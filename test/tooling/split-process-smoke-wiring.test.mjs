@@ -126,7 +126,7 @@ test('the candidate pin is qualified against the exact DSH runtime before any se
 
 test('the upgraded smoke carries every inventory gate and the critical negative controls', () => {
   const source = readFileSync(SCRIPT, 'utf8')
-  for (const gate of ['T01', 'T02', 'T03', 'T04', 'T05', 'T06', 'T07', 'T08', 'T09', 'T10', 'T11', 'T12', 'T13', 'T14', 'T15', 'T16', 'T17', 'T18', 'T19', 'T20', 'T21', 'T22', 'T23', 'T24', 'T25', 'T26', 'T27', 'T28', 'T29', 'T30', 'T31', 'T32', 'T33', 'T34', 'T35', 'T36', 'T37', 'T38', 'T39', 'T40', 'T41', 'T42', 'T43', 'T44', 'T45', 'T46', 'T47', 'T48', 'T49', 'T50', 'T51', 'T52', 'T53', 'T54', 'T55', 'T56', 'T57', 'T58', 'T59', 'T60']) {
+  for (const gate of ['T01', 'T02', 'T03', 'T04', 'T05', 'T06', 'T07', 'T08', 'T09', 'T09Q', 'T10', 'T11', 'T12', 'T13', 'T14', 'T15', 'T16', 'T17', 'T18', 'T19', 'T20', 'T21', 'T22', 'T23', 'T24', 'T25', 'T26', 'T27', 'T28', 'T29', 'T30', 'T31', 'T32', 'T33', 'T34', 'T35', 'T36', 'T37', 'T38', 'T39', 'T40', 'T41', 'T42', 'T43', 'T44', 'T45', 'T46', 'T47', 'T48', 'T49', 'T50', 'T51', 'T52', 'T53', 'T54', 'T55', 'T56', 'T57', 'T58', 'T59', 'T60']) {
     assert.match(source, new RegExp(`\\b${gate}\\b`, 'u'), `missing ${gate}`)
   }
   for (const marker of [
@@ -290,6 +290,43 @@ test('the upgraded smoke carries every inventory gate and the critical negative 
     'the artifact-absence control must block the package-scope self-reference escape')
   assert.match(source, /profilesManifest/u,
     'the artifact-absence control must reject an enclosing profiles manifest carrying the candidate package name')
+})
+
+test('T09 is two real Surface Clients on one Host while T09Q keeps the qualification seat negative', () => {
+  const source = readFileSync(SCRIPT, 'utf8')
+  // The qualification-only negative stays a real two-process EntryProcess race
+  // with the kernel seat conflict; it must not be downgraded to a static claim.
+  const t09qStart = source.indexOf('// T09Q: two QUALIFICATION Clients race')
+  const t02Start = source.indexOf('// T02: real authenticated HTTP')
+  assert.ok(t09qStart > 0 && t02Start > t09qStart, 'T09Q must stay before its original T02 continuation')
+  const t09q = source.slice(t09qStart, t02Start)
+  assert.match(t09q, /new EntryProcess\('client', entries\.client, probeClientBase\)/u)
+  assert.match(t09q, /waitForOutcome\(client, `T09Q client/u)
+  assert.match(t09q, /expectFailureRecord\(clientLoser, 'T09Q loser', 'CLIENT_ALREADY_ACTIVE'\)/u)
+  assert.match(t09q, /trace\('t09-qualification'/u)
+  // The real positive lives in the real-PTY lane, after A's durable Session A
+  // turn and before A's /new navigation: B is a second REAL surface over the
+  // same Host, with its own business PID and its own durable Host Session.
+  const t09Start = source.indexOf('// T09 (M5-A): a SECOND real Surface Client')
+  const t31Start = source.indexOf('// T31: Session switch')
+  assert.ok(t09Start > 0 && t31Start > t09Start, 'T09 must precede the T31 A navigation it leaves intact')
+  const t09 = source.slice(t09Start, t31Start)
+  assert.match(t09, /new SurfaceEntryProcess\(entries\.client/u)
+  assert.match(t09, /cwd: m5aWorkspaceB/u)
+  assert.match(t09, /record => record\.m4a0 === 'ready'/u)
+  assert.match(t09, /assertClientHostFacts\(m5aClientBReady\.host, surfaceHostFacts, 'T09 Client B'\)/u)
+  assert.match(t09, /assert\(typeof c1Ready\.pid === 'number' && typeof m5aClientBReady\.pid === 'number'/u)
+  assert.match(t09, /alive\(c1Ready\.pid\)/u)
+  assert.match(t09, /message === 'm5a client b'/u)
+  assert.match(t09, /hostAssistantHasText\(events, 'stub answer'\)/u)
+  assert.match(t09, /headerM5aB\.cwd === canonicalM5aWorkspaceB/u)
+  assert.match(t09, /sessionM5aB !== sessionA/u)
+  assert.match(t09, /client-closed/u)
+  assert.match(t09, /registryAfterM5aB\.instanceId === surfaceHostFacts\.instanceId/u)
+  assert.match(t09, /trace\('t09',/u)
+  // Only ONE new dual-surface positive exists.
+  assert.equal((source.match(/\/\/ T09 \(M5-A\): a SECOND real Surface Client/gu) ?? []).length, 1,
+    'the real dual-surface positive must exist exactly once')
 })
 
 test('the question lanes wait for the real review frame, never the permanent Submit tab', () => {

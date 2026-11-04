@@ -157,7 +157,18 @@ test('the upgrade lane owns the real Client reexec handoff and its two live nega
   assert.match(source, /clientClosed\.sessionOpen, false/u)
   assert.match(source, /clientClosed\.owners/u)
   assert.match(source, /c1Restored\.clientBuildId, newBuildId/u)
-  assert.match(source, /assertEqual\(await seatIsFree\(clientSeatName\), false/u)
+  // Surface Clients do NOT hold a profile-global Client seat, so this lane must
+  // never derive their lifecycle from one. The handoff is qualified by the real
+  // owner release, the new business PID, the same Host/Session restore and the
+  // strictly-once durable prompt instead.
+  assert.doesNotMatch(source, /seatIsFree\(clientSeatName\)/u,
+    'the upgrade lane must not treat the qualification Client seat as a Surface lifecycle fact')
+  assert.match(source, /record => record\.m4a0 === 'client-started' && record\.pid !== reloadClientPid/u,
+    'U08 must observe the replacement as a NEW OS process')
+  assert.match(source, /record => record\.m4r === 'handoff-restored' && record\.pid === replacementPid/u,
+    'U08 must observe the replacement restoring the original Session')
+  assert.match(source, /promptsAfterReload\.length, 1/u,
+    'U08 must prove the admitted prompt was not replayed')
   // The OLD Client exits only AFTER the replacement ran; the reexec is not
   // another same-PID surface revision.
   const oldClientExitIndex = source.indexOf("clientA.send('/exit\\r')")
@@ -226,6 +237,14 @@ test('the PRODUCTION /reload-client command is driven through the real PTY, not 
   assert.match(u08, /qualificationTargetOverrideUsed: false/u)
   assert.match(u08, /handoffRequestedByUserCommand: true/u)
   assert.match(u08, /promptNotReplayed: true/u)
+  // The refusal negatives keep the OLD live surface through its real PID, its
+  // Host identity and the untouched registry/launch bytes (never a seat probe).
+  assert.match(u08, /assertOldSurfaceKept/u)
+  assert.match(u08, /await assertOldSurfaceKept\('U08 already-current'\)/u)
+  assert.match(u08, /await assertOldSurfaceKept\('U08 attachments refusal'\)/u)
+  assert.match(u08, /assertIdentityKept\(safeIdentity\(\(await hostStatus\(host\)\)\.localHost\), hostIdentity, 'U08 Host after the command reload'\)/u)
+  assert.doesNotMatch(u08, /seatIsFree\(`\\0dsh-pi-tui-c-/u,
+    'U08 must not probe the qualification Client seat for a Surface lifecycle')
 
   // The two real PTY negatives keep the old/live surface and never stop it.
   assert.match(u08, /Client reload skipped: this Client already runs the installed build/u)
@@ -266,6 +285,11 @@ test('the manual reload ignores a live qualification target override and resolve
   assert.match(u09, /manualNeverReachedProcessStop: true/u)
   assert.match(u09, /qualificationUsedOverride: true/u)
   assert.match(u09, /sameProcessBothEntries: true/u)
+  // The U09 handoff is qualified by the replacement build/PID and the restored
+  // Host/Session, never by the absent profile-global Surface seat.
+  assert.match(u09, /replacementRestored\.clientBuildId, sideNewBuildId/u)
+  assert.match(u09, /replacementRestored\.sessionId, sessionId/u)
+  assert.doesNotMatch(u09, /seatIsFree/u, 'U09 must not probe the qualification Client seat for a Surface lifecycle')
   assert.match(source, /runReloadSourceIsolationRound\(\{/u)
 })
 

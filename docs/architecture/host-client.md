@@ -3,11 +3,11 @@
 This document owns the long-lived Host/Client boundary: locality, the semantic
 port contract, Direct/Remote equivalence, currentness/identity rules and the
 qualification tiers. Direct remains the production backend. Remote is the
-internal, Linux-only split-process backend: two real OS processes
-(`dist/local-host.mjs` / `dist/local-client.mjs`) over an authenticated loopback
-HTTP/WebSocket carrier, entered through ONE lazy Client edge
-(`app/remote-process/local-client-entry.ts -> app/bootstrap.ts`) after the
-official PluginPackages resolution. It is not a package export, bin, backend
+internal, Linux-only split-process backend: one Host process plus N Client
+processes (N ≥ 1; `dist/local-host.mjs` / `dist/local-client.mjs`) over an
+authenticated loopback HTTP/WebSocket carrier, entered through ONE lazy Client
+edge (`app/remote-process/local-client-entry.ts -> app/bootstrap.ts`) after
+the official PluginPackages resolution. It is not a package export, bin, backend
 selector or Session surface. The former in-process composition is retired from
 `src/**` into a test-only carrier and composes no production graph.
 
@@ -117,7 +117,9 @@ Must-not:
 - Construct a Direct semantic adapter in `src/app/surface/**`.
 - Mount a second copy of a base prerequisite to satisfy Remote composition or a
   test.
-- Create a second Client Context/Host graph/semantic bundle.
+- Create a second Client Context/Host graph/semantic bundle inside one process
+  composition (each independent split Client process owns its own Context by
+  contract).
 - Spread a generated Remote namespace or detach a receiver-sensitive method
   (`const on = source.remote.$on; on(...)`).
 - Add a public `--backend`/env/config Remote selector before the migration
@@ -129,11 +131,12 @@ second Host service or runtime graph.
 
 ## Split-process local Host transport
 
-The internal split-process entry is two OS processes from ONE installed npm
-package. It is Linux-only, Linux abstract AF_UNIX sockets are its only process
-admission authority, and the non-Linux entry fails before writing runtime files
-with `B1_PLATFORM_UNSUPPORTED`. No PID file, `O_EXCL` marker, registry record or
-`hasLiveClient()` result may stand in for that kernel ownership.
+The internal split-process entry is one Host process plus N Client processes
+(N ≥ 1) from ONE installed npm package. It is Linux-only, Linux abstract
+AF_UNIX sockets are its only process admission authority, and the non-Linux
+entry fails before writing runtime files with `B1_PLATFORM_UNSUPPORTED`. No PID
+file, `O_EXCL` marker, registry record or `hasLiveClient()` result may stand in
+for that kernel ownership.
 
 - **Scope.** The official `resolveDshHome()` / `resolveProfileDir()` results
   canonicalized through `realpath` plus the current UID decide the scope. The
@@ -144,12 +147,18 @@ with `B1_PLATFORM_UNSUPPORTED`. No PID file, `O_EXCL` marker, registry record or
   from the wire protocol below. The same canonical profile directory shares one
   scope across workspaces and package builds; the Client cwd is not a scope
   input.
-- **Single Host / single TUI seat.** The Host holds one abstract socket from
-  before the profile Context exists until process termination; a second Host
-  candidate loses `bind` and exits without building a Context, webserver, Agent
-  or Session. The Client holds a second abstract socket for its lifetime; a
-  second Client fails `CLIENT_ALREADY_ACTIVE` before spawning or touching a
-  Host. Kernel release on process death is the only stale-seat recovery.
+- **Single Host seat, qualification-only Client seat.** The Host holds one
+  abstract socket from before the profile Context exists until process
+  termination; a second Host candidate loses `bind` and exits without building
+  a Context, webserver, Agent or Session. Only the frozen `qualification` Client
+  binds the second, Client abstract socket for its lifetime; a second
+  qualification Client fails `CLIENT_ALREADY_ACTIVE` before spawning or touching
+  a Host. A real `surface` Client — and the non-TUI `peer` — binds no
+  profile-global seat: N independent Surface Clients, each with its own PTY,
+  Cordis Client Context, official transport, Session reference and physical
+  surface, may attach to the SAME Host concurrently and share its exact
+  PID/starttime/`instanceId`. Kernel release on process death is the only
+  stale-seat recovery.
 - **Identity is authenticated, never registry-only.** The registry
   (`instance.json`, 0600) is an unauthenticated hint containing the scope,
   canonical profile path, `instanceId`, Host PID, Linux `/proc/<pid>/stat`
@@ -179,9 +188,12 @@ with `B1_PLATFORM_UNSUPPORTED`. No PID file, `O_EXCL` marker, registry record or
   the registry, stdout/stderr, logs, argv or environment. The registry and
   launch files are 0600, the run directory 0700, and unsafe ownership, modes or
   symlinks fail closed.
-- **Lifecycle.** A Client exit, crash or HUP disposes only the Client subtree,
-  official transport, Client root and Client seat. It never calls a Host
-  shutdown. A Host starts on demand for one profile scope and then remains
+- **Lifecycle.** A Client exit, crash or HUP disposes only its own Client
+  subtree, official transport and Client root; a `qualification` Client also
+  releases its qualification-only Client seat, while a `surface` Client holds
+  no cross-process seat at all. No Client exit releases or stops another
+  attached Surface Client, and none calls a Host shutdown. A Host starts on
+  demand for one profile scope and then remains
   resident independent of Client attachment or idle time: only an explicit
   official stop (the Host entry admits `SIGTERM`/`SIGINT` into its one
   `runProfile` shutdown owner) or a real process/system failure ends it. There
@@ -215,12 +227,14 @@ with `B1_PLATFORM_UNSUPPORTED`. No PID file, `O_EXCL` marker, registry record or
   a normal `dist/local-client.mjs`), and hands the SAME one-shot facts —
   expected Host instance, current Session id when one is open, DSH anchor,
   profile and target build fingerprint — to a replacement child process. It
-  releases runner, UI, Domain graph, official transport, Client root and then
-  the kernel Client seat through the existing ONE stop coordinator; only after
-  that complete release may the replacement entry be spawned on the inherited
-  terminal as a new PID (`stdio: inherit`, no detached daemon, no second
-  terminal owner). The old PID is only a waiting parent that forwards the
-  child's exit status and holds no Client Context, TTY reader, seat or business
+  releases runner, UI, Domain graph, official transport and Client root, and
+  then closes the seat this mode actually holds (the qualification Client seat
+  when present; a no-op for `surface`), through the existing ONE stop
+  coordinator; only after that complete release may the replacement entry be
+  spawned on the inherited terminal as a new PID (`stdio: inherit`, no detached
+  daemon, no second terminal owner). The old PID is only a waiting parent that
+  forwards the child's exit status and holds no Client Context, TTY reader,
+  seat or business
   object; a termination signal addressed to that PID is forwarded to the
   replacement child, and a signal arriving after the handoff was accepted but
   before the child spawned cancels the handoff without spawning. The
@@ -838,8 +852,9 @@ Rules:
   passed, or a lane green on a different snapshot.
 - The Linux split-process lane (`smoke:split-process`, driven from an installed
   npm tarball) is a distribution-boundary proof outside L1–L6: it is the only
-  tier that observes two real OS processes. What it proves is a list of durable
-  capability classes, not one boundary row: OS process admission and kernel-seat
+  tier that observes a real Host process plus real Client OS processes. What it
+  proves is a list of durable capability classes, not one boundary row: OS
+  process admission and kernel-seat
   uniqueness; the official authenticated loopback carrier and Host identity;
   official Session open, durable history and live catch-up through a real
   surface; accepted Turn/Tool/Job/Child continuity across Client death; pending

@@ -803,7 +803,6 @@ async function runUserCommandReloadRound(context) {
   const scopeDir = scopeDirOf(dshHome, hostIdentity.scopeId)
   const registryBefore = readFileSync(join(scopeDir, 'instance.json'))
   const launchBefore = readFileSync(join(scopeDir, 'launch.json'))
-  const clientSeatName = `\0dsh-pi-tui-c-${hostIdentity.scopeId.slice(0, 40)}`
 
   const reloadOldClient = new SurfaceEntryProcess(join(sideOldPackage, 'dist', 'local-client.mjs'), {
     ...base,
@@ -832,11 +831,9 @@ async function runUserCommandReloadRound(context) {
   )
   assert(alive(reloadOldClientPid), 'U08 old Client is not a live process')
   assert(alive(hostIdentity.hostPid), 'U08 Host died while the old Client attached')
-  assertEqual(await seatIsFree(clientSeatName), false, 'U08 old Client does not hold the Client seat')
 
   const assertOldSurfaceKept = async (label) => {
     assert(alive(reloadOldClientPid), `${label}: the old Client PID died`)
-    assertEqual(await seatIsFree(clientSeatName), false, `${label}: the old Client seat was released`)
     assertEqual(reloadOldClient.records.filter(record => record.m4r === 'handoff-requested').length, 0,
       `${label}: a reload request reached the process sink`)
     assertIdentityKept(safeIdentity((await hostStatus(host)).localHost), hostIdentity, `${label}: Host identity`)
@@ -894,7 +891,6 @@ async function runUserCommandReloadRound(context) {
   const reloadOldClientExit = await reloadOldClient.waitForExit(120_000)
   assertEqual(reloadOldClientExit.code, 0, `U08 old Client exit was ${JSON.stringify(reloadOldClientExit)}`)
   await reloadOldClient.dispose()
-  assert(await seatIsFree(clientSeatName), 'U08 the old Client did not release its seat on /exit')
   assert(alive(hostIdentity.hostPid), 'U08 Host died when the old Client exited')
   assert(!c1WorkHadRelease(c1WorkRoot), 'U08 the admitted Turn was released by the old Client exit')
   const sessionLogsBeforeReload = sessionLogFiles(dshHome)
@@ -915,7 +911,6 @@ async function runUserCommandReloadRound(context) {
     120_000,
   )
   await reloadClient.waitForScreen(holdPrompt, 'U08 old-build reload Client painted the admitted prompt', 120_000)
-  assertEqual(await seatIsFree(clientSeatName), false, 'U08 old-build reload Client did not take the Client seat')
   assertEqual(reloadClient.records.filter(record => record.m4r === 'handoff-requested').length, 0,
     'U08 reload Client reloaded before the user command')
 
@@ -979,7 +974,6 @@ async function runUserCommandReloadRound(context) {
   assertEqual(replacementReady.sessionOpen, true)
   assertEqual(replacementReady.openSessionId, sessionId)
   await reloadClient.waitForScreen(holdPrompt, 'U08 the replacement surface painted the admitted prompt', 120_000)
-  assertEqual(await seatIsFree(clientSeatName), false, 'U08 the replacement Client does not hold the Client seat')
   assert(alive(hostIdentity.hostPid), 'U08 the Host died during the command reload')
   assert(readProcessStarttime(hostIdentity.hostPid) === hostIdentity.hostStarttime,
     'U08 the Host starttime changed during the command reload')
@@ -1004,7 +998,6 @@ async function runUserCommandReloadRound(context) {
   assertEqual(replacementExit.code, 0, `U08 replacement Client exit was ${JSON.stringify(replacementExit)}`)
   assert(await waitGone(replacementPid), 'U08 the replacement Client process did not exit')
   assert(await waitGone(reloadClientPid), 'U08 the old Client waiting parent did not exit')
-  assert(await seatIsFree(clientSeatName), 'U08 the Client seat stayed owned after the replacement Client exited')
   assert(alive(hostIdentity.hostPid), 'U08 the Host died when the replacement Client exited')
   assert(!c1WorkHadRelease(c1WorkRoot), 'U08 the admitted Turn was released by the Client exit')
 
@@ -1066,8 +1059,8 @@ async function runUserCommandReloadRound(context) {
  * U08 negative 3: the installed replacement target is OFFICIALLY
  * removed while a Client is live. The command's process preflight resolves the
  * PROFILE-installed package (never a qualification override), finds nothing,
- * refuses with its fixed notice, and keeps the live surface, its Client seat,
- * the Host identity and the admitted Turn's hold completely untouched.
+ * refuses with its fixed notice, and keeps the live surface, the Host identity
+ * and the admitted Turn's hold completely untouched.
  *
  * This round is isolated from the positive U08 round on purpose: removing the
  * installed bundle is a destructive profile transaction, so it must never run
@@ -1117,7 +1110,6 @@ async function runUnavailableTargetRound(context) {
   const scopeDir = scopeDirOf(dshHome, hostIdentity.scopeId)
   const registryBefore = readFileSync(join(scopeDir, 'instance.json'))
   const launchBefore = readFileSync(join(scopeDir, 'launch.json'))
-  const clientSeatName = `\0dsh-pi-tui-c-${hostIdentity.scopeId.slice(0, 40)}`
 
   const client = new SurfaceEntryProcess(join(profilePackage, 'dist', 'local-client.mjs'), { ...base, workDir: roundRoot })
   clients.push(client)
@@ -1134,7 +1126,6 @@ async function runUnavailableTargetRound(context) {
   )
   const sessionId = sessionStatus.openSessionId
   await waitForC1WorkEvent(c1WorkRoot, event => event.kind === 'long-turn-held' && event.sessionId === sessionId, 'U08 target-invalid Turn held')
-  assertEqual(await seatIsFree(clientSeatName), false, 'U08 target-invalid Client does not hold the Client seat')
 
   // The official DSH transaction removes the PROFILE-installed bundle while
   // the Client/Host runtimes (already loaded) keep their modules.
@@ -1150,7 +1141,6 @@ async function runUnavailableTargetRound(context) {
   assertEqual(client.records.filter(record => record.m4r === 'handoff-requested').length, 0,
     'U08 the target-invalid refusal reached the process stop sink')
   assert(alive(clientPid), 'U08 the target-invalid refusal killed the live Client')
-  assertEqual(await seatIsFree(clientSeatName), false, 'U08 the target-invalid refusal released the Client seat')
   assertIdentityKept(safeIdentity((await hostStatus(host)).localHost), hostIdentity, 'U08 Host after the target-invalid refusal')
   assert(alive(hostIdentity.hostPid), 'U08 the Host died on the target-invalid refusal')
   assert(!c1WorkHadRelease(c1WorkRoot), 'U08 the target-invalid refusal released the admitted Turn')
@@ -1164,7 +1154,6 @@ async function runUnavailableTargetRound(context) {
   await client.dispose().catch(() => undefined)
   killProcessGroup(host)
   await host.waitForExit(30_000).catch(() => undefined)
-  assert(await seatIsFree(clientSeatName), 'U08 the target-invalid Client seat stayed owned after teardown')
 
   return {
     installedTargetOfficiallyRemoved: true,
@@ -1172,7 +1161,6 @@ async function runUnavailableTargetRound(context) {
     targetInvalidKeptOldSurface: true,
     noReloadRequestReachedSink: true,
     clientAliveAfterRefusal: true,
-    clientSeatKept: true,
     hostIdentityKept: true,
     hostAliveAfterRefusal: true,
     registryBytesUnchanged: true,
@@ -1247,7 +1235,6 @@ async function runReloadSourceIsolationRound(context) {
   const scopeDir = scopeDirOf(dshHome, hostIdentity.scopeId)
   const registryBefore = readFileSync(join(scopeDir, 'instance.json'))
   const launchBefore = readFileSync(join(scopeDir, 'launch.json'))
-  const clientSeatName = `\0dsh-pi-tui-c-${hostIdentity.scopeId.slice(0, 40)}`
 
   // The ONE qualification process: BOTH the SIGUSR2 probe and the manual
   // command are reachable here.
@@ -1274,7 +1261,6 @@ async function runReloadSourceIsolationRound(context) {
   )
   const sessionId = sessionStatus.openSessionId
   await waitForC1WorkEvent(c1WorkRoot, event => event.kind === 'long-turn-held' && event.sessionId === sessionId, 'U09 Host Turn held')
-  assertEqual(await seatIsFree(clientSeatName), false, 'U09 Client does not hold the Client seat')
 
   checkpoint('U09/manual-already-current')
   // The MANUAL command runs in the qualification environment and must still
@@ -1288,7 +1274,6 @@ async function runReloadSourceIsolationRound(context) {
   assertEqual(client.records.filter(record => record.m4r === 'handoff-requested').length, 0,
     'U09 the manual command used the qualification target override')
   assert(alive(clientPid), 'U09 the manual already-current refusal killed the Client')
-  assertEqual(await seatIsFree(clientSeatName), false, 'U09 the manual refusal released the Client seat')
   assertIdentityKept(safeIdentity((await hostStatus(host)).localHost), hostIdentity, 'U09 Host after the manual refusal')
   assert(!c1WorkHadRelease(c1WorkRoot), 'U09 the manual refusal released the admitted Turn')
   assert(readFileSync(join(scopeDir, 'instance.json')).equals(registryBefore),
@@ -1340,7 +1325,6 @@ async function runReloadSourceIsolationRound(context) {
   assertEqual(replacementRestored.sessionId, sessionId)
   assertEqual(replacementRestored.surfaceMounted, true)
   await client.waitForScreen(holdPrompt, 'U09 the replacement painted the admitted prompt', 120_000)
-  assertEqual(await seatIsFree(clientSeatName), false, 'U09 the replacement does not hold the Client seat')
   assertIdentityKept(safeIdentity((await hostStatus(host)).localHost), hostIdentity, 'U09 Host after the qualification handoff')
   assert(!c1WorkHadRelease(c1WorkRoot), 'U09 the qualification handoff released the admitted Turn')
   assert(readFileSync(join(scopeDir, 'instance.json')).equals(registryBefore),
@@ -1355,7 +1339,6 @@ async function runReloadSourceIsolationRound(context) {
   assertEqual(replacementExit.code, 0, `U09 replacement exit was ${JSON.stringify(replacementExit)}`)
   assert(await waitGone(replacementPid), 'U09 the replacement process did not exit')
   assert(await waitGone(clientPid), 'U09 the old qualification parent did not exit')
-  assert(await seatIsFree(clientSeatName), 'U09 the Client seat stayed owned after the replacement exit')
 
   // Complete the held turn and stop the Host through its own owner path.
   writeFileSync(releaseBarrier, 'release\n', { mode: 0o600 })
@@ -1686,7 +1669,6 @@ async function main() {
     // stop coordinator, and only then spawn the NEW build's real entry as a
     // NEW OS PID. Host A, its Turn and its files must be untouched.
     const newClientEntry = join(sideBuildPackage, 'dist', 'local-client.mjs')
-    const clientSeatName = `\0dsh-pi-tui-c-${hostABefore.scopeId.slice(0, 40)}`
     const sessionLogsBeforeReexec = sessionLogFiles(dshHome)
     assert(alive(clientAPid), 'Client A was not a live Client before the reexec handoff')
     assert(alive(hostAReady.pid), 'Host A died before the reexec handoff')
@@ -1753,9 +1735,9 @@ async function main() {
     assertEqual(c1Ready.sessionOpen, true)
     assertEqual(c1Ready.openSessionId, sessionId)
     await clientA.waitForScreen('cross-build-hold', 'the replacement surface painted the admitted prompt', 120_000)
-    // While C1 runs, the OLD PID is only the waiting parent; C1 holds the ONE
-    // kernel Client seat and the old Client owns nothing.
-    assertEqual(await seatIsFree(clientSeatName), false, 'the replacement Client does not hold the Client seat')
+    // While C1 runs, the OLD PID is only the waiting parent and owns nothing;
+    // the replacement is the ONE live surface process for this terminal.
+    assert(alive(c1Pid), 'the replacement surface process is not alive')
     assert(alive(hostAReady.pid), 'Host A died during the reexec handoff')
     assert(readProcessStarttime(hostAReady.pid) === hostABefore.hostStarttime,
       'Host A starttime changed during the reexec handoff')
@@ -1784,7 +1766,6 @@ async function main() {
     assertEqual(reexecExit.signal, null)
     assert(await waitGone(c1Pid), 'the replacement Client process did not exit')
     assert(await waitGone(clientAPid), 'the old Client waiting parent did not exit')
-    assert(await seatIsFree(clientSeatName), 'the Client seat stayed owned after the replacement Client exited')
     assert(alive(hostAReady.pid), 'Host A died when the replacement Client exited')
     assert(!c1WorkHadRelease(workRootPath), 'Host A Turn was released when the replacement Client exited')
     assertIdentityKept(safeIdentity((await hostStatus(hostA)).localHost), hostABefore, 'Host A after the replacement Client exit')
@@ -1801,8 +1782,7 @@ async function main() {
       oldParentWaitedDuringChild: true,
       oldClientOwnersReleased: true,
       oldClientSessionReferenceReleased: true,
-      clientSeatHeldByReplacement: true,
-      clientSeatReleasedAfterExit: true,
+      replacementClientWasNewOsProcess: c1Pid !== clientAPid,
       targetBundleVersion: newArtifact.manifest.version,
       targetBuildId: newBuildId,
       oldBuildId,
@@ -1908,7 +1888,6 @@ async function main() {
       'the wrong expected Host refusal mutated the old launch material')
     assertDeepEqual(sessionLogFiles(dshHome), sessionLogsBeforeRefusal,
       'the wrong expected Host refusal created a new Session log')
-    assert(await seatIsFree(clientSeatName), 'the wrong expected Host refusal did not release the Client seat')
     await wrongExpectation.dispose()
     evidence.reexecRefusals = {
       wrongExpectedHost: {
@@ -1920,7 +1899,7 @@ async function main() {
         registryBytesUnchanged: true,
         launchBytesUnchanged: true,
         noNewSession: true,
-        clientSeatReleased: true,
+        noBusinessContextCreated: true,
         noPathPidOrSecret: true,
       },
     }
@@ -1989,7 +1968,6 @@ async function main() {
     assertEqual(parentExit.signal, null)
     assert(await waitGone(childFailure.pid), 'the failed replacement Client process stayed alive')
     assert(await waitGone(clientA2Pid), 'the old Client parent stayed alive after the failed child')
-    assert(await seatIsFree(clientSeatName), 'the failed handoff did not release the Client seat')
     const childFailureVisible = `${clientA2.raw}\n${clientA2.stderr}`
     const childFailureLines = childFailureVisible.split('\n').filter(line => line.includes('Client handoff failed'))
     assertEqual(childFailureLines.length, 1, `the failed child produced ${String(childFailureLines.length)} handoff failure lines`)
@@ -2021,7 +1999,7 @@ async function main() {
       oldClientOwnersReleased: true,
       parentExitCode: parentExit.code,
       processExitCode: childFailureExit.code,
-      clientSeatReleased: true,
+      parentAndChildExited: true,
       hostKept: true,
       hostStarttimeKept: true,
       noHostRestart: true,

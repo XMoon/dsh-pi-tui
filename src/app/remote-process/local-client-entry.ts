@@ -4,11 +4,13 @@
  *
  * The Client PID owns a real Cordis root and mounts only the Client-local
  * subtree plus the official Node Client transport. Its one scope is the
- * canonical DSH profile: it first claims the kernel single-TUI seat, then
- * discovers (or safely ensures) the Host, authenticates it through the
- * official `/connect` cookie, verifies the authenticated identity, and only
- * then installs the official three-layer transport on the same A0 Client
- * Context.
+ * canonical DSH profile: the frozen `qualification` mode first claims the
+ * qualification-only kernel Client seat (the real `surface` and `peer` modes
+ * do not), then discovers (or safely ensures) the Host, authenticates it
+ * through the official `/connect` cookie, verifies the authenticated
+ * identity, and only then installs the official three-layer transport on the
+ * same A0 Client Context. The Host Singleton keeps its own separate kernel
+ * seat in every mode.
  *
  * Client admission compares the required local wire protocol and the exact
  * DSH runtime version, not the package bundle/build fingerprint. A different
@@ -569,15 +571,16 @@ export function routeReexecTermination(
   return true
 }
 
-/** The one Client shutdown tail: seat close strictly precedes any child spawn. */
+/** The one Client shutdown tail: the mode-held seat close and the complete stop precede any child spawn. */
 export interface ClientEntryShutdownOptions {
   readonly seat: ProcessSeat
   readonly reexec?: {
     readonly intent: ClientReexecIntent
     readonly teardownSucceeded: boolean
     /**
-     * Live pre-spawn cancellation latch. It is read AFTER the seat close, so a
-     * termination signal arriving while that close is pending is observed.
+     * Live pre-spawn cancellation latch. It is read AFTER the seat close (a
+     * no-op for `surface`), so a termination signal arriving while that close
+     * is pending is observed.
      */
     readonly cancelled?: () => boolean
   }
@@ -594,7 +597,8 @@ export interface ClientEntryShutdownOptions {
 }
 
 /**
- * Finish the ONE Client process: close the kernel seat, and only after a fully
+ * Finish the ONE Client process: release the process seat this mode actually
+ * holds (qualification) or close the no-op seat, and only after a fully
  * successful teardown re-validate the replacement package and run the child.
  * A failed teardown, seat close, target re-check or spawn never starts C1 and
  * never touches the Host. Returns the replacement exit code when a handoff was
@@ -963,7 +967,7 @@ function observeQualificationSocket(
  */
 export async function runLocalClientEntry(options: LocalClientEntryOptions): Promise<void> {
   // Handoff mode is validated before ANY process seat or Context exists: a
-  // contradictory environment is refused without touching the Client seat.
+  // contradictory environment is refused without touching a seat.
   const expectedHostInstanceId = expectedHostInstanceFromEnvironment(options.mode)
   assertHandoffSignalExclusivity(options.mode, expectedHostInstanceId)
   const hostModules = await loadOfficialClientHost(options.dshAnchor)
@@ -986,14 +990,14 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
   // must be able to address THIS process while it is still assembling and no
   // ready record exists yet. No secret/path is carried.
   emit({ m4a0: 'client-started', processRole: 'client', pid: process.pid, phase: 'startup' })
-  // The single-TUI seat precedes discovery: a second Client never spawns a
-  // Host or touches the existing connection.
-  // The qualification-only answering Peer is NOT a TUI and must not take the
-  // single-TUI seat: it is the protocol counterpart used by the stale-result
-  // negative controls while the real TUI Client owns the seat.
-  const seat: ProcessSeat = options.mode === 'peer'
-    ? { close: async () => {} }
-    : await bindProcessSeat(scope.clientSeatSocketName, 'CLIENT_ALREADY_ACTIVE')
+  // Admission: the Host Singleton keeps its own kernel seat in every mode. The
+  // Client kernel seat is qualification-only — the frozen qualification harness
+  // must still fail CLIENT_ALREADY_ACTIVE on a second process, while every real
+  // `surface` (and the answering `peer`) is an independent Client that reaches
+  // the same authenticated Host without a profile-global seat.
+  const seat: ProcessSeat = options.mode === 'qualification'
+    ? await bindProcessSeat(scope.clientSeatSocketName, 'CLIENT_ALREADY_ACTIVE')
+    : { close: async () => {} }
   let context: import('@deepseek-ai/cordis').Context | undefined
   let loaderFiber: Fiber | undefined
   let startupGate: InteractionStartupGate | undefined
@@ -1149,7 +1153,8 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
       } else {
         process.exitCode = code
         // The handoff tail may start only after THIS coordinator released the
-        // root, official transport, Client seat and every owned object.
+        // root, official transport, the seat this mode actually held and every
+        // owned object.
         if (code === 0 && reexecIntent !== undefined) reexecTeardownSucceeded = true
       }
       // Pause the qualification control channel so its resumed stdin pipe no
@@ -1825,7 +1830,8 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
     if (timedOut || transportCleanupFailed) forceExitAfterCleanupFailure()
   } finally {
     process.stdin.pause()
-    // The ONE shutdown tail: the kernel Client seat is closed BEFORE any
+    // The ONE shutdown tail: release the seat this mode actually holds (the
+    // qualification Client seat; `surface`/`peer` hold none) BEFORE any
     // replacement Client can spawn. A reexec starts only for a fully successful
     // teardown; its child inherits this process's terminal only after the old
     // surface/root are gone.

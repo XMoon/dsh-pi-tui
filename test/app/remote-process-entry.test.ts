@@ -1050,7 +1050,7 @@ test('the handoff-restored claim re-checks the LIVE Host, transport and surface'
   )
 })
 
-test('the reexec trigger is internal, singular and starts only after the ONE seat close', () => {
+test('the reexec trigger is internal, singular and starts only after the ONE shutdown tail', () => {
   const source = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'src', 'app', 'remote-process', 'local-client-entry.ts'),
     'utf8',
@@ -1080,7 +1080,13 @@ test('the reexec trigger is internal, singular and starts only after the ONE sea
   assert.ok(finishSource.indexOf('await options.seat.close()') >= 0)
   assert.ok(
     finishSource.indexOf('await options.seat.close()') < finishSource.indexOf('await spawnChild('),
-    'the replacement Client must not spawn before the Client seat close',
+    'the replacement Client must not spawn before the shutdown tail calls seat.close() (a no-op for surface)',
+  )
+  // The tail's complete-stop gate is the real pre-spawn requirement; the
+  // qualification seat is only one input to it, never a Surface mutex.
+  assert.ok(
+    finishSource.indexOf('!seatClosed || !reexec.teardownSucceeded') < finishSource.indexOf('await spawnChild('),
+    'the replacement Client must not spawn before the complete Client stop succeeded',
   )
   assert.match(source, /expectedInstanceId: expectedHostInstanceId/u,
     'the handoff Client must pass the expected instance into discovery')
