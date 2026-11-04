@@ -403,6 +403,60 @@ export function createTspComposer(sinks: TspComposerSinks, recall: TspComposerRe
     commitChange()
   }
 
+  /**
+   * TSP I-C: the ONE conditional write a slash completion is allowed to make.
+   * A completion replaces the command token, so neither `setDraft` (which moves
+   * the caret to the END of the whole document) nor `insertIntoEditor` (which
+   * only inserts) describes it. Every check below is a REJECTION, never a
+   * repair: on `false` the text, the caret, the paste leases and the render stay
+   * exactly as they were, so a stale completion is dropped without touching what
+   * the user is typing.
+   */
+  const applyCompletionEdit = (
+    expected: { text: string; cursor: number },
+    next: { text: string; cursor: number },
+  ): boolean => {
+    // The live document must still be the one the Provider computed its
+    // replacement against — re-checked SYNCHRONOUSLY, never from a snapshot the
+    // caller kept across an await.
+    if (text !== expected.text || cursor !== expected.cursor) return false
+    // A completion never leaves the caret inside a grapheme cluster.
+    if (boundaryCursor(next.text, next.cursor) !== next.cursor) return false
+    // The ONE changed span, derived from the common prefix/suffix: every byte
+    // outside it is identical by construction, which is what proves no text
+    // beyond the command token was rewritten.
+    const shared = Math.min(expected.text.length, next.text.length)
+    let start = 0
+    while (start < shared && expected.text.charCodeAt(start) === next.text.charCodeAt(start)) start += 1
+    let oldEnd = expected.text.length
+    let newEnd = next.text.length
+    while (oldEnd > start && newEnd > start
+      && expected.text.charCodeAt(oldEnd - 1) === next.text.charCodeAt(newEnd - 1)) {
+      oldEnd -= 1
+      newEnd -= 1
+    }
+    // The span must stay INSIDE one logical line and must never split a CRLF
+    // cluster: a completion replaces a command name, not the document's shape.
+    const spanCrossesLine = (source: string, from: number, to: number): boolean => {
+      if (source.slice(from, to).includes('\n')) return true
+      if (source.charCodeAt(from) === 0x0a && source.charCodeAt(from - 1) === 0x0d) return true
+      return source.charCodeAt(to - 1) === 0x0d && source.charCodeAt(to) === 0x0a
+    }
+    if (spanCrossesLine(expected.text, start, oldEnd) || spanCrossesLine(next.text, start, newEnd)) return false
+    // The caret the Provider asked for belongs to the replaced token.
+    if (next.cursor < start || next.cursor > newEnd) return false
+    // The splice is EXACTLY known, so every OTHER paste lease follows it through
+    // the tracker (never a re-derivation from path text), and the ↑/↓ browse this
+    // draft may have come from is retired with it: a recalled row is ordinary
+    // content now.
+    forgetRecallBookmark()
+    pasteRanges.applyEdit({ start, oldEnd, newEnd }, next.text)
+    text = next.text
+    cursor = next.cursor
+    commitChange()
+    return true
+  }
+
   return {
     state,
     setFocused,
@@ -410,6 +464,7 @@ export function createTspComposer(sinks: TspComposerSinks, recall: TspComposerRe
     setDraft: replaceText,
     setEditorText: replaceText,
     insertIntoEditor: insert,
+    applyCompletionEdit,
     clearDraftStateOnly: () => {
       // PR3-B §7.3 (B2 F1): PURE STATE — no `onChanged`, no render. See the
       // interface doc; the next committed frame carries the emptied editor.
@@ -600,6 +655,23 @@ export interface TspComposer {
   setDraft(text: string): void
   setEditorText(text: string): void
   insertIntoEditor(text: string): void
+  /**
+   * TSP I-C: replace the command token ONE completion produced, atomically and
+   * only while the document still matches `expected` exactly. The caret lands
+   * where the Provider put it (never at the end of the draft), every other
+   * paste lease follows the exact splice, the ↑/↓ browse bookmark is retired, and
+   * `onChanged` fires exactly once on success.
+   *
+   * Returns `false` — touching NOTHING, no text, no caret, no lease, no render —
+   * when the live document/cursor moved, when the caret is not a grapheme
+   * boundary, or when the change is not confined to a single logical line. A
+   * rejected completion is how a stale async result or a foreign edit is refused;
+   * the caller never re-applies it and never submits anything because of it.
+   */
+  applyCompletionEdit(
+    expected: { text: string; cursor: number },
+    next: { text: string; cursor: number },
+  ): boolean
   notify(message: string, kind?: 'info' | 'error'): void
   setSubmitPending(detail: SubmitPendingDetail | undefined): void
   clearSettledLocalMessages(): void

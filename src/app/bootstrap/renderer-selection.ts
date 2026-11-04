@@ -44,6 +44,14 @@ export interface RendererSelectionDeps {
     readonly interaction: import('../surface/interaction-presenter.ts').SurfaceInteractionPresenter
     readonly bindInput: (handlers: import('../surface/runtime.ts').SurfaceInputBinding) => void
     /**
+     * TSP I-C: publish ONE effective slash-command catalog commit onto the
+     * connected renderer. The composition root forwards it verbatim; it holds no
+     * catalog, no provider and no candidate state of its own.
+     */
+    readonly installCommandCompletions: (
+      installation: import('../surface/runtime.ts').TspCommandCompletionInstallation,
+    ) => void
+    /**
      * PR-C: install the ONE image binding (the mount's loader + scope
      * sampler) on the connected renderer. It is SYNCHRONOUS and ONE-TIME:
      * the renderer needs it before its first tool projection.
@@ -114,6 +122,9 @@ export async function selectRendererMount(deps: RendererSelectionDeps): Promise<
         sessionBrowserPresentation: tsp.sessionBrowserPresentation,
         interaction: tsp.interaction,
         bindInput: (handlers) => tsp.bindInput(handlers),
+        // TSP I-C: the ONE catalog commit forwarded to the renderer's own seat.
+        // No catalog, no provider and no candidate list is held here.
+        installCommandCompletions: (installation) => tsp.installCommandCompletions(installation),
         dispose: () => tsp.dispose(),
       }
     },
@@ -164,6 +175,12 @@ export function productionTspConnector(
   readonly sessionBrowserPresentation?: import('../command/session-browser-presentation.ts').SessionBrowserPresentation | undefined
   readonly interaction: import('../surface/interaction-presenter.ts').SurfaceInteractionPresenter
   readonly bindInput: (handlers: import('../surface/runtime.ts').SurfaceInputBinding) => void
+  /** TSP I-C: the ONE catalog commit forwarded to the renderer's own seat (see
+   *  the connector input above). Required: a connected TSP renderer always
+   *  carries the seat, and a test connector is that contract's fake. */
+  readonly installCommandCompletions: (
+    installation: import('../surface/runtime.ts').TspCommandCompletionInstallation,
+  ) => void
   readonly bindImages: (binding: import('../surface/runtime.ts').SurfaceImageBinding) => void
   readonly bindStatusReader: (reader: StatusSnapshotReader) => void
   readonly bindNativeFooterConfig: (config: TspNativeFooterConfig) => void
