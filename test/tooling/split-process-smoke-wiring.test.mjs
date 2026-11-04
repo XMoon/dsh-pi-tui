@@ -818,9 +818,9 @@ test('the official Web composition qualification is discoverable and never fakes
   assert.doesNotMatch(source, /stderr: browserErr/u)
   assert.doesNotMatch(source, /stdout: browserOut/u)
   assert.match(source, /redactWebQualificationText/u)
-  // The driver exit is awaited through a bound whose timer is RELEASED: an
-  // uncancelled delay would keep the process alive for the whole timeout.
-  assert.match(source, /const browserExitBounded = async/u)
+  // The driver exit is awaited through ONE shared, timer-releasing bound.
+  assert.match(source, /const browserExitBounded = timeoutMs => browserDriverExitBounded\(browserExit, timeoutMs, 'PR_A_BROWSER_EXIT_TIMEOUT'\)/u)
+  assert.match(source, /export async function browserDriverExitBounded\(browserExit, timeoutMs, tag\)/u)
   assert.match(source, /export async function raceWithAbortableDeadline/u)
   assert.match(source, /AbortController/u)
   assert.match(source, /expiry\.abort\(\)/u)
@@ -828,8 +828,11 @@ test('the official Web composition qualification is discoverable and never fakes
   assert.doesNotMatch(source, /await browserExit\.catch/u)
   // A driver that already exited fails the observation it owns immediately
   // instead of consuming the whole wait budget, and the wait it started is
-  // CANCELLED so no polling timer survives the early failure.
-  assert.match(source, /const whileBrowserRuns = async/u)
+  // CANCELLED so no polling timer survives the early failure. There is exactly
+  // ONE such mechanism, and BOTH Browser lanes bind it.
+  assert.equal((source.match(/export async function whileBrowserDriverRuns\(/gu) ?? []).length, 1,
+    'the driver-exit/observation race must exist once, as a shared helper')
+  assert.match(source, /const whileBrowserRuns = \(startWait, label\) => whileBrowserDriverRuns\(browserExit, startWait, 'PA-05', label\)/u)
   assert.match(source, /const stopWait = new AbortController\(\)/u)
   assert.match(source, /stopWait\.abort\(\)/u)
   assert.match(source, /the real-Browser driver exited \(\$\{String\(outcome\.exit\.code\)\}/u)
@@ -928,6 +931,14 @@ test('the Web runtime toggle lane drives the private Peer control, never a Host 
   assert.match(lane, /assertToggle\(await webAccess\(peer, 'PB-07', true\), 'enabled'/u)
   assert.match(lane, /PR_A_EXPECTED_ANSWER_PREFIX: 'long-turn answer'/u,
     'the Browser driver must wait for the real model answer of this run')
+  // The Browser Session file is a fact the DRIVER owns: the wait must be raced
+  // against the driver's own exit (the PR-A mechanism), never a bare window.
+  assert.match(lane, /whileBrowserDriverRuns\(\s*\n\s*browserExit,/u,
+    'the PR-B lane must reuse the shared driver-exit race')
+  assert.match(lane, /'PB-07',\n\s*'the Browser Session file appeared'/u)
+  assert.doesNotMatch(lane, /await waitForCondition\(\(\) => existsSync\(join\(coordination, 'browser-session\.json'\)\)/u,
+    'a bare fixed-window wait for a driver-owned fact is the defect this race removes')
+  assert.match(lane, /const browserExitBounded = timeoutMs => browserDriverExitBounded\(browserExit, timeoutMs, 'PR_B_BROWSER_EXIT_TIMEOUT'\)/u)
   assert.match(lane, /await waitDurableTurn\(browserSession, marker, 'PB-07 Browser'\)/u)
   assert.match(lane, /browserCase = 'PASS'/u)
   assert.match(source, /assert\(!REQUIRE_WEB_BROWSER \|\| toggleQualification\.browser === 'PASS'/u,
