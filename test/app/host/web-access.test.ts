@@ -702,6 +702,7 @@ test('unmounting the Host runtime during a mutation leaves no unhandled rejectio
   release()
   const settled = await Promise.race([
     pending,
+    // Bounded window: a hang fails HERE instead of pending forever.
     new Promise<'timeout'>(resolve => { setTimeout(() => resolve('timeout'), 5_000).unref() }),
   ])
   assert.notEqual(settled, 'timeout', 'the in-flight mutation must settle, not hang')
