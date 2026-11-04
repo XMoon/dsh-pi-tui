@@ -548,6 +548,12 @@ test('a draft the application refuses keeps its text, its caret and its live pas
   await h.key(UP)
   await h.key(UP)
   assert.deepEqual(h.editor(), { text: 'plain row', cursor: 0 }, 'a plain draft recalls normally')
+  await h.key(DOWN)
+  assert.deepEqual(h.editor(), { text: 'plain', cursor: 5 },
+    'and leaving the browse restores the draft the refusal let through, not the refused path draft')
+  await h.key(UP)
+  await h.key(UP)
+  assert.deepEqual(h.editor(), { text: 'plain row', cursor: 0 }, 'the browse re-enters from the restored draft')
   assert.equal(receipt.replacePastedPath(path, '[image #1 (8×8)]'), false,
     'the late image read can never rewrite bytes inside a recalled history row')
   assert.equal(h.editor().text, 'plain row', 'and the recalled row stayed exactly what the scope carried')
