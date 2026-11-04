@@ -209,10 +209,12 @@ export class DirectSessionLifecycle implements SessionLifecycle {
     }
   }
 
-  /** Create-or-reuse a Workspace from a Host path proposal. A path the Host
-   *  refuses is a `refused` selection; no Session is dispatched. A signal that
-   *  aborts AFTER the durable create leaves the Workspace record in place and
-   *  reports `superseded` — creation is never rolled back. */
+  /** Create-or-reuse a Workspace from a Host path proposal. A failure the Host
+   *  reports is a `refused` selection with the official `workspace/invalid-path`
+   *  code (the official Host controller makes no finer distinction); no Session
+   *  is dispatched and the user-visible message never echoes the proposed path.
+   *  A signal that aborts AFTER the durable create leaves the Workspace record in
+   *  place and reports `superseded` — creation is never rolled back. */
   private async createWorkspace(
     registry: WorkspaceRegistryLike,
     path: string,
@@ -221,13 +223,19 @@ export class DirectSessionLifecycle implements SessionLifecycle {
     let workspace: WorkspaceEntityLike
     try {
       workspace = await registry.create(path)
-    } catch (error) {
+    } catch {
       if (signal?.aborted === true) {
         throw new WorkspaceSelectionError('superseded', 'the workspace selection was superseded while the Host validated the directory')
       }
+      // The official Host `workspace/create` controller classifies EVERY
+      // non-Remote failure as `workspace/invalid-path` (it does not separate a
+      // storage failure from a path refusal), so keeping that SAME business code
+      // is what makes the Direct and Remote pre-selection equivalent. The message
+      // stays path-free: the proposed directory and the Host's raw error (which
+      // quotes it) are user data, not something a user-visible failure may echo.
       throw new WorkspaceSelectionError(
         'refused',
-        `the Host refused workspace path "${path}": ${safeErrorMessage(error)}`,
+        'the Host refused the proposed workspace directory',
         'workspace/invalid-path',
       )
     }

@@ -227,13 +227,34 @@ test('resolveWorkspace(host-path) adopts the Host canonical directory and reuses
 })
 
 test('resolveWorkspace refuses a Host path the registry rejects and publishes no Session', async () => {
-  const registry = createRegistry({ createFailure: new Error('ENOENT: no such file or directory') })
+  const registry = createRegistry({ createFailure: new Error("ENOENT: no such file or directory, realpath '/missing'") })
   const lifecycle = new DirectSessionLifecycle(host(agents(), { registry: registry.registry }), compose('preset-a'))
   const error = await lifecycle.resolveWorkspace({ kind: 'host-path', path: '/missing' }).then(() => undefined, (thrown: unknown) => thrown)
   assert.ok(error instanceof WorkspaceSelectionError)
   assert.equal(error.kind, 'refused')
+  // The official Host `workspace/create` controller classifies every create
+  // failure as `workspace/invalid-path`; parity keeps that exact code.
   assert.equal(error.code, 'workspace/invalid-path')
-  assert.match(error.message, /refused workspace path "\/missing"/)
+  assert.equal(error.message, 'the Host refused the proposed workspace directory')
+  assert.equal(error.message.includes('/missing'), false, 'the user-visible failure must not echo the proposed path')
+  assert.equal(error.message.includes('realpath'), false, 'the Host raw error (which quotes the path) stays out of the user text')
+})
+
+test('a non-validation registry failure keeps the official workspace/invalid-path classification and stays path-free', async () => {
+  // The official Host controller does NOT distinguish a storage/internal
+  // failure from a path refusal: every non-Remote failure becomes
+  // `workspace/invalid-path`. The Direct adapter must report the SAME business
+  // code so pre-selection semantics stay equivalent across backends.
+  const registry = createRegistry({ createFailure: new Error('storage table unavailable for /private/secret/project') })
+  const lifecycle = new DirectSessionLifecycle(host(agents(), { registry: registry.registry }), compose('preset-a'))
+  const error = await lifecycle.resolveWorkspace({ kind: 'host-path', path: '/private/secret/project' })
+    .then(() => undefined, (thrown: unknown) => thrown)
+  assert.ok(error instanceof WorkspaceSelectionError)
+  assert.equal(error.kind, 'refused')
+  assert.equal(error.code, 'workspace/invalid-path')
+  assert.equal(error.message.includes('/private/secret/project'), false,
+    'neither the proposed nor the Host canonical path may reach the user text')
+  assert.equal(error.message.includes('storage'), false, 'the raw internal detail stays out of the user text')
 })
 
 test('a signal aborted after the durable Workspace create is superseded and never deletes the Workspace', async () => {
