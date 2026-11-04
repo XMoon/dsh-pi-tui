@@ -24,8 +24,21 @@ import type { AutocompleteItem, AutocompleteProvider } from '@xmoon76/pi-tui'
 import type { Key } from '@stencil-hq/tern'
 import type { TspComposer } from './editor.ts'
 
-/** The most candidate rows one paint shows; the rest stay in the list. */
-export const SLASH_COMPLETION_MAX_ROWS = 6
+/**
+ * The most candidate rows one paint shows; the rest stay in the list.
+ *
+ * FOUR, not the §3.1 ceiling of six, and the reason is a measured client fact
+ * rather than a guess: the pinned Tern reports NO pane height (`Capabilities`
+ * carries `cols` + `cell` only), so the program cannot adapt the window to the
+ * space above the composer. Measured on the client at the shortest supported
+ * matrix cell (900x360), the space above the editor is ~146px — six rows plus
+ * the hint overflowed it and the popup's TOP was clipped by the pane content
+ * boundary, which hid the default-highlighted row. Four rows plus the hint
+ * (~134px) are fully visible at every supported cell and appearance, and the
+ * window still walks with the highlight, so no candidate is unreachable: the
+ * rest of the list is one ↓ away, never a scroll the user cannot see.
+ */
+export const SLASH_COMPLETION_MAX_ROWS = 4
 
 /** One candidate row as the painter receives it. `id` is the row's identity
  *  inside its own list revision, so a click names the row that was painted and
@@ -44,9 +57,9 @@ export interface SlashCompletionRow {
  *  painter observes it and never re-reads, re-filters or re-sorts a catalog. */
 export interface SlashCompletionPopup {
   readonly revision: number
+  /** The painted window only; the rows beyond it stay reachable because the
+   *  window walks with the highlighted row. */
   readonly rows: readonly SlashCompletionRow[]
-  /** Candidates the window does not show — a truthful overflow count. */
-  readonly hidden: number
 }
 
 export interface TspSlashCompletion {
@@ -441,7 +454,7 @@ export function createTspSlashCompletion(
           highlighted: index === shown.selected,
         })
       }
-      return { revision: shown.revision, rows, hidden: total - (end - start) }
+      return { revision: shown.revision, rows }
     },
     isOpen: () => list !== undefined && list.items.length > 0,
     retire: () => withdraw(),
