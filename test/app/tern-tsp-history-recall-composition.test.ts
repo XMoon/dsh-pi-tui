@@ -41,6 +41,7 @@ import { createSurfaceRuntime, type SurfaceRendererMount, type SurfaceRuntime } 
 import type { ComposerSubmitRequest } from '../../src/tui-app.ts'
 import type { SurfaceEventRoutingSource } from '../../src/app/surface/event-routing.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
+import { draftHasAttachments } from '../../src/client/media/draft-attachments.ts'
 import { DraftFileStore } from '../../src/client/media/attachment/file-draft.ts'
 import { DraftImageStore } from '../../src/client/media/image/draft-store.ts'
 import { historyFilePath, loadHistoryRecords } from '../../src/client/history/store.ts'
@@ -159,12 +160,16 @@ interface ChainHarness {
   readonly historyOwner: ReturnType<typeof createInputHistory>
   readonly file: string
   readonly writes: Array<{ sessionId: string; message: unknown }>
+  readonly submits: Array<{ text: string; request: string; token: number | undefined }>
+  readonly images: DraftImageStore
   readonly rawLines: () => readonly string[]
   type(text: string): Promise<void>
   /** Press Enter and wait for the REAL writer sink, not the composer clear.
    *  A policy SKIP still reaches the writer and settles the scope without
    *  adding a JSONL row (`{ written: false }`). */
   enter(text: string, options?: { readonly written?: boolean }): Promise<void>
+  /** Arm/disarm the application's in-flight pasted-path delivery gate. */
+  setPendingPastedPath(path: string | undefined): void
   /** A REAL decoded key, followed by the shared SDK render wait. */
   key(bytes: string): Promise<void>
   /** The RESOLVED current owner's frame, never a shadow state. */
@@ -273,6 +278,7 @@ async function mountChain(
     },
     releaseUnmounted: async () => { await mountedRenderer?.dispose() },
   }
+  let pendingPastedPath: string | undefined
   surface.start({
     events: {
       onSubmit: (text: string, request: ComposerSubmitRequest, scopeToken?: number) => {
@@ -280,6 +286,12 @@ async function mountChain(
         controller.submit(text, request, scopeToken)
       },
       onExit: () => {},
+      shouldRememberInput: (text: string) => !draftHasAttachments(text, images, files)
+        && (pendingPastedPath === undefined || !text.includes(pendingPastedPath)),
+    },
+    terminalPastedPath: {
+      accept: () => {},
+      blocksDelivery: (text: string) => pendingPastedPath !== undefined && text.includes(pendingPastedPath),
     },
     renderer: rendererMount,
     workspaceRoot: home,
@@ -314,8 +326,7 @@ async function mountChain(
   const images = new DraftImageStore()
   const files = new DraftFileStore()
   const core = createSessionOwnershipCore({ isSurfaceDisposed: () => false, resetForGeneration: () => {} })
-  const ownerRef = {} as never
-  core.setCurrentOwner(ownerRef, SESSION_ID)
+  core.setCurrentOwner({} as never, SESSION_ID)
   let draft = ''
   const runtimeSurface: SubmissionRuntimeSurface = {
     withWriter: async (_scope, task) => task(),
@@ -363,17 +374,9 @@ async function mountChain(
       transitionPending: () => false,
     },
     scope: {
-      captureLive: () => ({
-        sessionId: SESSION_ID,
-        subject: core.captureSubject()!,
-        [Symbol.for('scope')]: true,
-      } as never),
+      captureLive: () => ({ sessionId: SESSION_ID, subject: core.captureSubject()! } as never),
       isCurrent: () => true,
-      requireLive: () => ({
-        sessionId: SESSION_ID,
-        subject: core.captureSubject()!,
-        [Symbol.for('scope')]: true,
-      } as never),
+      requireLive: () => ({ sessionId: SESSION_ID, subject: core.captureSubject()! } as never),
     },
     session: {
       ensureSession: async () => {},
@@ -453,6 +456,9 @@ async function mountChain(
     historyOwner,
     file,
     writes,
+    submits: submitting,
+    images,
+    setPendingPastedPath: (path) => { pendingPastedPath = path },
     rawLines: () => existsSync(file)
       ? readFileSync(file, 'utf8').split('\n').filter(line => line.trim() !== '')
       : [],
@@ -496,6 +502,8 @@ test('a tokenless writer between two real Enters stays visible between them in t
     // occurrence token is carried by the production submit handoff alone.
     await h.enter('a')
     assert.equal(h.writes.length, 1, 'the real session writer accepted a')
+    assert.equal(typeof h.submits[0]!.token, 'number',
+      'the production SurfaceRuntime submit entry carried an occurrence token into the controller')
     assert.equal(h.renderer().scopeFactCountForTest(), 1,
       'the writer settled THAT occurrence inside this mount kernel')
 
@@ -627,6 +635,65 @@ test('a sessionless pool submission is adopted by the first publication, and a r
     await h.key(UP)
     await h.key(UP)
     assert.deepEqual(h.editor(), { text: 'b row', cursor: 0 }, 'B recalls its own rows')
+  } finally {
+    await h.dispose()
+    await h.session.close()
+  }
+})
+
+test('a draft that references a staged attachment refuses the recall and keeps the draft, caret and staged bytes', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('pi-tui-tsp-recall-admission-')
+  const h = await mountChain(life, home)
+  t.after(() => h.dispose())
+  h.surface.display.beginInputHistoryScope(SESSION_ID)
+  try {
+    const bytes = new Uint8Array(33)
+    const staged = h.images.add({ bytes, mediaType: 'image/png', width: 8, height: 8, source: { type: 'clipboard' } })
+    h.surface.composer.setDraft(`${staged.placeholder} caption`)
+    await waitUntil('the staged draft is live', () => h.editor().text === `${staged.placeholder} caption`)
+    h.surface.display.resetInputHistory(['a plain row'])
+    await h.key(UP)
+    await h.key(UP)
+    assert.deepEqual(h.editor(), { text: `${staged.placeholder} caption`, cursor: 0 },
+      'the attachment predicate refused the recall: the multimodal draft is intact and only the '
+      + 'boundary-causing Home step moved the caret')
+    assert.equal(h.images.get(staged.id)?.byteLength, 33,
+      'the staged image is still resolvable — no path from a refused browse can drop it')
+
+    h.images.remove(staged.id)
+    await h.key(UP)
+    await h.key(UP)
+    assert.deepEqual(h.editor(), { text: 'a plain row', cursor: 0 },
+      'once the placeholder no longer resolves, the same draft recalls normally')
+  } finally {
+    await h.dispose()
+    await h.session.close()
+  }
+})
+
+test('an in-flight pasted path blocks the browse without writing a row or losing the draft text', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('pi-tui-tsp-recall-pending-path-')
+  const h = await mountChain(life, home)
+  t.after(() => h.dispose())
+  h.surface.display.beginInputHistoryScope(SESSION_ID)
+  try {
+    h.surface.display.resetInputHistory(['a plain row'])
+    const path = '/tmp/pi-tui-tsp-recall/pending-shot.png'
+    h.setPendingPastedPath(path)
+    await h.type(`${path} `)
+    await h.key(UP)
+    await h.key(UP)
+    assert.deepEqual(h.editor(), { text: `${path} `, cursor: 0 },
+      'the delivery gate refused the recall while the image read is in flight; the draft text is intact')
+    assert.deepEqual(rowsOf(home), [], 'no recall, no draft mutation and no history row')
+
+    h.setPendingPastedPath(undefined)
+    await h.key(UP)
+    await h.key(UP)
+    assert.deepEqual(h.editor(), { text: 'a plain row', cursor: 0 },
+      'the same key recalls once the read settled and the gate opened')
   } finally {
     await h.dispose()
     await h.session.close()
