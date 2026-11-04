@@ -753,13 +753,15 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // The SAME two application admissions a submission consults, read off the
     // CURRENT bound handlers (never a boot-time capture) and only when the
     // composer is about to replace a live draft with a recalled row. A refusal
-    // or a callback that rewrote the draft leaves the browse un-entered; a
-    // throw keeps travelling up the original key stack.
+    // leaves the browse un-entered; a throw keeps travelling up the original
+    // key stack.
     admitDraft: (text) => {
-      // `dispatchKey` reaches the composer ONLY after `bindInput` installed
-      // these handlers (the pre-bind keys are held, not applied), so the bind
-      // is a fact of this call site, not a state to re-check.
-      const handlers = boundHandlers as TspInputHandlers
+      // `routeInput` holds or drops every key before `dispatchKey`, so the
+      // composer only ever runs once the bind is live: assert the pairing for
+      // the type system rather than silently defaulting (the same shape as
+      // `routeInput`'s own check).
+      const handlers = boundHandlers
+      if (handlers === undefined) throw new Error('the TSP composer recalled before the input was bound')
       return handlers.admitPastedPathDelivery(text) && handlers.shouldRememberInput(text)
     },
   })
