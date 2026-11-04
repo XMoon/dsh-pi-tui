@@ -292,6 +292,41 @@ test('the upgraded smoke carries every inventory gate and the critical negative 
     'the artifact-absence control must reject an enclosing profiles manifest carrying the candidate package name')
 })
 
+test('the question lanes wait for the real review frame, never the permanent Submit tab', () => {
+  const source = readFileSync(SCRIPT, 'utf8')
+  // Every question page paints the `○ Submit` nav tab permanently, so a
+  // `waitForScreen('Submit', …)` returned while the flow was still on the
+  // option page; the driver's final Enter then landed before the review
+  // seat existed. Only the review-only title proves that page is painted.
+  assert.equal((source.match(/waitForScreen\(\s*'Submit'/gu) ?? []).length, 0,
+    'the permanent Submit nav tab can never prove the review page')
+  for (const [scenario, call] of [
+    ['T49/T50', /waitForScreen\('Review your answer before submit', `\$\{label\} C2 review page`/u],
+    ['T51', /waitForScreen\('Review your answer before submit', 'T51 C2 review'/u],
+    ['T52', /waitForScreen\('Review your answer before submit', 'T52 continued form review'/u],
+    ['T55c', /waitForScreen\('Review your answer before submit', 'T55c question review'/u],
+  ]) {
+    assert.match(source, call, `${scenario} must gate its final Enter on the unique review title`)
+  }
+  // T52 submits exactly ONCE from the painted review frame. The old second
+  // Enter compensated for the missing review wait and could append an
+  // unrelated reply instead of letting the official queued classification
+  // prove the single submit.
+  const t52 = source.slice(
+    source.indexOf("await c2.waitForScreen('Review your answer before submit', 'T52 continued form review'"),
+    source.indexOf('// The C2 UI\'s `answerContinued` return is observable'),
+  )
+  assert.ok(t52.length > 0, 'T52 form review wait not found')
+  assert.equal((t52.match(/c2\.send\('\\r'\)/gu) ?? []).length, 1,
+    'T52 must send exactly one final Enter after the review frame')
+  // The official witness checks the fix must not weaken.
+  assert.match(source, /duplicate question request\/settlement/u, 'T49/T50 keep the one-request/one-settlement check')
+  assert.match(source, /T55c HMR replayed the Host question request/u, 'T55c keeps the no-replay check')
+  assert.match(source, /T55c the new surface submitted the wrong answer/u, 'T55c must assert the submitted answer')
+  assert.match(source, /T55c the Host pending was not requested\/settled exactly once for this callId/u,
+    'T55c must prove per-callId request/settlement counts')
+})
+
 test('the lane declares every setup local it later assigns', () => {
   const source = readFileSync(SCRIPT, 'utf8')
   const main = source.slice(source.indexOf('async function main()'))

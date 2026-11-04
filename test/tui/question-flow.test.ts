@@ -68,6 +68,11 @@ function assertPage(
     // render (Enter submits, Esc cancels — no two-choice control).
     assert.ok(joined.includes('Submit'), `review tab missing (${width}x${budget}):\n${joined}`)
     assert.ok(!joined.includes('Cancel'), `the Submit/Cancel two-choice row is gone (${width}x${budget}):\n${joined}`)
+    // The smoke driver gates its final Enter on this EXACT line, so the
+    // review title must survive every supported budget/width — a wrapped
+    // or dropped title would leave the frame wait without a positive paint.
+    assert.ok(joined.includes('Review your answer before submit'),
+      `review-only title missing (${width}x${budget}):\n${joined}`)
   }
 }
 
@@ -372,6 +377,48 @@ test('the hint advertises ← back · → skip instead of the old letters', () =
   assert.ok(review.includes('← back · ↵ submit · esc cancel'), `review hint must advertise the fixed verbs:\n${review}`)
   assert.ok(!review.includes('↑↓ choose'), `the Submit/Cancel two-choice verb must be gone:\n${review}`)
   assert.ok(!review.includes('b back'), `the old 'b back' verb must be gone:\n${review}`)
+})
+
+test('a permanent Submit tab does not mark a selectable question as ready for final review', () => {
+  // The option page ALWAYS paints the `○ Submit` nav tab, so a driver that
+  // waits for the bare `Submit` label is satisfied while the flow is still
+  // on the question page: the split-process smoke then sent its final Enter
+  // into that page and left the Host pending unanswered. The unique review
+  // title is the only paint that proves the final review seat is ready.
+  const questions: QuestionFlowQuestion[] = [{
+    id: 'c1-question',
+    question: 'Continue the C1 test?',
+    options: [{ label: 'Proceed' }, { label: 'Cancel' }],
+  }]
+  // Enter on the option page is the option-confirm verb (select the
+  // highlighted row + advance), never the final submit.
+  const entered: unknown[] = []
+  const byEnter = new QuestionFlow(questions, (answers) => { entered.push(answers) }, () => {})
+  byEnter.setMaxRows(24)
+  const optionPage = render(byEnter, 100).join('\n')
+  assert.ok(optionPage.includes('Submit'), `the option page must carry the permanent Submit tab:\n${optionPage}`)
+  assert.ok(!optionPage.includes('Review your answer before submit'),
+    `the option page must not look like the review page:\n${optionPage}`)
+  byEnter.handleInput('\r')
+  assert.equal(entered.length, 0, 'Enter on the option page submitted the whole flow')
+  const reviewPage = render(byEnter, 100).join('\n')
+  assert.ok(reviewPage.includes('Review your answer before submit'),
+    `Enter must land on the review page:\n${reviewPage}`)
+  byEnter.handleInput('\r')
+  assert.deepEqual(entered, [[{ id: 'c1-question', selected: ['Proceed'] }]],
+    'exactly one Enter from the review seat submits the selection once')
+  // The digit route (what the smoke sends) has the SAME two-phase shape.
+  const digit: unknown[] = []
+  const byDigit = new QuestionFlow(questions, (answers) => { digit.push(answers) }, () => {})
+  byDigit.setMaxRows(24)
+  render(byDigit, 100)
+  byDigit.handleInput('1')
+  const digitReview = render(byDigit, 100).join('\n')
+  assert.ok(digitReview.includes('Review your answer before submit'),
+    `digit selection must land on the review page:\n${digitReview}`)
+  assert.equal(digit.length, 0, 'digit selection submitted the flow before the review Enter')
+  byDigit.handleInput('\r')
+  assert.deepEqual(digit, [[{ id: 'c1-question', selected: ['Proceed'] }]])
 })
 
 test('budget matrix: review page keeps the hint and never a Cancel row', () => {
