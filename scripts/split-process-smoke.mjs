@@ -2044,23 +2044,21 @@ async function main() {
         )
         trace('workspace-hold-open', { requestId })
       }
-      // A rejecting probe is reported on the control channel as ONE
-      // `control-failure`; surface that message instead of a bare wait timeout.
-      const proof = await Promise.race([
-        client.waitFor(
-          record => record.m4b2hf === 'host-rpc-proof' && record.requestId === requestId,
-          label,
-          180_000,
-        ),
-        client.waitFor(
-          record => record.m4a0 === 'control-failure',
-          `${label} control failure`,
-          180_000,
-        ).then(record => {
-          trace('probe-control-failure', { label, error: String(record.error).slice(0, 400) })
-          throw new Error(`${label}: the qualification probe failed: ${String(record.error)}`)
-        }),
-      ])
+      // ONE waiter for both outcomes. A rejecting probe is reported on the
+      // control channel as a single `control-failure`; racing two waiters would
+      // keep the losing 20 ms poll interval and its deadline alive after the
+      // proof had already arrived.
+      const outcome = await client.waitFor(
+        record => (record.m4b2hf === 'host-rpc-proof' && record.requestId === requestId)
+          || record.m4a0 === 'control-failure',
+        label,
+        180_000,
+      )
+      if (outcome.m4a0 === 'control-failure') {
+        trace('probe-control-failure', { label, error: String(outcome.error).slice(0, 400) })
+        throw new Error(`${label}: the qualification probe failed: ${String(outcome.error)}`)
+      }
+      const proof = outcome
       const after = await waitForHostWatchCount(0, `${label} watch release`)
       return { proof, during, after }
     }
