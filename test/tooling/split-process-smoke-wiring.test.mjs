@@ -351,10 +351,10 @@ test('T09 is two real Surface Clients on one Host while T09Q keeps the qualifica
 test('M5-B same-Session real two-PTY witness remains wired', () => {
   const source = readFileSync(SCRIPT, 'utf8')
   // The M5-B Case is the FIRST C1 scenario: it owns one isolated Host and runs
-  // before the T44 inventory it must not renumber.
+  // before the M5-C Case and the T44 inventory it must not renumber.
   const start = source.indexOf('// M5B-01 (M5-B):')
-  const end = source.indexOf('// T44: a real accepted Turn survives')
-  assert.ok(start > 0 && end > start, 'M5B-01 must stay immediately before the T44 Case')
+  const end = source.indexOf('// M5C-01 (M5-C):')
+  assert.ok(start > 0 && end > start, 'M5B-01 must stay immediately before the M5-C Case')
   assert.ok(start > source.indexOf('const startC1Client = async'),
     'M5B-01 must run inside the C1 helper section')
   assert.equal((source.match(/\/\/ M5B-01 \(M5-B\):/gu) ?? []).length, 1,
@@ -401,6 +401,142 @@ test('M5-B same-Session real two-PTY witness remains wired', () => {
   assert.match(m5b, /alive\(aReady\.pid\)/u)
   assert.match(m5b, /alive\(hostBefore\.hostPid\)/u)
   assert.match(m5b, /trace\('m5b-same-session'/u)
+})
+
+test('two real TUI Clients must both show one Host Question or Approval before first settlement', () => {
+  const source = readFileSync(SCRIPT, 'utf8')
+  // The M5-C Case is ONE isolated C1 scope between the M5-B Case and the T44
+  // inventory: it may not renumber, skip or absorb any existing Case.
+  const start = source.indexOf('// M5C-01 (M5-C):')
+  const end = source.indexOf('// T44: a real accepted Turn survives')
+  assert.ok(start > source.indexOf('// M5B-01 (M5-B):') && end > start,
+    'M5C-01 must stay between the M5-B Case and the T44 inventory')
+  assert.equal((source.match(/\/\/ M5C-01 \(M5-C\):/gu) ?? []).length, 1,
+    'the dual-TUI first-settlement Case must exist exactly once')
+  const m5c = source.slice(start, end)
+
+  // The shared admission helper owns the fixed startup ORDER: A creates an
+  // EMPTY Session with the real `/new` command, B joins the SAME Session
+  // through its startup intent, and both real interaction gates are up before
+  // any trigger exists. The prompt-submitting `openC1Session` helper would let
+  // the Host ask BEFORE B exists and only prove a later replay.
+  assert.match(m5c, /const admitM5cDualSurfaceScene = async \(scenario, label\) => \{/u)
+  assert.equal((m5c.match(/startC1Client\(/gu) ?? []).length, 2,
+    'the shared admission helper must start exactly two real Surface Clients per scene')
+  assert.match(m5c, /clientA\.send\('\/new\\r'\)/u,
+    'Client A must create the empty Session with the real /new command')
+  assert.match(m5c, /SPLIT_PROCESS_CLIENT_SESSION: sessionX/u,
+    'Client B must join the SAME Session X through its startup intent')
+  assert.match(m5c, /record\.openSessionId === sessionX/u)
+  assert.match(m5c, /record\.transport === 'connected'/u)
+  assert.match(m5c, /record\.surfaceMounted === true/u)
+  assert.match(m5c, /aReady\.pid !== bReady\.pid/u, 'the two Clients need distinct business PIDs')
+  assert.match(m5c, /clientA\.child\.pid !== clientB\.child\.pid/u, 'the two Clients need distinct script(1) wrappers')
+  assert.match(m5c, /assertInteractionGate\(clientA, `\$\{label\} Client A`\)/u)
+  assert.match(m5c, /assertInteractionGate\(clientB, `\$\{label\} Client B`\)/u)
+  assert.match(m5c, /assertClientHostFacts\(aOpen\.host, hostBefore/u)
+  assert.match(m5c, /assertClientHostFacts\(bOpen\.host, hostBefore/u)
+  assert.match(m5c, /event\.type === 'turn\/start' \|\| event\.type === 'tool\/call'/u,
+    'the scene must prove nothing was pending before its trigger')
+  assert.match(m5c, /event\.kind !== 'question-request'/u,
+    'the fixture must prove no Question predated the trigger')
+  assert.doesNotMatch(m5c, /openC1Session\(/u,
+    'M5C must never prepare the Clients with the prompt-submitting helper')
+  assert.doesNotMatch(m5c, /new EntryProcess\('client'/u,
+    'M5C must never downgrade a real TUI to the qualification EntryProcess')
+
+  // Three fixed Host scenes, each admitted BEFORE its own real keyboard trigger.
+  for (const [scenario, label, trigger] of [
+    ['question', 'm5c-question', 'm5c-question-trigger'],
+    ['approval-allow', 'm5c-approval-reject', 'm5c-approval-reject-trigger'],
+    ['approval-allow', 'm5c-approval-allow', 'm5c-approval-allow-trigger'],
+  ]) {
+    const admit = m5c.indexOf(`admitM5cDualSurfaceScene('${scenario}', '${label}')`)
+    const sent = m5c.indexOf(`clientA.send('${trigger}\\r')`)
+    assert.ok(admit >= 0, `${label} must use the shared dual-Surface admission`)
+    assert.ok(sent > admit, `${label} must admit BOTH real Clients before its trigger prompt`)
+  }
+
+  // Question: both physically distinct frames observe the same answerable
+  // modal, the winner goes through the REAL review page, and the ONE Host
+  // tool/result is tied to the durable callId.
+  assert.match(m5c, /clientA\.waitForScreen\('\[1\] Proceed'/u)
+  assert.match(m5c, /clientB\.waitForScreen\('\[1\] Proceed'/u)
+  assert.match(m5c, /clientA\.send\('1'\)/u)
+  assert.match(m5c, /clientA\.waitForScreen\('Review your answer before submit'/u)
+  assert.match(m5c, /clientA\.send\('\\r'\)/u)
+  assert.match(m5c, /event\.type === 'tool\/result' && String\(event\.data\?\.message\?\.toolCallId\) === callId/u,
+    'the Question settlement must be tied to the real durable callId')
+  assert.match(m5c, /event\.kind === 'question-settled' && event\.sessionId === sessionX/u)
+  assert.match(m5c, /event\.kind !== 'question-failed'/u)
+  assert.match(m5c, /settled\.answers\?\.\[0\]\?\.selected\?\.\[0\] === 'Proceed'/u)
+  // The loser withdrew its own modal and its late option key stayed inert.
+  assert.match(m5c, /clientB\.waitForScreenGone\('\[1\] Proceed'/u,
+    'the Question loser\'s CURRENT frame must prove the modal withdrawal')
+  assert.match(m5c, /clientB\.send\('2'\)/u, 'the Question loser must try the old option key')
+  assert.match(m5c, /waitForComposerDraft\('m5c-b-editor-after-question'/u,
+    'the loser must prove the editor seat is usable again')
+  assert.match(m5c, /a late loser option key reopened the settled question modal/u)
+  assert.match(m5c, /a late loser key produced Host activity/u)
+  assert.match(m5c, /the question was not settled exactly once/u)
+  assert.match(m5c, /the Host wrote more than one tool result for the question call/u)
+  assert.match(m5c, /afterExitEvents/u, 'the Question loser exit needs a NEW durable snapshot')
+
+  // Approvals: BOTH scenes paint the same sheet on both real frames, one
+  // winner settles each real outcome, and both late loser keys stay inert.
+  assert.equal((m5c.match(/clientA\.waitForScreen\('\[y\] Allow once'/gu) ?? []).length, 2,
+    'both Approval scenes must observe the same sheet on Client A')
+  assert.equal((m5c.match(/clientB\.waitForScreen\('\[y\] Allow once'/gu) ?? []).length, 2,
+    'both Approval scenes must observe the same sheet on Client B')
+  assert.match(m5c, /event\.type === 'approval\/asked'/u)
+  assert.match(m5c, /event\.type === 'approval\/decided' && String\(event\.data\?\.id\) === requestId/u,
+    'the Approval settlement must be tied to the real ApprovalRequestId')
+  assert.match(m5c, /decided\.data\.outcome === 'rejected'/u)
+  assert.match(m5c, /decided\.data\.outcome === 'allowed-once'/u)
+  assert.match(m5c, /event\.kind === 'approval-settled' && event\.outcome === 'rejected'/u)
+  assert.match(m5c, /event\.kind === 'approval-settled' && event\.outcome === 'allowed-once'/u)
+  // AR: B wins with `n`, then A's late `y` must not allow.
+  assert.match(m5c, /clientB\.send\('n'\)/u)
+  assert.match(m5c, /clientA\.waitForScreenGone\('\[y\] Allow once'/u)
+  assert.match(m5c, /a rejected approval still executed the bash tool/u)
+  assert.match(m5c, /the late loser allow produced a second\/changed Host decision/u)
+  assert.match(m5c, /the late loser key settled an allowed approval/u)
+  // AA: A wins with `y`, then B's late `n` must not reverse or re-execute.
+  assert.match(m5c, /clientA\.send\('y'\)/u)
+  assert.match(m5c, /clientB\.waitForScreenGone\('\[y\] Allow once'/u)
+  assert.match(m5c, /the late loser key settled a second allowed approval/u)
+  assert.match(m5c, /the late loser reject produced a second\/changed Host decision/u)
+  // Each Approval scene proves the ONE request/decision pair it owns.
+  assert.match(m5c, /the approval was not asked\/decided exactly once as rejected/u)
+  assert.match(m5c, /the approval was not asked\/decided exactly once as allowed-once/u)
+  // Each Approval scene runs exactly one winner key and one late loser key.
+  assert.equal((m5c.match(/clientA\.send\('y'\)/gu) ?? []).length, 2,
+    'Client A must allow once as the AA winner and once as the AR late loser')
+  assert.equal((m5c.match(/clientB\.send\('n'\)/gu) ?? []).length, 2,
+    'Client B must reject once as the AR winner and once as the AA late loser')
+  // The harmless command's execution evidence is the Host work-root marker:
+  // present with its payload for the allow, never present for the reject.
+  assert.match(m5c, /join\(workRoot, 'approval-allow\.marker'\)/u)
+  assert.match(m5c, /readFileSync\(marker, 'utf8'\) === 'c1-approval-allow'/u)
+  assert.match(m5c, /the rejected harmless command executed/u)
+  assert.match(m5c, /a marker appeared for the refused command/u)
+  assert.match(m5c, /the allowed harmless command did not execute/u)
+
+  // Identity, cleanup and the final Host durable counts are explicit asserts,
+  // never trace-only claims.
+  assert.match(m5c, /assertHostIdentityKept\(host, hostBefore/u)
+  assert.match(m5c, /exitC1Client\(clientA/u)
+  assert.match(m5c, /exitC1Client\(clientB/u)
+  assert.match(m5c, /stopC1Host\(host\)/u)
+  assert.match(m5c, /event\.type === 'turn\/end'/u)
+  for (const trace of ['m5c-01q', 'm5c-01ar', 'm5c-01aa']) {
+    assert.ok(m5c.includes(`trace('${trace}'`), `${trace} must report its real facts`)
+  }
+  for (const legacy of ['t49', 't50', 't51', 't52', 't53', 't54', 't55a', 't55b', 't55c-question', 't55c-approval']) {
+    assert.ok(source.includes(legacy), `the M5-C Case must not remove the legacy ${legacy} negative control`)
+  }
+  assert.ok(source.indexOf('// M5B-01 (M5-B):') > 0,
+    'the M5-C Case must not remove the M5-B same-Session witness')
 })
 
 test('the question lanes wait for the real review frame, never the permanent Submit tab', () => {
