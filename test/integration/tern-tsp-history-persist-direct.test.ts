@@ -360,6 +360,7 @@ test('a sessionless TSP boot recalls launch-cwd history with real ↑/↓, then 
       'the file keeps the launch cwd rows while the live Session projects only its own')
   } finally {
     recorder.detach()
+    // reason: the fixture's OWN bounded teardown window for the real disposal.
     await fixture.settle()
   }
 })
@@ -395,6 +396,7 @@ test('a boot-seeded last row dedupes the first real Enter, and a startup resume 
     await arrow(fixture, DOWN, { text: 'user draft', cursor: 'user draft'.length })
   } finally {
     recorder.detach()
+    // reason: the fixture's OWN bounded teardown window for the real disposal.
     await fixture.settle()
   }
 
@@ -417,6 +419,7 @@ test('a boot-seeded last row dedupes the first real Enter, and a startup resume 
     resumed.pane.input.type(UP)
     await probeNoRecall(resumed, { text: '', cursor: 0 })
   } finally {
+    // reason: the fixture's OWN bounded teardown window for the real disposal.
     await resumed.settle()
   }
 })
@@ -463,6 +466,7 @@ test('a browse opened on the boot cwd pool cannot survive the Enter that publish
       'the boot rows stay in the file while the live Session projects only its own')
   } finally {
     recorder.detach()
+    // reason: the fixture's OWN bounded teardown window for the real disposal.
     await fixture.settle()
   }
 })
@@ -500,6 +504,7 @@ test('a startup resume does not seed launch-cwd rows into the mounted recall, an
     await arrow(fixture, DOWN, { text: 'keep this draft', cursor: 'keep this draft'.length })
   } finally {
     recorder.detach()
+    // reason: the fixture's OWN bounded teardown window for the real disposal.
     await fixture.settle()
   }
 })
@@ -541,6 +546,7 @@ test('a staged image draft refuses recall through the existing application admis
       'the attachment submit added no row to the real history file')
   } finally {
     recorder.detach()
+    // reason: the fixture's OWN bounded teardown window for the real disposal.
     await fixture.settle()
   }
 })
@@ -598,6 +604,7 @@ test('a real /new and /resume switch shows B’s own row in B and A’s own row 
     await arrow(fixture, DOWN, { text: 'back in A', cursor: 'back in A'.length })
   } finally {
     recorder.detach()
+    // reason: the fixture's OWN bounded teardown window for the real disposal.
     await fixture.settle()
   }
 })
@@ -622,6 +629,7 @@ test('a refused `!` user-shell line restores its draft but never enters the ↑ 
     await arrow(fixture, DOWN, { text: line, cursor: line.length })
     assert.equal(composerText(fixture), line, 'a refused shell line never became an editor-recall entry')
   } finally {
+    // reason: the fixture's OWN bounded teardown window for the real disposal.
     await fixture.settle()
   }
 })

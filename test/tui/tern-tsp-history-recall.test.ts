@@ -152,6 +152,8 @@ async function mountRecallPane(
   let status = emptyStatusSnapshot()
   renderer.bindStatusReader({ snapshot: () => status })
   renderer.display.commitDisplaySubject({}, {}, undefined)
+  // reason: the shared render wait covers the SDK frame this assertion
+  // observes; it is a bounded observation window, not a guessed delay.
   await settle()
   const composerId = options.chrome === true ? 'dock.quiet-composer.composer' : 'dock.composer'
   return {
@@ -176,6 +178,8 @@ async function mountRecallPane(
       pane.key(bytes)
       // reason: the shared render wait covers the SDK frame/delivery the
       // assertion reads; the wire is what the case observes.
+      // reason: the shared render wait covers the SDK frame this assertion
+      // observes; it is a bounded observation window, not a guessed delay.
       await settle()
     },
     seed(entries, owner) {
@@ -186,6 +190,8 @@ async function mountRecallPane(
       status = snapshot
       renderer.display.commitDisplaySubject({}, {}, undefined)
       await waitUntil('the status committed a frame', () => pane.frameCount() > before)
+      // reason: the shared render wait covers the SDK frame this assertion
+      // observes; it is a bounded observation window, not a guessed delay.
       await settle(80)
     },
     dispose: async () => {
@@ -284,6 +290,8 @@ test('a modal form owns the arrows, the hidden composer keeps its draft, and the
     false,
   )
   pending.catch(() => {})
+  // reason: the shared render wait covers the SDK frame this assertion
+  // observes; it is a bounded observation window, not a guessed delay.
   await settle()
   const notes = h.calls.notes
   await h.key(UP)
@@ -293,6 +301,8 @@ test('a modal form owns the arrows, the hidden composer keeps its draft, and the
     'the seat consumed every arrow: the draft, the caret and the focus behind it are untouched')
   assert.equal(h.calls.notes, notes, 'a key the seat owns is not composer user input')
   h.pane.key(ESCAPE)
+  // reason: the shared render wait covers the SDK frame this assertion
+  // observes; it is a bounded observation window, not a guessed delay.
   await settle()
   await h.key(UP)
   assert.deepEqual(h.editor(), { text: 'hidden draft', cursor: 0 },
@@ -311,12 +321,16 @@ test('the Permission menu cycles its options on ↑/↓ without touching the dra
   await h.key('draft under the menu')
   h.seed(['newest entry'])
   clickNode(h.pane, '.composer-permission-s')
+  // reason: the shared render wait covers the SDK frame this assertion
+  // observes; it is a bounded observation window, not a guessed delay.
   await settle()
   const before = h.editor()
   await h.key(DOWN)
   await h.key(UP)
   assert.deepEqual(h.editor(), before, 'the open menu took both arrows; the composer text and caret did not move')
   h.pane.key(ESCAPE)
+  // reason: the shared render wait covers the SDK frame this assertion
+  // observes; it is a bounded observation window, not a guessed delay.
   await settle()
   assert.equal(h.calls.cancels, 0, 'Escape closed the menu and did not route the cancel intent')
   await h.key(UP)
@@ -339,20 +353,28 @@ test('the Session Browser and the Work Hub consume the arrows before the compose
     onClose: () => {},
   })
   browser.setSnapshot(SESSION_ROWS)
+  // reason: the shared render wait covers the SDK frame this assertion
+  // observes; it is a bounded observation window, not a guessed delay.
   await settle()
   await h.key(UP)
   await h.key(DOWN)
   assert.deepEqual(h.editor(), { text: 'kept draft', cursor: 10 },
     'the Browser list took the arrows; the composer behind it never moved')
   browser.close()
+  // reason: the shared render wait covers the SDK frame this assertion
+  // observes; it is a bounded observation window, not a guessed delay.
   await settle()
 
   const hub = h.renderer.taskPresentation.openBrowser(HUB_ITEMS, () => 'close', () => {}, hubOptions())
+  // reason: the shared render wait covers the SDK frame this assertion
+  // observes; it is a bounded observation window, not a guessed delay.
   await settle()
   await h.key(UP)
   await h.key(DOWN)
   assert.deepEqual(h.editor(), { text: 'kept draft', cursor: 10 }, 'the Work Hub takes the arrows too')
   hub.close()
+  // reason: the shared render wait covers the SDK frame this assertion
+  // observes; it is a bounded observation window, not a guessed delay.
   await settle()
   await h.key(UP)
   await h.key(UP)
@@ -368,6 +390,8 @@ test('a formal scope begin or reseed retires the open browse so an outgoing draf
 
   h.renderer.display.beginInputHistoryScope('session-a')
   h.renderer.display.resetInputHistory(['a row'], 'session-a')
+  // reason: the shared render wait covers the SDK frame this assertion
+  // observes; it is a bounded observation window, not a guessed delay.
   await settle()
   assert.deepEqual(h.editor(), { text: 'cwd row', cursor: 0 }, 'the seam commits state only — it never rewrites the visible text')
   await h.key(DOWN)
@@ -385,6 +409,8 @@ test('a formal scope begin or reseed retires the open browse so an outgoing draf
   assert.equal(h.editor().text, 'a row', 'the draft is bookmarked inside A')
   h.renderer.display.beginInputHistoryScope('session-b')
   h.renderer.display.resetInputHistory(['b row'], 'session-b')
+  // reason: the shared render wait covers the SDK frame this assertion
+  // observes; it is a bounded observation window, not a guessed delay.
   await settle()
   await h.key(DOWN)
   assert.deepEqual(h.editor(), { text: 'a row', cursor: 5 },
@@ -396,6 +422,8 @@ test('a formal scope begin or reseed retires the open browse so an outgoing draf
   // And back to A (A→B→A): A's rows are recallable again, B's browse is gone.
   h.renderer.display.beginInputHistoryScope('session-a')
   h.renderer.display.resetInputHistory(['a row'], 'session-a')
+  // reason: the shared render wait covers the SDK frame this assertion
+  // observes; it is a bounded observation window, not a guessed delay.
   await settle()
   await h.key(DOWN)
   assert.equal(h.editor().text, 'b row', 'the B bookmark died with the publication')
@@ -414,6 +442,8 @@ test('a settlement, a status commit and a Welcome commit never cancel the open b
   assert.deepEqual(h.editor(), { text: 'newest', cursor: 0 })
 
   h.renderer.display.settleScopeInput({ token: 7, owner: 'session-x', outcome: 'written', text: 'a settled row' })
+  // reason: the shared render wait covers the SDK frame this assertion
+  // observes; it is a bounded observation window, not a guessed delay.
   await settle()
   assert.deepEqual(h.editor(), { text: 'newest', cursor: 0 },
     'a settlement updates the kernel ledger, not the row being read')
@@ -424,6 +454,8 @@ test('a settlement, a status commit and a Welcome commit never cancel the open b
   h.renderer.display.commitStatusFacts({ sessionTitle: 'renamed' })
   h.renderer.display.setPendingInputPresentation({ queued: [], tail: [], running: true })
   h.renderer.display.commitDisplaySubject({}, {}, undefined)
+  // reason: the shared render wait covers the SDK frame this assertion
+  // observes; it is a bounded observation window, not a guessed delay.
   await settle()
   assert.equal(h.editor().text, 'older', 'no repaint is a history-owner signal — the browse survived all four')
   await h.key(DOWN)
@@ -442,6 +474,8 @@ test('the hydration window drops arrows like every other edit, and the browse th
   const notes = h.calls.notes
 
   h.renderer.display.beginSessionHydration()
+  // reason: the shared render wait covers the SDK frame this assertion
+  // observes; it is a bounded observation window, not a guessed delay.
   await settle()
   await h.key(DOWN)
   await h.key(UP)
@@ -453,6 +487,8 @@ test('the hydration window drops arrows like every other edit, and the browse th
   h.renderer.display.setTranscript(
     [] as never, undefined, { mode: 'latest' } as never, [], undefined, { generation: 'next' }, 'hidden',
   )
+  // reason: the shared render wait covers the SDK frame this assertion
+  // observes; it is a bounded observation window, not a guessed delay.
   await settle()
   await h.key(DOWN)
   assert.deepEqual(h.editor(), { text: 'mine', cursor: 4 },
@@ -473,6 +509,8 @@ test('a disposed mount takes no late arrow and commits no late recall state', as
 
   h.renderer.display.resetInputHistory(['late row'], 'late-owner')
   h.renderer.display.settleScopeInput({ token: 3, owner: 'late-owner', outcome: 'written', text: 'late row' })
+  // reason: the shared render wait covers the SDK frame this assertion
+  // observes; it is a bounded observation window, not a guessed delay.
   await settle()
   assert.equal(h.renderer.scopeFactCountForTest(), 0, 'a disposed mount commits no recall state')
   assert.equal(h.pane.frames().length, frames, 'and the late seam commits still painted nothing')
@@ -523,6 +561,8 @@ test('the arrows never become a submit, a steer or a cancel: the existing gestur
   assert.deepEqual(h.editor(), { text: '', cursor: 0 }, 'the draft cleared exactly as it did before the recall')
 
   h.pane.key(CTRL_C)
+  // reason: the shared render wait covers the SDK frame this assertion
+  // observes; it is a bounded observation window, not a guessed delay.
   await settle()
   assert.equal(h.calls.cancels, 1, 'Ctrl+C is still the cancel intent')
   h.pane.key(CTRL_D)
