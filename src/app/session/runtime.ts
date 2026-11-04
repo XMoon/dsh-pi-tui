@@ -275,11 +275,15 @@ export interface SessionRuntime {
   transitionTo<T>(steps: TransitionSteps<T>): Promise<TransitionOutcome<T>>
   /**
    * Run ONE user-navigation transaction through the same transition gate and
-   * barrier. The intent's captured generation is stopped exactly once BEFORE
-   * the admitted-writer drain; a stale capture or a refused/unproven stop
-   * aborts before the body with {@link SessionNavigationStopError}. The intent's
-   * `admission` records whether that stop was accepted, so a later failure in
-   * `task` can state that the old Turn is already stopped.
+   * barrier. The transition admission applies the backend's navigation
+   * ownership BEFORE the admitted-writer drain: a `stop-and-quiesce` backend
+   * stops the intent's captured generation exactly once (a stale capture or a
+   * refused/unproven stop aborts before the body with
+   * {@link SessionNavigationStopError}, and `admission.oldStopAccepted` records
+   * the accepted stop so a later failure in `task` can state that the old Turn
+   * is already stopped), while a `detach-client` backend dispatches no Host
+   * stop, so `admission.oldStopAccepted` stays false and only the captured
+   * scope's currentness is checked.
    */
   withNavigation<T>(intent: NavigationIntent, task: () => Promise<T> | T): Promise<T>
   /** Hand the TUI over to another persisted session (never throws). A scoped
@@ -388,7 +392,9 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
   }
 
   /**
-   * ONE exact-owner stop for a user navigation. Runs INSIDE the frozen
+   * The user-navigation admission. A `stop-and-quiesce` backend sends ONE
+   * exact-owner stop here; a `detach-client` backend returns `nothing` after
+   * the capture check and dispatches no Host call. It runs INSIDE the frozen
    * barrier: the scope check and the owner capture happen in the SAME
    * synchronous stack as the backend call (exactly like the control
    * admission), so a replacement published elsewhere can never receive this
@@ -415,9 +421,10 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
    * A stale capture aborts FIRST: another navigation owns the surface, and
    * this intent must not stop the replacement's work.
    */
-  /** The receipt of the LAST navigation stop in this gate task; read by
-   *  `transitionTo` so the OLD-owner quiesce validates the SAME generation the
-   *  accepted cancel was addressed to (never a later reconnect). */
+  /** The receipt of the LAST `stop-and-quiesce` navigation stop in this gate
+   *  task; read by `transitionTo` so the OLD-owner quiesce validates the SAME
+   *  generation the accepted cancel was addressed to (never a later
+   *  reconnect). Always undefined for a `detach-client` navigation. */
   let navigationReceipt: NavigationStopReceipt | undefined
 
   const navigationStop = async (scope: SessionScope): Promise<
@@ -453,10 +460,12 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
 
   /**
    * The barrier half of a navigation admission (the caller holds the gate):
-   * freeze → ONE exact-owner stop of the intent's captured generation →
-   * admitted writer drain → the transition body. The intent's `admission` fact
-   * is written from the stop callback, before the body runs; a stop failure
-   * aborts with ZERO body side effects.
+   * freeze → the backend's navigation ownership (`stop-and-quiesce`: ONE
+   * exact-owner stop of the intent's captured generation; `detach-client`: no
+   * Host stop, scope currentness only) → admitted writer drain → the
+   * transition body. The intent's `admission` fact is written from that
+   * admission callback, before the body runs; a stop failure aborts with ZERO
+   * body side effects.
    */
   const runNavigationTransition = <T>(intent: NavigationIntent, task: () => Promise<T> | T): Promise<T> => {
     let stopReceipt: NavigationStopReceipt | undefined
@@ -524,7 +533,8 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
    */
   const transitionTo = async <T>(steps: TransitionSteps<T>): Promise<TransitionOutcome<T>> => {
     // The accepted navigation stop's generation receipt, if this transition is
-    // the body of a user navigation. Non-navigation transitions have none.
+    // the body of a `stop-and-quiesce` user navigation. A plain transition and
+    // a `detach-client` navigation have none.
     const stopReceipt = navigationReceipt
     core.bumpNavigationEpoch()
     const from = core.currentSessionId()
@@ -849,14 +859,17 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
    * (open → commit) runs inside the session-transition gate, so it can never
    * interleave with another ordinary transition.
    *
-   * A switch is a USER NAVIGATION: the old generation is stopped once by the
-   * barrier admission before the admitted writers drain. A SCOPED intent (the
-   * Session Browser's captured row) is fenced by that capture: a stale one is a
-   * superseded navigation and settles silently. An UNSCOPED intent (a picker
-   * selection made against the live surface) captures its scope INSIDE the gate
-   * right before the freeze, so a queued later selection still follows the FIFO
-   * and never inherits an older generation. A refused or unproven stop keeps the
-   * CURRENT session live and says why.
+   * A switch is a USER NAVIGATION: the barrier admission applies the backend's
+   * navigation ownership before the admitted writers drain (a
+   * `stop-and-quiesce` backend stops the captured OLD generation once, a
+   * `detach-client` backend sends no Host stop and waits for no idle). A
+   * SCOPED intent (the Session Browser's captured row) is fenced by that
+   * capture: a stale one is a superseded navigation and settles silently. An
+   * UNSCOPED intent (a picker selection made against the live surface)
+   * captures its scope INSIDE the gate right before the freeze, so a queued
+   * later selection still follows the FIFO and never inherits an older
+   * generation. A refused or unproven stop keeps the CURRENT session live and
+   * says why.
    */
   const switchSessionOutcome = (sessionId: string, expectedScope?: SessionScope): Promise<SessionSwitchOutcome> => {
     /** The barrier half of this switch (the gate wrapper is added below). */

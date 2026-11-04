@@ -50,8 +50,10 @@ export type TransitionOutcome<T> =
 
 /**
  * Why the one-shot navigation stop of the captured OLD owner did not settle
- * `committed`. ONLY `committed` is permission to enter the quiesce/create
- * phase; every settlement below aborts navigation before any child work.
+ * `committed`. Only a `stop-and-quiesce` navigation dispatches this stop; a
+ * `detach-client` navigation never reaches this taxonomy. ONLY `committed` is
+ * permission to enter the quiesce/create phase; every settlement below aborts
+ * navigation before any child work.
  *
  * `stale` proves the captured owner/generation is no longer current (another
  * navigation already won) and the request never left the TUI; `rejected` is a

@@ -1399,7 +1399,9 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       // section via this seam. Host fork dispatch is outside this FIFO;
       // forked-child adoption and rewind navigation use their own gated
       // adoption path. `navigation` opts a USER NAVIGATION into the runtime's
-      // exact-owner stop-before-drain admission; `/preset` and every other
+      // backend-owned admission: a `stop-and-quiesce` backend stops the
+      // captured owner before the admitted-writer drain, a `detach-client`
+      // backend only re-checks the captured scope; `/preset` and every other
       // transition keep the plain admission.
       withSessionTransition: <T>(task: () => Promise<T> | T, navigation?: NavigationIntent) =>
         deps.transition.run(async () => {

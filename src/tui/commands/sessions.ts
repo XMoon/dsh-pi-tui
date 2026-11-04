@@ -1057,10 +1057,13 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
         }
         freshSessionInFlight = true
         // The ORIGINAL session generation/navigation identity, captured
-        // SYNCHRONOUSLY: the navigation stop must address exactly the owner
-        // the user chose to leave, never a replacement published while this
-        // intent waited behind another transition. The runtime fills in
-        // `admission.oldStopAccepted` before the transaction body runs.
+        // SYNCHRONOUSLY: a Direct (`stop-and-quiesce`) navigation stop must
+        // address exactly the owner the user chose to leave, never a
+        // replacement published while this intent waited behind another
+        // transition; a Remote (`detach-client`) navigation uses the same
+        // capture only for its stale/superseded fence. The runtime fills in
+        // `admission.oldStopAccepted` before the transaction body runs (false
+        // when no Host stop is dispatched).
         const navigation: NavigationIntent = {
           scope: runner.captureSessionScope(),
           admission: { oldStopAccepted: false },

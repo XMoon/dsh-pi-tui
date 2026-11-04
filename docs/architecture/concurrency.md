@@ -794,15 +794,35 @@ Where it runs:
   promise shared by every teardown path, never four copies. That entry has no
   exit-controller hook, so `retireOwnedSession` performs the same synchronous
   pre-cancel itself before creating the memoized promise.
-- **Client detach vs explicit Stop**: a Client surface teardown, Client
-  process exit, connection loss or leaving the Session through `/new`/a
-  switch/`/resume` releases only the Client-owned surface, official transport,
-  exact Session reference and Client root. It does not invoke the Direct/runtime
-  Session retirement cancel: that cancel remains the explicit Stop authority
-  (the Direct in-process navigation stop is the separate
-  `stop-and-quiesce` ownership described above, never a Client detach). A
-  Host-owned pending Question/Approval forward must stay pending in
-  the Host Gateway across the detach, and a later Client must answer the same
+- **What a Client detach releases — navigation, surface revision, process
+  exit and connection loss are DIFFERENT scopes**: none of them invokes the
+  Direct/runtime Session retirement cancel; that cancel remains the explicit
+  Stop authority (the Direct in-process navigation stop is the separate
+  `stop-and-quiesce` ownership described above, never a Client detach).
+  - Leaving the Session through `/new`, a selected `/sessions` switch or
+    `/resume <id>` releases ONLY the replaced Session view: the Client releases
+    the exact retained `tuiMainView` `SessionReference` of the Session it
+    leaves, and the ownership core publishes the replacement. The Client root,
+    its shared Connection/transport and the ONE physical surface stay alive, so
+    the same Client keeps sending and receiving on the same transport after the
+    switch (the M5-N navigation contract above).
+  - A same-process Client SURFACE REVISION retires the old surface and its
+    Session reference, then mounts the new revision on the SAME Client root,
+    Context and transport (see "Same-process Client surface revision").
+  - A CLIENT PROCESS EXIT is the only Client-side operation that enters the
+    Client root/transport close: the exit controller disposes the Client
+    surface and requests `appExit`, and the Client root's own disposal then
+    retires its Session references and transport wrappers (see "Interactive
+    exit" above).
+  - CONNECTION LOSS is a transport fact, not a Session operation: the
+    Connection generation invalidates, observations bound to the old generation
+    become unobservable (never proof of Host idle), and recovery follows the
+    official reconnect/generation contract owned by
+    `docs/architecture/host-client.md`. It is neither a Session navigation nor
+    a Host cancel.
+
+  Across ALL of these, a Host-owned pending Question/Approval forward must stay
+  pending in the Host Gateway, and a later Client must answer the same
   event/call identity at most once. A split Client composition must install its
   interaction owner before the official Gateway event pump can consume the
   pending forwarded event; a surface teardown must not settle that Host event,
