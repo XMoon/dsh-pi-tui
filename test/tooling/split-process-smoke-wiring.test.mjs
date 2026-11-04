@@ -323,8 +323,12 @@ test('the question lanes wait for the real review frame, never the permanent Sub
   assert.match(source, /duplicate question request\/settlement/u, 'T49/T50 keep the one-request/one-settlement check')
   assert.match(source, /T55c HMR replayed the Host question request/u, 'T55c keeps the no-replay check')
   assert.match(source, /T55c the new surface submitted the wrong answer/u, 'T55c must assert the submitted answer')
-  assert.match(source, /T55c the Host pending was not requested\/settled exactly once for this callId/u,
-    'T55c must prove per-callId request/settlement counts')
+  assert.match(source, /T55c the Host pending was not settled exactly once for this session/u,
+    'T55c must prove the single request/settlement pair with no failure')
+  // The official non-timed `ask()` has no `wait`, so a waterfall record cannot
+  // carry the callId; only the durable Host pair can, and it must stay checked.
+  assert.match(source, /T55c question tool result/u, 'T55c must wait for the callId-exact durable tool result')
+  assert.match(source, /T55c the answered question failed at the Host/u, 'T55c must reject an errored durable result')
 })
 
 test('the lane declares every setup local it later assigns', () => {

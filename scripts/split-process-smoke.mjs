@@ -4949,20 +4949,23 @@ async function main() {
           client.send(answer)
           await client.waitForScreen('Review your answer before submit', 'T55c question review', 30_000)
           client.send('\r')
-          // The settlement must name the SAME callId the Host asked for, carry
-          // the new surface's answer, and exist exactly once for that call.
+          // The official non-timed `ask()` attaches no `wait`, so its waterfall
+          // request — and therefore the fixture's request/settlement records —
+          // carries no callId; only a timed ask does (T52). The durable
+          // `tool/call` -> `tool/result` pair below is the callId-exact
+          // authority, while the settlement must carry the new surface's answer
+          // exactly once with no failed alternative.
           const settled = await waitForC1WorkEvent(workRoot,
-            event => event.kind === 'question-settled' && event.sessionId === sessionId && event.callId === questionCallId,
+            event => event.kind === 'question-settled' && event.sessionId === sessionId,
             'T55c question settled', 120_000)
           assert(settled.answers?.[0]?.selected?.[0] === 'Proceed',
             `T55c the new surface submitted the wrong answer: ${JSON.stringify(settled.answers)}`)
-          assert(readC1WorkEvents(workRoot).filter(event => event.kind === 'question-request' && event.sessionId === sessionId).length === 1,
+          const questionEvents = readC1WorkEvents(workRoot).filter(event => event.sessionId === sessionId)
+          assert(questionEvents.filter(event => event.kind === 'question-request').length === 1,
             'T55c HMR replayed the Host question request')
-          const forCall = readC1WorkEvents(workRoot).filter(event => event.callId === questionCallId)
-          assert(forCall.filter(event => event.kind === 'question-request').length === 1
-            && forCall.filter(event => event.kind === 'question-settled').length === 1
-            && forCall.every(event => event.kind !== 'question-failed'),
-            'T55c the Host pending was not requested/settled exactly once for this callId')
+          assert(questionEvents.filter(event => event.kind === 'question-settled').length === 1
+            && questionEvents.every(event => event.kind !== 'question-failed'),
+            'T55c the Host pending was not settled exactly once for this session')
           const result = await waitForHostSessionEvent(dshHome, sessionId,
             event => event.type === 'tool/result' && String(event.data?.message?.toolCallId) === questionCallId,
             'T55c question tool result', 120_000)
