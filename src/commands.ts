@@ -76,9 +76,17 @@ import type {
 import type { Catalog } from './runtime/catalog-port.ts'
 import type { SkillDefinitionResult } from './runtime/catalog-port.ts'
 import type { ConfigPort } from './runtime/config-port.ts'
-import type { HostFilePort } from './runtime/host-file-port.ts'
+import type { HostFilePort, HostFileScope } from './runtime/host-file-port.ts'
 import type { CatalogRefreshOutcome, CatalogRefreshSource } from './app/command/catalog-refresh.ts'
 import type { ClientCommandRegistry } from './app/command/client-command-registry.ts'
+import {
+  tspSelectedTuiBuiltinAvailability,
+  type TspBuiltinPickers,
+} from './app/command/tsp-capability.ts'
+import type {
+  TspCommandCompletionExtensionSuggest,
+  TspCommandCompletionInstallation,
+} from './app/surface/runtime.ts'
 import type { SubmissionComposerPort } from './app/submission/composer-port.ts'
 import { commandSummaryOf, type SurfaceCatalogSnapshot, type SurfaceCommandSummary } from './domain/catalog/surface.ts'
 import { isUserInvocableSkill, type HumanSkillCatalog, type HumanSkillSummary } from './domain/catalog/skill.ts'
@@ -939,6 +947,22 @@ export interface TuiCommandPresentation {
    * historical direct-test call sites; every production assembly supplies it.
    */
   readonly composer?: () => SubmissionComposerPort | undefined
+  /**
+   * TSP I-C: publish ONE effective slash-command catalog commit onto the
+   * mounted TSP renderer, at the SAME single commit point where PiTui receives
+   * `setCommandCompletions`. Optional because a headless assembly mounts no
+   * renderer: the command layer then records the skipped install and keeps the
+   * catalog, claims and collision health exactly as before.
+   */
+  readonly installTspCommandCompletions?: (installation: TspCommandCompletionInstallation) => void
+  /**
+   * TSP I-C: which native TUI-builtin presenters the mounted renderer really
+   * installed, read LIVE at each catalog commit (never a version/kind guess).
+   * The candidate screen consults it for rows whose winner is this surface's
+   * OWN TUI registration only; a genuine Host winner or a live Skill wrapper
+   * never consults it.
+   */
+  readonly tspCommandPickerCapabilities?: () => TspBuiltinPickers
 }
 
 export function registerTuiCommands(
@@ -1338,6 +1362,20 @@ export function registerTuiCommands(
    * health entries a successful merge may clear, and only while the record
    * still shows that collision message (see the recovery loop). */
   const collisionHealth = new Map<string, { ref: { slot: string; id: string; owner: string }; message: string }>()
+  /**
+   * Per-skill slash commands (/glab, /find-skills, ...), pi-style: each
+   * human-invocable catalog skill is directly selectable from the editor
+   * autocomplete and delivers its loaded body on Enter (through loadSkill,
+   * which steers the original line and injects the body alongside it). The
+   * description carries a [skill] tag so skill rows stand apart from
+   * built-in commands.
+   *
+   * TSP I-C: declared BEFORE the completion install because the install is
+   * the one place that decides which source a display row really came from —
+   * a live wrapper is a dynamic Skill row, never a TUI builtin to gate. It is
+   * a plain empty-map assignment, so moving it up changes no behavior.
+   */
+  const skillDisposers = new Map<string, () => void>()
   const installCompletions = (
     entries: readonly SurfaceCommandSummary[],
     options: { display?: 'merged' | 'none'; claimsFrom?: readonly SurfaceCommandSummary[] } = {},
@@ -1379,59 +1417,106 @@ export function registerTuiCommands(
     // after the host's own provider returns null. The registry's suggest()
     // handles cancellation (latest-only commit) and per-provider isolation.
     const extensionAutocomplete = runner.extensions?.autocomplete
-    if (app === undefined) {
-      runner.diag.info('command completions install skipped: no PiTui editor surface', {})
+    const extensionSuggest: TspCommandCompletionExtensionSuggest | undefined = extensionAutocomplete === undefined
+      ? undefined
+      : async (query) => {
+          const result = await extensionAutocomplete.suggestOwned(query, (id, owner, error) => {
+            recordExtensionError?.({ slot: 'autocomplete', id, owner }, error)
+            try {
+              ctx.logger.warn(`tui-runner: autocomplete provider ${id} failed: ${safeErrorMessage(error)}`)
+            } catch {
+              // The cordis logger must not block completion.
+            }
+          }, (id, owner) => clearExtensionError?.({ slot: 'autocomplete', id, owner }))
+          if (result === null) return null
+          return { items: [...result.items], prefix: result.prefix }
+        }
+    // The completion scope is resolved at SUGGESTION time from the LIVE
+    // session id (session identity when one exists — even mid-transition —
+    // the workspace cwd otherwise): a session switch or first create is
+    // picked up immediately, never requiring a reinstall.
+    const completionScope: () => HostFileScope = () => {
+      const sessionId = runner.currentSessionId
+      return sessionId === undefined
+        ? { kind: 'workspace', cwd: runner.sessionCwd() }
+        : { kind: 'session', sessionId }
+    }
+    // `/attach` and `/image` are Client-local. Direct mode uses the process cwd; a remote
+    // adapter can keep this independent from the Host session scope.
+    const completionLocalCwd = (): string => runner.cwd
+    // The inline skill reference lexicon rides the same install: the
+    // provider completes plain-text `/name` tokens from this detached
+    // list, never from the command registry.
+    const skillReferences = currentSkillReferences
+    // Shell amendment (M3-4 PR3): Host shell completion facts exist only
+    // on Direct; Remote must show no shell-specific suggestions at any
+    // position (command or path).
+    const hostShellCompletion = runner.hostShellCompletion
+    if (app !== undefined) {
+      app.setCommandCompletions(
+        display.map(command => ({
+          name: command.name,
+          description: command.description,
+          argumentHint: command.input?.hint,
+          ...(PATH_ARGUMENT_COMMANDS.has(command.name)
+            ? { getArgumentCompletions: (argument: string) => suggestPathArgument(argument, runner.cwd) }
+            : {}),
+        })),
+        runner.sessionCwd(),
+        // The Host-file port owns the `@`-mention discovery (migration
+        // M1.10) — the command surface never resolves fd itself.
+        runner.hostFile,
+        extensionSuggest,
+        completionScope,
+        completionLocalCwd,
+        skillReferences,
+        hostShellCompletion,
+      )
       return
     }
-    app.setCommandCompletions(
-      display.map(command => ({
+    // TSP I-C: the SAME catalog, the SAME synchronous commit point, the mounted
+    // renderer that has no PiTui editor. Nothing here re-reads the Host,
+    // re-synthesizes a catalog or touches `claims` — the only thing computed is
+    // which already-admitted rows this renderer may SHOW.
+    if (presentation === undefined || presentation.installTspCommandCompletions === undefined) {
+      runner.diag.info('command completions install skipped: no editor surface is mounted', {})
+      return
+    }
+    // The provenance screen. A row is withdrawn ONLY when it is PROVEN to be
+    // this surface's own TUI Client registration whose command family the
+    // mounted renderer cannot run; the order is the existing classifier's
+    // precedence, never a name guess:
+    //   1. a GENUINE Host-origin winner (mirrors already subtracted) keeps its
+    //      row and is never screened by the TUI-builtin gate;
+    //   2. a live dynamic Skill wrapper keeps its row (execution stays with the
+    //      existing skill revalidation);
+    //   3. any other TUI Client registration is offered only while the mount
+    //      can run it — and it never falls through to a same-name extension;
+    //   4. every other admitted row (an extension contribution the merger
+    //      really included, or a row whose source this screen cannot name)
+    //      stays visible exactly as on PiTui, so an unprovenanced row can never
+    //      hide a real command.
+    // Bare `/logout` is not offered because a candidate carries no argument.
+    const pickers = presentation.tspCommandPickerCapabilities?.() ?? {}
+    presentation.installTspCommandCompletions({
+      commands: display.filter(command => {
+        if (hostOriginDescriptors.has(command.name)) return true
+        if (skillDisposers.has(command.name)) return true
+        if (clientCommands.get(command.name) === undefined) return true
+        return tspSelectedTuiBuiltinAvailability(command.name, pickers, '').kind === 'available'
+      }).map(command => ({
         name: command.name,
         description: command.description,
         argumentHint: command.input?.hint,
-        ...(PATH_ARGUMENT_COMMANDS.has(command.name)
-          ? { getArgumentCompletions: (argument: string) => suggestPathArgument(argument, runner.cwd) }
-          : {}),
       })),
-      runner.sessionCwd(),
-      // The Host-file port owns the `@`-mention discovery (migration
-      // M1.10) — the command surface never resolves fd itself.
-      runner.hostFile,
-      extensionAutocomplete === undefined
-        ? undefined
-        : async (query) => {
-            const result = await extensionAutocomplete.suggestOwned(query, (id, owner, error) => {
-              recordExtensionError?.({ slot: 'autocomplete', id, owner }, error)
-              try {
-                ctx.logger.warn(`tui-runner: autocomplete provider ${id} failed: ${safeErrorMessage(error)}`)
-              } catch {
-                // The cordis logger must not block completion.
-              }
-            }, (id, owner) => clearExtensionError?.({ slot: 'autocomplete', id, owner }))
-            if (result === null) return null
-            return { items: [...result.items], prefix: result.prefix }
-          },
-      // The completion scope is resolved at SUGGESTION time from the LIVE
-      // session id (session identity when one exists — even mid-transition —
-      // the workspace cwd otherwise): a session switch or first create is
-      // picked up immediately, never requiring a reinstall.
-      () => {
-        const sessionId = runner.currentSessionId
-        return sessionId === undefined
-          ? { kind: 'workspace', cwd: runner.sessionCwd() }
-          : { kind: 'session', sessionId }
-      },
-      // `/attach` and `/image` are Client-local. Direct mode uses the process cwd; a remote
-      // adapter can keep this independent from the Host session scope.
-      () => runner.cwd,
-      // The inline skill reference lexicon rides the same install: the
-      // provider completes plain-text `/name` tokens from this detached
-      // list, never from the command registry.
-      currentSkillReferences,
-      // Shell amendment (M3-4 PR3): Host shell completion facts exist only
-      // on Direct; Remote must show no shell-specific suggestions at any
-      // position (command or path).
-      runner.hostShellCompletion,
-    )
+      cwd: runner.sessionCwd(),
+      fileReferences: runner.hostFile,
+      extensionSuggest,
+      scope: completionScope,
+      localCwd: completionLocalCwd,
+      skillReferences,
+      hostShellCompletion,
+    })
   }
   /** The saved probed scoped overrides (see installSurfaceSnapshot). */
   let savedScopedCommands: readonly SurfaceCommandSummary[] = []
@@ -2024,13 +2109,6 @@ export function registerTuiCommands(
     }
   }
 
-  // Per-skill slash commands (/glab, /find-skills, ...), pi-style: each
-  // human-invocable catalog skill is directly selectable from the editor
-  // autocomplete and delivers its loaded body on Enter (through loadSkill,
-  // which steers the original line and injects the body alongside it). The
-  // description carries a [skill] tag so skill rows stand apart from
-  // built-in commands.
-  const skillDisposers = new Map<string, () => void>()
   /**
    * Synchronously replace every direct skill wrapper from a snapshot. Pure
    * install: no catalog fetch, no await — the callers (the initial snapshot

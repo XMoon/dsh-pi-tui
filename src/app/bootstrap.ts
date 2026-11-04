@@ -2023,6 +2023,23 @@ export function applyRunnerWithRuntime(
         // decision, exposed as a function-type read capability. The runner
         // forwards it to `/deliverables`; no Folder instance crosses the seam.
         deliveredFilesSnapshot: () => surface.deliveredFilesSnapshot(),
+        // TSP I-C: the ONE catalog commit forwarded to the currently mounted TSP
+        // renderer. No prefetch, no await, no second catalog: the surface keeps
+        // only the mount's installer reference. The PiTui branch never reaches
+        // this seam (its catalog keeps going through `app.setCommandCompletions`).
+        installTspCommandCompletions: (installation) => {
+          surface.installTspCommandCompletions(installation)
+        },
+        // TSP I-C: the SAME live capability reads the submission admission already
+        // uses — the mounted presenters and the display seam's ONE Task Center
+        // reachability truth — sampled per catalog commit, never cached and never
+        // inferred from a Tern version or a command name.
+        tspCommandPickerCapabilities: () => ({
+          modelPicker: surface.modelPresentation !== undefined,
+          presetPicker: surface.presetPresentation !== undefined,
+          sessionBrowser: surface.sessionBrowserPresentation !== undefined,
+          taskCenter: surface.display.supportsTaskCenter,
+        }),
       },
       backend: {
         kind: selectedRuntime.kind,
