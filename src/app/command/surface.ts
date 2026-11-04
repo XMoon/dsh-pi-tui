@@ -158,11 +158,14 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
     /**
      * Run one gated session transition. `navigation` marks a USER NAVIGATION
      * (`/new`, a selected-session switch): the runtime captures that scope
-     * before its first await and its transition admission stops the captured
-     * old generation BEFORE the admitted writers drain. `undefined` (e.g. the
-     * `/preset` swap) keeps the plain transition admission and never cancels.
-     * The intent's `admission.oldStopAccepted` records whether the one-shot
-     * stop was accepted (always false without a navigation).
+     * before its first await, and its transition admission applies the
+     * backend's navigation ownership BEFORE the admitted writers drain — a
+     * `stop-and-quiesce` backend sends ONE exact-owner stop of the captured old
+     * generation, a `detach-client` backend sends no Host stop at all.
+     * `undefined` (e.g. the `/preset` swap) keeps the plain transition
+     * admission and never cancels. The intent's `admission.oldStopAccepted`
+     * records whether the one-shot stop was accepted (always false without a
+     * navigation, and false for a `detach-client` navigation).
      */
     run<T>(task: () => Promise<T> | T, navigation?: NavigationIntent): Promise<T>
   }

@@ -5548,6 +5548,279 @@ async function main() {
         }
       }
 
+      // M5N-01 (M5-N): Split Remote navigation is NON-DESTRUCTIVE. ONE real
+      // Host and REAL Surface Clients (`script(1)` PTYs, distinct business
+      // PIDs) prove that `/new` and `/resume` never stop — and never wait for
+      // — the Host Turn a Client leaves: the held X Turn keeps streaming and
+      // ends with its normal `completed` reason after the navigating Client
+      // moved, a RUNNING target is projected immediately instead of being
+      // waited to idle, a Host-queued occurrence stays with its own Session,
+      // an already-current switch is a no-op, and an explicit Busy Esc still
+      // cancels the exact Host Turn (the negative control). The fixture's held
+      // `long-turn` barrier is the ONLY thing that lets a held Turn continue,
+      // so a replayed write or a timer cannot produce these facts.
+      {
+        const releaseBarrier = join(workDir, 'm5n-long-turn.release')
+        const { host, ready: hostReady, workRoot } = await startC1Host('long-turn', 'm5n-navigation', {
+          C1_HOLD_LONG_TURN: releaseBarrier,
+        })
+        const hostBefore = await hostIdentityFacts(host)
+        assert(hostBefore.hostPid === hostReady.pid, 'M5N the Host ready record does not own the Host identity')
+        const { client: clientA, ready: aReady } = await startC1Client('M5N A')
+        assert(Number.isInteger(aReady.pid) && aReady.pid > 0 && aReady.pid !== hostBefore.hostPid,
+          'M5N Client A published no live business PID distinct from the Host')
+        assert(aReady.pid !== clientA.child.pid, 'M5N a business PID was mistaken for its script(1) wrapper')
+        /** The plain text of one durable/inbox message (bounded, never a payload dump). */
+        const textOf = message => (message?.content ?? [])
+          .map(part => (part?.type === 'text' && typeof part.text === 'string' ? part.text : ''))
+          .join('')
+        const durableOf = sessionId => hostSessionEvents(dshHome, sessionId) ?? []
+        /** Wait for the Nth `turn/end` at or after one durable boundary. */
+        const waitForTurnEnds = async (sessionId, afterIndex, count, label) => {
+          await waitForCondition(
+            () => durableOf(sessionId).slice(afterIndex).filter(event => event.type === 'turn/end').length >= count,
+            label,
+            120_000,
+          )
+          return durableOf(sessionId).slice(afterIndex).filter(event => event.type === 'turn/end')
+        }
+
+        // The seed Turn IS the running Turn every navigation below leaves: the
+        // fixture holds it until the release barrier exists.
+        const sessionX = await openC1Session(clientA, 'm5n-x-held', 'M5N A')
+        const heldX = await waitForC1WorkEvent(workRoot,
+          event => event.kind === 'long-turn-held' && event.sessionId === sessionX, 'M5N X Turn held')
+        assert(heldX.agentStatus === 'running',
+          `M5N the Host Agent was ${JSON.stringify(heldX.agentStatus)} while X was held`)
+        await waitForHostSessionEvent(dshHome, sessionX, event => event.type === 'turn/start', 'M5N X turn/start')
+        const xHeaderBefore = await waitForHostSessionHeader(dshHome, sessionX, 'M5N X durable header')
+        const sessionsBeforeNew = hostSessionLogCount(dshHome)
+        assert(!existsSync(releaseBarrier), 'M5N the held Turn was released before the first navigation')
+
+        // NB-01 (N-02): `/new` while X RUNS. The new Session commits while X's
+        // Turn is still held, so the switch cannot have waited for X to go
+        // idle, and no `turn/end` may exist before the barrier is released.
+        const newBoundary = clientA.records.length
+        clientA.send('/new\r')
+        const aOnY = await clientA.waitFor(
+          record => clientA.records.indexOf(record) >= newBoundary
+            && record.m4b2s === 'surface-status'
+            && record.sessionOpen === true
+            && typeof record.openSessionId === 'string'
+            && record.openSessionId !== sessionX,
+          'M5N A opened Session Y while X was running',
+          120_000,
+        )
+        const sessionY = aOnY.openSessionId
+        assert(sessionY !== sessionX, 'M5N /new did not open a different Session')
+        assert(aOnY.transport === 'connected' && aOnY.surfaceMounted === true,
+          'M5N Client A lost its transport/surface while navigating')
+        assertClientHostFacts(aOnY.host, hostBefore, 'M5N A on Y')
+        assert(durableOf(sessionX).every(event => event.type !== 'turn/end'),
+          'M5N X ended its Turn before the hold barrier was released: the /new stopped or waited for it')
+        assert(!existsSync(releaseBarrier), 'M5N the hold barrier was released during /new')
+        const yHeader = await waitForHostSessionHeader(dshHome, sessionY, 'M5N Y durable header')
+        assert(hostSessionLogCount(dshHome) === sessionsBeforeNew + 1,
+          `M5N /new created ${String(hostSessionLogCount(dshHome) - sessionsBeforeNew)} durable Sessions, expected exactly 1`)
+        assert(yHeader.cwd === xHeaderBefore.cwd,
+          `M5N the /new Session Workspace is not the captured Host Workspace: ${String(yHeader.cwd)} != ${String(xHeaderBefore.cwd)}`)
+        const xHeaderAfterNew = await waitForHostSessionHeader(dshHome, sessionX, 'M5N X durable header after /new')
+        assert(JSON.stringify(xHeaderAfterNew) === JSON.stringify(xHeaderBefore),
+          'M5N /new changed the durable Session it left')
+
+        // The RUNNING target for N-03: Y gets its own held Turn.
+        clientA.send('m5n-y-held\r')
+        const heldY = await waitForC1WorkEvent(workRoot,
+          event => event.kind === 'long-turn-held' && event.sessionId === sessionY, 'M5N Y Turn held')
+        assert(heldY.agentStatus === 'running',
+          `M5N the Host Agent was ${JSON.stringify(heldY.agentStatus)} while Y was held`)
+        await waitForHostSessionEvent(dshHome, sessionY, event => event.type === 'turn/start', 'M5N Y turn/start')
+        assert(durableOf(sessionY).every(event => event.type !== 'turn/end'),
+          'M5N Y ended its Turn before the hold barrier was released')
+
+        // NB-02 (N-03): `/resume` into a RUNNING target. A leaves running Y for
+        // running X; the commit must not wait for X to go idle, and the new
+        // surface projects X's in-flight stream instead of the Session it left.
+        const resumeBoundary = clientA.records.length
+        clientA.send(`/resume ${sessionX}\r`)
+        const aOnX = await clientA.waitFor(
+          record => clientA.records.indexOf(record) >= resumeBoundary
+            && record.m4b2s === 'surface-status'
+            && record.sessionOpen === true
+            && record.openSessionId === sessionX
+            && record.transport === 'connected'
+            && record.surfaceMounted === true,
+          'M5N A resumed the RUNNING Session X',
+          120_000,
+        )
+        assertClientHostFacts(aOnX.host, hostBefore, 'M5N A back on X')
+        await waitForCondition(async () => {
+          const frame = (await clientA.viewport()).join('\n')
+          return frame.includes('long-turn started') && !frame.includes('m5n-y-held')
+        }, 'M5N A projected the RUNNING X surface', 120_000)
+        assert(!existsSync(releaseBarrier), 'M5N the hold barrier was released during /resume')
+
+        // NB-03: an already-current switch is a NO-OP: no re-open, no Turn end.
+        const alreadyBoundary = clientA.records.length
+        clientA.send(`/resume ${sessionX}\r`)
+        await clientA.waitForScreen('already on this session', 'M5N already-current refusal', 120_000)
+        const alreadyStatus = lastSurfaceStatus(clientA)
+        assert(alreadyStatus?.openSessionId === sessionX, 'M5N an already-current switch moved the Client')
+        assert(durableOf(sessionX).every(event => event.type !== 'turn/end'),
+          'M5N an already-current switch ended the running Turn')
+        assert(clientA.records.filter(record => clientA.records.indexOf(record) >= alreadyBoundary
+          && record.m4b2s === 'surface-status' && record.openSessionId === sessionY).length === 0,
+          'M5N an already-current switch opened a different Session')
+
+        // NB-04 (N-04): a Host-queued occurrence on the running X, then A
+        // leaves X. The occurrence belongs to X and must survive the release.
+        const xQueueIndex = durableOf(sessionX).length
+        clientA.send('m5n-x-queued\r')
+        const queuedX = await waitForHostSessionEventAfter(dshHome, sessionX, xQueueIndex,
+          event => event.type === 'agent/inbox/spliced'
+            && event.data?.target === 'next-turn'
+            && (event.data.inserted ?? []).some(message => textOf(message) === 'm5n-x-queued'),
+          'M5N X queued the occurrence in the Host inbox',
+          120_000)
+        const queuedItem = (queuedX.data.inserted ?? []).find(message => textOf(message) === 'm5n-x-queued')
+        assert(typeof queuedItem?.id === 'string' && queuedItem.id !== '',
+          'M5N the Host queued occurrence carries no identity')
+
+        // NB-05 (N-01): `/resume` away from the RUNNING X. A lands on Y while
+        // X's Turn and its queued occurrence are still held.
+        const leaveBoundary = clientA.records.length
+        clientA.send(`/resume ${sessionY}\r`)
+        const aLeftX = await clientA.waitFor(
+          record => clientA.records.indexOf(record) >= leaveBoundary
+            && record.m4b2s === 'surface-status'
+            && record.sessionOpen === true
+            && record.openSessionId === sessionY
+            && record.transport === 'connected'
+            && record.surfaceMounted === true,
+          'M5N A left the running X for Y',
+          120_000,
+        )
+        assertClientHostFacts(aLeftX.host, hostBefore, 'M5N A after leaving X')
+        assert(!existsSync(releaseBarrier), 'M5N the hold barrier was released during the navigation')
+        assert(durableOf(sessionX).every(event => event.type !== 'turn/end'),
+          'M5N leaving X stopped its held Turn')
+        assert(!(await clientA.viewport()).join('\n').includes('m5n-x-queued'),
+          'M5N the X-only queued occurrence leaked onto the Y surface')
+
+        // B is a SECOND real pty admitted to the SAME X while it is still
+        // running: it reads X's live held stream and A's Host pending.
+        const { client: clientB, ready: bReady } = await startC1Client('M5N B', {
+          SPLIT_PROCESS_CLIENT_SESSION: sessionX,
+        })
+        const bOnX = await waitForSurfaceStatus(clientB,
+          record => record.sessionOpen === true
+            && record.openSessionId === sessionX
+            && record.transport === 'connected'
+            && record.surfaceMounted === true,
+          'M5N B retained the exact running Session X')
+        assertClientHostFacts(bOnX.host, hostBefore, 'M5N B')
+        assert(Number.isInteger(bReady.pid) && bReady.pid > 0 && bReady.pid !== hostBefore.hostPid,
+          'M5N Client B published no live business PID distinct from the Host')
+        assert(aReady.pid !== bReady.pid, 'M5N the two Clients must be two different business PIDs')
+        assert(clientA.child.pid !== clientB.child.pid, 'M5N the two Clients must use distinct script(1) wrappers')
+        await clientB.waitForScreen('long-turn started', 'M5N B read the running X stream', 120_000)
+        await clientB.waitForScreen('m5n-x-queued', 'M5N B read the Host-queued occurrence', 120_000)
+        assert(alive(aReady.pid) && alive(bReady.pid) && alive(hostBefore.hostPid),
+          'M5N a process died during the navigation')
+
+        // Release the ONE hold. The Turn A left continues and completes
+        // normally, claims the queued occurrence into the SAME Session, and B
+        // sees the continuation; A sees its own target's settlement.
+        const xReleaseIndex = durableOf(sessionX).length
+        const yReleaseIndex = durableOf(sessionY).length
+        writeFileSync(releaseBarrier, 'release\n', { mode: 0o600 })
+        const xEnds = await waitForTurnEnds(sessionX, xReleaseIndex, 1, 'M5N the held X Turn completed')
+        assert(xEnds[0]?.data?.reason?.kind === 'completed',
+          `M5N the held X Turn settled as ${JSON.stringify(xEnds[0]?.data?.reason)} instead of a normal completion`)
+        const yEnd = await waitForHostSessionEventAfter(dshHome, sessionY, yReleaseIndex,
+          event => event.type === 'turn/end', 'M5N the held Y Turn completed', 120_000)
+        assert(yEnd.data?.reason?.kind === 'completed',
+          `M5N the held Y Turn settled as ${JSON.stringify(yEnd.data?.reason)} instead of a normal completion`)
+        await clientA.waitForScreen('long-turn answer 1', 'M5N A read its target settlement', 120_000)
+        await clientB.waitForScreen('long-turn answer 1', 'M5N B read the departed Turn settlement', 120_000)
+        const claimedX = await waitForHostSessionEventAfter(dshHome, sessionX, xReleaseIndex,
+          event => event.type === 'user/message' && event.data?.id === queuedItem.id,
+          'M5N X claimed the exact queued occurrence', 120_000)
+        assert(textOf(claimedX.data) === 'm5n-x-queued', 'M5N the claimed occurrence changed content')
+        const xEndsAfter = await waitForTurnEnds(sessionX, xReleaseIndex, 2, 'M5N the queued X Turn settled')
+        assert(xEndsAfter.every(event => event.data?.reason?.kind === 'completed'),
+          'M5N a non-aborted X Turn settled without a normal completion')
+        const finalX = durableOf(sessionX)
+        assert(finalX.filter(event => event.type === 'user/message' && textOf(event.data) === 'm5n-x-queued').length === 1,
+          'M5N the queued occurrence committed more than once')
+        assert(finalX.filter(event => event.type === 'user/message' && event.data?.id === queuedItem.id).length === 1,
+          'M5N the queued occurrence identity committed more than once')
+        assert(durableOf(sessionY).every(event => !(event.type === 'user/message' && textOf(event.data) === 'm5n-x-queued')),
+          'M5N the X-only queued occurrence leaked into Session Y')
+        await clientB.waitForScreen('m5n-x-queued', 'M5N B read the settled queued occurrence', 120_000)
+        assert(lastSurfaceStatus(clientB)?.openSessionId === sessionX,
+          'M5N Client B lost Session X during the continuation')
+
+        // NB-06 (explicit Stop negative control): a fresh held Turn on a fresh
+        // Session Z is stopped by the real Busy Esc. The SAME Host records an
+        // ABORTED user settlement, so the detached navigation policy did not
+        // disable the explicit Stop.
+        rmSync(releaseBarrier)
+        const stopNewBoundary = clientA.records.length
+        clientA.send('/new\r')
+        const aOnZ = await clientA.waitFor(
+          record => clientA.records.indexOf(record) >= stopNewBoundary
+            && record.m4b2s === 'surface-status'
+            && record.sessionOpen === true
+            && typeof record.openSessionId === 'string'
+            && record.openSessionId !== sessionY
+            && record.openSessionId !== sessionX,
+          'M5N A opened the fresh Session Z for the Stop control',
+          120_000,
+        )
+        const sessionZ = aOnZ.openSessionId
+        clientA.send('m5n-z-stop\r')
+        const heldZ = await waitForC1WorkEvent(workRoot,
+          event => event.kind === 'long-turn-held' && event.sessionId === sessionZ, 'M5N Z Turn held')
+        assert(heldZ.agentStatus === 'running',
+          `M5N the Host Agent was ${JSON.stringify(heldZ.agentStatus)} while Z was held`)
+        // The Z transcript is fresh and carries its OWN unique prompt, so this
+        // paint is the Z Turn's live stream — the surface is busy and accepts
+        // the single-Esc Stop.
+        await waitForCondition(async () => {
+          const frame = (await clientA.viewport()).join('\n')
+          return frame.includes('m5n-z-stop') && frame.includes('long-turn started')
+        }, 'M5N A painted the held Z Turn', 120_000)
+        const zStopIndex = durableOf(sessionZ).length
+        clientA.send('\x1b')
+        const zAborted = await waitForHostSessionEventAfter(dshHome, sessionZ, zStopIndex,
+          event => event.type === 'turn/end', 'M5N the Busy Esc settled the Z Turn', 120_000)
+        assert(zAborted.data?.reason?.kind === 'aborted'
+          && zAborted.data?.reason?.reason?.kind === 'user',
+        `M5N the Busy Esc settlement was ${JSON.stringify(zAborted.data?.reason)} instead of an aborted user Turn`)
+
+        await assertHostIdentityKept(host, hostBefore, 'M5N Host after every navigation')
+        await exitC1Client(clientA, 'M5N A')
+        await exitC1Client(clientB, 'M5N B')
+        await stopC1Host(host)
+        trace('m5n-01', {
+          hostPid: hostBefore.hostPid,
+          clientAPid: aReady.pid,
+          clientBPid: bReady.pid,
+          wrapperPids: [clientA.child.pid, clientB.child.pid],
+          sessionX,
+          sessionY,
+          sessionZ,
+          newFromRunningX: true,
+          resumeRunningTarget: true,
+          alreadyCurrentNoOp: true,
+          queuedOccurrencePreserved: true,
+          oldXTurnCompletion: 'completed',
+          clientBReadContinuation: true,
+          explicitStop: 'aborted/user',
+        })
+      }
+
       // T44: a real accepted Turn survives a Client SIGKILL. The LLM stream is
       // held by the Host fixture; the Client disappears while the Host Agent is
       // running, then the SAME Host writes the final assistant message.
@@ -8381,6 +8654,7 @@ async function main() {
       webRuntimeToggleBrowser: toggleQualification.browser,
       m4c1: 'PASS_REAL_SPLIT_PROCESS',
       m5b: 'pass (two REAL surface Clients retained ONE Session X; shared pending inbox + official Ctrl+S steer of the other Client\'s occurrence; two independent same-text submits stayed two; A -> Y navigation kept B writing X; B-only exit kept A/Host)',
+      m5n: 'pass (NON-DESTRUCTIVE navigation: /new and /resume left a held-running Host Turn alive -> completed; a RUNNING target projected without an idle wait; already-current no-op; a Host-queued occurrence stayed with X across the Client\'s departure; explicit Busy Esc still aborted the exact Turn)',
       t44t48: 'pass',
       t49t55: 'pass (T49-T55, including detached pending UNKNOWN, real Gateway owner-stream eligibility, the old-peer protocol negatives and same-PID HMR pending question/approval)',
       t56t59: 'pass',
@@ -8400,7 +8674,7 @@ async function main() {
       releaseGates: 'not run by this smoke; stage-final lane records the separate release-gate verdict',
     })
 
-    console.log(`split-process authenticated-link + real-surface smoke passed — ${basename(tarball)} × DSH ${targetDshVersion} (incl. M5B-01 two real surfaces on one Session); official Web composition ${webBrowserVerdict === 'PASS' ? 'PASS (real Browser)' : `NOT_QUALIFIED (${webBrowserVerdict})`}; official Web runtime toggle ${toggleQualification.browser === 'PASS' ? 'PASS (real Browser)' : `NOT_QUALIFIED (${toggleQualification.browser})`}`)
+    console.log(`split-process authenticated-link + real-surface smoke passed — ${basename(tarball)} × DSH ${targetDshVersion} (incl. M5B-01 two real surfaces on one Session and M5N-01 non-destructive Split Remote navigation); official Web composition ${webBrowserVerdict === 'PASS' ? 'PASS (real Browser)' : `NOT_QUALIFIED (${webBrowserVerdict})`}; official Web runtime toggle ${toggleQualification.browser === 'PASS' ? 'PASS (real Browser)' : `NOT_QUALIFIED (${toggleQualification.browser})`}`)
   } catch (error) {
     // Report BEFORE the cleanup below: the failure projection must read the
     // still-live process handles, and the work root must still exist while the

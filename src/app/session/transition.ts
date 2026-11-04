@@ -3,9 +3,13 @@
  * /new and `/sessions` switch/resume:
  *
  * ```text
- * 0. user navigation only: after the barrier freeze, ONE exact-owner stop of
- *    the captured OLD generation, BEFORE the admitted-writer drain
- * 1. quiesce old (whenIdle + final flush)
+ * 0. user navigation only: after the barrier freeze, the navigation according
+ *    to the backend's `SessionNavigationOwnership` — ONE exact-owner stop of the
+ *    captured OLD generation for a `stop-and-quiesce` backend, or no Host stop
+ *    at all for a `detach-client` backend — always BEFORE the admitted-writer
+ *    drain
+ * 1. quiesce old (whenIdle + final flush; `detach-client` has neither, the
+ *    Host Turn stays alive and the Client writer drain already happened)
  * 2. ALL TUI-owned preflight (preset/composition/stale checks — BEFORE the
  *    DSH boundary, so failures abort with ZERO side effects)
  * 3. create/resume — a rejection is NEVER retried (no same-ID recovery):
@@ -13,8 +17,10 @@
  * 4. COMMIT — a synchronous critical section (generation bump, live
  *    replacement)
  * 5. RETIRE — retire the old Direct owner (cancel → idle → drain
- *    continuable descendants → final flush → dispose); child surface/catalog
- *    work is best-effort and the committed child always stands
+ *    continuable descendants → final flush → dispose); a `detach-client`
+ *    backend only releases the replaced Client reference, and its committed
+ *    child is not waited to idle. Child surface/catalog work is best-effort
+ *    and the committed child always stands
  * ```
  *
  * Phase 0 belongs to the transition ADMISSION (`SessionOperationBarrier`),
@@ -98,8 +104,9 @@ export interface NavigationAdmission {
    * transition's OLD-owner quiesce completes. Every failure states the
    * difference: "stop requested, completion unconfirmed" before the quiesce,
    * "stopped and cannot be resumed" only after it. `false` means nothing was
-   * dispatched (a sessionless surface, or a provable pre-dispatch
-   * cancellation), so no Turn-stop claim is made at all.
+   * dispatched — a sessionless surface, a provable pre-dispatch cancellation,
+   * or a `detach-client` backend whose navigation never addresses the Host
+   * Turn — so no Turn-stop claim is made at all.
    */
   readonly oldStopAccepted: boolean
 }
