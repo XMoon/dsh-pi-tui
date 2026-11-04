@@ -274,6 +274,262 @@ test('the protected eleven-row dependency assertion rejects a duplicated protect
   )
 })
 
+/**
+ * M5-W PR-A: the 59 official Web rows the Host-only overlay declares, in order.
+ * This list is FROZEN here on purpose: the composition assertion below compares
+ * the real overlay against it, so a silently dropped, renamed, reordered or
+ * re-enabled Web row fails the test instead of being mirrored by a generated
+ * list. It is the official rc.5 browser graph minus every row whose authority
+ * already exists in this Host, plus the one official `terminal-controller` row
+ * the Browser x TUI composition needs.
+ */
+const WEB_ROWS: ReadonlyArray<{ id: string; name: string }> = [
+  { id: 'web-runtime', name: '@deepseek-ai/dsh-web-app' },
+  { id: 'modules', name: '@deepseek-ai/dsh-client-modules' },
+  { id: 'client-hmr', name: '@deepseek-ai/dsh-client-hmr' },
+  { id: 'cordis-client-runner', name: '@deepseek-ai/dsh-cordis-client-runner' },
+  { id: 'ui-open-in-app', name: '@deepseek-ai/dsh-client-ui-open-in-app' },
+  { id: 'ui-settings-account', name: '@deepseek-ai/dsh-client-ui-settings-account' },
+  { id: 'ui-theme', name: '@deepseek-ai/dsh-client-ui-theme' },
+  { id: 'locale', name: '@deepseek-ai/dsh-client-locale' },
+  { id: 'shortcuts', name: '@deepseek-ai/dsh-client-shortcuts' },
+  { id: 'ui-shortcuts', name: '@deepseek-ai/dsh-client-ui-shortcuts' },
+  { id: 'ui-layout', name: '@deepseek-ai/dsh-client-ui-layout' },
+  { id: 'ui-renderer', name: '@deepseek-ai/dsh-client-ui-renderer' },
+  { id: 'ui-session', name: '@deepseek-ai/dsh-client-ui-session' },
+  { id: 'resources', name: '@deepseek-ai/dsh-client-resources' },
+  { id: 'ui-sidebar', name: '@deepseek-ai/dsh-client-ui-sidebar' },
+  { id: 'ui-sidebar-right', name: '@deepseek-ai/dsh-client-ui-sidebar-right' },
+  { id: 'ui-sidebar-documentpreview', name: '@deepseek-ai/dsh-client-ui-sidebar-documentpreview' },
+  { id: 'ui-sidebar-terminal', name: '@deepseek-ai/dsh-client-ui-sidebar-terminal' },
+  { id: 'ui-sidebar-files', name: '@deepseek-ai/dsh-client-ui-sidebar-files' },
+  { id: 'ui-settings', name: '@deepseek-ai/dsh-client-ui-settings' },
+  { id: 'ui-settings-general', name: '@deepseek-ai/dsh-client-ui-settings-general' },
+  { id: 'ui-settings-models', name: '@deepseek-ai/dsh-client-ui-settings-models' },
+  { id: 'ui-plugin-manager', name: '@deepseek-ai/dsh-client-ui-plugin-manager' },
+  { id: 'ui-settings-plugin-inventory', name: '@deepseek-ai/dsh-client-ui-settings-plugin-inventory' },
+  { id: 'ui-conversation', name: '@deepseek-ai/dsh-client-ui-conversation' },
+  { id: 'ui-approval', name: '@deepseek-ai/dsh-client-ui-approval' },
+  { id: 'ui-chat', name: '@deepseek-ai/dsh-client-ui-chat' },
+  { id: 'ui-brand-official', name: '@deepseek-ai/dsh-client-ui-brand-official' },
+  { id: 'ui-attachment', name: '@deepseek-ai/dsh-client-ui-attachment' },
+  { id: 'ui-tool', name: '@deepseek-ai/dsh-client-ui-tool' },
+  { id: 'ui-cordis', name: '@deepseek-ai/dsh-client-ui-cordis' },
+  { id: 'ui-deliverables', name: '@deepseek-ai/dsh-client-ui-deliverables' },
+  { id: 'ui-workspace', name: '@deepseek-ai/dsh-client-ui-workspace' },
+  { id: 'ui-workflow-run', name: '@deepseek-ai/dsh-client-ui-workflow-run' },
+  { id: 'ui-input-trigger', name: '@deepseek-ai/dsh-client-ui-input-trigger' },
+  { id: 'ui-commands', name: '@deepseek-ai/dsh-client-ui-commands' },
+  { id: 'ui-skill', name: '@deepseek-ai/dsh-client-ui-skill' },
+  { id: 'ui-subagent', name: '@deepseek-ai/dsh-client-ui-subagent' },
+  { id: 'ui-reference', name: '@deepseek-ai/dsh-client-ui-reference' },
+  { id: 'ui-secret-mask', name: '@deepseek-ai/dsh-client-ui-secret-mask' },
+  { id: 'ui-jobs', name: '@deepseek-ai/dsh-client-ui-jobs' },
+  { id: 'ui-schedule', name: '@deepseek-ai/dsh-client-ui-schedule' },
+  { id: 'ui-goal', name: '@deepseek-ai/dsh-client-ui-goal' },
+  { id: 'ui-message-feedback', name: '@deepseek-ai/dsh-client-ui-message-feedback' },
+  { id: 'ui-model-selection', name: '@deepseek-ai/dsh-client-ui-model-selection' },
+  { id: 'ui-deepseek-model-label-1017', name: '@deepseek-ai/dsh-client-ui-deepseek-model-label-1017' },
+  { id: 'ui-permission', name: '@deepseek-ai/dsh-client-ui-permission-presets' },
+  { id: 'ui-agent-preset', name: '@deepseek-ai/dsh-client-ui-agent-preset' },
+  { id: 'entry-customization', name: '@deepseek-ai/dsh-client-ui-entry-customization' },
+  { id: 'ui-settings-session-log', name: '@deepseek-ai/dsh-client-ui-settings-session-log' },
+  { id: 'ui-settings-plugins', name: '@deepseek-ai/dsh-client-ui-settings-plugins' },
+  { id: 'ui-settings-shell', name: '@deepseek-ai/dsh-client-ui-settings-shell' },
+  { id: 'ui-settings-agent-loop', name: '@deepseek-ai/dsh-client-ui-settings-agent-loop' },
+  { id: 'ui-settings-subagent', name: '@deepseek-ai/dsh-client-ui-settings-subagent' },
+  { id: 'ui-settings-web-search', name: '@deepseek-ai/dsh-client-ui-settings-web-search' },
+  { id: 'ui-plan', name: '@deepseek-ai/dsh-client-ui-plan' },
+  { id: 'ui-user-questions', name: '@deepseek-ai/dsh-client-ui-user-questions' },
+  { id: 'ui-trajectory', name: '@deepseek-ai/dsh-client-ui-trajectory' },
+  { id: 'terminal-controller', name: '@deepseek-ai/dsh-api-terminal-controller' },
+]
+
+const WEB_RUNTIME_ID = 'web-runtime'
+const WEB_RUNTIME_PACKAGE = '@deepseek-ai/dsh-web-app'
+const CLIENT_MODULES_PACKAGE = '@deepseek-ai/dsh-client-modules'
+/** The runtime values the plan fixes: no launcher, no printed token URL, no DSH_WEB_URL. */
+const WEB_RUNTIME_CONFIG = { openBrowser: false, printUrl: false, surfaceContext: false }
+/** Packages whose ONE Host authority already exists; the Web group must not re-declare them. */
+const DUPLICATED_HOST_AUTHORITY_PACKAGES: readonly string[] = [
+  '@deepseek-ai/dsh-client-connection',
+  '@deepseek-ai/dsh-api-remotes',
+  '@deepseek-ai/dsh-client-file-upload',
+  '@deepseek-ai/dsh-api-session-controller',
+  '@deepseek-ai/dsh-api-settings-controller',
+  '@deepseek-ai/dsh-host-webserver',
+  '@deepseek-ai/dsh-host-frontend-static',
+  '@deepseek-ai/dsh-api-workspace-controller',
+  '@deepseek-ai/dsh-workspace',
+  '@deepseek-ai/dsh-api-job-controller',
+]
+
+/**
+ * The Host authorities that ALREADY exist on the bundle/base rows. Group 2
+ * proves each is still owned by exactly ONE row across the bundle patch and the
+ * Host-only overlay, so the Web composition can never add a second owner of the
+ * same official package.
+ */
+const HOST_AUTHORITY_OWNERS: ReadonlyArray<{ pkg: string; id: string }> = [
+  { pkg: '@deepseek-ai/dsh-workspace', id: 'workspace' },
+  { pkg: '@deepseek-ai/dsh-api-workspace-controller', id: 'workspace-controller' },
+  { pkg: '@deepseek-ai/dsh-host-webserver', id: 'webserver' },
+  { pkg: '@deepseek-ai/dsh-api-job-controller', id: 'job-controller' },
+  { pkg: '@deepseek-ai/dsh-client-connection', id: 'split-host-connection' },
+  { pkg: '@deepseek-ai/dsh-api-remotes', id: 'split-host-api-remotes' },
+  { pkg: '@deepseek-ai/dsh-client-file-upload', id: 'split-host-file-upload' },
+  { pkg: '@deepseek-ai/dsh-api-session-controller', id: 'split-host-session-controller' },
+  { pkg: '@deepseek-ai/dsh-api-settings-controller', id: 'split-host-settings-controller' },
+]
+
+/** The overlay's LAST insert group is the Web composition declaration. */
+function webInsertGroup(entries: readonly OverlayEntry[]): readonly OverlayRow[] {
+  const groups = entries.filter(entry => entry.insert !== undefined)
+  assert.ok(groups.length >= 2, 'the overlay must keep the Host execution insert and add ONE Web insert')
+  return groups[groups.length - 1].insert ?? []
+}
+
+/**
+ * Group 1 — the frozen Web roster: exact ids, exact packages, order, ONE row
+ * per id and the three runtime values the plan fixes. Shared by the positive
+ * assertion and its negative controls so each control proves THIS assertion
+ * group rejects the mutation instead of a private copy.
+ */
+function assertWebRoster(web: readonly OverlayRow[]): void {
+  assert.deepEqual(web.map(candidate => candidate.id), WEB_ROWS.map(row => row.id),
+    'the Web insert must declare exactly the frozen 59 row ids in order')
+  assert.deepEqual(web.map(candidate => candidate.name), WEB_ROWS.map(row => row.name),
+    'every Web row id must keep its exact official package')
+  for (const candidate of web) {
+    assert.equal(candidate.disabled, true, `the "${candidate.id}" Web row must stay disabled by default`)
+    if (candidate.id === WEB_RUNTIME_ID) {
+      assert.equal(candidate.name, WEB_RUNTIME_PACKAGE)
+      assert.deepEqual(candidate.inject, ['webServer'],
+        'web-runtime must inject the existing webserver, not a second listener')
+      assert.deepEqual(candidate.config, WEB_RUNTIME_CONFIG,
+        'web-runtime must stay silent: no browser launch, no printed token URL, no DSH_WEB_URL')
+      continue
+    }
+    assert.equal(candidate.inject, undefined, `the "${candidate.id}" Web row must not inject extra services`)
+    assert.equal(candidate.config, undefined, `the "${candidate.id}" Web row must not carry extra config`)
+  }
+  const ids = web.map(candidate => candidate.id)
+  assert.equal(new Set(ids).size, ids.length, 'a duplicated Web row would activate one package twice')
+  assert.equal(ids.includes('ui-deliverables'), true, 'the official deliverables UI row belongs to the roster')
+  assert.equal(ids.includes('terminal-controller'), true, 'the ONE official Host row on top of the roster is terminal-controller')
+  assert.equal(ids.includes('workspace-controller'), false,
+    'the Workspace Controller authority already exists: the Web group must not insert a second one')
+}
+
+/**
+ * Group 2 — Host owner de-duplication: the Web composition adds rows, never a
+ * second owner of an authority this Host already publishes.
+ */
+function assertWebOwnerDedupe(
+  bundleEntries: readonly OverlayEntry[],
+  overlayEntries: readonly OverlayEntry[],
+): void {
+  const web = webInsertGroup(overlayEntries)
+  const webPackages = new Set(web.map(candidate => candidate.name))
+  for (const name of DUPLICATED_HOST_AUTHORITY_PACKAGES) {
+    assert.equal(webPackages.has(name), false, `the Web group must not re-declare the existing "${name}" authority`)
+  }
+  // Each existing Host authority keeps exactly ONE owning row across the whole
+  // composed declaration, on the row that owned it before this PR.
+  const composed = [
+    ...bundleEntries.flatMap(entry => entry.insert ?? [entry]),
+    ...overlayEntries.flatMap(entry => entry.insert ?? [entry]),
+  ]
+  for (const { pkg, id } of HOST_AUTHORITY_OWNERS) {
+    const owners = composed.filter(row => row.name === pkg)
+    assert.equal(owners.length, 1,
+      `exactly ONE "${pkg}" row must own the Host authority; found ${owners.map(row => row.id).join(',')}`)
+    assert.equal(owners[0].id, id, `the "${pkg}" authority must stay on the "${id}" row`)
+  }
+  // The whole overlay keeps ONE row per id: a second owner is an added row, not
+  // a renamed one. The three in-place overrides appear once each.
+  const overlayRows = overlayEntries.flatMap(entry => entry.insert ?? [entry])
+  const overlayIds = overlayRows.map(candidate => candidate.id)
+  assert.equal(new Set(overlayIds).size, overlayIds.length, 'the Host-only overlay must own exactly one row per id')
+  for (const name of [WEB_RUNTIME_PACKAGE, CLIENT_MODULES_PACKAGE]) {
+    assert.equal(overlayRows.filter(candidate => candidate.name === name).length, 1,
+      `exactly ONE "${name}" row may exist in the Host-only overlay`)
+  }
+  // The fallback owns the only SPA seat, so it arrives through web-runtime
+  // alone; a declared row would be a second static owner.
+  const bundle = bundleEntries.flatMap(entry => entry.insert ?? [entry])
+  assert.equal(bundle.some(candidate => candidate.name === '@deepseek-ai/dsh-host-frontend-static'), false,
+    'the Direct bundle must not mount the Web static owner')
+  assert.equal(overlayRows.some(candidate => candidate.name === '@deepseek-ai/dsh-host-frontend-static'), false,
+    'the fallback is web-runtime-owned: no separate frontend-static row may be declared')
+}
+
+test('the Host-only overlay declares the 59 official Web rows DEFAULT-DISABLED on ONE insert', () => {
+  assertWebRoster(webInsertGroup(OVERLAY_ENTRIES))
+  // The composition is static: no production switch selects these rows.
+  assert.doesNotMatch(HOST_ONLY_PATCH, /WEB_ENABLED|M5_WEB_MODE|--web\b/u,
+    'the overlay must not introduce a user-facing Web switch')
+})
+
+test('the Web composition reuses the existing Host authorities instead of declaring a second owner', () => {
+  assertWebOwnerDedupe(BUNDLE_ENTRIES, OVERLAY_ENTRIES)
+})
+
+test('the Web composition assertion rejects a re-enabled row, a browser launch and duplicate owners', () => {
+  const webGroups = OVERLAY_ENTRIES.filter(entry => entry.insert !== undefined)
+  const webGroup = webGroups[webGroups.length - 1]
+  assert.ok(webGroup.insert !== undefined, 'the negative controls need the real Web insert group')
+  const mutateWeb = (
+    mutate: (rows: readonly OverlayRow[]) => readonly OverlayRow[],
+  ): OverlayEntry[] => OVERLAY_ENTRIES.map(entry => entry === webGroup ? { ...entry, insert: mutate(entry.insert ?? []) } : entry)
+  // Drift 1: the runtime row enabled by default would open a Web surface the
+  // product has not shipped.
+  assert.throws(
+    () => assertWebRoster(webInsertGroup(mutateWeb(rows =>
+      rows.map(row => row.id === WEB_RUNTIME_ID ? { ...row, disabled: false } : row)))),
+    /web-runtime.*disabled by default/u,
+  )
+  // Drift 2: the official runtime defaults would launch a browser and print a
+  // token-bearing URL from the Host log.
+  assert.throws(
+    () => assertWebRoster(webInsertGroup(mutateWeb(rows =>
+      rows.map(row => row.id === WEB_RUNTIME_ID
+        ? { ...row, config: { ...WEB_RUNTIME_CONFIG, openBrowser: true } }
+        : row)))),
+    /web-runtime must stay silent/u,
+  )
+  // Drift 3: a second Workspace Controller inside the Web insert is the second
+  // owner the plan forbids (it already exists as an in-place override).
+  assert.throws(
+    () => assertWebOwnerDedupe(BUNDLE_ENTRIES, mutateWeb(rows => [...rows, {
+      id: 'workspace-controller', name: WORKSPACE_CONTROLLER_PACKAGE, disabled: true,
+    }])),
+    /exactly one row per id|re-declare the existing "@deepseek-ai\/dsh-api-workspace-controller"/u,
+  )
+  // Drift 4: a duplicated graph composer registers the browser module table
+  // twice.
+  assert.throws(
+    () => assertWebOwnerDedupe(BUNDLE_ENTRIES, mutateWeb(rows => [...rows, {
+      id: 'modules-again', name: CLIENT_MODULES_PACKAGE, disabled: true,
+    }])),
+    /exactly ONE "@deepseek-ai\/dsh-client-modules"/u,
+  )
+})
+
+test('the Direct bundle keeps no Web-only row and its own listener/startup gates', () => {
+  const bundleIds = new Set(BUNDLE_ROWS.map(row => row.id))
+  for (const { id } of WEB_ROWS) {
+    assert.equal(bundleIds.has(id), false, `the Direct bundle must not declare the Web-only row "${id}"`)
+  }
+  const webserver = BUNDLE_ROWS.find(row => row.id === 'webserver')
+  assert.deepEqual(webserver?.config, { host: '127.0.0.1', port: 0 },
+    'Direct keeps the loopback listener with an OS-assigned port')
+  assert.deepEqual(webserver?.inject, ['tuiStartup'], 'Direct keeps its own command-line startup gate')
+  assert.deepEqual(BUNDLE_ROWS.find(row => row.id === 'workspace-controller')?.inject, ['tuiStartup'],
+    'Direct keeps the Workspace Controller behind the TUI startup admission')
+  assert.equal(BUNDLE_ROWS.some(row => row.name === WEB_RUNTIME_PACKAGE), false, 'Direct mounts no Web runtime')
+})
+
 interface FixtureRow {
   readonly options: { readonly id: string; readonly name: string; readonly disabled?: boolean }
   readonly fiber?: { readonly state: number; readonly uid?: number }

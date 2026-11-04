@@ -53,7 +53,10 @@ test('the Host-only overlay disables the TUI runner and the Client UI rows only'
   // `disabled: false` silently leave a Client UI row mounted.
   const disabled = [...HOST_ONLY_PATCH.matchAll(/^- id: (\S+)\n  disabled: true$/gmu)].map(match => match[1])
   assert.deepEqual(disabled, ['tui-app', 'pi-tui-extension-host', 'pi-tui-builtins'])
-  assert.equal((HOST_ONLY_PATCH.match(/disabled: true/gu) ?? []).length, 3)
+  // Exactly the three top-level surface rows. The 59 default-disabled official
+  // Web rows live inside the INSERTED Web group (owned by the foundation
+  // composition test), so they are not top-level declarations of this overlay.
+  assert.equal((HOST_ONLY_PATCH.match(/^- id: \S+\n  disabled: true$/gmu) ?? []).length, 3)
   assert.doesNotMatch(HOST_ONLY_PATCH, /id: tui-startup/u,
     'the overlay must not disable or redefine the tui-startup row itself')
 
@@ -214,8 +217,16 @@ test('the Host-only overlay adds exactly the two B1 owner rows and no second gat
   // turned into a second Loader row for the same service.
   assert.doesNotMatch(HOST_ONLY_PATCH, /^    - id: (?:typert-gateway|webserver|agent|session|job-controller)$/mu)
   assert.match(HOST_ONLY_PATCH, /^- insert:$/mu)
-  assert.doesNotMatch(HOST_ONLY_PATCH, /split-host-connection\n(?:.*\n)*?      disabled: true/u)
-  assert.doesNotMatch(HOST_ONLY_PATCH, /split-host-api-remotes\n(?:.*\n)*?      disabled: true/u)
+  // The inserted-row block of ONE row ends at the next `- id:` line, so the
+  // `disabled` fact is read from that row itself instead of the whole overlay
+  // (the Web insert legitimately carries 59 `disabled: true` rows later).
+  const insertedRowBlock = (id: string): string => {
+    const match = new RegExp(`^    - id: ${id}\\n(?:      [^\\n]*\\n)*`, 'mu').exec(HOST_ONLY_PATCH)
+    assert.ok(match !== null, `the overlay must insert a "${id}" row`)
+    return match[0]
+  }
+  assert.doesNotMatch(insertedRowBlock('split-host-connection'), /disabled/u)
+  assert.doesNotMatch(insertedRowBlock('split-host-api-remotes'), /disabled/u)
 })
 
 test('the Host identity route rides the official owner-only Fetch registry', () => {
