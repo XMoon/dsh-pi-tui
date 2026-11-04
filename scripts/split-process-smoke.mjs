@@ -22,11 +22,16 @@
  *   T18 installed package shape and Direct `--help` remain unchanged
  *   T19 signal admission precedes publication; repeated same signals stay idempotent (no ready)
  *   T20 an early forced exit removes the Host-created scratch before profile boot
- *   T21 the official Session-serving rows + ONE built-in Host Runtime row are ACTIVE
+ *   T21 the official Session-serving rows, the ONE official Workspace registry /
+ *                controller pair, and ONE built-in Host Runtime row are ACTIVE
  *   T22/T23/T24 a real Client PID proves official session/list, private PiFile RPC
  *                and the private terminal-progress snapshot over the authenticated link
  *   T25 repeated probes register no duplicate descriptor; Client exit keeps the same Host
- *   T26 Host Runtime row/artifact absence / required official row / Cookie fail closed, no Ready
+ *   T26 Host Runtime row/artifact absence / required official row / Workspace
+ *                Controller row disabled / Cookie fail closed, no Ready
+ *   T27 a real `workspace` Remote creates a Host Workspace, is idempotent, and
+ *                restores its baseline for a later Client PID after generation
+ *                replacements
  *
  * Usage: node scripts/split-process-smoke.mjs [path-to-candidate.tgz]
  *        pnpm smoke:split-process -- [path-to-candidate.tgz]
@@ -1606,6 +1611,43 @@ async function main() {
     assert(!hasPublishedIdentity(), 'T26 missing official row published a Host identity')
     trace('t26-official-row-disabled', { exit: missingOfficialRowExit.code, readyEmitted: false })
 
+    // T26c (M5-WS1): the official Workspace Controller row disabled after the
+    // overlay must fail BEFORE any Ready/identity publication. A Host that
+    // would answer `Host ready` while `remote.workspace` has no owner is the
+    // exact false green this control excludes.
+    const workspaceControllerMutationPatch = join(workDir, 't26-workspace-controller-disabled.patch.yml')
+    writeFileSync(workspaceControllerMutationPatch, '- id: workspace-controller\n  disabled: true\n')
+    let workspaceControllerFailure
+    let workspaceControllerExit
+    try {
+      const workspaceControllerDisabled = new EntryProcess('host', entries.host, {
+        ...base,
+        env: { ...base.env, SPLIT_PROCESS_EXTRA_PATCH: workspaceControllerMutationPatch },
+      })
+      workspaceControllerFailure = await workspaceControllerDisabled.waitFor(
+        record => record.m4a0 === 'failure',
+        'T26 Workspace Controller row disabled',
+        120_000,
+      )
+      workspaceControllerExit = await workspaceControllerDisabled.waitForExit(60_000)
+      assert(workspaceControllerExit.code === 1, `T26 Workspace Controller row disabled exit was ${JSON.stringify(workspaceControllerExit)}`)
+      assert(!workspaceControllerDisabled.records.some(record => record.m4a0 === 'ready'),
+        'T26 Workspace Controller row disabled emitted ready')
+      assert(/expected exactly one active workspaceController owner row, found 0/u.test(String(workspaceControllerFailure.error)),
+        `T26 Workspace Controller row disabled: unexpected error ${String(workspaceControllerFailure.error)}`)
+      assert(!workspaceControllerDisabled.records.some(record => record.services?.workspaceController === true),
+        'T26 Workspace Controller row disabled reported a live workspaceController service')
+      assert(!hasPublishedIdentity(), 'T26 Workspace Controller row disabled published a Host identity')
+    } finally {
+      rmSync(workspaceControllerMutationPatch, { force: true })
+    }
+    trace('t26-workspace-controller-disabled', {
+      exit: workspaceControllerExit?.code,
+      readyEmitted: false,
+      identityPublished: false,
+      error: String(workspaceControllerFailure?.error ?? '').slice(0, 160),
+    })
+
     // T08: sixteen concurrent Host launch/ensure candidates. The kernel seat is
     // the ONLY winner; every loser exits before creating a Host Context.
     const race = Array.from({ length: 16 }, () => new EntryProcess('host', entries.host, base))
@@ -1667,6 +1709,12 @@ async function main() {
       'sessionController',
       'fileUploads',
       'settingsController',
+      // M5-WS1: the Host Workspace Remote owner and the durable registry must
+      // both be live services. The `ready` record is only produced after the
+      // collector asserted the `workspaceController/workspace` Typert binding,
+      // so a readable service can never stand in for that binding.
+      'workspaceController',
+      'workspaceRegistry',
       'piTuiFileReferences',
       'piTuiTerminalProgress',
       'piTuiHostReady',
@@ -1720,11 +1768,35 @@ async function main() {
       JSON.stringify(hostReady.ownerEntries?.visualTools) === JSON.stringify(['pi-tui-visual-tools']),
       'T21 Visual Tools owner mismatch',
     )
+    // T21/M5-WS1: the ONE official Workspace registry row and the ONE official
+    // Workspace Controller row, each ACTIVE exactly once under its stable id,
+    // with no `split-host-workspace-controller` competitor.
+    assert(
+      JSON.stringify(hostReady.ownerEntries?.workspaceRegistry) === JSON.stringify(['workspace']),
+      `T21 Workspace registry owner mismatch: ${JSON.stringify(hostReady.ownerEntries?.workspaceRegistry)}`,
+    )
+    assert(
+      JSON.stringify(hostReady.ownerEntries?.workspaceController) === JSON.stringify(['workspace-controller']),
+      `T21 Workspace Controller owner mismatch: ${JSON.stringify(hostReady.ownerEntries?.workspaceController)}`,
+    )
+    for (const [id, name] of [
+      ['workspace', '@deepseek-ai/dsh-workspace'],
+      ['workspace-controller', '@deepseek-ai/dsh-api-workspace-controller'],
+    ]) {
+      const activeRows = hostReady.entries.filter(entry => entry.name === name && entry.state === 'active')
+      assert(activeRows.length === 1 && activeRows[0].id === id,
+        `T21 expected exactly one ACTIVE ${name} row named "${id}": ${JSON.stringify(activeRows)}`)
+    }
+    assert(
+      hostReady.entries.filter(entry => String(entry.id).startsWith('split-host-workspace')).length === 0,
+      'T21 a split-host Workspace Controller row exists beside the official one',
+    )
     trace('t21', {
       officialSessionServingRows: 6,
       builtInHostRuntimeRows: 1,
       performanceOwners: hostReady.ownerEntries.performance,
       visualToolOwners: hostReady.ownerEntries.visualTools,
+      workspaceOwners: hostReady.ownerEntries.workspaceController,
       terminalProgressWatches: hostReady.terminalProgressWatches,
     })
     const origin = hostReady.localHost.origin
@@ -1860,15 +1932,66 @@ async function main() {
       authenticatedIdentity: identityResponse.status,
       generationId: c1Ready.generationId,
     })
+
+    // T06/WS1-06: the SAME admission fence must cover the Workspace Remote
+    // namespace, not just the identity route. Each refusal below is decided by
+    // the Connection/Gateway admission BEFORE any business dispatch, and the
+    // authenticated owner request to that exact route must reach the `workspace`
+    // namespace — proven by the namespace's OWN refusal of a relative path
+    // (which also means this control mutates no Host Workspace).
+    const workspaceRemoteRequest = headers => ({
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...headers },
+      body: JSON.stringify({
+        type: 'client-request',
+        rpcId: 'ws1-workspace-admission',
+        method: 'workspace/create',
+        payload: { args: { request: { path: 'ws1/relative-not-absolute' } } },
+      }),
+    })
+    const workspaceRoute = `${origin}/api/workspace/create`
+    const unauthenticatedWorkspace = await fetchStatus(workspaceRoute, workspaceRemoteRequest({}))
+    assert([401, 403].includes(unauthenticatedWorkspace.status),
+      `T06 unauthenticated workspace/create returned ${String(unauthenticatedWorkspace.status)}`)
+    const fakeCookieWorkspace = await fetchStatus(workspaceRoute, workspaceRemoteRequest({ cookie: 'dsh_session=deadbeef' }))
+    assert(fakeCookieWorkspace.status === 401, `T06 fake-Cookie workspace/create returned ${String(fakeCookieWorkspace.status)}`)
+    const wrongOriginWorkspace = await fetchStatus(workspaceRoute, workspaceRemoteRequest({ origin: 'http://evil.example' }))
+    assert(wrongOriginWorkspace.status === 403, `T06 wrong-Origin workspace/create returned ${String(wrongOriginWorkspace.status)}`)
+    assert(!unauthenticatedWorkspace.body.includes('workspace/invalid-path')
+      && !fakeCookieWorkspace.body.includes('workspace/invalid-path')
+      && !wrongOriginWorkspace.body.includes('workspace/invalid-path'),
+    'T06 a refused workspace/create reached the Workspace namespace instead of the admission fence')
+    const ownerWorkspace = await fetchStatus(workspaceRoute, workspaceRemoteRequest({ cookie: validCookie }))
+    assert(ownerWorkspace.status === 200, `T06 owner workspace/create returned ${String(ownerWorkspace.status)}`)
+    const ownerWorkspaceEnvelope = JSON.parse(ownerWorkspace.body)
+    assert(ownerWorkspaceEnvelope.result?.ok === false,
+      `T06 the owner workspace/create did not reach the Workspace namespace: ${ownerWorkspace.body.slice(0, 300)}`)
+    assert(ownerWorkspaceEnvelope.result?.error?.code === 'workspace/invalid-path',
+      `T06 the Workspace namespace did not report its own refusal: ${ownerWorkspace.body.slice(0, 300)}`)
+    trace('workspace-admission', {
+      unauthenticated: unauthenticatedWorkspace.status,
+      fakeCookie: fakeCookieWorkspace.status,
+      wrongOrigin: wrongOriginWorkspace.status,
+      ownerReachedNamespace: ownerWorkspaceEnvelope.result.error.code,
+    })
     assertNoSecret('Host stdout records', JSON.stringify(mainHost.records), [hostToken, validCookie])
     assertNoSecret('Host stderr', mainHost.stderr, [hostToken, validCookie])
     assertNoSecret('Client stdout records', JSON.stringify(c1.records), [hostToken, validCookie])
     assertNoSecret('Client stderr', c1.stderr, [hostToken, validCookie])
 
     // T22/T23/T24: run the real Host RPC proof on the SAME authenticated
-    // Client Context. The probe mounts its two contributions temporarily and
+    // Client Context. The probe mounts its three contributions temporarily and
     // unmounts them; no second Client/Connection/Gateway/Context is created.
     // Running it twice is also the T25 duplicate-registration check.
+    //
+    // T27: the probe also drives the official `workspace` Remote namespace. The
+    // directory it registers is a real directory this harness creates inside
+    // its OWN isolated work dir, and the Host — not the Client — canonicalizes
+    // and records it.
+    const probeWorkspacePath = join(workDir, 'workspace-probe-target')
+    mkdirSync(probeWorkspacePath, { mode: 0o700 })
+    const canonicalProbeWorkspacePath = realpathSync(probeWorkspacePath)
+
     /** Wait for the Host to report exactly `expected` live progress watchers. */
     const waitForHostWatchCount = async (expected, label, timeoutMs = 5_000) => {
       const deadline = Date.now() + timeoutMs
@@ -1883,10 +2006,19 @@ async function main() {
       )
       return status
     }
-    const runHostFoundationProbe = async (client, label) => {
+    const runHostFoundationProbe = async (client, label, probeOptions = {}) => {
       const requestId = `m4b2hf-${label}-${++statusSequence}`
       rmSync(hostFoundationBarrier, { force: true })
-      client.send({ op: 'qualification-host-foundation', requestId })
+      // `workspaceResume` makes the probe hold its live Workspace stream and
+      // drop the Client's physical carrier itself. The probe owns that window:
+      // the entry's control channel is serialized, so no client status request
+      // may be issued while the stream is held.
+      client.send({
+        op: 'qualification-host-foundation',
+        requestId,
+        workspacePath: probeWorkspacePath,
+        ...probeOptions.resume === true ? { workspaceResume: true } : {},
+      })
       // The probe holds the real Host watch open after its opening snapshot and
       // waits for the private barrier file, so the harness can observe the live
       // Host subscription (1) before releasing it and then observe 0.
@@ -1901,15 +2033,38 @@ async function main() {
         hostTerminalProgressWatches: during.terminalProgressWatches,
       })
       writeFileSync(hostFoundationBarrier, 'release\n', { mode: 0o600 })
-      const proof = await client.waitFor(
-        record => record.m4b2hf === 'host-rpc-proof' && record.requestId === requestId,
-        label,
-        180_000,
-      )
+      if (probeOptions.resume === true) {
+        // WS1-05: the probe holds the LIVE Workspace stream, drops the Client's
+        // physical carrier and waits for the replacement generation itself; the
+        // harness only observes the hold record and then the finished proof.
+        await client.waitFor(
+          record => record.m4b2hf === 'workspace-hold-open' && record.requestId === requestId,
+          `${label} workspace hold`,
+          180_000,
+        )
+        trace('workspace-hold-open', { requestId })
+      }
+      // A rejecting probe is reported on the control channel as ONE
+      // `control-failure`; surface that message instead of a bare wait timeout.
+      const proof = await Promise.race([
+        client.waitFor(
+          record => record.m4b2hf === 'host-rpc-proof' && record.requestId === requestId,
+          label,
+          180_000,
+        ),
+        client.waitFor(
+          record => record.m4a0 === 'control-failure',
+          `${label} control failure`,
+          180_000,
+        ).then(record => {
+          trace('probe-control-failure', { label, error: String(record.error).slice(0, 400) })
+          throw new Error(`${label}: the qualification probe failed: ${String(record.error)}`)
+        }),
+      ])
       const after = await waitForHostWatchCount(0, `${label} watch release`)
       return { proof, during, after }
     }
-    const firstProbe = await runHostFoundationProbe(c1, 't22-24')
+    const firstProbe = await runHostFoundationProbe(c1, 't22-24', { resume: true })
     const hostRpcProof = firstProbe.proof
     assert(hostRpcProof.hostPid === hostReady.pid, 'T22 probe Host PID mismatch')
     assert(hostRpcProof.hostInstanceId === hostReady.localHost.instanceId, 'T22 probe Host instance mismatch')
@@ -1917,6 +2072,30 @@ async function main() {
     for (const field of ['officialSessionList', 'privateFileRpc', 'terminalSnapshot', 'cleaned']) {
       assert(hostRpcProof[field] === true, `T22/T23/T24/T25 ${field} is not proven`)
     }
+    // T27: the official `workspace` namespace created a REAL Host Workspace.
+    for (const field of ['workspaceRemote', 'workspaceBaseline', 'workspaceIdempotent']) {
+      assert(hostRpcProof[field] === true, `T27 ${field} is not proven`)
+    }
+    assert(hostRpcProof.workspaceCreated === true, 'T27 the first probe must CREATE the Host Workspace')
+    assert(hostRpcProof.workspaceInBaseline === false,
+      'T27 a Workspace created after the baseline cannot already be in that baseline')
+    assert(hostRpcProof.workspaceUpsert === true,
+      'T27 the Host feed must publish the new Workspace as an upsert frame')
+    assert(typeof hostRpcProof.workspaceId === 'string' && hostRpcProof.workspaceId !== '',
+      'T27 the Host did not assign a Workspace identity')
+    assert(hostRpcProof.workspacePath === canonicalProbeWorkspacePath,
+      `T27 workspace/create returned a non-canonical Host path: ${JSON.stringify(hostRpcProof.workspacePath)} != ${canonicalProbeWorkspacePath}`)
+    // WS1-05 generation currentness: a LIVE iterator held across a physical
+    // carrier replacement observed the new generation, terminated WITHOUT
+    // writing a stale frame into it, and a NEW stream on the same Client then
+    // recovered the authoritative Host baseline.
+    assert(hostRpcProof.workspaceGenerationAdvanced === true,
+      'WS1-05 the held Workspace stream did not observe a replacement Connection generation')
+    assert(hostRpcProof.workspaceHeldStreamClosed === true,
+      'WS1-05 the held Workspace stream neither ended nor failed after its generation was replaced')
+    assert(hostRpcProof.workspaceRestoredBaseline === true,
+      'WS1-05 a NEW stream did not recover the authoritative Host baseline after the replacement')
+    const workspaceId = hostRpcProof.workspaceId
     const repeatedProbe = await runHostFoundationProbe(c1, 't25-repeat')
     const repeatedProof = repeatedProbe.proof
     assert(repeatedProof.hostPid === hostReady.pid, 'T25 repeat probe Host PID mismatch')
@@ -1925,6 +2104,19 @@ async function main() {
     for (const field of ['officialSessionList', 'privateFileRpc', 'terminalSnapshot', 'cleaned']) {
       assert(repeatedProof[field] === true, `T25 repeat ${field} is not proven`)
     }
+    // T25/T27: the repeat resolves the SAME Workspace through a fresh baseline
+    // instead of minting a second one. (`workspaceUpsert` is deliberately NOT
+    // asserted false here: the probe only observes an upsert on the creating
+    // branch, so it would be false by construction. The authoritative proof is
+    // that the fresh baseline already carried the identity.)
+    for (const field of ['workspaceRemote', 'workspaceBaseline', 'workspaceIdempotent']) {
+      assert(repeatedProof[field] === true, `T25 repeat ${field} is not proven`)
+    }
+    assert(repeatedProof.workspaceCreated === false, 'T25 the repeat probe must resolve, not create')
+    assert(repeatedProof.workspaceInBaseline === true,
+      'T25 the repeat probe baseline must already carry the Host Workspace')
+    assert(repeatedProof.workspaceId === workspaceId, 'T25 the repeat probe minted a second Workspace identity')
+    assert(repeatedProof.workspacePath === canonicalProbeWorkspacePath, 'T25 the repeat probe path is not the Host canonical path')
     trace('t22-t24-host-rpc-proof', {
       hostPid: hostRpcProof.hostPid,
       hostInstanceId: hostRpcProof.hostInstanceId,
@@ -1932,6 +2124,13 @@ async function main() {
       officialSessionList: true,
       privateFileRpc: 'ok/unavailable',
       terminalSnapshot: 'snapshot:false:idle',
+      workspaceRemote: true,
+      workspaceCreated: hostRpcProof.workspaceCreated,
+      workspacePath: hostRpcProof.workspacePath,
+      workspaceGenerationAdvanced: hostRpcProof.workspaceGenerationAdvanced,
+      workspaceHeldStreamClosed: hostRpcProof.workspaceHeldStreamClosed,
+      workspaceRestoredBaseline: hostRpcProof.workspaceRestoredBaseline,
+      workspaceIdDigest: createHash('sha256').update(workspaceId).digest('hex').slice(0, 16),
       cleaned: true,
       hostTerminalProgressWatchesBefore: hostReady.terminalProgressWatches,
       hostTerminalProgressWatchesDuring: firstProbe.during.terminalProgressWatches,
@@ -1942,6 +2141,9 @@ async function main() {
       hostInstanceId: repeatedProof.hostInstanceId,
       clientPid: repeatedProof.clientPid,
       duplicateRegistration: false,
+      workspaceCreated: repeatedProof.workspaceCreated,
+      workspaceInBaseline: repeatedProof.workspaceInBaseline,
+      sameWorkspaceId: repeatedProof.workspaceId === workspaceId,
       hostTerminalProgressWatchesDuring: repeatedProbe.during.terminalProgressWatches,
       hostTerminalProgressWatchesAfter: repeatedProbe.after.terminalProgressWatches,
     })
@@ -2027,7 +2229,7 @@ async function main() {
     assert(alive(hostReady.pid), 'T14 startup fatal killed the Host')
     trace('t14-startup-fatal', { code: 'HOST_IDENTITY_MISMATCH', readyEmitted: false, cleanup: startupCleanup[0].m4a0, hostAlive: true })
 
-    const c2 = new EntryProcess('client', entries.client, base)
+    const c2 = new EntryProcess('client', entries.client, probeClientBase)
     const c2Outcome = await waitForOutcome(c2, 'T10 C2')
     assert(c2Outcome.m4a0 === 'ready' && c2Outcome.transport === 'connected', `T10 C2 did not connect: ${JSON.stringify(c2Outcome)}`)
     assert(c2Outcome.pid !== c1Ready.pid, 'T10 C2 did not mint a new Client process')
@@ -2086,6 +2288,55 @@ async function main() {
       liveSockets: lastReconnected.liveSockets,
       hostInstanceId: lastReconnected.host.instanceId,
     })
+
+    // T27 (M5-WS1): a DIFFERENT Client PID — after thirty-six real generation
+    // replacements — still reaches the ONE Host Workspace authority: its fresh
+    // `follow` baseline already carries the Workspace the first Client created,
+    // and a repeated `create` resolves that identity instead of minting a
+    // second one. This is the disconnect/rollover currency proof for the
+    // Workspace stream; no Client-side Workspace store exists in between.
+    const restoredProbe = await runHostFoundationProbe(c2, 't27-workspace-restore')
+    const restoredProof = restoredProbe.proof
+    assert(restoredProof.hostPid === hostReady.pid, 'T27 restored probe Host PID mismatch')
+    assert(restoredProof.hostInstanceId === hostReady.localHost.instanceId, 'T27 restored probe Host instance mismatch')
+    assert(restoredProof.clientPid === c2Outcome.pid, 'T27 restored probe Client PID mismatch')
+    assert(restoredProof.cleaned === true, 'T27 restored probe did not clean up')
+    for (const field of ['workspaceRemote', 'workspaceBaseline', 'workspaceIdempotent']) {
+      assert(restoredProof[field] === true, `T27 restored ${field} is not proven`)
+    }
+    assert(restoredProof.workspaceCreated === false,
+      'T27 the later Client must RESOLVE the existing Workspace, not create a second one')
+    assert(restoredProof.workspaceInBaseline === true,
+      'T27 the later Client baseline does not carry the Host Workspace')
+    assert(restoredProof.workspaceId === workspaceId,
+      'T27 the later Client observed a different Workspace identity')
+    assert(restoredProof.workspacePath === canonicalProbeWorkspacePath,
+      'T27 the later Client observed a different canonical Workspace path')
+    const t27Status = await hostStatus(mainHost)
+    const t27Owners = t27Status.ownerEntries
+    assert(JSON.stringify(t27Owners.workspaceController) === JSON.stringify(['workspace-controller']),
+      `T27 the Workspace Controller owner changed after Client rollover: ${JSON.stringify(t27Owners.workspaceController)}`)
+    // The Client exit/reload and the generation replacements may only drop the
+    // Client's own descriptors: the Host Workspace loader rows keep their LIVE
+    // fiber identity (an HMR remount would mint a new UID).
+    for (const id of ['workspace', 'workspace-controller']) {
+      const before = hostReady.entries.find(entry => entry.id === id)?.fiberUid
+      const after = t27Status.entries.find(entry => entry.id === id)
+      assert(typeof before === 'number', `T21/T27 the Host ready record carries no live fiberUid for "${id}"`)
+      assert(after?.state === 'active' && after.fiberUid === before,
+        `T27 the "${id}" Host row was re-mounted across Client exit/rollover: ${JSON.stringify(after)}`)
+    }
+    trace('t27-workspace-restore', {
+      clientPid: restoredProof.clientPid,
+      hostInstanceId: restoredProof.hostInstanceId,
+      generationId: lastReconnected.generationId,
+      workspaceCreated: restoredProof.workspaceCreated,
+      workspaceInBaseline: restoredProof.workspaceInBaseline,
+      sameWorkspaceId: restoredProof.workspaceId === workspaceId,
+      workspaceControllerOwners: t27Owners.workspaceController,
+      workspaceFiberStable: true,
+    })
+
     const c2Exit = await c2.shutdown()
     assert(c2Exit.code === 0, `T13 C2 normal exit was ${JSON.stringify(c2Exit)}`)
     assert(alive(hostReady.pid), 'T13 Host died on C2 exit')

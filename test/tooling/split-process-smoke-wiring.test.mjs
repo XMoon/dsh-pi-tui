@@ -242,7 +242,10 @@ test('the upgraded smoke carries every inventory gate and the critical negative 
     't26-runtime-artifact-absent',
     't26-runtime-artifact-restored',
     't26-official-row-disabled',
+    't26-workspace-controller-disabled',
     't26-no-cookie',
+    'workspace-admission',
+    't27-workspace-restore',
     'mutation-tui-enabled',
     'mutation-connection-disabled',
     'killIsolatedProcesses',
@@ -258,8 +261,8 @@ test('the upgraded smoke carries every inventory gate and the critical negative 
     assert.ok(source.includes(marker), `missing smoke marker ${marker}`)
   }
   const extraPatchUses = source.match(/SPLIT_PROCESS_EXTRA_PATCH/gu) ?? []
-  assert.equal(extraPatchUses.length, 11,
-    'the extra patch may only implement the two child mutations, the T26 Host-Runtime/official-row mutations, the whole-smoke mutation mode, the isolated surface LLM overlay, the isolated Host Schedule overlay and the isolated armed-Goal overlay')
+  assert.equal(extraPatchUses.length, 12,
+    'the extra patch may only implement the two child mutations, the T26 Host-Runtime/official-row/Workspace-Controller mutations, the whole-smoke mutation mode, the isolated surface LLM overlay, the isolated Host Schedule overlay and the isolated armed-Goal overlay')
   assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: tuiMutationPatch/u)
   assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: connectionMutationPatch/u)
   assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: sessionControllerMutationPatch/u)
@@ -267,6 +270,7 @@ test('the upgraded smoke carries every inventory gate and the critical negative 
   assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: armedPatch/u)
   assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: surfaceLlm\.patchPath/u)
   assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: hostRuntimeMutationPatch/u)
+  assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: workspaceControllerMutationPatch/u)
   assert.match(source, /SPLIT_PROCESS_SMOKE_MUTATION/u)
   assert.match(source, /SPLIT_PROCESS_SMOKE_MUTATION/u)
   assert.match(source, /mutationEnv/u)

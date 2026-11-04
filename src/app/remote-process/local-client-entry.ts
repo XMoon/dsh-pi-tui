@@ -33,7 +33,7 @@ import { dirname, isAbsolute, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import type { Context, Fiber } from '@deepseek-ai/cordis'
 import { mergeCause } from '../remote/dispose-cause.ts'
-import { attachEntryControl, createEntryDiag, writeEntryRecord, type EntryRecordSink } from './entry-control.ts'
+import { attachEntryControl, createEntryDiag, writeEntryRecord, type EntryControlRequest, type EntryRecordSink } from './entry-control.ts'
 import {
   bindProcessSeat,
   computeBuildId,
@@ -1685,15 +1685,61 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
         return false
       }
       if (request.op === 'qualification-host-foundation') {
-        // Qualification-only: mount the two Remote contributions on THIS live
-        // Client Context, prove the official/private RPC and unmount them. The
-        // module is loaded dynamically so it never joins the normal startup
-        // path or the Client entry's static dependency graph.
+        // Qualification-only: mount the Remote contributions on THIS live
+        // Client Context, prove the official/private RPC and (when requested)
+        // the official `workspace` namespace, then unmount them. The module is
+        // loaded dynamically so it never joins the normal startup path or the
+        // Client entry's static dependency graph.
         if (context === undefined) throw new Error('local client entry: the qualification probe has no Client Context')
+        // `workspacePath` is the harness-created directory the Host must
+        // canonicalize and register. It is a qualification control input only:
+        // the surface runtime and the package API never receive it. Absent = the
+        // caller does not request the Workspace proof (the M4 cross-build lane
+        // runs a new Client against a Host that predates the namespace); a
+        // supplied value must be a real path string.
+        const qualificationRequest = request as EntryControlRequest & {
+          readonly workspacePath?: unknown
+          readonly workspaceResume?: unknown
+        }
+        const workspacePath = qualificationRequest.workspacePath
+        if (workspacePath !== undefined && (typeof workspacePath !== 'string' || workspacePath === '')) {
+          throw new Error('local client entry: a supplied workspacePath must be a non-empty string')
+        }
+        // `workspaceResume` asks for the generation-currentness proof: the probe
+        // holds the live Workspace stream open while THIS entry drops the
+        // Client's physical carrier, so the stream can only continue by
+        // resuming on the replacement generation. Qualification-only; the
+        // surface runtime never receives it.
+        const workspaceResume = qualificationRequest.workspaceResume
+        if (workspaceResume !== undefined && workspaceResume !== true) {
+          throw new Error('local client entry: workspaceResume must be the boolean true when supplied')
+        }
+        if (workspaceResume === true && workspacePath === undefined) {
+          throw new Error('local client entry: the generation-resume control requires a workspacePath')
+        }
         const { runHostFoundationProbe } = await import('./host-foundation-probe.ts')
         const proof = await runHostFoundationProbe(context, {
           dshAnchor: options.dshAnchor,
           host,
+          ...(workspacePath === undefined ? {} : { workspacePath }),
+          ...(workspaceResume !== true
+            ? {}
+            : {
+                // The entry's own transport projection is the generation
+                // authority the smoke already reads; the probe never resolves
+                // the Client Context's `connection` service itself.
+                readGeneration: () => transport?.status().generationId,
+                dropCarrier: () => {
+                  transport?.dropWebSocketsForQualification()
+                  emit({
+                    m4a0: 'qualification',
+                    op: 'drop-websocket',
+                    label: 'workspace-hold',
+                    processRole: 'client',
+                    pid: process.pid,
+                  })
+                },
+              }),
           ...(request.requestId === undefined ? {} : { requestId: request.requestId }),
         })
         emit({
