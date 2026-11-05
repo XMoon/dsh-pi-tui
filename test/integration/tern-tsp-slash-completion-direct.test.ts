@@ -58,6 +58,9 @@ const BACKSPACE = '\x7f'
 const PASTE_START = '\u001b[200~'
 const PASTE_END = '\u001b[201~'
 
+/** The TSP builtin admission refusal the command plane publishes as a dock notice. */
+const TSP_BUILTIN_REFUSAL = "This command's UI is not available in TSP yet"
+
 /** One parsed history row, read back through the real store the fixture writes. */
 interface Row {
   readonly content?: unknown
@@ -115,6 +118,22 @@ function composerText(fixture: DirectTspFixture): string {
 function composerCursor(fixture: DirectTspFixture): number {
   const node = composerNode(fixture)
   return node === undefined ? -1 : Number(node.p.cursor ?? -1)
+}
+
+/**
+ * The dock notice ids currently carrying the TSP builtin refusal, from ONE wire
+ * fold.
+ *
+ * A notice is minted with a NEW id per publish (`notice-n<seq>`), and the
+ * refusal text is re-painted by every later frame. So only an id that did not
+ * exist before a submission can prove THAT submission produced the refusal;
+ * searching the accumulated output for the phrase cannot.
+ */
+function refusalNoticeIds(fixture: DirectTspFixture): string[] {
+  return wireNodes(fixture.pane)
+    .filter(node => /^dock\.notice-n\d+$/u.test(node.id)
+      && String(node.p.text ?? '').includes(TSP_BUILTIN_REFUSAL))
+    .map(node => node.id)
 }
 
 /** Every file the real Client-local attachment store holds under this work root. */
@@ -511,9 +530,14 @@ test('a TUI builtin this renderer cannot run is never offered as a bare candidat
     // The business behaviour is UNCHANGED: submitting the original text still takes
     // the existing post-classification TSP admission refusal and restores the draft.
     for (const line of ['/settings', '/help']) {
+      // The refusal text is re-painted by every later frame, so only a notice id
+      // minted AFTER this Enter can prove THIS command was really processed.
+      const seenNotices = new Set(refusalNoticeIds(fixture))
       await submitCommand(fixture, line)
-      await waitFor(`the existing refusal for ${line}`, () =>
-        fixture.pane.output.text().includes('This command\'s UI is not available in TSP yet'), 25_000)
+      await waitFor(`a NEW refusal notice for ${line}`, () => {
+        const now = refusalNoticeIds(fixture)
+        return now.some(id => !seenNotices.has(id))
+      }, 25_000)
       await waitFor(`the refused draft ${line} is restored`, () => composerText(fixture) === line, 25_000)
       await eraseDraft(fixture)
     }

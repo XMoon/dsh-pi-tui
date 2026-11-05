@@ -1290,8 +1290,46 @@ test('the shared composer-readiness probe retries a key the hydration fence drop
   }
 })
 
+test('the shared composer-readiness probe refuses a pre-existing x draft instead of erasing it', async () => {
+  // The probe owns ONLY the bytes it typed in THIS call. An editor that already
+  // holds an all-`x` draft is somebody else's state: erasing it would hide
+  // exactly the leaked-draft regression the readiness wait exists to surface.
+  const harness = await mountHarness()
+  try {
+    const readComposer = (): { readonly text: string; readonly cursor: number } => {
+      const editor = wireNodes(harness.pane).find(node => node.id === 'dock.composer')
+      if (editor === undefined) return { text: '', cursor: -1 }
+      return { text: String(editor.p.text ?? ''), cursor: Number(editor.p.cursor ?? -1) }
+    }
+    // A committed subject, so the composer is on a real mounted wire.
+    harness.renderer.display.setTranscript(
+      [{ kind: 'assistant', turn: 1, text: 'a committed subject' }],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { identity: 'pre-draft' },
+    )
+    for (const draft of ['x', 'xx']) {
+      harness.renderer.composer.setDraft(draft)
+      await waitFor(() => {
+        const state = readComposer()
+        return state.text === draft && state.cursor === draft.length
+      }, `the pre-existing ${JSON.stringify(draft)} draft on the wire`)
+      await assert.rejects(() => waitForEditableComposer(harness.pane, readComposer),
+        /pre-existing editor draft/u,
+        `the probe refuses the pre-existing ${JSON.stringify(draft)} draft`)
+      const wire = readComposer()
+      assert.equal(wire.text, draft, 'the pre-existing draft is not erased')
+      assert.equal(wire.cursor, draft.length, 'the pre-existing caret is not moved')
+      assert.equal(harness.renderer.composer.getDraft(), draft, 'the client draft is untouched')
+    }
+  } finally {
+    await harness.dispose()
+  }
+})
+
 // ── The native composite branch (the negotiated Questions/Approval forms) ────
-//
 // These cases opt the scripted pane into the EXACT kind set the native
 // composites paint, so the seat takes its native branch; every case above keeps
 // the default advertised set and therefore qualifies the LEGACY branch. The

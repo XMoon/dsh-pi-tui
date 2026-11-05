@@ -116,8 +116,12 @@ export async function waitForEditableComposer(
   /**
    * Poll until the wire shows the EXACT empty editor. A missing editor node
    * (`cursor` -1) is never ready — it is not an editor that has accepted
-   * anything. Probe residue is erased first; any other content is a test-state
-   * error.
+   * anything.
+   *
+   * Residue is attributable ONLY after this call has actually sent a probe
+   * byte: before that, any non-empty editor is somebody else's draft and fails
+   * here instead of being erased. That keeps a leaked draft from a previous
+   * action visible as a failure rather than silently cleared.
    */
   const waitForEmptyEditor = async (waitCapMs: number): Promise<'empty' | 'timeout'> => {
     const waitUntil = Math.min(Date.now() + waitCapMs, deadline)
@@ -126,6 +130,9 @@ export async function waitForEditableComposer(
       if (isEmpty(last)) return 'empty'
       if (last.cursor !== -1 && !isProbeResidue(last)) {
         fail('a non-empty editor that is not the probe\'s own residue cannot be cleared')
+      }
+      if (last.cursor !== -1 && attempts === 0) {
+        fail('a pre-existing editor draft that this call never typed cannot be cleared')
       }
       if (last.cursor !== -1) {
         phase = 'erasing probe residue'
