@@ -1384,6 +1384,7 @@ test('an inline intake that settles onto a MOVED session owner writes nothing, s
   await vt.waitForRender()
 
   assert.equal(h.stagedImages().length, stagedAtControl, 'the stale intake staged NOTHING')
+  assert.deepEqual(h.imageRemovals(), [], 'and removed NOTHING: the failure left the stores untouched')
   assert.equal(h.imageStore.size(), 1, 'the draft-image count is exactly the control entry')
   assert.equal(h.seatEdits().length, 1, 'the stale intake wrote nothing to the seat')
   assert.equal(app.seatTextForTest(), staleAccepted, 'the user kept the accepted path text, untouched')
@@ -1527,6 +1528,7 @@ test('the LEADING /attach route still reports a real FileInputError and leaves z
   assert.deepEqual(errorNotices(), [{ message: 'File not found: nope.txt', kind: 'error' }],
     'the production FileInputError message is reported verbatim as an error')
   assert.equal(h.stagedFiles().length, 1, 'the failed path staged NOTHING (no orphan entry)')
+  assert.deepEqual(h.fileRemovals(), [], 'and the failed intake removed no draft entry either')
   assert.equal(h.fileStore.values().length, 1, 'the file store holds only the control entry')
   assert.equal(h.imageStore.size(), 0, 'the image store stayed empty')
   assert.deepEqual(h.attachedNotices(), [controlNotice], 'no success notice was claimed for the failed attach')
