@@ -507,10 +507,11 @@ export function createTspComposer(sinks: TspComposerSinks, recall: TspComposerRe
     const flatStart = lineStart + span.start
     const flatEnd = lineStart + span.end
     const fragment = text.slice(flatStart, flatEnd)
-    // The fragment is a path token INSIDE one logical line: a newline would mean
-    // the coordinates no longer describe this document, and a lone CR/LF would
-    // replace half of a CRLF cluster.
-    if (fragment.includes('\n') || fragment.includes('\r')) return false
+    // The fragment lives inside ONE `\n`-split line (the bounds above already
+    // reject anything past that line), so it can only carry a line break as the
+    // lone CR of a CRLF-terminated line — and half a CRLF cluster is never
+    // replaced.
+    if (fragment.includes('\r')) return false
     // Neither endpoint may sit inside a grapheme cluster (an emoji or a combined
     // name is one unit; cutting it would strand a lone surrogate).
     if (boundaryCursor(text, flatStart) !== flatStart || boundaryCursor(text, flatEnd) !== flatEnd) return false

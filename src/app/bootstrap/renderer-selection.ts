@@ -54,6 +54,20 @@ export interface RendererSelectionDeps {
       installation: import('../surface/runtime.ts').TspCommandCompletionInstallation,
     ) => void
     /**
+     * TSP I-D: install the ONE inline-attachment stager on the connected
+     * renderer. Forwarded verbatim like the catalog commit above; this
+     * projection holds no stager, stake, draft or attachment state. The surface
+     * runtime's mount slot is OPTIONAL, so THIS forward is what makes the
+     * production TSP composition carry the stager at all.
+     *
+     * Optional on the CONNECTOR INPUT so a scripted test connector can express
+     * "no attachment plane"; the production connector below declares it
+     * REQUIRED, because a connected TSP renderer always carries it.
+     */
+    readonly installInlineAttachmentStager?: (
+      stager: import('../surface/runtime.ts').TspInlineAttachmentStager,
+    ) => void
+    /**
      * PR-C: install the ONE image binding (the mount's loader + scope
      * sampler) on the connected renderer. It is SYNCHRONOUS and ONE-TIME:
      * the renderer needs it before its first tool projection.
@@ -128,6 +142,10 @@ export async function selectRendererMount(deps: RendererSelectionDeps): Promise<
         // TSP I-C: the ONE catalog commit forwarded to the renderer's own seat.
         // No catalog, no provider and no candidate list is held here.
         installCommandCompletions: (installation) => tsp.installCommandCompletions(installation),
+        // TSP I-D: the ONE inline-attachment stager forwarded the same way. The
+        // surface runtime's mount slot is optional, so a projection that forgot
+        // this member would silently ship a mount with no attachment intake.
+        installInlineAttachmentStager: (stager) => tsp.installInlineAttachmentStager?.(stager),
         dispose: () => tsp.dispose(),
       }
     },
@@ -185,6 +203,13 @@ export function productionTspConnector(
    *  carries the seat, and a test connector is that contract's fake. */
   readonly installCommandCompletions: (
     installation: import('../surface/runtime.ts').TspCommandCompletionInstallation,
+  ) => void
+  /** TSP I-D: the ONE inline-attachment stager forwarded to the renderer's own
+   *  mount (see the connector input above). Required: a connected TSP renderer
+   *  always carries the attachment plane, and a test connector is that
+   *  contract's fake. */
+  readonly installInlineAttachmentStager: (
+    stager: import('../surface/runtime.ts').TspInlineAttachmentStager,
   ) => void
   readonly bindImages: (binding: import('../surface/runtime.ts').SurfaceImageBinding) => void
   readonly bindStatusReader: (reader: StatusSnapshotReader) => void
