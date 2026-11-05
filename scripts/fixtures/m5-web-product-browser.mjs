@@ -26,6 +26,7 @@
  */
 
 import { createHash } from 'node:crypto'
+import { request as httpRequest } from 'node:http'
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { join } from 'node:path'
@@ -527,32 +528,48 @@ async function login(context, timeoutMs = 120_000) {
   return page
 }
 
+/** One raw HTTP status with EXPLICIT headers (Node's http, no Browser API). */
+function httpStatus(url, headers) {
+  return new Promise(resolve => {
+    const request = httpRequest(url, { method: 'GET', headers, timeout: 10_000 }, response => {
+      response.resume()
+      resolve(response.statusCode ?? 0)
+    })
+    request.on('timeout', () => { request.destroy(); resolve('timeout') })
+    request.on('error', error => resolve(`refused:${error?.code ?? error?.name ?? 'error'}`))
+    request.end()
+  })
+}
+
 /**
- * WP-01 negative controls with NO cookie/token. The status is the official
- * server's, never a Browser-context request API (which can hang on the
- * authenticated index chain and is not the negative-control authority).
+ * WP-01 unauth negative controls with NO cookie/token. Wrong Host/Origin are
+ * repeated WITH the authenticated cookie by authenticatedOriginNegatives();
+ * the unauth ones never stand in for the source policy.
  */
 async function unauthenticatedNegatives() {
   const access = currentLaunch()
-  const statusOf = async (path, headers) => {
-    try {
-      const response = await fetch(`${access.url.origin}${path}`, {
-        redirect: 'manual',
-        headers,
-        signal: AbortSignal.timeout(10_000),
-      })
-      await response.body?.cancel()
-      return response.status
-    } catch (error) {
-      return `refused:${error?.name ?? 'error'}`
-    }
-  }
-  const index = await statusOf('/')
-  const api = await statusOf('/api')
-  const plugins = await statusOf('/plugins/events')
-  const wrongHost = await statusOf('/', { Host: 'wrong-host.example' })
-  const wrongOrigin = await statusOf('/api', { Origin: 'http://wrong-origin.example' })
+  const index = await httpStatus(`${access.url.origin}/`, {})
+  const api = await httpStatus(`${access.url.origin}/api`, {})
+  const plugins = await httpStatus(`${access.url.origin}/plugins/events`, {})
+  const wrongHost = await httpStatus(`${access.url.origin}/`, { Host: 'wrong-host.example' })
+  const wrongOrigin = await httpStatus(`${access.url.origin}/api`, { Origin: 'http://wrong-origin.example' })
   return { index, api, plugins, wrongHost, wrongOrigin }
+}
+
+/**
+ * Authenticated source-policy negatives: the SAME valid official Cookie that
+ * opened the shell, with a wrong Host / Origin. An unauthenticated request
+ * cannot prove this: the server might reject it for the missing credential
+ * while accepting the wrong source.
+ */
+async function authenticatedOriginNegatives(context) {
+  const access = currentLaunch()
+  const cookies = await context.cookies(access.url.origin)
+  const cookie = cookies.map(item => `${item.name}=${item.value}`).join('; ')
+  if (cookie === '') throw new Error('the Web shell has no authenticated Cookie for the origin negatives')
+  const wrongHost = await httpStatus(`${access.url.origin}/`, { Cookie: cookie, Host: 'wrong-host.example' })
+  const wrongOrigin = await httpStatus(`${access.url.origin}/api`, { Cookie: cookie, Origin: 'http://wrong-origin.example' })
+  return { wrongHostAuthenticated: wrongHost, wrongOriginAuthenticated: wrongOrigin }
 }
 
 /** The shared prompt/answer assertion for the deterministic C1 long-turn model. */
@@ -624,6 +641,8 @@ async function nextCommand(offset, timeoutMs) {
 async function commandLoop(startPage, context) {
   let page = startPage
   let offset = 0
+  /** Per-generation failure boundaries captured BEFORE a Host stop/kill. */
+  const offlineMarks = new Map()
   for (;;) {
     const command = await nextCommand(offset, 300_000)
     offset += 1
@@ -644,8 +663,18 @@ async function commandLoop(startPage, context) {
         // answer. The runner kills the Host after the Host has accepted it.
         await sendPrompt(page, command.prompt)
         fact = { sent: true, prompt: command.prompt }
+      } else if (command.kind === 'mark') {
+        const name = command.name ?? `seq-${seq}`
+        offlineMarks.set(name, {
+          failed: result.network.failedPaths.length,
+          console: result.consoleErrors.length,
+        })
+        fact = { marked: true, name }
+        step(`mark:${name}`, true, { ...offlineMarks.get(name) })
       } else if (command.kind === 'expect-offline') {
-        fact = await waitOffline(page, command.timeoutMs ?? 120_000)
+        const marks = offlineMarks.get(command.mark) ?? { failed: 0, console: 0 }
+        fact = await waitOffline(page, command.timeoutMs ?? 120_000, marks)
+        step(`offline:${command.mark ?? 'unmarked'}`, true, { ...marks, ...fact })
       } else if (command.kind === 'reconnect') {
         await page.close().catch(() => {})
         const fresh = await login(context)
@@ -674,7 +703,7 @@ async function commandLoop(startPage, context) {
 }
 
 /** Observably disconnected Web page: a real WebSocket/fetch failure or notice. */
-async function waitOffline(page, timeoutMs) {
+async function waitOffline(page, timeoutMs, marks = { failed: 0, console: 0 }) {
   const deadline = Date.now() + timeoutMs
   let lastText = ''
   while (Date.now() < deadline) {
@@ -685,8 +714,10 @@ async function waitOffline(page, timeoutMs) {
       // failed navigation itself is the disconnect fact.
       lastText = ''
     }
-    const failed = result.network.failedPaths.some(path => /ERR_CONNECTION|ERR_INCOMPLETE|remote\.mux/iu.test(path))
-    const consoleFailure = result.consoleErrors.some(text => /ERR_CONNECTION|ECONNREFUSED|WebSocket|failed to fetch|offline/iu.test(text))
+    const failed = result.network.failedPaths.slice(marks.failed)
+      .some(path => /ERR_CONNECTION|ERR_INCOMPLETE|remote\.mux/iu.test(path))
+    const consoleFailure = result.consoleErrors.slice(marks.console)
+      .some(text => /ERR_CONNECTION|ECONNREFUSED|WebSocket|failed to fetch|offline/iu.test(text))
     const bodyFailure = /offline|disconnected|reconnect|connection (?:lost|failed)|cannot connect/iu.test(lastText)
     if (failed || consoleFailure || bodyFailure) {
       return { offline: true, observed: bodyFailure, networkFailure: failed || consoleFailure }
@@ -979,8 +1010,9 @@ async function inventory(page) {
 const cases = {
   /** WP-01: login, dynamic resources, a real Session UI action. */
   'wp01-login': async context => {
-    result.negatives = await unauthenticatedNegatives()
+    const unauth = await unauthenticatedNegatives()
     const page = await login(context)
+    result.negatives = { ...unauth, ...await authenticatedOriginNegatives(context) }
     const marker = `wp01-${nonce}`
     const sessionId = await newSession(page)
     driverFact('session', { sessionId })

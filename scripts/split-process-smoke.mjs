@@ -69,6 +69,7 @@ import {
   openSync,
   readFileSync,
   readdirSync,
+  readlinkSync,
   realpathSync,
   renameSync,
   rmSync,
@@ -1711,6 +1712,8 @@ function createProductEvidence() {
       caseEnd() {},
       browserCase() {},
       hostIdentity() {},
+      environment() {},
+      fact() {},
       sessionEvents() {},
       ptyFrame() {},
       features() {},
@@ -1807,6 +1810,12 @@ function createProductEvidence() {
         chmodSync(join(dir, target), 0o600)
       }
       state.ledger.push({ case: id, startedAt: new Date().toISOString(), status: 'BROWSER_EXIT', exit })
+    },
+    environment(id, facts) {
+      write(join('host', id, 'environment.json'), facts)
+    },
+    fact(id, name, value) {
+      write(join('host', id, `${name}.json`), value)
     },
     hostIdentity(id, facts) {
       write(join('host', id, 'owner-identity.json'), {
@@ -2009,9 +2018,10 @@ export const qualifyWebProduct = async context => {
     })
     return { host, ready, workRoot }
   }
-  const startTui = async (label, extraEnv = {}) => {
+  const startTui = async (label, extraEnv = {}, extraOptions = {}) => {
     const tui = new SurfaceEntryProcess(entries.client, {
       ...base,
+      ...extraOptions,
       workDir,
       env: { ...base.env, ...extraEnv },
     })
@@ -2382,10 +2392,16 @@ export const qualifyWebProduct = async context => {
       `WP-01 the unauthenticated index was accepted (HTTP ${String(wp01Negatives.index)})`)
     assert(wp01Negatives.api === 401,
       `WP-01 the unauthenticated /api was not 401 (HTTP ${String(wp01Negatives.api)})`)
+    // The unauth wrong-host/origin statuses are recorded but do NOT prove the
+    // source policy; the authenticated ones below do.
     assert(wp01Negatives.wrongHost !== 200,
-      `WP-01 a wrong Host header was accepted (HTTP ${String(wp01Negatives.wrongHost)})`)
+      `WP-01 an unauthenticated wrong Host header was accepted (HTTP ${String(wp01Negatives.wrongHost)})`)
     assert(wp01Negatives.wrongOrigin !== 200,
-      `WP-01 a wrong Origin was accepted (HTTP ${String(wp01Negatives.wrongOrigin)})`)
+      `WP-01 an unauthenticated wrong Origin was accepted (HTTP ${String(wp01Negatives.wrongOrigin)})`)
+    assert(wp01Negatives.wrongHostAuthenticated === 401,
+      `WP-01 an AUTHENTICATED wrong Host was not 401 (HTTP ${String(wp01Negatives.wrongHostAuthenticated)})`)
+    assert(wp01Negatives.wrongOriginAuthenticated === 403,
+      `WP-01 an AUTHENTICATED wrong Origin was not 403 (HTTP ${String(wp01Negatives.wrongOriginAuthenticated)})`)
     // `/plugins/events` may be an official public graph stream; the plan does
     // not require every non-index resource to be 401. Record it, never use it
     // as an authentication negative.
@@ -2680,11 +2696,18 @@ export const qualifyWebProduct = async context => {
     const tuiImageBytes = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC', 'base64')
     const tuiImagePath = join(tuiCwd, 'tui-local-image.png')
     writeFileSync(tuiImagePath, tuiImageBytes, { mode: 0o600 })
+    const tuiPath = join(tuiCwd, 'bin')
+    mkdirSync(tuiPath, { recursive: true, mode: 0o700 })
+    const tuiPathValue = `${tuiPath}:${base.env.PATH ?? process.env.PATH ?? '/usr/bin:/bin'}`
+    // The REAL TUI process gets its OWN cwd, HOME and PATH; the Host keeps
+    // base.cwd/base home/PATH. The locality assertions must compare the real
+    // process facts, not two directories that were only created.
     const { tui: tuiLocal } = await startTui('WP-09 Client-local TUI', {
       HOME: tuiHome,
+      PATH: tuiPathValue,
       SPLIT_PROCESS_CLIENT_SESSION: sessionToggle,
       SPLIT_PROCESS_SCRATCH: join(productRoot, 'client-local-scratch'),
-    })
+    }, { cwd: tuiCwd })
     await tuiLocal.waitForScreen(`W-${productNonce}-seed`, 'WP-09 Client-local TUI reads the Session', 180_000)
     const browserUploadMarker = `w-${productNonce}-browser-upload`
     let hostShellFact
@@ -2762,6 +2785,37 @@ export const qualifyWebProduct = async context => {
     const privateLeak = await storageMatches(`prd-tui-private-${productNonce}`)
     assert(privateLeak === undefined, `WP-09 the Host read a TUI-private file that was never attached: ${String(privateLeak)}`)
     const localityHeader = await waitForHostSessionHeader(dshHome, sessionToggle, 'WP-09 Session header')
+    // Read the REAL process facts from /proc: the TUI's own cwd/HOME/PATH and
+    // the Host's own cwd/HOME/PATH. Creating tuiCwd/tuiHome is not isolation.
+    const tuiPid = tuiLocal.records.filter(record => record.m4a0 === 'ready').at(-1)?.pid
+    assert(Number.isInteger(tuiPid) && tuiPid > 0, 'WP-09 the TUI published no business PID')
+    const procCwd = pid => realpathSync(readlinkSync(`/proc/${String(pid)}/cwd`))
+    const procEnv = pid => Object.fromEntries(readFileSync(`/proc/${String(pid)}/environ`).toString('utf8')
+      .split('\0').filter(Boolean).map(entry => {
+        const equals = entry.indexOf('=')
+        return [entry.slice(0, equals), entry.slice(equals + 1)]
+      }))
+    const tuiCwdActual = procCwd(tuiPid)
+    const hostCwdActual = procCwd(groupA.ready.pid)
+    const tuiEnvActual = procEnv(tuiPid)
+    const hostEnvActual = procEnv(groupA.ready.pid)
+    assert(tuiCwdActual === realpathSync(tuiCwd),
+      `WP-09 the TUI process cwd is ${tuiCwdActual}, not the isolated tuiCwd`)
+    assert(hostCwdActual !== tuiCwdActual,
+      `WP-09 the Host and TUI share the same cwd (${hostCwdActual})`)
+    assert(tuiEnvActual.HOME === tuiHome, `WP-09 the TUI HOME is ${String(tuiEnvActual.HOME)}, not tuiHome`)
+    assert(hostEnvActual.HOME !== tuiEnvActual.HOME,
+      `WP-09 the Host and TUI share HOME (${String(hostEnvActual.HOME)})`)
+    assert(tuiEnvActual.PATH === tuiPathValue, 'WP-09 the TUI PATH is not the isolated path')
+    assert(hostEnvActual.PATH !== tuiEnvActual.PATH,
+      'WP-09 the Host and TUI share PATH')
+    assert(localityHeader.cwd === hostCwdActual,
+      `WP-09 the Session workspace ${localityHeader.cwd} is not the Host cwd ${hostCwdActual}`)
+    evidence.environment('wp09-locality', {
+      host: { cwd: hostCwdActual, home: hostEnvActual.HOME, path: hostEnvActual.PATH },
+      tui: { cwd: tuiCwdActual, home: tuiEnvActual.HOME, path: tuiEnvActual.PATH },
+      sessionWorkspace: localityHeader.cwd,
+    })
     assert(typeof localityHeader.cwd === 'string' && !localityHeader.cwd.startsWith(tuiCwd),
       `WP-09 the Session workspace is the TUI client cwd (${String(localityHeader.cwd)}) instead of a Host workspace`)
     assert(!existsSync(join(tuiCwd, 'browser-local-sentinel.txt')),
@@ -3126,6 +3180,26 @@ export const qualifyWebProduct = async context => {
           && record.event === 'approval/request', 'WP-04E old Peer captured the approval frame', 180_000)
         assert(typeof frame.eventId === 'string' && typeof frame.clientId === 'string',
           'WP-04E the old Peer frame has no eventId/clientId')
+        // While the Approval is STILL pending, a Peer with a FORGED identity
+        // must not be able to settle the real pending event. This is the
+        // pending-state wrong-Peer control the settled-only lane cannot prove.
+        const pendingDecisionsBefore = durableOf(sessionId)
+          .filter(event => event.type === 'approval/decided').length
+        const forgedPendingClientId = `forged-pending-${productNonce}`
+        stalePeer.send({
+          op: 'peer-send-stale-result',
+          eventId: frame.eventId,
+          clientId: forgedPendingClientId,
+          value: { kind: 'result', value: 'allowed-once' },
+        })
+        const forgedPending = await stalePeer.waitFor(record => record.m4a0 === 'peer-stale-result-sent'
+          && record.eventId === frame.eventId && record.clientId === forgedPendingClientId,
+        'WP-04E forged pending Peer frame submitted', 30_000)
+        await sleep(800)
+        assert(durableOf(sessionId).filter(event => event.type === 'approval/decided').length === pendingDecisionsBefore,
+          'WP-04E a forged Peer settled a PENDING approval')
+        assert(!existsSync(join(group.workRoot, 'approval-allow.marker')),
+          'WP-04E a forged pending allow executed the command')
         tui.send('n')
         await waitForC1WorkEvent(group.workRoot,
           event => event.kind === 'approval-settled' && event.outcome === 'rejected',
@@ -3138,7 +3212,8 @@ export const qualifyWebProduct = async context => {
           value: { kind: 'result', value: 'allowed-once' },
         })
         const stale = await stalePeer.waitFor(record => record.m4a0 === 'peer-stale-result-sent'
-          && record.eventId === frame.eventId, 'WP-04E stale frame submitted', 30_000)
+          && record.eventId === frame.eventId && record.clientId === frame.clientId,
+        'WP-04E stale frame submitted', 30_000)
         assert(stale.ok === true, 'WP-04E the Host did not receive the old legal frame')
         await sleep(800)
         assert(durableOf(sessionId).filter(event => event.type === 'approval/decided').length === afterReject,
@@ -3158,9 +3233,34 @@ export const qualifyWebProduct = async context => {
         await sleep(500)
         assert(durableOf(sessionId).filter(event => event.type === 'approval/decided').length === afterReject,
           'WP-04E a forged approval frame produced a second Host decision')
+        evidence.fact('wp04e-stale-peer', 'peer-negative-controls', {
+          pendingForged: {
+            eventId: frame.eventId,
+            clientId: forgedPendingClientId,
+            ok: forgedPending.ok === true,
+            ...(forgedPending.errorCode === undefined ? {} : { errorCode: forgedPending.errorCode }),
+            decisions: pendingDecisionsBefore,
+          },
+          staleAfterSettle: {
+            eventId: frame.eventId,
+            clientId: frame.clientId,
+            ok: stale.ok === true,
+            ...(stale.errorCode === undefined ? {} : { errorCode: stale.errorCode }),
+            decisions: afterReject,
+          },
+          forgedEventId: {
+            eventId: `forged-${productNonce}`,
+            ok: forged.ok === true,
+            ...(forged.errorCode === undefined ? {} : { errorCode: forged.errorCode }),
+            decisions: afterReject,
+          },
+        })
         recordSession('wp04e-stale-peer', sessionId)
         await ptyFrames('wp04e-stale-peer', tui)
         trace('t75-web-product-stale-peer', {
+          pendingForgedRefused: true,
+          pendingForgedOk: forgedPending.ok === true,
+          pendingForgedErrorCode: forgedPending.errorCode,
           legalFrameIgnored: true,
           forgedFrameOk: forged.ok === true,
           forgedErrorCode: forged.errorCode,
@@ -3179,7 +3279,7 @@ export const qualifyWebProduct = async context => {
         }
       }
     }
-    setWc('WC-07', 'PASS', 'Browser first Allow/Reject, TUI first Allow/Reject, Browser offline and the official stale `$events/result` frame all produced exactly one Host decision and the matching side effect', ['WP-04A', 'WP-04B', 'WP-04C', 'WP-04D', 'WP-04E', 'WP-04F'])
+    setWc('WC-07', 'PASS', 'Browser first Allow/Reject, TUI first Allow/Reject, Browser offline, a PENDING forged-identity Peer refusal and the official stale `$events/result` frame all produced exactly one Host decision and the matching side effect', ['WP-04A', 'WP-04B', 'WP-04C', 'WP-04D', 'WP-04E', 'WP-04F'])
     assert(approvalAllow !== undefined && approvalReject !== undefined, 'WP-04 groups did not complete')
 
     // ── Group F: WP-05 Browser reload during a HELD Turn ────────────────
@@ -3241,10 +3341,14 @@ export const qualifyWebProduct = async context => {
       let wp07Final
       await browserCase('wp07-host-lifecycle', { sessionId: sessionLife }, async handle => {
         await handle.waitFact('ready', 'WP-07 Browser ready', 240_000)
-        // 1. Graceful owner-governed stop.
+        // 1. Graceful owner-governed stop. Capture the failure boundary BEFORE
+        //    the stop so this generation's disconnect cannot borrow an earlier
+        //    generation's network/console failure.
+        handle.writeCommand({ seq: 0, kind: 'mark', name: 'graceful' })
+        await handle.waitStep(0, 'WP-07 mark before the graceful stop')
         const stopped = await lifecycle.host.shutdown()
         assert(stopped.code === 0, 'WP-07 the graceful Host stop exited non-zero')
-        handle.writeCommand({ seq: 1, kind: 'expect-offline', timeoutMs: 180_000 })
+        handle.writeCommand({ seq: 1, kind: 'expect-offline', mark: 'graceful', timeoutMs: 180_000 })
         await handle.waitStep(1, 'WP-07 Browser observed the graceful stop')
         await waitForCondition(() => !alive(beforeStop.hostPid), 'WP-07 the stopped Host process is gone', 30_000)
         assert(!existsSync(join(dshHome, 'run', 'dsh-pi-tui', beforeStop.scopeId, 'instance.json')),
@@ -3267,13 +3371,16 @@ export const qualifyWebProduct = async context => {
         assert(userEvents(sessionLife, `H-${productNonce}-after-resume`).length === 1,
           'WP-07 the Browser turn after cold resume was not committed once')
         // 3. SIGKILL the new Host; a pending/unknown write must not become a
-        //    fake success and the old identity must be invalid.
+        //    fake success and the old identity must be invalid. The failure
+        //    boundary is captured before this generation is killed.
+        handle.writeCommand({ seq: 4, kind: 'mark', name: 'sigkill' })
+        await handle.waitStep(4, 'WP-07 mark before the SIGKILL')
         const oldInstance = next.ready.localHost.instanceId
         next.host.kill('SIGKILL')
         const killed = await next.host.waitForExit(60_000)
         assert(killed.signal === 'SIGKILL' || killed.code !== 0, `WP-07 the SIGKILL Host exit was ${JSON.stringify(killed)}`)
-        handle.writeCommand({ seq: 4, kind: 'expect-offline', timeoutMs: 180_000 })
-        await handle.waitStep(4, 'WP-07 Browser observed the Host SIGKILL')
+        handle.writeCommand({ seq: 5, kind: 'expect-offline', mark: 'sigkill', timeoutMs: 180_000 })
+        await handle.waitStep(5, 'WP-07 Browser observed the Host SIGKILL')
         const staleInstance = readJson(join(dshHome, 'run', 'dsh-pi-tui', next.ready.localHost.scopeId, 'instance.json'))
         assert(staleInstance.instanceId === oldInstance,
           'WP-07 the SIGKILL left no stale identity for the negative control')
@@ -3282,10 +3389,10 @@ export const qualifyWebProduct = async context => {
         assert(final.ready.localHost.instanceId !== oldInstance,
           'WP-07 a cold-started Host reused the killed instance id')
         await waitForHostSessionHeader(dshHome, sessionLife, 'WP-07 final Session header')
-        handle.writeCommand({ seq: 5, kind: 'reconnect', sessionId: sessionLife })
-        await handle.waitStep(5, 'WP-07 Browser reconnected after the SIGKILL')
-        handle.writeCommand({ seq: 6, kind: 'finish' })
-        await handle.waitStep(6, 'WP-07 Browser finish')
+        handle.writeCommand({ seq: 6, kind: 'reconnect', sessionId: sessionLife })
+        await handle.waitStep(6, 'WP-07 Browser reconnected after the SIGKILL')
+        handle.writeCommand({ seq: 7, kind: 'finish' })
+        await handle.waitStep(7, 'WP-07 Browser finish')
       })
       recordSession('wp07-host-lifecycle', sessionLife)
       setWc('WC-08', 'PASS', 'graceful stop and SIGKILL each left a stale/absent old identity, no fabricated settlement, and ONE fresh Host with the durable Session and autoStart preference', ['WP-05', 'WP-06', 'WP-07'])
@@ -3321,12 +3428,14 @@ export const qualifyWebProduct = async context => {
               'WP-07 pending: an assistant message settled before the kill')
             assert(!beforeKill.some(event => event.type === 'turn/end'),
               'WP-07 pending: the Turn settled before the kill')
+            handle.writeCommand({ seq: 2, kind: 'mark', name: 'pending' })
+            await handle.waitStep(2, 'WP-07 pending mark before the SIGKILL')
             pending.host.kill('SIGKILL')
             const killed = await pending.host.waitForExit(60_000)
             assert(killed.signal === 'SIGKILL' || killed.code !== 0,
               `WP-07 pending Host exit was ${JSON.stringify(killed)}`)
-            handle.writeCommand({ seq: 2, kind: 'expect-offline', timeoutMs: 180_000 })
-            await handle.waitStep(2, 'WP-07 pending Browser observed the SIGKILL')
+            handle.writeCommand({ seq: 3, kind: 'expect-offline', mark: 'pending', timeoutMs: 180_000 })
+            await handle.waitStep(3, 'WP-07 pending Browser observed the SIGKILL')
             const afterKill = durableOf(pendingSession)
             assert(afterKill.filter(event => event.type === 'user/message'
               && JSON.stringify(event).includes(pendingMarker)).length === 1,
@@ -3336,8 +3445,8 @@ export const qualifyWebProduct = async context => {
             pendingNext = await startHost('long-turn', 'wp07-pending-next', { C1_HOLD_LONG_TURN: pendingBarrier })
             assert(pendingNext.ready.localHost.instanceId !== pending.ready.localHost.instanceId,
               'WP-07 pending: the cold Host reused the killed instance id')
-            handle.writeCommand({ seq: 3, kind: 'reconnect', sessionId: pendingSession })
-            await handle.waitStep(3, 'WP-07 pending Browser reconnected')
+            handle.writeCommand({ seq: 4, kind: 'reconnect', sessionId: pendingSession })
+            await handle.waitStep(4, 'WP-07 pending Browser reconnected')
             await sleep(1_000)
             const finalEvents = durableOf(pendingSession)
             assert(finalEvents.filter(event => event.type === 'user/message'
@@ -3348,8 +3457,8 @@ export const qualifyWebProduct = async context => {
             assert(!finalEvents.some(event => event.type === 'turn/end'
               && event.data?.reason?.kind === 'completed'),
             'WP-07 pending: a fake completed settlement survived the kill')
-            handle.writeCommand({ seq: 4, kind: 'finish' })
-            await handle.waitStep(4, 'WP-07 pending finish')
+            handle.writeCommand({ seq: 5, kind: 'finish' })
+            await handle.waitStep(5, 'WP-07 pending finish')
           })
           assert(typeof pendingSession === 'string' && pendingSession !== '',
             'WP-07 pending: the Browser created no Session')
