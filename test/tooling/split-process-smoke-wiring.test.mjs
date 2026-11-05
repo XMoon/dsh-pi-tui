@@ -412,6 +412,25 @@ test('T09 is two real Surface Clients on one Host while T09Q keeps the qualifica
     'the real dual-surface positive must exist exactly once')
 })
 
+test('the surface T40 trace never claims unexecuted bootstrap results in selected mode', () => {
+  const surface = readFileSync(PTY_MODULE, 'utf8')
+  // T40 keeps its name and the full-mode inventory fields; a selected surface
+  // case never runs T01-T26 or the Direct `--help` positive, so those fields
+  // must be inside a `mode === 'full'` spread.
+  const lane = readFileSync(SCRIPT, 'utf8')
+  assert.match(lane, /mode: 'full',/u, 'the full lane must pass the full execution mode')
+  assert.match(lane, /mode: 'selected',/u, 'the selected dispatcher must pass the selected execution mode')
+  assert.match(surface, /mode,\n  \} = context/u, 'the case must read the runner execution mode')
+  const t40Start = surface.indexOf("trace('t40', {")
+  assert.ok(t40Start >= 0, 'the T40 trace must exist')
+  const t40 = surface.slice(t40Start, surface.indexOf('\n    })', t40Start))
+  const modeGate = /\.\.\.\(mode === 'full'\s*\? \{([\s\S]*?)\}\s*:\s*\{\}\),/u.exec(t40)
+  assert.ok(modeGate, 'the cross-case inventory fields must be spread only in full mode')
+  assert.match(modeGate[1], /directHelp: 'pass'/u)
+  assert.match(modeGate[1], /t01t26: 'pass/u)
+  assert.match(t40, /surface: 'T27-T39 \+ T41\/T42\/T43 pass'/u)
+})
+
 test('M5-B same-Session real two-PTY witness remains wired', () => {
   const source = readFileSync(SHARED_SESSION_MODULE, 'utf8')
   // The M5-B Case is the FIRST C1 scenario: it owns one isolated Host and runs
