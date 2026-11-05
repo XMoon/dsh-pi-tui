@@ -193,7 +193,13 @@ export async function runAttachmentIntake(deps: AttachmentIntakeDeps): Promise<v
     return target.seatCurrent()
   }
 
-  /** The ONE commit segment (synchronous): prune, add, write, notice. */
+  /** The ONE commit segment (synchronous): prune, add, write, notice.
+   *
+   * The success notice reports a COMPLETED write, so it is reached only when the
+   * placeholder really landed. A refused commit rolls back exactly this staged
+   * item and stops there — an entry the user cannot see in the draft is never
+   * announced as attached, and an accepted-but-unwritten token must not invite an
+   * Enter that sends nothing. */
   const commitStaged = (
     add: () => { readonly id: number; readonly placeholder: string },
     remove: (id: number) => void,
@@ -203,7 +209,10 @@ export async function runAttachmentIntake(deps: AttachmentIntakeDeps): Promise<v
     pruneUnreferencedDraftAttachments(commit.draft(), runner.imageStore, runner.fileStore)
     const staged = add()
     try {
-      if (!commit.commit(staged.placeholder)) remove(staged.id)
+      if (!commit.commit(staged.placeholder)) {
+        remove(staged.id)
+        return
+      }
     } catch (error) {
       // Only an item whose token never reached the draft is dropped; a visible
       // placeholder keeps its bytes and keeps the owned task's classification.
@@ -382,7 +391,14 @@ export function createArtifactsCommands(deps: ArtifactsCommandDeps): ArtifactsCo
                 }
               : undefined,
             notify: (message, kind) => {
-              if (!stillOwned()) return
+              // The success notice reports the COMPLETED commit, so it is gated
+              // on the operation's Session OWNER, not on the acceptance snapshot:
+              // the in-place placeholder write is exactly what invalidates that
+              // snapshot, and re-using it here would swallow every real success.
+              // The seat half of the fence stays where it belongs — BEFORE the
+              // write (`commit()` above and `stake.current()` inside it) — so a
+              // moved seat still cannot write or announce anything.
+              if (!runner.isSessionScopeCurrent(scope)) return
               stake.notify(message, kind)
             },
             explain: (message, kind) => {
