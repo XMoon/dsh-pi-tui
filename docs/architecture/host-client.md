@@ -412,9 +412,10 @@ Web state, and switching it never enables or disables a live Host. The Host-only
 entry consumes it after `runProfile()` + Loader settlement and BEFORE the
 readiness audit / Ready publication: `autoStart: true` calls the SAME
 `piTuiWebAccess.setEnabled(true)` and requires the reached `enabled` state; a
-failure is one bounded `web-autostart-unavailable` diagnostic (no URL, token or
-profile path) and the Host still publishes Ready with the Web state its own
-service truthfully reports. `autoStart: false` touches no Web row and keeps this
+failure is one bounded `web-autostart-unavailable` diagnostic — a fixed failure
+category plus the Host's own small state vocabulary, never an exception message
+and never a URL, token or profile path — and the Host still publishes Ready with
+the Web state its own service truthfully reports. `autoStart: false` touches no Web row and keeps this
 default-off composition. A profile whose Loader does not project the
 `pi-tui-web-preferences` section is a corrupted composition and fails Host
 startup instead of being read as Off.
