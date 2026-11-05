@@ -185,8 +185,11 @@ export function createSvgRasterizer(spawnProcess: SpawnProcess = spawn): SvgRast
       let timer: NodeJS.Timeout | undefined
       // ── DIAGNOSTIC (branch fix/svg-raster-coldstart-timeout-20261105) ──────
       // The relative phase timeline of ONE child, so a tripped bound names the
-      // stalled boundary instead of only reporting "exceeded 3000 ms". Marks
-      // are numbers only: no SVG source, no PNG bytes, no stderr text.
+      // stalled boundary instead of only reporting "exceeded 3000 ms". The
+      // parent-side marks carry numbers and a code/signal only: no SVG source,
+      // no PNG bytes, no child stderr text. The only child-supplied text the
+      // timeout message adds is the worker's own milestone records, matched by
+      // their exact grammar below.
       //
       // Two DIFFERENT authorities, never conflated by one mark:
       //   `stdinWritten`  = this process's `Writable.end()` callback ran, i.e.
@@ -202,12 +205,16 @@ export function createSvgRasterizer(spawnProcess: SpawnProcess = spawn): SvgRast
         phases.push(`${phase}=${Math.round(performance.now() - startedAt)}${detail !== undefined ? `(${detail})` : ''}`)
       }
       mark('spawn')
-      // The child's own milestone lines (`rp <phase>=<ms>`), kept separate from
-      // any real stderr so neither message buries the other. A missing or empty
-      // milestone set is a valid answer (`''`): nothing here parses the lines, so
-      // an absent field can never raise a new failure over the real one.
-      const workerPhases = (): string => stderr.split('\n').filter(line => line.startsWith('rp ')).join(' ')
-      const workerStderr = (): string => stderr.split('\n').filter(line => !line.startsWith('rp ')).join('\n').trim().slice(0, 200)
+      // The child's own milestone records, kept separate from any real stderr so
+      // neither message buries the other. Matching is the EXACT record grammar
+      // the worker writes, never a bare prefix: a native error line that happens
+      // to begin `rp ` is real stderr and must stay visible in the exit message
+      // instead of being absorbed as a phase. A missing or empty milestone set is
+      // a valid answer (`''`): nothing parses the numbers, so an absent field can
+      // never raise a new failure over the real one.
+      const isMilestone = (line: string): boolean => /^rp (?:request|import|ctor|render|answer)=\d+$/u.test(line)
+      const workerPhases = (): string => stderr.split('\n').filter(isMilestone).join(' ')
+      const workerStderr = (): string => stderr.split('\n').filter(line => !isMilestone(line)).join('\n').trim().slice(0, 200)
       // ───────────────────────────────────────────────────────────────────────
       const finish = (error: Error | undefined, result?: SvgRasterResult): void => {
         if (settled) return
@@ -238,7 +245,7 @@ export function createSvgRasterizer(spawnProcess: SpawnProcess = spawn): SvgRast
         stdout += chunk
         if (Buffer.byteLength(stdout, 'utf8') > MAX_STDOUT_BYTES) terminate('overflow')
       })
-      child.stdout.on('end', () => mark('stdoutEnd', `${stdout.length}b`))
+      child.stdout.on('end', () => mark('stdoutEnd', `${Buffer.byteLength(stdout, 'utf8')}b`))
       child.stderr.on('data', (chunk: string) => {
         if (stderr.length < MAX_STDERR_BYTES) stderr += chunk
       })
