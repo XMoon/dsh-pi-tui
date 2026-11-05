@@ -352,7 +352,10 @@ export class PiTuiWebAccessHostService extends TypertRemoteService {
     })
     // Keep the chain alive; a repair failure is observed by the next status read.
     this.tail = run.then(() => undefined, () => undefined)
-    void run.then((status) => {
+    // The repair is a serialized mutation whose BOTH settlements are observed:
+    // a non-enabled result is the (already truthful) live status and a rejected
+    // chain is logged here; no caller awaits it.
+    void run.then((status) => { // allowlist: both settlements handled below
       if (status.state === 'unavailable') {
         this.logger().warn('profile recomposition repair did not reach the live target', { state: status.state })
       }
