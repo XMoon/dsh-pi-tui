@@ -464,3 +464,47 @@ test('the PiTui menu is pointer-reachable on the fullscreen alt-screen surface',
   await h.vt.waitForRender()
   assert.equal(h.app.overlayGraphState().handles, 0, 'Esc restores the seat on the alt screen too')
 })
+
+test('the real /web command can be invoked again after Esc closes its menu', async t => {
+  const vt = new VirtualTerminal(120, 40)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  lifecycle.started.add(app)
+  t.after(() => { lifecycle.disposeAll() })
+  const runner: WebAccessCommandRunner = {
+    backendKind: 'remote',
+    webAccess: {
+      getStatus: async () => ({ state: 'enabled' }),
+      setEnabled: async () => ({ state: 'enabled' }),
+      getAuthenticatedUrl: async () => ({ url: 'http://127.0.0.1:4321/?token=test' }),
+    },
+    copyToClipboard: async () => true,
+    diag: SILENT_DIAG,
+    currentSessionId: undefined,
+  }
+  const handlers = new Map<string, (invocation: { rawInput: string }) => unknown>()
+  createWebAccessCommands({
+    runner,
+    app,
+    notify: (text, kind) => { app.notify(text, kind) },
+    registerOne: (definition) => {
+      const spec = definition as unknown as { name: string; handler: (invocation: { rawInput: string }) => unknown }
+      handlers.set(spec.name, spec.handler)
+    },
+    openUrl: () => {},
+  }).registerWeb()
+  const invoke = (): void => { handlers.get('web')!({ rawInput: '' }) }
+  invoke()
+  for (let at = 0; at < 12; at += 1) await Promise.resolve()
+  await vt.waitForRender()
+  assert.match(view(vt), /Status: enabled/u, 'the first invocation opens the menu')
+  vt.sendInput('\u001b')
+  await vt.waitForRender()
+  assert.doesNotMatch(view(vt), /Status: enabled/u, 'Esc closes it')
+  assert.equal(app.overlayGraphState().handles, 0)
+  invoke()
+  for (let at = 0; at < 12; at += 1) await Promise.resolve()
+  await vt.waitForRender()
+  assert.match(view(vt), /Status: enabled/u, 'a second /web invocation reopens the menu')
+  assert.equal(app.overlayGraphState().handles, 1)
+})

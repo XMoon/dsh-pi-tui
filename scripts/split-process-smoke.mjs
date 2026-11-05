@@ -8632,12 +8632,12 @@ async function main() {
         })
 
         // ── D. Manual `/web Disable` keeps the TUI working (PC-08) ──────────
-        // Reopen a FRESH enabled menu (the copy result row is not part of the
-        // next projection) and move to Disable one row at a time.
-        tui.send('\u001b')
-        await tui.waitForScreenGone('Status: enabled', 'PC-08 copy menu closed')
-        tui.send('/web\r')
-        await tui.waitForScreen('Status: enabled', 'PC-08 menu')
+        // Continue in the SAME menu the copy settled on: rows are status ->
+        // copy result -> Open -> Copy -> Disable (the notice row is a disabled
+        // fact but still a cursor stop). One arrow per chunk, each move proven
+        // by the row's own selected description.
+        tui.send('\u001b[B')
+        await tui.waitForScreen('Action result.', 'PC-08 copy result row')
         tui.send('\u001b[B')
         await tui.waitForScreen('Request the OS to open the official Web home page', 'PC-08 Open Browser row')
         tui.send('\u001b[B')
