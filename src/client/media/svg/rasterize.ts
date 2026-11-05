@@ -54,9 +54,11 @@ const POSIX_MEMORY_CAP_KB = 4 * 1024 * 1024
  */
 const WORKER_SOURCE = `
 import { pathToFileURL } from 'node:url'
-// DIAGNOSTIC: one bounded 'rp <phase>=<ms since child start>' line per milestone,
-// so a tripped parent bound names the child boundary that never reported
-// (nothing at all means the request never reached this process). Numbers only.
+// DIAGNOSTIC: one bounded record per milestone — the text "rp ", one of the five
+// names request|import|ctor|render|answer, then "=" and the whole milliseconds
+// since this child started. The parent treats a line as a record ONLY under that
+// exact grammar: a new phase name must be added to its pattern too, and anything
+// else stays ordinary stderr that the exit message still reports.
 const rpStart = performance.now()
 const rp = (phase) => process.stderr.write('rp ' + phase + '=' + Math.round(performance.now() - rpStart) + '\\n')
 const chunks = []
