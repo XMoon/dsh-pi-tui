@@ -292,6 +292,9 @@ test('the cases snapshot failure handles before their own cleanup', () => {
   const runner = readFileSync(SCRIPT, 'utf8')
   assert.match(runner, /const failureProcesses = \[\]/u)
   assert.match(runner, /const captureFailure = handles => \{/u)
+  assert.match(runner, /failureProcesses\.push\(\{\n\s+role: handle\.role,\n\s+exited: handle\.exited === true,/u,
+    'captureFailure must copy failure-time facts, not hold live handles that cleanup mutates')
+  assert.match(runner, /records: Array\.isArray\(handle\.records\) \? handle\.records\.slice\(-8\) : \[\]/u)
   assert.match(runner, /captureFailure,/u)
   const cross = readCase('cross-build-compatibility.mjs')
   assert.match(cross, /let detachedHost/u)
