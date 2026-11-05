@@ -32,6 +32,7 @@ import {
   assertNoSecret,
   assertNotEqual,
   assertProfileClientPeers,
+  alive,
   c1WorkHadRelease,
   createRequireFrom,
   fetchStatus,
@@ -50,6 +51,7 @@ import {
   sessionLogFiles,
   sha256,
   stopHostForCleanup,
+  waitForAcceptedHandoff,
   waitForUpgradeC1WorkEvent,
   waitGone,
 } from '../../lib/split-upgrade-support.mjs'

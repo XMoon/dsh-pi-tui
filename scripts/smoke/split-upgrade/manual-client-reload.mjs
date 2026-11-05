@@ -32,6 +32,7 @@ import {
   assertProfileClientPeers,
   c1WorkHadRelease,
   hostStatus,
+  installSideBuild,
   killProcessGroup,
   productionBuildId,
   readJson,
@@ -110,24 +111,12 @@ async function waitForClearedComposer(client, needle, label, timeoutMs = 60_000)
  * boundary. `failpoint` fires after the first round's old Host is Ready.
  */
 export async function runManualClientReload(context) {
-  const {
-    dsh,
-    harnessDir,
-    anchor,
-    targetDshVersion,
-    oldArtifact,
-    newArtifact,
-    workRoot,
-    checkpoint,
-    failpoint,
-    registerIsolatedHome,
-  } = context
   const hosts = []
   const clients = []
-  const scope = {
-    dsh, harnessDir, anchor, targetDshVersion, oldArtifact, newArtifact, workRoot,
-    checkpoint, failpoint, registerIsolatedHome, hosts, clients,
-  }
+  // Every context field MUST reach the round functions: the extracted rounds
+  // create real `EntryProcess`/`SurfaceEntryProcess` instances, so a narrower
+  // ad-hoc scope would turn them into free variables at run time.
+  const scope = { ...context, hosts, clients }
   try {
     const userCommandReload = await runUserCommandReloadRound(scope)
     const userCommandReloadTargetInvalid = await runUnavailableTargetRound(scope)
@@ -145,6 +134,7 @@ export async function runManualClientReload(context) {
 
 async function runUserCommandReloadRound(context) {
   const {
+    EntryProcess, SurfaceEntryProcess,
     dsh, harnessDir, anchor, targetDshVersion, oldArtifact, newArtifact, workRoot,
     checkpoint, failpoint, registerIsolatedHome, hosts, clients,
   } = context
@@ -598,6 +588,7 @@ async function runUserCommandReloadRound(context) {
 
 async function runUnavailableTargetRound(context) {
   const {
+    EntryProcess, SurfaceEntryProcess,
     dsh, harnessDir, anchor, targetDshVersion, oldArtifact, workRoot,
     checkpoint, failpoint, registerIsolatedHome, hosts, clients,
   } = context

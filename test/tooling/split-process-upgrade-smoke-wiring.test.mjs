@@ -15,8 +15,9 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { readFileSync, readdirSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import ts from 'typescript'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 
 import { parseUpgradeArguments } from '../../scripts/split-process-upgrade-smoke.mjs'
@@ -224,6 +225,16 @@ test('the cross-build case owns the real old/new pair, reexec handoff and both l
   assert.match(source, /assertProfileClientPeers\(profileDir, targetDshVersion, 'upgraded profile install'\)/u)
   assert.match(source, /newBuildId !== oldBuildId/u)
   assert.match(source, /installedPayloadHash\(oldProfilePackage\)/u)
+  assert.match(source, /sideBuildDir = join\(dshHome, 'profiles', 'split-upgrade-side-build'\)/u)
+  assert.match(source, /installSideBuild\(sideBuildDir, newArtifact\.path, env, targetDshVersion\)/u)
+  const support = readFileSync(join(ROOT, 'scripts', 'lib', 'split-upgrade-support.mjs'), 'utf8')
+  const sideBuild = support.slice(support.indexOf('export function installSideBuild'), support.indexOf('export function killProcessGroup'))
+  assert.match(sideBuild, /'@deepseek-ai\/dsh-client-store': targetDshVersion/u)
+  assert.match(sideBuild, /zustand: '4\.5\.7'/u)
+  assert.match(sideBuild, /immer: '10\.2\.0'/u)
+  assert.doesNotMatch(sideBuild, /@deepseek-ai\/cordis|'@deepseek-ai\/dsh':/u,
+    'the side-build must not copy the DSH family or a second Cordis')
+
   // U07: a real SIGUSR2 handoff, new OS PID, restored same Host/Session.
   const reexec = source.indexOf("clientA.signalBusiness('SIGUSR2')")
   assert.ok(reexec > 0)
@@ -253,6 +264,31 @@ test('the cross-build case owns the real old/new pair, reexec handoff and both l
   assert.match(source, /stopHostForCleanup\(host\)/u)
   assert.doesNotMatch(source, /copyFileSync|cpSync/u)
   assert.doesNotMatch(source, /writeFileSync\(.*newArtifact\.path/u)
+})
+
+test('the manual reload case forwards the real process constructors into both rounds', () => {
+  const source = readCase('manual-client-reload.mjs')
+  assert.match(source, /const scope = \{ \.\.\.context, hosts, clients \}/u,
+    'the case-local scope must carry every context field, including the process constructors')
+  assert.match(source, /async function runUserCommandReloadRound\(context\) \{\n  const \{\n    EntryProcess, SurfaceEntryProcess,/u)
+  assert.match(source, /async function runUnavailableTargetRound\(context\) \{\n  const \{\n    EntryProcess, SurfaceEntryProcess,/u)
+})
+
+test('the manual reload case keeps the second real old-build TUI through the cross-build reexec', () => {
+  const source = readCase('manual-client-reload.mjs')
+  const peerStart = source.indexOf("const peerClient = new SurfaceEntryProcess(join(sideOldPackage, 'dist', 'local-client.mjs')")
+  const command = source.indexOf("reloadClient.send('/reload-client\\r')")
+  assert.ok(peerStart > 0, 'U08 must start the second old-build Client from the real old installation')
+  assert.ok(command > peerStart, 'the second Client must join Session X before `/reload-client` is sent')
+  assert.match(source, /assertNotEqual\(peerPid, reloadClientPid/u)
+  assert.match(source, /assertNotEqual\(peerClient\.child\.pid, reloadClient\.child\.pid/u)
+  assert.match(source, /const assertPeerKept = \(label\) =>/u)
+  assert.match(source, /record\.rootFiberUid, peerStatusBefore\.rootFiberUid/u)
+  assert.match(source, /record\.generationId, peerStatusBefore\.generationId/u)
+  assert.match(source, /record\.surfaceRevision, peerStatusBefore\.surfaceRevision/u)
+  assert.match(source, /record\.host\?\.instanceId, hostIdentity\.instanceId/u)
+  assert.match(source, /secondClientIndependentWrite: true/u)
+  assert.match(source, /secondClientExitCode: peerExit\.code/u)
 })
 
 test('the production /reload-client case never uses a signal or override for the user command', () => {
@@ -296,7 +332,40 @@ test('the target-source-isolation case proves both entries in ONE live Client pr
   assert.match(source, /qualificationUsedOverride: true/u)
   assert.match(source, /failpoint\('client-reload\.target-source-isolation\.after-host-spawn'\)/u)
   assert.match(source, /registerIsolatedHome\(dshHome\)/u)
+  assert.match(source, /const scope = \{ \.\.\.context, hosts, clients \}/u)
+  assert.match(source, /async function runReloadSourceIsolationRound\(context\) \{\n  const \{\n    EntryProcess, SurfaceEntryProcess,/u)
 })
+
+test('the extracted upgrade modules resolve every free identifier', () => {
+  const files = [
+    'scripts/split-process-upgrade-smoke.mjs',
+    'scripts/lib/split-upgrade-selection.mjs',
+    'scripts/lib/split-upgrade-support.mjs',
+    'scripts/smoke/split-upgrade/cross-build-compatibility.mjs',
+    'scripts/smoke/split-upgrade/manual-client-reload.mjs',
+    'scripts/smoke/split-upgrade/reload-source-isolation.mjs',
+  ].map(file => join(ROOT, file))
+  const program = ts.createProgram({
+    rootNames: files,
+    options: {
+      allowJs: true,
+      checkJs: true,
+      noEmit: true,
+      target: ts.ScriptTarget.ES2022,
+      module: ts.ModuleKind.NodeNext,
+      moduleResolution: ts.ModuleResolutionKind.NodeNext,
+      skipLibCheck: true,
+      strict: false,
+      noImplicitAny: false,
+      types: ['node'],
+    },
+  })
+  const unresolved = ts.getPreEmitDiagnostics(program)
+    .filter(diagnostic => diagnostic.code === 2304)
+    .map(diagnostic => `${basename(diagnostic.file?.fileName ?? 'unknown')}: ${ts.flattenDiagnosticMessageText(diagnostic.messageText, ' ')}`)
+  assert.deepEqual(unresolved, [], 'a moved helper or process constructor must never become a free variable')
+})
+
 
 test('the runner owns ONE harness/setup boundary, ONE scope and the registered-home backstop', () => {
   const source = readFileSync(SCRIPT, 'utf8')

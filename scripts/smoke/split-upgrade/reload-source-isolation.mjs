@@ -25,6 +25,7 @@ import {
   assertIdentityKept,
   assertNotEqual,
   assertProfileClientPeers,
+  alive,
   c1WorkHadRelease,
   hostStatus,
   installSideBuild,
@@ -46,28 +47,12 @@ import {
  * boundary. `failpoint` fires after this case's first real Host is Ready.
  */
 export async function runReloadSourceIsolation(context) {
-  const {
-    EntryProcess,
-    SurfaceEntryProcess,
-    workRoot,
-    dshHome,
-    harnessDir,
-    env,
-    dsh,
-    anchor,
-    targetDshVersion,
-    oldArtifact,
-    newArtifact,
-    checkpoint,
-    failpoint,
-    registerIsolatedHome,
-  } = context
   const hosts = []
   const clients = []
-  const scope = {
-    dsh, harnessDir, anchor, targetDshVersion, oldArtifact, newArtifact, workRoot,
-    checkpoint, failpoint, registerIsolatedHome, hosts, clients,
-  }
+  // Every context field MUST reach the round function: the extracted round
+  // creates real `EntryProcess`/`SurfaceEntryProcess` instances, so a narrower
+  // ad-hoc scope would turn them into free variables at run time.
+  const scope = { ...context, hosts, clients }
   try {
     const userCommandReloadSourceIsolation = await runReloadSourceIsolationRound(scope)
     return { userCommandReloadSourceIsolation }
@@ -84,6 +69,7 @@ export async function runReloadSourceIsolation(context) {
 
 async function runReloadSourceIsolationRound(context) {
   const {
+    EntryProcess, SurfaceEntryProcess,
     dsh, harnessDir, anchor, targetDshVersion, oldArtifact, newArtifact, workRoot,
     checkpoint, failpoint, registerIsolatedHome, hosts, clients,
   } = context
