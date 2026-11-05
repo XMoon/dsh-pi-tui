@@ -264,6 +264,28 @@ test('the cross-build case owns the real old/new pair, reexec handoff and both l
   assert.match(source, /stopHostForCleanup\(host\)/u)
   assert.doesNotMatch(source, /copyFileSync|cpSync/u)
   assert.doesNotMatch(source, /writeFileSync\(.*newArtifact\.path/u)
+  // The historical Full JSON compatibility summary stays owned by the real
+  // cross-build case; selected U08/U09 fragments never carry it.
+  const compatibility = source.slice(
+    source.indexOf('fragment.compatibility = {'),
+    source.indexOf('return fragment'),
+  )
+  for (const field of [
+    "protocol: 'dsh-pi-tui/local/1'",
+    'dshVersion: targetDshVersion',
+    'oldBuildId,',
+    'newBuildId,',
+    'differentBundleVersions: oldArtifact.manifest.version !== newArtifact.manifest.version',
+    'differentBuildIds: oldBuildId !== newBuildId',
+    'sameProtocol: true',
+    'sameDshRuntime: true',
+  ]) {
+    assert.ok(compatibility.includes(field), `the Full compatibility evidence must keep ${field}`)
+  }
+  const manual = readCase('manual-client-reload.mjs')
+  const isolation = readCase('reload-source-isolation.mjs')
+  assert.ok(!manual.includes('compatibility:') && !isolation.includes('compatibility:'),
+    'selected U08/U09 cases must not synthesize a cross-build compatibility summary')
 })
 
 test('the manual reload case forwards the real process constructors into both rounds', () => {
