@@ -40,8 +40,12 @@ import { DirectConfigPort } from '../../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../../src/runtime/direct/host-file-direct.ts'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
-import { createClientCommandRegistry } from '../../src/app/command/client-command-registry.ts'
+import {
+  createClientCommandRegistry,
+  type ClientCommandExecution,
+} from '../../src/app/command/client-command-registry.ts'
 import { parseCommand } from '@deepseek-ai/dsh-commands'
+import type { SeatEditor } from '../../src/tui/interaction/editor-seat-holder.ts'
 
 const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
 afterEach(() => {
@@ -78,6 +82,12 @@ function fakeCommands(): { commands: { register: (def: { name: string; handler?:
   }
 }
 
+/** One recorded staging call on a REAL draft store (`add` return value). */
+interface StagedRecord {
+  readonly id: number
+  readonly placeholder: string
+}
+
 interface Harness {
   readonly vt: VirtualTerminal
   readonly app: TuiApp
@@ -86,11 +96,12 @@ interface Harness {
   /** The absolute path of the fixture image (the `/`-prefixed-candidate case). */
   readonly absoluteImagePath: string
   /**
-   * Resolves when the intake reached its POST-READ fence. The shared intake
-   * issues a real `isSessionScopeCurrent` call only after the read settled, so
-   * this is the authoritative "the async intake finished its read" signal —
-   * needed to assert that a late write did NOT happen without guessing at a
-   * sleep.
+   * Resolves at the intake's NEXT real `isSessionScopeCurrent` call. The shared
+   * intake asks the runner's real authority at the POST-READ fence (and again at
+   * the notice gate), so awaiting this right after releasing a held read is the
+   * authoritative "the fence ran and the whole synchronous commit segment —
+   * stage, write, announce — settled" signal; needed to assert that a late write
+   * or a late notice did NOT happen without guessing at a sleep.
    */
   postRead(): Promise<void>
   /**
@@ -102,6 +113,38 @@ interface Harness {
   holdImageRead(): { release: () => void; entered: Promise<void> }
   /** Submissions the REAL app owner observed (Enter, accelerated, steer). */
   submissions(): number
+  /**
+   * EVERY notice the REAL surface sink `TuiApp.notify` delivered, in call order
+   * (recorded by a passthrough on the mounted app, never a replaced sink), so a
+   * case can COUNT announcements instead of only checking that one appeared.
+   */
+  notices(): readonly { readonly message: string; readonly kind: 'info' | 'error' | undefined }[]
+  /** The notices whose text is an intake success announcement. */
+  attachedNotices(): readonly string[]
+  /**
+   * The app-side placeholder writes the live seat really performed (the ONE
+   * `SeatEditor.replaceTextUndoable` seam `commitInlineAttachment` uses).
+   */
+  seatEdits(): readonly { readonly text: string; readonly cursor: number }[]
+  /** Every `imageStore.add` / `fileStore.add` return, in staging order. */
+  stagedImages(): readonly StagedRecord[]
+  stagedFiles(): readonly StagedRecord[]
+  /** Every `imageStore.remove` / `fileStore.remove` id, in removal order. */
+  imageRemovals(): readonly number[]
+  fileRemovals(): readonly number[]
+  /** Run a LEADING command line through the REAL Client command registry. */
+  runLeading(line: string): Promise<ClientCommandExecution | undefined>
+  /** Take the seat's undoable-edit seam away — the exact state the app-side
+   *  commit answers `false` for (`SeatEditor.replaceTextUndoable` is optional in
+   *  production), with NO draft, cursor or edit-epoch change. */
+  refuseSeatEdits(): void
+  restoreSeatEdits(): void
+  /** Move the Session OWNER (the scope generation the stub runner reports), so a
+   *  scope captured before the move is stale exactly like a real /new or switch. */
+  bumpSessionGeneration(): void
+  /** Move the Session OWNER inside the next placeholder write: the write lands
+   *  and the intake settles onto a surface that no longer has its owner. */
+  moveSessionScopeOnNextWrite(): void
 }
 
 /** A workspace with one image, one plain file and one directory. */
@@ -129,8 +172,18 @@ function setup(
   const { root, image } = fixture(life)
   for (const name of options.dirs ?? []) mkdirSync(join(root, name), { recursive: true })
   for (const name of options.files ?? []) writeFileSync(join(root, name), pngBytes())
-  let markPostRead!: () => void
-  const postRead = new Promise<void>(resolve => { markPostRead = resolve })
+  // Resolves at the intake's NEXT real Session-currentness check. The shared
+  // intake asks the runner's real authority at the post-read fence (BEFORE the
+  // commit segment), so awaiting this after a held read is an authoritative
+  // "the async intake reached the fence and the whole synchronous commit segment
+  // ran" signal — never a guessed sleep.
+  let pendingPostRead: ((() => void) | undefined) = undefined
+  const markPostRead = (): void => {
+    const resolve = pendingPostRead
+    pendingPostRead = undefined
+    resolve?.()
+  }
+  const postRead = (): Promise<void> => new Promise<void>(resolve => { pendingPostRead = resolve })
   // The UNINJECTED production read: the gate delegates to it, so the intake
   // keeps its real behavior (metadata parse, limits) instead of chaining onto
   // another test's seam.
@@ -169,10 +222,78 @@ function setup(
   app.start()
   startedApps.add(app)
   life.defer(() => app.stop())
+  // Record EVERY notice the real surface sink delivers. This patches the mounted
+  // app's OWN `notify` (the sink both intake targets call), never a replacement
+  // port, so a case can COUNT announcements instead of only checking that one
+  // appeared. The original unbound function is called through the instance.
+  const notices: { message: string; kind: 'info' | 'error' | undefined }[] = []
+  const realNotify = app.notify
+  app.notify = (text: string, kind?: 'info' | 'error') => {
+    notices.push({ message: text, kind })
+    realNotify.call(app, text, kind)
+  }
+  life.defer(() => {
+    // Restore the prototype's own method identity (no shadow left behind).
+    delete (app as unknown as { notify?: unknown }).notify
+  })
   const imageStore = new DraftImageStore()
   const fileStore = new DraftFileStore()
+  // Record the real stores' staging/removal calls (passthrough wrappers on the
+  // mounted instances), so "the staged entry was rolled back" is a witnessed
+  // mutation, not an inference from a final count.
+  const stagedImages: StagedRecord[] = []
+  const stagedFiles: StagedRecord[] = []
+  const removedImages: number[] = []
+  const removedFiles: number[] = []
+  const realImageAdd = imageStore.add
+  const realImageRemove = imageStore.remove
+  const realFileAdd = fileStore.add
+  const realFileRemove = fileStore.remove
+  imageStore.add = (input) => {
+    const staged = realImageAdd.call(imageStore, input)
+    stagedImages.push({ id: staged.id, placeholder: staged.placeholder })
+    return staged
+  }
+  imageStore.remove = (id) => {
+    const removed = realImageRemove.call(imageStore, id)
+    removedImages.push(id)
+    return removed
+  }
+  fileStore.add = (input) => {
+    const staged = realFileAdd.call(fileStore, input)
+    stagedFiles.push({ id: staged.id, placeholder: staged.placeholder })
+    return staged
+  }
+  fileStore.remove = (id) => {
+    const removed = realFileRemove.call(fileStore, id)
+    removedFiles.push(id)
+    return removed
+  }
+  // The stub runner's live Session owner. A capture is stale after a bump
+  // exactly like a real /new or switch (the REAL scope authority decides).
+  let sessionGeneration = 0
+  // The seat's ONE undoable edit seam, recorded and (on demand) refused. The
+  // recorded call is the authoritative "the placeholder really landed" witness;
+  // dropping the seam reproduces the exact production state where
+  // `TuiApp.commitInlineAttachment` answers `false`.
+  const seat: SeatEditor = app.seatEditorForTest()
+  const realReplace = seat.replaceTextUndoable
+  assert.ok(realReplace !== undefined, 'the mounted host seat exposes the undoable edit seam')
+  const seatEdits: { text: string; cursor: number }[] = []
+  let moveScopeOnWrite = false
+  const replaceAndRecord: NonNullable<SeatEditor['replaceTextUndoable']> = (text, cursor) => {
+    realReplace.call(seat, text, cursor)
+    seatEdits.push({ text, cursor })
+    if (moveScopeOnWrite) {
+      moveScopeOnWrite = false
+      sessionGeneration += 1
+    }
+  }
+  seat.replaceTextUndoable = replaceAndRecord
+  life.defer(() => { seat.replaceTextUndoable = realReplace })
+  const clientCommands = createClientCommandRegistry(parseCommand)
   const ctx = new Context()
-  const scopeFacts = sessionScopeFacts(() => undefined, () => 0)
+  const scopeFacts = sessionScopeFacts(() => undefined, () => sessionGeneration)
   const { commands } = fakeCommands()
   ctx.provide('commands', commands as never)
   const runner: TuiCommandRunner = {
@@ -204,7 +325,7 @@ function setup(
     catalog: new DirectCatalogPort(ctx as never, () => undefined),
     config: new DirectConfigPort(ctx as never, undefined, () => undefined),
     commandRegistry: ctx.get('commands') as import('../../src/commands.ts').CommandRegistryLike | undefined,
-    clientCommands: createClientCommandRegistry(parseCommand),
+    clientCommands,
     hostFile: new DirectHostFilePort(() => undefined),
     hostShellCompletion: true,
     transcriptExportAvailable: true,
@@ -228,7 +349,7 @@ function setup(
     },
     cwd: root,
     // Wraps the REAL scope authority: the intake still decides exactly as
-    // production does, and its call is the deterministic post-read signal.
+    // production does, and every call is a deterministic settlement signal.
     isSessionScopeCurrent: (scope) => {
       markPostRead()
       return scopeFacts.isSessionScopeCurrent(scope)
@@ -281,9 +402,23 @@ function setup(
     fileStore,
     absoluteImagePath: image,
     submissions: () => submissions,
-    postRead: () => postRead,
+    postRead,
     // Consecutive holds share one gate; each test holds at most once.
     holdImageRead,
+    notices: () => [...notices],
+    attachedNotices: () => notices
+      .filter(notice => notice.message.startsWith('attached ') && notice.message.endsWith(' — Enter to send'))
+      .map(notice => notice.message),
+    seatEdits: () => [...seatEdits],
+    stagedImages: () => [...stagedImages],
+    stagedFiles: () => [...stagedFiles],
+    imageRemovals: () => [...removedImages],
+    fileRemovals: () => [...removedFiles],
+    runLeading: (line) => clientCommands.execute({ line, signal: new AbortController().signal }),
+    refuseSeatEdits: () => { seat.replaceTextUndoable = undefined },
+    restoreSeatEdits: () => { seat.replaceTextUndoable = replaceAndRecord },
+    bumpSessionGeneration: () => { sessionGeneration += 1 },
+    moveSessionScopeOnNextWrite: () => { moveScopeOnWrite = true },
   }
 }
 
@@ -1075,5 +1210,326 @@ test('an EXPLICITLY quoted directory stays continuable too', async (t) => {
   assert.equal(app.seatTextForTest(), 'see [image #1 (1×1)] ',
     'the explicit-quote directory chain completes and closes only at the file')
   assert.equal(h.imageStore.size(), 1, 'the real child file was read')
+  assert.equal(h.submissions(), 0, 'never submits')
+})
+
+// ── The shared-plane intake NOTICE contract (Owner amendment: inline success
+// notice + no notice for a refused commit) ───────────────────────────────────
+// `runAttachmentIntake` owns the ONE success announcement; the inline route's
+// gate is the operation's Session OWNER (never the acceptance snapshot, which
+// the in-place placeholder write itself invalidates). Every case below counts
+// the REAL `TuiApp.notify` deliveries, so a swallowed success, a duplicated
+// success, or a success claimed for a write that never landed all fail here.
+
+/** The NEXT inline fragment, typed as real key input on a fresh line of the
+ *  SAME draft: the earlier line keeps the control's committed placeholder, and
+ *  the real path-accept grammar supplies the fragment's own trailing separator.
+ *  No span is invented — the acceptance's fragment comes from the production
+ *  grammar exactly as in the neighbouring cases. */
+function typeSecondFragment(vt: VirtualTerminal, filter: string): void {
+  // Ctrl+J is the editor's newline (Enter would submit — the policy these
+  // cases must never change).
+  vt.sendInput('\n')
+  type(vt, `again /image ${filter}`)
+}
+
+test('an inline /image success lands ONE undoable placeholder edit and announces it EXACTLY ONCE', async (t) => {
+  const life = testLifecycle(t)
+  const h = setup(life)
+  const { vt, app } = h
+  await vt.waitForRender()
+  type(vt, 'one /image ')
+  await vt.waitForRender()
+  type(vt, 'shot')
+  await waitForDraft(app, draft => draft === 'one /image shot', 'the filter lands in the draft')
+  await waitForOnlyRow(vt, app, 'shot.png', 'the single filtered image candidate')
+  vt.sendInput('\r')
+  // The commit segment is synchronous: the seat write and its announcement are
+  // the same turn, so the recorded seat edit is the settle witness (no sleep).
+  await waitFor(() => h.seatEdits().length === 1, 'the intake wrote the placeholder through the seat seam')
+  await vt.waitForRender()
+
+  const placeholder = '[image #1 (1×1)]'
+  assert.deepEqual(h.seatEdits(), [{ text: `one ${placeholder} `, cursor: `one ${placeholder}`.length }],
+    'the intake is exactly ONE undoable seat edit that replaced the fragment in place')
+  assert.equal(app.seatTextForTest(), `one ${placeholder} `, 'the placeholder is the draft')
+  assert.deepEqual(h.stagedImages(), [{ id: 1, placeholder }], 'the draft-image store holds the staged entry')
+  assert.equal(h.imageStore.size(), 1)
+  assert.deepEqual(h.attachedNotices(), [`attached ${placeholder} — Enter to send`],
+    'EXACTLY ONE success notice for the one completed inline commit')
+  // The whole announcement ledger, not just the filtered success line: the one
+  // inline commit produces ONE notice of ANY kind on the real surface sink.
+  assert.deepEqual(h.notices(), [{ message: `attached ${placeholder} — Enter to send`, kind: 'info' }],
+    'one notice call in total: no duplicate, no second announcement of any kind')
+  assert.equal(h.submissions(), 0, 'never submits')
+})
+
+test('an inline /attach of a generic file lands the file token through the one edit, announces EXACTLY ONCE, and is never an image', async (t) => {
+  const life = testLifecycle(t)
+  const h = setup(life)
+  const { vt, app } = h
+  await vt.waitForRender()
+  type(vt, 'doc /attach ')
+  await vt.waitForRender()
+  type(vt, 'notes')
+  await waitForDraft(app, draft => draft === 'doc /attach notes', 'the filter lands in the draft')
+  await waitForOnlyRow(vt, app, 'notes.txt', 'the single filtered file candidate')
+  vt.sendInput('\r')
+  await waitFor(() => h.seatEdits().length === 1, 'the intake wrote the file token through the seat seam')
+  await vt.waitForRender()
+
+  const placeholder = '[file #1 (11 B)]'
+  assert.equal(app.seatTextForTest(), `doc ${placeholder} `, 'the generic-file token replaced the fragment in place')
+  assert.deepEqual(h.stagedFiles(), [{ id: 1, placeholder }], 'the FILE store holds the staged metadata entry')
+  const staged = h.fileStore.values()[0]!
+  assert.equal(staged.name, 'notes.txt', 'the staged name came from the real probe')
+  assert.equal(staged.byteLength, 11, 'the staged byte length came from the real file stat')
+  assert.equal(staged.source.type, 'path', 'the generic file keeps its Client-local path source')
+  assert.deepEqual(h.attachedNotices(), [`attached ${placeholder} — Enter to send`],
+    'EXACTLY ONE success notice for the one completed generic-file commit')
+  assert.deepEqual(h.notices(), [{ message: `attached ${placeholder} — Enter to send`, kind: 'info' }],
+    'one notice call in total on the real surface sink')
+
+  // The same business result through the OTHER authority: the file token is
+  // never presented as an image — the submit-side image expansion finds none.
+  const { expandImagePlaceholders } = await import('../../src/client/media/image/placeholder.ts')
+  const segments = expandImagePlaceholders(app.seatTextForTest(), h.imageStore)
+  assert.equal(h.imageStore.size(), 0, 'a generic file never enters the image store')
+  assert.equal(h.stagedImages().length, 0, 'no image staging call ran on the /attach file route')
+  assert.deepEqual(segments.filter(segment => segment.type === 'image'), [],
+    'the generic-file token expands to NO image block')
+  assert.equal(h.submissions(), 0, 'never submits')
+})
+
+test('a placeholder commit the app REFUSES rolls the staged entry back and announces nothing', async (t) => {
+  const life = testLifecycle(t)
+  const h = setup(life)
+  const { vt, app } = h
+  await vt.waitForRender()
+  // POSITIVE CONTROL on the SAME sink, through the route whose notice gate was
+  // never in question (the leading command's composer identity): a completed
+  // intake DOES announce exactly once here. The control deliberately does NOT
+  // use the inline route, so a run that fails below fails on the REFUSED COMMIT,
+  // not on some other announcement.
+  const control = await h.runLeading(`/image ${h.absoluteImagePath}`)
+  assert.deepEqual(control?.result, { kind: 'success' }, 'the real Client registry ran the control /image')
+  await waitFor(() => h.attachedNotices().length === 1, 'the control success notice reached the surface sink')
+  const controlNotice = h.attachedNotices()[0]!
+  const storeAtControl = h.imageStore.size()
+  const stagedAtControl = h.stagedImages().length
+  assert.equal(storeAtControl, 1, 'the control staged exactly one image')
+
+  // THE REFUSED COMMIT: hold the real read and take the seat's undoable seam
+  // away while it is in flight — the exact production state where
+  // `TuiApp.commitInlineAttachment` answers `false` (the seam is optional on
+  // `SeatEditor`), with the seat and the Session owner both still current.
+  // The control insert left the draft `…[image #1 (1×1)] ` with the cursor at
+  // its end, so this `/image` token is an INLINE body seat, not the leading one.
+  type(vt, '/image shot')
+  await waitForDraft(app, draft => draft === '[image #1 (1×1)] /image shot', 'the refused inline fragment lands')
+  await waitForOnlyRow(vt, app, 'shot.png', 'the refused image candidate')
+  const hold = h.holdImageRead()
+  vt.sendInput('\r')
+  await hold.entered
+  h.refuseSeatEdits()
+  hold.release()
+  await h.postRead()
+  await waitFor(() => h.stagedImages().length === stagedAtControl + 1,
+    'the refused intake reached the store: it staged, then was refused')
+  h.restoreSeatEdits()
+  await vt.waitForRender()
+
+  const refused = h.stagedImages()[stagedAtControl]!
+  assert.equal(refused.placeholder, '[image #2 (1×1)]', 'the refused intake staged the next canonical entry')
+  assert.deepEqual(h.imageRemovals(), [refused.id], 'exactly that staged entry was rolled back, nothing else')
+  assert.equal(h.imageStore.size(), storeAtControl, 'the store count is back to its PRIOR value')
+  assert.deepEqual(h.seatEdits(), [], 'the refused commit wrote nothing to the seat')
+  assert.equal(app.seatTextForTest().includes(refused.placeholder), false,
+    'no placeholder reached the draft for a refused commit')
+  assert.deepEqual(h.attachedNotices(), [controlNotice],
+    'a refused commit announces NOTHING: the control notice is still the only one')
+  assert.equal(h.submissions(), 0, 'never submits')
+})
+
+test('an inline intake that settles onto a MOVED session owner writes nothing, stages nothing and claims no success (the same gesture with the owner intact does)', async (t) => {
+  const life = testLifecycle(t)
+  const h = setup(life)
+  const { vt, app } = h
+  await vt.waitForRender()
+  // POSITIVE CONTROL: with the Session owner still current the identical gesture
+  // lands the placeholder and announces it exactly once.
+  type(vt, 'ok /image shot')
+  await waitForDraft(app, draft => draft === 'ok /image shot', 'the control filter lands')
+  await waitForOnlyRow(vt, app, 'shot.png', 'the control image candidate')
+  vt.sendInput('\r')
+  await waitFor(() => h.attachedNotices().length === 1, 'the control success notice reached the surface sink')
+  await waitFor(() => h.seatEdits().length === 1, 'the control placeholder write landed')
+  const controlNotice = h.attachedNotices()[0]!
+  const stagedAtControl = h.stagedImages().length
+
+  // THE MOVED OWNER: the Session generation bumps while the real read is in
+  // flight, so the intake settles onto a surface owned by someone else.
+  typeSecondFragment(vt, 'shot')
+  await waitForDraft(app, draft => draft.endsWith('again /image shot '), 'the stale fragment lands')
+  await waitForOnlyRow(vt, app, 'shot.png', 'the stale image candidate')
+  const hold = h.holdImageRead()
+  vt.sendInput('\r')
+  await hold.entered
+  // The acceptance has installed its own document by now: the read is in flight
+  // against exactly this draft.
+  const staleAccepted = app.seatTextForTest()
+  h.bumpSessionGeneration()
+  hold.release()
+  await h.postRead()
+  await vt.waitForRender()
+
+  assert.equal(h.stagedImages().length, stagedAtControl, 'the stale intake staged NOTHING')
+  assert.equal(h.imageStore.size(), 1, 'the draft-image count is exactly the control entry')
+  assert.equal(h.seatEdits().length, 1, 'the stale intake wrote nothing to the seat')
+  assert.equal(app.seatTextForTest(), staleAccepted, 'the user kept the accepted path text, untouched')
+  assert.equal(app.seatTextForTest().includes('[image #2'), false, 'no placeholder replaced the stale fragment')
+  assert.deepEqual(h.attachedNotices(), [controlNotice],
+    `NO success notice was claimed for the stale settlement (got ${JSON.stringify(h.attachedNotices())})`)
+  // The refusal is not silent amnesia: the intake's own fence EXPLAINS it, so
+  // the absence above is a fact about the notice gate, not about a run that
+  // never reached the surface.
+  assert.deepEqual(h.notices().filter(notice => notice.kind === 'error'),
+    [{ message: 'the session changed while reading the image — try again', kind: 'error' }],
+    'the post-read owner fence still reports its refusal')
+  assert.equal(h.submissions(), 0, 'never submits')
+})
+
+test('a seat that moved during the read announces nothing at all (the same gesture on the intact seat announces once)', async (t) => {
+  const life = testLifecycle(t)
+  const h = setup(life)
+  const { vt, app } = h
+  await vt.waitForRender()
+  // POSITIVE CONTROL: the intact seat gets its placeholder and one notice.
+  type(vt, 'keep /image shot')
+  await waitForDraft(app, draft => draft === 'keep /image shot', 'the control filter lands')
+  await waitForOnlyRow(vt, app, 'shot.png', 'the control image candidate')
+  vt.sendInput('\r')
+  await waitFor(() => h.attachedNotices().length === 1, 'the control success notice reached the surface sink')
+  const controlNotice = h.attachedNotices()[0]!
+  const stagedAtControl = h.stagedImages().length
+
+  // THE MOVED SEAT: the user keeps typing while the real read is in flight.
+  typeSecondFragment(vt, 'shot')
+  await waitForDraft(app, draft => draft.endsWith('again /image shot '), 'the moved fragment lands')
+  await waitForOnlyRow(vt, app, 'shot.png', 'the moved-seat image candidate')
+  const hold = h.holdImageRead()
+  vt.sendInput('\r')
+  await hold.entered
+  type(vt, 'X')
+  await vt.waitForRender()
+  const movedDraft = app.seatTextForTest()
+  hold.release()
+  await h.postRead()
+  await vt.waitForRender()
+
+  assert.ok(movedDraft.includes('X'), `the user's own edit survived: ${JSON.stringify(movedDraft)}`)
+  assert.equal(app.seatTextForTest(), movedDraft, 'the moved seat was never overwritten')
+  assert.equal(h.stagedImages().length, stagedAtControl, 'the moved seat staged NOTHING')
+  assert.equal(h.seatEdits().length, 1, 'the moved seat was never written by the intake')
+  assert.deepEqual(h.attachedNotices(), [controlNotice], 'NO success notice was claimed for the moved seat')
+  // The moved seat is SILENT, not merely un-success-notified: the fence emits no
+  // announcement of any kind, because `explain` is gated by the seat too.
+  assert.deepEqual(h.notices(), [{ message: controlNotice, kind: 'info' }],
+    'not one additional notice of any kind was delivered to the moved seat')
+  assert.equal(h.submissions(), 0, 'never submits')
+})
+
+test('the inline success notice stays GATED on the Session owner: a write that lands as the owner moves announces nothing (the ungated run before it announces once)', async (t) => {
+  const life = testLifecycle(t)
+  const h = setup(life)
+  const { vt, app } = h
+  await vt.waitForRender()
+  // POSITIVE CONTROL: an ordinary inline commit announces exactly once, so the
+  // suppression below is a fact about the gate — not about a notice sink that
+  // never fires. Deleting the gate entirely would deliver a SECOND notice here
+  // and fail this case.
+  type(vt, 'first /image shot')
+  await waitForDraft(app, draft => draft === 'first /image shot', 'the control filter lands')
+  await waitForOnlyRow(vt, app, 'shot.png', 'the control image candidate')
+  vt.sendInput('\r')
+  await waitFor(() => h.attachedNotices().length === 1, 'the control success notice reached the surface sink')
+  const controlNotice = h.attachedNotices()[0]!
+
+  // THE GATE: move the Session owner INSIDE the synchronous commit segment, at
+  // the seat's own write seam and right AFTER the placeholder write landed. This
+  // is the only window the notice gate actually covers (the commit and the
+  // announcement share one synchronous segment, so nothing else can interleave),
+  // and it is the case a "just delete the gate" change cannot pass. The completed
+  // write keeps its bytes and its token — the seat-side fences had already been
+  // proved BEFORE the write, which is where they belong — and only the
+  // ANNOUNCEMENT is refused, because a stale success must never be reported on
+  // the replacement owner's surface.
+  h.moveSessionScopeOnNextWrite()
+  typeSecondFragment(vt, 'shot')
+  await waitForDraft(app, draft => draft.endsWith('again /image shot '), 'the second fragment lands')
+  await waitForOnlyRow(vt, app, 'shot.png', 'the second image candidate')
+  vt.sendInput('\r')
+  await waitFor(() => h.seatEdits().length === 2, 'the second placeholder write landed')
+  await vt.waitForRender()
+
+  assert.equal(app.seatTextForTest(), 'first [image #1 (1×1)]\nagain [image #2 (1×1)] ',
+    'the write itself completed: only the announcement is gated')
+  assert.equal(h.imageStore.size(), 2, 'both staged entries survive')
+  assert.deepEqual(h.attachedNotices(), [controlNotice],
+    `the moved owner announced NOTHING (got ${JSON.stringify(h.attachedNotices())})`)
+  assert.deepEqual(h.notices(), [{ message: controlNotice, kind: 'info' }],
+    'the ledger holds ONLY the current-owner commit: the stale success was gated')
+  assert.equal(h.submissions(), 0, 'never submits')
+})
+
+test('the LEADING /image and /attach routes still announce exactly one success notice each', async (t) => {
+  const life = testLifecycle(t)
+  const h = setup(life)
+  const { app } = h
+  const image = await h.runLeading(`/image ${h.absoluteImagePath}`)
+  assert.deepEqual(image?.result, { kind: 'success' }, 'the real Client registry ran /image')
+  await waitFor(() => h.attachedNotices().length === 1, 'the leading /image success notice reached the surface sink')
+  const file = await h.runLeading('/attach notes.txt')
+  assert.deepEqual(file?.result, { kind: 'success' }, 'the real Client registry ran /attach')
+  await waitFor(() => h.attachedNotices().length === 2, 'the leading /attach success notice reached the surface sink')
+  await h.vt.waitForRender()
+
+  assert.deepEqual(h.attachedNotices(), [
+    'attached [image #1 (1×1)] — Enter to send',
+    'attached [file #1 (11 B)] — Enter to send',
+  ], 'exactly ONE success notice per leading command, in the order the commits landed')
+  assert.equal(h.imageStore.size(), 1, 'one staged image, no duplicate')
+  assert.equal(h.fileStore.values().length, 1, 'one staged file, no duplicate')
+  assert.ok(app.seatTextForTest().includes('[image #1 (1×1)]'), 'the image token reached the draft')
+  assert.ok(app.seatTextForTest().includes('[file #1 (11 B)]'), 'the file token reached the draft')
+  assert.equal(h.submissions(), 0, 'a leading attach never submits')
+})
+
+test('the LEADING /attach route still reports a real FileInputError and leaves zero orphan store entries (the control attach does stage and announce)', async (t) => {
+  const life = testLifecycle(t)
+  const h = setup(life)
+  const { app } = h
+  // POSITIVE CONTROL: the same command with a real file stages, writes the token
+  // and announces once — so the error assertions below are about the failure,
+  // not about a route that never notifies or never touches the store.
+  const control = await h.runLeading('/attach notes.txt')
+  assert.deepEqual(control?.result, { kind: 'success' })
+  await waitFor(() => h.attachedNotices().length === 1, 'the control success notice reached the surface sink')
+  await waitFor(() => h.fileStore.values().length === 1, 'the control file was staged')
+  const controlNotice = h.attachedNotices()[0]!
+
+  const failing = await h.runLeading('/attach nope.txt')
+  assert.deepEqual(failing?.result, { kind: 'success' }, 'the command dispatch itself acknowledged; the failure is the intake notice')
+  const errorNotices = () => h.notices().filter(notice => notice.kind === 'error')
+  await waitFor(() => errorNotices().length === 1, 'the real FileInputError reached the surface sink')
+  await h.vt.waitForRender()
+
+  assert.deepEqual(errorNotices(), [{ message: 'File not found: nope.txt', kind: 'error' }],
+    'the production FileInputError message is reported verbatim as an error')
+  assert.equal(h.stagedFiles().length, 1, 'the failed path staged NOTHING (no orphan entry)')
+  assert.equal(h.fileStore.values().length, 1, 'the file store holds only the control entry')
+  assert.equal(h.imageStore.size(), 0, 'the image store stayed empty')
+  assert.deepEqual(h.attachedNotices(), [controlNotice], 'no success notice was claimed for the failed attach')
+  assert.equal(app.seatTextForTest(), '[file #1 (11 B)] ', 'only the control token is in the draft')
   assert.equal(h.submissions(), 0, 'never submits')
 })
