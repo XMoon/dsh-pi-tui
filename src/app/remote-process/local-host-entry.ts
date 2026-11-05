@@ -152,13 +152,15 @@ export const HOST_ONLY_PATCH = `# M4-B1 Host-only profile overlay: production Ho
 # Only the isolated qualification runs additionally override rows through
 # SPLIT_PROCESS_EXTRA_PATCH; that internal test channel is not a user API.
 #
-# The roster is the official rc.5 browser graph minus every row whose
-# authority ALREADY exists in this Host: the second 'connection',
-# 'api-remotes', 'file-upload', 'workspace'/'workspace-controller',
+# The roster is the official browser graph of the installed DSH family minus
+# every row whose authority ALREADY exists in this Host: the second
+# 'connection', 'api-remotes', 'file-upload', 'workspace'/'workspace-controller',
 # 'session-controller', 'settings-controller', 'webserver', 'frontend-static'
 # fallback, 'web-startup' parser and the Web-only Host business rows are NOT
-# declared here. 'terminal-controller' is the ONE official Host row added on
-# top of the browser roster (the real Browser x TUI composition needs it).
+# declared here. The mandatory client-dependency closure of the official UIs
+# ('ui-context-menu', 'ui-file-drag') is part of it; new optional feature rows
+# are not. 'terminal-controller' is the ONE official Host row added on top of
+# the browser roster (the real Browser x TUI composition needs it).
 #
 # 'web-runtime' owns the single 'frontend-static' fallback over the official
 # dist and is explicitly told to stay silent: no browser launch, no printed
@@ -180,6 +182,9 @@ export const HOST_ONLY_PATCH = `# M4-B1 Host-only profile overlay: production Ho
       disabled: true
     - id: cordis-client-runner
       name: '@deepseek-ai/dsh-cordis-client-runner'
+      disabled: true
+    - id: ui-context-menu
+      name: '@deepseek-ai/dsh-client-ui-context-menu'
       disabled: true
     - id: ui-open-in-app
       name: '@deepseek-ai/dsh-client-ui-open-in-app'
@@ -256,6 +261,9 @@ export const HOST_ONLY_PATCH = `# M4-B1 Host-only profile overlay: production Ho
     - id: ui-attachment
       name: '@deepseek-ai/dsh-client-ui-attachment'
       disabled: true
+    - id: ui-file-drag
+      name: '@deepseek-ai/dsh-client-ui-file-drag'
+      disabled: true
     - id: ui-tool
       name: '@deepseek-ai/dsh-client-ui-tool'
       disabled: true
@@ -303,9 +311,6 @@ export const HOST_ONLY_PATCH = `# M4-B1 Host-only profile overlay: production Ho
       disabled: true
     - id: ui-model-selection
       name: '@deepseek-ai/dsh-client-ui-model-selection'
-      disabled: true
-    - id: ui-deepseek-model-label-1017
-      name: '@deepseek-ai/dsh-client-ui-deepseek-model-label-1017'
       disabled: true
     - id: ui-permission
       name: '@deepseek-ai/dsh-client-ui-permission-presets'
