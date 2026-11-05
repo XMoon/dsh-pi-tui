@@ -9912,12 +9912,16 @@ async function proveFailpointCleanup(dshHome) {
   else console.error('FAILPOINT_CLEANUP_OK')
 }
 
-/** Print the ONE registry-backed selectable listing (no tarball, no setup). */
+/**
+ * Print the ONE registry-backed selectable listing (no tarball, no setup).
+ *
+ * The registry order IS the execution order a suite or the full lane follows,
+ * so the listing prints it verbatim: sorting here would show a bootstrap order
+ * that no real run performs.
+ */
 function printSelectableCases() {
-  const cases = [...listSelectableCases()].sort((left, right) => left.suite.localeCompare(right.suite)
-    || left.id.localeCompare(right.id))
   process.stdout.write('SPLIT_PROCESS_SELECTABLE_CASES scope=SELECTABLE_ONLY\n')
-  for (const entry of cases) {
+  for (const entry of listSelectableCases()) {
     process.stdout.write(`suite=${entry.suite} case=${entry.id} title=${entry.title}\n`)
   }
 }
