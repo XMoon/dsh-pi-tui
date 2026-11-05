@@ -103,10 +103,15 @@ export function isInlineAttachmentPath(
  *
  * The rule is the path argument's own grammar:
  * - inside an OPEN quoted token, spaces are path content, so the remainder runs
- *   to the matching quote (or to the end of the line while it is still open);
+ *   to the matching quote (or to the end of THIS line while it is still open);
  * - otherwise the remainder is the current WORD up to the next separator — a
  *   POSIX filename may carry Unicode, `#`, `+`, `@`, `%` and so on, so a
  *   character allowlist cannot express this;
+ * - a CR or an LF ENDS the token in both forms. The line this grammar receives
+ *   may carry a line break inside it — one editor keeps a pasted CRLF's CR as
+ *   the content at its line's end — and the token never crosses it: an
+ *   attachment accept replaces a fragment of ONE line and must leave every
+ *   other line, and the break that ends this one, byte-for-byte untouched;
  * - at an EMPTY argument seat (the caret sits at the seat's first column) there
  *   is no token before the caret, so the text to the right is the user's PROSE
  *   and nothing may be consumed.
@@ -122,8 +127,12 @@ export function splitTokenRemainder(
   caretInsideToken: boolean,
 ): { consumed: string; suffix: string } {
   if (quoted) {
-    const close = afterCursor.indexOf('"')
-    const end = close === -1 ? afterCursor.length : close + 1
+    // The token runs to its OWN closing quote, and a line break that comes
+    // first ends it: an open quote never reaches across a line for a partner.
+    const boundary = /[\r\n"]/.exec(afterCursor)
+    const end = boundary === null
+      ? afterCursor.length
+      : boundary.index + (boundary[0] === '"' ? 1 : 0)
     return { consumed: afterCursor.slice(0, end), suffix: afterCursor.slice(end) }
   }
   // The SEPARATOR set must be the path argument's own, which rejects ONLY an
@@ -131,11 +140,14 @@ export function splitTokenRemainder(
   // rule the completion formatter uses when it decides that a name needs
   // quoting. A Unicode whitespace such as U+3000 is therefore a legal filename
   // character: treating it as a separator here would stop mid-name and duplicate
-  // the tail (`文　件.png` → `文　件.png 　件.png`).
+  // the tail (`文　件.png` → `文　件.png 　件.png`). A CR/LF is listed with the
+  // separators for the opposite reason — it is not a separator the argument may
+  // carry, it is the end of the line, which ends the token — so it is spelled
+  // out here instead of taking `\s`, which would also swallow U+3000.
   if (!caretInsideToken || afterCursor === '' || /^[ \t]/.test(afterCursor)) {
     return { consumed: '', suffix: afterCursor }
   }
-  const word = /^[^ \t]*/.exec(afterCursor)?.[0] ?? ''
+  const word = /^[^ \t\r\n]*/.exec(afterCursor)?.[0] ?? ''
   return { consumed: word, suffix: afterCursor.slice(word.length) }
 }
 
