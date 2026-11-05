@@ -167,6 +167,7 @@ export async function runWebStartupPreference(context) {
     return peer.waitFor(entry => entry.op === 'web-access-url' && entry.requestId === requestId,
       `${label} web-access-url`, 120_000)
   }
+  let originalError
   try {
     // ── A. Default-Off Host + save On through the real Remote settings ───
     const first = await startHost('PC-07 default-off')
@@ -401,6 +402,9 @@ export async function runWebStartupPreference(context) {
       hiddenSameProcessRemount: false,
     })
     return { verified: true }
+  } catch (error) {
+    originalError = error
+    throw error
   } finally {
     for (const client of clients) {
       try { await client.dispose() } catch { /* best effort */ }
@@ -417,25 +421,38 @@ export async function runWebStartupPreference(context) {
     // the REAL Settings wire on a fresh Host/Peer even when the case failed
     // after changing it, and fail this case if the read-back does not confirm
     // Off. Never rewrite the preference file directly.
+    let recoveryError
     if (webScopeSuffix !== undefined) {
-      let resetHost
-      let resetPeer
+      // Track array boundaries because startHost()/startPeer() publish their
+      // process BEFORE waiting for Ready. If the wait throws, the local
+      // cleanup must still find and stop those partially-started processes.
+      const hostBoundary = hosts.length
+      const peerBoundary = peers.length
       try {
-        const started = await startHost('PC-08 final preference reset')
-        resetHost = started.host
-        resetPeer = await startPeer('PC-08 final preference reset')
+        await startHost('PC-08 final preference reset')
+        const resetPeer = await startPeer('PC-08 final preference reset')
         const reset = await webPreference(resetPeer, 'PC-08 final preference reset', false)
         assert(reset.ok === true && reset.autoStart === false && reset.readBack === true,
           `PC-08 final preference reset did not read back Off: ${JSON.stringify(reset)}`)
         trace('t74-web-preference-restored', { autoStart: false, readBack: true })
+      } catch (error) {
+        recoveryError = error
       } finally {
-        if (resetPeer !== undefined && !resetPeer.exited) {
-          try { await resetPeer.shutdown() } catch { /* best effort */ }
+        for (const peer of peers.slice(peerBoundary)) {
+          if (peer.exited) continue
+          try { await peer.shutdown() } catch { /* best effort */ }
         }
-        if (resetHost !== undefined && !resetHost.exited) {
-          try { await resetHost.shutdown() } catch { /* best effort */ }
+        for (const host of hosts.slice(hostBoundary)) {
+          if (host.exited) continue
+          try { await host.shutdown() } catch { /* best effort */ }
         }
       }
+    }
+    if (recoveryError !== undefined) {
+      if (originalError === undefined) throw recoveryError
+      // Preserve the original qualification failure; expose only the fixed
+      // recovery failure category, never raw error text or the settings value.
+      trace('t74-web-preference-restore-failed', { result: 'recovery-failed-after-case-failure' })
     }
   }
 }
