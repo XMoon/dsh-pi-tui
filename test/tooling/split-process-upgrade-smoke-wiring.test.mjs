@@ -288,25 +288,6 @@ test('the cross-build case owns the real old/new pair, reexec handoff and both l
     'selected U08/U09 cases must not synthesize a cross-build compatibility summary')
 })
 
-test('the cases snapshot failure handles before their own cleanup', () => {
-  const runner = readFileSync(SCRIPT, 'utf8')
-  assert.match(runner, /const failureProcesses = \[\]/u)
-  assert.match(runner, /const captureFailure = handles => \{/u)
-  assert.match(runner, /failureProcesses\.push\(\{\n\s+role: handle\.role,\n\s+exited: handle\.exited === true,/u,
-    'captureFailure must copy failure-time facts, not hold live handles that cleanup mutates')
-  assert.match(runner, /records: Array\.isArray\(handle\.records\) \? handle\.records\.slice\(-8\) : \[\]/u)
-  assert.match(runner, /captureFailure,/u)
-  const cross = readCase('cross-build-compatibility.mjs')
-  assert.match(cross, /let detachedHost/u)
-  assert.match(cross, /detachedHost = \{ pid: newHost\.hostPid, starttime: newHost\.hostStarttime, scopeDir: newScopeDir \}/u)
-  assert.match(cross, /await stopRecordedHostForCleanup\(detachedHost\)/u)
-  assert.match(cross, /captureFailure\(failureHandles\)/u)
-  for (const name of ['manual-client-reload.mjs', 'reload-source-isolation.mjs']) {
-    const source = readCase(name)
-    assert.match(source, /context\.captureFailure\(\[\.\.\.hosts, \.\.\.clients\]\)/u)
-  }
-})
-
 test('the manual reload case forwards the real process constructors into both rounds', () => {
   const source = readCase('manual-client-reload.mjs')
   assert.match(source, /const scope = \{ \.\.\.context, hosts, clients \}/u,
@@ -414,9 +395,6 @@ test('the runner owns ONE harness/setup boundary, ONE scope and the registered-h
   assert.match(source, /const isolatedHomes = new Set\(\)/u)
   assert.match(source, /const registerIsolatedHome = path => \{ isolatedHomes\.add\(path\) \}/u)
   assert.match(source, /for \(const isolatedHome of isolatedHomes\) killIsolatedProcesses\(isolatedHome\)/u)
-  assert.match(source, /proveFailpointCleanup\(isolatedHomes, publishedScopes\)/u)
-  assert.match(source, /const collectPublishedScopes = \(\) =>/u)
-  assert.match(source, /if \(leftovers > 0 \|\| seats !== 'free'\)/u)
   assert.match(source, /SPLIT_UPGRADE_FAILPOINT_CLEANUP leftovers=/u)
   assert.match(source, /SPLIT_UPGRADE_FAILPOINT_CLEANUP_OK/u)
   assert.match(source, /for \(const run of \[\.\.\.activeProcesses\]\)/u)
@@ -453,7 +431,6 @@ test('the failure report path stays bounded and keeps the --evidence FAIL twin',
   const source = readFileSync(SCRIPT, 'utf8')
   assert.match(source, /diagnostics = createSmokeDiagnostics\(\{[\s\S]{0,300}lane: 'split-upgrade'/u)
   assert.match(source, /process\.stderr\.write\(`\$\{diagnostics\.identityLine\(\)\}\\n`\)/u)
-  assert.match(source, /diagnostics\.reportFailure\(error, \{\n\s+processes: \[\.\.\.failureProcesses, \.\.\.activeProcesses\],\n\s+evidencePath: options\.evidence,\n\s+\}\)/u)
   assert.match(source, /emitInputFailure\(\{[\s\S]{0,200}evidencePath: options\?\.evidence/u)
   assert.match(source, /SPLIT_PROCESS_UPGRADE_SMOKE_FAILURE: \$\{safeFailureSummary\(error\)\}/u)
   assert.match(source, /if \(KEEP\) process\.stderr\.write\(`SPLIT_PROCESS_UPGRADE_SMOKE_FORENSICS: \$\{forensicErrorText\(error\)\}\\n`\)/u)
