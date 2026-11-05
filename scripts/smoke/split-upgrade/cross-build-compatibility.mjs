@@ -856,6 +856,18 @@ export async function runCrossBuildCompatibility(context) {
         assert(sha256(path) === (path === oldArtifact.path ? oldArtifact.sha256 : newArtifact.sha256),
           `the packaged artifact changed during the lane: ${basename(path)}`)
       }
+      // Historical Full evidence compatibility summary. This is measured by the
+      // cross-build case only; selected U08/U09 runs never receive this block.
+      fragment.compatibility = {
+        protocol: 'dsh-pi-tui/local/1',
+        dshVersion: targetDshVersion,
+        oldBuildId,
+        newBuildId,
+        differentBundleVersions: oldArtifact.manifest.version !== newArtifact.manifest.version,
+        differentBuildIds: oldBuildId !== newBuildId,
+        sameProtocol: true,
+        sameDshRuntime: true,
+      }
     return fragment
   } finally {
     for (const client of clients) {
