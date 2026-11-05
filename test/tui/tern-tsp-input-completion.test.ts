@@ -1,5 +1,5 @@
 /**
- * The TSP slash-completion seat on the REAL SDK mount.
+ * The TSP input-completion seat on the REAL SDK mount.
  *
  * Every case drives the production `mountTspRenderer` over the scripted tty pane
  * and the shipped `@stencil-hq/tern` SDK: the catalog arrives through the
@@ -9,13 +9,21 @@
  * `text`/UTF-16 `cursor`, the candidate rows of the anchored list, and the exact
  * number of application callbacks the mount made.
  *
+ * The seat is ONE list with five positions decided by the SAME classifiers the
+ * shared Provider uses: a first-line leading `/command` (I-C), a Host `@`
+ * mention, a first-line leading `/image`/`/attach` path argument, a body
+ * inline path argument, and the body inline `/action`/`/skill` reference. This
+ * file proves the mount-level behaviour of those seats — which rows paint, what
+ * one accept writes, and that accepting never reads, stages or submits — not
+ * the command plane's intake (`test/app/**`/`test/integration/**`).
+ *
  * EVIDENCE LEVEL: SDK mount + wire. STANDS-IN: the scripted pane is not a
- * physical Tern client (that lane is `scripts/tern-pane-slash-completion-ux.mjs`
- * and `scripts/tern-gui-slash-completion.mjs`); the application above the mount
+ * physical Tern client (that lane is `scripts/tern-pane-input-completion-ux.mjs`
+ * and `scripts/tern-gui-input-completion.mjs`); the application above the mount
  * is the renderer's own bound input handlers, not the `SurfaceRuntime` — the
- * real catalog provenance, the real `SubmissionController` and the real
- * extension registry are
- * `test/app/tern-tsp-slash-completion-composition.test.ts`.
+ * real catalog provenance, the real `SubmissionController`, the real stager
+ * installation and the real extension registry are
+ * `test/app/tern-tsp-input-completion-composition.test.ts`.
  *
  * Seat priority proves ONE fact per seat here: while a higher owner holds the
  * keys, no arrow reaches the completion list. Each seat's own navigation stays
@@ -23,19 +31,30 @@
  * `tern-tsp-model-quick-menu`, `tern-tsp-session-browser`,
  * `tern-tsp-model-picker`, `tern-tsp-preset-picker`, `tern-tsp-work-hub`).
  *
- * @module @xmoon76/dsh-pi-tui/tern-tsp-slash-completion.test
+ * @module @xmoon76/dsh-pi-tui/tern-tsp-input-completion.test
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import test, { type TestContext } from 'node:test'
 import { connect } from '@stencil-hq/tern'
 import type { Session } from '@stencil-hq/tern'
 import type { StatusSnapshot } from '../../src/domain/status/types.ts'
 import { emptyStatusSnapshot } from '../../src/domain/status/types.ts'
+import type { HumanSkillSummary } from '../../src/domain/catalog/skill.ts'
 import { mountTspRenderer, type TspRenderer } from '../../src/tui/tsp/session.ts'
-import type { TspCommandCompletionInstallation } from '../../src/app/surface/runtime.ts'
-import type { HostFilePort } from '../../src/runtime/host-file-port.ts'
+import type {
+  TspCommandCompletionInstallation,
+  TspInlineAttachmentStake,
+} from '../../src/app/surface/runtime.ts'
+import type {
+  HostFileListResult,
+  HostFilePort,
+  HostFileScope,
+} from '../../src/runtime/host-file-port.ts'
 import { installTspPane, type TspPane } from '../support/tsp-terminal-fixture.ts'
+import { testLifecycle } from '../support/temp-lifecycle.ts'
 import { waitUntil } from '../support/tsp-runner-harness.ts'
 import { wireNodes, type WireNode } from '../support/tsp-picker-wire.ts'
 
@@ -105,6 +124,8 @@ interface SlashPane {
   key(bytes: string): Promise<void>
   /** Send a key that must change NOTHING, then wait the absence window. */
   quietKey(bytes: string): Promise<void>
+  /** Step the caret LEFT by graphemes and wait for the caret / frame it painted. */
+  caretLeft(steps: number, expected?: number): Promise<void>
   click(node: WireNode, writes?: boolean): Promise<void>
   commitStatus(snapshot: StatusSnapshot): Promise<void>
   dispose(): Promise<void>
@@ -116,7 +137,95 @@ interface MountOptions {
   readonly commands?: TspCommandCompletionInstallation['commands']
   /** A Host-file port that COUNTS every call (the no-file-probe witness). */
   readonly countingHostFile?: boolean
+  /** A scripted Host-file port (the positive `@` authority). */
+  readonly fileReferences?: HostFilePort | null
+  /** The Client-local completion base (a real temp directory when a case needs
+   *  real local files; the mount uses the bounded no-finder fallback). */
+  readonly localCwd?: string
+  /** The detached inline skill catalog the body `/name` seat reads. */
+  readonly skillReferences?: readonly HumanSkillSummary[]
   readonly extensionSuggest?: TspCommandCompletionInstallation['extensionSuggest']
+}
+
+/** One scripted Host-file port plus the queries it really answered. */
+interface ScriptedHostFile {
+  readonly port: HostFilePort
+  readonly queries: Array<{ readonly scope: HostFileScope; readonly query: string }>
+  /** EVERY port method this mount was asked to call (the witness that a seat
+   *  which must not reach the Host really never reaches it). */
+  readonly calls: () => number
+}
+
+/** A Host-file port that answers exactly what the case scripts (an
+ *  authoritative `ok` list, an empty `ok`, or `unavailable`) and records every
+ *  `listReferences` query it receives. */
+function scriptedHostFilePort(
+  answer: HostFileListResult | ((query: string) => HostFileListResult),
+): ScriptedHostFile {
+  const queries: Array<{ readonly scope: HostFileScope; readonly query: string }> = []
+  let calls = 0
+  return {
+    queries,
+    calls: () => calls,
+    port: {
+      async listReferences (scope, query) {
+        calls += 1
+        queries.push({ scope, query })
+        return typeof answer === 'function' ? answer(query) : answer
+      },
+      async resolveReference () {
+        calls += 1
+        return { kind: 'unavailable', reason: 'the scripted port never probes existence' }
+      },
+      async canonicalizeMentions (_scope, text) {
+        calls += 1
+        return text
+      },
+    },
+  }
+}
+
+/** The dotted row a positive control MUST see. A candidate VALUE with a dot is
+ *  exactly what a `…\.completion-[^.]+$`-style row filter silently misses (the
+ *  key sanitizer keeps `.`), so every "no row painted" claim in this file is
+ *  preceded by a control that paints this row through the SAME addressing. */
+const DOTTED_HOST_ROW = '›@src/deep.ts'
+const DOTTED_HOST_ITEMS: HostFileListResult = {
+  kind: 'ok',
+  items: [{ path: 'src/deep.ts', kind: 'file' }],
+}
+
+/** A real Client-local completion base in a test-owned temp directory. A
+ *  directory entry ends with `/`; everything else is a file with fixture
+ *  content. The cleanup is owned by `testLifecycle`, never by this file. */
+function localWorkspace(t: TestContext, entries: readonly string[]): string {
+  const root = testLifecycle(t).tempDir('dsh-tsp-id-local-')
+  for (const entry of entries) {
+    const full = join(root, entry)
+    if (entry.endsWith('/')) {
+      mkdirSync(full, { recursive: true })
+      continue
+    }
+    mkdirSync(dirname(full), { recursive: true })
+    writeFileSync(full, 'fixture')
+  }
+  return root
+}
+
+/** One recorded stager call: the immutable stake and the wire document the
+ *  mount had committed at the moment it reached the command plane. */
+interface StagedStake {
+  readonly stake: TspInlineAttachmentStake
+  readonly wire: { text: string; cursor: number }
+}
+
+/** Install the mount's ONE inline-attachment stager and record its calls. */
+function captureStager(m: { readonly renderer: TspRenderer; editor(): { text: string; cursor: number } }): StagedStake[] {
+  const staged: StagedStake[] = []
+  m.renderer.installInlineAttachmentStager((stake) => {
+    staged.push({ stake, wire: m.editor() })
+  })
+  return staged
 }
 
 function permissionSnapshot(id: string, label = id, matched = true): StatusSnapshot {
@@ -156,9 +265,12 @@ async function mountSlashPane(
   assert.ok(session, 'the scripted pane connects through the shipped SDK')
   const calls: SeatCalls = { submits: [], cancels: 0, notes: 0, exits: 0, steers: 0, pastes: 0 }
   let hostFileCalls = 0
-  const hostFile = options.countingHostFile === true
-    ? countingHostFilePort(() => { hostFileCalls += 1 })
-    : null
+  const hostFile = options.fileReferences !== undefined
+    ? options.fileReferences
+    : options.countingHostFile === true
+      ? countingHostFilePort(() => { hostFileCalls += 1 })
+      : null
+  const localCwd = options.localCwd ?? '/work'
   const renderer = mountTspRenderer(session, {
     copyVisual: async () => false,
     requestExit: () => { calls.exits += 1 },
@@ -200,8 +312,8 @@ async function mountSlashPane(
       cwd: '/work',
       fileReferences: hostFile,
       scope: () => ({ kind: 'workspace', cwd: '/work' }),
-      localCwd: () => '/work',
-      skillReferences: [],
+      localCwd: () => localCwd,
+      skillReferences: options.skillReferences ?? [],
       hostShellCompletion: false,
       ...(options.extensionSuggest === undefined ? {} : { extensionSuggest: options.extensionSuggest }),
       ...overrides,
@@ -210,13 +322,21 @@ async function mountSlashPane(
   install()
 
   const nodes = (): WireNode[] => wireNodes(pane)
-  // A candidate ROW is the `el` button itself; its name/description are CHILD
-  // nodes addressed under it (`…​.slash-….0`), so the row filter must not match
-  // those. The bare pane has no styled rows: it paints plain `ui.text` lines.
-  const rowNodes = (): WireNode[] => nodes().filter(node => node.k === 'el'
-    && /\.slash-[^.]+$/.test(node.id))
+  // A candidate ROW is the `el` button the popup paints; its name/description
+  // are CHILD `el` nodes addressed under it (`….0`, `….1`). The row key's last
+  // path segment starts with `completion-`, but its VALUE keeps dots (a real
+  // file name such as `src/deep.ts` survives the key sanitizer), so a filter
+  // anchored on "no dot after the prefix" silently matches NOTHING and every
+  // absence assertion becomes vacuous. A row is therefore the OUTERMOST
+  // completion `el` under the live popup: a child is excluded because its id
+  // starts with its row's id plus `.`.
+  const rowNodes = (): WireNode[] => {
+    const candidateEls = nodes().filter(node => node.k === 'el' && node.id.includes('.completion-'))
+    return candidateEls.filter(node => !candidateEls.some(other => other.id !== node.id
+      && node.id.startsWith(`${other.id}.`)))
+  }
   const bareRowNodes = (): WireNode[] => nodes().filter(node => node.k === 'text'
-    && /slash-bare-/.test(node.id))
+    && /completion-bare-/.test(node.id))
   const m: SlashPane = {
     pane,
     renderer,
@@ -255,6 +375,12 @@ async function mountSlashPane(
       pane.key(bytes)
       await new Promise(resolve => setTimeout(resolve, ABSENCE_WINDOW_MS))
     },
+    async caretLeft(steps, expected) {
+      await m.key(LEFT.repeat(steps))
+      if (expected !== undefined) {
+        await waitUntil(`the caret parked at ${expected}`, () => m.editor().cursor === expected)
+      }
+    },
     async click(node, writes = false) {
       const mark = pane.frameCount()
       pane.event({ ev: 'action', sf: pane.frames().at(-1)?.sf, id: node.id, act: 'click' })
@@ -267,9 +393,9 @@ async function mountSlashPane(
       await new Promise(resolve => setTimeout(resolve, ABSENCE_WINDOW_MS))
     },
     commitStatus: async (snapshot) => {
+      const mark = pane.frameCount()
       status = snapshot
       renderer.display.commitDisplaySubject({}, {}, undefined)
-      const mark = pane.frameCount()
       await waitUntil('the committed status painted its frame', () => pane.frameCount() > mark)
     },
     dispose: () => renderer.dispose(),
@@ -604,11 +730,38 @@ test('Ctrl+C retires the list and still runs the existing cancel intent exactly 
   assert.deepEqual(m.editor(), { text: '/mo', cursor: 3 }, 'and the draft is untouched')
 })
 
-// ── The seat fence: what is never a command seat ─────────────────────────────
+// ── The seat fence: what is never a candidate seat ───────────────────────────
 
-test('an argument position, a second line, an at-mention, a shell line and prose never open a candidate list', async (t) => {
-  const m = await mountSlashPane(t, { chrome: true, countingHostFile: true })
-  for (const draft of ['/attach ', '/attach im', 'a\n/ne', '@src', '!ls', '!!', 'hello /ne', '/usr/bi']) {
+test('a shell line, an at-email, a version tag, an absolute path, a URL and ordinary prose never open a candidate list', async (t) => {
+  const host = scriptedHostFilePort(() => DOTTED_HOST_ITEMS)
+  const m = await mountSlashPane(t, {
+    chrome: true,
+    fileReferences: host.port,
+    localCwd: localWorkspace(t, ['src/deep.ts']),
+  })
+  // POSITIVE CONTROL first, through the SAME row addressing the negatives use:
+  // a dotted candidate value really paints, so "no row" below cannot be the
+  // filter silently matching nothing.
+  await m.type('@src/deep')
+  await m.key(TAB)
+  await waitUntil('the dotted positive control painted', () => m.rows().length > 0)
+  assert.deepEqual(m.rows().map(node => m.rowText(node)), [DOTTED_HOST_ROW],
+    'the control row is a dotted value addressed by the same filter')
+  const controlCalls = host.calls()
+  // `/usr/bi` IS the first-line leading-slash SEAT, but no installed command and
+  // no plugin answers it — the point here is that no FILE source is consulted.
+  const drafts = [
+    '!ls',
+    '!!',
+    'hello foo',
+    './foo',
+    '/usr/bi',
+    'https://example.com/a/b',
+    'a@b.co/x',
+    'foo@bar.com',
+    'pkg@1.0.0',
+  ]
+  for (const draft of drafts) {
     // The draft is committed through the mount's own composer port (a raw `\n`
     // byte is an Enter gesture to the SDK, not a line break), then ONE real key
     // edits it so the natural trigger runs against the intended document.
@@ -617,8 +770,17 @@ test('an argument position, a second line, an at-mention, a shell line and prose
     assert.equal(m.rows().length, 0, `${JSON.stringify(draft)} paints no candidate list`)
     assert.equal(m.bareRows().length, 0, `${JSON.stringify(draft)} paints no bare candidate line`)
     assert.deepEqual(m.calls.submits, [], `${JSON.stringify(draft)} submitted nothing`)
+    assert.equal(host.calls(), controlCalls, `${JSON.stringify(draft)} reached no HostFilePort method`)
   }
-  assert.equal(m.hostFileCalls(), 0, 'no completion request reached the Host-file port')
+  // The three at-grammar near-misses are also not file seats on the explicit
+  // Tab trigger: an email/version/URL `@` is not a Host mention.
+  for (const draft of ['foo@bar.com', 'pkg@1.0.0', 'https://example.com/@src']) {
+    await m.type(draft)
+    await m.quietKey(TAB)
+    assert.equal(m.rows().length, 0, `${JSON.stringify(draft)} Tab paints no candidate list`)
+    assert.equal(host.calls(), controlCalls, `${JSON.stringify(draft)} Tab reaches no HostFilePort method`)
+  }
+  assert.equal(host.calls(), controlCalls, 'no closed position queried the Host-file port at all')
 })
 
 test('Tab outside the command seat is not consumed by the completion seat', async (t) => {
@@ -627,6 +789,715 @@ test('Tab outside the command seat is not consumed by the completion seat', asyn
   await m.quietKey(TAB)
   assert.equal(m.rows().length, 0, 'ordinary prose has no candidate list')
   assert.equal(m.editor().text.length > 0, true, 'and the Tab key is left to its existing owner')
+})
+
+// ── The Host `@` seat ───────────────────────────────────────────────────────
+
+test('a Host @ mention paints the official @ rows and accepting one inserts the literal mention with the exact caret and stages nothing', async (t) => {
+  const host = scriptedHostFilePort(() => ({
+    kind: 'ok',
+    items: [
+      { path: 'src/deep.ts', kind: 'file' },
+      { path: 'src/deep', kind: 'directory' },
+    ],
+  }))
+  // The Client-local base holds a name that WOULD match the same query: if any
+  // layer leaked the `@` seat into the local source, a plain `src/fo-local.ts`
+  // row would paint instead of (or beside) the Host rows.
+  const m = await mountSlashPane(t, {
+    chrome: true,
+    fileReferences: host.port,
+    localCwd: localWorkspace(t, ['src/fo-local.ts']),
+  })
+  const staged = captureStager(m)
+  await m.type('请看 @src/fo')
+  await m.key(TAB)
+  await waitUntil('the Host @ list painted', () => m.rows().length === 2)
+  assert.deepEqual(m.rows().map(node => m.rowText(node)), ['›@src/deep.ts', ' @src/deep/'],
+    'the rows carry the official @ values, in the Host order, with the first highlighted')
+  assert.equal(m.rows().some(node => m.rowText(node).includes('fo-local')), false,
+    'no Client-local candidate is mixed into the Host seat')
+  assert.deepEqual(m.editor(), { text: '请看 @src/fo', cursor: 10 },
+    'opening the list leaves the draft and the UTF-16 caret untouched')
+  await m.key(ENTER)
+  assert.deepEqual(m.editor(), { text: '请看 @src/deep.ts ', cursor: 16 },
+    'the accept writes only the literal mention plus the provider separator, and parks the caret after it')
+  assert.deepEqual(m.calls.submits, [], 'accepting a Host mention is never a submission')
+  assert.equal(staged.length, 0, 'a Host mention acceptance never reaches the inline-attachment stager')
+  assert.deepEqual(host.queries.map(entry => entry.query), ['src/fo'],
+    'the Host port received the official query form (the @ stripped, exactly once)')
+  assert.deepEqual(host.queries[0]!.scope, { kind: 'workspace', cwd: '/work' },
+    'the query was addressed to the mounted workspace scope')
+  // The next Enter is the one explicit submission; it sends the literal text.
+  await m.key(ENTER)
+  assert.deepEqual(m.calls.submits, [{ text: '请看 @src/deep.ts ', gesture: 'enter' }],
+    'the LATER Enter submits the literal mention exactly once')
+})
+
+test('quoted and CJK-glued Host @ mentions keep the prose around them byte-for-byte', async (t) => {
+  const host = scriptedHostFilePort(query => query === 'my fi'
+    ? { kind: 'ok', items: [{ path: 'my file.png', kind: 'file' }] }
+    : { kind: 'ok', items: [{ path: 'src/deep.ts', kind: 'file' }] })
+  const m = await mountSlashPane(t, { chrome: true, fileReferences: host.port })
+  const staged = captureStager(m)
+  // Quoted form: the unclosed `"` is part of the mention token; the official
+  // grammar closes it and the space before it is never rewritten.
+  await m.type('看 @"my fi')
+  await m.key(TAB)
+  await waitUntil('the quoted mention list painted', () => m.rows().length === 1)
+  assert.equal(m.rowText(m.rows()[0]!), '›@"my file.png"', 'the quoted row is the official quoted value')
+  await m.key(ENTER)
+  assert.deepEqual(m.editor(), { text: '看 @"my file.png" ', cursor: 17 },
+    'the accept keeps the prose before the mention and the closed quote')
+  // CJK-glued form: no ASCII separator before `@`, and the prefix survives.
+  await m.type('看看@src/')
+  await m.key(TAB)
+  await waitUntil('the CJK-glued mention list painted', () => m.rows().length === 1)
+  assert.equal(m.rowText(m.rows()[0]!), '›@src/deep.ts')
+  await m.key(ENTER)
+  assert.deepEqual(m.editor(), { text: '看看@src/deep.ts ', cursor: 15 },
+    'the CJK sentence before the mention is byte-identical and the caret is measured in UTF-16 units')
+  assert.deepEqual(host.queries.map(entry => entry.query), ['my fi', 'src/'],
+    'both official queries were stripped forms, quoting included')
+  assert.deepEqual(m.calls.submits, [], 'neither mention accept submitted anything')
+  assert.equal(staged.length, 0, 'neither mention accept staged a file')
+})
+
+test('the same single seat walks, accepts and dismisses a Host @ list with Tab, Shift+Tab, arrows, Escape and a click', async (t) => {
+  const host = scriptedHostFilePort(() => ({
+    kind: 'ok',
+    items: [
+      { path: 'src/a.ts', kind: 'file' },
+      { path: 'src/b.ts', kind: 'file' },
+      { path: 'src/c', kind: 'directory' },
+    ],
+  }))
+  const m = await mountSlashPane(t, { chrome: true, fileReferences: host.port })
+  const staged = captureStager(m)
+  await m.type('@src/')
+  await m.key(TAB)
+  await waitUntil('the @ list painted', () => m.rows().length === 3)
+  // The row of THIS frame becomes the stale target at the end of the case.
+  const stale = m.rows()[0]!
+  assert.equal(m.rowText(m.highlighted()[0]!), '›@src/a.ts')
+  await m.key(TAB)
+  assert.equal(m.rowText(m.highlighted()[0]!), ' @src/b.ts'.replace(/^ /, '›'), 'Tab walks forward')
+  await m.key(SHIFT_TAB)
+  assert.equal(m.rowText(m.highlighted()[0]!), '›@src/a.ts', 'Shift+Tab walks back')
+  await m.key(DOWN)
+  await m.key(DOWN)
+  assert.equal(m.rowText(m.highlighted()[0]!), '›@src/c/', 'the arrows walk to the directory row')
+  assert.deepEqual(m.editor(), { text: '@src/', cursor: 5 }, 'walking the list never edits the draft')
+  await m.key(ESCAPE)
+  assert.equal(m.rows().length, 0, 'Escape closed only the list')
+  assert.equal(m.calls.cancels, 0, 'an open list turns Escape into a dismiss, never a cancel')
+  await m.quietKey(ESCAPE)
+  assert.equal(m.calls.cancels, 1, 'with the list closed Escape reaches its original cancel owner once')
+  // Re-open (a fresh list highlights row 0 again), walk to the directory row
+  // and accept it — a directory `@` continuation inserts the official value and
+  // stages nothing.
+  await m.key(TAB)
+  await waitUntil('the @ list repainted', () => m.rows().length === 3)
+  await m.key(DOWN)
+  await m.key(DOWN)
+  await m.key(ENTER)
+  assert.deepEqual(m.editor(), { text: '@src/c/', cursor: 7 },
+    'the highlighted directory mention was inserted literally, with no trailing separator')
+  assert.equal(staged.length, 0, 'a Host directory accept never reaches the inline-attachment stager')
+  assert.deepEqual(m.calls.submits, [], 'no gesture above submitted anything')
+  // A click on a row of a SUPERSEDED frame completes nothing.
+  m.install({ commands: COMMANDS })
+  await new Promise(resolve => setTimeout(resolve, ABSENCE_WINDOW_MS))
+  await m.click(stale)
+  assert.deepEqual(m.editor(), { text: '@src/c/', cursor: 7 }, 'an old @ row cannot write into the composer')
+  assert.deepEqual(m.calls.submits, [], 'and a rejected click never submits')
+})
+
+test('an authoritative empty Host answer closes the @ seat without falling back to a Client-local listing', async (t) => {
+  const empty = scriptedHostFilePort(() => ({ kind: 'ok', items: [] }))
+  // The Client-local base holds the SAME name the Host query would match: any
+  // fallback into the local filesystem would paint a row here.
+  const m = await mountSlashPane(t, {
+    chrome: true,
+    fileReferences: scriptedHostFilePort(() => DOTTED_HOST_ITEMS).port,
+    localCwd: localWorkspace(t, ['src/deep.ts']),
+  })
+  await m.type('@src')
+  await m.key(TAB)
+  await waitUntil('the dotted positive control painted', () => m.rows().length > 0)
+  assert.deepEqual(m.rows().map(node => m.rowText(node)), [DOTTED_HOST_ROW],
+    'the row addressing used below really sees a dotted candidate')
+  // The same seat, the same draft, the authoritative empty answer.
+  m.install({ fileReferences: empty.port })
+  await m.type('@src')
+  await m.quietKey(TAB)
+  // reason: bounded absence window — an authoritative empty answer has no
+  // painted event to await; the fact is that neither source painted a row.
+  await new Promise(resolve => setTimeout(resolve, ABSENCE_WINDOW_MS))
+  assert.equal(m.rows().length, 0, 'an authoritative ok:[] paints no candidate row')
+  assert.equal(m.bareRows().length, 0, 'and no bare fallback line either')
+  assert.deepEqual(m.editor(), { text: '@src', cursor: 4 }, 'the empty answer changed neither draft nor caret')
+  assert.equal(empty.queries.length, 1, 'the Host authority was asked exactly once')
+  assert.deepEqual(m.calls.submits, [], 'an empty answer never submits')
+  assert.equal(m.fields().length, 1, 'no second input field was invented for the empty seat')
+})
+
+test('an unavailable Host source closes the @ seat without claiming the path is missing', async (t) => {
+  const offline = scriptedHostFilePort(() => ({
+    kind: 'unavailable',
+    reason: 'the Host file capability is not mounted',
+  }))
+  const m = await mountSlashPane(t, {
+    chrome: true,
+    fileReferences: scriptedHostFilePort(() => DOTTED_HOST_ITEMS).port,
+    localCwd: localWorkspace(t, ['src/deep.ts']),
+  })
+  await m.type('@src')
+  await m.key(TAB)
+  await waitUntil('the dotted positive control painted', () => m.rows().length > 0)
+  assert.deepEqual(m.rows().map(node => m.rowText(node)), [DOTTED_HOST_ROW],
+    'the row addressing used below really sees a dotted candidate')
+  // The same seat, the same draft, the capability that cannot answer.
+  m.install({ fileReferences: offline.port })
+  await m.type('@src')
+  await m.quietKey(TAB)
+  // reason: bounded absence window — the `unavailable` outcome has no event;
+  // the contract is that it paints nothing and invents no notice.
+  await new Promise(resolve => setTimeout(resolve, ABSENCE_WINDOW_MS))
+  assert.equal(m.rows().length, 0, 'an unavailable source paints no candidate row')
+  assert.equal(offline.queries.length, 1, 'the Host authority was asked exactly once')
+  const texts = wireNodes(m.pane)
+    .map(node => String(node.p.text ?? ''))
+    .filter(text => text !== '')
+  assert.deepEqual(texts.filter(text => /not found|unavailable|does not exist|不存在|不可用/i.test(text)), [],
+    'no "not found"/"unavailable" notice was invented for the Host capability state')
+  assert.deepEqual(m.calls.submits, [], 'an unavailable source never submits')
+})
+
+test('a @ mention never queries Client-local files and a /image argument never queries the Host port', async (t) => {
+  const host = scriptedHostFilePort(() => ({ kind: 'ok', items: [{ path: 'host-foo.ts', kind: 'file' }] }))
+  const m = await mountSlashPane(t, {
+    chrome: true,
+    fileReferences: host.port,
+    // A local name with the same letters exists, but the two sources never meet.
+    localCwd: localWorkspace(t, ['@foo.png']),
+  })
+  await m.type('@fo')
+  await m.key(TAB)
+  await waitUntil('the Host-only mention painted', () => m.rows().length === 1)
+  assert.equal(m.rowText(m.rows()[0]!), '›@host-foo.ts', 'the @ seat answers from the Host port only')
+  assert.equal(host.queries.length, 1)
+  // `/image @foo` is a declared Client-local path argument, never a mention.
+  await m.type('/image @fo')
+  await m.key(TAB)
+  await waitUntil('the Client-local argument painted', () => m.rows().length > 0)
+  assert.deepEqual(m.rows().map(node => m.rowText(node)), ['›@foo.png'],
+    'the argument seat answers from the Client-local filesystem only')
+  assert.equal(host.queries.length, 1, 'the Client-local /image seat never re-queried the Host port')
+  assert.deepEqual(m.calls.submits, [], 'neither seat submitted anything')
+})
+
+// ── Client-local leading and inline attachment seats ───────────────────────
+
+test('a leading /image argument accepts only the argument and the next Enter is the one that executes the command', async (t) => {
+  const m = await mountSlashPane(t, {
+    chrome: true,
+    countingHostFile: true,
+    localCwd: localWorkspace(t, ['shots/err.png']),
+  })
+  const staged = captureStager(m)
+  await m.type('/image sho')
+  await m.key(TAB)
+  await waitUntil('the leading Client-local argument painted', () => m.rows().length > 0)
+  assert.deepEqual(m.rows().map(node => m.rowText(node)), ['›shots/', ' shots/err.png'],
+    'the rows are the REAL local paths (a directory keeps its /), never /shots/ or a command row')
+  // The first row is a directory: accepting it only continues the path query.
+  await m.key(ENTER)
+  assert.deepEqual(m.editor(), { text: '/image shots/', cursor: 13 },
+    'only the argument text changed; the /image command token survives byte-for-byte')
+  assert.deepEqual(m.calls.submits, [], 'the completion accept records zero submissions')
+  assert.equal(staged.length, 0, 'accepting a leading path argument never reaches the inline stager')
+  assert.equal(m.hostFileCalls(), 0, 'the Client-local leading seat never touched the Host port')
+  // The leading seat is not the inline continuation seat: it stays closed until
+  // the user asks again. A fresh TYPE is the natural re-query.
+  assert.equal(m.rows().length, 0, 'a leading path accept does not keep a stale list painted')
+  // The next Enter is the one that reaches the application's submit/command
+  // owner at mount level; at this layer it is one explicit business gesture.
+  await m.key(ENTER)
+  assert.deepEqual(m.calls.submits, [{ text: '/image shots/', gesture: 'enter' }],
+    'the LATER Enter is the single explicit execution gesture for the leading command')
+})
+
+test('the now-open argument, second-line, at-mention and body inline drafts paint their own seats', async (t) => {
+  const host = scriptedHostFilePort(() => ({ kind: 'ok', items: [{ path: 'src/deep.ts', kind: 'file' }] }))
+  const m = await mountSlashPane(t, {
+    chrome: true,
+    fileReferences: host.port,
+    localCwd: localWorkspace(t, ['notes.txt']),
+  })
+  // Every draft is committed through the mount's composer port and then edited
+  // by ONE real key, so the natural trigger runs against the intended document.
+  // Each draft is written so the appended `t` still names a real candidate.
+  for (const draft of ['/attach ', '/attach no', '@src', 'look /image ', 'a\n/at']) {
+    await m.type(draft)
+    await m.key('t')
+    await waitUntil(`${JSON.stringify(draft)} painted its own list`, () => m.rows().length > 0)
+    assert.deepEqual(m.calls.submits, [], `${JSON.stringify(draft)} opened a list without submitting`)
+  }
+  assert.equal(host.queries.length > 0, true, 'the @ seat reached the Host port')
+})
+
+test('a second-line /attach argument paints the same Client-local path rows as a first-line leading argument', async (t) => {
+  const m = await mountSlashPane(t, {
+    chrome: true,
+    countingHostFile: true,
+    localCwd: localWorkspace(t, ['notes.txt']),
+  })
+  const staged = captureStager(m)
+  await m.type('first\n/attach note')
+  await m.key('s')
+  await waitUntil('the second-line path rows painted', () => m.rows().length > 0)
+  assert.deepEqual(m.rows().map(node => m.rowText(node)), ['›notes.txt'],
+    'the second-line argument is the Client-local inline path seat')
+  await m.key(ENTER)
+  assert.equal(m.editor().text.startsWith('first\n/attach notes.txt'), true,
+    'the accept rewrites only the argument; the first line and the command token survive')
+  assert.equal(staged.length, 1, 'a second-line inline FILE accept reaches the stager once')
+  assert.equal(m.hostFileCalls(), 0, 'the Client-local path seat never touched the Host port')
+  assert.deepEqual(m.calls.submits, [], 'the path accept was not a submission')
+})
+
+test('a body /att action opens the /attach path seat without reading a file', async (t) => {
+  const m = await mountSlashPane(t, {
+    chrome: true,
+    localCwd: localWorkspace(t, ['notes.txt']),
+  })
+  const staged = captureStager(m)
+  await m.type('look /att')
+  await m.key(TAB)
+  await waitUntil('the /attach action row painted', () => m.rows().length > 0)
+  assert.deepEqual(m.rows().map(node => m.rowText(node)), ['›/attachAttach local file or image'])
+  await m.key(ENTER)
+  assert.deepEqual(m.editor(), { text: 'look /attach ', cursor: 'look /attach '.length },
+    'the action writes exactly /attach plus one separator')
+  assert.equal(staged.length, 0, 'the action stages nothing')
+  await waitUntil('the /attach path rows painted', () => m.rows().length > 0)
+  assert.deepEqual(m.rows().map(node => m.rowText(node)), ['›notes.txt'])
+  assert.equal(staged.length, 0, 'listing /attach paths still stages nothing')
+  assert.deepEqual(m.calls.submits, [], 'no action or path listing submitted anything')
+})
+
+test('a body inline /im action opens the path seat from the same local cwd and the action accept stages nothing', async (t) => {
+  const m = await mountSlashPane(t, {
+    chrome: true,
+    localCwd: localWorkspace(t, ['notes.txt']),
+  })
+  const staged = captureStager(m)
+  await m.type('看一下 /im')
+  await m.key(TAB)
+  await waitUntil('the inline /im action list painted', () => m.rows().length > 0)
+  assert.deepEqual(m.rows().map(node => m.rowText(node)), ['›/imageInsert local image'],
+    'the fixed /image action is the inline /name row, with its own description')
+  await m.key(ENTER)
+  assert.deepEqual(m.editor(), { text: '看一下 /image ', cursor: 11 },
+    'accepting an action writes exactly /image plus one separator and keeps the CJK prose')
+  assert.deepEqual(m.calls.submits, [], 'the action accept is never a submission')
+  assert.equal(staged.length, 0, 'an action acceptance never reaches the file stager')
+  // The SAME seat re-queries the now-real path argument from the local cwd.
+  await waitUntil('the same seat immediately painted the local path rows', () => m.rows().length > 0)
+  assert.deepEqual(m.rows().map(node => m.rowText(node)), ['›notes.txt'],
+    'the follow-up query lists the real Client-local cwd, with no file read yet')
+  assert.equal(staged.length, 0, 'listing paths still stages nothing')
+})
+
+test('an inline path DIRECTORY continues the listing while a FILE commits one acceptance and preserves all surrounding prose', async (t) => {
+  const root = localWorkspace(t, ['shots/err.png', 'notes.txt'])
+  const m = await mountSlashPane(t, { chrome: true, localCwd: root })
+  const staged = captureStager(m)
+  await m.type('看一下 /image sho')
+  await m.key(TAB)
+  await waitUntil('the inline directory row painted', () => m.rows().length > 0)
+  assert.deepEqual(m.rows().map(node => m.rowText(node)), ['›shots/', ' shots/err.png'],
+    'both real local paths are offered; the directory keeps its trailing /')
+  await m.key(ENTER)
+  assert.deepEqual(m.editor(), { text: '看一下 /image shots/', cursor: '看一下 /image shots/'.length },
+    'a directory accept continues the argument and leaves the prefix and command intact')
+  assert.equal(staged.length, 0, 'a DIRECTORY acceptance stages nothing')
+  await waitUntil('the directory children painted', () => m.rows().map(node => m.rowText(node)).includes('›shots/err.png'))
+  // Backspace is unnecessary: `setDraft` installs a fresh single-line FILE
+  // seat whose prose must survive BOTH the accept and a later placeholder
+  // commit. The CRLF/emoji surroundings are covered by the next case.
+  await m.type('看一下 /image notes')
+  await m.key(TAB)
+  await waitUntil('the inline file row painted', () => m.rows().map(node => m.rowText(node)).includes('›notes.txt'))
+  await m.key(ENTER)
+  const committedText = '看一下 /image notes.txt '
+  const committedCursor = '看一下 /image notes.txt'.length
+  assert.deepEqual(m.editor(), { text: committedText, cursor: committedCursor },
+    'the FILE accept writes the path and one separator, leaving the caret right after the path token')
+  assert.deepEqual(m.calls.submits, [], 'the FILE accept is never a submission')
+  assert.equal(staged.length, 1, 'a committed FILE acceptance reaches the stager exactly once')
+  const { stake, wire } = staged[0]!
+  assert.equal(stake.command, 'image')
+  assert.equal(stake.path, 'notes.txt')
+  assert.equal(stake.rawDraft, committedText)
+  assert.deepEqual(wire, { text: committedText, cursor: committedCursor },
+    'the stager observed the SAME committed wire document and caret')
+  assert.deepEqual(stake.span, { line: 0, start: 4, end: committedCursor },
+    'the raw fragment names the /image command, its separator and the selected path')
+  assert.equal(stake.draft(), committedText, 'the live draft the stake reads is the accepted text')
+  const placeholder = '[image #1 (notes.txt)]'
+  assert.equal(stake.commit(placeholder), true, 'the one atomic placeholder commit succeeded')
+  const afterText = `看一下 ${placeholder} `
+  assert.deepEqual(m.editor(), { text: afterText, cursor: afterText.length - 1 },
+    'the placeholder replaces ONLY the inline fragment: the prose before /image survives byte-for-byte')
+  assert.equal(stake.current(), false, 'a committed edit retires the old intake stake')
+})
+
+test('an inline path whose token is followed by a CRLF pair refuses the accept instead of splitting the pair, and stages nothing', async (t) => {
+  const m = await mountSlashPane(t, {
+    chrome: true,
+    localCwd: localWorkspace(t, ['notes.txt']),
+  })
+  const staged = captureStager(m)
+  // The attachment grammar owns the token boundary and its unquoted word stops
+  // only at a space/tab, so the CR of a CRLF pair is read as token content: the
+  // provider's replacement would drop it. The Composer's CRLF-cluster guard then
+  // REFUSES the write (it never re-derives a second lexer), and a refused accept
+  // writes nothing, stages nothing and is still consumed.
+  await m.type('看一下 /image note\r\nsecond line')
+  await m.caretLeft('second line'.length + 1)
+  await m.key('s')
+  await waitUntil('the first-line CRLF file row painted', () => m.rows().length > 0)
+  await m.key(ENTER)
+  const preserved = '看一下 /image notes\r\nsecond line'
+  assert.deepEqual(m.editor(), { text: preserved, cursor: '看一下 /image notes'.length },
+    'a first-line accept whose replacement would split the CRLF pair is refused: the pair and line 2 survive byte-for-byte')
+  assert.equal(staged.length, 0, 'a refused CRLF write never reaches the stager')
+  assert.deepEqual(m.calls.submits, [], 'and the refused accept was consumed, not submitted')
+})
+
+test('a multi-line CRLF document keeps the first line, CRLF pair and emoji around a second-line inline file acceptance', async (t) => {
+  const m = await mountSlashPane(t, {
+    chrome: true,
+    localCwd: localWorkspace(t, ['notes.txt']),
+  })
+  const staged = captureStager(m)
+  // The document is committed through the mount's composer port: a raw Enter
+  // byte would be a submit gesture, and the CRLF pair is the content under
+  // test. Type `s` naturally so the SECOND line's inline path query paints.
+  await m.type('🖼️ first\r\n看一下 /image note')
+  await m.key('s')
+  const caretAtPath = m.editor().cursor
+  assert.equal(caretAtPath, '🖼️ first\r\n看一下 /image notes'.length,
+    'the typed character completed the second-line path token at the document end')
+  await waitUntil('the second-line CRLF file row painted', () => m.rows().length > 0)
+  await m.key(ENTER)
+  const accepted = '🖼️ first\r\n看一下 /image notes.txt '
+  const acceptedCursor = accepted.length - 1
+  assert.deepEqual(m.editor(), { text: accepted, cursor: acceptedCursor },
+    'the accepted path did not eat the emoji, the CRLF pair or the first line')
+  assert.equal(staged.length, 1, 'the CRLF file acceptance staged exactly once')
+  const { stake } = staged[0]!
+  assert.equal(stake.rawDraft, accepted)
+  assert.deepEqual(stake.span, { line: 1, start: 4, end: '看一下 /image notes.txt'.length },
+    'the half-open span stays inside the second logical line')
+  const placeholder = '[image #1 (notes.txt)]'
+  assert.equal(stake.commit(placeholder), true)
+  const afterText = `🖼️ first\r\n看一下 ${placeholder} `
+  assert.deepEqual(m.editor(), { text: afterText, cursor: afterText.length - 1 },
+    'the placeholder splice preserved the emoji, the CRLF pair and line 1 byte-for-byte')
+})
+
+test('a caret parked away from the live token makes a FILE acceptance stale: the write is refused, no stager call, and the editable path survives', async (t) => {
+  const m = await mountSlashPane(t, {
+    chrome: true,
+    localCwd: localWorkspace(t, ['notes.txt']),
+  })
+  const staged = captureStager(m)
+  await m.type('看一下 /image notes')
+  await m.key(TAB)
+  await waitUntil('the file row painted', () => m.rows().length === 1)
+  // Park the caret with LEFT (a caret-only move), then type one character so a
+  // NEW document is live: the list's snapshot is now stale. A TAB (not Enter)
+  // is the stale ACCEPT gesture, because a closed popup's Enter stays the
+  // composer's ordinary submit gesture.
+  await m.caretLeft(1, '看一下 /image notes'.length - 1)
+  await m.key('q')
+  const live = m.editor()
+  await m.quietKey(TAB)
+  assert.deepEqual(m.editor(), live, 'a stale accept wrote nothing and kept the user-editable path text')
+  assert.deepEqual(m.calls.submits, [], 'a refused/no-op accept is CONSUMED, never a submission')
+  assert.equal(staged.length, 0, 'a refused composer write never reached the stager')
+  assert.equal(m.rows().length, 0, 'the stale list retired')
+})
+
+test('a plugin row carrying a forged inlineAttachment path marker is displayed and inserted as plain text but never stages a file', async (t) => {
+  const m = await mountSlashPane(t, {
+    chrome: true,
+    commands: [],
+    localCwd: localWorkspace(t, []),
+    extensionSuggest: async () => ({
+      prefix: '/z',
+      items: [{
+        value: 'zz',
+        label: 'zz',
+        // The structural marker is NOT a permission: only a real
+        // MentionProvider request may grant a Client-local read.
+        inlineAttachment: 'path',
+        command: 'image',
+        directory: false,
+      } as never],
+    }),
+  })
+  const staged = captureStager(m)
+  await m.type('/z')
+  await m.key(TAB)
+  await waitUntil('the plugin row painted', () => m.rows().length === 1)
+  assert.equal(m.rowText(m.rows()[0]!), '›/zz', 'the foreign row is displayed as an ordinary /name row')
+  await m.key(ENTER)
+  assert.deepEqual(m.editor(), { text: '/zz ', cursor: 4 },
+    'the plugin completion inserted plain text and nothing else')
+  assert.equal(staged.length, 0, 'no forged marker reached the inline-attachment stager')
+  assert.deepEqual(m.calls.submits, [], 'the plugin accept is still accept-only')
+})
+
+test('a quoted inline path acceptance closes the quote once and hands the intake the unquoted path', async (t) => {
+  const m = await mountSlashPane(t, {
+    chrome: true,
+    localCwd: localWorkspace(t, ['my file.png']),
+  })
+  const staged = captureStager(m)
+  await m.type('look /image "my')
+  await m.key(TAB)
+  await waitUntil('the quoted local row painted', () => m.rows().length > 0)
+  assert.deepEqual(m.rows().map(node => m.rowText(node)), ['›my file.png'],
+    'the row paints the real local path, not a double-quoted command token')
+  await m.click(m.rows()[0]!, true)
+  const accepted = 'look /image "my file.png" '
+  assert.deepEqual(m.editor(), { text: accepted, cursor: 'look /image "my file.png"'.length },
+    'the quote was closed exactly once and the prose before /image survived')
+  assert.equal(staged.length, 1, 'the quoted FILE acceptance staged once')
+  assert.equal(staged[0]!.stake.path, 'my file.png', 'the intake received the unquoted path')
+})
+
+test('a Unicode filename with a full-width space completes span-exactly and keeps the surrounding prose', async (t) => {
+  const m = await mountSlashPane(t, {
+    chrome: true,
+    localCwd: localWorkspace(t, ['全角　名.png', 'ascii.png']),
+  })
+  const staged = captureStager(m)
+  await m.type('look /image 全角')
+  await m.key(TAB)
+  await waitUntil('the Unicode candidate painted', () => m.rows().length > 0)
+  assert.deepEqual(m.rows().map(node => m.rowText(node)), ['›全角　名.png'],
+    'only the matching Unicode name is offered; the U+3000 is path content, not a separator')
+  await m.key(ENTER)
+  const accepted = 'look /image 全角　名.png '
+  assert.deepEqual(m.editor(), { text: accepted, cursor: 'look /image 全角　名.png'.length },
+    'the name was written once with no duplicated tail and the prose around it survived')
+  assert.equal(staged.length, 1)
+  assert.equal(staged[0]!.stake.path, '全角　名.png', 'the read target is the raw name, quotes and spacing included')
+})
+
+test('a FILE acceptance whose intake never commits leaves the accepted path editable and invents no placeholder', async (t) => {
+  const m = await mountSlashPane(t, {
+    chrome: true,
+    localCwd: localWorkspace(t, ['notes.txt']),
+  })
+  // The command plane owns the read and the store; a failing/absent intake
+  // simply never calls `commit()`. The mount must not predict its success.
+  const staged = captureStager(m)
+  await m.type('看一下 /attach notes')
+  await m.key(TAB)
+  await waitUntil('the attach file row painted', () => m.rows().length > 0)
+  await m.key(ENTER)
+  const accepted = '看一下 /attach notes.txt '
+  assert.deepEqual(m.editor(), { text: accepted, cursor: '看一下 /attach notes.txt'.length },
+    'the accepted path is the live, still-editable draft')
+  assert.equal(staged.length, 1, 'the file acceptance reached the stager exactly once')
+  // reason: bounded absence window — no intake is running that could produce a
+  // placeholder frame; the fact is that no optimistic text ever appears.
+  await new Promise(resolve => setTimeout(resolve, ABSENCE_WINDOW_MS))
+  assert.deepEqual(m.editor(), { text: accepted, cursor: '看一下 /attach notes.txt'.length },
+    'no placeholder was invented for a read that never settled')
+  assert.equal(staged[0]!.stake.current(), true, 'the live seat is still the accepted one')
+  await m.key(LEFT)
+  assert.equal(staged[0]!.stake.current(), false, 'a user edit fences the old intake')
+  assert.deepEqual(m.calls.submits, [], 'none of this submitted anything')
+})
+
+test('a failed command catalog closes the leading-slash seat but leaves the Host @ and Client-local path seats answering', async (t) => {
+  const host = scriptedHostFilePort(() => ({ kind: 'ok', items: [{ path: 'src/deep.ts', kind: 'file' }] }))
+  const m = await mountSlashPane(t, {
+    chrome: true,
+    fileReferences: host.port,
+    localCwd: localWorkspace(t, ['notes.txt']),
+  })
+  m.install({ sourceFailed: true })
+  await m.type('/mo')
+  await m.quietKey(TAB)
+  assert.equal(m.rows().length, 0, 'a failed command source offers no leading /command rows')
+  await m.type('@src')
+  await m.key(TAB)
+  await waitUntil('the Host @ seat still painted', () => m.rows().length === 1)
+  assert.equal(m.rowText(m.rows()[0]!), '›@src/deep.ts')
+  await m.type('/image notes')
+  await m.key(TAB)
+  await waitUntil('the Client-local leading path seat still painted', () => m.rows().length > 0)
+  assert.deepEqual(m.rows().map(node => m.rowText(node)), ['›notes.txt'])
+  assert.deepEqual(m.calls.submits, [], 'none of those seats submitted anything')
+})
+
+test('a stale Host @ or path list after a new catalog, a draft clear or a hydration window accepts nothing', async (t) => {
+  const host = scriptedHostFilePort(() => ({ kind: 'ok', items: [{ path: 'src/deep.ts', kind: 'file' }] }))
+  const m = await mountSlashPane(t, {
+    chrome: true,
+    fileReferences: host.port,
+    localCwd: localWorkspace(t, ['notes.txt']),
+  })
+  const staged = captureStager(m)
+  const liveDraft = '看 @srcx'
+  const refusedAfter = async (seam: () => void, label: string): Promise<void> => {
+    await m.type(liveDraft)
+    await m.key(TAB)
+    await waitUntil(`${label}: the Host @ list painted`, () => m.rows().length > 0)
+    const stale = m.rows()[0]!
+    seam()
+    await m.click(stale)
+    assert.deepEqual(m.editor(), { text: liveDraft, cursor: liveDraft.length }, `${label}: the old @ row wrote nothing`)
+    assert.deepEqual(m.calls.submits, [], `${label}: the old @ row submitted nothing`)
+    assert.equal(staged.length, 0, `${label}: the old @ row staged nothing`)
+    // A→B→A: returning to the SAME query must re-query the CURRENT source, not
+    // resurrect the old row. Ask with the natural trigger once more; the Host
+    // port is the authority that re-answers.
+    const before = host.queries.length
+    await m.type(liveDraft)
+    await m.key('q')
+    await waitUntil(`${label}: the fresh query painted`, () => host.queries.length > before)
+  }
+  await refusedAfter(() => m.install({ commands: [{ name: 'model', description: 'Choose a model' }] }), 'a new catalog')
+  await refusedAfter(() => m.renderer.display.clearActiveDraft(), 'a draft clear')
+  await refusedAfter(() => m.renderer.display.beginInputHistoryScope('owner-b'), 'a published owner')
+  // Hydration is an INPUT FENCE: the outgoing list and its in-flight query die
+  // at `beginSessionHydration`, so the stale row cannot be clicked even before
+  // the incoming subject's first frame lifts the fence.
+  await m.type(liveDraft)
+  await m.key(TAB)
+  await waitUntil('hydration: the Host @ list painted', () => m.rows().length > 0)
+  const stale = m.rows()[0]!
+  m.renderer.display.beginSessionHydration()
+  await m.click(stale)
+  assert.deepEqual(m.editor(), { text: liveDraft, cursor: liveDraft.length },
+    'hydration: the old @ row wrote nothing')
+  assert.deepEqual(m.calls.submits, [], 'hydration: the old @ row submitted nothing')
+  assert.equal(staged.length, 0, 'hydration: the old @ row staged nothing')
+  m.renderer.display.commitDisplaySubject({}, {}, undefined)
+  assert.equal(m.rows().length, 0, 'hydration: the next committed frame carries no old list')
+})
+
+test('a bare pane shows at most three rows with no click affordance for Host @, path and inline seats', async (t) => {
+  const host = scriptedHostFilePort(() => ({
+    kind: 'ok',
+    items: [
+      { path: 'src/one.ts', kind: 'file' },
+      { path: 'src/two.ts', kind: 'file' },
+      { path: 'src/three.ts', kind: 'file' },
+      { path: 'src/four.ts', kind: 'file' },
+    ],
+  }))
+  const m = await mountSlashPane(t, {
+    chrome: false,
+    fileReferences: host.port,
+    localCwd: localWorkspace(t, ['one.txt', 'two.txt', 'three.txt', 'four.txt']),
+  })
+  // One natural keystroke opens the Host @ and inline-action seats; a leading
+  // path argument needs Tab (its empty cwd listing is the explicit trigger).
+  const seats: Array<{ draft: string; key: string }> = [
+    { draft: '@src', key: 't' },
+    { draft: '/image ', key: TAB },
+    { draft: 'look /at', key: 't' },
+  ]
+  for (const { draft, key } of seats) {
+    await m.type(draft)
+    if (key === TAB) await m.quietKey(key)
+    else await m.key(key)
+    await waitUntil(`${JSON.stringify(draft)} painted bare rows`, () => m.bareRows().length > 0)
+    assert.equal(m.bareRows().length <= 3, true, `${JSON.stringify(draft)} paints at most three bare rows`)
+    // Not "my row filter found no button" — this pane advertised no `el` kind at
+    // all, so NO `el` node may exist anywhere on the wire.
+    assert.equal(wireNodes(m.pane).filter(node => node.k === 'el').length, 0,
+      `${JSON.stringify(draft)}: a pane without el paints no clickable element at all`)
+    assert.equal(m.fields().length, 1, `${JSON.stringify(draft)} keeps exactly one editor`)
+    const painted = m.bareRows().map(node => m.rowText(node))
+    assert.equal(painted.filter(text => text.startsWith('›')).length, 1,
+      `${JSON.stringify(draft)} has exactly one bare highlight marker`)
+  }
+  assert.equal(host.queries.length > 0, true, 'the Host @ seat really answered on the bare pane')
+  assert.deepEqual(m.calls.submits, [], 'none of the bare-pane seats submitted anything')
+})
+
+test('Ctrl+C, Ctrl+V and a higher menu retire an OPEN non-slash popup and route the intent to its owner exactly once', async (t) => {
+  const host = scriptedHostFilePort(() => ({ kind: 'ok', items: [{ path: 'src/deep.ts', kind: 'file' }] }))
+  const m = await mountSlashPane(t, { chrome: true, fileReferences: host.port })
+  const openHostList = async (): Promise<void> => {
+    await m.type('看 @src')
+    await m.key(TAB)
+    await waitUntil('the Host @ popup painted', () => m.rows().length > 0)
+  }
+  // Ctrl+C is an application cancel intent, never an accept gesture.
+  await openHostList()
+  await m.quietKey(CTRL_C)
+  assert.equal(m.calls.cancels, 1, 'Ctrl+C reached the cancel owner exactly once')
+  assert.equal(m.rows().length, 0, 'the open Host list retired from the wire')
+  assert.deepEqual(m.editor(), { text: '看 @src', cursor: '看 @src'.length }, 'the draft and caret were untouched')
+  assert.deepEqual(m.calls.submits, [], 'the cancel intent never became a submit')
+  // Ctrl+V is the application's paste owner even when no clipboard image
+  // exists: no draft write, and no extra read AFTER the intent.
+  await openHostList()
+  const beforePaste = host.queries.length
+  await m.quietKey(CTRL_V)
+  assert.equal(m.calls.pastes, 1, 'the paste owner ran exactly once')
+  assert.equal(m.rows().length, 0, 'the open Host list is off the wire')
+  assert.equal(host.queries.length, beforePaste, 'an empty paste triggers no extra Host file read')
+  assert.deepEqual(m.calls.submits, [], 'the paste intent never became a submit')
+  // Modal/menu precedence: the Permission menu takes the keys and the hidden
+  // list cannot answer an arrow or an Enter.
+  await m.commitStatus(permissionSnapshot('workspace-write'))
+  await openHostList()
+  const trigger = wireNodes(m.pane).find(node => node.k === 'el' && node.id.includes('.composer-permission-s')
+    && !node.id.includes('option'))
+  assert.ok(trigger, 'the permission trigger is on the wire')
+  await m.click(trigger!)
+  await waitUntil('the permission menu opened', () => wireNodes(m.pane).some(node => node.id.includes('.composer-permission-option-')))
+  assert.equal(m.rows().length, 0, 'a higher menu retired the open Host list')
+  const highlightedOptions = (): number => wireNodes(m.pane)
+    .filter(node => node.k === 'el' && node.id.includes('.composer-permission-option-')
+      && (node.p.attrs as Record<string, string> | undefined)?.['data-highlight'] === 'true').length
+  assert.equal(highlightedOptions() <= 1, true, 'the menu carries its own one-row highlight state')
+  await m.key(DOWN)
+  assert.equal(highlightedOptions(), 1, 'the arrow reached the permission menu, not a hidden completion list')
+  assert.deepEqual(m.editor(), { text: '看 @src', cursor: '看 @src'.length }, 'the menu key never edited the draft')
+  assert.deepEqual(m.calls.submits, [], 'no modal-precedence key became a submit')
+})
+
+test('an inline skill row shares the /name seat with the attachment actions but inserts only plain text', async (t) => {
+  const m = await mountSlashPane(t, {
+    chrome: true,
+    skillReferences: [{ name: 'image-note', description: 'A plain skill reference' }],
+    commands: [],
+    localCwd: localWorkspace(t, ['notes.txt']),
+  })
+  const staged = captureStager(m)
+  await m.type('look /image-n')
+  await m.key(TAB)
+  await waitUntil('the inline skill row painted', () => m.rows().length > 0)
+  assert.deepEqual(m.rows().map(node => m.rowText(node)), ['›/image-noteA plain skill reference'])
+  await m.key(ENTER)
+  assert.deepEqual(m.editor(), { text: 'look /image-note ', cursor: 'look /image-note '.length },
+    'only the /name token was rewritten')
+  assert.equal(staged.length, 0, 'a skill row never stages a file')
+  assert.deepEqual(m.calls.submits, [], 'a skill accept is accept-only')
 })
 
 // ── Catalog lifecycle ───────────────────────────────────────────────────────
@@ -702,6 +1573,100 @@ test('a late plugin answer that arrives after the user typed on never paints and
   live({ items: [{ value: 'zzq', label: 'zzq' }], prefix: '/zzq' })
   await waitUntil('the current answer paints its own list', () => m.rows().length > 0)
   assert.equal(m.rowText(m.rows()[0]!), '›/zzq', 'the list the user can now accept belongs to the live query')
+})
+
+test('a late Host answer after a new catalog, a draft clear or the hydration window paints nothing and is accepted by nothing', async (t) => {
+  const pending: Array<(value: HostFileListResult) => void> = []
+  const host: HostFilePort = {
+    async listReferences (_scope, _query) {
+      return new Promise<HostFileListResult>(resolve => { pending.push(resolve) })
+    },
+    async resolveReference () {
+      return { kind: 'unavailable', reason: 'the deferred port never probes' }
+    },
+    async canonicalizeMentions (_scope, text) {
+      return text
+    },
+  }
+  const answer: HostFileListResult = { kind: 'ok', items: [{ path: 'src/deep.ts', kind: 'file' }] }
+  const m = await mountSlashPane(t, { chrome: true, fileReferences: host })
+  const staged = captureStager(m)
+  const refusedAfter = async (
+    seam: () => void,
+    label: string,
+    fresh: boolean,
+  ): Promise<void> => {
+    const outstanding = pending.length
+    await m.type('看 @sr')
+    await m.key('x')
+    assert.equal(pending.length > outstanding, true, `${label}: the Host query was really issued`)
+    assert.equal(m.rows().length, 0, `${label}: nothing is painted while the answer is outstanding`)
+    seam()
+    pending[outstanding]!(answer)
+    // reason: bounded absence window — the released answer either paints a row
+    // or it does not; the fact under test is that it never paints.
+    await new Promise(resolve => setTimeout(resolve, ABSENCE_WINDOW_MS))
+    assert.equal(m.rows().length, 0, `${label}: the superseded answer paints no row`)
+    assert.deepEqual(m.editor(), { text: '看 @srx', cursor: '看 @srx'.length },
+      `${label}: the late answer wrote no draft`)
+    assert.deepEqual(m.calls.submits, [], `${label}: the late answer submitted nothing`)
+    assert.equal(staged.length, 0, `${label}: the late answer staged nothing`)
+    if (!fresh) return
+    // POSITIVE CONTROL: the same seat re-queries and a FRESH answer paints.
+    const live = pending.length
+    await m.type('看 @sr')
+    await m.key('y')
+    assert.equal(pending.length > live, true, `${label}: a fresh query was issued for the live draft`)
+    pending[pending.length - 1]!(answer)
+    await waitUntil(`${label}: the fresh answer painted`, () => m.rows().length > 0)
+  }
+  await refusedAfter(() => m.install({ commands: [{ name: 'model', description: 'Choose a model' }] }), 'a new catalog', true)
+  await refusedAfter(() => m.renderer.display.clearActiveDraft(), 'a draft clear', true)
+  await refusedAfter(() => m.renderer.display.beginSessionHydration(), 'the hydration window', false)
+})
+
+
+
+
+
+
+// ── Enter is accept-only at every non-slash seat ────────────────────────────
+
+test('Enter at a Host @ mention whose typed token already names the row is still accept-only, never a submission', async (t) => {
+  const host = scriptedHostFilePort(() => ({ kind: 'ok', items: [{ path: 'src/deep.ts', kind: 'file' }] }))
+  const m = await mountSlashPane(t, { chrome: true, fileReferences: host.port })
+  const staged = captureStager(m)
+  // The draft ALREADY holds the official value: the I-C "whole first-line token
+  // names the candidate" exception does not exist for a Host `@` seat.
+  await m.type('看 @src/deep.ts')
+  await m.key(TAB)
+  await waitUntil('the exact-name mention painted', () => m.rows().length === 1)
+  assert.equal(m.rowText(m.rows()[0]!), '›@src/deep.ts')
+  await m.key(ENTER)
+  assert.deepEqual(m.calls.submits, [],
+    'the Enter was consumed as an accept: only the I-C leading-slash token may hand Enter to submit')
+  assert.deepEqual(m.editor(), { text: '看 @src/deep.ts ', cursor: '看 @src/deep.ts '.length },
+    'the accept added the provider separator instead of executing the draft')
+  assert.equal(staged.length, 0, 'and a mention accept still stages nothing')
+})
+
+test('Enter at a body inline action whose token already names the action completes it and is never a submission', async (t) => {
+  const m = await mountSlashPane(t, {
+    chrome: true,
+    localCwd: localWorkspace(t, ['notes.txt']),
+  })
+  const staged = captureStager(m)
+  await m.type('look /image')
+  await m.key(TAB)
+  await waitUntil('the exact-name action painted', () => m.rows().length === 1)
+  assert.equal(m.rowText(m.rows()[0]!), '›/imageInsert local image')
+  await m.key(ENTER)
+  assert.deepEqual(m.editor(), { text: 'look /image ', cursor: 'look /image '.length },
+    'the inline action gained exactly one separator; the token was never executed')
+  assert.deepEqual(m.calls.submits, [], 'the inline-seat Enter is accept-only even for a complete token')
+  assert.equal(staged.length, 0, 'an action accept never reaches the stager')
+  await waitUntil('the path seat opened after the action', () => m.rows().length > 0)
+  assert.deepEqual(m.rows().map(node => m.rowText(node)), ['›notes.txt'])
 })
 
 // ── Formal lifecycle seams ──────────────────────────────────────────────────

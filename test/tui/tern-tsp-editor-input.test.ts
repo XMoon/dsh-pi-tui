@@ -26,6 +26,9 @@ import { connect as sdkConnect, concatBytes, ui } from '@stencil-hq/tern'
 import type { Op, Session, TermInput, TermOutput } from '@stencil-hq/tern'
 import { createTspComposer, type TspComposer } from '../../src/tui/tsp/editor.ts'
 import { mountTspRenderer, type TspRenderer } from '../../src/tui/tsp/session.ts'
+import { applyInlineAttachmentPath, type InlineAttachmentSpan } from '../../src/tui/interaction/autocomplete/inline-attachment.ts'
+import { pathArgumentSeat } from '../../src/tui/file-completion/context.ts'
+import { FILE_ARGUMENT_COMMANDS } from '../../src/domain/file-completion/path-argument-commands.ts'
 import type { PastedPathReceipt } from '../../src/app/surface/pasted-image-intake.ts'
 
 const ENCODER = new TextEncoder()
@@ -1931,4 +1934,521 @@ test('a completion that hands the draft back byte-identical still counts as an e
   target.applyKey(key('down'))
   assert.deepEqual(target.state(), { text: '/ne', cursor: 3, focused: false },
     '↓ gives back the draft the walk actually began from')
+})
+
+// ── The inline attachment fragment commit and the edit revision ───────────────
+//
+// `replaceInlineAttachmentFragment(expected, span, placeholder)` is the ONE write
+// an inline attachment intake commits, and `editRevision()` is the fence it (and
+// every other async intake) compares against. A span is the acceptance's own
+// half-open range in the `\n`-split line model, so these fixtures derive it from
+// the production grammar (`pathArgumentSeat` + `applyInlineAttachmentPath`) —
+// never from hand-written coordinates. Every failed check is a REJECTION that
+// touches nothing: no text, no caret, no paste lease, no browse state, no frame.
+
+/** A path token a real bracketed paste put into the draft (its paste lease is
+ *  the unrelated lease every case below must carry through untouched). */
+const PASTED_PATH = '/tmp/photo.png'
+/** The draft mid-acceptance: prose, an attachment argument, and prose again. */
+const INLINE_PENDING_LINE = `${PASTED_PATH} 看一下 /image notes.tx 谢谢`
+/** The caret the acceptance was computed at: just after the argument. */
+const INLINE_PENDING_CARET = `${PASTED_PATH} 看一下 /image notes.tx`.length
+const INLINE_PLACEHOLDER = '[image #1 (1×1)]'
+
+/** The accepted document, flat caret and raw span of ONE inline FILE acceptance. */
+function inlinePathAcceptance(
+  lines: readonly string[],
+  lineIndex: number,
+  caretColumn: number,
+  value: string,
+): { text: string; cursor: number; span: InlineAttachmentSpan } {
+  const line = lines[lineIndex]!
+  const seat = pathArgumentSeat(line.slice(0, caretColumn), FILE_ARGUMENT_COMMANDS, lineIndex)
+  assert.ok(seat !== undefined, 'the fixture caret sits in a declared path-argument seat')
+  const applied = applyInlineAttachmentPath(line, seat, caretColumn, lineIndex, value)
+  const accepted = [...lines]
+  accepted[lineIndex] = applied.line
+  let cursor = applied.cursorCol
+  for (let index = 0; index < lineIndex; index += 1) cursor += (accepted[index]?.length ?? 0) + 1
+  return { text: accepted.join('\n'), cursor, span: applied.span }
+}
+
+/** Install `text` with the caret at `cursor`: `setDraft` only ever lands at the
+ *  document end, so the fixture walks left with the composer's own key reducer. */
+function setDraftAndCaret(composer: TspComposer, text: string, cursor: number): void {
+  composer.setDraft(text)
+  assert.equal(composer.state().cursor, text.length, 'a replacement lands the caret at the end')
+  let guard = 0
+  while (composer.state().cursor > cursor) {
+    const before = composer.state().cursor
+    composer.applyKey(key('left'))
+    guard += 1
+    assert.ok(composer.state().cursor < before && guard <= text.length + 1,
+      'the caret walks left one grapheme cluster at a time')
+  }
+  assert.equal(composer.state().cursor, cursor, 'the fixture caret reached the accepted position')
+}
+
+/** A composer holding the DOCUMENT, CARET and REVISION one inline acceptance
+ *  committed, plus the live paste lease of the path that precedes the fragment. */
+function acceptedInlineComposer(): ReturnType<typeof composerWithSinks> & {
+  acceptance: { text: string; cursor: number; span: InlineAttachmentSpan }
+  expected: { text: string; cursor: number; editRevision: number }
+  lease: number
+} {
+  const fixture = composerWithSinks()
+  const acceptance = inlinePathAcceptance([INLINE_PENDING_LINE], 0, INLINE_PENDING_CARET, 'notes.txt')
+  setDraftAndCaret(fixture.composer, acceptance.text, acceptance.cursor)
+  const lease = fixture.composer.registerPastedPathSpan({
+    start: 0, end: PASTED_PATH.length, expected: PASTED_PATH,
+  })
+  assert.ok(lease !== undefined, 'the fixture carries one live bracketed-paste lease')
+  return {
+    ...fixture,
+    acceptance,
+    lease,
+    expected: {
+      text: acceptance.text,
+      cursor: acceptance.cursor,
+      editRevision: fixture.composer.editRevision(),
+    },
+  }
+}
+
+test('editRevision reports every committed mutation, every port write and both formal invalidations', () => {
+  const { composer, changes } = composerWithSinks()
+  const initial = composer.editRevision()
+
+  // A committed reducer edit is ONE mutation and exactly ONE frame.
+  const painted = changes()
+  composer.applyKey(key('a', { text: 'a' }))
+  assert.equal(composer.editRevision(), initial + 1, 'a key edit bumps the revision')
+  assert.equal(changes() - painted, 1)
+
+  // A no-op key is neither a mutation nor a frame.
+  const quiet = composer.editRevision()
+  const quietRenders = changes()
+  assert.deepEqual(composer.applyKey(key('delete')), { kind: 'none' })
+  assert.equal(composer.editRevision(), quiet, 'a no-op moved no revision')
+  assert.equal(changes(), quietRenders, 'a no-op painted nothing')
+
+  // The port mutators and an accepted completion each bump once.
+  composer.setDraft('hello')
+  assert.equal(composer.editRevision(), quiet + 1, 'setDraft bumped')
+  composer.insertIntoEditor('!')
+  assert.equal(composer.editRevision(), quiet + 2, 'insertIntoEditor bumped')
+  composer.setDraft('/ne')
+  const beforeCompletion = composer.editRevision()
+  assert.equal(composer.applyCompletionEdit({ text: '/ne', cursor: 3 }, { text: '/new ', cursor: 5 }), true)
+  assert.equal(composer.editRevision(), beforeCompletion + 1, 'an accepted completion bumped')
+
+  // The two PURE-STATE formal changes bump the revision without painting.
+  const renders = changes()
+  const beforeClear = composer.editRevision()
+  composer.clearDraftStateOnly()
+  assert.equal(composer.editRevision(), beforeClear + 1, 'clearing the draft bumped')
+  assert.equal(changes(), renders, 'yet the clear stayed pure state — no render')
+  const beforeInvalidate = composer.editRevision()
+  composer.invalidateRecallNavigation()
+  assert.equal(composer.editRevision(), beforeInvalidate + 1, 'a scope invalidation bumped')
+  assert.equal(changes(), renders, 'and it painted nothing either')
+})
+
+test('a committed inline fragment becomes its placeholder in place, keeps the prose around it and fires exactly one frame', () => {
+  const { composer, changes, acceptance, expected, lease } = acceptedInlineComposer()
+  assert.deepEqual(acceptance.span, {
+    line: 0,
+    start: `${PASTED_PATH} 看一下 `.length,
+    end: `${PASTED_PATH} 看一下 /image notes.txt`.length,
+  }, 'the acceptance replaces the command token through the accepted value')
+  assert.deepEqual(composer.state(), {
+    text: `${PASTED_PATH} 看一下 /image notes.txt 谢谢`, cursor: expected.cursor, focused: false,
+  }, 'the fixture is the committed acceptance document')
+
+  const painted = changes()
+  const revision = composer.editRevision()
+  assert.equal(composer.replaceInlineAttachmentFragment(expected, acceptance.span, INLINE_PLACEHOLDER), true)
+  const after = composer.state()
+  assert.deepEqual(after, {
+    text: `${PASTED_PATH} 看一下 ${INLINE_PLACEHOLDER} 谢谢`,
+    cursor: `${PASTED_PATH} 看一下 `.length + INLINE_PLACEHOLDER.length,
+    focused: false,
+  }, 'only the accepted span was replaced; everything before it and after it survived')
+  assert.equal(after.text.slice(0, `${PASTED_PATH} 看一下 `.length), `${PASTED_PATH} 看一下 `,
+    'the pasted path and the CJK prose before span.start are byte-identical')
+  assert.equal(after.text.slice(after.cursor), ' 谢谢', 'the separator and the prose after span.end are byte-identical')
+  assert.equal(after.text.indexOf(INLINE_PLACEHOLDER), `${PASTED_PATH} 看一下 `.length)
+  assert.equal(after.text.match(/\[image #/g)?.length, 1, 'the placeholder appears exactly once')
+  assert.equal(changes() - painted, 1, 'one committed fragment is exactly one frame')
+  assert.equal(composer.editRevision(), revision + 1, 'the commit is one revision')
+  assert.equal(composer.hasLivePath(lease, PASTED_PATH), true, 'the unrelated paste lease survived')
+})
+
+test('a placeholder committed on line 2 leaves line 1 and line 3 byte-identical and both earlier placeholders coexist', () => {
+  const lines = [
+    `${PASTED_PATH} [image #7 (7×7)] first line`,
+    INLINE_PENDING_LINE,
+    '[image #8 (8×8)] third line',
+  ]
+  const acceptance = inlinePathAcceptance(lines, 1, INLINE_PENDING_CARET, 'notes.txt')
+  const { composer, changes } = composerWithSinks()
+  setDraftAndCaret(composer, acceptance.text, acceptance.cursor)
+  const expected = { text: acceptance.text, cursor: acceptance.cursor, editRevision: composer.editRevision() }
+  assert.deepEqual(acceptance.span, {
+    line: 1,
+    start: `${PASTED_PATH} 看一下 `.length,
+    end: `${PASTED_PATH} 看一下 /image notes.txt`.length,
+  }, 'the span stays line-relative')
+  assert.equal(acceptance.text.split('\n')[0], lines[0], 'line 1 of the accepted document is untouched')
+  assert.equal(acceptance.text.split('\n')[2], lines[2], 'line 3 of the accepted document is untouched')
+
+  const painted = changes()
+  assert.equal(composer.replaceInlineAttachmentFragment(expected, acceptance.span, INLINE_PLACEHOLDER), true)
+  const after = composer.state()
+  const afterLines = after.text.split('\n')
+  assert.equal(afterLines[0], lines[0], 'line 1 stayed byte-identical across the commit')
+  assert.equal(afterLines[2], lines[2], 'line 3 stayed byte-identical across the commit')
+  assert.equal(afterLines[1], `${PASTED_PATH} 看一下 ${INLINE_PLACEHOLDER} 谢谢`,
+    'the fragment was resolved with every earlier line PLUS its newline counted')
+  assert.equal(after.text.match(/\[image #/g)?.length, 3, 'two earlier attachments and this one coexist')
+  assert.equal(after.cursor, lines[0]!.length + 1 + `${PASTED_PATH} 看一下 `.length + INLINE_PLACEHOLDER.length,
+    'the caret sits right after the new placeholder, not at the document end')
+  assert.ok(caretBoundaries(after.text).includes(after.cursor), 'and on a grapheme boundary')
+  assert.equal(changes() - painted, 1, 'exactly one frame')
+})
+
+test('a fragment whose document moved under the intake is refused with no text, caret, lease or frame change', () => {
+  const { composer, changes, acceptance, expected, lease } = acceptedInlineComposer()
+  composer.applyKey(key('x', { text: 'x' }))
+  const live = composer.state()
+  assert.equal(live.text,
+    `${expected.text.slice(0, expected.cursor)}x${expected.text.slice(expected.cursor)}`,
+    'a real edit landed after the acceptance snapshot')
+
+  const painted = changes()
+  assert.equal(composer.replaceInlineAttachmentFragment(expected, acceptance.span, INLINE_PLACEHOLDER), false,
+    'a moved document is a rejection, never a repair')
+  assert.deepEqual(composer.state(), live, 'the refusal touched neither the text nor the caret')
+  assert.equal(changes(), painted, 'and painted no frame')
+  assert.equal(composer.hasLivePath(lease, PASTED_PATH), true, 'and retired no paste lease')
+})
+
+test('a fragment whose caret moved is refused with the caret left exactly where the user put it', () => {
+  const { composer, changes, acceptance, expected, lease } = acceptedInlineComposer()
+  composer.applyKey(key('left'))
+  const live = composer.state()
+  assert.deepEqual(live, { text: expected.text, cursor: expected.cursor - 1, focused: false },
+    'the bytes are the same but the caret moved')
+
+  const painted = changes()
+  assert.equal(composer.replaceInlineAttachmentFragment(expected, acceptance.span, INLINE_PLACEHOLDER), false,
+    'the moved caret alone makes the commit stale')
+  assert.deepEqual(composer.state(), live)
+  assert.equal(changes(), painted)
+  assert.equal(composer.hasLivePath(lease, PASTED_PATH), true)
+})
+
+test('an edit → delete → retype walk over the SAME bytes is refused by the revision the document equality cannot see', () => {
+  const { composer, changes, acceptance, expected, lease } = acceptedInlineComposer()
+  composer.applyKey(key('x', { text: 'x' }))
+  composer.applyKey(key('backspace'))
+  const live = composer.state()
+  assert.deepEqual(live, { text: expected.text, cursor: expected.cursor, focused: false },
+    'the A→B→A walk handed the identical document and caret back')
+  assert.notEqual(composer.editRevision(), expected.editRevision, 'but the revision moved')
+
+  const painted = changes()
+  assert.equal(composer.replaceInlineAttachmentFragment(expected, acceptance.span, INLINE_PLACEHOLDER), false,
+    'the stale revision refuses what text equality would have accepted')
+  assert.deepEqual(composer.state(), live, 'the refusal rewrote nothing')
+  assert.equal(changes(), painted, 'and painted no frame')
+  assert.equal(composer.hasLivePath(lease, PASTED_PATH), true, 'and retired no paste lease')
+
+  // The same fragment IS committable from the current revision: the refusal above
+  // was the stale revision, not the document.
+  const current = { text: live.text, cursor: live.cursor, editRevision: composer.editRevision() }
+  assert.equal(composer.replaceInlineAttachmentFragment(current, acceptance.span, INLINE_PLACEHOLDER), true)
+  assert.equal(composer.state().text, `${PASTED_PATH} 看一下 ${INLINE_PLACEHOLDER} 谢谢`)
+})
+
+test('a span whose line is outside the document is refused with nothing touched', () => {
+  const { composer, changes, acceptance, expected, lease } = acceptedInlineComposer()
+  const live = composer.state()
+  for (const line of [1, -1]) {
+    const painted = changes()
+    assert.equal(composer.replaceInlineAttachmentFragment(expected, { line, start: 0, end: 5 }, INLINE_PLACEHOLDER), false,
+      `span.line ${line} does not name a line of this document`)
+    assert.deepEqual(composer.state(), live, `line ${line} changed nothing`)
+    assert.equal(changes(), painted, `line ${line} painted nothing`)
+    assert.equal(composer.hasLivePath(lease, PASTED_PATH), true, `line ${line} retired no lease`)
+  }
+})
+
+test('an empty or inverted span is refused with nothing touched', () => {
+  const { composer, changes, acceptance, expected, lease } = acceptedInlineComposer()
+  const live = composer.state()
+  for (const span of [
+    { line: 0, start: 5, end: 5 },
+    { line: 0, start: 5, end: 4 },
+  ]) {
+    const painted = changes()
+    assert.equal(composer.replaceInlineAttachmentFragment(expected, span, INLINE_PLACEHOLDER), false,
+      `span ${JSON.stringify(span)} is not a non-empty range`)
+    assert.deepEqual(composer.state(), live)
+    assert.equal(changes(), painted)
+    assert.equal(composer.hasLivePath(lease, PASTED_PATH), true)
+  }
+})
+
+test('a negative span start is refused with nothing touched', () => {
+  const { composer, changes, acceptance, expected, lease } = acceptedInlineComposer()
+  const live = composer.state()
+  const painted = changes()
+  assert.equal(composer.replaceInlineAttachmentFragment(expected, { line: 0, start: -1, end: 5 }, INLINE_PLACEHOLDER), false,
+    'a start before the line is out of range')
+  assert.deepEqual(composer.state(), live)
+  assert.equal(changes(), painted)
+  assert.equal(composer.hasLivePath(lease, PASTED_PATH), true)
+})
+
+test('a span that ends past its line is refused with nothing touched', () => {
+  const { composer, changes, acceptance, expected, lease } = acceptedInlineComposer()
+  const live = composer.state()
+  const lineLength = expected.text.split('\n')[0]!.length
+  const painted = changes()
+  assert.equal(composer.replaceInlineAttachmentFragment(
+    expected, { line: 0, start: 0, end: lineLength + 1 }, INLINE_PLACEHOLDER,
+  ), false, 'the line holds no byte at that offset')
+  assert.deepEqual(composer.state(), live)
+  assert.equal(changes(), painted)
+  assert.equal(composer.hasLivePath(lease, PASTED_PATH), true)
+})
+
+test('a span that would swallow the line break is refused and the two-line document keeps both lines', () => {
+  const lines = [INLINE_PENDING_LINE, 'second line']
+  const acceptance = inlinePathAcceptance(lines, 0, INLINE_PENDING_CARET, 'notes.txt')
+  const { composer, changes } = composerWithSinks()
+  setDraftAndCaret(composer, acceptance.text, acceptance.cursor)
+  const expected = { text: acceptance.text, cursor: acceptance.cursor, editRevision: composer.editRevision() }
+  const live = composer.state()
+  const firstLine = acceptance.text.split('\n')[0]!
+  // Any span reaching past its own line is the one whose straight slice would carry
+  // the `\n` (and here even the head of line 2): the line bound refuses it, so the
+  // newline-consuming fragment is never written.
+  for (const end of [firstLine.length + 1, firstLine.length + 1 + 'second'.length]) {
+    const painted = changes()
+    assert.equal(composer.replaceInlineAttachmentFragment(expected, { line: 0, start: 0, end }, INLINE_PLACEHOLDER), false,
+      'a fragment may not carry a line break')
+    assert.deepEqual(composer.state(), live, 'neither line moved')
+    assert.equal(changes(), painted, 'and no frame was committed')
+  }
+})
+
+test('a CRLF document is never split: a span consuming the CR is refused, the same-line span commits', () => {
+  const crlf = '看一下 /image a.png \r\nsecond'
+  const lineLength = '看一下 /image a.png \r'.length
+  const caret = '看一下 /image a.png'.length
+  const { composer, changes } = composerWithSinks()
+  setDraftAndCaret(composer, crlf, caret)
+  const expected = { text: crlf, cursor: caret, editRevision: composer.editRevision() }
+  assert.ok(!caretBoundaries(crlf).includes(lineLength),
+    'the offset between the CR and the LF is inside the one CRLF cluster')
+
+  const consumed = { line: 0, start: '看一下 '.length, end: lineLength }
+  const painted = changes()
+  assert.equal(composer.replaceInlineAttachmentFragment(expected, consumed, INLINE_PLACEHOLDER), false,
+    'a fragment carrying the CR of a CRLF pair is refused')
+  assert.deepEqual(composer.state(), { text: crlf, cursor: caret, focused: false }, 'the pair stayed together')
+  assert.equal(changes(), painted, 'and the refusal painted nothing')
+
+  // Control: the identical document with a fragment that stops before the CR
+  // commits, so the refusal above was the CR, not the CRLF draft.
+  assert.equal(composer.replaceInlineAttachmentFragment(
+    expected, { line: 0, start: '看一下 '.length, end: caret }, INLINE_PLACEHOLDER,
+  ), true, 'a fragment inside one line of a CRLF draft is accepted')
+  const after = composer.state()
+  assert.equal(after.text, `看一下 ${INLINE_PLACEHOLDER} \r\nsecond`)
+  assert.equal(after.text.slice(4 + INLINE_PLACEHOLDER.length), ' \r\nsecond',
+    'the separator, the whole CRLF cluster and line 2 survived')
+  assert.equal(after.cursor, 4 + INLINE_PLACEHOLDER.length)
+  assert.equal(changes() - painted, 1, 'exactly one frame')
+})
+
+test('a span endpoint inside an emoji, ZWJ or combining cluster is refused with the cluster intact', () => {
+  const cases = [
+    { label: 'emoji', line: '看一下 /image a👍.png' },
+    { label: 'ZWJ family', line: '看一下 /image a👨‍👩‍👧.png' },
+    { label: 'combining mark', line: '看一下 /image ae\u0301.png' },
+  ]
+  for (const { label, line } of cases) {
+    const { composer, changes } = composerWithSinks()
+    setDraftAndCaret(composer, line, line.length)
+    const expected = { text: line, cursor: line.length, editRevision: composer.editRevision() }
+    const live = composer.state()
+    const boundaries = caretBoundaries(line)
+    const argumentStart = line.indexOf('/image ') + '/image '.length
+    let inside = -1
+    for (let index = argumentStart + 1; index < line.length; index += 1) {
+      if (!boundaries.includes(index)) { inside = index; break }
+    }
+    assert.ok(inside > argumentStart, `the ${label} fixture really has an interior offset`)
+    const painted = changes()
+    assert.equal(composer.replaceInlineAttachmentFragment(expected, { line: 0, start: argumentStart, end: inside }, INLINE_PLACEHOLDER), false,
+      `an END inside the ${label} cluster is refused`)
+    assert.deepEqual(composer.state(), live, `the ${label} refusal touched nothing`)
+    assert.equal(changes(), painted, `the ${label} refusal painted nothing`)
+    const secondPainted = changes()
+    assert.equal(composer.replaceInlineAttachmentFragment(expected, { line: 0, start: inside, end: line.length }, INLINE_PLACEHOLDER), false,
+      `a START inside the ${label} cluster is refused too`)
+    assert.deepEqual(composer.state(), live)
+    assert.equal(changes(), secondPainted)
+  }
+})
+
+test('a placeholder committed beside a pasted image path keeps that lease live and its later replacement hits the leased occurrence only', () => {
+  const pastePlaceholder = '[image #9 (9×9)]'
+  const draftLine = `${PASTED_PATH} ${PASTED_PATH} 看一下 /image notes.tx 谢谢`
+  const caretColumn = `${PASTED_PATH} ${PASTED_PATH} 看一下 /image notes.tx`.length
+  const acceptance = inlinePathAcceptance([draftLine], 0, caretColumn, 'notes.txt')
+  const { composer, changes } = composerWithSinks()
+  setDraftAndCaret(composer, acceptance.text, acceptance.cursor)
+  const secondStart = PASTED_PATH.length + 1
+  const lease = composer.registerPastedPathSpan({
+    start: secondStart, end: secondStart + PASTED_PATH.length, expected: PASTED_PATH,
+  })
+  assert.ok(lease !== undefined, 'the SECOND occurrence is the leased one')
+  const expected = { text: acceptance.text, cursor: acceptance.cursor, editRevision: composer.editRevision() }
+
+  const painted = changes()
+  assert.equal(composer.replaceInlineAttachmentFragment(expected, acceptance.span, INLINE_PLACEHOLDER), true)
+  assert.equal(changes() - painted, 1, 'the inline commit is one frame')
+  assert.equal(composer.state().text, `${PASTED_PATH} ${PASTED_PATH} 看一下 ${INLINE_PLACEHOLDER} 谢谢`)
+  assert.equal(composer.hasLivePath(lease, PASTED_PATH), true,
+    'the paste lease in a different part of the draft is still live')
+
+  const beforePaste = changes()
+  assert.equal(composer.replacePastedPathOccurrence(lease, PASTED_PATH, pastePlaceholder), true)
+  const after = composer.state()
+  assert.equal(changes() - beforePaste, 1, 'the paste replacement is one frame')
+  assert.equal(after.text, `${PASTED_PATH} ${pastePlaceholder} 看一下 ${INLINE_PLACEHOLDER} 谢谢`,
+    'the replacement hit the leased occurrence, left the other occurrence alone and did not clobber the placeholder')
+  assert.equal(after.text.slice(0, PASTED_PATH.length), PASTED_PATH, 'the first pasted path is byte-identical')
+  assert.equal(after.cursor, after.text.indexOf(INLINE_PLACEHOLDER) + INLINE_PLACEHOLDER.length,
+    'the caret stayed right after the inline placeholder, shifted with it')
+})
+
+test('a committed paste placeholder survives a stale inline commit and a committed inline placeholder survives a late paste replacement', () => {
+  // Direction 1: the paste read lands first, so the inline acceptance is stale.
+  const pasteFirst = acceptedInlineComposer()
+  const pastePlaceholder = '[image #9 (9×9)]'
+  assert.equal(pasteFirst.composer.replacePastedPathOccurrence(pasteFirst.lease, PASTED_PATH, pastePlaceholder), true)
+  const settledPaste = pasteFirst.composer.state()
+  assert.equal(settledPaste.text, `${pastePlaceholder} 看一下 /image notes.txt 谢谢`)
+  const stalePainted = pasteFirst.changes()
+  assert.equal(
+    pasteFirst.composer.replaceInlineAttachmentFragment(pasteFirst.expected, pasteFirst.acceptance.span, INLINE_PLACEHOLDER),
+    false, 'a stale inline commit is refused after the paste placeholder landed',
+  )
+  assert.deepEqual(pasteFirst.composer.state(), settledPaste, 'the committed paste placeholder stands')
+  assert.equal(pasteFirst.changes(), stalePainted, 'and the refusal painted nothing')
+  assert.equal(settledPaste.text.includes('/image notes.txt'), true, 'the user path stays editable text')
+
+  // Direction 2: the inline placeholder lands first, then the paste read commits
+  // and a SECOND (late) replacement for that same lease owns nothing.
+  const inlineFirst = acceptedInlineComposer()
+  assert.equal(
+    inlineFirst.composer.replaceInlineAttachmentFragment(inlineFirst.expected, inlineFirst.acceptance.span, INLINE_PLACEHOLDER),
+    true,
+  )
+  assert.equal(inlineFirst.composer.hasLivePath(inlineFirst.lease, PASTED_PATH), true,
+    'the inline commit did not retire the paste lease')
+  assert.equal(inlineFirst.composer.replacePastedPathOccurrence(inlineFirst.lease, PASTED_PATH, pastePlaceholder), true)
+  const settled = inlineFirst.composer.state()
+  assert.equal(settled.text, `${pastePlaceholder} 看一下 ${INLINE_PLACEHOLDER} 谢谢`, 'both placeholders coexist')
+  const latePainted = inlineFirst.changes()
+  assert.equal(inlineFirst.composer.replacePastedPathOccurrence(inlineFirst.lease, PASTED_PATH, '[image #10 (10×10)]'), false,
+    'a lease never survives its own replacement')
+  assert.deepEqual(inlineFirst.composer.state(), settled, 'the late replacement overwrote neither placeholder')
+  assert.equal(inlineFirst.changes(), latePainted, 'and painted nothing')
+})
+
+test('CJK, a full-width space and an emoji around the fragment survive the commit and the caret stays on a cluster boundary', () => {
+  const prefix = '看图👍 '
+  const suffix = ' 后面　好'
+  const pendingLine = `${prefix}/image 图片　文件👍.p${suffix}`
+  const caretColumn = `${prefix}/image 图片　文件👍.p`.length
+  const acceptance = inlinePathAcceptance([pendingLine], 0, caretColumn, '图片　文件👍.png')
+  const { composer, changes } = composerWithSinks()
+  setDraftAndCaret(composer, acceptance.text, acceptance.cursor)
+  const expected = { text: acceptance.text, cursor: acceptance.cursor, editRevision: composer.editRevision() }
+  assert.equal(acceptance.span.start, prefix.length, 'the fragment starts at the command token, after the emoji prose')
+
+  const painted = changes()
+  assert.equal(composer.replaceInlineAttachmentFragment(expected, acceptance.span, INLINE_PLACEHOLDER), true)
+  const after = composer.state()
+  assert.equal(after.text, `${prefix}${INLINE_PLACEHOLDER}${suffix}`,
+    'the CJK/emoji prefix and the full-width-space prose after the fragment survive byte-identically')
+  assert.equal(after.text.slice(0, prefix.length), prefix)
+  assert.equal(after.text.slice(-suffix.length), suffix)
+  assert.equal(after.cursor, prefix.length + INLINE_PLACEHOLDER.length)
+  assert.ok(caretBoundaries(after.text).includes(after.cursor),
+    'the caret is on a grapheme boundary, never inside the emoji cluster')
+  assert.equal(after.text.slice(after.cursor, after.cursor + 1), ' ',
+    'the caret sits right after the placeholder, before the preserved prose')
+  assert.equal(changes() - painted, 1, 'exactly one frame')
+})
+
+test('a refused fragment leaves an ↑ browse in flight untouched, so ↓ still gives the pre-browse draft back', () => {
+  const { composer, changes } = composerWithSinks({ entries: ['recalled row'] })
+  composer.setDraft('mine')
+  composer.applyKey(key('up'))
+  composer.applyKey(key('up'))
+  assert.deepEqual(composer.state(), { text: 'recalled row', cursor: 0, focused: false }, '↑ is browsing')
+  const expected = { text: 'recalled row', cursor: 0, editRevision: composer.editRevision() }
+
+  const painted = changes()
+  assert.equal(composer.replaceInlineAttachmentFragment(
+    expected, { line: 0, start: 4, end: 4 }, INLINE_PLACEHOLDER,
+  ), false, 'the empty span is refused')
+  assert.equal(changes(), painted, 'the refusal painted nothing')
+  assert.deepEqual(composer.state(), { text: 'recalled row', cursor: 0, focused: false },
+    'and touched neither the recalled text nor the caret')
+
+  composer.applyKey(key('down'))
+  assert.deepEqual(composer.state(), { text: 'mine', cursor: 4, focused: false },
+    'the browse bookmark survived the refusal: ↓ restores the exact pre-browse draft')
+})
+
+test('a committed inline placeholder retires the browse bookmark, so ↓ gives the placeholder back instead of the pre-accept draft', () => {
+  const pendingLine = '/image ./shots/a'
+  const seat = pathArgumentSeat(pendingLine, FILE_ARGUMENT_COMMANDS, 0)
+  assert.ok(seat !== undefined, 'the recalled row is itself an accepted attachment fragment')
+  const applied = applyInlineAttachmentPath(pendingLine, seat, pendingLine.length, 0, './shots/a.png')
+  const recalled = applied.line
+  assert.equal(recalled, '/image ./shots/a.png ')
+
+  const { composer, changes } = composerWithSinks({ entries: [recalled] })
+  composer.setDraft('mine')
+  composer.applyKey(key('up'))
+  composer.applyKey(key('up'))
+  assert.deepEqual(composer.state(), { text: recalled, cursor: 0, focused: false }, '↑ is on the recalled row')
+  composer.applyKey(key('end'))
+  composer.applyKey(key('left'))
+  const expected = { text: recalled, cursor: applied.cursorCol, editRevision: composer.editRevision() }
+  assert.equal(expected.cursor, recalled.length - 1, 'the caret is right after the accepted value')
+
+  const painted = changes()
+  assert.equal(composer.replaceInlineAttachmentFragment(expected, applied.span, INLINE_PLACEHOLDER), true)
+  const committed = composer.state()
+  assert.deepEqual(committed, { text: `${INLINE_PLACEHOLDER} `, cursor: INLINE_PLACEHOLDER.length, focused: false })
+  assert.equal(changes() - painted, 1)
+
+  assert.deepEqual(composer.applyKey(key('down')), { kind: 'edited' }, '↓ at the last line only moves the caret')
+  assert.equal(composer.state().text, committed.text, '↓ cannot resurrect the pre-accept draft')
+  composer.applyKey(key('up'))
+  composer.applyKey(key('up'))
+  assert.equal(composer.state().text, recalled, 'the browse itself still works from the committed draft')
+  composer.applyKey(key('down'))
+  assert.deepEqual(composer.state(), { text: committed.text, cursor: committed.text.length, focused: false },
+    'the new bookmark is the committed placeholder, not the draft the acceptance replaced')
 })
