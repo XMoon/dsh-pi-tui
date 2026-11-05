@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The inline attachment success notice is no longer swallowed.** Accepting an `/image` / `/attach` path candidate in the body of a draft really staged the file and spliced its placeholder, but the `attached … — Enter to send` notice was silently dropped because that notice re-used the pre-write draft snapshot — the very write that invalidates it. Both the PiTui and TSP renderers were affected; the first-line `/attach <path>` / `/image <path>` routes and the clipboard / terminal-paste routes keep their existing notices. A completed write is now announced on the completed commit plus the current Session owner, and the opposite hole is fixed too: a refused write rolled its entry back and still announced success, and now rolls back and stays silent.
 - Fixed the exit race that logged `retire phase failed phase=flush: flush on a closed handle` after `/new` followed by `/exit`: exit/HMR/parked-session retirements no longer issue an explicit flush against a write handle DSH has already started closing — final durability is settled by `AgentHandle.dispose` joining DSH's close/drain. Ordinary session switches keep the explicit old-owner flush, and a newly committed empty session now establishes its resumable persistence boundary right after the commit, before any long drain can be overtaken by a shutdown (failures are clearly reported, never silent).
 
 ## [0.5.5] - 2026-11-03
