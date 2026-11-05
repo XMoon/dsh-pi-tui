@@ -126,6 +126,14 @@ interface SlashPane {
   quietKey(bytes: string): Promise<void>
   /** Step the caret LEFT by graphemes and wait for the caret / frame it painted. */
   caretLeft(steps: number, expected?: number): Promise<void>
+  /** The mount's OWN render counter: every `render()` pushes exactly one frame
+   *  to the scripted pane, so a frame delta IS the real render call count that
+   *  §7.1 demands (the final wire diff alone cannot prove exactly-once). */
+  frameCount(): number
+  /** The candidate rows as painted AT the first `count` frames. */
+  rowsThrough(count: number): WireNode[]
+  /** The composer text/caret as painted AT the first `count` frames. */
+  editorThrough(count: number): { text: string; cursor: number }
   click(node: WireNode, writes?: boolean): Promise<void>
   commitStatus(snapshot: StatusSnapshot): Promise<void>
   dispose(): Promise<void>
@@ -322,6 +330,10 @@ async function mountSlashPane(
   install()
 
   const nodes = (): WireNode[] => wireNodes(pane)
+  /** The live node set folded through the FIRST `count` frames — the painted
+   *  state AT a frame, which is what makes a render count observable rather than
+   *  inferred from the final wire diff. */
+  const nodesThrough = (count: number): WireNode[] => wireNodes({ frames: () => pane.frames().slice(0, count) })
   // A candidate ROW is the `el` button the popup paints; its name/description
   // are CHILD `el` nodes addressed under it (`….0`, `….1`). The row key's last
   // path segment starts with `completion-`, but its VALUE keeps dots (a real
@@ -330,10 +342,15 @@ async function mountSlashPane(
   // absence assertion becomes vacuous. A row is therefore the OUTERMOST
   // completion `el` under the live popup: a child is excluded because its id
   // starts with its row's id plus `.`.
-  const rowNodes = (): WireNode[] => {
-    const candidateEls = nodes().filter(node => node.k === 'el' && node.id.includes('.completion-'))
+  const rowsIn = (list: WireNode[]): WireNode[] => {
+    const candidateEls = list.filter(node => node.k === 'el' && node.id.includes('.completion-'))
     return candidateEls.filter(node => !candidateEls.some(other => other.id !== node.id
       && node.id.startsWith(`${other.id}.`)))
+  }
+  const rowNodes = (): WireNode[] => rowsIn(nodes())
+  const composerThrough = (count: number): { text: string; cursor: number } => {
+    const node = nodesThrough(count).find(candidate => candidate.id === composerId)
+    return { text: String(node?.p.text ?? ''), cursor: Number(node?.p.cursor ?? 0) }
   }
   const bareRowNodes = (): WireNode[] => nodes().filter(node => node.k === 'text'
     && /completion-bare-/.test(node.id))
@@ -375,6 +392,9 @@ async function mountSlashPane(
       pane.key(bytes)
       await new Promise(resolve => setTimeout(resolve, ABSENCE_WINDOW_MS))
     },
+    frameCount: () => pane.frameCount(),
+    rowsThrough: (count) => rowsIn(nodesThrough(count)),
+    editorThrough: composerThrough,
     async caretLeft(steps, expected) {
       await m.key(LEFT.repeat(steps))
       if (expected !== undefined) {
@@ -1498,6 +1518,133 @@ test('an inline skill row shares the /name seat with the attachment actions but 
     'only the /name token was rewritten')
   assert.equal(staged.length, 0, 'a skill row never stages a file')
   assert.deepEqual(m.calls.submits, [], 'a skill accept is accept-only')
+})
+
+// ── The render-count contract (§7.1: the frame delta IS the render count) ────
+
+test('a WRITING completion commits exactly one frame, and a continuation commits its write and its re-query as two distinct states', async (t) => {
+  const host = scriptedHostFilePort(() => DOTTED_HOST_ITEMS)
+  const m = await mountSlashPane(t, {
+    chrome: true,
+    fileReferences: host.port,
+    localCwd: localWorkspace(t, ['shots/err.png', 'notes.txt']),
+  })
+  const staged = captureStager(m)
+
+  // Host `@` accept: one editor mutation and no follow-up query → one frame.
+  await m.type('请看 @src')
+  await m.key(TAB)
+  await waitUntil('the mention list painted', () => m.rows().length > 0)
+  const mentionBefore = m.frameCount()
+  await m.key(ENTER)
+  await waitUntil('the mention accept painted', () => m.editor().text === '请看 @src/deep.ts ')
+  assert.equal(m.frameCount() - mentionBefore, 1,
+    'the mention accept commits exactly ONE render')
+  assert.equal(m.rowsThrough(mentionBefore + 1).length, 0,
+    'that single frame carries the finished text with the list already withdrawn')
+  // reason: bounded absence window — a double commit would arrive as a LATER
+  // frame; the fact is that no second frame ever follows this state.
+  await new Promise(resolve => setTimeout(resolve, ABSENCE_WINDOW_MS))
+  assert.equal(m.frameCount() - mentionBefore, 1, 'and nothing re-renders the same committed state')
+
+  // Inline ACTION accept: the write is ONE frame, the re-queried path list the
+  // NEXT — two frames for two different states, never two for one.
+  await m.type('看一下 /im')
+  await m.key(TAB)
+  await waitUntil('the action list painted', () => m.rows().length > 0)
+  const actionBefore = m.frameCount()
+  await m.key(ENTER)
+  await waitUntil('the action path list painted', () => m.rowsThrough(actionBefore + 2).length > 0)
+  assert.equal(m.frameCount() - actionBefore, 2,
+    'the action accept commits exactly one write frame plus exactly one settled-list frame')
+  assert.equal(m.editorThrough(actionBefore + 1).text, '看一下 /image ', 'the first new frame is the write')
+  assert.equal(m.rowsThrough(actionBefore + 1).length, 0,
+    'and it carries no list yet: the follow-up query did not ride the same frame twice')
+  assert.equal(m.editorThrough(actionBefore + 2).text, '看一下 /image ',
+    'the second new frame changed only the popup, never the document again')
+  assert.equal(m.rowsThrough(actionBefore + 2).length, 2, 'the settled path list is that one frame')
+
+  // DIRECTORY accept: the same shape — one write frame, one continuation frame.
+  await m.type('看一下 /image sh')
+  await m.key(TAB)
+  await waitUntil('the directory list painted', () => m.rows().length > 0)
+  const dirBefore = m.frameCount()
+  await m.key(ENTER)
+  await waitUntil('the continuation list painted', () => m.rowsThrough(dirBefore + 2).length > 0)
+  assert.equal(m.frameCount() - dirBefore, 2,
+    'the directory accept commits exactly one write frame plus exactly one continuation frame')
+  assert.deepEqual(m.rowsThrough(dirBefore + 1).map(node => m.rowText(node)), [],
+    'the write frame carries the continued argument and an empty popup')
+  assert.equal(m.editorThrough(dirBefore + 2).text, '看一下 /image shots/',
+    'the continuation frame left the document untouched')
+  assert.deepEqual(m.rowsThrough(dirBefore + 2).map(node => m.rowText(node)), ['›shots/err.png'],
+    'and painted exactly the child listing of the accepted directory')
+  assert.equal(staged.length, 0, 'none of these writes staged a file, so no notice frame was added either')
+  assert.deepEqual(m.calls.submits, [], 'and none of them submitted')
+})
+
+test('a refused accept and every non-completion key over an OPEN non-slash popup owe exactly one dismissal frame and never a second', async (t) => {
+  const host = scriptedHostFilePort(() => DOTTED_HOST_ITEMS)
+  const m = await mountSlashPane(t, {
+    chrome: true,
+    fileReferences: host.port,
+    localCwd: localWorkspace(t, ['notes.txt']),
+  })
+  const staged = captureStager(m)
+  const openHostPopup = async (): Promise<number> => {
+    await m.type('看 @src')
+    await m.key(TAB)
+    await waitUntil('the Host popup painted', () => m.rows().length > 0)
+    return m.frameCount()
+  }
+
+  // The composer-refused write (the CRLF-guarded inline path): the seat still
+  // owes the ONE frame that takes the still-visible list off the wire.
+  await m.type('看一下 /image note\r\nsecond line')
+  await m.caretLeft('second line'.length + 1)
+  await m.key('s')
+  await waitUntil('the CRLF file row painted', () => m.rows().length > 0)
+  const refusedBefore = m.frameCount()
+  await m.key(ENTER)
+  await waitUntil('the refused accept dismissed its list',
+    () => m.frameCount() > refusedBefore && m.rowsThrough(m.frameCount()).length === 0)
+  assert.equal(m.frameCount() - refusedBefore, 1,
+    'a refused write owes exactly one dismissal frame, so the next Escape is not left facing a painted list')
+  // reason: bounded absence window — the claim is that NO second frame follows a
+  // refused accept; there is no further event to wait for.
+  await new Promise(resolve => setTimeout(resolve, ABSENCE_WINDOW_MS))
+  assert.equal(m.frameCount() - refusedBefore, 1, 'and the refusal produced no further render')
+  assert.deepEqual(m.editor(), { text: '看一下 /image notes\r\nsecond line', cursor: '看一下 /image notes'.length },
+    'the refused accept wrote nothing')
+  assert.equal(staged.length, 0, 'and staged nothing')
+
+  // Ctrl+C: the popup retires (one frame) and the cancel intent still travels.
+  const ctrlCBefore = await openHostPopup()
+  await m.quietKey(CTRL_C)
+  assert.equal(m.frameCount() - ctrlCBefore, 1, 'Ctrl+C costs exactly the one dismissal frame')
+  assert.equal(m.calls.cancels, 1, 'and the cancel owner ran exactly once')
+  assert.equal(m.rows().length, 0, 'the popup is off the wire')
+
+  // Ctrl+V with an empty clipboard: its owner writes nothing, so the dismissed
+  // list is the only frame the mount may add.
+  const ctrlVBefore = await openHostPopup()
+  const queriesBefore = host.queries.length
+  await m.quietKey(CTRL_V)
+  assert.equal(m.frameCount() - ctrlVBefore, 1, 'an empty Ctrl+V costs exactly the one dismissal frame')
+  assert.equal(m.calls.pastes, 1, 'the paste owner ran exactly once')
+  assert.equal(host.queries.length, queriesBefore, 'and no extra file read was triggered')
+
+  // A higher owner taking the keys: opening the Permission menu retires the
+  // popup inside that SAME frame — one frame, not a dismissal plus an opening.
+  await m.commitStatus(permissionSnapshot('workspace-write'))
+  const menuBefore = await openHostPopup()
+  const trigger = wireNodes(m.pane).find(node => node.k === 'el' && node.id.includes('.composer-permission-s')
+    && !node.id.includes('option'))
+  assert.ok(trigger, 'the permission trigger is on the wire')
+  await m.click(trigger!, true)
+  assert.equal(m.frameCount() - menuBefore, 1, 'the menu opening and the popup dismissal commit as ONE frame')
+  assert.equal(m.rows().length, 0, 'the non-slash popup is gone once the menu owns the keys')
+  assert.deepEqual(m.calls.submits, [], 'no dismissal path ever produced a submission')
 })
 
 // ── Catalog lifecycle ───────────────────────────────────────────────────────
