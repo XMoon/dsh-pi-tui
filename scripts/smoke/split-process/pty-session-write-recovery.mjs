@@ -72,6 +72,7 @@ export async function runPtySessionWriteRecovery(context) {
     targetDshVersion,
     trace,
     failpoint,
+    mode,
   } = context
   const { anchor, home, profileDir } = installation
   const clientWorkspaceA = join(workDir, 'ws2-client-workspace-A')
@@ -1189,8 +1190,15 @@ export async function runPtySessionWriteRecovery(context) {
       candidate: basename(tarball),
       sha256: candidateSha256,
       dshVersion: targetDshVersion,
-      directHelp: 'pass',
-      t01t26: 'pass (T26a row-disabled + real artifact-absent; T26b official row; T26 no-cookie)',
+      // The inventory claim belongs to a FULL run: a selected surface case never
+      // executes T01-T26 or the Direct `--help` positive, so it must not report
+      // them as passed. The event name and the full-mode fields stay compatible.
+      ...(mode === 'full'
+        ? {
+            directHelp: 'pass',
+            t01t26: 'pass (T26a row-disabled + real artifact-absent; T26b official row; T26 no-cookie)',
+          }
+        : {}),
       surface: 'T27-T39 + T41/T42/T43 pass',
     })
   } finally {
