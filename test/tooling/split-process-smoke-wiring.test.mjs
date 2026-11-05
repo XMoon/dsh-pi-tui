@@ -911,6 +911,17 @@ test('the independent Client lifecycle inventory stays between M5N-03 and the T4
   assert.equal((d05.match(/startC1Client\(/gu) ?? []).length, 2, 'D-05 must start exactly two real Surface Clients')
   assert.match(d05, /SPLIT_PROCESS_CLIENT_HMR_PROBE: '1'/u)
   assert.match(d05, /name === 'ask_user_question'/u)
+  // The observer wipe is synchronized on the qualification-only assembly hold:
+  // the replacement mount is parked BEFORE its UI is created, so the reset can
+  // never erase a legitimate new frame (the old `ui-mounted` poll race).
+  assert.match(d05, /SPLIT_PROCESS_CLIENT_HOLD_ASSEMBLY: `domain@\$\{assemblyBarrier\}`/u,
+    'D-05 must use the domain assembly hold for the replacement mount')
+  assert.match(d05, /rmSync\(assemblyBarrier, \{ force: true \}\)/u,
+    'D-05 must remove the initial-mount barrier before the HMR')
+  assert.match(d05, /op === 'assembly-hold'[\s\S]{0,160}record\.stage === 'domain'/u,
+    'D-05 must wait for the deterministic domain assembly hold')
+  assert.match(d05, /writeFileSync\(assemblyBarrier, 'release\\n'/u,
+    'D-05 must release the assembly barrier after wiping the observer')
   assert.match(d05, /clientA\.term\.reset\(\)/u,
     'D-05 must wipe the observer buffer so the OLD frame cannot satisfy the repaint wait')
   assert.match(d05, /NEW revision repainted the pending Question/u)
@@ -919,13 +930,16 @@ test('the independent Client lifecycle inventory stays between M5N-03 and the T4
   assert.match(d05, /withdrew the settled modal/u)
   assert.match(d05, /hostQuestionSettlements: 1/u)
   const d05Retired = d05.indexOf("op === 'hmr-revision-retired'")
+  const d05Hold = d05.indexOf("op === 'assembly-hold'")
   const d05Reset = d05.indexOf('clientA.term.reset()')
+  const d05Release = d05.indexOf("writeFileSync(assemblyBarrier, 'release\\n'")
   const d05Ready = d05.indexOf("op === 'hmr-revision-ready'")
   const d05Repaint = d05.indexOf('NEW revision repainted the pending Question')
   const d05Answer = d05.indexOf("clientB.send('1')")
-  assert.ok(d05Retired > 0 && d05Reset > d05Retired && d05Ready > d05Reset
+  assert.ok(d05Retired > 0 && d05Hold > d05Retired && d05Reset > d05Hold
+    && d05Release > d05Reset && d05Ready > d05Release
     && d05Repaint > d05Ready && d05Answer > d05Repaint,
-  'D-05 must retire the old revision, wipe, wait for ready, prove the NEW paint, then let B answer')
+  'D-05 must retire the old revision, park at the assembly hold, wipe, release, wait for ready, prove the NEW paint, then let B answer')
 
   // ── D-06: common Host SIGKILL, C is a NEW Host ──────────────────────────
   const d06 = slices['D-06']
@@ -955,6 +969,8 @@ test('the independent Client lifecycle inventory stays between M5N-03 and the T4
   // ── D-07: A SIGHUP process failure ──────────────────────────────────────
   const d07 = slices['D-07']
   assert.match(d07, /clientA\.signalBusiness\('SIGHUP'\)/u)
+  assert.match(d07, /aExit\.code === 129 && aExit\.signal === null/u,
+    'D-07 must assert the actual SIGHUP wrapper exit classification')
   assert.match(d07, /SIGHUP process-failure path fabricated a graceful owner inventory/u)
   assert.match(d07, /gracefulInventoryClaimed: false/u)
   assert.match(d07, /originalTurnSettlement: 'completed'/u)
