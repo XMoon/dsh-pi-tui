@@ -78,7 +78,7 @@ test('the split-process smoke is a package script and a release-tag-only CI job'
   const job = workflow.jobs['split-process']
   assert.ok(job, 'the split-process smoke must be its own CI job')
   const splitRun = job.steps?.find(step => typeof step.run === 'string'
-    && step.run.includes('pnpm smoke:split-process -- "$CANDIDATE"'))
+    && step.run.trim() === 'pnpm smoke:split-process -- "$CANDIDATE"')
   assert.ok(splitRun, 'the split-process job must execute the real lane against the downloaded candidate')
   assert.match(job.if, /startsWith\(github\.ref, 'refs\/tags\/'\)/u,
     'the split-process job must only run on a release tag; an ordinary PR skips it')
@@ -298,29 +298,11 @@ test('listing selectable split cases does not install a profile or claim complet
   assert.equal(result.status, 0, `--list must exit 0: ${result.stderr}`)
   // The listing prints the REGISTRY order — the same order a suite and the full
   // lane execute — so a sorted display can never show an order no run performs.
-  // The stable IDs, suites and order are the independent oracle; the readable
-  // title is owned by the registry and must be echoed verbatim, so a legitimate
-  // title rewording does not fail this wiring check.
-  const expected = [
-    ['bootstrap', 'bootstrap.host-runtime-disabled'],
-    ['bootstrap', 'bootstrap.entry-admission'],
-    ['bootstrap', 'bootstrap.runtime-artifact-recovery'],
-    ['transport', 'transport.authenticated-lifecycle'],
-    ['surface', 'surface.pty-session-write-recovery'],
-    ['multi-client', 'multi-client.shared-session-interactions'],
-    ['navigation', 'navigation.non-destructive-client-lifecycle'],
-    ['recovery', 'recovery.detached-turn-interactions'],
-    ['recovery', 'recovery.client-hmr-signals'],
-    ['recovery', 'recovery.unknown-write-host-death'],
-    ['web', 'web.official-composition'],
-    ['web', 'web.runtime-toggle'],
-    ['web', 'web.startup-preference'],
-    ['web', 'web.product-browser-tui'],
-  ]
-  const titles = new Map(listSelectableCases().map(entry => [entry.id, entry.title]))
+  // The frozen ID/suite/order oracle belongs to the registry test; here the
+  // expectation is derived from the live registry so no second roster exists.
   assert.deepEqual(result.stdout.trimEnd().split('\n'), [
     'SPLIT_PROCESS_SELECTABLE_CASES scope=SELECTABLE_ONLY',
-    ...expected.map(([suite, id]) => `suite=${suite} case=${id} title=${titles.get(id)}`),
+    ...listSelectableCases().map(entry => `suite=${entry.suite} case=${entry.id} title=${entry.title}`),
   ], 'the listing must follow the registry execution order')
   // A listing never becomes a full PASS and never creates a scene.
   for (const forbidden of ['SPLIT_PROCESS_SMOKE_PASS', 'T60 PASS', 'PASS_REAL_SPLIT_PROCESS',
