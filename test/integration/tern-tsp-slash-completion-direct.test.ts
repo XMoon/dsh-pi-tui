@@ -214,6 +214,15 @@ async function settle(fixture: DirectTspFixture, label: string, predicate: () =>
   }
 }
 
+/** Poll a renderer fact for a bounded number of frame cycles without failing. */
+async function waitsFor(predicate: () => boolean, attempts = 80): Promise<boolean> {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (predicate()) return true
+    await new Promise(resolve => setTimeout(resolve, 25))
+  }
+  return predicate()
+}
+
 /** Wait until the composer physically accepts a printable probe, then erase it. A key
  *  the hydration fence DROPS never reaches the wire, so this — not a sleep — is the
  *  authority that the NEXT keystroke is consumed (the sibling recall lane's shape).

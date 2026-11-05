@@ -1245,16 +1245,23 @@ test('the shared composer-readiness probe retries a key the hydration fence drop
       () => ({ ok: true as const }),
       (error: unknown) => ({ ok: false as const, error }),
     )
-    await waitFor(() => injections >= 2, 'the fenced probe is really re-injected', 5_000)
-    // The keys above were injected inside the fence; the delivery window is the
-    // fixture's documented bound for ONE input dispatch, so the empty draft
-    // below is an observation and not a lucky read.
-    await waitForKeyDeliveryWindow()
-    assert.equal(harness.renderer.composer.getDraft(), '',
-      'the hydration fence dropped the probe bytes instead of holding them for replay')
+    let fencedDraft: string | undefined
+    let fencedFailure: unknown
+    try {
+      await waitFor(() => injections >= 2, 'the fenced probe is really re-injected', 5_000)
+      // The keys above were injected inside the fence; the delivery window is the
+      // fixture's documented bound for ONE input dispatch, so the draft read
+      // below is an observation and not a lucky read.
+      await waitForKeyDeliveryWindow()
+      fencedDraft = harness.renderer.composer.getDraft()
+    } catch (error) {
+      // Keep the primary failure, but still settle the probe below: a pending
+      // readiness pass must not outlive this case on a red path.
+      fencedFailure = error
+    }
 
-    // The NEW subject commits: a different projection identity lifts the same
-    // fence the production session switch lifts.
+    // The NEW subject commits on EVERY path, so the pending probe settles
+    // instead of retrying against a fence nobody lifts for its own 30s budget.
     harness.renderer.display.setTranscript(
       [{ kind: 'assistant', turn: 1, text: 'the incoming subject' }],
       undefined,
@@ -1264,9 +1271,14 @@ test('the shared composer-readiness probe retries a key the hydration fence drop
       { identity: 'incoming' },
     )
     const settled = await outcome
-    if (!settled.ok) throw settled.error
     const wire = readComposer()
-    t.diagnostic(`probe injections=${injections} last=${JSON.stringify(wire)}`)
+    t.diagnostic(`probe injections=${injections} last=${JSON.stringify(wire)}`
+      + (settled.ok ? '' : ` error=${String(settled.error)}`)
+      + (fencedFailure === undefined ? '' : ` injection-check=${String(fencedFailure)}`))
+    if (!settled.ok) throw settled.error
+    if (fencedFailure !== undefined) throw fencedFailure
+    assert.equal(fencedDraft, '',
+      'the hydration fence dropped the probe bytes instead of holding them for replay')
     assert.equal(wire.text, '',
       `the accepted probe was erased again on the wire (last ${JSON.stringify(wire)})`)
     assert.equal(wire.cursor, 0, 'the accepted probe left the caret at the empty editor')

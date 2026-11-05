@@ -75,25 +75,28 @@ export async function waitForEditableComposer(
   }
 
   /**
-   * Send the observed number of real Backspaces and confirm the exact empty
-   * editor. A late probe byte that grows the residue is erased again; a
-   * Backspace that never lands is an unexpected test state and fails here,
-   * never by clearing somebody else's draft.
+   * Erase the probe bytes with real Backspaces until the exact empty editor is
+   * observed. The TOTAL Backspaces issued never exceed the largest residue count
+   * observed: an intermediate shrink is this batch landing, not a new
+   * encounter, so no surplus delete is ever sent. A Backspace that never lands
+   * is an unexpected test state and fails here, never by clearing somebody
+   * else's draft.
    */
   const eraseResidue = async (count: number): Promise<void> => {
     const until = Math.min(Date.now() + ERASE_OBSERVATION_MS, deadline)
-    let erased = count
-    for (let index = 0; index < count; index += 1) pane.input.type(BACKSPACE)
+    let sent = 0
+    const eraseUpTo = (observed: number): void => {
+      for (let index = sent; index < observed; index += 1) pane.input.type(BACKSPACE)
+      sent = Math.max(sent, observed)
+    }
+    eraseUpTo(count)
     for (;;) {
       last = read()
       if (isEmpty(last)) return
       if (last.cursor !== -1 && !isProbeResidue(last)) {
         fail('a non-empty editor that is not the probe\'s own residue cannot be cleared')
       }
-      if (last.cursor !== -1 && last.text.length !== erased) {
-        erased = last.text.length
-        for (let index = 0; index < erased; index += 1) pane.input.type(BACKSPACE)
-      }
+      if (last.cursor !== -1) eraseUpTo(last.text.length)
       if (Date.now() >= until) fail('the probe bytes could not be erased to the empty editor')
       await sleep(POLL_MS)
     }
