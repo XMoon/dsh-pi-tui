@@ -14,6 +14,7 @@ import assert from 'node:assert/strict'
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import test from 'node:test'
+import { executeModelToolFixture } from '@deepseek-ai/dsh-tool-testkit'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import {
@@ -259,7 +260,7 @@ test('official missing catalog, exact installTarget and local profile install', 
       // REAL Host start under the isolated HOME. A synchronous provider failure
       // is recorded as a truthful failure; a start that returns an external
       // child is observed to its settle/failure, never assumed successful.
-      const started = await host.ctx.tools.execute({
+      const started = await executeModelToolFixture(host.ctx, {
         signal: new AbortController().signal,
         callId: ToolCallId(`optional-bundle-${task.provider}-start`),
         name: task.tool,

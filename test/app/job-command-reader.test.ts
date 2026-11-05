@@ -14,6 +14,9 @@
 import assert from 'node:assert/strict'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { afterEach, test } from 'node:test'
+import { fakeAgentModel } from '../support/agent-model-double.ts'
+import { NativeToolExecutor } from '@deepseek-ai/dsh-tool-executor-native'
+import { executeModelToolFixture } from '@deepseek-ai/dsh-tool-testkit'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
 import { unsupportedInbox } from '@deepseek-ai/dsh-agent-loop-testkit'
@@ -893,6 +896,7 @@ for (const producer of [
       await ctx.plugin(SystemPrompt)
       await ctx.plugin(SessionProjectionRegistry)
       await ctx.plugin(ToolRuntime)
+      ctx.tools.setExecutor(new NativeToolExecutor(ctx))
       await ctx.plugin(AgentRegistry)
       // 0.2.1-rc.2: every agent tool injects the real `workingDirectory` owner
       // (its inject also needs `fs`, `sessionProjections` and `systemPrompt`).
@@ -916,6 +920,10 @@ for (const producer of [
         id: ownerId,
         options: {},
         session: Session.create(ownerId),
+        // DSH 0.2.2: the Agent owns its model selection (`AgentModel`); these
+        // options name no route, so the read answers undefined exactly like the
+        // production AgentModel would.
+        model: fakeAgentModel(undefined, {}),
         inbox: unsupportedInbox(),
         status: 'idle',
         ctx: scopeFiber.ctx,
@@ -930,7 +938,7 @@ for (const producer of [
       await ctx.agents.register(owner)
 
       const command = '  echo "Gate3B 雪"  \t\n'
-      await ctx.tools.execute({
+      await executeModelToolFixture(ctx, {
         signal: new AbortController().signal,
         callId: ToolCallId(`gate3b-producer-${producer.kind}`),
         name: producer.toolName,

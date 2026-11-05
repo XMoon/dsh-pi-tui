@@ -178,9 +178,11 @@ export async function createRemoteHostRuntime(hostContext: Context): Promise<Rem
     fibers.push(outlineFiber)
     await outlineFiber
     // 5. Session controller - M3/local-wire-safe: never native desktop open.
-    const sessionCtrlFiber = hostContext.inject(SessionController.inject, controllerContext => {
-      new SessionController(controllerContext, { nativeOpen: false })
-    })
+    // DSH 0.2.2 builds its `controlState`/history/state controllers inside the
+    // async `[Service.init]`; the PLUGIN form awaits that init (the inject
+    // callback form did not), so the wire `control` stream is complete before
+    // the Client connects.
+    const sessionCtrlFiber = hostContext.plugin(SessionController, { nativeOpen: false })
     fibers.push(sessionCtrlFiber)
     await sessionCtrlFiber
     // 6. Settings + credentials Remote owner.

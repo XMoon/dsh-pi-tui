@@ -28,6 +28,7 @@ import { apply as applyExtensionHost, PI_TUI_EXTENSIONS_SERVICE } from '../../sr
 import { TUI_STARTUP_SERVICE } from '../../src/startup.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import { historyFilePath, loadHistoryRecords } from '../../src/client/history/store.ts'
+import { fakeAgentModel } from '../support/agent-model-double.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { provideFakeHostWorkspaceRegistry } from '../support/workspace-registry.ts'
@@ -190,6 +191,8 @@ function fakeAgent(session: LiveSession, host: FakeAgentHost | undefined): Agent
     session,
     ctx: agentContext,
     options: { provider: 'p', model: 'm' },
+    // DSH 0.2.2: the Agent owns its model selection (`AgentModel`).
+    model: fakeAgentModel(session, { provider: 'p', model: 'm' }),
     // The live inbox surface (queue gates and the steer snapshot).
     inbox: {
       nextTurn,

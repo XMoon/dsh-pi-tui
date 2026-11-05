@@ -7,6 +7,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { fakeAgentModel } from '../support/agent-model-double.ts'
 import { unavailableWebAccess } from '../support/web-access-fake.ts'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { createClientCommandRegistry } from '../../src/app/command/client-command-registry.ts'
@@ -121,6 +122,8 @@ function fakeAgent(sessionId: string, events: readonly { type: string }[] = []):
     },
     ctx: { on: () => () => {} },
     options: { provider: 'p', model: 'm' },
+    // DSH 0.2.2: the Agent owns its model selection (`AgentModel`).
+    model: fakeAgentModel(undefined, { provider: 'p', model: 'm' }),
   } as unknown as Agent
 }
 

@@ -23,6 +23,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { apply as applyRunner, Config as TuiConfigSchema } from '../../src/index.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import { TUI_STARTUP_SERVICE } from '../../src/startup.ts'
+import { fakeAgentModel } from '../support/agent-model-double.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { installVirtualProcessTerminal } from '../support/runner-harness.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
@@ -39,6 +40,8 @@ function makeHarness(home: string) {
       session: { id: session.id, header: session.header, snapshotEvents: () => [] },
       ctx: agentContext,
       options: { provider: 'p', model: 'm' },
+      // DSH 0.2.2: the Agent owns its model selection (`AgentModel`).
+      model: fakeAgentModel(undefined, { provider: 'p', model: 'm' }),
       status: 'idle',
       inbox: { nextTurn: [], nextStep: [] },
       whenIdle: async () => {},

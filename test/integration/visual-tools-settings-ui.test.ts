@@ -39,7 +39,8 @@ import {
 } from '@deepseek-ai/dsh-llm'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import { renderToolsSdk, type ToolDefinition } from '@deepseek-ai/dsh-tools'
+import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
+import { renderToolsSdk } from '@deepseek-ai/dsh-tool-executor-ptc'
 import { createClientCommandRegistry } from '../../src/app/command/client-command-registry.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
@@ -571,7 +572,7 @@ test('a real Agent toggle Confirm is what the NEXT Session\'s subagent tool samp
 
   // A standing preset composition, exactly like the shipped base layer.
   const preset = createScope(ctx, { preset: 'r3-agent-toggle' })
-  await preset.ctx.plugin(tool, { provider: 'spawn', modelSelectionSettings: true })
+  await preset.ctx.plugin(tool, { provider: 'spawn', modelSelection: true, modelDiscovery: true })
 
   /** A NEW Session joined to the standing preset. */
   const createSession = async (id: string): Promise<{ session: unknown; agent: unknown }> => {
@@ -583,16 +584,27 @@ test('a real Agent toggle Confirm is what the NEXT Session\'s subagent tool samp
     })
     return { session: (handle.agent as unknown as { session: unknown }).session, agent: handle.agent }
   }
-  /** Whether the Session's subagent tool exposes the route fields. */
-  const samplesRoutes = (agent: unknown): boolean => {
+  /** Whether the Session's subagent tool DECLARES the route fields (DSH 0.2.2
+   *  declares them statically in the shipped preset; the setting samples a
+   *  per-Session POLICY instead of hiding the schema). */
+  const declaresRoutes = (agent: unknown): boolean => {
     const schema = ctx.tools.schemas(agent as never).find(candidate => candidate.name === 'subagent')
     const properties = (schema?.parameters as { properties?: Record<string, unknown> } | undefined)?.properties
     return properties?.['provider'] !== undefined && properties?.['model'] !== undefined
   }
+  /** The durable model-selection policy this Session sampled at creation. */
+  const sampledPolicy = (agent: unknown): readonly { provider: string; model: string }[] => {
+    const session = (agent as { session: { snapshotEvents(): readonly { type?: string; data?: { allowedModels?: readonly { provider: string; model: string }[] } }[] } }).session
+    const policy = session.snapshotEvents().filter(event => event.type === 'subagent/model-selection-policy').at(-1)
+    return [...(policy?.data?.allowedModels ?? [])]
+  }
 
-  // Baseline: the section is ENABLED, so a new Session already samples routes.
+  // Baseline: the section is ENABLED, so a new Session samples the allowlist
+  // (and the shipped declaration exposes the route fields either way).
   const before = await createSession('r3-toggle-before')
-  assert.equal(samplesRoutes(before.agent), true, 'the enabled section already produces route fields')
+  assert.deepEqual(sampledPolicy(before.agent), [{ provider: 'alpha', model: 'fast' }],
+    'the enabled section samples its allowlist per Session')
+  assert.equal(declaresRoutes(before.agent), true, 'the shipped declaration exposes the route fields')
 
   // The REAL UI: /settings -> Agent -> Subagent model selection -> Confirm off.
   const ui = mountSettingsUi(port)
@@ -640,12 +652,16 @@ test('a real Agent toggle Confirm is what the NEXT Session\'s subagent tool samp
   assert.deepEqual(port.subagentModelSelection.get(), { enabled: false, allowedModels: [{ provider: 'alpha', model: 'fast' }] },
     'disabling kept the saved route and flipped only enabled')
 
-  // ... and the NEXT Session no longer samples the route fields.
+  // ... and the NEXT Session samples NO policy. The route FIELDS stay declared
+  // (DSH 0.2.2 made that static, which is not a capability regression): without
+  // a policy, explicit selection is limited to the parent route.
   const after = await createSession('r3-toggle-after')
-  assert.equal(samplesRoutes(after.agent), false,
-    'a Session composed after the UI disable must not expose the route fields')
-  assert.equal(samplesRoutes(before.agent), true,
-    'and the already-composed Session is never hot-rewritten')
+  assert.deepEqual(sampledPolicy(after.agent), [],
+    'a Session composed after the UI disable samples no model-selection policy')
+  assert.equal(declaresRoutes(after.agent), true,
+    'the shipped declaration keeps the route fields; the setting decides the policy')
+  assert.deepEqual(sampledPolicy(before.agent), [{ provider: 'alpha', model: 'fast' }],
+    'the already-composed Session is never hot-rewritten')
 
   // THE REVERSE TRIP through the SAME UI: enable again (the saved route survived
   // the disable, so this needs no allowlist detour), and a NEW Session samples
@@ -665,8 +681,8 @@ test('a real Agent toggle Confirm is what the NEXT Session\'s subagent tool samp
     { enabled: true, allowedModels: [{ provider: 'alpha', model: 'fast' }] },
     're-enabling kept the saved route and flipped only enabled')
   const reEnabled = await createSession('r3-toggle-reenabled')
-  assert.equal(samplesRoutes(reEnabled.agent), true,
-    'a Session composed after the UI re-enable samples the route fields again')
+  assert.deepEqual(sampledPolicy(reEnabled.agent), [{ provider: 'alpha', model: 'fast' }],
+    'a Session composed after the UI re-enable samples the saved allowlist again')
 })
 
 test('a real Settings Confirm drives the Host registry and the next model request', async t => {

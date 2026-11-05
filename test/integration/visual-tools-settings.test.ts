@@ -25,9 +25,11 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { NativeToolExecutor } from '@deepseek-ai/dsh-tool-executor-native'
 import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
-import ToolRuntime, { defineTool, renderToolsSdk } from '@deepseek-ai/dsh-tools'
+import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
+import { renderToolsSdk } from '@deepseek-ai/dsh-tool-executor-ptc'
 import { DirectConfigPort } from '../../src/runtime/direct/config-direct.ts'
 import {
   CHART_TOOL_NAME,
@@ -85,6 +87,7 @@ async function bootPlane(life: TestLifecycle, root: string, resetUserDocument = 
   } as never)
   provideVisualRowDependencies(ctx)
   new ToolRuntime(ctx)
+  ctx.tools.setExecutor(new NativeToolExecutor(ctx))
   await ctx.plugin(Loader)
   const { profileDir } = await mountVisualToolsSettingsPlane(ctx, root, { resetUserDocument })
   let disposed = false

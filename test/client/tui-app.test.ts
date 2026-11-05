@@ -8,6 +8,8 @@
 import assert from 'node:assert/strict'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { afterEach, test } from 'node:test'
+import { NativeToolExecutor } from '@deepseek-ai/dsh-tool-executor-native'
+import { executeModelToolFixture } from '@deepseek-ai/dsh-tool-testkit'
 import { Context } from '@deepseek-ai/cordis'
 import { ToolRuntime, defineTool } from '@deepseek-ai/dsh-tools'
 import { ToolCallId, MessageId, createToolResultMessage } from '@deepseek-ai/dsh-llm'
@@ -296,6 +298,7 @@ test('tool cards present through the real registry: read shows the relativized p
     section: () => () => {},
   })
   new ToolRuntime(ctx)
+  ctx.tools.setExecutor(new NativeToolExecutor(ctx))
   const unregister = ctx.tools.register(defineTool({
     name: 'read',
     description: 'Read a UTF-8 text file (test fake).',
@@ -343,7 +346,7 @@ test('tool cards present through the real registry: read shows the relativized p
       time: 1_700_000_000_000,
       data: { turn: 0, step: 0, callId, name: 'read', arguments: JSON.stringify({ file_path: filePath }) },
     }
-    const outcome = await ctx.tools.execute({
+    const outcome = await executeModelToolFixture(ctx, {
       callId,
       name: 'read',
       arguments: { file_path: filePath },

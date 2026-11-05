@@ -24,6 +24,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { MessageId, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import { SESSION_FORMAT_VERSION, SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { ProcessTerminal } from '@xmoon76/pi-tui'
+import { fakeAgentModel } from '../support/agent-model-double.ts'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { installVirtualProcessTerminal } from '../support/runner-harness.ts'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
@@ -186,6 +187,8 @@ function makeHarness(home: string, events: readonly SessionEvent[], options: Har
       session,
       ctx: { get: () => undefined, on: () => () => {} },
       options: { provider: 'p', model: 'm', cwd: home },
+      // DSH 0.2.2: the Agent owns its model selection (`AgentModel`).
+      model: fakeAgentModel(session, { provider: 'p', model: 'm' }),
       status: 'idle',
       inbox: { nextTurn: [], nextStep: [] },
       whenIdle: async () => {},

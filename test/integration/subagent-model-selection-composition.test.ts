@@ -1,14 +1,12 @@
 /**
- * The official subagent model-selection CLOSED LOOP (the review's P2 gate):
- * the TUI writes the official `subagent-model-selection` section, and a NEW
- * standard-composed Session's `subagent` tool must actually expose
- * provider/model/reasoning_effort plus `list_subagent_models` — the exact
- * capability that supersedes the legacy `subagent_route` routing. The stack
- * is the REAL 0.1.7 host: the subagentModelSelection config service,
- * the Agent registry, the
- * subagent runtime with the in-process spawn provider, and the real
- * tool-subagent plugin mounted with `modelSelectionSettings: true` (the
- * standard preset's row).
+ * The official subagent model-selection CLOSED LOOP (the review's P2 gate) on
+ * the DSH 0.2.2 contract: the shipped preset declaration is STATIC
+ * (`modelSelection: true` + `modelDiscovery: true` expose
+ * provider/model/reasoning_effort and register `list_subagent_models`), while
+ * the `subagent-model-selection-settings` service samples a per-Session
+ * durable POLICY (`subagent/model-selection-policy`) when the Agent is
+ * created. Without a recorded policy, explicit selection (including a bare
+ * effort) is limited to the parent route.
  *
  * Sampling is per Agent publication (upstream contract): a settings change
  * never rewrites an already-composed Session, and a composed Session keeps
@@ -18,6 +16,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { executeModelToolFixture } from '@deepseek-ai/dsh-tool-testkit'
 import { Context } from '@deepseek-ai/cordis'
 import { bindScopeParent, createScope, scopeOf } from '@deepseek-ai/dsh-scope'
 import { ToolCallId, LlmAdapter, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
@@ -41,6 +40,17 @@ function selectable(ctx: Context, agent: Agent): boolean {
     && properties['model'] !== undefined
     && properties['reasoning_effort'] !== undefined
     && ctx.tools.schemas(agent).some(candidate => candidate.name === 'list_subagent_models')
+}
+
+/** The durable model-selection policy this Session sampled at creation, or an
+ *  empty list when the setting recorded none. */
+function policyOf(agent: Agent): readonly { provider: string; model: string }[] {
+  const events = agent.session.snapshotEvents() as readonly {
+    type?: string
+    data?: { allowedModels?: readonly { provider: string; model: string }[] }
+  }[]
+  const policy = events.filter(event => event.type === 'subagent/model-selection-policy').at(-1)
+  return [...(policy?.data?.allowedModels ?? [])]
 }
 
 type SubagentModelSelectionFiber = Awaited<ReturnType<Context['plugin']>>
@@ -67,7 +77,8 @@ async function mountPreset(ctx: Context): Promise<PresetScope> {
   const preset = createScope(ctx, { preset: `model-selection-${presetCounter}` })
   await preset.ctx.plugin(tool, {
     provider: 'spawn',
-    modelSelectionSettings: true,
+    modelSelection: true,
+    modelDiscovery: true,
   })
   return preset
 }
@@ -76,6 +87,8 @@ async function mountPreset(ctx: Context): Promise<PresetScope> {
 async function createAgent(ctx: Context, preset: PresetScope, id: string): Promise<Agent> {
   const handle = await ctx.agents.create({
     sessionId: SessionId(id),
+    // The parent route the no-policy fallback is limited to.
+    agentOptions: { provider: 'alpha', model: 'fast' },
     setup: (agentCtx) => {
       bindScopeParent(scopeOf(agentCtx)!, scopeOf(preset.ctx)!)
     },
@@ -144,7 +157,7 @@ let callCounter = 0
 
 /** Execute one tool through the real ToolRuntime pipeline. */
 function callTool(ctx: Context, name: string, args: unknown, agent: Agent) {
-  return ctx.tools.execute({
+  return executeModelToolFixture(ctx, {
     signal: new AbortController().signal,
     callId: ToolCallId(`composition-${++callCounter}`),
     name,
@@ -158,48 +171,51 @@ function text(result: { content?: readonly { type?: string; text?: string }[] })
   return (result.content ?? []).map(block => block.text ?? '').join('')
 }
 
-test('the official subagent model-selection closed loop: fresh sessions sample the setting, old sessions keep their policy', async () => {
+test('the official subagent model-selection closed loop: the setting samples a per-Session policy over a static declaration', async () => {
   const host = await boot()
   const { ctx, remount } = host
   try {
-    // 1. Default-off: a composed Session's subagent tool has NO route
-    //    fields and NO list_subagent_models.
-    const disabled = await host.create('disabled')
-    assert.equal(selectable(ctx, disabled), false,
-      'default-off must not expose provider/model/reasoning_effort or list_subagent_models')
-    // The negative control is only meaningful if the standing composition DID
-    // install the tool: the route fields are absent, not the whole definition.
-    assert.ok(ctx.tools.schemas(disabled).some(candidate => candidate.name === 'subagent'),
-      'the standing preset composition must register the subagent tool when selection is off')
+    ctx.llm.registerAdapter(['alpha'], new CatalogAdapter())
 
-    // 2. Enable + allowlist: a NEW Session samples the setting and its
-    //    subagent tool gains the route fields + list_subagent_models.
+    // 1. Settings default-off: the OFFICIAL preset still declares the route
+    //    fields and the discovery tool (DSH 0.2.2 made that declaration static —
+    //    it is NOT a regression), but no policy is sampled, so explicit
+    //    selection is limited to the parent route.
+    const disabled = await host.create('disabled')
+    assert.equal(selectable(ctx, disabled), true,
+      'the official preset declaration exposes the route fields and list_subagent_models statically')
+    assert.deepEqual(policyOf(disabled), [], 'default-off records no model-selection policy')
+    const parentOnly = await callTool(ctx, 'list_subagent_models', { provider: 'alpha' }, disabled)
+    assert.equal(parentOnly.isError, false, 'without a policy the parent route stays discoverable')
+    assert.match(text(parentOnly), /alpha\/fast/u)
+    assert.doesNotMatch(text(parentOnly), /alpha\/plain/u,
+      'without a policy the parent route is the ONLY route')
+    const outsideParent = await callTool(ctx, 'list_subagent_models', { provider: 'alpha', model: 'plain' }, disabled)
+    assert.equal(outsideParent.isError, true, 'an explicit out-of-parent route is refused without a policy')
+    assert.match(text(outsideParent), /is not allowed for this Session/u)
+
+    // 2. Enable + allowlist: a NEW Session samples the allowlist durably and its
+    //    tool admits exactly those routes.
     await remount({ enabled: true, allowedModels: ALLOWED_MODELS })
     const enabled = await host.create('enabled')
-    assert.equal(selectable(ctx, enabled), true,
-      'a fresh Session composed after enabling must expose the route fields and list_subagent_models')
-    // The already-composed Session is NOT rewritten by the settings change.
-    assert.equal(selectable(ctx, disabled), false,
-      'an already-composed Session must not be hot-changed by the settings update')
-
-    // 3. list_subagent_models enforces the Session allowlist: an
-    //    out-of-allowlist model is refused, the allowed model is served.
-    ctx.llm.registerAdapter(['alpha'], new CatalogAdapter())
-    const denied = await callTool(ctx, 'list_subagent_models', { provider: 'alpha', model: 'plain' }, enabled)
-    assert.equal(denied.isError, true, 'an out-of-allowlist model must be refused')
-    assert.match(text(denied), /is not allowed for this Session/u)
+    assert.deepEqual(policyOf(enabled), [{ provider: 'alpha', model: 'fast' }],
+      'a fresh Session samples the durable allowlist')
     const served = await callTool(ctx, 'list_subagent_models', { provider: 'alpha', model: 'fast' }, enabled)
-    assert.equal(served.isError, false, 'an allowlisted model must be served')
+    assert.equal(served.isError, false, 'an allowlisted model is served')
     assert.match(text(served), /alpha\/fast/u)
+    const denied = await callTool(ctx, 'list_subagent_models', { provider: 'alpha', model: 'plain' }, enabled)
+    assert.equal(denied.isError, true, 'an out-of-allowlist model is refused')
+    assert.match(text(denied), /is not allowed for this Session/u)
+    // The already-composed Session is NOT rewritten by the settings change.
+    assert.deepEqual(policyOf(disabled), [], 'an already-composed Session never gains the new policy')
 
-    // 4. Disable again: a NEW Session is not selectable, while the
-    //    previously-enabled Session KEEPS its durable sampled policy.
+    // 3. Disable again: a NEW Session records no policy, while the
+    //    previously-enabled Session KEEPS its durable sampled allowlist.
     await remount({ enabled: false })
     const disabledAgain = await host.create('disabled-again')
-    assert.equal(selectable(ctx, disabledAgain), false,
-      'a fresh Session composed after disabling must not expose the route fields')
-    assert.equal(selectable(ctx, enabled), true,
-      'a Session that sampled the policy keeps it (durable per-session policy)')
+    assert.deepEqual(policyOf(disabledAgain), [], 'a fresh Session after disabling records no policy')
+    assert.deepEqual(policyOf(enabled), [{ provider: 'alpha', model: 'fast' }],
+      'a Session that sampled the policy keeps it (durable per-Session policy)')
   } finally {
     await ctx.fiber.dispose()
   }

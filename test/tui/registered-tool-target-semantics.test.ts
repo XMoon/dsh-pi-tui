@@ -19,6 +19,9 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { fakeAgentModel } from '../support/agent-model-double.ts'
+import { NativeToolExecutor } from '@deepseek-ai/dsh-tool-executor-native'
+import { executeModelToolFixture } from '@deepseek-ai/dsh-tool-testkit'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
 import { unsupportedInbox } from '@deepseek-ai/dsh-agent-loop-testkit'
@@ -118,6 +121,7 @@ const ctx = new Context()
 await ctx.plugin(SystemPrompt)
 await ctx.plugin(SessionProjectionRegistry)
 await ctx.plugin(ToolRuntime)
+ctx.tools.setExecutor(new NativeToolExecutor(ctx))
 await ctx.plugin(AgentRegistry)
 await ctx.plugin(LocalFileSystem)
 await ctx.plugin(WorkingDirectory)
@@ -140,6 +144,10 @@ const owner: Agent = {
   id: ownerId,
   options: {},
   session: Session.create(ownerId),
+  // DSH 0.2.2: the Agent owns its model selection (`AgentModel`); these
+  // options name no route, so the read answers undefined exactly like the
+  // production AgentModel would.
+  model: fakeAgentModel(undefined, {}),
   inbox: unsupportedInbox(),
   status: 'idle',
   ctx: scopeFiber.ctx,
@@ -427,7 +435,7 @@ test('a REAL read execution yields the SAME view on both branches', async (t) =>
   const filePath = join(dir, 'src', 'real.ts')
   await writeFile(filePath, 'const answer = 42\n')
 
-  const outcome = await ctx.tools.execute({
+  const outcome = await executeModelToolFixture(ctx, {
     signal: new AbortController().signal,
     callId: ToolCallId('call-b1-real-read'),
     name: 'read',
@@ -466,7 +474,7 @@ test('a REAL settled read asked for by a RELATIVE path still claims the path kin
   // would demote the row to `text` exactly when the call finishes.
   const relative = 'package.json'
   const args = { file_path: relative }
-  const outcome = await ctx.tools.execute({
+  const outcome = await executeModelToolFixture(ctx, {
     signal: new AbortController().signal,
     callId: ToolCallId('call-b1-relative'),
     name: 'read',
@@ -524,7 +532,7 @@ test('a REAL overwrite that changes nothing still yields a diff on BOTH branches
   await writeFile(filePath, 'hello\n')
   const args = { file_path: filePath, content: 'hello\n' }
 
-  const outcome = await ctx.tools.execute({
+  const outcome = await executeModelToolFixture(ctx, {
     signal: new AbortController().signal,
     callId: ToolCallId('call-b1-unchanged'),
     name: 'write',

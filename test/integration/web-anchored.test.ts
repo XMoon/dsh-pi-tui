@@ -13,6 +13,7 @@ import assert from 'node:assert/strict'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { join } from 'node:path'
 import test from 'node:test'
+import { executeModelToolFixture } from '@deepseek-ai/dsh-tool-testkit'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import {
@@ -232,7 +233,7 @@ test('Plugin Market: real empty default, explicit offline index, unknown/invalid
   await presets.select(cordis, 'cordis')
   assert.equal(host.hasTool('plugin_market', cordis), true,
     'the market tool is reachable in the cordis preset when the market service is mounted')
-  const listed = await host.ctx.tools.execute({
+  const listed = await executeModelToolFixture(host.ctx, {
     signal: new AbortController().signal,
     callId: ToolCallId('optional-bundle-b12-market'),
     name: 'plugin_market',
@@ -243,7 +244,7 @@ test('Plugin Market: real empty default, explicit offline index, unknown/invalid
   const indexList = (listed.content ?? []).map(block => block.text ?? '').join('')
   assert.match(indexList, new RegExp(indexUrl.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')),
     'the Creator tool reads the SAME configured index source as the Host service')
-  const plugins = await host.ctx.tools.execute({
+  const plugins = await executeModelToolFixture(host.ctx, {
     signal: new AbortController().signal,
     callId: ToolCallId('optional-bundle-b12-market-plugins'),
     name: 'plugin_market',
