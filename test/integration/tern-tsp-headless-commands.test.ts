@@ -846,12 +846,37 @@ test('a real /attach of a regular file stages metadata and inserts the canonical
   const file = join(fixture.workRoot, 'report.pdf')
   writeFileSync(file, Buffer.from('%PDF-1.7 report'))
   await waitForInputDelivery(fixture.pane)
-  await submitInput(fixture, `/attach ${file}`)
+  // TSP I-D changed what the FIRST Enter of this draft means. `/attach <path>` is
+  // a declared path-argument seat, so a candidate row is painted while the caret
+  // sits in the argument, and an Enter over an OPEN list is an accept-only
+  // gesture — never an execution (the Owner-accepted I-D contract: §2.2 J3 and
+  // matrix D07, proven per-seat in `tern-tsp-input-completion-direct.test.ts`).
+  // The command still runs on the user's own NEXT Enter, which is what the rest
+  // of this case is about: one intake, one metadata entry, one announcement, no
+  // model call. The missing-path sibling below is the other half of the same
+  // rule: with no matching candidate the list never opens, so its single Enter
+  // stays the submit it always was.
+  fixture.pane.input.type(`/attach ${file}`)
+  await waitFor(`the composer to hold /attach ${file}`, () => composerText(fixture) === `/attach ${file}`)
+  // The argument seat is OPEN here: the pane paints the one local-path candidate
+  // as its own bare row. That is what makes the next Enter an accept.
+  await waitFor('the argument candidate row to paint', () => wireNodes(fixture.pane)
+    .some(node => /completion-bare-/.test(node.id)), 25_000)
+  fixture.pane.input.type('\r')
+  // Enter#1 consumed the gesture on the candidate: the list withdraws and the
+  // DRAFT IS STILL THERE — a submission would have taken the text away.
+  await waitFor('the candidate list to withdraw', () => !wireNodes(fixture.pane)
+    .some(node => /completion-bare-/.test(node.id)), 25_000)
+  assert.equal(composerText(fixture), `/attach ${file}`,
+    'Enter#1 accepted the candidate and submitted nothing: the draft is still the user\'s own')
+  fixture.pane.input.type('\r')
   // The success notice is published by the INTAKE, after the metadata draft
   // exists and its token was inserted — never by the synchronous command
   // result (the card-less result scope is error-only).
   await waitFor('the attach success notice', () =>
     dockNotices(fixture).some(text => text.includes('attached [file #1')), 25_000)
+  assert.equal(dockNotices(fixture).filter(text => text.includes('attached [file #')).length, 1,
+    'exactly ONE intake announced itself: the second Enter executed the command, it did not run twice')
   // The token is in the MOUNTED composer: the TSP renderer's own draft seat,
   // which is the whole point of the composer seam.
   await waitFor('the canonical file token in the composer', () =>
