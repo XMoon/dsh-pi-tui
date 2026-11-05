@@ -61,6 +61,10 @@ function candidateFiles() {
       + "export const CHART_TOOL_NAME = 'dsh_pi_tui_chart'\n"
       + "export const SVG_TOOL_NAME = 'dsh_pi_tui_svg'\n"
       + "export const apply = () => {}\n",
+    // M5-W PR-C: the profile-owned Web startup preference row.
+    'dist/web-preferences.mjs': "export const name = 'pi-tui-web-preferences'\n"
+      + "export const Config = () => {}\n"
+      + "export const apply = () => {}\n",
     'dist/index.d.mts': 'export declare const SOURCE_PROBE: boolean\n',
     'dist/startup.d.mts': 'export declare const STARTUP_PROBE: boolean\n',
     'dist/extensions.d.mts': 'export declare const EXTENSIONS_PROBE: boolean\n',
@@ -75,6 +79,9 @@ function candidateFiles() {
       + 'export declare const inject: string[]\n'
       + 'export declare const CHART_TOOL_NAME: string\n'
       + 'export declare const SVG_TOOL_NAME: string\n'
+      + 'export declare const apply: () => void\n',
+    'dist/web-preferences.d.mts': 'export declare const name: string\n'
+      + 'export declare const Config: unknown\n'
       + 'export declare const apply: () => void\n',
     'cordis.patch.yml': 'patch: []\n',
     'README.md': '# source probe\n',
@@ -133,6 +140,7 @@ function makeFixture(life, { includePresets = true, candidatePeers = { [DSH_CLI]
       './builtins': './dist/builtins.mjs',
       './performance-host': './dist/performance-host.mjs',
       './visual-tools': './dist/visual-tools.mjs',
+      './web-preferences': './dist/web-preferences.mjs',
       './host-runtime': './dist/host-runtime.mjs',
     },
     peerDependencies: candidatePeers,

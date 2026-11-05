@@ -17,6 +17,7 @@ import { RemoteSessionArchive } from '../../runtime/remote/session-archive-remot
 import { createRemoteBackend } from '../../runtime/remote/backend-remote.ts'
 import { RemotePromptSerializerProduction } from '../../runtime/remote/prompt-serializer-remote.ts'
 import { RemoteHostUserShellPort } from '../../runtime/remote/host-user-shell-remote.ts'
+import { RemoteWebAccessPort } from '../../runtime/remote/web-access-remote.ts'
 import { mergeCause } from './dispose-cause.ts'
 import { createRemoteM3ASemantics, remoteM3ARuntimeSourceOf, type RemoteM3ARuntimeSource, type RemoteM3ASemantics } from './m3a-semantics.ts'
 import type { SplitClientInteractionDelivery } from '../../runtime/remote/interaction-remote.ts'
@@ -155,6 +156,13 @@ export async function createRemoteBackendRuntime(
         // unavailable; CARRIER_GAP) — served by the backend, so the
         // composition root holds no static Remote edge.
         hostUserShell: new RemoteHostUserShellPort(),
+        // M5-W PR-C: the Split Client's Web frontend control over the package's
+        // ONE private `piTuiWebAccess` namespace and the SAME Connection
+        // generation source every other adapter fences on.
+        webAccess: new RemoteWebAccessPort(
+          options.runtime.remote.piTuiWebAccess,
+          options.runtime.connection.generation,
+        ),
       }),
       semantics,
       dispose,

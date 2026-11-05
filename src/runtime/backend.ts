@@ -26,6 +26,7 @@ import type { PluginManagerPort } from './plugin-manager-port.ts'
 import type { JobObservationPort } from './job-observation-port.ts'
 import type { HostUserShellPort } from './host-user-shell-port.ts'
 import type { DeliveredFileReadPort } from './deliverables-port.ts'
+import type { WebAccessPort } from './web-access-port.ts'
 
 /** The transport backends the TUI can run on. `direct` remains the
  * production/default; `remote` is the experimental M3-3B assembly that can be
@@ -77,6 +78,10 @@ export interface Backend {
    * scope. Direct reads the official Host service in-process; Remote calls the
    * official generated `workspaceFiles` namespace. */
   readonly deliveredFileRead: DeliveredFileReadPort
+  /** The Split-Client Web frontend control port (M5-W PR-C): the explicit
+   *  `/web` surface over the Host's private `piTuiWebAccess` service. Direct
+   *  serves the truthful-unavailable adapter. */
+  readonly webAccess: WebAccessPort
 }
 
 /** Assemble the Direct backend: in-process adapters over `ctx.*` services.
@@ -98,6 +103,7 @@ export function createDirectBackend(
   jobObservation: JobObservationPort,
   hostUserShell: HostUserShellPort,
   deliveredFileRead: DeliveredFileReadPort,
+  webAccess: WebAccessPort,
 ): Backend {
   return {
     kind: 'direct',
@@ -117,5 +123,6 @@ export function createDirectBackend(
     jobObservation,
     hostUserShell,
     deliveredFileRead,
+    webAccess,
   }
 }

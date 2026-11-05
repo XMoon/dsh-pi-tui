@@ -79,10 +79,17 @@ interface RowOverride {
   readonly fallback?: boolean
 }
 
+/** The official loopback origin the fixture's Web frontend would serve. */
+const FIXTURE_ORIGIN = 'http://127.0.0.1:4321'
+/** The fixture launch token the official Connection owner appends. */
+const FIXTURE_TOKEN = 'fixture-launch-token'
+
 /** The one loopback listener every Web fixture registers its fallback on. */
 interface WebServerFixture {
   readonly service: {
     registerFallback(handler: unknown): () => void
+    /** The official bound origin every launch URL is built from. */
+    getOrigin(): string
   }
   facts(): { readonly registered: boolean; readonly registrations: number; readonly disposals: number }
 }
@@ -97,6 +104,7 @@ function createWebServerFixture(): WebServerFixture {
   let disposals = 0
   return {
     service: {
+      getOrigin: () => FIXTURE_ORIGIN,
       registerFallback(handler: unknown): () => void {
         if (holder !== undefined) throw new Error('webserver: fallback already registered')
         holder = handler
@@ -206,6 +214,12 @@ async function createFixture(options: FixtureOptions = {}): Promise<WebAccessFix
   }
 
   ctx.provide('webServer', webServer.service)
+  // The official Connection owner's ONE public URL builder: the ONLY source of a
+  // Web launch URL. The fixture appends its own launch token so a test can prove
+  // the getter reaches THIS authority (and never invents a URL).
+  ctx.provide('connection', {
+    authenticatedUrl: (baseUrl: string) => `${baseUrl}?token=${FIXTURE_TOKEN}`,
+  })
   // The structural shape of the official Typert registry. The service only
   // needs it to exist (the Host Runtime owns the descriptors); the REAL Gateway
   // dispatch is proven by the split-process lane.
@@ -709,4 +723,70 @@ test('unmounting the Host runtime during a mutation leaves no unhandled rejectio
   // One more turn of the event loop: a late unhandled rejection would surface.
   await new Promise(resolve => setImmediate(resolve))
   assert.deepEqual(rejections, [], 'a Host shutdown during a toggle must not leak a rejection')
+})
+
+/* ── M5-W PR-C: the official authenticated URL getter ─────────────────────── */
+
+test('getAuthenticatedUrl answers only while the frontend is enabled, from the official authority', async t => {
+  const fixture = await createFixture()
+  t.after(() => fixture.dispose())
+
+  // Disabled: no URL is produced at all, and the failure never carries one.
+  await assert.rejects(
+    fixture.service.getAuthenticatedUrl(),
+    (error: unknown) => {
+      assert.match(String(error), /not enabled/u)
+      assert.doesNotMatch(String(error), new RegExp(FIXTURE_TOKEN, 'u'), 'no token in a disabled failure')
+      return true
+    },
+  )
+
+  assert.deepEqual(await fixture.service.setEnabled(true), { state: 'enabled' })
+  const { url } = await fixture.service.getAuthenticatedUrl()
+  assert.equal(url, `${FIXTURE_ORIGIN}/?token=${FIXTURE_TOKEN}`,
+    'the URL is connection.authenticatedUrl(webServer.getOrigin() + "/") — the official path only')
+
+  // The getter never stores or mirrors the value: the status stays the small
+  // availability vocabulary, and a second call reads the authority again.
+  const status = await fixture.service.getStatus()
+  assert.deepEqual(status, { state: 'enabled' })
+  assert.doesNotMatch(JSON.stringify(status), /token|127\.0\.0\.1:4321/u)
+  assert.deepEqual(await fixture.service.getAuthenticatedUrl(), { url })
+
+  // Disabled again: the same getter refuses instead of serving a stale link.
+  assert.deepEqual(await fixture.service.setEnabled(false), { state: 'disabled' })
+  await assert.rejects(fixture.service.getAuthenticatedUrl(), /not enabled/u)
+})
+
+test('getAuthenticatedUrl refuses during a mutation and on an unavailable roster', async t => {
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  let entered!: () => void
+  const started = new Promise<void>(resolve => { entered = resolve })
+  const fixture = await createFixture({
+    overrides: new Map<string, RowOverride>([['modules', {
+      provide: 'clientModules',
+      apply: () => {
+        entered()
+        return gate
+      },
+    }]]),
+  })
+  t.after(async () => {
+    release()
+    await fixture.dispose()
+  })
+  const enabling = fixture.service.setEnabled(true)
+  await started
+  await assert.rejects(fixture.service.getAuthenticatedUrl(), /not enabled/u,
+    'a changing Host must not hand out a URL')
+  release()
+  assert.deepEqual(await enabling, { state: 'enabled' })
+
+  // A partially disabled roster is `unavailable`: no URL either.
+  const row = fixture.rows.get('ui-theme') as unknown as {
+    update(options: { readonly disabled: boolean }): Promise<void>
+  }
+  await row.update({ disabled: true })
+  await assert.rejects(fixture.service.getAuthenticatedUrl(), /unavailable/u)
 })

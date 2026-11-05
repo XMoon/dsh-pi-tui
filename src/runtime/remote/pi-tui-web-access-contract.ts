@@ -1,26 +1,31 @@
 /**
- * The private `piTuiWebAccess` Remote contract (M5-W PR-B): TWO handwritten
- * invocation descriptors that BOTH the Host service and the Client
+ * The private `piTuiWebAccess` Remote contract (M5-W PR-B/PR-C): THREE
+ * handwritten invocation descriptors that BOTH the Host service and the Client
  * contribution derive from, so a namespace/method/parameter drift is
  * impossible by construction.
  *
  * ```text
  * endpoint   @xmoon76/dsh-pi-tui#piTuiWebAccess/getStatus
  * endpoint   @xmoon76/dsh-pi-tui#piTuiWebAccess/setEnabled
+ * endpoint   @xmoon76/dsh-pi-tui#piTuiWebAccess/getAuthenticatedUrl
  * service    piTuiWebAccess      (Host Cordis service key)
  * namespace  piTuiWebAccess      (wire namespace)
  * method     getStatus()
  * method     setEnabled(enabled)
+ * method     getAuthenticatedUrl()
  * result     PiTuiWebAccessStatus
+ * result     PiTuiWebAccessAuthenticatedUrl   (token-carrying; explicit action only)
  * ```
  *
  * The descriptors are registered EXPLICITLY on the Host (`ctx.typert.register`)
  * and mounted EXPLICITLY on the Client (`ctx.remote.$mount`) — never discovered
  * from source-mode decorators, never generated, never a second literal.
  *
- * The result carries NO token, URL, cookie or profile path: the status is the
+ * The STATUS result carries NO token, URL, cookie or profile path: it is the
  * small availability vocabulary of the official Web frontend, and an
- * `unavailable` reason is a fixed, redacted diagnostic.
+ * `unavailable` reason is a fixed, redacted diagnostic. The authenticated URL
+ * is a separate result produced only by an explicit user action and never
+ * enters a status object, a diagnostic or a trace.
  *
  * @module @xmoon76/dsh-pi-tui/runtime/remote/pi-tui-web-access-contract
  */
@@ -43,6 +48,9 @@ export const PI_TUI_WEB_ACCESS_GET_STATUS_ENDPOINT = '@xmoon76/dsh-pi-tui#piTuiW
 /** The mutation method's stable endpoint identity. */
 export const PI_TUI_WEB_ACCESS_SET_ENABLED_ENDPOINT = '@xmoon76/dsh-pi-tui#piTuiWebAccess/setEnabled'
 
+/** The authenticated-URL method's stable endpoint identity. */
+export const PI_TUI_WEB_ACCESS_GET_AUTHENTICATED_URL_ENDPOINT = '@xmoon76/dsh-pi-tui#piTuiWebAccess/getAuthenticatedUrl'
+
 /**
  * The availability of the official Web frontend on THIS Host.
  *
@@ -61,6 +69,19 @@ export type PiTuiWebAccessStatus =
 
 /** The business result the private Remote methods resolve to on the wire. */
 export type PiTuiWebAccessCallResult = RemoteResult<PiTuiWebAccessStatus>
+
+/**
+ * The official authenticated launch URL of THIS Host's Web frontend.
+ *
+ * The value CONTAINS the official launch token, so it is produced only by an
+ * explicit user action (`Open Browser` / `Copy Link`), it is never stored in a
+ * status object and it must never reach a log, a diagnostic, a trace or the
+ * transcript. There is exactly one field: the Host builds it from the official
+ * `connection.authenticatedUrl(webServer.getOrigin() + '/')`.
+ */
+export interface PiTuiWebAccessAuthenticatedUrl {
+  readonly url: string
+}
 
 /** One strict JSON codec that validates a wire boolean. */
 const BOOLEAN_CODEC: TypertCodec = {
@@ -155,6 +176,61 @@ export interface PiTuiWebAccessSetEnabledArguments {
   readonly enabled: boolean
 }
 
+/**
+ * Validate and detach one wire `PiTuiWebAccessAuthenticatedUrl`.
+ *
+ * It is the ONE place the token-carrying value crosses the wire, so the shape is
+ * parsed strictly: exactly one `url` field, a non-empty string, and an absolute
+ * `http(s)` URL. Nothing is normalized or rewritten — the Client opens/copies
+ * the official URL verbatim.
+ */
+export function parsePiTuiWebAccessAuthenticatedUrl(value: unknown): PiTuiWebAccessAuthenticatedUrl {
+  if (typeof value !== 'object' || value === null) {
+    throw new TypeError('piTuiWebAccess: the authenticated URL result must be an object')
+  }
+  const record = value as { readonly url?: unknown }
+  for (const key of Object.keys(record)) {
+    if (key !== 'url') {
+      throw new TypeError(`piTuiWebAccess: unexpected authenticated URL field ${JSON.stringify(key)}`)
+    }
+  }
+  if (typeof record.url !== 'string' || record.url === '') {
+    throw new TypeError('piTuiWebAccess: the authenticated URL must be a non-empty string')
+  }
+  let parsed: URL
+  try {
+    parsed = new URL(record.url)
+  } catch {
+    throw new TypeError('piTuiWebAccess: the authenticated URL must be an absolute URL')
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new TypeError('piTuiWebAccess: the authenticated URL must be an http(s) URL')
+  }
+  return { url: record.url }
+}
+
+const PI_TUI_WEB_ACCESS_AUTHENTICATED_URL_CODEC: TypertCodec = {
+  mode: 'strict',
+  typeSymbol: '@xmoon76/dsh-pi-tui#piTuiWebAccess:authenticatedUrl',
+  create: () => ({ parse: parsePiTuiWebAccessAuthenticatedUrl }),
+  decode: parsePiTuiWebAccessAuthenticatedUrl,
+}
+
+/**
+ * The `getAuthenticatedUrl` invocation both contributions derive from: no
+ * parameters, one strict `{url}` result. The Host registers this exact object;
+ * the Client mounts this exact object.
+ */
+export const PI_TUI_WEB_ACCESS_GET_AUTHENTICATED_URL: InvocationDescriptor = {
+  id: PI_TUI_WEB_ACCESS_GET_AUTHENTICATED_URL_ENDPOINT,
+  service: PI_TUI_WEB_ACCESS_NAMESPACE,
+  namespace: PI_TUI_WEB_ACCESS_NAMESPACE,
+  method: 'getAuthenticatedUrl',
+  invocation: { kind: 'direct' },
+  parameters: [],
+  result: PI_TUI_WEB_ACCESS_AUTHENTICATED_URL_CODEC,
+}
+
 /*
  * The Host/Client contributions are NOT declared here: rc.2 admits exactly one
  * contribution per package identity, so the package's single contribution —
@@ -166,12 +242,14 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
   interface TypertRemoteMap {
     'piTuiWebAccess/getStatus': () => Promise<PiTuiWebAccessCallResult>
     'piTuiWebAccess/setEnabled': (enabled: boolean) => Promise<PiTuiWebAccessCallResult>
+    'piTuiWebAccess/getAuthenticatedUrl': () => Promise<RemoteResult<PiTuiWebAccessAuthenticatedUrl>>
   }
 
   interface TypertRemoteNamespaceMap {
     'piTuiWebAccess': {
       getStatus: () => Promise<PiTuiWebAccessCallResult>
       setEnabled: (enabled: boolean) => Promise<PiTuiWebAccessCallResult>
+      getAuthenticatedUrl: () => Promise<RemoteResult<PiTuiWebAccessAuthenticatedUrl>>
     }
   }
 }

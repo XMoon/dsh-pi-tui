@@ -55,6 +55,12 @@ export const SETTINGS_DIRECT_PAGE_STUBS = {
     read: () => ({ enabled: true, revision: 1, userOverridden: false, applied: true }),
     setEnabled: async (_enabled: boolean, _revision: number) => {},
   },
+  /** The profile-owned Web startup preference: the schema default (OFF, no user
+   *  override) at revision 1. The `/settings` snapshot reads it on every open. */
+  webStartupPreference: {
+    read: () => ({ autoStart: false, revision: 1, userOverridden: false }),
+    setAutoStart: async (_value: boolean, _revision: number) => {},
+  },
 } as const
 
 /**
@@ -71,5 +77,6 @@ export function settingsDirectPageConfig(config: Record<string, unknown>): Recor
     credentials: { ...SETTINGS_DIRECT_PAGE_STUBS.credentials, ...(own.credentials ?? {}) },
     account: { ...SETTINGS_DIRECT_PAGE_STUBS.account, ...(own.account ?? {}) },
     visualTools: { ...SETTINGS_DIRECT_PAGE_STUBS.visualTools, ...(own.visualTools ?? {}) },
+    webStartupPreference: { ...SETTINGS_DIRECT_PAGE_STUBS.webStartupPreference, ...(own.webStartupPreference ?? {}) },
   }
 }

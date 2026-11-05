@@ -393,7 +393,8 @@ async function writeWebSettingsThroughTui(
   await app.waitFor(() => app.view().includes('Settings ·'), 'the Settings workspace')
   // The workspace home is About: walk the rail to Tools, then its Rows level.
   await selectSettingsCategory(app.vt, 'Tools')
-  for (const key of [KEY.enter, KEY.down, KEY.enter]) {
+  // Tools rows: Visual tools -> Auto-enable Web (M5-W PR-C) -> Web Search / Fetch.
+  for (const key of [KEY.enter, KEY.down, KEY.down, KEY.enter]) {
     app.vt.sendInput(key)
     await renderFrames(app)
   }
@@ -482,7 +483,8 @@ async function openWebPageInApp(app: S4D3Application): Promise<void> {
   }
   await app.waitFor(() => app.view().includes('Settings ·'), 'the Settings workspace')
   await selectSettingsCategory(app.vt, 'Tools')
-  for (const key of [KEY.enter, KEY.down, KEY.enter]) {
+  // Tools rows: Visual tools -> Auto-enable Web (M5-W PR-C) -> Web Search / Fetch.
+  for (const key of [KEY.enter, KEY.down, KEY.down, KEY.enter]) {
     app.vt.sendInput(key)
     await app.settle()
   }
@@ -503,7 +505,8 @@ async function openWebCredentialRowInApp(app: S4D3Application): Promise<void> {
   }
   await app.waitFor(() => app.view().includes('Settings ·'), 'the Settings workspace')
   await selectSettingsCategory(app.vt, 'Tools')
-  for (const key of [KEY.enter, KEY.down, KEY.enter]) {
+  // Tools rows: Visual tools -> Auto-enable Web (M5-W PR-C) -> Web Search / Fetch.
+  for (const key of [KEY.enter, KEY.down, KEY.down, KEY.enter]) {
     app.vt.sendInput(key)
     await renderFrames(app)
   }

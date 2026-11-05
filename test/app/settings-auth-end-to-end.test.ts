@@ -167,6 +167,10 @@ function open(width = 120, height = 40, authorizationOverride?: unknown): Harnes
         read: () => ({ enabled: true, revision: 1, userOverridden: false, applied: true }),
         setEnabled: async (_enabled: boolean, _revision: number) => {},
       },
+      webStartupPreference: {
+        read: () => ({ autoStart: false, revision: 1, userOverridden: false }),
+        setAutoStart: async (_value: boolean, _revision: number) => {},
+      },
       footerCustomItems: { rawForPersistence: () => ({ kind: 'available', value: undefined }) },
       permissions: { presetNames: () => [], defaultPreset: () => undefined, approvalOverrideOf: () => undefined, approvalOverrideAvailable: () => false },
       subagentModelSelection: { available: () => false },
@@ -1224,7 +1228,9 @@ async function openWebCredentialRow(h: Harness): Promise<void> {
   await waitForFrame(h.view, frame => frame.includes('Settings ·'), () => h.vt.waitForRender(), 'the Settings workspace')
   for (let step = 0; step < 7; step += 1) await key(h, '\x1b[B') // About -> Tools
   await key(h, '\r') // rows level
-  await key(h, '\x1b[B') // the Web row
+  // Walk the Tools rows until the Web launcher owns the selection (the M5-W
+  // PR-C preference row sits between Visual tools and it).
+  for (let step = 0; step < 6 && !/> Web Search \/ Fetch/u.test(h.view()); step += 1) await key(h, '\x1b[B')
   await key(h, '\r') // the SAME-lease Web page
   await waitForFrame(h.view, frame => frame.includes('Web Search Provider') && !frame.includes('Loading…'),
     () => h.vt.waitForRender(), 'the Web Search / Fetch page')

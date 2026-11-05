@@ -1554,3 +1554,63 @@ test('a visualTools confirm submits the revision the decision was read at, never
     'the ORIGINAL decision revision was submitted, not the refreshed mirror revision')
   assert.equal(port.visualTools.read()?.enabled, false, 'the external value remains authoritative')
 })
+
+// ── M5-W PR-C: the profile-owned Web startup preference ────────────────────
+
+test('webStartupPreference mirrors the Host section and writes the exact autoStart path', async () => {
+  const { port, state } = createBackend(current => {
+    current.namespaces.set('pi-tui-web-preferences', {
+      ns: 'pi-tui-web-preferences',
+      value: { autoStart: false },
+      revision: 7,
+    })
+  })
+  assert.equal(port.webStartupPreference.read(), undefined, 'a never-described mirror has no authority to report')
+  await port.describe()
+  assert.deepEqual(port.webStartupPreference.read(), { autoStart: false, revision: 7, userOverridden: false })
+
+  await port.webStartupPreference.setAutoStart(true, 7)
+  assert.equal(state.mutateCalls.length, 1)
+  assert.equal(state.mutateCalls[0]!.ns, 'pi-tui-web-preferences')
+  assert.deepEqual(state.mutateCalls[0]!.ops, [{ op: 'set', path: ['autoStart'], value: true }])
+  assert.equal(state.mutateCalls[0]!.revision, 7, 'the write carries the revision the decision was read at')
+  assert.equal(port.webStartupPreference.read()?.autoStart, true,
+    'the post-settlement mirror refresh is the new authority')
+})
+
+test('webStartupPreference marks a USER-declared value and reports an absent section', async () => {
+  const { port } = createBackend(current => {
+    current.namespaces.set('pi-tui-web-preferences', {
+      ns: 'pi-tui-web-preferences',
+      value: { autoStart: true },
+      user: { autoStart: true },
+      revision: 3,
+    })
+  })
+  await port.describe()
+  assert.deepEqual(port.webStartupPreference.read(), { autoStart: true, revision: 3, userOverridden: true })
+
+  const absent = createBackend()
+  await absent.port.describe()
+  assert.equal(absent.port.webStartupPreference.read(), undefined)
+  await assert.rejects(absent.port.webStartupPreference.setAutoStart(true, 1), /not available in this deployment/u)
+})
+
+test('a stale webStartupPreference read stays last-known and the write is refused', async () => {
+  const { port, state } = createBackend(current => {
+    current.namespaces.set('pi-tui-web-preferences', {
+      ns: 'pi-tui-web-preferences',
+      value: { autoStart: false },
+      revision: 2,
+    })
+  })
+  await port.describe()
+  state.describeFailure = { code: 'gateway/disconnected', message: 'connection lost' }
+  await assert.rejects(port.describe())
+  assert.deepEqual(port.webStartupPreference.read(), { autoStart: false, revision: 2, userOverridden: false },
+    'the last-known value remains READABLE but non-current')
+  assert.equal(port.configReadiness(), 'stale')
+  const callsBefore = state.mutateCalls.length
+  await assert.rejects(port.webStartupPreference.setAutoStart(true, 2), /settings\.describe failed: connection lost/u)
+  assert.equal(state.mutateCalls.length, callsBefore, 'a stale mirror never dispatches the preference')
+})

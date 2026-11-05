@@ -9,6 +9,14 @@
 
 ### 新增
 
+- **Split Client 的 `/web` 入口与「下次 Host 启动自动启用 Web 前端」偏好。**
+  在 Split Client 中输入 `/web` 可查看当前 Host 官方 Web 前端的真实状态，并只按
+  该状态提供启用、停用、打开浏览器、复制认证链接与只读详情；打开菜单或查看详情
+  不会改动 Host，认证链接只在用户明确选择「打开浏览器/复制链接」时才向当前 Host
+  取得，不会自动打开浏览器、打印 URL、创建会话或再起一个 Host。`/settings → Tools
+  → Auto-enable Web on Host startup` 把该偏好持久化到当前 DSH Profile，只在下一次
+  Split Host 冷启动时生效：默认关闭，切换偏好不会立即启用或停用正在运行的 Host，
+  浏览器仍只在用户操作时打开。Direct 模式会明确提示该能力仅在 Split Client 可用。
 - **终端粘贴图片路径自动附件化。** 在 Tern / Hedr 等终端里把本地图片文件粘贴到
   输入框时，dsh-pi-tui 会自动读取该图片并替换成标准 `[image #N (W×H)]`，无需手动
   `/image`；文件仍在读取时按 Enter / 发送 / 转向会被拒绝并提示重试，读取失败则

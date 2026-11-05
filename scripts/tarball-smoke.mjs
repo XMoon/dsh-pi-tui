@@ -283,6 +283,8 @@ function main() {
     check('types dist/builtins.d.mts', has('dist/builtins.d.mts'))
     check('exports entry dist/visual-tools.mjs', has('dist/visual-tools.mjs'))
     check('types dist/visual-tools.d.mts', has('dist/visual-tools.d.mts'))
+    check('exports entry dist/web-preferences.mjs', has('dist/web-preferences.mjs'))
+    check('types dist/web-preferences.d.mts', has('dist/web-preferences.d.mts'))
     check('exports entry dist/host-runtime.mjs', has('dist/host-runtime.mjs'))
     check('types dist/host-runtime.d.mts', has('dist/host-runtime.d.mts'))
     // M4-B2-HF: ONE Loader subpath for the built-in Host composition. The two
@@ -424,7 +426,7 @@ function main() {
         const match = /\/\/#region\s+(\S+)/.exec(line)
         if (match) {
           const regionPath = match[1]
-          const allowed = /^src\/(app\/bootstrap\/profile|app\/config\/schema|app\/host\/features\/file-reference|app\/host\/features\/terminal-progress|app\/host\/performance-host|app\/host\/pi-tui-host-runtime|app\/host\/visual-tools|app\/session\/interrupt|app\/submission\/command-policy|app\/submission\/pending-input|app\/surface\/compaction-presentation|app\/surface\/pending-presentation|app\/surface\/task-presentation|app\/surface\/viewer-policy|builtins|client\/launcher\/profile|client\/media\/image\/types|commands|display-preset|domain\/catalog\/skill|domain\/catalog\/surface|domain\/command\/policy|domain\/communication\/policy|domain\/media\/types|domain\/shell\/danger|extension\/advanced|extension\/advanced-types|extension\/public-types|extension\/service|extension\/slot-map|extension\/unstable|extension\/unstable-types|extensions|index|runtime\/direct\/surface-catalog|runtime\/process\/diagnostics|startup)\.d\.ts$/.test(regionPath)
+          const allowed = /^src\/(app\/bootstrap\/profile|app\/config\/schema|app\/host\/features\/file-reference|app\/host\/features\/terminal-progress|app\/host\/performance-host|app\/host\/pi-tui-host-runtime|app\/host\/visual-tools|app\/host\/web-preferences|app\/session\/interrupt|app\/submission\/command-policy|app\/submission\/pending-input|app\/surface\/compaction-presentation|app\/surface\/pending-presentation|app\/surface\/task-presentation|app\/surface\/viewer-policy|builtins|client\/launcher\/profile|client\/media\/image\/types|commands|display-preset|domain\/catalog\/skill|domain\/catalog\/surface|domain\/command\/policy|domain\/communication\/policy|domain\/media\/types|domain\/shell\/danger|extension\/advanced|extension\/advanced-types|extension\/public-types|extension\/service|extension\/slot-map|extension\/unstable|extension\/unstable-types|extensions|index|runtime\/direct\/surface-catalog|runtime\/process\/diagnostics|startup)\.d\.ts$/.test(regionPath)
           const rootAllowed = isRoot && /^src\/tui-app\.d\.ts$/.test(regionPath)
           if (!allowed && !rootAllowed) dtsLeaks.push(`${name}: region ${regionPath}`)
         }
@@ -497,7 +499,7 @@ function main() {
             + "import('@xmoon76/dsh-pi-tui/extensions'), import('@xmoon76/dsh-pi-tui/builtins'),"
             + "import('@xmoon76/dsh-pi-tui/extensions/advanced'), import('@xmoon76/dsh-pi-tui/extensions/unstable'),"
             + "import('@xmoon76/dsh-pi-tui/performance-host'), import('@xmoon76/dsh-pi-tui/visual-tools'),"
-            + "import('@xmoon76/dsh-pi-tui/host-runtime')])"
+            + "import('@xmoon76/dsh-pi-tui/host-runtime'), import('@xmoon76/dsh-pi-tui/web-preferences')])"
             + ".then(m => { if (m[4].ADVANCED_API_LEVEL !== 1) throw new Error('ADVANCED_API_LEVEL');"
             + "if (m[5].UNSTABLE_API_LEVEL !== 1) throw new Error('UNSTABLE_API_LEVEL');"
             + "if (m[6].name !== 'pi-tui-performance-host') throw new Error('performance-host row');"
@@ -512,6 +514,9 @@ function main() {
             + "if (m[8].name !== 'pi-tui-host-runtime') throw new Error('host-runtime row');"
             + "if (typeof m[8].apply !== 'function') throw new Error('host-runtime apply');"
             + "if (!Array.isArray(m[8].inject) || m[8].inject.join(',') !== 'typert,agents,fileReferences,workingDirectory') throw new Error('host-runtime inject');"
+            + "if (m[9].name !== 'pi-tui-web-preferences') throw new Error('web-preferences row');"
+            + "if (typeof m[9].Config !== 'function' && typeof m[9].Config !== 'object') throw new Error('web-preferences Config');"
+            + "if (typeof m[9].apply !== 'function') throw new Error('web-preferences apply');"
             + "console.log('imports-ok') })"
             + ".catch(e => { console.error(e.message); process.exit(1) })",
         ], { cwd: probeDir })

@@ -48,7 +48,7 @@ import { themeDisplayName as themeDisplayNameOf } from '../pickers/theme-menu.ts
 import { SubagentModelAllowlistPicker, allowlistSummary, lastRouteWhileEnabled } from '../pickers/subagent-model-menu.ts'
 import { resolveThemeSelection, themePickerRows } from '../../app/surface/theme-selection.ts'
 import { normalizePersistedTheme } from '../../domain/display/theme-selection.ts'
-import { serializeTuiSettingsMutation, type ConfigPort, type TuiSettingsDoc, type VisualToolsState, type WebProviderSettings } from '../../runtime/config-port.ts'
+import { serializeTuiSettingsMutation, type ConfigPort, type TuiSettingsDoc, type VisualToolsState, type WebProviderSettings, type WebStartupPreferenceState } from '../../runtime/config-port.ts'
 import {
   WEB_FETCH_PROVIDER_CANDIDATES,
   WEB_SEARCH_PROVIDER_CANDIDATES,
@@ -1579,6 +1579,119 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     return verifyCommittedVisualTools(enabled)
   }
 
+  /**
+   * The profile-owned Web startup preference (`pi-tui-web-preferences`). It is
+   * a NEXT-Host-launch fact only: this row never reports or changes the CURRENT
+   * Host's Web state, and committing it never calls the Web frontend toggle.
+   */
+  const webAutostartSummaryOf = (state: WebStartupPreferenceState | undefined): string => {
+    if (state === undefined) return 'Unavailable'
+    // `Off (default)` marks the schema default the USER layer does not declare;
+    // the Host form's provenance is the only source for that mark.
+    if (state.autoStart) return 'On'
+    return state.userOverridden ? 'Off' : 'Off (default)'
+  }
+
+  const webAutostartEditOf = (
+    state: WebStartupPreferenceState | undefined,
+    readiness: 'ready' | 'stale' | 'unavailable',
+  ): SettingsWorkspaceEdit => {
+    const editable = state !== undefined && readiness === 'ready'
+    return {
+      field: 'web-autostart',
+      primary: 'persisted',
+      ...(state === undefined ? {} : { revision: state.revision }),
+      options: editable
+        ? [
+            { value: 'On', label: 'On', available: true, current: state.autoStart },
+            { value: 'Off', label: 'Off', available: true, current: !state.autoStart },
+          ]
+        : [],
+      // The live effect statement: the preference applies to the NEXT Host
+      // launch and leaves the running one exactly as it is.
+      runtime: 'applies on the next Host launch; the current Host is unchanged',
+      persisted: webAutostartSummaryOf(state),
+    }
+  }
+
+  const webAutostartFreshnessOf = (
+    state: WebStartupPreferenceState | undefined,
+    readiness: 'ready' | 'stale' | 'unavailable',
+  ): SettingsWorkspaceFreshness => state === undefined
+    ? 'unavailable'
+    : readiness === 'ready' ? 'ready' : 'last-known'
+
+  /** A candidate identity ('On'/'Off') as the Host boolean. */
+  const webAutostartValueOf = (value: string): boolean | undefined =>
+    value === 'On' ? true : value === 'Off' ? false : undefined
+
+  /** The authoritative re-read of the committed PREFERENCE (never the current
+   *  Web state, which this row does not own). */
+  const verifyCommittedWebAutostart = (expected: boolean): SettingsWorkspaceCommitOutcome => {
+    const readiness = runner.config.configReadiness()
+    if (readiness !== 'ready') {
+      return { outcome: 'unverified', reason: `the configuration is ${readiness}; the committed preference could not be re-read` }
+    }
+    const state = runner.config.webStartupPreference.read()
+    if (state === undefined) {
+      return { outcome: 'unverified', reason: 'the committed Web startup preference could not be re-read' }
+    }
+    if (state.autoStart !== expected) {
+      return {
+        outcome: 'not-saved',
+        reason: `the write reported success, but the authoritative preference reads ${state.autoStart ? 'On' : 'Off'}`,
+      }
+    }
+    return { outcome: 'verified' }
+  }
+
+  /** Attribute a REJECTED preference write from a fresh authoritative read. */
+  const classifyRejectedWebAutostart = (
+    base: boolean,
+    failureReason: string,
+  ): SettingsWorkspaceCommitOutcome => {
+    const state = runner.config.configReadiness() === 'ready'
+      ? runner.config.webStartupPreference.read()
+      : undefined
+    if (state === undefined) {
+      return { outcome: 'indeterminate', reason: `${failureReason}; the authoritative preference could not be re-read` }
+    }
+    if (state.autoStart === base) return { outcome: 'not-saved', reason: failureReason }
+    return {
+      outcome: 'indeterminate',
+      reason: `${failureReason}; the authority no longer reads the value this request started from, so its outcome cannot be attributed`,
+    }
+  }
+
+  /** Commit the next-launch preference through the official revision-checked
+   *  settings write. It never touches the current Host's Web frontend. */
+  const commitWebAutostart = async (
+    value: string,
+    revision: number | undefined,
+  ): Promise<SettingsWorkspaceCommitOutcome> => {
+    const autoStart = webAutostartValueOf(value)
+    if (autoStart === undefined) {
+      return { outcome: 'not-saved', reason: `"${value}" is not a Web startup preference candidate` }
+    }
+    if (revision === undefined) {
+      return { outcome: 'not-saved', reason: 'the Host setting exposed no revision this choice could be based on' }
+    }
+    const readiness = runner.config.configReadiness()
+    if (readiness !== 'ready') {
+      return { outcome: 'not-saved', reason: `the configuration is ${readiness}; the Web startup preference was not changed` }
+    }
+    const base = runner.config.webStartupPreference.read()
+    if (base === undefined) {
+      return { outcome: 'not-saved', reason: 'the Host Web startup preference is unavailable; nothing was changed' }
+    }
+    try {
+      await runner.config.webStartupPreference.setAutoStart(autoStart, revision)
+    } catch (error) {
+      return classifyRejectedWebAutostart(base.autoStart, safeErrorMessage(error))
+    }
+    return verifyCommittedWebAutostart(autoStart)
+  }
+
   /** The TUI-settings-document writers. Deliberately NARROWER than
    *  {@link SettingsWorkspaceWritableField}: the Host visual-tools switch and
    *  the two runtime-only disclosure fields have no document field at all, so
@@ -1763,6 +1876,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       const field = request.field as Exclude<SettingsWorkspaceWritableField, `ext-setting:${string}`>
       switch (field) {
         case 'visual-tools': return commitVisualTools(request.value, request.revision)
+        case 'web-autostart': return commitWebAutostart(request.value, request.revision)
         case 'display-preset': return commitDisplayPreset(request.value)
         case 'theme': return commitTheme(request.value)
         case 'icon-style': return commitIconStyle(request.value)
@@ -2920,6 +3034,8 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     // the shipped default.
     const visualTools = runner.config.visualTools.read()
     const visualToolsFreshness = visualToolsFreshnessOf(visualTools, configReadiness)
+    const webAutostart = runner.config.webStartupPreference.read()
+    const webAutostartFreshness = webAutostartFreshnessOf(webAutostart, configReadiness)
     // ── C2-R3: the five Agent rows' read facts ────────────────────────────────
     // PERMISSIONS. The approval row exists only for a LIVE, still-current
     // captured scope on a backend that really reads and writes the override:
@@ -3476,6 +3592,20 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           description: 'Enable the built-in Chart and SVG tools for this DSH profile. '
             + 'Affects every agent using this Host profile, not just the TUI.',
           edit: visualToolsEditOf(visualTools, configReadiness),
+        },
+        {
+          // M5-W PR-C: the NEXT-Host-launch Web preference. It is a Host profile
+          // setting, not the current Web state: saving it never enables or
+          // disables the running Host, and `/web` remains the immediate control.
+          id: 'web-autostart',
+          category: 'tools',
+          label: 'Auto-enable Web on Host startup',
+          summary: webAutostartSummaryOf(webAutostart),
+          scope: 'DSH Host profile · next Split Host launch',
+          freshness: webAutostartFreshness,
+          description: 'Automatically serves the Web frontend when a new Split Host starts. '
+            + 'The current Host is not changed; use /web for immediate control. Browser opening remains manual.',
+          edit: webAutostartEditOf(webAutostart, configReadiness),
         },
         {
           // C2-R4: the ONE discoverable entry to the Web provider settings

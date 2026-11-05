@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A `/web` entry and an "auto-enable the Web frontend on Host startup"
+  preference for the Split Client.** `/web` shows the current Host's real
+  official-Web-frontend state and offers only the actions that state admits —
+  enable, disable, open the browser, copy the authenticated link and a read-only
+  Details page. Opening the menu or reading Details never changes the Host, and
+  the authenticated link is requested from the current Host only when the user
+  explicitly chooses Open Browser or Copy Link; nothing opens a browser
+  automatically, prints the URL, creates a Session or starts a second Host.
+  `/settings → Tools → Auto-enable Web on Host startup` persists the preference
+  in the current DSH Profile and applies it only to the NEXT Split Host launch:
+  it defaults to Off, changing it never enables or disables the running Host, and
+  the browser still opens only on an explicit user action. Direct mode states
+  that these controls are available only in a Split Client.
 - **Terminal image-file pastes are attached automatically.** Pasting a local
   image file into the composer of a terminal such as Tern or Hedr now reads the
   image and replaces the path with the standard `[image #N (W×H)]` token, with

@@ -39,6 +39,11 @@ import { DirectPluginManagerPort } from './plugin-manager-direct.ts'
 import { DirectJobObservationPort } from './job-observation-direct.ts'
 import { DirectHostUserShellPort, type DirectShellCapability } from './host-user-shell-direct.ts'
 import { DirectDeliveredFileReadPort } from './deliverables-direct.ts'
+import type { WebAccessPort } from '../web-access-port.ts'
+import type {
+  PiTuiWebAccessAuthenticatedUrl,
+  PiTuiWebAccessStatus,
+} from '../remote/pi-tui-web-access-contract.ts'
 
 /** The minimal Host context surface the Direct adapters need (structural;
  * the services resolve from the running dsh installation). */
@@ -77,6 +82,32 @@ export interface DirectBackendDeps {
   readonly liveResolvers: DirectSessionLiveResolvers
 }
 
+/**
+ * The Direct backend's Web frontend control: a truthful UNAVAILABLE capability.
+ *
+ * The official Web frontend toggle is a Split-Client capability (it belongs to
+ * the Split Host's private `piTuiWebAccess` service). The Direct process owns no
+ * such toggle, and this adapter touches no Host row, starts no Host and opens no
+ * browser — it answers the real missing capability so `/web` can say exactly
+ * that.
+ */
+class DirectUnavailableWebAccess implements WebAccessPort {
+  async getStatus(): Promise<PiTuiWebAccessStatus> {
+    return { state: 'unavailable', reason: DIRECT_WEB_ACCESS_REASON }
+  }
+
+  async setEnabled(): Promise<PiTuiWebAccessStatus> {
+    return { state: 'unavailable', reason: DIRECT_WEB_ACCESS_REASON }
+  }
+
+  async getAuthenticatedUrl(): Promise<PiTuiWebAccessAuthenticatedUrl> {
+    throw new Error(DIRECT_WEB_ACCESS_REASON)
+  }
+}
+
+/** The ONE statement of the Direct capability gap (presentation reads it). */
+export const DIRECT_WEB_ACCESS_REASON = 'Web frontend controls are available only in a Split Client.'
+
 /** Assemble the complete Direct `Backend` from the runner's resolvers. */
 export function createDirectRuntimeBackend(deps: DirectBackendDeps): Backend {
   return createDirectBackend(
@@ -105,5 +136,8 @@ export function createDirectRuntimeBackend(deps: DirectBackendDeps): Backend {
     // Delivered files PR2: the official Host file service read in-process,
     // under the same Session-derived scope the official Remote lookup uses.
     new DirectDeliveredFileReadPort(deps.ctx),
+    // M5-W PR-C: the Direct process owns no official Web frontend toggle; the
+    // adapter reports that missing capability instead of faking a control.
+    new DirectUnavailableWebAccess(),
   )
 }

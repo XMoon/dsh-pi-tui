@@ -77,6 +77,7 @@ import type { Catalog } from './runtime/catalog-port.ts'
 import type { SkillDefinitionResult } from './runtime/catalog-port.ts'
 import type { ConfigPort } from './runtime/config-port.ts'
 import type { HostFilePort, HostFileScope } from './runtime/host-file-port.ts'
+import type { WebAccessPort } from './runtime/web-access-port.ts'
 import type { CatalogRefreshOutcome, CatalogRefreshSource } from './app/command/catalog-refresh.ts'
 import type { ClientCommandRegistry } from './app/command/client-command-registry.ts'
 import {
@@ -94,12 +95,14 @@ import { registerExitCommand, registerHelpCommand, registerReloadClientCommand }
 import { registerPluginsCommand, registerTasksCommand } from './tui/commands/tasks.ts'
 import { createModelCommands } from './tui/commands/models.ts'
 import type { ModelPresentation } from './app/command/model-presentation.ts'
+import type { WebAccessPresentation } from './app/command/web-access-presentation.ts'
 import type { PresetPresentation } from './app/command/preset-presentation.ts'
 import type { SessionBrowserPresentation } from './app/command/session-browser-presentation.ts'
 import { registerReloadCommand, registerSkillCommand, type SkillsCommandDeps } from './tui/commands/skills.ts'
 import { createArtifactsCommands } from './tui/commands/artifacts.ts'
 import { createAuthCommands } from './tui/commands/auth.ts'
 import { createSettingsCommands } from './tui/commands/settings.ts'
+import { createWebAccessCommands } from './tui/commands/web-access.ts'
 import { createSessionCommands } from './tui/commands/sessions.ts'
 
 
@@ -437,6 +440,10 @@ export interface TuiCommandRunner {  ctx: Context
    * send-time canonicalization against the HOST filesystem — never the
    * client's fs assumption. */
   readonly hostFile: HostFilePort
+  /** The Split-Client Web frontend control port (M5-W PR-C): `/web` reads and
+   * mutates the Host's official Web frontend through this ONE semantic surface
+   * and never reaches a Host service, Connection or Gateway directly. */
+  readonly webAccess: WebAccessPort
   /** Whether Host-shell completion facts are reachable on this backend
    * (shell amendment M3-4 PR3): true on Direct (the process IS the Host, so
    * the compgen bridge reads Host state); false on Remote — no shell carrier
@@ -975,6 +982,9 @@ export function registerTuiCommands(
   modelPresentation?: ModelPresentation,
   presetPresentation?: PresetPresentation,
   presentation?: TuiCommandPresentation,
+  /** M5-W PR-C: the mounted native `/web` presenter, if any (the SAME optional
+   *  parameter shape as the Model/Preset ones). */
+  webPresentation?: WebAccessPresentation,
 ): {
   /** Per-name registration failures (a Host-claimed name degraded loudly;
    *  later registrations still installed). */
@@ -1831,6 +1841,18 @@ export function registerTuiCommands(
     captureExtensionHealthRef,
   })
   settingsCommands.registerSettings()
+
+  // M5-W PR-C: the ONE Split-Client Web frontend control entry, immediately
+  // after Settings. It is sessionless/local (see domain/command/policy.ts) and
+  // takes ONE optional native TSP presenter; every read/write stays here.
+  createWebAccessCommands({
+    runner,
+    app: app as TuiApp | undefined,
+    notify,
+    registerOne,
+    ...(webPresentation === undefined ? {} : { webPresentation }),
+  }).registerWeb()
+
   settingsCommands.registerFooter()
   settingsCommands.registerDisplay()
   settingsCommands.registerFocus()

@@ -8,6 +8,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { unavailableWebAccess } from '../support/web-access-fake.ts'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { createClientCommandRegistry } from '../../src/app/command/client-command-registry.ts'
 import { parseCommand } from '@deepseek-ai/dsh-commands'
@@ -104,6 +105,7 @@ function stubRunner(
     ctx,
     app,
     deliveredFilesSnapshot: () => undefined,
+    webAccess: unavailableWebAccess(),
     diag,
     ...sessionScopeFacts(() => state.agent, () => options.generation?.() ?? 1, catalog.skills),
     // The scoped collision baseline must read the FAKE registry (which
@@ -1809,11 +1811,13 @@ test('the built-in command decomposition preserves the exact primary set and reg
   // command, registered immediately after its primary. `/status` is the
   // `/settings` alias (C5).
   const ALIASES = new Set(['quit', 'status', 'statusline', 'resume', 'subagents', 'image', 'rename'])
-  // The 29 built-in primaries, in their frozen registration order.
+  // The built-in primaries, in their frozen registration order. `/web` is the
+  // M5-W PR-C Split-Client control entry and registers immediately after
+  // Settings.
   assert.deepEqual(
     services.registered.filter(name => !ALIASES.has(name)),
     [
-      'exit', 'reload-client', 'settings', 'footer', 'display', 'focus', 'sessions', 'skill', 'reload', 'model',
+      'exit', 'reload-client', 'settings', 'web', 'footer', 'display', 'focus', 'sessions', 'skill', 'reload', 'model',
       'new', 'tasks', 'plugins', 'yolo', 'preset', 'search', 'title', 'copy', 'attach', 'view-image',
       'export', 'transcript', 'deliverables', 'fork', 'rewind', 'login', 'logout', 'help', 'keybindings',
     ],
@@ -1823,6 +1827,7 @@ test('the built-in command decomposition preserves the exact primary set and reg
     'exit', 'quit',
     'reload-client',
     'settings', 'status',
+    'web',
     'footer', 'statusline',
     'display', 'focus',
     'sessions', 'resume',

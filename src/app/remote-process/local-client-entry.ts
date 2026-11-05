@@ -824,6 +824,20 @@ interface PeerRemoteService {
   readonly piTuiWebAccess?: {
     getStatus(): Promise<PeerRemoteResult>
     setEnabled(enabled: boolean): Promise<PeerRemoteResult>
+    getAuthenticatedUrl(): Promise<PeerRemoteResult>
+  }
+  /**
+   * The official generated settings namespace. The qualification Peer uses it
+   * to read/write the profile-owned Web startup preference through the SAME
+   * revision-checked wire the Remote ConfigPort uses — never a local file edit.
+   */
+  readonly settings?: {
+    describe(): Promise<PeerRemoteResult>
+    mutate(
+      ns: string,
+      ops: readonly { readonly op: 'set'; readonly path: readonly string[]; readonly value: unknown }[],
+      expectedRevision?: number,
+    ): Promise<PeerRemoteResult>
   }
 }
 
@@ -1448,6 +1462,144 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
                     errorCode: result.error?.code,
                     ...(result.error?.message === undefined ? {} : { error: result.error.message.slice(0, 300) }),
                   }),
+              ...(request.requestId === undefined ? {} : { requestId: request.requestId }),
+            })
+            return false
+          }
+          if (request.op === 'qualification-web-autostart') {
+            // Qualification-only: read/write the profile-owned Web startup
+            // preference through the SAME official generated `settings` wire the
+            // Remote ConfigPort consumes. It never edits a profile file and never
+            // touches the current Host's Web rows.
+            const settings = remoteService?.settings
+            if (settings === undefined) throw new Error('local client entry: the qualification Peer has no settings namespace')
+            const preferenceOf = (value: unknown): { autoStart: boolean; revision: number; userOverridden: boolean } | undefined => {
+              const namespaces = (value as { readonly namespaces?: readonly {
+                readonly ns?: unknown
+                readonly value?: unknown
+                readonly user?: unknown
+                readonly revision?: unknown
+              }[] } | undefined)?.namespaces
+              const entry = namespaces?.find(candidate => candidate.ns === 'pi-tui-web-preferences')
+              if (entry === undefined) return undefined
+              const projected = entry.value as { readonly autoStart?: unknown } | undefined
+              if (typeof projected?.autoStart !== 'boolean' || typeof entry.revision !== 'number') return undefined
+              const user = entry.user as { readonly autoStart?: unknown } | undefined
+              return {
+                autoStart: projected.autoStart,
+                revision: entry.revision,
+                userOverridden: user?.autoStart !== undefined,
+              }
+            }
+            const before = await settings.describe()
+            const current = before.ok ? preferenceOf(before.value) : undefined
+            if (current === undefined) {
+              emit({
+                m4a0: 'qualification',
+                op: 'web-autostart',
+                processRole: 'client',
+                pid: process.pid,
+                ok: false,
+                errorCode: 'preference/unavailable',
+                ...(request.requestId === undefined ? {} : { requestId: request.requestId }),
+              })
+              return false
+            }
+            const requested = request.webAutoStart
+            if (requested === undefined) {
+              emit({
+                m4a0: 'qualification',
+                op: 'web-autostart',
+                processRole: 'client',
+                pid: process.pid,
+                action: 'read',
+                ...current,
+                ok: true,
+                ...(request.requestId === undefined ? {} : { requestId: request.requestId }),
+              })
+              return false
+            }
+            if (typeof requested !== 'boolean') throw new Error('local client entry: qualification-web-autostart requires a boolean webAutoStart')
+            const write = await settings.mutate(
+              'pi-tui-web-preferences',
+              [{ op: 'set', path: ['autoStart'], value: requested }],
+              current.revision,
+            )
+            const after = await settings.describe()
+            const settled = after.ok ? preferenceOf(after.value) : undefined
+            emit({
+              m4a0: 'qualification',
+              op: 'web-autostart',
+              processRole: 'client',
+              pid: process.pid,
+              action: 'write',
+              requested,
+              ok: write.ok && settled !== undefined,
+              ...(settled === undefined ? {} : settled),
+              readBack: settled?.autoStart === requested,
+              ...(write.ok
+                ? {}
+                : {
+                    errorCode: write.error?.code,
+                    ...(write.error?.message === undefined ? {} : { error: write.error.message.slice(0, 300) }),
+                  }),
+              ...(request.requestId === undefined ? {} : { requestId: request.requestId }),
+            })
+            return false
+          }
+          if (request.op === 'qualification-web-access-url') {
+            // Qualification-only: obtain the official authenticated launch URL and
+            // prove it can really be exchanged for a page. The URL and its launch
+            // token are NEVER emitted: only the protocol, the parameter SHAPE,
+            // the exchange status and the follow-up page status are recorded.
+            const webAccess = remoteService?.piTuiWebAccess
+            if (webAccess === undefined) throw new Error('local client entry: the qualification Peer has no piTuiWebAccess namespace')
+            const result = await webAccess.getAuthenticatedUrl()
+            if (!result.ok) {
+              emit({
+                m4a0: 'qualification',
+                op: 'web-access-url',
+                processRole: 'client',
+                pid: process.pid,
+                ok: false,
+                ...(result.error?.code === undefined ? {} : { errorCode: result.error.code }),
+                ...(result.error?.message === undefined ? {} : { error: result.error.message.slice(0, 300) }),
+                ...(request.requestId === undefined ? {} : { requestId: request.requestId }),
+              })
+              return false
+            }
+            const url = new URL((result.value as { readonly url: string }).url)
+            const exchange = await fetch(url, { redirect: 'manual' })
+            await exchange.body?.cancel()
+            const cookies = exchange.headers.getSetCookie()
+              .map(header => header.split(';')[0] ?? '')
+              .filter(pair => pair !== '')
+            const cookieHeader = cookies.join('; ')
+            let pageStatus: number | undefined
+            let pageBytes = 0
+            if (cookieHeader !== '') {
+              const page = await fetch(`${url.origin}/`, {
+                redirect: 'manual',
+                headers: { cookie: cookieHeader },
+              })
+              const body = await page.text()
+              pageStatus = page.status
+              pageBytes = body.length
+            }
+            emit({
+              m4a0: 'qualification',
+              op: 'web-access-url',
+              processRole: 'client',
+              pid: process.pid,
+              ok: true,
+              loopback: url.hostname === '127.0.0.1',
+              protocol: url.protocol,
+              pathname: url.pathname,
+              tokenParams: url.searchParams.getAll('token').length,
+              paramNames: [...url.searchParams.keys()],
+              exchangeStatus: exchange.status,
+              cookieNames: cookies.map(pair => pair.split('=')[0]),
+              ...(pageStatus === undefined ? {} : { pageStatus, pageBytes }),
               ...(request.requestId === undefined ? {} : { requestId: request.requestId }),
             })
             return false

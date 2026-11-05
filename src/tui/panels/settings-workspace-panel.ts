@@ -95,6 +95,7 @@ export type SettingsWorkspaceRowId =
   | 'notification-method'
   | 'terminal-progress'
   | 'visual-tools'
+  | 'web-autostart'
   | 'web-settings'
   | 'approval'
   | 'default-permission'
@@ -127,7 +128,7 @@ export type SettingsWorkspaceFreshness = 'runtime' | 'ready' | 'last-known' | 'u
  * setting stays behind its category's `existing settings editor` launcher.
  */
 export type SettingsWorkspaceWritableField =
-  | 'theme' | 'display-preset' | 'visual-tools'
+  | 'theme' | 'display-preset' | 'visual-tools' | 'web-autostart'
   | 'icon-style' | 'expand' | 'thinking'
   | 'progress-updates' | 'response-style'
   | 'busy-enter' | 'git-attribution'
@@ -729,6 +730,7 @@ function isWorkspaceRowId(id: string): id is SettingsWorkspaceRowId {
     || id === 'notification-method'
     || id === 'terminal-progress'
     || id === 'visual-tools'
+    || id === 'web-autostart'
     || id === 'web-settings'
     || id === 'approval'
     || id === 'default-permission'

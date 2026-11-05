@@ -93,6 +93,10 @@ test('one contribution registers every private service and publishes readiness l
     ctx.typert.local.get('piTuiWebAccess/setEnabled')?.id,
     '@xmoon76/dsh-pi-tui#piTuiWebAccess/setEnabled',
   )
+  assert.equal(
+    ctx.typert.local.get('piTuiWebAccess/getAuthenticatedUrl')?.id,
+    '@xmoon76/dsh-pi-tui#piTuiWebAccess/getAuthenticatedUrl',
+  )
   await ctx.fiber.dispose()
 })
 
@@ -120,6 +124,7 @@ test('disposing the ONE built-in fiber withdraws every service, the contribution
   assert.equal(ctx.typert.local.get('piTuiTerminalProgress/watch'), undefined)
   assert.equal(ctx.typert.local.get('piTuiWebAccess/getStatus'), undefined)
   assert.equal(ctx.typert.local.get('piTuiWebAccess/setEnabled'), undefined)
+  assert.equal(ctx.typert.local.get('piTuiWebAccess/getAuthenticatedUrl'), undefined)
   await ctx.fiber.dispose()
 })
 

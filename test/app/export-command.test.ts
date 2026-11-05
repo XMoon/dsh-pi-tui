@@ -11,6 +11,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { unavailableWebAccess } from '../support/web-access-fake.ts'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { createClientCommandRegistry } from '../../src/app/command/client-command-registry.ts'
 import { parseCommand } from '@deepseek-ai/dsh-commands'
@@ -57,6 +58,7 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
     ctx,
     app,
     deliveredFilesSnapshot: () => undefined,
+    webAccess: unavailableWebAccess(),
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
         ...sessionScopeFacts(() => state.agent, () => 1),
         get currentSessionId() { return state.agent?.session.id },
@@ -204,6 +206,10 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
       visualTools: {
         read: () => undefined,
         setEnabled: async (_enabled: boolean, _revision: number) => {},
+      },
+      webStartupPreference: {
+        read: () => undefined,
+        setAutoStart: async (_value: boolean, _revision: number) => {},
       },
     },
     hostFile: new DirectHostFilePort(() => undefined, null),

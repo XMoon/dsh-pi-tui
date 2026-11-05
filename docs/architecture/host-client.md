@@ -378,7 +378,7 @@ facts and keeps following the official HMR lifecycle, so this contract is
 scoped to the listed execution rows and does not claim that every Host plugin,
 service or setting survives an arbitrary reload.
 
-### Official Web frontend availability (Host-owned, default off)
+### Official Web frontend availability and the startup preference
 
 A Split Host owns the official Web frontend as a TOGGLEABLE Host capability, not
 as a boot mode. The Host-only overlay declares the 59 official Web-only Loader
@@ -390,9 +390,34 @@ contribution is the ONLY control surface: `getStatus()` and `setEnabled(enabled)
 flip `disabled` on exactly those 59 rows through the official `Entry.update` on
 the live Loader. The authority is therefore the Loader row plus the official
 `webApp`/`clientModules`/`terminalController` services, read on every query; there
-is no persisted `enabled` flag, no settings file, no profile patch write and no
-second listener, Host process or Web bundle. Activation is per Host lifetime:
-the next cold boot starts default-off.
+is no persisted `enabled` flag, no settings file, no profile patch write of the
+toggle and no second listener, Host process or Web bundle.
+
+The third method of the same namespace, `getAuthenticatedUrl()`, returns the
+official launch URL of THIS serving Host — `connection.authenticatedUrl(
+webServer.getOrigin() + '/')` — and answers only while the live status is
+`enabled`. The value carries the Host's official launch token, so it is produced
+only for an explicit user action (Open Browser / Copy Link), never stored in a
+status object, never logged and never attached to a diagnostic or a trace. There
+is no "short-lived URL", no Client-synthesized token, no cookie or pairing
+mechanism and no Session deep-link scheme: the page opens the official Web home
+and the user chooses a session inside it.
+
+Activation is per Host lifetime, and the NEXT cold boot is a PROFILE preference:
+the base-profile row `pi-tui-web-preferences` owns the durable boolean
+`autoStart`, written through the ordinary revision-checked Settings/ConfigEditor
+user patch and projected as the `/settings → Tools → Auto-enable Web on Host
+startup` row. Its schema default is OFF, it is independent of the running Host's
+Web state, and switching it never enables or disables a live Host. The Host-only
+entry consumes it after `runProfile()` + Loader settlement and BEFORE the
+readiness audit / Ready publication: `autoStart: true` calls the SAME
+`piTuiWebAccess.setEnabled(true)` and requires the reached `enabled` state; a
+failure is one bounded `web-autostart-unavailable` diagnostic (no URL, token or
+profile path) and the Host still publishes Ready with the Web state its own
+service truthfully reports. `autoStart: false` touches no Web row and keeps this
+default-off composition. A profile whose Loader does not project the
+`pi-tui-web-preferences` section is a corrupted composition and fails Host
+startup instead of being read as Off.
 
 Enable assembles the browser graph first (`modules`, `client-hmr`,
 `cordis-client-runner`, `terminal-controller`, then the presentation rows) and
@@ -408,12 +433,26 @@ closed reports `unavailable` instead of claiming success. `ui-deliverables` may
 legitimately remain PENDING on its `workspaceChanges` dependency; that pending
 optional Browser feature is not a Web failure.
 
+The Client-side `/web` menu is the ONE user entry and it holds no Web state of
+its own: it reads the Host status through the semantic WebAccessPort, performs
+each explicit action on the Host's own service, re-reads the authoritative state
+and presents what the Host really reached. The backend assembly is Direct =
+truthful unavailable (the Direct process owns no Web toggle) and Split Client =
+the private `piTuiWebAccess` namespace of the ONE mounted contribution; the
+same presentation contract feeds the default PiTui short menu and the
+experimental TSP native picker. Disabling from `/web` is the same frontend
+serving switch described below: it never revokes a Browser cookie, an existing
+Browser page, a Bearer token or a live Browser WebSocket. The listener stays
+`127.0.0.1`-only, and the first release formally supports only the trusted
+same-machine user (no LAN, public proxy or SSH tunnel guarantee).
+
 This is a frontend SERVING switch, not an authorization boundary. It makes no
 promise about an already-loaded browser page, an existing Browser cookie or a
 live Browser WebSocket, and it must never be described as revoking Browser
 access, blocking Browser operations or logging Web out. Sessions, Agent
 ownership, Host identity, TUI transport generation and DSH data formats are
-invariant across a toggle.
+invariant across a toggle; the `autoStart` preference is likewise a next-launch
+configuration fact, never a second runtime authority.
 
 `performance-host` remains an independent Host projection row, and
 `visual-tools` remains an independent Loader row; neither is absorbed into the

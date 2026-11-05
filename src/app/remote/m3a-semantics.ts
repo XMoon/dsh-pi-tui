@@ -50,6 +50,7 @@ import type { RemotePluginManagerSource } from '../../runtime/remote/plugin-mana
 import { RemotePluginManagerPort } from '../../runtime/remote/plugin-manager-remote.ts'
 import { RemoteDeliveredFileReadPort } from '../../runtime/remote/deliverables-remote.ts'
 import type { RemoteWorkspaceFilesNamespace } from '../../runtime/remote/deliverables-remote.ts'
+import type { RemoteWebAccessNamespace } from '../../runtime/remote/web-access-remote.ts'
 import type { RemoteJobObservationSource } from '../../runtime/remote/job-observation-remote.ts'
 import { RemoteJobObservationPort } from '../../runtime/remote/job-observation-remote.ts'
 import type { PluginManagerPort } from '../../runtime/plugin-manager-port.ts'
@@ -142,6 +143,10 @@ export interface RemoteM3ARuntimeSource {
      *  `@` source. The official `fileReferences` namespace stays mounted but is
      *  consumed only by the Host-side bare-query delegation. */
     readonly piTuiFileReferences: RemotePiTuiFileReferenceRemotes
+    /** The PRIVATE `piTuiWebAccess` namespace (M5-W PR-C): the Split-Client
+     *  Web frontend control (`/web`). The SAME mounted contribution publishes
+     *  it; `/web` is its only consumer. */
+    readonly piTuiWebAccess: RemoteWebAccessNamespace
     readonly commands: RemoteCommandsSource
     readonly subagents: RemoteSubagentSource
     /** The rc.2 generated `userQuestions` namespace + the forwarded

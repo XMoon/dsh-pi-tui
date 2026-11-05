@@ -521,6 +521,16 @@ async function openOtherRows(h: Harness): Promise<void> {
   await key(h, ENTER)
 }
 
+/** Move the Tools rows cursor onto the Web launcher row (label-driven, so a new
+ *  neighbouring row can never silently shift this navigation again). */
+async function highlightWebRow(h: Harness): Promise<void> {
+  for (let step = 0; step < 6; step += 1) {
+    if (/> Web Search \/ Fetch/u.test(h.view())) return
+    await key(h, DOWN)
+  }
+  assert.fail(`the Web launcher row never owned the selection:\n${h.view()}`)
+}
+
 /** Wait for the page's SETTLED facts (the mount triggers a fresh Host read). */
 async function settleWebPage(h: Harness): Promise<string> {
   return settlePainted(h, 'the Web page to paint its settled facts', frame =>
@@ -531,7 +541,9 @@ async function settleWebPage(h: Harness): Promise<string> {
  *  for its settled authority facts. */
 async function openWebPage(h: Harness): Promise<string> {
   await openOtherRows(h)
-  await key(h, DOWN)
+  // Walk the Tools rows until the Web launcher really owns the selection: the
+  // M5-W PR-C preference row sits between Visual tools and it.
+  await highlightWebRow(h)
   await key(h, ENTER)
   return settleWebPage(h)
 }
@@ -570,7 +582,7 @@ test('the workspace row reports the configured providers and opens the Web page 
   assert.match(h.view(), /Web Search \/ Fetch/u)
   // The launcher's own Detail carries the authoritative summary plus the
   // billing/credential/entry facts (the narrow row column only shows a prefix).
-  await key(h, DOWN)
+  await highlightWebRow(h)
   const rowView = h.view()
   const compactRow = (): string => rowView.replace(/[\u2500-\u257f│]/gu, ' ').replace(/\s+/gu, ' ')
   assert.match(rowView, /Search: Messages · Fetch: HTTP/u, 'the launcher shows the authoritative provider summary')
@@ -747,7 +759,7 @@ test('the page deeplink is reachable and Esc cancels without a write', async t =
   await key(h, ESC) // list -> Tools rows
   // The root keeps the row's Detail focus, exactly like the allowlist picker
   // return: the Tools rows are painted again with the Web row selected.
-  assert.match(h.view(), /Rows \(2\)/u, 'Esc from the list returns to the Tools rows')
+  assert.match(h.view(), /Rows \(3\)/u, 'Esc from the list returns to the Tools rows')
   assert.match(h.view(), /Configure Web…/u, 'the Web row owns the frame again')
   assert.deepEqual(h.writes, [], 'the whole cancel path wrote nothing')
 })
@@ -858,7 +870,7 @@ test('an unreadable authority after a successful read drops to Unavailable, neve
   await openOtherRows(h)
   assert.match(h.view(), /Unavailable/u, 'the launcher states the failure')
   assert.doesNotMatch(h.view(), /Search: Messages/u, 'the old summary never survives as current')
-  await key(h, DOWN)
+  await highlightWebRow(h)
   await key(h, ENTER)
   const page = await settlePainted(h, 'the page to paint the failed read', frame =>
     frame.includes('Web Search Provider') && !frame.includes('Loading…'))
@@ -902,7 +914,7 @@ test('a workspace opened while the authority is pending paints Loading…, never
 
   // Entering the page starts its OWN fresh read, which is held too: the page's
   // first frames state Loading… instead of a last-known value.
-  await key(h, DOWN)
+  await highlightWebRow(h)
   await key(h, ENTER)
   const pendingPage = h.view()
   assert.match(pendingPage, /Web Search Provider/u)

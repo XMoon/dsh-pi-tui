@@ -1114,6 +1114,39 @@ test('the official Web composition qualification is discoverable and never fakes
   assert.match(source, /- id: workspace-controller\\n  config:\\n    documentsDirectory: '\$\{documentsDirectory\}'/u)
 })
 
+test('the Web startup preference lane drives the real Client settings/URL ops, never a Host shortcut', () => {
+  const source = readFileSync(SCRIPT, 'utf8')
+  const start = source.indexOf('const qualifyWebAutostart = async () => {')
+  // The lane is the T74 FUNCTION: it is defined before T73 and invoked later, so
+  // the boundary is the next function, never the invocation line.
+  const end = source.indexOf('const qualifyWebRuntimeToggle = async () => {')
+  assert.ok(start > 0 && end > start, 'the t74 lane must stay one bounded function')
+  const lane = source.slice(start, end)
+  // The preference is written through the REAL generated settings wire and the
+  // launch URL through the private Client namespace: never a profile file edit,
+  // never a Host loader call.
+  assert.match(lane, /op: 'qualification-web-autostart'/u)
+  assert.match(lane, /op: 'qualification-web-access-url'/u)
+  assert.doesNotMatch(lane, /piTuiWebAccess\.(getStatus|setEnabled|getAuthenticatedUrl)\(/u,
+    'the smoke may only reach the Web control through the authenticated Remote calls')
+  assert.doesNotMatch(lane, /writeFileSync\([^)]*cordis\.patch\.yml|profileDir/u,
+    'the preference must be persisted by the official settings write, never by the smoke')
+  assert.doesNotMatch(lane, /registerFallback|loader\.resolve|Entry\.update/u,
+    'the smoke must not drive the Loader directly')
+  // The verdict traces the inventory reports.
+  for (const marker of [
+    't74-web-preference-saved',
+    't74-web-tui-enable',
+    't74-web-authenticated-url',
+    't74-web-autostart-next-boot-off',
+    't74-web-autostart',
+  ]) {
+    assert.match(lane, new RegExp(`trace\\('${marker}'`, 'u'), `the t74 lane must trace ${marker}`)
+  }
+  // The URL and its token are never emitted: only the exchange/page verdicts.
+  assert.doesNotMatch(lane, /url:\s*url|token:\s*[a-z]/u)
+})
+
 test('the Web runtime toggle lane drives the private Peer control, never a Host shortcut', () => {
   const source = readFileSync(SCRIPT, 'utf8')
   const start = source.indexOf('const qualifyWebRuntimeToggle = async () => {')

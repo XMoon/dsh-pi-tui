@@ -76,6 +76,8 @@ import type {
   VisualToolsState,
   WebProviderConfig,
   WebProviderSettings,
+  WebStartupPreferenceConfig,
+  WebStartupPreferenceState,
   ConfigReadiness,
 } from '../config-port.ts'
 import {
@@ -168,6 +170,7 @@ export class DirectConfigPort implements ConfigPort {
   readonly subagentModelSelection: SubagentModelSelectionConfig
   readonly web: WebProviderConfig
   readonly visualTools: VisualToolsConfig
+  readonly webStartupPreference: WebStartupPreferenceConfig
 
   constructor(
     ctx: HostContextLike,
@@ -186,6 +189,7 @@ export class DirectConfigPort implements ConfigPort {
     this.subagentModelSelection = new DirectSubagentModelSelectionConfig(ctx)
     this.web = new DirectWebProviderConfig(ctx)
     this.visualTools = new DirectVisualToolsConfig(ctx)
+    this.webStartupPreference = new DirectWebStartupPreferenceConfig(ctx)
   }
 }
 
@@ -1868,6 +1872,66 @@ class DirectVisualToolsConfig implements VisualToolsConfig {
     // overwrite.
     await mutateSettings(settings, VISUAL_TOOLS_NS, [
       { op: 'set', path: ['enabled'], value: enabled },
+    ], expectedRevision)
+  }
+}
+
+/** The official profile entry id of the Host row that owns the Web startup
+ *  preference (its Loader row id is also its Settings namespace). */
+const WEB_STARTUP_PREFERENCE_NS = 'pi-tui-web-preferences'
+
+/**
+ * The Direct Web startup preference: the `pi-tui-web-preferences` form
+ * section's effective `autoStart` value. The write is a revision-checked path
+ * mutation of the exact `autoStart` field — never a whole-section replace, so
+ * an unrelated or unknown field is never pinned into the USER layer.
+ *
+ * It deliberately does NOT read or touch the private `piTuiWebAccess` service:
+ * the preference is the NEXT Host launch's behavior, and the current Host's
+ * Web state stays that service's sole authority.
+ */
+class DirectWebStartupPreferenceConfig implements WebStartupPreferenceConfig {
+  private readonly ctx: HostContextLike
+
+  constructor(ctx: HostContextLike) {
+    this.ctx = ctx
+  }
+
+  read(): WebStartupPreferenceState | undefined {
+    const settings = this.ctx.get('settings') as SettingsServiceLike | undefined
+    const descriptor = readSettingsDescriptor(settings, WEB_STARTUP_PREFERENCE_NS)
+    if (descriptor === undefined) return undefined
+    const value = formValueOf(descriptor)
+    const autoStart = value?.autoStart
+    // A missing or non-boolean effective value is NOT the schema default:
+    // report the section as unreadable instead of inventing `false`.
+    if (typeof autoStart !== 'boolean') return undefined
+    const revision = descriptor.revision
+    // Without the read revision the decision cannot be submitted conditionally;
+    // report the section unreadable rather than allowing a silent overwrite.
+    if (typeof revision !== 'number') return undefined
+    const user = descriptor.user
+    const userSection = typeof user === 'object' && user !== null && !Array.isArray(user)
+      ? user as Record<string, unknown>
+      : undefined
+    return {
+      autoStart,
+      revision,
+      userOverridden: userSection?.autoStart !== undefined,
+    }
+  }
+
+  async setAutoStart(value: boolean, expectedRevision: number): Promise<void> {
+    const settings = this.ctx.get('settings') as SettingsServiceLike | undefined
+    if (settings === undefined) throw new Error('the Host settings service is unavailable')
+    if (readSettingsDescriptor(settings, WEB_STARTUP_PREFERENCE_NS) === undefined) {
+      throw new Error(`the "pi-tui-web-preferences" Host settings section is not mounted`)
+    }
+    // Submit the revision the USER's decision was read at — never a revision
+    // observed at write time, which would turn an external edit into a silent
+    // overwrite.
+    await mutateSettings(settings, WEB_STARTUP_PREFERENCE_NS, [
+      { op: 'set', path: ['autoStart'], value },
     ], expectedRevision)
   }
 }
