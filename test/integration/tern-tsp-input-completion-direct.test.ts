@@ -80,6 +80,7 @@ const ENTER = '\r'
 const ESCAPE = '\u001b'
 const BACKSPACE = '\x7f'
 const RIGHT = '\u001b[C'
+const LEFT = '\u001b[D'
 const END = '\u001b[F'
 /** Shift+Enter is the Composer’s own newline gesture (I-D needs a real multi-line
  *  draft); the SDK decodes this exact CSI-u sequence into `enter` + `shift`. */
@@ -270,15 +271,6 @@ async function settle(fixture: DirectTspFixture, label: string, predicate: () =>
     if (Date.now() > deadline) throw new Error(`timed out waiting for ${label} (${wireState(fixture)})`)
     await new Promise(resolve => setTimeout(resolve, 25))
   }
-}
-
-/** Poll a renderer fact for a bounded number of frame cycles without failing. */
-async function waitsFor(predicate: () => boolean, attempts = 80): Promise<boolean> {
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
-    if (predicate()) return true
-    await new Promise(resolve => setTimeout(resolve, 25))
-  }
-  return predicate()
 }
 
 /** Wait until the composer physically accepts a printable probe, then erase it. A key
@@ -1389,6 +1381,76 @@ test('a body inline `/attach` of a generic file probes it, stages it in the real
     assert.equal(wire.includes('[file #'), false, 'the file placeholder was expanded, never sent as text')
     assert.equal(wire.includes(file), false, 'the Client-local absolute path never reached the Host content')
     assert.equal(wire.includes('看一下'), true, 'the prose beside the placeholder travelled into the message')
+  } finally {
+    recorder.detach()
+    stores.detach()
+    // reason: fixture.settle() awaits ownership cleanup, not a timer (receiver-blind guard).
+    await fixture.settle()
+  }
+})
+
+/**
+ * I-D #541 on the REAL wire: this Composer inserts a bracketed paste verbatim, so a
+ * Windows-clipboard CRLF pair really does land inside the draft (the vendored editor
+ * normalizes a CR away; this renderer does not). The line break ends the path token,
+ * so the accept completes the name on ITS OWN line, stages once through the real
+ * Client-local intake, and never rewrites the line after the break.
+ */
+test('a pasted CRLF that ends the path’s own line still completes the inline file there, stages once through the real intake and leaves line 2 byte-for-byte', async (t) => {
+  const life = testLifecycle(t)
+  const fixture = await createDirectTspFixture(life, { deltas: ['ID-CRLF'], composerActions: true, nativeImages: true })
+  const stores = watchDraftStores()
+  const recorder = fixture.recordPrompts(() => {})
+  const paste = (body: string): void => { fixture.pane.input.type(`${PASTE_START}${body}${PASTE_END}`) }
+  try {
+    await waitForInputDelivery(fixture.pane)
+    const shots = join(fixture.workRoot, 'shots')
+    mkdirSync(shots, { recursive: true })
+    const png = await realPng()
+    const image = join(shots, 'crash-shot.png')
+    writeFileSync(image, png)
+    const typed = `看一下 /image ${shots}/cras`
+
+    await prepareDraft(fixture, typed)
+    // ONE real terminal bracketed paste of a CRLF pair plus prose: the pair is draft
+    // CONTENT here, both bytes kept, and it is what ends the token the user typed.
+    paste('\r\nsecond line')
+    await settle(fixture, 'the pasted CRLF pair inside the draft', () =>
+      composerText(fixture) === `${typed}\r\nsecond line`)
+    assert.equal(composerText(fixture).includes('\r\n'), true, 'the real paste kept both bytes of the pair')
+
+    // The caret sits after the pasted prose; the walk back is line 2 PLUS the one
+    // `\r\n` cluster, which lands it at the end of the path token on line 1.
+    fixture.pane.input.type(LEFT.repeat('second line'.length + 1))
+    await settle(fixture, 'the caret parked on line 1 after the token', () => composerCursor(fixture) === typed.length)
+
+    // One real character completes the token IN THE MIDDLE of the document: the
+    // caret stays before the pasted break, which is exactly the shape the grammar
+    // has to get right.
+    fixture.pane.input.type('h')
+    const crashed = `看一下 /image ${shots}/crash\r\nsecond line`
+    await settle(fixture, 'the character appended to the token', () =>
+      composerText(fixture) === crashed && composerCursor(fixture) === crashed.indexOf('\r'))
+    await settle(fixture, 'the real file row on the CRLF line', () => rowTexts(fixture).includes(image))
+    pressEnter(fixture)
+    // The accepted path text is TRANSIENT once the real read lands, so the durable
+    // proof of "completed on its own line, then staged" is the FINAL document: the
+    // acceptance's document with ONLY its own fragment replaced.
+    await waitFor('the real intake to stage the file from the CRLF line', () => stores.imageAdds.length === 1, 25_000)
+    assert.equal(stores.readEntries(), 1, 'the intake entered the real read exactly once for this one accept')
+    const placeholder = lastPlaceholder(stores.imageAdds)
+    assert.equal(stores.imageEntries(), 1, 'the production draft image store holds exactly the one staged entry')
+    await settle(fixture, 'the placeholder to splice into line 1', () =>
+      composerText(fixture) === `看一下 ${placeholder} \r\nsecond line`)
+    assert.equal(composerCursor(fixture), '看一下 '.length + placeholder.length,
+      'the caret landed right after the placeholder, before the surviving separator')
+    assert.equal(composerLine(fixture, 1), 'second line',
+      'the in-place splice left the CRLF cluster and line 2 byte-for-byte')
+    assert.equal(composerText(fixture).includes(image), false, 'the raw client path is gone from the draft')
+    await waitFor('the real intake notice to reach the dock', () => successNotices(fixture).length === 1, 8_000)
+    assert.deepEqual(successNotices(fixture), [`attached ${placeholder} — Enter to send`],
+      'exactly ONE success announcement for the one commit')
+    assert.equal(recorder.calls(), 0, 'the accept never submitted the multi-line draft')
   } finally {
     recorder.detach()
     stores.detach()

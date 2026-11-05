@@ -1174,27 +1174,67 @@ test('an inline path DIRECTORY continues the listing while a FILE commits one ac
   assert.equal(stake.current(), false, 'a committed edit retires the old intake stake')
 })
 
-test('an inline path whose token is followed by a CRLF pair refuses the accept instead of splitting the pair, and stages nothing', async (t) => {
+test('an inline path on a CRLF-terminated line completes on its OWN line, stages exactly once, and leaves the pair and line 2 byte-for-byte', async (t) => {
   const m = await mountSlashPane(t, {
     chrome: true,
     localCwd: localWorkspace(t, ['notes.txt']),
   })
   const staged = captureStager(m)
-  // The attachment grammar owns the token boundary and its unquoted word stops
-  // only at a space/tab, so the CR of a CRLF pair is read as token content: the
-  // provider's replacement would drop it. The Composer's CRLF-cluster guard then
-  // REFUSES the write (it never re-derives a second lexer), and a refused accept
-  // writes nothing, stages nothing and is still consumed.
+  // The attachment grammar ends the token AT the line break, so the seat window
+  // stops before the CR: this accept is an ordinary same-line replacement and the
+  // CRLF cluster is never part of what it writes (the Composer guard against a
+  // break-carrying fragment stays as the backstop, witnessed in the editor suite).
   await m.type('看一下 /image note\r\nsecond line')
-  await m.caretLeft('second line'.length + 1)
+  // `\r\n` is ONE grapheme cluster, so the walk back from the document end is
+  // line 2 plus that single cluster.
+  await m.caretLeft('second line'.length + 1, '看一下 /image note'.length)
   await m.key('s')
-  await waitUntil('the first-line CRLF file row painted', () => m.rows().length > 0)
+  await waitUntil('the first-line CRLF file row painted', () => m.rows().map(node => m.rowText(node)).includes('›notes.txt'))
   await m.key(ENTER)
-  const preserved = '看一下 /image notes\r\nsecond line'
-  assert.deepEqual(m.editor(), { text: preserved, cursor: '看一下 /image notes'.length },
-    'a first-line accept whose replacement would split the CRLF pair is refused: the pair and line 2 survive byte-for-byte')
-  assert.equal(staged.length, 0, 'a refused CRLF write never reaches the stager')
-  assert.deepEqual(m.calls.submits, [], 'and the refused accept was consumed, not submitted')
+  const accepted = '看一下 /image notes.txt \r\nsecond line'
+  const acceptedCursor = '看一下 /image notes.txt'.length
+  assert.deepEqual(m.editor(), { text: accepted, cursor: acceptedCursor },
+    'the name completes on its own line: the CRLF pair and line 2 survive byte-for-byte')
+  assert.equal(staged.length, 1, 'the CRLF-line file acceptance reached the stager exactly once')
+  const { stake, wire } = staged[0]!
+  assert.equal(stake.command, 'image')
+  assert.equal(stake.path, 'notes.txt', 'the intake read the path the user chose')
+  assert.equal(stake.rawDraft, accepted)
+  assert.deepEqual(wire, { text: accepted, cursor: acceptedCursor },
+    'the stager observed the SAME committed document and caret')
+  assert.deepEqual(stake.span, { line: 0, start: 4, end: acceptedCursor },
+    'the raw fragment stays inside line 1')
+  assert.equal(accepted.slice(stake.span.start, stake.span.end).includes('\r'), false,
+    'the fragment the placeholder replaces carries none of the break')
+  assert.deepEqual(m.calls.submits, [], 'the accept is never a submission')
+  const placeholder = '[image #1 (notes.txt)]'
+  assert.equal(stake.commit(placeholder), true, 'the placeholder commits on a CRLF-terminated line')
+  const afterText = `看一下 ${placeholder} \r\nsecond line`
+  assert.deepEqual(m.editor(), { text: afterText, cursor: 4 + placeholder.length },
+    'the splice replaced ONLY the fragment: the break, line 2 and the separator survive')
+  assert.equal(stake.current(), false, 'a committed edit retires the old intake stake')
+})
+
+test('an OPEN quoted inline path on a CRLF line closes on its own line and leaves line 2 verbatim', async (t) => {
+  const m = await mountSlashPane(t, {
+    chrome: true,
+    localCwd: localWorkspace(t, ['my file.png']),
+  })
+  const staged = captureStager(m)
+  // The quoted branch has the same boundary: an open quote never reaches across a
+  // line for its partner, so the user's own `"` on line 2 is prose that survives.
+  await m.type('look /image "m\r\nsecond"')
+  await m.caretLeft('second"'.length + 1, 'look /image "m'.length)
+  await m.key('y')
+  await waitUntil('the quoted CRLF row painted', () => m.rows().map(node => m.rowText(node)).includes('›my file.png'))
+  await m.key(ENTER)
+  const accepted = 'look /image "my file.png" \r\nsecond"'
+  assert.deepEqual(m.editor(), { text: accepted, cursor: 'look /image "my file.png"'.length },
+    'the quoted name closes on its own line and line 2 keeps its stray quote verbatim')
+  assert.equal(staged.length, 1, 'the quoted CRLF acceptance staged exactly once')
+  assert.equal(staged[0]!.stake.path, 'my file.png', 'the intake received the unquoted path')
+  assert.deepEqual(staged[0]!.stake.span, { line: 0, start: 5, end: 'look /image "my file.png"'.length },
+    'the fragment stops before the break')
 })
 
 test('a multi-line CRLF document keeps the first line, CRLF pair and emoji around a second-line inline file acceptance', async (t) => {
@@ -1227,6 +1267,29 @@ test('a multi-line CRLF document keeps the first line, CRLF pair and emoji aroun
   const afterText = `🖼️ first\r\n看一下 ${placeholder} `
   assert.deepEqual(m.editor(), { text: afterText, cursor: afterText.length - 1 },
     'the placeholder splice preserved the emoji, the CRLF pair and line 1 byte-for-byte')
+})
+
+test('a U+3000-led remainder at a mid-token caret is consumed once on the real seat, never duplicated', async (t) => {
+  const m = await mountSlashPane(t, {
+    chrome: true,
+    localCwd: localWorkspace(t, ['全角　名.png', 'ascii.png']),
+  })
+  const staged = captureStager(m)
+  // The caret sits INSIDE the name, so the whole `　名.png` tail is the token's own
+  // remainder: U+3000 is filename content, and a whitespace-class boundary would
+  // stop there and re-emit the tail after the accepted value.
+  await m.type('look /image 全角　名.png')
+  await m.caretLeft('　名.png'.length, 'look /image 全角'.length)
+  // A caret-only move never re-queries: Tab is this seat's own open gesture at a
+  // closed list, so the query is asked at the mid-token caret the way a user asks it.
+  await m.key(TAB)
+  await waitUntil('the U+3000 row painted at the mid-token caret', () => m.rows().map(node => m.rowText(node)).includes('›全角　名.png'))
+  await m.key(ENTER)
+  const accepted = 'look /image 全角　名.png '
+  assert.deepEqual(m.editor(), { text: accepted, cursor: 'look /image 全角　名.png'.length },
+    'the name is written ONCE with no duplicated full-width tail')
+  assert.equal(staged.length, 1, 'the mid-token U+3000 acceptance staged exactly once')
+  assert.equal(staged[0]!.stake.path, '全角　名.png', 'the intake received the whole name including U+3000')
 })
 
 test('a caret parked away from the live token makes a FILE acceptance stale: the write is refused, no stager call, and the editable path survives', async (t) => {
@@ -1653,23 +1716,24 @@ test('a refused accept and every non-completion key over an OPEN non-slash popup
     return m.frameCount()
   }
 
-  // The composer-refused write (the CRLF-guarded inline path): the seat still
+  // The no-write accept (the inline path seat whose argument ALREADY is the
+  // highlighted row, with the user's own separator after it): the seat still
   // owes the ONE frame that takes the still-visible list off the wire.
-  await m.type('看一下 /image note\r\nsecond line')
-  await m.caretLeft('second line'.length + 1)
-  await m.key('s')
-  await waitUntil('the CRLF file row painted', () => m.rows().length > 0)
+  await m.type('看一下 /image notes.txt ')
+  await m.caretLeft(1, '看一下 /image notes.txt'.length)
+  await m.key(TAB)
+  await waitUntil('the already-complete file row painted', () => m.rows().map(node => m.rowText(node)).includes('›notes.txt'))
   const refusedBefore = m.frameCount()
   await m.key(ENTER)
-  await waitUntil('the refused accept dismissed its list',
+  await waitUntil('the no-write accept dismissed its list',
     () => m.frameCount() > refusedBefore && m.rowsThrough(m.frameCount()).length === 0)
   assert.equal(m.frameCount() - refusedBefore, 1,
-    'a refused write owes exactly one dismissal frame, so the next Escape is not left facing a painted list')
+    'a write that lands nothing owes exactly one dismissal frame, so the next Escape is not left facing a painted list')
   // reason: bounded absence window — the claim is that NO second frame follows a
   // refused accept; there is no further event to wait for.
   await new Promise(resolve => setTimeout(resolve, ABSENCE_WINDOW_MS))
   assert.equal(m.frameCount() - refusedBefore, 1, 'and the refusal produced no further render')
-  assert.deepEqual(m.editor(), { text: '看一下 /image notes\r\nsecond line', cursor: '看一下 /image notes'.length },
+  assert.deepEqual(m.editor(), { text: '看一下 /image notes.txt ', cursor: '看一下 /image notes.txt'.length },
     'the refused accept wrote nothing')
   assert.equal(staged.length, 0, 'and staged nothing')
 
