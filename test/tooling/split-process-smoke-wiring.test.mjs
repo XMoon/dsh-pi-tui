@@ -68,16 +68,18 @@ test('the split-process smoke is a package script and a release-tag-only CI job'
   const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
   assert.equal(pkg.scripts?.['smoke:split-process'], 'node scripts/split-process-smoke.mjs')
   const ci = readFileSync(join(ROOT, '.github', 'workflows', 'ci.yml'), 'utf8')
-  assert.match(ci, /pnpm smoke:split-process -- "\$CANDIDATE"/u)
 
-  // Parse the two jobs rather than only matching prose: the split-process job
-  // must own the npm release-tag gate, and `qualify` must explicitly record
-  // the source-mode skip for both npm-only surfaces. A text-only assertion
-  // could keep passing while the job-level gate or the source record was
-  // dropped.
+  // Parse the two jobs rather than matching raw text: the split-process job
+  // must own the npm release-tag gate AND execute the real lane against the
+  // downloaded candidate, and `qualify` must explicitly record the source-mode
+  // skip for both npm-only surfaces. A text-only assertion could keep passing
+  // while the run step was removed or the job-level gate was dropped.
   const workflow = parseYaml(ci)
   const job = workflow.jobs['split-process']
   assert.ok(job, 'the split-process smoke must be its own CI job')
+  const splitRun = job.steps?.find(step => typeof step.run === 'string'
+    && step.run.includes('pnpm smoke:split-process -- "$CANDIDATE"'))
+  assert.ok(splitRun, 'the split-process job must execute the real lane against the downloaded candidate')
   assert.match(job.if, /startsWith\(github\.ref, 'refs\/tags\/'\)/u,
     'the split-process job must only run on a release tag; an ordinary PR skips it')
   assert.match(job.if, /outputs\.mode == 'npm'/u, 'the split-process job must only run in npm mode')
@@ -296,22 +298,29 @@ test('listing selectable split cases does not install a profile or claim complet
   assert.equal(result.status, 0, `--list must exit 0: ${result.stderr}`)
   // The listing prints the REGISTRY order — the same order a suite and the full
   // lane execute — so a sorted display can never show an order no run performs.
+  // The stable IDs, suites and order are the independent oracle; the readable
+  // title is owned by the registry and must be echoed verbatim, so a legitimate
+  // title rewording does not fail this wiring check.
+  const expected = [
+    ['bootstrap', 'bootstrap.host-runtime-disabled'],
+    ['bootstrap', 'bootstrap.entry-admission'],
+    ['bootstrap', 'bootstrap.runtime-artifact-recovery'],
+    ['transport', 'transport.authenticated-lifecycle'],
+    ['surface', 'surface.pty-session-write-recovery'],
+    ['multi-client', 'multi-client.shared-session-interactions'],
+    ['navigation', 'navigation.non-destructive-client-lifecycle'],
+    ['recovery', 'recovery.detached-turn-interactions'],
+    ['recovery', 'recovery.client-hmr-signals'],
+    ['recovery', 'recovery.unknown-write-host-death'],
+    ['web', 'web.official-composition'],
+    ['web', 'web.runtime-toggle'],
+    ['web', 'web.startup-preference'],
+    ['web', 'web.product-browser-tui'],
+  ]
+  const titles = new Map(listSelectableCases().map(entry => [entry.id, entry.title]))
   assert.deepEqual(result.stdout.trimEnd().split('\n'), [
     'SPLIT_PROCESS_SELECTABLE_CASES scope=SELECTABLE_ONLY',
-    'suite=bootstrap case=bootstrap.host-runtime-disabled title=a disabled Host Runtime owner refuses Ready without publishing a Host identity',
-    'suite=bootstrap case=bootstrap.entry-admission title=an inherited Host role without a mounted TUI surface is refused before Host admission',
-    'suite=bootstrap case=bootstrap.runtime-artifact-recovery title=a renamed-away Host Runtime artifact fails closed and the restored artifact reaches authenticated Ready',
-    'suite=transport case=transport.authenticated-lifecycle title=concurrent Host launches elect one authenticated owner whose Client lifecycle survives exits and signals',
-    'suite=surface case=surface.pty-session-write-recovery title=one authenticated Host drives real PTY surfaces through Session writes, recovery and stale-generation fences',
-    'suite=multi-client case=multi-client.shared-session-interactions title=two real Clients retain one Session and settle one Host Question or Approval exactly once',
-    'suite=navigation case=navigation.non-destructive-client-lifecycle title=leaving a Session from one Client never stops the Host Turn another Client keeps reading',
-    'suite=recovery case=recovery.detached-turn-interactions title=an accepted Turn, Tool, Job, Child and pending interaction survive the Client that started them',
-    'suite=recovery case=recovery.client-hmr-signals title=Client-only HMR, real PTY signals and Host kill keep the official disposition taxonomy',
-    'suite=recovery case=recovery.unknown-write-host-death title=an ACK-dropped write survives Host death as one durable write and no fabricated answer',
-    'suite=web case=web.official-composition title=the official Web composition stays default-off and a real Browser plus real TUI share one authenticated Host',
-    'suite=web case=web.runtime-toggle title=one live Host toggles the official Web runtime on and off without unloading the real TUI',
-    'suite=web case=web.startup-preference title=the profile-owned Web startup preference applies on the next cold Host through the real settings wire',
-    'suite=web case=web.product-browser-tui title=the product Browser and real TUI share one Host across the 22-case WP matrix',
+    ...expected.map(([suite, id]) => `suite=${suite} case=${id} title=${titles.get(id)}`),
   ], 'the listing must follow the registry execution order')
   // A listing never becomes a full PASS and never creates a scene.
   for (const forbidden of ['SPLIT_PROCESS_SMOKE_PASS', 'T60 PASS', 'PASS_REAL_SPLIT_PROCESS',
