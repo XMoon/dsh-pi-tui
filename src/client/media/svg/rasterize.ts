@@ -19,6 +19,7 @@
 import { spawn } from 'node:child_process'
 import { admitSvg } from '../../../domain/visual/svg-admission.ts'
 import { createRequire } from 'node:module'
+import { performance } from 'node:perf_hooks'
 import {
   SVG_MAX_PNG_BYTES,
   SVG_MAX_RASTER_PIXELS,
@@ -53,9 +54,15 @@ const POSIX_MEMORY_CAP_KB = 4 * 1024 * 1024
  */
 const WORKER_SOURCE = `
 import { pathToFileURL } from 'node:url'
+// DIAGNOSTIC: one bounded 'rp <phase>=<ms since child start>' line per milestone,
+// so a tripped parent bound names the child boundary that never reported
+// (nothing at all means the request never reached this process). Numbers only.
+const rpStart = performance.now()
+const rp = (phase) => process.stderr.write('rp ' + phase + '=' + Math.round(performance.now() - rpStart) + '\\n')
 const chunks = []
 process.stdin.on('data', chunk => chunks.push(chunk))
 process.stdin.on('end', async () => {
+  rp('request')
   let input
   try {
     input = JSON.parse(Buffer.concat(chunks).toString('utf8'))
@@ -65,6 +72,7 @@ process.stdin.on('end', async () => {
   }
   try {
     const module = await import(pathToFileURL(input.modulePath).href)
+    rp('import')
     const Resvg = module.Resvg ?? (module.default && module.default.Resvg)
     if (typeof Resvg !== 'function') throw new Error('resvg module has no Resvg export')
     // The parent sends the EXACT declared CSS viewport; never derive it from
@@ -74,6 +82,7 @@ process.stdin.on('end', async () => {
     const canvasWidth = input.width
     const canvasHeight = Math.ceil(input.width * (input.viewportHeight / input.viewportWidth))
     const renderer = new Resvg(input.svg, { fitTo: { mode: 'width', value: input.width } })
+    rp('ctor')
     if (!Number.isInteger(canvasWidth) || !Number.isInteger(canvasHeight)
       || canvasWidth <= 0 || canvasHeight <= 0
       || canvasWidth > ${SVG_MAX_RASTER_SIDE} || canvasHeight > ${SVG_MAX_RASTER_SIDE}
@@ -86,7 +95,9 @@ process.stdin.on('end', async () => {
       return
     }
     const png = renderer.render().asPng()
+    rp('render')
     process.stdout.write(JSON.stringify({ ok: true, png: Buffer.from(png).toString('base64') }))
+    rp('answer')
   } catch (error) {
     process.stdout.write(JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) }))
   }
@@ -172,6 +183,21 @@ export function createSvgRasterizer(spawnProcess: SpawnProcess = spawn): SvgRast
       let cancelled = false
       let overflow = false
       let timer: NodeJS.Timeout | undefined
+      // ── DIAGNOSTIC (branch fix/svg-raster-coldstart-timeout-20261105) ──────
+      // The relative phase timeline of ONE child, so a tripped bound names the
+      // stalled boundary instead of only reporting "exceeded 3000 ms". Marks
+      // are numbers only: no SVG source, no PNG bytes, no stderr text.
+      const startedAt = performance.now()
+      const phases: string[] = []
+      const mark = (phase: string, detail?: string): void => {
+        phases.push(`${phase}=${Math.round(performance.now() - startedAt)}${detail !== undefined ? `(${detail})` : ''}`)
+      }
+      mark('spawn')
+      // The child's own milestone lines (`rp <phase>=<ms>`), kept separate from
+      // any real stderr so neither message buries the other.
+      const workerPhases = (): string => stderr.split('\n').filter(line => line.startsWith('rp ')).join(' ')
+      const workerStderr = (): string => stderr.split('\n').filter(line => !line.startsWith('rp ')).join('\n').trim().slice(0, 200)
+      // ───────────────────────────────────────────────────────────────────────
       const finish = (error: Error | undefined, result?: SvgRasterResult): void => {
         if (settled) return
         settled = true
@@ -189,6 +215,7 @@ export function createSvgRasterizer(spawnProcess: SpawnProcess = spawn): SvgRast
         if (reason === 'cancelled') cancelled = true
         else if (reason === 'timeout') timedOut = true
         else overflow = true
+        mark('terminate', reason)
         child.kill('SIGKILL')
       }
       const onAbort = (): void => terminate('cancelled')
@@ -196,16 +223,22 @@ export function createSvgRasterizer(spawnProcess: SpawnProcess = spawn): SvgRast
       child.stdout.setEncoding('utf8')
       child.stderr.setEncoding('utf8')
       child.stdout.on('data', (chunk: string) => {
+        if (stdout.length === 0) mark('firstStdout')
         stdout += chunk
         if (Buffer.byteLength(stdout, 'utf8') > MAX_STDOUT_BYTES) terminate('overflow')
       })
+      child.stdout.on('end', () => mark('stdoutEnd', `${stdout.length}b`))
       child.stderr.on('data', (chunk: string) => {
         if (stderr.length < MAX_STDERR_BYTES) stderr += chunk
       })
       child.on('error', (error: Error) => finish(new Error(`SVG rasterizer failed to start: ${error.message}`)))
+      child.on('exit', (code: number | null, signal: NodeJS.Signals | null) => {
+        mark('exit', `code=${code ?? 'null'} signal=${signal ?? 'null'}`)
+      })
       child.on('close', (code: number | null, signal: NodeJS.Signals | null) => {
+        mark('close', `code=${code ?? 'null'} signal=${signal ?? 'null'}`)
         if (timedOut) {
-          finish(new Error(`SVG rasterization exceeded ${SVG_RASTER_TIMEOUT_MS} ms`))
+          finish(new Error(`SVG rasterization exceeded ${SVG_RASTER_TIMEOUT_MS} ms [${phases.join(' ')}] [${workerPhases()}]`))
           return
         }
         if (cancelled) {
@@ -217,7 +250,7 @@ export function createSvgRasterizer(spawnProcess: SpawnProcess = spawn): SvgRast
           return
         }
         if (code !== 0) {
-          finish(new Error(`SVG rasterizer exited (${code ?? signal ?? 'unknown'}): ${stderr.trim().slice(0, 200)}`))
+          finish(new Error(`SVG rasterizer exited (${code ?? signal ?? 'unknown'}): ${workerStderr()}`))
           return
         }
         let message: unknown
@@ -254,13 +287,16 @@ export function createSvgRasterizer(spawnProcess: SpawnProcess = spawn): SvgRast
         terminate('cancelled')
       } else {
         options.signal.addEventListener('abort', onAbort, { once: true })
+        // DIAGNOSTIC: the `stdinAck` mark fires only once the parent loop
+        // actually pushed the request into the pipe, so a late ack names a
+        // parent that never got scheduled rather than a slow child.
         child.stdin.end(JSON.stringify({
         modulePath,
         svg: source,
         width,
         viewportWidth: admission.viewportWidth,
         viewportHeight: admission.viewportHeight,
-      }))
+      }), () => mark('stdinAck'))
       }
     })
   }

@@ -94,7 +94,12 @@ test('a raster child that outlives the 3 s bound is classified as a timeout afte
   const events: string[] = []
   let child: ChildProcessWithoutNullStreams | undefined
   const spawnProcess = ((..._args: Parameters<typeof spawn>): ReturnType<typeof spawn> => {
-    const spawned = spawn(process.execPath, ['-e', 'setInterval(() => {}, 60_000)'], {
+    // The child reports two worker milestones on stderr, then never answers:
+    // the failure message has to carry BOTH the parent-side timeline and the
+    // child's own last reported milestone, because a CI occurrence that says
+    // only "exceeded 3000 ms" cannot separate "the request was never delivered
+    // to the child" from "the child took the work and stalled inside resvg".
+    const spawned = spawn(process.execPath, ['-e', 'process.stderr.write("rp request=1\\nrp import=9\\n"); setInterval(() => {}, 60_000)'], {
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
     })
@@ -106,9 +111,9 @@ test('a raster child that outlives the 3 s bound is classified as a timeout afte
   }) as typeof spawn
   const rasterize = createSvgRasterizer(spawnProcess)
   const started = Date.now()
-  await assert.rejects(
-    rasterize(SVG_SOURCE, { targetWidth: 128, signal: new AbortController().signal }),
-    /SVG rasterization exceeded 3000 ms/u,
+  const failure = await rasterize(SVG_SOURCE, { targetWidth: 128, signal: new AbortController().signal }).then(
+    () => assert.fail('the never-answering child must reject'),
+    (error: unknown) => error as Error,
   )
   events.push('settled')
   const elapsed = Date.now() - started
@@ -118,6 +123,30 @@ test('a raster child that outlives the 3 s bound is classified as a timeout afte
   assert.ok(elapsed < 10_000, `the failure is bounded by the raster budget, not a 30 s wait: ${elapsed} ms`)
   assert.equal(child?.signalCode, 'SIGKILL', 'the child process is really gone before the promise settles')
   assert.equal(child?.exitCode, null)
+  assert.match(failure.message, /SVG rasterization exceeded 3000 ms/u)
+  assert.match(failure.message, /\[spawn=0 stdinAck=\d+ terminate=\d+\(timeout\)/u,
+    `the timeout names the parent boundary it reached: ${failure.message}`)
+  assert.match(failure.message, /\[rp request=1 rp import=9\]/u,
+    `the timeout carries the child's own last reported milestones: ${failure.message}`)
+  assert.ok(!failure.message.includes('firstStdout'),
+    'a child that answered nothing records no stdout boundary, so the two stalls stay separable')
+})
+
+test('a raster child that exits with an error keeps its real stderr, not its milestone lines', { skip: nativeRasterSkip }, async () => {
+  const spawnProcess = ((..._args: Parameters<typeof spawn>): ReturnType<typeof spawn> => spawn(
+    process.execPath,
+    ['-e', 'process.stderr.write("rp request=1\\nresvg native abort\\n"); process.exit(3)'],
+    { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true },
+  )) as typeof spawn
+  const failure = await createSvgRasterizer(spawnProcess)(
+    SVG_SOURCE,
+    { targetWidth: 128, signal: new AbortController().signal },
+  ).then(
+    () => assert.fail('the exiting child must reject'),
+    (error: unknown) => error as Error,
+  )
+  assert.match(failure.message, /SVG rasterizer exited \(3\): resvg native abort/u, failure.message)
+  assert.ok(!failure.message.includes('rp request='), `milestones never bury the error: ${failure.message}`)
 })
 
 
