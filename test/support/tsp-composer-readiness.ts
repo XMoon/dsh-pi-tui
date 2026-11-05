@@ -34,7 +34,7 @@ const DEADLINE_MS = 30_000
 const POLL_MS = 25
 /** How long one probe byte may take to land before it is treated as dropped. */
 const PROBE_OBSERVATION_MS = 500
-/** Bound for confirming the probe's own Backspace landed. */
+/** Bound for confirming the probe's own Backspace landed, per erase attempt. */
 const ERASE_OBSERVATION_MS = 2_000
 const PROBE = 'x'
 const BACKSPACE = '\x7f'
@@ -76,15 +76,21 @@ export async function waitForEditableComposer(
 
   /**
    * Erase the probe bytes with real Backspaces until the exact empty editor is
-   * observed. The TOTAL Backspaces issued never exceed the largest residue count
-   * observed: an intermediate shrink is this batch landing, not a new
-   * encounter, so no surplus delete is ever sent. A Backspace that never lands
-   * is an unexpected test state and fails here, never by clearing somebody
-   * else's draft.
+   * observed. Within one bounded attempt the TOTAL Backspaces issued never
+   * exceed the largest residue count observed: an intermediate shrink is this
+   * batch landing, not a new encounter, so no surplus delete is ever sent.
+   *
+   * A full attempt that left the residue in place is a probe byte the fence
+   * DROPPED — it can swallow the erase exactly like it swallows the probe. The
+   * plan's residue rule then applies again: erase the observed count and wait
+   * another bounded window, still inside the ONE global budget. The helper
+   * still has to observe the exact empty editor before it returns, and any
+   * content that is not this probe's own all-`x` tail fails here instead of
+   * being cleared.
    */
   const eraseResidue = async (count: number): Promise<void> => {
-    const until = Math.min(Date.now() + ERASE_OBSERVATION_MS, deadline)
     let sent = 0
+    let until = Math.min(Date.now() + ERASE_OBSERVATION_MS, deadline)
     const eraseUpTo = (observed: number): void => {
       for (let index = sent; index < observed; index += 1) pane.input.type(BACKSPACE)
       sent = Math.max(sent, observed)
@@ -97,7 +103,12 @@ export async function waitForEditableComposer(
         fail('a non-empty editor that is not the probe\'s own residue cannot be cleared')
       }
       if (last.cursor !== -1) eraseUpTo(last.text.length)
-      if (Date.now() >= until) fail('the probe bytes could not be erased to the empty editor')
+      if (Date.now() >= until) {
+        if (Date.now() >= deadline) fail('the probe bytes could not be erased to the empty editor')
+        sent = 0
+        until = Math.min(Date.now() + ERASE_OBSERVATION_MS, deadline)
+        continue
+      }
       await sleep(POLL_MS)
     }
   }
