@@ -831,6 +831,39 @@ test('a multi-line draft keeps every other line untouched (third line, leading c
   assert.equal(h.submissions(), 0)
 })
 
+test('a pasted CRLF lands as ONE newline and the accept on the line before it still completes and stages exactly once', async (t) => {
+  const life = testLifecycle(t)
+  const h = setup(life)
+  const { vt, app } = h
+  await vt.waitForRender()
+  type(vt, '看一下 /attach note')
+  await vt.waitForRender()
+  // The authentic Windows-clipboard gesture: ONE bracketed paste whose text carries
+  // a CRLF pair. The vendored editor normalizes CR to LF on EVERY insert path, so
+  // in this renderer a CR can never reach the shared grammar — the line break still
+  // ends the token, and what the fix guarantees is that this renderer's accept is
+  // exactly what it always was.
+  vt.sendInput('\x1b[200~\r\n\x1b[201~')
+  await waitForDraft(app, draft => draft === '看一下 /attach note\n', 'the pasted pair normalized into one LF')
+  assert.equal(app.seatTextForTest().includes('\r'), false, 'no CR survives the fork’s normalization')
+  // One real Backspace-adjacent gesture puts the caret back INSIDE the token: the
+  // single `\n` grapheme is what ends it.
+  vt.sendInput('\u001b[D')
+  await waitForDraft(app, () => app.seatEditorForTest().getCursor() === '看一下 /attach note'.length,
+    'the caret parked right after the path token')
+  type(vt, 's')
+  await waitForOnlyRow(vt, app, 'notes.txt', 'the file candidate before a line break')
+  vt.sendInput('\r')
+  await waitForDraft(app, draft => draft.includes('[file #1'), 'the file token lands on its own line')
+  assert.equal(app.seatTextForTest(), '看一下 [file #1 (11 B)] \n',
+    'the name completed on its own line: the newline the paste carried stays the document’s last byte')
+  assert.equal(h.stagedFiles().length, 1, 'exactly one staging call for the one acceptance')
+  assert.equal(h.fileStore.values().length, 1, 'the real draft store holds exactly the staged file')
+  assert.deepEqual(h.attachedNotices(), ['attached [file #1 (11 B)] — Enter to send'],
+    'exactly one success announcement for the one commit')
+  assert.equal(h.submissions(), 0, 'the accept never submitted the multi-line draft')
+})
+
 test('a large pasted block keeps its marker text and the fragment edits in place', async (t) => {
   const life = testLifecycle(t)
   const h = setup(life)
