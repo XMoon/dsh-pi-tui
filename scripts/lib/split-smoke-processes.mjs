@@ -548,7 +548,7 @@ export function createSplitProcessScope() {
 }
 
 /** The last `surface-status` record of a surface Client (no stdin channel). */
-function lastSurfaceStatus(client) {
+export function lastSurfaceStatus(client) {
   return client.records.filter(record => record.m4b2s === 'surface-status').at(-1)
 }
 

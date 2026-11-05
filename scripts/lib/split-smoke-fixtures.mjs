@@ -107,7 +107,7 @@ export function writeC1WorkFixture(profileDir, workDir) {
 }
 
 /** Read every host-workload fixture proof line (an absent file is simply empty). */
-function readC1WorkEvents(workRoot) {
+export function readC1WorkEvents(workRoot) {
   const path = join(workRoot, 'events.jsonl')
   if (!existsSync(path)) return []
   return readFileSync(path, 'utf8').split('\n').filter(Boolean).flatMap(line => {

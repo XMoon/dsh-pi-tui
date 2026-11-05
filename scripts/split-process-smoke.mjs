@@ -101,7 +101,7 @@ import {
   SplitSmokeInputError,
   SplitSmokeWaitError,
 } from './lib/split-smoke-diagnostics.mjs'
-import { writeC1WorkFixture } from './lib/split-smoke-fixtures.mjs'
+import { readC1WorkEvents, waitForC1WorkEvent, writeC1WorkFixture } from './lib/split-smoke-fixtures.mjs'
 import {
   createSplitSmokeProfile,
   inspectSplitCandidate,
@@ -112,6 +112,7 @@ import {
   findIsolatedProcesses,
   killIsolatedProcesses,
   killTracked,
+  lastSurfaceStatus,
   readProcState,
   readStartIdentity,
   seatFree,
@@ -2665,6 +2666,7 @@ async function main(explicitPath) {
       entries,
       anchor,
       clientPeers,
+      surfaceLlm,
       base: installedBase,
       dshInvocation: dsh,
     } = profile

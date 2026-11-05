@@ -159,6 +159,7 @@ export function createSplitSmokeProfile({ tarball, targetDshVersion, workDir }) 
     entries,
     anchor,
     base,
+    surfaceLlm,
     clientPeers,
     dshInvocation: dsh,
   }
