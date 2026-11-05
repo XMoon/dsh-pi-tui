@@ -17,6 +17,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { visibleWidth } from '@xmoon76/pi-tui'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import { createWebAccessCommands, type WebAccessCommandRunner } from '../../src/tui/commands/web-access.ts'
@@ -289,6 +290,7 @@ test('a failed toggle is stated as an error notice and the menu re-reads the aut
 
 interface MenuHarness {
   readonly vt: VirtualTerminal
+  readonly app: TuiApp
   readonly handle: WebAccessMenuHandle
   readonly actions: WebAccessActionId[]
   readonly notices: string[]
@@ -298,8 +300,9 @@ interface MenuHarness {
 async function pituiMenu(
   t: { after(fn: () => unknown): void },
   status: PiTuiWebAccessStatus,
+  size: { readonly columns: number; readonly rows: number } = { columns: 120, rows: 40 },
 ): Promise<MenuHarness> {
-  const vt = new VirtualTerminal(120, 40)
+  const vt = new VirtualTerminal(size.columns, size.rows)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
   lifecycle.started.add(app)
@@ -321,7 +324,7 @@ async function pituiMenu(
   }
   const handle = presentation.open(request)
   await settleMenu(vt)
-  return { vt, handle, actions, notices }
+  return { vt, app, handle, actions, notices }
 }
 
 /** Let the entry read settle and its projection paint. */
@@ -410,4 +413,18 @@ test('the Details page shows the durable facts and returns without a write', asy
   await h.vt.waitForRender()
   assert.match(view(h.vt), /Status: enabled/u, 'Back returns to the SAME menu')
   assert.deepEqual(h.actions, [], 'reading Details and going back writes nothing')
+})
+
+test('the PiTui menu stays reachable at 44×20 and Esc returns the focus seat without a write', async t => {
+  const h = await pituiMenu(t, { state: 'disabled' }, { columns: 44, rows: 20 })
+  const frame = view(h.vt)
+  assert.match(frame, /Status: disabled/u, 'the narrow menu still states the Host fact')
+  assert.match(frame, /Enable Web/u, 'the admitted action stays reachable at the 44-column floor')
+  assert.equal(h.app.overlayGraphState().handles, 1, 'exactly ONE managed overlay exists')
+  h.vt.sendInput('\u001b')
+  await h.vt.waitForRender()
+  assert.equal(h.app.overlayGraphState().handles, 0, 'Esc retires the overlay and restores the focus seat')
+  assert.doesNotMatch(view(h.vt), /Status: disabled/u)
+  assert.equal(h.handle.isDisposed(), true, 'the retired menu knows it is gone')
+  assert.deepEqual(h.actions, [], 'closing the menu writes nothing')
 })
