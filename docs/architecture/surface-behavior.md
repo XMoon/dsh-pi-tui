@@ -1107,6 +1107,14 @@ Attachment completion and intake are Client-local:
   quote is treated as a complete token and does not complete. An accepted
   DIRECTORY keeps its quote open so the next completion continues in the same
   token, while an accepted FILE closes it.
+- The attachment path token's boundary is ONE shared grammar, the same in every
+  renderer: an unquoted word ends at an ASCII space or tab, a CR or an LF ends it
+  in either form (an open quoted token never reaches across a line for its
+  partner), and a Unicode whitespace such as U+3000 stays ordinary filename
+  content. A line break may really sit inside a line — one renderer inserts a
+  bracketed paste verbatim, another normalizes CR to LF before this grammar ever
+  sees it — and an accept replaces a fragment of ONE logical line, leaving that
+  break and every later line byte-for-byte untouched.
 - `/attach` and `/image` are ALSO inline attachment sites: the
   FIRST logical line's leading command token stays the leading command seat
   above, while a declared attachment command token at any other cursor position
