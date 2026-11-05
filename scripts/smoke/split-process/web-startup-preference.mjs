@@ -413,5 +413,29 @@ export async function runWebStartupPreference(context) {
       if (host.exited) continue
       try { await host.shutdown() } catch { /* the global backstop owns leftovers */ }
     }
+    // D3: the profile-owned preference is persistent state. Restore it through
+    // the REAL Settings wire on a fresh Host/Peer even when the case failed
+    // after changing it, and fail this case if the read-back does not confirm
+    // Off. Never rewrite the preference file directly.
+    if (webScopeSuffix !== undefined) {
+      let resetHost
+      let resetPeer
+      try {
+        const started = await startHost('PC-08 final preference reset')
+        resetHost = started.host
+        resetPeer = await startPeer('PC-08 final preference reset')
+        const reset = await webPreference(resetPeer, 'PC-08 final preference reset', false)
+        assert(reset.ok === true && reset.autoStart === false && reset.readBack === true,
+          `PC-08 final preference reset did not read back Off: ${JSON.stringify(reset)}`)
+        trace('t74-web-preference-restored', { autoStart: false, readBack: true })
+      } finally {
+        if (resetPeer !== undefined && !resetPeer.exited) {
+          try { await resetPeer.shutdown() } catch { /* best effort */ }
+        }
+        if (resetHost !== undefined && !resetHost.exited) {
+          try { await resetHost.shutdown() } catch { /* best effort */ }
+        }
+      }
+    }
   }
 }
