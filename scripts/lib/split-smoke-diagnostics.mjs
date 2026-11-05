@@ -121,6 +121,9 @@ function eventNameOrUndefined(key, value) {
 export const LANE_ERROR_CODES = Object.freeze([
   'INPUT_DSH_PIN_MISSING_OR_INVALID',
   'INPUT_DSH_PIN_MISMATCH',
+  // The selectable-entry boundary: an unknown/ambiguous selector, a selector
+  // combined with --list, or a full-only control used with --case/--suite.
+  'INPUT_SMOKE_SELECTION_INVALID',
   'RECORD_READ_FAILED',
   'RECORD_WAIT_TIMEOUT',
   'PROCESS_EXITED_BEFORE_RECORD',
@@ -566,6 +569,12 @@ const ASSERT_HELPER_FRAMES = /^(?:assert|assertEqual|assertNotEqual|assertDeepEq
 const LANE_SOURCE_LIST = Object.freeze([
   'split-process-smoke.mjs',
   'split-process-upgrade-smoke.mjs',
+  // The extracted support modules that raise their own SplitSmokeAssertionError.
+  // `split-smoke-sessions.mjs` is deliberately absent: it only classifies waits.
+  'host-runtime-disabled.mjs',
+  'split-smoke-processes.mjs',
+  'split-smoke-fixtures.mjs',
+  'split-smoke-profile.mjs',
 ])
 /** The trust set as a live Set, kept private so no caller can widen it. */
 const LANE_SOURCES = new Set(LANE_SOURCE_LIST)
@@ -691,16 +700,27 @@ export function formatFailureSummary(report, reportPath) {
 /**
  * Emit the fixed failure projection for a lane error raised BEFORE its
  * diagnostics collector existed (bad arguments, an unreadable or unnameable
- * artifact, a missing pin source). There are no artifacts, processes or
- * checkpoints to project, so none are invented: the report holds the lane, the
- * category, the stable code and the target pin the lane could know.
+ * artifact, a missing pin source). There are no processes or checkpoints to
+ * project, so none are invented: the report holds the lane, the category, the
+ * stable code and — for the dedicated input error — only the artifact role and
+ * the exact pins that error already validated.
  */
 export function emitInputFailure({ lane, heading, error, reason, evidencePath }) {
+  // The dedicated input error is the ONE boundary that already holds the
+  // validated artifact role and the two exact pins of an invalid pairing.
+  // Projecting those declared facts keeps the role and both pins in the report
+  // without copying any raw error text; a selector error carries neither, so it
+  // stays role-less rather than inventing an artifact.
+  const inputFacts = error instanceof SplitSmokeInputError ? error : undefined
   const report = projectFailureReport({
     lane,
     category: failureCategoryOf(error),
     reason: reason ?? error?.code,
     assertion: publishedAssertionOf(error),
+    runtimeDshPin: inputFacts?.targetDshVersion,
+    artifacts: inputFacts?.role === undefined
+      ? []
+      : [{ role: inputFacts.role, pin: inputFacts.artifactPin }],
   })
   const path = writeFailureReport(report)
   process.stderr.write(`${heading}_FAILURE\n${formatFailureSummary(report, path)}\n`)

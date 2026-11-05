@@ -50,12 +50,21 @@ import {
   SplitSmokeWaitError,
 } from '../../scripts/lib/split-smoke-diagnostics.mjs'
 import { waitForAcceptedHandoff, waitForReloadNotice, writeRequestedEvidence } from '../../scripts/split-process-upgrade-smoke.mjs'
-import { waitForAnyReady, waitForC1WorkEvent, waitForHostSessionEvent, waitForSurfaceStatus } from '../../scripts/split-process-smoke.mjs'
+import { waitForAnyReady, waitForSurfaceStatus } from '../../scripts/lib/split-smoke-processes.mjs'
+import { waitForHostSessionEvent } from '../../scripts/lib/split-smoke-sessions.mjs'
+import { waitForC1WorkEvent } from '../../scripts/lib/split-smoke-fixtures.mjs'
+import { runHostRuntimeDisabled } from '../../scripts/smoke/split-process/host-runtime-disabled.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const UPGRADE_SCRIPT = join(ROOT, 'scripts', 'split-process-upgrade-smoke.mjs')
 const PROCESS_SCRIPT = join(ROOT, 'scripts', 'split-process-smoke.mjs')
 const LIB = join(ROOT, 'scripts', 'lib', 'split-smoke-diagnostics.mjs')
+const PROCESSES_LIB = join(ROOT, 'scripts', 'lib', 'split-smoke-processes.mjs')
+const SESSIONS_LIB = join(ROOT, 'scripts', 'lib', 'split-smoke-sessions.mjs')
+const FIXTURES_LIB = join(ROOT, 'scripts', 'lib', 'split-smoke-fixtures.mjs')
+const PROFILE_LIB = join(ROOT, 'scripts', 'lib', 'split-smoke-profile.mjs')
+const SELECTION_LIB = join(ROOT, 'scripts', 'lib', 'split-smoke-selection.mjs')
+const CASE_SCRIPT = join(ROOT, 'scripts', 'smoke', 'split-process', 'host-runtime-disabled.mjs')
 const PACKAGE_NAME = '@xmoon76/dsh-pi-tui'
 const DSH_AGENT = '@deepseek-ai/dsh-agent'
 const TARGET_PIN = npmDshVersion()
@@ -221,6 +230,18 @@ test('the process lane refuses a candidate with another exact pin before any ins
     `both exact versions must be reported:\n${result.stderr}`)
   assert.ok(!result.stderr.includes('qualified=true'),
     `an unqualified candidate must never announce itself as qualified:\n${result.stderr}`)
+  assertNoLaneSetup(dir, 'dsh-split-process-')
+  // The selected entry runs the SAME preflight: it refuses the pairing before a
+  // work root or install, and its report still names the role and both pins.
+  const selected = runLane(PROCESS_SCRIPT, [candidate, '--case', 'bootstrap.host-runtime-disabled'], dir)
+  assert.notEqual(selected.status, 0, 'a mismatched candidate must fail the selected case too')
+  assert.equal(selected.signal, null)
+  assert.match(selected.stderr, /INPUT_UNQUALIFIED/u)
+  assert.match(selected.stderr, /INPUT_DSH_PIN_MISMATCH/u)
+  assert.match(selected.stderr, /\bcandidate\b/u)
+  assert.ok(selected.stderr.includes(OTHER_PIN) && selected.stderr.includes(TARGET_PIN),
+    `the selected report must carry both exact pins:\n${selected.stderr}`)
+  assert.ok(!selected.stderr.includes('qualified=true'))
   assertNoLaneSetup(dir, 'dsh-split-process-')
 })
 
@@ -613,7 +634,8 @@ test('a real process wait failure reports no terminal or record payload', (t) =>
   const entry = join(dir, 'silent-exit.mjs')
   writeFileSync(entry, 'process.exit(0)\n')
   const probe = `
-    const { EntryProcess, SurfaceEntryProcess } = await import(${JSON.stringify(pathToFileURL(PROCESS_SCRIPT).href)})
+    const { createSplitProcessScope } = await import(${JSON.stringify(pathToFileURL(PROCESSES_LIB).href)})
+    const { EntryProcess, SurfaceEntryProcess } = createSplitProcessScope()
     const options = {
       cwd: ${JSON.stringify(dir)},
       env: { ...process.env },
@@ -813,6 +835,12 @@ test('an unknown error code is never reported, and never changes the category', 
     ['split-process', readFileSync(PROCESS_SCRIPT, 'utf8')],
     ['split-upgrade', readFileSync(UPGRADE_SCRIPT, 'utf8')],
     ['the shared module', readFileSync(LIB, 'utf8')],
+    ['split-smoke-processes', readFileSync(PROCESSES_LIB, 'utf8')],
+    ['split-smoke-sessions', readFileSync(SESSIONS_LIB, 'utf8')],
+    ['split-smoke-fixtures', readFileSync(FIXTURES_LIB, 'utf8')],
+    ['split-smoke-profile', readFileSync(PROFILE_LIB, 'utf8')],
+    ['split-smoke-selection', readFileSync(SELECTION_LIB, 'utf8')],
+    ['host-runtime-disabled', readFileSync(CASE_SCRIPT, 'utf8')],
   ]) {
     // A waiter failure site: fail('<category>', '<code>') or, where the read must
     // happen first, settleOrFail('<category>', '<code>').
@@ -974,17 +1002,28 @@ test('the locator trusts only the lane sources and fails closed otherwise', () =
     }
     return assert.fail('the assertion must fail')
   }
-  // Default trust set = the two lane scripts; this test file is NOT one of them.
+  // Default trust set = the lane entries plus the extracted support files that
+  // raise their OWN locatable assertions; this test file is NOT one of them.
   assert.equal(attempt(undefined).assertion, undefined,
     'a frame outside the trusted lane sources must not become a locator')
-  assert.deepEqual([...LANE_SOURCE_FILES].sort(), ['split-process-smoke.mjs', 'split-process-upgrade-smoke.mjs'])
+  assert.deepEqual([...LANE_SOURCE_FILES].sort(), [
+    'host-runtime-disabled.mjs',
+    'split-process-smoke.mjs',
+    'split-process-upgrade-smoke.mjs',
+    'split-smoke-fixtures.mjs',
+    'split-smoke-processes.mjs',
+    'split-smoke-profile.mjs',
+  ])
   // The default trust set is data, not a Set a caller can widen.
   assert.ok(Object.isFrozen(LANE_SOURCE_FILES), 'the exported list must be frozen')
   assert.equal(typeof LANE_SOURCE_FILES.add, 'undefined', 'there must be no mutator to widen the trust set')
   assert.equal(isLaneSourceFile('split-process-smoke.mjs'), true)
-  assert.equal(isLaneSourceFile('foreign.mjs'), false)
-  // Both real lanes are trusted by their own basenames.
-  for (const lane of ['split-process-smoke.mjs', 'split-process-upgrade-smoke.mjs']) {
+  assert.equal(isLaneSourceFile('host-runtime-disabled.mjs'), true)
+  assert.equal(isLaneSourceFile('foreign-driver.mjs'), false)
+  // A session-only reader is deliberately absent: it raises no assertion.
+  assert.equal(isLaneSourceFile('split-smoke-sessions.mjs'), false)
+  // Every real trusted source is trusted by its own basename.
+  for (const lane of LANE_SOURCE_FILES) {
     assert.ok(isLaneSourceFile(basename(lane)))
   }
   // An empty trust set and a trust set naming something else both fail closed.
@@ -1044,10 +1083,17 @@ test('the report only accepts a locator from a trusted lane source', (t) => {
     'split-process-smoke.mjs:12')
   assert.equal(projectFailureReport({ lane: 'split-upgrade', assertion: 'split-process-upgrade-smoke.mjs:99' }).assertion,
     'split-process-upgrade-smoke.mjs:99')
+  // The extracted scenario and its support modules are trusted by their own
+  // basenames, exactly as their real assertions expect.
+  for (const trusted of ['host-runtime-disabled.mjs:31', 'split-smoke-processes.mjs:312',
+    'split-smoke-fixtures.mjs:93', 'split-smoke-profile.mjs:64']) {
+    assert.equal(projectFailureReport({ lane: 'split-process', assertion: trusted }).assertion, trusted)
+  }
   // A well-shaped locator naming anything else is refused by the PROJECTION,
   // not only by the stack extractor: an error that merely carries an
   // `assertion` property must not smuggle a foreign file into the report.
-  for (const foreign of ['foreign.mjs:123', 'split-smoke-diagnostics.test.mjs:7', 'another-lane.mjs:1']) {
+  for (const foreign of ['foreign.mjs:123', 'foreign-driver.mjs:5',
+    'split-smoke-diagnostics.test.mjs:7', 'another-lane.mjs:1', 'split-smoke-sessions.mjs:8']) {
     assert.equal(projectFailureReport({ lane: 'split-process', assertion: foreign }).assertion, undefined,
       `the projection must refuse ${foreign}`)
   }
@@ -1061,6 +1107,41 @@ test('the report only accepts a locator from a trusted lane source', (t) => {
   const diagnostics = createSmokeDiagnostics({ lane: 'split-process', heading: 'SPLIT_PROCESS_SMOKE', marker: 'T' })
   const report = diagnostics.reportFailure(forged)
   assert.equal(report.assertion, undefined, 'an arbitrary error may not contribute a locator')
+})
+
+test('a real assertion in the selected scenario reports its trusted source location without payload', async (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('split-smoke-case-assertion-')
+  const error = await (async () => {
+    try {
+      await runHostRuntimeDisabled({
+        EntryProcess: class {
+          constructor() { throw new Error('the scenario must prove the artifact before it spawns a Host') }
+        },
+        entries: { host: join(dir, 'local-host.mjs') },
+        base: {},
+        workDir: dir,
+        dshHome: join(dir, 'dsh-home'),
+        profilePackage: join(dir, 'missing-profile'),
+        failpoint: () => {},
+      })
+    } catch (caught) {
+      return caught
+    }
+    assert.fail('the scenario must fail on the missing Host Runtime artifact')
+  })()
+  assert.equal(error.category, 'ASSERTION_FAILED')
+  assert.match(String(error.assertion), /^host-runtime-disabled\.mjs:\d+$/u,
+    'the locator must name the real case file')
+  const summary = safeFailureSummary(error)
+  assert.match(summary, /^ASSERTION_FAILED at host-runtime-disabled\.mjs:\d+$/u)
+  const published = projectFailureReport({ lane: 'split-process', category: error.category, assertion: error.assertion })
+  assert.equal(published.assertion, error.assertion, 'the trusted site survives the projection')
+  // The payload stays out of the default output; only the locator travels.
+  const text = `${JSON.stringify(published)}${summary}`
+  for (const sentinel of ['missing-profile', 'Host Runtime artifact', 'must prove the artifact']) {
+    assert.ok(!text.includes(sentinel), `the default projection must not carry the assertion text: ${sentinel}`)
+  }
 })
 
 test('the raw assertion property has exactly ONE reader in the shared module', () => {
@@ -1194,8 +1275,14 @@ test('a setup failure is reported and leaves no half-created scene behind', (t) 
   mkdirSync(locked, { mode: 0o500 })
   const started = Date.now()
   let result
+  let selected
   try {
     result = spawnSync(process.execPath, [PROCESS_SCRIPT, candidate], {
+      encoding: 'utf8', timeout: 10_000, env: { ...process.env, TMPDIR: locked },
+    })
+    // The selected entry reaches the same setup boundary (after its own
+    // qualified preflight) and must clean up exactly the same way.
+    selected = spawnSync(process.execPath, [PROCESS_SCRIPT, candidate, '--case', 'bootstrap.host-runtime-disabled'], {
       encoding: 'utf8', timeout: 10_000, env: { ...process.env, TMPDIR: locked },
     })
   } finally {
@@ -1212,6 +1299,13 @@ test('a setup failure is reported and leaves no half-created scene behind', (t) 
   assert.match(result.stderr, /SPLIT_PROCESS_SMOKE_FAILURE: INFRA_FAILURE$/mu)
   assert.ok(!/ENOENT|EACCES: |syscall|errno:/.test(result.stderr), `a system error text leaked:\n${result.stderr}`)
   assert.deepEqual(readdirSync(locked), [], 'no work root may survive the setup failure')
+  assert.equal(selected.signal, null, `the selected lane must fail by itself: ${selected.error?.message}`)
+  assert.notEqual(selected.status, 0)
+  assert.match(selected.stderr, /SPLIT_PROCESS_SMOKE_FAILURE\n/u)
+  assert.match(selected.stderr, /category: INFRA_FAILURE/u)
+  assert.match(selected.stderr, /DIAGNOSTIC_WRITE_FAILURE: E[A-Z]+/u)
+  assert.match(selected.stderr, /SPLIT_PROCESS_SMOKE_FAILURE: INFRA_FAILURE$/mu)
+  assert.deepEqual(readdirSync(locked), [], 'no work root may survive the selected setup failure')
 })
 
 // ── Round 12: every bounded wait must classify itself ───────────────────────
@@ -1397,15 +1491,23 @@ test('the SAME handle passed twice is one process, with or without a PID', () =>
   assert.equal(reverse.processes[0].exited, true)
 })
 
-test('no bounded wait in either lane still throws a bare Error', () => {
+test('no bounded wait in either lane or its extracted support throws a bare Error', () => {
   // A bare Error is classified INFRA_FAILURE with no label, which turns a real
   // wait timeout into an "infrastructure" report. Scanned per waiter FUNCTION so
   // the artifact-preflight throws (which are legitimately INFRA_FAILURE) are not
-  // mistaken for waits.
-  for (const [name, file] of [['split-process', PROCESS_SCRIPT], ['split-upgrade', UPGRADE_SCRIPT]]) {
+  // mistaken for waits. The extracted modules are scanned by the SAME rule: a
+  // waiter that moved out of the lane must not lose its classification.
+  const sources = [
+    ['split-process', PROCESS_SCRIPT, 1],
+    ['split-upgrade', UPGRADE_SCRIPT, 4],
+    ['split-smoke-processes', PROCESSES_LIB, 2],
+    ['split-smoke-sessions', SESSIONS_LIB, 3],
+    ['split-smoke-fixtures', FIXTURES_LIB, 1],
+  ]
+  for (const [name, file, minimum] of sources) {
     const source = readFileSync(file, 'utf8')
     const waiters = [...source.matchAll(/^(?:export )?async function (wait\w+)\([\s\S]*?^\}/gmu)]
-    assert.ok(waiters.length >= 4, `${name} exposes fewer waits than expected: ${String(waiters.length)}`)
+    assert.ok(waiters.length >= minimum, `${name} exposes fewer waits than expected: ${String(waiters.length)}`)
     for (const [body, fn] of waiters.map(match => [match[0], match[1]])) {
       // `waitForOutcome` only delegates to another (already classified) waiter.
       if (fn === 'waitForOutcome') continue

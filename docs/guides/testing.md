@@ -300,11 +300,33 @@ Host/Client split-process development work must run it manually against the
 actual candidate tarball and record the package SHA, DSH version, command, and
 PASS/FAIL (or `NOT_RUN`).
 
+The lane has one command entry with a strict selector. The DEFAULT form (no
+selector) is still the complete qualification: every historical scenario plus
+its real T60/Web/Browser results:
 
 ```sh
-pnpm smoke:split-process -- <candidate.tgz>
+pnpm smoke:split-process -- <candidate.tgz>               # complete lane
+pnpm smoke:split-process -- --list                        # the selectable registry
+pnpm smoke:split-process -- <candidate.tgz> --suite <suite>
+pnpm smoke:split-process -- <candidate.tgz> --case <id>
 pnpm smoke:split-upgrade -- --old <old.tgz> --new <new.tgz> [--evidence <file>]
 ```
+
+`--list` prints the selectable registry (`SPLIT_PROCESS_SELECTABLE_CASES
+scope=SELECTABLE_ONLY`) and exits without resolving a candidate, creating a
+work root or installing anything. `--suite` and `--case` run only the
+registered cases of that suite/id through their own isolated installation and
+print one `SPLIT_PROCESS_SELECTED_PASS id=… scope=SELECTABLE_ONLY` per case;
+that output names the selectable subset only — it never claims the complete
+inventory, a `T60` result or a Browser/Web product qualification. A selector
+accepts at most one candidate and exactly one `--case` or `--suite` (never
+both, never repeated); `--list` takes neither. Unknown options, a missing or
+repeated selector, an extra positional, and a required Browser qualification
+flag (`SPLIT_PROCESS_REQUIRE_WEB_BROWSER` / `SPLIT_PROCESS_REQUIRE_WEB_PRODUCT`)
+combined with a selected non-Browser case all fail closed as
+`INPUT_UNQUALIFIED` / `INPUT_SMOKE_SELECTION_INVALID` before any scene exists.
+The full-only whole-lane mutation control (`SPLIT_PROCESS_SMOKE_MUTATION`) is
+refused in selector modes instead of being silently applied.
 
 Both lanes install packaged payloads, start a real Host and a real Client over
 a PTY, and prove the same contracts, so they share the same input rule. The
@@ -317,7 +339,8 @@ produce the behaviour these lanes assert. Such a pairing stops before any work
 root, install or process exists and is reported as `INPUT_UNQUALIFIED` with
 the role, both exact versions and the reason: it is an invalid test pairing,
 not a product regression, and the fix is to rebuild the artifact against the
-current pin.
+current pin. The full and selected entries use the same preflight; a selected
+case installs nothing until that preflight has qualified the exact pin.
 
 A default run is diagnosable without any environment variable. Both lanes
 announce the qualified artifact identity at startup and one checkpoint per
