@@ -254,6 +254,25 @@ async function runScene(options, oldArtifact, newArtifact, targetDshVersion) {
   let evidence
   const isolatedHomes = new Set()
   const registerIsolatedHome = path => { isolatedHomes.add(path) }
+  const failureProcesses = []
+  const publishedScopes = new Set()
+  // Scope directories can disappear during Case/owner cleanup. Capture the
+  // published Host scope identities BEFORE cleanup for the failpoint Seat proof.
+  const collectPublishedScopes = () => {
+    for (const isolatedHome of isolatedHomes) {
+      const scopeRoot = join(isolatedHome, 'run', 'dsh-pi-tui')
+      if (!existsSync(scopeRoot)) continue
+      for (const entry of readdirSync(scopeRoot, { withFileTypes: true })) {
+        if (entry.isDirectory()) publishedScopes.add(entry.name)
+      }
+    }
+  }
+  // Case-owned failure snapshot: a Case records its live handles BEFORE its
+  // own finally disposes them. The Runner still reports once, after the throw.
+  const captureFailure = handles => {
+    collectPublishedScopes()
+    for (const handle of handles) failureProcesses.push(handle)
+  }
   let failpointTriggered = false
   const { EntryProcess, SurfaceEntryProcess, activeProcesses } = createSplitProcessScope()
   try {
@@ -324,6 +343,7 @@ async function runScene(options, oldArtifact, newArtifact, targetDshVersion) {
         failpoint(name)
       },
       registerIsolatedHome,
+      captureFailure,
     }
     if (options.mode === 'full') {
       for (const entry of listSelectableUpgradeCases()) {
@@ -378,7 +398,7 @@ async function runScene(options, oldArtifact, newArtifact, targetDshVersion) {
     // Report BEFORE the cleanup below: the projection reads the still-live
     // process handles, and the work root still exists while it is built.
     diagnostics.reportFailure(error, {
-      processes: [...activeProcesses],
+      processes: [...failureProcesses, ...activeProcesses],
       evidencePath: options.evidence,
     })
     throw error
@@ -386,9 +406,10 @@ async function runScene(options, oldArtifact, newArtifact, targetDshVersion) {
     for (const run of [...activeProcesses]) {
       try { process.kill(-run.child.pid, 'SIGKILL') } catch { /* already gone */ }
     }
+    collectPublishedScopes()
     for (const isolatedHome of isolatedHomes) killIsolatedProcesses(isolatedHome)
     if (FAILPOINT !== undefined && failpointTriggered && workRoot !== undefined) {
-      await proveFailpointCleanup(isolatedHomes)
+      await proveFailpointCleanup(isolatedHomes, publishedScopes)
     }
     if (workRoot === undefined) {
       // Nothing was created: setup failed before the work root existed.
@@ -407,7 +428,7 @@ async function runScene(options, oldArtifact, newArtifact, targetDshVersion) {
  * isolated round home), and only reports `seats=free` for scopes that actually
  * published one. A failure before any scope existed reports `seats=unchecked`.
  */
-async function proveFailpointCleanup(isolatedHomes) {
+async function proveFailpointCleanup(isolatedHomes, publishedScopes) {
   let leftovers = 0
   for (const isolatedHome of isolatedHomes) {
     let pids = findIsolatedProcesses(isolatedHome)
@@ -418,14 +439,9 @@ async function proveFailpointCleanup(isolatedHomes) {
     }
     leftovers += pids.length
   }
-  const scopeIds = []
-  for (const isolatedHome of isolatedHomes) {
-    const scopeRoot = join(isolatedHome, 'run', 'dsh-pi-tui')
-    if (!existsSync(scopeRoot)) continue
-    for (const entry of readdirSync(scopeRoot, { withFileTypes: true })) {
-      if (entry.isDirectory()) scopeIds.push(entry.name)
-    }
-  }
+  // Only scopes captured BEFORE cleanup are evidence. A scope directory that
+  // vanished during owner cleanup is not silently reclassified as free.
+  const scopeIds = [...publishedScopes]
   let seatsOk = true
   for (const scopeId of scopeIds) {
     for (const seatName of [`\0dsh-pi-tui-h-${scopeId.slice(0, 40)}`, `\0dsh-pi-tui-c-${scopeId.slice(0, 40)}`]) {
@@ -441,8 +457,11 @@ async function proveFailpointCleanup(isolatedHomes) {
   }
   const seats = scopeIds.length === 0 ? 'unchecked' : seatsOk ? 'free' : 'busy'
   console.error(`SPLIT_UPGRADE_FAILPOINT_CLEANUP leftovers=${String(leftovers)} seats=${seats}`)
-  if (leftovers > 0 || !seatsOk) process.exitCode = 1
-  else console.error('SPLIT_UPGRADE_FAILPOINT_CLEANUP_OK')
+  if (leftovers > 0 || seats !== 'free') {
+    process.exitCode = 1
+    return
+  }
+  console.error('SPLIT_UPGRADE_FAILPOINT_CLEANUP_OK')
 }
 
 /** Strict CLI dispatch: `--list`, the old help, the complete lane or one selection. */

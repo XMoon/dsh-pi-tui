@@ -286,6 +286,21 @@ export async function stopHostForCleanup(host) {
   try { await host.waitForExit(20_000) } catch { killProcessGroup(host) }
 }
 
+/**
+ * Stop a real Host that a Client cold-started (it has no harness handle).
+ * The recorded kernel starttime is the ownership fence: a PID reused by an
+ * unrelated process is never signalled.
+ */
+export async function stopRecordedHostForCleanup(host) {
+  if (host === undefined || readStartIdentity(host.pid) !== host.starttime) return
+  try { process.kill(host.pid, 'SIGTERM') } catch { return }
+  if (await waitGone(host.pid, 20_000)) return
+  try { process.kill(-host.pid, 'SIGKILL') } catch {
+    try { process.kill(host.pid, 'SIGKILL') } catch { /* already gone */ }
+  }
+  await waitGone(host.pid, 5_000)
+}
+
 /** The internal `m4r` rejection classifications that still match one notice. */
 function rejectionMatchesNotice(expectedNotice, observed) {
   if (observed === 'TARGET_INVALID_DSH_PIN_MISMATCH' || observed === 'TARGET_INVALID_UNCLASSIFIED') {

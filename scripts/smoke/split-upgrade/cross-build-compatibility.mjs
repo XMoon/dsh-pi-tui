@@ -51,6 +51,7 @@ import {
   sessionLogFiles,
   sha256,
   stopHostForCleanup,
+  stopRecordedHostForCleanup,
   waitForAcceptedHandoff,
   waitForUpgradeC1WorkEvent,
   waitGone,
@@ -75,11 +76,13 @@ export async function runCrossBuildCompatibility(context) {
     newArtifact,
     checkpoint,
     failpoint,
+    captureFailure,
   } = context
   const fragment = { old: {}, new: {} }
   const hosts = []
   const clients = []
   const scratch = join(workRoot, 'scratch')
+  let detachedHost
   // A sibling of the active profile, never a child: its own pnpm project must
   // not discover or rewrite the running old profile, while DSH's `profiles/**`
   // interception still applies to its installed Client build.
@@ -785,6 +788,10 @@ export async function runCrossBuildCompatibility(context) {
       const clientB2Ready = await clientB2.waitFor(record => record.m4a0 === 'ready', 'second new-build Client ready', 240_000)
       const newAuth = await clientB2.waitFor(record => record.m4a0 === 'host-authenticated', 'second new-build Client authenticated Host', 60_000)
       const newHost = safeIdentity(newAuth.host)
+      const newScopeDir = scopeDirOf(dshHome, newHost.scopeId)
+      // The Client cold-started this Host, so no EntryProcess handle owns it.
+      // Record its real kernel identity now: THIS case stops it on failure too.
+      detachedHost = { pid: newHost.hostPid, starttime: newHost.hostStarttime, scopeDir: newScopeDir }
       assert(newHost.scopeId === hostABefore.scopeId, 'the new Host changed the canonical scope id')
       assert(newHost.instanceId !== hostABefore.instanceId, 'the new Host reused the old instance id')
       assert(newHost.hostPid !== hostABefore.hostPid, 'the new Host reused the old PID')
@@ -806,7 +813,6 @@ export async function runCrossBuildCompatibility(context) {
       assert(resumedDurable.some(event => event.type === 'turn/end'), 'the durable Session history lost the Turn end')
 
       // Old launch token and Cookie are invalid on the new Host.
-      const newScopeDir = scopeDirOf(dshHome, newHost.scopeId)
       const newLaunch = readJson(join(newScopeDir, 'launch.json'))
       const newToken = new URL(newLaunch.connectUrl).searchParams.get('token')
       assert(typeof newToken === 'string' && newToken !== oldToken, 'the new Host reused the old launch token')
@@ -869,6 +875,17 @@ export async function runCrossBuildCompatibility(context) {
         sameDshRuntime: true,
       }
     return fragment
+  } catch (error) {
+    const failureHandles = [...hosts, ...clients]
+    if (detachedHost !== undefined) {
+      failureHandles.push({
+        role: 'host-u07',
+        get exited() { return !alive(detachedHost.pid) },
+        get records() { return readHostLogRecords(detachedHost.scopeDir, detachedHost.pid) },
+      })
+    }
+    captureFailure(failureHandles)
+    throw error
   } finally {
     for (const client of clients) {
       try { await client.dispose?.() } catch { /* best effort */ }
@@ -877,5 +894,8 @@ export async function runCrossBuildCompatibility(context) {
       await stopHostForCleanup(host).catch(() => undefined)
       killProcessGroup(host)
     }
+    // Second local ownership step: the Client-spawned Host was recorded with
+    // its real PID/starttime; Runner /proc cleanup remains the last backstop.
+    await stopRecordedHostForCleanup(detachedHost).catch(() => undefined)
   }
 }
