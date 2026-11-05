@@ -99,7 +99,10 @@ test('a raster child that outlives the 3 s bound is classified as a timeout afte
     // child's own last reported milestone, because a CI occurrence that says
     // only "exceeded 3000 ms" cannot separate "the request was never delivered
     // to the child" from "the child took the work and stalled inside resvg".
-    const spawned = spawn(process.execPath, ['-e', 'process.stderr.write("rp request=1\\nrp import=9\\n"); setInterval(() => {}, 60_000)'], {
+    // The third line is a collision probe: a real stderr record that merely
+    // STARTS like a milestone is not one and must never be absorbed into the
+    // milestone array (the closing bracket below is what proves it).
+    const spawned = spawn(process.execPath, ['-e', 'process.stderr.write("rp request=1\\nrp import=9\\nrp native abort\\n"); setInterval(() => {}, 60_000)'], {
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
     })
@@ -133,9 +136,12 @@ test('a raster child that outlives the 3 s bound is classified as a timeout afte
 })
 
 test('a raster child that exits with an error keeps its real stderr, not its milestone lines', { skip: nativeRasterSkip }, async () => {
+  // `rp native abort` is a genuine native error line that only LOOKS like the
+  // milestone prefix: filtering by prefix would delete it from the one message
+  // that exists to report the failure.
   const spawnProcess = ((..._args: Parameters<typeof spawn>): ReturnType<typeof spawn> => spawn(
     process.execPath,
-    ['-e', 'process.stderr.write("rp request=1\\nresvg native abort\\n"); process.exit(3)'],
+    ['-e', 'process.stderr.write("rp request=1\\nrp native abort\\nresvg hard failure\\n"); process.exit(3)'],
     { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true },
   )) as typeof spawn
   const failure = await createSvgRasterizer(spawnProcess)(
@@ -145,8 +151,8 @@ test('a raster child that exits with an error keeps its real stderr, not its mil
     () => assert.fail('the exiting child must reject'),
     (error: unknown) => error as Error,
   )
-  assert.match(failure.message, /SVG rasterizer exited \(3\): resvg native abort/u, failure.message)
-  assert.ok(!failure.message.includes('rp request='), `milestones never bury the error: ${failure.message}`)
+  assert.match(failure.message, /SVG rasterizer exited \(3\): rp native abort\nresvg hard failure/u, failure.message)
+  assert.ok(!failure.message.includes('rp request=1'), `milestones never bury the error: ${failure.message}`)
 })
 
 
