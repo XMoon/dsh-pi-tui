@@ -340,6 +340,34 @@ require flags demands real Chromium PA/PB PASS and the Product Browser subset
 PASS. WC-12 stays `DEFERRED_WITH_OWNER`; a PASS of the Browser/TUI subset does
 not claim the deferred real Tern GUI half.
 
+The Upgrade lane has its own strict selector over two genuinely different
+packaged builds pinned to the same exact DSH runtime:
+
+```sh
+pnpm smoke:split-upgrade -- --old <old.tgz> --new <new.tgz>   # complete U01-U09
+pnpm smoke:split-upgrade -- --list
+pnpm smoke:split-upgrade -- --old <old.tgz> --new <new.tgz> --suite client-reload
+pnpm smoke:split-upgrade -- --old <old.tgz> --new <new.tgz> --case upgrade.cross-build-compatibility
+```
+
+`--list` prints `SPLIT_UPGRADE_SELECTABLE_CASES scope=SELECTABLE_ONLY` followed
+by one `suite=<suite> case=<id> title=<title>` line per registry entry in
+execution order, without reading a tarball, creating a work root or installing
+DSH. `--case` and `--suite` run only the registered cases of that id/suite in
+their own work root and print one `SPLIT_UPGRADE_SELECTED_PASS id=<id>
+scope=SELECTABLE_ONLY` per executed case; their stdout and `--evidence` document
+are the partial `scope: SELECTABLE_ONLY` JSON carrying `selectedCases` and only
+the executed cases' facts. A selected run never emits
+`SPLIT_UPGRADE_SMOKE_PASS (cross-build-compatible)`, `status: PASS` or
+`verdict: cross-build-compatible`. Only the complete form (no selector) runs all
+three registered cases and may emit the historical full marker and
+`status: PASS`/`verdict: cross-build-compatible`. Unknown, repeated or combined
+selectors, a missing `--old`/`--new`, and a same-path/SHA/version/differently
+pinned pairing all fail closed before any work root, profile or DSH installation
+exists. `SPLIT_UPGRADE_SMOKE_FAIL_AFTER` accepts only the three fixed
+`<case-id>.after-…-host-spawn` values used by the cases; any other value has no
+effect.
+
 The complete Split lane and the Upgrade lane install packaged payloads and
 drive real Host/Client processes over a PTY, so they share the same input rule.
 A selected case runs only the resources its own contract needs — the
@@ -368,8 +396,8 @@ label, elapsed, target pin, artifact name/version/SHA, expected and observed
 notice, recent checkpoints, per-process exit and official event names). A failed
 lane assertion is locatable through its own `<lane>.mjs:<line>` site — the only
 part of it the default output may carry; the site is derived from the real stack,
-restricted to the lane scripts themselves, and omitted entirely when nothing
-trusted can be read. No
+restricted to the lane scripts and their extracted case/support modules, and
+omitted entirely when nothing trusted can be read. No
 `Error.message` is ever copied into the default output — the lane assertion,
 the tool failure and the parser text all stay out of it — so terminal bytes,
 captured stderr, record contents, session text, cookies, tokens and connect

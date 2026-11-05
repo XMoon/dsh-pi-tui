@@ -51,6 +51,7 @@ import {
   SplitSmokeWaitError,
 } from '../../scripts/lib/split-smoke-diagnostics.mjs'
 import { waitForAcceptedHandoff, waitForReloadNotice, writeRequestedEvidence } from '../../scripts/split-process-upgrade-smoke.mjs'
+import { assertProfileClientPeers } from '../../scripts/lib/split-upgrade-support.mjs'
 import { waitForAnyReady, waitForSurfaceStatus } from '../../scripts/lib/split-smoke-processes.mjs'
 import { waitForHostSessionEvent } from '../../scripts/lib/split-smoke-sessions.mjs'
 import { waitForC1WorkEvent } from '../../scripts/lib/split-smoke-fixtures.mjs'
@@ -58,6 +59,11 @@ import { runHostRuntimeDisabled } from '../../scripts/smoke/split-process/host-r
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const UPGRADE_SCRIPT = join(ROOT, 'scripts', 'split-process-upgrade-smoke.mjs')
+const UPGRADE_SUPPORT = join(ROOT, 'scripts', 'lib', 'split-upgrade-support.mjs')
+const UPGRADE_SELECTION = join(ROOT, 'scripts', 'lib', 'split-upgrade-selection.mjs')
+const CROSS_BUILD_SCRIPT = join(ROOT, 'scripts', 'smoke', 'split-upgrade', 'cross-build-compatibility.mjs')
+const MANUAL_RELOAD_SCRIPT = join(ROOT, 'scripts', 'smoke', 'split-upgrade', 'manual-client-reload.mjs')
+const SOURCE_ISOLATION_SCRIPT = join(ROOT, 'scripts', 'smoke', 'split-upgrade', 'reload-source-isolation.mjs')
 const PROCESS_SCRIPT = join(ROOT, 'scripts', 'split-process-smoke.mjs')
 const LIB = join(ROOT, 'scripts', 'lib', 'split-smoke-diagnostics.mjs')
 const PROCESSES_LIB = join(ROOT, 'scripts', 'lib', 'split-smoke-processes.mjs')
@@ -858,6 +864,11 @@ test('an unknown error code is never reported, and never changes the category', 
   for (const [name, source] of [
     ['split-process', readFileSync(PROCESS_SCRIPT, 'utf8')],
     ['split-upgrade', readFileSync(UPGRADE_SCRIPT, 'utf8')],
+    ['split-upgrade-support', readFileSync(UPGRADE_SUPPORT, 'utf8')],
+    ['split-upgrade-selection', readFileSync(UPGRADE_SELECTION, 'utf8')],
+    ['cross-build-compatibility', readFileSync(CROSS_BUILD_SCRIPT, 'utf8')],
+    ['manual-client-reload', readFileSync(MANUAL_RELOAD_SCRIPT, 'utf8')],
+    ['reload-source-isolation', readFileSync(SOURCE_ISOLATION_SCRIPT, 'utf8')],
     ['the shared module', readFileSync(LIB, 'utf8')],
     ['split-smoke-processes', readFileSync(PROCESSES_LIB, 'utf8')],
     ['split-smoke-sessions', readFileSync(SESSIONS_LIB, 'utf8')],
@@ -1049,12 +1060,15 @@ test('the locator trusts only the lane sources and fails closed otherwise', () =
     'authenticated-lifecycle.mjs',
     'c1-scene.mjs',
     'client-hmr-signals.mjs',
+    'cross-build-compatibility.mjs',
     'detached-turn-interactions.mjs',
     'entry-admission.mjs',
     'host-runtime-disabled.mjs',
+    'manual-client-reload.mjs',
     'non-destructive-client-lifecycle.mjs',
     'official-web-composition.mjs',
     'pty-session-write-recovery.mjs',
+    'reload-source-isolation.mjs',
     'runtime-artifact-recovery.mjs',
     'shared-session-interactions.mjs',
     'split-process-smoke.mjs',
@@ -1062,6 +1076,7 @@ test('the locator trusts only the lane sources and fails closed otherwise', () =
     'split-smoke-fixtures.mjs',
     'split-smoke-processes.mjs',
     'split-smoke-profile.mjs',
+    'split-upgrade-support.mjs',
     'unknown-write-host-death.mjs',
     'web-helpers.mjs',
     'web-product.mjs',
@@ -1312,11 +1327,26 @@ test('a pre-collector failure cannot publish a forged assertion locator', (t) =>
 })
 
 test('both lanes raise locatable assertions through the shared class', () => {
-  for (const file of [PROCESS_SCRIPT, UPGRADE_SCRIPT]) {
+  for (const file of [PROCESS_SCRIPT, UPGRADE_SUPPORT]) {
     assert.match(readFileSync(file, 'utf8'),
       /function assert\(condition, message\) \{\n\s*if \(!condition\) throw new SplitSmokeAssertionError\(message\)\n\}/u,
       `${basename(file)} must raise locatable assertions`)
   }
+})
+
+test('a real upgrade support helper assertion publishes a trusted site without its payload', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('split-upgrade-helper-assertion-')
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ dependencies: {} }))
+  let error
+  try {
+    assertProfileClientPeers(dir, TARGET_PIN, 'UPGRADE_HELPER_SENTINEL')
+  } catch (caught) {
+    error = caught
+  }
+  assert.equal(error?.category, 'ASSERTION_FAILED')
+  assert.match(String(error.assertion), /^split-upgrade-support\.mjs:\d+$/u)
+  assert.ok(!safeFailureSummary(error).includes('UPGRADE_HELPER_SENTINEL'))
 })
 
 test('a setup failure is reported and leaves no half-created scene behind', (t) => {
@@ -1555,7 +1585,11 @@ test('no bounded wait in either lane or its extracted support throws a bare Erro
     // The lane's top-level `waitFor*` helpers moved into the shared module and
     // the extracted cases; the remaining scenario waits are inline closures.
     ['split-process', PROCESS_SCRIPT, 0],
-    ['split-upgrade', UPGRADE_SCRIPT, 4],
+    ['split-upgrade', UPGRADE_SCRIPT, 0],
+    ['split-upgrade-support', UPGRADE_SUPPORT, 3],
+    ['cross-build-compatibility', CROSS_BUILD_SCRIPT, 0],
+    ['manual-client-reload', MANUAL_RELOAD_SCRIPT, 1],
+    ['reload-source-isolation', SOURCE_ISOLATION_SCRIPT, 0],
     ['split-smoke-processes', PROCESSES_LIB, 5],
     ['split-smoke-sessions', SESSIONS_LIB, 3],
     ['split-smoke-fixtures', FIXTURES_LIB, 1],
