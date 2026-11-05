@@ -6937,8 +6937,17 @@ async function main() {
         const { host, ready: hostReady, workRoot } = await startC1Host('question', 'm5d5-interaction')
         const hostBefore = await hostIdentityFacts(host)
         assert(hostBefore.hostPid === hostReady.pid, 'M5D-05 the Host ready record does not own the Host identity')
+        // Deterministic observer boundary for the replacement mount: the
+        // assembly hold pauses HMR BEFORE the new UI runtime is created. The
+        // barrier is PRESENT for the initial mount (so it passes immediately)
+        // and is removed only before the HMR gesture, so the replacement mount
+        // is the one that actually blocks. Wiping the observer at that hold
+        // cannot erase a new frame: none exists yet.
+        const assemblyBarrier = join(workDir, 'm5d5-hmr-assembly.release')
+        writeFileSync(assemblyBarrier, 'initial-mount\n', { mode: 0o600 })
         const { client: clientA, ready: aReady } = await startC1Client('M5D-05 A', {
           SPLIT_PROCESS_CLIENT_HMR_PROBE: '1',
+          SPLIT_PROCESS_CLIENT_HOLD_ASSEMBLY: `domain@${assemblyBarrier}`,
         })
         // A creates the EMPTY Session X with the real product `/new`; B joins
         // the SAME X before the Host is asked, so both modals are the ONE
@@ -6996,6 +7005,9 @@ async function main() {
         const bBoundary = clientB.records.length
         const durableCheckpoint = durableOf(sessionX).length
         const hmrFrom = clientA.records.length
+        // Release the initial-mount hold path: removing the barrier now makes
+        // the NEXT mount (the replacement revision) pause at the domain hold.
+        rmSync(assemblyBarrier, { force: true })
         // A retires and remounts its surface while the SAME Host Question is
         // pending. B is never touched and never pre-answers.
         clientA.signalBusiness('SIGUSR2')
@@ -7016,24 +7028,26 @@ async function main() {
           'M5D-05 the old revision retired',
           120_000,
         )
-        // Synchronize on the replacement's own mount stage, THEN wipe this
-        // observer's buffer. The old revision is disposed already and the new
-        // runner fiber is not mounted yet (ui-mounted precedes application
-        // ready + mountRunner), so every pending-modal pixel seen after this
-        // point is painted by the NEW revision — an old frame cannot satisfy
-        // the wait below.
-        await clientA.waitFor(
+        // The replacement mount is now DETERMINISTICALLY parked at the domain
+        // assembly hold, after the old revision retired and BEFORE
+        // createRemoteClientUiRuntime / the runner paint. Wipe this observer's
+        // buffer here: no new frame can exist yet, so the reset can never
+        // erase a legitimate paint (the record-poller race the old ui-mounted
+        // sync had). Then release the barrier and wait for the new ready/frame.
+        const assemblyHold = await clientA.waitFor(
           record => clientA.records.indexOf(record) >= hmrFrom
-            && record.m4b2s === 'qualification' && record.op === 'startup-stage'
-            && record.stage === 'ui-mounted' && record.revision === start.revision,
-          'M5D-05 the replacement revision started mounting',
+            && record.m4b2s === 'qualification' && record.op === 'assembly-hold'
+            && record.stage === 'domain',
+          'M5D-05 the replacement paused before its UI creation',
           120_000,
         )
+        assert(assemblyHold.barrier === assemblyBarrier, 'M5D-05 the replacement paused on another assembly barrier')
         await new Promise(resolveFlush => clientA.term.write('', resolveFlush))
         clientA.term.reset()
         await new Promise(resolveFlush => clientA.term.write('', resolveFlush))
         assert(!(await clientA.viewport()).join('\n').includes('[1] Proceed'),
           'M5D-05 the retired revision frame survived the observer reset')
+        writeFileSync(assemblyBarrier, 'release\n', { mode: 0o600 })
         const ready = await clientA.waitFor(
           record => clientA.records.indexOf(record) >= hmrFrom
             && record.m4b2s === 'qualification' && record.op === 'hmr-revision-ready',
@@ -7338,6 +7352,8 @@ async function main() {
         await waitGone(aReady.pid, 15_000)
         assert(!alive(aReady.pid), 'M5D-07 Client A survived SIGHUP')
         const aExit = await clientA.waitForExit(60_000)
+        assert(aExit.code === 129 && aExit.signal === null,
+          `M5D-07 SIGHUP wrapper exit was ${JSON.stringify(aExit)} (script -e maps SIGHUP to 128+1=129)`)
         clientA.readRecords()
         assert(clientA.records.every(record => record.m4b2s !== 'client-closed'),
           'M5D-07 the SIGHUP process-failure path fabricated a graceful owner inventory')
