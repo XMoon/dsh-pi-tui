@@ -27,28 +27,29 @@ const dshPeerEntries = Object.entries(packageJson.peerDependencies ?? {})
 // tested with the same range semantics consumers use.
 test('all DSH runtime peers use the published npm lower bound', () => {
   assert.ok(dshPeerEntries.length > 0, 'the bundle must declare DSH runtime peers')
-  // The rc.2 adaptation lifts the whole peer policy onto the 0.2.1-rc.2
-  // floor: the 0.5.3 line is qualified against the exact published 0.2.1-rc.2 family
-  // and does not carry the intermediate 0.2.1-rc.1 release (the compatibility
-  // matrix records that version without a `tui`). The window stays open-ended
-  // above 0.2.1-rc.2; only the lower bound moved.
+  // The 0.2.2-rc.1 adaptation lifts the whole peer policy onto the 0.2.2-rc.1
+  // floor: the 0.5.6 line is qualified against that exact published family and
+  // no longer claims the 0.2.1-rc.* family (npm semver excludes a
+  // different-major.minor.patch prerelease). The window stays open-ended above
+  // 0.2.2-rc.1; only the lower bound moved.
   for (const [name, range] of dshPeerEntries) {
     assert.equal(range, expectedWindow, `${name} must use the open-ended support lower bound`)
     assert.equal(semver.validRange(range) !== null, true, `${name} peer range must be valid semver syntax`)
-    assert.equal(semver.satisfies('0.2.1-rc.2', range), true, `${name} must include its published npm floor`)
-    assert.equal(semver.satisfies('0.2.1-rc.1', range), false, `${name} must reject the intermediate 0.2.1-rc.1 release`)
-    assert.equal(semver.satisfies('0.2.0-rc.2', range), false, `${name} must reject the previous 0.2.0-rc.2 line`)
-    assert.equal(semver.satisfies('0.2.1-rc.0', range), false, `${name} must reject the prerelease below the floor`)
-    assert.equal(semver.satisfies('0.1.7-rc.2', range), false, `${name} must reject the legacy 0.1.7 line below the floor`)
-    assert.equal(semver.satisfies('0.2.0-alpha.1', range), false, `${name} must reject the alpha line below the floor`)
-    assert.equal(semver.satisfies('0.1.6', range), false, `${name} stable releases predate the rc.2 family contract`)
-    assert.equal(semver.satisfies('0.2.1', range), true, `${name} must remain open to later compatible releases`)
-    assert.equal(semver.satisfies('0.2.2', range), true, `${name} must remain open to later stable releases`)
+    assert.equal(semver.satisfies('0.2.2-rc.1', range), true, `${name} must include its published npm floor`)
     // A later prerelease of the SAME major.minor.patch tuple orders above the
-    // floor; a DIFFERENT tuple's prerelease is excluded by npm range semantics
-    // and is therefore not claimed as product-qualified.
-    assert.equal(semver.satisfies('0.2.1-rc.3', range), true, `${name} must accept a later rc of the same tuple`)
-    assert.equal(semver.satisfies('0.2.2-alpha.1', range), false, `${name} must not claim an unqualified cross-tuple prerelease`)
+    // floor; a different tuple's prerelease is excluded by npm range semantics
+    // (this is why the previous 0.2.1-rc.* family drops out entirely).
+    assert.equal(semver.satisfies('0.2.2-rc.2', range), true, `${name} must accept a later rc of the same tuple`)
+    assert.equal(semver.satisfies('0.2.2-rc.0', range), false, `${name} must reject the prerelease below the floor`)
+    assert.equal(semver.satisfies('0.2.2-alpha.3', range), false, `${name} must reject the alpha line below the floor`)
+    assert.equal(semver.satisfies('0.2.1-rc.5', range), false, `${name} must reject the previous 0.2.1-rc.5 family`)
+    assert.equal(semver.satisfies('0.2.1', range), false, `${name} must reject the previous stable 0.2.1 line`)
+    assert.equal(semver.satisfies('0.2.0-rc.2', range), false, `${name} must reject the previous 0.2.0-rc.2 line`)
+    assert.equal(semver.satisfies('0.1.7-rc.2', range), false, `${name} must reject the legacy 0.1.7 line below the floor`)
+    assert.equal(semver.satisfies('0.2.2', range), true, `${name} must remain open to the floor tuple's stable release`)
+    assert.equal(semver.satisfies('0.2.3', range), true, `${name} must remain open to later compatible releases`)
+    assert.equal(semver.satisfies('1.0.0', range), true, `${name} must remain open to later major lines`)
+    assert.equal(semver.satisfies('0.2.3-alpha.1', range), false, `${name} must not claim an unqualified cross-tuple prerelease`)
   }
 })
 
@@ -70,13 +71,28 @@ test('engines.dsh restates the matrix support floor and the official evaluator e
   // ignored) and prereleases participate in the range.
   assert.equal(evaluatePluginCompatibility(packageJson, {}, supportedFloor), undefined,
     `the official evaluator must admit its own floor ${supportedFloor}`)
-  for (const rejected of ['0.2.1-rc.1', '0.2.0-rc.2']) {
+  for (const rejected of ['0.2.2-rc.0', '0.2.1-rc.5', '0.2.1', '0.2.0-rc.2']) {
     const issue = evaluatePluginCompatibility(packageJson, {}, rejected)
     assert.notEqual(issue, undefined, `the official evaluator must reject ${rejected}`)
     assert.deepEqual(Object.keys(issue.requirements), ['engines.dsh'],
       `the ${rejected} rejection must be reported under engines.dsh, not as a peer`)
     assert.equal(issue.requirements['engines.dsh'], expectedWindow)
   }
+})
+
+test('engines.node declares the target Node floor, not a floating major', () => {
+  // Node's own engine semantics decide support: the DSH 0.2.2-rc.1 CLI declares
+  // `>=24.9.0`, so the TUI restates that exact floor instead of a floating
+  // `24` major that a CI image happens to provide.
+  const range = packageJson.engines.node
+  assert.equal(range, '>=24.9.0')
+  assert.equal(semver.validRange(range) !== null, true, 'engines.node must be valid semver syntax')
+  assert.equal(semver.satisfies('24.8.0', range), false, 'the Node floor must reject 24.8.0')
+  assert.equal(semver.satisfies('24.9.0', range), true, 'the Node floor must admit 24.9.0')
+  assert.equal(semver.satisfies('24.22.2', range), true, 'the locked development Node must be supported')
+  assert.equal(semver.satisfies('26.0.0', range), true, 'a later major must stay supported')
+  assert.equal(semver.satisfies('22.19.0', range), false, 'the retired Node 22 line must be rejected')
+  assert.equal(semver.satisfies('24.0.0', range), false, 'Node 24.0.0 predates the floor')
 })
 
 test('all DSH development packages stay pinned to the exact declared target', () => {
@@ -106,21 +122,25 @@ test('the package version reserves one consistent release identity across manife
   assert.equal(currentRows[0].tui, version, 'the current compatibility row must carry the package version as its TUI identity')
 })
 
-test('the pi2dsh compatibility manifest targets a DSH version this TUI line supports', () => {
-  // The ecosystem gate installs exactly `manifest.dshVersion` and proves the
-  // PUBLISHED pi2dsh bridge against it, so the pin answers one question: does
-  // our latest code keep the published bridge working on a DSH version we
-  // both support? The published consumer's own peer declaration owns how far
-  // that bridge can be claimed, which is why this pin is NOT the development
-  // target — it may legitimately trail `current.upgradeDsh` until the consumer
-  // widens its peers. It must still name a REAL pairing this line ships, so a
-  // stale pin can never silently validate a DSH version we do not support.
+test('the pi2dsh compatibility manifest stays an honest historical pairing record', () => {
+  // `test/compat/pi2dsh.json` records the LAST pairing that the published
+  // pi2dsh bridge actually qualified against — `pi2dsh@0.27.0 × DSH
+  // 0.2.1-rc.2`, which is the 0.5.5 TUI line. The third-party package has no
+  // published support statement for the current 0.2.2-rc.1 target, so the
+  // manifest deliberately keeps that historical fact instead of inventing a
+  // current-target pin. This audit therefore asserts BOTH halves: the pin names
+  // the historical 0.5.5 matrix row, AND it is OUTSIDE this package's new
+  // support floor — which is why `ecosystem-compat` cannot be claimed as
+  // rc.1 qualification (it stays an explicit external gap, see
+  // EXTERNAL_ECOSYSTEM_NOT_QUALIFIED).
   const manifest = JSON.parse(readFileSync(join(process.cwd(), 'test', 'compat', 'pi2dsh.json'), 'utf8'))
   const claimedRows = COMPAT_MATRIX.matrix.filter(row => row.versions.includes(manifest.dshVersion))
   assert.equal(claimedRows.length, 1, 'the pi2dsh manifest must name exactly one published matrix row')
-  assert.equal(claimedRows[0].tui, packageJson.version,
-    'the claimed DSH version must be a pairing this TUI line ships')
-  assert.equal(semver.satisfies(manifest.dshVersion, expectedWindow), true,
-    'the claimed DSH version must stay inside this package support floor')
+  assert.equal(claimedRows[0].tui, '0.5.5',
+    'the recorded pairing must stay the published 0.5.5 TUI line')
+  assert.notEqual(claimedRows[0].tui, packageJson.version,
+    'the historical ecosystem pairing must not be restated as the current TUI line')
+  assert.equal(semver.satisfies(manifest.dshVersion, expectedWindow), false,
+    'the historical pairing must stay OUTSIDE the current support floor instead of being claimed as qualified')
   assert.equal(manifest.consumer, 'pi2dsh', 'the pi2dsh manifest must name the pi2dsh consumer')
 })
