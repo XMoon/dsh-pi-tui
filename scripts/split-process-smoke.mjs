@@ -2420,6 +2420,7 @@ async function main(explicitPath) {
     const installation = createSplitSmokeProfile({ tarball, targetDshVersion, workDir })
     const {
       home,
+      env,
       profileDir,
       profilePackage,
       manifest,
@@ -2504,6 +2505,7 @@ async function main(explicitPath) {
     assert(publishedScopeIds.length === 1,
       `the full lane must have published exactly one Host scope: ${JSON.stringify(publishedScopeIds)}`)
     const isolatedScopeId = publishedScopeIds[0]
+    const scopeDir = join(publishedScopeRoot, isolatedScopeId)
     const scopeSuffix = isolatedScopeId.slice(0, 40)
 
     // ── Real-surface qualification (T27–T39) ─────────────────────────────
