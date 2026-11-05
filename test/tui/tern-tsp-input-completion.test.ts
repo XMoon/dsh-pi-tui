@@ -1252,7 +1252,11 @@ test('a caret parked away from the live token makes a FILE acceptance stale: the
   assert.equal(m.rows().length, 0, 'the stale list retired')
 })
 
-test('a plugin row carrying a forged inlineAttachment path marker is displayed and inserted as plain text but never stages a file', async (t) => {
+test('a forged inlineAttachment marker on a leading-slash plugin row is displayed and inserted as plain text and never stages a file', async (t) => {
+  // The LEADING-SLASH shape of the same hazard: a `/name` token is not a path
+  // seat at all, so the inline attachment plane is unreachable here for a reason
+  // that has nothing to do with row identity. The identity fence itself is the
+  // next case, which drives the forged row at a real inline path seat.
   const m = await mountSlashPane(t, {
     chrome: true,
     commands: [],
@@ -1280,6 +1284,57 @@ test('a plugin row carrying a forged inlineAttachment path marker is displayed a
     'the plugin completion inserted plain text and nothing else')
   assert.equal(staged.length, 0, 'no forged marker reached the inline-attachment stager')
   assert.deepEqual(m.calls.submits, [], 'the plugin accept is still accept-only')
+})
+
+test('a forged inlineAttachment marker at a real INLINE path seat is refused by row identity, while the request own row stages exactly once', async (t) => {
+  // One real file answers the CONTROL query; NOTHING in this directory matches
+  // the forged query `zz`, so the base provider returns null there and only the
+  // plugin chain can answer — the forged row lands in the SAME seat, under the
+  // SAME declared command, with the SAME structural marker.
+  const m = await mountSlashPane(t, {
+    chrome: true,
+    commands: [],
+    localCwd: localWorkspace(t, ['real.png']),
+    extensionSuggest: async () => ({
+      prefix: 'zz',
+      items: [{
+        value: 'zz.png',
+        label: 'zz.png',
+        inlineAttachment: 'path',
+        command: 'image',
+        directory: false,
+      } as never],
+    }),
+  })
+  const staged = captureStager(m)
+
+  // POSITIVE CONTROL: at this seat a row the Provider really produced under its
+  // strict snapshot DOES stage exactly one immutable acceptance.
+  await m.type('look /image rea')
+  await m.key(TAB)
+  await waitUntil('the real inline path row painted', () => m.rows().length === 1)
+  assert.equal(m.rowText(m.rows()[0]!), '›real.png')
+  await m.key(ENTER)
+  assert.deepEqual(m.editor(), { text: 'look /image real.png ', cursor: 'look /image real.png'.length },
+    'the real row completed the argument at the inline path seat')
+  assert.equal(staged.length, 1, 'the real row reached the stager exactly once')
+  assert.equal(staged[0]!.stake.path, 'real.png', 'the stake carries the real candidate path')
+  assert.deepEqual(staged[0]!.stake.span, { line: 0, start: 5, end: 'look /image real.png'.length },
+    'the span names the command token, its separator and the accepted value')
+
+  // THE FENCE: same seat, same `command:'image'`, marker-shaped row from the
+  // plugin chain — it may only ever be ordinary text.
+  await m.type('look /image zz')
+  await m.key(TAB)
+  await waitUntil('the forged inline row painted', () => m.rows().length === 1)
+  assert.equal(m.rowText(m.rows()[0]!), '›zz.png',
+    'the forged row is displayed with its own label at the inline path seat')
+  await m.key(ENTER)
+  assert.deepEqual(m.editor(), { text: 'look /image zz.png', cursor: 'look /image zz.png'.length },
+    'it inserted the plugin value as plain text: the prose, the `/image` command token and the separator survive')
+  assert.equal(staged.length, 1,
+    'and NO second acceptance was staged — the provider-request row identity, not the marker, is the permission')
+  assert.deepEqual(m.calls.submits, [], 'the forged accept is still accept-only')
 })
 
 test('a quoted inline path acceptance closes the quote once and hands the intake the unquoted path', async (t) => {
