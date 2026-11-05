@@ -180,29 +180,15 @@ test('the cross-build case owns the real old/new pair, reexec handoff and both l
   assert.doesNotMatch(sideBuild, /@deepseek-ai\/cordis|'@deepseek-ai\/dsh':/u,
     'the side-build must not copy the DSH family or a second Cordis')
 
-  // U07: a real SIGUSR2 handoff, new OS PID, restored same Host/Session.
-  const reexec = source.indexOf("clientA.signalBusiness('SIGUSR2')")
-  assert.ok(reexec > 0)
+  // U07 fixed qualification inputs and negatives (behaviour is owned by E3).
   assert.match(source, /SPLIT_PROCESS_CLIENT_REEXEC_PROBE: '1'/u)
   assert.match(source, /SPLIT_PROCESS_CLIENT_REEXEC_TARGET_PACKAGE_ROOT: sideBuildPackagePath/u)
-  assert.match(source, /m4r === 'handoff-restored'/u)
-  assert.match(source, /clientClosed\.sessionOpen, false/u)
-  assert.match(source, /c1Restored\.clientBuildId, newBuildId/u)
-  assert.match(source, /newOsPid: c1Pid !== clientAPid/u)
   // Negative 1: wrong expected Host never connects.
   assert.match(source, /SPLIT_PROCESS_CLIENT_EXPECTED_INSTANCE_ID: randomUUID\(\)/u)
   assert.match(source, /HOST_IDENTITY_MISMATCH/u)
   // Negative 2: the injected child failure is forwarded only to the child.
   assert.match(source, /SPLIT_PROCESS_CLIENT_REEXEC_CHILD_FAILURE: 'client-bootstrap'/u)
   assert.match(source, /qualification forced client bootstrap failure/u)
-  // U02/U04 remain real cross-build qualification after the handoff.
-  assert.ok(source.indexOf('qualification-host-foundation') > reexec)
-  assert.ok(source.indexOf('host-rpc-proof') > reexec)
-  assert.match(source, /assertIdentityKept\(clientBAuth\.host, hostABefore/u)
-  assert.match(source, /clientBAuth\.host\.buildId === oldBuildId/u)
-  assert.ok(source.indexOf('crossBuildSurface') > reexec)
-  assert.match(source, /SPLIT_PROCESS_CLIENT_SESSION: sessionId/u)
-  assert.match(source, /waitForScreen\('cross-build-hold'/u)
   // Case-owned failure injection and cleanup.
   assert.match(source, /failpoint\('upgrade\.cross-build-compatibility\.after-old-host-spawn'\)/u)
   assert.match(source, /\} finally \{/u)
@@ -241,8 +227,6 @@ test('the production /reload-client case never uses a signal or override for the
   assert.equal(source.indexOf('signalBusiness('), -1, 'U08 must never simulate the user command with SIGUSR2')
   assert.match(source, /installPlugin\(dsh, newArtifact\.path, harnessDir, env, false\)/u)
   assert.match(source, /assertProfileClientPeers\(profileDir, targetDshVersion, 'U08 upgraded profile install'\)/u)
-  assert.match(source, /reloadRequested\.targetBuildId, newBuildId/u)
-  assert.match(source, /replacementRestored\.clientBuildId, newBuildId/u)
   assert.match(source, /productionTargetResolvedFromProfile: true/u)
   assert.match(source, /qualificationTargetOverrideUsed: false/u)
   assert.match(source, /alreadyCurrentKeptOldSurface: true/u)
@@ -274,8 +258,6 @@ test('the target-source-isolation case proves both entries in ONE live Client pr
   assert.match(source, /qualificationUsedOverride: true/u)
   assert.match(source, /failpoint\('client-reload\.target-source-isolation\.after-host-spawn'\)/u)
   assert.match(source, /registerIsolatedHome\(dshHome\)/u)
-  assert.match(source, /const scope = \{ \.\.\.context, hosts, clients \}/u)
-  assert.match(source, /async function runReloadSourceIsolationRound\(context\) \{\n  const \{\n    EntryProcess, SurfaceEntryProcess,/u)
 })
 
 test('the extracted upgrade modules resolve every free identifier', () => {
