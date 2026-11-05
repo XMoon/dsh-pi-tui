@@ -167,7 +167,14 @@ When a known child settles, the runner rechecks the captured identity. A newer
 navigation leaves the visible surface unchanged and parks the successful Direct
 owner; it does not roll back the published child. If the identity is current,
 a short gated handoff swaps the visible handle, bumps the generation, restores
-rewind draft state, and retires the old owner. Cleanup waits for pending forks
+rewind draft state, and retires the old owner. The adoption's post-commit child
+phase follows the SAME `navigationKind` the ordinary transition consumes: a
+`stop-and-quiesce` backend keeps the abort-aware child idle wait (it owns the
+in-process Agent), while a `detach-client` backend initializes the committed
+child's live surface and catalog immediately and never waits for the child's
+Host idle — the Host fork business interface owns the cut and the child's
+activity, and the adopted child may legitimately be running when this Client
+arrives. Cleanup waits for pending forks
 before retiring current and parked Direct owners, including late published-
 with-error settlements.
 

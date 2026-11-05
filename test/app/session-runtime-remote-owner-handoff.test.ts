@@ -103,6 +103,8 @@ function harness(options: { retirement?: Partial<SessionOwnerRetirement> } = {})
   const live = new Map<string, { binding: FakeBinding; refs: number }>()
   const arms = new Map<string, OpenArm>()
   let forkHook: (() => void) | undefined
+  /** A test-owned override of the Host fork settlement (a refusal shape). */
+  let forkOutcomeOverride: ForkResult['outcome'] | undefined
   let nextChildId = 0
 
   const retain = (sessionId: string): ClientSessionOwner => {
@@ -223,6 +225,11 @@ function harness(options: { retirement?: Partial<SessionOwnerRetirement> } = {})
     fork: async (request): Promise<ForkResult> => {
       calls.forks += 1
       forkHook?.()
+      if (forkOutcomeOverride !== undefined) {
+        const outcome = forkOutcomeOverride
+        forkOutcomeOverride = undefined
+        return { ownership: 'current', outcome }
+      }
       nextChildId += 1
       // Publication only: catalogued identity, NO retain, NO binding.
       return { ownership: 'current', outcome: { kind: 'forked', handle: { session: { id: `child-${nextChildId}` } } } }
@@ -369,6 +376,7 @@ function harness(options: { retirement?: Partial<SessionOwnerRetirement> } = {})
     countRefs: (id: string): number => live.get(id)?.refs ?? 0,
     disposeSurface: (): void => { disposed = true },
     setForkHook: (hook: (() => void) | undefined): void => { forkHook = hook },
+    setForkOutcome: (outcome: ForkResult['outcome']): void => { forkOutcomeOverride = outcome },
     failNextGenerationReset: (): void => { explodeNextGenerationReset = true },
     failNextCommitBeforePublication,
     failNextCompletionOwnerAfterPublication,
@@ -2129,4 +2137,131 @@ test('a Host-opened target whose local surface was superseded is INDETERMINATE, 
     'the target was opened but the local surface was superseded — the operation may have happened')
   assert.match(outcome.message, /opened but the local surface was superseded/)
   assert.equal(h.core.currentSessionId(), 'session-a', 'the old owner remains current locally')
+})
+
+// ── the N2 sibling paths: fork/rewind adoption and the Client exit ─────────
+//
+// The detached-navigation contract ("leaving a Session never stops, and never
+// waits for, the Host Turn") applies to EVERY path that replaces the Client's
+// exact owner reference, not only to `/new` and a selected-session switch.
+// `/fork` and `/rewind` adopt a published child, and the exit family releases
+// the current owner under the official shutdown shape. Both must stay free of
+// an implicit Host cancel, and the forked child's live surface must not be
+// gated on the child Host Agent's idle — the Host business interface owns the
+// fork cut and the child's activity.
+
+test('a Remote fork of a RUNNING source never cancels the Host Turn it leaves', async () => {
+  const h = harness()
+  h.publishRetained('session-a')
+  const source = h.bindingOf('session-a')!
+  source.setRunning(true)
+
+  const outcome = await h.runtime.forkSession('session-a')
+  assert.equal(outcome.kind, 'success')
+  assert.equal(h.calls.forks, 1, 'exactly one Host fork dispatch')
+  assert.equal(h.calls.opens.length, 1, 'exactly one adoption open')
+  assert.equal(h.calls.opens[0], 'child-1', 'the opened child is the committed session')
+  assert.equal(h.core.currentSessionId(), 'child-1', 'the adopted child is current')
+  assert.equal(source.cancelCalls(), 0, 'the fork source is never cancelled by the Client')
+  assert.equal(source.session.getSnapshot().running, true,
+    'the Host Turn of the source keeps running after this Client forked')
+  assert.equal(h.countRefs('session-a'), 0, 'the source owner is released exactly once after the commit')
+  assert.ok(h.events.includes('release:session-a@current=child-1'),
+    'the source reference is released only after the child was committed')
+  assert.ok(h.events.includes('init:child-1'), 'the adopted child surface init ran')
+})
+
+test('a Remote fork adopts a RUNNING child without waiting for its Host idle', async () => {
+  const h = harness()
+  h.publishRetained('session-a')
+  // The child the Host published is already RUNNING when this Client adopts it
+  // (the Host business interface decides the child's activity). A detached
+  // adoption must initialize the live surface immediately instead of blocking
+  // on `SessionSnapshot.running === false`, which nothing guarantees.
+  h.arms.set('child-1', {
+    duringOpen: () => { h.bindingOf('child-1')!.setRunning(true) },
+  })
+  const outcome = await Promise.race([
+    h.runtime.forkSession('session-a'),
+    new Promise<'timeout'>(resolve => { setTimeout(() => resolve('timeout'), 5_000) }),
+  ])
+  assert.notEqual(outcome, 'timeout',
+    'the adoption blocked on the running child\'s Host idle')
+  assert.ok(outcome !== 'timeout' && outcome.kind === 'success', `the fork must settle: ${JSON.stringify(outcome)}`)
+  assert.equal(h.core.currentSessionId(), 'child-1', 'the running child is current')
+  assert.ok(h.events.includes('init:child-1'),
+    'the running child\'s live surface still initialized')
+  assert.equal(h.bindingOf('child-1')!.cancelCalls(), 0,
+    'adopting a running child never cancels its Host Turn')
+  assert.equal(h.bindingOf('child-1')!.session.getSnapshot().running, true,
+    'the child keeps running after the adoption')
+  assert.ok(h.events.indexOf('catalog:child-1') > h.events.indexOf('init:child-1'),
+    'the catalog refresh still follows the child surface init')
+})
+
+test('a detached fork keeps the child surface off the Host idle but still skips it on a lifecycle abort', async () => {
+  // The lifecycle abort can land during the adoption's OWN post-commit awaits
+  // (the source release). The surface is disposed then, so the committed child
+  // must not be repainted: the abort skip is the SAME behavior the ordinary
+  // transition's committed-child phase has, on BOTH backends.
+  let abortOnRetire: (() => void) | undefined
+  let servicesRef: ReturnType<typeof createRemoteSessionOwnerServices> | undefined
+  const h = harness({
+    retirement: {
+      retire: async (owner, mode) => {
+        abortOnRetire?.()
+        return servicesRef!.retirement.retire(owner, mode)
+      },
+    },
+  })
+  servicesRef = h.services
+  h.publishRetained('session-a')
+  abortOnRetire = () => { h.controller.abort() }
+
+  const outcome = await h.runtime.forkSession('session-a')
+  assert.equal(outcome.kind, 'success')
+  assert.equal(h.core.currentSessionId(), 'child-1', 'the abort does not roll back the committed child')
+  assert.equal(h.events.includes('init:child-1'), false,
+    'the committed child surface must not be initialized after the lifecycle aborted')
+  assert.ok(h.events.includes('release:session-a@current=child-1'),
+    'the source release still ran exactly once')
+})
+
+test('a Host-refused fork is reported truthfully and never adopts, parks or retries', async () => {
+  const h = harness()
+  h.publishRetained('session-a')
+  // The official business refusal shape: no legal fork boundary (no completed
+  // prefix). The Client must report it as the Host's own refusal — never as an
+  // adopted child and never by parking a handle that does not exist.
+  h.setForkOutcome({
+    kind: 'rejected',
+    error: { code: 'session/fork-unavailable', message: 'session "session-a" has no completed turn to fork from' },
+  })
+  const outcome = await h.runtime.forkSession('session-a')
+  assert.ok(outcome.kind === 'error', `the refusal must be a failure: ${JSON.stringify(outcome)}`)
+  assert.equal(outcome.reason, 'host-refused')
+  assert.match(outcome.text, /no completed turn to fork from/)
+  assert.match(outcome.text, /session\/fork-unavailable/)
+  assert.deepEqual(h.calls.opens, [], 'a refused fork dispatches no adoption open')
+  assert.equal(h.calls.forks, 1, 'the refusal is never retried')
+  assert.equal(h.core.currentSessionId(), 'session-a', 'the source Session stays current')
+  assert.equal(h.countRefs('session-a'), 1, 'the source reference stays held')
+  assert.equal(h.events.filter(entry => entry.startsWith('init:')).length, 0, 'no child surface work ran')
+})
+
+test('a Remote client exit releases its reference without cancelling the Host Turn', async () => {
+  const h = harness()
+  h.publishRetained('session-a')
+  const owner = h.bindingOf('session-a')!
+  owner.setRunning(true)
+  // The synchronous shutdown preparation is a Client no-op on Remote: the
+  // official shutdown pre-cancel exists for the backend that OWNS the Agent.
+  h.runtime.preCancelOwnedSession()
+  assert.equal(owner.cancelCalls(), 0, 'the exit preparation never cancels the Host owner')
+  const report = await h.runtime.retireOwnedSession()
+  assert.deepEqual(report.failures, [], 'the Client reference release reported no failure')
+  assert.equal(h.countRefs('session-a'), 0, 'the Client reference was released exactly once')
+  assert.equal(owner.cancelCalls(), 0, 'the exit never cancels the Host Turn')
+  assert.equal(owner.session.getSnapshot().running, true,
+    'the Host Turn keeps running after this Client exited')
 })

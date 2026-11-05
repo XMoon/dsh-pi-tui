@@ -1338,11 +1338,23 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
           // that success would otherwise race its own retirement.
           if (retirement !== undefined) await retirement
         }
+        // A detach-client backend keeps the committed child's Host Turn alive:
+        // the forked child is a Host-owned Session that may legitimately be
+        // RUNNING when this Client adopts it (the Host fork business interface
+        // decides the cut and the child's activity, never the Client), so the
+        // adoption must not wait for its idle — the same rule the ordinary
+        // transition's committed-child phase follows. The lifecycle-abort skip
+        // still runs on BOTH backends: an exit during this phase owns the same
+        // skip-the-surface-init behavior.
         let aborted: boolean | 'unobservable' = false
-        try {
-          aborted = await deps.retirement.whenIdleOrAbort(nextOwner, deps.lifecycleSignal)
-        } catch (error) {
-          deps.diag.error('fork child quiescence failed after commit', { error: safeErrorMessage(error), session: nextSessionId })
+        if (deps.retirement.navigationKind === 'detach-client') {
+          aborted = deps.lifecycleSignal.aborted
+        } else {
+          try {
+            aborted = await deps.retirement.whenIdleOrAbort(nextOwner, deps.lifecycleSignal)
+          } catch (error) {
+            deps.diag.error('fork child quiescence failed after commit', { error: safeErrorMessage(error), session: nextSessionId })
+          }
         }
         if (aborted !== true) {
           try {
