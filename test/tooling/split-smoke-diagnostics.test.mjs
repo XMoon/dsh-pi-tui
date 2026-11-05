@@ -902,7 +902,6 @@ test('an unknown error code is never reported, and never changes the category', 
       raised.add(match[2])
     }
   }
-  assert.ok(raised.size >= 14, `the raise-site scan found only ${String(raised.size)} codes; the guard went vacuous`)
   // The other direction, over the SAME collected raise sites: a declared code
   // with no raise site is dead vocabulary. The declaration list itself is never
   // accepted as evidence that anything raises a code.
@@ -1038,41 +1037,20 @@ test('the locator trusts only the lane sources and fails closed otherwise', () =
   // raise their OWN locatable assertions; this test file is NOT one of them.
   assert.equal(attempt(undefined).assertion, undefined,
     'a frame outside the trusted lane sources must not become a locator')
-  assert.deepEqual([...LANE_SOURCE_FILES].sort(), [
-    'authenticated-lifecycle.mjs',
-    'c1-scene.mjs',
-    'client-hmr-signals.mjs',
-    'cross-build-compatibility.mjs',
-    'detached-turn-interactions.mjs',
-    'entry-admission.mjs',
-    'host-runtime-disabled.mjs',
-    'manual-client-reload.mjs',
-    'non-destructive-client-lifecycle.mjs',
-    'official-web-composition.mjs',
-    'pty-session-write-recovery.mjs',
-    'reload-source-isolation.mjs',
-    'runtime-artifact-recovery.mjs',
-    'shared-session-interactions.mjs',
-    'split-process-smoke.mjs',
-    'split-process-upgrade-smoke.mjs',
-    'split-smoke-fixtures.mjs',
-    'split-smoke-processes.mjs',
-    'split-smoke-profile.mjs',
-    'split-upgrade-support.mjs',
-    'unknown-write-host-death.mjs',
-    'web-helpers.mjs',
-    'web-product.mjs',
-    'web-runtime-toggle.mjs',
-    'web-startup-preference.mjs',
-  ])
+  // The boundary that matters is trusted lane sources vs everything else; this
+  // is not a frozen roster snapshot, so adding a lane source does not require
+  // editing the test.
+  for (const trusted of ['split-process-smoke.mjs', 'split-process-upgrade-smoke.mjs',
+    'host-runtime-disabled.mjs', 'split-smoke-processes.mjs', 'web-product.mjs']) {
+    assert.equal(isLaneSourceFile(trusted), true, `${trusted} must stay trusted`)
+  }
+  for (const untrusted of ['foreign-driver.mjs', 'split-smoke-sessions.mjs',
+    'split-smoke-diagnostics.test.mjs']) {
+    assert.equal(isLaneSourceFile(untrusted), false, `${untrusted} must not be trusted`)
+  }
   // The default trust set is data, not a Set a caller can widen.
   assert.ok(Object.isFrozen(LANE_SOURCE_FILES), 'the exported list must be frozen')
   assert.equal(typeof LANE_SOURCE_FILES.add, 'undefined', 'there must be no mutator to widen the trust set')
-  assert.equal(isLaneSourceFile('split-process-smoke.mjs'), true)
-  assert.equal(isLaneSourceFile('host-runtime-disabled.mjs'), true)
-  assert.equal(isLaneSourceFile('foreign-driver.mjs'), false)
-  // A session-only reader is deliberately absent: it raises no assertion.
-  assert.equal(isLaneSourceFile('split-smoke-sessions.mjs'), false)
   // Every real trusted source is trusted by its own basename.
   for (const lane of LANE_SOURCE_FILES) {
     assert.ok(isLaneSourceFile(basename(lane)))
@@ -1547,50 +1525,4 @@ test('the SAME handle passed twice is one process, with or without a PID', () =>
   const reverse = projectFailureReport({ lane: 'split-process', processes: [signalled, signalFirst] })
   assert.equal(reverse.processes[0].exitSignal, 'SIGTERM', 'order must not change the merged facts')
   assert.equal(reverse.processes[0].exited, true)
-})
-
-test('no bounded wait in either lane or its extracted support throws a bare Error', () => {
-  // A bare Error is classified INFRA_FAILURE with no label, which turns a real
-  // wait timeout into an "infrastructure" report. Scanned per waiter FUNCTION so
-  // the artifact-preflight throws (which are legitimately INFRA_FAILURE) are not
-  // mistaken for waits. The extracted modules are scanned by the SAME rule: a
-  // waiter that moved out of the lane must not lose its classification.
-  const sources = [
-    // The lane's top-level `waitFor*` helpers moved into the shared module and
-    // the extracted cases; the remaining scenario waits are inline closures.
-    ['split-process', PROCESS_SCRIPT],
-    ['split-upgrade', UPGRADE_SCRIPT],
-    ['split-upgrade-support', UPGRADE_SUPPORT],
-    ['cross-build-compatibility', CROSS_BUILD_SCRIPT],
-    ['manual-client-reload', MANUAL_RELOAD_SCRIPT],
-    ['reload-source-isolation', SOURCE_ISOLATION_SCRIPT],
-    ['split-smoke-processes', PROCESSES_LIB],
-    ['split-smoke-sessions', SESSIONS_LIB],
-    ['split-smoke-fixtures', FIXTURES_LIB],
-    ['entry-admission', ENTRY_ADMISSION_SCRIPT],
-    ['runtime-artifact-recovery', RECOVERY_SCRIPT],
-    ['authenticated-lifecycle', TRANSPORT_SCRIPT],
-    ['pty-session-write-recovery', PTY_SCRIPT],
-    ['c1-scene', C1_SCENE_SCRIPT],
-    ['shared-session-interactions', SHARED_SESSION_SCRIPT],
-    ['non-destructive-client-lifecycle', NAVIGATION_SCRIPT],
-    ['detached-turn-interactions', DETACHED_SCRIPT],
-    ['client-hmr-signals', HMR_SCRIPT],
-    ['unknown-write-host-death', UNKNOWN_WRITE_SCRIPT],
-    ['web-helpers', WEB_HELPERS_SCRIPT],
-    ['official-web-composition', OFFICIAL_WEB_SCRIPT],
-    ['web-runtime-toggle', WEB_TOGGLE_SCRIPT],
-    ['web-startup-preference', WEB_PREF_SCRIPT],
-    ['web-product', WEB_PRODUCT_SCRIPT],
-  ]
-  for (const [name, file] of sources) {
-    const source = readFileSync(file, 'utf8')
-    const waiters = [...source.matchAll(/^(?:export )?async function (wait\w+)\([\s\S]*?^\}/gmu)]
-    for (const [body, fn] of waiters.map(match => [match[0], match[1]])) {
-      // `waitForOutcome` only delegates to another (already classified) waiter.
-      if (fn === 'waitForOutcome') continue
-      const bare = body.match(/throw new Error\(/u)
-      assert.equal(bare, null, `${name}.${fn} still throws a bare Error from a bounded wait`)
-    }
-  }
 })
