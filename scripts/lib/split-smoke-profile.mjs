@@ -31,7 +31,7 @@ import {
   validateCandidateTarball,
 } from '../pi2dsh-compat-smoke.mjs'
 import { loadDshDistribution, npmDshVersion, PACKAGE_ROOT } from './dsh-distribution.mjs'
-import { requireExactSmokeDshPin, SplitSmokeAssertionError } from './split-smoke-diagnostics.mjs'
+import { requireExactSmokeDshPin, smokeArtifactIdentity, SplitSmokeAssertionError } from './split-smoke-diagnostics.mjs'
 import { writeSurfaceLlmFixture } from './split-smoke-fixtures.mjs'
 
 function assert(condition, message) {
@@ -59,7 +59,12 @@ export function inspectSplitCandidate(explicitPath) {
   const manifest = validateCandidateTarball(tarball)
   const candidateSha256 = createHash('sha256').update(readFileSync(tarball)).digest('hex')
   const targetDshVersion = npmDshVersion()
-  requireExactSmokeDshPin('candidate', manifest, targetDshVersion)
+  // The identity is already fully validated here; carrying it on the pin error
+  // keeps the refused-pairing report as traceable as the pre-extraction one
+  // (role, name, version, SHA256 and both exact pins) without raw manifest text.
+  requireExactSmokeDshPin('candidate', manifest, targetDshVersion, {
+    artifact: smokeArtifactIdentity('candidate', manifest, candidateSha256),
+  })
   return { tarball, manifest, candidateSha256, targetDshVersion }
 }
 
