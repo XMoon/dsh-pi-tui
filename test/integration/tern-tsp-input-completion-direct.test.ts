@@ -53,7 +53,7 @@
 
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, truncateSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, join, relative } from 'node:path'
 import test from 'node:test'
@@ -1510,6 +1510,98 @@ test('an inline `/image` of a file that is not an image keeps the user’s path 
     await eraseDraft(fixture)
     assert.deepEqual(stagedAttachmentFiles(fixture.workRoot), [], 'the refusal wrote no durable attachment')
   } finally {
+    recorder.detach()
+    stores.detach()
+    // reason: fixture.settle() awaits ownership cleanup, not a timer (receiver-blind guard).
+    await fixture.settle()
+  }
+})
+
+/**
+ * I-D D13 — the two remaining refusal branches, on the REAL deployment limits.
+ * The non-image refusal is covered by the case above; the plan's D13 also names an
+ * OVER-LIMIT file and an UNREADABLE one. Both are driven through the same production
+ * intake the leading `/image` command uses, with the harness's own default byte cap
+ * (`@deepseek-ai/dsh-attachment-local`: 20 MiB) and a real `EACCES` — no production
+ * limit is overridden and no error is simulated. Each refusal must keep the user's own
+ * path text editable, mint no placeholder, announce no success, and leave ZERO orphan
+ * entries in either draft store (an orphan keeps bytes resident).
+ */
+test('an inline `/image` of an over-limit file and of an unreadable file both refuse with the real intake error and leave no orphan, no token and an editable draft', async (t) => {
+  const life = testLifecycle(t)
+  const fixture = await createDirectTspFixture(life, { deltas: ['ID-D13'], composerActions: true, nativeImages: true })
+  const stores = watchDraftStores()
+  const recorder = fixture.recordPrompts(() => {})
+  const secret = join(fixture.workRoot, 'shots', 'locked.png')
+  try {
+    await waitForInputDelivery(fixture.pane)
+    const shots = join(fixture.workRoot, 'shots')
+    mkdirSync(shots, { recursive: true })
+
+    // (1) OVER-LIMIT: 21 MiB against the default 20 MiB cap, and the guard reads only
+    // the stat — the bytes are never pulled into memory.
+    const huge = join(shots, 'huge.png')
+    writeFileSync(huge, Buffer.alloc(1))
+    truncateSync(huge, 21 * 1024 * 1024)
+    assert.equal(statSync(huge).size, 21 * 1024 * 1024, 'the file really is over the configured cap')
+    assert.equal(stores.imageEntries(), 0, 'the image draft store starts empty')
+
+    await prepareDraft(fixture, `看一下 /image ${shots}/huge`)
+    await settle(fixture, 'the over-limit row', () => rowTexts(fixture).includes(huge))
+    pressEnter(fixture)
+    const overText = `看一下 /image ${huge} `
+    await waitFor('the real over-limit error notice', () =>
+      noticeTexts(fixture).some(text => text.includes('current attachment limit is')), 25_000)
+    await settle(fixture, 'the over-limit acceptance to stay put', () =>
+      composerText(fixture) === overText && composerCursor(fixture) === overText.length - 1)
+    await observeNothing(fixture)
+    assert.equal(stores.readEntries(), 1, 'the intake really ran its own read attempt for this accept')
+    assert.equal(stores.imageAdds.length, 0, 'the over-limit refusal staged nothing')
+    assert.equal(stores.imageEntries() + stores.fileEntries(), 0, 'no orphan entry in either draft store')
+    assert.equal(overText.includes('[image #'), false, 'no success token was minted for a failure')
+    assert.deepEqual(successNotices(fixture), [],
+      `no success notice was claimed for the over-limit refusal (got ${JSON.stringify(noticeTexts(fixture))})`)
+    assert.equal(recorder.calls(), 0, 'the refusal submitted nothing')
+    assert.equal(fixture.modelCalls(), 0, 'the refusal never reached the model')
+
+    // (2) UNREADABLE: a REAL PNG whose mode drops every read bit for this uid (1000),
+    // so `stat` succeeds and the read itself fails — the intake's own IO error, not a
+    // simulated one.
+    fixture.pane.input.type(END)
+    await settle(fixture, 'the over-limit draft caret reaches the line end', () =>
+      composerCursor(fixture) === overText.length)
+    await eraseDraft(fixture)
+    const png = await realPng()
+    writeFileSync(secret, png)
+    chmodSync(secret, 0o000)
+    await prepareDraft(fixture, `看一下 /image ${shots}/locked`)
+    await settle(fixture, 'the unreadable row is still offered (it exists; an extension is not a read grant)',
+      () => rowTexts(fixture).includes(secret))
+    pressEnter(fixture)
+    const unreadText = `看一下 /image ${secret} `
+    await waitFor('the real unreadable-file error notice', () =>
+      noticeTexts(fixture).some(text => text.includes('Image file cannot be read: locked.png')), 25_000)
+    await settle(fixture, 'the unreadable acceptance to stay put', () =>
+      composerText(fixture) === unreadText && composerCursor(fixture) === unreadText.length - 1)
+    await observeNothing(fixture)
+
+    const errorNotices = noticeTexts(fixture).filter(text => !text.startsWith('attached '))
+    assert.equal(errorNotices.some(text => text.includes(secret)), false,
+      `the error taxonomy stays basename-only: no notice carries the full Client path (got ${JSON.stringify(errorNotices)})`)
+    assert.equal(stores.imageAdds.length, 0, 'the unreadable refusal staged nothing either')
+    assert.equal(stores.imageEntries() + stores.fileEntries(), 0, 'still zero orphan entries in either draft store')
+    assert.deepEqual(successNotices(fixture), [], 'and neither refusal announced a success')
+
+    // The refused drafts remain ordinary editable text at the caret (the plan's own
+    // wording for D13), for BOTH branches.
+    fixture.pane.input.type(END)
+    await settle(fixture, 'the caret at the line end', () => composerCursor(fixture) === unreadText.length)
+    await editAtCaret(fixture, `${unreadText}x`, 'x')
+    assert.equal(composerText(fixture), `${unreadText}x`, 'the refused draft stays an ordinary editable draft')
+    await eraseDraft(fixture)
+    assert.deepEqual(stagedAttachmentFiles(fixture.workRoot), [], 'the two refusals wrote no durable attachment')
+  } finally {
+    if (existsSync(secret)) chmodSync(secret, 0o600)
     recorder.detach()
     stores.detach()
     // reason: fixture.settle() awaits ownership cleanup, not a timer (receiver-blind guard).
