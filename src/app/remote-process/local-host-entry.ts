@@ -1001,6 +1001,29 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
           error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
         })
       }
+      // rc1 teardown compatibility: Cordis 4.1 unloads a provider fiber only
+      // after its dependent fibers finish, and the built-in HMR service's own
+      // unload drains its serialized reload queue. A post-boot failure can
+      // happen while the initial configuration refresh is still queued;
+      // disposing the tree then waits on that refresh while the refresh waits
+      // on the Loader being disposed, so the launcher's 5s shutdown grace
+      // force-exits before the cleanup classification can be recorded. Drain
+      // the PUBLIC HMR transaction queue first (bounded) so the official
+      // shutdown can settle; a drain that does not complete stays a truthful
+      // prior cleanup failure instead of a fabricated completed record.
+      try {
+        await drainHmrTransactions(handle?.ctx as unknown as HostHmrTransactionsContext)
+      } catch (drainError) {
+        priorCleanupFailure ??= drainError instanceof Error ? drainError.message : String(drainError)
+        writeEntryRecord({
+          m4a0: 'cleanup-failure',
+          processRole: 'host',
+          phase: 'after-boot',
+          pid: process.pid,
+          step: 'hmr-drain',
+          error: priorCleanupFailure,
+        })
+      }
       await finishHostFailureCleanup(
         shutdownOwner,
         writeEntryRecord,
@@ -1011,6 +1034,49 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
     }
   } finally {
     await seat.close()
+  }
+}
+
+/** The public HMR transaction queue seam the post-boot failure cleanup drains. */
+export interface HostHmrTransactionsContext {
+  get?(name: string): { runExclusive?(operation: () => Promise<unknown>): Promise<unknown> } | undefined
+}
+
+/**
+ * Drain the HMR service's serialized reload transactions before the failed
+ * Host disposes its application tree.
+ *
+ * Cordis 4.1 unloads a provider fiber only after its dependent fibers finish,
+ * and the built-in HMR service's own unload drains the reload queue that is
+ * still holding the boot-time configuration refresh. Disposing the tree while
+ * that refresh is queued therefore deadlocks: the HMR fiber waits for the
+ * refresh, and the refresh waits for the Loader that is being disposed. The
+ * launcher's shutdown then force-exits after its 5s grace before the cleanup
+ * classification can be recorded. `runExclusive` is the public serialization
+ * seam, so an empty operation joins the queue and resolves after the in-flight
+ * transaction settled. A missing HMR service is a no-op; a queue that cannot
+ * drain within the bound rejects so the caller reports a truthful cleanup
+ * failure instead of claiming completion.
+ *
+ * @param context - the Host context whose HMR service (if any) is drained.
+ * @param timeoutMs - the bound on the drain, so a stuck queue cannot hang exit.
+ */
+export async function drainHmrTransactions(
+  context: HostHmrTransactionsContext,
+  timeoutMs = 3_000,
+): Promise<void> {
+  const hmr = context.get?.('hmr')
+  if (typeof hmr?.runExclusive !== 'function') return
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    await Promise.race([
+      hmr.runExclusive(async () => undefined),
+      new Promise<void>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error('local host entry: HMR transactions did not drain before failure cleanup')), timeoutMs)
+      }),
+    ])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
   }
 }
 
