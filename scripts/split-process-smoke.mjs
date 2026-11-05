@@ -5841,6 +5841,411 @@ async function main() {
         })
       }
 
+
+      // M5N-02 (M5-N): the SIBLING paths of a detached navigation. `/fork`
+      // adopts a Host-published child while the source Turn is still running,
+      // and the Client EXIT releases only this Client's own references. Neither
+      // path may cancel the Host work it leaves: the source Turn finishes with
+      // its normal `completed` reason after the Client moved or exited, the
+      // second Client keeps reading and writing that same Session, and an
+      // explicit Busy Esc is still the ONE gesture that aborts a Turn (the
+      // negative control). The Host fork boundary is the source's last
+      // COMPLETED turn, so the child is adopted while the source's LATER Turn is
+      // still held: a fork that waited for the source Turn could not commit
+      // here, and a fork that stopped it could not continue afterwards.
+      {
+        const releaseBarrier = join(workDir, 'm5n2-siblings.release')
+        const { host, ready: hostReady, workRoot } = await startC1Host('long-turn', 'm5n2-siblings', {
+          C1_HOLD_LONG_TURN: releaseBarrier,
+        })
+        const hostBefore = await hostIdentityFacts(host)
+        assert(hostBefore.hostPid === hostReady.pid, 'M5N2 the Host ready record does not own the Host identity')
+        const { client: clientA, ready: aReady } = await startC1Client('M5N2 A')
+        /** The plain text of one durable/inbox message (bounded, never a payload dump). */
+        const textOf = message => (message?.content ?? [])
+          .map(part => (part?.type === 'text' && typeof part.text === 'string' ? part.text : ''))
+          .join('')
+        const durableOf = sessionId => hostSessionEvents(dshHome, sessionId) ?? []
+        /** Wait for the Nth `turn/end` at or after one durable boundary. */
+        const waitForTurnEnds = async (sessionId, afterIndex, count, label) => {
+          await waitForCondition(
+            () => durableOf(sessionId).slice(afterIndex).filter(event => event.type === 'turn/end').length >= count,
+            label,
+            120_000,
+          )
+          return durableOf(sessionId).slice(afterIndex).filter(event => event.type === 'turn/end')
+        }
+        /** Type one prompt through the PAINTED composer, then submit it. */
+        const submitPrompt = async (client, text) => {
+          client.send(text)
+          await client.waitForComposerDraft(text)
+          client.send('\r')
+        }
+
+        // Turn 1 on X becomes a REAL completed product turn: it is the Host fork
+        // cut the child inherits.
+        const sessionX = await openC1Session(clientA, 'm5n2-x-turn1', 'M5N2 A')
+        const heldX1 = await waitForC1WorkEvent(workRoot,
+          event => event.kind === 'long-turn-held' && event.sessionId === sessionX && event.attempt === 1,
+          'M5N2 X first Turn held')
+        assert(heldX1.agentStatus === 'running',
+          `M5N2 the Host Agent was ${JSON.stringify(heldX1.agentStatus)} while X was held`)
+        // B joins the SAME Session X through its own startup intent: it is the
+        // second real Client that must keep serving X through both departures.
+        const { client: clientB, ready: bReady } = await startC1Client('M5N2 B', {
+          SPLIT_PROCESS_CLIENT_SESSION: sessionX,
+        })
+        const bOnX = await waitForSurfaceStatus(clientB,
+          record => record.sessionOpen === true
+            && record.openSessionId === sessionX
+            && record.transport === 'connected'
+            && record.surfaceMounted === true,
+          'M5N2 B retained Session X')
+        assertClientHostFacts(bOnX.host, hostBefore, 'M5N2 B')
+        assert(Number.isInteger(bReady.pid) && bReady.pid > 0 && bReady.pid !== hostBefore.hostPid,
+          'M5N2 Client B published no live business PID distinct from the Host')
+        assert(aReady.pid !== bReady.pid, 'M5N2 the two Clients must be two different business PIDs')
+        assert(clientA.child.pid !== clientB.child.pid, 'M5N2 the two Clients must use distinct script(1) wrappers')
+        const xTurn1Index = durableOf(sessionX).length
+        writeFileSync(releaseBarrier, 'release\n', { mode: 0o600 })
+        const xTurn1Ends = await waitForTurnEnds(sessionX, xTurn1Index, 1, 'M5N2 the held X first Turn completed')
+        assert(xTurn1Ends[0]?.data?.reason?.kind === 'completed',
+          `M5N2 the X first Turn settled as ${JSON.stringify(xTurn1Ends[0]?.data?.reason)} instead of a normal completion`)
+
+        // Turn 2 on X stays RUNNING: it is the work the fork must not stop and
+        // must not wait for.
+        rmSync(releaseBarrier)
+        const xTurn2Index = durableOf(sessionX).length
+        await submitPrompt(clientA, 'm5n2-x-turn2')
+        const heldX2 = await waitForC1WorkEvent(workRoot,
+          event => event.kind === 'long-turn-held' && event.sessionId === sessionX && event.attempt === 2,
+          'M5N2 X second Turn held')
+        assert(heldX2.agentStatus === 'running',
+          `M5N2 the Host Agent was ${JSON.stringify(heldX2.agentStatus)} while X's second Turn was held`)
+        await waitForHostSessionEventAfter(dshHome, sessionX, xTurn2Index,
+          event => event.type === 'user/message' && textOf(event.data) === 'm5n2-x-turn2',
+          'M5N2 X committed the second prompt', 120_000)
+        assert(!existsSync(releaseBarrier), 'M5N2 the hold barrier was released before the fork')
+
+        // NB-10 (N-05): `/fork` while X's second Turn runs. ONE Host fork, ONE
+        // published child, ONE Client move, and the source keeps running.
+        const sessionsBeforeFork = hostSessionLogCount(dshHome)
+        const forkBoundary = clientA.records.length
+        clientA.send('/fork\r')
+        const aOnChild = await clientA.waitFor(
+          record => clientA.records.indexOf(record) >= forkBoundary
+            && record.m4b2s === 'surface-status'
+            && record.sessionOpen === true
+            && typeof record.openSessionId === 'string'
+            && record.openSessionId !== sessionX
+            && record.transport === 'connected'
+            && record.surfaceMounted === true,
+          'M5N2 A adopted the forked child',
+          120_000,
+        )
+        const childId = aOnChild.openSessionId
+        assert(childId !== sessionX, 'M5N2 /fork did not move the Client onto a new Session')
+        assertClientHostFacts(aOnChild.host, hostBefore, 'M5N2 A on the forked child')
+        assert(durableOf(sessionX).slice(xTurn2Index).every(event => event.type !== 'turn/end'),
+          'M5N2 the fork ended the source Turn: the source Host Turn was stopped')
+        assert(!existsSync(releaseBarrier), 'M5N2 the hold barrier was released during the fork')
+        // The Client moved ONCE: from the record that adopted the child on,
+        // no later status may return to the source or name a third Session.
+        const movesAfterFork = clientA.records
+          .slice(clientA.records.indexOf(aOnChild))
+          .filter(record => record.m4b2s === 'surface-status' && record.sessionOpen === true
+            && typeof record.openSessionId === 'string')
+          .map(record => record.openSessionId)
+        assert(movesAfterFork.every(id => id === childId),
+          `M5N2 the /fork moved the Client more than once: ${JSON.stringify(movesAfterFork)}`)
+        // The Host published the child from THIS source, with the source's
+        // COMPLETED prefix only: never the running Turn and never the source's
+        // own command settlement.
+        const childHeader = await waitForHostSessionHeader(dshHome, childId, 'M5N2 the child durable header')
+        assert(hostSessionLogCount(dshHome) === sessionsBeforeFork + 1,
+          `M5N2 /fork published ${String(hostSessionLogCount(dshHome) - sessionsBeforeFork)} durable Sessions, expected exactly 1`)
+        assert(childHeader.parentSession === sessionX,
+          `M5N2 the child lineage named ${JSON.stringify(childHeader.parentSession)} instead of the source`)
+        assert(childHeader.isSeeded === true, 'M5N2 the child is not a seeded fork')
+        const childUserTexts = hostUserTexts(durableOf(childId))
+        assert(childUserTexts.filter(text => text === 'm5n2-x-turn1').length === 1,
+          `M5N2 the child lost the source's completed prefix: ${JSON.stringify(childUserTexts)}`)
+        assert(childUserTexts.filter(text => text === 'm5n2-x-turn2').length === 0,
+          'M5N2 the child inherited the RUNNING source Turn')
+        assert(durableOf(childId).some(event => event.type === 'turn/end' && event.data?.reason?.kind === 'completed'),
+          'M5N2 the child inherited no completed Turn')
+        // Release the ONE hold: the source Turn A left continues and completes,
+        // and B reads the continuation through its own PTY.
+        const xReleaseIndex = durableOf(sessionX).length
+        writeFileSync(releaseBarrier, 'release\n', { mode: 0o600 })
+        const xTurn2Ends = await waitForTurnEnds(sessionX, xReleaseIndex, 1, 'M5N2 the source Turn completed after the fork')
+        assert(xTurn2Ends[0]?.data?.reason?.kind === 'completed',
+          `M5N2 the source Turn settled as ${JSON.stringify(xTurn2Ends[0]?.data?.reason)} instead of a normal completion`)
+        await clientB.waitForScreen('long-turn answer 2', 'M5N2 B read the source continuation', 120_000)
+        assert(lastSurfaceStatus(clientB)?.openSessionId === sessionX, 'M5N2 Client B left Session X')
+        // A Split Remote TUI command is executed through the CLIENT command
+        // registry: the projected agent never reaches `ctx.commands.execute`,
+        // so `/fork` appends NO `command/run`/`command/done` row to the Host
+        // Session (the Direct in-process path does, and
+        // test/domain/runner-session-navigation.test.ts pins there that the
+        // source owner stays attached THROUGH that append). The deferred
+        // source-retirement window the runtime uses is the SAME code path on
+        // both backends; the durable rows simply do not exist for this
+        // backend, so this scene must not claim them.
+        // The child is an INDEPENDENT conversation: its own prompt commits on
+        // the child only.
+        const childTurnIndex = durableOf(childId).length
+        await submitPrompt(clientA, 'm5n2-child-own')
+        await waitForHostSessionEventAfter(dshHome, childId, childTurnIndex,
+          event => event.type === 'user/message' && textOf(event.data) === 'm5n2-child-own',
+          'M5N2 the child prompt committed', 120_000)
+        await waitForHostSessionEventAfter(dshHome, childId, childTurnIndex,
+          event => event.type === 'turn/end', 'M5N2 the child Turn settled', 120_000)
+        assert(hostUserTexts(durableOf(sessionX)).every(text => text !== 'm5n2-child-own'),
+          'M5N2 the child prompt leaked into the source Session')
+
+        // NB-11 (N-06): the Client EXIT. A returns to the running source and
+        // leaves the Client entirely: the exit releases only A's own references.
+        rmSync(releaseBarrier)
+        const xTurn3Index = durableOf(sessionX).length
+        await submitPrompt(clientB, 'm5n2-x-turn3')
+        const heldX3 = await waitForC1WorkEvent(workRoot,
+          event => event.kind === 'long-turn-held' && event.sessionId === sessionX && event.attempt === 3,
+          'M5N2 X third Turn held')
+        assert(heldX3.agentStatus === 'running',
+          `M5N2 the Host Agent was ${JSON.stringify(heldX3.agentStatus)} while X's third Turn was held`)
+        const backBoundary = clientA.records.length
+        clientA.send(`/resume ${sessionX}\r`)
+        const aBackOnX = await clientA.waitFor(
+          record => clientA.records.indexOf(record) >= backBoundary
+            && record.m4b2s === 'surface-status'
+            && record.sessionOpen === true
+            && record.openSessionId === sessionX
+            && record.transport === 'connected'
+            && record.surfaceMounted === true,
+          'M5N2 A returned to the running source Session',
+          120_000,
+        )
+        assertClientHostFacts(aBackOnX.host, hostBefore, 'M5N2 A back on X')
+        const sessionsBeforeExit = hostSessionLogCount(dshHome)
+        const aPid = aReady.pid
+        await exitC1Client(clientA, 'M5N2 A')
+        await waitGone(aPid, 15_000)
+        assert(!alive(aPid), 'M5N2 Client A survived its exit')
+        assert(alive(bReady.pid) && alive(hostBefore.hostPid), 'M5N2 the Client exit killed the Host or the second Client')
+        assert(hostSessionLogCount(dshHome) === sessionsBeforeExit,
+          'M5N2 the Client exit created or removed a durable Session')
+        assert(durableOf(sessionX).slice(xTurn3Index).every(event => event.type !== 'turn/end'),
+          'M5N2 the Client exit ended the running Host Turn')
+        assert(!existsSync(releaseBarrier), 'M5N2 the hold barrier was released during the exit')
+        await assertHostIdentityKept(host, hostBefore, 'M5N2 Host after the Client exit')
+        // Release: the source Turn completes with its normal reason and B can
+        // still write that same Session.
+        const xExitReleaseIndex = durableOf(sessionX).length
+        writeFileSync(releaseBarrier, 'release\n', { mode: 0o600 })
+        const xTurn3Ends = await waitForTurnEnds(sessionX, xExitReleaseIndex, 1, 'M5N2 the source Turn completed after the exit')
+        assert(xTurn3Ends[0]?.data?.reason?.kind === 'completed',
+          `M5N2 the source Turn settled as ${JSON.stringify(xTurn3Ends[0]?.data?.reason)} after the exit`)
+        await clientB.waitForScreen('long-turn answer 3', 'M5N2 B read the continuation after A exited', 120_000)
+        assert(durableOf(sessionX).every(event => !(event.type === 'turn/end' && event.data?.reason?.kind === 'aborted')),
+          'M5N2 a Turn was aborted by something other than the explicit Stop')
+        const afterExitIndex = durableOf(sessionX).length
+        await submitPrompt(clientB, 'm5n2-b-after-exit')
+        await waitForHostSessionEventAfter(dshHome, sessionX, afterExitIndex,
+          event => event.type === 'user/message' && textOf(event.data) === 'm5n2-b-after-exit',
+          'M5N2 B committed after A exited', 120_000)
+        await waitForHostSessionEventAfter(dshHome, sessionX, afterExitIndex,
+          event => event.type === 'turn/end', 'M5N2 the post-exit Turn settled', 120_000)
+        const committedAfterExit = hostUserTexts(durableOf(sessionX)).filter(text => text === 'm5n2-b-after-exit').length
+        assert(committedAfterExit === 1,
+          `M5N2 the post-exit prompt committed ${String(committedAfterExit)} times, expected exactly 1`)
+
+        // NB-12 (explicit Stop negative control): only the Busy Esc gesture may
+        // abort the SAME Session's held Turn. The exit above left it running.
+        rmSync(releaseBarrier)
+        const stopIndex = durableOf(sessionX).length
+        await submitPrompt(clientB, 'm5n2-x-stop')
+        const heldStop = await waitForC1WorkEvent(workRoot,
+          event => event.kind === 'long-turn-held' && event.sessionId === sessionX && event.attempt === 4,
+          'M5N2 the Stop-control Turn held')
+        assert(heldStop.agentStatus === 'running',
+          `M5N2 the Host Agent was ${JSON.stringify(heldStop.agentStatus)} while the Stop-control Turn was held`)
+        await waitForCondition(async () => {
+          const frame = (await clientB.viewport()).join('\n')
+          return frame.includes('m5n2-x-stop') && frame.includes('long-turn started')
+        }, 'M5N2 B painted the held Stop-control Turn', 120_000)
+        clientB.send('\x1b')
+        const stopped = await waitForHostSessionEventAfter(dshHome, sessionX, stopIndex,
+          event => event.type === 'turn/end', 'M5N2 the Busy Esc settled the Turn', 120_000)
+        assert(stopped.data?.reason?.kind === 'aborted' && stopped.data?.reason?.reason?.kind === 'user',
+          `M5N2 the Busy Esc settlement was ${JSON.stringify(stopped.data?.reason)} instead of an aborted user Turn`)
+
+        await assertHostIdentityKept(host, hostBefore, 'M5N2 Host after the fork, exit and Stop')
+        await exitC1Client(clientB, 'M5N2 B')
+        await stopC1Host(host)
+        trace('m5n-02', {
+          hostPid: hostBefore.hostPid,
+          clientAPid: aReady.pid,
+          clientBPid: bReady.pid,
+          wrapperPids: [clientA.child.pid, clientB.child.pid],
+          sessionX,
+          childId,
+          forkDispatches: 1,
+          forkCut: 'completed-prefix (turn 1)',
+          sourceTurnKeptRunningThroughFork: true,
+          remoteCommandRows: 'none (client-registry route)',
+          childInheritedPrefixUserTexts: childUserTexts.length,
+          childOwnTurnCommitted: true,
+          sourceTurnCompletionAfterFork: 'completed',
+          clientExitReleasesOnlyOwnReference: true,
+          sourceTurnCompletionAfterExit: 'completed',
+          secondClientCommittedAfterExit: true,
+          explicitStop: 'aborted/user',
+        })
+      }
+
+      // M5N-03 (M5-N): a Client leaving a Session with a PENDING Host interaction
+      // withdraws only its OWN presentation. The Host question is never
+      // cancelled by that departure: the second admitted Client still answers
+      // the SAME `callId`, the Host settles exactly once, and the Turn ends
+      // normally. The reachable leave gesture while a Question owns the editor
+      // seat is the Client EXIT (the modal does not accept a slash command), so
+      // the local withdrawal is the exit's own teardown — never a Host cancel.
+      {
+        const { host, ready: hostReady, workRoot } = await startC1Host('question', 'm5n3-interaction')
+        const hostBefore = await hostIdentityFacts(host)
+        assert(hostBefore.hostPid === hostReady.pid, 'M5N3 the Host ready record does not own the Host identity')
+        const { client: clientA, ready: aReady } = await startC1Client('M5N3 A')
+        // A creates an EMPTY Session X with the real product `/new`; B joins the
+        // SAME X before the Host is asked, so both modals are the ONE delivery.
+        const aBoundary = clientA.records.length
+        clientA.send('/new\r')
+        const aOpen = await clientA.waitFor(
+          record => clientA.records.indexOf(record) >= aBoundary
+            && record.m4b2s === 'surface-status'
+            && record.sessionOpen === true
+            && typeof record.openSessionId === 'string'
+            && record.openSessionId !== ''
+            && record.transport === 'connected'
+            && record.surfaceMounted === true,
+          'M5N3 Client A opened an empty Session',
+          120_000,
+        )
+        const sessionX = aOpen.openSessionId
+        assert(Number.isInteger(aReady.pid) && aReady.pid > 0 && aReady.pid !== hostBefore.hostPid,
+          'M5N3 Client A published no live business PID distinct from the Host')
+        const { client: clientB, ready: bReady } = await startC1Client('M5N3 B', {
+          SPLIT_PROCESS_CLIENT_SESSION: sessionX,
+        })
+        const bOnX = await waitForSurfaceStatus(clientB,
+          record => record.sessionOpen === true
+            && record.openSessionId === sessionX
+            && record.transport === 'connected'
+            && record.surfaceMounted === true,
+          'M5N3 Client B retained Session X')
+        assertClientHostFacts(aOpen.host, hostBefore, 'M5N3 Client A')
+        assertClientHostFacts(bOnX.host, hostBefore, 'M5N3 Client B')
+        assert(aReady.pid !== bReady.pid, 'M5N3 the two Clients must be two different business PIDs')
+        assert(clientA.child.pid !== clientB.child.pid, 'M5N3 the two Clients must use distinct script(1) wrappers')
+        assertInteractionGate(clientA, 'M5N3 Client A')
+        assertInteractionGate(clientB, 'M5N3 Client B')
+        const pendingBefore = hostSessionEvents(dshHome, sessionX) ?? []
+        assert(!pendingBefore.some(event => event.type === 'turn/start' || event.type === 'tool/call'
+          || event.type === 'approval/asked'),
+        'M5N3 Host Session X carried Host activity before the trigger')
+
+        // The ONE trigger is A's real keyboard submission AFTER both Clients
+        // were admitted and nothing was pending.
+        const triggerIndex = (hostSessionEvents(dshHome, sessionX) ?? []).length
+        clientA.send('m5n3-interaction-trigger\r')
+        const call = await waitForHostSessionEventAfter(dshHome, sessionX, triggerIndex,
+          event => event.type === 'tool/call' && event.data?.name === 'ask_user_question',
+          'M5N3 the Host question tool/call', 120_000)
+        assert(typeof call.data.callId === 'string' && call.data.callId !== '',
+          'M5N3 the question tool/call carries no callId')
+        const callId = call.data.callId
+        await waitForC1WorkEvent(workRoot,
+          event => event.kind === 'question-request' && event.sessionId === sessionX,
+          'M5N3 the Host question request', 120_000)
+        await clientA.waitForScreen('[1] Proceed', 'M5N3 A painted the question modal', 120_000)
+        await clientB.waitForScreen('[1] Proceed', 'M5N3 B painted the question modal', 120_000)
+        assert((await clientA.viewport()).join('\n').includes('Continue the C1 test?'),
+          'M5N3 Client A painted no question text')
+        assert((await clientB.viewport()).join('\n').includes('Continue the C1 test?'),
+          'M5N3 Client B painted no question text')
+
+        // A LEAVES the Session without answering. Nothing may reach the Host:
+        // no answer, no cancel, no Turn end.
+        const leaveIndex = (hostSessionEvents(dshHome, sessionX) ?? []).length
+        const aPid = aReady.pid
+        clientA.signalBusiness('SIGTERM')
+        const aExit = await clientA.waitForExit(60_000)
+        assert(aExit.code === 0 && aExit.signal === null,
+          `M5N3 Client A exit was ${JSON.stringify(aExit)}`)
+        await waitGone(aPid, 15_000)
+        assert(!alive(aPid), 'M5N3 Client A survived its exit')
+        await clientA.dispose()
+        assert(alive(bReady.pid) && alive(hostBefore.hostPid), 'M5N3 A\'s departure killed the Host or Client B')
+        assert((hostSessionEvents(dshHome, sessionX) ?? []).slice(leaveIndex)
+          .every(event => event.type !== 'tool/result' && event.type !== 'turn/end'),
+        'M5N3 A\'s departure settled the Host question or the Turn')
+        assert(readC1WorkEvents(workRoot)
+          .every(event => event.kind !== 'question-settled'),
+        'M5N3 A\'s departure settled the Host question')
+        await assertHostIdentityKept(host, hostBefore, 'M5N3 Host after A left')
+        // B is still the answerer of the SAME Host delivery.
+        await clientB.waitForScreen('[1] Proceed', 'M5N3 B still paints the answerable modal', 60_000)
+        const answerIndex = (hostSessionEvents(dshHome, sessionX) ?? []).length
+        clientB.send('1')
+        await clientB.waitForScreen('Review your answer before submit', 'M5N3 B question review', 30_000)
+        clientB.send('\r')
+        const settled = await waitForC1WorkEvent(workRoot,
+          event => event.kind === 'question-settled' && event.sessionId === sessionX,
+          'M5N3 the Host question settled', 120_000)
+        assert(settled.answers?.[0]?.selected?.[0] === 'Proceed',
+          `M5N3 the Host received the wrong answer: ${JSON.stringify(settled.answers)}`)
+        const result = await waitForHostSessionEventAfter(dshHome, sessionX, answerIndex,
+          event => event.type === 'tool/result' && String(event.data?.message?.toolCallId) === callId,
+          'M5N3 the question tool result', 120_000)
+        assert(result.data?.message?.isError !== true, 'M5N3 the answered question failed at the Host')
+        const questionEnd = await waitForHostSessionEventAfter(dshHome, sessionX, answerIndex,
+          event => event.type === 'turn/end', 'M5N3 the question Turn ended', 120_000)
+        assert(questionEnd.data?.reason?.kind === 'completed',
+          `M5N3 the question Turn settled as ${JSON.stringify(questionEnd.data?.reason)} instead of a normal completion`)
+        await clientB.waitForScreen('question answered', 'M5N3 B read the Host settlement', 120_000)
+        // EXACTLY ONCE, read from the final durable state: A's departure neither
+        // answered nor cancelled, and B's ONE decision is the ONE result.
+        const finalEvents = hostSessionEvents(dshHome, sessionX) ?? []
+        assert(finalEvents.filter(event => event.type === 'tool/result'
+          && String(event.data?.message?.toolCallId) === callId).length === 1,
+        'M5N3 the Host question produced more than one tool result')
+        const finalProofs = readC1WorkEvents(workRoot)
+        assert(finalProofs.filter(event => event.kind === 'question-request' && event.sessionId === sessionX).length === 1,
+          'M5N3 the Host asked more than once')
+        assert(finalProofs.filter(event => event.kind === 'question-settled' && event.sessionId === sessionX).length === 1,
+          'M5N3 the Host settled the question more than once')
+        assert(finalEvents.every(event => !(event.type === 'turn/end' && event.data?.reason?.kind === 'aborted')),
+          'M5N3 the question Turn was aborted instead of settling normally')
+        await assertHostIdentityKept(host, hostBefore, 'M5N3 Host after the settlement')
+        await exitC1Client(clientB, 'M5N3 B')
+        await stopC1Host(host)
+        trace('m5n-03', {
+          hostPid: hostBefore.hostPid,
+          clientAPid: aReady.pid,
+          clientBPid: bReady.pid,
+          wrapperPids: [clientA.child.pid, clientB.child.pid],
+          sessionX,
+          callId,
+          dualModalPainted: true,
+          leavingClientExitCode: aExit.code,
+          departureSettledNothing: true,
+          secondClientAnswered: 'Proceed',
+          hostToolResults: 1,
+          hostQuestionSettlements: 1,
+          turnSettlement: 'completed',
+        })
+      }
+
       // T44: a real accepted Turn survives a Client SIGKILL. The LLM stream is
       // held by the Host fixture; the Client disappears while the Host Agent is
       // running, then the SAME Host writes the final assistant message.
@@ -8694,7 +9099,7 @@ async function main() {
       releaseGates: 'not run by this smoke; stage-final lane records the separate release-gate verdict',
     })
 
-    console.log(`split-process authenticated-link + real-surface smoke passed — ${basename(tarball)} × DSH ${targetDshVersion} (incl. M5B-01 two real surfaces on one Session and M5N-01 non-destructive Split Remote navigation); official Web composition ${webBrowserVerdict === 'PASS' ? 'PASS (real Browser)' : `NOT_QUALIFIED (${webBrowserVerdict})`}; official Web runtime toggle ${toggleQualification.browser === 'PASS' ? 'PASS (real Browser)' : `NOT_QUALIFIED (${toggleQualification.browser})`}`)
+    console.log(`split-process authenticated-link + real-surface smoke passed — ${basename(tarball)} × DSH ${targetDshVersion} (incl. M5B-01 two real surfaces on one Session, M5N-01 non-destructive Split Remote navigation, M5N-02 fork/exit siblings and M5N-03 departing from a pending Host interaction); official Web composition ${webBrowserVerdict === 'PASS' ? 'PASS (real Browser)' : `NOT_QUALIFIED (${webBrowserVerdict})`}; official Web runtime toggle ${toggleQualification.browser === 'PASS' ? 'PASS (real Browser)' : `NOT_QUALIFIED (${toggleQualification.browser})`}`)
   } catch (error) {
     // Report BEFORE the cleanup below: the failure projection must read the
     // still-live process handles, and the work root must still exist while the
