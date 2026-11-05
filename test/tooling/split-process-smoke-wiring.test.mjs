@@ -14,17 +14,41 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { parse as parseYaml } from 'yaml'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
-import { EntryProcess, PR_A_WEB_ROWS, raceWithAbortableDeadline, redactWebQualificationText, statusMatches, waitForCondition } from '../../scripts/split-process-smoke.mjs'
+import { PR_A_WEB_ROWS, raceWithAbortableDeadline, redactWebQualificationText, waitForCondition } from '../../scripts/split-process-smoke.mjs'
+import { createSplitProcessScope, statusMatches } from '../../scripts/lib/split-smoke-processes.mjs'
+import {
+  listSelectableCases,
+  parseSelectionArgs,
+  resolveSelection,
+  selectedPassLine,
+} from '../../scripts/lib/split-smoke-selection.mjs'
+import { runHostRuntimeDisabled } from '../../scripts/smoke/split-process/host-runtime-disabled.mjs'
 import { HOST_ONLY_PATCH } from '../../src/app/remote-process/local-host-entry.ts'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const SCRIPT = join(ROOT, 'scripts', 'split-process-smoke.mjs')
+const PROFILE_MODULE = join(ROOT, 'scripts', 'lib', 'split-smoke-profile.mjs')
+const CASE_MODULE = join(ROOT, 'scripts', 'smoke', 'split-process', 'host-runtime-disabled.mjs')
+
+/** Run the real lane CLI with one private temp root. */
+function runCli(args, tmpRoot, env = {}) {
+  return spawnSync(process.execPath, [SCRIPT, ...args], {
+    encoding: 'utf8',
+    timeout: 15_000,
+    env: { ...process.env, TMPDIR: tmpRoot, ...env },
+  })
+}
+
+/** No lane work root may survive a rejected selection. */
+function workRootsIn(tmpRoot) {
+  return readdirSync(tmpRoot).filter(name => name.startsWith('dsh-split-process-'))
+}
 
 test('the split-process smoke is a package script and a release-tag-only CI job', () => {
   const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
@@ -78,7 +102,8 @@ test('a completed waitForExit does not leave its deadline holding the process', 
   const entry = join(dir, 'exit-now.mjs')
   writeFileSync(entry, 'process.exit(0)\n')
   const probe = `
-    import { EntryProcess } from ${JSON.stringify(pathToFileURL(SCRIPT).href)}
+    import { createSplitProcessScope } from ${JSON.stringify(pathToFileURL(join(ROOT, 'scripts', 'lib', 'split-smoke-processes.mjs')).href)}
+    const { EntryProcess } = createSplitProcessScope()
     const child = new EntryProcess('probe', ${JSON.stringify(entry)}, {
       cwd: ${JSON.stringify(dir)},
       env: { ...process.env },
@@ -103,30 +128,27 @@ test('a completed waitForExit does not leave its deadline holding the process', 
   )
 })
 
-test('the candidate pin is qualified against the exact DSH runtime before any setup', () => {
+test('the candidate preflight is the shared qualified one, not a local copy', () => {
   const source = readFileSync(SCRIPT, 'utf8')
-  assert.match(source, /requireExactSmokeDshPin,[\s\S]*?\} from '\.\/lib\/split-smoke-diagnostics\.mjs'/u,
-    'the exact-pin rule is shared with the split-upgrade lane, not restated per script')
-  const main = source.slice(source.indexOf('async function main()'))
-  const validate = main.indexOf('const candidateManifest = validateCandidateTarball(tarball)')
-  const sha = main.indexOf('candidateSha256 = createHash(')
-  const target = main.indexOf('targetDshVersion = npmDshVersion()')
-  const guard = main.indexOf("requireExactSmokeDshPin('candidate', candidateManifest, targetDshVersion)")
-  const distribution = main.indexOf('loadDshDistribution({ mode: ')
-  // Located by shape, never by the temp-API token: the temp-hygiene gate text-scans
-  // the whole test tree, strings and comments included.
-  const workRoot = main.search(/[A-Za-z]+Sync\(join\(tmpdir\(\), 'dsh-split-process-'\)\)/u)
-  const install = main.indexOf('runPnpmInstall(harnessDir, env, distribution)')
-  assert.ok(validate >= 0 && sha > validate && target > sha && guard > target,
-    'the candidate manifest must be read, hashed and pinned against the lane target before anything is set up')
-  assert.ok(distribution > guard && workRoot > guard && install > workRoot,
-    'an unqualified candidate may not load the distribution, create a work root or install')
-  // The shared validator keeps its own public semantics for every other caller.
+  // The real preflight behaviour (resolve, validate, hash, exact pin, and the
+  // refusal before any work root) is proven by the real synthetic-tarball CLI
+  // runs in `split-smoke-diagnostics.test.mjs`, for BOTH the full and the
+  // selected entry. Here the static contract is ownership: the lane obtains
+  // that one implementation instead of restating any of its steps.
+  assert.match(source, /import \{[\s\S]*?inspectSplitCandidate,[\s\S]*?\} from '\.\/lib\/split-smoke-profile\.mjs'/u)
+  assert.match(source, /candidate = inspectSplitCandidate\(explicitPath\)/u)
+  assert.doesNotMatch(source, /function inspectSplitCandidate/u, 'the lane must not restate the preflight')
   assert.doesNotMatch(source, /function validateCandidateTarball/u)
+  assert.doesNotMatch(source, /requireExactSmokeDshPin/u, 'the exact-pin guard belongs to the shared preflight')
 })
 
 test('the upgraded smoke carries every inventory gate and the critical negative controls', () => {
   const source = readFileSync(SCRIPT, 'utf8')
+  // Process/PTY and fixture markers live in the modules that now own them; the
+  // inventory claim is about the lane's implementation, not one file's lines.
+  const implementation = source
+    + readFileSync(join(ROOT, 'scripts', 'lib', 'split-smoke-processes.mjs'), 'utf8')
+    + readFileSync(join(ROOT, 'scripts', 'lib', 'split-smoke-fixtures.mjs'), 'utf8')
   for (const gate of ['T01', 'T02', 'T03', 'T04', 'T05', 'T06', 'T07', 'T08', 'T09', 'T09Q', 'T10', 'T11', 'T12', 'T13', 'T14', 'T15', 'T16', 'T17', 'T18', 'T19', 'T20', 'T21', 'T22', 'T23', 'T24', 'T25', 'T26', 'T27', 'T28', 'T29', 'T30', 'T31', 'T32', 'T33', 'T34', 'T35', 'T36', 'T37', 'T38', 'T39', 'T40', 'T41', 'T42', 'T43', 'T44', 'T45', 'T46', 'T47', 'T48', 'T49', 'T50', 'T51', 'T52', 'T53', 'T54', 'T55', 'T56', 'T57', 'T58', 'T59', 'T60']) {
     assert.match(source, new RegExp(`\\b${gate}\\b`, 'u'), `missing ${gate}`)
   }
@@ -239,7 +261,6 @@ test('the upgraded smoke carries every inventory gate and the critical negative 
     't22-t24-host-rpc-proof',
     't25-repeat-probe',
     't25-client-detach',
-    't26-runtime-row-disabled',
     't26-runtime-artifact-absent',
     't26-runtime-artifact-restored',
     't26-official-row-disabled',
@@ -259,18 +280,20 @@ test('the upgraded smoke carries every inventory gate and the critical negative 
     'HOST_AUTH_FAILED',
     'HOST_IDENTITY_MISMATCH',
   ]) {
-    assert.ok(source.includes(marker), `missing smoke marker ${marker}`)
+    assert.ok(implementation.includes(marker), `missing smoke marker ${marker}`)
   }
   const extraPatchUses = source.match(/SPLIT_PROCESS_EXTRA_PATCH/gu) ?? []
-  assert.equal(extraPatchUses.length, 21,
-    'the extra patch may only implement the two child mutations, the T26 Host-Runtime/official-row/Workspace-Controller mutations, the whole-smoke mutation mode, the isolated surface LLM overlay, the isolated Host Schedule overlay, the isolated armed-Goal overlay, the three bounded PR-A Web composition runs, the five bounded PR-B Web-toggle runs and the ONE PR-D product Host patch')
+  assert.equal(extraPatchUses.length, 19,
+    'the full lane may only implement the two child mutations, the T26 official-row/Workspace-Controller mutations, the whole-smoke mutation mode, the isolated Host Schedule/armed-Goal overlays, the three bounded PR-A Web composition runs, the five bounded PR-B Web-toggle runs and the ONE PR-D product Host patch; the row-disabled case and the default stub-LLM overlay belong to the shared modules')
   assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: tuiMutationPatch/u)
   assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: connectionMutationPatch/u)
   assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: sessionControllerMutationPatch/u)
   assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: schedulePatch/u)
   assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: armedPatch/u)
-  assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: surfaceLlm\.patchPath/u)
-  assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: hostRuntimeMutationPatch/u)
+  // The row-disabled control and the default stub-LLM overlay live where the
+  // shared implementation lives, not in a second inline copy here.
+  assert.match(readFileSync(CASE_MODULE, 'utf8'), /SPLIT_PROCESS_EXTRA_PATCH: patchPath/u)
+  assert.match(readFileSync(PROFILE_MODULE, 'utf8'), /SPLIT_PROCESS_EXTRA_PATCH: surfaceLlm\.patchPath/u)
   assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: workspaceControllerMutationPatch/u)
   // The PR-A Web composition owns exactly three of these runs: the isolated
   // enable, the missing-frontend-dist control and the duplicate-modules control.
@@ -1030,48 +1053,41 @@ test('the question lanes wait for the real review frame, never the permanent Sub
   assert.match(source, /T55c the answered question failed at the Host/u, 'T55c must reject an errored durable result')
 })
 
-test('the lane declares every setup local it later assigns', () => {
-  const source = readFileSync(SCRIPT, 'utf8')
-  const main = source.slice(source.indexOf('async function main()'))
-  // A bare assignment to an undeclared name is a ReferenceError, and only the
-  // REAL lane reaches this code, so the declarations are pinned here.
-  for (const name of ['distribution', 'workDir', 'home', 'dshHome', 'harnessDir',
-    'scratch', 'env', 'isolatedScopeId']) {
-    const declared = main.search(new RegExp(`let ${name}$`, 'mu'))
-    assert.ok(declared >= 0, `the setup must declare \`${name}\``)
-    const assigned = main.search(new RegExp(`^\\s*${name} = `, 'mu'))
-    assert.ok(assigned < 0 || assigned > declared,
-      `\`${name}\` must be declared before its first assignment`)
-  }
+test('the extracted split-smoke modules import without starting a lane', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('split-smoke-imports-')
+  const urls = [
+    'scripts/lib/split-smoke-processes.mjs',
+    'scripts/lib/split-smoke-sessions.mjs',
+    'scripts/lib/split-smoke-fixtures.mjs',
+    'scripts/lib/split-smoke-profile.mjs',
+    'scripts/lib/split-smoke-selection.mjs',
+    'scripts/smoke/split-process/host-runtime-disabled.mjs',
+    'scripts/split-process-smoke.mjs',
+    'scripts/split-process-upgrade-smoke.mjs',
+  ].map(relative => JSON.stringify(pathToFileURL(join(ROOT, relative)).href))
+  const probe = `
+    for (const url of [${urls.join(', ')}]) await import(url)
+  `
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', probe], {
+    encoding: 'utf8',
+    timeout: 15_000,
+    cwd: dir,
+    env: { ...process.env, TMPDIR: dir },
+  })
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(result.stdout, '', 'an import must not announce a checkpoint, identity or PASS')
+  assert.deepEqual(readdirSync(dir), [], 'an import may not create a work root or report directory')
 })
 
-test('the lane setup shares the report and cleanup boundary with the run', () => {
+test('the full lane installs its profile through the ONE shared installer', () => {
   const source = readFileSync(SCRIPT, 'utf8')
-  const main = source.slice(source.indexOf('async function main()'))
-  // Pin qualification must still happen BEFORE anything is created on disk.
-  const guard = main.indexOf("requireExactSmokeDshPin('candidate'")
-  const root = main.search(/[A-Za-z]+Sync\(join\(tmpdir\(\), 'dsh-split-process-'\)\)/u)
-  // Locate the REAL `try {` that owns the report and the cleanup, not a nearby
-  // declaration: the guard must fail if the setup is moved back outside it.
-  const setupTry = main.indexOf('try {', guard)
-  const distributionLoad = main.indexOf('distribution = loadDshDistribution(', guard)
-  assert.ok(guard > 0 && root > guard, 'no setup may run before the input is qualified')
-  assert.ok(setupTry > guard, 'the reporting/cleanup try must follow the pin qualification')
-  assert.ok(root > setupTry, 'the work root must be created INSIDE the reporting/cleanup try')
-  assert.ok(distributionLoad > setupTry,
-    'the distribution load must be inside the reporting/cleanup try, not before it')
-  assert.ok(main.indexOf('if (workDir === undefined) {', root) > 0,
-    'the finally must tolerate a root that never appeared')
-  // The cleanup must tolerate a scene that never got created, and must remove a
-  // root that was created before a later setup step failed.
-  const finallyIndex = main.indexOf('} finally {', root)
-  const cleanup = main.slice(finallyIndex)
-  assert.match(cleanup, /if \(workDir === undefined\) \{/u, 'a missing work root must not break the cleanup')
-  assert.match(cleanup, /else if \(!KEEP\) rmSync\(workDir/u)
-  assert.match(cleanup, /if \(dshHome !== undefined\) killIsolatedProcesses\(dshHome\)/u)
-  // The FAILPOINT proof reads the same scene, so it needs the same guard: an
-  // undefined root must not reach a second read of the isolated process list.
-  assert.match(cleanup, /if \(FAILPOINT !== undefined && dshHome !== undefined\) \{/u)
+  // No second profile installation may live in the lane: the very statements
+  // that used to be inline here are now the shared profile module's job.
+  assert.match(source, /const profile = createSplitSmokeProfile\(\{ tarball, targetDshVersion, workDir \}\)/u)
+  assert.doesNotMatch(source, /installPlugin\(/u, 'the lane must not install the profile itself')
+  assert.doesNotMatch(source, /runPnpmInstall\(/u, 'the lane must not run the isolated install itself')
+  assert.doesNotMatch(source, /loadDshDistribution\(/u, 'the lane must not load the distribution itself')
 })
 
 test('the split-process lane reports every failure through the shared safe projection', () => {
@@ -1086,29 +1102,34 @@ test('the split-process lane reports every failure through the shared safe proje
   assert.match(source, /diagnostics = createSmokeDiagnostics\(\{[\s\S]{0,200}lane: 'split-process'/u)
   assert.match(source, /marker: 'T'/u)
   // The report is built while the processes are still alive, BEFORE the finally
-  // kills them and deletes the work root.
-  const main = source.slice(source.indexOf('async function main()'))
-  const report = main.indexOf('diagnostics.reportFailure(error, { processes: [...activeProcesses] })')
-  const catchIndex = main.lastIndexOf('} catch (error) {', report)
-  const finallyIndex = main.indexOf('} finally {', report)
-  const cleanupKill = main.indexOf('for (const run of [...activeProcesses]) {', report)
-  const cleanupRemove = main.indexOf('rmSync(workDir, { recursive: true, force: true })', report)
-  assert.ok(report > 0 && catchIndex > 0 && catchIndex < report, 'the catch must precede the report')
-  assert.ok(finallyIndex > report && cleanupKill > finallyIndex && cleanupRemove > finallyIndex,
-    'the report must be written before the cleanup kills the processes and deletes the work root')
-  assert.match(main.slice(finallyIndex), /if \(!KEEP\) rmSync\(workDir/u, 'the KEEP semantics stay unchanged')
-  assert.match(main.slice(finallyIndex), /FAILPOINT_CLEANUP leftovers/u, 'the failpoint cleanup proof must remain')
-  // Shared waiters fail with a classified bounded context, never a payload dump.
-  assert.match(source, /SplitSmokeWaitError,\n\} from '\.\/lib\/split-smoke-diagnostics\.mjs'/u)
-  for (const waiter of ['waitForScreen(needle, label, timeoutMs = 60_000)', 'waitForComposerDraft(text, timeoutMs = 30_000)']) {
-    assert.ok(source.includes(waiter), `the shared waiter ${waiter} must remain`)
+  // kills them and deletes the work root. The SAME boundary serves a selected
+  // case run: one report site per execution path, never a second schema.
+  const main = source.slice(source.indexOf('async function main('))
+  const selected = source.slice(source.indexOf('async function runSelectedCases(selection)'))
+  for (const [label, block] of [['full', main], ['selected', selected]]) {
+    const report = block.indexOf('diagnostics.reportFailure(error, { processes: [...activeProcesses] })')
+    assert.ok(report > 0, `${label}: the shared report site must exist`)
+    const catchIndex = block.lastIndexOf('} catch (error) {', report)
+    const finallyIndex = block.indexOf('} finally {', report)
+    const cleanupKill = block.indexOf('for (const run of [...activeProcesses]) {', report)
+    const cleanupRemove = block.indexOf('rmSync(workDir, { recursive: true, force: true })', report)
+    assert.ok(catchIndex > 0 && catchIndex < report, `${label}: the catch must precede the report`)
+    assert.ok(finallyIndex > report && cleanupKill > finallyIndex && cleanupRemove > finallyIndex,
+      `${label}: the report must be written before the cleanup kills the processes and deletes the work root`)
+    assert.match(block.slice(finallyIndex), /FAILPOINT_CLEANUP leftovers/u, `${label}: the failpoint cleanup proof must remain`)
   }
-  assert.doesNotMatch(source, /records=\$\{JSON\.stringify\(this\.records/u, 'a waiter must not dump its records into the error')
-  assert.doesNotMatch(source, /stderr=\$\{this\.stderr\.slice/u, 'a waiter must not dump captured stderr into the error')
-  assert.doesNotMatch(source, /raw=\$\{JSON\.stringify\(this\.raw/u, 'a waiter must not dump raw terminal bytes into the error')
-  assert.doesNotMatch(source, /viewport=\$\{JSON\.stringify\(viewport\)/u, 'a waiter must not dump the viewport into the error')
+  // The moved waiters keep their bounded, classified failure shape in the one
+  // module that owns them; their behaviour is proven by the real-process tests.
+  const processes = readFileSync(join(ROOT, 'scripts', 'lib', 'split-smoke-processes.mjs'), 'utf8')
+  assert.match(processes, /SplitSmokeWaitError \} from '\.\/split-smoke-diagnostics\.mjs'/u)
+  for (const waiter of ['waitForScreen(needle, label, timeoutMs = 60_000)', 'waitForComposerDraft(text, timeoutMs = 30_000)']) {
+    assert.ok(processes.includes(waiter), `the shared waiter ${waiter} must remain`)
+  }
+  for (const forbidden of [/records=\$\{JSON\.stringify\(this\.records/u, /stderr=\$\{this\.stderr\.slice/u, /raw=\$\{JSON\.stringify\(this\.raw/u, /viewport=\$\{JSON\.stringify\(viewport\)/u]) {
+    assert.doesNotMatch(processes, forbidden, 'a waiter must not dump its payload into the error')
+  }
   // One final synchronous JSONL read removes the poller-versus-snapshot tail race.
-  assert.match(source, /finalRecordRead\(label\)/u)
+  assert.match(processes, /finalRecordRead\(label\)/u)
   // The final stderr line stays concise even for an unexpected error shape.
   // The default final line is the fixed classification only; the raw error text
   // appears in one place, and only when the operator asked for a kept scene.
@@ -1116,7 +1137,7 @@ test('the split-process lane reports every failure through the shared safe proje
   assert.match(source, /if \(KEEP\) console\.error\(`SPLIT_PROCESS_SMOKE_FORENSICS: \$\{forensicErrorText\(error\)\}`\)/u)
   assert.doesNotMatch(source, /SPLIT_PROCESS_SMOKE_FAILURE: \$\{error instanceof Error \? error\.message/u)
   // A failure before the collector existed still leaves one safe report.
-  assert.match(main, /if \(diagnostics === undefined\) emitInputFailure\(\{ lane: 'split-process'/u)
+  assert.match(source, /emitInputFailure\(\{ lane: 'split-process', heading: 'SPLIT_PROCESS_SMOKE', error \}\)/u)
 })
 
 test('every real Client-detach recovery case observes the pending source as UNKNOWN', () => {
@@ -1149,45 +1170,47 @@ test('the payload-drift gate proves a loadable cross-build Client against the sa
 
 test('the Client peer set is installed into the profile that actually runs it', () => {
   const source = readFileSync(SCRIPT, 'utf8')
+  const setup = readFileSync(PROFILE_MODULE, 'utf8')
   // The active profile owns the Client platform peer set, and every peer must
   // be installed BEFORE the candidate bundle. The isolated harness is only the
   // DSH CLI anchor: a harness devDependency is not a Client peer owner
   // (issue #476). The published store declares its zustand/immer engine
   // imports only as devDependencies, so the profile owns those exact pins too.
-  const profileStoreInstall = source.indexOf(
+  const profileStoreInstall = setup.indexOf(
     'installPlugin(dsh, `@deepseek-ai/dsh-client-store@${targetDshVersion}`, harnessDir, env, false)',
   )
-  const zustandInstall = source.indexOf("installPlugin(dsh, 'zustand@4.5.7', harnessDir, env, false)")
-  const immerInstall = source.indexOf("installPlugin(dsh, 'immer@10.2.0', harnessDir, env, false)")
-  const candidateInstall = source.indexOf('installPlugin(dsh, tarball, harnessDir, env, false)')
+  const zustandInstall = setup.indexOf("installPlugin(dsh, 'zustand@4.5.7', harnessDir, env, false)")
+  const immerInstall = setup.indexOf("installPlugin(dsh, 'immer@10.2.0', harnessDir, env, false)")
+  const candidateInstall = setup.indexOf('installPlugin(dsh, tarball, harnessDir, env, false)')
   assert.ok(profileStoreInstall >= 0, 'the Client store peer must be installed through the official profile CLI')
   assert.ok(zustandInstall > profileStoreInstall, 'the store engine peer zustand must follow the store install')
   assert.ok(immerInstall > zustandInstall, 'the store engine peer immer must follow the zustand install')
   assert.ok(candidateInstall > immerInstall, 'every Client peer must be installed before the candidate bundle')
-  const harnessManifest = source.slice(
-    source.indexOf("name: 'dsh-split-process-harness'"),
-    source.indexOf('runPnpmInstall(harnessDir, env, distribution)'),
+  const harnessManifest = setup.slice(
+    setup.indexOf("name: 'dsh-split-process-harness'"),
+    setup.indexOf('runPnpmInstall(harnessDir, env, distribution)'),
   )
   assert.doesNotMatch(harnessManifest, /dsh-client-store|zustand|immer/u,
     'the isolated harness must not pretend to own the Client peer set')
 
   // The work dir is a real OS temp root, and the checkout-ancestor escape is
   // rejected explicitly instead of silently falling back to the project temp.
-  // Assigned inside the setup boundary, but still an OS temp root outside the checkout.
+  // Assigned inside the full lane's setup boundary and inside the selected
+  // runner, but still an OS temp root outside the checkout.
   assert.match(source, /workDir = [A-Za-z]+Sync\(join\(tmpdir\(\), 'dsh-split-process-'\)\)/u)
-  assert.match(source, /relative\(realpathSync\(PACKAGE_ROOT\), realpathSync\(workDir\)\)/u)
-  assert.match(source, /workDirFromCheckout\.startsWith\(`\.\.\$\{sep\}`\)/u)
+  assert.match(setup, /relative\(realpathSync\(PACKAGE_ROOT\), realpathSync\(workDir\)\)/u)
+  assert.match(setup, /workDirFromCheckout\.startsWith\(`\.\.\$\{sep\}`\)/u)
 
   // The peer install is proven from the real owner: manifest dependency,
   // non-bundle activation, physical version and profile-anchored containment.
-  assert.match(source, /const clientPeers = \[\n\s*\['@deepseek-ai\/dsh-client-store', targetDshVersion\],\n\s*\['zustand', '4\.5\.7'\],\n\s*\['immer', '10\.2\.0'\],\n\s*\]/u)
-  assert.match(source, /profileManifest\.dependencies\?\.\[name\] === version/u)
-  assert.match(source, /!\s*\(profileManifest\.dsh\?\.profile\?\.bundles \?\? \[\]\)\.includes\(name\)/u)
-  assert.match(source, /profileManifest\.dsh\?\.profile\?\.bundles \?\? \[\]\)\.includes\('@xmoon76\/dsh-pi-tui'\)/u)
-  assert.match(source, /realpathSync\(join\(profileDir, 'node_modules', name\)\)/u)
-  assert.match(source, /readJson\(join\(peerDir, 'package\.json'\)\)\.version === version/u)
-  assert.match(source, /createRequire\(join\(profileDir, 'package\.json'\)\)\.resolve\(name\)/u)
-  assert.match(source, /peerRelative/u)
+  assert.match(setup, /const clientPeers = \[\n\s*\['@deepseek-ai\/dsh-client-store', targetDshVersion\],\n\s*\['zustand', '4\.5\.7'\],\n\s*\['immer', '10\.2\.0'\],\n\s*\]/u)
+  assert.match(setup, /profileManifest\.dependencies\?\.\[name\] === version/u)
+  assert.match(setup, /!\s*\(profileManifest\.dsh\?\.profile\?\.bundles \?\? \[\]\)\.includes\(name\)/u)
+  assert.match(setup, /profileManifest\.dsh\?\.profile\?\.bundles \?\? \[\]\)\.includes\('@xmoon76\/dsh-pi-tui'\)/u)
+  assert.match(setup, /realpathSync\(join\(profileDir, 'node_modules', name\)\)/u)
+  assert.match(setup, /readJson\(join\(peerDir, 'package\.json'\)\)\.version === version/u)
+  assert.match(setup, /createRequire\(join\(profileDir, 'package\.json'\)\)\.resolve\(name\)/u)
+  assert.match(setup, /peerRelative/u)
 
   // The sandboxed background-Job scenarios keep their release barrier inside
   // the session workspace (the installed profile): a workspace-write bwrap
@@ -1309,7 +1332,7 @@ test('the product Browser x real-TUI qualification is require-gated and never fa
   assert.ok(start > 0, 'the PR-D product qualification must stay one bounded module-level function')
   // The function is context-injected and module-level so a development run can
   // exercise ONLY the product cases; it must stay before main().
-  const end = source.indexOf('async function main() {', start)
+  const end = source.indexOf('async function main(', start)
   assert.ok(end > start, 'the PR-D function must stay before main()')
   const lane = source.slice(start, end)
   for (const marker of [
@@ -1687,4 +1710,117 @@ test('a Browser exit cannot turn a later TUI paint into a failure', () => {
     'the TUI prompt paint must not be coupled to the Browser process lifetime')
   assert.match(source, /await waitBrowserTurn\(browserSession, marker, 'PA-05'\)/u,
     'the Host commitment of the Browser prompt must stay asserted independently')
+})
+
+// ── The selectable bootstrap foundation ─────────────────────────────────────
+
+test('listing selectable split cases does not install a profile or claim complete coverage', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('split-selectable-list-')
+  const result = runCli(['--list'], dir)
+  assert.equal(result.status, 0, `--list must exit 0: ${result.stderr}`)
+  assert.match(result.stdout, /SPLIT_PROCESS_SELECTABLE_CASES scope=SELECTABLE_ONLY/u)
+  assert.match(result.stdout, /suite=bootstrap case=bootstrap\.host-runtime-disabled title=a disabled Host Runtime owner refuses Ready without publishing a Host identity/u)
+  // A listing never becomes a full PASS and never creates a scene.
+  for (const forbidden of ['SPLIT_PROCESS_SMOKE_PASS', 'T60 PASS', 'PASS_REAL_SPLIT_PROCESS',
+    'PASS_PRODUCT_BROWSER', 'WC-12 PASS']) {
+    assert.ok(!`${result.stdout}${result.stderr}`.includes(forbidden),
+      `a listing must not claim ${forbidden}`)
+  }
+  assert.deepEqual(workRootsIn(dir), [], 'a listing must not create a work root')
+  assert.deepEqual(readdirSync(dir), [], 'a listing must not install or write a report')
+})
+
+test('unknown and conflicting selectors are rejected before a work root exists', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('split-selectable-reject-')
+  const id = 'bootstrap.host-runtime-disabled'
+  const invalid = [
+    ['--case', 'does-not-exist'],
+    ['--case'],
+    ['--case', id, '--suite', 'bootstrap'],
+    ['--list', 'bogus.tgz'],
+    ['--list', '--case', id],
+    ['--shard', '2'],
+    ['a.tgz', 'b.tgz'],
+    ['--case', id, '--case', id],
+  ]
+  for (const args of invalid) {
+    const result = runCli(args, dir)
+    assert.notEqual(result.status, 0, `the selector ${JSON.stringify(args)} must fail`)
+    assert.equal(result.signal, null, `the selector ${JSON.stringify(args)} must fail by itself`)
+    assert.match(result.stderr, /INPUT_UNQUALIFIED/u, `the selector ${JSON.stringify(args)} must be an input failure`)
+    assert.match(result.stderr, /INPUT_SMOKE_SELECTION_INVALID/u, `the selector ${JSON.stringify(args)} must name its code`)
+    assert.deepEqual(workRootsIn(dir), [], `the selector ${JSON.stringify(args)} must not create a work root`)
+  }
+})
+
+test('a required Browser qualification cannot be satisfied by a selected non-Browser case', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('split-selectable-browser-')
+  for (const env of [{ SPLIT_PROCESS_REQUIRE_WEB_BROWSER: '1' }, { SPLIT_PROCESS_REQUIRE_WEB_PRODUCT: '1' }]) {
+    const result = runCli(['--case', 'bootstrap.host-runtime-disabled'], dir, env)
+    assert.notEqual(result.status, 0)
+    assert.match(result.stderr, /INPUT_UNQUALIFIED/u)
+    assert.match(result.stderr, /INPUT_SMOKE_SELECTION_INVALID/u)
+    assert.deepEqual(workRootsIn(dir), [], 'a required Browser run must not start a work root')
+  }
+  // The full-only mutation control is refused the same way, before any scene.
+  const mutated = runCli(['--suite', 'bootstrap'], dir, { SPLIT_PROCESS_SMOKE_MUTATION: 'tui-enabled' })
+  assert.notEqual(mutated.status, 0)
+  assert.match(mutated.stderr, /INPUT_SMOKE_SELECTION_INVALID/u)
+  assert.deepEqual(workRootsIn(dir), [], 'the full-only mutation control must not start a work root')
+})
+
+test('the selectable registry is the single source for listing, resolution and the run bridge', () => {
+  const cases = listSelectableCases()
+  assert.equal(cases.length, 1, 'bootstrap currently selects exactly one case')
+  const [entry] = cases
+  assert.equal(entry.suite, 'bootstrap')
+  assert.equal(entry.id, 'bootstrap.host-runtime-disabled')
+  assert.equal(entry.title, 'a disabled Host Runtime owner refuses Ready without publishing a Host identity')
+  assert.equal(entry.run, runHostRuntimeDisabled,
+    'the registered run must be the real scenario, not a copy or a re-wrapped stub')
+  assert.ok(Object.isFrozen(cases) && Object.isFrozen(entry), 'the registry must stay frozen')
+
+  assert.deepEqual(resolveSelection({ mode: 'case', id: entry.id }).cases, [entry])
+  assert.deepEqual(resolveSelection({ mode: 'suite', suite: 'bootstrap' }).cases, [entry])
+  assert.throws(() => resolveSelection({ mode: 'case', id: 'does-not-exist' }),
+    error => error.code === 'INPUT_SMOKE_SELECTION_INVALID')
+  assert.throws(() => resolveSelection({ mode: 'suite', suite: 'does-not-exist' }),
+    error => error.code === 'INPUT_SMOKE_SELECTION_INVALID')
+
+  assert.deepEqual(parseSelectionArgs([]), { mode: 'full', candidate: undefined })
+  assert.deepEqual(parseSelectionArgs(['--', 'candidate.tgz']), { mode: 'full', candidate: 'candidate.tgz' })
+  assert.deepEqual(parseSelectionArgs(['--list']), { mode: 'list' })
+  assert.deepEqual(parseSelectionArgs(['--case', entry.id]), { mode: 'case', id: entry.id, candidate: undefined })
+  assert.deepEqual(parseSelectionArgs(['--suite', 'bootstrap', 'candidate.tgz']),
+    { mode: 'suite', suite: 'bootstrap', candidate: 'candidate.tgz' })
+  for (const invalid of [[['--case']], [['--case', 'a', '--suite', 'b']], [['--list', 'x.tgz']], [['--case', 'a', '--case', 'a']]]) {
+    assert.throws(() => parseSelectionArgs(invalid[0]), error => error.code === 'INPUT_SMOKE_SELECTION_INVALID')
+  }
+})
+
+test('a selected result names only the selectable scope', () => {
+  const line = selectedPassLine('bootstrap.host-runtime-disabled')
+  assert.equal(line, 'SPLIT_PROCESS_SELECTED_PASS id=bootstrap.host-runtime-disabled scope=SELECTABLE_ONLY')
+  for (const forbidden of ['SPLIT_PROCESS_SMOKE_PASS', 'T60', 'PASS_REAL_SPLIT_PROCESS',
+    'PASS_PRODUCT_BROWSER', 'WC-12 PASS']) {
+    assert.ok(!line.includes(forbidden), `a selected result must not claim ${forbidden}`)
+  }
+  // The same vocabulary is what the lane prints: no second PASS string exists.
+  const source = readFileSync(SCRIPT, 'utf8')
+  assert.match(source, /process\.stdout\.write\(`\$\{selectedPassLine\(caseId\)\}\\n`\)/u)
+  assert.doesNotMatch(source, /SPLIT_PROCESS_SMOKE_PASS/u, 'the lane may never print a full PASS')
+})
+
+test('the Host Runtime row-disabled control has one implementation', () => {
+  const source = readFileSync(SCRIPT, 'utf8')
+  const scenario = readFileSync(CASE_MODULE, 'utf8')
+  assert.match(scenario, /split-host-pi-tui-runtime\\n  disabled: true/u)
+  assert.match(source, /runHostRuntimeDisabled\(\{/u, 'the full lane must call the ONE scenario')
+  assert.equal((source.match(/trace\('t26-runtime-row-disabled'/gu) ?? []).length, 1,
+    'the full lane keeps exactly one old trace event for the scenario')
+  assert.doesNotMatch(source, /t26-host-runtime-disabled\.patch\.yml/u,
+    'the full lane must not keep a second inline row-disabled control')
 })

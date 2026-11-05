@@ -87,17 +87,20 @@ import {
   SplitSmokeWaitError,
   writePrivateReport,
 } from './lib/split-smoke-diagnostics.mjs'
-import { EntryProcess, SurfaceEntryProcess, hostSessionEvents, waitForHostSessionEvent, waitForHostSessionEventAfter, writeC1WorkFixture } from './split-process-smoke.mjs'
+import { createSplitProcessScope } from './lib/split-smoke-processes.mjs'
+import { writeC1WorkFixture } from './lib/split-smoke-fixtures.mjs'
+import { hostSessionEvents, waitForHostSessionEvent, waitForHostSessionEventAfter } from './lib/split-smoke-sessions.mjs'
 
 const EXPECTED_PACKAGE_NAME = '@xmoon76/dsh-pi-tui'
 const KEEP = process.env.SPLIT_UPGRADE_KEEP === '1'
 const SEMVER = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?$/u
+// This lane owns its OWN process scope: the extracted constructors are never
+// bound to the split-process lane's active set.
+const { EntryProcess, SurfaceEntryProcess } = createSplitProcessScope()
 
 let statusSequence = 0
 /** This run's bounded diagnostics (checkpoints + one default failure report). */
 let diagnostics
-const activeProcesses = new Set()
-const trackedHosts = new Map()
 
 /** One U phase boundary: remembered and announced by default, never FIELDS. */
 function checkpoint(name) {

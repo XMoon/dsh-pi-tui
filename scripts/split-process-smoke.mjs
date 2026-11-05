@@ -83,35 +83,60 @@ import { createServer as createHttpServer, request as httpRequest } from 'node:h
 import { createRequire } from 'node:module'
 import { createServer as createNetServer } from 'node:net'
 import { tmpdir } from 'node:os'
-import { basename, dirname, join, relative, resolve, sep } from 'node:path'
+import { basename, dirname, join, relative, resolve } from 'node:path'
 import { setTimeout as sleepTimer } from 'node:timers/promises'
-import { zstdDecompressSync } from 'node:zlib'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import xterm from '@xterm/headless'
 import { parse as parseYaml } from 'yaml'
 
-import {
-  candidateArgument,
-  dshInvocation,
-  installPlugin,
-  isolatedEnvironment,
-  resolveTarball,
-  runDsh,
-  runPnpmInstall,
-  validateCandidateTarball,
-} from './pi2dsh-compat-smoke.mjs'
-import { loadDshDistribution, npmDshVersion, PACKAGE_ROOT } from './lib/dsh-distribution.mjs'
+import { runDsh } from './pi2dsh-compat-smoke.mjs'
+import { PACKAGE_ROOT } from './lib/dsh-distribution.mjs'
 import {
   boundedName,
   createSmokeDiagnostics,
   emitInputFailure,
   forensicErrorText,
-  requireExactSmokeDshPin,
   safeFailureSummary,
   smokeArtifactIdentity,
   SplitSmokeAssertionError,
+  SplitSmokeInputError,
   SplitSmokeWaitError,
 } from './lib/split-smoke-diagnostics.mjs'
+import { writeC1WorkFixture } from './lib/split-smoke-fixtures.mjs'
+import {
+  createSplitSmokeProfile,
+  inspectSplitCandidate,
+} from './lib/split-smoke-profile.mjs'
+import {
+  alive,
+  createSplitProcessScope,
+  findIsolatedProcesses,
+  killIsolatedProcesses,
+  killTracked,
+  readProcState,
+  readStartIdentity,
+  seatFree,
+  seatIsFree,
+  statusMatches,
+  waitForAnyReady,
+  waitForSurfaceStatus,
+  waitGone,
+} from './lib/split-smoke-processes.mjs'
+import {
+  listSelectableCases,
+  parseSelectionArgs,
+  resolveSelection,
+  selectedPassLine,
+} from './lib/split-smoke-selection.mjs'
+import {
+  hostSessionEvents,
+  hostSessionLogCount,
+  sha16,
+  waitForHostSessionEvent,
+  waitForHostSessionEventAfter,
+  waitForHostSessionHeader,
+} from './lib/split-smoke-sessions.mjs'
+import { runHostRuntimeDisabled } from './smoke/split-process/host-runtime-disabled.mjs'
+
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
 const TRACE_PATH = process.env.SPLIT_PROCESS_TRACE
@@ -404,11 +429,13 @@ export async function browserDriverExitBounded(browserExit, timeoutMs, tag) {
 }
 
 let traceFd
-let sequence = 0
 let statusSequence = 0
 /** This run's bounded diagnostics (checkpoints + one default failure report). */
 let diagnostics
-const activeProcesses = new Set()
+// The lane's ONE process scope: module-level qualification helpers and the
+// full/selected dispatchers resolve the same constructors. A CLI run takes
+// exactly one of those paths, so this active set never spans two runs.
+const { EntryProcess, SurfaceEntryProcess, activeProcesses } = createSplitProcessScope()
 /** Detached processes this round owns: PID -> its kernel starttime (if known). */
 const trackedProcesses = new Map()
 
@@ -432,11 +459,6 @@ function assert(condition, message) {
   if (!condition) throw new SplitSmokeAssertionError(message)
 }
 
-/** Quote one argument for the `sh -c` command string system `script(1)` runs. */
-function shellQuote(value) {
-  return `'${String(value).replaceAll("'", "'\\''")}'`
-}
-
 function sleep(ms) {
   return new Promise(resolveSleep => setTimeout(resolveSleep, ms))
 }
@@ -445,28 +467,7 @@ function failpoint(name) {
   if (FAILPOINT === name) throw new Error(`qualification failpoint: ${name}`)
 }
 
-/** A status response belongs to exactly one qualification request. */
-export function statusMatches(record, requestId) {
-  return record.m4a0 === 'status' && record.requestId === requestId
-}
 
-function readStartIdentity(pid) {
-  try {
-    const stat = readFileSync(`/proc/${String(pid)}/stat`, 'utf8')
-    return stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/)[19]
-  } catch {
-    return undefined
-  }
-}
-
-function readProcState(pid) {
-  try {
-    const stat = readFileSync(`/proc/${String(pid)}/stat`, 'utf8')
-    return stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/)[0]
-  } catch {
-    return undefined
-  }
-}
 
 /** Leave one real killed child unreaped by its shell parent; return its PID. */
 async function makeZombie() {
@@ -499,597 +500,6 @@ async function makeZombie() {
   return { pid, starttime }
 }
 
-function alive(pid) {
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch {
-    return false
-  }
-}
-
-/** One OS entry process with parsed JSON records. Exported for the tooling liveness guard. */
-export class EntryProcess {
-  constructor(role, entry, options) {
-    this.role = role
-    this.records = []
-    this.stderr = ''
-    this.exited = false
-    this.exitResult = undefined
-    const effectiveScratch = options.env?.SPLIT_PROCESS_SCRATCH ?? join(options.scratch, `${role}-${++sequence}`)
-    this.effectiveScratch = effectiveScratch
-    this.child = spawn(process.execPath, [entry], {
-      cwd: options.cwd,
-      env: {
-        ...options.env,
-        SPLIT_PROCESS_DSH_ANCHOR: options.anchor,
-        SPLIT_PROCESS_PROFILE: options.profile,
-        SPLIT_PROCESS_SCRATCH: effectiveScratch,
-      },
-      stdio: ['pipe', 'pipe', 'pipe'],
-      detached: true,
-    })
-    activeProcesses.add(this)
-    this.child.stdout.setEncoding('utf8')
-    this.child.stderr.setEncoding('utf8')
-    let buffer = ''
-    this.child.stdout.on('data', chunk => {
-      buffer += chunk
-      for (let newline = buffer.indexOf('\n'); newline >= 0; newline = buffer.indexOf('\n')) {
-        const line = buffer.slice(0, newline).trim()
-        buffer = buffer.slice(newline + 1)
-        if (line === '') continue
-        this.records.push(JSON.parse(line))
-      }
-    })
-    this.child.stderr.on('data', chunk => { this.stderr += chunk })
-    this.exit = new Promise(resolveExit => {
-      // `close` fires after the child's stdio streams close; `exit` may fire
-      // first and would let a caller read a truncated record tail.
-      this.child.on('close', (code, signal) => {
-        this.exited = true
-        this.exitResult = { code, signal }
-        activeProcesses.delete(this)
-        resolveExit(this.exitResult)
-      })
-    })
-  }
-
-  waitFor(predicate, label, timeoutMs = 120_000) {
-    const existing = this.records.find(predicate)
-    if (existing !== undefined) return Promise.resolve(existing)
-    return new Promise((resolveWait, reject) => {
-      const started = Date.now()
-      const settle = (record) => {
-        clearInterval(interval)
-        clearTimeout(timer)
-        resolveWait(record)
-      }
-      const fail = (category, code) => {
-        clearInterval(interval)
-        clearTimeout(timer)
-        // Only the fixed label, the elapsed time and this process's bounded
-        // summary travel in the error: never captured stderr or record bytes.
-        reject(new SplitSmokeWaitError(category, {
-          code,
-          waitLabel: label,
-          processRole: this.role,
-          elapsedMs: Date.now() - started,
-          process: this,
-        }))
-      }
-      const poll = () => {
-        const record = this.records.find(predicate)
-        if (record !== undefined) {
-          settle(record)
-          return
-        }
-        if (this.exited) fail('PROCESS_EXITED', 'PROCESS_EXITED_BEFORE_RECORD')
-      }
-      const interval = setInterval(poll, 20)
-      const timer = setTimeout(() => fail('WAIT_TIMEOUT', 'RECORD_WAIT_TIMEOUT'), timeoutMs)
-      poll()
-    })
-  }
-
-  waitForExit(timeoutMs = 120_000) {
-    let timer
-    const started = Date.now()
-    const deadline = new Promise((_resolve, reject) => {
-      timer = setTimeout(() => {
-        reject(new SplitSmokeWaitError('WAIT_TIMEOUT', {
-          code: 'PROCESS_EXIT_TIMEOUT',
-          waitLabel: 'process exit',
-          processRole: this.role,
-          elapsedMs: Date.now() - started,
-          process: this,
-        }))
-      }, timeoutMs)
-    })
-    // A pending deadline is a live handle: without clearing it the whole smoke
-    // stays alive until the longest timeout expires even though every child exited.
-    return Promise.race([this.exit, deadline]).finally(() => clearTimeout(timer))
-  }
-
-  send(request) {
-    this.child.stdin.write(`${JSON.stringify(request)}\n`)
-  }
-
-  async shutdown() {
-    this.send({ op: 'shutdown' })
-    return await this.waitForExit()
-  }
-
-  kill(signal) {
-    try {
-      process.kill(-this.child.pid, signal)
-    } catch {
-      try { this.child.kill(signal) } catch { /* already gone */ }
-    }
-  }
-}
-
-/**
- * One REAL PiTui surface Client driven through the system `script(1)` pseudo-TTY.
- *
- * Structured telemetry reads the private `0600` JSONL file the entry owns (never
- * the terminal); the terminal bytes stay on the pty and are parsed with the
- * repository's headless xterm parser, so "the frame shows …" is an escape-aware
- * fact rather than a substring of raw ANSI. The process tree is `script ->
- * node dist/local-client.mjs`; the business PID is the one in the `ready`
- * record, and signals for the surface Client are sent to THAT pid.
- */
-export class SurfaceEntryProcess {
-  constructor(entry, options) {
-    this.role = 'surface-client'
-    this.records = []
-    this.raw = ''
-    this.stderr = ''
-    this.exited = false
-    this.exitResult = undefined
-    this.recordError = undefined
-    this.recordPath = join(options.workDir, `surface-client-${String(++sequence)}.jsonl`)
-    this.term = new xterm.Terminal({
-      cols: options.columns ?? 100,
-      rows: options.rows ?? 30,
-      disableStdin: true,
-      allowProposedApi: true,
-    })
-    this.child = spawn('script', [
-      '-qefc',
-      `${shellQuote(process.execPath)} ${shellQuote(entry)}`,
-      '/dev/null',
-    ], {
-      cwd: options.cwd,
-      env: {
-        ...options.env,
-        SPLIT_PROCESS_DSH_ANCHOR: options.anchor,
-        SPLIT_PROCESS_PROFILE: options.profile,
-        SPLIT_PROCESS_SCRATCH: options.effectiveScratch ?? join(options.scratch, `surface-${String(sequence)}`),
-        SPLIT_PROCESS_CLIENT_MODE: 'surface',
-        SPLIT_PROCESS_CLIENT_RECORD_FILE: this.recordPath,
-        COLUMNS: String(options.columns ?? 100),
-        LINES: String(options.rows ?? 30),
-      },
-      stdio: ['pipe', 'pipe', 'pipe'],
-      detached: true,
-    })
-    activeProcesses.add(this)
-    this.child.stdout.setEncoding('utf8')
-    this.child.stderr.setEncoding('utf8')
-    this.child.stdout.on('data', chunk => {
-      this.raw += chunk
-      this.term.write(chunk)
-    })
-    this.child.stderr.on('data', chunk => { this.stderr += chunk })
-    this.exit = new Promise(resolveExit => {
-      this.child.on('close', (code, signal) => {
-        this.exited = true
-        this.exitResult = { code, signal }
-        activeProcesses.delete(this)
-        clearInterval(this.recordTimer)
-        resolveExit(this.exitResult)
-      })
-    })
-    this.recordTimer = setInterval(() => {
-      try {
-        this.readRecords()
-      } catch (error) {
-        this.recordError = error
-      }
-    }, 25)
-  }
-
-  /**
-   * Parse only COMPLETE lines: the entry appends while this polls.
-   *
-   * A malformed line stays a real failure with its own text here — this private
-   * `recordPath` JSONL is the record authority, and the bounded default report
-   * never copies it.
-   */
-  readRecords() {
-    if (!existsSync(this.recordPath)) return
-    const text = readFileSync(this.recordPath, 'utf8')
-    const end = text.lastIndexOf('\n')
-    if (end < 0) return
-    const lines = text.slice(0, end).split('\n').filter(line => line !== '')
-    this.records = lines.map((line, index) => {
-      try {
-        return JSON.parse(line)
-      } catch (error) {
-        throw new Error(`${this.role}: malformed record line ${String(index)}: ${line.slice(0, 200)} (${String(error)})`)
-      }
-    })
-  }
-
-  waitFor(predicate, label, timeoutMs = 120_000) {
-    const existing = this.records.find(predicate)
-    if (existing !== undefined) return Promise.resolve(existing)
-    return new Promise((resolveWait, reject) => {
-      const started = Date.now()
-      let settled = false
-      const cleanup = () => {
-        clearInterval(interval)
-        clearTimeout(timer)
-      }
-      const finish = (error, record) => {
-        if (settled) return
-        settled = true
-        cleanup()
-        if (error !== undefined && error !== null) reject(error)
-        else resolveWait(record)
-      }
-      // A bounded wait failure: the fixed label, the elapsed time and this
-      // process's projection — never `raw`, `stderr` or the record bytes.
-      const fail = (category, code) => finish(new SplitSmokeWaitError(category, {
-        code,
-        waitLabel: label,
-        processRole: this.role,
-        elapsedMs: Date.now() - started,
-        process: this,
-      }))
-      // Before a timeout or an early exit is reported, take ONE synchronous
-      // read of the complete JSONL tail: the 25ms poller and the failure
-      // snapshot must never disagree about the last records.
-      const settleOrFail = (category, code) => {
-        const unread = this.finalRecordRead(label)
-        if (unread !== undefined) {
-          finish(unread)
-          return
-        }
-        const record = this.records.find(predicate)
-        if (record !== undefined) finish(undefined, record)
-        else fail(category, code)
-      }
-      const poll = () => {
-        if (this.recordError !== undefined) fail('INFRA_FAILURE', 'RECORD_READ_FAILED')
-        else if (this.exited) settleOrFail('PROCESS_EXITED', 'PROCESS_EXITED_BEFORE_RECORD')
-        else {
-          const record = this.records.find(predicate)
-          if (record !== undefined) finish(undefined, record)
-        }
-      }
-      const interval = setInterval(poll, 20)
-      const timer = setTimeout(() => settleOrFail('WAIT_TIMEOUT', 'RECORD_WAIT_TIMEOUT'), timeoutMs)
-      poll()
-    })
-  }
-
-  /** Flush the headless terminal and return its visible viewport. */
-  async viewport() {
-    await new Promise(resolveFlush => this.term.write('', resolveFlush))
-    const lines = []
-    const buffer = this.term.buffer.active
-    for (let index = 0; index < this.term.rows; index += 1) {
-      const line = buffer.getLine(buffer.viewportY + index)
-      lines.push(line === undefined ? '' : line.translateToString(true))
-    }
-    return lines
-  }
-
-  /**
-   * One final synchronous JSONL read before a wait gives up, so the poller and
-   * the failure snapshot cannot disagree about the record tail. A malformed line
-   * stays a real failure; its bytes never enter the reported context.
-   */
-  finalRecordRead(label) {
-    try {
-      this.readRecords()
-    } catch {
-      return new SplitSmokeWaitError('INFRA_FAILURE', {
-        code: 'RECORD_READ_FAILED',
-        waitLabel: label,
-        processRole: this.role,
-        process: this,
-      })
-    }
-    return undefined
-  }
-
-  /** Wait until the PAINTED frame contains the text (escape-aware). */
-  async waitForScreen(needle, label, timeoutMs = 60_000) {
-    const started = Date.now()
-    while (Date.now() - started < timeoutMs) {
-      const viewport = await this.viewport()
-      if (viewport.join('\n').includes(needle)) return
-      if (this.exited) {
-        const unread = this.finalRecordRead(label)
-        throw unread ?? new SplitSmokeWaitError('PROCESS_EXITED', {
-          code: 'PROCESS_EXITED_BEFORE_FRAME',
-          waitLabel: label,
-          processRole: this.role,
-          elapsedMs: Date.now() - started,
-          process: this,
-        })
-      }
-      await sleep(50)
-    }
-    const unread = this.finalRecordRead(label)
-    throw unread ?? new SplitSmokeWaitError('WAIT_TIMEOUT', {
-      code: 'FRAME_WAIT_TIMEOUT',
-      waitLabel: label,
-      processRole: this.role,
-      elapsedMs: Date.now() - started,
-      process: this,
-    })
-  }
-
-  /**
-   * The COMPOSER box text of one viewport.
-   *
-   * The input box is drawn between its top and bottom rule; the SECOND-TO-LAST
-   * rule is used as the box top so the footer rule below it is not mistaken for
-   * the box. Returns `undefined` when the frame has no box.
-   */
-  composerOf(viewport) {
-    const separators = []
-    for (let index = 0; index < viewport.length; index += 1) {
-      if (/^─+$/u.test(viewport[index].trim())) separators.push(index)
-    }
-    if (separators.length === 0) return undefined
-    const top = separators.length >= 2 ? separators[separators.length - 2] : separators[separators.length - 1]
-    const bottom = separators.length >= 2 ? separators[separators.length - 1] : viewport.length
-    return viewport.slice(top + 1, bottom).join('\n')
-  }
-
-  /** Wait until the COMPOSER line (after the last separator) holds the text. */
-  async waitForComposerDraft(text, timeoutMs = 30_000) {
-    const started = Date.now()
-    while (Date.now() - started < timeoutMs) {
-      const composer = this.composerOf(await this.viewport())
-      if (composer !== undefined && composer.includes('❯') && composer.includes(text)) return
-      if (this.exited) {
-        const unread = this.finalRecordRead('composer draft')
-        throw unread ?? new SplitSmokeWaitError('PROCESS_EXITED', {
-          code: 'PROCESS_EXITED_BEFORE_COMPOSER',
-          waitLabel: 'composer draft',
-          processRole: this.role,
-          elapsedMs: Date.now() - started,
-          process: this,
-        })
-      }
-      await sleep(50)
-    }
-    const unread = this.finalRecordRead('composer draft')
-    throw unread ?? new SplitSmokeWaitError('WAIT_TIMEOUT', {
-      code: 'COMPOSER_WAIT_TIMEOUT',
-      waitLabel: 'composer draft',
-      processRole: this.role,
-      elapsedMs: Date.now() - started,
-      process: this,
-    })
-  }
-
-  /** The current composer text, or `undefined` when no box is painted. */
-  async composerText() {
-    return this.composerOf(await this.viewport())
-  }
-
-  /**
-   * Clear a restored draft through the REAL editor: one backspace per character,
-   * then wait until the text is gone from the composer. Used where a case must
-   * send a SECOND independent prompt on the same process.
-   */
-  async clearComposerDraft(text, timeoutMs = 30_000) {
-    const started = Date.now()
-    if (text !== '') this.send('\x7f'.repeat(text.length))
-    while (Date.now() - started < timeoutMs) {
-      const composer = await this.composerText()
-      if (composer !== undefined && !composer.includes(text)) return
-      await sleep(50)
-    }
-    const unread = this.finalRecordRead('composer cleared')
-    throw unread ?? new SplitSmokeWaitError('WAIT_TIMEOUT', {
-      code: 'COMPOSER_CLEAR_TIMEOUT',
-      waitLabel: 'composer cleared',
-      processRole: this.role,
-      elapsedMs: Date.now() - started,
-      process: this,
-    })
-  }
-
-  /**
-   * Wait until a previously painted row DISAPPEARS (escape-aware). Used to
-   * observe the exit-confirmation window closing: the footer hint is the
-   * product's own armed state, so the wait is bounded by that real cue instead
-   * of a blind sleep.
-   */
-  async waitForScreenGone(needle, label, timeoutMs = 60_000) {
-    const started = Date.now()
-    while (Date.now() - started < timeoutMs) {
-      const viewport = await this.viewport()
-      if (!viewport.join('\n').includes(needle)) return
-      if (this.exited) {
-        // The process left while the row was still painted: that is the caller's
-        // negative-control failure, not a timeout.
-        const unread = this.finalRecordRead(label)
-        throw unread ?? new SplitSmokeWaitError('PROCESS_EXITED', {
-          code: 'PROCESS_EXITED_BEFORE_FRAME',
-          waitLabel: label,
-          processRole: this.role,
-          elapsedMs: Date.now() - started,
-          process: this,
-        })
-      }
-      await sleep(50)
-    }
-    const unread = this.finalRecordRead(label)
-    throw unread ?? new SplitSmokeWaitError('WAIT_TIMEOUT', {
-      code: 'FRAME_WAIT_TIMEOUT',
-      waitLabel: label,
-      processRole: this.role,
-      elapsedMs: Date.now() - started,
-      process: this,
-    })
-  }
-
-  /** Send terminal input to the Client through the pty master. */
-  send(data) {
-    this.child.stdin.write(data)
-  }
-
-  /** Signal the business Client process (never the `script` wrapper). */
-  signalBusiness(signal) {
-    const pid = this.records.find(record => record.m4a0 === 'ready')?.pid
-      ?? this.records.find(record => record.m4a0 === 'client-started')?.pid
-    assert(Number.isInteger(pid), `${this.role}: no business PID is known yet`)
-    process.kill(pid, signal)
-  }
-
-  waitForExit(timeoutMs = 120_000) {
-    let timer
-    const started = Date.now()
-    const deadline = new Promise((_resolve, reject) => {
-      timer = setTimeout(() => {
-        reject(new SplitSmokeWaitError('WAIT_TIMEOUT', {
-          code: 'PROCESS_EXIT_TIMEOUT',
-          waitLabel: 'process exit',
-          processRole: this.role,
-          elapsedMs: Date.now() - started,
-          process: this,
-        }))
-      }, timeoutMs)
-    })
-    return Promise.race([this.exit, deadline]).finally(() => clearTimeout(timer))
-  }
-
-  async dispose() {
-    clearInterval(this.recordTimer)
-    try { process.kill(-this.child.pid, 'SIGKILL') } catch { /* already gone */ }
-    try { await this.waitForExit(15_000) } catch { /* best effort */ }
-  }
-}
-
-/**
- * Decode a session log file: the Host appends one independently compressed
- * zstd frame per write, and Node's one-shot decoder reads only the first frame.
- * Splitting at the frame magic (a torn final frame is skipped) reconstructs the
- * whole durable log.
- */
-function decodeZstdFrames(buffer) {
-  const magic = Buffer.from([0x28, 0xb5, 0x2f, 0xfd])
-  const offsets = []
-  for (let index = 0; index + 4 <= buffer.length; index += 1) {
-    if (buffer.compare(magic, 0, 4, index, index + 4) === 0) offsets.push(index)
-  }
-  if (offsets.length === 0 || offsets[0] !== 0) throw new Error('session log is not a zstd frame stream')
-  const parts = []
-  for (let index = 0; index < offsets.length; index += 1) {
-    const end = offsets[index + 1] ?? buffer.length
-    try {
-      parts.push(zstdDecompressSync(buffer.subarray(offsets[index], end)))
-    } catch (error) {
-      if (index === offsets.length - 1) break // a torn append tail
-      throw new Error(`session log frame ${String(index)} is corrupt: ${String(error)}`)
-    }
-  }
-  return Buffer.concat(parts).toString('utf8')
-}
-
-/** Locate one persisted Host Session log under the isolated DSH home. */
-function findHostSessionLog(dshHome, sessionId) {
-  const sessionsRoot = join(dshHome, 'sessions')
-  if (!existsSync(sessionsRoot)) return undefined
-  for (const dirent of readdirSync(sessionsRoot, { withFileTypes: true })) {
-    if (!dirent.isDirectory()) continue
-    const sessionDir = join(sessionsRoot, dirent.name, sessionId)
-    if (!existsSync(sessionDir)) continue
-    for (const file of readdirSync(sessionDir)) {
-      if (file.endsWith('.jsonl.zstd')) return join(sessionDir, file)
-    }
-  }
-  return undefined
-}
-
-/** The durable Host Session events of one Session (undefined before any log). */
-export function hostSessionEvents(dshHome, sessionId) {
-  const path = findHostSessionLog(dshHome, sessionId)
-  if (path === undefined) return undefined
-  return decodeZstdFrames(readFileSync(path)).split('\n').filter(Boolean)
-    .map(line => {
-      try {
-        return JSON.parse(line)
-      } catch {
-        return undefined // a torn tail line while the Host appends
-      }
-    })
-    .filter(event => event !== undefined)
-}
-
-/** The first persisted line (the durable Session header) of one Host Session. */
-export function hostSessionHeader(dshHome, sessionId) {
-  const events = hostSessionEvents(dshHome, sessionId)
-  const header = events?.[0]
-  return header !== undefined && header.type === 'session' ? header : undefined
-}
-
-/** The number of durable Host Session logs under the isolated home. */
-export function hostSessionLogCount(dshHome) {
-  const sessionsRoot = join(dshHome, 'sessions')
-  if (!existsSync(sessionsRoot)) return 0
-  let count = 0
-  for (const dirent of readdirSync(sessionsRoot, { withFileTypes: true })) {
-    if (!dirent.isDirectory()) continue
-    const sessionDir = join(sessionsRoot, dirent.name)
-    for (const entry of readdirSync(sessionDir, { withFileTypes: true })) {
-      if (entry.isDirectory()) {
-        for (const file of readdirSync(join(sessionDir, entry.name))) {
-          if (file.endsWith('.jsonl.zstd')) count += 1
-        }
-      }
-    }
-  }
-  return count
-}
-
-/** A bounded wait for one Session's durable header line (the Host writes it on
- *  the first accepted append, so a just-created Session may lag briefly). A
- *  read that lands on a torn/partial zstd frame is not a verdict: it just is not
- *  durable yet, so the wait retries until the classified deadline. */
-export async function waitForHostSessionHeader(dshHome, sessionId, label, timeoutMs = 60_000) {
-  const started = Date.now()
-  const deadline = started + timeoutMs
-  while (Date.now() < deadline) {
-    try {
-      const header = hostSessionHeader(dshHome, sessionId)
-      if (header !== undefined) return header
-    } catch {
-      // The Host may be mid-append; a partial frame is not a durable header yet.
-    }
-    await sleep(100)
-  }
-  throw new SplitSmokeWaitError('WAIT_TIMEOUT', {
-    code: 'HOST_SESSION_HEADER_TIMEOUT',
-    waitLabel: label,
-    processRole: 'host',
-    elapsedMs: Date.now() - started,
-  })
-}
-
-/** Bounded digest (the shape the WS-2 qualification records carry). */
-export function sha16(value) {
-  return createHash('sha256').update(String(value)).digest('hex').slice(0, 16)
-}
 
 /** The human-authored `user/message` texts of one persisted Host Session. */
 function hostUserTexts(events) {
@@ -1103,221 +513,6 @@ function hostAssistantHasText(events, text) {
   return events.some(event => event.type === 'assistant/message' && JSON.stringify(event).includes(text))
 }
 
-/** The test-only offline Host LLM route (official Loader row + patch override). */
-export function writeSurfaceLlmFixture(profileDir, workDir) {
-  const stubPath = join(profileDir, 'm4b2s-stub-llm.mjs')
-  writeFileSync(stubPath, `import { LlmAdapter } from '@deepseek-ai/dsh-llm'
-export const name = 'm4b2s-stub-llm'
-export const inject = ['llm']
-class StubLlmAdapter extends LlmAdapter {
-  resolveModel(provider, model) { return Promise.resolve({ provider: 'stub', id: model, name: model }) }
-  listModels() { return Promise.resolve([{ provider: 'stub', id: 'stub', name: 'stub' }]) }
-  async *stream() {
-    yield { type: 'block-start', index: 0, blockType: 'text' }
-    yield { type: 'text-delta', index: 0, text: 'stub answer' }
-    yield { type: 'block-end', index: 0, block: { type: 'text', text: 'stub answer' } }
-  }
-}
-export function apply(ctx) { ctx.llm.registerAdapter(['stub'], new StubLlmAdapter()) }
-`, { mode: 0o600 })
-  const patchPath = join(workDir, 'm4b2s-llm.patch.yml')
-  writeFileSync(patchPath, [
-    '- insert:',
-    '    - id: m4b2s-stub-llm',
-    `      name: '${pathToFileURL(stubPath).href}'`,
-    '      inject: [llm]',
-    '- id: agent-default-model',
-    '  config:',
-    '    provider: stub',
-    '    model: stub',
-    '',
-  ].join('\n'), { mode: 0o600 })
-  return { stubPath, patchPath }
-}
-
-/**
- * The isolated Host workload overlay. The fixture file is copied into
- * the installed profile so its official `@deepseek-ai/*` imports resolve from
- * that profile (never from the repository checkout), exactly like the stub
- * LLM row above. One row registers the scripted adapter; `agent-default-model`
- * routes the Agent to it.
- */
-export function writeC1WorkFixture(profileDir, workDir) {
-  const source = join(SCRIPT_DIR, 'fixtures', 'split-process-host-work.mjs')
-  const fixturePath = join(profileDir, 'split-process-host-work.mjs')
-  writeFileSync(fixturePath, readFileSync(source), { mode: 0o600 })
-  chmodSync(fixturePath, 0o600)
-  const rows = [
-    '- insert:',
-    '    - id: split-process-host-work',
-    `      name: '${pathToFileURL(fixturePath).href}'`,
-    '      inject: [llm, tools, jobs, subagents, agents, typertGateway, connection]',
-    '- id: agent-default-model',
-    '  config:',
-    '    provider: c1-qualification',
-    '    model: c1',
-    '',
-  ]
-  const patchPath = join(workDir, 'm4-c1-work.patch.yml')
-  writeFileSync(patchPath, rows.join('\n'), { mode: 0o600 })
-  chmodSync(patchPath, 0o600)
-  // T52: a profile-scoped override of the REAL `standard` preset. The
-  // generated preset patch is the canonical plugin list; only the
-  // `tool-ask-user` row switches to its official timed mode (1s foreground
-  // window). The production preset itself is untouched.
-  const standardPatch = parseYaml(readFileSync(join(SCRIPT_DIR, '..', 'generated', 'dsh-presets', 'standard.patch.yml'), 'utf8'))
-  const presetRow = standardPatch.find(entry => Array.isArray(entry.insert))?.insert?.find(entry => entry.id === 'preset-standard')
-  assert(presetRow !== undefined && presetRow.config !== undefined, 'T52 the generated standard preset row is missing')
-  const plugins = structuredClone(presetRow.config.plugins)
-  const askRow = plugins.find(entry => entry.id === 'tool-ask-user')
-  assert(askRow !== undefined, 'T52 the standard preset has no tool-ask-user row')
-  askRow.config = { mode: 'timed', timeout: 1 }
-  const timedPatchPath = join(workDir, 'm4-c1-work-timed.patch.yml')
-  const basePatches = parseYaml(readFileSync(patchPath, 'utf8'))
-  writeFileSync(timedPatchPath, JSON.stringify([
-    ...basePatches,
-    { id: 'preset-standard', config: { ...presetRow.config, plugins } },
-  ], null, 2), { mode: 0o600 })
-  chmodSync(timedPatchPath, 0o600)
-  return { fixturePath, patchPath, timedPatchPath }
-
-}
-
-/** Read every host-workload fixture proof line (an absent file is simply empty). */
-function readC1WorkEvents(workRoot) {
-  const path = join(workRoot, 'events.jsonl')
-  if (!existsSync(path)) return []
-  return readFileSync(path, 'utf8').split('\n').filter(Boolean).flatMap(line => {
-    try {
-      return [JSON.parse(line)]
-    } catch {
-      return []
-    }
-  })
-}
-
-/** Wait for one fixture proof matching the predicate. */
-export async function waitForC1WorkEvent(workRoot, predicate, label, timeoutMs = 60_000) {
-  const started = Date.now()
-  const deadline = started + timeoutMs
-  while (Date.now() < deadline) {
-    const event = readC1WorkEvents(workRoot).find(predicate)
-    if (event !== undefined) return event
-    await sleep(25)
-  }
-  throw new SplitSmokeWaitError('WAIT_TIMEOUT', {
-    code: 'WORK_PROOF_WAIT_TIMEOUT',
-    waitLabel: label,
-    elapsedMs: Date.now() - started,
-  })
-}
-
-/** Wait for one durable Host Session event matching the predicate. */
-/**
- * Wait for one durable Host Session event that satisfies `predicate` AND appears
- * at or after the durable index `afterIndex` (a snapshot taken BEFORE the action
- * under test). A Session that already carries earlier turns needs this: a bare
- * `turn/end` wait would happily match history and report a fact the new write
- * never produced.
- */
-export async function waitForHostSessionEventAfter(dshHome, sessionId, afterIndex, predicate, label, timeoutMs = 60_000) {
-  const started = Date.now()
-  const deadline = started + timeoutMs
-  while (Date.now() < deadline) {
-    const events = hostSessionEvents(dshHome, sessionId)
-    const event = events === undefined ? undefined : events.slice(afterIndex).find(predicate)
-    if (event !== undefined) return event
-    await sleep(50)
-  }
-  throw new SplitSmokeWaitError('WAIT_TIMEOUT', {
-    code: 'SESSION_EVENT_WAIT_TIMEOUT',
-    waitLabel: label,
-    elapsedMs: Date.now() - started,
-  })
-}
-
-export async function waitForHostSessionEvent(dshHome, sessionId, predicate, label, timeoutMs = 60_000) {
-  const started = Date.now()
-  const deadline = started + timeoutMs
-  while (Date.now() < deadline) {
-    const events = hostSessionEvents(dshHome, sessionId)
-    const event = events?.find(predicate)
-    if (event !== undefined) return event
-    await sleep(50)
-  }
-  throw new SplitSmokeWaitError('WAIT_TIMEOUT', {
-    code: 'SESSION_EVENT_WAIT_TIMEOUT',
-    waitLabel: label,
-    elapsedMs: Date.now() - started,
-  })
-}
-
-/** The last `surface-status` record of a surface Client (no stdin channel). */
-function lastSurfaceStatus(client) {
-  return client.records.filter(record => record.m4b2s === 'surface-status').at(-1)
-}
-
-/** Wait for a surface status matching the predicate. */
-export async function waitForSurfaceStatus(client, predicate, label, timeoutMs = 120_000) {
-  const started = Date.now()
-  const deadline = started + timeoutMs
-  /** Read the complete JSONL tail once, then re-check the status. */
-  const settleOrFail = (category, code) => {
-    const unread = client.finalRecordRead(label)
-    if (unread !== undefined) throw unread
-    const late = lastSurfaceStatus(client)
-    if (late !== undefined && predicate(late)) return late
-    throw new SplitSmokeWaitError(category, {
-      code,
-      waitLabel: label,
-      processRole: client.role,
-      elapsedMs: Date.now() - started,
-      process: client,
-    })
-  }
-  while (Date.now() < deadline) {
-    const status = lastSurfaceStatus(client)
-    if (status !== undefined && predicate(status)) return status
-    // A Client that died while the status never arrived is not a timeout: that
-    // is the failure itself, and it must not consume the whole budget. The
-    // poller stops on close, so the LAST line may still be unread — read it
-    // before deciding the status is missing.
-    if (client.exited) return settleOrFail('PROCESS_EXITED', 'PROCESS_EXITED_BEFORE_STATUS')
-    await sleep(25)
-  }
-  // Same read before a timeout: a status written just before the deadline must
-  // not be reported as never having arrived.
-  return settleOrFail('WAIT_TIMEOUT', 'SURFACE_STATUS_WAIT_TIMEOUT')
-}
-
-/** Wait for the first ready record among concurrent entries. */
-export async function waitForAnyReady(processes, label, timeoutMs) {
-  const started = Date.now()
-  const deadline = started + timeoutMs
-  while (Date.now() < deadline) {
-    for (const process of processes) {
-      const record = process.records.find(candidate => candidate.m4a0 === 'ready')
-      if (record !== undefined) return { process, record }
-    }
-    if (processes.every(process => process.exited)) {
-      // The close callback removed every contender from `activeProcesses`, so a
-      // report built later would show NO process at all for exactly the failure
-      // that involves all of them. Carry them on the error for the projection.
-      throw new SplitSmokeWaitError('PROCESS_EXITED', {
-        code: 'READY_RACE_EXITED',
-        waitLabel: label,
-        elapsedMs: Date.now() - started,
-        processes,
-      })
-    }
-    await sleep(25)
-  }
-  throw new SplitSmokeWaitError('WAIT_TIMEOUT', {
-    code: 'READY_RACE_TIMEOUT',
-    waitLabel: label,
-    elapsedMs: Date.now() - started,
-  })
-}
 
 async function waitForOutcome(process, label, timeoutMs = 120_000) {
   return await process.waitFor(record => record.m4a0 === 'ready' || record.m4a0 === 'failure', label, timeoutMs)
@@ -1519,103 +714,6 @@ function closeMux(socket, WebSocket) {
   })
 }
 
-/** Bounded wait for a kernel abstract-socket name to become bindable. */
-async function seatFree(name, timeoutMs = 5_000) {
-  const started = Date.now()
-  const deadline = started + timeoutMs
-  while (Date.now() < deadline) {
-    const free = await new Promise(resolveFree => {
-      const server = createNetServer()
-      server.once('error', () => resolveFree(false))
-      server.listen(name, () => {
-        server.close(() => resolveFree(true))
-      })
-    })
-    if (free) return
-    await sleep(50)
-  }
-  throw new SplitSmokeWaitError('WAIT_TIMEOUT', {
-    code: 'SEAT_RELEASE_TIMEOUT',
-    waitLabel: 'abstract seat release',
-    elapsedMs: Date.now() - started,
-  })
-}
-
-/** Read a live process starttime and kill only the process that still matches it. */
-function killTracked(pid, starttime, signal) {
-  if (starttime !== undefined && readStartIdentity(pid) !== starttime) return
-  try {
-    process.kill(-pid, signal)
-  } catch {
-    try { process.kill(pid, signal) } catch { /* already gone */ }
-  }
-}
-
-/**
- * Failure backstop for detached processes the smoke did not learn about: only
- * PIDs whose environment carries THIS isolated DSH home and whose command line
- * is one of the two internal entries are killed.
- */
-function findIsolatedProcesses(dshHome) {
-  const marker = `DSH_HOME=${dshHome}`
-  let entries
-  try {
-    entries = readdirSync('/proc')
-  } catch {
-    return []
-  }
-  const pids = []
-  for (const name of entries) {
-    if (!/^\d+$/u.test(name)) continue
-    const pid = Number(name)
-    let cmdline
-    let environ
-    try {
-      cmdline = readFileSync(`/proc/${pid}/cmdline`, 'utf8')
-      environ = readFileSync(`/proc/${pid}/environ`, 'utf8')
-    } catch {
-      continue
-    }
-    if (!cmdline.includes('local-host.mjs') && !cmdline.includes('local-client.mjs')) continue
-    if (!environ.split('\0').includes(marker)) continue
-    pids.push(pid)
-  }
-  return pids
-}
-
-function killIsolatedProcesses(dshHome) {
-  for (const pid of findIsolatedProcesses(dshHome)) {
-    try { process.kill(-pid, 'SIGKILL') } catch { try { process.kill(pid, 'SIGKILL') } catch { /* already gone */ } }
-  }
-}
-
-async function waitGone(pid, timeoutMs = 15_000) {
-  const deadline = Date.now() + timeoutMs
-  while (Date.now() < deadline) {
-    if (!alive(pid)) return true
-    await sleep(50)
-  }
-  return !alive(pid)
-}
-
-/** Whether one Linux abstract-socket seat can be claimed again. */
-async function seatIsFree(name) {
-  return await new Promise((resolveSeat, rejectSeat) => {
-    const server = createNetServer()
-    let settled = false
-    server.once('error', error => {
-      if (settled) return
-      settled = true
-      if (error.code === 'EADDRINUSE') resolveSeat(false)
-      else rejectSeat(error)
-    })
-    server.listen(name, () => {
-      if (settled) return
-      settled = true
-      server.close(() => resolveSeat(true))
-    })
-  })
-}
 
 function assertNoSecret(label, text, secrets) {
   for (const secret of secrets) {
@@ -3517,124 +2615,64 @@ export const qualifyWebProduct = async context => {
 }
 
 
-async function main() {
+async function main(explicitPath) {
   // The input phase has its own failure boundary: nothing exists yet, so the
   // lane may only emit the fixed safe projection (identity when the manifest
   // was readable, processes when none exist).
-  let tarball
-  let targetDshVersion
-  /** The exact candidate artifact this run qualifies; re-read at the end. */
-  let candidateSha256
+  let candidate
   try {
-    tarball = resolveTarball(candidateArgument(process.argv.slice(2)))
-    const candidateManifest = validateCandidateTarball(tarball)
-    candidateSha256 = createHash('sha256').update(readFileSync(tarball)).digest('hex')
-    targetDshVersion = npmDshVersion()
-    diagnostics = createSmokeDiagnostics({
-      lane: 'split-process',
-      heading: 'SPLIT_PROCESS_SMOKE',
-      marker: 'T',
-      runtimeDshPin: targetDshVersion,
-      artifacts: [smokeArtifactIdentity('candidate', candidateManifest, candidateSha256)],
-    })
     // Input qualification BEFORE any install: the candidate must declare this
     // checkout's exact DSH runtime pin, the same rule the production Client
     // reexec preflight applies to a replacement target.
-    requireExactSmokeDshPin('candidate', candidateManifest, targetDshVersion)
+    candidate = inspectSplitCandidate(explicitPath)
   } catch (error) {
-    if (diagnostics === undefined) emitInputFailure({ lane: 'split-process', heading: 'SPLIT_PROCESS_SMOKE', error })
-    else diagnostics.reportFailure(error)
+    emitInputFailure({ lane: 'split-process', heading: 'SPLIT_PROCESS_SMOKE', error })
     throw error
   }
+  const { tarball, manifest: candidateManifest, candidateSha256, targetDshVersion } = candidate
+  diagnostics = createSmokeDiagnostics({
+    lane: 'split-process',
+    heading: 'SPLIT_PROCESS_SMOKE',
+    marker: 'T',
+    runtimeDshPin: targetDshVersion,
+    artifacts: [smokeArtifactIdentity('candidate', candidateManifest, candidateSha256)],
+  })
   // The startup identity is announced only AFTER preflight qualified it.
   process.stderr.write(`${diagnostics.identityLine()}\n`)
   diagnostics.checkpoint('preflight/candidate-input')
   // The setup itself is inside the same failure boundary: a `mkdtemp`, `mkdir`
   // or `writeFileSync` failure must still leave the safe report AND still remove
   // whatever root was already created, instead of escaping past the cleanup.
-  let distribution
   let workDir
-  let home
   let dshHome
-  let harnessDir
-  let scratch
-  let env
   let isolatedScopeId
+  // The setup itself is inside the same failure boundary: a `mkdtemp`, `mkdir`
+  // or `writeFileSync` failure must still leave the safe report AND still remove
+  // whatever root was already created, instead of escaping past the cleanup.
   try {
-    distribution = loadDshDistribution({ mode: 'npm', version: targetDshVersion })
     workDir = mkdtempSync(join(tmpdir(), 'dsh-split-process-'))
-    home = join(workDir, 'home')
+    // The cleanup scans this exact DSH_HOME even when the profile installation
+    // fails before returning: assign it before the install, not after.
     dshHome = join(workDir, 'dsh-home')
-    harnessDir = join(workDir, 'harness')
-    scratch = join(workDir, 'scratch')
-    for (const directory of [home, dshHome, harnessDir, scratch]) mkdirSync(directory, { recursive: true })
-    writeFileSync(join(workDir, 'npmrc'), 'registry=https://registry.npmjs.org\n', 'utf8')
-    env = isolatedEnvironment(workDir, home, dshHome, join(workDir, 'evidence.json'))
-    // The qualification work dir must be a real OS temp root outside this
-    // checkout: an ancestor `node_modules` would otherwise lend the Client
-    // peer set that the isolated installation must supply itself (issue #476).
-    const workDirFromCheckout = relative(realpathSync(PACKAGE_ROOT), realpathSync(workDir))
-    assert(workDirFromCheckout === '..' || workDirFromCheckout.startsWith(`..${sep}`),
-      `the split-process work dir must be outside the checkout: ${workDir}`)
-    writeFileSync(join(harnessDir, 'package.json'), JSON.stringify({
-      name: 'dsh-split-process-harness',
-      private: true,
-      type: 'module',
-      dependencies: {
-        '@deepseek-ai/dsh': targetDshVersion,
-      },
-    }, null, 2) + '\n', 'utf8')
-    runPnpmInstall(harnessDir, env, distribution)
-    const dsh = dshInvocation(harnessDir)
-    const version = runDsh(dsh, ['--version'], harnessDir, env)
-    assert(version.status === 0, `installed DSH --version failed: ${version.stderr}`)
-    assert(version.stdout.trim() === targetDshVersion, `installed DSH version ${version.stdout.trim()} != ${targetDshVersion}`)
-    // The Client's static platform peer set belongs to the profile that will
-    // run it, exactly like a production profile dependency; the harness only
-    // anchors the DSH CLI installation (issue #476). The published store
-    // declares its zustand/immer engine imports only as devDependencies, so
-    // the profile must own those two as well; the pins are the exact versions
-    // DSH 0.2.1-rc.4 resolved for the store.
-    const profileDir = join(dshHome, 'profiles', 'pi-tui')
-    const clientPeers = [
-      ['@deepseek-ai/dsh-client-store', targetDshVersion],
-      ['zustand', '4.5.7'],
-      ['immer', '10.2.0'],
-    ]
-    installPlugin(dsh, `@deepseek-ai/dsh-client-store@${targetDshVersion}`, harnessDir, env, false)
-    installPlugin(dsh, 'zustand@4.5.7', harnessDir, env, false)
-    installPlugin(dsh, 'immer@10.2.0', harnessDir, env, false)
-    installPlugin(dsh, tarball, harnessDir, env, false)
-    const profileManifest = readJson(join(profileDir, 'package.json'))
-    for (const [name, version] of clientPeers) {
-      assert(profileManifest.dependencies?.[name] === version,
-        `the active profile does not declare the exact Client peer ${name}@${version}`)
-      assert(!(profileManifest.dsh?.profile?.bundles ?? []).includes(name),
-        `the plain Client peer ${name} must not become a profile bundle`)
-      const peerDir = realpathSync(join(profileDir, 'node_modules', name))
-      assert(readJson(join(peerDir, 'package.json')).version === version,
-        `the active profile installed a different ${name} version`)
-      const resolvedPeer = realpathSync(createRequire(join(profileDir, 'package.json')).resolve(name))
-      const peerRelative = relative(peerDir, resolvedPeer)
-      assert(peerRelative !== '' && peerRelative !== '..' && !peerRelative.startsWith(`..${sep}`),
-        `the active profile ${name} resolves outside its own package: ${resolvedPeer}`)
-    }
-    assert((profileManifest.dsh?.profile?.bundles ?? []).includes('@xmoon76/dsh-pi-tui'),
-      'the candidate bundle row disappeared from the active profile')
+    const profile = createSplitSmokeProfile({ tarball, targetDshVersion, workDir })
+    const {
+      home,
+      harnessDir,
+      env,
+      profileDir,
+      profilePackage,
+      manifest,
+      entries,
+      anchor,
+      clientPeers,
+      base: installedBase,
+      dshInvocation: dsh,
+    } = profile
     trace('client-peer-install', {
       owner: 'active pi-tui profile',
       peers: clientPeers.map(([name, version]) => `${name}@${version}`),
       harnessOwnsClientPeer: false,
     })
-    const profilePackage = join(profileDir, 'node_modules', '@xmoon76', 'dsh-pi-tui')
-    assert(existsSync(join(profilePackage, 'dist', 'local-host.mjs')), 'candidate host entry missing from profile install')
-    assert(existsSync(join(profilePackage, 'dist', 'local-client.mjs')), 'candidate client entry missing from profile install')
-    const entries = entryPaths(profilePackage)
-    const manifest = readJson(join(profilePackage, 'package.json'))
-    assert(manifest.bin === undefined, 'the candidate must not add a package bin')
-    assert(!Object.keys(manifest.exports ?? {}).some(name => /local-(host|client)/u.test(name)), 'the internal entries must stay unexported')
-    assert(manifest.dependencies?.ws === '8.21.3', 'the installed package must declare ws@8.21.3')
-    const anchor = realpathSync(join(harnessDir, 'node_modules', '@deepseek-ai', 'dsh', 'package.json'))
     const mutationMode = process.env.SPLIT_PROCESS_SMOKE_MUTATION
     const tuiMutationPatch = join(workDir, 'mutation-tui-enabled.patch.yml')
     const connectionMutationPatch = join(workDir, 'mutation-connection-disabled.patch.yml')
@@ -3644,18 +2682,12 @@ async function main() {
       : mutationMode === 'connection-disabled'
         ? { SPLIT_PROCESS_EXTRA_PATCH: connectionMutationPatch }
         : {}
-    // The test-only offline Host LLM row is part of the isolated profile for
-    // this whole run: the link lanes never prompt, and the surface lanes need a
-    // real Host-side model route to prove a committed prompt round trip. The
-    // running-mutation env wins when present (those cases replace the overlay).
-    const surfaceLlm = writeSurfaceLlmFixture(profileDir, workDir)
-    const base = {
-      cwd: profileDir,
-      env: { ...env, SPLIT_PROCESS_EXTRA_PATCH: surfaceLlm.patchPath, ...mutationEnv },
-      anchor,
-      profile: 'pi-tui',
-      scratch,
-    }
+    // The running mutation wins when present (those cases replace the isolated
+    // surface LLM overlay); otherwise the shared install's default stub-LLM
+    // patch stays the ONE extra patch.
+    const base = mutationMode === undefined
+      ? installedBase
+      : { ...installedBase, env: { ...installedBase.env, ...mutationEnv } }
     const hostFoundationBarrier = join(workDir, 'host-foundation-watch-barrier')
     const probeClientBase = {
       ...base,
@@ -3718,33 +2750,25 @@ async function main() {
     // T26a: the built-in Host Runtime ROW disabled after the overlay must fail
     // the strict readiness audit with no Ready and no Host identity. This is the
     // ROW-absence control: the module artifact itself is still installed and
-    // reachable, so it is NOT the artifact-absence claim (issue #474).
+    // reachable, so it is NOT the artifact-absence claim (issue #474). The
+    // scenario itself is the ONE selectable case registered in
+    // `split-smoke-selection.mjs`.
     const runRoot = join(dshHome, 'run', 'dsh-pi-tui')
     const hasPublishedIdentity = () => existsSync(runRoot)
       && readdirSync(runRoot, { recursive: true }).some(name => String(name).endsWith('instance.json'))
-    const hostRuntimeMutationPatch = join(workDir, 't26-host-runtime-disabled.patch.yml')
-    writeFileSync(hostRuntimeMutationPatch, '- id: split-host-pi-tui-runtime\n  disabled: true\n')
-    let runtimeRowDisabledFailure
-    let runtimeRowDisabledExit
-    try {
-      const rowDisabled = new EntryProcess('host', entries.host, {
-        ...base,
-        env: { ...base.env, SPLIT_PROCESS_EXTRA_PATCH: hostRuntimeMutationPatch },
-      })
-      runtimeRowDisabledFailure = await rowDisabled.waitFor(record => record.m4a0 === 'failure', 'T26 Host Runtime row disabled', 120_000)
-      runtimeRowDisabledExit = await rowDisabled.waitForExit(60_000)
-      assert(runtimeRowDisabledExit.code === 1, `T26 Host Runtime row disabled exit was ${JSON.stringify(runtimeRowDisabledExit)}`)
-      assert(!rowDisabled.records.some(record => record.m4a0 === 'ready'), 'T26 Host Runtime row disabled emitted ready')
-      assert(/expected exactly one active piTuiHostRuntime owner row, found 0/u.test(String(runtimeRowDisabledFailure.error)),
-        `T26 Host Runtime row disabled: unexpected error ${String(runtimeRowDisabledFailure.error)}`)
-      assert(!hasPublishedIdentity(), 'T26 Host Runtime row disabled published a Host identity')
-    } finally {
-      rmSync(hostRuntimeMutationPatch, { force: true })
-    }
+    const runtimeRowDisabled = await runHostRuntimeDisabled({
+      EntryProcess,
+      entries,
+      base,
+      workDir,
+      dshHome,
+      profilePackage,
+      failpoint,
+    })
     trace('t26-runtime-row-disabled', {
-      exit: runtimeRowDisabledExit?.code,
+      exit: runtimeRowDisabled.exitCode,
       readyEmitted: false,
-      error: String(runtimeRowDisabledFailure?.error ?? '').slice(0, 160),
+      error: runtimeRowDisabled.error.slice(0, 160),
     })
 
     // T26a-artifact-absent: the REAL module-absence negative (issue #474). The
@@ -12686,8 +11710,156 @@ async function main() {
   }
 }
 
+/** Print the ONE registry-backed selectable listing (no tarball, no setup). */
+function printSelectableCases() {
+  const cases = [...listSelectableCases()].sort((left, right) => left.suite.localeCompare(right.suite)
+    || left.id.localeCompare(right.id))
+  process.stdout.write('SPLIT_PROCESS_SELECTABLE_CASES scope=SELECTABLE_ONLY\n')
+  for (const entry of cases) {
+    process.stdout.write(`suite=${entry.suite} case=${entry.id} title=${entry.title}\n`)
+  }
+}
+
+/**
+ * Run ONLY the resolved registry cases in their own isolated installation.
+ *
+ * This path never calls the full `main()`: no T18, T08, T75 or Browser
+ * scenario runs, and the result names the selectable scope only.
+ */
+async function runSelectedCases(selection) {
+  let candidate
+  try {
+    // A required Browser qualification cannot be satisfied by this selectable
+    // non-Browser set, and the whole-lane mutation mode is full-only: both are
+    // rejected before any work root or install.
+    if (process.env.SPLIT_PROCESS_REQUIRE_WEB_BROWSER === '1' || process.env.SPLIT_PROCESS_REQUIRE_WEB_PRODUCT === '1') {
+      throw new SplitSmokeInputError('INPUT_SMOKE_SELECTION_INVALID',
+        'INPUT_UNQUALIFIED: INPUT_SMOKE_SELECTION_INVALID (invalid smoke selection, not a product regression): '
+        + 'a required Browser qualification cannot be satisfied by a selectable non-Browser case')
+    }
+    if (process.env.SPLIT_PROCESS_SMOKE_MUTATION !== undefined) {
+      throw new SplitSmokeInputError('INPUT_SMOKE_SELECTION_INVALID',
+        'INPUT_UNQUALIFIED: INPUT_SMOKE_SELECTION_INVALID (invalid smoke selection, not a product regression): '
+        + 'SPLIT_PROCESS_SMOKE_MUTATION is a full-lane control and cannot be used with --case or --suite')
+    }
+    candidate = inspectSplitCandidate(selection.candidate)
+  } catch (error) {
+    emitInputFailure({ lane: 'split-process', heading: 'SPLIT_PROCESS_SMOKE', error })
+    throw error
+  }
+  const { tarball, candidateSha256, targetDshVersion } = candidate
+  diagnostics = createSmokeDiagnostics({
+    lane: 'split-process',
+    heading: 'SPLIT_PROCESS_SMOKE',
+    marker: 'T',
+    runtimeDshPin: targetDshVersion,
+    artifacts: [smokeArtifactIdentity('candidate', candidate.manifest, candidateSha256)],
+  })
+  process.stderr.write(`${diagnostics.identityLine()}\n`)
+  diagnostics.checkpoint('preflight/candidate-input')
+
+  let workDir
+  let dshHome
+  try {
+    workDir = mkdtempSync(join(tmpdir(), 'dsh-split-process-'))
+    // The cleanup scans this exact DSH_HOME even when the profile installation
+    // fails before returning: assign it before the install, not after.
+    dshHome = join(workDir, 'dsh-home')
+    const profile = createSplitSmokeProfile({ tarball, targetDshVersion, workDir })
+    diagnostics.checkpoint('setup/profile-install')
+    const context = {
+      EntryProcess,
+      entries: profile.entries,
+      base: profile.base,
+      workDir,
+      dshHome,
+      profilePackage: profile.profilePackage,
+      failpoint,
+    }
+    const selected = []
+    for (const selectedCase of selection.cases) {
+      diagnostics.checkpoint(`case/${selectedCase.id}`)
+      await selectedCase.run(context)
+      selected.push(selectedCase.id)
+    }
+    assert(createHash('sha256').update(readFileSync(tarball)).digest('hex') === candidateSha256,
+      'the candidate artifact changed during the selected qualification')
+    for (const caseId of selected) process.stdout.write(`${selectedPassLine(caseId)}\n`)
+  } catch (error) {
+    // Report BEFORE the cleanup below: the failure projection must read the
+    // still-live process handles, and the work root must still exist while the
+    // report is built. The original error is rethrown so the lane still fails.
+    diagnostics.reportFailure(error, { processes: [...activeProcesses] })
+    throw error
+  } finally {
+    for (const run of [...activeProcesses]) {
+      try { process.kill(-run.child.pid, 'SIGKILL') } catch { /* already gone */ }
+    }
+    if (dshHome !== undefined) killIsolatedProcesses(dshHome)
+    if (FAILPOINT !== undefined && dshHome !== undefined) {
+      // The failpoint proof reads this run's isolated scene: with no scene (a
+      // setup failure before the root existed) there is nothing to prove.
+      let leftovers = findIsolatedProcesses(dshHome)
+      for (let attempt = 0; attempt < 100 && leftovers.length > 0; attempt += 1) {
+        await sleep(50)
+        killIsolatedProcesses(dshHome)
+        leftovers = findIsolatedProcesses(dshHome)
+      }
+      let seatsOk = true
+      const scopeRoot = join(dshHome, 'run', 'dsh-pi-tui')
+      const scopeIds = existsSync(scopeRoot)
+        ? readdirSync(scopeRoot, { withFileTypes: true })
+          .filter(entry => entry.isDirectory())
+          .map(entry => entry.name)
+        : []
+      for (const scopeId of scopeIds) {
+        const seats = [
+          `\0dsh-pi-tui-h-${scopeId.slice(0, 40)}`,
+          `\0dsh-pi-tui-c-${scopeId.slice(0, 40)}`,
+        ]
+        try {
+          for (const seatName of seats) await seatFree(seatName, 15_000)
+        } catch {
+          seatsOk = false
+          console.error(`FAILPOINT_SEAT_FAILURE seat=${boundedName(seats[0])} the Seat stayed owned; see the preserved work root under KEEP`)
+          break
+        }
+      }
+      console.error(`FAILPOINT_CLEANUP leftovers=${String(leftovers.length)} seats=${seatsOk ? 'free' : 'busy'}`)
+      if (leftovers.length > 0 || !seatsOk) process.exitCode = 1
+      else console.error('FAILPOINT_CLEANUP_OK')
+    }
+    if (workDir === undefined) {
+      // Nothing was created: setup failed before the work root existed.
+    } else if (!KEEP) rmSync(workDir, { recursive: true, force: true })
+    else console.error(`preserved split-process environment: ${workDir}`)
+  }
+}
+
+/** Strict CLI dispatch: `--list`, the old full run, or one selected case set. */
+async function runLane() {
+  let selection
+  try {
+    selection = resolveSelection(parseSelectionArgs(process.argv.slice(2)))
+  } catch (error) {
+    // A selector error exists before any reporter: it leaves the ONE fixed
+    // input projection and never a work root, an install or a process.
+    emitInputFailure({ lane: 'split-process', heading: 'SPLIT_PROCESS_SMOKE', error })
+    throw error
+  }
+  if (selection.mode === 'list') {
+    printSelectableCases()
+    return
+  }
+  if (selection.mode === 'full') {
+    await main(selection.candidate)
+    return
+  }
+  await runSelectedCases(selection)
+}
+
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  main().catch(error => {
+  runLane().catch(error => {
     // One concise final line: the fixed category and its stable code. The
     // structured report (written BEFORE the work root was deleted) owns the
     // safe diagnosis; an `Error.message` of any origin is never copied here.
