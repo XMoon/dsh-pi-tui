@@ -39,11 +39,7 @@ import { DirectPluginManagerPort } from './plugin-manager-direct.ts'
 import { DirectJobObservationPort } from './job-observation-direct.ts'
 import { DirectHostUserShellPort, type DirectShellCapability } from './host-user-shell-direct.ts'
 import { DirectDeliveredFileReadPort } from './deliverables-direct.ts'
-import type { WebAccessPort } from '../web-access-port.ts'
-import type {
-  PiTuiWebAccessAuthenticatedUrl,
-  PiTuiWebAccessStatus,
-} from '../remote/pi-tui-web-access-contract.ts'
+import type { WebAccessPort, WebAccessStatus, WebAccessUrl } from '../web-access-port.ts'
 
 /** The minimal Host context surface the Direct adapters need (structural;
  * the services resolve from the running dsh installation). */
@@ -92,15 +88,15 @@ export interface DirectBackendDeps {
  * that.
  */
 class DirectUnavailableWebAccess implements WebAccessPort {
-  async getStatus(): Promise<PiTuiWebAccessStatus> {
+  async getStatus(): Promise<WebAccessStatus> {
     return { state: 'unavailable', reason: DIRECT_WEB_ACCESS_REASON }
   }
 
-  async setEnabled(): Promise<PiTuiWebAccessStatus> {
+  async setEnabled(): Promise<WebAccessStatus> {
     return { state: 'unavailable', reason: DIRECT_WEB_ACCESS_REASON }
   }
 
-  async getAuthenticatedUrl(): Promise<PiTuiWebAccessAuthenticatedUrl> {
+  async getAuthenticatedUrl(): Promise<WebAccessUrl> {
     throw new Error(DIRECT_WEB_ACCESS_REASON)
   }
 }

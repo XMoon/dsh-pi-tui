@@ -17,11 +17,7 @@
  */
 
 import { SupersededReadError } from '../read-error.ts'
-import type { WebAccessPort } from '../web-access-port.ts'
-import type {
-  PiTuiWebAccessAuthenticatedUrl,
-  PiTuiWebAccessStatus,
-} from './pi-tui-web-access-contract.ts'
+import type { WebAccessPort, WebAccessStatus, WebAccessUrl } from '../web-access-port.ts'
 import type { RemoteConnectionGenerationSource } from './session-reader-remote.ts'
 import type { RemoteResultLike } from './session-writer-remote.ts'
 
@@ -32,9 +28,9 @@ import type { RemoteResultLike } from './session-writer-remote.ts'
  * augmentation.
  */
 export interface RemoteWebAccessNamespace {
-  getStatus(): Promise<RemoteResultLike<PiTuiWebAccessStatus>>
-  setEnabled(enabled: boolean): Promise<RemoteResultLike<PiTuiWebAccessStatus>>
-  getAuthenticatedUrl(): Promise<RemoteResultLike<PiTuiWebAccessAuthenticatedUrl>>
+  getStatus(): Promise<RemoteResultLike<WebAccessStatus>>
+  setEnabled(enabled: boolean): Promise<RemoteResultLike<WebAccessStatus>>
+  getAuthenticatedUrl(): Promise<RemoteResultLike<WebAccessUrl>>
 }
 
 /** One official result's business value, or its refusal thrown. */
@@ -56,15 +52,15 @@ export class RemoteWebAccessPort implements WebAccessPort {
     this.generation = generation
   }
 
-  async getStatus(): Promise<PiTuiWebAccessStatus> {
+  async getStatus(): Promise<WebAccessStatus> {
     return this.fenced('status', namespace => namespace.getStatus())
   }
 
-  async setEnabled(enabled: boolean): Promise<PiTuiWebAccessStatus> {
+  async setEnabled(enabled: boolean): Promise<WebAccessStatus> {
     return this.fenced('toggle', namespace => namespace.setEnabled(enabled))
   }
 
-  async getAuthenticatedUrl(): Promise<PiTuiWebAccessAuthenticatedUrl> {
+  async getAuthenticatedUrl(): Promise<WebAccessUrl> {
     return this.fenced('link', namespace => namespace.getAuthenticatedUrl())
   }
 
