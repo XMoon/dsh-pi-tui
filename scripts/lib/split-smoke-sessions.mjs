@@ -171,3 +171,15 @@ export async function waitForHostSessionEvent(dshHome, sessionId, predicate, lab
     elapsedMs: Date.now() - started,
   })
 }
+
+/** The human-authored `user/message` texts of one persisted Host Session. */
+export function hostUserTexts(events) {
+  return events
+    .filter(event => event.type === 'user/message' && Array.isArray(event.data?.content))
+    .map(event => event.data.content.map(part => typeof part?.text === 'string' ? part.text : '').join(''))
+}
+
+/** Whether the durable log carries one assistant message containing the text. */
+export function hostAssistantHasText(events, text) {
+  return events.some(event => event.type === 'assistant/message' && JSON.stringify(event).includes(text))
+}
