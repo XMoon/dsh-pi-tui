@@ -30,6 +30,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   PiTui and TSP renderers support it, and images keep flowing through the
   existing draft and submission chain.
 
+### Changed
+
+- **Breaking: the public `composeAgent(ctx, ModelSelectionRef)` call is retired.**
+  DSH 0.2.2 moved model-selection ownership into the Agent (`AgentModel` plus the
+  Session `modelSelection` projection) and removed `ModelSelectionRef` /
+  `installModelSelection(ctx, ref)` upstream, so this release no longer accepts a
+  caller-owned model-selection ref; no compatible local shim exists. Migration:
+  replace `composeAgent(ctx, ref, ...)` with
+  `composeAgent(ctx, (agentCtx, agent) => { /* install Agent-scoped contributions */ }, ...)`;
+  model selection is Agent-owned (read/write `agent.model`; `/model` still commits
+  through the existing catalog port). Profiles that only use the built-in TUI need
+  no change.
+
 ### Fixed
 
 - **The inline attachment success notice is no longer swallowed.** Accepting an `/image` / `/attach` path candidate in the body of a draft really staged the file and spliced its placeholder, but the `attached … — Enter to send` notice was silently dropped because that notice re-used the pre-write draft snapshot — the very write that invalidates it. Both the PiTui and TSP renderers were affected; the first-line `/attach <path>` / `/image <path>` routes and the clipboard / terminal-paste routes keep their existing notices. A completed write is now announced on the completed commit plus the current Session owner, and the opposite hole is fixed too: a refused write rolled its entry back and still announced success, and now rolls back and stays silent.
