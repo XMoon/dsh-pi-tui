@@ -187,6 +187,15 @@ export function createSvgRasterizer(spawnProcess: SpawnProcess = spawn): SvgRast
       // The relative phase timeline of ONE child, so a tripped bound names the
       // stalled boundary instead of only reporting "exceeded 3000 ms". Marks
       // are numbers only: no SVG source, no PNG bytes, no stderr text.
+      //
+      // Two DIFFERENT authorities, never conflated by one mark:
+      //   `stdinWritten`  = this process's `Writable.end()` callback ran, i.e.
+      //                     the parent's loop handed the bytes into the OS pipe.
+      //                     It is NOT proof the worker read or parsed them.
+      //   `rp request`    = the worker's own line: its stdin really reached EOF.
+      // A late `stdinWritten` with no `rp` line at all is therefore "the parent
+      // never got scheduled", while `rp request` present and no `rp answer` is
+      // "the worker took the work and stalled inside it".
       const startedAt = performance.now()
       const phases: string[] = []
       const mark = (phase: string, detail?: string): void => {
@@ -194,7 +203,9 @@ export function createSvgRasterizer(spawnProcess: SpawnProcess = spawn): SvgRast
       }
       mark('spawn')
       // The child's own milestone lines (`rp <phase>=<ms>`), kept separate from
-      // any real stderr so neither message buries the other.
+      // any real stderr so neither message buries the other. A missing or empty
+      // milestone set is a valid answer (`''`): nothing here parses the lines, so
+      // an absent field can never raise a new failure over the real one.
       const workerPhases = (): string => stderr.split('\n').filter(line => line.startsWith('rp ')).join(' ')
       const workerStderr = (): string => stderr.split('\n').filter(line => !line.startsWith('rp ')).join('\n').trim().slice(0, 200)
       // ───────────────────────────────────────────────────────────────────────
@@ -287,16 +298,15 @@ export function createSvgRasterizer(spawnProcess: SpawnProcess = spawn): SvgRast
         terminate('cancelled')
       } else {
         options.signal.addEventListener('abort', onAbort, { once: true })
-        // DIAGNOSTIC: the `stdinAck` mark fires only once the parent loop
-        // actually pushed the request into the pipe, so a late ack names a
-        // parent that never got scheduled rather than a slow child.
+        // DIAGNOSTIC: the parent-side write boundary (see the block above): this
+        // callback runs when OUR loop pushed the bytes into the pipe.
         child.stdin.end(JSON.stringify({
         modulePath,
         svg: source,
         width,
         viewportWidth: admission.viewportWidth,
         viewportHeight: admission.viewportHeight,
-      }), () => mark('stdinAck'))
+      }), () => mark('stdinWritten'))
       }
     })
   }
