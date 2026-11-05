@@ -14,6 +14,7 @@ import assert from 'node:assert/strict'
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import test from 'node:test'
+import { getDshRuntimeVersion } from '@deepseek-ai/dsh-app-boot'
 import { executeModelToolFixture } from '@deepseek-ai/dsh-tool-testkit'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
@@ -177,7 +178,7 @@ const NATIVE_TASKS = [
 
 test('official missing catalog, exact installTarget and local profile install', { skip }, async t => {
   // Catalog truth before any install: both on-demand packages are discoverable
-  // as missing official entries with an exact rc.2 install target.
+  // as missing official entries with an exact target-version install target.
   const catalogHost = await startOptionalBundleHost(t, { bundles: [] })
   const pluginManager = catalogHost.ctx.get('pluginManager') as {
     listBundles(): Promise<readonly {
@@ -193,8 +194,8 @@ test('official missing catalog, exact installTarget and local profile install', 
     assert.ok(entry !== undefined, `${task.packageName} must be discoverable`)
     assert.equal(entry.official, true)
     assert.equal(entry.availability, 'missing')
-    assert.equal(entry.installTarget?.version, '0.2.1-rc.2')
-    assert.equal(entry.installTarget?.spec, `${task.packageName}@0.2.1-rc.2`)
+    assert.equal(entry.installTarget?.version, getDshRuntimeVersion())
+    assert.equal(entry.installTarget?.spec, `${task.packageName}@${getDshRuntimeVersion()}`)
   }
   await catalogHost.dispose()
 
