@@ -124,7 +124,7 @@ test('a raster child that outlives the 3 s bound is classified as a timeout afte
   assert.equal(child?.signalCode, 'SIGKILL', 'the child process is really gone before the promise settles')
   assert.equal(child?.exitCode, null)
   assert.match(failure.message, /SVG rasterization exceeded 3000 ms/u)
-  assert.match(failure.message, /\[spawn=0 stdinAck=\d+ terminate=\d+\(timeout\)/u,
+  assert.match(failure.message, /\[spawn=0 stdinWritten=\d+ terminate=\d+\(timeout\)/u,
     `the timeout names the parent boundary it reached: ${failure.message}`)
   assert.match(failure.message, /\[rp request=1 rp import=9\]/u,
     `the timeout carries the child's own last reported milestones: ${failure.message}`)
