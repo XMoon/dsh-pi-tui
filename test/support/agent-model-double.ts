@@ -97,8 +97,13 @@ export function fakeAgentModel(
       return
     }
     if (type !== 'request/header') return
-    const header = (data as { header?: { config?: Partial<FakeAgentModelSelection> } } | undefined)?.header
-    const next = selectionOf(header?.config)
+    // The official `selectionOfHeader` never records an effort the adapter
+    // defaulted: that effort was not an explicit user choice.
+    const header = (data as {
+      header?: { config?: Partial<FakeAgentModelSelection>; adapterDefaults?: { reasoningEffort?: unknown } }
+    } | undefined)?.header
+    const adapterDefaultedEffort = header?.adapterDefaults?.reasoningEffort === true
+    const next = selectionOf(adapterDefaultedEffort ? { ...header?.config, reasoningEffort: undefined } : header?.config)
     if (next === undefined) return
     if (pending !== undefined && sameSelection(pending, next)) pending = undefined
     lastUsed = next
@@ -130,6 +135,11 @@ export function fakeAgentModel(
         model: selection.model,
         ...selection.reasoningEffort === undefined ? {} : { reasoningEffort: selection.reasoningEffort },
       }
+      // The official `AgentModel.select` is a no-op for a selection equal to
+      // the projection's recorded choice (pending ?? lastUsed); the Agent's
+      // options fallback is NOT a recorded choice.
+      const recordedChoice = pending ?? lastUsed
+      if (recordedChoice !== undefined && sameSelection(recordedChoice, normalized)) return
       if (typeof capable?.append === 'function') capable.append('model/selection', normalized)
       else recorded = normalized
     },
