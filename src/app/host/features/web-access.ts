@@ -50,9 +50,6 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-// The official Host profile recomposition emits `app-boot/config-reload`; the
-// type-only import loads its Cordis Events declaration (no runtime edge).
-import type {} from '@deepseek-ai/dsh-app-boot'
 import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import {
   PI_TUI_WEB_ACCESS_NAMESPACE,
@@ -263,7 +260,16 @@ export class PiTuiWebAccessHostService extends TypertRemoteService {
     // `disabled: true` rows. Restore THIS Host's live target after it settled,
     // through the one serialized mutation queue. The event is the official
     // post-settlement signal; there is no earlier hook.
-    ctx.on('app-boot/config-reload', () => { this.reconcileAfterRecompose() })
+    //
+    // STRUCTURAL by contract (same rule as the retired `dsh-session-query`
+    // peer): the event NAME is the official one, but this is a one-line
+    // subscription, not a runtime API import — importing `dsh-app-boot` (even
+    // type-only) would add a package peer for a Cordis event string. The cast
+    // stays ON `ctx.on` so the Host-subscription inventory still sees it.
+    ;(ctx.on as (event: 'app-boot/config-reload', listener: () => void) => unknown)(
+      'app-boot/config-reload',
+      () => { this.reconcileAfterRecompose() },
+    )
   }
 
   /**
