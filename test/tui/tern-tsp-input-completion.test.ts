@@ -1393,10 +1393,15 @@ test('a forged inlineAttachment marker at a real INLINE path seat is refused by 
   assert.equal(m.rowText(m.rows()[0]!), '›zz.png',
     'the forged row is displayed with its own label at the inline path seat')
   await m.key(ENTER)
+  // The PERMISSION claim is asserted FIRST, on purpose: a regression that lets the
+  // marker buy the attachment route shows up here as `2 !== 1` instead of surfacing
+  // first as the cosmetic separator the attachment grammar appends. Both halves are
+  // discriminating — measured under the M5 mutant in either order (the text-shape
+  // assert fails when it leads, the staging fence fails when it leads).
+  assert.equal(staged.length, 1,
+    'NO second acceptance was staged — the provider-request row identity, not the marker, is the permission')
   assert.deepEqual(m.editor(), { text: 'look /image zz.png', cursor: 'look /image zz.png'.length },
     'it inserted the plugin value as plain text: the prose, the `/image` command token and the separator survive')
-  assert.equal(staged.length, 1,
-    'and NO second acceptance was staged — the provider-request row identity, not the marker, is the permission')
   assert.deepEqual(m.calls.submits, [], 'the forged accept is still accept-only')
 })
 
