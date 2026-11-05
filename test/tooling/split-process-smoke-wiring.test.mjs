@@ -1899,6 +1899,20 @@ test('a selected result names only the selectable scope', () => {
   assert.doesNotMatch(source, /SPLIT_PROCESS_SMOKE_PASS/u, 'the lane may never print a full PASS')
 })
 
+test('the legacy C1 bridge exposes every helper the still-inline T44-T66 block destructures', () => {
+  const source = readFileSync(SCRIPT, 'utf8')
+  const scene = readFileSync(C1_SCENE_MODULE, 'utf8')
+  const bridge = /const legacyC1 = createC1Scene\(context\)\n    const \{([\s\S]*?)\} = legacyC1/u.exec(source)
+  assert.ok(bridge, 'the T44-T66 legacy bridge must exist until PR2-C deletes it')
+  const names = bridge[1].split(',').map(name => name.trim()).filter(name => name !== '')
+  assert.ok(names.length > 0, 'the legacy bridge must destructure the scene helpers')
+  const returnBlock = scene.slice(scene.lastIndexOf('  return {'), scene.indexOf('\n  }\n}'))
+  for (const name of names) {
+    assert.match(returnBlock, new RegExp(`\\b${name}\\b`, 'u'),
+      `createC1Scene must expose "${name}" to the legacy bridge`)
+  }
+})
+
 test('the Host Runtime row-disabled control has one implementation', () => {
   const source = readFileSync(SCRIPT, 'utf8')
   const scenario = readFileSync(CASE_MODULE, 'utf8')

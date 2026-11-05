@@ -201,6 +201,7 @@ export function createC1Scene(context) {
 
   return {
     PROTECTED_HOST_ROWS,
+    c1Work,
     c1WorkRoot,
     c1JobWorkRoot,
     startC1Host,
