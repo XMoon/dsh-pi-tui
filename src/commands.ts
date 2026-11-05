@@ -87,6 +87,7 @@ import {
 import type {
   TspCommandCompletionExtensionSuggest,
   TspCommandCompletionInstallation,
+  TspInlineAttachmentStager,
 } from './app/surface/runtime.ts'
 import type { SubmissionComposerPort } from './app/submission/composer-port.ts'
 import { commandSummaryOf, type SurfaceCatalogSnapshot, type SurfaceCommandSummary } from './domain/catalog/surface.ts'
@@ -965,6 +966,14 @@ export interface TuiCommandPresentation {
    * catalog, claims and collision health exactly as before.
    */
   readonly installTspCommandCompletions?: (installation: TspCommandCompletionInstallation) => void
+  /**
+   * TSP I-D: install the SAME inline-attachment stager the mounted PiTui app
+   * receives through `setInlineAttachmentStager`, on the mounted TSP renderer
+   * that has no PiTui editor. Optional because a headless/test assembly mounts
+   * no renderer; the production TSP composition supplies it, and the real TSP
+   * Direct path proves the install reached the current mount.
+   */
+  readonly installTspInlineAttachmentStager?: (stager: TspInlineAttachmentStager) => void
   /**
    * TSP I-C: which native TUI-builtin presenters the mounted renderer really
    * installed, read LIVE at each catalog commit (never a version/kind guess).
@@ -2428,11 +2437,14 @@ export function registerTuiCommands(
 
   artifactCommands.registerAttach()
 
-  // The INLINE completion route stages through the SAME intake.
-  // The stager is installed on the mounted app (which owns the editor, the one
-  // undoable in-place edit and the seat fence); a renderer without a PiTui app
-  // has no inline completion plane at all, so nothing is installed.
-  app?.setInlineAttachmentStager(artifactCommands.inlineAttachmentStager())
+  // The INLINE completion route stages through the SAME intake. The stager is
+  // installed on the surface that owns the editor: the mounted PiTui app (its
+  // undoable in-place edit and seat fence), or — TSP I-D — the mounted TSP
+  // renderer through its one narrow install seam. One stager, one intake, one
+  // installation site; an assembly with neither surface installs nothing.
+  const inlineAttachmentStager = artifactCommands.inlineAttachmentStager()
+  if (app !== undefined) app.setInlineAttachmentStager(inlineAttachmentStager)
+  else presentation?.installTspInlineAttachmentStager?.(inlineAttachmentStager)
 
   // Image UX PR2: `/view-image` is a PiTui-local product surface (it lists the
   // CURRENTLY MOUNTED transcript window and opens the PiTui Viewer), so it is
