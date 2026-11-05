@@ -688,8 +688,17 @@ test('the detached-navigation siblings stay between M5N-01 and the T44 inventory
   // A REAL completed turn is the fork cut; the RUNNING turn is the work the
   // fork must neither stop nor wait for.
   assert.match(m5n2, /clientA\.send\('\/fork\\r'\)/u)
-  assert.match(m5n2, /event\.attempt === 1/u)
-  assert.match(m5n2, /event\.attempt === 2/u)
+  // Readiness of every held turn is BOUNDED to that turn's own fixture event
+  // and its unique prompt text: a bare history scan can be satisfied by an
+  // earlier turn's proof (the fixture file is append-only for the whole lane).
+  assert.match(m5n2, /const waitForC1WorkEventAfter = async \(afterIndex, predicate, label/u,
+    'M5N-02 must bound fixture-event waits to a recorded boundary')
+  assert.match(m5n2, /event\.userText\.includes\('m5n2-x-turn1'\)/u)
+  assert.match(m5n2, /event\.userText\.includes\('m5n2-x-turn2'\)/u)
+  assert.doesNotMatch(m5n2, /event\.attempt ===/u,
+    'M5N-02 must never identify a fresh turn by a reused attempt number')
+  assert.doesNotMatch(m5n2, /frame\.includes\('long-turn started'\)/u,
+    'M5N-02 must never use the accumulating transcript as a freshness fact')
   assert.equal((m5n2.match(/!existsSync\(releaseBarrier\)/gu) ?? []).length, 5,
     'M5N-02 must assert the hold barrier state at each departure (/fork, exit, /rewind) and before the rewind Turn')
   assert.match(m5n2, /durableOf\(sessionX\)\.slice\(xTurn2Index\)\.every\(event => event\.type !== 'turn\/end'\)/u,
@@ -738,7 +747,10 @@ test('the detached-navigation siblings stay between M5N-01 and the T44 inventory
 
   // Explicit Busy Esc remains the ONE aborting gesture.
   assert.match(m5n2, /clientB\.send\('\\x1b'\)/u)
-  assert.match(m5n2, /event\.attempt === 4/u)
+  assert.match(m5n2, /event\.userText\.includes\('m5n2-x-stop'\)/u,
+    'the Stop control must be proven ready by THIS prompt\'s fixture event')
+  assert.match(m5n2, /the Stop-control Turn started at the Host/u,
+    'the Stop control must also observe the fresh Host turn/start')
   assert.match(m5n2, /reason\?\.kind === 'aborted'/u)
   assert.match(m5n2, /reason\?\.reason\?\.kind === 'user'/u)
   // Identity, cleanup and the trace are explicit.
