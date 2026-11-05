@@ -60,7 +60,6 @@ export async function runEntryAdmission(context) {
   assert(manifest.dependencies?.ws === '8.21.3', 'T18 ws runtime dependency missing')
   assert(!Object.keys(manifest.exports ?? {}).includes('./local-host'), 'T18 public Host entry appeared')
   assert(!Object.keys(manifest.exports ?? {}).includes('./local-client'), 'T18 public Client entry appeared')
-  trace('t18', { packageShape: 'internal entries only', directHelp: 'pass', roleOnlyNegative: 'pass' })
 
   // T18 negative control: the role string alone is not Host-entry admission.
   // A regular CLI that merely inherits DSH_PI_TUI_ROLE=host must still fail
@@ -83,6 +82,8 @@ export async function runEntryAdmission(context) {
   }
   const help = runDsh(dsh, ['--profile', 'pi-tui', '--help'], profileDir, env, 120_000)
   assert(help.status === 0, `Direct --help failed: ${help.stderr}`)
+  // Both T18 runtime checks above passed; only now is the combined PASS fact safe.
+  trace('t18', { packageShape: 'internal entries only', directHelp: 'pass', roleOnlyNegative: 'pass' })
 
   // The running-state mutations below use real Host processes, not a unit fake.
   // (1) Re-enabling the Host-only TUI row after the overlay must make the
