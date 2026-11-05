@@ -532,7 +532,9 @@ async function login(context, timeoutMs = 120_000) {
 function httpStatus(url, headers) {
   return new Promise(resolve => {
     const request = httpRequest(url, { method: 'GET', headers, timeout: 10_000 }, response => {
-      response.resume()
+      // Only the status is needed. SSE (/plugins/events) would otherwise keep
+      // this socket open until the idle timeout even after the status arrived.
+      response.destroy()
       resolve(response.statusCode ?? 0)
     })
     request.on('timeout', () => { request.destroy(); resolve('timeout') })
