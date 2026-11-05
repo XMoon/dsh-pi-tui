@@ -151,7 +151,7 @@ async function runUserCommandReloadRound(context) {
   }
   writeFileSync(join(envWork, 'npmrc'), 'registry=https://registry.npmjs.org\n', 'utf8')
   const env = isolatedEnvironment(envWork, home, dshHome, join(roundRoot, 'evidence.json'))
-  
+
   // ── The old profile owns the real old installation (official install) ────
   const profileDir = join(dshHome, 'profiles', 'pi-tui')
   installPlugin(dsh, `@deepseek-ai/dsh-client-store@${targetDshVersion}`, harnessDir, env, false)
@@ -605,7 +605,7 @@ async function runUnavailableTargetRound(context) {
   }
   writeFileSync(join(envWork, 'npmrc'), 'registry=https://registry.npmjs.org\n', 'utf8')
   const env = isolatedEnvironment(envWork, home, dshHome, join(roundRoot, 'evidence.json'))
-  
+
   const profileDir = join(dshHome, 'profiles', 'pi-tui')
   installPlugin(dsh, `@deepseek-ai/dsh-client-store@${targetDshVersion}`, harnessDir, env, false)
   installPlugin(dsh, 'zustand@4.5.7', harnessDir, env, false)

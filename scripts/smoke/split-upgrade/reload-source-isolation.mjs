@@ -86,7 +86,7 @@ async function runReloadSourceIsolationRound(context) {
   }
   writeFileSync(join(envWork, 'npmrc'), 'registry=https://registry.npmjs.org\n', 'utf8')
   const env = isolatedEnvironment(envWork, home, dshHome, join(roundRoot, 'evidence.json'))
-  
+
   // Profile = the OLD installed build (the running build). The side-by-side
   // NEW build is the qualification-only override target.
   const profileDir = join(dshHome, 'profiles', 'pi-tui')
