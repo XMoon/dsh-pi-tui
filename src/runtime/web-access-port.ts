@@ -19,17 +19,35 @@
  * @module @xmoon76/dsh-pi-tui/runtime/web-access-port
  */
 
-import type {
-  PiTuiWebAccessAuthenticatedUrl,
-  PiTuiWebAccessStatus,
-} from './remote/pi-tui-web-access-contract.ts'
+/**
+ * The availability of the official Web frontend on the Host, as the Client
+ * port reports it. It is a SEMANTIC DTO — deliberately independent of the
+ * package's private wire module, so the public command-runner declaration does
+ * not pull the private Typert contract (and its protocol augmentation) into the
+ * published root types. The Host service and the Remote adapter speak their own
+ * structurally identical vocabulary at their own layers.
+ */
+export type WebAccessStatus =
+  | { readonly state: 'disabled' }
+  | { readonly state: 'enabled' }
+  | { readonly state: 'changing' }
+  | { readonly state: 'unavailable'; readonly reason: string }
+
+/**
+ * The official authenticated launch URL of the Host's Web frontend. The value
+ * carries the official launch token, so it is only requested by an explicit
+ * user action and is never stored, logged or attached to a status object.
+ */
+export interface WebAccessUrl {
+  readonly url: string
+}
 
 /** The ONE Client-side control surface of the Host's official Web frontend. */
 export interface WebAccessPort {
   /** The Host's current state, read live on every call. */
-  getStatus(): Promise<PiTuiWebAccessStatus>
+  getStatus(): Promise<WebAccessStatus>
   /** Enable or disable the official Web frontend on THIS Host. */
-  setEnabled(enabled: boolean): Promise<PiTuiWebAccessStatus>
+  setEnabled(enabled: boolean): Promise<WebAccessStatus>
   /** The official authenticated launch URL; only meaningful while `enabled`. */
-  getAuthenticatedUrl(): Promise<PiTuiWebAccessAuthenticatedUrl>
+  getAuthenticatedUrl(): Promise<WebAccessUrl>
 }

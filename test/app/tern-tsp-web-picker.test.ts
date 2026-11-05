@@ -25,7 +25,7 @@ import type {
   WebAccessReadOutcome,
   WebAccessRequest,
 } from '../../src/app/command/web-access-presentation.ts'
-import type { PiTuiWebAccessStatus } from '../../src/runtime/remote/pi-tui-web-access-contract.ts'
+import type { WebAccessStatus } from '../../src/runtime/web-access-port.ts'
 import { installTspPane, type TspPane } from '../support/tsp-terminal-fixture.ts'
 import { settle, waitUntil } from '../support/tsp-runner-harness.ts'
 import {
@@ -115,7 +115,7 @@ async function mounted(
   const notices: Array<{ text: string; kind?: 'info' | 'error' }> = []
   /** The captured-subject fence: a case can revoke the request. */
   let current = true
-  const open = (status: PiTuiWebAccessStatus): WebAccessMenuHandle => {
+  const open = (status: WebAccessStatus): WebAccessMenuHandle => {
     assert.ok(renderer.webPresentation, 'the web pane must expose the native /web presenter')
     return renderer.webPresentation.open({
       isCurrent: () => current,
@@ -132,7 +132,7 @@ async function mounted(
     notices,
     open,
     revoke: () => { current = false },
-    ready: async (handle: WebAccessMenuHandle, status: PiTuiWebAccessStatus) => {
+    ready: async (handle: WebAccessMenuHandle, status: WebAccessStatus) => {
       await waitUntil('web picker ready', () => props(pane).state === 'ready')
       const revisionBefore = actionRevision(pane)
       handle.setStatus({ kind: 'status', status })

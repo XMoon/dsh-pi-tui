@@ -15,7 +15,7 @@
  * @module app/command/web-access-presentation
  */
 
-import type { PiTuiWebAccessStatus } from '../../runtime/remote/pi-tui-web-access-contract.ts'
+import type { WebAccessStatus } from '../../runtime/web-access-port.ts'
 import type { OwnedTaskOptions } from '../../runtime/process/tasks.ts'
 
 /**
@@ -27,7 +27,7 @@ import type { OwnedTaskOptions } from '../../runtime/process/tasks.ts'
  * or guessing `disabled`.
  */
 export type WebAccessReadOutcome =
-  | { readonly kind: 'status'; readonly status: PiTuiWebAccessStatus }
+  | { readonly kind: 'status'; readonly status: WebAccessStatus }
   | { readonly kind: 'unavailable'; readonly message: string }
 
 /**

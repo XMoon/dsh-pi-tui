@@ -29,7 +29,7 @@ import type {
   WebAccessReadOutcome,
   WebAccessRequest,
 } from '../../src/app/command/web-access-presentation.ts'
-import type { PiTuiWebAccessStatus } from '../../src/runtime/remote/pi-tui-web-access-contract.ts'
+import type { WebAccessStatus } from '../../src/runtime/web-access-port.ts'
 import { LOCAL_COMMANDS, SESSIONLESS_COMMANDS } from '../../src/domain/command/policy.ts'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 
@@ -101,8 +101,8 @@ function ownedRunner() {
 
 function setup(options: {
   readonly backendKind?: 'direct' | 'remote'
-  readonly status?: PiTuiWebAccessStatus
-  readonly settledStatus?: PiTuiWebAccessStatus
+  readonly status?: WebAccessStatus
+  readonly settledStatus?: WebAccessStatus
   readonly copy?: boolean
   readonly readFailure?: string
   readonly toggleFailure?: string
@@ -299,7 +299,7 @@ interface MenuHarness {
 /** One real PiTui menu driven on a virtual terminal. */
 async function pituiMenu(
   t: { after(fn: () => unknown): void },
-  status: PiTuiWebAccessStatus,
+  status: WebAccessStatus,
   size: { readonly columns: number; readonly rows: number } = { columns: 120, rows: 40 },
 ): Promise<MenuHarness> {
   const vt = new VirtualTerminal(size.columns, size.rows)
