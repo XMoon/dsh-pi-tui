@@ -556,11 +556,11 @@ test('two real TUI Clients must both show one Host Question or Approval before f
 test('the non-destructive Split Remote navigation witness stays between M5-C and the T44 inventory', () => {
   const source = readFileSync(SCRIPT, 'utf8')
   // ONE isolated case, after the M5-C first-settlement Case and before the
-  // T44 inventory it must not renumber or absorb.
+  // M5N-02 sibling case and the T44 inventory it must not renumber or absorb.
   const start = source.indexOf('// M5N-01 (M5-N):')
-  const end = source.indexOf('// T44: a real accepted Turn survives')
+  const end = source.indexOf('// M5N-02 (M5-N):')
   assert.ok(start > source.indexOf('// M5C-01 (M5-C):'), 'M5N-01 must run after the M5-C Case')
-  assert.ok(end > start, 'M5N-01 must stay immediately before the T44 inventory')
+  assert.ok(end > start, 'M5N-01 must stay immediately before the M5N-02 sibling case')
   assert.equal((source.match(/\/\/ M5N-01 \(M5-N\):/gu) ?? []).length, 1,
     'the non-destructive navigation witness must exist exactly once')
   const m5n = source.slice(start, end)
@@ -655,6 +655,106 @@ test('the non-destructive Split Remote navigation witness stays between M5-C and
   assert.match(m5n, /exitC1Client\(clientB/u)
   assert.match(m5n, /stopC1Host\(host\)/u)
   assert.match(m5n, /trace\('m5n-01'/u)
+})
+
+test('the detached-navigation siblings stay between M5N-01 and the T44 inventory', () => {
+  const source = readFileSync(SCRIPT, 'utf8')
+  const start = source.indexOf('// M5N-02 (M5-N):')
+  const end = source.indexOf('// T44: a real accepted Turn survives')
+  assert.ok(start > source.indexOf('// M5N-01 (M5-N):'), 'M5N-02 must run after the M5N-01 case')
+  assert.ok(source.indexOf('// M5N-03 (M5-N):') > start, 'M5N-03 must run after the M5N-02 case')
+  assert.ok(end > source.indexOf('// M5N-03 (M5-N):'),
+    'M5N-03 must stay immediately before the T44 inventory')
+  for (const marker of ['// M5N-02 (M5-N):', '// M5N-03 (M5-N):']) {
+    assert.equal((source.match(new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'gu')) ?? []).length, 1,
+      `${marker} must exist exactly once`)
+  }
+  const m5n2 = source.slice(source.indexOf('// M5N-02 (M5-N):'), source.indexOf('// M5N-03 (M5-N):'))
+  const m5n3 = source.slice(source.indexOf('// M5N-03 (M5-N):'), end)
+
+  // ── M5N-02: `/fork` from a RUNNING source, the Client exit, and Stop ──────
+  // ONE real Host holds its Turn until the barrier file exists: the fork cut is
+  // the source's first COMPLETED turn, so the second Turn can stay held across
+  // the adoption. Two REAL Surface Clients, never the qualification entry.
+  assert.match(m5n2, /startC1Host\('long-turn', 'm5n2-siblings'/u)
+  assert.match(m5n2, /C1_HOLD_LONG_TURN: releaseBarrier/u)
+  assert.equal((m5n2.match(/startC1Client\(/gu) ?? []).length, 2,
+    'M5N-02 must start exactly two real Surface Clients')
+  assert.doesNotMatch(m5n2, /new EntryProcess\('client'/u,
+    'M5N-02 must never downgrade to the qualification EntryProcess')
+  assert.match(m5n2, /SPLIT_PROCESS_CLIENT_SESSION: sessionX/u)
+  assert.match(m5n2, /aReady\.pid !== bReady\.pid/u)
+  assert.match(m5n2, /clientA\.child\.pid !== clientB\.child\.pid/u)
+  // A REAL completed turn is the fork cut; the RUNNING turn is the work the
+  // fork must neither stop nor wait for.
+  assert.match(m5n2, /clientA\.send\('\/fork\\r'\)/u)
+  assert.match(m5n2, /event\.attempt === 1/u)
+  assert.match(m5n2, /event\.attempt === 2/u)
+  assert.equal((m5n2.match(/!existsSync\(releaseBarrier\)/gu) ?? []).length, 3,
+    'M5N-02 must assert the hold barrier was still absent at each departure')
+  assert.match(m5n2, /durableOf\(sessionX\)\.slice\(xTurn2Index\)\.every\(event => event\.type !== 'turn\/end'\)/u,
+    'the fork must not end the running source Turn')
+  assert.match(m5n2, /hostSessionLogCount\(dshHome\) === sessionsBeforeFork \+ 1/u,
+    'the fork must publish exactly ONE durable child Session')
+  assert.match(m5n2, /childHeader\.parentSession === sessionX/u,
+    'the published child must name the source as its parent')
+  // A Split Remote TUI command appends no Host `command/*` row: the scene must
+  // not claim a durable command settlement this backend never writes.
+  assert.doesNotMatch(m5n2, /event\.type === 'command\/done'/u,
+    'M5N-02 must not assert a durable command/done the Remote command plane never appends')
+  assert.match(m5n2, /childUserTexts\.filter\(text => text === 'm5n2-x-turn2'\)\.length === 0/u,
+    'the child must not inherit the RUNNING source Turn')
+  // The fork's Client move happens exactly once.
+  assert.match(m5n2, /movesAfterFork\.every\(id => id === childId\)/u)
+  // The Client EXIT: `/exit` through the real editor, then the source Turn
+  // continues and the second Client still writes the same Session.
+  assert.match(m5n2, /exitC1Client\(clientA, 'M5N2 A'\)/u)
+  assert.match(m5n2, /await waitGone\(aPid, 15_000\)/u)
+  assert.match(m5n2, /durableOf\(sessionX\)\.slice\(xTurn3Index\)\.every\(event => event\.type !== 'turn\/end'\)/u,
+    'the Client exit must not end the running Host Turn')
+  assert.match(m5n2, /hostSessionLogCount\(dshHome\) === sessionsBeforeExit/u,
+    'the Client exit must not create or remove a durable Session')
+  assert.match(m5n2, /m5n2-b-after-exit/u, 'the second Client must still write the Session after the exit')
+  // Explicit Busy Esc remains the ONE aborting gesture.
+  assert.match(m5n2, /clientB\.send\('\\x1b'\)/u)
+  assert.match(m5n2, /event\.attempt === 4/u)
+  assert.match(m5n2, /reason\?\.kind === 'aborted'/u)
+  assert.match(m5n2, /reason\?\.reason\?\.kind === 'user'/u)
+  // Identity, cleanup and the trace are explicit.
+  assert.match(m5n2, /assertHostIdentityKept\(host, hostBefore/u)
+  assert.match(m5n2, /exitC1Client\(clientB, 'M5N2 B'\)/u)
+  assert.match(m5n2, /stopC1Host\(host\)/u)
+  assert.match(m5n2, /trace\('m5n-02'/u)
+
+  // ── M5N-03: leaving a pending Host Question ─────────────────────────────
+  // ONE real Host question reaches TWO real modals before either Client leaves.
+  assert.match(m5n3, /startC1Host\('question', 'm5n3-interaction'/u)
+  assert.equal((m5n3.match(/startC1Client\(/gu) ?? []).length, 2,
+    'M5N-03 must start exactly two real Surface Clients')
+  assert.doesNotMatch(m5n3, /new EntryProcess\('client'/u,
+    'M5N-03 must never downgrade to the qualification EntryProcess')
+  assert.match(m5n3, /SPLIT_PROCESS_CLIENT_SESSION: sessionX/u)
+  assert.match(m5n3, /aReady\.pid !== bReady\.pid/u)
+  assert.match(m5n3, /name === 'ask_user_question'/u)
+  assert.equal((m5n3.match(/waitForScreen\('\[1\] Proceed'/gu) ?? []).length, 3,
+    'M5N-03 must paint the answerable modal on BOTH Clients before the departure')
+  // A leaves WITHOUT answering: nothing may reach the Host, and B answers the
+  // SAME callId afterwards.
+  assert.match(m5n3, /clientA\.signalBusiness\('SIGTERM'\)/u)
+  assert.match(m5n3, /await waitGone\(aPid, 15_000\)/u)
+  assert.match(m5n3, /A\\'s departure settled the Host question or the Turn/u)
+  assert.match(m5n3, /kind !== 'question-settled'/u)
+  assert.match(m5n3, /clientB\.send\('1'\)/u)
+  assert.match(m5n3, /waitForScreen\('Review your answer before submit'/u)
+  assert.match(m5n3, /String\(event\.data\?\.message\?\.toolCallId\) === callId/u)
+  assert.match(m5n3, /question Turn settled as/u)
+  // EXACTLY ONCE, on the final durable state.
+  assert.match(m5n3, /produced more than one tool result/u)
+  assert.match(m5n3, /the Host settled the question more than once/u)
+  assert.match(m5n3, /assertHostIdentityKept\(host, hostBefore/u)
+  assert.match(m5n3, /exitC1Client\(clientB, 'M5N3 B'\)/u)
+  assert.match(m5n3, /stopC1Host\(host\)/u)
+  assert.match(m5n3, /trace\('m5n-03'/u)
 })
 
 test('the question lanes wait for the real review frame, never the permanent Submit tab', () => {
