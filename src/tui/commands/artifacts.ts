@@ -199,7 +199,15 @@ export async function runAttachmentIntake(deps: AttachmentIntakeDeps): Promise<v
    * placeholder really landed. A refused commit rolls back exactly this staged
    * item and stops there — an entry the user cannot see in the draft is never
    * announced as attached, and an accepted-but-unwritten token must not invite an
-   * Enter that sends nothing. */
+   * Enter that sends nothing.
+   *
+   * Why the Session owner is the whole notice gate here: `target.commit()` is
+   * only handed out while the seat still owns the surface, the app-side commit
+   * re-proves the accepted fragment, and the commit and this notice share ONE
+   * synchronous segment — no disposal, catalog install or seat replacement can
+   * interleave between them. Requiring the acceptance snapshot here instead would
+   * be self-defeating: a successful in-place write is exactly what invalidates
+   * that snapshot, so every legitimate success would go unannounced. */
   const commitStaged = (
     add: () => { readonly id: number; readonly placeholder: string },
     remove: (id: number) => void,
