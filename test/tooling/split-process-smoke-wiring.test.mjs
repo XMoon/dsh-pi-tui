@@ -20,7 +20,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { parse as parseYaml } from 'yaml'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
-import { waitForCondition } from '../../scripts/split-process-smoke.mjs'
+import { assertSelectedVerdict, waitForCondition } from '../../scripts/split-process-smoke.mjs'
 import { PR_A_WEB_ROWS, raceWithAbortableDeadline, redactWebQualificationText } from '../../scripts/smoke/split-process/web-helpers.mjs'
 import { createSplitProcessScope, statusMatches } from '../../scripts/lib/split-smoke-processes.mjs'
 import {
@@ -1951,6 +1951,25 @@ test('the selectable registry is the single source for listing, resolution and t
   }
 })
 
+test('selected dispatch fails closed on non-PASS Web verdicts', () => {
+  assert.equal(assertSelectedVerdict('web.official-composition', { status: 'PASS', browser: 'PASS' }), undefined)
+  assert.equal(assertSelectedVerdict('web.runtime-toggle', { status: 'PASS', browser: 'PASS' }), undefined)
+  assert.equal(assertSelectedVerdict('web.startup-preference', { verified: true }), undefined)
+  assert.equal(assertSelectedVerdict('web.product-browser-tui', { status: 'DEFERRED_WITH_OWNER', browserSubset: 'PASS' }), undefined)
+  assert.throws(() => assertSelectedVerdict('web.official-composition', { status: 'PASS', browser: 'NOT_RUN' }),
+    /SELECTED_PASS|selected web\.official-composition/u)
+  assert.throws(() => assertSelectedVerdict('web.runtime-toggle', { status: 'PASS', browser: 'INCOMPLETE' }),
+    /selected web\.runtime-toggle/u)
+  assert.throws(() => assertSelectedVerdict('web.product-browser-tui', { status: 'BLOCKED', browserSubset: 'PASS' }),
+    /selected web\.product-browser-tui/u)
+  assert.throws(() => assertSelectedVerdict('web.product-browser-tui', { status: 'PASS', browserSubset: 'FAIL' }),
+    /selected web\.product-browser-tui/u)
+  assert.throws(() => assertSelectedVerdict('web.startup-preference', { verified: false }),
+    /selected web\.startup-preference/u)
+  assert.equal(assertSelectedVerdict('bootstrap.host-runtime-disabled', { exitCode: 1 }), undefined)
+  assert.throws(() => assertSelectedVerdict('bootstrap.host-runtime-disabled', { status: 'NOT_RUN' }),
+    /selected bootstrap\.host-runtime-disabled/u)
+})
 test('a selected result names only the selectable scope', () => {
   const line = selectedPassLine('bootstrap.host-runtime-disabled')
   assert.equal(line, 'SPLIT_PROCESS_SELECTED_PASS id=bootstrap.host-runtime-disabled scope=SELECTABLE_ONLY')

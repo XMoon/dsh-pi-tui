@@ -446,6 +446,34 @@ function printSelectableCases() {
 }
 
 /**
+ * Fail closed when a selected case returns a verdict that is not SELECTED_PASS
+ * material. The Full lane aggregates every result; the selected lane must not
+ * turn `BLOCKED`/`INCOMPLETE`/`NOT_RUN` into its one-line PASS.
+ *
+ * Exported for the tooling guard that drives the real return contract without
+ * installing a profile.
+ */
+export function assertSelectedVerdict(caseId, result) {
+  if (caseId === 'web.startup-preference') {
+    assert(result?.verified === true, `selected ${caseId}: the settings/cold-Host verdict was not verified`)
+    return
+  }
+  if (caseId === 'web.product-browser-tui') {
+    assert(result?.browserSubset === 'PASS'
+      && (result?.status === 'PASS' || result?.status === 'DEFERRED_WITH_OWNER'),
+    `selected ${caseId}: the Browser subset ended as ${String(result?.browserSubset ?? 'missing')}/${String(result?.status ?? 'missing')}`)
+    return
+  }
+  if (caseId.startsWith('web.')) {
+    assert(result?.status === 'PASS' && result?.browser === 'PASS',
+      `selected ${caseId}: the Browser/Web verdict ended as ${String(result?.browser ?? 'missing')}/${String(result?.status ?? 'missing')}`)
+    return
+  }
+  assert(result?.status === undefined || result?.status === 'PASS',
+    `selected ${caseId}: the case returned ${String(result?.status)} instead of a successful verdict`)
+}
+
+/**
  * Run ONLY the resolved registry cases in their own isolated installation.
  *
  * This path never calls the full `main()`: no T18, T08, T75 or Browser
@@ -517,7 +545,8 @@ async function runSelectedCases(selection) {
     const selected = []
     for (const selectedCase of selection.cases) {
       diagnostics.checkpoint(`case/${selectedCase.id}`)
-      await selectedCase.run(context)
+      const result = await selectedCase.run(context)
+      assertSelectedVerdict(selectedCase.id, result)
       selected.push(selectedCase.id)
     }
     assert(createHash('sha256').update(readFileSync(tarball)).digest('hex') === candidateSha256,
