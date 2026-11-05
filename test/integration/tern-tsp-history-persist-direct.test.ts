@@ -39,6 +39,7 @@ import { dirname, join } from 'node:path'
 import test from 'node:test'
 import { createDirectTspFixture, waitFor, waitForInputDelivery, type DirectTspFixture } from '../support/direct-tsp-fixture.ts'
 import { wireNodes } from '../support/tsp-picker-wire.ts'
+import { waitForEditableComposer, type ComposerProbeState } from '../support/tsp-composer-readiness.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 import { historyFilePath } from '../../src/client/history/store.ts'
 
@@ -84,6 +85,34 @@ function composerText(fixture: DirectTspFixture): string {
 function composerCursor(fixture: DirectTspFixture): number {
   const editor = wireNodes(fixture.pane).find(node => node.id === 'dock.composer')
   return editor === undefined ? -1 : Number(editor.p.cursor ?? 0)
+}
+
+/**
+ * The composer's `text`/`cursor` from ONE folded wire snapshot: the readiness
+ * probe needs both values from the SAME frame. A missing node reports
+ * `cursor:-1` so "no editor here yet" can never be mistaken for an empty,
+ * editable one.
+ */
+function composerState(fixture: DirectTspFixture): ComposerProbeState {
+  const editor = wireNodes(fixture.pane).find(node => node.id === 'dock.composer')
+  if (editor === undefined) return { text: '', cursor: -1 }
+  return {
+    text: typeof editor.p.text === 'string' ? editor.p.text : '',
+    cursor: Number(editor.p.cursor ?? -1),
+  }
+}
+
+/**
+ * The projection scope the renderer is currently showing (`s3`), or `undefined`
+ * while it sits BETWEEN scopes (the Loading state). Read-only: it folds the
+ * same wire the assertions below read.
+ */
+function projectionScopeId(pane: DirectTspFixture['pane']): string | undefined {
+  for (const node of wireNodes(pane)) {
+    const match = /main\.(s\d+)-/u.exec(node.id)
+    if (match !== null) return match[1]
+  }
+  return undefined
 }
 
 /** Every history row written under the fixture's isolated DSH home. */
@@ -154,9 +183,11 @@ async function waitForSessionHeaders(fixture: DirectTspFixture, expected: number
  * Type one line through the REAL key path and press Enter, waiting on the
  * renderer's own facts (the composer holding the draft, then the draft leaving
  * the composer) rather than on a guessed window — the same ladder a real user's
- * keystrokes take.
+ * keystrokes take. The editor is proven editable BEFORE any business byte is
+ * typed: a line the hydration fence drops is lost, so it is never re-sent.
  */
 async function submitLine(fixture: DirectTspFixture, line: string): Promise<void> {
+  await composerReady(fixture)
   fixture.pane.input.type(line)
   await waitFor(`the composer to hold ${JSON.stringify(line)}`, () => composerText(fixture) === line, 25_000)
   fixture.pane.input.type('\r')
@@ -164,18 +195,15 @@ async function submitLine(fixture: DirectTspFixture, line: string): Promise<void
 }
 
 /**
- * Wait until the composer is physically editable by sending real printable
- * bytes. A typed key that the hydration fence drops never reaches the wire;
- * observing the marker land and erase is the authority that the next arrow is
- * consumed rather than guessed through a sleep.
+ * Wait until the composer is physically editable, through the shared probe:
+ * an empty editor accepts a printable byte, paints the controlled caret and
+ * erases it with a real Backspace. A typed key the hydration fence drops never
+ * reaches the wire, so observing the marker land and erase is the authority
+ * that the next arrow (or business line) is consumed rather than guessed
+ * through a sleep. Only the probe byte itself is ever retried.
  */
 async function composerReady(fixture: DirectTspFixture): Promise<void> {
-  fixture.pane.input.type('x')
-  await waitFor('the composer to accept a real typed probe', () =>
-    composerText(fixture) === 'x' && composerCursor(fixture) === 1, 30_000)
-  fixture.pane.input.type('\x7f')
-  await waitFor('the composer to erase the real typed probe', () =>
-    composerText(fixture) === '' && composerCursor(fixture) === 0, 30_000)
+  await waitForEditableComposer(fixture.pane, () => composerState(fixture))
 }
 
 async function arrow(fixture: DirectTspFixture, bytes: typeof UP | typeof DOWN, expected: { readonly text: string; readonly cursor: number }): Promise<void> {
@@ -448,15 +476,26 @@ test('a browse opened on the boot cwd pool cannot survive the Enter that publish
     await arrow(fixture, UP, { text: submitted, cursor: 0 })
 
     // Enter on the browsed row IS the first agent-facing input: it publishes the
-    // Session, and the formal publication retires the browse with it.
+    // Session, and the formal publication retires the browse with it. The
+    // publication's OWN commit is the renderer's new projection scope; the
+    // persisted row (and the Session store) are earlier than it.
+    const scopeBefore = projectionScopeId(fixture.pane)
+    const framesBefore = fixture.pane.frameCount()
     fixture.pane.input.type('\r')
     await waitFor('the browsed row to be submitted', () => composerText(fixture) === '', 30_000)
     await waitFor('the first Session prompt', () => prompts.length === 1, 30_000)
     await historyRowsFor(fixture, submitted, prompts[0]!)
+    // READ-ONLY until the scope commits: no editor edit may run before the
+    // negative arrow probe below, because a draft edit retires the browse on
+    // its own and would disguise the outcome this case owns.
+    await waitFor('the new projection scope commit', () => {
+      const scope = projectionScopeId(fixture.pane)
+      return fixture.pane.frameCount() > framesBefore && scope !== undefined && scope !== scopeBefore
+    }, 30_000)
     fixture.pane.input.type(DOWN)
     // If the outgoing browse had survived, this ↓ would have handed back the
-    // pre-browse draft, and the probe could never read a bare `x`.
-    await composerReady(fixture)
+    // pre-browse draft, and the probe could never read a bare marker.
+    await probeNoRecall(fixture, { text: '', cursor: 0 })
 
     await arrow(fixture, UP, { text: submitted, cursor: 0 })
     fixture.pane.input.type(UP)

@@ -38,6 +38,7 @@ import { join, relative } from 'node:path'
 import test from 'node:test'
 import { createDirectTspFixture, waitFor, waitForInputDelivery, type DirectTspFixture } from '../support/direct-tsp-fixture.ts'
 import { wireNodes, type WireNode } from '../support/tsp-picker-wire.ts'
+import { waitForEditableComposer } from '../support/tsp-composer-readiness.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 import { SLASH_COMPLETION_MAX_ROWS } from '../../src/tui/tsp/slash-completion.ts'
 
@@ -213,35 +214,17 @@ async function settle(fixture: DirectTspFixture, label: string, predicate: () =>
   }
 }
 
-/** Poll a renderer fact for a bounded number of frame cycles without failing. */
-async function waitsFor(predicate: () => boolean, attempts = 80): Promise<boolean> {
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
-    if (predicate()) return true
-    await new Promise(resolve => setTimeout(resolve, 25))
-  }
-  return predicate()
-}
-
 /** Wait until the composer physically accepts a printable probe, then erase it. A key
  *  the hydration fence DROPS never reaches the wire, so this — not a sleep — is the
- *  authority that the NEXT keystroke is consumed (the sibling recall lane's shape). */
+ *  authority that the NEXT keystroke is consumed (the sibling recall lane's shape).
+ *  `read` is this suite's authoritative wire reader: ONE folded snapshot per poll,
+ *  preferring the quiet-composer editor path and falling back to the historical one. */
 async function composerReady(fixture: DirectTspFixture): Promise<void> {
-  const deadline = Date.now() + 30_000
-  for (;;) {
-    fixture.pane.input.type('x')
-    const accepted = await waitsFor(() => composerText(fixture) === 'x' && composerCursor(fixture) === 1)
-    if (accepted) {
-      fixture.pane.input.type(BACKSPACE)
-      if (await waitsFor(() => composerText(fixture) === '' && composerCursor(fixture) === 0)) return
-    }
-    if (Date.now() > deadline) {
-      throw new Error(`timed out waiting for the composer to accept a real typed probe (${wireState(fixture)})`)
-    }
-    // Whatever the wire shows now (a dropped probe, a stacked marker) is erased before
-    // the next attempt, so a retry can never leave a stray byte behind.
-    for (let index = 0; index < composerText(fixture).length; index += 1) fixture.pane.input.type(BACKSPACE)
-    await waitsFor(() => composerText(fixture) === '' && composerCursor(fixture) === 0)
-  }
+  await waitForEditableComposer(fixture.pane, () => {
+    const node = composerNode(fixture)
+    if (node === undefined) return { text: '', cursor: -1 }
+    return { text: String(node.p.text ?? ''), cursor: Number(node.p.cursor ?? -1) }
+  })
 }
 
 /** Type one draft through the real key path and wait for the wire to carry it. */
@@ -304,7 +287,6 @@ async function submitCommand(fixture: DirectTspFixture, line: string): Promise<v
   await dismissList(fixture)
   assert.equal(slashRows(fixture).length, 0, 'no candidate list is open, so this Enter is the submit gesture')
   fixture.pane.input.type(ENTER)
-  await waitsFor(() => composerText(fixture) !== line)
 }
 
 /** Query one command token through the real key path and wait for the list it paints. */
