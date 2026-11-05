@@ -16,12 +16,15 @@
  */
 
 import { runAuthenticatedLifecycle } from '../smoke/split-process/authenticated-lifecycle.mjs'
+import { runClientHmrSignals } from '../smoke/split-process/client-hmr-signals.mjs'
+import { runDetachedTurnInteractions } from '../smoke/split-process/detached-turn-interactions.mjs'
 import { runNonDestructiveClientLifecycle } from '../smoke/split-process/non-destructive-client-lifecycle.mjs'
 import { runEntryAdmission } from '../smoke/split-process/entry-admission.mjs'
 import { runPtySessionWriteRecovery } from '../smoke/split-process/pty-session-write-recovery.mjs'
 import { runSharedSessionInteractions } from '../smoke/split-process/shared-session-interactions.mjs'
 import { runHostRuntimeDisabled } from '../smoke/split-process/host-runtime-disabled.mjs'
 import { runRuntimeArtifactRecovery } from '../smoke/split-process/runtime-artifact-recovery.mjs'
+import { runUnknownWriteHostDeath } from '../smoke/split-process/unknown-write-host-death.mjs'
 import { SplitSmokeInputError } from './split-smoke-diagnostics.mjs'
 
 /** The evidence scope every selected result declares. */
@@ -34,7 +37,10 @@ const SELECTABLE_SCOPE = 'SELECTABLE_ONLY'
  * the full lane runs every migrated entry through the same `run()` at its old
  * position. `bootstrap` keeps the row-disabled pilot first, then the entry
  * admission and artifact-recovery negatives; `transport` owns the whole
- * authenticated-link chain.
+ * authenticated-link chain; `surface`, `multi-client` and `navigation` own the
+ * real-surface, shared-Session and non-destructive Client scenes; `recovery`
+ * owns the detached-interaction, HMR/signal and unknown-write Host-death
+ * continuity evidence.
  */
 const CASE_REGISTRY = Object.freeze([
   Object.freeze({
@@ -78,6 +84,24 @@ const CASE_REGISTRY = Object.freeze([
     id: 'navigation.non-destructive-client-lifecycle',
     title: 'leaving a Session from one Client never stops the Host Turn another Client keeps reading',
     run: runNonDestructiveClientLifecycle,
+  }),
+  Object.freeze({
+    suite: 'recovery',
+    id: 'recovery.detached-turn-interactions',
+    title: 'an accepted Turn, Tool, Job, Child and pending interaction survive the Client that started them',
+    run: runDetachedTurnInteractions,
+  }),
+  Object.freeze({
+    suite: 'recovery',
+    id: 'recovery.client-hmr-signals',
+    title: 'Client-only HMR, real PTY signals and Host kill keep the official disposition taxonomy',
+    run: runClientHmrSignals,
+  }),
+  Object.freeze({
+    suite: 'recovery',
+    id: 'recovery.unknown-write-host-death',
+    title: 'an ACK-dropped write survives Host death as one durable write and no fabricated answer',
+    run: runUnknownWriteHostDeath,
   }),
 ])
 
