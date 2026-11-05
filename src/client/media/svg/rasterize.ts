@@ -194,13 +194,18 @@ export function createSvgRasterizer(spawnProcess: SpawnProcess = spawn): SvgRast
       // their exact grammar below.
       //
       // Two DIFFERENT authorities, never conflated by one mark:
-      //   `stdinWritten`  = this process's `Writable.end()` callback ran, i.e.
-      //                     the parent's loop handed the bytes into the OS pipe.
-      //                     It is NOT proof the worker read or parsed them.
-      //   `rp request`    = the worker's own line: its stdin really reached EOF.
-      // A late `stdinWritten` with no `rp` line at all is therefore "the parent
-      // never got scheduled", while `rp request` present and no `rp answer` is
-      // "the worker took the work and stalled inside it".
+      //   `stdinWritten`  = this process's `Writable.end()` callback ran: OUR loop
+      //                     finished handing the bytes to the OS pipe. It is not a
+      //                     worker receipt, and a late value only says the write
+      //                     completion was delayed — this loop not being scheduled
+      //                     and pipe backpressure both produce it.
+      //   `rp request`    = the worker's own record that its stdin reached EOF. Its
+      //                     absence says the worker never reported that, which is
+      //                     still not proof the bytes never arrived: a process
+      //                     killed before it wrote anything reports nothing.
+      // So these marks narrow a stall down; saying WHO stalled needs them read
+      // together with the other marks of the same occurrence, never one timestamp
+      // alone.
       const startedAt = performance.now()
       const phases: string[] = []
       const mark = (phase: string, detail?: string): void => {
