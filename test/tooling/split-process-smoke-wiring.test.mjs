@@ -262,8 +262,8 @@ test('the upgraded smoke carries every inventory gate and the critical negative 
     assert.ok(source.includes(marker), `missing smoke marker ${marker}`)
   }
   const extraPatchUses = source.match(/SPLIT_PROCESS_EXTRA_PATCH/gu) ?? []
-  assert.equal(extraPatchUses.length, 20,
-    'the extra patch may only implement the two child mutations, the T26 Host-Runtime/official-row/Workspace-Controller mutations, the whole-smoke mutation mode, the isolated surface LLM overlay, the isolated Host Schedule overlay, the isolated armed-Goal overlay, the three bounded PR-A Web composition runs and the five bounded PR-B Web-toggle runs')
+  assert.equal(extraPatchUses.length, 21,
+    'the extra patch may only implement the two child mutations, the T26 Host-Runtime/official-row/Workspace-Controller mutations, the whole-smoke mutation mode, the isolated surface LLM overlay, the isolated Host Schedule overlay, the isolated armed-Goal overlay, the three bounded PR-A Web composition runs, the five bounded PR-B Web-toggle runs and the ONE PR-D product Host patch')
   assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: tuiMutationPatch/u)
   assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: connectionMutationPatch/u)
   assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: sessionControllerMutationPatch/u)
@@ -1301,6 +1301,115 @@ test('the official Web composition qualification is discoverable and never fakes
   // Neither is a product default.
   assert.match(source, /welcomeNoticeVersion: '\$\{PR_A_WELCOME_NOTICE_VERSION\}'/u)
   assert.match(source, /- id: workspace-controller\\n  config:\\n    documentsDirectory: '\$\{documentsDirectory\}'/u)
+})
+
+test('the product Browser x real-TUI qualification is require-gated and never fakes a pass', () => {
+  const source = readFileSync(SCRIPT, 'utf8')
+  const start = source.indexOf('export const qualifyWebProduct = async context => {')
+  assert.ok(start > 0, 'the PR-D product qualification must stay one bounded module-level function')
+  // The function is context-injected and module-level so a development run can
+  // exercise ONLY the product cases; it must stay before main().
+  const end = source.indexOf('async function main() {', start)
+  assert.ok(end > start, 'the PR-D function must stay before main()')
+  const lane = source.slice(start, end)
+  for (const marker of [
+    'qualifyWebProduct',
+    'SPLIT_PROCESS_REQUIRE_WEB_PRODUCT',
+    'status: \'NOT_RUN\'',
+    'm5-web-product-browser.mjs',
+    'createProductEvidence',
+    'browserCase',
+    'wp01-login',
+    'wp02a-open-existing',
+    'wp02b-browser-session',
+    'wp02c-dual-prompts',
+    'wp02d-same-text',
+    'wp02e-independent-view',
+    'wp03a-question-browser-first',
+    'wp03b-question-tui-first',
+    'wp03c-question-detach',
+    'wp03d-question-timed',
+    'wp04a-approval-browser-allow',
+    'wp04b-approval-browser-reject',
+    'wp04c-approval-tui-first',
+    'wp04d-approval-tui-reject',
+    'wp04f-approval-offline',
+    'wp05-refresh-held',
+    'wp06-tui-lifecycle',
+    'wp07-host-lifecycle',
+    'wp08-web-toggle',
+    'wp09-locality',
+    'wp10-inventory',
+    'setWc(\'WC-01\'',
+    'setWc(\'WC-12\'',
+    'webFullyOff',
+    'webFullyOn',
+    'assertSingleHostOwners',
+  ]) {
+    assert.ok(lane.includes(marker), `missing PR-D marker ${marker}`)
+  }
+  // The required flag is the ONLY gate: without it the lane reports NOT_RUN and
+  // never claims a product PASS; with it a missing Playwright install or a
+  // failed case is a hard failure.
+  assert.match(source, /const REQUIRE_WEB_PRODUCT = process\.env\.SPLIT_PROCESS_REQUIRE_WEB_PRODUCT === '1'/u)
+  assert.ok(source.includes('M5_WEB_PRODUCT_EVIDENCE'), 'the evidence root is the product qualification\'s ONE retained output')
+  assert.match(lane, /if \(!REQUIRE_WEB_PRODUCT\) \{/u)
+  assert.match(lane, /assert\(playwrightRoot !== undefined && playwrightRoot !== '',/u)
+  assert.match(source, /const productQualification = await qualifyWebProduct\(\{/u)
+  assert.match(source, /assert\(productQualification\.status === 'NOT_RUN' \|\| productQualification\.status === 'PASS_PRODUCT_BROWSER'/u)
+  // The driver-owned facts are raced against the driver's own exit through the
+  // ONE shared helper; a bare fixed window would burn the whole budget.
+  assert.match(lane, /waitFact:[\s\S]*?whileBrowserDriverRuns\(/u)
+  assert.match(lane, /waitStep:[\s\S]*?whileBrowserDriverRuns\(/u)
+  assert.doesNotMatch(lane, /await browserExit\.catch/u)
+  // The result is a whitelisted projection: no credential shape may survive.
+  assert.match(lane, /const reportText = JSON\.stringify\(report\)/u)
+  assert.match(lane, /!\/\[\?&\]token=\/u\.test\(reportText\)/u)
+  assert.match(lane, /cookie|Authorization/iu)
+  // The real driver is a Playwright program with real pointer/keyboard input,
+  // case-id admission and a 0600 whitelisted result.
+  const driver = readFileSync(join(ROOT, 'scripts', 'fixtures', 'm5-web-product-browser.mjs'), 'utf8')
+  for (const marker of [
+    "const { chromium } = createRequire(",
+    'page.mouse.down()',
+    "page.getByRole('button'",
+    'setInputFiles',
+    'if (!KNOWN_CASES.includes(caseId)) throw new Error',
+    'browser-result.json',
+    'function redacted(text)',
+    'M5_WEB_DSH_HOME',
+    'M5_WEB_PLAYWRIGHT_ROOT',
+    'PLAYWRIGHT_BROWSERS_PATH',
+    'waitSignal(',
+    'function captureNextSessionCreate',
+    'function conversationMarkers',
+  ]) {
+    assert.ok(driver.includes(marker), `missing PR-D driver marker ${marker}`)
+  }
+  assert.doesNotMatch(driver, /result\.(token|cookie|url|headers)\b/u,
+    'the driver result must not carry a credential or an authenticated URL')
+  const parse = spawnSync(process.execPath, ['--check', join(ROOT, 'scripts', 'fixtures', 'm5-web-product-browser.mjs')], { encoding: 'utf8' })
+  assert.equal(parse.status, 0, parse.stderr)
+  // The release-tag CI job installs ONE pinned Playwright and requires BOTH
+  // Browser flags; no floating version and no PR-run Browser PASS.
+  const workflow = parseYaml(readFileSync(join(ROOT, '.github', 'workflows', 'ci.yml'), 'utf8'))
+  const job = workflow.jobs['split-process']
+  assert.equal(job.timeoutMinutes ?? job['timeout-minutes'], 60,
+    'the product Browser lane needs the bounded longer job timeout')
+  assert.equal(job.env.PLAYWRIGHT_VERSION, '1.64.1')
+  const install = job.steps.find(step => step.name === 'Install the isolated Playwright Chromium qualification tools')
+  assert.ok(install, 'the split-process job must install the pinned Playwright Chromium')
+  assert.match(install.run, /playwright@\$PLAYWRIGHT_VERSION/u)
+  assert.match(install.run, /install --with-deps chromium/u)
+  assert.match(install.run, /SPLIT_PROCESS_REQUIRE_WEB_BROWSER=1/u)
+  assert.match(install.run, /SPLIT_PROCESS_REQUIRE_WEB_PRODUCT=1/u)
+  assert.match(install.run, /M5_WEB_PRODUCT_EVIDENCE=/u)
+  assert.match(install.run, /SPLIT_PROCESS_PLAYWRIGHT_ROOT=\$TOOLS/u)
+  assert.ok(job.steps.some(step => step.name === 'Upload the product Browser qualification evidence'))
+  assert.match(job.if, /startsWith\(github\.ref, 'refs\/tags\/'\)/u,
+    'the Browser qualification must stay release-tag-only (ordinary PRs skip it)')
+  assert.equal((readFileSync(join(ROOT, '.github', 'workflows', 'ci.yml'), 'utf8').match(/1\.64\.1/gu) ?? []).length, 1,
+    'the Playwright version must be ONE job-level constant')
 })
 
 test('the Web startup preference lane drives the real Client settings/URL ops, never a Host shortcut', () => {

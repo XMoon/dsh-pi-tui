@@ -1074,9 +1074,12 @@ jobs:
     # tag runs it.
     if: ${{ always() && startsWith(github.ref, 'refs/tags/') && needs.dsh-context.result == 'success' && needs.candidate.result == 'success' && needs.dsh-context.outputs.mode == 'npm' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     env:
       DSH_MODE: ${{ needs.dsh-context.outputs.mode }}
+      # The ONE pinned Playwright version of the product Browser qualification.
+      # It is a qualification tool only: never a product dependency.
+      PLAYWRIGHT_VERSION: 1.64.1
 
     steps:
       - name: Checkout
@@ -1100,6 +1103,26 @@ jobs:
             --mode "$DSH_MODE_RESOLVED" \
             --distribution "$RUNNER_TEMP/dsh-source-pack" \
             --workspace "$GITHUB_WORKSPACE"
+
+      # The product Browser x real Split TUI qualification runs on the SAME
+      # release-tag job as the packed smoke, against the SAME downloaded
+      # candidate. Playwright Chromium lives in an isolated tools directory and
+      # never enters the product tarball or the runtime dependency graph.
+      - name: Install the isolated Playwright Chromium qualification tools
+        run: |
+          set -euo pipefail
+          TOOLS="$RUNNER_TEMP/m5-web-product-tools"
+          mkdir -p "$TOOLS"
+          npm install --prefix "$TOOLS" --no-save --no-audit --no-fund --ignore-scripts "playwright@$PLAYWRIGHT_VERSION"
+          PLAYWRIGHT_BROWSERS_PATH="$TOOLS/browsers" "$TOOLS/node_modules/.bin/playwright" install --with-deps chromium
+          node -e "console.log('qualified Playwright ' + require(process.argv[1] + '/node_modules/playwright/package.json').version)" "$TOOLS"
+          {
+            echo "SPLIT_PROCESS_PLAYWRIGHT_ROOT=$TOOLS"
+            echo "SPLIT_PROCESS_PLAYWRIGHT_BROWSERS=$TOOLS/browsers"
+            echo "SPLIT_PROCESS_REQUIRE_WEB_BROWSER=1"
+            echo "SPLIT_PROCESS_REQUIRE_WEB_PRODUCT=1"
+            echo "M5_WEB_PRODUCT_EVIDENCE=$RUNNER_TEMP/m5-web-product-evidence"
+          } >> "$GITHUB_ENV"
 
       - name: Download the candidate
         uses: actions/download-artifact@v8
@@ -1132,6 +1155,14 @@ jobs:
 
       - name: Host/Client split-process bootstrap
         run: pnpm smoke:split-process -- "$CANDIDATE"
+
+      - name: Upload the product Browser qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v8
+        with:
+          name: m5-web-product-evidence
+          path: ${{ runner.temp }}/m5-web-product-evidence
+          if-no-files-found: ignore
 
       - name: Re-prove the candidate was not replaced during qualification
         env:
