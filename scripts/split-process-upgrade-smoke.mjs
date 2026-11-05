@@ -87,7 +87,7 @@ import {
   SplitSmokeWaitError,
   writePrivateReport,
 } from './lib/split-smoke-diagnostics.mjs'
-import { EntryProcess, SurfaceEntryProcess, hostSessionEvents, waitForHostSessionEvent, writeC1WorkFixture } from './split-process-smoke.mjs'
+import { EntryProcess, SurfaceEntryProcess, hostSessionEvents, waitForHostSessionEvent, waitForHostSessionEventAfter, writeC1WorkFixture } from './split-process-smoke.mjs'
 
 const EXPECTED_PACKAGE_NAME = '@xmoon76/dsh-pi-tui'
 const KEEP = process.env.SPLIT_UPGRADE_KEEP === '1'
@@ -914,6 +914,61 @@ async function runUserCommandReloadRound(context) {
   assertEqual(reloadClient.records.filter(record => record.m4r === 'handoff-requested').length, 0,
     'U08 reload Client reloaded before the user command')
 
+  // ── U08 dual-TUI: the SECOND old-build Client keeps the SAME Session X ────
+  // B is a real `dist/local-client.mjs` instance of the OLD installed build
+  // (the side-by-side real installation the old Client already runs), on its
+  // own `script(1)` wrapper/PTY and its own official Client Context. It joins
+  // X through the real startup intent BEFORE A's `/reload-client` gesture, so
+  // every replacement/exit/release below has an independent live witness.
+  const peerClient = new SurfaceEntryProcess(join(sideOldPackage, 'dist', 'local-client.mjs'), {
+    ...base,
+    workDir: roundRoot,
+    env: { ...base.env, SPLIT_PROCESS_CLIENT_SESSION: sessionId },
+  })
+  clients.push(peerClient)
+  const peerReady = await peerClient.waitFor(record => record.m4a0 === 'ready', 'U08 second old-build Client ready', 240_000)
+  const peerPid = peerReady.pid
+  assert(Number.isInteger(peerPid) && peerPid > 0, 'U08 the second old-build Client ready record has no business PID')
+  assertNotEqual(peerPid, reloadClientPid, 'U08 the second old-build Client reuses the first Client PID')
+  assertNotEqual(peerClient.child.pid, reloadClient.child.pid,
+    'U08 the second old-build Client reuses the first script(1) wrapper')
+  const peerStatus = await peerClient.waitFor(
+    record => record.m4b2s === 'surface-status' && record.sessionOpen === true
+      && record.openSessionId === sessionId && record.transport === 'connected'
+      && record.surfaceMounted === true,
+    'U08 second old-build Client retained the SAME Session X',
+    120_000,
+  )
+  assertIdentityKept(peerStatus.host, hostIdentity, 'U08 second Client authenticated Host')
+  await peerClient.waitForScreen(holdPrompt, 'U08 second old-build Client painted the admitted prompt', 120_000)
+  const peerBoundary = peerClient.records.length
+  const peerStatusBefore = peerClient.records.filter(record => record.m4b2s === 'surface-status').at(-1)
+  assert(peerStatusBefore !== undefined, 'U08 the second old-build Client published no status boundary')
+  /** The second Client is untouched by EVERYTHING the reexec does to A. */
+  const assertPeerKept = (label) => {
+    assert(alive(peerPid), `${label}: the second old-build Client died`)
+    // Read the complete record tail first: the 25ms poller must not decide
+    // this witness from a stale snapshot.
+    peerClient.readRecords()
+    for (const record of peerClient.records.slice(peerBoundary).filter(entry => entry.m4b2s === 'surface-status')) {
+      assertEqual(record.pid, peerPid, `${label}: the second Client PID changed`)
+      assertEqual(record.rootFiberUid, peerStatusBefore.rootFiberUid, `${label}: the second Client root fiber changed`)
+      assertEqual(record.generationId, peerStatusBefore.generationId,
+        `${label}: the second Client transport generation changed`)
+      assertEqual(record.surfaceRevision, peerStatusBefore.surfaceRevision,
+        `${label}: the second Client surface revision changed`)
+      assertEqual(record.sessionOpen, true, `${label}: the second Client lost its open Session`)
+      assertEqual(record.openSessionId, sessionId, `${label}: the second Client Session changed`)
+      assertEqual(record.transport, 'connected', `${label}: the second Client transport disconnected`)
+      assertEqual(record.surfaceMounted, true, `${label}: the second Client lost its mounted surface`)
+      assertEqual(record.host?.instanceId, hostIdentity.instanceId, `${label}: the second Client Host instance changed`)
+    }
+    assert(peerClient.records.slice(peerBoundary).every(record => record.m4b2s !== 'client-closed'),
+      `${label}: the second Client released its own resources`)
+  }
+
+  checkpoint('U08/dual-client-joined')
+
   checkpoint('U08/positive-reexec')
   // ── U08 positive: the PRODUCTION `/reload-client` command drives the SAME
   //    production reexec/handoff chain into the newly installed build ──────
@@ -936,6 +991,10 @@ async function runUserCommandReloadRound(context) {
   assertEqual(reloadClientClosed.surfaceMounted, false, 'U08 reload Client still reported a mounted surface after its release')
   assertDeepEqual(reloadClientClosed.owners, { typert: 0, connection: 0, remote: 0, fileUpload: 0, sessions: 0, jobs: 0 },
     'U08 reload Client still owned Client services after its release')
+  // The old Client completed its OWN release; the second Client is untouched
+  // by that release and still holds the running Session X.
+  assertPeerKept('U08 after the old Client released')
+  await peerClient.waitForScreen(holdPrompt, 'U08 second Client still paints Session X after the release', 60_000)
   const replacementStarted = await reloadClient.waitFor(
     record => record.m4a0 === 'client-started' && record.pid !== reloadClientPid,
     'U08 the replacement Client started as a new OS process',
@@ -974,6 +1033,11 @@ async function runUserCommandReloadRound(context) {
   assertEqual(replacementReady.sessionOpen, true)
   assertEqual(replacementReady.openSessionId, sessionId)
   await reloadClient.waitForScreen(holdPrompt, 'U08 the replacement surface painted the admitted prompt', 120_000)
+  // A' is alive and restored the SAME Session/history — this does NOT claim it
+  // observed the held Turn's later completion (the original Turn is still
+  // held). The second Client must be completely untouched by the reexec.
+  assertPeerKept('U08 after the replacement restored Session X')
+  await peerClient.waitForScreen(holdPrompt, 'U08 second Client still paints Session X after the replacement', 60_000)
   assert(alive(hostIdentity.hostPid), 'U08 the Host died during the command reload')
   assert(readProcessStarttime(hostIdentity.hostPid) === hostIdentity.hostStarttime,
     'U08 the Host starttime changed during the command reload')
@@ -990,6 +1054,11 @@ async function runUserCommandReloadRound(context) {
       && event.data?.source?.kind === 'user'
       && JSON.stringify(event.data?.content ?? []).includes(holdPrompt))
   assertEqual(promptsAfterReload.length, 1, 'U08 the command reload replayed or duplicated the admitted prompt')
+  // A' restored the SAME Session/history, but the original Turn is STILL held:
+  // the durable log has no settlement yet. A' being ready is not a claim that
+  // it observed the held Turn's later completion.
+  assert((hostSessionEvents(dshHome, sessionId) ?? []).every(event => event.type !== 'turn/end'),
+    'U08 the replacement ready observed a turn/end before the original barrier release')
 
   const replacementExit = await (async () => {
     reloadClient.send('/exit\r')
@@ -998,13 +1067,72 @@ async function runUserCommandReloadRound(context) {
   assertEqual(replacementExit.code, 0, `U08 replacement Client exit was ${JSON.stringify(replacementExit)}`)
   assert(await waitGone(replacementPid), 'U08 the replacement Client process did not exit')
   assert(await waitGone(reloadClientPid), 'U08 the old Client waiting parent did not exit')
+  const replacementClosed = await reloadClient.waitFor(
+    record => record.m4b2s === 'client-closed' && record.pid === replacementPid,
+    'U08 the replacement Client released every owned Client resource',
+    120_000,
+  )
+  assertEqual(replacementClosed.sessionOpen, false,
+    'U08 the replacement Client still reported an open Session after its release')
+  assertEqual(replacementClosed.surfaceMounted, false,
+    'U08 the replacement Client still reported a mounted surface after its release')
+  assertDeepEqual(replacementClosed.owners,
+    { typert: 0, connection: 0, remote: 0, fileUpload: 0, sessions: 0, jobs: 0 },
+    'U08 the replacement Client still owned Client services after its release')
   assert(alive(hostIdentity.hostPid), 'U08 the Host died when the replacement Client exited')
   assert(!c1WorkHadRelease(c1WorkRoot), 'U08 the admitted Turn was released by the Client exit')
+  // The ORIGINAL Host Turn is STILL held: neither A's release nor A' exit may
+  // cancel it, and the second Client still owns its own live Session X.
+  assertPeerKept('U08 after the replacement exited with the original Turn still held')
+  await peerClient.waitForScreen(holdPrompt,
+    'U08 second Client still holds Session X after the replacement exit', 60_000)
 
   // Complete the admitted work and stop the Host through its own owner path.
   writeFileSync(releaseBarrier, 'release\n', { mode: 0o600 })
   await waitForC1WorkEvent(c1WorkRoot, event => event.kind === 'long-turn-released' && event.sessionId === sessionId, 'U08 Host Turn completes')
   await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'turn/end', 'U08 Host turn/end')
+  // The SECOND Client — alive through the whole cross-build A -> A' handoff
+  // and A' exit — now reads the ORIGINAL Turn's Host settlement on its own
+  // current PTY and writes the SAME Session again exactly once.
+  await peerClient.waitForScreen('long-turn answer 1', 'U08 second Client read the original Turn settlement', 120_000)
+  const peerPrompt = 'u08-b-after-reload'
+  const peerWriteIndex = (hostSessionEvents(dshHome, sessionId) ?? []).length
+  peerClient.send(peerPrompt)
+  await peerClient.waitForComposerDraft(peerPrompt)
+  peerClient.send('\r')
+  await waitForHostSessionEventAfter(dshHome, sessionId, peerWriteIndex,
+    event => event.type === 'user/message' && JSON.stringify(event.data?.content ?? []).includes(peerPrompt),
+    'U08 second Client committed after the reload', 120_000)
+  await waitForHostSessionEventAfter(dshHome, sessionId, peerWriteIndex,
+    event => event.type === 'turn/end', 'U08 second Client Turn settled', 120_000)
+  const peerPrompts = (hostSessionEvents(dshHome, sessionId) ?? [])
+    .filter(event => event.type === 'user/message'
+      && event.data?.source?.kind === 'user'
+      && JSON.stringify(event.data?.content ?? []).includes(peerPrompt))
+  assertEqual(peerPrompts.length, 1, 'U08 the second Client prompt committed more than once')
+  // The final scan covers the WHOLE post-release window too: the second
+  // Client's identity/currentness must hold after its own write, not only at
+  // the earlier handoff checkpoints.
+  assertPeerKept('U08 after the second Client wrote the same Session')
+  const peerExit = await (async () => {
+    peerClient.send('/exit\r')
+    return await peerClient.waitForExit(120_000)
+  })()
+  assertEqual(peerExit.code, 0, `U08 second Client exit was ${JSON.stringify(peerExit)}`)
+  const peerClosed = await peerClient.waitFor(
+    record => record.m4b2s === 'client-closed' && record.pid === peerPid,
+    'U08 second Client released every owned Client resource',
+    120_000,
+  )
+  assertEqual(peerClosed.sessionOpen, false, 'U08 the second Client still reported an open Session after its release')
+  assertEqual(peerClosed.surfaceMounted, false, 'U08 the second Client still reported a mounted surface after its release')
+  assertDeepEqual(peerClosed.owners, { typert: 0, connection: 0, remote: 0, fileUpload: 0, sessions: 0, jobs: 0 },
+    'U08 the second Client still owned Client services after its release')
+  assert(await waitGone(peerPid), 'U08 the second old-build Client process did not exit')
+  await peerClient.dispose()
+  assert(alive(hostIdentity.hostPid), 'U08 the Host died when the second Client exited')
+  assertIdentityKept(safeIdentity((await hostStatus(host)).localHost), hostIdentity,
+    'U08 Host after the second Client exit')
   host.child.stdin.end()
   assert(readProcessStarttime(hostIdentity.hostPid) === hostIdentity.hostStarttime,
     'U08 the Host stop target starttime no longer matches')
@@ -1050,7 +1178,18 @@ async function runUserCommandReloadRound(context) {
     noNewSessionLog: true,
     promptNotReplayed: true,
     turnHeldAcrossReload: true,
+    secondClientPid: peerPid,
+    secondClientBuildId: oldBuildId,
+    secondClientBoundaryRecords: peerBoundary,
+    secondClientIdentityKept: true,
+    secondClientSessionKept: true,
+    secondClientReadOriginalTurn: true,
+    secondClientIndependentWrite: true,
+    secondClientOwnersReleased: true,
+    replacementOwnersReleased: true,
+    turnHeldWhileReplacementExited: true,
     exitCode: replacementExit.code,
+    secondClientExitCode: peerExit.code,
     hostStopExitCode: hostExit.code,
   }
 }
