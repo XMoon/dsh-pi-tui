@@ -34,7 +34,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { renderSkillContent } from '@deepseek-ai/dsh-skill'
-import type { ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
+import type { ModelSelection } from '@deepseek-ai/dsh-agent'
 import type { CommandInvocation, CommandResult, CommandDescriptor, CommandDefinition } from '@deepseek-ai/dsh-commands'
 import { CommandDefinitionId } from '@deepseek-ai/dsh-commands'
 import { TransitionInProgressError } from './app/session/operation-barrier.ts'
@@ -44,6 +44,7 @@ import type { NavigationIntent } from './app/session/transition.ts'
 import type { ClientReloadProcessRefusal } from './app/application-runtime.ts'
 import type { ClientReloadRefusal } from './app/remote-process/client-reload-safety.ts'
 import type { DefaultIntentRecord } from './app/command/model-default-intent.ts'
+import type { SelectionRef } from './app/command/model-selection.ts'
 import type { Component } from '@xmoon76/pi-tui'
 import type { EmbeddedPluginPage } from './tui/plugin-manager/workspace.ts'
 import type { ComposerSubmitGesture } from './tui-app.ts'
@@ -338,7 +339,7 @@ export interface TuiCommandRunner {  ctx: Context
    * current Agent; with deferred start it holds only the sessionless
    * optimistic choice and never gets installed into an Agent context.
    */
-  readonly selected: ModelSelectionRef
+  readonly selected: SelectionRef<ModelSelection>
   /** Legacy/display facade: the newest SESSIONLESS `/model` intent (pending or
    * unresolved) falling back to the persisted global default. A fresh create
    * NEVER seeds from it — the Direct adapter captures the persisted Host default

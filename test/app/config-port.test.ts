@@ -19,7 +19,7 @@ import { CredentialWorkflow, resolveLoginDestination, resolveLogoutDestination }
 import type { ProviderProfileConfig } from '../../src/runtime/config-port.ts'
 
 function host(services: Record<string, unknown>): HostContextLike {
-  return { get: (name) => services[name], on: () => {} }
+  return { get: (name) => services[name], on: (() => false) as unknown as HostContextLike['on'] }
 }
 
 /** The 0.1.7 SettingsForms surface over an in-memory form document:

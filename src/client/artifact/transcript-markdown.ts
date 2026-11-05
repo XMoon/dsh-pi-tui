@@ -13,6 +13,11 @@
 import { isReplacementSurfaceEvent, TOOL_NOT_STARTED } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
+// The PTC sub-dispatch session events (`tool/ptc-dispatch-start` /
+// `tool/ptc-dispatch`) are declared by the official PTC executor package's
+// `SessionEventMap` augmentation; the type-only import keeps them in the
+// program so the transcript folds stay exhaustive.
+import type {} from '@deepseek-ai/dsh-tool-executor-ptc'
 import { finalizedBlockFallbackText } from '../../domain/transcript/content-blocks.ts'
 import { humanFacingVisualResult } from '../../domain/visual/publication.ts'
 import { isVisualToolName } from '../../domain/visual/tools.ts'

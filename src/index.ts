@@ -23,7 +23,7 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import type { Agent, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import { TUI_STARTUP_SERVICE } from './startup.ts'
 import { type ProgressUpdatesState, type ResponseStyleState } from './domain/communication/policy.ts'
 
@@ -135,17 +135,6 @@ export interface AgentComposition {
 }
 
 /**
- * Source-compatible composition returned for standalone callers that provide
- * their own ModelSelectionRef instead of an Agent-local installer.
- */
-interface LegacyAgentComposition {
-  /** Preset id for the session header, absent when the deployment composes no roster. */
-  agentPreset?: string
-  /** Standalone setup installs the caller-owned model selection ref. */
-  setup: (agentCtx: Context) => Promise<void> | void
-}
-
-/**
  * Resolve the preset an agent will be composed from, and the setup that
  * installs it.
  *
@@ -158,11 +147,10 @@ interface LegacyAgentComposition {
  * A deployment with no roster composes nothing and every session shares the
  * host composition, which is the behavior before presets existed.
  * @param ctx - the runner context (services read through `ctx.get`).
- * @param installSelection - installs a fresh Agent-local model selection ref
- *   during setup using the explicit Agent identity supplied by DSH. A
- *   ModelSelectionRef is also accepted for source compatibility with
- *   standalone composition callers; that branch installs the caller-owned ref
- *   and does not require an Agent.
+ * @param installSelection - installs the Agent-scoped runtime contributions
+ *   during setup using the explicit Agent identity supplied by DSH. DSH 0.2.2
+ *   owns model selection inside the Agent (`AgentModel` + the `modelSelection`
+ *   projection), so there is no caller-owned selection ref to install.
  * @param presetId - the requested preset, or `undefined` for the default.
  * @param displayState - the shared canonical DisplayState. When provided, the
  *   setup also installs the dynamic Focus system-prompt
@@ -180,15 +168,6 @@ interface LegacyAgentComposition {
  */
 export function composeAgent(
   ctx: Context,
-  installSelection: ModelSelectionRef,
-  presetId?: string,
-  displayState?: DisplayState,
-  diag?: Diag,
-  progressUpdatesState?: ProgressUpdatesState,
-  responseStyleState?: ResponseStyleState,
-): Promise<LegacyAgentComposition>
-export function composeAgent(
-  ctx: Context,
   installSelection: (agentCtx: Context, agent: Agent) => void,
   presetId?: string,
   displayState?: DisplayState,
@@ -198,13 +177,13 @@ export function composeAgent(
 ): Promise<AgentComposition>
 export async function composeAgent(
   ctx: Context,
-  installSelection: ModelSelectionRef | ((agentCtx: Context, agent: Agent) => void),
+  installSelection: (agentCtx: Context, agent: Agent) => void,
   presetId?: string,
   displayState?: DisplayState,
   diag?: Diag,
   progressUpdatesState?: ProgressUpdatesState,
   responseStyleState?: ResponseStyleState,
-): Promise<LegacyAgentComposition | AgentComposition> {
+): Promise<AgentComposition> {
   // The Direct-only body lives in app/direct (plan §27); the entry keeps the
   // public overloads above and delegates the composition here.
   return composeDirectAgent(ctx, installSelection, presetId, displayState, diag, progressUpdatesState, responseStyleState)

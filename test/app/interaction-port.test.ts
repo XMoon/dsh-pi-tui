@@ -24,11 +24,14 @@ function host(
 ): HostContextLike {
   return {
     get: (name) => services[name],
-    on: (event, listener) => {
+    // The framework's typed `on`: record the subscription in the test's own
+    // map. The cast is the test double's seam (the generic signature cannot be
+    // expressed by a recording stub).
+    on: ((event: string, listener: unknown) => {
       events.push(event)
       events.push(listener as RegisteredListener)
-      return listener
-    },
+      return () => true
+    }) as HostContextLike['on'],
   }
 }
 

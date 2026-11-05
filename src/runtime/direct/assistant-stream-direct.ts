@@ -21,6 +21,7 @@
  * @module @xmoon76/dsh-pi-tui/runtime/direct/assistant-stream-direct
  */
 
+import type { Context } from '@deepseek-ai/cordis'
 import type {
   AssistantLiveChunk,
   AssistantLiveContentBlock,
@@ -33,7 +34,7 @@ import type {
  * package dependency; the service resolves from the dsh installation).
  * Cordis's `on` returns the disposer that removes the listener. */
 export interface HostEventSurface {
-  on(event: string, listener: (payload: unknown) => void): () => void
+  on: Context['on']
 }
 
 /** The official frame surface — the EXACT upstream `AssistantStreamFrame`

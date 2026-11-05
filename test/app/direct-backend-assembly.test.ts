@@ -25,14 +25,12 @@ function makeDeps(): DirectBackendDeps {
     dispose: () => {},
   }
   return {
-    ctx: { get: () => undefined, on: () => () => {} },
+    ctx: { get: () => undefined, on: () => () => false },
     diag,
     tuiSettings: undefined,
     modelSelections: {
       current: () => undefined,
-      appendSelection: () => {},
-      setCurrent: () => {},
-      selectForNextRequest: () => {},
+      select: () => {},
       serializeImageAdmission: async (_agent, operation) => operation(),
       durableProjectionForSession: () => ({ lastUsed: null, next: null }),
     },

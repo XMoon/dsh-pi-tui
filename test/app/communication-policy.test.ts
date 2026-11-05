@@ -209,8 +209,7 @@ test('Focus prompt states the surface fact without owning cadence or style prefe
 })
 
 for (const withRoster of [false, true]) {
-  for (const legacy of [false, true]) {
-    test(`composition reads persisted settings on first assembly (roster=${withRoster}, legacy=${legacy})`, async () => {
+  test(`composition reads persisted settings on first assembly (roster=${withRoster})`, async () => {
       const registry = promptRegistry()
       let mounted = false
       const presets = {
@@ -230,14 +229,9 @@ for (const withRoster of [false, true]) {
       const responseStyleState: ResponseStyleState = { style: parseResponseStyle('explanatory') }
       const agent = {} as never
       let installedAgent: unknown
-      if (legacy) {
-        const composition = await composeAgent(ctx as never, { current: undefined, assembled: undefined }, undefined, display, undefined, progressUpdatesState, responseStyleState)
-        await composition.setup(agentCtx as never)
-      } else {
-        const composition = await composeAgent(ctx as never, (_ctx, received) => { installedAgent = received }, undefined, display, undefined, progressUpdatesState, responseStyleState)
-        await composition.setup(agentCtx as never, agent)
-        assert.equal(installedAgent, agent)
-      }
+      const composition = await composeAgent(ctx as never, (_ctx, received) => { installedAgent = received }, undefined, display, undefined, progressUpdatesState, responseStyleState)
+      await composition.setup(agentCtx as never, agent)
+      assert.equal(installedAgent, agent)
       assert.equal(registry.text('tui:progress-updates'), '', 'Focus suppresses the progress section')
       assert.match(registry.text('tui:response-style'), /# Response style: Explanatory/)
       assert.equal(registry.text('tui:focus-mode'), FOCUS_MODE_PROMPT)
@@ -260,15 +254,14 @@ for (const withRoster of [false, true]) {
       }
       assert.equal(registry.sections.size, 3)
     })
-  }
 }
 
 test('plain composeAgent callers without communication states install no communication sections', async () => {
   const registry = promptRegistry()
   const ctx = { get: () => undefined }
   const agentCtx = { get: () => registry.systemPrompt, on: () => () => {} }
-  const composition = await composeAgent(ctx as never, { current: undefined, assembled: undefined }, undefined, { preset: 'full' })
-  await composition.setup(agentCtx as never)
+  const composition = await composeAgent(ctx as never, () => {}, undefined, { preset: 'full' })
+  await composition.setup(agentCtx as never, {} as never)
   assert.equal(registry.sections.has('tui:progress-updates'), false)
   assert.equal(registry.sections.has('tui:response-style'), false)
   assert.ok(registry.sections.has('tui:focus-mode'), 'the Focus section still installs')

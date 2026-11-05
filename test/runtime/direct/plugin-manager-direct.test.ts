@@ -46,12 +46,14 @@ function host(service: unknown): { ctx: PluginManagerHostContextLike; listeners:
   const listeners = new Map<string, Set<(payload: unknown) => void>>()
   const ctx: PluginManagerHostContextLike = {
     get: (name: string) => name === 'pluginManager' ? service : undefined,
-    on: (name, listener) => {
+    // The recording double for the framework's typed `on`: the map is keyed by
+    // the official event name so the tests can fan one payload out.
+    on: ((name: string, listener: (payload: unknown) => void) => {
       const set = listeners.get(name) ?? new Set()
       set.add(listener)
       listeners.set(name, set)
-      return () => { set.delete(listener) }
-    },
+      return () => { set.delete(listener); return true }
+    }) as PluginManagerHostContextLike['on'],
   }
   return { ctx, listeners }
 }
@@ -71,6 +73,7 @@ test('snapshot maps bundles/plugins/registries/exemptions onto frozen detached f
         installed: true,
         optional: false,
         removable: true,
+        updatable: false,
         rows: [{ rowId: 'tui-app', moduleName: '@xmoon76/dsh-pi-tui', meta: { title: 'App' }, entryId: 'e-app' as never }],
         overrides: ['tool-bash'],
       },
@@ -184,7 +187,7 @@ test('subscribeInvalidation maps the official plugin-manager/changed and unsubsc
 })
 
 test('a missing pluginManager service fails loud, never silently', async () => {
-  const port = new DirectPluginManagerPort({ get: () => undefined, on: () => () => {} })
+  const port = new DirectPluginManagerPort({ get: () => undefined, on: () => () => false })
   await assert.rejects(() => port.snapshot(), /pluginManager service unavailable/)
 })
 
@@ -199,6 +202,7 @@ test('a missing official catalog entry keeps official/availability/installTarget
       installed: false,
       optional: true,
       removable: false,
+      updatable: false,
       rows: [],
       overrides: [],
     }],

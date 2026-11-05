@@ -11,6 +11,7 @@
  * @module @xmoon76/dsh-pi-tui/runtime/direct/plugin-manager-direct
  */
 
+import type { Context } from '@deepseek-ai/cordis'
 import type {
   BundleInfo,
   ChangeResult,
@@ -46,8 +47,9 @@ import {
  * service resolves from the dsh installation, never a package dependency). */
 export interface PluginManagerHostContextLike {
   get(name: string): unknown
-  /** Subscribe to the official `plugin-manager/*` events; returns a disposer. */
-  on(name: string, listener: (payload: unknown) => void): () => void
+  /** The framework's typed `on`; this adapter subscribes only to the official
+   *  `plugin-manager/*` events. */
+  on: Context['on']
 }
 
 /** The official Host service shape this adapter consumes. */

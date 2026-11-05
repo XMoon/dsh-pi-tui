@@ -47,8 +47,6 @@ import type {} from '@deepseek-ai/dsh-credentials'
 import type {} from '@deepseek-ai/dsh-token-meter'
 import { selectBlankSessionPreset, sessionPresetOf } from '../runtime/direct/session-preset-direct.ts'
 import { DirectTuiSettings, type SettingsFormsLike } from '../runtime/direct/tui-settings-direct.ts'
-import type { DefaultModelServiceLike } from '../runtime/direct/model-selection-direct.ts'
-import { rawSelectionFromRequestHeader } from '../domain/session/model-selection.ts'
 import { foldSessionTitle } from '@deepseek-ai/dsh-session-title'
 import { TUI_STARTUP_SERVICE } from '../startup.ts'
 import { createSessionPresentation } from './surface/session-presentation.ts'
@@ -793,7 +791,6 @@ export function applyRunnerWithRuntime(
         ctx,
         diag,
         tuiSettings,
-        defaultModel: defaultModel as unknown as DefaultModelServiceLike,
         // The Direct owner pool is built and owned inside the Direct runtime; it
         // reads the ONE ownership-core release ledger through these two seams.
         waitForRelease: ownership.waitForOwnerRelease,
@@ -942,7 +939,7 @@ export function applyRunnerWithRuntime(
         ? defaultModel.currentSelection() as ModelSelection | undefined
         : detachedModelSelection(backend.catalog.models.defaultSelection()),
       currentOf: (agent) => directRuntime()?.modelSelections.current(agent as Agent),
-      setCurrentOf: (agent, next) => directRuntime()?.modelSelections.setCurrent(agent as Agent, next),
+      setCurrentOf: (agent, next) => { directRuntime()?.modelSelections.select(agent as Agent, next as ModelSelection) },
     })
     const sessionRuntime = bindSessionRuntime(ownership, {
       // M3-4 PR1: the common session-runtime inputs come from the selected
@@ -3482,19 +3479,6 @@ export function applyRunnerWithRuntime(
           : agents.get(SessionId(sessionId)) as Agent | undefined
         let settledViewChildId: string | undefined
         let refreshAgents = false
-        const selectionEvent = event as unknown as { type?: unknown; data?: unknown }
-        if (selectionEvent.type === 'model/selection') {
-          if (runtimeAgent !== undefined) directRuntime()?.modelSelections.observeSelectionEvent(runtimeAgent, selectionEvent)
-        } else if (event.type === 'request/header' && runtimeAgent !== undefined) {
-          const data = event.data as unknown
-          const header = typeof data === 'object' && data !== null
-            ? (data as { header?: unknown }).header
-            : undefined
-          const raw = rawSelectionFromRequestHeader(header)
-          if (raw !== undefined) {
-            directRuntime()?.modelSelections.consumeSelection(runtimeAgent, raw.provider, raw.model, raw.reasoningEffort)
-          }
-        }
         if (event.type === 'tool/call') {
           presentation.setToolArgs(event.data.callId, typeof event.data.arguments === 'string'
             ? event.data.arguments
