@@ -31,6 +31,7 @@ import { connect as sdkConnect } from '@stencil-hq/tern'
 import type { Op } from '@stencil-hq/tern'
 import { installTspPane, type TspPane } from '../support/tsp-terminal-fixture.ts'
 import { wireNodes, type WireNode } from '../support/tsp-picker-wire.ts'
+import { waitForEditableComposer } from '../support/tsp-composer-readiness.ts'
 import { mountTspRenderer, type TspRenderer } from '../../src/tui/tsp/session.ts'
 import type { ApprovalOutcome, ApprovalPromptRequest, TuiQuestion, TuiQuestionAnswer, TuiQuestionStatus } from '../../src/app/surface/interaction-presenter.ts'
 
@@ -1197,6 +1198,82 @@ test('the composer accepts input again only after the NEW projection scope commi
     await waitFor(() => harness.renderer.composer.getDraft() === 'b',
       'the composer accepts input once the new scope has committed')
   } finally {
+    await harness.dispose()
+  }
+})
+
+test('the shared composer-readiness probe retries a key the hydration fence drops and succeeds after the new projection scope commits', async (t) => {
+  // The probe under test is the one the Direct TSP lanes use: it must survive
+  // a key the fence DROPS, not be saved by it. This case opens the real fence,
+  // lets the probe inject while every byte is lost, commits a new projection
+  // source, and asserts the SAME pending probe then lands and erases.
+  const harness = await mountHarness()
+  // Count ONLY the probe's own tty bytes, read from the pane's real data
+  // stream — never from the helper's internals.
+  let injections = 0
+  const onData = (chunk: unknown): void => {
+    const text = typeof chunk === 'string' ? chunk : new TextDecoder().decode(chunk as Uint8Array)
+    if (text === 'x') injections += 1
+  }
+  try {
+    // The mounted pane's controlled editor, from ONE folded wire snapshot.
+    const readComposer = (): { readonly text: string; readonly cursor: number } => {
+      const editor = wireNodes(harness.pane).find(node => node.id === 'dock.composer')
+      if (editor === undefined) return { text: '', cursor: -1 }
+      return { text: String(editor.p.text ?? ''), cursor: Number(editor.p.cursor ?? -1) }
+    }
+    // A committed subject, so the fence below has something to retire.
+    harness.renderer.display.setTranscript(
+      [{ kind: 'assistant', turn: 1, text: 'the outgoing subject' }],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { identity: 'outgoing' },
+    )
+    await waitFor(() => {
+      const state = readComposer()
+      return state.text === '' && state.cursor === 0
+    }, 'the composer starts empty on the wire')
+
+    // The switch opens the fence and the probe starts — NOT awaited yet, so it
+    // keeps retrying while every probe byte is fenced out.
+    harness.renderer.display.beginSessionHydration()
+    harness.pane.input.on('data', onData)
+    const probe = waitForEditableComposer(harness.pane, readComposer)
+    const outcome = probe.then(
+      () => ({ ok: true as const }),
+      (error: unknown) => ({ ok: false as const, error }),
+    )
+    await waitFor(() => injections >= 2, 'the fenced probe is really re-injected', 5_000)
+    // The keys above were injected inside the fence; the delivery window is the
+    // fixture's documented bound for ONE input dispatch, so the empty draft
+    // below is an observation and not a lucky read.
+    await waitForKeyDeliveryWindow()
+    assert.equal(harness.renderer.composer.getDraft(), '',
+      'the hydration fence dropped the probe bytes instead of holding them for replay')
+
+    // The NEW subject commits: a different projection identity lifts the same
+    // fence the production session switch lifts.
+    harness.renderer.display.setTranscript(
+      [{ kind: 'assistant', turn: 1, text: 'the incoming subject' }],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { identity: 'incoming' },
+    )
+    const settled = await outcome
+    if (!settled.ok) throw settled.error
+    const wire = readComposer()
+    t.diagnostic(`probe injections=${injections} last=${JSON.stringify(wire)}`)
+    assert.equal(wire.text, '',
+      `the accepted probe was erased again on the wire (last ${JSON.stringify(wire)})`)
+    assert.equal(wire.cursor, 0, 'the accepted probe left the caret at the empty editor')
+    assert.equal(harness.renderer.composer.getDraft(), '',
+      'the client composer draft stayed empty through the probe')
+  } finally {
+    harness.pane.input.off('data', onData)
     await harness.dispose()
   }
 })
