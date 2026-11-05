@@ -877,13 +877,35 @@ test('a failed recomposition repair never claims the restored state', async t =>
   t.after(() => fixture.dispose())
   assert.deepEqual(await fixture.service.setEnabled(true), { state: 'enabled' })
   await reapplyOverlayDisabled(fixture)
+  // The repair's own diagnostic is emitted AFTER the serialized repair settled:
+  // it is the authoritative attempt+settlement witness. The live status alone is
+  // already `disabled` here, so only this witness proves the repair really ran.
+  const warnings: string[] = []
+  // Cordis exposes `ctx.logger` as a CALLABLE logger object: both
+  // `ctx.logger(name)` and the direct fiber diagnostics (`ctx.logger.error`)
+  // must exist, so the test seam is the same hybrid shape.
+  const fakeLogger = Object.assign(
+    (_name: string) => fakeLogger,
+    {
+      debug() {},
+      info() {},
+      warn: (message: string) => { warnings.push(message) },
+      error() {},
+    },
+  )
+  ;(fixture.ctx as unknown as { logger: unknown }).logger = fakeLogger
+  const appliesBefore = webApplies(fixture)
   failReenable = true
   fixture.ctx.emit('app-boot/config-reload')
-  // The repair fails and rolls back to the fully disabled roster: the LIVE
-  // status is that rolled-back truth (the repair never fabricates `enabled`).
-  const status = await waitForStatus(fixture, 'disabled', 'failed recomposition repair')
-  assert.equal(status.state, 'disabled')
-  assert.equal((await fixture.service.getStatus()).state === 'enabled', false,
-    'a failed repair must never claim the restored enabled state')
+  const deadline = Date.now() + 10_000
+  while (!warnings.some(message => /repair/u.test(message)) && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  const repaired = warnings.filter(message => /repair/u.test(message))
+  assert.equal(repaired.length, 1, 'the repair really ran and settled with its own diagnostic')
+  assert.match(repaired[0] ?? '', /did not reach the live target|repair failed/u)
+  assert.equal(webApplies(fixture) > appliesBefore, true, 'the repair really attempted to re-enable')
+  const status = await fixture.service.getStatus()
+  assert.equal(status.state, 'disabled', 'the rolled-back live status is the truth')
   assert.equal(fixture.webServer.facts().registered, false, 'the failed repair left no served fallback')
 })
