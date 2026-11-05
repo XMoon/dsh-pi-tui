@@ -20,7 +20,8 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { parse as parseYaml } from 'yaml'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
-import { PR_A_WEB_ROWS, raceWithAbortableDeadline, redactWebQualificationText, waitForCondition } from '../../scripts/split-process-smoke.mjs'
+import { waitForCondition } from '../../scripts/split-process-smoke.mjs'
+import { PR_A_WEB_ROWS, raceWithAbortableDeadline, redactWebQualificationText } from '../../scripts/smoke/split-process/web-helpers.mjs'
 import { createSplitProcessScope, statusMatches } from '../../scripts/lib/split-smoke-processes.mjs'
 import {
   listSelectableCases,
@@ -38,6 +39,10 @@ import { runNonDestructiveClientLifecycle } from '../../scripts/smoke/split-proc
 import { runDetachedTurnInteractions } from '../../scripts/smoke/split-process/detached-turn-interactions.mjs'
 import { runClientHmrSignals } from '../../scripts/smoke/split-process/client-hmr-signals.mjs'
 import { runUnknownWriteHostDeath } from '../../scripts/smoke/split-process/unknown-write-host-death.mjs'
+import { runOfficialWebComposition } from '../../scripts/smoke/split-process/official-web-composition.mjs'
+import { runWebRuntimeToggle } from '../../scripts/smoke/split-process/web-runtime-toggle.mjs'
+import { runWebStartupPreference } from '../../scripts/smoke/split-process/web-startup-preference.mjs'
+import { runWebProductQualification } from '../../scripts/smoke/split-process/web-product.mjs'
 import { HOST_ONLY_PATCH } from '../../src/app/remote-process/local-host-entry.ts'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
@@ -54,6 +59,11 @@ const NAVIGATION_MODULE = join(ROOT, 'scripts', 'smoke', 'split-process', 'non-d
 const DETACHED_MODULE = join(ROOT, 'scripts', 'smoke', 'split-process', 'detached-turn-interactions.mjs')
 const HMR_MODULE = join(ROOT, 'scripts', 'smoke', 'split-process', 'client-hmr-signals.mjs')
 const UNKNOWN_WRITE_MODULE = join(ROOT, 'scripts', 'smoke', 'split-process', 'unknown-write-host-death.mjs')
+const WEB_HELPERS_MODULE = join(ROOT, 'scripts', 'smoke', 'split-process', 'web-helpers.mjs')
+const OFFICIAL_WEB_MODULE = join(ROOT, 'scripts', 'smoke', 'split-process', 'official-web-composition.mjs')
+const WEB_TOGGLE_MODULE = join(ROOT, 'scripts', 'smoke', 'split-process', 'web-runtime-toggle.mjs')
+const WEB_PREF_MODULE = join(ROOT, 'scripts', 'smoke', 'split-process', 'web-startup-preference.mjs')
+const WEB_PRODUCT_MODULE = join(ROOT, 'scripts', 'smoke', 'split-process', 'web-product.mjs')
 
 /** Run the real lane CLI with one private temp root. */
 function runCli(args, tmpRoot, env = {}) {
@@ -179,6 +189,11 @@ test('the upgraded smoke carries every inventory gate and the critical negative 
     + readFileSync(DETACHED_MODULE, 'utf8')
     + readFileSync(HMR_MODULE, 'utf8')
     + readFileSync(UNKNOWN_WRITE_MODULE, 'utf8')
+    + readFileSync(WEB_HELPERS_MODULE, 'utf8')
+    + readFileSync(OFFICIAL_WEB_MODULE, 'utf8')
+    + readFileSync(WEB_TOGGLE_MODULE, 'utf8')
+    + readFileSync(WEB_PREF_MODULE, 'utf8')
+    + readFileSync(WEB_PRODUCT_MODULE, 'utf8')
     + readFileSync(join(ROOT, 'scripts', 'lib', 'split-smoke-processes.mjs'), 'utf8')
     + readFileSync(join(ROOT, 'scripts', 'lib', 'split-smoke-fixtures.mjs'), 'utf8')
   for (const gate of ['T01', 'T02', 'T03', 'T04', 'T05', 'T06', 'T07', 'T08', 'T09', 'T09Q', 'T10', 'T11', 'T12', 'T13', 'T14', 'T15', 'T16', 'T17', 'T18', 'T19', 'T20', 'T21', 'T22', 'T23', 'T24', 'T25', 'T26', 'T27', 'T28', 'T29', 'T30', 'T31', 'T32', 'T33', 'T34', 'T35', 'T36', 'T37', 'T38', 'T39', 'T40', 'T41', 'T42', 'T43', 'T44', 'T45', 'T46', 'T47', 'T48', 'T49', 'T50', 'T51', 'T52', 'T53', 'T54', 'T55', 'T56', 'T57', 'T58', 'T59', 'T60']) {
@@ -317,7 +332,10 @@ test('the upgraded smoke carries every inventory gate and the critical negative 
   const extraPatchUses = (source
     + readFileSync(DETACHED_MODULE, 'utf8')
     + readFileSync(HMR_MODULE, 'utf8')
-    + readFileSync(UNKNOWN_WRITE_MODULE, 'utf8')).match(/SPLIT_PROCESS_EXTRA_PATCH/gu) ?? []
+    + readFileSync(UNKNOWN_WRITE_MODULE, 'utf8')
+    + readFileSync(OFFICIAL_WEB_MODULE, 'utf8')
+    + readFileSync(WEB_TOGGLE_MODULE, 'utf8')
+    + readFileSync(WEB_PRODUCT_MODULE, 'utf8')).match(/SPLIT_PROCESS_EXTRA_PATCH/gu) ?? []
   assert.equal(extraPatchUses.length, 13,
     'the full lane plus the recovery cases may only implement the whole-smoke mutation mode, the isolated host-work overlays, the C1 timed patch, the three bounded PR-A Web composition runs, the five bounded PR-B Web-toggle runs and the ONE PR-D product Host patch; the two child mutations, the two required-row mutations, the row-disabled control, the C1 Host fixture patch and the default stub-LLM overlay belong to the extracted cases and the shared modules')
   assert.match(readFileSync(C1_SCENE_MODULE, 'utf8'), /SPLIT_PROCESS_EXTRA_PATCH: c1Work\.patchPath/u,
@@ -338,18 +356,20 @@ test('the upgraded smoke carries every inventory gate and the critical negative 
   assert.match(recovery, /SPLIT_PROCESS_EXTRA_PATCH: workspaceControllerMutationPatch/u)
   // The PR-A Web composition owns exactly three of these runs: the isolated
   // enable, the missing-frontend-dist control and the duplicate-modules control.
-  assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: webPatch/u)
-  assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: duplicatePatch/u)
-  assert.equal((source.match(/SPLIT_PROCESS_EXTRA_PATCH: webPatch/gu) ?? []).length, 2,
+  const officialWeb = readFileSync(OFFICIAL_WEB_MODULE, 'utf8')
+  const webToggle = readFileSync(WEB_TOGGLE_MODULE, 'utf8')
+  assert.match(officialWeb, /SPLIT_PROCESS_EXTRA_PATCH: webPatch/u)
+  assert.match(officialWeb, /SPLIT_PROCESS_EXTRA_PATCH: duplicatePatch/u)
+  assert.equal((officialWeb.match(/SPLIT_PROCESS_EXTRA_PATCH: webPatch/gu) ?? []).length, 2,
     'the isolated enable patch is reused by the positive run and the dist-absent control')
   // The PR-B toggle lane owns exactly four of these runs: the one default-off
   // Host that carries the whole toggle, its missing-asset negative control, the
   // duplicate-module-owner control and the malformed-argument control. The
   // toggle itself never needs a second patch: it flips the declared rows.
-  assert.equal((source.match(/SPLIT_PROCESS_EXTRA_PATCH: hostPatch/gu) ?? []).length, 4,
+  assert.equal((webToggle.match(/SPLIT_PROCESS_EXTRA_PATCH: hostPatch/gu) ?? []).length, 4,
     'the toggle patch is reused by the default-off Host and its three isolated negative lanes')
-  assert.equal((source.match(/SPLIT_PROCESS_EXTRA_PATCH: duplicatePatch/gu) ?? []).length, 2,
-    'the duplicate-module control keeps its own patch in both Web lanes')
+  assert.equal((webToggle.match(/SPLIT_PROCESS_EXTRA_PATCH: duplicatePatch/gu) ?? []).length, 1,
+    'the duplicate-module control keeps its patch in the toggle lane')
   assert.match(source, /SPLIT_PROCESS_SMOKE_MUTATION/u)
   assert.match(entryAdmission, /DSH_PI_TUI_ROLE: 'host'/u, 'the inherited-role negative control must remain')
 
@@ -1310,7 +1330,7 @@ test('the Client peer set is installed into the profile that actually runs it', 
 })
 
 test('the official Web composition qualification is discoverable and never fakes a pass', () => {
-  const source = readFileSync(SCRIPT, 'utf8')
+  const source = readFileSync(OFFICIAL_WEB_MODULE, 'utf8') + readFileSync(WEB_HELPERS_MODULE, 'utf8') + readFileSync(SCRIPT, 'utf8')
   for (const marker of [
     't67-web-default-off',
     't68-web-qualified',
@@ -1318,7 +1338,7 @@ test('the official Web composition qualification is discoverable and never fakes
     't70-web-hmr',
     't71-web-shutdown',
     't72-web-negative-controls',
-    'qualifyOfficialWebComposition',
+    'runOfficialWebComposition',
     'PR_A_WEB_ROWS',
     'PR_A_SINGLETON_PACKAGES',
     'readHostWebIndex',
@@ -1345,15 +1365,14 @@ test('the official Web composition qualification is discoverable and never fakes
   // requires it (SPLIT_PROCESS_REQUIRE_WEB_BROWSER=1) FAILS without it, and the
   // inventory/summary carry the verdict instead of claiming a full pass.
   assert.match(source, /const playwrightRoot = process\.env\.SPLIT_PROCESS_PLAYWRIGHT_ROOT/u)
-  assert.match(source, /const REQUIRE_WEB_BROWSER = process\.env\.SPLIT_PROCESS_REQUIRE_WEB_BROWSER === '1'/u)
-  assert.match(source, /assert\(!REQUIRE_WEB_BROWSER,/u)
+  assert.match(source, /const requireBrowser = mode === 'selected' \|\| process\.env\.SPLIT_PROCESS_REQUIRE_WEB_BROWSER === '1'/u)
+  assert.match(source, /assert\(!requireBrowser,/u)
   assert.match(source, /this run does NOT exercise the real Browser and does not claim it/u)
-  assert.match(source, /const webQualification = await qualifyOfficialWebComposition\(\)/u)
-  assert.match(source, /webComposition: webBrowserVerdict === 'PASS'/u)
+    assert.match(source, /webComposition: webBrowserVerdict === 'PASS'/u)
   assert.match(source, /PASS_OFFICIAL_WEB_COMPOSITION_REAL_BROWSER/u)
   assert.match(source, /NOT_QUALIFIED \(\$\{webBrowserVerdict\}\)/u)
   // EVERY non-PASS verdict fails a required run, not only the absent root.
-  assert.match(source, /assert\(!REQUIRE_WEB_BROWSER \|\| webQualification\.browser === 'PASS'/u)
+  assert.match(source, /assert\(!requireBrowser \|\| browserCase === 'PASS'/u)
   assert.match(source, /browserCase = existsSync\(join\(coordination, 'browser-result\.json'\)\) \? 'FAILED' : 'INCOMPLETE'/u)
   // No raw driver output may be retained: only fixed facts and redacted text.
   assert.doesNotMatch(source, /stderr: browserErr/u)
@@ -1408,16 +1427,10 @@ test('the official Web composition qualification is discoverable and never fakes
 })
 
 test('the product Browser x real-TUI qualification is require-gated and never fakes a pass', () => {
-  const source = readFileSync(SCRIPT, 'utf8')
-  const start = source.indexOf('export const qualifyWebProduct = async context => {')
-  assert.ok(start > 0, 'the PR-D product qualification must stay one bounded module-level function')
-  // The function is context-injected and module-level so a development run can
-  // exercise ONLY the product cases; it must stay before main().
-  const end = source.indexOf('async function main(', start)
-  assert.ok(end > start, 'the PR-D function must stay before main()')
-  const lane = source.slice(start, end)
+  const source = readFileSync(WEB_PRODUCT_MODULE, 'utf8') + readFileSync(WEB_HELPERS_MODULE, 'utf8') + readFileSync(SCRIPT, 'utf8')
+  const lane = readFileSync(WEB_PRODUCT_MODULE, 'utf8')
   for (const marker of [
-    'qualifyWebProduct',
+    'runWebProductQualification',
     'SPLIT_PROCESS_REQUIRE_WEB_PRODUCT',
     'status: \'NOT_RUN\'',
     'm5-web-product-browser.mjs',
@@ -1465,12 +1478,11 @@ test('the product Browser x real-TUI qualification is require-gated and never fa
   // The required flag is the ONLY gate: without it the lane reports NOT_RUN and
   // never claims a product PASS; with it a missing Playwright install or a
   // failed case is a hard failure.
-  assert.match(source, /const REQUIRE_WEB_PRODUCT = process\.env\.SPLIT_PROCESS_REQUIRE_WEB_PRODUCT === '1'/u)
+  assert.match(source, /const requireProduct = mode === 'selected' \|\| process\.env\.SPLIT_PROCESS_REQUIRE_WEB_PRODUCT === '1'/u)
   assert.ok(source.includes('M5_WEB_PRODUCT_EVIDENCE'), 'the evidence root is the product qualification\'s ONE retained output')
-  assert.match(lane, /if \(!REQUIRE_WEB_PRODUCT\) \{/u)
+  assert.match(lane, /if \(!requireProduct\) \{/u)
   assert.match(lane, /assert\(playwrightRoot !== undefined && playwrightRoot !== '',/u)
-  assert.match(source, /const productQualification = await qualifyWebProduct\(\{/u)
-  assert.match(source, /assert\(productQualification\.status === 'NOT_RUN' \|\| productQualification\.browserSubset === 'PASS'/u)
+    assert.match(lane, /return \{ status: finalStatus, browserSubset, wc \}/u)
   // The driver-owned facts are raced against the driver's own exit through the
   // ONE shared helper; a bare fixed window would burn the whole budget.
   assert.match(lane, /waitFact:[\s\S]*?whileBrowserDriverRuns\(/u)
@@ -1542,13 +1554,9 @@ test('the product Browser x real-TUI qualification is require-gated and never fa
 })
 
 test('the Web startup preference lane drives the real Client settings/URL ops, never a Host shortcut', () => {
-  const source = readFileSync(SCRIPT, 'utf8')
-  const start = source.indexOf('const qualifyWebAutostart = async () => {')
-  // The lane is the T74 FUNCTION: it is defined before T73 and invoked later, so
-  // the boundary is the next function, never the invocation line.
-  const end = source.indexOf('const qualifyWebRuntimeToggle = async () => {')
-  assert.ok(start > 0 && end > start, 'the t74 lane must stay one bounded function')
-  const lane = source.slice(start, end)
+  const source = readFileSync(WEB_PREF_MODULE, 'utf8')
+  const lane = source
+  assert.ok(lane.includes('export async function runWebStartupPreference'), 'the t74 lane must stay one bounded case function')
   // The preference is written through the REAL generated settings wire and the
   // launch URL through the private Client namespace: never a profile file edit,
   // never a Host loader call.
@@ -1576,11 +1584,9 @@ test('the Web startup preference lane drives the real Client settings/URL ops, n
 })
 
 test('the Web runtime toggle lane drives the private Peer control, never a Host shortcut', () => {
-  const source = readFileSync(SCRIPT, 'utf8')
-  const start = source.indexOf('const qualifyWebRuntimeToggle = async () => {')
-  const end = source.indexOf('const toggleQualification = await qualifyWebRuntimeToggle()')
-  assert.ok(start > 0 && end > start, 'the t73 lane must stay one bounded function')
-  const lane = source.slice(start, end)
+  const source = readFileSync(WEB_TOGGLE_MODULE, 'utf8')
+  const lane = source
+  assert.ok(lane.includes('export async function runWebRuntimeToggle'), 'the t73 lane must stay one bounded case function')
   // The control path is the REAL authenticated Peer through the v2 Gateway: the
   // qualification op of the internal Client entry, correlated by requestId.
   assert.match(lane, /op: 'qualification-web-access'/u)
@@ -1651,7 +1657,7 @@ test('the Web runtime toggle lane drives the private Peer control, never a Host 
   assert.match(lane, /const browserExitBounded = timeoutMs => browserDriverExitBounded\(browserExit, timeoutMs, 'PR_B_BROWSER_EXIT_TIMEOUT'\)/u)
   assert.match(lane, /await waitDurableTurn\(browserSession, marker, 'PB-07 Browser'\)/u)
   assert.match(lane, /browserCase = 'PASS'/u)
-  assert.match(source, /assert\(!REQUIRE_WEB_BROWSER \|\| toggleQualification\.browser === 'PASS'/u,
+  assert.match(lane, /assert\(!requireBrowser \|\| browserCase === 'PASS'/u,
     'a required Browser run may only be satisfied by a PASS verdict')
   // PB-10: nothing was persisted, and the official Host shutdown owns the exit.
   assert.match(lane, /profilePatchAfter\.equals\(profilePatchBefore\)/u)
@@ -1729,7 +1735,7 @@ test('the Web qualification redactor removes every credential shape from retaine
 
 test('a completed abortable deadline releases its timer instead of holding the process', () => {
   const probe = `
-    import { raceWithAbortableDeadline } from ${JSON.stringify(pathToFileURL(SCRIPT).href)}
+    import { raceWithAbortableDeadline } from ${JSON.stringify(pathToFileURL(WEB_HELPERS_MODULE).href)}
     const started = Date.now()
     const value = await raceWithAbortableDeadline(
       Promise.resolve({ code: 0, signal: null }),
@@ -1782,7 +1788,7 @@ test('an aborted condition wait stops polling instead of holding the process', (
 })
 
 test('a Browser exit cannot turn a later TUI paint into a failure', () => {
-  const source = readFileSync(SCRIPT, 'utf8')
+  const source = readFileSync(OFFICIAL_WEB_MODULE, 'utf8')
   // The prompt paint is a TUI fact; the Host commitment is proved separately by
   // the durable-log assertion, so the wait must not be raced with the driver.
   const promptWait = source.slice(
@@ -1817,6 +1823,10 @@ test('listing selectable split cases does not install a profile or claim complet
     'suite=recovery case=recovery.detached-turn-interactions title=an accepted Turn, Tool, Job, Child and pending interaction survive the Client that started them',
     'suite=recovery case=recovery.client-hmr-signals title=Client-only HMR, real PTY signals and Host kill keep the official disposition taxonomy',
     'suite=recovery case=recovery.unknown-write-host-death title=an ACK-dropped write survives Host death as one durable write and no fabricated answer',
+    'suite=web case=web.official-composition title=the official Web composition stays default-off and a real Browser plus real TUI share one authenticated Host',
+    'suite=web case=web.runtime-toggle title=one live Host toggles the official Web runtime on and off without unloading the real TUI',
+    'suite=web case=web.startup-preference title=the profile-owned Web startup preference applies on the next cold Host through the real settings wire',
+    'suite=web case=web.product-browser-tui title=the product Browser and real TUI share one Host across the 22-case WP matrix',
   ], 'the listing must follow the registry execution order')
   // A listing never becomes a full PASS and never creates a scene.
   for (const forbidden of ['SPLIT_PROCESS_SMOKE_PASS', 'T60 PASS', 'PASS_REAL_SPLIT_PROCESS',
@@ -1883,13 +1893,17 @@ test('the selectable registry is the single source for listing, resolution and t
     'recovery.detached-turn-interactions',
     'recovery.client-hmr-signals',
     'recovery.unknown-write-host-death',
+    'web.official-composition',
+    'web.runtime-toggle',
+    'web.startup-preference',
+    'web.product-browser-tui',
   ])
   assert.deepEqual(cases.map(entry => entry.suite), [
     'bootstrap', 'bootstrap', 'bootstrap', 'transport', 'surface', 'multi-client', 'navigation',
-    'recovery', 'recovery', 'recovery',
+    'recovery', 'recovery', 'recovery', 'web', 'web', 'web', 'web',
   ])
   const [pilot, entry, recovery, transport, surface, multiClient, navigation,
-    detached, hmrSignals, unknownWrite] = cases
+    detached, hmrSignals, unknownWrite, webComposition, webToggle, webPreference, webProduct] = cases
   assert.equal(pilot.title, 'a disabled Host Runtime owner refuses Ready without publishing a Host identity')
   assert.equal(entry.title, 'an inherited Host role without a mounted TUI surface is refused before Host admission')
   assert.equal(recovery.title, 'a renamed-away Host Runtime artifact fails closed and the restored artifact reaches authenticated Ready')
@@ -1900,11 +1914,16 @@ test('the selectable registry is the single source for listing, resolution and t
   assert.equal(detached.title, 'an accepted Turn, Tool, Job, Child and pending interaction survive the Client that started them')
   assert.equal(hmrSignals.title, 'Client-only HMR, real PTY signals and Host kill keep the official disposition taxonomy')
   assert.equal(unknownWrite.title, 'an ACK-dropped write survives Host death as one durable write and no fabricated answer')
+  assert.equal(webComposition.title, 'the official Web composition stays default-off and a real Browser plus real TUI share one authenticated Host')
+  assert.equal(webToggle.title, 'one live Host toggles the official Web runtime on and off without unloading the real TUI')
+  assert.equal(webPreference.title, 'the profile-owned Web startup preference applies on the next cold Host through the real settings wire')
+  assert.equal(webProduct.title, 'the product Browser and real TUI share one Host across the 22-case WP matrix')
   assert.deepEqual([pilot.run, entry.run, recovery.run, transport.run, surface.run, multiClient.run, navigation.run,
-    detached.run, hmrSignals.run, unknownWrite.run],
+    detached.run, hmrSignals.run, unknownWrite.run, webComposition.run, webToggle.run, webPreference.run, webProduct.run],
     [runHostRuntimeDisabled, runEntryAdmission, runRuntimeArtifactRecovery, runAuthenticatedLifecycle,
       runPtySessionWriteRecovery, runSharedSessionInteractions, runNonDestructiveClientLifecycle,
-      runDetachedTurnInteractions, runClientHmrSignals, runUnknownWriteHostDeath],
+      runDetachedTurnInteractions, runClientHmrSignals, runUnknownWriteHostDeath,
+      runOfficialWebComposition, runWebRuntimeToggle, runWebStartupPreference, runWebProductQualification],
     'every registered run must be the real scenario, not a copy or a re-wrapped stub')
   assert.ok(Object.isFrozen(cases) && cases.every(entry_ => Object.isFrozen(entry_)), 'the registry must stay frozen')
 
@@ -1915,6 +1934,7 @@ test('the selectable registry is the single source for listing, resolution and t
   assert.deepEqual(resolveSelection({ mode: 'suite', suite: 'multi-client' }).cases, [multiClient])
   assert.deepEqual(resolveSelection({ mode: 'suite', suite: 'navigation' }).cases, [navigation])
   assert.deepEqual(resolveSelection({ mode: 'suite', suite: 'recovery' }).cases, [detached, hmrSignals, unknownWrite])
+  assert.deepEqual(resolveSelection({ mode: 'suite', suite: 'web' }).cases, [webComposition, webToggle, webPreference, webProduct])
   assert.throws(() => resolveSelection({ mode: 'case', id: 'does-not-exist' }),
     error => error.code === 'INPUT_SMOKE_SELECTION_INVALID')
   assert.throws(() => resolveSelection({ mode: 'suite', suite: 'does-not-exist' }),
@@ -1944,11 +1964,39 @@ test('a selected result names only the selectable scope', () => {
   assert.doesNotMatch(source, /SPLIT_PROCESS_SMOKE_PASS/u, 'the lane may never print a full PASS')
 })
 
+test('T60 is driven by the actual case results and blocks on a missing or failed case', () => {
+  const source = readFileSync(SCRIPT, 'utf8')
+  assert.match(source, /const actualCaseResults = \[\]/u)
+  assert.match(source, /T60 the actual case results do not match the frozen registry/u)
+  assert.match(source, /statusOf\(/u)
+  assert.doesNotMatch(source, /t44t48: 'pass',/u, 'no legacy field may be an unconditional PASS')
+  assert.doesNotMatch(source, /m5b: 'pass/u, 'no legacy field may be an unconditional PASS')
+  assert.match(source, /webProductResult\?\.status === 'NOT_RUN'/u,
+    'an optional Product run is recorded as NOT_RUN, not as a fake PASS')
+})
+
 test('the Full entry runs every registered case in the frozen registry order', () => {
   const source = readFileSync(SCRIPT, 'utf8')
-  const calls = [...source.matchAll(/runRegisteredCase\('([^']+)'\)/gu)].map(match => match[1])
-  assert.deepEqual(calls, listSelectableCases().map(entry => entry.id),
-    'the Full lane must stay wired to every registered case in the same order a suite uses')
+  assert.match(source, /for \(const registeredCase of listSelectableCases\(\)\)/u,
+    'the Full lane must dispatch the ONE registry, not a second hand-written list')
+  assert.match(source, /actualCaseResults\.push\(/u, 'the Full lane must record every actual result')
+  assert.doesNotMatch(source, /runRegisteredCase/u, 'the retired per-case bridge must not return')
+  assert.deepEqual(listSelectableCases().map(entry => entry.id), [
+    'bootstrap.host-runtime-disabled',
+    'bootstrap.entry-admission',
+    'bootstrap.runtime-artifact-recovery',
+    'transport.authenticated-lifecycle',
+    'surface.pty-session-write-recovery',
+    'multi-client.shared-session-interactions',
+    'navigation.non-destructive-client-lifecycle',
+    'recovery.detached-turn-interactions',
+    'recovery.client-hmr-signals',
+    'recovery.unknown-write-host-death',
+    'web.official-composition',
+    'web.runtime-toggle',
+    'web.startup-preference',
+    'web.product-browser-tui',
+  ])
 })
 
 test('the recovery cases keep the real HMR, signal and unknown-write observables', () => {
@@ -2009,23 +2057,13 @@ test('the T44-T66 legacy C1 bridge is gone and the recovery cases own every cont
   const detached = readFileSync(DETACHED_MODULE, 'utf8')
   const hmr = readFileSync(HMR_MODULE, 'utf8')
   const unknown = readFileSync(UNKNOWN_WRITE_MODULE, 'utf8')
-  // The three recovery cases are the REAL implementation, and the Full lane
-  // calls the same registered functions at their historical position.
+  // The three recovery cases are the REAL implementation; the Full lane is
+  // registry-driven and keeps no second copy of any continuity scene.
   assert.match(detached, /export async function runDetachedTurnInteractions\(context\)/u)
   assert.match(hmr, /export async function runClientHmrSignals\(context\)/u)
   assert.match(unknown, /export async function runUnknownWriteHostDeath\(context\)/u)
-  const calls = [
-    "await runRegisteredCase('navigation.non-destructive-client-lifecycle')",
-    "await runRegisteredCase('recovery.detached-turn-interactions')",
-    "await runRegisteredCase('recovery.client-hmr-signals')",
-    "await runRegisteredCase('recovery.unknown-write-host-death')",
-  ]
-  let cursor = -1
-  for (const call of calls) {
-    const index = source.indexOf(call)
-    assert.ok(index > cursor, `the Full lane must run ${call} in historical order`)
-    cursor = index
-  }
+  assert.match(source, /for \(const registeredCase of listSelectableCases\(\)\)/u)
+  assert.doesNotMatch(source, /runRegisteredCase/u)
   // Every continuity marker moved exactly once: the lane carries none of the
   // old inline T44-T66 sections.
   for (const marker of ['// T44:', '// T57:', '// T66:']) {
@@ -2045,10 +2083,10 @@ test('the Host Runtime row-disabled control has one implementation', () => {
   const source = readFileSync(SCRIPT, 'utf8')
   const scenario = readFileSync(CASE_MODULE, 'utf8')
   assert.match(scenario, /split-host-pi-tui-runtime\\n  disabled: true/u)
-  assert.match(source, /runRegisteredCase\('bootstrap\.host-runtime-disabled'\)/u,
-    'the full lane must run the ONE registered scenario through the registry')
-  assert.equal((source.match(/trace\('t26-runtime-row-disabled'/gu) ?? []).length, 1,
-    'the full lane keeps exactly one old trace event for the scenario')
+  assert.match(scenario, /trace\('t26-runtime-row-disabled'/u,
+    'the pilot case owns its one compatibility trace')
+  assert.equal((scenario.match(/trace\('t26-runtime-row-disabled'/gu) ?? []).length, 1,
+    'the pilot keeps exactly one trace event for the scenario')
   assert.doesNotMatch(source, /t26-host-runtime-disabled\.patch\.yml/u,
     'the full lane must not keep a second inline row-disabled control')
 })

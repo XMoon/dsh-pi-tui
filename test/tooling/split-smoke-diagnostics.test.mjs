@@ -76,6 +76,11 @@ const NAVIGATION_SCRIPT = join(ROOT, 'scripts', 'smoke', 'split-process', 'non-d
 const DETACHED_SCRIPT = join(ROOT, 'scripts', 'smoke', 'split-process', 'detached-turn-interactions.mjs')
 const HMR_SCRIPT = join(ROOT, 'scripts', 'smoke', 'split-process', 'client-hmr-signals.mjs')
 const UNKNOWN_WRITE_SCRIPT = join(ROOT, 'scripts', 'smoke', 'split-process', 'unknown-write-host-death.mjs')
+const WEB_HELPERS_SCRIPT = join(ROOT, 'scripts', 'smoke', 'split-process', 'web-helpers.mjs')
+const OFFICIAL_WEB_SCRIPT = join(ROOT, 'scripts', 'smoke', 'split-process', 'official-web-composition.mjs')
+const WEB_TOGGLE_SCRIPT = join(ROOT, 'scripts', 'smoke', 'split-process', 'web-runtime-toggle.mjs')
+const WEB_PREF_SCRIPT = join(ROOT, 'scripts', 'smoke', 'split-process', 'web-startup-preference.mjs')
+const WEB_PRODUCT_SCRIPT = join(ROOT, 'scripts', 'smoke', 'split-process', 'web-product.mjs')
 const PACKAGE_NAME = '@xmoon76/dsh-pi-tui'
 const DSH_AGENT = '@deepseek-ai/dsh-agent'
 const TARGET_PIN = npmDshVersion()
@@ -870,6 +875,11 @@ test('an unknown error code is never reported, and never changes the category', 
     ['detached-turn-interactions', readFileSync(DETACHED_SCRIPT, 'utf8')],
     ['client-hmr-signals', readFileSync(HMR_SCRIPT, 'utf8')],
     ['unknown-write-host-death', readFileSync(UNKNOWN_WRITE_SCRIPT, 'utf8')],
+    ['web-helpers', readFileSync(WEB_HELPERS_SCRIPT, 'utf8')],
+    ['official-web-composition', readFileSync(OFFICIAL_WEB_SCRIPT, 'utf8')],
+    ['web-runtime-toggle', readFileSync(WEB_TOGGLE_SCRIPT, 'utf8')],
+    ['web-startup-preference', readFileSync(WEB_PREF_SCRIPT, 'utf8')],
+    ['web-product', readFileSync(WEB_PRODUCT_SCRIPT, 'utf8')],
   ]) {
     // A waiter failure site: fail('<category>', '<code>') or, where the read must
     // happen first, settleOrFail('<category>', '<code>').
@@ -1043,6 +1053,7 @@ test('the locator trusts only the lane sources and fails closed otherwise', () =
     'entry-admission.mjs',
     'host-runtime-disabled.mjs',
     'non-destructive-client-lifecycle.mjs',
+    'official-web-composition.mjs',
     'pty-session-write-recovery.mjs',
     'runtime-artifact-recovery.mjs',
     'shared-session-interactions.mjs',
@@ -1052,6 +1063,10 @@ test('the locator trusts only the lane sources and fails closed otherwise', () =
     'split-smoke-processes.mjs',
     'split-smoke-profile.mjs',
     'unknown-write-host-death.mjs',
+    'web-helpers.mjs',
+    'web-product.mjs',
+    'web-runtime-toggle.mjs',
+    'web-startup-preference.mjs',
   ])
   // The default trust set is data, not a Set a caller can widen.
   assert.ok(Object.isFrozen(LANE_SOURCE_FILES), 'the exported list must be frozen')
@@ -1554,6 +1569,11 @@ test('no bounded wait in either lane or its extracted support throws a bare Erro
     ['detached-turn-interactions', DETACHED_SCRIPT, 0],
     ['client-hmr-signals', HMR_SCRIPT, 0],
     ['unknown-write-host-death', UNKNOWN_WRITE_SCRIPT, 0],
+    ['web-helpers', WEB_HELPERS_SCRIPT, 0],
+    ['official-web-composition', OFFICIAL_WEB_SCRIPT, 0],
+    ['web-runtime-toggle', WEB_TOGGLE_SCRIPT, 0],
+    ['web-startup-preference', WEB_PREF_SCRIPT, 0],
+    ['web-product', WEB_PRODUCT_SCRIPT, 0],
   ]
   for (const [name, file, minimum] of sources) {
     const source = readFileSync(file, 'utf8')

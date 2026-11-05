@@ -301,8 +301,8 @@ actual candidate tarball and record the package SHA, DSH version, command, and
 PASS/FAIL (or `NOT_RUN`).
 
 The lane has one command entry with a strict selector. The DEFAULT form (no
-selector) is still the complete qualification: every historical scenario plus
-its real T60/Web/Browser results:
+selector) is the complete qualification: it runs every registered case in the
+registry order and emits T60 only from the actual successful case results:
 
 ```sh
 pnpm smoke:split-process -- <candidate.tgz>               # complete lane
@@ -323,10 +323,22 @@ accepts at most one candidate and exactly one `--case` or `--suite` (never
 both, never repeated); `--list` takes neither. Unknown options, a missing or
 repeated selector, an extra positional, and a required Browser qualification
 flag (`SPLIT_PROCESS_REQUIRE_WEB_BROWSER` / `SPLIT_PROCESS_REQUIRE_WEB_PRODUCT`)
-combined with a selected non-Browser case all fail closed as
+combined with any selection other than `--suite web` all fail closed as
 `INPUT_UNQUALIFIED` / `INPUT_SMOKE_SELECTION_INVALID` before any scene exists.
 The full-only whole-lane mutation control (`SPLIT_PROCESS_SMOKE_MUTATION`) is
 refused in selector modes instead of being silently applied.
+
+A selected Web case owns its own Browser requirement: `web.official-composition`
+and `web.runtime-toggle` require the real pinned Playwright Chromium, and
+`web.product-browser-tui` requires the complete Browser×TUI Product subset;
+`web.startup-preference` has no Browser requirement. A missing Playwright
+install is a failure/NOT_RUN, never `SPLIT_PROCESS_SELECTED_PASS`. The
+`--suite web` form may carry both Browser require flags; a Full run without
+those flags keeps the PA/PB Host/HTTP/TTY checks mandatory while their Browser
+case may be `NOT_RUN`, and the Product case may be `NOT_RUN`. Full with the
+require flags demands real Chromium PA/PB PASS and the Product Browser subset
+PASS. WC-12 stays `DEFERRED_WITH_OWNER`; a PASS of the Browser/TUI subset does
+not claim the deferred real Tern GUI half.
 
 The complete Split lane and the Upgrade lane install packaged payloads and
 drive real Host/Client processes over a PTY, so they share the same input rule.

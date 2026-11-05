@@ -30,7 +30,7 @@ const HOST_RUNTIME_OWNER_AUDIT = /expected exactly one active piTuiHostRuntime o
  * case calls it exactly once, AFTER the Host spawned and BEFORE it waits for a
  * record, so the shared selected/full failure path can prove its cleanup.
  */
-export async function runHostRuntimeDisabled({ EntryProcess, entries, base, workDir, dshHome, profilePackage, failpoint }) {
+export async function runHostRuntimeDisabled({ EntryProcess, entries, base, workDir, dshHome, profilePackage, trace, failpoint }) {
   const patchPath = join(workDir, 'host-runtime-disabled.patch.yml')
   writeFileSync(patchPath, '- id: split-host-pi-tui-runtime\n  disabled: true\n')
   const runRoot = join(dshHome, 'run', 'dsh-pi-tui')
@@ -53,12 +53,18 @@ export async function runHostRuntimeDisabled({ EntryProcess, entries, base, work
     assert(HOST_RUNTIME_OWNER_AUDIT.test(String(failure.error)),
       `T26 Host Runtime row disabled: unexpected error ${String(failure.error)}`)
     assert(!hasPublishedIdentity(), 'T26 Host Runtime row disabled published a Host identity')
-    return {
+    const result = {
       exitCode: exit.code,
       readyEmitted: false,
       identityPublished: false,
       error: String(failure.error),
     }
+    trace('t26-runtime-row-disabled', {
+      exit: result.exitCode,
+      readyEmitted: false,
+      error: result.error.slice(0, 160),
+    })
+    return result
   } finally {
     rmSync(patchPath, { force: true })
   }
