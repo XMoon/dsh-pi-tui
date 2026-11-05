@@ -6356,6 +6356,1154 @@ async function main() {
         })
       }
 
+      // M5D-01 (M5-D): INDEPENDENT Client lifecycle on ONE real Host with TWO
+      // real Surface Clients. Every D scene starts its OWN isolated Host and
+      // two `script(1)` PTYs (distinct business PIDs, wrappers and PTYs) and
+      // proves the same invariant from a different reachable gesture: A leaves
+      // (exit / SIGKILL / SIGHUP / transport rollover / same-PID HMR /
+      // navigation). The cross-build `/reload-client` sibling is the upgrade
+      // lane's U08, not a D scene. In every D scene B's own Context, root
+      // fiber, transport generation, surface revision, Session X and Host
+      // identity stay unchanged, and the Host's ORIGINAL held Turn survives
+      // A's gesture.
+      // The fixture is the ONLY authority for the held Turn and the Question,
+      // so a timer, a replayed write or a cached transcript cannot produce
+      // these facts.
+      //
+      //   D-01  A `/exit`; B keeps the original running X and writes after it
+      //         completes.
+      //   D-02  A SIGKILL (kernel path, NO graceful inventory); B keeps X; a
+      //         NEW A' cold-attaches without replaying the accepted prompt.
+      //   D-03  A's physical mux drop rolls the official generation over; B is
+      //         untouched and the original Turn still completes. This scene
+      //         does NOT claim the T66 lost-ACK taxonomy: it has no in-flight
+      //         ACK-loss input.
+      //   D-04  A same-PID surface HMR: the old revision is retired before the
+      //         new one is ready and B's own surface never changes.
+      //   D-05  A HMR while B holds the SAME pending Host Question: A's NEW
+      //         revision repaints the pending frame, B settles the same callId
+      //         exactly once and A's modal is withdrawn by the settlement.
+      //   D-06  Host SIGKILL disconnects BOTH Clients; a new C cold-discovers
+      //         the NEXT Host and neither old Client treats it as a
+      //         continuation.
+      //   D-07  A SIGHUP (process failure, never the graceful inventory); B
+      //         keeps the running original X.
+      //   D-08  N-composite: A navigates X -> Y through the real `/new` while
+      //         X's original Turn is held, then exits from Y; B keeps X and the
+      //         Host completes the ORIGINAL Turn.
+      /** The durable events of one Host Session (empty before its log exists). */
+      const durableOf = sessionId => hostSessionEvents(dshHome, sessionId) ?? []
+      /** The plain text of one durable/inbox message (bounded, never a dump). */
+      const textOf = message => (message?.content ?? [])
+        .map(part => (part?.type === 'text' && typeof part.text === 'string' ? part.text : ''))
+        .join('')
+      /** Type a prompt through the PAINTED composer, then submit it. */
+      const submitPrompt = async (client, text) => {
+        client.send(text)
+        await client.waitForComposerDraft(text)
+        client.send('\r')
+      }
+      /** Wait for the Nth `turn/end` at or after one durable boundary. */
+      const waitForTurnEnds = async (sessionId, afterIndex, count, label) => {
+        await waitForCondition(
+          () => durableOf(sessionId).slice(afterIndex).filter(event => event.type === 'turn/end').length >= count,
+          label,
+          120_000,
+        )
+        return durableOf(sessionId).slice(afterIndex).filter(event => event.type === 'turn/end')
+      }
+      /**
+       * The B-side non-interference witness of ONE operation. From the record
+       * boundary taken BEFORE A's gesture, B's own status tuple may not change
+       * at all: the Host status projection dedupes an identical
+       * (transport, generation, session, revision, fiber) key, so "no NEW
+       * record" is the correct fact for "B did not change". B's current-PTY
+       * readback and B's later Host-accepted write are the independent
+       * after-liveness proof; no heartbeat is invented here.
+       */
+      const assertSecondClientKept = (client, before, fromIndex, label) => {
+        assert(before !== undefined, `${label}: Client B has no status boundary`)
+        // Read the complete record tail first: the 25ms poller must not decide
+        // this witness from a stale snapshot. The scene ALSO re-runs this scan
+        // against the SAME boundary after B's own Host-accepted write, so a
+        // record emitted late in A's operation window is still covered.
+        client.readRecords()
+        for (const record of client.records.slice(fromIndex).filter(entry => entry.m4b2s === 'surface-status')) {
+          assert(record.pid === before.pid, `${label}: Client B PID changed`)
+          assert(record.rootFiberUid === before.rootFiberUid, `${label}: Client B root fiber changed`)
+          assert(record.generationId === before.generationId, `${label}: Client B transport generation changed`)
+          assert(record.surfaceRevision === before.surfaceRevision, `${label}: Client B surface revision changed`)
+          assert(record.surfaceFiberUid === before.surfaceFiberUid, `${label}: Client B runner fiber changed`)
+          assert(record.surfaceMounted === true, `${label}: Client B lost its mounted surface`)
+          assert(record.transport === 'connected', `${label}: Client B transport became ${String(record.transport)}`)
+          assert(record.sessionOpen === true, `${label}: Client B lost its open Session`)
+          assert(record.openSessionId === before.openSessionId, `${label}: Client B Session changed`)
+          assert(record.host?.instanceId === before.host?.instanceId, `${label}: Client B Host instance changed`)
+        }
+        assert(client.records.slice(fromIndex).every(record => record.m4b2s !== 'client-closed'),
+          `${label}: Client B emitted a Client owner release`)
+        assert(alive(before.pid), `${label}: Client B business process is not alive`)
+      }
+      /** The graceful `/exit` inventory: code 0 and every owned Client row 0. */
+      const exitClientWithInventory = async (client, label) => {
+        client.send('/exit\r')
+        const exit = await client.waitForExit(60_000)
+        assert(exit.code === 0 && exit.signal === null, `${label} exit was ${JSON.stringify(exit)}`)
+        const closed = await client.waitFor(record => record.m4b2s === 'client-closed', `${label} owner inventory`, 30_000)
+        assert(closed.pid === client.records.find(record => record.m4a0 === 'ready')?.pid,
+          `${label} owner inventory came from another process`)
+        assert(closed.sessionOpen === false, `${label} still reported an open Session`)
+        assert(closed.surfaceMounted === false, `${label} still reported a mounted surface`)
+        for (const owner of ['typert', 'connection', 'remote', 'fileUpload', 'sessions', 'jobs']) {
+          assert(closed.owners?.[owner] === 0, `${label} left ${owner} owner alive`)
+        }
+        await client.dispose()
+        return { exit, closed }
+      }
+      /**
+       * Stop one D scene Host through its OWN owner path and assert the clean
+       * shutdown exit. The older `stopC1Host` is a swallowing backstop for the
+       * T/M5N cases; the plan's per-scene order ends with a clean Host stop, so
+       * the M5-D scenes must not hide a failed owner shutdown.
+       */
+      const stopDHost = async (host, label) => {
+        if (host.exited) {
+          assert(host.exitResult?.code === 0,
+            `${label} exited before its owner shutdown: ${JSON.stringify(host.exitResult)}`)
+          return
+        }
+        const exit = await host.shutdown()
+        assert(exit.code === 0, `${label} owner shutdown exited ${JSON.stringify(exit)}`)
+      }
+
+      // ── D-01: A `/exit` while the ORIGINAL Turn runs, B keeps X ──────────
+      {
+        const releaseBarrier = join(workDir, 'm5d1-long-turn.release')
+        const { host, ready: hostReady, workRoot } = await startC1Host('long-turn', 'm5d1-exit', {
+          C1_HOLD_LONG_TURN: releaseBarrier,
+        })
+        const hostBefore = await hostIdentityFacts(host)
+        assert(hostBefore.hostPid === hostReady.pid, 'M5D-01 the Host ready record does not own the Host identity')
+        const { client: clientA, ready: aReady } = await startC1Client('M5D-01 A')
+        const sessionX = await openC1Session(clientA, 'm5d1-x-held', 'M5D-01 A')
+        const held = await waitForC1WorkEvent(workRoot,
+          event => event.kind === 'long-turn-held' && event.sessionId === sessionX, 'M5D-01 X Turn held', 120_000)
+        assert(held.agentStatus === 'running',
+          `M5D-01 the Host Agent was ${JSON.stringify(held.agentStatus)} while X was held`)
+        await waitForHostSessionEvent(dshHome, sessionX, event => event.type === 'turn/start', 'M5D-01 X turn/start', 120_000)
+        const { client: clientB, ready: bReady } = await startC1Client('M5D-01 B', {
+          SPLIT_PROCESS_CLIENT_SESSION: sessionX,
+        })
+        const bOnX = await waitForSurfaceStatus(clientB,
+          record => record.sessionOpen === true && record.openSessionId === sessionX
+            && record.transport === 'connected' && record.surfaceMounted === true,
+          'M5D-01 B retained Session X')
+        assertClientHostFacts(bOnX.host, hostBefore, 'M5D-01 B')
+        // Two REAL business PIDs over two distinct `script(1)` wrappers/PTYs.
+        assert(Number.isInteger(aReady.pid) && aReady.pid > 0 && aReady.pid !== hostBefore.hostPid,
+          'M5D-01 Client A published no live business PID distinct from the Host')
+        assert(Number.isInteger(bReady.pid) && bReady.pid > 0 && bReady.pid !== hostBefore.hostPid,
+          'M5D-01 Client B published no live business PID distinct from the Host')
+        assert(aReady.pid !== bReady.pid, 'M5D-01 the two Clients must be two different business PIDs')
+        assert(clientA.child.pid !== clientB.child.pid, 'M5D-01 the two Clients must use distinct script(1) wrappers')
+        await clientB.waitForScreen('long-turn started', 'M5D-01 B read the running X stream', 120_000)
+        const bBefore = lastSurfaceStatus(clientB)
+        const bBoundary = clientB.records.length
+        const durableBoundary = durableOf(sessionX).length
+        // A's REAL keyboard `/exit` through the painted editor while the Host
+        // Turn is held: the graceful path, so the full owner inventory exists.
+        const { exit: aExit, closed: aClosed } = await exitClientWithInventory(clientA, 'M5D-01 A')
+        assert(aClosed.pid === aReady.pid, 'M5D-01 the owner inventory did not come from Client A')
+        await waitGone(aReady.pid, 15_000)
+        assert(!alive(aReady.pid), 'M5D-01 Client A survived its exit')
+        assert(alive(bReady.pid) && alive(hostBefore.hostPid), 'M5D-01 A\'s exit killed the Host or Client B')
+        assertSecondClientKept(clientB, bBefore, bBoundary, 'M5D-01 after A exit')
+        assert(durableOf(sessionX).slice(durableBoundary).every(event => event.type !== 'turn/end'),
+          'M5D-01 A\'s exit settled or cancelled the running Host Turn')
+        assert(!existsSync(releaseBarrier), 'M5D-01 the hold barrier was released before the original Turn completed')
+        await assertHostIdentityKept(host, hostBefore, 'M5D-01 Host after A exit')
+        // Release the ONE hold: the ORIGINAL Turn completes and B reads it.
+        const releaseIndex = durableOf(sessionX).length
+        writeFileSync(releaseBarrier, 'release\n', { mode: 0o600 })
+        const ends = await waitForTurnEnds(sessionX, releaseIndex, 1, 'M5D-01 the original X Turn completed')
+        assert(ends[0]?.data?.reason?.kind === 'completed',
+          `M5D-01 the original X Turn settled as ${JSON.stringify(ends[0]?.data?.reason)}`)
+        await clientB.waitForScreen('long-turn answer 1', 'M5D-01 B read the original Turn settlement', 120_000)
+        assert(hostUserTexts(durableOf(sessionX)).filter(text => text === 'm5d1-x-held').length === 1,
+          'M5D-01 the accepted prompt was replayed or lost across A\'s exit')
+        // B's OWN Host-accepted write on the SAME Session after the lifecycle.
+        const writeIndex = durableOf(sessionX).length
+        await submitPrompt(clientB, 'm5d1-b-after-exit')
+        await waitForHostSessionEventAfter(dshHome, sessionX, writeIndex,
+          event => event.type === 'user/message' && textOf(event.data) === 'm5d1-b-after-exit',
+          'M5D-01 B committed after A exited', 120_000)
+        const bEnd = await waitForHostSessionEventAfter(dshHome, sessionX, writeIndex,
+          event => event.type === 'turn/end', 'M5D-01 B\'s own Turn settled', 120_000)
+        assert(bEnd.data?.reason?.kind === 'completed', 'M5D-01 B\'s own Turn did not complete normally')
+        await clientB.waitForScreen('long-turn answer 2', 'M5D-01 B read its own Turn settlement', 120_000)
+        assert(hostUserTexts(durableOf(sessionX)).filter(text => text === 'm5d1-b-after-exit').length === 1,
+          'M5D-01 B\'s own prompt committed more than once')
+        // Final scan of the WHOLE B status tail from the pre-gesture boundary:
+        // a record emitted late in A's operation window is still covered.
+        assertSecondClientKept(clientB, bBefore, bBoundary, 'M5D-01 at the end of the scene')
+        assert(durableOf(sessionX).every(event => !(event.type === 'turn/end' && event.data?.reason?.kind === 'aborted')),
+          'M5D-01 a Turn was aborted without an explicit user gesture')
+        await assertHostIdentityKept(host, hostBefore, 'M5D-01 Host after the original Turn')
+        await exitC1Client(clientB, 'M5D-01 B')
+        await stopDHost(host, 'M5D-01 Host')
+        trace('m5d-01', {
+          hostPid: hostBefore.hostPid,
+          clientAPid: aReady.pid,
+          clientBPid: bReady.pid,
+          wrapperPids: [clientA.child.pid, clientB.child.pid],
+          sessionX,
+          aExitCode: aExit.code,
+          aOwnersReleased: true,
+          originalTurnSettlement: 'completed',
+          bOwnReadback: true,
+          bOwnTurn: 'completed',
+        })
+      }
+
+      // ── D-02: A SIGKILL (kernel path), B keeps X, A' cold-attaches ────────
+      {
+        const releaseBarrier = join(workDir, 'm5d2-long-turn.release')
+        const { host, ready: hostReady, workRoot } = await startC1Host('long-turn', 'm5d2-hard-kill', {
+          C1_HOLD_LONG_TURN: releaseBarrier,
+        })
+        const hostBefore = await hostIdentityFacts(host)
+        assert(hostBefore.hostPid === hostReady.pid, 'M5D-02 the Host ready record does not own the Host identity')
+        const { client: clientA, ready: aReady } = await startC1Client('M5D-02 A')
+        const sessionX = await openC1Session(clientA, 'm5d2-x-held', 'M5D-02 A')
+        const held = await waitForC1WorkEvent(workRoot,
+          event => event.kind === 'long-turn-held' && event.sessionId === sessionX, 'M5D-02 X Turn held', 120_000)
+        assert(held.agentStatus === 'running',
+          `M5D-02 the Host Agent was ${JSON.stringify(held.agentStatus)} while X was held`)
+        await waitForHostSessionEvent(dshHome, sessionX, event => event.type === 'turn/start', 'M5D-02 X turn/start', 120_000)
+        const { client: clientB, ready: bReady } = await startC1Client('M5D-02 B', {
+          SPLIT_PROCESS_CLIENT_SESSION: sessionX,
+        })
+        const bOnX = await waitForSurfaceStatus(clientB,
+          record => record.sessionOpen === true && record.openSessionId === sessionX
+            && record.transport === 'connected' && record.surfaceMounted === true,
+          'M5D-02 B retained Session X')
+        assertClientHostFacts(bOnX.host, hostBefore, 'M5D-02 B')
+        assert(aReady.pid !== bReady.pid, 'M5D-02 the two Clients must be two different business PIDs')
+        assert(clientA.child.pid !== clientB.child.pid, 'M5D-02 the two Clients must use distinct script(1) wrappers')
+        await clientB.waitForScreen('long-turn started', 'M5D-02 B read the running X stream', 120_000)
+        const bBefore = lastSurfaceStatus(clientB)
+        const bBoundary = clientB.records.length
+        const durableBoundary = durableOf(sessionX).length
+        // A REAL SIGKILL to the BUSINESS PID (never the `script(1)` wrapper):
+        // the kernel terminates it, so no graceful disposer/inventory exists.
+        clientA.signalBusiness('SIGKILL')
+        await waitGone(aReady.pid, 15_000)
+        assert(!alive(aReady.pid), 'M5D-02 Client A survived SIGKILL')
+        await clientA.waitForExit(60_000)
+        clientA.readRecords()
+        assert(clientA.records.every(record => record.m4b2s !== 'client-closed'),
+          'M5D-02 a SIGKILL cannot produce the graceful Client owner inventory')
+        await clientA.dispose()
+        assert(alive(bReady.pid) && alive(hostBefore.hostPid), 'M5D-02 A\'s SIGKILL killed the Host or Client B')
+        assertSecondClientKept(clientB, bBefore, bBoundary, 'M5D-02 after A SIGKILL')
+        assert(durableOf(sessionX).slice(durableBoundary).every(event => event.type !== 'turn/end'),
+          'M5D-02 A\'s SIGKILL settled or cancelled the running Host Turn')
+        assert(!existsSync(releaseBarrier), 'M5D-02 the hold barrier was released before the original Turn completed')
+        await assertHostIdentityKept(host, hostBefore, 'M5D-02 Host after A SIGKILL')
+        // Release the ORIGINAL Turn; B must read the Host's own settlement.
+        const releaseIndex = durableOf(sessionX).length
+        writeFileSync(releaseBarrier, 'release\n', { mode: 0o600 })
+        const ends = await waitForTurnEnds(sessionX, releaseIndex, 1, 'M5D-02 the original X Turn completed')
+        assert(ends[0]?.data?.reason?.kind === 'completed',
+          `M5D-02 the original X Turn settled as ${JSON.stringify(ends[0]?.data?.reason)}`)
+        await clientB.waitForScreen('long-turn answer 1', 'M5D-02 B read the original Turn settlement', 120_000)
+        // A' is a NEW real PTY/PID that COLD-attaches the same Session and Host.
+        const { client: clientAPrime, ready: aPrimeReady } = await startC1Client('M5D-02 A-prime', {
+          SPLIT_PROCESS_CLIENT_SESSION: sessionX,
+        })
+        const aPrimeOnX = await waitForSurfaceStatus(clientAPrime,
+          record => record.sessionOpen === true && record.openSessionId === sessionX
+            && record.transport === 'connected' && record.surfaceMounted === true,
+          'M5D-02 A-prime cold-attached Session X')
+        assertClientHostFacts(aPrimeOnX.host, hostBefore, 'M5D-02 A-prime')
+        assert(Number.isInteger(aPrimeReady.pid) && aPrimeReady.pid > 0,
+          'M5D-02 A-prime published no live business PID')
+        assert(aPrimeReady.pid !== aReady.pid, 'M5D-02 the cold replacement reused the killed Client PID')
+        assert(aPrimeReady.pid !== bReady.pid, 'M5D-02 the cold replacement reused Client B\'s PID')
+        assert(clientAPrime.child.pid !== clientA.child.pid && clientAPrime.child.pid !== clientB.child.pid,
+          'M5D-02 the cold replacement reused another Client\'s script(1) wrapper')
+        await clientAPrime.waitForScreen('m5d2-x-held', 'M5D-02 A-prime cold history', 120_000)
+        await clientAPrime.waitForScreen('long-turn answer 1', 'M5D-02 A-prime read the settled Turn', 120_000)
+        assert(hostUserTexts(durableOf(sessionX)).filter(text => text === 'm5d2-x-held').length === 1,
+          'M5D-02 the cold attach replayed the accepted prompt')
+        // B's independent Host-accepted write after the cold attach.
+        const writeIndex = durableOf(sessionX).length
+        await submitPrompt(clientB, 'm5d2-b-after-kill')
+        await waitForHostSessionEventAfter(dshHome, sessionX, writeIndex,
+          event => event.type === 'user/message' && textOf(event.data) === 'm5d2-b-after-kill',
+          'M5D-02 B committed after A was killed', 120_000)
+        const bEnd = await waitForHostSessionEventAfter(dshHome, sessionX, writeIndex,
+          event => event.type === 'turn/end', 'M5D-02 B\'s own Turn settled', 120_000)
+        assert(bEnd.data?.reason?.kind === 'completed', 'M5D-02 B\'s own Turn did not complete normally')
+        await clientB.waitForScreen('long-turn answer 2', 'M5D-02 B read its own Turn settlement', 120_000)
+        assert(hostUserTexts(durableOf(sessionX)).filter(text => text === 'm5d2-b-after-kill').length === 1,
+          'M5D-02 B\'s own prompt committed more than once')
+        assert(hostUserTexts(durableOf(sessionX)).filter(text => text === 'm5d2-x-held').length === 1,
+          'M5D-02 the killed Client\'s accepted prompt was replayed')
+        assertSecondClientKept(clientB, bBefore, bBoundary, 'M5D-02 at the end of the scene')
+        await exitC1Client(clientAPrime, 'M5D-02 A-prime')
+        await exitC1Client(clientB, 'M5D-02 B')
+        await stopDHost(host, 'M5D-02 Host')
+        trace('m5d-02', {
+          hostPid: hostBefore.hostPid,
+          killedClientPid: aReady.pid,
+          clientBPid: bReady.pid,
+          coldClientPid: aPrimeReady.pid,
+          wrapperPids: [clientA.child.pid, clientAPrime.child.pid, clientB.child.pid],
+          sessionX,
+          killedPath: 'SIGKILL (kernel): no graceful inventory claimed',
+          originalTurnSettlement: 'completed',
+          promptCommitsAfterColdAttach: 1,
+          bOwnTurn: 'completed',
+        })
+      }
+
+      // ── D-03: only A's official transport generation rolls over ───────────
+      {
+        const releaseBarrier = join(workDir, 'm5d3-long-turn.release')
+        const { host, ready: hostReady, workRoot } = await startC1Host('long-turn', 'm5d3-rollover', {
+          C1_HOLD_LONG_TURN: releaseBarrier,
+        })
+        const hostBefore = await hostIdentityFacts(host)
+        assert(hostBefore.hostPid === hostReady.pid, 'M5D-03 the Host ready record does not own the Host identity')
+        const { client: clientA, ready: aReady } = await startC1Client('M5D-03 A')
+        const sessionX = await openC1Session(clientA, 'm5d3-x-held', 'M5D-03 A')
+        const held = await waitForC1WorkEvent(workRoot,
+          event => event.kind === 'long-turn-held' && event.sessionId === sessionX, 'M5D-03 X Turn held', 120_000)
+        assert(held.agentStatus === 'running',
+          `M5D-03 the Host Agent was ${JSON.stringify(held.agentStatus)} while X was held`)
+        await waitForHostSessionEvent(dshHome, sessionX, event => event.type === 'turn/start', 'M5D-03 X turn/start', 120_000)
+        const { client: clientB, ready: bReady } = await startC1Client('M5D-03 B', {
+          SPLIT_PROCESS_CLIENT_SESSION: sessionX,
+        })
+        const bOnX = await waitForSurfaceStatus(clientB,
+          record => record.sessionOpen === true && record.openSessionId === sessionX
+            && record.transport === 'connected' && record.surfaceMounted === true,
+          'M5D-03 B retained Session X')
+        assertClientHostFacts(bOnX.host, hostBefore, 'M5D-03 B')
+        assert(aReady.pid !== bReady.pid, 'M5D-03 the two Clients must be two different business PIDs')
+        assert(clientA.child.pid !== clientB.child.pid, 'M5D-03 the two Clients must use distinct script(1) wrappers')
+        await clientB.waitForScreen('long-turn started', 'M5D-03 B read the running X stream', 120_000)
+        const aBefore = lastSurfaceStatus(clientA)
+        assert(typeof aBefore?.generationId === 'number',
+          'M5D-03 Client A never observed an official transport generation')
+        const bBefore = lastSurfaceStatus(clientB)
+        const bBoundary = clientB.records.length
+        const durableBoundary = durableOf(sessionX).length
+        const aBoundary = clientA.records.length
+        // Qualification-only input: SIGUSR1 drops A's REAL physical mux socket.
+        // The PASS authority is NOT that trace: it is the official new
+        // Connection generation with the exact Session re-adopted below.
+        clientA.signalBusiness('SIGUSR1')
+        await clientA.waitFor(
+          record => clientA.records.indexOf(record) >= aBoundary
+            && record.m4b2s === 'qualification' && record.op === 'drop-websocket',
+          'M5D-03 the qualification mux drop was injected',
+          30_000,
+        )
+        // The official Node Connection loop leaves `connected` through its
+        // retry state and clears the generation; the literal `disconnected`
+        // label is the offline/network-unavailable branch and is not reachable
+        // on a local mux drop. Bind the generation truth: the old official
+        // generation is GONE before the replacement generation is accepted.
+        const dropped = await clientA.waitFor(
+          record => clientA.records.indexOf(record) >= aBoundary
+            && record.m4b2s === 'surface-status'
+            && record.transport !== 'connected'
+            && record.generationId === undefined,
+          'M5D-03 A observed the official lost generation',
+          60_000,
+        )
+        assert(dropped.surfaceRevision === aBefore.surfaceRevision,
+          'M5D-03 the transport loss replaced A\'s surface revision')
+        const rolled = await clientA.waitFor(
+          record => clientA.records.indexOf(record) >= aBoundary
+            && record.m4b2s === 'surface-status'
+            && typeof record.generationId === 'number'
+            && record.generationId !== aBefore.generationId
+            && record.transport === 'connected'
+            && record.sessionOpen === true
+            && record.openSessionId === sessionX
+            && record.surfaceMounted === true,
+          'M5D-03 A reconnected on a NEW official generation with X current',
+          120_000,
+        )
+        assertClientHostFacts(rolled.host, hostBefore, 'M5D-03 A after the rollover')
+        assert(rolled.pid === aBefore.pid && rolled.rootFiberUid === aBefore.rootFiberUid,
+          'M5D-03 the transport rollover replaced the Client process or root Context')
+        assert(rolled.surfaceRevision === aBefore.surfaceRevision,
+          'M5D-03 the transport rollover replaced A\'s surface revision')
+        assertSecondClientKept(clientB, bBefore, bBoundary, 'M5D-03 during A rollover')
+        assert(durableOf(sessionX).slice(durableBoundary).every(event => event.type !== 'turn/end'),
+          'M5D-03 A\'s rollover settled or cancelled the running Host Turn')
+        assert(!existsSync(releaseBarrier), 'M5D-03 the hold barrier was released during the rollover')
+        await assertHostIdentityKept(host, hostBefore, 'M5D-03 Host after A rollover')
+        // Release: A's CURRENT generation and B both read the ORIGINAL Turn.
+        const releaseIndex = durableOf(sessionX).length
+        writeFileSync(releaseBarrier, 'release\n', { mode: 0o600 })
+        const ends = await waitForTurnEnds(sessionX, releaseIndex, 1, 'M5D-03 the original X Turn completed')
+        assert(ends[0]?.data?.reason?.kind === 'completed',
+          `M5D-03 the original X Turn settled as ${JSON.stringify(ends[0]?.data?.reason)}`)
+        await clientA.waitForScreen('long-turn answer 1', 'M5D-03 A read the settlement on the new generation', 120_000)
+        await clientB.waitForScreen('long-turn answer 1', 'M5D-03 B read the original Turn settlement', 120_000)
+        const writeIndex = durableOf(sessionX).length
+        await submitPrompt(clientB, 'm5d3-b-after-rollover')
+        await waitForHostSessionEventAfter(dshHome, sessionX, writeIndex,
+          event => event.type === 'user/message' && textOf(event.data) === 'm5d3-b-after-rollover',
+          'M5D-03 B committed after A rolled over', 120_000)
+        const bEnd = await waitForHostSessionEventAfter(dshHome, sessionX, writeIndex,
+          event => event.type === 'turn/end', 'M5D-03 B\'s own Turn settled', 120_000)
+        assert(bEnd.data?.reason?.kind === 'completed', 'M5D-03 B\'s own Turn did not complete normally')
+        await clientB.waitForScreen('long-turn answer 2', 'M5D-03 B read its own Turn settlement', 120_000)
+        assert(hostUserTexts(durableOf(sessionX)).filter(text => text === 'm5d3-b-after-rollover').length === 1,
+          'M5D-03 B\'s own prompt committed more than once')
+        assert(hostUserTexts(durableOf(sessionX)).filter(text => text === 'm5d3-x-held').length === 1,
+          'M5D-03 A\'s accepted prompt was replayed by the rollover')
+        assertSecondClientKept(clientB, bBefore, bBoundary, 'M5D-03 at the end of the scene')
+        const { exit: aExit } = await exitClientWithInventory(clientA, 'M5D-03 A')
+        await exitC1Client(clientB, 'M5D-03 B')
+        await stopDHost(host, 'M5D-03 Host')
+        trace('m5d-03', {
+          hostPid: hostBefore.hostPid,
+          clientAPid: aReady.pid,
+          clientBPid: bReady.pid,
+          wrapperPids: [clientA.child.pid, clientB.child.pid],
+          sessionX,
+          generationBefore: aBefore.generationId,
+          generationAfter: rolled.generationId,
+          rolloverInjection: 'qualification SIGUSR1 (physical mux socket)',
+          lossObserved: dropped.transport,
+          lostGeneration: 'undefined (old official generation invalidated)',
+          officialReconnect: true,
+          bGeneration: bBefore.generationId,
+          originalTurnSettlement: 'completed',
+          aExitCode: aExit.code,
+          lostAckTaxonomyClaimed: false,
+        })
+      }
+
+      // ── D-04: A same-PID HMR, B's whole lifecycle untouched ───────────────
+      {
+        const releaseBarrier = join(workDir, 'm5d4-long-turn.release')
+        const { host, ready: hostReady, workRoot } = await startC1Host('long-turn', 'm5d4-hmr', {
+          C1_HOLD_LONG_TURN: releaseBarrier,
+        })
+        const hostBefore = await hostIdentityFacts(host)
+        assert(hostBefore.hostPid === hostReady.pid, 'M5D-04 the Host ready record does not own the Host identity')
+        const { client: clientA, ready: aReady } = await startC1Client('M5D-04 A', { SPLIT_PROCESS_CLIENT_HMR_PROBE: '1' })
+        const sessionX = await openC1Session(clientA, 'm5d4-x-held', 'M5D-04 A')
+        const held = await waitForC1WorkEvent(workRoot,
+          event => event.kind === 'long-turn-held' && event.sessionId === sessionX, 'M5D-04 X Turn held', 120_000)
+        assert(held.agentStatus === 'running',
+          `M5D-04 the Host Agent was ${JSON.stringify(held.agentStatus)} while X was held`)
+        await waitForHostSessionEvent(dshHome, sessionX, event => event.type === 'turn/start', 'M5D-04 X turn/start', 120_000)
+        const { client: clientB, ready: bReady } = await startC1Client('M5D-04 B', {
+          SPLIT_PROCESS_CLIENT_SESSION: sessionX,
+        })
+        const bOnX = await waitForSurfaceStatus(clientB,
+          record => record.sessionOpen === true && record.openSessionId === sessionX
+            && record.transport === 'connected' && record.surfaceMounted === true,
+          'M5D-04 B retained Session X')
+        assertClientHostFacts(bOnX.host, hostBefore, 'M5D-04 B')
+        assert(aReady.pid !== bReady.pid, 'M5D-04 the two Clients must be two different business PIDs')
+        assert(clientA.child.pid !== clientB.child.pid, 'M5D-04 the two Clients must use distinct script(1) wrappers')
+        await clientB.waitForScreen('long-turn started', 'M5D-04 B read the running X stream', 120_000)
+        const aBefore = lastSurfaceStatus(clientA)
+        assert(aBefore !== undefined && aBefore.surfaceMounted === true && aBefore.sessionOpen === true,
+          'M5D-04 Client A has no mounted status boundary')
+        const bBefore = lastSurfaceStatus(clientB)
+        const bBoundary = clientB.records.length
+        const durableBoundary = durableOf(sessionX).length
+        const hmrFrom = clientA.records.length
+        // Qualification-only same-PID HMR: SIGUSR2 retires and remounts the
+        // surface on A's SAME PID/root/transport while B stays live.
+        clientA.signalBusiness('SIGUSR2')
+        const start = await clientA.waitFor(
+          record => clientA.records.indexOf(record) >= hmrFrom
+            && record.m4b2s === 'qualification' && record.op === 'hmr-revision-start',
+          'M5D-04 HMR start',
+          60_000,
+        )
+        assert(Number.isInteger(start.revision), 'M5D-04 the HMR start named no replacement revision')
+        await waitForSurfaceStatus(clientA,
+          record => record.surfaceRevision === aBefore.surfaceRevision && record.surfaceMounted === false,
+          'M5D-04 the old surface retired first',
+          60_000,
+        )
+        await clientA.waitFor(
+          record => clientA.records.indexOf(record) >= hmrFrom
+            && record.m4b2s === 'qualification' && record.op === 'hmr-revision-retired',
+          'M5D-04 the old revision retired',
+          120_000,
+        )
+        const ready = await clientA.waitFor(
+          record => clientA.records.indexOf(record) >= hmrFrom
+            && record.m4b2s === 'qualification' && record.op === 'hmr-revision-ready',
+          'M5D-04 the replacement revision is ready',
+          180_000,
+        )
+        assert(ready.revision === start.revision, 'M5D-04 the ready record named another revision')
+        const after = await waitForSurfaceStatus(clientA,
+          record => record.surfaceRevision === ready.revision && record.surfaceMounted === true,
+          'M5D-04 the replacement surface is mounted',
+          120_000,
+        )
+        assert(after.pid === aBefore.pid, 'M5D-04 HMR changed the Client PID')
+        assert(after.rootFiberUid === aBefore.rootFiberUid, 'M5D-04 HMR changed the Client root Context fiber')
+        assert(after.generationId === aBefore.generationId, 'M5D-04 HMR changed the transport generation')
+        assert(after.surfaceRevision !== aBefore.surfaceRevision, 'M5D-04 the surface revision did not change')
+        assert(after.surfaceFiberUid !== aBefore.surfaceFiberUid, 'M5D-04 the runner fiber did not change')
+        assert(after.sessionOpen === true && after.openSessionId === sessionX,
+          'M5D-04 the new revision did not re-adopt the exact Session')
+        assert(after.owners?.typert === 1 && after.owners?.connection === 1 && after.owners?.remote === 1
+          && after.owners?.fileUpload === 1 && after.owners?.sessions === 1 && after.owners?.jobs === 1,
+        `M5D-04 duplicate/absent Domain owners after HMR: ${JSON.stringify(after.owners)}`)
+        // The retired-before-mounted ORDER is read from the record stream: the
+        // old revision must be unmounted before ANY new-revision mount, so the
+        // two revisions never own A's PTY at the same time.
+        const records = clientA.records
+        const indexOfOp = op => records.findIndex(record => record.m4b2s === 'qualification' && record.op === op)
+        const startIndex = indexOfOp('hmr-revision-start')
+        const retiredIndex = indexOfOp('hmr-revision-retired')
+        const readyIndex = indexOfOp('hmr-revision-ready')
+        const oldUnmountedIndex = records.findIndex(record => record.m4b2s === 'surface-status'
+          && record.surfaceRevision === aBefore.surfaceRevision && record.surfaceMounted === false)
+        const newMountedIndex = records.findIndex(record => record.m4b2s === 'surface-status'
+          && record.surfaceRevision === ready.revision && record.surfaceMounted === true)
+        assert(startIndex >= 0 && startIndex < oldUnmountedIndex,
+          'M5D-04 the replacement started before the old surface was unmounted')
+        assert(oldUnmountedIndex < newMountedIndex, 'M5D-04 the replacement surface mounted over a live old surface')
+        assert(oldUnmountedIndex < retiredIndex && retiredIndex < readyIndex,
+          'M5D-04 the old revision was not retired before the replacement became ready')
+        assertSecondClientKept(clientB, bBefore, bBoundary, 'M5D-04 during A HMR')
+        assert(durableOf(sessionX).slice(durableBoundary).every(event => event.type !== 'turn/end'),
+          'M5D-04 A\'s HMR settled or cancelled the running Host Turn')
+        assert(!existsSync(releaseBarrier), 'M5D-04 the hold barrier was released during HMR')
+        await assertHostIdentityKept(host, hostBefore, 'M5D-04 Host after A HMR')
+        const releaseIndex = durableOf(sessionX).length
+        writeFileSync(releaseBarrier, 'release\n', { mode: 0o600 })
+        const ends = await waitForTurnEnds(sessionX, releaseIndex, 1, 'M5D-04 the original X Turn completed')
+        assert(ends[0]?.data?.reason?.kind === 'completed',
+          `M5D-04 the original X Turn settled as ${JSON.stringify(ends[0]?.data?.reason)}`)
+        await clientA.waitForScreen('long-turn answer 1', 'M5D-04 the replacement revision read the settlement', 120_000)
+        await clientB.waitForScreen('long-turn answer 1', 'M5D-04 B read the original Turn settlement', 120_000)
+        const writeIndex = durableOf(sessionX).length
+        await submitPrompt(clientB, 'm5d4-b-after-hmr')
+        await waitForHostSessionEventAfter(dshHome, sessionX, writeIndex,
+          event => event.type === 'user/message' && textOf(event.data) === 'm5d4-b-after-hmr',
+          'M5D-04 B committed after A HMR', 120_000)
+        const bEnd = await waitForHostSessionEventAfter(dshHome, sessionX, writeIndex,
+          event => event.type === 'turn/end', 'M5D-04 B\'s own Turn settled', 120_000)
+        assert(bEnd.data?.reason?.kind === 'completed', 'M5D-04 B\'s own Turn did not complete normally')
+        await clientB.waitForScreen('long-turn answer 2', 'M5D-04 B read its own Turn settlement', 120_000)
+        assert(hostUserTexts(durableOf(sessionX)).filter(text => text === 'm5d4-b-after-hmr').length === 1,
+          'M5D-04 B\'s own prompt committed more than once')
+        assert(hostUserTexts(durableOf(sessionX)).filter(text => text === 'm5d4-x-held').length === 1,
+          'M5D-04 A\'s accepted prompt was replayed by HMR')
+        assertSecondClientKept(clientB, bBefore, bBoundary, 'M5D-04 at the end of the scene')
+        const { exit: aExit } = await exitClientWithInventory(clientA, 'M5D-04 A')
+        await exitC1Client(clientB, 'M5D-04 B')
+        await stopDHost(host, 'M5D-04 Host')
+        trace('m5d-04', {
+          hostPid: hostBefore.hostPid,
+          clientAPid: aBefore.pid,
+          clientBPid: bReady.pid,
+          wrapperPids: [clientA.child.pid, clientB.child.pid],
+          sessionX,
+          revisionBefore: aBefore.surfaceRevision,
+          revisionAfter: after.surfaceRevision,
+          samePid: true,
+          sameRootFiber: true,
+          sameGeneration: true,
+          retireBeforeReady: true,
+          bIdentityKept: true,
+          originalTurnSettlement: 'completed',
+          aExitCode: aExit.code,
+        })
+      }
+
+      // ── D-05: A HMR while B holds the SAME pending Host Question ──────────
+      {
+        const { host, ready: hostReady, workRoot } = await startC1Host('question', 'm5d5-interaction')
+        const hostBefore = await hostIdentityFacts(host)
+        assert(hostBefore.hostPid === hostReady.pid, 'M5D-05 the Host ready record does not own the Host identity')
+        const { client: clientA, ready: aReady } = await startC1Client('M5D-05 A', {
+          SPLIT_PROCESS_CLIENT_HMR_PROBE: '1',
+        })
+        // A creates the EMPTY Session X with the real product `/new`; B joins
+        // the SAME X before the Host is asked, so both modals are the ONE
+        // official delivery to two independent root interaction owners.
+        const aBoundary = clientA.records.length
+        clientA.send('/new\r')
+        const aOpen = await clientA.waitFor(
+          record => clientA.records.indexOf(record) >= aBoundary
+            && record.m4b2s === 'surface-status'
+            && record.sessionOpen === true
+            && typeof record.openSessionId === 'string'
+            && record.openSessionId !== ''
+            && record.transport === 'connected'
+            && record.surfaceMounted === true,
+          'M5D-05 A opened an empty Session X',
+          120_000,
+        )
+        const sessionX = aOpen.openSessionId
+        const { client: clientB, ready: bReady } = await startC1Client('M5D-05 B', {
+          SPLIT_PROCESS_CLIENT_SESSION: sessionX,
+        })
+        const bOnX = await waitForSurfaceStatus(clientB,
+          record => record.sessionOpen === true && record.openSessionId === sessionX
+            && record.transport === 'connected' && record.surfaceMounted === true,
+          'M5D-05 B retained Session X')
+        assertClientHostFacts(aOpen.host, hostBefore, 'M5D-05 A')
+        assertClientHostFacts(bOnX.host, hostBefore, 'M5D-05 B')
+        assert(aReady.pid !== bReady.pid, 'M5D-05 the two Clients must be two different business PIDs')
+        assert(clientA.child.pid !== clientB.child.pid, 'M5D-05 the two Clients must use distinct script(1) wrappers')
+        assertInteractionGate(clientA, 'M5D-05 A')
+        assertInteractionGate(clientB, 'M5D-05 B')
+        assert(!durableOf(sessionX).some(event => event.type === 'turn/start' || event.type === 'tool/call'
+          || event.type === 'approval/asked'),
+        'M5D-05 Host Session X carried Host activity before the trigger')
+        const triggerIndex = durableOf(sessionX).length
+        clientA.send('m5d5-interaction-trigger\r')
+        const call = await waitForHostSessionEventAfter(dshHome, sessionX, triggerIndex,
+          event => event.type === 'tool/call' && event.data?.name === 'ask_user_question',
+          'M5D-05 the Host question tool/call', 120_000)
+        assert(typeof call.data.callId === 'string' && call.data.callId !== '',
+          'M5D-05 the question tool/call carries no callId')
+        const callId = call.data.callId
+        await waitForC1WorkEvent(workRoot,
+          event => event.kind === 'question-request' && event.sessionId === sessionX,
+          'M5D-05 the Host question request', 120_000)
+        await clientA.waitForScreen('[1] Proceed', 'M5D-05 A painted the question modal', 120_000)
+        await clientB.waitForScreen('[1] Proceed', 'M5D-05 B painted the question modal', 120_000)
+        assert((await clientA.viewport()).join('\n').includes('Continue the C1 test?'),
+          'M5D-05 Client A painted no question text')
+        assert((await clientB.viewport()).join('\n').includes('Continue the C1 test?'),
+          'M5D-05 Client B painted no question text')
+        const aBefore = lastSurfaceStatus(clientA)
+        assert(aBefore !== undefined && aBefore.surfaceMounted === true, 'M5D-05 Client A has no mounted status boundary')
+        const bBefore = lastSurfaceStatus(clientB)
+        const bBoundary = clientB.records.length
+        const durableCheckpoint = durableOf(sessionX).length
+        const hmrFrom = clientA.records.length
+        // A retires and remounts its surface while the SAME Host Question is
+        // pending. B is never touched and never pre-answers.
+        clientA.signalBusiness('SIGUSR2')
+        const start = await clientA.waitFor(
+          record => clientA.records.indexOf(record) >= hmrFrom
+            && record.m4b2s === 'qualification' && record.op === 'hmr-revision-start',
+          'M5D-05 HMR start',
+          60_000,
+        )
+        await waitForSurfaceStatus(clientA,
+          record => record.surfaceRevision === aBefore.surfaceRevision && record.surfaceMounted === false,
+          'M5D-05 the old surface retired first',
+          60_000,
+        )
+        await clientA.waitFor(
+          record => clientA.records.indexOf(record) >= hmrFrom
+            && record.m4b2s === 'qualification' && record.op === 'hmr-revision-retired',
+          'M5D-05 the old revision retired',
+          120_000,
+        )
+        // Synchronize on the replacement's own mount stage, THEN wipe this
+        // observer's buffer. The old revision is disposed already and the new
+        // runner fiber is not mounted yet (ui-mounted precedes application
+        // ready + mountRunner), so every pending-modal pixel seen after this
+        // point is painted by the NEW revision — an old frame cannot satisfy
+        // the wait below.
+        await clientA.waitFor(
+          record => clientA.records.indexOf(record) >= hmrFrom
+            && record.m4b2s === 'qualification' && record.op === 'startup-stage'
+            && record.stage === 'ui-mounted' && record.revision === start.revision,
+          'M5D-05 the replacement revision started mounting',
+          120_000,
+        )
+        await new Promise(resolveFlush => clientA.term.write('', resolveFlush))
+        clientA.term.reset()
+        await new Promise(resolveFlush => clientA.term.write('', resolveFlush))
+        assert(!(await clientA.viewport()).join('\n').includes('[1] Proceed'),
+          'M5D-05 the retired revision frame survived the observer reset')
+        const ready = await clientA.waitFor(
+          record => clientA.records.indexOf(record) >= hmrFrom
+            && record.m4b2s === 'qualification' && record.op === 'hmr-revision-ready',
+          'M5D-05 the replacement revision is ready',
+          180_000,
+        )
+        assert(ready.revision === start.revision, 'M5D-05 the ready record named another revision')
+        const after = await waitForSurfaceStatus(clientA,
+          record => record.surfaceRevision === ready.revision && record.surfaceMounted === true,
+          'M5D-05 the replacement surface is mounted',
+          120_000,
+        )
+        assert(after.pid === aBefore.pid && after.rootFiberUid === aBefore.rootFiberUid
+          && after.generationId === aBefore.generationId,
+        'M5D-05 the HMR changed A\'s PID, root Context or transport generation')
+        assert(after.sessionOpen === true && after.openSessionId === sessionX,
+          'M5D-05 the replacement revision did not re-adopt Session X')
+        // The NEW revision must PAINT the pending modal before B answers.
+        await clientA.waitForScreen('[1] Proceed', 'M5D-05 the NEW revision repainted the pending Question', 180_000)
+        assert((await clientA.viewport()).join('\n').includes('Continue the C1 test?'),
+          'M5D-05 the new revision painted no question text')
+        await clientB.waitForScreen('[1] Proceed', 'M5D-05 B still paints the answerable modal', 60_000)
+        assert(!readC1WorkEvents(workRoot).some(event => event.kind === 'question-settled'),
+          'M5D-05 A\'s HMR settled the Host question')
+        assert(durableOf(sessionX).slice(durableCheckpoint).every(event => event.type !== 'tool/result'),
+          'M5D-05 the pending question was settled before B answered')
+        assertSecondClientKept(clientB, bBefore, bBoundary, 'M5D-05 during A HMR')
+        await assertHostIdentityKept(host, hostBefore, 'M5D-05 Host after A HMR')
+        // B answers the SAME Host delivery with the real keyboard flow.
+        const answerIndex = durableOf(sessionX).length
+        clientB.send('1')
+        await clientB.waitForScreen('Review your answer before submit', 'M5D-05 B question review', 30_000)
+        clientB.send('\r')
+        const settled = await waitForC1WorkEvent(workRoot,
+          event => event.kind === 'question-settled' && event.sessionId === sessionX,
+          'M5D-05 the Host question settled', 120_000)
+        assert(settled.answers?.[0]?.selected?.[0] === 'Proceed',
+          `M5D-05 the Host received the wrong answer: ${JSON.stringify(settled.answers)}`)
+        const result = await waitForHostSessionEventAfter(dshHome, sessionX, answerIndex,
+          event => event.type === 'tool/result' && String(event.data?.message?.toolCallId) === callId,
+          'M5D-05 the question tool result', 120_000)
+        assert(result.data?.message?.isError !== true, 'M5D-05 the answered question failed at the Host')
+        const questionEnd = await waitForHostSessionEventAfter(dshHome, sessionX, answerIndex,
+          event => event.type === 'turn/end', 'M5D-05 the question Turn ended', 120_000)
+        assert(questionEnd.data?.reason?.kind === 'completed',
+          `M5D-05 the question Turn settled as ${JSON.stringify(questionEnd.data?.reason)} instead of a normal completion`)
+        // The NEW revision withdraws the modal only after the official
+        // settlement; A never answered and never cancelled it.
+        await clientA.waitForScreenGone('[1] Proceed', 'M5D-05 A\'s new revision withdrew the settled modal', 120_000)
+        await clientB.waitForScreen('question answered', 'M5D-05 B read the Host settlement', 120_000)
+        const finalEvents = durableOf(sessionX)
+        assert(finalEvents.filter(event => event.type === 'tool/result'
+          && String(event.data?.message?.toolCallId) === callId).length === 1,
+        'M5D-05 the Host question produced more than one tool result')
+        const finalProofs = readC1WorkEvents(workRoot)
+        assert(finalProofs.filter(event => event.kind === 'question-request' && event.sessionId === sessionX).length === 1,
+          'M5D-05 the Host asked more than once')
+        assert(finalProofs.filter(event => event.kind === 'question-settled' && event.sessionId === sessionX).length === 1,
+          'M5D-05 the Host settled the question more than once')
+        assert(finalProofs.every(event => !(event.kind === 'question-failed' && event.sessionId === sessionX)),
+          'M5D-05 A\'s HMR cancelled the Host question instead of leaving it pending for B')
+        assert(finalEvents.every(event => !(event.type === 'turn/end' && event.data?.reason?.kind === 'aborted')),
+          'M5D-05 the question Turn was aborted instead of settling normally')
+        assertSecondClientKept(clientB, bBefore, bBoundary, 'M5D-05 at the end of the scene')
+        await assertHostIdentityKept(host, hostBefore, 'M5D-05 Host after the settlement')
+        await exitC1Client(clientA, 'M5D-05 A')
+        await exitC1Client(clientB, 'M5D-05 B')
+        await stopDHost(host, 'M5D-05 Host')
+        trace('m5d-05', {
+          hostPid: hostBefore.hostPid,
+          clientAPid: aReady.pid,
+          clientBPid: bReady.pid,
+          wrapperPids: [clientA.child.pid, clientB.child.pid],
+          sessionX,
+          callId,
+          dualModalPainted: true,
+          aRevisionBefore: aBefore.surfaceRevision,
+          aRevisionAfter: after.surfaceRevision,
+          newRevisionRepaintedPending: true,
+          bAnsweredSameCallId: 'Proceed',
+          hostToolResults: 1,
+          hostQuestionSettlements: 1,
+          aModalWithdrawn: true,
+          turnSettlement: 'completed',
+        })
+      }
+
+      // ── D-06: Host SIGKILL disconnects BOTH Clients, C is a NEW Host ──────
+      {
+        const releaseBarrier = join(workDir, 'm5d6-long-turn.release')
+        const { host, ready: hostReady, workRoot } = await startC1Host('long-turn', 'm5d6-host-kill', {
+          C1_HOLD_LONG_TURN: releaseBarrier,
+        })
+        const hostBefore = await hostIdentityFacts(host)
+        assert(hostBefore.hostPid === hostReady.pid, 'M5D-06 the Host ready record does not own the Host identity')
+        const { client: clientA, ready: aReady } = await startC1Client('M5D-06 A')
+        const sessionX = await openC1Session(clientA, 'm5d6-x-held', 'M5D-06 A')
+        const held = await waitForC1WorkEvent(workRoot,
+          event => event.kind === 'long-turn-held' && event.sessionId === sessionX, 'M5D-06 X Turn held', 120_000)
+        assert(held.agentStatus === 'running',
+          `M5D-06 the Host Agent was ${JSON.stringify(held.agentStatus)} while X was held`)
+        await waitForHostSessionEvent(dshHome, sessionX, event => event.type === 'turn/start', 'M5D-06 X turn/start', 120_000)
+        const { client: clientB, ready: bReady } = await startC1Client('M5D-06 B', {
+          SPLIT_PROCESS_CLIENT_SESSION: sessionX,
+        })
+        const bOnX = await waitForSurfaceStatus(clientB,
+          record => record.sessionOpen === true && record.openSessionId === sessionX
+            && record.transport === 'connected' && record.surfaceMounted === true,
+          'M5D-06 B retained Session X')
+        assertClientHostFacts(bOnX.host, hostBefore, 'M5D-06 B')
+        assert(aReady.pid !== bReady.pid, 'M5D-06 the two Clients must be two different business PIDs')
+        assert(clientA.child.pid !== clientB.child.pid, 'M5D-06 the two Clients must use distinct script(1) wrappers')
+        await clientB.waitForScreen('long-turn started', 'M5D-06 B read the running X stream', 120_000)
+        const aBoundary = clientA.records.length
+        const bBoundary = clientB.records.length
+        const durableBoundary = durableOf(sessionX).length
+        const hostPid = hostBefore.hostPid
+        const liveHostPids = () => findIsolatedProcesses(dshHome).filter(pid => {
+          try {
+            return readFileSync(`/proc/${String(pid)}/cmdline`, 'utf8').includes('local-host.mjs')
+          } catch {
+            return false
+          }
+        })
+        // The COMMON failure: a REAL SIGKILL of the Host BUSINESS PID. This is
+        // not a graceful Host stop, so no cleanup record is expected.
+        process.kill(hostPid, 'SIGKILL')
+        await waitGone(hostPid, 30_000)
+        assert(!alive(hostPid), 'M5D-06 the Host survived SIGKILL')
+        const aLost = await clientA.waitFor(
+          record => clientA.records.indexOf(record) >= aBoundary
+            && record.m4b2s === 'surface-status'
+            && record.transport !== 'connected'
+            && record.generationId === undefined,
+          'M5D-06 A observed the official lost generation',
+          60_000,
+        )
+        const bLost = await clientB.waitFor(
+          record => clientB.records.indexOf(record) >= bBoundary
+            && record.m4b2s === 'surface-status'
+            && record.transport !== 'connected'
+            && record.generationId === undefined,
+          'M5D-06 B observed the official lost generation',
+          60_000,
+        )
+        for (const [lost, label] of [[aLost, 'A'], [bLost, 'B']]) {
+          // The local Node Connection loop exits `connected` through its retry
+          // state and clears the generation; the literal `disconnected` label
+          // is the offline/network-unavailable branch and is not reachable
+          // here. The generation-undefined loss record is the authoritative
+          // "the old generation is gone" fact.
+          assert(lost.transport !== 'connected',
+            `M5D-06 Client ${label} still reported a connected transport after the Host kill`)
+          assert(lost.generationId === undefined,
+            `M5D-06 Client ${label} still reported a current generation after the Host kill`)
+          assert(lost.host?.instanceId === hostBefore.instanceId,
+            `M5D-06 Client ${label} dropped the dead Host identity before the replacement existed`)
+        }
+        assert(durableOf(sessionX).slice(durableBoundary).every(event => event.type !== 'turn/end'),
+          'M5D-06 the pending Turn was reported as settled after a Host SIGKILL')
+        assert(!hostAssistantHasText(durableOf(sessionX), 'long-turn answer'),
+          'M5D-06 an answer was fabricated for the Turn lost in the Host SIGKILL')
+        assert(!(await clientA.viewport()).join('\n').includes('long-turn answer'),
+          'M5D-06 Client A painted a fabricated answer for the lost Turn')
+        assert(!(await clientB.viewport()).join('\n').includes('long-turn answer'),
+          'M5D-06 Client B painted a fabricated answer for the lost Turn')
+        assert(!clientA.exited && !clientB.exited,
+          'M5D-06 a Client treated the ordinary Host carrier loss as a fatal exit')
+        // C is a genuinely NEW startup: its own cold discovery creates the
+        // next Host instance, and the cold resume reads the durable history.
+        const { client: clientC, ready: cReady } = await startC1Client('M5D-06 C', {
+          SPLIT_PROCESS_CLIENT_SESSION: sessionX,
+        })
+        const newHost = cReady.host
+        assert(newHost.hostPid !== hostBefore.hostPid, 'M5D-06 stale discovery reused the killed Host PID')
+        assert(newHost.instanceId !== hostBefore.instanceId, 'M5D-06 stale discovery reused the killed Host instance')
+        // Host identity is the PID/starttime pair plus the authenticated
+        // instance identity. Different PIDs already prove a different process;
+        // a standalone cross-process `/proc` starttime inequality is tick-
+        // granular and is not a contract (two fast processes may share a
+        // tick). Verify the replacement Host's OWN registry facts instead.
+        const newRegistry = readJson(join(dshHome, 'run', 'dsh-pi-tui', hostBefore.scopeId, 'instance.json'))
+        assert(newRegistry.instanceId === newHost.instanceId
+          && newRegistry.hostPid === newHost.hostPid
+          && newRegistry.hostStarttime === newHost.hostStarttime,
+        `M5D-06 the replacement Host registry does not match its authenticated identity: ${JSON.stringify(newRegistry)}`)
+        await clientC.waitForScreen('m5d6-x-held', 'M5D-06 C cold history', 120_000)
+        const recovered = await waitForHostSessionEventAfter(dshHome, sessionX, durableBoundary,
+          event => event.type === 'turn/end', 'M5D-06 the new Host settled the orphaned Turn', 120_000)
+        assert(recovered.data?.reason?.kind === 'interrupted',
+          `M5D-06 the cold resume settled the lost Turn as ${String(recovered.data?.reason?.kind)}`)
+        assert(durableOf(sessionX).filter(event => event.type === 'turn/start').length === 1,
+          'M5D-06 the recovered settlement does not belong to the single lost Turn')
+        assert(hostUserTexts(durableOf(sessionX)).filter(text => text === 'm5d6-x-held').length === 1,
+          'M5D-06 the cold resume replayed the accepted prompt')
+        assert(!hostAssistantHasText(durableOf(sessionX), 'long-turn answer'),
+          'M5D-06 the cold resume fabricated an answer')
+        assert(!(await clientC.viewport()).join('\n').includes('long-turn answer'),
+          'M5D-06 the resumed surface painted a fabricated answer')
+        // AFTER C is up, the OLD Clients must NOT adopt the replacement Host.
+        // The official identity fence is authoritative: the replacement Host
+        // publishes new launch material, the old Client's retry reads it, sees
+        // a DIFFERENT instanceId, and fails closed with
+        // HOST_IDENTITY_MISMATCH instead of re-binding. That fail-closed exit
+        // is the truthful no-takeover outcome for "不得将新 Host 的
+        // instanceId/generation 冒充原 Host continuation"; no silent
+        // continuation is possible. The deterministic causal input is the
+        // replacement Host's launch material (published before its ready), and
+        // every retry after that point reads it.
+        const oldClientOutcomes = []
+        for (const [client, ready, label] of [[clientA, aReady, 'A'], [clientB, bReady, 'B']]) {
+          await waitForCondition(() => {
+            client.readRecords()
+            return client.records.some(record => record.m4a0 === 'failure') || client.exited
+          }, `M5D-06 Client ${label} classified the replacement Host`, 60_000)
+          client.readRecords()
+          const failure = client.records.find(record => record.m4a0 === 'failure')
+          assert(failure?.code === 'HOST_IDENTITY_MISMATCH',
+            `M5D-06 Client ${label} did not take the official replacement-Host refusal: ${JSON.stringify(failure)}`)
+          assert(/launch\.json names a different Host instance|Host identity changed/u.test(String(failure.error)),
+            `M5D-06 Client ${label} failed for another reason: ${String(failure.error)}`)
+          const exit = await client.waitForExit(60_000)
+          assert(exit.code === 1 && exit.signal === null,
+            `M5D-06 Client ${label} fail-closed exit was ${JSON.stringify(exit)}`)
+          client.readRecords()
+          assert(client.records.every(record => record.host?.instanceId !== newHost.instanceId),
+            `M5D-06 Client ${label} recorded the replacement Host identity`)
+          assert(client.records.every(record => !(record.m4b2s === 'surface-status' && record.transport === 'connected'
+            && record.generationId !== undefined
+            && record.host?.instanceId === newHost.instanceId)),
+          `M5D-06 Client ${label} adopted a generation of the replacement Host`)
+          oldClientOutcomes.push(`${label}:HOST_IDENTITY_MISMATCH`)
+          await waitGone(ready.pid, 15_000)
+          await client.dispose()
+        }
+        assert(JSON.stringify(liveHostPids()) === JSON.stringify([newHost.hostPid]),
+          `M5D-06 expected exactly the replacement Host owner, found ${JSON.stringify(liveHostPids())}`)
+        assert(!existsSync(releaseBarrier), 'M5D-06 the hold barrier was released during the Host failure')
+        // C leaves normally; the replacement Host keeps running (Client
+        // lifetime is independent of the Host) and is stopped through its own
+        // owner path afterwards.
+        await exitC1Client(clientC, 'M5D-06 C')
+        assert(alive(newHost.hostPid), 'M5D-06 the replacement Host died when C exited')
+        // Stop the REPLACEMENT Host through its owner path. It is a new Host,
+        // never a revived original instance.
+        process.kill(newHost.hostPid, 'SIGTERM')
+        await waitGone(newHost.hostPid, 30_000)
+        assert(!alive(newHost.hostPid), 'M5D-06 the replacement Host survived the official SIGTERM')
+        await seatFree(`\0dsh-pi-tui-h-${scopeSuffix}`, 15_000)
+        await stopC1Host(host)
+        trace('m5d-06', {
+          hostPid,
+          signal: 'SIGKILL',
+          clientAPid: aReady.pid,
+          clientBPid: bReady.pid,
+          wrapperPids: [clientA.child.pid, clientB.child.pid],
+          sessionX,
+          aObserved: aLost.transport,
+          bObserved: bLost.transport,
+          oldClientOutcomes,
+          newHostPid: newHost.hostPid,
+          newInstanceId: newHost.instanceId,
+          orphanSettlement: 'interrupted',
+          fabricatedSettlement: false,
+          automaticTakeover: false,
+        })
+      }
+
+      // ── D-07: A SIGHUP is a process failure, B keeps the running X ────────
+      {
+        const releaseBarrier = join(workDir, 'm5d7-long-turn.release')
+        const { host, ready: hostReady, workRoot } = await startC1Host('long-turn', 'm5d7-client-hup', {
+          C1_HOLD_LONG_TURN: releaseBarrier,
+        })
+        const hostBefore = await hostIdentityFacts(host)
+        assert(hostBefore.hostPid === hostReady.pid, 'M5D-07 the Host ready record does not own the Host identity')
+        const { client: clientA, ready: aReady } = await startC1Client('M5D-07 A')
+        const sessionX = await openC1Session(clientA, 'm5d7-x-held', 'M5D-07 A')
+        const held = await waitForC1WorkEvent(workRoot,
+          event => event.kind === 'long-turn-held' && event.sessionId === sessionX, 'M5D-07 X Turn held', 120_000)
+        assert(held.agentStatus === 'running',
+          `M5D-07 the Host Agent was ${JSON.stringify(held.agentStatus)} while X was held`)
+        await waitForHostSessionEvent(dshHome, sessionX, event => event.type === 'turn/start', 'M5D-07 X turn/start', 120_000)
+        const { client: clientB, ready: bReady } = await startC1Client('M5D-07 B', {
+          SPLIT_PROCESS_CLIENT_SESSION: sessionX,
+        })
+        const bOnX = await waitForSurfaceStatus(clientB,
+          record => record.sessionOpen === true && record.openSessionId === sessionX
+            && record.transport === 'connected' && record.surfaceMounted === true,
+          'M5D-07 B retained Session X')
+        assertClientHostFacts(bOnX.host, hostBefore, 'M5D-07 B')
+        assert(aReady.pid !== bReady.pid, 'M5D-07 the two Clients must be two different business PIDs')
+        assert(clientA.child.pid !== clientB.child.pid, 'M5D-07 the two Clients must use distinct script(1) wrappers')
+        await clientB.waitForScreen('long-turn started', 'M5D-07 B read the running X stream', 120_000)
+        const bBefore = lastSurfaceStatus(clientB)
+        const bBoundary = clientB.records.length
+        const durableBoundary = durableOf(sessionX).length
+        // A REAL SIGHUP to the Client BUSINESS PID: the default disposition
+        // terminates it, so this is NOT the graceful coordinator path and no
+        // `client-closed` inventory may be expected.
+        clientA.signalBusiness('SIGHUP')
+        await waitGone(aReady.pid, 15_000)
+        assert(!alive(aReady.pid), 'M5D-07 Client A survived SIGHUP')
+        const aExit = await clientA.waitForExit(60_000)
+        clientA.readRecords()
+        assert(clientA.records.every(record => record.m4b2s !== 'client-closed'),
+          'M5D-07 the SIGHUP process-failure path fabricated a graceful owner inventory')
+        await clientA.dispose()
+        assert(alive(bReady.pid) && alive(hostBefore.hostPid), 'M5D-07 A\'s SIGHUP killed the Host or Client B')
+        assertSecondClientKept(clientB, bBefore, bBoundary, 'M5D-07 after A SIGHUP')
+        assert(durableOf(sessionX).slice(durableBoundary).every(event => event.type !== 'turn/end'),
+          'M5D-07 A\'s SIGHUP settled or cancelled the running Host Turn')
+        assert(!existsSync(releaseBarrier), 'M5D-07 the hold barrier was released before the original Turn completed')
+        await assertHostIdentityKept(host, hostBefore, 'M5D-07 Host after A SIGHUP')
+        const releaseIndex = durableOf(sessionX).length
+        writeFileSync(releaseBarrier, 'release\n', { mode: 0o600 })
+        const ends = await waitForTurnEnds(sessionX, releaseIndex, 1, 'M5D-07 the original X Turn completed')
+        assert(ends[0]?.data?.reason?.kind === 'completed',
+          `M5D-07 the original X Turn settled as ${JSON.stringify(ends[0]?.data?.reason)}`)
+        await clientB.waitForScreen('long-turn answer 1', 'M5D-07 B read the original Turn settlement', 120_000)
+        assert(hostUserTexts(durableOf(sessionX)).filter(text => text === 'm5d7-x-held').length === 1,
+          'M5D-07 the accepted prompt was replayed or lost across A\'s SIGHUP')
+        const writeIndex = durableOf(sessionX).length
+        await submitPrompt(clientB, 'm5d7-b-after-hup')
+        await waitForHostSessionEventAfter(dshHome, sessionX, writeIndex,
+          event => event.type === 'user/message' && textOf(event.data) === 'm5d7-b-after-hup',
+          'M5D-07 B committed after A was HUPed', 120_000)
+        const bEnd = await waitForHostSessionEventAfter(dshHome, sessionX, writeIndex,
+          event => event.type === 'turn/end', 'M5D-07 B\'s own Turn settled', 120_000)
+        assert(bEnd.data?.reason?.kind === 'completed', 'M5D-07 B\'s own Turn did not complete normally')
+        await clientB.waitForScreen('long-turn answer 2', 'M5D-07 B read its own Turn settlement', 120_000)
+        assert(hostUserTexts(durableOf(sessionX)).filter(text => text === 'm5d7-b-after-hup').length === 1,
+          'M5D-07 B\'s own prompt committed more than once')
+        assertSecondClientKept(clientB, bBefore, bBoundary, 'M5D-07 at the end of the scene')
+        await exitC1Client(clientB, 'M5D-07 B')
+        await stopDHost(host, 'M5D-07 Host')
+        trace('m5d-07', {
+          hostPid: hostBefore.hostPid,
+          clientAPid: aReady.pid,
+          clientBPid: bReady.pid,
+          wrapperPids: [clientA.child.pid, clientB.child.pid],
+          sessionX,
+          signal: 'SIGHUP',
+          aWrapperExit: aExit,
+          gracefulInventoryClaimed: false,
+          originalTurnSettlement: 'completed',
+          bOwnReadback: true,
+        })
+      }
+
+      // ── D-08: N-composite X -> Y navigation, then A exits from Y ──────────
+      {
+        const releaseBarrier = join(workDir, 'm5d8-long-turn.release')
+        const { host, ready: hostReady, workRoot } = await startC1Host('long-turn', 'm5d8-navigation', {
+          C1_HOLD_LONG_TURN: releaseBarrier,
+        })
+        const hostBefore = await hostIdentityFacts(host)
+        assert(hostBefore.hostPid === hostReady.pid, 'M5D-08 the Host ready record does not own the Host identity')
+        const { client: clientA, ready: aReady } = await startC1Client('M5D-08 A')
+        const sessionX = await openC1Session(clientA, 'm5d8-x-held', 'M5D-08 A')
+        const held = await waitForC1WorkEvent(workRoot,
+          event => event.kind === 'long-turn-held' && event.sessionId === sessionX, 'M5D-08 X Turn held', 120_000)
+        assert(held.agentStatus === 'running',
+          `M5D-08 the Host Agent was ${JSON.stringify(held.agentStatus)} while X was held`)
+        await waitForHostSessionEvent(dshHome, sessionX, event => event.type === 'turn/start', 'M5D-08 X turn/start', 120_000)
+        // A's own OLD X frame must carry the unique prompt before the switch.
+        await waitForCondition(async () => (await clientA.viewport()).join('\n').includes('m5d8-x-held'),
+          'M5D-08 A painted the original X-only prompt', 120_000)
+        const { client: clientB, ready: bReady } = await startC1Client('M5D-08 B', {
+          SPLIT_PROCESS_CLIENT_SESSION: sessionX,
+        })
+        const bOnX = await waitForSurfaceStatus(clientB,
+          record => record.sessionOpen === true && record.openSessionId === sessionX
+            && record.transport === 'connected' && record.surfaceMounted === true,
+          'M5D-08 B retained Session X')
+        assertClientHostFacts(bOnX.host, hostBefore, 'M5D-08 B')
+        assert(aReady.pid !== bReady.pid, 'M5D-08 the two Clients must be two different business PIDs')
+        assert(clientA.child.pid !== clientB.child.pid, 'M5D-08 the two Clients must use distinct script(1) wrappers')
+        await clientB.waitForScreen('long-turn started', 'M5D-08 B read the running X stream', 120_000)
+        const bBefore = lastSurfaceStatus(clientB)
+        const bBoundary = clientB.records.length
+        const durableBoundary = durableOf(sessionX).length
+        const xHeader = await waitForHostSessionHeader(dshHome, sessionX, 'M5D-08 X durable header')
+        const sessionsBeforeNew = hostSessionLogCount(dshHome)
+        // The N-gesture: the real `/new` while X's original Turn is RUNNING.
+        // The pending-Question/Approval modal is NOT used here (the editor
+        // seat forbids a lifecycle command under a pending interaction).
+        const newBoundary = clientA.records.length
+        clientA.send('/new\r')
+        const aOnY = await clientA.waitFor(
+          record => clientA.records.indexOf(record) >= newBoundary
+            && record.m4b2s === 'surface-status'
+            && record.sessionOpen === true
+            && typeof record.openSessionId === 'string'
+            && record.openSessionId !== sessionX
+            && record.transport === 'connected'
+            && record.surfaceMounted === true,
+          'M5D-08 A opened Session Y while X was held',
+          120_000,
+        )
+        const sessionY = aOnY.openSessionId
+        assertClientHostFacts(aOnY.host, hostBefore, 'M5D-08 A on Y')
+        // A status record is NOT a painted frame. Y is empty, so its welcome
+        // card names the EXACT Y id — the Y-only paint fact — and only then is
+        // the X-only transcript absence asserted.
+        await waitForCondition(async () => (await clientA.viewport()).join('\n').includes(sessionY),
+          'M5D-08 A painted the NEW Y surface', 120_000)
+        assert(!(await clientA.viewport()).join('\n').includes('m5d8-x-held'),
+          'M5D-08 the X-only transcript survived the /new navigation')
+        assert(!existsSync(releaseBarrier), 'M5D-08 the hold barrier was released during /new')
+        const yHeader = await waitForHostSessionHeader(dshHome, sessionY, 'M5D-08 Y durable header')
+        assert(hostSessionLogCount(dshHome) === sessionsBeforeNew + 1,
+          `M5D-08 /new created ${String(hostSessionLogCount(dshHome) - sessionsBeforeNew)} durable Sessions, expected exactly 1`)
+        assert(yHeader.cwd === xHeader.cwd,
+          `M5D-08 the new Y Session Workspace is not the captured Host Workspace: ${String(yHeader.cwd)} != ${String(xHeader.cwd)}`)
+        assert(durableOf(sessionX).slice(durableBoundary).every(event => event.type !== 'turn/end'),
+          'M5D-08 the /new navigation ended or cancelled the running X Turn')
+        // A exits from Y (its CURRENT Session) with the full owner inventory.
+        const { exit: aExit } = await exitClientWithInventory(clientA, 'M5D-08 A')
+        await waitGone(aReady.pid, 15_000)
+        assert(!alive(aReady.pid), 'M5D-08 Client A survived its exit from Y')
+        assert(alive(bReady.pid) && alive(hostBefore.hostPid), 'M5D-08 A\'s exit killed the Host or Client B')
+        assertSecondClientKept(clientB, bBefore, bBoundary, 'M5D-08 after A navigated and exited')
+        assert(durableOf(sessionX).slice(durableBoundary).every(event => event.type !== 'turn/end'),
+          'M5D-08 A\'s exit from Y ended or cancelled the original X Turn')
+        await assertHostIdentityKept(host, hostBefore, 'M5D-08 Host after A exited from Y')
+        // The ORIGINAL X Turn — left twice (navigation, then exit) — completes
+        // and B reads/writes the SAME Session X.
+        const releaseIndex = durableOf(sessionX).length
+        writeFileSync(releaseBarrier, 'release\n', { mode: 0o600 })
+        const ends = await waitForTurnEnds(sessionX, releaseIndex, 1, 'M5D-08 the original X Turn completed')
+        assert(ends[0]?.data?.reason?.kind === 'completed',
+          `M5D-08 the original X Turn settled as ${JSON.stringify(ends[0]?.data?.reason)}`)
+        await clientB.waitForScreen('long-turn answer 1', 'M5D-08 B read the original Turn settlement', 120_000)
+        assert(hostUserTexts(durableOf(sessionX)).filter(text => text === 'm5d8-x-held').length === 1,
+          'M5D-08 the accepted X prompt was replayed or lost')
+        const writeIndex = durableOf(sessionX).length
+        await submitPrompt(clientB, 'm5d8-b-after-navigation')
+        await waitForHostSessionEventAfter(dshHome, sessionX, writeIndex,
+          event => event.type === 'user/message' && textOf(event.data) === 'm5d8-b-after-navigation',
+          'M5D-08 B committed after A exited from Y', 120_000)
+        const bEnd = await waitForHostSessionEventAfter(dshHome, sessionX, writeIndex,
+          event => event.type === 'turn/end', 'M5D-08 B\'s own Turn settled', 120_000)
+        assert(bEnd.data?.reason?.kind === 'completed', 'M5D-08 B\'s own Turn did not complete normally')
+        await clientB.waitForScreen('long-turn answer 2', 'M5D-08 B read its own Turn settlement', 120_000)
+        assert(hostUserTexts(durableOf(sessionX)).filter(text => text === 'm5d8-b-after-navigation').length === 1,
+          'M5D-08 B\'s own prompt committed more than once')
+        assertSecondClientKept(clientB, bBefore, bBoundary, 'M5D-08 at the end of the scene')
+        // Y was a real ONE Host-created Session and stayed EMPTY of turns: A
+        // never wrote there, it only released its own Y reference on exit.
+        assert(durableOf(sessionY).every(event => event.type !== 'user/message'),
+          'M5D-08 the empty Y Session received a message A never sent')
+        await exitC1Client(clientB, 'M5D-08 B')
+        await stopDHost(host, 'M5D-08 Host')
+        trace('m5d-08', {
+          hostPid: hostBefore.hostPid,
+          clientAPid: aReady.pid,
+          clientBPid: bReady.pid,
+          wrapperPids: [clientA.child.pid, clientB.child.pid],
+          sessionX,
+          sessionY,
+          aExitCode: aExit.code,
+          navigatedBeforeExit: true,
+          aExitedFrom: 'Y',
+          originalXTurnCompletion: 'completed',
+          bOwnReadback: true,
+          bOwnTurn: 'completed',
+        })
+      }
+
       // T44: a real accepted Turn survives a Client SIGKILL. The LLM stream is
       // held by the Host fixture; the Client disappears while the Host Agent is
       // running, then the SAME Host writes the final assistant message.

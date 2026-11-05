@@ -665,14 +665,14 @@ test('the non-destructive Split Remote navigation witness stays between M5-C and
   assert.match(m5n, /trace\('m5n-01'/u)
 })
 
-test('the detached-navigation siblings stay between M5N-01 and the T44 inventory', () => {
+test('the detached-navigation siblings stay between M5N-01 and the M5D inventory', () => {
   const source = readFileSync(SCRIPT, 'utf8')
   const start = source.indexOf('// M5N-02 (M5-N):')
-  const end = source.indexOf('// T44: a real accepted Turn survives')
+  const end = source.indexOf('// M5D-01 (M5-D):')
   assert.ok(start > source.indexOf('// M5N-01 (M5-N):'), 'M5N-02 must run after the M5N-01 case')
   assert.ok(source.indexOf('// M5N-03 (M5-N):') > start, 'M5N-03 must run after the M5N-02 case')
   assert.ok(end > source.indexOf('// M5N-03 (M5-N):'),
-    'M5N-03 must stay immediately before the T44 inventory')
+    'M5N-03 must stay immediately before the M5D-01 inventory')
   for (const marker of ['// M5N-02 (M5-N):', '// M5N-03 (M5-N):']) {
     assert.equal((source.match(new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'gu')) ?? []).length, 1,
       `${marker} must exist exactly once`)
@@ -800,6 +800,179 @@ test('the detached-navigation siblings stay between M5N-01 and the T44 inventory
   assert.match(m5n3, /exitC1Client\(clientB, 'M5N3 B'\)/u)
   assert.match(m5n3, /stopC1Host\(host\)/u)
   assert.match(m5n3, /trace\('m5n-03'/u)
+})
+
+test('the independent Client lifecycle inventory stays between M5N-03 and the T44 inventory', () => {
+  const source = readFileSync(SCRIPT, 'utf8')
+  const start = source.indexOf('// M5D-01 (M5-D):')
+  const end = source.indexOf('// T44: a real accepted Turn survives')
+  assert.ok(start > source.indexOf('// M5N-03 (M5-N):'), 'M5D-01 must run after the M5N-03 case')
+  assert.ok(end > start, 'M5D-01 must stay immediately before the T44 inventory')
+  assert.equal((source.match(/\/\/ M5D-01 \(M5-D\):/gu) ?? []).length, 1, 'M5D-01 must exist exactly once')
+  const m5d = source.slice(start, end)
+  // The shared witnesses are explicit and never downgraded.
+  assert.match(m5d, /const assertSecondClientKept = \(client, before, fromIndex, label\) =>/u,
+    'the B non-interference witness must be one shared scanner')
+  assert.match(m5d, /const exitClientWithInventory = async \(client, label\) =>/u,
+    'the graceful `/exit` inventory must be one shared witness')
+  assert.match(m5d, /record\.m4b2s === 'client-closed'/u)
+  assert.equal((m5d.match(/startC1Host\(/gu) ?? []).length, 8,
+    'each M5-D scene must start its OWN isolated Host')
+  assert.doesNotMatch(m5d, /new EntryProcess\('client'/u,
+    'the M5-D scenes must never downgrade to the qualification EntryProcess')
+  assert.doesNotMatch(m5d, /await sleep\(/u,
+    'the M5-D scenes must pace on painted frames/records, never a fixed sleep')
+  assert.doesNotMatch(m5d, /requestId/iu,
+    'the M5-D scenes must not infer a request identity from a text match')
+  // Every scene carries the identity, cleanup and trace facts.
+  const cases = ['D-01', 'D-02', 'D-03', 'D-04', 'D-05', 'D-06', 'D-07', 'D-08']
+  const positions = cases.map(name => m5d.indexOf(`// ── ${name}:`))
+  positions.forEach((position, index) => assert.ok(position > 0, `${cases[index]} must exist`))
+  for (let index = 1; index < positions.length; index += 1) {
+    assert.ok(positions[index] > positions[index - 1], `${cases[index]} must run after ${cases[index - 1]}`)
+  }
+  const slices = Object.fromEntries(cases.map((name, index) => [name, m5d.slice(positions[index], positions[index + 1] ?? m5d.length)]))
+  cases.forEach((name, index) => {
+    const slice = slices[name]
+    assert.match(slice, new RegExp(`trace\\('m5d-0${String(index + 1)}'`, 'u'), `${name} must record its evidence trace`)
+    if (name === 'D-06') {
+      // The original Host is dead by contract: the common-failure scene keeps
+      // the identity through its Client facts BEFORE the kill and proves the
+      // replacement instance afterwards instead of claiming a graceful stop.
+      assert.match(slice, /assertClientHostFacts\(bOnX\.host, hostBefore/u)
+      assert.match(slice, /await waitGone\(hostPid, 30_000\)/u)
+      assert.match(slice, /assert\(!alive\(hostPid\)/u)
+      assert.doesNotMatch(slice, /stopDHost\(/u,
+        'D-06 must not claim a graceful stop for the SIGKILLed original Host')
+      return
+    }
+    assert.match(slice, new RegExp(`stopDHost\\(host, 'M5D-0${String(index + 1)} Host'\\)`, 'u'),
+      `${name} must assert its own Host owner shutdown exit`)
+    assert.match(slice, /assertHostIdentityKept\(host, hostBefore/u, `${name} must keep the Host identity`)
+    assert.match(slice, /assertSecondClientKept\(clientB, bBefore, bBoundary/u,
+      `${name} must use the B non-interference witness`)
+    assert.match(slice, /at the end of the scene/u,
+      `${name} must rescan the WHOLE B status tail at the end of the scene`)
+  })
+
+  // ── D-01: A `/exit`, B keeps the ORIGINAL running X ─────────────────────
+  const d01 = slices['D-01']
+  assert.match(d01, /startC1Host\('long-turn', 'm5d1-exit'/u)
+  assert.equal((d01.match(/startC1Client\(/gu) ?? []).length, 2, 'D-01 must start exactly two real Surface Clients')
+  assert.match(d01, /aReady\.pid !== bReady\.pid/u)
+  assert.match(d01, /clientA\.child\.pid !== clientB\.child\.pid/u)
+  assert.match(d01, /exitClientWithInventory\(clientA, 'M5D-01 A'\)/u)
+  assert.match(d01, /aOwnersReleased: true/u)
+  assert.match(d01, /durableOf\(sessionX\)\.slice\(durableBoundary\)\.every\(event => event\.type !== 'turn\/end'\)/u,
+    'D-01 must prove the exit did not settle the running Turn')
+  assert.match(d01, /originalTurnSettlement: 'completed'/u)
+  assert.match(d01, /m5d1-x-held/u)
+  assert.match(d01, /m5d1-b-after-exit/u, 'B must write the same Session after A exited')
+
+  // ── D-02: kernel SIGKILL, B keeps X, A' cold-attaches ───────────────────
+  const d02 = slices['D-02']
+  assert.match(d02, /startC1Host\('long-turn', 'm5d2-hard-kill'/u)
+  assert.equal((d02.match(/startC1Client\(/gu) ?? []).length, 3,
+    'D-02 must start two live Clients and the cold replacement')
+  assert.match(d02, /clientA\.signalBusiness\('SIGKILL'\)/u)
+  assert.match(d02, /a SIGKILL cannot produce the graceful Client owner inventory/u)
+  assert.match(d02, /startC1Client\('M5D-02 A-prime'/u)
+  assert.match(d02, /aPrimeReady\.pid !== aReady\.pid/u)
+  assert.match(d02, /the cold attach replayed the accepted prompt/u)
+  assert.match(d02, /promptCommitsAfterColdAttach: 1/u)
+
+  // ── D-03: A's official generation rollover only ─────────────────────────
+  const d03 = slices['D-03']
+  assert.match(d03, /clientA\.signalBusiness\('SIGUSR1'\)/u)
+  assert.match(d03, /record\.op === 'drop-websocket'/u)
+  assert.match(d03, /record\.transport !== 'connected'[\s\S]{0,120}record\.generationId === undefined/u,
+    'D-03 must observe the official generation loss, not only the new connected generation')
+  assert.match(d03, /record\.generationId !== aBefore\.generationId/u)
+  assert.match(d03, /lossObserved: dropped\.transport/u)
+  assert.match(d03, /officialReconnect: true/u)
+  assert.match(d03, /lostAckTaxonomyClaimed: false/u,
+    'D-03 must not claim the T66 lost-ACK taxonomy without an ACK-loss input')
+
+  // ── D-04: A same-PID HMR, B untouched ───────────────────────────────────
+  const d04 = slices['D-04']
+  assert.match(d04, /SPLIT_PROCESS_CLIENT_HMR_PROBE: '1'/u)
+  assert.match(d04, /clientA\.signalBusiness\('SIGUSR2'\)/u)
+  for (const operation of ['hmr-revision-start', 'hmr-revision-retired', 'hmr-revision-ready']) {
+    assert.match(d04, new RegExp(`op === '${operation}'`, 'u'))
+  }
+  assert.match(d04, /oldUnmountedIndex < newMountedIndex/u, 'D-04 must prove the old revision retired first')
+  assert.match(d04, /after\.pid === aBefore\.pid/u)
+  assert.match(d04, /after\.generationId === aBefore\.generationId/u)
+  assert.match(d04, /after\.surfaceFiberUid !== aBefore\.surfaceFiberUid/u)
+
+  // ── D-05: A HMR with B holding the SAME pending Question ────────────────
+  const d05 = slices['D-05']
+  assert.match(d05, /startC1Host\('question', 'm5d5-interaction'/u)
+  assert.equal((d05.match(/startC1Client\(/gu) ?? []).length, 2, 'D-05 must start exactly two real Surface Clients')
+  assert.match(d05, /SPLIT_PROCESS_CLIENT_HMR_PROBE: '1'/u)
+  assert.match(d05, /name === 'ask_user_question'/u)
+  assert.match(d05, /clientA\.term\.reset\(\)/u,
+    'D-05 must wipe the observer buffer so the OLD frame cannot satisfy the repaint wait')
+  assert.match(d05, /NEW revision repainted the pending Question/u)
+  assert.match(d05, /clientB\.send\('1'\)/u)
+  assert.match(d05, /String\(event\.data\?\.message\?\.toolCallId\) === callId/u)
+  assert.match(d05, /withdrew the settled modal/u)
+  assert.match(d05, /hostQuestionSettlements: 1/u)
+  const d05Retired = d05.indexOf("op === 'hmr-revision-retired'")
+  const d05Reset = d05.indexOf('clientA.term.reset()')
+  const d05Ready = d05.indexOf("op === 'hmr-revision-ready'")
+  const d05Repaint = d05.indexOf('NEW revision repainted the pending Question')
+  const d05Answer = d05.indexOf("clientB.send('1')")
+  assert.ok(d05Retired > 0 && d05Reset > d05Retired && d05Ready > d05Reset
+    && d05Repaint > d05Ready && d05Answer > d05Repaint,
+  'D-05 must retire the old revision, wipe, wait for ready, prove the NEW paint, then let B answer')
+
+  // ── D-06: common Host SIGKILL, C is a NEW Host ──────────────────────────
+  const d06 = slices['D-06']
+  assert.match(d06, /process\.kill\(hostPid, 'SIGKILL'\)/u)
+  assert.equal((d06.match(/startC1Client\(/gu) ?? []).length, 3,
+    'D-06 must start TWO original Clients and the cold-discovering C')
+  assert.match(d06, /newHost\.instanceId !== hostBefore\.instanceId/u)
+  assert.match(d06, /newRegistry\.instanceId === newHost\.instanceId/u,
+    'D-06 must verify the replacement Host\'s own registry/starttime identity')
+  assert.doesNotMatch(d06, /newHost\.hostStarttime !== hostBefore\.hostStarttime/u,
+    'D-06 must not require a cross-process starttime inequality')
+  assert.match(d06, /C cold history/u)
+  assert.match(d06, /orphanSettlement: 'interrupted'/u)
+  assert.match(d06, /record\.generationId === undefined/u,
+    'D-06 must observe the official lost generation')
+  assert.match(d06, /HOST_IDENTITY_MISMATCH/u,
+    'D-06 must classify the old Clients against the replacement Host identity fence')
+  assert.match(d06, /oldClientOutcomes/u)
+  assert.match(d06, /assert\(alive\(newHost\.hostPid\)/u,
+    'D-06 must prove the replacement Host survives C exit before stopping it')
+  assert.match(d06, /automaticTakeover: false/u)
+  const d06Cold = d06.indexOf("startC1Client('M5D-06 C'")
+  const d06AfterC = d06.indexOf('AFTER C is up')
+  assert.ok(d06Cold > 0 && d06AfterC > d06Cold,
+    'D-06 must run the old-Client re-check after the replacement Host/C exists')
+
+  // ── D-07: A SIGHUP process failure ──────────────────────────────────────
+  const d07 = slices['D-07']
+  assert.match(d07, /clientA\.signalBusiness\('SIGHUP'\)/u)
+  assert.match(d07, /SIGHUP process-failure path fabricated a graceful owner inventory/u)
+  assert.match(d07, /gracefulInventoryClaimed: false/u)
+  assert.match(d07, /originalTurnSettlement: 'completed'/u)
+
+  // ── D-08: X -> Y navigation, then A exits from Y ────────────────────────
+  const d08 = slices['D-08']
+  assert.match(d08, /startC1Host\('long-turn', 'm5d8-navigation'/u)
+  assert.match(d08, /clientA\.send\('\/new\\r'\)/u)
+  assert.match(d08, /record\.openSessionId !== sessionX/u)
+  assert.match(d08, /A painted the NEW Y surface/u)
+  assert.match(d08, /exitClientWithInventory\(clientA, 'M5D-08 A'\)/u)
+  assert.match(d08, /originalXTurnCompletion: 'completed'/u)
+  assert.match(d08, /durableOf\(sessionY\)\.every/u)
+  const d08New = d08.indexOf("clientA.send('/new\\r')")
+  const d08Exit = d08.indexOf("exitClientWithInventory(clientA, 'M5D-08 A')")
+  const d08Release = d08.indexOf('writeFileSync(releaseBarrier')
+  assert.ok(d08New > 0 && d08Exit > d08New && d08Release > d08Exit,
+    'D-08 must navigate first, exit A from Y second, and only then release the ORIGINAL X Turn')
 })
 
 test('the question lanes wait for the real review frame, never the permanent Submit tab', () => {

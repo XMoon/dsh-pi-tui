@@ -262,6 +262,72 @@ test('the PRODUCTION /reload-client command is driven through the real PTY, not 
   assert.match(source, /runUnavailableTargetRound\(\{/u)
 })
 
+test('U08 keeps a SECOND old-build TUI through the cross-build reexec and the held Turn', () => {
+  const source = readFileSync(SCRIPT, 'utf8')
+  const start = source.indexOf('async function runUserCommandReloadRound')
+  const end = source.indexOf('async function runUnavailableTargetRound')
+  assert.ok(start > 0 && end > start, 'the U08 round must exist')
+  const u08 = source.slice(start, end)
+
+  // B is a real OLD installed `dist/local-client.mjs` on its own wrapper/PTY.
+  // It must join the SAME Session X BEFORE the production command is typed.
+  const peerStart = u08.indexOf("const peerClient = new SurfaceEntryProcess(join(sideOldPackage, 'dist', 'local-client.mjs')")
+  const command = u08.indexOf("reloadClient.send('/reload-client\\r')")
+  assert.ok(peerStart > 0, 'U08 must start the second old-build Client from the real old installation')
+  assert.ok(command > peerStart, 'the second Client must join Session X before `/reload-client` is sent')
+  assert.match(u08, /SPLIT_PROCESS_CLIENT_SESSION: sessionId/u)
+  assert.match(u08, /assertNotEqual\(peerPid, reloadClientPid/u)
+  assert.match(u08, /assertNotEqual\(peerClient\.child\.pid, reloadClient\.child\.pid/u)
+  assert.match(u08, /const assertPeerKept = \(label\) =>/u)
+  // B's own identity is the before/post-boundary fact, never a heartbeat.
+  assert.match(u08, /record\.rootFiberUid, peerStatusBefore\.rootFiberUid/u)
+  assert.match(u08, /record\.generationId, peerStatusBefore\.generationId/u)
+  assert.match(u08, /record\.surfaceRevision, peerStatusBefore\.surfaceRevision/u)
+  assert.match(u08, /record\.host\?\.instanceId, hostIdentity\.instanceId/u)
+  assert.match(u08, /the second Client released its own resources/u)
+  const peerAfterRelease = u08.indexOf("assertPeerKept('U08 after the old Client released')")
+  const peerAfterRestore = u08.indexOf("assertPeerKept('U08 after the replacement restored Session X')")
+  const peerAfterExit = u08.indexOf("assertPeerKept('U08 after the replacement exited")
+  assert.ok(peerAfterRelease > 0 && peerAfterRestore > peerAfterRelease && peerAfterExit > peerAfterRestore,
+    'B must be re-verified at the old release, the A\' restore and the A\' exit')
+
+  // The OLD A closure and the NEW A' PID/handoff stay the authority.
+  const oldClosed = u08.indexOf("'U08 old-build reload Client released every owned Client resource'")
+  const replacementStarted = u08.indexOf("record => record.m4a0 === 'client-started' && record.pid !== reloadClientPid")
+  assert.ok(oldClosed > 0 && replacementStarted > oldClosed, 'the old release must precede the replacement process')
+  assert.match(u08, /record => record\.m4r === 'handoff-restored' && record\.pid === replacementPid/u)
+  assert.match(u08, /replacementRestored\.clientBuildId, newBuildId/u)
+  assert.match(u08, /replacementRestored\.sessionHistoryOpen, true/u)
+
+  // A' exits while the ORIGINAL Turn is STILL held; only then is the barrier
+  // released, and the SECOND Client reads the settlement and writes again.
+  const replacementExit = u08.indexOf("reloadClient.send('/exit\\r')")
+  const heldAfterExit = u08.indexOf('U08 after the replacement exited with the original Turn still held')
+  const release = u08.indexOf('writeFileSync(releaseBarrier')
+  assert.ok(replacementExit > 0 && heldAfterExit > replacementExit && release > heldAfterExit,
+    'the barrier must be released only AFTER A\' exited with the original Turn still held')
+  assert.match(u08, /the admitted Turn was released by the Client exit/u)
+  assert.match(u08, /the replacement Client still owned Client services after its release/u)
+  assert.match(u08, /second Client read the original Turn settlement/u)
+  assert.match(u08, /second Client committed after the reload/u)
+  assert.match(u08, /the second Client prompt committed more than once/u)
+  assert.match(u08, /second Client released every owned Client resource/u)
+  assert.match(u08, /secondClientExitCode: peerExit\.code/u)
+  const finalPeerScan = u08.indexOf("assertPeerKept('U08 after the second Client wrote the same Session')")
+  const peerExit = u08.indexOf("peerClient.send('/exit\\r')")
+  const hostStop = u08.indexOf("process.kill(hostIdentity.hostPid, 'SIGTERM')")
+  assert.ok(finalPeerScan > 0 && peerExit > finalPeerScan,
+    'B must be rescanned over the WHOLE post-release window after its own write and before its exit')
+  assert.ok(peerExit > 0 && hostStop > peerExit,
+    'the second Client must close normally before the Host stop remains the last owner-governed step')
+
+  // The legal two-artifact pairing stays a HARD gate (never optional).
+  assert.match(source, /requireExactSmokeDshPin\('old', oldArtifact\.manifest, targetDshVersion\)/u)
+  assert.match(source, /requireExactSmokeDshPin\('new', newArtifact\.manifest, targetDshVersion\)/u)
+  assert.match(source, /oldArtifact\.sha256 === newArtifact\.sha256/u)
+  assert.match(source, /newBuildId !== oldBuildId/u)
+})
+
 test('the manual reload ignores a live qualification target override and resolves the active profile', () => {
   const source = readFileSync(SCRIPT, 'utf8')
   const start = source.indexOf('async function runReloadSourceIsolationRound')
