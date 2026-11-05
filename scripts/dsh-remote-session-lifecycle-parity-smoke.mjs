@@ -256,9 +256,16 @@ async function createHost(workRoot) {
     // only Workspace authority, and it serves the generated `workspace` Remote
     // namespace this lane's ordinary create pre-selects through.
     await ctx.plugin(WorkspaceController)
+    await ctx.plugin(hostCtx => {
+      new HostConnectionService(hostCtx, [], {})
+    })
+    await ctx.inject(TypertGatewayService.inject, gatewayCtx => {
+      new TypertGatewayService(gatewayCtx, { websocketHeartbeatIntervalMs: 50 })
+    })
     // DSH 0.2.2 builds the controller's control/history/state sub-owners in the
-    // async `[Service.init]`, so mount the plugin form (which awaits init) and
-    // read the instance back from the service registry.
+    // async `[Service.init]` and the controller also injects `typertGateway`, so
+    // mount the plugin form AFTER the gateway and read the instance back from the
+    // service registry (a pre-gateway mount stays pending and yields no service).
     await ctx.plugin(SessionController, { nativeOpen: false })
     const sessionController = ctx.get('sessionController')
     // Count every Host-side create dispatch: the pinned controller create is
@@ -270,12 +277,6 @@ async function createHost(workRoot) {
       hostCreateCalls.push(String(request?.sessionId))
       return originalCreate(request)
     }
-    await ctx.plugin(hostCtx => {
-      new HostConnectionService(hostCtx, [], {})
-    })
-    await ctx.inject(TypertGatewayService.inject, gatewayCtx => {
-      new TypertGatewayService(gatewayCtx, { websocketHeartbeatIntervalMs: 50 })
-    })
     await ctx.plugin({ inject: apiRemotesInject, apply: applyApiRemotes })
 
     ctx.llm.registerAdapter([PROVIDER], new SmokeAdapter())
