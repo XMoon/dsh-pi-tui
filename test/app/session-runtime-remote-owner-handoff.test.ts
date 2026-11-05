@@ -2183,6 +2183,8 @@ test('a Remote fork adopts a RUNNING child without waiting for its Host idle', a
   })
   const outcome = await Promise.race([
     h.runtime.forkSession('session-a'),
+    // Bounded observation window: the adoption settles without any Host-idle
+    // dependency, so this deadline can only expire if that dependency is back.
     new Promise<'timeout'>(resolve => { setTimeout(() => resolve('timeout'), 5_000) }),
   ])
   assert.notEqual(outcome, 'timeout',
@@ -2225,6 +2227,41 @@ test('a detached fork keeps the child surface off the Host idle but still skips 
     'the committed child surface must not be initialized after the lifecycle aborted')
   assert.ok(h.events.includes('release:session-a@current=child-1'),
     'the source release still ran exactly once')
+})
+
+test('a rewind adoption takes the explicit cut and never waits for the running child\'s Host idle', async () => {
+  // `/rewind` is the SAME adoption transaction with an explicit completed-turn
+  // cut, the picker's captured identity and a draft-restore callback. The
+  // changed child phase must behave identically for that entry, and the
+  // rewind's AWAITED source retirement must still complete before the fork
+  // settles.
+  const h = harness()
+  h.publishRetained('session-a')
+  const pickerIdentity = h.core.captureNavigationIdentity()
+  // Captured BEFORE the fork: the committed adoption RELEASES the source's
+  // Client reference, after which the live binding map no longer holds it.
+  const sourceBinding = h.bindingOf('session-a')!
+  h.arms.set('child-1', {
+    duringOpen: () => { h.bindingOf('child-1')!.setRunning(true) },
+  })
+  const restored: string[] = []
+  const outcome = await Promise.race([
+    h.runtime.forkSession('session-a', 7, () => { restored.push('adopted') }, pickerIdentity),
+    // Bounded observation window: the adoption settles without any Host-idle
+    // dependency, so this deadline can only expire if that dependency is back.
+    new Promise<'timeout'>(resolve => { setTimeout(() => resolve('timeout'), 5_000) }),
+  ])
+  assert.notEqual(outcome, 'timeout', 'the rewind adoption blocked on the running child\'s Host idle')
+  assert.ok(outcome !== 'timeout' && outcome.kind === 'success', `the rewind must settle: ${JSON.stringify(outcome)}`)
+  assert.equal(h.calls.forks, 1, 'exactly one Host fork dispatch')
+  assert.deepEqual(h.calls.opens, ['child-1'], 'the adoption open ran exactly once for the rewound child')
+  assert.deepEqual(restored, ['adopted'], 'the rewind draft restore ran exactly once')
+  assert.ok(h.events.indexOf('init:child-1') > h.events.indexOf('release:session-a@current=child-1'),
+    'the rewound child surface initialized after the awaited source release')
+  assert.equal(sourceBinding.cancelCalls(), 0, 'the rewind never cancels the source Host Turn')
+  assert.equal(h.core.currentSessionId(), 'child-1', 'the rewound child is current')
+  assert.equal(h.bindingOf('child-1')!.session.getSnapshot().running, true,
+    'the running child keeps running after the adoption')
 })
 
 test('a Host-refused fork is reported truthfully and never adopts, parks or retries', async () => {

@@ -6080,6 +6080,84 @@ async function main() {
         assert(stopped.data?.reason?.kind === 'aborted' && stopped.data?.reason?.reason?.kind === 'user',
           `M5N2 the Busy Esc settlement was ${JSON.stringify(stopped.data?.reason)} instead of an aborted user Turn`)
 
+        // NB-13 (N-05, `/rewind`): the SAME detached-navigation contract for an
+        // EXPLICIT completed-turn cut. X keeps RUNNING while B rewinds: the Host
+        // fork boundary is the PRECEDECESSOR's end (turn 3 for the selected turn
+        // 4), the adopted child carries that prefix only, and the selected
+        // prompt is restored into the ADOPTED child's editor.
+        // The Stop control above already removed the hold barrier, so the next
+        // source Turn holds; never rm a path that is legitimately gone.
+        assert(!existsSync(releaseBarrier), 'M5N2 the hold barrier must be absent before the rewind Turn')
+        const xTurn6Index = durableOf(sessionX).length
+        await submitPrompt(clientB, 'm5n2-x-turn6')
+        const heldX6 = await waitForC1WorkEvent(workRoot,
+          event => event.kind === 'long-turn-held' && event.sessionId === sessionX && event.attempt === 6,
+          'M5N2 X sixth Turn held')
+        assert(heldX6.agentStatus === 'running',
+          `M5N2 the Host Agent was ${JSON.stringify(heldX6.agentStatus)} while X's sixth Turn was held`)
+        const sessionsBeforeRewind = hostSessionLogCount(dshHome)
+        const rewindBoundary = clientB.records.length
+        clientB.send('/rewind\r')
+        await clientB.waitForScreen('turn 4 · m5n2-b-after-exit',
+          'M5N2 the rewind picker listed the completed turns', 60_000)
+        /** The turn the picker's `> ` selection marker is PAINTED on. */
+        const markedTurn = async () => {
+          const row = (await clientB.viewport()).find(line => /> +turn \d+ ·/u.test(line))
+          const match = row?.match(/> +turn (\d+) ·/u)
+          return match === undefined ? undefined : Number(match[1])
+        }
+        const initialMarkedTurn = await markedTurn()
+        assert(initialMarkedTurn !== undefined, 'M5N2 the rewind picker painted no selection marker')
+        // Move the REAL picker selection by observing the painted marker move
+        // (an authoritative frame fact), never by a fixed sleep between keys.
+        for (let step = 0; step < 6 && (await markedTurn()) !== 4; step += 1) {
+          const before = await markedTurn()
+          clientB.send('\x1b[B')
+          await waitForCondition(async () => {
+            const now = await markedTurn()
+            return now !== undefined && now !== before
+          }, 'M5N2 the rewind picker moved its selection', 15_000)
+        }
+        assert((await markedTurn()) === 4, 'M5N2 the rewind picker never selected turn 4')
+        clientB.send('\r')
+        const bOnRewound = await clientB.waitFor(
+          record => clientB.records.indexOf(record) >= rewindBoundary
+            && record.m4b2s === 'surface-status'
+            && record.sessionOpen === true
+            && typeof record.openSessionId === 'string'
+            && record.openSessionId !== sessionX
+            && record.transport === 'connected'
+            && record.surfaceMounted === true,
+          'M5N2 B adopted the rewound child', 120_000)
+        const rewoundChildId = bOnRewound.openSessionId
+        assertClientHostFacts(bOnRewound.host, hostBefore, 'M5N2 B on the rewound child')
+        assert(hostSessionLogCount(dshHome) === sessionsBeforeRewind + 1,
+          `M5N2 /rewind published ${String(hostSessionLogCount(dshHome) - sessionsBeforeRewind)} durable Sessions, expected exactly 1`)
+        assert(durableOf(sessionX).slice(xTurn6Index).every(event => event.type !== 'turn/end'),
+          'M5N2 the rewind ended the running source Turn')
+        assert(!existsSync(releaseBarrier), 'M5N2 the hold barrier was released during the rewind')
+        const rewoundHeader = await waitForHostSessionHeader(dshHome, rewoundChildId, 'M5N2 the rewound child durable header')
+        assert(rewoundHeader.parentSession === sessionX, 'M5N2 the rewound child does not name the source')
+        assert(rewoundHeader.isSeeded === true, 'M5N2 the rewound child is not a seeded fork')
+        const rewoundTexts = hostUserTexts(durableOf(rewoundChildId))
+        assert(rewoundTexts.filter(text => text === 'm5n2-x-turn3').length === 1,
+          `M5N2 the rewound child lost the prefix through turn 3: ${JSON.stringify(rewoundTexts)}`)
+        assert(rewoundTexts.filter(text => text === 'm5n2-b-after-exit').length === 0,
+          'M5N2 the rewound child inherited the selected turn it forked BEFORE')
+        assert(durableOf(rewoundChildId).every(event => !(event.type === 'turn/end' && event.data?.reason?.kind === 'aborted')),
+          'M5N2 the rewound child inherited the later aborted Turn')
+        // The rewind restored the SELECTED turn's prompt into the ADOPTED editor.
+        await clientB.waitForComposerDraft('m5n2-b-after-exit')
+        clientB.send('\x15')
+        await waitForCondition(async () => !((await clientB.composerText()) ?? '').includes('m5n2-b-after-exit'),
+          'M5N2 cleared the restored rewind draft', 30_000)
+        // The source Turn B walked away from still completes normally.
+        const xRewindReleaseIndex = durableOf(sessionX).length
+        writeFileSync(releaseBarrier, 'release\n', { mode: 0o600 })
+        const xTurn6Ends = await waitForTurnEnds(sessionX, xRewindReleaseIndex, 1, 'M5N2 the source Turn completed after the rewind')
+        assert(xTurn6Ends[0]?.data?.reason?.kind === 'completed',
+          `M5N2 the source Turn settled as ${JSON.stringify(xTurn6Ends[0]?.data?.reason)} after the rewind`)
+
         await assertHostIdentityKept(host, hostBefore, 'M5N2 Host after the fork, exit and Stop')
         await exitC1Client(clientB, 'M5N2 B')
         await stopC1Host(host)
@@ -6101,6 +6179,10 @@ async function main() {
           sourceTurnCompletionAfterExit: 'completed',
           secondClientCommittedAfterExit: true,
           explicitStop: 'aborted/user',
+          rewoundChildId,
+          rewindCut: 'turn 3 end (selected turn 4)',
+          rewindDraftRestored: true,
+          sourceTurnCompletionAfterRewind: 'completed',
         })
       }
 
