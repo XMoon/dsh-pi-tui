@@ -388,7 +388,8 @@ function projectProcess(handle) {
     exited: handle.exited === true,
     events,
   }
-  if (Number.isInteger(identity?.pid)) summary.pid = identity.pid
+  const pid = Number.isInteger(handle.pid) ? handle.pid : identity?.pid
+  if (Number.isInteger(pid)) summary.pid = pid
   if (handle.exitResult !== undefined) {
     if (Number.isInteger(handle.exitResult.code)) summary.exitCode = handle.exitResult.code
     const signal = boundedName(handle.exitResult.signal)
