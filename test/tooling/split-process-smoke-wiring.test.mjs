@@ -602,6 +602,14 @@ test('the non-destructive Split Remote navigation witness stays between M5-C and
     'M5N must name the refused line it expects the editor to restore')
   assert.match(m5n, /await clientA\.waitForComposerDraft\(refusedLine\)/u,
     'M5N must OBSERVE the restored refused line before clearing it')
+  // A negative frame assertion must wait for the TARGET surface to be painted
+  // first: a status record is not a frame, and the old transcript can lag it.
+  {
+    const painted = m5n.indexOf("'M5N A painted the Y surface after leaving X'")
+    const absent = m5n.indexOf("'M5N the X-only queued occurrence leaked onto the Y surface'")
+    assert.ok(painted >= 0 && absent > painted,
+      'the X-only absence must be asserted only after the Y surface is painted')
+  }
   assert.match(m5n, /clientA\.send\('\\x15'\)/u,
     'M5N must clear the restored line with the real editor gesture (Ctrl+U)')
   assert.match(m5n, /cleared the refused command line/u,
