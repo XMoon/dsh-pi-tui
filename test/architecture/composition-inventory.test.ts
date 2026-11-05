@@ -409,6 +409,10 @@ const OTHER_HOST_SUBSCRIPTIONS: ReadonlyArray<readonly [string, string]> = [
   ['skills/change', 'src/runtime/direct/skill-catalog.ts'],
   ['commands/change', 'src/commands.ts'],
   ['loader/volatile-update', 'src/app/host/visual-tools.ts'],
+  // M5-W PR-C: the Host Web access service repairs its live roster after the
+  // official profile recomposition (Owner decision: settings writes must not
+  // change the running Host's FINAL Web state).
+  ['app-boot/config-reload', 'src/app/host/features/web-access.ts'],
 ]
 
 /**
