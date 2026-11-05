@@ -35,6 +35,9 @@ import { runAuthenticatedLifecycle } from '../../scripts/smoke/split-process/aut
 import { runPtySessionWriteRecovery } from '../../scripts/smoke/split-process/pty-session-write-recovery.mjs'
 import { runSharedSessionInteractions } from '../../scripts/smoke/split-process/shared-session-interactions.mjs'
 import { runNonDestructiveClientLifecycle } from '../../scripts/smoke/split-process/non-destructive-client-lifecycle.mjs'
+import { runDetachedTurnInteractions } from '../../scripts/smoke/split-process/detached-turn-interactions.mjs'
+import { runClientHmrSignals } from '../../scripts/smoke/split-process/client-hmr-signals.mjs'
+import { runUnknownWriteHostDeath } from '../../scripts/smoke/split-process/unknown-write-host-death.mjs'
 import { HOST_ONLY_PATCH } from '../../src/app/remote-process/local-host-entry.ts'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
@@ -48,6 +51,9 @@ const PTY_MODULE = join(ROOT, 'scripts', 'smoke', 'split-process', 'pty-session-
 const C1_SCENE_MODULE = join(ROOT, 'scripts', 'smoke', 'split-process', 'c1-scene.mjs')
 const SHARED_SESSION_MODULE = join(ROOT, 'scripts', 'smoke', 'split-process', 'shared-session-interactions.mjs')
 const NAVIGATION_MODULE = join(ROOT, 'scripts', 'smoke', 'split-process', 'non-destructive-client-lifecycle.mjs')
+const DETACHED_MODULE = join(ROOT, 'scripts', 'smoke', 'split-process', 'detached-turn-interactions.mjs')
+const HMR_MODULE = join(ROOT, 'scripts', 'smoke', 'split-process', 'client-hmr-signals.mjs')
+const UNKNOWN_WRITE_MODULE = join(ROOT, 'scripts', 'smoke', 'split-process', 'unknown-write-host-death.mjs')
 
 /** Run the real lane CLI with one private temp root. */
 function runCli(args, tmpRoot, env = {}) {
@@ -170,6 +176,9 @@ test('the upgraded smoke carries every inventory gate and the critical negative 
     + readFileSync(C1_SCENE_MODULE, 'utf8')
     + readFileSync(SHARED_SESSION_MODULE, 'utf8')
     + readFileSync(NAVIGATION_MODULE, 'utf8')
+    + readFileSync(DETACHED_MODULE, 'utf8')
+    + readFileSync(HMR_MODULE, 'utf8')
+    + readFileSync(UNKNOWN_WRITE_MODULE, 'utf8')
     + readFileSync(join(ROOT, 'scripts', 'lib', 'split-smoke-processes.mjs'), 'utf8')
     + readFileSync(join(ROOT, 'scripts', 'lib', 'split-smoke-fixtures.mjs'), 'utf8')
   for (const gate of ['T01', 'T02', 'T03', 'T04', 'T05', 'T06', 'T07', 'T08', 'T09', 'T09Q', 'T10', 'T11', 'T12', 'T13', 'T14', 'T15', 'T16', 'T17', 'T18', 'T19', 'T20', 'T21', 'T22', 'T23', 'T24', 'T25', 'T26', 'T27', 'T28', 'T29', 'T30', 'T31', 'T32', 'T33', 'T34', 'T35', 'T36', 'T37', 'T38', 'T39', 'T40', 'T41', 'T42', 'T43', 'T44', 'T45', 'T46', 'T47', 'T48', 'T49', 'T50', 'T51', 'T52', 'T53', 'T54', 'T55', 'T56', 'T57', 'T58', 'T59', 'T60']) {
@@ -305,9 +314,12 @@ test('the upgraded smoke carries every inventory gate and the critical negative 
   ]) {
     assert.ok(implementation.includes(marker), `missing smoke marker ${marker}`)
   }
-  const extraPatchUses = source.match(/SPLIT_PROCESS_EXTRA_PATCH/gu) ?? []
+  const extraPatchUses = (source
+    + readFileSync(DETACHED_MODULE, 'utf8')
+    + readFileSync(HMR_MODULE, 'utf8')
+    + readFileSync(UNKNOWN_WRITE_MODULE, 'utf8')).match(/SPLIT_PROCESS_EXTRA_PATCH/gu) ?? []
   assert.equal(extraPatchUses.length, 13,
-    'the full lane may only implement the whole-smoke mutation mode, the isolated host-work overlays, the C1 timed patch, the three bounded PR-A Web composition runs, the five bounded PR-B Web-toggle runs and the ONE PR-D product Host patch; the two child mutations, the two required-row mutations, the row-disabled control, the C1 Host fixture patch and the default stub-LLM overlay belong to the extracted cases and the shared modules')
+    'the full lane plus the recovery cases may only implement the whole-smoke mutation mode, the isolated host-work overlays, the C1 timed patch, the three bounded PR-A Web composition runs, the five bounded PR-B Web-toggle runs and the ONE PR-D product Host patch; the two child mutations, the two required-row mutations, the row-disabled control, the C1 Host fixture patch and the default stub-LLM overlay belong to the extracted cases and the shared modules')
   assert.match(readFileSync(C1_SCENE_MODULE, 'utf8'), /SPLIT_PROCESS_EXTRA_PATCH: c1Work\.patchPath/u,
     'the C1 scene owns its fixture patch, not the full lane')
   // The two installed-profile mutations are OWNED by the entry-admission case:
@@ -317,8 +329,8 @@ test('the upgraded smoke carries every inventory gate and the critical negative 
   assert.match(entryAdmission, /SPLIT_PROCESS_EXTRA_PATCH: tuiMutationPatch/u)
   assert.match(entryAdmission, /SPLIT_PROCESS_EXTRA_PATCH: connectionMutationPatch/u)
   assert.match(recovery, /SPLIT_PROCESS_EXTRA_PATCH: sessionControllerMutationPatch/u)
-  assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: schedulePatch/u)
-  assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: armedPatch/u)
+  assert.match(readFileSync(DETACHED_MODULE, 'utf8'), /SPLIT_PROCESS_EXTRA_PATCH: schedulePatch/u)
+  assert.match(readFileSync(DETACHED_MODULE, 'utf8'), /SPLIT_PROCESS_EXTRA_PATCH: armedPatch/u)
   // The row-disabled control and the default stub-LLM overlay live where the
   // shared implementation lives, not in a second inline copy here.
   assert.match(readFileSync(CASE_MODULE, 'utf8'), /SPLIT_PROCESS_EXTRA_PATCH: patchPath/u)
@@ -621,9 +633,9 @@ test('two real TUI Clients must both show one Host Question or Approval before f
   for (const trace of ['m5c-01q', 'm5c-01ar', 'm5c-01aa']) {
     assert.ok(m5c.includes(`trace('${trace}'`), `${trace} must report its real facts`)
   }
-  const fullLane = readFileSync(SCRIPT, 'utf8')
+  const detached = readFileSync(DETACHED_MODULE, 'utf8')
   for (const legacy of ['t49', 't50', 't51', 't52', 't53', 't54', 't55a', 't55b', 't55c-question', 't55c-approval']) {
-    assert.ok(fullLane.includes(legacy), `the M5-C Case must not remove the legacy ${legacy} negative control`)
+    assert.ok(detached.includes(legacy), `the M5-C Case must not remove the legacy ${legacy} negative control`)
   }
   assert.ok(source.indexOf('// M5B-01 (M5-B):') > 0,
     'the M5-C Case must not remove the M5-B same-Session witness')
@@ -1068,7 +1080,7 @@ test('the independent Client lifecycle inventory stays between M5N-03 and the T4
 })
 
 test('the question lanes wait for the real review frame, never the permanent Submit tab', () => {
-  const source = readFileSync(SCRIPT, 'utf8')
+  const source = readFileSync(DETACHED_MODULE, 'utf8')
   // Every question page paints the `○ Submit` nav tab permanently, so a
   // `waitForScreen('Submit', …)` returned while the flow was still on the
   // option page; the driver's final Enter then landed before the review
@@ -1206,7 +1218,7 @@ test('the split-process lane reports every failure through the shared safe proje
 })
 
 test('every real Client-detach recovery case observes the pending source as UNKNOWN', () => {
-  const source = readFileSync(SCRIPT, 'utf8')
+  const source = readFileSync(DETACHED_MODULE, 'utf8')
   const pendingChecks = source.match(/await assertPendingUnobservable\(host, hostBefore,/gu) ?? []
   assert.equal(pendingChecks.length, 2,
     'the detached pending UNKNOWN assertion must cover the Question detach loop (kill + clean exit) and the Approval outcome loop (allow + reject)')
@@ -1283,8 +1295,8 @@ test('the Client peer set is installed into the profile that actually runs it', 
   // would be invisible and the Job could never settle.
   assert.match(readFileSync(C1_SCENE_MODULE, 'utf8'),
     /const c1JobWorkRoot = label => \{\n\s*const root = join\(profileDir, `c1-\$\{label\}`\)/u)
-  assert.match(source, /startC1Host\('job', 't47', \{\}, c1JobWorkRoot\('t47'\)\)/u)
-  assert.match(source, /startC1Host\('job', 't58', \{\}, c1JobWorkRoot\('t58'\)\)/u)
+  assert.match(readFileSync(DETACHED_MODULE, 'utf8'), /startC1Host\('job', 't47', \{\}, c1JobWorkRoot\('t47'\)\)/u)
+  assert.match(readFileSync(HMR_MODULE, 'utf8'), /startC1Host\('job', 't58', \{\}, c1JobWorkRoot\('t58'\)\)/u)
 
   // The existing artifact-absence control and the cross-build drift gate must
   // stay intact in the cases that own them (the full inventory remains in the
@@ -1802,6 +1814,9 @@ test('listing selectable split cases does not install a profile or claim complet
     'suite=surface case=surface.pty-session-write-recovery title=one authenticated Host drives real PTY surfaces through Session writes, recovery and stale-generation fences',
     'suite=multi-client case=multi-client.shared-session-interactions title=two real Clients retain one Session and settle one Host Question or Approval exactly once',
     'suite=navigation case=navigation.non-destructive-client-lifecycle title=leaving a Session from one Client never stops the Host Turn another Client keeps reading',
+    'suite=recovery case=recovery.detached-turn-interactions title=an accepted Turn, Tool, Job, Child and pending interaction survive the Client that started them',
+    'suite=recovery case=recovery.client-hmr-signals title=Client-only HMR, real PTY signals and Host kill keep the official disposition taxonomy',
+    'suite=recovery case=recovery.unknown-write-host-death title=an ACK-dropped write survives Host death as one durable write and no fabricated answer',
   ], 'the listing must follow the registry execution order')
   // A listing never becomes a full PASS and never creates a scene.
   for (const forbidden of ['SPLIT_PROCESS_SMOKE_PASS', 'T60 PASS', 'PASS_REAL_SPLIT_PROCESS',
@@ -1865,11 +1880,16 @@ test('the selectable registry is the single source for listing, resolution and t
     'surface.pty-session-write-recovery',
     'multi-client.shared-session-interactions',
     'navigation.non-destructive-client-lifecycle',
+    'recovery.detached-turn-interactions',
+    'recovery.client-hmr-signals',
+    'recovery.unknown-write-host-death',
   ])
   assert.deepEqual(cases.map(entry => entry.suite), [
     'bootstrap', 'bootstrap', 'bootstrap', 'transport', 'surface', 'multi-client', 'navigation',
+    'recovery', 'recovery', 'recovery',
   ])
-  const [pilot, entry, recovery, transport, surface, multiClient, navigation] = cases
+  const [pilot, entry, recovery, transport, surface, multiClient, navigation,
+    detached, hmrSignals, unknownWrite] = cases
   assert.equal(pilot.title, 'a disabled Host Runtime owner refuses Ready without publishing a Host identity')
   assert.equal(entry.title, 'an inherited Host role without a mounted TUI surface is refused before Host admission')
   assert.equal(recovery.title, 'a renamed-away Host Runtime artifact fails closed and the restored artifact reaches authenticated Ready')
@@ -1877,9 +1897,14 @@ test('the selectable registry is the single source for listing, resolution and t
   assert.equal(surface.title, 'one authenticated Host drives real PTY surfaces through Session writes, recovery and stale-generation fences')
   assert.equal(multiClient.title, 'two real Clients retain one Session and settle one Host Question or Approval exactly once')
   assert.equal(navigation.title, 'leaving a Session from one Client never stops the Host Turn another Client keeps reading')
-  assert.deepEqual([pilot.run, entry.run, recovery.run, transport.run, surface.run, multiClient.run, navigation.run],
+  assert.equal(detached.title, 'an accepted Turn, Tool, Job, Child and pending interaction survive the Client that started them')
+  assert.equal(hmrSignals.title, 'Client-only HMR, real PTY signals and Host kill keep the official disposition taxonomy')
+  assert.equal(unknownWrite.title, 'an ACK-dropped write survives Host death as one durable write and no fabricated answer')
+  assert.deepEqual([pilot.run, entry.run, recovery.run, transport.run, surface.run, multiClient.run, navigation.run,
+    detached.run, hmrSignals.run, unknownWrite.run],
     [runHostRuntimeDisabled, runEntryAdmission, runRuntimeArtifactRecovery, runAuthenticatedLifecycle,
-      runPtySessionWriteRecovery, runSharedSessionInteractions, runNonDestructiveClientLifecycle],
+      runPtySessionWriteRecovery, runSharedSessionInteractions, runNonDestructiveClientLifecycle,
+      runDetachedTurnInteractions, runClientHmrSignals, runUnknownWriteHostDeath],
     'every registered run must be the real scenario, not a copy or a re-wrapped stub')
   assert.ok(Object.isFrozen(cases) && cases.every(entry_ => Object.isFrozen(entry_)), 'the registry must stay frozen')
 
@@ -1889,6 +1914,7 @@ test('the selectable registry is the single source for listing, resolution and t
   assert.deepEqual(resolveSelection({ mode: 'suite', suite: 'surface' }).cases, [surface])
   assert.deepEqual(resolveSelection({ mode: 'suite', suite: 'multi-client' }).cases, [multiClient])
   assert.deepEqual(resolveSelection({ mode: 'suite', suite: 'navigation' }).cases, [navigation])
+  assert.deepEqual(resolveSelection({ mode: 'suite', suite: 'recovery' }).cases, [detached, hmrSignals, unknownWrite])
   assert.throws(() => resolveSelection({ mode: 'case', id: 'does-not-exist' }),
     error => error.code === 'INPUT_SMOKE_SELECTION_INVALID')
   assert.throws(() => resolveSelection({ mode: 'suite', suite: 'does-not-exist' }),
@@ -1918,18 +1944,101 @@ test('a selected result names only the selectable scope', () => {
   assert.doesNotMatch(source, /SPLIT_PROCESS_SMOKE_PASS/u, 'the lane may never print a full PASS')
 })
 
-test('the legacy C1 bridge exposes every helper the still-inline T44-T66 block destructures', () => {
+test('the Full entry runs every registered case in the frozen registry order', () => {
   const source = readFileSync(SCRIPT, 'utf8')
+  const calls = [...source.matchAll(/runRegisteredCase\('([^']+)'\)/gu)].map(match => match[1])
+  assert.deepEqual(calls, listSelectableCases().map(entry => entry.id),
+    'the Full lane must stay wired to every registered case in the same order a suite uses')
+})
+
+test('the recovery cases keep the real HMR, signal and unknown-write observables', () => {
+  const hmr = readFileSync(HMR_MODULE, 'utf8')
+  // Client-only HMR must stay the SAME physical process; a real failure and a
+  // stop-during-HMR each emit exactly one retirement and no fake ready.
+  assert.match(hmr, /client\.signalBusiness\('SIGUSR2'\)/u)
+  assert.match(hmr, /hmr-revision-failure/u)
+  assert.match(hmr, /hmr-revision-retired/u)
+  assert.match(hmr, /duplicate HMR retirement records/u)
+  // Real OS dispositions: SIGINT 130, the double Ctrl+C / Ctrl+D PTY chord,
+  // SIGHUP as a process failure and SIGKILL as a lost Host.
+  assert.match(hmr, /client\.signalBusiness\('SIGINT'\)/u)
+  assert.match(hmr, /exit\.code === 130/u)
+  assert.match(hmr, /ctrlC\.send\('\\x03'\)/u)
+  assert.match(hmr, /ctrlD\.send\('\\x04'\)/u)
+  assert.match(hmr, /process\.kill\(hostPid, 'SIGHUP'\)/u)
+  assert.match(hmr, /process\.kill\(hostPid, 'SIGKILL'\)/u)
+  // The real PTY master close is the separate HUP case, owned by this module.
+  assert.match(hmr, /T12-surface-PTY-HUP/u)
+  assert.match(hmr, /trace\('t12-pty-hup'/u)
+  const unknown = readFileSync(UNKNOWN_WRITE_MODULE, 'utf8')
+  // The ACK-dropped write is a REAL unknown write: the Client paints
+  // indeterminate, the committing Host dies, and the cold resume reads the
+  // original text exactly once with an interrupted settlement and no answer.
+  assert.match(unknown, /SPLIT_PROCESS_CLIENT_DROP_PROMPT_ACK: '1'/u)
+  assert.match(unknown, /client\.waitForScreen\('indeterminate'/u)
+  assert.match(unknown, /process\.kill\(hostPid, 'SIGKILL'\)/u)
+  assert.match(unknown, /recovered\.data\?\.reason\?\.kind === 'interrupted'/u)
+  assert.match(unknown, /afterResume === 1/u)
+  assert.match(unknown, /fabricated answer/u)
+})
+
+test('every recovery case destructures only helpers createC1Scene exposes', () => {
   const scene = readFileSync(C1_SCENE_MODULE, 'utf8')
-  const bridge = /const legacyC1 = createC1Scene\(context\)\n    const \{([\s\S]*?)\} = legacyC1/u.exec(source)
-  assert.ok(bridge, 'the T44-T66 legacy bridge must exist until PR2-C deletes it')
-  const names = bridge[1].split(',').map(name => name.trim()).filter(name => name !== '')
-  assert.ok(names.length > 0, 'the legacy bridge must destructure the scene helpers')
   const returnBlock = scene.slice(scene.lastIndexOf('  return {'), scene.indexOf('\n  }\n}'))
-  for (const name of names) {
-    assert.match(returnBlock, new RegExp(`\\b${name}\\b`, 'u'),
-      `createC1Scene must expose "${name}" to the legacy bridge`)
+  for (const [label, module] of [
+    ['detached-turn-interactions', DETACHED_MODULE],
+    ['client-hmr-signals', HMR_MODULE],
+    ['unknown-write-host-death', UNKNOWN_WRITE_MODULE],
+  ]) {
+    const source = readFileSync(module, 'utf8')
+    const destructured = /  const \{\n([\s\S]*?)\n  \} = scene/u.exec(source)
+    assert.ok(destructured, `${label} must use the ONE C1 scene factory`)
+    const names = destructured[1].split(',').map(name => name.trim()).filter(name => name !== '')
+    assert.ok(names.length > 0, `${label} must destructure the scene helpers it uses`)
+    for (const name of names) {
+      assert.match(returnBlock, new RegExp(`\\b${name}\\b`, 'u'),
+        `createC1Scene must expose "${name}" to ${label}`)
+    }
   }
+})
+
+test('the T44-T66 legacy C1 bridge is gone and the recovery cases own every continuity block', () => {
+  const source = readFileSync(SCRIPT, 'utf8')
+  assert.doesNotMatch(source, /legacyC1/u, 'the PR2-B transitional C1 bridge must be deleted')
+  assert.doesNotMatch(source, /createC1Scene/u, 'the full lane must not import the scene factory itself')
+  const detached = readFileSync(DETACHED_MODULE, 'utf8')
+  const hmr = readFileSync(HMR_MODULE, 'utf8')
+  const unknown = readFileSync(UNKNOWN_WRITE_MODULE, 'utf8')
+  // The three recovery cases are the REAL implementation, and the Full lane
+  // calls the same registered functions at their historical position.
+  assert.match(detached, /export async function runDetachedTurnInteractions\(context\)/u)
+  assert.match(hmr, /export async function runClientHmrSignals\(context\)/u)
+  assert.match(unknown, /export async function runUnknownWriteHostDeath\(context\)/u)
+  const calls = [
+    "await runRegisteredCase('navigation.non-destructive-client-lifecycle')",
+    "await runRegisteredCase('recovery.detached-turn-interactions')",
+    "await runRegisteredCase('recovery.client-hmr-signals')",
+    "await runRegisteredCase('recovery.unknown-write-host-death')",
+  ]
+  let cursor = -1
+  for (const call of calls) {
+    const index = source.indexOf(call)
+    assert.ok(index > cursor, `the Full lane must run ${call} in historical order`)
+    cursor = index
+  }
+  // Every continuity marker moved exactly once: the lane carries none of the
+  // old inline T44-T66 sections.
+  for (const marker of ['// T44:', '// T57:', '// T66:']) {
+    assert.ok(!source.includes(marker), `the lane must not keep the inline ${marker} block`)
+  }
+  assert.equal((hmr.match(/T12-surface-PTY-HUP/gu) ?? []).length, 1,
+    'the real PTY HUP case must live exactly once in the Client HMR/signal case')
+  assert.doesNotMatch(detached, /T12-surface-PTY-HUP/u,
+    'the detached-interaction case must not claim the separate PTY HUP inventory')
+  // Each case owns its own fail-after control inside its try boundary.
+  assert.match(detached, /failpoint\('recovery\.detached-turn-interactions\.after-host-spawn'\)/u)
+  assert.match(hmr, /failpoint\('recovery\.client-hmr-signals\.after-host-spawn'\)/u)
+  assert.match(unknown, /failpoint\('recovery\.unknown-write-host-death\.after-host-spawn'\)/u)
 })
 
 test('the Host Runtime row-disabled control has one implementation', () => {

@@ -73,6 +73,9 @@ const PTY_SCRIPT = join(ROOT, 'scripts', 'smoke', 'split-process', 'pty-session-
 const C1_SCENE_SCRIPT = join(ROOT, 'scripts', 'smoke', 'split-process', 'c1-scene.mjs')
 const SHARED_SESSION_SCRIPT = join(ROOT, 'scripts', 'smoke', 'split-process', 'shared-session-interactions.mjs')
 const NAVIGATION_SCRIPT = join(ROOT, 'scripts', 'smoke', 'split-process', 'non-destructive-client-lifecycle.mjs')
+const DETACHED_SCRIPT = join(ROOT, 'scripts', 'smoke', 'split-process', 'detached-turn-interactions.mjs')
+const HMR_SCRIPT = join(ROOT, 'scripts', 'smoke', 'split-process', 'client-hmr-signals.mjs')
+const UNKNOWN_WRITE_SCRIPT = join(ROOT, 'scripts', 'smoke', 'split-process', 'unknown-write-host-death.mjs')
 const PACKAGE_NAME = '@xmoon76/dsh-pi-tui'
 const DSH_AGENT = '@deepseek-ai/dsh-agent'
 const TARGET_PIN = npmDshVersion()
@@ -864,6 +867,9 @@ test('an unknown error code is never reported, and never changes the category', 
     ['c1-scene', readFileSync(C1_SCENE_SCRIPT, 'utf8')],
     ['shared-session-interactions', readFileSync(SHARED_SESSION_SCRIPT, 'utf8')],
     ['non-destructive-client-lifecycle', readFileSync(NAVIGATION_SCRIPT, 'utf8')],
+    ['detached-turn-interactions', readFileSync(DETACHED_SCRIPT, 'utf8')],
+    ['client-hmr-signals', readFileSync(HMR_SCRIPT, 'utf8')],
+    ['unknown-write-host-death', readFileSync(UNKNOWN_WRITE_SCRIPT, 'utf8')],
   ]) {
     // A waiter failure site: fail('<category>', '<code>') or, where the read must
     // happen first, settleOrFail('<category>', '<code>').
@@ -1032,6 +1038,8 @@ test('the locator trusts only the lane sources and fails closed otherwise', () =
   assert.deepEqual([...LANE_SOURCE_FILES].sort(), [
     'authenticated-lifecycle.mjs',
     'c1-scene.mjs',
+    'client-hmr-signals.mjs',
+    'detached-turn-interactions.mjs',
     'entry-admission.mjs',
     'host-runtime-disabled.mjs',
     'non-destructive-client-lifecycle.mjs',
@@ -1043,6 +1051,7 @@ test('the locator trusts only the lane sources and fails closed otherwise', () =
     'split-smoke-fixtures.mjs',
     'split-smoke-processes.mjs',
     'split-smoke-profile.mjs',
+    'unknown-write-host-death.mjs',
   ])
   // The default trust set is data, not a Set a caller can widen.
   assert.ok(Object.isFrozen(LANE_SOURCE_FILES), 'the exported list must be frozen')
@@ -1542,6 +1551,9 @@ test('no bounded wait in either lane or its extracted support throws a bare Erro
     ['c1-scene', C1_SCENE_SCRIPT, 0],
     ['shared-session-interactions', SHARED_SESSION_SCRIPT, 0],
     ['non-destructive-client-lifecycle', NAVIGATION_SCRIPT, 0],
+    ['detached-turn-interactions', DETACHED_SCRIPT, 0],
+    ['client-hmr-signals', HMR_SCRIPT, 0],
+    ['unknown-write-host-death', UNKNOWN_WRITE_SCRIPT, 0],
   ]
   for (const [name, file, minimum] of sources) {
     const source = readFileSync(file, 'utf8')
