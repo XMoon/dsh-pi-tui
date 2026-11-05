@@ -690,8 +690,8 @@ test('the detached-navigation siblings stay between M5N-01 and the T44 inventory
   assert.match(m5n2, /clientA\.send\('\/fork\\r'\)/u)
   assert.match(m5n2, /event\.attempt === 1/u)
   assert.match(m5n2, /event\.attempt === 2/u)
-  assert.equal((m5n2.match(/!existsSync\(releaseBarrier\)/gu) ?? []).length, 3,
-    'M5N-02 must assert the hold barrier was still absent at each departure')
+  assert.equal((m5n2.match(/!existsSync\(releaseBarrier\)/gu) ?? []).length, 5,
+    'M5N-02 must assert the hold barrier state at each departure (/fork, exit, /rewind) and before the rewind Turn')
   assert.match(m5n2, /durableOf\(sessionX\)\.slice\(xTurn2Index\)\.every\(event => event\.type !== 'turn\/end'\)/u,
     'the fork must not end the running source Turn')
   assert.match(m5n2, /hostSessionLogCount\(dshHome\) === sessionsBeforeFork \+ 1/u,
@@ -715,6 +715,27 @@ test('the detached-navigation siblings stay between M5N-01 and the T44 inventory
   assert.match(m5n2, /hostSessionLogCount\(dshHome\) === sessionsBeforeExit/u,
     'the Client exit must not create or remove a durable Session')
   assert.match(m5n2, /m5n2-b-after-exit/u, 'the second Client must still write the Session after the exit')
+  // `/rewind` is the SAME detached-navigation contract for an EXPLICIT cut:
+  // the picker selects a completed turn, the adopted child carries only the
+  // predecessor prefix, the selected prompt is restored into the ADOPTED
+  // editor, and the source Turn still completes afterwards.
+  assert.match(m5n2, /clientB\.send\('\/rewind\\r'\)/u, 'M5N-02 must drive the real /rewind entry')
+  assert.match(m5n2, /waitForScreen\('turn 4 · m5n2-b-after-exit'/u,
+    'M5N-02 must observe the real rewind picker row before selecting')
+  assert.match(m5n2, /markedTurn/u, 'M5N-02 must move the real picker selection, not guess it')
+  assert.doesNotMatch(m5n2, /await sleep\(/u,
+    'M5N-02 must never pace the picker with a fixed sleep (testing.md rule 5)')
+  assert.match(m5n2, /rewoundHeader\.parentSession === sessionX/u,
+    'the rewound child must name the source as its parent')
+  assert.match(m5n2, /rewoundTexts\.filter\(text => text === 'm5n2-b-after-exit'\)\.length === 0/u,
+    'the rewound child must exclude the selected turn')
+  assert.match(m5n2, /waitForComposerDraft\('m5n2-b-after-exit'\)/u,
+    'the rewind must restore the selected prompt into the ADOPTED editor')
+  assert.match(m5n2, /source Turn completed after the rewind/u)
+  assert.match(m5n2, /rewindCut: 'turn 3 end \(selected turn 4\)'/u)
+  assert.equal((m5n2.match(/startC1Client\(/gu) ?? []).length, 2,
+    'M5N-02 must still start exactly two real Surface Clients')
+
   // Explicit Busy Esc remains the ONE aborting gesture.
   assert.match(m5n2, /clientB\.send\('\\x1b'\)/u)
   assert.match(m5n2, /event\.attempt === 4/u)
