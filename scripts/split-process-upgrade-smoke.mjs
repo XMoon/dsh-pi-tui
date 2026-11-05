@@ -127,6 +127,34 @@ function sleep(ms) {
   return new Promise(resolveSleep => setTimeout(resolveSleep, ms))
 }
 
+/**
+ * Copy one live process handle into bounded failure facts. The PID is derived
+ * from the FULL record chain, then stored beside the last eight event records;
+ * long scenes must not lose their identity merely because the identity record
+ * fell out of the event window.
+ */
+export function snapshotFailureHandle(handle) {
+  if (handle === null || typeof handle !== 'object') return undefined
+  const records = Array.isArray(handle.records) ? handle.records : []
+  let identity
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const name = records[index]?.m4a0
+    if (name === 'ready' || name === 'client-started') {
+      identity = records[index]
+      break
+    }
+  }
+  const snapshot = {
+    role: handle.role,
+    exited: handle.exited === true,
+    exitResult: handle.exitResult === undefined ? undefined : { ...handle.exitResult },
+    records: records.slice(-8),
+  }
+  const pid = Number.isInteger(handle.pid) ? handle.pid : identity?.pid
+  if (Number.isInteger(pid)) snapshot.pid = pid
+  return snapshot
+}
+
 function failpoint(name) {
   if (!FIXED_FAILPOINTS.includes(name)) throw new TypeError(`split upgrade smoke: unknown failpoint ${name}`)
   if (FAILPOINT !== undefined && FAILPOINT === name) throw new Error(`qualification failpoint: ${name}`)
@@ -273,13 +301,8 @@ async function runScene(options, oldArtifact, newArtifact, targetDshVersion) {
   const captureFailure = handles => {
     collectPublishedScopes()
     for (const handle of handles) {
-      if (handle === null || typeof handle !== 'object') continue
-      failureProcesses.push({
-        role: handle.role,
-        exited: handle.exited === true,
-        exitResult: handle.exitResult === undefined ? undefined : { ...handle.exitResult },
-        records: Array.isArray(handle.records) ? handle.records.slice(-8) : [],
-      })
+      const snapshot = snapshotFailureHandle(handle)
+      if (snapshot !== undefined) failureProcesses.push(snapshot)
     }
   }
   let failpointTriggered = false

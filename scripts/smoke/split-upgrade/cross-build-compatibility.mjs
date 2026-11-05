@@ -880,6 +880,7 @@ export async function runCrossBuildCompatibility(context) {
     if (detachedHost !== undefined) {
       failureHandles.push({
         role: 'host-u07',
+        pid: detachedHost.pid,
         get exited() { return !alive(detachedHost.pid) },
         get records() { return readHostLogRecords(detachedHost.scopeDir, detachedHost.pid) },
       })
