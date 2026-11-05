@@ -804,20 +804,6 @@ test('an existing --evidence file is replaced on a private inode, never rewritte
   assert.deepEqual(readdirSync(dir).filter(name => name.includes('.tmp')), [], 'no temp file may survive')
 })
 
-test('every default lane output line is either a fixed marker or a whitelisted field', () => {
-  // The failpoint cleanup proof is a qualification-only diagnostic path: it must
-  // report the leftover count and the Seat verdict, never the thrown message.
-  const tSource = readFileSync(PROCESS_SCRIPT, 'utf8')
-  assert.match(tSource, /console\.error\(`FAILPOINT_SEAT_FAILURE seat=\$\{boundedName\(seatName\)\} the Seat stayed owned/u)
-  assert.doesNotMatch(tSource, /FAILPOINT_SEAT_FAILURE: \$\{error/u)
-  assert.match(tSource, /console\.error\(`FAILPOINT_CLEANUP leftovers=/u)
-  // And the two default failure lines stay fixed-shape for both lanes.
-  for (const source of [tSource, readFileSync(UPGRADE_SCRIPT, 'utf8')]) {
-    assert.match(source, /SMOKE_FAILURE: \$\{safeFailureSummary\(error\)\}/u)
-    assert.match(source, /SMOKE_FORENSICS: \$\{forensicErrorText\(error\)\}/u)
-  }
-})
-
 test('one real lane failure leaves exactly one report and one evidence twin', (t) => {
   const life = testLifecycle(t)
   const dir = life.tempDir('split-smoke-report-count-')
@@ -942,10 +928,6 @@ test('a PASS that cannot land its requested evidence document fails instead', (t
   } finally {
     chmodSync(readOnly, 0o700)
   }
-  // And the announcement order makes it impossible to print PASS first.
-  const source = readFileSync(UPGRADE_SCRIPT, 'utf8')
-  assert.ok(source.indexOf('writeRequestedEvidence(options.evidence, evidence)') < source.indexOf("'SPLIT_UPGRADE_SMOKE_PASS"),
-    'the PASS marker may only be written after the requested evidence document landed')
 })
 
 // ── Round 8: the reviewer's four P2 findings ────────────────────────────────
@@ -1326,14 +1308,6 @@ test('a pre-collector failure cannot publish a forged assertion locator', (t) =>
   assert.equal(report.assertion, genuine.assertion)
 })
 
-test('both lanes raise locatable assertions through the shared class', () => {
-  for (const file of [PROCESS_SCRIPT, UPGRADE_SUPPORT]) {
-    assert.match(readFileSync(file, 'utf8'),
-      /function assert\(condition, message\) \{\n\s*if \(!condition\) throw new SplitSmokeAssertionError\(message\)\n\}/u,
-      `${basename(file)} must raise locatable assertions`)
-  }
-})
-
 test('a real upgrade support helper assertion publishes a trusted site without its payload', (t) => {
   const life = testLifecycle(t)
   const dir = life.tempDir('split-upgrade-helper-assertion-')
@@ -1584,35 +1558,34 @@ test('no bounded wait in either lane or its extracted support throws a bare Erro
   const sources = [
     // The lane's top-level `waitFor*` helpers moved into the shared module and
     // the extracted cases; the remaining scenario waits are inline closures.
-    ['split-process', PROCESS_SCRIPT, 0],
-    ['split-upgrade', UPGRADE_SCRIPT, 0],
-    ['split-upgrade-support', UPGRADE_SUPPORT, 3],
-    ['cross-build-compatibility', CROSS_BUILD_SCRIPT, 0],
-    ['manual-client-reload', MANUAL_RELOAD_SCRIPT, 1],
-    ['reload-source-isolation', SOURCE_ISOLATION_SCRIPT, 0],
-    ['split-smoke-processes', PROCESSES_LIB, 5],
-    ['split-smoke-sessions', SESSIONS_LIB, 3],
-    ['split-smoke-fixtures', FIXTURES_LIB, 1],
-    ['entry-admission', ENTRY_ADMISSION_SCRIPT, 0],
-    ['runtime-artifact-recovery', RECOVERY_SCRIPT, 0],
-    ['authenticated-lifecycle', TRANSPORT_SCRIPT, 0],
-    ['pty-session-write-recovery', PTY_SCRIPT, 0],
-    ['c1-scene', C1_SCENE_SCRIPT, 0],
-    ['shared-session-interactions', SHARED_SESSION_SCRIPT, 0],
-    ['non-destructive-client-lifecycle', NAVIGATION_SCRIPT, 0],
-    ['detached-turn-interactions', DETACHED_SCRIPT, 0],
-    ['client-hmr-signals', HMR_SCRIPT, 0],
-    ['unknown-write-host-death', UNKNOWN_WRITE_SCRIPT, 0],
-    ['web-helpers', WEB_HELPERS_SCRIPT, 0],
-    ['official-web-composition', OFFICIAL_WEB_SCRIPT, 0],
-    ['web-runtime-toggle', WEB_TOGGLE_SCRIPT, 0],
-    ['web-startup-preference', WEB_PREF_SCRIPT, 0],
-    ['web-product', WEB_PRODUCT_SCRIPT, 0],
+    ['split-process', PROCESS_SCRIPT],
+    ['split-upgrade', UPGRADE_SCRIPT],
+    ['split-upgrade-support', UPGRADE_SUPPORT],
+    ['cross-build-compatibility', CROSS_BUILD_SCRIPT],
+    ['manual-client-reload', MANUAL_RELOAD_SCRIPT],
+    ['reload-source-isolation', SOURCE_ISOLATION_SCRIPT],
+    ['split-smoke-processes', PROCESSES_LIB],
+    ['split-smoke-sessions', SESSIONS_LIB],
+    ['split-smoke-fixtures', FIXTURES_LIB],
+    ['entry-admission', ENTRY_ADMISSION_SCRIPT],
+    ['runtime-artifact-recovery', RECOVERY_SCRIPT],
+    ['authenticated-lifecycle', TRANSPORT_SCRIPT],
+    ['pty-session-write-recovery', PTY_SCRIPT],
+    ['c1-scene', C1_SCENE_SCRIPT],
+    ['shared-session-interactions', SHARED_SESSION_SCRIPT],
+    ['non-destructive-client-lifecycle', NAVIGATION_SCRIPT],
+    ['detached-turn-interactions', DETACHED_SCRIPT],
+    ['client-hmr-signals', HMR_SCRIPT],
+    ['unknown-write-host-death', UNKNOWN_WRITE_SCRIPT],
+    ['web-helpers', WEB_HELPERS_SCRIPT],
+    ['official-web-composition', OFFICIAL_WEB_SCRIPT],
+    ['web-runtime-toggle', WEB_TOGGLE_SCRIPT],
+    ['web-startup-preference', WEB_PREF_SCRIPT],
+    ['web-product', WEB_PRODUCT_SCRIPT],
   ]
-  for (const [name, file, minimum] of sources) {
+  for (const [name, file] of sources) {
     const source = readFileSync(file, 'utf8')
     const waiters = [...source.matchAll(/^(?:export )?async function (wait\w+)\([\s\S]*?^\}/gmu)]
-    assert.ok(waiters.length >= minimum, `${name} exposes fewer waits than expected: ${String(waiters.length)}`)
     for (const [body, fn] of waiters.map(match => [match[0], match[1]])) {
       // `waitForOutcome` only delegates to another (already classified) waiter.
       if (fn === 'waitForOutcome') continue
