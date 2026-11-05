@@ -12,9 +12,12 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { executeModelToolFixture } from '@deepseek-ai/dsh-tool-testkit'
+import { NativeToolExecutor } from '@deepseek-ai/dsh-tool-executor-native'
 import { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
-import ToolRuntime, { defineTool, renderToolsSdk, type ToolDefinition } from '@deepseek-ai/dsh-tools'
+import ToolRuntime, { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools'
+import { renderToolsSdk } from '@deepseek-ai/dsh-tool-executor-ptc'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { apply as applyVisualTools, Config } from '../../src/app/host/visual-tools.ts'
 import {
@@ -49,6 +52,9 @@ function mountRegistry(): Context {
   })
   ;(ctx as unknown as { provide(name: string, value: object): void }).provide('sessionProjections', NO_BOUNDARY)
   new ToolRuntime(ctx)
+  // Test-owned registry: the official native executor supplies the batch
+  // settlement the production Base row would provide.
+  ctx.tools.setExecutor(new NativeToolExecutor(ctx))
   return ctx
 }
 
@@ -87,7 +93,7 @@ function svgArgs() {
 }
 
 async function execute(ctx: Context, name: string, args: unknown) {
-  return await ctx.tools.execute({
+  return await executeModelToolFixture(ctx, {
     signal: new AbortController().signal,
     callId: ToolCallId(`visual-${name}`),
     name,
@@ -472,6 +478,9 @@ function mountWithBoundary(): { ctx: Context; boundary: { openTurnStartSeq: numb
     stateOf: () => boundary,
   })
   new ToolRuntime(ctx)
+  // Test-owned registry: the official native executor supplies the batch
+  // settlement the production Base row would provide.
+  ctx.tools.setExecutor(new NativeToolExecutor(ctx))
   return { ctx, boundary }
 }
 
@@ -488,7 +497,7 @@ test('a generating result inside an open model step projects its stable referenc
   const projected = projectContentOf(ctx, CHART_TOOL_NAME)
   const blocks = chartContentBlocks(chartFactFromArgs(chartArgs()))
   const session = { id: 'session-probe' }
-  const result = await ctx.tools.execute({
+  const result = await executeModelToolFixture(ctx, {
     signal: new AbortController().signal,
     callId: ToolCallId('call-ref'),
     name: CHART_TOOL_NAME,
@@ -548,7 +557,7 @@ test('present_visual refuses agentless, nested, empty, oversized, duplicated and
   const { ctx } = mountWithBoundary()
   applyVisualTools(ctx, { enabled: { get: () => true } } as never)
   const ref = 'sv1_0123456789abcdef0123'
-  const run = async (visuals: unknown) => ctx.tools.execute({
+  const run = async (visuals: unknown) => executeModelToolFixture(ctx, {
     signal: new AbortController().signal,
     callId: ToolCallId('call-present'),
     name: PRESENT_VISUAL_TOOL_NAME,
@@ -629,6 +638,9 @@ function mountWithControlledObservation(boundaryState: {
     stateOf: () => ({ ...boundary, lastStepBoundary: boundary.lastStepBoundary === null ? null : { ...boundary.lastStepBoundary } }),
   })
   new ToolRuntime(ctx)
+  // Test-owned registry: the official native executor supplies the batch
+  // settlement the production Base row would provide.
+  ctx.tools.setExecutor(new NativeToolExecutor(ctx))
   return {
     ctx,
     boundary,

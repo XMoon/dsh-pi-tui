@@ -13,6 +13,8 @@ import {
   type GenerateOptions,
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
+import type { Context } from '@deepseek-ai/cordis'
+import { executeModelToolFixture } from '@deepseek-ai/dsh-tool-testkit'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { readSurfaceCatalog } from '../../../src/runtime/direct/surface-catalog.ts'
@@ -306,13 +308,13 @@ class RalphAdapter extends LlmAdapter {
 }
 
 function executeTool(
-  host: { ctx: { tools: { execute(input: unknown): Promise<unknown> } } },
+  host: { ctx: Context },
   name: string,
-  agent: unknown,
+  agent: Agent,
   args: unknown,
   signal: AbortSignal,
 ): Promise<{ isError?: boolean; content?: readonly { type?: string; text?: string }[] }> {
-  return host.ctx.tools.execute({
+  return executeModelToolFixture(host.ctx, {
     signal,
     callId: `optional-bundle-${name}-${Date.now()}-${Math.random().toString(16).slice(2)}` as never,
     name,

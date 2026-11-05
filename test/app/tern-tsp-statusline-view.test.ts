@@ -33,6 +33,7 @@ import { TranscriptFolder } from '../../src/domain/transcript/folder.ts'
 import { TranscriptWindowController } from '../../src/domain/transcript/window.ts'
 import type { SurfaceEventRoutingSource } from '../../src/app/surface/event-routing.ts'
 import { createPluginManagerWorkspacePanel } from '../../src/tui/plugin-manager/workspace.ts'
+import { fakeAgentModel } from '../support/agent-model-double.ts'
 import { installTspPane, type TspPane } from '../support/tsp-terminal-fixture.ts'
 import { wireNodes } from '../support/tsp-picker-wire.ts'
 import { waitUntil } from '../support/tsp-runner-harness.ts'
@@ -428,7 +429,12 @@ async function mountStatuslineHarness(options: {
     // source. REMOTE-equivalent: neither exists, so the official session
     // projection answers (the §2.4 "equivalent source" for that branch).
     liveAgent: () => (options.branch === 'direct'
-      ? { session: { id: SESSION_ID, header: { cwd: '/agent/AGENT_CWD' } }, options: { provider: 'p', model: 'm' } }
+      ? {
+          session: { id: SESSION_ID, header: { cwd: '/agent/AGENT_CWD' } },
+          options: { provider: 'p', model: 'm' },
+          // DSH 0.2.2: the Agent owns its model selection (`AgentModel`).
+          model: fakeAgentModel(undefined, { provider: 'p', model: 'm' }),
+        }
       : undefined),
     generation: () => 1,
     currentSessionId: () => SESSION_ID,

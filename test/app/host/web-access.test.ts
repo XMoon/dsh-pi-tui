@@ -232,15 +232,17 @@ async function createFixture(options: FixtureOptions = {}): Promise<WebAccessFix
   ;(loader as unknown as { internal: unknown }).internal = internal
 
   // Recorder around the Loader's OWN persistent surface: the toggle must never
-  // reach it. Original functions are kept unbound and called with this loader.
+  // reach it. cordis-plugin-loader 1.1 renamed that tree-level persistence hook
+  // from `write()` to `commit(change)` (a per-entry `Entry.update` does not call
+  // it). Original functions are kept unbound and called with this loader.
   let writes = 0
   let treeMutations = 0
   const writeStacks: string[] = []
-  const write = loader.write
-  loader.write = (...args: Parameters<Loader['write']>) => {
+  const commit = loader.commit
+  loader.commit = (...args: Parameters<Loader['commit']>) => {
     writes += 1
-    writeStacks.push(new Error('loader.write').stack ?? '')
-    return write.apply(loader, args)
+    writeStacks.push(new Error('loader.commit').stack ?? '')
+    return commit.apply(loader, args)
   }
   const update = loader.update
   loader.update = async (...args: Parameters<Loader['update']>) => {
@@ -372,9 +374,9 @@ test('the toggle drives off -> on -> off -> on through the real Entry.update', a
       `the protected "${row.id}" owner must survive the second enable`)
   }
 
-  // The whole toggle wrote NOTHING persistent: no Loader write, no Loader tree
-  // mutation (no `loader.update`, no `loader.create`, no `loader.remove`).
-  assert.equal(fixture.writes(), 0, `the toggle must not persist the Loader tree: ${fixture.writeStacks().join('\n---\n')}`)
+  // The whole toggle wrote NOTHING persistent: no Loader tree commit, no Loader
+  // tree mutation (no `loader.update`, no `loader.create`, no `loader.remove`).
+  assert.equal(fixture.writes(), 0, `the toggle must not commit the Loader tree: ${fixture.writeStacks().join('\n---\n')}`)
   assert.equal(fixture.treeMutations(), 0, 'the toggle must not use loader.update/create/remove')
 })
 
@@ -712,9 +714,13 @@ test('unmounting the Host runtime during a mutation leaves no unhandled rejectio
     await fixture.dispose()
   })
   const pending = fixture.service.setEnabled(true)
-  // Host shutdown while the transition is in flight.
-  await fixture.ctx.fiber.dispose()
+  // Host shutdown while the transition is in flight. cordis 4.1's disposal
+  // AWAITS the pending plugin lifecycle work, so the fixture gate is released
+  // CONCURRENTLY with the dispose: releasing it afterwards would deadlock the
+  // disposal on the very gate it is waiting for.
+  const disposal = fixture.ctx.fiber.dispose()
   release()
+  await disposal
   const settled = await Promise.race([
     pending,
     // Bounded window: a hang fails HERE instead of pending forever.

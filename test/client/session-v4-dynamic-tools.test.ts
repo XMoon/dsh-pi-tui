@@ -15,6 +15,7 @@
 import assert from 'node:assert/strict'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import test, { afterEach } from 'node:test'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import { Context } from '@deepseek-ai/cordis'
 import { visibleWidth } from '@xmoon76/pi-tui'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
@@ -378,6 +379,9 @@ test('a real long Agent/Session admits the next ordinary prompt and the TUI fold
     await ctx.plugin(SessionProjectionRegistry)
     await ctx.plugin(SystemPrompt, { personaPrefix: '', personaSuffix: '' })
     await ctx.plugin(ToolRuntime)
+    // The official executor owns batch settlement (DSH 0.2.2 Base installs it;
+    // this standalone fixture must do the same).
+    await ctx.plugin(NativeToolExecutor)
     await ctx.plugin(AgentRegistry)
     await ctx.plugin(AgentLoop, { agents: [] })
     const adapter = new TextAdapter()

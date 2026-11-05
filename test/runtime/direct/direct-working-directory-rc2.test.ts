@@ -25,6 +25,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { executeModelToolFixture } from '@deepseek-ai/dsh-tool-testkit'
 import { Context } from '@deepseek-ai/cordis'
 import { SessionId, SessionLogOffset, SessionSeq, buildForkSeed, type Session, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
@@ -97,7 +98,7 @@ async function boot(life: TestLifecycle): Promise<Fixture> {
 
 /** Execute one tool through the real ToolRuntime pipeline. */
 function callTool(ctx: Context, name: string, args: unknown, agent: Agent) {
-  return ctx.tools.execute({
+  return executeModelToolFixture(ctx, {
     signal,
     callId: ToolCallId(`s2b-wd-${++callCounter}`),
     name,

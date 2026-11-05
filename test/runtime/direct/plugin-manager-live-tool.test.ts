@@ -26,6 +26,7 @@
 
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
@@ -39,7 +40,8 @@ import LlmRuntime, {
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
-import ToolRuntime, { defineContentToolFixture } from '@deepseek-ai/dsh-tools'
+import ToolRuntime from '@deepseek-ai/dsh-tools'
+import { defineContentToolFixture } from '@deepseek-ai/dsh-tool-testkit'
 import { PluginManagerController } from '../../../src/app/plugin-manager/controller.ts'
 import { bundleValue } from '../../../src/app/plugin-manager/model.ts'
 import { createDiag } from '../../../src/runtime/process/diagnostics.ts'
@@ -89,6 +91,9 @@ async function mountLoop(): Promise<LoopHarness> {
   await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(SystemPrompt, { personaPrefix: '', personaSuffix: '' })
   await ctx.plugin(ToolRuntime)
+  // The official executor owns batch settlement (DSH 0.2.2 Base installs it;
+  // this standalone fixture must do the same).
+  await ctx.plugin(NativeToolExecutor)
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(AgentLoop, { agents: [] })
   const adapter = new RecordingAdapter()
