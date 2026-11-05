@@ -36,6 +36,7 @@ import type { PluginManagerPort } from '../plugin-manager-port.ts'
 import type { JobObservationPort } from '../job-observation-port.ts'
 import type { HostUserShellPort } from '../host-user-shell-port.ts'
 import type { DeliveredFileReadPort } from '../deliverables-port.ts'
+import type { WebAccessPort } from '../web-access-port.ts'
 
 /** Every semantic port the Remote backend serves (one adapter each). */
 export interface RemoteBackendParts {
@@ -57,6 +58,8 @@ export interface RemoteBackendParts {
   readonly jobObservation: JobObservationPort
   /** The official generated `workspaceFiles` read adapter (Delivered files PR2). */
   readonly deliveredFileRead: DeliveredFileReadPort
+  /** The private `piTuiWebAccess` control adapter (M5-W PR-C). */
+  readonly webAccess: WebAccessPort
 }
 
 /** Assemble the experimental Remote `Backend` from its proven adapters. */

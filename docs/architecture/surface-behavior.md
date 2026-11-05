@@ -155,6 +155,51 @@ Must-not: add a second observer/screen owner, concatenate status/label/output,
 claim full history, move the background transcript, or give a Label Job a
 Command page.
 
+## Web frontend control (`/web`)
+
+`/web` is ONE local, sessionless Client command that controls the Split Host's
+official Web frontend. It never creates a Session, submits a prompt, starts a
+second Host, changes the default backend or disconnects the TUI; on the Direct
+backend it answers `Web frontend controls are available only in a Split Client.`
+and opens nothing. The menu is a SHORT operation list, never a second Settings
+workspace: the default PiTui presentation is one `app.openSettings` overlay, and
+the experimental TSP renderer presents one native `ui.picker` plus ONE read-only
+Details Reading. Both consume the SAME application-level presentation request,
+so the action vocabulary cannot fork between renderers.
+
+The menu reads the Host's current state on entry and offers exactly what that
+state admits:
+
+| Host state | Menu actions | What an action really does |
+|---|---|---|
+| `disabled` | Enable Web, Details | the Host's own `setEnabled(true)` |
+| `enabled` | Open Browser, Copy Link, Disable Web, Details | official authenticated URL for the explicit opener/clipboard, or `setEnabled(false)` |
+| `changing` | Details (no write) | nothing concurrent is submitted |
+| `unavailable` | Details (the reason is shown) | no implicit recovery or retry |
+| connection unreadable | the explicit unavailable statement, esc | no guessed Off, no write |
+
+Every operation is committed by the command, never by the presenter: one Host
+call, then ONE authoritative status re-read whose result is what the menu
+re-projects. A dismissal retires the menu only and never undoes a Host-accepted
+change. Open Browser issues the Client-local platform opener and only ever
+states `Opening browser…`; the authenticated URL contains the Host's official
+launch token and never enters a notice, the transcript, the Details page, a
+diagnostic or a trace. Copy Link reports only the clipboard's boolean
+acknowledgement (`Link copied` or `Clipboard unavailable`). Details is read-only
+and states the loopback Host, the current state, the frontend-only meaning of
+enable/disable, the next-launch lifetime of the preference and that the page
+opens the Web home where the user chooses a session — there is no TUI→browser
+session navigation or deep-link synthesis.
+
+The `Auto-enable Web on Host startup` row in `/settings → Tools` is a different
+fact with a different lifetime: it persists a PROFILE preference
+(`pi-tui-web-preferences.autoStart`, default Off, options On/Off) for the NEXT
+Split Host launch, read by the Host cold boot before Ready. Saving it never
+enables or disables the current Host, the row never reports the current Web
+frontend state, and `/web` remains the immediate control. A non-current
+configuration backend offers no confirmable candidate, and the authoritative
+re-read confirms only the persisted preference.
+
 ## Settings Workspace
 
 `/settings` and its real alias `/status` open ONE fullscreen lease with ONE

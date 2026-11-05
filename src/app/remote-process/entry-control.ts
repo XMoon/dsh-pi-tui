@@ -66,6 +66,13 @@ export interface EntryControlRequest {
    * a published CLI, Surface or HTTP surface.
    */
   readonly webAccessEnabled?: unknown
+  /**
+   * Qualification-only target of the `qualification-web-autostart` op: absent
+   * asks for the profile's current Web startup preference, otherwise the value
+   * is passed to the official generated `settings.mutate` as the next-launch
+   * `autoStart`. Internal control channel only.
+   */
+  readonly webAutoStart?: unknown
 }
 
 /** Handles one control request; `true` means the process should stop reading. */

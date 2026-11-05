@@ -60,6 +60,10 @@
       "types": "./dist/visual-tools.d.mts",
       "default": "./dist/visual-tools.mjs"
     },
+    "./web-preferences": {
+      "types": "./dist/web-preferences.d.mts",
+      "default": "./dist/web-preferences.mjs"
+    },
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },

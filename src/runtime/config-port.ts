@@ -663,6 +663,46 @@ export interface VisualToolsConfig {
 }
 
 /**
+ * The profile-owned Web startup preference (`pi-tui-web-preferences.autoStart`):
+ * whether a NEW Split Host enables the official Web frontend while it boots.
+ *
+ * This is a CONFIGURATION fact, never the current Web state: the live
+ * `enabled/disabled/changing/unavailable` authority stays the Host's private
+ * `piTuiWebAccess` service, and saving this preference must never enable or
+ * disable a running Host. The preference applies to the next Host launch only.
+ */
+export interface WebStartupPreferenceState {
+  /** The effective `autoStart` value the next Host cold boot will apply. */
+  readonly autoStart: boolean
+  /** The namespace revision this state was read at; a Confirm submits it back
+   *  as the official `expectedRevision`, so an external write between the read
+   *  and the Confirm is a conflict instead of a silent last-write-wins. */
+  readonly revision: number
+  /** Whether the USER profile layer declares the value. `false` means the
+   *  effective value is the schema default — the only provenance the Host form
+   *  exposes — so the UI may mark it `[default]`; the default is never
+   *  re-derived here. */
+  readonly userOverridden: boolean
+}
+
+/**
+ * The profile-wide Web startup preference. The write is the official
+ * revision-checked settings mutation of the `pi-tui-web-preferences` entry. A
+ * resolved write is NOT a read-back: the caller must
+ * {@link WebStartupPreferenceConfig.read} again and only that read earns
+ * `Verified`.
+ */
+export interface WebStartupPreferenceConfig {
+  /** The current Host preference, or `undefined` when the profile section
+   *  cannot be read at all. Never a fabricated default. */
+  read(): WebStartupPreferenceState | undefined
+  /** Persist `autoStart` through the official settings write at the revision
+   *  the user's decision was read at. A stale revision is a refusal (the
+   *  official conflict), never a silent overwrite. */
+  setAutoStart(value: boolean, expectedRevision: number): Promise<void>
+}
+
+/**
  * How current this backend's config reads are (M3-3B, plan §9.1).
  *
  * `ready` — the values below are authoritative for the live backend;
@@ -821,4 +861,6 @@ export interface ConfigPort {
   readonly web: WebProviderConfig
   /** The profile-wide built-in visual tools (Chart + SVG) availability switch. */
   readonly visualTools: VisualToolsConfig
+  /** The profile-owned Web startup preference for the NEXT Split Host launch. */
+  readonly webStartupPreference: WebStartupPreferenceConfig
 }

@@ -154,6 +154,10 @@ function proxyRunner(
         read: () => ({ enabled: true, revision: 1, userOverridden: false, applied: true }),
         setEnabled: async (_enabled: boolean, _revision: number) => {},
       },
+      webStartupPreference: {
+        read: () => ({ autoStart: false, revision: 1, userOverridden: false }),
+        setAutoStart: async (_value: boolean, _revision: number) => {},
+      },
       permissions: {
         presetNames: () => [],
         defaultPreset: () => undefined,

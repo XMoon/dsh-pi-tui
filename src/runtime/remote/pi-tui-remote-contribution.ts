@@ -31,6 +31,7 @@ import type { TypertRemoteContribution } from '@deepseek-ai/dsh-typert-protocol'
 import { PI_TUI_FILE_REFERENCES_LIST } from './pi-tui-file-reference-contract.ts'
 import { PI_TUI_TERMINAL_PROGRESS_WATCH } from './pi-tui-terminal-progress-contract.ts'
 import {
+  PI_TUI_WEB_ACCESS_GET_AUTHENTICATED_URL,
   PI_TUI_WEB_ACCESS_GET_STATUS,
   PI_TUI_WEB_ACCESS_SET_ENABLED,
 } from './pi-tui-web-access-contract.ts'
@@ -50,6 +51,7 @@ export const PI_TUI_HOST_CONTRIBUTION: TypertContribution = {
     PI_TUI_TERMINAL_PROGRESS_WATCH,
     PI_TUI_WEB_ACCESS_GET_STATUS,
     PI_TUI_WEB_ACCESS_SET_ENABLED,
+    PI_TUI_WEB_ACCESS_GET_AUTHENTICATED_URL,
   ],
 }
 
@@ -61,5 +63,6 @@ export const PI_TUI_CLIENT_CONTRIBUTION: TypertRemoteContribution = {
     PI_TUI_TERMINAL_PROGRESS_WATCH,
     PI_TUI_WEB_ACCESS_GET_STATUS,
     PI_TUI_WEB_ACCESS_SET_ENABLED,
+    PI_TUI_WEB_ACCESS_GET_AUTHENTICATED_URL,
   ],
 }

@@ -183,6 +183,10 @@ test('the Direct backend is the current production surface and serves EXACTLY th
       read: () => undefined,
       setEnabled: async (_enabled: boolean, _revision: number) => {},
     },
+    webStartupPreference: {
+      read: () => undefined,
+      setAutoStart: async (_value: boolean, _revision: number) => {},
+    },
   }
   const hostFile = {
     listReferences: async () => ({ kind: 'ok' as const, items: [] }),
@@ -225,7 +229,12 @@ test('the Direct backend is the current production surface and serves EXACTLY th
     stat: async () => ({ version: 'v1' }),
     read: async () => ({ stat: { version: 'v1' }, offset: 1, limit: 1, text: '', lines: 0, eof: true }),
   }
-  const backend = createDirectBackend(subagent, sessionReader, pendingInputReader, sessionWriter, sessionLifecycle, interaction, catalog, config, hostFile, sessionArchive, hostCommand, pluginManager, jobObservation, hostUserShell, deliveredFileRead)
+  const webAccess: import('../../src/runtime/web-access-port.ts').WebAccessPort = {
+    getStatus: async () => ({ state: 'unavailable', reason: 'test' }),
+    setEnabled: async () => ({ state: 'unavailable', reason: 'test' }),
+    getAuthenticatedUrl: async () => { throw new Error('test') },
+  }
+  const backend = createDirectBackend(subagent, sessionReader, pendingInputReader, sessionWriter, sessionLifecycle, interaction, catalog, config, hostFile, sessionArchive, hostCommand, pluginManager, jobObservation, hostUserShell, deliveredFileRead, webAccess)
   assert.equal(backend.kind, 'direct')
   assert.equal(backend.subagent, subagent)
   assert.equal(backend.sessionReader, sessionReader)

@@ -218,6 +218,7 @@ async function setupEnvironment(): Promise<Harness> {
     config: {
       configReadiness: () => 'ready' as const,
       visualTools: { read: () => undefined },
+      webStartupPreference: { read: () => undefined, setAutoStart: async (_value: boolean, _revision: number) => {} },
       footerCustomItems: { rawForPersistence: () => ({ kind: 'available' as const, value: undefined }) },
       permissions: {
         presetNames: () => [],

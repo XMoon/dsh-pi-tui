@@ -48,6 +48,10 @@ import {
   type ProcessSeat,
 } from './local-scope.ts'
 import { runDetached } from '../../runtime/process/tasks.ts'
+import {
+  PI_TUI_WEB_ACCESS_NAMESPACE,
+  type PiTuiWebAccessStatus,
+} from '../../runtime/remote/pi-tui-web-access-contract.ts'
 import { cleanupOwnedFiles, type LocalInstanceRecord } from './local-discovery.ts'
 
 /**
@@ -135,14 +139,16 @@ export const HOST_ONLY_PATCH = `# M4-B1 Host-only profile overlay: production Ho
       name: '@xmoon76/dsh-pi-tui/host-runtime'
       inject: [typert, agents, fileReferences, workingDirectory]
 
-# ── Official Web composition (M5-W PR-A/PR-B) ───────────────────────────────
+# ── Official Web composition (M5-W PR-A/PR-B/PR-C) ──────────────────────────
 # The official Browser Web rows, declared here ONCE and DISABLED BY DEFAULT.
 # This declaration is the ONE roster the private 'piTuiWebAccess' Host service
 # toggles at runtime: it flips 'disabled' on exactly these rows through
 # 'Entry.update', never a second declaration, never a profile patch write, and
-# never a separate Web process. The toggle is per Host lifetime and this
-# default-off state is what every cold boot starts from; there is still no
-# user-facing surface in this stage (no /web command, no flag, no setting).
+# never a separate Web process. The toggle is per Host lifetime; a cold boot
+# starts from this default-off state UNLESS the profile's own
+# 'pi-tui-web-preferences.autoStart' preference is on, in which case the boot
+# sequence below enables the same roster before Ready ('/web' remains the
+# immediate control of a running Host).
 # Only the isolated qualification runs additionally override rows through
 # SPLIT_PROCESS_EXTRA_PATCH; that internal test channel is not a user API.
 #
@@ -420,6 +426,76 @@ async function waitForQualificationBarrier(path: string): Promise<void> {
   }
 }
 
+/** The Host's own settings-form projection (the official SettingsForms read). */
+interface HostSettingsServiceLike {
+  describe(options?: { readonly redactSecrets?: boolean }): readonly {
+    readonly ns?: unknown
+    readonly value?: unknown
+  }[] | undefined
+}
+
+/** The profile entry that owns the Web startup preference. */
+const WEB_STARTUP_PREFERENCE_NAMESPACE = 'pi-tui-web-preferences'
+
+/**
+ * Apply the profile-owned Web startup preference BEFORE the Host becomes Ready.
+ *
+ * `autoStart` is read from the SAME `ctx` that already settled the profile: a
+ * missing settings service or a missing `pi-tui-web-preferences` section is a
+ * corrupted composition and fails the Host startup loudly (never "treated as
+ * Off"), while a failing Web enable is a bounded diagnostic: the Host keeps its
+ * Session/Agent/Gateway graph and publishes Ready with the Web frontend in
+ * whatever state the private service truthfully reports.
+ *
+ * The diagnostic carries the failure TYPE only — never a URL, launch token,
+ * cookie or profile path.
+ */
+async function applyWebStartupPreference(context: import('@deepseek-ai/cordis').Context): Promise<void> {
+  const settings = context.get('settings') as HostSettingsServiceLike | undefined
+  if (settings === undefined || typeof settings.describe !== 'function') {
+    throw new Error('local host entry: the Host has no settings service, so the Web startup preference cannot be read')
+  }
+  const descriptor = (settings.describe() ?? []).find(entry => entry.ns === WEB_STARTUP_PREFERENCE_NAMESPACE)
+  if (descriptor === undefined) {
+    throw new Error('local host entry: the profile projects no "pi-tui-web-preferences" settings section')
+  }
+  const value = descriptor.value
+  const autoStart = typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as { readonly autoStart?: unknown }).autoStart
+    : undefined
+  // The schema owns the boolean strictly; anything else means the section was
+  // projected by a different composition, not a missing user choice.
+  if (typeof autoStart !== 'boolean') {
+    throw new Error('local host entry: "pi-tui-web-preferences.autoStart" is not a boolean')
+  }
+  if (!autoStart) return
+  try {
+    const service = context.get(PI_TUI_WEB_ACCESS_NAMESPACE) as {
+      setEnabled(enabled: boolean): Promise<PiTuiWebAccessStatus>
+    } | undefined
+    if (service === undefined) throw new Error('the private Web access service is not published')
+    const status = await service.setEnabled(true)
+    if (status.state !== 'enabled') {
+      throw new Error(status.state === 'unavailable' ? status.reason : `the Web frontend reached "${status.state}"`)
+    }
+    writeEntryRecord({
+      m4a0: 'web-autostart',
+      processRole: 'host',
+      pid: process.pid,
+      phase: 'pre-ready',
+      status: 'enabled',
+    })
+  } catch (error) {
+    writeEntryRecord({
+      m4a0: 'diagnostic',
+      processRole: 'host',
+      pid: process.pid,
+      code: 'web-autostart-unavailable',
+      error: error instanceof Error ? error.message : String(error),
+    })
+  }
+}
+
 interface HostConnectionService {
   readonly fetch: {
     register(route: {
@@ -645,6 +721,9 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
       })
       const { settleHostEntries, collectHostEntryStatus } = await import('./host-bootstrap.ts')
       await settleHostEntries(handle.ctx)
+      // M5-W PR-C: the profile-owned Web startup preference is consumed HERE —
+      // after the profile settled, before the readiness audit and Ready.
+      await applyWebStartupPreference(handle.ctx)
       const status = collectHostEntryStatus(handle.ctx, { profile: options.profile, processStartIdentity })
       // Installed after the Host readiness audit and before Ready. The
       // observer is Host-process-local: it subscribes to the official live

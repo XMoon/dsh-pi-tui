@@ -55,6 +55,7 @@ import type { TuiApp } from '../../tui-app.ts'
 import type { CommandRuntime } from './runtime.ts'
 import type { ModelSelectionOwner, SelectionRef } from './model-selection.ts'
 import type { ModelPresentation } from './model-presentation.ts'
+import type { WebAccessPresentation } from './web-access-presentation.ts'
 import type { PresetPresentation } from './preset-presentation.ts'
 import type { SessionBrowserPresentation } from './session-browser-presentation.ts'
 import type { NotificationMethod, NotificationMode } from '../../domain/notification/settings.ts'
@@ -137,6 +138,8 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
   readonly modelPresentation?: () => ModelPresentation | undefined
   /** Only the Preset presenter; never an alternate command executor. */
   readonly presetPresentation?: () => PresetPresentation | undefined
+  /** M5-W PR-C: only the native `/web` presenter; never an alternate executor. */
+  readonly webPresentation?: () => WebAccessPresentation | undefined
   /** Native Session Browser presenter, read live; absent on unsupported renderers. */
   readonly sessionBrowserPresentation?: () => SessionBrowserPresentation | undefined
   /** PR3-A: the renderer-neutral notice sink (registration/refresh failures
@@ -281,6 +284,8 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
     readonly catalog: TuiCommandRunner['catalog']
     readonly config: TuiCommandRunner['config']
     readonly hostFile: TuiCommandRunner['hostFile']
+    /** M5-W PR-C: the Split-Client Web frontend control (`/web`). */
+    readonly webAccess: TuiCommandRunner['webAccess']
     /** Shell amendment (M3-4 PR3): whether Host-shell completion facts are
      * reachable on the selected backend (Direct true / Remote false). */
     readonly hostShellCompletion: boolean
@@ -952,6 +957,9 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
           },
           tspCommandPickerCapabilities: () => deps.surface.tspCommandPickerCapabilities(),
         },
+        // M5-W PR-C: the native `/web` presenter, read LIVE like the Model and
+        // Preset ones (never a cached mount).
+        deps.webPresentation?.(),
       )
       // Per-name degradation notice (M3-4 PR2): a Host-claimed name (the
       // Remote Host composition mounts `/export` itself) fails only ITS own
@@ -1257,6 +1265,10 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       // The Host-file port (migration M1.10): `@`-mention discovery and
       // send-time canonicalization against the Host filesystem.
       hostFile: deps.backend.hostFile,
+      // M5-W PR-C: the Split-Client Web frontend control (`/web`). The command
+      // layer owns every read/write through this ONE port; the presenters never
+      // reach the Host.
+      webAccess: deps.backend.webAccess,
       hostShellCompletion: deps.backend.hostShellCompletion,
       // The readable-transcript business capability (round 5): explicitly
       // backend-owned, NEVER derived from the commandRegistry mirror below

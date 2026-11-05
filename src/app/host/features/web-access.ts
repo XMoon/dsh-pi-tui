@@ -22,7 +22,10 @@
  * Every mutation goes through `Entry.update({ disabled })` on the rows the
  * Host-only overlay already declares — never `loader.update()`, never a
  * `ConfigEditor`/plugin-manager write, never `cordis.patch.yml`. The toggle is
- * therefore ephemeral by construction: the next cold boot is default-off.
+ * therefore ephemeral by construction: a cold boot starts from the overlay's
+ * default-off rows, and only the profile's own `pi-tui-web-preferences.autoStart`
+ * preference (a separate, durable next-launch fact) can ask the boot sequence to
+ * enable the same roster before Ready.
  *
  * LAYER NOTE: this row lives in `app/host/features/**` because the built-in
  * Host Runtime owns the row and its lifetime; its wire contract lives in
@@ -35,6 +38,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import {
   PI_TUI_WEB_ACCESS_NAMESPACE,
+  type PiTuiWebAccessAuthenticatedUrl,
   type PiTuiWebAccessStatus,
 } from '../../../runtime/remote/pi-tui-web-access-contract.ts'
 
@@ -239,6 +243,36 @@ export class PiTuiWebAccessHostService extends TypertRemoteService {
    */
   async getStatus(): Promise<PiTuiWebAccessStatus> {
     return this.inFlight > 0 ? { state: 'changing' } : this.describe()
+  }
+
+  /**
+   * The private authenticated-URL method (`piTuiWebAccess/getAuthenticatedUrl`):
+   * the official launch URL of THIS Host's Web frontend, built by the official
+   * `connection.authenticatedUrl(webServer.getOrigin() + '/')`.
+   *
+   * It answers ONLY while the live roster/status is `enabled`. The value carries
+   * the official launch token, so this method never stores it, never adds it to
+   * a status object and never writes it to a diagnostic: the caller (one
+   * explicit user action) is the only owner.
+   *
+   * @returns the official authenticated URL of the running Web frontend.
+   */
+  async getAuthenticatedUrl(): Promise<PiTuiWebAccessAuthenticatedUrl> {
+    const status = await this.getStatus()
+    if (status.state !== 'enabled') {
+      throw new Error(status.state === 'unavailable'
+        ? `web access: the official Web frontend is unavailable (${status.reason})`
+        : 'web access: the official Web frontend is not enabled')
+    }
+    const connection = this.ctx.get('connection') as { authenticatedUrl?(baseUrl: string): string } | undefined
+    if (connection === undefined || typeof connection.authenticatedUrl !== 'function') {
+      throw new Error('web access: the Host has no official Connection service')
+    }
+    const webServer = this.ctx.get('webServer') as { getOrigin?(): string } | undefined
+    if (webServer === undefined || typeof webServer.getOrigin !== 'function') {
+      throw new Error('web access: the Host has no official WebServer service')
+    }
+    return { url: connection.authenticatedUrl(`${webServer.getOrigin()}/`) }
   }
 
   /**

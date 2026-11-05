@@ -23,6 +23,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { unavailableWebAccess } from '../support/web-access-fake.ts'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
@@ -218,6 +219,7 @@ function fakeRunnerDeps(options: {
     }).applyPermissionPreset = options.applyPermissionPreset
   }
   const runner: TuiCommandRunner = {
+    webAccess: unavailableWebAccess(),
     beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx,
@@ -378,6 +380,7 @@ function fakeRunnerDeps(options: {
       catalog: runner.catalog,
       config: runner.config,
       hostFile: runner.hostFile,
+      webAccess: runner.webAccess,
       hostShellCompletion: false,
       transcriptExportAvailable: false,
     },

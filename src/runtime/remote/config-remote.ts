@@ -80,6 +80,8 @@ import type {
   ConfigReadiness,
   VisualToolsConfig,
   VisualToolsState,
+  WebStartupPreferenceConfig,
+  WebStartupPreferenceState,
 } from '../config-port.ts'
 import { SupersededReadError } from '../read-error.ts'
 import type { RemoteCommandsSource } from './host-command-remote.ts'
@@ -1682,6 +1684,64 @@ class RemoteVisualToolsConfig implements VisualToolsConfig {
   }
 }
 
+/** The official profile entry id of the Host row that owns the Web startup
+ *  preference (its Loader row id is also its Settings namespace). */
+const WEB_STARTUP_PREFERENCE_NS = 'pi-tui-web-preferences'
+
+/**
+ * The Remote Web startup preference: the mirrored `pi-tui-web-preferences` form
+ * section over the official generated settings remote. The write is a
+ * revision-checked path mutation and the mirror's post-settlement refresh is
+ * the only new authority — the mutate reply is never trusted as the new value.
+ *
+ * It reads the preference only: the CURRENT Host's Web state has no settings
+ * projection and stays the private `piTuiWebAccess` service's authority.
+ */
+class RemoteWebStartupPreferenceConfig implements WebStartupPreferenceConfig {
+  private readonly mirror: RemoteConfigMirror
+
+  constructor(mirror: RemoteConfigMirror) {
+    this.mirror = mirror
+  }
+
+  read(): WebStartupPreferenceState | undefined {
+    const view = this.mirror.namespace(WEB_STARTUP_PREFERENCE_NS)
+    if (view === undefined) return undefined
+    const value = plainRecord(view.value)
+    const autoStart = value?.autoStart
+    // A missing/non-boolean projection is unreadable, never the default.
+    if (typeof autoStart !== 'boolean') return undefined
+    const revision = view.revision
+    // Without the read revision the decision cannot be submitted conditionally;
+    // report the section unreadable rather than allowing a silent overwrite.
+    if (typeof revision !== 'number') return undefined
+    const user = plainRecord(view.user)
+    return {
+      autoStart,
+      revision,
+      userOverridden: user?.autoStart !== undefined,
+    }
+  }
+
+  async setAutoStart(value: boolean, expectedRevision: number): Promise<void> {
+    const view = this.mirror.namespace(WEB_STARTUP_PREFERENCE_NS)
+    if (view === undefined) {
+      throw new Error(`settings namespace "${WEB_STARTUP_PREFERENCE_NS}" is not available in this deployment`)
+    }
+    if (view.value === undefined) {
+      throw new Error(`settings namespace "${WEB_STARTUP_PREFERENCE_NS}" exposes no form projection`)
+    }
+    // The decision's revision is the fence; `record` keeps a failed
+    // post-settlement refresh a currentness uncertainty, not proof of refusal.
+    await this.mirror.mutate(
+      WEB_STARTUP_PREFERENCE_NS,
+      [{ op: 'set', path: ['autoStart'], value }],
+      expectedRevision,
+      'record',
+    )
+  }
+}
+
 /* ------------------------------------------------------------------------- *
  * The port.
  * ------------------------------------------------------------------------- */
@@ -1710,6 +1770,7 @@ export class RemoteConfigPort implements ConfigPort {
   readonly subagentModelSelection: SubagentModelSelectionConfig
   readonly web: WebProviderConfig
   readonly visualTools: VisualToolsConfig
+  readonly webStartupPreference: WebStartupPreferenceConfig
 
   /** `undefined` while the `tui-app` namespace is absent from the mirror
    *  (the port's documented absence contract). */
@@ -1749,6 +1810,7 @@ export class RemoteConfigPort implements ConfigPort {
     this.presetDefault = new RemotePresetDefaultConfig(this.mirror)
     this.subagentModelSelection = new RemoteSubagentModelSelectionConfig(this.mirror)
     this.visualTools = new RemoteVisualToolsConfig(this.mirror)
+    this.webStartupPreference = new RemoteWebStartupPreferenceConfig(this.mirror)
     // S2/PR-B §3.2: the Host web-provider setting stays DIRECT-only. The wire
     // publishes no provider-selection read or write, so this backend reports a
     // static unavailable and refuses every write — it never names a Host

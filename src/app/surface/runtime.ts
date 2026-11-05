@@ -118,6 +118,7 @@ import {
   type PastedPathReceipt,
 } from './pasted-image-intake.ts'
 import type { ModelPresentation } from '../command/model-presentation.ts'
+import type { WebAccessPresentation } from '../command/web-access-presentation.ts'
 import type { PresetPresentation } from '../command/preset-presentation.ts'
 import type { SessionBrowserPresentation } from '../command/session-browser-presentation.ts'
 import { pituiSurfaceInteractionPresenter, type SurfaceInteractionPresenter } from './interaction-presenter.ts'
@@ -523,6 +524,8 @@ export interface SurfaceRendererMount {
     readonly modelPresentation?: ModelPresentation | undefined
     /** The native `/preset` presenter, beside the Model one. */
     readonly presetPresentation?: PresetPresentation | undefined
+    /** M5-W PR-C: the native `/web` presenter, beside the other two. */
+    readonly webPresentation?: WebAccessPresentation | undefined
     /** Internal read-only Session Browser presenter; no production command opens it in B1-A. */
     readonly sessionBrowserPresentation?: SessionBrowserPresentation | undefined
     /**
@@ -861,6 +864,8 @@ export interface SurfaceRuntime<Event extends RoutedSessionEvent> {
   readonly modelPresentation?: ModelPresentation | undefined
   /** Native /preset presentation, absent until a supported renderer mounts. */
   readonly presetPresentation?: PresetPresentation | undefined
+  /** M5-W PR-C: native /web presentation, absent on PiTui and unsupported TSP panes. */
+  readonly webPresentation?: WebAccessPresentation | undefined
   /** Internal read-only Session Browser seam; absent on PiTui and unsupported TSP panes. */
   readonly sessionBrowserPresentation?: SessionBrowserPresentation | undefined
   /**
@@ -1273,6 +1278,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
   let composerPort: SubmissionComposerPort | undefined
   let modelPresentation: ModelPresentation | undefined
   let presetPresentation: PresetPresentation | undefined
+  let webPresentation: WebAccessPresentation | undefined
   let sessionBrowserPresentation: SessionBrowserPresentation | undefined
   /**
    * PR3-B §3.3: the renderer input projection constructed at `start()` and the
@@ -2706,6 +2712,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     },
     get modelPresentation() { return modelPresentation },
     get presetPresentation() { return presetPresentation },
+    get webPresentation() { return webPresentation },
     get sessionBrowserPresentation() { return sessionBrowserPresentation },
     get display(): SurfaceDisplaySeam {
       return displaySeam()
@@ -2975,6 +2982,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
         composerPort = mounted.composer
         modelPresentation = mounted.modelPresentation
         presetPresentation = mounted.presetPresentation
+        webPresentation = mounted.webPresentation
         sessionBrowserPresentation = mounted.sessionBrowserPresentation
         interactionPresenter = mounted.interaction
         rendererDispose = mounted.dispose
@@ -3156,6 +3164,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       rendererCommandCompletionsInstaller = undefined
       modelPresentation = undefined
       presetPresentation = undefined
+      webPresentation = undefined
       sessionBrowserPresentation = undefined
       // A disposed surface never binds its renderer input afterwards.
       pendingInputBinding = undefined

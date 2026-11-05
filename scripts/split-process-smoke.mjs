@@ -8425,6 +8425,305 @@ async function main() {
       `PA-05 the required real-Browser qualification ended as ${String(webQualification.browser)}; only PASS qualifies this lane`)
 
     /**
+     * M5-W PR-C (t74): the profile-owned Web startup preference and the `/web`
+     * entry on REAL processes.
+     *
+     * PC-07  a default-Off Host serves no Web; the PREFERENCE is saved On through
+     *        the REAL generated Client `settings` wire (a read-back proves the
+     *        profile patch), the RUNNING Host is not changed, and a NEW Host
+     *        process over the same profile auto-enables the roster before Ready;
+     * PC-04/PC-06  a real Split TUI drives `/web → Enable Web` and the Host then
+     *        serves the authenticated index while the TUI keeps working;
+     * PC-05  the official authenticated URL is obtained through the real Client,
+     *        exchanged for a cookie and followed to the served page — the URL and
+     *        token are never emitted;
+     * PC-08  a manual `/web Disable` keeps the TUI working, saving Off does not
+     *        change the running Host, and the NEXT cold boot is default-off.
+     */
+    const qualifyWebAutostart = async () => {
+      const autostartRoot = join(workDir, 'pr-c-autostart')
+      mkdirSync(autostartRoot, { recursive: true, mode: 0o700 })
+      chmodSync(autostartRoot, 0o700)
+      const hosts = []
+      const clients = []
+      const peers = []
+      const rowStates = ready => new Map(PR_A_WEB_ROWS.map(row => [row.id,
+        (ready.entries ?? []).find(entry => entry.id === row.id)?.state]))
+      /** No declared Web row is live (absent/state-4 are plainly off). */
+      const assertFullyOff = (ready, label) => {
+        const live = [...rowStates(ready)]
+          .filter(([, state]) => state !== 'absent' && state !== 'state-4')
+          .map(([id, state]) => `${id}:${state ?? 'missing'}`)
+        assert(live.length === 0, `${label}: these Web rows are not plainly off: ${live.join(',')}`)
+      }
+      /** Every declared Web row is ACTIVE except the ONE allowed pending row. */
+      const assertFullyOn = (ready, label) => {
+        const notActive = [...rowStates(ready)]
+          .filter(([id, state]) => id !== 'ui-deliverables' && state !== 'active')
+          .map(([id, state]) => `${id}:${state ?? 'missing'}`)
+        assert(notActive.length === 0, `${label}: these Web rows are not active: ${notActive.join(',')}`)
+      }
+      /** The ordinary HTTP facts of a Host with no served frontend. */
+      const assertHttpOff = async (origin, label) => {
+        const root = await fetchStatus(`${origin}/`)
+        assert(root.status === 404, `${label}: GET / must be 404 with Web off, got ${root.status}`)
+        const api = await fetchStatus(`${origin}/api`)
+        assert(api.status === 401, `${label}: unauthenticated /api must stay 401, got ${api.status}`)
+        return { root: root.status, api: api.status }
+      }
+      const assertServing = async (origin, launch, label) => {
+        const facts = await readHostWebIndex(origin, launch, label)
+        assertWebIndexQualified(facts, label, targetDshVersion)
+        assert(facts.index.status === 200 && facts.graph !== undefined,
+          `${label}: the authenticated Web index is not served (HTTP ${facts.index.status})`)
+        const sse = await sseProbe(origin, '/plugins/events')
+        assert(sse.status === 200 && sse.contentType.startsWith('text/event-stream'),
+          `${label}: /plugins/events is not a live stream (${sse.status})`)
+        return { index: facts.index.status, graphEntries: facts.graph.entries.length, sse: sse.status }
+      }
+      const startHost = async label => {
+        await seatFree(`\0dsh-pi-tui-h-${scopeSuffix}`, 15_000)
+        const host = new EntryProcess('host', entries.host, { ...base })
+        hosts.push(host)
+        const ready = await host.waitFor(record => record.m4a0 === 'ready', `${label} Host ready`, 240_000)
+        return { host, ready }
+      }
+      const startPeer = async label => {
+        const peer = new EntryProcess('peer', entries.client, {
+          ...base,
+          env: { ...base.env, SPLIT_PROCESS_CLIENT_MODE: 'peer' },
+        })
+        peers.push(peer)
+        await peer.waitFor(record => record.m4a0 === 'ready', `${label} peer ready`, 180_000)
+        return peer
+      }
+      const startTui = async label => {
+        await seatFree(`\0dsh-pi-tui-c-${scopeSuffix}`, 15_000)
+        const tui = new SurfaceEntryProcess(entries.client, { ...base, workDir })
+        clients.push(tui)
+        const ready = await tui.waitFor(record => record.m4a0 === 'ready', `${label} TUI ready`, 180_000)
+        assert(ready.surfaceMounted === true && ready.transport === 'connected',
+          `${label}: the real Split TUI did not mount its surface`)
+        return tui
+      }
+      const webAccess = async (peer, label, value) => {
+        const requestId = `prc-${++statusSequence}`
+        peer.send({
+          op: 'qualification-web-access',
+          requestId,
+          ...(value === undefined ? {} : { webAccessEnabled: value }),
+        })
+        return peer.waitFor(entry => entry.op === 'web-access' && entry.requestId === requestId,
+          `${label} web-access`, 300_000)
+      }
+      const assertToggle = (record, expected, label) => {
+        assert(record.ok === true, `${label}: the private Web access call failed: ${JSON.stringify(record.errorCode ?? null)}`)
+        assert(record.status?.state === expected,
+          `${label}: the Host reported ${JSON.stringify(record.status)} instead of ${expected}`)
+      }
+      const webPreference = async (peer, label, value) => {
+        const requestId = `prc-pref-${++statusSequence}`
+        peer.send({
+          op: 'qualification-web-autostart',
+          requestId,
+          ...(value === undefined ? {} : { webAutoStart: value }),
+        })
+        return peer.waitFor(entry => entry.op === 'web-autostart' && entry.requestId === requestId,
+          `${label} web-autostart`, 120_000)
+      }
+      const webAccessUrl = async (peer, label) => {
+        const requestId = `prc-url-${++statusSequence}`
+        peer.send({ op: 'qualification-web-access-url', requestId })
+        return peer.waitFor(entry => entry.op === 'web-access-url' && entry.requestId === requestId,
+          `${label} web-access-url`, 120_000)
+      }
+      /** Drive the real TUI `/web` menu: open it, move `downs` rows, activate. */
+      const driveWebMenu = async (tui, label, downs, expected) => {
+        tui.send('/web\r')
+        await tui.waitForScreen('Status:', `${label} menu`)
+        for (let step = 0; step < downs; step += 1) tui.send('\u001b[B')
+        tui.send('\r')
+        await tui.waitForScreen(expected, `${label} result`)
+      }
+      try {
+        // ── A. Default-Off Host + save On through the real Remote settings ───
+        const first = await startHost('PC-07 default-off')
+        const origin = first.ready.localHost.origin
+        assertFullyOff(first.ready, 'PC-07a')
+        const offHttp = await assertHttpOff(origin, 'PC-07a')
+        const firstPid = first.ready.pid
+        const peer = await startPeer('PC-07')
+        assertToggle(await webAccess(peer, 'PC-07a status', undefined), 'disabled', 'PC-07a getStatus')
+
+        const beforeSave = await webPreference(peer, 'PC-07a read', undefined)
+        assert(beforeSave.ok === true && beforeSave.autoStart === false && beforeSave.userOverridden === false,
+          `PC-07 the default preference is ${JSON.stringify(beforeSave)}`)
+        const savedOn = await webPreference(peer, 'PC-07 write On', true)
+        assert(savedOn.ok === true && savedOn.autoStart === true && savedOn.userOverridden === true && savedOn.readBack === true,
+          `PC-07 the preference write did not read back On: ${JSON.stringify(savedOn)}`)
+        // Saving the preference must NOT change the running Host.
+        assertToggle(await webAccess(peer, 'PC-07a after-save', undefined), 'disabled', 'PC-07a after-save')
+        const stillOff = await assertHttpOff(origin, 'PC-07a after-save')
+        trace('t74-web-preference-saved', {
+          readBack: savedOn.autoStart,
+          userOverridden: savedOn.userOverridden,
+          runningHostStillOff: stillOff.root === 404,
+          hostPid: firstPid,
+        })
+
+        // ── B. The real TUI `/web → Enable Web` serves the frontend (PC-04/06) ──
+        const tui = await startTui('PC-06 TUI')
+        await driveWebMenu(tui, 'PC-06 enable', 1, 'Status: enabled')
+        const enabledStatus = await hostStatus(first.host)
+        assertFullyOn(enabledStatus, 'PC-06 enabled')
+        assert(enabledStatus.pid === firstPid, 'PC-06 the enable changed the Host process')
+        const launch = readJson(join(dshHome, 'run', 'dsh-pi-tui', first.ready.localHost.scopeId, 'launch.json'))
+        const serving = await assertServing(origin, launch, 'PC-06')
+        // Close the menu (Esc) before the TUI receives ordinary input: the open
+        // overlay owns the keyboard, so a prompt typed into it would only edit
+        // the list's own search box.
+        tui.send('\u001b')
+        await tui.waitForScreenGone('Status: enabled', 'PC-06 menu closed')
+        // The TUI keeps working on the serving Host.
+        tui.send('pc-06 tui works\r')
+        await tui.waitForScreen('pc-06 tui works', 'PC-06 TUI prompt')
+        trace('t74-web-tui-enable', {
+          index: serving.index,
+          graphEntries: serving.graphEntries,
+          sse: serving.sse,
+          tuiPromptAccepted: true,
+          sameHostProcess: true,
+        })
+
+        // ── C. The official authenticated URL (PC-05) ───────────────────────
+        const link = await webAccessUrl(peer, 'PC-05')
+        assert(link.ok === true, `PC-05 the authenticated URL call failed: ${JSON.stringify(link.errorCode ?? null)}`)
+        assert(link.loopback === true && link.protocol === 'http:' && link.pathname === '/',
+          `PC-05 the launch URL is not the loopback Web root: ${JSON.stringify(link)}`)
+        assert(link.tokenParams === 1 && link.paramNames?.length === 1 && link.paramNames[0] === 'token',
+          `PC-05 the launch URL does not carry exactly the official token parameter: ${JSON.stringify(link)}`)
+        assert(link.exchangeStatus >= 300 && link.exchangeStatus < 400,
+          `PC-05 the launch URL was not exchanged for a cookie (HTTP ${String(link.exchangeStatus)})`)
+        assert(link.pageStatus === 200 && link.pageBytes > 1024,
+          `PC-05 the cookie did not reach the served page (HTTP ${String(link.pageStatus)}, ${String(link.pageBytes)} bytes)`)
+        assert(!('url' in link) && !('token' in link), 'PC-05 the URL/token leaked into a record')
+        // Copy Link through the SAME real TUI menu (enabled projection): rows are
+        // status -> Open Browser -> Copy Link, so two Downs then Enter. Only the
+        // clipboard acknowledgement may be painted.
+        tui.send('/web\r')
+        await tui.waitForScreen('Status: enabled', 'PC-05 menu')
+        tui.send('\u001b[B\u001b[B')
+        tui.send('\r')
+        await tui.waitForScreen('Link copied', 'PC-05 copy acknowledgement')
+        const copyScreen = (await tui.viewport()).join('\n')
+        assert(!copyScreen.includes('token='), 'PC-05 the launch URL/token was painted by Copy Link')
+        assert(copyScreen.includes('Link copied'), 'PC-05 the copy acknowledgement disappeared')
+        trace('t74-web-authenticated-url', {
+          exchangeStatus: link.exchangeStatus,
+          pageStatus: link.pageStatus,
+          pageBytes: link.pageBytes,
+          tokenParameter: link.tokenParams,
+          urlEmitted: false,
+          copyAcknowledged: true,
+        })
+
+        // ── D. Manual `/web Disable` keeps the TUI working (PC-08) ──────────
+        // Rows in the open enabled menu: status -> Open -> Copy -> Disable.
+        tui.send('\u001b[B\u001b[B\u001b[B')
+        tui.send('\r')
+        await tui.waitForScreen('Status: disabled', 'PC-08 disable')
+        const disabledStatus = await hostStatus(first.host)
+        assertFullyOff(disabledStatus, 'PC-08 manual disable')
+        assert(disabledStatus.pid === firstPid, 'PC-08 the disable changed the Host process')
+        await assertHttpOff(origin, 'PC-08 manual disable')
+        tui.send('\u001b')
+        await tui.waitForScreenGone('Status: disabled', 'PC-08 menu closed')
+        tui.send('pc-08 after disable\r')
+        await tui.waitForScreen('pc-08 after disable', 'PC-08 TUI prompt after disable')
+        // Saving Off does not change the running Host; saving Off again on a
+        // RE-ENABLED Host still leaves it enabled (the preference is next-launch).
+        const savedOff = await webPreference(peer, 'PC-08 write Off', false)
+        assert(savedOff.ok === true && savedOff.autoStart === false && savedOff.readBack === true,
+          `PC-08 the Off write did not read back: ${JSON.stringify(savedOff)}`)
+        assertToggle(await webAccess(peer, 'PC-08 re-enable', true), 'enabled', 'PC-08 re-enable')
+        const offWhileEnabled = await webPreference(peer, 'PC-08 write Off again', false)
+        assert(offWhileEnabled.ok === true && offWhileEnabled.autoStart === false, 'PC-08 the Off write did not settle')
+        assertToggle(await webAccess(peer, 'PC-08 still enabled', undefined), 'enabled',
+          'PC-08 saving Off disabled the running Host')
+        tui.send('/exit\r')
+        assert((await tui.waitForExit(60_000)).code === 0, 'PC-08 the TUI did not exit normally')
+        assert((await peer.shutdown()).code === 0, 'PC-08 the peer did not stop')
+        assert((await first.host.shutdown()).code === 0, 'PC-08 the first Host did not stop')
+
+        // ── E. The NEXT cold boot applies the (now Off) preference ──────────
+        const second = await startHost('PC-08 next cold boot')
+        assertFullyOff(second.ready, 'PC-08 next cold boot')
+        assert(second.ready.pid !== firstPid, 'PC-08 the next Host must be a NEW process')
+        await assertHttpOff(second.ready.localHost.origin, 'PC-08 next cold boot')
+        trace('t74-web-autostart-next-boot-off', {
+          hostPid: second.ready.pid,
+          previousHostPid: firstPid,
+          webRowsLive: 0,
+          preferenceApplied: 'off',
+        })
+        assert((await second.host.shutdown()).code === 0, 'PC-08 the second Host did not stop')
+
+        // ── F. Save On, stop, and prove the NEXT Host auto-starts (PC-07) ───
+        const third = await startHost('PC-07 preference-off')
+        assertFullyOff(third.ready, 'PC-07b')
+        const thirdPid = third.ready.pid
+        const peer2 = await startPeer('PC-07b')
+        const onAgain = await webPreference(peer2, 'PC-07b write On', true)
+        assert(onAgain.ok === true && onAgain.autoStart === true, 'PC-07 the second On write did not settle')
+        assertToggle(await webAccess(peer2, 'PC-07b after-save', undefined), 'disabled',
+          'PC-07 saving On enabled the running Host')
+        await peer2.shutdown()
+        assert((await third.host.shutdown()).code === 0, 'PC-07 the third Host did not stop')
+
+        const autostarted = await startHost('PC-07 auto-start')
+        assert(autostarted.ready.pid !== thirdPid, 'PC-07 the auto-start Host must be a NEW process')
+        assertFullyOn(autostarted.ready, 'PC-07 auto-start')
+        assert(autostarted.host.records.some(record => record.m4a0 === 'web-autostart' && record.status === 'enabled'),
+          'PC-07 the Host did not record the applied auto-start')
+        const autoLaunch = readJson(join(dshHome, 'run', 'dsh-pi-tui', autostarted.ready.localHost.scopeId, 'launch.json'))
+        const autoServing = await assertServing(autostarted.ready.localHost.origin, autoLaunch, 'PC-07 auto-start')
+        // A real TUI + Agent turn on the auto-started Host.
+        const tui2 = await startTui('PC-07 TUI')
+        tui2.send('pc-07 autostart turn\r')
+        await tui2.waitForScreen('pc-07 autostart turn', 'PC-07 TUI prompt')
+        await tui2.waitForScreen('stub answer', 'PC-07 Agent answer')
+        tui2.send('/exit\r')
+        assert((await tui2.waitForExit(60_000)).code === 0, 'PC-07 the TUI did not exit normally')
+        assert((await autostarted.host.shutdown()).code === 0, 'PC-07 the auto-start Host did not stop')
+        trace('t74-web-autostart', {
+          previousHostPid: thirdPid,
+          hostPid: autostarted.ready.pid,
+          rowsActiveBeforeReady: [...rowStates(autostarted.ready)]
+            .filter(([, state]) => state === 'active').length,
+          autostartRecord: 'web-autostart enabled before ready',
+          index: autoServing.index,
+          graphEntries: autoServing.graphEntries,
+          sse: autoServing.sse,
+          tuiAgentTurn: 'accepted and answered',
+          hiddenSameProcessRemount: false,
+        })
+        return { verified: true }
+      } finally {
+        for (const client of clients) {
+          try { await client.dispose() } catch { /* best effort */ }
+        }
+        for (const peer of peers) {
+          if (peer.exited) continue
+          try { await peer.shutdown() } catch { /* the global backstop owns leftovers */ }
+        }
+        for (const host of hosts) {
+          if (host.exited) continue
+          try { await host.shutdown() } catch { /* the global backstop owns leftovers */ }
+        }
+      }
+    }
+
+    /**
      * M5-W PR-B (t73): the official Web frontend runtime toggle on ONE Host.
      *
      * PB-01  an ordinary default-off Host serves no SPA root and no `/plugins`
@@ -9153,9 +9452,13 @@ async function main() {
       }
       return { browser: browserCase }
     }
+
     const toggleQualification = await qualifyWebRuntimeToggle()
     assert(!REQUIRE_WEB_BROWSER || toggleQualification.browser === 'PASS',
       `PB-07 the required real-Browser qualification ended as ${String(toggleQualification.browser)}; only PASS qualifies this lane`)
+    // M5-W PR-C (t74): the profile-owned startup preference on REAL processes.
+    const autostartQualification = await qualifyWebAutostart()
+    assert(autostartQualification.verified === true, 't74 the Web startup preference qualification did not complete')
 
     // T18: installed package shape is already checked above; Direct `--help`
     // and the role-only negative control ran before any Host existed.
@@ -9187,6 +9490,9 @@ async function main() {
         ? 'PASS_OFFICIAL_WEB_RUNTIME_TOGGLE_REAL_BROWSER'
         : `NOT_RUN_OR_INCOMPLETE(${toggleQualification.browser})`,
       webRuntimeToggleBrowser: toggleQualification.browser,
+      webStartupPreference: autostartQualification.verified === true
+        ? 'PASS_PROFILE_AUTOSTART_AND_WEB_ENTRY_REAL_PROCESSES'
+        : 'NOT_VERIFIED',
       m4c1: 'PASS_REAL_SPLIT_PROCESS',
       m5b: 'pass (two REAL surface Clients retained ONE Session X; shared pending inbox + official Ctrl+S steer of the other Client\'s occurrence; two independent same-text submits stayed two; A -> Y navigation kept B writing X; B-only exit kept A/Host)',
       m5n: 'pass (NON-DESTRUCTIVE navigation: /new and /resume left a held-running Host Turn alive -> completed; a RUNNING target projected without an idle wait; already-current no-op; a Host-queued occurrence stayed with X across the Client\'s departure; explicit Busy Esc still aborted the exact Turn)',

@@ -1187,3 +1187,94 @@ test('visualTools.setEnabled submits the decision revision, so an external edit 
   assert.deepEqual(writes, [{ revision: 21 }], 'the ORIGINAL read revision is the fence')
   assert.equal(config.read()?.revision, 22, 'the authoritative read re-establishes the newer revision')
 })
+
+// ── M5-W PR-C: the profile-owned Web startup preference ────────────────────
+
+test('webStartupPreference reads the effective value and its USER provenance', () => {
+  const config = port({
+    settings: {
+      describe: () => [{
+        ns: 'pi-tui-web-preferences',
+        value: { autoStart: false },
+        user: {},
+        revision: 9,
+      }],
+      mutate: async () => {},
+    },
+  }).webStartupPreference
+  assert.deepEqual(config.read(), { autoStart: false, revision: 9, userOverridden: false })
+
+  const overridden = port({
+    settings: {
+      describe: () => [{
+        ns: 'pi-tui-web-preferences',
+        value: { autoStart: true },
+        user: { autoStart: true },
+        revision: 4,
+      }],
+      mutate: async () => {},
+    },
+  }).webStartupPreference
+  assert.deepEqual(overridden.read(), { autoStart: true, revision: 4, userOverridden: true })
+})
+
+test('webStartupPreference reports an unreadable section instead of the schema default', () => {
+  assert.equal(port({ settings: settings({}) }).webStartupPreference.read(), undefined,
+    'a missing namespace is unavailable, never Off')
+  assert.equal(port({
+    settings: {
+      describe: () => [{ ns: 'pi-tui-web-preferences', value: { autoStart: 'yes' }, revision: 1 }],
+      mutate: async () => {},
+    },
+  }).webStartupPreference.read(), undefined, 'a non-boolean effective value is unreadable')
+  assert.equal(port({}).webStartupPreference.read(), undefined, 'no settings service at all is unreadable')
+})
+
+test('webStartupPreference.setAutoStart writes the exact namespace path and the decision revision', async () => {
+  const writes: Array<{ ns: string; ops: unknown; revision?: number }> = []
+  const config = port({
+    settings: {
+      describe: () => [{ ns: 'pi-tui-web-preferences', value: { autoStart: false }, revision: 12 }],
+      mutate: async (ns: string, ops: unknown, revision?: number) => {
+        writes.push({ ns, ops, revision })
+      },
+    },
+  }).webStartupPreference
+  await config.setAutoStart(true, 12)
+  assert.deepEqual(writes, [{
+    ns: 'pi-tui-web-preferences',
+    ops: [{ op: 'set', path: ['autoStart'], value: true }],
+    revision: 12,
+  }])
+
+  const unavailable = port({ settings: settings({}) }).webStartupPreference
+  await assert.rejects(unavailable.setAutoStart(true, 1), /not mounted/u, 'an absent section is an explicit refusal')
+  const noSettings = port({}).webStartupPreference
+  await assert.rejects(noSettings.setAutoStart(true, 1), /settings service is unavailable/u)
+})
+
+test('webStartupPreference submits the decision revision, so an external edit is a conflict', async () => {
+  let revision = 31
+  const writes: Array<{ revision?: number }> = []
+  const config = port({
+    settings: {
+      describe: () => [{ ns: 'pi-tui-web-preferences', value: { autoStart: false }, revision }],
+      mutate: async (_ns: string, _ops: unknown, expectedRevision?: number) => {
+        writes.push({ revision: expectedRevision })
+        if (expectedRevision !== revision) {
+          throw Object.assign(new Error(`expected revision ${String(expectedRevision)}, actual ${revision}`), {
+            code: 'SETTINGS_CONFLICT',
+          })
+        }
+        revision += 1
+      },
+    },
+  }).webStartupPreference
+  const decision = config.read()
+  assert.equal(decision?.revision, 31)
+  revision = 32
+  await assert.rejects(config.setAutoStart(true, decision.revision), /expected revision 31, actual 32/u,
+    'the stale decision is refused instead of overwriting the external edit')
+  assert.deepEqual(writes, [{ revision: 31 }], 'the ORIGINAL read revision is the fence')
+  assert.equal(config.read()?.revision, 32)
+})

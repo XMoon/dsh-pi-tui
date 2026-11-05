@@ -263,11 +263,21 @@ async function openOtherRows(h: Harness): Promise<void> {
   await key(h, ENTER)
 }
 
+/** Move the Tools rows cursor onto the Web launcher row (label-driven, so a new
+ *  neighbouring row can never silently shift this navigation). */
+async function highlightWebRow(h: Harness): Promise<void> {
+  for (let step = 0; step < 6; step += 1) {
+    if (/> Web Search \/ Fetch/u.test(h.view())) return
+    await key(h, DOWN)
+  }
+  assert.fail(`the Web launcher row never owned the selection:\n${h.view()}`)
+}
+
 /** Open the Web page and wait for its settled authority facts (the page's own
  *  mount triggers a fresh Host read, so the first frames are Loading…). */
 async function openWebPage(h: Harness): Promise<void> {
   await openOtherRows(h)
-  await key(h, DOWN)
+  await highlightWebRow(h)
   await key(h, ENTER)
   await waitForPainted(h, 'the Web page to paint its settled facts', frame =>
     frame.includes('Web Search Provider') && !frame.includes('Loading…'))
@@ -287,7 +297,7 @@ for (const [columns, rows] of SIZES) {
     const launcherRows = h.plain()
     assert.ok(launcherRows.some(line => line.includes('Web Search / Fetch')),
       `the launcher row is painted at ${columns}x${rows}:\n${launcherRows.join('\n')}`)
-    await key(h, DOWN)
+    await highlightWebRow(h)
     await key(h, ENTER)
     const frame = await waitForPainted(h, `the Web page at ${columns}x${rows}`, frame =>
       frame.includes('Web Search Provider') && !frame.includes('Loading…'))
@@ -563,7 +573,7 @@ test('an unavailable authority paints the reason and offers no Confirm', async t
     try {
       h.store.available = false
       await openOtherRows(h)
-      await key(h, DOWN)
+      await highlightWebRow(h)
       await key(h, ENTER)
       const frame = await waitForPainted(h, 'the unavailable page', frame =>
         frame.includes('Web Search Provider') && !frame.includes('Loading…'))

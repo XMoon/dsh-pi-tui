@@ -159,6 +159,8 @@ export function installTspPane(options: {
    */
   readonly modelQuick?: boolean
   readonly presetPicker?: boolean
+  /** M5-W PR-C: advertise the native `/web` page's kinds/scroll. */
+  readonly webPicker?: boolean
   readonly sessionBrowser?: boolean
   /**
    * Advertise the temporary Work Details Reader's negotiated surface: the
@@ -218,6 +220,7 @@ export function installTspPane(options: {
     ...(options.composerActions === true ? ['el'] : []),
     ...(options.modelQuick === true ? ['input'] : []),
     ...(options.presetPicker === true ? ['picker', 'row', 'overlay', 'text', 'md', 'kv'] : []),
+    ...(options.webPicker === true ? ['picker', 'row', 'overlay', 'text'] : []),
     ...(options.sessionBrowser === true ? ['picker', 'row', 'overlay', 'text', 'kv'] : []),
     ...(options.workDetails === true ? ['row', 'text'] : []),
     ...(options.nativeImages === true ? ['image'] : []),
@@ -225,7 +228,7 @@ export function installTspPane(options: {
     ...(options.nativeInteraction === true ? ['questions', 'overlay', 'row', 'text', 'input', 'button', 'scroll'] : []),
   ]))
   const nativeFeatures = [
-    ...(options.presetPicker === true || options.sessionBrowser === true || options.workDetails === true ? ['scroll'] : []),
+    ...(options.presetPicker === true || options.webPicker === true || options.sessionBrowser === true || options.workDetails === true ? ['scroll'] : []),
     ...(options.nativeImages === true ? ['blobs'] : []),
   ]
   const hello = options.kinds !== undefined || options.features !== undefined

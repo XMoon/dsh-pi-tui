@@ -7,6 +7,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { unavailableWebAccess } from '../support/web-access-fake.ts'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { createClientCommandRegistry } from '../../src/app/command/client-command-registry.ts'
 import { parseCommand } from '@deepseek-ai/dsh-commands'
@@ -288,6 +289,7 @@ test('/footer is sessionless and opens the configurator; S saves and persists', 
   ctx.provide('settings', { describe: () => [{ ns: 'tui-app', user: { footerCustomItems: persistedCustomItems } }] } as never)
   const applied: Array<{ footer: string; footerLayout?: unknown; footerCustomItems?: unknown }> = []
   const runner: TuiCommandRunner = {
+    webAccess: unavailableWebAccess(),
     beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx,
@@ -462,6 +464,7 @@ test('/footer serializes overlapping saves and re-reads future USER definitions'
   const persistedDisplayDocs: Record<string, unknown>[] = []
   let displayPreset: 'full' | 'focus' | 'compact' = 'full'
   const runner: TuiCommandRunner = {
+    webAccess: unavailableWebAccess(),
     beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx,
@@ -633,6 +636,7 @@ test('/footer Esc cancels without writing', async () => {
   const settings = fakeSettings({ footer: 'default' })
   const applied: Array<{ footer: string }> = []
   const runner: TuiCommandRunner = {
+    webAccess: unavailableWebAccess(),
     beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx, app, diag: {} as never,
@@ -719,6 +723,7 @@ test('/footer starts from the persisted custom layout when active', async () => 
   }
   const settings = fakeSettings({ footer: 'custom', footerLayout: persisted })
   const runner: TuiCommandRunner = {
+    webAccess: unavailableWebAccess(),
     beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx, app, diag: {} as never,
@@ -804,6 +809,7 @@ test('/footer starts from the EFFECTIVE COMPACT layout (a compact user pressing 
   ctx.provide('settings', { describe: () => [{ ns: 'tui-app', user: {} }] } as never)
   const applied: Array<{ footer: string; footerLayout?: unknown }> = []
   const runner: TuiCommandRunner = {
+    webAccess: unavailableWebAccess(),
     beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx, app, diag: {} as never,
@@ -928,6 +934,7 @@ test('/footer Enter with a FAILED settings write keeps the old layout and notifi
   }
   const applied: Array<{ footer: string }> = []
   const runner: TuiCommandRunner = {
+    webAccess: unavailableWebAccess(),
     beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx, app, diag: {} as never,
@@ -1044,6 +1051,7 @@ test('/settings footer change is PERSIST-FIRST: a failed write keeps the old lay
   }
   const applied: Array<{ footer: string }> = []
   const runner: TuiCommandRunner = {
+    webAccess: unavailableWebAccess(),
     beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx,
@@ -1170,6 +1178,7 @@ test('/settings footer change PERSISTS footerFallbackMode (the command-mode rest
   const settings = fakeSettings({ footer: 'default' })
   const applied: Array<{ footer: string }> = []
   const runner: TuiCommandRunner = {
+    webAccess: unavailableWebAccess(),
     beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx, app, diag: {} as never,
@@ -1282,6 +1291,7 @@ test('/footer save failures notify exactly once (validation and write failures)'
   ctx.provide('settings', { describe: () => [{ ns: 'tui-app', user: { footerCustomItems: [known] } }] } as never)
   const applied: Array<{ footerLayout?: unknown }> = []
   const runner: TuiCommandRunner = {
+    webAccess: unavailableWebAccess(),
     beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx,
@@ -1406,6 +1416,7 @@ test('an unsaved custom command draft NEVER executes (preview, resize, Keep Edit
     ctx.provide('settings', { describe: () => [{ ns: 'tui-app', user: {} }] } as never)
     const applied: Array<{ footer: string }> = []
     const runner: TuiCommandRunner = {
+      webAccess: unavailableWebAccess(),
       beginClientWrite: () => () => {},
       deliveredFilesSnapshot: () => undefined,
       ctx, app, diag: {} as never,
@@ -1556,6 +1567,7 @@ test('a FAILED save never executes the new command (draft preserved, marker abse
     }
     const applied: Array<{ footer: string }> = []
     const runner: TuiCommandRunner = {
+      webAccess: unavailableWebAccess(),
       beginClientWrite: () => () => {},
       deliveredFilesSnapshot: () => undefined,
       ctx, app, diag: {} as never,
@@ -1672,6 +1684,7 @@ test('a SUCCESSFUL save is the ONLY event that arms the runtime (marker appears 
     ctx.provide('settings', { describe: () => [{ ns: 'tui-app', user: {} }] } as never)
     const applied: Array<{ footer: string; footerCustomItems?: unknown }> = []
     const runner: TuiCommandRunner = {
+      webAccess: unavailableWebAccess(),
       beginClientWrite: () => () => {},
       deliveredFilesSnapshot: () => undefined,
       ctx, app, diag: {} as never,

@@ -40,6 +40,8 @@ export interface RendererSelectionDeps {
     readonly composer: import('../submission/composer-port.ts').SubmissionComposerPort
     readonly modelPresentation?: import('../command/model-presentation.ts').ModelPresentation | undefined
     readonly presetPresentation?: import('../command/preset-presentation.ts').PresetPresentation | undefined
+    /** M5-W PR-C: the native `/web` presenter. */
+    readonly webPresentation?: import('../command/web-access-presentation.ts').WebAccessPresentation | undefined
     readonly sessionBrowserPresentation?: import('../command/session-browser-presentation.ts').SessionBrowserPresentation | undefined
     readonly interaction: import('../surface/interaction-presenter.ts').SurfaceInteractionPresenter
     readonly bindInput: (handlers: import('../surface/runtime.ts').SurfaceInputBinding) => void
@@ -119,6 +121,7 @@ export async function selectRendererMount(deps: RendererSelectionDeps): Promise<
         composer: tsp.composer,
         modelPresentation: tsp.modelPresentation,
         presetPresentation: tsp.presetPresentation,
+        webPresentation: tsp.webPresentation,
         sessionBrowserPresentation: tsp.sessionBrowserPresentation,
         interaction: tsp.interaction,
         bindInput: (handlers) => tsp.bindInput(handlers),
@@ -172,6 +175,8 @@ export function productionTspConnector(
   readonly composer: import('../submission/composer-port.ts').SubmissionComposerPort
   readonly modelPresentation?: import('../command/model-presentation.ts').ModelPresentation | undefined
   readonly presetPresentation?: import('../command/preset-presentation.ts').PresetPresentation | undefined
+  /** M5-W PR-C: the native `/web` presenter. */
+  readonly webPresentation?: import('../command/web-access-presentation.ts').WebAccessPresentation | undefined
   readonly sessionBrowserPresentation?: import('../command/session-browser-presentation.ts').SessionBrowserPresentation | undefined
   readonly interaction: import('../surface/interaction-presenter.ts').SurfaceInteractionPresenter
   readonly bindInput: (handlers: import('../surface/runtime.ts').SurfaceInputBinding) => void

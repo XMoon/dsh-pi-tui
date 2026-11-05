@@ -1945,6 +1945,9 @@ export function applyRunnerWithRuntime(
       signal: lifecycleController.signal,
       app: () => app,
       modelPresentation: () => surface.modelPresentation,
+      // M5-W PR-C: the mounted native `/web` presenter (absent on PiTui and on
+      // a TSP pane that did not negotiate its kinds).
+      webPresentation: () => surface.webPresentation,
               sessionBrowserPresentation: () => surface.sessionBrowserPresentation,
       presetPresentation: () => surface.presetPresentation,
       // PR3-A: registration/refresh failures are background-reachable under a
@@ -2052,6 +2055,8 @@ export function applyRunnerWithRuntime(
         catalog: backend.catalog,
         config: backend.config,
         hostFile: backend.hostFile,
+        // M5-W PR-C: the Split-Client Web frontend control (`/web`).
+        webAccess: backend.webAccess,
         // Shell amendment (M3-4 PR3): Host-shell completion facts exist only
         // where the TUI process IS the Host (Direct). Remote has no qualified
         // shell carrier, so it must show no shell-specific suggestions.

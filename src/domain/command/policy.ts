@@ -32,6 +32,11 @@ import { parseCommand } from '@deepseek-ai/dsh-commands'
 export const SESSIONLESS_COMMANDS = new Set([
   'display', 'exit', 'focus', 'footer', 'settings', 'help', 'attach', 'image', 'login', 'logout', 'model', 'reload',
   'sessions', 'resume', 'search', 'new', 'fork', 'rewind', 'preset', 'keybindings', 'plugins',
+  // `/web` (M5-W PR-C) controls the Split Host's official Web frontend from the
+  // Client. It must answer before any Session exists (the Web frontend is a
+  // Host feature, not a conversation), so a first-boot `/web` never creates a
+  // Session and never submits a prompt.
+  'web',
   // `/quit` is `/exit`'s canonical command alias (the runner registers
   // /exit → /quit); before a session exists both must exit WITHOUT creating
   // one — the alias must not silently drift out of the sessionless set
@@ -87,6 +92,9 @@ export const LOCAL_COMMANDS = new Set([
   'model', 'new', 'preset', 'plugins', 'quit', 'reload', 'rename', 'resume', 'rewind',
   'search', 'sessions', 'settings', 'skill', 'status', 'subagents', 'tasks',
   'title', 'transcript', 'yolo',
+  // `/web` (M5-W PR-C) is a Client-local control entry: it is reserved for this
+  // surface (no plugin may shadow it) and it is never a Host/model line.
+  'web',
   // Image UX PR2: `/view-image` is a Client-local transcript presentation
   // command (mounted window → PiTui picker/Viewer), never a Host/model line.
   'view-image',

@@ -35,6 +35,9 @@ const bundleConfig = defineConfig({
     // entry, exactly the performance-host precedent; the root ledger stays
     // closed at seven stable entries.
     { 'visual-tools': './src/app/host/visual-tools.ts' },
+    // M5-W PR-C: the profile-owned Web startup preference row. Same precedent:
+    // the canonical nested Host module is exposed under a flat package subpath.
+    { 'web-preferences': './src/app/host/web-preferences.ts' },
   ],
   format: ['esm'],
   outDir: 'dist',

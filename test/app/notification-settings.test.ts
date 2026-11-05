@@ -6,6 +6,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { unavailableWebAccess } from '../support/web-access-fake.ts'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { createClientCommandRegistry } from '../../src/app/command/client-command-registry.ts'
 import { parseCommand } from '@deepseek-ai/dsh-commands'
@@ -126,6 +127,7 @@ function setupSettings(options: { notificationMode?: string; notificationMethod?
   let liveMode = parseNotificationMode(settings.value.get().notificationMode)
   let liveMethod = parseNotificationMethod(settings.value.get().notificationMethod)
   const runner: TuiCommandRunner = {
+    webAccess: unavailableWebAccess(),
     beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx,

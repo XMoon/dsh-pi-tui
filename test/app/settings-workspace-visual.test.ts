@@ -48,7 +48,7 @@ import { createDirectSettingsFixture } from '../support/direct-settings-fixture.
 import { parseUserKeybindings } from '../../src/tui/keybindings/config.ts'
 import { waitForFrame } from '../support/frame-wait.ts'
 import { themePickerRows } from '../../src/app/surface/theme-selection.ts'
-import type { CredentialProviderOption, TuiSettingsDoc, VisualToolsState } from '../../src/runtime/config-port.ts'
+import type { CredentialProviderOption, TuiSettingsDoc, VisualToolsState, WebStartupPreferenceState } from '../../src/runtime/config-port.ts'
 import { serializeTuiSettingsMutation } from '../../src/runtime/config-port.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
@@ -159,6 +159,12 @@ interface HarnessOptions {
   /** An external writer commits this enabled value (and bumps the revision)
    *  just before the next switch write: the decision is then stale. */
   visualToolsExternalChange?: boolean
+  /** M5-W PR-C: the profile-owned Web startup preference the ConfigPort reads. */
+  webStartupPreference?: WebStartupPreferenceState
+  /** The Web startup preference section is absent/unreadable. */
+  webStartupUnavailable?: boolean
+  /** Make `setAutoStart` reject with this reason (a refused Host write). */
+  webStartupWriteFailure?: string
   /**
    * Compose a LIVE main Session for the About page: the exact seams the real
    * `/settings` command injects (`captureLiveSessionScope` / scope currency /
@@ -372,6 +378,8 @@ interface Harness {
   readonly visualWrites: () => readonly boolean[]
   /** The current fake Host state the ConfigPort reads. */
   readonly visualState: () => VisualToolsState | undefined
+  /** Every `webStartupPreference.setAutoStart` value the UI dispatched. */
+  readonly webAutoStartWrites: () => readonly boolean[]
   /** Every byte the app wrote to the terminal (the raw write sink). */
   readonly writes: () => readonly string[]
   /** Run every owned task the harness is holding (`holdOwned`). */
@@ -432,6 +440,10 @@ function setup(options: HarnessOptions = {}): Harness {
   let pluginPages = 0
   const pluginPageInstances: FakeEmbeddedPluginPage[] = []
   const visualWrites: boolean[] = []
+  const webAutoStartWrites: boolean[] = []
+  let webStartupState: WebStartupPreferenceState | undefined = options.webStartupUnavailable === true
+    ? undefined
+    : options.webStartupPreference ?? { autoStart: false, revision: 1, userOverridden: false }
   /** The LIVE backend readiness the ConfigPort answers (a case can move it). */
   let readiness = options.readiness ?? 'ready'
   let externalVisualChange = options.visualToolsExternalChange
@@ -711,6 +723,19 @@ function setup(options: HarnessOptions = {}): Harness {
           }
         },
       },
+      webStartupPreference: {
+        read: () => webStartupState,
+        setAutoStart: async (value: boolean, revision: number) => {
+          webAutoStartWrites.push(value)
+          if (options.webStartupWriteFailure !== undefined) throw new Error(options.webStartupWriteFailure)
+          if (webStartupState !== undefined && webStartupState.revision !== revision) {
+            throw new Error(`settings namespace "pi-tui-web-preferences" changed since it was read (expected revision ${revision}, now ${webStartupState.revision})`)
+          }
+          if (webStartupState !== undefined) {
+            webStartupState = { autoStart: value, revision: webStartupState.revision + 1, userOverridden: true }
+          }
+        },
+      },
       footerCustomItems: {
         rawForPersistence: () => ({ kind: 'available' as const, value: options.footerCustomItemsRaw }),
       },
@@ -886,6 +911,7 @@ function setup(options: HarnessOptions = {}): Harness {
     terminalProgressWrites: () => terminalProgressWrites,
     warnings: () => warnings,
     visualWrites: () => visualWrites,
+    webAutoStartWrites: () => webAutoStartWrites,
     visualState: () => visualState,
     writes: () => writes,
     pluginPages: () => pluginPages,
@@ -5435,6 +5461,7 @@ test('a narrow Account deeplink → rail-browse About reads nothing; Enter reads
     config: {
       configReadiness: () => 'ready',
       visualTools: { read: () => undefined, setEnabled: async (_enabled: boolean, _revision: number) => {} },
+      webStartupPreference: { read: () => undefined, setAutoStart: async (_value: boolean, _revision: number) => {} },
       footerCustomItems: { rawForPersistence: () => ({ kind: 'available', value: undefined }) },
       permissions: { presetNames: () => [], defaultPreset: () => undefined, approvalOverrideOf: () => undefined, approvalOverrideAvailable: () => false },
       subagentModelSelection: { available: () => false },
@@ -8936,7 +8963,8 @@ test('the real /settings route edits rows, choices and pages without ever callin
   // 3. The Web row mounts the embedded page in THIS lease.
   await railToCategory(h, 'Tools')
   await key(h, '\r') // L0 -> L1
-  await key(h, '\x1b[B') // Visual tools -> Web Search / Fetch
+  await key(h, '\x1b[B') // Visual tools -> Auto-enable Web on Host startup
+  await key(h, '\x1b[B') // -> Web Search / Fetch
   await key(h, '\r') // the row's own page
   assert.match(h.rowsPlain()[0]!, /Settings · Tools · Web Search \/ Fetch/u,
     `the Web page owns THIS workspace body:\n${h.view()}`)
@@ -9007,5 +9035,81 @@ test('/keybindings conflicts still paints its conflicts in the independent Setti
   assert.match(description, / vs /u, 'the row states the conflict, not just two actions')
   assert.match(description, /app\.todo\.toggle \(global, user\)/u, `the second conflicting action is named:\n${frame}`)
   assert.ok(!frame.includes('Settings · Categories'), 'the independent list is NOT the Settings workspace')
+  h.dispose()
+})
+
+// ── M5-W PR-C: the next-Host-launch Web preference (`web-autostart`) ────────
+//
+// The row is a PROFILE preference, not the current Web state: every case below
+// drives the REAL `/settings` composition and proves the value the user picks,
+// the Host write that persists it and the authoritative re-read — never a claim
+// about the running Host's Web frontend.
+
+/** Move from the first Tools row (`visual-tools`) onto `web-autostart` and open it. */
+async function openWebAutostartRow(h: Harness): Promise<void> {
+  await h.open('Tools')
+  await key(h, '\r') // L0 -> L1 (the Rows level, on Visual tools)
+  await key(h, '\x1b[B') // Visual tools -> Auto-enable Web on Host startup
+}
+
+test('the Auto-enable Web row shows the schema default and writes On through its own Host port', async () => {
+  const h = setup({ columns: 200, rows: 40 })
+  await openWebAutostartRow(h)
+  assert.match(h.view(), /Auto-enable Web on Host startup/, 'the Tools category carries the preference row')
+  assert.match(h.view(), /Off \(default\)/, 'the default OFF is marked as not user-overridden')
+  assert.match(
+    h.view(),
+    /applies on the next Host launch; the current Host is unchanged/u,
+    'the row states the next-launch lifetime instead of claiming a live effect',
+  )
+  await key(h, '\r') // writable L1 -> L2 inline choice
+  assert.match(h.view(), /Choose value/)
+  assert.match(h.view(), /> Off/, 'the current candidate carries the highlight')
+  await key(h, '\x1b[A') // Off (last candidate) -> On
+  assert.match(h.view(), /> On/)
+  assert.equal(h.webAutoStartWrites().length, 0, 'choosing a candidate never writes')
+
+  await key(h, '\r')
+  await settle(h)
+  assert.deepEqual(h.webAutoStartWrites(), [true], 'the Host port receives exactly one On write')
+  assert.match(h.view(), /Status\s+Verified/)
+  assert.match(h.view(), /On/, 'the verified row reports the persisted preference')
+  h.dispose()
+})
+
+test('an unreadable Web preference offers no confirmable candidate', async () => {
+  const h = setup({ columns: 200, rows: 40, webStartupUnavailable: true })
+  await openWebAutostartRow(h)
+  assert.match(h.view(), /Auto-enable Web on Host startup/)
+  assert.match(h.view(), /Unavailable/, 'an absent section is reported, never the schema default')
+  await key(h, '\r')
+  assert.doesNotMatch(h.view(), /Choose value/, 'no candidate exists without an authoritative read')
+  assert.equal(h.webAutoStartWrites().length, 0)
+  h.dispose()
+})
+
+test('a refused Web preference write is reported as not saved and keeps the base value', async () => {
+  const h = setup({
+    columns: 200,
+    rows: 40,
+    webStartupWriteFailure: 'settings namespace "pi-tui-web-preferences" changed since it was read (expected revision 1, now 2)',
+  })
+  await openWebAutostartRow(h)
+  await key(h, '\r')
+  await key(h, '\x1b[A') // Off -> On
+  await key(h, '\r')
+  await settle(h)
+  assert.deepEqual(h.webAutoStartWrites(), [true], 'the refused decision still reached the Host once')
+  assert.match(h.view(), /Not saved/, 'the conflict is attributed to THIS request')
+  assert.match(h.view(), /changed since it was read/u, 'the official conflict reason is stated')
+  h.dispose()
+})
+
+test('the Web preference never claims the current Host Web state was changed', async () => {
+  const h = setup({ columns: 200, rows: 40 })
+  await openWebAutostartRow(h)
+  const detail = h.view()
+  assert.doesNotMatch(detail, /enabled\b/u, 'the preference row never asserts the current frontend state')
+  assert.match(detail, /current Host is not changed/u)
   h.dispose()
 })
