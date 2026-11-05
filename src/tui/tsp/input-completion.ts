@@ -45,7 +45,7 @@ import {
   splitTokenRemainder,
   type InlineAttachmentAcceptance,
 } from '../interaction/autocomplete/inline-attachment.ts'
-import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
+import { sanitizeDisplaySegment } from '../presentation/terminal-text.ts'
 
 /**
  * The most candidate rows one paint shows; the rest stay in the list (§3.1
@@ -768,8 +768,16 @@ export function createTspInputCompletion(
         const item = shown.items[index]!
         rows.push({
           id: rowId(item, index),
-          text: sanitizeDisplayText(rowText(shown.seat.kind, item)),
-          description: item.description,
+          // BOTH painted halves of a candidate row go through the SAME
+          // untrusted-label projection. A row is a ONE-LINE cell, and the painter
+          // composes the description into the button's `title`/`aria` as well as
+          // painting it as its own span, so a plugin- or Host-supplied
+          // description carrying an ANSI/VT sequence or a bare CR/LF/TAB would
+          // otherwise reach the wire terminal-active right next to a clean name.
+          // Identity is untouched: the click and the accept use `id` and the
+          // Provider's own `item`, never this projection.
+          text: sanitizeDisplaySegment(rowText(shown.seat.kind, item)),
+          description: item.description === undefined ? undefined : sanitizeDisplaySegment(item.description),
           highlighted: index === shown.selected,
         })
       }

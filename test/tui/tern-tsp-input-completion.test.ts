@@ -2023,3 +2023,42 @@ test('the window keeps the highlighted row visible when the list is longer than 
   assert.equal(m.rows().some(node => node.id === highlighted[0]!.id), true,
     'the highlighted row stays inside the painted window after eight steps')
 })
+
+// ── RFL-013: both painted halves of a candidate row are untrusted labels ─────
+
+test('a candidate description carrying ANSI/CR/LF/TAB is projected onto one safe line and the row still accepts on its own identity', async (t) => {
+  // A candidate row is a ONE-LINE cell whose description the painter composes
+  // into the button `title`/`aria` AND paints as its own span, so both fields
+  // need the repository's untrusted-LABEL projection. A plugin controls its own
+  // description text, so this is a real provider surface: without the second
+  // projection the ANSI sequence reaches the wire while the name beside it is
+  // clean. Identity is untouched — the accept below still uses the Provider's
+  // own value.
+  const esc = String.fromCharCode(27)
+  const cr = String.fromCharCode(13)
+  const lf = String.fromCharCode(10)
+  const tab = String.fromCharCode(9)
+  const hostile = `red${esc}[31mdesc${esc}[0m cr${cr}lf${lf}tab${tab}end`
+  const m = await mountSlashPane(t, {
+    chrome: true,
+    commands: [],
+    extensionSuggest: async () => ({
+      prefix: '/z',
+      items: [{ value: 'zz', label: 'zz', description: hostile } as never],
+    }),
+  })
+  await m.type('/z')
+  await m.key(TAB)
+  await waitUntil('the plugin row painted', () => m.rows().length === 1)
+  const row = m.rows()[0]!
+  const control = /[\u0000-\u0008\u000a-\u001f\u007f]/u
+  const painted = m.rowText(row)
+  assert.equal(painted.startsWith('\u203a/zz'), true, `the row still paints its own name: ${JSON.stringify(painted)}`)
+  assert.equal(control.test(painted), false, `the painted row carries no control character: ${JSON.stringify(painted)}`)
+  assert.equal(control.test(String(row.p.title ?? '')), false, 'the row title is terminal-safe')
+  assert.equal(control.test(String(row.p.aria ?? '')), false, 'the row aria is terminal-safe')
+  await m.key(ENTER)
+  assert.deepEqual(m.editor(), { text: '/zz ', cursor: 4 },
+    'the sanitised projection did not touch what the accept inserts')
+  assert.deepEqual(m.calls.submits, [], 'and the accept is still accept-only')
+})
