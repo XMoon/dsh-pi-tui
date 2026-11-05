@@ -1,25 +1,55 @@
 /**
  * Split-process upgrade smoke wiring guard.
  *
- * The real dual-artifact lane is `scripts/split-process-upgrade-smoke.mjs`.
- * It needs two genuinely packaged `.tgz` payloads and a real installation of
- * the exact DSH runtime this checkout pins, so it stays an explicit manual
- * qualification lane. This test only prevents its argument contract and
- * package wiring from rotting; it is NOT evidence that U02-U06 passed.
+ * The real dual-artifact lane is `scripts/split-process-upgrade-smoke.mjs`. It
+ * needs two genuinely packaged `.tgz` payloads and a real installation of the
+ * exact DSH runtime this checkout pins, so it stays an explicit manual
+ * qualification lane. This test only proves the registry, selector grammar,
+ * preflight ordering, case ownership and output/cleanup contracts; it is NOT
+ * evidence that U01-U09 passed.
  *
  * @module split-process-upgrade-smoke-wiring.test
  */
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
-import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import { testLifecycle } from '../support/temp-lifecycle.ts'
+
 import { parseUpgradeArguments } from '../../scripts/split-process-upgrade-smoke.mjs'
+import {
+  listSelectableUpgradeCases,
+  selectedUpgradePassLine,
+} from '../../scripts/lib/split-upgrade-selection.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const SCRIPT = join(ROOT, 'scripts', 'split-process-upgrade-smoke.mjs')
+const CASE_DIR = join(ROOT, 'scripts', 'smoke', 'split-upgrade')
+const CASE_NAMES = Object.freeze([
+  'cross-build-compatibility.mjs',
+  'manual-client-reload.mjs',
+  'reload-source-isolation.mjs',
+])
+
+function readCase(name) {
+  return readFileSync(join(CASE_DIR, name), 'utf8')
+}
+
+function withTempDir(t) {
+  return testLifecycle(t).tempDir('split-upgrade-wiring-')
+}
+
+function runCli(args, cwd) {
+  return spawnSync(process.execPath, [SCRIPT, ...args], {
+    encoding: 'utf8',
+    cwd,
+    timeout: 10_000,
+    env: { ...process.env, TMPDIR: cwd },
+  })
+}
 
 test('the upgrade smoke is a package script and parses as ESM', () => {
   const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
@@ -28,510 +58,334 @@ test('the upgrade smoke is a package script and parses as ESM', () => {
   assert.equal(result.status, 0, result.stderr)
 })
 
-test('the upgrade smoke requires two different old/new artifact paths', () => {
-  const oldPath = join(ROOT, 'temp', 'old.tgz')
-  const newPath = join(ROOT, 'temp', 'new.tgz')
-  assert.deepEqual(
-    (() => {
-      const parsed = parseUpgradeArguments(['--', '--old', oldPath, '--new', newPath])
-      return { old: parsed.old, new: parsed.new, evidence: parsed.evidence }
-    })(),
-    { old: oldPath, new: newPath, evidence: undefined },
+test('the upgrade registry is the ONE frozen 3-case / 2-suite fact list in execution order', () => {
+  const registry = listSelectableUpgradeCases()
+  assert.ok(Object.isFrozen(registry), 'the registry must be frozen')
+  assert.deepEqual(registry.map(entry => [entry.suite, entry.id]), [
+    ['upgrade', 'upgrade.cross-build-compatibility'],
+    ['client-reload', 'client-reload.production-command'],
+    ['client-reload', 'client-reload.target-source-isolation'],
+  ])
+  assert.equal(new Set(registry.map(entry => entry.id)).size, 3, 'case ids must be unique')
+  for (const entry of registry) {
+    assert.ok(Object.isFrozen(entry), `the registry entry ${entry.id} must be frozen`)
+    assert.deepEqual(Object.keys(entry).sort(), ['id', 'run', 'suite', 'title'])
+    assert.equal(typeof entry.run, 'function', `the registry entry ${entry.id} must name its real run`)
+    assert.ok(entry.title.length > 0 && !/\bU0[1-9]\b/u.test(entry.title),
+      'titles state a condition and observable behavior, never an internal Uxx code')
+  }
+  assert.equal(selectedUpgradePassLine('upgrade.cross-build-compatibility'),
+    'SPLIT_UPGRADE_SELECTED_PASS id=upgrade.cross-build-compatibility scope=SELECTABLE_ONLY')
+})
+
+test('the selector grammar accepts the fixed forms and rejects every ambiguous one', () => {
+  const full = parseUpgradeArguments(['--', '--old', 'old.tgz', '--new', 'new.tgz'])
+  assert.equal(full.mode, 'full')
+  assert.equal(full.old, resolve('old.tgz'))
+  assert.equal(full.new, resolve('new.tgz'))
+  assert.equal(full.evidence, undefined)
+
+  const ordered = parseUpgradeArguments(['--new', 'new.tgz', '--evidence', 'ev.json', '--old', 'old.tgz'])
+  assert.equal(ordered.evidence, resolve('ev.json'), 'old/new/evidence order stays free')
+
+  assert.deepEqual(parseUpgradeArguments(['--list']), { mode: 'list' })
+  assert.deepEqual(parseUpgradeArguments(['--help']), { mode: 'help' })
+  assert.deepEqual(parseUpgradeArguments(['-h']), { mode: 'help' })
+
+  const caseSelection = parseUpgradeArguments([
+    '--old', 'old.tgz', '--new', 'new.tgz', '--case', 'upgrade.cross-build-compatibility',
+  ])
+  assert.equal(caseSelection.mode, 'case')
+  assert.equal(caseSelection.id, 'upgrade.cross-build-compatibility')
+  assert.deepEqual(caseSelection.cases.map(entry => entry.id), ['upgrade.cross-build-compatibility'])
+
+  const upgradeSuite = parseUpgradeArguments([
+    '--old', 'old.tgz', '--new', 'new.tgz', '--suite', 'upgrade',
+  ])
+  assert.deepEqual(upgradeSuite.cases.map(entry => entry.id), ['upgrade.cross-build-compatibility'])
+
+  const clientReloadSuite = parseUpgradeArguments([
+    '--old', 'old.tgz', '--new', 'new.tgz', '--suite', 'client-reload',
+  ])
+  assert.deepEqual(clientReloadSuite.cases.map(entry => entry.id), [
+    'client-reload.production-command',
+    'client-reload.target-source-isolation',
+  ], 'a suite follows the registry execution order')
+
+  const inputError = (args, pattern) => assert.throws(
+    () => parseUpgradeArguments(args),
+    error => error?.code === 'INPUT_SMOKE_SELECTION_INVALID' && pattern.test(error.message),
   )
-  assert.throws(() => parseUpgradeArguments(['--old', 'old.tgz']), /both --old <tgz> and --new <tgz> are required/u)
-  assert.throws(() => parseUpgradeArguments(['--old', 'same.tgz', '--new', 'same.tgz']), /must name different artifacts/u)
-  assert.throws(() => parseUpgradeArguments(['--old', 'old.tgz', '--new', 'new.tgz', '--bogus']), /unknown argument/u)
-  assert.throws(() => parseUpgradeArguments(['--old', '--new', 'new.tgz']), /--old requires a path/u)
+  inputError(['--case', 'does-not-exist', '--old', 'old.tgz', '--new', 'new.tgz'], /unknown case/u)
+  inputError(['--suite', 'does-not-exist', '--old', 'old.tgz', '--new', 'new.tgz'], /unknown suite/u)
+  inputError(['--old', 'old.tgz', '--new', 'new.tgz', '--case', 'upgrade.cross-build-compatibility', '--suite', 'upgrade'],
+    /mutually exclusive/u)
+  inputError(['--old', 'old.tgz', '--new', 'new.tgz', '--case', 'upgrade.cross-build-compatibility', '--case', 'upgrade.cross-build-compatibility'],
+    /--case may appear only once/u)
+  inputError(['--old', 'old.tgz', '--new', 'new.tgz', '--suite', 'client-reload', '--suite', 'upgrade'],
+    /--suite may appear only once/u)
+  inputError(['--list', '--old', 'old.tgz'], /--list cannot be combined/u)
+  inputError(['--help', '--list'], /--help cannot be combined/u)
+  inputError(['--old', 'old.tgz'], /both --old <tgz> and --new <tgz> are required/u)
+  inputError(['--old', 'same.tgz', '--new', 'same.tgz'], /must name different artifacts/u)
+  inputError(['--old', '--new', 'new.tgz'], /--old requires a path/u)
+  inputError(['--old', 'old.tgz', '--new', 'new.tgz', '--bogus'], /unknown option/u)
+  inputError(['--old', 'old.tgz', '--new', 'new.tgz', 'extra.tgz'], /unexpected positional/u)
+  inputError(['--', '--', '--old', 'old.tgz', '--new', 'new.tgz'], /unknown option/u)
 })
 
-test('the upgrade smoke proves cross-build compatibility instead of a build refusal', () => {
-  const source = readFileSync(SCRIPT, 'utf8')
-  assert.match(source, /oldArtifact\.sha256 === newArtifact\.sha256/u)
-  assert.match(source, /newBuildId !== oldBuildId/u)
-  // U02 uses the real qualification control on the new Client and reads its
-  // structured RPC proof; it must not treat a build refusal as the outcome.
-  assert.match(source, /qualification-host-foundation/u)
-  assert.match(source, /host-rpc-proof/u)
-  assert.match(source, /assertIdentityKept\(clientBAuth\.host, hostABefore/u)
-  assert.match(source, /clientBAuth\.host\.buildId === oldBuildId/u)
-  // U04 must be the real PTY surface resuming the running old Session.
-  assert.match(source, /SurfaceEntryProcess/u)
-  assert.match(source, /SPLIT_PROCESS_CLIENT_SESSION: sessionId/u)
-  assert.match(source, /sessionOpen === true && record\.openSessionId === sessionId/u)
-  assert.match(source, /waitForScreen\('cross-build-hold'/u)
-  assert.match(source, /crossBuildClient/u)
-  assert.match(source, /crossBuildSurface/u)
-  assert.match(source, /cross-build-compatible/u)
-  assert.match(source, /SPLIT_UPGRADE_SMOKE_PASS/u)
-  assert.match(source, /SPLIT_UPGRADE_KEEP/u)
-  assert.doesNotMatch(source, /HOST_BUILD_INCOMPATIBLE/u,
-    'the upgrade lane must not present a cross-build refusal as its success path')
-  // The lane must never derive the old artifact by mutating the new one.
-  assert.doesNotMatch(source, /writeFileSync\(.*newArtifact\.path/u)
+test('--list and --help are side-effect free and never announce a qualification', (t) => {
+  const dir = withTempDir(t)
+  const listed = runCli(['--list'], dir)
+  assert.equal(listed.status, 0, listed.stderr)
+  assert.equal(listed.stderr, '')
+  const lines = listed.stdout.trimEnd().split('\n')
+  assert.equal(lines[0], 'SPLIT_UPGRADE_SELECTABLE_CASES scope=SELECTABLE_ONLY')
+  assert.deepEqual(lines.slice(1), listSelectableUpgradeCases().map(
+    entry => `suite=${entry.suite} case=${entry.id} title=${entry.title}`,
+  ))
+  assert.ok(!listed.stdout.includes('SPLIT_UPGRADE_SMOKE_PASS'))
+  assert.ok(!listed.stdout.includes('IDENTITY') && !listed.stdout.includes('qualified=true'))
+  assert.deepEqual(readdirSync(dir), [], '--list may not create a work root or failure report')
+
+  const helped = runCli(['--help'], dir)
+  assert.equal(helped.status, 0, helped.stderr)
+  assert.match(helped.stdout, /pnpm smoke:split-upgrade -- --list/u)
+  assert.match(helped.stdout, /--case upgrade\.cross-build-compatibility/u)
+  assert.match(helped.stdout, /--suite client-reload/u)
+  assert.deepEqual(readdirSync(dir), [], '--help may not create a work root')
 })
 
-test('both Client peer owners are real and every upgrade root is isolated', () => {
+test('artifact and selector preflight complete before any distribution load or work root', () => {
   const source = readFileSync(SCRIPT, 'utf8')
-  // The work root is a real OS temp root outside the checkout; a repo-local
-  // split-upgrade-* root would borrow the checkout's node_modules (issue #476).
-  // Assigned inside the setup boundary, but still an OS temp root outside the checkout.
+  const lane = source.slice(source.indexOf('async function runLane()'))
+  const parse = lane.indexOf('parseUpgradeArguments(process.argv.slice(2))')
+  const inspectOld = lane.indexOf("inspectArtifact(options.old, 'old')")
+  const inspectNew = lane.indexOf("inspectArtifact(options.new, 'new')")
+  const pinOld = lane.indexOf("requireExactSmokeDshPin('old'")
+  const pinNew = lane.indexOf("requireExactSmokeDshPin('new'")
+  const identity = lane.indexOf('diagnostics.identityLine()')
+  assert.ok(parse >= 0 && inspectOld > parse && inspectNew > inspectOld,
+    'the selector and both artifacts are read before any setup')
+  assert.ok(pinOld > inspectNew && pinNew > pinOld && identity > pinNew,
+    'both exact pins qualify before the identity line is announced')
+  const scene = source.slice(source.indexOf('async function runScene('))
+  const distribution = scene.indexOf('loadDshDistribution(')
+  const root = scene.search(/[A-Za-z]+Sync\(join\(tmpdir\(\), 'dsh-split-upgrade-'\)\)/u)
+  const install = scene.indexOf('runPnpmInstall(harnessDir, env, distribution)')
+  assert.ok(distribution >= 0 && root > distribution && install > root,
+    'the distribution load and work root live inside the protected setup after preflight')
   assert.match(source, /workRoot = [A-Za-z]+Sync\(join\(tmpdir\(\), 'dsh-split-upgrade-'\)\)/u)
   assert.match(source, /relative\(realpathSync\(PACKAGE_ROOT\), realpathSync\(workRoot\)\)/u)
   assert.match(source, /workRootFromCheckout\.startsWith\(`\.\.\$\{sep\}`\)/u)
   assert.doesNotMatch(source, /join\(PACKAGE_ROOT, 'temp', 'split-upgrade-'\)/u)
-  assert.doesNotMatch(source, /mkdirSync\(join\(PACKAGE_ROOT, 'temp'\)/u)
 
-  // The active profile owns the exact Client peer set and installs it before
-  // the old bundle; the harness is only the DSH CLI anchor.
-  const profileStoreInstall = source.indexOf(
-    'installPlugin(dsh, `@deepseek-ai/dsh-client-store@${targetDshVersion}`, harnessDir, env, false)',
-  )
-  const zustandInstall = source.indexOf("installPlugin(dsh, 'zustand@4.5.7', harnessDir, env, false)")
-  const immerInstall = source.indexOf("installPlugin(dsh, 'immer@10.2.0', harnessDir, env, false)")
-  const oldInstall = source.indexOf('installPlugin(dsh, oldArtifact.path, harnessDir, env, false)')
-  assert.ok(profileStoreInstall >= 0, 'the active profile must install the Client store through the official CLI')
-  assert.ok(zustandInstall > profileStoreInstall && immerInstall > zustandInstall,
-    'the published store\'s zustand/immer engine peers must follow the store install')
-  assert.ok(oldInstall > immerInstall, 'the active profile peer set must be installed before the old bundle')
-  const harnessManifest = source.slice(
-    source.indexOf("name: 'dsh-split-upgrade-harness'"),
-    source.indexOf('runPnpmInstall(harnessDir, env, distribution)'),
-  )
-  assert.doesNotMatch(harnessManifest, /dsh-client-store|zustand|immer/u,
-    'the isolated harness must not pretend to own the Client peer set')
+  // The process scope is created exactly once, after input preflight, and is
+  // never a module-level side effect (historical bug: scope at import time).
+  const beforeScene = source.slice(0, source.indexOf('async function runScene('))
+  assert.doesNotMatch(beforeScene, /createSplitProcessScope\(\)/u)
+  assert.equal((source.match(/createSplitProcessScope\(\)/gu) ?? []).length, 1)
+})
+
+test('the full and selected lanes dispatch through the SAME registry functions', () => {
+  const source = readFileSync(SCRIPT, 'utf8')
+  const scene = source.slice(source.indexOf('async function runScene('))
+  assert.match(scene, /for \(const entry of listSelectableUpgradeCases\(\)\) \{\n\s+diagnostics\.checkpoint\(`case\/\$\{entry\.id\}`\)\n\s+const fragment = await entry\.run\(context\)/u)
+  assert.match(scene, /for \(const entry of options\.cases\) \{\n\s+diagnostics\.checkpoint\(`case\/\$\{entry\.id\}`\)\n\s+const fragment = await entry\.run\(context\)/u)
+  // No second execution list and no inline implementation survives in the runner.
+  for (const legacy of [
+    'runUserCommandReloadRound',
+    'runUnavailableTargetRound',
+    'runReloadSourceIsolationRound',
+    'qualification-host-foundation',
+    'host-rpc-proof',
+    'crossBuildSurface',
+  ]) {
+    assert.ok(!source.includes(legacy), `the runner must not inline the case body: ${legacy}`)
+  }
+  // The registry imports the three real module functions.
+  const selection = readFileSync(join(ROOT, 'scripts', 'lib', 'split-upgrade-selection.mjs'), 'utf8')
+  for (const name of ['runCrossBuildCompatibility', 'runManualClientReload', 'runReloadSourceIsolation']) {
+    assert.match(selection, new RegExp(`import \\{ ${name} \\} from`, 'u'))
+    assert.match(selection, new RegExp(`run: ${name}`, 'u'))
+  }
+})
+
+test('the cross-build case owns the real old/new pair, reexec handoff and both live negatives', () => {
+  const source = readCase('cross-build-compatibility.mjs')
+  // The active profile owns the exact Client peer set before the old bundle.
+  const store = source.indexOf('installPlugin(dsh, `@deepseek-ai/dsh-client-store@${targetDshVersion}`')
+  const zustand = source.indexOf("installPlugin(dsh, 'zustand@4.5.7'")
+  const immer = source.indexOf("installPlugin(dsh, 'immer@10.2.0'")
+  const oldBundle = source.indexOf('installPlugin(dsh, oldArtifact.path')
+  assert.ok(store >= 0 && zustand > store && immer > zustand && oldBundle > immer,
+    'the profile peer set is installed before the old bundle')
   assert.match(source, /assertProfileClientPeers\(profileDir, targetDshVersion, 'old profile install'\)/u)
   assert.match(source, /assertProfileClientPeers\(profileDir, targetDshVersion, 'upgraded profile install'\)/u)
-  assert.match(source, /manifest\.dependencies\?\.\[name\] === version/u)
-  assert.match(source, /realpathSync\(createRequireFrom\(join\(profileDir, 'package\.json'\)\)\.resolve\(name\)\)/u)
-
-  // The side-build is a sibling profile project with its own exact peer
-  // closure, never a child of the active profile and never a second DSH or
-  // Cordis family.
-  assert.match(source, /sideBuildDir = join\(dshHome, 'profiles', 'split-upgrade-side-build'\)/u)
-  assert.match(source, /function installSideBuild\(dir, tarball, env, targetDshVersion\)/u)
-  assert.match(source, /installSideBuild\(sideBuildDir, newArtifact\.path, env, targetDshVersion\)/u)
-  const sideBuildSource = source.slice(
-    source.indexOf('function installSideBuild'),
-    source.indexOf('function killProcessGroup'),
-  )
-  assert.match(sideBuildSource, /'@deepseek-ai\/dsh-client-store': targetDshVersion/u)
-  assert.match(sideBuildSource, /zustand: '4\.5\.7'/u)
-  assert.match(sideBuildSource, /immer: '10\.2\.0'/u)
-  assert.doesNotMatch(sideBuildSource, /@deepseek-ai\/cordis|'@deepseek-ai\/dsh':/u,
-    'the side-build must not copy the DSH family or a second Cordis')
-  assert.match(source, /the side-by-side \$\{name\} resolves outside its own package/u)
-})
-
-test('the upgrade lane qualifies BOTH artifact pins against the exact DSH runtime before any setup', () => {
-  const source = readFileSync(SCRIPT, 'utf8')
-  assert.match(source, /requireExactSmokeDshPin,[\s\S]*?\} from '\.\/lib\/split-smoke-diagnostics\.mjs'/u,
-    'the exact-pin rule is shared with the split-process lane, not restated per script')
-  const main = source.slice(source.indexOf('async function main()'))
-  const inspectOld = main.indexOf("inspectArtifact(options.old, 'old')")
-  const inspectNew = main.indexOf("inspectArtifact(options.new, 'new')")
-  const target = main.indexOf('targetDshVersion = npmDshVersion()')
-  const guardOld = main.indexOf("requireExactSmokeDshPin('old', oldArtifact.manifest, targetDshVersion)")
-  const guardNew = main.indexOf("requireExactSmokeDshPin('new', newArtifact.manifest, targetDshVersion)")
-  const distribution = main.indexOf('loadDshDistribution(')
-  // Located by shape, never by the temp-API token: the temp-hygiene gate text-scans
-  // the whole test tree, strings and comments included.
-  const workRoot = main.search(/[A-Za-z]+Sync\(join\(tmpdir\(\), 'dsh-split-upgrade-'\)\)/u)
-  const install = main.indexOf('runPnpmInstall(harnessDir, env, distribution)')
-  assert.ok(
-    inspectOld >= 0 && inspectNew > inspectOld && target > inspectNew
-      && guardOld > target && guardNew > guardOld
-      && distribution > guardNew && workRoot > guardNew && install > workRoot,
-    'the pinned artifacts must be read and qualified BEFORE the distribution load, the work root and any install',
-  )
-  assert.ok(target >= 0, 'the target pin comes from npmDshVersion(), not from engines or a compat matrix')
-})
-
-test('the upgrade lane owns the real Client reexec handoff and its two live negatives', () => {
-  const source = readFileSync(SCRIPT, 'utf8')
-  const reexecIndex = source.indexOf("clientA.signalBusiness('SIGUSR2')")
-  assert.ok(reexecIndex > 0, 'the upgrade lane must trigger the real reexec probe')
-  // Client A stays the live PTY Client until the side-by-side build exists.
+  assert.match(source, /newBuildId !== oldBuildId/u)
+  assert.match(source, /installedPayloadHash\(oldProfilePackage\)/u)
+  // U07: a real SIGUSR2 handoff, new OS PID, restored same Host/Session.
+  const reexec = source.indexOf("clientA.signalBusiness('SIGUSR2')")
+  assert.ok(reexec > 0)
   assert.match(source, /SPLIT_PROCESS_CLIENT_REEXEC_PROBE: '1'/u)
   assert.match(source, /SPLIT_PROCESS_CLIENT_REEXEC_TARGET_PACKAGE_ROOT: sideBuildPackagePath/u)
   assert.match(source, /m4r === 'handoff-restored'/u)
   assert.match(source, /clientClosed\.sessionOpen, false/u)
-  assert.match(source, /clientClosed\.owners/u)
   assert.match(source, /c1Restored\.clientBuildId, newBuildId/u)
-  // Surface Clients do NOT hold a profile-global Client seat, so this lane must
-  // never derive their lifecycle from one. The handoff is qualified by the real
-  // owner release, the new business PID, the same Host/Session restore and the
-  // strictly-once durable prompt instead.
-  assert.doesNotMatch(source, /seatIsFree\(clientSeatName\)/u,
-    'the upgrade lane must not treat the qualification Client seat as a Surface lifecycle fact')
-  assert.match(source, /record => record\.m4a0 === 'client-started' && record\.pid !== reloadClientPid/u,
-    'U08 must observe the replacement as a NEW OS process')
-  assert.match(source, /record => record\.m4r === 'handoff-restored' && record\.pid === replacementPid/u,
-    'U08 must observe the replacement restoring the original Session')
-  assert.match(source, /promptsAfterReload\.length, 1/u,
-    'U08 must prove the admitted prompt was not replayed')
-  // The OLD Client exits only AFTER the replacement ran; the reexec is not
-  // another same-PID surface revision.
-  const oldClientExitIndex = source.indexOf("clientA.send('/exit\\r')")
-  assert.ok(oldClientExitIndex > reexecIndex, 'the old Client must exit only after the reexec handoff was driven')
   assert.match(source, /newOsPid: c1Pid !== clientAPid/u)
-  assert.match(source, /oldParentWaitedDuringChild: true/u)
-  // Negative 1: a wrong expected Host never connects and never publishes ready.
+  // Negative 1: wrong expected Host never connects.
   assert.match(source, /SPLIT_PROCESS_CLIENT_EXPECTED_INSTANCE_ID: randomUUID\(\)/u)
   assert.match(source, /HOST_IDENTITY_MISMATCH/u)
-  assert.match(source, /noHostConnect: true/u)
-  assert.match(source, /noPathPidOrSecret: true/u)
-  // Negative 2: the fault is injected into the CHILD only.
+  // Negative 2: the injected child failure is forwarded only to the child.
   assert.match(source, /SPLIT_PROCESS_CLIENT_REEXEC_CHILD_FAILURE: 'client-bootstrap'/u)
   assert.match(source, /qualification forced client bootstrap failure/u)
-  assert.match(source, /noAutoRecovery: true/u)
-  assert.match(source, /noReplay: true/u)
-  // The original U02/U04 cross-build qualification and the durable Session
-  // release/U05/U06 ordering must remain AFTER the reexec section.
-  assert.ok(source.indexOf('qualification-host-foundation') > reexecIndex,
-    'U02 must still run after the reexec handoff')
-  assert.ok(source.indexOf('crossBuildSurface') > reexecIndex,
-    'U04 must still run after the reexec handoff')
-  assert.ok(source.indexOf('writeFileSync(releaseBarrier', reexecIndex) > reexecIndex,
-    'the admitted Turn must still be released after the reexec handoff')
-  assert.ok(source.indexOf('SPLIT_UPGRADE_SMOKE_PASS') > reexecIndex)
-  // A real installed package is the only target: no copied/faked dist payload.
+  // U02/U04 remain real cross-build qualification after the handoff.
+  assert.ok(source.indexOf('qualification-host-foundation') > reexec)
+  assert.ok(source.indexOf('host-rpc-proof') > reexec)
+  assert.match(source, /assertIdentityKept\(clientBAuth\.host, hostABefore/u)
+  assert.match(source, /clientBAuth\.host\.buildId === oldBuildId/u)
+  assert.ok(source.indexOf('crossBuildSurface') > reexec)
+  assert.match(source, /SPLIT_PROCESS_CLIENT_SESSION: sessionId/u)
+  assert.match(source, /waitForScreen\('cross-build-hold'/u)
+  // Case-owned failure injection and cleanup.
+  assert.match(source, /failpoint\('upgrade\.cross-build-compatibility\.after-old-host-spawn'\)/u)
+  assert.match(source, /\} finally \{/u)
+  assert.match(source, /stopHostForCleanup\(host\)/u)
   assert.doesNotMatch(source, /copyFileSync|cpSync/u)
-  assert.match(source, /function installSideBuild/u)
+  assert.doesNotMatch(source, /writeFileSync\(.*newArtifact\.path/u)
 })
 
-test('the PRODUCTION /reload-client command is driven through the real PTY, not a signal', () => {
-  const source = readFileSync(SCRIPT, 'utf8')
-  const start = source.indexOf('async function runUserCommandReloadRound')
-  const targetInvalid = source.indexOf('async function runUnavailableTargetRound')
-  const isolation = source.indexOf('async function runReloadSourceIsolationRound')
-  assert.ok(start > 0 && targetInvalid > start && isolation > targetInvalid, 'the U08/U09 rounds must exist')
-  // The PRODUCTION positive/negative round: it must never set the qualification
-  // override or simulate the user command with SIGUSR2.
-  const u08 = source.slice(start, targetInvalid)
-  // The destructive removal negative lives in its OWN isolated round.
-  const targetInvalidRound = source.slice(targetInvalid, isolation)
-
-  // A SECOND, fully isolated profile/home round: U07's round is untouched.
-  assert.match(u08, /const dshHome = join\(roundRoot, 'dsh-home'\)/u)
-  assert.match(u08, /isolatedEnvironment\(envWork, home, dshHome/u)
-  assert.match(u08, /extraIsolatedHomes\.push\(dshHome\)/u)
-
-  // The command is typed into the real PTY. No SIGUSR2 simulation, no
-  // qualification target override, and no copied/faked payload.
-  assert.match(u08, /send\('\/reload-client\\r'\)/u)
-  assert.doesNotMatch(u08, /SPLIT_PROCESS_CLIENT_REEXEC_PROBE|SPLIT_PROCESS_CLIENT_REEXEC_TARGET_PACKAGE_ROOT/u)
-  assert.equal(u08.indexOf('signalBusiness('), -1, 'U08 must never simulate the user command with SIGUSR2')
-  assert.doesNotMatch(u08, /copyFileSync|cpSync/u)
-  assert.doesNotMatch(u08, /writeFileSync\([^)]*dist/u)
-  assert.doesNotMatch(u08, /writeFileSync\([^)]*(oldArtifact|newArtifact)\.path/u)
-
-  // The official in-place profile upgrade installs the NEW candidate; the
-  // command resolves the PROFILE package and the handoff restores the Host.
-  assert.match(u08, /installPlugin\(dsh, newArtifact\.path, harnessDir, env, false\)/u)
-  assert.match(u08, /assertProfileClientPeers\(profileDir, targetDshVersion, 'U08 upgraded profile install'\)/u)
-  assert.match(u08, /newBuildId, oldBuildId/u)
-  assert.match(u08, /reloadRequested\.targetBuildId, newBuildId/u)
-  assert.match(u08, /reloadRequested\.targetBundleVersion, newArtifact\.manifest\.version/u)
-  assert.match(u08, /replacementRestored\.clientBuildId, newBuildId/u)
-  assert.match(u08, /productionTargetResolvedFromProfile: true/u)
-  assert.match(u08, /qualificationTargetOverrideUsed: false/u)
-  assert.match(u08, /handoffRequestedByUserCommand: true/u)
-  assert.match(u08, /promptNotReplayed: true/u)
-  // The refusal negatives keep the OLD live surface through its real PID, its
-  // Host identity and the untouched registry/launch bytes (never a seat probe).
-  assert.match(u08, /assertOldSurfaceKept/u)
-  assert.match(u08, /await assertOldSurfaceKept\('U08 already-current'\)/u)
-  assert.match(u08, /await assertOldSurfaceKept\('U08 attachments refusal'\)/u)
-  assert.match(u08, /assertIdentityKept\(safeIdentity\(\(await hostStatus\(host\)\)\.localHost\), hostIdentity, 'U08 Host after the command reload'\)/u)
-  assert.doesNotMatch(u08, /seatIsFree\(`\\0dsh-pi-tui-c-/u,
-    'U08 must not probe the qualification Client seat for a Surface lifecycle')
-
-  // The two real PTY negatives keep the old/live surface and never stop it.
-  assert.match(u08, /Client reload skipped: this Client already runs the installed build/u)
-  assert.match(u08, /Client reload blocked: remove or submit the staged attachments first/u)
-  assert.match(u08, /alreadyCurrentKeptOldSurface: true/u)
-  assert.match(u08, /attachmentsKeptOldSurface: true/u)
-
-  // Negative 3: the official removal round.
-  assert.match(targetInvalidRound, /'plugin', '--profile', 'pi-tui', 'remove', EXPECTED_PACKAGE_NAME/u)
-  assert.match(targetInvalidRound, /Client reload failed: the installed replacement Client is unavailable or incompatible/u)
-  assert.match(targetInvalidRound, /targetInvalidKeptOldSurface: true/u)
-  assert.match(targetInvalidRound, /installedTargetOfficiallyRemoved: true/u)
-  assert.match(targetInvalidRound, /targetInvalidRefused: true/u)
-  assert.match(targetInvalidRound, /turnHeldAcrossRefusal: true/u)
-  assert.match(source, /runUnavailableTargetRound\(\{/u)
+test('the production /reload-client case never uses a signal or override for the user command', () => {
+  const source = readCase('manual-client-reload.mjs')
+  assert.match(source, /send\('\/reload-client\\r'\)/u)
+  assert.doesNotMatch(source, /SPLIT_PROCESS_CLIENT_REEXEC_PROBE|SPLIT_PROCESS_CLIENT_REEXEC_TARGET_PACKAGE_ROOT/u,
+    'the U08 production command must never set the qualification override')
+  assert.equal(source.indexOf('signalBusiness('), -1, 'U08 must never simulate the user command with SIGUSR2')
+  assert.match(source, /installPlugin\(dsh, newArtifact\.path, harnessDir, env, false\)/u)
+  assert.match(source, /assertProfileClientPeers\(profileDir, targetDshVersion, 'U08 upgraded profile install'\)/u)
+  assert.match(source, /reloadRequested\.targetBuildId, newBuildId/u)
+  assert.match(source, /replacementRestored\.clientBuildId, newBuildId/u)
+  assert.match(source, /productionTargetResolvedFromProfile: true/u)
+  assert.match(source, /qualificationTargetOverrideUsed: false/u)
+  assert.match(source, /alreadyCurrentKeptOldSurface: true/u)
+  assert.match(source, /attachmentsKeptOldSurface: true/u)
+  // The destructive target-invalid round runs the official remove transaction.
+  assert.match(source, /'plugin', '--profile', 'pi-tui', 'remove', EXPECTED_PACKAGE_NAME/u)
+  assert.match(source, /Client reload failed: the installed replacement Client is unavailable or incompatible/u)
+  assert.match(source, /installedTargetOfficiallyRemoved: true/u)
+  assert.match(source, /failpoint\('client-reload\.production-command\.after-host-spawn'\)/u)
+  assert.match(source, /registerIsolatedHome\(dshHome\)/u)
+  // Both rounds land in ONE case-owned cleanup boundary.
+  assert.match(source, /export async function runManualClientReload\(context\)/u)
+  assert.match(source, /return \{ userCommandReload, userCommandReloadTargetInvalid \}/u)
 })
 
-test('U08 keeps a SECOND old-build TUI through the cross-build reexec and the held Turn', () => {
-  const source = readFileSync(SCRIPT, 'utf8')
-  const start = source.indexOf('async function runUserCommandReloadRound')
-  const end = source.indexOf('async function runUnavailableTargetRound')
-  assert.ok(start > 0 && end > start, 'the U08 round must exist')
-  const u08 = source.slice(start, end)
-
-  // B is a real OLD installed `dist/local-client.mjs` on its own wrapper/PTY.
-  // It must join the SAME Session X BEFORE the production command is typed.
-  const peerStart = u08.indexOf("const peerClient = new SurfaceEntryProcess(join(sideOldPackage, 'dist', 'local-client.mjs')")
-  const command = u08.indexOf("reloadClient.send('/reload-client\\r')")
-  assert.ok(peerStart > 0, 'U08 must start the second old-build Client from the real old installation')
-  assert.ok(command > peerStart, 'the second Client must join Session X before `/reload-client` is sent')
-  assert.match(u08, /SPLIT_PROCESS_CLIENT_SESSION: sessionId/u)
-  assert.match(u08, /assertNotEqual\(peerPid, reloadClientPid/u)
-  assert.match(u08, /assertNotEqual\(peerClient\.child\.pid, reloadClient\.child\.pid/u)
-  assert.match(u08, /const assertPeerKept = \(label\) =>/u)
-  // B's own identity is the before/post-boundary fact, never a heartbeat.
-  assert.match(u08, /record\.rootFiberUid, peerStatusBefore\.rootFiberUid/u)
-  assert.match(u08, /record\.generationId, peerStatusBefore\.generationId/u)
-  assert.match(u08, /record\.surfaceRevision, peerStatusBefore\.surfaceRevision/u)
-  assert.match(u08, /record\.host\?\.instanceId, hostIdentity\.instanceId/u)
-  assert.match(u08, /the second Client released its own resources/u)
-  const peerAfterRelease = u08.indexOf("assertPeerKept('U08 after the old Client released')")
-  const peerAfterRestore = u08.indexOf("assertPeerKept('U08 after the replacement restored Session X')")
-  const peerAfterExit = u08.indexOf("assertPeerKept('U08 after the replacement exited")
-  assert.ok(peerAfterRelease > 0 && peerAfterRestore > peerAfterRelease && peerAfterExit > peerAfterRestore,
-    'B must be re-verified at the old release, the A\' restore and the A\' exit')
-
-  // The OLD A closure and the NEW A' PID/handoff stay the authority.
-  const oldClosed = u08.indexOf("'U08 old-build reload Client released every owned Client resource'")
-  const replacementStarted = u08.indexOf("record => record.m4a0 === 'client-started' && record.pid !== reloadClientPid")
-  assert.ok(oldClosed > 0 && replacementStarted > oldClosed, 'the old release must precede the replacement process')
-  assert.match(u08, /record => record\.m4r === 'handoff-restored' && record\.pid === replacementPid/u)
-  assert.match(u08, /replacementRestored\.clientBuildId, newBuildId/u)
-  assert.match(u08, /replacementRestored\.sessionHistoryOpen, true/u)
-
-  // A' exits while the ORIGINAL Turn is STILL held; only then is the barrier
-  // released, and the SECOND Client reads the settlement and writes again.
-  const replacementExit = u08.indexOf("reloadClient.send('/exit\\r')")
-  const heldAfterExit = u08.indexOf('U08 after the replacement exited with the original Turn still held')
-  const release = u08.indexOf('writeFileSync(releaseBarrier')
-  assert.ok(replacementExit > 0 && heldAfterExit > replacementExit && release > heldAfterExit,
-    'the barrier must be released only AFTER A\' exited with the original Turn still held')
-  assert.match(u08, /the admitted Turn was released by the Client exit/u)
-  assert.match(u08, /the replacement Client still owned Client services after its release/u)
-  assert.match(u08, /second Client read the original Turn settlement/u)
-  assert.match(u08, /second Client committed after the reload/u)
-  assert.match(u08, /the second Client prompt committed more than once/u)
-  assert.match(u08, /second Client released every owned Client resource/u)
-  assert.match(u08, /secondClientExitCode: peerExit\.code/u)
-  const finalPeerScan = u08.indexOf("assertPeerKept('U08 after the second Client wrote the same Session')")
-  const peerExit = u08.indexOf("peerClient.send('/exit\\r')")
-  const hostStop = u08.indexOf("process.kill(hostIdentity.hostPid, 'SIGTERM')")
-  assert.ok(finalPeerScan > 0 && peerExit > finalPeerScan,
-    'B must be rescanned over the WHOLE post-release window after its own write and before its exit')
-  assert.ok(peerExit > 0 && hostStop > peerExit,
-    'the second Client must close normally before the Host stop remains the last owner-governed step')
-
-  // The legal two-artifact pairing stays a HARD gate (never optional).
-  assert.match(source, /requireExactSmokeDshPin\('old', oldArtifact\.manifest, targetDshVersion\)/u)
-  assert.match(source, /requireExactSmokeDshPin\('new', newArtifact\.manifest, targetDshVersion\)/u)
-  assert.match(source, /oldArtifact\.sha256 === newArtifact\.sha256/u)
-  assert.match(source, /newBuildId !== oldBuildId/u)
+test('the target-source-isolation case proves both entries in ONE live Client process', () => {
+  const source = readCase('reload-source-isolation.mjs')
+  assert.match(source, /SPLIT_PROCESS_CLIENT_REEXEC_PROBE: '1'/u)
+  assert.match(source, /SPLIT_PROCESS_CLIENT_REEXEC_TARGET_PACKAGE_ROOT: sideNewPackage/u)
+  assert.match(source, /send\('\/reload-client\\r'\)/u)
+  assert.match(source, /signalBusiness\('SIGUSR2'\)/u)
+  assert.match(source, /Client reload skipped: this Client already runs the installed build/u)
+  assert.match(source, /assertEqual\(client\.records\.filter\(record => record\.m4r === 'handoff-requested'\)\.length, 0/u)
+  assert.match(source, /qualificationRequested\.source, 'qualification'/u)
+  assert.match(source, /qualificationRequested\.targetBuildId, sideNewBuildId/u)
+  assert.match(source, /replacementRestored\.clientBuildId, sideNewBuildId/u)
+  assert.match(source, /manualResolvedProfileOnly: true/u)
+  assert.match(source, /manualNeverReachedProcessStop: true/u)
+  assert.match(source, /qualificationUsedOverride: true/u)
+  assert.match(source, /failpoint\('client-reload\.target-source-isolation\.after-host-spawn'\)/u)
+  assert.match(source, /registerIsolatedHome\(dshHome\)/u)
 })
 
-test('the manual reload ignores a live qualification target override and resolves the active profile', () => {
+test('the runner owns ONE harness/setup boundary, ONE scope and the registered-home backstop', () => {
   const source = readFileSync(SCRIPT, 'utf8')
-  const start = source.indexOf('async function runReloadSourceIsolationRound')
-  const end = source.indexOf('async function main()')
-  assert.ok(start > 0 && end > start, 'the U09 source-isolation round must exist')
-  const u09 = source.slice(start, end)
-  // The SAME qualification process owns BOTH entries: probe + side-by-side
-  // override AND the public manual command.
-  assert.match(u09, /SPLIT_PROCESS_CLIENT_REEXEC_PROBE: '1'/u)
-  assert.match(u09, /SPLIT_PROCESS_CLIENT_REEXEC_TARGET_PACKAGE_ROOT: sideNewPackage/u)
-  assert.match(u09, /send\('\/reload-client\\r'\)/u)
-  assert.match(u09, /signalBusiness\('SIGUSR2'\)/u)
-  // The manual command resolves the PROFILE (the running old build), so it is
-  // already-current; the qualification request uses the override build.
-  assert.match(u09, /Client reload skipped: this Client already runs the installed build/u)
-  assert.match(u09, /assertEqual\(client\.records\.filter\(record => record\.m4r === 'handoff-requested'\)\.length, 0/u)
-  assert.match(u09, /qualificationRequested\.source, 'qualification'/u)
-  assert.match(u09, /qualificationRequested\.targetBuildId, sideNewBuildId/u)
-  assert.match(u09, /replacementRestored\.clientBuildId, sideNewBuildId/u)
-  assert.match(u09, /manualResolvedProfileOnly: true/u)
-  assert.match(u09, /manualNeverReachedProcessStop: true/u)
-  assert.match(u09, /qualificationUsedOverride: true/u)
-  assert.match(u09, /sameProcessBothEntries: true/u)
-  // The U09 handoff is qualified by the replacement build/PID and the restored
-  // Host/Session, never by the absent profile-global Surface seat.
-  assert.match(u09, /replacementRestored\.clientBuildId, sideNewBuildId/u)
-  assert.match(u09, /replacementRestored\.sessionId, sessionId/u)
-  assert.doesNotMatch(u09, /seatIsFree/u, 'U09 must not probe the qualification Client seat for a Surface lifecycle')
-  assert.match(source, /runReloadSourceIsolationRound\(\{/u)
+  assert.doesNotMatch(source, /extraIsolatedHomes/u, 'the module-level mutable home list must be gone')
+  assert.match(source, /const isolatedHomes = new Set\(\)/u)
+  assert.match(source, /const registerIsolatedHome = path => \{ isolatedHomes\.add\(path\) \}/u)
+  assert.match(source, /for \(const isolatedHome of isolatedHomes\) killIsolatedProcesses\(isolatedHome\)/u)
+  assert.match(source, /proveFailpointCleanup\(isolatedHomes\)/u)
+  assert.match(source, /SPLIT_UPGRADE_FAILPOINT_CLEANUP leftovers=/u)
+  assert.match(source, /SPLIT_UPGRADE_FAILPOINT_CLEANUP_OK/u)
+  assert.match(source, /for \(const run of \[\.\.\.activeProcesses\]\)/u)
+  assert.match(source, /else if \(!KEEP\) \{\n\s+rmSync\(workRoot/u)
+  // The shared DSH CLI harness is installed exactly once in the runner.
+  assert.equal((source.match(/runPnpmInstall\(harnessDir, env, distribution\)/gu) ?? []).length, 1)
+  assert.equal((source.match(/loadDshDistribution\(/gu) ?? []).length, 1)
+  assert.doesNotMatch(source, /installPlugin\(/u, 'cases own their profile installs; the runner must not')
 })
 
-test('the upgrade lane declares every setup local it later assigns', () => {
+test('full and selected outputs keep the historical FULL / Selected-only boundary', () => {
   const source = readFileSync(SCRIPT, 'utf8')
-  const main = source.slice(source.indexOf('async function main()'))
-  // A bare assignment to an undeclared name is a ReferenceError at run time and
-  // only the REAL lane reaches this code, so pin the declarations here.
-  for (const name of ['distribution', 'workRoot', 'home', 'dshHome', 'harnessDir',
-    'sideBuildDir', 'sideBuildPackagePath', 'scratch', 'env', 'evidence']) {
-    assert.match(main, new RegExp(`let ${name}$`, 'mu'),
-      `the setup must declare \`${name}\` before assigning it`)
-    assert.match(main, new RegExp(`^\\s*${name} = `, 'mu'),
-      `the setup must assign \`${name}\` inside the boundary`)
-  }
-  // The declaration must precede the first assignment for each of them.
-  for (const name of ['distribution', 'workRoot', 'dshHome', 'evidence']) {
-    const declared = main.search(new RegExp(`let ${name}$`, 'mu'))
-    const assigned = main.search(new RegExp(`^\\s*${name} = `, 'mu'))
-    assert.ok(declared >= 0 && assigned > declared,
-      `\`${name}\` must be declared before its first assignment`)
-  }
+  const scene = source.slice(source.indexOf('async function runScene('))
+  // Full assigns the historical status/verdict only after every registered case ran.
+  const fullLoop = scene.indexOf('for (const entry of listSelectableUpgradeCases())')
+  const fullStatus = scene.indexOf("evidence.status = 'PASS'")
+  const fullVerdict = scene.indexOf("evidence.verdict = 'cross-build-compatible'")
+  const fullMarker = scene.indexOf('SPLIT_UPGRADE_SMOKE_PASS (cross-build-compatible)')
+  assert.ok(fullLoop >= 0 && fullStatus > fullLoop && fullVerdict > fullStatus && fullMarker > fullVerdict)
+  // Selected writes a partial SELECTABLE_ONLY document and only per-case markers.
+  assert.match(scene, /scope: 'SELECTABLE_ONLY'/u)
+  assert.match(scene, /selectedCases: \[\]/u)
+  assert.ok(scene.indexOf('writeRequestedEvidence(options.evidence, selectedEvidence)') < scene.indexOf('process.stdout.write(`${JSON.stringify(selectedEvidence'))
+  assert.ok(scene.indexOf('process.stdout.write(`${JSON.stringify(selectedEvidence') < scene.indexOf('selectedUpgradePassLine(id)'))
+  assert.doesNotMatch(scene.slice(scene.indexOf('// Selected mode'), scene.indexOf('} catch (error)')),
+    /evidence\.status|evidence\.verdict|SPLIT_UPGRADE_SMOKE_PASS/u,
+    'a selected run never carries the Full status/verdict/marker')
+  // The requested evidence lands BEFORE the full marker.
+  assert.ok(source.indexOf('writeRequestedEvidence(options.evidence, evidence)')
+    < source.indexOf("'SPLIT_UPGRADE_SMOKE_PASS"))
 })
 
-test('the upgrade setup shares the report and cleanup boundary with the run', () => {
+test('the failure report path stays bounded and keeps the --evidence FAIL twin', () => {
   const source = readFileSync(SCRIPT, 'utf8')
-  const main = source.slice(source.indexOf('async function main()'))
-  const guard = main.indexOf("requireExactSmokeDshPin('new'")
-  const root = main.search(/[A-Za-z]+Sync\(join\(tmpdir\(\), 'dsh-split-upgrade-'\)\)/u)
-  // The REAL `try {` index, so moving the setup back out of it fails the guard.
-  const setupTry = main.indexOf('try {', guard)
-  const distributionLoad = main.indexOf('distribution = loadDshDistribution(', guard)
-  assert.ok(guard > 0 && root > guard, 'no setup may run before both pins are qualified')
-  assert.ok(setupTry > guard, 'the reporting/cleanup try must follow both pin guards')
-  assert.ok(root > setupTry, 'the work root must be created INSIDE the reporting/cleanup try')
-  assert.ok(distributionLoad > setupTry,
-    'the distribution load must be inside the reporting/cleanup try, not before it')
-  assert.ok(main.indexOf('if (workRoot === undefined) {', root) > 0,
-    'the finally must tolerate a root that never appeared')
-  const finallyIndex = main.indexOf('} finally {', root)
-  const cleanup = main.slice(finallyIndex)
-  assert.match(cleanup, /if \(workRoot === undefined\) \{/u, 'a missing work root must not break the cleanup')
-  assert.match(cleanup, /else if \(!KEEP\) rmSync\(workRoot/u)
-  assert.match(cleanup, /if \(dshHome !== undefined\) killIsolatedProcesses\(dshHome\)/u)
-})
-
-test('the split-upgrade lane reports every failure with a bounded default projection', () => {
-  const source = readFileSync(SCRIPT, 'utf8')
-  assert.match(source, /import \{[\s\S]*createSmokeDiagnostics,[\s\S]*\} from '\.\/lib\/split-smoke-diagnostics\.mjs'/u)
   assert.match(source, /diagnostics = createSmokeDiagnostics\(\{[\s\S]{0,300}lane: 'split-upgrade'/u)
   assert.match(source, /process\.stderr\.write\(`\$\{diagnostics\.identityLine\(\)\}\\n`\)/u)
-  const main = source.slice(source.indexOf('async function main()'))
-  // The identity is announced only AFTER both pins qualified (the unqualified
-  // CLI run asserting the absence of `qualified=true` covers the behaviour).
-  assert.ok(main.indexOf('diagnostics.identityLine()') > main.indexOf("requireExactSmokeDshPin('new'"),
-    'the identity line must be built only after both artifacts qualified')
-  // Each named phase boundary is announced, so a default log locates the failure.
-  for (const step of [
-    "checkpoint('U01-U06/base-pairing')",
-    "checkpoint('U07/reexec-request')",
-    "checkpoint('U07/negative-wrong-instance')",
-    "checkpoint('U07/negative-child-failure')",
-    "checkpoint('U02/cross-build-attach')",
-    "checkpoint('U04/cross-build-surface')",
-    "checkpoint('U05/host-stop')",
-    "checkpoint('U06/new-host-boot')",
-    "checkpoint('U08/negative-already-current')",
-    "checkpoint('U08/negative-attachments')",
-    "checkpoint('U08/upgrade-install')",
-    "checkpoint('U08/positive-reexec')",
-    "checkpoint('U08/negative-target-invalid')",
-    "checkpoint('U09/manual-already-current')",
-    "checkpoint('U09/qualification-reexec')",
-  ]) {
-    assert.ok(source.includes(step), `the lane must announce ${step}`)
-  }
-  // Both failure paths report BEFORE the cleanup, and the FAIL twin lands on the
-  // operator's --evidence path (never inside the deletable work root).
-  const preflightReport = main.indexOf("diagnostics.reportFailure(error, { evidencePath: options.evidence })")
-  const runReport = main.indexOf('processes: [...hosts, ...clients]')
-  const finallyIndex = main.indexOf('} finally {')
-  const workRootRemove = main.indexOf('rmSync(workRoot, { recursive: true, force: true })', finallyIndex)
-  assert.ok(preflightReport > 0 && runReport > preflightReport && finallyIndex > runReport,
-    'the preflight branch and the run catch must both report before the finally cleanup')
-  assert.ok(workRootRemove > finallyIndex, 'the work root deletion must stay in the finally')
-  assert.match(main.slice(runReport - 200, finallyIndex), /diagnostics\.reportFailure\(error, \{\s*processes: \[\.\.\.hosts, \.\.\.clients\],/u)
-  assert.match(main.slice(runReport, finallyIndex), /evidencePath: options\.evidence/u)
-  assert.match(main.slice(finallyIndex), /if \(!KEEP\) rmSync\(workRoot/u, 'the SPLIT_UPGRADE_KEEP semantics stay unchanged')
-  // The PASS evidence keeps its original shape and marker.
-  assert.match(source, /evidence\.status = 'PASS'/u)
-  assert.match(source, /evidence\.verdict = 'cross-build-compatible'/u)
-  // The default final line is the fixed classification only; the raw error text
-  // appears in one place, and only when the operator asked for a kept scene.
+  assert.match(source, /diagnostics\.reportFailure\(error, \{\n\s+processes: \[\.\.\.activeProcesses\],\n\s+evidencePath: options\.evidence,\n\s+\}\)/u)
+  assert.match(source, /emitInputFailure\(\{[\s\S]{0,200}evidencePath: options\?\.evidence/u)
   assert.match(source, /SPLIT_PROCESS_UPGRADE_SMOKE_FAILURE: \$\{safeFailureSummary\(error\)\}/u)
   assert.match(source, /if \(KEEP\) process\.stderr\.write\(`SPLIT_PROCESS_UPGRADE_SMOKE_FORENSICS: \$\{forensicErrorText\(error\)\}\\n`\)/u)
   assert.doesNotMatch(source, /SPLIT_PROCESS_UPGRADE_SMOKE_FAILURE: \$\{error instanceof Error \? error\.message/u)
-  // A failure before the collector existed still leaves one safe report AND the
-  // `--evidence` FAIL twin, and the PASS twin uses the same private write.
-  assert.match(main, /emitInputFailure\(\{[\s\S]{0,160}evidencePath: options\?\.evidence/u,
-    'an input failure before the collector still writes the --evidence FAIL twin')
-  assert.match(main, /diagnostics\.reportFailure\(error, \{ evidencePath: options\.evidence \}\)/u)
-  assert.match(source, /writeRequestedEvidence\(options\.evidence, evidence\)/u,
-    'a requested PASS evidence document must fail the lane when it cannot land')
-  assert.ok(source.indexOf('writeRequestedEvidence(options.evidence, evidence)')
-    < source.indexOf("'SPLIT_UPGRADE_SMOKE_PASS"),
-    'the PASS marker may only be announced after the requested evidence landed')
+  assert.match(source, /export \{ waitForAcceptedHandoff, waitForReloadNotice \} from '\.\/lib\/split-upgrade-support\.mjs'/u,
+    'the shared diagnostics tooling keeps its single import path')
+  const support = readFileSync(join(ROOT, 'scripts', 'lib', 'split-upgrade-support.mjs'), 'utf8')
+  assert.equal((support.match(/export async function waitForReloadNotice/gu) ?? []).length, 1)
+  assert.equal((support.match(/export async function waitForAcceptedHandoff/gu) ?? []).length, 1)
+  // The 120s historical C1 wait default survives as an explicit Upgrade wrapper.
+  assert.match(support, /export async function waitForUpgradeC1WorkEvent\(workRoot, predicate, label, timeoutMs = 120_000\)/u)
 })
 
-test('the reload waits fail early on a refusal yet still PASS only on a painted notice', () => {
-  const source = readFileSync(SCRIPT, 'utf8')
-  assert.match(source, /export async function waitForReloadNotice\(client, expectedText, label, fromRecordIndex/u)
-  assert.match(source, /export async function waitForAcceptedHandoff\(client, pid, label, fromRecordIndex/u)
-  // PASS authority #1: the real PTY viewport, classified into the product's
-  // FIXED NOTICE ROW SHAPE, checked FIRST inside the loop.
-  const noticeWait = source.slice(
-    source.indexOf('export async function waitForReloadNotice'),
-    source.indexOf('const IGNORED_REASON_TYPES'),
-  )
-  const firstViewport = noticeWait.indexOf('const viewport = await client.viewport()')
-  const shapeClassify = noticeWait.indexOf('const painted = classifyReloadNotices(viewport)')
-  const paintPass = noticeWait.indexOf('if (painted.includes(expected)) return expected')
-  const rejectionScan = noticeWait.indexOf("record?.m4r !== 'handoff-request-rejected'")
-  assert.ok(firstViewport >= 0 && shapeClassify >= 0 && paintPass >= 0 && rejectionScan >= 0,
-    'the wait must read the viewport, classify the fixed notice shape, then check the painted PASS and the rejection scan')
-  assert.ok(firstViewport < shapeClassify && shapeClassify < paintPass,
-    'the painted frame must be classified into the fixed notice shape before anything can PASS')
-  assert.ok(paintPass < rejectionScan, 'telemetry may only ever shorten a wait, never satisfy it')
-  // A bare substring of the expected wording is NOT a PASS criterion: a prompt
-  // echo or composer line carrying the same bytes must not satisfy the wait.
-  assert.doesNotMatch(noticeWait, /includes\(expectedText\)/u,
-    'the notice wait must not PASS on a raw viewport substring')
+test('the extracted upgrade modules import without starting a lane', (t) => {
+  const dir = withTempDir(t)
+  const urls = [
+    'scripts/lib/split-upgrade-selection.mjs',
+    'scripts/lib/split-upgrade-support.mjs',
+    ...CASE_NAMES.map(name => `scripts/smoke/split-upgrade/${name}`),
+    'scripts/split-process-upgrade-smoke.mjs',
+  ].map(relative => JSON.stringify(pathToFileURL(join(ROOT, relative)).href))
+  const probe = `for (const url of [${urls.join(', ')}]) await import(url)`
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', probe], {
+    encoding: 'utf8',
+    timeout: 15_000,
+    cwd: dir,
+    env: { ...process.env, TMPDIR: dir },
+  })
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(result.stdout, '', 'an import must not announce a checkpoint, identity or PASS')
+  assert.deepEqual(readdirSync(dir), [], 'an import may not create a work root or report directory')
+})
 
-  // PASS authority #2: an accepted handoff must be THIS PID's own record.
-  const handoffWait = source.slice(
-    source.indexOf('export async function waitForAcceptedHandoff'),
-    source.indexOf('async function runUserCommandReloadRound'),
-  )
-  assert.match(handoffWait, /record\?\.m4r === 'handoff-requested' && record\.pid === pid/u)
-  // Every command or signal has its OWN pre-send record boundary; no site reads
-  // a refusal left by an earlier action.
-  const boundaries = [
-    'const alreadyCurrentFrom = reloadOldClient.records.length',
-    'const attachmentsFrom = reloadOldClient.records.length',
-    'const reloadRequestFrom = reloadClient.records.length',
-    'const targetInvalidFrom = client.records.length',
-    'const manualReloadFrom = client.records.length',
-    'const qualificationFrom = client.records.length',
-    'const reexecRequestFrom = clientA.records.length',
-    'const childFailureRequestFrom = clientA2.records.length',
-  ]
-  for (const capture of boundaries) {
-    const index = source.indexOf(capture)
-    assert.ok(index > 0, `the wait needs its own boundary: ${capture}`)
-    const after = source.slice(index, index + 400)
-    assert.ok(/send\('\/reload-client\\r'\)|signalBusiness\('SIGUSR2'\)/u.test(after),
-      `${capture} must be captured immediately before this action's command`)
+test('the upgrade-specific tooling no longer locks an inline main() shape', () => {
+  const source = readFileSync(SCRIPT, 'utf8')
+  // The old pseudo-guards looked for U02-U06 strings inside main()'s source. The
+  // real cases are now separate owner modules; the runner may not retain them.
+  for (const gone of ["checkpoint('U01-U06/base-pairing')", 'const hosts = []', 'const clients = []']) {
+    assert.ok(!source.includes(gone), `the runner must not keep inline case machinery: ${gone}`)
   }
-  for (const call of [
-    "waitForReloadNotice(reloadOldClient, 'Client reload skipped: this Client already runs the installed build.',\n    'U08 already-current notice', alreadyCurrentFrom)",
-    "waitForReloadNotice(reloadOldClient, 'Client reload blocked: remove or submit the staged attachments first.',\n    'U08 attachments refusal', attachmentsFrom)",
-    'waitForReloadNotice(client, \'Client reload failed: the installed replacement Client is unavailable or incompatible.\',\n    \'U08 target-invalid notice\', targetInvalidFrom)',
-    "waitForReloadNotice(client, 'Client reload skipped: this Client already runs the installed build.',\n    'U09 manual already-current notice', manualReloadFrom)",
-  ]) {
-    assert.ok(source.includes(call), `the painted-notice wait must own this site:\n${call}`)
+  const files = [SCRIPT, ...CASE_NAMES.map(name => join(CASE_DIR, name))]
+  for (const file of files) {
+    const text = readFileSync(file, 'utf8')
+    assert.doesNotMatch(text, /EXPECTED_CASE_COUNT/u)
   }
-  // The Session-content and prompt proofs stay plain PTY waits: they are not
-  // reload notices and must not be routed through the refusal classifier.
-  assert.match(source, /waitForScreen\(holdPrompt, 'U08 old Client painted the admitted prompt', 120_000\)/u)
-  assert.match(source, /waitForScreen\(holdPrompt, 'U09 the replacement painted the admitted prompt', 120_000\)/u)
-  assert.match(source, /waitForScreen\('cross-build-hold'/u)
-  // The untouched safety assertions around the converted waits still exist.
-  assert.match(source, /waitForClearedComposer\(reloadOldClient, '\[image #', 'U08 staged placeholder cleared'\)/u)
-  assert.match(source, /assertOldSurfaceKept/u)
-  assert.match(source, /m4r === 'handoff-restored'/u)
-  // The fault-injection negatives keep their own expectations.
-  assert.match(source, /qualification forced client bootstrap failure/u)
-  assert.match(source, /assertEqual\(childFailureExit\.code, 1/u)
-  assert.match(source, /HOST_IDENTITY_MISMATCH/u)
+  assert.doesNotMatch(source, /readdirSync\(CASE_DIR/u)
 })
