@@ -5724,6 +5724,12 @@ async function main() {
         assert(!existsSync(releaseBarrier), 'M5N the hold barrier was released during the navigation')
         assert(durableOf(sessionX).every(event => event.type !== 'turn/end'),
           'M5N leaving X stopped its held Turn')
+        // The status record is not a painted frame: the old X transcript can
+        // still be on screen when the record arrives. Wait for a Y-ONLY fact
+        // (`m5n-y-held` was never sent on X) before asserting the X-only
+        // absence, or the assertion races the repaint.
+        await waitForCondition(async () => (await clientA.viewport()).join('\n').includes('m5n-y-held'),
+          'M5N A painted the Y surface after leaving X', 120_000)
         assert(!(await clientA.viewport()).join('\n').includes('m5n-x-queued'),
           'M5N the X-only queued occurrence leaked onto the Y surface')
 
