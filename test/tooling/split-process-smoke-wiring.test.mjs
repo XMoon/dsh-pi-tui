@@ -1753,11 +1753,15 @@ test('listing selectable split cases does not install a profile or claim complet
   const dir = life.tempDir('split-selectable-list-')
   const result = runCli(['--list'], dir)
   assert.equal(result.status, 0, `--list must exit 0: ${result.stderr}`)
-  assert.match(result.stdout, /SPLIT_PROCESS_SELECTABLE_CASES scope=SELECTABLE_ONLY/u)
-  assert.match(result.stdout, /suite=bootstrap case=bootstrap\.entry-admission title=an inherited Host role without a mounted TUI surface is refused before Host admission/u)
-  assert.match(result.stdout, /suite=bootstrap case=bootstrap\.host-runtime-disabled title=a disabled Host Runtime owner refuses Ready without publishing a Host identity/u)
-  assert.match(result.stdout, /suite=bootstrap case=bootstrap\.runtime-artifact-recovery title=a renamed-away Host Runtime artifact fails closed and the restored artifact reaches authenticated Ready/u)
-  assert.match(result.stdout, /suite=transport case=transport\.authenticated-lifecycle title=concurrent Host launches elect one authenticated owner whose Client lifecycle survives exits and signals/u)
+  // The listing prints the REGISTRY order — the same order a suite and the full
+  // lane execute — so a sorted display can never show an order no run performs.
+  assert.deepEqual(result.stdout.trimEnd().split('\n'), [
+    'SPLIT_PROCESS_SELECTABLE_CASES scope=SELECTABLE_ONLY',
+    'suite=bootstrap case=bootstrap.host-runtime-disabled title=a disabled Host Runtime owner refuses Ready without publishing a Host identity',
+    'suite=bootstrap case=bootstrap.entry-admission title=an inherited Host role without a mounted TUI surface is refused before Host admission',
+    'suite=bootstrap case=bootstrap.runtime-artifact-recovery title=a renamed-away Host Runtime artifact fails closed and the restored artifact reaches authenticated Ready',
+    'suite=transport case=transport.authenticated-lifecycle title=concurrent Host launches elect one authenticated owner whose Client lifecycle survives exits and signals',
+  ], 'the listing must follow the registry execution order')
   // A listing never becomes a full PASS and never creates a scene.
   for (const forbidden of ['SPLIT_PROCESS_SMOKE_PASS', 'T60 PASS', 'PASS_REAL_SPLIT_PROCESS',
     'PASS_PRODUCT_BROWSER', 'WC-12 PASS']) {
