@@ -1,7 +1,7 @@
 /**
  * Shared Web qualification helpers for the four PR2-D Web cases.
  *
- * This is the ONE owner of the official 59-row oracle, the authenticated
+ * This is the ONE owner of the official 60-row oracle, the authenticated
  * launch-token -> cookie -> index -> graph chain, the bounded SSE probes, the
  * credential redactor and the abortable Browser-driver waits. The host cases
  * import these helpers; no copy remains in the lane entry.
@@ -20,7 +20,7 @@ function assert(condition, message) {
 }
 
 /**
- * M5-W PR-A: the 59 official Web rows the Host-only overlay declares, in order.
+ * M5-W PR-A: the 60 official Web rows the Host-only overlay declares, in order.
  *
  * The isolated qualification re-reads the LIVE overlay patch the running Host
  * wrote and compares it against this FROZEN list, so a dropped, renamed,
@@ -33,6 +33,7 @@ export const PR_A_WEB_ROWS = [
   { id: 'modules', name: '@deepseek-ai/dsh-client-modules' },
   { id: 'client-hmr', name: '@deepseek-ai/dsh-client-hmr' },
   { id: 'cordis-client-runner', name: '@deepseek-ai/dsh-cordis-client-runner' },
+  { id: 'ui-context-menu', name: '@deepseek-ai/dsh-client-ui-context-menu' },
   { id: 'ui-open-in-app', name: '@deepseek-ai/dsh-client-ui-open-in-app' },
   { id: 'ui-settings-account', name: '@deepseek-ai/dsh-client-ui-settings-account' },
   { id: 'ui-theme', name: '@deepseek-ai/dsh-client-ui-theme' },
@@ -58,6 +59,7 @@ export const PR_A_WEB_ROWS = [
   { id: 'ui-chat', name: '@deepseek-ai/dsh-client-ui-chat' },
   { id: 'ui-brand-official', name: '@deepseek-ai/dsh-client-ui-brand-official' },
   { id: 'ui-attachment', name: '@deepseek-ai/dsh-client-ui-attachment' },
+  { id: 'ui-file-drag', name: '@deepseek-ai/dsh-client-ui-file-drag' },
   { id: 'ui-tool', name: '@deepseek-ai/dsh-client-ui-tool' },
   { id: 'ui-cordis', name: '@deepseek-ai/dsh-client-ui-cordis' },
   { id: 'ui-deliverables', name: '@deepseek-ai/dsh-client-ui-deliverables' },
@@ -74,7 +76,6 @@ export const PR_A_WEB_ROWS = [
   { id: 'ui-goal', name: '@deepseek-ai/dsh-client-ui-goal' },
   { id: 'ui-message-feedback', name: '@deepseek-ai/dsh-client-ui-message-feedback' },
   { id: 'ui-model-selection', name: '@deepseek-ai/dsh-client-ui-model-selection' },
-  { id: 'ui-deepseek-model-label-1017', name: '@deepseek-ai/dsh-client-ui-deepseek-model-label-1017' },
   { id: 'ui-permission', name: '@deepseek-ai/dsh-client-ui-permission-presets' },
   { id: 'ui-agent-preset', name: '@deepseek-ai/dsh-client-ui-agent-preset' },
   { id: 'entry-customization', name: '@deepseek-ai/dsh-client-ui-entry-customization' },
