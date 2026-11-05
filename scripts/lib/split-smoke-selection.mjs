@@ -20,11 +20,15 @@ import { runClientHmrSignals } from '../smoke/split-process/client-hmr-signals.m
 import { runDetachedTurnInteractions } from '../smoke/split-process/detached-turn-interactions.mjs'
 import { runNonDestructiveClientLifecycle } from '../smoke/split-process/non-destructive-client-lifecycle.mjs'
 import { runEntryAdmission } from '../smoke/split-process/entry-admission.mjs'
+import { runOfficialWebComposition } from '../smoke/split-process/official-web-composition.mjs'
 import { runPtySessionWriteRecovery } from '../smoke/split-process/pty-session-write-recovery.mjs'
 import { runSharedSessionInteractions } from '../smoke/split-process/shared-session-interactions.mjs'
 import { runHostRuntimeDisabled } from '../smoke/split-process/host-runtime-disabled.mjs'
 import { runRuntimeArtifactRecovery } from '../smoke/split-process/runtime-artifact-recovery.mjs'
 import { runUnknownWriteHostDeath } from '../smoke/split-process/unknown-write-host-death.mjs'
+import { runWebProductQualification } from '../smoke/split-process/web-product.mjs'
+import { runWebRuntimeToggle } from '../smoke/split-process/web-runtime-toggle.mjs'
+import { runWebStartupPreference } from '../smoke/split-process/web-startup-preference.mjs'
 import { SplitSmokeInputError } from './split-smoke-diagnostics.mjs'
 
 /** The evidence scope every selected result declares. */
@@ -40,7 +44,9 @@ const SELECTABLE_SCOPE = 'SELECTABLE_ONLY'
  * authenticated-link chain; `surface`, `multi-client` and `navigation` own the
  * real-surface, shared-Session and non-destructive Client scenes; `recovery`
  * owns the detached-interaction, HMR/signal and unknown-write Host-death
- * continuity evidence.
+ * continuity evidence; `web` owns the official Web composition, the live
+ * runtime toggle, the profile startup preference and the product Browser/TUI
+ * matrix.
  */
 const CASE_REGISTRY = Object.freeze([
   Object.freeze({
@@ -102,6 +108,30 @@ const CASE_REGISTRY = Object.freeze([
     id: 'recovery.unknown-write-host-death',
     title: 'an ACK-dropped write survives Host death as one durable write and no fabricated answer',
     run: runUnknownWriteHostDeath,
+  }),
+  Object.freeze({
+    suite: 'web',
+    id: 'web.official-composition',
+    title: 'the official Web composition stays default-off and a real Browser plus real TUI share one authenticated Host',
+    run: runOfficialWebComposition,
+  }),
+  Object.freeze({
+    suite: 'web',
+    id: 'web.runtime-toggle',
+    title: 'one live Host toggles the official Web runtime on and off without unloading the real TUI',
+    run: runWebRuntimeToggle,
+  }),
+  Object.freeze({
+    suite: 'web',
+    id: 'web.startup-preference',
+    title: 'the profile-owned Web startup preference applies on the next cold Host through the real settings wire',
+    run: runWebStartupPreference,
+  }),
+  Object.freeze({
+    suite: 'web',
+    id: 'web.product-browser-tui',
+    title: 'the product Browser and real TUI share one Host across the 22-case WP matrix',
+    run: runWebProductQualification,
   }),
 ])
 

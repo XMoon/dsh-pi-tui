@@ -51,9 +51,16 @@ export const ENTRY_ADMISSION_MUTATIONS = Object.freeze({
  */
 export async function runEntryAdmission(context) {
   const { installation, EntryProcess, entries, base, workDir, trace, failpoint } = context
-  const { dshInvocation: dsh, env, profileDir } = installation
+  const { dshInvocation: dsh, env, profileDir, manifest } = installation
   const tuiMutationPatch = join(workDir, ENTRY_ADMISSION_MUTATIONS['tui-enabled'].file)
   const connectionMutationPatch = join(workDir, ENTRY_ADMISSION_MUTATIONS['connection-disabled'].file)
+
+  // T18 package shape: the installed candidate must keep its internal entries
+  // and the one runtime dependency the Client reexec/transport actually uses.
+  assert(manifest.dependencies?.ws === '8.21.3', 'T18 ws runtime dependency missing')
+  assert(!Object.keys(manifest.exports ?? {}).includes('./local-host'), 'T18 public Host entry appeared')
+  assert(!Object.keys(manifest.exports ?? {}).includes('./local-client'), 'T18 public Client entry appeared')
+  trace('t18', { packageShape: 'internal entries only', directHelp: 'pass', roleOnlyNegative: 'pass' })
 
   // T18 negative control: the role string alone is not Host-entry admission.
   // A regular CLI that merely inherits DSH_PI_TUI_ROLE=host must still fail
