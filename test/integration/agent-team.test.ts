@@ -13,6 +13,9 @@
 import assert from 'node:assert/strict'
 import { join } from 'node:path'
 import test from 'node:test'
+import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { Context } from '@deepseek-ai/cordis'
+import { executeModelToolFixture } from '@deepseek-ai/dsh-tool-testkit'
 import { LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
@@ -62,12 +65,12 @@ class TeammateAdapter extends LlmAdapter {
   }
 }
 
-function toolCall(ctx: { tools: { execute(input: unknown): Promise<unknown> } }, name: string, agent: unknown, args: unknown): Promise<{
+function toolCall(ctx: Context, name: string, agent: Agent, args: unknown): Promise<{
   isError?: boolean
   content?: readonly { type?: string; text?: string }[]
   error?: { info?: { code?: string } }
 }> {
-  return ctx.tools.execute({
+  return executeModelToolFixture(ctx, {
     signal,
     callId: ToolCallId(`optional-bundle-team-${++callCounter}`),
     name,

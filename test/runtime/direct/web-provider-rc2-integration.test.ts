@@ -22,6 +22,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { join } from 'node:path'
+import { executeModelToolFixture } from '@deepseek-ai/dsh-tool-testkit'
 import { Context } from '@deepseek-ai/cordis'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
@@ -156,16 +157,18 @@ test('the shipped defaults select the Messages search and the HTTP fetch provide
   assert.equal(booted.transport.requests[0]?.authorization, 'Bearer l5-test-key',
     'the official credential store supplies the key; no literal key is configured')
 
-  // The default FETCH provider is the anonymous HTTP fetcher: it refuses a
-  // non-public destination LOCALLY (no request leaves the process), which is
-  // how this fixture proves the selection without network egress.
+  // The default FETCH provider is the anonymous HTTP fetcher. DSH 0.2.2's
+  // provider no longer refuses a non-public destination locally (upstream
+  // removed that pre-check), so this probe only proves WHICH provider answered:
+  // the plain fetch failure is the anonymous fetcher's, and no DeepSeek
+  // endpoint was consulted for it.
   const web = booted.ctx.get('web') as { fetch(request: { url: string }): Promise<unknown> }
   await assert.rejects(web.fetch({ url: 'http://127.0.0.1:9/page' }), (error: unknown) => {
-    assert.match(String((error as Error).message), /non-public IP/u)
+    assert.match(String((error as Error).message), /web fetch failed/u)
     return true
   })
   assert.deepEqual(booted.transport.requests.map(request => request.url), [MESSAGES_ENDPOINT],
-    'the HTTP provider never reached the outer transport')
+    'the fetch provider never consulted the Messages search endpoint')
 })
 
 test('a TUI settings write switches the NEXT search to the DeepSeek Search API with its options', async t => {
@@ -218,12 +221,22 @@ test('the real web_search tool delivers the selected provider result to the mode
   const booted = await boot(life)
   await booted.config.setSearchProvider('deepseek-search-api')
 
-  const result = await booted.ctx.tools.execute({
-    signal: new AbortController().signal,
+  // `web_search` registers with a step condition (`when: searchReady`), so a
+  // direct execution needs the SAME admission the agent loop resolves at step
+  // start — never a bypass of the condition.
+  const signal = new AbortController().signal
+  const toolSet = await booted.ctx.tools.resolve({
+    agent: booted.agent,
+    modelSelection: { provider: 'mock', model: 'model' },
+    signal,
+  })
+  const result = await executeModelToolFixture(booted.ctx, {
+    signal,
     callId: ToolCallId('web-l5-tool-call'),
     name: 'web_search',
     arguments: { queries: ['harness release'] },
     agent: booted.agent,
+    toolSet,
   })
   const text = ((result.content ?? []) as readonly { readonly text?: string }[]).map(block => block.text ?? '').join('\n')
   assert.match(text, /https:\/\/example\.test\/api/u, `the tool result carries the selected provider's source:\n${text}`)

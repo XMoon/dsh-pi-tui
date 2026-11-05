@@ -3,6 +3,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { MessageId } from '@deepseek-ai/dsh-llm'
 import { SESSION_FORMAT_VERSION, SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { ProcessTerminal } from '@xmoon76/pi-tui'
+import { fakeAgentModel } from './agent-model-double.ts'
 import { apply as applyRunner, Config as TuiConfigSchema } from '../../src/index.ts'
 import { TUI_STARTUP_SERVICE } from '../../src/startup.ts'
 import type { VirtualTerminal } from './virtual-terminal.ts'
@@ -174,6 +175,9 @@ export function fakeAgent(
   promptAcceptance: { value: boolean } = { value: false },
   /** The harness-level delivery log (see `makeHarness`'s `delivered`). */
   delivered: DeliveredPrompt[] = [],
+  /** The Agent options (the production loop seeds them from the persisted
+   *  default at creation). */
+  agentOptions: { provider?: string; model?: string } = { provider: 'p', model: 'm' },
 ): Agent {
   // A small structural Agent context is sufficient for the Direct setup
   // callbacks.
@@ -202,7 +206,9 @@ export function fakeAgent(
   const agent = {
     session,
     ctx: agentContext,
-    options: { provider: 'p', model: 'm' },
+    options: agentOptions,
+    // DSH 0.2.2: the Agent owns its model selection (`AgentModel`).
+    model: fakeAgentModel(session, agentOptions),
     status: 'idle',
     inbox: { nextTurn: [], nextStep: [] },
     whenIdle: async () => {
@@ -295,13 +301,17 @@ export function makeHarness(
     persisted.set(session.id, session)
   }
 
-  const makeHandle = (session: FakeSession): { agent: Agent; dispose: () => Promise<void> } => {
+  const makeHandle = (
+    session: FakeSession,
+    options: { provider?: string; model?: string } = initialDefault,
+  ): { agent: Agent; dispose: () => Promise<void> } => {
     const agent = fakeAgent(
       session,
       whenIdleGate === undefined ? undefined : () => whenIdleGate(session.id),
       retirementEvents,
       promptAcceptance,
       deliveredLog,
+      options,
     )
     live.set(session.id, agent)
     return {
@@ -378,7 +388,7 @@ export function makeHarness(
       })
       createdSessions.push(session)
       persisted.set(id, session)
-      const handle = makeHandle(session)
+      const handle = makeHandle(session, agentOptions ?? initialDefault)
       await setup?.(handle.agent.ctx, handle.agent)
       return handle
     },

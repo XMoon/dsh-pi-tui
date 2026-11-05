@@ -1743,8 +1743,8 @@ test('LIVE: a mounted Remote surface renders the tool call as it executes on the
   // mounted card must ride the bounded generic fallback (§7.4-11's mounted
   // proof), while the live→settled convergence (§7.4-10's live proof) is
   // the Host executing this very call through the official loop.
-  const tools = await import('@deepseek-ai/dsh-tools')
-  host.ctx.tools.register(tools.defineContentToolFixture({
+  const testkit = await import('@deepseek-ai/dsh-tool-testkit')
+  host.ctx.tools.register(testkit.defineContentToolFixture({
     name: 'pr4_live_fixture',
     description: 'the live lifecycle fixture tool',
     parameters: {},

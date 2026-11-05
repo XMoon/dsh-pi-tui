@@ -32,6 +32,7 @@
 
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
@@ -157,6 +158,9 @@ async function createProbe(adapter: LlmAdapter): Promise<Probe> {
   await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(SystemPrompt, { personaPrefix: '', personaSuffix: '' })
   await ctx.plugin(ToolRuntime)
+  // The official executor owns batch settlement (DSH 0.2.2 Base installs it;
+  // this standalone fixture must do the same).
+  await ctx.plugin(NativeToolExecutor)
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(AgentLoop, { agents: [] })
   ctx.llm.registerAdapter(['probe'], adapter)

@@ -1538,12 +1538,15 @@ test('an inline `/image` of an over-limit file and of an unreadable file both re
     const shots = join(fixture.workRoot, 'shots')
     mkdirSync(shots, { recursive: true })
 
-    // (1) OVER-LIMIT: 21 MiB against the default 20 MiB cap, and the guard reads only
-    // the stat — the bytes are never pulled into memory.
+    // (1) OVER-LIMIT: one byte past the deployment cap, and the guard reads only
+    // the stat — the bytes are never pulled into memory. DSH 0.2.2 raised the
+    // LocalAttachmentStore default `maxImageBytes` to 50 MiB, so the fixture is
+    // bounded against that real default (never a stale 20 MiB literal).
     const huge = join(shots, 'huge.png')
+    const overLimitBytes = 51 * 1024 * 1024
     writeFileSync(huge, Buffer.alloc(1))
-    truncateSync(huge, 21 * 1024 * 1024)
-    assert.equal(statSync(huge).size, 21 * 1024 * 1024, 'the file really is over the configured cap')
+    truncateSync(huge, overLimitBytes)
+    assert.equal(statSync(huge).size, overLimitBytes, 'the file really is over the configured cap')
     assert.equal(stores.imageEntries(), 0, 'the image draft store starts empty')
 
     await prepareDraft(fixture, `看一下 /image ${shots}/huge`)

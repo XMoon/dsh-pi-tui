@@ -12,6 +12,9 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
+import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { Context } from '@deepseek-ai/cordis'
+import { executeModelToolFixture } from '@deepseek-ai/dsh-tool-testkit'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { createUserMessage, LlmAdapter, ToolCallId, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { sanitizeDisplayText } from '../../src/tui/presentation/terminal-text.ts'
@@ -81,7 +84,7 @@ test('an official Optional bundle goes off→enable→restart-required→restart
     // REAL TOOL: create a branch/worktree from a local commit and observe the
     // OFFICIAL working-directory projection, not the tool result alone.
     const agent = await restarted.createAgent(SessionId('optional-bundle-b05'), { cwd: project })
-    const result = await restarted.ctx.tools.execute({
+    const result = await executeModelToolFixture(restarted.ctx, {
       signal: new AbortController().signal,
       callId: ToolCallId('optional-bundle-b05-call'),
       name: 'create_worktree',
@@ -111,7 +114,7 @@ test('an official Optional bundle goes off→enable→restart-required→restart
 
     // NEGATIVE: an invalid branch name is refused by the OFFICIAL runtime and
     // the Session's effective directory does not drift.
-    const refused = await restarted.ctx.tools.execute({
+    const refused = await executeModelToolFixture(restarted.ctx, {
       signal: new AbortController().signal,
       callId: ToolCallId('optional-bundle-b05-bad'),
       name: 'create_worktree',
@@ -342,12 +345,12 @@ async function waitFor(condition: () => boolean | Promise<boolean>, turns = 2000
 }
 
 function execute(
-  host: { ctx: { tools: { execute(input: unknown): Promise<unknown> } } },
+  host: { ctx: Context },
   name: string,
-  agent: unknown,
+  agent: Agent,
   args: unknown,
 ): Promise<{ isError?: boolean; content?: readonly { type?: string; text?: string }[] }> {
-  return host.ctx.tools.execute({
+  return executeModelToolFixture(host.ctx, {
     signal: new AbortController().signal,
     callId: ToolCallId(`optional-bundle-host-${++callCounter}`),
     name,

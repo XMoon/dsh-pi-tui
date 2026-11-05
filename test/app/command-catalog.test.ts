@@ -8,6 +8,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { fakeAgentModel } from '../support/agent-model-double.ts'
 import { unavailableWebAccess } from '../support/web-access-fake.ts'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { createClientCommandRegistry } from '../../src/app/command/client-command-registry.ts'
@@ -49,9 +50,12 @@ afterEach(() => {
  * flip status to 'running' (agent-loop's wakeDriver), so tests exercise the
  * same status transitions production sees. */
 function fakeAgent(sessionId: string, delivered: { kind: 'steer' | 'followup' | 'inject'; text: string }[] = [], status: 'idle' | 'running' = 'idle'): Agent {
+  const options = { provider: 'p', model: 'm' }
   const agent = {
     session: { id: sessionId, header: { cwd: '/ws' }, events: [] },
-    options: { provider: 'p', model: 'm' },
+    options,
+    // DSH 0.2.2: the Agent owns its model selection (`AgentModel`).
+    model: fakeAgentModel(undefined, options),
     status,
   } as unknown as Agent & { status: 'idle' | 'running' }
   Object.assign(agent, {
