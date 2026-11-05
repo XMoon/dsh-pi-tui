@@ -233,13 +233,14 @@ export function createTspInputCompletion(
   let listRevision = 0
   let pending: PendingQuery | undefined
   let list: CandidateList | undefined
-  /** The accept-stack depth of `captureInlineAttachmentAcceptance`: non-zero
-   *  ONLY while this seat's own `applyCompletion()` call is on the stack. */
-  let captureDepth = 0
-  /** The one acceptance the accept gesture in flight staged. A transient local
-   *  inside the gesture: it is cleared when the gesture ends, so it is never a
-   *  second attachment state and never survives into a newer document. */
-  let captureSlot: InlineAttachmentAcceptance | undefined
+  /** The in-flight accept gestures, innermost LAST. One frame is pushed for the
+   *  duration of this seat's own `applyCompletion()` call and popped when it
+   *  returns, so a capture always lands on the frame that armed it: a nested
+   *  gesture (a provider callback that re-enters this seat) can settle its own
+   *  acceptance and can NEVER move, hide or replace the outer frame's staged
+   *  one. An empty stack means no accept gesture is in flight, so nothing may
+   *  be captured at all. */
+  const captureFrames: Array<InlineAttachmentAcceptance | undefined> = []
 
   /** The leading-`/` command seat, decided EXACTLY as the shared Provider
    *  decides it: the FIRST logical line, the `trimStart()`ed text before the
@@ -504,12 +505,13 @@ export function createTspInputCompletion(
     const document = shown.document
     const seat = shown.seat
     // PHASE 1 — ask the SAME installed provider for the replacement, with the
-    // inline-attachment capture armed for this stack only. The acceptance is
-    // STAGED here and nothing else: no file read, no store mutation and no
-    // notice, because the composer has not agreed to this edit yet.
-    captureDepth += 1
-    captureSlot = undefined
+    // inline-attachment capture armed for THIS gesture frame only. The
+    // acceptance is STAGED here and nothing else: no file read, no store
+    // mutation and no notice, because the composer has not agreed to this edit
+    // yet.
+    captureFrames.push(undefined)
     let applied: { lines: string[]; cursorLine: number; cursorCol: number }
+    let staged: InlineAttachmentAcceptance | undefined
     try {
       applied = installed.applyCompletion(
         [...document.lines],
@@ -518,11 +520,12 @@ export function createTspInputCompletion(
         item,
         shown.prefix,
       )
+      staged = captureFrames[captureFrames.length - 1]
     } finally {
-      captureDepth -= 1
+      // The frame leaves the stack with the gesture, staged or not: a dropped
+      // acceptance is never readable by a later one.
+      captureFrames.pop()
     }
-    const staged = captureSlot
-    captureSlot = undefined
     const nextText = applied.lines.join('\n')
     const nextCursor = flatOffset(applied.lines, applied.cursorLine, applied.cursorCol)
     const token = seat.kind === 'leading-slash' ? commandToken(document) : undefined
@@ -635,12 +638,13 @@ export function createTspInputCompletion(
       if (withdraw()) ports.requestRender()
     },
     captureInlineAttachmentAcceptance: (acceptance) => {
-      // Armed ONLY inside this seat's own `applyCompletion()` call (see `accept`
-      // PHASE 1). Anything else is a foreign caller with no attachment rights:
-      // it stages nothing, so no read, no store mutation and no placeholder can
-      // ever follow it.
-      if (captureDepth === 0) return
-      captureSlot = acceptance
+      // Armed ONLY inside this seat's own `applyCompletion()` call, and always
+      // on the INNERMOST gesture frame (see `captureFrames`). Anything else is a
+      // foreign caller with no attachment rights: it stages nothing, so no read,
+      // no store mutation and no placeholder can ever follow it.
+      const frame = captureFrames.length - 1
+      if (frame < 0) return
+      captureFrames[frame] = acceptance
     },
     onComposerEdit: () => {
       query()
