@@ -27,6 +27,7 @@ import type { CommandResult } from '@deepseek-ai/dsh-commands'
 import type {
   WebAccessActionId,
   WebAccessMenuHandle,
+  WebAccessNotice,
   WebAccessPresentation,
   WebAccessReadOutcome,
   WebAccessRequest,
@@ -139,16 +140,22 @@ export function createWebAccessCommands(deps: WebAccessCommandDeps): WebAccessCo
   }
 
   /** Re-read the authoritative status and reproject the SAME menu. */
-  const refreshMenu = (handle: WebAccessMenuHandle): void => {
+  const refreshMenu = (handle: WebAccessMenuHandle, notice?: WebAccessNotice): void => {
     runOwned('web status', readStatus, {
       diag: runner.diag,
       sessionId: () => runner.currentSessionId,
       isCancellation: () => handle.isDisposed(),
       onResult: (outcome) => {
         if (handle.isDisposed()) return
-        handle.setStatus(outcome)
+        handle.setStatus(outcome, notice)
       },
     })
+  }
+
+  /** One settled action: the Host's status plus the visible result line. */
+  interface ActionSettlement {
+    readonly outcome: WebAccessReadOutcome
+    readonly notice?: WebAccessNotice
   }
 
   /**
@@ -161,7 +168,8 @@ export function createWebAccessCommands(deps: WebAccessCommandDeps): WebAccessCo
     if (handle === undefined || handle.isDisposed()) return
     handle.setPending(pendingLabel(action))
     const openUrl = deps.openUrl ?? openExternalUrl
-    runOwned(`web ${action}`, async (): Promise<WebAccessReadOutcome> => {
+    runOwned(`web ${action}`, async (): Promise<ActionSettlement> => {
+      let notice: WebAccessNotice | undefined
       switch (action) {
         case 'enable':
           await runner.webAccess.setEnabled(true)
@@ -173,7 +181,7 @@ export function createWebAccessCommands(deps: WebAccessCommandDeps): WebAccessCo
           const { url } = await runner.webAccess.getAuthenticatedUrl()
           // Client-local opener only: the Host never runs a browser opener.
           openUrl(url)
-          presentation.notify('Opening browser… (use Copy Link if it does not open)', 'info')
+          notice = { message: 'Opening browser… (use Copy Link if it does not open)', kind: 'info' }
           break
         }
         case 'copy-link': {
@@ -181,26 +189,33 @@ export function createWebAccessCommands(deps: WebAccessCommandDeps): WebAccessCo
           const copied = await runner.copyToClipboard(url)
           // Only the boolean acknowledgement counts; the URL never becomes a
           // notice/transcript fallback.
-          presentation.notify(copied ? 'Link copied' : 'Clipboard unavailable', copied ? 'info' : 'error')
+          notice = copied
+            ? { message: 'Link copied', kind: 'info' }
+            : { message: 'Clipboard unavailable', kind: 'error' }
           break
         }
       }
+      // The result reaches the user on BOTH surfaces: the base notice line (for
+      // a menu the user dismissed) and the open menu's own result row (a menu
+      // overlay covers the base surface's notice line at common heights).
+      if (notice !== undefined) presentation.notify(notice.message, notice.kind)
       // One authoritative re-read AFTER the action: the menu presents the
       // Host's own settled state instead of the requested one.
-      return readStatus()
+      return { outcome: await readStatus(), ...(notice === undefined ? {} : { notice }) }
     }, {
       diag: runner.diag,
       sessionId: () => runner.currentSessionId,
       isCancellation: () => handle.isDisposed(),
-      onResult: (outcome) => {
+      onResult: (settlement) => {
         if (handle.isDisposed()) return
-        handle.setStatus(outcome)
+        handle.setStatus(settlement.outcome, settlement.notice)
       },
       onError: (error) => {
-        presentation.notify(`web ${action}: ${safeErrorMessage(error)}`, 'error')
+        const failure = `web ${action}: ${safeErrorMessage(error)}`
+        presentation.notify(failure, 'error')
         // The Host may have settled the request and failed only the read; the
         // ONE authoritative status re-read is what the menu shows either way.
-        if (!handle.isDisposed()) refreshMenu(handle)
+        if (!handle.isDisposed()) refreshMenu(handle, { message: failure, kind: 'error' })
       },
     })
   }

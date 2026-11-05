@@ -63,6 +63,12 @@ export interface WebAccessRequest {
   ): void
 }
 
+/** One transient result line the menu can paint (the same text `notify` sends). */
+export interface WebAccessNotice {
+  readonly message: string
+  readonly kind: 'info' | 'error'
+}
+
 /** One menu instance. Closing retires the presentation only — never a Host write. */
 export interface WebAccessMenuHandle {
   /** Enter the loading state (the menu was just opened; the read is running). */
@@ -73,8 +79,13 @@ export interface WebAccessMenuHandle {
    * settled read back through {@link setStatus}.
    */
   setPending(message: string): void
-  /** Present one settled read outcome (a Host status or an unreadable state). */
-  setStatus(outcome: WebAccessReadOutcome): void
+  /**
+   * Present one settled read outcome (a Host status or an unreadable state)
+   * plus the optional action result. The notice is painted INSIDE the menu as
+   * well as sent through {@link WebAccessPresentation.notify}, because a menu
+   * overlay can cover the base surface's notice line.
+   */
+  setStatus(outcome: WebAccessReadOutcome, notice?: WebAccessNotice): void
   isDisposed(): boolean
   /** Retire this menu; it cancels no admitted business operation. */
   close(): void

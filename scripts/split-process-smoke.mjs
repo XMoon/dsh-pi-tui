@@ -8537,14 +8537,6 @@ async function main() {
         return peer.waitFor(entry => entry.op === 'web-access-url' && entry.requestId === requestId,
           `${label} web-access-url`, 120_000)
       }
-      /** Drive the real TUI `/web` menu: open it, move `downs` rows, activate. */
-      const driveWebMenu = async (tui, label, downs, expected) => {
-        tui.send('/web\r')
-        await tui.waitForScreen('Status:', `${label} menu`)
-        for (let step = 0; step < downs; step += 1) tui.send('\u001b[B')
-        tui.send('\r')
-        await tui.waitForScreen(expected, `${label} result`)
-      }
       try {
         // ── A. Default-Off Host + save On through the real Remote settings ───
         const first = await startHost('PC-07 default-off')
@@ -8573,7 +8565,14 @@ async function main() {
 
         // ── B. The real TUI `/web → Enable Web` serves the frontend (PC-04/06) ──
         const tui = await startTui('PC-06 TUI')
-        await driveWebMenu(tui, 'PC-06 enable', 1, 'Status: enabled')
+        tui.send('/web\r')
+        await tui.waitForScreen('Status: disabled', 'PC-06 menu')
+        // The overlay owns the keyboard: ONE arrow per chunk, and the selected
+        // row's own description is the authoritative "the move landed" signal.
+        tui.send('\u001b[B')
+        await tui.waitForScreen('Start serving the official Web frontend', 'PC-06 Enable row')
+        tui.send('\r')
+        await tui.waitForScreen('Status: enabled', 'PC-06 enabled projection')
         const enabledStatus = await hostStatus(first.host)
         assertFullyOn(enabledStatus, 'PC-06 enabled')
         assert(enabledStatus.pid === firstPid, 'PC-06 the enable changed the Host process')
@@ -8612,8 +8611,13 @@ async function main() {
         // clipboard acknowledgement may be painted.
         tui.send('/web\r')
         await tui.waitForScreen('Status: enabled', 'PC-05 menu')
-        tui.send('\u001b[B\u001b[B')
+        tui.send('\u001b[B')
+        await tui.waitForScreen('Request the OS to open the official Web home page', 'PC-05 Open Browser row')
+        tui.send('\u001b[B')
+        await tui.waitForScreen('Copy the authenticated Web home link to the clipboard', 'PC-05 Copy Link row')
         tui.send('\r')
+        // The copy result is painted INSIDE the open menu (the overlay covers the
+        // base notice line at the smoke's PTY height).
         await tui.waitForScreen('Link copied', 'PC-05 copy acknowledgement')
         const copyScreen = (await tui.viewport()).join('\n')
         assert(!copyScreen.includes('token='), 'PC-05 the launch URL/token was painted by Copy Link')
@@ -8628,8 +8632,18 @@ async function main() {
         })
 
         // ── D. Manual `/web Disable` keeps the TUI working (PC-08) ──────────
-        // Rows in the open enabled menu: status -> Open -> Copy -> Disable.
-        tui.send('\u001b[B\u001b[B\u001b[B')
+        // Reopen a FRESH enabled menu (the copy result row is not part of the
+        // next projection) and move to Disable one row at a time.
+        tui.send('\u001b')
+        await tui.waitForScreenGone('Status: enabled', 'PC-08 copy menu closed')
+        tui.send('/web\r')
+        await tui.waitForScreen('Status: enabled', 'PC-08 menu')
+        tui.send('\u001b[B')
+        await tui.waitForScreen('Request the OS to open the official Web home page', 'PC-08 Open Browser row')
+        tui.send('\u001b[B')
+        await tui.waitForScreen('Copy the authenticated Web home link to the clipboard', 'PC-08 Copy Link row')
+        tui.send('\u001b[B')
+        await tui.waitForScreen('Stop serving the official Web frontend', 'PC-08 Disable row')
         tui.send('\r')
         await tui.waitForScreen('Status: disabled', 'PC-08 disable')
         const disabledStatus = await hostStatus(first.host)
