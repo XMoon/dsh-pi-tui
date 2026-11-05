@@ -1138,6 +1138,7 @@ test('the Web startup preference lane drives the real Client settings/URL ops, n
     't74-web-preference-saved',
     't74-web-tui-enable',
     't74-web-authenticated-url',
+    't74-web-recompose-repair',
     't74-web-autostart-next-boot-off',
     't74-web-autostart',
   ]) {

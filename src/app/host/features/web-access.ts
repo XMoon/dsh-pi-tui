@@ -27,6 +27,21 @@
  * preference (a separate, durable next-launch fact) can ask the boot sequence to
  * enable the same roster before Ready.
  *
+ * PROFILE RECOMPOSITION: the official settings write (`SettingsForms.mutate` →
+ * `ConfigEditor.edit`) reconciles the whole profile patch stack before and after
+ * writing the user patch, and `recompose()` re-applies this overlay's declarative
+ * `disabled: true` rows — which would otherwise silently disable a running Web
+ * frontend whenever the user saves ANY setting. The service therefore keeps the
+ * current Host lifetime's last SUCCESSFULLY requested enablement as a TARGET
+ * INTENT (never a state authority: `getStatus()` still reads the live Loader),
+ * and after the official `app-boot/config-reload` it restores the live roster
+ * through the SAME `setEnabled` path when the recomposition diverged from that
+ * target. This is an in-memory lifecycle repair of the existing authority: it
+ * persists nothing, adds no listener-visible state and does not survive a
+ * process restart. A recomposition still unloads the Web rows for a short
+ * window, so a browser connection may briefly drop; the FINAL state is
+ * preserved by design.
+ *
  * LAYER NOTE: this row lives in `app/host/features/**` because the built-in
  * Host Runtime owns the row and its lifetime; its wire contract lives in
  * `runtime/remote/**`, the direction the architecture gate permits.
@@ -35,6 +50,9 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+// The official Host profile recomposition emits `app-boot/config-reload`; the
+// type-only import loads its Cordis Events declaration (no runtime edge).
+import type {} from '@deepseek-ai/dsh-app-boot'
 import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import {
   PI_TUI_WEB_ACCESS_NAMESPACE,
@@ -228,12 +246,24 @@ export class PiTuiWebAccessHostService extends TypertRemoteService {
   private tail: Promise<unknown> = Promise.resolve()
   /** The number of serialized mutations currently running (the `changing` state). */
   private inFlight = 0
+  /**
+   * The current Host lifetime's last SUCCESSFULLY requested enablement, or
+   * `undefined` before any toggle. It is a TARGET INTENT for the recomposition
+   * repair only — NEVER a state authority: `getStatus()`/`describe()` keep
+   * reading the live Loader rows and official Web services on every call.
+   */
+  private target: 'enabled' | 'disabled' | undefined
 
   /**
    * @param ctx - the Host context this row is mounted in.
    */
   constructor(ctx: Context) {
     super(ctx, PI_TUI_WEB_ACCESS_NAMESPACE)
+    // The official profile recomposition re-applies this overlay's declarative
+    // `disabled: true` rows. Restore THIS Host's live target after it settled,
+    // through the one serialized mutation queue. The event is the official
+    // post-settlement signal; there is no earlier hook.
+    ctx.on('app-boot/config-reload', () => { this.reconcileAfterRecompose() })
   }
 
   /**
@@ -285,10 +315,55 @@ export class PiTuiWebAccessHostService extends TypertRemoteService {
    * @returns the status the Host actually reached, never the requested boolean.
    */
   setEnabled(enabled: boolean): Promise<PiTuiWebAccessStatus> {
-    const run = this.tail.then(() => this.apply(enabled))
+    const run = this.tail.then(() => this.applyAndTrack(enabled))
     // Keep the chain alive on failure: the next request must still run.
     this.tail = run.then(() => undefined, () => undefined)
     return run
+  }
+
+  /**
+   * One serialized mutation that updates the target intent ONLY when the Host
+   * really reached the requested state. A failed/partial mutation leaves the
+   * previous successful intent in place and reports its reached state.
+   */
+  private async applyAndTrack(enabled: boolean): Promise<PiTuiWebAccessStatus> {
+    const status = await this.apply(enabled)
+    if (status.state === (enabled ? 'enabled' : 'disabled')) this.target = enabled ? 'enabled' : 'disabled'
+    return status
+  }
+
+  /**
+   * Repair the live roster after the official profile recomposition.
+   *
+   * The listener runs synchronously and only ENQUEUES the repair on the same
+   * serialized chain (the official emit does not await promises, and a settings
+   * write also reconciles before and after its own write). The LATEST target is
+   * re-read when the repair actually runs, so a user toggle admitted later wins
+   * in FIFO order. No repair runs before the first successful toggle, and a
+   * failed repair is reported by the live status (never a fabricated success).
+   */
+  private reconcileAfterRecompose(): void {
+    const run = this.tail.then(() => {
+      const target = this.target
+      if (target === undefined) return this.describe()
+      const status = this.describe()
+      if (status.state === target) return status
+      return this.applyAndTrack(target === 'enabled')
+    })
+    // Keep the chain alive; a repair failure is observed by the next status read.
+    this.tail = run.then(() => undefined, () => undefined)
+    void run.then((status) => {
+      if (status.state === 'unavailable') {
+        this.logger().warn('profile recomposition repair did not reach the live target', { state: status.state })
+      }
+    }, (error: unknown) => {
+      this.logger().warn('profile recomposition repair failed', { reason: reasonOf(error) })
+    })
+  }
+
+  /** The row's own Cordis logger (diagnostics only; never a state channel). */
+  private logger(): { warn(message: string, fields?: Record<string, unknown>): void } {
+    return this.ctx.logger('pi-tui-web-access')
   }
 
   /** Run one serialized mutation and always report the reached state. */

@@ -420,6 +420,23 @@ default-off composition. A profile whose Loader does not project the
 `pi-tui-web-preferences` section is a corrupted composition and fails Host
 startup instead of being read as Off.
 
+The official Settings write is a PROFILE-level operation: `settings.mutate`
+→ `ConfigEditor.edit` reconciles and recomposes the whole profile patch stack
+before and after writing the user patch, which re-applies this overlay's
+declarative `disabled: true` rows. The private service therefore keeps the
+current Host lifetime's last SUCCESSFULLY requested enablement as a TARGET
+INTENT — never a state authority, never persisted, never surviving a process
+restart — and after the official `app-boot/config-reload` it restores the live
+roster through the SAME `setEnabled` path when the recomposition diverged from
+that target. `getStatus()` keeps reading only the live Loader rows and the
+official Web services, so a repair that cannot be completed is reported as the
+roster's real state (`disabled` or `unavailable`), never as a fabricated
+restoration. The FINAL Web state is preserved across a settings write; a
+recomposition still unloads and remounts the Web rows for a short window, so a
+browser connection may briefly drop and reconnect. The `autoStart` preference
+is still read exactly once, at cold boot, and is never re-applied by a settings
+write.
+
 Enable assembles the browser graph first (`modules`, `client-hmr`,
 `cordis-client-runner`, `terminal-controller`, then the presentation rows) and
 mounts the SPA fallback LAST, so the official index never advertises a graph that

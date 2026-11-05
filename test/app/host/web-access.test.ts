@@ -37,6 +37,7 @@ import {
 import {
   PI_TUI_WEB_ACCESS_SET_ENABLED,
   parsePiTuiWebAccessStatus,
+  type PiTuiWebAccessStatus,
 } from '../../../src/runtime/remote/pi-tui-web-access-contract.ts'
 
 /** Cordis `FiberState` values (the enum is a const enum with no runtime value). */
@@ -789,4 +790,100 @@ test('getAuthenticatedUrl refuses during a mutation and on an unavailable roster
   }
   await row.update({ disabled: true })
   await assert.rejects(fixture.service.getAuthenticatedUrl(), /unavailable/u)
+})
+
+/* ── M5-W PR-C: profile recomposition preserves the live target ───────────── */
+
+/** Wait for the serialized recomposition repair to reach the expected state. */
+async function waitForStatus(
+  fixture: WebAccessFixture,
+  expected: PiTuiWebAccessStatus['state'],
+  label: string,
+): Promise<PiTuiWebAccessStatus> {
+  const deadline = Date.now() + 10_000
+  let status = await fixture.service.getStatus()
+  while (status.state !== expected && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 10))
+    status = await fixture.service.getStatus()
+  }
+  assert.equal(status.state, expected, `${label}: reached ${JSON.stringify(status)}`)
+  return status
+}
+
+/** Emulate the official recompose's re-application of the overlay rows. */
+async function reapplyOverlayDisabled(fixture: WebAccessFixture): Promise<void> {
+  for (const row of PI_TUI_WEB_ACCESS_ROWS) {
+    const entry = fixture.rows.get(row.id) as unknown as {
+      update(options: { readonly disabled: boolean }): Promise<void>
+    }
+    await entry.update({ disabled: true })
+  }
+}
+
+test('an official profile recomposition restores the last successful enabled target', async t => {
+  const fixture = await createFixture()
+  t.after(() => fixture.dispose())
+
+  // No repair before the first successful toggle: the cold-boot default stands.
+  fixture.ctx.emit('app-boot/config-reload')
+  await waitForStatus(fixture, 'disabled', 'cold boot before any toggle')
+  assert.equal(webApplies(fixture), 0, 'no repair ran before the first successful toggle')
+
+  assert.deepEqual(await fixture.service.setEnabled(true), { state: 'enabled' })
+  const appliesWhileEnabled = webApplies(fixture)
+  assert.equal(fixture.webServer.facts().registered, true)
+
+  // The official Settings write recomposes the profile and re-applies the
+  // overlay's declarative disabled rows, then emits the official event.
+  await reapplyOverlayDisabled(fixture)
+  assert.equal((await fixture.service.getStatus()).state, 'disabled',
+    'the recomposition really disabled the live roster (negative control)')
+  fixture.ctx.emit('app-boot/config-reload')
+  await waitForStatus(fixture, 'enabled', 'recomposition repair')
+  assert.equal(webApplies(fixture) > appliesWhileEnabled, true,
+    'the repair re-mounted the live roster through the same Entry.update path')
+  assert.deepEqual(fixture.webServer.facts(), { registered: true, registrations: 2, disposals: 1 },
+    'the SPA fallback was re-registered exactly once by the repair')
+})
+
+test('a recomposition never re-enables after a successful disable or without a toggle', async t => {
+  const fixture = await createFixture()
+  t.after(() => fixture.dispose())
+  assert.deepEqual(await fixture.service.setEnabled(true), { state: 'enabled' })
+  assert.deepEqual(await fixture.service.setEnabled(false), { state: 'disabled' })
+  const appliesWhileDisabled = webApplies(fixture)
+  await reapplyOverlayDisabled(fixture)
+  fixture.ctx.emit('app-boot/config-reload')
+  await waitForStatus(fixture, 'disabled', 'disabled target after recomposition')
+  assert.equal(webApplies(fixture), appliesWhileDisabled, 'a disabled target must never be re-enabled')
+
+  const fresh = await createFixture()
+  t.after(() => fresh.dispose())
+  fresh.ctx.emit('app-boot/config-reload')
+  await waitForStatus(fresh, 'disabled', 'no toggle at all')
+  assert.equal(webApplies(fresh), 0, 'a never-toggled Host has no target to restore')
+})
+
+test('a failed recomposition repair never claims the restored state', async t => {
+  let failReenable = false
+  const fixture = await createFixture({
+    overrides: new Map<string, RowOverride>([['modules', {
+      provide: 'clientModules',
+      apply: () => {
+        if (failReenable) throw new Error('fixture: the module graph refused to compose again')
+      },
+    }]]),
+  })
+  t.after(() => fixture.dispose())
+  assert.deepEqual(await fixture.service.setEnabled(true), { state: 'enabled' })
+  await reapplyOverlayDisabled(fixture)
+  failReenable = true
+  fixture.ctx.emit('app-boot/config-reload')
+  // The repair fails and rolls back to the fully disabled roster: the LIVE
+  // status is that rolled-back truth (the repair never fabricates `enabled`).
+  const status = await waitForStatus(fixture, 'disabled', 'failed recomposition repair')
+  assert.equal(status.state, 'disabled')
+  assert.equal((await fixture.service.getStatus()).state === 'enabled', false,
+    'a failed repair must never claim the restored enabled state')
+  assert.equal(fixture.webServer.facts().registered, false, 'the failed repair left no served fallback')
 })

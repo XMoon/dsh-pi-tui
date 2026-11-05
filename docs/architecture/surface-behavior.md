@@ -200,10 +200,15 @@ The `Auto-enable Web on Host startup` row in `/settings → Tools` is a differen
 fact with a different lifetime: it persists a PROFILE preference
 (`pi-tui-web-preferences.autoStart`, default Off, options On/Off) for the NEXT
 Split Host launch, read by the Host cold boot before Ready. Saving it never
-enables or disables the current Host, the row never reports the current Web
-frontend state, and `/web` remains the immediate control. A non-current
-configuration backend offers no confirmable candidate, and the authoritative
-re-read confirms only the persisted preference.
+changes the current Host's FINAL Web state, the row never reports the current
+Web frontend state, and `/web` remains the immediate control. Saving any
+Settings value recomposes the Host profile, so the Web rows are briefly
+unloaded and re-mounted by the Host's own repair through the official
+`app-boot/config-reload`; the final state is preserved, a browser connection may
+drop and reconnect during that window, and the preference still applies only to
+the next launch. A non-current configuration backend offers no confirmable
+candidate, and the authoritative re-read confirms only the persisted
+preference.
 
 ## Settings Workspace
 

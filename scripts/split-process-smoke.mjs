@@ -8654,16 +8654,65 @@ async function main() {
         await tui.waitForScreenGone('Status: disabled', 'PC-08 menu closed')
         tui.send('pc-08 after disable\r')
         await tui.waitForScreen('pc-08 after disable', 'PC-08 TUI prompt after disable')
-        // Saving Off does not change the running Host; saving Off again on a
-        // RE-ENABLED Host still leaves it enabled (the preference is next-launch).
+        // Saving Off does not change the running Host's FINAL Web state. The
+        // official Settings write reconciles/recomposes the profile and briefly
+        // re-applies the overlay's disabled rows; the Host service restores its
+        // live target after the official `app-boot/config-reload`. Owner-agreed
+        // semantics: the FINAL state is preserved, a brief browser disconnect is
+        // allowed. Wait for the final state, never poll-as-success without a bound.
         const savedOff = await webPreference(peer, 'PC-08 write Off', false)
         assert(savedOff.ok === true && savedOff.autoStart === false && savedOff.readBack === true,
           `PC-08 the Off write did not read back: ${JSON.stringify(savedOff)}`)
         assertToggle(await webAccess(peer, 'PC-08 re-enable', true), 'enabled', 'PC-08 re-enable')
-        const offWhileEnabled = await webPreference(peer, 'PC-08 write Off again', false)
-        assert(offWhileEnabled.ok === true && offWhileEnabled.autoStart === false, 'PC-08 the Off write did not settle')
-        assertToggle(await webAccess(peer, 'PC-08 still enabled', undefined), 'enabled',
-          'PC-08 saving Off disabled the running Host')
+        const enabledBeforeSaves = await hostStatus(first.host)
+        assert(enabledBeforeSaves.pid === firstPid, 'PC-08 the re-enable changed the Host process')
+
+        /** Wait for the post-recomposition repair to reach the FINAL target. */
+        const awaitFinalWebState = async (label, expected) => {
+          const deadline = Date.now() + 60_000
+          let state = 'unknown'
+          while (Date.now() < deadline) {
+            const record = await webAccess(peer, `${label} status`, undefined)
+            assert(record.ok === true, `${label}: the Web status call failed: ${JSON.stringify(record.errorCode ?? null)}`)
+            state = record.status?.state
+            if (state === expected) return record.status
+            // A recomposition window legitimately shows disabled/changing; any
+            // other state (`unavailable`) is a real failure, not a wait.
+            if (state !== 'disabled' && state !== 'changing') break
+            await sleep(250)
+          }
+          assert(false, `${label}: the running Host never returned to ${expected} (last ${JSON.stringify(state)})`)
+        }
+        // 1) Saving the SAME value (no value change) must preserve the final state.
+        const sameValueOff = await webPreference(peer, 'PC-08 same-value Off save', false)
+        assert(sameValueOff.ok === true && sameValueOff.autoStart === false && sameValueOff.readBack === true,
+          `PC-08 the same-value Off save did not read back: ${JSON.stringify(sameValueOff)}`)
+        await awaitFinalWebState('PC-08 same-value Off save', 'enabled')
+        // 2) Saving a CHANGED value (On) must preserve it too.
+        const changedOn = await webPreference(peer, 'PC-08 changed On save', true)
+        assert(changedOn.ok === true && changedOn.autoStart === true && changedOn.readBack === true,
+          `PC-08 the changed On save did not read back: ${JSON.stringify(changedOn)}`)
+        await awaitFinalWebState('PC-08 changed On save', 'enabled')
+        // 3) The FINAL save returns the preference to Off for the next cold boot,
+        //    and the running Host still ends enabled.
+        const finalOff = await webPreference(peer, 'PC-08 final Off save', false)
+        assert(finalOff.ok === true && finalOff.autoStart === false && finalOff.readBack === true,
+          `PC-08 the final Off save did not read back: ${JSON.stringify(finalOff)}`)
+        await awaitFinalWebState('PC-08 final Off save', 'enabled')
+        const afterSaves = await hostStatus(first.host)
+        assert(afterSaves.pid === firstPid, 'PC-08 a settings save replaced the Host process')
+        assertFullyOn(afterSaves, 'PC-08 after preference saves')
+        const savedLaunch = readJson(join(dshHome, 'run', 'dsh-pi-tui', first.ready.localHost.scopeId, 'launch.json'))
+        const stillServing = await assertServing(origin, savedLaunch, 'PC-08 after preference saves')
+        trace('t74-web-recompose-repair', {
+          sameValueSave: 'final enabled',
+          changedValueSave: 'final enabled',
+          finalOffSave: 'final enabled',
+          index: stillServing.index,
+          graphEntries: stillServing.graphEntries,
+          sameHostProcess: true,
+          transientRecomposeAccepted: true,
+        })
         tui.send('/exit\r')
         assert((await tui.waitForExit(60_000)).code === 0, 'PC-08 the TUI did not exit normally')
         assert((await peer.shutdown()).code === 0, 'PC-08 the peer did not stop')
