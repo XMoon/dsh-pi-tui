@@ -300,13 +300,17 @@ interface MenuHarness {
 async function pituiMenu(
   t: { after(fn: () => unknown): void },
   status: WebAccessStatus,
-  size: { readonly columns: number; readonly rows: number } = { columns: 120, rows: 40 },
+  size: { readonly columns: number; readonly rows: number; readonly fullscreen?: boolean } = { columns: 120, rows: 40 },
 ): Promise<MenuHarness> {
   const vt = new VirtualTerminal(size.columns, size.rows)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
   lifecycle.started.add(app)
   t.after(() => { lifecycle.disposeAll() })
+  if (size.fullscreen === true) {
+    app.setFullscreen(true)
+    await vt.waitForRender()
+  }
   const actions: WebAccessActionId[] = []
   const notices: string[] = []
   const presentation = pituiWebAccessPresentation(app)
@@ -427,4 +431,21 @@ test('the PiTui menu stays reachable at 44×20 and Esc returns the focus seat wi
   assert.doesNotMatch(view(h.vt), /Status: disabled/u)
   assert.equal(h.handle.isDisposed(), true, 'the retired menu knows it is gone')
   assert.deepEqual(h.actions, [], 'closing the menu writes nothing')
+})
+
+test('the PiTui menu is pointer-reachable on the fullscreen alt-screen surface', async t => {
+  const h = await pituiMenu(t, { state: 'disabled' }, { columns: 120, rows: 40, fullscreen: true })
+  assert.equal(h.app.overlayGraphState().handles, 1, 'the ONE overlay is painted on the alt screen')
+  const lines = h.vt.getViewport()
+  const row = lines.findIndex(line => line.includes('Enable Web'))
+  assert.ok(row >= 0, `the Enable Web row must be painted on the alt screen:\n${lines.join('\n')}`)
+  const start = visibleWidth(lines[row]!.slice(0, lines[row]!.indexOf('Enable Web')))
+  h.vt.sendInput(`\u001b[<0;${start + 3};${row + 1}M`)
+  await h.vt.waitForRender()
+  h.vt.sendInput(`\u001b[<0;${start + 3};${row + 1}m`)
+  await h.vt.waitForRender()
+  assert.deepEqual(h.actions, ['enable'], 'the alt-screen pointer path reaches the ONE command intent')
+  h.vt.sendInput('\u001b')
+  await h.vt.waitForRender()
+  assert.equal(h.app.overlayGraphState().handles, 0, 'Esc restores the seat on the alt screen too')
 })

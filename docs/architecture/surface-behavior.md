@@ -180,7 +180,12 @@ state admits:
 
 Every operation is committed by the command, never by the presenter: one Host
 call, then ONE authoritative status re-read whose result is what the menu
-re-projects. A dismissal retires the menu only and never undoes a Host-accepted
+re-projects. Pointer activation of the short menu is the `SettingsList`
+component's own mouse contract and is delivered by the fullscreen/alt-screen
+surface (the host enables terminal mouse reporting only there); the regular
+screen deliberately keeps the terminal's native selection behavior and has no
+overlay pointer capture, and this menu adds no custom mouse routing or fork
+divergence. A dismissal retires the menu only and never undoes a Host-accepted
 change. Open Browser issues the Client-local platform opener and only ever
 states `Opening browser…`; the authenticated URL contains the Host's official
 launch token and never enters a notice, the transcript, the Details page, a

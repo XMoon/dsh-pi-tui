@@ -13,6 +13,13 @@
  * time. Closing the overlay retires the presentation only: an accepted Host
  * mutation is never undone.
  *
+ * Pointer activation is the `SettingsList` component's OWN mouse contract and
+ * is delivered by the alt-screen (fullscreen) surface, which is the only place
+ * this host enables terminal mouse reporting and routes pointer events to
+ * overlays. The regular screen deliberately keeps the terminal's native
+ * selection/drag behavior and has no overlay pointer capture, so this presenter
+ * adds NO custom mouse routing and no vendored-fork divergence.
+ *
  * @module tui/pickers/web-access-presentation-pitui
  */
 
