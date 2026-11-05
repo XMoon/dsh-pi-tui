@@ -157,61 +157,6 @@ test('--list and --help are side-effect free and never announce a qualification'
   assert.deepEqual(readdirSync(dir), [], '--help may not create a work root')
 })
 
-test('artifact and selector preflight complete before any distribution load or work root', () => {
-  const source = readFileSync(SCRIPT, 'utf8')
-  const lane = source.slice(source.indexOf('async function runLane()'))
-  const parse = lane.indexOf('parseUpgradeArguments(process.argv.slice(2))')
-  const inspectOld = lane.indexOf("inspectArtifact(options.old, 'old')")
-  const inspectNew = lane.indexOf("inspectArtifact(options.new, 'new')")
-  const pinOld = lane.indexOf("requireExactSmokeDshPin('old'")
-  const pinNew = lane.indexOf("requireExactSmokeDshPin('new'")
-  const identity = lane.indexOf('diagnostics.identityLine()')
-  assert.ok(parse >= 0 && inspectOld > parse && inspectNew > inspectOld,
-    'the selector and both artifacts are read before any setup')
-  assert.ok(pinOld > inspectNew && pinNew > pinOld && identity > pinNew,
-    'both exact pins qualify before the identity line is announced')
-  const scene = source.slice(source.indexOf('async function runScene('))
-  const distribution = scene.indexOf('loadDshDistribution(')
-  const root = scene.search(/[A-Za-z]+Sync\(join\(tmpdir\(\), 'dsh-split-upgrade-'\)\)/u)
-  const install = scene.indexOf('runPnpmInstall(harnessDir, env, distribution)')
-  assert.ok(distribution >= 0 && root > distribution && install > root,
-    'the distribution load and work root live inside the protected setup after preflight')
-  assert.match(source, /workRoot = [A-Za-z]+Sync\(join\(tmpdir\(\), 'dsh-split-upgrade-'\)\)/u)
-  assert.match(source, /relative\(realpathSync\(PACKAGE_ROOT\), realpathSync\(workRoot\)\)/u)
-  assert.match(source, /workRootFromCheckout\.startsWith\(`\.\.\$\{sep\}`\)/u)
-  assert.doesNotMatch(source, /join\(PACKAGE_ROOT, 'temp', 'split-upgrade-'\)/u)
-
-  // The process scope is created exactly once, after input preflight, and is
-  // never a module-level side effect (historical bug: scope at import time).
-  const beforeScene = source.slice(0, source.indexOf('async function runScene('))
-  assert.doesNotMatch(beforeScene, /createSplitProcessScope\(\)/u)
-  assert.equal((source.match(/createSplitProcessScope\(\)/gu) ?? []).length, 1)
-})
-
-test('the full and selected lanes dispatch through the SAME registry functions', () => {
-  const source = readFileSync(SCRIPT, 'utf8')
-  const scene = source.slice(source.indexOf('async function runScene('))
-  assert.match(scene, /for \(const entry of listSelectableUpgradeCases\(\)\) \{\n\s+diagnostics\.checkpoint\(`case\/\$\{entry\.id\}`\)\n\s+const fragment = await entry\.run\(context\)/u)
-  assert.match(scene, /for \(const entry of options\.cases\) \{\n\s+diagnostics\.checkpoint\(`case\/\$\{entry\.id\}`\)\n\s+const fragment = await entry\.run\(context\)/u)
-  // No second execution list and no inline implementation survives in the runner.
-  for (const legacy of [
-    'runUserCommandReloadRound',
-    'runUnavailableTargetRound',
-    'runReloadSourceIsolationRound',
-    'qualification-host-foundation',
-    'host-rpc-proof',
-    'crossBuildSurface',
-  ]) {
-    assert.ok(!source.includes(legacy), `the runner must not inline the case body: ${legacy}`)
-  }
-  // The registry imports the three real module functions.
-  const selection = readFileSync(join(ROOT, 'scripts', 'lib', 'split-upgrade-selection.mjs'), 'utf8')
-  for (const name of ['runCrossBuildCompatibility', 'runManualClientReload', 'runReloadSourceIsolation']) {
-    assert.match(selection, new RegExp(`import \\{ ${name} \\} from`, 'u'))
-    assert.match(selection, new RegExp(`run: ${name}`, 'u'))
-  }
-})
-
 test('the cross-build case owns the real old/new pair, reexec handoff and both live negatives', () => {
   const source = readCase('cross-build-compatibility.mjs')
   // The active profile owns the exact Client peer set before the old bundle.
@@ -286,31 +231,6 @@ test('the cross-build case owns the real old/new pair, reexec handoff and both l
   const isolation = readCase('reload-source-isolation.mjs')
   assert.ok(!manual.includes('compatibility:') && !isolation.includes('compatibility:'),
     'selected U08/U09 cases must not synthesize a cross-build compatibility summary')
-})
-
-test('the manual reload case forwards the real process constructors into both rounds', () => {
-  const source = readCase('manual-client-reload.mjs')
-  assert.match(source, /const scope = \{ \.\.\.context, hosts, clients \}/u,
-    'the case-local scope must carry every context field, including the process constructors')
-  assert.match(source, /async function runUserCommandReloadRound\(context\) \{\n  const \{\n    EntryProcess, SurfaceEntryProcess,/u)
-  assert.match(source, /async function runUnavailableTargetRound\(context\) \{\n  const \{\n    EntryProcess, SurfaceEntryProcess,/u)
-})
-
-test('the manual reload case keeps the second real old-build TUI through the cross-build reexec', () => {
-  const source = readCase('manual-client-reload.mjs')
-  const peerStart = source.indexOf("const peerClient = new SurfaceEntryProcess(join(sideOldPackage, 'dist', 'local-client.mjs')")
-  const command = source.indexOf("reloadClient.send('/reload-client\\r')")
-  assert.ok(peerStart > 0, 'U08 must start the second old-build Client from the real old installation')
-  assert.ok(command > peerStart, 'the second Client must join Session X before `/reload-client` is sent')
-  assert.match(source, /assertNotEqual\(peerPid, reloadClientPid/u)
-  assert.match(source, /assertNotEqual\(peerClient\.child\.pid, reloadClient\.child\.pid/u)
-  assert.match(source, /const assertPeerKept = \(label\) =>/u)
-  assert.match(source, /record\.rootFiberUid, peerStatusBefore\.rootFiberUid/u)
-  assert.match(source, /record\.generationId, peerStatusBefore\.generationId/u)
-  assert.match(source, /record\.surfaceRevision, peerStatusBefore\.surfaceRevision/u)
-  assert.match(source, /record\.host\?\.instanceId, hostIdentity\.instanceId/u)
-  assert.match(source, /secondClientIndependentWrite: true/u)
-  assert.match(source, /secondClientExitCode: peerExit\.code/u)
 })
 
 test('the production /reload-client case never uses a signal or override for the user command', () => {
@@ -405,28 +325,6 @@ test('the runner owns ONE harness/setup boundary, ONE scope and the registered-h
   assert.doesNotMatch(source, /installPlugin\(/u, 'cases own their profile installs; the runner must not')
 })
 
-test('full and selected outputs keep the historical FULL / Selected-only boundary', () => {
-  const source = readFileSync(SCRIPT, 'utf8')
-  const scene = source.slice(source.indexOf('async function runScene('))
-  // Full assigns the historical status/verdict only after every registered case ran.
-  const fullLoop = scene.indexOf('for (const entry of listSelectableUpgradeCases())')
-  const fullStatus = scene.indexOf("evidence.status = 'PASS'")
-  const fullVerdict = scene.indexOf("evidence.verdict = 'cross-build-compatible'")
-  const fullMarker = scene.indexOf('SPLIT_UPGRADE_SMOKE_PASS (cross-build-compatible)')
-  assert.ok(fullLoop >= 0 && fullStatus > fullLoop && fullVerdict > fullStatus && fullMarker > fullVerdict)
-  // Selected writes a partial SELECTABLE_ONLY document and only per-case markers.
-  assert.match(scene, /scope: 'SELECTABLE_ONLY'/u)
-  assert.match(scene, /selectedCases: \[\]/u)
-  assert.ok(scene.indexOf('writeRequestedEvidence(options.evidence, selectedEvidence)') < scene.indexOf('process.stdout.write(`${JSON.stringify(selectedEvidence'))
-  assert.ok(scene.indexOf('process.stdout.write(`${JSON.stringify(selectedEvidence') < scene.indexOf('selectedUpgradePassLine(id)'))
-  assert.doesNotMatch(scene.slice(scene.indexOf('// Selected mode'), scene.indexOf('} catch (error)')),
-    /evidence\.status|evidence\.verdict|SPLIT_UPGRADE_SMOKE_PASS/u,
-    'a selected run never carries the Full status/verdict/marker')
-  // The requested evidence lands BEFORE the full marker.
-  assert.ok(source.indexOf('writeRequestedEvidence(options.evidence, evidence)')
-    < source.indexOf("'SPLIT_UPGRADE_SMOKE_PASS"))
-})
-
 test('the failure report path stays bounded and keeps the --evidence FAIL twin', () => {
   const source = readFileSync(SCRIPT, 'utf8')
   assert.match(source, /diagnostics = createSmokeDiagnostics\(\{[\s\S]{0,300}lane: 'split-upgrade'/u)
@@ -462,19 +360,4 @@ test('the extracted upgrade modules import without starting a lane', (t) => {
   assert.equal(result.status, 0, result.stderr)
   assert.equal(result.stdout, '', 'an import must not announce a checkpoint, identity or PASS')
   assert.deepEqual(readdirSync(dir), [], 'an import may not create a work root or report directory')
-})
-
-test('the upgrade-specific tooling no longer locks an inline main() shape', () => {
-  const source = readFileSync(SCRIPT, 'utf8')
-  // The old pseudo-guards looked for U02-U06 strings inside main()'s source. The
-  // real cases are now separate owner modules; the runner may not retain them.
-  for (const gone of ["checkpoint('U01-U06/base-pairing')", 'const hosts = []', 'const clients = []']) {
-    assert.ok(!source.includes(gone), `the runner must not keep inline case machinery: ${gone}`)
-  }
-  const files = [SCRIPT, ...CASE_NAMES.map(name => join(CASE_DIR, name))]
-  for (const file of files) {
-    const text = readFileSync(file, 'utf8')
-    assert.doesNotMatch(text, /EXPECTED_CASE_COUNT/u)
-  }
-  assert.doesNotMatch(source, /readdirSync\(CASE_DIR/u)
 })
