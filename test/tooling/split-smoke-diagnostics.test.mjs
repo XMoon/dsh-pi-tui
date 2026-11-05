@@ -66,6 +66,9 @@ const FIXTURES_LIB = join(ROOT, 'scripts', 'lib', 'split-smoke-fixtures.mjs')
 const PROFILE_LIB = join(ROOT, 'scripts', 'lib', 'split-smoke-profile.mjs')
 const SELECTION_LIB = join(ROOT, 'scripts', 'lib', 'split-smoke-selection.mjs')
 const CASE_SCRIPT = join(ROOT, 'scripts', 'smoke', 'split-process', 'host-runtime-disabled.mjs')
+const ENTRY_ADMISSION_SCRIPT = join(ROOT, 'scripts', 'smoke', 'split-process', 'entry-admission.mjs')
+const RECOVERY_SCRIPT = join(ROOT, 'scripts', 'smoke', 'split-process', 'runtime-artifact-recovery.mjs')
+const TRANSPORT_SCRIPT = join(ROOT, 'scripts', 'smoke', 'split-process', 'authenticated-lifecycle.mjs')
 const PACKAGE_NAME = '@xmoon76/dsh-pi-tui'
 const DSH_AGENT = '@deepseek-ai/dsh-agent'
 const TARGET_PIN = npmDshVersion()
@@ -850,6 +853,9 @@ test('an unknown error code is never reported, and never changes the category', 
     ['split-smoke-profile', readFileSync(PROFILE_LIB, 'utf8')],
     ['split-smoke-selection', readFileSync(SELECTION_LIB, 'utf8')],
     ['host-runtime-disabled', readFileSync(CASE_SCRIPT, 'utf8')],
+    ['entry-admission', readFileSync(ENTRY_ADMISSION_SCRIPT, 'utf8')],
+    ['runtime-artifact-recovery', readFileSync(RECOVERY_SCRIPT, 'utf8')],
+    ['authenticated-lifecycle', readFileSync(TRANSPORT_SCRIPT, 'utf8')],
   ]) {
     // A waiter failure site: fail('<category>', '<code>') or, where the read must
     // happen first, settleOrFail('<category>', '<code>').
@@ -1016,7 +1022,10 @@ test('the locator trusts only the lane sources and fails closed otherwise', () =
   assert.equal(attempt(undefined).assertion, undefined,
     'a frame outside the trusted lane sources must not become a locator')
   assert.deepEqual([...LANE_SOURCE_FILES].sort(), [
+    'authenticated-lifecycle.mjs',
+    'entry-admission.mjs',
     'host-runtime-disabled.mjs',
+    'runtime-artifact-recovery.mjs',
     'split-process-smoke.mjs',
     'split-process-upgrade-smoke.mjs',
     'split-smoke-fixtures.mjs',
@@ -1507,11 +1516,16 @@ test('no bounded wait in either lane or its extracted support throws a bare Erro
   // mistaken for waits. The extracted modules are scanned by the SAME rule: a
   // waiter that moved out of the lane must not lose its classification.
   const sources = [
-    ['split-process', PROCESS_SCRIPT, 1],
+    // The lane's top-level `waitFor*` helpers moved into the shared module and
+    // the extracted cases; the remaining scenario waits are inline closures.
+    ['split-process', PROCESS_SCRIPT, 0],
     ['split-upgrade', UPGRADE_SCRIPT, 4],
-    ['split-smoke-processes', PROCESSES_LIB, 2],
+    ['split-smoke-processes', PROCESSES_LIB, 3],
     ['split-smoke-sessions', SESSIONS_LIB, 3],
     ['split-smoke-fixtures', FIXTURES_LIB, 1],
+    ['entry-admission', ENTRY_ADMISSION_SCRIPT, 0],
+    ['runtime-artifact-recovery', RECOVERY_SCRIPT, 0],
+    ['authenticated-lifecycle', TRANSPORT_SCRIPT, 0],
   ]
   for (const [name, file, minimum] of sources) {
     const source = readFileSync(file, 'utf8')

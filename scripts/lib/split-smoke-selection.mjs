@@ -15,16 +15,23 @@
  * @module split-smoke-selection
  */
 
+import { runAuthenticatedLifecycle } from '../smoke/split-process/authenticated-lifecycle.mjs'
+import { runEntryAdmission } from '../smoke/split-process/entry-admission.mjs'
 import { runHostRuntimeDisabled } from '../smoke/split-process/host-runtime-disabled.mjs'
+import { runRuntimeArtifactRecovery } from '../smoke/split-process/runtime-artifact-recovery.mjs'
 import { SplitSmokeInputError } from './split-smoke-diagnostics.mjs'
 
 /** The evidence scope every selected result declares. */
 const SELECTABLE_SCOPE = 'SELECTABLE_ONLY'
 
 /**
- * The frozen selectable cases. `bootstrap` currently selects exactly this one
- * case: it is a subset of the bootstrap checks, never the complete bootstrap
- * or split-process qualification.
+ * The frozen selectable cases, in registration order.
+ *
+ * The order IS the fact: a suite runs these entries in exactly this sequence and
+ * the full lane runs every migrated entry through the same `run()` at its old
+ * position. `bootstrap` keeps the row-disabled pilot first, then the entry
+ * admission and artifact-recovery negatives; `transport` owns the whole
+ * authenticated-link chain.
  */
 const CASE_REGISTRY = Object.freeze([
   Object.freeze({
@@ -32,6 +39,24 @@ const CASE_REGISTRY = Object.freeze([
     id: 'bootstrap.host-runtime-disabled',
     title: 'a disabled Host Runtime owner refuses Ready without publishing a Host identity',
     run: runHostRuntimeDisabled,
+  }),
+  Object.freeze({
+    suite: 'bootstrap',
+    id: 'bootstrap.entry-admission',
+    title: 'an inherited Host role without a mounted TUI surface is refused before Host admission',
+    run: runEntryAdmission,
+  }),
+  Object.freeze({
+    suite: 'bootstrap',
+    id: 'bootstrap.runtime-artifact-recovery',
+    title: 'a renamed-away Host Runtime artifact fails closed and the restored artifact reaches authenticated Ready',
+    run: runRuntimeArtifactRecovery,
+  }),
+  Object.freeze({
+    suite: 'transport',
+    id: 'transport.authenticated-lifecycle',
+    title: 'concurrent Host launches elect one authenticated owner whose Client lifecycle survives exits and signals',
+    run: runAuthenticatedLifecycle,
   }),
 ])
 
