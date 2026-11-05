@@ -12,6 +12,7 @@
 
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import test from 'node:test'
 import { parse as parseYaml } from 'yaml'
 import type { Context } from '@deepseek-ai/cordis'
@@ -277,19 +278,22 @@ test('the protected eleven-row dependency assertion rejects a duplicated protect
 })
 
 /**
- * M5-W PR-A: the 59 official Web rows the Host-only overlay declares, in order.
+ * M5-W PR-A: the 60 official Web rows the Host-only overlay declares, in order.
  * This list is FROZEN here on purpose: the composition assertion below compares
  * the real overlay against it, so a silently dropped, renamed, reordered or
  * re-enabled Web row fails the test instead of being mirrored by a generated
- * list. It is the official rc.5 browser graph minus every row whose authority
- * already exists in this Host, plus the one official `terminal-controller` row
- * the Browser x TUI composition needs.
+ * list. It is the official browser graph of the installed DSH family minus every
+ * row whose authority already exists in this Host, plus the one official
+ * `terminal-controller` row the Browser x TUI composition needs. The mandatory
+ * client-dependency closure of the shipped official UIs (`ui-context-menu`,
+ * `ui-file-drag`) is part of it; new optional feature rows are not.
  */
 const WEB_ROWS: ReadonlyArray<{ id: string; name: string }> = [
   { id: 'web-runtime', name: '@deepseek-ai/dsh-web-app' },
   { id: 'modules', name: '@deepseek-ai/dsh-client-modules' },
   { id: 'client-hmr', name: '@deepseek-ai/dsh-client-hmr' },
   { id: 'cordis-client-runner', name: '@deepseek-ai/dsh-cordis-client-runner' },
+  { id: 'ui-context-menu', name: '@deepseek-ai/dsh-client-ui-context-menu' },
   { id: 'ui-open-in-app', name: '@deepseek-ai/dsh-client-ui-open-in-app' },
   { id: 'ui-settings-account', name: '@deepseek-ai/dsh-client-ui-settings-account' },
   { id: 'ui-theme', name: '@deepseek-ai/dsh-client-ui-theme' },
@@ -315,6 +319,7 @@ const WEB_ROWS: ReadonlyArray<{ id: string; name: string }> = [
   { id: 'ui-chat', name: '@deepseek-ai/dsh-client-ui-chat' },
   { id: 'ui-brand-official', name: '@deepseek-ai/dsh-client-ui-brand-official' },
   { id: 'ui-attachment', name: '@deepseek-ai/dsh-client-ui-attachment' },
+  { id: 'ui-file-drag', name: '@deepseek-ai/dsh-client-ui-file-drag' },
   { id: 'ui-tool', name: '@deepseek-ai/dsh-client-ui-tool' },
   { id: 'ui-cordis', name: '@deepseek-ai/dsh-client-ui-cordis' },
   { id: 'ui-deliverables', name: '@deepseek-ai/dsh-client-ui-deliverables' },
@@ -331,7 +336,6 @@ const WEB_ROWS: ReadonlyArray<{ id: string; name: string }> = [
   { id: 'ui-goal', name: '@deepseek-ai/dsh-client-ui-goal' },
   { id: 'ui-message-feedback', name: '@deepseek-ai/dsh-client-ui-message-feedback' },
   { id: 'ui-model-selection', name: '@deepseek-ai/dsh-client-ui-model-selection' },
-  { id: 'ui-deepseek-model-label-1017', name: '@deepseek-ai/dsh-client-ui-deepseek-model-label-1017' },
   { id: 'ui-permission', name: '@deepseek-ai/dsh-client-ui-permission-presets' },
   { id: 'ui-agent-preset', name: '@deepseek-ai/dsh-client-ui-agent-preset' },
   { id: 'entry-customization', name: '@deepseek-ai/dsh-client-ui-entry-customization' },
@@ -397,10 +401,13 @@ function webInsertGroup(entries: readonly OverlayEntry[]): readonly OverlayRow[]
  * assertion and its negative controls so each control proves THIS assertion
  * group rejects the mutation instead of a private copy.
  */
-function assertWebRoster(web: readonly OverlayRow[]): void {
-  assert.deepEqual(web.map(candidate => candidate.id), WEB_ROWS.map(row => row.id),
-    'the Web insert must declare exactly the frozen 59 row ids in order')
-  assert.deepEqual(web.map(candidate => candidate.name), WEB_ROWS.map(row => row.name),
+function assertWebRoster(
+  web: readonly OverlayRow[],
+  expected: readonly { readonly id: string; readonly name: string }[] = WEB_ROWS,
+): void {
+  assert.deepEqual(web.map(candidate => candidate.id), expected.map(row => row.id),
+    'the Web insert must declare exactly the frozen 60 row ids in order')
+  assert.deepEqual(web.map(candidate => candidate.name), expected.map(row => row.name),
     'every Web row id must keep its exact official package')
   for (const candidate of web) {
     assert.equal(candidate.disabled, true, `the "${candidate.id}" Web row must stay disabled by default`)
@@ -466,7 +473,7 @@ function assertWebOwnerDedupe(
     'the fallback is web-runtime-owned: no separate frontend-static row may be declared')
 }
 
-test('the Host-only overlay declares the 59 official Web rows DEFAULT-DISABLED on ONE insert', () => {
+test('the Host-only overlay declares the 60 official Web rows DEFAULT-DISABLED on ONE insert', () => {
   assertWebRoster(webInsertGroup(OVERLAY_ENTRIES))
   // The composition is static: no production switch selects these rows.
   assert.doesNotMatch(HOST_ONLY_PATCH, /WEB_ENABLED|M5_WEB_MODE|--web\b/u,
@@ -480,7 +487,7 @@ test('the Web composition reuses the existing Host authorities instead of declar
 /**
  * M5-W PR-B — the runtime toggle's roster must BE the overlay's roster.
  *
- * The service owns a frozen 59-row table (id + official package) because it
+ * The service owns a frozen 60-row table (id + official package) because it
  * flips those exact rows at runtime. This assertion compares that table with
  * the real `HOST_ONLY_PATCH` insert, so a silently added, dropped, renamed or
  * reordered declaration cannot leave the toggle driving a different graph than
@@ -500,7 +507,7 @@ function assertWebAccessRoster(web: readonly OverlayRow[]): void {
 
 test('the runtime toggle owns exactly the overlay Web roster', () => {
   assertWebAccessRoster(webInsertGroup(OVERLAY_ENTRIES))
-  assert.equal(PI_TUI_WEB_ACCESS_ROWS.length, 59, 'the toggle owns the complete 59-row Web roster')
+  assert.equal(PI_TUI_WEB_ACCESS_ROWS.length, 60, 'the toggle owns the complete 60-row Web roster')
 })
 
 test('the toggle roster assertion rejects a missing, renamed, duplicated or foreign row', () => {
@@ -577,6 +584,158 @@ test('the Web composition assertion rejects a re-enabled row, a browser launch a
     }])),
     /exactly ONE "@deepseek-ai\/dsh-client-modules"/u,
   )
+  // Drift 5/6: the two mandatory Client dependencies the shipped official UIs
+  // inject may not be missing from the REAL overlay. The expectations are
+  // mutated here (not the overlay), so the control proves the comparison catches
+  // a roster that no longer satisfies the official inject closure.
+  for (const dependency of MANDATORY_CLIENT_DEPENDENCY_PACKAGES) {
+    assert.throws(
+      () => assertWebRoster(webInsertGroup(OVERLAY_ENTRIES), WEB_ROWS.filter(row => row.name !== dependency)),
+      /must declare exactly the frozen 60 row ids in order/u,
+      `dropping "${dependency}" from the frozen roster must fail the composition assertion`,
+    )
+  }
+  // Drift 7: the deleted official label may not come back into the expectations
+  // (and therefore never into the overlay).
+  assert.throws(
+    () => assertWebRoster(webInsertGroup(OVERLAY_ENTRIES), [...WEB_ROWS, {
+      id: 'ui-deepseek-model-label-1017',
+      name: '@deepseek-ai/dsh-client-ui-deepseek-model-label-1017',
+    }]),
+    /must declare exactly the frozen 60 row ids in order/u,
+    'the deleted 1017 label must fail the roster comparison instead of being re-added',
+  )
+  // Drift 8/9: a second `connection`/`api-remotes` owner in the Web insert (or at
+  // the top level) is the duplicate Host authority this composition forbids.
+  for (const [suffix, authority] of [
+    ['connection-copy', '@deepseek-ai/dsh-client-connection'],
+    ['api-remotes-copy', '@deepseek-ai/dsh-api-remotes'],
+  ] as const) {
+    assert.throws(
+      () => assertWebOwnerDedupe(BUNDLE_ENTRIES, mutateWeb(rows => [...rows, {
+        id: suffix, name: authority, disabled: true,
+      }])),
+      /must not re-declare the existing|exactly ONE/u,
+      `a second "${authority}" row must fail the owner de-duplication`,
+    )
+  }
+  assert.throws(
+    () => assertWebOwnerDedupe(BUNDLE_ENTRIES, [...OVERLAY_ENTRIES, {
+      id: 'api-remotes-copy', name: '@deepseek-ai/dsh-api-remotes',
+    }]),
+    /exactly ONE "@deepseek-ai\/dsh-api-remotes"/u,
+    'a top-level second api-remotes row must fail the owner de-duplication',
+  )
+})
+
+/**
+ * The official Client UIs whose declared `dsh.client.inject` closure the Web
+ * roster must satisfy. The manifests are read from the REAL installed npm
+ * packages of the pinned DSH family, anchored at the official Web bundle that
+ * declares them — never from a hand-written dependency list.
+ */
+const OFFICIAL_CLIENT_UI_PACKAGES = [
+  '@deepseek-ai/dsh-client-ui-chat',
+  '@deepseek-ai/dsh-client-ui-attachment',
+  '@deepseek-ai/dsh-client-ui-conversation',
+  '@deepseek-ai/dsh-client-ui-sidebar-documentpreview',
+  '@deepseek-ai/dsh-client-ui-open-in-app',
+  '@deepseek-ai/dsh-client-ui-sidebar-right',
+  '@deepseek-ai/dsh-client-ui-deliverables',
+] as const
+
+/** The mandatory Client packages whose only owner is one Web-only roster row. */
+const MANDATORY_CLIENT_DEPENDENCY_PACKAGES = [
+  '@deepseek-ai/dsh-client-ui-context-menu',
+  '@deepseek-ai/dsh-client-ui-file-drag',
+] as const
+
+/** The installed official Web-bundle manifest, the anchor of the Client family. */
+function officialWebAppManifest(): { readonly version: string } {
+  const anchor = createRequire(import.meta.url).resolve('@deepseek-ai/dsh-web-app/package.json')
+  return JSON.parse(readFileSync(anchor, 'utf8')) as { readonly version: string }
+}
+
+/**
+ * Read one installed official manifest's `dsh.client.inject` list. A missing
+ * package, an unreadable manifest or an unknown shape fails closed instead of
+ * being treated as "no dependencies".
+ */
+function readOfficialClientInject(pkg: string): { readonly version: string; readonly inject: readonly string[] } {
+  const anchor = createRequire(import.meta.url).resolve('@deepseek-ai/dsh-web-app/package.json')
+  const manifestPath = createRequire(anchor).resolve(`${pkg}/package.json`)
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
+    readonly version?: unknown
+    readonly dsh?: { readonly client?: { readonly inject?: unknown } }
+  }
+  assert.equal(typeof manifest.version, 'string', `the official "${pkg}" manifest must declare its version`)
+  const inject = manifest.dsh?.client?.inject
+  assert.ok(
+    Array.isArray(inject) && inject.every(entry => typeof entry === 'string' && entry.length > 0),
+    `the official "${pkg}" manifest must declare a string "dsh.client.inject" list`,
+  )
+  return { version: manifest.version as string, inject }
+}
+
+/**
+ * The official Client inject closure, shared by the positive assertion and its
+ * negative control: every mandatory dependency some shipped official UI
+ * declares must be owned by exactly ONE Web roster row, declared default-OFF.
+ */
+function assertMandatoryClientInjectClosure(
+  web: readonly OverlayRow[],
+  manifests: ReadonlyMap<string, readonly string[]>,
+): void {
+  for (const dependency of MANDATORY_CLIENT_DEPENDENCY_PACKAGES) {
+    const consumers = [...manifests]
+      .filter(([, inject]) => inject.includes(dependency))
+      .map(([pkg]) => pkg)
+    assert.ok(consumers.length > 0,
+      `no shipped official Client UI declares "${dependency}"; the mandatory dependency list is stale`)
+    for (const consumer of consumers) {
+      const owners = web.filter(row => row.name === dependency)
+      assert.equal(owners.length, 1,
+        `"${consumer}" injects "${dependency}": exactly ONE Web row must load it, found ${String(owners.length)}`)
+      const owner = owners[0] as OverlayRow
+      assert.equal(owner.disabled, true,
+        `the "${owner.id}" row serving "${dependency}" must start disabled so only the toggle mounts it`)
+    }
+  }
+}
+
+test('the Web roster satisfies the official Client inject closure of the pinned npm family', () => {
+  const webApp = officialWebAppManifest()
+  const pinned = (JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as {
+    readonly devDependencies: Readonly<Record<string, string>>
+  }).devDependencies['@deepseek-ai/dsh-web-app']
+  assert.equal(webApp.version, pinned,
+    'the installed official Web bundle must be the DSH family this repository pins')
+  const manifests = new Map<string, readonly string[]>()
+  for (const pkg of OFFICIAL_CLIENT_UI_PACKAGES) {
+    const manifest = readOfficialClientInject(pkg)
+    assert.equal(manifest.version, webApp.version,
+      `the official "${pkg}" must come from the same pinned DSH family as the Web bundle`)
+    manifests.set(pkg, manifest.inject)
+  }
+  const web = webInsertGroup(OVERLAY_ENTRIES)
+  assertMandatoryClientInjectClosure(web, manifests)
+  // The two mandatory rows own their package exactly once and are plain rows:
+  // no local inject/config override, no feature configuration.
+  for (const dependency of MANDATORY_CLIENT_DEPENDENCY_PACKAGES) {
+    const owners = web.filter(row => row.name === dependency)
+    assert.equal(owners.length, 1, `the Web roster must own exactly one "${dependency}" row`)
+    assert.equal(owners[0].inject, undefined, `"${dependency}" keeps its own official manifest injects`)
+    assert.equal(owners[0].config, undefined, `"${dependency}" carries no local feature configuration`)
+  }
+  // Negative control: the SAME closure assertion rejects a roster that dropped
+  // either mandatory dependency.
+  for (const dependency of MANDATORY_CLIENT_DEPENDENCY_PACKAGES) {
+    assert.throws(
+      () => assertMandatoryClientInjectClosure(web.filter(row => row.name !== dependency), manifests),
+      /exactly ONE Web row must load it/u,
+      `dropping "${dependency}" from the Web roster must fail the inject-closure assertion`,
+    )
+  }
 })
 
 test('the Direct bundle keeps no Web-only row and its own listener/startup gates', () => {
