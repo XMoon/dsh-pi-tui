@@ -20,7 +20,7 @@ import type {
   QuickMenuRenderState,
   QuickMenuRow,
 } from './model-quick-menu.ts'
-import type { SlashCompletionPopup } from './slash-completion.ts'
+import type { TspInputCompletionPopup } from './input-completion.ts'
 
 /** The ONE surface-scoped stylesheet name the renderer installs. */
 export const QUIET_COMPOSER_SHEET = 'dsh-quiet-composer'
@@ -53,15 +53,17 @@ export const QUIET_COMPOSER_ROLES = {
   send: 'dsh.composer.send',
   stop: 'dsh.composer.stop',
   footerGroup: 'dsh.footer.group',
-  // TSP I-C: the anchored slash-candidate list. It is ONE child of the Composer
+  // TSP I-C/I-D: the ONE anchored candidate list. It is ONE child of the Composer
   // shell and positioned absolutely against it, so it floats above the Composer
   // and takes NO layout height — the editor keeps its exact node path and the
-  // Composer box never moves.
-  slashMenu: 'dsh.composer.slash-menu',
-  slashItem: 'dsh.composer.slash-item',
-  slashName: 'dsh.composer.slash-name',
-  slashDescription: 'dsh.composer.slash-description',
-  slashHint: 'dsh.composer.slash-hint',
+  // Composer box never moves. I-C raised it from a Slash-only menu to the shared
+  // seat's menu (command, Host `@`, local path, inline action/skill rows all ride
+  // THIS list), so the role family is named for what it now shows.
+  completionMenu: 'dsh.composer.completion-menu',
+  completionItem: 'dsh.composer.completion-item',
+  completionText: 'dsh.composer.completion-text',
+  completionDescription: 'dsh.composer.completion-description',
+  completionHint: 'dsh.composer.completion-hint',
 } as const
 
 /** One selectable permission preset in the v2 menu (fixed standard set). */
@@ -109,21 +111,23 @@ export interface QuietComposerViewInput {
   readonly busy: boolean
   readonly sendable: boolean
   /**
-   * TSP I-C: the slash candidate list this frame shows, or `undefined` when the
+   * TSP I-C/I-D: the candidate list this frame shows, or `undefined` when the
    * seat has nothing to paint. It is the SEAT's own render-time projection —
    * already filtered, already ordered by the shared provider and already
    * windowed — so this view re-sorts nothing, re-queries nothing and claims no
-   * availability the catalog did not state.
+   * availability the catalog did not state. Its rows carry the Provider's own
+   * display text for the seat they came from: a `/command`, an official `@`
+   * mention, a real local path or an inline `/action`.
    */
-  readonly slash: SlashCompletionPopup | undefined
+  readonly completion: TspInputCompletionPopup | undefined
   readonly onPermissionToggle: () => void
   readonly onPermissionChoose: (id: string, menuEpoch: number) => void
   /** The combined trigger: opens, or closes, the anchored quick menu. */
   readonly onModelQuickToggle: () => void
   /** One interaction of the CURRENT menu frame. */
   readonly onModelQuickIntent: (intent: QuickMenuIntent) => void
-  /** Choose ONE slash candidate of the CURRENT list frame (row id + revision). */
-  readonly onSlashChoose: (id: string, revision: number) => void
+  /** Choose ONE candidate of the CURRENT list frame (row id + revision). */
+  readonly onCompletionChoose: (id: string, revision: number) => void
   readonly onSend: () => void
   readonly onStop: () => void
 }
@@ -227,21 +231,23 @@ function quickMenuNode(
   )
 }
 
-/** One row of the anchored slash-candidate list. A row is a COMPLETION, never
- *  an execution: `title`/`aria` carry the full name plus its description so a
- *  reviewer or a reader can tell two similar commands apart from the frame
- *  alone, and the highlighted row is marked by exactly one active signal. */
-function slashRow(
+/** One row of the anchored candidate list. A row is a COMPLETION, never an
+ *  execution: `title`/`aria` carry the seat's own display text plus the
+ *  Provider's description so a reviewer or a reader can tell two similar rows
+ *  apart from the frame alone (a Host `@src/a.ts` and a local `src/a.ts` are
+ *  different sources even when the letters match), and the highlighted row is
+ *  marked by exactly one active signal. */
+function completionRow(
   scope: string,
-  popup: SlashCompletionPopup,
-  row: SlashCompletionPopup['rows'][number],
+  popup: TspInputCompletionPopup,
+  row: TspInputCompletionPopup['rows'][number],
   onChoose: (id: string, revision: number) => void,
 ): Node {
   const description = row.description ?? ''
-  const full = description === '' ? row.name : `${row.name} — ${description}`
+  const full = description === '' ? row.text : `${row.text} — ${description}`
   return html.button({
-    key: `slash-${scope}-${popup.revision}-${row.id.replace(/[^A-Za-z0-9._-]+/g, '_')}`,
-    role: QUIET_COMPOSER_ROLES.slashItem,
+    key: `completion-${scope}-${popup.revision}-${row.id.replace(/[^A-Za-z0-9._-]+/g, '_')}`,
+    role: QUIET_COMPOSER_ROLES.completionItem,
     title: full,
     aria: full,
     ...(row.highlighted
@@ -249,10 +255,10 @@ function slashRow(
       : {}),
     onClick: () => onChoose(row.id, popup.revision),
   },
-    html.span({ role: QUIET_COMPOSER_ROLES.slashName }, `${row.highlighted ? '›' : ' '}${row.name}`),
+    html.span({ role: QUIET_COMPOSER_ROLES.completionText }, `${row.highlighted ? '›' : ' '}${row.text}`),
     ...(description === ''
       ? []
-      : [html.span({ role: QUIET_COMPOSER_ROLES.slashDescription }, description)]),
+      : [html.span({ role: QUIET_COMPOSER_ROLES.completionDescription }, description)]),
   )
 }
 
@@ -284,23 +290,23 @@ export function quietComposerView(input: QuietComposerViewInput): Node {
       )
     : undefined
 
-  const slashMenu = input.slash === undefined || input.slash.rows.length === 0
+  const completionMenu = input.completion === undefined || input.completion.rows.length === 0
     ? undefined
     : ui.col(
         {
-          key: `composer-slash-menu-${input.scope}-${input.slash.revision}`,
-          role: QUIET_COMPOSER_ROLES.slashMenu,
-          aria: 'Slash command candidates',
+          key: `composer-completion-menu-${input.scope}-${input.completion.revision}`,
+          role: QUIET_COMPOSER_ROLES.completionMenu,
+          aria: 'Completion candidates',
           gap: 'none',
         },
-        ...input.slash.rows.map(row => slashRow(
+        ...input.completion.rows.map(row => completionRow(
           input.scope,
-          input.slash!,
+          input.completion!,
           row,
-          input.onSlashChoose,
+          input.onCompletionChoose,
         )),
         ui.text({
-          key: `composer-slash-hint-${input.slash.revision}`,
+          key: `composer-completion-hint-${input.completion.revision}`,
           wrap: 'none',
           text: '↑↓ select · Tab/Enter complete · Esc close',
         }),
@@ -308,12 +314,12 @@ export function quietComposerView(input: QuietComposerViewInput): Node {
 
   return ui.col(
     { key: 'quiet-composer', role: QUIET_COMPOSER_ROLES.shell, gap: 'none' },
-    // TSP I-C: the candidate list is ONE child of the shell it anchors to, so
+    // TSP I-C/I-D: the candidate list is ONE child of the shell it anchors to, so
     // the editor keeps its EXACT existing node path
     // (`dock.quiet-composer.composer`) — no new wrapper, no focus-path change.
     // Absolute positioning takes it out of flow, so the Composer keeps the
     // height it had before and the transcript never moves.
-    ...(slashMenu === undefined ? [] : [slashMenu]),
+    ...(completionMenu === undefined ? [] : [completionMenu]),
     input.editor,
     ui.row(
       { key: 'composer-controls', role: QUIET_COMPOSER_ROLES.controls, gap: 'sm', align: 'center' },
@@ -729,7 +735,7 @@ export const QUIET_COMPOSER_STYLES = `
      scrolls only where it does not — at 900x360 the last row is clipped, which the
      Owner accepted as a recorded limitation because the client reports no pane
      height for the program to adapt to. */
-  [data-role='dsh.composer.slash-menu'] {
+  [data-role='dsh.composer.completion-menu'] {
     position: absolute;
     left: 12px;
     right: 12px;
@@ -752,7 +758,7 @@ export const QUIET_COMPOSER_STYLES = `
      client at 400x600 the buttons took their intrinsic width (719px inside a
      342px menu) and painted command text outside the popup. A zero min-width plus
      the hidden overflow keep the row inside its frame at every width. */
-  [data-role='dsh.composer.slash-item'] {
+  [data-role='dsh.composer.completion-item'] {
     display: flex;
     align-items: center;
     gap: 8px;
@@ -770,22 +776,21 @@ export const QUIET_COMPOSER_STYLES = `
     text-align: left;
     cursor: pointer;
   }
-  [data-role='dsh.composer.slash-item']:hover {
+  [data-role='dsh.composer.completion-item']:hover {
     background: rgb(from var(--t1) r g b / 4%);
     color: var(--t1);
   }
-  [data-role='dsh.composer.slash-item'][data-highlight='true'] {
+  [data-role='dsh.composer.completion-item'][data-highlight='true'] {
     background: rgb(from var(--t1) r g b / 7%);
     color: var(--t1);
   }
-  /* The command name is the thing that must survive a narrow anchor; the
-     description is secondary and truncates first, so a row never loses its
-     leading slash-name (the same rule the quick menu's label/value pair
-     follows). Both stay inside the box: when even the name cannot fit it
+  /* The candidate text is the thing that must survive a narrow anchor; the
+     description is secondary and truncates first, so a row never loses what it
+     names (the same rule the quick menu's label/value pair follows). Both stay inside the box: when even the name cannot fit it
      ellipsizes — the row's title/aria still carry the complete text, and a
      truncated row is never a different command because the composer receives
      the Provider's own full value, not the painted label. */
-  [data-role='dsh.composer.slash-name'] {
+  [data-role='dsh.composer.completion-text'] {
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -793,7 +798,7 @@ export const QUIET_COMPOSER_STYLES = `
     flex-shrink: 1;
     color: var(--t1);
   }
-  [data-role='dsh.composer.slash-description'] {
+  [data-role='dsh.composer.completion-description'] {
     color: var(--t3);
     min-width: 0;
     overflow: hidden;
@@ -801,7 +806,7 @@ export const QUIET_COMPOSER_STYLES = `
     white-space: nowrap;
     flex-shrink: 8;
   }
-  [data-role='dsh.composer.slash-menu'] .sf-text {
+  [data-role='dsh.composer.completion-menu'] .sf-text {
     padding: 2px 8px;
     color: var(--t4);
     font-family: var(--sans);

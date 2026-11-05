@@ -1250,16 +1250,16 @@ Authority: `src/commands.ts` (`PATH_ARGUMENT_COMMANDS`),
 `src/app/command/tsp-capability.ts`,
 `src/app/submission/submit-flow.ts`.
 
-### Slash command-name completion
+### Input completion seat
 
-The command-name candidate list has ONE source and ONE composition. The single
-catalog commit point in `src/commands.ts` publishes the effective display catalog
-(Host rows, Client registrations and merged extension contributions) together with
-the collision and Host-claims bookkeeping, and that same install reaches the
-mounted renderer by renderer kind: PiTui through the editor's installed
-autocomplete provider, a renderer without a PiTui editor through the mount's
-command-completion install port, which only forwards. Both compose their provider
-from `createInstalledAutocompleteProvider`, so there is never a second catalog,
+The candidate list has ONE source and ONE composition. The single catalog commit
+point in `src/commands.ts` publishes the effective display catalog (Host rows,
+Client registrations and merged extension contributions) together with the
+collision and Host-claims bookkeeping, and that same install reaches the mounted
+renderer by renderer kind: PiTui through the editor's installed autocomplete
+provider, a renderer without a PiTui editor through the mount's command-completion
+install port, which only forwards. Both compose their provider from
+`createInstalledAutocompleteProvider`, so there is never a second catalog,
 resolver, claims map or ranking implementation.
 
 - A candidate row is a display fact only. Screening happens once, at that commit
@@ -1274,21 +1274,63 @@ resolver, claims map or ranking implementation.
 - A bare `/name` candidate carries no argument, so a builtin whose bare form needs
   UI the renderer lacks is not offered. Offering a row is never an execution claim:
   submitting the original text still runs the unchanged gate and refusal.
-- The completion seat is admitted only for the FIRST logical line's leading
-  command token, with no space before the caret, and never for an argument
-  position, an `@` mention, an inline skill reference, a shell line or ordinary
-  prose. File and argument candidates therefore open no file discovery from this
-  seat.
+- The renderer's own seat (`src/tui/tsp/input-completion.ts`) opens a list at
+  exactly the positions the SHARED classifier already recognizes, and classifies
+  nothing itself: the FIRST logical line's leading command token with no space
+  before the caret is the command seat; an `@` token at a real boundary is the Host
+  mention seat; a declared file-argument command (`/attach`, `/image`) is the
+  Client-local path seat, and its own `leading` fact separates the legacy first-line
+  argument seat from the inline body seat; a `/name` token at any other position is
+  the inline seat the two fixed attachment actions share with the skill lexicon. A
+  literal `!`/`!!` shell line, an email, `pkg@1.0.0`, a URL, a bare `./path` or
+  ordinary prose open nothing, and the seat never asks a plugin about a position it
+  did not admit. Which of those positions exists at all is the classifier's
+  contract (`## Attachments and input completion` above and
+  `## Session \`@\` completion routing` below), not a second rule invented per
+  renderer.
+- Sources never substitute for each other. A Host mention answers ONLY from
+  `HostFilePort` under the current completion scope; an authoritative empty or
+  `unavailable` answer opens no Client-local listing, is never re-scanned locally
+  and is never presented as "the file does not exist" (see
+  `docs/architecture/host-client.md`). A Client-local path argument answers ONLY
+  from the local cwd and never queries the Host port; `/image @foo` is a local
+  argument, not a mention. A text `/name` row — including one a plugin forged with
+  attachment-shaped fields — never grants a read, because the shared provider's own
+  strict request snapshot and row identity are the permission. A failed COMMAND
+  catalog blocks only the command seat: a withdrawn catalog says nothing about the
+  Host or local file sources.
 - Accepting a candidate is a Composer edit, not a submission: the shared provider
   computes the replacement and the renderer's composer applies it as one
-  conditional atomic write that keeps the indentation and the text after the caret
+  conditional atomic write that keeps the text before and after the admitted token
   and parks the caret where the provider landed it — never at the end of the
-  draft, which is what a whole-document draft write does. Only a later, separate
-  submit gesture reaches the submission controller. The write is refused as a
-  whole when the live document or caret no longer matches the document the
-  replacement was computed against, when the caret is not a grapheme boundary, or
-  when the change is not confined to one logical line; a refused completion
-  changes no text, caret, paste lease or frame.
+  draft, which is what a whole-document draft write does. The span an accept may
+  rewrite is the token the ORIGINAL classifier named for that seat (the `@` token,
+  the argument range, the inline `/name` token plus whatever its own grammar
+  consumes right of the caret, the command token), so no answer can move the `@`,
+  eat the prose, rewrite the `/image` command token or reach another line; an
+  out-of-span answer writes nothing. Only a later, separate submit gesture reaches
+  the submission controller. The write is refused as a whole when the live document
+  or caret no longer matches the document the replacement was computed against,
+  when the caret is not a grapheme boundary, or when the change is not confined to
+  one logical line; a refused completion changes no text, caret, paste lease or
+  frame.
+- An accepted inline attachment FILE is a two-phase gesture, and the two halves
+  have different owners. The provider hands the immutable acceptance to the seat,
+  which only STAGES it for that one gesture; the mount settles it through the
+  installed command-plane stager — the same `runAttachmentIntake` authority the
+  leading `/attach`/`/image` commands use (one Client-local read, the existing
+  budget, the existing draft stores, the existing notices) — AFTER the composer's
+  own atomic write committed the accepted document and caret. A refused write, a
+  stale seat, an uninstalled stager, a moved document or caret, or an edit that
+  walked away and back to the same bytes (the composer's edit-revision fence)
+  produce no read, no store mutation, no placeholder and no success notice, and the
+  user's own path text stays editable. An accepted ACTION writes `/image `/
+  `/attach ` and reopens the same seat's path candidates; an accepted DIRECTORY
+  continues the path seat; neither reads anything. The canonical placeholder
+  replaces exactly the accepted fragment through one atomic composer edit that
+  preserves every other paste lease, and the intake's session-scope and transition
+  fences stay the command plane's. The leading argument seat never stages on an
+  accept: the command handler still runs on the NEXT explicit submit.
 - Any currentness loss ends the browse without touching the draft: a new catalog
   commit, a formal completion-scope change, a cleared draft, a Session
   publication, a hydration window, a disposed renderer, or a higher input seat
@@ -1298,13 +1340,21 @@ resolver, claims map or ranking implementation.
   Escape closes only the list, and a modified or otherwise unconsumed key retires
   the list first and then reaches its existing owner exactly once — so a visible
   list can never turn Cancel into a no-op, and a no-op key can never leave a
-  dismissed list painted. With the list closed the Composer's own arrows keep their
-  existing meaning, including the input-history recall browse.
+  dismissed list painted. Plain Enter ACCEPTS and is never a submit, with ONE
+  exception: when the first logical line's WHOLE command token already names the
+  highlighted candidate and the caret sits at that token's end, there is nothing
+  left to complete and Enter stays the submission gesture it has always been. For
+  every other seat an Enter that cannot complete is still consumed, so a mention, a
+  path, an action or a skill never executes or sends on the accept gesture. With
+  the list closed the Composer's own arrows keep their existing meaning, including
+  the input-history recall browse.
 
 Authority: `src/commands.ts`,
 `src/tui/interaction/autocomplete/installed-provider.ts`,
-`src/tui/tsp/slash-completion.ts`, `src/tui/tsp/editor.ts`,
-`src/app/command/tsp-capability.ts`, `src/app/surface/runtime.ts`.
+`src/tui/tsp/input-completion.ts`, `src/tui/tsp/editor.ts`,
+`src/tui/tsp/session.ts`, `src/tui/commands/artifacts.ts`,
+`src/app/command/tsp-capability.ts`, `src/app/surface/runtime.ts`,
+`src/runtime/host-file-port.ts`.
 
 
 ## Session `@` completion routing

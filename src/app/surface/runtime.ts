@@ -275,6 +275,45 @@ export interface TspCommandCompletionInstallation {
 }
 
 /**
+ * TSP I-D: the structural projection of ONE inline-attachment intake STAKE —
+ * the immutable description of a file the user just accepted at an inline
+ * attachment seat, plus the editor-side fences the command plane consumes
+ * through it. The AUTHORITY for this contract stays
+ * `InlineAttachmentStake` in `src/tui/interaction/autocomplete/inline-attachment.ts`;
+ * this mirror exists for the same reason `TspCommandCompletionInstallation`
+ * above does — the application layer never imports the concrete TUI layer
+ * (`scripts/application-architecture-gate.mjs`, `app-imports-tui`), so the
+ * forwarding seam is declared by its owning layer and consumed structurally.
+ */
+export interface TspInlineAttachmentStake {
+  /** The declared attachment command (`image` / `attach`). */
+  readonly command: string
+  /** The chosen path exactly as the user selected it (quotes removed). */
+  readonly path: string
+  /** The raw draft the acceptance installed. */
+  readonly rawDraft: string
+  /** The raw fragment the canonical placeholder replaces (inline half-open). */
+  readonly span: { readonly line: number; readonly start: number; readonly end: number }
+  /** Whether the seat this stake was taken for is still the live one. */
+  current(): boolean
+  /** The live raw draft, or undefined when the seat moved away. */
+  draft(): string | undefined
+  /** Commit the canonical placeholder as ONE atomic editor edit. */
+  commit(placeholder: string): boolean
+  /** One transient notice (the intake's success/refusal feedback). */
+  notify(message: string, kind?: 'info' | 'error'): void
+}
+
+/**
+ * TSP I-D: the command plane's inline-attachment entry the mounted TSP renderer
+ * installs — the SAME `runAttachmentIntake` authority the leading `/image`
+ * `/attach` commands use. It is a FUNCTION, not a service: the surface stores
+ * only the mount's installer reference, never a stager instance, a stake or any
+ * attachment state.
+ */
+export type TspInlineAttachmentStager = (stake: TspInlineAttachmentStake) => void
+
+/**
  * PR3-B §3.3 (the B1 slice): the renderer-facing input binding — a NARROW
  * structural projection of the existing `TuiAppEvents` (the lifecycle/user
  * activity members), constructed at the `SurfaceRuntime.start` composition
@@ -549,6 +588,15 @@ export interface SurfaceRendererMount {
      * no command execution right.
      */
     readonly installCommandCompletions?: (installation: TspCommandCompletionInstallation) => void
+    /**
+     * TSP I-D: install the ONE inline-attachment stager onto the mounted
+     * renderer. OPTIONAL for the same reason the installer above is: the PiTui
+     * branch installs it on the mounted `TuiApp`, and a renderer without an
+     * inline attachment plane supplies nothing. It is synchronous, carries no
+     * read/store authority of its own, and the surface keeps NO copy — only the
+     * mount's installer reference (cleared with the mount).
+     */
+    readonly installInlineAttachmentStager?: (stager: TspInlineAttachmentStager) => void
     /**
      * Stop the renderer and release its terminal ONCE (the TSP branch closes
      * the SDK surface then the session). May be async; the surface disposal
@@ -1187,6 +1235,16 @@ export interface SurfaceRuntime<Event extends RoutedSessionEvent> {
    */
   installTspCommandCompletions(installation: TspCommandCompletionInstallation): void
   /**
+   * TSP I-D: forward the ONE inline-attachment stager to the CURRENT TSP mount,
+   * SYNCHRONOUSLY, through the same installer-reference pattern as the catalog
+   * commit above. This owner stores only the mount's installer reference — never
+   * a stager, a stake, a draft or any attachment state — and a renderer that is
+   * not mounted (or is already disposed) receives nothing. The PiTui branch never
+   * calls this: its stager keeps going through `app.setInlineAttachmentStager`
+   * at the same single registration site.
+   */
+  installTspInlineAttachmentStager(stager: TspInlineAttachmentStager): void
+  /**
    * Early teardown: release the Plugin Manager install-event subscription at
    * its original EARLY cleanup position (a late install event must never
    * notify/repaint a dying surface).
@@ -1288,6 +1346,13 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
    * this slot is only the forwarding reference, cleared with the mount.
    */
   let rendererCommandCompletionsInstaller: ((installation: TspCommandCompletionInstallation) => void) | undefined
+  /**
+   * TSP I-D: the CURRENT TSP mount's inline-attachment stager installer, and
+   * NOTHING else — the stager itself stays owned by the command plane
+   * (`src/commands.ts` + `src/tui/commands/artifacts.ts`), the acceptance and
+   * draft state stay inside the mount. Cleared with the mount.
+   */
+  let rendererInlineAttachmentStagerInstaller: ((stager: TspInlineAttachmentStager) => void) | undefined
   /**
    * PR3-B §3.2: the live modal presenter projection. PiTui assigns the
    * mounted app (structurally a `SurfaceInteractionPresenter`); a renderer
@@ -2982,6 +3047,10 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
         // candidate state). A mount without a completion seat leaves this
         // unset, and the command layer reports the skipped install.
         rendererCommandCompletionsInstaller = mounted.installCommandCompletions
+        // TSP I-D: the same installer-reference pattern for the ONE inline
+        // attachment stager. A mount without an attachment plane leaves this
+        // unset, and the forward below then installs NOTHING.
+        rendererInlineAttachmentStagerInstaller = mounted.installInlineAttachmentStager
         // PR3-B §3.3: the input projection is constructed HERE (from the EXACT
         // already-built callbacks, preserving their receiver/signature) but
         // BOUND LATER, through `bindRendererInput()`. Binding at this instant
@@ -3129,6 +3198,13 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       // reports the skipped install instead of keeping a second copy here.
       rendererCommandCompletionsInstaller?.(installation)
     },
+    installTspInlineAttachmentStager(stager) {
+      // TSP I-D: one synchronous forward, exactly like the catalog commit above.
+      // Absent (no renderer mounted, a renderer without an attachment plane, or
+      // already disposed) means NOTHING is installed; the mount, not this owner,
+      // reports the fact.
+      rendererInlineAttachmentStagerInstaller?.(stager)
+    },
     disposePluginManager() {
       // Release the Plugin Manager install-event subscription at its original
       // EARLY position. This never cancels a Host install: only the official
@@ -3154,6 +3230,10 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       // so no late catalog commit can reach a disposed mount (and nothing
       // survives into a remount, which mounts a NEW installer reference).
       rendererCommandCompletionsInstaller = undefined
+      // TSP I-D: withdraw the stager installer with the mount it points at, so a
+      // late registration can never reach a disposed mount and a remount binds
+      // its OWN installer reference.
+      rendererInlineAttachmentStagerInstaller = undefined
       modelPresentation = undefined
       presetPresentation = undefined
       sessionBrowserPresentation = undefined

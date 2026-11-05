@@ -2033,6 +2033,12 @@ export function applyRunnerWithRuntime(
         installTspCommandCompletions: (installation) => {
           surface.installTspCommandCompletions(installation)
         },
+        // TSP I-D: the ONE inline-attachment stager, forwarded to the CURRENT
+        // mount through the same live surface read. No stager, stake, draft or
+        // attachment state is kept here.
+        installTspInlineAttachmentStager: (stager) => {
+          surface.installTspInlineAttachmentStager(stager)
+        },
         // TSP I-C: the SAME live capability reads the submission admission already
         // uses — the mounted presenters and the display seam's ONE Task Center
         // reachability truth — sampled per catalog commit, never cached and never

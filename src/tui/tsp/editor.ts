@@ -28,6 +28,7 @@
 import type { Key } from '@stencil-hq/tern'
 import type { SubmitPendingDetail } from '../../app/submission/ack.ts'
 import { PasteRangeTracker, type PasteRangeSpan } from '../interaction/pasted-path-range.ts'
+import type { InlineAttachmentSpan } from '../interaction/autocomplete/inline-attachment.ts'
 
 /** The composer's editor state snapshot (cursor in UTF-16 code units). */
 export interface TspComposerState {
@@ -404,13 +405,15 @@ export function createTspComposer(sinks: TspComposerSinks, recall: TspComposerRe
   }
 
   /**
-   * TSP I-C: the ONE conditional write a slash completion is allowed to make.
-   * A completion replaces the command token, so neither `setDraft` (which moves
-   * the caret to the END of the whole document) nor `insertIntoEditor` (which
-   * only inserts) describes it. Every check below is a REJECTION, never a
-   * repair: on `false` the text, the caret, the paste leases and the render stay
-   * exactly as they were, so a stale completion is dropped without touching what
-   * the user is typing.
+   * TSP I-C/I-D: the ONE conditional write an admitted completion is allowed to
+   * make. A completion replaces a token, so neither `setDraft` (which moves the
+   * caret to the END of the whole document) nor `insertIntoEditor` (which only
+   * inserts) describes it. WHICH token (a command name, an `@` reference, a local
+   * path argument, an inline action) is decided by the candidate seat through the
+   * original classifier BEFORE it calls here — this method never re-parses the
+   * draft. Every check below is a REJECTION, never a repair: on `false` the text,
+   * the caret, the paste leases and the render stay exactly as they were, so a
+   * stale completion is dropped without touching what the user is typing.
    */
   const applyCompletionEdit = (
     expected: { text: string; cursor: number },
@@ -465,6 +468,70 @@ export function createTspComposer(sinks: TspComposerSinks, recall: TspComposerRe
     return true
   }
 
+  /**
+   * TSP I-D: the current edit revision — the SAME counter `commitChange` bumps
+   * for every committed mutation, `clearDraftStateOnly` and
+   * `invalidateRecallNavigation` (every formal scope invalidation). An async
+   * intake compares it to prove that NOTHING has moved the draft since its
+   * accept; text equality alone cannot tell "the user kept the draft" from
+   * "edit → backspace → retype" (an A→B→A walk over the same bytes).
+   */
+  const editRevision = (): number => editEpoch
+
+  /**
+   * TSP I-D: replace ONE accepted inline attachment fragment with its canonical
+   * placeholder — the atomic in-place edit the inline intake commits through.
+   * It is deliberately NOT `applyCompletionEdit` (whose minimal-diff model
+   * cannot express a caret the user already moved on) and NOT `setDraft` (which
+   * rebuilds the whole document and would retire every unrelated paste lease).
+   * Every check below is a REJECTION: on `false` the text, the caret, the paste
+   * leases, the browse state and the render stay exactly as they were.
+   */
+  const replaceInlineAttachmentFragment = (
+    expected: { text: string; cursor: number; editRevision: number },
+    span: InlineAttachmentSpan,
+    placeholder: string,
+  ): boolean => {
+    // The document, the caret AND the revision must still be the accepted ones,
+    // re-read SYNCHRONOUSLY here (the intake may have taken any amount of time).
+    if (text !== expected.text || cursor !== expected.cursor || editEpoch !== expected.editRevision) return false
+    // The span is the acceptance's own half-open range in the `\n`-split line
+    // model, so the flat offsets accumulate every earlier line PLUS its one
+    // newline — never the composer's CR-trimmed display-line model.
+    const lines = text.split('\n')
+    const line = lines[span.line]
+    if (line === undefined) return false
+    if (span.start < 0 || span.end <= span.start || span.end > line.length) return false
+    let lineStart = 0
+    for (let index = 0; index < span.line; index += 1) lineStart += (lines[index]?.length ?? 0) + 1
+    const flatStart = lineStart + span.start
+    const flatEnd = lineStart + span.end
+    const fragment = text.slice(flatStart, flatEnd)
+    // The fragment is a path token INSIDE one logical line: a newline would mean
+    // the coordinates no longer describe this document, and a lone CR/LF would
+    // replace half of a CRLF cluster.
+    if (fragment.includes('\n') || fragment.includes('\r')) return false
+    // Neither endpoint may sit inside a grapheme cluster (an emoji or a combined
+    // name is one unit; cutting it would strand a lone surrogate).
+    if (boundaryCursor(text, flatStart) !== flatStart || boundaryCursor(text, flatEnd) !== flatEnd) return false
+    const next = `${text.slice(0, flatStart)}${placeholder}${text.slice(flatEnd)}`
+    // The caret lands right AFTER the placeholder (normalized like every other
+    // mutation here, so the invariant holds even when the fragment's following
+    // cluster merged with what replaced it).
+    const nextCursor = boundaryCursor(next, flatStart + placeholder.length)
+    // The splice is EXACTLY known: every OTHER paste lease follows it through
+    // the tracker, and the ↑/↓ browse this draft may have come from retires.
+    pasteRanges.applyEdit(
+      { start: flatStart, oldEnd: flatEnd, newEnd: flatStart + placeholder.length },
+      next,
+    )
+    forgetRecallBookmark()
+    text = next
+    cursor = nextCursor
+    commitChange()
+    return true
+  }
+
   return {
     state,
     setFocused,
@@ -473,6 +540,8 @@ export function createTspComposer(sinks: TspComposerSinks, recall: TspComposerRe
     setEditorText: replaceText,
     insertIntoEditor: insert,
     applyCompletionEdit,
+    editRevision,
+    replaceInlineAttachmentFragment,
     clearDraftStateOnly: () => {
       // PR3-B §7.3 (B2 F1): PURE STATE — no `onChanged`, no render. See the
       // interface doc; the next committed frame carries the emptied editor.
@@ -664,13 +733,17 @@ export interface TspComposer {
   setEditorText(text: string): void
   insertIntoEditor(text: string): void
   /**
-   * TSP I-C: replace the command token ONE completion produced, atomically and
-   * only while the document still matches `expected` exactly. The caret lands
-   * where the Provider put it — inside the completed line, keeping the
-   * indentation and the text after the caret — and is never forced to the end of
-   * the draft the way `setDraft` does. Every other paste lease follows the exact
+   * TSP I-C/I-D: replace the document edit ONE accepted completion produced,
+   * atomically and only while the document still matches `expected` exactly. The
+   * caret lands where the Provider put it — inside the completed line, keeping
+   * the indentation and the text after the caret — and is never forced to the end
+   * of the draft the way `setDraft` does. Every other paste lease follows the exact
    * splice, the ↑/↓ browse bookmark is retired, and `onChanged` fires exactly
    * once on success.
+   *
+   * WHICH span a completion may rewrite is not this method's decision: the ONE
+   * candidate seat (`tui/tsp/input-completion.ts`) admits the edit against the
+   * original file-completion classifier before it ever calls here.
    *
    * Returns `false` — touching NOTHING, no text, no caret, no lease, no render —
    * when the live document/cursor moved, when the caret is not a grapheme
@@ -682,6 +755,32 @@ export interface TspComposer {
   applyCompletionEdit(
     expected: { text: string; cursor: number },
     next: { text: string; cursor: number },
+  ): boolean
+  /**
+   * TSP I-D: the current edit revision — the counter every committed mutation,
+   * draft clear and formal scope invalidation bumps. An async inline intake
+   * compares it to prove nothing moved the draft since its accept; text equality
+   * alone cannot tell "nothing happened" from an A→B→A edit walk.
+   */
+  editRevision(): number
+  /**
+   * TSP I-D: replace ONE accepted inline attachment fragment (a half-open span in
+   * the `\n`-split line model, imported from the attachment grammar that produced
+   * it) with its canonical placeholder — ONE atomic edit, ONE `onChanged`, the
+   * caret right after the placeholder, every OTHER paste lease carried through
+   * the exact splice.
+   *
+   * Returns `false` and changes NOTHING when the live document, caret or revision
+   * moved away from `expected`, when the span is not a legal non-empty range of
+   * the current line, when the fragment carries a line break or a lone CR/LF (a
+   * CRLF cluster is never split), or when an endpoint falls inside a grapheme
+   * cluster. A refused fragment leaves the user's own path text editable — the
+   * placeholder of a stale intake never lands in a newer draft.
+   */
+  replaceInlineAttachmentFragment(
+    expected: { readonly text: string; readonly cursor: number; readonly editRevision: number },
+    span: InlineAttachmentSpan,
+    placeholder: string,
   ): boolean
   notify(message: string, kind?: 'info' | 'error'): void
   setSubmitPending(detail: SubmitPendingDetail | undefined): void

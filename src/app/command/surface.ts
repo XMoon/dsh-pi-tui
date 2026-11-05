@@ -42,7 +42,7 @@ import type { SubmissionComposerPort } from '../submission/composer-port.ts'
 import type { RemoteCommandSourceFace } from '../application-runtime.ts'
 import { bindCommandRuntime, type CommandRuntimeSurface, type CommandSessionRuntime } from './runtime.ts'
 import { titleRefusalNoticeOwner, titleSuccessNoticeVisible, type TspBuiltinPickers } from './tsp-capability.ts'
-import type { TspCommandCompletionInstallation } from '../surface/runtime.ts'
+import type { TspCommandCompletionInstallation, TspInlineAttachmentStager } from '../surface/runtime.ts'
 import type { DeliveredFilesSnapshot } from '../../domain/deliverables/catalog.ts'
 import { copyToClipboard } from '../../client/clipboard/copy.ts'
 import { isFocusDisplayPreset, type DisplayState } from '../../domain/display/preset.ts'
@@ -265,6 +265,16 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
      * and the catalog authority stay exactly as they were.
      */
     installTspCommandCompletions(installation: TspCommandCompletionInstallation): void
+    /**
+     * TSP I-D: install the ONE inline-attachment stager onto the CURRENTLY
+     * mounted TSP renderer. The command layer calls it at the SAME site where
+     * PiTui receives `app.setInlineAttachmentStager`; this owner forwards to the
+     * mount and stores nothing. The mount may lack the capability (a renderer
+     * with no attachment plane), but the COMPOSITION must supply the seam: a
+     * surface that wires the catalog forward and forgets the stager would ship a
+     * renderer whose inline attachment silently never stages.
+     */
+    installTspInlineAttachmentStager(stager: TspInlineAttachmentStager): void
     /**
      * TSP I-C: which native TUI-builtin presenters the mounted renderer
      * actually installed — a READ of the existing mount capabilities, sampled
@@ -949,6 +959,12 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
           // that appears or goes away later changes the candidate set with it.
           installTspCommandCompletions: installation => {
             deps.surface.installTspCommandCompletions(installation)
+          },
+          // TSP I-D: the SAME live-read forwarding for the ONE inline-attachment
+          // stager. No runner, no draft stores and no `TuiApp` cross this seam;
+          // the mount owns the acceptance lifecycle, this owner owns nothing.
+          installTspInlineAttachmentStager: stager => {
+            deps.surface.installTspInlineAttachmentStager(stager)
           },
           tspCommandPickerCapabilities: () => deps.surface.tspCommandPickerCapabilities(),
         },
