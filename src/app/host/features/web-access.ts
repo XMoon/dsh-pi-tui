@@ -61,8 +61,11 @@ import {
 const FIBER_ACTIVE = 2
 
 /**
- * The 59 official Web-only Loader rows the Host-only overlay declares, in the
+ * The 60 official Web-only Loader rows the Host-only overlay declares, in the
  * overlay's canonical order, with the exact official package each row loads.
+ * The row set is the official Web composition of the installed DSH family: it
+ * must satisfy every `dsh.client.inject` dependency the shipped official Client
+ * UIs declare, so it is fixed by those manifests rather than by a local count.
  *
  * FROZEN on purpose: `test/app/remote-process-host-foundation.test.ts` compares
  * this table against the real `HOST_ONLY_PATCH` roster (ids, order, packages),
@@ -74,6 +77,7 @@ export const PI_TUI_WEB_ACCESS_ROWS: ReadonlyArray<{ readonly id: string; readon
   { id: 'modules', name: '@deepseek-ai/dsh-client-modules' },
   { id: 'client-hmr', name: '@deepseek-ai/dsh-client-hmr' },
   { id: 'cordis-client-runner', name: '@deepseek-ai/dsh-cordis-client-runner' },
+  { id: 'ui-context-menu', name: '@deepseek-ai/dsh-client-ui-context-menu' },
   { id: 'ui-open-in-app', name: '@deepseek-ai/dsh-client-ui-open-in-app' },
   { id: 'ui-settings-account', name: '@deepseek-ai/dsh-client-ui-settings-account' },
   { id: 'ui-theme', name: '@deepseek-ai/dsh-client-ui-theme' },
@@ -99,6 +103,7 @@ export const PI_TUI_WEB_ACCESS_ROWS: ReadonlyArray<{ readonly id: string; readon
   { id: 'ui-chat', name: '@deepseek-ai/dsh-client-ui-chat' },
   { id: 'ui-brand-official', name: '@deepseek-ai/dsh-client-ui-brand-official' },
   { id: 'ui-attachment', name: '@deepseek-ai/dsh-client-ui-attachment' },
+  { id: 'ui-file-drag', name: '@deepseek-ai/dsh-client-ui-file-drag' },
   { id: 'ui-tool', name: '@deepseek-ai/dsh-client-ui-tool' },
   { id: 'ui-cordis', name: '@deepseek-ai/dsh-client-ui-cordis' },
   { id: 'ui-deliverables', name: '@deepseek-ai/dsh-client-ui-deliverables' },
@@ -115,7 +120,6 @@ export const PI_TUI_WEB_ACCESS_ROWS: ReadonlyArray<{ readonly id: string; readon
   { id: 'ui-goal', name: '@deepseek-ai/dsh-client-ui-goal' },
   { id: 'ui-message-feedback', name: '@deepseek-ai/dsh-client-ui-message-feedback' },
   { id: 'ui-model-selection', name: '@deepseek-ai/dsh-client-ui-model-selection' },
-  { id: 'ui-deepseek-model-label-1017', name: '@deepseek-ai/dsh-client-ui-deepseek-model-label-1017' },
   { id: 'ui-permission', name: '@deepseek-ai/dsh-client-ui-permission-presets' },
   { id: 'ui-agent-preset', name: '@deepseek-ai/dsh-client-ui-agent-preset' },
   { id: 'entry-customization', name: '@deepseek-ai/dsh-client-ui-entry-customization' },
@@ -146,11 +150,11 @@ const REQUIRED_WEB_SERVICES = ['webApp', 'clientModules', 'terminalController'] 
  */
 export const PI_TUI_WEB_ACCESS_OPTIONAL_PENDING_ROWS: ReadonlySet<string> = new Set(['ui-deliverables'])
 
-/** The five rows that must be assembled first/last around the other 54. */
+/** The five rows that must be assembled first/last around the other 55. */
 const BROWSER_GRAPH_ROWS = ['modules', 'client-hmr', 'cordis-client-runner', 'terminal-controller'] as const
 const SPA_ROW = 'web-runtime'
 
-/** The 54 Browser presentation rows, in the overlay's canonical order. */
+/** The 55 Browser presentation rows, in the overlay's canonical order. */
 const PRESENTATION_ROWS = PI_TUI_WEB_ACCESS_ROWS
   .map(row => row.id)
   .filter(id => id !== SPA_ROW && !(BROWSER_GRAPH_ROWS as readonly string[]).includes(id))
