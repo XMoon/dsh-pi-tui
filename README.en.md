@@ -58,13 +58,14 @@ next compatibility range, and fallback paths.
 ### Requirements
 
 * DeepSeek Harness
-* Node.js `^22.19.0 || >=24`
+* Node.js `>=24.9.0`
 
 ### DSH/TUI version pairing (important)
 
 | TUI package line | Official DSH tags for the pairing | Notes |
 |---|---|---|
-| `0.5.5` (stable / `@latest`) | `dsh-v0.2.1-rc.2`, `dsh-v0.2.1-rc.3`, `dsh-v0.2.1-rc.4`, `dsh-v0.2.1-rc.5` | Current stable line; the minimum DSH version is 0.2.1-rc.2, and this checkout's exact validation target is 0.2.1-rc.5 |
+| `0.5.6` (reserved candidate / unreleased) | `dsh-v0.2.2-rc.1` | Candidate identity reserved by this checkout, not published to npm; the minimum DSH version is 0.2.2-rc.1 and the exact validation target is 0.2.2-rc.1 |
+| `0.5.5` (stable / `@latest`) | `dsh-v0.2.1-rc.2`, `dsh-v0.2.1-rc.3`, `dsh-v0.2.1-rc.4`, `dsh-v0.2.1-rc.5` | Current published stable line; the minimum DSH version is 0.2.1-rc.2, and it passes validation across that 0.2.1-rc.* family |
 | `0.5.4` (stable, previous) | `dsh-v0.2.1-rc.2`, `dsh-v0.2.1-rc.3`, `dsh-v0.2.1-rc.4` | Previous stable line; the minimum DSH version is 0.2.1-rc.2, and it passes the official preset assembly on all three DSH versions |
 | `0.5.3` (stable, previous) | `dsh-v0.2.1-rc.2`, `dsh-v0.2.1-rc.3`, `dsh-v0.2.1-rc.4` | Previous stable line; the minimum DSH version is 0.2.1-rc.2, and it passes the official preset assembly on all three DSH versions |
 | `0.5.1` (stable, previous) | `dsh-v0.2.0-rc.2` | Previous stable line; both the minimum and the exact validation target are the 0.2.0-rc.2 family |
@@ -77,16 +78,20 @@ next compatibility range, and fallback paths.
 | `0.4.7-alpha.2` (next, previous) | `dsh-v0.1.6-alpha.2` | Previous next line; the compatible TUI for a 0.1.6-alpha.2 runtime |
 
 Do not mix the stable and `@next` prerelease lines. `0.5.5` is the current
-stable release: its minimum DSH version (peer floor) stays the `0.2.1-rc.2`
-family, and this checkout's exact validation target is `0.2.1-rc.5`. The
-published `0.5.4` and `0.5.3` are the previous stable lines and also pair with
-`0.2.1-rc.2`, `0.2.1-rc.3` and `0.2.1-rc.4`. The safe order for upgrading from
-an older stable line to `0.5.5`: let in-flight conversation turns and
-background jobs finish, exit the old TUI/DSH process normally, then install
+published stable release: its minimum DSH version (peer floor) stays the
+`0.2.1-rc.2` family, and it passes validation across `0.2.1-rc.2` through
+`0.2.1-rc.5`. The published `0.5.4` and `0.5.3` are the previous stable lines
+and also pair with `0.2.1-rc.2`, `0.2.1-rc.3` and `0.2.1-rc.4`. The safe order
+for upgrading from an older stable line to `0.5.5`: let in-flight conversation
+turns and background jobs finish, exit the old TUI/DSH process normally, then install
 `0.5.5` with the official plugin command and start it again. Do not install
 the new package while an old process is still live and expect a
 zero-interruption hot swap; no in-place lossless upgrade of a running old
-Host is promised. The intermediate
+Host is promised. This checkout reserves the **unreleased** `0.5.6` candidate
+identity: it lifts the whole DSH peer floor to `>=0.2.2-rc.1` and the minimum
+Node version to `>=24.9.0`, so it no longer supports the `0.2.1-rc.*` family;
+upgrading to that candidate also requires in-flight turns and background jobs
+to finish first. The intermediate
 `dsh-v0.2.1-rc.1` has no paired TUI, and `0.5.2-rc.1` is the previous preview
 published to the npm `next` channel (its pairing, 0.2.0-rc.2, stays in the table
 above; it does not cover 0.2.1-rc.2). The previous stable

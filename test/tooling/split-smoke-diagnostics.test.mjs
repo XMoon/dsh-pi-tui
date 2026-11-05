@@ -400,7 +400,7 @@ test('a qualified run announces its identity and creates NO report artifact', (t
   })
   assert.equal(result.status, 0, result.stderr)
   assert.match(result.stderr, /SPLIT_PROCESS_SMOKE_START candidate=@xmoon76\/dsh-pi-tui@0\.5\.5/u)
-  assert.match(result.stderr, /pin=0\.2\.1-rc\.5/u)
+  assert.ok(result.stderr.includes(`pin=${TARGET_PIN}`), `the identity line names the exact target pin:\n${result.stderr}`)
   assert.match(result.stderr, /qualified=true$/mu)
   assert.match(result.stderr, /\[T checkpoint\] preflight\/candidate-input/u)
   assert.match(result.stderr, /\[T checkpoint\] t18/u, 'checkpoints are visible WITHOUT TRACE or KEEP')
