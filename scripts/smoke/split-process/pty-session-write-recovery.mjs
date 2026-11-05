@@ -105,9 +105,6 @@ export async function runPtySessionWriteRecovery(context) {
   assert(surfaceHostReady.entries?.some(entry => entry.id === 'm4b2s-stub-llm' && entry.state === 'active') === true,
     'T30 the test-only offline Host LLM row is not active')
   assert(surfaceHostReady.localHost?.hostPid === surfaceHostPid, 'T27 Host ready PID mismatch')
-  // The lane's own fail-after control: this case's single Hook fires while the
-  // dedicated surface Host is alive, so the shared failure path must kill it.
-  failpoint('surface.pty-session-write-recovery.after-host-spawn')
   const surfaceClients = []
   let surfaceHostClosed = false
   let sessionA
@@ -117,6 +114,10 @@ export async function runPtySessionWriteRecovery(context) {
   // record, never carried forward from another scenario.
   const scopeDir = join(dshHome, 'run', 'dsh-pi-tui', surfaceHostReady.localHost.scopeId)
   try {
+    // The lane's own fail-after control: this case's single Hook fires INSIDE the
+    // case-owned try, so the finally below (not only the runner backstop) must
+    // dispose every surface and shut this Host down on that failure path.
+    failpoint('surface.pty-session-write-recovery.after-host-spawn')
     // T27/T28: ONE real surface over the SAME authenticated connection; sessionless
     // Welcome painted on the real pty, no JSON on the terminal.
     const c1 = new SurfaceEntryProcess(entries.client, {
