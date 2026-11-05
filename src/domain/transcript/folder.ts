@@ -25,6 +25,11 @@ import type {} from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-subagent'
 import type {} from '@deepseek-ai/dsh-llm-retry'
 import type { ToolWorkflowAgentStartData, ToolWorkflowRunStartData } from '@deepseek-ai/dsh-tool-workflow/types'
+// The PTC sub-dispatch session events (`tool/ptc-dispatch-start` /
+// `tool/ptc-dispatch`) are declared by the official PTC executor package's
+// `SessionEventMap` augmentation; the type-only import keeps them in the
+// program so the transcript folds stay exhaustive.
+import type {} from '@deepseek-ai/dsh-tool-executor-ptc'
 import {
   textWithAttachmentMarkers,
   userBlocksVisibleNow,

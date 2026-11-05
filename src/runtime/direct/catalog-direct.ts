@@ -16,6 +16,7 @@
  * @module @xmoon76/dsh-pi-tui/runtime/direct/catalog-direct
  */
 
+import type { Context } from '@deepseek-ai/cordis'
 import type { AgentPreset } from '@deepseek-ai/dsh-agent-preset-registry'
 import { safeErrorMessage } from '../process/errors.ts'
 import { runDetached } from '../process/tasks.ts'
@@ -60,7 +61,7 @@ import { selectBlankSessionPreset } from './session-preset-direct.ts'
  * a package dependency; the services resolve from the dsh installation). */
 export interface HostContextLike {
   get(name: string): unknown
-  on?(event: string, listener: unknown): unknown
+  on?: Context['on']
 }
 
 /** The structural `llm` service surface the model directory reads. */
@@ -458,19 +459,17 @@ export class DirectModelCatalog implements ModelCatalog {
     if (next === undefined) {
       return { kind: 'rejected', error: { code: 'session/model-invalid', message: 'invalid model selection' } }
     }
-    // The durable append is the commit point: it throws on failure and the
-    // Agent-local selection is untouched, so a failed choice can never be
-    // observed by a request. Only after the append commits does the choice
-    // become the Agent's pending selection.
+    // The durable append is the commit point: the upstream `AgentModel.select`
+    // throws on failure, and the projection's pending choice only becomes
+    // visible to a request after that append commits.
     try {
-      owner.appendSelection(agent, next)
+      owner.select(agent, next)
     } catch (error) {
       return {
         kind: 'rejected',
         error: { code: 'session/model-unavailable', message: safeErrorMessage(error) },
       }
     }
-    owner.setCurrent(agent, next)
     // rc.2 commits the Session selection and returns immediately: the
     // global-default save is best-effort BACKGROUND work (pinned official
     // `session.selectModel` semantics). Its failure is diagnosed through the

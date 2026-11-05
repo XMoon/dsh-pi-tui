@@ -38,7 +38,6 @@ import {
 } from '../../runtime/direct/assistant-stream-direct.ts'
 import {
   DirectModelSelectionOwner,
-  type DefaultModelServiceLike,
 } from '../../runtime/direct/model-selection-direct.ts'
 import type {
   CompositionLike,
@@ -58,13 +57,13 @@ export interface DirectViewedQueueAgent {
   readonly subject: { readonly session: { readonly id: string } }
 }
 
-/** The narrow model-selection operations the runner still needs. */
+/** The narrow model-selection operations the runner still needs. Reads and
+ *  durable writes both delegate to the live Agent's own upstream `AgentModel`;
+ *  the facade only adds the notice install and the per-Agent admission window. */
 export interface DirectModelSelectionFacade {
   current(agent: unknown): ModelSelection | undefined
-  setCurrent(agent: unknown, selection: ModelSelection | undefined): void
+  select(agent: unknown, selection: ModelSelection): void
   installForAgent(agent: Agent): void
-  observeSelectionEvent(agent: Agent, event: unknown): void
-  consumeSelection(agent: Agent, provider: string, model: string, reasoningEffort: string | undefined): boolean
 }
 
 /** The Host Session/Agent accessors the Direct session reader projects. */
@@ -88,8 +87,6 @@ export interface DirectApplicationRuntimeDeps {
   readonly diag: Diag
   /** The persisted TUI-settings facade (absent without the Settings service). */
   readonly tuiSettings: TuiSettingsConfig | undefined
-  /** The persisted default-model service. */
-  readonly defaultModel: DefaultModelServiceLike
   /**
    * The ownership core's owner-release seam. The Direct owner pool is built and
    * owned HERE; it reads the ONE ledger through this callback.
@@ -193,7 +190,7 @@ function directHostAccessors(ctx: DirectBackendContextLike): DirectHostAccessors
  * same per-Agent admission serialization and the same live-agent authority.
  */
 export function createDirectApplicationRuntime(deps: DirectApplicationRuntimeDeps): DirectApplicationRuntime {
-  const modelSelections = new DirectModelSelectionOwner(deps.defaultModel)
+  const modelSelections = new DirectModelSelectionOwner()
   // The Direct-only Host lookups live behind this seam (A5-3, plan §26).
   const host = directHostAccessors(deps.ctx)
 
@@ -288,11 +285,8 @@ export function createDirectApplicationRuntime(deps: DirectApplicationRuntimeDep
 
   const modelSelectionFacade: DirectModelSelectionFacade = {
     current: (agent) => modelSelections.current(agent),
-    setCurrent: (agent, selection) => { modelSelections.setCurrent(agent, selection) },
+    select: (agent, selection) => { modelSelections.select(agent, selection) },
     installForAgent: (agent) => { modelSelections.installForAgent(agent) },
-    observeSelectionEvent: (agent, event) => { modelSelections.observeSelectionEvent(agent, event) },
-    consumeSelection: (agent, provider, model, reasoningEffort) =>
-      modelSelections.consumeSelection(agent, provider, model, reasoningEffort),
   }
 
   const withPromptAdmission = <T>(agent: Agent, hasImage: boolean, operation: () => Promise<T>): Promise<T> =>

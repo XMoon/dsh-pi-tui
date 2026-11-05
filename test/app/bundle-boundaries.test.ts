@@ -25,7 +25,7 @@ import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import PluginManager, { type BundleInfo } from '@deepseek-ai/dsh-plugin-manager'
 import { mkdirSync, writeFileSync } from 'node:fs'
-import { OPTIONAL_BUNDLES, OFFICIAL_ON_DEMAND_CATALOG } from '@deepseek-ai/dsh-app-boot'
+import { OPTIONAL_BUNDLES, OFFICIAL_ON_DEMAND_CATALOG } from '@deepseek-ai/dsh-official-bundles'
 import {
   EXPERIMENTAL_BUNDLE_IDS,
   classifyPluginPackages,
@@ -104,7 +104,7 @@ const SURFACE_HINTS: Readonly<Record<string, RegExp>> = {
   '@deepseek-ai/dsh-subagent-claude-code': /one-shot Claude Code subagent tool/u,
 }
 
-test('the real rc.2 Host catalog paints all 14 bounded boundaries through the mounted Plugin Manager', async t => {
+test('the real Host catalog paints all 14 verified B01–B14 boundaries through the mounted Plugin Manager', async t => {
   const life = testLifecycle(t)
   const workRoot = life.tempDir('s4-d3-boundaries-')
   const profileContext = seedProfile(workRoot)
@@ -114,7 +114,7 @@ test('the real rc.2 Host catalog paints all 14 bounded boundaries through the mo
   await ctx.plugin(Loader)
   await ctx.plugin(PluginManager, {})
   const service = ctx.get('pluginManager') as PluginManagerServiceLike
-  const port = new DirectPluginManagerPort({ get: name => name === 'pluginManager' ? service : undefined, on: () => () => {} })
+  const port = new DirectPluginManagerPort({ get: name => name === 'pluginManager' ? service : undefined, on: () => () => false })
 
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
@@ -170,7 +170,11 @@ test('the real rc.2 Host catalog paints all 14 bounded boundaries through the mo
     const start = split.leftWidth + 2
     return lines.map(line => line.slice(start)).join('\n').replace(/\s+/gu, ' ')
   }
-  await waitFor(() => controller.model().cards.length === 14, 'the real Host catalog read')
+  // The catalog is the COMPLETE official roster (shipped Optional bundles +
+  // on-demand catalog entries); the 14 B01–B14 UI boundaries below are the
+  // TUI's own verified subset, not the catalog size.
+  await waitFor(() => controller.model().cards.length === OPTIONAL_BUNDLES.length + ON_DEMAND.length,
+    'the real Host catalog read')
   assert.deepEqual(controller.model().sections.at(-1)!.cards.map(card => card.name), [...EXPERIMENTAL_BUNDLE_IDS])
 
   // Walk the Experimental tail from B14 backwards using the REAL keys: the

@@ -15,6 +15,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { parse } from 'yaml'
+import AgentRegistry from '@deepseek-ai/dsh-agent'
 import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import AgentPresetRegistry from '@deepseek-ai/dsh-agent-preset-registry'
@@ -130,7 +131,6 @@ test('the TUI overlay keeps the complete agent-plane disable closure', () => {
     'command-compact',
     'tool-result-pruner',
     'tool-subagent-control',
-    'tool-subagent-list-agents',
     'tool-subagent',
     'tool-subagent-fork',
     'workflow-ptc',
@@ -143,6 +143,11 @@ test('the TUI overlay keeps the complete agent-plane disable closure', () => {
     assert.match(patch, new RegExp(`^- id: ${id}\\n  disabled: true$`, 'mu'),
       `${id} must stay disabled on the host overlay so preset scope owns it`)
   }
+  // DSH 0.2.2 removed the independent `tool-subagent-list-agents` row: the
+  // official `tool-subagent-control` plugin registers `list_agents` in its own
+  // apply. No TUI override may reintroduce a second row (or a second tool).
+  assert.doesNotMatch(patch, /^- id: tool-subagent-list-agents$/mu,
+    'the removed tool-subagent-list-agents override must not be reintroduced')
 })
 
 test('the preset skill composition keeps the M3 contract fact: a skill-body path on standard/ptc/cordis, none on minimal', () => {
@@ -170,13 +175,15 @@ test('the local declarative patches compose the official roster through the real
   const loader = ctx.plugin(Loader)
   await loader
   ctx.baseUrl = pathToFileURL(`${process.cwd()}/`).href
-  // The registry registers its projection unit at construction and requires
-  // the shared projection registry to be composed first.
+  // The registry injects `loader`, `sessionProjections` AND `agents` (DSH
+  // 0.2.2), so the registry service activates only after all three exist.
   const projectionsFiber = ctx.plugin(SessionProjectionRegistry)
   await projectionsFiber
+  const agentsFiber = ctx.plugin(AgentRegistry)
+  await agentsFiber
   const registryFiber = ctx.plugin(AgentPresetRegistry, { default: 'standard' })
   await registryFiber
-  const declarationFibers: Array<{ dispose(): unknown }> = [registryFiber, projectionsFiber, loader]
+  const declarationFibers: Array<{ dispose(): unknown }> = [registryFiber, agentsFiber, projectionsFiber, loader]
   try {
     for (const id of OFFICIAL_IDS) {
       const row = parsePatch(id)

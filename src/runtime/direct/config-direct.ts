@@ -16,6 +16,7 @@
  * @module @xmoon76/dsh-pi-tui/runtime/direct/config-direct
  */
 
+import type { Context } from '@deepseek-ai/cordis'
 import { randomUUID } from 'node:crypto'
 import {
   credentialKeyId,
@@ -89,7 +90,7 @@ import {
  * a package dependency; the services resolve from the dsh installation). */
 export interface HostContextLike {
   get(name: string): unknown
-  on?(event: string, listener: unknown): unknown
+  on?: Context['on']
 }
 
 /** The structural 0.1.7 SettingsForms surface (descriptor projection +
@@ -835,7 +836,7 @@ export class DirectCredentialConfig implements CredentialConfig {
 
   onChanged(listener: () => void): () => void {
     const disposers: Array<() => void> = []
-    const register = (event: string): void => {
+    const register = (event: 'credentials/reference-updated' | 'credentials/record-updated'): void => {
       const dispose = this.ctx.on?.(event, listener)
       if (typeof dispose === 'function') disposers.push(dispose as () => void)
     }

@@ -3,10 +3,11 @@
  *
  * The official `PluginManager.listBundles()` Host service is instantiated over
  * a REAL managed profile directory + installation anchor fixture that
- * reproduces the official catalog shape: the 12 project-maintained Optional
- * bundles are shipped by the installation (available, not selected) and the 2
- * on-demand subagent bundles are discoverable as `missing` with a real
- * `installTarget`. The real Host output then travels through the shared
+ * reproduces the official catalog shape: EVERY project-maintained Optional
+ * bundle is shipped by the installation (available, not selected) and every
+ * on-demand catalog entry is discoverable as `missing` with a real
+ * `installTarget`; the catalog size is read from the official rosters, never
+ * hardcoded. The real Host output then travels through the shared
  * mapping -> stable identity/origin/section classifier -> model.
  *
  * `PRODUCTION PREREQUISITES REPRODUCED`: the real `@deepseek-ai/dsh-plugin-manager`
@@ -27,7 +28,8 @@ import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import PluginManager, { type BundleInfo } from '@deepseek-ai/dsh-plugin-manager'
-import { OPTIONAL_BUNDLES, OFFICIAL_ON_DEMAND_CATALOG, getDshRuntimeVersion } from '@deepseek-ai/dsh-app-boot'
+import { OPTIONAL_BUNDLES, OFFICIAL_ON_DEMAND_CATALOG } from '@deepseek-ai/dsh-official-bundles'
+import { getDshRuntimeVersion } from '@deepseek-ai/dsh-app-boot'
 import {
   EXPERIMENTAL_BUNDLE_IDS,
   SELF_BUNDLE,
@@ -43,6 +45,9 @@ import { openWorkspace, plain } from '../support/plugin-workspace-harness.ts'
 import { disposeContext } from '../support/runner-harness.ts'
 
 const ON_DEMAND = OFFICIAL_ON_DEMAND_CATALOG.map(entry => entry.packageName)
+/** The COMPLETE official catalog this Host advertises: shipped Optional
+ *  bundles plus the on-demand catalog entries, deduplicated by package name. */
+const OFFICIAL_CATALOG = [...new Set([...OPTIONAL_BUNDLES, ...ON_DEMAND])]
 /** The exact installed DSH runtime this checkout develops against. The Host
  *  derives every install target and exemption grant from this same value, so
  *  the fixture must never hardcode a released version of it. */
@@ -74,8 +79,8 @@ function seedProfile(workRoot: string): {
   writeFileSync(installAnchor, JSON.stringify({
     name: 'catalog-fixture-installation',
     private: true,
-    // The installation ships the 12 Optional bundles; the two on-demand
-    // subagent bundles are catalog-only.
+    // The installation ships every official Optional bundle; the on-demand
+    // catalog entries are catalog-only.
     dependencies: Object.fromEntries(OPTIONAL_BUNDLES.map(name => [name, RUNTIME_VERSION])),
   }, null, 2))
   writeFileSync(join(profileDir, 'package.json'), JSON.stringify({
@@ -160,7 +165,7 @@ function seedInstallProfile(workRoot: string): {
   }
 }
 
-test('the REAL Host listBundles discovers 14/14 official optional/on-demand bundles', async (t) => {
+test('the REAL Host listBundles discovers the complete official optional/on-demand catalog', async (t) => {
   const life = testLifecycle(t)
   const workRoot = life.tempDir('catalog-')
   const seeded = seedProfile(workRoot)
@@ -173,8 +178,10 @@ test('the REAL Host listBundles discovers 14/14 official optional/on-demand bund
   const service = ctx.get('pluginManager') as { listBundles(): Promise<BundleInfo[]> }
   const bundles = await service.listBundles()
   const names = bundles.map(bundle => bundle.name)
-  assert.equal(bundles.length, 14, `the real Host must return 14 bundles, got: ${names.join(', ')}`)
-  assert.deepEqual([...names].sort(), [...EXPERIMENTAL_BUNDLE_IDS].sort(), 'catalog identity parity with the frozen rc.2 list')
+  assert.equal(bundles.length, OFFICIAL_CATALOG.length,
+    `the real Host must return every official bundle (${OFFICIAL_CATALOG.length}), got: ${names.join(', ')}`)
+  assert.deepEqual([...names].sort(), [...OFFICIAL_CATALOG].sort(),
+    'catalog identity parity with the official Optional + on-demand rosters')
 
   const byName = new Map(bundles.map(bundle => [bundle.name, bundle]))
   for (const name of OPTIONAL_BUNDLES) {
@@ -186,14 +193,18 @@ test('the REAL Host listBundles discovers 14/14 official optional/on-demand bund
     assert.equal(bundle.enabled, false)
     assert.equal(bundle.removable, false)
   }
-  for (const name of ON_DEMAND) {
-    const bundle = byName.get(name)!
+  for (const entry of OFFICIAL_ON_DEMAND_CATALOG) {
+    const bundle = byName.get(entry.packageName)!
     assert.equal(bundle.official, true)
     assert.equal(bundle.optional, false, 'on-demand catalog entries are not shipped Optional bundles')
     assert.equal(bundle.availability, 'missing')
     assert.equal(bundle.installed, false)
     assert.equal(bundle.installTarget?.version, RUNTIME_VERSION)
-    assert.equal(bundle.installTarget?.spec, `${name}@${RUNTIME_VERSION}`)
+    assert.equal(bundle.installTarget?.spec, `${entry.packageName}@${RUNTIME_VERSION}`)
+    // A platform-scoped entry stays OUT of the default listing: being in the
+    // Host roster is not a claim that the TUI can enable it here.
+    assert.equal(bundle.listedByDefault, entry.listedByDefault === false ? false : undefined,
+      `${entry.packageName} keeps its official default-listing decision`)
   }
 
   // REAL Host records -> the SHARED mapping -> stable identity -> classifier.
@@ -213,7 +224,8 @@ test('the REAL Host listBundles discovers 14/14 official optional/on-demand bund
   }))
   const model = buildPluginManagerModel(snapshot, classifyPluginPackages(inputs, []))
   const experimental = model.sections.find(section => section.id === 'experimental')!.cards
-  assert.equal(experimental.length, 14, 'the Experimental section carries exactly the real Host items')
+  assert.equal(experimental.length, EXPERIMENTAL_BUNDLE_IDS.length,
+    'the Experimental section carries exactly the frozen B01–B14 identities')
   assert.deepEqual(experimental.map(card => card.name), [...EXPERIMENTAL_BUNDLE_IDS], 'the frozen B01–B14 order')
   assert.equal(experimental.at(-2)!.name, '@deepseek-ai/dsh-subagent-codex')
   assert.equal(experimental.at(-1)!.name, '@deepseek-ai/dsh-subagent-claude-code')
@@ -331,7 +343,7 @@ test('the REAL Host install/toggle/remove lifecycle flows through the ONE Direct
   await ctx.plugin(Loader)
   await ctx.plugin(PluginManager, {})
   const service = ctx.get('pluginManager') as unknown as PluginManagerServiceLike
-  const port = new DirectPluginManagerPort({ get: name => name === 'pluginManager' ? service : undefined, on: () => () => {} })
+  const port = new DirectPluginManagerPort({ get: name => name === 'pluginManager' ? service : undefined, on: () => () => false })
 
   const inspection = await port.inspect(seeded.bundleDir)
   assert.equal(inspection.status, 'accepted')
@@ -392,7 +404,7 @@ test('the REAL Host -> Direct port -> controller -> workspace page install chain
   await ctx.plugin(Loader)
   await ctx.plugin(PluginManager, {})
   const service = ctx.get('pluginManager') as unknown as PluginManagerServiceLike
-  const port = new DirectPluginManagerPort({ get: name => name === 'pluginManager' ? service : undefined, on: () => () => {} })
+  const port = new DirectPluginManagerPort({ get: name => name === 'pluginManager' ? service : undefined, on: () => () => false })
 
   // The ONE real Settings lease hosts the embedded page through the REAL
   // `Settings → Plugins` factory; it owns the controller's claim and grants the
@@ -530,7 +542,7 @@ test('an APPLIED real-Host version exemption reaches the card Detail without an 
   await ctx.plugin(Loader)
   await ctx.plugin(PluginManager, {})
   const service = ctx.get('pluginManager') as unknown as PluginManagerServiceLike
-  const port = new DirectPluginManagerPort({ get: name => name === 'pluginManager' ? service : undefined, on: () => () => {} })
+  const port = new DirectPluginManagerPort({ get: name => name === 'pluginManager' ? service : undefined, on: () => () => false })
 
   const installed = await port.startInstall({
     requestId: 'exempt-install',
