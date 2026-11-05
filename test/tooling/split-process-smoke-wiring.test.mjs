@@ -28,13 +28,19 @@ import {
   resolveSelection,
   selectedPassLine,
 } from '../../scripts/lib/split-smoke-selection.mjs'
+import { runEntryAdmission } from '../../scripts/smoke/split-process/entry-admission.mjs'
 import { runHostRuntimeDisabled } from '../../scripts/smoke/split-process/host-runtime-disabled.mjs'
+import { runRuntimeArtifactRecovery } from '../../scripts/smoke/split-process/runtime-artifact-recovery.mjs'
+import { runAuthenticatedLifecycle } from '../../scripts/smoke/split-process/authenticated-lifecycle.mjs'
 import { HOST_ONLY_PATCH } from '../../src/app/remote-process/local-host-entry.ts'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const SCRIPT = join(ROOT, 'scripts', 'split-process-smoke.mjs')
 const PROFILE_MODULE = join(ROOT, 'scripts', 'lib', 'split-smoke-profile.mjs')
 const CASE_MODULE = join(ROOT, 'scripts', 'smoke', 'split-process', 'host-runtime-disabled.mjs')
+const ENTRY_ADMISSION_MODULE = join(ROOT, 'scripts', 'smoke', 'split-process', 'entry-admission.mjs')
+const RECOVERY_MODULE = join(ROOT, 'scripts', 'smoke', 'split-process', 'runtime-artifact-recovery.mjs')
+const TRANSPORT_MODULE = join(ROOT, 'scripts', 'smoke', 'split-process', 'authenticated-lifecycle.mjs')
 
 /** Run the real lane CLI with one private temp root. */
 function runCli(args, tmpRoot, env = {}) {
@@ -146,11 +152,17 @@ test('the upgraded smoke carries every inventory gate and the critical negative 
   const source = readFileSync(SCRIPT, 'utf8')
   // Process/PTY and fixture markers live in the modules that now own them; the
   // inventory claim is about the lane's implementation, not one file's lines.
+  const entryAdmission = readFileSync(ENTRY_ADMISSION_MODULE, 'utf8')
+  const recovery = readFileSync(RECOVERY_MODULE, 'utf8')
+  const transport = readFileSync(TRANSPORT_MODULE, 'utf8')
   const implementation = source
+    + entryAdmission
+    + recovery
+    + transport
     + readFileSync(join(ROOT, 'scripts', 'lib', 'split-smoke-processes.mjs'), 'utf8')
     + readFileSync(join(ROOT, 'scripts', 'lib', 'split-smoke-fixtures.mjs'), 'utf8')
   for (const gate of ['T01', 'T02', 'T03', 'T04', 'T05', 'T06', 'T07', 'T08', 'T09', 'T09Q', 'T10', 'T11', 'T12', 'T13', 'T14', 'T15', 'T16', 'T17', 'T18', 'T19', 'T20', 'T21', 'T22', 'T23', 'T24', 'T25', 'T26', 'T27', 'T28', 'T29', 'T30', 'T31', 'T32', 'T33', 'T34', 'T35', 'T36', 'T37', 'T38', 'T39', 'T40', 'T41', 'T42', 'T43', 'T44', 'T45', 'T46', 'T47', 'T48', 'T49', 'T50', 'T51', 'T52', 'T53', 'T54', 'T55', 'T56', 'T57', 'T58', 'T59', 'T60']) {
-    assert.match(source, new RegExp(`\\b${gate}\\b`, 'u'), `missing ${gate}`)
+    assert.match(implementation, new RegExp(`\\b${gate}\\b`, 'u'), `missing ${gate}`)
   }
   for (const marker of [
     '/api/pi-tui.local-host',
@@ -283,18 +295,22 @@ test('the upgraded smoke carries every inventory gate and the critical negative 
     assert.ok(implementation.includes(marker), `missing smoke marker ${marker}`)
   }
   const extraPatchUses = source.match(/SPLIT_PROCESS_EXTRA_PATCH/gu) ?? []
-  assert.equal(extraPatchUses.length, 19,
-    'the full lane may only implement the two child mutations, the T26 official-row/Workspace-Controller mutations, the whole-smoke mutation mode, the isolated Host Schedule/armed-Goal overlays, the three bounded PR-A Web composition runs, the five bounded PR-B Web-toggle runs and the ONE PR-D product Host patch; the row-disabled case and the default stub-LLM overlay belong to the shared modules')
-  assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: tuiMutationPatch/u)
-  assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: connectionMutationPatch/u)
-  assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: sessionControllerMutationPatch/u)
+  assert.equal(extraPatchUses.length, 14,
+    'the full lane may only implement the whole-smoke mutation mode, the isolated host-work overlays, the C1 timed patch, the three bounded PR-A Web composition runs, the five bounded PR-B Web-toggle runs and the ONE PR-D product Host patch; the two child mutations, the two required-row mutations, the row-disabled control and the default stub-LLM overlay belong to the extracted cases and the shared modules')
+  // The two installed-profile mutations are OWNED by the entry-admission case:
+  // the full-only mutation mode reuses its descriptors instead of restating them.
+  assert.match(source, /ENTRY_ADMISSION_MUTATIONS\[mutationMode\]/u,
+    'the whole-lane mutation mode must consume the case-owned descriptors')
+  assert.match(entryAdmission, /SPLIT_PROCESS_EXTRA_PATCH: tuiMutationPatch/u)
+  assert.match(entryAdmission, /SPLIT_PROCESS_EXTRA_PATCH: connectionMutationPatch/u)
+  assert.match(recovery, /SPLIT_PROCESS_EXTRA_PATCH: sessionControllerMutationPatch/u)
   assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: schedulePatch/u)
   assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: armedPatch/u)
   // The row-disabled control and the default stub-LLM overlay live where the
   // shared implementation lives, not in a second inline copy here.
   assert.match(readFileSync(CASE_MODULE, 'utf8'), /SPLIT_PROCESS_EXTRA_PATCH: patchPath/u)
   assert.match(readFileSync(PROFILE_MODULE, 'utf8'), /SPLIT_PROCESS_EXTRA_PATCH: surfaceLlm\.patchPath/u)
-  assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: workspaceControllerMutationPatch/u)
+  assert.match(recovery, /SPLIT_PROCESS_EXTRA_PATCH: workspaceControllerMutationPatch/u)
   // The PR-A Web composition owns exactly three of these runs: the isolated
   // enable, the missing-frontend-dist control and the duplicate-modules control.
   assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: webPatch/u)
@@ -310,34 +326,38 @@ test('the upgraded smoke carries every inventory gate and the critical negative 
   assert.equal((source.match(/SPLIT_PROCESS_EXTRA_PATCH: duplicatePatch/gu) ?? []).length, 2,
     'the duplicate-module control keeps its own patch in both Web lanes')
   assert.match(source, /SPLIT_PROCESS_SMOKE_MUTATION/u)
-  assert.match(source, /SPLIT_PROCESS_SMOKE_MUTATION/u)
-  assert.match(source, /mutationEnv/u)
-  assert.match(source, /DSH_PI_TUI_ROLE: 'host'/u, 'the inherited-role negative control must remain')
+  assert.match(entryAdmission, /DSH_PI_TUI_ROLE: 'host'/u, 'the inherited-role negative control must remain')
 
   // The artifact-absence control is the claim issue #474 left NOT_VERIFIED. It
   // must rename the installed module and prove the rename is REALLY
   // unresolvable from the profile anchor; a row toggle or an `existsSync`
   // precheck would test a different claim.
-  assert.match(source, /renameSync\(hostRuntimeArtifact, hostRuntimeAbsentPath\)/u,
+  assert.match(recovery, /renameSync\(hostRuntimeArtifact, hostRuntimeAbsentPath\)/u,
     'the artifact-absence control must remove the installed module itself, not disable the row')
-  assert.match(source, /the renamed artifact must be genuinely unresolvable from the profile anchor/u,
+  assert.match(recovery, /the renamed artifact must be genuinely unresolvable from the profile anchor/u,
     'the artifact-absence control must prove resolution failure before booting the Host')
-  assert.match(source, /reachableAncestorCopies/u,
+  assert.match(recovery, /reachableAncestorCopies/u,
     'the artifact-absence control must reject a layout with a second reachable package copy')
-  assert.match(source, /packageScopeBarrier/u,
+  assert.match(recovery, /packageScopeBarrier/u,
     'the artifact-absence control must block the package-scope self-reference escape')
-  assert.match(source, /profilesManifest/u,
+  assert.match(recovery, /profilesManifest/u,
     'the artifact-absence control must reject an enclosing profiles manifest carrying the candidate package name')
+  // The restored authenticated identity is part of the SAME case, not a ghost
+  // assertion left at the full lane's tail.
+  assert.match(recovery, /T26 Host Runtime restored authenticated identity/u)
+  assert.doesNotMatch(source, /T26 Host Runtime restored authenticated identity/u,
+    'the restored-identity proof must live in the artifact-recovery case')
 })
 
 test('T09 is two real Surface Clients on one Host while T09Q keeps the qualification seat negative', () => {
   const source = readFileSync(SCRIPT, 'utf8')
   // The qualification-only negative stays a real two-process EntryProcess race
   // with the kernel seat conflict; it must not be downgraded to a static claim.
-  const t09qStart = source.indexOf('// T09Q: two QUALIFICATION Clients race')
-  const t02Start = source.indexOf('// T02: real authenticated HTTP')
-  assert.ok(t09qStart > 0 && t02Start > t09qStart, 'T09Q must stay before its original T02 continuation')
-  const t09q = source.slice(t09qStart, t02Start)
+  // It now lives in the transport case, so the guard reads THAT real scene.
+  const transport = readFileSync(TRANSPORT_MODULE, 'utf8')
+  const t09qStart = transport.indexOf('// T09Q: two QUALIFICATION Clients race')
+  assert.ok(t09qStart >= 0, 'the qualification seat race must stay its own real scene')
+  const t09q = transport.slice(t09qStart)
   assert.match(t09q, /new EntryProcess\('client', entries\.client, probeClientBase\)/u)
   assert.match(t09q, /waitForOutcome\(client, `T09Q client/u)
   assert.match(t09q, /expectFailureRecord\(clientLoser, 'T09Q loser', 'CLIENT_ALREADY_ACTIVE'\)/u)
@@ -1084,7 +1104,9 @@ test('the full lane installs its profile through the ONE shared installer', () =
   const source = readFileSync(SCRIPT, 'utf8')
   // No second profile installation may live in the lane: the very statements
   // that used to be inline here are now the shared profile module's job.
-  assert.match(source, /const profile = createSplitSmokeProfile\(\{ tarball, targetDshVersion, workDir \}\)/u)
+  assert.match(source, /const installation = createSplitSmokeProfile\(\{ tarball, targetDshVersion, workDir \}\)/gu)
+  assert.equal((source.match(/createSplitSmokeProfile\(/gu) ?? []).length, 2,
+    'the full lane and the selected dispatcher each install through the ONE shared installer')
   assert.doesNotMatch(source, /installPlugin\(/u, 'the lane must not install the profile itself')
   assert.doesNotMatch(source, /runPnpmInstall\(/u, 'the lane must not run the isolated install itself')
   assert.doesNotMatch(source, /loadDshDistribution\(/u, 'the lane must not load the distribution itself')
@@ -1116,8 +1138,18 @@ test('the split-process lane reports every failure through the shared safe proje
     assert.ok(catchIndex > 0 && catchIndex < report, `${label}: the catch must precede the report`)
     assert.ok(finallyIndex > report && cleanupKill > finallyIndex && cleanupRemove > finallyIndex,
       `${label}: the report must be written before the cleanup kills the processes and deletes the work root`)
-    assert.match(block.slice(finallyIndex), /FAILPOINT_CLEANUP leftovers/u, `${label}: the failpoint cleanup proof must remain`)
+    assert.match(block.slice(finallyIndex), /await proveFailpointCleanup\(dshHome\)/u,
+      `${label}: the failpoint cleanup proof must remain after the report`)
   }
+  // The failpoint proof itself is ONE implementation shared by both execution
+  // paths, and it never reports a Seat verdict it did not check: the names come
+  // from the scope directories this run published under, and an early failure
+  // reports the check as unchecked instead of a fabricated `free`.
+  assert.equal((source.match(/console\.error\(`FAILPOINT_CLEANUP leftovers=/gu) ?? []).length, 1,
+    'the cleanup proof must be one implementation, not one copy per execution path')
+  assert.match(source, /async function proveFailpointCleanup\(dshHome\) \{/u)
+  assert.match(source, /const seats = scopeIds\.length === 0 \? 'unchecked'/u,
+    'an unverified Seat check must not be printed as free')
   // The moved waiters keep their bounded, classified failure shape in the one
   // module that owns them; their behaviour is proven by the real-process tests.
   const processes = readFileSync(join(ROOT, 'scripts', 'lib', 'split-smoke-processes.mjs'), 'utf8')
@@ -1151,10 +1183,10 @@ test('every real Client-detach recovery case observes the pending source as UNKN
 })
 
 test('the payload-drift gate proves a loadable cross-build Client against the same live Host', () => {
-  const source = readFileSync(SCRIPT, 'utf8')
-  // T17a must be a positive, non-destructive drift: append a harmless comment,
-  // prove the production fingerprint changed, connect the same Host, and
-  // restore the exact original bytes in finally.
+  const source = readFileSync(TRANSPORT_MODULE, 'utf8')
+  // T17a must be a positive, non-destructive drift INSIDE the transport case:
+  // append a harmless comment, prove the production fingerprint changed, connect
+  // the same Host, and restore the exact original bytes in finally.
   assert.ok(
     source.includes("appendFileSync(clientChunk, '\\n// harmless client build drift: protocol unchanged\\n')"),
     'T17a must append only a harmless comment to the client chunk',
@@ -1221,12 +1253,14 @@ test('the Client peer set is installed into the profile that actually runs it', 
   assert.match(source, /startC1Host\('job', 't58', \{\}, c1JobWorkRoot\('t58'\)\)/u)
 
   // The existing artifact-absence control and the cross-build drift gate must
-  // stay intact next to the peer install (the full inventory remains in the
+  // stay intact in the cases that own them (the full inventory remains in the
   // gate test above).
-  assert.match(source, /renameSync\(hostRuntimeArtifact, hostRuntimeAbsentPath\)/u)
-  assert.match(source, /reachableAncestorCopies/u)
-  assert.match(source, /packageScopeBarrier/u)
-  assert.ok(source.includes("appendFileSync(clientChunk, '\\n// harmless client build drift: protocol unchanged\\n')"))
+  const recovery = readFileSync(RECOVERY_MODULE, 'utf8')
+  const transport = readFileSync(TRANSPORT_MODULE, 'utf8')
+  assert.match(recovery, /renameSync\(hostRuntimeArtifact, hostRuntimeAbsentPath\)/u)
+  assert.match(recovery, /reachableAncestorCopies/u)
+  assert.match(recovery, /packageScopeBarrier/u)
+  assert.ok(transport.includes("appendFileSync(clientChunk, '\\n// harmless client build drift: protocol unchanged\\n')"))
 })
 
 test('the official Web composition qualification is discoverable and never fakes a pass', () => {
@@ -1720,7 +1754,10 @@ test('listing selectable split cases does not install a profile or claim complet
   const result = runCli(['--list'], dir)
   assert.equal(result.status, 0, `--list must exit 0: ${result.stderr}`)
   assert.match(result.stdout, /SPLIT_PROCESS_SELECTABLE_CASES scope=SELECTABLE_ONLY/u)
+  assert.match(result.stdout, /suite=bootstrap case=bootstrap\.entry-admission title=an inherited Host role without a mounted TUI surface is refused before Host admission/u)
   assert.match(result.stdout, /suite=bootstrap case=bootstrap\.host-runtime-disabled title=a disabled Host Runtime owner refuses Ready without publishing a Host identity/u)
+  assert.match(result.stdout, /suite=bootstrap case=bootstrap\.runtime-artifact-recovery title=a renamed-away Host Runtime artifact fails closed and the restored artifact reaches authenticated Ready/u)
+  assert.match(result.stdout, /suite=transport case=transport\.authenticated-lifecycle title=concurrent Host launches elect one authenticated owner whose Client lifecycle survives exits and signals/u)
   // A listing never becomes a full PASS and never creates a scene.
   for (const forbidden of ['SPLIT_PROCESS_SMOKE_PASS', 'T60 PASS', 'PASS_REAL_SPLIT_PROCESS',
     'PASS_PRODUCT_BROWSER', 'WC-12 PASS']) {
@@ -1774,17 +1811,29 @@ test('a required Browser qualification cannot be satisfied by a selected non-Bro
 
 test('the selectable registry is the single source for listing, resolution and the run bridge', () => {
   const cases = listSelectableCases()
-  assert.equal(cases.length, 1, 'bootstrap currently selects exactly one case')
-  const [entry] = cases
-  assert.equal(entry.suite, 'bootstrap')
-  assert.equal(entry.id, 'bootstrap.host-runtime-disabled')
-  assert.equal(entry.title, 'a disabled Host Runtime owner refuses Ready without publishing a Host identity')
-  assert.equal(entry.run, runHostRuntimeDisabled,
-    'the registered run must be the real scenario, not a copy or a re-wrapped stub')
-  assert.ok(Object.isFrozen(cases) && Object.isFrozen(entry), 'the registry must stay frozen')
+  // The ORDER is the frozen execution order the full lane and `--suite` follow.
+  assert.deepEqual(cases.map(entry => entry.id), [
+    'bootstrap.host-runtime-disabled',
+    'bootstrap.entry-admission',
+    'bootstrap.runtime-artifact-recovery',
+    'transport.authenticated-lifecycle',
+  ])
+  assert.deepEqual(cases.map(entry => entry.suite), [
+    'bootstrap', 'bootstrap', 'bootstrap', 'transport',
+  ])
+  const [pilot, entry, recovery, transport] = cases
+  assert.equal(pilot.title, 'a disabled Host Runtime owner refuses Ready without publishing a Host identity')
+  assert.equal(entry.title, 'an inherited Host role without a mounted TUI surface is refused before Host admission')
+  assert.equal(recovery.title, 'a renamed-away Host Runtime artifact fails closed and the restored artifact reaches authenticated Ready')
+  assert.equal(transport.title, 'concurrent Host launches elect one authenticated owner whose Client lifecycle survives exits and signals')
+  assert.deepEqual([pilot.run, entry.run, recovery.run, transport.run],
+    [runHostRuntimeDisabled, runEntryAdmission, runRuntimeArtifactRecovery, runAuthenticatedLifecycle],
+    'every registered run must be the real scenario, not a copy or a re-wrapped stub')
+  assert.ok(Object.isFrozen(cases) && cases.every(entry_ => Object.isFrozen(entry_)), 'the registry must stay frozen')
 
-  assert.deepEqual(resolveSelection({ mode: 'case', id: entry.id }).cases, [entry])
-  assert.deepEqual(resolveSelection({ mode: 'suite', suite: 'bootstrap' }).cases, [entry])
+  assert.deepEqual(resolveSelection({ mode: 'case', id: transport.id }).cases, [transport])
+  assert.deepEqual(resolveSelection({ mode: 'suite', suite: 'bootstrap' }).cases, [pilot, entry, recovery])
+  assert.deepEqual(resolveSelection({ mode: 'suite', suite: 'transport' }).cases, [transport])
   assert.throws(() => resolveSelection({ mode: 'case', id: 'does-not-exist' }),
     error => error.code === 'INPUT_SMOKE_SELECTION_INVALID')
   assert.throws(() => resolveSelection({ mode: 'suite', suite: 'does-not-exist' }),
@@ -1793,7 +1842,7 @@ test('the selectable registry is the single source for listing, resolution and t
   assert.deepEqual(parseSelectionArgs([]), { mode: 'full', candidate: undefined })
   assert.deepEqual(parseSelectionArgs(['--', 'candidate.tgz']), { mode: 'full', candidate: 'candidate.tgz' })
   assert.deepEqual(parseSelectionArgs(['--list']), { mode: 'list' })
-  assert.deepEqual(parseSelectionArgs(['--case', entry.id]), { mode: 'case', id: entry.id, candidate: undefined })
+  assert.deepEqual(parseSelectionArgs(['--case', transport.id]), { mode: 'case', id: transport.id, candidate: undefined })
   assert.deepEqual(parseSelectionArgs(['--suite', 'bootstrap', 'candidate.tgz']),
     { mode: 'suite', suite: 'bootstrap', candidate: 'candidate.tgz' })
   for (const invalid of [[['--case']], [['--case', 'a', '--suite', 'b']], [['--list', 'x.tgz']], [['--case', 'a', '--case', 'a']]]) {
@@ -1818,7 +1867,8 @@ test('the Host Runtime row-disabled control has one implementation', () => {
   const source = readFileSync(SCRIPT, 'utf8')
   const scenario = readFileSync(CASE_MODULE, 'utf8')
   assert.match(scenario, /split-host-pi-tui-runtime\\n  disabled: true/u)
-  assert.match(source, /runHostRuntimeDisabled\(\{/u, 'the full lane must call the ONE scenario')
+  assert.match(source, /runRegisteredCase\('bootstrap\.host-runtime-disabled'\)/u,
+    'the full lane must run the ONE registered scenario through the registry')
   assert.equal((source.match(/trace\('t26-runtime-row-disabled'/gu) ?? []).length, 1,
     'the full lane keeps exactly one old trace event for the scenario')
   assert.doesNotMatch(source, /t26-host-runtime-disabled\.patch\.yml/u,

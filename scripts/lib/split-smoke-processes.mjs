@@ -7,13 +7,19 @@
  * another lane or another run. Importing this module performs no I/O and
  * starts no process; entries exist only when a caller instantiates one.
  *
+ * It is also the ONE owner of the operational helpers the extracted selectable
+ * scenarios share with the still-inline full-lane blocks (status probes,
+ * installed-payload facts, the authenticated Host HTTP/identity checks). Those
+ * are test-operation helpers only; they are never imported by product code.
+ *
  * @module split-smoke-processes
  */
 
-import { spawn } from 'node:child_process'
-import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { spawn, spawnSync } from 'node:child_process'
+import { chmodSync, existsSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import xterm from '@xterm/headless'
 
 import { SplitSmokeAssertionError, SplitSmokeWaitError } from './split-smoke-diagnostics.mjs'
@@ -709,4 +715,152 @@ export async function seatIsFree(name) {
       server.close(() => resolveSeat(true))
     })
   })
+}
+
+// ── Shared operational helpers ───────────────────────────────────────────────
+// Moved out of `scripts/split-process-smoke.mjs` so the extracted selectable
+// scenarios and the still-inline full-lane blocks call the SAME implementation.
+// The Host HTTP/identity helpers are also consumed by the still-inline Web
+// qualification; PR2-D re-homes the Web-only part into its own owner module.
+
+/** The repository root, for the installed-payload helpers below. */
+const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
+
+/** One qualification request id sequence for the two status probes. */
+let statusSequence = 0
+
+/** Ask one real Host for a current status snapshot and wait for ITS answer. */
+export function hostStatus(host) {
+  const requestId = `status-${++statusSequence}`
+  host.send({ op: 'status', requestId })
+  return host.waitFor(record => statusMatches(record, requestId), `host status ${requestId}`, 30_000)
+}
+
+/** Ask one qualification Client for a current status snapshot. */
+export function clientStatus(client) {
+  const requestId = `status-${++statusSequence}`
+  client.send({ op: 'status', requestId })
+  return client.waitFor(record => statusMatches(record, requestId), `client status ${requestId}`, 30_000)
+}
+
+export function readJson(path) {
+  return JSON.parse(readFileSync(path, 'utf8'))
+}
+
+export function modeOf(path) {
+  return statSync(path).mode & 0o777
+}
+
+/** Remember one private file's exact bytes and permission bits. */
+export function saveFile(path) {
+  return { bytes: readFileSync(path), mode: modeOf(path) }
+}
+
+/** Put saved bytes back with their original mode (replacing any symlink). */
+export function restoreFile(path, saved) {
+  try { unlinkSync(path) } catch { /* missing is fine */ }
+  writeFileSync(path, saved.bytes, { mode: saved.mode })
+  chmodSync(path, saved.mode)
+}
+
+/** Wait for the ONE ready/failure outcome a Host or Client entry reports. */
+export async function waitForOutcome(process, label, timeoutMs = 120_000) {
+  return await process.waitFor(record => record.m4a0 === 'ready' || record.m4a0 === 'failure', label, timeoutMs)
+}
+
+/** Assert the refusal record carries the exact expected stable code. */
+export function expectFailureRecord(process, label, expectedCode) {
+  const failure = process.records.find(record => record.m4a0 === 'failure')
+  assert(failure !== undefined, `${label}: no failure record; records=${JSON.stringify(process.records.slice(-3))}`)
+  assert(failure.code === expectedCode, `${label}: expected ${expectedCode}, got ${JSON.stringify(failure.code ?? failure.error)}`)
+}
+
+/** The ONE installed dist chunk whose file name starts with the prefix. */
+export function chunk(profilePackage, prefix) {
+  const file = readdirSync(join(profilePackage, 'dist')).find(name => name.startsWith(prefix) && name.endsWith('.mjs'))
+  if (file === undefined) throw new Error(`missing ${prefix} chunk in installed package`)
+  return join(profilePackage, 'dist', file)
+}
+
+/** The production build fingerprint of one installed payload. */
+export function productionBuildId(packageRoot, dshVersion) {
+  const moduleUrl = pathToFileURL(join(PACKAGE_ROOT, 'src', 'app', 'remote-process', 'local-scope.ts')).href
+  const code = `import { computeBuildId } from ${JSON.stringify(moduleUrl)}; process.stdout.write(computeBuildId(process.argv[1], process.argv[2]))`
+  const result = spawnSync(
+    process.execPath,
+    ['--import', 'tsx/esm', '--input-type=module', '-e', code, packageRoot, dshVersion],
+    { cwd: PACKAGE_ROOT, env: process.env, encoding: 'utf8', timeout: 60_000 },
+  )
+  if (result.status !== 0) {
+    throw new Error(`the production build fingerprint could not be computed for ${packageRoot}: ${result.stderr || String(result.error ?? '')}`)
+  }
+  const value = result.stdout.trim()
+  if (!/^[0-9a-f]{64}$/u.test(value)) {
+    throw new Error(`the production build fingerprint is not 64 hex characters: ${JSON.stringify(value)}`)
+  }
+  return value
+}
+
+/** One service-bound HTTP request with redirects and cache left to the caller. */
+export async function fetchStatus(url, init = {}) {
+  const response = await fetch(url, { redirect: 'manual', ...init })
+  const body = await response.text()
+  const setCookie = response.headers.getSetCookie?.() ?? []
+  return {
+    status: response.status,
+    headers: response.headers,
+    body,
+    setCookie,
+  }
+}
+
+/** Exchange the private launch URL for one qualification Cookie (never logged). */
+export async function connectCookie(origin, launch) {
+  const url = new URL(launch.connectUrl)
+  url.searchParams.set('interactions', 'answer')
+  const response = await fetch(url, { redirect: 'manual', cache: 'no-store' })
+  assert(response.status === 302, `valid /connect returned HTTP ${String(response.status)}`)
+  assert(/\bno-store\b/iu.test(response.headers.get('cache-control') ?? ''), '/connect response is not no-store')
+  const redirect = new URL(response.headers.get('location') ?? '/', url)
+  assert(redirect.origin === origin && redirect.pathname === '/api/remote.mux', '/connect redirected outside the local mux')
+  const setCookie = response.headers.getSetCookie?.() ?? []
+  assert(setCookie.length > 0, '/connect returned no signed cookie')
+  await response.body?.cancel()
+  return setCookie[0].split(';', 1)[0].trim()
+}
+
+/** Every published Host identity field must match the expected facts. */
+export function assertIdentityFields(actual, expected, label) {
+  for (const key of [
+    'schema',
+    'scopeId',
+    'profileRealpath',
+    'instanceId',
+    'hostPid',
+    'hostStarttime',
+    'origin',
+    'protocol',
+    'bundleVersion',
+    'dshVersion',
+    'buildId',
+  ]) {
+    assert(actual?.[key] === expected?.[key], `${label}: ${key} mismatch`)
+  }
+}
+
+/** A Client's echoed Host facts must name the SAME Host the lane is proving. */
+export function assertClientHostFacts(client, host, label) {
+  for (const key of [
+    'scopeId',
+    'instanceId',
+    'hostPid',
+    'hostStarttime',
+    'origin',
+    'protocol',
+    'bundleVersion',
+    'dshVersion',
+    'buildId',
+  ]) {
+    assert(client?.[key] === host?.[key], `${label}: Client host ${key} mismatch`)
+  }
 }

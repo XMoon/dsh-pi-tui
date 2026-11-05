@@ -574,6 +574,9 @@ const LANE_SOURCE_LIST = Object.freeze([
   // The extracted support modules that raise their own SplitSmokeAssertionError.
   // `split-smoke-sessions.mjs` is deliberately absent: it only classifies waits.
   'host-runtime-disabled.mjs',
+  'entry-admission.mjs',
+  'runtime-artifact-recovery.mjs',
+  'authenticated-lifecycle.mjs',
   'split-smoke-processes.mjs',
   'split-smoke-fixtures.mjs',
   'split-smoke-profile.mjs',
