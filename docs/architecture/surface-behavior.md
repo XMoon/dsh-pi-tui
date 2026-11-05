@@ -1124,6 +1124,13 @@ Attachment completion and intake are Client-local:
   prefix, and the acceptance is honored only while the accepted request's strict
   snapshot, the accepting row's own identity, the live editor document/cursor,
   the seat and the surface generation all still match.
+  Ownership is proven BEFORE the write; the notice reports the write. A
+  successful placeholder replacement is exactly what makes the accepted draft
+  snapshot no longer describe the draft, so the `attached … — Enter to send`
+  success notice is gated on the intake's Session OWNER and on the commit
+  actually returning `true` — never on the pre-commit snapshot (that would
+  swallow every real success) and never after a refused commit (a rolled-back
+  item announces nothing).
 - `/attach <path>` is the canonical Client intake. Images go through the image
   pipeline; other regular files stage as metadata-only drafts and are streamed
   through `ctx.attachments.saveFileStream()` only when an agent-bound submission
