@@ -1267,16 +1267,30 @@ export async function runAuthenticatedLifecycle(context) {
     renameSync(hostChunk, `${hostChunk}.missing`)
     let missingHostExit
     let missingHostRecords
+    let missingHostFailure
+    let missingHostFailureAt
+    let missingHostExitAt
     try {
       const missingHost = new EntryProcess('host', entries.host, base)
-      await missingHost.waitFor(record => record.m4a0 === 'failure', 'T17 missing host chunk', 120_000)
+      missingHostFailure = await missingHost.waitFor(record => record.m4a0 === 'failure', 'T17 missing host chunk', 120_000)
+      missingHostFailureAt = Date.now()
       missingHostExit = await missingHost.waitForExit(60_000)
+      missingHostExitAt = Date.now()
       missingHostRecords = missingHost.records
     } finally {
       renameSync(`${hostChunk}.missing`, hostChunk)
     }
     assert(missingHostExit.code === 1, `T17 missing host chunk exit was ${JSON.stringify(missingHostExit)}`)
     assert(missingHostRecords.some(record => record.m4a0 === 'failure' && record.phase === 'after-boot'), 'T17 missing host chunk did not report after-boot failure')
+    // Diagnostic only: print the cleanup records the Host really emitted when the
+    // completed-cleanup claim is missing. Only the fixed record vocabulary is
+    // copied; a record's `error` text could carry a path and stays out.
+    const cleanupRecords = missingHostRecords
+      .filter(record => record.m4a0 === 'cleanup' || record.m4a0 === 'cleanup-failure')
+      .map(record => ({ m4a0: record.m4a0, phase: record.phase, status: record.status, step: record.step }))
+    if (!cleanupRecords.some(record => record.m4a0 === 'cleanup' && record.status === 'completed')) {
+      console.error(`[T17 cleanup diagnostic] exit=${JSON.stringify(missingHostExit)} failureToExitMs=${missingHostExitAt - missingHostFailureAt} failurePhase=${JSON.stringify(missingHostFailure?.phase)} cleanup=${JSON.stringify(cleanupRecords)} recordKinds=${JSON.stringify([...new Set(missingHostRecords.map(record => record.m4a0))])}`)
+    }
     assert(missingHostRecords.some(record => record.m4a0 === 'cleanup' && record.status === 'completed'), 'T17 missing host chunk did not emit completed cleanup')
     assert(!missingHostRecords.some(record => record.m4a0 === 'cleanup-failure'), 'T17 missing host chunk falsely reported cleanup failure')
     trace('t17-host-chunk', { phase: 'after-boot', cleanup: 'completed' })

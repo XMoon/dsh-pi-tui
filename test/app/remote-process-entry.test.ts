@@ -41,7 +41,7 @@ import {
 } from '../../src/app/remote-process/local-client-entry.ts'
 import { LocalScopeError } from '../../src/app/remote-process/local-scope.ts'
 import { collectHostEntryStatus } from '../../src/app/remote-process/host-bootstrap.ts'
-import { finishHostFailureCleanup, HOST_ONLY_PATCH } from '../../src/app/remote-process/local-host-entry.ts'
+import { drainHmrTransactions, finishHostFailureCleanup, HOST_ONLY_PATCH } from '../../src/app/remote-process/local-host-entry.ts'
 import {
   assertRemoteHostPrerequisites,
   REMOTE_HOST_PREREQUISITE_SERVICES,
@@ -141,6 +141,43 @@ test('a rejected control handler is reported and does not strand later commands'
   await dispatcher.dispatch('{"op":"status"}')
   assert.deepEqual(seen, ['status', 'boom', 'status'], 'the queue continues after a rejected handler')
   assert.equal(records.filter(record => record.m4a0 === 'control-failure').length, 1)
+})
+
+test('a post-boot failure drains the HMR transaction queue before the Host disposes', async () => {
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const seen: string[] = []
+  const context = {
+    get: (name: string) => name === 'hmr'
+      ? {
+        runExclusive: async (operation: () => Promise<unknown>) => {
+          seen.push('queued')
+          await gate
+          await operation()
+          seen.push('ran')
+        },
+      }
+      : undefined,
+  }
+  let drained = false
+  const drain = drainHmrTransactions(context).then(() => { drained = true })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(seen, ['queued'], 'the drain must join the PUBLIC HMR queue')
+  assert.equal(drained, false, 'the drain must wait for the in-flight HMR transaction')
+  release()
+  await drain
+  assert.deepEqual(seen, ['queued', 'ran'], 'the drain resolves only after the in-flight transaction settled')
+})
+
+test('a stuck HMR transaction queue rejects the drain instead of hanging the failure cleanup', async () => {
+  const context = { get: () => ({ runExclusive: () => new Promise<unknown>(() => {}) }) }
+  await assert.rejects(drainHmrTransactions(context, 10), /did not drain before failure cleanup/u)
+})
+
+test('a Host without the HMR service has nothing to drain', async () => {
+  await drainHmrTransactions({})
+  await drainHmrTransactions({ get: () => undefined })
+  await drainHmrTransactions({ get: () => ({}) })
 })
 
 test('a rejecting Host shutdown reports cleanup-failure and never claims completed', async () => {
