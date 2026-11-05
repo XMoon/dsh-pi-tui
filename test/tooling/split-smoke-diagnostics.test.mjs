@@ -69,6 +69,10 @@ const CASE_SCRIPT = join(ROOT, 'scripts', 'smoke', 'split-process', 'host-runtim
 const ENTRY_ADMISSION_SCRIPT = join(ROOT, 'scripts', 'smoke', 'split-process', 'entry-admission.mjs')
 const RECOVERY_SCRIPT = join(ROOT, 'scripts', 'smoke', 'split-process', 'runtime-artifact-recovery.mjs')
 const TRANSPORT_SCRIPT = join(ROOT, 'scripts', 'smoke', 'split-process', 'authenticated-lifecycle.mjs')
+const PTY_SCRIPT = join(ROOT, 'scripts', 'smoke', 'split-process', 'pty-session-write-recovery.mjs')
+const C1_SCENE_SCRIPT = join(ROOT, 'scripts', 'smoke', 'split-process', 'c1-scene.mjs')
+const SHARED_SESSION_SCRIPT = join(ROOT, 'scripts', 'smoke', 'split-process', 'shared-session-interactions.mjs')
+const NAVIGATION_SCRIPT = join(ROOT, 'scripts', 'smoke', 'split-process', 'non-destructive-client-lifecycle.mjs')
 const PACKAGE_NAME = '@xmoon76/dsh-pi-tui'
 const DSH_AGENT = '@deepseek-ai/dsh-agent'
 const TARGET_PIN = npmDshVersion()
@@ -856,6 +860,10 @@ test('an unknown error code is never reported, and never changes the category', 
     ['entry-admission', readFileSync(ENTRY_ADMISSION_SCRIPT, 'utf8')],
     ['runtime-artifact-recovery', readFileSync(RECOVERY_SCRIPT, 'utf8')],
     ['authenticated-lifecycle', readFileSync(TRANSPORT_SCRIPT, 'utf8')],
+    ['pty-session-write-recovery', readFileSync(PTY_SCRIPT, 'utf8')],
+    ['c1-scene', readFileSync(C1_SCENE_SCRIPT, 'utf8')],
+    ['shared-session-interactions', readFileSync(SHARED_SESSION_SCRIPT, 'utf8')],
+    ['non-destructive-client-lifecycle', readFileSync(NAVIGATION_SCRIPT, 'utf8')],
   ]) {
     // A waiter failure site: fail('<category>', '<code>') or, where the read must
     // happen first, settleOrFail('<category>', '<code>').
@@ -1023,9 +1031,13 @@ test('the locator trusts only the lane sources and fails closed otherwise', () =
     'a frame outside the trusted lane sources must not become a locator')
   assert.deepEqual([...LANE_SOURCE_FILES].sort(), [
     'authenticated-lifecycle.mjs',
+    'c1-scene.mjs',
     'entry-admission.mjs',
     'host-runtime-disabled.mjs',
+    'non-destructive-client-lifecycle.mjs',
+    'pty-session-write-recovery.mjs',
     'runtime-artifact-recovery.mjs',
+    'shared-session-interactions.mjs',
     'split-process-smoke.mjs',
     'split-process-upgrade-smoke.mjs',
     'split-smoke-fixtures.mjs',
@@ -1520,12 +1532,16 @@ test('no bounded wait in either lane or its extracted support throws a bare Erro
     // the extracted cases; the remaining scenario waits are inline closures.
     ['split-process', PROCESS_SCRIPT, 0],
     ['split-upgrade', UPGRADE_SCRIPT, 4],
-    ['split-smoke-processes', PROCESSES_LIB, 3],
+    ['split-smoke-processes', PROCESSES_LIB, 5],
     ['split-smoke-sessions', SESSIONS_LIB, 3],
     ['split-smoke-fixtures', FIXTURES_LIB, 1],
     ['entry-admission', ENTRY_ADMISSION_SCRIPT, 0],
     ['runtime-artifact-recovery', RECOVERY_SCRIPT, 0],
     ['authenticated-lifecycle', TRANSPORT_SCRIPT, 0],
+    ['pty-session-write-recovery', PTY_SCRIPT, 0],
+    ['c1-scene', C1_SCENE_SCRIPT, 0],
+    ['shared-session-interactions', SHARED_SESSION_SCRIPT, 0],
+    ['non-destructive-client-lifecycle', NAVIGATION_SCRIPT, 0],
   ]
   for (const [name, file, minimum] of sources) {
     const source = readFileSync(file, 'utf8')

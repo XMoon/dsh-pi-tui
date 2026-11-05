@@ -864,3 +864,28 @@ export function assertClientHostFacts(client, host, label) {
     assert(client?.[key] === host?.[key], `${label}: Client host ${key} mismatch`)
   }
 }
+
+/**
+ * Bounded wait for one qualification condition. A caller-owned `signal` stops
+ * the polling loop for real: a race that only *returns* early would leave the
+ * loop's own timer holding the process until the full budget.
+ */
+export async function waitForCondition(predicate, label, timeoutMs, signal) {
+  const started = Date.now()
+  while (Date.now() - started < timeoutMs) {
+    if (signal?.aborted === true) {
+      throw new SplitSmokeWaitError('WAIT_TIMEOUT', {
+        code: 'QUALIFICATION_CONDITION_ABORTED',
+        waitLabel: label,
+        elapsedMs: Date.now() - started,
+      })
+    }
+    if (await predicate()) return true
+    await sleep(100)
+  }
+  throw new SplitSmokeWaitError('WAIT_TIMEOUT', {
+    code: 'QUALIFICATION_CONDITION_TIMEOUT',
+    waitLabel: label,
+    elapsedMs: Date.now() - started,
+  })
+}

@@ -32,6 +32,9 @@ import { runEntryAdmission } from '../../scripts/smoke/split-process/entry-admis
 import { runHostRuntimeDisabled } from '../../scripts/smoke/split-process/host-runtime-disabled.mjs'
 import { runRuntimeArtifactRecovery } from '../../scripts/smoke/split-process/runtime-artifact-recovery.mjs'
 import { runAuthenticatedLifecycle } from '../../scripts/smoke/split-process/authenticated-lifecycle.mjs'
+import { runPtySessionWriteRecovery } from '../../scripts/smoke/split-process/pty-session-write-recovery.mjs'
+import { runSharedSessionInteractions } from '../../scripts/smoke/split-process/shared-session-interactions.mjs'
+import { runNonDestructiveClientLifecycle } from '../../scripts/smoke/split-process/non-destructive-client-lifecycle.mjs'
 import { HOST_ONLY_PATCH } from '../../src/app/remote-process/local-host-entry.ts'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
@@ -41,6 +44,10 @@ const CASE_MODULE = join(ROOT, 'scripts', 'smoke', 'split-process', 'host-runtim
 const ENTRY_ADMISSION_MODULE = join(ROOT, 'scripts', 'smoke', 'split-process', 'entry-admission.mjs')
 const RECOVERY_MODULE = join(ROOT, 'scripts', 'smoke', 'split-process', 'runtime-artifact-recovery.mjs')
 const TRANSPORT_MODULE = join(ROOT, 'scripts', 'smoke', 'split-process', 'authenticated-lifecycle.mjs')
+const PTY_MODULE = join(ROOT, 'scripts', 'smoke', 'split-process', 'pty-session-write-recovery.mjs')
+const C1_SCENE_MODULE = join(ROOT, 'scripts', 'smoke', 'split-process', 'c1-scene.mjs')
+const SHARED_SESSION_MODULE = join(ROOT, 'scripts', 'smoke', 'split-process', 'shared-session-interactions.mjs')
+const NAVIGATION_MODULE = join(ROOT, 'scripts', 'smoke', 'split-process', 'non-destructive-client-lifecycle.mjs')
 
 /** Run the real lane CLI with one private temp root. */
 function runCli(args, tmpRoot, env = {}) {
@@ -159,6 +166,10 @@ test('the upgraded smoke carries every inventory gate and the critical negative 
     + entryAdmission
     + recovery
     + transport
+    + readFileSync(PTY_MODULE, 'utf8')
+    + readFileSync(C1_SCENE_MODULE, 'utf8')
+    + readFileSync(SHARED_SESSION_MODULE, 'utf8')
+    + readFileSync(NAVIGATION_MODULE, 'utf8')
     + readFileSync(join(ROOT, 'scripts', 'lib', 'split-smoke-processes.mjs'), 'utf8')
     + readFileSync(join(ROOT, 'scripts', 'lib', 'split-smoke-fixtures.mjs'), 'utf8')
   for (const gate of ['T01', 'T02', 'T03', 'T04', 'T05', 'T06', 'T07', 'T08', 'T09', 'T09Q', 'T10', 'T11', 'T12', 'T13', 'T14', 'T15', 'T16', 'T17', 'T18', 'T19', 'T20', 'T21', 'T22', 'T23', 'T24', 'T25', 'T26', 'T27', 'T28', 'T29', 'T30', 'T31', 'T32', 'T33', 'T34', 'T35', 'T36', 'T37', 'T38', 'T39', 'T40', 'T41', 'T42', 'T43', 'T44', 'T45', 'T46', 'T47', 'T48', 'T49', 'T50', 'T51', 'T52', 'T53', 'T54', 'T55', 'T56', 'T57', 'T58', 'T59', 'T60']) {
@@ -295,8 +306,10 @@ test('the upgraded smoke carries every inventory gate and the critical negative 
     assert.ok(implementation.includes(marker), `missing smoke marker ${marker}`)
   }
   const extraPatchUses = source.match(/SPLIT_PROCESS_EXTRA_PATCH/gu) ?? []
-  assert.equal(extraPatchUses.length, 14,
-    'the full lane may only implement the whole-smoke mutation mode, the isolated host-work overlays, the C1 timed patch, the three bounded PR-A Web composition runs, the five bounded PR-B Web-toggle runs and the ONE PR-D product Host patch; the two child mutations, the two required-row mutations, the row-disabled control and the default stub-LLM overlay belong to the extracted cases and the shared modules')
+  assert.equal(extraPatchUses.length, 13,
+    'the full lane may only implement the whole-smoke mutation mode, the isolated host-work overlays, the C1 timed patch, the three bounded PR-A Web composition runs, the five bounded PR-B Web-toggle runs and the ONE PR-D product Host patch; the two child mutations, the two required-row mutations, the row-disabled control, the C1 Host fixture patch and the default stub-LLM overlay belong to the extracted cases and the shared modules')
+  assert.match(readFileSync(C1_SCENE_MODULE, 'utf8'), /SPLIT_PROCESS_EXTRA_PATCH: c1Work\.patchPath/u,
+    'the C1 scene owns its fixture patch, not the full lane')
   // The two installed-profile mutations are OWNED by the entry-admission case:
   // the full-only mutation mode reuses its descriptors instead of restating them.
   assert.match(source, /ENTRY_ADMISSION_MUTATIONS\[mutationMode\]/u,
@@ -350,7 +363,7 @@ test('the upgraded smoke carries every inventory gate and the critical negative 
 })
 
 test('T09 is two real Surface Clients on one Host while T09Q keeps the qualification seat negative', () => {
-  const source = readFileSync(SCRIPT, 'utf8')
+  const source = readFileSync(PTY_MODULE, 'utf8')
   // The qualification-only negative stays a real two-process EntryProcess race
   // with the kernel seat conflict; it must not be downgraded to a static claim.
   // It now lives in the transport case, so the guard reads THAT real scene.
@@ -400,7 +413,7 @@ test('T09 is two real Surface Clients on one Host while T09Q keeps the qualifica
 })
 
 test('M5-B same-Session real two-PTY witness remains wired', () => {
-  const source = readFileSync(SCRIPT, 'utf8')
+  const source = readFileSync(SHARED_SESSION_MODULE, 'utf8')
   // The M5-B Case is the FIRST C1 scenario: it owns one isolated Host and runs
   // before the M5-C Case and the T44 inventory it must not renumber.
   const start = source.indexOf('// M5B-01 (M5-B):')
@@ -455,13 +468,13 @@ test('M5-B same-Session real two-PTY witness remains wired', () => {
 })
 
 test('two real TUI Clients must both show one Host Question or Approval before first settlement', () => {
-  const source = readFileSync(SCRIPT, 'utf8')
+  const source = readFileSync(SHARED_SESSION_MODULE, 'utf8')
   // The M5-C Case is ONE isolated C1 scope between the M5-B Case and the T44
   // inventory: it may not renumber, skip or absorb any existing Case.
   const start = source.indexOf('// M5C-01 (M5-C):')
-  const end = source.indexOf('// M5N-01 (M5-N):')
+  const end = source.length
   assert.ok(start > source.indexOf('// M5B-01 (M5-B):') && end > start,
-    'M5C-01 must stay between the M5-B Case and the M5N-01 Case')
+    'M5C-01 must stay after the M5-B Case in the shared-session module')
   assert.equal((source.match(/\/\/ M5C-01 \(M5-C\):/gu) ?? []).length, 1,
     'the dual-TUI first-settlement Case must exist exactly once')
   const m5c = source.slice(start, end)
@@ -589,20 +602,21 @@ test('two real TUI Clients must both show one Host Question or Approval before f
   for (const trace of ['m5c-01q', 'm5c-01ar', 'm5c-01aa']) {
     assert.ok(m5c.includes(`trace('${trace}'`), `${trace} must report its real facts`)
   }
+  const fullLane = readFileSync(SCRIPT, 'utf8')
   for (const legacy of ['t49', 't50', 't51', 't52', 't53', 't54', 't55a', 't55b', 't55c-question', 't55c-approval']) {
-    assert.ok(source.includes(legacy), `the M5-C Case must not remove the legacy ${legacy} negative control`)
+    assert.ok(fullLane.includes(legacy), `the M5-C Case must not remove the legacy ${legacy} negative control`)
   }
   assert.ok(source.indexOf('// M5B-01 (M5-B):') > 0,
     'the M5-C Case must not remove the M5-B same-Session witness')
 })
 
 test('the non-destructive Split Remote navigation witness stays between M5-C and the T44 inventory', () => {
-  const source = readFileSync(SCRIPT, 'utf8')
+  const source = readFileSync(NAVIGATION_MODULE, 'utf8')
   // ONE isolated case, after the M5-C first-settlement Case and before the
   // M5N-02 sibling case and the T44 inventory it must not renumber or absorb.
   const start = source.indexOf('// M5N-01 (M5-N):')
   const end = source.indexOf('// M5N-02 (M5-N):')
-  assert.ok(start > source.indexOf('// M5C-01 (M5-C):'), 'M5N-01 must run after the M5-C Case')
+  assert.ok(start >= 0, 'the M5N-01 scene must exist in the navigation case')
   assert.ok(end > start, 'M5N-01 must stay immediately before the M5N-02 sibling case')
   assert.equal((source.match(/\/\/ M5N-01 \(M5-N\):/gu) ?? []).length, 1,
     'the non-destructive navigation witness must exist exactly once')
@@ -709,7 +723,7 @@ test('the non-destructive Split Remote navigation witness stays between M5-C and
 })
 
 test('the detached-navigation siblings stay between M5N-01 and the M5D inventory', () => {
-  const source = readFileSync(SCRIPT, 'utf8')
+  const source = readFileSync(NAVIGATION_MODULE, 'utf8')
   const start = source.indexOf('// M5N-02 (M5-N):')
   const end = source.indexOf('// M5D-01 (M5-D):')
   assert.ok(start > source.indexOf('// M5N-01 (M5-N):'), 'M5N-02 must run after the M5N-01 case')
@@ -846,11 +860,11 @@ test('the detached-navigation siblings stay between M5N-01 and the M5D inventory
 })
 
 test('the independent Client lifecycle inventory stays between M5N-03 and the T44 inventory', () => {
-  const source = readFileSync(SCRIPT, 'utf8')
+  const source = readFileSync(NAVIGATION_MODULE, 'utf8')
   const start = source.indexOf('// M5D-01 (M5-D):')
-  const end = source.indexOf('// T44: a real accepted Turn survives')
+  const end = source.length
   assert.ok(start > source.indexOf('// M5N-03 (M5-N):'), 'M5D-01 must run after the M5N-03 case')
-  assert.ok(end > start, 'M5D-01 must stay immediately before the T44 inventory')
+  assert.ok(end > start, 'the M5D inventory must be inside the navigation case')
   assert.equal((source.match(/\/\/ M5D-01 \(M5-D\):/gu) ?? []).length, 1, 'M5D-01 must exist exactly once')
   const m5d = source.slice(start, end)
   // The shared witnesses are explicit and never downgraded.
@@ -1248,7 +1262,8 @@ test('the Client peer set is installed into the profile that actually runs it', 
   // the session workspace (the installed profile): a workspace-write bwrap
   // sandbox mounts an ephemeral /tmp, so a barrier under the smoke work dir
   // would be invisible and the Job could never settle.
-  assert.match(source, /const c1JobWorkRoot = label => \{\n\s*const root = join\(profileDir, `c1-\$\{label\}`\)/u)
+  assert.match(readFileSync(C1_SCENE_MODULE, 'utf8'),
+    /const c1JobWorkRoot = label => \{\n\s*const root = join\(profileDir, `c1-\$\{label\}`\)/u)
   assert.match(source, /startC1Host\('job', 't47', \{\}, c1JobWorkRoot\('t47'\)\)/u)
   assert.match(source, /startC1Host\('job', 't58', \{\}, c1JobWorkRoot\('t58'\)\)/u)
 
@@ -1332,7 +1347,8 @@ test('the official Web composition qualification is discoverable and never fakes
   assert.match(source, /stopWait\.abort\(\)/u)
   assert.match(source, /the real-Browser driver exited \(\$\{String\(outcome\.exit\.code\)\}/u)
   assert.match(source, /signal => waitForCondition\(/u)
-  assert.match(source, /QUALIFICATION_CONDITION_ABORTED/u)
+  assert.match(readFileSync(join(ROOT, 'scripts', 'lib', 'split-smoke-processes.mjs'), 'utf8'),
+    /QUALIFICATION_CONDITION_ABORTED/u)
   // The TUI paints are judged by the TUI, never by Browser liveness: the driver
   // may exit normally while the renderer paints the same Host message later.
   assert.doesNotMatch(source, /whileBrowserRuns\(\s*\n\s*tui\.waitForScreen\(/u,
@@ -1706,6 +1722,9 @@ test('a completed abortable deadline releases its timer instead of holding the p
 })
 
 test('an aborted condition wait stops polling instead of holding the process', () => {
+  const processes = readFileSync(join(ROOT, 'scripts', 'lib', 'split-smoke-processes.mjs'), 'utf8')
+  assert.match(processes, /QUALIFICATION_CONDITION_ABORTED/u,
+    'the abort classification must live in the wait owner the case modules import')
   const probe = `
     import { waitForCondition } from ${JSON.stringify(pathToFileURL(SCRIPT).href)}
     const controller = new AbortController()
@@ -1761,6 +1780,9 @@ test('listing selectable split cases does not install a profile or claim complet
     'suite=bootstrap case=bootstrap.entry-admission title=an inherited Host role without a mounted TUI surface is refused before Host admission',
     'suite=bootstrap case=bootstrap.runtime-artifact-recovery title=a renamed-away Host Runtime artifact fails closed and the restored artifact reaches authenticated Ready',
     'suite=transport case=transport.authenticated-lifecycle title=concurrent Host launches elect one authenticated owner whose Client lifecycle survives exits and signals',
+    'suite=surface case=surface.pty-session-write-recovery title=one authenticated Host drives real PTY surfaces through Session writes, recovery and stale-generation fences',
+    'suite=multi-client case=multi-client.shared-session-interactions title=two real Clients retain one Session and settle one Host Question or Approval exactly once',
+    'suite=navigation case=navigation.non-destructive-client-lifecycle title=leaving a Session from one Client never stops the Host Turn another Client keeps reading',
   ], 'the listing must follow the registry execution order')
   // A listing never becomes a full PASS and never creates a scene.
   for (const forbidden of ['SPLIT_PROCESS_SMOKE_PASS', 'T60 PASS', 'PASS_REAL_SPLIT_PROCESS',
@@ -1821,23 +1843,33 @@ test('the selectable registry is the single source for listing, resolution and t
     'bootstrap.entry-admission',
     'bootstrap.runtime-artifact-recovery',
     'transport.authenticated-lifecycle',
+    'surface.pty-session-write-recovery',
+    'multi-client.shared-session-interactions',
+    'navigation.non-destructive-client-lifecycle',
   ])
   assert.deepEqual(cases.map(entry => entry.suite), [
-    'bootstrap', 'bootstrap', 'bootstrap', 'transport',
+    'bootstrap', 'bootstrap', 'bootstrap', 'transport', 'surface', 'multi-client', 'navigation',
   ])
-  const [pilot, entry, recovery, transport] = cases
+  const [pilot, entry, recovery, transport, surface, multiClient, navigation] = cases
   assert.equal(pilot.title, 'a disabled Host Runtime owner refuses Ready without publishing a Host identity')
   assert.equal(entry.title, 'an inherited Host role without a mounted TUI surface is refused before Host admission')
   assert.equal(recovery.title, 'a renamed-away Host Runtime artifact fails closed and the restored artifact reaches authenticated Ready')
   assert.equal(transport.title, 'concurrent Host launches elect one authenticated owner whose Client lifecycle survives exits and signals')
-  assert.deepEqual([pilot.run, entry.run, recovery.run, transport.run],
-    [runHostRuntimeDisabled, runEntryAdmission, runRuntimeArtifactRecovery, runAuthenticatedLifecycle],
+  assert.equal(surface.title, 'one authenticated Host drives real PTY surfaces through Session writes, recovery and stale-generation fences')
+  assert.equal(multiClient.title, 'two real Clients retain one Session and settle one Host Question or Approval exactly once')
+  assert.equal(navigation.title, 'leaving a Session from one Client never stops the Host Turn another Client keeps reading')
+  assert.deepEqual([pilot.run, entry.run, recovery.run, transport.run, surface.run, multiClient.run, navigation.run],
+    [runHostRuntimeDisabled, runEntryAdmission, runRuntimeArtifactRecovery, runAuthenticatedLifecycle,
+      runPtySessionWriteRecovery, runSharedSessionInteractions, runNonDestructiveClientLifecycle],
     'every registered run must be the real scenario, not a copy or a re-wrapped stub')
   assert.ok(Object.isFrozen(cases) && cases.every(entry_ => Object.isFrozen(entry_)), 'the registry must stay frozen')
 
   assert.deepEqual(resolveSelection({ mode: 'case', id: transport.id }).cases, [transport])
   assert.deepEqual(resolveSelection({ mode: 'suite', suite: 'bootstrap' }).cases, [pilot, entry, recovery])
   assert.deepEqual(resolveSelection({ mode: 'suite', suite: 'transport' }).cases, [transport])
+  assert.deepEqual(resolveSelection({ mode: 'suite', suite: 'surface' }).cases, [surface])
+  assert.deepEqual(resolveSelection({ mode: 'suite', suite: 'multi-client' }).cases, [multiClient])
+  assert.deepEqual(resolveSelection({ mode: 'suite', suite: 'navigation' }).cases, [navigation])
   assert.throws(() => resolveSelection({ mode: 'case', id: 'does-not-exist' }),
     error => error.code === 'INPUT_SMOKE_SELECTION_INVALID')
   assert.throws(() => resolveSelection({ mode: 'suite', suite: 'does-not-exist' }),

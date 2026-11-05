@@ -16,7 +16,10 @@
  */
 
 import { runAuthenticatedLifecycle } from '../smoke/split-process/authenticated-lifecycle.mjs'
+import { runNonDestructiveClientLifecycle } from '../smoke/split-process/non-destructive-client-lifecycle.mjs'
 import { runEntryAdmission } from '../smoke/split-process/entry-admission.mjs'
+import { runPtySessionWriteRecovery } from '../smoke/split-process/pty-session-write-recovery.mjs'
+import { runSharedSessionInteractions } from '../smoke/split-process/shared-session-interactions.mjs'
 import { runHostRuntimeDisabled } from '../smoke/split-process/host-runtime-disabled.mjs'
 import { runRuntimeArtifactRecovery } from '../smoke/split-process/runtime-artifact-recovery.mjs'
 import { SplitSmokeInputError } from './split-smoke-diagnostics.mjs'
@@ -57,6 +60,24 @@ const CASE_REGISTRY = Object.freeze([
     id: 'transport.authenticated-lifecycle',
     title: 'concurrent Host launches elect one authenticated owner whose Client lifecycle survives exits and signals',
     run: runAuthenticatedLifecycle,
+  }),
+  Object.freeze({
+    suite: 'surface',
+    id: 'surface.pty-session-write-recovery',
+    title: 'one authenticated Host drives real PTY surfaces through Session writes, recovery and stale-generation fences',
+    run: runPtySessionWriteRecovery,
+  }),
+  Object.freeze({
+    suite: 'multi-client',
+    id: 'multi-client.shared-session-interactions',
+    title: 'two real Clients retain one Session and settle one Host Question or Approval exactly once',
+    run: runSharedSessionInteractions,
+  }),
+  Object.freeze({
+    suite: 'navigation',
+    id: 'navigation.non-destructive-client-lifecycle',
+    title: 'leaving a Session from one Client never stops the Host Turn another Client keeps reading',
+    run: runNonDestructiveClientLifecycle,
   }),
 ])
 
