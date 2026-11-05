@@ -25,6 +25,7 @@ import { pituiWebAccessPresentation } from '../../src/tui/pickers/web-access-pre
 import type {
   WebAccessActionId,
   WebAccessMenuHandle,
+  WebAccessNotice,
   WebAccessPresentation,
   WebAccessReadOutcome,
   WebAccessRequest,
@@ -43,6 +44,7 @@ interface MenuRecord {
   readonly request: WebAccessRequest
   readonly calls: string[]
   readonly outcomes: WebAccessReadOutcome[]
+  readonly notices: WebAccessNotice[]
   readonly pending: string[]
   disposed: boolean
 }
@@ -54,12 +56,15 @@ function recordingPresentation() {
   const presentation: WebAccessPresentation = {
     notify: (text, kind) => { notices.push({ text, kind: kind ?? 'info' }) },
     open: (request): WebAccessMenuHandle => {
-      const entry: MenuRecord = { request, calls: [], outcomes: [], pending: [], disposed: false }
+      const entry: MenuRecord = { request, calls: [], outcomes: [], notices: [], pending: [], disposed: false }
       menus.push(entry)
       return {
         setLoading: () => { entry.calls.push('loading') },
         setPending: (message) => { entry.pending.push(message) },
-        setStatus: (outcome) => { entry.outcomes.push(outcome) },
+        setStatus: (outcome, notice) => {
+          entry.outcomes.push(outcome)
+          if (notice !== undefined) entry.notices.push(notice)
+        },
         isDisposed: () => entry.disposed,
         close: () => { entry.disposed = true },
       }
@@ -211,6 +216,7 @@ test('Enable Web performs the Host toggle and reprojects the authoritative re-re
   assert.deepEqual(entry.outcomes, [{ kind: 'status', status: { state: 'enabled' } }],
     'the menu shows the RE-READ state, not the requested boolean')
   assert.equal(h.recording.menus.length, 1, 'the SAME menu is reprojected')
+  assert.deepEqual(entry.notices, [], 'a state toggle needs no extra result line: the status is the result')
 })
 
 test('Disable Web trusts the authoritative re-read, not the toggle reply', async () => {
@@ -256,6 +262,8 @@ test('Copy Link reports only the clipboard acknowledgement and never falls back 
     const notice = h.recording.notices.at(-1)
     assert.equal(notice?.text, expected, 'the notice states the copy acknowledgement only')
     assert.equal(notice?.kind, kind)
+    assert.deepEqual(entry.notices, [{ message: expected, kind }],
+      'the SAME result is painted INSIDE the open menu (its overlay covers the base notice line)')
     assert.doesNotMatch(JSON.stringify(h.recording.notices), /SECRET-LAUNCH-TOKEN/u)
   }
 })
@@ -284,6 +292,9 @@ test('a failed toggle is stated as an error notice and the menu re-reads the aut
   assert.match(notices.at(-1) ?? '', /the Host refused the toggle/u)
   assert.deepEqual(entry.outcomes, [{ kind: 'status', status: { state: 'disabled' } }],
     'the authoritative re-read is what the menu shows after the refusal')
+  assert.equal(entry.notices.length, 1, 'the refusal is painted inside the open menu too')
+  assert.equal(entry.notices[0]?.kind, 'error')
+  assert.match(entry.notices[0]?.message ?? '', /the Host refused the toggle/u)
 })
 
 /* ------------------------------------------------------------ PiTui menu */
@@ -377,9 +388,13 @@ test('an unavailable Host offers no write', async t => {
 
 test('activating Enable Web forwards the ONE intent and closing never writes', async t => {
   const h = await pituiMenu(t, { state: 'disabled' })
-  // Row 1 is the disabled fact row; one Down reaches Enable Web, Enter activates it.
+  // Row 1 is the disabled fact row; one Down reaches Enable Web, whose own
+  // selected-row description is the painted "the move landed" signal, Enter
+  // activates it.
   h.vt.sendInput('\u001b[B')
   await h.vt.waitForRender()
+  assert.match(view(h.vt), /Start serving the official Web frontend from this Host/u,
+    'the selected action row paints its own description')
   h.vt.sendInput('\r')
   await h.vt.waitForRender()
   assert.deepEqual(h.actions, ['enable'], 'the activation reaches the command exactly once')

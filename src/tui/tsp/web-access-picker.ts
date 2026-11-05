@@ -33,6 +33,7 @@ import type { PickerAction, PickerItem, PickerProps } from '@stencil-hq/tern'
 import type {
   WebAccessActionId,
   WebAccessMenuHandle,
+  WebAccessNotice,
   WebAccessPresentation,
   WebAccessReadOutcome,
   WebAccessRequest,
@@ -60,6 +61,8 @@ interface WebAccessPickerPanel {
   outcome: WebAccessReadOutcome | undefined
   /** The visible statement of the admitted action (the `pending` phase). */
   pending: string
+  /** The settled action result, painted as an inert fact row while the menu is open. */
+  notice: WebAccessNotice | undefined
   /** The highlight: the row id the keyboard/mouse last moved onto. */
   selected: string
   /** Which footer entry owns Enter, as a BASE id. */
@@ -81,6 +84,7 @@ type WebAccessPickerIntent =
 
 /** The row ids the menu really paints. */
 const STATUS_ROW = 'web-status'
+const NOTICE_ROW = 'web-notice'
 const DETAILS_ROW = 'web-details'
 /** The body key prefix the presenter resolves its scroll target from. */
 export const WEB_READING_BODY_KEY_PREFIX = 'web-reading-body-'
@@ -98,7 +102,9 @@ interface WebAccessPickerAction {
 
 /** The two fact/entry rows of the menu (the ONLY browsable rows). */
 function menuRows(panel: WebAccessPickerPanel): string[] {
-  return [STATUS_ROW, DETAILS_ROW]
+  return panel.notice === undefined
+    ? [STATUS_ROW, DETAILS_ROW]
+    : [STATUS_ROW, NOTICE_ROW, DETAILS_ROW]
 }
 
 /** The human label of the adopted status (the Host's own vocabulary). */
@@ -207,6 +213,14 @@ function menuPicker(panel: WebAccessPickerPanel): Node {
       disabled: true,
       detail: sanitizedPhysicalLine(webAccessStatusDetail(panel.outcome)),
     },
+    ...(panel.notice === undefined ? [] : [{
+      id: NOTICE_ROW,
+      label: sanitizedPhysicalLine(panel.notice.message),
+      // A settled action result: an inert fact the user reads, never an operation.
+      disabled: true as const,
+      ...(panel.notice.kind === 'error' ? { dot: 'error' as const } : {}),
+      detail: panel.notice.kind === 'error' ? 'The action failed; the Host state below is the truth.' : 'Action result.',
+    }]),
     {
       id: DETAILS_ROW,
       label: 'Details…',
@@ -430,6 +444,7 @@ export class TspWebAccessPicker {
       zone: 'list',
       outcome: undefined,
       pending: '',
+      notice: undefined,
       selected: DETAILS_ROW,
       actionFocus: undefined,
       readerEpoch: 0,
@@ -453,17 +468,20 @@ export class TspWebAccessPicker {
         if (this.current() !== panel) return
         panel.phase = 'loading'
         panel.pending = ''
+        panel.notice = undefined
         this.change(panel)
       },
       setPending: (message) => {
         if (this.current() !== panel) return
         panel.phase = 'pending'
         panel.pending = message
+        panel.notice = undefined
         this.change(panel)
       },
-      setStatus: (outcome) => {
+      setStatus: (outcome, notice) => {
         if (this.current() !== panel) return
         panel.outcome = outcome
+        panel.notice = notice
         panel.phase = 'ready'
         panel.pending = ''
         panel.page = 'menu'

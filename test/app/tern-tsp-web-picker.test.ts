@@ -132,10 +132,14 @@ async function mounted(
     notices,
     open,
     revoke: () => { current = false },
-    ready: async (handle: WebAccessMenuHandle, status: WebAccessStatus) => {
+    ready: async (
+      handle: WebAccessMenuHandle,
+      status: WebAccessStatus,
+      notice?: { readonly message: string; readonly kind: 'info' | 'error' },
+    ) => {
       await waitUntil('web picker ready', () => props(pane).state === 'ready')
       const revisionBefore = actionRevision(pane)
-      handle.setStatus({ kind: 'status', status })
+      handle.setStatus({ kind: 'status', status }, notice)
       // The reprojection is a NEW frame: wait for the action id of a newer
       // revision (or the new state fact) instead of a blind sleep.
       await waitUntil('web picker reprojected', () =>
@@ -291,4 +295,19 @@ test('a revoked request closes the layer and refuses further events', async t =>
   // reason: the same bounded observation window as above — a refused event emits no frame.
   await settle()
   assert.deepEqual(h.actions, [], 'a superseded request never reaches a writer')
+})
+
+test('a settled action result is painted INSIDE the native picker', async t => {
+  const h = await mounted(t)
+  const handle = h.open({ state: 'enabled' })
+  await h.ready(handle, { state: 'enabled' }, { message: 'Link copied', kind: 'info' })
+  const rows = items(h.pane)
+  const notice = rows.find(row => row.id === 'web-notice')
+  assert.equal(notice?.label, 'Link copied', 'the copy result is a visible fact row')
+  assert.equal(notice?.disabled, true, 'the result is never an operation')
+  // A new admitted action clears the previous result line.
+  handle.setPending('Disabling Web…')
+  await waitUntil('web picker pending', () => props(h.pane).state === 'ready'
+    && items(h.pane).every(row => row.id !== 'web-notice'))
+  assert.equal(items(h.pane).some(row => row.id === 'web-notice'), false)
 })

@@ -27,6 +27,7 @@ import type { SettingItem } from '@xmoon76/pi-tui'
 import type {
   WebAccessActionId,
   WebAccessMenuHandle,
+  WebAccessNotice,
   WebAccessPresentation,
   WebAccessReadOutcome,
   WebAccessRequest,
@@ -108,6 +109,19 @@ function detailsRows(outcome: WebAccessReadOutcome): SettingItem[] {
   ]
 }
 
+/** The action-result row: a transient fact painted INSIDE the menu, because the
+ *  overlay covers the base surface's notice line at common heights. */
+function noticeRow(notice: WebAccessNotice): SettingItem {
+  return {
+    id: 'web-notice',
+    label: sanitizedPhysicalLine(notice.message),
+    description: notice.kind === 'error'
+      ? 'The action failed; the current Host state is shown below.'
+      : 'Action result.',
+    currentValue: '',
+  }
+}
+
 /** The loading projection: one inert row, no write. */
 function loadingRow(): SettingItem[] {
   return [{
@@ -155,9 +169,10 @@ export function pituiWebAccessPresentation(app: TuiApp): WebAccessPresentation {
         )
       }
       let current: WebAccessReadOutcome | undefined
-      const menu = (outcome: WebAccessReadOutcome): void => {
+      const menu = (outcome: WebAccessReadOutcome, notice?: WebAccessNotice): void => {
         current = outcome
         const rows: SettingItem[] = [statusRow(outcome)]
+        if (notice !== undefined) rows.push(noticeRow(notice))
         if (outcome.kind === 'status') {
           switch (outcome.status.state) {
             case 'disabled':
@@ -193,7 +208,7 @@ export function pituiWebAccessPresentation(app: TuiApp): WebAccessPresentation {
       const handle: WebAccessMenuHandle = {
         setLoading: () => show(loadingRow(), () => {}),
         setPending: (message) => show(pendingRow(message), () => {}),
-        setStatus: (outcome) => menu(outcome),
+        setStatus: (outcome, notice) => menu(outcome, notice),
         isDisposed: () => disposed,
         close: () => {
           if (disposed) return
