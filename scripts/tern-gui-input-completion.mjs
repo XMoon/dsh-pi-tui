@@ -1,23 +1,33 @@
 /**
- * TSP I-C §7.6 REAL GUI-WINDOW evidence lane: the first-line slash-command
- * completion popup on the PRODUCTION Direct/TSP composition.
+ * TSP I-D §7.3 REAL GUI-WINDOW evidence lane: the ONE input-completion seat —
+ * the I-C first-line slash popup PLUS the I-D Host `@` reference, the Client-local
+ * `/image`/`/attach` path rows and the inline attachment intake — on the
+ * PRODUCTION Direct/TSP composition.
  *
- *   DISPLAY=:0 node scripts/tern-gui-drive.mjs scripts/tern-gui-slash-completion.mjs \
+ *   DISPLAY=:0 node scripts/tern-gui-drive.mjs scripts/tern-gui-input-completion.mjs \
  *     --out <fresh evidence directory>
  *
  * ONE production Direct composition runs inside a pane of a REAL Tern GUI
  * window on a real display: `createDirectTspFixture({externalTern:true})` boots
  * the shipped composition, so the mount, the stylesheet install, the mount
  * order, the display seam and the Quiet Composer path are the production ones,
- * and the candidate catalog arrives through the REAL command layer's single
- * commit point (the flow proves that from the recorded call sites instead of
- * assuming it). The subject's `events.jsonl` records the production facts (every
- * key the mount's own input loop pulled, every catalog commit, every composer
- * reducer call, the conditional completion write, every input handler call,
- * every settled Direct writer prompt); `sdk-wire.jsonl` carries the exact
- * `ui.editor` `text`/`cursor` props and the row `data-highlight`; the flow reads
- * the window's real node tree, layout and PNG for what the CLIENT paints. A
- * `ctl key` reply alone never proves a key arrived.
+ * the candidate catalog arrives through the REAL command layer's single commit
+ * point, and the inline intake is the REAL `artifactCommands.inlineAttachmentStager`
+ * → `runAttachmentIntake` (the flow proves that provenance from the recorded
+ * call sites instead of assuming it). Both file sources are REAL directories:
+ * the Host side is the persisted Session's own workspace cwd, the Client side is
+ * the fixture's own Client cwd (the subject `process.chdir()`s into it before
+ * the composition captures `process.cwd()` — no test-only production port
+ * exists and none was added). The subject's `events.jsonl` records the
+ * production facts (every key the mount's own input loop pulled, every catalog
+ * commit, every composer reducer call, every conditional completion write, every
+ * Host `listReferences` call and the paths it answered, every Client-local
+ * directory read and its base, every draft-store stage and its placeholder, the
+ * atomic inline-fragment commit, every input handler call, every settled Direct
+ * writer prompt); `sdk-wire.jsonl` carries the exact `ui.editor` `text`/`cursor`
+ * props and the row `data-highlight`; the flow reads the window's real node
+ * tree, layout and PNG for what the CLIENT paints. A `ctl key` reply alone never
+ * proves a key arrived.
  *
  * EVIDENCE TIER (docs/guides/tern-gui-testing.md): `REAL_TERN_GUI` for the
  * window, its native chrome, its desktop font stack and its rendering, plus
@@ -50,9 +60,14 @@
  *  - soft-wrapped visual rows are NOT part of this milestone (the contract is
  *    hard-newline logical lines), so the long-candidate-line case records what
  *    the client really does with one long row instead of asserting parity;
+ *  - the short-pane clipping the Owner accepted belongs to I-C ONLY. The I-D
+ *    rows (a Host `@` mention, a local path, an inline action) are measured for
+ *    THIS milestone: what clips is recorded as measured here, and a candidate
+ *    the user must reach — the default highlight or the one the walk lands on —
+ *    that is not actually shown is a FAILED assertion, not an inherited pass;
  *  - if the window cannot keep the list visible or the caret operable at some
  *    size, that is a FAILED assertion in the ledger, not a reworded pass.
- * @module scripts/tern-gui-slash-completion
+ * @module scripts/tern-gui-input-completion
  */
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
@@ -61,7 +76,7 @@ import { rect, visibleSpan, containedXY, visiblePoint } from './tern-pane-geomet
 
 const ROWS = ['oldest recall row', 'middle recall row', 'newest recall row']
 const RECALL = [...ROWS].reverse()
-const SESSION_A = 'session-slash-a'
+const SESSION_A = 'session-input-a'
 const HINT = '↑↓ select · Tab/Enter complete · Esc close'
 // The window clamps a size below its native minimum; those bands are reported
 // as clamped and the popup is then judged at the size the window really took.
@@ -74,6 +89,19 @@ const VIEWPORTS = [
 const APPEARANCES = ['light', 'dark']
 /** The bounded window for this lane's ABSENCE claims (nothing to await). */
 const ABSENCE_WINDOW_MS = 600
+/** The I-D fixture vocabulary the subject materializes on the two REAL sources
+ *  (see the subject's `HOST_FILES` / `CLIENT_FILES`): the prose is what must
+ *  survive every accept, and each token below is typed exactly as written. */
+const PROSE_BODY = '看一下 '
+const HOST_PREFIX = '请看 '
+const HOST_SCOPE_QUERY = `${HOST_PREFIX}@src/de`
+const HOST_DIRECTORY_QUERY = '@src/'
+const LOCAL_ONLY_QUERY = '/image src/cl'
+const INLINE_ACTION_QUERY = `${PROSE_BODY}/im`
+const INLINE_PATH_QUERY = `${PROSE_BODY}/image `
+const BARE_HOST_QUERY = '@deep'
+const CROSS_LOCAL_ARG = '/image src/deep'
+const CROSS_MENTION_ARG = '/image @src/de'
 
 const eventPath = h => join(h.root, 'events.jsonl')
 const wirePath = h => join(h.root, 'sdk-wire.jsonl')
@@ -132,22 +160,28 @@ const wireFold = h => {
   return nodes
 }
 const isComposerEditor = id => id === 'dock.quiet-composer.composer' || id === 'dock.composer'
-/** A candidate ROW is the `el` button itself; its name/description are CHILD
- *  nodes addressed under it, so this filter never matches those. */
-const isSlashRow = id => /\.slash-[^.]+$/u.test(id)
+/** A candidate ROW is the `el` button itself; its text/description are CHILD
+ *  nodes addressed under it, so this filter never matches those. The production
+ *  row key is `completion-<scope>-<revision>-<row id>` (TSP I-D renamed the
+ *  I-C `slash-…` key when the one seat opened to every candidate position), and
+ *  the menu/hint siblings are `composer-completion-menu-…`/`composer-completion-hint-…`. */
+const isCompletionRow = id => /\.completion-[^.]+$/u.test(id)
+const isCompletionMenu = id => /\.composer-completion-menu-/u.test(id)
 const wireEditor = h => {
   const entry = [...wireFold(h).entries()].filter(([id, node]) => node.k === 'editor' && isComposerEditor(id)).at(-1)
   const props = entry?.[1]?.p
   if (props === undefined || typeof props.text !== 'string') return undefined
   return { id: entry[0], text: props.text, cursor: typeof props.cursor === 'number' ? props.cursor : 0, attrs: props }
 }
-const wireSlashRows = h => [...wireFold(h).entries()]
-  .filter(([id, node]) => node.k === 'el' && isSlashRow(id))
+const wireCompletionRows = h => [...wireFold(h).entries()]
+  .filter(([id, node]) => node.k === 'el' && isCompletionRow(id))
   .map(([id, node]) => ({
     id,
     highlighted: String(node.p?.attrs?.['data-highlight'] ?? '') === 'true',
     title: String(node.p?.title ?? ''),
   }))
+const wireCompletionMenuCount = h => [...wireFold(h).entries()]
+  .filter(([id, node]) => isCompletionMenu(id)).length
 const wireEditorCount = h => [...wireFold(h).entries()]
   .filter(([id, node]) => node.k === 'editor' && isComposerEditor(id)).length
 
@@ -167,15 +201,23 @@ const sendNode = snap => visibleNodes(snap).find(node => node.tag === 'button'
   && ['↑', 'Send', 'Stop'].includes(String(node.text ?? '')))
 const pickerNode = snap => visibleNodes(snap).find(node => hasClass(node, 'sf-picker'))
 const overlayNode = snap => visibleNodes(snap).find(node => hasClass(node, 'sf-overlay'))
-/** The client tree carries no wire ids and no custom `data-role`, so a
- *  candidate row is identified by the row's own `title`, which the presenter
- *  sets (`/name — description`) and the client echoes. */
-const slashRows = snap => visibleNodes(snap).filter(node => node.tag === 'button'
-  // The SDK paints a candidate row as an `sf-el` button. A GUI window's own tab
-  // button can carry a "/abs/path  Ctrl+Shift+1" title: that is window chrome,
-  // never a candidate row (measured in the GUI lane).
-  && hasClass(node, 'sf-el') && String(node.title ?? '').startsWith('/'))
-const slashHintNode = snap => visibleNodes(snap).find(node => String(node.text ?? '') === HINT)
+/** The client tree carries no wire ids and no custom `data-role`. The CURRENT
+ *  frame's candidate rows are the `sf-el` buttons whose parent is the ONE
+ *  completion menu: that parent also holds the frozen hint text row. The GUI
+ *  window's own tab/button chrome can carry a path-like title but is never a
+ *  child of this menu. A cumulative wire fold is NOT a row oracle: this lane
+ *  queries many revisions, and deleted historical completion nodes stay in the
+ *  wire record, so the wire is used only for the editor props and the
+ *  `data-highlight` attribute. */
+const completionRows = snap => {
+  const hint = visibleNodes(snap).find(node => String(node.text ?? '') === HINT)
+  if (hint === undefined) return []
+  const chain = snap.chains.get(hint) ?? []
+  const menu = chain.length < 2 ? undefined : chain[chain.length - 2]
+  if (menu === undefined) return []
+  return (menu.children ?? []).filter(node => node.tag === 'button' && hasClass(node, 'sf-el'))
+}
+const completionHintNode = snap => visibleNodes(snap).find(node => String(node.text ?? '') === HINT)
 const chainOf = (snap, node) => snap.chains.get(node) ?? []
 const parentOf = (snap, node) => {
   const chain = chainOf(snap, node)
@@ -231,7 +273,7 @@ const rowDossier = (h, snap, row, menuBox, pickIt) => {
   // `oracleContainedXY` is false for every row while the PNG shows them painted.
   const realClips = chain.filter(node => menuBox === undefined || containsBox(rect(node), menuBox))
   const inside = target => realClips.every(node => containsBox(rect(node), target))
-  const nameSpan = (row.children ?? []).find(node => /^\s*›?\/[^\s]/u.test(String(node.text ?? '')))
+  const nameSpan = (row.children ?? []).find(node => String(node.text ?? '').trim().length > 0)
   const nameBox = nameSpan === undefined ? box : rect(nameSpan)
   // The SAME geometry oracle (`visibleSpan`/`containedXY` from
   // tern-pane-geometry.mjs), applied to the REAL clip chain instead of every
@@ -324,7 +366,7 @@ const typeText = async (h, text) => {
     if (after.text === before.text + text) {
       if (inputChannel.kind === 'UNSET') {
         inputChannel.kind = 'ctl key'
-        h.measure('text input channel', `ctl key ${JSON.stringify(text)} inserted the text (GUI_CONTROL, control-injected)`)
+        h.measure('text input channel', `ctl key ${JSON.stringify(text)} inserted the text (CONTROL_INJECTED_INPUT, GUI control channel, not OS_INPUT_VERIFIED)`)
       }
       return after
     }
@@ -358,11 +400,90 @@ const sendCase = async (h, command) => {
 const querySlash = async (h, label, { pick = true } = {}) => {
   await sendCase(h, 'clear')
   const typed = await typeText(h, '/')
-  const painted = await waitUntil(h, `${label}: the candidate list painted`, () => slashRows(h.snapshot()).length > 0,
+  const painted = await waitUntil(h, `${label}: the candidate list painted`, () => completionRows(h.snapshot()).length > 0,
     { limit: 40, intervalMs: 150 })
   const snap = h.snapshot()
-  const rows = slashRows(snap)
+  const rows = completionRows(snap)
   return { typed, painted, snap, rows, menu: menuNodeOf(snap, rows) }
+}
+/** Clear through the production composer port, then type a query with a real
+ *  control-injected key/commit and wait for the real candidate list. The
+ *  candidate predicate lets a negative case bound its own absence without
+ *  guessing from a fixed delay; the caller still checks every negative sink. */
+const queryText = async (h, label, text, expected = () => true) => {
+  await sendCase(h, 'clear')
+  const typed = await typeText(h, text)
+  const painted = await waitUntil(h, `${label}: the candidate list painted`, () => {
+    const snap = h.snapshot()
+    const rows = completionRows(snap)
+    return rows.length > 0 && expected(rows.map(row => rowName(row)))
+  }, { limit: 60, intervalMs: 150 })
+  const snap = h.snapshot()
+  const rows = completionRows(snap)
+  return { typed, painted, snap, rows, menu: menuNodeOf(snap, rows), names: rows.map(row => rowName(row)) }
+}
+/** A NEGATIVE query: type it, wait the same bounded absence window the I-C
+ *  cases use, then read the real tree and every production sink. It never
+ *  asserts a row did not paint from a `waitUntil` that was never run. */
+const queryNegative = async (h, label, text) => {
+  await sendCase(h, 'clear')
+  const typed = await typeText(h, text)
+  await h.sleep(ABSENCE_WINDOW_MS)
+  const snap = h.snapshot()
+  const rows = completionRows(snap)
+  return { typed, snap, rows, menu: menuNodeOf(snap, rows), names: rows.map(row => rowName(row)) }
+}
+/** The positive control for one row's identity in the frame the client painted:
+ *  the row is an `sf-el` button in the ONE menu that owns the frozen hint, and
+ *  the client's own tree paints exactly one highlighted row in that frame. The
+ *  wire table is cumulative across this lane's many revisions, so it is NOT the
+ *  authority for the current row set; it is recorded separately as evidence. */
+const rowFrame = (h, snap, rows) => {
+  const lit = rows.filter(row => rowPaint(h, row).startsWith('›'))
+  return {
+    menu: menuNodeOf(snap, rows),
+    menusInWire: wireCompletionMenuCount(h),
+    rows: rows.length,
+    wire: wireCompletionRows(h).length,
+    lit: lit.length,
+    highlighted: lit.map(row => rowName(row)),
+    paints: rows.map(row => rowPaint(h, row)),
+  }
+}
+/** Walk the current frame with real ArrowDown keys until the desired candidate
+ *  is highlighted. It reads the client's own painted `›`, not the cumulative
+ *  wire fold. */
+const walkToCandidate = async (h, desired, limit = 8) => {
+  for (let step = 0; step <= limit; step += 1) {
+    const rows = completionRows(h.snapshot())
+    const lit = rows.find(row => rowPaint(h, row).startsWith('›'))
+    if (lit !== undefined && rowName(lit) === desired) return { found: true, steps: step, rows: rows.length }
+    if (step < limit) await h.key('ArrowDown', 350)
+  }
+  const rows = completionRows(h.snapshot())
+  return { found: false, steps: limit + 1, rows: rows.length, lit: rows.find(row => rowPaint(h, row).startsWith('›')) ?? null }
+}
+/** One control-injected click on a row of the CURRENT frame, then the focus is
+ *  restored to the editor for the next keyboard case (the I-C mouse rule). */
+const clickCurrentRow = async (h, row) => {
+  const point = centreOf(rect(row))
+  await h.clickAt(point.x, point.y, 900)
+  const editor = editorNode(h.snapshot())
+  if (editor === undefined) return point
+  const editorPoint = centreOf(rect(editor))
+  await h.clickAt(editorPoint.x, editorPoint.y, 700)
+  return point
+}
+/** A stale click: the point of a row from an older frame, delivered after the
+ *  row itself is gone. A no-op is measured through the production sinks. */
+const clickStalePoint = async (h, staleRow) => {
+  const point = centreOf(rect(staleRow))
+  await h.clickAt(point.x, point.y, 900)
+  const editor = editorNode(h.snapshot())
+  if (editor === undefined) return point
+  const editorPoint = centreOf(rect(editor))
+  await h.clickAt(editorPoint.x, editorPoint.y, 700)
+  return point
 }
 const writeLedger = (h, name, value) => {
   const path = join(h.root, name)
@@ -381,7 +502,7 @@ const finish = (h, extra = {}) => {
 
 export default async function (h) {
   const out = h.root
-  const subject = join(h.repo, 'scripts', 'tern-gui-slash-completion-subject.mts')
+  const subject = join(h.repo, 'scripts', 'tern-gui-input-completion-subject.mts')
   const ternBin = process.env.TERN_BIN ?? 'tern'
   const ternVersion = execFileSync(ternBin, ['--version'], { encoding: 'utf8' }).trim()
   const lock = readFileSync(join(h.repo, 'pnpm-lock.yaml'), 'utf8')
@@ -434,8 +555,16 @@ export default async function (h) {
   h.check('three newest-first history rows were committed through the production display seam',
     seamReset?.entries?.length === 3 && JSON.stringify(seamReset.entries) === JSON.stringify(RECALL)
     && seamReset?.newestFirst === true, JSON.stringify(seamReset))
-  h.check('the slash catalog arrived through the mount install port from the real command layer',
-    productionInstall !== undefined && catalog.length > 0, JSON.stringify(productionInstall))
+  h.check('the I-D subject created REAL Host and Client fixture files and used the production Client-cwd lever',
+    (subjectReady?.hostFiles ?? []).length === 3 && (subjectReady?.clientFiles ?? []).length === 4
+    && subjectReady?.clientCwd === subjectReady?.clientRoot
+    && String(subjectReady?.clientCwdLever ?? '').includes('process.chdir(clientRoot) BEFORE createDirectTspFixture'),
+    JSON.stringify({ hostFiles: subjectReady?.hostFiles, clientFiles: subjectReady?.clientFiles, clientCwd: subjectReady?.clientCwd, lever: subjectReady?.clientCwdLever }))
+  h.check('the production catalog arrived through the mount install port from the real command layer',
+    productionInstall !== undefined && catalog.length > 0 && productionInstall.hasFileReferences === true
+    && productionInstall.localCwd === subjectReady?.clientCwd, JSON.stringify(productionInstall))
+  h.check('the production inline-attachment stager was installed through the mount port',
+    kindCount(h, 'stager.installed') > 0, JSON.stringify(records(h).filter(entry => entry.kind === 'stager.installed')))
   writeLedger(h, 'environment.json', {
     ternVersion, sdkPin, integrity, caps: subjectReady?.caps, seamReset, productionInstall,
     catalogCount: catalog.length, catalog,
@@ -451,20 +580,18 @@ export default async function (h) {
   h.check('the natural `/` query reached the composer as a real draft change',
     natural.typed.text === '/' && natural.typed.cursor === 1 && natural.painted,
     JSON.stringify({ typed: natural.typed, painted: natural.painted }))
-  const naturalRows = slashRows(natural.snap)
+  const naturalRows = completionRows(natural.snap)
   const naturalNames = naturalRows.map(row => rowName(row))
-  const naturalWireRows = wireSlashRows(h)
   const highlightedNodes = naturalRows.filter(row => rowPaint(h, row).startsWith('›'))
   h.check('the popup paints at most six candidate rows plus one hint row',
-    naturalRows.length > 0 && naturalRows.length <= 6 && slashHintNode(natural.snap) !== undefined,
-    JSON.stringify({ rows: naturalRows.length, hint: slashHintNode(natural.snap) === undefined ? null : rect(slashHintNode(natural.snap)) }))
+    naturalRows.length > 0 && naturalRows.length <= 6 && completionHintNode(natural.snap) !== undefined,
+    JSON.stringify({ rows: naturalRows.length, hint: completionHintNode(natural.snap) === undefined ? null : rect(completionHintNode(natural.snap)) }))
   h.check('the painted rows are the installed catalog, in provider order, with no second list',
-    naturalNames.every(name => catalog.includes(name.slice(1))) && naturalNames.length === naturalWireRows.length,
-    JSON.stringify({ painted: naturalNames, catalog: catalog.slice(0, 8), wireRows: naturalWireRows.length }))
+    naturalNames.length > 0 && naturalNames.every(name => catalog.includes(name.slice(1))),
+    JSON.stringify({ painted: naturalNames, catalog: catalog.slice(0, 8) }))
   h.check('the default highlight is the FIRST row and exactly one row carries it',
-    highlightedNodes.length === 1 && naturalWireRows.filter(row => row.highlighted).length === 1
-    && rowPaint(h, highlightedNodes[0]) === rowPaint(h, naturalRows[0]),
-    JSON.stringify({ painted: naturalRows.map(row => rowPaint(h, row)).map(text => text.slice(0, 24)), wireHighlight: naturalWireRows.filter(row => row.highlighted).length }))
+    highlightedNodes.length === 1 && rowPaint(h, highlightedNodes[0]) === rowPaint(h, naturalRows[0]),
+    JSON.stringify({ painted: naturalRows.map(row => rowPaint(h, row)).map(text => text.slice(0, 24)) }))
   const afterPaint = editorFacts(h)
   h.check('painting the list leaves the editor `text`/`cursor` props exactly what the user typed',
     afterPaint.text === '/' && afterPaint.cursor === 1, JSON.stringify({ typed: natural.typed, afterPaint }))
@@ -481,11 +608,12 @@ export default async function (h) {
     note: 'the list is an absolutely positioned child of the Composer shell that overflows the Dock region upward by design; the oracle treats every sized ancestor as a clip, so these numbers are the documented over-approximation, and ctl pick + the PNG are the client authority',
   }))
   safeLayersMeasure(h)
-  h.capture('01-slash-popup-1280x800-light', 'the natural `/` query, default highlight on the first row')
+  h.capture('01-input-popup-1280x800-light', 'the natural `/` query, default highlight on the first row')
   writeLedger(h, 'natural-query.json', {
     catalogCount: catalog.length, painted: naturalNames,
-    paint: naturalRows.map(row => rowPaint(h, row)), wireRows: naturalWireRows,
-    hintRect: slashHintNode(natural.snap) === undefined ? undefined : rect(slashHintNode(natural.snap)),
+    paint: naturalRows.map(row => rowPaint(h, row)),
+    wireEditorId: wireEditor(h)?.id ?? null,
+    hintRect: completionHintNode(natural.snap) === undefined ? undefined : rect(completionHintNode(natural.snap)),
     menuRect: natural.menu === undefined ? undefined : rect(natural.menu),
     before: natural.typed, afterPaint,
   })
@@ -499,7 +627,7 @@ export default async function (h) {
     await h.key(step, 450)
     const after = editorFacts(h)
     const snap = h.snapshot()
-    const rows = slashRows(snap)
+    const rows = completionRows(snap)
     const lit = rows.filter(row => rowPaint(h, row).startsWith('›'))
     const index = lit.length === 0 ? -1 : rows.indexOf(lit[0])
     walk.push({ step, highlightIndex: index, painted: rows.length, totalCatalog: catalog.length })
@@ -517,17 +645,17 @@ export default async function (h) {
     kindCount(h, 'composer.applyCompletionEdit') === writesAtStart
     && kindCount(h, 'handler.submit') === submitsAtStart && kindCount(h, 'writer.prompt') === promptsAtStart,
     JSON.stringify({ writes: kindCount(h, 'composer.applyCompletionEdit'), submits: kindCount(h, 'handler.submit') }))
-  h.capture('02-slash-walk-1280x800-light', 'the highlight walked by real ArrowDown/ArrowUp/Tab/Shift+Tab')
+  h.capture('02-input-walk-1280x800-light', 'the highlight walked by real ArrowDown/ArrowUp/Tab/Shift+Tab')
   writeLedger(h, 'arrow-walk.json', { painted: naturalNames, totalCatalog: catalog.length, walk })
 
   // ── 3. A plain Enter completes the name and is NOT a submission ───────────
   await querySlash(h, 'enter case reopen')
-  const enterTarget = rowName(slashRows(h.snapshot())[0])
+  const enterTarget = rowName(completionRows(h.snapshot())[0])
   const enterKeys = kindCount(h, 'composer.applyKey')
   await h.key('Enter', 600)
   const completed = editorFacts(h)
   const writeRecord = lastKind(h, 'composer.applyCompletionEdit')
-  const afterEnterRows = slashRows(h.snapshot())
+  const afterEnterRows = completionRows(h.snapshot())
   h.check('a plain Enter writes ONLY the command name into the composer',
     completed.text === `${enterTarget} ` && completed.cursor === completed.text.length,
     JSON.stringify({ expected: `${enterTarget} `, completed }))
@@ -541,7 +669,7 @@ export default async function (h) {
     JSON.stringify({ submits: kindCount(h, 'handler.submit'), prompts: kindCount(h, 'writer.prompt'), writeRecord }))
   h.check('the Enter the list consumed never re-entered the composer reducer',
     kindCount(h, 'composer.applyKey') === enterKeys, JSON.stringify({ enterKeys, now: kindCount(h, 'composer.applyKey') }))
-  h.capture('03-slash-enter-completed-1280x800-light', `the composer holds ${JSON.stringify(completed.text)} after the list-consuming Enter`)
+  h.capture('03-input-enter-completed-1280x800-light', `the composer holds ${JSON.stringify(completed.text)} after the list-consuming Enter`)
   // ── 4. A control-injected click completes the row it names, once ─────────
   const clicked = await querySlash(h, 'click case')
   const clickTarget = clicked.rows[1] ?? clicked.rows[0]
@@ -565,7 +693,7 @@ export default async function (h) {
     && kindCount(h, 'handler.submit') === submitsAtStart && kindCount(h, 'writer.prompt') === promptsAtStart
     && kindCount(h, 'composer.applyKey') === clickKeys,
     JSON.stringify({ point, clickedName, clickDraft, clickWrite, submits: kindCount(h, 'handler.submit') }))
-  h.capture('04-slash-row-click-1280x800-light', `the row at ${JSON.stringify(point)} completed by a control-injected click`)
+  h.capture('04-input-row-click-1280x800-light', `the row at ${JSON.stringify(point)} completed by a control-injected click`)
   writeLedger(h, 'row-click.json', { point, clickedName, clickDraft, clickWrite })
   // The click moved the client's focus to the row's button; the lane continues
   // with keys, so the composer seat must be back in focus — proven, not assumed.
@@ -583,7 +711,7 @@ export default async function (h) {
   await h.sleep(ABSENCE_WINDOW_MS)
   const escapedDraft = editorFacts(h)
   h.check('Escape with the list open closes the list and leaves the draft untouched',
-    slashRows(h.snapshot()).length === 0 && escapedDraft.text === '/' && escapedDraft.cursor === 1,
+    completionRows(h.snapshot()).length === 0 && escapedDraft.text === '/' && escapedDraft.cursor === 1,
     JSON.stringify({ escapedDraft }))
   h.check('Escape with the list open records NO cancel',
     kindCount(h, 'handler.cancel') === cancelsBefore,
@@ -608,20 +736,20 @@ export default async function (h) {
   h.check('the recall case starts with the list open', recallQuery.rows.length > 0, JSON.stringify(recallQuery.typed))
   await h.key('Escape', 500)
   await h.sleep(ABSENCE_WINDOW_MS)
-  h.check('the recall case continues with the list CLOSED', slashRows(h.snapshot()).length === 0, '')
+  h.check('the recall case continues with the list CLOSED', completionRows(h.snapshot()).length === 0, '')
   await h.key('ArrowUp', 450)
   const lineHome = editorFacts(h)
   h.check('with the list closed the first ↑ is still the I-B line-home move, not a recall',
-    lineHome.text === '/' && lineHome.cursor === 0 && slashRows(h.snapshot()).length === 0, JSON.stringify(lineHome))
+    lineHome.text === '/' && lineHome.cursor === 0 && completionRows(h.snapshot()).length === 0, JSON.stringify(lineHome))
   await h.key('ArrowUp', 450)
   const recalled = editorFacts(h)
   h.check('with the list closed the next ↑ performs the I-B history recall',
-    recalled.text === RECALL[0] && slashRows(h.snapshot()).length === 0, JSON.stringify({ expected: RECALL[0], recalled }))
+    recalled.text === RECALL[0] && completionRows(h.snapshot()).length === 0, JSON.stringify({ expected: RECALL[0], recalled }))
   await h.key('ArrowDown', 450)
   const restoredDraft = editorFacts(h)
   h.check('↓ leaving the recall restores the exact draft the browse replaced',
     restoredDraft.text === '/', JSON.stringify(restoredDraft))
-  h.capture('06-slash-closed-arrow-recall-1280x800-light', 'the I-B recall still owns ↑ once the candidate list is closed')
+  h.capture('06-input-closed-arrow-recall-1280x800-light', 'the I-B recall still owns ↑ once the candidate list is closed')
   writeLedger(h, 'recall-after-close.json', { seed, seededReset, lineHome, recalled, restoredDraft })
 
   // ── 7. A catalog re-install withdraws a removed command ──────────────────
@@ -631,7 +759,7 @@ export default async function (h) {
   const reduce = await sendCase(h, 'catalog-reduce')
   const withdrawn = reduce?.withdrawn ?? ''
   await h.sleep(ABSENCE_WINDOW_MS)
-  const withdrawnRows = slashRows(h.snapshot())
+  const withdrawnRows = completionRows(h.snapshot())
   h.check('a catalog re-commit withdraws the current list at once',
     reduce?.committed === true && withdrawnRows.length === 0, JSON.stringify({ reduce, rows: withdrawnRows.length }))
   h.check('the re-commit names the command it withdrew and that command was the row the popup showed',
@@ -657,7 +785,7 @@ export default async function (h) {
   // call, and the claim below is that the MENU'S keys add no further one.
   const seatBefore = editorFacts(h)
   const seatApplyKeys = kindCount(h, 'composer.applyKey')
-  h.check('the slash list is open before the higher control takes the keys',
+  h.check('the completion list is open before the higher control takes the keys',
     opened.rows.length > 0, JSON.stringify(opened.typed))
   // The Permission trigger is measured first: an absent roster is a composition
   // fact, and this lane must not claim a control it cannot really open.
@@ -676,26 +804,26 @@ export default async function (h) {
       || h.texts(snap).some(text => String(text).includes('All models & details') || String(text).includes('Scripted Model'))
   }, { limit: 40, intervalMs: 150 })
   const menuSnap = h.snapshot()
-  h.check('the production quick menu became visible and the slash list is gone',
-    menuOpened && seatOpen?.opened === true && slashRows(menuSnap).length === 0 && slashHintNode(menuSnap) === undefined,
-    JSON.stringify({ seatOpen, slashRows: slashRows(menuSnap).length, hint: slashHintNode(menuSnap) === undefined ? null : rect(slashHintNode(menuSnap)) }))
+  h.check('the production quick menu became visible and the completion list is gone',
+    menuOpened && seatOpen?.opened === true && completionRows(menuSnap).length === 0 && completionHintNode(menuSnap) === undefined,
+    JSON.stringify({ seatOpen, completionRows: completionRows(menuSnap).length, hint: completionHintNode(menuSnap) === undefined ? null : rect(completionHintNode(menuSnap)) }))
   for (const step of ['ArrowDown', 'ArrowUp', 'Tab', 'Enter']) {
     await h.key(step, 450)
     const after = editorFacts(h)
     h.check(`${step} while the quick menu owns the keys reaches neither the composer nor a submit, and no list comes back`,
       after.text === seatBefore.text && after.cursor === seatBefore.cursor
       && kindCount(h, 'composer.applyKey') === seatApplyKeys
-      && kindCount(h, 'handler.submit') === submitsAtStart && slashRows(h.snapshot()).length === 0,
+      && kindCount(h, 'handler.submit') === submitsAtStart && completionRows(h.snapshot()).length === 0,
       JSON.stringify({ step, seatBefore, after, applyKeys: kindCount(h, 'composer.applyKey') }))
   }
-  h.capture('08-higher-seat-1280x800-light', 'the quick menu owns the keys; the slash list is gone')
+  h.capture('08-higher-seat-1280x800-light', 'the quick menu owns the keys; the completion list is gone')
   await h.key('Escape', 500)
   await sendCase(h, 'seat-close')
   const afterSeat = editorFacts(h)
   h.check('the composer draft and caret survive the higher control exactly',
     afterSeat.text === seatBefore.text && afterSeat.cursor === seatBefore.cursor, JSON.stringify({ seatBefore, afterSeat }))
   const reacquired = await querySlash(h, 'seat released requery')
-  h.check('after the higher control closes, the slash seat is admitted again',
+  h.check('after the higher control closes, the completion seat is admitted again',
     reacquired.rows.length > 0, JSON.stringify({ rows: reacquired.rows.length }))
   writeLedger(h, 'higher-seat.json', { seatBefore, seatOpen, afterSeat, rowsAfterRelease: reacquired.rows.length })
 
@@ -782,7 +910,7 @@ export default async function (h) {
   })
   await sendCase(h, 'catalog-restore')
   h.measure('the bare (no el + no styles) ≤3 plain ui.text fallback',
-    'NOT_VERIFIED: this client negotiates both `el` and `styles`, so the mount always takes the Quiet Composer branch and the fallback is unreachable on a real pane. The fallback is owned by test/tui/tern-tsp-slash-completion.test.ts (SDK mount).')
+    'NOT_VERIFIED: this client negotiates both `el` and `styles`, so the mount always takes the Quiet Composer branch and the fallback is unreachable on a real pane. The fallback is owned by test/tui/tern-tsp-input-completion.test.ts (SDK mount).')
 
   // ── 11. Eight real appearance/geometry cells with the list OPEN ──────────
   const cells = []
@@ -796,9 +924,9 @@ export default async function (h) {
       await h.sleep(400)
       const queried = await querySlash(h, `cell ${viewport.name} ${appearance}`, { pick: false })
       const clip = clipReport(h)
-      const id = h.capture(`cell-${viewport.name}-${appearance}`, `slash completion UX ${viewport.name} ${appearance}`)
+      const id = h.capture(`cell-${viewport.name}-${appearance}`, `input completion UX ${viewport.name} ${appearance}`)
       const snap = h.snapshot()
-      const rows = slashRows(snap)
+      const rows = completionRows(snap)
       const menu = menuNodeOf(snap, rows)
       const menuBox = menu === undefined ? undefined : rect(menu)
       const rowDossiers = rows.map(row => rowDossier(h, snap, row, menuBox, true))
@@ -833,9 +961,9 @@ export default async function (h) {
         rows: rowDossiers,
         highlightedIndex: litIndex,
         highlighted: rowDossiers[litIndex] ?? null,
-        hint: slashHintNode(snap) === undefined ? null : {
-          rect: rect(slashHintNode(snap)),
-          insideMenu: containsBox(menuBox, rect(slashHintNode(snap))),
+        hint: completionHintNode(snap) === undefined ? null : {
+          rect: rect(completionHintNode(snap)),
+          insideMenu: containsBox(menuBox, rect(completionHintNode(snap))),
         },
         caret: {
           rect: caret === undefined ? undefined : rect(caret),
@@ -930,7 +1058,369 @@ export default async function (h) {
   await h.resize(1280, 800)
   writeLedger(h, 'geometry-cells.json', cells)
 
-  // ── 12. Source→sink ledger and the honest lane boundaries ────────────────
+  // ── 12. I-D J1/J2/J4: REAL Host `@`, inline action → directory → image/file,
+  //         pointer accept, the placeholder/notice, the separate Enter ────────
+  const idCases = {}
+  const stateCase = await sendCase(h, 'state')
+  h.check('the production Direct writer and both real file sources are observed before the I-D journeys',
+    stateCase?.rendererObserved === true && kindCount(h, 'stager.installed') > 0
+    && kindCount(h, 'host.references') >= 0 && kindCount(h, 'client.listDirectory') >= 0,
+    JSON.stringify(stateCase?.seatState ?? {}))
+
+  // J1 — the Host `@` seat, a keyboard accept and a pointer accept, an
+  // authoritative `ok:[]`, stale click, Escape and no cross-source substitution.
+  const hostBefore = {
+    submits: kindCount(h, 'handler.submit'), prompts: kindCount(h, 'writer.prompt'),
+    writes: kindCount(h, 'composer.applyCompletionEdit'), host: kindCount(h, 'host.references'),
+    clientList: kindCount(h, 'client.listDirectory'), clientFind: kindCount(h, 'client.find'),
+    stager: kindCount(h, 'stager.call'), image: kindCount(h, 'store.image.add'),
+    file: kindCount(h, 'store.file.add'), fragments: kindCount(h, 'composer.replaceInlineAttachmentFragment'),
+  }
+  const host = await queryText(h, 'Host @ explicit scope', HOST_SCOPE_QUERY,
+    names => names.some(name => name.startsWith('@src/')))
+  const hostFrame = rowFrame(h, host.snap, host.rows)
+  const hostNames = host.names
+  const hostRowsShown = host.rows.map(row => rowDossier(h, host.snap, row, host.menu === undefined ? undefined : rect(host.menu), true))
+  h.capture('20-id-host-at-rows-1280x800-light', 'I-D J1: the real Host @src/de candidate rows')
+  h.check('J1: the real explicit Host @ query reached the composer, painted Host @ rows in the one completion menu and no second editor',
+    host.typed.text === HOST_SCOPE_QUERY && host.typed.cursor === HOST_SCOPE_QUERY.length && host.painted
+    && hostNames.length > 0 && hostNames.every(name => name.startsWith('@'))
+    && hostFrame.menu !== undefined && hostFrame.menusInWire >= 1 && hostFrame.lit === 1
+    && wireEditorCount(h) === 1 && completionHintNode(host.snap) !== undefined
+    && hostFrame.rows === hostNames.length && hostFrame.wire >= hostFrame.rows,
+    JSON.stringify({ typed: host.typed, painted: host.painted, names: hostNames, frame: hostFrame }))
+  h.check('J1: the first Host @ row is VISIBLE and reachable in this real GUI window',
+    hostRowsShown.length > 0 && hostRowsShown[0].shown === true && hostRowsShown[0].hitOwnSubtree === true,
+    JSON.stringify({ first: hostRowsShown[0], all: hostRowsShown.map(row => ({ name: row.name, shown: row.shown })) }))
+  const hostScopeCalls = records(h).filter(entry => entry.kind === 'host.references').slice(hostBefore.host)
+  h.check('J1: the @ rows came from the REAL HostFilePort session scope over the Host workspace, never the Client filesystem',
+    hostScopeCalls.length > 0 && hostScopeCalls.some(entry => entry.scope?.kind === 'session'
+      && entry.scope?.sessionId === SESSION_A && String(entry.query ?? '').includes('src/de')
+      && entry.paths?.some(path => String(path).includes('deep')))
+    && kindCount(h, 'client.listDirectory') === hostBefore.clientList
+    && kindCount(h, 'client.find') === hostBefore.clientFind,
+    JSON.stringify({ hostScopeCalls, clientLists: kindCount(h, 'client.listDirectory') - hostBefore.clientList, clientFinds: kindCount(h, 'client.find') - hostBefore.clientFind }))
+  const hostFirst = host.rows[0]
+  const hostName = rowName(hostFirst)
+  const hostWrites = kindCount(h, 'composer.applyCompletionEdit')
+  const hostStager = kindCount(h, 'stager.call')
+  await h.key('Enter', 700)
+  const hostAccepted = editorFacts(h)
+  const hostAcceptedRows = completionRows(h.snapshot())
+  const hostWrite = lastKind(h, 'composer.applyCompletionEdit')
+  h.check('J1: a keyboard Enter accepts ONE Host @ row into literal editor text, keeps the surrounding prose and stages/submits NOTHING (a directory may continue the same seat)',
+    hostAccepted.text === `${HOST_PREFIX}${hostName}` && hostAccepted.cursor === hostAccepted.text.length
+    && hostWrite?.accepted === true && kindCount(h, 'composer.applyCompletionEdit') === hostWrites + 1
+    && kindCount(h, 'handler.submit') === hostBefore.submits && kindCount(h, 'writer.prompt') === hostBefore.prompts
+    && kindCount(h, 'stager.call') === hostStager && kindCount(h, 'store.image.add') === hostBefore.image
+    && kindCount(h, 'store.file.add') === hostBefore.file && kindCount(h, 'client.listDirectory') === hostBefore.clientList,
+    JSON.stringify({ expected: `${HOST_PREFIX}${hostName}`, accepted: hostAccepted, write: hostWrite, submits: kindCount(h, 'handler.submit'), continuationRows: hostAcceptedRows.map(row => rowName(row)) }))
+  h.capture('21-id-host-at-accepted-1280x800-light', 'I-D J1: one Host @ reference accepted as literal text, prose intact')
+  const hostPointer = await queryText(h, 'Host @ pointer accept', HOST_DIRECTORY_QUERY,
+    names => names.some(name => name.startsWith('@src/')))
+  const hostPointerTarget = hostPointer.rows.find(row => {
+    const name = rowName(row)
+    return name.startsWith('@src/') && !name.endsWith('/')
+  }) ?? hostPointer.rows.find(row => rowName(row).startsWith('@src/')) ?? hostPointer.rows[0]
+  const hostPointerName = rowName(hostPointerTarget)
+  const hostPointerWrites = kindCount(h, 'composer.applyCompletionEdit')
+  const hostPointerStager = kindCount(h, 'stager.call')
+  const hostPoint = await clickCurrentRow(h, hostPointerTarget)
+  const hostPointerDraft = editorFacts(h)
+  const hostPointerWrite = lastKind(h, 'composer.applyCompletionEdit')
+  h.check('J1: a control-injected click on the CURRENT frame Host @ row accepts that row once, leaves literal text and stages/submits NOTHING',
+    hostPointer.painted && hostPointerDraft.text === `${hostPointerName} `
+    && hostPointerDraft.cursor === hostPointerDraft.text.length
+    && hostPointerWrite?.accepted === true && kindCount(h, 'composer.applyCompletionEdit') === hostPointerWrites + 1
+    && kindCount(h, 'stager.call') === hostPointerStager
+    && kindCount(h, 'handler.submit') === hostBefore.submits && kindCount(h, 'writer.prompt') === hostBefore.prompts
+    && kindCount(h, 'client.listDirectory') === hostBefore.clientList,
+    JSON.stringify({ point: hostPoint, name: hostPointerName, draft: hostPointerDraft, write: hostPointerWrite }))
+  h.capture('22-id-host-at-click-1280x800-light', 'I-D J1: the current-frame Host @ row accepted by a control-injected click')
+  // A stale row object can never be the frame the client currently paints:
+  // remember one, close the list with Escape, then click the OLD coordinates.
+  const staleHost = await queryText(h, 'Host @ stale row', HOST_DIRECTORY_QUERY,
+    names => names.some(name => name.startsWith('@src/')))
+  const staleRow = staleHost.rows[0]
+  const staleDraftBefore = editorFacts(h)
+  const staleWrites = kindCount(h, 'composer.applyCompletionEdit')
+  const staleStager = kindCount(h, 'stager.call')
+  await h.key('Escape', 500)
+  await h.sleep(ABSENCE_WINDOW_MS)
+  const stalePoint = await clickStalePoint(h, staleRow)
+  const staleDraftAfter = editorFacts(h)
+  h.check('J1 NEGATIVE: Escape closes the Host popup without editing or cancelling, and a stale-frame row click has ZERO side effects',
+    completionRows(h.snapshot()).length === 0 && staleDraftBefore.text === HOST_DIRECTORY_QUERY
+    && staleDraftAfter.text === HOST_DIRECTORY_QUERY && kindCount(h, 'composer.applyCompletionEdit') === staleWrites
+    && kindCount(h, 'stager.call') === staleStager && kindCount(h, 'handler.submit') === hostBefore.submits
+    && kindCount(h, 'writer.prompt') === hostBefore.prompts
+    && kindCount(h, 'handler.cancel') === stateCase?.seatState?.handlerCancel,
+    JSON.stringify({ stalePoint, before: staleDraftBefore, after: staleDraftAfter, writes: kindCount(h, 'composer.applyCompletionEdit') - staleWrites }))
+  const emptyHostBefore = kindCount(h, 'host.references')
+  const emptyHost = await queryNegative(h, 'Host @ authoritative empty', BARE_HOST_QUERY)
+  const emptyHostCalls = records(h).filter(entry => entry.kind === 'host.references').slice(emptyHostBefore)
+  h.check('J1 NEGATIVE: an authoritative empty Host answer paints NO @ rows and does NOT fall back to the Client-local files',
+    emptyHost.typed.text === BARE_HOST_QUERY && emptyHost.rows.length === 0
+    && emptyHostCalls.some(entry => entry.result === 'ok' && entry.count === 0)
+    && kindCount(h, 'client.listDirectory') === hostBefore.clientList
+    && kindCount(h, 'client.find') === hostBefore.clientFind
+    && kindCount(h, 'handler.submit') === hostBefore.submits,
+    JSON.stringify({ typed: emptyHost.typed, rows: emptyHost.names, hostCalls: emptyHostCalls, clientLists: kindCount(h, 'client.listDirectory') - hostBefore.clientList }))
+  const crossLocalBefore = kindCount(h, 'client.listDirectory')
+  const crossLocal = await queryNegative(h, 'cross-source local path', CROSS_LOCAL_ARG)
+  h.check('J1 NEGATIVE: a Client-local path query does NOT substitute the Host-only deeper/ workspace file',
+    crossLocal.rows.length === 0 && !crossLocal.names.some(name => name.includes('deeper'))
+    && kindCount(h, 'client.listDirectory') > crossLocalBefore
+    && kindCount(h, 'handler.submit') === hostBefore.submits,
+    JSON.stringify({ typed: crossLocal.typed, names: crossLocal.names, clientLists: kindCount(h, 'client.listDirectory') - crossLocalBefore }))
+  const crossMentionBefore = kindCount(h, 'host.references')
+  const crossMention = await queryNegative(h, 'cross-source @ argument', CROSS_MENTION_ARG)
+  h.check('J1 NEGATIVE: an @ token in the /image argument stays Client-local and does NOT call the Host port',
+    crossMention.rows.length === 0 && kindCount(h, 'host.references') === crossMentionBefore
+    && kindCount(h, 'client.listDirectory') > crossLocalBefore
+    && kindCount(h, 'handler.submit') === hostBefore.submits,
+    JSON.stringify({ typed: crossMention.typed, names: crossMention.names, hostCalls: kindCount(h, 'host.references') - crossMentionBefore }))
+  idCases.host = {
+    query: HOST_SCOPE_QUERY, names: hostNames, frame: hostFrame, firstShown: hostRowsShown[0],
+    hostScopeCalls, keyboard: { expected: `${HOST_PREFIX}${hostName}`, draft: hostAccepted, write: hostWrite },
+    pointer: { name: hostPointerName, point: hostPoint, draft: hostPointerDraft, write: hostPointerWrite },
+    stale: { point: stalePoint, before: staleDraftBefore, after: staleDraftAfter },
+    emptyHostCalls, crossLocal: crossLocal.names, crossMention: crossMention.names,
+  }
+  writeLedger(h, 'id-host-journey.json', idCases.host)
+
+  // J2 — the body inline action, the real local path rows, directory
+  // continuation, the real image intake, the placeholder + notice + SEPARATE
+  // Enter (a genuine submission and its PreparedPrompt are recorded).
+  const inlineBefore = {
+    submits: kindCount(h, 'handler.submit'), prompts: kindCount(h, 'writer.prompt'),
+    writes: kindCount(h, 'composer.applyCompletionEdit'), host: kindCount(h, 'host.references'),
+    clientList: kindCount(h, 'client.listDirectory'), stager: kindCount(h, 'stager.call'),
+    image: kindCount(h, 'store.image.add'), file: kindCount(h, 'store.file.add'),
+    fragments: kindCount(h, 'composer.replaceInlineAttachmentFragment'), notices: kindCount(h, 'composer.notify'),
+  }
+  const action = await queryText(h, 'inline action seat', INLINE_ACTION_QUERY,
+    names => names.includes('/image'))
+  const actionFrame = rowFrame(h, action.snap, action.rows)
+  h.capture('23-id-inline-action-rows-1280x800-light', 'I-D J2: the fixed inline image/attach action rows')
+  h.check('J2: the body inline /im query paints the fixed image action row and calls NO file source',
+    action.painted && action.typed.text === INLINE_ACTION_QUERY
+    && action.names.includes('/image') && action.rows.length === 1
+    && actionFrame.menu !== undefined && actionFrame.lit === 1
+    && kindCount(h, 'host.references') === inlineBefore.host
+    && kindCount(h, 'client.listDirectory') === inlineBefore.clientList
+    && kindCount(h, 'stager.call') === inlineBefore.stager,
+    JSON.stringify({ typed: action.typed, names: action.names, frame: actionFrame }))
+  const actionWrites = kindCount(h, 'composer.applyCompletionEdit')
+  await h.key('Enter', 700)
+  const actionAccepted = editorFacts(h)
+  const pathAfterAction = await waitUntil(h, 'the accepted inline action immediately queried the local path seat', () =>
+    completionRows(h.snapshot()).some(row => rowName(row).startsWith('shots') || rowName(row).startsWith('notes.txt')),
+  { limit: 60, intervalMs: 150 })
+  const actionSnap = h.snapshot()
+  const actionRows = completionRows(actionSnap)
+  const pathNames = actionRows.map(row => rowName(row))
+  const pathFrame = rowFrame(h, actionSnap, actionRows)
+  h.check('J2: accepting the inline action writes /image , keeps the prose, immediately paints REAL Client-cwd rows, and reads NO file',
+    actionAccepted.text === INLINE_PATH_QUERY && actionAccepted.cursor === actionAccepted.text.length
+    && kindCount(h, 'composer.applyCompletionEdit') === actionWrites + 1
+    && pathAfterAction && pathNames.includes('shots/') && pathNames.includes('notes.txt')
+    && !pathNames.some(name => name.includes('deep.ts') || name.includes('only-one.ts'))
+    && pathFrame.menu !== undefined && pathFrame.lit === 1
+    && kindCount(h, 'host.references') === inlineBefore.host
+    && kindCount(h, 'client.listDirectory') > inlineBefore.clientList
+    && kindCount(h, 'stager.call') === inlineBefore.stager && kindCount(h, 'store.image.add') === inlineBefore.image,
+    JSON.stringify({ accepted: actionAccepted, names: pathNames, frame: pathFrame, clientLists: kindCount(h, 'client.listDirectory') - inlineBefore.clientList }))
+  h.capture('24-id-local-path-rows-1280x800-light', 'I-D J2: local path rows from the fixture Client cwd after accepting /image')
+  const clientBaseCalls = records(h).filter(entry => entry.kind === 'client.listDirectory' || entry.kind === 'client.find').slice(-6)
+  h.check('J2: every local discovery call reads a directory inside the REAL Client cwd',
+    clientBaseCalls.length > 0 && clientBaseCalls.some(entry => String(entry.baseDir ?? '') === subjectReady?.clientCwd)
+    && clientBaseCalls.every(entry => String(entry.baseDir ?? '').startsWith(`${subjectReady?.clientCwd ?? ''}/`)
+      || String(entry.baseDir ?? '') === subjectReady?.clientCwd),
+    JSON.stringify({ clientBaseCalls, expectedBase: subjectReady?.clientCwd }))
+  const dirWalk = await walkToCandidate(h, 'shots/')
+  const dirWrites = kindCount(h, 'composer.applyCompletionEdit')
+  const dirStager = kindCount(h, 'stager.call')
+  await h.key('Enter', 700)
+  const dirContinued = editorFacts(h)
+  const dirRows = completionRows(h.snapshot())
+  const dirNames = dirRows.map(row => rowName(row))
+  h.check('J2: accepting a real local DIRECTORY continues the same path seat (no file read, no store, no submit)',
+    dirWalk.found === true && dirContinued.text === `${PROSE_BODY}/image shots/` && dirNames.includes('shots/photo.png')
+    && kindCount(h, 'composer.applyCompletionEdit') === dirWrites + 1
+    && kindCount(h, 'stager.call') === dirStager
+    && kindCount(h, 'store.image.add') === inlineBefore.image && kindCount(h, 'store.file.add') === inlineBefore.file
+    && kindCount(h, 'handler.submit') === inlineBefore.submits,
+    JSON.stringify({ draft: dirContinued, names: dirNames, stagerCalls: kindCount(h, 'stager.call') - dirStager }))
+  h.capture('25-id-directory-continued-1280x800-light', 'I-D J2: the local directory continued, the real PNG row is visible')
+  const fileWalk = await walkToCandidate(h, 'shots/photo.png')
+  const fileWrites = kindCount(h, 'composer.applyCompletionEdit')
+  const fileStager = kindCount(h, 'stager.call')
+  const fileSubmits = kindCount(h, 'handler.submit')
+  const filePrompt = kindCount(h, 'writer.prompt')
+  await h.key('Enter', 100)
+  const acceptedPath = editorFacts(h)
+  const intakeSettled = await requiredWait(h, 'the real inline image intake committed its placeholder and notice', () =>
+    kindCount(h, 'composer.replaceInlineAttachmentFragment') === inlineBefore.fragments + 1
+    && kindCount(h, 'store.image.add') === inlineBefore.image + 1
+    && kindCount(h, 'composer.notify') > inlineBefore.notices,
+  { limit: 60, intervalMs: 200 })
+  const intakeSnap = h.snapshot()
+  const intakeRows = completionRows(intakeSnap)
+  const staged = records(h).filter(entry => entry.kind === 'store.image.add').at(-1)
+  const fragment = lastKind(h, 'composer.replaceInlineAttachmentFragment')
+  const notice = records(h).filter(entry => entry.kind === 'composer.notify').at(-1)
+  const placeholder = String(staged?.placeholder ?? '')
+  const placeholderDraft = editorFacts(h)
+  const fileWrite = lastKind(h, 'composer.applyCompletionEdit')
+  h.check('J2: accepting a real local FILE does ONE conditional edit, runs the production stager, stores the real PNG and splices its placeholder IN PLACE with the prose intact',
+    fileWalk.found === true && intakeSettled && fileWrite?.accepted === true
+    && String(fileWrite?.next?.text ?? '').startsWith(`${PROSE_BODY}/image shots/photo.png`)
+    && kindCount(h, 'composer.applyCompletionEdit') === fileWrites + 1
+    && kindCount(h, 'stager.call') === fileStager + 1
+    && fragment?.committed === true && fragment?.placeholder === placeholder
+    && placeholderDraft.text === `${PROSE_BODY}${placeholder} ` && placeholderDraft.cursor === placeholderDraft.text.length - 1
+    && String(staged?.source?.path ?? '').endsWith('shots/photo.png')
+    && String(notice?.message ?? '').includes(placeholder) && String(notice?.message ?? '').includes('Enter to send')
+    && intakeRows.length === 0,
+    JSON.stringify({ acceptedPath, staged, fragment, notice, placeholderDraft, intakeRows: intakeRows.length }))
+  h.check('J2: the placeholder/notice are still accept-only — a SEPARATE Enter is required to submit',
+    kindCount(h, 'handler.submit') === fileSubmits && kindCount(h, 'writer.prompt') === filePrompt
+    && kindCount(h, 'stager.call') === fileStager + 1,
+    JSON.stringify({ submits: kindCount(h, 'handler.submit') - fileSubmits, prompts: kindCount(h, 'writer.prompt') - filePrompt }))
+  h.capture('26-id-placeholder-notice-1280x800-light', `I-D J2: ${placeholder} spliced in place, intake notice painted, no submit yet`)
+  const separatedWrites = kindCount(h, 'composer.applyCompletionEdit')
+  const separatedStager = kindCount(h, 'stager.call')
+  await h.key('Enter', 1600)
+  const submitted = await requiredWait(h, 'the separate Enter submitted the placeholder draft once', () =>
+    kindCount(h, 'handler.submit') === fileSubmits + 1, { limit: 60 })
+  const inlineSubmitRecord = lastKind(h, 'handler.submit')
+  const inlinePromptRecord = lastKind(h, 'writer.prompt')
+  h.check('J2: the SEPARATE Enter submits the placeholder draft exactly once (no extra completion write, no second stager call)',
+    submitted && inlineSubmitRecord?.text === placeholderDraft.text && String(inlineSubmitRecord?.request) === 'enter'
+    && kindCount(h, 'handler.submit') === fileSubmits + 1
+    && kindCount(h, 'composer.applyCompletionEdit') === separatedWrites
+    && kindCount(h, 'stager.call') === separatedStager,
+    JSON.stringify({ submitRecord: inlineSubmitRecord, promptRecord: inlinePromptRecord, submits: kindCount(h, 'handler.submit') - fileSubmits }))
+  h.capture('27-id-separate-enter-submits-1280x800-light', 'I-D J2: the separate Enter submitted the placeholder draft')
+  writeLedger(h, 'id-inline-journey.json', {
+    action: { typed: action.typed, names: action.names, frame: actionFrame, accepted: actionAccepted },
+    path: { names: pathNames, frame: pathFrame, clientBaseCalls },
+    directory: { draft: dirContinued, names: dirNames },
+    file: { acceptedPath, staged, separatedWrites, fragment, notice, placeholderDraft, submitRecord: inlineSubmitRecord, promptRecord: inlinePromptRecord },
+  })
+  idCases.inline = {
+    action: action.names, path: pathNames, directory: dirNames,
+    acceptedPath, placeholder: placeholderDraft.text, submit: inlineSubmitRecord,
+    separateEnter: submitted, staged, fragment, notice,
+  }
+
+  // J2 pointer branch: inline action → local path rows → a real FILE accept by
+  // clicking the CURRENT frame's row, with surrounding prose preserved. This
+  // deliberately uses the generic /attach action so a generic Client-local file
+  // is probed/stored (the /image branch above proved the real PNG image store).
+  const pointerBody = await queryText(h, 'pointer inline action', `${PROSE_BODY}/att`,
+    names => names.includes('/attach'))
+  const pointerActionRow = pointerBody.rows.find(row => rowName(row) === '/attach') ?? pointerBody.rows[0]
+  const pointerActionWrites = kindCount(h, 'composer.applyCompletionEdit')
+  const pointerActionStager = kindCount(h, 'stager.call')
+  const pointerAction = await clickCurrentRow(h, pointerActionRow)
+  const pointerActionDraft = editorFacts(h)
+  const pointerActionWritesAfter = kindCount(h, 'composer.applyCompletionEdit')
+  const pointerPathPainted = await waitUntil(h, 'the clicked /attach action opened the local path seat', () =>
+    completionRows(h.snapshot()).some(row => rowName(row) === 'notes.txt' || rowName(row) === 'shots/'),
+  { limit: 60, intervalMs: 150 })
+  const pointerPathRows = completionRows(h.snapshot())
+  const pointerPathNames = pointerPathRows.map(row => rowName(row))
+  const pointerFileRow = pointerPathRows.find(row => rowName(row) === 'notes.txt') ?? pointerPathRows[0]
+  const pointerFileName = rowName(pointerFileRow)
+  const pointerFileWrites = kindCount(h, 'composer.applyCompletionEdit')
+  const pointerFileStager = kindCount(h, 'stager.call')
+  const pointerFileStore = kindCount(h, 'store.file.add')
+  const pointerFileSubmits = kindCount(h, 'handler.submit')
+  const pointerFragments = kindCount(h, 'composer.replaceInlineAttachmentFragment')
+  const pointerPoint = await clickCurrentRow(h, pointerFileRow)
+  const pointerFileDraft = editorFacts(h)
+  const pointerIntake = await requiredWait(h, 'the clicked local file row settled its real generic-file intake', () =>
+    kindCount(h, 'composer.replaceInlineAttachmentFragment') === pointerFragments + 1
+    && kindCount(h, 'store.file.add') === pointerFileStore + 1,
+  { limit: 60, intervalMs: 200 })
+  const pointerStaged = records(h).filter(entry => entry.kind === 'store.file.add').at(-1)
+  const pointerPlaceholder = String(pointerStaged?.placeholder ?? '')
+  const pointerDraft = editorFacts(h)
+  h.check('J4: a control-injected click on the CURRENT action row writes /attach and opens the real Client path rows; clicking a real file row stages it in place with NO submit',
+    pointerBody.painted && rowName(pointerActionRow) === '/attach' && pointerActionDraft.text === `${PROSE_BODY}/attach `
+    && pointerActionWritesAfter === pointerActionWrites + 1
+    && pointerPathPainted && pointerPathNames.includes('notes.txt') && pointerIntake === true
+    && kindCount(h, 'composer.applyCompletionEdit') === pointerFileWrites + 1
+    && kindCount(h, 'stager.call') === pointerFileStager + 1
+    && kindCount(h, 'store.file.add') === pointerFileStore + 1
+    && pointerDraft.text === `${PROSE_BODY}${pointerPlaceholder} `
+    && pointerDraft.text.startsWith(PROSE_BODY)
+    && kindCount(h, 'handler.submit') === pointerFileSubmits,
+    JSON.stringify({ pointerAction, pointerActionDraft, pointerPathNames, pointerPoint, pointerFileName, pointerFileDraft, pointerStaged, pointerDraft }))
+  h.capture('28-id-pointer-file-accept-1280x800-light', 'I-D J4: the current-frame local file row accepted by a control-injected click')
+  idCases.pointer = {
+    action: pointerAction, actionDraft: pointerActionDraft, path: pointerPathNames,
+    point: pointerPoint, fileName: pointerFileName, accepted: pointerFileDraft,
+    staged: pointerStaged, placeholder: pointerDraft.text,
+  }
+  writeLedger(h, 'id-pointer-journey.json', idCases.pointer)
+
+  // I-D row shapes at the short-pane cell: a Host @ row, a local path row and
+  // an inline action row. The I-C accepted limitation is scoped to I-C ONLY;
+  // every new row the user must reach is asserted here, and clipping that really
+  // happens is a FAILURE (with a MEASUREMENT that names the row).
+  const shortResize = await h.resize(900, 360)
+  const shortCells = []
+  for (const shape of [
+    { name: 'host-at', query: HOST_DIRECTORY_QUERY, match: names => names.some(name => name.startsWith('@src/')) },
+    { name: 'local-path', query: LOCAL_ONLY_QUERY, match: names => names.some(name => name.includes('client-decoy')) },
+    { name: 'inline-action', query: INLINE_ACTION_QUERY, match: names => names.some(name => name === '/image') },
+  ]) {
+    const queried = await queryText(h, `short-pane ${shape.name}`, shape.query, shape.match)
+    const snap = h.snapshot()
+    const rows = completionRows(snap)
+    const menu = menuNodeOf(snap, rows)
+    const menuBox = menu === undefined ? undefined : rect(menu)
+    const dossiers = rows.map(row => rowDossier(h, snap, row, menuBox, true))
+    const clipped = dossiers.filter(row => row.shown !== true)
+    const id = h.capture(`29-id-short-900x360-${shape.name}`, `I-D short-pane ${shape.name} row shapes`)
+    const layout = layoutOf(h, id, out)
+    const cell = {
+      name: shape.name, query: shape.query, requested: [900, 360],
+      actualViewport: h.ctl('stats').viewport?.slice(0, 2),
+      resolvedTheme: h.ctl('state').theme, layoutTheme: layout?.theme,
+      names: rows.map(row => rowName(row)), menu: { rect: menuBox },
+      rows: dossiers, clipped: clipped.map(row => ({ name: row.name, rect: row.rect, shown: row.shown })),
+      png: join(out, 'shots', `${id}.png`), nodeTree: join(out, `${id}.tree.json`),
+      layout: join(out, 'client-shots', 'live', `${id}.layout.json`),
+    }
+    h.check(`I-D 900x360 ${shape.name}: the window took its reported minimum, the candidate the popup offers FIRST is really shown, and NO new row shape is clipped`,
+      queried.painted && shortResize.clamped === true
+      && cell.actualViewport?.[0] === 900 && cell.actualViewport?.[1] === 440
+      && JSON.stringify(shortResize.viewport?.slice(0, 2)) === JSON.stringify(cell.actualViewport)
+      && dossiers.length > 0 && dossiers[0].shown === true && clipped.length === 0
+      && dossiers.every(row => row.escapesMenuX === false),
+      JSON.stringify({ names: cell.names, first: dossiers[0], clipped: cell.clipped, menu: cell.menu, resize: shortResize, viewport: cell.actualViewport }))
+    h.measure(`I-D 900x360 ${shape.name}: measured MAIN/DOCK/menu/rows (I-C's accepted limitation is NOT reused as an I-D pass)`,
+      JSON.stringify({ main: rect(mainNode(snap)), dock: rect(dockNode(snap)), menu: cell.menu, rows: dossiers.map(row => ({ name: row.name, rect: row.rect, shown: row.shown, hitOwnSubtree: row.hitOwnSubtree })) }))
+    shortCells.push(cell)
+  }
+  writeLedger(h, 'id-short-pane-cells.json', shortCells)
+  await h.resize(1280, 800)
+
+  const idSubmits = kindCount(h, 'handler.submit')
+  const idPrompts = kindCount(h, 'writer.prompt')
+  const idSinks = await sendCase(h, 'state')
+  h.check('I-D NEGATIVE: except the ONE deliberate separate Enter, every accept/negative produced zero accidental submits and zero accidental writer prompts',
+    idSubmits === hostBefore.submits + 1 && idPrompts === hostBefore.prompts + 1
+    && idSinks?.seatState?.handlerSubmit === idSubmits,
+    JSON.stringify({ hostBefore, idSubmits, idPrompts, seatState: idSinks?.seatState }))
+  h.measure('I-C accepted short-pane limitation scope', 'I-C ONLY: the six-row slash-list clipping the Owner accepted is not promoted into an I-D pass; the I-D row shapes above are measured separately in this run and any clipped reachable row is a FAILURE')
+  writeLedger(h, 'id-cases.json', idCases)
+
+  // ── 13. Source→sink ledger and the honest lane boundaries ────────────────
   const keyCommands = readFileSync(join(out, 'run.log'), 'utf8').split('\n')
     .filter(line => line.startsWith('SEND ok ["key"') || line.startsWith('SEND ok ["commit"') || line.startsWith('SEND ok ["click"'))
   writeLedger(h, 'key-events.jsonl', keyCommands.join('\n'))
@@ -952,11 +1442,21 @@ export default async function (h) {
       'soft-wrapped visual rows',
       'the full Host /sessions Resume transition (the seat-priority case uses the production quick-menu port with a scripted roster)',
     ],
+    shortPaneCells: shortCells.length,
+    idCases: { host: Boolean(idCases.host), inline: Boolean(idCases.inline), pointer: Boolean(idCases.pointer) },
     counts: {
       keysArrived: kindCount(h, 'key.arrived'),
       composerApplyKey: kindCount(h, 'composer.applyKey'),
       completionWrites: kindCount(h, 'composer.applyCompletionEdit'),
       catalogCommits: kindCount(h, 'catalog.install'),
+      hostReferences: kindCount(h, 'host.references'),
+      clientListDirectory: kindCount(h, 'client.listDirectory'),
+      clientFind: kindCount(h, 'client.find'),
+      stagerCalls: kindCount(h, 'stager.call'),
+      fragmentCommits: kindCount(h, 'composer.replaceInlineAttachmentFragment'),
+      storeImageAdd: kindCount(h, 'store.image.add'),
+      storeFileAdd: kindCount(h, 'store.file.add'),
+      notices: kindCount(h, 'composer.notify'),
       handlerSubmit: kindCount(h, 'handler.submit'),
       handlerCancel: kindCount(h, 'handler.cancel'),
       writerPrompt: kindCount(h, 'writer.prompt'),
@@ -980,6 +1480,8 @@ export default async function (h) {
     sdk: { pin: sdkPin, integrity, caps: subjectReady?.caps },
     catalog: { count: catalog.length, names: catalog },
     cells,
+    shortPaneCells: shortCells.length,
+    idCases,
     inputChannel: laneLedger.inputChannel,
     CLIENT_INTERACTIVE: 'REAL_TERN_GUI_CONTROL',
     GUI_PHYSICAL_OS: 'REAL_WINDOW_VERIFIED_OS_INPUT_NOT_VERIFIED',

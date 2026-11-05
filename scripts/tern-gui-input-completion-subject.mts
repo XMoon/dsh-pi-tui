@@ -1,6 +1,7 @@
 /**
- * TSP I-C §7.6 real-Tern GUI-window subject: the PRODUCTION Direct/TSP
- * composition with the first-line slash-completion seat.
+ * TSP I-D §7.3 real-Tern GUI-window subject: the PRODUCTION Direct/TSP
+ * composition with the ONE input-completion seat (I-C first-line slash,
+ * I-D Host `@`, Client-local path argument and inline attachment action).
  *
  * `createDirectTspFixture({ externalTern: true, ... })` boots the official
  * Direct application composition over the real Tern-owned stdio. The production
@@ -12,9 +13,28 @@
  * same display seam, and history seeded through the same production JSONL store
  * + `resetInputHistory`.
  *
+ * THE TWO FILE SOURCES ARE REAL AND SEPARATE, and this subject materializes
+ * both with real files instead of standing either one in:
+ *  - the HOST side is the Session's own workspace: the persisted Session header
+ *    cwd is the fixture `workRoot` (the official Direct `HostFilePort` reads
+ *    exactly that scope), so `workRoot/src/**` is what a `@src/` query answers
+ *    from — a real Host scoped discovery, never a fake reference list;
+ *  - the CLIENT side is the process cwd the composition captures as its
+ *    Client-local completion base (`app/bootstrap.ts` reads `process.cwd()` once
+ *    at composition time, and `commands.ts` passes that value to the mount as
+ *    the provider's `localCwd`). This subject therefore CREATES a real Client
+ *    directory under the run directory and `process.chdir()`s into it BEFORE the
+ *    fixture boots: the lever is the fixture's own Client cwd, not a test-only
+ *    production port (none exists, and none was added). `/image` path rows and
+ *    the inline intake read that directory; a file the Host workspace does not
+ *    contain (and the reverse) is what makes the cross-source negatives a
+ *    measurement instead of an argument.
+ *
  * DECLARED STAND-INS / FIXTURE EVIDENCE (also written to `events.jsonl`):
- *  - the official Direct fixture's scripted LLM adapter, empty fileReferences
- *    and fixed default model are its own documented boundary stand-ins;
+ *  - the official Direct fixture's scripted LLM adapter, its documented empty
+ *    `ctx.fileReferences` workspace-INDEX stand-in (the BARE fuzzy `@` route) and
+ *    fixed default model are its own boundary stand-ins; an EXPLICIT path scope
+ *    (`@src/…`) is answered by the real Direct Host discovery over `workRoot`;
  *  - three newest-first history rows are seeded into the SAME production JSONL
  *    store (`historyFilePath` + v2 rows) and read back through the official
  *    hydration `resetInputHistory` seam, exactly as the I-B subject does. One
@@ -28,7 +48,7 @@
  *    it. The `catalog-*` cases re-commit through that SAME mount port with a
  *    copy of the production installation whose `commands` list is reduced or
  *    scripted; the command layer's own provenance filter is NOT re-run (that
- *    half is `test/app/tern-tsp-slash-completion-composition.test.ts`);
+ *    half is `test/app/tern-tsp-input-completion-composition.test.ts`);
  *  - the command-to-fixture channel is a narrow `case` file in `TERN_PANE_DIR`:
  *    `state`, `clear`, `seat-open`, `seat-close`, `recall-seed`, `catalog-reduce`,
  *    `catalog-single`, `catalog-long`, `catalog-restore`, `exit`. These are
@@ -54,21 +74,39 @@
  * to the `src/tui/tsp/session.ts` module source. The wrapper calls the ORIGINAL
  * `mountTspRenderer` and returns the SAME object with read/write recorders
  * installed on its existing `display`, `composer`, `modelPresentation`,
- * `installCommandCompletions` and `bindInput` members, plus one recorder on the
- * production-created SDK `Session.next` that the mount's OWN input loop calls.
+ * `installCommandCompletions`, `installInlineAttachmentStager` and `bindInput`
+ * members, plus one recorder on the production-created SDK `Session.next` that
+ * the mount's OWN input loop calls. The stager recorder wraps the FUNCTION the
+ * production command layer hands to that port (it still calls the original with
+ * the original receiver, so the real `runAttachmentIntake` runs) — the subject
+ * never installs its own stager and never re-implements the intake.
+ * Four production classes are observed the same way, by patching the prototype
+ * the production composition instantiates (the UNBOUND original is saved, never
+ * `.bind`, and is called with the ORIGINAL receiver): the Direct `HostFilePort`
+ * (every real Host `@` query, its scope, its raw query and the paths it
+ * answered), the Client-local discovery driver (every real Client directory
+ * read, with the base directory it read), and the two draft stores (every real
+ * staged image/file and its canonical placeholder). Those four records are what
+ * make "the `@` seat read no Client filesystem", "`/image @foo` queried no Host
+ * port" and "accepting a Host/path row staged nothing" MEASURED facts of this
+ * run instead of arguments about the code.
  * Every recorder delegates to the original member and returns its outcome
  * unchanged. No production file is edited and no production state is duplicated.
  *
  * The subject's OWN record is `events.jsonl`: the shipped SDK capabilities, the
  * isolated history file, the fixture boot, every key the mount's input loop
  * actually pulled, every handled fixture command, every catalog commit, every
- * composer reducer call, every conditional completion write, every formal
- * display-seam owner call, every real input handler call, and every settled
- * production Direct writer prompt. The flow reads that record back as its
- * positive control; a `ctl key` reply alone never proves that a key arrived.
+ * composer reducer call, every conditional completion write, every atomic
+ * inline-attachment fragment commit, every Host/Client-local discovery call,
+ * every draft-store stage, every formal display-seam owner call, every real
+ * input handler call, and every settled production Direct writer prompt. The
+ * flow reads that record back as its positive control; a `ctl key` reply alone
+ * never proves that a key arrived.
  *
- * Usage: node --import tsx/esm scripts/tern-gui-slash-completion-subject.mts
- * @module scripts/tern-gui-slash-completion-subject
+ * Usage: node scripts/tern-gui-drive.mjs scripts/tern-gui-input-completion.mjs --out <fresh dir>
+ * (the subject itself is started by the driver inside the GUI window's pane:
+ *  node --import tsx/esm scripts/tern-gui-input-completion-subject.mts)
+ * @module scripts/tern-gui-input-completion-subject
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -77,6 +115,10 @@ import { registerHooks } from 'node:module'
 const paneRoot = process.env.TERN_PANE_DIR
 if (paneRoot === undefined) throw new Error('TERN_PANE_DIR is required by the real Tern subject')
 const workRoot = join(paneRoot, 'dsh-home')
+/** The REAL Client-local directory this subject chdirs into before the fixture
+ *  boots (see `CLIENT-CWD LEVER` below); the GUI window itself starts the
+ *  subject in the repository directory, which is NOT a useful attachment base. */
+const clientRoot = join(paneRoot, 'client-workspace')
 const wireRecordPath = join(paneRoot, 'sdk-wire.jsonl')
 mkdirSync(workRoot, { recursive: true })
 // Set isolation BEFORE dynamically importing the DSH Host composition.
@@ -97,8 +139,8 @@ registerHooks({
     const source = Buffer.isBuffer(result.source) ? result.source.toString('utf8') : String(result.source ?? '')
     const hook = `
 
-/* TSP I-C §7.6 ONE-TO-ONE subject recorder (appended, production source untouched). */
-const __ternSubjectNote = (event) => globalThis.__ternPaneSlashNote?.(event)
+/* TSP I-C/I-D §7.3 ONE-TO-ONE subject recorder (appended, production source untouched). */
+const __ternSubjectNote = (event) => globalThis.__ternGuiCompletionNote?.(event)
 const __ternSubjectOriginalMount = mountTspRenderer
 mountTspRenderer = function (...args) {
   const renderer = __ternSubjectOriginalMount(...args)
@@ -106,7 +148,7 @@ mountTspRenderer = function (...args) {
   // loop is "for await (const input of session)", whose generator calls
   // "this.next()" on every step, so patching the production-created Session's
   // OWN method sees a key BEFORE any seat decides it — including a key the
-  // slash seat consumes and never forwards. The UNBOUND original is saved and
+  // completion seat consumes and never forwards. The UNBOUND original is saved and
   // called with the ORIGINAL receiver (never .bind); the recorder returns the
   // same value. The recorder is installed after the mount returns, so an input
   // already in flight at that instant is not recorded; measured: no flow input
@@ -125,7 +167,7 @@ mountTspRenderer = function (...args) {
               ctrl: key.ctrl === true, alt: key.alt === true, shift: key.shift === true, meta: key.meta === true,
             })
             // The subject contract: F10 shuts the subject down.
-            if (key.name === 'f10') globalThis.__ternPaneSlashF10?.()
+            if (key.name === 'f10') globalThis.__ternGuiCompletionF10?.()
           } else if (input.event !== undefined && input.event.ev !== 'resize') {
             // Every other client event, named as the client sent it (a pointer
             // click on a candidate row is one of these; the lane records which
@@ -136,9 +178,9 @@ mountTspRenderer = function (...args) {
         return input
       })
     }
-    globalThis.__ternPaneSlashRestoreSessionNext = () => { session.next = originalNext }
+    globalThis.__ternGuiCompletionRestoreSessionNext = () => { session.next = originalNext }
   }
-  // TSP I-C: the ONE catalog commit point. This is the mount's own production
+  // TSP I-C/I-D: the ONE catalog commit point. This is the mount's own production
   // installer; the command layer calls it and the flow re-commits through it.
   // The call sites are recorded so the PROVENANCE (real command layer vs. this
   // subject's case channel) is a fact in the run, not an assumption.
@@ -151,17 +193,18 @@ mountTspRenderer = function (...args) {
     // real one. The re-install cases must copy the EFFECTIVE production
     // catalog, so only a commit that did NOT come from this subject's own case
     // channel, and that is non-empty, is kept as the production installation.
-    const fromSubjectCase = globalThis.__ternPaneSlashSubjectCommit === true
+    const fromSubjectCase = globalThis.__ternGuiCompletionSubjectCommit === true
     if (!fromSubjectCase && names.length > 0) {
-      globalThis.__ternPaneSlashProductionInstallation = installation
+      globalThis.__ternGuiCompletionProductionInstallation = installation
     }
-    globalThis.__ternPaneSlashLastInstallation = installation
+    globalThis.__ternGuiCompletionLastInstallation = installation
     __ternSubjectNote({
       kind: 'catalog.install',
       origin: fromSubjectCase ? 'subject-case' : 'production-commit-point',
       count: names.length,
       names,
       cwd: installation.cwd,
+      localCwd: typeof installation.localCwd === 'function' ? installation.localCwd() : installation.localCwd ?? null,
       hostShellCompletion: installation.hostShellCompletion === true,
       skillReferences: (installation.skillReferences ?? []).length,
       hasFileReferences: installation.fileReferences !== undefined && installation.fileReferences !== null,
@@ -196,8 +239,8 @@ mountTspRenderer = function (...args) {
     __ternSubjectNote({ kind: 'composer.setDraft', text, standIn: 'production port observed' })
     return originalSetDraft.call(composer, text)
   }
-  // A key the slash seat CONSUMES never reaches this reducer, so the count of
-  // reducer calls is the witness that an arrow walked the list instead of
+  // A key the completion seat CONSUMES never reaches this reducer, so the count
+  // of reducer calls is the witness that an arrow walked the list instead of
   // editing the draft or entering the I-B browse.
   composer.applyKey = function (key) {
     const edit = originalApplyKey.call(composer, key)
@@ -209,11 +252,64 @@ mountTspRenderer = function (...args) {
     })
     return edit
   }
-  // TSP I-C: the ONE conditional write a completion is allowed to make.
+  // TSP I-C/I-D: the ONE conditional write a completion is allowed to make.
+  // 'revisionAfter' is the composer's own edit revision immediately after the
+  // write, so a later inline intake commit is compared against a PROVEN value
+  // instead of a guess about what moved the draft.
   composer.applyCompletionEdit = function (expected, next) {
     const accepted = originalApplyCompletionEdit.call(composer, expected, next)
-    __ternSubjectNote({ kind: 'composer.applyCompletionEdit', expected, next, accepted })
+    __ternSubjectNote({
+      kind: 'composer.applyCompletionEdit', expected, next, accepted,
+      revisionAfter: composer.editRevision(),
+    })
     return accepted
+  }
+  // TSP I-D: the ONE atomic placeholder commit an inline intake is allowed to
+  // make. A 'committed: false' answer means the fragment refused, which the flow
+  // asserts leaves the user's own path text in place.
+  const originalReplaceFragment = composer.replaceInlineAttachmentFragment
+  composer.replaceInlineAttachmentFragment = function (expected, span, placeholder) {
+    const committed = originalReplaceFragment.call(composer, expected, span, placeholder)
+    const state = composer.state()
+    __ternSubjectNote({
+      kind: 'composer.replaceInlineAttachmentFragment', expected, span, placeholder, committed,
+      text: state.text, cursor: state.cursor,
+    })
+    return committed
+  }
+  // TSP I-D: the leading /image /attach command handler's own insert — the
+  // witness that the FIRST line's NEXT Enter really ran the registered handler.
+  const originalInsert = composer.insertIntoEditor
+  composer.insertIntoEditor = function (fragment) {
+    originalInsert.call(composer, fragment)
+    const state = composer.state()
+    __ternSubjectNote({ kind: 'composer.insertIntoEditor', fragment, text: state.text, cursor: state.cursor })
+  }
+  // TSP I-D: the intake's own notice sink ('attached [image #1 …] — Enter to
+  // send' / a real refusal). Recorded, never invented.
+  const originalNotify = composer.notify
+  composer.notify = function (message, kind) {
+    __ternSubjectNote({ kind: 'composer.notify', message: String(message ?? ''), noticeKind: kind ?? null })
+    return originalNotify.call(composer, message, kind)
+  }
+  // TSP I-D: the ONE inline-attachment stager install. The recorded wrapper is
+  // ONE-TO-ONE around the FUNCTION the production command layer supplies: the
+  // original stager (the real runAttachmentIntake) runs with the original
+  // receiver semantics and its outcome is returned unchanged. The subject never
+  // installs a stager of its own and never re-implements the intake; the record
+  // is the fact that a real Client-local read was asked for, with the exact
+  // stake the seat produced.
+  const originalInstallStager = renderer.installInlineAttachmentStager
+  renderer.installInlineAttachmentStager = function (stager) {
+    __ternSubjectNote({ kind: 'stager.installed', standIn: 'one-to-one recorder around the production command-plane stager' })
+    const recordingStager = (stake) => {
+      __ternSubjectNote({
+        kind: 'stager.call', command: stake.command, path: stake.path, span: stake.span,
+        rawDraft: stake.rawDraft, current: stake.current(), draft: stake.draft(),
+      })
+      return stager(stake)
+    }
+    return originalInstallStager.call(renderer, recordingStager)
   }
   const originalBindInput = renderer.bindInput
   renderer.bindInput = function (handlers) {
@@ -269,20 +365,25 @@ mountTspRenderer = function (...args) {
     __ternSubjectNote({ kind: 'renderer.bindInput', standIn: 'one-to-one recorder around production handlers' })
     return originalBindInput.call(renderer, recording)
   }
-  globalThis.__ternPaneSlashRenderer = renderer
-  __ternSubjectNote({ kind: 'renderer.observed', initialDraft: renderer.composer.getDraft() })
+  globalThis.__ternGuiCompletionRenderer = renderer
+  __ternSubjectNote({
+    kind: 'renderer.observed',
+    initialDraft: renderer.composer.getDraft(),
+    installCommandCompletionsPort: typeof renderer.installCommandCompletions === 'function',
+    installInlineAttachmentStagerPort: typeof renderer.installInlineAttachmentStager === 'function',
+  })
   return renderer
 }
 `
     return { ...result, source: source + hook }
   },
 })
-;(globalThis as unknown as { __ternPaneSlashNote: typeof note }).__ternPaneSlashNote = note
+;(globalThis as unknown as { __ternGuiCompletionNote: typeof note }).__ternGuiCompletionNote = note
 
 const commandPath = join(paneRoot, 'case')
 const commandResultPath = join(paneRoot, 'case-result')
-const SESSION_A = 'session-slash-a'
-const SESSION_B = 'session-slash-b'
+const SESSION_A = 'session-input-a'
+const SESSION_B = 'session-input-b'
 const HISTORY_ROWS = [
   { content: 'oldest recall row', sessionId: SESSION_A },
   { content: 'middle recall row', sessionId: SESSION_A },
@@ -296,7 +397,7 @@ let resolveExit!: () => void
 const exitRequested = new Promise<void>(resolve => { resolveExit = resolve })
 // The subject contract: F10 (seen by the mount's own input loop recorder)
 // shuts the subject down.
-;(globalThis as unknown as { __ternPaneSlashF10?: () => void }).__ternPaneSlashF10 = () => setImmediate(resolveExit)
+;(globalThis as unknown as { __ternGuiCompletionF10?: () => void }).__ternGuiCompletionF10 = () => setImmediate(resolveExit)
 process.once('SIGTERM', () => setImmediate(resolveExit))
 process.once('SIGINT', () => setImmediate(resolveExit))
 let setupCleanup: (() => unknown) | undefined
@@ -310,6 +411,165 @@ const { createDirectTspFixture } = await import('../test/support/direct-tsp-fixt
 const { historyFilePath, loadHistoryRecords } = await import('../src/client/history/store.ts')
 const { connect } = await import('@stencil-hq/tern')
 const { DirectSessionWriter } = await import('../src/runtime/direct/session-writer-direct.ts')
+
+/**
+ * REAL FILES FOR BOTH FILE SOURCES.
+ *
+ * HOST: the persisted Session's header cwd is `workRoot`, so the official
+ * Direct Host file port discovers `workRoot/src/**` for an explicit `@src/`
+ * query. These are ordinary files on the Host filesystem; no reference list is
+ * handed to the renderer.
+ *
+ * CLIENT: the composition captures `process.cwd()` as its Client-local
+ * completion base (see the module comment). The files below exist only in
+ * `clientRoot`; the Host workspace deliberately does NOT contain
+ * `src/client-decoy.ts`, and the Client directory deliberately does NOT contain
+ * `deep.ts` / `deeper/` / `only-one.ts`. That asymmetry is what the flow's
+ * cross-source assertions measure.
+ */
+const HOST_FILES = ['src/deep.ts', 'src/deeper/inner.ts', 'src/only-one.ts'] as const
+const CLIENT_FILES = ['shots/photo.png', 'notes.txt', 'src/client-decoy.ts', '@foo'] as const
+/** A 1×1 PNG: the real image the inline intake reads and parses. */
+const ONE_PIXEL_PNG = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==',
+  'base64',
+)
+for (const relative of HOST_FILES) {
+  const path = join(workRoot, relative)
+  mkdirSync(dirname(path), { recursive: true })
+  writeFileSync(path, `host workspace fixture: ${relative}\n`, 'utf8')
+}
+for (const relative of CLIENT_FILES) {
+  const path = join(clientRoot, relative)
+  mkdirSync(dirname(path), { recursive: true })
+  if (relative.endsWith('.png')) writeFileSync(path, ONE_PIXEL_PNG)
+  else writeFileSync(path, `client local fixture: ${relative}\n`, 'utf8')
+}
+/**
+ * THE CLIENT-CWD LEVER: `app/bootstrap.ts` reads `process.cwd()` once when the
+ * runner applies and passes that value to the command plane as the provider's
+ * `localCwd`. Changing the process directory HERE — before the fixture boots —
+ * therefore moves the production Client-local base. No test-only production
+ * port was added; this is the same lever the application itself uses.
+ */
+process.chdir(clientRoot)
+
+/**
+ * ONE-TO-ONE recorders around the four PRODUCTION classes the composition
+ * instantiates. Each saves the UNBOUND original, calls it with the ORIGINAL
+ * receiver and returns its outcome unchanged; the record is written only after
+ * the original settles (a rejected call is recorded as a rejection and
+ * re-thrown). These are observation wrappers, not replacements: the `@` source
+ * decision and the intake stay exactly where production put them.
+ */
+const { DirectHostFilePort } = await import('../src/runtime/direct/host-file-direct.ts')
+type HostReferencesCall = {
+  listReferences(
+    scope: { readonly kind: string; readonly sessionId?: string; readonly cwd?: string },
+    query: string,
+    options?: { readonly signal?: AbortSignal },
+  ): Promise<{
+    readonly kind: string
+    readonly items?: readonly { readonly path: string; readonly kind: string }[]
+    readonly reason?: string
+  }>
+}
+const hostPrototype = DirectHostFilePort.prototype as unknown as HostReferencesCall
+const originalHostReferences = hostPrototype.listReferences
+hostPrototype.listReferences = async function (scope, query, options) {
+  try {
+    const result = await originalHostReferences.call(this, scope, query, options)
+    note({
+      kind: 'host.references', scope, query, result: result.kind,
+      count: result.items?.length ?? 0,
+      paths: result.items?.map(item => item.path) ?? [],
+      reason: result.reason ?? null,
+    })
+    return result
+  } catch (error) {
+    note({ kind: 'host.references', scope, query, rejected: String(error) })
+    throw error
+  }
+}
+
+const { ClientLocalDiscoveryDriver } = await import('../src/client/file-completion/local-discovery.ts')
+type ClientDiscoveryCall = {
+  listDirectory(baseDir: string, relativeDir: string, signal: AbortSignal): Promise<readonly unknown[] | null>
+  find(baseDir: string, term: string, signal: AbortSignal): Promise<readonly unknown[] | null>
+}
+const clientPrototype = ClientLocalDiscoveryDriver.prototype as unknown as ClientDiscoveryCall
+const originalClientListDirectory = clientPrototype.listDirectory
+clientPrototype.listDirectory = async function (baseDir, relativeDir, signal) {
+  try {
+    const entries = await originalClientListDirectory.call(this, baseDir, relativeDir, signal)
+    note({ kind: 'client.listDirectory', baseDir, relativeDir, count: entries?.length ?? null })
+    return entries
+  } catch (error) {
+    note({ kind: 'client.listDirectory', baseDir, relativeDir, rejected: String(error) })
+    throw error
+  }
+}
+const originalClientFind = clientPrototype.find
+clientPrototype.find = async function (baseDir, term, signal) {
+  try {
+    const candidates = await originalClientFind.call(this, baseDir, term, signal)
+    note({ kind: 'client.find', baseDir, term, count: candidates?.length ?? null })
+    return candidates
+  } catch (error) {
+    note({ kind: 'client.find', baseDir, term, rejected: String(error) })
+    throw error
+  }
+}
+
+const { DraftImageStore } = await import('../src/client/media/image/draft-store.ts')
+type ImageStoreCall = {
+  add(input: Record<string, unknown>): {
+    readonly id: number
+    readonly placeholder: string
+    readonly source: unknown
+    readonly mediaType: string
+    readonly width: number
+    readonly height: number
+    readonly name?: string
+  }
+}
+const imageStorePrototype = DraftImageStore.prototype as unknown as ImageStoreCall
+const originalImageAdd = imageStorePrototype.add
+imageStorePrototype.add = function (input) {
+  const image = originalImageAdd.call(this, input)
+  note({
+    kind: 'store.image.add', id: image.id, placeholder: image.placeholder, source: image.source,
+    mediaType: image.mediaType, width: image.width, height: image.height, name: image.name ?? null,
+    byteLength: (input.bytes as Uint8Array | undefined)?.byteLength ?? 0,
+  })
+  return image
+}
+
+const { DraftFileStore } = await import('../src/client/media/attachment/file-draft.ts')
+type FileStoreCall = {
+  add(input: { readonly name: string; readonly byteLength: number; readonly source: unknown }): {
+    readonly id: number
+    readonly placeholder: string
+    readonly name: string
+    readonly byteLength: number
+    readonly source: unknown
+  }
+}
+const fileStorePrototype = DraftFileStore.prototype as unknown as FileStoreCall
+const originalFileAdd = fileStorePrototype.add
+fileStorePrototype.add = function (input) {
+  const file = originalFileAdd.call(this, input)
+  note({
+    kind: 'store.file.add', id: file.id, placeholder: file.placeholder, name: file.name,
+    // A Client filesystem probe can return BigInt stats inside the source
+    // fingerprint. The recorder serializes the path/type identity without
+    // aborting the production intake.
+    byteLength: typeof file.byteLength === 'bigint' ? String(file.byteLength) : file.byteLength,
+    sourceType: (file.source as { readonly type?: string } | undefined)?.type ?? null,
+    sourcePath: (file.source as { readonly path?: string } | undefined)?.path ?? null,
+  })
+  return file
+}
 
 /**
  * Seed BOTH cwd identities the official composition may read: the Client launch
@@ -329,23 +589,29 @@ const historyFiles = [process.cwd(), workRoot].map(cwd => {
   return { cwd, file, rows: loadHistoryRecords(file).map(row => row.content) }
 })
 
-const capabilitySession = await connect({ app: 'tern-gui-slash-completion', timeout: 2000 })
+const capabilitySession = await connect({ app: 'tern-gui-input-completion', timeout: 2000 })
 if (capabilitySession === null) throw new Error('this subject must run inside a real Tern GUI window pane')
 const caps = capabilitySession.caps
 await capabilitySession.close()
 note({
   kind: 'subject.ready',
   standIns: [
-    'official Direct fixture: scripted LLM, empty fileReferences, fixed default model',
+    'official Direct fixture: scripted LLM, the documented empty ctx.fileReferences workspace-INDEX stand-in (the BARE @ route; an explicit @src/ scope is answered by the real Direct Host discovery), fixed default model',
     'three fixture history rows in the production JSONL store under an isolated DSH_HOME',
     'case-file orchestration for state/clear/seat/recall-seed/catalog/exit',
     'catalog re-commits go through the mount port with a copy of the PRODUCTION installation (commands only replaced)',
     'scripted model roster through the production modelPresentation.openQuick port',
-    'OS physical input / OS screen reader: NOT_VERIFIED; control-injected REAL GUI window input is exercised (REAL_TERN_GUI + CONTROL_INJECTED_INPUT)',
+    'the inline-attachment stager recorder wraps the FUNCTION the production command layer installs; the real runAttachmentIntake still runs',
+    'OS physical input / OS IME / OS screen reader: NOT_VERIFIED; control-injected REAL GUI window input is exercised (REAL_TERN_GUI + CONTROL_INJECTED_INPUT)',
   ],
   caps,
   workRoot,
+  hostWorkspace: workRoot,
+  hostFiles: [...HOST_FILES],
+  clientRoot,
+  clientFiles: [...CLIENT_FILES],
   clientCwd: process.cwd(),
+  clientCwdLever: 'process.chdir(clientRoot) BEFORE createDirectTspFixture, because app/bootstrap.ts captures process.cwd() as the Client-local completion base',
   historyFiles,
   wireRecordPath,
   seededRows: HISTORY_ROWS,
@@ -385,6 +651,9 @@ type ObservedRenderer = {
     getDraft(): string
     setDraft(text: string): void
     state(): { text: string; cursor: number; focused: boolean }
+    /** TSP I-D: the composer's own edit revision (the inline intake's
+     *  currentness half). Read-only observation. */
+    editRevision(): number
   }
   readonly modelPresentation?: {
     openQuick?: (request: unknown) => {
@@ -394,17 +663,19 @@ type ObservedRenderer = {
     }
   }
   installCommandCompletions?(installation: CatalogInstallation): void
+  /** TSP I-D: the ONE inline-attachment stager install port of this mount. */
+  installInlineAttachmentStager?(stager: (stake: unknown) => void): void
   scopeFactCountForTest?(): number
   reconcileStepsForTest?(): number
 }
 const globals = globalThis as unknown as {
-  __ternPaneSlashRenderer?: ObservedRenderer
-  __ternPaneSlashProductionInstallation?: CatalogInstallation
-  __ternPaneSlashLastInstallation?: CatalogInstallation
-  __ternPaneSlashSubjectCommit?: boolean
-  __ternPaneSlashRestoreSessionNext?: () => void
+  __ternGuiCompletionRenderer?: ObservedRenderer
+  __ternGuiCompletionProductionInstallation?: CatalogInstallation
+  __ternGuiCompletionLastInstallation?: CatalogInstallation
+  __ternGuiCompletionSubjectCommit?: boolean
+  __ternGuiCompletionRestoreSessionNext?: () => void
 }
-const observedRenderer = (): ObservedRenderer | undefined => globals.__ternPaneSlashRenderer
+const observedRenderer = (): ObservedRenderer | undefined => globals.__ternGuiCompletionRenderer
 let quickHandle: ReturnType<NonNullable<NonNullable<ObservedRenderer['modelPresentation']>['openQuick']>> | undefined
 
 let fixture: import('../test/support/direct-tsp-fixture.ts').DirectTspExternalFixture | undefined
@@ -416,7 +687,7 @@ const subjectCatalogCommits: string[] = []
 
 function reInstall(kind: string, commands: readonly CatalogCommand[]): Record<string, unknown> {
   const renderer = observedRenderer()
-  const production = globals.__ternPaneSlashProductionInstallation
+  const production = globals.__ternGuiCompletionProductionInstallation
   if (renderer?.installCommandCompletions === undefined || production === undefined) {
     return { available: false, reason: 'the production catalog install was never observed' }
   }
@@ -426,11 +697,11 @@ function reInstall(kind: string, commands: readonly CatalogCommand[]): Record<st
   // keeps the production composition.
   // The commit is marked so the recorder never mistakes it for the production
   // command-layer commit (which is the catalog the re-install cases copy from).
-  globals.__ternPaneSlashSubjectCommit = true
+  globals.__ternGuiCompletionSubjectCommit = true
   try {
     renderer.installCommandCompletions({ ...production, commands })
   } finally {
-    globals.__ternPaneSlashSubjectCommit = false
+    globals.__ternGuiCompletionSubjectCommit = false
   }
   subjectCatalogCommits.push(kind)
   return {
@@ -464,6 +735,7 @@ async function runCase(command: string, ordinal: number): Promise<Record<string,
       expectedRecall: EXPECTED_RECALL,
       draft,
       composer: composerState,
+      editRevision: renderer?.composer.editRevision?.(),
       seatState: {
         keyArrived: countOf('key.arrived'),
         applyKey: countOf('composer.applyKey'),
@@ -472,9 +744,19 @@ async function runCase(command: string, ordinal: number): Promise<Record<string,
         handlerSubmit: countOf('handler.submit'),
         handlerCancel: countOf('handler.cancel'),
         writerPrompt: countOf('writer.prompt'),
+        hostReferences: countOf('host.references'),
+        clientListDirectory: countOf('client.listDirectory'),
+        clientFind: countOf('client.find'),
+        stagerInstalled: countOf('stager.installed'),
+        stagerCalls: countOf('stager.call'),
+        fragmentCommits: countOf('composer.replaceInlineAttachmentFragment'),
+        insertIntoEditor: countOf('composer.insertIntoEditor'),
+        storeImageAdd: countOf('store.image.add'),
+        storeFileAdd: countOf('store.file.add'),
+        notices: countOf('composer.notify'),
       },
-      lastInstallationNames: globals.__ternPaneSlashLastInstallation?.commands?.map(entry => entry.name) ?? null,
-      productionInstallationNames: globals.__ternPaneSlashProductionInstallation?.commands?.map(entry => entry.name) ?? null,
+      lastInstallationNames: globals.__ternGuiCompletionLastInstallation?.commands?.map(entry => entry.name) ?? null,
+      productionInstallationNames: globals.__ternGuiCompletionProductionInstallation?.commands?.map(entry => entry.name) ?? null,
       scopeFacts: renderer?.scopeFactCountForTest?.(),
       reconcileSteps: renderer?.reconcileStepsForTest?.(),
       rendererObserved: renderer !== undefined,
@@ -529,7 +811,7 @@ async function runCase(command: string, ordinal: number): Promise<Record<string,
     return { closed: true }
   }
   if (name === 'catalog-reduce') {
-    const production = globals.__ternPaneSlashProductionInstallation
+    const production = globals.__ternGuiCompletionProductionInstallation
     if (production === undefined) return { available: false, reason: 'the production catalog install was never observed' }
     const withdrawn = production.commands[0]?.name
     const kept = production.commands.slice(1)
@@ -537,7 +819,7 @@ async function runCase(command: string, ordinal: number): Promise<Record<string,
     return { ...result, withdrawn, kept: kept.length }
   }
   if (name === 'catalog-single') {
-    const scripted: readonly CatalogCommand[] = [{ name: 'evidence-probe', description: 'Scripted I-C evidence row' }]
+    const scripted: readonly CatalogCommand[] = [{ name: 'evidence-probe', description: 'Scripted input-completion evidence row' }]
     return reInstall('catalog-single', scripted)
   }
   if (name === 'catalog-long') {
@@ -550,7 +832,7 @@ async function runCase(command: string, ordinal: number): Promise<Record<string,
     return { ...result, longName }
   }
   if (name === 'catalog-restore') {
-    const production = globals.__ternPaneSlashProductionInstallation
+    const production = globals.__ternGuiCompletionProductionInstallation
     if (production === undefined) return { available: false, reason: 'the production catalog install was never observed' }
     return reInstall('catalog-restore', production.commands)
   }
@@ -596,7 +878,7 @@ try {
     sessionBrowser: true,
     modelPicker: true,
     modelQuick: true,
-    deltas: ['I-C', '-DIRECT', '-OK'],
+    deltas: ['I-D', '-DIRECT', '-OK'],
     appExit: () => {
       note({ kind: 'app.exit' })
       setImmediate(resolveExit)
@@ -627,7 +909,7 @@ try {
     rendererObserved: renderer !== undefined,
     initialDraft: renderer?.composer.getDraft(),
     recallSeedPolicy: 'the flow accepts either the sessionless activateBootRecall seed or the Session A hydration reseed; both use the same pre-existing cwd JSONL rows',
-    seat: 'the slash-completion seat is mount-local and is driven only by real keys and the production catalog install',
+    seat: 'the ONE input-completion seat is mount-local and is driven only by real keys, the production catalog install and the production inline-attachment stager',
   })
   const polling = periodic()
   await exitRequested
@@ -639,5 +921,5 @@ try {
   disposed = true
   await setupCleanup?.()
   promptPrototype.prompt = originalPrompt
-  globals.__ternPaneSlashRestoreSessionNext?.()
+  globals.__ternGuiCompletionRestoreSessionNext?.()
 }
