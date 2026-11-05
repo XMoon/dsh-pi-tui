@@ -693,10 +693,16 @@ test('the detached-navigation siblings stay between M5N-01 and the T44 inventory
   // earlier turn's proof (the fixture file is append-only for the whole lane).
   assert.match(m5n2, /const waitForC1WorkEventAfter = async \(afterIndex, predicate, label/u,
     'M5N-02 must bound fixture-event waits to a recorded boundary')
-  assert.match(m5n2, /event\.userText\.includes\('m5n2-x-turn1'\)/u)
-  assert.match(m5n2, /event\.userText\.includes\('m5n2-x-turn2'\)/u)
+  assert.match(m5n2, /const submitAndHold = async \(client, prompt, durableBoundary\)/u,
+    'M5N-02 must prove each fresh Turn through ONE boundary-bounded helper')
+  assert.match(m5n2, /event => event\.type === 'turn\/start'[^\n]*prompt\}" Turn started at the Host/u,
+    'the helper must observe the fresh Host turn/start after its boundary')
+  assert.match(m5n2, /event => event\.type === 'user\/message' && textOf\(event\.data\) === prompt/u,
+    'the helper must observe the EXACT prompt committed after its boundary')
   assert.doesNotMatch(m5n2, /event\.attempt ===/u,
     'M5N-02 must never identify a fresh turn by a reused attempt number')
+  assert.doesNotMatch(m5n2, /event\.userText\.includes\(/u,
+    'the fixture truncates userText to 400 chars, so it is not a prompt identity')
   assert.doesNotMatch(m5n2, /frame\.includes\('long-turn started'\)/u,
     'M5N-02 must never use the accumulating transcript as a freshness fact')
   assert.equal((m5n2.match(/!existsSync\(releaseBarrier\)/gu) ?? []).length, 5,
@@ -747,10 +753,8 @@ test('the detached-navigation siblings stay between M5N-01 and the T44 inventory
 
   // Explicit Busy Esc remains the ONE aborting gesture.
   assert.match(m5n2, /clientB\.send\('\\x1b'\)/u)
-  assert.match(m5n2, /event\.userText\.includes\('m5n2-x-stop'\)/u,
-    'the Stop control must be proven ready by THIS prompt\'s fixture event')
-  assert.match(m5n2, /the Stop-control Turn started at the Host/u,
-    'the Stop control must also observe the fresh Host turn/start')
+  assert.match(m5n2, /submitAndHold\(clientB, 'm5n2-x-stop', stopIndex\)/u,
+    'the Stop control must use the same boundary-bounded fresh-Turn proof')
   assert.match(m5n2, /reason\?\.kind === 'aborted'/u)
   assert.match(m5n2, /reason\?\.reason\?\.kind === 'user'/u)
   // Identity, cleanup and the trace are explicit.
