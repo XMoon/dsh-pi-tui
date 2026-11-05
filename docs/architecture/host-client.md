@@ -381,14 +381,19 @@ service or setting survives an arbitrary reload.
 ### Official Web frontend availability and the startup preference
 
 A Split Host owns the official Web frontend as a TOGGLEABLE Host capability, not
-as a boot mode. The Host-only overlay declares the 59 official Web-only Loader
-rows once, every one `disabled: true`, so an ordinary Split Host serves no SPA
-root and no `/plugins` browser graph; `/connect` and `/api` remain the only
-network surface, and a real TUI Client connects and operates without Web. The
-private `piTuiWebAccess` namespace of the same built-in runtime's ONE Typert
-contribution is the ONLY control surface: `getStatus()` and `setEnabled(enabled)`
-flip `disabled` on exactly those 59 rows through the official `Entry.update` on
-the live Loader. The authority is therefore the Loader row plus the official
+as a boot mode. The Host-only overlay declares the official Web-only Loader row
+set the installed DSH Web composition needs once — including the mandatory
+`dsh.client.inject` closure of the shipped official Client UIs, so the Browser
+graph those packages declare can actually resolve — every one `disabled: true`,
+so an ordinary Split Host serves no SPA root and no `/plugins` browser graph;
+`/connect` and `/api` remain the only network surface, and a real TUI Client
+connects and operates without Web. The private `piTuiWebAccess` namespace of the
+same built-in runtime's ONE Typert contribution is the ONLY control surface:
+`getStatus()` and `setEnabled(enabled)` flip `disabled` on exactly those roster
+rows through the official `Entry.update` on the live Loader. The exact ids,
+packages and their order are fixed by the official package manifests and locked
+by source tests; this document carries no second roster. The authority is
+therefore the Loader row plus the official
 `webApp`/`clientModules`/`terminalController` services, read on every query; there
 is no persisted `enabled` flag, no settings file, no profile patch write of the
 toggle and no second listener, Host process or Web bundle.
@@ -449,7 +454,10 @@ continues, and `/connect` plus `/api` stay authenticated and reachable. A failed
 enable withdraws whatever it mounted; a disable that cannot prove the Web state
 closed reports `unavailable` instead of claiming success. `ui-deliverables` may
 legitimately remain PENDING on its `workspaceChanges` dependency; that pending
-optional Browser feature is not a Web failure.
+optional Browser feature is not a Web failure. A row that instead belongs to the
+mandatory Client dependency closure of the shipped official UIs is an ordinary
+mandatory row: it must reach ACTIVE for `enabled`, and a PENDING one makes the
+composition `unavailable`.
 
 The Client-side `/web` menu is the ONE user entry and it holds no Web state of
 its own: it reads the Host status through the semantic WebAccessPort, performs
