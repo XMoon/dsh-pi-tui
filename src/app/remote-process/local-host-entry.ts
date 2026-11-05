@@ -437,6 +437,9 @@ interface HostSettingsServiceLike {
 /** The profile entry that owns the Web startup preference. */
 const WEB_STARTUP_PREFERENCE_NAMESPACE = 'pi-tui-web-preferences'
 
+/** The fixed failure categories the pre-Ready Web autostart may report. */
+export type WebAutostartFailure = 'service-missing' | 'mutation-failed' | 'not-enabled'
+
 /**
  * Apply the profile-owned Web startup preference BEFORE the Host becomes Ready.
  *
@@ -447,10 +450,19 @@ const WEB_STARTUP_PREFERENCE_NAMESPACE = 'pi-tui-web-preferences'
  * Session/Agent/Gateway graph and publishes Ready with the Web frontend in
  * whatever state the private service truthfully reports.
  *
- * The diagnostic carries the failure TYPE only — never a URL, launch token,
- * cookie or profile path.
+ * The diagnostic is a FIXED record: a failure category and (when the service
+ * answered at all) the Host's own small state vocabulary. It never carries an
+ * exception message — a Host, Connection, Loader or plugin error text could
+ * contain a URL, launch token, cookie or profile path, which this pre-Ready path
+ * must never publish.
+ *
+ * @param context - the Host context that already settled the profile.
+ * @param emit - the structured record sink (the entry emits on its control channel).
  */
-async function applyWebStartupPreference(context: import('@deepseek-ai/cordis').Context): Promise<void> {
+export async function applyWebStartupPreference(
+  context: import('@deepseek-ai/cordis').Context,
+  emit: (record: Record<string, unknown>) => void = writeEntryRecord,
+): Promise<void> {
   const settings = context.get('settings') as HostSettingsServiceLike | undefined
   if (settings === undefined || typeof settings.describe !== 'function') {
     throw new Error('local host entry: the Host has no settings service, so the Web startup preference cannot be read')
@@ -469,31 +481,43 @@ async function applyWebStartupPreference(context: import('@deepseek-ai/cordis').
     throw new Error('local host entry: "pi-tui-web-preferences.autoStart" is not a boolean')
   }
   if (!autoStart) return
-  try {
-    const service = context.get(PI_TUI_WEB_ACCESS_NAMESPACE) as {
-      setEnabled(enabled: boolean): Promise<PiTuiWebAccessStatus>
-    } | undefined
-    if (service === undefined) throw new Error('the private Web access service is not published')
-    const status = await service.setEnabled(true)
-    if (status.state !== 'enabled') {
-      throw new Error(status.state === 'unavailable' ? status.reason : `the Web frontend reached "${status.state}"`)
-    }
-    writeEntryRecord({
-      m4a0: 'web-autostart',
-      processRole: 'host',
-      pid: process.pid,
-      phase: 'pre-ready',
-      status: 'enabled',
-    })
-  } catch (error) {
-    writeEntryRecord({
+  const unavailable = (failure: WebAutostartFailure, state?: string): void => {
+    emit({
       m4a0: 'diagnostic',
       processRole: 'host',
       pid: process.pid,
       code: 'web-autostart-unavailable',
-      error: error instanceof Error ? error.message : String(error),
+      failure,
+      ...(state === undefined ? {} : { state }),
     })
   }
+  const service = context.get(PI_TUI_WEB_ACCESS_NAMESPACE) as {
+    setEnabled(enabled: boolean): Promise<PiTuiWebAccessStatus>
+  } | undefined
+  if (service === undefined) {
+    unavailable('service-missing')
+    return
+  }
+  let status: PiTuiWebAccessStatus
+  try {
+    status = await service.setEnabled(true)
+  } catch {
+    // The exception text is deliberately dropped: it can name a URL, a token,
+    // a cookie or a profile path. The Host's own status is the visible truth.
+    unavailable('mutation-failed')
+    return
+  }
+  if (status.state !== 'enabled') {
+    unavailable('not-enabled', status.state)
+    return
+  }
+  emit({
+    m4a0: 'web-autostart',
+    processRole: 'host',
+    pid: process.pid,
+    phase: 'pre-ready',
+    status: 'enabled',
+  })
 }
 
 interface HostConnectionService {
