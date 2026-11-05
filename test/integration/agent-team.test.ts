@@ -76,7 +76,7 @@ function toolCall(ctx: Context, name: string, agent: Agent, args: unknown): Prom
     name,
     arguments: args,
     agent,
-  }) as never
+  })
 }
 
 function resultText(result: { content?: readonly { type?: string; text?: string }[] }): string {
