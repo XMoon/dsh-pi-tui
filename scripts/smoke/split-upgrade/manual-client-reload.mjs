@@ -121,6 +121,9 @@ export async function runManualClientReload(context) {
     const userCommandReload = await runUserCommandReloadRound(scope)
     const userCommandReloadTargetInvalid = await runUnavailableTargetRound(scope)
     return { userCommandReload, userCommandReloadTargetInvalid }
+  } catch (error) {
+    context.captureFailure([...hosts, ...clients])
+    throw error
   } finally {
     for (const client of clients) {
       try { await client.dispose?.() } catch { /* best effort */ }

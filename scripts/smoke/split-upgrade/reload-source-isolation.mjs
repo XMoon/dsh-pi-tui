@@ -56,6 +56,9 @@ export async function runReloadSourceIsolation(context) {
   try {
     const userCommandReloadSourceIsolation = await runReloadSourceIsolationRound(scope)
     return { userCommandReloadSourceIsolation }
+  } catch (error) {
+    context.captureFailure([...hosts, ...clients])
+    throw error
   } finally {
     for (const client of clients) {
       try { await client.dispose?.() } catch { /* best effort */ }
