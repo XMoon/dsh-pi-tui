@@ -5881,12 +5881,24 @@ async function main() {
           await client.waitForComposerDraft(text)
           client.send('\r')
         }
+        /**
+         * Wait for a FIXTURE event recorded at or after one boundary (the
+         * fixture proof file is append-only for the whole lane, so a bare
+         * `.find()` over all history can satisfy a wait with an EARLIER turn).
+         */
+        const waitForC1WorkEventAfter = async (afterIndex, predicate, label, timeoutMs = 120_000) => {
+          const found = () => readC1WorkEvents(workRoot).slice(afterIndex).find(predicate)
+          await waitForCondition(() => found() !== undefined, label, timeoutMs)
+          return found()
+        }
 
         // Turn 1 on X becomes a REAL completed product turn: it is the Host fork
         // cut the child inherits.
+        const openWorkBoundary = readC1WorkEvents(workRoot).length
         const sessionX = await openC1Session(clientA, 'm5n2-x-turn1', 'M5N2 A')
-        const heldX1 = await waitForC1WorkEvent(workRoot,
-          event => event.kind === 'long-turn-held' && event.sessionId === sessionX && event.attempt === 1,
+        const heldX1 = await waitForC1WorkEventAfter(openWorkBoundary,
+          event => event.kind === 'long-turn-held' && event.sessionId === sessionX
+            && event.userText.includes('m5n2-x-turn1'),
           'M5N2 X first Turn held')
         assert(heldX1.agentStatus === 'running',
           `M5N2 the Host Agent was ${JSON.stringify(heldX1.agentStatus)} while X was held`)
@@ -5916,9 +5928,11 @@ async function main() {
         // must not wait for.
         rmSync(releaseBarrier)
         const xTurn2Index = durableOf(sessionX).length
+        const turn2WorkBoundary = readC1WorkEvents(workRoot).length
         await submitPrompt(clientA, 'm5n2-x-turn2')
-        const heldX2 = await waitForC1WorkEvent(workRoot,
-          event => event.kind === 'long-turn-held' && event.sessionId === sessionX && event.attempt === 2,
+        const heldX2 = await waitForC1WorkEventAfter(turn2WorkBoundary,
+          event => event.kind === 'long-turn-held' && event.sessionId === sessionX
+            && event.userText.includes('m5n2-x-turn2'),
           'M5N2 X second Turn held')
         assert(heldX2.agentStatus === 'running',
           `M5N2 the Host Agent was ${JSON.stringify(heldX2.agentStatus)} while X's second Turn was held`)
@@ -6008,9 +6022,11 @@ async function main() {
         // leaves the Client entirely: the exit releases only A's own references.
         rmSync(releaseBarrier)
         const xTurn3Index = durableOf(sessionX).length
+        const turn3WorkBoundary = readC1WorkEvents(workRoot).length
         await submitPrompt(clientB, 'm5n2-x-turn3')
-        const heldX3 = await waitForC1WorkEvent(workRoot,
-          event => event.kind === 'long-turn-held' && event.sessionId === sessionX && event.attempt === 3,
+        const heldX3 = await waitForC1WorkEventAfter(turn3WorkBoundary,
+          event => event.kind === 'long-turn-held' && event.sessionId === sessionX
+            && event.userText.includes('m5n2-x-turn3'),
           'M5N2 X third Turn held')
         assert(heldX3.agentStatus === 'running',
           `M5N2 the Host Agent was ${JSON.stringify(heldX3.agentStatus)} while X's third Turn was held`)
@@ -6064,16 +6080,24 @@ async function main() {
         // abort the SAME Session's held Turn. The exit above left it running.
         rmSync(releaseBarrier)
         const stopIndex = durableOf(sessionX).length
+        const stopWorkBoundary = readC1WorkEvents(workRoot).length
         await submitPrompt(clientB, 'm5n2-x-stop')
-        const heldStop = await waitForC1WorkEvent(workRoot,
-          event => event.kind === 'long-turn-held' && event.sessionId === sessionX && event.attempt === 4,
+        // The readiness proof is BOUNDED to THIS turn: the fixture records
+        // `long-turn-held` when the Host starts the model stream for the
+        // request carrying this exact prompt, and the Host appends the fresh
+        // `turn/start` after the durable boundary. Neither can be satisfied by
+        // an earlier turn's proof, and the generic "long-turn started" text is
+        // never used as a freshness fact (it stays in the transcript).
+        const heldStop = await waitForC1WorkEventAfter(stopWorkBoundary,
+          event => event.kind === 'long-turn-held' && event.sessionId === sessionX
+            && event.userText.includes('m5n2-x-stop'),
           'M5N2 the Stop-control Turn held')
         assert(heldStop.agentStatus === 'running',
           `M5N2 the Host Agent was ${JSON.stringify(heldStop.agentStatus)} while the Stop-control Turn was held`)
-        await waitForCondition(async () => {
-          const frame = (await clientB.viewport()).join('\n')
-          return frame.includes('m5n2-x-stop') && frame.includes('long-turn started')
-        }, 'M5N2 B painted the held Stop-control Turn', 120_000)
+        await waitForHostSessionEventAfter(dshHome, sessionX, stopIndex,
+          event => event.type === 'turn/start', 'M5N2 the Stop-control Turn started at the Host', 120_000)
+        await waitForCondition(async () => (await clientB.viewport()).join('\n').includes('m5n2-x-stop'),
+          'M5N2 B echoed the held Stop-control prompt', 120_000)
         clientB.send('\x1b')
         const stopped = await waitForHostSessionEventAfter(dshHome, sessionX, stopIndex,
           event => event.type === 'turn/end', 'M5N2 the Busy Esc settled the Turn', 120_000)
@@ -6089,9 +6113,11 @@ async function main() {
         // source Turn holds; never rm a path that is legitimately gone.
         assert(!existsSync(releaseBarrier), 'M5N2 the hold barrier must be absent before the rewind Turn')
         const xTurn6Index = durableOf(sessionX).length
+        const turn6WorkBoundary = readC1WorkEvents(workRoot).length
         await submitPrompt(clientB, 'm5n2-x-turn6')
-        const heldX6 = await waitForC1WorkEvent(workRoot,
-          event => event.kind === 'long-turn-held' && event.sessionId === sessionX && event.attempt === 6,
+        const heldX6 = await waitForC1WorkEventAfter(turn6WorkBoundary,
+          event => event.kind === 'long-turn-held' && event.sessionId === sessionX
+            && event.userText.includes('m5n2-x-turn6'),
           'M5N2 X sixth Turn held')
         assert(heldX6.agentStatus === 'running',
           `M5N2 the Host Agent was ${JSON.stringify(heldX6.agentStatus)} while X's sixth Turn was held`)
