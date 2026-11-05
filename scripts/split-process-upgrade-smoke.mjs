@@ -267,11 +267,20 @@ async function runScene(options, oldArtifact, newArtifact, targetDshVersion) {
       }
     }
   }
-  // Case-owned failure snapshot: a Case records its live handles BEFORE its
-  // own finally disposes them. The Runner still reports once, after the throw.
+  // Case-owned failure snapshot: the case copies its live handles into bounded
+  // facts BEFORE its own finally mutates/disposes them. The Runner still emits
+  // the one report after the throw.
   const captureFailure = handles => {
     collectPublishedScopes()
-    for (const handle of handles) failureProcesses.push(handle)
+    for (const handle of handles) {
+      if (handle === null || typeof handle !== 'object') continue
+      failureProcesses.push({
+        role: handle.role,
+        exited: handle.exited === true,
+        exitResult: handle.exitResult === undefined ? undefined : { ...handle.exitResult },
+        records: Array.isArray(handle.records) ? handle.records.slice(-8) : [],
+      })
+    }
   }
   let failpointTriggered = false
   const { EntryProcess, SurfaceEntryProcess, activeProcesses } = createSplitProcessScope()
