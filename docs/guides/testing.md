@@ -328,19 +328,22 @@ combined with a selected non-Browser case all fail closed as
 The full-only whole-lane mutation control (`SPLIT_PROCESS_SMOKE_MUTATION`) is
 refused in selector modes instead of being silently applied.
 
-Both lanes install packaged payloads, start a real Host and a real Client over
-a PTY, and prove the same contracts, so they share the same input rule. The
-DSH runtime of a run is the exact `@deepseek-ai/dsh-agent` development pin of
-this checkout, and every artifact must declare that SAME pin in its own
-`package/package.json` — not a range, not a floor, and not the version a file
-name suggests. The production Client refuses a replacement target pinned to a
-different runtime, so an artifact built against another DSH version can never
-produce the behaviour these lanes assert. Such a pairing stops before any work
-root, install or process exists and is reported as `INPUT_UNQUALIFIED` with
-the role, both exact versions and the reason: it is an invalid test pairing,
-not a product regression, and the fix is to rebuild the artifact against the
-current pin. The full and selected entries use the same preflight; a selected
-case installs nothing until that preflight has qualified the exact pin.
+The complete Split lane and the Upgrade lane install packaged payloads and
+drive real Host/Client processes over a PTY, so they share the same input rule.
+A selected case runs only the resources its own contract needs — the
+`bootstrap.host-runtime-disabled` negative starts one real Host and
+deliberately no TUI Client. The DSH runtime of a run is the exact
+`@deepseek-ai/dsh-agent` development pin of this checkout, and every artifact
+must declare that SAME pin in its own `package/package.json` — not a range, not
+a floor, and not the version a file name suggests. The production Client
+refuses a replacement target pinned to a different runtime, so an artifact
+built against another DSH version can never produce the behaviour these lanes
+assert. Such a pairing stops before any work root, install or process exists
+and is reported as `INPUT_UNQUALIFIED` with the role, the artifact identity,
+both exact versions and the reason: it is an invalid test pairing, not a
+product regression, and the fix is to rebuild the artifact against the current
+pin. The full and selected entries use the same preflight; a selected case
+installs nothing until that preflight has qualified the exact pin.
 
 A default run is diagnosable without any environment variable. Both lanes
 announce the qualified artifact identity at startup and one checkpoint per

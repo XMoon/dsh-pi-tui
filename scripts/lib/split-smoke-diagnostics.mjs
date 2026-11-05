@@ -232,6 +232,8 @@ export class SplitSmokeInputError extends Error {
     this.role = facts.role
     this.targetDshVersion = facts.targetDshVersion
     this.artifactPin = facts.artifactPin
+    /** Optional already-validated identity of the refused artifact. */
+    this.artifact = facts.artifact
   }
 }
 
@@ -318,7 +320,7 @@ export function reloadNoticeTypeForText(text) {
  * Deliberately NO range matching and NO "compatible enough" inference: only
  * string equality with the lane's `npmDshVersion()` target qualifies.
  */
-export function requireExactSmokeDshPin(role, manifest, targetDshVersion) {
+export function requireExactSmokeDshPin(role, manifest, targetDshVersion, facts = {}) {
   if (!INPUT_ROLES.has(role)) throw new TypeError(`split smoke pin guard: unknown role ${String(role)}`)
   if (exactPinOrUndefined(targetDshVersion) === undefined) {
     throw new TypeError('split smoke pin guard: the lane target must be an exact DSH version')
@@ -331,7 +333,7 @@ export function requireExactSmokeDshPin(role, manifest, targetDshVersion) {
       `INPUT_UNQUALIFIED: INPUT_DSH_PIN_MISSING_OR_INVALID (INVALID_TEST_PAIRING, not a product regression): `
         + `the ${role} split-smoke artifact declares no exact ${DSH_AGENT_PACKAGE} devDependency pin, `
         + `but this lane runs ${targetDshVersion}; rebuild the ${role} qualification artifact against DSH ${targetDshVersion}`,
-      { role, targetDshVersion },
+      { role, targetDshVersion, artifact: facts.artifact },
     )
   }
   if (pin !== targetDshVersion) {
@@ -340,7 +342,7 @@ export function requireExactSmokeDshPin(role, manifest, targetDshVersion) {
       `INPUT_UNQUALIFIED: INPUT_DSH_PIN_MISMATCH (INVALID_TEST_PAIRING, not a product regression): `
         + `the ${role} split-smoke artifact pins ${DSH_AGENT_PACKAGE} ${pin}, but this lane runs ${targetDshVersion}; `
         + `rebuild the ${role} qualification artifact against DSH ${targetDshVersion}`,
-      { role, targetDshVersion, artifactPin: pin },
+      { role, targetDshVersion, artifactPin: pin, artifact: facts.artifact },
     )
   }
   return pin
@@ -710,17 +712,22 @@ export function emitInputFailure({ lane, heading, error, reason, evidencePath })
   // validated artifact role and the two exact pins of an invalid pairing.
   // Projecting those declared facts keeps the role and both pins in the report
   // without copying any raw error text; a selector error carries neither, so it
-  // stays role-less rather than inventing an artifact.
+  // stays role-less rather than inventing an artifact. A preflight that already
+  // validated the refused artifact's identity supplies it so name, version and
+  // SHA256 stay as traceable as the pre-extraction report.
   const inputFacts = error instanceof SplitSmokeInputError ? error : undefined
+  const artifacts = inputFacts?.artifact !== undefined
+    ? [inputFacts.artifact]
+    : inputFacts?.role === undefined
+      ? []
+      : [{ role: inputFacts.role, pin: inputFacts.artifactPin }]
   const report = projectFailureReport({
     lane,
     category: failureCategoryOf(error),
     reason: reason ?? error?.code,
     assertion: publishedAssertionOf(error),
     runtimeDshPin: inputFacts?.targetDshVersion,
-    artifacts: inputFacts?.role === undefined
-      ? []
-      : [{ role: inputFacts.role, pin: inputFacts.artifactPin }],
+    artifacts,
   })
   const path = writeFailureReport(report)
   process.stderr.write(`${heading}_FAILURE\n${formatFailureSummary(report, path)}\n`)

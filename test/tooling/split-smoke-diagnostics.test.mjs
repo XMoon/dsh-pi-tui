@@ -20,6 +20,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { createHash } from 'node:crypto'
 import { chmodSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { basename, dirname, join } from 'node:path'
@@ -220,25 +221,33 @@ test('the process lane refuses a candidate with another exact pin before any ins
   // The candidate identity check is the lane's own: name and version must match
   // this checkout, so only the DSH pin differs here.
   const candidate = syntheticTarball(dir, 'candidate', manifestOf(source.version, OTHER_PIN))
+  // The refused pairing must keep the already-validated candidate identity in
+  // the default report: role, name, version, SHA256 and both exact pins.
+  const candidateSha256 = createHash('sha256').update(readFileSync(candidate)).digest('hex')
+  const expectedIdentity = `candidate: ${PACKAGE_NAME}@${source.version}; pin=${OTHER_PIN}; sha256=${candidateSha256}`
   const result = runLane(PROCESS_SCRIPT, [candidate], dir)
   assert.notEqual(result.status, 0, 'a mismatched candidate must exit nonzero')
   assert.equal(result.signal, null, 'the lane must fail by itself inside the budget, not be killed by it')
   assert.match(result.stderr, /INPUT_UNQUALIFIED/u)
   assert.match(result.stderr, /INPUT_DSH_PIN_MISMATCH/u)
   assert.match(result.stderr, /\bcandidate\b/u)
+  assert.ok(result.stderr.includes(expectedIdentity),
+    `the full lane must keep the candidate identity in the refused-pairing report:\n${result.stderr}`)
   assert.ok(result.stderr.includes(OTHER_PIN) && result.stderr.includes(TARGET_PIN),
     `both exact versions must be reported:\n${result.stderr}`)
   assert.ok(!result.stderr.includes('qualified=true'),
     `an unqualified candidate must never announce itself as qualified:\n${result.stderr}`)
   assertNoLaneSetup(dir, 'dsh-split-process-')
   // The selected entry runs the SAME preflight: it refuses the pairing before a
-  // work root or install, and its report still names the role and both pins.
+  // work root or install, with the same identity and both pins.
   const selected = runLane(PROCESS_SCRIPT, [candidate, '--case', 'bootstrap.host-runtime-disabled'], dir)
   assert.notEqual(selected.status, 0, 'a mismatched candidate must fail the selected case too')
   assert.equal(selected.signal, null)
   assert.match(selected.stderr, /INPUT_UNQUALIFIED/u)
   assert.match(selected.stderr, /INPUT_DSH_PIN_MISMATCH/u)
   assert.match(selected.stderr, /\bcandidate\b/u)
+  assert.ok(selected.stderr.includes(expectedIdentity),
+    `the selected lane must keep the candidate identity in the refused-pairing report:\n${selected.stderr}`)
   assert.ok(selected.stderr.includes(OTHER_PIN) && selected.stderr.includes(TARGET_PIN),
     `the selected report must carry both exact pins:\n${selected.stderr}`)
   assert.ok(!selected.stderr.includes('qualified=true'))
