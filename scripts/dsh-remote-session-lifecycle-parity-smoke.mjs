@@ -256,10 +256,11 @@ async function createHost(workRoot) {
     // only Workspace authority, and it serves the generated `workspace` Remote
     // namespace this lane's ordinary create pre-selects through.
     await ctx.plugin(WorkspaceController)
-    let sessionController
-    await ctx.inject(SessionController.inject, controllerCtx => {
-      sessionController = new SessionController(controllerCtx, { nativeOpen: false })
-    })
+    // DSH 0.2.2 builds the controller's control/history/state sub-owners in the
+    // async `[Service.init]`, so mount the plugin form (which awaits init) and
+    // read the instance back from the service registry.
+    await ctx.plugin(SessionController, { nativeOpen: false })
+    const sessionController = ctx.get('sessionController')
     // Count every Host-side create dispatch: the pinned controller create is
     // "create or idempotently adopt", so mere Session presence cannot prove the
     // TUI dispatched exactly one Host create.

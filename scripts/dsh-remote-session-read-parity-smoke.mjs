@@ -145,10 +145,10 @@ async function createHost() {
   await ctx.inject(SqliteSessionQueryEngine.inject, queryCtx => {
     new SqliteSessionQueryEngine(queryCtx, { path: ':memory:', openAt: 'first-search' })
   })
-
-  await ctx.inject(SessionController.inject, controllerCtx => {
-    new SessionController(controllerCtx, { nativeOpen: false })
-  })
+  // DSH 0.2.2 builds the controller's control/history/state sub-owners in the
+  // async `[Service.init]`, so mount the plugin form (which awaits init)
+  // instead of constructing the service inside an inject callback.
+  await ctx.plugin(SessionController, { nativeOpen: false })
   await ctx.plugin(hostCtx => {
     new HostConnectionService(hostCtx, [], {})
   })
