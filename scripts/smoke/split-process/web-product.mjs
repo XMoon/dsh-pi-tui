@@ -1029,7 +1029,7 @@ export const runWebProductQualification = async context => {
       // The TUI keeps working on the SAME Host while Web is off.
       await tuiTurn(groupTui, sessionToggle, `W-${productNonce}-tui-while-off`, 'WP-08 TUI while off')
       // The old page is deliberately NOT guaranteed to stay usable: the
-      // product contract stops serving the page and unloads the 59 rows;
+      // product contract stops serving the page and unloads the 60 rows;
       // the re-enable is proved by a NEW authenticated page below.
       await enableWeb(groupTui, 'WP-08 re-enable')
       assertToggle(await webAccess(togglePeer, 'WP-08 after re-enable', undefined), 'enabled', 'WP-08 after re-enable')
@@ -1064,7 +1064,7 @@ export const runWebProductQualification = async context => {
     }
     recordSession('wp08-web-toggle', sessionToggle)
     await ptyFrames('wp08-web-toggle', groupTui)
-    setWc('WC-09', 'PASS', 'the real TUI `/web Disable` unloaded the 59 rows and stopped serving while the Host/TUI kept working; Enable and a settings recomposition restored the final enabled state', ['WP-08'])
+    setWc('WC-09', 'PASS', 'the real TUI `/web Disable` unloaded the 60 rows and stopped serving while the Host/TUI kept working; Enable and a settings recomposition restored the final enabled state', ['WP-08'])
     assert(await togglePeer.shutdown() !== undefined, 'WP-08 the qualification Peer did not stop')
     const peerIndex = peers.indexOf(togglePeer)
     if (peerIndex >= 0) peers.splice(peerIndex, 1)

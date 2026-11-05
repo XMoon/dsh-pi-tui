@@ -222,7 +222,7 @@ export async function runOfficialWebComposition(context) {
       tuiAnswer: 'painted',
     })
 
-    // ── B. Isolated qualification: the 59 rows enabled by ONE patch ─────
+    // ── B. Isolated qualification: the 60 rows enabled by ONE patch ─────
     // The override rows are appended to the SAME single extra patch this
     // lane already uses for its offline Host LLM. The entry accepts exactly
     // ONE extra patch file, so splitting them would silently drop one.
