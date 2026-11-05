@@ -36,7 +36,7 @@
 import type { AutocompleteItem, AutocompleteProvider } from '@xmoon76/pi-tui'
 import type { Key } from '@stencil-hq/tern'
 import type { TspComposer } from './editor.ts'
-import { classifyFileCompletionContext } from '../file-completion/context.ts'
+import { classifyFileCompletionContext, stripAtQuotes } from '../file-completion/context.ts'
 import { FILE_ARGUMENT_COMMANDS } from '../../domain/file-completion/path-argument-commands.ts'
 import { extractInlineSkillPrefix } from '../interaction/autocomplete/skill-reference.ts'
 import {
@@ -299,23 +299,34 @@ export function createTspInputCompletion(
       shell: false,
     })
     if (context.kind === 'mention') {
-      // The official mention grammar owns the token's LEFT bound, and the
-      // shared apply rewrites exactly `[range.start, cursorCol)`.
-      return { kind: 'host-mention', start: lineStart + context.range.start, end: document.cursor }
+      // The official mention grammar owns the token's LEFT bound, and the shared
+      // apply rewrites exactly `[range.start, cursorCol)` — plus, for the QUOTED
+      // mention form only, the one closing quote the official formatter merges
+      // into the value it returns (the grammar's own quote adjustment, never a
+      // seat-side lexer).
+      const mergedQuote = stripAtQuotes(context.query).quoted && line.charAt(document.cursorCol) === '"' ? 1 : 0
+      return {
+        kind: 'host-mention',
+        start: lineStart + context.range.start,
+        end: document.cursor + mergedQuote,
+      }
     }
     if (context.kind === 'path-argument') {
       const start = lineStart + context.range.start
+      const quoted = isOpenQuotedToken(context.argument)
       if (context.leading) {
         // The legacy first-line argument seat: the fork's argument apply keeps
-        // everything right of the caret.
-        return { kind: 'local-path-leading', start, end: document.cursor }
+        // everything right of the caret, except the same one merged closing
+        // quote of an open quoted token.
+        const mergedQuote = quoted && line.charAt(document.cursorCol) === '"' ? 1 : 0
+        return { kind: 'local-path-leading', start, end: document.cursor + mergedQuote }
       }
       // The INLINE path grammar is the attachment module's own boundary rule
       // (never a second lexer): an accepted value may end the token the caret
       // sits inside, so that remainder is inside the window.
       const remainder = splitTokenRemainder(
         line.slice(document.cursorCol),
-        isOpenQuotedToken(context.argument),
+        quoted,
         context.argument.replace(/^[ \t]+/, '') !== '',
       )
       return { kind: 'local-path-inline', start, end: document.cursor + remainder.consumed.length }
@@ -462,15 +473,14 @@ export function createTspInputCompletion(
   /** Settle the ONE acceptance a committed edit produced. An `action` and a
    *  `directory` continue the SAME seat (one follow-up query, no read, no
    *  stage); only a committed FILE hands the immutable acceptance to the mount's
-   *  installed stager. A committed document that does not match the acceptance
-   *  owns nothing here, so a foreign apply can never borrow a real row's read. */
-  const settleAcceptance = (
-    acceptance: InlineAttachmentAcceptance,
-    committedText: string,
-    committedCursor: number,
-  ): void => {
-    if (committedText !== acceptance.lines.join('\n')
-      || committedCursor !== flatOffset(acceptance.lines, acceptance.cursorLine, acceptance.cursorCol)) {
+   *  installed stager. The comparison is against the composer's LIVE state —
+   *  re-read here, after the commit and its frame — because a staged acceptance
+   *  describes the document the Provider produced, and anything that did not
+   *  actually install that document owns no read. */
+  const settleAcceptance = (acceptance: InlineAttachmentAcceptance): void => {
+    const live = ports.composer.state()
+    if (live.text !== acceptance.lines.join('\n')
+      || live.cursor !== flatOffset(acceptance.lines, acceptance.cursorLine, acceptance.cursorCol)) {
       return
     }
     if (acceptance.kind === 'path') {
@@ -575,7 +585,7 @@ export function createTspInputCompletion(
     // composer actually committed. A refused write DROPS it: no file is read, no
     // store mutates, no placeholder appears, no notice is claimed and nothing
     // submits — and the user's own path text stays exactly as they typed it.
-    if (written && staged !== undefined) settleAcceptance(staged, nextText, nextCursor)
+    if (written && staged !== undefined) settleAcceptance(staged)
     if (!written && hadPopup) ports.requestRender()
     // CONSUMED in every case except the leading-slash `tokenAlreadyComplete`
     // exception. An accept gesture that could not write must never degrade into
