@@ -308,6 +308,9 @@ export function redactWebQualificationText (text, secrets = []) {
   return value
     .replace(/([?&]token=)[^&\s"']+/gu, '$1<redacted>')
     .replace(/http:\/\/127\.0\.0\.1:\d+/gu, 'http://127.0.0.1:<port>')
+    .replace(/(^|\n)\s*(cookie|set-cookie|authorization)\s*:[^\n]*/giu, '$1$2: <redacted>')
+    .replace(/\b(cookie|set-cookie|authorization)=([^\s;,]+)/giu, '$1=<redacted>')
+    .replace(/\b(Bearer\s+)[A-Za-z0-9._~+\/-]+=*/gu, '$1<redacted>')
 }
 
 /**
@@ -2050,13 +2053,26 @@ export const qualifyWebProduct = async context => {
     }
     throw new SplitSmokeAssertionError(`${label}: the /web menu never selected "${description}"`)
   }
-  const enableWeb = async (tui, label) => {
+  const enableWeb = async (tui, label, options = {}) => {
     tui.send('/web\r')
-    await tui.waitForScreen('Status: disabled', `${label} /web disabled menu`, 120_000)
+    await tui.waitForScreen('Status:', `${label} /web menu`, 120_000)
+    const menu = (await tui.viewport()).join('\n')
+    const initial = menu.includes('Status: enabled') ? 'enabled'
+      : menu.includes('Status: disabled') ? 'disabled' : 'unknown'
+    assert(initial !== 'unknown', `${label}: the /web menu painted no known Web status`)
+    if (options.requireDisabled === true) {
+      assert(initial === 'disabled', `${label}: the initial Web state was ${initial}, expected disabled`)
+    }
+    if (initial === 'enabled') {
+      tui.send('\u001b')
+      await tui.waitForScreenGone('Status:', `${label} menu closed`, 30_000)
+      return initial
+    }
     await selectWebRow(tui, 'Start serving the official Web frontend', `${label} Enable Web`)
     await tui.waitForScreen('Status: enabled', `${label} enabled projection`, 180_000)
     tui.send('\u001b')
     await tui.waitForScreenGone('Status: enabled', `${label} menu closed`, 30_000)
+    return initial
   }
   const disableWeb = async (tui, label) => {
     tui.send('/web\r')
@@ -2239,15 +2255,39 @@ export const qualifyWebProduct = async context => {
       await body(handle)
       const finished = await browserDriverExitBounded(exit, 300_000, `PR_D_BROWSER_EXIT_TIMEOUT(${caseId})`)
       const report = readJson(join(coord, 'browser-result.json'))
-      const reportText = JSON.stringify(report)
       assert(finished.code === 0,
         `PR-D ${caseId}: the product Browser driver failed (exit ${JSON.stringify(finished.code)}/${String(finished.signal)}): ${redactWebQualificationText(report.error ?? 'driver-failure')}`)
       assert(report.ok === true && report.caseId === caseId && report.nonce === productNonce,
         `PR-D ${caseId}: the product Browser result is not a completed PASS (${String(report.error ?? 'no error')})`)
+      // RFL-001: the Driver's observed ids are the start; the AUTHORITATIVE
+      // correlations are the durable Host ids of this case's Session. Enrich
+      // the retained result BEFORE it leaves the run, so the evidence copy is
+      // not a Browser-only claim.
+      const sessionForCorrelation = typeof config.sessionId === 'string' && config.sessionId !== ''
+        ? config.sessionId
+        : report.sessionId
+      if (typeof sessionForCorrelation === 'string' && sessionForCorrelation !== '') {
+        const durableIds = durableOf(sessionForCorrelation).flatMap(event => [
+          event.data?.source?.rpcId,
+          event.data?.rpcId,
+          event.data?.requestId,
+          event.data?.callId,
+          event.data?.id,
+        ]).filter(value => typeof value === 'string' && value !== '')
+        report.requestIds = [...new Set([...(Array.isArray(report.requestIds) ? report.requestIds : []), ...durableIds])]
+      }
+      writeFileSync(join(coord, 'browser-result.json'), `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 })
+      const reportText = JSON.stringify(report)
       assert(!/[?&]token=/u.test(reportText) && !/127\.0\.0\.1:\d+/u.test(reportText) && !/(?:Cookie|Authorization)\s*:/iu.test(reportText),
         `PR-D ${caseId}: the product Browser result leaked an authenticated-link secret`)
+      assert(typeof report.sessionId === 'string' && report.sessionId !== '',
+        `PR-D ${caseId}: the product Browser case has no Host Session identity`)
+      assert(Array.isArray(report.steps) && report.steps.length > 0,
+        `PR-D ${caseId}: the product Browser case recorded no real step`)
       assert(report.steps.every(entry => entry.passed === true),
         `PR-D ${caseId}: a product Browser step did not pass`)
+      assert(Array.isArray(report.requestIds) && report.requestIds.length > 0,
+        `PR-D ${caseId}: the product Browser case carries no Host request/rpc correlation`)
       evidence.browserCase(caseId, coord, report, finished)
       evidence.setBrowserRuntime({
         playwright: report.runtimeVersion?.playwright,
@@ -2305,7 +2345,7 @@ export const qualifyWebProduct = async context => {
     const groupAIdentity = groupA.ready.localHost
     const { tui: tuiA } = await startTui('wp01-group')
     let groupTui = tuiA
-    await enableWeb(groupTui, 'WP-01')
+    await enableWeb(groupTui, 'WP-01', { requireDisabled: true })
     const groupAEnabled = await hostStatus(groupA.host)
     assertSingleHostOwners(groupAEnabled, 'WP-01 enabled Host')
     webFullyOn(groupAEnabled)
@@ -2337,6 +2377,19 @@ export const qualifyWebProduct = async context => {
     assert(userEvents(wp01Session, `wp01-${productNonce}`).length === 1,
       'WP-01 the Browser prompt was not committed to the Host exactly once')
     assert(wp01.indexStatus === 200, `WP-01 the Browser index was HTTP ${String(wp01.indexStatus)}`)
+    const wp01Negatives = wp01.negatives ?? {}
+    assert(wp01Negatives.index !== 200,
+      `WP-01 the unauthenticated index was accepted (HTTP ${String(wp01Negatives.index)})`)
+    assert(wp01Negatives.api === 401,
+      `WP-01 the unauthenticated /api was not 401 (HTTP ${String(wp01Negatives.api)})`)
+    assert(wp01Negatives.wrongHost !== 200,
+      `WP-01 a wrong Host header was accepted (HTTP ${String(wp01Negatives.wrongHost)})`)
+    assert(wp01Negatives.wrongOrigin !== 200,
+      `WP-01 a wrong Origin was accepted (HTTP ${String(wp01Negatives.wrongOrigin)})`)
+    // `/plugins/events` may be an official public graph stream; the plan does
+    // not require every non-index resource to be 401. Record it, never use it
+    // as an authentication negative.
+    trace('t75-web-product-wp01-negatives', wp01Negatives)
     assert((wp01.network?.statuses ?? []).some(entry => entry.path === '/plugins/events' && entry.status === 200),
       'WP-01 the Browser never loaded the official plugin event stream')
     assert((wp01.network?.failedPaths ?? []).every(path => !/\/plugins\/.*\.js|\/api\/.* -> 5\d\d/iu.test(path)),
@@ -2634,11 +2687,14 @@ export const qualifyWebProduct = async context => {
     })
     await tuiLocal.waitForScreen(`W-${productNonce}-seed`, 'WP-09 Client-local TUI reads the Session', 180_000)
     const browserUploadMarker = `w-${productNonce}-browser-upload`
+    let hostShellFact
+    let hostShellFeature
     await browserCase('wp09-locality', {
       sessionId: sessionToggle,
       expectedAnswer: 'long-turn answer',
     }, async handle => {
       await handle.waitFact('upload', 'WP-09 Browser upload', 240_000)
+      hostShellFact = await handle.waitFact('host-shell', 'WP-09 Host terminal command', 240_000)
     })
     await tuiLocal.waitForScreen('browser-local-sentinel.txt', 'WP-09 TUI sees the Browser attachment', 180_000)
     // The TUI Client-local intake reads the image in the TUI process; the
@@ -2710,13 +2766,43 @@ export const qualifyWebProduct = async context => {
       `WP-09 the Session workspace is the TUI client cwd (${String(localityHeader.cwd)}) instead of a Host workspace`)
     assert(!existsSync(join(tuiCwd, 'browser-local-sentinel.txt')),
       'WP-09 the Browser-local file was written into the TUI Client cwd')
+    // Host-owned workspace shell/path: the real Web terminal (right sidebar →
+    // New tab → New terminal) runs a Host PTY in the Session workspace. Its
+    // commands must create Host-side files, never files in the TUI Client cwd.
+    assert(hostShellFact !== undefined && typeof hostShellFact.marker === 'string',
+      'WP-09 the Host terminal command produced no marker fact')
+    const hostShellMarkerPath = join(localityHeader.cwd, 'host-shell-marker.txt')
+    const hostShellPwdPath = join(localityHeader.cwd, 'host-shell-pwd.txt')
+    assert(existsSync(hostShellMarkerPath),
+      `WP-09 the Host terminal marker is absent from the Host Session workspace (${hostShellMarkerPath})`)
+    assert(readFileSync(hostShellMarkerPath, 'utf8').trim() === hostShellFact.marker,
+      'WP-09 the Host terminal marker content is not the command marker')
+    assert(existsSync(hostShellPwdPath), `WP-09 the Host terminal pwd file is absent (${hostShellPwdPath})`)
+    const hostShellPwd = readFileSync(hostShellPwdPath, 'utf8').trim()
+    assert(hostShellPwd === localityHeader.cwd || realpathSync(hostShellPwd) === realpathSync(localityHeader.cwd),
+      `WP-09 the Host terminal ran in ${hostShellPwd}, not the Host Session workspace ${localityHeader.cwd}`)
+    assert(!existsSync(join(tuiCwd, 'host-shell-marker.txt')),
+      'WP-09 the Host terminal marker landed in the TUI Client cwd')
+    hostShellFeature = {
+      feature: 'web terminal/PTY',
+      entryVisible: true,
+      actualAction: 'opened the official Web terminal (right sidebar → New tab → New terminal) and ran pwd/printf in the Host PTY',
+      hostApi: 'official Web terminal/PTY, Host-owned Session workspace',
+      durableOrUiResult: `Host files created at ${hostShellPwd}: host-shell-marker.txt and host-shell-pwd.txt`,
+      status: 'SUPPORTED_PASS',
+      reason: '',
+      evidence: ['WP-09-host-shell', hostShellPwd],
+      supportText: 'The official Web terminal runs in the Session workspace on the Host; commands create files on the Host, not in the TUI client cwd.',
+    }
     recordSession('wp09-locality', sessionToggle)
     await ptyFrames('wp09-locality', tuiLocal)
-    setWc('WC-10', 'PASS', 'Browser-local upload and TUI Client-local image intake reached Host storage through the official owners; a TUI-private file never reached the Host; the Session workspace is Host-owned. TUI generic-file /attach is UNAVAILABLE in the Remote composition (no upload-receipt seam) and is recorded, not claimed', ['WP-04A', 'WP-09'])
+    setWc('WC-10', 'PASS', 'Browser-local upload, TUI Client-local image intake and a real Host-owned Web terminal command were proven: Host-side files were created in the Session workspace and not in the TUI cwd; a TUI-private file never reached the Host. TUI generic-file /attach is UNAVAILABLE in the Remote composition (no upload-receipt seam) and is recorded, not claimed', ['WP-04A', 'WP-09'])
 
     // WP-10: the honest visible-feature inventory.
     const inventory = await browserCase('wp10-inventory', {}, async () => {})
-    evidence.features(inventory.features ?? [])
+    const featureMatrix = (inventory.features ?? []).filter(feature => feature.feature !== 'web terminal/PTY')
+    if (hostShellFeature !== undefined) featureMatrix.push(hostShellFeature)
+    evidence.features(featureMatrix)
     recordSession('wp10-inventory', inventory.sessionId)
     await ptyFrames('wp10-inventory', groupTui)
     assert((inventory.features ?? []).some(feature => feature.feature === 'session.create/list/open' && feature.status === 'SUPPORTED_PASS'),
@@ -2727,7 +2813,7 @@ export const qualifyWebProduct = async context => {
       assert((inventory.features ?? []).some(entry => entry.feature === feature && entry.status === 'SUPPORTED_PASS'),
         `WP-10 the core ${feature} surface did not PASS`)
     }
-    setWc('WC-12', 'BLOCKED', 'the Web feature inventory is recorded (core Session/Turn/Question/Approval PASS; optional panels are honestly NOT_VERIFIED); the REAL Tern GUI lane is not yet signed off', ['WP-10'])
+    setWc('WC-12', 'DEFERRED_WITH_OWNER', 'the Web feature inventory is recorded (core Session/Turn/Question/Approval PASS; optional panels are honestly NOT_VERIFIED). The REAL Tern GUI half is deferred by explicit OWNER decision on 2026-11-05: the TSP `/web` picker is only reachable from the Direct renderer selection while the serving `piTuiWebAccess` Host service is only composed by the Split Host-only overlay. Responsible: M5-W owner. Re-entry: when a composition change lets the TSP/Tern GUI reach the serving Host WebAccessPort. This is NOT a GUI PASS and NOT stage closure.', ['WP-10'])
 
     // The evidence PTY frame of the last group-A TUI state.
     const tuiAAfter = await hostStatus(groupA.host)
@@ -3152,6 +3238,7 @@ export const qualifyWebProduct = async context => {
       assert(savedOn.ok === true && savedOn.readBack === true, 'WP-07 the autoStart On write did not read back')
       await lifecyclePeer.shutdown()
       const beforeStop = (await hostStatus(lifecycle.host)).localHost
+      let wp07Final
       await browserCase('wp07-host-lifecycle', { sessionId: sessionLife }, async handle => {
         await handle.waitFact('ready', 'WP-07 Browser ready', 240_000)
         // 1. Graceful owner-governed stop.
@@ -3191,6 +3278,7 @@ export const qualifyWebProduct = async context => {
         assert(staleInstance.instanceId === oldInstance,
           'WP-07 the SIGKILL left no stale identity for the negative control')
         const final = await startHost('long-turn', 'wp07-final', { C1_HOLD_LONG_TURN: fastBarrier })
+        wp07Final = final
         assert(final.ready.localHost.instanceId !== oldInstance,
           'WP-07 a cold-started Host reused the killed instance id')
         await waitForHostSessionHeader(dshHome, sessionLife, 'WP-07 final Session header')
@@ -3201,6 +3289,80 @@ export const qualifyWebProduct = async context => {
       })
       recordSession('wp07-host-lifecycle', sessionLife)
       setWc('WC-08', 'PASS', 'graceful stop and SIGKILL each left a stale/absent old identity, no fabricated settlement, and ONE fresh Host with the durable Session and autoStart preference', ['WP-05', 'WP-06', 'WP-07'])
+      if (wp07Final !== undefined && !wp07Final.host.exited) {
+        const stop = await wp07Final.host.shutdown()
+        assert(stop.code === 0, 'WP-07 the final Host did not stop before the pending case')
+      }
+
+      // WP-07 pending/unknown Browser write across a Host SIGKILL.
+      {
+        const pendingBarrier = join(productRoot, 'long-turn.pending')
+        rmSync(pendingBarrier, { force: true })
+        const pending = await startHost('long-turn', 'wp07-pending', { C1_HOLD_LONG_TURN: pendingBarrier })
+        const { tui: pendingTui } = await startTui('wp07-pending')
+        await enableWeb(pendingTui, 'WP-07 pending')
+        const pendingMarker = `H-${productNonce}-pending`
+        let pendingSession
+        let pendingNext
+        try {
+          await browserCase('wp07-pending-write', {}, async handle => {
+            const session = await handle.waitFact('session', 'WP-07 pending Session', 240_000)
+            pendingSession = session.sessionId
+            handle.writeCommand({ seq: 1, kind: 'send', prompt: pendingMarker })
+            await handle.waitStep(1, 'WP-07 pending Browser send')
+            await waitForC1WorkEvent(pending.workRoot,
+              event => event.kind === 'long-turn-held' && event.sessionId === pendingSession,
+              'WP-07 pending Host held the Turn', 180_000)
+            const beforeKill = durableOf(pendingSession)
+            assert(beforeKill.filter(event => event.type === 'user/message'
+              && JSON.stringify(event).includes(pendingMarker)).length === 1,
+            'WP-07 pending: the Browser prompt was not committed once before the kill')
+            assert(!beforeKill.some(event => event.type === 'assistant/message'),
+              'WP-07 pending: an assistant message settled before the kill')
+            assert(!beforeKill.some(event => event.type === 'turn/end'),
+              'WP-07 pending: the Turn settled before the kill')
+            pending.host.kill('SIGKILL')
+            const killed = await pending.host.waitForExit(60_000)
+            assert(killed.signal === 'SIGKILL' || killed.code !== 0,
+              `WP-07 pending Host exit was ${JSON.stringify(killed)}`)
+            handle.writeCommand({ seq: 2, kind: 'expect-offline', timeoutMs: 180_000 })
+            await handle.waitStep(2, 'WP-07 pending Browser observed the SIGKILL')
+            const afterKill = durableOf(pendingSession)
+            assert(afterKill.filter(event => event.type === 'user/message'
+              && JSON.stringify(event).includes(pendingMarker)).length === 1,
+            'WP-07 pending: the kill duplicated the pending prompt')
+            assert(!afterKill.some(event => event.type === 'assistant/message'),
+              'WP-07 pending: the killed Host fabricated an assistant answer')
+            pendingNext = await startHost('long-turn', 'wp07-pending-next', { C1_HOLD_LONG_TURN: pendingBarrier })
+            assert(pendingNext.ready.localHost.instanceId !== pending.ready.localHost.instanceId,
+              'WP-07 pending: the cold Host reused the killed instance id')
+            handle.writeCommand({ seq: 3, kind: 'reconnect', sessionId: pendingSession })
+            await handle.waitStep(3, 'WP-07 pending Browser reconnected')
+            await sleep(1_000)
+            const finalEvents = durableOf(pendingSession)
+            assert(finalEvents.filter(event => event.type === 'user/message'
+              && JSON.stringify(event).includes(pendingMarker)).length === 1,
+            'WP-07 pending: the cold Host replayed or duplicated the pending prompt')
+            assert(!finalEvents.some(event => event.type === 'assistant/message'),
+              'WP-07 pending: the pending prompt was answered after cold resume')
+            assert(!finalEvents.some(event => event.type === 'turn/end'
+              && event.data?.reason?.kind === 'completed'),
+            'WP-07 pending: a fake completed settlement survived the kill')
+            handle.writeCommand({ seq: 4, kind: 'finish' })
+            await handle.waitStep(4, 'WP-07 pending finish')
+          })
+          assert(typeof pendingSession === 'string' && pendingSession !== '',
+            'WP-07 pending: the Browser created no Session')
+          recordSession('wp07-pending-write', pendingSession)
+          setWc('WC-08', 'PASS', 'TUI reload/exit/SIGKILL, a real Browser reload and a pending Browser write across Host SIGKILL/cold resume all kept ONE Host/Writer with no fabricated settlement and no replay', ['WP-05', 'WP-06', 'WP-07'])
+        } finally {
+          try { await pendingTui.dispose() } catch { /* best effort */ }
+          if (!pending.host.exited) { try { await pending.host.shutdown() } catch { /* best effort */ } }
+          if (pendingNext !== undefined && !pendingNext.host.exited) {
+            try { await pendingNext.host.shutdown() } catch { /* best effort */ }
+          }
+        }
+      }
       for (const client of clients.splice(0)) {
         if (client.exited) continue
         try { await client.dispose() } catch { /* the global backstop owns leftovers */ }
@@ -3210,20 +3372,36 @@ export const qualifyWebProduct = async context => {
     // The evidence writer's final status is deliberately explicit: WP-11's
     // real Tern GUI half is a product-composition blocker, not a PASS.
     evidence.setTernGui({
-      status: 'BLOCKED',
-      reason: 'the TSP `/web` picker is mounted only by the Direct renderer selection, while the Host WebAccessPort is composed only by the Split Host-only overlay; the current product boundary has no real Tern GUI path to the same serving Host, so this lane is NOT_RUN and the GUI sign-off needs Owner disposition',
+      status: 'DEFERRED_WITH_OWNER',
+      reason: 'the TSP `/web` picker is mounted only by the Direct renderer selection, while the Host WebAccessPort is composed only by the Split Host-only overlay; the current product boundary has no real Tern GUI path to the same serving Host',
+      ownerApproval: 'Owner explicitly selected DEFERRED_WITH_OWNER for WP-11/WC-12 in the PR-D session on 2026-11-05',
+      responsible: 'M5-W owner',
+      reentry: 'when a composition change lets the TSP/Tern GUI reach the same serving Host WebAccessPort',
     })
-    const productOnly = Object.entries(wc).filter(([code]) => code !== 'WC-12')
-    const finalStatus = productOnly.every(([, entry]) => entry.status === 'PASS') ? 'PASS_PRODUCT_BROWSER' : 'INCOMPLETE'
-    evidence.finish({ status: finalStatus, wc, browserCases: browserRun })
+    const browserSubsetPassed = Object.entries(wc)
+      .filter(([code]) => code !== 'WC-12')
+      .every(([, entry]) => entry.status === 'PASS')
+    const allPassed = Object.values(wc).every(entry => entry.status === 'PASS')
+    const ownerDeferredOnly = Object.entries(wc).every(([code, entry]) => entry.status === 'PASS'
+      || (code === 'WC-12' && entry.status === 'DEFERRED_WITH_OWNER'))
+    // Plan §15/§19: ANY MUST `BLOCKED/NOT_RUN` forbids declaring the PR-D
+    // product qualification complete. WC-12 includes the real Tern GUI gate
+    // (§12), now explicitly DEFERRED_WITH_OWNER; the overall status records
+    // that deferral, while the Browser×TUI subset it actually ran is separate.
+    const finalStatus = allPassed ? 'PASS'
+      : browserSubsetPassed && ownerDeferredOnly ? 'DEFERRED_WITH_OWNER'
+        : browserSubsetPassed ? 'BLOCKED' : 'INCOMPLETE'
+    const browserSubset = browserSubsetPassed ? 'PASS' : 'FAIL'
+    evidence.finish({ status: finalStatus, browserSubset, wc, browserCases: browserRun })
     trace('t75-web-product', {
       status: finalStatus,
+      browserSubset,
       cases: browserRun,
       wc,
       hostPid: groupA.ready.pid,
-      ternGui: 'BLOCKED: no real Tern GUI path to the Split Host WebAccessPort in the current composition',
+      ternGui: 'DEFERRED_WITH_OWNER: no real Tern GUI path to the Split Host WebAccessPort in the current composition; Owner-approved on 2026-11-05',
     })
-    return { status: finalStatus, wc }
+    return { status: finalStatus, browserSubset, wc }
   } finally {
     await cleanup()
   }
@@ -12276,8 +12454,8 @@ async function main() {
       targetDshVersion,
       env,
     })
-    assert(productQualification.status === 'NOT_RUN' || productQualification.status === 'PASS_PRODUCT_BROWSER',
-      `t75 the product Web qualification ended as ${String(productQualification.status)}`)
+    assert(productQualification.status === 'NOT_RUN' || productQualification.browserSubset === 'PASS',
+      `t75 the product Browser×TUI subset ended as ${String(productQualification.browserSubset ?? productQualification.status)}`)
 
     // T18: installed package shape is already checked above; Direct `--help`
     // and the role-only negative control ran before any Host existed.
@@ -12312,9 +12490,13 @@ async function main() {
       webStartupPreference: autostartQualification.verified === true
         ? 'PASS_PROFILE_AUTOSTART_AND_WEB_ENTRY_REAL_PROCESSES'
         : 'NOT_VERIFIED',
-      webProduct: productQualification.status === 'PASS_PRODUCT_BROWSER'
+      webProduct: productQualification.status === 'PASS'
         ? 'PASS_PRODUCT_BROWSER_X_REAL_TUI'
-        : 'NOT_RUN_OR_INCOMPLETE',
+        : productQualification.browserSubset === 'PASS'
+          ? 'BROWSER_SUBSET_PASS_WC12_DEFERRED_WITH_OWNER'
+          : 'NOT_RUN_OR_INCOMPLETE',
+      webProductStatus: productQualification.status,
+      webProductBrowserSubset: productQualification.browserSubset,
       webProductWc: productQualification.wc,
       m4c1: 'PASS_REAL_SPLIT_PROCESS',
       m5b: 'pass (two REAL surface Clients retained ONE Session X; shared pending inbox + official Ctrl+S steer of the other Client\'s occurrence; two independent same-text submits stayed two; A -> Y navigation kept B writing X; B-only exit kept A/Host)',
@@ -12338,7 +12520,7 @@ async function main() {
       releaseGates: 'not run by this smoke; stage-final lane records the separate release-gate verdict',
     })
 
-    console.log(`split-process authenticated-link + real-surface smoke passed — ${basename(tarball)} × DSH ${targetDshVersion} (incl. M5B-01 two real surfaces on one Session, M5N-01 non-destructive Split Remote navigation, M5N-02 fork/exit siblings and M5N-03 departing from a pending Host interaction); official Web composition ${webBrowserVerdict === 'PASS' ? 'PASS (real Browser)' : `NOT_QUALIFIED (${webBrowserVerdict})`}; official Web runtime toggle ${toggleQualification.browser === 'PASS' ? 'PASS (real Browser)' : `NOT_QUALIFIED (${toggleQualification.browser})`}; product Web × real TUI ${productQualification.status === 'PASS_PRODUCT_BROWSER' ? 'PASS (real Browser + real PTY TUI)' : `NOT_RUN (${productQualification.status})`}`)
+    console.log(`split-process authenticated-link + real-surface smoke passed — ${basename(tarball)} × DSH ${targetDshVersion} (incl. M5B-01 two real surfaces on one Session, M5N-01 non-destructive Split Remote navigation, M5N-02 fork/exit siblings and M5N-03 departing from a pending Host interaction); official Web composition ${webBrowserVerdict === 'PASS' ? 'PASS (real Browser)' : `NOT_QUALIFIED (${webBrowserVerdict})`}; official Web runtime toggle ${toggleQualification.browser === 'PASS' ? 'PASS (real Browser)' : `NOT_QUALIFIED (${toggleQualification.browser})`}; product Web × real TUI ${productQualification.status === 'PASS' ? 'PASS (real Browser + real PTY TUI)' : productQualification.browserSubset === 'PASS' ? `BROWSER SUBSET PASS; WC-12 ${productQualification.status} (Owner decision recorded)` : `NOT_RUN (${productQualification.status})`}`)
   } catch (error) {
     // Report BEFORE the cleanup below: the failure projection must read the
     // still-live process handles, and the work root must still exist while the

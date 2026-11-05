@@ -1337,7 +1337,12 @@ test('the product Browser x real-TUI qualification is require-gated and never fa
     'wp05-refresh-held',
     'wp06-tui-lifecycle',
     'wp07-host-lifecycle',
+    'wp07-pending-write',
     'wp08-web-toggle',
+    'host-shell',
+    'requestIds',
+    'DEFERRED_WITH_OWNER',
+    'web terminal/PTY',
     'wp09-locality',
     'wp10-inventory',
     'setWc(\'WC-01\'',
@@ -1356,7 +1361,7 @@ test('the product Browser x real-TUI qualification is require-gated and never fa
   assert.match(lane, /if \(!REQUIRE_WEB_PRODUCT\) \{/u)
   assert.match(lane, /assert\(playwrightRoot !== undefined && playwrightRoot !== '',/u)
   assert.match(source, /const productQualification = await qualifyWebProduct\(\{/u)
-  assert.match(source, /assert\(productQualification\.status === 'NOT_RUN' \|\| productQualification\.status === 'PASS_PRODUCT_BROWSER'/u)
+  assert.match(source, /assert\(productQualification\.status === 'NOT_RUN' \|\| productQualification\.browserSubset === 'PASS'/u)
   // The driver-owned facts are raced against the driver's own exit through the
   // ONE shared helper; a bare fixed window would burn the whole budget.
   assert.match(lane, /waitFact:[\s\S]*?whileBrowserDriverRuns\(/u)
@@ -1365,7 +1370,11 @@ test('the product Browser x real-TUI qualification is require-gated and never fa
   // The result is a whitelisted projection: no credential shape may survive.
   assert.match(lane, /const reportText = JSON\.stringify\(report\)/u)
   assert.match(lane, /!\/\[\?&\]token=\/u\.test\(reportText\)/u)
-  assert.match(lane, /cookie|Authorization/iu)
+  assert.match(source, /set-cookie/iu)
+  assert.match(source, /authorization/iu)
+  assert.ok(lane.includes('report.steps.length > 0'), 'an empty steps array must not qualify')
+  assert.ok(lane.includes('report.requestIds.length > 0'), 'request correlation must be non-empty')
+  assert.ok(lane.includes("code === 'WC-12' && entry.status === 'DEFERRED_WITH_OWNER'"), 'the total verdict must not exclude WC-12')
   // The real driver is a Playwright program with real pointer/keyboard input,
   // case-id admission and a 0600 whitelisted result.
   const driver = readFileSync(join(ROOT, 'scripts', 'fixtures', 'm5-web-product-browser.mjs'), 'utf8')
@@ -1383,6 +1392,14 @@ test('the product Browser x real-TUI qualification is require-gated and never fa
     'waitSignal(',
     'function captureNextSessionCreate',
     'function conversationMarkers',
+    'function sanitizeValue',
+    'sanitizeValue(result)',
+    'function recordRequestIds',
+    'function hostShellCommand',
+    'unauthenticatedNegatives',
+    'wp07-pending-write',
+    'host-terminal-command',
+    'cookie|set-cookie|authorization',
   ]) {
     assert.ok(driver.includes(marker), `missing PR-D driver marker ${marker}`)
   }
@@ -1584,6 +1601,14 @@ test('the Web qualification redactor removes every credential shape from retaine
   assert.match(redacted, /bare launch token <redacted-token> in a log line/u)
   assert.match(redacted, /token=<redacted>/u)
   assert.match(redacted, /http:\/\/127\.0\.0\.1:<port>/u)
+  const headers = redactWebQualificationText([
+    'Cookie: session=supersecretcookie',
+    'Set-Cookie: dsh_session=anothersecret',
+    'Authorization: Bearer topsecretvalue',
+  ].join('\n'), [])
+  assert.equal(/supersecretcookie|anothersecret|topsecretvalue/u.test(headers), false,
+    'Cookie/Authorization values must not survive the redactor')
+  assert.match(headers, /cookie: <redacted>/iu)
   // Discriminating control: the SAME assertion group rejects the raw text.
   assert.throws(() => {
     assert.equal(raw.includes(token), false)

@@ -106,6 +106,30 @@ function redacted(text) {
     // into evidence even without a token.
     .replace(/(?:https?|wss?):\/\/127\.0\.0\.1:\d+/gu, '<redacted-origin>')
     .replace(/127\.0\.0\.1:\d+/gu, '127.0.0.1:<port>')
+    // Playwright can echo request/response headers in an error or console
+    // line. The plan forbids Cookie/Authorization values in retained evidence;
+    // redact the header LINE and any `name=value` variant.
+    .replace(/(^|\n)\s*(cookie|set-cookie|authorization)\s*:[^\n]*/giu, '$1$2: <redacted>')
+    .replace(/\b(cookie|set-cookie|authorization)=([^\s;,]+)/giu, '$1=<redacted>')
+    .replace(/\b(Bearer\s+)[A-Za-z0-9._~+\/-]+=*/gu, '$1<redacted>')
+}
+
+/**
+ * Sanitize EVERY retained string recursively, then reject a surviving header
+ * shape outright. A sensitive value must never reach the result file before
+ * the runner's own check: the file is the artifact, not a candidate for a
+ * later filter.
+ */
+function sanitizeValue(value) {
+  if (typeof value === 'string') {
+    const clean = redacted(value)
+    return /(?:^|\n)\s*(?:cookie|set-cookie|authorization)\s*:/iu.test(clean) ? '<redacted-header>' : clean
+  }
+  if (Array.isArray(value)) return value.map(sanitizeValue)
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, sanitizeValue(item)]))
+  }
+  return value
 }
 
 const result = {
@@ -162,6 +186,15 @@ function writeJson(path, value, mode = 0o600) {
 
 function driverFact(name, value) {
   writeJson(join(coordinationDir, `browser-${name}.json`), value)
+}
+
+/** Retain only official request ids the driver itself observed. */
+function recordRequestIds(value) {
+  for (const candidate of [value?.id, value?.requestId, value?.result?.id, value?.result?.requestId]) {
+    if (typeof candidate === 'string' && candidate !== '' && !result.requestIds.includes(candidate)) {
+      result.requestIds.push(candidate)
+    }
+  }
 }
 
 /** Wait for one runner signal file; the driver owns no timeout policy of its own. */
@@ -295,6 +328,8 @@ async function openSession(page, sessionId, timeoutMs = 120_000) {
   const row = page.locator(`[data-row-key="session:${sessionId}"]`).first()
   await row.waitFor({ state: 'visible', timeout: timeoutMs })
   await row.click()
+  result.sessionId = sessionId
+  result.browserClientActions.push('open-session')
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     const selected = await page.evaluate(id => document.querySelector(`[data-row-key="session:${id}"]`)?.getAttribute('aria-selected') === 'true', sessionId)
@@ -335,6 +370,8 @@ async function newSession(page) {
   const sessionId = created?.result?.value?.sessionId
   if (typeof sessionId !== 'string' || sessionId === '') throw new Error('the Web UI created no Host Session')
   result.sessionId = sessionId
+  result.browserClientActions.push('new-session')
+  recordRequestIds(created)
   return sessionId
 }
 
@@ -490,10 +527,73 @@ async function login(context, timeoutMs = 120_000) {
   return page
 }
 
+/**
+ * WP-01 negative controls with NO cookie/token. The status is the official
+ * server's, never a Browser-context request API (which can hang on the
+ * authenticated index chain and is not the negative-control authority).
+ */
+async function unauthenticatedNegatives() {
+  const access = currentLaunch()
+  const statusOf = async (path, headers) => {
+    try {
+      const response = await fetch(`${access.url.origin}${path}`, {
+        redirect: 'manual',
+        headers,
+        signal: AbortSignal.timeout(10_000),
+      })
+      await response.body?.cancel()
+      return response.status
+    } catch (error) {
+      return `refused:${error?.name ?? 'error'}`
+    }
+  }
+  const index = await statusOf('/')
+  const api = await statusOf('/api')
+  const plugins = await statusOf('/plugins/events')
+  const wrongHost = await statusOf('/', { Host: 'wrong-host.example' })
+  const wrongOrigin = await statusOf('/api', { Origin: 'http://wrong-origin.example' })
+  return { index, api, plugins, wrongHost, wrongOrigin }
+}
+
 /** The shared prompt/answer assertion for the deterministic C1 long-turn model. */
 async function promptAndWait(page, text, answerNeedle, timeoutMs = 240_000) {
   await sendPrompt(page, text)
   return waitConversation(page, text, [answerNeedle], timeoutMs, `the answer of "${text.slice(0, 40)}"`)
+}
+
+/**
+ * Run one harmless command in the official Web terminal (a Host-owned PTY in
+ * the Session workspace) and write two sentinel files on the HOST side. This
+ * is the WP-09 Host-owned workspace shell/path action: the browser-local and
+ * TUI-local files never prove it.
+ */
+async function hostShellCommand(page, nonce) {
+  const openSidebar = await findControlMatching(page, /open right sidebar/iu, 2_000)
+  if (openSidebar !== null) {
+    await clickCentre(page, openSidebar)
+    await page.waitForTimeout(500)
+  }
+  let terminal = await findControlMatching(page, /new terminal/iu, 2_000)
+  if (terminal === null) {
+    const newTab = await findControlMatching(page, /new tab/iu, 2_000)
+    if (newTab !== null) {
+      await clickCentre(page, newTab)
+      await page.waitForTimeout(500)
+      terminal = await findControlMatching(page, /new terminal/iu, 3_000)
+    }
+  }
+  if (terminal === null) throw new Error('the official Web shell exposed no New terminal control')
+  await clickCentre(page, terminal)
+  await page.locator('.xterm').last().waitFor({ state: 'visible', timeout: 30_000 })
+  const textarea = page.locator('.xterm-helper-textarea').last()
+  await textarea.click({ timeout: 10_000 })
+  const marker = `host-shell-${nonce}`
+  await page.keyboard.type('pwd > host-shell-pwd.txt\r')
+  await page.waitForTimeout(1_000)
+  await page.keyboard.type(`printf ${marker} > host-shell-marker.txt\r`)
+  await page.waitForTimeout(1_000)
+  result.browserClientActions.push('host-terminal-command')
+  return { marker }
 }
 
 /** Read the next command from the runner's append-only command ledger. */
@@ -539,6 +639,11 @@ async function commandLoop(startPage, context) {
         await promptAndWait(page, command.prompt, command.answerNeedle ?? 'long-turn answer')
         const after = await conversationCount(page, command.marker, 'long-turn answer')
         fact = { answerSeen: true, prompt: command.prompt, answerCountBefore: before, answerCountAfter: after }
+      } else if (command.kind === 'send') {
+        // WP-07 pending/unknown: submit the real prompt but do NOT wait for an
+        // answer. The runner kills the Host after the Host has accepted it.
+        await sendPrompt(page, command.prompt)
+        fact = { sent: true, prompt: command.prompt }
       } else if (command.kind === 'expect-offline') {
         fact = await waitOffline(page, command.timeoutMs ?? 120_000)
       } else if (command.kind === 'reconnect') {
@@ -615,6 +720,26 @@ async function probeFeature(page, feature, action) {
   return entry
 }
 
+/** A bounded "find one visible control whose aria/text matches a regex" probe. */
+async function findControlMatching(page, pattern, timeoutMs = 3_000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const point = await page.evaluate(source => {
+      const re = new RegExp(source, 'iu')
+      for (const node of document.querySelectorAll('button,[role=button]')) {
+        const label = `${node.getAttribute('aria-label') ?? ''} ${node.textContent ?? ''}`.replace(/\s+/gu, ' ').trim()
+        if (!re.test(label)) continue
+        const rect = node.getBoundingClientRect()
+        if (rect.width > 0 && rect.height >= 20) return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 }
+      }
+      return null
+    }, pattern.source)
+    if (point !== null) return point
+    await page.waitForTimeout(150)
+  }
+  return null
+}
+
 /** A bounded "find one visible control by aria label or exact text" probe. */
 async function findControl(page, match, timeoutMs = 3_000) {
   const deadline = Date.now() + timeoutMs
@@ -665,6 +790,19 @@ async function inventory(page) {
     supportText: 'Prompt submission and live assistant output work in the official Web conversation.',
   })
 
+  // Stop/interrupt: a core Turn control; this inventory did not drive it.
+  result.features.push({
+    feature: 'turn.stop/interrupt',
+    entryVisible: true,
+    actualAction: 'not driven in this inventory pass',
+    hostApi: 'official Agent turn cancellation',
+    durableOrUiResult: 'no stop action was executed',
+    status: 'NOT_VERIFIED',
+    reason: 'the Web stop/interrupt control was not exercised in this run; the held-turn lanes do not claim it',
+    evidence: [],
+    supportText: '',
+  })
+
   // Questions: proven by the real WP-03 lane; the inventory records the same fact.
   result.features.push({
     feature: 'Questions',
@@ -690,7 +828,7 @@ async function inventory(page) {
   })
 
   // Session rename: a real row action if the shell exposes it.
-  await probeFeature(page, 'session.rename', async () => {
+  await probeFeature(page, 'session.rename/delete', async () => {
     const row = page.locator(`[data-row-key="session:${createdSession}"]`).first()
     await row.hover()
     const buttons = await page.evaluate(id => {
@@ -699,10 +837,10 @@ async function inventory(page) {
       return [...rowNode.querySelectorAll('button')].map(button => (button.getAttribute('aria-label') ?? button.textContent ?? '').trim())
     }, createdSession)
     return {
-      actualAction: `hovered the Session row; row controls=${JSON.stringify(buttons)}`,
+      actualAction: `hovered the Session row; rename/delete controls=${JSON.stringify(buttons)}`,
       durableOrUiResult: 'row action controls were observed but not driven',
       status: 'NOT_VERIFIED',
-      reason: 'the row action menu was not driven by this automated inventory probe',
+      reason: 'the row rename/delete action menu was not driven by this automated inventory probe',
       evidence: [`rowControls=${JSON.stringify(buttons)}`],
       supportText: '',
     }
@@ -764,6 +902,64 @@ async function inventory(page) {
     }
   })
 
+  // Web terminal / PTY: report the real visible control, never a claimed action.
+  await probeFeature(page, 'web terminal/PTY', async () => {
+    const labels = await page.evaluate(() => [...document.querySelectorAll('button,[role=button]')]
+      .map(node => (node.getAttribute('aria-label') ?? node.textContent ?? '').replace(/\s+/gu, ' ').trim())
+      .filter(label => label !== ''))
+    const control = labels.find(label => /terminal|shell/iu.test(label))
+    return control === undefined
+      ? {
+          entryVisible: false,
+          actualAction: 'read the shell control inventory',
+          hostApi: 'none',
+          durableOrUiResult: 'no terminal/shell control visible',
+          status: 'UNAVAILABLE_BY_DESIGN',
+          reason: 'the official Web shell exposed no terminal/shell control in this composition',
+          evidence: ['no terminal/shell control'],
+          supportText: 'A Web terminal/PTY is not offered by this Web shell; no Host PTY action is claimed.',
+        }
+      : {
+          entryVisible: true,
+          actualAction: `found the "${control}" control but did not drive it`,
+          hostApi: 'official Web terminal/PTY (not exercised)',
+          durableOrUiResult: 'control visible only',
+          status: 'NOT_VERIFIED',
+          reason: 'a terminal control is visible; this inventory did not execute a Host command through it',
+          evidence: [`control=${control}`],
+          supportText: '',
+        }
+  })
+
+  // Downloaded deliverables / export: no UI action was driven.
+  await probeFeature(page, 'downloaded deliverables/export', async () => {
+    const labels = await page.evaluate(() => [...document.querySelectorAll('button,a[href],[role=button]')]
+      .map(node => (node.getAttribute('aria-label') ?? node.textContent ?? '').replace(/\s+/gu, ' ').trim())
+      .filter(label => label !== ''))
+    const control = labels.find(label => /download|export|deliverable/iu.test(label))
+    return control === undefined
+      ? {
+          entryVisible: false,
+          actualAction: 'read the shell control inventory',
+          hostApi: 'none',
+          durableOrUiResult: 'no download/export control visible',
+          status: 'UNAVAILABLE_BY_DESIGN',
+          reason: 'the observed Web shell exposed no download/export deliverable control',
+          evidence: ['no download/export control'],
+          supportText: '',
+        }
+      : {
+          entryVisible: true,
+          actualAction: `found the "${control}" control but did not drive it`,
+          hostApi: 'official deliverables/download (not exercised)',
+          durableOrUiResult: 'control visible only',
+          status: 'NOT_VERIFIED',
+          reason: 'a download/export control is visible; this inventory did not execute the file transfer',
+          evidence: [`control=${control}`],
+          supportText: '',
+        }
+  })
+
   // Session deep link: record what the shell really does after opening a row.
   result.features.push({
     feature: 'session deep link/cross-client navigation',
@@ -783,13 +979,14 @@ async function inventory(page) {
 const cases = {
   /** WP-01: login, dynamic resources, a real Session UI action. */
   'wp01-login': async context => {
+    result.negatives = await unauthenticatedNegatives()
     const page = await login(context)
     const marker = `wp01-${nonce}`
     const sessionId = await newSession(page)
     driverFact('session', { sessionId })
     await promptAndWait(page, marker, caseConfig.expectedAnswer ?? 'long-turn answer')
     await screenshot(page, 'home-session')
-    step('login-and-session', true, { sessionId, marker })
+    step('login-and-session', true, { sessionId, marker, negatives: result.negatives })
     await waitSignal('runner-go')
   },
 
@@ -802,6 +999,7 @@ const cases = {
     await waitConversation(page, caseConfig.marker, [caseConfig.expectedAnswer ?? 'long-turn answer'], 180_000, 'the TUI prompt and Host answer')
     await screenshot(page, 'tui-session')
     driverFact('confirmed', { sessionId })
+    step('opened-tui-session', true, { sessionId })
   },
 
   /** WP-02B: the Browser creates a Session; the runner resumes it in the TUI. */
@@ -811,6 +1009,7 @@ const cases = {
     const marker = caseConfig.marker ?? `wp02b-${nonce}`
     await promptAndWait(page, marker, caseConfig.expectedAnswer ?? 'long-turn answer')
     driverFact('session', { sessionId })
+    step('created-browser-session', true, { sessionId, marker })
     await waitSignal('runner-go')
     await screenshot(page, 'browser-session')
   },
@@ -933,6 +1132,7 @@ const cases = {
     while (!existsSync(sessionFile) && Date.now() < deadline) await sleep(100)
     if (!existsSync(sessionFile)) throw new Error('the timed question case never learned its Session id')
     const sessionId = readJson(sessionFile).sessionId
+    result.sessionId = sessionId
     await openSession(page, sessionId)
     // A timed question settles without a Browser answer. The official card may
     // already be in `continued` state; the assertion is that no answerable
@@ -1072,6 +1272,17 @@ const cases = {
     await screenshot(current, 'host-lifecycle')
   },
 
+  /** WP-07 pending/unknown Browser write across a Host SIGKILL. */
+  'wp07-pending-write': async context => {
+    const page = await login(context)
+    const sessionId = await newSession(page)
+    driverFact('session', { sessionId })
+    driverFact('ready', {})
+    const current = await commandLoop(page, context)
+    step('pending-write-killed-and-not-replayed', true, { sessionId })
+    await screenshot(current, 'pending-write')
+  },
+
   /** WP-08: `/web` toggle and settings recomposition with a live Browser. */
   'wp08-web-toggle': async context => {
     const page = await login(context)
@@ -1097,7 +1308,11 @@ const cases = {
     await promptAndWait(page, `wp09 attachment ${nonce}`, caseConfig.expectedAnswer ?? 'long-turn answer')
     await screenshot(page, 'browser-upload')
     driverFact('upload', { painted, fileName: 'browser-local-sentinel.txt' })
+    const hostShell = await hostShellCommand(page, nonce)
+    driverFact('host-shell', hostShell)
+    await screenshot(page, 'host-terminal')
     step('browser-local-upload', true, { fileName: 'browser-local-sentinel.txt' })
+    step('host-owned-terminal-command', true, hostShell)
   },
 
   /** WP-10: the honest visible-feature inventory. */
@@ -1127,7 +1342,7 @@ try {
   result.error = redacted(String(error.message)).split('\n')[0].slice(0, 400)
 } finally {
   result.durationMs = Date.now() - startedAt
-  writeJson(join(coordinationDir, 'browser-result.json'), result)
+  writeJson(join(coordinationDir, 'browser-result.json'), sanitizeValue(result))
   // Closing the CONTEXT alone leaves the Playwright browser connection alive
   // and the Node process would never exit (the runner would have to kill it).
   await browser?.close().catch(() => {})
