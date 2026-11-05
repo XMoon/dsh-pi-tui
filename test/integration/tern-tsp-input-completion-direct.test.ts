@@ -1,5 +1,20 @@
 /**
- * TSP I-C (the first-line slash completion) on the OFFICIAL Direct composition.
+ * TSP I-C (the first-line slash completion) + I-D (the Host `@` reference, the
+ * declared `/attach` + `/image` argument, the body inline action and the inline
+ * attachment intake) on the OFFICIAL Direct composition.
+ *
+ * HOST ROUTE PROVEN HERE (read this before crediting any `@` row): the Direct
+ * adapter routes an `@` query by the TOKEN's own form — an EXPLICIT path scope
+ * (`@src/tui/…`, `@../…`, `@/abs`) runs the real Host scoped discovery
+ * (`runtime/direct/file-completion/host-discovery.ts`) over the real workspace, while a
+ * BARE fuzzy query (`@editor`) delegates to the official `ctx.fileReferences`
+ * provider, which THIS fixture mounts as the documented empty workspace-index
+ * stand-in. The `@` cases below therefore prove the explicit-scope route against real
+ * workspace files, and prove the bare route answers its authoritative empty WITHOUT a
+ * Client-local fallback; the bare-fuzzy POSITIVE (a real provider ranking a fuzzy
+ * query) cannot be proven against this stand-in and stays owned by
+ * `test/domain/file-completion-convergence.test.ts` and
+ * `test/app/pi-tui-file-reference-host.test.ts`.
  *
  * Every case here boots the real Direct application (`support/direct-tsp-fixture.ts`:
  * real rc.2 Host services + live Agents, the real `CommandRuntime` catalog, the real
@@ -8,16 +23,20 @@
  * Client-local attachment store). Candidates are read back from the actual
  * `ui.editor`-anchored wire — the row nodes the SDK really sent — never from a
  * hand-built catalog: no case feeds the menu, the only install path is the production
- * `registerTuiCommands` commit point.
+ * `registerTuiCommands` commit point, and the only inline-attachment stager is the
+ * production `artifactCommands.inlineAttachmentStager()` that SAME commit installs on
+ * the real mount — no case injects a stager, and no case is handed a pre-staged
+ * placeholder.
  *
  * EVIDENCE LEVEL: official Direct composition + SDK wire. STAND-INS: the scripted
  * pane (its advertised `el` kind IS the handshake) and the scripted streaming model.
  * ABSENT: a physical Tern GUI/OS input path and a user profile.
  *
  * LANE BOUNDARY: the seat's own interaction semantics on the mount are
- * `test/tui/tern-tsp-slash-completion.test.ts`; this file owns the OFFICIAL Direct
- * composition — the real registry provenance, a real Session create/resume and the
- * real persistence behind what the first-line menu shows and what an accept leaves.
+ * `test/tui/tern-tsp-input-completion.test.ts`; this file owns the OFFICIAL Direct
+ * composition — the real registry provenance, a real Session create/resume, the real
+ * Host file port, the real Client-local intake/draft stores and the real delivered
+ * prompt behind what the seat shows and what an accept leaves.
  *
  * GENUINE Host-origin rows used as evidence (read back from the real registry, never
  * fabricated): `/permission`, registered by the shipped
@@ -29,22 +48,27 @@
  * case observes its sink. Per-Session candidate tracking uses the official per-agent
  * seam the Host registry itself names (`agent.ctx.get('commands').register(...)`),
  * i.e. a real agent-scoped Host command read back with `commands.list(agent)`.
- * @module @xmoon76/dsh-pi-tui/test/integration/tern-tsp-slash-completion-direct
+ * @module @xmoon76/dsh-pi-tui/test/integration/tern-tsp-input-completion-direct
  */
 
 import assert from 'node:assert/strict'
-import { readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
-import { join, relative } from 'node:path'
+import { createHash } from 'node:crypto'
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
+import { dirname, join, relative } from 'node:path'
 import test from 'node:test'
 import { createDirectTspFixture, waitFor, waitForInputDelivery, type DirectTspFixture } from '../support/direct-tsp-fixture.ts'
 import { wireNodes, type WireNode } from '../support/tsp-picker-wire.ts'
 import { waitForEditableComposer } from '../support/tsp-composer-readiness.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
-import { SLASH_COMPLETION_MAX_ROWS } from '../../src/tui/tsp/slash-completion.ts'
+import { INPUT_COMPLETION_MAX_ROWS } from '../../src/tui/tsp/input-completion.ts'
+import { readImageFileUninjected, setImageReadForTest } from '../../src/client/media/image/intake.ts'
+import { DraftImageStore } from '../../src/client/media/image/draft-store.ts'
+import { DraftFileStore } from '../../src/client/media/attachment/file-draft.ts'
 
 /** The seat's own painted-row window: read the production constant, never a
  *  copy that can drift from the surface it is asserting on. */
-const MAX_ROWS = SLASH_COMPLETION_MAX_ROWS
+const MAX_ROWS = INPUT_COMPLETION_MAX_ROWS
 
 /** The bounded observation window for this file's ABSENCE claims. The bound is not a
  *  guess: the pane acks every drawn frame before the SDK sends its next View, and a
@@ -55,6 +79,11 @@ const ABSENCE_WINDOW_MS = 400
 const ENTER = '\r'
 const ESCAPE = '\u001b'
 const BACKSPACE = '\x7f'
+const RIGHT = '\u001b[C'
+const END = '\u001b[F'
+/** Shift+Enter is the Composer’s own newline gesture (I-D needs a real multi-line
+ *  draft); the SDK decodes this exact CSI-u sequence into `enter` + `shift`. */
+const SHIFT_ENTER = '\u001b[13;2u'
 const PASTE_START = '\u001b[200~'
 const PASTE_END = '\u001b[201~'
 
@@ -79,9 +108,19 @@ interface Registry {
   register(definition: unknown): () => void
 }
 
-/** The styled candidate rows the SDK currently carries. */
+/**
+ * The styled candidate rows the SDK currently carries, for ANY seat (the I-C
+ * command token, a Host `@` reference, a local path argument, an inline action).
+ * A row is the popup's own `button` node; its MENU container, its hint line and
+ * the row's inner text/description spans are NOT rows. The previous
+ * `\.completion-[^.]+$` shape silently dropped every row whose value contains a
+ * dot — i.e. exactly the file-name rows I-D paints (`photo.png`), because the
+ * node key keeps the filename's own dot — so the identity test is the button
+ * element plus the seat's row-key prefix, never a dot-free suffix.
+ */
 function slashRows(fixture: DirectTspFixture): WireNode[] {
-  return wireNodes(fixture.pane).filter(node => node.k === 'el' && /\.slash-[^.]+$/.test(node.id))
+  return wireNodes(fixture.pane).filter(node =>
+    node.k === 'el' && node.p.tag === 'button' && /(^|\.)completion-/.test(node.id))
 }
 
 /** The catalog's own row text: `<name> — <description>` as the painter received it. */
@@ -352,6 +391,165 @@ function clickRow(fixture: DirectTspFixture, id: string): void {
 /** Hold the wire still for the bounded negative window, then read it. */
 async function observeNothing(fixture: DirectTspFixture): Promise<void> {
   await new Promise(resolve => setTimeout(resolve, ABSENCE_WINDOW_MS)) // reason: bounded negative observation window; the pane's frame-credit ack cycle already covers every list this mount could paint
+}
+
+/**
+ * ONE real PNG, produced by the attachment backend’s own dependency (the same
+ * producer `pasted-image-path-direct-submission.test.ts` uses), so the Client-local
+ * intake decodes REAL bytes and REAL header dimensions instead of a hand-made
+ * buffer the test could have invented.
+ */
+async function realPng(width = 8, height = 8): Promise<Uint8Array> {
+  const require = createRequire(import.meta.url)
+  const storeRoot = dirname(require.resolve('@deepseek-ai/dsh-attachment-local/package.json'))
+  const sharp = require(require.resolve('sharp', { paths: [storeRoot] })) as (
+    input: unknown,
+  ) => { png(): { toBuffer(): Promise<Buffer> } }
+  return new Uint8Array(await sharp({ create: { width, height, channels: 3, background: '#abcdef' } }).png().toBuffer())
+}
+
+/** One staging call the production intake made on a Client draft store. */
+interface StagedCall {
+  readonly placeholder: string
+  readonly id: number
+  readonly name: string
+  readonly bytes?: Uint8Array
+  readonly width?: number
+  readonly height?: number
+  readonly mediaType?: string
+  readonly sourcePath?: string
+  readonly byteLength?: number
+  readonly inode?: bigint
+}
+
+/**
+ * Attach ONE-TO-ONE recorders to the TWO production Client draft stores. The
+ * Direct composition creates them inside the mounted runner
+ * (`src/app/bootstrap.ts` `new DraftImageStore()` / `new DraftFileStore()`), so
+ * the observation point is the shipped class prototype with the UNBOUND original
+ * saved and re-invoked on the real receiver (never `.bind`), and `detach()`
+ * restores the SAME function identity. Every recorded call carries the receiver,
+ * which IS the mount's live store object — so `imageEntries()`/`fileEntries()`
+ * read the real staged counts from the production store itself, never from a
+ * test-side copy. `add` is the ONLY path that mints a draft entry, so a zero
+ * call count is the authoritative "no draft store entry exists" fact.
+ */
+function watchDraftStores(): {
+  readonly imageAdds: StagedCall[]
+  readonly fileAdds: StagedCall[]
+  /** How many image intakes reached the real `readImageFile` argument step. */
+  readEntries(): number
+  imageEntries(): number
+  fileEntries(): number
+  detach(): void
+} {
+  const imageAdds: StagedCall[] = []
+  const fileAdds: StagedCall[] = []
+  const imageStores = new Set<DraftImageStore>()
+  const fileStores = new Set<DraftFileStore>()
+  let reads = 0
+  const imagePrototype = DraftImageStore.prototype as unknown as {
+    add(this: DraftImageStore, input: never): { id: number; placeholder: string }
+    remainingBytes(this: DraftImageStore): number
+    values(this: DraftImageStore): readonly unknown[]
+  }
+  const filePrototype = DraftFileStore.prototype as unknown as {
+    add(this: DraftFileStore, input: never): { id: number; placeholder: string }
+  }
+  const originalAdd = imagePrototype.add
+  const originalRemaining = imagePrototype.remainingBytes
+  const originalFileAdd = filePrototype.add
+  imagePrototype.add = function (this: DraftImageStore, input: never) {
+    imageStores.add(this)
+    const staged = originalAdd.call(this, input)
+    imageAdds.push({
+      placeholder: staged.placeholder,
+      id: staged.id,
+      name: String((input as never as { name?: string }).name ?? ''),
+      bytes: (input as never as { bytes?: Uint8Array }).bytes,
+      width: (input as never as { width?: number }).width,
+      height: (input as never as { height?: number }).height,
+      mediaType: (input as never as { mediaType?: string }).mediaType,
+      sourcePath: (input as never as { source?: { path?: string } }).source?.path,
+    })
+    return staged
+  }
+  imagePrototype.remainingBytes = function (this: DraftImageStore) {
+    // The intake's OWN synchronous argument step: `readImageFile(path, cwd,
+    // limits, store.remainingBytes())`. A call here is the fact that the
+    // command plane entered the Client-local read for this stake.
+    imageStores.add(this)
+    reads += 1
+    return originalRemaining.call(this)
+  }
+  filePrototype.add = function (this: DraftFileStore, input: never) {
+    fileStores.add(this)
+    const staged = originalFileAdd.call(this, input)
+    fileAdds.push({
+      placeholder: staged.placeholder,
+      id: staged.id,
+      name: String((input as never as { name?: string }).name ?? ''),
+      byteLength: (input as never as { byteLength?: number }).byteLength,
+      sourcePath: (input as never as { source?: { path?: string } }).source?.path,
+      inode: (input as never as { source?: { fingerprint?: { ino?: bigint } } }).source?.fingerprint?.ino,
+    })
+    return staged
+  }
+  const sum = (stores: Set<{ values(): readonly unknown[] }>): number => {
+    let total = 0
+    for (const store of stores) total += store.values().length
+    return total
+  }
+  return {
+    imageAdds,
+    fileAdds,
+    readEntries: () => reads,
+    imageEntries: () => sum(imageStores as Set<{ values(): readonly unknown[] }>),
+    fileEntries: () => sum(fileStores as Set<{ values(): readonly unknown[] }>),
+    detach: () => {
+      imagePrototype.add = originalAdd
+      imagePrototype.remainingBytes = originalRemaining
+      filePrototype.add = originalFileAdd
+    },
+  }
+}
+
+/** Every transient notice this mount has painted (the Dock notice segment). */
+function noticeTexts(fixture: DirectTspFixture): string[] {
+  return wireNodes(fixture.pane)
+    .filter(node => /(^|\.)notice-/.test(node.id) && typeof node.p.text === 'string')
+    .map(node => String(node.p.text))
+}
+
+/** The candidate rows' OWN display text, without any description suffix. */
+function rowTexts(fixture: DirectTspFixture): string[] {
+  return rowTitles(fixture).map(title => title.split(' — ')[0]!)
+}
+
+/** One real Enter key the seat owns (accept a highlighted candidate). */
+function pressEnter(fixture: DirectTspFixture): void {
+  fixture.pane.input.type(ENTER)
+}
+
+/**
+ * The intake SUCCESS notices the dock really paints. Counted, not merely “present”:
+ * one accepted file commits exactly one announcement, and a settlement the currentness
+ * fence refused adds none — the positive control earlier in the same case is what makes
+ * that absence a fact about the fence rather than about a notice that never exists.
+ */
+function successNotices(fixture: DirectTspFixture): string[] {
+  return noticeTexts(fixture).filter(text => text.startsWith('attached '))
+}
+
+/** The draft text of one logical line of the controlled composer. */
+function composerLine(fixture: DirectTspFixture, index: number): string {
+  return composerText(fixture).split('\n')[index] ?? ''
+}
+
+/** The real staged PNG/placeholder token the production store minted, if any. */
+function lastPlaceholder(calls: readonly StagedCall[]): string {
+  assert.ok(calls.length > 0, 'at least one staging call exists')
+  return calls[calls.length - 1]!.placeholder
 }
 
 test('a launch with no Session yet offers the real registered catalog to the first input, and accepting a candidate writes its name and submits nothing', async (t) => {
@@ -757,30 +955,60 @@ test('the same accepted text twice creates one real history row and one candidat
   }
 })
 
-test('an argument position, an at-mention, a shell line, a pasted second line and ordinary prose offer no candidates and stage no file state', async (t) => {
+test('the I-D contract on one mount: the Host `@` scope and the declared attachment argument DO open, while a shell line, an email, a version pin, prose and a bare path still open nothing and stage nothing', async (t) => {
   const life = testLifecycle(t)
-  const fixture = await createDirectTspFixture(life, { deltas: ['IC-FENCE'], composerActions: true })
+  const fixture = await createDirectTspFixture(life, { deltas: ['ID-FENCE'], composerActions: true })
+  const stores = watchDraftStores()
   const recorder = fixture.recordPrompts(() => {})
   try {
     await waitForInputDelivery(fixture.pane)
     const attachable = join(fixture.workRoot, 'lane-note.pdf')
     writeFileSync(attachable, Buffer.from('%PDF-1.7 lane note'))
     assert.deepEqual(stagedAttachmentFiles(fixture.workRoot), [], 'the attachment store starts with no staged object')
+    assert.equal(stores.imageEntries(), 0, 'the draft image store starts empty')
+    assert.equal(stores.fileEntries(), 0, 'the draft file store starts empty')
 
+    // POSITIVE CONTROL FIRST: on THIS mount the two I-D seats really do open. A
+    // closed `@`/argument position would make every absence below vacuous, which
+    // is exactly the I-C rule I-D replaces (Host `@` and a declared attachment
+    // argument are now open seats).
+    await prepareDraft(fixture, `看一下 /image ${fixture.workRoot}/lane`)
+    await settle(fixture, 'the declared /attach-argument seat to open', () =>
+      rowTexts(fixture).includes(attachable))
+    await eraseDraft(fixture)
+    await prepareDraft(fixture, '请看 /imag')
+    await settle(fixture, 'the inline attachment ACTION seat to open', () => rowTexts(fixture).includes('/image'))
+    await eraseDraft(fixture)
+
+    // The provenance boundary: an `@` INSIDE a declared attachment argument stays
+    // Client-local path text. A Host mention row is the official `@…` value; a
+    // local argument row never is — the two sources never trade places.
+    const atDir = join(fixture.workRoot, '@local')
+    mkdirSync(atDir, { recursive: true })
+    writeFileSync(join(atDir, 'inside.txt'), Buffer.from('inside an @-named directory'))
+    await prepareDraft(fixture, `看一下 /attach ${fixture.workRoot}/@local/in`)
+    await settle(fixture, 'the argument seat with an `@` in the path', () =>
+      rowTexts(fixture).includes(join(atDir, 'inside.txt')))
+    assert.equal(rowTexts(fixture).every(text => !text.startsWith('@')), true,
+      `an ` + `@ inside an argument is path text, never a Host mention row (got ${JSON.stringify(rowTexts(fixture))})`)
+    await eraseDraft(fixture)
+
+    // The positions I-D still keeps closed. Each is typed, then ONE real printable
+    // edit at the caret runs the natural trigger against THIS document.
     const cases: ReadonlyArray<{ readonly typed: string; readonly draft: string }> = [
-      { typed: `/attach ${attachable}`, draft: `/attach ${attachable}` },
-      { typed: '/image lane-note.pdf', draft: '/image lane-note.pdf' },
-      { typed: '@lane', draft: '@lane' },
       { typed: '!echo hi', draft: '!echo hi' },
       { typed: '!!echo hi', draft: '!!echo hi' },
-      { typed: `${PASTE_START}first line\n/ne${PASTE_END}`, draft: 'first line\n/ne' },
+      { typed: 'foo@bar.com', draft: 'foo@bar.com' },
+      { typed: 'pkg@1.0.0', draft: 'pkg@1.0.0' },
       { typed: 'hello /ne', draft: 'hello /ne' },
+      { typed: './lane-note.pdf', draft: './lane-note.pdf' },
       { typed: '/usr/bi', draft: '/usr/bi' },
+      // A PASTED second line is not the first line’s command seat, and a `/ne`
+      // body token matches neither attachment action nor any skill on this mount.
+      { typed: `${PASTE_START}first line\n/ne${PASTE_END}`, draft: 'first line\n/ne' },
     ]
     for (const entry of cases) {
       await prepareDraft(fixture, entry.typed)
-      // ONE real printable edit at the caret: the natural trigger runs against THIS
-      // document, exactly as a user's next keystroke would.
       await editAtCaret(fixture, `${entry.draft}x`, 'x')
       await observeNothing(fixture)
       assert.equal(slashRows(fixture).length, 0, `${JSON.stringify(entry.draft)} paints no candidate row`)
@@ -789,6 +1017,9 @@ test('an argument position, an at-mention, a shell line, a pasted second line an
       await eraseDraft(fixture)
     }
 
+    assert.equal(stores.readEntries(), 0, 'no closed position even entered the Client-local read seam')
+    assert.equal(stores.imageAdds.length, 0, 'no closed position read a Client-local image')
+    assert.equal(stores.fileAdds.length, 0, 'no closed position staged a Client-local file')
     assert.deepEqual(stagedAttachmentFiles(fixture.workRoot), [],
       'typing an attach/path token staged no attachment object')
     assert.deepEqual(historyRows(fixture.workRoot), [], 'nothing was submitted, so the real store holds no row')
@@ -796,8 +1027,658 @@ test('an argument position, an at-mention, a shell line, a pasted second line an
     assert.equal(recorder.calls(), 0, 'no draft produced a business submission')
     assert.equal(fixture.modelCalls(), 0, 'no draft reached the model')
     assert.equal(fixture.pane.output.text().includes('[file #'), false, 'no canonical attachment token entered the wire')
+    assert.equal(fixture.pane.output.text().includes('[image #'), false, 'no canonical image token entered the wire')
   } finally {
     recorder.detach()
+    stores.detach()
+    // reason: fixture.settle() awaits ownership cleanup, not a timer (receiver-blind guard).
+    await fixture.settle()
+  }
+})
+
+// ── TSP I-D: the Host `@` reference and the Client-local attachment seats ──────
+
+test('a Host `@` explicit-scope reference paints REAL HostFilePort rows, the accept writes only the literal mention, and the NEXT Enter sends that literal text with zero Client-local attachment state', async (t) => {
+  const life = testLifecycle(t)
+  const fixture = await createDirectTspFixture(life, { deltas: ['ID-HOST'], composerActions: true })
+  const stores = watchDraftStores()
+  const delivered: unknown[] = []
+  const recorder = fixture.recordPrompts(call => { delivered.push(call.message) })
+  try {
+    await waitForInputDelivery(fixture.pane)
+    // ROUTE: this is the Direct adapter’s EXPLICIT path-navigation route
+    // (`runtime/direct/host-file-augmentation-direct.ts` → the Host scoped discovery
+    // over the Session’s own workspace), NEVER the bare workspace fuzzy route. A
+    // live Session makes the scope the official Session scope.
+    const workspace = process.cwd()
+    const target = join('src', 'tui', 'tsp', 'editor.ts')
+    assert.ok(existsSync(join(workspace, target)),
+      `the real Host workspace (${workspace}) really holds ${target}: the query below addresses a fact, not a fixture`)
+    await submitCommand(fixture, '/new')
+    const [sessionA] = await waitForSessionHeaders(fixture, 1, 'the Session whose scope the mention resolves against')
+    await waitFor('the new Session to own a live Agent', () => liveAgentIds(fixture).includes(sessionA), 30_000)
+
+    await prepareDraft(fixture, `请看 @src/tui/tsp/edit`)
+    await settle(fixture, 'the Host mention rows', () => slashRows(fixture).length > 0)
+    const offered = rowTexts(fixture)
+    assert.equal(offered.length <= MAX_ROWS, true, 'the list stays inside the seat budget')
+    assert.equal(offered.every(text => text.startsWith('@')), true,
+      `every row of an "@" seat is an official mention value (got ${JSON.stringify(offered)})`)
+    assert.equal(offered.includes(`@${target}`), true,
+      `the real Host discovery returned the real file (got ${JSON.stringify(offered)})`)
+    for (const text of offered) {
+      // A painted Host row must name a path the Host workspace really has: the proof
+      // that the Provider carried the PORT’s answer, not a synthesized list.
+      assert.equal(existsSync(join(workspace, text.slice(1).replace(/\/$/, ''))), true,
+        `${text} names a REAL workspace path (got ${JSON.stringify(offered)})`)
+    }
+    assert.equal(stores.imageAdds.length, 0, 'painting Host rows read no file')
+    assert.equal(stores.fileAdds.length, 0, 'painting Host rows staged no file')
+
+    // THE ROUTE CONTRAST on the same mount: the same basename as a BARE fuzzy query
+    // is the OFFICIAL `ctx.fileReferences` route, which this fixture mounts as the
+    // documented empty workspace-index stand-in. Its authoritative `ok:[]` must stay
+    // empty — the seat never re-derives an answer from the Client filesystem. (The
+    // bare-fuzzy POSITIVE is not provable against that stand-in; see the header.)
+    await eraseDraft(fixture)
+    await prepareDraft(fixture, '请看 @editor')
+    await observeNothing(fixture)
+    assert.equal(slashRows(fixture).length, 0,
+      'the bare Host route answers its authoritative empty and never falls back to a Client listing')
+
+    // Accept the mention: an `@` row is NEVER an execution and NEVER an attachment.
+    await prepareDraft(fixture, `请看 @src/tui/tsp/edit`)
+    await settle(fixture, 'the Host mention rows again', () => slashRows(fixture).length > 0)
+    pressEnter(fixture)
+    await settle(fixture, 'the accept to write the literal mention', () =>
+      composerText(fixture) === `请看 @${target} ` && composerCursor(fixture) === `请看 @${target} `.length)
+    assert.equal(slashRows(fixture).length, 0, 'the accepted frame carries no stale list')
+    assert.equal(stores.readEntries(), 0, 'a Host mention never entered the Client-local read seam')
+    assert.equal(stores.imageAdds.length, 0, 'a Host mention accept staged no image')
+    assert.equal(stores.fileAdds.length, 0, 'a Host mention accept staged no file')
+    assert.equal(stores.imageEntries(), 0, 'the real image draft store holds no entry')
+    assert.equal(stores.fileEntries(), 0, 'the real file draft store holds no entry')
+    assert.equal(recorder.calls(), 0, 'the mention accept submitted nothing')
+    assert.equal(fixture.modelCalls(), 0, 'the mention accept never reached the model')
+    await observeNothing(fixture)
+    assert.equal(stores.imageAdds.length + stores.fileAdds.length, 0,
+      'and still no attachment read or staging after the window')
+    assert.equal(composerText(fixture).includes('[image #'), false, 'no canonical image token exists')
+    assert.equal(composerText(fixture).includes('[file #'), false, 'no canonical file token exists')
+
+    // The NEXT Enter is the only submit, and the reference travels LITERALLY.
+    pressEnter(fixture)
+    await waitFor('the settled prompt write', () => recorder.calls() === 1, 30_000)
+    const wire = JSON.stringify(delivered[0])
+    assert.equal(wire.includes(`@${target}`), true,
+      `the delivered prompt carries the literal @-reference (got ${wire.slice(0, 300)})`)
+    assert.equal(wire.includes('"type":"image"'), false, 'the mention delivered no image part')
+    assert.equal(wire.includes('"type":"file"'), false, 'the mention delivered no file part')
+    assert.equal(stores.imageAdds.length + stores.fileAdds.length, 0,
+      'the send did not turn the reference into a Client-local attachment')
+    assert.equal(recorder.calls(), 1, 'exactly one submission settled')
+    // The real `$DSH_HOME/user-history` rows: the `/new` command line plus the sent
+    // draft. The mention itself travelled LITERALLY — the only difference from the
+    // composer text is the submission owner’s own trim of the trailing separator.
+    const contents = historyRows(fixture.workRoot).map(row => row.content)
+    assert.deepEqual(contents, ['/new', `请看 @${target}`],
+      `the real input-history store kept the LITERAL mention text (got ${JSON.stringify(contents)})`)
+    assert.deepEqual(stagedAttachmentFiles(fixture.workRoot), [],
+      'the durable attachment directory received nothing from a Host reference')
+  } finally {
+    recorder.detach()
+    stores.detach()
+    // reason: fixture.settle() awaits ownership cleanup, not a timer (receiver-blind guard).
+    await fixture.settle()
+  }
+})
+
+test('a first-line `/image` argument completes ONLY the argument, and the NEXT Enter runs the real registered /image handler that stages the file', async (t) => {
+  const life = testLifecycle(t)
+  const fixture = await createDirectTspFixture(life, { deltas: ['ID-LEADING'], composerActions: true })
+  const stores = watchDraftStores()
+  const recorder = fixture.recordPrompts(() => {})
+  try {
+    await waitForInputDelivery(fixture.pane)
+    const shots = join(fixture.workRoot, 'shots')
+    mkdirSync(shots, { recursive: true })
+    const png = await realPng()
+    const image = join(shots, 'photo.png')
+    writeFileSync(image, png)
+
+    await prepareDraft(fixture, `/image ${shots}/ph`)
+    await settle(fixture, 'the local path-argument rows', () => slashRows(fixture).length > 0)
+    const offered = rowTexts(fixture)
+    assert.equal(offered.includes(`${shots}/photo.png`), true,
+      `the Client-local discovery offers the real file (got ${JSON.stringify(offered)})`)
+    assert.equal(offered.every(text => !text.startsWith('@')), true,
+      'an argument seat never dresses a Client-local path as a Host mention')
+    assert.equal(stores.imageAdds.length, 0, 'listing the argument staged nothing')
+
+    pressEnter(fixture)
+    await settle(fixture, 'the argument-only completion', () =>
+      composerText(fixture) === `/image ${image}` && composerCursor(fixture) === `/image ${image}`.length)
+    assert.equal(slashRows(fixture).length, 0, 'the accept closed the list')
+    assert.equal(stores.imageAdds.length, 0, 'completing an argument ran no intake')
+    assert.equal(stores.readEntries(), 0, 'completing an argument started no Client-local read')
+    assert.equal(stores.imageEntries(), 0, 'completing an argument staged no draft image')
+    assert.equal(recorder.calls(), 0, 'completing an argument submitted nothing')
+    assert.equal(composerText(fixture).startsWith('/image '), true, 'the command token is untouched')
+    await observeNothing(fixture)
+    assert.equal(stores.imageAdds.length, 0, 'and still nothing staged after the window')
+
+    // The NEXT Enter is the gesture that runs the registered handler.
+    pressEnter(fixture)
+    await waitFor('the real /image handler to stage the file', () => stores.imageAdds.length === 1, 25_000)
+    const staged = stores.imageAdds[0]!
+    assert.equal(staged.width, 8, 'the staged entry carries the REAL parsed PNG width')
+    assert.equal(staged.height, 8, 'the staged entry carries the REAL parsed PNG height')
+    assert.equal(staged.mediaType, 'image/png', 'the media type came from the bytes, never the extension')
+    assert.equal(staged.name, 'photo.png', 'the staged name is the file’s own basename')
+    assert.deepEqual(staged.bytes, png, 'the staged bytes ARE the real file bytes (readImageFile ran)')
+    assert.equal(staged.sourcePath, realpathSync(image), 'the intake read the resolved path the user chose')
+    assert.equal(composerText(fixture), `${staged.placeholder} `,
+      'the leading route inserts the canonical token at the composer cursor')
+    await waitFor('the real intake notice to reach the dock', () =>
+      noticeTexts(fixture).includes(`attached ${staged.placeholder} — Enter to send`), 8_000)
+    assert.equal(stores.imageEntries(), 1, 'the production draft image store holds exactly the staged entry')
+    assert.equal(recorder.calls(), 0, 'a command line is not an agent-facing submission')
+    assert.equal(fixture.modelCalls(), 0, 'staging never reached the model')
+    // The command line is a remembered input of its own (the ordinary DraftStore
+    // history owner), and it is the ONLY row: no agent-facing submission followed.
+    assert.deepEqual(historyRows(fixture.workRoot).map(row => row.content), [`/image ${image}`],
+      'the real history store holds the command line itself and nothing else')
+  } finally {
+    recorder.detach()
+    stores.detach()
+    // reason: fixture.settle() awaits ownership cleanup, not a timer (receiver-blind guard).
+    await fixture.settle()
+  }
+})
+
+/**
+ * I-D D11 (L6) — the ONE closed Client-local chain, proven in ONE run on the real
+ * Direct composition (plan §7 “严禁拼接证明”): the typed body gesture → the real
+ * Provider rows → the real TSP key seat → the real Composer edit → the
+ * `artifactCommands.inlineAttachmentStager()` that the production
+ * `registerTuiCommands` commit installed on THIS mount → the real `readImageFile`
+ * → the real `DraftImageStore` entry → the canonical placeholder spliced IN PLACE →
+ * the real notice → zero submits → then the user’s own Enter and the REAL prepared
+ * and delivered prompt. No case here injects a stager, hands the composer a
+ * pre-staged token, or calls the intake by hand.
+ */
+test('a body inline `/image` file acceptance runs the whole Client-local chain in ONE run: committed draft, real read, real draft store, in-place placeholder, notice, zero submits, then the real delivered prompt', async (t) => {
+  const life = testLifecycle(t)
+  const fixture = await createDirectTspFixture(life, { deltas: ['ID-INLINE'], composerActions: true, nativeImages: true })
+  const stores = watchDraftStores()
+  const delivered: unknown[] = []
+  const recorder = fixture.recordPrompts(call => { delivered.push(call.message) })
+  try {
+    await waitForInputDelivery(fixture.pane)
+    const shots = join(fixture.workRoot, 'shots')
+    mkdirSync(shots, { recursive: true })
+    const png = await realPng()
+    const image = join(shots, 'photo.png')
+    writeFileSync(image, png)
+    const blobId = createHash('sha256').update(png).digest('hex')
+    assert.equal(stores.imageEntries(), 0, 'the production draft image store starts empty')
+
+    // (1) the ACTION seat: `看一下 /im` offers the fixed inline `/image` action.
+    await prepareDraft(fixture, '看一下 /im')
+    await settle(fixture, 'the inline /image action row', () => rowTexts(fixture).includes('/image'))
+    assert.equal(stores.readEntries(), 0, 'offering an action row started no Client-local read')
+    assert.equal(stores.imageAdds.length, 0, 'offering an action row staged nothing')
+    pressEnter(fixture)
+    // (2) the action accept writes `/image ` and the SAME seat keeps browsing.
+    await settle(fixture, 'the action accept to write `/image `', () =>
+      composerText(fixture) === '看一下 /image ' && composerCursor(fixture) === '看一下 /image '.length)
+    await settle(fixture, 'the local path rows at the same seat', () => slashRows(fixture).length > 0)
+    assert.equal(rowTexts(fixture).every(text => !text.startsWith('@')), true,
+      'the same seat now answers with Client-local paths, never Host mentions')
+    assert.equal(stores.readEntries(), 0, 'the action accept read no file')
+
+    // (3) the real path argument completes, then ONE key accepts the real FILE.
+    await editAtCaret(fixture, `看一下 /image ${shots}/ph`, `${shots}/ph`)
+    await settle(fixture, 'the real file row', () => rowTexts(fixture).includes(image))
+    // (4) ONE key gesture, then the chain: the acceptance committed the Provider’s
+    // own document and the ONE stager the production registration installed on this
+    // mount ran against it. The committed text is transient once the read lands, so
+    // the durable proof of "edit first, stage second" is the FINAL document below:
+    // the acceptance’s document with ONLY the accepted fragment replaced.
+    const accepted = `看一下 /image ${image} `
+    pressEnter(fixture)
+    await waitFor('the real Client-local read to stage the accepted file', () => stores.imageAdds.length === 1, 25_000)
+    assert.equal(stores.readEntries(), 1, 'the intake entered the real read exactly once for this one accept')
+    assert.equal(slashRows(fixture).length, 0, 'the accepted frame carries no stale list')
+    assert.equal(recorder.calls(), 0, 'the accept itself never reached the submit path')
+    const staged = stores.imageAdds[0]!
+    assert.deepEqual(staged.bytes, png, 'the staged bytes ARE the real file bytes (readImageFile ran)')
+    assert.equal(staged.mediaType, 'image/png', 'the media type came from the bytes, never the extension')
+    assert.equal(staged.width, 8, 'the width came from the real PNG header')
+    assert.equal(staged.height, 8, 'the height came from the real PNG header')
+    assert.equal(staged.name, 'photo.png', 'the staged name is the file’s own basename')
+    assert.equal(staged.sourcePath, realpathSync(image), 'the intake read the resolved path the user chose')
+    assert.equal(stores.imageEntries(), 1, 'the production DraftImageStore holds exactly the staged entry')
+    assert.equal(stores.fileAdds.length, 0, 'an `/image` intake never touched the generic-file store')
+
+    // (6) the canonical placeholder replaced ONLY the accepted inline fragment: the
+    // prose before the command token, the command token, the trailing space and the
+    // caret all survive (`replaceInlineAttachmentFragment`, not a document rebuild).
+    const placeholder = staged.placeholder
+    await settle(fixture, 'the placeholder to splice into the draft', () =>
+      composerText(fixture) === `看一下 ${placeholder} `)
+    assert.equal(composerCursor(fixture), `看一下 ${placeholder}`.length,
+      'the caret landed right after the placeholder, before the surviving separator')
+    assert.equal(composerText(fixture).startsWith('看一下 '), true,
+      'the prose before the `/image` token survived: the splice is in place, not from the line start')
+    assert.equal(composerText(fixture).endsWith(' '), true, "the accepted fragment's own trailing space survived")
+    assert.equal(accepted.includes(placeholder), false,
+      'the token is the store’s own, not text the acceptance wrote')
+    assert.equal(composerText(fixture).includes(image), false, 'the raw client path is gone from the draft')
+    // The staged bytes also reached the ONE SDK blob sender through the production
+    // preview path, so the draft token and its preview are the same staged object.
+    await waitFor('the staged bytes to reach the SDK blob channel', () => fixture.pane.blobIds().includes(blobId), 25_000)
+    assert.equal(recorder.calls(), 0, 'the whole intake submitted nothing')
+    assert.equal(fixture.modelCalls(), 0, 'the whole intake never reached the model')
+    assert.deepEqual(historyRows(fixture.workRoot), [], 'an intake persisted no recall row')
+    // Plan §2.4 makes the success notice part of the intake contract (“原地 placeholder
+    // + 正式 store + 通知”), asserted LAST in this block so a red run still exercises
+    // every sink above it. ONE accepted file, ONE staged entry, ONE announcement: the
+    // COUNT is the witness, so a duplicated notice, a leading-route notice borrowed
+    // for an inline stage, or a notice a refused commit tried to claim all fail it.
+    await waitFor('the real intake notice to reach the dock', () =>
+      noticeTexts(fixture).includes(`attached ${placeholder} — Enter to send`), 8_000)
+    assert.deepEqual(successNotices(fixture), [`attached ${placeholder} — Enter to send`],
+      'exactly ONE success notice is visible for the one inline commit')
+
+    // (6) the user’s OWN Enter is the only submit, and it carries the staged image.
+    pressEnter(fixture)
+    await waitFor('the settled prompt write', () => recorder.calls() === 1, 30_000)
+    const wire = JSON.stringify(delivered[0])
+    assert.equal(wire.includes('"type":"image"'), true,
+      `the delivered prompt carries a real image part (got ${wire.slice(0, 300)})`)
+    assert.equal(wire.includes('[image #'), false, 'the canonical token was expanded, never sent as text')
+    assert.equal(wire.includes(image), false, 'the Client-local absolute path never reached the Host content')
+    assert.equal(wire.includes('看一下'), true, 'the prose beside the placeholder travelled into the message')
+    const ref = (delivered[0] as { content: { type: string; attachment?: { attachmentId: string; bytes: number } }[] })
+      .content.find(block => block.type === 'image')!.attachment!
+    assert.equal(ref.bytes, png.byteLength, 'the durable ref records the staged byte length')
+    const attachments = fixture.ctx.get('attachments') as unknown as {
+      readImage(ref: unknown): Promise<{ data: Uint8Array }>
+    }
+    const stored = await attachments.readImage(ref)
+    assert.deepEqual(new Uint8Array(stored.data), png, 'the delivered image part carries the exact bytes the real file has')
+    await waitFor('the staged draft is consumed by the submission', () => stores.imageEntries() === 0, 30_000)
+    assert.ok((await sessionHeaders(fixture)).length >= 1, 'the prompt owned a real Session')
+  } finally {
+    recorder.detach()
+    stores.detach()
+    // reason: fixture.settle() awaits ownership cleanup, not a timer (receiver-blind guard).
+    await fixture.settle()
+  }
+})
+
+/**
+ * I-D D12 (L6) — the SAME one-run shape through `/attach`: the body action, the
+ * real Client-local `probeAttachment`, the real `DraftFileStore`, a generic file
+ * that is NEVER treated as an image, and the real delivered prompt.
+ */
+test('a body inline `/attach` of a generic file probes it, stages it in the real file draft store, never in the image store, and delivers it as a file', async (t) => {
+  const life = testLifecycle(t)
+  const fixture = await createDirectTspFixture(life, { deltas: ['ID-ATTACH'], composerActions: true, nativeImages: true })
+  const stores = watchDraftStores()
+  const delivered: unknown[] = []
+  const recorder = fixture.recordPrompts(call => { delivered.push(call.message) })
+  try {
+    await waitForInputDelivery(fixture.pane)
+    const notes = join(fixture.workRoot, 'notes')
+    mkdirSync(notes, { recursive: true })
+    const body = Buffer.from('# meeting notes\n\ngeneric file bytes, not an image.\n')
+    const file = join(notes, 'meeting-notes.md')
+    writeFileSync(file, body)
+    const facts = statSync(file)
+
+    await prepareDraft(fixture, '看一下 /att')
+    await settle(fixture, 'the inline /attach action row', () => rowTexts(fixture).includes('/attach'))
+    pressEnter(fixture)
+    await settle(fixture, 'the action accept to write `/attach `', () =>
+      composerText(fixture) === '看一下 /attach ' && composerCursor(fixture) === '看一下 /attach '.length)
+    await settle(fixture, 'the local path rows at the same seat', () => slashRows(fixture).length > 0)
+    assert.equal(stores.readEntries(), 0, 'the action accept read no file')
+    assert.equal(stores.imageAdds.length + stores.fileAdds.length, 0, 'the action accept staged nothing')
+
+    await editAtCaret(fixture, `看一下 /attach ${notes}/meeting`, `${notes}/meeting`)
+    await settle(fixture, 'the real generic-file row', () => rowTexts(fixture).includes(file))
+    pressEnter(fixture)
+    // The acceptance’s own document is transient once the probe lands: the durable
+    // proof of "one real commit, then stage" is the FINAL document asserted below.
+    await waitFor('the real probe to stage the generic file', () => stores.fileAdds.length === 1, 25_000)
+    assert.equal(stores.fileAdds.length, 1, 'exactly one generic-file staging call')
+    assert.equal(recorder.calls(), 0, 'the accept itself never reached the submit path')
+    const staged = stores.fileAdds[0]!
+    assert.equal(staged.name, 'meeting-notes.md', 'the staged name is the probed file’s own basename')
+    assert.equal(staged.byteLength, body.byteLength, 'the staged byte length came from the real file’s stat')
+    assert.equal(staged.sourcePath, realpathSync(file), 'the probe resolved the path the user chose')
+    assert.equal(staged.inode, statSync(file, { bigint: true }).ino, 'the staged fingerprint inode IS the real file’s inode (probeAttachment ran)')
+    assert.equal(stores.imageAdds.length, 0, 'a generic file was NEVER read or staged as an image')
+    assert.equal(stores.imageEntries(), 0, 'the real image draft store stayed empty')
+    assert.equal(stores.fileEntries(), 1, 'the real file draft store holds exactly the staged file')
+
+    const placeholder = staged.placeholder
+    assert.match(placeholder, /^\[file #\d+ \(/u, 'the canonical generic-file placeholder is the store’s own token')
+    await settle(fixture, 'the placeholder to splice into the draft', () =>
+      composerText(fixture) === `看一下 ${placeholder} `)
+    assert.equal(composerCursor(fixture), `看一下 ${placeholder}`.length,
+      'the caret landed right after the placeholder, before the surviving separator')
+    assert.equal(composerText(fixture).includes('image #'), false, 'no image placeholder was minted for a file')
+    assert.equal(composerText(fixture).includes(file), false, 'the raw client path is gone from the draft')
+    assert.equal(recorder.calls(), 0, 'the intake submitted nothing')
+    assert.equal(fixture.modelCalls(), 0, 'the intake never reached the model')
+    // The same §2.4 contract on the `/attach` route: one commit, one announcement.
+    await waitFor('the real intake notice to reach the dock', () =>
+      noticeTexts(fixture).includes(`attached ${placeholder} — Enter to send`), 8_000)
+    assert.deepEqual(successNotices(fixture), [`attached ${placeholder} — Enter to send`],
+      'exactly ONE success notice is visible for the one generic-file commit')
+
+    pressEnter(fixture)
+    await waitFor('the settled prompt write', () => recorder.calls() === 1, 30_000)
+    const wire = JSON.stringify(delivered[0])
+    assert.equal(wire.includes('"type":"file"'), true,
+      `the delivered prompt carries the admitted generic file (got ${wire.slice(0, 300)})`)
+    assert.equal(wire.includes('"type":"image"'), false, 'the delivered prompt carries no image part')
+    assert.equal(wire.includes('[file #'), false, 'the file placeholder was expanded, never sent as text')
+    assert.equal(wire.includes(file), false, 'the Client-local absolute path never reached the Host content')
+    assert.equal(wire.includes('看一下'), true, 'the prose beside the placeholder travelled into the message')
+  } finally {
+    recorder.detach()
+    stores.detach()
+    // reason: fixture.settle() awaits ownership cleanup, not a timer (receiver-blind guard).
+    await fixture.settle()
+  }
+})
+
+/**
+ * I-D D13 — the intake refuses with its OWN error and the user keeps their text.
+ * A `.png` name whose bytes are not a raster is a real `readImageFile` failure: the
+ * acceptance stays as editable draft text, with NO placeholder, NO success notice
+ * and ZERO draft-store entries (an orphan would keep its bytes resident).
+ */
+test('an inline `/image` of a file that is not an image keeps the user’s path text editable, reports the real intake error and leaves zero orphan store entries', async (t) => {
+  const life = testLifecycle(t)
+  const fixture = await createDirectTspFixture(life, { deltas: ['ID-REFUSE'], composerActions: true, nativeImages: true })
+  const stores = watchDraftStores()
+  const recorder = fixture.recordPrompts(() => {})
+  try {
+    await waitForInputDelivery(fixture.pane)
+    const shots = join(fixture.workRoot, 'shots')
+    mkdirSync(shots, { recursive: true })
+    const broken = join(shots, 'not-an-image.png')
+    writeFileSync(broken, Buffer.from('this is definitely not a PNG, whatever the extension says'))
+
+    // The candidate IS offered: the file exists, and an extension is never a MIME
+    // authority — the refusal belongs to the read, not to the listing.
+    await prepareDraft(fixture, `看一下 /image ${shots}/not-an`)
+    await settle(fixture, 'the not-an-image row', () => rowTexts(fixture).includes(broken))
+    pressEnter(fixture)
+    const accepted = `看一下 /image ${broken} `
+    await waitFor('the real intake to enter the Client-local read', () => stores.readEntries() === 1, 25_000)
+    await settle(fixture, 'the committed acceptance to stay put (no token replaces it)', () =>
+      composerText(fixture) === accepted && composerCursor(fixture) === accepted.length - 1)
+
+    await waitFor('the real intake error notice', () =>
+      noticeTexts(fixture).some(text => text.includes('Unsupported image format')), 25_000)
+    await observeNothing(fixture)
+    assert.equal(stores.imageAdds.length, 0, 'a refused intake staged nothing')
+    assert.equal(stores.fileAdds.length, 0, 'a refused image intake never touched the file store')
+    assert.equal(stores.imageEntries(), 0, 'the production image draft store holds zero entries (no orphan)')
+    assert.equal(stores.fileEntries(), 0, 'the production file draft store holds zero entries (no orphan)')
+    assert.equal(composerText(fixture), accepted,
+      'the draft still holds the accepted path text — no fake placeholder replaced it')
+    assert.equal(composerText(fixture).includes('[image #'), false, 'no success token was minted for a failure')
+    assert.deepEqual(successNotices(fixture), [],
+      `no success notice was claimed for a refused intake (got ${JSON.stringify(noticeTexts(fixture))})`)
+    assert.equal(recorder.calls(), 0, 'the refusal submitted nothing')
+    assert.equal(fixture.modelCalls(), 0, 'the refusal never reached the model')
+
+    // The user’s own path text is still EDITABLE at the caret.
+    fixture.pane.input.type(END)
+    await settle(fixture, 'the caret to move to the line end', () => composerCursor(fixture) === accepted.length)
+    await editAtCaret(fixture, `${accepted}x`, 'x')
+    assert.equal(composerText(fixture), `${accepted}x`, 'the refused draft stays an ordinary editable draft')
+    await eraseDraft(fixture)
+    assert.deepEqual(stagedAttachmentFiles(fixture.workRoot), [], 'the refusal wrote no durable attachment')
+  } finally {
+    recorder.detach()
+    stores.detach()
+    // reason: fixture.settle() awaits ownership cleanup, not a timer (receiver-blind guard).
+    await fixture.settle()
+  }
+})
+
+/**
+ * I-D D17 — a read that lands after the seat moved commits NOTHING.
+ *
+ * The read window is made deterministic with the intake’s OWN existing test seam
+ * (`setImageReadForTest` in `src/client/media/image/intake.ts`, the seam
+ * `test/app/inline-attachment-completion.test.ts`, `test/app/image-command.test.ts`
+ * and `test/tui/terminal-pasted-image.test.ts` already use). The gate DELEGATES to
+ * `readImageFileUninjected`, so the real read still runs; the gate only holds the
+ * window open and announces that the intake has entered it. No production-only port
+ * was added for this test and nothing about the intake’s behaviour is replaced.
+ */
+test('an inline intake whose read is still in flight when the draft moves commits no placeholder, no notice and no store mutation', async (t) => {
+  const life = testLifecycle(t)
+  const fixture = await createDirectTspFixture(life, { deltas: ['ID-STALE'], composerActions: true, nativeImages: true })
+  const stores = watchDraftStores()
+  const recorder = fixture.recordPrompts(() => {})
+  const realRead = readImageFileUninjected
+  let gate: { readonly entered: () => void; readonly wait: Promise<void> } | undefined
+  let releaseGate: (() => void) | undefined
+  let markEntered!: () => void
+  const entered = new Promise<void>(resolve => { markEntered = resolve })
+  let wait!: Promise<void>
+  wait = new Promise<void>(resolve => { releaseGate = resolve })
+  setImageReadForTest(async (rawPath, cwd, limits, cap) => {
+    const held = gate
+    if (held !== undefined) {
+      // The intake has ENTERED the real read: the stale input below arrives while
+      // the IO is genuinely in flight, not before the acceptance settled.
+      held.entered()
+      await held.wait
+    }
+    return realRead(rawPath, cwd, limits, cap)
+  })
+  // A held gate always carries a guaranteed release, so a failing assertion in the
+  // window below can never hang the lane.
+  life.defer(() => { gate = undefined; releaseGate?.(); setImageReadForTest(undefined) })
+  try {
+    await waitForInputDelivery(fixture.pane)
+    const shots = join(fixture.workRoot, 'shots')
+    mkdirSync(shots, { recursive: true })
+    const png = await realPng()
+    const keep = join(shots, 'keep.png')
+    const stale = join(shots, 'stale.png')
+    writeFileSync(keep, png)
+    writeFileSync(stale, png)
+
+    // POSITIVE CONTROL first, on this same mount: with the draft untouched the
+    // settlement DOES land. Without it the absence below would prove nothing.
+    await prepareDraft(fixture, `看一下 /image ${shots}/keep`)
+    await settle(fixture, 'the control file row', () => rowTexts(fixture).includes(keep))
+    pressEnter(fixture)
+    await waitFor('the control intake to commit its placeholder', () => composerText(fixture).includes('[image #'), 25_000)
+    const controlPlaceholder = lastPlaceholder(stores.imageAdds)
+    assert.equal(composerText(fixture), `看一下 ${controlPlaceholder} `,
+      'the control acceptance spliced its placeholder in place')
+    assert.equal(stores.imageAdds.length, 1, 'the control intake staged exactly one image')
+    // The notice half of the positive control: this mount DOES announce an inline
+    // success, so the absence asserted after the refused settlement is a fact about
+    // the currentness fence and not about a notice that never exists.
+    await waitFor('the control success notice to reach the dock', () =>
+      successNotices(fixture).length === 1, 8_000)
+    const noticesAtControl = successNotices(fixture).length
+
+    // THE STALE GESTURE, on the NEXT line of the same draft: hold the read, then
+    // move the caret and edit the draft while the intake is genuinely in flight.
+    fixture.pane.input.type(END)
+    await settle(fixture, 'the caret to the line end', () =>
+      composerCursor(fixture) === `看一下 ${controlPlaceholder} `.length)
+    fixture.pane.input.type(SHIFT_ENTER)
+    assert.equal(composerLine(fixture, 0), `看一下 ${controlPlaceholder} `)
+    await settle(fixture, 'a real second line', () =>
+      composerText(fixture) === `看一下 ${controlPlaceholder} \n` && composerCursor(fixture) === `看一下 ${controlPlaceholder} \n`.length)
+    const lineOne = composerLine(fixture, 0)
+    await editAtCaret(fixture, `看一下 ${controlPlaceholder} \n再看 /image ${shots}/stale`, `再看 /image ${shots}/stale`)
+    await settle(fixture, 'the stale file row', () => rowTexts(fixture).includes(stale))
+    gate = { entered: markEntered, wait }
+    pressEnter(fixture)
+    await entered // authoritative: the intake is inside the held real read
+    const addsAtRead = stores.imageAdds.length
+    const entriesAtRead = stores.imageEntries()
+    fixture.pane.input.type(RIGHT)
+    fixture.pane.input.type(BACKSPACE)
+    const moved = `看一下 ${controlPlaceholder} \n再看 /image ${stale}`
+    await settle(fixture, 'the draft edit to land on the wire', () =>
+      composerText(fixture) === moved && composerCursor(fixture) === moved.length)
+    releaseGate?.()
+    gate = undefined
+    await observeNothing(fixture)
+    assert.equal(stores.imageAdds.length, addsAtRead,
+      'the moved seat staged nothing — no orphan draft entry behind the stale read')
+    assert.equal(stores.imageEntries(), entriesAtRead,
+      'the production image draft store count is UNCHANGED by the refused settlement')
+    assert.equal(composerText(fixture), moved,
+      "the user's own path text stayed exactly where they left it, editable")
+    assert.equal(composerLine(fixture, 0), lineOne,
+      'the control placeholder line survived the refused settlement byte-for-byte')
+    assert.equal(composerLine(fixture, 1).includes('[image #'), false,
+      'no placeholder replaced the moved draft')
+    // And the refused settlement announced NOTHING: the success-notice count is
+    // exactly what the control produced, so no `attached …` line was claimed for a
+    // stage that never committed.
+    assert.equal(successNotices(fixture).length, noticesAtControl,
+      `no success notice was claimed for the refused settlement (got ${JSON.stringify(successNotices(fixture))})`)
+    assert.equal(recorder.calls(), 0, 'nothing submitted')
+    assert.equal(fixture.modelCalls(), 0, 'nothing reached the model')
+
+    // The refused draft is still a live draft: one more real keystroke lands.
+    fixture.pane.input.type(END)
+    await editAtCaret(fixture, `${moved}x`, 'x')
+    assert.deepEqual(stagedAttachmentFiles(fixture.workRoot), [], 'the refused intake wrote no durable attachment')
+  } finally {
+    recorder.detach()
+    stores.detach()
+    releaseGate?.()
+    setImageReadForTest(undefined)
+    // reason: fixture.settle() awaits ownership cleanup, not a timer (receiver-blind guard).
+    await fixture.settle()
+  }
+})
+
+/**
+ * I-D D20 — a REAL bracketed-paste image lease and a SECOND inline attachment
+ * placeholder in the same multi-line draft: the inline splice replaces only its own
+ * fragment, every earlier placeholder survives byte-identically, and a paste lease
+ * taken AFTER that in-place splice still resolves.
+ */
+test('a paste lease held open ACROSS an inline attachment splice still resolves into its own fragment, and the inline placeholder survives it', async (t) => {
+  const life = testLifecycle(t)
+  const fixture = await createDirectTspFixture(life, { deltas: ['ID-PASTE'], composerActions: true, nativeImages: true })
+  const stores = watchDraftStores()
+  const delivered: unknown[] = []
+  const recorder = fixture.recordPrompts(call => { delivered.push(call.message) })
+  // The same existing intake read seam, this time keyed to ONE path: it holds the
+  // PASTED file’s real read window open while the inline attachment is accepted and
+  // committed, so the inline splice provably happens while a paste lease is still
+  // in flight — the overlap D20 is about, not a race and not a reordering. The read
+  // itself still runs for real on release.
+  const realRead = readImageFileUninjected
+  let holdPath: string | undefined
+  let readEntered = false
+  let releaseRead!: () => void
+  const held = new Promise<void>(resolve => { releaseRead = resolve })
+  setImageReadForTest(async (rawPath, cwd, limits, cap) => {
+    if (holdPath !== undefined && rawPath === holdPath) {
+      readEntered = true
+      await held
+    }
+    return realRead(rawPath, cwd, limits, cap)
+  })
+  life.defer(() => { holdPath = undefined; releaseRead(); setImageReadForTest(undefined) })
+  const paste = (body: string): void => { fixture.pane.input.type(`${PASTE_START}${body}${PASTE_END}`) }
+  try {
+    await waitForInputDelivery(fixture.pane)
+    const shots = join(fixture.workRoot, 'shots')
+    mkdirSync(shots, { recursive: true })
+    const png = await realPng()
+    const pasted = join(shots, 'pasted-shot.png')
+    const inline = join(shots, 'inline-shot.png')
+    writeFileSync(pasted, png)
+    writeFileSync(inline, png)
+
+    // (1) ONE real terminal bracketed paste of an image path; its read is held, so
+    // the application paste-path owner has a LIVE lease on that tracked span.
+    holdPath = pasted
+    paste(`${pasted} `)
+    await waitFor('the paste-path intake to enter the real read', () => readEntered, 25_000)
+    assert.equal(composerText(fixture), `${pasted} `,
+      'the pasted path is still ordinary tracked draft text while its lease is live')
+    assert.equal(stores.imageAdds.length, 0, 'the held read staged nothing yet')
+
+    // (2) while that lease is in flight, a SECOND attachment goes through the body
+    // inline seat on the NEXT line of the same draft.
+    fixture.pane.input.type(END)
+    fixture.pane.input.type(SHIFT_ENTER)
+    await settle(fixture, 'a real second line', () => composerText(fixture) === `${pasted} \n`)
+    await editAtCaret(fixture, `${pasted} \n看一下 /image ${shots}/inline`, `看一下 /image ${shots}/inline`)
+    await settle(fixture, 'the inline file row on line 2', () => rowTexts(fixture).includes(inline))
+    pressEnter(fixture)
+    await waitFor('the inline intake to stage and splice on line 2', () => stores.imageAdds.length === 1, 25_000)
+    const inlinePlaceholder = lastPlaceholder(stores.imageAdds)
+    await settle(fixture, 'the line-2 placeholder to land', () => composerLine(fixture, 1) === `看一下 ${inlinePlaceholder} `)
+    // The splice replaced ONLY its own fragment: the in-flight paste text survives
+    // byte-for-byte at its shifted offset, and its lease is still the tracked span.
+    assert.equal(composerLine(fixture, 0), `${pasted} `,
+      'the in-flight pasted path survived the inline splice byte-for-byte')
+    assert.equal(stores.imageEntries(), 1, 'only the inline image is staged while the paste read is held')
+
+    // (3) release the held read: the lease still resolves, into ITS OWN span.
+    holdPath = undefined
+    releaseRead()
+    await waitFor('the released paste lease to resolve', () => stores.imageAdds.length === 2, 25_000)
+    const pastedPlaceholder = lastPlaceholder(stores.imageAdds)
+    await settle(fixture, 'the paste placeholder to replace exactly the pasted path', () =>
+      composerLine(fixture, 0) === `${pastedPlaceholder} `)
+    assert.equal(composerLine(fixture, 1), `看一下 ${inlinePlaceholder} `,
+      'the inline placeholder survived the paste replacement byte-for-byte')
+    assert.equal(composerText(fixture).includes(pasted), false, 'the pasted raw path is gone')
+    assert.equal(new Set([pastedPlaceholder, inlinePlaceholder]).size, 2,
+      'the two attachments minted two distinct canonical tokens')
+    assert.equal(stores.imageEntries(), 2, 'the real draft store holds both staged images')
+    // Each of the two routes announced exactly ONE success, in commit order: the
+    // inline splice first, then the released paste lease — never twice, never zero.
+    assert.deepEqual(successNotices(fixture), [
+      `attached ${inlinePlaceholder} — Enter to send`,
+      `attached ${pastedPlaceholder} — Enter to send`,
+    ], 'one success notice per attachment, in the order the two commits landed')
+    assert.equal(recorder.calls(), 0, 'no attachment gesture submitted anything')
+    assert.deepEqual(historyRows(fixture.workRoot), [], 'no attachment gesture persisted a recall row')
+
+    // (4) the user’s OWN Enter sends the multi-line draft with both images.
+    fixture.pane.input.type(END)
+    pressEnter(fixture)
+    await waitFor('the settled prompt write', () => recorder.calls() === 1, 30_000)
+    const blocks = (delivered[0] as { content: { type: string }[] }).content
+    assert.equal(blocks.filter(block => block.type === 'image').length, 2,
+      `the delivered prompt carries both staged images (got ${JSON.stringify(blocks.map(b => b.type))})`)
+    assert.equal(JSON.stringify(delivered[0]).includes('[image #'), false,
+      'no canonical token text reached the model content')
+  } finally {
+    recorder.detach()
+    stores.detach()
+    holdPath = undefined
+    releaseRead()
+    setImageReadForTest(undefined)
     // reason: fixture.settle() awaits ownership cleanup, not a timer (receiver-blind guard).
     await fixture.settle()
   }

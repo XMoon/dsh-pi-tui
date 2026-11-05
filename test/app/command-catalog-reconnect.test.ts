@@ -368,6 +368,8 @@ function fakeRunnerDeps(options: {
       // because the production composition makes them required capabilities of
       // the mounted surface, and this literal is that contract's fake.
       installTspCommandCompletions: () => {},
+      // TSP I-D: same reason — the PiTui branch installs the stager on `app`.
+      installTspInlineAttachmentStager: () => {},
       tspCommandPickerCapabilities: () => ({}),
     },
     backend: {
