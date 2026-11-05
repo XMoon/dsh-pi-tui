@@ -41,6 +41,7 @@ const BUNDLE: BundleInfo = {
   installed: true,
   optional: false,
   removable: true,
+  updatable: false,
   rows: [{ rowId: 'row-1', moduleName: 'module-1', meta: { title: 'Row one' }, entryId: entryId('entry-1') }],
   overrides: ['builtin-row'],
 }
@@ -244,7 +245,7 @@ function directFixture(): PluginManagerServiceLike & { calls: string[] } {
 function directPort(service: PluginManagerServiceLike): DirectPluginManagerPort {
   return new DirectPluginManagerPort({
     get: name => name === 'pluginManager' ? service : undefined,
-    on: () => () => {},
+    on: () => () => false,
   })
 }
 

@@ -4,7 +4,7 @@
  * ONE isolated, real composition per bundle:
  *
  * ```text
- * temp installation manifest (the 12 shipped Optional bundles @ exact target)
+ * temp installation manifest (the shipped Optional bundles @ exact target)
  *   └─ temp profile package.json (dsh.profile.bundles: base [+ target])
  *       └─ official loadProfileDirectory() reads the REAL bundle manifest and
  *          its REAL cordis.patch.yml files from the installation
@@ -37,7 +37,8 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { boot, getDshRuntimeVersion, loadOverlayPatches, loadProfileDirectory, OFFICIAL_ON_DEMAND_CATALOG, OPTIONAL_BUNDLES } from '@deepseek-ai/dsh-app-boot'
+import { boot, getDshRuntimeVersion, loadOverlayPatches, loadProfileDirectory } from '@deepseek-ai/dsh-app-boot'
+import { OFFICIAL_ON_DEMAND_CATALOG, OPTIONAL_BUNDLES } from '@deepseek-ai/dsh-official-bundles'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { TestContext } from 'node:test'
 import { testLifecycle } from './temp-lifecycle.ts'
@@ -50,7 +51,8 @@ const TARGET_DSH_VERSION = getDshRuntimeVersion()
 const BASE_BUNDLE = '@deepseek-ai/dsh-base'
 const BIN_NAME = 'dsh'
 
-/** The exact target Optional/on-demand bundle identities (B01–B14). */
+/** The verified TUI boundary identities (B01–B14). This is the frozen
+ *  presentation contract, NOT the complete official catalog. */
 export const OPTIONAL_BUNDLE_IDS = [
   '@deepseek-ai/dsh-experimental-agent-team-profile',
   '@deepseek-ai/dsh-experimental-voice-input-bundle',
@@ -70,19 +72,24 @@ export const OPTIONAL_BUNDLE_IDS = [
 
 export type OptionalBundleId = typeof OPTIONAL_BUNDLE_IDS[number]
 
-/** The official target Optional + on-demand identity set (12 + 2). */
+/** The COMPLETE official target Optional + on-demand identity set. Its size is
+ *  an upstream fact (`OPTIONAL_BUNDLES` + `OFFICIAL_ON_DEMAND_CATALOG`), never a
+ *  local constant; the fixture's B01–B14 list below is the TUI's own VERIFIED
+ *  boundary subset and may legitimately be smaller. */
 const OFFICIAL_BUNDLE_IDS = [
   ...OPTIONAL_BUNDLES,
   ...OFFICIAL_ON_DEMAND_CATALOG.map(entry => entry.packageName),
 ] as const
 
-/** Prove the fixture identity set against the OFFICIAL catalog constants, so a
- *  rename/shape drift fails loudly instead of comparing a constant to itself. */
+/** Prove the fixture's verified identity subset against the OFFICIAL catalog
+ *  constants: a renamed or removed bundle fails loudly, and a newly added
+ *  official bundle is allowed (it simply carries no verified TUI boundary in
+ *  this fixture). */
 function assertOfficialBundleIdentitySet(): void {
-  const expected = new Set(OFFICIAL_BUNDLE_IDS)
-  const actual = new Set(OPTIONAL_BUNDLE_IDS)
-  if (expected.size !== actual.size || [...expected].some(name => !actual.has(name as OptionalBundleId))) {
-    throw new Error(`Optional-bundle fixture: bundle identity drift; official=${[...expected].join(',')} fixture=${[...actual].join(',')}`)
+  const official = new Set(OFFICIAL_BUNDLE_IDS)
+  const missing = OPTIONAL_BUNDLE_IDS.filter(name => !official.has(name))
+  if (missing.length > 0) {
+    throw new Error(`Optional-bundle fixture: ${missing.join(',')} are no longer in the official Optional/on-demand catalog`)
   }
 }
 

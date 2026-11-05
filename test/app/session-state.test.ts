@@ -6,6 +6,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { fakeAgentModel } from '../support/agent-model-double.ts'
 import { unavailableWebAccess } from '../support/web-access-fake.ts'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { createClientCommandRegistry } from '../../src/app/command/client-command-registry.ts'
@@ -73,7 +74,7 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
 }
 
 /** A minimal fake agent whose identity marks which session a refresh ran for. */
-function fakeAgent(sessionId: string): Agent {
+function fakeAgent(sessionId: string, options: { provider: string; model: string } = { provider: 'p', model: 'm' }): Agent {
   // The alpha.4 Session shape over a private backing log.
   const events: unknown[] = []
   const session = {
@@ -96,7 +97,9 @@ function fakeAgent(sessionId: string): Agent {
   const agent = {
     session,
     ctx: agentContext,
-    options: { provider: 'p', model: 'm' },
+    options,
+    // DSH 0.2.2: the Agent owns its model selection (`AgentModel`).
+    model: fakeAgentModel(session, options),
   } as unknown as Agent
   agentContext.agent = agent
   return agent
@@ -165,7 +168,7 @@ function stubRunner(
   // The REAL pure intent machine (the same class the production runner uses),
   // so the command-level tests exercise the authoritative state machine.
   const defaultIntent = new DefaultIntentTracker<ModelSelection>()
-  const owner = new DirectModelSelectionOwner({ currentSelection: () => ({ provider: 'p', model: 'default-model' }) })
+  const owner = new DirectModelSelectionOwner()
   return {
     beginClientWrite: () => () => {},
     ctx,
@@ -914,7 +917,9 @@ test('a failed live default save after a session switch never mutates any Sessio
     // The user switches to another Session while the save is pending. A live
     // Session write never enters the sessionless default-intent tracker, so a
     // late failure can only affect Session-level state — never a global intent.
-    state.agent = fakeAgent('session-b')
+    // The new Session's OWN options carry the persisted default (production:
+    // the agent-default-model row resolves it when the Agent is created).
+    state.agent = fakeAgent('session-b', { provider: 'p', model: 'default-model' })
     saveM1.reject(new Error('quota exceeded'))
     await vt.waitForRender()
     await Promise.resolve()
@@ -1913,8 +1918,9 @@ test('a /model picker opened on S1 cannot apply to S2 after a session switch (su
   await vt.waitForRender()
   // Prove the overlay actually opened (not a vacuous early return).
   assert.match(vt.getViewport().join('\n'), /Models/, 'the model picker must open before the switch')
-  // A Session switch lands AFTER the overlay opened.
-  state.agent = fakeAgent('session-b')
+  // A Session switch lands AFTER the overlay opened; the new Session's own
+  // options carry the persisted default.
+  state.agent = fakeAgent('session-b', { provider: 'p', model: 'default-model' })
   state.generation = 2
   vt.sendInput('\r') // submit the STALE overlay
   await vt.waitForRender()
@@ -1964,8 +1970,9 @@ test('a sessionless /model picker cannot write a Session that appeared in the sa
   await (modelDef!.handler as () => Promise<unknown>)()
   await vt.waitForRender()
   assert.match(vt.getViewport().join('\n'), /Models/, 'the sessionless picker must open before the create')
-  // A first create publishes a live Agent BEFORE the generation bump.
-  state.agent = fakeAgent('session-new')
+  // A first create publishes a live Agent BEFORE the generation bump; its own
+  // options carry the persisted default.
+  state.agent = fakeAgent('session-new', { provider: 'p', model: 'default-model' })
   vt.sendInput('\r') // submit the stale sessionless overlay
   await vt.waitForRender()
   await Promise.resolve()
@@ -2019,8 +2026,9 @@ test('a sessionless /model whose subject drifts to a same-generation live Sessio
   await vt.waitForRender()
   vt.sendInput('\r') // sessionless pick -> gated default write
   await saveStarted.promise
-  // A first create publishes a live Agent BEFORE the generation bump.
-  state.agent = fakeAgent('session-new')
+  // A first create publishes a live Agent BEFORE the generation bump; its own
+  // options carry the persisted default.
+  state.agent = fakeAgent('session-new', { provider: 'p', model: 'default-model' })
   release()
   await vt.waitForRender()
   await Promise.resolve()

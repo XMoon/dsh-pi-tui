@@ -102,7 +102,6 @@ export const DEPRECATED_READER_ALLOWLIST = [
   // debt moved WITH the call site, never doubled. The surface never reads the
   // live session log itself.
   { file: 'src/app/bootstrap/session-startup.ts', call: 'snapshotEvents', site: 'if (agent !== undefined) return workingFromLog(agent.session.snapshotEvents())', why: 'Direct compaction-end context re-measure from the in-process log (A4-7 injected capability; M3-4 PR2: the Remote branch folds the official reader window instead)' },
-  { file: 'src/runtime/direct/model-selection-direct.ts', call: 'snapshotEvents', site: 'const folded = foldPendingModelSelection(agent.session.snapshotEvents())', why: 'Direct model-selection replay over the in-process session log' },
   // M3-4 PR4 §18.4: the DIRECT-only compatibility fold for the whole-log
   // rewind outline. The shared picker owner reads the official `turnOutline`
   // projection on both branches; a minimal Direct composition that mounts no

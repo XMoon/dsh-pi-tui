@@ -19,15 +19,20 @@ export interface PlanModeLike {
   get(agent: unknown): { active: boolean; pending?: boolean }
 }
 
-/** The official projection registry surface (structural) — the `plan`
- * projection's internal state. The wire view derives `pending` from
- * `wanted`/`running`; `active` is the committed flag. */
+/** The official `plan` projection's internal state. The wire view derives
+ *  `pending` from `wanted`/`running`; `active` is the committed flag. */
+export interface PlanProjectionState {
+  readonly active: boolean
+  readonly wanted: boolean | null
+  readonly running: { readonly wanted: boolean } | null
+}
+
+/** The official projection registry surface (structural). DSH 0.2.2 narrowed
+ *  the deprecated string-key read to `unknown` (the typed per-key handle is the
+ *  supported route; this fallback read is deferred S2 work), so the ONE
+ *  `stateOf` caller asserts the plan shape at this boundary. */
 export interface PlanProjectionLike {
-  stateOf(session: unknown, key: 'plan'): {
-    active: boolean
-    wanted: boolean | null
-    running: { wanted: boolean } | null
-  } | undefined
+  stateOf(session: unknown, key: 'plan'): unknown
 }
 
 /**
@@ -55,7 +60,7 @@ export function derivePlanStatus(
   }
   if (projections !== undefined && session !== undefined) {
     try {
-      const state = projections.stateOf(session, 'plan')
+      const state = projections.stateOf(session, 'plan') as PlanProjectionState | undefined
       if (state !== undefined) {
         // The projection's wire view: a wanted change that differs from the
         // committed active state is pending.
@@ -81,7 +86,7 @@ export function projectedPlanActive(
 ): boolean | undefined {
   if (projections === undefined || session === undefined) return undefined
   try {
-    return projections.stateOf(session, 'plan')?.active
+    return (projections.stateOf(session, 'plan') as PlanProjectionState | undefined)?.active
   } catch {
     return undefined
   }

@@ -82,9 +82,6 @@ declare module '@deepseek-ai/dsh-session-projection/types' {
   interface SessionProjectionMap {
     piTuiPerformance: PiTuiPerformanceProjection
   }
-  interface SessionProjectionStateMap {
-    piTuiPerformance: PerformanceHostState
-  }
 }
 
 const counterSchema = z.strictObject({
@@ -261,11 +258,13 @@ function settleCompletedStep(
 /**
  * The registration form of the unit: `piTuiPerformance` is client-visible, so
  * the wire view is REQUIRED (`ProjectionDefinition.wire` is optional because
- * host-only units omit it).
+ * host-only units omit it). The unit's raw state type is stated explicitly:
+ * DSH 0.2.2 removed the `SessionProjectionStateMap` augmentation table, so the
+ * registration carries the owning `PerformanceHostState` itself.
  */
 export type PiTuiPerformanceDefinition =
-  Omit<ProjectionDefinition<typeof PI_TUI_PERFORMANCE_KEY>, 'wire'>
-  & { wire: NonNullable<ProjectionDefinition<typeof PI_TUI_PERFORMANCE_KEY>['wire']> }
+  Omit<ProjectionDefinition<typeof PI_TUI_PERFORMANCE_KEY, PerformanceHostState>, 'wire'>
+  & { wire: NonNullable<ProjectionDefinition<typeof PI_TUI_PERFORMANCE_KEY, PerformanceHostState>['wire']> }
 
 /**
  * The `piTuiPerformance` projection unit. `stateVersion` gates the persisted

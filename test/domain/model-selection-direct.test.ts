@@ -1,15 +1,40 @@
-/** Direct owner tests for Agent-local model-selection isolation. */
+/** Direct model-selection adapter tests: the live Agent's own upstream
+ *  `AgentModel` is the ONE read/write authority, and this adapter only
+ *  normalizes reads, records durable selections through it, installs the
+ *  official switch notice once, and owns the per-Agent admission window. */
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { DirectModelSelectionOwner } from '../../src/runtime/direct/model-selection-direct.ts'
 import { rawSelectionFromRequestHeader, selectionFromRequestHeader } from '../../src/domain/session/model-selection.ts'
 
+type Selection = { provider: string; model: string; reasoningEffort?: string }
+
+/** One Agent whose `model` mimics the upstream `AgentModel`: `current()` answers
+ *  the recorded/option route and `select()` is the durable append. */
 function fakeAgent(events: readonly unknown[], header: unknown) {
   const appended: unknown[] = []
   const onCalls: string[] = []
+  let recorded: Selection | undefined
+  const optionsRoute = (): Selection | undefined => {
+    const config = (header as { config?: Partial<Selection> } | undefined)?.config
+    return typeof config?.provider === 'string' && typeof config.model === 'string'
+      ? {
+          provider: config.provider,
+          model: config.model,
+          ...config.reasoningEffort === undefined ? {} : { reasoningEffort: config.reasoningEffort },
+        }
+      : undefined
+  }
   const agent = {
     ctx: { on: (name: string) => { onCalls.push(name); return () => {} } },
+    model: {
+      current: () => recorded ?? optionsRoute(),
+      select: (next: Selection) => {
+        appended.push({ type: 'model/selection', data: next })
+        recorded = next
+      },
+    },
     // The alpha.4 Session shape: the log is served through snapshot reads.
     session: {
       get seq() { return events.length },
@@ -32,10 +57,8 @@ const request = (provider: string, model: string, reasoningEffort: string, adapt
   },
 })
 
-test('each Agent gets an independent installed selection and resumed history wins over the global default', () => {
-  const owner = new DirectModelSelectionOwner({
-    currentSelection: () => ({ provider: 'global', model: 'default', reasoningEffort: 'low' as never }),
-  })
+test('each Agent reads its own upstream selection', () => {
+  const owner = new DirectModelSelectionOwner()
   const first = fakeAgent([request('provider-a', 'model-a', 'high')], {
     config: { provider: 'provider-a', model: 'model-a', reasoningEffort: 'high' },
   })
@@ -43,53 +66,49 @@ test('each Agent gets an independent installed selection and resumed history win
     config: { provider: 'provider-b', model: 'model-b', reasoningEffort: 'max' },
   })
 
-  const firstSelection = owner.installForAgent(first.agent as never)
-  const secondSelection = owner.installForAgent(second.agent as never)
-  assert.notEqual(firstSelection, secondSelection)
-  assert.deepEqual(firstSelection.current, { provider: 'provider-a', model: 'model-a', reasoningEffort: 'high' })
-  assert.deepEqual(secondSelection.current, { provider: 'provider-b', model: 'model-b', reasoningEffort: 'max' })
-})
-
-test('an Agent without history reads the current global default dynamically', () => {
-  let fallback = { provider: 'global', model: 'old-default' }
-  const owner = new DirectModelSelectionOwner({ currentSelection: () => fallback })
-  const empty = fakeAgent([], undefined)
-  const selection = owner.installForAgent(empty.agent as never)
-  assert.deepEqual(selection.current, fallback)
-  fallback = { provider: 'global', model: 'new-default' }
-  assert.deepEqual(selection.current, fallback)
-})
-
-test('durable pending intent survives until its exact request header and then falls back to the logged value', () => {
-  const owner = new DirectModelSelectionOwner({
-    currentSelection: () => ({ provider: 'global', model: 'default' }),
-  })
-  const pending = fakeAgent([{ type: 'model/selection', data: { provider: 'p', model: 'm', reasoningEffort: 'high' } }], {
-    config: { provider: 'p', model: 'm', reasoningEffort: 'low' },
-    adapterDefaults: { reasoningEffort: true },
-  })
-  const selection = owner.installForAgent(pending.agent as never)
-  assert.deepEqual(selection.current, { provider: 'p', model: 'm', reasoningEffort: 'high' })
-  assert.equal(selection.consume('p', 'm', 'low'), false)
-  assert.deepEqual(selection.current, { provider: 'p', model: 'm', reasoningEffort: 'high' })
-  assert.equal(selection.consume('p', 'm', 'high'), true)
-  assert.deepEqual(selection.current, { provider: 'p', model: 'm' })
-})
-
-test('selectForNextRequest appends durable intent before changing only that Agent', () => {
-  const owner = new DirectModelSelectionOwner({ currentSelection: () => ({ provider: 'global', model: 'default' }) })
-  const first = fakeAgent([], undefined)
-  const second = fakeAgent([], undefined)
-  owner.installForAgent(first.agent as never)
-  owner.installForAgent(second.agent as never)
-  owner.selectForNextRequest(first.agent, { provider: 'p', model: 'm', reasoningEffort: 'max' })
-  assert.deepEqual(first.appended, [{ type: 'model/selection', data: { provider: 'p', model: 'm', reasoningEffort: 'max' } }])
+  assert.deepEqual(owner.current(first.agent), { provider: 'provider-a', model: 'model-a', reasoningEffort: 'high' })
+  assert.deepEqual(owner.current(second.agent), { provider: 'provider-b', model: 'model-b', reasoningEffort: 'max' })
+  owner.select(first.agent, { provider: 'p', model: 'm', reasoningEffort: 'max' })
   assert.deepEqual(owner.current(first.agent), { provider: 'p', model: 'm', reasoningEffort: 'max' })
-  assert.deepEqual(owner.current(second.agent), { provider: 'global', model: 'default' })
+  assert.deepEqual(owner.current(second.agent), { provider: 'provider-b', model: 'model-b', reasoningEffort: 'max' },
+    'another Agent is untouched')
+})
+
+test('an Agent with no recorded or option route reads undefined', () => {
+  const owner = new DirectModelSelectionOwner()
+  const empty = fakeAgent([], undefined)
+  assert.equal(owner.current(empty.agent), undefined)
+  assert.deepEqual(empty.appended, [])
+})
+
+test('select records ONE durable model/selection through the upstream AgentModel', () => {
+  const owner = new DirectModelSelectionOwner()
+  const { agent, appended } = fakeAgent([], undefined)
+  owner.select(agent, { provider: 'p', model: 'm', reasoningEffort: 'max' })
+  assert.deepEqual(appended, [{ type: 'model/selection', data: { provider: 'p', model: 'm', reasoningEffort: 'max' } }])
+  assert.deepEqual(owner.current(agent), { provider: 'p', model: 'm', reasoningEffort: 'max' })
+})
+
+test('select refuses an invalid selection before touching the Agent', () => {
+  const owner = new DirectModelSelectionOwner()
+  const { agent, appended } = fakeAgent([], undefined)
+  assert.throws(() => owner.select(agent, { provider: '', model: 'm' } as Selection), /invalid model selection/)
+  assert.deepEqual(appended, [], 'an invalid selection never reaches the Session log')
+})
+
+test('installForAgent installs the official switch notice exactly once per Agent', () => {
+  const owner = new DirectModelSelectionOwner()
+  const { agent, onCalls } = fakeAgent([], undefined)
+  owner.installForAgent(agent as never)
+  owner.installForAgent(agent as never)
+  assert.deepEqual(onCalls, ['agent/pre-step'], 'the model-switch notice listener is installed once')
+  const other = fakeAgent([], undefined)
+  owner.installForAgent(other.agent as never)
+  assert.deepEqual(other.onCalls, ['agent/pre-step'], 'each Agent gets its own listener')
 })
 
 test('serializeImageAdmission serializes per Agent and leaves another Agent independent', async () => {
-  const owner = new DirectModelSelectionOwner({ currentSelection: () => undefined })
+  const owner = new DirectModelSelectionOwner()
   const first = fakeAgent([], undefined).agent
   const other = fakeAgent([], undefined).agent
   const order: string[] = []
@@ -106,18 +125,17 @@ test('serializeImageAdmission serializes per Agent and leaves another Agent inde
 })
 
 test('an image admission queued on the same Agent observes the earlier model selection commit', async () => {
-  // rc.2 shares one per-Agent window: a model selection and an image-bearing
+  // The per-Agent window is shared: a model selection and an image-bearing
   // prompt admission cannot interleave, so the admission reads the committed
   // selection rather than a racing older choice.
-  const owner = new DirectModelSelectionOwner({ currentSelection: () => ({ provider: 'global', model: 'default' }) })
-  const agent = fakeAgent([], undefined).agent
-  owner.installForAgent(agent as never)
+  const owner = new DirectModelSelectionOwner()
+  const { agent } = fakeAgent([], undefined)
   const observed: unknown[] = []
   let release!: () => void
   const gate = new Promise<void>((resolve) => { release = resolve })
   const selection = owner.serializeImageAdmission(agent, async () => {
     await gate
-    owner.selectForNextRequest(agent, { provider: 'p', model: 'm' })
+    owner.select(agent, { provider: 'p', model: 'm' })
   })
   const admission = owner.serializeImageAdmission(agent, async () => { observed.push(owner.current(agent)) })
   await new Promise(resolve => setImmediate(resolve))
@@ -197,9 +215,10 @@ function officialSurface(events: readonly unknown[]): {
 
 test('the durable read answers from the exact Session’s own request header, without the default, a listener or an append', () => {
   let defaultReads = 0
-  const owner = new DirectModelSelectionOwner({
-    currentSelection: () => { defaultReads += 1; return { provider: 'global', model: 'default' } },
-  })
+  // The owner no longer consults any global default: DSH 0.2.2's AgentModel
+  // resolves options/lastUsed itself. The counter proves the read never falls
+  // back to a second source.
+  const owner = new DirectModelSelectionOwner()
   const { agent, appended, onCalls } = fakeAgent([request('deepseek', 'child-model', 'high')], {
     config: { provider: 'deepseek', model: 'child-model', reasoningEffort: 'high' },
   })
@@ -219,7 +238,7 @@ test('the durable read answers from the exact Session’s own request header, wi
 })
 
 test('the compat surface is the Session’s latest USED route and its lastUsed half matches the installed reducer', () => {
-  const owner = new DirectModelSelectionOwner({ currentSelection: () => ({ provider: 'global', model: 'default' }) })
+  const owner = new DirectModelSelectionOwner()
   const sequences: ReadonlyArray<{ name: string; events: readonly unknown[] }> = [
     { name: 'legacy request only', events: [request('p1', 'm1', 'high')] },
     { name: 'several requests: the LAST one owns the surface', events: [request('p1', 'm1', 'high'), request('p2', 'm2', 'low')] },
@@ -272,7 +291,7 @@ test('the raw adapter-defaulted effort is preserved exactly like the official wi
   assert.deepEqual(rawSelectionFromRequestHeader(defaulted), { provider: 'p', model: 'm', reasoningEffort: 'high' })
   assert.deepEqual(selectionFromRequestHeader(defaulted), { provider: 'p', model: 'm' },
     'the Agent-restore policy strips an adapter default — deliberately a DIFFERENT semantic from the projection')
-  const owner = new DirectModelSelectionOwner({ currentSelection: () => undefined })
+  const owner = new DirectModelSelectionOwner()
   assert.deepEqual(owner.durableProjectionForSession({ requestHeader: () => defaulted }), {
     lastUsed: { provider: 'p', model: 'm', reasoningEffort: 'high' },
     next: { provider: 'p', model: 'm', reasoningEffort: 'high' },

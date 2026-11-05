@@ -17,8 +17,10 @@ import { DefaultIntentTracker } from './model-default-intent.ts'
 import { DefaultWriteBarrier } from './model-default-write-barrier.ts'
 import { sameModelSelection, type ModelSelectionValue } from '../../domain/session/model-selection.ts'
 
-/** The TUI-only selection facade shape (structurally the Host
- *  `ModelSelectionRef`, never imported). */
+/** The TUI-only selection facade the footer and `/model` read. DSH 0.2.2 owns
+ *  the Agent's durable selection (`AgentModel` + the `modelSelection`
+ *  projection), so this shape is a presentation facade, NOT an installable
+ *  Host ref: nothing hands it to an Agent context. */
 export interface SelectionRef<Selection> {
   current: Selection | undefined
   assembled: undefined
@@ -110,7 +112,7 @@ export function createModelSelectionOwner<Selection extends ModelSelectionValue>
     defaultIntent.reconcile(selection => sameModelSelection(persisted as Selection, selection))
   }
 
-  /** TUI-only facade; this ref is NEVER installed into an Agent context. */
+  /** TUI-only facade; it is NEVER installed into an Agent context. */
   
   const selected: SelectionRef<Selection> = {
     get current(): Selection | undefined {

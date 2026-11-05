@@ -380,8 +380,11 @@ test('a main Session opening cut preserves old-Agent bookkeeping and B transient
   // owner committed, so the model read-back below is already final (the previous
   // 70ms window was redundant with it).
   await settle()
-  assert.equal(probe.capturedModels.at(-1), 'p/m',
-    'opening model selection must be consumed by its matching request/header before the target commits')
+  // DSH 0.2.2: the matching request/header consumes the pending intent and the
+  // Session's OWN used route remains the display source (the AgentModel fold
+  // answers `lastUsed`); there is no global-default fallback behind it.
+  assert.equal(probe.capturedModels.at(-1), 'opening-provider/opening-model @high',
+    'the consumed opening selection resolves to the Session\'s own used route before the target commits')
   const openingMessages = probe.capturedMessages ?? []
   assert.ok(openingMessages.some(message => message.text === 'B opening prefix'),
     'B transient prefix must survive the commit-to-init opening gap')

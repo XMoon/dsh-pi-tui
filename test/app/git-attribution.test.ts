@@ -1,16 +1,17 @@
 /**
  * Git attribution prompt policy (the prompt-based migration plan §17):
  * parser boundaries, per-mode section text, live mode changes without
- * re-registration, `{{provider}}/{{model}}` resolution through the REAL
- * `installModelSelection()` assembly waterfall, and composed-Agent
- * installation beside the existing TUI sections.
+ * re-registration, `{{provider}}/{{model}}` resolution through the OFFICIAL
+ * prompt-variable seam (DSH 0.2.2's agent loop registers those two variables
+ * from the step's model selection; the TUI only ships the placeholders), and
+ * composed-Agent installation beside the existing TUI sections.
  * @module @xmoon76/dsh-pi-tui/git-attribution.test
  */
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
-import { installModelSelection, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
+import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import {
   DEFAULT_GIT_ATTRIBUTION_MODE,
   GIT_ATTRIBUTION_SECTION_NAME,
@@ -45,7 +46,7 @@ function promptRegistry() {
 }
 
 /** Render a section's text with DSH-style {{variable}} substitution. */
-function render(text: string, variables: Record<string, string>): string {
+function render(text: string, variables: Record<string, string | undefined>): string {
   return text.replaceAll(/\{\{(\w+)\}\}/g, (whole, key: string) => variables[key] ?? whole)
 }
 
@@ -77,26 +78,29 @@ test('product contains exactly the official trailer and no model variables', () 
   assert.ok(!rendered.includes('Assisted-By'))
 })
 
-test('product-model renders provider/model through the REAL installModelSelection assembly', async () => {
-  // The real DSH waterfall owns the variables; the attribution section only
-  // carries the {{provider}}/{{model}} placeholders (plan §2/§8).
+/** The official prompt-variable seam: DSH 0.2.2's agent loop registers
+ *  `provider`/`model` from the step's model selection, and the assembly they
+ *  feed is what renders the TUI section's placeholders. */
+async function assembleRoute(route: { provider: string; model: string }): Promise<Record<string, string | undefined>> {
   const ctx = new Context()
-  const selection: ModelSelectionRef = { current: { provider: 'openai-codex', model: 'gpt-5.6' }, assembled: undefined }
-  installModelSelection(ctx, selection)
+  await ctx.plugin(SystemPrompt)
+  ctx.systemPrompt.variable('provider', () => route.provider)
+  ctx.systemPrompt.variable('model', () => route.model)
+  return (await ctx.systemPrompt.assemble({})).variables
+}
+
+test('product-model renders provider/model through the official prompt-variable seam', async () => {
+  // The real DSH assembly owns the variables; the attribution section only
+  // carries the {{provider}}/{{model}} placeholders (plan §2/§8).
   const { systemPrompt, text } = promptRegistry()
   const state: GitAttributionState = { mode: 'product-model' }
   installGitAttributionPrompt(systemPrompt, state)
 
-  // Drive the REAL system-prompt/assemble waterfall the way DSH does.
-  const assemble = (ctx as unknown as {
-    events: { waterfall(name: string, assembly: unknown, context: unknown, next: () => Promise<{ complete: boolean, variables: Record<string, string> }>): Promise<{ complete: boolean, variables: Record<string, string> }> }
-  }).events
-  const emptyAssembly = { complete: false, variables: {} as Record<string, string> }
-  const assembled = await assemble.waterfall('system-prompt/assemble', emptyAssembly, {}, async () => emptyAssembly)
-  assert.equal(assembled.variables.provider, 'openai-codex')
-  assert.equal(assembled.variables.model, 'gpt-5.6')
+  const variables = await assembleRoute({ provider: 'openai-codex', model: 'gpt-5.6' })
+  assert.equal(variables.provider, 'openai-codex')
+  assert.equal(variables.model, 'gpt-5.6')
 
-  const rendered = render(text(GIT_ATTRIBUTION_SECTION_NAME), assembled.variables)
+  const rendered = render(text(GIT_ATTRIBUTION_SECTION_NAME), variables)
   assert.ok(rendered.includes(OFFICIAL_TRAILER), `official trailer in:\n${rendered}`)
   assert.ok(rendered.includes('Assisted-By: openai-codex/gpt-5.6'), `route in:\n${rendered}`)
   assert.ok(!rendered.includes('{{provider}}'), `no unresolved provider variable in:\n${rendered}`)
@@ -105,28 +109,23 @@ test('product-model renders provider/model through the REAL installModelSelectio
 
 test('live model switch changes the NEXT rendering without re-registering the section', async () => {
   const ctx = new Context()
-  const selection: ModelSelectionRef = { current: { provider: 'openai-codex', model: 'gpt-5.6' }, assembled: undefined }
-  installModelSelection(ctx, selection)
+  await ctx.plugin(SystemPrompt)
+  // The loop's providers are evaluated per assembly, so the live Agent model
+  // switch reaches the next rendering while the section stays registered once.
+  const route = { provider: 'openai-codex', model: 'gpt-5.6' }
+  ctx.systemPrompt.variable('provider', () => route.provider)
+  ctx.systemPrompt.variable('model', () => route.model)
   const { sections, systemPrompt, text } = promptRegistry()
   const state: GitAttributionState = { mode: 'product-model' }
   installGitAttributionPrompt(systemPrompt, state)
   const registrations = sections.size
 
-  const assemble = (ctx as unknown as {
-    events: { waterfall(name: string, assembly: unknown, context: unknown, next: () => Promise<{ complete: boolean, variables: Record<string, string> }>): Promise<{ complete: boolean, variables: Record<string, string> }> }
-  }).events
-  const runAssembly = async (): Promise<Record<string, string>> => {
-    const emptyAssembly = { complete: false, variables: {} as Record<string, string> }
-    const assembled = await assemble.waterfall('system-prompt/assemble', emptyAssembly, {}, async () => emptyAssembly)
-    return assembled.variables
-  }
-
-  const first = await runAssembly()
+  const first = (await ctx.systemPrompt.assemble({})).variables
   assert.ok(render(text(GIT_ATTRIBUTION_SECTION_NAME), first).includes('Assisted-By: openai-codex/gpt-5.6'))
 
-  // Switch the official ModelSelectionRef.current (the only model authority).
-  selection.current = { provider: 'deepseek-official', model: 'deepseek-v4' }
-  const second = await runAssembly()
+  route.provider = 'deepseek-official'
+  route.model = 'deepseek-v4'
+  const second = (await ctx.systemPrompt.assemble({})).variables
   const rendered = render(text(GIT_ATTRIBUTION_SECTION_NAME), second)
   assert.ok(rendered.includes('Assisted-By: deepseek-official/deepseek-v4'), `next assembly uses the new route:\n${rendered}`)
   assert.equal(sections.size, registrations, 'the section registration count stays 1')
@@ -216,36 +215,42 @@ test('omitting the attribution state installs no section', async () => {
   assert.equal(sections.has(GIT_ATTRIBUTION_SECTION_NAME), false, 'no attribution section without the state')
 })
 
-test('product-model renders through the REAL SystemPrompt + model selection end to end', async () => {
+test('product-model renders through the REAL SystemPrompt + model-variable seam end to end', async () => {
   // The full production chain: the REAL dsh SystemPrompt service owns the
-  // section registry AND drives the assembly waterfall itself (so the REAL
-  // installModelSelection() listener populates provider/model for the step),
-  // and renderPrompt performs the {{variable}} interpolation (plan §9/§17:
-  // no unresolved variable may survive in the final model-facing text).
+  // section registry AND drives the assembly itself (DSH 0.2.2's agent loop
+  // registers the `provider`/`model` variables from the step's model
+  // selection), and renderPrompt performs the {{variable}} interpolation
+  // (plan §9/§17: no unresolved variable may survive in the final
+  // model-facing text).
   const { Context: RealContext } = await import('@deepseek-ai/cordis')
   const { default: SystemPrompt, renderPrompt } = await import('@deepseek-ai/dsh-system-prompt')
   const ctx = new RealContext()
   await ctx.plugin(SystemPrompt, { personaPrefix: '', personaSuffix: '' })
   const systemPrompt = ctx.get('systemPrompt') as unknown as {
     section(section: Parameters<SystemPromptLike['section']>[0]): () => void
+    variable(name: string, provider: () => string | undefined): () => void
     assemble(): Promise<Parameters<typeof renderPrompt>[0]>
   }
 
-  const selection: ModelSelectionRef = { current: { provider: 'openai-codex', model: 'gpt-5.6' }, assembled: undefined }
-  installModelSelection(ctx, selection)
+  // The loop's own variable providers: evaluated per assembly, so a live
+  // Agent model switch reaches the next rendering with no listener.
+  const route = { provider: 'openai-codex', model: 'gpt-5.6' }
+  systemPrompt.variable('provider', () => route.provider)
+  systemPrompt.variable('model', () => route.model)
   const state: GitAttributionState = { mode: 'product-model' }
   const dispose = installGitAttributionPrompt(systemPrompt as unknown as SystemPromptLike, state)
 
   const render = async (): Promise<string> => systemPrompt.assemble().then(renderPrompt)
 
   const first = await render()
-  assert.ok(first.includes('Assisted-By: openai-codex/gpt-5.6'), `real service + real selection:\n${first}`)
+  assert.ok(first.includes('Assisted-By: openai-codex/gpt-5.6'), `real service + real variables:\n${first}`)
   assert.ok(first.includes(OFFICIAL_TRAILER), 'the official trailer is in the final prompt')
   assert.ok(!first.includes('{{provider}}') && !first.includes('{{model}}'), 'no unresolved variable survives')
 
   // Model switch: the SAME registration renders the new route on the next
   // assembly (DSH's own variables; no listener, no re-registration).
-  selection.current = { provider: 'deepseek-official', model: 'deepseek-v4' }
+  route.provider = 'deepseek-official'
+  route.model = 'deepseek-v4'
   const second = await render()
   assert.ok(second.includes('Assisted-By: deepseek-official/deepseek-v4'), `the next assembly uses the new route:\n${second}`)
   dispose()

@@ -15,6 +15,7 @@
  * @module @xmoon76/dsh-pi-tui/runtime/direct/backend-direct
  */
 
+import type { Context } from '@deepseek-ai/cordis'
 import type { Diag } from '../process/diagnostics.ts'
 import type { Backend } from '../backend.ts'
 import { createDirectBackend } from '../backend.ts'
@@ -45,7 +46,9 @@ import type { WebAccessPort, WebAccessStatus, WebAccessUrl } from '../web-access
  * the services resolve from the running dsh installation). */
 export interface DirectBackendContextLike {
   get(name: string): unknown
-  on(event: string, listener: unknown): () => void
+  /** The framework's typed `on` (cordis 4.1 restricts names to `keyof Events`);
+   *  the Direct adapters only subscribe to official DSH events. */
+  on: Context['on']
 }
 
 /** The live-Agent surface the Direct assembly hands to its adapters: the
