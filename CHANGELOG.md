@@ -22,6 +22,17 @@
   `/image`；文件仍在读取时按 Enter / 发送 / 转向会被拒绝并提示重试，读取失败则
   保留原路径文字。PiTui 与 TSP 两种渲染器均支持，图片仍走既有的草稿与提交链。
 
+### 变更
+
+- **（不兼容）公开的 `composeAgent(ctx, ModelSelectionRef)` 调用已退休。** DSH 0.2.2
+  将模型选择所有权移入 Agent（`AgentModel` + 会话 `modelSelection` 投影），上游删除了
+  `ModelSelectionRef` 与 `installModelSelection(ctx, ref)`，因此本版本不再接受调用方
+  自持的模型选择 ref；不存在可兼容的本地替身。迁移方式：把
+  `composeAgent(ctx, ref, ...)` 改为
+  `composeAgent(ctx, (agentCtx, agent) => { /* 安装 Agent 级贡献 */ }, ...)`，模型选择
+  由 Agent 自身管理（读写 `agent.model`；`/model` 仍通过既有 catalog 端口提交）。仅使用
+  内置 TUI 的 profile 无需改动。
+
 ### 修复
 
 - **正文内联附件的成功提示不再被吞掉。** 在正文里接受 `/image` / `/attach` 的路径候选后，占位符与草稿附件其实已经落地，但 `attached … — Enter to send` 提示被「写入前的草稿快照」守卫判为已过期而静默丢弃（正是这次写入让该快照失效），PiTui 与 TSP 两种渲染器都受影响；首行 `/attach <path>`、`/image <path>` 与剪贴板 / 终端粘贴路径的提示保持不变。现在成功提示以「写入确实完成 + 当前会话所有权」为准；同时修掉另一侧——写入被拒绝时原先仍会播报成功，现在只回滚该条目，不再假报 `attached`。
