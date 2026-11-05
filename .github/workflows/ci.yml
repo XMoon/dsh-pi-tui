@@ -1405,9 +1405,9 @@ jobs:
   # Test the EXACT packed artifact against the supported Node.js boundaries.
   #
   # Important:
-  #   22.19.0 = minimum Node 22 supported by package.json
-  #   24.0.0  = minimum Node 24 covered by >=24
-  #   26      = current/newer supported major
+  #   24.9.0 = minimum Node declared by package.json `engines.node` (and by the
+  #            DSH CLI's own `engines.node` floor)
+  #   26     = current/newer supported major
   #
   # Node 24 used during qualification already runs every packed-artifact smoke.
   # The matrix additionally performs a clean fresh install; Source Mode injects
@@ -1430,8 +1430,7 @@ jobs:
       fail-fast: false
       matrix:
         node:
-          - '22.19.0'
-          - '24.0.0'
+          - '24.9.0'
           - '26'
 
     steps:
