@@ -20,7 +20,7 @@ import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 
 const PORT: PluginManagerPort = {
   snapshot: async () => ({
-    bundles: [{ name: 'ordinary', official: false, availability: 'profile', enabled: true, installed: true, optional: false, removable: true, rows: [], overrides: [] }],
+    bundles: [{ name: 'ordinary', official: false, availability: 'profile', enabled: true, installed: true, optional: false, removable: true, updatable: false, rows: [], overrides: [] }],
     plugins: [],
     registries: { registry: null, fallbackRegistries: [], resolved: null },
     exemptions: [],

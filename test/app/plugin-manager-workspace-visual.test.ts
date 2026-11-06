@@ -502,13 +502,17 @@ test('the B11 surface/risk copy is fully readable (scrolled) at 80×24, 72×24 a
       await harness.waitForFrame()
     }
     assert.match(gather(), /TUI surface/u, `${columns}x${rows} exposes the surface fact via the existing Detail scroll`)
-    for (let page = 0; page < 12 && !gather().includes('May run multiple rounds'); page += 1) {
+    // The Detail legitimately grew (Host default-listing/update facts), so
+    // the paragraph's LAST line is the reachability target, not its first.
+    for (let page = 0; page < 12 && !gather().includes('guaranteed Job'); page += 1) {
       harness.vt.sendInput('\x1b[6~')
       await harness.waitForFrame()
     }
-    const frame = gather()
-    assert.match(frame.replace(/\s+/gu, ' '), /ralph is a Host foreground tool/u)
-    assert.match(frame.replace(/\s+/gu, ' '), /May run multiple rounds and incur model cost\. No dedicated Ralph UI or guaranteed Job\./u)
+    const frame = gather().replace(/\s+/gu, ' ')
+    assert.match(frame, /ralph is a Host foreground tool/u)
+    // A dual List|Details frame interleaves the list column between the wrapped
+    // paragraph's rows, so the copy is matched with one bounded wildcard.
+    assert.match(frame, /May run multiple rounds and incur model cost\.[\s\S]{0,200}?No dedicated Ralph UI or guaranteed Job\./u)
     for (const line of harness.viewport()) {
       assert.ok(visibleWidth(line) <= columns, `${columns}x${rows} capability copy never exceeds the width: ${JSON.stringify(line)}`)
     }
@@ -551,7 +555,9 @@ test('keeps its unverified host limit visible in the real Detail', async () => {
     await harness.waitForFrame()
   }
   const frame = plain(harness.viewport()).replace(/\s+/gu, ' ')
-  assert.match(frame, /Browser\/Node Inspector has no PiTui inspection page\./u)
-  assert.match(frame, /captureFetch may expose unredacted debugging data\. Host activation is not qualified here\./u)
+  // A dual List|Details frame interleaves the list column between the wrapped
+  // fact's rows, so the paragraph is matched with one bounded wildcard.
+  assert.match(frame, /Browser\/Node Inspector has no[\s\S]{0,200}?PiTui inspection page\./u)
+  assert.match(frame, /captureFetch may expose unredacted debugging data\.[\s\S]{0,200}?Host activation is not qualified here\./u)
   assert.doesNotMatch(frame, /Host capability not yet qualified for TUI/u)
 })

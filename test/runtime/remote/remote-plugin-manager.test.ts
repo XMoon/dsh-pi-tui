@@ -37,11 +37,14 @@ const BUNDLE: BundleInfo = {
   availability: 'profile',
   source: 'file:/tmp/bundle-a',
   meta: { title: { en: 'Bundle A' }, description: 'Local description' },
+  // The rc.1 default-listing decision and update capability are Host facts the
+  // shared mapping must carry through BOTH backends without inventing values.
+  listedByDefault: false,
   enabled: true,
   installed: true,
   optional: false,
   removable: true,
-  updatable: false,
+  updatable: true,
   rows: [{ rowId: 'row-1', moduleName: 'module-1', meta: { title: 'Row one' }, entryId: entryId('entry-1') }],
   overrides: ['builtin-row'],
 }
@@ -261,10 +264,12 @@ test('the Remote snapshot maps bundles, plugins, registries and exemptions like 
     version: '1.2.3',
     title: 'Bundle A',
     description: 'Local description',
+    listedByDefault: false,
     enabled: true,
     installed: true,
     optional: false,
     removable: true,
+    updatable: true,
     rows: [{ rowId: 'row-1', moduleName: 'module-1', title: 'Row one', entryId: 'entry-1' }],
     overrides: ['builtin-row'],
   })

@@ -5,10 +5,12 @@
  * Three explicit modes, never a fake pass:
  *
  * - default (no flags): OFFLINE inspection of the provisioned official
- *   installation used by `test/support/optional-bundle-fixture.ts`.
- *   A missing/wrong-version artifact is `BLOCKED`; npm/profile/restart and any
- *   external/native capability stay `EXTERNAL_UNVERIFIED` (this mode performs
- *   no public network call).
+ *   installation used by `test/support/optional-bundle-fixture.ts`. The checked
+ *   roster is derived from the release's own `OPTIONAL_BUNDLES` and
+ *   `OFFICIAL_ON_DEMAND_CATALOG` (platform-scoped on-demand entries excluded),
+ *   never from a local copy. A missing/wrong-version artifact is `BLOCKED`;
+ *   npm/profile/restart and any external/native capability stay
+ *   `EXTERNAL_UNVERIFIED` (this mode performs no public network call).
  * - `--network`: the REAL pinned-npm CLI profile loop: install
  *   `@deepseek-ai/dsh@<exact target>` into an isolated harness, install one exact
  *   `@deepseek-ai/dsh-experimental-*@<exact target>` bundle into an isolated
@@ -26,7 +28,9 @@
  * - `--provision`: install the official package set at this checkout's exact
  *   target into the fixture's `temp/optional-bundles` tree (a local test artifact,
  *   never a tracked dependency). This is the one-time setup the in-process
- *   fixture consumes.
+ *   fixture consumes; its roster is the official one, so a newly shipped
+ *   Optional bundle is provisioned without widening the `--bundle` capability
+ *   scope below.
  *
  * Usage:
  *   node scripts/dsh-optional-bundles-smoke.mjs --provision
@@ -48,6 +52,7 @@ import {
   runDsh,
   runPnpmInstall,
 } from './lib/dsh-smoke-harness.mjs'
+import { OFFICIAL_ON_DEMAND_CATALOG, OPTIONAL_BUNDLES } from '@deepseek-ai/dsh-official-bundles'
 import { loadDshDistribution, npmDshVersion } from './lib/dsh-distribution.mjs'
 import { pnpmExecutable } from './lib/process.mjs'
 
@@ -59,6 +64,9 @@ const PNPM_COMMAND = pnpmExecutable()
 const FIXTURE_CACHE = join(REPO_ROOT, 'temp', 'optional-bundles')
 const PROVISION_TIMEOUT_MS = 20 * 60_000
 
+/** The legacy B01–B14 capability smoke scope (implementation plan §3.6): the
+ *  REAL native/tool/profile-loop qualifications stay limited to these exact
+ *  identities. It is NOT the official catalog and never grows automatically. */
 const SHIPPED_OPTIONAL = [
   '@deepseek-ai/dsh-experimental-agent-team-profile',
   '@deepseek-ai/dsh-experimental-voice-input-bundle',
@@ -77,7 +85,22 @@ const ON_DEMAND = [
   '@deepseek-ai/dsh-subagent-codex',
   '@deepseek-ai/dsh-subagent-claude-code',
 ]
-const ALL_BUNDLES = [...SHIPPED_OPTIONAL, ...ON_DEMAND]
+/** The legacy capability scope accepted by `--bundle` (twelve shipped Optional
+ *  bundles plus the two external on-demand subagents). */
+const LEGACY_BUNDLES = [...SHIPPED_OPTIONAL, ...ON_DEMAND]
+
+/** The official Optional roster this checkout provisions, derived from the
+ *  release's own list rather than a local snapshot. */
+const PROVISION_OPTIONAL = [...OPTIONAL_BUNDLES]
+/** On-demand entries the running Host platform accepts: a platform-scoped entry
+ *  (for example the darwin-only CUA bundle) is a CATALOG negative case here and
+ *  must not be installed into the local provisioning tree. `process.platform`
+ *  is the HOST platform of this provisioning machine only; it decides nothing
+ *  about product behavior. */
+const PROVISION_ON_DEMAND = OFFICIAL_ON_DEMAND_CATALOG
+  .filter(entry => entry.platforms === undefined || entry.platforms.includes(process.platform))
+  .map(entry => entry.packageName)
+const PROVISION_BUNDLES = [...PROVISION_OPTIONAL, ...PROVISION_ON_DEMAND]
 
 /** A row package name each bundle's real patch inserts (the composed tree is
  *  read as row names, so the bundle package itself need not appear). */
@@ -129,7 +152,10 @@ function parseArgs(argv) {
     else if (arg === '--gate') options.gate = true
     else if (arg === '--bundle') {
       const value = argv[++index]
-      if (value === undefined || !ALL_BUNDLES.includes(value)) fail('USAGE', `--bundle must be one of the 14 exact identities: ${value}`)
+      // The gate scope is the LEGACY fourteen capability identities, never the
+      // complete official catalog: a newly shipped Optional bundle joins the
+      // provisioning roster without silently entering this external workflow.
+      if (value === undefined || !LEGACY_BUNDLES.includes(value)) fail('USAGE', `--bundle must be one of the legacy fourteen capability identities: ${value}`)
       options.bundle = value
     } else if (arg === '--evidence') {
       const value = argv[++index]
@@ -147,7 +173,7 @@ function inspectFixtureInstallation() {
   const nodeModules = join(FIXTURE_CACHE, 'node_modules')
   const problems = []
   const versions = {}
-  for (const packageName of ['@deepseek-ai/dsh-base', ...ALL_BUNDLES]) {
+  for (const packageName of ['@deepseek-ai/dsh-base', ...PROVISION_BUNDLES]) {
     const version = packageVersion(nodeModules, packageName)
     versions[packageName] = version
     if (version === undefined) problems.push(`${packageName} is absent`)
@@ -167,7 +193,7 @@ function provisionFixtureCache(options) {
   const repoManifest = readJson(join(REPO_ROOT, 'package.json'))
   const dependencies = {
     '@deepseek-ai/dsh-base': TARGET_VERSION,
-    ...Object.fromEntries(ALL_BUNDLES.map(name => [name, TARGET_VERSION])),
+    ...Object.fromEntries(PROVISION_BUNDLES.map(name => [name, TARGET_VERSION])),
   }
   for (const [name, version] of Object.entries(repoManifest.devDependencies ?? {})) {
     if (name.startsWith('@deepseek-ai/') && dependencies[name] === undefined) dependencies[name] = version

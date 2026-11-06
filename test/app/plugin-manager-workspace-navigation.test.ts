@@ -796,3 +796,68 @@ test('a zero-row body revokes ordinary Remove and Detail actions', async () => {
   started.delete(detail)
   detail.app.dispose()
 })
+
+test('a Host default-hidden installation bundle appears only on explicit search and stays enable-able', async () => {
+  const hidden = '@deepseek-ai/dsh-experimental-hidden-optional'
+  const harness = await open({
+    columns: 140,
+    rows: 40,
+    bundles: [
+      bundle({ name: SELF_BUNDLE, source: 'file:/tmp/tui', rows: [{ rowId: 'tui-app', moduleName: SELF_BUNDLE, entryId: 'e-tui' }] }),
+      bundle({ name: '@vendor/foo', source: 'file:/tmp/foo', enabled: false }),
+      bundle({
+        name: hidden,
+        official: true,
+        availability: 'installation',
+        installed: false,
+        enabled: false,
+        optional: true,
+        removable: false,
+        source: undefined,
+        listedByDefault: false,
+      }),
+    ],
+  })
+  const view = (): string => harness.view()
+
+  // D: the Host default listing hides it from the untouched All list, and ONE
+  // existing hint line explains the explicit route.
+  assert.doesNotMatch(view(), new RegExp(hidden))
+  assert.match(view(), /\/ searches hidden official bundles/u)
+  // A status filter does not resurrect a default-hidden card either.
+  harness.vt.sendInput('\t')
+  await harness.waitForFrame()
+  assert.doesNotMatch(view(), new RegExp(hidden))
+  harness.vt.sendInput('\t')
+  harness.vt.sendInput('\t')
+  await harness.waitForFrame()
+  assert.doesNotMatch(view(), new RegExp(hidden))
+
+  // The explicit search reads the same model card.
+  harness.vt.sendInput('/')
+  for (const character of 'hidden-optional') harness.vt.sendInput(character)
+  harness.vt.sendInput('\r')
+  await harness.waitForFrame()
+  const value = `bundle:${hidden}`
+  assert.equal(harness.panel.selectedCardValue(), value, 'the search selects the hidden card')
+  assert.match(view(), new RegExp(hidden))
+
+  // It stays a fully manageable bundle: Details → Enable… dispatches the Host write.
+  harness.vt.sendInput('\r')
+  await harness.waitForFrame()
+  for (let attempt = 0; attempt < 2 && harness.setBundle.length === 0; attempt += 1) {
+    harness.vt.sendInput('\r')
+    await harness.waitForFrame()
+  }
+  assert.deepEqual(harness.setBundle, [{ name: hidden, enabled: true }])
+
+  // Clearing the search restores the default listing and re-anchors the
+  // selection on a card that is really visible.
+  harness.vt.sendInput('\x1b') // leave Details
+  harness.vt.sendInput('/')
+  await harness.waitForFrame()
+  harness.vt.sendInput('\x1b') // clear the query
+  await harness.waitForFrame()
+  assert.doesNotMatch(view(), new RegExp(hidden))
+  assert.notEqual(harness.panel.selectedCardValue(), value)
+})

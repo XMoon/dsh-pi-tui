@@ -84,6 +84,10 @@ export interface PluginBundleFact {
   readonly version?: string
   readonly title?: string
   readonly description?: string
+  /** The Host's default GUI visibility decision after its own package/Host
+   * checks; absent when the Host declares none. It only answers "listed by
+   * default", never enablement, installation or load success. */
+  readonly listedByDefault?: boolean
   /** Selected in the profile manifest. */
   readonly enabled: boolean
   /** Whether the profile's own dependencies hold the package. */
@@ -94,6 +98,9 @@ export interface PluginBundleFact {
    * information removed by the Host), when one is declared. */
   readonly source?: string
   readonly removable: boolean
+  /** Whether the Host accepts `listVersions`/`updateBundle` for this bundle: a
+   * declared Host capability only. This port has no update operation. */
+  readonly updatable: boolean
   readonly readOnlyReason?: PluginReadOnlyReason
   readonly error?: PluginErrorFact
   readonly rows: readonly PluginBundleRowFact[]

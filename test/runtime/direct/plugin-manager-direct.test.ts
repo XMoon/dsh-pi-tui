@@ -97,6 +97,10 @@ test('snapshot maps bundles/plugins/registries/exemptions onto frozen detached f
   assert.equal(bundle.availability, 'profile')
   assert.equal(bundle.source, 'file:/home/user/plugins/dsh-pi-tui')
   assert.equal(bundle.installTarget, undefined)
+  // A Host bundle always carries the declared update capability…
+  assert.equal(bundle.updatable, false)
+  // …while an absent default-listing decision stays ABSENT (never `false`).
+  assert.equal('listedByDefault' in bundle, false)
   assert.equal(bundle.rows[0]!.title, 'App')
   assert.equal(bundle.rows[0]!.entryId, 'e-app')
   assert.deepEqual([...bundle.overrides], ['tool-bash'])
@@ -218,6 +222,71 @@ test('a missing official catalog entry keeps official/availability/installTarget
   })
   assert.equal(bundle.installed, false)
   assert.equal(bundle.optional, true)
+})
+
+test('the rc.1 default-listing, update capability and platform refusal survive the shared mapping', async () => {
+  const port = new DirectPluginManagerPort(host(fakeService({
+    listBundles: async () => [
+      {
+        name: '@deepseek-ai/dsh-cua-bundle',
+        official: true,
+        availability: 'missing',
+        installTarget: { spec: '@deepseek-ai/dsh-cua-bundle@0.2.2-rc.1', version: '0.2.2-rc.1' },
+        listedByDefault: false,
+        enabled: false,
+        installed: false,
+        optional: false,
+        removable: false,
+        updatable: false,
+        error: { code: 'unsupported-platform', diagnostic: 'This package supports darwin only.' },
+        rows: [],
+        overrides: [],
+      },
+      {
+        name: '@deepseek-ai/dsh-shipped',
+        official: true,
+        availability: 'installation',
+        enabled: false,
+        installed: true,
+        optional: true,
+        removable: false,
+        updatable: false,
+        rows: [],
+        overrides: [],
+      },
+      {
+        name: 'profile-owned',
+        official: false,
+        availability: 'profile',
+        source: 'https://registry.example/profile-owned',
+        listedByDefault: true,
+        enabled: true,
+        installed: true,
+        optional: false,
+        removable: true,
+        updatable: true,
+        rows: [],
+        overrides: [],
+      },
+    ],
+  })).ctx)
+
+  const snapshot = await port.snapshot()
+  const platformRefused = snapshot.bundles[0]!
+  assert.equal(platformRefused.listedByDefault, false, 'the Host default-listing decision is carried verbatim')
+  assert.equal(platformRefused.updatable, false)
+  // The official code AND its diagnostic text survive; nothing is normalized.
+  assert.deepEqual(platformRefused.error, {
+    code: 'unsupported-platform',
+    diagnostic: 'This package supports darwin only.',
+  })
+  assert.equal(platformRefused.installTarget?.spec, '@deepseek-ai/dsh-cua-bundle@0.2.2-rc.1')
+  // An ABSENT Host decision is never masked with a fabricated default.
+  assert.equal('listedByDefault' in snapshot.bundles[1]!, false)
+  assert.equal(snapshot.bundles[1]!.updatable, false, 'a shipped bundle declares no update capability unless the Host says so')
+  assert.equal(snapshot.bundles[2]!.listedByDefault, true)
+  assert.equal(snapshot.bundles[2]!.updatable, true, 'the Host-declared update capability is preserved')
+  assert.ok(Object.isFrozen(snapshot.bundles[2]))
 })
 
 test('the detached change result preserves the rc.2 restart/version/build facts', async () => {
