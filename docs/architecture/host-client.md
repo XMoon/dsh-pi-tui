@@ -678,9 +678,12 @@ workspace/question/approval store and keeps no cross-session cache.
   AND inbox were both read and show no answerable call; an unreadable source,
   `null`, `migration-required` (including cache hints) or a missing
   `userQuestions` unit is `unknown`, never `active: []`. Two sources that
-  genuinely conflict fail closed to `unknown`. The answer itself still travels
-  through the existing first-settlement path (`switchSessionOutcome` → the
-  Question/Approval presenter → Host settlement), never through this port.
+  genuinely conflict fail closed to `unknown`. The answer itself never travels
+  through this port: a live forwarded request is settled by the existing
+  Question/Approval first-settlement path (the Client's forwarded-event
+  presenter → Host settlement), while a UI flow that navigates first enters the
+  Session through `switchSessionOutcome` and then presents the SAME request.
+  This port only classifies the candidate; it has no answer/write endpoint.
 - **Failure vocabulary.** `remote-access/denied` is `denied`,
   `gateway/invocation-unavailable` is `unavailable` (the optional read method is
   genuinely not registered), and every network/Host/codec/timeout failure is
@@ -711,12 +714,7 @@ Authority: `src/runtime/session-workspace-facts-port.ts`,
 `src/runtime/remote/session-workspace-facts-remote.ts`,
 `src/runtime/direct/session-workspace-facts-direct.ts`; the port is a required
 read-only `Backend` member served once by the Direct assembly and the ONE
-Remote M3A assembly. Regression anchors:
-`test/runtime/remote/remote-session-workspace-facts.test.ts`,
-`test/runtime/direct/direct-session-workspace-facts.test.ts`, the official
-contract proof in `test/runtime/remote/remote-official-contract.test.ts` and the
-real Host/two-PTY case `read.official-read-authority` in
-`scripts/smoke/split-process/read-authority.mjs`.
+Remote M3A assembly.
 
 ## Direct/Remote semantic equivalence
 

@@ -54,6 +54,53 @@ test('UA-06 plan-review comes ONLY from the official AskUserQuestionItem intent'
     deriveAttention({ kind: 'known', running: true, pendingKinds: ['question'] }, review).attention,
     'plan-review',
   )
+  // Only the OPEN pending candidates count: an unrelated continued plan-review
+  // must not relabel a different currently-pending question.
+  const unrelatedContinued = readQuestionProjection({
+    kind: 'sequenced',
+    values: {
+      userQuestions: {
+        active: [
+          { callId: 'old', state: 'continued', questions: [{ id: 'q', question: 'p', intent: { kind: 'plan-review', approve: 'Go' } }] },
+          { callId: 'now', state: 'open', questions: [{ id: 'q', question: 'Continue?' }] },
+        ],
+        settled: [],
+      },
+      inbox: { 'next-step': [], 'next-turn': [] },
+    },
+  })
+  assert.equal(deriveAttention({ kind: 'known', running: true, pendingKinds: ['question'] }, unrelatedContinued).attention, 'question',
+    'a continued plan-review never labels the current open question')
+  // Multiple open candidates with mixed intents are not guessed as plan-review.
+  const mixedOpen = readQuestionProjection({
+    kind: 'sequenced',
+    values: {
+      userQuestions: {
+        active: [
+          { callId: 'a', state: 'open', questions: [{ id: 'q', question: 'p', intent: { kind: 'plan-review', approve: 'Go' } }] },
+          { callId: 'b', state: 'open', questions: [{ id: 'q', question: 'plain' }] },
+        ],
+        settled: [],
+      },
+      inbox: { 'next-step': [], 'next-turn': [] },
+    },
+  })
+  assert.equal(deriveAttention({ kind: 'known', running: true, pendingKinds: ['question'] }, mixedOpen).attention, 'question')
+  // An open plan-review whose reply is already queued is not the pending one.
+  const queuedReview = readQuestionProjection({
+    kind: 'sequenced',
+    values: {
+      userQuestions: { active: [{ callId: 'a', state: 'open', questions: [{ id: 'q', question: 'p', intent: { kind: 'plan-review', approve: 'Go' } }] }], settled: [] },
+      inbox: { 'next-step': [], 'next-turn': [{ source: { kind: 'user-question-reply', callId: 'a' } }] },
+    },
+  })
+  assert.equal(deriveAttention({ kind: 'known', running: true, pendingKinds: ['question'] }, queuedReview).attention, 'question')
+  // The unreadable-inbox case keeps the generic question label.
+  const noInboxReview = readQuestionProjection({
+    kind: 'sequenced',
+    values: { userQuestions: { active: [{ callId: 'a', state: 'open', questions: [{ id: 'q', question: 'p', intent: { kind: 'plan-review', approve: 'Go' } }] }], settled: [] } },
+  })
+  assert.equal(deriveAttention({ kind: 'known', running: true, pendingKinds: ['question'] }, noInboxReview).attention, 'question')
   // A title/snippet/option label never becomes a plan-review signal.
   const textOnly = readQuestionProjection({
     kind: 'sequenced',
@@ -111,6 +158,21 @@ test('UA-05 a continued call is a late-answer candidate unless its reply is alre
   assert.deepEqual(facts.continuedQuestionCallIds, ['c1'], 'the queued callId is not answerable')
   // A pendingInput=[] sample never overrides a real continued answerable call.
   assert.equal(facts.attentionSourceState, 'known')
+  const mixedContinued = readQuestionProjection({
+    kind: 'sequenced',
+    values: {
+      userQuestions: {
+        active: [
+          { callId: 'c1', state: 'continued', questions: [{ id: 'q', question: 'p', intent: { kind: 'plan-review', approve: 'Go' } }] },
+          { callId: 'c2', state: 'continued', questions: [{ id: 'q', question: 'plain' }] },
+        ],
+        settled: [],
+      },
+      inbox: { 'next-step': [], 'next-turn': [] },
+    },
+  })
+  assert.equal(deriveAttention(KNOWN_IDLE, mixedContinued).attention, 'question',
+    'mixed continued intents are not guessed as plan-review')
 })
 
 test('UA-02/UA-05 an open timed call with no Gateway pending input fails closed to unknown', () => {
@@ -152,6 +214,8 @@ interface Harness {
 
 function harness(options: {
   listed?: readonly SessionSummary[]
+  /** The official list row `running` bits, INDEPENDENT of `SessionSummary.live`. */
+  listedRunning?: Readonly<Record<string, boolean>>
   listPhase?: 'pending' | 'ready'
   states?: Readonly<Record<string, ReadOutcome | { readonly failure: unknown }>>
   projections?: Readonly<Record<string, ReadOutcome | { readonly failure: unknown }>>
@@ -175,7 +239,7 @@ function harness(options: {
         ids: listed.map(row => row.id),
         byId: Object.fromEntries(listed.map(row => [row.id, {
           id: row.id,
-          running: row.live,
+          running: options.listedRunning?.[row.id] ?? false,
           updatedAt: row.updatedAt,
         }])),
         phase: options.listPhase ?? 'ready',
@@ -226,7 +290,8 @@ const row = (id: string, overrides: Partial<SessionSummary> = {}): SessionSummar
 
 test('UA-01 readActivity keeps the caller roster/order and never enumerates another corpus', async () => {
   const h = harness({
-    listed: [row('x', { live: true }), row('y'), row('child', { origin: 'subagent' })],
+    listed: [row('x'), row('y'), row('child', { origin: 'subagent' })],
+    listedRunning: { x: true, y: false },
     states: {
       x: { result: { running: true, pendingInput: ['question'] } },
       y: { result: { running: false, pendingInput: [] } },
@@ -236,9 +301,12 @@ test('UA-01 readActivity keeps the caller roster/order and never enumerates anot
       y: { result: { kind: 'sequenced', values: { userQuestions: { active: [], settled: [] }, inbox: { 'next-step': [], 'next-turn': [] } } } },
     },
   })
-  const facts = await h.facts.readActivity([row('x'), row('y'), row('child', { origin: 'subagent' })])
+  // The roster rows carry the OPPOSITE `live` bits: `running` must come from the
+  // official list row, never the old attachment bit.
+  const facts = await h.facts.readActivity([row('x', { live: false }), row('y', { live: true }), row('child', { origin: 'subagent' })])
   assert.deepEqual(facts.map(fact => fact.sessionId), ['x', 'y'], 'subagent rows never enter the facts and no id is added')
-  assert.equal(facts[0].running, true)
+  assert.equal(facts[0].running, true, 'the official list-row running is true despite live:false')
+  assert.equal(facts[1].running, false, 'the official list-row running is false despite live:true')
   assert.equal(facts[0].attention, 'question')
   assert.deepEqual(facts[0].continuedQuestionCallIds, ['c1'])
   assert.equal(facts[1].attention, 'none')
@@ -249,7 +317,8 @@ test('UA-01 readActivity keeps the caller roster/order and never enumerates anot
 
 test('UA-01 a row read failure keeps an in-row Unknown/Denied and does not clear the other rows', async () => {
   const h = harness({
-    listed: [row('denied', { live: true }), row('unavailable', { live: true }), row('broken')],
+    listed: [row('denied'), row('unavailable'), row('broken')],
+    listedRunning: { denied: true, unavailable: true, broken: false },
     states: {
       denied: { failure: { code: 'remote-access/denied' } },
       unavailable: { failure: { code: 'gateway/invocation-unavailable' } },
@@ -271,8 +340,8 @@ test('UA-01 a row read failure keeps an in-row Unknown/Denied and does not clear
 
 test('UA-01 a list/state running disagreement is unknown, never one guessed value', async () => {
   const h = harness({
-    // `live` is the structural stand-in for the official list row `running`.
-    listed: [row('disagree', { live: true }), row('agree-idle', { live: false })],
+    listed: [row('disagree'), row('agree-idle')],
+    listedRunning: { disagree: true, 'agree-idle': false },
     states: { disagree: { result: { running: false, pendingInput: [] } }, 'agree-idle': { result: { running: false, pendingInput: [] } }, 'no-list-row': { result: { running: true, pendingInput: [] } } },
     projections: {},
   })
@@ -280,6 +349,23 @@ test('UA-01 a list/state running disagreement is unknown, never one guessed valu
   assert.equal(facts[0].running, undefined)
   assert.equal(facts[1].running, false)
   assert.equal(facts[2].running, true)
+})
+
+test('UA-01 a pending list phase is not an idle claim: running comes from the passive state', async () => {
+  const h = harness({
+    listed: [row('x'), row('broken')],
+    listPhase: 'pending',
+    states: {
+      x: { result: { running: true, pendingInput: ['question'] } },
+      broken: { failure: { code: 'gateway/internal' } },
+    },
+    projections: { x: { failure: { code: 'gateway/internal' } }, broken: { failure: { code: 'gateway/internal' } } },
+  })
+  const facts = await h.facts.readActivity([row('x'), row('broken')])
+  assert.equal(facts[0].running, true, 'the Host state still proves running with no ready list snapshot')
+  assert.equal(facts[0].attention, 'question')
+  assert.equal(facts[1].running, undefined, 'a failed state read is unknown, never idle')
+  assert.equal(facts[1].attentionSourceState, 'unknown')
 })
 
 test('UA-10 no current generation rejects the sample instead of reporting zero facts', async () => {
@@ -412,7 +498,8 @@ test('UA-07 a stream without a baseline is an unknown Workspace state, never an 
   const workspace = workspaceNamespace([{ type: 'upsert', workspace: workspaceView('a') }])
   const h = harness({ workspace: workspace.namespace })
   const handle = h.facts.followWorkspaces()
-  await assert.rejects(async () => { for await (const _ of handle) { assert.fail('no frame may be published') } }, SupersededReadError)
+  await assert.rejects(async () => { for await (const _ of handle) { assert.fail('no frame may be published') } },
+    /did not begin with a baseline/u)
   assert.equal(workspace.disposed(), 1)
 })
 
@@ -420,7 +507,8 @@ test('UA-07 a stream that ends before its baseline publishes nothing', async () 
   const workspace = workspaceNamespace([])
   const h = harness({ workspace: workspace.namespace })
   const handle = h.facts.followWorkspaces()
-  await assert.rejects(async () => { for await (const _ of handle) { assert.fail('no frame may be published') } }, SupersededReadError)
+  await assert.rejects(async () => { for await (const _ of handle) { assert.fail('no frame may be published') } },
+    /ended before its baseline/u)
 })
 
 test('UA-10 a generation replacement ends the open Workspace stream', async () => {
@@ -436,6 +524,16 @@ test('UA-10 a generation replacement ends the open Workspace stream', async () =
   assert.deepEqual(first, { done: false, value: { type: 'baseline', items: [] } })
   await assert.rejects(() => iterator.next(), SupersededReadError)
   assert.equal(workspace.disposed(), 1)
+})
+
+test('UA-10 an already-aborted signal never opens a Workspace stream', () => {
+  const controller = new AbortController()
+  controller.abort()
+  const workspace = workspaceNamespace([{ type: 'baseline', value: { items: [] } }])
+  const h = harness({ workspace: workspace.namespace })
+  assert.throws(() => h.facts.followWorkspaces(controller.signal),
+    (error: unknown) => (error as Error).name === 'AbortError')
+  assert.equal(workspace.follows(), 0, 'no official stream is opened for an aborted generation')
 })
 
 test('UA-09 a Workspace stream cannot be opened without a current generation', () => {

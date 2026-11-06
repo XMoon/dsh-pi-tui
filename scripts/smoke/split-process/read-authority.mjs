@@ -31,7 +31,7 @@
  * @module split-process/read-authority
  */
 
-import { existsSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 
@@ -163,7 +163,7 @@ export async function runReadAuthority(context) {
   }
 
   /** Admit A on Session Y, and (by default) B on a DIFFERENT Session X. */
-  const startDualSurfaceScene = async (scenario, label, extraEnv = {}, options = { openB: true }) => {
+  const startDualSurfaceScene = async (scenario, label, extraEnv = {}, options = { openB: true, bCwd: undefined, bEnv: {} }) => {
     const { host, ready: hostReady, workRoot } = await startC1Host(scenario, label, extraEnv)
     const hostBefore = await hostIdentityFacts(host)
     assert(hostBefore.hostPid === hostReady.pid, `${label} the Host ready record does not own the Host identity`)
@@ -181,7 +181,8 @@ export async function runReadAuthority(context) {
     const sessionY = aOpen.openSessionId
     const { client: clientB, ready: bReady } = await startC1Client(`${label} B`, {
       SPLIT_PROCESS_CLIENT_READ_AUTHORITY_PROOF: requestPath,
-    })
+      ...options.bEnv,
+    }, options.bCwd === undefined ? {} : { cwd: options.bCwd })
     let sessionX
     if (options.openB) {
       await submitPrompt(clientB, '/new', `${label} B /new`)
@@ -519,6 +520,18 @@ export async function runReadAuthority(context) {
         'UA continued answer')
       assert(answerRecord.phase === 'continued-answer' && answerRecord.outcome === 'queued',
         `UA the late answer was not queued: ${JSON.stringify(answerRecord)}`)
+      // The queued reply is now in the binding's inbox while the timed call is
+      // still `continued`: a fresh port read must WITHDRAW the answerable
+      // candidate instead of presenting the same call as needs-attention.
+      const suppressed = await readFactsUntil(clientA, record => {
+        const fact = (record.facts ?? []).find(entry => entry.sessionId === sessionX)
+        return fact !== undefined
+          && Array.isArray(fact.continuedQuestionCallIds)
+          && !fact.continuedQuestionCallIds.includes(callId)
+      }, 'UA queued reply suppresses the continued candidate', 20_000)
+      const suppressedFact = factOf(suppressed, sessionX, 'UA queued suppression fact')
+      assert(suppressedFact.attention !== 'question' && suppressedFact.attention !== 'plan-review',
+        `UA a queued reply still reported attention ${JSON.stringify(suppressedFact.attention)}`)
       // Release the held turn: the queued reply is claimed as a durable
       // `user-question-reply` message exactly once.
       writeFileSync(holdBarrier, 'release\n', { mode: 0o600 })
@@ -584,10 +597,19 @@ export async function runReadAuthority(context) {
     // ── UA-07/09/10: the official Workspace follow baseline + a REAL Session
     //    create increment, then a real mux rollover and a fresh-generation read.
     {
+      // B gets its OWN launch directory, HOME and PATH: the Workspace identity
+      // a Client reads must still be the Host's, never its own filesystem.
+      const bCwd = join(workDir, 'ua-b-client-cwd')
+      const bHome = join(workDir, 'ua-b-home')
+      for (const dir of [bCwd, bHome]) mkdirSync(dir, { recursive: true, mode: 0o700 })
       const { host, hostBefore, clientA, clientB, aReady, bReady, sessionY } =
-        await startDualSurfaceScene('question', 'ua-workspaces', {}, { openB: false })
-      // B is admitted but sessionless until the baseline is read; its own
-      // workspace membership change is the increment.
+        await startDualSurfaceScene('question', 'ua-workspaces', {}, {
+          openB: false,
+          bCwd,
+          bEnv: { HOME: bHome, PATH: `${bCwd}:${process.env.PATH ?? ''}` },
+        })
+      // B is admitted but sessionless: it proposes no Workspace of its own, and
+      // its different launch environment must not become a membership fact.
       const baselineNonce = signalProbe(clientA, { op: 'workspaces', windowMs: 30_000, maxFrames: 3 })
       await waitProbe(clientA, baselineNonce, record => record.phase === 'workspaces-open',
         'UA workspaces stream opened', 30_000)
@@ -602,16 +624,32 @@ export async function runReadAuthority(context) {
       assert(typeof member.workspaceId === 'string' && member.workspaceId !== ''
         && typeof member.path === 'string' && typeof member.title === 'string',
       'UA a Workspace baseline row is missing its Host identity/path/title')
-      // A real Session create in ANOTHER Client changes the Host Workspace
-      // membership; the per-open stream must forward that increment.
+      // B (different cwd/HOME/PATH) reads the SAME Host Workspace identity for
+      // the same Session; its own launch directory is never the answer.
+      const bNonce = signalProbe(clientB, { op: 'workspaces', windowMs: 15_000, maxFrames: 1 })
+      const bBaseline = await waitProbe(clientB, bNonce,
+        record => record.phase === 'workspaces-frame' && record.type === 'baseline',
+        'UA B workspaces baseline', 30_000)
+      const bMember = (bBaseline.items ?? []).find(item =>
+        Array.isArray(item.sessionIds) && item.sessionIds.includes(sessionY))
+      assert(bMember !== undefined,
+        `UA B (different cwd/HOME/PATH) did not see Y's Host Workspace: ${JSON.stringify(bBaseline.items)}`)
+      assert(bMember.workspaceId === member.workspaceId && bMember.path === member.path
+        && bMember.title === member.title, 'UA the two Clients disagreed about the Host Workspace identity')
+      assert(bMember.path !== bCwd,
+        `UA the Workspace path fell back to the Client launch directory (${JSON.stringify(bMember.path)})`)
+      await waitProbe(clientB, bNonce, record => record.phase === 'workspaces-ended',
+        'UA B workspaces stream ended', 30_000)
+      // A real Session create changes the Host Workspace membership; the
+      // per-open stream must forward that increment.
       const createIndex = (hostSessionEvents(dshHome, sessionY) ?? []).length
-      await submitPrompt(clientB, '/new', 'UA workspaces B /new')
-      const bOpen = await waitForSurfaceStatus(clientB,
+      await submitPrompt(clientA, '/new', 'UA workspaces A /new')
+      const aSecond = await waitForSurfaceStatus(clientA,
         record => record.sessionOpen === true && typeof record.openSessionId === 'string'
           && record.openSessionId !== sessionY,
-        'UA B created Session X',
+        'UA A created Session X',
         120_000)
-      const sessionX = bOpen.openSessionId
+      const sessionX = aSecond.openSessionId
       const upsert = await waitProbe(clientA, baselineNonce,
         record => record.phase === 'workspaces-frame'
           && (record.type === 'upsert' || record.type === 'replace')

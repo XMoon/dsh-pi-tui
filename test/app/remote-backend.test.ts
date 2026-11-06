@@ -75,7 +75,6 @@ function fakeRuntime(settingsDescribe: () => Promise<unknown>): {
       // facts adapter. The assembly never calls them during construction.
       state: async () => ({ ok: true, value: { running: false, pendingInput: [] } }),
       projections: async () => ({ ok: true, value: null }),
-      workspace: { follow: () => Object.assign((async function* () {})(), { dispose: () => {} }) },
       pluginManager: {},
       settings: {
         describe: async () => { describeCalls += 1; return settingsDescribe() },
@@ -86,6 +85,9 @@ function fakeRuntime(settingsDescribe: () => Promise<unknown>): {
       credentials: { describe: async () => ({ ok: true, value: {} }), set: async () => ({ ok: true, value: undefined }), unset: async () => ({ ok: true, value: undefined }) },
       permissionPresets: { catalog: async () => ({ ok: true, value: { options: [] } }) },
       $on: () => () => {},
+      // M5-U-A: the generated `workspace` namespace the ONE facts adapter
+      // follows. It lives at the `remote` level, never under `session`.
+      workspace: { follow: () => Object.assign((async function* () {})(), { dispose: () => {} }) },
     },
     jobs: { state: { getSnapshot: () => ({ rows: {}, observed: {} }), subscribe: () => () => {} }, watchRows: () => () => {}, observe: () => () => {} },
     connection: { generation },

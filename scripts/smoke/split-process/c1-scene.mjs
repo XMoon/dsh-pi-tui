@@ -110,12 +110,15 @@ export function createC1Scene(context) {
     if (host.exited) return
     try { await host.shutdown() } catch { /* the global backstop kills leftovers */ }
   }
-  const startC1Client = async (label, extraEnv = {}) => {
+  const startC1Client = async (label, extraEnv = {}, options = {}) => {
     // A real `surface` Client holds no profile-global Client seat, so a new
     // scenario only has to start its own process and authenticate the Host.
+    // `options.cwd` gives one Client its own launch directory (its Workspace
+    // proposal input); the Host Workspace identity still comes from the Host.
     const client = new SurfaceEntryProcess(entries.client, {
       ...base,
       workDir,
+      ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
       env: { ...base.env, ...extraEnv },
     })
     c1Clients.push(client)

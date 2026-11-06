@@ -1080,9 +1080,16 @@ async function startSurfaceLocalClient(
   // read implementation: every fact comes from the mounted Backend port.
   const readAuthorityRequestPath = process.env.SPLIT_PROCESS_CLIENT_READ_AUTHORITY_PROOF
   if (readAuthorityRequestPath !== undefined && readAuthorityRequestPath !== '') {
+    const readAuthorityDiag = composition.diag
+    if (readAuthorityDiag === undefined) {
+      throw new Error('local client entry: the read-authority qualification requires the Client diagnostics sink')
+    }
     let chain: Promise<void> = Promise.resolve()
     process.on('SIGUSR2', () => {
-      chain = chain.then(async () => {
+      // Serialized, and each request is an owned detached task: a throwing
+      // telemetry sink or probe body is classified by the repository's failure
+      // model instead of becoming an unhandled rejection on a bare chain.
+      chain = chain.then(() => runDetached('read-authority qualification probe', async () => {
         /** Echoes the caller's correlation nonce on every record of ONE op. */
         let nonce: unknown
         const emit = (record: Record<string, unknown>): void => {
@@ -1199,7 +1206,7 @@ async function startSurfaceLocalClient(
               : {}),
           })
         }
-      })
+      }, { diag: readAuthorityDiag }))
     })
   }
   // T34 qualification input: close the writer's pre-dispatch admission while
