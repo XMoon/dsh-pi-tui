@@ -997,7 +997,7 @@ test('the Detail Check updates entry drives one exact update through confirm, st
   const done = harness.view()
   assert.match(done, /Target result/)
   assert.match(done, /Restore result/)
-  assert.match(done, /Not required; the former version was never removed\./)
+  assert.match(done, /Not required; the Host did not reinstall the former version\./)
   assert.match(done, /Observed installed version\s+1\.1\.0/)
   assert.match(done, /Outcome\s+applied/)
 

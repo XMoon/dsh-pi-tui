@@ -984,7 +984,8 @@ test('the REAL Host TUI path lists versions, confirms one exact target and updat
     try { harness.controller.dispose() } catch {}
     try { harness.app.dispose() } catch {}
   })
-  const settle = async (rounds = 10): Promise<void> => { await harness.waitForFrame(rounds) }
+  // A bounded RENDER wait (not a blind sleep): the frame must have landed.
+  const paint = async (rounds = 10): Promise<void> => { await harness.waitForFrame(rounds) }
   const frame = (): string => plain(harness.vt.getViewport())
   const waitFor = async (predicate: () => boolean, label: string, timeoutMs = 60_000): Promise<void> => {
     const deadline = Date.now() + timeoutMs
@@ -996,18 +997,18 @@ test('the REAL Host TUI path lists versions, confirms one exact target and updat
     throw new Error(`timed out waiting for ${label}: ${frame()}`)
   }
   await waitFor(() => harness.controller.status().state === 'ready', 'the real Host inventory read')
-  await settle()
+  await paint()
   const card = harness.controller.model().cards.find(candidate => candidate.name === UPDATE_FIXTURE_BUNDLE)
   assert.ok(card !== undefined, 'the real registry install is listed')
   assert.equal(card.updatable, true, 'the Host declares the profile registry dependency updatable')
 
   // The REAL user path: search -> Details -> Check updates….
   searchFor(harness, UPDATE_FIXTURE_BUNDLE)
-  await settle()
+  await paint()
   harness.vt.sendInput('\r') // Details
   await waitFor(() => frame().includes('[Details]'), 'the Details focus frame')
   harness.vt.sendInput('\x1b[B') // Disable… -> Check updates…
-  await settle()
+  await paint()
   harness.vt.sendInput('\r')
   await waitFor(() => harness.panel.currentView() === 'update', 'the Check updates… entry')
   await waitFor(() => /Update bundle · dsh-s5-pr2-update-fixture/u.test(frame()), 'the Update page identity')
@@ -1023,7 +1024,7 @@ test('the REAL Host TUI path lists versions, confirms one exact target and updat
   assert.match(frame(), /To\s+1\.1\.0/u)
   assert.match(frame(), /> Cancel/u, 'Cancel is the default choice')
   harness.vt.sendInput('\x1b[A') // Cancel -> Confirm update
-  await settle()
+  await paint()
   harness.vt.sendInput('\r')
   await waitFor(() => harness.controller.updateView()?.phase === 'running', 'the running update')
   await waitFor(() => harness.controller.updateView()?.readback === 'ready', 'the authoritative reread')
@@ -1033,7 +1034,7 @@ test('the REAL Host TUI path lists versions, confirms one exact target and updat
   assert.match(view, /Target result/u)
   assert.match(view, /Outcome\s+applied/u)
   assert.match(view, /Restore result/u)
-  assert.match(view, /Not required; the former version was never removed\./u)
+  assert.match(view, /Not required; the Host did not reinstall the former version\./u)
 
   // The authoritative Host truth: package version and profile dependency.
   const reread = await fixture.port.snapshot()

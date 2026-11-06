@@ -845,6 +845,8 @@ test('the forwarded plugin-manager/update-state reaches the Remote adapter over 
   ])
   dispose()
   emit('plugin-manager/update-state', { requestId: 'pr6-update-2', step: 'installing' })
+  // A disposed subscription must deliver nothing later; no authoritative
+  // signal can prove a non-event, so this negative observation needs a window.
   await new Promise(resolve => setTimeout(resolve, 150))
   assert.equal(received.length, 2, 'a disposed update subscription delivers nothing later')
 })
