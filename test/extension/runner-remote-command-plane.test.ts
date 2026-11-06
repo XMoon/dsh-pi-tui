@@ -1387,32 +1387,46 @@ test('/transcript while running + steer still saves the committed cut locally an
   const outDir = life.tempDir('dsh-remote-transcript-running-')
   const llm = new StubStreamingLlmAdapter()
   const release = llm.hold()
-  life.defer(release)
   const fixture = await mountRunner(life, { resumeSessionId: mainId, llmAdapter: llm, seed: () => {} })
-  submit(fixture, 'hold this turn open')
-  await waitFor('the session is running', () =>
-    fixture.aggregate.presentation.sessionFacts.running(mainId) === true, 20_000)
-  const originalAsk = TuiApp.prototype.askSaveLocation
-  TuiApp.prototype.askSaveLocation = async function patchedAsk() {
-    return { kind: 'selected', directory: outDir, overwrite: false }
+  // Register the release AFTER mountRunner's disposers: `testLifecycle` runs
+  // deferred callbacks in reverse registration order, so a failing assertion
+  // must release the held stream BEFORE the fixture teardown waits on it.
+  life.defer(release)
+  try {
+    submit(fixture, 'hold this turn open')
+    // The authoritative running fact is the durable open turn PLUS the live
+    // Client projection: a load-stretched projection is waited out, never
+    // mistaken for a finished turn.
+    await waitFor('the session is running with the committed prompt', () =>
+      fixture.aggregate.presentation.sessionFacts.running(mainId) === true
+      && fixture.events(mainId).some(event =>
+        event.type === 'user/message' && JSON.stringify(event.data).includes('hold this turn open')), 30_000)
+    let savePrompts = 0
+    const originalAsk = TuiApp.prototype.askSaveLocation
+    TuiApp.prototype.askSaveLocation = async function patchedAsk() {
+      savePrompts += 1
+      return { kind: 'selected', directory: outDir, overwrite: false }
+    }
+    life.defer(() => { TuiApp.prototype.askSaveLocation = originalAsk })
+    const app = fixture.app() as unknown as { setDraft(text: string): void; submitDraft(request?: string): void }
+    app.setDraft('/transcript')
+    app.submitDraft('accelerated')
+    const target = join(outDir, `dsh-session-${mainId}.md`)
+    await waitFor('the committed-cut Markdown file landed', () => existsSync(target), 30_000)
+    assert.equal(savePrompts, 1, 'the Client Save Location opened exactly once for the running command')
+    const content = readFileSync(target, 'utf8')
+    // The committed cut contains the user's prompt; the still-streaming model
+    // output is NOT invented into the transcript.
+    assert.match(content, /> hold this turn open/u, 'the committed user message is exported')
+    assert.doesNotMatch(content, /^## (User|Assistant)$/mu, 'the retired Client-local format is gone')
+    const spliced = fixture.events(mainId).some(event =>
+      event.type === 'agent/inbox/spliced' && JSON.stringify(event.data).includes('/transcript'))
+    assert.equal(spliced, false, '/transcript was never steered into the agent inbox')
+    assert.equal(fixture.hostCommandRuns(mainId), 0,
+      'the running+steer /transcript stays a Client-local command')
+  } finally {
+    release()
   }
-  life.defer(() => { TuiApp.prototype.askSaveLocation = originalAsk })
-  const app = fixture.app() as unknown as { setDraft(text: string): void; submitDraft(request?: string): void }
-  app.setDraft('/transcript')
-  app.submitDraft('accelerated')
-  const target = join(outDir, `dsh-session-${mainId}.md`)
-  await waitFor('the committed-cut Markdown file landed', () => existsSync(target), 15_000)
-  const content = readFileSync(target, 'utf8')
-  // The committed cut contains the user's prompt; the still-streaming model
-  // output is NOT invented into the transcript.
-  assert.match(content, /> hold this turn open/u, 'the committed user message is exported')
-  assert.doesNotMatch(content, /^## (User|Assistant)$/mu, 'the retired Client-local format is gone')
-  const spliced = fixture.events(mainId).some(event =>
-    event.type === 'agent/inbox/spliced' && JSON.stringify(event.data).includes('/transcript'))
-  assert.equal(spliced, false, '/transcript was never steered into the agent inbox')
-  assert.equal(fixture.hostCommandRuns(mainId), 0,
-    'the running+steer /transcript stays a Client-local command')
-  release()
 })
 
 test('negative controls: agent-facing and Host-owned lines keep their delivery under the same condition', async (t) => {
