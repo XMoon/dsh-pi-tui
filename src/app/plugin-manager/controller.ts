@@ -891,12 +891,20 @@ export class PluginManagerController {
         return
       }
       if (existing.cardValue === cardValue) {
-        // Re-entry: reuse the SAME preview/result. Only an acknowledged
-        // indeterminate outcome may start a NEW check for this same bundle.
-        if (existing.phase !== 'unknown') return
-        if (!existing.acknowledged) {
-          this.message = 'the previous update outcome is unknown; acknowledge it before checking again'
-          this.notifyChanged()
+        if (existing.phase === 'unknown') {
+          if (!existing.acknowledged) {
+            this.message = 'the previous update outcome is unknown; acknowledge it before checking again'
+            this.notifyChanged()
+            return
+          }
+          // An acknowledged indeterminate outcome may start a NEW check.
+        } else if (existing.phase !== 'done') {
+          // Re-entry while the version list is still a live preview (or its
+          // confirmation is open) reuses that SAME preview. A COMPLETED update
+          // is historical evidence, not a preview: Check updates… is a new
+          // user intent that starts a fresh registry read (listVersions), never
+          // a re-dispatch. The done result remains reopenable with
+          // `u update result` until the new check replaces it.
           return
         }
       } else if (existing.phase === 'unknown' && !existing.acknowledged) {
