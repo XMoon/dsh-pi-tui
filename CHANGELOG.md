@@ -7,6 +7,34 @@
 
 ## [Unreleased]
 
+### 升级与安全须知
+
+- **DSH 0.2.2 默认不再强制「先读后写」。** 上游把
+  `fs-observation-policy` 改为默认关闭，dsh-pi-tui 跟随该默认，不恢复旧的
+  文件观察守卫；模型可以直接 `write` / `edit` 未在本会话读取过的文件。若部署
+  需要旧的先读后写约束，请通过官方 Profile 覆盖重新启用
+  `fs-observation-policy`；本扩展不会自动修改用户配置。
+- **`web_fetch` 可以访问 localhost 与私网目标。** 上游 HTTP provider 不再在
+  工具层拒绝非公网地址，dsh-pi-tui 也不再承诺旧的私网拦截。若环境需要屏蔽，
+  请使用 Host 进程级网络隔离、代理/防火墙或官方 tool pre-execute policy；
+  不要依赖 TUI 自身的 URL 规则。
+- **同一 Host 的附件存储不是按会话隔离的。** 合法调用者在同一 Host 的
+  AttachmentStore 内持有完整图片引用时，可以读取其他 Session 未引用过的图片；
+  Gateway / Peer 的方法级授权仍是权限边界。若要求按会话隔离，请使用各自独立的
+  Host 与 `DSH_HOME`。
+- **旧 `schedule/change` 事件只保留为历史日志。** rc5 时代的会话内提醒事件不会
+  自动变成新的 Host Scheduled Task；已有 Host 任务的执行与存储仍由官方
+  Schedule 服务负责。新的 `schedule_*` 工具管理的是 Host-wide 任务，使用者需
+  注意其权限范围；旧工具调用/结果仍按历史记录展示。
+- **升级前请备份，且不要对已升级目录原地降级。** 0.2.2 新语义写入的
+  Session、fork 与 schedule 数据不保证能被 rc5 读取。升级前请停止正在运行的
+  Agent 与后台任务，备份旧 DSH/TUI 安装配对、Profile 与 patch、Session 原始
+  日志、Workspace 与必要的 Host 资源/凭据引用；需要退回时，把备份恢复到独立
+  目录并用匹配的旧 DSH/TUI 配对启动。备份材料应安全保存，不要把敏感信息写入
+  诊断输出。
+- **`pi2dsh` 的真实终端兼容性未纳入本版资格范围。** 该外部插件的 peer 依赖指向
+  不同的 DSH 版本，本版未验证其真实 PTY 兼容；请按该外部插件自身的说明使用。
+
 ### 新增
 
 - **Split Client 的 `/web` 入口与「下次 Host 启动自动启用 Web 前端」偏好。**

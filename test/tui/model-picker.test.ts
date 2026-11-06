@@ -2204,6 +2204,7 @@ test('the real rc.2 DeepSeek catalog exposes deepseek-flash to the mounted /mode
   const adapter = new FlashAdapter()
   const app = await startS4D3Application(t, {
     bundles: [],
+    presets: true,
     columns: 120,
     rows: 36,
     patches: [{ id: 'agent-default-model', config: { provider: 'scripted', model: 'review-model' } }] as never,
@@ -2294,6 +2295,7 @@ test('a legal non-empty deployment catalog without deepseek-flash is authoritati
   const adapter = new FlashAdapter()
   const app = await startS4D3Application(t, {
     bundles: [],
+    presets: true,
     columns: 120,
     rows: 36,
     patches: [
