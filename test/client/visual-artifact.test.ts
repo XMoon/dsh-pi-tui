@@ -118,8 +118,8 @@ function pair(
   ]
 }
 
-const REF_LINE = 'visual-ref-v1:sv1_0123456789abcdef0123'
-const PUBLISHED_LINE = 'visual-published-v1:{"version":1,"published":[{"ref":"sv1_0123456789abcdef0123"}]}'
+const REF_LINE = 'visual-ref-v2:sv2_0123456789abcdef0123'
+const PUBLISHED_LINE = 'visual-published-v1:{"version":1,"published":[{"ref":"sv2_0123456789abcdef0123"}]}'
 
 test('the readable export drops the three visual tools’ machine tails but keeps their human text', () => {
   const chartFact = chartFactFromArgs(CHART_ARGS)
@@ -131,13 +131,13 @@ test('the readable export drops the three visual tools’ machine tails but keep
       { type: 'step/start', seq: 1, time: 1, data: { turn: 1, step: 0 } } as never,
       ...pair(1, 0, 2, 'call-chart', 'dsh_pi_tui_chart', CHART_ARGS,
         [chartBlocks[0] as { type: 'text'; text: string }, { type: 'text', text: REF_LINE }, chartBlocks[1] as { type: 'text'; text: string }]),
-      ...pair(1, 1, 5, 'call-present', 'present_visual', { visuals: [{ ref: 'sv1_0123456789abcdef0123' }] },
+      ...pair(1, 1, 5, 'call-present', 'present_visual', { visuals: [{ ref: 'sv2_0123456789abcdef0123' }] },
         [{ type: 'text', text: 'Selected 1 visual for presentation.' }, { type: 'text', text: PUBLISHED_LINE }]),
     ] as never,
   } as never)
   assert.match(markdown, /Request latency/u, 'the human chart text is exported')
   assert.match(markdown, /Selected 1 visual for presentation\./u, 'the human publication summary is exported')
-  assert.doesNotMatch(markdown, /visual-ref-v1:/u, 'the reference machine block is not readable export material')
+  assert.doesNotMatch(markdown, /visual-ref-v2:/u, 'the reference machine block is not readable export material')
   assert.doesNotMatch(markdown, /^visual-v1:/mu, 'the fact machine block is not readable export material')
   assert.doesNotMatch(markdown, /visual-published-v1:/u, 'the receipt machine block is not readable export material')
 })
@@ -152,7 +152,7 @@ test('the readable export keeps another tool’s lookalike machine text verbatim
       ...pair(1, 0, 2, 'call-bash', 'bash', { command: 'cat out.txt' }, [{ type: 'text', text: lookalike }]),
     ] as never,
   } as never)
-  assert.match(markdown, /visual-ref-v1:sv1_0123456789abcdef0123/u, 'a non-visual tool’s text is untouched')
+  assert.match(markdown, /visual-ref-v2:sv2_0123456789abcdef0123/u, 'a non-visual tool’s text is untouched')
   assert.match(markdown, /visual-published-v1:/u, 'even a receipt-looking line from another tool survives')
 })
 
@@ -165,7 +165,7 @@ test('search never indexes a visual tool’s machine tails', () => {
     { type: 'step/start', seq: 1, time: 1, data: { turn: 1, step: 0 } } as never,
     ...pair(1, 0, 2, 'call-chart', 'dsh_pi_tui_chart', CHART_ARGS,
       [chartBlocks[0] as { type: 'text'; text: string }, { type: 'text', text: REF_LINE }, chartBlocks[1] as { type: 'text'; text: string }]),
-    ...pair(1, 1, 5, 'call-present', 'present_visual', { visuals: [{ ref: 'sv1_0123456789abcdef0123' }] },
+    ...pair(1, 1, 5, 'call-present', 'present_visual', { visuals: [{ ref: 'sv2_0123456789abcdef0123' }] },
       [{ type: 'text', text: 'Selected 1 visual for presentation.' }, { type: 'text', text: PUBLISHED_LINE }]),
   ] as never)
   const chart = folder.messages().find(message => message.kind === 'tool' && message.name === 'dsh_pi_tui_chart')
@@ -173,7 +173,7 @@ test('search never indexes a visual tool’s machine tails', () => {
   assert.ok(chart !== undefined && present !== undefined)
   const chartText = transcriptSearchText(chart)
   assert.match(chartText, /Request latency/u, 'the human values stay searchable')
-  assert.doesNotMatch(chartText, /visual-ref-v1:/u)
+  assert.doesNotMatch(chartText, /visual-ref-v2:/u)
   assert.doesNotMatch(chartText, /visual-v1:/u)
   const presentText = transcriptSearchText(present)
   assert.match(presentText, /Selected 1 visual/u, 'the human summary stays searchable')
@@ -191,6 +191,6 @@ test('search keeps another tool’s lookalike machine text searchable', () => {
   const bash = folder.messages().find(message => message.kind === 'tool' && message.name === 'bash')
   assert.ok(bash !== undefined)
   const text = transcriptSearchText(bash)
-  assert.match(text, /visual-ref-v1:sv1_0123456789abcdef0123/u)
+  assert.match(text, /visual-ref-v2:sv2_0123456789abcdef0123/u)
   assert.match(text, /visual-published-v1:/u)
 })

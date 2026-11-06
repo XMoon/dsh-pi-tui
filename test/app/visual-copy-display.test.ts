@@ -20,7 +20,6 @@ import { chartContentBlocks, chartFactFromArgs, type ChartArgs } from '../../src
 import { visualReference, visualReferenceLine } from '../../src/domain/visual/reference.ts'
 import { VISUAL_PUBLISHED_PREFIX } from '../../src/domain/transcript/visual-text.ts'
 import { asVisualSessionEvents } from '../../src/domain/visual/publication.ts'
-import { ownVisualOriginSpans, type VerifiedVisualOriginSpan } from '../../src/domain/visual/origin.ts'
 import { TranscriptFolder } from '../../src/transcript.ts'
 import { SupersededReadError } from '../../src/runtime/read-error.ts'
 
@@ -40,10 +39,8 @@ function marker(ref: string): string {
 /** One append-only builder for the official Session log used by BOTH sides. */
 class Log {
   readonly events: SessionEvent[]
-  private readonly sessionId: string
 
-  constructor(sessionId: string = SESSION, seed: readonly SessionEvent[] = []) {
-    this.sessionId = sessionId
+  constructor(seed: readonly SessionEvent[] = []) {
     this.events = [...seed]
   }
 
@@ -88,7 +85,7 @@ class Log {
   /** Append one chart generation (call + result) inside the OPEN step. */
   generateChart(turn: number, step: number, callId: string, stepStartSeq: number): string {
     this.call(turn, step, callId, 'dsh_pi_tui_chart', CHART_ARGS)
-    const ref = visualReference({ sessionId: this.sessionId, turn, stepStartSeq, callId })
+    const ref = visualReference({ turn, stepStartSeq, callId })
     const blocks = chartContentBlocks(chartFactFromArgs(CHART_ARGS))
     this.result(turn, step, callId, [
       ...blocks.slice(0, -1),
@@ -144,13 +141,13 @@ class Log {
  * One turn: step 0 generates the chart, step 1 publishes it, step 2 is the
  * final answer that consumes the marker.
  */
-function publishedTurn(prefix: string, suffix: string, sessionId: string = SESSION): {
+function publishedTurn(prefix: string, suffix: string): {
   log: Log
   ref: string
   finalSeq: number
   answer: string
 } {
-  const log = new Log(sessionId).turnStart(1).stepStart(1, 0)
+  const log = new Log().turnStart(1).stepStart(1, 0)
   const ref = log.generateChart(1, 0, 'chart-call', 1)
   log.assistant(1, 0, [{ type: 'text', text: '' }])
   log.stepEnd(1, 0)
@@ -179,7 +176,6 @@ function bridgeOf(options: {
   readonly folder?: TranscriptFolder
   readonly generation?: () => number
   readonly sessionId?: string
-  readonly originSpans?: readonly VerifiedVisualOriginSpan[]
 }): ReturnType<typeof createPresentationBridge> {
   const events = options.events
   const session = sessionOf(events)
@@ -197,15 +193,13 @@ function bridgeOf(options: {
       sessionId,
       seq: events.length,
       events: asVisualSessionEvents(events),
-      verifiedOriginSpans: options.originSpans ?? ownVisualOriginSpans(sessionId, 0, events.length),
-      originRevision: 0,
     }),
   })
 }
 
 test('a consumed marker disappears from the Direct /copy payload while every other byte stays exact', () => {
   const { log, ref, finalSeq, answer } = publishedTurn('第一段。\r\n\r\n', '\r\n\r\n\tAfter 😀.\r\n')
-  assert.match(ref, /^sv1_[0-9a-f]{20}$/u, 'the publication ref is the durable identity tuple')
+  assert.match(ref, /^sv2_[0-9a-f]{20}$/u, 'the publication ref is the durable identity tuple')
   assert.ok(answer.includes(marker(ref)))
   const folder = new TranscriptFolder()
   folder.apply(log.events)
@@ -222,7 +216,7 @@ test('a consumed marker disappears from the Direct /copy payload while every oth
 })
 
 test('a marker-shaped answer with no publication returns the original text unchanged', () => {
-  const answer = `Look: ${marker(`sv1_${'a'.repeat(20)}`)}`
+  const answer = `Look: ${marker(`sv2_${'a'.repeat(20)}`)}`
   const log = new Log().turnStart(1).stepStart(1, 0)
   log.assistant(1, 0, [{ type: 'text', text: answer }])
   log.stepEnd(1, 0).turnEnd(1)
@@ -310,31 +304,21 @@ test('a model-only surface replacement is never the display /copy source', () =>
   assert.equal(bridge.directLastAssistantText(SESSION), 'Before.\n\n\n\nAfter.')
 })
 
-// ── fork-inherited display copy provenance ────────────────────────────────
+// ── fork-inherited display copy across the event epoch ────────────────────
 
-const PARENT_SESSION = 'session-parent'
 const CHILD_SESSION = 'session-child'
 
 /** A child log: the parent log verbatim plus its own inherited cut marker. */
-function forkedLog(parent: Log): { readonly log: Log; readonly inheritedLength: number } {
-  const inheritedLength = parent.events.length
-  return { log: new Log(CHILD_SESSION, parent.events).forkMarker(), inheritedLength }
+function forkedLog(parent: Log): Log {
+  return new Log(parent.events).forkMarker()
 }
 
-test('a fork-inherited final answer drops only the marker its proven parent publication consumed', () => {
-  const parent = publishedTurn('Parent before.\r\n\r\n', '\r\n\r\nParent after.\r\n', PARENT_SESSION)
-  const { log, inheritedLength } = forkedLog(parent.log)
+test('a fork-inherited final answer drops only the marker its inherited publication consumed', () => {
+  const parent = publishedTurn('Parent before.\r\n\r\n', '\r\n\r\nParent after.\r\n')
+  const log = forkedLog(parent.log)
   const folder = new TranscriptFolder()
   folder.apply(log.events)
-  const bridge = bridgeOf({
-    events: log.events,
-    folder,
-    sessionId: CHILD_SESSION,
-    originSpans: [
-      { startSeq: 0, endSeqExclusive: inheritedLength, sessionId: PARENT_SESSION },
-      { startSeq: inheritedLength, endSeqExclusive: log.events.length, sessionId: CHILD_SESSION },
-    ],
-  })
+  const bridge = bridgeOf({ events: log.events, folder, sessionId: CHILD_SESSION })
   assert.equal(
     bridge.directLastAssistantText(CHILD_SESSION),
     'Parent before.\r\n\r\n\r\n\r\nParent after.\r\n',
@@ -342,24 +326,22 @@ test('a fork-inherited final answer drops only the marker its proven parent publ
   )
 })
 
-test('a fork-inherited final answer whose origin is not proven fails closed before any clipboard write', () => {
-  const parent = publishedTurn('Parent before.\n\n', '\n\nParent after.', PARENT_SESSION)
-  const { log, inheritedLength } = forkedLog(parent.log)
+test('a fork-inherited marker without a successful publication is ordinary text and is copied verbatim', () => {
+  const log = new Log().turnStart(1).stepStart(1, 0)
+  const ref = log.generateChart(1, 0, 'chart-call', 1)
+  log.assistant(1, 0, [{ type: 'text', text: '' }])
+  log.stepEnd(1, 0)
+  const answer = `Before.\n\n${marker(ref)}\n\nAfter.`
+  log.stepStart(1, 1)
+  log.assistant(1, 1, [{ type: 'text', text: answer }])
+  log.stepEnd(1, 1).turnEnd(1)
+  const child = forkedLog(log)
   const folder = new TranscriptFolder()
-  folder.apply(log.events)
-  // Pending (or failed) lineage: only the child's own range is proven, so the
-  // inherited answer's marker may already be consumed and must never be copied.
-  const bridge = bridgeOf({
-    events: log.events,
-    folder,
-    sessionId: CHILD_SESSION,
-    originSpans: [
-      { startSeq: inheritedLength, endSeqExclusive: log.events.length, sessionId: CHILD_SESSION },
-    ],
-  })
-  assert.throws(
-    () => bridge.directLastAssistantText(CHILD_SESSION),
-    (error: unknown) => error instanceof SupersededReadError,
-    'an unproven inherited origin is an unavailable copy, never a literal marker copy',
+  folder.apply(child.events)
+  const bridge = bridgeOf({ events: child.events, folder, sessionId: CHILD_SESSION })
+  assert.equal(
+    bridge.directLastAssistantText(CHILD_SESSION),
+    answer,
+    'without a committed successful publication the marker-shaped bytes are ordinary prose',
   )
 })

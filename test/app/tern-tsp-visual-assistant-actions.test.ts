@@ -173,8 +173,8 @@ const SVG: SvgFact = {
   bytes: SVG_SOURCE.length,
 }
 
-const REF_CHART = `sv1_${'1'.repeat(20)}`
-const REF_SVG = `sv1_${'2'.repeat(20)}`
+const REF_CHART = `sv2_${'1'.repeat(20)}`
+const REF_SVG = `sv2_${'2'.repeat(20)}`
 
 function marker(ref: string): string {
   return `[dsh-visual-${ref}]: <#>`

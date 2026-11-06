@@ -511,12 +511,12 @@ test('a generating result inside an open model step projects its stable referenc
   assert.ok(content !== undefined, 'a real agent root call inside an open step gets a reference')
   const texts = content.map(block => block.type === 'text' ? block.text : '')
   assert.equal(texts.length, 3)
-  assert.match(texts[1] as string, /^visual-ref-v1:sv1_[0-9a-f]{20}$/u)
+  assert.match(texts[1] as string, /^visual-ref-v2:sv2_[0-9a-f]{20}$/u)
   assert.match(texts[2] as string, /^visual-v1:/u, 'the fact stays the LAST block')
   // The ref is the documented tuple projection, not an arbitrary id.
   assert.equal(
     texts[1],
-    `visual-ref-v1:${visualReference({ sessionId: 'session-probe', turn: 1, stepStartSeq: 7, callId: 'call-ref' })}`,
+    `visual-ref-v2:${visualReference({ turn: 1, stepStartSeq: 7, callId: 'call-ref' })}`,
   )
 })
 
@@ -556,7 +556,7 @@ test('a result without a trailing visual fact keeps its exact projection', () =>
 test('present_visual refuses agentless, nested, empty, oversized, duplicated and malformed arguments', async () => {
   const { ctx } = mountWithBoundary()
   applyVisualTools(ctx, { enabled: { get: () => true } } as never)
-  const ref = 'sv1_0123456789abcdef0123'
+  const ref = 'sv2_0123456789abcdef0123'
   const run = async (visuals: unknown) => executeModelToolFixture(ctx, {
     signal: new AbortController().signal,
     callId: ToolCallId('call-present'),
@@ -566,7 +566,7 @@ test('present_visual refuses agentless, nested, empty, oversized, duplicated and
   // Empty.
   assert.equal((await run({ visuals: [] })).isError, true)
   // More than the hard cap.
-  const tooMany = Array.from({ length: 9 }, (_, index) => ({ ref: `sv1_${String(index).padStart(20, '0')}` }))
+  const tooMany = Array.from({ length: 9 }, (_, index) => ({ ref: `sv2_${String(index).padStart(20, '0')}` }))
   assert.equal((await run({ visuals: tooMany })).isError, true)
   // Agentless: the schema passes, the body refuses BEFORE any identity work.
   const agentless = await run({ visuals: [{ ref }] })
@@ -588,7 +588,7 @@ test('present_visual declares its concurrency safety and its exact output shape'
   // A well-formed argument set classifies as concurrency safe: the tool never
   // waits for a same-step source, it refuses it.
   assert.equal(
-    definition.isConcurrencySafe?.({ visuals: [{ ref: 'sv1_0123456789abcdef0123' }] }),
+    definition.isConcurrencySafe?.({ visuals: [{ ref: 'sv2_0123456789abcdef0123' }] }),
     true,
     'a same-step source is refused, never waited for',
   )
@@ -685,7 +685,7 @@ test('present_visual rejects a boundary change across its observation and releas
     arguments: {},
   }
   const running = definition.execute(
-    { visuals: [{ ref: 'sv1_0123456789abcdef0123' }] },
+    { visuals: [{ ref: 'sv2_0123456789abcdef0123' }] },
     exec as never,
   )
   // The observation is suspended and the turn advances to a DIFFERENT open
@@ -711,7 +711,7 @@ test('present_visual surfaces an aborted observation as cancellation and still r
   assert.ok(definition !== undefined)
   const controller = new AbortController()
   const running = definition.execute(
-    { visuals: [{ ref: 'sv1_0123456789abcdef0123' }] },
+    { visuals: [{ ref: 'sv2_0123456789abcdef0123' }] },
     {
       callId: ToolCallId('call-present-abort'),
       agent: { session: { id: SESSION_ID } },
@@ -741,7 +741,7 @@ test('present_visual refuses a prepared (non-live) observation', async () => {
   const definition = probe.ctx.tools.get(PRESENT_VISUAL_TOOL_NAME)
   assert.ok(definition !== undefined)
   const running = definition.execute(
-    { visuals: [{ ref: 'sv1_0123456789abcdef0123' }] },
+    { visuals: [{ ref: 'sv2_0123456789abcdef0123' }] },
     {
       callId: ToolCallId('call-present-prepared'),
       agent: { session: { id: SESSION_ID } },

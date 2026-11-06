@@ -1986,7 +1986,7 @@ function compactChartPublication(ref: string): PublishedVisual {
 }
 
 test('Compact renders a published visual inline while the raw marker stays search-visible', async () => {
-  const ref = `sv1_${'e'.repeat(20)}`
+  const ref = `sv2_${'e'.repeat(20)}`
   const marker = `[dsh-visual-${ref}]: <#>`
   const text = `Before compact.\n\n${marker}\n\nAfter compact.`
   const folder = new TranscriptFolder()

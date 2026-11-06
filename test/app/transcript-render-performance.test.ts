@@ -546,7 +546,7 @@ test('a steady MULTI-SLOT compact render never rescans its unchanged text', asyn
 
 
 test('a stable inline visual Assistant repaint is a no-op with a stable mounted component', () => {
-  const ref = `sv1_${'9'.repeat(20)}`
+  const ref = `sv2_${'9'.repeat(20)}`
   const marker = `[dsh-visual-${ref}]: <#>`
   const folder = new TranscriptFolder()
   folder.apply([

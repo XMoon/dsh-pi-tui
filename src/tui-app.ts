@@ -19151,7 +19151,7 @@ export class TuiApp {
         resultPreview = imageFoldedPreview(message.result)
       } else if (isVisualToolName(message.name)) {
         // The three visual tools carry machine blocks (the projected
-        // `visual-ref-v1:` line, the chart/SVG fact and present_visual's
+        // `visual-ref-v2:` line, the chart/SVG fact and present_visual's
         // `visual-published-v1:` receipt) beside their human text. The folded
         // preview reads the SAME source-aware projection as the expanded body,
         // so no machine line ever appears in one row of the folded card.

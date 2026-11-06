@@ -25,13 +25,13 @@ import {
   type GenerateOptions,
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
-import { SessionId, SessionLogOffset, SessionSeq, buildForkSeed, type SessionEvent } from '@deepseek-ai/dsh-session'
+import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import SessionQuerySqlite from '@deepseek-ai/dsh-session-query-sqlite'
 import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import { apply as applyVisualTools } from '../../src/app/host/visual-tools.ts'
+import { DirectSessionLifecycle } from '../../src/runtime/direct/session-lifecycle-direct.ts'
 import { createSurfaceRuntime, type SurfaceEventRoutingSource, type SurfaceViewedChildPresentation } from '../../src/app/surface/runtime.ts'
 import { createVisualEventSnapshotProvider, type VisualEventSnapshotProvider } from '../../src/app/bootstrap/visual-snapshot.ts'
-import { proveVisualLineage, type VisualLineageQuery } from '../../src/app/bootstrap/visual-lineage.ts'
 import { createPresentationBridge } from '../../src/app/bootstrap/presentation-bridge.ts'
 import { renderTranscriptMarkdown } from '../../src/client/artifact/transcript-markdown.ts'
 import { installVirtualProcessTerminal } from '../support/runner-harness.ts'
@@ -40,7 +40,6 @@ import { TranscriptFolder, type TranscriptMessage } from '../../src/transcript.t
 import { TranscriptWindowController } from '../../src/domain/transcript/window.ts'
 import { createPluginManagerWorkspacePanel } from '../../src/tui/plugin-manager/workspace.ts'
 import { asVisualSessionEvents, collectPublishedVisuals } from '../../src/domain/visual/publication.ts'
-import { ownVisualOriginSpans } from '../../src/domain/visual/origin.ts'
 import { assistantVisualPresentation, type VisualEventSnapshot } from '../../src/domain/visual/presentation.ts'
 import { createViewerRuntime, type ViewerChildSource, type ViewerChildView, type ViewerRuntimeDeps } from '../../src/app/surface/viewer-runtime.ts'
 import type { SessionPresentationEvent } from '../../src/app/surface/session-presentation.ts'
@@ -125,7 +124,7 @@ class ScriptedAdapter extends LlmAdapter {
 }
 
 function refsInPrompt(prompt: string): string[] {
-  return [...prompt.matchAll(/visual-ref-v1:(sv1_[0-9a-f]{20})/gu)].map(match => match[1] as string)
+  return [...prompt.matchAll(/visual-ref-v2:(sv2_[0-9a-f]{20})/gu)].map(match => match[1] as string)
 }
 
 function marker(ref: string): string {
@@ -159,8 +158,8 @@ interface RealContext {
   readonly ctx: Context
   readonly provider: string
   create(label: string): Promise<RealSession>
-  /** Create the official fork child of one live Session in THIS context. */
-  fork(source: RealSession, label: string): Promise<RealSession>
+  /** Create the REAL production Direct fork child of one Session. */
+  fork(source: RealSession): Promise<RealSession>
   /**
    * Retire one live Agent (its Session leaves the live registry) and flush the
    * whole durability barrier, so a later ancestor observation is a REAL cold
@@ -188,6 +187,10 @@ async function bootRealContext(
   const provider = `visual-assistant-${label}`
   const adapter = new ScriptedAdapter()
   ctx.llm.registerAdapter([provider], adapter)
+  // The production Direct lifecycle resolves the child route from the Host
+  // default-model service; provide the same fixed selection the fixture's
+  // Sessions use.
+  ctx.provide('agentDefaultModel', { currentSelection: () => ({ provider, model: 'm' }) } as never)
   const wrap = (sessionId: string, handle: { agent: unknown }): RealSession => {
     const agent = handle.agent as {
       followup(message: unknown): void
@@ -225,24 +228,19 @@ async function bootRealContext(
       handles.set(sessionId, handle as unknown as { dispose(): Promise<void> })
       return wrap(sessionId, handle)
     },
-    async fork(source: RealSession, idLabel: string): Promise<RealSession> {
-      // The OFFICIAL seed: the exact inclusive prefix, the child-owned
-      // `session/end-seed` marker, and the child metadata the Direct lifecycle
-      // commits. No hand-built fork shape.
-      const sourceEvents = source.session.snapshotEvents()
-      const boundary = sourceEvents.length - 1
-      assert.ok(boundary >= 0, 'the fork source has a committed event')
-      const sessionId = `${idLabel}-${randomSuffix()}`
-      const handle = await ctx.agents.create({
-        sessionId: SessionId(sessionId) as never,
-        seed: buildForkSeed(sourceEvents, SessionSeq(boundary)),
-        inheritedEventCount: SessionLogOffset(boundary + 1),
-        meta: { parentSession: SessionId(source.sessionId), isSeeded: true },
-        agentOptions: { provider, model: 'm' },
-        setup: () => {},
-      })
-      handles.set(sessionId, handle as unknown as { dispose(): Promise<void> })
-      return wrap(sessionId, handle)
+    async fork(source: RealSession): Promise<RealSession> {
+      // The REAL production Direct fork: the adapter owns the official seed,
+      // the inherited cut, the child metadata and the Host default route. No
+      // hand-built seed/parentSession/isSeeded is injected by this fixture.
+      const lifecycle = new DirectSessionLifecycle(ctx as never, async () => ({ setup: () => {} }))
+      const result = await lifecycle.fork({ sourceSessionId: source.sessionId })
+      assert.equal(result.outcome.kind, 'forked', 'the production Direct fork must settle forked')
+      if (result.outcome.kind !== 'forked') throw new Error('unreachable')
+      const handle = result.outcome.handle
+      const owner = handle.direct?.ownerHandle as { dispose(): Promise<void> } | undefined
+      assert.ok(owner !== undefined, 'the production fork handle owns its Agent')
+      handles.set(handle.session.id, owner)
+      return wrap(handle.session.id, { agent: handle.direct?.agent })
     },
     async retire(session: RealSession): Promise<void> {
       const handle = handles.get(session.sessionId)
@@ -397,8 +395,6 @@ function mountSurface(
         sessionId: snapshot.sessionId,
         seq: snapshot.seq,
         events: asVisualSessionEvents(snapshot.events),
-        verifiedOriginSpans: ownVisualOriginSpans(snapshot.sessionId, 0, snapshot.seq),
-        originRevision: 0,
       }
     },
   })
@@ -512,7 +508,7 @@ test('a real chart publication is inserted at its final-answer marker in the pro
     },
     { text: markerAnswer('Before figure.', 'After figure.') },
   ])
-  const publications = collectPublishedVisuals(session.sessionId, asVisualSessionEvents(eventsOf(session)))
+  const publications = collectPublishedVisuals(asVisualSessionEvents(eventsOf(session)))
   assert.equal(publications.length, 1, 'the real publication was accepted')
   assert.equal(publications[0]?.source.type, 'chart')
 
@@ -555,7 +551,7 @@ test('the real published turn yields the display /copy payload through the Direc
     { text: markerAnswer('BEFORE-COPY', 'AFTER-COPY') },
   ])
   const events = eventsOf(session)
-  const publications = collectPublishedVisuals(session.sessionId, asVisualSessionEvents(events))
+  const publications = collectPublishedVisuals(asVisualSessionEvents(events))
   assert.equal(publications.length, 1, 'the real publication was accepted')
   const folder = new TranscriptFolder()
   folder.apply(events)
@@ -581,8 +577,6 @@ test('the real published turn yields the display /copy payload through the Direc
       sessionId: session.sessionId,
       seq: session.session.seq,
       events: asVisualSessionEvents(events),
-      verifiedOriginSpans: ownVisualOriginSpans(session.sessionId, 0, session.session.seq),
-      originRevision: 0,
     }),
   })
   const copy = bridge.directLastAssistantText(session.sessionId)
@@ -613,7 +607,7 @@ test('a chart generated without present_visual stays only in the tool card', asy
     { calls: [{ callId: 'call-chart', name: CHART_TOOL_NAME, args: CHART }] },
     { text: markerAnswer('Before.', 'After.') },
   ])
-  assert.deepEqual(collectPublishedVisuals(session.sessionId, asVisualSessionEvents(eventsOf(session))), [])
+  assert.deepEqual(collectPublishedVisuals(asVisualSessionEvents(eventsOf(session))), [])
   const folder = new TranscriptFolder()
   const harness = mountSurface(new Map([[session.sessionId, snapshotOf(session)]]), session.sessionId, folder)
   try {
@@ -646,10 +640,10 @@ test('a real publication whose final marker names another ref is tailed after th
       }],
     },
     {
-      text: () => `Before.\n\n${marker('sv1_ffffffffffffffffffff')}\n\nAfter.`,
+      text: () => `Before.\n\n${marker('sv2_ffffffffffffffffffff')}\n\nAfter.`,
     },
   ])
-  assert.equal(collectPublishedVisuals(session.sessionId, asVisualSessionEvents(eventsOf(session))).length, 1)
+  assert.equal(collectPublishedVisuals(asVisualSessionEvents(eventsOf(session))).length, 1)
   const folder = new TranscriptFolder()
   const harness = mountSurface(new Map([[session.sessionId, snapshotOf(session)]]), session.sessionId, folder)
   try {
@@ -692,7 +686,7 @@ test('two real figures (chart and SVG) keep their two inline marker positions', 
       },
     },
   ])
-  const publications = collectPublishedVisuals(session.sessionId, asVisualSessionEvents(eventsOf(session)))
+  const publications = collectPublishedVisuals(asVisualSessionEvents(eventsOf(session)))
   assert.deepEqual(publications.map(entry => entry.source.type), ['chart', 'svg'])
   const folder = new TranscriptFolder()
   const harness = mountSurface(new Map([[session.sessionId, snapshotOf(session)]]), session.sessionId, folder)
@@ -908,7 +902,7 @@ test('three generated figures with only two published inline/tail exactly those 
       },
     },
   ])
-  const publications = collectPublishedVisuals(session.sessionId, asVisualSessionEvents(eventsOf(session)))
+  const publications = collectPublishedVisuals(asVisualSessionEvents(eventsOf(session)))
   assert.equal(publications.length, 2, 'the third figure is never published')
   const folder = new TranscriptFolder()
   const harness = mountSurface(new Map([[session.sessionId, snapshotOf(session)]]), session.sessionId, folder)
@@ -1184,71 +1178,37 @@ test('the bootstrap visual snapshot provider is wired to the production selector
   assert.match(bootstrap, /isRemote: \(\) => remoteSources !== undefined/)
   assert.match(bootstrap, /mainAgent: \(\) => agentNow\(\)/)
   assert.match(bootstrap, /viewedChildAgent: \(\) => viewerRef\?\.viewedChildAgent\(\)/)
+  assert.doesNotMatch(bootstrap, /proveVisualLineage|VisualLineageQuery/, 'no ancestor query is wired')
   const helper = readFileSync(new URL('../../src/app/bootstrap/visual-snapshot.ts', import.meta.url), 'utf8')
   assert.match(helper, /if \(options\.isRemote\(\)\) return undefined/)
   assert.match(helper, /subject\.subjectId !== undefined && session\.id !== subject\.subjectId/)
-  assert.match(helper, /asVisualSessionEvents\(session\.snapshotEvents\(\)\)/)
+  assert.match(helper, /visualSeedCut\(session, rawEvents\)/, 'the official seed/cut is validated before the log is served')
+  assert.match(helper, /asVisualSessionEvents\(rawEvents\)/)
+  const publication = readFileSync(new URL('../../src/domain/visual/publication.ts', import.meta.url), 'utf8')
+  assert.match(publication, /session\/end-seed/, 'the authority reads the official fork marker')
+  assert.doesNotMatch(publication, /originSessionId|visualReference\(\{\s*sessionId/, 'the authority derives no Session-based reference')
 })
 
 // ── official fork inheritance through the real production chain ───────────
 
-/** The REAL official observation, held behind a test-owned gate. */
-function gatedLineageQuery(ctx: Context): {
-  readonly query: VisualLineageQuery
-  release(): void
-} {
-  const real = ctx.get('sessionQuery') as VisualLineageQuery
-  let release!: () => void
-  const gate = new Promise<void>((resolve) => { release = resolve })
-  return {
-    release: () => release(),
-    query: {
-      async observeSession(sessionId, options) {
-        await gate
-        return real.observeSession(sessionId, options)
-      },
-    },
-  }
-}
-
 /**
- * Mount ONE fork subject with the production provider wired to the REAL
- * official `sessionQuery`: the ancestry proof runs for real, the settled
- * result repaints through the mounted surface, and no fixture injects an
- * already-proven decision downstream.
+ * Mount ONE fork subject through the REAL provider: the committed log's own
+ * `session/end-seed` epochs are the only ancestry input, so inherited
+ * publications replay on the FIRST frame — no async proof and no second
+ * repaint.
  */
 function mountForkSubject(
-  query: VisualLineageQuery,
   session: RealSession,
   folder: TranscriptFolder,
-): {
-  readonly harness: SurfaceHarness
-  readonly tasks: Promise<void>[]
-  readonly snapshot: () => VisualEventSnapshot | undefined
-} {
-  let mainAgent: { session: RealSession['session'] } | undefined = { session: session.session }
-  let surfaceRef: { repaint(): void } | undefined
-  let latest: VisualEventSnapshot | undefined
-  const tasks: Promise<void>[] = []
+): { readonly harness: SurfaceHarness } {
   const provider = createVisualEventSnapshotProvider({
     isRemote: () => false,
-    mainAgent: () => mainAgent,
+    mainAgent: () => ({ session: session.session }),
     viewedChildAgent: () => undefined,
-    lineage: {
-      prove: sessionId => proveVisualLineage(sessionId, query),
-      run: (_label, task) => { tasks.push(task()) },
-      isCurrentSubject: (_subject, calledSession) => mainAgent?.session === calledSession,
-      requestRepaint: () => { surfaceRef?.repaint() },
-    },
   })
-  const snapshotFor: VisualEventSnapshotProvider = subject => {
-    const snapshot = provider(subject)
-    latest = snapshot
-    return snapshot
-  }
+  const snapshotFor: VisualEventSnapshotProvider = subject => provider(subject)
   const harness = mountSurface(new Map(), session.sessionId, folder, { visualEventSnapshot: snapshotFor })
-  surfaceRef = harness.surface
-  return { harness, tasks, snapshot: () => latest }
+  return { harness }
 }
 
 /** Run one turn publishing ONE chart and ONE SVG, with both markers inline. */
@@ -1281,36 +1241,35 @@ async function runTwoFigureAnswer(
   ])
 }
 
-test('a real official fork replays its inherited Chart and SVG once the lineage proof settles', async (t) => {
+test('a REAL production ordinary fork immediately replays its inherited Chart and SVG', async (t) => {
   const life = testLifecycle(t)
   const boot = await bootRealContext(life, 'fork-inherit')
   const source = await boot.create('source')
   await runTwoFigureAnswer(source, CHART, SVG)
-  const sourceEvents = source.session.snapshotEvents()
-  assert.equal(collectPublishedVisuals(source.sessionId, asVisualSessionEvents(sourceEvents)).length, 2,
-    'the source publication is committed under the source identity')
+  assert.equal(collectPublishedVisuals(asVisualSessionEvents(source.session.snapshotEvents())).length, 2,
+    'the source publications are committed under the same sv2 locators')
 
-  const child = await boot.fork(source, 'child')
+  const child = await boot.fork(source)
   assert.equal(child.session.header.isSeeded, true)
-  assert.equal(String(child.session.header.parentSession), source.sessionId)
-  // The exact bug this hotfix targets: replaying the child log with the CHILD
-  // id revokes both inherited publications.
-  assert.deepEqual(collectPublishedVisuals(child.sessionId, asVisualSessionEvents(child.session.snapshotEvents())), [])
+  assert.equal(child.session.header.parentSession, undefined,
+    'the rc1 ordinary fork child is an independent Session with NO parent pointer')
+  assert.ok(child.session.inheritedEventCount > 0, 'the real production fork inherited a prefix')
+  const childEvents = child.session.snapshotEvents()
+  assert.equal(childEvents[child.session.inheritedEventCount]?.type, 'session/end-seed',
+    'the official fork marker sits exactly at the child-owned cut')
+  // The display authority needs NOTHING but the child's own complete log: the
+  // inherited publications replay immediately in their own epoch.
+  assert.deepEqual(
+    collectPublishedVisuals(asVisualSessionEvents(childEvents)).map(entry => entry.source.type),
+    ['chart', 'svg'],
+    'both inherited publications replay without any ancestor read',
+  )
 
   const folder = new TranscriptFolder()
-  folder.apply(child.session.snapshotEvents())
-  const gated = gatedLineageQuery(boot.ctx)
-  const subject = mountForkSubject(gated.query, child, folder)
+  folder.apply(childEvents)
+  const subject = mountForkSubject(child, folder)
   try {
     await subject.harness.repaint()
-    const pendingView = subject.harness.vt.getViewport().join('\n')
-    assert.ok(pendingView.includes('Before.') && pendingView.includes('After.'))
-    assert.equal(pendingView.indexOf('Request latency', pendingView.indexOf('Before.')), -1,
-      `while the official ancestry read is pending the inherited figure stays in its Tool card:\n${pendingView}`)
-    assert.equal(subject.tasks.length, 1, 'ONE ancestry read for the selected Session identity')
-
-    gated.release()
-    await subject.tasks[0]
     await subject.harness.vt.waitForRender()
     const view = subject.harness.vt.getViewport().join('\n')
     const before = view.indexOf('Before.')
@@ -1319,15 +1278,8 @@ test('a real official fork replays its inherited Chart and SVG once the lineage 
     const svg = view.indexOf('Service topology', between)
     const after = view.indexOf('After.')
     assert.ok(before >= 0 && chart > before && between > chart && svg > between && after > svg,
-      `both inherited figures replay inline at their own markers:\n${view}`)
+      `both inherited figures replay inline at their own markers on the FIRST frame:\n${view}`)
     assert.equal(bulletRows(view).length, 1)
-
-    const snapshot = subject.snapshot()
-    assert.ok(snapshot !== undefined)
-    assert.deepEqual(snapshot.verifiedOriginSpans, [
-      { startSeq: 0, endSeqExclusive: source.session.seq, sessionId: source.sessionId },
-      { startSeq: source.session.seq, endSeqExclusive: child.session.seq, sessionId: child.sessionId },
-    ], 'the settled provenance attributes the inherited prefix to the official source Session')
   } finally {
     subject.harness.dispose()
   }
@@ -1338,7 +1290,7 @@ test('A -> B -> C keeps the grandparent, parent and child figures exactly once e
   const boot = await bootRealContext(life, 'fork-chain')
   const a = await boot.create('a')
   await runTwoFigureAnswer(a, CHART, SVG)
-  const b = await boot.fork(a, 'b')
+  const b = await boot.fork(a)
   // B publishes its OWN new SVG in a real turn.
   await b.run([
     { calls: [{ callId: 'b-svg', name: SVG_TOOL_NAME, args: SVG_CHILD }] },
@@ -1359,9 +1311,10 @@ test('A -> B -> C keeps the grandparent, parent and child figures exactly once e
       },
     },
   ])
-  const c = await boot.fork(b, 'c')
-  // C publishes its OWN new chart in a real turn: the A -> B -> C chain must
-  // prove all three origins through source -> lineage -> projection -> sink.
+  const c = await boot.fork(b)
+  assert.equal(c.session.header.parentSession, undefined)
+  // C publishes its OWN new chart in a real turn: the A -> B -> C chain now
+  // proves all three epochs from the child's own committed log.
   await c.run([
     { calls: [{ callId: 'c-chart', name: CHART_TOOL_NAME, args: CHART_GRANDCHILD }] },
     {
@@ -1380,12 +1333,18 @@ test('A -> B -> C keeps the grandparent, parent and child figures exactly once e
     },
   ])
 
+  const cEvents = c.session.snapshotEvents()
+  assert.deepEqual(
+    collectPublishedVisuals(asVisualSessionEvents(cEvents)).map(entry => entry.source.callId),
+    ['call-chart', 'call-svg', 'b-svg', 'c-chart'],
+    'A, B and C each keep their own publication once through the two inherited epochs',
+  )
+
   const folder = new TranscriptFolder()
-  folder.apply(c.session.snapshotEvents())
-  const subject = mountForkSubject(boot.ctx.get('sessionQuery') as VisualLineageQuery, c, folder)
+  folder.apply(cEvents)
+  const subject = mountForkSubject(c, folder)
   try {
     await subject.harness.repaint()
-    await subject.tasks[0]
     await subject.harness.vt.waitForRender()
     const view = subject.harness.vt.getViewport().join('\n')
     // A's inherited answer keeps both of ITS figures inline.
@@ -1417,10 +1376,6 @@ test('A -> B -> C keeps the grandparent, parent and child figures exactly once e
     assert.equal(view.indexOf('Child topology', cBefore), -1,
       `the parent figure never leaks into C the child answer:\n${view}`)
 
-    // F02's exact discriminator: every distinct figure appears EXACTLY ONCE in
-    // its OWNING Assistant answer and ZERO times in the other answers. Counting
-    // per answer range is stricter than a positional indexOf: a duplicated
-    // inline figure or a cross-answer leak cannot pass.
     const answers = {
       a: { start: aBefore, end: aAfter + 'After.'.length },
       b: { start: bBefore, end: bAfter + 'Child after.'.length },
@@ -1464,14 +1419,6 @@ test('A -> B -> C keeps the grandparent, parent and child figures exactly once e
           `${figure} never appears in the foreign answer ${answer}:\n${view}`)
       }
     }
-
-    const snapshot = subject.snapshot()
-    assert.ok(snapshot !== undefined)
-    assert.deepEqual(snapshot.verifiedOriginSpans.map(span => span.sessionId), [
-      a.sessionId,
-      b.sessionId,
-      c.sessionId,
-    ], 'three origins, each proven at its own level')
   } finally {
     subject.harness.dispose()
   }
@@ -1479,30 +1426,33 @@ test('A -> B -> C keeps the grandparent, parent and child figures exactly once e
 
 // ── cold parent: the fork's ancestor is only in persistence ────────────────
 
-test('a fork whose parent is no longer live proves its inherited figures from the persisted log', async (t) => {
+test('a fork whose parent is no longer live replays its inherited figures from its own log', async (t) => {
   const life = testLifecycle(t)
   const boot = await bootRealContext(life, 'fork-cold-parent', { persistent: true })
   const source = await boot.create('source')
   await runTwoFigureAnswer(source, CHART, SVG)
-  const sourceSpan = { startSeq: 0, endSeqExclusive: source.session.seq, sessionId: source.sessionId }
 
   const sessions = boot.ctx.get('sessions') as { get(id: unknown): unknown }
   assert.ok(sessions.get(source.sessionId) !== undefined, 'the parent is live before retirement')
   await boot.retire(source)
   assert.equal(sessions.get(source.sessionId), undefined,
-    'the parent LEFT the live registry: the ancestor observation below must be a cold persistence read')
+    'the parent LEFT the live registry before the fork; display must not need it')
 
-  const child = await boot.fork(source, 'child')
+  const child = await boot.fork(source)
   assert.equal(child.session.header.isSeeded, true)
-  assert.equal(String(child.session.header.parentSession), source.sessionId)
+  assert.equal(child.session.header.parentSession, undefined)
+  const childEvents = child.session.snapshotEvents()
+  assert.deepEqual(
+    collectPublishedVisuals(asVisualSessionEvents(childEvents)).map(entry => entry.source.type),
+    ['chart', 'svg'],
+    'the inherited publications replay from the child’s own complete log',
+  )
 
   const folder = new TranscriptFolder()
-  folder.apply(child.session.snapshotEvents())
-  const subject = mountForkSubject(boot.ctx.get('sessionQuery') as VisualLineageQuery, child, folder)
+  folder.apply(childEvents)
+  const subject = mountForkSubject(child, folder)
   try {
     await subject.harness.repaint()
-    assert.equal(subject.tasks.length, 1, 'ONE cold-parent ancestry read for the selected identity')
-    await subject.tasks[0]
     await subject.harness.vt.waitForRender()
     const view = subject.harness.vt.getViewport().join('\n')
     const before = view.indexOf('Before.')
@@ -1511,14 +1461,51 @@ test('a fork whose parent is no longer live proves its inherited figures from th
     const svg = view.indexOf('Service topology', between)
     const after = view.indexOf('After.')
     assert.ok(before >= 0 && chart > before && between > chart && svg > between && after > svg,
-      `both inherited figures replay inline from the cold parent log:\n${view}`)
-    const snapshot = subject.snapshot()
-    assert.ok(snapshot !== undefined)
-    assert.deepEqual(snapshot.verifiedOriginSpans, [
-      sourceSpan,
-      { startSeq: source.session.seq, endSeqExclusive: child.session.seq, sessionId: child.sessionId },
-    ], 'the cold observation proves the parent prefix exactly like the live one')
+      `both inherited figures replay inline without a live ancestor:\n${view}`)
   } finally {
     subject.harness.dispose()
   }
+})
+
+test('a REAL fork child cannot re-publish an inherited generating result', async (t) => {
+  const life = testLifecycle(t)
+  const boot = await bootRealContext(life, 'fork-republish')
+  const source = await boot.create('source')
+  await runChartAnswer(source, CHART, 'Before.', 'After.')
+  const inheritedRef = refsInPrompt(
+    JSON.stringify(source.session.snapshotEvents().filter(event => event.type === 'tool/result')),
+  )[0]
+  assert.ok(inheritedRef !== undefined, 'the source chart reference is durable')
+
+  const child = await boot.fork(source)
+  assert.equal(child.session.header.parentSession, undefined)
+  // The inherited ref is visible in the child model context; a child
+  // `present_visual` request for it must be refused by the live Host, not
+  // re-authorized by the inherited source.
+  await child.run([
+    {
+      calls: () => [{
+        callId: 'child-republish',
+        name: PRESENT_VISUAL_TOOL_NAME,
+        args: { visuals: [{ ref: inheritedRef }] },
+      }],
+    },
+    { text: 'Republish attempt settled.' },
+  ])
+  const childEvents = child.session.snapshotEvents()
+  const attempt = childEvents.find(event => event.type === 'tool/result'
+    && (event.data as { message?: { toolCallId?: string } }).message?.toolCallId === 'child-republish')
+  assert.ok(attempt !== undefined, 'the child publication attempt reached a durable result')
+  const message = (attempt.data as {
+    readonly message: { readonly isError?: boolean; readonly content: readonly { readonly type: string; readonly text?: string }[] }
+  }).message
+  assert.equal(message.isError, true, 'the live Host refused the inherited source')
+  const errorText = message.content.filter(block => block.type === 'text').map(block => block.text ?? '').join('')
+  assert.match(errorText, /earlier fork epoch|belongs to turn/iu,
+    'the refusal names the invalid inherited identity')
+  assert.deepEqual(
+    collectPublishedVisuals(asVisualSessionEvents(childEvents)).map(entry => entry.ref),
+    [inheritedRef],
+    'the inherited publication itself still replays, but the child added no second publication',
+  )
 })

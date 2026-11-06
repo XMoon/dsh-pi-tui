@@ -54,9 +54,9 @@ const SVG: SvgFact = {
   bytes: SVG_SOURCE.length,
 }
 
-const REF_CHART = `sv1_${'1'.repeat(20)}`
-const REF_SVG = `sv1_${'2'.repeat(20)}`
-const REF_THIRD = `sv1_${'3'.repeat(20)}`
+const REF_CHART = `sv2_${'1'.repeat(20)}`
+const REF_SVG = `sv2_${'2'.repeat(20)}`
+const REF_THIRD = `sv2_${'3'.repeat(20)}`
 
 function visualSource(overrides: Partial<VisualSource> & { readonly ref: string; readonly type: 'chart' | 'svg' }): VisualSource {
   return {
@@ -451,7 +451,7 @@ test('a definition placed after its two references is supplied to both display r
 })
 
 test('twenty ordinary definitions and ten figures keep every definition in every run without a marker leak', () => {
-  const publications = Array.from({ length: 10 }, (_, index) => chartPublication(`sv1_${String(index + 4).padStart(20, '0')}`))
+  const publications = Array.from({ length: 10 }, (_, index) => chartPublication(`sv2_${String(index + 4).padStart(20, '0')}`))
   const definitions = Array.from({ length: 20 }, (_, index) => `[link${index}]: https://example.com/${index}`)
   const body = [
     `Intro [a][link0] [b][link19].`,
