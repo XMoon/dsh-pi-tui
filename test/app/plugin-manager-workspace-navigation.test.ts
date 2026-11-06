@@ -1150,3 +1150,61 @@ test('a read-only Check updates preview never blocks disabling its bundle', asyn
     'a read-only version preview must never block the Host write path')
   assert.equal(harness.updateCalls.length, 0)
 })
+
+test('a completed update can be checked and applied again from the same Bundle Detail', async () => {
+  let check = 0
+  const harness = await open({
+    columns: 120,
+    rows: 40,
+    bundles: [bundle({
+      name: 'updatable',
+      updatable: true,
+      version: '1.0.0',
+      source: 'https://registry.example/updatable',
+      enabled: false,
+    })],
+    plugins: [],
+    versionsImpl: async () => {
+      check += 1
+      return {
+        status: 'listed',
+        installed: check === 1 ? '1.0.0' : '1.1.0',
+        registry: 'https://registry.example/',
+        attempts: [{ registry: 'https://registry.example/' }],
+        versions: [{ version: check === 1 ? '1.1.0' : '1.2.0', tags: ['latest'], prerelease: false, bundle: true }],
+        omitted: 0,
+      }
+    },
+  })
+  const runUpdate = async (): Promise<void> => {
+    harness.vt.sendInput('\r')
+    await harness.waitForFrame()
+    harness.vt.sendInput('\x1b[A') // Cancel -> Confirm update
+    await harness.waitForFrame()
+    harness.vt.sendInput('\r')
+    await harness.waitForFrame(16)
+    assert.equal(harness.controller.updateView()?.phase, 'done')
+  }
+  await openCheckUpdates(harness)
+  await runUpdate()
+  assert.equal(harness.updateCalls.length, 1)
+  assert.equal(harness.controller.updateView()?.lastObservedVersion, '1.1.0')
+
+  // Esc returns to the SAME Detail; Check updates… is a NEW intent.
+  harness.vt.sendInput('\x1b')
+  await harness.waitForFrame()
+  assert.equal(harness.panel.currentView(), 'details')
+  await openCheckUpdates(harness)
+  assert.equal(harness.listVersionCalls.length, 2, 'a completed update does not freeze the version check')
+  assert.equal(harness.updateCalls.length, 1, 'the new check dispatches no write on its own')
+  assert.match(harness.view(), /\b1\.2\.0\b/u)
+  assert.match(harness.view(), /Installed\s+1\.1\.0/u)
+
+  // The second update is a full explicit lifecycle with no reused request.
+  const firstRequest = harness.updateCalls[0]!.requestId
+  await runUpdate()
+  assert.equal(harness.updateCalls.length, 2)
+  assert.equal(harness.updateCalls[1]!.version, '1.2.0')
+  assert.notEqual(harness.updateCalls[1]!.requestId, firstRequest)
+  assert.equal(harness.controller.updateView()?.lastObservedVersion, '1.2.0')
+})

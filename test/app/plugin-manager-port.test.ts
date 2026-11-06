@@ -2014,3 +2014,65 @@ test('update: an official catalog install entry is admitted during a read-only p
     'the official catalog install entry is not blocked by a read-only preview')
   controller.dispose()
 })
+
+test('update: Check updates after a completed update starts a fresh lifecycle and never re-dispatches', async () => {
+  let check = 0
+  let installed = '1.0.0'
+  const updates: string[] = []
+  const fixture = fakePort({
+    snapshotImpl: async () => snapshot([updatable({ version: installed })]),
+    versionsImpl: async () => {
+      check += 1
+      const target = check === 1 ? '1.1.0' : '1.2.0'
+      return listed([stableVersion({ version: target }), stableVersion({ version: '9.9.9' })], { installed })
+    },
+    updateImpl: async (_name, version) => {
+      updates.push(version)
+      installed = version
+      return {
+        from: '1.0.0',
+        to: version,
+        step: 'install',
+        result: change({ stage: 'install', application: 'applied', version }),
+      }
+    },
+  })
+  const { controller } = controllerOf(fixture.port)
+  controller.open()
+  await tick()
+
+  // First update: 1.0.0 -> 1.1.0.
+  controller.beginUpdate(bundleValue('updatable'))
+  await tick()
+  controller.confirmUpdateVersion()
+  controller.executeUpdate()
+  await tick(10)
+  assert.equal(controller.updateView()?.phase, 'done')
+  assert.equal(controller.updateView()?.lastObservedVersion, '1.1.0')
+  const firstRequest = controller.updateView()?.requestId
+  assert.ok(firstRequest !== undefined)
+  assert.equal(fixture.state.updateCalls.length, 1)
+
+  // A completed update is historical evidence; Check updates… is a new intent.
+  controller.beginUpdate(bundleValue('updatable'))
+  assert.equal(controller.updateView()?.phase, 'checking', 'the done result is replaced by a fresh check')
+  await tick()
+  const second = controller.updateView()!
+  assert.equal(second.phase, 'selecting')
+  assert.equal(second.versions?.status, 'listed')
+  assert.equal(second.selectedExactVersion, '1.2.0')
+  assert.equal(second.requestId, undefined, 'the new check has no update request id')
+  assert.equal(second.result, undefined, 'the new check carries no previous result')
+  assert.equal(fixture.state.listVersionCalls.length, 2)
+  assert.equal(fixture.state.updateCalls.length, 1, 'a new check never re-dispatches the update')
+
+  controller.confirmUpdateVersion()
+  assert.equal(controller.updateView()?.phase, 'confirm')
+  controller.executeUpdate()
+  await tick(10)
+  assert.equal(fixture.state.updateCalls.length, 2)
+  assert.deepEqual(updates, ['1.1.0', '1.2.0'])
+  assert.equal(controller.updateView()?.phase, 'done')
+  assert.equal(controller.updateView()?.lastObservedVersion, '1.2.0')
+  assert.notEqual(controller.updateView()?.requestId, firstRequest, 'the second update has its own request id')
+})

@@ -1075,10 +1075,14 @@ checking → selecting → confirm → running → done
 
 - `Check updates…` requires the current Host model card to be a non-self
   `target:'bundle'` with `updatable:true`, and fixes the installed version and
-  read epoch before `listVersions(name,{})`. Only an explicit `r` repeats the
-  registry read; re-entering the page reuses the completed list, and a new
-  inventory read invalidates an unconfirmed list (`Bundle changed; check
-  versions again`).
+  read epoch before `listVersions(name,{})`. An UNFINISHED preview
+  (`checking`/`selecting`/`confirm`) is reused when the page is re-entered; only
+  an explicit `r` repeats its registry read, and a new inventory read
+  invalidates an unconfirmed list (`Bundle changed; check versions again`). A
+  `done` result is historical evidence, not a frozen preview: `Check updates…`
+  on the same bundle starts a NEW check (never a re-dispatch and never a reuse
+  of the old registry/version selection), while `u update result` reopens the
+  settled result until that new check replaces it.
 - `selecting` renders every Host-listed version verbatim: tags, publication
   time, prerelease, deprecation, bundle declaration and compatibility. A
   non-bundle, incompatible or deprecated row is not selectable; a legal
@@ -1117,8 +1121,9 @@ checking → selecting → confirm → running → done
   `Acknowledge uncertainty` is the only release; the acknowledgement states that
   the Host may still be finishing the update.
 - A settled update while the page is hidden is notified once and stays
-  recoverable through the same Bundle's `Check updates…` or the List's
-  `u update result`; no second update history/task center exists.
+  reopenable through the List's `u update result`; `Check updates…` after
+  `done` starts a new check instead. No second update history/task center
+  exists.
 
 ### Detail copy policy
 
