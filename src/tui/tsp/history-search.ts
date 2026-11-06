@@ -456,17 +456,18 @@ export function createTspHistorySearch(
       // newer round, another open, a Session change or a higher seat is dropped.
       if (state !== owner || owner.retired || pending !== request) return
       if (request.serial !== owner.openSerial || request.revision !== owner.queryRevision) return
-      // Identity ONLY. The mount's seat admission is deliberately NOT read
-      // here: a Modal parks this card and makes it false, and a parked card must
-      // keep its committed rows so `resume()` shows the SAME query, selection
-      // and page — the plan's TRANSIENT state. A dead captured scope is not
-      // re-checked here either: `renderState()` refuses to project it,
-      // `isOpen()` refuses to own keys or the Composer seat, `act()` refuses to
-      // act, and the next `open()` retires this instance synchronously before
-      // capturing anything new. Four fences on one fact would be a second owner
-      // of the same decision, and none of them is observable against the other
-      // three (measured: removing this branch changes no frame, no state and no
-      // read in the seat-level case).
+      // Identity + the captured Session scope. The mount's seat admission is
+      // deliberately NOT read here: a Modal PARKS this card and makes admission
+      // false, and a parked card must keep its committed rows so `resume()`
+      // shows the SAME query, selection and page (the plan's TRANSIENT state) —
+      // reading admission here was the bug that destroyed the card.
+      // The captured scope IS read here, and it is not decoration: retirement
+      // is what aborts the in-flight read, so a page that answers after its
+      // Session scope died both commits nothing and stops the source's scan.
+      if (owner.scopeCapture.isCurrent() === false) {
+        retireDiscovered()
+        return
+      }
       try {
         pending = undefined
         const previous = owner.selectedId
@@ -492,8 +493,13 @@ export function createTspHistorySearch(
     }, () => {
       if (state !== owner || owner.retired || pending !== request) return
       if (request.serial !== owner.openSerial || request.revision !== owner.queryRevision) return
-      // The same identity-only fence as the fulfilment branch: a parked card
-      // records its failure and shows it on resume.
+      // The same identity + captured-scope fence as the fulfilment branch: a
+      // parked card records its failure and states it on resume, while a dead
+      // scope retires the round and aborts nothing further.
+      if (owner.scopeCapture.isCurrent() === false) {
+        retireDiscovered()
+        return
+      }
       try {
         pending = undefined
         // A failed read is a FAILED read: never an empty page dressed up as "no
@@ -644,14 +650,21 @@ export function createTspHistorySearch(
         const revision = owner.queryRevision
         ports.copyRaw(raw, () => {
           const live = state
+          // Plan §5.2.7: the copy's outcome is announced while the SAME card,
+          // the SAME round and the SAME row are still the seat's, and the
+          // captured scope is still current. A Modal PARK is not a loss of any
+          // of those four facts, so the notice survives the park instead of
+          // silently dropping a copy the clipboard already performed. Every
+          // real loss of the card — a Presenter, hydration, a publication, a
+          // disposal — retires it, and `retired`/`state` catch all of them;
+          // reading the mount's admission here would re-create the park bug.
           return live !== undefined
             && !live.retired
-            && live.phase === 'open'
+            && (live.phase === 'open' || live.phase === 'parked')
             && live.openSerial === serial
             && live.queryRevision === revision
             && live.selectedId === rowId
             && live.scopeCapture.isCurrent()
-            && ports.admitted()
         })
         return
       }
