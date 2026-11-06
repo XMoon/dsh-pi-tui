@@ -1108,11 +1108,61 @@ test('a copy that settles while a Modal parks the card still states its outcome'
   await waitUntil('the outcome is announced under the park', () => notices().includes('Copied the history entry'))
   assert.equal(surfaceTexts(pane, 's1').includes('Input History'), false,
     'and announcing it did not bring the parked card back')
+  // The notice is a base-surface fact while the Modal layer is above it, so the
+  // user-visible claim is made where the user can see it: after the form closes.
   pane.key('y')
   await waitUntil('the approval settled', () => settled)
   await waitUntil('the same card returned', () => surfaceTexts(pane, 's1').includes('Input History'))
+  assert.ok(notices().includes('Copied the history entry'),
+    'the outcome is still stated once the blocker is gone')
   assert.equal(wireNodes(pane).some(node => node.id === 'dock.quiet-composer.composer'
     && String((node.p as { text?: string }).text ?? '') !== ''), false, 'a copy never writes the draft')
+})
+
+test('a retirement the settlement performs owns the frame it asks for too', async (t) => {
+  // The fence and the commit share one failure owner: `retireDiscovered()` asks
+  // the mount for the frame that removes the card, so if THAT frame throws the
+  // error still reaches the fatal owner instead of escaping the chain the seat
+  // started. This is the case that fails when the fence sits outside the `try`.
+  const fatal: unknown[] = []
+  const rejections: unknown[] = []
+  let current = true
+  let release: ((page: HistorySearchPage) => void) | undefined
+  let frames = 0
+  const seat = createTspHistorySearch({
+    admitted: () => true,
+    requestRender: () => {
+      frames += 1
+      // The open frame is allowed; the retirement frame the dead-scope fence
+      // owes is the one that throws, exactly like a broken tty owner.
+      if (frames > 1) throw new Error('simulated ViewError on the retirement frame')
+    },
+    setFocus: () => {},
+    restoreToComposer: () => {},
+    copyRaw: () => {},
+    reveal: () => {},
+    scroll: () => {},
+    reportFatal: (error) => { fatal.push(error) },
+  }, {
+    source: {
+      search: () => new Promise<HistorySearchPage>(resolve => { release = resolve }),
+    },
+    cwd: () => '/work/alpha',
+    captureScope: () => ({ sessionId: 'ses_a', isCurrent: () => current }),
+  }, () => true)
+  process.on('unhandledRejection', (reason) => { rejections.push(reason) })
+  t.after(() => {
+    process.removeAllListeners('unhandledRejection')
+    seat.retire()
+  })
+  seat.open()
+  current = false
+  release?.({ results: [], exhausted: true })
+  await settle(ABSENCE_WINDOW_MS)
+  assert.equal(fatal.length, 1, 'the retirement frame\u2019s failure reached the fatal owner')
+  assert.match(String((fatal[0] as Error)?.message ?? ''), /simulated ViewError on the retirement frame/)
+  assert.deepEqual(rejections, [], 'and nothing escaped as an unhandled rejection')
+  assert.equal(seat.renderState(), undefined, 'the card is gone regardless')
 })
 
 test('the seat routes a frame commit that throws in its OWN settlement to the fatal owner', async (t) => {
@@ -1154,12 +1204,11 @@ test('the seat routes a frame commit that throws in its OWN settlement to the fa
   assert.equal(seat.renderState()?.rows.length, 1, 'the page the source answered is still the seat state')
 })
 
-test('a read that answers after its captured scope died is refused AND its scan is aborted by the settlement itself', async (t) => {
+test('a read that answers after its captured scope died is refused by the settlement, which retires the round and aborts its controller', async (t) => {
   // Isolated at the seat boundary: no mount, no presentation guard, no outer
   // retirement. The scope authority goes stale while the read is in flight and
   // NOTHING else tells the seat about it, so the settlement's own captured-scope
-  // re-check is the only thing that can (a) refuse the page and (b) abort the
-  // scan the source is still running for a Session that no longer exists.
+  // re-check is the only thing that can refuse the page and retire the round.
   const fatal: unknown[] = []
   let current = true
   let release: ((page: HistorySearchPage) => void) | undefined
@@ -1191,7 +1240,7 @@ test('a read that answers after its captured scope died is refused AND its scan 
     ts: 1_700_000_000_000, sessionId: 'ses_a', sourceFile: 'late', sourceByteOffset: 0 }], exhausted: true })
   await settle(ABSENCE_WINDOW_MS)
   assert.equal(signals[0]?.aborted, true,
-    'the settlement retired the round, which aborted the scan: without that re-check the source keeps reading for a Session that is gone')
+    'the settlement retired the round, and retirement aborts this read\u2019s controller')
   assert.deepEqual(fatal, [], 'refusing a dead scope is not a failure')
   assert.equal(seat.renderState(), undefined, 'the card is gone')
   assert.equal(seat.isOpen(), false, 'it owns no keys, no caret and no Composer seat')
