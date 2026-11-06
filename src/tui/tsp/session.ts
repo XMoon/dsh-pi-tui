@@ -60,9 +60,11 @@ import type { ImageAttachmentRefLike } from '../../domain/media/types.ts'
 import { TSP_CONTINUED_INSPECTION_LABEL, TSP_VISUAL_CHORDS, TSP_VISUAL_COPY_LABEL, TSP_VISUAL_SELECT_LABEL, matchesKeyId } from '../keybindings/hints.ts'
 import { createTspComposer, type TspComposer, type TspComposerEdit, type TspComposerState } from './editor.ts'
 import { createTspInputCompletion, type TspInputCompletion } from './input-completion.ts'
+import { createTspHistorySearch, TSP_HISTORY_SEARCH_UNAVAILABLE, type TspHistorySearchSeat } from './history-search.ts'
+import { historySearchView, HISTORY_SEARCH_SHEET, HISTORY_SEARCH_STYLES } from './history-search-view.ts'
 import type { InlineAttachmentAcceptance, InlineAttachmentStager } from '../interaction/autocomplete/inline-attachment.ts'
 import { createInstalledAutocompleteProvider } from '../interaction/autocomplete/installed-provider.ts'
-import type { TspCommandCompletionInstallation } from '../../app/surface/runtime.ts'
+import type { TspCommandCompletionInstallation, TspHistorySearchBinding } from '../../app/surface/runtime.ts'
 import { pastedBodySpan } from '../interaction/pasted-path-range.ts'
 import type { PastedPathReceipt } from '../../app/surface/pasted-image-intake.ts'
 import { imageProtocolPreference } from '../graphics/image-protocol-preference.ts'
@@ -474,6 +476,17 @@ export interface TspRenderer extends TspInputBinding {
    */
   readonly installInlineAttachmentStager: (stager: InlineAttachmentStager) => void
   /**
+   * TSP I-E: install the ONE read-only History-search capability bundle on this
+   * mount. It is SYNCHRONOUS and ONE-TIME, exactly like the image binding and
+   * the status reader: the mount owns ONE History seat, the seat is created here
+   * and never a second time, and a binding after disposal is an explicit error.
+   *
+   * The bundle carries READ-ONLY capability only — one search source, the live
+   * session cwd and the atomic Session-currentness capture. It grants no
+   * persistence, no Session ownership and no clipboard authority.
+   */
+  readonly bindHistorySearch: (binding: TspHistorySearchBinding) => void
+  /**
    * Stop the input loop, close the surface + session ONCE. The promise
    * settles only after the SDK restored the tty (input drain included), so
    * callers awaiting it can safely touch the terminal afterwards.
@@ -803,6 +816,15 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     },
   })
   /**
+   * TSP I-E: the ONE History-search seat of this mount, created exactly once by
+   * {@link bindHistorySearch} at the mount. It is a short-lived Dock seat — not a
+   * Presenter, not a second composer, not a second SDK surface — and it holds no
+   * history, Session or clipboard authority of its own.
+   */
+  let historySearch: TspHistorySearchSeat | undefined
+  /** TSP I-E: the one-time History bind latch (a lifecycle fact, not a cache). */
+  let historySearchInstalled = false
+  /**
    * TSP I-D: the ONE inline-attachment stager of this mount, installed by the
    * command layer through the renderer's `installInlineAttachmentStager` port at
    * the SAME single registration site where PiTui receives
@@ -1051,6 +1073,11 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   /** The sibling retirement steps, in the fixed order. */
   const siblingRetirements = (...excluded: readonly ('model' | 'preset' | 'browser' | 'hub' | 'web')[]): Array<() => void> => {
     const steps: Array<() => void> = []
+    // TSP I-E: a non-blocking Presenter NEVER coexists with the History card. It
+    // is retired SYNCHRONOUSLY as the first step of every presenter open —
+    // before any retiring callback can run — so a hidden History never keeps a
+    // read in flight and never claims a key.
+    steps.push(() => historySearch?.retire())
     // TSP-7 PR-G: the composer quick menu is the FIRST step in EVERY presenter
     // open — including its own — so at most one of the two model presentations
     // is ever operable and a Quick → Full handoff never leaves a clickable
@@ -1331,6 +1358,22 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   const composerChromeSupported = (): boolean =>
     session.caps.features.includes('styles') && session.caps.kinds.includes('el')
 
+  /**
+   * TSP I-E: the ONE capability gate of the native History card. It reads the
+   * EXACT kinds the card's own projection constructs plus the two features it
+   * really uses (`styles` for the scoped sheet, `scroll` for the two native
+   * scroll containers) from the negotiated handshake — never a version label or
+   * a window size. A pane that cannot paint and scroll the whole card gets an
+   * explicit unavailable statement, never a reduced second-tier UI.
+   */
+  const nativeHistoryCapable = (): boolean =>
+    ['col', 'row', 'text', 'input', 'el', 'scroll'].every(kind => session.caps.kinds.includes(kind))
+    && session.caps.features.includes('styles')
+    && session.caps.features.includes('scroll')
+  /** The card's responsive breakpoint: the ACTUAL pane width in px, never the
+   *  desktop window width (a TSP pane can be a split of any window). */
+  const historyPaneWide = (): boolean => session.caps.cols * session.caps.cell.w > 720
+
   /** The editor's REAL node path: inside the Quiet Composer Shell it is
    *  `dock.quiet-composer.composer` (region -> shell key -> editor key); the
    *  no-chrome branch keeps the historical `dock.composer`. ONE function so
@@ -1368,9 +1411,16 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
                 // field owns the keyboard (the real wire id of the node this frame
                 // built); everywhere else it is app-routed and asks for no caret,
                 // so the Composer's draft and caret stay untouched.
-                : modelQuick?.isOpen() === true
-                  ? modelQuick.desiredFocusId() ?? null
-                  : composerFocusId
+                // TSP I-E: an OPERABLE History card owns the hardware caret on
+                // its own query field (the real wire id of the field this frame
+                // built). It outranks the Quick menu, the Permission menu and
+                // the Composer, it never claims focus while parked, and closing
+                // it returns the caret to the ONE composer through this function.
+                : historySearch?.isOpen() === true
+                  ? historySearch.desiredFocusId() ?? null
+                  : modelQuick?.isOpen() === true
+                    ? modelQuick.desiredFocusId() ?? null
+                    : composerFocusId
     if (!force && desired === lastAppliedFocusId) return
     lastAppliedFocusId = desired
     composer.setFocused(desired === composerFocusId)
@@ -1686,6 +1736,11 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    *  diff, wiping an open modal on the next unrelated repaint). */
   function render(): void {
     if (disposed) return
+    // TSP I-E: the Modal/Reader blocker is mirrored into the History seat at
+    // the top of every frame, so a card parked under a form is neither painted
+    // operable nor keyboard-live, and the SAME instance comes back when the
+    // last blocker settles (a stale captured scope retires it instead).
+    historySearch?.syncBlocker(seat.hasModalSeat())
     if (seat.hasModalSeat()) {
       sessionBrowser?.suspend()
       webPicker?.suspend()
@@ -1766,6 +1821,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // (resolved from the SDK's own id assignment, never a guessed path). A dock
     // without the menu indexes nothing.
     if (dockNode !== undefined && modelQuick?.isOpen() === true) modelQuick.indexFrame(dockNode)
+    // TSP I-E: the History card's reveal/scroll/focus targets are the wire ids
+    // of the frame the SDK just committed — never a guessed path. A closed or
+    // parked card indexes nothing.
+    if (dockNode !== undefined && historySearch?.isOpen() === true) historySearch.indexFrame(dockNode)
     applyFocus(false)
     // B3-A2 §5.3: the base frame is the ONE point that reconciles the Reader
     // with the CURRENT row (the Hub already renders after `setItems`), so a
@@ -2488,6 +2547,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // Quiet Composer shell with the native control row; every other pane keeps
     // the pre-PR-C editor exactly as before. The native edit/undo/send
     // features are NOT advertised; the program owns every edit.
+    // TSP I-E: the History card rides ABOVE the Quiet Composer inside the ONE
+    // Dock — never a `mode:'screen'`, never an overlay, never a second editor.
+    const historyNode = historyDockNode()
+    if (historyNode !== undefined) lines.push(historyNode)
     const editorNode = composerEditorNode()
     const quietShell = composerActionsSupported() ? quietComposerNode(editorNode) : undefined
     if (quietShell === undefined) {
@@ -2724,6 +2787,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // EXPLICIT Loading state and FENCE the retired source until a frame
       // with a NEW token commits — AND fence the composer input for the same
       // window (§3.4 row 1).
+      // TSP I-E: the outgoing subject's card goes with it — PURE STATE (abort,
+      // timer, click identities), never a render, and a cleanup failure can
+      // never roll back the publication that already happened.
+      historySearch?.retire()
       hydrating = true
       retiredSource = projectionScope
       // TSP-7 Welcome D: the Welcome retires SYNCHRONOUSLY in this same commit,
@@ -2761,6 +2828,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // un-editable, so the outgoing text is never submittable meanwhile.
       if (disposed) return
       composer.clearDraftStateOnly()
+      // TSP I-E: the draft the card could have restored into is gone, so the
+      // card is withdrawn too. Pure state, exactly like the composer call above;
+      // the next committed frame carries the emptied editor and no card.
+      historySearch?.retire()
       // TSP I-C: the draft the candidate list was built for is gone, so the
       // list and any in-flight query die with it — PURE STATE here, exactly like
       // the composer call above; the next committed frame paints the emptied
@@ -2789,6 +2860,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // catalog was resolved under, so it is withdrawn here too. Pure state,
       // no render, exactly as above.
       completion.retire()
+      // TSP I-E: the same formal scope commit ends the search card: its captured
+      // Session scope is the OUTGOING owner by definition.
+      historySearch?.retire()
       historyRecall.reset(entries, owner)
     },
     beginInputHistoryScope(owner) {
@@ -2801,6 +2875,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // TSP I-C: a newly published Owner also ends the completion browse (the
       // scope its candidates were resolved under is the outgoing one).
       completion.retire()
+      // TSP I-E: a newly published Owner retires the card before any older
+      // subject's rows could be restored into the incoming one.
+      historySearch?.retire()
       historyRecall.begin(owner)
     },
     settleScopeInput(settlement) {
@@ -3059,7 +3136,8 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    * does. It is a shared local predicate — no `enabled` mirror is persisted
    * and no second state machine exists.
    */
-  const composerActionsAdmitted = (): boolean => visualActionsAdmitted()
+  const composerActionsAdmitted = (): boolean =>
+    visualActionsAdmitted() && !historyOwnsComposerSeat()
 
   /**
    * PR-C (TSP-7): the Send click — the same one-shot submit path as Enter. A
@@ -3169,6 +3247,62 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     render()
   }
 
+  /**
+   * TSP I-E: the ONE `Ctrl+R` entry. An unbound seat or a pane that never
+   * negotiated the kinds/features the card really paints gets an explicit
+   * unavailable statement and an untouched draft — never a silently reduced
+   * second-tier UI. When it can open, the three low composer popovers go first
+   * (none of them reopens itself), then the seat captures its Session scope and
+   * cwd exactly once and paints its first Searching frame.
+   */
+  const openHistorySearch = (): void => {
+    if (disposed || hydrating || !inputBound) return
+    if (visualActionsAdmitted() === false) return
+    if (historySearch === undefined || !historySearch.supported()) {
+      display.notify(TSP_HISTORY_SEARCH_UNAVAILABLE, 'info')
+      return
+    }
+    if (closePermissionMenu()) render()
+    retireQuickMenu()
+    if (completion.retire()) render()
+    historySearch.open()
+  }
+
+  /**
+   * TSP I-E: the ONE History Copy. It reuses the SAME Client-local copy policy
+   * the Assistant figure Copy and the composer's visual copy already use — the
+   * injected `copyVisual` callback, whose production input is
+   * `ClientActions.copySelection` — and never a second clipboard owner. The raw
+   * payload was captured at admission inside the seat; the settlement notice is
+   * owed only while the SAME card, the SAME query round and the SAME selected
+   * row are still current, so a copy that finished after a Session change or a
+   * newer card never announces itself onto a different subject.
+   */
+  const issueHistoryCopy = (payload: string, live: () => boolean): void => {
+    let task: Promise<boolean>
+    try {
+      task = options.copyVisual(payload)
+    } catch (error) {
+      options.logError?.('tsp renderer: history copy failed', { error: errorText(error) })
+      try { display.notify('Failed to copy the history entry', 'error') } catch (failure) { routeFatal(failure) }
+      return
+    }
+    task.then(
+      copied => {
+        if (!live()) return
+        try {
+          display.notify(copied ? 'Copied the history entry' : 'Failed to copy the history entry',
+            copied ? 'info' : 'error')
+        } catch (error) { routeFatal(error) }
+      },
+      (error: unknown) => {
+        options.logError?.('tsp renderer: history copy failed', { error: errorText(error) })
+        if (!live()) return
+        try { display.notify('Failed to copy the history entry', 'error') } catch (failure) { routeFatal(failure) }
+      },
+    )
+  }
+
   /** The Quiet Composer's narrow-pane threshold (measured: 400px pane is
    *  below this, the 637px GUI pane is above it). */
   const QUIET_COMPOSER_NARROW_COLS = 56
@@ -3176,6 +3310,35 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   const QUIET_COMPOSER_MODEL_WIDTH = 34
   const QUIET_COMPOSER_MODEL_NARROW_WIDTH = 14
   const QUIET_COMPOSER_PERMISSION_WIDTH = 24
+
+  /**
+   * TSP I-E: the mount-side admission the History seat consults — the SAME live
+   * facts every composer-adjacent seat uses (no Modal, no temporary Reader, no
+   * higher Presenter, no hydration window, no disposal, input bound), plus the
+   * pane's own negotiated capability. A seat that is not admitted neither keeps
+   * a card painted nor consumes a key, so a hidden History can never shadow the
+   * form or panel the user is actually looking at.
+   */
+  const historySeatAdmitted = (): boolean => visualActionsAdmitted() && nativeHistoryCapable()
+
+  /**
+   * TSP I-E: the ONE Dock producer of the History card. `undefined` = paint
+   * nothing: the seat's own projection already refuses a parked, retired,
+   * un-admitted or capability-poor card, so a frame can never show a card the
+   * mount would not let act.
+   */
+  const historyDockNode = (): Node | undefined => {
+    const seatState = historySearch?.renderState()
+    if (seatState === undefined) return undefined
+    return historySearchView({
+      state: seatState,
+      wide: historyPaneWide(),
+      // Every pointer route lands in the SAME admitted intent the keyboard
+      // produces; the SDK dispatches by the id of the view it last rendered, and
+      // the seat re-checks serial/revision/currentness before anything mutates.
+      onIntent: (intent) => { historySearch?.handleIntent(intent) },
+    })
+  }
 
   /** The controlled editor node: the SAME program-owned draft/cursor cell,
    *  with the v2 placeholder and NO `> ` prompt inside the quiet shell. */
@@ -3214,6 +3377,13 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    *  modal/Reader/picker/hydration/disposed owner. */
   const permissionMenuAdmitted = (): boolean =>
     permissionComposerAffordance() && visualActionsAdmitted()
+
+  /** TSP I-E: whether the History card currently owns the composer seat. The
+   *  Quiet Composer stays VISIBLE and is the ONE editor either way; while the
+   *  card owns the seat its business controls are painted disabled and every
+   *  callback admission refuses, so a click can never send, stop or open a
+   *  second popover behind the card the user is looking at. */
+  const historyOwnsComposerSeat = (): boolean => historySearch?.isOpen() === true
 
   /** Toggle the menu; opening starts a NEW expansion identity and lands the
    *  keyboard highlight on the current preset when one is present. */
@@ -3376,7 +3546,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       busyEpoch,
       permission: {
         label: permissionTriggerLabel(),
-        interactive: permissionComposerAffordance(),
+        interactive: permissionComposerAffordance() && !historyOwnsComposerSeat(),
         expanded: permissionMenuOpen && options.length > 0,
         options,
         menuEpoch: permissionMenuEpoch,
@@ -3385,12 +3555,12 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         name: modelQuickView.name,
         effort: modelQuickView.effort,
         title: modelQuickView.title,
-        interactive: modelQuickView.interactive,
+        interactive: modelQuickView.interactive && !historyOwnsComposerSeat(),
         expanded: modelQuick?.isOpen() === true,
         panel: modelQuick?.renderState(),
       },
       busy: presentedStatus?.activity.busy === true && !hydrating,
-      sendable: composerDraftSubmittable(),
+      sendable: composerDraftSubmittable() && !historyOwnsComposerSeat(),
       // TSP I-C: the seat's OWN projection, observed at paint time. The painter
       // never queries and never re-sorts; a click is admitted only for the row
       // of the frame that painted it.
@@ -3554,6 +3724,15 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       seat.handleKey(key, handlers)
       return false
     }
+    // TSP I-E: an open (non-parked) History card owns EVERY key. Its own
+    // `Esc`/`Ctrl+C` is the card's cancel (closing History never interrupts the
+    // Agent and never quits the TUI), and a stray letter, `Ctrl+V`, `Ctrl+D`,
+    // `Alt+Q` or a visual chord can never reach the Composer reducer, the paste
+    // intake or another business owner meanwhile.
+    if (historySearch?.isOpen() === true) {
+      historySearch.handleKey(key)
+      return false
+    }
     // 4. `Alt+Q` (PR3-B B3 §3.8): the inspection entry for parked continued
     //    Questions — only with no modal and outside the hydration window (the
     //    list belongs to the subject that is currently owned, so the SAME
@@ -3591,6 +3770,15 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     if (webPicker?.handleKey(key)) return false
     if (presetPicker?.handleKey(key)) return false
     if (modelPicker?.handleKey(key)) return false
+    // TSP I-E: `Ctrl+R` opens the ONE History card. It runs after every higher
+    // Presenter (Reader/Modal/Alt+Q list/Hub/Browser/Web/Preset/Model) has
+    // declined the key and BEFORE the three low composer popovers, and it
+    // retires those popovers synchronously first — the same
+    // never-two-operable-seats rule the Quick menu and Permission menu follow.
+    if (key.ctrl === true && key.name === 'r' && !key.alt && !key.meta && !key.shift) {
+      openHistorySearch()
+      return false
+    }
     // TSP-7 PR-G: the composer quick menu owns its keys after every higher seat
     // and BEFORE the Permission menu and the original Escape/cancel route: a
     // consumed key never reaches the Composer reducer, so Enter cannot send the
@@ -4048,6 +4236,32 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       })
       completion.install(provider, installation.sourceFailed === true)
     },
+    // TSP I-E: the ONE History-search bind. Synchronous, exactly once, at the
+    // mount (before `bindInput` can deliver any key), and it installs nothing
+    // but capability plus the seat's own scoped sheet: no snapshot is sampled,
+    // no read starts and no frame is painted here, so a mount that fails
+    // afterwards has nothing to unwind. A second bind or a post-disposal bind is
+    // an explicit error, exactly like the image binding and the status reader.
+    bindHistorySearch: (binding) => {
+      if (disposed) throw new Error('cannot bind History search after TSP renderer disposal')
+      if (historySearchInstalled) throw new Error('the TSP renderer History search is already bound')
+      historySearchInstalled = true
+      // The sheet is installed ONCE, and only on a pane that can really paint
+      // the card: a pane without `el`+`styles` never receives a rule it cannot
+      // draw, and the capability gate above refuses the card there anyway.
+      if (composerChromeSupported() && nativeHistoryCapable()) {
+        surface.stylesheet(HISTORY_SEARCH_SHEET, HISTORY_SEARCH_STYLES)
+      }
+      historySearch = createTspHistorySearch({
+        admitted: historySeatAdmitted,
+        requestRender: () => render(),
+        setFocus: () => applyFocus(true),
+        restoreToComposer: (raw) => { composer.setEditorText(raw) },
+        copyRaw: (raw, live) => { issueHistoryCopy(raw, live) },
+        reveal: (id) => { surface.reveal(id, 'nearest') },
+        scroll: (id, to) => { surface.scroll(id, to) },
+      }, binding, nativeHistoryCapable)
+    },
     installInlineAttachmentStager: (stager) => {
       // A disposed mount installs nothing: the seat died with the renderer, so a
       // late registration has no composer to write a placeholder into.
@@ -4138,6 +4352,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
           // stager installed on a dead mount has no composer to commit into
           // (cleared here so no late acceptance can even reach the command
           // plane).
+          // TSP I-E: the History seat dies with the renderer — its abort, its
+          // debounce timer and its painted click identities are all released
+          // here, and a late search or copy settlement owns no frame.
+          () => { historySearch?.retire() },
           () => { completion.retire(); inlineAttachmentStager = undefined },
         ])
       } catch (error) {

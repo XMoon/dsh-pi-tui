@@ -188,6 +188,14 @@ export function installTspPane(options: {
    * fail-closed default, not an accident.
    */
   readonly nativeInteraction?: boolean
+  /**
+   * TSP I-E: advertise the EXACT kinds and features the native Ctrl+R History
+   * card really paints — a `ui.input` query, `el` buttons, and TWO native
+   * `scroll` containers — plus its `styles` sheet. A pane without any one of
+   * them must be refused the card, so the negative case passes `kinds` or
+   * `features` verbatim instead (the fail-closed default, not an accident).
+   */
+  readonly historySearch?: boolean
   readonly kinds?: readonly string[]
   readonly features?: readonly string[]
 } = {}): TspPane {
@@ -226,10 +234,12 @@ export function installTspPane(options: {
     ...(options.nativeImages === true ? ['image'] : []),
     ...(options.nativeChart === true ? ['chart'] : []),
     ...(options.nativeInteraction === true ? ['questions', 'overlay', 'row', 'text', 'input', 'button', 'scroll'] : []),
+    ...(options.historySearch === true ? ['input', 'el', 'scroll', 'row', 'text'] : []),
   ]))
   const nativeFeatures = [
     ...(options.presetPicker === true || options.webPicker === true || options.sessionBrowser === true || options.workDetails === true ? ['scroll'] : []),
     ...(options.nativeImages === true ? ['blobs'] : []),
+    ...(options.historySearch === true ? ['scroll'] : []),
   ]
   const hello = options.kinds !== undefined || options.features !== undefined
     ? {

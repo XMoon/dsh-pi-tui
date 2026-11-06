@@ -38,6 +38,18 @@ import { installTspPane, type TspPane } from '../support/tsp-terminal-fixture.ts
 import { wireNodes } from '../support/tsp-picker-wire.ts'
 import { waitUntil } from '../support/tsp-runner-harness.ts'
 
+/**
+ * TSP I-E: the History-search mount parameter these pre-I-E cases do not
+ * exercise. It is FAIL-CLOSED on purpose — a source that rejects, never an
+ * empty `search()` that would let a card report "no history" as a success —
+ * and none of these cases press `Ctrl+R`, so the seat stays unbound here.
+ */
+const INERT_HISTORY_BINDING = {
+  source: { search: () => Promise.reject(new Error('History search is not exercised by this case')) },
+  cwd: () => '/tmp/dsh-inert-cwd',
+  captureScope: () => ({ sessionId: undefined, isCurrent: () => false }),
+}
+
 const SESSION_ID = 'session-tsp7-pra'
 const T0 = 1_700_000_000_000
 
@@ -753,7 +765,7 @@ test('PR-A A-24: a REAL binder throw propagates and the production release close
 
     const reader = { snapshot: () => emptyStatusSnapshot() }
     // The REAL wrapper mount: it binds the reader, then the image binder throws.
-    assert.throws(() => mount.mount({} as never, reader),
+    assert.throws(() => mount.mount({} as never, reader, INERT_HISTORY_BINDING),
       /already installed/,
       'the production binder error propagates unchanged (never swallowed)')
     // No surface was opened by the failed mount, so the pane has seen no close

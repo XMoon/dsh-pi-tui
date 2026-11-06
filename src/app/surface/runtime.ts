@@ -524,6 +524,29 @@ export function createSurfaceDraftImageProjection(
 }
 
 /**
+ * TSP I-E: the ONE read-only History-search capability bundle a mounted renderer
+ * receives at the mount. It is a forwarding projection of the SAME three inputs
+ * the PiTui branch already gets through {@link buildOptions} — the single
+ * `HistorySearchSource`, the live session cwd and the one atomic
+ * `captureHistoryScope()` bridge — so a TSP mount never constructs a second
+ * source, never re-derives a Session identity and never reads the history file
+ * or the `InputHistory` owner itself.
+ *
+ * Like {@link TspInlineAttachmentStake}, this mirror is declared by its OWNING
+ * layer and consumed structurally, because the application layer never imports
+ * the concrete TUI layer (`scripts/application-architecture-gate.mjs`,
+ * `app-imports-tui`).
+ */
+export interface TspHistorySearchBinding {
+  /** The runner-owned search source: the ONLY history read authority. */
+  readonly source: OptionCapability<'historySearchSource'>
+  /** The live session cwd, read once per Ctrl+R open by the seat. */
+  readonly cwd: () => string
+  /** The ONE atomic History currentness capture (exact owner + generation). */
+  readonly captureScope: () => HistoryOpenScope
+}
+
+/**
  * PR3-A: one already-connected renderer mount the composition root hands to
  * {@link SurfaceRuntime.start} instead of the default PiTui process mount.
  * The mount owns its own terminal (the TSP SDK session); the surface never
@@ -544,7 +567,17 @@ export interface SurfaceRendererMount {
    * this surface created at `createSurfaceRuntime` — never the store itself, so
    * no renderer gains an update/subscribe capability of its own.
    */
-  mount(binding: SurfaceImageBinding, statusReader: StatusSnapshotReader): {
+  mount(
+    binding: SurfaceImageBinding,
+    statusReader: StatusSnapshotReader,
+    /**
+     * TSP I-E: the ONE read-only History-search capability bundle. REQUIRED: a
+     * connected TSP renderer always carries the seat, and a scripted mount that
+     * wants to express "no History plane" passes a binding whose SOURCE fails
+     * closed — never an empty `search()` that pretends success.
+     */
+    historySearch: TspHistorySearchBinding,
+  ): {
     /** The renderer-facing display seam implementation. */
     readonly display: SurfaceDisplaySeam
     /**
@@ -3026,9 +3059,19 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
         // TSP-7 PR-A: the mount receives the READ-ONLY projection of the ONE
         // store (`status`), never the store itself — the surface stays the sole
         // writer and the renderer can only sample an already-committed snapshot.
+        // TSP I-E: the History-search binding is the SAME three read-only
+        // inputs the PiTui branch already receives — the one search source, the
+        // live session cwd and the one atomic currentness bridge. Nothing here
+        // constructs a second source, reads a history file or re-derives a
+        // Session identity; the renderer's seat consumes exactly this bundle.
         const mounted = deps.renderer.mount(
           { imageLoader, imageScope: deps.imageScope, draftImages },
           { snapshot: () => status.snapshot() },
+          {
+            source: deps.historySearchSource,
+            cwd: () => deps.sessionCwd(),
+            captureScope: deps.captureHistoryScope,
+          },
         )
         // TSP-7 PR-B: the TSP branch's seam is the renderer's own, wrapped by a
         // NARROW surface-side proxy over `commitStatusFacts` only. The proxy
