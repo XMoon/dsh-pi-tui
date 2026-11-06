@@ -834,19 +834,24 @@ test('the forwarded plugin-manager/update-state reaches the Remote adapter over 
   const received: PluginUpdateProgressFact[] = []
   const dispose = port.subscribeUpdate(progress => received.push(progress))
   life.defer(dispose)
+  // The CONTROL subscription is the delivery barrier: the same event that the
+  // disposed subscription must not receive is proven to have crossed the real
+  // wire because this live listener observes it. No arbitrary sleep is needed.
+  const control: PluginUpdateProgressFact[] = []
+  const disposeControl = port.subscribeUpdate(progress => control.push(progress))
+  life.defer(disposeControl)
 
   const emit = fixture.host.ctx.emit as unknown as (name: string, payload: unknown) => void
   emit('plugin-manager/update-state', { requestId: 'pr6-update-1', step: 'checking' })
   emit('plugin-manager/update-state', { requestId: 'pr6-update-1', step: 'restoring' })
-  await waitFor('the forwarded update events arrive over the real wire', () => received.length === 2, 20_000)
+  await waitFor('the forwarded update events arrive over the real wire', () => received.length === 2 && control.length === 2, 20_000)
   assert.deepEqual(received, [
     { requestId: 'pr6-update-1', step: 'checking' },
     { requestId: 'pr6-update-1', step: 'restoring' },
   ])
   dispose()
   emit('plugin-manager/update-state', { requestId: 'pr6-update-2', step: 'installing' })
-  // A disposed subscription must deliver nothing later; no authoritative
-  // signal can prove a non-event, so this negative observation needs a window.
-  await new Promise(resolve => setTimeout(resolve, 150))
+  await waitFor('the control listener receives the post-disposal event', () => control.length === 3, 20_000)
   assert.equal(received.length, 2, 'a disposed update subscription delivers nothing later')
+  assert.deepEqual(control.at(-1), { requestId: 'pr6-update-2', step: 'installing' })
 })
