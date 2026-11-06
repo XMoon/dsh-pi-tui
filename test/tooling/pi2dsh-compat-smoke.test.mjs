@@ -7,7 +7,6 @@ import { testLifecycle } from '../support/temp-lifecycle.ts'
 import { API_VERSION } from '../../src/extension/public-types.ts'
 import { UNSTABLE_API_LEVEL } from '../../src/extension/unstable-types.ts'
 import {
-  assertNoCompatibilityFailures,
   candidateArgument,
   compatibilityFailureLine,
   isolatedEnvironment,
@@ -20,6 +19,7 @@ import {
   validateCandidatePackageData,
 } from '../../scripts/lib/dsh-smoke-harness.mjs'
 import {
+  assertNoPi2dshSurfaceFailures,
   CI_ECOSYSTEM_TIMEOUT_MS,
   classifyConsumerMetadata,
   CLEANUP_BUDGET_MS,
@@ -29,6 +29,7 @@ import {
   GATE_BUDGET_MS,
   hasFreshResizeWidth,
   isPullRequestRef,
+  pi2dshCompatibilityFailureLine,
   PI2DSH_COMPAT_DISPOSITIONS,
   REQUIRED_CONTRACTS,
   RESIZE_FAILURE_PHASE,
@@ -425,15 +426,27 @@ test('pi2dsh smoke redacts common credential forms from diagnostics', () => {
   assert.match(output, /\[REDACTED\]/u, 'redacted diagnostics must retain an explicit marker')
 })
 
-test('pi2dsh smoke detects published fallback diagnostics without false positives', () => {
+test('the shared smoke failure detector is consumer-neutral', () => {
   assert.equal(compatibilityFailureLine('ordinary fallback text'), undefined, 'ordinary TUI text must not fail the gate')
   assert.equal(compatibilityFailureLine('component fallback is available'), undefined, 'benign component fallback text must not fail the gate')
   assert.equal(compatibilityFailureLine('TUI fallback is available'), undefined, 'benign TUI fallback text must not fail the gate')
   assert.ok(compatibilityFailureLine('fallback to headless mode') !== undefined, 'an unprefixed headless fallback must fail the gate')
   assert.ok(compatibilityFailureLine('capability mismatch: unstable surface') !== undefined, 'an unprefixed capability mismatch must fail the gate')
-  assert.ok(compatibilityFailureLine('[pi2dsh] unsupported surface capability') !== undefined, 'a prefixed pi2dsh capability failure must fail the gate')
-  assert.ok(compatibilityFailureLine('pi2dsh degraded to headless') !== undefined, 'explicit pi2dsh headless degradation must fail the gate')
   assert.ok(compatibilityFailureLine('surface degraded to inert') !== undefined, 'explicit surface inert degradation must fail the gate')
+  // Consumer-token-only diagnostics are the consumer entry's rule, not the
+  // shared detector's: the harness must stay usable by a smoke that never
+  // installs pi2dsh.
+  assert.equal(compatibilityFailureLine('[pi2dsh] unsupported surface capability'), undefined,
+    'the shared detector must not claim a pi2dsh-specific diagnostic')
+  assert.equal(compatibilityFailureLine('pi2dsh degraded to headless'), undefined,
+    'the shared detector must not claim a pi2dsh-specific diagnostic')
+})
+
+test('the pi2dsh smoke keeps its own surface-failure diagnostics', () => {
+  assert.ok(pi2dshCompatibilityFailureLine('[pi2dsh] unsupported surface capability') !== undefined, 'a prefixed pi2dsh capability failure must fail the pi2dsh gate')
+  assert.ok(pi2dshCompatibilityFailureLine('pi2dsh degraded to headless') !== undefined, 'explicit pi2dsh headless degradation must fail the pi2dsh gate')
+  assert.ok(pi2dshCompatibilityFailureLine('surface degraded to inert') !== undefined, 'a generic surface failure must still fail the pi2dsh gate')
+  assert.equal(pi2dshCompatibilityFailureLine('ordinary fallback text'), undefined, 'benign text must not fail the pi2dsh gate')
 })
 
 test('pi2dsh smoke rechecks late lifecycle diagnostics', (t) => {
@@ -443,8 +456,9 @@ test('pi2dsh smoke rechecks late lifecycle diagnostics', (t) => {
   for (const phase of ['raw input', 'resize', 'dispose']) {
     writeFileSync(logPath, `${phase}: surface degraded to inert\n`)
     assert.throws(
-      () => assertNoCompatibilityFailures(logPath, { capturePane: () => '' }),
-      error => error?.phase === 'COMPAT_BOOT_FAILURE',
+      () => assertNoPi2dshSurfaceFailures(logPath, { capturePane: () => '' }),
+      error => error?.phase === 'COMPAT_BOOT_FAILURE'
+        && error.message.startsWith('published pi2dsh reported an incompatible surface:'),
       `${phase} diagnostics must fail the compatibility check`,
     )
   }

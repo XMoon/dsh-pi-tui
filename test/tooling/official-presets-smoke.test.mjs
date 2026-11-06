@@ -5,6 +5,7 @@ import { join } from 'node:path'
 
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 import {
+  assertNoPresetCompatibilityFailures,
   assertOfficialPresetHeader,
   officialPresetStatusCommand,
   officialPresetStatusVisible,
@@ -118,5 +119,18 @@ test('the official preset smoke requires a durable canonical session header', (t
   assert.throws(
     () => assertOfficialPresetHeader('minimal', evidencePath),
     error => error?.phase === 'COMPAT_BOOT_FAILURE' && error.message.includes('durable header probe failed'),
+  )
+})
+
+test('official preset failures name the official preset gate, not a consumer bridge', (t) => {
+  const life = testLifecycle(t)
+  const directory = life.tempDir('official-presets-diagnostics-')
+  const logPath = join(directory, 'tui.log')
+  writeFileSync(logPath, 'fallback to headless mode\n')
+  assert.throws(
+    () => assertNoPresetCompatibilityFailures(logPath, { capturePane: () => '' }),
+    error => error?.phase === 'COMPAT_BOOT_FAILURE'
+      && error.message.startsWith('official preset smoke reported an incompatible surface:')
+      && !error.message.includes('pi2dsh'),
   )
 })
