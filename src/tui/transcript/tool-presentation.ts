@@ -264,6 +264,10 @@ function schedulePageSummary(value: unknown): string | undefined {
   if (!isNonNegativeInteger(shown) || !isNonNegativeInteger(total)) return undefined
   if (!isNonNegativeInteger(limit) || limit === 0 || !isNonNegativeInteger(offset)) return undefined
   if (shown !== items.length || total < shown) return undefined
+  // A list page proves its task rows: a malformed entry (no legal kind, or no
+  // legal status/state) makes the whole page unprovable instead of silently
+  // counting a pseudo-task.
+  if (!items.every(item => scheduleTaskSummary(item) !== undefined)) return undefined
   return items.length === 0 && total === 0 ? 'no scheduled tasks' : `${shown} of ${total} scheduled`
 }
 
@@ -294,8 +298,12 @@ export function foldedResultSummaryFor(name: string, text: string): string | und
   }
   const parsed = parseJsonValue(text)
   if (name === 'schedule_list') {
-    // The rc5 result is the bare task array (historical replay only).
-    if (Array.isArray(parsed)) return parsed.length === 0 ? 'no scheduled jobs' : `${parsed.length} scheduled`
+    // The rc5 result is the bare task array (historical replay only); each
+    // entry must still prove a canonical Task, never a pseudo-object.
+    if (Array.isArray(parsed)) {
+      if (!parsed.every(item => scheduleTaskSummary(item) !== undefined)) return undefined
+      return parsed.length === 0 ? 'no scheduled jobs' : `${parsed.length} scheduled`
+    }
     const code = scheduleErrorCode(parsed)
     if (code !== undefined) return code
     return schedulePageSummary(parsed)
@@ -315,13 +323,18 @@ export function foldedResultSummaryFor(name: string, text: string): string | und
     return scheduleTaskSummary(parsed)
   }
   if (name === 'schedule_delete') {
-    // The rc5 delete receipt is the only shape that answers `not found`.
-    if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
-      const deleted = (parsed as Record<string, unknown>).deleted
-      if (deleted === true) return 'deleted'
-      if (deleted === false) return 'not found'
-    }
-    return scheduleErrorCode(parsed)
+    // The rc5 not-found receipt (`deleted:false` + `schedule_not_found`) is
+    // the ONE documented pairing where the boolean receipt is the phrase.
+    // Every OTHER explicit error code is authoritative and is never replaced
+    // by a success-shaped or contradictory boolean field.
+    const code = scheduleErrorCode(parsed)
+    const deleted = typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>).deleted
+      : undefined
+    if (code !== undefined && !(code === 'schedule_not_found' && deleted === false)) return code
+    if (deleted === true) return 'deleted'
+    if (deleted === false) return 'not found'
+    return undefined
   }
   if (name === 'cordis_inspect_list') {
     if (typeof parsed !== 'object' || parsed === null) return undefined

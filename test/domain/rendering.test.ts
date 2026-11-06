@@ -4365,7 +4365,7 @@ test('foldedResultSummaryFor derives a friendly phrase, never the JSON', async (
   assert.equal(foldedResultSummaryFor('schedule_edit', '{"kind":"at","id":"s1","status":"ended"}'), 'at · ended')
   assert.equal(foldedResultSummaryFor('schedule_list', '{"items":[],"shown":0,"total":0,"limit":20,"offset":0}'), 'no scheduled tasks')
   assert.equal(
-    foldedResultSummaryFor('schedule_list', '{"items":[{"kind":"after","id":"a"},{"kind":"weekly","id":"b"}],"shown":2,"total":9,"limit":20,"offset":0}'),
+    foldedResultSummaryFor('schedule_list', '{"items":[{"kind":"after","id":"a","status":"active"},{"kind":"weekly","id":"b","status":"paused"}],"shown":2,"total":9,"limit":20,"offset":0}'),
     '2 of 9 scheduled',
   )
   // An offset past the last task is a legal EMPTY page: it must not claim "no tasks".
@@ -4374,7 +4374,7 @@ test('foldedResultSummaryFor derives a friendly phrase, never the JSON', async (
     '0 of 9 scheduled',
   )
   // rc5 historical schema: bare array list and the update/delete receipts.
-  assert.equal(foldedResultSummaryFor('schedule_list', '[{"kind":"after","id":"s1"}]'), '1 scheduled')
+  assert.equal(foldedResultSummaryFor('schedule_list', '[{"kind":"after","id":"s1","state":"scheduled"}]'), '1 scheduled')
   assert.equal(foldedResultSummaryFor('schedule_list', '[]'), 'no scheduled jobs')
   assert.equal(foldedResultSummaryFor('schedule_create', '{"kind":"after","id":"s1","state":"scheduled"}'), 'after · scheduled')
   assert.equal(foldedResultSummaryFor('schedule_update', '{"kind":"every","id":"s1","state":"overdue"}'), 'every · overdue')
@@ -4382,6 +4382,12 @@ test('foldedResultSummaryFor derives a friendly phrase, never the JSON', async (
   assert.equal(foldedResultSummaryFor('schedule_delete', '{"id":"s1","deleted":true}'), 'deleted')
   assert.equal(foldedResultSummaryFor('schedule_delete', '{"id":"s1","deleted":false}'), 'not found')
   assert.equal(foldedResultSummaryFor('schedule_delete', '{"id":"s1","deleted":false,"code":"schedule_not_found"}'), 'not found')
+  // Every OTHER explicit error code wins over a boolean delete receipt.
+  assert.equal(foldedResultSummaryFor('schedule_delete', '{"id":"s1","deleted":false,"code":"schedule_conflict"}'), 'schedule_conflict')
+  assert.equal(foldedResultSummaryFor('schedule_delete', '{"id":"s1","deleted":true,"code":"schedule_conflict"}'), 'schedule_conflict',
+    'a contradictory success receipt never overrides an explicit error code')
+  assert.equal(foldedResultSummaryFor('schedule_delete', '{"id":"s1","deleted":true,"code":"schedule_not_found"}'), 'schedule_not_found',
+    'only the documented deleted:false not-found receipt renders "not found"')
   // rc1 edit delete success / not-found / conflict.
   assert.equal(foldedResultSummaryFor('schedule_edit', '{"id":"s1","deleted":true}'), 'deleted')
   assert.equal(foldedResultSummaryFor('schedule_edit', '{"id":"s1","code":"schedule_not_found"}'), 'schedule_not_found')
@@ -4411,6 +4417,28 @@ test('foldedResultSummaryFor derives a friendly phrase, never the JSON', async (
     undefined,
     'total below shown contradicts the page',
   )
+  // Every item must prove a canonical Task: an unknown kind, a missing status
+  // and a pseudo-object entry all make the page unprovable.
+  assert.equal(
+    foldedResultSummaryFor('schedule_list', '{"items":[{"kind":"bogus","status":"active"}],"shown":1,"total":1,"limit":20,"offset":0}'),
+    undefined,
+    'an unknown task kind is not a scheduled task',
+  )
+  assert.equal(
+    foldedResultSummaryFor('schedule_list', '{"items":[{"kind":"after","id":"a"}],"shown":1,"total":1,"limit":20,"offset":0}'),
+    undefined,
+    'a task without a legal status/state is not counted',
+  )
+  assert.equal(
+    foldedResultSummaryFor('schedule_list', '{"items":[{"kind":"after","status":"active"},{"kind":"after"}],"shown":2,"total":2,"limit":20,"offset":0}'),
+    undefined,
+    'one pseudo entry invalidates the whole page count',
+  )
+  // The historical bare array applies the same Task proof.
+  assert.equal(foldedResultSummaryFor('schedule_list', '[{"kind":"bogus"}]'), undefined)
+  assert.equal(foldedResultSummaryFor('schedule_list', '[{"kind":"after","id":"s1"}]'), undefined,
+    'a historical task needs its state, not just a kind')
+  assert.equal(foldedResultSummaryFor('schedule_list', '[{"kind":"after","state":"scheduled"},{"kind":"bogus"}]'), undefined)
   assert.equal(foldedResultSummaryFor('schedule_delete', '{"id":"s1","deleted":"yes"}'), undefined, 'only a boolean receipt decides deletion')
   assert.equal(foldedResultSummaryFor('cordis_inspect_query', '{"data":42}'), undefined)
 })
