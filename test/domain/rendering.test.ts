@@ -4359,20 +4359,52 @@ test('foldedResultSummaryFor derives a friendly phrase, never the JSON', async (
   )
   // A bare-JSON ralph result (no render prefix) falls back to status/rounds.
   assert.equal(foldedResultSummaryFor('ralph', '{"status":"blocked","roundsStarted":3,"report":{}}'), 'blocked · 3 rounds')
-  // schedule family.
+  // schedule family — current schema (create/view/edit task + paged list).
+  assert.equal(foldedResultSummaryFor('schedule_create', '{"kind":"after","id":"s1","status":"active"}'), 'after · active')
+  assert.equal(foldedResultSummaryFor('schedule_view', '{"kind":"weekly","id":"s1","status":"paused"}'), 'weekly · paused')
+  assert.equal(foldedResultSummaryFor('schedule_edit', '{"kind":"at","id":"s1","status":"ended"}'), 'at · ended')
+  assert.equal(foldedResultSummaryFor('schedule_list', '{"items":[],"shown":0,"total":0,"limit":20,"offset":0}'), 'no scheduled tasks')
+  assert.equal(
+    foldedResultSummaryFor('schedule_list', '{"items":[{"kind":"after","id":"a"},{"kind":"weekly","id":"b"}],"shown":2,"total":9,"limit":20,"offset":0}'),
+    '2 of 9 scheduled',
+  )
+  // An offset past the last task is a legal EMPTY page: it must not claim "no tasks".
+  assert.equal(
+    foldedResultSummaryFor('schedule_list', '{"items":[],"shown":0,"total":9,"limit":20,"offset":999}'),
+    '0 of 9 scheduled',
+  )
+  // rc5 historical schema: bare array list and the update/delete receipts.
   assert.equal(foldedResultSummaryFor('schedule_list', '[{"kind":"after","id":"s1"}]'), '1 scheduled')
   assert.equal(foldedResultSummaryFor('schedule_list', '[]'), 'no scheduled jobs')
-  assert.equal(foldedResultSummaryFor('schedule_create', '{"kind":"after","id":"s1","state":"pending"}'), 'after · pending')
+  assert.equal(foldedResultSummaryFor('schedule_create', '{"kind":"after","id":"s1","state":"scheduled"}'), 'after · scheduled')
+  assert.equal(foldedResultSummaryFor('schedule_update', '{"kind":"every","id":"s1","state":"overdue"}'), 'every · overdue')
+  assert.equal(foldedResultSummaryFor('schedule_update', '{"id":"s1","updated":false,"code":"schedule_ended"}'), 'schedule_ended')
   assert.equal(foldedResultSummaryFor('schedule_delete', '{"id":"s1","deleted":true}'), 'deleted')
   assert.equal(foldedResultSummaryFor('schedule_delete', '{"id":"s1","deleted":false}'), 'not found')
+  assert.equal(foldedResultSummaryFor('schedule_delete', '{"id":"s1","deleted":false,"code":"schedule_not_found"}'), 'not found')
+  // rc1 edit delete success / not-found / conflict.
+  assert.equal(foldedResultSummaryFor('schedule_edit', '{"id":"s1","deleted":true}'), 'deleted')
+  assert.equal(foldedResultSummaryFor('schedule_edit', '{"id":"s1","code":"schedule_not_found"}'), 'schedule_not_found')
+  assert.equal(foldedResultSummaryFor('schedule_edit', '{"id":"s1","code":"schedule_conflict"}'), 'schedule_conflict')
+  // Error objects win over any success-shaped field.
+  assert.equal(foldedResultSummaryFor('schedule_create', '{"code":"subagent_session","message":"nope"}'), 'subagent_session')
   assert.equal(foldedResultSummaryFor('schedule_list', '{"code":"schedule_error","message":"boom"}'), 'schedule_error')
   // cordis inspect family.
   assert.equal(foldedResultSummaryFor('cordis_inspect_list', '{"providers":[{"platform":"p"},{"platform":"q"}]}'), '2 providers')
   assert.equal(foldedResultSummaryFor('cordis_inspect_list', '{"providers":[]}'), 'no providers')
   assert.equal(foldedResultSummaryFor('cordis_inspect_query', '{"platform":"p","provider":"x","method":"query"}'), 'p · x · query')
   assert.equal(foldedResultSummaryFor('cordis_inspect_self', '{"mode":"plugins","plugins":[]}'), 'mode plugins')
-  // Undeducible results yield undefined (the caller shows NO preview).
+  // Malformed / inconsistent / unproven results yield undefined (no JSON fallback).
   assert.equal(foldedResultSummaryFor('schedule_create', 'not json at all'), undefined)
+  assert.equal(foldedResultSummaryFor('schedule_create', '{"kind":"after","id":"s1","state":"pending"}'), undefined, 'the rc5 enum is not a current status')
+  assert.equal(foldedResultSummaryFor('schedule_create', '{"kind":"monthly","status":"active"}'), undefined, 'an unknown kind is not claimed')
+  assert.equal(foldedResultSummaryFor('schedule_list', '{"items":[{"kind":"after"}],"shown":2,"total":9,"limit":20,"offset":0}'), undefined, 'shown must equal items.length')
+  assert.equal(foldedResultSummaryFor('schedule_list', '{"items":[],"shown":0,"total":9,"limit":0,"offset":0}'), undefined, 'a zero limit is not a page')
+  assert.equal(foldedResultSummaryFor('schedule_list', '{"items":[],"shown":0,"total":9,"limit":20}'), undefined, 'a missing offset is not a page')
+  assert.equal(foldedResultSummaryFor('schedule_list', '{"items":[],"shown":0,"total":9,"limit":20,"offset":-1}'), undefined, 'a negative offset is not a page')
+  assert.equal(foldedResultSummaryFor('schedule_list', '{"items":[],"shown":0,"total":9,"limit":20,"offset":0.5}'), undefined, 'a fractional offset is not a page')
+  assert.equal(foldedResultSummaryFor('schedule_list', '"nope"'), undefined)
+  assert.equal(foldedResultSummaryFor('schedule_delete', '{"id":"s1","deleted":"yes"}'), undefined, 'only a boolean receipt decides deletion')
   assert.equal(foldedResultSummaryFor('cordis_inspect_query', '{"data":42}'), undefined)
 })
 
@@ -4381,7 +4413,7 @@ test('folded JSON-result cards show the summary, never the raw JSON', async () =
   app.setTranscript([
     {
       kind: 'tool', turn: 0, name: 'schedule_list', args: '{}',
-      result: '[{"kind":"after","id":"s1","prompt":"ping","scheduledAt":"t","state":"pending","deliveryMode":"queue","afterSeconds":30}]',
+      result: '[{"kind":"after","id":"s1","prompt":"ping","scheduledAt":"t","state":"scheduled","deliveryMode":"queue","afterSeconds":30}]',
       status: 'ok',
     },
     {
@@ -4402,6 +4434,54 @@ test('folded JSON-result cards show the summary, never the raw JSON', async () =
   assert.ok(!view.includes('"afterSeconds"'), `raw schedule JSON leaked into the fold:\n${view}`)
   assert.ok(!view.includes('"providers"'), `raw cordis JSON leaked into the fold:\n${view}`)
   assert.ok(!view.includes('"summary"'), `raw ralph report JSON leaked into the fold:\n${view}`)
+  app.stop()
+})
+
+test('a current-schema schedule list page folds to counts and keeps its exact JSON expanded', async () => {
+  const result = JSON.stringify({
+    items: [
+      { id: 'a', kind: 'after', status: 'active', title: 'first', scheduledAt: 't', scheduledAtLocal: 'l' },
+      { id: 'b', kind: 'weekly', status: 'paused', title: 'second', scheduledAt: 't', scheduledAtLocal: 'l' },
+    ],
+    shown: 2,
+    total: 9,
+    limit: 20,
+    offset: 0,
+  })
+  const { vt, app } = startApp()
+  app.setTranscript([
+    { kind: 'tool', turn: 0, name: 'schedule_list', args: '{"limit":20,"offset":0}', result, status: 'ok' },
+  ])
+  const folded = await viewport(vt)
+  assert.ok(folded.includes('List scheduled tasks'), `schedule header missing:\n${folded}`)
+  assert.ok(folded.includes('— 2 of 9 scheduled'), `schedule page summary missing:\n${folded}`)
+  assert.ok(!folded.includes('"items"'), `raw page JSON leaked into the fold:\n${folded}`)
+  assert.ok(!folded.includes('scheduledAtLocal'), `raw task JSON leaked into the fold:\n${folded}`)
+
+  app.setTranscriptDetailExpanded(true)
+  const expanded = await viewport(vt)
+  // The expanded body is the model-facing result TEXT, byte for byte. The
+  // viewport wraps it physically, so unwrap the painted rows before matching.
+  const unwrapped = stripTerminalSequences(expanded).replace(/\r?\n\s*/gu, '')
+  assert.ok(unwrapped.includes(result), `the exact tool result must be visible expanded:\n${expanded}`)
+  app.stop()
+})
+
+test('a failed rc1 schedule_edit card keeps [error], the error code and the result detail', async () => {
+  const result = '{"id":"s1","code":"schedule_conflict","message":"the task changed after that result"}'
+  const { vt, app } = startApp()
+  app.setTranscript([
+    { kind: 'tool', turn: 0, name: 'schedule_edit', args: '{"id":"s1","action":"update"}', result, status: 'error' },
+  ])
+  const folded = await viewport(vt)
+  assert.ok(folded.includes('Edit scheduled task s1 [error]'), `error card identity missing:\n${folded}`)
+  assert.ok(folded.includes('— schedule_conflict'), `the error code must be the folded verdict:\n${folded}`)
+  assert.ok(!folded.includes('the task changed'), `the folded row keeps the summary, not the raw message:\n${folded}`)
+
+  app.setTranscriptDetailExpanded(true)
+  const expanded = await viewport(vt)
+  assert.ok(expanded.includes('schedule_conflict'), `the expanded error code must stay visible:\n${expanded}`)
+  assert.ok(expanded.includes('the task changed after that result'), `the expanded error message must stay visible:\n${expanded}`)
   app.stop()
 })
 

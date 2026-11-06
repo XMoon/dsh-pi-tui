@@ -149,6 +149,39 @@ test('compact action presentations are payload-first and receipt-safe', () => {
   assert.equal(focusToolDisplay({ name: 'list_agents', args: '{}' }), 'List agents children')
 })
 
+test('schedule cards use the fixed no-registry fallback titles and identities', () => {
+  // The Direct live definition's own `presentCall` still wins when the
+  // registry holds it; these assertions cover the replay/Remote fallback
+  // where no definition is available.
+  assert.deepEqual(toolCardHeader('schedule_create', '{"title":"Morning report","prompt":"secret instruction"}'), {
+    title: 'Create scheduled task', summary: 'Morning report',
+  })
+  // A create call without a title never leaks its prompt into the header.
+  assert.deepEqual(toolCardHeader('schedule_create', '{"prompt":"secret instruction"}'), {
+    title: 'Create scheduled task', summary: '',
+  })
+  assert.deepEqual(toolCardHeader('schedule_list', '{}'), { title: 'List scheduled tasks', summary: '' })
+  assert.deepEqual(toolCardHeader('schedule_list', ''), { title: 'List scheduled tasks', summary: '' })
+  assert.deepEqual(toolCardHeader('schedule_view', '{"id":"s1"}'), { title: 'View scheduled task', summary: 's1' })
+  assert.deepEqual(toolCardHeader('schedule_edit', '{"id":"s1","action":"update"}'), { title: 'Edit scheduled task', summary: 's1' })
+  assert.deepEqual(toolCardHeader('schedule_edit', '{"id":"s1","action":"delete"}'), { title: 'Delete scheduled task', summary: 's1' })
+  // The historical rc5 names keep their own identities.
+  assert.deepEqual(toolCardHeader('schedule_update', '{"id":"s1"}'), { title: 'Update reminder', summary: 's1' })
+  assert.deepEqual(toolCardHeader('schedule_delete', '{"id":"s1"}'), { title: 'Delete reminder', summary: 's1' })
+  // A mistyped identity leaves an empty summary, never a generic args/prompt dump.
+  assert.deepEqual(toolCardHeader('schedule_edit', '{"id":7,"action":"update","prompt":"secret"}'), {
+    title: 'Edit scheduled task', summary: '',
+  })
+  // The compact Focus line uses the same fallback title.
+  assert.equal(focusToolDisplay({ name: 'schedule_list', args: '{}' }), 'List scheduled tasks')
+  assert.equal(focusToolDisplay({ name: 'schedule_edit', args: '{"id":"s1","action":"delete"}' }), 'Delete scheduled task s1')
+  assert.equal(focusToolDisplay({ name: 'schedule_create', args: '{"title":"Morning report","prompt":"secret"}' }), 'Create scheduled task Morning report')
+  // An unknown third-party tool keeps the generic row.
+  const unknown = toolCardHeader('totally_custom', '{"id":"s1"}')
+  assert.equal(unknown.title, 'Tool call')
+  assert.match(unknown.summary, /^totally_custom · s1$/u)
+})
+
 test('list_agents summarizes structured and rendered historical snapshots', () => {
   const structured = summarizeAgentListResult(JSON.stringify([
     { kind: 'child', id: '1', label: 'a', status: 'running' },

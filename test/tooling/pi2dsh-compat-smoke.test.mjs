@@ -21,6 +21,12 @@ import {
   retryDiagnostic,
   RESIZE_FAILURE_PHASE,
   classifyConsumerMetadata,
+  dispositionFileArgument,
+  isPullRequestRef,
+  PI2DSH_COMPAT_DISPOSITIONS,
+  skipUnsupportedDshPeerOnPrArgument,
+  unsupportedDshPeerSkipAllowed,
+  writeDispositionFile,
   failConsumerMetadata,
   validateCandidatePackageData,
   validateConsumerMetadata,
@@ -191,6 +197,155 @@ test('pi2dsh metadata preflight classifies the four peer-declaration cases', () 
     candidate,
   )
   assert.equal(dshMismatch.kind, 'block')
+})
+
+test('pi2dsh metadata classifies a published DSH peer set that excludes rc1 as a typed unsupported peer case', () => {
+  const manifest = { dshVersion: '0.2.2-rc.1', pi2dshVersion: '0.28.0-next.1' }
+  const candidate = { name: '@xmoon76/dsh-pi-tui', version: '0.5.6' }
+  const published = {
+    name: 'pi2dsh',
+    version: '0.28.0-next.1',
+    peerDependencies: {
+      '@xmoon76/dsh-pi-tui': '^0.5.1',
+      '@deepseek-ai/dsh-agent': '0.2.2-alpha.3',
+      '@deepseek-ai/dsh-commands': '0.2.2-alpha.3',
+    },
+  }
+  const classification = classifyConsumerMetadata(published, manifest, candidate)
+  assert.equal(classification.kind, 'unsupported-dsh-peer')
+  assert.deepEqual(classification.peers.map(([name]) => name), ['@deepseek-ai/dsh-agent', '@deepseek-ai/dsh-commands'])
+  // The default preflight still BLOCKS this classification; only the narrow
+  // PR-only caller decision may turn it into a typed skip.
+  assert.throws(
+    () => validateConsumerMetadata(published, manifest, candidate),
+    error => error?.name === 'CompatFailure'
+      && error?.phase === 'ECOSYSTEM_CONTRACT_BLOCKER'
+      && error.message.includes('DSH 0.2.2-rc.1')
+      && error.message.includes('@deepseek-ai/dsh-agent: 0.2.2-alpha.3'),
+  )
+
+  // A truly compatible published peer set is `ok` and must proceed to the
+  // REAL PTY smoke, never to a typed skip.
+  const compatible = {
+    ...published,
+    peerDependencies: { ...published.peerDependencies, '@deepseek-ai/dsh-agent': '0.2.2-rc.1', '@deepseek-ai/dsh-commands': '>=0.2.2-rc.1' },
+  }
+  assert.equal(classifyConsumerMetadata(compatible, manifest, candidate).kind, 'ok')
+  assert.equal(unsupportedDshPeerSkipAllowed({
+    classification: classifyConsumerMetadata(compatible, manifest, candidate),
+    skipRequested: true,
+    ref: 'refs/pull/464/merge',
+    dispositionFile: '/tmp/disposition',
+  }), false, 'a compatible pairing is never skipped')
+})
+
+test('the typed unsupported-DSH-peer skip is allowed only for an explicit PR ref', () => {
+  const manifest = { dshVersion: '0.2.2-rc.1', pi2dshVersion: '0.28.0-next.1' }
+  const candidate = { name: '@xmoon76/dsh-pi-tui', version: '0.5.6' }
+  const unsupported = {
+    name: 'pi2dsh',
+    version: '0.28.0-next.1',
+    peerDependencies: {
+      '@xmoon76/dsh-pi-tui': '^0.5.1',
+      '@deepseek-ai/dsh-agent': '0.2.2-alpha.3',
+    },
+  }
+  const classification = classifyConsumerMetadata(unsupported, manifest, candidate)
+  assert.equal(classification.kind, 'unsupported-dsh-peer')
+  // PR + explicit flag + a disposition path: allowed.
+  assert.equal(unsupportedDshPeerSkipAllowed({
+    classification, skipRequested: true, ref: 'refs/pull/464/merge', dispositionFile: '/tmp/disposition',
+  }), true)
+  // Every other combination fails closed into the blocking preflight.
+  for (const entry of [
+    { name: 'flag missing', skipRequested: false, ref: 'refs/pull/464/merge' },
+    { name: 'release tag', skipRequested: true, ref: 'refs/tags/v0.5.6' },
+    { name: 'prerelease tag', skipRequested: true, ref: 'refs/tags/next-v0.5.6-alpha.1' },
+    { name: 'main branch', skipRequested: true, ref: 'refs/heads/main' },
+    { name: 'comp branch', skipRequested: true, ref: 'refs/heads/comp/dsh-0.2.2' },
+    { name: 'plain pull prefix', skipRequested: true, ref: 'refs/pull/464' },
+    { name: 'malformed PR ref', skipRequested: true, ref: 'refs/pull/x/merge' },
+    { name: 'missing ref', skipRequested: true, ref: undefined },
+    { name: 'empty ref', skipRequested: true, ref: '' },
+  ]) {
+    assert.equal(unsupportedDshPeerSkipAllowed({
+      classification, skipRequested: entry.skipRequested, ref: entry.ref, dispositionFile: '/tmp/disposition',
+    }), false, entry.name)
+  }
+  // The skip also needs a usable disposition path; without it the caller must
+  // fail closed instead of exiting successfully with nothing to read.
+  for (const dispositionFile of [undefined, '', null]) {
+    assert.equal(unsupportedDshPeerSkipAllowed({
+      classification, skipRequested: true, ref: 'refs/pull/464/merge', dispositionFile,
+    }), false, `dispositionFile=${JSON.stringify(dispositionFile)}`)
+  }
+  assert.equal(isPullRequestRef('refs/pull/1/merge'), true)
+  assert.equal(isPullRequestRef('refs/pull/1/head'), false)
+  assert.equal(isPullRequestRef('refs/heads/refs/pull/1/merge'), false)
+  assert.equal(skipUnsupportedDshPeerOnPrArgument(['--skip-unsupported-dsh-peer-on-pr']), true)
+  assert.equal(skipUnsupportedDshPeerOnPrArgument(['--allow-stale-tui-peer']), false)
+})
+
+test('the unsupported-DSH-peer classification demands that nothing else is wrong', () => {
+  const manifest = { dshVersion: '0.2.2-rc.1', pi2dshVersion: '0.28.0-next.1' }
+  const candidate = { name: '@xmoon76/dsh-pi-tui', version: '0.5.6' }
+  const base = {
+    name: 'pi2dsh',
+    version: '0.28.0-next.1',
+    peerDependencies: {
+      '@xmoon76/dsh-pi-tui': '^0.5.1',
+      '@deepseek-ai/dsh-agent': '0.2.2-alpha.3',
+    },
+  }
+  const kindOf = (consumerPackage) => classifyConsumerMetadata(consumerPackage, manifest, candidate).kind
+
+  // Missing DSH peers, missing/invalid/stale TUI peer, malformed metadata,
+  // invalid DSH ranges and an unpinned consumer identity all stay BLOCKING.
+  assert.equal(kindOf({ ...base, peerDependencies: { '@xmoon76/dsh-pi-tui': '^0.5.1' } }), 'block')
+  assert.equal(kindOf({ ...base, peerDependencies: { ...base.peerDependencies, '@xmoon76/dsh-pi-tui': undefined } }), 'block')
+  assert.equal(kindOf({ ...base, peerDependencies: { ...base.peerDependencies, '@xmoon76/dsh-pi-tui': 'not a range' } }), 'block')
+  assert.equal(kindOf({ ...base, peerDependencies: { ...base.peerDependencies, '@xmoon76/dsh-pi-tui': '^0.4.0' } }), 'block')
+  assert.equal(kindOf({ ...base, peerDependencies: 'broken' }), 'block')
+  assert.equal(kindOf({ ...base, peerDependencies: { ...base.peerDependencies, '@deepseek-ai/dsh-agent': 'not a range' } }), 'block')
+  assert.equal(kindOf({ ...base, peerDependencies: { ...base.peerDependencies, '@deepseek-ai/dsh-tools': 42 } }), 'block',
+    'a non-string DSH peer range is broken metadata, not a typed peer mismatch')
+  assert.equal(kindOf({ ...base, peerDependencies: { ...base.peerDependencies, '@deepseek-ai/dsh-session': '' } }), 'block')
+  assert.equal(kindOf({ ...base, version: '0.28.0' }), 'block')
+  assert.equal(kindOf({ ...base, name: 'other-bridge' }), 'block')
+  assert.equal(kindOf(null), 'block')
+  assert.equal(kindOf({ ...base, peerDependencies: { ...base.peerDependencies, '@deepseek-ai/dsh-agent': '^0.2.2-alpha.3' } }), 'ok',
+    'a peer set that covers rc1 is compatible even with the alpha.3 floor range')
+})
+
+test('the pi2dsh disposition path is explicit, absolute and transport-safe', (t) => {
+  const life = testLifecycle(t)
+  const directory = life.tempDir('pi2dsh-disposition-')
+  const previous = process.env.PI2DSH_COMPAT_DISPOSITION_FILE
+  delete process.env.PI2DSH_COMPAT_DISPOSITION_FILE
+  try {
+    assert.equal(dispositionFileArgument([]), undefined)
+    assert.equal(dispositionFileArgument(['--disposition-file', join(directory, 'disposition')]), join(directory, 'disposition'))
+    assert.throws(() => dispositionFileArgument(['--disposition-file', 'relative-disposition']), /must be absolute/u)
+    assert.throws(() => dispositionFileArgument(['--disposition-file', '--allow-stale-tui-peer']), /requires an absolute temp file path/u)
+    process.env.PI2DSH_COMPAT_DISPOSITION_FILE = join(directory, 'from-env')
+    assert.equal(dispositionFileArgument([]), join(directory, 'from-env'))
+    assert.equal(dispositionFileArgument(['--disposition-file', join(directory, 'explicit')]), join(directory, 'explicit'),
+      'the explicit CLI option wins over the environment')
+  } finally {
+    if (previous === undefined) delete process.env.PI2DSH_COMPAT_DISPOSITION_FILE
+    else process.env.PI2DSH_COMPAT_DISPOSITION_FILE = previous
+  }
+
+  // Exactly two dispositions are transportable, and the write is atomic.
+  assert.deepEqual([...PI2DSH_COMPAT_DISPOSITIONS].sort(), ['passed', 'skipped-unsupported-dsh-peer'])
+  const passedPath = join(directory, 'passed')
+  writeDispositionFile(passedPath, 'passed')
+  assert.equal(readFileSync(passedPath, 'utf8'), 'passed\n')
+  const skippedPath = join(directory, 'skipped')
+  writeDispositionFile(skippedPath, 'skipped-unsupported-dsh-peer')
+  assert.equal(readFileSync(skippedPath, 'utf8'), 'skipped-unsupported-dsh-peer\n')
+  assert.throws(() => writeDispositionFile(skippedPath, 'PASSED'), /unknown pi2dsh compatibility disposition/u)
+  assert.doesNotThrow(() => writeDispositionFile(undefined, 'passed'))
 })
 
 test('pi2dsh preset checks inspect the filtered /help frame rather than stale pane text', () => {
