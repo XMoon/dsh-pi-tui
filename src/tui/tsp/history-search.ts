@@ -414,10 +414,11 @@ export function createTspHistorySearch(
     pending = request
     const cwd = owner.openCwd
     const sessionId = owner.scopeCapture.sessionId
-    // allowlist: the seat's own two-branch settlement — BOTH branches are owned
-    // here (a fulfilment commits or refuses, a rejection states the failure), so
-    // nothing travels unhandled, exactly like the mounted renderer's own loop.
-    void source.search({
+    // The seat is the ONE owner of this read's settlement: BOTH branches are
+    // handled here (a fulfilment commits or refuses, a rejection states the
+    // failure), so nothing travels unhandled and no second owner exists — the
+    // same shape as the mounted renderer's own input loop.
+    void source.search({ // allowlist: the seat's own two-branch settlement
       scope: request.scope,
       cwd,
       sessionId,
