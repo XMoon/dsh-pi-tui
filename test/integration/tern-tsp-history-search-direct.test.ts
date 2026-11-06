@@ -120,10 +120,10 @@ async function keyWithFrame(fixture: DirectTspFixture, bytes: string, label: str
 }
 
 async function observeNothing(fixture: DirectTspFixture): Promise<void> {
-  // reason: bounded negative window — a refused gesture writes no frame, and a
-  // pending debounced round settles inside it (the SDK frame-credit ack cycle is
-  // already covered by the frame waits above).
-  await new Promise(resolve => setTimeout(resolve, 400))
+  // A refused gesture writes no frame, and a pending debounced round settles
+  // inside this span; the SDK frame-credit ack cycle is covered by the frame
+  // waits above, so this is a bounded negative observation window, not a sleep.
+  await new Promise(resolve => setTimeout(resolve, 400)) // reason: bounded negative window
 }
 
 /** The live Agent ids the real Host currently owns. */

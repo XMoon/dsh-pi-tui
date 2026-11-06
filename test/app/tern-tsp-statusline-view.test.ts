@@ -42,7 +42,8 @@ import { waitUntil } from '../support/tsp-runner-harness.ts'
  * TSP I-E: the History-search mount parameter these pre-I-E cases do not
  * exercise. It is FAIL-CLOSED on purpose — a source that rejects, never an
  * empty `search()` that would let a card report "no history" as a success —
- * and none of these cases press `Ctrl+R`, so the seat stays unbound here.
+ * The mount still BINDS it (one install, like every other capability); none of
+ * these cases press `Ctrl+R`, so the seat is bound and simply never opened.
  */
 const INERT_HISTORY_BINDING = {
   source: { search: () => Promise.reject(new Error('History search is not exercised by this case')) },

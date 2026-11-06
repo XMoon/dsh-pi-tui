@@ -136,6 +136,14 @@ export interface TspHistorySearchPorts {
   reveal(id: string): void
   /** Scroll the Preview's own container. */
   scroll(id: string, to: ScrollTo): void
+  /**
+   * The mount's FATAL owner. A settlement branch that throws (the frame commit
+   * it owes can throw: `surface.render` raises a `ViewError`) is a broken tty
+   * owner, not a silent cancel: the PRIMARY error reaches the runner's fatal
+   * lifecycle instead of becoming an unhandled rejection on the chain this seat
+   * started. Nothing here swallows, retries or falls back.
+   */
+  reportFatal(error: unknown): void
 }
 
 export interface TspHistorySearchSeat {
@@ -211,16 +219,27 @@ function rowSummary(content: string): string {
   return sanitizedPhysicalLine(first.trim())
 }
 
-/** The shortest distinctive cwd suffix (parent + name), display-only. */
+/**
+ * The shortest distinctive cwd suffix (parent + name), display-only.
+ *
+ * The file's own `cwd` is UNTRUSTED text (a legacy or hand-edited JSONL row), so
+ * it goes through the same one-line projection the PiTui panel applies before a
+ * cwd or a Session id reaches a painted cell: no control byte or escape sequence
+ * can reach a node's `text`, `title` or `aria`. The raw bytes stay in the Seat
+ * for Copy and Restore, which is the only place they are ever needed exact.
+ */
 function shortCwd(cwd: string): string {
-  const parts = cwd.split('/').filter((part) => part !== '')
-  return parts.length >= 2 ? parts.slice(-2).join('/') : cwd
+  const safe = sanitizedPhysicalLine(cwd)
+  const parts = safe.split('/').filter((part) => part !== '')
+  return parts.length >= 2 ? parts.slice(-2).join('/') : safe
 }
 
-/** The row's short time mark, newest-look. A legacy row has no timestamp and
- *  is never given a fabricated one. */
+/** The row's short time mark, newest-look. A legacy row has no timestamp and is
+ *  never given a fabricated one: its mark is simply ABSENT (the Preview states
+ *  the explicit `Time unknown`), so no ambiguous-width glyph is introduced into
+ *  this new surface. */
 function shortTime(ts: number | null, now: number): string {
-  if (ts === null) return '—'
+  if (ts === null) return ''
   const diff = Math.max(0, now - ts)
   const minutes = Math.floor(diff / 60_000)
   if (minutes < 1) return 'now'
@@ -274,11 +293,18 @@ function editQuery(
   if (key.name === 'paste') {
     const inserted = sanitizeDisplaySegment(key.text ?? '')
     const next = `${query.slice(0, cursor)}${inserted}${query.slice(cursor)}`
-    return { query: next, cursor: next.length }
+    const raw = cursor + inserted.length
+    // The caret stays at the END OF THE PASTED RUN, not at the end of the
+    // whole query: a mid-caret paste must not teleport the reader's caret.
+    return { query: next, cursor: graphemeBounds(next).find(index => index >= raw) ?? next.length }
   }
   if (key.text === undefined) return undefined
-  const typed = query.slice(0, cursor) + key.text
-  const raw = cursor + key.text.length
+  // A printable key is query TEXT, and the History query is a one-line filter:
+  // the same projection the paste branch applies, so no control byte or line
+  // break can be carried into the painted field or the source query.
+  const inserted = sanitizeDisplaySegment(key.text)
+  const typed = query.slice(0, cursor) + inserted
+  const raw = cursor + inserted.length
   return {
     query: typed + query.slice(cursor),
     cursor: graphemeBounds(typed).find((index) => index >= raw) ?? typed.length,
@@ -430,41 +456,56 @@ export function createTspHistorySearch(
       // newer round, another open, a Session change or a higher seat is dropped.
       if (state !== owner || owner.retired || pending !== request) return
       if (request.serial !== owner.openSerial || request.revision !== owner.queryRevision) return
-      if (ports.admitted() === false || owner.scopeCapture.isCurrent() === false) {
-        retireDiscovered()
-        return
+      // Identity ONLY. The mount's seat admission is deliberately NOT read
+      // here: a Modal parks this card and makes it false, and a parked card must
+      // keep its committed rows so `resume()` shows the SAME query, selection
+      // and page — the plan's TRANSIENT state. A dead captured scope is not
+      // re-checked here either: `renderState()` refuses to project it,
+      // `isOpen()` refuses to own keys or the Composer seat, `act()` refuses to
+      // act, and the next `open()` retires this instance synchronously before
+      // capturing anything new. Four fences on one fact would be a second owner
+      // of the same decision, and none of them is observable against the other
+      // three (measured: removing this branch changes no frame, no state and no
+      // read in the seat-level case).
+      try {
+        pending = undefined
+        const previous = owner.selectedId
+        owner.rows = page.results
+        owner.exhausted = page.exhausted
+        owner.status = 'ready'
+        // The same query keeps its selection while the row still exists; a
+        // replaced page falls back to the first settled row, never an invented one.
+        const survives = previous !== undefined && page.results.some((row) => row.id === previous)
+        owner.selectedId = survives ? previous : page.results[0]?.id
+        if (!survives && previous !== undefined) {
+          owner.previewResetPending = true
+          owner.revealPending = true
+        }
+        // A parked card records its settled rows but owes no interactive frame;
+        // `resume()` paints them in the next one.
+        if (owner.phase === 'open') change(owner)
+      } catch (error) {
+        // The page WAS consumed; only the frame it owed failed. The error is the
+        // renderer's fatal path, never a second "failed read" story.
+        ports.reportFatal(error)
       }
-      pending = undefined
-      const previous = owner.selectedId
-      owner.rows = page.results
-      owner.exhausted = page.exhausted
-      owner.status = 'ready'
-      // The same query keeps its selection while the row still exists; a
-      // replaced page falls back to the first settled row, never an invented one.
-      const survives = previous !== undefined && page.results.some((row) => row.id === previous)
-      owner.selectedId = survives ? previous : page.results[0]?.id
-      if (!survives && previous !== undefined) {
-        owner.previewResetPending = true
-        owner.revealPending = true
-      }
-      // A parked card records its settled rows but owes no interactive frame;
-      // `resume()` paints them in the next one.
-      if (owner.phase === 'open') change(owner)
     }, () => {
       if (state !== owner || owner.retired || pending !== request) return
       if (request.serial !== owner.openSerial || request.revision !== owner.queryRevision) return
-      if (ports.admitted() === false || owner.scopeCapture.isCurrent() === false) {
-        retireDiscovered()
-        return
+      // The same identity-only fence as the fulfilment branch: a parked card
+      // records its failure and shows it on resume.
+      try {
+        pending = undefined
+        // A failed read is a FAILED read: never an empty page dressed up as "no
+        // matches", and the user's own draft was never touched by it.
+        owner.status = 'failed'
+        owner.rows = []
+        owner.selectedId = undefined
+        owner.exhausted = false
+        if (owner.phase === 'open') change(owner)
+      } catch (error) {
+        ports.reportFatal(error)
       }
-      pending = undefined
-      // A failed read is a FAILED read: never an empty page dressed up as "no
-      // matches", and the user's own draft was never touched by it.
-      owner.status = 'failed'
-      owner.rows = []
-      owner.selectedId = undefined
-      owner.exhausted = false
-      if (owner.phase === 'open') change(owner)
     })
   }
 
@@ -499,6 +540,10 @@ export function createTspHistorySearch(
     SCOPE_RING.filter((entry) => owner.scopeAvailable || entry.scope !== 'session').map((entry) => entry.scope)
 
   const browse = (owner: HistorySeatState, step: TspHistoryBrowseStep): void => {
+    // The same operable-identity rule as a row click: while a newer round is in
+    // flight the painted page belongs to the PREVIOUS query, so the keyboard
+    // must not walk rows that are about to be replaced.
+    if (owner.status !== 'ready') return
     const rows = owner.rows
     if (rows.length === 0) return
     const at = Math.max(0, rows.findIndex((row) => row.id === owner.selectedId))
@@ -554,6 +599,11 @@ export function createTspHistorySearch(
         return
       }
       case 'select': {
+        // A newer round is in flight: the rows still on screen belong to the
+        // PREVIOUS query, so they are visible but no longer operable. Accepting
+        // a click here would let a lagging pointer select a row the user has
+        // already typed past.
+        if (owner.status !== 'ready') return
         const row = owner.rows.find((candidate) => candidate.id === intent.rowId)
         if (row === undefined || row.id === owner.selectedId) return
         owner.selectedId = row.id
@@ -719,9 +769,9 @@ export function createTspHistorySearch(
       : undefined
     const preview = selected === undefined ? undefined : {
       text: sanitizeDisplayText(selected.content),
-      directory: `Directory: ${selected.cwd ?? 'unknown'}`,
+      directory: `Directory: ${selected.cwd === null ? 'unknown' : sanitizedPhysicalLine(selected.cwd)}`,
       time: `Time: ${previewTime(selected.ts)}`,
-      session: `Session: ${selected.sessionId ?? 'unknown'}`,
+      session: `Session: ${selected.sessionId === undefined ? 'unknown' : sanitizedPhysicalLine(selected.sessionId)}`,
     }
     return {
       serial: owner.openSerial,
@@ -794,24 +844,34 @@ export function createTspHistorySearch(
   return {
     isOpen: () => {
       const owner = state
-      return owner !== undefined && !owner.retired && owner.phase === 'open' && ports.admitted()
+      if (owner === undefined || owner.retired || owner.phase !== 'open') return false
+      // A card whose captured Session scope died owns NOTHING: not the keys,
+      // not the caret, and not the Composer's disabled state. Its retirement
+      // frame is owed by the next entry that touches it.
+      if (!owner.scopeCapture.isCurrent()) return false
+      return ports.admitted()
     },
+    // Supported = this mount received the ONE History bundle AND the pane
+    // negotiated what the card actually paints. `binding === undefined` IS the
+    // "no bound source" case: the bundle's `source` member is typed
+    // `OptionCapability<'historySearchSource'>` = `NonNullable<…>`, so a bound
+    // bundle always carries a real source and no second guard is needed.
     supported: () => binding !== undefined && nativeSupported(),
     handleKey,
     handleIntent: (intent) => { act(intent) },
     open: () => {
-      const source = binding
-      if (source === undefined) return
+      const bundle = binding
+      if (bundle === undefined) return
       // One instance only: an older card is withdrawn before the new one
       // captures anything, so no older request, key or click can act on it.
       retire()
-      const scopeCapture = source.captureScope()
+      const scopeCapture = bundle.captureScope()
       const scope: HistoryScope = scopeCapture.sessionId === undefined ? 'current' : 'session'
       const owner: HistorySeatState = {
         phase: 'open',
         openSerial: ++openSerial,
         scopeCapture,
-        openCwd: source.cwd(),
+        openCwd: bundle.cwd(),
         scopeAvailable: scopeCapture.sessionId !== undefined,
         scope,
         query: '',

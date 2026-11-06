@@ -49,6 +49,7 @@ import { settle, waitUntil } from '../support/tsp-runner-harness.ts'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
 
 const CTRL_R = '\u0012'
+const ESCAPE_COMPOSITION = '\u001b'
 const ENTER = '\r'
 const TAB = '\t'
 /** One bounded window: long enough for the seat's own debounce plus an SDK
@@ -99,7 +100,11 @@ function seedHistory(home: string, cwd: string, sessionId: string, rows: readonl
   return file
 }
 
-async function mountChain(life: TestLifecycle, sessionId0: string): Promise<ChainHarness> {
+async function mountChain(
+  life: TestLifecycle,
+  sessionId0: string,
+  options?: { readonly sessionless?: boolean },
+): Promise<ChainHarness> {
   const home = life.tempDir('dsh-ie-composition-')
   const previousHome = process.env.DSH_HOME
   process.env.DSH_HOME = home
@@ -129,7 +134,9 @@ async function mountChain(life: TestLifecycle, sessionId0: string): Promise<Chai
 
   // The REAL ownership stack: the same two authorities `bootstrap` composes.
   const ownership = createSessionOwnershipCore({ isSurfaceDisposed: () => false, resetForGeneration: () => {} })
-  ownership.setCurrentOwner({} as never, sessionId0)
+  // A sessionless start is the REAL pre-first-session state: the ownership core
+  // has no subject at all, so `captureHistoryScope()` reports no session id.
+  if (options?.sessionless !== true) ownership.setCurrentOwner({} as never, sessionId0)
   const scopeAuthority = createSessionScopeAuthority({
     current: () => {
       const subject = ownership.captureSubject()
@@ -300,6 +307,83 @@ async function mountChain(life: TestLifecycle, sessionId0: string): Promise<Chai
   return harness
 }
 
+test('a sessionless open offers no Session scope, and the first published session retires that card', async (t) => {
+  const life = testLifecycle(t)
+  const h = await mountChain(life, 'ses_a', { sessionless: true })
+  try {
+    h.key(CTRL_R)
+    await waitUntil('the sessionless card opened', () => h.cardPainted())
+    assert.ok(h.texts().includes('Scope: Directory \u2304'),
+      `a sessionless start defaults to Directory: ${JSON.stringify(h.texts().filter(text => text.startsWith('Scope')))}`)
+    assert.equal(h.requests.at(-1)?.sessionId, undefined, 'the read carried no session id')
+    // The first real session arrives while the card is open: the capture this
+    // card pinned is no longer what the surface owns, so the card is retired by
+    // the next entry rather than quietly re-scoped under the new owner.
+    // Hold the round the sessionless card is running, so the publication lands
+    // MID-READ and the retirement's own effect is observable.
+    h.holdNextRead()
+    h.type('x')
+    await waitUntil('the held round started', () => h.requests.at(-1)?.query === 'x')
+    h.publishOwner('ses_a')
+    h.releaseHeld({ results: [{ id: 'late:0', content: 'a page captured under the sessionless scope',
+      cwd: process.env.DSH_HOME ?? '/work/alpha', ts: 1_700_000_000_000, sourceFile: 'late', sourceByteOffset: 0 }], exhausted: true })
+    await h.observeAbsence()
+    assert.equal(h.cardPainted(), false,
+      'the card whose captured scope died paints nothing, and its late page never reaches the frame')
+    h.key(CTRL_R)
+    await waitUntil('a fresh card opened for the owned session', () => h.cardPainted())
+    assert.ok(h.texts().includes('Scope: Session \u2304'),
+      'the reopened card offers Session because a session now exists')
+    void ESCAPE_COMPOSITION
+    assert.equal(h.requests.at(-1)?.sessionId, 'ses_a', 'and the read carries the live session id')
+  } finally {
+    await h.dispose()
+  }
+})
+
+test('disposal retires the seat and a read that answers afterwards paints nothing', async (t) => {
+  const life = testLifecycle(t)
+  const h = await mountChain(life, 'ses_a')
+  h.key(CTRL_R)
+  await waitUntil('the card opened', () => h.cardPainted())
+  h.holdNextRead()
+  h.type('t')
+  await waitUntil('the held round started', () => h.requests.at(-1)?.query === 't')
+  const framesBefore = h.pane.frameCount()
+  await h.dispose()
+  // The answer arrives AFTER the mount is gone: it must neither paint nor throw.
+  h.releaseHeld({ results: [], exhausted: true })
+  await settle(ABSENCE_WINDOW_MS)
+  assert.equal(h.pane.frameCount(), framesBefore, 'a disposed mount committed no frame')
+})
+
+test('a Modal park under the REAL scope authority keeps the same card and its page', async (t) => {
+  const life = testLifecycle(t)
+  const h = await mountChain(life, 'ses_a')
+  try {
+    h.key(CTRL_R)
+    await waitUntil('the card opened', () => h.cardPainted())
+    h.holdNextRead()
+    h.type('ter')
+    await waitUntil('the held round started', () => h.requests.at(-1)?.query === 'ter')
+    let settled = false
+    const outcome = h.renderer().interaction.showApprovalPrompt(
+      { toolName: 'tool-a', reason: 'composition park', arguments: '{}' }, true)
+    void outcome.then(() => { settled = true })
+    await waitUntil('the modal parked the card', () => !h.cardPainted())
+    h.releaseHeld({ results: [], exhausted: true })
+    await settle(ABSENCE_WINDOW_MS)
+    assert.equal(h.cardPainted(), false, 'a parked card paints no operable rows')
+    h.type('y')
+    await waitUntil('the approval settled', () => settled)
+    await waitUntil('the SAME card returned', () => h.cardPainted())
+    assert.equal(h.binds.history, 1, 'and it is still the one installed seat')
+    assert.ok(h.texts().some(text => text.startsWith('Results \u00b7')), 'with a settled page painted')
+  } finally {
+    await h.dispose()
+  }
+})
+
 // ── A. One owner per fact, all the way down ─────────────────────────────────
 
 test('the mount installs ONE History seat from the surface\'s own source, cwd and scope bridge', async (t) => {
@@ -420,6 +504,33 @@ test('a painted Restore cell from the older card cannot act after a same-id reop
     await h.observeAbsence()
     assert.equal(h.draft().text, '', 'the older capture restored nothing under the reopened Session')
     assert.equal(h.submits.length, 0, 'and never submitted')
+  } finally {
+    await h.dispose()
+  }
+})
+
+test('a new projection source at the transcript commit retires the card and aborts its read', async (t) => {
+  const life = testLifecycle(t)
+  const h = await mountChain(life, 'ses_a')
+  try {
+    h.key(CTRL_R)
+    await waitUntil('the card opened', () => h.cardPainted())
+    h.holdNextRead()
+    h.type('ter')
+    await waitUntil('the held round started', () => h.requests.at(-1)?.query === 'ter')
+    const inFlight = h.requests.at(-1)!
+    // The production commit point: a NEW opaque source token is a new
+    // presentation subject (session commit / cold rehydrate / viewer switch).
+    // The card belongs to the outgoing subject, so it goes with it HERE —
+    // synchronously, exactly like the sibling completion and quick-menu seats.
+    h.renderer().display.setTranscript([], undefined, undefined, undefined, undefined, { identity: 'new-subject' })
+    assert.equal(inFlight.signal?.aborted, true,
+      'the commit aborted the outgoing subject\u2019s read instead of leaving it running')
+    h.releaseHeld({ results: [{ id: 'late:0', content: 'a page from the outgoing subject',
+      cwd: process.env.DSH_HOME ?? '/work/alpha', ts: 1_700_000_000_000, sourceFile: 'late', sourceByteOffset: 0 }], exhausted: true })
+    await h.observeAbsence()
+    assert.equal(h.cardPainted(), false, 'and the retired card paints nothing when its answer arrives')
+    assert.equal(h.draft().text, '', 'nothing was restored under the incoming subject')
   } finally {
     await h.dispose()
   }
