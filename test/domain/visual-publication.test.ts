@@ -176,6 +176,14 @@ function publishedTurn(): { log: LogBuilder; ref: string } {
 // ── the reference algorithm ────────────────────────────────────────────────
 
 test('the reference is a stable sv2 value for one fixed identity tuple and carries no Session id', () => {
+  // Golden pin of the documented algorithm: SHA-256 over the NUL-joined
+  // `['sv2', turn, stepStartSeq, callId, '']` tuple, first 20 lowercase hex
+  // digits. A changed separator, field order or dropped domain tag must fail
+  // here, not merely produce a different-but-stable value.
+  assert.equal(
+    visualReference({ turn: 1, stepStartSeq: 4, callId: 'c' }),
+    'sv2_2d5dfb98930c76e3365c',
+  )
   assert.equal(
     visualReference({ turn: 1, stepStartSeq: 4, callId: 'c' }),
     visualReference({ turn: 1, stepStartSeq: 4, callId: 'c' }),

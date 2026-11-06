@@ -140,10 +140,11 @@ export function sessionPickerCategories(
       id: 'current',
       label: 'Current directory',
       header: `${header} · Current directory`,
-      // The same lineage tree as "All directories", built over the CURRENT
-      // workspace's subset: a fork/rewind branch whose parent lives in
-      // another workspace (or outside the window) degrades to a root at depth
-      // 0 — never lost, never mis-nested under an unrelated root.
+      // The same flat list as "All directories", built over the CURRENT
+      // workspace's subset. This category excludes subagent rows, and an rc.1
+      // ordinary fork has no parent edge (legacy ordinary-fork parentSession
+      // metadata is flat too), so every row stays at depth 0 — never lost,
+      // never mis-nested under an unrelated root.
       items: () => {
         const mainRows = rows.filter(row => row.origin !== 'subagent')
         if (rows.length === 0 && placeholder !== undefined) return [placeholder()]
@@ -156,10 +157,11 @@ export function sessionPickerCategories(
       id: 'all',
       label: 'All directories',
       header: `${header} · All directories`,
-      // The lineage tree (plan §20): fork/rewind children and subagents
-      // hang under their parentSession chain with a └─ prefix. Missing-parent
-      // or cycle members degrade to flat roots; the tree's `placed` guard
-      // keeps corrupt metadata from looping.
+      // This category lists only non-subagent rows: rc.1 ordinary forks carry
+      // no parent edge, and legacy ordinary-fork parentSession metadata never
+      // fabricates one, so the list is flat. The shared `buildSessionTree`
+      // contract (and its `placed` cycle guard) still owns real subagent
+      // lineage wherever that tree is used.
       items: () => {
         const mainRows = rows.filter(row => row.origin !== 'subagent')
         if (rows.length === 0 && placeholder !== undefined) return [placeholder()]
@@ -685,8 +687,8 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
         // the same controller; a runner exit closes the overlay AND cancels
         // the scan through the shared signal.
         signal: scanSignal,
-        // The selected session's long title marquees; the lineage tree
-        // connector and the `●` current marker stay fixed (plan §7.6/§7.7).
+        // The selected session's long title marquees; the row prefix (when
+        // present) and the `●` current marker stay fixed (plan §7.6/§7.7).
         marquee: { labelPartsOf: sessionLabelParts },
         // The Session Browser's content-search hook: every filter change
         // (typed or programmatic) feeds the 250ms debounce; before the
