@@ -561,3 +561,50 @@ test('keeps its unverified host limit visible in the real Detail', async () => {
   assert.match(frame, /captureFetch may expose unredacted debugging data\.[\s\S]{0,200}?Host activation is not qualified here\./u)
   assert.doesNotMatch(frame, /Host capability not yet qualified for TUI/u)
 })
+
+test('the hidden-bundle search hint is discoverable WITHOUT scrolling at 80×24, 72×24 and 44×20', async () => {
+  const hidden = '@deepseek-ai/dsh-experimental-hidden-optional'
+  for (const [columns, rows] of [[80, 24], [72, 24], [44, 20]] as const) {
+    // Enough visible cards that a tail-placed hint would sit below the list
+    // viewport: discoverability must not depend on list paging.
+    const visible = Array.from({ length: 14 }, (_, index) => bundle({
+      name: `@vendor/visible-${index}`,
+      title: `Visible bundle ${index}`,
+      source: `file:/tmp/visible-${index}`,
+    }))
+    const harness = await open({
+      columns,
+      rows,
+      bundles: [
+        bundle({ name: SELF_BUNDLE, source: 'file:/tmp/tui', rows: [{ rowId: 'tui-app', moduleName: SELF_BUNDLE, entryId: 'e-tui' }] }),
+        ...visible,
+        bundle({
+          name: hidden,
+          official: true,
+          availability: 'installation',
+          installed: false,
+          enabled: false,
+          optional: true,
+          removable: false,
+          source: undefined,
+          listedByDefault: false,
+        }),
+      ],
+    })
+    // First frame, no key pressed: the untouched list is the Host default
+    // listing and the ONE search hint sits at the TOP of the list body, so it
+    // is painted even though the visible cards exceed the viewport.
+    const view = harness.view()
+    assert.match(view, /\/ searches hidden/u,
+      `${columns}x${rows} must reveal the explicit search route without scrolling:\n${view}`)
+    const hintRow = rowOf(harness, '/ searches hidden')
+    const firstCardRow = rowOf(harness, 'Visible bundle 0')
+    assert.ok(hintRow >= 0, `${columns}x${rows} paints the search hint`)
+    assert.ok(firstCardRow > hintRow,
+      `${columns}x${rows} places the hint above the card list, never below its viewport (hint ${hintRow}, first card ${firstCardRow})`)
+    assert.doesNotMatch(view, new RegExp(hidden.replace('/', '\\/')),
+      `${columns}x${rows} keeps the default-hidden bundle out of the untouched list`)
+    started.delete(harness)
+    harness.app.dispose()
+  }
+})

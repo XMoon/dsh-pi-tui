@@ -2091,10 +2091,12 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
         for (const card of cards) entries.push({ kind: 'card', label: card.name, value: card.value, card })
       }
     }
-    // ONE existing hint line: the untouched list is the Host's default
-    // listing, and an explicit `/` search reads the complete inventory.
+    // ONE hint line: the untouched list is the Host's default listing, and an
+    // explicit `/` search reads the complete inventory. It is the FIRST body
+    // row so it cannot fall below the list viewport (the list's own paging
+    // moves between cards and would never guarantee scrolling to a tail hint).
     if (model.cards.some(card => this.hiddenByDefault(card))) {
-      entries.push({
+      entries.unshift({
         kind: 'empty',
         label: '/ searches hidden official bundles',
       })

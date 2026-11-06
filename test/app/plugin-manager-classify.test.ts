@@ -1006,13 +1006,28 @@ test('the Host default-listing decision is preserved as a explained fact', () =>
   assert.equal(cardByName(model, 'hidden-by-default')!.listedByDefault, false)
 })
 
-test('the Status group names the profile selection, never a load claim', () => {
-  const model = buildPluginManagerModel(snapshot([bundle({ name: 'selected', enabled: true })], []), new Map())
-  const facts = buildPluginDetailView(cardByName(model, 'selected')!).groups.flatMap(group => group.facts)
-  assert.equal(facts.find(entry => entry.label === 'Selected in profile')?.value, 'Yes')
-  assert.equal(facts.some(entry => entry.label === 'Enabled'), false,
+test('the Status group names the profile selection for a bundle and effective enablement for an entry', () => {
+  // The SAME Host `enabled` boolean means "profile selection" for a bundle…
+  const bundleModel = buildPluginManagerModel(snapshot([bundle({ name: 'selected', enabled: true })], []), new Map())
+  const bundleFacts = buildPluginDetailView(cardByName(bundleModel, 'selected')!).groups.flatMap(group => group.facts)
+  assert.equal(bundleFacts.find(entry => entry.label === 'Selected in profile')?.value, 'Yes')
+  assert.equal(bundleFacts.some(entry => entry.label === 'Effective enabled'), false)
+  assert.equal(bundleFacts.some(entry => entry.label === 'Enabled'), false,
     'the Host enabled flag is never presented as a running/enabled service')
-  assert.equal(facts.find(entry => entry.label === 'Fiber'), undefined, 'no live row means no fiber claim')
+  assert.equal(bundleFacts.find(entry => entry.label === 'Fiber'), undefined, 'no live row means no fiber claim')
+
+  // …but a standalone Loader entry is NOT a profile bundle: its flag is the
+  // entry's effective enablement, so it must never be labelled as a selection.
+  const entryModel = buildPluginManagerModel(
+    snapshot([], [row({ entryId: 'include:plain', moduleName: 'plain', patchId: 'plain', enabled: false })]),
+    new Map(),
+  )
+  const entryCard = entryModel.cards.find(candidate => candidate.target === 'entry')!
+  const entryFacts = buildPluginDetailView(entryCard).groups.flatMap(group => group.facts)
+  assert.equal(entryFacts.find(entry => entry.label === 'Effective enabled')?.value, 'No')
+  assert.equal(entryFacts.some(entry => entry.label === 'Selected in profile'), false,
+    'a standalone Loader entry is not a profile bundle selection')
+  assert.equal(entryFacts.some(entry => entry.label === 'Enabled'), false)
 })
 
 // ── S5-PR1: release-owned Experimental identity vs legacy presentation ─────
