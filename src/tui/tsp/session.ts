@@ -4275,6 +4275,14 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         // error reaches the runner's fatal lifecycle, exactly like the seat's
         // own modal settle and the visual/History Copy settlements above.
         reportFatal: (error) => { routeFatal(error) },
+        // The fatal owner itself threw: state it, exactly as the visible-Reader
+        // close does, and do not let this chain end unhandled.
+        reportSecondaryFailure: (error, secondary) => {
+          options.logError?.('tsp renderer: History search settlement failure could not be routed', {
+            error: errorText(error),
+            secondary: errorText(secondary),
+          })
+        },
       }, binding, nativeHistoryCapable)
     },
     installInlineAttachmentStager: (stager) => {

@@ -1119,6 +1119,51 @@ test('a copy that settles while a Modal parks the card still states its outcome'
     && String((node.p as { text?: string }).text ?? '') !== ''), false, 'a copy never writes the draft')
 })
 
+test('a fatal owner that itself throws is stated, never left as an unhandled rejection', async (t) => {
+  // The terminal path of the terminal path: the settlement's frame failed, the
+  // seat routed it, and the fatal owner threw while handling it. The renderer's
+  // own precedent (the visible-Reader close) states the pair through
+  // `logError`; this seat must not be the one that orphans the chain instead.
+  const routed: unknown[] = []
+  const secondary: Array<[unknown, unknown]> = []
+  const rejections: unknown[] = []
+  let frames = 0
+  let release: ((page: HistorySearchPage) => void) | undefined
+  const seat = createTspHistorySearch({
+    admitted: () => true,
+    requestRender: () => {
+      // Only the frame the SETTLEMENT owes fails; the open frame is allowed,
+      // so this case is about the fatal owner, not about a broken mount.
+      frames += 1
+      if (frames > 1) throw new Error('simulated ViewError on the settled frame')
+    },
+    setFocus: () => {},
+    restoreToComposer: () => {},
+    copyRaw: () => {},
+    reveal: () => {},
+    scroll: () => {},
+    reportFatal: (error) => { routed.push(error); throw new Error('the fatal owner itself threw') },
+    reportSecondaryFailure: (error, second) => { secondary.push([error, second]) },
+  }, {
+    source: { search: () => new Promise<HistorySearchPage>(resolve => { release = resolve }) },
+    cwd: () => '/work/alpha',
+    captureScope: () => ({ sessionId: 'ses_a', isCurrent: () => true }),
+  }, () => true)
+  process.on('unhandledRejection', (reason) => { rejections.push(reason) })
+  t.after(() => {
+    process.removeAllListeners('unhandledRejection')
+    seat.retire()
+  })
+  seat.open()
+  release?.({ results: [], exhausted: true })
+  await settle(ABSENCE_WINDOW_MS)
+  assert.equal(routed.length, 1, 'the PRIMARY error was routed first')
+  assert.equal(secondary.length, 1, 'and the fatal owner\u2019s own throw was stated, not swallowed')
+  assert.match(String((secondary[0]?.[0] as Error)?.message ?? ''), /simulated ViewError/)
+  assert.match(String((secondary[0]?.[1] as Error)?.message ?? ''), /fatal owner itself threw/)
+  assert.deepEqual(rejections, [], 'and nothing escaped as an unhandled rejection')
+})
+
 test('a retirement the settlement performs owns the frame it asks for too', async (t) => {
   // The fence and the commit share one failure owner: `retireDiscovered()` asks
   // the mount for the frame that removes the card, so if THAT frame throws the
@@ -1143,6 +1188,7 @@ test('a retirement the settlement performs owns the frame it asks for too', asyn
     reveal: () => {},
     scroll: () => {},
     reportFatal: (error) => { fatal.push(error) },
+    reportSecondaryFailure: (error, secondary) => { fatal.push(['secondary', error, secondary]) },
   }, {
     source: {
       search: () => new Promise<HistorySearchPage>(resolve => { release = resolve }),
@@ -1180,6 +1226,7 @@ test('the seat routes a frame commit that throws in its OWN settlement to the fa
     reveal: () => {},
     scroll: () => {},
     reportFatal: (error) => { fatal.push(error) },
+    reportSecondaryFailure: (error, secondary) => { fatal.push(['secondary', error, secondary]) },
   }, {
     source: {
       search: () => Promise.resolve({
@@ -1222,6 +1269,7 @@ test('a read that answers after its captured scope died is refused by the settle
     reveal: () => {},
     scroll: () => {},
     reportFatal: (error) => { fatal.push(error) },
+    reportSecondaryFailure: (error, secondary) => { fatal.push(['secondary', error, secondary]) },
   }, {
     source: {
       search: (request: HistorySearchRequest) => {
@@ -1256,10 +1304,12 @@ test('the mount wires the seat\u2019s fatal port to its own fatal owner (end-to-
   // reaches `onFatal`. It deliberately does NOT prove the seat owns the failure
   // (the SDK's own loop routes the same ViewError here too), which is the
   // seat-isolated case above's job.
-  // The seat OWNS both settlement branches, so the only remaining failure is the
-  // frame it owes. `surface.render` raises a ViewError; that PRIMARY error must
-  // reach the runner's fatal lifecycle (the pane's tty owner is broken), never
-  // an unhandled rejection on the chain the seat started and never a silent
+  // What THIS case proves is the WIRING: a `ViewError` raised by the frame the
+  // settlement owes reaches the runner's fatal lifecycle end to end on the real
+  // mount (the seat's own ownership of that failure is the isolated case
+  // above's job, because the SDK loop routes the same error here too). The
+  // settlement owns both of its branches, so the only failure left is the frame
+  // it owes — and it must never end up as an unhandled rejection or a silent
   // "failed read" story.
   const pane = installTspPane({ composerActions: true, historySearch: true })
   t.after(() => pane.restore())

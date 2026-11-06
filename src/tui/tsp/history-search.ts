@@ -144,6 +144,13 @@ export interface TspHistorySearchPorts {
    * started. Nothing here swallows, retries or falls back.
    */
   reportFatal(error: unknown): void
+  /**
+   * The fatal owner itself threw while handling `error`. This is the terminal
+   * path, so the only honest act left is to STATE it (the renderer's own
+   * `logError` route) rather than let the chain that started this settlement
+   * end up as an unhandled rejection. Nothing here retries or recovers.
+   */
+  reportSecondaryFailure(primary: unknown, secondary: unknown): void
 }
 
 export interface TspHistorySearchSeat {
@@ -492,8 +499,16 @@ export function createTspHistorySearch(
         if (owner.phase === 'open') change(owner)
       } catch (error) {
         // The page WAS consumed; only the frame it owed failed. The error is the
-        // renderer's fatal path, never a second "failed read" story.
-        ports.reportFatal(error)
+        // renderer's fatal path, never a second "failed read" story. A fatal
+        // owner that itself throws is handled exactly the way the renderer's
+        // other settlement owners handle it (the visible-Reader close): the
+        // PRIMARY error stays routed, the secondary is stated, and nothing is
+        // left to become an unhandled rejection on this chain.
+        try {
+          ports.reportFatal(error)
+        } catch (secondary) {
+          ports.reportSecondaryFailure(error, secondary)
+        }
       }
     }, () => {
       if (state !== owner || owner.retired || pending !== request) return
@@ -516,7 +531,11 @@ export function createTspHistorySearch(
         owner.exhausted = false
         if (owner.phase === 'open') change(owner)
       } catch (error) {
-        ports.reportFatal(error)
+        try {
+          ports.reportFatal(error)
+        } catch (secondary) {
+          ports.reportSecondaryFailure(error, secondary)
+        }
       }
     })
   }
