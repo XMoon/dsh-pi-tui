@@ -461,14 +461,19 @@ export function createTspHistorySearch(
       // false, and a parked card must keep its committed rows so `resume()`
       // shows the SAME query, selection and page (the plan's TRANSIENT state) —
       // reading admission here was the bug that destroyed the card.
-      // The captured scope IS read here, and it is not decoration: retirement
-      // is what aborts the in-flight read, so a page that answers after its
-      // Session scope died both commits nothing and stops the source's scan.
-      if (owner.scopeCapture.isCurrent() === false) {
-        retireDiscovered()
-        return
-      }
+      // The captured scope IS re-checked here, INSIDE the frame-owning `try`:
+      // retirement itself asks the mount for the frame that removes the card,
+      // so a fence placed before the `try` would let that frame's failure
+      // escape as an unhandled rejection instead of reaching the fatal owner.
       try {
+        if (owner.scopeCapture.isCurrent() === false) {
+          // The page is refused and the round is retired, which aborts this
+          // read's controller: a source that still holds the signal stops
+          // scanning. (The abort is a no-op for a source that already settled,
+          // so the refusal is the claim, not the stopping.)
+          retireDiscovered()
+          return
+        }
         pending = undefined
         const previous = owner.selectedId
         owner.rows = page.results
@@ -493,14 +498,15 @@ export function createTspHistorySearch(
     }, () => {
       if (state !== owner || owner.retired || pending !== request) return
       if (request.serial !== owner.openSerial || request.revision !== owner.queryRevision) return
-      // The same identity + captured-scope fence as the fulfilment branch: a
-      // parked card records its failure and states it on resume, while a dead
-      // scope retires the round and aborts nothing further.
-      if (owner.scopeCapture.isCurrent() === false) {
-        retireDiscovered()
-        return
-      }
+      // The same fence, in the same frame-owning `try`, as the fulfilment
+      // branch: a parked card records its failure and states it on resume, and
+      // a dead scope retires the round without letting the retirement frame's
+      // own failure escape.
       try {
+        if (owner.scopeCapture.isCurrent() === false) {
+          retireDiscovered()
+          return
+        }
         pending = undefined
         // A failed read is a FAILED read: never an empty page dressed up as "no
         // matches", and the user's own draft was never touched by it.
