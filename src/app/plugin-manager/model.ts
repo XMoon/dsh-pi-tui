@@ -380,9 +380,16 @@ export function cardStatusTone(card: PluginCardView): 'muted' | 'warning' | 'err
 function cardStatusFacts(card: PluginCardView): PluginDetailFact[] {
   const facts: PluginDetailFact[] = [
     { label: 'Installed', value: card.installed ? 'Yes' : 'No', tone: card.installed ? 'normal' : 'dim' },
-    // The Host `enabled` fact is the profile's SELECTION, never proof that the
-    // layer loaded or runs; `Fiber` below stays the separate runtime fact.
-    { label: 'Selected in profile', value: card.enabled ? 'Yes' : 'No', tone: card.enabled ? 'normal' : 'dim' },
+    // The SAME Host `enabled` boolean means different things per target: a
+    // bundle's flag is the profile SELECTION (never proof that the layer
+    // loaded or runs), while a standalone Loader entry's flag is its effective
+    // enablement (including disabled ancestor groups). `Fiber` below stays the
+    // separate runtime fact in both cases.
+    {
+      label: card.target === 'bundle' ? 'Selected in profile' : 'Effective enabled',
+      value: card.enabled ? 'Yes' : 'No',
+      tone: card.enabled ? 'normal' : 'dim',
+    },
     { label: 'Availability', value: availabilityLabel(card.availability), tone: card.availability === 'missing' ? 'warning' : 'dim' },
     { label: 'Origin', value: originLabel(card.origin), tone: card.origin === 'unknown' ? 'warning' : 'dim' },
   ]

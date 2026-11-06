@@ -984,10 +984,13 @@ the Host catalog stays the only authority and explicit search is the documented
 route to the complete inventory. The list carries ONE hint line naming that
 route; there is no second catalog page, store or navigation level.
 
-A `Host error` outranks every selected/available summary: `enabled` is the
-profile SELECTION (painted as `Selected in profile`, with `Fiber` as the separate
-runtime fact), so a bundle the Host refuses with `unsupported-platform` is never
-presented as running. That refusal blocks only the official catalog Install; it
+A `Host error` outranks every selected/available summary. The SAME Host
+`enabled` boolean means different things per target and is labelled accordingly:
+a bundle's flag is the profile SELECTION (`Selected in profile`), while a
+standalone Loader entry's flag is its effective enablement (`Effective enabled`,
+including disabled ancestor groups). `Fiber` stays the separate runtime fact in
+both cases, so a bundle the Host refuses with `unsupported-platform` is never
+presented as running and an entry is never mislabelled as a profile selection. That refusal blocks only the official catalog Install; it
 never locks the recoveries the Host still permits. A selected bundle can always
 be disabled through the real `setBundleEnabled(name,false)` plus the
 authoritative reread — including while its files are missing or its platform is
