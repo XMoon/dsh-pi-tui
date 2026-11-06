@@ -1557,7 +1557,17 @@ test('without a settings service the Remote config fails closed', async (t) => {
  *  extension. This focused case mounts the SAME production Gateway rows
  *  (`WebServer` + Connection + `TypertGatewayService`) on a real loopback
  *  server and drives the carrier with a real `ws` client; no product code or
- *  wire protocol is changed for the test. */
+ *  wire protocol is changed for the test.
+ *
+ *  EVIDENCE LEVEL — TRANSPORT ONLY: the invoked method is a test-registered
+ *  Typert service and the client is a raw `ws` peer, so this case proves the
+ *  production Gateway carrier's `permessage-deflate` negotiation, a 1KiB+
+ *  frame, and the admitted browser Peer identity. It does NOT prove the
+ *  production Client read chain or an existing Session Remote endpoint, so the
+ *  S3 Q14 qualification stays `UPSTREAM_VERIFIED / PRODUCT_NOT_MEASURED`
+ *  (the upstream rc1 `gateway-stream.host.spec.ts` owns the compression-mode
+ *  interop evidence); this local case is supplementary transport evidence,
+ *  never a full product PASS. */
 const S3_LARGE_PAYLOAD = `s3-large-${'x'.repeat(1_500)}`
 
 class S3WireService extends TypertRemoteService {
