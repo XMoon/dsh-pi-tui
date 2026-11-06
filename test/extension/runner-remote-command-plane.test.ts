@@ -440,8 +440,14 @@ test('F-UX-02 Remote: a real /fork announces the adopted child exactly once and 
   const childIds = clientSessionIds(clientSessions).filter(id => !sourcesBefore.includes(id))
   assert.equal(childIds.length, 1, 'the Host fork created exactly one child Session')
   const childId = childIds[0]!
-  assert.equal(childParentId(clientSessions, childId), mainId,
-    'the new Session is the fork child of the source (official lineage)')
+  assert.equal(childParentId(clientSessions, childId), undefined,
+    'an rc.1 ordinary fork child is an independent Session (no Client parentId)')
+  const childHeader = (fixture.host.ctx.sessions.get(SessionId(childId)) as unknown as {
+    header: { readonly parentSession?: string; readonly isSeeded?: boolean }
+  }).header
+  assert.equal(childHeader.parentSession, undefined,
+    'the Host child header carries no parentSession')
+  assert.equal(childHeader.isSeeded, true, 'the Host child header must be seeded')
   // The adopted navigation: the TUI main view retains the CHILD and no longer
   // retains the source — the official Client retain bookkeeping, not a guess.
   assert.deepEqual(retainFacts(clientSessions, childId).retainedBy, { tuiMainView: 1 },

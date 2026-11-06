@@ -100,6 +100,10 @@ function deferred<Value>() {
 }
 
 async function mounted(t: { after(fn: () => unknown): void }, read: SessionReader = reader({
+  // rc.1 ordinary forks are independent Sessions, so these LEGACY
+  // parentSession rows must stay flat roots; real subagent rows are excluded
+  // from the Browser by the read owner. The grouping/orphan/cycle fixtures
+  // below therefore exercise flat ordering and membership, not nesting.
   list: async () => [
     row('session-current', { live: true }),
     row('session-other', { cwd: '/workspace/project', parentSession: 'session-current' }),
@@ -275,7 +279,8 @@ test('native Browser is one workspace tree, then a global cards union with Host-
   assert.deepEqual(items(pane).map((entry) => entry.id), [
     'session:session-current', 'session:session-other', 'session:session-cross-child',
   ])
-  assert.deepEqual(items(pane).map((entry) => entry.depth), [0, 1, 0])
+  assert.deepEqual(items(pane).map((entry) => entry.depth), [0, 0, 0],
+    'legacy ordinary-fork parentSession metadata stays flat in the Browser tree')
   assert.deepEqual(order(pane), [
     { group: 'workspace-run:0', label: 'workspace/project', count: 3 },
     'session:session-current',
@@ -591,7 +596,8 @@ test('All workspaces groups contiguous workspace runs without changing lineage, 
     'session:session-cycle-a',
     'session:session-cycle-b',
   ])
-  assert.deepEqual(items(pane).map((entry) => entry.depth), [0, 1, 2, 3, 0, 0, 1])
+  assert.deepEqual(items(pane).map((entry) => entry.depth), [0, 0, 0, 0, 0, 0, 0],
+    'legacy parentSession metadata never nests; orphans and cycle members stay listed once')
   const allOrder = order(pane)
   const groups = allOrder.filter((entry): entry is PickerGroup => typeof entry !== 'string')
   assert.deepEqual(allOrder, [

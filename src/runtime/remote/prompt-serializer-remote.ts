@@ -25,6 +25,7 @@
  */
 
 import type { PreparedPrompt } from '../prepared-prompt.ts'
+import type { ImageAttachmentRefLike } from '../../domain/media/types.ts'
 import type {
   RemotePendingAttachment,
   RemotePromptContentPart,
@@ -34,9 +35,10 @@ import type {
 } from './session-writer-remote.ts'
 
 /** The official attachment-bytes read for recalled images (structural
- * `SessionFace.readAttachment`): addressed by session + attachment id. */
+ * `SessionFace.readAttachment`): addressed by session + the FULL durable
+ * reference the recalled draft carries. */
 export interface RemoteAttachmentBytesSource {
-  readAttachment(sessionId: string, attachmentId: string): Promise<
+  readAttachment(sessionId: string, attachment: ImageAttachmentRefLike): Promise<
     | { readonly ok: true; readonly data: Uint8Array }
     | { readonly ok: false; readonly error: unknown }
   >
@@ -63,12 +65,12 @@ function previewOf(image: { readonly name?: string; readonly width: number; read
 }
 
 /** The sessions face the binding-based recall read borrows: the official
- * `ClientSessions.binding(id).session.readAttachment(attachmentId)` chain,
- * kept structural so tests can stand in. */
+ * `ClientSessions.binding(id).session.readAttachment(fullRef)` chain, kept
+ * structural so tests can stand in. */
 export interface RemoteSerializerSessionsSource {
   binding(sessionId: string): {
     readonly session: {
-      readAttachment(attachmentId: never): Promise<
+      readAttachment(attachment: ImageAttachmentRefLike): Promise<
         | { readonly ok: true; readonly value: { readonly data: Uint8Array } }
         | { readonly ok: false; readonly error: unknown }
       >
@@ -110,12 +112,12 @@ export class RemotePromptSerializerProduction implements RemotePromptSerializer 
    * retained binding, addressed by the PreparedPrompt's own session id. */
   static overSessions(sessions: RemoteSerializerSessionsSource): RemotePromptSerializerProduction {
     const serializer = new RemotePromptSerializerProduction({
-      async readAttachment(sessionId, attachmentId) {
+      async readAttachment(sessionId, attachment) {
         const binding = sessions.binding(sessionId)
         if (binding === undefined) {
           return { ok: false, error: new Error(`session "${sessionId}" is not available for an attachment read`) }
         }
-        const result = await binding.session.readAttachment(attachmentId as never)
+        const result = await binding.session.readAttachment(attachment)
         if (result.ok) return { ok: true, data: result.value.data }
         return { ok: false, error: (result as { readonly error: unknown }).error }
       },
@@ -205,7 +207,7 @@ export class RemotePromptSerializerProduction implements RemotePromptSerializer 
           // through the official attachment read, then submit ordinary
           // official image data (never cite the Host-private reference).
           const source = this.attachments!
-          const read = await source.readAttachment(prompt.sessionId, image.recalledRef.attachmentId)
+          const read = await source.readAttachment(prompt.sessionId, image.recalledRef)
           signal?.throwIfAborted()
           if (!read.ok) {
             return { kind: 'unsupported', reason: `the durable image bytes could not be read for re-send (${String(read.error)})` }

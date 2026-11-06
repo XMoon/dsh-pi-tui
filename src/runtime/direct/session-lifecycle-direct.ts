@@ -4,11 +4,11 @@
  *
  * D2.3 moved ordinary create/open activation requirements INSIDE the adapter.
  * D2.4 does the same for fork: this adapter maps the official Host fork
- * algorithm (observation, the alpha.2 boundary contract — an explicit `atSeq`
+ * algorithm (observation, the rc.1 boundary contract — an explicit `atSeq`
  * is an EXACT inclusive event cut, an omitted one selects the latest completed
- * prefix —, the official `buildForkSeed` repair, lineage, preset, default model
- * and workspace attachment) without exposing those details through the
- * semantic port.
+ * prefix —, the official `buildForkSeed` repair, subagent ancestor workspace
+ * resolution, preset, default model and workspace attachment) without exposing
+ * those details through the semantic port.
  *
  * The adapter is the only module in these lifecycle paths that touches `ctx`
  * and the preset composition. It keeps the real AgentHandle ownership escape
@@ -448,7 +448,7 @@ export class DirectSessionLifecycle implements SessionLifecycle {
     }
   }
 
-  /** Map the official alpha.2 Host fork algorithm into the Direct
+  /** Map the official rc.1 Host fork algorithm into the Direct
    * implementation. The only raw seed construction in the repository is the
    * OFFICIAL `buildForkSeed()` called here, immediately next to
    * `agents.create`; commands and the semantic port see only the source id and
@@ -480,7 +480,7 @@ export class DirectSessionLifecycle implements SessionLifecycle {
       )
     }
     try {
-      // The alpha.2 contract: an explicit `atSeq` is the EXACT inclusive cut
+      // The rc.1 contract: an explicit `atSeq` is the EXACT inclusive cut
       // (never moved to a later `turn/end`); an omitted one selects the latest
       // completed prefix. The canonical-event proof below mirrors the official
       // STRICT `source.events[boundary]?.seq === boundary` check — no numeric
@@ -524,7 +524,6 @@ export class DirectSessionLifecycle implements SessionLifecycle {
       const inheritedEventCount = SessionLogOffset(boundary + 1)
       const childMeta: Record<string, unknown> = {
         ...(source.header.cwd === undefined ? {} : { cwd: source.header.cwd }),
-        parentSession: source.header.id,
         isSeeded: true,
         ...(composition.agentPreset === undefined ? {} : { agentPreset: composition.agentPreset }),
       }
@@ -590,7 +589,7 @@ export class DirectSessionLifecycle implements SessionLifecycle {
 
 /** Resolve the omitted-`atSeq` default to the latest completed-turn prefix,
  * including standalone stable events before the next turn / queued-input
- * admission boundary. The exact alpha.2 Host selector (`latestCompletedPrefix
+ * admission boundary. The exact rc.1 Host selector (`latestCompletedPrefix
  * Boundary` in the official Session Controller) — omitted default cut
  * selection is Host semantics, not picker semantics, so this private mapping
  * lives immediately beside the fork adapter. */

@@ -40,15 +40,23 @@ export function sameWorkspace(a: string | undefined, b: string | undefined): boo
   return normalize(strip(a)) === normalize(strip(b))
 }
 
-/** Parent-first lineage, preserving newest-first order at every level. */
-export function buildSessionTree<T extends { readonly id: string; readonly parentSession?: string }>(
+/** Subagent-first lineage, preserving newest-first order at every level.
+ *
+ * Only a REAL Host subagent origin owns a displayed parent edge: an ordinary
+ * `/fork` child is an independent Session with no `parentSession` metadata,
+ * and legacy ordinary-fork metadata must not fabricate a tree edge. */
+export function buildSessionTree<T extends {
+  readonly id: string
+  readonly parentSession?: string
+  readonly origin?: 'subagent'
+}>(
   rows: readonly T[],
 ): { readonly row: T; readonly depth: number }[] {
   const known = new Set(rows.map(row => row.id))
   const children = new Map<string, T[]>()
   const roots: T[] = []
   for (const row of rows) {
-    if (row.parentSession !== undefined && known.has(row.parentSession)) {
+    if (row.origin === 'subagent' && row.parentSession !== undefined && known.has(row.parentSession)) {
       const list = children.get(row.parentSession)
       if (list === undefined) children.set(row.parentSession, [row])
       else list.push(row)

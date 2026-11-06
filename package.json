@@ -116,6 +116,7 @@
     "@deepseek-ai/dsh-api-settings-controller": ">=0.2.2-rc.1",
     "@deepseek-ai/dsh-api-workspace-controller": ">=0.2.2-rc.1",
     "@deepseek-ai/dsh-api-workspace-files": ">=0.2.2-rc.1",
+    "@deepseek-ai/dsh-attachment": ">=0.2.2-rc.1",
     "@deepseek-ai/dsh-authorization": ">=0.2.2-rc.1",
     "@deepseek-ai/dsh-client-connection": ">=0.2.2-rc.1",
     "@deepseek-ai/dsh-client-file-upload": ">=0.2.2-rc.1",

@@ -20,8 +20,8 @@
  * fork runs through `ClientSessions.fork()`; the Direct fork runs through
  * `DirectSessionLifecycle.fork()`. The children are then compared on semantic
  * output only — event structure, inherited prefix length, fork marker and
- * repair shape, lineage metadata, workspace membership, preset and activation
- * default — never on ids or timestamps.
+ * repair shape, independent-child metadata, workspace membership, preset and
+ * activation default — never on ids or timestamps.
  *
  * Covered parity cases (plan §26):
  * - P1 exact mid-turn cut with a dispatched result-less tool call (repair);
@@ -30,7 +30,8 @@
  * - P4 omitted cut includes a standalone stable tail event;
  * - P5 omitted cut excludes queued input, and continuing both children with
  *   "C" never executes the parent's queued future input;
- * - P6 child lineage (parentSession + isSeeded, compared by shape);
+ * - P6 independent ordinary fork child metadata (no parentSession; isSeeded,
+ *   compared by shape);
  * - P7 subagent source nearest-ancestor workspace with an ordinary child
  *   header (origin/delegationDepth not copied);
  * - P8 child activation stays the Host current default.
@@ -348,7 +349,8 @@ function childSnapshot(host, childId) {
 }
 
 /** Compare two children from structurally identical sources on semantic
- * output only (never ids/times), including lineage-by-shape and preset. */
+ * output only (never ids/times), including independent-child metadata and
+ * preset. */
 function assertChildrenParity(host, hostChild, directChild, hostSourceId, directSourceId, expectations = {}) {
   const hostEvents = hostChild.snapshotEvents()
   const directEvents = directChild.snapshotEvents()
@@ -367,7 +369,9 @@ function assertChildrenParity(host, hostChild, directChild, hostSourceId, direct
     [hostChild, hostSourceId, 'Host'],
     [directChild, directSourceId, 'Direct'],
   ]) {
-    assert.equal(child.header.parentSession, sourceId, `${label} child parentSession must name its own source`)
+    assert.notEqual(String(child.header.id), sourceId, `${label} fork child must be its own Session`)
+    assert.equal(child.header.parentSession, undefined,
+      `${label} child must be an independent ordinary fork with no parentSession`)
     assert.equal(child.header.isSeeded, true, `${label} child must be seeded`)
     assert.equal(child.header.origin, undefined, `${label} child must not copy origin`)
     assert.equal(child.header.delegationDepth, undefined, `${label} child must not copy delegationDepth`)

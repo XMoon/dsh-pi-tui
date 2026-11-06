@@ -53,10 +53,9 @@ export interface RemoteChildBinding {
     }
     /**
      * The official binding's authenticated attachment read. DSH 0.2.2 takes the
-     * Host's full `ImageAttachmentRef`, not a bare id; the parameter stays an
-     * opaque handle here because PR1A does not re-type the deferred Remote
-     * image-read path (the two production call sites keep their documented
-     * `as never` and S2 owns the ref construction).
+     * Host's full `ImageAttachmentRef`, not a bare id; the composition seam
+     * passes the complete durable reference now (S2-PR2 runtime compatibility),
+     * so this structural handle stays opaque only at the type boundary.
      */
     readAttachment(attachment: unknown): Promise<RemoteAttachmentReadResult>
   }

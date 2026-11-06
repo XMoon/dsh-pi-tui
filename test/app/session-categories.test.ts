@@ -43,14 +43,14 @@ function startApp(): { vt: VirtualTerminal; app: TuiApp; picked: string[] } {
   return { vt, app, picked }
 }
 
-test('buildSessionTree hangs every parentSession row under its parent chain', () => {
+test('buildSessionTree nests only real subagent origins', () => {
   const rows: SessionPickerRow[] = [
     { id: 'session-root-1', createdAt: 5, updatedAt: 5, live: false },
     { id: 'session-child-1', createdAt: 4, updatedAt: 4, origin: 'subagent', parentSession: 'session-root-1', live: false },
     { id: 'session-root-2', createdAt: 3, updatedAt: 3, live: false },
     { id: 'session-grandchild', createdAt: 2, updatedAt: 2, origin: 'subagent', parentSession: 'session-child-1', live: false },
-    // A subagent WITHOUT a parentSession is a root now: `parentSession`
-    // decides the hierarchy, `origin` only the badge (plan §20).
+    // A subagent WITHOUT a parentSession is a root: `origin` decides whether
+    // a real Host ancestry edge exists, `parentSession` supplies the target.
     { id: 'session-unparented', createdAt: 1, updatedAt: 1, origin: 'subagent', live: false },
   ]
   const tree = buildSessionTree(rows)
@@ -65,9 +65,23 @@ test('buildSessionTree hangs every parentSession row under its parent chain', ()
   assert.equal(tree[1]!.row.id, 'session-child-1', 'children follow their root immediately')
 })
 
-// ── session lineage (plan §20): /fork + rewind children in the tree ───────
+// ── session lineage: only real subagent origins form a picker tree ────────
 
-test('a plain /fork child hangs under its parent', () => {
+test('an rc.1 ordinary /fork child is an independent root', () => {
+  const rows: SessionPickerRow[] = [
+    { id: 'session-parent', createdAt: 4, updatedAt: 4, live: false },
+    { id: 'session-fork', createdAt: 3, updatedAt: 3, live: false },
+  ]
+  const tree = buildSessionTree(rows)
+  assert.deepEqual(tree.map(entry => [entry.row.id, entry.depth]), [
+    ['session-parent', 0],
+    ['session-fork', 0],
+  ])
+})
+
+test('historical ordinary-fork parentSession metadata stays a root', () => {
+  // Pre-rc.1 ordinary forks persisted `parentSession`; the rc.1 contract does
+  // not turn that historical metadata into a displayed tree edge.
   const rows: SessionPickerRow[] = [
     { id: 'session-parent', createdAt: 4, updatedAt: 4, live: false },
     { id: 'session-fork', createdAt: 3, updatedAt: 3, parentSession: 'session-parent', live: false },
@@ -75,11 +89,11 @@ test('a plain /fork child hangs under its parent', () => {
   const tree = buildSessionTree(rows)
   assert.deepEqual(tree.map(entry => [entry.row.id, entry.depth]), [
     ['session-parent', 0],
-    ['session-fork', 1],
+    ['session-fork', 0],
   ])
 })
 
-test('a rewind-of-rewind chain nests deeper', () => {
+test('a rewind-of-rewind chain of ordinary forks never nests', () => {
   const rows: SessionPickerRow[] = [
     { id: 'session-parent', createdAt: 5, updatedAt: 5, live: false },
     { id: 'session-child1', createdAt: 4, updatedAt: 4, parentSession: 'session-parent', live: false },
@@ -88,12 +102,12 @@ test('a rewind-of-rewind chain nests deeper', () => {
   const tree = buildSessionTree(rows)
   assert.deepEqual(tree.map(entry => [entry.row.id, entry.depth]), [
     ['session-parent', 0],
-    ['session-child1', 1],
-    ['session-child2', 2],
+    ['session-child1', 0],
+    ['session-child2', 0],
   ])
 })
 
-test('a subagent still hangs under its parent', () => {
+test('a real subagent still hangs under its parent', () => {
   const rows: SessionPickerRow[] = [
     { id: 'session-parent', createdAt: 4, updatedAt: 4, live: false },
     { id: 'session-sub', createdAt: 3, updatedAt: 3, origin: 'subagent', parentSession: 'session-parent', live: false },
@@ -105,10 +119,10 @@ test('a subagent still hangs under its parent', () => {
   ])
 })
 
-test('fork and subagent siblings keep the input order', () => {
+test('subagent children stay under their root while ordinary forks keep the input order', () => {
   const rows: SessionPickerRow[] = [
     { id: 'session-parent', createdAt: 5, updatedAt: 5, live: false },
-    { id: 'session-fork', createdAt: 4, updatedAt: 4, parentSession: 'session-parent', live: false },
+    { id: 'session-fork', createdAt: 4, updatedAt: 4, live: false },
     { id: 'session-sub', createdAt: 3, updatedAt: 3, origin: 'subagent', parentSession: 'session-parent', live: false },
     { id: 'session-parent2', createdAt: 2, updatedAt: 2, live: false },
     { id: 'session-fork2', createdAt: 1, updatedAt: 1, parentSession: 'session-parent2', live: false },
@@ -116,45 +130,57 @@ test('fork and subagent siblings keep the input order', () => {
   const tree = buildSessionTree(rows)
   assert.deepEqual(tree.map(entry => [entry.row.id, entry.depth]), [
     ['session-parent', 0],
-    ['session-fork', 1],
     ['session-sub', 1],
+    ['session-fork', 0],
     ['session-parent2', 0],
-    ['session-fork2', 1],
+    ['session-fork2', 0],
   ])
 })
 
-test('an orphan child (parent outside the window) degrades to root depth', () => {
+test('an orphan subagent degrades to root depth; historical fork metadata stays a root', () => {
   const rows: SessionPickerRow[] = [
-    { id: 'session-orphan-fork', createdAt: 3, updatedAt: 3, parentSession: 'session-missing', live: false },
+    { id: 'session-legacy-fork', createdAt: 3, updatedAt: 3, parentSession: 'session-missing', live: false },
     { id: 'session-root', createdAt: 2, updatedAt: 2, live: false },
     { id: 'session-orphan-sub', createdAt: 1, updatedAt: 1, origin: 'subagent', parentSession: 'session-missing', live: false },
   ]
   const tree = buildSessionTree(rows)
   const byId = new Map(tree.map(entry => [entry.row.id, entry.depth]))
   assert.equal(byId.get('session-root'), 0)
-  assert.equal(byId.get('session-orphan-fork'), 0, 'orphan fork children degrade to root without being lost')
+  assert.equal(byId.get('session-legacy-fork'), 0, 'legacy fork metadata never creates an unplaceable child')
   assert.equal(byId.get('session-orphan-sub'), 0, 'orphan subagents degrade to root without being lost')
 })
 
-test('parent cycles never loop and each row appears once', () => {
-  const rows: SessionPickerRow[] = [
+test('legacy cycles never loop and each row appears once', () => {
+  // Legacy ordinary-fork metadata with a cycle: no subagent origin, so no
+  // displayed edge at all — every row is a flat root, still exactly once.
+  const legacy: SessionPickerRow[] = [
     { id: 'session-a', createdAt: 3, updatedAt: 3, parentSession: 'session-b', live: false },
     { id: 'session-b', createdAt: 2, updatedAt: 2, parentSession: 'session-a', live: false },
     { id: 'session-self', createdAt: 1, updatedAt: 1, parentSession: 'session-self', live: false },
   ]
-  const tree = buildSessionTree(rows)
-  const ids = tree.map(entry => entry.row.id)
-  assert.equal(new Set(ids).size, ids.length, 'no row may be output twice')
-  assert.ok(!ids.some(id => ids.filter(candidate => candidate === id).length > 1), 'cycle rows must not repeat')
+  assert.deepEqual(buildSessionTree(legacy).map(entry => [entry.row.id, entry.depth]), [
+    ['session-a', 0],
+    ['session-b', 0],
+    ['session-self', 0],
+  ])
+  // A corrupt subagent cycle cannot loop either: the `placed` guard emits each
+  // row once and never traverses indefinitely.
+  const subagents: SessionPickerRow[] = legacy.map(row => ({ ...row, origin: 'subagent' as const }))
+  assert.deepEqual(buildSessionTree(subagents).map(entry => [entry.row.id, entry.depth]), [
+    ['session-a', 0],
+    ['session-b', 1],
+    ['session-self', 0],
+  ])
 })
 
-test('the All category indents fork children under their parent (plan §20)', () => {
+test('the All category keeps ordinary forks flat and badges only historical metadata', () => {
   const plainItem = (row: SessionPickerRow, indent = 0): { value: string; label: string; description: string; group: string } =>
     sessionPickerItem(row, '', indent)
   const categories = sessionPickerCategories(
     [
-      { id: 'session-parent', createdAt: 4, updatedAt: 4, cwd: '/ws', live: false },
-      { id: 'session-fork', createdAt: 3, updatedAt: 3, cwd: '/ws', parentSession: 'session-parent', live: false },
+      { id: 'session-parent', createdAt: 5, updatedAt: 5, cwd: '/ws', live: false },
+      { id: 'session-legacy', createdAt: 4, updatedAt: 4, cwd: '/ws', parentSession: 'session-parent', live: false },
+      { id: 'session-new', createdAt: 3, updatedAt: 3, cwd: '/ws', live: false },
       { id: 'session-other', createdAt: 2, updatedAt: 2, cwd: '/ws', live: false },
     ],
     '/ws',
@@ -162,12 +188,19 @@ test('the All category indents fork children under their parent (plan §20)', ()
     plainItem,
   )
   const all = categories[1]!.items()
-  const parent = all.find(item => item.value === 'session-parent')
-  const fork = all.find(item => item.value === 'session-fork')
-  assert.ok(parent !== undefined && !parent.label.includes('└─'), 'the root row stays flat')
-  assert.ok(fork !== undefined, 'fork child must be listed')
-  assert.ok(fork!.label.startsWith('  └─ '), `fork child must be indented:\n${fork!.label}`)
-  assert.ok(fork!.description !== undefined && fork!.description.includes('fork'), 'the fork badge stays on the indented row')
+  const row = (id: string): { readonly label: string; readonly description?: string } => {
+    const item = all.find(candidate => candidate.value === id)
+    assert.ok(item !== undefined, `${id} must be listed`)
+    return item
+  }
+  assert.deepEqual(all.map(item => item.value), ['session-parent', 'session-legacy', 'session-new', 'session-other'])
+  for (const id of ['session-parent', 'session-legacy', 'session-new', 'session-other']) {
+    assert.ok(!row(id).label.includes('└─'), `${id} must stay flat`)
+  }
+  assert.ok((row('session-legacy').description ?? '').split(' · ').includes('fork'),
+    'historical ordinary-fork metadata keeps its explanatory badge')
+  assert.ok(!(row('session-new').description ?? '').split(' · ').includes('fork'),
+    'an rc.1 ordinary fork has no historical badge')
 })
 
 // ── the Current directory / All directories scopes (plan item 3) ──────────
@@ -211,12 +244,12 @@ test('sessionPickerCategories treats a trailing-slash cwd as the same workspace'
     `/ws/project-a/ scopes the same sessions as /ws/project-a:\n${JSON.stringify(currentIds)}`)
 })
 
-test('the Current category keeps real fork children indented and orphan roots flat', () => {
+test('the Current category keeps ordinary forks and orphans flat', () => {
   const treeItem = (row: SessionPickerRow, indent = 0): SessionPickerItem => sessionPickerItem(row, '', indent)
   const categories = sessionPickerCategories(
     [
       { id: 'session-parent', createdAt: 4, updatedAt: 4, cwd: '/ws', live: false },
-      { id: 'session-fork', createdAt: 3, updatedAt: 3, cwd: '/ws', parentSession: 'session-parent', live: false },
+      { id: 'session-legacy', createdAt: 3, updatedAt: 3, cwd: '/ws', parentSession: 'session-parent', live: false },
       { id: 'session-other-cwd', createdAt: 2, updatedAt: 2, cwd: '/other', parentSession: 'session-parent', live: false },
       { id: 'session-orphan', createdAt: 1, updatedAt: 1, cwd: '/ws', parentSession: 'session-missing', live: false },
     ],
@@ -226,12 +259,13 @@ test('the Current category keeps real fork children indented and orphan roots fl
   )
   const current = categories[0]!.items()
   const parent = current.find(item => item.value === 'session-parent')
-  const fork = current.find(item => item.value === 'session-fork')
+  const legacy = current.find(item => item.value === 'session-legacy')
   const otherCwd = current.find(item => item.value === 'session-other-cwd')
   const orphan = current.find(item => item.value === 'session-orphan')
   assert.ok(parent !== undefined && !parent.label.includes('└─'), 'the workspace root stays flat')
-  assert.ok(fork !== undefined && fork.label.startsWith('  └─ '), `a fork child in the current workspace must be indented:\n${fork!.label}`)
-  assert.equal(otherCwd, undefined, 'a child in ANOTHER workspace is out of the Current scope')
+  assert.ok(legacy !== undefined && !legacy.label.includes('└─'),
+    `historical fork metadata must stay flat in Current:\n${legacy!.label}`)
+  assert.equal(otherCwd, undefined, 'a sibling in ANOTHER workspace is out of the Current scope')
   assert.ok(orphan !== undefined && !orphan.label.startsWith('  └─ '), 'an orphan (parent outside the workspace/window) degrades to a flat root')
 })
 
