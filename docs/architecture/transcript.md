@@ -982,9 +982,10 @@ replaced/forged receipt never enter the row.
 
 A forked Session inherits a durable prefix of its source log. The rc.1 ordinary
 fork carries NO `parentSession`, and a visual reference is SESSION-FREE: the
-`sv2_…` locator is derived from the tuple `[turn, absolute step/start seq,
-callId]`, so the same committed generation keeps the same locator inside the
-inherited prefix. The display never reads an ancestor Session.
+`sv2_…` locator is the first 20 hex digits of SHA-256 over the NUL-joined
+`['sv2', turn, absolute step/start seq, callId, '']` tuple, so the same
+committed generation keeps the same locator inside the inherited prefix. The
+display never reads an ancestor Session.
 
 - `src/domain/visual/publication.ts` is the ONE authority for the live
   `decidePublication()` write and the cold `collectPublishedVisuals()` replay.
@@ -1020,7 +1021,7 @@ inherited prefix. The display never reads an ancestor Session.
   result) and grant no inline figure.
 
 Remote has no trusted complete-log seam and keeps the pre-existing Tool/Work
-behavior; it never gains an inferred origin.
+behavior; it never gains an inferred fork provenance.
 
 `src/domain/visual/placement.ts` owns the ONE placement projection. The
 Assistant's original `ContentBlock` text is the sole coordinate authority:
