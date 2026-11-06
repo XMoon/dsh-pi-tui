@@ -172,10 +172,17 @@ test('schedule cards use the fixed no-registry fallback titles and identities', 
   assert.deepEqual(toolCardHeader('schedule_edit', '{"id":7,"action":"update","prompt":"secret"}'), {
     title: 'Edit scheduled task', summary: '',
   })
+  // Unparseable arguments are NOT an identity: the fixed title stays and the
+  // summary is empty (the generic first-string derivation could surface the prompt).
+  assert.deepEqual(toolCardHeader('schedule_create', 'not json'), { title: 'Create scheduled task', summary: '' })
+  assert.deepEqual(toolCardHeader('schedule_create', '{"prompt":"secret'), { title: 'Create scheduled task', summary: '' })
+  assert.deepEqual(toolCardHeader('schedule_list', 'not json'), { title: 'List scheduled tasks', summary: '' })
+  assert.deepEqual(toolCardHeader('schedule_view', '{"id":'), { title: 'View scheduled task', summary: '' })
   // The compact Focus line uses the same fallback title.
   assert.equal(focusToolDisplay({ name: 'schedule_list', args: '{}' }), 'List scheduled tasks')
   assert.equal(focusToolDisplay({ name: 'schedule_edit', args: '{"id":"s1","action":"delete"}' }), 'Delete scheduled task s1')
   assert.equal(focusToolDisplay({ name: 'schedule_create', args: '{"title":"Morning report","prompt":"secret"}' }), 'Create scheduled task Morning report')
+  assert.equal(focusToolDisplay({ name: 'schedule_create', args: 'not json' }), 'Create scheduled task')
   // An unknown third-party tool keeps the generic row.
   const unknown = toolCardHeader('totally_custom', '{"id":"s1"}')
   assert.equal(unknown.title, 'Tool call')

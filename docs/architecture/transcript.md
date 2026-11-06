@@ -970,8 +970,10 @@ Every card renders through the Web parity render intents in
   delete receipt folds to `deleted`, and an explicit error `code` always wins
   over any success-shaped field. The fallback header title is the fixed action
   name; its summary is only the task title (create) or id — never the
-  prompt/instruction. An unparseable result or an unproven shape drops the
-  summary instead of falling back to raw JSON. The live tool-authored
+  prompt/instruction. Unparseable arguments or a mistyped identity field keep
+  the fixed title with an empty summary, never the generic first-string
+  derivation. An unparseable result or an unproven shape drops the summary
+  instead of falling back to raw JSON. The live tool-authored
   `presentCall` remains the preferred Direct presentation; this fallback covers
   replay after definition unload and Remote logs, where no Host definition is
   available.

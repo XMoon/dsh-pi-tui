@@ -825,6 +825,23 @@ function deriveSummary(name: string, argsRaw: string): string {
  * @returns the tool-specific summary, or undefined when none applies.
  */
 function summarizeToolArgs(name: string, argsRaw: string): string | undefined {
+  if (SCHEDULE_TOOL_NAMES.has(name)) {
+    // The fixed Schedule fallback reads ONLY the documented identity field:
+    // never the prompt/instruction (a raw-args fallback would leak it) and
+    // never an arbitrary JSON key. An absent, mistyped or UNPARSEABLE
+    // arguments value keeps the fixed card title with an empty summary
+    // instead of falling through to the generic first-string derivation.
+    const parsedArgs = parseArgs(argsRaw)
+    if (typeof parsedArgs !== 'object' || parsedArgs === null || Array.isArray(parsedArgs)) return ''
+    const args = parsedArgs as Record<string, unknown>
+    if (name === 'schedule_list') return ''
+    if (name === 'schedule_create') {
+      const title = args.title
+      return typeof title === 'string' ? firstLine(title) : ''
+    }
+    const id = args.id
+    return typeof id === 'string' ? firstLine(id) : ''
+  }
   const parsed = parseArgs(argsRaw)
   if (typeof parsed !== 'object' || parsed === null) return undefined
   const args = parsed as Record<string, unknown>
@@ -872,19 +889,6 @@ function summarizeToolArgs(name: string, argsRaw: string): string | undefined {
     // identities that belong to no header.
     const count = Array.isArray(args.visuals) ? args.visuals.length : 0
     return count === 0 ? undefined : `${count} visual${count === 1 ? '' : 's'}`
-  }
-  if (SCHEDULE_TOOL_NAMES.has(name)) {
-    // The fixed Schedule fallback reads ONLY the documented identity field:
-    // never the prompt/instruction (a raw-args fallback would leak it) and
-    // never an arbitrary JSON key. An absent or mistyped field keeps the card
-    // title with an empty summary instead of inventing one.
-    if (name === 'schedule_list') return ''
-    if (name === 'schedule_create') {
-      const title = args.title
-      return typeof title === 'string' ? firstLine(title) : ''
-    }
-    const id = args.id
-    return typeof id === 'string' ? firstLine(id) : ''
   }
   if (name !== 'todo_write') return undefined
   const todos = args.todos
