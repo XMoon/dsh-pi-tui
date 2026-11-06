@@ -41,6 +41,7 @@ import { boot, getDshRuntimeVersion, loadOverlayPatches, loadProfileDirectory } 
 import { OFFICIAL_ON_DEMAND_CATALOG, OPTIONAL_BUNDLES } from '@deepseek-ai/dsh-official-bundles'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { TestContext } from 'node:test'
+import { parseDocument, Scalar, stringify, visit } from 'yaml'
 import { testLifecycle } from './temp-lifecycle.ts'
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
@@ -288,6 +289,7 @@ function writeProfile(
   bundles: readonly string[],
   dependencies: Readonly<Record<string, string>>,
   installationBoot: boolean,
+  persistedPatches: BootPatches,
 ): void {
   writeFileSync(join(profileDir, 'package.json'), JSON.stringify({
     name: 'optional-bundle-optional-bundle-profile',
@@ -297,10 +299,35 @@ function writeProfile(
   }, null, 2))
   // HMR is deliberately disabled in this Host-only fixture (no application
   // readiness owner). Only the installation-boot variant performs official
-  // ConfigEditor recomposes (real settings writes), so only it needs the same
-  // fact on DISK; the default fixture keeps the historical empty profile patch.
-  writeFileSync(join(profileDir, 'cordis.patch.yml'), installationBoot ? '- id: hmr\n  disabled: true\n' : '[]\n')
+  // ConfigEditor recomposes (real settings writes); the official reconcile
+  // restores the root Include from THIS file, so every fixture-only layer that
+  // must survive a settings write is persisted here. The default fixture never
+  // recomposes and keeps the historical empty profile patch.
+  if (installationBoot) {
+    writePatchDocument(join(profileDir, 'cordis.patch.yml'), [
+      ...persistedPatches,
+      { id: 'hmr', disabled: true },
+    ])
+  } else {
+    writeFileSync(join(profileDir, 'cordis.patch.yml'), '[]\n')
+  }
   writeFileSync(join(profileDir, 'cordis.yml'), '[]\n')
+}
+
+/** Persist loaded overlay patches as a real profile patch document. Loaded
+ *  `!!js` expressions arrive as `{ __jsExpr }` markers; write them back as the
+ *  same YAML tag the official patch reader evaluates. */
+function writePatchDocument(path: string, patches: BootPatches): void {
+  const document = parseDocument(stringify(patches))
+  visit(document, {
+    Map(_key, node) {
+      if (node.items.length !== 1 || typeof node.get('__jsExpr') !== 'string') return
+      const expression = new Scalar(node.get('__jsExpr'))
+      expression.tag = 'tag:yaml.org,2002:js'
+      return expression
+    },
+  })
+  writeFileSync(path, String(document))
 }
 
 /** The official agent-plane layer of the TUI overlay, without its screen rows. */
@@ -326,6 +353,7 @@ function prepareRoot(
   bundles: readonly string[],
   profileDependencies: Readonly<Record<string, string>>,
   installationBoot: boolean,
+  persistedPatches: BootPatches,
 ): string {
   const profileDir = join(root, 'profile')
   const home = join(root, 'home')
@@ -348,7 +376,7 @@ function prepareRoot(
     // links the ONE provisioned tree instead of duplicating it.
     symlinkSync(installation.nodeModules, join(profileDir, 'node_modules'), 'dir')
   }
-  writeProfile(profileDir, bundles, profileDependencies, installationBoot)
+  writeProfile(profileDir, bundles, profileDependencies, installationBoot, persistedPatches)
   return profileDir
 }
 
@@ -373,16 +401,18 @@ async function bootAt(options: HostOptions): Promise<OptionalBundleHost> {
   const basePatches = profile.layers.filter(layer => layer.packageName === BASE_BUNDLE).flatMap(layer => layer.patches)
   const bundlePatches = profile.layers.filter(layer => layer.packageName !== BASE_BUNDLE).flatMap(layer => layer.patches)
   if (basePatches.length === 0) throw new Error('Optional-bundle fixture: the profile did not compose the official dsh-base bundle')
+  const persisted = options.settings.installationBoot === true
   const patches: BootPatches = [
     ...basePatches,
-    ...(options.settings.presets === true ? agentPlanePatches() : []),
-    ...(options.settings.presets === true ? presetPatches() : []),
-    // HMR needs a real application readiness owner; this Host-only fixture has
-    // no TUI/CLI surface, so the module watcher is deliberately not mounted.
-    { id: 'hmr', disabled: true },
+    // An installation boot persists these fixture-only layers into the profile
+    // patch document (see writeProfile), so the official ConfigEditor reconcile
+    // keeps them after a real settings write. Other modes apply them in memory.
+    ...(persisted || options.settings.presets !== true ? [] : agentPlanePatches()),
+    ...(persisted || options.settings.presets !== true ? [] : presetPatches()),
+    ...(persisted ? [] : [{ id: 'hmr', disabled: true }]),
     ...bundlePatches,
     ...profile.patches,
-    ...(options.settings.patches ?? []),
+    ...(persisted ? [] : options.settings.patches ?? []),
   ]
   const profileContext = {
     name: 'optional-bundle-optional-bundle-profile',
@@ -593,6 +623,11 @@ export async function startOptionalBundleHost(
     [BASE_BUNDLE, ...(settings.bundles ?? [])],
     settings.profileDependencies ?? {},
     settings.installationBoot === true,
+    [
+      ...(settings.presets === true ? agentPlanePatches() : []),
+      ...(settings.presets === true ? presetPatches() : []),
+      ...(settings.patches ?? []),
+    ],
   )
   return bootAt(options)
 }

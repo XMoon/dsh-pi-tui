@@ -317,13 +317,17 @@ import { skippedInstallationReason } from '../../support/optional-bundle-fixture
 
 class WebL6Adapter extends LlmAdapter {
   private queue: Array<{ readonly kind: 'tool'; name: string; arguments: string; callId: string } | { readonly kind: 'text'; text: string }> = []
+  /** The exact model-facing requests this transport served: the catalog proof
+   *  for tools rc.1 conditionally withholds. */
+  readonly modelRequests: GenerateOptions[] = []
   push(script: { readonly kind: 'tool'; name: string; arguments: string; callId: string } | { readonly kind: 'text'; text: string }): void {
     this.queue.push(script)
   }
   override resolveModel(provider: string, model: string): Promise<{ provider: string; id: string; name: string }> {
     return Promise.resolve({ provider, id: model, name: model })
   }
-  override async *stream(): AsyncIterable<StreamChunk> {
+  override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    this.modelRequests.push(options)
     const script = this.queue.shift()
     if (script === undefined) {
       yield { type: 'block-start', index: 0, blockType: 'text' }
@@ -546,6 +550,7 @@ test('an EXTERNAL custom provider installed after the page read is never overwri
   const adapter = new WebL6Adapter()
   const app = await startS4D3Application(t, {
     bundles: [],
+    presets: true,
     columns: 140,
     rows: 40,
     patches: [{ id: 'agent-default-model', config: { provider: 'scripted', model: 'review-model' } }] as never,
@@ -586,6 +591,7 @@ test('a TUI Web settings write reaches the NEXT real tool call and the mounted t
   const adapter = new WebL6Adapter()
   const app = await startS4D3Application(t, {
     bundles: [],
+    presets: true,
     columns: 140,
     rows: 40,
     patches: [{ id: 'agent-default-model', config: { provider: 'scripted', model: 'review-model' } }] as never,
@@ -636,6 +642,7 @@ test('a TUI Web settings write reaches the real search and fetch consumers with 
   const adapter = new WebL6Adapter()
   const app = await startS4D3Application(t, {
     bundles: [],
+    presets: true,
     columns: 140,
     rows: 40,
     patches: [{ id: 'agent-default-model', config: { provider: 'scripted', model: 'review-model' } }] as never,
@@ -708,6 +715,7 @@ test('the Web credential deeplink completes a real store set and clear and the p
   const adapter = new WebL6Adapter()
   const app = await startS4D3Application(t, {
     bundles: [],
+    presets: true,
     columns: 140,
     rows: 40,
     patches: [{ id: 'agent-default-model', config: { provider: 'scripted', model: 'review-model' } }] as never,
@@ -812,10 +820,11 @@ test('the Web credential deeplink completes a real store set and clear and the p
   assert.equal(transport.requests.length, requestsBeforeSearch, 'no silent fallback and no dispatched request')
 })
 
-test('the missing-credential error reaches the TUI and the selected provider is never bypassed', { skip: skippedInstallationReason([]) }, async t => {
+test('the missing credential makes rc.1 withhold web_search and dispatch no request', { skip: skippedInstallationReason([]) }, async t => {
   const adapter = new WebL6Adapter()
   const app = await startS4D3Application(t, {
     bundles: [],
+    presets: true,
     columns: 140,
     rows: 40,
     patches: [{ id: 'agent-default-model', config: { provider: 'scripted', model: 'review-model' } }] as never,
@@ -832,11 +841,23 @@ test('the missing-credential error reaches the TUI and the selected provider is 
   adapter.push({ kind: 'text', text: 'Search failed.' })
   const agent = await app.submitFirstPrompt('Search without a credential')
   await agent.whenIdle()
+
+  // rc.1 gates `web_search` on `ctx.web.searchReady(provider)`: without a
+  // credential the tool is WITHHELD from the model catalog instead of being
+  // offered and failing at call time (the provider-level missing-credential
+  // error is proven by the two L5 cases above).
+  assert.equal(adapter.modelRequests.length > 0, true, 'the scripted transport served the real model step')
+  assert.equal(
+    adapter.modelRequests.every(request => (request.tools ?? []).every(tool => tool.name !== 'web_search')),
+    true,
+    'the model-facing catalog withholds web_search while the provider cannot authenticate',
+  )
+
+  // The scripted call is refused by the REAL tool gate, not executed.
   const refused = toolResultOf(agent, 's4d3-web-missing')
   assert.ok(refused !== undefined, `the exact web_search call settles as a tool result:\n${String(refused)}`)
-  assert.match(refused!, /DEEPSEEK_API_KEY|MISSING_CREDENTIAL|no API key/iu,
-    'the official missing-credential error is the TOOL result, not the user prompt')
-  await app.waitFor(() => /DEEPSEEK_API_KEY|MISSING_CREDENTIAL|no API key/iu.test(app.view()),
-    'the same official error is painted in the TUI')
-  assert.deepEqual(transport.requests, [], 'no silent fallback and no dispatched request')
+  assert.match(refused!, /unknown tool/iu, 'rc.1 refuses the call it never admitted')
+  assert.match(refused!, /web_search/u)
+  await app.waitFor(() => app.view().includes('web_search'), 'the refused tool call is painted in the TUI')
+  assert.deepEqual(transport.requests, [], 'the withheld tool dispatches no provider request')
 })

@@ -20,10 +20,11 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { once } from 'node:events'
 import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 import { join } from 'node:path'
-import { Context, type Fiber } from '@deepseek-ai/cordis'
+import { Context, symbols, type Fiber } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import { SESSION_LOG_FILENAME, sessionLogZipFilename } from '@deepseek-ai/dsh-session-log-export'
 import ConfigEditor from '@deepseek-ai/dsh-config-editor'
@@ -54,6 +55,11 @@ import Storage from '@deepseek-ai/dsh-storage'
 import * as StorageJson from '@deepseek-ai/dsh-storage-json'
 import * as StorageDomain from '@deepseek-ai/dsh-storage-domain'
 import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
+import WebServer from '@deepseek-ai/dsh-host-webserver'
+import { apply as applyConnection, inject as connectionInject } from '@deepseek-ai/dsh-client-connection'
+import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
+import WebSocket, { type RawData } from 'ws'
+import { z } from 'zod'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
 import WorkspaceRegistry from '@deepseek-ai/dsh-workspace'
 import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
@@ -1542,4 +1548,137 @@ test('without a settings service the Remote config fails closed', async (t) => {
     assembled.dispose()
     await runtime.dispose()
   }
+})
+
+// ── S3-03 E: the real WebSocket compression negotiation ────────────────────
+
+/** The M3 fixture above runs over the IN-PROCESS carrier: its stub `webServer`
+ *  exposes no upgrade listener, so it cannot show the official `ws` handshake
+ *  extension. This focused case mounts the SAME production Gateway rows
+ *  (`WebServer` + Connection + `TypertGatewayService`) on a real loopback
+ *  server and drives the carrier with a real `ws` client; no product code or
+ *  wire protocol is changed for the test. */
+const S3_LARGE_PAYLOAD = `s3-large-${'x'.repeat(1_500)}`
+
+class S3WireService extends TypertRemoteService {
+  readonly peers: string[] = []
+
+  constructor(ctx: Context) {
+    super(ctx, 's3Wire')
+  }
+
+  *large(): Iterable<string> {
+    this.peers.push(String(this.ctx.invocation?.peer.id))
+    yield S3_LARGE_PAYLOAD
+  }
+}
+
+/** Minimum in-memory credential owner a mounted Connection plugin needs. */
+function provideBrowserCredentialsFixture(ctx: Context): void {
+  const records = new Map<unknown, unknown>()
+  ctx.provide('credentials', {
+    async modifyRecord(key: unknown, mutate: (current: unknown) => Promise<unknown>): Promise<unknown> {
+      const next = await mutate(records.get(key))
+      if (next !== undefined) records.set(key, next)
+      return next ?? records.get(key)
+    },
+  } as never)
+}
+
+/** Exchange the Host process token for its browser cookie header. */
+function browserCookieOf(ctx: Context): string {
+  const origin = `http://127.0.0.1:${String(ctx.webServer.port)}`
+  const target = new URL(ctx.connection.authenticatedUrl(origin))
+  let setCookie: string | undefined
+  ctx.connection.authorizeIndex({
+    method: 'GET',
+    url: `${target.pathname}${target.search}`,
+    headers: { host: target.host },
+  }, {
+    writeHead(_status: number, headers?: Record<string, string>) { setCookie = headers?.['set-cookie'] },
+    end() {},
+  })
+  if (setCookie === undefined) throw new Error('the S3 gateway fixture received no browser cookie')
+  return setCookie.split(';', 1)[0]!
+}
+
+function rawSocketText(data: RawData): string {
+  if (Array.isArray(data)) return Buffer.concat(data).toString('utf8')
+  if (data instanceof ArrayBuffer) return Buffer.from(data).toString('utf8')
+  return Buffer.from(data).toString('utf8')
+}
+
+/** One real WebSocket-serving Gateway composition, configured with the
+ *  explicit compression mode this case proves. */
+async function mountS3WebSocketGateway(
+  life: TestLifecycle,
+  compression: 'deflate' | 'none',
+): Promise<{ readonly ctx: Context; readonly service: S3WireService }> {
+  const ctx = new Context()
+  life.defer(() => ctx.fiber.dispose())
+  await ctx.plugin(WebServer, { host: '127.0.0.1', port: 0 })
+  provideBrowserCredentialsFixture(ctx)
+  await ctx.plugin(TypertRegistry)
+  await ctx.plugin(RemoteAccessService)
+  await ctx.plugin(TypertGatewayService, {
+    websocketHeartbeatIntervalMs: 50,
+    websocketCompression: compression,
+  })
+  await ctx.plugin({ inject: [...connectionInject], apply: applyConnection })
+  await ctx.plugin(S3WireService)
+  ;(ctx.get('typert') as { register(definition: unknown): void }).register({
+    package: '@xmoon76/dsh-pi-tui/test-s3-wire',
+    face: 'host',
+    schemas: [],
+    model: { services: [], events: [], objects: [] },
+    invocations: [{
+      id: '@xmoon76/dsh-pi-tui/test-s3-wire#s3Wire/large',
+      service: 's3Wire',
+      namespace: 's3Wire',
+      method: 'large',
+      mode: 'stream',
+      invocation: { kind: 'direct' },
+      parameters: [],
+      result: { mode: 'strict', typeSymbol: '@xmoon76/dsh-pi-tui/test-s3-wire#Item', create: () => z.string() },
+    }],
+  })
+  const traced = ctx.get('s3Wire') as S3WireService & { readonly [key: symbol]: unknown }
+  return { ctx, service: (traced[symbols.original] ?? traced) as S3WireService }
+}
+
+test('the production Gateway negotiates permessage-deflate and delivers a 1KiB+ item over a real WebSocket', async t => {
+  const life = testLifecycle(t)
+  const deflate = await mountS3WebSocketGateway(life, 'deflate')
+  const socket = new WebSocket(`ws://127.0.0.1:${String(deflate.ctx.webServer.port)}/api/remote.mux`, {
+    headers: { cookie: browserCookieOf(deflate.ctx) },
+  })
+  await once(socket, 'open')
+  assert.match(String(socket.extensions), /permessage-deflate/u,
+    'the real WebSocket handshake negotiated permessage-deflate')
+  const frames: Array<Record<string, unknown>> = []
+  socket.on('message', data => { frames.push(JSON.parse(rawSocketText(data)) as Record<string, unknown>) })
+  socket.send(JSON.stringify({ type: 'open', streamId: 'large', endpoint: 's3Wire/large', payload: { args: {} } }))
+  await waitFor('the 1KiB+ stream item over the real WebSocket', () => frames.some(frame =>
+    frame.type === 'item' && frame.streamId === 'large' && frame.value === S3_LARGE_PAYLOAD), 20_000)
+  const item = frames.find(frame => frame.type === 'item' && frame.streamId === 'large')!
+  assert.equal(item.value, S3_LARGE_PAYLOAD, 'the receiving side decodes the exact 1.5KiB text')
+  assert.equal(String(item.value).length >= 1_024, true, 'the delivered frame is above the 1KiB compression threshold')
+  await waitFor('the stream end after the large item', () =>
+    frames.some(frame => frame.type === 'end' && frame.streamId === 'large'), 20_000)
+  assert.equal(deflate.service.peers.at(0), String(deflate.ctx.connection.browserPeer.id),
+    'the large item was delivered for the admitted browser Peer (identity preserved)')
+  socket.close()
+  await once(socket, 'close')
+
+  // The NEGATIVE control: the SAME production carrier with the explicit
+  // `none` mode negotiates no extension, so the setting owns the behavior.
+  const plain = await mountS3WebSocketGateway(life, 'none')
+  const plainSocket = new WebSocket(`ws://127.0.0.1:${String(plain.ctx.webServer.port)}/api/remote.mux`, {
+    headers: { cookie: browserCookieOf(plain.ctx) },
+  })
+  await once(plainSocket, 'open')
+  assert.equal(String(plainSocket.extensions), '',
+    'websocketCompression: none disables the extension on the same carrier')
+  plainSocket.close()
+  await once(plainSocket, 'close')
 })

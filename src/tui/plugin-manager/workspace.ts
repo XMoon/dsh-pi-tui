@@ -2862,10 +2862,13 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       riskStart = content.length
       content.push(...wrapTextWithAnsi(AUTO_REVIEW_DISABLE_WARNING, plan.width).map(line => color.warning(line)))
       riskEnd = content.length - 1
-      // The Host teardown detail is supplemental, not part of the required
-      // consequence; it may scroll without withholding the primary.
+      // The unload consequence is supplemental, not part of the required
+      // warning; it may scroll without withholding the primary. The shipped
+      // rc.1 integration migrates live Auto sessions when the integration
+      // UNLOADS while the Host is still running; a Host shutdown ends its
+      // sessions without a migration write, so this text must not promise one.
       content.push(...wrapTextWithAnsi(
-        'The official Host teardown moves existing Auto sessions to Full access; Auto Review is not a sandbox.',
+        'Disabling Auto Review moves live Auto sessions to Full access when the integration unloads; a Host that shuts down ends its sessions without that migration. Auto Review is not a sandbox.',
         plan.width,
       ).map(line => color.textDim(line)))
     } else if (kind === 'remove') {
