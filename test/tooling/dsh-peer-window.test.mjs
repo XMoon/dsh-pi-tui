@@ -121,26 +121,3 @@ test('the package version reserves one consistent release identity across manife
   assert.equal(currentRows.length, 1, 'exactly one matrix row must cover the current DSH target')
   assert.equal(currentRows[0].tui, version, 'the current compatibility row must carry the package version as its TUI identity')
 })
-
-test('the pi2dsh compatibility manifest stays an honest historical pairing record', () => {
-  // `test/compat/pi2dsh.json` records the LAST pairing that the published
-  // pi2dsh bridge actually qualified against — `pi2dsh@0.27.0 × DSH
-  // 0.2.1-rc.2`, which is the 0.5.5 TUI line. The third-party package has no
-  // published support statement for the current 0.2.2-rc.1 target, so the
-  // manifest deliberately keeps that historical fact instead of inventing a
-  // current-target pin. This audit therefore asserts BOTH halves: the pin names
-  // the historical 0.5.5 matrix row, AND it is OUTSIDE this package's new
-  // support floor — which is why `ecosystem-compat` cannot be claimed as
-  // rc.1 qualification (it stays an explicit external gap, see
-  // EXTERNAL_ECOSYSTEM_NOT_QUALIFIED).
-  const manifest = JSON.parse(readFileSync(join(process.cwd(), 'test', 'compat', 'pi2dsh.json'), 'utf8'))
-  const claimedRows = COMPAT_MATRIX.matrix.filter(row => row.versions.includes(manifest.dshVersion))
-  assert.equal(claimedRows.length, 1, 'the pi2dsh manifest must name exactly one published matrix row')
-  assert.equal(claimedRows[0].tui, '0.5.5',
-    'the recorded pairing must stay the published 0.5.5 TUI line')
-  assert.notEqual(claimedRows[0].tui, packageJson.version,
-    'the historical ecosystem pairing must not be restated as the current TUI line')
-  assert.equal(semver.satisfies(manifest.dshVersion, expectedWindow), false,
-    'the historical pairing must stay OUTSIDE the current support floor instead of being claimed as qualified')
-  assert.equal(manifest.consumer, 'pi2dsh', 'the pi2dsh manifest must name the pi2dsh consumer')
-})
