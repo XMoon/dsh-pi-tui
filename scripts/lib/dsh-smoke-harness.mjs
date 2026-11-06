@@ -161,22 +161,26 @@ export function readText(path) {
   }
 }
 
+/**
+ * The consumer-neutral surface-failure detector. An entry that must also treat
+ * a consumer-specific diagnostic as a failure adds that rule in its own module,
+ * not here.
+ */
 export function compatibilityFailureLine(text) {
   return String(text).split(/\r?\n/u).find(line => {
     const duplicateCommand = /(?:duplicate[ -]command|command registration failed|command ["'][^"']+["'] is already registered)/iu.test(line)
-    const capabilityFailure = /(?:\bcapability mismatch\b|\bpi2dsh\b[^\n]*(?:fatal|unsupported|cannot|could not|failed))/iu.test(line)
+    const capabilityFailure = /\bcapability mismatch\b/iu.test(line)
     const explicitFallback = /\b(?:fallback|falling\s+back)\b\s*(?:[:=-]\s*|\b(?:to|into|as|using)\b[^\n]*?)\b(?:headless|inert|legacy|dsh[- ]?tui|compat(?:ibility)?|surface|component)\b/iu.test(line)
       || /\b(?:headless|inert|legacy)\b[^\n]*\b(?:fallback|falling\s+back)\b/iu.test(line)
       || /\bheadless\s+(?:mode|surface|component|fallback|path)\b/iu.test(line)
-    const explicitDegradation = /\bpi2dsh\b[^\n]*\b(?:degrad(?:ed|es|ing)|headless|inert)\b/iu.test(line)
-      || /\b(?:surface|component|tui|compat|legacy)\b[^\n]*\b(?:headless|inert)\b/iu.test(line)
-      || /\b(?:headless|inert)\b[^\n]*\b(?:pi2dsh|surface|component|tui|compat|legacy)\b/iu.test(line)
+    const explicitDegradation = /\b(?:surface|component|tui|compat|legacy)\b[^\n]*\b(?:headless|inert)\b/iu.test(line)
+      || /\b(?:headless|inert)\b[^\n]*\b(?:surface|component|tui|compat|legacy)\b/iu.test(line)
     return duplicateCommand || capabilityFailure || explicitFallback || explicitDegradation
   })
 }
 
 /**
- * Fail when the captured log/pane contains an incompatible-surface
+ * Fail when the captured log/pane contains a generic incompatible-surface
  * diagnostic. The detection mechanics are shared; the caller supplies the
  * diagnostic sentence so the harness carries no entry-specific wording.
  */

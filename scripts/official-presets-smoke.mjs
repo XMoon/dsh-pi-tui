@@ -214,10 +214,10 @@ function officialPresetCatalogDiagnostic(presetId, tuiLog, tmux) {
   ].join('\\n')
 }
 
-// The failure text is part of this gate's existing diagnostics; the shared
-// harness owns only the detection mechanics.
-function assertNoPresetCompatibilityFailures(tuiLog, tmux) {
-  assertNoCompatibilityFailures(tuiLog, tmux, line => `published pi2dsh reported an incompatible surface: ${line}`)
+// The official preset gate owns its own diagnostic wording; the shared
+// harness only detects a generic incompatible surface.
+export function assertNoPresetCompatibilityFailures(tuiLog, tmux) {
+  assertNoCompatibilityFailures(tuiLog, tmux, line => `official preset smoke reported an incompatible surface: ${line}`)
 }
 
 export function assertOfficialPresetHeader(presetId, evidencePath) {

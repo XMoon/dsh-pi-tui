@@ -46,8 +46,8 @@ import semver from 'semver'
 import { API_VERSION } from '../src/extension/public-types.ts'
 import { UNSTABLE_API_LEVEL } from '../src/extension/unstable-types.ts'
 import {
-  assertNoCompatibilityFailures as assertNoSharedCompatibilityFailures,
   candidateArgument,
+  compatibilityFailureLine,
   CompatFailure,
   delay,
   distributionArgument,
@@ -60,6 +60,7 @@ import {
   PNPM_COMMAND,
   readJson,
   readOptionalJson,
+  readText,
   redact,
   redactedJson,
   requireExactVersion,
@@ -130,10 +131,30 @@ const CLEANUP_BUDGET_MS = 30_000
 const GATE_BUDGET_MS = CI_ECOSYSTEM_TIMEOUT_MS - 3 * 60_000
 const RESIZE_FAILURE_PHASE = 'COMPAT_SURFACE_FAILURE'
 
-// The harness owns the shared degradation detection; this entry supplies its
-// own diagnostic wording so the gate's failure text is unchanged.
+/**
+ * Consumer-specific diagnostics the published pi2dsh surface must never emit.
+ * The shared detector is consumer-neutral; these lines are this entry's
+ * business, not the harness's.
+ */
+const PI2DSH_DEGRADATION_PATTERNS = [
+  /\bpi2dsh\b[^\n]*(?:fatal|unsupported|cannot|could not|failed)/iu,
+  /\bpi2dsh\b[^\n]*\b(?:degrad(?:ed|es|ing)|headless|inert)\b/iu,
+  /\b(?:headless|inert)\b[^\n]*\bpi2dsh\b/iu,
+]
+
+/** The first line that is a generic or pi2dsh-specific surface failure. */
+function pi2dshCompatibilityFailureLine(text) {
+  return String(text).split(/\r?\n/u).find(line =>
+    compatibilityFailureLine(line) !== undefined
+    || PI2DSH_DEGRADATION_PATTERNS.some(pattern => pattern.test(line)))
+}
+
 function assertNoPi2dshSurfaceFailures(tuiLog, tmux) {
-  assertNoSharedCompatibilityFailures(tuiLog, tmux, line => `published pi2dsh reported an incompatible surface: ${line}`)
+  const text = `${readText(tuiLog)}\n${tmux.capturePane()}`
+  const failedLine = pi2dshCompatibilityFailureLine(text)
+  if (failedLine !== undefined) {
+    fail('COMPAT_BOOT_FAILURE', `published pi2dsh reported an incompatible surface: ${failedLine.trim()}`)
+  }
 }
 
 /**
@@ -943,6 +964,7 @@ if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(
 }
 
 export {
+  assertNoPi2dshSurfaceFailures,
   classifyConsumerMetadata,
   CLEANUP_BUDGET_MS,
   CI_ECOSYSTEM_TIMEOUT_MS,
@@ -952,6 +974,7 @@ export {
   GATE_BUDGET_MS,
   hasFreshResizeWidth,
   isPullRequestRef,
+  pi2dshCompatibilityFailureLine,
   PI2DSH_COMPAT_DISPOSITIONS,
   REQUIRED_CONTRACTS,
   RESIZE_FAILURE_PHASE,
