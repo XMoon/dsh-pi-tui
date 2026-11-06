@@ -1775,7 +1775,7 @@ test('capability-truthful discovery copy is registered for the conditional comma
   assert.equal(descriptionOf('attach'),
     'Attach an image or file to the draft; generic-file delivery requires backend support (tab completes the path)')
   assert.equal(descriptionOf('transcript'),
-    'Export a readable Markdown transcript of this session when supported')
+    'Export this session as official Markdown')
   assert.equal(descriptionOf('login'),
     'Open Models to configure provider credentials or sign in to DeepSeek Account')
   assert.equal(descriptionOf('logout'),
