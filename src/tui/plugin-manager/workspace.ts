@@ -3576,7 +3576,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       if (update.result?.restore !== undefined) {
         content.push(...updateChangeFacts(update.result.restore, width))
       } else {
-        content.push(color.textDim('Not required; the former version was never removed.'))
+        content.push(color.textDim('Not required; the Host did not reinstall the former version.'))
       }
       content.push('')
       content.push(...this.updateObservedInventoryFacts(update, width))
