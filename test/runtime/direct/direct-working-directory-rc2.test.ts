@@ -225,8 +225,8 @@ test('a REAL fork child keeps the original project in its header and the cut dir
   await callTool(ctx, 'working_directory', { cd: 'moved' }, agent)
 
   // The OFFICIAL fork helper over the REAL log, exactly like the Direct
-  // lifecycle: the cut is the newest event, and the child meta repeats the
-  // source HEADER (the original project).
+  // lifecycle: the cut is the newest event, and the ordinary rc1 child meta
+  // repeats the source HEADER (the original project) with NO parentSession.
   const sourceEvents = agent.session.snapshotEvents() as readonly SessionEvent[]
   const boundary = sourceEvents.length - 1
   const seed = buildForkSeed(sourceEvents, SessionSeq(boundary))
@@ -235,7 +235,7 @@ test('a REAL fork child keeps the original project in its header and the cut dir
     sessionId: childId,
     seed,
     inheritedEventCount: SessionLogOffset(boundary + 1),
-    meta: { cwd: originalProject, parentSession: SessionId(String(agent.session.id)), isSeeded: true },
+    meta: { cwd: originalProject, isSeeded: true },
     setup: () => {},
   })
   const child = handle.agent
