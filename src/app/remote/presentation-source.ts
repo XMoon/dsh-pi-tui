@@ -51,6 +51,8 @@ import type { ClientRemote } from '@deepseek-ai/dsh-api-gateway/client'
 import type { RemoteApplicationSources,
   RemoteTransportLifetime,
 } from '../application-runtime.ts'
+import type { ImageAttachmentRefLike } from '../../domain/media/types.ts'
+import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type { SessionPresentationEvent } from '../surface/session-presentation.ts'
 
 /**
@@ -143,6 +145,18 @@ export interface RemotePresentationClientSource extends RemoteM3ARuntimeSource {
   readonly sessions: ISessions
   readonly jobs: IJobs
   readonly remote: ClientRemote
+}
+
+/**
+ * Convert the neutral full reference into the official `ImageAttachmentRef`
+ * the Client Session face declares. `attachmentId` is the ONLY branded field
+ * and the brand is compile-time-only: the exact opaque id (and every optional
+ * metadata field) is passed through unchanged. This is an explicit typed
+ * boundary assertion — never a reconstruction, never a partial object, never a
+ * `never` cast that hides a real signature/wire mismatch.
+ */
+function officialAttachmentRef(attachment: ImageAttachmentRefLike): ImageAttachmentRef {
+  return attachment as ImageAttachmentRef
 }
 
 /**
@@ -299,7 +313,7 @@ export function createRemotePresentationSource(
     attachments: {
       async readDurableImage(
         sessionId: string,
-        attachmentId: string,
+        attachment: ImageAttachmentRefLike,
         expectedLifetime: RemoteTransportLifetime,
       ): Promise<{ ref: unknown; data: Uint8Array }> {
         const capturedGeneration = generation.getSnapshot()
@@ -316,7 +330,7 @@ export function createRemotePresentationSource(
         if (binding !== expectedLifetime.binding) {
           throw new Error(`the presentation's Session binding for ${sessionId} is retired`)
         }
-        const result = await binding.session.readAttachment(attachmentId as never)
+        const result = await binding.session.readAttachment(officialAttachmentRef(attachment))
         if (!Object.is(capturedGeneration, generation.getSnapshot())
           || sessions.binding(sessionId as never) !== binding) {
           throw new Error(`the Session binding for ${sessionId} changed while the attachment was read`)

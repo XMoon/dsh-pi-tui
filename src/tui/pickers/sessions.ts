@@ -84,7 +84,8 @@ export interface SessionPickerRow {
   /** Effective agent preset id, when the row has been enriched. Initial
    * lightweight picker rows may omit it while projection replay is pending. */
   preset?: string
-  /** The session this one was forked from, when it has lineage. */
+  /** The parent Session id: retained subagent ancestry, or historical
+   * ordinary-fork metadata from before rc.1's independent-fork semantics. */
   parentSession?: string
   /** Subagent children carry the `sub` marker. */
   origin?: 'subagent'
@@ -135,7 +136,9 @@ export function sessionPickerItem(row: SessionPickerRow, currentId: string, inde
   // session id) is projected like every other Host-derived label.
   const meta: string[] = [sanitizeTerminalText(shortSessionId(row.id)), formatSessionAge(row.createdAt ?? row.updatedAt)]
   if (row.origin === 'subagent') meta.push('sub')
-  if (row.parentSession !== undefined) meta.push('fork')
+  // `fork` is HISTORICAL ordinary-fork metadata only. A real subagent never
+  // gets it, and an rc.1 ordinary fork carries no parent at all.
+  else if (row.parentSession !== undefined) meta.push('fork')
   if (row.preset !== undefined) meta.push(`preset:${sanitizeTerminalText(row.preset)}`)
   if (row.live) meta.push('live')
   if (contentHit !== undefined) meta.push(`…${sanitizeTerminalText(contentHit.snippet)}…`)

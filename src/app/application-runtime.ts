@@ -24,6 +24,7 @@
 
 import type { PresentationReader } from '../runtime/presentation-read-port.ts'
 import type { SessionReader } from '../runtime/session-reader-port.ts'
+import type { ImageAttachmentRefLike } from '../domain/media/types.ts'
 import type { TerminalProgressOutcome } from '../domain/terminal-progress/settings.ts'
 import type { SubmissionPresentationSource } from './submission/presentation.ts'
 import type { Backend, BackendKind } from '../runtime/backend.ts'
@@ -189,7 +190,7 @@ export interface RemoteTerminalProgressSource {
 export interface RemoteAttachmentSource {
   readDurableImage(
     sessionId: string,
-    attachmentId: string,
+    attachment: ImageAttachmentRefLike,
     expectedLifetime: RemoteTransportLifetime,
   ): Promise<{ ref: unknown; data: Uint8Array }>
 }
