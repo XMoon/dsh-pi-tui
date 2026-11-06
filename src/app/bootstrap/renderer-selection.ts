@@ -86,6 +86,19 @@ export interface RendererSelectionDeps {
      * re-reads nothing later (a settings change needs a TSP restart).
      */
     readonly bindNativeFooterConfig: (config: TspNativeFooterConfig) => void
+    /**
+     * TSP I-E: install the ONE read-only History-search capability bundle on the
+     * connected renderer. Forwarded verbatim like the image binding and the
+     * status reader: this projection holds no source, no cwd, no Session scope,
+     * no rows and no seat — only the renderer's own mount installs the seat.
+     *
+     * Optional on the CONNECTOR INPUT so a scripted test connector can express
+     * "no History plane"; the production connector below declares it REQUIRED,
+     * because a connected TSP renderer always carries the seat.
+     */
+    readonly bindHistorySearch?: (
+      binding: import('../surface/runtime.ts').TspHistorySearchBinding,
+    ) => void
     readonly dispose: () => Promise<void>
   } | undefined>
   /** The environment read (production: `process.env`). */
@@ -125,10 +138,17 @@ export async function selectRendererMount(deps: RendererSelectionDeps): Promise<
     // TSP-7 PR-D: the footer config binds exactly once at the mount, BEFORE
     // the first status commit can paint a row (a resolver throw propagates —
     // the mount-failure release path owns the session).
-    mount: (binding, statusReader) => {
+    mount: (binding, statusReader, historySearch) => {
       tsp.bindStatusReader(statusReader)
       tsp.bindNativeFooterConfig(deps.resolveFooterConfig())
       tsp.bindImages(binding)
+      // TSP I-E: the History-search capability is installed SYNCHRONOUSLY at
+      // the same one-time mount, AFTER the terminal-owning bindings and BEFORE
+      // any input can reach the renderer. A scripted connector without the
+      // member mounts a renderer with NO History plane (its seat stays
+      // unbound, so `Ctrl+R` states the truth instead of opening a fake card) —
+      // never a second lifecycle and never a silent fallback.
+      tsp.bindHistorySearch?.(historySearch)
       return {
         display: tsp.display,
         taskPresentation: tsp.taskPresentation,
@@ -213,6 +233,12 @@ export function productionTspConnector(
   ) => void
   readonly bindImages: (binding: import('../surface/runtime.ts').SurfaceImageBinding) => void
   readonly bindStatusReader: (reader: StatusSnapshotReader) => void
+  /** TSP I-E: the ONE History-search install on the renderer's own mount (see
+     the connector input above). Required: a connected TSP renderer always
+     carries the seat, and a test connector is that contract's fake. */
+  readonly bindHistorySearch: (
+    binding: import('../surface/runtime.ts').TspHistorySearchBinding,
+  ) => void
   readonly bindNativeFooterConfig: (config: TspNativeFooterConfig) => void
   readonly dispose: () => Promise<void>
 } | undefined> {

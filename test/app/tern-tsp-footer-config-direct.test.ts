@@ -29,6 +29,18 @@ import { installTspPane, type TspPane } from '../support/tsp-terminal-fixture.ts
 import { wireNodes } from '../support/tsp-picker-wire.ts'
 import { waitUntil } from '../support/tsp-runner-harness.ts'
 
+/**
+ * TSP I-E: the History-search mount parameter these pre-I-E cases do not
+ * exercise. It is FAIL-CLOSED on purpose — a source that rejects, never an
+ * empty `search()` that would let a card report "no history" as a success —
+ * and none of these cases press `Ctrl+R`, so the seat stays unbound here.
+ */
+const INERT_HISTORY_BINDING = {
+  source: { search: () => Promise.reject(new Error('History search is not exercised by this case')) },
+  cwd: () => '/tmp/dsh-inert-cwd',
+  captureScope: () => ({ sessionId: undefined, isCurrent: () => false }),
+}
+
 /** One projection node's own props. */
 function props(node: Node): Record<string, unknown> {
   return node.props as Record<string, unknown>
@@ -436,7 +448,7 @@ test('the mount wiring binds the footer config exactly once through the producti
     assert.ok(mount !== undefined)
     // The FIRST production mount binds the reader + footer config together;
     // run it so the resolver evaluation is the mount's own (never a test's).
-    mount.mount({} as never, { snapshot: () => richSnapshot() })
+    mount.mount({} as never, { snapshot: () => richSnapshot() }, INERT_HISTORY_BINDING)
     assert.equal(resolves, 1, 'the resolver ran exactly once, at the mount')
     // The footer bind is one-shot on the renderer: the mount's SECOND bind
     // attempt (driven through a fresh production connector over the same
