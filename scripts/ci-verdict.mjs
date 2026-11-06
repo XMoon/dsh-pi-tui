@@ -131,6 +131,27 @@ export function expectedSplitProcessStatus(mode, ref) {
   return mode === 'npm' && isReleaseTagRef(ref) ? 'success' : 'skipped'
 }
 
+/**
+ * The ecosystem-compat job's typed disposition — a SECOND, independently
+ * auditable proof on top of the job's `success` status.
+ *
+ * `passed` means the complete real pi2dsh PTY smoke ran. The Owner-approved
+ * `skipped-unsupported-dsh-peer` exists ONLY for a pull-request candidate
+ * whose published peer metadata provably excludes the target DSH; it is
+ * reported as external NOT_QUALIFIED and is a hard failure on every release
+ * tag and ordinary branch. There is deliberately NO default value: a missing
+ * or unrecognized disposition is a failure, never a silent success.
+ */
+export const ECOSYSTEM_DISPOSITION = Object.freeze({
+  passed: 'passed',
+  skippedUnsupportedDshPeer: 'skipped-unsupported-dsh-peer',
+})
+
+/** Whether `ref` is a pull-request merge ref (the only place a skip is legal). */
+export function isPullRequestRef(ref) {
+  return typeof ref === 'string' && /^refs\/pull\/\d+\/merge$/u.test(ref)
+}
+
 function fail(message) {
   throw new Error(message)
 }
@@ -138,10 +159,10 @@ function fail(message) {
 /**
  * Decide whether this run qualifies.
  *
- * @param {{role: 'qualify'|'summary', mode: string, ref: string, phases: Array<{name: string, result: string}>, release?: boolean, started?: string}} options
+ * @param {{role: 'qualify'|'summary', mode: string, ref: string, phases: Array<{name: string, result: string}>, release?: boolean, started?: string, ecosystemDisposition?: string}} options
  * @returns {{ok: boolean, failures: string[], lines: string[], elapsedSeconds: number|null}} the verdict.
  */
-export function verdict({ role, mode, ref, phases, release = false, started }) {
+export function verdict({ role, mode, ref, phases, release = false, started, ecosystemDisposition }) {
   const failures = []
   const byName = new Map()
   for (const phase of phases) byName.set(phase.name, phase.result)
@@ -195,6 +216,26 @@ export function verdict({ role, mode, ref, phases, release = false, started }) {
     }
   }
 
+  // The ecosystem-compat disposition is a second proof beside the required
+  // job status: `success` alone is no longer enough, because the job's typed
+  // skip exits successfully WITHOUT running the real PTY smoke. `passed` is
+  // the only value that qualifies a release tag or ordinary branch; the
+  // PR-only skip stays visibly NOT_QUALIFIED. Source Mode keeps its existing
+  // contract and does not claim a disposition (the npm-only ecosystem gate).
+  let externalQualified
+  if (mode === 'npm') {
+    if (ecosystemDisposition === ECOSYSTEM_DISPOSITION.passed) {
+      externalQualified = true
+    } else if (ecosystemDisposition === ECOSYSTEM_DISPOSITION.skippedUnsupportedDshPeer) {
+      externalQualified = false
+      if (!isPullRequestRef(ref)) {
+        failures.push(`the ecosystem disposition '${ECOSYSTEM_DISPOSITION.skippedUnsupportedDshPeer}' is allowed only on a pull-request ref, not on '${ref}': a release tag or branch must run the real external compatibility smoke`)
+      }
+    } else {
+      failures.push(`the ecosystem disposition ${JSON.stringify(ecosystemDisposition)} is missing or unknown: an npm run requires '${ECOSYSTEM_DISPOSITION.passed}', or '${ECOSYSTEM_DISPOSITION.skippedUnsupportedDshPeer}' on a pull request only`)
+    }
+  }
+
   // The start instant is optional. When it IS given it must be usable: the
   // shell treats an empty operand as zero, which once produced a
   // plausible-looking elapsed time for a run that never started.
@@ -217,11 +258,21 @@ export function verdict({ role, mode, ref, phases, release = false, started }) {
     seen.add(name)
     lines.push(`${name.padEnd(29)} ${byName.get(name) ?? '(absent)'}`)
   }
+  if (mode === 'npm') {
+    // Never let a PR-only skip read like a runtime qualification.
+    const status = externalQualified === true
+      ? 'QUALIFIED (passed)'
+      : externalQualified === false
+        ? 'NOT_QUALIFIED (skipped-unsupported-dsh-peer)'
+        : 'UNVERIFIED (missing or unknown disposition)'
+    lines.push('')
+    lines.push(`external pi2dsh compatibility  ${status}`)
+  }
   if (elapsedSeconds !== null) {
     lines.push('')
     lines.push(`whole pipeline                ${elapsedSeconds}s`)
   }
-  return { ok: failures.length === 0, failures, lines, elapsedSeconds }
+  return { ok: failures.length === 0, failures, lines, elapsedSeconds, externalQualified }
 }
 
 /** Parse `--phase <name>=<result>` pairs. */
@@ -248,7 +299,7 @@ function main() {
   const args = process.argv.slice(2)
   const role = args[0]
   if (role !== 'qualify' && role !== 'summary') {
-    console.error('usage: node scripts/ci-verdict.mjs <qualify|summary> --mode <npm|source> --ref <github-ref> [--release] [--started <epoch>] --phase <job>=<result>...')
+    console.error('usage: node scripts/ci-verdict.mjs <qualify|summary> --mode <npm|source> --ref <github-ref> [--ecosystem-disposition <passed|skipped-unsupported-dsh-peer>] [--release] [--started <epoch>] --phase <job>=<result>...')
     process.exit(2)
   }
   const valueOf = (name) => {
@@ -273,6 +324,7 @@ function main() {
     phases,
     release: args.includes('--release'),
     started: valueOf('--started'),
+    ecosystemDisposition: valueOf('--ecosystem-disposition'),
   })
   console.log(decision.lines.join('\n'))
   if (!decision.ok) {

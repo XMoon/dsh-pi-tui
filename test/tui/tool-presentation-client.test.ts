@@ -66,6 +66,28 @@ test('unknown/other tools: undefined (the existing Client fallbacks stay authori
   assert.equal(presenter.call('bash', 'not-json'), undefined)
 })
 
+test('the client presenter never invents a Schedule Host presentation', () => {
+  // A Remote Client has no Host tool registry: the rc1 Schedule tools declare
+  // only a tool-authored `presentCall`/canonical JSON result, no durable
+  // presentation metadata. The shared `toolCardHeader` fallback owns the card
+  // identity; the Client presenter must not fabricate a Schedule view (nor turn
+  // a matching-looking durable `meta` into one).
+  for (const name of ['schedule_create', 'schedule_list', 'schedule_view', 'schedule_edit', 'schedule_update', 'schedule_delete']) {
+    assert.equal(presenter.call(name, JSON.stringify({ id: 's1', title: 'Morning report', action: 'delete' })), undefined, `${name} call`)
+    assert.equal(
+      presenter.result(name, JSON.stringify({ id: 's1' }), {
+        content: [{ type: 'text', text: '{"id":"s1","kind":"rrule","status":"active"}' }],
+        isError: false,
+        // A legacy/foreign metadata payload shaped like a Schedule task is
+        // still not a Host-authored presentation contract.
+        meta: { id: 's1', kind: 'rrule', status: 'active', code: 'schedule_conflict' },
+      }),
+      undefined,
+      `${name} result`,
+    )
+  }
+})
+
 test('result: a settled view comes only from the TOOL-AUTHORED result metadata', () => {
   // No metadata: the existing Client derivations stay authoritative.
   assert.equal(presenter.result('edit', '{}', { content: [], isError: false }), undefined)

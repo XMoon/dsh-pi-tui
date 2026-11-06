@@ -2082,3 +2082,36 @@ test('the owner\'s anonymous-to-named update is ONE row, never a double draw', (
   assert.equal(subtreeText(view, rows[0]!.id), 'Preparing Bash… · pnpm test · 23 B')
   assert.ok(!subtreeText(view, rows[0]!.id).includes('{"comm'), 'no partial JSON is displayed')
 })
+
+test('the native TSP rows share the Schedule fallback header (no new TSP parsing)', () => {
+  // This mapper never grew a Schedule branch: the rows below are the SAME
+  // `toolCardHeader` fallback the PiTui transcript uses. `transcript-view.ts`
+  // is deliberately unchanged by the Schedule presentation work.
+  const messages: TranscriptMessage[] = [
+    {
+      kind: 'tool', turn: 1, callId: 'sched-create', name: 'schedule_create',
+      args: '{"title":"Morning report","prompt":"secret instruction"}',
+      result: '{"id":"s1","kind":"rrule","status":"active"}', status: 'ok',
+    },
+    {
+      kind: 'tool', turn: 1, callId: 'sched-edit', name: 'schedule_edit',
+      args: '{"id":"s1","action":"delete"}',
+      result: '{"id":"s1","deleted":true}', status: 'ok',
+    },
+    {
+      kind: 'tool', turn: 1, callId: 'sched-list', name: 'schedule_list',
+      args: '{}',
+      result: '{"items":[],"shown":0,"total":0,"limit":20,"offset":0}', status: 'ok',
+    },
+  ]
+  const view = viewWithPreviews(messages, [])
+  const tools = flatten(view).filter(node => node.kind === 'tool')
+  assert.deepEqual(tools.map(node => node.props['title']), [
+    'Create scheduled task',
+    'Delete scheduled task',
+    'List scheduled tasks',
+  ])
+  assert.deepEqual(tools.map(node => node.props['target']), ['Morning report', 's1', undefined])
+  assert.ok(!JSON.stringify(tools.map(node => node.props)).includes('secret instruction'),
+    'the Schedule fallback never promotes the prompt to a header')
+})
