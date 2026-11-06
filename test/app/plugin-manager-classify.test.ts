@@ -30,12 +30,14 @@ import {
   bundleValue,
   entryValue,
   errorText,
+  isSelectableUpdateVersion,
   rowToggleValue,
+  updateVersionBlocker,
   type PluginCardView,
   type PluginManagerModel,
 } from '../../src/app/plugin-manager/model.ts'
 import { detachPluginManagerSnapshot } from '../../src/runtime/plugin-manager-mapping.ts'
-import type { PluginBundleFact, PluginManagerSnapshot, PluginRowFact } from '../../src/runtime/plugin-manager-port.ts'
+import type { PluginBundleFact, PluginManagerSnapshot, PluginRowFact, PluginVersionFact } from '../../src/runtime/plugin-manager-port.ts'
 
 function observation(overrides: Partial<TuiExtensionObservation> = {}): TuiExtensionObservation {
   return {
@@ -1161,4 +1163,25 @@ test('each release-only Experimental bundle is Experimental only with proven off
     assert.equal(fakeCard.section, 'third-party', `${name} without proven provenance is not Experimental`)
     assert.equal(fact(fakeCard, 'TUI surface'), undefined)
   }
+})
+
+
+test('update version eligibility is a pure Host-list narrowing, never an eligibility claim', () => {
+  const base: PluginVersionFact = { version: '1.1.0', tags: ['latest'], prerelease: false, bundle: true }
+  assert.equal(isSelectableUpdateVersion(base), true)
+  assert.equal(isSelectableUpdateVersion({ ...base, bundle: false }), false)
+  assert.equal(isSelectableUpdateVersion({ ...base, deprecated: 'use the 2.x line' }), false)
+  assert.equal(isSelectableUpdateVersion({
+    ...base,
+    incompatible: { name: 'pkg', version: '1.1.0', runtimeVersion: '0.2.2-rc.1', requirements: { 'engines.dsh': '>=9' } },
+  }), false)
+  // A legal prerelease stays selectable: only the user's explicit choice may
+  // pick it, and the confirmation warns separately.
+  assert.equal(isSelectableUpdateVersion({ ...base, version: '1.2.0-rc.1', prerelease: true }), true)
+  assert.match(updateVersionBlocker({ ...base, bundle: false }) ?? '', /no bundle/u)
+  assert.match(updateVersionBlocker({ ...base, deprecated: 'old' }) ?? '', /Deprecated: old/u)
+  assert.match(updateVersionBlocker({
+    ...base,
+    incompatible: { name: 'pkg', version: '1.1.0', runtimeVersion: '0.2.2-rc.1', requirements: { 'engines.dsh': '>=9' } },
+  }) ?? '', /rejects DSH/u)
 })

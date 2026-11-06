@@ -906,7 +906,6 @@ test('the Detail Check updates entry drives one exact update through confirm, st
   await openCheckUpdates(harness)
 
   // checking -> selecting (the fixture list resolves immediately).
-  await selectCard(harness, 'bundle:updatable')
   assert.equal(harness.listVersionCalls.length, 1)
   assert.equal(harness.controller.updateView()?.phase, 'selecting')
   assert.match(harness.view(), /Update bundle · updatable/)

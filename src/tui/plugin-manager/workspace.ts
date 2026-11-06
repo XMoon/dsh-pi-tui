@@ -338,8 +338,6 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   private updateConfirmSelection = 1
   private updateConfirmOffset = 0
   private updateActionSelection = 0
-  private updateLogOffset = 0
-  private updateLogsExpanded = false
   /** The action values actually painted in the LAST Update frame. */
   private paintedUpdateActions: ReadonlySet<string> = new Set()
   /** Version values whose row was really painted in the LAST update frame. */
@@ -2377,8 +2375,6 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       this.updateConfirmSelection = 1
       this.updateConfirmOffset = 0
       this.updateActionSelection = 0
-      this.updateLogOffset = 0
-      this.updateLogsExpanded = false
       if (update?.phase === 'selecting') {
         const list = update.versions
         const index = list?.status === 'listed' && update.selectedExactVersion !== undefined
@@ -3066,8 +3062,6 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     this.updateConfirmOffset = 0
     this.updateActionSelection = 0
     this.updateOffset = 0
-    this.updateLogOffset = 0
-    this.updateLogsExpanded = false
     const list = update.versions
     const index = list !== undefined && list.status === 'listed' && update.selectedExactVersion !== undefined
       ? list.versions.findIndex(version => version.version === update.selectedExactVersion)
@@ -3105,8 +3099,6 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   private leaveUpdate(destination: 'list' | 'details'): void {
     this.view = destination
     this.focus = destination === 'details' ? 'details' : 'list'
-    this.updateLogOffset = 0
-    this.updateLogsExpanded = false
     this.bumpRevision(); this.bumpSemantic()
     this.intents.requestRender()
   }
@@ -3138,10 +3130,19 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     this.intents.requestRender()
   }
 
-  /** Wheel scrolling of the update body; the pinned action rows never move. */
+  /** Wheel scrolling of the update body. While `selecting` the wheel browses
+   *  the version rows (the pinned action rows never move). */
   private scrollUpdate(delta: number, plan: ChromePlan | undefined): boolean {
     const update = this.controller.updateView()
     if (update === undefined) return false
+    if (update.phase === 'selecting') {
+      const count = this.updateVersionsOf(update).length
+      if (count === 0) return false
+      const next = Math.min(Math.max(0, this.updateSelection + (delta > 0 ? 1 : -1)), count - 1)
+      if (next === this.updateSelection) return false
+      this.updateSelection = next
+      return true
+    }
     const viewport = this.paintedUpdateViewport > 0
       ? this.paintedUpdateViewport
       : Math.max(1, (plan?.bodyRows ?? 1) - Math.min(2, plan?.bodyRows ?? 1))
@@ -3157,6 +3158,11 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     if (next === this.updateOffset) return false
     this.updateOffset = next
     return true
+  }
+
+  /** One page of the Update version list (the painted body minus its header). */
+  private updatePageStep(): number {
+    return Math.max(1, this.paintedUpdateViewport - 1)
   }
 
   private scrollUpdatePage(direction: 1 | -1, page: boolean): void {
@@ -3200,19 +3206,23 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       return
     }
     if (matchesKey(data, 'pageUp')) {
-      this.scrollUpdatePage(-1, true)
+      if (selecting) this.moveUpdateSelection(-this.updatePageStep())
+      else this.scrollUpdatePage(-1, true)
       return
     }
     if (matchesKey(data, 'pageDown')) {
-      this.scrollUpdatePage(1, true)
+      if (selecting) this.moveUpdateSelection(this.updatePageStep())
+      else this.scrollUpdatePage(1, true)
       return
     }
     if (matchesKey(data, 'home')) {
-      this.scrollUpdatePage(-1, false)
+      if (selecting) this.moveUpdateSelection(-Number.MAX_SAFE_INTEGER)
+      else this.scrollUpdatePage(-1, false)
       return
     }
     if (matchesKey(data, 'end')) {
-      this.scrollUpdatePage(1, false)
+      if (selecting) this.moveUpdateSelection(Number.MAX_SAFE_INTEGER)
+      else this.scrollUpdatePage(1, false)
       return
     }
     if (matchesKey(data, 'enter')) {

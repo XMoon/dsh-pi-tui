@@ -2,10 +2,12 @@
  * Test-only local npm registry for the S5 real-Host Plugin Manager install
  * evidence (A09 cancel window, A10 blocked-build approval).
  *
- * The fixture packs ONE audit package into a tarball with the developer's own
- * npm, then serves the npm registry metadata route and that exact tarball from
- * a loopback HTTP server. Nothing is published anywhere; no public registry,
- * credential or user store is read.
+ * The fixture packs the audit package (and optionally extra published versions)
+ * into tarballs with the developer's own npm, then serves the npm registry
+ * metadata route and those exact tarballs from a loopback HTTP server. Nothing
+ * is published anywhere; no public registry, credential or user store is read.
+ * `additionalVersions` lets the official `listVersions`/`updateBundle` path read
+ * a real registry upgrade; the LAST additional version is the slow/cancel target.
  *
  * `slowTarball` withholds the tarball body after the first bytes, so the real
  * pnpm child sits in a network read until the test calls `releaseTarball()`.

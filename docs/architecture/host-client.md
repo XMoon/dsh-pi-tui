@@ -800,14 +800,22 @@ callback listener beyond loopback in the shipped profile.
 ## Plugin Manager
 
 `@deepseek-ai/dsh-plugin-manager` is the sole authority for package/profile
-truth, enablement, installed state, install/remove, compatibility and version
-exemptions. The semantic port projects **detached** `PluginBundleFact`
-(`official`, `availability`, `installTarget`, `version`, `listedByDefault`,
-`enabled`, `installed`, `optional`, `source`, `removable`, `updatable`,
-`readOnlyReason`, `error`, `rows`, `overrides`), `PluginRowFact`, `PluginRegistriesFact`, `PluginExemptionFact` and
-`PluginChangeFact` (`application`, `restartReason`, `version`, `pendingBuilds`,
-`approvedBuilds`, `packageResult`, `registries`, `failedAt`). The port owns no
-installed-package database, no enabled truth and no compatibility evaluation.
+truth, enablement, installed state, install/remove, compatibility, version
+exemptions and version updates. The semantic port projects **detached**
+`PluginBundleFact` (`official`, `availability`, `installTarget`, `version`,
+`listedByDefault`, `enabled`, `installed`, `optional`, `source`, `removable`,
+`updatable`, `readOnlyReason`, `error`, `rows`, `overrides`), `PluginRowFact`,
+`PluginRegistriesFact`, `PluginExemptionFact` and `PluginChangeFact`
+(`application`, `restartReason`, `version`, `pendingBuilds`, `approvedBuilds`,
+`packageResult`, `registries`, `failedAt`). It also carries the update facts:
+`PluginVersionListFact` (the Host-listed newer versions with their registry,
+attempts, per-version tags/publication/prerelease/deprecation/bundle/
+compatibility and omitted count, or the Host refusal), `PluginUpdateProgressFact`
+(`requestId`, `checking|removing|installing|restoring`) and
+`PluginUpdateResultFact` (`from`, `to`, the last `step`, the target `result`
+and the SEPARATE optional `restore`). The port owns no installed-package
+database, no enabled truth, no compatibility evaluation and no local semver
+comparison.
 
 Direct and Remote use the SAME detach/mapping functions:
 
@@ -818,10 +826,23 @@ Host fact
   -> surface-behavior controller/UI
 ```
 
-Every Remote read/mutation/wait/cancel/inspect result is fenced by the
-pre-dispatch Connection generation and raises `PluginManagerStaleResultError`
-when superseded; the surface contract interprets that as indeterminate plus an
-authoritative reread, never as a refusal or success. The UI never guesses a
+`listVersions(name, {})` and `updateBundle(name, exactVersion, { registry,
+requestId })` are the official update read/write. The Host alone decides whether
+a bundle is updatable, which registry answered, which exact version is offered,
+whether it declares a bundle and whether it accepts the running DSH version; it
+re-checks the exact target before changing the profile and may run its own
+remove/install/restore sequence. The TUI never guesses a newer version, accepts
+an arbitrary registry, or reproduces the update with removeBundle + installBundle.
+`plugin-manager/update-state` is the official stage hint only, never proof of
+success; `cancelInstall(requestId)` stops ONLY the target installation step and
+never the whole update or the Host's restore. `updateBundle` is called once per
+confirmed attempt and never retried.
+
+Every Remote read/mutation/wait/cancel/inspect/list-versions/update result is
+fenced by the pre-dispatch Connection generation and raises
+`PluginManagerStaleResultError` when superseded; the surface contract interprets
+that as indeterminate plus an authoritative reread, never as a refusal or
+success. The UI never guesses a
 capability from a package name, `@deepseek-ai/` scope, `experimental` substring,
 enablement, `fiber` or availability. Official Experimental identity comes from
 the release's read-only `EXPERIMENTAL_BUNDLES` set plus the TUI's frozen legacy

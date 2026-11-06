@@ -956,12 +956,17 @@ Esc is a two-level gradient: the untouched List root yields to the Categories
 rail (keeping the page and its state), a second Esc closes the Settings lease;
 Details returns to the List, confirmation returns to Details, Diagnostics
 returns to the List, and a running install's Esc hides the view without
-cancelling the Host operation. The rail's `Tab`/`Enter`/`Right` only transfer
-the keyboard into the List. `Esc` in the install gradient and the details
-sub-state never cross levels. A page factory failure releases the claim and
-disposes anything half-built instead of faking success; a page that starts
-after an earlier attempt ALWAYS starts on the List, and `i` reopens the same
-in-flight/failed/unknown request id without dispatching a second install.
+cancelling the Host operation. The upgrade view follows the same rule: Esc from
+`checking`/`selecting`/`confirm`/`done` returns to that Bundle's Detail, while a
+`running` or `unknown` update hides the page (to the List) without cancelling or
+re-dispatching the Host operation. The rail's `Tab`/`Enter`/`Right` only
+transfer the keyboard into the List. `Esc` in the install/update gradient and
+the details sub-state never cross levels. A page factory failure releases the
+claim and disposes anything half-built instead of faking success; a page that
+starts after an earlier attempt ALWAYS starts on the List, `i` reopens the same
+in-flight/failed/unknown install request id without dispatching a second
+install, and `u update result` reopens the ONE update lifecycle after it was
+hidden.
 
 ### Host authority is owned elsewhere
 
@@ -999,10 +1004,12 @@ Host `removable`/`availability` facts, through its own destructive confirmation.
 The TUI never fabricates a platform decision, retries an indeterminate write, or
 reports a refusal as success.
 
-`BundleInfo.updatable` is likewise a declared Host capability with NO TUI action:
-Detail states it read-only, and the update gesture (and `listVersions`/
-`updateBundle` registration) does not exist here until the milestone that owns
-it.
+`BundleInfo.updatable` is a declared Host capability, never a TUI guess: only a
+Host-updatable, non-self bundle Detail offers `Check updates…` (before Remove),
+and the entry is answered by the official `listVersions` read. The Host's
+`installed`/`official`/`source`/`readOnlyReason` facts — not a local check —
+decide that capability; a non-updatable profile bundle keeps the
+Remove-then-explicit-install guidance.
 
 ### Inventory read epoch
 
@@ -1055,6 +1062,63 @@ normal successor of `applying`.
 - A Remote reply superseded by a Connection generation change is an
   indeterminate `PluginManagerStaleResultError`, never a new-Host success or
   refusal.
+
+### Update state machine
+
+Phases (ONE Controller-owned lifecycle, never a second store):
+
+```text
+checking → selecting → confirm → running → done
+   │           │          │         │
+   └───────────┴──────────┘         └──→ unknown
+```
+
+- `Check updates…` requires the current Host model card to be a non-self
+  `target:'bundle'` with `updatable:true`, and fixes the installed version and
+  read epoch before `listVersions(name,{})`. Only an explicit `r` repeats the
+  registry read; re-entering the page reuses the completed list, and a new
+  inventory read invalidates an unconfirmed list (`Bundle changed; check
+  versions again`).
+- `selecting` renders every Host-listed version verbatim: tags, publication
+  time, prerelease, deprecation, bundle declaration and compatibility. A
+  non-bundle, incompatible or deprecated row is not selectable; a legal
+  prerelease is selectable only by an explicit choice (the initial suggestion is
+  the first eligible stable version and does NOT silently pick a prerelease).
+- `confirm` shows `From → To`, the Host-answered registry, and the consequence
+  warning; Cancel is the default choice, and a dangerous primary is painted only
+  when its whole warning fits the painted body (a tiny frame withholds it and
+  says why). Enter/pointer activation re-checks the last-painted action and the
+  current installed-version/read epoch; a changed inventory withdraws the
+  confirmation without writing.
+- `execute` sets the request id, `running`, `busyValue` and `mutationToken`
+  synchronously, then calls the official `updateBundle(name, exactVersion,
+  {registry, requestId})` exactly once. While the update owns the path, Remove,
+  Toggle, a new Install, build approval and a second Update are refused. Hiding
+  the page never cancels or re-dispatches it.
+- `running` renders the official `plugin-manager/update-state` steps and the
+  matched `install-state`/install-log by exact request id; unrelated ids never
+  enter the update log. `s stop target install` exists only while the update step
+  is `installing` AND the matched install phase is `installing`; it calls
+  `cancelInstall(requestId)` and keeps waiting for the update result. A
+  `cancelled` / `too-late` / `not-running` answer is only a notice, never the
+  update's outcome.
+- The returned `PluginUpdateResultFact` is reported as TWO independent fields:
+  the target `result` (`application`, `stage`, `version`, error, restart) and
+  the optional Host `restore` (its own application/error/version). A target
+  failure with a successful restore and a target failure with a failed restore
+  are distinct states; a missing restore is never presented as a restored
+  version. `restart-required` is shown as such.
+- The update is `done` only after a fresh authoritative `snapshot()` read. The
+  observed installed version is a separate fact from the operation result; a
+  failed reread is `Inventory stale`, never a fabricated current version.
+- A transport/Remote-generation failure after dispatch is `unknown`: it is
+  neither success nor failure nor cancellation, is never retried, and keeps the
+  local write lock. A successful authoritative reread plus an explicit
+  `Acknowledge uncertainty` is the only release; the acknowledgement states that
+  the Host may still be finishing the update.
+- A settled update while the page is hidden is notified once and stays
+  recoverable through the same Bundle's `Check updates…` or the List's
+  `u update result`; no second update history/task center exists.
 
 ### Detail copy policy
 
@@ -1113,8 +1177,8 @@ Derive only from `availability`, `canRemove`, `isSelf`, `version`,
 
 - self → managed outside this screen;
 - installation → upgrade DSH; no in-place update or Remove;
-- profile-owned with `updatable:true` → state that the Host supports version
-  updates and that this TUI does not yet offer the update action;
+- profile-owned with `updatable:true` → name `Check updates…` and state that the
+  Host re-checks the exact target before changing the profile;
 - profile-owned without it → Remove first, then an explicit later install; state
   when removal is not permitted;
 - missing with an official target the Host itself refuses (for example
