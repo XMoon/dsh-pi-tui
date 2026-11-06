@@ -12,7 +12,7 @@ import type { Component } from '@xmoon76/pi-tui'
 import { PluginManagerController } from '../../src/app/plugin-manager/controller.ts'
 import { PluginManagerWorkspacePanel } from '../../src/tui/plugin-manager/workspace.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
-import type { PluginBundleFact, PluginChangeFact } from '../../src/runtime/plugin-manager-port.ts'
+import type { PluginBundleFact, PluginChangeFact, PluginUpdateResultFact } from '../../src/runtime/plugin-manager-port.ts'
 import { SELF_BUNDLE } from '../../src/app/plugin-manager/classify.ts'
 import { EXPERIMENTAL_NAMES, bundle, openWorkspace, plain, row, type WorkspaceHarness } from '../support/plugin-workspace-harness.ts'
 
@@ -308,6 +308,9 @@ test('a second workspace lease is refused; an external disposal notifies exactly
     waitForInstall: async () => null,
     cancelInstall: async () => ({ status: 'not-running' }),
     subscribeInstall: () => () => {},
+    listVersions: async () => ({ status: 'refused', problem: 'not-updatable', reason: 'the fixture has no updatable bundle', attempts: [] }),
+    updateBundle: async () => { throw new Error('updateBundle is not used by this fixture') },
+    subscribeUpdate: () => () => {},
     subscribeInvalidation: () => () => {},
   }, {
     requestRender: () => {},
@@ -860,4 +863,202 @@ test('a Host default-hidden installation bundle appears only on explicit search 
   await harness.waitForFrame()
   assert.doesNotMatch(view(), new RegExp(hidden))
   assert.notEqual(harness.panel.selectedCardValue(), value)
+})
+
+// ── S5-PR2: the Update page through the real Settings workspace ─────────────
+
+const UPDATABLE_BUNDLES = (): readonly PluginBundleFact[] => [
+  bundle({
+    name: 'updatable',
+    updatable: true,
+    version: '1.0.0',
+    source: 'https://registry.example/updatable',
+    enabled: false,
+  }),
+]
+
+/** From the List: open the card Detail, move from Disable… to Check updates…,
+ *  and activate it. The action must be painted by the frame that admits Enter. */
+async function openCheckUpdates(harness: WorkspaceHarness): Promise<void> {
+  if (harness.panel.currentView() === 'list') {
+    await selectCard(harness, 'bundle:updatable')
+    harness.vt.sendInput('\r')
+    await harness.waitForFrame()
+  }
+  assert.equal(harness.panel.currentView(), 'details')
+  harness.vt.sendInput('\x1b[B') // Disable… -> Check updates…
+  await harness.waitForFrame()
+  harness.vt.sendInput('\r')
+  await harness.waitForFrame()
+  assert.equal(harness.panel.currentView(), 'update')
+}
+
+test('the Detail Check updates entry drives one exact update through confirm, stop and result', async () => {
+  const gate = deferred<PluginUpdateResultFact>()
+  const harness = await open({
+    columns: 120,
+    rows: 40,
+    bundles: UPDATABLE_BUNDLES(),
+    plugins: [],
+    updateImpl: () => gate.promise,
+    cancelImpl: async () => ({ status: 'cancelled' }),
+  })
+  await openCheckUpdates(harness)
+
+  // checking -> selecting (the fixture list resolves immediately).
+  await selectCard(harness, 'bundle:updatable')
+  assert.equal(harness.listVersionCalls.length, 1)
+  assert.equal(harness.controller.updateView()?.phase, 'selecting')
+  assert.match(harness.view(), /Update bundle · updatable/)
+  assert.match(harness.view(), /Installed\s+1\.0\.0/)
+  assert.match(harness.view(), /1\.1\.0/)
+  assert.match(harness.view(), /Registry\s+https:\/\/registry\.example\//)
+  assert.match(harness.view(), /Enter choose/)
+
+  // Esc returns to the SAME Detail; re-entering reuses the completed list.
+  harness.vt.sendInput('\x1b')
+  await harness.waitForFrame()
+  assert.equal(harness.panel.currentView(), 'details')
+  await openCheckUpdates(harness)
+  assert.equal(harness.listVersionCalls.length, 1, 're-entering never repeats the registry read')
+  assert.equal(harness.controller.updateView()?.selectedExactVersion, '1.1.0')
+
+  // Enter selects the version and opens the confirmation; Cancel is the default.
+  harness.vt.sendInput('\r')
+  await harness.waitForFrame()
+  assert.equal(harness.controller.updateView()?.phase, 'confirm')
+  const confirm = harness.view()
+  assert.match(confirm, /From\s+1\.0\.0/)
+  assert.match(confirm, /To\s+1\.1\.0/)
+  assert.match(confirm, /Plugins may stop during the update/)
+  assert.match(confirm, /Host attempts to restore the former version/)
+  assert.match(confirm, /> Cancel/)
+  harness.vt.sendInput('\r')
+  await harness.waitForFrame()
+  assert.equal(harness.controller.updateView()?.phase, 'selecting', 'Enter on the default Cancel writes nothing')
+  assert.equal(harness.updateCalls.length, 0)
+
+  // Re-confirm deliberately: Up moves from Cancel to Confirm update.
+  harness.vt.sendInput('\r')
+  await harness.waitForFrame()
+  assert.equal(harness.controller.updateView()?.phase, 'confirm')
+  harness.vt.sendInput('\x1b[A')
+  await harness.waitForFrame()
+  harness.vt.sendInput('\r')
+  await harness.waitForFrame()
+  const running = harness.controller.updateView()!
+  assert.equal(running.phase, 'running')
+  assert.equal(harness.updateCalls.length, 1)
+  assert.deepEqual({
+    name: harness.updateCalls[0]!.name,
+    version: harness.updateCalls[0]!.version,
+    registry: harness.updateCalls[0]!.registry,
+    requestId: harness.updateCalls[0]!.requestId,
+  }, {
+    name: 'updatable',
+    version: '1.1.0',
+    registry: 'https://registry.example/',
+    requestId: running.requestId,
+  })
+
+  // The Host step and the matched install phase appear; only then Stop.
+  harness.emitUpdate({ requestId: running.requestId!, step: 'checking' })
+  await harness.waitForFrame()
+  assert.match(harness.view(), /Checking the exact target/)
+  harness.emitUpdate({ requestId: running.requestId!, step: 'installing' })
+  await harness.waitForFrame()
+  assert.doesNotMatch(harness.view(), /stop target install/, 'the matched install-state has not arrived yet')
+  harness.emit({ kind: 'phase', phase: { requestId: running.requestId!, phase: 'installing' } })
+  await harness.waitForFrame()
+  assert.match(harness.view(), /Installing the target version/)
+  assert.match(harness.view(), /s stop target install/)
+
+  harness.vt.sendInput('s')
+  await harness.waitForFrame()
+  assert.deepEqual(harness.cancelInstallCalls, [running.requestId], 'Stop names ONLY the update request id')
+  assert.equal(harness.controller.updateView()?.phase, 'running', 'cancelling the target install never ends the update')
+
+  gate.resolve({
+    from: '1.0.0',
+    to: '1.1.0',
+    step: 'install',
+    result: { changed: true, application: 'applied', stage: 'install', target: 'updatable@1.1.0', bundle: 'updatable', version: '1.1.0' },
+  })
+  await harness.waitForFrame(16)
+  assert.equal(harness.controller.updateView()?.phase, 'done')
+  assert.equal(harness.controller.updateView()?.readback, 'ready')
+  const done = harness.view()
+  assert.match(done, /Target result/)
+  assert.match(done, /Restore result/)
+  assert.match(done, /Not required; the former version was never removed\./)
+  assert.match(done, /Observed installed version\s+1\.1\.0/)
+  assert.match(done, /Outcome\s+applied/)
+
+  // Esc returns to the same Bundle Detail; the result stays on the Controller.
+  harness.vt.sendInput('\x1b')
+  await harness.waitForFrame()
+  assert.equal(harness.panel.currentView(), 'details')
+  assert.equal(harness.controller.updateView()?.phase, 'done')
+  assert.equal(harness.updateCalls.length, 1)
+})
+
+test('a running update hides without cancelling; `u` reopens the one result after it settles', async () => {
+  const gate = deferred<PluginUpdateResultFact>()
+  const harness = await open({
+    columns: 120,
+    rows: 40,
+    bundles: UPDATABLE_BUNDLES(),
+    plugins: [],
+    updateImpl: () => gate.promise,
+  })
+  await openCheckUpdates(harness)
+  harness.vt.sendInput('\r')
+  await harness.waitForFrame()
+  harness.vt.sendInput('\x1b[A')
+  await harness.waitForFrame()
+  harness.vt.sendInput('\r')
+  await harness.waitForFrame()
+  assert.equal(harness.controller.updateView()?.phase, 'running')
+
+  harness.vt.sendInput('\x1b')
+  await harness.waitForFrame()
+  assert.equal(harness.panel.currentView(), 'list', 'a running update hides to the List')
+  assert.equal(harness.cancelInstallCalls.length, 0, 'Esc never cancels the Host operation')
+  assert.match(harness.view(), /u update result/, 'the List names the single recoverable update')
+
+  gate.resolve({
+    from: '1.0.0',
+    to: '1.1.0',
+    step: 'install',
+    result: { changed: true, application: 'restart-required', stage: 'install', target: 'updatable@1.1.0', bundle: 'updatable', version: '1.1.0', restartReason: 'no-hmr' },
+  })
+  await harness.waitForFrame(16)
+  await harness.waitForFrame(4)
+  assert.equal(harness.controller.updateView()?.phase, 'done')
+  harness.vt.sendInput('u')
+  await harness.waitForFrame()
+  assert.equal(harness.panel.currentView(), 'update')
+  assert.match(harness.view(), /Restart\s+no-hmr/)
+  assert.match(harness.view(), /Observed installed version\s+1\.1\.0/)
+  assert.equal(harness.updateCalls.length, 1)
+})
+
+test('a resize between pressing a version row and releasing it refuses the stale choice', async () => {
+  const harness = await open({
+    columns: 120,
+    rows: 40,
+    bundles: UPDATABLE_BUNDLES(),
+    plugins: [],
+  })
+  await openCheckUpdates(harness)
+  const lines = plain(harness.viewport()).split('\n')
+  const y = lines.findIndex(line => line.includes('1.1.0'))
+  assert.ok(y >= 0, 'the version row is painted')
+  harness.panel.onCellPress(2, y)
+  // A new grant invalidates the painted frame before the release.
+  harness.panel.setViewport({ width: 118, rows: 40, allowDual: false })
+  harness.panel.onCellClick(2, y)
+  await harness.waitForFrame()
+  assert.equal(harness.controller.updateView()?.phase, 'selecting', 'the stale press never opens the confirmation')
+  assert.equal(harness.updateCalls.length, 0)
 })

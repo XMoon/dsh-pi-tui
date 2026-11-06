@@ -16,6 +16,7 @@ import type {
   BundleInfo,
   ChangeResult,
   InstallBundleOptions,
+  ListVersionsOptions,
   PluginEntryId,
   PluginInfo,
   PluginInstallCancellation,
@@ -24,6 +25,10 @@ import type {
   PluginInstallRequestId,
   PluginRegistries,
   PluginSpecInspection,
+  PluginUpdateProgress,
+  PluginUpdateResult,
+  PluginVersionList,
+  UpdateBundleOptions,
 } from '@deepseek-ai/dsh-plugin-manager'
 import type {
   PluginChangeFact,
@@ -33,6 +38,9 @@ import type {
   PluginManagerPort,
   PluginManagerSnapshot,
   PluginSpecInspectionFact,
+  PluginUpdateProgressFact,
+  PluginUpdateResultFact,
+  PluginVersionListFact,
 } from '../plugin-manager-port.ts'
 import {
   detachChange,
@@ -40,6 +48,9 @@ import {
   detachLog,
   detachPhase,
   detachPluginManagerSnapshot,
+  detachPluginUpdateProgress,
+  detachPluginUpdateResult,
+  detachPluginVersionList,
   pluginInstallRequestId,
 } from '../plugin-manager-mapping.ts'
 
@@ -65,6 +76,8 @@ export interface PluginManagerServiceLike {
   installBundle(spec: string, options?: InstallBundleOptions): Promise<ChangeResult>
   waitForInstall(requestId: PluginInstallRequestId): Promise<ChangeResult | null>
   cancelInstall(requestId: PluginInstallRequestId): Promise<PluginInstallCancellation>
+  listVersions(name: string, options?: ListVersionsOptions, signal?: AbortSignal): Promise<PluginVersionList>
+  updateBundle(name: string, version: string, options?: UpdateBundleOptions): Promise<PluginUpdateResult>
 }
 
 /** The Direct backend's Plugin Manager port over the official Host service. */
@@ -144,6 +157,18 @@ export class DirectPluginManagerPort implements PluginManagerPort {
     return Object.freeze({ status: result.status })
   }
 
+  /** The Host's own default registry plan: the Client never supplies one here. */
+  async listVersions(name: string, signal?: AbortSignal): Promise<PluginVersionListFact> {
+    return detachPluginVersionList(await this.service().listVersions(name, {}, signal))
+  }
+
+  async updateBundle(name: string, version: string, registry: string | null, requestId: string): Promise<PluginUpdateResultFact> {
+    return detachPluginUpdateResult(await this.service().updateBundle(name, version, {
+      registry,
+      requestId: pluginInstallRequestId(requestId),
+    }))
+  }
+
   subscribeInstall(listener: (event: PluginInstallEvent) => void): () => void {
     const offState = this.ctx.on('plugin-manager/install-state', (payload) => {
       listener({ kind: 'phase', phase: detachPhase(payload as PluginInstallProgress) })
@@ -155,6 +180,13 @@ export class DirectPluginManagerPort implements PluginManagerPort {
       offState()
       offLog()
     }
+  }
+
+  /** The official update step announcements only: never `plugin-manager/changed`. */
+  subscribeUpdate(listener: (progress: PluginUpdateProgressFact) => void): () => void {
+    return this.ctx.on('plugin-manager/update-state', (payload) => {
+      listener(detachPluginUpdateProgress(payload as PluginUpdateProgress))
+    })
   }
 
   subscribeInvalidation(listener: () => void): () => void {

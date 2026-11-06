@@ -43,9 +43,15 @@ export interface PackedFixturePackage {
   readonly sha256: string
 }
 
-/** Write one package directory and pack it with the local npm. */
-export function packFixturePackage(root: string, pkg: FixturePackage): PackedFixturePackage {
-  const packageDir = join(root, 'fixture-package')
+/** Write one package directory and pack it with the local npm. A caller that
+ *  packs TWO versions passes distinct directories so the second `npm pack`
+ *  never overwrites the first version's package/tarball. */
+export function packFixturePackage(
+  root: string,
+  pkg: FixturePackage,
+  options: { readonly directory?: string; readonly tarballDirectory?: string } = {},
+): PackedFixturePackage {
+  const packageDir = join(root, options.directory ?? 'fixture-package')
   mkdirSync(packageDir, { recursive: true })
   writeFileSync(join(packageDir, 'package.json'), `${JSON.stringify(pkg.manifest, null, 2)}\n`)
   for (const [name, content] of Object.entries(pkg.files ?? {})) {
@@ -53,7 +59,7 @@ export function packFixturePackage(root: string, pkg: FixturePackage): PackedFix
     if (name.includes('/')) mkdirSync(join(path, '..'), { recursive: true })
     writeFileSync(path, content)
   }
-  const outDir = join(root, 'fixture-tarball')
+  const outDir = join(root, options.tarballDirectory ?? 'fixture-tarball')
   mkdirSync(outDir, { recursive: true })
   // `npm pack` prints the created file name; no registry/network access and no
   // lifecycle scripts run for this fixture package.
@@ -71,6 +77,17 @@ export function packFixturePackage(root: string, pkg: FixturePackage): PackedFix
     tarballPath,
     sha256: createHash('sha256').update(tarball).digest('hex'),
   }
+}
+
+/** One additional published version served beside the primary package. */
+export interface AdditionalRegistryVersion {
+  readonly packed: PackedFixturePackage
+  /** The exact manifest merged into this version's packument entry. */
+  readonly manifest?: Record<string, unknown>
+  readonly publishedAt?: string
+  readonly deprecated?: string
+  /** Dist-tags pointing at this version (the last additional version is `latest`). */
+  readonly tags?: readonly string[]
 }
 
 export interface LocalNpmRegistryControl {
@@ -100,13 +117,50 @@ export async function startLocalNpmRegistry(
      *  packument's version entry so `pnpm view` (the official inspect path)
      *  sees `dsh.bundle` instead of a bundle-less package. */
     readonly manifest?: Record<string, unknown>
+    /** Published versions newer than the primary package. The Host's
+     *  `listVersions` can therefore read a real registry upgrade. */
+    readonly additionalVersions?: readonly AdditionalRegistryVersion[]
   } = {},
 ): Promise<LocalNpmRegistryControl> {
-  const tarball = readFileSync(packed.tarballPath)
-  const integrity = `sha512-${createHash('sha512').update(tarball).digest('base64')}`
-  const shasum = createHash('sha1').update(tarball).digest('hex')
-  const tarballName = `${packed.name.split('/')[1]}-${packed.version}.tgz`
-  const tarballPath = `/${packed.name}/-/${tarballName}`
+  interface ServedVersion {
+    readonly packed: PackedFixturePackage
+    readonly manifest: Record<string, unknown> | undefined
+    readonly publishedAt: string
+    readonly deprecated?: string
+    readonly tags: readonly string[]
+    readonly tarball: Buffer
+    readonly integrity: string
+    readonly shasum: string
+    readonly tarballPath: string
+  }
+  const served: ServedVersion[] = []
+  const versions = [packed, ...(options.additionalVersions ?? []).map(version => version.packed)]
+  const tarballPaths = new Map<string, string>()
+  for (const entry of versions) {
+    const tarball = readFileSync(entry.tarballPath)
+    // A scoped name keeps its last segment; an unscoped name is its own filename.
+    const baseName = entry.name.startsWith('@') ? entry.name.split('/')[1]! : entry.name
+    const tarballName = `${baseName}-${entry.version}.tgz`
+    const tarballPath = `/${entry.name}/-/${tarballName}`
+    tarballPaths.set(`${entry.name}@${entry.version}`, tarballPath)
+    const additional = (options.additionalVersions ?? []).find(candidate => candidate.packed.version === entry.version)
+    served.push({
+      packed: entry,
+      manifest: entry === packed ? options.manifest : additional?.manifest,
+      publishedAt: additional?.publishedAt ?? new Date(0).toISOString(),
+      ...(additional?.deprecated === undefined ? {} : { deprecated: additional.deprecated }),
+      tags: entry === packed ? [] : additional?.tags ?? [],
+      tarball,
+      integrity: `sha512-${createHash('sha512').update(tarball).digest('base64')}`,
+      shasum: createHash('sha1').update(tarball).digest('hex'),
+      tarballPath,
+    })
+  }
+  const tarballByPath = new Map(served.map(version => [version.tarballPath, version]))
+  // The LAST additional version is the release the slow mode withholds (the
+  // update target); a single-version fixture keeps the primary behavior.
+  const slowVersion = (options.additionalVersions ?? []).at(-1)?.packed.version ?? packed.version
+  const slowTarballPath = tarballPaths.get(`${packed.name}@${slowVersion}`)!
   const metadataPath = `/${packed.name}`
 
   let release!: () => void
@@ -116,31 +170,43 @@ export async function startLocalNpmRegistry(
   let requestedOnce = false
   let closed = false
 
+  const distTags: Record<string, string> = { latest: served.at(-1)!.packed.version }
+  for (const version of served) {
+    for (const tag of version.tags) distTags[tag] = version.packed.version
+  }
+  const time: Record<string, string> = {
+    created: served[0]!.publishedAt,
+    modified: served.at(-1)!.publishedAt,
+  }
+  for (const version of served) time[version.packed.version] = version.publishedAt
+
   const server: Server = createServer((request, response) => {
     const path = decodeURIComponent(new URL(request.url ?? '/', 'http://127.0.0.1').pathname)
     if (path === metadataPath) {
       const body = JSON.stringify({
         name: packed.name,
-        'dist-tags': { latest: packed.version },
-        versions: {
-          [packed.version]: {
-            ...options.manifest,
-            name: packed.name,
-            version: packed.version,
-            dist: {
-              tarball: `${registryUrl}${tarballPath}`,
-              integrity,
-              shasum,
-            },
+        'dist-tags': distTags,
+        time,
+        versions: Object.fromEntries(served.map((version) => [version.packed.version, {
+          ...version.manifest,
+          name: packed.name,
+          version: version.packed.version,
+          ...(version.deprecated === undefined ? {} : { deprecated: version.deprecated }),
+          dist: {
+            tarball: `${registryUrl}${version.tarballPath}`,
+            integrity: version.integrity,
+            shasum: version.shasum,
           },
-        },
+        }])),
       })
       response.writeHead(200, { 'content-type': 'application/json' })
       response.end(body)
       return
     }
-    if (path === tarballPath) {
-      if (!requestedOnce) {
+    const servedVersion = tarballByPath.get(path)
+    if (servedVersion !== undefined) {
+      const slow = options.slowTarball === true && path === slowTarballPath
+      if (slow && !requestedOnce) {
         requestedOnce = true
         markRequested()
       }
@@ -149,18 +215,18 @@ export async function startLocalNpmRegistry(
       })
       response.writeHead(200, {
         'content-type': 'application/octet-stream',
-        'content-length': String(tarball.length),
+        'content-length': String(servedVersion.tarball.length),
       })
-      if (options.slowTarball !== true) {
-        response.end(tarball)
+      if (!slow) {
+        response.end(servedVersion.tarball)
         return
       }
       // First bytes flush the headers; the rest waits for the test. A pnpm
       // child terminated by the official cancel closes the socket first.
-      response.write(tarball.subarray(0, Math.min(64, tarball.length)))
+      response.write(servedVersion.tarball.subarray(0, Math.min(64, servedVersion.tarball.length)))
       void released.then(() => {
         if (closed) return
-        finishSlow(response, tarball.subarray(64))
+        finishSlow(response, servedVersion.tarball.subarray(64))
       })
       return
     }

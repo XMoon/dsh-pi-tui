@@ -14,7 +14,7 @@ import { darkColors, lightColors } from '../../src/domain/display/theme.ts'
 import { PluginManagerController } from '../../src/app/plugin-manager/controller.ts'
 import { PluginManagerWorkspacePanel } from '../../src/tui/plugin-manager/workspace.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
-import type { PluginChangeFact, PluginManagerPort, PluginManagerSnapshot } from '../../src/runtime/plugin-manager-port.ts'
+import type { PluginBundleFact, PluginChangeFact, PluginManagerPort, PluginManagerSnapshot, PluginVersionListFact } from '../../src/runtime/plugin-manager-port.ts'
 import { SELF_BUNDLE } from '../../src/app/plugin-manager/classify.ts'
 import type { TuiApp } from '../../src/tui-app.ts'
 import { EXPERIMENTAL_NAMES, bundle, openWorkspace, plain, row, type WorkspaceHarness } from '../support/plugin-workspace-harness.ts'
@@ -266,6 +266,9 @@ test('a model refresh whose repaint has NOT run refuses a click on the old Enabl
     waitForInstall: async () => null,
     cancelInstall: async () => ({ status: 'not-running' }),
     subscribeInstall: () => () => {},
+    listVersions: async () => ({ status: 'refused', problem: 'not-updatable', reason: 'the fixture has no updatable bundle', attempts: [] }),
+    updateBundle: async () => { throw new Error('updateBundle is not used by this fixture') },
+    subscribeUpdate: () => () => {},
     subscribeInvalidation: () => () => {},
   }
   const controller = new PluginManagerController(port, {
@@ -607,4 +610,149 @@ test('the hidden-bundle search hint is discoverable WITHOUT scrolling at 80×24,
     started.delete(harness)
     harness.app.dispose()
   }
+})
+
+// ── S5-PR2: the Update page at the frozen terminal matrix ──────────────────
+
+const UPDATE_SIZES = [[200, 50], [120, 40], [100, 40], [80, 24], [80, 10], [72, 24], [44, 20]] as const
+
+/** A painted primary ACTION row (the withheld explanation merely names it). */
+function primaryActionPainted(text: string): boolean {
+  return /^\s*(?:> )?Confirm update\s*$/mu.test(text)
+}
+
+function updatableBundles(): readonly PluginBundleFact[] {
+  return [bundle({
+    name: 'updatable',
+    updatable: true,
+    version: '1.0.0',
+    source: 'https://registry.example/updatable',
+    enabled: false,
+  })]
+}
+
+function updateVersions(): PluginVersionListFact {
+  return {
+    status: 'listed',
+    installed: '1.0.0',
+    registry: 'https://user:secret@registry.example/really/long/registry/path/',
+    attempts: [{ registry: 'https://user:secret@registry.example/really/long/registry/path/' }],
+    versions: [
+      {
+        version: '1.1.0',
+        publishedAt: '2026-01-02T03:04:05.000Z',
+        tags: ['latest'],
+        prerelease: false,
+        bundle: true,
+      },
+      {
+        version: '1.2.0-rc.1',
+        tags: ['next'],
+        prerelease: true,
+        deprecated: '这是一个较长的弃用说明，仅用于视觉换行验证。',
+        bundle: false,
+      },
+    ],
+    omitted: 0,
+  }
+}
+
+async function enterUpdate(harness: WorkspaceHarness): Promise<void> {
+  harness.vt.sendInput('\r') // Details on the first (only) card
+  await harness.waitForFrame()
+  harness.vt.sendInput('\x1b[B') // Disable… -> Check updates…
+  await harness.waitForFrame()
+  harness.vt.sendInput('\r')
+  await harness.waitForFrame()
+  assert.equal(harness.panel.currentView(), 'update')
+}
+
+test('the Update page keeps the Settings skeleton, ONE cursor, a pinned bar and masked facts at every size', async () => {
+  for (const [columns, rows] of UPDATE_SIZES) {
+    const harness = await open({
+      columns,
+      rows,
+      bundles: updatableBundles(),
+      plugins: [],
+      versionsImpl: async () => updateVersions(),
+    })
+    await enterUpdate(harness)
+    const view = harness.viewport()
+    const text = plain(view)
+    assert.match(plain([view[0]!]), /Settings · Plugins/u, `${columns}x${rows} header`)
+    assert.match(plain([view.at(-1)!]), /Esc/u, `${columns}x${rows} keeps the real Esc on the last row`)
+    for (const [index, line] of view.entries()) {
+      assert.ok(visibleWidth(line) <= columns, `${columns}x${rows} line ${index} exceeds the width`)
+    }
+    assert.equal(text.split('\n').filter(line => /^> /u.test(line)).length, 1,
+      `${columns}x${rows} has exactly ONE active indicator`)
+    assert.ok(text.includes('Update bundle · updatable'), `${columns}x${rows} fixed identity header`)
+    assert.ok(text.includes('1.1.0'), `${columns}x${rows} paints the target version`)
+    if (rows >= 24) {
+      assert.ok(text.includes('Installed'), `${columns}x${rows} paints the installed version fact`)
+    }
+    assert.ok(!text.includes('secret'), `${columns}x${rows} never leaks registry credentials`)
+    if (rows >= 24) {
+      assert.ok(text.includes('bundle: yes'), `${columns}x${rows} paints the bundle fact`)
+      assert.ok(text.includes('prerelease'), `${columns}x${rows} paints the prerelease fact`)
+    }
+
+    // Enter selects the version and opens the confirmation; Cancel is default.
+    harness.vt.sendInput('\r')
+    await harness.waitForFrame()
+    assert.equal(harness.controller.updateView()?.phase, 'confirm', `${columns}x${rows} confirmation`)
+    const confirm = plain(harness.viewport())
+    const flatConfirm = confirm.replace(/\s+/gu, ' ')
+    assert.match(confirm, /> Cancel/u, `${columns}x${rows} defaults to Cancel`)
+    if (primaryActionPainted(confirm)) {
+      // The dangerous primary is painted ONLY with its whole consequence.
+      assert.ok(flatConfirm.includes('Plugins may stop during the update.'), `${columns}x${rows} shows the consequence with the primary`)
+      assert.ok(flatConfirm.includes('a restart may be required.'), `${columns}x${rows} shows the whole warning with the primary`)
+    }
+    harness.vt.sendInput('\r') // default Cancel
+    await harness.waitForFrame()
+    assert.equal(harness.controller.updateView()?.phase, 'selecting', `${columns}x${rows} Cancel never writes`)
+    assert.equal(harness.updateCalls.length, 0)
+    started.delete(harness)
+    harness.app.dispose()
+  }
+})
+
+test('a short confirmation frame withholds the dangerous primary until the whole warning fits', async () => {
+  const harness = await open({
+    columns: 120,
+    rows: 40,
+    bundles: updatableBundles(),
+    plugins: [],
+    versionsImpl: async () => ({
+      status: 'listed',
+      installed: '1.0.0',
+      registry: 'https://registry.example/',
+      attempts: [{ registry: 'https://registry.example/' }],
+      versions: [{ version: '1.1.0-rc.1', tags: ['next'], prerelease: true, bundle: true }],
+      omitted: 0,
+    }),
+  })
+  await enterUpdate(harness)
+  // The only target is a prerelease: no default selection, an explicit choice.
+  assert.equal(harness.controller.updateView()?.selectedExactVersion, undefined)
+  harness.vt.sendInput('\r')
+  await harness.waitForFrame()
+  assert.equal(harness.controller.updateView()?.phase, 'confirm')
+
+  // A too-short body cannot show the whole warning: the primary is withheld.
+  harness.panel.setViewport({ width: 80, rows: 5, allowDual: false })
+  const tiny = plain(harness.panel.render(80))
+  assert.ok(!primaryActionPainted(tiny), 'the dangerous primary is not painted when clipped')
+  assert.ok(tiny.includes('Enlarge the terminal'), 'the frame states why the primary is withheld')
+  assert.ok(tiny.includes('> Cancel'), 'Cancel stays the reachable choice')
+
+  // A frame that fits the whole warning paints the primary (and the prerelease warning).
+  harness.panel.setViewport({ width: 80, rows: 24, allowDual: false })
+  const tall = plain(harness.panel.render(80))
+  const flatTall = tall.replace(/\s+/gu, ' ')
+  assert.ok(primaryActionPainted(tall), 'the primary returns when its warning is fully readable')
+  assert.ok(flatTall.includes('This is a prerelease version'), 'the prerelease risk is explicit')
+  assert.ok(flatTall.includes('Plugins may stop during the update.'), 'the standard consequence is explicit')
+  assert.ok(flatTall.includes('a restart may be required.'), 'the whole warning is visible')
 })

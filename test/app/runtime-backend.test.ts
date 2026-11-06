@@ -215,6 +215,9 @@ test('the Direct backend is the current production surface and serves EXACTLY th
     waitForInstall: async () => null,
     cancelInstall: async () => ({ status: 'not-running' as const }),
     subscribeInstall: () => () => {},
+    listVersions: async () => ({ status: 'refused' as const, problem: 'not-updatable' as const, reason: 'the fixture has no updatable bundle', attempts: [] }),
+    updateBundle: async () => { throw new Error('updateBundle is not used by this fixture') },
+    subscribeUpdate: () => () => {},
     subscribeInvalidation: () => () => {},
   }
   const jobObservation = {

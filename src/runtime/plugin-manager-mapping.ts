@@ -25,6 +25,11 @@ import type {
   PluginInstallRequestId,
   PluginRegistries,
   PluginSpecInspection,
+  PluginUpdateProgress,
+  PluginUpdateResult,
+  PluginVersion,
+  PluginVersionList,
+  RegistryAttempt,
 } from '@deepseek-ai/dsh-plugin-manager'
 import type {
   PluginBundleFact,
@@ -38,8 +43,13 @@ import type {
   PluginManagerSnapshot,
   PluginPackageResultFact,
   PluginRegistriesFact,
+  PluginRegistryAttemptFact,
   PluginRowFact,
   PluginSpecInspectionFact,
+  PluginUpdateProgressFact,
+  PluginUpdateResultFact,
+  PluginVersionFact,
+  PluginVersionListFact,
 } from './plugin-manager-port.ts'
 
 /** The official localized-text shape (`@deepseek-ai/dsh-package-manifest`),
@@ -253,5 +263,64 @@ export function detachLog(chunk: PluginInstallLogChunk): PluginInstallLogFact {
     jobId: chunk.jobId,
     stream: chunk.stream,
     text: chunk.text,
+  })
+}
+
+function detachRegistryAttempt(attempt: RegistryAttempt): PluginRegistryAttemptFact {
+  return Object.freeze({
+    registry: attempt.registry,
+    ...(attempt.problem === undefined ? {} : { problem: attempt.problem }),
+    ...(attempt.reason === undefined ? {} : { reason: attempt.reason }),
+  })
+}
+
+function detachVersion(version: PluginVersion): PluginVersionFact {
+  return Object.freeze({
+    version: version.version,
+    ...(version.publishedAt === undefined ? {} : { publishedAt: version.publishedAt }),
+    tags: Object.freeze([...version.tags]),
+    prerelease: version.prerelease,
+    ...(version.deprecated === undefined ? {} : { deprecated: version.deprecated }),
+    bundle: version.bundle,
+    ...(version.incompatible === undefined ? {} : { incompatible: detachIncompatible(version.incompatible) }),
+  })
+}
+
+/** Map one version listing with the Host's order, facts and omitted count intact. */
+export function detachPluginVersionList(list: PluginVersionList): PluginVersionListFact {
+  if (list.status === 'refused') {
+    return Object.freeze({
+      status: 'refused',
+      problem: list.problem,
+      reason: list.reason,
+      attempts: Object.freeze(list.attempts.map(detachRegistryAttempt)),
+    })
+  }
+  return Object.freeze({
+    status: 'listed',
+    installed: list.installed,
+    registry: list.registry,
+    attempts: Object.freeze(list.attempts.map(detachRegistryAttempt)),
+    versions: Object.freeze(list.versions.map(detachVersion)),
+    omitted: list.omitted,
+  })
+}
+
+/** Map one update step announcement. */
+export function detachPluginUpdateProgress(progress: PluginUpdateProgress): PluginUpdateProgressFact {
+  return Object.freeze({
+    requestId: String(progress.requestId),
+    step: progress.step,
+  })
+}
+
+/** Map the target outcome and the automatic restore as TWO independent results. */
+export function detachPluginUpdateResult(result: PluginUpdateResult): PluginUpdateResultFact {
+  return Object.freeze({
+    from: result.from,
+    to: result.to,
+    step: result.step,
+    result: detachChange(result.result),
+    ...(result.restore === undefined ? {} : { restore: detachChange(result.restore) }),
   })
 }

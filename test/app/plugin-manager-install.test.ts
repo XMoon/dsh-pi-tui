@@ -65,6 +65,9 @@ function harness(): { controller: PluginManagerController; installCalls: unknown
     waitForInstall: async () => null,
     cancelInstall: async () => ({ status: 'not-running' }),
     subscribeInstall: (listener) => { listeners.add(listener); return () => listeners.delete(listener) },
+    listVersions: async () => ({ status: 'refused', problem: 'not-updatable', reason: 'the fixture has no updatable bundle', attempts: [] }),
+    updateBundle: async () => { throw new Error('updateBundle is not used by this fixture') },
+    subscribeUpdate: () => () => {},
     subscribeInvalidation: () => () => {},
   }
   const controller = new PluginManagerController(port, {
@@ -206,6 +209,9 @@ function recoveryHarness(options: {
     },
     cancelInstall: async (requestId) => { cancelCalls.push(String(requestId)); return { status: 'cancelled' } },
     subscribeInstall: () => () => {},
+    listVersions: async () => ({ status: 'refused', problem: 'not-updatable', reason: 'the fixture has no updatable bundle', attempts: [] }),
+    updateBundle: async () => { throw new Error('updateBundle is not used by this fixture') },
+    subscribeUpdate: () => () => {},
     subscribeInvalidation: () => () => {},
   }
   const controller = new PluginManagerController(port, {
@@ -349,6 +355,9 @@ test('install inspection metadata and progress rows fold hostile values onto ONE
     waitForInstall: async () => null,
     cancelInstall: async () => ({ status: 'not-running' }),
     subscribeInstall: (listener) => { listeners.add(listener); return () => listeners.delete(listener) },
+    listVersions: async () => ({ status: 'refused', problem: 'not-updatable', reason: 'the fixture has no updatable bundle', attempts: [] }),
+    updateBundle: async () => { throw new Error('updateBundle is not used by this fixture') },
+    subscribeUpdate: () => () => {},
     subscribeInvalidation: () => () => {},
   }
   const controller = new PluginManagerController(port, {
@@ -555,6 +564,9 @@ test('an unknown install reopens with its request id and reconciliation action',
     waitForInstall: async () => null,
     cancelInstall: async () => ({ status: 'not-running' }),
     subscribeInstall: () => () => {},
+    listVersions: async () => ({ status: 'refused', problem: 'not-updatable', reason: 'the fixture has no updatable bundle', attempts: [] }),
+    updateBundle: async () => { throw new Error('updateBundle is not used by this fixture') },
+    subscribeUpdate: () => () => {},
     subscribeInvalidation: () => () => {},
   }, {
     requestRender: () => {},
@@ -899,6 +911,9 @@ test('the controller renders the real Host too-late response and the one install
           }
           listener(event)
         }),
+        listVersions: (name, signal) => direct.listVersions(name, signal),
+        updateBundle: (name, version, registry, requestId) => direct.updateBundle(name, version, registry, requestId),
+        subscribeUpdate: (listener) => direct.subscribeUpdate(listener),
         subscribeInvalidation: (listener) => direct.subscribeInvalidation(listener),
       }
       return wrapper

@@ -954,23 +954,50 @@ test('an unsupported-platform refusal blocks catalog Install yet keeps Disable a
   assert.equal(errorText(profileRefused!.error!), 'unsupported-platform — This bundle cannot be enabled on the DSH Host platform. — darwin only')
 })
 
-test('a Host-declared update capability is stated but never becomes a TUI Update action', () => {
+test('a Host-declared update capability is the only source of the Detail Check updates entry', () => {
   const updatable = bundle({ name: 'updatable-profile', updatable: true, source: 'https://registry.example/pkg' })
   const fixed = bundle({ name: 'fixed-profile', updatable: false, source: 'https://registry.example/fixed' })
-  const model = buildPluginManagerModel(snapshot([updatable, fixed], []), new Map())
+  const official = bundle({
+    name: '@vendor/official-shipped',
+    official: true,
+    availability: 'installation',
+    source: undefined,
+    updatable: false,
+  })
+  const self = bundle({ name: SELF_BUNDLE, updatable: true, source: 'https://registry.example/tui' })
+  const model = buildPluginManagerModel(snapshot([updatable, fixed, official], []), new Map())
 
   const updatableDetail = buildPluginDetailView(cardByName(model, 'updatable-profile')!)
   const updatableFacts = updatableDetail.groups.flatMap(group => group.facts)
   assert.equal(updatableFacts.find(entry => entry.label === 'Host updatable')?.value, 'Yes')
-  assert.match(updatableFacts.find(entry => entry.label === 'Upgrade')?.value ?? '',
-    /The Host supports version updates; this TUI does not yet offer the update action\./u)
-  assert.ok(!updatableDetail.actions.some(action => /update/i.test(action.label) || /update/i.test(action.value)),
-    'the declared Host capability never registers an update action')
+  assert.equal(
+    updatableFacts.find(entry => entry.label === 'Upgrade')?.value,
+    'Host-supported registry updates are available through Check updates…; the Host checks the exact target again before changing the profile.',
+  )
+  const checkAction = updatableDetail.actions.find(action => action.value === PLUGIN_ACTION.checkUpdates)
+  assert.equal(checkAction?.label, 'Check updates…')
+  assert.equal(checkAction?.enabled, true)
+  // The entry sits before Remove in the same action list.
+  const values = updatableDetail.actions.map(action => action.value)
+  assert.ok(values.indexOf(PLUGIN_ACTION.checkUpdates) < values.indexOf(PLUGIN_ACTION.remove))
 
   const fixedFacts = buildPluginDetailView(cardByName(model, 'fixed-profile')!).groups.flatMap(group => group.facts)
   assert.equal(fixedFacts.find(entry => entry.label === 'Host updatable')?.value, 'No')
   assert.match(fixedFacts.find(entry => entry.label === 'Upgrade')?.value ?? '',
     /Remove the current bundle first, then explicitly install the desired package version/u)
+  assert.ok(!buildPluginDetailView(cardByName(model, 'fixed-profile')!).actions.some(action => action.value === PLUGIN_ACTION.checkUpdates))
+
+  // An official shipped bundle, the Current TUI itself and a standalone entry
+  // never expose the update entry, even if a fixture declared the capability.
+  assert.ok(!buildPluginDetailView(cardByName(model, '@vendor/official-shipped')!).actions.some(action => action.value === PLUGIN_ACTION.checkUpdates))
+  const selfClaims = classifyPluginPackages(
+    inputs([{ key: bundleValue(SELF_BUNDLE), bundleName: SELF_BUNDLE, entryIds: [], official: false, availability: 'profile', installed: true, source: 'https://registry.example/tui' }]),
+    [],
+  )
+  const selfModel = buildPluginManagerModel(snapshot([self], []), selfClaims)
+  const selfCard = cardByName(selfModel, SELF_BUNDLE)!
+  assert.equal(selfCard.isSelf, true)
+  assert.ok(!buildPluginDetailView(selfCard).actions.some(action => action.value === PLUGIN_ACTION.checkUpdates))
 
   // A standalone Loader entry is not a Host bundle: it never fabricates either
   // Host declaration nor an update/install capability.
@@ -980,6 +1007,7 @@ test('a Host-declared update capability is stated but never becomes a TUI Update
   const entryFacts = buildPluginDetailView(entry).groups.flatMap(group => group.facts)
   assert.equal(entryFacts.some(fact => fact.label === 'Host updatable'), false)
   assert.equal(entryFacts.some(fact => fact.label === 'Default listing'), false)
+  assert.ok(!buildPluginDetailView(entry).actions.some(action => action.value === PLUGIN_ACTION.checkUpdates))
 })
 
 test('the Host default-listing decision is preserved as a explained fact', () => {
