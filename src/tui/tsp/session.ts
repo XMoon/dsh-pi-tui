@@ -2645,6 +2645,12 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // withdrawn, so a candidate set built for the outgoing subject can never
       // be accepted into the incoming one. The next keystroke re-queries.
       completion.retire()
+      // TSP I-E: the same rule for the History card. A new presentation scope
+      // is a different subject, so the outgoing subject's page, selection and
+      // in-flight read are withdrawn here (PURE STATE); the card a user must
+      // open again for the incoming subject, and no older row can be restored
+      // or copied into it.
+      historySearch?.retire()
       scopePrefix = `s${scopeEpoch}-`
       scopeKeys = new TranscriptNodeKeys()
       // PR-C: the retired subject's image subscriptions go with it, and the
@@ -4023,9 +4029,14 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
           }
           return false
         }
+        // TSP I-E: the History card joins the seats whose caret a terminal
+        // focus claim must NOT steal. A click on the still-visible Composer
+        // behind the card asks the client to move the caret; the keyboard owner
+        // is still the card, so the ONE focus decision is re-asserted rather
+        // than left on the Composer.
         if ((workHub?.isOpen() === true || sessionBrowser?.isOpen() === true
           || presetPicker?.isOpen() === true || modelPicker?.isOpen() === true
-          || modelQuick?.isOpen() === true)
+          || modelQuick?.isOpen() === true || historySearch?.isOpen() === true)
           && input.event.ev === 'focus') applyFocus(true)
       }
       return false
@@ -4260,6 +4271,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         copyRaw: (raw, live) => { issueHistoryCopy(raw, live) },
         reveal: (id) => { surface.reveal(id, 'nearest') },
         scroll: (id, to) => { surface.scroll(id, to) },
+        // A settlement branch that throws is a broken tty owner: the PRIMARY
+        // error reaches the runner's fatal lifecycle, exactly like the seat's
+        // own modal settle and the visual/History Copy settlements above.
+        reportFatal: (error) => { routeFatal(error) },
       }, binding, nativeHistoryCapable)
     },
     installInlineAttachmentStager: (stager) => {

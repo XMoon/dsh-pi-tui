@@ -241,10 +241,17 @@ export function installTspPane(options: {
     ...(options.nativeImages === true ? ['blobs'] : []),
     ...(options.historySearch === true ? ['scroll'] : []),
   ]
+  // The History-search case declares a larger APC: this fixture's frame reader
+  // folds ONE un-chunked `f` message per frame, and the plan's full-page
+  // obligation is a settled page at the source's own 200-row cap. The REAL
+  // client's 65536 limit and its chunking belong to the real-pane lanes, never
+  // to this scripted pane, so widening it here changes no product behavior.
+  const apc = options.historySearch === true ? 4 * 1024 * 1024 : HELLO.apc
   const hello = options.kinds !== undefined || options.features !== undefined
     ? {
         ...HELLO,
         ver: '0.7.2',
+        apc,
         kinds: options.kinds ?? HELLO.kinds,
         features: options.features ?? HELLO.features,
       }
@@ -253,6 +260,7 @@ export function installTspPane(options: {
       : {
           ...HELLO,
           ver: '0.7.2',
+          apc,
           kinds: [...HELLO.kinds, ...native],
           features: [...HELLO.features, ...nativeFeatures],
         }

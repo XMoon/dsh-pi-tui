@@ -40,6 +40,7 @@ import { HISTORY_SEARCH_DEBOUNCE_MS, HISTORY_SEARCH_RESULT_LIMIT } from '../../s
 import type { TspHistorySearchBinding } from '../../src/app/surface/runtime.ts'
 import { emptyStatusSnapshot } from '../../src/domain/status/types.ts'
 import { mountTspRenderer, type TspRenderer } from '../../src/tui/tsp/session.ts'
+import { createTspHistorySearch } from '../../src/tui/tsp/history-search.ts'
 import { installTspPane, type TspPane } from '../support/tsp-terminal-fixture.ts'
 import { settle, waitUntil } from '../support/tsp-runner-harness.ts'
 import { clickNodeById, surfaceTexts, wireNodes } from '../support/tsp-picker-wire.ts'
@@ -57,6 +58,7 @@ const CTRL_V = String.fromCharCode(22)
 const TAB = '\t'
 const SHIFT_TAB = '\u001b[27;2Z'
 const UP = '\u001b[A'
+const LEFT = '\u001b[D'
 const DOWN = '\u001b[B'
 const PAGE_DOWN = '\u001b[6~'
 const F2 = '\u001bOQ'
@@ -80,6 +82,8 @@ interface HistoryPane {
   readonly requests: HistorySearchRequest[]
   /** Releases the read the scripted source parked on the query `hold`. */
   resolveHeld: (page: HistorySearchPage) => void
+  /** Park the NEXT read the seat issues until {@link resolveHeld} runs. */
+  holdNext: () => void
   composer(): { text: string; cursor: number }
   cardPainted(): boolean
   cardSerials(): string[]
@@ -120,6 +124,7 @@ const DEFAULT_ROWS: readonly SeedRow[] = [
  *  the query is exactly `hold` — the stale-round witness. */
 function scriptSource(rows: readonly SeedRow[]): {
   readonly source: TspHistorySearchBinding['source']
+  readonly armNext: () => void
   readonly requests: HistorySearchRequest[]
   resolveHeld: (page: HistorySearchPage) => void
 } {
@@ -134,13 +139,20 @@ function scriptSource(rows: readonly SeedRow[]): {
     sourceByteOffset: index,
   })
   let release: ((page: HistorySearchPage) => void) | undefined
+  let armed = false
   return {
     requests,
+    armNext(): void { armed = true },
     source: {
       search(request: HistorySearchRequest): Promise<HistorySearchPage> {
         requests.push(request)
         if (request.signal?.aborted) return Promise.resolve({ results: [], exhausted: false })
-        if (request.query === 'hold') return new Promise(resolve => { release = resolve })
+        // `hold` (the stale-round witness) and an armed next read (the park
+        // window) both park the answer until the case releases it.
+        if (armed || request.query === 'hold') {
+          armed = false
+          return new Promise(resolve => { release = resolve })
+        }
         const all = rows.map(toResult)
         return Promise.resolve({
           results: request.query === ''
@@ -219,6 +231,7 @@ async function mountHistoryPane(
     copies,
     requests: scripted.requests,
     resolveHeld: scripted.resolveHeld,
+    holdNext: () => scripted.armNext(),
     composer: () => {
       const node = wireNodes(pane).find(candidate => candidate.id === 'dock.quiet-composer.composer')
       return { text: String(node?.p.text ?? ''), cursor: Number(node?.p.cursor ?? 0) }
@@ -368,6 +381,54 @@ test('Esc and Ctrl+C each close the card only, and the same chords still cancel 
     assert.equal(h.calls.cancels, 1, 'and exactly once, as it did before this seat existed')
     assert.equal(h.composer().text, 'draft', 'the cancel never cleared the draft here')
     await h.dispose()
+  }
+})
+
+test('the card close is byte-exact for every draft shape the plan names, never a partial cancel', async (t) => {
+  // Plan §7.2.2: `Esc`/`Ctrl+C` inside History must be equivalent to the same
+  // chord with no card at all, for the drafts the composer really holds. The
+  // witness is the WHOLE draft identity plus every sink the seat must not touch.
+  // The claim is the INVARIANT (a byte-identical draft AND caret across the
+  // card), so the caret is read from the editor after the motion rather than
+  // computed: the editor walks grapheme clusters, not UTF-16 units.
+  const DRAFTS: Array<{ readonly name: string; readonly bytes: string; readonly left: number }> = [
+    { name: 'multi-line', bytes: 'line one\nline two', left: 3 },
+    { name: 'caret at zero', bytes: 'keep me', left: 0 },
+    { name: 'caret mid-run', bytes: 'a😀b', left: 1 },
+    { name: 'emoji only', bytes: '🧪🧪 test', left: 2 },
+  ]
+  for (const chord of [ESCAPE, CTRL_C]) {
+    for (const draft of DRAFTS) {
+      const h = await mountHistoryPane(t)
+      // A bracketed paste is the only honest way to put a line break INTO a
+      // draft: a raw newline byte decodes as `enter` and would submit it.
+      h.pane.key(`\u001b[200~${draft.bytes}\u001b[201~`)
+      await h.painted(() => h.composer().text === draft.bytes, `${draft.name} reached the editor`)
+      if (draft.left === 0) {
+        for (let step = 0; step < 12; step += 1) h.key(LEFT)
+        await h.painted(() => h.composer().cursor === 0, `${draft.name} caret at zero`)
+      } else {
+        for (let step = 0; step < draft.left; step += 1) h.key(LEFT)
+        await h.painted(() => h.composer().cursor < draft.bytes.length, `${draft.name} caret parked mid-draft`)
+      }
+      const before = h.composer()
+      const pastesBefore = h.calls.pastes
+      const receiptsBefore = h.calls.receipts
+      const notesBefore = h.calls.notes
+      h.key(CTRL_R)
+      await h.painted(() => h.cardPainted(), 'the card opened')
+      h.key(chord)
+      await h.painted(() => !h.cardPainted(), 'the card closed')
+      assert.deepEqual(h.composer(), before,
+        `${JSON.stringify(chord)} on ${draft.name}: the draft and caret are byte-identical`)
+      assert.equal(h.calls.cancels, 0, `${JSON.stringify(chord)} on ${draft.name} never cancelled the Agent`)
+      assert.equal(h.calls.submits, 0, `${JSON.stringify(chord)} on ${draft.name} never submitted`)
+      assert.equal(h.calls.steers, 0, `${JSON.stringify(chord)} on ${draft.name} never steered`)
+      assert.equal(h.calls.pastes, pastesBefore, `${JSON.stringify(chord)} never armed the paste intake`)
+      assert.equal(h.calls.receipts, receiptsBefore, `${JSON.stringify(chord)} never armed a pasted-path intake`)
+      assert.equal(h.calls.notes, notesBefore, `${JSON.stringify(chord)} never recorded an input`)
+      await h.dispose()
+    }
   }
 })
 
@@ -844,7 +905,9 @@ test('a non-exhaustive first page counts the SHOWN rows and names the remaining 
   // 65536), so this page is bounded to what that pane can carry; the row CAP
   // the seat asks the source for is asserted separately below.
   const reads: HistorySearchRequest[] = []
-  const shown = 40
+  // The obligation is the source's OWN row cap (200): the seat must neither
+  // auto-chase the continuation nor describe the shown page as a global total.
+  const shown = HISTORY_SEARCH_RESULT_LIMIT
   const h = await mountHistoryPane(t, {
     binding: {
       source: {
@@ -876,6 +939,15 @@ test('a non-exhaustive first page counts the SHOWN rows and names the remaining 
     'the source row cap was requested, never a scan count')
   assert.equal(reads.at(-1)?.query, '', 'for the current query')
   assert.equal(reads.length, 1, 'the first page is ONE read: the continuation is never auto-chased')
+  assert.equal(h.ids(/-o\d+$/).length, shown, 'every row of the full page is a real painted cell')
+  // A full page then walks: the deep row is reachable by paging, and each real
+  // move revealed the row node of the CURRENT frame.
+  const revealsBefore = h.ops('reveal').length
+  for (let step = 0; step < 40; step += 1) h.key(DOWN)
+  await h.painted(() => h.ops('reveal').length > revealsBefore + 30, 'the walk revealed each moved row')
+  await h.painted(() => h.selected()[0]?.includes('scanned row 40') === true, 'the walk arrived')
+  h.key(ENTER)
+  await h.painted(() => h.composer().text.includes('scanned row 40'), 'and the deep row restored')
 })
 
 test('untrusted history text reaches the frame only as sanitized display while Copy keeps the raw bytes', async (t) => {
@@ -902,6 +974,287 @@ test('a long entry stays fully readable in the Preview and is restored whole, ne
   h.key(ENTER)
   await h.painted(() => h.composer().text !== '', 'the restore landed')
   assert.equal(h.composer().text, long, 'the whole original text restored, byte for byte')
+})
+
+// ── H. Untrusted source text can never reach a painted cell ────────────────
+
+test('a hostile cwd and session id in the source row never reach painted text, title or aria', async (t) => {
+  // A legacy or hand-edited JSONL row is UNTRUSTED text: the PiTui panel folds
+  // its cwd and session id before painting them, and the TSP card must not be
+  // the weaker of the two renderers.
+  const hostileCwd = '/we/ird\u001b]52;c;QUVDNTJfRlJPTV9DV0Q\u0007path\u0008tail'
+  const hostileSession = 'ses\u001b[31m_injected'
+  const h = await mountHistoryPane(t, {
+    rows: [{ content: 'a row with hostile metadata', cwd: hostileCwd, sessionId: hostileSession }],
+  })
+  h.key(CTRL_R)
+  await h.painted(() => h.texts().some(text => text.includes('a row with hostile metadata')), 'the hostile row painted')
+  // The RAW painted values are what the client receives: JSON.stringify would
+  // escape a control byte into a literal \u001b sequence and hide the very
+  // defect this case exists to catch. Each value is scanned ON ITS OWN — joining
+  // them would inject the line break the predicate forbids.
+  const control = (text: string): boolean => /[\u0000-\u0008\u0009\u000b-\u001f\u007f-\u009f]/u.test(text)
+  const offenders = h.texts().filter(control)
+  assert.deepEqual(offenders, [],
+    `no control byte reached a painted cell: ${JSON.stringify(offenders).slice(0, 300)}`)
+  const attrs = wireNodes(h.pane)
+    .flatMap(node => [String(node.p.title ?? ''), String(node.p.aria ?? '')])
+    .join('\n')
+  assert.equal(attrs.includes('QUVDNTJfRlJPTV9DV0Q'), false, 'the hostile cwd never becomes an OSC 52 payload in a title/aria')
+  assert.equal(/\u001b\]52;/.test(attrs), false, `no raw OSC sequence reached an attribute: ${JSON.stringify(attrs).slice(0, 240)}`)
+  assert.equal(/\u001b\[31m/.test(attrs), false, 'the hostile session id never carries an SGR sequence into an attribute')
+  await h.key(ALT_C)
+  await h.painted(() => h.copies.length === 1, 'the copy settled')
+  assert.deepEqual(h.copies, ['a row with hostile metadata'], 'the row CONTENT still copies byte-exact: sanitizing metadata never touched the payload')
+})
+
+test('a control byte typed into the query is projected to display text, never carried into the field or the source query', async (t) => {
+  const h = await mountHistoryPane(t)
+  h.key(CTRL_R)
+  await h.painted(() => h.requests.length === 1, 'the first round')
+  // The SDK decodes 0x01..0x1a to a ctrl+letter Key, so the only printable text
+  // a query can receive is real text; a C1 byte arriving as key.text must still
+  // be projected, and a bracketed paste must collapse to one line.
+  h.pane.key('a\u001b[200~line-one\nline-two\u001b[201~')
+  await h.painted(() => (h.queryField()?.text ?? '').includes('line-one'), 'the pasted text reached the query field')
+  await h.painted(() => (h.queryField()?.text ?? '').includes('line-one'), 'the pasted text reached the query field')
+  const field = h.queryField()
+  assert.equal(/[\u0000-\u0008\u000a-\u001f\u007f-\u009f]/.test(field?.text ?? ''), false,
+    `the query field carries no control byte: ${JSON.stringify(field)}`)
+  assert.equal(field?.text.includes('\n'), false, 'a pasted line break never becomes a second query line')
+  await h.painted(() => h.requests.length >= 2, 'the debounced round started')
+  assert.equal(h.requests.at(-1)?.query.includes('\n'), false, 'and the source query stays one line')
+})
+
+test('a read that settles while a Modal parks the card keeps the SAME instance and its page', async (t) => {
+  // The park window is exactly where the old code destroyed the card: the
+  // mount's seat admission is false under a Modal, and the settlement read it.
+  const h = await mountHistoryPane(t, { nativeInteraction: true })
+  h.key(CTRL_R)
+  await h.painted(() => h.requests.length === 1, 'the first round started')
+  h.holdNext()
+  h.key('t')
+  h.key('e')
+  h.key('r')
+  h.key('n')
+  await h.painted(() => h.requests.at(-1)?.query === 'tern', 'the held round started')
+  let settled = false
+  const outcome = h.renderer.interaction.showApprovalPrompt(
+    { toolName: 'tool-a', reason: 'park window', arguments: '{}' }, true)
+  void outcome.then(() => { settled = true })
+  await h.painted(() => !h.cardPainted(), 'the modal parked the card')
+  // The read answers UNDER the modal.
+  h.resolveHeld({
+    results: [{ id: 'held:0', content: 'tern row answered under the modal', cwd: '/work/alpha',
+      ts: 1_800_000_000_000, sessionId: 'ses_a', sourceFile: 'held', sourceByteOffset: 0 }],
+    exhausted: true,
+  })
+  await h.observeAbsence()
+  assert.equal(h.cardPainted(), false, 'a parked card still paints no operable rows')
+  h.key('y')
+  await h.painted(() => settled, 'the approval settled')
+  await h.painted(() => h.cardPainted(), 'the SAME card came back')
+  assert.deepEqual(h.queryField(), { text: 'tern', cursor: 4 }, 'with its query and caret intact')
+  assert.ok(h.texts().some(text => text.includes('tern row answered under the modal')),
+    'and the page that settled under the Modal is the page it shows')
+  assert.equal(h.composer().text, '', 'the parked window wrote no draft')
+})
+
+test('the seat routes a frame commit that throws in its OWN settlement to the fatal owner', async (t) => {
+  // Isolated at the seat boundary: the mount's input loop would ALSO surface a
+  // ViewError, so an end-to-end run cannot tell the two owners apart. Here the
+  // only possible witness is the seat's own `reportFatal` port.
+  const fatal: unknown[] = []
+  let renders = 0
+  const seat = createTspHistorySearch({
+    admitted: () => true,
+    requestRender: () => { renders += 1; if (renders > 1) throw new Error('simulated ViewError on the settled frame') },
+    setFocus: () => {},
+    restoreToComposer: () => {},
+    copyRaw: () => {},
+    reveal: () => {},
+    scroll: () => {},
+    reportFatal: (error) => { fatal.push(error) },
+  }, {
+    source: {
+      search: () => Promise.resolve({
+        results: [{ id: 'x:0', content: 'one settled row', cwd: '/work/alpha', ts: 1_700_000_000_000,
+          sessionId: 'ses_a', sourceFile: 'x', sourceByteOffset: 0 }],
+        exhausted: true,
+      }),
+    },
+    cwd: () => '/work/alpha',
+    captureScope: () => ({ sessionId: 'ses_a', isCurrent: () => true }),
+  }, () => true)
+  const rejections: unknown[] = []
+  const onRejection = (reason: unknown): void => { rejections.push(reason) }
+  process.on('unhandledRejection', onRejection)
+  t.after(() => { process.off('unhandledRejection', onRejection); seat.retire() })
+  seat.open()
+  await settle(ABSENCE_WINDOW_MS)
+  assert.equal(fatal.length, 1, 'the frame the settlement owed failed exactly once, and the seat reported it')
+  assert.match(String((fatal[0] as Error)?.message ?? fatal[0] ?? ''), /simulated ViewError/,
+    'the PRIMARY error reached the fatal owner')
+  assert.deepEqual(rejections, [], 'and no unhandled rejection escaped the chain the seat started')
+  assert.equal(seat.renderState()?.rows.length, 1, 'the page the source answered is still the seat state')
+})
+
+test('a settlement whose captured scope died is refused by the seat itself, before it mutates any state', async (t) => {
+  // Isolated at the seat boundary so the fence is the ONLY thing that can be
+  // observed: the mount's presentation guard would hide the card anyway, and a
+  // retirement elsewhere would abort the read anyway. Here the scope authority
+  // goes stale while the read is in flight, with no retire call at all.
+  const fatal: unknown[] = []
+  let renders = 0
+  let current = true
+  let release: ((page: HistorySearchPage) => void) | undefined
+  let searches = 0
+  const seat = createTspHistorySearch({
+    admitted: () => true,
+    requestRender: () => { renders += 1 },
+    setFocus: () => {},
+    restoreToComposer: () => {},
+    copyRaw: () => {},
+    reveal: () => {},
+    scroll: () => {},
+    reportFatal: (error) => { fatal.push(error) },
+  }, {
+    source: {
+      search: () => { searches += 1; return new Promise<HistorySearchPage>(resolve => { release = resolve }) },
+    },
+    cwd: () => '/work/alpha',
+    captureScope: () => ({ sessionId: 'ses_a', isCurrent: () => current }),
+  }, () => true)
+  seat.open()
+  assert.equal(searches, 1, 'the open read started')
+  // The read is in flight; the scope dies with nobody telling the seat.
+  current = false
+  release?.({ results: [{ id: 'late:0', content: 'a page from the dead scope', cwd: '/work/alpha',
+    ts: 1_700_000_000_000, sessionId: 'ses_a', sourceFile: 'late', sourceByteOffset: 0 }], exhausted: true })
+  await settle(ABSENCE_WINDOW_MS)
+  assert.deepEqual(fatal, [], 'refusing a dead scope is not a failure')
+  assert.equal(seat.renderState(), undefined, 'the card is gone')
+  assert.equal(seat.isOpen(), false, 'it owns no keys and no composer seat')
+  // The distinguishing fact: the fence RETIRED the round. If the settlement had
+  // merely been hidden, the seat would still be the same open instance and a
+  // second `open()` would start NO read (the documented one-instance rule).
+  const rendersBefore = renders
+  current = true
+  seat.open()
+  assert.equal(searches, 2, 'a reopened card after a dead scope starts a NEW read')
+  assert.ok(renders > rendersBefore, 'and the fresh card asks for its own frame')
+  assert.equal(seat.renderState()?.rows.length, 0, 'the dead page is not carried into it')
+})
+
+test('a frame commit that throws inside a settled read reaches the fatal owner instead of an unhandled rejection', async (t) => {
+  // The seat OWNS both settlement branches, so the only remaining failure is the
+  // frame it owes. `surface.render` raises a ViewError; that PRIMARY error must
+  // reach the runner's fatal lifecycle (the pane's tty owner is broken), never
+  // an unhandled rejection on the chain the seat started and never a silent
+  // "failed read" story.
+  const pane = installTspPane({ composerActions: true, historySearch: true })
+  t.after(() => pane.restore())
+  const session = await connect({ timeout: 500, exitHooks: false })
+  assert.ok(session, 'the scripted pane connects')
+  let fatal: unknown
+  const renderer = mountTspRenderer(session, {
+    copyVisual: async () => true,
+    requestExit: () => {},
+    onFatal: (error) => { fatal = error },
+  })
+  t.after(() => renderer.dispose())
+  const scripted = scriptSource(DEFAULT_ROWS)
+  renderer.bindHistorySearch({
+    source: scripted.source,
+    cwd: () => '/work/alpha',
+    captureScope: () => ({ sessionId: 'ses_a', isCurrent: () => true }),
+  })
+  renderer.bindInput({
+    exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {}, pasteMedia: () => {}, pastedPath: () => {},
+    admitPastedPathDelivery: () => true, shouldRememberInput: () => true, noteUserInput: () => {},
+    listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker: () => {},
+    openModelQuick: () => {}, openSessionBrowser: () => {}, sessionBrowserAvailable: () => false,
+  })
+  renderer.bindStatusReader({ snapshot: () => emptyStatusSnapshot() })
+  renderer.display.commitDisplaySubject({}, {}, undefined)
+  await waitUntil('the composer frame', () => wireNodes(pane).some(node => node.id === 'dock.quiet-composer.composer'))
+  const surface = session.surfaces[0]
+  assert.ok(surface !== undefined, 'the mount opened its surface')
+  const originalRender = surface.render.bind(surface)
+  let trips = 0
+  surface.render = (view: Parameters<typeof originalRender>[0]) => {
+    // Fail ONLY the frame a settled read owes, so the case is about the
+    // settlement's failure ownership, not about a broken mount.
+    if (trips === 0) { trips += 1; throw new Error('simulated ViewError on the settled frame') }
+    return originalRender(view)
+  }
+  const previousRejections: unknown[] = []
+  const onRejection = (reason: unknown): void => { previousRejections.push(reason) }
+  process.once('unhandledRejection', onRejection)
+  pane.key(CTRL_R)
+  await waitUntil('the fatal owner saw the settlement failure', () => fatal !== undefined, 10_000)
+  await settle(ABSENCE_WINDOW_MS)
+  process.off('unhandledRejection', onRejection)
+  assert.match(String((fatal as Error)?.message ?? fatal ?? ''), /simulated ViewError/,
+    'the PRIMARY error reached the fatal lifecycle')
+  assert.deepEqual(previousRejections, [], 'and no unhandled rejection escaped the seat-owned chain')
+  surface.render = originalRender
+})
+
+test('a row click and the arrow walk are refused while a newer round is in flight', async (t) => {
+  // The page on screen belongs to the PREVIOUS query. Plan §5.2.2: a new round
+  // clears the OLD page's operable identity, so a lagging pointer or an early
+  // arrow can never select a row the user has already typed past.
+  const h = await mountHistoryPane(t)
+  h.key(CTRL_R)
+  await h.painted(() => h.selected().length === 1, 'the settled page painted with a selection')
+  const before = h.selected()[0] ?? ''
+  h.holdNext()
+  h.key('n')
+  await h.painted(() => h.requests.at(-1)?.query === 'n', 'the newer round started')
+  await h.painted(() => h.texts().some(text => text === 'Searching…'), 'and the header says Searching')
+  const rowIds = h.ids(/-o\d+$/)
+  assert.ok(rowIds.length > 0, 'the previous page is still PAINTED (visual continuity, not a blank shell)')
+  h.click(rowIds[1] ?? rowIds[0])
+  h.key(DOWN)
+  await h.observeAbsence()
+  assert.equal(h.selected()[0] ?? '', before, 'neither the click nor the arrow moved the selection')
+  h.resolveHeld({ results: [], exhausted: true })
+  await h.painted(() => h.texts().some(text => text === 'No matching history.'), 'the new page arrived')
+})
+
+test('a bracketed paste at a mid-query caret keeps the caret after the pasted run', async (t) => {
+  const h = await mountHistoryPane(t)
+  h.key(CTRL_R)
+  await h.painted(() => h.requests.length === 1, 'the first round')
+  h.pane.key('tern')
+  await h.painted(() => h.queryField()?.text === 'tern', 'the query holds tern')
+  h.key(LEFT)
+  h.key(LEFT)
+  h.key(LEFT)
+  await h.painted(() => h.queryField()?.cursor === 1, 'the caret moved to index 1')
+  h.pane.key('\u001b[200~XY\u001b[201~')
+  await h.painted(() => h.queryField()?.text === 'tXYern', 'the paste landed at the caret')
+  assert.deepEqual(h.queryField(), { text: 'tXYern', cursor: 3 },
+    'the caret sits after the PASTED RUN, not at the end of the whole query')
+})
+
+test('a Composer focus event while the card owns the seat re-asserts the query caret', async (t) => {
+  // The card does not cover the Composer, so a click there really does make the
+  // client focus the editor node. The keyboard owner is still the card, so the
+  // ONE focus decision must come back to the query instead of leaving the caret
+  // in a field the seat will not type into.
+  const h = await mountHistoryPane(t)
+  h.key(CTRL_R)
+  await h.painted(() => h.queryField() !== undefined, 'the card opened with its query focused')
+  const focusBefore = h.ops('focus').length
+  h.pane.event({ ev: 'focus', sf: 's1', id: 'dock.quiet-composer.composer' })
+  await h.painted(() => h.ops('focus').length > focusBefore, 'the focus decision was re-asserted')
+  assert.ok(String(h.ops('focus').at(-1)?.[1] ?? '').endsWith('-query'),
+    `and it went back to the query, not the Composer: ${JSON.stringify(h.ops('focus').at(-1))}`)
+  h.key('x')
+  await h.painted(() => (h.queryField()?.text ?? '').includes('x'), 'typing still edits the query')
+  assert.equal(h.composer().text, '', 'and never the draft')
 })
 
 // ── H. The composer chrome stays honest while the card owns the seat ─────────
