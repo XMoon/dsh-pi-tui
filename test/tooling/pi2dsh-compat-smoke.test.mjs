@@ -376,6 +376,9 @@ test('pi2dsh smoke redacts common credential forms from diagnostics', () => {
     'url-secret',
     'query-secret',
     'aws-secret',
+    'hyphen-secret',
+    'hyphen-auth-secret',
+    'hyphen-query-secret',
   ]
   const output = redact([
     'Authorization: Bearer bearer-secret',
@@ -384,6 +387,9 @@ test('pi2dsh smoke redacts common credential forms from diagnostics', () => {
     'https://user:url-secret@example.test/',
     'https://example.test/?access_token=query-secret',
     'AWS_SECRET_ACCESS_KEY=aws-secret',
+    'x-token=hyphen-secret',
+    'foo-authorization=hyphen-auth-secret',
+    'https://example.test/?x-token=hyphen-query-secret',
     '  @deepseek-ai/dsh-credentials: 0.2.1-rc.2 || 0.2.1-rc.3',
     '  @deepseek-ai/dsh-authorization: >=0.2.2-rc.1',
   ].join('\n'))

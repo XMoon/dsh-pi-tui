@@ -552,7 +552,7 @@ export function tail(text, count) {
 }
 
 const SENSITIVE_KEY = '(?:api[_-]?key|access[_-]?token|auth(?:orization)?|token|secret(?:[_-][a-z0-9]+)*|password|passphrase|credential(?:s)?|private[_-]?key|client[_-]?secret|npm[_-]?(?:token|auth)|node[_-]?auth[_-]?token)'
-const SENSITIVE_ASSIGNMENT = new RegExp(`((?:"?)(?<!-)${SENSITIVE_KEY}(?![-\\w])(?:"?)\\s*[:=]\\s*)(?:"[^"]*"|'[^']*'|[^\\s,;}&]+)`, 'giu')
+const SENSITIVE_ASSIGNMENT = new RegExp(`((?:"?)(?<!@[\\w.-]+/[\\w.-]*-)${SENSITIVE_KEY}(?![-\\w])(?:"?)\\s*[:=]\\s*)(?:"[^"]*"|'[^']*'|[^\\s,;}&]+)`, 'giu')
 const SENSITIVE_QUERY = new RegExp(`([?&]${SENSITIVE_KEY}[=:])[^&#\\s]+`, 'giu')
 
 export function redact(text) {
