@@ -129,9 +129,6 @@ export function historySearchView(input: TspHistorySearchViewInput): Node {
   if (state.empty !== undefined) {
     resultsBody.push(ui.text({ key: `h${serial}-empty`, role: HISTORY_SEARCH_ROLES.status, wrap: 'none', text: state.empty }))
   }
-  if (state.failure !== undefined) {
-    resultsBody.push(ui.text({ key: `h${serial}-failed`, role: HISTORY_SEARCH_ROLES.status, wrap: 'none', text: state.failure }))
-  }
 
   const results = ui.col(
     { key: `h${serial}-results`, role: HISTORY_SEARCH_ROLES.results, gap: 'none' },
@@ -241,11 +238,18 @@ export function historySearchView(input: TspHistorySearchViewInput): Node {
  *  mapped onto the client's own theme variables; the native Dock grant, not this
  *  sheet, is the authority on what finally fits. */
 export const HISTORY_SEARCH_STYLES = `
+  /* ONE fixed-height column: every row below the scroll regions is a
+     flex-shrink:0 row, so the action row and the composer UNDER the card can
+     never be pushed out of the box (measured on the real client: without the
+     explicit shrink guards the short-pane card clipped its own actions and the
+     composer). */
   [data-role='dsh.history.card'] {
     display: flex;
     flex-direction: column;
     gap: 6px;
     max-height: min(390px, 55vh);
+    overflow: hidden;
+    flex-shrink: 0;
     padding: 10px 12px;
     border: 1px solid var(--l2);
     border-radius: 12px;
@@ -325,6 +329,11 @@ export const HISTORY_SEARCH_STYLES = `
   }
   [data-role='dsh.history.query'] {
     margin: 0;
+    flex-shrink: 0;
+  }
+  [data-role='dsh.history.head'],
+  [data-role='dsh.history.actions'] {
+    flex-shrink: 0;
   }
   [data-role='dsh.history.body'] {
     display: flex;
@@ -341,6 +350,12 @@ export const HISTORY_SEARCH_STYLES = `
     gap: 2px;
     min-width: 0;
     min-height: 0;
+    /* The two regions are what a short/narrow pane compresses. */
+    flex: 1 1 0;
+  }
+  [data-role='dsh.history.results-head'],
+  [data-role='dsh.history.preview-head'] {
+    flex-shrink: 0;
   }
   [data-role='dsh.history.results-head'],
   [data-role='dsh.history.preview-head'] {
@@ -354,6 +369,7 @@ export const HISTORY_SEARCH_STYLES = `
   [data-role='dsh.history.preview-scroll'] {
     min-height: 0;
     overflow-y: auto;
+    flex: 1 1 auto;
   }
   [data-role='dsh.history.row'] {
     display: flex;
@@ -439,12 +455,25 @@ export const HISTORY_SEARCH_STYLES = `
   }
   /* Short pane: the candidate budget tightens, and the secondary hint is the
      first thing to go — the query, at least one row and both verbs stay. */
+  /* Short pane: the frozen compression order — the secondary hint and the two
+     region headings go first, then the Preview yields its own basis, and the
+     results region keeps a WHOLE row (26px at this type scale). The card never
+     grows past its budget, so the Composer and the Footer below stay reachable. */
   @media (max-height: 460px) {
-    [data-role='dsh.history.card'] { max-height: min(224px, 66vh); gap: 4px; padding: 6px 10px; }
+    [data-role='dsh.history.card'] { max-height: min(176px, 48vh); gap: 4px; padding: 6px 10px; }
     [data-role='dsh.history.hint'] { display: none; }
+    [data-role='dsh.history.results-head'],
+    [data-role='dsh.history.preview-head'] { display: none; }
+    [data-role='dsh.history.results-scroll'] { min-height: 26px; flex-grow: 2; }
+    [data-role='dsh.history.preview-scroll'] { min-height: 0; }
+    [data-role='dsh.history.preview'] { flex-basis: 0; }
   }
   /* Narrow pane: stack the body and let the preview keep its own scroll. */
   @media (max-width: 720px) {
     [data-role='dsh.history.body'] { flex-direction: column; }
+    /* Stacked: the Preview yields first so the query, at least one result row
+       and BOTH verbs stay reachable. */
+    [data-role='dsh.history.preview'] { flex: 0 1 auto; max-height: 30%; }
+    [data-role='dsh.history.results'] { flex: 1 1 auto; }
   }
 `

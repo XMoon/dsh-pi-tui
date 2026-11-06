@@ -1,0 +1,939 @@
+/**
+ * TSP I-E: the `Ctrl+R` input-history search seat on the REAL SDK mount.
+ *
+ * Every case drives the production `mountTspRenderer` with its production
+ * `bindHistorySearch` install over the shipped `@stencil-hq/tern` SDK and the
+ * scripted tty pane, and asserts on the WIRE: the card's own reconciled nodes,
+ * the ONE controlled composer's props, the `focus`/`reveal`/`scroll` ops the
+ * mount actually issued, and the bound application handlers. A key is delivered
+ * as raw terminal bytes and decoded by the SDK's own keyboard; a click is a
+ * pane event addressed at the node id the SDK assigned in the committed frame.
+ *
+ * Every PRESENCE claim waits an authoritative predicate (a settled read, a
+ * painted row, an op on the wire); every ABSENCE claim waits one named bounded
+ * window. The seat debounces every non-initial query round by the source's own
+ * `HISTORY_SEARCH_DEBOUNCE_MS`, so a query-round claim waits the REQUEST, never
+ * a frame count.
+ *
+ * EVIDENCE LEVEL: SDK mount + wire. STANDS-IN: the scripted pane is not a
+ * physical Tern client (that lane is `scripts/tern-pane-history-search-ux.mjs`),
+ * the search source is a scripted `HistorySearchSource` (the real JSONL store,
+ * its scope rules and the production persistence owner are
+ * `test/integration/tern-tsp-history-search-direct.test.ts`), and the
+ * application above the mount is the renderer's own bound handlers (the real
+ * `SurfaceRuntime` → mount → seat binding and the Session currentness authority
+ * are `test/app/tern-tsp-history-search-composition.test.ts`).
+ *
+ * What THIS file owns and no other lane proves: the frozen seat priority and
+ * key table (a consumed key never reaches the Composer reducer, `Enter` never
+ * submits, `Esc`/`Ctrl+C` never cancel the Agent), the Select-vs-Restore
+ * pointer split, the retired-frame and retired-round refusals, the Modal park
+ * and resume of the SAME instance, and the capability-negative statement.
+ * @module @xmoon76/dsh-pi-tui/tern-tsp-history-search.test
+ */
+
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import { connect } from '@stencil-hq/tern'
+import type { HistorySearchPage, HistorySearchRequest, HistorySearchResult } from '../../src/client/history/search.ts'
+import { HISTORY_SEARCH_DEBOUNCE_MS, HISTORY_SEARCH_RESULT_LIMIT } from '../../src/client/history/search.ts'
+import type { TspHistorySearchBinding } from '../../src/app/surface/runtime.ts'
+import { emptyStatusSnapshot } from '../../src/domain/status/types.ts'
+import { mountTspRenderer, type TspRenderer } from '../../src/tui/tsp/session.ts'
+import { installTspPane, type TspPane } from '../support/tsp-terminal-fixture.ts'
+import { settle, waitUntil } from '../support/tsp-runner-harness.ts'
+import { clickNodeById, surfaceTexts, wireNodes } from '../support/tsp-picker-wire.ts'
+
+/** The bounded observation window for this file's ABSENCE claims: one debounced
+ *  query round plus the SDK's own input dispatch. Every absence claim below
+ *  waits exactly this window and then reads the wire. */
+const ABSENCE_WINDOW_MS = HISTORY_SEARCH_DEBOUNCE_MS * 3
+
+const CTRL_R = '\u0012'
+const ENTER = '\r'
+const ESCAPE = '\u001b'
+const CTRL_C = '\u0003'
+const CTRL_V = String.fromCharCode(22)
+const TAB = '\t'
+const SHIFT_TAB = '\u001b[27;2Z'
+const UP = '\u001b[A'
+const DOWN = '\u001b[B'
+const PAGE_DOWN = '\u001b[6~'
+const F2 = '\u001bOQ'
+const ALT_UP = '\u001b[1;3A'
+const ALT_C = '\u001bc'
+const BACKSPACE = '\u007f'
+
+/** One seeded row. `ts` is absolute so a painted age never rides the clock. */
+interface SeedRow {
+  readonly content: string
+  readonly cwd?: string | null
+  readonly ts?: number | null
+  readonly sessionId?: string
+}
+
+interface HistoryPane {
+  readonly pane: TspPane
+  readonly renderer: TspRenderer
+  readonly calls: Record<'submits' | 'cancels' | 'exits' | 'steers' | 'pastes' | 'notes' | 'receipts', number>
+  readonly copies: string[]
+  readonly requests: HistorySearchRequest[]
+  /** Releases the read the scripted source parked on the query `hold`. */
+  resolveHeld: (page: HistorySearchPage) => void
+  composer(): { text: string; cursor: number }
+  cardPainted(): boolean
+  cardSerials(): string[]
+  texts(): string[]
+  selected(): string[]
+  queryField(): { text: string; cursor: number } | undefined
+  ops(kind: 'focus' | 'reveal' | 'scroll'): string[][]
+  ids(match: RegExp): string[]
+  key(bytes: string): void
+  click(id: string): void
+  painted(predicate: () => boolean, label: string): Promise<void>
+  observeAbsence(): Promise<void>
+  dispose(): Promise<void>
+}
+
+interface MountOptions {
+  /** `'none'` mounts a renderer with NO History plane (the unbound negative). */
+  readonly binding?: TspHistorySearchBinding | 'none'
+  /** `false` advertises a pane that never negotiated the card's kinds/scroll. */
+  readonly historySearch?: boolean
+  readonly rows?: readonly SeedRow[]
+  /** `null` = a sessionless start (no live Session identity at open). */
+  readonly sessionId?: string | null
+  readonly isCurrent?: () => boolean
+  readonly cwd?: string
+  readonly copyOk?: boolean
+  readonly nativeInteraction?: boolean
+  readonly modelPicker?: boolean
+}
+
+const DEFAULT_ROWS: readonly SeedRow[] = [
+  { content: 'alpha one' },
+  { content: 'beta two about tern' },
+  { content: 'gamma three\nwith a second line' },
+]
+
+/** The scripted source: a literal substring filter, plus a read that PARKS when
+ *  the query is exactly `hold` — the stale-round witness. */
+function scriptSource(rows: readonly SeedRow[]): {
+  readonly source: TspHistorySearchBinding['source']
+  readonly requests: HistorySearchRequest[]
+  resolveHeld: (page: HistorySearchPage) => void
+} {
+  const requests: HistorySearchRequest[] = []
+  const toResult = (row: SeedRow, index: number): HistorySearchResult => ({
+    id: `seed.jsonl:${index}`,
+    content: row.content,
+    cwd: row.cwd === undefined ? '/work/alpha' : row.cwd,
+    ts: row.ts === undefined ? 1_700_000_000_000 + index * 60_000 : row.ts,
+    ...(row.sessionId === undefined ? {} : { sessionId: row.sessionId }),
+    sourceFile: 'seed.jsonl',
+    sourceByteOffset: index,
+  })
+  let release: ((page: HistorySearchPage) => void) | undefined
+  return {
+    requests,
+    source: {
+      search(request: HistorySearchRequest): Promise<HistorySearchPage> {
+        requests.push(request)
+        if (request.signal?.aborted) return Promise.resolve({ results: [], exhausted: false })
+        if (request.query === 'hold') return new Promise(resolve => { release = resolve })
+        const all = rows.map(toResult)
+        return Promise.resolve({
+          results: request.query === ''
+            ? all
+            : all.filter(row => row.content.toLowerCase().includes(request.query.toLowerCase())),
+          exhausted: true,
+        })
+      },
+    },
+    resolveHeld: (page: HistorySearchPage) => { release?.(page) },
+  }
+}
+
+async function mountHistoryPane(
+  t: { after(fn: () => unknown): void },
+  options: MountOptions = {},
+): Promise<HistoryPane> {
+  const pane = installTspPane({
+    composerActions: true,
+    ...(options.historySearch === false ? {} : { historySearch: true }),
+    ...(options.nativeInteraction === true ? { nativeInteraction: true } : {}),
+    ...(options.modelPicker === true ? { modelPicker: true } : {}),
+  })
+  t.after(() => pane.restore())
+  const session = await connect({ timeout: 500, exitHooks: false })
+  assert.ok(session, 'the scripted pane connects through the shipped SDK')
+
+  const scripted = scriptSource(options.rows ?? DEFAULT_ROWS)
+  const calls = { submits: 0, cancels: 0, exits: 0, steers: 0, pastes: 0, notes: 0, receipts: 0 }
+  const copies: string[] = []
+  const renderer = mountTspRenderer(session, {
+    copyVisual: async (text) => { copies.push(text); return options.copyOk !== false },
+    requestExit: () => { calls.exits += 1 },
+    onFatal: (error) => { throw error },
+  })
+  t.after(() => renderer.dispose())
+  if (options.binding !== 'none') {
+    const sessionId = options.sessionId === undefined ? 'ses_a' : options.sessionId
+    renderer.bindHistorySearch(options.binding ?? {
+      source: scripted.source,
+      cwd: () => options.cwd ?? '/work/alpha',
+      captureScope: () => ({
+        sessionId: sessionId === null ? undefined : sessionId,
+        isCurrent: options.isCurrent ?? (() => true),
+      }),
+    })
+  }
+  renderer.bindInput({
+    exit: () => { calls.exits += 1 },
+    cancel: () => { calls.cancels += 1 },
+    submit: () => { calls.submits += 1 },
+    steer: () => { calls.steers += 1 },
+    pasteMedia: () => { calls.pastes += 1 },
+    pastedPath: () => { calls.receipts += 1 },
+    admitPastedPathDelivery: () => true,
+    shouldRememberInput: () => true,
+    noteUserInput: () => { calls.notes += 1 },
+    listContinuedQuestions: () => [],
+    reopenContinuedQuestion: () => false,
+    openModelPicker: () => {},
+    openModelQuick: () => {},
+    modelPickerAvailable: () => false,
+    openSessionBrowser: () => {},
+    sessionBrowserAvailable: () => false,
+  })
+  renderer.bindStatusReader({ snapshot: () => emptyStatusSnapshot() })
+  renderer.display.commitDisplaySubject({}, {}, undefined)
+  // The mount's own committed frame is the readiness fact — no timed window.
+  await waitUntil('the mount painted its composer editor',
+    () => wireNodes(pane).some(node => node.id === 'dock.quiet-composer.composer'))
+
+  return {
+    pane,
+    renderer,
+    calls,
+    copies,
+    requests: scripted.requests,
+    resolveHeld: scripted.resolveHeld,
+    composer: () => {
+      const node = wireNodes(pane).find(candidate => candidate.id === 'dock.quiet-composer.composer')
+      return { text: String(node?.p.text ?? ''), cursor: Number(node?.p.cursor ?? 0) }
+    },
+    cardPainted: () => wireNodes(pane).some(node => node.id.includes('history-card')),
+    cardSerials: () => [...new Set(wireNodes(pane)
+      .map(node => node.id.match(/history-card-\d+/)?.[0])
+      .filter((id): id is string => id !== undefined))],
+    texts: () => surfaceTexts(pane, 's1'),
+    selected: () => surfaceTexts(pane, 's1').filter(text => text.startsWith('›')),
+    queryField: () => {
+      const node = wireNodes(pane).find(candidate => /-query$/.test(candidate.id))
+      if (node === undefined) return undefined
+      return { text: String(node.p.text ?? ''), cursor: Number(node.p.cursor ?? 0) }
+    },
+    ops: (kind) => pane.frames()
+      .flatMap(frame => frame.ops.filter(op => op[0] === kind))
+      .map(op => op.map(entry => typeof entry === 'string' ? entry : JSON.stringify(entry ?? null))),
+    ids: (match) => wireNodes(pane).map(node => node.id).filter(id => match.test(id)),
+    key(bytes: string) { pane.key(bytes) },
+    click(id: string) { clickNodeById(pane, id) },
+    async painted(predicate, label) { await waitUntil(label, predicate) },
+    async observeAbsence() {
+      // reason: the absence contract is "no later round and no repaint", which
+      // is only observable as a bounded window over the debounced round length.
+      await settle(ABSENCE_WINDOW_MS)
+    },
+    async dispose() {
+      await renderer.dispose()
+      await session.close()
+    },
+  }
+}
+
+// ── A. Opening the seat ──────────────────────────────────────────────────────
+
+test('Ctrl+R opens ONE card above the ONE composer and reads the recent page at once with an empty query', async (t) => {
+  const h = await mountHistoryPane(t)
+  assert.equal(h.cardPainted(), false, 'no card before the chord')
+  h.key(CTRL_R)
+  await h.painted(() => h.cardPainted(), 'the card painted')
+  assert.equal(h.cardSerials().length, 1, 'exactly one card frame')
+  assert.equal(h.requests.length, 1, 'the empty query reads NOW, not after the debounce')
+  assert.deepEqual(
+    {
+      scope: h.requests[0]?.scope,
+      cwd: h.requests[0]?.cwd,
+      sessionId: h.requests[0]?.sessionId,
+      query: h.requests[0]?.query,
+      limit: h.requests[0]?.limit,
+    },
+    { scope: 'session', cwd: '/work/alpha', sessionId: 'ses_a', query: '', limit: 200 },
+    'the request carries the open-time scope, cwd, Session identity and the source row cap',
+  )
+  await h.painted(() => h.texts().some(text => text === 'Results · 3 shown'), 'the settled counter')
+  assert.ok(h.texts().includes('Input History'), 'the card names itself')
+  assert.equal(h.composer().text, '', 'opening never touches the draft')
+  assert.equal(wireNodes(h.pane).filter(node => node.k === 'editor').length, 1,
+    'the card adds NO second editor: the ONE controlled composer stays')
+  assert.ok(h.ops('focus').at(-1)?.[1]?.endsWith('-query'), 'the query field owns the hardware caret')
+})
+
+test('a sessionless start defaults to Directory and its Scope ring never offers Session', async (t) => {
+  const h = await mountHistoryPane(t, { sessionId: null })
+  h.key(CTRL_R)
+  await h.painted(() => h.requests.length === 1, 'the sessionless first round')
+  assert.equal(h.requests[0]?.scope, 'current', 'no Session scope without a live identity')
+  assert.equal(h.requests[0]?.sessionId, undefined, 'and no session identity is sent either')
+  await h.painted(() => h.texts().includes('Scope: Directory ⌄'), 'the Scope control states the current scope')
+  h.key(TAB)
+  await h.painted(() => h.requests.at(-1)?.scope === 'all', 'Tab walked Directory → All')
+  h.key(TAB)
+  await h.painted(() => h.requests.length === 3, 'the third round started')
+  assert.equal(h.requests.at(-1)?.scope, 'current', 'and the ring never includes Session')
+})
+
+test('a mounted renderer with no History plane states the refusal and keeps its draft and keys', async (t) => {
+  const h = await mountHistoryPane(t, { binding: 'none' })
+  h.key('keep me')
+  await h.painted(() => h.composer().text === 'keep me', 'the draft reached the editor')
+  h.key(CTRL_R)
+  await h.painted(() => h.texts().some(text => text === 'Input history search is unavailable in this Tern pane.'),
+    'the missing capability is stated, not silently skipped')
+  assert.equal(h.composer().text, 'keep me', 'the chord was consumed: no literal r was inserted')
+  assert.equal(h.cardPainted(), false, 'and no card exists')
+  assert.deepEqual(h.requests, [], 'nothing was ever queried')
+})
+
+test('a pane that never negotiated the card kinds and scroll feature gets no half UI and no read', async (t) => {
+  const h = await mountHistoryPane(t, { historySearch: false })
+  h.key(CTRL_R)
+  await h.painted(() => h.texts().some(text => text === 'Input history search is unavailable in this Tern pane.'),
+    'the same explicit refusal')
+  assert.equal(h.cardPainted(), false, 'no card without the negotiated kinds and the scroll feature')
+  assert.deepEqual(h.requests, [], 'the source was never queried')
+})
+
+// ── B. Restore is a draft write, never a submission ──────────────────────────
+
+test('Enter restores the selected entry as the exact stored text and the NEXT Enter is the only submit', async (t) => {
+  const h = await mountHistoryPane(t)
+  h.key(CTRL_R)
+  await h.painted(() => h.texts().some(text => text === 'Results · 3 shown'), 'the settled page')
+  h.key(ENTER)
+  await h.painted(() => h.composer().text !== '', 'the restore committed')
+  assert.deepEqual(h.composer(), { text: 'alpha one', cursor: 9 },
+    'the exact content replaced the draft with the caret at its end')
+  assert.equal(h.calls.submits, 0, 'restore is never a submission')
+  assert.equal(h.calls.notes, 0, 'and it is not user-input activity either')
+  assert.equal(h.cardPainted(), false, 'the card closed with the restore')
+  assert.equal(h.ops('focus').at(-1)?.[1], 'dock.quiet-composer.composer', 'the caret returned to the ONE composer')
+  h.key(ENTER)
+  await h.painted(() => h.calls.submits === 1, 'the later Enter submitted once')
+  assert.equal(h.calls.submits, 1, 'exactly one submission for one Enter')
+})
+
+test('a multi-line entry restores whole with its newline and a later arrow is ordinary editor motion', async (t) => {
+  const h = await mountHistoryPane(t)
+  h.key(CTRL_R)
+  await h.painted(() => h.selected().length === 1, 'the first row selected')
+  h.key(DOWN)
+  h.key(DOWN)
+  await h.painted(() => h.selected()[0]?.includes('gamma three') === true, 'the third row is selected')
+  h.key(ENTER)
+  await h.painted(() => h.composer().text.includes('second line'), 'the multi-line restore landed')
+  assert.equal(h.composer().text, 'gamma three\nwith a second line', 'the FULL original text, newline included')
+  assert.equal(h.calls.submits, 0, 'and the restored multi-line text was not executed')
+  h.key(DOWN)
+  await h.observeAbsence()
+  assert.equal(h.composer().text, 'gamma three\nwith a second line', 'the arrow moved inside the draft, it never re-recalled')
+  assert.equal(h.calls.submits, 0, 'and no submit either')
+})
+
+test('Esc and Ctrl+C each close the card only, and the same chords still cancel once the card is gone', async (t) => {
+  for (const chord of [ESCAPE, CTRL_C]) {
+    const h = await mountHistoryPane(t)
+    h.key('draft')
+    await h.painted(() => h.composer().text === 'draft', 'the draft reached the editor')
+    h.key(CTRL_R)
+    await h.painted(() => h.cardPainted(), 'the card opened')
+    h.key(chord)
+    await h.painted(() => !h.cardPainted(), 'the card closed')
+    assert.equal(h.calls.cancels, 0, `${JSON.stringify(chord)} inside History never cancels the Agent`)
+    assert.deepEqual(h.composer(), { text: 'draft', cursor: 5 }, `${JSON.stringify(chord)} left the draft and caret alone`)
+    h.key(CTRL_C)
+    await h.painted(() => h.calls.cancels === 1, 'the cancel intent reached the app')
+    assert.equal(h.calls.cancels, 1, 'and exactly once, as it did before this seat existed')
+    assert.equal(h.composer().text, 'draft', 'the cancel never cleared the draft here')
+    await h.dispose()
+  }
+})
+
+// ── C. The frozen key table ──────────────────────────────────────────────────
+
+test('typing edits only the card query and refilters through the source; the draft never moves', async (t) => {
+  const h = await mountHistoryPane(t)
+  h.key('mine')
+  await h.painted(() => h.composer().text === 'mine', 'the draft reached the editor')
+  h.key(CTRL_R)
+  await h.painted(() => h.requests.length === 1, 'the first round')
+  h.key('t')
+  h.key('e')
+  h.key('r')
+  h.key('n')
+  await h.painted(() => h.requests.at(-1)?.query === 'tern', 'the debounced round carried the current query')
+  assert.deepEqual(h.queryField(), { text: 'tern', cursor: 4 }, 'the card field holds the query with its caret')
+  assert.equal(h.composer().text, 'mine', 'the composer draft is untouched')
+  await h.painted(() => h.texts().some(text => text === 'Results · 1 shown'), 'only the matching row is shown')
+  h.key(ENTER)
+  await h.painted(() => h.composer().text !== 'mine', 'the filtered row restored')
+  assert.equal(h.composer().text, 'beta two about tern', 'the filtered row is what restored')
+  assert.equal(h.calls.submits, 0, 'and the draft behind it was never executed')
+})
+
+test('Backspace edits the query on a grapheme boundary and never reaches the composer reducer', async (t) => {
+  const h = await mountHistoryPane(t)
+  h.key('draft')
+  await h.painted(() => h.composer().text === 'draft', 'the draft reached the editor')
+  h.key(CTRL_R)
+  await h.painted(() => h.requests.length === 1, 'the first round')
+  h.key('a')
+  h.key('b')
+  await h.painted(() => h.requests.at(-1)?.query === 'ab', 'the ab round')
+  h.key(BACKSPACE)
+  await h.painted(() => h.requests.at(-1)?.query === 'a', 'the shorter query re-read')
+  assert.deepEqual(h.queryField(), { text: 'a', cursor: 1 }, 'one grapheme went back')
+  assert.equal(h.composer().text, 'draft', 'the draft, caret and mode survived')
+})
+
+test('Ctrl+V inside the card neither pastes media nor inserts a character anywhere', async (t) => {
+  const h = await mountHistoryPane(t)
+  h.key(CTRL_R)
+  await h.painted(() => h.cardPainted(), 'the card opened')
+  h.key(CTRL_V)
+  await h.observeAbsence()
+  assert.equal(h.calls.pastes, 0, 'the application paste owner never saw the chord')
+  assert.equal(h.calls.receipts, 0, 'and no pasted-path intake was armed either')
+  assert.equal(h.composer().text, '', 'the draft stayed empty')
+  assert.deepEqual(h.queryField(), { text: '', cursor: 0 }, 'nor did the query gain a literal v')
+})
+
+test('Tab and Shift+Tab cycle the scope with the query preserved in the frozen order', async (t) => {
+  const h = await mountHistoryPane(t)
+  h.key(CTRL_R)
+  await h.painted(() => h.requests.length === 1, 'the first round')
+  h.key('o')
+  h.key('n')
+  h.key('e')
+  await h.painted(() => h.requests.at(-1)?.scope === 'session' && h.requests.at(-1)?.query === 'one', 'the typed round')
+  h.key(TAB)
+  await h.painted(() => h.requests.at(-1)?.scope === 'current', 'Tab → Directory')
+  h.key(TAB)
+  await h.painted(() => h.requests.at(-1)?.scope === 'all', 'Tab → All')
+  assert.equal(h.requests.at(-1)?.query, 'one', 'the query string survived both switches')
+  h.key(SHIFT_TAB)
+  await h.painted(() => h.requests.at(-1)?.scope === 'current', 'Shift+Tab walks back')
+  await h.painted(() => h.texts().includes('Scope: Directory ⌄'), 'and the control reads it')
+})
+
+test('Up/Down walk the selection with one reveal and clamp at both ends instead of wrapping', async (t) => {
+  const h = await mountHistoryPane(t)
+  h.key(CTRL_R)
+  await h.painted(() => h.selected().length === 1, 'the first settled row starts selected')
+  assert.deepEqual(h.selected(), ['›alpha one'], 'the first row starts selected')
+  const before = h.ops('reveal').length
+  h.key(DOWN)
+  await h.painted(() => h.ops('reveal').length === before + 1, 'one real move issued exactly one reveal')
+  assert.ok(h.ops('reveal').at(-1)?.[1]?.endsWith('-o1'), 'addressed at the row node of THIS frame')
+  assert.deepEqual(h.selected(), ['›beta two about tern'], 'and the highlight moved down')
+  h.key(UP)
+  await h.painted(() => h.selected()[0]?.includes('alpha one') === true, 'back up')
+  h.key(UP)
+  await h.observeAbsence()
+  assert.deepEqual(h.selected(), ['›alpha one'], 'the first row clamps — it never wraps to the last')
+})
+
+test('PageDown steps the selection by the page budget and clamps at the last row', async (t) => {
+  const rows = Array.from({ length: 20 }, (_unused, index) => ({ content: `row ${index}` }))
+  const h = await mountHistoryPane(t, { rows })
+  h.key(CTRL_R)
+  await h.painted(() => h.selected().length === 1, 'the page settled')
+  h.key(PAGE_DOWN)
+  await h.painted(() => h.selected()[0]?.includes('row 6') === true, 'one page moved by the frozen page step')
+  h.key(PAGE_DOWN)
+  h.key(PAGE_DOWN)
+  h.key(PAGE_DOWN)
+  await h.painted(() => h.selected()[0]?.includes('row 19') === true, 'the last row clamps the page walk')
+  assert.equal(h.composer().text, '', 'and paging never wrote the draft')
+})
+
+test('Alt arrows scroll the Preview container only and never move the selection', async (t) => {
+  const h = await mountHistoryPane(t)
+  h.key(CTRL_R)
+  await h.painted(() => h.selected().length === 1, 'the page settled')
+  const selectedBefore = h.selected()
+  const before = h.ops('scroll').length
+  h.key(ALT_UP)
+  await h.painted(() => h.ops('scroll').length > before, 'the mount issued a native scroll op')
+  assert.ok(String(h.ops('scroll').at(-1)?.[1]).endsWith('-preview-scroll'),
+    'addressed at the Preview container of this frame')
+  assert.equal(String(h.ops('scroll').at(-1)?.[2]), 'line-up', 'one line up')
+  h.key(ALT_UP)
+  await h.painted(() => h.ops('scroll').length > before + 1, 'a second scroll op')
+  assert.deepEqual(h.selected(), selectedBefore, 'the result highlight never moved')
+  assert.equal(h.calls.submits, 0, 'and no scroll gesture leaked into a submission')
+})
+
+test('F2 toggles the SAME card with its query and selection, never a second surface', async (t) => {
+  const h = await mountHistoryPane(t)
+  h.key(CTRL_R)
+  await h.painted(() => h.requests.length === 1, 'the first round')
+  h.key('o')
+  h.key('n')
+  h.key('e')
+  await h.painted(() => h.requests.at(-1)?.query === 'one', 'the typed round')
+  const queryBefore = h.queryField()?.text
+  const selectedBefore = h.selected()
+  const surfacesBefore = h.pane.openSurfaces().length
+  h.key(F2)
+  await h.painted(() => h.texts().includes('Collapse'), 'the same card states its expanded height')
+  assert.equal(h.cardSerials().length, 1, 'still one card, same frame')
+  assert.equal(h.queryField()?.text, queryBefore, 'the query survived the toggle')
+  assert.deepEqual(h.selected(), selectedBefore, 'the selection survived the toggle')
+  assert.equal(h.pane.openSurfaces().length, surfacesBefore, 'and no second SDK surface was opened for it')
+  h.key(F2)
+  await h.painted(() => h.texts().includes('Expand'), 'and back to the normal presentation')
+})
+
+test('a second Ctrl+R keeps ONE live card instance and starts no new read', async (t) => {
+  const h = await mountHistoryPane(t)
+  h.key(CTRL_R)
+  await h.painted(() => h.requests.length === 1, 'the first round')
+  h.key('t')
+  h.key('e')
+  h.key('r')
+  h.key('n')
+  await h.painted(() => h.requests.at(-1)?.query === 'tern', 'the typed round')
+  const requestsBefore = h.requests.length
+  const serialBefore = h.cardSerials()[0]
+  h.key(CTRL_R)
+  await h.painted(() => h.ops('focus').at(-1)?.[1]?.endsWith('-query') === true, 'the caret went back to the query')
+  assert.equal(h.requests.length, requestsBefore, 'no second open re-queried the source')
+  assert.equal(h.cardSerials().length, 1, 'still exactly one card')
+  assert.equal(h.cardSerials()[0], serialBefore, 'the SAME instance, not a replacement')
+  assert.equal(h.queryField()?.text, 'tern', 'its query and selection stayed put')
+})
+
+// ── D. The pointer contract ──────────────────────────────────────────────────
+
+test('a result row click selects only; the explicit Restore button is the one composer write', async (t) => {
+  const h = await mountHistoryPane(t)
+  h.key(CTRL_R)
+  await h.painted(() => h.ids(/-o\d$/).length === 3, 'the settled page painted three real el buttons')
+  const rows = h.ids(/-o\d$/)
+  assert.equal(rows.length, 3, 'three result rows, each an el button')
+  h.click(rows[1]!)
+  await h.painted(() => h.selected()[0]?.includes('beta two') === true, 'the row click moved the selection')
+  assert.equal(h.composer().text, '', 'a row click never writes the composer')
+  assert.equal(h.calls.submits, 0, 'and never submits')
+  const restore = h.ids(/-restore$/)[0]
+  assert.ok(restore !== undefined, 'the card carries one real Restore button')
+  h.click(restore!)
+  await h.painted(() => h.composer().text !== '', 'the restore committed')
+  assert.equal(h.composer().text, 'beta two about tern', 'the row the pointer selected, byte for byte')
+  assert.equal(h.cardPainted(), false, 'and the card closed')
+  assert.equal(h.calls.submits, 0, 'still zero submissions from the whole pointer walk')
+})
+
+test('a click addressed at a retired frame acts on nothing — not the row, not the Restore button', async (t) => {
+  const h = await mountHistoryPane(t)
+  h.key(CTRL_R)
+  await h.painted(() => h.ids(/-o\d$/).length === 3, 'the first page')
+  const staleRow = h.ids(/-o\d$/)[2]!
+  const staleRestore = h.ids(/-restore$/)[0]!
+  h.key('t')
+  h.key('e')
+  h.key('r')
+  h.key('n')
+  await h.painted(() => h.requests.at(-1)?.query === 'tern', 'the newer round reached the source')
+  await h.painted(() => h.selected()[0]?.includes('beta two') === true, 'the newer round repainted its own ids')
+  assert.notEqual(h.ids(/-o\d$/)[0], staleRow, 'the live row id belongs to a NEWER frame')
+  h.click(staleRow)
+  await h.observeAbsence()
+  assert.deepEqual(h.selected(), ['›beta two about tern'], 'the stale row click did not reselect')
+  h.click(staleRestore)
+  await h.observeAbsence()
+  assert.equal(h.composer().text, '', 'the stale Restore click wrote no composer text')
+  assert.equal(h.cardPainted(), true, 'and did not close the live card either')
+  assert.equal(h.calls.submits, 0, 'and it never became a submission')
+})
+
+test('Scope, Expand, Close and Copy are el buttons whose click runs exactly one intent', async (t) => {
+  const h = await mountHistoryPane(t)
+  h.key(CTRL_R)
+  await h.painted(() => h.ids(/-scope$/).length === 1, 'the Scope control is one el button, not blue text')
+  h.click(h.ids(/-scope$/)[0]!)
+  await h.painted(() => h.requests.at(-1)?.scope === 'current', 'the Scope click re-queried through the same intent')
+  h.click(h.ids(/-expand$/)[0]!)
+  await h.painted(() => h.texts().includes('Collapse'), 'the Expand click toggled the same card')
+  h.click(h.ids(/-copy$/)[0]!)
+  await h.painted(() => h.copies.length === 1, 'the Copy click reached the copy policy')
+  assert.deepEqual(h.copies, ['alpha one'], 'the raw stored content, not a rendered row')
+  assert.equal(h.cardPainted(), true, 'a copy never closes the card')
+  h.click(h.ids(/-close$/)[0]!)
+  await h.painted(() => !h.cardPainted(), 'the Close click removed the card')
+  assert.equal(h.calls.cancels, 0, 'and the close was never an Agent cancel')
+})
+
+test('a stale Scope-frame click cannot re-scope the live card or start an older round', async (t) => {
+  const h = await mountHistoryPane(t)
+  h.key(CTRL_R)
+  await h.painted(() => h.ids(/-scope$/).length === 1, 'the first frame')
+  const staleScope = h.ids(/-scope$/)[0]!
+  h.key(TAB)
+  await h.painted(() => h.requests.at(-1)?.scope === 'current', 'the keyboard switch worked')
+  const roundsBefore = h.requests.length
+  h.click(staleScope)
+  await h.observeAbsence()
+  assert.equal(h.requests.length, roundsBefore, 'the stale Scope click started no new round')
+  assert.ok(h.texts().includes('Scope: Directory ⌄'), 'the card still reads the live scope')
+})
+
+// ── E. Copy is the existing Client-local policy ──────────────────────────────
+
+test('Alt+C copies the exact stored text, keeps the card open and states the outcome', async (t) => {
+  const h = await mountHistoryPane(t)
+  h.key(CTRL_R)
+  await h.painted(() => h.selected().length === 1, 'the page settled')
+  h.key(DOWN)
+  await h.painted(() => h.selected()[0]?.includes('beta two') === true, 'the selection moved')
+  h.key(ALT_C)
+  await h.painted(() => h.copies.length === 1, 'the copy settled')
+  assert.deepEqual(h.copies, ['beta two about tern'], 'the raw content of the selected row')
+  assert.equal(h.cardPainted(), true, 'Copy keeps the seat live')
+  await h.painted(() => h.texts().some(text => text.includes('Copied the history entry')), 'the outcome notice painted')
+  assert.equal(h.calls.submits, 0, 'a copy never became a submission')
+  assert.equal(h.composer().text, '', 'and never wrote the draft')
+})
+
+test('a failed copy is stated as a failure, not as a success', async (t) => {
+  const h = await mountHistoryPane(t, { copyOk: false })
+  h.key(CTRL_R)
+  await h.painted(() => h.selected().length === 1, 'the page settled')
+  const copy = h.ids(/-copy$/)[0]
+  assert.ok(copy !== undefined, 'Copy all is one el button')
+  assert.equal((wireNodes(h.pane).find(node => node.id === copy)?.p['attrs'] as Record<string, unknown> | undefined)?.['aria-disabled'],
+    undefined, 'Copy is enabled while a settled row is selected')
+  h.key(ALT_C)
+  await h.painted(() => h.texts().some(text => text.includes('Failed to copy the history entry')), 'the failure stated')
+  assert.equal(h.copies.length, 1, 'one write attempt')
+  assert.equal(h.cardPainted(), true, 'a failed copy still keeps the seat live')
+})
+
+test('a Copy outcome whose captured scope went stale never announces itself onto the newer owner', async (t) => {
+  let current = true
+  let resolveCopy: ((copied: boolean) => void) | undefined
+  const pane = installTspPane({ composerActions: true, historySearch: true })
+  t.after(() => pane.restore())
+  const session = await connect({ timeout: 500, exitHooks: false })
+  assert.ok(session, 'the scripted pane connects')
+  const renderer = mountTspRenderer(session, {
+    copyVisual: () => new Promise<boolean>(resolve => { resolveCopy = resolve }),
+    requestExit: () => {},
+    onFatal: (error) => { throw error },
+  })
+  t.after(() => renderer.dispose())
+  const scripted = scriptSource(DEFAULT_ROWS)
+  renderer.bindHistorySearch({
+    source: scripted.source,
+    cwd: () => '/work/alpha',
+    captureScope: () => ({ sessionId: 'ses_a', isCurrent: () => current }),
+  })
+  renderer.bindInput({
+    exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {}, pasteMedia: () => {}, pastedPath: () => {},
+    admitPastedPathDelivery: () => true, shouldRememberInput: () => true, noteUserInput: () => {},
+    listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker: () => {},
+    openModelQuick: () => {}, openSessionBrowser: () => {}, sessionBrowserAvailable: () => false,
+  })
+  renderer.bindStatusReader({ snapshot: () => emptyStatusSnapshot() })
+  renderer.display.commitDisplaySubject({}, {}, undefined)
+  await waitUntil('the composer frame', () => wireNodes(pane).some(node => node.id === 'dock.quiet-composer.composer'))
+  const copyNotices = () => surfaceTexts(pane, 's1').filter(text => /Copied|Failed to copy the history/.test(text))
+  pane.key(CTRL_R)
+  await waitUntil('the card opened', () => surfaceTexts(pane, 's1').some(text => text === 'Results · 3 shown'))
+  pane.key(ALT_C)
+  await waitUntil('the copy started', () => resolveCopy !== undefined)
+  assert.equal(copyNotices().length, 0, 'nothing announced before the settlement')
+  current = false
+  resolveCopy!(true)
+  // reason: a refused settlement writes no frame, so the only observation is a
+  // bounded window over the copy callback plus a later committed repaint.
+  await settle(ABSENCE_WINDOW_MS)
+  assert.equal(copyNotices().length, 0, 'the stale settlement stated nothing on the dock')
+})
+
+// ── F. Seat priority ─────────────────────────────────────────────────────────
+
+test('an open card retires synchronously when a non-blocking Presenter takes the seat', async (t) => {
+  const h = await mountHistoryPane(t, { modelPicker: true })
+  h.key(CTRL_R)
+  await h.painted(() => h.cardPainted(), 'the card is up')
+  const requestsBefore = h.requests.length
+  const opened = h.renderer.modelPresentation?.open({
+    subject: { sessionId: 'ses_a', sessionless: false },
+    isCurrent: () => true,
+    apply: () => Promise.resolve({ outcome: 'committed' } as never),
+    retry: () => {},
+    runOwned: (_label: string, run: () => Promise<unknown>) => ({ promise: run(), settle: () => {} }),
+    close: () => {},
+  } as never)
+  assert.ok(opened !== undefined, 'the model presenter opened through the production sweep')
+  await h.painted(() => !h.cardPainted(), 'the sweep retired the card in the SAME synchronous stack')
+  assert.equal(h.requests.length, requestsBefore, 'and its in-flight read went with it')
+  assert.equal(h.calls.submits, 0, 'no hidden card wrote anything')
+  h.key(ENTER)
+  await h.observeAbsence()
+  assert.equal(h.composer().text, '', 'a retired card never restores on the Presenter keys')
+})
+
+test('a Modal parks the SAME card with its query and selection and it returns when the form settles', async (t) => {
+  const h = await mountHistoryPane(t, { nativeInteraction: true })
+  h.key(CTRL_R)
+  await h.painted(() => h.requests.length === 1, 'the first round')
+  h.key('o')
+  h.key('n')
+  h.key('e')
+  await h.painted(() => h.requests.at(-1)?.query === 'one', 'the typed round settled')
+  const selectedBefore = h.selected()
+  assert.equal(selectedBefore.length, 1, 'the filtered page has one selected row')
+
+  let settled = false
+  const outcome = h.renderer.interaction.showApprovalPrompt(
+    { toolName: 'tool-a', reason: 'park check', arguments: '{}' }, true)
+  void outcome.then(() => { settled = true })
+  await h.painted(() => !h.cardPainted(), 'the modal took the seat')
+  assert.equal(h.cardPainted(), false, 'a parked card paints no operable rows')
+  assert.ok(h.texts().some(text => text.includes('park check')), 'the form itself is what the pane shows')
+
+  h.key(ENTER)
+  await h.observeAbsence()
+  assert.equal(h.composer().text, '', 'the History restore did not fire under the Modal')
+  assert.equal(h.calls.submits, 0, 'and Enter never became a submission')
+  h.key(CTRL_R)
+  await h.observeAbsence()
+  assert.equal(h.cardPainted(), false, 'Ctrl+R does not reopen a parked card')
+
+  h.key('y')
+  await h.painted(() => settled, 'the approval settled')
+  await h.painted(() => h.cardPainted(), 'the card came back')
+  assert.equal(h.queryField()?.text, 'one', 'the SAME instance returned with its query')
+  assert.deepEqual(h.selected(), selectedBefore, 'and its selection')
+  assert.ok(h.ops('focus').at(-1)?.[1]?.endsWith('-query'), 'and the caret came back to it')
+  assert.equal(h.composer().text, '', 'the parked card still wrote no draft')
+})
+
+test('a card whose captured Session scope stopped being current restores nothing and leaves the frame', async (t) => {
+  let current = true
+  const h = await mountHistoryPane(t, { isCurrent: () => current })
+  h.key(CTRL_R)
+  await h.painted(() => h.selected().length === 1, 'the card is up while the captured scope is current')
+  current = false
+  h.renderer.display.beginSessionHydration()
+  await h.painted(() => !h.cardPainted(), 'the publication commit withdrew the card')
+  assert.equal(h.cardPainted(), false, 'the stale card left the frame')
+  h.key(ENTER)
+  await h.observeAbsence()
+  assert.equal(h.composer().text, '', 'the stale restore wrote nothing')
+  assert.equal(h.calls.submits, 0, 'and Enter did not degrade into a submission of an empty draft either')
+})
+
+test('a late answer for a retired round commits nothing even when the source ignored its abort', async (t) => {
+  const h = await mountHistoryPane(t)
+  h.key(CTRL_R)
+  await h.painted(() => h.requests.length === 1, 'the first round')
+  h.key('h')
+  h.key('o')
+  h.key('l')
+  h.key('d')
+  await h.painted(() => h.requests.at(-1)?.query === 'hold', 'the held round started')
+  h.key(ESCAPE)
+  await h.painted(() => !h.cardPainted(), 'the card closed')
+  h.resolveHeld({
+    results: [{
+      id: 'ghost:0', content: 'ghost row from a retired round', cwd: '/work/alpha',
+      ts: 1_800_000_000_000, sourceFile: 'ghost', sourceByteOffset: 0,
+    }],
+    exhausted: true,
+  })
+  await h.observeAbsence()
+  assert.equal(h.cardPainted(), false, 'the retired card did not come back')
+  assert.equal(h.texts().some(text => text.includes('ghost row')), false, 'and its rows were never painted')
+  assert.equal(h.composer().text, '', 'nothing was restored from it either')
+})
+
+// ── G. States that must not lie ──────────────────────────────────────────────
+
+test('a failed read states the failure with one Retry and is never dressed up as empty history', async (t) => {
+  let fail = true
+  const seen: string[] = []
+  const pane = installTspPane({ composerActions: true, historySearch: true })
+  t.after(() => pane.restore())
+  const session = await connect({ timeout: 500, exitHooks: false })
+  assert.ok(session, 'the scripted pane connects')
+  const renderer = mountTspRenderer(session, { copyVisual: async () => true, requestExit: () => {}, onFatal: e => { throw e } })
+  t.after(() => renderer.dispose())
+  renderer.bindHistorySearch({
+    source: {
+      search(request: HistorySearchRequest): Promise<HistorySearchPage> {
+        seen.push(request.query)
+        if (fail) return Promise.reject(new Error('simulated read failure'))
+        return Promise.resolve({
+          results: [{ id: 'r:0', content: `recovered ${request.query}`, cwd: '/work/alpha', ts: 1, sourceFile: 'r', sourceByteOffset: 0 }],
+          exhausted: true,
+        })
+      },
+    },
+    cwd: () => '/work/alpha',
+    captureScope: () => ({ sessionId: 'ses_a', isCurrent: () => true }),
+  })
+  renderer.bindInput({
+    exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {}, pasteMedia: () => {}, pastedPath: () => {},
+    admitPastedPathDelivery: () => true, shouldRememberInput: () => true, noteUserInput: () => {},
+    listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker: () => {},
+    openModelQuick: () => {}, openSessionBrowser: () => {}, sessionBrowserAvailable: () => false,
+  })
+  renderer.bindStatusReader({ snapshot: () => emptyStatusSnapshot() })
+  renderer.display.commitDisplaySubject({}, {}, undefined)
+  await waitUntil('the composer frame', () => wireNodes(pane).some(node => node.id === 'dock.quiet-composer.composer'))
+  const texts = () => surfaceTexts(pane, 's1')
+  const ids = (match: RegExp) => wireNodes(pane).map(node => node.id).filter(id => match.test(id))
+
+  pane.key(CTRL_R)
+  await waitUntil('the failure painted', () => texts().includes('Could not search input history.'))
+  assert.equal(texts().includes('No input history in this scope.'), false,
+    'a failed read is never reported as an empty history')
+  assert.equal(texts().some(text => text.startsWith('Results ·')), false, 'no match counter is claimed either')
+  assert.equal(texts().filter(text => text === 'Could not search input history.').length, 1,
+    'the failure is stated exactly once on the frame')
+  assert.equal(ids(/-retry$/).length, 1, 'the failed state offers exactly one Retry')
+  fail = false
+  clickNodeById(pane, ids(/-retry$/)[0]!)
+  await waitUntil('the retry re-read the current query', () => texts().some(text => text.includes('recovered')))
+  assert.equal(texts().includes('Could not search input history.'), false, 'the failure row went away')
+  assert.deepEqual(seen, ['', ''], 'Retry re-sent the CURRENT scope and query and nothing else')
+})
+
+test('an empty page and a non-exhaustive page each state their own truth', async (t) => {
+  const empty = await mountHistoryPane(t, { rows: [] })
+  empty.key(CTRL_R)
+  await empty.painted(() => empty.texts().includes('No input history in this scope.'),
+    'an exhausted empty page says so')
+  empty.key('z')
+  empty.key('z')
+  empty.key('z')
+  await empty.painted(() => empty.requests.at(-1)?.query === 'zzz', 'the filter round')
+  await empty.painted(() => empty.texts().includes('No matching history.'), 'a query that exhausted the scan')
+  await empty.dispose()
+
+})
+
+test('a non-exhaustive first page counts the SHOWN rows and names the remaining budget, never a total', async (t) => {
+  // The scripted pane decodes ONE un-chunked APC frame (its hello `apc` is
+  // 65536), so this page is bounded to what that pane can carry; the row CAP
+  // the seat asks the source for is asserted separately below.
+  const reads: HistorySearchRequest[] = []
+  const shown = 40
+  const h = await mountHistoryPane(t, {
+    binding: {
+      source: {
+        search: (request: HistorySearchRequest) => {
+          reads.push(request)
+          return Promise.resolve({
+            results: Array.from({ length: shown }, (_unused, index) => ({
+              id: `big.jsonl:${index}`,
+              content: `scanned row ${index}`,
+              cwd: '/work/alpha',
+              ts: 1_700_000_000_000 + index,
+              sourceFile: 'big.jsonl',
+              sourceByteOffset: index,
+            })),
+            // `exhausted: false` with NO continuation is the honest double:
+            // older history remains, and the seat must not auto-chase it.
+            exhausted: false,
+          })
+        },
+      },
+      cwd: () => '/work/alpha',
+      captureScope: () => ({ sessionId: 'ses_a', isCurrent: () => true }),
+    },
+  })
+  h.key(CTRL_R)
+  await h.painted(() => h.texts().some(text => text === `Results · ${shown} shown · older history may remain`),
+    'the counter names the SHOWN page and the remaining budget')
+  assert.equal(reads.at(-1)?.limit, HISTORY_SEARCH_RESULT_LIMIT,
+    'the source row cap was requested, never a scan count')
+  assert.equal(reads.at(-1)?.query, '', 'for the current query')
+  assert.equal(reads.length, 1, 'the first page is ONE read: the continuation is never auto-chased')
+})
+
+test('untrusted history text reaches the frame only as sanitized display while Copy keeps the raw bytes', async (t) => {
+  const hostile = 'a\u001b]52;cOSC52PROBE\u0007b\u001b[31mc\r\u0000d'
+  const h = await mountHistoryPane(t, { rows: [{ content: hostile, cwd: '/we/ird\u001b[1mpath' }] })
+  h.key(CTRL_R)
+  await h.painted(() => h.selected().length === 1, 'the hostile row painted')
+  const painted = JSON.stringify(h.texts())
+  assert.equal(/[\u0000-\u0008\u000a-\u001f\u007f-\u009f]/.test(painted), false,
+    `no control byte reached a painted cell: ${painted.slice(0, 240)}`)
+  const wire = h.pane.output.text()
+  assert.equal(wire.includes('OSC52PROBE'), false, 'the hostile copy payload never became an OSC 52 write')
+  await h.key(ALT_C)
+  await h.painted(() => h.copies.length === 1, 'the copy settled')
+  assert.deepEqual(h.copies, [hostile], 'Copy still carries the EXACT stored bytes, control included')
+})
+
+test('a long entry stays fully readable in the Preview and is restored whole, never truncated', async (t) => {
+  const long = `line one\n${'x'.repeat(4000)}\nline three`
+  const h = await mountHistoryPane(t, { rows: [{ content: long }] })
+  h.key(CTRL_R)
+  await h.painted(() => h.texts().some(text => text.includes('line three')), 'the last source line is painted')
+  assert.equal(h.texts().some(text => text.includes('… more')), false, 'nothing advertises a truncated preview')
+  h.key(ENTER)
+  await h.painted(() => h.composer().text !== '', 'the restore landed')
+  assert.equal(h.composer().text, long, 'the whole original text restored, byte for byte')
+})
+
+// ── H. The composer chrome stays honest while the card owns the seat ─────────
+
+test('while the card owns the seat the composer Send is painted disabled and its click writes nothing', async (t) => {
+  const h = await mountHistoryPane(t)
+  h.key('draft')
+  await h.painted(() => h.composer().text === 'draft', 'the draft reached the editor')
+  h.key(CTRL_R)
+  await h.painted(() => h.cardPainted(), 'the card opened')
+  const send = wireNodes(h.pane).find(node => /composer-send/.test(node.id))
+  assert.ok(send !== undefined, 'the ONE composer keeps its Send control visible')
+  const attrs = send.p['attrs'] as Record<string, unknown> | undefined
+  assert.equal(attrs?.['aria-disabled'], 'true', 'painted disabled while the card owns the seat')
+  assert.equal(h.composer().text, 'draft', 'and the draft itself is still on the editor')
+  h.click(send.id)
+  await h.observeAbsence()
+  assert.equal(h.calls.submits, 0, 'its click reached no submission behind the card')
+  assert.equal(h.cardPainted(), true, 'and it did not close the card either')
+})
+
+test('the formal History-scope commits retire an open card and leave the composer alone', async (t) => {
+  const h = await mountHistoryPane(t)
+  h.key(CTRL_R)
+  await h.painted(() => h.selected().length === 1, 'the card is up')
+  const requestsBefore = h.requests.length
+  h.renderer.display.beginInputHistoryScope({ sessionId: 'ses_b' } as never)
+  assert.equal(h.cardPainted(), true, 'the seam is PURE STATE: it owes no frame of its own')
+  h.renderer.display.setTranscript([], undefined, undefined, undefined, undefined, {})
+  await h.painted(() => !h.cardPainted(), 'the outer commit carries the frame with no card')
+  assert.equal(h.requests.length, requestsBefore, 'the pure retire issued no new read')
+  h.key(ENTER)
+  await h.observeAbsence()
+  assert.equal(h.composer().text, '', 'and the retired card restored nothing')
+})

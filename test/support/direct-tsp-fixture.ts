@@ -297,6 +297,13 @@ export interface DirectTspFixtureOptions {
   readonly presetPicker?: boolean
   readonly sessionBrowser?: boolean
   /**
+   * TSP I-E: advertise the exact kinds and features the native `Ctrl+R` History
+   * card really paints (`input` query, `el` buttons, two native `scroll`
+   * containers, plus the `styles` sheet). A pane that does not advertise them
+   * must state the card is unavailable, so the negative case omits this.
+   */
+  readonly historySearch?: boolean
+  /**
    * Advertise the NATIVE IMAGE capability on the scripted pane (the `image`
    * kind + the `blobs` feature): a pane that does not advertise them can
    * never carry a tool-result image, so the qualification of that path needs
@@ -431,6 +438,7 @@ export async function createDirectTspFixture(
         nativeChart: options.nativeChart,
         composerActions: options.composerActions,
         modelQuick: options.modelQuick,
+        historySearch: options.historySearch,
       })
   // OWNERSHIP, not success-contingency: scripted mode replaces the PROCESS tty
   // and clears five env vars; external-Tern and PiTui modes must leave the
