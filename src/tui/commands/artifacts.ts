@@ -43,7 +43,6 @@ type ArtifactsCommandRunner = Pick<
   | 'requireLiveSessionScope'
   | 'sessionTransitionPending'
   | 'signal'
-  | 'transcriptExportAvailable'
 >
 
 export interface ArtifactsCommandDeps {
@@ -552,33 +551,21 @@ export function createArtifactsCommands(deps: ArtifactsCommandDeps): ArtifactsCo
   const registerTranscript = (): void => {
     registerOne({
       name: 'transcript',
-      description: 'Export a readable Markdown transcript of this session when supported',
+      description: 'Export this session as official Markdown',
       handler: (invocation) => {
         // /transcript mirrors /export: no arguments, acknowledgement only; the
         // Client-local save workflow starts after successful command
-        // settlement.
+        // settlement and reads the official Host Markdown by captured id.
         if (invocation.rawInput.trim() !== '') {
           return { kind: 'error', text: 'The /transcript command does not accept a path.' }
         }
-        // Truthful-unavailable on the wire backend (the explicit capability,
-        // never the M8-retiring Host-mirror field): the Markdown renderer
-        // reads the whole Session event history (`snapshotEvents`), for which
-        // no transport-neutral seam exists yet — the Remote post-success
-        // artifact save would resolve the projected agent and crash inside
-        // `renderTranscriptMarkdown` after the command already reported
-        // success. The capability is REQUIRED on every assembly, so refusing
-        // on `!== true` is the explicit business rule, not an optional
-        // compatibility default.
-        // `/export` stays available on both backends (it renders from
-        // `SessionArchivePort`, not the Session).
-        if (runner.transcriptExportAvailable !== true) {
-          const text = 'transcript export is unavailable on this backend'
-          // Unchanged PiTui route: with a PiTui app mounted this is the
-          // long-standing inline notice beside the command card. A renderer
-          // without one refuses `/transcript` in the admission gate before this
-          // handler runs, so its returned error text keeps its own owner there.
-          app?.notify(text, 'error')
-          return { kind: 'error', text }
+        // The business Port is available on both backends, but the Client-local
+        // save location is a real mounted-renderer capability: a renderer
+        // without a TuiApp has no save dialog, so the command refuses
+        // explicitly instead of reporting a success whose post-success save can
+        // never run.
+        if (app === undefined) {
+          return { kind: 'error', text: 'transcript file save is unavailable on this renderer' }
         }
         return { kind: 'success', text: 'Transcript export requested.' }
       },

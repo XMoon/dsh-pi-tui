@@ -35,6 +35,7 @@ import { DirectCatalogPort } from './catalog-direct.ts'
 import { DirectConfigPort } from './config-direct.ts'
 import { DirectHostFilePort } from './host-file-direct.ts'
 import { DirectSessionArchive } from './session-archive-direct.ts'
+import { DirectSessionMarkdown } from './session-markdown-direct.ts'
 import { DirectHostCommandPort } from './host-command-direct.ts'
 import { DirectPluginManagerPort } from './plugin-manager-direct.ts'
 import { DirectJobObservationPort } from './job-observation-direct.ts'
@@ -121,6 +122,10 @@ export function createDirectRuntimeBackend(deps: DirectBackendDeps): Backend {
     new DirectConfigPort(deps.ctx, deps.tuiSettings, deps.agentFor),
     new DirectHostFilePort(deps.agentFor, deps.ctx),
     new DirectSessionArchive(deps.ctx),
+    // S5-PR3: the official Markdown read is a separate semantic capability
+    // from the ZIP archive; the Host Session Query snapshot and the official
+    // formatter are resolved/consumed in-process, never in the Client.
+    new DirectSessionMarkdown(deps.ctx),
     new DirectHostCommandPort(deps.ctx, deps.agentFor),
     new DirectPluginManagerPort(deps.ctx),
     new DirectJobObservationPort(deps.ctx, deps.diag),

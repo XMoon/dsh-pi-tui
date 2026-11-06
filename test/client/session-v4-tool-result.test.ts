@@ -27,7 +27,6 @@ import { createSessionFormatV3ToV4, sessionFormatV3ToV4 } from '@deepseek-ai/dsh
 import { SessionSeq, TOOL_NOT_STARTED, TOOL_OUTCOME_UNKNOWN, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { foldedResultSummaryFor, resultTextLines, type JsonValue } from '../../src/tui/transcript/tool-presentation.ts'
 import { TranscriptFolder, type TranscriptMessage } from '../../src/transcript.ts'
-import { renderTranscriptMarkdown } from '../../src/client/artifact/transcript-markdown.ts'
 
 type ToolCard = Extract<TranscriptMessage, { kind: 'tool' }>
 
@@ -254,23 +253,6 @@ test('multimodal result content keeps its exact block order and text summary', (
   assert.deepEqual(resultTextLines(card.resultBlocks ?? []), ['before', '[image]', '📄 report.pdf · 12.3 KiB', 'after'])
 })
 
-test('the Markdown transcript reads the native message.content in order', () => {
-  const events = [
-    turnStart(),
-    toolCall(1, 'c1', 'screenshot_tool'),
-    toolResult(2, 'c1', [text('tool before'), FILE_BLOCK, text('tool after')]),
-    turnEnd(3),
-  ]
-  const markdown = renderTranscriptMarkdown({
-    header: { id: 'session-v4-tool-result', cwd: '/ws', version: 4, createdAt: 0, isSeeded: false, delegationDepth: 0 },
-    snapshotEvents: () => events,
-  } as never)
-  assert.ok(markdown.includes('tool before'))
-  assert.ok(markdown.includes('tool after'))
-  assert.ok(markdown.indexOf('tool before') < markdown.indexOf('📄 report.pdf · 12.3 KiB'))
-  assert.ok(markdown.indexOf('📄 report.pdf · 12.3 KiB') < markdown.indexOf('tool after'))
-})
-
 /** Drive one released-V3 body through the OFFICIAL V3→V4 migration stage. */
 function migrateReleasedV3(rows: readonly Record<string, unknown>[]): SessionEvent[] {
   const sourceHeader = { version: 3, id: 'b1-historical-v3', createdAt: 1, cwd: '/ws', isSeeded: false, delegationDepth: 0 }
@@ -466,14 +448,6 @@ test('an earlier observed call does not leak across a reused id in another step'
   assert.equal(cards[0]!.origin, undefined)
   assert.equal(cards[1]!.origin, 'tool-not-started')
   assert.equal(cards[1]!.name, 'read', 'the later request recovers its own identity despite the earlier observed call')
-
-  const markdown = renderTranscriptMarkdown({
-    header: { id: 'session-tool-not-started-id-reuse', cwd: '/ws', version: 4, createdAt: 0, isSeeded: false, delegationDepth: 0 },
-    snapshotEvents: () => events,
-  } as never)
-  assert.ok(markdown.includes('### Tool bash'), `the earlier ordinary call keeps its heading:\n${markdown}`)
-  assert.ok(markdown.includes('### Tool request not started: read'),
-    `the later reused-id recovery is NOT suppressed by the earlier observation:\n${markdown}`)
 })
 
 test('an observed tool/call outranks a contradictory TOOL_NOT_STARTED result', () => {
@@ -495,26 +469,6 @@ test('an observed tool/call outranks a contradictory TOOL_NOT_STARTED result', (
   assert.equal(card.name, 'bash')
   assert.equal(card.args, JSON.stringify({ command: 'ls' }))
   assert.equal(card.status, 'error')
-
-  // The Markdown export mirrors the fold's guard: an observed tool/call
-  // keeps the ordinary heading + result output, never a not-started
-  // diagnostic heading.
-  const markdown = renderTranscriptMarkdown({
-    header: { id: 'session-tool-not-started-contradiction', cwd: '/ws', version: 4, createdAt: 0, isSeeded: false, delegationDepth: 0 },
-    snapshotEvents: () => [
-      turnStart(),
-      assistantToolRequest(1, 'c1', 'bash'),
-      toolCall(2, 'c1', 'bash', { command: 'ls' }),
-      toolResult(3, 'c1', [text(NOT_STARTED_RECOVERY_TEXT)], {
-        isError: true,
-        error: { name: 'ToolNotStartedError', code: TOOL_NOT_STARTED },
-      }),
-      turnEnd(4),
-    ],
-  } as never)
-  assert.ok(markdown.includes('### Tool bash'), `the ordinary call heading survives:\n${markdown}`)
-  assert.ok(markdown.includes('<details><summary>result</summary>'), `the ordinary result block survives:\n${markdown}`)
-  assert.ok(!markdown.includes('Tool request not started'), `no contradictory not-started heading is invented:\n${markdown}`)
 })
 
 test('TOOL_OUTCOME_UNKNOWN stays a genuine started tool with error outcome', () => {
@@ -535,37 +489,4 @@ test('TOOL_OUTCOME_UNKNOWN stays a genuine started tool with error outcome', () 
   assert.equal(card.callCount, 1, 'a real tool/call was observed: genuine call cardinality')
   assert.equal(card.name, 'bash')
   assert.equal(card.status, 'error')
-})
-
-test('the Markdown export states the not-started fact without inventing a tool call', () => {
-  const events = [
-    turnStart(),
-    event('step/start', { turn: 0, step: 0 }, 1),
-    assistantToolRequest(2, 'c1', 'bash'),
-    notStartedResult(3, 'c1'),
-    event('step/end', { turn: 0, step: 0 }, 4),
-    turnEnd(5),
-  ]
-  const markdown = renderTranscriptMarkdown({
-    header: { id: 'session-tool-not-started', cwd: '/ws', version: 4, createdAt: 0, isSeeded: false, delegationDepth: 0 },
-    snapshotEvents: () => events,
-  } as never)
-  assert.ok(markdown.includes('### Tool request not started: bash'), `the diagnostic heading is present:\n${markdown}`)
-  assert.ok(markdown.includes('interrupted before the Harness recorded it as started'), `the upstream recovery guidance survives:\n${markdown}`)
-  assert.ok(!markdown.includes('### Tool bash'), `no durable-call heading is invented:\n${markdown}`)
-  assert.ok(!/<details><summary>result<\/summary>/.test(markdown), `the not-started result is not presented as an ordinary result:\n${markdown}`)
-})
-
-test('the Markdown export degrades to an anonymous not-started heading without identity', () => {
-  const events = [
-    turnStart(),
-    notStartedResult(1, 'c1'),
-    turnEnd(2),
-  ]
-  const markdown = renderTranscriptMarkdown({
-    header: { id: 'session-tool-not-started-anon', cwd: '/ws', version: 4, createdAt: 0, isSeeded: false, delegationDepth: 0 },
-    snapshotEvents: () => events,
-  } as never)
-  assert.ok(markdown.includes('### Tool request not started\n'), `the anonymous diagnostic heading is present:\n${markdown}`)
-  assert.ok(!markdown.includes('### Tool request not started:'), `no unproven tool identity is named:\n${markdown}`)
 })

@@ -1135,8 +1135,9 @@ never the component's render-time candidate.
 
 ### Display `/copy` for consumed visual markers
 
-The durable Assistant body keeps its `[dsh-visual-…]: <#>` definition and the
-raw `/transcript` export keeps every byte. `/copy` is a DISPLAY sink, so it
+The durable Assistant body keeps its `[dsh-visual-…]: <#>` definition. The
+official `/transcript` Markdown renders that text block verbatim (the formatter
+never strips it); `/copy` is a DISPLAY sink, so it
 projects the same text the user reads: the latest official
 `assistant/message` is proven to be the committed final row of the SAME Session
 (the Folder's `assistantSettlementSeq(turn, step)` equals the event's `seq`,
@@ -1186,13 +1187,16 @@ standalone attention diagnostic ("Tool request not started", expanded recovery
 guidance). The requested name is recovered from the durable assistant tool-call
 block fenced by call id + turn + step. It has `callCount = 0` and is not Work,
 Action or stats input; the Host-owned renderer bypasses presenter/plugin paths.
-Markdown export states the fact, never invents a tool heading.
+The `/transcript` Markdown is the official Host-authored Session transcript, not
+a byte copy of this card, so it renders the durable tool result text and does
+not synthesize the TUI diagnostic heading.
 
 `TOOL_OUTCOME_UNKNOWN` keeps normal Tool-card semantics. Do not synthesize a
 `tool/call` or classify the diagnostic as an orphan Action.
 
-Authority: `src/domain/transcript/folder.ts`,
-`src/client/artifact/transcript-markdown.ts`.
+Authority: `src/domain/transcript/folder.ts` (the TUI card). The Markdown
+artifact authority is the official Host `formatSessionMarkdown` behind
+`SessionMarkdownPort` (see `docs/architecture/host-client.md`).
 Proof: `test/client/session-v4-tool-result.test.ts`.
 
 ## Fullscreen jump and scroll intent

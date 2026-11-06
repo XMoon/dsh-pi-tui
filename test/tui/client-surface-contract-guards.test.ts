@@ -237,32 +237,31 @@ test('unavailable Remote approval/sandbox facts are omitted, never guessed', () 
     'the Remote access branch never infers a sandbox mode')
 })
 
-/* ───────── PR5: the required transcript-export capability declaration ──── */
+/* ───────── S5-PR3: the transcript renderer capability, not a backend flag ─ */
 
-test('the transcript-export capability is REQUIRED and refused unless exactly true', () => {
-  const commands = code('commands.ts')
-  const declaration = commands.indexOf('readonly transcriptExportAvailable: boolean')
-  assert.ok(declaration !== -1,
-    'the runner capability is a required boolean (no optional marker)')
-  assert.equal(code('commands.ts').includes('transcriptExportAvailable?:'), false,
-    'no optional declaration of the capability may reappear')
-  // TS1 moved the built-in /transcript definition into the artifacts command
-  // owner; the capability DECLARATION stays on the facade.
+test('/transcript gates on the REAL mounted save UI and never on a backend capability flag', () => {
+  // The retired Direct-only `transcriptExportAvailable` business flag must not
+  // reappear: the official Markdown Port serves BOTH backends, and the only
+  // Client capability left is the mounted `TuiApp` save-location dialog.
+  for (const file of [
+    'commands.ts',
+    'app/command/surface.ts',
+    'app/bootstrap.ts',
+    'tui/commands/artifacts.ts',
+  ]) {
+    assert.equal(code(file).includes('transcriptExportAvailable'), false,
+      `${file} must not carry the retired transcript-export capability flag`)
+  }
   const artifacts = code('tui/commands/artifacts.ts')
   const handlerAt = artifacts.indexOf("name: 'transcript'")
   assert.ok(handlerAt !== -1, 'the /transcript definition lives in the artifacts command owner')
   const handler = artifacts.slice(handlerAt)
-  assert.ok(handler.includes('runner.transcriptExportAvailable !== true'),
-    'the /transcript handler refuses unless the declared capability is exactly true')
-  // The production composition declares it per selected runtime, and the
-  // command-surface backend deps type requires it structurally: a new
-  // assembly cannot omit the capability.
-  const bootstrap = code('app/bootstrap.ts')
-  assert.ok(bootstrap.includes('transcriptExportAvailable: selectedRuntime.kind === \'direct\''),
-    'the production composition declares the capability from the selected runtime kind')
-  const surface = code('app/command/surface.ts')
-  assert.ok(surface.includes('readonly transcriptExportAvailable: boolean'),
-    'the command-surface backend deps keep the field required (structural guard)')
+  assert.ok(handler.includes('if (app === undefined)'),
+    'the handler refuses when the renderer mounts no TuiApp (no save location)')
+  assert.ok(handler.includes('transcript file save is unavailable on this renderer'),
+    'the app-less refusal keeps its fixed actionable message')
+  assert.ok(handler.includes("'The /transcript command does not accept a path.'"),
+    'the no-argument grammar refusal is unchanged')
 })
 
 /* ── PR5 v2 §1C: origin-aware command authority guards ─────────────────── */

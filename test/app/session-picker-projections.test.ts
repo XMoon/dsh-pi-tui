@@ -162,7 +162,6 @@ test('the picker projection loader covers EVERY main row beyond the legacy windo
     clientCommands: createClientCommandRegistry(parseCommand),
     hostFile: new DirectHostFilePort(() => undefined),
     hostShellCompletion: true,
-    transcriptExportAvailable: true,
     requestExit: () => {},
     cwd: '/ws',
     sessionCwd: () => '/ws',

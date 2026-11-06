@@ -124,7 +124,6 @@ function setup(options: { cwd?: string; sessionCwd?: string; signal?: AbortSigna
     clientCommands: createClientCommandRegistry(parseCommand),
     hostFile: new DirectHostFilePort(() => undefined),
     hostShellCompletion: true,
-    transcriptExportAvailable: true,
     interaction: {
       questions: {
         onRequest: () => true,
@@ -560,7 +559,6 @@ function mountedHarness(options: {
     clientCommands: createClientCommandRegistry(parseCommand),
     hostFile: new DirectHostFilePort(() => undefined),
     hostShellCompletion: false,
-    transcriptExportAvailable: false,
     interaction: {
       questions: {
         onRequest: () => true,

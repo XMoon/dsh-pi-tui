@@ -945,7 +945,6 @@ async function mountChain(
     commandRegistry: registry as never,
     clientCommands: createClientCommandRegistry(parseCommand),
     hostShellCompletion: false,
-    transcriptExportAvailable: false,
     imageStore: images,
     fileStore: files,
     copyToClipboard: async () => true,

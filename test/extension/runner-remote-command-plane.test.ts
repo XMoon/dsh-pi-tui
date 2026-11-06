@@ -48,12 +48,13 @@
  */
 
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
 import type { Fiber } from '@deepseek-ai/cordis'
 import { symbols } from '@deepseek-ai/cordis'
 import { SessionId } from '@deepseek-ai/dsh-session'
+import { formatSessionMarkdown } from '@deepseek-ai/dsh-session-log-export'
 import { Config as TuiConfigSchema } from '../../src/index.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import { applyRunnerWithRuntime } from '../../src/app/bootstrap.ts'
@@ -950,53 +951,82 @@ test('sessionless standing skill: the Remote refresh reports EXPLICIT unavailabl
     'the Remote standing refresh creates NO hidden Session')
 })
 
-test('truthful-unavailable (review round 4): Remote /transcript refuses EXPLICITLY and never starts the artifact save', async (t) => {
-  // The Markdown renderer reads the whole Session event history
-  // (`snapshotEvents`) — no transport-neutral seam exists yet, so the
-  // Remote post-success artifact save would resolve the projected agent and
-  // crash inside `renderTranscriptMarkdown` AFTER the command already
-  // reported success. The contract: the handler refuses with a shown error,
-  // the notice renders, Save Location NEVER opens (zero artifact-save
-  // workflows started), and the Host executor is never entered.
+test('L6: Remote /transcript writes the official Host Markdown to a Client-local file (real authenticated route)', async (t) => {
+  // The REAL Remote composition: the Client-local `/transcript` command keeps
+  // its Client dispatch, the post-success save opens the Client Save Location,
+  // and the official authenticated `GET /api/session.markdown` route serves the
+  // Host Session Query snapshot. The Host executor is never entered and the
+  // saved bytes equal the official formatter output over the SAME snapshot.
   const life = testLifecycle(t)
-  const mainId = 'm3-4-pr4-transcript-unavailable'
+  const mainId = 'm3-4-pr4-transcript-success'
+  const outDir = life.tempDir('dsh-remote-transcript-')
   const fixture = await mountRunner(life, {
     resumeSessionId: mainId,
     seed: (append) => {
-      // One completed turn so the session is a real conversation subject
-      // (the save path could otherwise be refused for emptiness).
+      // One completed turn: a real conversation subject, with the durable
+      // append-origin markers the official formatter selects on.
       append('turn/start', { turn: 1 })
       append('step/start', { turn: 1, step: 1 })
       append('user/message', {
-        id: 'u-transcript', role: 'user', content: [{ type: 'text', text: 'transcript prompt' }], source: { kind: 'user' },
+        id: 'u-transcript', role: 'user', content: [{ type: 'text', text: 'transcript prompt 汉字' }], source: { kind: 'user' },
       }, { surfaceOp: 'append' })
       append('assistant/message', {
         turn: 1, step: 1,
-        message: { id: 'a-transcript', role: 'assistant', content: [{ type: 'text', text: 'answer' }], source: { kind: 'model', provider: 'smoke', model: 'smoke' } },
+        message: { id: 'a-transcript', role: 'assistant', content: [{ type: 'text', text: 'official answer 🙂' }], source: { kind: 'model', provider: 'smoke', model: 'smoke' } },
         stream: [], usage: { inputTokens: 1, outputTokens: 1 },
       }, { surfaceOp: 'append' })
       append('step/end', { turn: 1, step: 1 })
       append('turn/end', { turn: 1, reason: { kind: 'completed' } })
     },
   })
-  // The save prompt is CLIENT-local UI: patch the production prototype so
-  // the test observes the REAL workflow's entry (never a test-owned seam).
+  // The save prompt is CLIENT-local UI: patch the production prototype so the
+  // test observes the REAL workflow's entry into the Client filesystem.
   let savePrompts = 0
   const originalAsk = TuiApp.prototype.askSaveLocation
   TuiApp.prototype.askSaveLocation = async function patchedAsk() {
     savePrompts += 1
-    return { kind: 'cancelled' }
+    return { kind: 'selected', directory: outDir, overwrite: false }
   }
   life.defer(() => { TuiApp.prototype.askSaveLocation = originalAsk })
+  // Instrument the EXACT Host sessionQuery instance (unwrapped from the
+  // traceable service proxy, never `.bind`-ed) so the official route's Host
+  // read is observable: only the Host route can reach this object from the
+  // Client.
+  const query = unwrapService(fixture.host.ctx.get('sessionQuery')) as {
+    readSession(id: unknown): Promise<unknown>
+  }
+  const originalRead = query.readSession
+  let queryReads = 0
+  query.readSession = function patchedReadSession(this: unknown, id: unknown): Promise<unknown> {
+    queryReads += 1
+    return originalRead.call(this, id)
+  }
+  life.defer(() => { query.readSession = originalRead })
   await settle(120)
   submit(fixture, '/transcript')
-  await waitFor('the truthful-unavailable notice rendered', () =>
-    fixture.vt.getViewport().join('').includes('transcript export is unavailable on this backend'), 15_000)
-  await settle(150)
-  assert.equal(savePrompts, 0,
-    'a refused /transcript must never open Save Location (zero artifact-save workflows)')
+  const target = join(outDir, `dsh-session-${mainId}.md`)
+  await waitFor('the Client-local Markdown file landed', () => existsSync(target), 15_000)
+  assert.equal(savePrompts, 1, 'the Client Save Location opened exactly once')
+  assert.equal(queryReads, 1, 'the official Host route performed exactly one Session Query read')
   assert.equal(fixture.hostCommandRuns(mainId), 0,
-    'the Remote /transcript refusal never reaches the Host command executor')
+    'the Client-local /transcript never reaches the Host command executor')
+  // The saved bytes are the official formatter output over the same committed
+  // Host snapshot (and carry the Host metadata path, kept verbatim).
+  const snapshot = await (fixture.host.ctx as unknown as {
+    sessionQuery: { readSession(id: unknown): Promise<{ events: readonly never[] }> }
+  }).sessionQuery.readSession(SessionId(mainId))
+  const metadata = await (fixture.host.ctx as unknown as {
+    sessionPersistence: { stat(id: unknown): Promise<{ location?: { path?: string } } | undefined> }
+  }).sessionPersistence.stat(SessionId(mainId))
+  const content = readFileSync(target, 'utf8')
+  assert.equal(content, formatSessionMarkdown(snapshot.events, metadata?.location?.path),
+    'the Remote file bytes are the official Host-authored Markdown')
+  assert.match(content, /> transcript prompt 汉字/u, 'the human question is an official blockquote')
+  assert.match(content, /official answer 🙂/u)
+  assert.doesNotMatch(content, /^## (User|Assistant)$/mu, 'the retired Client-local format never ran')
+  assert.equal(content.endsWith('\n'), true)
+  // The save target is the CLIENT-selected directory, never the Host path.
+  assert.ok(existsSync(join(outDir, `dsh-session-${mainId}.md`)))
 })
 
 test('stale catalog (M3-6 PR2): refresh A → Connection replacement → the old snapshot cannot commit and generation B AUTOMATICALLY re-reads the Host catalog without /reload', async (t) => {
@@ -1351,9 +1381,10 @@ test('/copy under running + steer copies (the OSC 52 leg runs), never steers', a
   release()
 })
 
-test('/transcript under running + steer gives the explicit unavailable error, never steers', async (t) => {
+test('/transcript while running + steer still saves the committed cut locally and never steers', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr5-reach-transcript'
+  const outDir = life.tempDir('dsh-remote-transcript-running-')
   const llm = new StubStreamingLlmAdapter()
   const release = llm.hold()
   life.defer(release)
@@ -1361,14 +1392,26 @@ test('/transcript under running + steer gives the explicit unavailable error, ne
   submit(fixture, 'hold this turn open')
   await waitFor('the session is running', () =>
     fixture.aggregate.presentation.sessionFacts.running(mainId) === true, 20_000)
+  const originalAsk = TuiApp.prototype.askSaveLocation
+  TuiApp.prototype.askSaveLocation = async function patchedAsk() {
+    return { kind: 'selected', directory: outDir, overwrite: false }
+  }
+  life.defer(() => { TuiApp.prototype.askSaveLocation = originalAsk })
   const app = fixture.app() as unknown as { setDraft(text: string): void; submitDraft(request?: string): void }
   app.setDraft('/transcript')
   app.submitDraft('accelerated')
-  await waitFor('the truthful-unavailable notice rendered', () =>
-    fixture.vt.getViewport().join('\n').includes('transcript export is unavailable on this backend'), 15_000)
+  const target = join(outDir, `dsh-session-${mainId}.md`)
+  await waitFor('the committed-cut Markdown file landed', () => existsSync(target), 15_000)
+  const content = readFileSync(target, 'utf8')
+  // The committed cut contains the user's prompt; the still-streaming model
+  // output is NOT invented into the transcript.
+  assert.match(content, /> hold this turn open/u, 'the committed user message is exported')
+  assert.doesNotMatch(content, /^## (User|Assistant)$/mu, 'the retired Client-local format is gone')
   const spliced = fixture.events(mainId).some(event =>
     event.type === 'agent/inbox/spliced' && JSON.stringify(event.data).includes('/transcript'))
   assert.equal(spliced, false, '/transcript was never steered into the agent inbox')
+  assert.equal(fixture.hostCommandRuns(mainId), 0,
+    'the running+steer /transcript stays a Client-local command')
   release()
 })
 

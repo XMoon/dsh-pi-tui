@@ -18,7 +18,7 @@ test('the Remote backend advertises exactly its implemented capabilities', () =>
   const parts = {
     subagent: {}, sessionReader: {}, pendingInputReader: {}, sessionWriter: {},
     sessionLifecycle: {}, interaction: {}, catalog: {}, config: {}, hostFile: {},
-    sessionArchive: {}, hostCommand: {}, pluginManager: {}, jobObservation: {},
+    sessionArchive: {}, sessionMarkdown: {}, hostCommand: {}, pluginManager: {}, jobObservation: {},
   } as unknown as RemoteBackendParts
   const backend = createRemoteBackend(parts)
   assert.equal(backend.kind, 'remote')
@@ -30,6 +30,7 @@ test('the Remote backend advertises exactly its implemented capabilities', () =>
   assert.equal(backend.config, parts.config)
   assert.equal(backend.interaction, parts.interaction)
   assert.equal(backend.sessionArchive, parts.sessionArchive)
+  assert.equal(backend.sessionMarkdown, parts.sessionMarkdown)
 })
 
 test('BackendKind accepts remote while Direct stays the production default', () => {

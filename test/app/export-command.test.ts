@@ -26,9 +26,9 @@ import { SESSION_FORMAT_VERSION, SessionId } from '@deepseek-ai/dsh-session'
 import { registerTuiCommands, type TuiCommandRunner } from '../../src/commands.ts'
 import { apply as applyRunner, Config as TuiConfigSchema } from '../../src/index.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
-import { sessionArtifactFilename, safeSessionIdSegment } from '../../src/app/command/artifacts.ts'
+import { createArtifactSaveOwner, sessionArtifactFilename, safeSessionIdSegment } from '../../src/app/command/artifacts.ts'
 import { resolveClientDirectory, streamToFile, writeTextAtomically } from '../../src/client/artifact/save.ts'
-import { sessionLogZipFilename } from '@deepseek-ai/dsh-session-log-export'
+import { formatSessionMarkdown, sessionLogZipFilename } from '@deepseek-ai/dsh-session-log-export'
 import { TuiApp } from '../../src/tui-app.ts'
 import { DraftImageStore } from '../../src/client/media/image/draft-store.ts'
 import { DirectHostFilePort } from '../../src/runtime/direct/host-file-direct.ts'
@@ -38,6 +38,7 @@ import { testLifecycle } from '../support/temp-lifecycle.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { sessionScopeFacts } from '../support/session-scope-facts.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
+import type { SessionMarkdownPort } from '../../src/runtime/session-markdown-port.ts'
 import { provideFakeHostWorkspaceRegistry } from '../support/workspace-registry.ts'
 
 process.env.NO_COLOR = ''
@@ -215,7 +216,6 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
     },
     hostFile: new DirectHostFilePort(() => undefined, null),
     hostShellCompletion: true,
-    transcriptExportAvailable: true,
     commandRegistry: ctx.get('commands') as import('../../src/commands.ts').CommandRegistryLike | undefined,
     clientCommands: createClientCommandRegistry(parseCommand),
     requestExit: () => {},
@@ -328,9 +328,9 @@ test('/transcript accepts no arguments: bare and whitespace-only succeed, any ar
   registerTuiCommandsWithDirectSeams(stubRunner(ctx, app))
   const defs = commands.defs
 
-  // The stub declares the REQUIRED capability explicitly as `true` (Direct
-  // semantics); the refused branch is locked separately below and by the
-  // mounted Remote /transcript L6.
+  // A mounted PiTui app is the real save-dialog capability; the refused
+  // app-less renderer branch is locked separately below, and the mounted
+  // Remote success path by the L6 Remote suite.
   const bare = awaitHandler(defs, 'transcript', '')
   assert.equal(bare.kind, 'success')
   assert.equal(bare.text, 'Transcript export requested.')
@@ -342,21 +342,25 @@ test('/transcript accepts no arguments: bare and whitespace-only succeed, any ar
   assert.equal(path.kind, 'error')
 })
 
-test('/transcript refuses truthfully when the composition declares the capability false (PR4 round 5; required since PR5)', () => {
+test('/transcript refuses explicitly on a renderer without a mounted TuiApp (no post-success save can start)', () => {
   const ctx = new Context()
   const commands = fakeCommands()
   ctx.provide('commands', commands.service as never)
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {}, onCancel: () => {} })
   startedApps.add(app)
+  // The non-PiTui/TSP renderer mounts no `TuiApp`: the save-location dialog is
+  // a real Client capability that does not exist there. The command must refuse
+  // BEFORE a success result (and therefore before the post-success artifact
+  // workflow) instead of reporting a save that can never run.
   const runner: import('../../src/commands.ts').TuiCommandRunner = {
     ...stubRunner(ctx, app),
-    transcriptExportAvailable: false,
+    app: undefined,
   }
   registerTuiCommandsWithDirectSeams(runner)
   const refused = awaitHandler(commands.defs, 'transcript', '')
   assert.equal(refused.kind, 'error')
-  assert.equal(refused.text, 'transcript export is unavailable on this backend')
+  assert.equal(refused.text, 'transcript file save is unavailable on this renderer')
 })
 
 // The grammar handlers are synchronous acknowledgements; the helper keeps
@@ -707,14 +711,22 @@ test('streamToFile releases the reader lock after a cancelled save', async (t) =
 
 /** A minimal runner harness (the runner-session-bootstrap pattern) with a
  * scriptable commands service and a recorded archive port. */
+type HarnessSession = {
+  id: string
+  header: { id: string; cwd: string; createdAt: number; version: number }
+  events?: readonly unknown[]
+}
+
 function makeHarness(home: string, options: {
   execute?: () => Promise<{ result: { kind: 'success' } | { kind: 'error'; text: string } } | undefined>
-  sessions?: Record<string, { id: string; header: { id: string; cwd: string; createdAt: number; version: number } }>
+  sessions?: Record<string, HarnessSession>
 }) {
-  const persisted = new Map<string, { id: string; header: { id: string; cwd: string; createdAt: number; version: number } }>()
+  const persisted = new Map<string, HarnessSession>()
   for (const session of Object.values(options.sessions ?? {})) persisted.set(session.id, session)
+  // Every official Session Query Markdown read the production adapter issues.
+  const markdownReads: string[] = []
   const live = new Map<string, Agent>()
-  const makeHandle = (session: { id: string; header: { id: string; cwd: string; createdAt: number; version: number } }): { agent: Agent; dispose: () => Promise<void> } => {
+  const makeHandle = (session: HarnessSession): { agent: Agent; dispose: () => Promise<void> } => {
     // The structural Agent shape the runner's surface rebuild and the
     // Direct retirement touch: ctx (get/on), whenIdle, cancel, inbox.
     const agentContext = {
@@ -753,6 +765,12 @@ function makeHarness(home: string, options: {
       if (session === undefined) throw new Error(`unknown test session ${String(id)}`)
       return { meta: session.header, events: [] }
     },
+    stat: async (id: unknown) => {
+      const session = persisted.get(String(id))
+      if (session === undefined) return undefined
+      // Every seeded Session has a materialized Host artifact in this fixture.
+      return { header: session.header, revision: 'rev-1', location: { path: `/host/sessions/${session.id}.jsonl` } }
+    },
   }
   const sessionQuery = {
     listSessions: async () => [...persisted.values()].map(session => ({ header: session.header, live: live.has(session.id) })),
@@ -760,6 +778,16 @@ function makeHarness(home: string, options: {
       const session = persisted.get(String(id))
       if (session === undefined) throw new Error(`unknown test session ${String(id)}`)
       return { header: session.header, events: [], [Symbol.dispose]: () => {} }
+    },
+    // The official complete committed logical snapshot the Markdown adapter
+    // consumes. An unknown id answers the official stable not-found code.
+    readSession: async (id: unknown) => {
+      markdownReads.push(String(id))
+      const session = persisted.get(String(id))
+      if (session === undefined) {
+        throw Object.assign(new Error('session not found'), { code: 'SESSION_QUERY_SESSION_NOT_FOUND' })
+      }
+      return { header: session.header, events: session.events ?? [] }
     },
   }
   const agents = {
@@ -817,7 +845,17 @@ function makeHarness(home: string, options: {
     execute: options.execute ?? (async () => ({ result: { kind: 'success' } })),
     handler: (name: string) => definitions.get(name)?.handler,
   }
-  return { persistence, sessionQuery, agents, sessions, defaultModel, llm, commands, live }
+  return {
+    persistence,
+    sessionQuery,
+    agents,
+    sessions,
+    defaultModel,
+    llm,
+    commands,
+    live,
+    markdownReads,
+  }
 }
 
 async function settle(): Promise<void> {
@@ -1135,7 +1173,7 @@ test('the post-success workflow targets the CAPTURED originating Session even af
   assert.ok(existsSync(join(outDir, 'dsh-session-session-a.zip')), 'the artifact lands in the selected directory')
 })
 
-test('/transcript writes the readable Markdown from the originating Session after settlement', async (t) => {
+test('BLOCKING: /transcript writes the OFFICIAL Markdown of the captured originating Session after a switch', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-export-transcript-')
   const previousHome = process.env.DSH_HOME
@@ -1145,10 +1183,68 @@ test('/transcript writes the readable Markdown from the originating Session afte
     else process.env.DSH_HOME = previousHome
   })
   const outDir = life.tempDir('dsh-export-out-')
-  const sessionA = { id: 'session-a', header: { id: 'session-a', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION } }
-  const harness = makeHarness(home, { sessions: { 'session-a': sessionA } })
+  const eventsA = [
+    { type: 'session/title', seq: 0, time: 1, data: { title: 'Session A title' } },
+    { type: 'turn/start', seq: 1, time: 2, data: { turn: 0 } },
+    {
+      type: 'user/message', seq: 2, time: 3, surfaceOp: 'append',
+      data: { id: 'u-a', role: 'user', content: [{ type: 'text', text: 'question from A 汉字' }], source: { kind: 'user' } },
+    },
+    {
+      type: 'assistant/message', seq: 3, time: 4, surfaceOp: 'append',
+      data: {
+        turn: 0, step: 0,
+        message: {
+          id: 'a-a', role: 'assistant',
+          content: [{ type: 'text', text: 'answer from A 🙂' }],
+          source: { kind: 'model', provider: 'p', model: 'm' },
+        },
+        stream: [], usage: { inputTokens: 1, outputTokens: 1 },
+      },
+    },
+    { type: 'turn/end', seq: 4, time: 5, data: { turn: 0, reason: { kind: 'completed' } } },
+  ] as const
+  const eventsB = [
+    { type: 'session/title', seq: 0, time: 1, data: { title: 'Session B title' } },
+    { type: 'turn/start', seq: 1, time: 2, data: { turn: 0 } },
+    {
+      type: 'user/message', seq: 2, time: 3, surfaceOp: 'append',
+      data: { id: 'u-b', role: 'user', content: [{ type: 'text', text: 'question from B' }], source: { kind: 'user' } },
+    },
+    {
+      type: 'assistant/message', seq: 3, time: 4, surfaceOp: 'append',
+      data: {
+        turn: 0, step: 0,
+        message: {
+          id: 'a-b', role: 'assistant',
+          content: [{ type: 'text', text: 'answer from B' }],
+          source: { kind: 'model', provider: 'p', model: 'm' },
+        },
+        stream: [], usage: { inputTokens: 1, outputTokens: 1 },
+      },
+    },
+    { type: 'turn/end', seq: 4, time: 5, data: { turn: 0, reason: { kind: 'completed' } } },
+  ] as const
+  const headerA = { id: 'session-a', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION }
+  const headerB = { id: 'session-b', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION }
+  const harness = makeHarness(home, {
+    sessions: {
+      'session-a': { id: 'session-a', header: headerA, events: eventsA },
+      'session-b': { id: 'session-b', header: headerB, events: eventsB },
+    },
+  })
   const originalAsk = TuiApp.prototype.askSaveLocation
+  let askCalls = 0
   TuiApp.prototype.askSaveLocation = async function () {
+    askCalls += 1
+    // While the /transcript workflow is paused at Save Location, switch the
+    // live Session to B (the /resume command handler drives the switch). The
+    // eventual Markdown MUST still be A's.
+    const resumeHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('resume')
+    assert.ok(resumeHandler !== undefined, 'the real runner must register /resume')
+    const outcome = await (resumeHandler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: 'session-b' })
+    assert.equal((outcome as { kind?: string }).kind, 'success', 'the switch to B must succeed')
+    await settle()
     return { kind: 'selected', directory: outDir, overwrite: false }
   }
   life.defer(() => { TuiApp.prototype.askSaveLocation = originalAsk })
@@ -1164,20 +1260,117 @@ test('/transcript writes the readable Markdown from the originating Session afte
   const app = probe.apps.at(-1)
   assert.ok(app, 'the production runner must create a TuiApp')
   startedApps.add(app)
+  harness.markdownReads.length = 0
   submitText(app, '/transcript')
   await settle()
-  // The save chain crosses real async boundaries (the transition quiesce
-  // and the atomic text sink); poll for the artifact instead of a fixed
-  // sleep so a loaded CI machine cannot starve the assertion.
+  const target = join(outDir, 'dsh-session-session-a.md')
   const deadline = Date.now() + 2_000
   for (;;) {
     await new Promise<void>(resolve => setTimeout(resolve, 25))
     await settle()
-    if (existsSync(join(outDir, 'dsh-session-session-a.md'))) break
+    if (existsSync(target)) break
     if (Date.now() > deadline) break
   }
-  const target = join(outDir, 'dsh-session-session-a.md')
-  assert.ok(existsSync(target), 'the transcript file is written with the fixed .md name')
+  assert.equal(askCalls, 1, 'the save workflow must have opened Save Location')
+  assert.deepEqual(harness.markdownReads, ['session-a'],
+    'the Markdown read targets the captured originating Session, never the live B')
+  assert.ok(existsSync(target), 'the official Markdown lands in the Client-selected directory')
   const content = readFileSync(target, 'utf8')
-  assert.ok(content.startsWith('# Session session-a'), 'the Markdown renders the originating Session header')
+  assert.equal(
+    content,
+    formatSessionMarkdown(eventsA as never, '/host/sessions/session-a.jsonl'),
+    'the file bytes are the official formatter output over the captured Host snapshot (with the Host source path)',
+  )
+  assert.match(content, /^# Session A title$/mu, 'the official title, not the retired Client header')
+  assert.match(content, /> question from A 汉字/u, 'the human question is an official blockquote')
+  assert.match(content, /answer from A 🙂/u)
+  assert.doesNotMatch(content, /answer from B/u, 'the replacement live Session is never exported')
+  assert.doesNotMatch(content, /^## (User|Assistant)$/mu, 'the retired Client-local format is gone')
+  assert.equal(content.endsWith('\n'), true)
+})
+
+// ── 23.4 ArtifactSaveOwner Markdown source classification ────────────────
+
+/** A focused ArtifactSaveOwner harness: the REAL owner/sink over a fake
+ *  official Markdown port. Used ONLY for the sink/error classification the
+ *  real end-to-end runner test above cannot drive (a Host that answers
+ *  none/unavailable/generic failure), never as a substitute for the real
+ *  Host→route→Client chain. */
+function markdownOwnerHarness(options: {
+  directory: string
+  read: SessionMarkdownPort['read']
+  saveResult?: { kind: 'selected'; directory: string; overwrite: boolean } | { kind: 'cancelled' }
+}) {
+  const notices: { text: string; kind?: 'info' | 'error' }[] = []
+  const reads: string[] = []
+  const app = {
+    askSaveLocation: async () => options.saveResult
+      ?? { kind: 'selected' as const, directory: options.directory, overwrite: false },
+    notify: (text: string, kind?: 'info' | 'error') => { notices.push({ text, kind }) },
+  } as unknown as TuiApp
+  const owner = createArtifactSaveOwner<{ session: { id: string } }>({
+    app: () => app,
+    isCleanedUp: () => false,
+    signal: new AbortController().signal,
+    diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
+    sessionArchive: { open: async () => ({ kind: 'unavailable' as const }) },
+    sessionMarkdown: {
+      read: async (sessionId, signal) => {
+        reads.push(sessionId)
+        return options.read(sessionId, signal)
+      },
+    },
+    clientCwd: options.directory,
+  })
+  return { owner, notices, reads }
+}
+
+test('a cancelled transcript save never reads the Host and writes no file', async (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('dsh-transcript-cancel-')
+  const harness = markdownOwnerHarness({
+    directory: dir,
+    saveResult: { kind: 'cancelled' },
+    read: async () => ({ kind: 'ready', markdown: 'never read\n' }),
+  })
+  const outcome = await harness.owner.save('transcript', { session: { id: 'session-a' } })
+  assert.deepEqual(outcome, { kind: 'cancelled' })
+  assert.deepEqual(harness.reads, [], 'a cancelled Save Location dispatches no Host request')
+  assert.deepEqual(readdirSync(dir), [], 'no artifact is created')
+})
+
+test('none / unavailable / generic failure never write a file or claim success', async (t) => {
+  const life = testLifecycle(t)
+  for (const [label, read, message] of [
+    ['none', async () => ({ kind: 'none' as const }), 'Session was not found.'],
+    ['unavailable', async () => ({ kind: 'unavailable' as const }), 'Session Markdown export is unavailable.'],
+    ['generic', async () => { throw new Error('host path /secret/session.jsonl exploded') }, 'host path /secret/session.jsonl exploded'],
+  ] as const) {
+    const dir = life.tempDir(`dsh-transcript-${label}-`)
+    const harness = markdownOwnerHarness({ directory: dir, read })
+    await assert.rejects(
+      () => harness.owner.save('transcript', { session: { id: 'session-a' } }),
+      error => error instanceof Error && error.message === message,
+      `${label} must reject with its own stable classification`,
+    )
+    assert.deepEqual(readdirSync(dir), [], `${label} must leave no final artifact`)
+  }
+})
+
+test('the user notice maps an unexpected Markdown failure to the stable artifact error', async (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('dsh-transcript-error-')
+  const harness = markdownOwnerHarness({
+    directory: dir,
+    read: async () => { throw new Error('transport reset') },
+  })
+  harness.owner.start('transcript', { session: { id: 'session-a' } })
+  const deadline = Date.now() + 1_000
+  while (harness.notices.length === 0 && Date.now() < deadline) {
+    await new Promise<void>(resolve => setTimeout(resolve, 10))
+    await settle()
+  }
+  assert.deepEqual(harness.notices, [{ text: 'transcript export failed', kind: 'error' }],
+    'the Host error detail stays in diagnostics; the user sees the stable artifact-level failure')
+  assert.deepEqual(readdirSync(dir), [], 'a failed read leaves no artifact')
 })

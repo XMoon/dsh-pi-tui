@@ -115,7 +115,6 @@ function setup(options: {
     clientCommands: createClientCommandRegistry(parseCommand),
     hostFile: new DirectHostFilePort(() => undefined),
     hostShellCompletion: true,
-    transcriptExportAvailable: true,
     interaction: {
       questions: {
         onRequest: () => true,
@@ -578,7 +577,6 @@ test('a user Enter on /view-image routes through the REAL controller into the pi
     clientCommands,
     hostFile: new DirectHostFilePort(() => undefined),
     hostShellCompletion: true,
-    transcriptExportAvailable: true,
     interaction: {
       questions: { onRequest: () => true, subscribe: () => undefined, snapshot: () => undefined, claimTimedWait: async () => undefined, answerContinued: async () => 'not-continued' as const },
       onApprovalRequest: () => {},

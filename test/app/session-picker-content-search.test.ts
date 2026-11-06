@@ -173,7 +173,6 @@ function harness(options: {
     clientCommands: createClientCommandRegistry(parseCommand),
     hostFile: new DirectHostFilePort(() => undefined),
     hostShellCompletion: true,
-    transcriptExportAvailable: true,
     requestExit: () => {},
     cwd: '/ws',
     sessionCwd: () => '/ws',

@@ -31,6 +31,7 @@ import type { Catalog } from '../catalog-port.ts'
 import type { ConfigPort } from '../config-port.ts'
 import type { HostFilePort } from '../host-file-port.ts'
 import type { SessionArchivePort } from '../session-archive-port.ts'
+import type { SessionMarkdownPort } from '../session-markdown-port.ts'
 import type { HostCommandPort } from '../host-command-port.ts'
 import type { PluginManagerPort } from '../plugin-manager-port.ts'
 import type { JobObservationPort } from '../job-observation-port.ts'
@@ -54,6 +55,8 @@ export interface RemoteBackendParts {
   readonly config: ConfigPort
   readonly hostFile: HostFilePort
   readonly sessionArchive: SessionArchivePort
+  /** The official authenticated Session Markdown read adapter (S5-PR3). */
+  readonly sessionMarkdown: SessionMarkdownPort
   readonly hostCommand: HostCommandPort
   readonly pluginManager: PluginManagerPort
   readonly jobObservation: JobObservationPort

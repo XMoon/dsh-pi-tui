@@ -36,9 +36,6 @@
     "sessions",
     "subagents"
   ],
-  "client/artifact/transcript-markdown.ts": [
-    "import:dsh-session"
-  ],
   "commands.ts": [
     "import:dsh-agent",
     "import:dsh-session"
@@ -106,6 +103,11 @@
   ],
   "runtime/direct/session-archive-direct.ts": [
     "import:dsh-session"
+  ],
+  "runtime/direct/session-markdown-direct.ts": [
+    "import:dsh-session",
+    "sessionPersistence",
+    "sessionQuery"
   ],
   "runtime/direct/session-direct.ts": [
     "agentPresets",

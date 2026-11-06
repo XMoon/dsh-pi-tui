@@ -459,19 +459,6 @@ export interface TuiCommandRunner {  ctx: Context
    * Direct keeps the Host registration so the in-process dispatch surface
    * (busy-Enter, sessionless execution) is unchanged. */
   readonly commandRegistry: CommandRegistryLike | undefined
-  /** Whether the readable-transcript artifact is renderable on this backend
-   * (M3-4 PR5): `true` on Direct — the Markdown renderer reads the whole
-   * in-process Session event history; `false` on the wire backend, where no
-   * transport-neutral whole-history seam exists yet. This is a business
-   * CAPABILITY, deliberately NOT derived from {@link commandRegistry}: that
-   * field is the Direct Host-registry compatibility mirror whose retirement
-   * is owned by M8, and a business decision must never hang off a
-   * compatibility implementation.
-   *
-   * REQUIRED: every runner assembly declares it explicitly (the production
-   * composition and every typed test stub); the handler refuses unless the
-   * declared value is exactly `true`. */
-  readonly transcriptExportAvailable: boolean
   /** The Client-owned command registry (M3-4 PR4 §D2): every TUI built-in
    *  and dynamic skill-wrapper definition registers here FIRST. On Direct
    *  the same definitions additionally register into the Host commands

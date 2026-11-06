@@ -81,6 +81,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   through the existing catalog port). Profiles that only use the built-in TUI need
   no change.
 
+- **`/transcript` now writes the official Session Markdown, so the exported format changes.** On both Direct and the Split Client, `/transcript` reads the complete committed Session Markdown produced by the official Host `formatSessionMarkdown` (including the fork-inherited prefix and the latest title) and writes it through the existing Client-local save workflow. The retired Client-local `## User` / `## Assistant` sections, Workflow/PTC blocks and visual-result filtering no longer appear: human messages are blockquotes, the final answer is plain Markdown, and earlier tool/process activity collapses into `<details>`, with the official `Session file:` source path when the Host provides one. The filename, argument-free grammar, save-location/collision/cancel behavior and the `/export` ZIP archive are unchanged; the Split Client's `/transcript` is now genuinely available instead of reporting "unavailable on this backend".
+
 ### Fixed
 
 - **Fixed the official Web frontend failing to load on the Split Host under the current DSH release.** The new official Web frontend removed the retired model-label plugin and requires two official client capabilities — the context menu and file drag — that its existing chat, attachment and session surfaces inject; the Split Host Web composition now matches that real dependency closure, while the `/web` toggle, the `autoStart` preference and the browser access path are unchanged.

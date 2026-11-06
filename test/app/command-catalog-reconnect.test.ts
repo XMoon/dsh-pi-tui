@@ -251,7 +251,6 @@ function fakeRunnerDeps(options: {
     clientCommands: createClientCommandRegistry(parseCommand),
     hostFile: new DirectHostFilePort(() => undefined),
     hostShellCompletion: false,
-    transcriptExportAvailable: false,
     interaction: {
       questions: {
         onRequest: () => true, subscribe: () => undefined, snapshot: () => undefined,
@@ -384,7 +383,6 @@ function fakeRunnerDeps(options: {
       hostFile: runner.hostFile,
       webAccess: runner.webAccess,
       hostShellCompletion: false,
-      transcriptExportAvailable: false,
     },
     session: {
       ensureSession: () => runner.ensureSession(),
