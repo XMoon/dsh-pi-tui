@@ -805,7 +805,7 @@ export class PluginManagerController {
       this.requestAutoDisable(card.value)
       return
     }
-    if (card.availability === 'missing') {
+    if (card.availability === 'missing' && !card.enabled) {
       this.message = card.canInstall
         ? `${card.name} is not installed; use Install… from its detail`
         : card.installBlockedReason ?? `${card.name} is not installed`

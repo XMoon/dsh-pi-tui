@@ -71,7 +71,22 @@ export const OPTIONAL_BUNDLE_IDS = [
   '@deepseek-ai/dsh-subagent-claude-code',
 ] as const
 
+/** The three Optional bundles the current release adds beyond the legacy
+ *  B01–B14 verified subset. They are a TEST-LOCAL qualification set, never a
+ *  second catalog authority: the real roster stays `OPTIONAL_BUNDLES`, and
+ *  every name here must still appear in it. */
+export const S5_OPTIONAL_BUNDLE_IDS = [
+  '@deepseek-ai/dsh-personalized-recommendations',
+  '@deepseek-ai/dsh-experimental-liveshare',
+  '@deepseek-ai/dsh-experimental-forge-bundle',
+] as const
+
+export type S5OptionalBundleId = typeof S5_OPTIONAL_BUNDLE_IDS[number]
+
 export type OptionalBundleId = typeof OPTIONAL_BUNDLE_IDS[number]
+
+/** Any bundle identity this fixture can provision into its isolated Host. */
+export type OptionalBundlePackageId = OptionalBundleId | S5OptionalBundleId
 
 /** The COMPLETE official target Optional + on-demand identity set. Its size is
  *  an upstream fact (`OPTIONAL_BUNDLES` + `OFFICIAL_ON_DEMAND_CATALOG`), never a
@@ -88,7 +103,7 @@ const OFFICIAL_BUNDLE_IDS = [
  *  this fixture). */
 function assertOfficialBundleIdentitySet(): void {
   const official = new Set(OFFICIAL_BUNDLE_IDS)
-  const missing = OPTIONAL_BUNDLE_IDS.filter(name => !official.has(name))
+  const missing = [...OPTIONAL_BUNDLE_IDS, ...S5_OPTIONAL_BUNDLE_IDS].filter(name => !official.has(name))
   if (missing.length > 0) {
     throw new Error(`Optional-bundle fixture: ${missing.join(',')} are no longer in the official Optional/on-demand catalog`)
   }
@@ -139,7 +154,7 @@ function readManifest(path: string): Record<string, unknown> | undefined {
 }
 
 /** Format a `t.skip()` reason for an unavailable provisioned installation. */
-export function skippedInstallationReason(required: readonly OptionalBundleId[] = OPTIONAL_BUNDLE_IDS): string | undefined {
+export function skippedInstallationReason(required: readonly OptionalBundlePackageId[] = OPTIONAL_BUNDLE_IDS): string | undefined {
   const resolution = resolveOptionalBundleInstallation(required)
   return resolution.ok ? undefined : resolution.reason
 }
@@ -149,7 +164,7 @@ export function skippedInstallationReason(required: readonly OptionalBundleId[] 
  * bundles. A missing or wrong-version package is a concrete BLOCKED fact, never
  * a local same-name substitute.
  */
-export function resolveOptionalBundleInstallation(required: readonly OptionalBundleId[] = OPTIONAL_BUNDLE_IDS): OptionalBundleInstallationResolution {
+export function resolveOptionalBundleInstallation(required: readonly OptionalBundlePackageId[] = OPTIONAL_BUNDLE_IDS): OptionalBundleInstallationResolution {
   assertOfficialBundleIdentitySet()
   const requiredPackages = [BASE_BUNDLE, ...required]
   const attempts: string[] = []
@@ -189,7 +204,7 @@ export function resolveOptionalBundleInstallation(required: readonly OptionalBun
 
 export interface OptionalBundleHostOptions {
   /** The exact bundle packages whose real patch layers compose after base. */
-  readonly bundles?: readonly OptionalBundleId[]
+  readonly bundles?: readonly OptionalBundlePackageId[]
   /**
    * Bundle packages installed as PROFILE-owned dependencies (the on-demand
    * B13/B14 shape: a real published package in the profile). Shipped Optional

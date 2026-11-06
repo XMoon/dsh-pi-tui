@@ -44,6 +44,7 @@ export function bundle(overrides: Partial<PluginBundleFact> = {}): PluginBundleF
     installed: true,
     optional: false,
     removable: true,
+    updatable: false,
     rows: [],
     overrides: [],
     ...overrides,

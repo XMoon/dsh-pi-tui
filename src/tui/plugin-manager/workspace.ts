@@ -1974,11 +1974,34 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     }
   }
 
+  /**
+   * The Host's own default-listing decision, projected ONCE here: a bundle the
+   * Host hides by default (`listedByDefault:false`) stays out of the untouched
+   * list unless the profile selects it, it is profile-installed, or a live row
+   * proves it actually runs. A non-empty explicit search lifts the gate over
+   * the SAME model cards; this predicate never drops an entry from the model
+   * or the controller.
+   */
+  private hiddenByDefault(card: PluginCardView): boolean {
+    if (card.target !== 'bundle') return false
+    if (card.listedByDefault !== false) return false
+    if (this.query.trim() !== '') return false
+    if (card.enabled || card.installed) return false
+    return !card.rows.some(row => row.live && row.fiberPhase === 'active')
+  }
+
+  /** The ONE visible-card predicate shared by the list and the selection. */
+  private visibleCard(card: PluginCardView): boolean {
+    return !this.hiddenByDefault(card)
+      && this.matchesFilter(card)
+      && PluginManagerWorkspacePanel.matchesQuery(card, this.query)
+  }
+
   private filteredCards(model: ReturnType<PluginManagerController['model']>): readonly PluginCardView[] {
     const out: PluginCardView[] = []
     for (const section of model.sections) {
       for (const card of section.cards) {
-        if (this.matchesFilter(card) && PluginManagerWorkspacePanel.matchesQuery(card, this.query)) out.push(card)
+        if (this.visibleCard(card)) out.push(card)
       }
     }
     return out
@@ -2038,8 +2061,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       }]
     }
     for (const section of model.sections) {
-      const cards = section.cards.filter(card =>
-        this.matchesFilter(card) && PluginManagerWorkspacePanel.matchesQuery(card, this.query))
+      const cards = section.cards.filter(card => this.visibleCard(card))
       if (cards.length === 0) {
         // The unfiltered view keeps every frozen section discoverable with an
         // honest empty state; a filter/query drops the empty group instead.
@@ -2068,6 +2090,14 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       } else {
         for (const card of cards) entries.push({ kind: 'card', label: card.name, value: card.value, card })
       }
+    }
+    // ONE existing hint line: the untouched list is the Host's default
+    // listing, and an explicit `/` search reads the complete inventory.
+    if (model.cards.some(card => this.hiddenByDefault(card))) {
+      entries.push({
+        kind: 'empty',
+        label: '/ searches hidden official bundles',
+      })
     }
     return entries
   }

@@ -129,6 +129,7 @@
     "@deepseek-ai/dsh-jobs": ">=0.2.2-rc.1",
     "@deepseek-ai/dsh-llm": ">=0.2.2-rc.1",
     "@deepseek-ai/dsh-llm-retry": ">=0.2.2-rc.1",
+    "@deepseek-ai/dsh-official-bundles": ">=0.2.2-rc.1",
     "@deepseek-ai/dsh-permission-presets": ">=0.2.2-rc.1",
     "@deepseek-ai/dsh-plan-mode": ">=0.2.2-rc.1",
     "@deepseek-ai/dsh-plugin-manager": ">=0.2.2-rc.1",

@@ -7,7 +7,9 @@
  *  1. exact `SELF_BUNDLE`                                   → TUI & Extensions
  *  2. ≥1 observation whose Loader `entryId` is owned by
  *     exactly this one card                                 → TUI & Extensions
- *  3. Host `official:true` AND an exact rc.2 `B01–B14` id   → Experimental
+ *  3. Host `official:true` AND the official release's
+ *     `EXPERIMENTAL_BUNDLES` (or one of the three historical
+ *     Bxx exceptions)                                       → Experimental
  *  4. Host `official:true`, or an exact rc.2 built-in base
  *     bundle id proven by Host inventory                    → Official DSH
  *  5. a profile-owned bundle the Host proves is not
@@ -22,14 +24,17 @@
  * same card aggregate into one extension fact set; an `entryId` claimed by
  * zero or several cards classifies none of them.
  *
- * `EXPERIMENTAL_BUNDLE_IDS` is a version-limited PRESENTATION list: it only
- * answers "which section/order does a real Host item take". It never creates a
- * card, never fills a missing `installTarget`/version, and must be re-compared
- * with the official catalog before any later DSH version updates it.
+ * Experimental IDENTITY is owned by the official release's read-only
+ * `EXPERIMENTAL_BUNDLES` set; `EXPERIMENTAL_BUNDLE_IDS` is only the older
+ * version-limited PRESENTATION order (it selects no section). Neither list
+ * creates a card, fills a missing `installTarget`/version, or grants official
+ * provenance: a `@deepseek-ai/` scope and an `experimental` substring prove
+ * nothing on their own.
  *
  * @module @xmoon76/dsh-pi-tui/app/plugin-manager/classify
  */
 
+import { EXPERIMENTAL_BUNDLES } from '@deepseek-ai/dsh-official-bundles'
 import type { PluginAvailability } from '../../runtime/plugin-manager-port.ts'
 import type { TuiExtensionObservation } from './extension-inventory.ts'
 
@@ -58,8 +63,10 @@ export type PluginOrigin = 'official' | 'third-party' | 'unknown'
 
 /**
  * The 14 rc.2 B01–B14 Optional/On-demand identities, in the frozen display
- * order (§4.4). This is CLASSIFICATION EVIDENCE, never catalog authority: a
- * missing Host item is a catalog discrepancy, not a generated card.
+ * order (§4.4). This is the LEGACY PRESENTATION ORDER only: it no longer
+ * answers which package is official Experimental (`EXPERIMENTAL_BUNDLES` does)
+ * and it is never catalog authority — a missing Host item is a catalog
+ * discrepancy, not a generated card.
  */
 export const EXPERIMENTAL_BUNDLE_IDS: readonly string[] = Object.freeze([
   '@deepseek-ai/dsh-experimental-agent-team-profile',
@@ -93,8 +100,29 @@ export const OFFICIAL_BASE_BUNDLE_IDS: readonly string[] = Object.freeze([
   '@deepseek-ai/dsh-sdk-minimal',
 ])
 
-const EXPERIMENTAL = new Set(EXPERIMENTAL_BUNDLE_IDS)
 const OFFICIAL_BASE = new Set(OFFICIAL_BASE_BUNDLE_IDS)
+
+/**
+ * The three legacy Bxx identities the release's `EXPERIMENTAL_BUNDLES` does not
+ * list but the TUI has always presented in Experimental.
+ *
+ * Official `@deepseek-ai/dsh-official-bundles@0.2.2-rc.1` omits B07
+ * (`@deepseek-ai/dsh-experimental-terminal-bundle`) from `EXPERIMENTAL_BUNDLES`
+ * and lists it in the Web-only `HIDDEN_BUNDLES` (no Web Plugin Manager page).
+ * The TUI does not copy that Web hidden policy: B07 has always been presented
+ * in the frozen B01–B14 Experimental catalog with TUI-specific support copy, so
+ * it is a compatibility exception alongside the two external on-demand
+ * subagents. All other Experimental identity comes from upstream
+ * `EXPERIMENTAL_BUNDLES`. Historical exceptions only; no other name may be
+ * added here.
+ */
+export const LEGACY_EXPERIMENTAL_BUNDLE_IDS: readonly string[] = Object.freeze([
+  '@deepseek-ai/dsh-experimental-terminal-bundle',
+  '@deepseek-ai/dsh-subagent-codex',
+  '@deepseek-ai/dsh-subagent-claude-code',
+])
+
+const LEGACY_EXPERIMENTAL = new Set(LEGACY_EXPERIMENTAL_BUNDLE_IDS)
 
 /**
  * The proven classification input of one card. Bundle fields are the Host
@@ -134,7 +162,7 @@ export interface PluginPackageClassification {
   readonly role: PluginPresentationRole
   readonly section: PluginPresentationSection
   readonly origin: PluginOrigin
-  /** Whether this card is one of the 14 rc.2 Experimental identities. */
+  /** Whether this official card is an Experimental identity of the release. */
   readonly experimental: boolean
   /** `Third-party → Unverified origin`: neither official nor profile source
    * could be proven. */
@@ -194,7 +222,7 @@ export function sectionOf(input: PluginClassificationInput, role: PluginPresenta
   if (
     input.official === true
     && input.bundleName !== undefined
-    && EXPERIMENTAL.has(input.bundleName)
+    && (EXPERIMENTAL_BUNDLES.has(input.bundleName) || LEGACY_EXPERIMENTAL.has(input.bundleName))
   ) {
     return 'experimental'
   }

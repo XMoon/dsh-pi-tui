@@ -22,13 +22,13 @@
  */
 
 import assert from 'node:assert/strict'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import test from 'node:test'
+import test, { type TestContext } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import PluginManager, { type BundleInfo } from '@deepseek-ai/dsh-plugin-manager'
-import { OPTIONAL_BUNDLES, OFFICIAL_ON_DEMAND_CATALOG } from '@deepseek-ai/dsh-official-bundles'
+import { EXPERIMENTAL_BUNDLES, OFFICIAL_ON_DEMAND_CATALOG, OPTIONAL_BUNDLES } from '@deepseek-ai/dsh-official-bundles'
 import { getDshRuntimeVersion } from '@deepseek-ai/dsh-app-boot'
 import {
   EXPERIMENTAL_BUNDLE_IDS,
@@ -41,10 +41,19 @@ import { detachPluginManagerSnapshot } from '../../src/runtime/plugin-manager-ma
 import { DirectPluginManagerPort, type PluginManagerServiceLike } from '../../src/runtime/direct/plugin-manager-direct.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 import { PluginManagerWorkspacePanel } from '../../src/tui/plugin-manager/workspace.ts'
+import type { WorkspaceHarness } from '../support/plugin-workspace-harness.ts'
 import { openWorkspace, plain } from '../support/plugin-workspace-harness.ts'
 import { disposeContext } from '../support/runner-harness.ts'
 
 const ON_DEMAND = OFFICIAL_ON_DEMAND_CATALOG.map(entry => entry.packageName)
+/** The release-only Experimental identities (present upstream, absent from the
+ *  frozen legacy Bxx order), in the REAL Host catalog order: shipped Optional
+ *  order first, then the on-demand entries. The Experimental section appends
+ *  them after the legacy Bxx order in exactly this order. */
+const RELEASE_ONLY_EXPERIMENTAL = [...OPTIONAL_BUNDLES, ...ON_DEMAND]
+  .filter(name => EXPERIMENTAL_BUNDLES.has(name) && !EXPERIMENTAL_BUNDLE_IDS.includes(name))
+/** The legacy Bxx order first, then the release-only members in Host order. */
+const EXPERIMENTAL_CATALOG = [...EXPERIMENTAL_BUNDLE_IDS, ...RELEASE_ONLY_EXPERIMENTAL]
 /** The COMPLETE official catalog this Host advertises: shipped Optional
  *  bundles plus the on-demand catalog entries, deduplicated by package name. */
 const OFFICIAL_CATALOG = [...new Set([...OPTIONAL_BUNDLES, ...ON_DEMAND])]
@@ -66,7 +75,7 @@ function renderAt(
   return page.render(width)
 }
 
-function seedProfile(workRoot: string): {
+function seedProfile(workRoot: string, selectedBundles: readonly string[] = []): {
   profileContext: Record<string, unknown>
   installationAnchor: string
 } {
@@ -87,7 +96,7 @@ function seedProfile(workRoot: string): {
     name: 'catalog-fixture-profile',
     private: true,
     dependencies: {},
-    dsh: { profile: { bundles: [], patch: 'cordis.patch.yml' } },
+    dsh: { profile: { bundles: [...selectedBundles], patch: 'cordis.patch.yml' } },
   }, null, 2))
   writeFileSync(profilePatchPath, '[]\n')
   for (const name of OPTIONAL_BUNDLES) {
@@ -165,6 +174,57 @@ function seedInstallProfile(workRoot: string): {
   }
 }
 
+const CUA_BUNDLE = '@deepseek-ai/dsh-cua-bundle'
+
+interface RealHostPage {
+  readonly harness: WorkspaceHarness
+  readonly controller: WorkspaceHarness['controller']
+  readonly frame: () => string
+  readonly settle: () => Promise<void>
+  readonly waitFor: (predicate: () => boolean, label: string, timeoutMs?: number) => Promise<void>
+}
+
+/** The REAL Host service + Direct port + the production Settings→Plugins page
+ *  over ONE fixture profile. The test owns teardown; `ready` means the first
+ *  authoritative inventory read already happened. */
+async function mountRealHostPage(t: TestContext, profileContext: Record<string, unknown>): Promise<RealHostPage> {
+  const life = testLifecycle(t)
+  const ctx = new Context()
+  life.defer(() => disposeContext(ctx))
+  ctx.provide('profileContext', profileContext as never)
+  await ctx.plugin(Loader)
+  await ctx.plugin(PluginManager, {})
+  const service = ctx.get('pluginManager') as unknown as PluginManagerServiceLike
+  const port = new DirectPluginManagerPort({ get: name => name === 'pluginManager' ? service : undefined, on: () => () => false })
+  const harness = await openWorkspace({ port })
+  life.defer(() => {
+    try { harness.close() } catch {}
+    try { harness.controller.dispose() } catch {}
+    try { harness.app.dispose() } catch {}
+  })
+  const settle = async (): Promise<void> => { await harness.waitForFrame() }
+  const frame = (): string => plain(harness.vt.getViewport())
+  const waitFor = async (predicate: () => boolean, label: string, timeoutMs = 30_000): Promise<void> => {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      if (predicate()) return
+      await new Promise<void>(resolve => setTimeout(resolve, 10))
+      await harness.vt.waitForRender()
+    }
+    throw new Error(`timed out waiting for ${label}: ${frame()}`)
+  }
+  await waitFor(() => harness.controller.status().state === 'ready', 'the real Host inventory read')
+  await settle()
+  return { harness, controller: harness.controller, frame, settle, waitFor }
+}
+
+/** Type a search query through the page's own `/` seat and apply it. */
+function searchFor(harness: WorkspaceHarness, query: string): void {
+  harness.vt.sendInput('/')
+  for (const character of query) harness.vt.sendInput(character)
+  harness.vt.sendInput('\r')
+}
+
 test('the REAL Host listBundles discovers the complete official optional/on-demand catalog', async (t) => {
   const life = testLifecycle(t)
   const workRoot = life.tempDir('catalog-')
@@ -224,11 +284,21 @@ test('the REAL Host listBundles discovers the complete official optional/on-dema
   }))
   const model = buildPluginManagerModel(snapshot, classifyPluginPackages(inputs, []))
   const experimental = model.sections.find(section => section.id === 'experimental')!.cards
-  assert.equal(experimental.length, EXPERIMENTAL_BUNDLE_IDS.length,
-    'the Experimental section carries exactly the frozen B01–B14 identities')
-  assert.deepEqual(experimental.map(card => card.name), [...EXPERIMENTAL_BUNDLE_IDS], 'the frozen B01–B14 order')
-  assert.equal(experimental.at(-2)!.name, '@deepseek-ai/dsh-subagent-codex')
-  assert.equal(experimental.at(-1)!.name, '@deepseek-ai/dsh-subagent-claude-code')
+  // The section is DERIVED from the release rosters: the frozen B01–B14 order
+  // first, then every release-added Experimental identity in Host order. A
+  // release that adds or drops a member changes this expectation without a
+  // local fixed-size snapshot.
+  assert.deepEqual(experimental.map(card => card.name), EXPERIMENTAL_CATALOG,
+    'the Experimental section is the legacy Bxx order plus the release-only members')
+  assert.equal(experimental.length, EXPERIMENTAL_CATALOG.length)
+  for (const card of experimental) {
+    assert.ok(OFFICIAL_CATALOG.includes(card.name), `${card.name} is a real official catalog identity`)
+  }
+  // The legacy Bxx block keeps its exact tail (B13/B14) and the release-only
+  // members are appended after it, never interleaved.
+  assert.equal(experimental[EXPERIMENTAL_BUNDLE_IDS.length - 2]!.name, '@deepseek-ai/dsh-subagent-codex')
+  assert.equal(experimental[EXPERIMENTAL_BUNDLE_IDS.length - 1]!.name, '@deepseek-ai/dsh-subagent-claude-code')
+  assert.deepEqual(experimental.slice(EXPERIMENTAL_BUNDLE_IDS.length).map(card => card.name), RELEASE_ONLY_EXPERIMENTAL)
 
   for (const card of experimental) {
     assert.equal(card.section, 'experimental')
@@ -245,13 +315,25 @@ test('the REAL Host listBundles discovers the complete official optional/on-dema
     assert.ok(upgrade !== undefined, `${card.name} states the F10 route from real Host facts`)
     if (ON_DEMAND.includes(card.name)) {
       assert.equal(card.availability, 'missing')
-      assert.equal(card.canInstall, true)
-      assert.ok(detail.actions.some(action => action.value === 'action:official-install' && action.enabled))
       assert.equal(card.installTarget?.spec, `${card.name}@${RUNTIME_VERSION}`)
-      assert.equal(upgrade!.value,
-        `Install: Use the official offered target ${card.name}@${RUNTIME_VERSION} (version ${RUNTIME_VERSION}); this is not an in-place update.`)
-      assert.match(upgrade!.value, /this is not an in-place update/)
       assert.equal(facts.find(fact => fact.label === 'Current version')?.value, 'unavailable')
+      const installAction = detail.actions.find(action => action.value === 'action:official-install')!
+      if (card.error?.code === 'unsupported-platform') {
+        // The Host's OWN platform refusal (for example the darwin-only CUA
+        // bundle on this Host) is not an install route: the official catalog
+        // Install stays disabled with the Host reason and the guidance says so.
+        assert.equal(card.canInstall, false)
+        assert.match(card.installBlockedReason ?? '', /unsupported-platform/u)
+        assert.equal(installAction.enabled, false)
+        assert.match(installAction.reason ?? '', /unsupported-platform/u)
+        assert.equal(upgrade!.value, `Install unavailable: ${card.installBlockedReason}`)
+      } else {
+        assert.equal(card.canInstall, true)
+        assert.equal(installAction.enabled, true)
+        assert.equal(upgrade!.value,
+          `Install: Use the official offered target ${card.name}@${RUNTIME_VERSION} (version ${RUNTIME_VERSION}); this is not an in-place update.`)
+        assert.match(upgrade!.value, /this is not an in-place update/)
+      }
     } else {
       assert.equal(card.availability, 'installation')
       assert.equal(card.canInstall, false)
@@ -489,9 +571,12 @@ test('the REAL Host -> Direct port -> controller -> workspace page install chain
     'the real Host disable + authoritative reread')
   // The controller's state leads the repaint: the toggled row is waited for
   // as a FRAME, so the case never reads a frame painted before the change.
-  await waitFor(() => /Enabled\s+No/u.test(frame()),
+  await waitFor(() => /Selected in profile/u.test(frame()) && /> Enable…/u.test(frame()),
     'the toggled row is painted')
-  assert.match(frame(), /Enabled\s+No/)
+  // The value column wraps onto the next physical row on this frame, so the
+  // painted evidence is the honest Status label plus the flipped action.
+  assert.match(frame(), /Selected in profile/)
+  assert.match(frame(), /> Enable…/)
 
   vt.sendInput('\x1b[B') // Enable… -> Remove…
   await settle()
@@ -574,4 +659,187 @@ test('an APPLIED real-Host version exemption reaches the card Detail without an 
   assert.ok(detail.groups.some(group => group.facts.some(fact =>
     fact.label === 'Exemption' && fact.tone === 'success' && fact.value.includes(`${seeded.bundleName}@1.0.0`))),
   'the applied real-Host exemption is visible on the card')
+})
+
+test('a real Host platform refusal stays out of the default list and never installs', async (t) => {
+  const life = testLifecycle(t)
+  const workRoot = life.tempDir('cua-default-')
+  const seeded = seedProfile(workRoot)
+  const page = await mountRealHostPage(t, seeded.profileContext)
+  const profileDir = seeded.profileContext.dir as string
+  const refused = process.platform !== 'darwin'
+  const card = page.controller.model().cards.find(candidate => candidate.name === CUA_BUNDLE)!
+  const painted = card.title ?? card.name
+
+  // The REAL Host facts the page consumes.
+  assert.equal(card.enabled, false)
+  assert.equal(card.installed, false)
+  assert.equal(card.listedByDefault, false, 'the Host default-listing decision survives Host -> port -> model')
+  if (refused) {
+    assert.equal(card.error?.code, 'unsupported-platform')
+    assert.equal(card.canInstall, false, 'the Host platform refusal blocks the official catalog Install')
+  }
+
+  // A: the untouched list is the Host default listing, and ONE existing hint
+  // line names the explicit search route without adding a second catalog page.
+  assert.doesNotMatch(page.frame(), new RegExp(painted))
+  assert.match(page.frame(), /\/ searches hidden official bundles/u)
+
+  // The explicit search reads the SAME model card.
+  searchFor(page.harness, CUA_BUNDLE)
+  await page.settle()
+  await page.waitFor(() => page.frame().includes(painted), 'the explicit search finds the hidden bundle')
+  if (refused) assert.match(page.frame(), /\[error\]/)
+
+  page.harness.vt.sendInput('\r') // Details
+  await page.waitFor(() => page.frame().includes('[Details]'), 'the Details focus frame')
+  // The CUA card's Detail is longer than the pane: the Status/Source facts are
+  // read on the initial frame, then one navigation reveals the Actions block.
+  assert.match(page.frame(), /Default listing/u)
+  page.harness.vt.sendInput('\x1b[B')
+  page.harness.vt.sendInput('\x1b[A')
+  await page.settle()
+  if (refused) {
+    await page.waitFor(() => /unsupported-platform/u.test(page.frame()), 'the Host error is painted in Detail')
+    // Enter on the disabled Install action explains the Host refusal and
+    // creates NOTHING: no request id, no install dispatch, no profile write.
+    page.harness.vt.sendInput('\r')
+    await page.waitFor(() => /unsupported-platform/u.test(page.frame()), 'the refusal is explained')
+    assert.equal(page.controller.installView(), undefined, 'no official install request was created')
+  } else {
+    assert.match(page.frame(), /> Install…/u, 'a supported platform keeps the real Install route')
+  }
+  const profile = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8'))
+  assert.deepEqual(profile.dependencies, {}, 'the refused platform caused no package write')
+  assert.deepEqual(profile.dsh.profile.bundles, [], 'the refused platform caused no selection')
+
+  // Matrix E control: an ordinary on-demand entry the Host does not refuse
+  // keeps its Install capability in the same real catalog.
+  const codex = page.controller.model().cards.find(candidate => candidate.name === '@deepseek-ai/dsh-subagent-codex')!
+  assert.equal(codex.canInstall, true)
+  assert.equal(codex.installBlockedReason, undefined)
+})
+
+test('a selected bundle the Host refuses is disabled through the Host and leaves the default list', async (t) => {
+  const life = testLifecycle(t)
+  const workRoot = life.tempDir('cua-selected-')
+  const seeded = seedProfile(workRoot, [CUA_BUNDLE])
+  const page = await mountRealHostPage(t, seeded.profileContext)
+  const profileDir = seeded.profileContext.dir as string
+  const refused = process.platform !== 'darwin'
+  const cardOf = (): ReturnType<WorkspaceHarness['controller']['model']>['cards'][number] | undefined =>
+    page.controller.model().cards.find(candidate => candidate.name === CUA_BUNDLE)
+  const painted = cardOf()!.title ?? CUA_BUNDLE
+
+  // B: a SELECTED bundle stays listed (and manageable) whatever its default
+  // listing says.
+  assert.equal(cardOf()!.enabled, true)
+  await page.waitFor(() => page.frame().includes(painted), 'the selected bundle is painted')
+  if (refused) assert.match(page.frame(), /\[error\]/)
+
+  searchFor(page.harness, CUA_BUNDLE)
+  await page.settle()
+  page.harness.vt.sendInput('\r') // Details
+  await page.waitFor(() => page.frame().includes('[Details]'), 'the Details focus frame')
+  assert.match(page.frame(), /Selected in profile/u)
+  // A missing bundle's actions are `Install…` then `Disable…`: one navigation
+  // selects the recovery action and reveals the Actions block.
+  page.harness.vt.sendInput('\x1b[B')
+  await page.settle()
+  const detail = page.frame()
+  assert.match(detail, /> Disable…/u, 'a selected refused bundle keeps an executable Disable')
+  if (refused) assert.match(detail, /unsupported-platform/u)
+
+  page.harness.vt.sendInput('\r') // Disable…
+  await page.waitFor(() => cardOf()?.enabled === false, 'the real Host disable + authoritative reread')
+  // The real profile selection is gone.
+  const profile = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8'))
+  assert.deepEqual(profile.dsh.profile.bundles, [])
+  // The explicit query still matches the card, so clearing it (the page's own
+  // Esc-clear seat) is what restores the Host default listing.
+  page.harness.vt.sendInput('/')
+  await page.settle()
+  page.harness.vt.sendInput('\x1b')
+  await page.settle()
+  await page.waitFor(() => !page.frame().includes(painted), 'the default list hides the unselected bundle')
+
+  // The card is NOT deleted from the Host catalog / model: an explicit search
+  // reads it again with its Host facts intact, and no hidden card becomes the
+  // selected target of the list frame behind it.
+  searchFor(page.harness, CUA_BUNDLE)
+  await page.settle()
+  await page.waitFor(() => page.frame().includes(painted), 'the explicit search still reaches it')
+  assert.equal(cardOf()!.enabled, false)
+  assert.equal(cardOf()!.error?.code, refused ? 'unsupported-platform' : undefined)
+})
+
+test('a profile-owned bundle the Host refuses keeps Disable and the Host-permitted Remove separately executable', async (t) => {
+  const life = testLifecycle(t)
+  const workRoot = life.tempDir('cua-profile-owned-')
+  const seeded = seedProfile(workRoot, [CUA_BUNDLE])
+  const profileDir = seeded.profileContext.dir as string
+  // Narrow deterministic INPUT control (not darwin hardware evidence): this
+  // profile's OWN dependency declares the platform, so the REAL Host reports
+  // availability:'profile', installed:true, selected:true, removable:true and
+  // the unsupported-platform error on every platform.
+  const packageDir = join(profileDir, 'node_modules', CUA_BUNDLE)
+  mkdirSync(packageDir, { recursive: true })
+  writeFileSync(join(packageDir, 'package.json'), JSON.stringify({
+    name: CUA_BUNDLE,
+    version: RUNTIME_VERSION,
+    dsh: { bundle: { patch: [], platforms: ['darwin'] } },
+  }, null, 2))
+  writeFileSync(join(profileDir, 'package.json'), JSON.stringify({
+    name: 'catalog-fixture-profile',
+    private: true,
+    dependencies: { [CUA_BUNDLE]: `file:./node_modules/${CUA_BUNDLE}` },
+    dsh: { profile: { bundles: [CUA_BUNDLE], patch: 'cordis.patch.yml' } },
+  }, null, 2))
+
+  const page = await mountRealHostPage(t, seeded.profileContext)
+  const cardOf = (): ReturnType<WorkspaceHarness['controller']['model']>['cards'][number] | undefined =>
+    page.controller.model().cards.find(candidate => candidate.name === CUA_BUNDLE)
+
+  // C: the Host proves every fact the recovery actions depend on.
+  const card = cardOf()!
+  const painted = card.title ?? CUA_BUNDLE
+  assert.equal(card.availability, 'profile')
+  assert.equal(card.installed, true)
+  assert.equal(card.enabled, true)
+  assert.equal(card.removable, true)
+  assert.equal(card.error?.code, 'unsupported-platform')
+  assert.equal(card.canToggle, true, 'the enable error does not lock Disable')
+  assert.equal(card.canRemove, true, 'the enable error does not lock Remove')
+
+  searchFor(page.harness, CUA_BUNDLE)
+  await page.settle()
+  page.harness.vt.sendInput('\r') // Details
+  await page.waitFor(() => page.frame().includes('[Details]'), 'the Details focus frame')
+  assert.match(page.frame(), new RegExp(painted))
+  // One navigation reveals the Actions block; the next enters Remove.
+  page.harness.vt.sendInput('\x1b[B') // Disable… -> Remove… (reveals Actions)
+  await page.settle()
+  const detail = page.frame()
+  assert.match(detail, /> Remove…/u)
+  assert.match(detail, /Disable…/u)
+  assert.match(detail, /unsupported-platform/u)
+  page.harness.vt.sendInput('\r')
+  await page.waitFor(() => page.frame().includes('Cancel'), 'the destructive Remove confirmation')
+  page.harness.vt.sendInput('\x1b') // cancel
+  await page.settle()
+  assert.match(page.frame(), /> Remove…/u, 'the confirmation returns to the same action')
+  const afterCancel = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8'))
+  assert.equal(afterCancel.dependencies[CUA_BUNDLE], `file:./node_modules/${CUA_BUNDLE}`,
+    'cancel dispatched no Host removal')
+
+  // Disable is independent: the same card is disabled through the real Host
+  // while the Remove capability stays Host-permitted and the refusal visible.
+  page.harness.vt.sendInput('\x1b[A') // Remove… -> Disable…
+  await page.settle()
+  assert.match(page.frame(), /> Disable…/u)
+  page.harness.vt.sendInput('\r')
+  await page.waitFor(() => cardOf()?.enabled === false, 'the real Host disable + authoritative reread')
+  assert.equal(cardOf()!.error?.code, 'unsupported-platform',
+    'the real Host error is never erased by the local disable result')
+  assert.equal(cardOf()!.canRemove, true, 'Remove remains available after the disable result')
 })

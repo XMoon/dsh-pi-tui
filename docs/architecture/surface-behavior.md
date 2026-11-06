@@ -971,6 +971,36 @@ This surface owns the controller/read-epoch/state-machine/workspace behavior; it
 never invents catalog facts, and a `@deepseek-ai/` scope or `experimental`
 substring is not identity proof.
 
+### Default listing, explicit search and refused bundles
+
+The Host's `BundleInfo.listedByDefault` is a DISPLAY decision, never enablement
+or load success. The workspace applies it ONCE, as a local projection over the
+same model cards: with an empty query, a `listedByDefault:false` bundle is
+listed only while the profile selects it, the profile installs it, or a live row
+proves it runs; any non-empty explicit search lifts that gate over the SAME
+`model.cards`. A status filter never resurrects a default-hidden card, and no
+entry is dropped from the controller, the model or the Host snapshot, because
+the Host catalog stays the only authority and explicit search is the documented
+route to the complete inventory. The list carries ONE hint line naming that
+route; there is no second catalog page, store or navigation level.
+
+A `Host error` outranks every selected/available summary: `enabled` is the
+profile SELECTION (painted as `Selected in profile`, with `Fiber` as the separate
+runtime fact), so a bundle the Host refuses with `unsupported-platform` is never
+presented as running. That refusal blocks only the official catalog Install; it
+never locks the recoveries the Host still permits. A selected bundle can always
+be disabled through the real `setBundleEnabled(name,false)` plus the
+authoritative reread — including while its files are missing or its platform is
+refused — and a profile-owned bundle's Remove is answered independently by the
+Host `removable`/`availability` facts, through its own destructive confirmation.
+The TUI never fabricates a platform decision, retries an indeterminate write, or
+reports a refusal as success.
+
+`BundleInfo.updatable` is likewise a declared Host capability with NO TUI action:
+Detail states it read-only, and the update gesture (and `listVersions`/
+`updateBundle` registration) does not exist here until the milestone that owns
+it.
+
 ### Inventory read epoch
 
 `readEpoch` makes the latest-started read win. A failed refresh keeps the last
@@ -1075,13 +1105,17 @@ a name/prefix, or let a Host `Stale`/error notice label the extension projection
 
 ### Detail upgrade guidance
 
-Derive only from `availability`, `canRemove`, `isSelf`, `version` and
-`installTarget`:
+Derive only from `availability`, `canRemove`, `isSelf`, `version`,
+`installTarget` and the Host `updatable`/error facts:
 
 - self → managed outside this screen;
 - installation → upgrade DSH; no in-place update or Remove;
-- profile-owned → Remove first, then an explicit later install; state when
-  removal is not permitted;
+- profile-owned with `updatable:true` → state that the Host supports version
+  updates and that this TUI does not yet offer the update action;
+- profile-owned without it → Remove first, then an explicit later install; state
+  when removal is not permitted;
+- missing with an official target the Host itself refuses (for example
+  `unsupported-platform`) → install unavailable with the Host reason;
 - missing with an official target → the Host-offered target (masked spec +
   version); Install remains the only path;
 - missing without a target → install unavailable;

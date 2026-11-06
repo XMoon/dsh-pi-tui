@@ -802,9 +802,9 @@ callback listener beyond loopback in the shipped profile.
 `@deepseek-ai/dsh-plugin-manager` is the sole authority for package/profile
 truth, enablement, installed state, install/remove, compatibility and version
 exemptions. The semantic port projects **detached** `PluginBundleFact`
-(`official`, `availability`, `installTarget`, `version`, `enabled`, `installed`,
-`optional`, `source`, `removable`, `readOnlyReason`, `error`, `rows`,
-`overrides`), `PluginRowFact`, `PluginRegistriesFact`, `PluginExemptionFact` and
+(`official`, `availability`, `installTarget`, `version`, `listedByDefault`,
+`enabled`, `installed`, `optional`, `source`, `removable`, `updatable`,
+`readOnlyReason`, `error`, `rows`, `overrides`), `PluginRowFact`, `PluginRegistriesFact`, `PluginExemptionFact` and
 `PluginChangeFact` (`application`, `restartReason`, `version`, `pendingBuilds`,
 `approvedBuilds`, `packageResult`, `registries`, `failedAt`). The port owns no
 installed-package database, no enabled truth and no compatibility evaluation.
@@ -823,7 +823,10 @@ pre-dispatch Connection generation and raises `PluginManagerStaleResultError`
 when superseded; the surface contract interprets that as indeterminate plus an
 authoritative reread, never as a refusal or success. The UI never guesses a
 capability from a package name, `@deepseek-ai/` scope, `experimental` substring,
-enablement, `fiber` or availability.
+enablement, `fiber` or availability. Official Experimental identity comes from
+the release's read-only `EXPERIMENTAL_BUNDLES` set plus the TUI's frozen legacy
+Bxx presentation exceptions; that identity is still gated on the Host
+`official:true` fact, so a same-name non-official package never inherits it.
 
 The controller, inventory read epoch, install state machine, request-id
 reconciliation, retry/unknown handling, workspace lease and Detail copy/upgrade

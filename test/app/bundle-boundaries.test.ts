@@ -25,7 +25,7 @@ import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import PluginManager, { type BundleInfo } from '@deepseek-ai/dsh-plugin-manager'
 import { mkdirSync, writeFileSync } from 'node:fs'
-import { OPTIONAL_BUNDLES, OFFICIAL_ON_DEMAND_CATALOG } from '@deepseek-ai/dsh-official-bundles'
+import { EXPERIMENTAL_BUNDLES, OFFICIAL_ON_DEMAND_CATALOG, OPTIONAL_BUNDLES } from '@deepseek-ai/dsh-official-bundles'
 import {
   EXPERIMENTAL_BUNDLE_IDS,
   classifyPluginPackages,
@@ -44,6 +44,10 @@ import { disposeContext } from '../support/runner-harness.ts'
 import { plain } from '../support/plugin-workspace-harness.ts'
 
 const ON_DEMAND = OFFICIAL_ON_DEMAND_CATALOG.map(entry => entry.packageName)
+/** The release-added Experimental members in Host catalog order: they are
+ *  appended after the frozen B01–B14 order, not interleaved with it. */
+const RELEASE_ONLY_EXPERIMENTAL = [...OPTIONAL_BUNDLES, ...ON_DEMAND]
+  .filter(name => EXPERIMENTAL_BUNDLES.has(name) && !EXPERIMENTAL_BUNDLE_IDS.includes(name))
 
 function seedProfile(workRoot: string): Record<string, unknown> {
   const profileDir = join(workRoot, 'profile')
@@ -175,14 +179,22 @@ test('the real Host catalog paints all 14 verified B01–B14 boundaries through 
   // TUI's own verified subset, not the catalog size.
   await waitFor(() => controller.model().cards.length === OPTIONAL_BUNDLES.length + ON_DEMAND.length,
     'the real Host catalog read')
-  assert.deepEqual(controller.model().sections.at(-1)!.cards.map(card => card.name), [...EXPERIMENTAL_BUNDLE_IDS])
+  assert.deepEqual(controller.model().sections.at(-1)!.cards.map(card => card.name),
+    [...EXPERIMENTAL_BUNDLE_IDS, ...RELEASE_ONLY_EXPERIMENTAL])
 
   // Walk the Experimental tail from B14 backwards using the REAL keys: the
   // Detail is painted for each exact identity and its bounded facts survive.
-  vt.sendInput('\x1b[F') // End = B14
-  await settle()
+  // Selection is EXPLICIT (the page's own search seat) because the Host's
+  // default listing legitimately hides several Optional bundles.
   for (let index = EXPERIMENTAL_BUNDLE_IDS.length - 1; index >= 0; index -= 1) {
     const name = EXPERIMENTAL_BUNDLE_IDS[index]!
+    vt.sendInput('/')
+    vt.sendInput('\x1b') // clear any previous query
+    vt.sendInput('/')
+    for (const character of name) vt.sendInput(character)
+    vt.sendInput('\r')
+    await settle()
+    assert.equal(panel.selectedCardValue(), `bundle:${name}`, `the explicit search selects ${name}`)
     vt.sendInput('\r')
     await waitFor(() => plain(vt.getViewport()).includes('Official DSH catalog entry'), `the ${name} Detail`)
     // The Detail column wraps cleanly; the existing PgUp/PgDn scroll reveals
@@ -199,12 +211,17 @@ test('the real Host catalog paints all 14 verified B01–B14 boundaries through 
       await settle()
       paintedUnion += `\n${detailFrame()}`
     }
+    // The bounded copy is proven by a frame that REALLY painted it: the
+    // accumulated detail frames of this card, never a later page position.
     const frame = detailFrame()
-    assert.match(frame, SURFACE_HINTS[name]!, `${name} surfaces its exact boundary:\n${frame}`)
+    assert.match(paintedUnion, SURFACE_HINTS[name]!, `${name} surfaces its exact boundary:\n${paintedUnion}\ncurrent:\n${frame}`)
     if (ON_DEMAND.includes(name)) {
-      for (let page = 0; page < 10 && !/no Continue\/Resume/u.test(detailFrame()); page += 1) {
+      // Accumulate the paged frames too: the evidence is a frame that painted
+      // the copy, never the pane's final scroll position.
+      for (let page = 0; page < 10 && !/no Continue\/Resume/u.test(paintedUnion); page += 1) {
         vt.sendInput('\x1b[6~')
         await settle()
+        paintedUnion += `\n${detailFrame()}`
       }
       const external = paintedUnion
       assert.match(external, /no Continue\/Resume/u, `${name} states its verified one-shot boundary`)
@@ -225,13 +242,10 @@ test('the real Host catalog paints all 14 verified B01–B14 boundaries through 
     }
     vt.sendInput('\x1b') // leave Details
     await settle()
-    if (index > 0) {
-      vt.sendInput('\x1b[A') // Up: the previous Experimental row
-      await settle()
-    }
   }
   assert.deepEqual(controller.model().cards.filter(card => card.section === 'experimental').map(card => card.name),
-    [...EXPERIMENTAL_BUNDLE_IDS], 'the real Host snapshot kept the frozen B01–B14 order')
+    [...EXPERIMENTAL_BUNDLE_IDS, ...RELEASE_ONLY_EXPERIMENTAL],
+    'the real Host snapshot kept the frozen B01–B14 order and appended the release members')
 
   // No phantom Team/Discover/mic/Inspector page action is present in the real
   // catalog; the web-only rows expose only the official Install/Back actions.
