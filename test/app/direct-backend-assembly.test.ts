@@ -64,6 +64,7 @@ test('each backend domain is served by its own adapter instance', () => {
     backend.config,
     backend.hostFile,
     backend.sessionArchive,
+    backend.sessionMarkdown,
     backend.hostCommand,
     backend.pluginManager,
     backend.jobObservation,

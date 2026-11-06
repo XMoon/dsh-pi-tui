@@ -9,7 +9,6 @@ import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { afterEach, test } from 'node:test'
 import { setKittyProtocolActive, visibleWidth } from '@xmoon76/pi-tui'
 import type { TranscriptMessage } from '../../src/transcript.ts'
-import { renderTranscriptMarkdown } from '../../src/client/artifact/transcript-markdown.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 
@@ -241,83 +240,4 @@ test('thinking keeps its three-row height even with little content', async () =>
   const block = lines.slice(start, start + 3)
   assert.equal(block.length, 3, `short block must stay 3 rows:\n${block.join('\n')}`)
   assert.ok(block[2]!.includes('alt+t'), `hint row missing:\n${block[2]}`)
-})
-
-test('renderTranscriptMarkdown projects image blocks (review finding 4)', () => {
-  // Alpha.4 Session shape: the export reads the log through snapshotEvents.
-  const events = [
-      {
-        type: 'user/message',
-        data: {
-          content: [
-            { type: 'text', text: '分析这张图:' },
-            { type: 'image', attachment: { attachmentId: 'att-9', mediaType: 'image/png', bytes: 100, width: 1920, height: 1080, name: 'shot.png' } },
-          ],
-          source: { kind: 'user' },
-        },
-      },
-      {
-        type: 'user/message',
-        data: {
-          content: [{ type: 'image', attachment: { attachmentId: 'att-10', mediaType: 'image/jpeg', bytes: 50, width: 640, height: 480 } }],
-          source: { kind: 'user' },
-        },
-      },
-  ]
-  const md = renderTranscriptMarkdown({ header: { id: 'session-1' as never, cwd: '/ws', version: 1, createdAt: 0 }, snapshotEvents: () => events } as never)
-  assert.ok(md.includes('> 🖼️ shot.png · 1920×1080 · attachment `att-9`'), 'image line rendered')
-  assert.ok(md.includes('> 🖼️ image · 640×480 · attachment `att-10`'), 'image-only message renders')
-  assert.ok(md.includes('分析这张图:'), 'text rides along')
-})
-
-test('renderTranscriptMarkdown never replays surface replacements', () => {
-  // A pruned tool result + a summary compaction checkpoint must stay out
-  // of the human-facing export: the append-origin originals already render
-  // at their log positions (same contract as the transcript fold).
-  // Alpha.4 Session shape (same as the image fixture above).
-  const events = [
-      {
-        type: 'tool/call',
-        seq: 0,
-        time: 1,
-        data: { turn: 0, step: 0, callId: 'call-1' as never, name: 'bash', arguments: '{}' },
-      },
-      {
-        type: 'tool/result',
-        seq: 1,
-        time: 2,
-        data: {
-          turn: 0,
-          step: 0,
-          message: {
-            id: 'msg-1' as never,
-            role: 'tool',
-            toolCallId: 'call-1' as never,
-            content: [{ type: 'text', text: 'ORIGINAL RESULT' }],
-            source: { kind: 'tool', callId: 'call-1' as never },
-          },
-        },
-        surfaceOp: 'append',
-      },
-      {
-        type: 'tool/result',
-        seq: 2,
-        time: 3,
-        data: {
-          turn: 0,
-          step: 0,
-          message: {
-            id: 'msg-2' as never,
-            role: 'tool',
-            toolCallId: 'call-1' as never,
-            content: [{ type: 'text', text: 'PRUNED RESULT' }],
-            source: { kind: 'tool', callId: 'call-1' as never },
-          },
-        },
-        surfaceOp: { op: 'replace', start: 1, end: 1 },
-      },
-  ]
-  const md = renderTranscriptMarkdown({ header: { id: 'session-2' as never, cwd: '/ws', version: 1, createdAt: 0 }, snapshotEvents: () => events } as never)
-  assert.ok(md.includes('ORIGINAL RESULT'), 'the append-origin result renders')
-  assert.ok(!md.includes('PRUNED RESULT'), 'the pruned replacement must never render in the export')
 })

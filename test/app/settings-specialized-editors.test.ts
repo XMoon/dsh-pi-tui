@@ -179,7 +179,6 @@ function makeRunner(
     },
     backendKind: 'direct' as const,
     hostShellCompletion: true,
-    transcriptExportAvailable: true,
     forceContextMeasurementResult: () => ({ value: undefined, observation: 'unavailable' as const }),
     subscribeSessionScopeInvalidation: () => () => {},
     listScopedCommands: () => [],

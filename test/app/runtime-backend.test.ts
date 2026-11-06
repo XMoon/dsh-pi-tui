@@ -196,6 +196,9 @@ test('the Direct backend is the current production surface and serves EXACTLY th
   const sessionArchive = {
     open: async () => ({ kind: 'unavailable' as const }),
   }
+  const sessionMarkdown: import('../../src/runtime/session-markdown-port.ts').SessionMarkdownPort = {
+    read: async () => ({ kind: 'unavailable' as const }),
+  }
   const hostCommand = {
     execute: async () => ({ kind: 'committed' as const, matched: false as const }),
   }
@@ -243,7 +246,10 @@ test('the Direct backend is the current production surface and serves EXACTLY th
       throw new Error('the fixture never follows Workspaces')
     },
   }
-  const backend = createDirectBackend(subagent, sessionReader, pendingInputReader, sessionWriter, sessionLifecycle, interaction, catalog, config, hostFile, sessionArchive, hostCommand, pluginManager, jobObservation, hostUserShell, deliveredFileRead, webAccess, sessionWorkspaceFacts)
+  // S5-PR3 and M5-U-A add TWO independent required ports: the official Session
+  // Markdown read and the UI-neutral read-authority facts. Both stay wired and
+  // asserted below; neither replaces the other.
+  const backend = createDirectBackend(subagent, sessionReader, pendingInputReader, sessionWriter, sessionLifecycle, interaction, catalog, config, hostFile, sessionArchive, sessionMarkdown, hostCommand, pluginManager, jobObservation, hostUserShell, deliveredFileRead, webAccess, sessionWorkspaceFacts)
   assert.equal(backend.kind, 'direct')
   assert.equal(backend.subagent, subagent)
   assert.equal(backend.sessionReader, sessionReader)
@@ -255,6 +261,7 @@ test('the Direct backend is the current production surface and serves EXACTLY th
   assert.equal(backend.config, config)
   assert.equal(backend.hostFile, hostFile)
   assert.equal(backend.sessionArchive, sessionArchive)
+  assert.equal(backend.sessionMarkdown, sessionMarkdown)
   assert.equal(backend.hostCommand, hostCommand)
   assert.equal(backend.pluginManager, pluginManager)
   assert.equal(backend.jobObservation, jobObservation)

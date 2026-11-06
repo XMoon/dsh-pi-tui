@@ -31,7 +31,7 @@ hyperlinks) is trusted and must survive untouched.
 | Terminal style for **external** log text | the whitelist below | `sanitizeDisplayLog` |
 | Plugin install operations, session identities, picker ids | existing controllers / `SessionReader` | display-only string projections |
 | TSP frame/currentness | installed SDK + `src/tui/tsp/session.ts` | `sanitizeDisplayText` on node **text props only** |
-| Display `/copy` payload | official latest `assistant/message` + same-Session Folder settlement + PR1 publications + `planVisualPlacement` | text spans only; raw Session/`/transcript` keep the marker |
+| Display `/copy` payload | official latest `assistant/message` + same-Session Folder settlement + PR1 publications + `planVisualPlacement` | text spans only; raw Session bytes and the official Markdown text block keep the marker |
 
 The source of truth — event objects, raw observations, copy payloads, search
 source keys, navigation ids, exact-copy offsets and persistence — is **never**
@@ -42,7 +42,10 @@ published-visual marker line that the renderer CONSUMED is not part of what the
 user reads, so the clipboard payload omits that exact source span while every
 other byte stays original (see `docs/architecture/transcript.md`, "Display
 `/copy` for consumed visual markers"). The durable Session body, the model
-history, search and the raw `/transcript` export never take this projection. Rendering is a disposable projection over it: the same raw
+history, search and the `/transcript` export never take this projection: the
+export is the official Host Markdown formatter's output, not a
+terminal-sanitized display projection. Rendering is a disposable projection
+over it: the same raw
 value can be copied byte-exactly and also painted safely.
 
 ## The two policies

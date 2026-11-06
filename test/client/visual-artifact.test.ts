@@ -12,7 +12,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createToolResultMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
-import { renderTranscriptMarkdown } from '../../src/client/artifact/transcript-markdown.ts'
 import { TranscriptFolder } from '../../src/domain/transcript/folder.ts'
 import { transcriptSearchText } from '../../src/domain/transcript/search.ts'
 import { chartContentBlocks, chartFactFromArgs } from '../../src/domain/visual/chart.ts'
@@ -76,19 +75,6 @@ test('search finds the chart values and the authorized SVG source', () => {
   assert.match(svgText, /<svg/u, 'the durable call source is searchable')
 })
 
-test('Markdown export carries the authorized facts, never a PNG/blob derivative', () => {
-  const markdown = renderTranscriptMarkdown({
-    header: { id: 'visual-artifact', cwd: '/ws', version: 4, createdAt: 0, isSeeded: false, delegationDepth: 0 },
-    snapshotEvents: () => events() as never,
-  } as never)
-  assert.match(markdown, /Request latency/u)
-  assert.match(markdown, /42 ms/u)
-  assert.match(markdown, /Gateway -> App -> Database/u)
-  assert.match(markdown, /<svg/u, 'the export keeps the authorized SVG source from the call')
-  assert.doesNotMatch(markdown, /blobId/u, 'no client blob id becomes durable export material')
-  assert.doesNotMatch(markdown, /base64/u, 'no raster bytes are exported')
-})
-
 /** One durable call/result pair carrying the given blocks. */
 function pair(
   turn: number,
@@ -120,41 +106,6 @@ function pair(
 
 const REF_LINE = 'visual-ref-v2:sv2_0123456789abcdef0123'
 const PUBLISHED_LINE = 'visual-published-v1:{"version":1,"published":[{"ref":"sv2_0123456789abcdef0123"}]}'
-
-test('the readable export drops the three visual tools’ machine tails but keeps their human text', () => {
-  const chartFact = chartFactFromArgs(CHART_ARGS)
-  const chartBlocks = chartContentBlocks(chartFact) as { type: 'text'; text: string }[]
-  const markdown = renderTranscriptMarkdown({
-    header: { id: 'visual-machine', cwd: '/ws', version: 4, createdAt: 0, isSeeded: false, delegationDepth: 0 },
-    snapshotEvents: () => [
-      { type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } } as never,
-      { type: 'step/start', seq: 1, time: 1, data: { turn: 1, step: 0 } } as never,
-      ...pair(1, 0, 2, 'call-chart', 'dsh_pi_tui_chart', CHART_ARGS,
-        [chartBlocks[0] as { type: 'text'; text: string }, { type: 'text', text: REF_LINE }, chartBlocks[1] as { type: 'text'; text: string }]),
-      ...pair(1, 1, 5, 'call-present', 'present_visual', { visuals: [{ ref: 'sv2_0123456789abcdef0123' }] },
-        [{ type: 'text', text: 'Selected 1 visual for presentation.' }, { type: 'text', text: PUBLISHED_LINE }]),
-    ] as never,
-  } as never)
-  assert.match(markdown, /Request latency/u, 'the human chart text is exported')
-  assert.match(markdown, /Selected 1 visual for presentation\./u, 'the human publication summary is exported')
-  assert.doesNotMatch(markdown, /visual-ref-v2:/u, 'the reference machine block is not readable export material')
-  assert.doesNotMatch(markdown, /^visual-v1:/mu, 'the fact machine block is not readable export material')
-  assert.doesNotMatch(markdown, /visual-published-v1:/u, 'the receipt machine block is not readable export material')
-})
-
-test('the readable export keeps another tool’s lookalike machine text verbatim', () => {
-  const lookalike = `${REF_LINE}\n${PUBLISHED_LINE}`
-  const markdown = renderTranscriptMarkdown({
-    header: { id: 'visual-lookalike', cwd: '/ws', version: 4, createdAt: 0, isSeeded: false, delegationDepth: 0 },
-    snapshotEvents: () => [
-      { type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } } as never,
-      { type: 'step/start', seq: 1, time: 1, data: { turn: 1, step: 0 } } as never,
-      ...pair(1, 0, 2, 'call-bash', 'bash', { command: 'cat out.txt' }, [{ type: 'text', text: lookalike }]),
-    ] as never,
-  } as never)
-  assert.match(markdown, /visual-ref-v2:sv2_0123456789abcdef0123/u, 'a non-visual tool’s text is untouched')
-  assert.match(markdown, /visual-published-v1:/u, 'even a receipt-looking line from another tool survives')
-})
 
 test('search never indexes a visual tool’s machine tails', () => {
   const chartFact = chartFactFromArgs(CHART_ARGS)

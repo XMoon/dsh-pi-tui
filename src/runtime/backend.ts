@@ -21,6 +21,7 @@ import type { Catalog } from './catalog-port.ts'
 import type { ConfigPort } from './config-port.ts'
 import type { HostFilePort } from './host-file-port.ts'
 import type { SessionArchivePort } from './session-archive-port.ts'
+import type { SessionMarkdownPort } from './session-markdown-port.ts'
 import type { HostCommandPort } from './host-command-port.ts'
 import type { PluginManagerPort } from './plugin-manager-port.ts'
 import type { JobObservationPort } from './job-observation-port.ts'
@@ -63,6 +64,10 @@ export interface Backend {
   /** The session ARCHIVE domain port (Pre-Stage-D): one complete
    * Session-tree archive stream per root Session. */
   readonly sessionArchive: SessionArchivePort
+  /** The Session MARKDOWN domain port (S5-PR3): the official complete
+   * committed Session transcript read by id, never the Client transcript
+   * projection. */
+  readonly sessionMarkdown: SessionMarkdownPort
   /** The Host command execution domain port (D2.1). */
   readonly hostCommand: HostCommandPort
   /** The Plugin Manager domain port (P1-A): bundles, plugins, installs. */
@@ -103,6 +108,7 @@ export function createDirectBackend(
   config: ConfigPort,
   hostFile: HostFilePort,
   sessionArchive: SessionArchivePort,
+  sessionMarkdown: SessionMarkdownPort,
   hostCommand: HostCommandPort,
   pluginManager: PluginManagerPort,
   jobObservation: JobObservationPort,
@@ -124,6 +130,7 @@ export function createDirectBackend(
     config,
     hostFile,
     sessionArchive,
+    sessionMarkdown,
     hostCommand,
     pluginManager,
     jobObservation,

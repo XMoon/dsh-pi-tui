@@ -14,6 +14,7 @@ import type { Backend } from '../../runtime/backend.ts'
 import type { RemotePromptSerializer } from '../../runtime/remote/session-writer-remote.ts'
 import { RemoteConfigPort, type RemoteConfigRuntimeSource } from '../../runtime/remote/config-remote.ts'
 import { RemoteSessionArchive } from '../../runtime/remote/session-archive-remote.ts'
+import { RemoteSessionMarkdown } from '../../runtime/remote/session-markdown-remote.ts'
 import { createRemoteBackend } from '../../runtime/remote/backend-remote.ts'
 import { RemotePromptSerializerProduction } from '../../runtime/remote/prompt-serializer-remote.ts'
 import { RemoteHostUserShellPort } from '../../runtime/remote/host-user-shell-remote.ts'
@@ -124,6 +125,10 @@ export async function createRemoteBackendRuntime(
     const config = new RemoteConfigPort(remoteConfigRuntimeSourceOf(options.runtime))
     unwind.push(() => config.dispose())
     const sessionArchive = new RemoteSessionArchive({ fetch: options.fetch })
+    // S5-PR3: the official authenticated Markdown read over the SAME
+    // composition-owned fetch; the Host-only profile already registers the
+    // official route, so this adapter never mounts a second Host row.
+    const sessionMarkdown = new RemoteSessionMarkdown({ fetch: options.fetch })
     // §2.3/§4.1 config readiness barrier: the mirror's invalidation listeners
     // are already installed (the port's constructor), the M3-1 Client runtime
     // already awaited its own initial readiness (so a Connection generation
@@ -152,6 +157,7 @@ export async function createRemoteBackendRuntime(
         ...semantics,
         config,
         sessionArchive,
+        sessionMarkdown,
         // M3-4 PR3: the Remote Host user-shell adapter (truthful
         // unavailable; CARRIER_GAP) — served by the backend, so the
         // composition root holds no static Remote edge.

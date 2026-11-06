@@ -57,9 +57,9 @@ Consequences that are part of the contract:
 
 `Backend` is an assembly of narrow domain ports (`subagent`, `sessionReader`,
 `pendingInputReader`, `sessionWriter`, `sessionLifecycle`, `interaction`,
-`catalog`, `config`, `hostFile`, `sessionArchive`, `hostCommand`,
-`pluginManager`, `jobObservation`, `hostUserShell`, `deliveredFileRead`,
-`webAccess`, `sessionWorkspaceFacts`), never a
+`catalog`, `config`, `hostFile`, `sessionArchive`, `sessionMarkdown`,
+`hostCommand`, `pluginManager`, `jobObservation`, `hostUserShell`,
+`deliveredFileRead`, `webAccess`, `sessionWorkspaceFacts`), never a
 `TuiBackend` god object. A port exposes detached semantic facts, opaque identities/request ids,
 event surfaces (for example authorization: begin → attemptId → notice/prompt →
 respond/cancel) and semantic operations. It owns no Host database, state machine
@@ -952,6 +952,59 @@ agent composition consumes the parsed values. Authority:
 `src/app/direct/system-prompt.ts`. Proof: `test/app/communication-policy.test.ts`
 (Focus suppression + pinned section registration).
 
+## Session artifact reads: archive vs official Markdown
+
+Two independent artifact capabilities share the ONE Client save workflow
+(`ArtifactSaveOwner`) and nothing else:
+
+- `SessionArchivePort` (`/export`) opens the official full Session-tree ZIP
+  stream (root log, descendants, attachments). Its shape and ownership are
+  unchanged.
+- `SessionMarkdownPort` (`/transcript`) is the read-only official complete
+  committed Session transcript selected by Session id. It never streams an
+  archive, never accepts a formatter choice, descendants, output path or Client
+  cwd, and never writes output.
+
+`SessionMarkdownPort.read(sessionId, signal)` answers `ready {markdown}` /
+`none` / `unavailable`, or rejects a real failure. The adapter mapping is:
+
+- **Direct** (Host-owned, in-process): the official
+  `sessionQuery.readSession` complete committed live-preferred logical snapshot
+  (including any fork-inherited prefix) is rendered by the official
+  `formatSessionMarkdown`; the optional `sessionPersistence.stat` artifact path
+  is passed through as the formatter's `Session file:` source. An absent
+  `sessionQuery` is `unavailable`; the official stable
+  `SESSION_QUERY_SESSION_NOT_FOUND` code is `none`; every other read/stat/abort
+  failure rejects. `readSession` itself has no cancellation parameter, so abort
+  is observed before and after the awaited read (the same limitation as the
+  official Host route).
+- **Remote** (Split Client): the official authenticated
+  `GET /api/session.markdown?sessionId=...` over the SAME composition-owned
+  fetch every Remote adapter consumes — never a caller-built URL, cookie,
+  private Remote or second Host plugin. A `200` must be the official
+  `text/markdown` body and is returned byte-exactly (no trim, recode, sanitize
+  or prefix); the official `session not found` 404 body is `none`; an unknown
+  404 (unregistered route) and the official missing-`session-query` 500 body are
+  `unavailable`; auth/permission, other 5xx, malformed/HTML/empty success and
+  transport failures reject. The Client never reconstructs the formatter and
+  never reads a Remote `Session.snapshot*`.
+
+The captured command-origin Session id is the target: a later Session switch
+never redirects the save. The Client chooses the destination directory, applies
+collision/overwrite policy and commits atomically; a Host artifact path may
+appear verbatim INSIDE the Markdown (`Session file:`) but is never the Client
+save target. Business availability is decided by the port's answer at save
+time, never by a pre-read backend capability flag; the mounted `TuiApp` save
+dialog is the separate Client-local capability a renderer without one must
+refuse. The official Markdown is the Host formatter's text contract, not a
+byte-for-byte reproduction of the TUI Transcript cards (Workflow/Context/visual
+card semantics stay display-only).
+
+Proof: `test/runtime/direct/session-markdown-direct.test.ts`,
+`test/runtime/remote/remote-session-markdown.test.ts`,
+`test/app/remote-semantics-smoke.test.ts`, `test/app/export-command.test.ts`,
+`test/extension/runner-remote-command-plane.test.ts`.
+
 ## Workflow terminal-state authority
 
 A Workflow run/member status is settled ONLY by its own terminal event:
@@ -960,10 +1013,12 @@ matching `runId` + `seq`. A run without `run-end` is an OPEN durable record and
 reads `running`. Step/Turn closure, main-Agent idle and the next `turn/start`
 carry no Workflow authority and never settle or "interrupt" a run.
 
-ONE `WorkflowProjection` serves both the visual Transcript fold and
-`/transcript` Markdown export, so the two cannot drift. The renderer only
-derives counts/phase groups/aggregate status/disclosure mode and never writes
-durable status back to the projection.
+ONE `WorkflowProjection` serves the visual Transcript fold, so the card and
+the Workflow status vocabulary cannot drift. It is NOT the `/transcript`
+Markdown authority: that artifact is the official Host-authored Session
+transcript, and the Workflow/Context card record stays display-only. The
+renderer only derives counts/phase groups/aggregate status/disclosure mode and
+never writes durable status back to the projection.
 
 ## Request-zone metadata
 

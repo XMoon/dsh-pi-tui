@@ -13,10 +13,12 @@
  *   domain/transcript/folder.ts              ONE TranscriptFolder fold authority
  *
  * TS8-D moved the `/transcript` Markdown artifact formatter out to
- * `src/client/artifact/transcript-markdown.ts`. This facade now owns NO local
- * implementation, no Markdown helper, and imports neither `client/**` nor
- * `tui/**`: it re-exports the canonical semantic surface (including the
- * transcript-neutral content-block helpers) and nothing else.
+ * `src/client/artifact/transcript-markdown.ts`; S5-PR3 retired that Client
+ * formatter entirely — `/transcript` now writes the official Host Markdown
+ * (`SessionMarkdownPort`). This facade owns NO local implementation, no
+ * Markdown helper, and imports neither `client/**` nor `tui/**`: it re-exports
+ * the canonical semantic surface (including the transcript-neutral
+ * content-block helpers) and nothing else.
  * @module @xmoon76/dsh-pi-tui/transcript
  */
 

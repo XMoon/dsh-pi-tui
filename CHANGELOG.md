@@ -61,6 +61,8 @@
   由 Agent 自身管理（读写 `agent.model`；`/model` 仍通过既有 catalog 端口提交）。仅使用
   内置 TUI 的 profile 无需改动。
 
+- **`/transcript` 改为官方 Session Markdown，导出内容格式随之变化。** `/transcript` 现在在 Direct 与 Split Client 上都读取官方 Host `formatSessionMarkdown` 生成的完整已提交 Session Markdown（含 fork 继承前缀与最新标题），再由客户端本地保存流程写入 `.md`；不再使用 TUI 自研的 `## User` / `## Assistant`、Workflow/PTC 小节和视觉结果过滤。用户消息变为引用块，最终回答为普通 Markdown，之前的工具与过程活动折叠进 `<details>`，需要时附带官方 `Session file:` 源路径。文件名、无参数语法、保存位置/重名确认/取消以及 `/export` 的 ZIP 归档行为保持不变；Split Client 的 `/transcript` 由原先的“此 backend 不可用”变为真实可用。
+
 ### 修复
 
 - **修复新版 DSH 下 Split Host 的官方 Web 前端无法加载的问题。** 新版官方 Web 前端删除了已不存在的模型标签插件，并要求聊天、附件与会话等既有界面依赖上下文菜单与文件拖拽这两项官方客户端能力；Split Host 的 Web 组件清单现已同步这组真实依赖，`/web` 启停、`autoStart` 偏好与浏览器访问路径保持不变。

@@ -45,7 +45,6 @@ import {
   TranscriptFolder,
   type TranscriptMessage,
 } from '../../src/transcript.ts'
-import { renderTranscriptMarkdown } from '../../src/client/artifact/transcript-markdown.ts'
 import { projectTranscriptStructure } from '../../src/tui/transcript/structure.ts'
 import { TuiApp, transcriptContentWidth } from '../../src/tui-app.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
@@ -221,19 +220,6 @@ test('Ctrl+F search stays stable over the dynamic-tool transcript and matches or
   assert.ok(!searchable.includes('rc2_live_tool_probe tool'), 'no tool-addition declaration leaks into search')
 })
 
-test('the readable transcript export stays stable over dynamic-tool events', () => {
-  const events = dynamicToolEvents()
-  const markdown = renderTranscriptMarkdown({
-    header: { id: 'session-v4-dynamic-tools', cwd: '/ws', version: 4, createdAt: 0, isSeeded: false, delegationDepth: 0 },
-    snapshotEvents: () => events,
-  } as never)
-  assert.ok(markdown.includes('first question'))
-  assert.ok(markdown.includes('probe ok'))
-  assert.ok(markdown.includes('second question'))
-  assert.ok(!markdown.includes('tool-addition'))
-  assert.ok(!markdown.includes('tool-removal'))
-})
-
 test('rewind candidates ignore developer tool updates and keep the human-turn boundaries', () => {
   const candidates = collectRewindCandidates(dynamicToolEvents())
   // The first human turn has no completed predecessor (official fork omission
@@ -271,7 +257,7 @@ test('a long V4 session folds and still accepts the next ordinary prompt', () =>
   if (tail?.kind === 'user') assert.equal(tail.text, 'the next prompt')
 })
 
-test('a very long multibyte tool result survives fold, search and export without malformed characters', () => {
+test('a very long multibyte tool result survives fold and search without malformed characters', () => {
   const ascii = 'A'.repeat(20_000)
   const cjk = '汉字测试'.repeat(2_000)
   const emoji = '🙂🚀✨'.repeat(500)
@@ -299,15 +285,9 @@ test('a very long multibyte tool result survives fold, search and export without
   assert.ok(expanded.some(line => line.includes('汉字测试')), 'the expanded card keeps CJK')
   assert.ok(expanded.some(line => line.includes('🙂🚀✨')), 'the expanded card keeps emoji')
   assert.ok(expanded.every(line => !line.includes('\uFFFD')), 'no expanded line gains a replacement character')
-  // Search and export read the same bytes without corruption.
+  // Search reads the same bytes without corruption (the official Markdown
+  // UTF-8 boundary is proven by the Markdown Port parity suite).
   assert.ok(transcriptSearchText(card).includes('end'))
-  const markdown = renderTranscriptMarkdown({
-    header: { id: 'session-v4-long-utf8', cwd: '/ws', version: 4, createdAt: 0, isSeeded: false, delegationDepth: 0 },
-    snapshotEvents: () => events,
-  } as never)
-  assert.ok(markdown.includes('汉字测试'), 'the export keeps CJK intact')
-  assert.ok(markdown.includes('🙂🚀✨'), 'the export keeps emoji intact')
-  assert.ok(!markdown.includes('\uFFFD'), 'the export introduces no replacement character')
   // A subsequent ordinary prompt still folds onto the same transcript.
   const after = new TranscriptFolder()
   after.apply([...events, turnStart(6, 1), userMessage(7, 'the next prompt')])

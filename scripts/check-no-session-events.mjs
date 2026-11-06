@@ -116,10 +116,9 @@ export const DEPRECATED_READER_ALLOWLIST = [
   { file: 'src/runtime/direct/session-direct.ts', call: 'snapshotEvents', site: 'return directTurnOutlineCompat(agent.session.snapshotEvents())', why: 'Direct-only rewind-outline compatibility fold, capability absent (M3-4 PR4 §18.4; projection present always wins)' },
   { file: 'src/runtime/direct/session-direct.ts', call: 'snapshotEvents', site: 'return directTurnOutlineCompat(agent.session.snapshotEvents())', why: 'Direct-only rewind-outline compatibility fold, projection value absent (M3-4 PR4 §18.4; an authoritative [] never reaches this fold)' },
   { file: 'src/runtime/direct/presentation-read-direct.ts', call: 'snapshotEvents', site: 'const durableEvents = agent.session.snapshotEvents().map(event => detachedClone(event as PresentationDurableEvent))', why: 'Direct presentation read fold over the in-process session log' },
-  // TS8-D moved the `/transcript` full-log Markdown reconstruction (and this
-  // call site WITH it) out of the `src/transcript.ts` facade into the Client
-  // artifact formatter; the debt moved, never doubled.
-  { file: 'src/client/artifact/transcript-markdown.ts', call: 'snapshotEvents', site: 'for (const event of session.snapshotEvents()) {', why: 'Direct full transcript reconstruction from the in-process log' },
+  // S5-PR3 retired the `/transcript` Client-local formatter together with its
+  // snapshot reader; the official Host session-query snapshot is the exporter
+  // (no in-process Client full-log read remains for this feature).
 ]
 
 /** Collect the .ts files of one directory tree (src only; no fixtures). */

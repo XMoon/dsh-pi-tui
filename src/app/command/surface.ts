@@ -299,12 +299,6 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
     /** Shell amendment (M3-4 PR3): whether Host-shell completion facts are
      * reachable on the selected backend (Direct true / Remote false). */
     readonly hostShellCompletion: boolean
-    /** M3-4 PR4 round 5: whether the readable-transcript artifact is
-     * renderable on the selected backend (Direct true — the renderer reads
-     * the in-process Session history; Remote false — no transport-neutral
-     * whole-history seam yet). An explicit business capability, never
-     * derived from the M8-retiring Host-registry compatibility mirror. */
-    readonly transcriptExportAvailable: boolean
   }
   /** The bound session runtime entries the runner drives. */
   readonly session: {
@@ -1286,10 +1280,11 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       // reach the Host.
       webAccess: deps.backend.webAccess,
       hostShellCompletion: deps.backend.hostShellCompletion,
-      // The readable-transcript business capability (round 5): explicitly
-      // backend-owned, NEVER derived from the commandRegistry mirror below
-      // (that mirror retires with M8).
-      transcriptExportAvailable: deps.backend.transcriptExportAvailable,
+      // The readable-transcript business capability is NOT a pre-read flag:
+      // the command only acknowledges, and the post-success save owner reads
+      // the official Session Markdown port at save time (`none`/`unavailable`
+      // are reported then). The Client-local save dialog is the mounted-app
+      // capability the handler checks.
       // The minimal commands registry for the TUI's OWN registrations
       // (migration M1.11) — the runner assembly dependency, never a Host
       // capability exposed to command handlers. Direct-only on PR4: the

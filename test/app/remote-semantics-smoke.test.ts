@@ -26,7 +26,7 @@ import { pathToFileURL } from 'node:url'
 import { join } from 'node:path'
 import { Context, symbols, type Fiber } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
-import { SESSION_LOG_FILENAME, sessionLogZipFilename } from '@deepseek-ai/dsh-session-log-export'
+import { SESSION_LOG_FILENAME, formatSessionMarkdown, sessionLogZipFilename } from '@deepseek-ai/dsh-session-log-export'
 import ConfigEditor from '@deepseek-ai/dsh-config-editor'
 import SettingsForms from '@deepseek-ai/dsh-settings'
 import { loadProfileDirectory, mountRootInclude } from '@deepseek-ai/dsh-app-boot'
@@ -1220,6 +1220,40 @@ test('the assembled M3-3B Remote backend serves config + archive over the real H
     const logText = new TextDecoder().decode(rootLog)
     assert.match(logText, /archive me/u, 'the ZIP carries the seeded prompt')
     assert.match(logText, /archived answer/u, 'the ZIP carries the seeded answer')
+
+    // 3b. Official Session Markdown over the REAL authenticated Host route:
+    // the exact `/api/session.markdown` GET is served by the mounted official
+    // plugin, the Host `readSession` snapshot supplies the body and the bytes
+    // equal the same snapshot formatted locally. The read is an observation —
+    // it appends no event and starts no Agent.
+    const markdownRead = await assembled.backend.sessionMarkdown.read(MAIN)
+    assert.ok(markdownRead.kind === 'ready', `the Host serves a real Markdown transcript (got ${markdownRead.kind})`)
+    const markdownSession = host.ctx.sessions.get(SessionId(MAIN)) as unknown as {
+      snapshotEvents(): Array<{ type: string }>
+    }
+    const eventCountBefore = markdownSession.snapshotEvents().length
+    const officialSnapshot = await (host.ctx as unknown as {
+      sessionQuery: { readSession(id: unknown): Promise<{ events: readonly never[] }> }
+    }).sessionQuery.readSession(SessionId(MAIN))
+    const officialMetadata = await (host.ctx as unknown as {
+      sessionPersistence: { stat(id: unknown): Promise<{ location?: { path?: string } } | undefined> }
+    }).sessionPersistence.stat(SessionId(MAIN))
+    assert.equal(
+      markdownRead.markdown,
+      formatSessionMarkdown(officialSnapshot.events, officialMetadata?.location?.path),
+      'the wire bytes are the official formatter output for the same Host snapshot',
+    )
+    assert.match(markdownRead.markdown, /> archive me/u, 'the user question is a blockquote')
+    assert.match(markdownRead.markdown, /archived answer/u, 'the final answer is present')
+    assert.equal(markdownRead.markdown.endsWith('\n'), true, 'exactly one trailing LF')
+    assert.doesNotMatch(markdownRead.markdown, /^## User$/mu, 'the retired Client-local formatter never ran')
+    assert.equal(markdownSession.snapshotEvents().length, eventCountBefore,
+      'the Markdown read appends no Host event')
+
+    // An unknown Session id is NOT a fabricated empty transcript: the official
+    // route proves the Session absent and the port reports `none`.
+    const missing = await assembled.backend.sessionMarkdown.read('m3a-does-not-exist')
+    assert.equal(missing.kind, 'none', 'a missing Session is classified none, never ready')
 
     // 4. The ONE M3 wiring here is the assembly's own: it serves the adapter
     // INSTANCE it built, never a second one constructed inside
