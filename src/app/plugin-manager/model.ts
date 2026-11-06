@@ -25,6 +25,7 @@ import type {
   PluginReadOnlyReason,
   PluginRegistriesFact,
   PluginRowFact,
+  PluginVersionFact,
 } from '../../runtime/plugin-manager-port.ts'
 import {
   EXPERIMENTAL_BUNDLE_IDS,
@@ -286,6 +287,7 @@ export function entryValue(entryId: string): string {
 export const PLUGIN_ACTION = {
   install: 'action:install',
   officialInstall: 'action:official-install',
+  checkUpdates: 'plugin:check-updates',
   refresh: 'action:refresh',
   close: 'action:close',
   toggle: 'action:toggle',
@@ -446,7 +448,7 @@ function upgradeGuidance(card: PluginCardView): PluginDetailFact | undefined {
     if (card.updatable) {
       return {
         label: 'Upgrade',
-        value: `Upgrade: Profile-owned. The Host supports version updates; this TUI does not yet offer the update action.${removal}`,
+        value: 'Host-supported registry updates are available through Check updates…; the Host checks the exact target again before changing the profile.',
         tone: 'normal',
       }
     }
@@ -637,6 +639,27 @@ function cardWarningFacts(card: PluginCardView, exemptions: readonly PluginExemp
   return facts
 }
 
+/** Why one published version cannot replace the installed bundle, or undefined
+ *  when the TUI may select it. A missing bundle, a host-incompatible version,
+ *  or a deprecated version is not selectable; a legal prerelease is (the
+ *  confirmation view warns about it separately). */
+export function updateVersionBlocker(version: PluginVersionFact): string | undefined {
+  if (!version.bundle) return 'This version declares no bundle and cannot replace one.'
+  if (version.incompatible !== undefined) return incompatibleText(version.incompatible)
+  if (version.deprecated !== undefined) return `Deprecated: ${version.deprecated}`
+  return undefined
+}
+
+/** One published version the TUI may select as an update target. This is a
+ *  LOCAL narrowing of the Host list only (`bundle`/`incompatible`/`deprecated`);
+ *  it never answers whether the bundle itself may be updated (`Host
+ *  BundleInfo.updatable`) or whether the Host accepts the version (the Host
+ *  re-checks the exact target before changing anything). A legal prerelease
+ *  stays selectable: the user may explicitly choose it after its warning. */
+export function isSelectableUpdateVersion(version: PluginVersionFact): boolean {
+  return updateVersionBlocker(version) === undefined
+}
+
 function cardActions(card: PluginCardView): PluginDetailAction[] {
   const actions: PluginDetailAction[] = []
   if (card.isSelf) {
@@ -681,6 +704,16 @@ function cardActions(card: PluginCardView): PluginDetailAction[] {
         reason: card.toggleBlockedReason ?? 'This bundle is read-only',
         tone: 'warning',
       })
+  }
+  // Only a Host-updatable third-party profile bundle exposes the official
+  // version-update entry. The Host re-checks the exact target before writing.
+  if (card.target === 'bundle' && card.updatable && !card.isSelf) {
+    actions.push({
+      value: PLUGIN_ACTION.checkUpdates,
+      label: 'Check updates…',
+      enabled: true,
+      tone: 'normal',
+    })
   }
   // Only a profile-owned, Host-removable bundle EVER shows Remove. A shipped
   // installation bundle, a missing catalog entry and a standalone Loader

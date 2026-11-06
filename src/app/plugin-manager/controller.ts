@@ -24,10 +24,16 @@
 import { PluginManagerStaleResultError } from '../../runtime/plugin-manager-port.ts'
 import type {
   PluginChangeFact,
+  PluginInstallCancellationFact,
   PluginInstallEvent,
+  PluginInstallPhaseFact,
   PluginManagerPort,
   PluginManagerSnapshot,
   PluginSpecInspectionFact,
+  PluginUpdateProgressFact,
+  PluginUpdateResultFact,
+  PluginVersionFact,
+  PluginVersionListFact,
 } from '../../runtime/plugin-manager-port.ts'
 import { runDetached } from '../../runtime/process/tasks.ts'
 import { runSyncDisposalSteps } from '../../runtime/process/disposal.ts'
@@ -40,9 +46,11 @@ import {
   bundleValue,
   changeSummary,
   entryValue,
+  isSelectableUpdateVersion,
   type PluginCardView,
   type PluginManagerModel,
   type PluginManagerSectionView,
+  updateVersionBlocker,
 } from './model.ts'
 
 /** The exact confirmation target classes. `remove` keeps the D1 behavior; the
@@ -77,6 +85,41 @@ export interface PluginInstallView {
   readonly message?: string
   readonly cancellable: boolean
   readonly requestId?: string
+}
+
+/** The official version-update lifecycle phases owned by this Controller. */
+export type PluginUpdatePhase = 'checking' | 'selecting' | 'confirm' | 'running' | 'done' | 'unknown'
+
+/**
+ * The one Update page's presentation state. `versions` is the Host's own
+ * answer to `listVersions`; `result` is the official `updateBundle` settlement;
+ * `lastObservedVersion` is the AUTHORITATIVE inventory's answer to what is
+ * installed now. They are intentionally separate facts.
+ */
+export interface PluginUpdateView {
+  readonly phase: PluginUpdatePhase
+  readonly cardValue: string
+  readonly name: string
+  /** The installed version this update was started from. */
+  readonly sourceInstalled: string
+  readonly versions?: PluginVersionListFact
+  readonly selectedExactVersion?: string
+  readonly registry?: string | null
+  readonly requestId?: string
+  readonly hostStep?: PluginUpdateProgressFact['step']
+  readonly announcedSteps: readonly PluginUpdateProgressFact['step'][]
+  readonly matchedInstallPhase?: PluginInstallPhaseFact['phase']
+  readonly log: readonly string[]
+  readonly result?: PluginUpdateResultFact
+  readonly cancelStatus?: PluginInstallCancellationFact['status']
+  readonly message?: string
+  /** The authoritative inventory's installed version after the update reread. */
+  readonly lastObservedVersion?: string
+  readonly readback: 'pending' | 'ready' | 'error'
+  /** True only in the legal target-installation cancellation window. */
+  readonly canStopTargetInstall: boolean
+  /** Whether the user explicitly released an indeterminate update. */
+  readonly acknowledged: boolean
 }
 
 /** The hooks the owning runner wires. */
@@ -122,6 +165,33 @@ interface ActiveInstall {
   /** The exact Host target spec that made `officialName` true. */
   officialSpec?: string
   approvedBuilds?: readonly string[]
+}
+
+/** The ONE in-flight update lifecycle (never a second manager or store). */
+interface ActiveUpdate {
+  cardValue: string
+  name: string
+  sourceInstalled: string
+  sourceReadGeneration: number
+  phase: PluginUpdatePhase
+  versions?: PluginVersionListFact
+  selectedExactVersion?: string
+  registry?: string | null
+  requestId?: string
+  hostStep?: PluginUpdateProgressFact['step']
+  announcedSteps: PluginUpdateProgressFact['step'][]
+  matchedInstallPhase?: PluginInstallPhaseFact['phase']
+  log: string[]
+  result?: PluginUpdateResultFact
+  cancelStatus?: PluginInstallCancellationFact['status']
+  message?: string
+  lastObservedVersion?: string
+  readback: 'pending' | 'ready' | 'error'
+  checkAbort?: AbortController
+  checkEpoch: number
+  mutationToken?: number
+  cancelPending: boolean
+  acknowledged: boolean
 }
 
 interface PluginConfirmation {
@@ -186,7 +256,9 @@ export class PluginManagerController {
   private mutationToken = 0
   private install: ActiveInstall | undefined
   private installEpoch = 0
+  private update: ActiveUpdate | undefined
   private readonly unsubscribe: () => void
+  private readonly unsubscribeUpdate: () => void
   private readonly unsubscribeInvalidation!: () => void
   private disposed = false
 
@@ -196,11 +268,17 @@ export class PluginManagerController {
     this.observationSource = options?.observations
     this.unsubscribe = port.subscribeInstall(event => this.onInstallEvent(event))
     try {
-      this.unsubscribeInvalidation = port.subscribeInvalidation(() => this.onInvalidation())
+      this.unsubscribeUpdate = port.subscribeUpdate(progress => this.onUpdateEvent(progress))
+      try {
+        this.unsubscribeInvalidation = port.subscribeInvalidation(() => this.onInvalidation())
+      } catch (error) {
+        // Transactional acquisition: a synchronously throwing THIRD subscription
+        // must not leave the first two owned by a controller the caller never
+        // receives.
+        this.unsubscribeUpdate()
+        throw error
+      }
     } catch (error) {
-      // Transactional acquisition, symmetric with the adapters: a synchronously
-      // throwing SECOND subscription must not leave the install subscription
-      // owned by a controller the caller never receives.
       this.unsubscribe()
       throw error
     }
@@ -232,17 +310,23 @@ export class PluginManagerController {
    */
   private onInvalidation(): void {
     if (this.disposed) return
+    // A new inventory invalidates a version list that has not been confirmed
+    // yet (the Host may have changed what is installed); a running update keeps
+    // its request id and is never re-dispatched.
+    this.invalidateUpdatePreview()
     if (!this.hooks.isOpen()) return
     this.run('plugin manager read', () => this.read())
   }
 
-  /** Release the install-event and invalidation subscriptions (runner teardown). */
+  /** Release the install/update/invalidation subscriptions (runner teardown). */
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
     runSyncDisposalSteps('plugin manager disposal', [
       () => this.install?.inspectAbort?.abort(),
+      () => this.update?.checkAbort?.abort(),
       () => this.unsubscribe(),
+      () => this.unsubscribeUpdate(),
       () => this.unsubscribeInvalidation(),
     ])
   }
@@ -400,6 +484,7 @@ export class PluginManagerController {
    */
   beginManualInstall(): boolean {
     if (this.disposed) return false
+    if (this.refuseWhileUpdating()) return false
     const active = this.install
     if (active?.phase === 'unknown') {
       this.message = 'the previous install outcome is unknown; check its status before starting a new install'
@@ -432,6 +517,7 @@ export class PluginManagerController {
    */
   beginOfficialInstall(value: string): boolean {
     if (this.disposed) return false
+    if (this.refuseWhileUpdating()) return false
     const active = this.install
     if (active !== undefined
       && (active.phase === 'done' || active.phase === 'failed' || active.phase === 'unknown')) {
@@ -548,6 +634,7 @@ export class PluginManagerController {
     const active = this.install
     if (active === undefined || active.phase !== 'confirm') return
     if (active.inspection?.status !== 'accepted') return
+    if (this.refuseWhileUpdating()) return
     active.phase = 'starting'
     active.message = undefined
     this.notifyChanged()
@@ -667,6 +754,7 @@ export class PluginManagerController {
    * this; an unconfirmed package set can never be approved here.
    */
   approvePendingBuilds(): void {
+    if (this.refuseWhileUpdating()) return
     const active = this.install
     if (active === undefined || active.phase !== 'failed') return
     const pending = active.outcome?.pendingBuilds
@@ -727,6 +815,473 @@ export class PluginManagerController {
     this.notifyChanged()
   }
 
+  // ── update lifecycle ─────────────────────────────────────────────────────
+
+  /** The ONE current update lifecycle, or undefined when none exists. */
+  updateView(): PluginUpdateView | undefined {
+    const active = this.update
+    if (active === undefined) return undefined
+    return {
+      phase: active.phase,
+      cardValue: active.cardValue,
+      name: active.name,
+      sourceInstalled: active.sourceInstalled,
+      ...(active.versions === undefined ? {} : { versions: active.versions }),
+      ...(active.selectedExactVersion === undefined ? {} : { selectedExactVersion: active.selectedExactVersion }),
+      ...(active.registry === undefined ? {} : { registry: active.registry }),
+      ...(active.requestId === undefined ? {} : { requestId: active.requestId }),
+      ...(active.hostStep === undefined ? {} : { hostStep: active.hostStep }),
+      announcedSteps: active.announcedSteps,
+      ...(active.matchedInstallPhase === undefined ? {} : { matchedInstallPhase: active.matchedInstallPhase }),
+      log: active.log,
+      ...(active.result === undefined ? {} : { result: active.result }),
+      ...(active.cancelStatus === undefined ? {} : { cancelStatus: active.cancelStatus }),
+      ...(active.message === undefined ? {} : { message: active.message }),
+      ...(active.lastObservedVersion === undefined ? {} : { lastObservedVersion: active.lastObservedVersion }),
+      readback: active.readback,
+      canStopTargetInstall: canStopTargetInstall(active),
+      acknowledged: active.acknowledged,
+    }
+  }
+
+  /** Whether an existing update still owns the write path. A terminal `done`
+   *  update is only evidence; an unacknowledged `unknown` outcome keeps the
+   *  lock because the Host may still be writing. */
+  private updateBlocksWrites(): boolean {
+    const active = this.update
+    if (active === undefined) return false
+    if (active.phase === 'done') return false
+    return !(active.phase === 'unknown' && active.acknowledged)
+  }
+
+  /** Refuse an old write entry point while the ONE update still owns the path. */
+  private refuseWhileUpdating(): boolean {
+    if (!this.updateBlocksWrites()) return false
+    this.message = this.update?.phase === 'unknown'
+      ? 'the previous update outcome is unknown; acknowledge it before changing plugins'
+      : 'another plugin change is still in progress; wait for it to settle'
+    this.notifyChanged()
+    return true
+  }
+
+  /**
+   * Enter the ONE Update page for a Host-updatable bundle, or reuse the
+   * existing lifecycle for the same bundle (a completed list/result is never
+   * re-queried implicitly). A terminal `done` update for ANOTHER bundle may be
+   * replaced; an indeterminate outcome must be acknowledged first.
+   */
+  beginUpdate(cardValue: string): void {
+    if (this.disposed) return
+    const existing = this.update
+    if (existing !== undefined) {
+      if (existing.phase === 'running') {
+        this.message = 'another plugin change is still in progress; wait for it to settle'
+        this.notifyChanged()
+        return
+      }
+      if (existing.cardValue === cardValue) {
+        // Re-entry: reuse the SAME list/result. Only an acknowledged
+        // indeterminate outcome may start a NEW check for this same bundle.
+        if (existing.phase !== 'unknown') return
+        if (!existing.acknowledged) {
+          this.message = 'the previous update outcome is unknown; acknowledge it before checking again'
+          this.notifyChanged()
+          return
+        }
+      } else if (existing.phase !== 'done' && !(existing.phase === 'unknown' && existing.acknowledged)) {
+        this.message = 'another plugin change is still in progress; wait for it to settle'
+        this.notifyChanged()
+        return
+      }
+    }
+    if (this.refuseWhileMutating()) return
+    if (this.hasDispatchedInstall()) {
+      this.message = 'another plugin change is still in progress; wait for it to settle'
+      this.notifyChanged()
+      return
+    }
+    const card = this.card(cardValue)
+    if (card === undefined) {
+      this.message = 'the inventory changed; refresh and try again'
+      this.notifyChanged()
+      return
+    }
+    if (card.target !== 'bundle' || card.isSelf || !card.updatable) {
+      this.message = `${card.name} does not support Host updates`
+      this.notifyChanged()
+      return
+    }
+    if (card.version === undefined) {
+      this.message = `${card.name} declares no installed version the Host can update`
+      this.notifyChanged()
+      return
+    }
+    // A replaced lifecycle must not leave a previous version read running.
+    existing?.checkAbort?.abort()
+    const active: ActiveUpdate = {
+      cardValue: card.value,
+      name: card.name,
+      sourceInstalled: card.version,
+      sourceReadGeneration: this.readEpoch,
+      phase: 'checking',
+      announcedSteps: [],
+      log: [],
+      readback: 'pending',
+      checkEpoch: 0,
+      cancelPending: false,
+      acknowledged: false,
+    }
+    this.update = active
+    this.message = undefined
+    this.startUpdateCheck(active)
+  }
+
+  /**
+   * Explicit `r`: re-read the official version list. This is the ONLY path
+   * that repeats a registry query; hiding/reopening the page reuses the
+   * current answer.
+   */
+  retryUpdateCheck(): void {
+    const active = this.update
+    if (this.disposed || active === undefined || active.phase !== 'selecting') return
+    // The update itself owns the version read; only another write refuses it.
+    if (this.busyValue !== undefined || this.hasDispatchedInstall()) {
+      this.message = 'another plugin change is still in progress; wait for it to settle'
+      this.notifyChanged()
+      return
+    }
+    const card = this.card(active.cardValue)
+    if (card === undefined || card.target !== 'bundle' || card.isSelf || !card.updatable || card.version === undefined) {
+      this.markUpdatePreviewInvalid(active)
+      return
+    }
+    active.sourceInstalled = card.version
+    active.sourceReadGeneration = this.readEpoch
+    this.startUpdateCheck(active)
+  }
+
+  private startUpdateCheck(active: ActiveUpdate): void {
+    const epoch = ++active.checkEpoch
+    active.checkAbort?.abort()
+    const abort = new AbortController()
+    active.checkAbort = abort
+    active.phase = 'checking'
+    active.versions = undefined
+    active.selectedExactVersion = undefined
+    active.registry = undefined
+    active.message = undefined
+    this.notifyChanged()
+    this.run('plugin manager versions', () => this.performUpdateCheck(active, epoch, abort))
+  }
+
+  private async performUpdateCheck(active: ActiveUpdate, epoch: number, abort: AbortController): Promise<void> {
+    let list: PluginVersionListFact
+    try {
+      list = await this.port.listVersions(active.name, abort.signal)
+    } catch (error) {
+      if (this.disposed || this.update !== active || active.checkEpoch !== epoch) return
+      active.checkAbort = undefined
+      active.phase = 'selecting'
+      active.versions = undefined
+      active.message = error instanceof PluginManagerStaleResultError
+        ? 'the version list belongs to a superseded currentness context; check versions again'
+        : `version check failed: ${errorMessage(error)}`
+      this.notifyChanged()
+      return
+    }
+    if (this.disposed || this.update !== active || active.checkEpoch !== epoch || active.phase !== 'checking') return
+    // A snapshot read (refresh or Host invalidation) since the check started
+    // changes the installed-version premise this list was computed from.
+    const card = this.card(active.cardValue)
+    if (this.readEpoch !== active.sourceReadGeneration
+      || card === undefined
+      || card.target !== 'bundle'
+      || card.isSelf
+      || !card.updatable
+      || card.version !== active.sourceInstalled) {
+      this.markUpdatePreviewInvalid(active)
+      return
+    }
+    active.checkAbort = undefined
+    active.versions = list
+    active.phase = 'selecting'
+    if (list.status === 'listed') {
+      // The Host answered which registry an update installs from; the Client
+      // never infers it from the install dialog.
+      active.registry = list.registry
+      // Prefer the first eligible STABLE version. A list of only eligible
+      // prereleases starts with NO selection: the user must choose one.
+      active.selectedExactVersion = list.versions
+        .find(version => !version.prerelease && isSelectableUpdateVersion(version))?.version
+    }
+    active.message = undefined
+    this.notifyChanged()
+  }
+
+  /** Select one exact version from the CURRENT Host list. No Host write. */
+  selectUpdateVersion(exactVersion: string): void {
+    const active = this.update
+    if (this.disposed || active === undefined || active.phase !== 'selecting') return
+    const list = active.versions
+    if (list === undefined || list.status !== 'listed') return
+    const version = list.versions.find(candidate => candidate.version === exactVersion)
+    if (version === undefined) {
+      this.message = "that version is not in the Host's current list; check versions again"
+      this.notifyChanged()
+      return
+    }
+    const blocked = updateVersionBlocker(version)
+    if (blocked !== undefined) {
+      this.message = blocked
+      this.notifyChanged()
+      return
+    }
+    active.selectedExactVersion = version.version
+    active.message = undefined
+    this.notifyChanged()
+  }
+
+  /** selecting -> confirm. Never writes to the Host. */
+  confirmUpdateVersion(): void {
+    const active = this.update
+    if (this.disposed || active === undefined || active.phase !== 'selecting') return
+    const list = active.versions
+    const selected = active.selectedExactVersion
+    if (list === undefined || list.status !== 'listed' || selected === undefined) return
+    const version = list.versions.find(candidate => candidate.version === selected)
+    if (version === undefined || !isSelectableUpdateVersion(version)) {
+      this.markUpdatePreviewInvalid(active)
+      return
+    }
+    const card = this.card(active.cardValue)
+    if (this.readEpoch !== active.sourceReadGeneration
+      || card === undefined
+      || card.target !== 'bundle'
+      || card.isSelf
+      || !card.updatable
+      || card.version !== active.sourceInstalled) {
+      this.markUpdatePreviewInvalid(active)
+      return
+    }
+    active.registry = list.registry
+    active.phase = 'confirm'
+    active.message = undefined
+    this.notifyChanged()
+  }
+
+  /** confirm -> selecting. No Host call and no request id. */
+  cancelUpdateConfirmation(): void {
+    const active = this.update
+    if (this.disposed || active === undefined || active.phase !== 'confirm') return
+    active.phase = 'selecting'
+    active.message = undefined
+    this.notifyChanged()
+  }
+
+  /** confirm -> running: the ONE Host write for this update lifecycle. */
+  executeUpdate(): void {
+    const active = this.update
+    if (this.disposed || active === undefined || active.phase !== 'confirm') return
+    const selected = active.selectedExactVersion
+    const list = active.versions
+    if (selected === undefined || list === undefined || list.status !== 'listed') return
+    // The update itself is in `confirm`, not writing; only ANOTHER in-flight
+    // write may refuse this dispatch.
+    if (this.busyValue !== undefined) {
+      this.message = 'another plugin change is still in progress; wait for it to settle'
+      this.notifyChanged()
+      return
+    }
+    if (this.hasDispatchedInstall()) {
+      this.message = 'another plugin change is still in progress; wait for it to settle'
+      this.notifyChanged()
+      return
+    }
+    // Never dispatch a selection whose authoritative premise changed since the
+    // confirmation opened.
+    const card = this.card(active.cardValue)
+    if (this.readEpoch !== active.sourceReadGeneration
+      || card === undefined
+      || card.target !== 'bundle'
+      || card.isSelf
+      || !card.updatable
+      || card.version !== active.sourceInstalled) {
+      this.markUpdatePreviewInvalid(active)
+      return
+    }
+    const requestId = nextInstallRequestId()
+    active.requestId = requestId
+    active.registry = list.registry
+    active.phase = 'running'
+    active.hostStep = undefined
+    active.announcedSteps = []
+    active.log = []
+    active.result = undefined
+    active.cancelStatus = undefined
+    active.matchedInstallPhase = undefined
+    active.readback = 'pending'
+    active.cancelPending = false
+    active.acknowledged = false
+    const token = ++this.mutationToken
+    active.mutationToken = token
+    this.busyValue = active.cardValue
+    this.message = undefined
+    this.notifyChanged()
+    this.run('plugin manager update', () => this.performUpdate(active, token))
+  }
+
+  private async performUpdate(active: ActiveUpdate, token: number): Promise<void> {
+    const requestId = active.requestId
+    const selected = active.selectedExactVersion
+    if (requestId === undefined || selected === undefined) return
+    let result: PluginUpdateResultFact
+    try {
+      result = await this.port.updateBundle(active.name, selected, active.registry ?? null, requestId)
+    } catch (error) {
+      if (this.disposed || token !== this.mutationToken || this.update !== active) return
+      // The write may have reached the Host and may still be running: this is
+      // indeterminate, never failure/success/cancellation, and is never retried.
+      active.phase = 'unknown'
+      active.result = undefined
+      active.readback = 'pending'
+      active.cancelPending = false
+      active.message = `update outcome unknown: ${errorMessage(error)} — the Host may still be applying it; not retried automatically`
+      this.notifyChanged()
+      await this.read()
+      if (this.disposed || token !== this.mutationToken || this.update !== active) return
+      this.notifyChanged()
+      if (!this.hooks.isOpen()) {
+        this.hooks.notify('plugin update outcome unknown; authoritative inventory reread', 'error')
+      }
+      return
+    }
+    if (this.disposed || token !== this.mutationToken || this.update !== active) return
+    active.result = result
+    active.phase = 'done'
+    active.cancelPending = false
+    active.message = undefined
+    // The operation's result is NOT the current inventory: keep the write lock
+    // until the authoritative reread has settled (see `read`).
+    this.notifyChanged()
+    await this.read()
+    if (this.disposed || token !== this.mutationToken || this.update !== active) return
+    this.busyValue = undefined
+    this.notifyChanged()
+    if (!this.hooks.isOpen()) {
+      this.hooks.notify(`plugin update ${result.result.application}: ${active.name}`, result.result.application === 'failed' ? 'error' : 'info')
+    }
+  }
+
+  /** Stop ONLY the target installation, in the official window. The update
+   *  promise (including the Host's automatic restore) still decides the end. */
+  stopUpdateTargetInstall(): void {
+    const active = this.update
+    if (this.disposed || active === undefined || active.phase !== 'running') return
+    if (!canStopTargetInstall(active)) return
+    const requestId = active.requestId
+    if (requestId === undefined) return
+    active.cancelPending = true
+    active.message = 'stopping the target installation…'
+    this.notifyChanged()
+    this.run('plugin manager stop update install', () => this.performStopUpdateInstall(active, requestId))
+  }
+
+  private async performStopUpdateInstall(active: ActiveUpdate, requestId: string): Promise<void> {
+    let cancellation: PluginInstallCancellationFact
+    try {
+      cancellation = await this.port.cancelInstall(requestId)
+    } catch (error) {
+      if (this.disposed || this.update !== active || active.requestId !== requestId) return
+      active.cancelPending = false
+      active.message = error instanceof PluginManagerStaleResultError
+        ? 'the cancellation result belongs to a superseded currentness context; the Host update result decides the outcome'
+        : `cancel failed: ${errorMessage(error)}`
+      this.notifyChanged()
+      return
+    }
+    if (this.disposed || this.update !== active || active.requestId !== requestId) return
+    active.cancelPending = false
+    active.cancelStatus = cancellation.status
+    // None of these statuses ends the update: only its own promise/Host restore does.
+    active.message = cancellation.status === 'cancelled'
+      ? 'Target installation cancelled; awaiting Host restoration/result'
+      : cancellation.status === 'too-late'
+        ? 'Too late; update may apply/restart'
+        : 'No active target install; awaiting update result'
+    this.notifyChanged()
+  }
+
+  /** Release an indeterminate update's local write lock: only after a
+   *  successful authoritative reread AND an explicit user acknowledgment. */
+  acknowledgeUpdateUncertainty(): void {
+    const active = this.update
+    if (this.disposed || active === undefined || active.phase !== 'unknown') return
+    if (active.readback !== 'ready') {
+      this.message = 'an authoritative inventory reread must succeed before the update lock can be released'
+      this.notifyChanged()
+      return
+    }
+    active.acknowledged = true
+    active.message = 'uncertainty acknowledged; the Host may still be finishing this update in the background'
+    this.busyValue = undefined
+    this.notifyChanged()
+  }
+
+  /** Hide the Update view. The panel owns the view change; this never cancels
+   *  or re-dispatches anything at the Host. */
+  hideUpdate(): void {
+    if (this.disposed) return
+  }
+
+  private onUpdateEvent(progress: PluginUpdateProgressFact): void {
+    if (this.disposed) return
+    const active = this.update
+    if (active === undefined || active.requestId === undefined) return
+    if (active.requestId !== progress.requestId) return
+    if (active.phase !== 'running') return
+    if (active.hostStep === progress.step) return
+    active.hostStep = progress.step
+    active.announcedSteps = [...active.announcedSteps, progress.step]
+    this.notifyChanged()
+  }
+
+  /** A new authoritative inventory invalidates an unconfirmed version list. */
+  private invalidateUpdatePreview(): void {
+    const active = this.update
+    if (active === undefined) return
+    if (active.phase !== 'checking' && active.phase !== 'selecting' && active.phase !== 'confirm') return
+    if (active.phase === 'selecting' && active.versions === undefined && active.checkAbort === undefined) return
+    this.markUpdatePreviewInvalid(active)
+  }
+
+  /** The confirmed list no longer describes the authoritative inventory. */
+  private markUpdatePreviewInvalid(active: ActiveUpdate): void {
+    active.checkAbort?.abort()
+    active.checkAbort = undefined
+    active.checkEpoch += 1
+    active.phase = 'selecting'
+    active.versions = undefined
+    active.selectedExactVersion = undefined
+    active.registry = undefined
+    active.message = 'Bundle changed; check versions again'
+    this.notifyChanged()
+  }
+
+  /** A successful/failed authoritative read while an update result is waiting
+   *  for inventory truth settles the readback it reports. */
+  private settleUpdateReadback(outcome: 'ready' | 'error', snapshot?: PluginManagerSnapshot): void {
+    const active = this.update
+    if (active === undefined) return
+    if (active.phase !== 'done' && active.phase !== 'unknown') return
+    // A successful reread also recovers a previously failed one (explicit `r reread`).
+    if (active.readback === 'ready') return
+    if (outcome === 'error' && active.readback === 'error') return
+    active.readback = outcome
+    if (outcome === 'ready' && snapshot !== undefined) {
+      active.lastObservedVersion = snapshot.bundles.find(bundle => bundle.name === active.name)?.version
+    }
+  }
+
   // ── mutations ────────────────────────────────────────────────────────────
 
   /**
@@ -739,6 +1294,13 @@ export class PluginManagerController {
   private refuseWhileMutating(): boolean {
     if (this.busyValue !== undefined) {
       this.message = 'another plugin change is still in progress; wait for it to settle'
+      this.notifyChanged()
+      return true
+    }
+    if (this.updateBlocksWrites()) {
+      this.message = this.update?.phase === 'unknown'
+        ? 'the previous update outcome is unknown; acknowledge it before changing plugins'
+        : 'another plugin change is still in progress; wait for it to settle'
       this.notifyChanged()
       return true
     }
@@ -1090,6 +1652,9 @@ export class PluginManagerController {
 
   private async read(): Promise<void> {
     if (this.disposed) return
+    // Any new authoritative inventory invalidates an unconfirmed version
+    // preview; a running/terminal update keeps its own lifecycle.
+    this.invalidateUpdatePreview()
     // Latest-started read wins: starting a newer read invalidates EVERY older
     // in-flight read, so an older read can neither repaint stale inventory
     // after it started nor clear a newer failure.
@@ -1107,6 +1672,7 @@ export class PluginManagerController {
       // caller just set).
       if (this.message === this.refreshErrorMessage) this.message = undefined
       this.refreshErrorMessage = undefined
+      this.settleUpdateReadback('ready', snapshot)
       this.notifyChanged()
     } catch (error) {
       if (this.disposed || epoch !== this.readEpoch) return
@@ -1115,6 +1681,7 @@ export class PluginManagerController {
       this.error = errorMessage(error)
       this.refreshErrorMessage = `refresh failed: ${this.error}`
       this.message = this.refreshErrorMessage
+      this.settleUpdateReadback('error')
       this.notifyChanged()
     }
   }
@@ -1145,6 +1712,22 @@ export class PluginManagerController {
 
   private onInstallEvent(event: PluginInstallEvent): void {
     if (this.disposed) return
+    // Only the operation that OWNS this exact request id may consume the
+    // event. The update and the install are independent lifecycles: their
+    // logs and phases must never cross over.
+    const updating = this.update
+    if (updating !== undefined
+      && updating.phase === 'running'
+      && updating.requestId !== undefined
+      && eventRequestId(event) === updating.requestId) {
+      if (event.kind === 'phase') {
+        updating.matchedInstallPhase = event.phase.phase
+        this.notifyChanged()
+        return
+      }
+      if (this.appendLog(updating, event.log.stream, event.log.text)) this.notifyChanged()
+      return
+    }
     const active = this.install
     if (active === undefined) return
     if (event.kind === 'phase') {
@@ -1163,23 +1746,23 @@ export class PluginManagerController {
     this.notifyChanged()
   }
 
-  /** Append one Host log chunk. Returns whether the bounded log really changed:
-   *  an empty/blank chunk is NOT a presentation change, so the caller must not
-   *  notify (a no-op notification would advance the monotonic transition count
-   *  and revoke a legitimate held gesture). */
-  private appendLog(active: ActiveInstall, stream: 'stdout' | 'stderr', text: string): boolean {
+  /** Append one Host log chunk to ONE bounded log owner. Returns whether the
+   *  bounded log really changed: an empty/blank chunk is NOT a presentation
+   *  change, so the caller must not notify (a no-op notification would advance
+   *  the monotonic transition count and revoke a legitimate held gesture). */
+  private appendLog(target: { log: string[] }, stream: 'stdout' | 'stderr', text: string): boolean {
     if (text === '') return false
     let appended = false
     for (const line of text.split('\n')) {
       if (line === '') continue
-      active.log.push(stream === 'stderr' ? `! ${line}` : line)
+      target.log.push(stream === 'stderr' ? `! ${line}` : line)
       appended = true
     }
     if (!appended) return false
-    if (active.log.length > LOG_MAX_LINES) active.log.splice(0, active.log.length - LOG_MAX_LINES)
-    let total = active.log.reduce((sum, line) => sum + line.length + 1, 0)
-    while (total > LOG_MAX_CHARS && active.log.length > 1) {
-      total -= (active.log.shift()!.length + 1)
+    if (target.log.length > LOG_MAX_LINES) target.log.splice(0, target.log.length - LOG_MAX_LINES)
+    let total = target.log.reduce((sum, line) => sum + line.length + 1, 0)
+    while (total > LOG_MAX_CHARS && target.log.length > 1) {
+      total -= (target.log.shift()!.length + 1)
     }
     return true
   }
@@ -1188,6 +1771,20 @@ export class PluginManagerController {
 /** The busy key for one row-level toggle (never the card row's identity). */
 function rowToggleValueBusy(entryId: string): string {
   return `action:toggle-row:${entryId}`
+}
+
+/** The request id one install event names (logs may omit it). */
+function eventRequestId(event: PluginInstallEvent): string | undefined {
+  return event.kind === 'phase' ? event.phase.requestId : event.log.requestId
+}
+
+/** `s stop target install` is legal ONLY while the Host is really installing
+ *  the update's target and before it starts restoring the former version. */
+function canStopTargetInstall(active: ActiveUpdate): boolean {
+  return active.phase === 'running'
+    && !active.cancelPending
+    && active.hostStep === 'installing'
+    && active.matchedInstallPhase === 'installing'
 }
 
 /** The refusal text for a self-protected target: the whole TUI bundle vs one of

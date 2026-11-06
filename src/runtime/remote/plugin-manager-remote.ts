@@ -24,6 +24,7 @@ import type {
   BundleInfo,
   ChangeResult,
   InstallBundleOptions,
+  ListVersionsOptions,
   PluginChange,
   PluginInfo,
   PluginInstallCancellation,
@@ -32,6 +33,10 @@ import type {
   PluginInstallRequestId,
   PluginRegistries,
   PluginSpecInspection,
+  PluginUpdateProgress,
+  PluginUpdateResult,
+  PluginVersionList,
+  UpdateBundleOptions,
 } from '@deepseek-ai/dsh-plugin-manager'
 import type {
   PluginChangeFact,
@@ -41,6 +46,9 @@ import type {
   PluginManagerPort,
   PluginManagerSnapshot,
   PluginSpecInspectionFact,
+  PluginUpdateProgressFact,
+  PluginUpdateResultFact,
+  PluginVersionListFact,
 } from '../plugin-manager-port.ts'
 import {
   detachChange,
@@ -48,6 +56,9 @@ import {
   detachLog,
   detachPhase,
   detachPluginManagerSnapshot,
+  detachPluginUpdateProgress,
+  detachPluginUpdateResult,
+  detachPluginVersionList,
   pluginInstallRequestId,
   type PluginExemptionsValue,
 } from '../plugin-manager-mapping.ts'
@@ -76,6 +87,8 @@ export interface RemotePluginManagerNamespace {
   installBundle(spec: string, options?: InstallBundleOptions): Promise<RemoteResultLike<ChangeResult>>
   waitForInstall(requestId: PluginInstallRequestId): Promise<RemoteResultLike<ChangeResult | null>>
   cancelInstall(requestId: PluginInstallRequestId): Promise<RemoteResultLike<PluginInstallCancellation>>
+  listVersions(name: string, options?: ListVersionsOptions, signal?: AbortSignal): Promise<RemoteResultLike<PluginVersionList>>
+  updateBundle(name: string, version: string, options?: UpdateBundleOptions): Promise<RemoteResultLike<PluginUpdateResult>>
 }
 
 /**
@@ -89,6 +102,7 @@ export interface RemotePluginManagerSource {
   $on(event: 'plugin-manager/changed', listener: (payload: PluginChange) => void): () => void
   $on(event: 'plugin-manager/install-state', listener: (payload: PluginInstallProgress) => void): () => void
   $on(event: 'plugin-manager/install-log', listener: (payload: PluginInstallLogChunk) => void): () => void
+  $on(event: 'plugin-manager/update-state', listener: (payload: PluginUpdateProgress) => void): () => void
 }
 
 /** One refused Remote call, normalized to the port's throw-based failure entry. */
@@ -199,6 +213,23 @@ export class RemotePluginManagerPort implements PluginManagerPort {
     return Object.freeze({ status: result.status })
   }
 
+  /** One version read fenced to the Connection generation captured before it ran. */
+  async listVersions(name: string, signal?: AbortSignal): Promise<PluginVersionListFact> {
+    return detachPluginVersionList(await this.currentness(
+      'listVersions',
+      () => this.remote.pluginManager.listVersions(name, {}, signal),
+    ))
+  }
+
+  /** The ONE official update write; a superseded reply is indeterminate, never success. */
+  async updateBundle(name: string, version: string, registry: string | null, requestId: string): Promise<PluginUpdateResultFact> {
+    return detachPluginUpdateResult(await this.currentness('updateBundle', () => this.remote.pluginManager.updateBundle(
+      name,
+      version,
+      { registry, requestId: pluginInstallRequestId(requestId) },
+    )))
+  }
+
   subscribeInstall(listener: (event: PluginInstallEvent) => void): () => void {
     const owned: Array<() => void> = []
     try {
@@ -216,6 +247,17 @@ export class RemotePluginManagerPort implements PluginManagerPort {
       for (const off of owned.splice(0)) off()
       throw error
     }
+    return () => {
+      for (const off of owned.splice(0)) off()
+    }
+  }
+
+  /** The official update step announcements; request-id matching stays in the Controller. */
+  subscribeUpdate(listener: (progress: PluginUpdateProgressFact) => void): () => void {
+    const owned: Array<() => void> = [this.remote.$on(
+      'plugin-manager/update-state',
+      payload => listener(detachPluginUpdateProgress(payload)),
+    )]
     return () => {
       for (const off of owned.splice(0)) off()
     }

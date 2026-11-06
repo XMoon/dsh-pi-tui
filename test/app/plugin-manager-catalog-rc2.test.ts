@@ -25,7 +25,7 @@ import assert from 'node:assert/strict'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test, { type TestContext } from 'node:test'
-import { Context } from '@deepseek-ai/cordis'
+import { Context, symbols } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import PluginManager, { type BundleInfo } from '@deepseek-ai/dsh-plugin-manager'
 import { EXPERIMENTAL_BUNDLES, OFFICIAL_ON_DEMAND_CATALOG, OPTIONAL_BUNDLES } from '@deepseek-ai/dsh-official-bundles'
@@ -40,6 +40,8 @@ import { buildPluginDetailView, buildPluginManagerModel, bundleValue } from '../
 import { detachPluginManagerSnapshot } from '../../src/runtime/plugin-manager-mapping.ts'
 import { DirectPluginManagerPort, type PluginManagerServiceLike } from '../../src/runtime/direct/plugin-manager-direct.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
+import { createRemoteApplicationHostFixture } from '../support/remote-application-fixture.ts'
+import { packFixturePackage, startLocalNpmRegistry, type AdditionalRegistryVersion, type LocalNpmRegistryControl } from '../support/local-npm-registry.ts'
 import { PluginManagerWorkspacePanel } from '../../src/tui/plugin-manager/workspace.ts'
 import type { WorkspaceHarness } from '../support/plugin-workspace-harness.ts'
 import { openWorkspace, plain } from '../support/plugin-workspace-harness.ts'
@@ -840,4 +842,303 @@ test('a profile-owned bundle the Host refuses keeps Disable and the Host-permitt
   assert.equal(cardOf()!.error?.code, 'unsupported-platform',
     'the real Host error is never erased by the local disable result')
   assert.equal(cardOf()!.canRemove, true, 'Remove remains available after the disable result')
+})
+
+// ── S5-PR2: REAL Host registry update qualification (L5) ────────────────────
+
+/** The test-owned registry bundle name (never a production package). */
+const UPDATE_FIXTURE_BUNDLE = 'dsh-s5-pr2-update-fixture'
+/** The published versions the update tests install and offer. */
+const UPDATE_FIXTURE_FROM = '1.0.0'
+const UPDATE_FIXTURE_TO = '1.1.0'
+
+interface UpdateFixture {
+  readonly host: Awaited<ReturnType<typeof createRemoteApplicationHostFixture>>
+  readonly registry: LocalNpmRegistryControl
+  readonly port: DirectPluginManagerPort
+  readonly profileDir: string
+}
+
+interface UpdateFixtureOptions {
+  /** Publish versions newer than 1.0.0 (default: one compatible bundle 1.1.0). */
+  readonly additional?: readonly {
+    readonly version: string
+    readonly bundle?: boolean
+    readonly enginesDsh?: string
+    readonly deprecated?: string
+    readonly prerelease?: boolean
+  }[]
+  /** Withhold the target tarball body (the deterministic cancel window). */
+  readonly slowTarball?: boolean
+  /** Provide the HMR service the Host's remove/install/restore branch needs. */
+  readonly hmr?: boolean
+}
+
+function updateFixturePackage(
+  root: string,
+  version: string,
+  options: { readonly bundle?: boolean; readonly enginesDsh?: string } = {},
+): { manifest: Record<string, unknown>; packed: ReturnType<typeof packFixturePackage> } {
+  const manifest: Record<string, unknown> = {
+    name: UPDATE_FIXTURE_BUNDLE,
+    version,
+    main: 'index.js',
+    ...(options.bundle === false ? {} : { dsh: { bundle: { patch: 'cordis.patch.yml' } } }),
+    ...(options.enginesDsh === undefined ? {} : { engines: { dsh: options.enginesDsh } }),
+  }
+  const packed = packFixturePackage(root, {
+    name: UPDATE_FIXTURE_BUNDLE,
+    version,
+    manifest,
+    files: options.bundle === false
+      ? { 'index.js': 'export default function noBundle() {}\n' }
+      : { 'cordis.patch.yml': '[]\n', 'index.js': 'export default function bundle() {}\n' },
+  }, { directory: 'package', tarballDirectory: 'tarball' })
+  return { manifest, packed }
+}
+
+/**
+ * A REAL `@deepseek-ai/dsh-plugin-manager` Host over an isolated managed
+ * profile, seeded with a REAL registry install of 1.0.0 from a loopback
+ * registry that also serves the update targets.
+ */
+async function startUpdateFixture(
+  t: TestContext,
+  presetId: string,
+  options: UpdateFixtureOptions = {},
+): Promise<UpdateFixture> {
+  const life = testLifecycle(t)
+  const host = await createRemoteApplicationHostFixture(life, presetId, {
+    pluginManagerProfile: { emptyProfile: true },
+    isolateHome: true,
+  })
+  if (options.hmr !== false) {
+    // The official Host reads this service to decide between its in-place
+    // install and the remove/install/restore branch. The stand-in provides
+    // exactly that seam (exclusive execution + no restart requirement).
+    host.ctx.provide('hmr', {
+      runExclusive: <T>(fn: () => Promise<T>) => fn(),
+      reconcileProfile: async () => ({ warnings: [], pending: [] }),
+    })
+  }
+  const packRoot = life.tempDir(`${presetId}-pack-`)
+  const from = updateFixturePackage(join(packRoot, 'from'), UPDATE_FIXTURE_FROM)
+  const additional = (options.additional ?? [{ version: UPDATE_FIXTURE_TO }]).map((entry) => {
+    const target = updateFixturePackage(join(packRoot, `to-${entry.version}`), entry.version, {
+      ...(entry.bundle === undefined ? {} : { bundle: entry.bundle }),
+      ...(entry.enginesDsh === undefined ? {} : { enginesDsh: entry.enginesDsh }),
+    })
+    const version: AdditionalRegistryVersion = {
+      packed: target.packed,
+      manifest: target.manifest,
+      publishedAt: '2026-02-03T00:00:00.000Z',
+      tags: ['latest'],
+      ...(entry.deprecated === undefined ? {} : { deprecated: entry.deprecated }),
+    }
+    return version
+  })
+  const registry = await startLocalNpmRegistry(from.packed, {
+    manifest: from.manifest,
+    ...(options.slowTarball === true ? { slowTarball: true } : {}),
+    additionalVersions: additional,
+  })
+  life.defer(() => registry.close())
+  const port = new DirectPluginManagerPort(host.ctx)
+  const seeded = await port.startInstall({
+    requestId: 'seed-1.0.0',
+    spec: `${UPDATE_FIXTURE_BUNDLE}@${UPDATE_FIXTURE_FROM}`,
+    registry: registry.url,
+    enabled: true,
+  })
+  assert.equal(seeded.application, options.hmr === false ? 'restart-required' : 'applied')
+  assert.equal(seeded.version, UPDATE_FIXTURE_FROM)
+  return { host, registry, port, profileDir: host.pluginManager!.profileDir }
+}
+
+function readProfileDependencies(profileDir: string): Record<string, string> {
+  const manifest = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8')) as {
+    dependencies?: Record<string, string>
+  }
+  return manifest.dependencies ?? {}
+}
+
+test('the REAL Host TUI path lists versions, confirms one exact target and updates 1.0.0 → 1.1.0', async (t) => {
+  const fixture = await startUpdateFixture(t, 's5-pr2-real-update-ui')
+  // Count the REAL Host updateBundle dispatches on the unwrapped service.
+  const proxy = fixture.host.ctx.get('pluginManager') as unknown as Record<symbol, unknown> & {
+    updateBundle(name: string, version: string, options?: unknown): Promise<unknown>
+  }
+  const service = (proxy[symbols.original] ?? proxy) as typeof proxy
+  const originalUpdate = service.updateBundle
+  let updateDispatches = 0
+  service.updateBundle = function patchedUpdate(this: unknown, name: string, version: string, options?: unknown): Promise<unknown> {
+    updateDispatches += 1
+    return originalUpdate.call(this, name, version, options)
+  }
+  t.after(() => { service.updateBundle = originalUpdate })
+  const harness = await openWorkspace({ port: fixture.port })
+  t.after(() => {
+    try { harness.close() } catch {}
+    try { harness.controller.dispose() } catch {}
+    try { harness.app.dispose() } catch {}
+  })
+  const settle = async (rounds = 10): Promise<void> => { await harness.waitForFrame(rounds) }
+  const frame = (): string => plain(harness.vt.getViewport())
+  const waitFor = async (predicate: () => boolean, label: string, timeoutMs = 60_000): Promise<void> => {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      if (predicate()) return
+      await new Promise<void>(resolve => setTimeout(resolve, 10))
+      await harness.vt.waitForRender()
+    }
+    throw new Error(`timed out waiting for ${label}: ${frame()}`)
+  }
+  await waitFor(() => harness.controller.status().state === 'ready', 'the real Host inventory read')
+  await settle()
+  const card = harness.controller.model().cards.find(candidate => candidate.name === UPDATE_FIXTURE_BUNDLE)
+  assert.ok(card !== undefined, 'the real registry install is listed')
+  assert.equal(card.updatable, true, 'the Host declares the profile registry dependency updatable')
+
+  // The REAL user path: search -> Details -> Check updates….
+  searchFor(harness, UPDATE_FIXTURE_BUNDLE)
+  await settle()
+  harness.vt.sendInput('\r') // Details
+  await waitFor(() => frame().includes('[Details]'), 'the Details focus frame')
+  harness.vt.sendInput('\x1b[B') // Disable… -> Check updates…
+  await settle()
+  harness.vt.sendInput('\r')
+  await waitFor(() => harness.panel.currentView() === 'update', 'the Check updates… entry')
+  await waitFor(() => /Update bundle · dsh-s5-pr2-update-fixture/u.test(frame()), 'the Update page identity')
+  await waitFor(() => /\b1\.1\.0\b/u.test(frame()), 'the Host listVersions target')
+  assert.match(frame(), /Installed\s+1\.0\.0/u)
+  assert.match(frame(), /http:\/\/127\.0\.0\.1:\d+\//u, 'the Host-answered registry is shown')
+  assert.doesNotMatch(frame(), /secret/u)
+
+  // Enter: select the exact version and open the confirmation.
+  harness.vt.sendInput('\r')
+  await waitFor(() => harness.controller.updateView()?.phase === 'confirm', 'the confirmation')
+  await waitFor(() => /From\s+1\.0\.0/u.test(frame()), 'the confirmation facts frame')
+  assert.match(frame(), /To\s+1\.1\.0/u)
+  assert.match(frame(), /> Cancel/u, 'Cancel is the default choice')
+  harness.vt.sendInput('\x1b[A') // Cancel -> Confirm update
+  await settle()
+  harness.vt.sendInput('\r')
+  await waitFor(() => harness.controller.updateView()?.phase === 'running', 'the running update')
+  await waitFor(() => harness.controller.updateView()?.readback === 'ready', 'the authoritative reread')
+  await waitFor(() => harness.controller.updateView()?.phase === 'done', 'the official update result')
+  await waitFor(() => /Observed installed version\s+1\.1\.0/u.test(frame()), 'the fresh installed version frame')
+  const view = frame()
+  assert.match(view, /Target result/u)
+  assert.match(view, /Outcome\s+applied/u)
+  assert.match(view, /Restore result/u)
+  assert.match(view, /Not required; the former version was never removed\./u)
+
+  // The authoritative Host truth: package version and profile dependency.
+  const reread = await fixture.port.snapshot()
+  assert.equal(reread.bundles.find(candidate => candidate.name === UPDATE_FIXTURE_BUNDLE)?.version, UPDATE_FIXTURE_TO)
+  assert.equal(readProfileDependencies(fixture.profileDir)[UPDATE_FIXTURE_BUNDLE], UPDATE_FIXTURE_TO)
+  assert.equal(updateDispatches, 1, 'the real Host updateBundle ran exactly once')
+})
+
+test('the REAL Host no-HMR update reports restart-required and still installs the target', async (t) => {
+  const fixture = await startUpdateFixture(t, 's5-pr2-real-update-nohmr', { hmr: false })
+  const list = await fixture.port.listVersions(UPDATE_FIXTURE_BUNDLE)
+  assert.equal(list.status, 'listed')
+  if (list.status !== 'listed') return
+  assert.equal(list.versions[0]?.version, UPDATE_FIXTURE_TO)
+  assert.equal(list.registry, `${fixture.registry.url}/`, 'the Host normalizes the answered registry')
+  const result = await fixture.port.updateBundle(UPDATE_FIXTURE_BUNDLE, UPDATE_FIXTURE_TO, list.registry, 'req-nohmr')
+  assert.equal(result.step, 'install')
+  assert.equal(result.result.application, 'restart-required')
+  assert.equal(result.result.restartReason, 'no-hmr')
+  assert.equal(result.restore, undefined, 'no removal/restore happens without HMR')
+  const snapshot = await fixture.port.snapshot()
+  assert.equal(snapshot.bundles.find(candidate => candidate.name === UPDATE_FIXTURE_BUNDLE)?.version, UPDATE_FIXTURE_TO)
+  assert.equal(readProfileDependencies(fixture.profileDir)[UPDATE_FIXTURE_BUNDLE], UPDATE_FIXTURE_TO)
+})
+
+test('the REAL Host refuses an older, a non-bundle and an incompatible target with zero profile writes', async (t) => {
+  const fixture = await startUpdateFixture(t, 's5-pr2-real-update-refusals', {
+    additional: [
+      { version: UPDATE_FIXTURE_TO },
+      { version: '1.2.0', bundle: false },
+      { version: '1.3.0', enginesDsh: '>=9' },
+    ],
+  })
+  const before = readFileSync(join(fixture.profileDir, 'package.json'), 'utf8')
+  const list = await fixture.port.listVersions(UPDATE_FIXTURE_BUNDLE)
+  assert.equal(list.status, 'listed')
+  if (list.status !== 'listed') return
+  const byVersion = new Map(list.versions.map(version => [version.version, version]))
+  assert.equal(byVersion.get('1.2.0')?.bundle, false)
+  assert.equal(byVersion.get('1.3.0')?.incompatible?.requirements['engines.dsh'], '>=9')
+
+  // A version newer than the installed one is required.
+  const older = await fixture.port.updateBundle(UPDATE_FIXTURE_BUNDLE, '0.9.0', list.registry, 'req-older')
+  assert.equal(older.step, 'check')
+  assert.equal(older.result.application, 'failed')
+  assert.match(older.result.error?.diagnostic ?? '', /not a version newer/u)
+  // A published version without a bundle cannot replace one.
+  const nonBundle = await fixture.port.updateBundle(UPDATE_FIXTURE_BUNDLE, '1.2.0', list.registry, 'req-nonbundle')
+  assert.equal(nonBundle.step, 'check')
+  assert.equal(nonBundle.result.error?.code, 'not-bundle')
+  // A Host-incompatible version is refused before any removal.
+  const incompatible = await fixture.port.updateBundle(UPDATE_FIXTURE_BUNDLE, '1.3.0', list.registry, 'req-incompatible')
+  assert.equal(incompatible.step, 'check')
+  assert.equal(incompatible.result.error?.code, 'incompatible-version')
+  assert.equal(incompatible.result.error?.incompatible?.[0]?.requirements['engines.dsh'], '>=9')
+  assert.equal(readFileSync(join(fixture.profileDir, 'package.json'), 'utf8'), before,
+    'every refused target left the profile manifest byte-identical')
+  const snapshot = await fixture.port.snapshot()
+  assert.equal(snapshot.bundles.find(candidate => candidate.name === UPDATE_FIXTURE_BUNDLE)?.version, UPDATE_FIXTURE_FROM)
+})
+
+test('a REAL slow target install cancelled through the Host restores 1.0.0 (independent restore result)', async (t) => {
+  const fixture = await startUpdateFixture(t, 's5-pr2-real-update-cancel', { slowTarball: true })
+  const requestId = 'req-cancel-target'
+  const pending = fixture.port.updateBundle(UPDATE_FIXTURE_BUNDLE, UPDATE_FIXTURE_TO, fixture.registry.url, requestId)
+  await fixture.registry.waitForTarballRequest(60_000)
+  const cancellation = await fixture.port.cancelInstall(requestId)
+  assert.equal(cancellation.status, 'cancelled')
+  const result = await pending
+  assert.equal(result.result.application, 'cancelled', 'the target installation was cancelled')
+  assert.equal(result.restore?.application, 'applied', 'the Host restored the former version separately')
+  assert.equal(result.restore?.version, UPDATE_FIXTURE_FROM)
+  const snapshot = await fixture.port.snapshot()
+  assert.equal(snapshot.bundles.find(candidate => candidate.name === UPDATE_FIXTURE_BUNDLE)?.version, UPDATE_FIXTURE_FROM)
+  assert.equal(readProfileDependencies(fixture.profileDir)[UPDATE_FIXTURE_BUNDLE], UPDATE_FIXTURE_FROM)
+})
+
+test('a REAL failed target install plus a failed restore are reported as two independent failures', async (t) => {
+  const fixture = await startUpdateFixture(t, 's5-pr2-real-update-restore-failure', { slowTarball: true })
+  // Fault injection through the NATIVE Host method: only the restore's exact
+  // previous spec fails; the update target still runs through the real pnpm.
+  const proxy = fixture.host.ctx.get('pluginManager') as unknown as Record<symbol, unknown> & {
+    installBundle(spec: string, options?: { saveExact?: boolean }): Promise<unknown>
+  }
+  const service = (proxy[symbols.original] ?? proxy) as typeof proxy
+  const original = service.installBundle
+  service.installBundle = async function patchedInstall(this: unknown, spec: string, options?: { saveExact?: boolean }): Promise<unknown> {
+    if (spec === `${UPDATE_FIXTURE_BUNDLE}@${UPDATE_FIXTURE_FROM}` && options?.saveExact === true) {
+      return {
+        changed: false,
+        application: 'failed',
+        stage: 'install',
+        target: spec,
+        error: { code: 'operation-error', diagnostic: 'restore fault injected' },
+      }
+    }
+    return original.call(this, spec, options)
+  }
+  t.after(() => { service.installBundle = original })
+
+  const requestId = 'req-restore-failure'
+  const pending = fixture.port.updateBundle(UPDATE_FIXTURE_BUNDLE, UPDATE_FIXTURE_TO, fixture.registry.url, requestId)
+  await fixture.registry.waitForTarballRequest(60_000)
+  const cancellation = await fixture.port.cancelInstall(requestId)
+  assert.equal(cancellation.status, 'cancelled')
+  const result = await pending
+  assert.equal(result.result.application, 'cancelled')
+  assert.equal(result.restore?.application, 'failed', 'a failed restoration is NOT merged into the target result')
+  assert.equal(result.restore?.error?.diagnostic, 'restore fault injected')
 })

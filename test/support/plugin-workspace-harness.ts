@@ -27,6 +27,9 @@ import type {
   PluginManagerSnapshot,
   PluginRowFact,
   PluginSpecInspectionFact,
+  PluginUpdateProgressFact,
+  PluginUpdateResultFact,
+  PluginVersionListFact,
 } from '../../src/runtime/plugin-manager-port.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
@@ -93,6 +96,10 @@ export interface WorkspaceHarnessOptions {
   readonly waitImpl?: (requestId: string) => Promise<PluginChangeFact | null>
   readonly cancelImpl?: (requestId: string) => Promise<{ status: 'cancelled' | 'too-late' | 'not-running' }>
   readonly inspectImpl?: (spec: string) => Promise<PluginSpecInspectionFact>
+  /** Replaces the fixture version list (the Host's own answer). */
+  readonly versionsImpl?: (name: string) => Promise<PluginVersionListFact>
+  /** Replaces the fixture update write (the Host's own settlement). */
+  readonly updateImpl?: (name: string, version: string, registry: string | null, requestId: string) => Promise<PluginUpdateResultFact>
   /** A REAL Host-backed port (an L6 source->sink test supplies it); the
    *  default fake catalog below is never used in that case. */
   readonly port?: PluginManagerPort
@@ -116,6 +123,12 @@ export interface WorkspaceHarness {
   /** How many official inventory snapshots the controller requested. */
   readonly snapshotCalls: () => number
   readonly installCalls: Array<{ requestId: string; spec: string; approvedBuilds?: readonly string[] }>
+  /** Every Host version-list read (`name`). */
+  readonly listVersionCalls: Array<{ name: string }>
+  /** Every official update write, with its exact target/registry/request id. */
+  readonly updateCalls: Array<{ name: string; version: string; registry: string | null; requestId: string }>
+  readonly emitUpdate: (progress: PluginUpdateProgressFact) => void
+  readonly updateSubscriptions: () => number
   readonly setBundle: Array<{ name: string; enabled: boolean }>
   readonly setPlugin: Array<{ entryId: string; enabled: boolean }>
   readonly removeBundle: string[]
@@ -166,6 +179,7 @@ export async function openWorkspace(options: WorkspaceHarnessOptions = {}): Prom
     row({ entryId: 'e-tui', moduleName: SELF_BUNDLE, patchId: 'tui-app' }),
     row({ entryId: 'e-free', moduleName: 'free-extension', patchId: 'free' }),
   ]
+  let currentBundles: readonly PluginBundleFact[] = bundles
   const snapshot: PluginManagerSnapshot = {
     bundles,
     plugins,
@@ -174,8 +188,11 @@ export async function openWorkspace(options: WorkspaceHarnessOptions = {}): Prom
     exemptionWarnings: options.exemptionWarnings ?? [],
   }
   const installListeners = new Set<(event: PluginInstallEvent) => void>()
+  const updateListeners = new Set<(progress: PluginUpdateProgressFact) => void>()
   const invalidateListeners = new Set<() => void>()
   const installCalls: Array<{ requestId: string; spec: string; approvedBuilds?: readonly string[] }> = []
+  const listVersionCalls: Array<{ name: string }> = []
+  const updateCalls: Array<{ name: string; version: string; registry: string | null; requestId: string }> = []
   let snapshotCalls = 0
   const setBundle: Array<{ name: string; enabled: boolean }> = []
   const setPlugin: Array<{ entryId: string; enabled: boolean }> = []
@@ -183,7 +200,7 @@ export async function openWorkspace(options: WorkspaceHarnessOptions = {}): Prom
   /** Host `cancelInstall` calls (a WRITE-side operation on the port). */
   const cancelCalls: string[] = []
   const fixturePort: PluginManagerPort = {
-    snapshot: async () => { snapshotCalls += 1; return snapshot },
+    snapshot: async () => { snapshotCalls += 1; return { ...snapshot, bundles: currentBundles } },
     inspect: options.inspectImpl ?? (async (spec: string) => ({
       status: 'accepted',
       kind: 'registry',
@@ -217,6 +234,51 @@ export async function openWorkspace(options: WorkspaceHarnessOptions = {}): Prom
         : options.cancelImpl(requestId)
     },
     subscribeInstall: (listener) => { installListeners.add(listener); return () => installListeners.delete(listener) },
+    listVersions: async (name) => {
+      listVersionCalls.push({ name })
+      if (options.versionsImpl !== undefined) return options.versionsImpl(name)
+      return {
+        status: 'listed' as const,
+        installed: '1.0.0',
+        registry: 'https://registry.example/',
+        attempts: [{ registry: 'https://registry.example/' }],
+        versions: [{
+          version: '1.1.0',
+          publishedAt: '2026-01-02T03:04:05.000Z',
+          tags: ['latest'],
+          prerelease: false,
+          bundle: true,
+        }],
+        omitted: 0,
+      }
+    },
+    updateBundle: async (name, version, registry, requestId) => {
+      updateCalls.push({ name, version, registry, requestId })
+      const result = options.updateImpl !== undefined
+        ? await options.updateImpl(name, version, registry, requestId)
+        : {
+          from: '1.0.0',
+          to: version,
+          step: 'install' as const,
+          result: {
+            changed: true,
+            application: 'applied' as const,
+            stage: 'install' as const,
+            target: `${name}@${version}`,
+            bundle: name,
+            version,
+          },
+        }
+      // The fixture profile mirrors a successful Host write: a later
+      // authoritative snapshot reflects the installed target version.
+      if (result.result.application !== 'failed' && result.result.version !== undefined) {
+        currentBundles = currentBundles.map(candidate => candidate.name === name
+          ? { ...candidate, version: result.result.version }
+          : candidate)
+      }
+      return result
+    },
+    subscribeUpdate: (listener) => { updateListeners.add(listener); return () => updateListeners.delete(listener) },
     subscribeInvalidation: (listener) => { invalidateListeners.add(listener); return () => invalidateListeners.delete(listener) },
   }
   const port = options.port ?? fixturePort
@@ -292,12 +354,16 @@ export async function openWorkspace(options: WorkspaceHarnessOptions = {}): Prom
     copied,
     snapshotCalls: () => snapshotCalls,
     installCalls,
+    listVersionCalls,
+    updateCalls,
     setBundle,
     setPlugin,
     removeBundle,
     cancelInstallCalls: cancelCalls,
     invalidate: () => { for (const listener of [...invalidateListeners]) listener() },
     emit: event => { for (const listener of [...installListeners]) listener(event) },
+    emitUpdate: progress => { for (const listener of [...updateListeners]) listener(progress) },
+    updateSubscriptions: () => updateListeners.size,
     close: () => settings!.close(),
     reopen: async (reopenOptions = {}) => {
       settings = openLease(reopenOptions.startOn === 'rail' ? 'rail' : 'plugins')

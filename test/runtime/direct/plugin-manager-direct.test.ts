@@ -38,6 +38,20 @@ function fakeService(overrides: Partial<PluginManagerServiceLike> = {}): PluginM
     installBundle: async () => change({ stage: 'install' }),
     waitForInstall: async () => null,
     cancelInstall: async () => ({ status: 'not-running' }),
+    listVersions: async () => ({
+      status: 'listed',
+      installed: '1.0.0',
+      registry: 'https://registry.example/',
+      attempts: [{ registry: 'https://registry.example/' }],
+      versions: [{ version: '1.1.0', tags: ['latest'], prerelease: false, bundle: true }],
+      omitted: 0,
+    }),
+    updateBundle: async (_name, version) => ({
+      from: '1.0.0',
+      to: version,
+      step: 'install',
+      result: { changed: true, application: 'applied', stage: 'install', target: 'pkg', version },
+    }),
     ...overrides,
   } as PluginManagerServiceLike
 }
@@ -343,4 +357,147 @@ test('the TUI plugin-manager source never touches profile/process internals', ()
       assert.ok(!source.includes(token), `${file} must not reference ${token}`)
     }
   }
+})
+
+// ── S5-PR2: official version listing and update ─────────────────────────────
+
+test('listVersions asks the Host default registry plan and maps every version fact verbatim', async () => {
+  const calls: unknown[] = []
+  const port = new DirectPluginManagerPort(host(fakeService({
+    listVersions: async (name, options, signal) => {
+      calls.push({ name, options, aborted: signal?.aborted })
+      return {
+        status: 'listed',
+        installed: '1.0.0',
+        registry: 'https://registry.example/',
+        attempts: [
+          { registry: 'https://fallback.example/', problem: 'network', reason: 'offline' },
+          { registry: 'https://registry.example/' },
+        ],
+        versions: [
+          {
+            version: '1.1.0',
+            publishedAt: '2026-01-02T03:04:05.000Z',
+            tags: ['latest'],
+            prerelease: false,
+            bundle: true,
+          },
+          {
+            version: '1.2.0-rc.1',
+            tags: ['next'],
+            prerelease: true,
+            deprecated: 'use 1.1.x',
+            bundle: false,
+            incompatible: {
+              name: 'pkg',
+              version: '1.2.0-rc.1',
+              runtimeVersion: '0.2.2-rc.1',
+              requirements: { 'engines.dsh': '>=9' },
+            },
+          },
+        ],
+        omitted: 2,
+      }
+    },
+  })).ctx)
+
+  const signal = new AbortController().signal
+  const list = await port.listVersions('pkg', signal)
+  assert.deepEqual(calls, [{ name: 'pkg', options: {}, aborted: false }],
+    'the Client never supplies a registry to the Host read')
+  assert.equal(list.status, 'listed')
+  if (list.status !== 'listed') return
+  assert.equal(list.installed, '1.0.0')
+  assert.equal(list.registry, 'https://registry.example/')
+  assert.equal(list.omitted, 2)
+  assert.equal(list.attempts.length, 2)
+  assert.equal(list.attempts[0]!.problem, 'network')
+  assert.equal(list.attempts[0]!.reason, 'offline')
+  assert.equal(list.versions[0]!.version, '1.1.0')
+  assert.deepEqual([...list.versions[0]!.tags], ['latest'])
+  assert.equal(list.versions[0]!.publishedAt, '2026-01-02T03:04:05.000Z')
+  assert.equal(list.versions[1]!.prerelease, true)
+  assert.equal(list.versions[1]!.deprecated, 'use 1.1.x')
+  assert.equal(list.versions[1]!.bundle, false)
+  assert.equal(list.versions[1]!.incompatible?.requirements['engines.dsh'], '>=9')
+  assert.ok(Object.isFrozen(list))
+  assert.ok(Object.isFrozen(list.versions))
+  assert.ok(Object.isFrozen(list.versions[0]))
+  assert.ok(Object.isFrozen(list.versions[0]!.tags))
+})
+
+test('listVersions maps a refused Host answer without inventing a status', async () => {
+  const port = new DirectPluginManagerPort(host(fakeService({
+    listVersions: async () => ({
+      status: 'refused',
+      problem: 'not-updatable',
+      reason: 'not a registry dependency',
+      attempts: [],
+    }),
+  })).ctx)
+  const list = await port.listVersions('pkg')
+  assert.deepEqual(list, {
+    status: 'refused',
+    problem: 'not-updatable',
+    reason: 'not a registry dependency',
+    attempts: [],
+  })
+})
+
+test('updateBundle forwards the exact target, registry and request id and maps both outcomes', async () => {
+  const calls: unknown[] = []
+  const port = new DirectPluginManagerPort(host(fakeService({
+    updateBundle: async (name, version, options) => {
+      calls.push({ name, version, options })
+      return {
+        from: '1.0.0',
+        to: version,
+        step: 'install',
+        result: change({
+          stage: 'install',
+          application: 'failed',
+          version: '1.1.0',
+          error: { code: 'operation-error', diagnostic: 'target failed' },
+        }),
+        restore: change({
+          stage: 'install',
+          application: 'applied',
+          version: '1.0.0',
+        }),
+      }
+    },
+  })).ctx)
+
+  const result = await port.updateBundle('pkg', '1.1.0', 'https://registry.example/', 'req-update')
+  assert.deepEqual(calls, [{
+    name: 'pkg',
+    version: '1.1.0',
+    options: { registry: 'https://registry.example/', requestId: 'req-update' },
+  }])
+  assert.equal(result.from, '1.0.0')
+  assert.equal(result.to, '1.1.0')
+  assert.equal(result.step, 'install')
+  assert.equal(result.result.application, 'failed')
+  assert.equal(result.result.error?.diagnostic, 'target failed')
+  assert.equal(result.restore?.application, 'applied', 'the restore outcome is a SEPARATE field')
+  assert.equal(result.restore?.version, '1.0.0')
+  assert.ok(Object.isFrozen(result))
+  assert.ok(Object.isFrozen(result.result))
+  assert.ok(Object.isFrozen(result.restore))
+})
+
+test('subscribeUpdate delivers the detached official update step and unsubscribes', () => {
+  const { ctx, listeners } = host(fakeService())
+  const port = new DirectPluginManagerPort(ctx)
+  const received: unknown[] = []
+  const off = port.subscribeUpdate(progress => received.push(progress))
+  assert.equal([...listeners.get('plugin-manager/update-state')!].length, 1)
+
+  const update = [...listeners.get('plugin-manager/update-state')!][0]!
+  update({ requestId: 'req-update', step: 'restoring' })
+  assert.deepEqual(received, [{ requestId: 'req-update', step: 'restoring' }])
+
+  off()
+  assert.equal([...listeners.get('plugin-manager/update-state')!].length, 0,
+    'the disposer releases exactly the update-state listener')
 })

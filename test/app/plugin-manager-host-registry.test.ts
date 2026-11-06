@@ -34,6 +34,9 @@ const PORT: PluginManagerPort = {
   waitForInstall: async () => null,
   cancelInstall: async () => ({ status: 'not-running' }),
   subscribeInstall: () => () => {},
+  listVersions: async () => ({ status: 'refused', problem: 'not-updatable', reason: 'the fixture has no updatable bundle', attempts: [] }),
+  updateBundle: async () => { throw new Error('updateBundle is not used by this fixture') },
+  subscribeUpdate: () => () => {},
   subscribeInvalidation: () => () => {},
 }
 

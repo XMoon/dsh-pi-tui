@@ -76,10 +76,11 @@ interface RemotePluginManagerFixture extends RemotePluginManagerSource {
   readonly calls: string[]
   readonly installOptions: InstallBundleOptions[]
   /** How many times each forwarded-event disposer was actually invoked. */
-  readonly offCalls: { readonly installState: number; readonly installLog: number; readonly changed: number }
+  readonly offCalls: { readonly installState: number; readonly installLog: number; readonly changed: number; readonly updateState: number }
   emitState(progress: PluginInstallProgress): void
   emitLog(chunk: PluginInstallLogChunk): void
   emitChanged(): void
+  emitUpdate(progress: { readonly requestId: string; readonly step: 'checking' | 'removing' | 'installing' | 'restoring' }): void
   refuse(operation: string, message: string): void
   failOn(event: string, error: unknown): void
   readonly subscriptions: number
@@ -131,8 +132,9 @@ function remoteFixture(): RemotePluginManagerFixture {
   const stateListeners = new Set<(payload: PluginInstallProgress) => void>()
   const logListeners = new Set<(payload: PluginInstallLogChunk) => void>()
   const changedListeners = new Set<() => void>()
+  const updateListeners = new Set<(payload: { readonly requestId: string; readonly step: 'checking' | 'removing' | 'installing' | 'restoring' }) => void>()
   const eventFailures = new Map<string, unknown>()
-  const offCalls = { installState: 0, installLog: 0, changed: 0 }
+  const offCalls = { installState: 0, installLog: 0, changed: 0, updateState: 0 }
   /** Record the call and fold a scripted refusal into the official result. */
   const settle = <T>(operation: string, value: T): { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: unknown } => {
     calls.push(operation)
@@ -181,6 +183,20 @@ function remoteFixture(): RemotePluginManagerFixture {
       ? null
       : { ...CHANGE, stage: 'install' as const, target: String(requestId) }),
     cancelInstall: async () => settle('cancelInstall', { status: 'cancelled' as const }),
+    listVersions: async (name) => settle('listVersions', {
+      status: 'listed' as const,
+      installed: '1.0.0',
+      registry: 'https://r.example',
+      attempts: [{ registry: 'https://r.example' }],
+      versions: [{ version: '1.1.0', tags: ['latest'], prerelease: false, bundle: true }],
+      omitted: 0,
+    }),
+    updateBundle: async (name, version) => settle('updateBundle', {
+      from: '1.0.0',
+      to: version,
+      step: 'install' as const,
+      result: { ...CHANGE, stage: 'install' as const, target: `${name}@${version}`, version },
+    }),
   }
   return {
     pluginManager,
@@ -201,6 +217,11 @@ function remoteFixture(): RemotePluginManagerFixture {
         changedListeners.add(typed)
         return () => { offCalls.changed += 1; changedListeners.delete(typed) }
       }
+      if (event === 'plugin-manager/update-state') {
+        const typed = listener as (payload: { readonly requestId: string; readonly step: 'checking' | 'removing' | 'installing' | 'restoring' }) => void
+        updateListeners.add(typed)
+        return () => { offCalls.updateState += 1; updateListeners.delete(typed) }
+      }
       const typed = listener as (payload: PluginInstallLogChunk) => void
       logListeners.add(typed)
       return () => { offCalls.installLog += 1; logListeners.delete(typed) }
@@ -208,10 +229,11 @@ function remoteFixture(): RemotePluginManagerFixture {
     get calls() { return calls },
     get installOptions() { return installOptions },
     get offCalls() { return offCalls },
-    get subscriptions() { return stateListeners.size + logListeners.size + changedListeners.size },
+    get subscriptions() { return stateListeners.size + logListeners.size + changedListeners.size + updateListeners.size },
     emitState(progress) { for (const listener of [...stateListeners]) listener(progress) },
     emitLog(chunk) { for (const listener of [...logListeners]) listener(chunk) },
     emitChanged() { for (const listener of [...changedListeners]) listener() },
+    emitUpdate(progress) { for (const listener of [...updateListeners]) listener(progress) },
     refuse(operation, message) { failures.set(operation, message) },
     failOn(event, error) { eventFailures.set(event, error) },
   }
@@ -240,6 +262,20 @@ function directFixture(): PluginManagerServiceLike & { calls: string[] } {
     installBundle: async () => { calls.push('installBundle'); return CHANGE },
     waitForInstall: async () => { calls.push('waitForInstall'); return null },
     cancelInstall: async () => { calls.push('cancelInstall'); return { status: 'not-running' } },
+    listVersions: async () => { calls.push('listVersions'); return {
+      status: 'listed',
+      installed: '1.0.0',
+      registry: 'https://r.example',
+      attempts: [{ registry: 'https://r.example' }],
+      versions: [{ version: '1.1.0', tags: ['latest'], prerelease: false, bundle: true }],
+      omitted: 0,
+    } },
+    updateBundle: async (name, version) => { calls.push('updateBundle'); return {
+      from: '1.0.0',
+      to: version,
+      step: 'install',
+      result: { ...CHANGE, stage: 'install', target: `${name}@${version}`, version },
+    } },
     get calls() { return calls },
   }
 }
@@ -376,12 +412,12 @@ test('subscribeInstall maps both forwarded install events and releases both on d
   dispose()
   dispose()
   assert.equal(remote.subscriptions, 0)
-  assert.deepEqual(remote.offCalls, { installState: 1, installLog: 1, changed: 0 },
+  assert.deepEqual(remote.offCalls, { installState: 1, installLog: 1, changed: 0, updateState: 0 },
     'each install-event disposer runs EXACTLY once, even when dispose is repeated')
   remote.emitState({ requestId: pluginInstallRequestId('req-2'), phase: 'applying' })
   remote.emitLog({ jobId: 'job-2', argv: [], cwd: '/tmp', stream: 'stderr', text: 'late' })
   assert.equal(events.length, 2, 'a disposed subscription must not deliver later events')
-  assert.deepEqual(remote.offCalls, { installState: 1, installLog: 1, changed: 0 })
+  assert.deepEqual(remote.offCalls, { installState: 1, installLog: 1, changed: 0, updateState: 0 })
 })
 
 test('a refused Remote call surfaces as one thrown Error (never application: failed)', async () => {
@@ -427,13 +463,13 @@ test('a forwarded plugin-manager/changed maps to exactly one invalidation and di
   dispose()
   assert.equal(remote.subscriptions, 0, 'the changed subscription is released')
   assert.equal(generation.subscriptions, 0, 'the generation subscription is released')
-  assert.deepEqual(remote.offCalls, { installState: 0, installLog: 0, changed: 1 },
+  assert.deepEqual(remote.offCalls, { installState: 0, installLog: 0, changed: 1, updateState: 0 },
     'the changed disposer runs EXACTLY once, even when dispose is repeated')
   assert.equal(generation.offCalls, 1, 'the generation disposer runs EXACTLY once')
   remote.emitChanged()
   generation.set(2)
   assert.equal(invalidations, 1, 'a disposed subscription must not deliver later invalidations')
-  assert.deepEqual(remote.offCalls, { installState: 0, installLog: 0, changed: 1 })
+  assert.deepEqual(remote.offCalls, { installState: 0, installLog: 0, changed: 1, updateState: 0 })
   assert.equal(generation.offCalls, 1)
 })
 
@@ -679,4 +715,124 @@ test('installBundle, waitForInstall and cancelInstall settlements are generation
   assert.equal(started.stage, 'install')
   assert.deepEqual(await currentPort.waitForInstall('r-1'), { ...CHANGE, stage: 'install', target: 'r-1' })
   assert.deepEqual(await currentPort.cancelInstall('r-1'), { status: 'cancelled' })
+})
+
+// ── S5-PR2: official version listing and update over the generated Remote ───
+
+test('the Remote version list and update result match the Direct adapter exactly', async () => {
+  const remote = portOf(remoteFixture())
+  const direct = directPort(directFixture())
+  assert.deepEqual(await remote.listVersions('bundle-a', new AbortController().signal), await direct.listVersions('bundle-a'))
+  assert.deepEqual(
+    await remote.updateBundle('bundle-a', '1.1.0', 'https://r.example', 'req-update'),
+    await direct.updateBundle('bundle-a', '1.1.0', 'https://r.example', 'req-update'),
+  )
+})
+
+test('the Remote update write forwards the exact version, Host-answered registry and request id', async () => {
+  const remote = remoteFixture()
+  const port = portOf(remote)
+  const fact = await port.updateBundle('bundle-a', '1.2.0', 'https://r.example', 'req-update')
+  assert.deepEqual([...remote.calls], ['updateBundle'])
+  assert.equal(fact.from, '1.0.0')
+  assert.equal(fact.to, '1.2.0')
+  assert.equal(fact.step, 'install')
+  assert.equal(fact.result.target, 'bundle-a@1.2.0')
+})
+
+test('subscribeUpdate maps the forwarded update state and releases exactly one listener', () => {
+  const remote = remoteFixture()
+  const port = portOf(remote)
+  const received: unknown[] = []
+  const dispose = port.subscribeUpdate(progress => received.push(progress))
+  remote.emitUpdate({ requestId: 'req-update', step: 'checking' })
+  remote.emitUpdate({ requestId: 'req-update', step: 'installing' })
+  assert.deepEqual(received, [
+    { requestId: 'req-update', step: 'checking' },
+    { requestId: 'req-update', step: 'installing' },
+  ])
+  dispose()
+  dispose()
+  assert.equal(remote.subscriptions, 0)
+  assert.deepEqual(remote.offCalls, { installState: 0, installLog: 0, changed: 0, updateState: 1 },
+    'the update-state disposer runs EXACTLY once')
+  remote.emitUpdate({ requestId: 'req-update', step: 'restoring' })
+  assert.equal(received.length, 2, 'a disposed subscription delivers nothing later')
+})
+
+test('a version list or update reply carried by a superseded Connection generation is indeterminate', async (t) => {
+  const hold = <T>(call: () => Promise<T>): { pending: Promise<T>; release: () => void } => {
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    return { pending: (async () => { await gate; return call() })(), release }
+  }
+
+  // A successful version list carried by a superseded generation.
+  const listRemote = remoteFixture()
+  const listOriginal = listRemote.pluginManager.listVersions
+  const listHold = hold(() => listOriginal('bundle-a', undefined, undefined))
+  listRemote.pluginManager.listVersions = () => listHold.pending
+  t.after(() => { listHold.release() })
+  const listGeneration = generationFixture(1)
+  const listPort = portOf(listRemote, listGeneration)
+  const listing = listPort.listVersions('bundle-a')
+  listGeneration.set(2)
+  listHold.release()
+  await assert.rejects(listing, error => error instanceof PluginManagerStaleResultError)
+
+  // A successful update result carried by a superseded generation.
+  const updateRemote = remoteFixture()
+  const updateOriginal = updateRemote.pluginManager.updateBundle
+  const updateHold = hold(() => updateOriginal('bundle-a', '1.1.0', { registry: 'https://r.example' }))
+  updateRemote.pluginManager.updateBundle = () => updateHold.pending
+  t.after(() => { updateHold.release() })
+  const updateGeneration = generationFixture(1)
+  const updatePort = portOf(updateRemote, updateGeneration)
+  const updating = updatePort.updateBundle('bundle-a', '1.1.0', 'https://r.example', 'req-update')
+  updateGeneration.set(2)
+  updateHold.release()
+  await assert.rejects(updating, error => error instanceof PluginManagerStaleResultError)
+  assert.deepEqual([...updateRemote.calls], ['updateBundle'], 'the real call ran; only its stale reply was refused')
+
+  // A refused or transport-rejected update carried by a superseded generation is indeterminate.
+  const refusedRemote = remoteFixture()
+  refusedRemote.refuse('updateBundle', 'host refused')
+  const refusedOriginal = refusedRemote.pluginManager.updateBundle
+  const refusedHold = hold(() => refusedOriginal('bundle-a', '1.1.0', { registry: 'https://r.example' }))
+  refusedRemote.pluginManager.updateBundle = () => refusedHold.pending
+  t.after(() => { refusedHold.release() })
+  const refusedGeneration = generationFixture(1)
+  const refusedPort = portOf(refusedRemote, refusedGeneration)
+  const refusedUpdating = refusedPort.updateBundle('bundle-a', '1.1.0', 'https://r.example', 'req-update')
+  refusedGeneration.set(2)
+  refusedHold.release()
+  await assert.rejects(refusedUpdating, error => error instanceof PluginManagerStaleResultError)
+
+  const lostRemote = remoteFixture()
+  let releaseLost!: () => void
+  const lostGate = new Promise<void>(resolve => { releaseLost = resolve })
+  t.after(() => { releaseLost() })
+  lostRemote.pluginManager.updateBundle = async () => {
+    await lostGate
+    throw new Error('transport lost')
+  }
+  const lostGeneration = generationFixture(1)
+  const lostPort = portOf(lostRemote, lostGeneration)
+  const lostUpdating = lostPort.updateBundle('bundle-a', '1.1.0', 'https://r.example', 'req-update')
+  lostGeneration.set(2)
+  releaseLost()
+  await assert.rejects(lostUpdating, error => error instanceof PluginManagerStaleResultError)
+
+  // An UNCHANGED generation keeps the genuine refusal and resolves the real reply.
+  const currentRefused = remoteFixture()
+  currentRefused.refuse('updateBundle', 'host refused')
+  await assert.rejects(
+    portOf(currentRefused).updateBundle('bundle-a', '1.1.0', 'https://r.example', 'req-update'),
+    /pluginManager\.updateBundle failed: host refused/,
+  )
+  const current = remoteFixture()
+  const currentPort = portOf(current)
+  const settled = await currentPort.updateBundle('bundle-a', '1.1.0', 'https://r.example', 'req-update')
+  assert.equal(settled.to, '1.1.0')
+  assert.deepEqual([...current.calls], ['updateBundle'], 'one write per call, never a retry')
 })
