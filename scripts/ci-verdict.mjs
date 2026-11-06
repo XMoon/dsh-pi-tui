@@ -184,6 +184,9 @@ export function verdict({ role, mode, ref, phases, release = false, started, eco
       continue
     }
     if (result !== 'success') {
+      // The pi2dsh ecosystem job is disabled on main; its skipped phase is
+      // expected there and is reported as NOT_QUALIFIED below.
+      if (name === 'ecosystem-compat' && ref === 'refs/heads/main' && result === 'skipped') continue
       failures.push(`the required phase '${name}' is '${result}', not 'success'`)
     }
   }
@@ -223,8 +226,11 @@ export function verdict({ role, mode, ref, phases, release = false, started, eco
   // PR-only skip stays visibly NOT_QUALIFIED. Source Mode keeps its existing
   // contract and does not claim a disposition (the npm-only ecosystem gate).
   let externalQualified
+  const mainEcosystemDisabled = ref === 'refs/heads/main' && byName.get('ecosystem-compat') === 'skipped'
   if (mode === 'npm') {
-    if (ecosystemDisposition === ECOSYSTEM_DISPOSITION.passed) {
+    if (mainEcosystemDisabled) {
+      externalQualified = false
+    } else if (ecosystemDisposition === ECOSYSTEM_DISPOSITION.passed) {
       externalQualified = true
     } else if (ecosystemDisposition === ECOSYSTEM_DISPOSITION.skippedUnsupportedDshPeer) {
       externalQualified = false
@@ -259,12 +265,14 @@ export function verdict({ role, mode, ref, phases, release = false, started, eco
     lines.push(`${name.padEnd(29)} ${byName.get(name) ?? '(absent)'}`)
   }
   if (mode === 'npm') {
-    // Never let a PR-only skip read like a runtime qualification.
+    // Never let a skip read like a runtime qualification.
     const status = externalQualified === true
       ? 'QUALIFIED (passed)'
-      : externalQualified === false
-        ? 'NOT_QUALIFIED (skipped-unsupported-dsh-peer)'
-        : 'UNVERIFIED (missing or unknown disposition)'
+      : mainEcosystemDisabled
+        ? 'NOT_QUALIFIED (main branch: pi2dsh gate disabled)'
+        : externalQualified === false
+          ? 'NOT_QUALIFIED (skipped-unsupported-dsh-peer)'
+          : 'UNVERIFIED (missing or unknown disposition)'
     lines.push('')
     lines.push(`external pi2dsh compatibility  ${status}`)
   }
