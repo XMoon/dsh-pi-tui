@@ -1528,7 +1528,7 @@ jobs:
       - dsh-context
       - prepare-dsh-source
       - qualify
-    if: ${{ always() && needs.dsh-context.result == 'success' && needs.qualify.result == 'success' && (needs.dsh-context.outputs.mode == 'npm' || needs.prepare-dsh-source.result == 'success') }}
+    if: ${{ always() && github.ref != 'refs/heads/main' && needs.dsh-context.result == 'success' && needs.qualify.result == 'success' && (needs.dsh-context.outputs.mode == 'npm' || needs.prepare-dsh-source.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
