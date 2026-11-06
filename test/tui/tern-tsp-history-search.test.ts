@@ -1060,6 +1060,61 @@ test('a read that settles while a Modal parks the card keeps the SAME instance a
   assert.equal(h.composer().text, '', 'the parked window wrote no draft')
 })
 
+test('a copy that settles while a Modal parks the card still states its outcome', async (t) => {
+  // The window is a copy that STARTS while the card is open and ANSWERS under a
+  // park: the clipboard write already happened, so dropping the notice is not
+  // conservative — the user pressed Alt+C and got silence. A park changes none
+  // of the four facts the outcome depends on (same card, same round, same row,
+  // still-current scope), so it must still announce.
+  let resolveCopy: ((copied: boolean) => void) | undefined
+  const pane = installTspPane({ composerActions: true, historySearch: true, nativeInteraction: true })
+  t.after(() => pane.restore())
+  const session = await connect({ timeout: 500, exitHooks: false })
+  assert.ok(session, 'the scripted pane connects')
+  const copied: string[] = []
+  const renderer = mountTspRenderer(session, {
+    copyVisual: (text) => { copied.push(text); return new Promise<boolean>(resolve => { resolveCopy = resolve }) },
+    requestExit: () => {},
+    onFatal: (error) => { throw error },
+  })
+  t.after(() => renderer.dispose())
+  const scripted = scriptSource(DEFAULT_ROWS)
+  renderer.bindHistorySearch({
+    source: scripted.source,
+    cwd: () => '/work/alpha',
+    captureScope: () => ({ sessionId: 'ses_a', isCurrent: () => true }),
+  })
+  renderer.bindInput({
+    exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {}, pasteMedia: () => {}, pastedPath: () => {},
+    admitPastedPathDelivery: () => true, shouldRememberInput: () => true, noteUserInput: () => {},
+    listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker: () => {},
+    openModelQuick: () => {}, openSessionBrowser: () => {}, sessionBrowserAvailable: () => false,
+  })
+  renderer.bindStatusReader({ snapshot: () => emptyStatusSnapshot() })
+  renderer.display.commitDisplaySubject({}, {}, undefined)
+  await waitUntil('the composer frame', () => wireNodes(pane).some(node => node.id === 'dock.quiet-composer.composer'))
+  const notices = () => surfaceTexts(pane, 's1').filter(text => /Copied|Failed to copy the history/.test(text))
+  pane.key(CTRL_R)
+  await waitUntil('the page settled', () => surfaceTexts(pane, 's1').some(text => text === 'Results · 3 shown'))
+  pane.key(ALT_C)
+  await waitUntil('the copy call is in flight', () => copied.length === 1)
+  // A tool approval arrives while the copy promise is still open.
+  let settled = false
+  const outcome = renderer.interaction.showApprovalPrompt(
+    { toolName: 'tool-a', reason: 'copy settles under a park', arguments: '{}' }, true)
+  void outcome.then(() => { settled = true })
+  await waitUntil('the modal parked the card', () => !surfaceTexts(pane, 's1').includes('Input History'))
+  resolveCopy?.(true)
+  await waitUntil('the outcome is announced under the park', () => notices().includes('Copied the history entry'))
+  assert.equal(surfaceTexts(pane, 's1').includes('Input History'), false,
+    'and announcing it did not bring the parked card back')
+  pane.key('y')
+  await waitUntil('the approval settled', () => settled)
+  await waitUntil('the same card returned', () => surfaceTexts(pane, 's1').includes('Input History'))
+  assert.equal(wireNodes(pane).some(node => node.id === 'dock.quiet-composer.composer'
+    && String((node.p as { text?: string }).text ?? '') !== ''), false, 'a copy never writes the draft')
+})
+
 test('the seat routes a frame commit that throws in its OWN settlement to the fatal owner', async (t) => {
   // Isolated at the seat boundary: the mount's input loop would ALSO surface a
   // ViewError, so an end-to-end run cannot tell the two owners apart. Here the
@@ -1099,19 +1154,19 @@ test('the seat routes a frame commit that throws in its OWN settlement to the fa
   assert.equal(seat.renderState()?.rows.length, 1, 'the page the source answered is still the seat state')
 })
 
-test('a settlement whose captured scope died is refused by the seat itself, before it mutates any state', async (t) => {
-  // Isolated at the seat boundary so the fence is the ONLY thing that can be
-  // observed: the mount's presentation guard would hide the card anyway, and a
-  // retirement elsewhere would abort the read anyway. Here the scope authority
-  // goes stale while the read is in flight, with no retire call at all.
+test('a read that answers after its captured scope died is refused AND its scan is aborted by the settlement itself', async (t) => {
+  // Isolated at the seat boundary: no mount, no presentation guard, no outer
+  // retirement. The scope authority goes stale while the read is in flight and
+  // NOTHING else tells the seat about it, so the settlement's own captured-scope
+  // re-check is the only thing that can (a) refuse the page and (b) abort the
+  // scan the source is still running for a Session that no longer exists.
   const fatal: unknown[] = []
-  let renders = 0
   let current = true
   let release: ((page: HistorySearchPage) => void) | undefined
-  let searches = 0
+  const signals: Array<AbortSignal | undefined> = []
   const seat = createTspHistorySearch({
     admitted: () => true,
-    requestRender: () => { renders += 1 },
+    requestRender: () => {},
     setFocus: () => {},
     restoreToComposer: () => {},
     copyRaw: () => {},
@@ -1120,33 +1175,38 @@ test('a settlement whose captured scope died is refused by the seat itself, befo
     reportFatal: (error) => { fatal.push(error) },
   }, {
     source: {
-      search: () => { searches += 1; return new Promise<HistorySearchPage>(resolve => { release = resolve }) },
+      search: (request: HistorySearchRequest) => {
+        signals.push(request.signal)
+        return new Promise<HistorySearchPage>(resolve => { release = resolve })
+      },
     },
     cwd: () => '/work/alpha',
     captureScope: () => ({ sessionId: 'ses_a', isCurrent: () => current }),
   }, () => true)
   seat.open()
-  assert.equal(searches, 1, 'the open read started')
-  // The read is in flight; the scope dies with nobody telling the seat.
+  assert.equal(signals.length, 1, 'the open read started')
+  // The scope dies with nobody telling the seat, then the page answers.
   current = false
   release?.({ results: [{ id: 'late:0', content: 'a page from the dead scope', cwd: '/work/alpha',
     ts: 1_700_000_000_000, sessionId: 'ses_a', sourceFile: 'late', sourceByteOffset: 0 }], exhausted: true })
   await settle(ABSENCE_WINDOW_MS)
+  assert.equal(signals[0]?.aborted, true,
+    'the settlement retired the round, which aborted the scan: without that re-check the source keeps reading for a Session that is gone')
   assert.deepEqual(fatal, [], 'refusing a dead scope is not a failure')
   assert.equal(seat.renderState(), undefined, 'the card is gone')
-  assert.equal(seat.isOpen(), false, 'it owns no keys and no composer seat')
-  // The distinguishing fact: the fence RETIRED the round. If the settlement had
-  // merely been hidden, the seat would still be the same open instance and a
-  // second `open()` would start NO read (the documented one-instance rule).
-  const rendersBefore = renders
+  assert.equal(seat.isOpen(), false, 'it owns no keys, no caret and no Composer seat')
+  // The refused page must also not be carried into the next card.
   current = true
   seat.open()
-  assert.equal(searches, 2, 'a reopened card after a dead scope starts a NEW read')
-  assert.ok(renders > rendersBefore, 'and the fresh card asks for its own frame')
-  assert.equal(seat.renderState()?.rows.length, 0, 'the dead page is not carried into it')
+  assert.equal(signals.length, 2, 'a reopened card starts its own read')
+  assert.equal(seat.renderState()?.rows.length, 0, 'and nothing from the dead scope is in it')
 })
 
-test('a frame commit that throws inside a settled read reaches the fatal owner instead of an unhandled rejection', async (t) => {
+test('the mount wires the seat\u2019s fatal port to its own fatal owner (end-to-end)', async (t) => {
+  // This case proves the WIRING on the real SDK mount: an error the seat reports
+  // reaches `onFatal`. It deliberately does NOT prove the seat owns the failure
+  // (the SDK's own loop routes the same ViewError here too), which is the
+  // seat-isolated case above's job.
   // The seat OWNS both settlement branches, so the only remaining failure is the
   // frame it owes. `surface.render` raises a ViewError; that PRIMARY error must
   // reach the runner's fatal lifecycle (the pane's tty owner is broken), never

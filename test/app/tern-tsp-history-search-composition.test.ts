@@ -49,7 +49,6 @@ import { settle, waitUntil } from '../support/tsp-runner-harness.ts'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
 
 const CTRL_R = '\u0012'
-const ESCAPE_COMPOSITION = '\u001b'
 const ENTER = '\r'
 const TAB = '\t'
 /** One bounded window: long enough for the seat's own debounce plus an SDK
@@ -334,7 +333,6 @@ test('a sessionless open offers no Session scope, and the first published sessio
     await waitUntil('a fresh card opened for the owned session', () => h.cardPainted())
     assert.ok(h.texts().includes('Scope: Session \u2304'),
       'the reopened card offers Session because a session now exists')
-    void ESCAPE_COMPOSITION
     assert.equal(h.requests.at(-1)?.sessionId, 'ses_a', 'and the read carries the live session id')
   } finally {
     await h.dispose()
