@@ -208,6 +208,14 @@ test('an allowlisted call cannot be swapped for a different call site in the sam
   assert.ok(stale.some(entry => entry.file === allowance.file), 'the original allowance is now stale')
 })
 
+test('the retired /transcript Client formatter leaves no deprecated-reader allowance behind', () => {
+  assert.equal(
+    DEPRECATED_READER_ALLOWLIST.some(entry => entry.file === 'src/client/artifact/transcript-markdown.ts'),
+    false,
+    'S5-PR3 deleted the Client formatter, so its snapshotEvents allowance must be gone (no wrapper/fallback debt)',
+  )
+})
+
 test('the exact allowlisted call site is accepted and leaves no stale allowance', (t) => {
   const life = testLifecycle(t)
   const allowance = DEPRECATED_READER_ALLOWLIST.find(entry => entry.file === 'src/app/direct/child-view.ts')
