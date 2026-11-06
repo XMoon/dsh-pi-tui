@@ -49,7 +49,7 @@ import { CredentialProvider } from '@deepseek-ai/dsh-credentials'
 import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
 import { mountWorkspaceFileService } from '../support/remote-application-fixture.ts'
 import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import { SESSION_FORMAT_VERSION, SessionId } from '@deepseek-ai/dsh-session'
 import { SqliteSessionQueryEngine } from '@deepseek-ai/dsh-session-query-sqlite'
 import Storage from '@deepseek-ai/dsh-storage'
 import * as StorageJson from '@deepseek-ai/dsh-storage-json'
@@ -1254,6 +1254,122 @@ test('the assembled M3-3B Remote backend serves config + archive over the real H
     // route proves the Session absent and the port reports `none`.
     const missing = await assembled.backend.sessionMarkdown.read('m3a-does-not-exist')
     assert.equal(missing.kind, 'none', 'a missing Session is classified none, never ready')
+
+    // 3c. Fork-inherited prefix over the REAL route: a live fork carries the
+    // parent's complete committed prefix plus its own child turn. The read is
+    // independent of the Client's visible window — the Client is never bound
+    // to the fork; the Host corpus supplies the whole logical log.
+    const FORK = 'm3a-fork'
+    const fork = (host.ctx.sessions as unknown as {
+      fork(source: unknown, boundary?: unknown, childSessionId?: unknown): {
+        readonly header: { readonly isSeeded: boolean }
+        append(type: string, data: unknown, options?: { surfaceOp?: 'append' }): void
+      }
+    }).fork(SessionId(MAIN), undefined, SessionId(FORK))
+    assert.equal(fork.header.isSeeded, true, 'the fork carries a fork-inherited prefix')
+    fork.append('turn/start', { turn: 2 })
+    fork.append('step/start', { turn: 2, step: 1 })
+    fork.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'forked question' }],
+      source: { kind: 'user' },
+    }), { surfaceOp: 'append' })
+    fork.append('assistant/message', {
+      turn: 2,
+      step: 1,
+      message: {
+        id: MessageId(`${FORK}-assistant`),
+        role: 'assistant',
+        content: [{ type: 'text', text: 'forked answer' }],
+        source: { kind: 'model', provider: 'smoke', model: 'smoke-model' },
+      },
+      stream: [],
+      usage: { inputTokens: 1, outputTokens: 1 },
+    }, { surfaceOp: 'append' })
+    fork.append('step/end', { turn: 2, step: 1 })
+    fork.append('turn/end', { turn: 2, reason: { kind: 'completed' } })
+    const forkSnapshot = await (host.ctx as unknown as {
+      sessionQuery: { readSession(id: unknown): Promise<{ events: readonly never[]; inheritedEventCount: number }> }
+    }).sessionQuery.readSession(SessionId(FORK))
+    assert.ok(forkSnapshot.inheritedEventCount > 0,
+      'the fork snapshot reports its inherited event prefix')
+    const forkMetadata = await (host.ctx as unknown as {
+      sessionPersistence: { stat(id: unknown): Promise<{ location?: { path?: string } } | undefined> }
+    }).sessionPersistence.stat(SessionId(FORK))
+    const forkRead = await assembled.backend.sessionMarkdown.read(FORK)
+    assert.ok(forkRead.kind === 'ready', `the fork Markdown read is ready (got ${forkRead.kind})`)
+    assert.equal(forkRead.markdown, formatSessionMarkdown(forkSnapshot.events, forkMetadata?.location?.path),
+      'the fork body is the official formatter output over the inherited+own snapshot')
+    assert.match(forkRead.markdown, /> archive me/u, 'the inherited parent question is present')
+    assert.match(forkRead.markdown, /archived answer/u, 'the inherited parent answer is present')
+    assert.match(forkRead.markdown, /> forked question/u, 'the child turn is present')
+    assert.match(forkRead.markdown, /forked answer/u)
+    assert.equal(runtime.client.sessions.binding(SessionId(FORK)), undefined,
+      'the read did not depend on a Client-visible window for the fork')
+
+    // 3d. A genuinely COLD persisted Session (created through the official
+    // persistence owner, never live in the sessions store) is readable by the
+    // same official route. This proves the export needs no Agent and no
+    // visible window.
+    const COLD = 'm3a-cold'
+    const coldPersistence = (host.ctx as unknown as {
+      sessionPersistence: {
+        create(header: unknown): Promise<{
+          append(events: readonly unknown[]): Promise<void>
+          flush(): Promise<void>
+          close(): Promise<void>
+        }>
+      }
+    }).sessionPersistence
+    const coldHandle = await coldPersistence.create({
+      version: SESSION_FORMAT_VERSION,
+      id: SessionId(COLD),
+      createdAt: 1_700_000_000_000,
+      cwd: host.anchorDir,
+      isSeeded: false,
+    })
+    try {
+      await coldHandle.append([
+        { type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } },
+        { type: 'step/start', seq: 1, time: 1, data: { turn: 1, step: 1 } },
+        {
+          type: 'user/message', seq: 2, time: 2, surfaceOp: 'append',
+          data: createUserMessage({ content: [{ type: 'text', text: 'cold question' }], source: { kind: 'user' } }),
+        },
+        {
+          type: 'assistant/message', seq: 3, time: 3, surfaceOp: 'append',
+          data: {
+            turn: 1,
+            step: 1,
+            message: {
+              id: MessageId(`${COLD}-assistant`),
+              role: 'assistant',
+              content: [{ type: 'text', text: 'cold answer' }],
+              source: { kind: 'model', provider: 'smoke', model: 'smoke-model' },
+            },
+            stream: [],
+            usage: { inputTokens: 1, outputTokens: 1 },
+          },
+        },
+        { type: 'step/end', seq: 4, time: 4, data: { turn: 1, step: 1 } },
+        { type: 'turn/end', seq: 5, time: 5, data: { turn: 1, reason: { kind: 'completed' } } },
+      ])
+      await coldHandle.flush()
+    } finally {
+      await coldHandle.close()
+    }
+    assert.equal(host.ctx.sessions.get(SessionId(COLD)), undefined,
+      'the cold Session is NOT live in the sessions store')
+    // Direct observation first: surface the exact Host read failure if any.
+    const coldSnapshot = await (host.ctx as unknown as {
+      sessionQuery: { readSession(id: unknown): Promise<{ events: readonly never[] }> }
+    }).sessionQuery.readSession(SessionId(COLD))
+    assert.ok(coldSnapshot.events.length > 0)
+    const coldRead = await assembled.backend.sessionMarkdown.read(COLD)
+    assert.ok(coldRead.kind === 'ready', `the cold Markdown read is ready (got ${coldRead.kind})`)
+    assert.match(coldRead.markdown, /> cold question/u, 'the cold committed question is exported')
+    assert.match(coldRead.markdown, /cold answer/u, 'the cold committed answer is exported')
+    assert.equal(host.ctx.sessions.get(SessionId(COLD)), undefined,
+      'reading the Markdown did not materialize an Agent/Session')
 
     // 4. The ONE M3 wiring here is the assembly's own: it serves the adapter
     // INSTANCE it built, never a second one constructed inside

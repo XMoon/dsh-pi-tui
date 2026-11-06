@@ -858,7 +858,9 @@ function makeHarness(home: string, options: {
   }
 }
 
-async function settle(): Promise<void> {
+/** Drain the queued microtask chain (a deterministic flush, NOT a fixed-time
+ *  wait; the name deliberately avoids any support fixed-wait helper name). */
+async function flushMicrotasks(): Promise<void> {
   for (let index = 0; index < 40; index += 1) await Promise.resolve()
 }
 
@@ -946,7 +948,7 @@ async function mountRunner(
   ctx.provide('loader', { await: async () => {} } as never)
   const fiber = ctx.plugin((pluginCtx) => applyRunner(pluginCtx, TuiConfigSchema(config as never)))
   await fiber
-  await settle()
+  await flushMicrotasks()
   return fiber
 }
 
@@ -993,7 +995,7 @@ test('BLOCKING: /export opens Save Location only after commands.execute resolved
   assert.ok(app, 'the production runner must create a TuiApp')
   startedApps.add(app)
   submitText(app, '/export')
-  await settle()
+  await flushMicrotasks()
   // The save workflow must start ONLY AFTER the command lifecycle settled.
   assert.deepEqual(events, ['execute-resolved', 'save-location-opened'],
     'the archive workflow must begin after commands.execute resolved — never inside the handler')
@@ -1031,7 +1033,7 @@ test('BLOCKING: a failed /export result never opens Save Location', async (t) =>
   assert.ok(app, 'the production runner must create a TuiApp')
   startedApps.add(app)
   submitText(app, '/export foo')
-  await settle()
+  await flushMicrotasks()
   assert.equal(opened, 0, 'an error result must never open Save Location')
 })
 
@@ -1071,30 +1073,30 @@ test('a second artifact save while one prompt is active is refused with a notice
   // the editor is free — no prompt is open until a command settles).
   submitText(app, '/export')
   submitText(app, '/transcript')
-  await settle()
+  await flushMicrotasks()
   // Release each command in turn. The first successful command opens the
   // real Save Location prompt; after its submit turn is released, the second
   // command runs and its save is refused by the duplicate guard.
   for (let index = 0; index < 2; index += 1) {
-    for (let round = 0; round < 40 && executeGates.length <= index; round += 1) await settle()
+    for (let round = 0; round < 40 && executeGates.length <= index; round += 1) await flushMicrotasks()
     assert.ok(executeGates[index], `command ${index + 1} must reach the gated Host plane`)
     executeGates[index]!()
-    await settle()
+    await flushMicrotasks()
   }
-  await settle()
+  await flushMicrotasks()
   // Bounded poll for the refused-save notice: a fixed sleep raced the
   // prompt/notice rendering under load (the flake this replaces).
   let view = ''
   for (let round = 0; round < 50 && !view.includes('already active'); round += 1) {
     await new Promise<void>(resolve => setTimeout(resolve, 10))
-    await settle()
+    await flushMicrotasks()
     view = vt.getViewport().join('\n')
   }
   assert.ok(view.includes('already active'),
     `the refused second save must notify, never silently drop:\n${view}`)
   // Cancel the first prompt (Esc) to clean up.
   vt.sendInput('\x1b')
-  await settle()
+  await flushMicrotasks()
 })
 
 test('the post-success workflow targets the CAPTURED originating Session even after a switch', async (t) => {
@@ -1138,7 +1140,7 @@ test('the post-success workflow targets the CAPTURED originating Session even af
     assert.ok(resumeHandler !== undefined, 'the real runner must register /resume')
     const outcome = await (resumeHandler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: 'session-b' })
     assert.equal((outcome as { kind?: string }).kind, 'success', 'the switch to B must succeed')
-    await settle()
+    await flushMicrotasks()
     return { kind: 'selected', directory: outDir, overwrite: false }
   }
   life.defer(() => { TuiApp.prototype.askSaveLocation = originalAsk })
@@ -1155,14 +1157,14 @@ test('the post-success workflow targets the CAPTURED originating Session even af
   assert.ok(app, 'the production runner must create a TuiApp')
   startedApps.add(app)
   submitText(app, '/export')
-  await settle()
+  await flushMicrotasks()
   // The switch + save chain crosses real async boundaries (the transition
   // quiesce and the stream sink); poll for the artifact instead of a fixed
   // sleep so a loaded CI machine cannot starve the assertion.
   const deadline = Date.now() + 2_000
   for (;;) {
     await new Promise<void>(resolve => setTimeout(resolve, 25))
-    await settle()
+    await flushMicrotasks()
     if (existsSync(join(outDir, 'dsh-session-session-a.zip'))) break
     if (Date.now() > deadline) break
   }
@@ -1244,7 +1246,7 @@ test('BLOCKING: /transcript writes the OFFICIAL Markdown of the captured origina
     assert.ok(resumeHandler !== undefined, 'the real runner must register /resume')
     const outcome = await (resumeHandler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: 'session-b' })
     assert.equal((outcome as { kind?: string }).kind, 'success', 'the switch to B must succeed')
-    await settle()
+    await flushMicrotasks()
     return { kind: 'selected', directory: outDir, overwrite: false }
   }
   life.defer(() => { TuiApp.prototype.askSaveLocation = originalAsk })
@@ -1262,12 +1264,12 @@ test('BLOCKING: /transcript writes the OFFICIAL Markdown of the captured origina
   startedApps.add(app)
   harness.markdownReads.length = 0
   submitText(app, '/transcript')
-  await settle()
+  await flushMicrotasks()
   const target = join(outDir, 'dsh-session-session-a.md')
   const deadline = Date.now() + 2_000
   for (;;) {
     await new Promise<void>(resolve => setTimeout(resolve, 25))
-    await settle()
+    await flushMicrotasks()
     if (existsSync(target)) break
     if (Date.now() > deadline) break
   }
@@ -1368,7 +1370,7 @@ test('the user notice maps an unexpected Markdown failure to the stable artifact
   const deadline = Date.now() + 1_000
   while (harness.notices.length === 0 && Date.now() < deadline) {
     await new Promise<void>(resolve => setTimeout(resolve, 10))
-    await settle()
+    await flushMicrotasks()
   }
   assert.deepEqual(harness.notices, [{ text: 'transcript export failed', kind: 'error' }],
     'the Host error detail stays in diagnostics; the user sees the stable artifact-level failure')

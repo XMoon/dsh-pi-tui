@@ -104,11 +104,6 @@
   "runtime/direct/session-archive-direct.ts": [
     "import:dsh-session"
   ],
-  "runtime/direct/session-markdown-direct.ts": [
-    "import:dsh-session",
-    "sessionPersistence",
-    "sessionQuery"
-  ],
   "runtime/direct/session-direct.ts": [
     "agentPresets",
     "import:dsh-session",
@@ -123,6 +118,11 @@
     "import:dsh-session",
     "sessionQuery",
     "workspaceRegistry"
+  ],
+  "runtime/direct/session-markdown-direct.ts": [
+    "import:dsh-session",
+    "sessionPersistence",
+    "sessionQuery"
   ],
   "runtime/direct/session-preset-direct.ts": [
     "agentPresets",
