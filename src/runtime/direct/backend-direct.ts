@@ -40,6 +40,7 @@ import { DirectPluginManagerPort } from './plugin-manager-direct.ts'
 import { DirectJobObservationPort } from './job-observation-direct.ts'
 import { DirectHostUserShellPort, type DirectShellCapability } from './host-user-shell-direct.ts'
 import { DirectDeliveredFileReadPort } from './deliverables-direct.ts'
+import { DirectSessionWorkspaceFacts } from './session-workspace-facts-direct.ts'
 import type { WebAccessPort, WebAccessStatus, WebAccessUrl } from '../web-access-port.ts'
 
 /** The minimal Host context surface the Direct adapters need (structural;
@@ -138,5 +139,9 @@ export function createDirectRuntimeBackend(deps: DirectBackendDeps): Backend {
     // M5-W PR-C: the Direct process owns no official Web frontend toggle; the
     // adapter reports that missing capability instead of faking a control.
     new DirectUnavailableWebAccess(),
+    // M5-U-A: the ONE read-authority port. Direct reads the live Agent status
+    // and the official Workspace registry it already owns; it never fabricates
+    // a cross-Session pending fact.
+    new DirectSessionWorkspaceFacts(deps.ctx, deps.agentFor),
   )
 }

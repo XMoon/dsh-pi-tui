@@ -74,6 +74,7 @@ import { RemoteSkillCatalog } from '../../../src/runtime/remote/skill-remote.ts'
 import { createRemoteM3ASemantics, remoteM3ARuntimeSourceOf } from '../../../src/app/remote/m3a-semantics.ts'
 import { RemoteHostFilePort } from '../../../src/runtime/remote/host-file-remote.ts'
 import { RemoteInteractionPort } from '../../../src/runtime/remote/interaction-remote.ts'
+import { RemoteSessionWorkspaceFacts } from '../../../src/runtime/remote/session-workspace-facts-remote.ts'
 import type { ContextPressureProjection, ContextBreakdownProjection, TokenUsageProjection } from '@deepseek-ai/dsh-token-meter'
 import type { TurnOutlineEntry } from '@deepseek-ai/dsh-session-turn-outline/types'
 import type { SessionSeq } from '@deepseek-ai/dsh-session/types'
@@ -221,6 +222,23 @@ function officialContextFactFaces(): { breakdown: ContextBreakdownProjection; us
   }
 }
 
+/** M5-U-A: the official `ISessions` read face, the generated `session`
+ *  namespace and the generated `workspace` namespace satisfy the facts
+ *  adapter's one-source face with NO cast — the passive `session.state` /
+ *  `session.projections` methods and `workspace.follow` are the published
+ *  contract, not a test-only shape. */
+function officialSessionWorkspaceFacts(
+  sessions: ISessions,
+  remote: ClientRemote,
+  generation: ConnectionGenerationState,
+): RemoteSessionWorkspaceFacts {
+  return new RemoteSessionWorkspaceFacts({
+    sessions,
+    remote: { session: remote.session, workspace: remote.workspace },
+    connection: { generation },
+  })
+}
+
 /** The M3-3A partial assembly constructs from the REAL M3-1 runtime — a
  * compile-time proof that `RemoteClientRuntime` satisfies the narrow
  * one-source face (the same sessions service, Remote namespaces and
@@ -281,9 +299,14 @@ test('every Remote adapter accepts the published DSH public Client/Remote face (
     officialSkillCatalog,
     piTuiHostFilePort,
     officialRemoteInteractionPort,
+    officialSessionWorkspaceFacts,
   ]) {
     assert.equal(typeof proof, 'function')
   }
+})
+
+test('the M5-U-A read-authority adapter consumes the published generated session/workspace contract', () => {
+  assert.equal(typeof officialSessionWorkspaceFacts, 'function')
 })
 
 test('the M3-3B additions consume the published 0.2.0-rc.2 contract', () => {

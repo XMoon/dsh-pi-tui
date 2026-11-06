@@ -67,6 +67,7 @@ test('each backend domain is served by its own adapter instance', () => {
     backend.hostCommand,
     backend.pluginManager,
     backend.jobObservation,
+    backend.sessionWorkspaceFacts,
   ]
   assert.equal(new Set(ports).size, ports.length, 'no adapter instance may serve two domains')
 })

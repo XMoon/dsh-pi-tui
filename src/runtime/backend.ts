@@ -27,6 +27,7 @@ import type { JobObservationPort } from './job-observation-port.ts'
 import type { HostUserShellPort } from './host-user-shell-port.ts'
 import type { DeliveredFileReadPort } from './deliverables-port.ts'
 import type { WebAccessPort } from './web-access-port.ts'
+import type { SessionWorkspaceFactsPort } from './session-workspace-facts-port.ts'
 
 /** The transport backends the TUI can run on. `direct` remains the
  * production/default; `remote` is the experimental M3-3B assembly that can be
@@ -82,6 +83,10 @@ export interface Backend {
    *  `/web` surface over the Host's private `piTuiWebAccess` service. Direct
    *  serves the truthful-unavailable adapter. */
   readonly webAccess: WebAccessPort
+  /** The UI-neutral read-authority port (M5-U-A): Session activity facts over
+   *  the caller's authorized roster plus the ONE official Workspace stream.
+   *  Read-only; it owns no writer, store or cross-session cache. */
+  readonly sessionWorkspaceFacts: SessionWorkspaceFactsPort
 }
 
 /** Assemble the Direct backend: in-process adapters over `ctx.*` services.
@@ -104,6 +109,7 @@ export function createDirectBackend(
   hostUserShell: HostUserShellPort,
   deliveredFileRead: DeliveredFileReadPort,
   webAccess: WebAccessPort,
+  sessionWorkspaceFacts: SessionWorkspaceFactsPort,
 ): Backend {
   return {
     kind: 'direct',
@@ -124,5 +130,6 @@ export function createDirectBackend(
     hostUserShell,
     deliveredFileRead,
     webAccess,
+    sessionWorkspaceFacts,
   }
 }

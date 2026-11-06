@@ -167,7 +167,7 @@ function harness() {
       if (workspaceCreateReply !== undefined) return workspaceCreateReply
       const existing = workspaceRows.find(row => row.path === request.path)
       if (existing !== undefined) return { ok: true, value: { workspace: existing, created: false } }
-      const created = { workspaceId: `ws-${workspaceRows.length + 1}`, path: request.path, sessionIds: [] }
+      const created = { workspaceId: `ws-${workspaceRows.length + 1}`, path: request.path, title: request.path, sessionIds: [] }
       workspaceRows.push(created)
       return { ok: true, value: { workspace: created, created: true } }
     },
@@ -743,7 +743,7 @@ test('a retain refused by a synchronous abort is superseded, never current', asy
 // ── WS-2: Host Workspace pre-selection ─────────────────────────────────────
 
 function workspaceRow(overrides: Partial<RemoteWorkspaceViewLike> = {}): RemoteWorkspaceViewLike {
-  return { workspaceId: 'ws-a', path: '/host/a', sessionIds: [], ...overrides }
+  return { workspaceId: 'ws-a', path: '/host/a', title: 'a', sessionIds: [], ...overrides }
 }
 
 test('resolveWorkspace(host-path) adopts the Host canonical directory through the official workspace.create', async () => {

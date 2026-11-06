@@ -414,6 +414,10 @@ const OTHER_HOST_SUBSCRIPTIONS: ReadonlyArray<readonly [string, string]> = [
   // official profile recomposition (Owner decision: settings writes must not
   // change the running Host's FINAL Web state).
   ['app-boot/config-reload', 'src/app/host/features/web-access.ts'],
+  // M5-U-A: the Direct read-authority adapter re-reads the ONE official Host
+  // Workspace registry after each committed Workspace domain write (it never
+  // derives an increment from the event payload and keeps no second table).
+  ['domain/changed', 'src/runtime/direct/session-workspace-facts-direct.ts'],
 ]
 
 /**

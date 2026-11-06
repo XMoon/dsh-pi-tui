@@ -29,7 +29,7 @@
  */
 
 import { createHash } from 'node:crypto'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
 import { PI_TUI_EXTENSIONS_SERVICE } from '../../extensions.ts'
 import type { RemoteApplicationOverride } from '../application-runtime.ts'
@@ -1070,6 +1070,136 @@ async function startSurfaceLocalClient(
           privateNamespaces: status().privateNamespaces,
         })
       }, { diag })
+    })
+  }
+  // M5-U-A qualification input: exercise the ONE read-authority Backend port
+  // (`SessionWorkspaceFactsPort`) in the REAL Client composition against the
+  // REAL Host. The request is a small JSON operation file under the isolated
+  // qualification work root (never a product input); the result is one
+  // structured telemetry record. This is an observation seam, not a second
+  // read implementation: every fact comes from the mounted Backend port.
+  const readAuthorityRequestPath = process.env.SPLIT_PROCESS_CLIENT_READ_AUTHORITY_PROOF
+  if (readAuthorityRequestPath !== undefined && readAuthorityRequestPath !== '') {
+    let chain: Promise<void> = Promise.resolve()
+    process.on('SIGUSR2', () => {
+      chain = chain.then(async () => {
+        /** Echoes the caller's correlation nonce on every record of ONE op. */
+        let nonce: unknown
+        const emit = (record: Record<string, unknown>): void => {
+          composition.onQualification?.({
+            op: 'read-authority-proof',
+            ...(nonce === undefined ? {} : { nonce }),
+            ...record,
+          })
+        }
+        try {
+          const request = JSON.parse(readFileSync(readAuthorityRequestPath, 'utf8')) as {
+            readonly nonce?: unknown
+            readonly op?: unknown
+            readonly sessionId?: unknown
+            readonly callId?: unknown
+            readonly answers?: unknown
+            readonly windowMs?: unknown
+            readonly maxFrames?: unknown
+          }
+          nonce = request.nonce
+          const backend = currentRevision?.application?.selected.backend
+          if (backend === undefined) throw new Error('read-authority probe: no mounted surface revision')
+          if (request.op === 'read') {
+            const rows = await backend.sessionReader.list(undefined)
+            if (rows === undefined) throw new Error('read-authority probe: the Host Session list is unavailable')
+            const facts = await backend.sessionWorkspaceFacts.readActivity(rows)
+            const current = status()
+            const listedIds = domains.sessions.list.getSnapshot().ids
+            /** The official listed identity of one plain id (never a re-mint). */
+            const officialIdOf = (id: unknown): (typeof listedIds)[number] | undefined =>
+              listedIds.find(listedId => String(listedId) === String(id))
+            emit({
+              phase: 'facts',
+              openSessionId: current.openSessionId ?? null,
+              sessionOpen: current.sessionOpen,
+              generationId: current.generationId,
+              rows: rows.map(row => ({
+                id: row.id,
+                live: row.live,
+                ...(row.origin === undefined ? {} : { origin: row.origin }),
+                // The official `tuiMainView`/child reference counts: a read must
+                // never be satisfied by retaining the Session it reports on.
+                retainedBy: (() => {
+                  const listedId = officialIdOf(row.id)
+                  return listedId === undefined
+                    ? undefined
+                    : domains.sessions.retainInfo(listedId).getSnapshot().retainedBy
+                })(),
+              })),
+              facts: facts.map(fact => ({
+                sessionId: fact.sessionId,
+                running: fact.running,
+                pendingKinds: fact.pendingKinds,
+                continuedQuestionCallIds: fact.continuedQuestionCallIds,
+                attention: fact.attention,
+                attentionSourceState: fact.attentionSourceState,
+              })),
+            })
+            return
+          }
+          if (request.op === 'workspaces') {
+            const handle = backend.sessionWorkspaceFacts.followWorkspaces()
+            const windowMs = typeof request.windowMs === 'number' ? request.windowMs : 30_000
+            const maxFrames = typeof request.maxFrames === 'number' ? request.maxFrames : Number.POSITIVE_INFINITY
+            const deadline = setTimeout(() => { handle.dispose() }, windowMs)
+            emit({ phase: 'workspaces-open', windowMs, maxFrames })
+            try {
+              let frames = 0
+              for await (const frame of handle) {
+                frames += 1
+                switch (frame.type) {
+                  case 'baseline':
+                  case 'replace':
+                    emit({ phase: 'workspaces-frame', type: frame.type, items: frame.items })
+                    break
+                  case 'upsert':
+                    emit({ phase: 'workspaces-frame', type: frame.type, workspace: frame.workspace })
+                    break
+                  case 'remove':
+                    emit({ phase: 'workspaces-frame', type: frame.type, workspaceId: frame.workspaceId })
+                    break
+                  case 'order':
+                    emit({ phase: 'workspaces-frame', type: frame.type, workspaceIds: frame.workspaceIds })
+                    break
+                }
+                if (frames >= maxFrames) break
+              }
+              emit({ phase: 'workspaces-ended' })
+            } finally {
+              clearTimeout(deadline)
+              handle.dispose()
+            }
+            return
+          }
+          if (request.op === 'answer-continued') {
+            if (typeof request.sessionId !== 'string' || typeof request.callId !== 'string') {
+              throw new Error('read-authority probe: answer-continued requires sessionId and callId')
+            }
+            const outcome = await backend.interaction.questions.answerContinued(
+              request.sessionId,
+              request.callId,
+              request.answers as Parameters<typeof backend.interaction.questions.answerContinued>[2],
+            )
+            emit({ phase: 'continued-answer', sessionId: request.sessionId, callId: request.callId, outcome })
+            return
+          }
+          throw new Error(`read-authority probe: unsupported op ${JSON.stringify(request.op)}`)
+        } catch (error) {
+          emit({
+            phase: 'failed',
+            error: error instanceof Error ? error.message : String(error),
+            ...(typeof error === 'object' && error !== null && typeof (error as { code?: unknown }).code === 'string'
+              ? { errorCode: (error as { code: string }).code }
+              : {}),
+          })
+        }
+      })
     })
   }
   // T34 qualification input: close the writer's pre-dispatch admission while

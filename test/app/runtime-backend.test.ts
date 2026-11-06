@@ -237,7 +237,13 @@ test('the Direct backend is the current production surface and serves EXACTLY th
     setEnabled: async () => ({ state: 'unavailable', reason: 'test' }),
     getAuthenticatedUrl: async () => { throw new Error('test') },
   }
-  const backend = createDirectBackend(subagent, sessionReader, pendingInputReader, sessionWriter, sessionLifecycle, interaction, catalog, config, hostFile, sessionArchive, hostCommand, pluginManager, jobObservation, hostUserShell, deliveredFileRead, webAccess)
+  const sessionWorkspaceFacts: import('../../src/runtime/session-workspace-facts-port.ts').SessionWorkspaceFactsPort = {
+    readActivity: async () => [],
+    followWorkspaces: () => {
+      throw new Error('the fixture never follows Workspaces')
+    },
+  }
+  const backend = createDirectBackend(subagent, sessionReader, pendingInputReader, sessionWriter, sessionLifecycle, interaction, catalog, config, hostFile, sessionArchive, hostCommand, pluginManager, jobObservation, hostUserShell, deliveredFileRead, webAccess, sessionWorkspaceFacts)
   assert.equal(backend.kind, 'direct')
   assert.equal(backend.subagent, subagent)
   assert.equal(backend.sessionReader, sessionReader)
@@ -252,6 +258,7 @@ test('the Direct backend is the current production surface and serves EXACTLY th
   assert.equal(backend.hostCommand, hostCommand)
   assert.equal(backend.pluginManager, pluginManager)
   assert.equal(backend.jobObservation, jobObservation)
+  assert.equal(backend.sessionWorkspaceFacts, sessionWorkspaceFacts)
   // Truthful advertisement: the backend serves EXACTLY the implemented
   // ports — nothing is advertised without a port.
   for (const capability of DIRECT_IMPLEMENTED_CAPABILITIES) {

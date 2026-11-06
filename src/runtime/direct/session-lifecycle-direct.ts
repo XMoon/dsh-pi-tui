@@ -98,10 +98,14 @@ export interface ForkSessionQueryLike {
 
 /** The official Host Workspace entity subset: one durable record over an
  * existing Host directory, with its header-validated Session membership. */
-export interface WorkspaceEntityLike {
+export interface WorkspaceFactEntityLike {
   readonly id: string
   readonly path: string
+  readonly title: string
   readonly sessionIds: readonly string[]
+}
+
+export interface WorkspaceEntityLike extends WorkspaceFactEntityLike {
   attachSession(sessionId: ReturnType<typeof SessionId>): Promise<void>
 }
 
@@ -113,6 +117,14 @@ export interface WorkspaceRegistryLike {
   create(path: string): Promise<WorkspaceEntityLike>
   get(id: string): WorkspaceEntityLike | undefined
   list(): readonly WorkspaceEntityLike[]
+}
+
+/** Resolve the ONE official Host Workspace registry (the only Direct Workspace
+ *  authority). Exported for the read-authority adapter so the Host coupling
+ *  stays at THIS approved boundary site instead of spreading to a second
+ *  `ctx.get('workspaceRegistry')` call. */
+export function directWorkspaceRegistry(ctx: HostContextLike): WorkspaceRegistryLike | undefined {
+  return ctx.get('workspaceRegistry') as WorkspaceRegistryLike | undefined
 }
 
 /** Direct-only owner handoff. The runner parks a child when navigation is
