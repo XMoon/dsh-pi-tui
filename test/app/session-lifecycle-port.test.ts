@@ -33,6 +33,7 @@ import {
 interface FakeWorkspace {
   readonly id: string
   readonly path: string
+  readonly title: string
   readonly sessionIds: string[]
   attachSession(sessionId: unknown): Promise<void>
 }
@@ -57,6 +58,7 @@ function createRegistry(options: {
   const make = (id: string, path: string): FakeWorkspace => ({
     id,
     path,
+    title: path,
     sessionIds: [],
     attachSession: async (sessionId) => {
       attached.push(String(sessionId))
@@ -290,7 +292,7 @@ test('resolveWorkspace(workspace-id) requires an existing official Host identity
 
 test('resolveWorkspace(source-session) uses official membership FIRST, never an effective cwd', async () => {
   const registry = createRegistry({ workspaces: [] })
-  const session = { id: 'ws-source', path: '/source', sessionIds: ['session-a'], attachSession: async () => {} }
+  const session = { id: 'ws-source', path: '/source', title: 'source', sessionIds: ['session-a'], attachSession: async () => {} }
   registry.workspaces.push(session)
   const lifecycle = new DirectSessionLifecycle(host(agents(), {
     registry: registry.registry,
@@ -459,6 +461,7 @@ test('attach failure after publication keeps the real identity and hands the own
     get: () => ({
       id: 'ws-a',
       path: '/ws',
+      title: 'ws',
       sessionIds: [],
       attachSession: async (sessionId) => {
         attached.push(String(sessionId))
@@ -497,6 +500,7 @@ test('attach failure without an owner pool disposes the just-created Direct hand
     get: () => ({
       id: 'ws-a',
       path: '/ws',
+      title: 'ws',
       sessionIds: [],
       attachSession: async () => { throw new Error('attach refused') },
     }),

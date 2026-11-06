@@ -19,6 +19,7 @@ import { runAuthenticatedLifecycle } from '../smoke/split-process/authenticated-
 import { runClientHmrSignals } from '../smoke/split-process/client-hmr-signals.mjs'
 import { runDetachedTurnInteractions } from '../smoke/split-process/detached-turn-interactions.mjs'
 import { runNonDestructiveClientLifecycle } from '../smoke/split-process/non-destructive-client-lifecycle.mjs'
+import { runReadAuthority } from '../smoke/split-process/read-authority.mjs'
 import { runEntryAdmission } from '../smoke/split-process/entry-admission.mjs'
 import { runOfficialWebComposition } from '../smoke/split-process/official-web-composition.mjs'
 import { runPtySessionWriteRecovery } from '../smoke/split-process/pty-session-write-recovery.mjs'
@@ -90,6 +91,12 @@ const CASE_REGISTRY = Object.freeze([
     id: 'navigation.non-destructive-client-lifecycle',
     title: 'leaving a Session from one Client never stops the Host Turn another Client keeps reading',
     run: runNonDestructiveClientLifecycle,
+  }),
+  Object.freeze({
+    suite: 'read',
+    id: 'read.official-read-authority',
+    title: 'A(Y) reads X\'s real Host pending/Workspace facts through the ONE read-authority port and answers X through the existing first-settlement path',
+    run: runReadAuthority,
   }),
   Object.freeze({
     suite: 'recovery',

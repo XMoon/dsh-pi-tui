@@ -71,17 +71,26 @@ import {
 import { remoteFailureCode, remoteFailureMessage } from './write-failure.ts'
 
 /** One official `workspace.follow` frame subset. The first frame of every
- *  generation is a `baseline`; increments only follow it. */
+ *  generation is a `baseline`; increments only follow it. The U-A read seam
+ *  forwards `baseline`/`replace`/`upsert`/`remove`/`order`; `archived`/`pinned`
+ *  are registry-global Session sets and stay out of the Workspace facts. */
 export interface RemoteWorkspaceFollowFrameLike {
   readonly type: string
   readonly value?: { readonly items: readonly RemoteWorkspaceViewLike[] }
+  readonly workspace?: RemoteWorkspaceViewLike
+  readonly workspaceId?: string
+  readonly workspaceIds?: readonly string[]
+  readonly archivedSessionIds?: readonly string[]
+  readonly pinnedSessionIds?: readonly string[]
 }
 
 /** One official Workspace row (`WorkspaceView`): the stable id, the Host
- *  canonical directory and the header-validated Session membership. */
+ *  canonical directory, the user-visible title and the header-validated
+ *  Session membership. */
 export interface RemoteWorkspaceViewLike {
   readonly workspaceId: string
   readonly path: string
+  readonly title: string
   readonly sessionIds: readonly string[]
 }
 

@@ -58,7 +58,8 @@ Consequences that are part of the contract:
 `Backend` is an assembly of narrow domain ports (`subagent`, `sessionReader`,
 `pendingInputReader`, `sessionWriter`, `sessionLifecycle`, `interaction`,
 `catalog`, `config`, `hostFile`, `sessionArchive`, `hostCommand`,
-`pluginManager`, `jobObservation`, `hostUserShell`, `deliveredFileRead`), never a
+`pluginManager`, `jobObservation`, `hostUserShell`, `deliveredFileRead`,
+`webAccess`, `sessionWorkspaceFacts`), never a
 `TuiBackend` god object. A port exposes detached semantic facts, opaque identities/request ids,
 event surfaces (for example authorization: begin → attemptId → notice/prompt →
 respond/cancel) and semantic operations. It owns no Host database, state machine
@@ -647,6 +648,75 @@ Approval survives that revision change and is handed to the new surface
 exactly once. Host `runProfile`, Agent, Job and service fibers are untouched. Revision identity and status are
 qualification observations only; they grant no Host authority, and no second
 runner may ever hold the tty at the same time.
+
+## Session activity and Workspace facts (read-only)
+
+`SessionWorkspaceFactsPort` is the ONE UI-neutral read-authority seam for facts
+that are NOT the mounted surface's own Session. It is read-only: it submits no
+question answer, approval, cancel, open, retain or create, owns no Client
+workspace/question/approval store and keeps no cross-session cache.
+`SessionReader` remains the ONE Session-listing authority.
+
+- **Roster.** `readActivity(rows, signal)` consumes exactly the main rows the
+  caller obtained from `SessionReader.list()`; it never lists, refreshes or
+  probes an alternative corpus, and a `subagent` child row is excluded. It adds
+  no row and drops none, so one sampled Session produces at most one fact row.
+- **Running.** `running` comes from the official list row (`RemoteSessionListRow.running`)
+  and/or the passive Host `session.state(...).running`; the two are compared on
+  the same id and a disagreement is `undefined` (unknown), never one guessed
+  value. `SessionSummary.live` (the old Direct attachment bit) is never a
+  running source, and a missing live Agent is unknown rather than idle.
+- **Pending.** The two official passive sources are the Host
+  `session.state(...).pendingInput` kind sample and the cold-safe
+  `session.projections(...).values.userQuestions.active` timed-Question
+  projection with the same binding's `inbox` queued-reply records. The port
+  reports `question`/`approval`/`other` as a kind clue, never as answer
+  authority: `other` is unknown, `plan-review` is identified ONLY by the
+  official `AskUserQuestionItem.intent.kind`, and a `continued` call is a
+  late-answer candidate only while no same-`callId` `user-question-reply` is
+  already queued. `none` requires a `sequenced` projection whose active records
+  AND inbox were both read and show no answerable call; an unreadable source,
+  `null`, `migration-required` (including cache hints) or a missing
+  `userQuestions` unit is `unknown`, never `active: []`. Two sources that
+  genuinely conflict fail closed to `unknown`. The answer itself still travels
+  through the existing first-settlement path (`switchSessionOutcome` → the
+  Question/Approval presenter → Host settlement), never through this port.
+- **Failure vocabulary.** `remote-access/denied` is `denied`,
+  `gateway/invocation-unavailable` is `unavailable` (the optional read method is
+  genuinely not registered), and every network/Host/codec/timeout failure is
+  `unknown`. A failed or denied row keeps its in-row Unknown/Denied and never
+  clears or zero-fills the other rows. Abort and Connection-generation
+  replacement discard the WHOLE sample (abort / `SupersededReadError`); a
+  superseded generation is never published as the current one. The Remote
+  adapter bounds per-Session passive reads (six concurrent reads) as
+  backpressure; the bound never truncates the roster.
+- **Workspaces.** `followWorkspaces(signal)` is one caller-owned per-open
+  observation over the official `workspace.follow` stream (Remote) or the
+  official Host `workspaceRegistry` plus `domain/changed` re-reads (Direct). The
+  five forwarded frames are `baseline`/`replace`/`upsert`/`remove`/`order`; the
+  registry-global `archived`/`pinned` sets are not Workspace membership and are
+  ignored. Every generation starts with exactly one baseline; a missing
+  baseline is an unknown Workspace state, never an empty one. The handle is
+  disposed exactly once and a generation replacement ends the open generation
+  instead of applying a stale increment. Workspace identity/path/title/
+  membership are the Host's values; the Client cwd, HOME or PATH is never a
+  membership input.
+- **Direct parity.** Direct reads the exact live Agent status and the official
+  `workspaceRegistry` it already owns; it fabricates no cross-Session pending
+  fact (`attention: 'unknown'`) because it owns no Gateway forwarded-event truth
+  for another Session. Its existing in-process Question/Approval modal and
+  Session/Writer/Navigation lifecycle are unchanged.
+
+Authority: `src/runtime/session-workspace-facts-port.ts`,
+`src/runtime/remote/session-workspace-facts-remote.ts`,
+`src/runtime/direct/session-workspace-facts-direct.ts`; the port is a required
+read-only `Backend` member served once by the Direct assembly and the ONE
+Remote M3A assembly. Regression anchors:
+`test/runtime/remote/remote-session-workspace-facts.test.ts`,
+`test/runtime/direct/direct-session-workspace-facts.test.ts`, the official
+contract proof in `test/runtime/remote/remote-official-contract.test.ts` and the
+real Host/two-PTY case `read.official-read-authority` in
+`scripts/smoke/split-process/read-authority.mjs`.
 
 ## Direct/Remote semantic equivalence
 

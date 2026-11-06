@@ -71,6 +71,11 @@ function fakeRuntime(settingsDescribe: () => Promise<unknown>): {
       commands: { execute: async () => ({ ok: true, value: undefined }) },
       subagents: { prompt: async () => ({ ok: true, value: { messageId: 'm' } }), interruptByParent: async () => ({ ok: true, value: {} }) },
       userQuestions: { attachWait: () => Object.assign((async function* () {})(), { dispose: () => {} }), answer: async () => ({ ok: true, value: true }) },
+      // M5-U-A: the passive read-authority faces the assembly hands the ONE
+      // facts adapter. The assembly never calls them during construction.
+      state: async () => ({ ok: true, value: { running: false, pendingInput: [] } }),
+      projections: async () => ({ ok: true, value: null }),
+      workspace: { follow: () => Object.assign((async function* () {})(), { dispose: () => {} }) },
       pluginManager: {},
       settings: {
         describe: async () => { describeCalls += 1; return settingsDescribe() },

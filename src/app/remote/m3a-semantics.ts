@@ -50,6 +50,8 @@ import type { RemotePluginManagerSource } from '../../runtime/remote/plugin-mana
 import { RemotePluginManagerPort } from '../../runtime/remote/plugin-manager-remote.ts'
 import { RemoteDeliveredFileReadPort } from '../../runtime/remote/deliverables-remote.ts'
 import type { RemoteWorkspaceFilesNamespace } from '../../runtime/remote/deliverables-remote.ts'
+import type { SessionWorkspaceFactsPort } from '../../runtime/session-workspace-facts-port.ts'
+import { RemoteSessionWorkspaceFacts, type RemoteSessionFactsRemotes } from '../../runtime/remote/session-workspace-facts-remote.ts'
 import type { RemoteWebAccessNamespace } from '../../runtime/remote/web-access-remote.ts'
 import type { RemoteJobObservationSource } from '../../runtime/remote/job-observation-remote.ts'
 import { RemoteJobObservationPort } from '../../runtime/remote/job-observation-remote.ts'
@@ -92,6 +94,9 @@ export interface RemoteM3ASemantics {
   /** The delivered-file READ port (Delivered files PR2): the generated
    *  `workspaceFiles` namespace, generation-fenced. */
   readonly deliveredFileRead: DeliveredFileReadPort
+  /** The UI-neutral read-authority port (M5-U-A): passive Session activity
+   *  facts and the official Workspace follow stream. Read-only. */
+  readonly sessionWorkspaceFacts: SessionWorkspaceFactsPort
   /** Drop adapter-owned caches/subscriptions. Runs BEFORE the Client
    *  Context disposal (`RemoteClientRuntime.dispose()`). */
   dispose(): void
@@ -134,7 +139,7 @@ export interface RemoteM3ARuntimeSource {
   readonly sessions: RemoteM3ASessionsSource
   /** The ONE shared generated Remote namespaces the M3-3A adapters map. */
   readonly remote: {
-    readonly session: RemoteModelRemotes
+    readonly session: RemoteModelRemotes & RemoteSessionFactsRemotes['session']
     /** The official generated `llm` namespaces (discovery + the configurable-provider directory the ConfigPort reads from this SAME service). */
     readonly llm: RemoteLlmRemotes & RemoteConfigRuntimeSource['remote']['llm']
     readonly agentPresets: RemotePresetRemotes
@@ -246,6 +251,14 @@ export function createRemoteM3ASemantics(
     ),
     jobObservation: new RemoteJobObservationPort(runtime.jobs),
     deliveredFileRead: new RemoteDeliveredFileReadPort(remote.workspaceFiles, generation),
+    // M5-U-A: passive `session.state`/`session.projections` reads over the SAME
+    // generated namespace and the official `workspace.follow` stream. No second
+    // Client/Remote, no retain, no writer.
+    sessionWorkspaceFacts: new RemoteSessionWorkspaceFacts({
+      sessions,
+      remote: { session: remote.session, workspace: remote.workspace },
+      connection: { generation },
+    }),
     dispose(): void {
       if (disposed) return
       disposed = true
