@@ -1118,19 +1118,20 @@ projects the same text the user reads: the latest official
 (the Folder's `assistantSettlementSeq(turn, step)` equals the event's `seq`,
 and `eligibleFinalAssistant()` returns the same turn/step/body), then the
 existing `collectPublishedVisuals` authority supplies the publications from the
-SAME verified origin ranges the render used (see "Fork-inherited history and
-origin provenance"), and the shared `planVisualPlacement()` yields the text
-spans. Only consumed marker spans are removed; line terminators, whitespace,
-CJK, emoji, tabs, ordinary definitions and code samples survive exactly, and
-the display-only definitions prefix never enters the payload. A marker-shaped
-body without a publication for its turn is ordinary prose and is copied
-unchanged. A fork-inherited answer whose origin window is not yet proven
-(pending or failed lineage) is an UNAVAILABLE copy: its markers may already be
-consumed by an ancestor publication, so the clipboard write never starts and no
-literal marker bytes are copied. A published marker whose final-row identity
-cannot be proven (torn fold, replaced body, ownership change) fails closed
-instead of guessing which bytes to drop. Remote's bounded-window last-assistant
-read is a different contract and stays byte-exact.
+SAME epoch-aware `PublishedVisual` projection the render used (see
+"Fork-inherited history and event epochs"), and the shared
+`planVisualPlacement()` yields the text spans. Only consumed marker spans are
+removed; line terminators, whitespace, CJK, emoji, tabs, ordinary definitions
+and code samples survive exactly, and the display-only definitions prefix never
+enters the payload. A marker-shaped body without a successful publication for
+its turn is ordinary prose and is copied unchanged. A fork-inherited answer
+with a successful inherited publication strips its consumed marker exactly like
+an own-generation answer; there is no ancestor read and no pending lineage
+stage to wait for. The copy is UNAVAILABLE when the visual snapshot itself is
+unavailable (inconsistent seed flag/count/marker cut) or when identity cannot
+be proven (torn fold, replaced body, ownership/currentness change), instead of
+guessing which bytes to drop. Remote's bounded-window last-assistant read is a
+different contract and stays byte-exact.
 
 ## Long user messages
 
