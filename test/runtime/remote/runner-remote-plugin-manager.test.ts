@@ -77,6 +77,14 @@ function bundleLine(viewport: readonly string[], bundleName: string): string | u
   return plain(viewport).split('\n').find(line => line.includes(bundleName))
 }
 
+/** The rendered line carrying one bundle name AND its status chip: in the
+ *  dual List|Details frame the Detail title also names the bundle, so the chip
+ *  row is the list row, not the first name match. */
+function bundleChipLine(viewport: readonly string[], bundleName: string): string | undefined {
+  return plain(viewport).split('\n')
+    .find(line => line.includes(bundleName) && /\[(?:enabled|disabled)\]/u.test(line))
+}
+
 async function settle(ms = 80): Promise<void> {
   await new Promise(resolve => setTimeout(resolve, ms))
 }
@@ -477,9 +485,11 @@ test('one real Remote mutation reaches Host authority and the authoritative rere
   // reread — not from the operation reply.
   await waitFor('the Host profile truth is written', () =>
     profile.selectedBundles().includes(bundle), 20_000)
-  const detail = plain(fixture.vt.getViewport())
-  assert.match(detail, /Enabled\s+Yes/, 'the reread renders the enabled status')
-  assert.doesNotMatch(detail, /Enabled\s+No/, 'the stale disabled truth is gone')
+  // The list row's status chip is the truthful reread projection; the Detail
+  // label is `Selected in profile` (the Host selection, never a run claim).
+  const rereadLine = bundleChipLine(fixture.vt.getViewport(), bundle) ?? ''
+  assert.match(rereadLine, /\[enabled\]/u, 'the reread renders the enabled status')
+  assert.doesNotMatch(rereadLine, /\[disabled\]/u, 'the stale disabled truth is gone')
 
   // Truthful disposition: no hmr in this composition, so the Host reports
   // restart-required rather than pretending a live application.
@@ -507,7 +517,7 @@ test('an external Host change invalidates an open Remote panel with no manual re
   // No `R` key is ever sent: only the invalidation-driven authoritative reread
   // can repaint the already-open panel.
   await waitFor('the open panel repaints from the externally changed Host truth', () =>
-    (bundleLine(fixture.vt.getViewport(), bundle) ?? '').includes('[enabled]'), 20_000)
+    (bundleChipLine(fixture.vt.getViewport(), bundle) ?? '').includes('[enabled]'), 20_000)
 })
 
 test('a new Connection generation rereads authoritative truth without replaying the prior mutation', async (t) => {
@@ -652,7 +662,11 @@ test('a Remote mutation reply carried by a superseded Connection generation neve
   fixture.vt.sendInput('\r')
   await replyReached
   await waitFor('the real Host write is dispatched exactly once', () => hostWrites === 1, 20_000)
-  assert.match(plain(fixture.vt.getViewport()), /Enabled\s+No/, 'the pending operation has not repainted the Host truth')
+  // The Detail `Selected in profile` fact wraps onto the following physical
+  // row in the dual frame, so it is matched with one bounded wildcard. The
+  // chip can read `busy` while the Host reply is withheld.
+  assert.match(plain(fixture.vt.getViewport()), /Selected in profile[\s\S]{0,160}?\bNo\b/u,
+    'the pending operation has not repainted the Host truth')
 
   // Switch the official Connection generation while the operation is pending.
   const connection = fixture.aggregate.wire.client.connection as unknown as {
@@ -668,7 +682,7 @@ test('a Remote mutation reply carried by a superseded Connection generation neve
   // The new generation's authoritative inventory reread is the only painter:
   // the real Host write really happened, so the truth is enabled.
   await waitFor('the new generation reread paints the authoritative enabled truth', () =>
-    /Enabled\s+Yes/.test(plain(fixture.vt.getViewport())), 20_000)
+    /Selected in profile[\s\S]{0,160}?\bYes\b/u.test(plain(fixture.vt.getViewport())), 20_000)
 
   // Now the old-generation reply lands on the new surface.
   releaseReply()
@@ -683,6 +697,7 @@ test('a Remote mutation reply carried by a superseded Connection generation neve
     'the notice names the authoritative reread as the decision owner')
   assert.doesNotMatch(view, /enable\/disable failed/,
     'the applied mutation is never presented as a definite failure')
-  assert.match(view, /Enabled\s+Yes/, 'the authoritative inventory still paints the applied truth')
+  assert.match(plain(fixture.vt.getViewport()), /Selected in profile[\s\S]{0,160}?\bYes\b/u,
+    'the authoritative inventory still paints the applied truth')
   assert.deepEqual([...profile.selectedBundles()], [bundle], 'the durable Host truth is exactly the one real write')
 })
