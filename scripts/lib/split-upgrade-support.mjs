@@ -18,7 +18,7 @@ import { createRequire } from 'node:module'
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs'
 import { join, relative, sep } from 'node:path'
 
-import { run } from '../pi2dsh-compat-smoke.mjs'
+import { run } from './dsh-smoke-harness.mjs'
 import {
   classifyHandoffRejection,
   classifyReloadNotices,

@@ -15,7 +15,7 @@
 import { mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-import { installPlugin, isolatedEnvironment } from '../../pi2dsh-compat-smoke.mjs'
+import { installPlugin, isolatedEnvironment } from '../../lib/dsh-smoke-harness.mjs'
 import { hostSessionEvents, waitForHostSessionEvent } from '../../lib/split-smoke-sessions.mjs'
 import { writeC1WorkFixture } from '../../lib/split-smoke-fixtures.mjs'
 import {
