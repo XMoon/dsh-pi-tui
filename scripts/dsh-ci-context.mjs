@@ -8,8 +8,9 @@
  * the pinned source pack and the registry-backed npm distribution. All
  * other branches/PR bases use npm mode. Source Mode reads its version from
  * test/compat/dsh-source.json; npm Mode reads the exact DSH version declared
- * in this checkout's package.json. The pi2dsh manifest is an external
- * consumer pairing and is not a CI target-version source.
+ * in this checkout's package.json. The pi2dsh bridge is an external
+ * published consumer resolved per probe run; it is not a CI target-version
+ * source.
  *
  * @module dsh-ci-context
  */

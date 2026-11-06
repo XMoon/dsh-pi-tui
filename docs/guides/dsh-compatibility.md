@@ -16,6 +16,7 @@ READMEs and release notes.
 | Tracked development mode for a branch | `test/compat/dsh-mode.json` |
 | Project DSH CLI executable and version | `mise.toml` template + `mise.lock`; the exact version comes from the `@deepseek-ai/dsh-agent` devDependency |
 | Pinned source target for Source Mode | `test/compat/dsh-source.json` (repository + exact 40-character commit) |
+| Published pi2dsh bridge probe input | the live public npm registry (`pi2dsh@latest` and the `@deepseek-ai/dsh` version list); there is no checked-in pairing file |
 | Published pairing summary and installation commands | `README.md` / `README.en.md` |
 | Release-by-release history | `CHANGELOG.md` / `CHANGELOG.en.md` and GitHub Releases |
 
@@ -64,17 +65,40 @@ DSH/TUI pairing is evaluated with npm/node-semver rules plus the official
    startup notice is best-effort because Loader rows mount concurrently; the
    matrix remains the authority for the recommended target.
 
-An unsupported published consumer declaration (for example one whose peers do
-not cover the DSH version the manifest declares) is an
-`ECOSYSTEM_CONTRACT_BLOCKER`, not a reason to force-install or to rewrite the
-consumer manifest. The blocking gate validates the pairing that
-`test/compat/pi2dsh.json` declares, so that pin answers one question: does the
-current code keep the published consumer working on a DSH version both sides
-support? It names an external consumer pairing and is NOT a CI target-version
-source, so it may trail the matrix's current DSH target while the published
-consumer still declares the older family. The declared version must remain a
-pairing this TUI line actually supports, and a declaration the gate cannot
-satisfy stays blocking until a compatible consumer release exists.
+## Published pi2dsh ecosystem probe
+
+The pi2dsh bridge is an EXTERNAL published consumer; it is not a version target
+of this repository and has no checked-in pairing file. Every probe run:
+
+1. resolves `pi2dsh@latest` from the public npm registry and freezes that exact
+   published version for the whole run (the bridge is installed by that exact
+   spec, never by `latest`);
+2. reads the published `@deepseek-ai/dsh` version list and selects the HIGHEST
+   published version that satisfies every DSH peer the bridge actually declares,
+   every DSH peer the candidate tarball declares, and the candidate's
+   `engines.dsh` (with the official `includePrerelease` semantics). npm's
+   default prerelease rule governs peer ranges;
+3. installs that exact pair and runs the real tmux PTY smoke.
+
+A valid but lagging `@xmoon76/dsh-pi-tui` peer on the bridge is
+`METADATA_DRIFT`: it is reported but does not reject a runnable DSH; the real
+ordinary plugin install and PTY decide. A missing/invalid bridge TUI peer,
+invalid metadata, no installable intersection, registry failure, install
+failure or runtime failure is a real failure — never a SKIP, never a forced
+install. A PASS proves only the exact pair resolved for that run; it does not
+claim the whole semver range was runtime-verified.
+
+`pnpm smoke:pi2dsh -- <candidate.tgz>` is the local entry. It always validates
+the published npm ecosystem and requires online registry access; `--distribution`
+(Source Mode) is refused with a non-zero error. `--force-peers` is an
+INVESTIGATIVE manual run that ignores only the bridge's DSH peers; it is never
+used in CI and never produces a published compatibility claim.
+
+The checks are optional external-ecosystem signals: the `ecosystem-compat` job
+uses Job-level `continue-on-error`, is not a dependency of the release
+qualification graph, and its own job/log/debug artifact is the only authority
+for its result. The official preset, runtime-boundary and Source Mode lanes
+remain the hard gates for this repository's own qualification.
 
 ## Session and preset data compatibility
 
@@ -121,19 +145,19 @@ registry lockfile for unpublished DSH metadata.
 
 CI policy is explicit: pushes to `next` and pull requests whose base is `next`
 follow the tracked `test/compat/dsh-mode.json`; `main` and every release tag use
-registry-backed npm mode with a frozen lockfile. The pi2dsh ecosystem check
-runs in BOTH modes and always against the PUBLISHED ecosystem: it installs the
-published DSH and the published pi2dsh release from the registry, so it never
-validates a source pack. A source pack cannot validate the published ecosystem
-— the smoke refuses that combination and reports it as a SKIP, which is not a
-pass. The gate is blocking in both modes.
+registry-backed npm mode with a frozen lockfile. The pi2dsh ecosystem probe is
+independent of that mode split: every run evaluates the PUBLISHED ecosystem
+(`pi2dsh@latest` and published `@deepseek-ai/dsh`) and never uses a source pack.
+A source pack cannot validate the published ecosystem, so the probe refuses
+that combination with a non-zero error; the job is optional in both modes and a
+skipped job is not a pass.
 
 A passing ecosystem check proves the candidate against the PUBLISHED DSH
 family only. In Source Mode it says nothing about the unpublished DSH source
-family, and the published pi2dsh release is pinned to a published DSH version,
-so a later source-baseline move must not read this gate as evidence that the
-new Host is compatible. The Source Mode lanes (official presets, the old-DSH
-boundary, the source distribution checks) own that qualification.
+family, and the published pi2dsh release is paired with a published DSH
+version, so a later source-baseline move must not read this check as evidence
+that the new Host is compatible. The Source Mode lanes (official presets, the
+old-DSH boundary, the source distribution checks) own that qualification.
 
 For local validation use the isolated driver rather than workspace symlinks:
 
@@ -159,6 +183,9 @@ removed with the temporary validation workspace and must never be committed to
 - The official-preset gate installs only the exact target DSH and candidate
   artifact, then runs real `standard`/`ptc`/`minimal`/`cordis` Agent/Session
   creation, durable-header, degradation and `/goal` isolation checks.
+- The optional `ecosystem-compat` job resolves the current published
+  `pi2dsh@latest` / DSH intersection and runs the real PTY smoke; it is visible
+  but not part of release qualification.
 - `test/tooling/dsh-peer-window.test.mjs`, `test/tooling/release-notes.test.mjs` and
   `scripts/installation-doc-gate.mjs` prove the manifest/matrix-derived install
   facts and the two root READMEs; a stale matrix fails the release-notes gate

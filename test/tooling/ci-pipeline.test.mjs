@@ -117,13 +117,13 @@ test('an UNKNOWN mode is refused rather than installed as npm', () => {
 // ---------------------------------------------------------------------------
 
 test('a fully successful npm PR run qualifies with split-process skipped', () => {
-  const decision = verdict({ role: 'qualify', mode: 'npm', ref: PR_REF, phases: phasesAt('success'), ecosystemDisposition: 'passed' })
+  const decision = verdict({ role: 'qualify', mode: 'npm', ref: PR_REF, phases: phasesAt('success') })
   assert.deepEqual(decision.failures, [])
   assert.equal(decision.ok, true)
 })
 
 test('a fully successful npm release-tag run qualifies with split-process success', () => {
-  const decision = verdict({ role: 'qualify', mode: 'npm', ref: RELEASE_REF, phases: phasesAt('success', { ref: RELEASE_REF }), ecosystemDisposition: 'passed' })
+  const decision = verdict({ role: 'qualify', mode: 'npm', ref: RELEASE_REF, phases: phasesAt('success', { ref: RELEASE_REF }) })
   assert.deepEqual(decision.failures, [])
   assert.equal(decision.ok, true)
 })
@@ -132,14 +132,14 @@ test('mise-toolchain is required in both npm and source modes', () => {
   for (const mode of ['npm', 'source']) {
     const phases = phasesAt('success', { mode }).map(phase =>
       phase.name === 'mise-toolchain' ? { ...phase, result: 'skipped' } : phase)
-    const decision = verdict({ role: 'qualify', mode, ref: PR_REF, phases, ecosystemDisposition: 'passed' })
+    const decision = verdict({ role: 'qualify', mode, ref: PR_REF, phases })
     assert.equal(decision.ok, false, `${mode} mode must not qualify without the mise contract`)
     assert.match(decision.failures.join('\n'), /'mise-toolchain' is 'skipped'/u)
   }
 })
 
 test('a fully successful source run qualifies with the source mode-statuses', () => {
-  const decision = verdict({ role: 'qualify', mode: 'source', ref: RELEASE_REF, phases: phasesAt('success', { mode: 'source', ref: RELEASE_REF }), ecosystemDisposition: 'passed' })
+  const decision = verdict({ role: 'qualify', mode: 'source', ref: RELEASE_REF, phases: phasesAt('success', { mode: 'source', ref: RELEASE_REF }) })
   assert.deepEqual(decision.failures, [])
 })
 
@@ -147,7 +147,7 @@ test('SKIPPED, FAILED and CANCELLED are not success for a required phase', () =>
   for (const result of ['skipped', 'failure', 'cancelled']) {
     const phases = phasesAt('success')
     phases[0] = { name: phases[0].name, result }
-    const decision = verdict({ role: 'qualify', mode: 'npm', ref: PR_REF, phases, ecosystemDisposition: 'passed' })
+    const decision = verdict({ role: 'qualify', mode: 'npm', ref: PR_REF, phases })
     assert.equal(decision.ok, false, `'${result}' must not qualify`)
     assert.match(decision.failures.join('\n'), new RegExp(`is '${result}', not 'success'`, 'u'))
   }
@@ -155,7 +155,7 @@ test('SKIPPED, FAILED and CANCELLED are not success for a required phase', () =>
 
 test('an ABSENT phase is a failure, not a pass', () => {
   const phases = phasesAt('success').filter(phase => phase.name !== 'aggregate')
-  const decision = verdict({ role: 'qualify', mode: 'npm', ref: PR_REF, phases, ecosystemDisposition: 'passed' })
+  const decision = verdict({ role: 'qualify', mode: 'npm', ref: PR_REF, phases })
   assert.equal(decision.ok, false)
   assert.match(decision.failures.join('\n'), /'aggregate' was not reported/u)
 })
@@ -166,11 +166,11 @@ test('a mode-dependent phase with the WRONG status is a failure', () => {
   // run whose client-family gate was skipped dropped a check.
   const sourceWrong = phasesAt('success', { mode: 'source', ref: PR_REF })
   sourceWrong.find(phase => phase.name === 'prepare-dsh-source').result = 'skipped'
-  assert.equal(verdict({ role: 'qualify', mode: 'source', ref: PR_REF, phases: sourceWrong, ecosystemDisposition: 'passed' }).ok, false)
+  assert.equal(verdict({ role: 'qualify', mode: 'source', ref: PR_REF, phases: sourceWrong }).ok, false)
 
   const npmWrong = phasesAt('success')
   npmWrong.find(phase => phase.name === 'client-family-compat').result = 'skipped'
-  const decision = verdict({ role: 'qualify', mode: 'npm', ref: PR_REF, phases: npmWrong, ecosystemDisposition: 'passed' })
+  const decision = verdict({ role: 'qualify', mode: 'npm', ref: PR_REF, phases: npmWrong })
   assert.equal(decision.ok, false)
   assert.match(decision.failures.join('\n'), /requires 'success'/u)
 })
@@ -233,89 +233,68 @@ test('the split-process truth table is fail-closed in both directions', () => {
   ]
   for (const entry of cases) {
     const phases = withSplitProcess(phasesAt('success', { mode: entry.mode, ref: entry.ref }), entry.split)
-    const decision = verdict({ role: 'qualify', mode: entry.mode, ref: entry.ref, phases, ecosystemDisposition: 'passed' })
+    const decision = verdict({ role: 'qualify', mode: entry.mode, ref: entry.ref, phases })
     assert.equal(decision.ok, entry.ok, `${entry.name}: ${decision.failures.join('; ')}`)
   }
 })
 
-test('the ecosystem disposition truth table is fail-closed outside a PR', () => {
-  const cases = [
-    // PR: a real pass or the explicit typed skip keeps the PR candidate alive.
-    { name: 'npm PR passed', mode: 'npm', ref: PR_REF, disposition: 'passed', ok: true },
-    { name: 'npm PR typed skip', mode: 'npm', ref: PR_REF, disposition: 'skipped-unsupported-dsh-peer', ok: true },
-    // Release tags and ordinary branches must run the REAL smoke.
-    { name: 'npm release tag passed', mode: 'npm', ref: RELEASE_REF, disposition: 'passed', ok: true },
-    { name: 'npm release tag typed skip', mode: 'npm', ref: RELEASE_REF, disposition: 'skipped-unsupported-dsh-peer', ok: false },
-    { name: 'npm main typed skip', mode: 'npm', ref: 'refs/heads/main', disposition: 'skipped-unsupported-dsh-peer', ok: false },
-    { name: 'npm comp branch typed skip', mode: 'npm', ref: 'refs/heads/comp/dsh-0.2.2', disposition: 'skipped-unsupported-dsh-peer', ok: false },
-    // No implicit success value: missing, empty, mixed-case or forged values fail.
-    { name: 'npm PR missing', mode: 'npm', ref: PR_REF, disposition: undefined, ok: false },
-    { name: 'npm PR empty', mode: 'npm', ref: PR_REF, disposition: '', ok: false },
-    { name: 'npm PR mixed case', mode: 'npm', ref: PR_REF, disposition: 'PASSED', ok: false },
-    { name: 'npm PR boolean-ish', mode: 'npm', ref: PR_REF, disposition: 'true', ok: false },
-    { name: 'npm PR wrong skip spelling', mode: 'npm', ref: PR_REF, disposition: 'skipped', ok: false },
-    // Source Mode keeps its previous contract and never claims a disposition.
-    { name: 'source PR no claim', mode: 'source', ref: PR_REF, disposition: 'skipped-unsupported-dsh-peer', ok: true },
-    { name: 'source tag no claim', mode: 'source', ref: RELEASE_REF, disposition: undefined, ok: true },
-  ]
-  for (const entry of cases) {
-    const decision = verdict({
-      role: 'qualify',
-      mode: entry.mode,
-      ref: entry.ref,
-      phases: phasesAt('success', { mode: entry.mode, ref: entry.ref }),
-      ecosystemDisposition: entry.disposition,
-    })
-    assert.equal(decision.ok, entry.ok, `${entry.name}: ${decision.failures.join('; ')}`)
+test('the optional ecosystem phase never changes the hard-gate verdict', () => {
+  // The external pi2dsh probe is informational. Whatever the workflow's
+  // continue-on-error projection reports for it — success, failure, skipped or
+  // no report at all — the qualification verdict must rest on the hard phases.
+  for (const result of ['success', 'failure', 'skipped', undefined]) {
+    for (const role of ['qualify', 'summary']) {
+      const phases = [
+        ...phasesAt('success'),
+        ...(result === undefined ? [] : [{ name: 'ecosystem-compat', result }]),
+        ...(role === 'summary' ? [{ name: 'qualified', result: 'success' }] : []),
+      ]
+      const decision = verdict({ role, mode: 'npm', ref: PR_REF, phases })
+      assert.equal(decision.ok, true, `${role} with ecosystem=${String(result)}: ${decision.failures.join('; ')}`)
+      assert.doesNotMatch(decision.lines.join('\n'), /external pi2dsh compatibility/u,
+        'the pipeline summary must not carry a second ecosystem truth')
+    }
   }
 
-  // A typed skip stays visibly NOT_QUALIFIED; only a real pass reports qualified.
-  const skipped = verdict({ role: 'qualify', mode: 'npm', ref: PR_REF, phases: phasesAt('success'), ecosystemDisposition: 'skipped-unsupported-dsh-peer' })
-  assert.match(skipped.lines.join('\n'), /NOT_QUALIFIED \(skipped-unsupported-dsh-peer\)/u)
-  assert.equal(skipped.externalQualified, false)
-  const passed = verdict({ role: 'qualify', mode: 'npm', ref: PR_REF, phases: phasesAt('success'), ecosystemDisposition: 'passed' })
-  assert.match(passed.lines.join('\n'), /QUALIFIED \(passed\)/u)
-  assert.equal(passed.externalQualified, true)
-
-  const args = cliPhases(phasesAt('success'))
-  const missing = cli(['qualify', '--mode', 'npm', '--ref', PR_REF, ...args])
-  assert.equal(missing.status, 1)
-  assert.match(missing.stderr, /ecosystem disposition/u)
-
-  const prSkip = cli(['qualify', '--mode', 'npm', '--ref', PR_REF, '--ecosystem-disposition', 'skipped-unsupported-dsh-peer', ...args])
-  assert.equal(prSkip.status, 0, prSkip.stderr)
-  assert.match(prSkip.stdout, /NOT_QUALIFIED/u)
-
-  const tagSkip = cli([
-    'qualify', '--mode', 'npm', '--ref', RELEASE_REF,
-    '--ecosystem-disposition', 'skipped-unsupported-dsh-peer',
-    ...cliPhases(phasesAt('success', { ref: RELEASE_REF })),
-  ])
-  assert.equal(tagSkip.status, 1)
-  assert.match(tagSkip.stderr, /pull-request ref/u)
+  // A real hard phase failure still refuses qualification; the optional phase
+  // must not mask it.
+  const hardFailure = phasesAt('success').map(phase => phase.name === 'build' ? { ...phase, result: 'failure' } : phase)
+  const decision = verdict({ role: 'qualify', mode: 'npm', ref: PR_REF, phases: hardFailure })
+  assert.equal(decision.ok, false)
+  assert.match(decision.failures.join('\n'), /'build' is 'failure'/u)
 })
 
-test('the ecosystem-compat job transports a typed disposition, never a bare exit code', () => {
-  const job = workflow().jobs['ecosystem-compat']
-  assert.deepEqual(job.outputs, { disposition: '${{ steps.run_pi2dsh.outputs.disposition }}' })
-  const step = (job.steps ?? []).find(entry => entry.id === 'run_pi2dsh')
-  assert.ok(step !== undefined, 'the smoke step must be identifiable by its id')
-  const run = step.run
-  assert.match(run, /DISPOSITION_FILE="\$RUNNER_TEMP\/pi2dsh-disposition"/u)
-  assert.match(run, /--disposition-file "\$DISPOSITION_FILE"/u)
-  assert.match(run, /--allow-stale-tui-peer/u, 'the narrow stale-TUI peer rule stays')
-  assert.match(run, /--skip-unsupported-dsh-peer-on-pr/u)
-  assert.match(run, /refs\/pull\/\[0-9\]\+\/merge/u, 'the typed skip is gated on the actual PR ref')
-  assert.match(run, /passed\|skipped-unsupported-dsh-peer/u, 'only the two typed values may be exported')
-  assert.match(run, /unknown disposition/u)
-  assert.match(run, /if \[ ! -f "\$DISPOSITION_FILE" \]/u, 'a zero exit without a disposition is not a pass')
-  assert.match(run, /if \[ "\$DSH_MODE" != "npm" \]/u, 'Source Mode keeps its previous contract')
+test('the optional ecosystem job is independent, visible and non-blocking', () => {
+  const graph = workflow()
+  const job = graph.jobs['ecosystem-compat']
+  assert.deepEqual(needsOf(job).sort(), ['candidate', 'dsh-context'],
+    'the probe must run whenever a provisional candidate exists, independent of the formal qualification')
+  assert.equal(job['continue-on-error'], true, 'the job failure stays visible but never fails the workflow')
+  assert.equal(job.outputs, undefined, 'there is no disposition transport and therefore no second ecosystem truth')
 
-  const expectedArg = '--ecosystem-disposition "${{ needs[\'ecosystem-compat\'].outputs.disposition }}"'
+  const smokeStep = (job.steps ?? []).find(step => typeof step.run === 'string' && step.run.includes('pi2dsh-compat-smoke.mjs'))
+  assert.ok(smokeStep, 'the job must run the pi2dsh compatibility smoke')
+  assert.match(smokeStep.run, /node scripts\/pi2dsh-compat-smoke\.mjs "\$\{TARBALLS\[0\]\}"/u,
+    'the smoke runs the one provisional tarball with no historical flags')
+  for (const forbidden of ['--allow-stale-tui-peer', '--skip-unsupported-dsh-peer-on-pr', '--disposition-file', 'DSH_MODE', '|| true']) {
+    assert.equal(smokeStep.run.includes(forbidden), false, `the smoke step must not contain ${forbidden}`)
+  }
+  assert.equal(smokeStep['continue-on-error'], undefined, 'the real smoke step must not swallow its failure')
+  assert.equal(smokeStep.if, undefined, 'the real smoke step must run unconditionally inside the job')
+  assert.equal((job.steps ?? []).some(step => step['continue-on-error'] === true), false,
+    'continue-on-error belongs to the JOB, never to a step')
+
+  for (const name of ['qualified', 'publish', 'summary']) {
+    assert.equal(needsOf(workspaceJob(name)).includes('ecosystem-compat'), false,
+      `${name} must not wait for the optional external probe`)
+  }
   for (const name of ['qualified', 'summary']) {
-    const verdictStep = workflow().jobs[name].steps.find(entry => typeof entry.run === 'string' && entry.run.includes('ci-verdict.mjs'))
-    assert.ok(verdictStep.run.includes(expectedArg), `${name} must transport the same disposition value`)
+    const verdictStep = graph.jobs[name].steps.find(step => typeof step.run === 'string' && step.run.includes('ci-verdict.mjs'))
+    assert.doesNotMatch(verdictStep.run, /ecosystem-compat|ecosystem-disposition/u,
+      `${name} must not carry a second ecosystem truth`)
   }
+  assert.ok(REQUIRED_PHASES.includes('official-preset-assembly'),
+    'the official preset gate stays a hard required phase')
 })
 
 test('a missing or malformed GITHUB_REF is a failure, never an implicit PR skip', () => {
@@ -331,50 +310,50 @@ test('a missing or malformed GITHUB_REF is a failure, never an implicit PR skip'
     'refs/tags/v1.lock',
     'refs/heads/@{bad',
   ]) {
-    const decision = verdict({ role: 'qualify', mode: 'npm', ref, phases: phasesAt('success'), ecosystemDisposition: 'passed' })
+    const decision = verdict({ role: 'qualify', mode: 'npm', ref, phases: phasesAt('success') })
     assert.equal(decision.ok, false, `ref=${JSON.stringify(ref)} must fail`)
     assert.match(decision.failures.join('\n'), /missing or not a supported ref/u)
   }
 
   const args = cliPhases(phasesAt('success'))
-  const missing = cli(['qualify', '--mode', 'npm', '--ecosystem-disposition', 'passed', ...args])
+  const missing = cli(['qualify', '--mode', 'npm', ...args])
   assert.equal(missing.status, 1)
   assert.match(missing.stderr, /--ref is required/u)
 
-  const empty = cli(['qualify', '--mode', 'npm', '--ref', '', '--ecosystem-disposition', 'passed', ...args])
+  const empty = cli(['qualify', '--mode', 'npm', '--ref', '', ...args])
   assert.equal(empty.status, 1)
   assert.match(empty.stderr, /--ref is required/u)
 
-  const invalid = cli(['qualify', '--mode', 'npm', '--ref', 'main', '--ecosystem-disposition', 'passed', ...args])
+  const invalid = cli(['qualify', '--mode', 'npm', '--ref', 'main', ...args])
   assert.equal(invalid.status, 1)
   assert.match(invalid.stderr, /not a supported GitHub ref/u)
 
-  const malformed = cli(['qualify', '--mode', 'npm', '--ref', 'refs/heads/a..b', '--ecosystem-disposition', 'passed', ...args])
+  const malformed = cli(['qualify', '--mode', 'npm', '--ref', 'refs/heads/a..b', ...args])
   assert.equal(malformed.status, 1)
   assert.match(malformed.stderr, /not a supported GitHub ref/u)
 
   const summaryArgs = cliPhases(phasesAt('success', { extra: { qualified: 'success' } }))
-  const summaryMissing = cli(['summary', '--mode', 'npm', '--ecosystem-disposition', 'passed', ...summaryArgs])
+  const summaryMissing = cli(['summary', '--mode', 'npm', ...summaryArgs])
   assert.equal(summaryMissing.status, 1)
   assert.match(summaryMissing.stderr, /--ref is required/u)
 })
 
 test('an UNKNOWN mode cannot be qualified, including object-prototype names', () => {
   for (const mode of ['hybrid', 'constructor', 'toString', '__proto__']) {
-    const decision = verdict({ role: 'qualify', mode, ref: PR_REF, phases: phasesAt('success'), ecosystemDisposition: 'passed' })
+    const decision = verdict({ role: 'qualify', mode, ref: PR_REF, phases: phasesAt('success') })
     assert.equal(decision.ok, false, `mode=${mode} must fail`)
     assert.match(decision.failures.join('\n'), /not one this verdict knows/u)
   }
-  const cliResult = cli(['qualify', '--mode', 'constructor', '--ref', PR_REF, '--ecosystem-disposition', 'passed', ...cliPhases(phasesAt('success'))])
+  const cliResult = cli(['qualify', '--mode', 'constructor', '--ref', PR_REF, ...cliPhases(phasesAt('success'))])
   assert.equal(cliResult.status, 1)
   assert.match(cliResult.stderr, /not one this verdict knows/u)
 })
 
 test('the release phases are required only on a release tag', () => {
-  const withoutRelease = verdict({ role: 'qualify', mode: 'npm', ref: RELEASE_REF, phases: phasesAt('success', { ref: RELEASE_REF }), ecosystemDisposition: 'passed' })
+  const withoutRelease = verdict({ role: 'qualify', mode: 'npm', ref: RELEASE_REF, phases: phasesAt('success', { ref: RELEASE_REF }) })
   assert.equal(withoutRelease.ok, true, 'a PR does not run the release jobs')
 
-  const withRelease = verdict({ role: 'qualify', mode: 'npm', ref: RELEASE_REF, phases: phasesAt('success', { ref: RELEASE_REF }), release: true, ecosystemDisposition: 'passed' })
+  const withRelease = verdict({ role: 'qualify', mode: 'npm', ref: RELEASE_REF, phases: phasesAt('success', { ref: RELEASE_REF }), release: true })
   assert.equal(withRelease.ok, false)
   for (const phase of RELEASE_PHASES) {
     assert.match(withRelease.failures.join('\n'), new RegExp(`'${phase}' was not reported`, 'u'))
@@ -385,17 +364,16 @@ test('the release phases are required only on a release tag', () => {
     mode: 'npm',
     ref: RELEASE_REF,
     release: true,
-    ecosystemDisposition: 'passed',
     phases: phasesAt('success', { ref: RELEASE_REF, extra: Object.fromEntries(RELEASE_PHASES.map(name => [name, 'success'])) }),
   })
   assert.equal(complete.ok, true)
 })
 
 test('the SUMMARY additionally requires the qualified artifact', () => {
-  const summary = verdict({ role: 'summary', mode: 'npm', ref: PR_REF, phases: phasesAt('success'), ecosystemDisposition: 'passed' })
+  const summary = verdict({ role: 'summary', mode: 'npm', ref: PR_REF, phases: phasesAt('success') })
   assert.equal(summary.ok, false)
   assert.match(summary.failures.join('\n'), /'qualified' was not reported/u)
-  const withQualified = verdict({ role: 'summary', mode: 'npm', ref: PR_REF, phases: phasesAt('success', { extra: { qualified: 'success' } }), ecosystemDisposition: 'passed' })
+  const withQualified = verdict({ role: 'summary', mode: 'npm', ref: PR_REF, phases: phasesAt('success', { extra: { qualified: 'success' } }) })
   assert.equal(withQualified.ok, true)
   assert.deepEqual(SUMMARY_EXTRA_PHASES, ['qualified'])
 })
@@ -404,12 +382,12 @@ test('an unusable start instant is a diagnosis, not an elapsed time', () => {
   // The shell treats an empty operand as zero, which once produced a
   // plausible-looking elapsed time for a run that never started.
   for (const started of ['', '0', 'yesterday']) {
-    const decision = verdict({ role: 'summary', mode: 'npm', ref: PR_REF, phases: phasesAt('success', { extra: { qualified: 'success' } }), started, ecosystemDisposition: 'passed' })
+    const decision = verdict({ role: 'summary', mode: 'npm', ref: PR_REF, phases: phasesAt('success', { extra: { qualified: 'success' } }), started })
     assert.equal(decision.ok, false, `started=${JSON.stringify(started)} must fail`)
     assert.match(decision.failures.join('\n'), /start instant is unusable/u)
   }
   const now = Math.floor(Date.now() / 1000) - 10
-  const decision = verdict({ role: 'summary', mode: 'npm', ref: PR_REF, phases: phasesAt('success', { extra: { qualified: 'success' } }), started: String(now), ecosystemDisposition: 'passed' })
+  const decision = verdict({ role: 'summary', mode: 'npm', ref: PR_REF, phases: phasesAt('success', { extra: { qualified: 'success' } }), started: String(now) })
   assert.equal(decision.ok, true)
   assert.ok(decision.elapsedSeconds !== null && decision.elapsedSeconds >= 10)
 })
@@ -422,12 +400,12 @@ test('the phase parser refuses an unknown result instead of treating it as not-f
 
 test('the CLI exits non-zero on a failed phase and zero on a full success', () => {
   const args = cliPhases(phasesAt('success'))
-  const ok = cli(['qualify', '--mode', 'npm', '--ref', PR_REF, '--ecosystem-disposition', 'passed', ...args])
+  const ok = cli(['qualify', '--mode', 'npm', '--ref', PR_REF, ...args])
   assert.equal(ok.status, 0, ok.stderr)
   assert.match(ok.stdout, /phase\s+result/u)
 
   const failed = args.map(entry => (entry === 'build=success' ? 'build=failure' : entry))
-  const bad = cli(['qualify', '--mode', 'npm', '--ref', PR_REF, '--ecosystem-disposition', 'passed', ...failed])
+  const bad = cli(['qualify', '--mode', 'npm', '--ref', PR_REF, ...failed])
   assert.equal(bad.status, 1)
   assert.match(bad.stderr, /did NOT qualify/u)
 })
@@ -471,6 +449,11 @@ test('every phase the verdict names is a job in ci.yml, and every blocking job i
 /** The parsed workflow. */
 function workflow() {
   return parseYaml(readFileSync(join(ROOT, '.github', 'workflows', 'ci.yml'), 'utf8'))
+}
+
+/** One job of the parsed workflow. */
+function workspaceJob(name) {
+  return workflow().jobs[name]
 }
 
 /** A job's needs, normalised to an array. */
@@ -559,9 +542,6 @@ test('every job that can be SKIPPED by mode states the mode it needs', () => {
     if (!/always\(\)|!cancelled\(\)/u.test(job.if)) continue
     if (!reporting.has(name)) {
       for (const need of needsOf(job)) {
-        // pi2dsh is an optional external ecosystem: publish intentionally
-        // does not gate on its result.
-        if (name === 'publish' && need === 'ecosystem-compat') continue
         const checked = job.if.includes(`needs.${need}.result`) || job.if.includes(`needs['${need}'].result`)
         assert.ok(checked, `${name} has an always()/!cancelled() condition but does not check '${need}'`)
       }
