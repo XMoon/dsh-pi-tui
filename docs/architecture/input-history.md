@@ -79,7 +79,11 @@ dedicated data file keyed by the working directory. We adopt that shape.
 (host-reserved key; plugins can never claim it). It is "find and EDIT", never
 "find and run": the Transcript keeps rendering above it and the ordinary footer
 below it, and the panel is an editor-seat tenant — not an overlay and not a
-second screen.
+second screen. The Scope, filtering, currentness, Enter, Esc, Ctrl+C and Copy
+rules below are renderer-independent behavior contracts. The **layout,
+pointer and visual rules in the remainder of this section are PiTui-specific
+presentation**; the TSP renderer's native presentation has its own section
+below.
 
 - **Scopes**: `Tab` cycles the scope; the query survives the switch.
   - `Current session` (the default when a live session exists) — only the
@@ -155,6 +159,57 @@ second screen.
   `src/tui/panels/history-panel.ts` (the editor-seat surface). The exact
   original-text cell mapping the Preview drag shares with the Job Command page
   lives in `src/tui/components/source-text-layout.ts`.
+
+### TSP native History presentation
+
+The experimental Tern Surface Protocol renderer presents the SAME `Ctrl+R`
+input-history behavior as one short-lived Dock card above the ONE Quiet
+Composer, inside the existing inline surface. It is not a `mode:'screen'`, an
+overlay, a second stdin reader, a second composer or a second History owner.
+The Main transcript and the ordinary native footer keep rendering above and
+below it, and the Composer stays visible (its business controls are disabled
+while the card owns the seat).
+
+- **One authority per fact.** The card consumes the SAME
+  `HistorySearchSource`, open-time session cwd and atomic
+  `captureHistoryScope()` pair the PiTui panel consumes; it never scans a file,
+  re-derives a Session identity from a string, caches rows across sessions or
+  owns a clipboard policy. Copy uses the existing Client-local copy callback
+  with the exact stored bytes, and Restore uses the ONE controlled composer's
+  whole-document write — never a submit, a steer, a History write or an
+  attachment intake.
+- **Scopes and currentness.** A live Session opens in `Session`; a sessionless
+  start opens in `Directory` and never offers a Session Scope. The single Scope
+  control cycles `Session → Directory → All → Session` (or the two-scope ring)
+  with the query preserved. `Tab`/`Shift+Tab` and the keyboard/pointer routes
+  converge on the same admission. Every acting entry — a key, a click, a read
+  settlement, a copy settlement — re-checks the captured owner+generation, so a
+  publication, a same-id reopen or a generation bump retires the older card.
+- **Keys.** `Ctrl+R` opens one card or returns the caret to the SAME instance.
+  `↑/↓`, `PgUp`/`PgDn` select within the settled first page and reveal the
+  selected row; `Alt+↑/↓`, `Alt+PgUp/PgDn`, `Alt+Home/End` scroll the Preview
+  independently. `Tab`/`Shift+Tab` cycle the Scope, `F2` expands or collapses
+  the same card, `Enter` restores only, `Alt+C`/`Copy all` copies only, and
+  `Esc`/`Ctrl+C`/`×` cancel only. While the card owns the seat every key is
+  consumed by it: a closing `Ctrl+C` never interrupts the Agent. The next
+  independent Enter follows the normal submission contract.
+- **Pointer.** Result rows are native buttons whose click SELECTS; the explicit
+  `Restore to draft` button is the one draft write. The Scope, Expand, Close,
+  Copy and Retry controls are native buttons too. A click addressed at a
+  retired frame is refused by the frame's real node identity; a card under a
+  Question/Approval parks the SAME instance and returns after the last blocker,
+  while a non-blocking Presenter closes it synchronously.
+- **Presentation.** The card is ONE light-bordered Dock surface: Header + one
+  neutral Scope button + Expand/Close, one official native search input, a
+  scrollable results list and an independently scrollable full Preview, and the
+  `Copy all` / `Restore to draft` action row. Wide panes put the list beside the
+  Preview; narrow panes stack them; short panes compress decoration first and
+  keep the query, at least one result row, both actions, the Composer and the
+  Footer. The Preview keeps the original soft-wrapped text — never a `… more`
+  pretence — and states `Time unknown` for a legacy row. `Results · N shown`
+  counts the displayed first page, never a global total. Panes that did not
+  negotiate the kinds and features this card really paints state that History
+  search is unavailable instead of painting a reduced secondary UI.
 
 ### The session-scope persist gate (deferred start)
 

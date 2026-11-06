@@ -175,6 +175,10 @@ export interface TspHistorySearchSeat {
  *  second-tier UI or letting the key fall through as a literal `r`. */
 export const TSP_HISTORY_SEARCH_UNAVAILABLE = 'Input history search is unavailable in this Tern pane.'
 
+/** The ONE user-visible statement of a failed read, and of a pane that cannot
+ *  present the card. Both are stated instead of painting a misleading page. */
+export const HISTORY_SEARCH_FAILURE = 'Could not search input history.'
+
 /** The page step of the results navigation (the `↑↓` / `PgUp`/`PgDn` pair). The
  *  native scroll container grants the real height, so this is a paging step and
  *  never a claim about how many rows the pane shows. */
@@ -391,6 +395,19 @@ export function createTspHistorySearch(
     frameIds = new Map()
   }
 
+  /**
+   * The retire that DISCOVERED the death (a late settlement, a stale acting
+   * entry) rather than the one an outer commit performed: nothing else owes a
+   * frame, so the card a user can still see must actually leave the frame. A
+   * formal lifecycle commit calls plain {@link retire} and carries its own
+   * repaint, exactly like the composer and completion seats.
+   */
+  const retireDiscovered = (): void => {
+    if (state === undefined) return
+    retire()
+    ports.requestRender()
+  }
+
   const runSearch = (owner: HistorySeatState, request: PendingSearch): void => {
     const source = binding?.source
     if (source === undefined) return
@@ -413,7 +430,7 @@ export function createTspHistorySearch(
       if (state !== owner || owner.retired || pending !== request) return
       if (request.serial !== owner.openSerial || request.revision !== owner.queryRevision) return
       if (ports.admitted() === false || owner.scopeCapture.isCurrent() === false) {
-        retire()
+        retireDiscovered()
         return
       }
       pending = undefined
@@ -436,7 +453,7 @@ export function createTspHistorySearch(
       if (state !== owner || owner.retired || pending !== request) return
       if (request.serial !== owner.openSerial || request.revision !== owner.queryRevision) return
       if (ports.admitted() === false || owner.scopeCapture.isCurrent() === false) {
-        retire()
+        retireDiscovered()
         return
       }
       pending = undefined
@@ -620,7 +637,7 @@ export function createTspHistorySearch(
     const owner = state
     if (owner === undefined || owner.retired || owner.phase !== 'open') return false
     if (!ports.admitted() || !owner.scopeCapture.isCurrent()) {
-      retire()
+      retireDiscovered()
       return false
     }
     const intent = keyIntent(owner, key)
@@ -683,10 +700,15 @@ export function createTspHistorySearch(
       selected: row.id === owner.selectedId,
     }))
     const selected = settledSelected(owner)
+    // The header states ONE thing per state: a round in flight says so, a
+    // FAILED read says FAILED (never a zero match count that would dress a
+    // broken read up as an empty history), and a settled page counts the rows
+    // this frame actually shows.
     const header = owner.status === 'searching'
       ? 'Searching…'
-      : `Results · ${painted.length} shown`
-        + (owner.exhausted ? '' : ' · older history may remain')
+      : owner.status === 'failed'
+        ? HISTORY_SEARCH_FAILURE
+        : `Results · ${painted.length} shown${owner.exhausted ? '' : ' · older history may remain'}`
     const empty = owner.status === 'ready' && painted.length === 0
       ? owner.query === ''
         ? 'No input history in this scope.'
@@ -717,7 +739,7 @@ export function createTspHistorySearch(
       header,
       rows: painted,
       empty,
-      failure: owner.status === 'failed' ? 'Could not search input history.' : undefined,
+      failure: owner.status === 'failed' ? HISTORY_SEARCH_FAILURE : undefined,
       preview,
       hint: `${HISTORY_CHORDS.scope.label} scope · ${HISTORY_CHORDS.results.label} select`
         + ` · ${HISTORY_CHORDS.preview.label} preview · ${HISTORY_CHORDS.copy.label} copy`
