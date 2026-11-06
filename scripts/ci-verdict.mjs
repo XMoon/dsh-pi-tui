@@ -184,9 +184,9 @@ export function verdict({ role, mode, ref, phases, release = false, started, eco
       continue
     }
     if (result !== 'success') {
-      // The pi2dsh ecosystem job is disabled on main; its skipped phase is
-      // expected there and is reported as NOT_QUALIFIED below.
-      if (name === 'ecosystem-compat' && ref === 'refs/heads/main' && result === 'skipped') continue
+      // pi2dsh is an optional external ecosystem: its failed/skipped phase is
+      // reported as NOT_QUALIFIED below but never blocks the verdict.
+      if (name === 'ecosystem-compat') continue
       failures.push(`the required phase '${name}' is '${result}', not 'success'`)
     }
   }
@@ -226,11 +226,9 @@ export function verdict({ role, mode, ref, phases, release = false, started, eco
   // PR-only skip stays visibly NOT_QUALIFIED. Source Mode keeps its existing
   // contract and does not claim a disposition (the npm-only ecosystem gate).
   let externalQualified
-  const mainEcosystemDisabled = ref === 'refs/heads/main' && byName.get('ecosystem-compat') === 'skipped'
-  if (mode === 'npm') {
-    if (mainEcosystemDisabled) {
-      externalQualified = false
-    } else if (ecosystemDisposition === ECOSYSTEM_DISPOSITION.passed) {
+  const ecosystemResult = byName.get('ecosystem-compat')
+  if (mode === 'npm' && ecosystemResult === 'success') {
+    if (ecosystemDisposition === ECOSYSTEM_DISPOSITION.passed) {
       externalQualified = true
     } else if (ecosystemDisposition === ECOSYSTEM_DISPOSITION.skippedUnsupportedDshPeer) {
       externalQualified = false
@@ -240,6 +238,10 @@ export function verdict({ role, mode, ref, phases, release = false, started, eco
     } else {
       failures.push(`the ecosystem disposition ${JSON.stringify(ecosystemDisposition)} is missing or unknown: an npm run requires '${ECOSYSTEM_DISPOSITION.passed}', or '${ECOSYSTEM_DISPOSITION.skippedUnsupportedDshPeer}' on a pull request only`)
     }
+  } else if (mode === 'npm') {
+    // pi2dsh is an optional external ecosystem; a failed/skipped job is
+    // reported below as NOT_QUALIFIED but never blocks the verdict.
+    externalQualified = false
   }
 
   // The start instant is optional. When it IS given it must be usable: the
@@ -265,11 +267,11 @@ export function verdict({ role, mode, ref, phases, release = false, started, eco
     lines.push(`${name.padEnd(29)} ${byName.get(name) ?? '(absent)'}`)
   }
   if (mode === 'npm') {
-    // Never let a skip read like a runtime qualification.
+    // Never let a PR-only skip read like a runtime qualification.
     const status = externalQualified === true
       ? 'QUALIFIED (passed)'
-      : mainEcosystemDisabled
-        ? 'NOT_QUALIFIED (main branch: pi2dsh gate disabled)'
+      : ecosystemResult !== 'success'
+        ? `NOT_QUALIFIED (ecosystem job ${ecosystemResult ?? 'absent'})`
         : externalQualified === false
           ? 'NOT_QUALIFIED (skipped-unsupported-dsh-peer)'
           : 'UNVERIFIED (missing or unknown disposition)'

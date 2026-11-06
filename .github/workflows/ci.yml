@@ -1528,9 +1528,13 @@ jobs:
       - dsh-context
       - prepare-dsh-source
       - qualify
-    if: ${{ always() && github.ref != 'refs/heads/main' && needs.dsh-context.result == 'success' && needs.qualify.result == 'success' && (needs.dsh-context.outputs.mode == 'npm' || needs.prepare-dsh-source.result == 'success') }}
+    if: ${{ always() && needs.dsh-context.result == 'success' && needs.qualify.result == 'success' && (needs.dsh-context.outputs.mode == 'npm' || needs.prepare-dsh-source.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # pi2dsh is an optional external ecosystem, not a hard release dependency:
+    # a failure here stays visible but must not fail the workflow or block main
+    # and release publication.
+    continue-on-error: true
     outputs:
       # The typed ecosystem-compat transport: the ONLY values ci-verdict
       # accepts are `passed` or the PR-only `skipped-unsupported-dsh-peer`.
@@ -2007,7 +2011,7 @@ jobs:
   publish:
     name: Publish to npm
 
-    if: ${{ always() && startsWith(github.ref, 'refs/tags/') && needs.dsh-context.result == 'success' && needs.release-context.result == 'success' && needs.source-checks.result == 'success' && needs.qualified.result == 'success' && needs.client-family-compat.result == 'success' && needs.compat-smoke.result == 'success' && needs.ecosystem-compat.result == 'success' && needs.official-preset-assembly.result == 'success' && needs.runtime-boundary.result == 'success' && needs.security-audit.result == 'success' && needs.release-metadata.result == 'success' && needs.release-packed-check.result == 'success' && needs.dsh-context.outputs.mode == 'npm' }}
+    if: ${{ always() && startsWith(github.ref, 'refs/tags/') && needs.dsh-context.result == 'success' && needs.release-context.result == 'success' && needs.source-checks.result == 'success' && needs.qualified.result == 'success' && needs.client-family-compat.result == 'success' && needs.compat-smoke.result == 'success' && needs.official-preset-assembly.result == 'success' && needs.runtime-boundary.result == 'success' && needs.security-audit.result == 'success' && needs.release-metadata.result == 'success' && needs.release-packed-check.result == 'success' && needs.dsh-context.outputs.mode == 'npm' }}
 
     needs:
       - dsh-context

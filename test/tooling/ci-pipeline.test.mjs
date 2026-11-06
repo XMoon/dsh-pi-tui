@@ -559,6 +559,9 @@ test('every job that can be SKIPPED by mode states the mode it needs', () => {
     if (!/always\(\)|!cancelled\(\)/u.test(job.if)) continue
     if (!reporting.has(name)) {
       for (const need of needsOf(job)) {
+        // pi2dsh is an optional external ecosystem: publish intentionally
+        // does not gate on its result.
+        if (name === 'publish' && need === 'ecosystem-compat') continue
         const checked = job.if.includes(`needs.${need}.result`) || job.if.includes(`needs['${need}'].result`)
         assert.ok(checked, `${name} has an always()/!cancelled() condition but does not check '${need}'`)
       }
