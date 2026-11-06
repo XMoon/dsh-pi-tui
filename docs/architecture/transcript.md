@@ -987,10 +987,9 @@ answer", "folded JSON-result cards show the summary, never the raw JSON",
 "a current-schema schedule list page folds to counts and keeps its exact JSON
 expanded", "a failed rc1 schedule_edit card keeps [error], the error code and
 the result detail", "settled ask_user_question cards show the answered count",
-"goal cards without a goal say no goal set"), `test/tui/action-tool-card.test.ts`
-("schedule cards use the fixed no-registry fallback titles and identities") and
-`test/domain/tern-tsp-transcript-spike.test.ts` ("the native TSP rows share the
-Schedule fallback header (no new TSP parsing)").
+"goal cards without a goal say no goal set") and
+`test/tui/action-tool-card.test.ts` ("schedule cards use the fixed no-registry
+fallback titles and identities").
 
 ## Assistant-owned published visuals
 
