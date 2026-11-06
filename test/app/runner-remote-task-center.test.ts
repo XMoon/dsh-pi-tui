@@ -72,6 +72,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { MessageId, LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { RemoteTransportLifetime } from '../../src/app/application-runtime.ts'
+import type { ImageAttachmentRefLike } from '../../src/domain/media/types.ts'
 import { mountRemotePresentationHost, mountRemoteRunner } from './runner-remote-presentation.test.ts'
 import { waitFor } from '../support/remote-application-fixture.ts'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
@@ -305,11 +306,24 @@ function flat(view: string): string {
 test('`/tasks` renders the REAL Remote descendant tree and the child row opens the REAL child viewer', async (t) => {
   const life = testLifecycle(t)
   const { host, fixture, app, sessions, viewport } = await mountTaskCenterFixture(life)
-  // A parent-session pending echo: while the MAIN surface owns the queue it is
-  // visible; inside the child viewer it must NOT be (the child subject wins).
-  const parentBinding = sessions.binding(SessionId(PARENT_ID))
-  assert.ok(parentBinding !== undefined, 'the retained main session serves the official echo source')
-  parentBinding.session.beginSubmission({ mode: 'queue', text: 'parent pending echo', attachments: [] })
+  // A parent-session pending occurrence: while the MAIN surface owns the queue
+  // it is visible; inside the child viewer it must NOT be (the child subject
+  // wins). rc.1 exposes no client-local registered-only echo, so the
+  // authoritative pending row is the Host inbox occurrence (projection).
+  const parentAgent = host.ctx.agents.get(SessionId(PARENT_ID)) as unknown as {
+    inbox: {
+      append(target: 'next-turn', message: unknown): void
+      readonly nextTurn: readonly { readonly source?: { readonly rpcId?: unknown } }[]
+    }
+  }
+  parentAgent.inbox.append('next-turn', {
+    id: 'parent-pending-occurrence',
+    role: 'user',
+    content: [{ type: 'text', text: 'parent pending echo' }],
+    source: { kind: 'user', rpcId: 'parent-pending-rpc' },
+  })
+  await waitFor('the parent pending occurrence is visible on the MAIN surface', () =>
+    pendingTexts(app.pendingInputForTest()).includes('parent pending echo'), 15_000)
 
   // ── §14.4 `/tasks` through the real application surface.
   const generationBefore = app.getViewerGeneration()
@@ -383,15 +397,27 @@ test('`/tasks` renders the REAL Remote descendant tree and the child row opens t
   assert.match(childView, /a-ws/u, `the child cwd must render:\n${childView}`)
   assert.equal(childView.includes('parent pending echo'), false,
     'the parent pending echo must not follow into the child viewer')
-  // …and the CHILD's pending-input subject is active: a real official echo on
-  // the child binding surfaces in the viewer's pending pane.
+  // …and the CHILD's pending-input subject is active: a REAL Host inbox
+  // occurrence on the child (the authoritative pending row) surfaces in the
+  // viewer's pending pane.
   const childBinding = sessions.binding(SessionId(CHILD_A_ID))
   assert.ok(childBinding !== undefined, 'the viewer retains the exact child generation')
-  childBinding.session.beginSubmission({ mode: 'queue', text: 'child A pending echo', attachments: [] })
-  await waitFor('the child pending echo joined the pending pane', () =>
+  const childAgent = host.ctx.agents.get(SessionId(CHILD_A_ID)) as unknown as {
+    inbox: {
+      append(target: 'next-turn', message: unknown): void
+      readonly nextTurn: readonly { readonly source?: { readonly rpcId?: unknown } }[]
+    }
+  }
+  childAgent.inbox.append('next-turn', {
+    id: 'child-a-pending-occurrence',
+    role: 'user',
+    content: [{ type: 'text', text: 'child A pending echo' }],
+    source: { kind: 'user', rpcId: 'child-a-pending-rpc' },
+  })
+  await waitFor('the child pending occurrence joined the pending pane', () =>
     pendingTexts(app.pendingInputForTest()).includes('child A pending echo'), 15_000)
-  assert.equal(childBinding.session.getSnapshot().pendingSubmissions.some(echo => echo.text === 'child A pending echo'), true,
-    'the child binding itself carries the official pending echo (the subject is real, not a fabricated row)')
+  assert.equal(childAgent.inbox.nextTurn.some(message => message.source?.rpcId === 'child-a-pending-rpc'), true,
+    'the child agent itself carries the official pending occurrence (the subject is real, not a fabricated row)')
   assert.equal(pendingTexts(app.pendingInputForTest()).includes('parent pending echo'), false,
     'the parent pending echo is NOT in the child viewer pending pane')
 
@@ -559,7 +585,7 @@ test('mutation teeth: the OLD binding-requiring activity fact cannot render the 
 
 test('one-shot B and nested C are READ-ONLY from the root surface (no interactive editor, no child queue subject)', async (t) => {
   const life = testLifecycle(t)
-  const { fixture, app, sessions, viewport } = await mountTaskCenterFixture(life)
+  const { host, fixture, app, sessions, viewport } = await mountTaskCenterFixture(life)
 
   const openReadOnly = async (rowLabel: string, expectedBar: RegExp, childId: string, pendingText: string): Promise<void> => {
     const before = app.getViewerGeneration()
@@ -578,16 +604,28 @@ test('one-shot B and nested C are READ-ONLY from the root surface (no interactiv
     assert.match(flat(viewport()), expectedBar, `the read-only editor bar must render:\n${viewport()}`)
     assert.equal(viewport().includes('Message '), false,
       `a read-only viewer must not render the interactive message placeholder:\n${viewport()}`)
-    // A REAL pending echo exists on the retained child binding, yet the viewer
-    // exposes NO child queue subject, so it must never surface.
+    // A REAL Host pending occurrence exists on the retained child generation,
+    // yet the viewer exposes NO child queue subject, so it must never surface.
     const binding = sessions.binding(SessionId(childId))
     assert.ok(binding !== undefined, 'the read-only viewer still retains the exact child generation')
-    binding.session.beginSubmission({ mode: 'queue', text: pendingText, attachments: [] })
+    const childAgent = host.ctx.agents.get(SessionId(childId)) as unknown as {
+      inbox: {
+        append(target: 'next-turn', message: unknown): void
+        readonly nextTurn: readonly { readonly source?: { readonly rpcId?: unknown } }[]
+      }
+    }
+    const requestId = `readonly-pending-rpc-${childId}`
+    childAgent.inbox.append('next-turn', {
+      id: `readonly-pending-${childId}`,
+      role: 'user',
+      content: [{ type: 'text', text: pendingText }],
+      source: { kind: 'user', rpcId: requestId },
+    })
     await new Promise(resolve => setTimeout(resolve, 400))
-    assert.equal(binding.session.getSnapshot().pendingSubmissions.some(echo => echo.text === pendingText), true,
-      'the child binding really carries the official pending echo')
+    assert.equal(childAgent.inbox.nextTurn.some(message => message.source?.rpcId === requestId), true,
+      'the child agent really carries the official pending occurrence')
     assert.equal(pendingTexts(app.pendingInputForTest()).includes(pendingText), false,
-      'a read-only viewer must expose no child queue subject for its pending echo')
+      'a read-only viewer must expose no child queue subject for its pending occurrence')
     fixture.vt.sendInput('\x1b')
     await new Promise(resolve => setTimeout(resolve, 200))
   }
@@ -609,9 +647,22 @@ test('one-shot B and nested C are READ-ONLY from the root surface (no interactiv
     `a nested viewer must not render the interactive message placeholder:\n${viewport()}`)
   const nestedBinding = sessions.binding(SessionId(CHILD_C_ID))
   assert.ok(nestedBinding !== undefined, 'the nested viewer retains the exact child generation')
-  nestedBinding.session.beginSubmission({ mode: 'queue', text: 'child C pending echo', attachments: [] })
+  const nestedAgent = host.ctx.agents.get(SessionId(CHILD_C_ID)) as unknown as {
+    inbox: {
+      append(target: 'next-turn', message: unknown): void
+      readonly nextTurn: readonly { readonly source?: { readonly rpcId?: unknown } }[]
+    }
+  }
+  const nestedRequestId = 'readonly-pending-rpc-nested-c'
+  nestedAgent.inbox.append('next-turn', {
+    id: 'readonly-pending-nested-c',
+    role: 'user',
+    content: [{ type: 'text', text: 'child C pending echo' }],
+    source: { kind: 'user', rpcId: nestedRequestId },
+  })
   await new Promise(resolve => setTimeout(resolve, 400))
-  assert.equal(nestedBinding.session.getSnapshot().pendingSubmissions.some(echo => echo.text === 'child C pending echo'), true)
+  assert.equal(nestedAgent.inbox.nextTurn.some(message => message.source?.rpcId === nestedRequestId), true,
+    'the nested child agent really carries the official pending occurrence')
   assert.equal(pendingTexts(app.pendingInputForTest()).includes('child C pending echo'), false,
     'a nested continuable viewer must expose no child queue subject')
   fixture.vt.sendInput('\x1b')
@@ -989,14 +1040,7 @@ async function realPng(background: string, size: number): Promise<Uint8Array> {
 /** The real Host attachment service face used to admit a fixture image. */
 interface FixtureAttachments {
   saveImages(inputs: readonly { readonly data: Uint8Array; readonly mediaType: string; readonly name?: string }[]):
-    Promise<readonly {
-      readonly attachmentId: string
-      readonly mediaType: string
-      readonly bytes: number
-      readonly width: number
-      readonly height: number
-      readonly name?: string
-    }[]>
+    Promise<readonly ImageAttachmentRefLike[]>
 }
 
 /** The official Client retain bookkeeping for one Session. */
@@ -1052,6 +1096,8 @@ function currentImageScope(app: MountedApp): ImageScopeToken {
 /** One durable-image read attempt, resolved once it settles. */
 interface DurableReadCall {
   readonly sessionId: string
+  /** The COMPLETE durable reference the loader asked to read. */
+  readonly attachment: ImageAttachmentRefLike
   readonly attachmentId: string
   readonly expectedLifetime: unknown
   outcome?: 'ok' | 'failed'
@@ -1092,13 +1138,16 @@ function spyDurableImageReads(fixture: { readonly aggregate: { readonly presenta
   const served = new Map<string, Uint8Array>()
   const settled = new Map<string, { sessionId: string; outcome: 'ok' | 'failed'; error?: unknown }>()
   const settledByAttachment = new Map<string, { sessionId: string; outcome: 'ok' | 'failed'; error?: unknown }>()
-  source.readDurableImage = async (sessionId, attachmentId, expectedLifetime) => {
+  source.readDurableImage = async (sessionId, attachment, expectedLifetime) => {
     // The new lifetime argument MUST be forwarded: dropping it would let a stale
-    // presentation borrow a successor binding for the same Session id.
-    const call: DurableReadCall = { sessionId, attachmentId, expectedLifetime }
+    // presentation borrow a successor binding for the same Session id. The FULL
+    // reference travels unchanged (the production source addresses the official
+    // attachment read by the complete durable ref, never a bare id).
+    const attachmentId = attachment.attachmentId
+    const call: DurableReadCall = { sessionId, attachment, attachmentId, expectedLifetime }
     routed.push(call)
     try {
-      const result = await original(sessionId, attachmentId, expectedLifetime)
+      const result = await original(sessionId, attachment, expectedLifetime)
       served.set(`${sessionId}\u0000${attachmentId}`, result.data)
       call.outcome = 'ok'
       const record = { sessionId, outcome: 'ok' as const }
@@ -1130,7 +1179,7 @@ function spyDurableImageReads(fixture: { readonly aggregate: { readonly presenta
 interface DurableImageFace {
   readDurableImage(
     sessionId: string,
-    attachmentId: string,
+    attachment: ImageAttachmentRefLike,
     expectedLifetime: RemoteTransportLifetime,
   ): Promise<{ ref: unknown; data: Uint8Array }>
 }
@@ -1140,7 +1189,7 @@ interface DurableImageFace {
 
 /** A retained Client binding face with the official Session attachment read. */
 interface ReadAttachmentFace {
-  session: { readAttachment(id: unknown): Promise<unknown> }
+  session: { readAttachment(attachment: ImageAttachmentRefLike): Promise<unknown> }
 }
 
 /** The official local retain facts of one Session id. `retainedBy` is handed
@@ -1214,9 +1263,9 @@ test('the mounted child viewer routes the durable child image through the CHILD 
   const parentBinding = sessions.binding(SessionId(PARENT_ID)) as unknown as ReadAttachmentFace
   const parentReads: string[] = []
   const originalParentRead = parentBinding.session.readAttachment
-  parentBinding.session.readAttachment = async (id: unknown) => {
-    parentReads.push(String(id))
-    return originalParentRead.call(parentBinding.session, id)
+  parentBinding.session.readAttachment = async (attachment: ImageAttachmentRefLike) => {
+    parentReads.push(attachment.attachmentId)
+    return originalParentRead.call(parentBinding.session, attachment)
   }
   life.defer(() => { parentBinding.session.readAttachment = originalParentRead })
 
@@ -1230,9 +1279,9 @@ test('the mounted child viewer routes the durable child image through the CHILD 
     'the child viewer must retain the exact child generation synchronously on open')
   const childReads: string[] = []
   const originalChildRead = childBinding.session.readAttachment
-  childBinding.session.readAttachment = async (id: unknown) => {
-    childReads.push(String(id))
-    return originalChildRead.call(childBinding.session, id)
+  childBinding.session.readAttachment = async (attachment: ImageAttachmentRefLike) => {
+    childReads.push(attachment.attachmentId)
+    return originalChildRead.call(childBinding.session, attachment)
   }
   life.defer(() => { childBinding.session.readAttachment = originalChildRead })
 
@@ -1275,15 +1324,19 @@ test('the mounted child viewer routes the durable child image through the CHILD 
   const loader = (app as unknown as MountedImageLoader).imageLoader
   const parentReadsBeforeF7 = parentReads.length
   // Give the parent presentation's scope a KNOWN state before the child's ask, so
-  // the "untouched" assertion below is not vacuous.
-  const parentProbe = (await attachments.saveImages([{
+  // the "untouched" assertion below is not vacuous. The probe is a FORGED
+  // complete reference (a real saved id with a wrong byte length): rc.1 Host
+  // attachment verification refuses it, which is the real upstream negative —
+  // NOT the retired-id assumption that reading an unreferenced valid ref fails.
+  const parentStored = (await attachments.saveImages([{
     data: await realPng('#00ffff', 5), mediaType: 'image/png', name: 'parent-probe.png',
   }]))[0]!
+  const parentProbe = { ...parentStored, bytes: parentStored.bytes + 1 }
   loader.load(parentProbe, mainScope)
   await waitFor('the parent-scope probe settled', () => settledByAttachment.has(parentProbe.attachmentId), 20_000)
   const parentProbeStateBefore = loader.get(parentProbe, mainScope)
   assert.equal(parentProbeStateBefore.state, 'error',
-    'the parent scope refuses an image its own Session does not reference')
+    'a forged complete reference is refused by the Host attachment verification')
   const parentCacheBeforeF7 = loader.cacheSize(mainScope)
   const generationAtLoad = app.getViewerGeneration()
   loader.load(orphan, childScope)
@@ -1335,16 +1388,17 @@ test('the mounted child viewer routes the durable child image through the CHILD 
     'the same lifetime MUST yield the same scope object after a child visit')
   assert.equal(loader.get(parentProbe, mainScopeAfterExit).error, parentProbeStateBefore.error,
     "the post-visit main scope is the SAME scope: its recorded failure survives")
-  // Mutation witness: the wrong subject is NOT a silent no-op. Asking the parent
-  // Session for this child-only attachment is refused by the Host, so the pre-fix
-  // late resolution would have failed the child image with a wrong-subject error
-  // instead of serving it.
+  // Mutation witness: the wrong subject is NOT a silent no-op. The CHILD-stamped
+  // routing above is proven by the address spy, and the Host's own verification
+  // really refuses a forged complete reference (a wrong media type over a real
+  // stored id) — the pre-fix late resolution would have surfaced that failure on
+  // the child image instead of serving it.
   const parentLifetime = currentImageScope(app).transportToken
   assert.ok(parentLifetime !== undefined, 'the parent presentation must carry a transport lifetime')
   await assert.rejects(
-    () => presentation.attachments.readDurableImage(PARENT_ID, orphan.attachmentId, parentLifetime),
-    (error: unknown) => /not referenced by this session/u.test(String(error)),
-    'the parent route is refused by the Host — the defect would have surfaced here')
+    () => presentation.attachments.readDurableImage(PARENT_ID, { ...orphan, mediaType: 'image/jpeg' }, parentLifetime),
+    (error: unknown) => /metadata does not match its reference|session\/attachment-invalid/u.test(String(error)),
+    'a forged complete reference is refused by the Host — the real upstream negative')
 
   // Witness wiring (non-vacuity): with NO viewer mounted, the SAME seam asks the
   // PARENT Session — so the child-route assertions above cannot be satisfied by a
@@ -1964,9 +2018,9 @@ test('dual-subject: the SAME attachment id loaded under the parent and child sco
   const loader = (app as unknown as MountedImageLoader).imageLoader
   const attachments = host.ctx.get('attachments') as unknown as FixtureAttachments
 
-  // X is a REAL durable image that the parent asks for BEFORE any viewer exists
-  // (so the parent lifetime scope owns its failure) and that the CHILD then asks
-  // for under its own scope. It is referenced only by the child Session.
+  // X is a REAL durable image. The PARENT scope asks with a FORGED byte length
+  // (so the parent lifetime scope owns a real Host-verification failure) and the
+  // CHILD scope asks with the exact verified reference under its own scope.
   const pngX = await realPng('#c0ffee', 2)
   const X = (await attachments.saveImages([{ data: pngX, mediaType: 'image/png', name: 'dual-subject.png' }]))[0]!
   const parentScope = currentImageScope(app)
@@ -1992,24 +2046,26 @@ test('dual-subject: the SAME attachment id loaded under the parent and child sco
   const stopChild = loader.subscribe(X.attachmentId, () => { childWakes.push('wake') }, childScope)
   life.defer(stopChild)
 
-  // ── The PARENT scope's own ask: the Host refuses an image the parent Session
-  // does not reference, and that failure belongs to the parent scope alone.
-  loader.load(X, parentScope)
+  // ── The PARENT scope's own ask: the forged complete reference is refused by
+  // the Host's attachment verification, and that failure belongs to the parent
+  // scope alone (rc.1 authorizes readAttachment by the supplied ref's own
+  // verification, not by Session history).
+  loader.load({ ...X, bytes: X.bytes + 1 }, parentScope)
   await waitFor('the parent-scoped ask settled', () => settled.has(parentAddress), 20_000)
   assert.deepEqual(readerSpy.addresses(X.attachmentId),
     [{ sessionId: PARENT_ID, attachmentId: X.attachmentId }],
     'the first ask of X is addressed to the PARENT Session')
   assert.equal(settled.get(parentAddress)?.outcome, 'failed',
-    'the parent Session does not reference X, so its read fails closed')
+    'the forged byte length is refused by Host attachment verification')
   assert.equal(parentWakes.length, 1, "the parent scope's own settle wakes its subscriber")
   assert.equal(childWakes.length, 0,
     "the parent scope's settle must NOT wake the child scope's subscriber")
   assert.equal(loader.get(X, childScope).state, 'idle',
     "the parent scope's failure must not create child-scope state for the same id")
 
-  // ── The CHILD scope's ask of the SAME id is authorized only after X is
-  // referenced by the child Session; the production render may also load it, so
-  // the claim is the isolation, never a trigger count.
+  // ── The CHILD scope's ask of the SAME id carries the exact verified reference;
+  // the production render may also load it, so the claim is the isolation, never
+  // a trigger count.
   seedImageTurn(appenderOf(host.ctx, CHILD_A_ID), 31, 'childa dual image', X)
   loader.load(X, childScope)
   await waitFor('the child-scoped ask served X', () => served.has(childAddress), 20_000)
@@ -2018,7 +2074,7 @@ test('dual-subject: the SAME attachment id loaded under the parent and child sco
     { sessionId: CHILD_A_ID, attachmentId: X.attachmentId },
   ], 'the same id was asked once per presentation scope')
   assert.equal(settled.get(childAddress)?.outcome, 'ok',
-    'the child Session references X, so its read is served')
+    'the verified complete reference is served')
   assert.deepEqual(served.get(childAddress), pngX, 'the child scope owns the real bytes')
   assert.ok(childWakes.length >= 1, "the child scope's own settle wakes its subscriber")
 
@@ -2051,8 +2107,9 @@ test('reincarnation: a read stamped with the OLD child lifetime fails closed and
   life.defer(readerSpy.restore)
   const loader = (app as unknown as MountedImageLoader).imageLoader
   const attachments = host.ctx.get('attachments') as unknown as FixtureAttachments
+  const raw = await realPng('#ff00ff', 3)
   const orphan = (await attachments.saveImages([{
-    data: await realPng('#ff00ff', 3), mediaType: 'image/png', name: 'reincarnation.png',
+    data: raw, mediaType: 'image/png', name: 'reincarnation.png',
   }]))[0]!
   const address = `${CHILD_A_ID}\u0000${orphan.attachmentId}`
 
@@ -2115,9 +2172,9 @@ test('reincarnation: a read stamped with the OLD child lifetime fails closed and
   // loader does from here on is observed by THIS spy instance.
   const successorReads: string[] = []
   const originalSuccessor = binding2.session.readAttachment
-  binding2.session.readAttachment = async (id: unknown) => {
-    successorReads.push(String(id))
-    return originalSuccessor.call(binding2.session, id)
+  binding2.session.readAttachment = async (attachment: ImageAttachmentRefLike) => {
+    successorReads.push(attachment.attachmentId)
+    return originalSuccessor.call(binding2.session, attachment)
   }
   life.defer(() => { binding2.session.readAttachment = originalSuccessor })
 
@@ -2146,25 +2203,27 @@ test('reincarnation: a read stamped with the OLD child lifetime fails closed and
     'ZERO successor-binding calls for the retired lifetime (the spy is armed and proven below)')
 
   // (e) The NEW scope's own ask is NOT blocked by the old scope's failure. The
-  // ref is referenced by no Session, so the Host's bounded refusal is the honest
-  // positive control — asserted as an outcome plus loader state, never a faked
-  // served success.
+  // exact verified complete reference is served by the Host (readAttachment
+  // authorizes by the supplied ref's own verification, not by Session history),
+  // so this is the honest positive control that the successor binding really is
+  // the active route — never a faked served success.
   loader.load(orphan, scope2)
   const successorAsk = await settledCall(2)
   assert.equal(successorAsk.expectedLifetime, scope2.transportToken,
     'the new ask carries the SUCCESSOR lifetime token')
   assert.notEqual(successorAsk.expectedLifetime, retiredRetry.expectedLifetime)
-  assert.equal(successorAsk.outcome, 'failed',
-    'an unreferenced ref is refused by the Host, never served')
-  assert.match(String(successorAsk.error), /not referenced by this session/u,
-    'the successor ask reached the Session and got the Host reference refusal')
-  assert.doesNotMatch(String(successorAsk.error), /retired|no retained Session binding/u,
-    'the successor lifetime must NOT hit the lifetime fence')
-  assert.equal(loader.get(orphan, scope2).state, 'error', 'lifetime 2 records its own refusal')
+  assert.equal(successorAsk.outcome, 'ok',
+    'the successor lifetime is admitted and serves the verified reference')
+  assert.equal(successorAsk.error, undefined,
+    'the successor ask did not hit the lifetime fence')
+  assert.equal(loader.get(orphan, scope2).state, 'ready', 'lifetime 2 records its own served state')
   assert.equal(loader.get(orphan, scope1).state, 'error', 'lifetime 1 keeps its own retired failure')
   assert.equal(successorReads.filter(id => id === orphan.attachmentId).length, 1,
     'ARMING PROOF: this very spy observed the new scope\'s call, so the zero-call assertion in (d) is not vacuous')
-  assert.equal(readerSpy.served.has(address), false, 'the refused ref is never served in either scope')
+  assert.deepEqual(readerSpy.served.get(address), raw,
+    'the successor binding served the exact verified bytes')
+  assert.equal(readerSpy.settledByAttachment.get(orphan.attachmentId)?.sessionId, CHILD_A_ID,
+    'the served settle is attributed to the CHILD Session')
 })
 
 test('a durable image read under the STILL-OWNED presentation survives a same-binding reconnect; a different binding fails closed', async (t) => {

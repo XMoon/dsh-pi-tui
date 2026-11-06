@@ -124,14 +124,24 @@ test('the official imageLimits projection is re-applied at preflight (count and 
 
 test('a recalled durable image reads its authorized bytes through the official attachment read — never cites the ref', async () => {
   const durableBytes = new Uint8Array([99, 98, 97])
+  const recalledRef = {
+    attachmentId: 'att-42',
+    mediaType: 'image/png' as const,
+    bytes: 3,
+    width: 2,
+    height: 2,
+    name: 'durable.png',
+    originalDimensions: { width: 4, height: 4 },
+  }
   let readCalls = 0
   const sessions: RemoteSerializerSessionsSource = {
     binding: sessionId => ({
       session: {
-        readAttachment: async (attachmentId: never) => {
+        readAttachment: async (attachment) => {
           readCalls += 1
           assert.equal(sessionId, 'session-a', 'the read addresses the PreparedPrompt session')
-          assert.equal(String(attachmentId), 'att-42')
+          assert.equal(attachment, recalledRef,
+            'the recalled draft’s ORIGINAL complete reference reaches the official read')
           return { ok: true as const, value: { data: durableBytes } }
         },
         projections: { faceOf: () => ({ getSnapshot: () => undefined }) },
@@ -141,7 +151,9 @@ test('a recalled durable image reads its authorized bytes through the official a
   const serializer = RemotePromptSerializerProduction.overSessions(sessions)
   const recalled = stagedImage({
     bytes: new Uint8Array(0),
-    recalledRef: { attachmentId: 'att-42', mediaType: 'image/png', bytes: 3, width: 2, height: 2 },
+    byteLength: 0,
+    name: 'durable.png',
+    recalledRef,
   })
   const prompt = preparePrompt('session-a', 'resend [image #1 (2×2)]', { images: storeOf([recalled]) })
   const preflight = serializer.preflight(prompt)
@@ -150,7 +162,9 @@ test('a recalled durable image reads its authorized bytes through the official a
   assert.ok(serialized.kind === 'ok')
   assert.equal(readCalls, 1)
   const imagePart = serialized.content.find(part => (part as { type: string }).type === 'image') as
-    { type: 'image'; data: string }
+    { type: 'image'; mediaType: string; data: string; name?: string }
+  assert.equal(imagePart.mediaType, 'image/png')
+  assert.equal(imagePart.name, 'durable.png')
   assert.equal(imagePart.data, Buffer.from(durableBytes).toString('base64'),
     'the part carries the authorized bytes, not the Host-private reference')
   assert.equal(JSON.stringify(serialized.content).includes('att-42'), false,

@@ -109,7 +109,7 @@ test('sessionPickerItem uses updatedAt when a Remote row has no createdAt', () =
   assert.ok(sessionPickerItem(row, '').description.includes('2d'))
 })
 
-test('sessionPickerItem marks the current session, subagents, forks, live', () => {
+test('sessionPickerItem marks the current session, subagents, live (never fork)', () => {
   const row: SessionPickerRow = {
     id: 'session-0123456789abcdef',
     updatedAt: 1_000,
@@ -121,45 +121,71 @@ test('sessionPickerItem marks the current session, subagents, forks, live', () =
   }
   const item = sessionPickerItem(row, 'session-0123456789abcdef')
   assert.ok(item.label.startsWith('● '), `current marker missing: ${item.label}`)
-  assert.ok(item.description.includes('sub'), `sub marker missing: ${item.description}`)
-  assert.ok(item.description.includes('fork'), `fork marker missing: ${item.description}`)
+  assert.ok(item.description.split(' · ').includes('sub'), `sub marker missing: ${item.description}`)
+  assert.ok(!item.description.split(' · ').includes('fork'),
+    `a subagent must not carry the fork marker: ${item.description}`)
   assert.ok(item.description.includes('live'), `live marker missing: ${item.description}`)
   // Untitled sessions fall back to the short id as the label.
   assert.equal(item.label, '● 01234567')
 })
 
-function treeRow(id: string, parentSession?: string): SessionPickerRow {
+test('sessionPickerItem badges only historical ordinary-fork metadata', () => {
+  // Pre-rc.1 ordinary forks persisted a parentSession; that leftover metadata
+  // keeps its explanatory badge.
+  const legacy: SessionPickerRow = {
+    id: 'session-legacy0000', updatedAt: 1_000, createdAt: 1_000, parentSession: 'session-parent', live: false,
+  }
+  assert.ok(sessionPickerItem(legacy, '').description.split(' · ').includes('fork'))
+  // An rc.1 ordinary fork is an independent Session with no parent at all.
+  const fresh: SessionPickerRow = { id: 'session-fresh0000', updatedAt: 1_000, createdAt: 1_000, live: false }
+  assert.ok(!sessionPickerItem(fresh, '').description.split(' · ').includes('fork'))
+})
+
+function treeRow(id: string, parentSession?: string, origin?: 'subagent'): SessionPickerRow {
   return {
     id,
     updatedAt: 0,
     createdAt: 0,
     live: false,
     ...(parentSession === undefined ? {} : { parentSession }),
+    ...(origin === undefined ? {} : { origin }),
   }
 }
 
-test('buildSessionTree follows Host lineage depth for normal ancestry', () => {
+test('buildSessionTree follows real subagent lineage depth', () => {
   const rows = buildSessionTree([
     treeRow('root'),
-    treeRow('child', 'root'),
-    treeRow('grandchild', 'child'),
+    treeRow('child', 'root', 'subagent'),
+    treeRow('grandchild', 'child', 'subagent'),
   ])
   assert.deepEqual(rows.map(entry => [entry.row.id, entry.depth]), [
     ['root', 0], ['child', 1], ['grandchild', 2],
   ])
 })
 
-test('buildSessionTree degrades an orphan to root depth', () => {
-  const rows = buildSessionTree([treeRow('orphan', 'missing-parent'), treeRow('root')])
+test('buildSessionTree keeps ordinary fork metadata at root depth', () => {
+  const rows = buildSessionTree([
+    treeRow('root'),
+    treeRow('child', 'root'),
+    treeRow('grandchild', 'child'),
+    treeRow('new-fork'),
+  ])
+  assert.deepEqual(rows.map(entry => [entry.row.id, entry.depth]), [
+    ['root', 0], ['child', 0], ['grandchild', 0], ['new-fork', 0],
+  ])
+})
+
+test('buildSessionTree degrades an orphan subagent to root depth', () => {
+  const rows = buildSessionTree([treeRow('orphan', 'missing-parent', 'subagent'), treeRow('root')])
   assert.deepEqual(rows.map(entry => [entry.row.id, entry.depth]), [
     ['orphan', 0], ['root', 0],
   ])
 })
 
-test('buildSessionTree emits cycle members without indentation or infinite traversal', () => {
-  const twoNode = buildSessionTree([treeRow('a', 'b'), treeRow('b', 'a')])
+test('buildSessionTree places guarded cycle members once, without infinite traversal', () => {
+  const twoNode = buildSessionTree([treeRow('a', 'b', 'subagent'), treeRow('b', 'a', 'subagent')])
   assert.deepEqual(twoNode.map(entry => [entry.row.id, entry.depth]), [['a', 0], ['b', 1]])
-  const self = buildSessionTree([treeRow('self', 'self')])
+  const self = buildSessionTree([treeRow('self', 'self', 'subagent')])
   assert.deepEqual(self.map(entry => [entry.row.id, entry.depth]), [['self', 0]])
 })
 

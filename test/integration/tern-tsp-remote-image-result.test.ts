@@ -18,6 +18,7 @@ import { mountRemotePresentationHost, mountRemoteRunner } from '../app/runner-re
 import { waitFor } from '../support/remote-application-fixture.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 import { readTspBlobMessages } from '../support/tsp-blob-wire.ts'
+import type { ImageAttachmentRefLike } from '../../src/domain/media/types.ts'
 
 const SESSION_ID = 'prc-remote-image-session'
 
@@ -31,9 +32,7 @@ async function realPng(): Promise<Uint8Array> {
 }
 
 interface AttachmentStore {
-  saveImages(inputs: readonly { data: Uint8Array; mediaType: string; name?: string }[]): Promise<readonly {
-    attachmentId: string; mediaType: string; bytes: number; width: number; height: number; name?: string
-  }[]>
+  saveImages(inputs: readonly { data: Uint8Array; mediaType: string; name?: string }[]): Promise<readonly ImageAttachmentRefLike[]>
 }
 interface HostSession { append(type: string, data: unknown, options?: { surfaceOp?: 'append' }): void }
 
@@ -76,7 +75,7 @@ test('a Remote lifetime that retires while the read is open refuses the bytes, a
     // WHILE the read is open. The gate is a test-side seam on the client's
     // read method: the read itself still traverses the real Host.
     const clientSessions = fixture.aggregate.wire.client.sessions as unknown as {
-      binding(id: unknown): { session: { readAttachment(id: unknown): Promise<unknown> } } | undefined
+      binding(id: unknown): { session: { readAttachment(attachment: ImageAttachmentRefLike): Promise<unknown> } } | undefined
     }
     const retained = clientSessions.binding(SessionId(SESSION_ID))
     assert.ok(retained, 'the resumed Remote Session is retained by the real Client')
@@ -84,17 +83,17 @@ test('a Remote lifetime that retires while the read is open refuses the bytes, a
     const gate = new Promise<void>(resolve => { releaseRead = resolve })
     let readStarted = false
     const originalRead = retained.session.readAttachment
-    retained.session.readAttachment = async (id: unknown) => {
+    retained.session.readAttachment = async (attachment: ImageAttachmentRefLike) => {
       readStarted = true
       await gate
-      return originalRead.call(retained.session, id)
+      return originalRead.call(retained.session, attachment)
     }
 
     // The PRODUCTION Remote read seam is observed one-to-one: the unbound
     // original is called through `original.call`, and the outcome is recorded.
     const presentation = fixture.aggregate.presentation as unknown as {
       attachments: {
-        readDurableImage(sessionId: string, attachmentId: string, lifetime: unknown): Promise<unknown>
+        readDurableImage(sessionId: string, attachment: ImageAttachmentRefLike, lifetime: unknown): Promise<unknown>
       }
     }
     const outcomes: { readonly rejected?: string }[] = []
@@ -176,7 +175,7 @@ test('a Remote tool-result image is authorized by its retained Session and reach
     const expectedBlobId = createHash('sha256').update(png).digest('hex')
 
     const clientSessions = fixture.aggregate.wire.client.sessions as unknown as {
-      binding(id: unknown): { session: { readAttachment(id: unknown): Promise<unknown> } } | undefined
+      binding(id: unknown): { session: { readAttachment(attachment: ImageAttachmentRefLike): Promise<unknown> } } | undefined
     }
     const retained = clientSessions.binding(SessionId(SESSION_ID))
     assert.ok(retained, 'the resumed Remote Session is retained by the real Client')
@@ -188,16 +187,16 @@ test('a Remote tool-result image is authorized by its retained Session and reach
     // names the exact production seam instead of "some read happened".
     const presentation = fixture.aggregate.presentation as unknown as {
       attachments: {
-        readDurableImage(sessionId: string, attachmentId: string, lifetime: unknown): Promise<unknown>
+        readDurableImage(sessionId: string, attachment: ImageAttachmentRefLike, lifetime: unknown): Promise<unknown>
       }
     }
     const durableReads: { sessionId: string; attachmentId: string; hasLifetime: boolean }[] = []
     const originalRead = presentation.attachments.readDurableImage
     presentation.attachments.readDurableImage = function patched(
-      this: unknown, sessionId: string, attachmentId: string, lifetime: unknown,
+      this: unknown, sessionId: string, attachment: ImageAttachmentRefLike, lifetime: unknown,
     ) {
-      durableReads.push({ sessionId, attachmentId, hasLifetime: lifetime !== undefined })
-      return originalRead.call(this, sessionId, attachmentId, lifetime)
+      durableReads.push({ sessionId, attachmentId: attachment.attachmentId, hasLifetime: lifetime !== undefined })
+      return originalRead.call(this, sessionId, attachment, lifetime)
     }
     try {
       session.append('turn/start', { turn: 1 })
@@ -267,16 +266,16 @@ test('a Remote USER body image is authorized by its retained Session and painted
     // original is saved and called through `original.call`, never `.bind`).
     const presentation = fixture.aggregate.presentation as unknown as {
       attachments: {
-        readDurableImage(sessionId: string, attachmentId: string, lifetime: unknown): Promise<unknown>
+        readDurableImage(sessionId: string, attachment: ImageAttachmentRefLike, lifetime: unknown): Promise<unknown>
       }
     }
     const durableReads: { sessionId: string; attachmentId: string; hasLifetime: boolean }[] = []
     const originalRead = presentation.attachments.readDurableImage
     presentation.attachments.readDurableImage = function patched(
-      this: unknown, sessionId: string, attachmentId: string, lifetime: unknown,
+      this: unknown, sessionId: string, attachment: ImageAttachmentRefLike, lifetime: unknown,
     ) {
-      durableReads.push({ sessionId, attachmentId, hasLifetime: lifetime !== undefined })
-      return originalRead.call(this, sessionId, attachmentId, lifetime)
+      durableReads.push({ sessionId, attachmentId: attachment.attachmentId, hasLifetime: lifetime !== undefined })
+      return originalRead.call(this, sessionId, attachment, lifetime)
     }
     try {
       // A REAL durable USER message whose content carries the image block.
@@ -331,7 +330,7 @@ test('a Remote USER body image whose read is refused after a generation rollover
     // Gate the REAL retained binding's read so the transport lifetime can
     // retire WHILE the read is open.
     const clientSessions = fixture.aggregate.wire.client.sessions as unknown as {
-      binding(id: unknown): { session: { readAttachment(id: unknown): Promise<unknown> } } | undefined
+      binding(id: unknown): { session: { readAttachment(attachment: ImageAttachmentRefLike): Promise<unknown> } } | undefined
     }
     const retained = clientSessions.binding(SessionId(BODY_SESSION_ID))
     assert.ok(retained, 'the resumed Remote Session is retained by the real Client')
@@ -339,10 +338,10 @@ test('a Remote USER body image whose read is refused after a generation rollover
     const gate = new Promise<void>(resolve => { releaseRead = resolve })
     let readStarted = false
     const originalRead = retained.session.readAttachment
-    retained.session.readAttachment = async (id: unknown) => {
+    retained.session.readAttachment = async (attachment: ImageAttachmentRefLike) => {
       readStarted = true
       await gate
-      return originalRead.call(retained.session, id)
+      return originalRead.call(retained.session, attachment)
     }
     try {
       session.append('user/message', {

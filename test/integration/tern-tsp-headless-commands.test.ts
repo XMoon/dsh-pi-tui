@@ -183,9 +183,9 @@ async function clearComposer(fixture: DirectTspFixture): Promise<void> {
 }
 
 /** The authoritative persisted session headers (the real persistence seam). */
-async function sessionHeaders(fixture: DirectTspFixture): Promise<Array<{ id: string; parentSession?: string; cwd?: string }>> {
+async function sessionHeaders(fixture: DirectTspFixture): Promise<Array<{ id: string; parentSession?: string; isSeeded?: boolean; cwd?: string }>> {
   const persistence = fixture.ctx.get('sessionPersistence') as unknown as {
-    list(): Promise<readonly { header: { id: string; parentSession?: string; cwd?: string } }[]>
+    list(): Promise<readonly { header: { id: string; parentSession?: string; isSeeded?: boolean; cwd?: string } }[]>
   }
   return (await persistence.list()).map(row => ({ ...row.header }))
 }
@@ -310,7 +310,9 @@ test('/fork forks the current conversation and publishes the child owner', async
     const headers = await sessionHeaders(fixture)
     const childRow = headers.find(row => row.id === child.id)
     assert.ok(childRow !== undefined, 'the fork child is persisted')
-    assert.equal(childRow.parentSession, source, 'the child carries the official parent lineage')
+    // rc.1 ordinary fork children are INDEPENDENT Sessions, not lineage rows.
+    assert.equal(childRow.parentSession, undefined, 'the child carries no parent lineage')
+    assert.equal(childRow.isSeeded, true, 'the child is the seeded fork Session')
   } finally {
     await fixture.settle()
   }

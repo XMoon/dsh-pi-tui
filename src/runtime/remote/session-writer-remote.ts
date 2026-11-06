@@ -249,9 +249,13 @@ export class RemoteSessionWriter implements SessionWriter {
       }
       if (generationChanged(this.generation, captured)) return remoteNotDispatched()
 
-      // 2. Register the official echo synchronously, BEFORE the potentially
-      //    expensive serialization, so the submission is visible immediately
-      //    (the official Client contract: beginSubmission precedes serialization).
+      // 2. Register the official submission identity synchronously, BEFORE the
+      //    potentially expensive serialization (the official Client contract:
+      //    beginSubmission precedes serialization). Registration reserves the
+      //    requestId LOCALLY and mints no visible echo: the official snapshot
+      //    publishes the submission only after Host acceptance (the prompt
+      //    receipt or an Inbox row carrying the same requestId), so there is no
+      //    Client-local optimistic store here.
       let handle: RemoteSubmissionHandle
       try {
         handle = binding.session.beginSubmission({

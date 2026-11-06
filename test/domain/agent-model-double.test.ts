@@ -12,12 +12,14 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { AgentModel, modelSelectionProjectionDefinition } from '@deepseek-ai/dsh-agent'
+import type { ModelSelection } from '@deepseek-ai/dsh-agent/types'
+import { ReasoningEffortId } from '@deepseek-ai/dsh-llm/brand'
 import { Session, SessionId, SessionLogOffset, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { fakeAgentModel, type FakeAgentModelSelection } from '../support/agent-model-double.ts'
 
 interface ModelSurface {
   current(): FakeAgentModelSelection | undefined
-  select(selection: FakeAgentModelSelection): void
+  select(selection: Readonly<ModelSelection>): void
 }
 
 type ScenarioStep = (session: Session) => (model: ModelSurface) => void
@@ -85,8 +87,8 @@ test('an adapter-defaulted reasoning effort is not a recorded selection', () => 
 test('an explicit reasoning effort stays part of the recorded selection', () => {
   compare('explicit-effort', [
     session => () => { appendHeader(session, { provider: 'p', model: 'm', reasoningEffort: 'high' }) },
-    () => model => { model.select({ provider: 'p', model: 'm', reasoningEffort: 'high' }) },
-    () => model => { model.select({ provider: 'p', model: 'm', reasoningEffort: 'low' }) },
+    () => model => { model.select({ provider: 'p', model: 'm', reasoningEffort: ReasoningEffortId('high') }) },
+    () => model => { model.select({ provider: 'p', model: 'm', reasoningEffort: ReasoningEffortId('low') }) },
   ])
 })
 
@@ -107,10 +109,10 @@ test('the double follows a pending selection until a matching request header ret
   compare('pending-retire', [
     session => model => {
       appendHeader(session, { provider: 'p', model: 'm', reasoningEffort: 'high' })
-      model.select({ provider: 'p', model: 'm2', reasoningEffort: 'max' })
+      model.select({ provider: 'p', model: 'm2', reasoningEffort: ReasoningEffortId('max') })
     },
-    () => model => { model.select({ provider: 'p', model: 'm2', reasoningEffort: 'max' }) },
+    () => model => { model.select({ provider: 'p', model: 'm2', reasoningEffort: ReasoningEffortId('max') }) },
     session => () => { appendHeader(session, { provider: 'p', model: 'm2', reasoningEffort: 'max' }) },
-    () => model => { model.select({ provider: 'p', model: 'm2', reasoningEffort: 'max' }) },
+    () => model => { model.select({ provider: 'p', model: 'm2', reasoningEffort: ReasoningEffortId('max') }) },
   ])
 })

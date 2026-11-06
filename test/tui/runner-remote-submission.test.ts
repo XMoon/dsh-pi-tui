@@ -44,6 +44,7 @@ import { TuiApp } from '../../src/tui-app.ts'
 import { applyRunnerWithRuntime } from '../../src/app/bootstrap.ts'
 import { TRANSITION_FENCE_NOTICE } from '../../src/app/submission/steer.ts'
 import type { RemoteApplicationOverride } from '../../src/app/application-runtime.ts'
+import type { ImageAttachmentRefLike } from '../../src/domain/media/types.ts'
 import { createRemoteApplicationRuntime } from '../support/m3-inprocess/application-runtime.ts'
 import { waitFor } from '../support/remote-application-fixture.ts'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
@@ -413,21 +414,27 @@ test('image: known staged bytes → PromptContentPart → Host durable attachmen
   // rc.2 durable user/message payload IS the message: content lives at
   // event.data.content (never .data.message.content).
   const blocks = ((imageEvent.data as { content?: unknown[] }).content ?? []) as
-    Array<{ type: string; attachment?: { attachmentId?: string } }>
+    Array<{ type: string; attachment?: ImageAttachmentRefLike }>
   const imageBlock = blocks.find(block => block.type === 'image')
   assert.ok(imageBlock?.attachment?.attachmentId !== undefined,
     'the durable row carries a Host attachment id (the image became durable)')
-  // The OFFICIAL authorized read through the real Client binding.
+  assert.equal(imageBlock.attachment.mediaType, 'image/png',
+    'the durable block carries the full reference metadata, not only the id')
+  assert.equal(imageBlock.attachment.width, 1)
+  assert.equal(imageBlock.attachment.height, 1)
+  assert.ok(imageBlock.attachment.bytes > 0)
+  // The OFFICIAL authorized read through the real Client binding, addressed by
+  // the COMPLETE durable reference the persisted user/message block carries.
   const binding = fixture.aggregate.wire.client.sessions.binding(SessionId(mainId) as never) as {
     session: {
-      readAttachment(attachmentId: never): Promise<
+      readAttachment(attachment: ImageAttachmentRefLike): Promise<
         | { ok: true; value: { data: Uint8Array } }
         | { ok: false; error: unknown }
       >
     }
   } | undefined
   assert.ok(binding !== undefined, 'the retained binding serves the official attachment read')
-  const read = await binding.session.readAttachment(imageBlock.attachment!.attachmentId as never)
+  const read = await binding.session.readAttachment(imageBlock.attachment)
   assert.ok(read.ok, 'the official readAttachment must succeed')
   if (read.ok) {
     assert.deepEqual(
@@ -799,38 +806,43 @@ test('image resend: a SECOND submission citing the recalled durable image re-del
   const store = app.draftImageStoreForTest!
   const sessionOf = (): { snapshotEvents(): Array<{ type: string; data: unknown }> } =>
     fixture.host.ctx.sessions.get(SessionId(mainId)) as never
-  const officialRead = async (attachmentId: string): Promise<Uint8Array> => {
+  const officialRead = async (attachment: ImageAttachmentRefLike): Promise<Uint8Array> => {
     const binding = fixture.aggregate.wire.client.sessions.binding(SessionId(mainId) as never) as {
-      session: { readAttachment(id: never): Promise<{ ok: true; value: { data: Uint8Array } } | { ok: false; error: unknown }> }
+      session: {
+        readAttachment(attachment: ImageAttachmentRefLike): Promise<
+          { ok: true; value: { data: Uint8Array } } | { ok: false; error: unknown }
+        >
+      }
     } | undefined
     if (binding === undefined) throw new Error('no retained binding for the official attachment read')
-    const read = await binding.session.readAttachment(attachmentId as never)
+    const read = await binding.session.readAttachment(attachment)
     if (!read.ok) throw new Error(`official readAttachment failed: ${JSON.stringify(read.error)}`)
     return read.value.data
   }
   const imageEventCount = (): number =>
     sessionOf().snapshotEvents().filter(event => event.type === 'user/message'
       && JSON.stringify(event.data).includes('image')).length
-  const attachmentIdsOf = (): string[] => {
-    const ids: string[] = []
+  /** The COMPLETE durable references of every image block (never bare ids). */
+  const attachmentRefsOf = (): ImageAttachmentRefLike[] => {
+    const refs: ImageAttachmentRefLike[] = []
     for (const event of sessionOf().snapshotEvents()) {
       if (event.type !== 'user/message') continue
       const blocks = ((event.data as { content?: unknown[] }).content ?? []) as
-        Array<{ type: string; attachment?: { attachmentId?: string } }>
+        Array<{ type: string; attachment?: ImageAttachmentRefLike }>
       for (const block of blocks) {
-        if (block.type === 'image' && block.attachment?.attachmentId !== undefined) ids.push(block.attachment.attachmentId)
+        if (block.type === 'image' && block.attachment?.attachmentId !== undefined) refs.push(block.attachment)
       }
     }
-    return ids
+    return refs
   }
   // (1) FIRST submission: staged bytes → durable image → authorized read equality.
   const staged = store.add({ bytes: pngBytes, mediaType: 'image/png', width: 1, height: 1, name: 'resend-proof.png' })
   submitDraft(fixture, `resend first submit ${staged.placeholder}`)
   await waitFor('first durable image row', () => imageEventCount() >= 1, 20_000)
-  const firstIds = attachmentIdsOf()
-  assert.equal(firstIds.length, 1, 'exactly one attachment after the first submission')
+  const firstRefs = attachmentRefsOf()
+  assert.equal(firstRefs.length, 1, 'exactly one attachment after the first submission')
   assert.deepEqual(
-    Buffer.from(await officialRead(firstIds[0]!)).toString('hex'),
+    Buffer.from(await officialRead(firstRefs[0]!)).toString('hex'),
     Buffer.from(pngBytes).toString('hex'),
     '(1) the FIRST submission durably stored the image; the authorized read returns the original bytes')
   // The held stream keeps the turn officially RUNNING.
@@ -885,12 +897,12 @@ test('image resend: a SECOND submission citing the recalled durable image re-del
     'the resent line produced its own durable user/message row')
   const lastImageEvent = imageEvents[imageEvents.length - 1]!
   const lastBlocks = ((lastImageEvent.data as { content?: unknown[] }).content ?? []) as
-    Array<{ type: string; attachment?: { attachmentId?: string } }>
+    Array<{ type: string; attachment?: ImageAttachmentRefLike }>
   const resentBlock = lastBlocks.find(block => block.type === 'image')
   assert.ok(resentBlock?.attachment?.attachmentId !== undefined,
     "the second submission's durable row carries an image attachment (the recalled durable image was re-delivered)")
   assert.deepEqual(
-    Buffer.from(await officialRead(resentBlock!.attachment!.attachmentId!)).toString('hex'),
+    Buffer.from(await officialRead(resentBlock.attachment)).toString('hex'),
     Buffer.from(pngBytes).toString('hex'),
     'the SECOND submission (citing the recalled durable image) re-delivered the ORIGINAL authorized bytes through the official attachment read')
   release()

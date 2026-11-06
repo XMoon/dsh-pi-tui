@@ -22,6 +22,7 @@ import type { RemoteRefoldReason } from './remote/live-ingress.ts'
 import type { ContextMeasureReason } from '../domain/status/context-measurement.ts'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, ModelSelection } from '@deepseek-ai/dsh-agent'
+import type { AttachmentId, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session/types'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
@@ -3217,7 +3218,7 @@ export function applyRunnerWithRuntime(
           }
           return remoteSources.attachments.readDurableImage(
             subject.sessionId,
-            ref.attachmentId,
+            ref,
             subject.transportToken as RemoteTransportLifetime,
           )
         }
@@ -3225,7 +3226,14 @@ export function applyRunnerWithRuntime(
         if (attachments === undefined) {
           throw new ImageLoadError('Image attachments are unavailable in this deployment.')
         }
-        return attachments.readImage(ref as never) as Promise<{ ref: unknown; data: Uint8Array }>
+        // The Direct seam is the official AttachmentStore: brand the opaque,
+        // already-verified id and pass the FULL reference (the store verifies
+        // id/mediaType/bytes/width/height, so a partial object must never be
+        // synthesized here).
+        return attachments.readImage({
+          ...ref,
+          attachmentId: ref.attachmentId as AttachmentId,
+        } satisfies ImageAttachmentRef)
       },
       present,
       sessionCwd: () => status.sessionCwd(),

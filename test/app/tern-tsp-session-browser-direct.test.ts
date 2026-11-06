@@ -103,7 +103,7 @@ test('REAL_DIRECT_HEADLESS: persisted main Session → DirectSessionReader → p
   }
 })
 
-test('REAL_DIRECT_HEADLESS: cross-workspace persisted Fork lineage reaches the production Tree in parent order', async (t) => {
+test('REAL_DIRECT_HEADLESS: legacy persisted Fork headers stay flat roots across workspace runs', async (t) => {
   const { testLifecycle } = await import('../support/temp-lifecycle.ts')
   const life = testLifecycle(t)
   const fixture = await createDirectTspFixture(life, {
@@ -119,8 +119,10 @@ test('REAL_DIRECT_HEADLESS: cross-workspace persisted Fork lineage reaches the p
   }
   const now = Date.now()
   // Persist isolated parentSession/isSeeded headers through the authoritative
-  // storage service. The CWD split models imported/legacy cross-workspace lineage,
-  // not a live user session or a call to SessionStore.fork().
+  // storage service. The CWD split models imported/legacy cross-workspace
+  // metadata, not a live user session or a call to SessionStore.fork(). rc.1
+  // ordinary fork children are independent Sessions, so these legacy headers
+  // must NOT fabricate a Tree edge.
   for (const header of [
     {
       id: 'lineage-cross-child',
@@ -216,17 +218,17 @@ test('REAL_DIRECT_HEADLESS: cross-workspace persisted Fork lineage reaches the p
     const ids = items.map((item) => item.id)
     const lineageIds = ['session:blank-live-1', 'session:lineage-cross-child', 'session:lineage-return-child']
     const positions = lineageIds.map((id) => ids.indexOf(id))
-    assert.ok(positions[0]! < positions[1]! && positions[1]! < positions[2]!, 'the production Picker preserves parent-before-child order')
-    assert.deepEqual(positions.map((index) => items[index]?.depth), [0, 1, 2])
+    assert.ok(positions.every(index => index >= 0), 'all three legacy Sessions are listed')
+    assert.deepEqual(positions.map((index) => items[index]?.depth), [0, 0, 0],
+      'legacy ordinary-fork parentSession metadata does not fabricate a tree edge')
     const order = props(browserPane).order as Array<string | PickerGroup>
     const groups = order.filter((entry): entry is PickerGroup => typeof entry !== 'string')
     assert.deepEqual(order.filter((entry): entry is string => typeof entry === 'string'), ids)
     assert.deepEqual(groups.map((group) => [group.label, group.count]), [
-      [workspaceKey(fixture.workRoot), 1],
+      [workspaceKey(fixture.workRoot), 2],
       [workspaceKey(otherWorkspace), 1],
-      [workspaceKey(fixture.workRoot), 1],
     ])
-    assert.equal(new Set(groups.map((group) => group.group)).size, groups.length, 'each A→B→A run has a distinct PickerGroup identity')
+    assert.equal(new Set(groups.map((group) => group.group)).size, groups.length, 'each contiguous workspace run has a distinct PickerGroup identity')
   } finally {
     owner?.dispose()
     diag.dispose()

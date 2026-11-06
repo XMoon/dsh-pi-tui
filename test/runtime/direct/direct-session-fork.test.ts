@@ -82,7 +82,6 @@ test('Direct exact turn/end cut uses the official buildForkSeed and Host metadat
   assert.deepEqual(calls[0]?.agentOptions, { provider: 'p', model: 'm' })
   assert.deepEqual(calls[0]?.meta, {
     cwd: '/ws',
-    parentSession: 'session-source',
     isSeeded: true,
     agentPreset: 'minimal',
   })
@@ -388,7 +387,7 @@ test('Direct rejects non-canonical fork cuts before Host observation', async () 
   assert.equal(observed, false)
 })
 
-test('Direct fork does not copy origin or delegationDepth onto the ordinary child', async () => {
+test('Direct fork does not copy origin, delegationDepth or parentSession onto the ordinary child', async () => {
   const source = observation({
     header: { id: 'session-subagent-source', origin: 'subagent', delegationDepth: 1 },
     events: [
@@ -400,8 +399,9 @@ test('Direct fork does not copy origin or delegationDepth onto the ordinary chil
 
   const result = await lifecycle.fork({ sourceSessionId: 'session-subagent-source' })
   assert.equal(result.outcome.kind, 'forked')
+  // rc.1 ordinary fork children are INDEPENDENT Sessions: the source may be a
+  // subagent, but the child header carries neither ancestry nor its depth.
   assert.deepEqual(calls[0]?.meta, {
-    parentSession: 'session-subagent-source',
     isSeeded: true,
   })
 })

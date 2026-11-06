@@ -866,6 +866,10 @@ export async function runPtySessionWriteRecovery(context) {
     // not-dispatched, the draft must return to the composer, and the Host must
     // never see the prompt. The signal only closes the SAME admission gate the
     // surface-stop path owns; the surface stays mounted so the draft is visible.
+    // The barrier snapshot itself is the rc.1 accepted-only negative: a
+    // registered submission the Host has not accepted is NOT an accepted
+    // submission and paints no echo, so this lane waits for the production
+    // `serialize-held` evidence rather than a pre-accept screen echo.
     const holdBarrier = join(workDir, 't34-serializer-barrier')
     rmSync(holdBarrier, { force: true })
     const cHold = new SurfaceEntryProcess(entries.client, {
@@ -882,7 +886,15 @@ export async function runPtySessionWriteRecovery(context) {
     assert(cHoldReady.sessionOpen === true && cHoldReady.openSessionId === sessionA,
       'T34 the hold Client did not open the retained Session')
     cHold.send('holdme\r')
-    await cHold.waitForScreen('holdme', 'T34 pending echo', 60_000)
+    // rc.1 is ACCEPTED-ONLY: a registered but not-yet-Host-accepted submission
+    // has no visible echo, so waiting for the on-screen `holdme` row at this
+    // point would assert the retired behavior. The REAL qualification is the
+    // production serializer barrier: wait until the write actually reached it.
+    await cHold.waitFor(
+      record => record.m4b2s === 'qualification' && record.op === 'serialize-held',
+      'T34 real serializer barrier reached',
+      60_000,
+    )
     cHold.signalBusiness('SIGUSR2')
     await cHold.waitFor(
       record => record.m4b2s === 'qualification' && record.op === 'stop-surface-admission',

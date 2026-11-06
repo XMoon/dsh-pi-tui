@@ -61,6 +61,7 @@ import { once } from 'node:events'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { isDeepStrictEqual } from 'node:util'
 import { Context, type Fiber } from '@deepseek-ai/cordis'
 import { LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
@@ -811,40 +812,118 @@ test('the real boundary gesture extends the loaded official history through the 
   }, 15_000)
 })
 
-test('the official pendingSubmissions echo drives the pending-presentation join (user-visible rows)', async (t) => {
+test('accepted-only: a registered submission is invisible until Host acceptance, then joins by requestId', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr2-pending'
   const hostPreset = 'm3-4-pr2-preset'
   const seedHost = await mountRemotePresentationHost(life, hostPreset)
-  await seedHost.harness.create(SessionId(mainId), undefined, { cwd: seedHost.anchorDir })
+  // The agent needs its route, else the accepted turn errors before the
+  // durable user message exists (and the test would time out for the wrong
+  // reason).
+  await seedHost.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' } as never, { cwd: seedHost.anchorDir })
   const fixture = await mountRemoteRunner(life, { presetId: hostPreset, resumeSessionId: mainId, host: seedHost })
   const app = await waitForApp(fixture)
   // Baseline: the join renders nothing pending.
   assert.deepEqual(app.pendingInputForTest().queued, [])
   assert.deepEqual(app.pendingInputForTest().tail, [])
-  // The OFFICIAL optimistic echo: the real Client's beginSubmission on the
-  // retained binding — the exact gesture the official composer makes (PR2
-  // proves the READ/presentation side; no prompt dispatch happens).
   const binding = fixture.aggregate.wire.client.sessions.binding(SessionId(mainId) as never) as {
-    session: { beginSubmission(input: { mode: 'queue' | 'steer'; text: string; attachments: readonly [] }): { requestId: string } }
+    session: {
+      getSnapshot(): { readonly pendingSubmissions: readonly { readonly requestId: string }[] }
+      beginSubmission(input: {
+        readonly mode: 'queue' | 'steer'
+        readonly text: string
+        readonly attachments: readonly []
+        readonly onAccept?: () => void
+      }): { readonly requestId: string }
+      prompt(
+        content: readonly { readonly type: 'text'; readonly text: string }[],
+        mode: 'queue' | 'steer',
+        signal?: AbortSignal,
+        requestId?: string,
+      ): Promise<{ readonly ok: boolean }>
+    }
   } | undefined
-  assert.ok(binding !== undefined, 'the retained binding serves the official beginSubmission')
-  const submission = binding.session.beginSubmission({ mode: 'queue', text: 'official echo drives the pane', attachments: [] })
-  await waitFor('official snapshot carries the echo', () => {
-    return (fixture.override.presentation.submissionPresentation.snapshot(mainId) ?? []).length > 0
-  }, 5_000)
-  // The official snapshot now carries the echo; the surface refresh joins it
-  // into the rendered rows (the queue pane for a queued placement when
-  // running; the tail lane otherwise — both are user-visible pending rows).
-  await waitFor('official echo joined into the pending rows', () => {
-    const pending = app.pendingInputForTest()
-    return pending.queued.length + pending.tail.length > 0
-  }, 15_000)
-  const pending = app.pendingInputForTest()
-  const rows = [...pending.queued, ...pending.tail] as Array<{ row?: { text?: string }; text?: string }>
-  const joined = rows.some(row => (row.row?.text ?? row.text) === 'official echo drives the pane')
-  assert.equal(joined, true, 'the OFFICIAL echo text is rendered through the pending-presentation join')
-  void submission
+  assert.ok(binding !== undefined, 'the retained binding serves the official beginSubmission/prompt faces')
+
+  // 1. REGISTER ONLY. rc.1 publishes a submission echo only after Host
+  //    acceptance, so the pre-accept snapshot and the product join stay empty.
+  const text = 'accepted-only submission drives the pane'
+  let accepts = 0
+  let acceptedSnapshot: { readonly pendingSubmissions: readonly { readonly requestId: string }[] } | undefined
+  const submission = binding.session.beginSubmission({
+    mode: 'queue',
+    text,
+    attachments: [],
+    onAccept: () => {
+      accepts += 1
+      acceptedSnapshot = binding.session.getSnapshot()
+    },
+  })
+  assert.equal(accepts, 0, 'registration alone never claims acceptance')
+  assert.equal(binding.session.getSnapshot().pendingSubmissions.some(entry => entry.requestId === submission.requestId), false,
+    'the official snapshot must not publish an unaccepted submission')
+  assert.equal(
+    (fixture.override.presentation.submissionPresentation.snapshot(mainId) ?? [])
+      .some(entry => entry.requestId === submission.requestId),
+    false,
+    'the product pending source projects no unaccepted submission',
+  )
+  assert.deepEqual(app.pendingInputForTest().queued, [], 'no unaccepted echo may appear in the queue pane')
+  assert.deepEqual(app.pendingInputForTest().tail, [], 'no unaccepted echo may appear in the tail lane')
+
+  // 2. The IDENTIFIED prompt carries the registered requestId. Acceptance
+  //    fires onAccept exactly once and publishes the echo in the SAME update;
+  //    the idle prompt may reach durable admission immediately, so no fixed
+  //    transient echo window is assumed.
+  const accepted = await binding.session.prompt([{ type: 'text', text }], 'queue', undefined, submission.requestId)
+  assert.equal(accepted.ok, true, 'the identified Host prompt must be accepted')
+  assert.equal(accepts, 1, 'onAccept fires exactly once')
+  assert.ok(acceptedSnapshot !== undefined, 'onAccept observes the accepted snapshot synchronously')
+  assert.ok(acceptedSnapshot.pendingSubmissions.some(entry => entry.requestId === submission.requestId),
+    'the accepted snapshot already publishes the submission echo')
+
+  // 3. DURABLE correlation: exactly ONE Host user/message carries the SAME
+  //    requestId, and its content is the submitted text.
+  type HostUserMessage = {
+    readonly source: { readonly kind?: string; readonly rpcId?: unknown }
+    readonly content: readonly { readonly type?: string; readonly text?: string }[]
+  }
+  const hostUserMessages = (): readonly HostUserMessage[] => {
+    const session = seedHost.ctx.sessions.get(SessionId(mainId)) as unknown as {
+      snapshotEvents(): ReadonlyArray<{ type: string; data: unknown }>
+    }
+    return session.snapshotEvents()
+      .filter(event => event.type === 'user/message')
+      .map(event => event.data as HostUserMessage)
+      .filter(message => message.source.kind === 'user')
+  }
+  await waitFor('the identified Host user message is durable', () =>
+    hostUserMessages().some(message => message.source.rpcId === submission.requestId), 20_000)
+  const identified = hostUserMessages().filter(message => message.source.rpcId === submission.requestId)
+  assert.equal(identified.length, 1, 'exactly one durable message carries the submission requestId')
+  assert.equal(identified[0]!.content.filter(part => part.type === 'text').map(part => part.text).join(''), text,
+    'the durable message content is the submitted text')
+  await waitFor('the durable row is painted', () => fixture.vt.getViewport().join('\n').includes(text), 20_000)
+  assert.equal(fixture.vt.getViewport().join('\n').split('\n').filter(line => line.includes(text)).length, 1,
+    'the user text appears exactly once (never a pending echo plus its durable replacement)')
+
+  // 4. A TRULY failed identified prompt manufactures no committed/durable
+  //    display: the Host refuses empty content, the official Client retires the
+  //    echo and onAccept never fires.
+  const durableBefore = hostUserMessages().length
+  let failedAccepts = 0
+  const failed = binding.session.beginSubmission({
+    mode: 'queue',
+    text: '   ',
+    attachments: [],
+    onAccept: () => { failedAccepts += 1 },
+  })
+  const rejected = await binding.session.prompt([{ type: 'text', text: '   ' }], 'queue', undefined, failed.requestId)
+  assert.equal(rejected.ok, false, 'the Host must refuse an empty prompt')
+  assert.equal(failedAccepts, 0, 'a rejected prompt never fires onAccept')
+  assert.equal(binding.session.getSnapshot().pendingSubmissions.some(entry => entry.requestId === failed.requestId), false,
+    'a rejected prompt never publishes an accepted echo')
+  assert.equal(hostUserMessages().length, durableBefore, 'a rejected prompt commits no durable message')
 })
 
 test('an external inbox projection update re-joins the queue pane without a durable session event', async (t) => {
@@ -1321,10 +1400,11 @@ test('navigation: switch, same-id rollover and reconnect re-init the presentatio
   assert.ok(childId !== undefined, 'the fork created a child session')
   assert.notEqual(childId, sessionA, 'the child is a DIFFERENT session')
   const childHeader = (seedHost.ctx.sessions.get(SessionId(childId!)) as unknown as {
-    header: { readonly parentSession?: string }
+    header: { readonly parentSession?: string; readonly isSeeded?: boolean }
   }).header
-  assert.equal(String(childHeader.parentSession), sessionA,
-    'the child carries the official fork lineage to the parent')
+  assert.equal(childHeader.parentSession, undefined,
+    'rc.1 ordinary fork children are independent Sessions with no parent lineage')
+  assert.equal(childHeader.isSeeded, true, 'the fork child must be seeded')
   assert.ok(bindingOf(childId!) !== undefined, 'the Client retained the adopted child')
   await waitFor('forked child hydrated', () => viewport().includes('alpha answer 3'), 20_000)
   assert.equal(viewport().includes('beta answer 3'), false,
@@ -1449,7 +1529,7 @@ test('a real Remote /new leaves the running old turn alive while it commits the 
   void app
 })
 
-test('pending: queued -> queue pane, steering -> tail lane, and the echo -> authoritative identity handoff', async (t) => {
+test('pending: accepted queued -> queue pane, accepted steering -> official status, and the echo -> durable identity handoff', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr2-pending-running'
   const hostPreset = 'm3-4-pr2-preset'
@@ -1466,43 +1546,87 @@ test('pending: queued -> queue pane, steering -> tail lane, and the echo -> auth
   const app = await waitForApp(fixture)
   const binding = fixture.aggregate.wire.client.sessions.binding(SessionId(mainId)) as unknown as {
     session: {
-      getSnapshot(): { readonly running: boolean }
+      getSnapshot(): {
+        readonly running: boolean
+        readonly pendingSubmissions: readonly {
+          readonly requestId: string
+          readonly placement: 'queued' | 'steering' | 'transcript'
+        }[]
+      }
+      projections: { faceOf(key: string): { getSnapshot(): unknown } }
       prompt(
         content: readonly { readonly type: 'text'; readonly text: string }[],
         mode: 'queue' | 'steer',
         signal?: AbortSignal,
-        requestId?: unknown,
-      ): Promise<unknown>
+        requestId?: string,
+      ): Promise<{ readonly ok: boolean }>
       beginSubmission(input: {
         readonly mode: 'queue' | 'steer'
         readonly text: string
         readonly attachments: readonly unknown[]
-      }): { readonly requestId: unknown }
+        readonly onAccept?: () => void
+      }): { readonly requestId: string }
     }
   }
   assert.ok(binding !== undefined, 'the retained binding serves the official prompt/echo faces')
+  const inboxNextTurnOf = (): readonly { readonly source?: { readonly rpcId?: unknown } }[] => {
+    const inbox = binding.session.projections.faceOf('inbox').getSnapshot() as
+      | { readonly 'next-turn'?: readonly { readonly source?: { readonly rpcId?: unknown } }[] }
+      | undefined
+    return inbox?.['next-turn'] ?? []
+  }
   // Hold one real turn OPEN so the session is officially `running`: the
-  // placement of every echo below is the official `running ? queued/steering :
-  // transcript` rule, computed by the Client itself.
+  // placement of every accepted submission below is the official
+  // `running ? queued/steering : transcript` rule, computed by the Client.
   const release = adapter.hold()
   await binding.session.prompt([{ type: 'text', text: 'hold the turn open' }], 'queue')
   await waitFor('session running', () => binding.session.getSnapshot().running, 15_000)
 
-  // QUEUED: a queue-mode echo on a running session lands in the QUEUE pane.
-  const queued = binding.session.beginSubmission({ mode: 'queue', text: 'queued echo body', attachments: [] })
-  await waitFor('queued row in the queue pane', () => {
-    return app.pendingInputForTest().queued.some(row => (row as { text?: string }).text === 'queued echo body')
-  }, 15_000)
-  assert.equal(app.pendingInputForTest().tail.some(row => row.row?.text === 'queued echo body'), false,
-    'a queued echo never rides the transcript tail lane')
+  // QUEUED: registration alone is invisible; the identified prompt reaches the
+  // running Host, the Inbox carries the SAME requestId, and the accepted echo
+  // joins the real Host row into exactly ONE queue-pane row.
+  const queuedText = 'queued echo body'
+  const queued = binding.session.beginSubmission({ mode: 'queue', text: queuedText, attachments: [] })
+  assert.equal(app.pendingInputForTest().queued.some(row => (row as { text?: string }).text === queuedText), false,
+    'a registered-but-unaccepted queued submission is never painted')
+  const queuedAccepted = await binding.session.prompt([{ type: 'text', text: queuedText }], 'queue', undefined, queued.requestId)
+  assert.equal(queuedAccepted.ok, true, 'the identified queued prompt is accepted')
+  await waitFor('the Host Inbox carries the queued requestId', () =>
+    inboxNextTurnOf().some(item => item.source?.rpcId === queued.requestId), 15_000)
+  await waitFor('exactly one joined queued row', () =>
+    app.pendingInputForTest().queued.filter(row => (row as { text?: string }).text === queuedText).length === 1, 15_000)
+  assert.equal(app.pendingInputForTest().tail.some(row => row.row?.text === queuedText), false,
+    'a queued occurrence never rides the transcript tail lane')
 
-  // STEERING: a steer-mode echo on the running session lands in the tail lane.
-  binding.session.beginSubmission({ mode: 'steer', text: 'steering echo body', attachments: [] })
-  await waitFor('steering row in the tail lane', () => {
-    return app.pendingInputForTest().tail.some(row => row.row?.text === 'steering echo body' && row.row?.status === 'steering')
-  }, 15_000)
-  assert.equal(app.pendingInputForTest().queued.some(row => (row as { text?: string }).text === 'steering echo body'), false,
-    'a steering echo never rides the queue pane')
+  // STEERING: the identified steer prompt is accepted by the Host; the official
+  // onAccept snapshot is the observable status row (placement `steering`). The
+  // steer interrupts the held turn, so no fixed transient echo window is
+  // assumed — the durable identity proof below is the settlement.
+  const steeringText = 'steering echo body'
+  let steeringAccepts = 0
+  let steeringAcceptedSnapshot: ReturnType<typeof binding.session.getSnapshot> | undefined
+  const steering = binding.session.beginSubmission({
+    mode: 'steer',
+    text: steeringText,
+    attachments: [],
+    onAccept: () => {
+      steeringAccepts += 1
+      steeringAcceptedSnapshot = binding.session.getSnapshot()
+    },
+  })
+  assert.equal(app.pendingInputForTest().tail.some(row => row.row?.text === steeringText), false,
+    'a registered-but-unaccepted steering submission is never painted')
+  const steeringAccepted = await binding.session.prompt([{ type: 'text', text: steeringText }], 'steer', undefined, steering.requestId)
+  assert.equal(steeringAccepted.ok, true, 'the identified steer prompt is accepted')
+  assert.equal(steeringAccepts, 1, 'steering onAccept fires exactly once')
+  assert.ok(steeringAcceptedSnapshot !== undefined, 'the steering acceptance snapshot is observable')
+  assert.ok(steeringAcceptedSnapshot.pendingSubmissions.some(entry =>
+    entry.requestId === steering.requestId && entry.placement === 'steering'),
+  'the accepted steering submission carries the official steering status')
+  assert.equal(app.pendingInputForTest().queued.some(row => (row as { text?: string }).text === steeringText), false,
+    'a steering occurrence never rides the queue pane')
+  assert.ok(app.pendingInputForTest().tail.filter(row => row.row?.text === steeringText).length <= 1,
+    'the steering occurrence is never duplicated across the tail lane')
 
   // CONTEXT: a NON-user `next-step` inbox message (here a goal-injected one)
   // is the official CONTEXT placement — it rides the generic tail row, never
@@ -1524,18 +1648,46 @@ test('pending: queued -> queue pane, steering -> tail lane, and the echo -> auth
     'a non-user occurrence never rides the user/steering lane',
   )
 
-  // HANDOFF: the identified prompt carries the echo's OWN requestId; once the
-  // Host admits the durable user message the echo retires by IDENTITY and the
-  // authoritative row takes its place (never a text-based dedupe).
-  await binding.session.prompt([{ type: 'text', text: 'queued echo body' }], 'queue', undefined, queued.requestId)
+  // HANDOFF: both accepted submissions keep their OWN requestId; the durable
+  // Host user/messages carry exactly those ids, the queued echo retires by
+  // IDENTITY (never by text), and each text paints once.
   release()
-  await waitFor('echo retired into the durable row', () => {
+  await waitFor('the queued echo retired into the durable row', () => {
     const pending = app.pendingInputForTest()
-    return pending.queued.every(row => (row as { text?: string }).text !== 'queued echo body')
+    return pending.queued.every(row => (row as { text?: string }).text !== queuedText)
   }, 20_000)
-  await waitFor('durable user row painted', () => {
-    return fixture.vt.getViewport().join('\n').includes('queued echo body')
-  }, 20_000)
+  type HostUserMessage = {
+    readonly source: { readonly kind?: string; readonly rpcId?: unknown }
+    readonly content: readonly { readonly type?: string; readonly text?: string }[]
+  }
+  const hostUserMessages = (): readonly HostUserMessage[] => {
+    const session = seedHost.ctx.sessions.get(SessionId(mainId)) as unknown as {
+      snapshotEvents(): ReadonlyArray<{ type: string; data: unknown }>
+    }
+    return session.snapshotEvents()
+      .filter(event => event.type === 'user/message')
+      .map(event => event.data as HostUserMessage)
+      .filter(message => message.source.kind === 'user')
+  }
+  await waitFor('both identified durable rows landed', () =>
+    [queued.requestId, steering.requestId].every(requestId =>
+      hostUserMessages().some(message => message.source.rpcId === requestId)), 20_000)
+  for (const [requestId, expectedText] of [
+    [queued.requestId, queuedText],
+    [steering.requestId, steeringText],
+  ] as const) {
+    const identified = hostUserMessages().filter(message => message.source.rpcId === requestId)
+    assert.equal(identified.length, 1, `exactly one durable message carries requestId ${requestId}`)
+    assert.equal(identified[0]!.content.filter(part => part.type === 'text').map(part => part.text).join(''), expectedText,
+      'the durable identity carries the submitted content')
+  }
+  await waitFor('both durable user rows painted', () =>
+    fixture.vt.getViewport().join('\n').includes(queuedText) && fixture.vt.getViewport().join('\n').includes(steeringText), 20_000)
+  const painted = fixture.vt.getViewport().join('\n').split('\n')
+  assert.equal(painted.filter(line => line.includes(queuedText)).length, 1,
+    'the queued text paints exactly once (no echo plus durable duplicate)')
+  assert.equal(painted.filter(line => line.includes(steeringText)).length, 1,
+    'the steering text paints exactly once (no echo plus durable duplicate)')
 })
 
 test('a real Remote ordinary submit carries the Client-sampled request zone — not the Host zone — into the Host source and its time-context injection', async (t) => {
@@ -1700,6 +1852,122 @@ test('a projection-owned value changed by ANOTHER writer reaches the surface thr
   await waitFor('the new model reached the surface', () => modelOf() === 'second-model', 20_000)
   assert.equal(modelOf(), 'second-model',
     'the live projection channel refreshed the current-value fact (a stale footer would still say first-model)')
+})
+
+test('ONE real Host event updates MULTIPLE Client projection faces, and the reconnect baseline reverts a poisoned value', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm3-4-pr2-projection-multikey'
+  const hostPreset = 'm3-4-pr2-preset'
+  const seedHost = await mountRemotePresentationHost(life, hostPreset)
+  await seedHost.harness.create(
+    SessionId(mainId),
+    { provider: 'smoke', model: 'smoke' } as never,
+    { cwd: seedHost.anchorDir },
+  )
+  const session = seedHost.ctx.sessions.get(SessionId(mainId)) as unknown as {
+    append(type: string, data: unknown, options?: { surfaceOp?: 'append' }): void
+  }
+  seedTurns(session, 1, 2, 'multi')
+  const fixture = await mountRemoteRunner(life, { presetId: hostPreset, resumeSessionId: mainId, host: seedHost })
+  const app = await waitForApp(fixture)
+  const binding = fixture.aggregate.wire.client.sessions.binding(SessionId(mainId) as never) as {
+    session: {
+      readonly projections: {
+        faceOf(key: string): { getSnapshot(): unknown }
+        apply(key: string, value: unknown, seq: number): void
+        seqOf(key: string): number | undefined
+      }
+    }
+  } | undefined
+  assert.ok(binding !== undefined, 'the retained binding serves the official projection faces')
+  const statusStore = (app as unknown as {
+    statusStore: { snapshot(): { usage?: { tokens?: { input?: number; output?: number } } } }
+  }).statusStore
+  /** The official Host projection registry: its per-event change listener is
+   *  the SAME change set the wire frame carries (the Client's control frame is
+   *  `{seq, changes[]}`), so the keys/seq below are observed, never invented. */
+  const projections = seedHost.ctx.get('sessionProjections') as unknown as {
+    onEventChanged(listener: (session: unknown, changes: readonly { readonly key: string }[], seq: unknown) => void): () => void
+    snapshot(session: unknown, keys: readonly string[]): { readonly values: Readonly<Record<string, unknown>> }
+  }
+  const frames: Array<{ readonly keys: string[]; readonly seq: number }> = []
+  const unsubscribe = projections.onEventChanged((changedSession, changes, seq) => {
+    if (changedSession !== session) return
+    frames.push({ keys: changes.map(change => change.key), seq: Number(seq) })
+  })
+  life.defer(unsubscribe)
+  // The baseline painted the seeded lifetime usage (2 turns x 1 token) through
+  // the official tokenUsage projection — the consumer state a stale frame must
+  // not survive.
+  await waitFor('the seeded tokenUsage baseline painted', () => {
+    const tokens = statusStore.snapshot().usage?.tokens
+    return tokens?.input === 2 && tokens?.output === 2
+  }, 20_000)
+
+  // ONE real committed event that changes MULTIPLE client-visible units. The
+  // exact key set comes from the Host's own per-event change listener.
+  session.append('assistant/message', {
+    turn: 3,
+    step: 0,
+    message: {
+      id: 'multi-key-assistant',
+      role: 'assistant',
+      content: [{ type: 'text', text: 'multi-key answer' }],
+      source: { kind: 'model', provider: 'smoke', model: 'smoke' },
+    },
+    stream: [{ type: 'chunk', time: Date.now() - 1, chunk: { type: 'text-delta', index: 0, text: 'x' } }],
+    usage: { inputTokens: 7, outputTokens: 11 },
+  }, { surfaceOp: 'append' })
+  await waitFor('a real MULTI-KEY Host projection frame', () =>
+    frames.some(frame => frame.keys.length >= 2 && frame.keys.includes('tokenUsage')), 20_000)
+  const frame = frames.find(entry => entry.keys.length >= 2 && entry.keys.includes('tokenUsage'))!
+  const frameTruth = projections.snapshot(session, frame.keys)
+  const facesMatch = (truth: Readonly<Record<string, unknown>>): boolean =>
+    frame.keys.every(key => isDeepStrictEqual(binding.session.projections.faceOf(key).getSnapshot(), truth[key]))
+  await waitFor('every changed key of the frame crossed the wire', () => facesMatch(frameTruth.values), 20_000)
+  for (const key of frame.keys) {
+    assert.deepEqual(binding.session.projections.faceOf(key).getSnapshot(), frameTruth.values[key],
+      `the Client faceOf(${key}) equals the official session/projections readback in the SAME frame`)
+  }
+  const usageTruth = frameTruth.values.tokenUsage as {
+    readonly uncachedInputTokens: number
+    readonly outputTokens: number
+  }
+  await waitFor('the mounted consumer repaints the new tokenUsage truth', () => {
+    const tokens = statusStore.snapshot().usage?.tokens
+    return tokens?.input === usageTruth.uncachedInputTokens && tokens?.output === usageTruth.outputTokens
+  }, 20_000)
+
+  // POISON the pre-reconnect generation's Client store for one changed key: a
+  // value the Host never produced, at a higher seq than the live frame.
+  const poison = { uncachedInputTokens: 999_999, outputTokens: 888_888, cacheReadTokens: 0, cacheWriteTokens: 0 }
+  binding.session.projections.apply('tokenUsage', poison, (binding.session.projections.seqOf('tokenUsage') ?? 0) + 1_000)
+  assert.deepEqual(binding.session.projections.faceOf('tokenUsage').getSnapshot(), poison,
+    'the pre-reconnect Client store now holds the poisoned value')
+
+  // RECONNECT: the new generation's authoritative baseline must REVERT the
+  // poisoned value and re-establish every key of the observed frame.
+  const connection = fixture.aggregate.wire.client.connection as unknown as {
+    generation: { getSnapshot(): { readonly id: number } | undefined }
+    reconnect(): void
+  }
+  const generationBefore = connection.generation.getSnapshot()?.id
+  connection.reconnect()
+  await waitFor('reconnected on a NEW generation', () => {
+    const id = connection.generation.getSnapshot()?.id
+    return id !== undefined && id !== generationBefore
+  }, 20_000)
+  await waitFor('the reconnect baseline reverts the poisoned tokenUsage face', () =>
+    isDeepStrictEqual(binding.session.projections.faceOf('tokenUsage').getSnapshot(), frameTruth.values.tokenUsage), 20_000)
+  await waitFor('the mounted consumer repaints the authoritative usage', () => {
+    const tokens = statusStore.snapshot().usage?.tokens
+    return tokens?.input === usageTruth.uncachedInputTokens && tokens?.output === usageTruth.outputTokens
+  }, 20_000)
+  const truthAfterReconnect = projections.snapshot(session, frame.keys)
+  for (const key of frame.keys) {
+    assert.deepEqual(binding.session.projections.faceOf(key).getSnapshot(), truthAfterReconnect.values[key],
+      `the reconnect baseline re-established the official ${key} value`)
+  }
 })
 
 /* ───────────── §7.4-10/11 LIVE tool lifecycle (review F8) ───────────── */
