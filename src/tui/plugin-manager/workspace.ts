@@ -3629,7 +3629,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
         for (const line of wrapTextWithAnsi(`Registries asked: ${asked}`, width)) content.push(color.textDim(line))
         for (const attempt of list.attempts) {
           if (attempt.reason === undefined || attempt.reason === '') continue
-          for (const line of wrapTextWithAnsi(`  ${attempt.reason}`, width)) content.push(color.textMuted(line))
+          for (const line of wrapTextWithAnsi(`  ${sanitizedPhysicalLine(attempt.reason)}`, width)) content.push(color.textMuted(line))
         }
       }
       return
@@ -3662,7 +3662,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       else if (version.deprecated !== undefined) detail += ` — ${sanitizedPhysicalLine(version.deprecated)}`
       else if (blocked !== undefined) detail += ` — ${blocked}`
       else if (version.prerelease) detail += ' — explicit choice required'
-      const lines = wrapTextWithAnsi(detail, Math.max(1, width - 2))
+      const lines = wrapTextWithAnsi(sanitizedPhysicalLine(detail), Math.max(1, width - 2))
       for (const line of lines.length === 0 ? [''] : lines) {
         content.push(fit(`  ${blocked === undefined ? color.textMuted(line) : color.warning(line)}`, width))
       }
@@ -3698,10 +3698,10 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     if (update === undefined) return
     const result = update.result
     const headers: string[] = [
-      `update ${update.name} ${update.sourceInstalled} → ${update.selectedExactVersion ?? result?.to ?? 'unknown'}`,
+      `update ${sanitizedPhysicalLine(update.name)} ${sanitizedPhysicalLine(update.sourceInstalled)} → ${sanitizedPhysicalLine(update.selectedExactVersion ?? result?.to ?? 'unknown')}`,
       `phase: ${update.phase} · readback: ${update.readback}`,
       ...(update.requestId === undefined ? [] : [`request id: ${update.requestId}`]),
-      ...(update.registry === undefined ? [] : [`registry: ${update.registry}`]),
+      ...(update.registry === undefined ? [] : [`registry: ${maskedSource(sanitizedPhysicalLine(update.registry ?? 'pnpm default'))}`]),
     ]
     if (update.result !== undefined) {
       headers.push(`target: ${sanitizedPhysicalLine(changeSummary(update.result.result))}`)
