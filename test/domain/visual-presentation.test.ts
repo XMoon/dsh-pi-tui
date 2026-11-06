@@ -59,8 +59,8 @@ function baseKey(): VisualPresentationKey {
   }
 }
 
-const REF_A = `sv1_${'a'.repeat(20)}`
-const REF_B = `sv1_${'b'.repeat(20)}`
+const REF_A = `sv2_${'a'.repeat(20)}`
+const REF_B = `sv2_${'b'.repeat(20)}`
 
 test('a first committed projection starts at revision 1 and exposes its publications', () => {
   const message = {}

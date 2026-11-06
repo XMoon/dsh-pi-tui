@@ -1918,7 +1918,6 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     readonly session: object
     readonly sessionId: string
     readonly seq: number
-    readonly originRevision: number
     readonly index: VisualPublicationIndex
   } | undefined
   /** One-shot guard for the post-commit successor repaint. A re-entrant
@@ -1927,15 +1926,14 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
   let visualSuccessorRepaint = false
   const publicationsOf = (snapshot: VisualEventSnapshot): VisualPublicationIndex => {
     const memo = visualSnapshotMemo
-    // The origin revision is part of the identity: an async fork-lineage proof
-    // settles for the SAME Session seq, so without it the stale index would
-    // mask the newly proven inherited publications forever.
+    // The exact Session object + its committed seq are the identity: a fork
+    // epoch is derived synchronously from that log, so there is no late proof
+    // that could change the projection under the same seq.
     if (memo !== undefined
       && memo.session === snapshot.session
       && memo.sessionId === snapshot.sessionId
-      && memo.seq === snapshot.seq
-      && memo.originRevision === snapshot.originRevision) return memo.index
-    const publications = collectPublishedVisuals(snapshot.sessionId, snapshot.events, snapshot.verifiedOriginSpans)
+      && memo.seq === snapshot.seq) return memo.index
+    const publications = collectPublishedVisuals(snapshot.events)
     const byTurn = new Map<number, PublishedVisual[]>()
     for (const publication of publications) {
       const existing = byTurn.get(publication.turn)
@@ -1947,7 +1945,6 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       session: snapshot.session,
       sessionId: snapshot.sessionId,
       seq: snapshot.seq,
-      originRevision: snapshot.originRevision,
       index,
     }
     return index

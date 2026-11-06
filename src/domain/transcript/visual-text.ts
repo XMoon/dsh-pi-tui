@@ -48,13 +48,13 @@ export function isVisualToolName(name: string): boolean {
 export const VISUAL_FACT_PREFIX = 'visual-v1:'
 
 /** Prefix of the model-visible stable reference block. */
-export const VISUAL_REFERENCE_PREFIX = 'visual-ref-v1:'
+export const VISUAL_REFERENCE_PREFIX = 'visual-ref-v2:'
 
 /** Prefix of the durable publication receipt block. */
 export const VISUAL_PUBLISHED_PREFIX = 'visual-published-v1:'
 
 /** The one accepted reference spelling (lowercase hex, exactly 20 digits). */
-export const VISUAL_REFERENCE_PATTERN = /^sv1_[0-9a-f]{20}$/u
+export const VISUAL_REFERENCE_PATTERN = /^sv2_[0-9a-f]{20}$/u
 
 /** The maximum number of references one official receipt may carry. */
 export const MAX_PUBLISHED_VISUALS = 8
@@ -226,7 +226,7 @@ export function isOfficialVisualMachineBlock(text: string): boolean {
  * Each tool has one canonical tail composition, and a result carries at most
  * that composition:
  *
- * - a generator: optionally one `visual-ref-v1` block immediately followed by
+ * - a generator: optionally one `visual-ref-v2` block immediately followed by
  *   one `visual-v1` fact block of the MATCHING type, or the fact block alone
  *   (the reference is only projected for a root call inside an open step);
  * - the publication tool: one `visual-published-v1` receipt block.

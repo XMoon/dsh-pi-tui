@@ -3,7 +3,7 @@
  *
  * A published chart/SVG becomes part of an eligible final Assistant only
  * through an explicit Markdown reference definition
- * (`[dsh-visual-sv1_…]: <#>`). This module turns the Assistant's original
+ * (`[dsh-visual-sv2_…]: <#>`). This module turns the Assistant's original
  * ContentBlock text plus the PR1-qualified `PublishedVisual[]` into ONE
  * ordered source-span projection: text slices and visual occurrences, in the
  * exact original UTF-16 coordinates, with the marker text consumed and every
@@ -32,7 +32,7 @@ import type { PublishedVisual } from './publication.ts'
 const MARKER_LABEL_PREFIX = 'dsh-visual-'
 
 /** The strict marker line: column 0, exact label, exact `<#>` destination. */
-const MARKER_LINE_PATTERN = /^\[dsh-visual-(sv1_[0-9a-f]{20})\]: <#>$/u
+const MARKER_LINE_PATTERN = /^\[dsh-visual-(sv2_[0-9a-f]{20})\]: <#>$/u
 
 /**
  * The block-level visual label shape. A definition with this shape is NEVER
@@ -40,7 +40,7 @@ const MARKER_LINE_PATTERN = /^\[dsh-visual-(sv1_[0-9a-f]{20})\]: <#>$/u
  * is published: the marker line must keep its own Markdown definition
  * semantics in the source.
  */
-const VISUAL_LABEL_PATTERN = /^dsh-visual-sv1_[0-9a-f]{20}$/u
+const VISUAL_LABEL_PATTERN = /^dsh-visual-sv2_[0-9a-f]{20}$/u
 
 /**
  * One text slice of the original answer. `start`/`end` are UTF-16 offsets

@@ -4215,7 +4215,7 @@ function focusChartPublication(ref: string): PublishedVisual {
 }
 
 test('the real Ctrl+O key folds a process-bearing visual answer and keeps one inline figure', async () => {
-  const ref = `sv1_${'d'.repeat(20)}`
+  const ref = `sv2_${'d'.repeat(20)}`
   const marker = `[dsh-visual-${ref}]: <#>`
   const folder = new TranscriptFolder()
   folder.apply([

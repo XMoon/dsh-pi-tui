@@ -425,8 +425,8 @@ function mappedResultOf(blocks: readonly unknown[], name: string, argsRaw: strin
 test('the TSP mapper paints the publication summary and never the receipt machine block', () => {
   const mapped = mappedResultOf([
     { type: 'text', text: 'Selected 2 visuals for presentation.' },
-    { type: 'text', text: 'visual-published-v1:{"version":1,"published":[{"ref":"sv1_0123456789abcdef0123"},{"ref":"sv1_0123456789abcdef0124"}]}' },
-  ], 'present_visual', JSON.stringify({ visuals: [{ ref: 'sv1_0123456789abcdef0123' }, { ref: 'sv1_0123456789abcdef0124' }] }))
+    { type: 'text', text: 'visual-published-v1:{"version":1,"published":[{"ref":"sv2_0123456789abcdef0123"},{"ref":"sv2_0123456789abcdef0124"}]}' },
+  ], 'present_visual', JSON.stringify({ visuals: [{ ref: 'sv2_0123456789abcdef0123' }, { ref: 'sv2_0123456789abcdef0124' }] }))
   assert.ok(mapped.text.includes('Selected 2 visuals for presentation.'), `the summary is painted:\n${mapped.text}`)
   assert.ok(!mapped.text.includes('visual-published-v1:'), `the receipt is never painted:\n${mapped.text}`)
   assert.ok(!mapped.kinds.includes('chart'), 'the publication tool never emits a chart node')
@@ -435,9 +435,9 @@ test('the TSP mapper paints the publication summary and never the receipt machin
 
 test('the TSP mapper keeps a failed publication’s readable reason', () => {
   const mapped = mappedResultOf(
-    [{ type: 'text', text: 'unknown visual ref sv1_0123456789abcdef0123' }],
+    [{ type: 'text', text: 'unknown visual ref sv2_0123456789abcdef0123' }],
     'present_visual',
-    JSON.stringify({ visuals: [{ ref: 'sv1_0123456789abcdef0123' }] }),
+    JSON.stringify({ visuals: [{ ref: 'sv2_0123456789abcdef0123' }] }),
   )
   assert.ok(mapped.text.includes('unknown visual ref'), `the failure reason is painted:\n${mapped.text}`)
 })

@@ -35,7 +35,6 @@ import { TuiApp } from '../../src/tui-app.ts'
 import { chartContentBlocks, chartFactFromArgs, type ChartArgs } from '../../src/domain/visual/chart.ts'
 import { visualReference, visualReferenceLine } from '../../src/domain/visual/reference.ts'
 import { VISUAL_PUBLISHED_PREFIX } from '../../src/domain/transcript/visual-text.ts'
-import { SupersededReadError } from '../../src/runtime/read-error.ts'
 import { provideFakeHostWorkspaceRegistry } from '../support/workspace-registry.ts'
 
 const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
@@ -77,7 +76,7 @@ function officialLog(sessionId: string = SESSION_ID): { events: SessionEvent[]; 
     usage: { inputTokens: 1, outputTokens: 1 },
   }, 'append')
   push('tool/call', { turn: 1, step: 0, callId: 'chart-call', name: 'dsh_pi_tui_chart', arguments: JSON.stringify(CHART) })
-  const ref = visualReference({ sessionId, turn: 1, stepStartSeq: 1, callId: 'chart-call' })
+  const ref = visualReference({ turn: 1, stepStartSeq: 1, callId: 'chart-call' })
   const chartBlocks = chartContentBlocks(chartFactFromArgs(CHART))
   push('tool/result', {
     turn: 1,
@@ -143,21 +142,11 @@ function officialLog(sessionId: string = SESSION_ID): { events: SessionEvent[]; 
   return { events, markerRef: ref }
 }
 
-/** One recorded ancestor of the mounted Session (the official fork source). */
-interface HarnessParent {
-  readonly sessionId: string
-  readonly header: Record<string, unknown>
-  readonly events: readonly SessionEvent[]
-  /** Optional hold: the lineage proof stays PENDING until this resolves. */
-  readonly gate?: () => Promise<void>
-}
-
 /** Optional fork facts for the mounted Session. */
 interface HarnessOptions {
   readonly sessionId?: string
   readonly header?: Record<string, unknown>
   readonly inheritedEventCount?: number
-  readonly parent?: HarnessParent
 }
 
 /** The minimal Host-service stand-ins the real runner composition consumes. */
@@ -201,16 +190,9 @@ function makeHarness(home: string, events: readonly SessionEvent[], options: Har
     list: async () => [header],
     inspect: async () => ({ meta: header, events }),
   }
-  const parent = options.parent
   const sessionQuery = {
     listSessions: async () => [{ header, live: live.has(sessionId) }],
-    observeSession: async (requested: unknown) => {
-      if (parent !== undefined && String(requested) === parent.sessionId) {
-        if (parent.gate !== undefined) await parent.gate()
-        return { header: parent.header, inheritedEventCount: 0, events: parent.events, [Symbol.dispose]: () => {} }
-      }
-      return { header, inheritedEventCount, events, [Symbol.dispose]: () => {} }
-    },
+    observeSession: async () => ({ header, inheritedEventCount, events, [Symbol.dispose]: () => {} }),
   }
   const agents = {
     resume: async () => makeHandle(),
@@ -397,38 +379,22 @@ test('the real /copy command copies the display body through the production brid
   assert.notEqual(copied.payload, `${ANSWER_BEFORE}\n\n[dsh-visual-`, 'the raw marker line is never copied')
 })
 
-test('the real /copy writes nothing while an inherited origin is unproven, then copies the visible body', async (t) => {
+test('the real /copy of a fork-inherited answer uses its own committed publication immediately', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-copy-fork-composition-')
-  const parentHeader = {
-    id: PARENT_SESSION_ID,
-    cwd: home,
-    createdAt: 1_700_000_000_000,
-    version: SESSION_FORMAT_VERSION,
-    isSeeded: false,
-  }
   const childHeader = {
     id: CHILD_SESSION_ID,
     cwd: home,
     createdAt: 1_700_000_000_001,
     version: SESSION_FORMAT_VERSION,
     isSeeded: true,
-    parentSession: PARENT_SESSION_ID,
   }
   const { events: parentEvents } = officialLog(PARENT_SESSION_ID)
   const childEvents = forkEvents(parentEvents)
-  let releaseParent!: () => void
-  const parentGate = new Promise<void>((resolve) => { releaseParent = resolve })
   const harness = makeHarness(home, childEvents, {
     sessionId: CHILD_SESSION_ID,
     header: childHeader,
     inheritedEventCount: parentEvents.length,
-    parent: {
-      sessionId: PARENT_SESSION_ID,
-      header: parentHeader,
-      events: parentEvents,
-      gate: () => parentGate,
-    },
   })
   const { vt, commands } = await mountRunner(life, home, harness, CHILD_SESSION_ID)
   await waitForAnswer(vt)
@@ -436,24 +402,12 @@ test('the real /copy writes nothing while an inherited origin is unproven, then 
   const handler = commands.handler('copy')
   assert.ok(handler !== undefined, 'the real /copy command was registered for the fork child')
 
-  // 1) The inherited final answer's origin is still being proven: the command
-  //    reports the unavailable read and NOTHING reaches the clipboard.
-  const pending = await runCopyThroughTerminal(handler)
-  assert.ok(pending.result instanceof SupersededReadError,
-    `an unproven inherited origin is an unavailable copy, not a clipboard write (got ${String((pending.result as Error | undefined)?.message)})`)
-  assert.match((pending.result as Error).message, /inherited visual provenance .* not verified yet/u,
-    'the pending refusal is the provenance fence, not an unrelated torn read')
-  assert.equal(pending.payload, undefined, 'no OSC 52 clipboard payload is emitted')
-  assert.deepEqual(pending.writes, [], 'the terminal clipboard sink received zero writes')
-
-  // 2) The official proof settles; the surface repaints the inherited figures
-  //    and /copy now writes the SAME display body a native answer would.
-  releaseParent()
-  await drainMicrotasks()
-  const settled = await runCopyThroughTerminal(handler)
-  assert.deepEqual(settled.result, { kind: 'success', text: 'copied last assistant message' })
-  assert.equal(settled.payload, `${ANSWER_BEFORE}\n\n\n\n${ANSWER_AFTER}`,
+  // The inherited publication replays from the child's own committed log; no
+  // ancestor query or pending proof may hold the clipboard back.
+  const copied = await runCopyThroughTerminal(handler)
+  assert.deepEqual(copied.result, { kind: 'success', text: 'copied last assistant message' })
+  assert.equal(copied.payload, `${ANSWER_BEFORE}\n\n\n\n${ANSWER_AFTER}`,
     'only the consumed marker span is gone; every other byte is exact')
-  assert.notEqual(settled.payload, `${ANSWER_BEFORE}\n\n[dsh-visual-`,
+  assert.notEqual(copied.payload, `${ANSWER_BEFORE}\n\n[dsh-visual-`,
     'the raw inherited marker line is never copied')
 })

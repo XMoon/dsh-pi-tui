@@ -1000,7 +1000,7 @@ function visualAnswerFolder(ref: string, text: string): {
 }
 
 test('search after an inline figure highlights the rendered answer row', async () => {
-  const ref = `sv1_${'f'.repeat(20)}`
+  const ref = `sv2_${'f'.repeat(20)}`
   const marker = `[dsh-visual-${ref}]: <#>`
   const { folder, assistant } = visualAnswerFolder(ref, `Before figure.\n\n${marker}\n\nAfter needle.`)
   const { vt, app } = startApp()
@@ -1021,7 +1021,7 @@ test('search after an inline figure highlights the rendered answer row', async (
 })
 
 test('a search that only matches a consumed marker line paints no false anchor', async () => {
-  const ref = `sv1_${'f'.repeat(20)}`
+  const ref = `sv2_${'f'.repeat(20)}`
   const marker = `[dsh-visual-${ref}]: <#>`
   const { folder, assistant } = visualAnswerFolder(ref, `Before figure.\n\n${marker}\n\nAfter.`)
   const { vt, app } = startApp()
@@ -1043,7 +1043,7 @@ test('a search that only matches a consumed marker line paints no false anchor',
 
 
 test('a visual Assistant keeps the search anchor for a folded delivered-file target', async () => {
-  const ref = `sv1_${'f'.repeat(20)}`
+  const ref = `sv2_${'f'.repeat(20)}`
   const files = Array.from({ length: 6 }, (_, index) => ({
     path: `out/visible-${index}.md`,
     description: `Visible report ${index}`,
@@ -1117,7 +1117,7 @@ test('a visual Assistant keeps the search anchor for a folded delivered-file tar
 })
 
 test('a search target below an inline figure scrolls the viewport to the rendered answer row', async () => {
-  const ref = `sv1_${'f'.repeat(20)}`
+  const ref = `sv2_${'f'.repeat(20)}`
   const marker = `[dsh-visual-${ref}]: <#>`
   const filler = Array.from({ length: 30 }, (_, index) => `filler line ${index}`).join('\n')
   const { folder, assistant } = visualAnswerFolder(ref, `Before figure.\n\n${marker}\n\n${filler}\n\nAfter needle.`)
@@ -1141,7 +1141,7 @@ test('a search target below an inline figure scrolls the viewport to the rendere
 
 
 test('a message target crossing a non-text block keeps its search anchor', async () => {
-  const ref = `sv1_${'f'.repeat(20)}`
+  const ref = `sv2_${'f'.repeat(20)}`
   const content = [
     { type: 'text' as const, text: 'cross-' },
     { type: 'image' as const, attachment: { type: 'image' as const, name: 'middle.png' } },

@@ -30,7 +30,6 @@ import {
   VISUAL_PUBLISHED_PREFIX,
   type VisualSessionEvent,
 } from '../../src/domain/visual/publication.ts'
-import type { VerifiedVisualOriginSpan } from '../../src/domain/visual/origin.ts'
 
 const SESSION = 'session-under-test'
 
@@ -60,12 +59,7 @@ interface Tuple {
 class LogBuilder {
   private readonly log: VisualSessionEvent[]
   private seq: number
-  /** The Session whose events this log records; a generating result derives
-   *  its reference from THIS identity. */
-  private readonly sessionId: string
-
-  constructor(sessionId: string = SESSION, seed: readonly VisualSessionEvent[] = []) {
-    this.sessionId = sessionId
+  constructor(seed: readonly VisualSessionEvent[] = []) {
     this.log = [...seed]
     this.seq = seed.length
   }
@@ -134,7 +128,7 @@ class LogBuilder {
   generate(turn: number, step: number, callId: string, kind: 'chart' | 'svg'): { tuple: Tuple; ref: string } {
     const tuple = this.call(turn, step, callId, kind === 'chart' ? 'dsh_pi_tui_chart' : 'dsh_pi_tui_svg',
       kind === 'chart' ? CHART_ARGS : SVG_ARGS)
-    const ref = visualReference({ sessionId: this.sessionId, ...tuple })
+    const ref = visualReference(tuple)
     const fact = kind === 'chart' ? chartContentBlocks(chartFactFromArgs(CHART_ARGS)) : svgContentBlocks(svgFactFromArgs(SVG_ARGS))
     this.result(turn, step, callId, [
       ...fact.slice(0, -1),
@@ -181,18 +175,34 @@ function publishedTurn(): { log: LogBuilder; ref: string } {
 
 // ── the reference algorithm ────────────────────────────────────────────────
 
-test('the reference is a stable golden value for one fixed identity tuple', () => {
+test('the reference is a stable sv2 value for one fixed identity tuple and carries no Session id', () => {
   assert.equal(
-    visualReference({ sessionId: 's', turn: 1, stepStartSeq: 4, callId: 'c' }),
-    visualReference({ sessionId: 's', turn: 1, stepStartSeq: 4, callId: 'c' }),
+    visualReference({ turn: 1, stepStartSeq: 4, callId: 'c' }),
+    visualReference({ turn: 1, stepStartSeq: 4, callId: 'c' }),
   )
-  assert.match(visualReference({ sessionId: 's', turn: 1, stepStartSeq: 4, callId: 'c' }), /^sv1_[0-9a-f]{20}$/u)
-  // Every tuple field participates.
-  const base = { sessionId: 's', turn: 1, stepStartSeq: 4, callId: 'c' }
-  assert.notEqual(visualReference(base), visualReference({ ...base, sessionId: 's2' }))
+  assert.match(visualReference({ turn: 1, stepStartSeq: 4, callId: 'c' }), /^sv2_[0-9a-f]{20}$/u)
+  // Every tuple field participates. The tuple has NO Session field: the same
+  // generation inside two independent Sessions is the same locator string; the
+  // publication authority never grants cross-Session authority from it.
+  const base = { turn: 1, stepStartSeq: 4, callId: 'c' }
   assert.notEqual(visualReference(base), visualReference({ ...base, turn: 2 }))
   assert.notEqual(visualReference(base), visualReference({ ...base, stepStartSeq: 5 }))
   assert.notEqual(visualReference(base), visualReference({ ...base, callId: 'c2' }))
+})
+
+test('an old sv1 reference block never qualifies under the sv2 grammar', () => {
+  const log = new LogBuilder().turnStart(1)
+  const tuple = log.call(1, 0, 'legacy', 'dsh_pi_tui_chart', CHART_ARGS)
+  const fact = chartContentBlocks(chartFactFromArgs(CHART_ARGS))
+  log.result(1, 0, 'legacy', [
+    ...fact.slice(0, -1),
+    { type: 'text', text: `visual-ref-v1:sv1_${'a'.repeat(20)}` },
+    fact[fact.length - 1] as ContentBlock,
+  ])
+  log.stepEnd(1, 0).turnEnd(1)
+  assert.equal(tuple.callId, 'legacy')
+  assert.deepEqual(collectVisualSources(log.events()), [],
+    'the legacy machine block is ordinary text: no migration and no dual-stack parser')
 })
 
 test('the same figure title and call id in another step or turn is a different reference', () => {
@@ -201,7 +211,7 @@ test('the same figure title and call id in another step or turn is a different r
   first.turnEnd(1)
   first.turnStart(2)
   first.generate(2, 0, 'same', 'chart')
-  const refs = collectVisualSources(SESSION, first.events()).map(source => source.ref)
+  const refs = collectVisualSources(first.events()).map(source => source.ref)
   assert.equal(refs.length, 2, 'both occurrences are sources')
   assert.notEqual(refs[0], refs[1], 'the reused call id does not collapse the two identities')
 })
@@ -213,7 +223,7 @@ test('a successful chart/SVG result with its projected reference becomes a sourc
   const chart = log.generate(1, 0, 'call-chart', 'chart')
   const svg = log.generate(1, 1, 'call-svg', 'svg')
   log.turnEnd(1)
-  const sources = collectVisualSources(SESSION, log.events())
+  const sources = collectVisualSources(log.events())
   assert.deepEqual(sources.map(source => source.ref), [chart.ref, svg.ref])
   assert.deepEqual(sources.map(source => source.type), ['chart', 'svg'])
   const svgSource = sources[1]
@@ -228,7 +238,7 @@ test('a missing, mismatched or malformed reference block never becomes a source'
   withoutRef.call(1, 0, 'c1', 'dsh_pi_tui_chart', CHART_ARGS)
   withoutRef.result(1, 0, 'c1', chartContentBlocks(chartFactFromArgs(CHART_ARGS)))
   withoutRef.turnEnd(1)
-  assert.deepEqual(collectVisualSources(SESSION, withoutRef.events()), [])
+  assert.deepEqual(collectVisualSources(withoutRef.events()), [])
 
   // A ref block derived from a DIFFERENT tuple.
   const wrongRef = new LogBuilder().turnStart(1)
@@ -236,28 +246,28 @@ test('a missing, mismatched or malformed reference block never becomes a source'
   const chartBlocks = chartContentBlocks(chartFactFromArgs(CHART_ARGS))
   wrongRef.result(1, 0, 'c1', [
     chartBlocks[0] as ContentBlock,
-    { type: 'text', text: visualReferenceLine(visualReference({ sessionId: SESSION, turn: 1, stepStartSeq: 0, callId: 'other' })) },
+    { type: 'text', text: visualReferenceLine(visualReference({ turn: 1, stepStartSeq: 0, callId: 'other' })) },
     chartBlocks[1] as ContentBlock,
   ])
   wrongRef.turnEnd(1)
-  assert.deepEqual(collectVisualSources(SESSION, wrongRef.events()), [])
+  assert.deepEqual(collectVisualSources(wrongRef.events()), [])
 
   // A malformed reference line.
   const malformed = new LogBuilder().turnStart(1)
   malformed.call(1, 0, 'c1', 'dsh_pi_tui_chart', CHART_ARGS)
   malformed.result(1, 0, 'c1', [
     chartBlocks[0] as ContentBlock,
-    { type: 'text', text: 'visual-ref-v1:sv1_NOT_LOWERCASE_HEX00' },
+    { type: 'text', text: 'visual-ref-v2:sv2_NOT_LOWERCASE_HEX00' },
     chartBlocks[1] as ContentBlock,
   ])
   malformed.turnEnd(1)
-  assert.deepEqual(collectVisualSources(SESSION, malformed.events()), [])
+  assert.deepEqual(collectVisualSources(malformed.events()), [])
 })
 
 test('a reference block in the wrong POSITION is not a projected reference', () => {
   const blocks = chartContentBlocks(chartFactFromArgs(CHART_ARGS))
   const tuple = new LogBuilder().turnStart(1).call(1, 0, 'c1', 'dsh_pi_tui_chart', CHART_ARGS)
-  const ref = visualReference({ sessionId: SESSION, ...tuple })
+  const ref = visualReference({ ...tuple })
   // The ref text is present but NOT immediately before the fact: it sits before
   // the human block instead. Position, not presence, is the contract.
   const log = new LogBuilder().turnStart(1)
@@ -268,7 +278,7 @@ test('a reference block in the wrong POSITION is not a projected reference', () 
     blocks[1] as ContentBlock,
   ])
   log.turnEnd(1)
-  assert.deepEqual(collectVisualSources(SESSION, log.events()), [],
+  assert.deepEqual(collectVisualSources(log.events()), [],
     'a reference block that is not the one immediately before the fact is not projected')
 
   // A reference block AFTER the fact is likewise not a projected reference.
@@ -280,14 +290,14 @@ test('a reference block in the wrong POSITION is not a projected reference', () 
     { type: 'text', text: visualReferenceLine(ref) },
   ])
   after.turnEnd(1)
-  assert.deepEqual(collectVisualSources(SESSION, after.events()), [])
+  assert.deepEqual(collectVisualSources(after.events()), [])
 })
 
 test('a failed result, a mismatched fact type or a replaced credential never becomes a source', () => {
   // isError result.
   const failed = new LogBuilder().turnStart(1)
   const tuple = failed.call(1, 0, 'c1', 'dsh_pi_tui_chart', CHART_ARGS)
-  const ref = visualReference({ sessionId: SESSION, ...tuple })
+  const ref = visualReference({ ...tuple })
   const blocks = chartContentBlocks(chartFactFromArgs(CHART_ARGS))
   failed.result(1, 0, 'c1', [
     blocks[0] as ContentBlock,
@@ -295,12 +305,12 @@ test('a failed result, a mismatched fact type or a replaced credential never bec
     blocks[1] as ContentBlock,
   ], true)
   failed.turnEnd(1)
-  assert.deepEqual(collectVisualSources(SESSION, failed.events()), [])
+  assert.deepEqual(collectVisualSources(failed.events()), [])
 
   // A chart tool whose final fact is an SVG credential: the type must match.
   const mismatched = new LogBuilder().turnStart(1)
   const t2 = mismatched.call(1, 0, 'c2', 'dsh_pi_tui_chart', CHART_ARGS)
-  const ref2 = visualReference({ sessionId: SESSION, ...t2 })
+  const ref2 = visualReference({ ...t2 })
   const svgBlocks = svgContentBlocks(svgFactFromArgs(SVG_ARGS))
   mismatched.result(1, 0, 'c2', [
     svgBlocks[0] as ContentBlock,
@@ -308,12 +318,12 @@ test('a failed result, a mismatched fact type or a replaced credential never bec
     svgBlocks[1] as ContentBlock,
   ])
   mismatched.turnEnd(1)
-  assert.deepEqual(collectVisualSources(SESSION, mismatched.events()), [])
+  assert.deepEqual(collectVisualSources(mismatched.events()), [])
 
   // An SVG credential whose digest does not match the durable call source.
   const tampered = new LogBuilder().turnStart(1)
   const t3 = tampered.call(1, 0, 'c3', 'dsh_pi_tui_svg', SVG_ARGS)
-  const ref3 = visualReference({ sessionId: SESSION, ...t3 })
+  const ref3 = visualReference({ ...t3 })
   const replaced = svgContentBlocks(svgFactFromArgs({ ...SVG_ARGS, svg: `${SVG_SOURCE}<!-- replaced -->` }))
   tampered.result(1, 0, 'c3', [
     replaced[0] as ContentBlock,
@@ -321,7 +331,7 @@ test('a failed result, a mismatched fact type or a replaced credential never bec
     replaced[1] as ContentBlock,
   ])
   tampered.turnEnd(1)
-  assert.deepEqual(collectVisualSources(SESSION, tampered.events()), [])
+  assert.deepEqual(collectVisualSources(tampered.events()), [])
 })
 
 test('a bare call id reused across turns does not merge two occurrences', () => {
@@ -331,7 +341,7 @@ test('a bare call id reused across turns does not merge two occurrences', () => 
   log.turnStart(2)
   log.generate(2, 0, 'same-id', 'svg')
   log.stepEnd(2, 0).turnEnd(2)
-  const sources = collectVisualSources(SESSION, log.events())
+  const sources = collectVisualSources(log.events())
   assert.equal(sources.length, 2)
   assert.deepEqual(sources.map(source => source.turn), [1, 2])
 })
@@ -345,12 +355,12 @@ test('a duplicated call identity or a second result makes the occurrence unpubli
   duplicateCall.stepStart(1, 0)
   duplicateCall.callInOpenStep(1, 0, 'dup', 'dsh_pi_tui_chart', CHART_ARGS)
   duplicateCall.turnEnd(1)
-  assert.deepEqual(collectVisualSources(SESSION, duplicateCall.events()), [],
+  assert.deepEqual(collectVisualSources(duplicateCall.events()), [],
     'a duplicated (turn, step, callId) is ambiguous')
 
   const twoResults = new LogBuilder().turnStart(1)
   const { tuple } = twoResults.generate(1, 0, 'twice', 'chart')
-  const ref = visualReference({ sessionId: SESSION, ...tuple })
+  const ref = visualReference({ ...tuple })
   const blocks = chartContentBlocks(chartFactFromArgs(CHART_ARGS))
   const content: ContentBlock[] = [
     blocks[0] as ContentBlock,
@@ -359,7 +369,7 @@ test('a duplicated call identity or a second result makes the occurrence unpubli
   ]
   twoResults.result(1, 0, 'twice', content)
   twoResults.turnEnd(1)
-  assert.deepEqual(collectVisualSources(SESSION, twoResults.events()), [], 'a second result is ambiguous')
+  assert.deepEqual(collectVisualSources(twoResults.events()), [], 'a second result is ambiguous')
 })
 
 test('a call outside an open step frame never becomes a source', () => {
@@ -368,7 +378,7 @@ test('a call outside an open step frame never becomes a source', () => {
   log.stepEnd(1, 0)
   // No open step: the call has no durable step identity, so it is not indexed.
   log.callInOpenStep(1, 1, 'orphan', 'dsh_pi_tui_chart', CHART_ARGS)
-  const ref = visualReference({ sessionId: SESSION, turn: 1, stepStartSeq: 0, callId: 'orphan' })
+  const ref = visualReference({ turn: 1, stepStartSeq: 0, callId: 'orphan' })
   const blocks = chartContentBlocks(chartFactFromArgs(CHART_ARGS))
   log.result(1, 1, 'orphan', [
     blocks[0] as ContentBlock,
@@ -376,14 +386,14 @@ test('a call outside an open step frame never becomes a source', () => {
     blocks[1] as ContentBlock,
   ])
   log.turnEnd(1)
-  assert.deepEqual(collectVisualSources(SESSION, log.events()), [])
+  assert.deepEqual(collectVisualSources(log.events()), [])
 })
 
 // ── publications ───────────────────────────────────────────────────────────
 
 test('a real present_visual call/result pair publishes its reference once', () => {
   const { log, ref } = publishedTurn()
-  const published = collectPublishedVisuals(SESSION, log.events())
+  const published = collectPublishedVisuals(log.events())
   assert.equal(published.length, 1)
   assert.equal(published[0]?.ref, ref)
   assert.equal(published[0]?.source.type, 'chart')
@@ -396,7 +406,7 @@ test('a non-visual tool whose RESULT text claims the chart shape is not a source
   // chart fact — so only the real `tool/call` name can refuse it.
   const log = new LogBuilder().turnStart(1)
   const tuple = log.call(1, 0, 'call-bash', 'bash', { command: 'cat chart.json' })
-  const ref = visualReference({ sessionId: SESSION, ...tuple })
+  const ref = visualReference({ ...tuple })
   const blocks = chartContentBlocks(chartFactFromArgs(CHART_ARGS))
   log.result(1, 0, 'call-bash', [
     blocks[0] as ContentBlock,
@@ -409,15 +419,15 @@ test('a non-visual tool whose RESULT text claims the chart shape is not a source
   // so this case cannot pass merely because the shape is unqualified.
   const control = new LogBuilder().turnStart(1)
   const controlTuple = control.call(1, 0, 'call-chart', 'dsh_pi_tui_chart', CHART_ARGS)
-  const controlRef = visualReference({ sessionId: SESSION, ...controlTuple })
+  const controlRef = visualReference({ ...controlTuple })
   control.result(1, 0, 'call-chart', [
     blocks[0] as ContentBlock,
     { type: 'text', text: visualReferenceLine(controlRef) },
     blocks[1] as ContentBlock,
   ])
   control.turnEnd(1)
-  assert.equal(collectVisualSources(SESSION, control.events()).length, 1, 'the shape alone qualifies under the real name')
-  assert.deepEqual(collectVisualSources(SESSION, events), [],
+  assert.equal(collectVisualSources(control.events()).length, 1, 'the shape alone qualifies under the real name')
+  assert.deepEqual(collectVisualSources(events), [],
     'the durable tool/call name, not the result text, decides the tool')
 })
 
@@ -432,7 +442,7 @@ test('a fabricated receipt from another tool publishes nothing', () => {
     { type: 'text', text: `${VISUAL_PUBLISHED_PREFIX}${JSON.stringify({ version: 1, published: [{ ref }] })}` },
   ])
   log.turnEnd(1)
-  assert.deepEqual(collectPublishedVisuals(SESSION, log.events()), [])
+  assert.deepEqual(collectPublishedVisuals(log.events()), [])
 })
 
 test('an orphan publication result with no durable call publishes nothing', () => {
@@ -444,7 +454,7 @@ test('an orphan publication result with no durable call publishes nothing', () =
     { type: 'text', text: `${VISUAL_PUBLISHED_PREFIX}${JSON.stringify({ version: 1, published: [{ ref }] })}` },
   ])
   log.turnEnd(1)
-  assert.deepEqual(collectPublishedVisuals(SESSION, log.events()), [])
+  assert.deepEqual(collectPublishedVisuals(log.events()), [])
 })
 
 test('a receipt whose refs differ from the model arguments publishes nothing', () => {
@@ -459,7 +469,7 @@ test('a receipt whose refs differ from the model arguments publishes nothing', (
     { type: 'text', text: `${VISUAL_PUBLISHED_PREFIX}${JSON.stringify({ version: 1, published: [{ ref: second.ref }] })}` },
   ])
   log.turnEnd(1)
-  assert.deepEqual(collectPublishedVisuals(SESSION, log.events()), [])
+  assert.deepEqual(collectPublishedVisuals(log.events()), [])
 })
 
 test('a source published from the publisher’s own step is refused', () => {
@@ -468,7 +478,7 @@ test('a source published from the publisher’s own step is refused', () => {
   // The chart call and the publication call both live in step 0.
   log.call(1, 0, 'chart-same-step', 'dsh_pi_tui_chart', CHART_ARGS)
   const stepStartSeq = 0
-  const ref = visualReference({ sessionId: SESSION, turn: 1, stepStartSeq, callId: 'chart-same-step' })
+  const ref = visualReference({ turn: 1, stepStartSeq, callId: 'chart-same-step' })
   const blocks = chartContentBlocks(chartFactFromArgs(CHART_ARGS))
   log.result(1, 0, 'chart-same-step', [
     blocks[0] as ContentBlock,
@@ -482,7 +492,7 @@ test('a source published from the publisher’s own step is refused', () => {
     { type: 'text', text: `${VISUAL_PUBLISHED_PREFIX}${JSON.stringify({ version: 1, published: [{ ref }] })}` },
   ])
   log.turnEnd(1)
-  assert.deepEqual(collectPublishedVisuals(SESSION, log.events()), [],
+  assert.deepEqual(collectPublishedVisuals(log.events()), [],
     'a source in the publisher own step is refused even after committing first')
 })
 
@@ -493,7 +503,7 @@ test('a cross-turn reference publishes nothing', () => {
   log.turnStart(2)
   log.publish(2, 0, 'present-turn-2', [ref])
   log.stepEnd(2, 0).turnEnd(2)
-  assert.deepEqual(collectPublishedVisuals(SESSION, log.events()), [])
+  assert.deepEqual(collectPublishedVisuals(log.events()), [])
 })
 
 test('a failed publication result publishes nothing even with a valid receipt body', () => {
@@ -507,7 +517,7 @@ test('a failed publication result publishes nothing even with a valid receipt bo
     data: { ...original.data, message: { ...original.data.message, isError: true } },
   }
   void ref
-  assert.deepEqual(collectPublishedVisuals(SESSION, events), [])
+  assert.deepEqual(collectPublishedVisuals(events), [])
 })
 
 test('repeated publications keep the FIRST successful occurrence of one reference', () => {
@@ -518,7 +528,7 @@ test('repeated publications keep the FIRST successful occurrence of one referenc
   log.stepEnd(1, 1)
   log.publish(1, 2, 'present-2', [ref])
   log.stepEnd(1, 2).turnEnd(1)
-  const published = collectPublishedVisuals(SESSION, log.events())
+  const published = collectPublishedVisuals(log.events())
   assert.equal(published.length, 1)
   assert.equal(published[0]?.callId, 'present-1')
 })
@@ -558,11 +568,11 @@ test('a model-only pruner replacement never retracts an accepted publication', (
   log.turnEnd(1)
   const events = log.events()
   // The append-origin source is still the authority.
-  const sources = collectVisualSources(SESSION, events)
+  const sources = collectVisualSources(events)
   assert.equal(sources.length, 1, 'the replacement is NOT a second durable result')
   assert.equal(sources[0]?.ref, ref)
   // The already-accepted publication still replays.
-  const published = collectPublishedVisuals(SESSION, events)
+  const published = collectPublishedVisuals(events)
   assert.equal(published.length, 1, 'a pruner rewrite never retracts a publication')
   assert.equal(published[0]?.ref, ref)
 })
@@ -572,7 +582,7 @@ test('a replacement-only log still yields no source, and an unmarked duplicate i
   // the replacement copy alone must not become a source.
   const replacedOnly = new LogBuilder().turnStart(1)
   const replacedTuple = replacedOnly.call(1, 0, 'call-chart', 'dsh_pi_tui_chart', CHART_ARGS)
-  const replacedRef = visualReference({ sessionId: SESSION, ...replacedTuple })
+  const replacedRef = visualReference({ ...replacedTuple })
   const replacedBlocks = chartContentBlocks(chartFactFromArgs(CHART_ARGS))
   // Only the MODEL-ONLY copy is present, carrying a perfectly valid fact and
   // reference. If the skip were wrong, this would read as a real source.
@@ -582,7 +592,7 @@ test('a replacement-only log still yields no source, and an unmarked duplicate i
     replacedBlocks[1] as ContentBlock,
   ])
   replacedOnly.turnEnd(1)
-  assert.deepEqual(collectVisualSources(SESSION, replacedOnly.events()), [],
+  assert.deepEqual(collectVisualSources(replacedOnly.events()), [],
     'a replacement copy is never a source in its own right')
 
   // An UNMARKED second result is not a replacement marker and stays ambiguous.
@@ -595,7 +605,7 @@ test('a replacement-only log still yields no source, and an unmarked duplicate i
     blocks[1] as ContentBlock,
   ])
   unmarked.turnEnd(1)
-  assert.deepEqual(collectVisualSources(SESSION, unmarked.events()), [],
+  assert.deepEqual(collectVisualSources(unmarked.events()), [],
     'absence of the replacement marker is never treated as a rewrite')
 })
 
@@ -607,7 +617,6 @@ test('the live decision accepts an earlier-step committed source', () => {
   log.stepEnd(1, 0)
   const { tuple } = log.publish(1, 1, 'call-present', [ref])
   const decision = decidePublication({
-    sessionId: SESSION,
     events: log.events(),
     refs: [ref],
     turn: tuple.turn,
@@ -629,7 +638,6 @@ test('the live decision names the same-step and not-yet-committed refusals', () 
   const present = { turn: 1, stepStartSeq: generated.tuple.stepStartSeq, callId: 'present' }
   sameStep.stepEnd(1, 0).turnEnd(1)
   const sameStepDecision = decidePublication({
-    sessionId: SESSION,
     events: sameStep.events(),
     refs: [ref],
     turn: present.turn,
@@ -642,11 +650,10 @@ test('the live decision names the same-step and not-yet-committed refusals', () 
   // The generating call is committed, its result is NOT yet.
   const pending = new LogBuilder().turnStart(1)
   const tuple = pending.call(1, 0, 'chart', 'dsh_pi_tui_chart', CHART_ARGS)
-  const pendingRef = visualReference({ sessionId: SESSION, ...tuple })
+  const pendingRef = visualReference({ ...tuple })
   pending.stepEnd(1, 0)
   const publisher = pending.call(1, 1, 'present', 'present_visual', { visuals: [{ ref: pendingRef }] })
   const pendingDecision = decidePublication({
-    sessionId: SESSION,
     events: pending.events(),
     refs: [pendingRef],
     turn: publisher.turn,
@@ -662,7 +669,7 @@ test('the live decision refuses duplicated refs, an unknown ref and a missing pu
   const { ref } = log.generate(1, 0, 'chart', 'chart')
   log.stepEnd(1, 0)
   const { tuple } = log.publish(1, 1, 'present', [ref])
-  const base = { sessionId: SESSION, events: log.events(), turn: tuple.turn, stepStartSeq: tuple.stepStartSeq, callId: tuple.callId }
+  const base = { events: log.events(), turn: tuple.turn, stepStartSeq: tuple.stepStartSeq, callId: tuple.callId }
 
   // A caller-supplied list that disagrees with the DURABLE arguments is refused
   // before any identity work: the log owns what was requested.
@@ -675,11 +682,10 @@ test('the live decision refuses duplicated refs, an unknown ref and a missing pu
   const unknownLog = new LogBuilder().turnStart(1)
   unknownLog.generate(1, 0, 'chart', 'chart')
   unknownLog.stepEnd(1, 0)
-  const unknownTuple = unknownLog.publish(1, 1, 'present', ['sv1_00000000000000000000'])
+  const unknownTuple = unknownLog.publish(1, 1, 'present', ['sv2_00000000000000000000'])
   const unknown = decidePublication({
-    sessionId: SESSION,
     events: unknownLog.events(),
-    refs: ['sv1_00000000000000000000'],
+    refs: ['sv2_00000000000000000000'],
     turn: unknownTuple.tuple.turn,
     stepStartSeq: unknownTuple.tuple.stepStartSeq,
     callId: unknownTuple.tuple.callId,
@@ -698,7 +704,7 @@ test('the live decision refuses duplicated refs, an unknown ref and a missing pu
 // ── the ONE argument contract (live and replay) ────────────────────────────
 
 test('the shared argument contract refuses every non-official document', () => {
-  const ok = 'sv1_0123456789abcdef0123'
+  const ok = 'sv2_0123456789abcdef0123'
   assert.deepEqual(parsePresentVisualArguments({ visuals: [{ ref: ok }] }), { ok: true, refs: [ok] })
   const rejected: readonly unknown[] = [
     {},
@@ -709,7 +715,7 @@ test('the shared argument contract refuses every non-official document', () => {
     { visuals: [{ ref: 'not-a-ref' }] },
     { visuals: [{ ref: ok.toUpperCase() }] },
     { visuals: [ok] },
-    { visuals: Array.from({ length: 9 }, (_, index) => ({ ref: `sv1_${String(index).padStart(20, '0')}` })) },
+    { visuals: Array.from({ length: 9 }, (_, index) => ({ ref: `sv2_${String(index).padStart(20, '0')}` })) },
     [{ visuals: [{ ref: ok }] }],
     null,
   ]
@@ -736,7 +742,6 @@ test('a successful live receipt always parses back from its DURABLE arguments', 
   assert.equal(parsed.ok, true)
   assert.deepEqual(parsed.ok ? [...parsed.refs] : [], [ref])
   const decision = decidePublication({
-    sessionId: SESSION,
     events,
     refs: [ref],
     turn: tuple.turn,
@@ -745,7 +750,7 @@ test('a successful live receipt always parses back from its DURABLE arguments', 
   })
   assert.equal(decision.ok, true, decision.ok ? '' : decision.reason)
   // And the REPLAY of the same log reports exactly that publication.
-  assert.equal(collectPublishedVisuals(SESSION, events).length, 1)
+  assert.equal(collectPublishedVisuals(events).length, 1)
 })
 
 test('a duplicated publisher callId is refused by the LIVE path exactly as replay does', () => {
@@ -765,7 +770,6 @@ test('a duplicated publisher callId is refused by the LIVE path exactly as repla
   log.turnEnd(1)
   const events = log.events()
   const live = decidePublication({
-    sessionId: SESSION,
     events,
     refs: [ref],
     turn: 1,
@@ -775,7 +779,7 @@ test('a duplicated publisher callId is refused by the LIVE path exactly as repla
   assert.equal(live.ok, false, 'the live path must refuse an ambiguous publisher')
   assert.match(live.ok ? '' : live.reason, /no unique committed present_visual call/u)
   // And replay agrees: nothing was published.
-  assert.deepEqual(collectPublishedVisuals(SESSION, events), [])
+  assert.deepEqual(collectPublishedVisuals(events), [])
 })
 
 test('a duplicate publisher ID is refused even when observed BEFORE the duplicate tool/call lands', () => {
@@ -804,7 +808,6 @@ test('a duplicate publisher ID is refused even when observed BEFORE the duplicat
   log.callInOpenStep(1, 1, 'present', 'present_visual', { visuals: [{ ref }] })
   const observedCut = log.events()
   const live = decidePublication({
-    sessionId: SESSION,
     events: observedCut,
     refs: [ref],
     turn: 1,
@@ -829,7 +832,6 @@ test('a duplicate publisher ID is refused even when observed BEFORE the duplicat
   })
   control.callInOpenStep(1, 1, 'present', 'present_visual', { visuals: [{ ref: controlRef }] })
   const controlDecision = decidePublication({
-    sessionId: SESSION,
     events: control.events(),
     refs: [controlRef],
     turn: 1,
@@ -842,7 +844,7 @@ test('a duplicate publisher ID is refused even when observed BEFORE the duplicat
 // ── the receipt parser ─────────────────────────────────────────────────────
 
 test('the receipt parser accepts only the exact version-1 shape', () => {
-  const ref = 'sv1_0123456789abcdef0123'
+  const ref = 'sv2_0123456789abcdef0123'
   const ok = parsePublicationReceipt([
     { type: 'text', text: 'Selected 1 visual for presentation.' },
     { type: 'text', text: `${VISUAL_PUBLISHED_PREFIX}${JSON.stringify({ version: 1, published: [{ ref }] })}` },
@@ -882,7 +884,7 @@ test('the human projection drops only VALID official tail machine blocks', () =>
   const fact = chartContentBlocks(chartFactFromArgs(CHART_ARGS))[1] as Extract<ContentBlock, { type: 'text' }>
   const blocks: ContentBlock[] = [
     { type: 'text', text: 'Request latency (ms)\np50  42 ms' },
-    { type: 'text', text: visualReferenceLine('sv1_0123456789abcdef0123') },
+    { type: 'text', text: visualReferenceLine('sv2_0123456789abcdef0123') },
     fact,
   ]
   const chart = humanFacingVisualResult({
@@ -896,7 +898,7 @@ test('the human projection drops only VALID official tail machine blocks', () =>
     toolName: 'dsh_pi_tui_chart',
     blocks: [
       { type: 'text', text: 'title: visual-v1: CPU usage' },
-      { type: 'text', text: visualReferenceLine('sv1_0123456789abcdef0123') },
+      { type: 'text', text: visualReferenceLine('sv2_0123456789abcdef0123') },
       fact,
     ],
     text: '',
@@ -918,8 +920,8 @@ test('the human projection keeps an official tool’s ordinary PROSE that only l
   assert.match(replaced.text, /visual-v1:\{"type":"chart"\}/u)
 
   const refProse: ContentBlock[] = [
-    { type: 'text', text: 'selected refs were visual-ref-v1: see the log' },
-    { type: 'text', text: 'visual-ref-v1:not-a-reference' },
+    { type: 'text', text: 'selected refs were visual-ref-v2: see the log' },
+    { type: 'text', text: 'visual-ref-v2:not-a-reference' },
   ]
   const refReplaced = humanFacingVisualResult({ toolName: PRESENT_VISUAL_TOOL_NAME, blocks: refProse, text: '' })
   assert.equal(refReplaced.blocks.length, 2, 'a malformed reference line is human text')
@@ -1031,7 +1033,7 @@ test('a VALID fact line for the WRONG tool stays human text', () => {
   assert.equal(svgOnChart.blocks.length, 2, 'an SVG fact is never a chart machine block')
 
   // A receipt belongs only to the publication tool.
-  const receipt = 'visual-published-v1:{"version":1,"published":[{"ref":"sv1_0123456789abcdef0123"}]}'
+  const receipt = 'visual-published-v1:{"version":1,"published":[{"ref":"sv2_0123456789abcdef0123"}]}'
   for (const toolName of [CHART_TOOL_NAME, SVG_TOOL_NAME]) {
     const onGenerator = humanFacingVisualResult({
       toolName,
@@ -1053,9 +1055,9 @@ test('a VALID fact line for the WRONG tool stays human text', () => {
 test('only the OFFICIAL tail COMPOSITION is stripped, never a merely machine-looking suffix', () => {
   const chartFact = chartContentBlocks(chartFactFromArgs(CHART_ARGS))[1] as Extract<ContentBlock, { type: 'text' }>
   const svgFact = svgContentBlocks(svgFactFromArgs(SVG_ARGS))[1] as Extract<ContentBlock, { type: 'text' }>
-  const ref = visualReferenceLine('sv1_0123456789abcdef0123')
-  const ref2 = visualReferenceLine('sv1_0123456789abcdef0124')
-  const receipt = 'visual-published-v1:{"version":1,"published":[{"ref":"sv1_0123456789abcdef0123"}]}'
+  const ref = visualReferenceLine('sv2_0123456789abcdef0123')
+  const ref2 = visualReferenceLine('sv2_0123456789abcdef0124')
+  const receipt = 'visual-published-v1:{"version":1,"published":[{"ref":"sv2_0123456789abcdef0123"}]}'
 
   const human = (text: string): ContentBlock[] => [{ type: 'text', text }]
 
@@ -1150,7 +1152,7 @@ test('the human projection never touches another tool’s similar text', () => {
   const flat = humanFacingVisualResult({
     toolName: PRESENT_VISUAL_TOOL_NAME,
     blocks: undefined,
-    text: `Selected 2 visuals for presentation.\n${VISUAL_PUBLISHED_PREFIX}${JSON.stringify({ version: 1, published: [{ ref: 'sv1_0123456789abcdef0123' }, { ref: 'sv1_0123456789abcdef0124' }] })}`,
+    text: `Selected 2 visuals for presentation.\n${VISUAL_PUBLISHED_PREFIX}${JSON.stringify({ version: 1, published: [{ ref: 'sv2_0123456789abcdef0123' }, { ref: 'sv2_0123456789abcdef0124' }] })}`,
   })
   assert.equal(flat.text, 'Selected 2 visuals for presentation.')
 })
@@ -1158,10 +1160,10 @@ test('the human projection never touches another tool’s similar text', () => {
 test('the human projection keeps a failed visual result’s readable reason', () => {
   const human = humanFacingVisualResult({
     toolName: 'present_visual',
-    blocks: [{ type: 'text', text: 'unknown visual ref sv1_0123456789abcdef0123' }],
-    text: 'unknown visual ref sv1_0123456789abcdef0123',
+    blocks: [{ type: 'text', text: 'unknown visual ref sv2_0123456789abcdef0123' }],
+    text: 'unknown visual ref sv2_0123456789abcdef0123',
   })
-  assert.equal(human.text, 'unknown visual ref sv1_0123456789abcdef0123')
+  assert.equal(human.text, 'unknown visual ref sv2_0123456789abcdef0123')
 })
 
 test('the readable filter recognises EVERY fact the official serializer can emit', () => {
@@ -1195,7 +1197,7 @@ test('the readable filter recognises EVERY fact the official serializer can emit
       toolName: CHART_TOOL_NAME,
       blocks: [
         blocks[0] as ContentBlock,
-        { type: 'text', text: visualReferenceLine('sv1_0123456789abcdef0123') },
+        { type: 'text', text: visualReferenceLine('sv2_0123456789abcdef0123') },
         blocks[1] as ContentBlock,
       ],
       text: '',
@@ -1212,7 +1214,7 @@ test('the readable filter recognises EVERY fact the official serializer can emit
     toolName: SVG_TOOL_NAME,
     blocks: [
       svgBlocks[0] as ContentBlock,
-      { type: 'text', text: visualReferenceLine('sv1_0123456789abcdef0123') },
+      { type: 'text', text: visualReferenceLine('sv2_0123456789abcdef0123') },
       svgBlocks[1] as ContentBlock,
     ],
     text: '',
@@ -1237,7 +1239,7 @@ test('cold replay keeps its exact semantics with many sources, many publications
   log.stepEnd(1, 4).turnEnd(1)
 
   const events = log.events()
-  const published = collectPublishedVisuals(SESSION, events)
+  const published = collectPublishedVisuals(events)
   // History is preserved, first-wins per ref, in the FIRST publication's order.
   assert.deepEqual(published.map(entry => entry.ref), [first.ref, second.ref])
   assert.deepEqual(published.map(entry => entry.callId), ['present-1', 'present-1'])
@@ -1253,7 +1255,7 @@ test('cold replay keeps its exact semantics with many sources, many publications
   ambiguous.stepStart(1, 0)
   ambiguous.callInOpenStep(1, 0, 'dup-ref', 'dsh_pi_tui_chart', CHART_ARGS)
   ambiguous.turnEnd(1)
-  assert.deepEqual(collectVisualSources(SESSION, ambiguous.events()), [],
+  assert.deepEqual(collectVisualSources(ambiguous.events()), [],
     'the duplicated identity is not a source at all')
 
   // A publication of an UNOWNED ref never replays, which is the same refusal the
@@ -1261,9 +1263,9 @@ test('cold replay keeps its exact semantics with many sources, many publications
   const publishUnknown = new LogBuilder().turnStart(1)
   publishUnknown.generate(1, 0, 'dup-ref', 'chart')
   publishUnknown.stepEnd(1, 0)
-  publishUnknown.publish(1, 1, 'present-unknown', ['sv1_0123456789abcdef0123'])
+  publishUnknown.publish(1, 1, 'present-unknown', ['sv2_0123456789abcdef0123'])
   publishUnknown.stepEnd(1, 1).turnEnd(1)
-  assert.deepEqual(collectPublishedVisuals(SESSION, publishUnknown.events()), [],
+  assert.deepEqual(collectPublishedVisuals(publishUnknown.events()), [],
     'an unknown ref never publishes')
 })
 
@@ -1287,30 +1289,21 @@ test('cold replay stays linear in the number of publications', () => {
     log.stepEnd(1, SOURCE_COUNT + index)
   }
   log.turnEnd(1)
-  const published = collectPublishedVisuals(SESSION, log.events())
+  const published = collectPublishedVisuals(log.events())
   assert.deepEqual(published.map(entry => entry.ref), [refs[0], refs[1]])
   assert.equal(published.length, 2, '200 publications of the same refs stay two entries')
   assert.equal(published[0]?.callId, 'present-0', 'the first publication wins')
 })
 
-// ── fork-inherited replay provenance ──────────────────────────────────────
+// ── fork event epochs: inherited replay without an ancestor pointer ───────
 
-const PARENT = 'session-parent'
-const CHILD = 'session-child'
-const GRANDCHILD = 'session-grandchild'
-
-/** A durable origin range, written the way the lineage proof emits it. */
-function originSpan(startSeq: number, endSeqExclusive: number, sessionId: string): VerifiedVisualOriginSpan {
-  return { startSeq, endSeqExclusive, sessionId }
-}
-
-/** One completed turn of ONE Session whose chart and SVG were both published. */
-function publishedFigures(sessionId: string): {
+/** One completed turn of ONE generation whose chart and SVG were both published. */
+function publishedFigures(): {
   readonly log: LogBuilder
   readonly chartRef: string
   readonly svgRef: string
 } {
-  const log = new LogBuilder(sessionId).turnStart(1)
+  const log = new LogBuilder().turnStart(1)
   const chart = log.generate(1, 0, 'chart-call', 'chart')
   log.stepEnd(1, 0)
   const svg = log.generate(1, 1, 'svg-call', 'svg')
@@ -1321,123 +1314,72 @@ function publishedFigures(sessionId: string): {
 }
 
 /**
- * The exact official child continuation: every parent event verbatim at its own
- * seq, then the child-owned `session/end-seed { inherited: true }` marker. This
- * is the shape `buildForkSeed()` + `Session` construction commit, and the child
- * id is DIFFERENT from the one that derived the inherited references.
+ * The exact official child continuation: the parent's events verbatim at their
+ * own seqs, then the child-owned `session/end-seed { inherited: true }` marker.
+ * This is the shape `buildForkSeed()` + `Session` construction commit. There is
+ * NO Session id in the log, so the inherited references stay valid by
+ * construction.
  */
-function forkOf(parent: LogBuilder, childSessionId: string): LogBuilder {
-  return new LogBuilder(childSessionId, parent.events()).inheritedMarker()
+function forkOf(parent: LogBuilder): LogBuilder {
+  return new LogBuilder(parent.events()).inheritedMarker()
 }
 
-test('a fork child replays the parent published Chart and SVG once each under the parent origin', () => {
-  const parent = publishedFigures(PARENT)
-  const child = forkOf(parent.log, CHILD)
-  const inheritedLength = parent.log.events().length
-  const spans = [
-    originSpan(0, inheritedLength, PARENT),
-    originSpan(inheritedLength, child.events().length, CHILD),
-  ]
+test('a fork child immediately replays the inherited published Chart and SVG once each', () => {
+  const parent = publishedFigures()
+  const child = forkOf(parent.log)
 
-  // The baseline bug: replaying the child's whole log with the CHILD id derives
-  // different references, so the receipt no longer qualifies.
-  assert.deepEqual(collectPublishedVisuals(CHILD, child.events()), [],
-    'the current-session-only replay revokes the inherited publications')
-
-  const published = collectPublishedVisuals(CHILD, child.events(), spans)
+  const published = collectPublishedVisuals(child.events())
   assert.deepEqual(published.map(entry => entry.ref), [parent.chartRef, parent.svgRef],
-    'both inherited figures replay with their ORIGINAL references, in durable order')
+    'both inherited publications replay with their ORIGINAL references, in durable order')
   assert.deepEqual(published.map(entry => entry.source.type), ['chart', 'svg'])
   assert.deepEqual(published.map(entry => entry.source.callId), ['chart-call', 'svg-call'],
-    'both publications keep their inherited generating identity')
+    'both publications keep their inherited generating identity without any ancestor read')
 })
 
-test('A -> B -> C proves three origins and keeps every ancestor publication exactly once', () => {
+test('A -> B -> C keeps every ancestor publication exactly once across three epochs', () => {
   // A publishes a chart.
-  const a = new LogBuilder('session-a').turnStart(1)
+  const a = new LogBuilder().turnStart(1)
   const aChart = a.generate(1, 0, 'a-chart', 'chart')
   a.stepEnd(1, 0)
   a.publish(1, 1, 'a-present', [aChart.ref])
   a.stepEnd(1, 1).turnEnd(1)
-  const kA = a.events().length
 
   // B forks A and publishes its own new SVG.
-  const b = forkOf(a, 'session-b').turnStart(2)
+  const b = forkOf(a).turnStart(2)
   const bSvg = b.generate(2, 0, 'b-svg', 'svg')
   b.stepEnd(2, 0)
   b.publish(2, 1, 'b-present', [bSvg.ref])
   b.stepEnd(2, 1).turnEnd(2)
-  const kB = b.events().length
 
   // C forks B and publishes its own new chart.
-  const c = forkOf(b, 'session-c').turnStart(3)
+  const c = forkOf(b).turnStart(3)
   const cChart = c.generate(3, 0, 'c-chart', 'chart')
   c.stepEnd(3, 0)
   c.publish(3, 1, 'c-present', [cChart.ref])
   c.stepEnd(3, 1).turnEnd(3)
 
-  const spans = [
-    originSpan(0, kA, 'session-a'),
-    originSpan(kA, kB, 'session-b'),
-    originSpan(kB, c.events().length, 'session-c'),
-  ]
-  // The pre-fix replay attributes the whole log to C, so only C's OWN
-  // publication survives and both inherited figures disappear.
-  assert.deepEqual(collectPublishedVisuals('session-c', c.events()).map(entry => entry.ref), [cChart.ref],
-    'the pre-fix replay loses every inherited publication and keeps only C\'s own')
-
-  const published = collectPublishedVisuals('session-c', c.events(), spans)
-  assert.deepEqual(published.map(entry => entry.ref), [aChart.ref, bSvg.ref, cChart.ref])
+  const published = collectPublishedVisuals(c.events())
+  assert.deepEqual(published.map(entry => entry.ref), [aChart.ref, bSvg.ref, cChart.ref],
+    'both inherited end-seed markers open the epochs; every published figure survives once')
   assert.deepEqual(published.map(entry => entry.source.callId), ['a-chart', 'b-svg', 'c-chart'],
-    'A -> B -> C proves each generating call from its true origin, never `parentSession ?? current`')
+    'each generating call keeps its own identity and generation')
 })
 
-test('attributing the whole inherited log to the direct parent loses the grandparent figure', () => {
-  const a = new LogBuilder('session-a').turnStart(1)
-  const aChart = a.generate(1, 0, 'a-chart', 'chart')
-  a.stepEnd(1, 0)
-  a.publish(1, 1, 'a-present', [aChart.ref])
-  a.stepEnd(1, 1).turnEnd(1)
-  const kA = a.events().length
-  const b = forkOf(a, 'session-b')
-  const kB = b.events().length
-  const c = forkOf(b, 'session-c')
-
-  // The forbidden one-size-fits-all attribution: everything inherited belongs
-  // to the direct parent B.
-  const naive = [
-    originSpan(0, kB, 'session-b'),
-    originSpan(kB, c.events().length, 'session-c'),
-  ]
-  assert.deepEqual(collectPublishedVisuals('session-c', c.events(), naive), [],
-    'a grandparent reference never verifies against the direct-parent id')
-  assert.deepEqual(
-    collectPublishedVisuals('session-c', c.events(), [
-      originSpan(0, kA, 'session-a'),
-      originSpan(kA, kB, 'session-b'),
-      originSpan(kB, c.events().length, 'session-c'),
-    ]).map(entry => entry.ref),
-    [aChart.ref],
-    'only the proven per-range origin recovers it',
-  )
-})
-
-test('a child call cannot publish an inherited source: pairing requires the same origin', () => {
+test('a child present_visual cannot publish an inherited generating result, even with perfect order', () => {
   // The parent generates a chart in step 0 and an SVG in step 1, then publishes
   // only the chart in step 2.
-  const parent = new LogBuilder(PARENT).turnStart(1)
+  const parent = new LogBuilder().turnStart(1)
   const chart = parent.generate(1, 0, 'chart-call', 'chart')
   parent.stepEnd(1, 0)
   const svg = parent.generate(1, 1, 'svg-call', 'svg')
   parent.stepEnd(1, 1)
   parent.publish(1, 2, 'present-call', [chart.ref])
   parent.stepEnd(1, 2).turnEnd(1)
-  const inheritedLength = parent.events().length
 
   // The child borrows the UNPUBLISHED inherited SVG inside its OWN new step of
   // the SAME turn: turn, step order and seq order all line up, so only the
-  // origin mismatch can refuse it.
-  const child = forkOf(parent, CHILD)
+  // epoch mismatch can refuse it.
+  const child = forkOf(parent)
   child.stepStart(1, 3)
   child.callInOpenStep(1, 3, 'borrow-present', PRESENT_VISUAL_TOOL_NAME, { visuals: [{ ref: svg.ref }] })
   child.result(1, 3, 'borrow-present', [
@@ -1449,47 +1391,49 @@ test('a child call cannot publish an inherited source: pairing requires the same
   ])
   child.stepEnd(1, 3)
 
-  const spans = [
-    originSpan(0, inheritedLength, PARENT),
-    originSpan(inheritedLength, child.events().length, CHILD),
-  ]
-  assert.deepEqual(collectPublishedVisuals(CHILD, child.events(), spans).map(entry => entry.ref), [chart.ref],
-    'the borrowed inherited source never becomes a child publication')
+  assert.deepEqual(collectPublishedVisuals(child.events()).map(entry => entry.ref), [chart.ref],
+    'only the inherited successful chart publication replays; the borrowed inherited SVG never becomes a child publication')
+  const borrowStep = child.events().filter(event => event.type === 'step/start').at(-1)
+  assert.ok(borrowStep !== undefined)
+  const decision = decidePublication({
+    events: child.events(),
+    refs: [svg.ref],
+    turn: 1,
+    stepStartSeq: borrowStep.seq,
+    callId: 'borrow-present',
+  })
+  assert.equal(decision.ok, false)
+  assert.match(decision.ok ? '' : decision.reason, /earlier fork epoch/u,
+    'the live decision refuses an inherited source in a later epoch')
 })
 
-test('an unproven inherited prefix never publishes while the child own turn still does', () => {
-  const parent = publishedFigures(PARENT)
-  const child = forkOf(parent.log, CHILD)
-  const inheritedLength = parent.log.events().length
-  child.turnStart(2)
-  const ownSvg = child.generate(2, 0, 'child-svg', 'svg')
-  child.stepEnd(2, 0)
-  child.publish(2, 1, 'child-present', [ownSvg.ref])
-  child.stepEnd(2, 1).turnEnd(2)
+test('a fork synthetic closer never completes an inherited open call across the epoch cut', () => {
+  const parent = new LogBuilder().turnStart(1)
+  const stepStartSeq = parent.stepStart(1, 0)
+  parent.callInOpenStep(1, 0, 'open-call', CHART_TOOL_NAME, CHART_ARGS)
+  const ref = visualReference({ turn: 1, stepStartSeq, callId: 'open-call' })
 
-  // Only the child's own range is proven; the inherited prefix stays unproven.
-  const ownOnly = [originSpan(inheritedLength, child.events().length, CHILD)]
-  assert.deepEqual(collectPublishedVisuals(CHILD, child.events(), ownOnly).map(entry => entry.ref), [ownSvg.ref],
-    'the unprovable inherited figures stay out while the child own visual still publishes')
+  const child = forkOf(parent)
+  // DSH `buildForkSeed` appends the synthetic closer AFTER the inherited marker.
+  // Even a success-shaped result there must not complete the inherited call.
+  child.result(1, 0, 'open-call', [
+    { type: 'text', text: 'outcome unknown' },
+    { type: 'text', text: visualReferenceLine(ref) },
+    chartContentBlocks(chartFactFromArgs(CHART_ARGS)).at(-1) as ContentBlock,
+  ])
+  child.stepEnd(1, 0).turnEnd(1)
+
+  assert.deepEqual(collectVisualSources(child.events()), [],
+    'the cross-epoch synthetic closer never qualifies the inherited call')
 })
 
-test('an overlapping, foreign or non-canonical provenance set grants nothing', () => {
-  const parent = publishedFigures(PARENT)
-  const child = forkOf(parent.log, CHILD)
-  const inheritedLength = parent.log.events().length
-  const end = child.events().length
-
-  assert.deepEqual(collectPublishedVisuals(CHILD, child.events(), [
-    originSpan(0, inheritedLength + 2, PARENT),
-    originSpan(inheritedLength, end, CHILD),
-  ]), [], 'overlap is refused instead of attributing one seq twice')
-
-  assert.deepEqual(collectPublishedVisuals(CHILD, child.events(), [
-    originSpan(0, inheritedLength, 'session-forged'),
-    originSpan(inheritedLength, end, CHILD),
-  ]), [], 'a ref-shaped claim from another Session never verifies')
-
-  assert.deepEqual(collectPublishedVisuals(CHILD, child.events(), [
-    originSpan(0, end, CHILD),
-  ]), [], 'the child id over an inherited prefix revokes it, never reassigns it')
+test('the same sv2 in an independent log does not inherit another Session publication authority', () => {
+  const parent = publishedFigures()
+  // A separate independent log that only carries a present_visual receipt for
+  // the very same ref: no local generating call exists, so nothing publishes.
+  const foreign = new LogBuilder().turnStart(1)
+  foreign.publish(1, 0, 'foreign-present', [parent.chartRef])
+  foreign.stepEnd(1, 0).turnEnd(1)
+  assert.deepEqual(collectPublishedVisuals(foreign.events()), [],
+    'a ref-shaped receipt without a local generating pair grants nothing')
 })

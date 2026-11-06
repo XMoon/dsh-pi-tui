@@ -590,11 +590,12 @@ the current switch value.
   (`visual-v1:{"type":"chart"|"svg",…}`) plus the readable value rows. When the
   call has a live Agent, is a root call and runs inside an open `step/start`,
   the tool's `projectContent` inserts ONE additional TEXT block immediately
-  before that fact: `visual-ref-v1:sv1_<20 lowercase hex>`. The reference is the
-  truncated SHA-256 of the exact `(sessionId, turn, step/start seq, callId, "")`
-  tuple, so the same figure produced twice is two references while a replayed
-  log derives the same one. The hash is an IDENTITY, never a permission token:
-  every publication re-verifies the tuple against committed events.
+  before that fact: `visual-ref-v2:sv2_<20 lowercase hex>`. The reference is the
+  truncated SHA-256 of the exact `(turn, absolute step/start seq, callId, "")`
+  tuple — deliberately SESSION-FREE — so the same figure produced twice is two
+  references while a fork-inherited log derives the same one without reading an
+  ancestor Session. The hash is an IDENTITY, never a permission token: every
+  publication re-verifies the tuple against committed events.
 - `present_visual({visuals:[{ref}]})` accepts 1–8 references and declares the
   explicit publication intent. It reads the executing Session through the
   official `sessionQuery.observeSession` lease, fences the `turnBoundary`
@@ -614,7 +615,11 @@ the current switch value.
   proven by the durable `present_visual` call plus its FINAL result; a
   model-written `visual-published-v1:` line, a `bash` forgery or an orphan
   result has no authority. No new Session event, durable publication table or
-  cache is created: cold replay derives the same facts from the log.
+  cache is created: cold replay derives the same facts from the log. The live
+  write and cold replay share ONE event-epoch index derived synchronously from
+  the official `session/end-seed { inherited: true }` markers: an inherited
+  SUCCESSFUL publication replays from its own epoch, while a child's
+  `present_visual` of an inherited generating result is refused across epochs.
 - Human-facing surfaces (Tool Card folded preview and expanded body, TSP result
   nodes, transcript search, `/transcript` readable Markdown) drop ONLY the
   official tail machine blocks of these three tools, identified by position plus
