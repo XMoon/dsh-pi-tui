@@ -12,7 +12,7 @@ import test from 'node:test'
 import { SELF_BUNDLE } from '../../src/app/plugin-manager/classify.ts'
 import { PluginManagerController } from '../../src/app/plugin-manager/controller.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
-import { PLUGIN_ACTION, bundleValue, buildPluginDetailView, entryValue } from '../../src/app/plugin-manager/model.ts'
+import { AUTO_REVIEW_BUNDLE, PLUGIN_ACTION, bundleValue, buildPluginDetailView, entryValue } from '../../src/app/plugin-manager/model.ts'
 import { PluginManagerStaleResultError } from '../../src/runtime/plugin-manager-port.ts'
 import type {
   PluginBundleFact,
@@ -1895,4 +1895,122 @@ test('update: a failed target with a successful restore reports both outcomes se
   assert.equal(done.result?.result.application, 'failed')
   assert.equal(done.result?.restore?.application, 'applied')
   assert.equal(done.result?.restore?.version, '1.0.0')
+})
+
+test('update: a read-only version preview never blocks the other plugin mutations', async () => {
+  const fixture = await openedUpdate()
+  const { controller, state } = fixture
+  controller.beginUpdate(bundleValue('updatable'))
+  await tick()
+  assert.equal(controller.updateView()?.phase, 'selecting')
+
+  // Toggle the same bundle while the read-only preview exists: it is admitted.
+  controller.toggleCard(bundleValue('updatable'))
+  await tick()
+  assert.equal(state.setBundle.length, 1, 'a registry preview never owns the Host write path')
+  // The mutation's authoritative reread revokes the stale preview.
+  assert.equal(controller.updateView()?.phase, 'selecting')
+  assert.equal(controller.updateView()?.versions, undefined)
+  assert.match(controller.updateView()?.message ?? '', /Bundle changed; check versions again/u)
+
+  // The other write entrances are admitted too.
+  assert.equal(controller.beginManualInstall(), true)
+  controller.hideInstall()
+  assert.equal(controller.requestRemove(bundleValue('updatable')), true)
+  controller.cancelConfirmation()
+})
+
+test('update: the read-only preview leaves Auto Review and row toggles admitted', async () => {
+  const fixture = fakePort({
+    snapshotImpl: async () => ({
+      bundles: [
+        updatable(),
+        bundle({
+          name: AUTO_REVIEW_BUNDLE,
+          enabled: true,
+          rows: [{ rowId: 'review-row', moduleName: 'review', entryId: 'e-review' }],
+        }),
+      ],
+      plugins: [{ entryId: 'e-review', moduleName: 'review', enabled: true, fiberPhase: 'active', patchId: 'review-row' }],
+      registries: { registry: null, fallbackRegistries: [], resolved: null },
+      exemptions: [],
+      exemptionWarnings: [],
+    }),
+  })
+  const { controller } = controllerOf(fixture.port)
+  controller.open()
+  await tick()
+  controller.beginUpdate(bundleValue('updatable'))
+  await tick()
+  assert.equal(controller.updateView()?.phase, 'selecting')
+  assert.equal(controller.requestAutoDisable(bundleValue(AUTO_REVIEW_BUNDLE)), true,
+    'the Auto Review confirmation is not blocked by a read-only preview')
+  controller.cancelConfirmation()
+  assert.equal(controller.toggleRow(bundleValue(AUTO_REVIEW_BUNDLE), 'e-review'), true,
+    'a row-level toggle is not blocked by a read-only preview')
+  controller.cancelConfirmation()
+})
+
+test('update: another bundle Check updates replaces a read-only preview', async () => {
+  const fixture = fakePort({
+    snapshotImpl: async () => snapshot([
+      updatable({ name: 'first' }),
+      updatable({ name: 'second' }),
+    ]),
+  })
+  const { controller } = controllerOf(fixture.port)
+  controller.open()
+  await tick()
+  controller.beginUpdate(bundleValue('first'))
+  await tick()
+  assert.equal(controller.updateView()?.name, 'first')
+  controller.beginUpdate(bundleValue('second'))
+  await tick()
+  assert.equal(controller.updateView()?.name, 'second')
+  assert.equal(controller.updateView()?.phase, 'selecting')
+  assert.deepEqual(fixture.state.listVersionCalls, [{ name: 'first' }, { name: 'second' }],
+    'the previous preview read is abandoned for the new bundle')
+})
+
+test('update: another mutation revokes an open confirmation before any write', async () => {
+  const fixture = await openedUpdate()
+  const { controller, state } = fixture
+  controller.beginUpdate(bundleValue('updatable'))
+  await tick()
+  controller.confirmUpdateVersion()
+  assert.equal(controller.updateView()?.phase, 'confirm')
+  controller.toggleCard(bundleValue('updatable'))
+  await tick()
+  assert.equal(state.setBundle.length, 1)
+  assert.equal(controller.updateView()?.phase, 'selecting')
+  assert.equal(controller.updateView()?.versions, undefined)
+  controller.executeUpdate()
+  await tick()
+  assert.equal(state.updateCalls.length, 0, 'a withdrawn confirmation never dispatches the Host update')
+})
+
+test('update: an official catalog install entry is admitted during a read-only preview', async () => {
+  const fixture = fakePort({
+    snapshotImpl: async () => snapshot([
+      updatable(),
+      bundle({
+        name: 'official-missing',
+        official: true,
+        availability: 'missing',
+        installed: false,
+        removable: false,
+        source: undefined,
+        installTarget: { spec: 'official-missing@1.0.0', version: '1.0.0' },
+      }),
+    ]),
+  })
+  const { controller } = controllerOf(fixture.port)
+  controller.open()
+  await tick()
+  controller.beginUpdate(bundleValue('updatable'))
+  await tick()
+  assert.equal(controller.updateView()?.phase, 'selecting')
+  assert.equal(controller.beginOfficialInstall(bundleValue('official-missing')), true,
+    'the official catalog install entry is not blocked by a read-only preview')
+  controller.dispose()
 })

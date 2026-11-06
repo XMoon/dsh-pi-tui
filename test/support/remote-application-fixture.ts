@@ -285,6 +285,13 @@ function isolateFixtureHome(root: string): () => void {
   writeFileSync(globalNpmrc, '')
   const cache = join(home, '.npm-cache')
   mkdirSync(cache, { recursive: true })
+  // pnpm's content-addressable store does NOT follow HOME/XDG alone: CI's
+  // pnpm setup exports PNPM_HOME and caches the store there. A fixture tarball
+  // then comes from the shared cache and never reaches the loopback registry,
+  // which breaks the deliberate slow-tarball cancel window. Pin a
+  // fixture-owned store so every real-pnpm test really downloads its packages.
+  const pnpmStore = join(home, '.pnpm-store')
+  mkdirSync(pnpmStore, { recursive: true })
   const overrides: Record<string, string> = {
     npm_config_userconfig: userNpmrc,
     NPM_CONFIG_USERCONFIG: userNpmrc,
@@ -292,6 +299,8 @@ function isolateFixtureHome(root: string): () => void {
     NPM_CONFIG_GLOBALCONFIG: globalNpmrc,
     npm_config_cache: cache,
     NPM_CONFIG_CACHE: cache,
+    pnpm_config_store_dir: pnpmStore,
+    npm_config_store_dir: pnpmStore,
   }
   for (const [key, value] of Object.entries(overrides)) {
     remember(key)
