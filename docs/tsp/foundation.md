@@ -591,11 +591,12 @@ the current switch value.
   call has a live Agent, is a root call and runs inside an open `step/start`,
   the tool's `projectContent` inserts ONE additional TEXT block immediately
   before that fact: `visual-ref-v2:sv2_<20 lowercase hex>`. The reference is the
-  truncated SHA-256 of the exact `(turn, absolute step/start seq, callId, "")`
-  tuple — deliberately SESSION-FREE — so the same figure produced twice is two
-  references while a fork-inherited log derives the same one without reading an
-  ancestor Session. The hash is an IDENTITY, never a permission token: every
-  publication re-verifies the tuple against committed events.
+  first 20 hex digits of SHA-256 over the NUL-joined
+  `['sv2', turn, absolute step/start seq, callId, '']` tuple — deliberately
+  SESSION-FREE — so the same figure produced twice is two references while a
+  fork-inherited log derives the same one without reading an ancestor Session.
+  The hash is an IDENTITY, never a permission token: every publication
+  re-verifies the tuple against committed events.
 - `present_visual({visuals:[{ref}]})` accepts 1–8 references and declares the
   explicit publication intent. It reads the executing Session through the
   official `sessionQuery.observeSession` lease, fences the `turnBoundary`

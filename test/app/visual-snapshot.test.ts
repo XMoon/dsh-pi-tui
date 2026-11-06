@@ -167,6 +167,10 @@ test('inconsistent seed metadata makes the whole visual snapshot unavailable', (
       session: sessionOf({ seeded: true, cut: 1.5 }),
     },
     {
+      label: 'a cut at the end of the log without a marker',
+      session: sessionOf({ seeded: true, cut: 1, events: [{ type: 'turn/start', seq: 0 }] }),
+    },
+    {
       label: 'a cut beyond the real log',
       session: sessionOf({ seeded: true, cut: 4, events: [{ type: 'turn/start', seq: 0 }] }),
     },
