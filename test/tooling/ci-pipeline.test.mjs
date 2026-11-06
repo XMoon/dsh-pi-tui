@@ -281,6 +281,12 @@ test('the optional ecosystem job is independent, visible and non-blocking', () =
   }
   assert.equal(smokeStep['continue-on-error'], undefined, 'the real smoke step must not swallow its failure')
   assert.equal(smokeStep.if, undefined, 'the real smoke step must run unconditionally inside the job')
+  assert.match(smokeStep.env.EXPECTED_SHA256, /needs\.candidate\.outputs\.sha256/u,
+    'the probe must re-prove the candidate bytes it downloaded')
+  assert.match(smokeStep.env.EXPECTED_TARBALL, /needs\.candidate\.outputs\.tarball/u,
+    'the probe must re-prove the candidate filename it downloaded')
+  assert.match(smokeStep.run, /sha256sum/u, 'the probe must compare the downloaded digest')
+  assert.match(smokeStep.run, /basename/u, 'the probe must compare the downloaded filename')
   assert.equal((job.steps ?? []).some(step => step['continue-on-error'] === true), false,
     'continue-on-error belongs to the JOB, never to a step')
 
@@ -492,16 +498,21 @@ test('the accelerated jobs exist, the pack-equivalence job is GONE, and the arti
   assert.deepEqual(packers.map(([name]) => name), ['candidate'])
 })
 
-test('every consumer downloads the PROVISIONAL artifact and re-proves it', () => {
-  // `provisional` is what the downstream gates are allowed to read; the final
-  // `dsh-pi-tui-tarball` is the only publishable one. Swapping them would let a
-  // gate certify one tarball while another is published.
+test('every downstream consumer downloads a real candidate artifact and re-proves it', () => {
+  // `provisional` is what the post-qualification gates read; the optional
+  // ecosystem probe runs before qualification and reads the `candidate`
+  // artifact (the exact same tarball bytes that qualify later republishes).
+  // The final `dsh-pi-tui-tarball` is the only publishable one.
   const jobs = workflow().jobs
-  for (const name of ['compat-smoke', 'ecosystem-compat', 'official-preset-assembly', 'runtime-boundary']) {
+  for (const name of ['compat-smoke', 'official-preset-assembly', 'runtime-boundary']) {
     const steps = jobs[name].steps
     const download = steps.find(step => step.uses === 'actions/download-artifact@v8' && step.with?.path === 'tarball')
     assert.equal(download?.with?.name, 'dsh-pi-tui-provisional', `${name} must consume the provisional artifact`)
   }
+  const ecosystem = jobs['ecosystem-compat'].steps
+  const ecosystemDownload = ecosystem.find(step => step.uses === 'actions/download-artifact@v8' && step.with?.path === 'tarball')
+  assert.equal(ecosystemDownload?.with?.name, 'dsh-pi-tui-candidate',
+    'the optional probe runs before qualification, so it consumes the candidate producer')
   // And the publish path reads ONLY the qualified artifact.
   for (const name of ['publish', 'release']) {
     const steps = jobs[name].steps
