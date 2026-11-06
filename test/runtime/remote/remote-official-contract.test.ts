@@ -40,6 +40,7 @@
  * | RemoteInteractionPort          | `ISessions` + `ClientRemote` (userQuestions + $on) |
  * | RemoteSessionArchive          | the composition-owned `Fetch`                   |
  * | RemoteConfigPort               | `ClientRemote['settings']` + `['credentials']`   |
+ * | RemoteSessionWorkspaceFacts    | `ISessions` + `ClientRemote['session']` (state/projections) + `['workspace']` |
  * | RemoteHostFilePort (TS8-HF1)   | the PRIVATE `piTuiFileReferences` contribution   |
  *
  * @module @xmoon76/dsh-pi-tui/remote-official-contract.test
@@ -78,6 +79,9 @@ import { RemoteSessionWorkspaceFacts } from '../../../src/runtime/remote/session
 import type { ContextPressureProjection, ContextBreakdownProjection, TokenUsageProjection } from '@deepseek-ai/dsh-token-meter'
 import type { TurnOutlineEntry } from '@deepseek-ai/dsh-session-turn-outline/types'
 import type { SessionSeq } from '@deepseek-ai/dsh-session/types'
+import type { SessionProjectionsValue } from '@deepseek-ai/dsh-api-session-controller/types'
+import type { UserQuestionProjectionView } from '@deepseek-ai/dsh-user-questions/types'
+import type { InboxWireState } from '@deepseek-ai/dsh-agent/types'
 import type { SessionStatusProjection, SessionReader } from '../../../src/runtime/session-reader-port.ts'
 import type { PresentationReader, TurnOutlineEntryDto } from '../../../src/runtime/presentation-read-port.ts'
 
@@ -239,6 +243,34 @@ function officialSessionWorkspaceFacts(
   })
 }
 
+/** M5-U-A: the official projection PAYLOAD the Attention classification reads
+ *  — `sequenced` cut, typed `userQuestions.active` (callId/state/intent) and
+ *  the `inbox` lanes — is the published `SessionProjectionValues` shape, with
+ *  NO cast. The Runtime adapter parses the same JSON-safe value structurally
+ *  because it may not import Host packages; this proof keeps the field names
+ *  and value domains pinned to the published declarations. */
+function officialQuestionProjectionPayload(value: SessionProjectionsValue): {
+  readonly active: readonly {
+    readonly callId: string
+    readonly state: 'open' | 'continued'
+    readonly intents: readonly string[]
+  }[]
+  readonly lanes: readonly ('next-step' | 'next-turn')[]
+} {
+  if (value === null || value.kind !== 'sequenced') return { active: [], lanes: [] }
+  const questions: UserQuestionProjectionView | undefined = value.values.userQuestions
+  const inbox: InboxWireState | undefined = value.values.inbox
+  return {
+    active: (questions?.active ?? []).map(entry => ({
+      callId: String(entry.callId),
+      state: entry.state,
+      intents: entry.questions.flatMap(question =>
+        question.intent === undefined ? [] : [question.intent.kind as string]),
+    })),
+    lanes: inbox === undefined ? [] : (['next-step', 'next-turn'] as const),
+  }
+}
+
 /** The M3-3A partial assembly constructs from the REAL M3-1 runtime — a
  * compile-time proof that `RemoteClientRuntime` satisfies the narrow
  * one-source face (the same sessions service, Remote namespaces and
@@ -300,13 +332,10 @@ test('every Remote adapter accepts the published DSH public Client/Remote face (
     piTuiHostFilePort,
     officialRemoteInteractionPort,
     officialSessionWorkspaceFacts,
+    officialQuestionProjectionPayload,
   ]) {
     assert.equal(typeof proof, 'function')
   }
-})
-
-test('the M5-U-A read-authority adapter consumes the published generated session/workspace contract', () => {
-  assert.equal(typeof officialSessionWorkspaceFacts, 'function')
 })
 
 test('the M3-3B additions consume the published 0.2.0-rc.2 contract', () => {

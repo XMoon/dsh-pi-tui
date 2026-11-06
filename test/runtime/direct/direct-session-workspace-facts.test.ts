@@ -147,6 +147,28 @@ test('UA-09 an unavailable Host Workspace registry fails instead of publishing a
   assert.throws(() => h.facts.followWorkspaces(), /Workspace registry is unavailable/u)
 })
 
+test('UA-10 an already-aborted signal never opens a Direct Workspace generation', () => {
+  const h = directHarness({ workspaces: [{ id: 'ws-a', path: '/host/a', title: 'A', sessionIds: [] }] })
+  const controller = new AbortController()
+  controller.abort()
+  assert.throws(() => h.facts.followWorkspaces(controller.signal),
+    (error: unknown) => (error as Error).name === 'AbortError')
+  assert.equal(h.offCount(), 0, 'no domain subscription is installed for an aborted open')
+})
+
+test('UA-09 dispose drops queued Workspace frames with the subscription', async () => {
+  const h = directHarness({ workspaces: [{ id: 'ws-a', path: '/host/a', title: 'A', sessionIds: [] }] })
+  const handle = h.facts.followWorkspaces()
+  const iterator = handle[Symbol.asyncIterator]()
+  // A committed change queues a replacement BEFORE the caller iterates.
+  h.setWorkspaceRows([{ id: 'ws-b', path: '/host/b', title: 'B', sessionIds: [] }])
+  h.emitDomainChange('workspace')
+  handle.dispose()
+  assert.deepEqual(await iterator.next(), { done: true, value: undefined },
+    'a disposed generation publishes neither the baseline nor the queued replacement')
+  assert.equal(h.offCount(), 1)
+})
+
 test('UA-10 the caller abort ends the Direct Workspace generation and releases the subscription', async () => {
   const h = directHarness({ workspaces: [{ id: 'ws-a', path: '/host/a', title: 'A', sessionIds: [] }] })
   const controller = new AbortController()

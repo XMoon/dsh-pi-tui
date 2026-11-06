@@ -246,8 +246,17 @@ export function deriveAttention(
     return { attention: 'approval', attentionSourceState: 'known', continuedQuestionCallIds }
   }
   if (pendingKinds.includes('question')) {
-    const planReview = projection.kind === 'known'
-      && projection.active.some(entry => entry.planReview)
+    // Only an `open` timed call can be the CURRENT forwarded question; a
+    // `continued` entry is a different (already timed-out) interaction. The
+    // plan-review intent is claimed only when EVERY such open candidate carries
+    // it and none is already answered by a queued reply; an unreadable inbox
+    // keeps the generic `question` label instead of guessing.
+    let planReview = false
+    if (projection.kind === 'known' && projection.queuedReplyCallIds !== undefined) {
+      const openCandidates = projection.active.filter(entry =>
+        entry.state === 'open' && !projection.queuedReplyCallIds!.has(entry.callId))
+      planReview = openCandidates.length > 0 && openCandidates.every(entry => entry.planReview)
+    }
     return {
       attention: planReview ? 'plan-review' : 'question',
       attentionSourceState: 'known',
@@ -270,7 +279,7 @@ export function deriveAttention(
   // pending clue and cannot stand in for one.
   const lateAnswers = projection.active.filter(entry => entry.state === 'continued' && !queued.has(entry.callId))
   if (lateAnswers.length > 0) {
-    const planReview = lateAnswers.some(entry => entry.planReview)
+    const planReview = lateAnswers.every(entry => entry.planReview)
     return {
       attention: planReview ? 'plan-review' : 'question',
       attentionSourceState: 'known',
@@ -328,22 +337,22 @@ function workspaceFrameOf(frame: RemoteWorkspaceFollowFrameLike): WorkspaceFacts
     case 'baseline':
     case 'replace':
       if (!Array.isArray(frame.value?.items)) {
-        throw new SupersededReadError('the Host Workspace frame carries no complete item list')
+        throw new Error('the Host Workspace frame carries no complete item list')
       }
       return { type: frame.type, items: frame.value.items.map(workspaceFactOf) }
     case 'upsert':
       if (frame.workspace === undefined) {
-        throw new SupersededReadError('the Host Workspace upsert carries no workspace')
+        throw new Error('the Host Workspace upsert carries no workspace')
       }
       return { type: 'upsert', workspace: workspaceFactOf(frame.workspace) }
     case 'remove':
       if (typeof frame.workspaceId !== 'string') {
-        throw new SupersededReadError('the Host Workspace remove carries no workspace id')
+        throw new Error('the Host Workspace remove carries no workspace id')
       }
       return { type: 'remove', workspaceId: frame.workspaceId }
     case 'order':
       if (!Array.isArray(frame.workspaceIds)) {
-        throw new SupersededReadError('the Host Workspace order carries no id list')
+        throw new Error('the Host Workspace order carries no id list')
       }
       return { type: 'order', workspaceIds: frame.workspaceIds.map(String) }
     default:
@@ -369,6 +378,7 @@ class RemoteWorkspaceFactsHandle implements WorkspaceFactsHandle {
     source: RemoteSessionWorkspaceFactsSource,
     signal: AbortSignal | undefined,
   ) {
+    signal?.throwIfAborted()
     const captured = source.connection.generation.getSnapshot()
     if (captured === undefined) {
       throw new SupersededReadError('the Host Workspace stream requires a current Connection generation')
@@ -399,14 +409,14 @@ class RemoteWorkspaceFactsHandle implements WorkspaceFactsHandle {
         const mapped = workspaceFrameOf(frame)
         if (!baselined) {
           if (mapped?.type !== 'baseline') {
-            throw new SupersededReadError('the Host Workspace stream did not begin with a baseline')
+            throw new Error('the Host Workspace stream did not begin with a baseline')
           }
           baselined = true
         }
         if (mapped !== undefined) yield mapped
       }
       this.requireCurrent()
-      if (!baselined) throw new SupersededReadError('the Host Workspace stream ended before its baseline')
+      if (!baselined) throw new Error('the Host Workspace stream ended before its baseline')
     } finally {
       this.dispose()
     }

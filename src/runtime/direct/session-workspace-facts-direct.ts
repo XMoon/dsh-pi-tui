@@ -135,6 +135,9 @@ class DirectWorkspaceFactsHandle implements WorkspaceFactsHandle {
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
+    // A disposed observation owns no fact any more: queued frames are dropped
+    // with the subscription instead of draining into a caller that is gone.
+    this.queue.length = 0
     this.off()
     this.abortCleanup?.()
     this.finish()
@@ -193,6 +196,10 @@ export class DirectSessionWorkspaceFacts implements SessionWorkspaceFactsPort {
   }
 
   followWorkspaces(signal?: AbortSignal): WorkspaceFactsHandle {
+    // An already-aborted caller never gets a live subscription: Node does not
+    // fire a late abort listener, so opening the handle would subscribe for a
+    // generation nobody can consume.
+    signal?.throwIfAborted()
     return new DirectWorkspaceFactsHandle(this.ctx, signal)
   }
 }
