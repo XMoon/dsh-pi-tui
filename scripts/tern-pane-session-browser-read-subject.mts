@@ -23,6 +23,10 @@ const longId = 'session-long'
 const contentId = 'session-content'
 const migrationId = 'session-migration'
 
+// The `parentSession` values below are HISTORICAL ordinary-fork metadata:
+// they carry no `origin: 'subagent'`, so the Browser must render every row as a
+// flat root (the real-fork contract after rc1). They are retained deliberately
+// to qualify the flat legacy shape, not a parent/child tree.
 const mainRows: SessionSummary[] = [
   {
     id: currentId,

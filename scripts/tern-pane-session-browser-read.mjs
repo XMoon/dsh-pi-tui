@@ -88,9 +88,9 @@ export default async function (h) {
     JSON.stringify({ migrationTreeDetail }))
   h.capture('session-browser-migration-row-1280x800', 'migration-required row detail at 1280x800')
   const lineage = new Map(frameItems(frame).map((item) => [item.id, item.depth]))
-  h.check('the real all-workspaces tree keeps the cross-workspace child under its listed parent',
-    lineage.get('session:session-long') === 1 && lineage.get('session:session-row-00') === 2
-    && lineage.get('session:session-row-51') === 53 && lineage.get('session:session-content') === 2,
+  h.check('the real all-workspaces tree keeps legacy ordinary-fork metadata as flat roots',
+    ['session:session-long', 'session:session-row-00', 'session:session-row-51', 'session:session-content']
+      .every((id) => lineage.get(id) === 0),
     JSON.stringify([...lineage.entries()].filter(([id]) => ['session:session-long', 'session:session-row-00', 'session:session-row-51', 'session:session-content'].includes(id))))
   const allIds = frameItems(frame).map((item) => item.id)
   const projected = await waitFrame(h, (value) => frameItems(value).some((item) => item.id === 'session:session-long'
@@ -117,7 +117,7 @@ export default async function (h) {
     endSelected && homeSelected && endCurrent === 'session:session-current'
     && lastFrame(h)?.current?.[0] === 'session:session-current',
     JSON.stringify({ last: allIds.at(-1), endCurrent, frame: lastFrame(h)?.selected, current: lastFrame(h)?.current }))
-  h.capture('session-browser-tree-all-1280x800', 'All workspaces retains lineage and keyboard row navigation')
+  h.capture('session-browser-tree-all-1280x800', 'All workspaces keeps legacy rows flat and keyboard row navigation')
 
   const viewports = [
     { w: 900, h: 640, name: '900x640' },
