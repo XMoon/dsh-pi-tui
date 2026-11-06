@@ -636,11 +636,15 @@ export function apply(ctx) {
           record('schedule', { phase: 'unavailable' })
           return
         }
-        schedule.create(agent.id, {
+        // rc.1 Schedule API: `create(request, actorSessionId)` with a typed
+        // `timing` selector, and `edit({ id, action: 'delete' }, actorSessionId)`
+        // for removal. The old `create(sessionId, {...after_seconds})` /
+        // `delete({sessionId,id})` shape no longer exists.
+        schedule.create({
           prompt: 'M4-C2-A qualification schedule task',
           title: 'M4-C2-A qualification schedule task',
-          after_seconds: 600,
-        }).then(view => {
+          timing: { kind: 'after', after_seconds: 600 },
+        }, agent.id).then(view => {
           record('schedule-created', {
             agentId: String(agent.id),
             scheduleId: String(view.id),
@@ -650,7 +654,7 @@ export function apply(ctx) {
           const timer = setInterval(() => {
             if (!existsSync(deleteBarrier)) return
             clearInterval(timer)
-            schedule.delete({ sessionId: agent.id, id: view.id }).then(
+            schedule.edit({ id: view.id, action: 'delete' }, agent.id).then(
               result => { record('schedule-deleted', { scheduleId: String(view.id), deleted: result.deleted, code: result.code }) },
               error => { record('schedule-delete-failed', { scheduleId: String(view.id), error: error instanceof Error ? error.message : String(error) }) },
             )
