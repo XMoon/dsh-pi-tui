@@ -180,7 +180,6 @@ interface RealHostPage {
   readonly harness: WorkspaceHarness
   readonly controller: WorkspaceHarness['controller']
   readonly frame: () => string
-  readonly settle: () => Promise<void>
   readonly waitFor: (predicate: () => boolean, label: string, timeoutMs?: number) => Promise<void>
 }
 
@@ -202,7 +201,6 @@ async function mountRealHostPage(t: TestContext, profileContext: Record<string, 
     try { harness.controller.dispose() } catch {}
     try { harness.app.dispose() } catch {}
   })
-  const settle = async (): Promise<void> => { await harness.waitForFrame() }
   const frame = (): string => plain(harness.vt.getViewport())
   const waitFor = async (predicate: () => boolean, label: string, timeoutMs = 30_000): Promise<void> => {
     const deadline = Date.now() + timeoutMs
@@ -214,8 +212,8 @@ async function mountRealHostPage(t: TestContext, profileContext: Record<string, 
     throw new Error(`timed out waiting for ${label}: ${frame()}`)
   }
   await waitFor(() => harness.controller.status().state === 'ready', 'the real Host inventory read')
-  await settle()
-  return { harness, controller: harness.controller, frame, settle, waitFor }
+  await harness.waitForFrame()
+  return { harness, controller: harness.controller, frame, waitFor }
 }
 
 /** Type a search query through the page's own `/` seat and apply it. */
@@ -687,7 +685,7 @@ test('a real Host platform refusal stays out of the default list and never insta
 
   // The explicit search reads the SAME model card.
   searchFor(page.harness, CUA_BUNDLE)
-  await page.settle()
+  await page.harness.waitForFrame()
   await page.waitFor(() => page.frame().includes(painted), 'the explicit search finds the hidden bundle')
   if (refused) assert.match(page.frame(), /\[error\]/)
 
@@ -698,7 +696,7 @@ test('a real Host platform refusal stays out of the default list and never insta
   assert.match(page.frame(), /Default listing/u)
   page.harness.vt.sendInput('\x1b[B')
   page.harness.vt.sendInput('\x1b[A')
-  await page.settle()
+  await page.harness.waitForFrame()
   if (refused) {
     await page.waitFor(() => /unsupported-platform/u.test(page.frame()), 'the Host error is painted in Detail')
     // Enter on the disabled Install action explains the Host refusal and
@@ -738,14 +736,14 @@ test('a selected bundle the Host refuses is disabled through the Host and leaves
   if (refused) assert.match(page.frame(), /\[error\]/)
 
   searchFor(page.harness, CUA_BUNDLE)
-  await page.settle()
+  await page.harness.waitForFrame()
   page.harness.vt.sendInput('\r') // Details
   await page.waitFor(() => page.frame().includes('[Details]'), 'the Details focus frame')
   assert.match(page.frame(), /Selected in profile/u)
   // A missing bundle's actions are `Install…` then `Disable…`: one navigation
   // selects the recovery action and reveals the Actions block.
   page.harness.vt.sendInput('\x1b[B')
-  await page.settle()
+  await page.harness.waitForFrame()
   const detail = page.frame()
   assert.match(detail, /> Disable…/u, 'a selected refused bundle keeps an executable Disable')
   if (refused) assert.match(detail, /unsupported-platform/u)
@@ -758,16 +756,16 @@ test('a selected bundle the Host refuses is disabled through the Host and leaves
   // The explicit query still matches the card, so clearing it (the page's own
   // Esc-clear seat) is what restores the Host default listing.
   page.harness.vt.sendInput('/')
-  await page.settle()
+  await page.harness.waitForFrame()
   page.harness.vt.sendInput('\x1b')
-  await page.settle()
+  await page.harness.waitForFrame()
   await page.waitFor(() => !page.frame().includes(painted), 'the default list hides the unselected bundle')
 
   // The card is NOT deleted from the Host catalog / model: an explicit search
   // reads it again with its Host facts intact, and no hidden card becomes the
   // selected target of the list frame behind it.
   searchFor(page.harness, CUA_BUNDLE)
-  await page.settle()
+  await page.harness.waitForFrame()
   await page.waitFor(() => page.frame().includes(painted), 'the explicit search still reaches it')
   assert.equal(cardOf()!.enabled, false)
   assert.equal(cardOf()!.error?.code, refused ? 'unsupported-platform' : undefined)
@@ -812,13 +810,13 @@ test('a profile-owned bundle the Host refuses keeps Disable and the Host-permitt
   assert.equal(card.canRemove, true, 'the enable error does not lock Remove')
 
   searchFor(page.harness, CUA_BUNDLE)
-  await page.settle()
+  await page.harness.waitForFrame()
   page.harness.vt.sendInput('\r') // Details
   await page.waitFor(() => page.frame().includes('[Details]'), 'the Details focus frame')
   assert.match(page.frame(), new RegExp(painted))
   // One navigation reveals the Actions block; the next enters Remove.
   page.harness.vt.sendInput('\x1b[B') // Disable… -> Remove… (reveals Actions)
-  await page.settle()
+  await page.harness.waitForFrame()
   const detail = page.frame()
   assert.match(detail, /> Remove…/u)
   assert.match(detail, /Disable…/u)
@@ -826,7 +824,7 @@ test('a profile-owned bundle the Host refuses keeps Disable and the Host-permitt
   page.harness.vt.sendInput('\r')
   await page.waitFor(() => page.frame().includes('Cancel'), 'the destructive Remove confirmation')
   page.harness.vt.sendInput('\x1b') // cancel
-  await page.settle()
+  await page.harness.waitForFrame()
   assert.match(page.frame(), /> Remove…/u, 'the confirmation returns to the same action')
   const afterCancel = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8'))
   assert.equal(afterCancel.dependencies[CUA_BUNDLE], `file:./node_modules/${CUA_BUNDLE}`,
@@ -835,7 +833,7 @@ test('a profile-owned bundle the Host refuses keeps Disable and the Host-permitt
   // Disable is independent: the same card is disabled through the real Host
   // while the Remove capability stays Host-permitted and the refusal visible.
   page.harness.vt.sendInput('\x1b[A') // Remove… -> Disable…
-  await page.settle()
+  await page.harness.waitForFrame()
   assert.match(page.frame(), /> Disable…/u)
   page.harness.vt.sendInput('\r')
   await page.waitFor(() => cardOf()?.enabled === false, 'the real Host disable + authoritative reread')
