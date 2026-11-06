@@ -24,7 +24,7 @@ import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
-import { runDsh } from '../../pi2dsh-compat-smoke.mjs'
+import { runDsh } from '../../lib/dsh-smoke-harness.mjs'
 
 function assert(condition, message) {
   if (!condition) throw new SplitSmokeAssertionError(message)

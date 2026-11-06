@@ -49,7 +49,7 @@ import {
   runDsh,
   runPnpmInstall,
   validateCandidateTarball,
-} from './pi2dsh-compat-smoke.mjs'
+} from './lib/dsh-smoke-harness.mjs'
 import { loadDshDistribution, npmDshVersion } from './lib/dsh-distribution.mjs'
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))

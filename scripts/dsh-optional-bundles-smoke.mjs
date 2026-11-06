@@ -47,7 +47,7 @@ import {
   run,
   runDsh,
   runPnpmInstall,
-} from './pi2dsh-compat-smoke.mjs'
+} from './lib/dsh-smoke-harness.mjs'
 import { loadDshDistribution, npmDshVersion } from './lib/dsh-distribution.mjs'
 import { pnpmExecutable } from './lib/process.mjs'
 

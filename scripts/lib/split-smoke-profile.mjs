@@ -29,7 +29,7 @@ import {
   runDsh,
   runPnpmInstall,
   validateCandidateTarball,
-} from '../pi2dsh-compat-smoke.mjs'
+} from './dsh-smoke-harness.mjs'
 import { loadDshDistribution, npmDshVersion, PACKAGE_ROOT } from './dsh-distribution.mjs'
 import { requireExactSmokeDshPin, smokeArtifactIdentity, SplitSmokeAssertionError } from './split-smoke-diagnostics.mjs'
 import { writeSurfaceLlmFixture } from './split-smoke-fixtures.mjs'

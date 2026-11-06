@@ -8,41 +8,37 @@ import { API_VERSION } from '../../src/extension/public-types.ts'
 import { UNSTABLE_API_LEVEL } from '../../src/extension/unstable-types.ts'
 import {
   assertNoCompatibilityFailures,
-  assertOfficialPresetHeader,
   candidateArgument,
   compatibilityFailureLine,
-  fixtureImportViolations,
-  hasFreshResizeWidth,
   isolatedEnvironment,
   isRetryableRegistryFailure,
   redact,
   requireExactVersion,
   resolveTarball,
   retryDiagnostic,
-  RESIZE_FAILURE_PHASE,
+  run,
+  validateCandidatePackageData,
+} from '../../scripts/lib/dsh-smoke-harness.mjs'
+import {
+  CI_ECOSYSTEM_TIMEOUT_MS,
   classifyConsumerMetadata,
+  CLEANUP_BUDGET_MS,
   dispositionFileArgument,
+  failConsumerMetadata,
+  fixtureImportViolations,
+  GATE_BUDGET_MS,
+  hasFreshResizeWidth,
   isPullRequestRef,
   PI2DSH_COMPAT_DISPOSITIONS,
+  REQUIRED_CONTRACTS,
+  RESIZE_FAILURE_PHASE,
   skipUnsupportedDshPeerOnPrArgument,
   unsupportedDshPeerSkipAllowed,
-  writeDispositionFile,
-  failConsumerMetadata,
-  validateCandidatePackageData,
   validateConsumerMetadata,
   validateFixturePackageData,
   validateManifest,
   validateTargetDshManifest,
-  smokeOfficialPresetMounts,
-  officialPresetStatusCommand,
-  officialPresetStatusVisible,
-  settingsSearchSnapshot,
-  presetDegradationLine,
-  CI_ECOSYSTEM_TIMEOUT_MS,
-  CLEANUP_BUDGET_MS,
-  GATE_BUDGET_MS,
-  REQUIRED_CONTRACTS,
-  run,
+  writeDispositionFile,
 } from '../../scripts/pi2dsh-compat-smoke.mjs'
 
 test('pi2dsh smoke isolates credential-bearing parent environment variables', () => {
@@ -54,8 +50,8 @@ test('pi2dsh smoke isolates credential-bearing parent environment variables', ()
     assert.equal(env[canary], undefined, 'the isolated environment must not inherit arbitrary parent variables')
     assert.equal(env.HOME, '/tmp/compat-home', 'the TUI must receive the temporary HOME')
     assert.equal(env.DSH_HOME, '/tmp/compat-dsh', 'the TUI must receive the temporary DSH_HOME')
-    assert.equal(env.PI2DSH_COMPAT_EVIDENCE, '/tmp/evidence.json', 'the TUI must receive the isolated evidence path')
-    assert.equal(env.PI2DSH_COMPAT_HEADER_EVIDENCE, '/tmp/compat-work/header-evidence.json', 'the TUI must receive the isolated durable-header evidence path')
+    assert.equal(env.DSH_SMOKE_EVIDENCE, '/tmp/evidence.json', 'the TUI must receive the isolated evidence path')
+    assert.equal(env.DSH_SMOKE_HEADER_EVIDENCE, '/tmp/compat-work/header-evidence.json', 'the TUI must receive the isolated durable-header evidence path')
     assert.equal(env.PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN, 'false')
     assert.equal(env.PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS, 'false')
   } finally {
@@ -117,14 +113,10 @@ test('the required contracts are derived from the production extension surface, 
   assert.throws(() => validateManifest(stale), /missing a required contract/u)
 })
 
-test('official preset validation is independent of pi2dsh consumer metadata', () => {
+test('the compatibility manifest must pin an exact target DSH version', () => {
   assert.equal(validateTargetDshManifest({ dshVersion: '0.1.2-alpha.1' }), '0.1.2-alpha.1')
   assert.doesNotThrow(() => validateTargetDshManifest({ dshVersion: '0.1.2-alpha.1', consumer: 'unreleased-bridge' }))
   assert.throws(() => validateTargetDshManifest({ dshVersion: 'not-a-version' }), /exact target DSH version/u)
-  assert.equal(typeof smokeOfficialPresetMounts, 'function', 'the real official matrix must be independently callable')
-  assert.equal(officialPresetStatusCommand(), '/preset status')
-  assert.equal(officialPresetStatusVisible('ptc', 'preset: ptc · default: ptc'), true)
-  assert.equal(officialPresetStatusVisible('ptc', 'preset: standard · default: ptc'), false)
 })
 
 test('pi2dsh metadata preflight blocks an unsupported consumer contract', () => {
@@ -346,107 +338,6 @@ test('the pi2dsh disposition path is explicit, absolute and transport-safe', (t)
   assert.equal(readFileSync(skippedPath, 'utf8'), 'skipped-unsupported-dsh-peer\n')
   assert.throws(() => writeDispositionFile(skippedPath, 'PASSED'), /unknown pi2dsh compatibility disposition/u)
   assert.doesNotThrow(() => writeDispositionFile(undefined, 'passed'))
-})
-
-test('pi2dsh preset checks inspect the filtered /help frame rather than stale pane text', () => {
-  const goalPane = [
-    'transcript mentioned /goal before the overlay',
-    '╭────────────────────────╮',
-    '│ > goal                 │',
-    '│                        │',
-    '│ ❯ /goal               │',
-    '│                        │',
-    '│ Type to search · Enter/Space to change · Esc to cancel │',
-    '╰────────────────────────╯',
-  ].join('\n')
-  assert.deepEqual(settingsSearchSnapshot(goalPane), {
-    searchVisible: true,
-    query: 'goal',
-    commandRows: ['/goal'],
-    noMatches: false,
-  })
-
-  const minimalPane = [
-    'transcript mentioned /goal before the overlay',
-    '╭────────────────────────╮',
-    '│ > goal                 │',
-    '│ No matching settings   │',
-    '│ Type to search · Enter/Space to change · Esc to cancel │',
-    '╰────────────────────────╯',
-  ].join('\n')
-  assert.deepEqual(settingsSearchSnapshot(minimalPane), {
-    searchVisible: true,
-    query: 'goal',
-    commandRows: [],
-    noMatches: true,
-  })
-
-  // A capturing overlay is composited over the host frame, so the overlay's
-  // left border can share a line with stale host text. The parser must slice
-  // the inner frame before looking for query text or command rows.
-  const compositedPane = [
-    '╭──────────────────────────────────────────────────────────────────────────────╮',
-    '│ 🐋  session session-1                                                        │',
-    '│ de╭──────────────────────────────────────────────────────────────────────╮   │',
-    '│ /h│ >                                                                    │   │',
-    '╰───│                                                                      │───╯',
-    '    │   (1/48)                                                             │',
-    '────│   Type to search · Enter/Space to change · Esc to cancel             │────',
-    '❯   ╰──────────────────────────────────────────────────────────────────────╯',
-  ].join('\n')
-  assert.deepEqual(settingsSearchSnapshot(compositedPane), {
-    searchVisible: true,
-    query: '',
-    commandRows: [],
-    noMatches: false,
-  })
-
-  const compositedGoalPane = [
-    '╭──────────────────────────────────────────────────────────────────────────────╮',
-    '│ 🐋  session session-1                                                        │',
-    '│ de╭──────────────────────────────────────────────────────────────────────╮   │',
-    '│ /h│ > goal                                                               │   │',
-    '╰───│ ›/goal                                                             │───╯',
-    '    │                                                                      │',
-    '────│   Type to search · Enter/Space to change · Esc to cancel             │────',
-    '❯   ╰──────────────────────────────────────────────────────────────────────╯',
-  ].join('\n')
-  assert.deepEqual(settingsSearchSnapshot(compositedGoalPane), {
-    searchVisible: true,
-    query: 'goal',
-    commandRows: ['/goal'],
-    noMatches: false,
-  })
-})
-
-test('pi2dsh preset degradation diagnostics never count as a healthy mount', () => {
-  assert.equal(presetDegradationLine('preset mounted successfully'), undefined)
-  assert.equal(
-    presetDegradationLine('tui-runner: launch preset unavailable; falling back to default'),
-    'tui-runner: launch preset unavailable; falling back to default',
-  )
-  assert.equal(
-    presetDegradationLine('skill catalog unavailable for preset standard'),
-    'skill catalog unavailable for preset standard',
-  )
-})
-
-test('pi2dsh preset smoke requires a durable canonical session header', (t) => {
-  const life = testLifecycle(t)
-  const directory = life.tempDir('pi2dsh-compat-header-')
-  const evidencePath = join(directory, 'header.json')
-  writeFileSync(evidencePath, JSON.stringify({ sessionId: 'session-1', agentPreset: 'minimal' }))
-  assert.doesNotThrow(() => assertOfficialPresetHeader('minimal', evidencePath))
-  writeFileSync(evidencePath, JSON.stringify({ sessionId: 'session-1', agentPreset: 'standard' }))
-  assert.throws(
-    () => assertOfficialPresetHeader('minimal', evidencePath),
-    error => error?.phase === 'COMPAT_BOOT_FAILURE' && error.message.includes('durable header mismatch'),
-  )
-  writeFileSync(evidencePath, JSON.stringify({ sessionId: 'session-1', error: 'inspect failed' }))
-  assert.throws(
-    () => assertOfficialPresetHeader('minimal', evidencePath),
-    error => error?.phase === 'COMPAT_BOOT_FAILURE' && error.message.includes('durable header probe failed'),
-  )
 })
 
 test('pi2dsh smoke classifies resize failures as surface failures', () => {

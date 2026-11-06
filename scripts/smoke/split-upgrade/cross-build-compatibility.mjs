@@ -19,7 +19,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join, relative, sep } from 'node:path'
 
-import { installPlugin } from '../../pi2dsh-compat-smoke.mjs'
+import { installPlugin } from '../../lib/dsh-smoke-harness.mjs'
 import { hostSessionEvents, waitForHostSessionEvent } from '../../lib/split-smoke-sessions.mjs'
 import { writeC1WorkFixture } from '../../lib/split-smoke-fixtures.mjs'
 import {
