@@ -184,9 +184,10 @@ test('Source Mode matrix uses a clean distribution-aware fresh install; the pi2d
   assert.match(ecosystem, /needs\.dsh-context\.outputs\.mode == 'npm' \|\| needs\.prepare-dsh-source\.result == 'success'/u)
   assert.doesNotMatch(ecosystem, /Download DSH source pack/u)
   assert.doesNotMatch(ecosystem, /Source mode ecosystem status/u)
-  // The publish job must wait for the ecosystem gate.
+  // The publish job waits for the ecosystem job but does not gate on its
+  // result: pi2dsh is an optional external ecosystem.
   const publish = workflow.slice(workflow.indexOf('  publish:'))
-  assert.match(publish, /if:.*ecosystem-compat\.result == 'success'/u)
+  assert.doesNotMatch(publish, /if:.*ecosystem-compat\.result == 'success'/u)
   assert.match(publish, /^\s+- ecosystem-compat$/mu)
 })
 
