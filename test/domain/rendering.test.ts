@@ -4404,6 +4404,13 @@ test('foldedResultSummaryFor derives a friendly phrase, never the JSON', async (
   assert.equal(foldedResultSummaryFor('schedule_list', '{"items":[],"shown":0,"total":9,"limit":20,"offset":-1}'), undefined, 'a negative offset is not a page')
   assert.equal(foldedResultSummaryFor('schedule_list', '{"items":[],"shown":0,"total":9,"limit":20,"offset":0.5}'), undefined, 'a fractional offset is not a page')
   assert.equal(foldedResultSummaryFor('schedule_list', '"nope"'), undefined)
+  assert.equal(foldedResultSummaryFor('schedule_create', 'null'), undefined)
+  assert.equal(foldedResultSummaryFor('schedule_create', '[]'), undefined)
+  assert.equal(
+    foldedResultSummaryFor('schedule_list', '{"items":[{"kind":"after"},{"kind":"after"}],"shown":2,"total":1,"limit":20,"offset":0}'),
+    undefined,
+    'total below shown contradicts the page',
+  )
   assert.equal(foldedResultSummaryFor('schedule_delete', '{"id":"s1","deleted":"yes"}'), undefined, 'only a boolean receipt decides deletion')
   assert.equal(foldedResultSummaryFor('cordis_inspect_query', '{"data":42}'), undefined)
 })
