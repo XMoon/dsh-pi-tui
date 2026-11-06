@@ -116,6 +116,9 @@ export interface PluginUpdateView {
   /** The authoritative inventory's installed version after the update reread. */
   readonly lastObservedVersion?: string
   readonly readback: 'pending' | 'ready' | 'error'
+  /** The official result is in but the authoritative reread has not settled;
+   *  the update is still running/blocking writes. */
+  readonly settling: boolean
   /** True only in the legal target-installation cancellation window. */
   readonly canStopTargetInstall: boolean
   /** Whether the user explicitly released an indeterminate update. */
@@ -187,6 +190,9 @@ interface ActiveUpdate {
   message?: string
   lastObservedVersion?: string
   readback: 'pending' | 'ready' | 'error'
+  /** The official result arrived but the authoritative reread has not settled:
+   *  the update is NOT terminal yet (plan §6.6(9), §7). */
+  settling: boolean
   checkAbort?: AbortController
   checkEpoch: number
   mutationToken?: number
@@ -839,6 +845,7 @@ export class PluginManagerController {
       ...(active.message === undefined ? {} : { message: active.message }),
       ...(active.lastObservedVersion === undefined ? {} : { lastObservedVersion: active.lastObservedVersion }),
       readback: active.readback,
+      settling: active.settling,
       canStopTargetInstall: canStopTargetInstall(active),
       acknowledged: active.acknowledged,
     }
@@ -927,6 +934,7 @@ export class PluginManagerController {
       announcedSteps: [],
       log: [],
       readback: 'pending',
+      settling: false,
       checkEpoch: 0,
       cancelPending: false,
       acknowledged: false,
@@ -1120,6 +1128,7 @@ export class PluginManagerController {
     active.cancelStatus = undefined
     active.matchedInstallPhase = undefined
     active.readback = 'pending'
+    active.settling = false
     active.cancelPending = false
     active.acknowledged = false
     const token = ++this.mutationToken
@@ -1156,20 +1165,17 @@ export class PluginManagerController {
       return
     }
     if (this.disposed || token !== this.mutationToken || this.update !== active) return
+    // The operation's result is NOT the current inventory. The update stays
+    // `running` (write lock held, no terminal result painted) until the
+    // authoritative reread settles; `read` then commits `done` with
+    // readback ready/error in ONE step (plan §6.6(9), §7 rows 336-343).
     active.result = result
-    active.phase = 'done'
+    active.settling = true
     active.cancelPending = false
-    active.message = undefined
-    // The operation's result is NOT the current inventory: keep the write lock
-    // until the authoritative reread has settled (see `read`).
+    active.message = 'Reading the authoritative inventory…'
+    active.readback = 'pending'
     this.notifyChanged()
     await this.read()
-    if (this.disposed || token !== this.mutationToken || this.update !== active) return
-    this.busyValue = undefined
-    this.notifyChanged()
-    if (!this.hooks.isOpen()) {
-      this.hooks.notify(`plugin update ${result.result.application}: ${active.name}`, result.result.application === 'failed' ? 'error' : 'info')
-    }
   }
 
   /** Stop ONLY the target installation, in the official window. The update
@@ -1272,13 +1278,27 @@ export class PluginManagerController {
   private settleUpdateReadback(outcome: 'ready' | 'error', snapshot?: PluginManagerSnapshot): void {
     const active = this.update
     if (active === undefined) return
-    if (active.phase !== 'done' && active.phase !== 'unknown') return
+    const settling = active.settling && active.phase === 'running'
+    if (!settling && active.phase !== 'done' && active.phase !== 'unknown') return
     // A successful reread also recovers a previously failed one (explicit `r reread`).
     if (active.readback === 'ready') return
     if (outcome === 'error' && active.readback === 'error') return
     active.readback = outcome
     if (outcome === 'ready' && snapshot !== undefined) {
       active.lastObservedVersion = snapshot.bundles.find(bundle => bundle.name === active.name)?.version
+    }
+    if (!settling) return
+    // `done` is committed ONLY here: the official result plus the authoritative
+    // inventory reread have both settled. A failed reread is `done` with
+    // readback:error, never a fabricated current version.
+    active.settling = false
+    active.phase = 'done'
+    active.message = undefined
+    active.cancelPending = false
+    if (active.mutationToken === this.mutationToken) this.busyValue = undefined
+    if (!this.hooks.isOpen()) {
+      const application = active.result?.result.application ?? 'unknown'
+      this.hooks.notify(`plugin update ${application}: ${active.name}`, application === 'failed' ? 'error' : 'info')
     }
   }
 
@@ -1782,6 +1802,7 @@ function eventRequestId(event: PluginInstallEvent): string | undefined {
  *  the update's target and before it starts restoring the former version. */
 function canStopTargetInstall(active: ActiveUpdate): boolean {
   return active.phase === 'running'
+    && !active.settling
     && !active.cancelPending
     && active.hostStep === 'installing'
     && active.matchedInstallPhase === 'installing'

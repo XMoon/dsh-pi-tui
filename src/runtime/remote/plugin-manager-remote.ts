@@ -121,18 +121,35 @@ export class RemotePluginManagerPort implements PluginManagerPort {
     this.generation = generation
   }
 
+  /**
+   * The whole inventory read is fenced by the Connection generation captured
+   * BEFORE the four reads start. A successful reply, a refused reply and a
+   * transport rejection are all generation-bound: a snapshot carried by a
+   * superseded generation must never become the new generation's authoritative
+   * inventory (the update result reread and the uncertainty acknowledgement
+   * depend on it).
+   */
   async snapshot(): Promise<PluginManagerSnapshot> {
-    const [bundles, plugins, registries, exemptions] = await Promise.all([
-      this.remote.pluginManager.listBundles(),
-      this.remote.pluginManager.listPlugins(),
-      this.remote.pluginManager.registries(),
-      this.remote.pluginManager.listVersionExemptions(),
-    ])
+    const captured = this.generation.getSnapshot()
+    const stillCurrent = (): boolean => Object.is(captured, this.generation.getSnapshot())
+    let results: [RemoteResultLike<BundleInfo[]>, RemoteResultLike<PluginInfo[]>, RemoteResultLike<PluginRegistries>, RemoteResultLike<PluginExemptionsValue>]
+    try {
+      results = await Promise.all([
+        this.remote.pluginManager.listBundles(),
+        this.remote.pluginManager.listPlugins(),
+        this.remote.pluginManager.registries(),
+        this.remote.pluginManager.listVersionExemptions(),
+      ])
+    } catch (error) {
+      if (!stillCurrent()) throw new PluginManagerStaleResultError('snapshot')
+      throw error
+    }
+    if (!stillCurrent()) throw new PluginManagerStaleResultError('snapshot')
     return detachPluginManagerSnapshot({
-      bundles: unwrapRemote(bundles, 'listBundles'),
-      plugins: unwrapRemote(plugins, 'listPlugins'),
-      registries: unwrapRemote(registries, 'registries'),
-      exemptions: unwrapRemote(exemptions, 'listVersionExemptions'),
+      bundles: unwrapRemote(results[0], 'listBundles'),
+      plugins: unwrapRemote(results[1], 'listPlugins'),
+      registries: unwrapRemote(results[2], 'registries'),
+      exemptions: unwrapRemote(results[3], 'listVersionExemptions'),
     })
   }
 
