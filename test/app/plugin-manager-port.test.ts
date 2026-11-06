@@ -1779,3 +1779,120 @@ test('update: begin refuses a bundle the Host does not declare updatable without
   }
   assert.equal(fixture.state.listVersionCalls.length, 0)
 })
+
+test('update: the terminal done state waits for the authoritative reread', async () => {
+  const readGate = deferred<PluginManagerSnapshot>()
+  let reads = 0
+  const fixture = await openedUpdate({
+    snapshotImpl: async () => {
+      reads += 1
+      if (reads === 1) return snapshot([updatable({ version: '1.0.0' })])
+      return readGate.promise
+    },
+    updateImpl: async (_name, version) => ({
+      from: '1.0.0',
+      to: version,
+      step: 'install',
+      result: change({ stage: 'install', application: 'applied', version }),
+    }),
+  })
+  const { controller } = fixture
+  controller.beginUpdate(bundleValue('updatable'))
+  await tick()
+  controller.confirmUpdateVersion()
+  controller.executeUpdate()
+  await tick(10)
+  const settling = controller.updateView()!
+  assert.equal(settling.phase, 'running', 'the official result alone is never painted as done')
+  assert.equal(settling.settling, true)
+  assert.equal(settling.readback, 'pending')
+  assert.equal(settling.canStopTargetInstall, false, 'stop is closed once the Host already returned')
+  assert.equal(controller.busy(), bundleValue('updatable'), 'the write lock is held through the reread')
+  readGate.resolve(snapshot([updatable({ version: '1.1.0' })]))
+  await tick(10)
+  assert.equal(controller.updateView()?.phase, 'done')
+  assert.equal(controller.updateView()?.readback, 'ready')
+  assert.equal(controller.updateView()?.lastObservedVersion, '1.1.0')
+  assert.equal(controller.busy(), undefined)
+})
+
+test('update: a superseded authoritative reread never becomes ready', async () => {
+  let reads = 0
+  const fixture = await openedUpdate({
+    snapshotImpl: async () => {
+      reads += 1
+      if (reads > 1) throw new PluginManagerStaleResultError('snapshot')
+      return snapshot([updatable({ version: '1.0.0' })])
+    },
+    updateImpl: async (_name, version) => ({
+      from: '1.0.0',
+      to: version,
+      step: 'install',
+      result: change({ stage: 'install', application: 'applied', version }),
+    }),
+  })
+  const { controller } = fixture
+  controller.beginUpdate(bundleValue('updatable'))
+  await tick()
+  controller.confirmUpdateVersion()
+  controller.executeUpdate()
+  await tick(10)
+  const done = controller.updateView()!
+  assert.equal(done.phase, 'done')
+  assert.equal(done.readback, 'error', 'a superseded snapshot is NOT the authoritative readback')
+  assert.equal(done.lastObservedVersion, undefined)
+  assert.equal(controller.busy(), undefined)
+})
+
+test('update: a Host check-step refusal is a done result, not an indeterminate outcome', async () => {
+  const fixture = await openedUpdate({
+    updateImpl: async (_name, version) => ({
+      from: '1.0.0',
+      to: version,
+      step: 'check',
+      result: change({
+        stage: 'install',
+        application: 'failed',
+        error: { code: 'incompatible-version' },
+      }),
+    }),
+  })
+  const { controller } = fixture
+  controller.beginUpdate(bundleValue('updatable'))
+  await tick()
+  controller.confirmUpdateVersion()
+  controller.executeUpdate()
+  await tick(10)
+  const done = controller.updateView()!
+  assert.equal(done.phase, 'done')
+  assert.equal(done.result?.step, 'check')
+  assert.equal(done.result?.result.application, 'failed')
+  assert.equal(done.result?.restore, undefined)
+  assert.equal(done.readback, 'ready')
+})
+
+test('update: a failed target with a successful restore reports both outcomes separately', async () => {
+  const fixture = await openedUpdate({
+    updateImpl: async (_name, version) => ({
+      from: '1.0.0',
+      to: version,
+      step: 'install',
+      result: change({
+        stage: 'install',
+        application: 'failed',
+        error: { code: 'operation-error', diagnostic: 'target failed' },
+      }),
+      restore: change({ stage: 'install', application: 'applied', version: '1.0.0' }),
+    }),
+  })
+  const { controller } = fixture
+  controller.beginUpdate(bundleValue('updatable'))
+  await tick()
+  controller.confirmUpdateVersion()
+  controller.executeUpdate()
+  await tick(10)
+  const done = controller.updateView()!
+  assert.equal(done.result?.result.application, 'failed')
+  assert.equal(done.result?.restore?.application, 'applied')
+  assert.equal(done.result?.restore?.version, '1.0.0')
+})

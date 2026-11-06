@@ -960,6 +960,14 @@ test('the Detail Check updates entry drives one exact update through confirm, st
     requestId: running.requestId,
   })
 
+  // The request id is hidden on screen but complete in the copy/diagnostics
+  // payload, so Host update/install events can be correlated.
+  harness.vt.sendInput('c')
+  await harness.waitForFrame()
+  const copied = harness.copied.at(-1) ?? ''
+  assert.match(copied, new RegExp(`request id: ${running.requestId!}`, 'u'))
+  assert.match(copied, /registry: https:\/\/registry\.example\//u)
+
   // The Host step and the matched install phase appear; only then Stop.
   harness.emitUpdate({ requestId: running.requestId!, step: 'checking' })
   await harness.waitForFrame()

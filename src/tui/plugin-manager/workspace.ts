@@ -2424,17 +2424,11 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     return view === undefined ? 'none' : JSON.stringify(view)
   }
 
-  /** The listed versions of one update view (empty for any other status). */
-  private updateVersions(update: PluginUpdateView): readonly PluginVersionFact[] {
-    const list = update.versions
-    return list !== undefined && list.status === 'listed' ? list.versions : []
-  }
-
   private ensureUpdateSelection(): void {
     if (this.view !== 'update') return
     const update = this.controller.updateView()
     if (update === undefined) return
-    const count = this.updateVersions(update).length
+    const count = this.updateVersionsOf(update).length
     if (count === 0) {
       this.updateSelection = 0
       return
@@ -2609,7 +2603,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       if (update.phase === 'selecting') {
         return [
           { text: 'Enter choose', priority: 90 },
-          ...(this.paintedUpdateLineCount > this.paintedUpdateViewport ? [{ text: 'PgUp/PgDn scroll', priority: 80 }] : []),
+          ...(this.paintedUpdateLineCount > this.paintedUpdateViewport ? [{ text: 'PgUp/PgDn page', priority: 80 }] : []),
           { text: `${WORKSPACE_KEYS.refresh} retry`, priority: 70 },
           { text: 'Esc back', priority: 100 },
         ]
@@ -3536,15 +3530,17 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       content.push(color.textDim(`Registry  ${maskedSource(sanitizedPhysicalLine(update.registry ?? 'pnpm configuration default'))}`))
     } else if (update.phase === 'running') {
       const step = update.hostStep
-      const status = step === undefined
-        ? 'Starting the update…'
-        : step === 'checking'
-          ? 'Checking the exact target with the Host…'
-          : step === 'removing'
-            ? 'Removing the previous version…'
-            : step === 'installing'
-              ? 'Installing the target version…'
-              : 'Restoring the previous version…'
+      const status = update.settling
+        ? 'Update finished; reading the authoritative inventory…'
+        : step === undefined
+          ? 'Starting the update…'
+          : step === 'checking'
+            ? 'Checking the exact target with the Host…'
+            : step === 'removing'
+              ? 'Removing the previous version…'
+              : step === 'installing'
+                ? 'Installing the target version…'
+                : 'Restoring the previous version…'
       content.push(color.textStrong(status))
       if (update.hostStep === 'installing' && update.matchedInstallPhase === undefined) {
         content.push(color.textDim('Waiting for the Host target installation to start…'))
@@ -3592,7 +3588,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       content.push('')
       pushWrapped('Check the observed version, then acknowledge the uncertainty to release the plugin-change lock. The Host may still be finishing this update in the background.', color.textDim)
     }
-    if (update.message !== undefined && update.phase !== 'unknown') {
+    if (update.message !== undefined && update.phase !== 'unknown' && !update.settling) {
       pushWrapped(update.message, color.textMuted)
     }
     content.push('')
@@ -3631,6 +3627,10 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
           .map(attempt => `${maskedSource(sanitizedPhysicalLine(attempt.registry ?? 'pnpm default'))}${attempt.problem === undefined ? '' : ` (${attempt.problem})`}`)
           .join(' · ')
         for (const line of wrapTextWithAnsi(`Registries asked: ${asked}`, width)) content.push(color.textDim(line))
+        for (const attempt of list.attempts) {
+          if (attempt.reason === undefined || attempt.reason === '') continue
+          for (const line of wrapTextWithAnsi(`  ${attempt.reason}`, width)) content.push(color.textMuted(line))
+        }
       }
       return
     }
@@ -3700,6 +3700,8 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     const headers: string[] = [
       `update ${update.name} ${update.sourceInstalled} → ${update.selectedExactVersion ?? result?.to ?? 'unknown'}`,
       `phase: ${update.phase} · readback: ${update.readback}`,
+      ...(update.requestId === undefined ? [] : [`request id: ${update.requestId}`]),
+      ...(update.registry === undefined ? [] : [`registry: ${update.registry}`]),
     ]
     if (update.result !== undefined) {
       headers.push(`target: ${sanitizedPhysicalLine(changeSummary(update.result.result))}`)

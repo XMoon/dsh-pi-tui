@@ -695,6 +695,7 @@ test('the Update page keeps the Settings skeleton, ONE cursor, a pinned bar and 
     if (rows >= 24) {
       assert.ok(text.includes('bundle: yes'), `${columns}x${rows} paints the bundle fact`)
       assert.ok(text.includes('prerelease'), `${columns}x${rows} paints the prerelease fact`)
+      assert.ok(text.includes('弃用说明'), `${columns}x${rows} paints the CJK deprecation text`)
     }
 
     // Enter selects the version and opens the confirmation; Cancel is default.

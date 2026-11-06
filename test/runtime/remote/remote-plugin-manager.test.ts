@@ -836,3 +836,49 @@ test('a version list or update reply carried by a superseded Connection generati
   assert.equal(settled.to, '1.1.0')
   assert.deepEqual([...current.calls], ['updateBundle'], 'one write per call, never a retry')
 })
+
+test('a Remote snapshot carried by a superseded Connection generation is never authoritative', async (t) => {
+  const holdPlugins = (remote: RemotePluginManagerFixture): { release: () => void } => {
+    const original = remote.pluginManager.listPlugins
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    remote.pluginManager.listPlugins = async () => {
+      await gate
+      return original()
+    }
+    t.after(() => { release() })
+    return { release }
+  }
+
+  // A successful snapshot whose four reads started on generation A and settle
+  // on generation B is indeterminate, never the new generation's inventory.
+  const successRemote = remoteFixture()
+  const successHold = holdPlugins(successRemote)
+  const successGeneration = generationFixture(1)
+  const successPort = portOf(successRemote, successGeneration)
+  const pendingSnapshot = successPort.snapshot()
+  await new Promise<void>(resolve => setImmediate(resolve))
+  successGeneration.set(2)
+  successHold.release()
+  await assert.rejects(pendingSnapshot, error => error instanceof PluginManagerStaleResultError)
+  assert.ok(successRemote.calls.includes('listBundles'), 'the real inventory reads ran')
+
+  // A REFUSED snapshot carried by a superseded generation is indeterminate too.
+  const refusedRemote = remoteFixture()
+  refusedRemote.refuse('listBundles', 'inventory denied')
+  const refusedHold = holdPlugins(refusedRemote)
+  const refusedGeneration = generationFixture(1)
+  const refusedPort = portOf(refusedRemote, refusedGeneration)
+  const refusedSnapshot = refusedPort.snapshot()
+  await new Promise<void>(resolve => setImmediate(resolve))
+  refusedGeneration.set(2)
+  refusedHold.release()
+  await assert.rejects(refusedSnapshot, error => error instanceof PluginManagerStaleResultError)
+
+  // An UNCHANGED generation keeps the real refusal and resolves a real snapshot.
+  const currentRefused = remoteFixture()
+  currentRefused.refuse('listBundles', 'inventory denied')
+  await assert.rejects(portOf(currentRefused).snapshot(), /pluginManager\.listBundles failed: inventory denied/)
+  const current = await portOf(remoteFixture()).snapshot()
+  assert.equal(current.bundles.length, 1)
+})

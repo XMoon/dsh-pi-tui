@@ -3787,9 +3787,9 @@ export class SettingsWorkspacePanel implements Component {
     readonly allowDual: boolean
   } {
     const width = plan.width
-    // A business page (install/confirm/diagnostics) owns the FULL width: its
-    // risk text and actions are never squeezed beside the Categories rail.
-    if (view === 'install' || view === 'confirm' || view === 'diagnostics') {
+    // A business page (install/update/confirm/diagnostics) owns the FULL width:
+    // its risk text and actions are never squeezed beside the Categories rail.
+    if (view === 'install' || view === 'update' || view === 'confirm' || view === 'diagnostics') {
       return { showCategories: false, contentX: 0, contentWidth: Math.max(1, width), allowDual: false }
     }
     if (width >= 120) {
@@ -3992,6 +3992,7 @@ export class SettingsWorkspacePanel implements Component {
     switch (view) {
       case 'details': return 'Plugins · Details'
       case 'install': return 'Plugins · Install'
+      case 'update': return 'Plugins · Update'
       case 'confirm': return 'Plugins · Confirm'
       case 'diagnostics': return 'Plugins · Diagnostics'
       default: return 'Plugins'
@@ -4025,6 +4026,7 @@ export class SettingsWorkspacePanel implements Component {
     switch (view) {
       case 'details': return 'Details'
       case 'install': return 'Plugins · Install'
+      case 'update': return 'Plugins · Update'
       case 'confirm': return 'Plugins · Confirm'
       case 'diagnostics': return 'Plugins · Diagnostics'
       default: return 'Plugins'
