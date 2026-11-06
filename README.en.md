@@ -844,7 +844,7 @@ The published package already contains the Pi TUI fork required at runtime. No s
 
 ### CI validation policy
 
-CI follows the tracked `test/compat/dsh-mode.json` policy for pushes to `next` and pull requests targeting `next`; `main` and every tag use npm Mode. Source Mode reads the source target from `test/compat/dsh-source.json` and validates the complete official DSH tarball family, TUI presets, and the old-runtime boundary; npm Mode uses the DSH version declared by the checkout's `package.json` and frozen lockfile to run the registry lane. The published `pi2dsh` ecosystem check runs in both modes and always targets the published ecosystem (it installs the published DSH and pi2dsh from the registry), so a source pack is explicitly skipped rather than passed. See [`docs/guides/dsh-compatibility.md`](docs/guides/dsh-compatibility.md) for the compatibility method.
+CI follows the tracked `test/compat/dsh-mode.json` policy for pushes to `next` and pull requests targeting `next`; `main` and every tag use npm Mode. Source Mode reads the source target from `test/compat/dsh-source.json` and validates the complete official DSH tarball family, TUI presets, and the old-runtime boundary; npm Mode uses the DSH version declared by the checkout's `package.json` and frozen lockfile to run the registry lane. The published `pi2dsh` ecosystem check is independent of the selected mode and always targets the published ecosystem (every run resolves `pi2dsh@latest` and the highest published DSH intersection from the registry); it does not accept a source pack and refuses `--distribution` with a non-zero error rather than reporting a pass. See [`docs/guides/dsh-compatibility.md`](docs/guides/dsh-compatibility.md) for the compatibility method.
 
 ## Repository layout
 

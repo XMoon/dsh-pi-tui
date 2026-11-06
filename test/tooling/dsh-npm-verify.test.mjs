@@ -154,10 +154,10 @@ test('official preset assembly follows the selected Source/npm distribution lane
   assert.match(official, /else\n\s+node scripts\/official-presets-smoke\.mjs "\$\{TARBALLS\[0\]\}"/u)
 })
 
-test('Source Mode matrix uses a clean distribution-aware fresh install; the pi2dsh gate runs in both modes', () => {
+test('Source Mode matrix uses a clean distribution-aware fresh install; the pi2dsh probe stays outside qualification', () => {
   const workflow = readFileSync(new URL('../../.github/workflows/ci.yml', import.meta.url), 'utf8')
   const compatStart = workflow.indexOf('  compat-smoke:')
-  const ecosystemStart = workflow.indexOf('  # Test the EXACT packed artifact against the published pi2dsh bridge', compatStart)
+  const ecosystemStart = workflow.indexOf('  # Test the EXACT provisional candidate', compatStart)
   assert.ok(compatStart >= 0 && ecosystemStart > compatStart, 'workflow job boundaries must exist')
   const compat = workflow.slice(compatStart, ecosystemStart)
   assert.match(compat, /Download DSH source pack/u)
@@ -167,28 +167,22 @@ test('Source Mode matrix uses a clean distribution-aware fresh install; the pi2d
 
   const officialStart = workflow.indexOf('  official-preset-assembly:')
   const ecosystem = workflow.slice(ecosystemStart, officialStart)
-  // The published pi2dsh bridge is validated at the pairing the ecosystem
-  // manifest declares — an external consumer pairing, not this checkout's DSH
-  // target — so the gate runs in BOTH modes: the smoke installs the published
-  // DSH and pi2dsh from the registry, and a failing peer declaration stays an
-  // ECOSYSTEM_CONTRACT_BLOCKER.
-  assert.match(ecosystem, /if: \$\{\{ always\(\) && needs\.dsh-context\.result == 'success' && needs\.qualify\.result == 'success' && \(needs\.dsh-context\.outputs\.mode == 'npm' \|\| needs\.prepare-dsh-source\.result == 'success'\) \}\}/u)
-  assert.doesNotMatch(ecosystem, /if: \$\{\{ false \}\}/u)
-  assert.doesNotMatch(ecosystem, /DISABLED/u)
-  assert.doesNotMatch(ecosystem, /RE-ENABLE PROCEDURE/u)
-  // BOTH modes reach it: in npm mode the skipped source pack is tolerated, in
-  // source mode the pack must have succeeded. A bare `mode == 'npm'` gate —
-  // which is what this assertion used to look for — would drop the gate from
-  // the next line entirely.
-  assert.match(ecosystem, /needs\.qualify\.result == 'success'/u)
-  assert.match(ecosystem, /needs\.dsh-context\.outputs\.mode == 'npm' \|\| needs\.prepare-dsh-source\.result == 'success'/u)
+  // The published pi2dsh probe resolves its own published pairing on every run
+  // and never consults a source pack or the formal qualification graph.
+  assert.match(ecosystem, /needs:\n\s+- dsh-context\n\s+- candidate/u)
+  assert.match(ecosystem, /if: \$\{\{ always\(\) && needs\.dsh-context\.result == 'success' && needs\.candidate\.result == 'success' \}\}/u)
+  assert.doesNotMatch(ecosystem, /needs\.qualify\.result/u)
+  assert.doesNotMatch(ecosystem, /prepare-dsh-source/u)
+  assert.match(ecosystem, /continue-on-error: true/u)
+  assert.match(ecosystem, /node scripts\/pi2dsh-compat-smoke\.mjs "\$\{TARBALLS\[0\]\}"/u)
+  assert.doesNotMatch(ecosystem, /--allow-stale-tui-peer|--skip-unsupported-dsh-peer-on-pr|--disposition-file/u)
   assert.doesNotMatch(ecosystem, /Download DSH source pack/u)
   assert.doesNotMatch(ecosystem, /Source mode ecosystem status/u)
-  // The publish job waits for the ecosystem job but does not gate on its
-  // result: pi2dsh is an optional external ecosystem.
+
+  // The publish path neither waits for nor gates on the optional probe.
   const publish = workflow.slice(workflow.indexOf('  publish:'))
   assert.doesNotMatch(publish, /if:.*ecosystem-compat\.result == 'success'/u)
-  assert.match(publish, /^\s+- ecosystem-compat$/mu)
+  assert.doesNotMatch(publish, /^\s+- ecosystem-compat$/mu)
 })
 
 test('npm verification rejects a symlinked candidate tarball', (t) => {

@@ -386,11 +386,14 @@ TARBALL_SMOKE_SKIP_INSTALL=1 node scripts/tarball-smoke.mjs <tgz>
 This checks structure/content only; re-run without the skip once the family is
 published. The official-presets smoke with `--distribution` boots `standard`,
 `ptc`, `minimal` and `cordis` explicitly (a standard-only boot can hide a missing
-Host service). The `pi2dsh` check always runs against the published ecosystem —
-it installs the published DSH and pi2dsh from the registry — so it refuses a
-source pack and reports that combination as a SKIP. A SKIP is not a pass, the
-npm lane must not run against source tarballs, and the gate is blocking in
-both modes.
+Host service). The `pi2dsh` check always runs against the published ecosystem:
+every run resolves `pi2dsh@latest` and the highest published DSH intersection
+from the public registry, so it requires online access and never uses a source
+pack (`--distribution` is refused non-zero). No candidate pack means no
+compatibility claim, and the check is an optional, non-blocking signal — its own
+`ecosystem-compat` job, log and debug artifact are the authority. For local use:
+`pnpm smoke:pi2dsh -- <tgz>`; the selection method is owned by
+[dsh-compatibility.md](./dsh-compatibility.md).
 
 ## Benchmarks and profilers
 

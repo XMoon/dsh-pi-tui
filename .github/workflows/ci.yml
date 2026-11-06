@@ -1203,7 +1203,6 @@ jobs:
       - source-checks
       - client-family-compat
       - compat-smoke
-      - ecosystem-compat
       - official-preset-assembly
       - runtime-boundary
       - security-audit
@@ -1245,7 +1244,6 @@ jobs:
           node scripts/ci-verdict.mjs qualify \
             --mode "$DSH_MODE" \
             --ref "$GITHUB_REF" \
-            --ecosystem-disposition "${{ needs['ecosystem-compat'].outputs.disposition }}" \
             --phase "dsh-context=${{ needs.dsh-context.result }}" \
             --phase "mise-toolchain=${{ needs['mise-toolchain'].result }}" \
             --phase "prepare-dsh-source=${{ needs['prepare-dsh-source'].result }}" \
@@ -1259,7 +1257,6 @@ jobs:
             --phase "split-process=${{ needs['split-process'].result }}" \
             --phase "source-checks=${{ needs['source-checks'].result }}" \
             --phase "compat-smoke=${{ needs['compat-smoke'].result }}" \
-            --phase "ecosystem-compat=${{ needs['ecosystem-compat'].result }}" \
             --phase "official-preset-assembly=${{ needs['official-preset-assembly'].result }}" \
             --phase "runtime-boundary=${{ needs['runtime-boundary'].result }}" \
             --phase "security-audit=${{ needs['security-audit'].result }}"
@@ -1326,7 +1323,6 @@ jobs:
       - source-checks
       - client-family-compat
       - compat-smoke
-      - ecosystem-compat
       - official-preset-assembly
       - runtime-boundary
       - security-audit
@@ -1365,7 +1361,6 @@ jobs:
           node scripts/ci-verdict.mjs summary \
             --mode "$DSH_MODE" \
             --ref "$GITHUB_REF" \
-            --ecosystem-disposition "${{ needs['ecosystem-compat'].outputs.disposition }}" \
             --started "${STARTED:-}" \
             $RELEASE_ARG \
             --phase "dsh-context=${{ needs.dsh-context.result }}" \
@@ -1381,7 +1376,6 @@ jobs:
             --phase "split-process=${{ needs['split-process'].result }}" \
             --phase "source-checks=${{ needs['source-checks'].result }}" \
             --phase "compat-smoke=${{ needs['compat-smoke'].result }}" \
-            --phase "ecosystem-compat=${{ needs['ecosystem-compat'].result }}" \
             --phase "official-preset-assembly=${{ needs['official-preset-assembly'].result }}" \
             --phase "runtime-boundary=${{ needs['runtime-boundary'].result }}" \
             --phase "security-audit=${{ needs['security-audit'].result }}" \
@@ -1513,35 +1507,29 @@ jobs:
           fi
 
   # ---------------------------------------------------------------------------
-  # Test the EXACT packed artifact against the published pi2dsh bridge and a
-  # real Pi component in a real pseudo-terminal. This is intentionally outside
-  # the packed-artifact runner: local packing stays offline and non-interactive. The published
-  # ecosystem is evaluated in BOTH modes: the smoke installs the published DSH
-  # and pi2dsh from the registry, at the pairing the ecosystem manifest
-  # declares — an external consumer pairing, not this checkout's DSH target — so
-  # Source Mode does not skip it. A failing pi2dsh peer declaration is an
-  # ECOSYSTEM_CONTRACT_BLOCKER, never a forced install.
+  # Test the EXACT provisional candidate against the CURRENT published pi2dsh
+  # latest release and a real Pi component in a real pseudo-terminal. This is
+  # intentionally outside the packed-artifact runner: local packing stays
+  # offline and non-interactive. The published ecosystem is evaluated in BOTH
+  # modes: every run resolves `pi2dsh@latest` from the public registry and the
+  # highest published DSH version both sides actually declare; a source pack is
+  # never used. The job stays visible on failure (`continue-on-error`) and is
+  # NOT part of the release qualification graph: it neither delays nor blocks
+  # `qualified`, `publish` or `release`. When no provisional candidate exists
+  # the job is SKIPPED, which is not a compatibility pass.
   # ---------------------------------------------------------------------------
   ecosystem-compat:
     name: External compatibility / pi2dsh
     needs:
       - dsh-context
-      - prepare-dsh-source
-      - qualify
-    if: ${{ always() && needs.dsh-context.result == 'success' && needs.qualify.result == 'success' && (needs.dsh-context.outputs.mode == 'npm' || needs.prepare-dsh-source.result == 'success') }}
+      - candidate
+    if: ${{ always() && needs.dsh-context.result == 'success' && needs.candidate.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     # pi2dsh is an optional external ecosystem, not a hard release dependency:
     # a failure here stays visible but must not fail the workflow or block main
     # and release publication.
     continue-on-error: true
-    outputs:
-      # The typed ecosystem-compat transport: the ONLY values ci-verdict
-      # accepts are `passed` or the PR-only `skipped-unsupported-dsh-peer`.
-      # An absent/unknown value is a verdict failure, never a default pass.
-      disposition: ${{ steps.run_pi2dsh.outputs.disposition }}
-    env:
-      DSH_MODE: ${{ needs.dsh-context.outputs.mode }}
 
     steps:
       - name: Checkout
@@ -1574,8 +1562,8 @@ jobs:
             echo "npm_config_userconfig=$RUNNER_TEMP/dsh-npmrc"
           } >> "$GITHUB_ENV"
 
-      # The PROVISIONAL artifact: these gates must run before the final
-      # qualified artifact exists, and none of them has publication authority.
+      # The PROVISIONAL artifact: this gate must run before the final qualified
+      # artifact exists and has no publication authority.
       - name: Download the provisional candidate
         uses: actions/download-artifact@v8
         with:
@@ -1588,68 +1576,22 @@ jobs:
           sudo apt-get install -y tmux
 
       - name: Run pi2dsh compatibility smoke
-        id: run_pi2dsh
         env:
           PI2DSH_COMPAT_DEBUG_DIR: pi2dsh-compat-debug
-        shell: bash
         run: |
           set -euo pipefail
-
           mapfile -t TARBALLS < <(
             find tarball -maxdepth 1 -type f \
               -name 'xmoon76-dsh-pi-tui-*.tgz' \
               -print \
               | sort
           )
-
           if [ "${#TARBALLS[@]}" -ne 1 ]; then
             echo "Expected exactly one tarball, found ${#TARBALLS[@]}" >&2
             printf '%s\n' "${TARBALLS[@]}" >&2
             exit 1
           fi
-
-          # The NARROW stale-peer allowance: only a TUI-peer-only metadata
-          # mismatch proceeds to the targeted real runtime smoke (whose
-          # result decides). DSH peer mismatches, missing dsh peers, and
-          # runtime/fixture failures stay blocking. The typed
-          # `--skip-unsupported-dsh-peer-on-pr` is added ONLY on a PR merge
-          # ref, and the script itself re-checks the actual GITHUB_REF and the
-          # explicit flag: a release tag or branch can never skip.
-          SMOKE_ARGS=("${TARBALLS[0]}" --allow-stale-tui-peer)
-          DISPOSITION_FILE=""
-          if [ "$DSH_MODE" = "npm" ]; then
-            DISPOSITION_FILE="$RUNNER_TEMP/pi2dsh-disposition"
-            rm -f "$DISPOSITION_FILE"
-            SMOKE_ARGS+=(--disposition-file "$DISPOSITION_FILE")
-            if [[ "$GITHUB_REF" =~ ^refs/pull/[0-9]+/merge$ ]]; then
-              SMOKE_ARGS+=(--skip-unsupported-dsh-peer-on-pr)
-            fi
-          fi
-          node scripts/pi2dsh-compat-smoke.mjs "${SMOKE_ARGS[@]}"
-
-          # The ecosystem gate is npm-only. Source Mode keeps its existing
-          # contract and claims no disposition.
-          if [ "$DSH_MODE" != "npm" ]; then
-            echo "disposition=" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          # A zero exit is NOT the proof: only the script's typed disposition
-          # is. Missing, empty, mixed-case or unknown values fail closed.
-          if [ ! -f "$DISPOSITION_FILE" ]; then
-            echo "the pi2dsh smoke exited 0 without a disposition file: a run that proved nothing is not a pass" >&2
-            exit 1
-          fi
-          DISPOSITION="$(tr -d '\r\n' < "$DISPOSITION_FILE")"
-          case "$DISPOSITION" in
-            passed|skipped-unsupported-dsh-peer)
-              echo "disposition=$DISPOSITION" >> "$GITHUB_OUTPUT"
-              ;;
-            *)
-              echo "the pi2dsh smoke wrote an unknown disposition: '$DISPOSITION'" >&2
-              exit 1
-              ;;
-          esac
+          node scripts/pi2dsh-compat-smoke.mjs "${TARBALLS[0]}"
 
       - name: Upload pi2dsh compatibility diagnostics
         if: failure()
@@ -2020,7 +1962,6 @@ jobs:
       - source-checks
       - qualified
       - compat-smoke
-      - ecosystem-compat
       - official-preset-assembly
       - runtime-boundary
       - security-audit
@@ -2130,8 +2071,8 @@ jobs:
   #
   # The assets are the SAME artifact chain as npm: the candidate packed from
   # the verified build, qualified by the smokes and the leak gate, gated by
-  # compat-smoke and the pi2dsh ecosystem gate, joined by `qualified`, then
-  # published by publish — never a rebuild. A SHA256 file rides along for
+  # compat-smoke, joined by `qualified`, then published by publish — never a
+  # rebuild. A SHA256 file rides along for
   # download verification.
   #
   # The job is re-runnable: an existing release is edited in place and assets
