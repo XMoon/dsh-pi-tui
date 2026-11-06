@@ -25,10 +25,13 @@
  *   `@xmoon76/dsh-pi-tui`-named stand-in (the exact-name Current-TUI
  *   negative-control target). Both are manifests only; no package process runs.
  *
+ * - the S5-PR2 update path: one real registry install of 1.0.0 seeded through
+ *   the Host, then the official `listVersions`/`updateBundle` and forwarded
+ *   `plugin-manager/update-state` over the generated Remote, driven from the
+ *   real `/plugins` page to the durable 1.1.0 profile dependency
+ *
  * DELIBERATELY ABSENT
- * - real package installation (the network/pnpm install L6-F scenario is
- *   retained at the L5 Remote-event level, the `L5:` scenario below; this suite
- *   does not claim it as L6)
+ * - public npm credentials/endpoints (the registry is loopback and test-owned)
  * - Task Center / child viewer, Job viewer, public Remote selector, global
  *   reconnect/HMR closure outside the Plugin Manager invalidation
  *

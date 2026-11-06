@@ -12,12 +12,14 @@
  *
  * `PRODUCTION PREREQUISITES REPRODUCED`: the real `@deepseek-ai/dsh-plugin-manager`
  * Host service, its real profile/patch/installation records, the real
- * `pnpm`-backed profile package operations (local fixture package only), the
- * shared Direct adapter/mapping and the real controller/page below.
- * `TEST STAND-INS`: ephemeral profile/installation directories and local
- * package manifests; no public npm download and no network install.
- * `DELIBERATELY ABSENT`: live npm registries, credentials, a real external
- * bundle consumer and the Optional-bundle and later Host/TUI feature qualification.
+ * `pnpm`-backed profile package operations, the shared Direct adapter/mapping,
+ * the real controller/page and the official `listVersions`/`updateBundle`/
+ * `plugin-manager/update-state` update path over a real registry install.
+ * `TEST STAND-INS`: ephemeral profile/installation directories, isolated
+ * HOME/XDG/npm caches, a loopback npm registry and two inert test-only versions
+ * of one registry bundle (the real `pnpm add` still runs).
+ * `DELIBERATELY ABSENT`: public npm credentials/endpoints, user profiles,
+ * native OS permissions, and the physical split-process network qualification.
  * @module @xmoon76/dsh-pi-tui/plugin-manager-catalog-rc2.test
  */
 
