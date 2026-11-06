@@ -1069,3 +1069,56 @@ test('a resize between pressing a version row and releasing it refuses the stale
   assert.equal(harness.controller.updateView()?.phase, 'selecting', 'the stale press never opens the confirmation')
   assert.equal(harness.updateCalls.length, 0)
 })
+
+test('update diagnostics copy masks a Host registry credential and its control bytes', async () => {
+  const hostile = 'https://user:secret@registry.example/path\u001b]52;c;ZXZpbA==\u0007'
+  const harness = await open({
+    columns: 120,
+    rows: 40,
+    bundles: UPDATABLE_BUNDLES(),
+    plugins: [],
+    versionsImpl: async () => ({
+      status: 'listed',
+      installed: '1.0.0',
+      registry: hostile,
+      attempts: [{ registry: hostile }],
+      versions: [{ version: '1.1.0', tags: ['latest'], prerelease: false, bundle: true }],
+      omitted: 0,
+    }),
+  })
+  await openCheckUpdates(harness)
+  const frame = harness.view()
+  assert.doesNotMatch(frame, /secret/u, 'the painted registry never exposes userinfo')
+  assert.doesNotMatch(frame, /ZXZpbA/u, 'the painted registry never carries the OSC payload')
+  harness.vt.sendInput('c')
+  await harness.waitForFrame()
+  const copied = harness.copied.at(-1) ?? ''
+  assert.doesNotMatch(copied, /secret/u, 'the copied registry never exposes userinfo')
+  assert.doesNotMatch(copied, /\x1b/u, 'the copied metadata carries no terminal escape')
+  assert.match(copied, /registry: https:\/\/\*\*\*@registry\.example\/path/u,
+    'the copied registry uses the shared masked projection')
+})
+
+test('a refused Host version list sanitizes its reason and every attempt reason', async () => {
+  const harness = await open({
+    columns: 120,
+    rows: 40,
+    bundles: UPDATABLE_BUNDLES(),
+    plugins: [],
+    versionsImpl: async () => ({
+      status: 'refused',
+      problem: 'network',
+      reason: 'network down \u001b]0;owned-title\u0007',
+      attempts: [{
+        registry: 'https://user:secret@registry.example/',
+        problem: 'network',
+        reason: 'boom \u001b[31mred\u001b[0m \u001b]52;c;ZXZpbA==\u0007',
+      }],
+    }),
+  })
+  await openCheckUpdates(harness)
+  const frame = harness.view()
+  assert.match(frame, /Refused: network/u)
+  assert.doesNotMatch(frame, /owned-title|ZXZpbA|secret/u, 'the refused reasons carry no injected terminal text or credential')
+  assert.match(frame, /boom red/u, 'the reason text survives in its sanitized form')
+})
