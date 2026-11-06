@@ -955,9 +955,26 @@ Every card renders through the Web parity render intents in
   Lenient `{"goal":…}` parsing; undefined falls back to generic.
 - JSON-result families (`schedule_*`, `cordis_inspect_*`, `ralph`): the expanded
   body stays VERBATIM; the folded preview shows a parsed summary or drops the
-  preview row — never raw JSON. Failed calls never take the summary branch.
-  Agent-team tools are excluded by name because they collide with subagent tool
-  names.
+  preview row — never raw JSON. A failed call's error identity is never replaced
+  by a success phrase: a normal (non-`isError`) result object that carries an
+  error `code` folds to that code, and an `isError` result keeps its structured
+  error while the folded summary may add the code. Agent-team tools are excluded
+  by name because they collide with subagent tool names.
+- Schedule tools: the current `schedule_create`/`list`/`view`/`edit` family and
+  the historical `schedule_create`/`list`/`update`/`delete` pair share ONE
+  header fallback and ONE folded summarizer (TSP reuses the same header helper;
+  no TSP-only parser). A task folds as `<kind> · <status>` (current schema) or
+  `<kind> · <state>` (historical schema); a current page folds as
+  `<shown> of <total> scheduled` (or `no scheduled tasks` for an empty page),
+  while the historical bare array keeps `no scheduled jobs`/`<n> scheduled`. A
+  delete receipt folds to `deleted`, and an explicit error `code` always wins
+  over any success-shaped field. The fallback header title is the fixed action
+  name; its summary is only the task title (create) or id — never the
+  prompt/instruction. An unparseable result or an unproven shape drops the
+  summary instead of falling back to raw JSON. The live tool-authored
+  `presentCall` remains the preferred Direct presentation; this fallback covers
+  replay after definition unload and Remote logs, where no Host definition is
+  available.
 
 Must-not: render raw JSON or raw model-facing XML on a folded row; beautify an
 expanded generic JSON body; mutate `TranscriptMessage` or model bytes; let an
@@ -965,8 +982,13 @@ unknown tool lose the generic path.
 
 Proof: `test/domain/rendering.test.ts` ("web search result views render sources and the
 answer", "folded JSON-result cards show the summary, never the raw JSON",
-"settled ask_user_question cards show the answered count", "goal cards without
-a goal say no goal set").
+"a current-schema schedule list page folds to counts and keeps its exact JSON
+expanded", "a failed rc1 schedule_edit card keeps [error], the error code and
+the result detail", "settled ask_user_question cards show the answered count",
+"goal cards without a goal say no goal set"), `test/tui/action-tool-card.test.ts`
+("schedule cards use the fixed no-registry fallback titles and identities") and
+`test/domain/tern-tsp-transcript-spike.test.ts` ("the native TSP rows share the
+Schedule fallback header (no new TSP parsing)").
 
 ## Assistant-owned published visuals
 

@@ -92,6 +92,18 @@ const TOOL_TITLES: Record<string, string> = {
   [CHART_TOOL_NAME]: 'Chart',
   [SVG_TOOL_NAME]: 'SVG',
   [PRESENT_VISUAL_TOOL_NAME]: 'Present visuals',
+  // The Schedule family: the live registry's tool-authored `presentCall`
+  // still wins when it is available. This fixed fallback keeps the card
+  // identity when a Direct definition was unloaded, a historical Session has
+  // no live registration, or a Remote Client only has the durable log. The
+  // names are the current four-tool family plus the historical rc5 pair; no
+  // other name is treated as Schedule.
+  schedule_create: 'Create scheduled task',
+  schedule_list: 'List scheduled tasks',
+  schedule_view: 'View scheduled task',
+  schedule_edit: 'Edit scheduled task',
+  schedule_update: 'Update reminder',
+  schedule_delete: 'Delete reminder',
 }
 
 /**
@@ -123,6 +135,37 @@ const TUI_TOOL_TITLES: Record<string, string> = {
 export const GOAL_TOOL_NAMES: ReadonlySet<string> = new Set(['get_goal', 'create_goal', 'update_goal'])
 
 /**
+ * The Schedule tool names that carry the fixed header fallback and the folded
+ * summarizer: the current four-tool family (`create`/`list`/`view`/`edit`)
+ * plus the historical `update`/`delete` pair.
+ */
+const SCHEDULE_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'schedule_create',
+  'schedule_list',
+  'schedule_view',
+  'schedule_edit',
+  'schedule_update',
+  'schedule_delete',
+])
+
+/** The recurrence kinds the Schedule task schema knows (both generations). */
+const SCHEDULE_TASK_KINDS: ReadonlySet<string> = new Set([
+  'after',
+  'at',
+  'every',
+  'daily',
+  'weekly',
+  'cron',
+  'rrule',
+])
+
+/** The current task status values. */
+const SCHEDULE_TASK_STATUSES: ReadonlySet<string> = new Set(['active', 'paused', 'ended'])
+
+/** The historical rc5 task state values (`state`, never `status`). */
+const SCHEDULE_TASK_STATES: ReadonlySet<string> = new Set(['scheduled', 'overdue'])
+
+/**
  * Tools whose folded result preview must never leak the raw result JSON
  * (web parity: the web's folded row shows only the args summary, never the
  * result). The TUI keeps its result-preview row but shows a parsed summary
@@ -137,9 +180,7 @@ export const GOAL_TOOL_NAMES: ReadonlySet<string> = new Set(['get_goal', 'create
  */
 export const FOLDED_JSON_RESULT_TOOLS: ReadonlySet<string> = new Set([
   'ralph',
-  'schedule_create',
-  'schedule_list',
-  'schedule_delete',
+  ...SCHEDULE_TOOL_NAMES,
   'cordis_inspect_list',
   'cordis_inspect_query',
   'cordis_inspect_self',
@@ -171,6 +212,61 @@ function stringField(value: unknown): string | undefined {
   return typeof value === 'string' && value !== '' ? value : undefined
 }
 
+/** Whether `value` is a non-negative safe integer. */
+function isNonNegativeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+}
+
+/** The error code of a Schedule result object, when it declares one. */
+function scheduleErrorCode(value: unknown): string | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  return stringField((value as Record<string, unknown>).code)
+}
+
+/**
+ * The folded summary of one canonical Schedule task value: `<kind> · <status>`
+ * for the current schema, `<kind> · <state>` for the historical rc5 schema.
+ * A task whose kind or status/state is absent or outside the upstream enums
+ * is never claimed — the caller then shows no preview.
+ */
+function scheduleTaskSummary(value: unknown): string | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const record = value as Record<string, unknown>
+  const kind = stringField(record.kind)
+  if (kind === undefined || !SCHEDULE_TASK_KINDS.has(kind)) return undefined
+  // `status` and `state` are different generations' enums: an rc5-shaped
+  // `state` never validates as a status (and vice versa).
+  const status = record.status
+  const state = record.state
+  if (status !== undefined) {
+    return typeof status === 'string' && SCHEDULE_TASK_STATUSES.has(status) ? `${kind} · ${status}` : undefined
+  }
+  if (typeof state === 'string' && SCHEDULE_TASK_STATES.has(state)) return `${kind} · ${state}`
+  return undefined
+}
+
+/**
+ * The folded summary of one current-schema `schedule_list` page: a page with
+ * no items and no tasks says `no scheduled tasks`, any other page reports
+ * `<shown> of <total> scheduled`. The counts must agree with the items array
+ * and stay non-negative; an offset beyond the last item is a LEGAL empty page
+ * (the service allows it), so no `offset <= total` rule is imposed here.
+ */
+function schedulePageSummary(value: unknown): string | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const record = value as Record<string, unknown>
+  const items = record.items
+  if (!Array.isArray(items)) return undefined
+  const shown = record.shown
+  const total = record.total
+  const limit = record.limit
+  const offset = record.offset
+  if (!isNonNegativeInteger(shown) || !isNonNegativeInteger(total)) return undefined
+  if (!isNonNegativeInteger(limit) || limit === 0 || !isNonNegativeInteger(offset)) return undefined
+  if (shown !== items.length || total < shown) return undefined
+  return items.length === 0 && total === 0 ? 'no scheduled tasks' : `${shown} of ${total} scheduled`
+}
+
 /**
  * The folded preview summary for one of {@link FOLDED_JSON_RESULT_TOOLS}:
  * a short human phrase derived from the parsed result JSON. Returns
@@ -198,24 +294,34 @@ export function foldedResultSummaryFor(name: string, text: string): string | und
   }
   const parsed = parseJsonValue(text)
   if (name === 'schedule_list') {
+    // The rc5 result is the bare task array (historical replay only).
     if (Array.isArray(parsed)) return parsed.length === 0 ? 'no scheduled jobs' : `${parsed.length} scheduled`
-    if (typeof parsed === 'object' && parsed !== null) return stringField((parsed as Record<string, unknown>).code)
-    return undefined
+    const code = scheduleErrorCode(parsed)
+    if (code !== undefined) return code
+    return schedulePageSummary(parsed)
   }
-  if (name === 'schedule_create') {
-    if (typeof parsed !== 'object' || parsed === null) return undefined
-    const record = parsed as Record<string, unknown>
-    const kind = stringField(record.kind)
-    const state = stringField(record.state)
-    const parts = [kind, state].filter((part): part is string => part !== undefined)
-    return parts.length === 0 ? undefined : parts.join(' · ')
+  if (name === 'schedule_create' || name === 'schedule_view' || name === 'schedule_update') {
+    const code = scheduleErrorCode(parsed)
+    if (code !== undefined) return code
+    return scheduleTaskSummary(parsed)
+  }
+  if (name === 'schedule_edit') {
+    // An error code is the authoritative outcome and is never rendered as a
+    // success phrase; a delete success is the `deleted: true` receipt.
+    const code = scheduleErrorCode(parsed)
+    if (code !== undefined) return code
+    if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+      && (parsed as Record<string, unknown>).deleted === true) return 'deleted'
+    return scheduleTaskSummary(parsed)
   }
   if (name === 'schedule_delete') {
-    if (typeof parsed !== 'object' || parsed === null) return undefined
-    const record = parsed as Record<string, unknown>
-    if (record.deleted === true) return 'deleted'
-    if (record.deleted === false) return 'not found'
-    return stringField(record.code)
+    // The rc5 delete receipt is the only shape that answers `not found`.
+    if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+      const deleted = (parsed as Record<string, unknown>).deleted
+      if (deleted === true) return 'deleted'
+      if (deleted === false) return 'not found'
+    }
+    return scheduleErrorCode(parsed)
   }
   if (name === 'cordis_inspect_list') {
     if (typeof parsed !== 'object' || parsed === null) return undefined
@@ -767,6 +873,19 @@ function summarizeToolArgs(name: string, argsRaw: string): string | undefined {
     const count = Array.isArray(args.visuals) ? args.visuals.length : 0
     return count === 0 ? undefined : `${count} visual${count === 1 ? '' : 's'}`
   }
+  if (SCHEDULE_TOOL_NAMES.has(name)) {
+    // The fixed Schedule fallback reads ONLY the documented identity field:
+    // never the prompt/instruction (a raw-args fallback would leak it) and
+    // never an arbitrary JSON key. An absent or mistyped field keeps the card
+    // title with an empty summary instead of inventing one.
+    if (name === 'schedule_list') return ''
+    if (name === 'schedule_create') {
+      const title = args.title
+      return typeof title === 'string' ? firstLine(title) : ''
+    }
+    const id = args.id
+    return typeof id === 'string' ? firstLine(id) : ''
+  }
   if (name !== 'todo_write') return undefined
   const todos = args.todos
   if (!Array.isArray(todos)) return undefined
@@ -778,6 +897,15 @@ function summarizeToolArgs(name: string, argsRaw: string): string | undefined {
   )
   const content = active === undefined ? '' : String((active as Record<string, unknown>).content ?? '')
   return `${done}/${todos.length} done${content === '' ? '' : ` · ${firstLine(content)}`}`
+}
+
+/** The `schedule_edit` delete branch title; every other name has no dynamic
+ *  fallback title (the fixed `TOOL_TITLES` entry applies). */
+function scheduleEditFallbackTitle(name: string, argsRaw: string): string | undefined {
+  if (name !== 'schedule_edit') return undefined
+  const parsed = parseArgs(argsRaw)
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined
+  return (parsed as Record<string, unknown>).action === 'delete' ? 'Delete scheduled task' : undefined
 }
 
 /** Classify a tool name into its row variant; unknown names are `others`. */
@@ -1165,7 +1293,9 @@ export function toolCardHeader(name: string, argsRaw: string, cwd?: string): Too
   if (action !== undefined) return { title: action.title, summary: action.summary ?? '' }
 
   const variant = classifyTool(name)
-  const toolTitle = TOOL_TITLES[name] ?? TUI_TOOL_TITLES[name]
+  // `schedule_edit`'s delete action names the delete; every other Schedule
+  // name keeps its fixed fallback title from TOOL_TITLES.
+  const toolTitle = scheduleEditFallbackTitle(name, argsRaw) ?? TOOL_TITLES[name] ?? TUI_TOOL_TITLES[name]
   // Tool-specific summaries replace the args-derived base before the
   // generic derivation (Web TodoRow parity: `todo_write` reads
   // `2/3 done` instead of a raw args dump).

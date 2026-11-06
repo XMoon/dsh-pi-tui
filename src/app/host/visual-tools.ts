@@ -78,10 +78,10 @@ export const name = 'pi-tui-visual-tools'
 
 /**
  * The Host services this row uses: the registry it owns, the live Agent (the
- * executing Session identity) and the official Session read service that
- * returns a committed observation.
+ * executing Session identity plus the official turn-boundary reader) and the
+ * official Session read service that returns a committed observation.
  */
-export const inject = ['tools', 'agents', 'sessionQuery', 'sessionProjections']
+export const inject = ['tools', 'agents', 'sessionQuery']
 
 /**
  * The two stable, namespaced generating tool names.
@@ -191,9 +191,9 @@ interface SessionQueryObservationLike {
   }>
 }
 
-/** The narrow official `sessionProjections` read this row uses. */
-interface SessionProjectionReaderLike {
-  stateOf(session: unknown, key: 'turnBoundary'): TurnBoundary | undefined
+/** The narrow official `agents` read this row uses. */
+interface AgentTurnBoundaryReaderLike {
+  turnBoundaryOf(session: unknown): TurnBoundary
 }
 
 /**
@@ -207,14 +207,13 @@ interface SessionProjectionReaderLike {
  * keeps its exact previous behaviour.
  */
 function projectVisualReference(
-  projections: SessionProjectionReaderLike,
+  readers: AgentTurnBoundaryReaderLike,
   exec: Parameters<NonNullable<ToolDefinition['projectContent']>>[0],
   result: Parameters<NonNullable<ToolDefinition['projectContent']>>[1],
 ): ContentBlock[] | undefined {
   if (exec.agent === undefined || exec.parent !== undefined) return undefined
   if (result.isError) return undefined
-  const boundary = projections.stateOf(exec.agent.session, 'turnBoundary')
-  if (boundary === undefined) return undefined
+  const boundary = readers.turnBoundaryOf(exec.agent.session)
   if (boundary.openTurnStartSeq === null || boundary.lastStepStartSeq === null) return undefined
   if (boundary.lastStepBoundary === null || boundary.lastStepBoundary.kind !== 'start') return undefined
   const blocks = result.content
@@ -243,9 +242,9 @@ function projectVisualReference(
 /**
  * Define the chart tool. The tool body is a pure canonical projection of the
  * caller's supplied numbers: no filesystem, network, model or workspace access.
- * @param projections - the turn-boundary reader the reference projection uses.
+ * @param readers - the official Agent turn-boundary reader the reference projection uses.
  */
-function chartTool(projections: SessionProjectionReaderLike) {
+function chartTool(readers: AgentTurnBoundaryReaderLike) {
   return defineTool({
     name: CHART_TOOL_NAME,
     description: 'Render a small static chart from numbers supplied by the user or by an explicitly labelled example. '
@@ -268,7 +267,7 @@ function chartTool(projections: SessionProjectionReaderLike) {
       schema: CHART_OUTPUT_SCHEMA,
       render: (_args, value) => chartContentBlocks(value),
     },
-    projectContent: (exec, result) => projectVisualReference(projections, exec, result),
+    projectContent: (exec, result) => projectVisualReference(readers, exec, result),
     isConcurrencySafe: () => true,
     async execute(args) {
       const problem = chartArgsProblem(args)
@@ -291,9 +290,9 @@ function chartTool(projections: SessionProjectionReaderLike) {
 /**
  * Define the SVG tool. The body admits a bounded static subset and returns the
  * short credential; the source itself stays in the durable call arguments.
- * @param projections - the turn-boundary reader the reference projection uses.
+ * @param readers - the official Agent turn-boundary reader the reference projection uses.
  */
-function svgTool(projections: SessionProjectionReaderLike) {
+function svgTool(readers: AgentTurnBoundaryReaderLike) {
   return defineTool({
     name: SVG_TOOL_NAME,
     description: 'Render one static, self-contained SVG figure. Use only when a diagram communicates better than text. '
@@ -312,7 +311,7 @@ function svgTool(projections: SessionProjectionReaderLike) {
       schema: SVG_OUTPUT_SCHEMA,
       render: (_args, value) => svgContentBlocks(value),
     },
-    projectContent: (exec, result) => projectVisualReference(projections, exec, result),
+    projectContent: (exec, result) => projectVisualReference(readers, exec, result),
     isConcurrencySafe: () => true,
     async execute(args) {
       const problem = svgArgsProblem(args)
@@ -331,9 +330,9 @@ function svgTool(projections: SessionProjectionReaderLike) {
  * replay uses. A refusal throws one readable error; there is no partial
  * publication.
  * @param ctx - the Host context (recorded so the tool body reads the live Host).
- * @param projections - the turn-boundary reader used for the boundary fences.
+ * @param readers - the official Agent turn-boundary reader used for the boundary fences.
  */
-function presentVisualTool(ctx: Context, projections: SessionProjectionReaderLike) {
+function presentVisualTool(ctx: Context, readers: AgentTurnBoundaryReaderLike) {
   return defineTool({
     name: PRESENT_VISUAL_TOOL_NAME,
     description: 'Select previously generated chart/SVG visuals for presentation to the user. '
@@ -371,7 +370,7 @@ function presentVisualTool(ctx: Context, projections: SessionProjectionReaderLik
       if (!parsed.ok) throw new Error(parsed.reason)
       const requested = parsed.refs
       const session = exec.agent.session
-      const before = requireOpenStep(projections, session, 'present_visual')
+      const before = requireOpenStep(readers, session, 'present_visual')
       const query = ctx.reflect.get('sessionQuery') as SessionQueryObservationLike
       const observation = await query.observeSession(session.id as unknown as string, {
         signal: exec.signal,
@@ -391,7 +390,7 @@ function presentVisualTool(ctx: Context, projections: SessionProjectionReaderLik
         observation[Symbol.dispose]()
       }
       exec.signal.throwIfAborted()
-      const after = requireOpenStep(projections, session, 'present_visual')
+      const after = requireOpenStep(readers, session, 'present_visual')
       if (!sameBoundary(before, after)) {
         throw new Error('present_visual aborted: the turn/step boundary changed while reading the Session')
       }
@@ -410,12 +409,11 @@ function presentVisualTool(ctx: Context, projections: SessionProjectionReaderLik
 
 /** Read the turn boundary and require an open turn with an open `step/start`. */
 function requireOpenStep(
-  projections: SessionProjectionReaderLike,
+  readers: AgentTurnBoundaryReaderLike,
   session: unknown,
   toolName: string,
 ): TurnBoundary {
-  const boundary = projections.stateOf(session, 'turnBoundary')
-  if (boundary === undefined) throw new Error(`${toolName} requires the turnBoundary session projection`)
+  const boundary = readers.turnBoundaryOf(session)
   if (boundary.openTurnStartSeq === null) throw new Error(`${toolName} requires an open turn`)
   if (boundary.lastStepStartSeq === null) throw new Error(`${toolName} requires an open step`)
   if (boundary.lastStepBoundary === null || boundary.lastStepBoundary.kind !== 'start') {
@@ -510,7 +508,7 @@ function releaseRegistered(
  */
 export function apply(ctx: Context, config: Config): void {
   const tools = ctx.reflect.get('tools') as ToolRuntime
-  const projections = ctx.reflect.get('sessionProjections') as SessionProjectionReaderLike
+  const readers = ctx.reflect.get('agents') as AgentTurnBoundaryReaderLike
   let chart: RegisteredVisualTool | undefined
   let svg: RegisteredVisualTool | undefined
   let present: RegisteredVisualTool | undefined
@@ -588,13 +586,13 @@ export function apply(ctx: Context, config: Config): void {
       throw new AggregateError(errors, 'visual tools: a registration failed and the rollback did not complete')
     }
     try {
-      const chartDefinition = chartTool(projections)
+      const chartDefinition = chartTool(readers)
       chart = { definition: chartDefinition, dispose: tools.register(chartDefinition) }
       created.push(chart)
-      const svgDefinition = svgTool(projections)
+      const svgDefinition = svgTool(readers)
       svg = { definition: svgDefinition, dispose: tools.register(svgDefinition) }
       created.push(svg)
-      const presentDefinition = presentVisualTool(ctx, projections)
+      const presentDefinition = presentVisualTool(ctx, readers)
       present = { definition: presentDefinition, dispose: tools.register(presentDefinition) }
       created.push(present)
     } catch (error) {

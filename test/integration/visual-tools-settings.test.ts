@@ -72,11 +72,18 @@ interface Plane {
  *  structural stand-ins: the row only needs them to be PRESENT for the Loader
  *  to activate it. */
 function provideVisualRowDependencies(ctx: Context): void {
-  ctx.provide('agents', { get: () => undefined } as never)
+  ctx.provide('agents', {
+    get: () => undefined,
+    turnBoundaryOf: () => ({
+      openTurnStartSeq: null,
+      lastStepStartSeq: null,
+      lastStepBoundary: null,
+      lastTurn: 0,
+    }),
+  } as never)
   ctx.provide('sessionQuery', {
     observeSession: async () => { throw new Error('this plane never observes a Session') },
   } as never)
-  ctx.provide('sessionProjections', { stateOf: () => undefined } as never)
 }
 
 async function bootPlane(life: TestLifecycle, root: string, resetUserDocument = false): Promise<Plane> {

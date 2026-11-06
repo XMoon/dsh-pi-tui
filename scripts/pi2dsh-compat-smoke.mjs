@@ -35,6 +35,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from 'node:fs'
@@ -67,6 +68,20 @@ const CONSUMER_PACKAGE_NAME = 'pi2dsh'
 const OFFICIAL_PRESET_IDS = ['standard', 'ptc', 'minimal', 'cordis']
 const MANIFEST_PATH = join(PACKAGE_ROOT, 'test', 'compat', 'pi2dsh.json')
 const FIXTURE_ROOT = join(PACKAGE_ROOT, 'test', 'fixtures', 'pi2dsh-compat')
+
+/**
+ * The ONLY dispositions this gate may transmit. `passed` means the complete
+ * real PTY smoke ran; `skipped-unsupported-dsh-peer` is the Owner-approved,
+ * PR-only typed skip for a published consumer whose DSH peers provably do not
+ * cover the target DSH. Nothing else may be written, and neither value ever
+ * means "release qualified" by itself.
+ */
+const DISPOSITION_PASSED = 'passed'
+const DISPOSITION_SKIPPED_UNSUPPORTED_DSH_PEER = 'skipped-unsupported-dsh-peer'
+const PI2DSH_COMPAT_DISPOSITIONS = new Set([DISPOSITION_PASSED, DISPOSITION_SKIPPED_UNSUPPORTED_DSH_PEER])
+
+/** The CI-only ref shape on which the typed unsupported-peer skip may run. */
+const PULL_REQUEST_REF = /^refs\/pull\/[0-9]+\/merge$/u
 // The required contracts are DERIVED from the production extension surface,
 // never hand-written here: the published pi2dsh bridge hosts Pi components
 // only when the host reports the CURRENT apiVersion and advertises the
@@ -390,6 +405,73 @@ function allowStaleTuiPeerArgument(args) {
   return args.includes('--allow-stale-tui-peer') || process.env.PI2DSH_COMPAT_ALLOW_STALE_TUI_PEER === '1'
 }
 
+/** Whether the Owner-approved, PR-only typed skip is requested on the CLI. */
+function skipUnsupportedDshPeerOnPrArgument(args) {
+  return args.includes('--skip-unsupported-dsh-peer-on-pr')
+}
+
+/**
+ * The disposition transport path. The explicit `--disposition-file` option
+ * wins; CI may alternatively export `PI2DSH_COMPAT_DISPOSITION_FILE`. The path
+ * must be ABSOLUTE: the script is often launched from a pnpm `--` argv and a
+ * relative path would land somewhere nobody reads.
+ */
+function dispositionFileArgument(args) {
+  const index = args.indexOf('--disposition-file')
+  const fromEnvironment = process.env.PI2DSH_COMPAT_DISPOSITION_FILE
+  let value
+  if (index >= 0) {
+    value = args[index + 1]
+    if (value === undefined || value === '' || value.startsWith('--')) {
+      fail('COMPAT_BOOT_FAILURE', '--disposition-file requires an absolute temp file path')
+    }
+  } else if (fromEnvironment !== undefined && fromEnvironment !== '') {
+    value = fromEnvironment
+  }
+  if (value === undefined) return undefined
+  if (!isAbsolute(value)) fail('COMPAT_BOOT_FAILURE', `the pi2dsh disposition file path must be absolute: ${value}`)
+  return value
+}
+
+/** Whether the actual CI ref is a pull-request merge ref. */
+function isPullRequestRef(ref) {
+  return typeof ref === 'string' && PULL_REQUEST_REF.test(ref)
+}
+
+/**
+ * Write exactly one disposition ATOMICALLY (a same-directory temporary path
+ * followed by a rename). A crash can therefore never leave a half-written
+ * success file behind for CI to read.
+ */
+function writeDispositionFile(path, disposition) {
+  if (path === undefined) return
+  if (!PI2DSH_COMPAT_DISPOSITIONS.has(disposition)) {
+    fail('COMPAT_BOOT_FAILURE', `refusing to write an unknown pi2dsh compatibility disposition: ${String(disposition)}`)
+  }
+  const temporary = `${path}.tmp-${process.pid}`
+  writeFileSync(temporary, `${disposition}\n`, 'utf8')
+  renameSync(temporary, path)
+}
+
+function unsupportedDshPeerProblems(peers) {
+  return peers.map(([name, range]) => `  ${name}: ${range}`)
+}
+
+/**
+ * The ONE condition under which the typed skip may replace the real smoke:
+ * the classification is exactly `unsupported-dsh-peer`, the explicit PR-only
+ * CLI flag was given, the actual GitHub ref is a PR merge ref, and a usable
+ * disposition path exists. Anything else fails closed into the normal
+ * blocking preflight — a tag/branch/missing ref can never skip.
+ */
+function unsupportedDshPeerSkipAllowed({ classification, skipRequested, ref, dispositionFile }) {
+  return classification?.kind === 'unsupported-dsh-peer'
+    && skipRequested === true
+    && isPullRequestRef(ref)
+    && typeof dispositionFile === 'string'
+    && dispositionFile !== ''
+}
+
 function distributionArgument(args) {
   const index = args.indexOf('--distribution')
   if (index < 0) return undefined
@@ -512,30 +594,71 @@ function rangeIncludesVersion(range, version) {
  *   `@deepseek-ai/dsh-*` peer covers the target DSH. This is a stale
  *   third-party declaration: the targeted real runtime smoke decides when
  *   `--allow-stale-tui-peer` is given;
- * - `{ kind: 'block', problems }` — a DSH peer mismatch, missing dsh peers,
- *   or any other contract problem (always blocking).
+ * - `{ kind: 'unsupported-dsh-peer', peers }` — every declared DSH range is a
+ *   VALID range that provably excludes the target DSH, and NOTHING else is
+ *   wrong (no missing peers, no invalid range, no stale/missing TUI peer, no
+ *   broken metadata). This is the ONLY classification the Owner-approved
+ *   PR-only typed skip may accept;
+ * - `{ kind: 'block', problems }` — anything else (missing peers, missing TUI
+ *   peer, invalid versions/ranges, a mixed DSH+TUI problem, broken metadata)
+ *   is always blocking.
  */
 function classifyConsumerMetadata(consumerPackage, manifest, candidatePackage) {
-  const peerDependencies = consumerPackage?.peerDependencies
+  if (typeof consumerPackage !== 'object' || consumerPackage === null || Array.isArray(consumerPackage)) {
+    return { kind: 'block', problems: ['  published consumer metadata: (not a package object)'] }
+  }
+  const peerDependencies = consumerPackage.peerDependencies
+  if (peerDependencies !== undefined
+    && (typeof peerDependencies !== 'object' || peerDependencies === null || Array.isArray(peerDependencies))) {
+    return { kind: 'block', problems: ['  peerDependencies: (malformed)'] }
+  }
   const tuiRange = peerDependencies?.[EXPECTED_PACKAGE_NAME]
+  // A DSH-ish peer with a non-string/empty range is broken metadata, not a
+  // peer that simply did not cover the target: it must stay blocking.
+  const malformedDshPeers = Object.entries(peerDependencies ?? {}).filter(([name, range]) =>
+    (name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-'))
+    && (typeof range !== 'string' || range.trim() === ''))
+  if (malformedDshPeers.length > 0) {
+    return { kind: 'block', problems: malformedDshPeers.map(([name]) => `  ${name}: (invalid declared range)`) }
+  }
   const dshPeers = relevantDshPeerEntries(consumerPackage)
   const unsupportedDshPeers = dshPeers.filter(([, range]) => !rangeIncludesVersion(range, manifest.dshVersion))
 
   if (dshPeers.length === 0) {
     return { kind: 'block', problems: ['  @deepseek-ai/dsh-* peers: (none declared)'] }
   }
-  if (unsupportedDshPeers.length > 0) {
-    return { kind: 'block', problems: unsupportedDshPeers.map(([name, range]) => `  ${name}: ${range}`) }
-  }
   // A MISSING TUI peer is a contract blocker, not a stale range: "declared
   // too old" can be proven stale by the real runtime smoke, but "never
   // declared a dependency on the TUI at all" cannot.
-  if (typeof tuiRange !== 'string' || tuiRange.trim() === '') {
+  const tuiMissing = typeof tuiRange !== 'string' || tuiRange.trim() === ''
+  const tuiStale = !tuiMissing && !rangeIncludesVersion(tuiRange, candidatePackage.version)
+  const tuiRangeInvalid = !tuiMissing && semver.validRange(tuiRange) === null
+  if (unsupportedDshPeers.length > 0) {
+    const dshRangesValid = dshPeers.every(([, range]) => semver.validRange(range) !== null)
+    const versionsValid = semver.valid(manifest.dshVersion) !== null && semver.valid(candidatePackage.version) !== null
+    const identityValid = consumerPackage.name === CONSUMER_PACKAGE_NAME
+      && consumerPackage.version === manifest.pi2dshVersion
+    const tuiCoversCandidate = !tuiMissing && !tuiStale && !tuiRangeInvalid
+    if (dshRangesValid && versionsValid && identityValid && tuiCoversCandidate) {
+      return { kind: 'unsupported-dsh-peer', peers: unsupportedDshPeers }
+    }
+    // The typed skip is unavailable, so report EVERY blocking fact (never only
+    // the DSH ranges) and stay blocking.
+    const problems = unsupportedDshPeerProblems(unsupportedDshPeers)
+    if (tuiMissing) problems.push(`  ${EXPECTED_PACKAGE_NAME}: (missing)`)
+    else if (tuiRangeInvalid) problems.push(`  ${EXPECTED_PACKAGE_NAME}: ${tuiRange} (invalid range)`)
+    else if (tuiStale) problems.push(`  ${EXPECTED_PACKAGE_NAME}: ${tuiRange}`)
+    if (!dshRangesValid) {
+      problems.push('  @deepseek-ai/dsh-* peers: (a declared range is not a valid semver range)')
+    }
+    if (!versionsValid) problems.push('  versions: (the manifest or candidate version is not a valid semver)')
+    if (!identityValid) problems.push(`  published consumer identity: (expected ${CONSUMER_PACKAGE_NAME}@${manifest.pi2dshVersion})`)
+    return { kind: 'block', problems }
+  }
+  if (tuiMissing) {
     return { kind: 'block', problems: [`  ${EXPECTED_PACKAGE_NAME}: (missing)`] }
   }
-  if (!rangeIncludesVersion(tuiRange, candidatePackage.version)) {
-    return { kind: 'stale-tui-peer', tuiRange }
-  }
+  if (tuiStale) return { kind: 'stale-tui-peer', tuiRange }
   return { kind: 'ok' }
 }
 
@@ -555,12 +678,18 @@ function failConsumerMetadata(consumerPackage, manifest, candidatePackage, probl
  * The blocking metadata preflight. Throws `ECOSYSTEM_CONTRACT_BLOCKER` for a
  * DSH peer mismatch, missing dsh peers, or any other contract problem; a
  * stale-TUI-peer-only classification is returned (not thrown) so the caller
- * can run the targeted runtime smoke under `--allow-stale-tui-peer`.
+ * can run the targeted runtime smoke under `--allow-stale-tui-peer`. The
+ * typed `unsupported-dsh-peer` classification is returned so the CALLER can
+ * decide whether the narrow PR-only skip is permissible; everywhere else it is
+ * blocking exactly like before.
  */
 function validateConsumerMetadata(consumerPackage, manifest, candidatePackage) {
   const classification = classifyConsumerMetadata(consumerPackage, manifest, candidatePackage)
   if (classification.kind === 'block') {
     failConsumerMetadata(consumerPackage, manifest, candidatePackage, classification.problems)
+  }
+  if (classification.kind === 'unsupported-dsh-peer') {
+    failConsumerMetadata(consumerPackage, manifest, candidatePackage, unsupportedDshPeerProblems(classification.peers))
   }
   return classification
 }
@@ -1316,6 +1445,11 @@ async function main() {
   activeGateDeadline = Date.now() + GATE_BUDGET_MS
   try {
     const smokeArgs = process.argv.slice(2)
+    const dispositionFile = dispositionFileArgument(smokeArgs)
+    const skipUnsupportedDshPeerOnPr = skipUnsupportedDshPeerOnPrArgument(smokeArgs)
+    if (skipUnsupportedDshPeerOnPr && dispositionFile === undefined) {
+      fail('COMPAT_BOOT_FAILURE', '--skip-unsupported-dsh-peer-on-pr requires --disposition-file (or PI2DSH_COMPAT_DISPOSITION_FILE): a typed skip must be machine-readable')
+    }
     context.tarball = resolveTarball(candidateArgument(smokeArgs))
     context.manifest = readJson(MANIFEST_PATH, 'pi2dsh compatibility manifest')
     context.candidatePackage = validateCandidateTarball(context.tarball)
@@ -1353,8 +1487,30 @@ async function main() {
     const env = isolatedEnvironment(workDir, home, dshHome, evidencePath)
     context.consumerPackage = publishedPackageMetadata(CONSUMER_PACKAGE_NAME, context.manifest.pi2dshVersion, env)
     if (forcePeersArgument(smokeArgs)) {
+      if (dispositionFile !== undefined) {
+        fail('COMPAT_BOOT_FAILURE', '--force-peers is INVESTIGATIVE and can never produce a pi2dsh compatibility disposition')
+      }
       console.log('PEER PREFLIGHT BYPASSED (--force-peers): the published peer declaration does not cover the candidate; running the runtime smoke anyway — the result is INVESTIGATIVE and never stands in for the blocking preflight')
     } else {
+      const classification = classifyConsumerMetadata(context.consumerPackage, context.manifest, context.candidatePackage)
+      if (unsupportedDshPeerSkipAllowed({
+        classification,
+        skipRequested: skipUnsupportedDshPeerOnPr,
+        ref: process.env.GITHUB_REF,
+        dispositionFile,
+      })) {
+        // The Owner-approved PR-only typed skip: the published DSH peers
+        // PROVABLY exclude the target and nothing else is wrong. Do not install
+        // the candidate, the bridge or the fixture, and never claim runtime
+        // compatibility. The disposition is the only artifact.
+        writeDispositionFile(dispositionFile, DISPOSITION_SKIPPED_UNSUPPORTED_DSH_PEER)
+        console.log(`PI2DSH_COMPAT_DISPOSITION=${DISPOSITION_SKIPPED_UNSUPPORTED_DSH_PEER}`)
+        console.log('PI2DSH_COMPAT_EVIDENCE=published-peer-mismatch')
+        console.log('PI2DSH_RUNTIME_QUALIFIED=false')
+        console.log(`UNSUPPORTED_DSH_PEER: ${CONSUMER_PACKAGE_NAME}@${context.consumerPackage.version} declares ${classification.peers.map(([name, range]) => `${name} ${range}`).join(', ')}, which does not cover DSH ${context.manifest.dshVersion}`)
+        console.log(`NOT_QUALIFIED: external pi2dsh compatibility for ${CONSUMER_PACKAGE_NAME}@${context.manifest.pi2dshVersion} x DSH ${context.manifest.dshVersion} is NOT qualified; no candidate, bridge or fixture was installed. This PR-only typed skip is not a release qualification and never becomes one.`)
+        return
+      }
       const preflight = validateConsumerMetadata(context.consumerPackage, context.manifest, context.candidatePackage)
       if (preflight.kind === 'stale-tui-peer') {
         if (!allowStaleTuiPeerArgument(smokeArgs)) {
@@ -1493,6 +1649,8 @@ async function main() {
     if (context.staleTuiPeer !== undefined) {
       console.log(`WARN: ${CONSUMER_PACKAGE_NAME}@${context.manifest.pi2dshVersion} still declares ${EXPECTED_PACKAGE_NAME} ${context.staleTuiPeer} (stale peer declaration — does not cover ${context.candidatePackage.version}); the targeted real runtime smoke PASSED, so the stale metadata is a warning, not a blocker. Ask the pi2dsh maintainers to widen the peer (e.g. ^0.3.3 || ^0.4.0-alpha.1).`)
     }
+    // Reached ONLY after every preflight and PTY smoke check succeeded.
+    writeDispositionFile(dispositionFile, DISPOSITION_PASSED)
   } catch (error) {
     context.error = error
     preserveDiagnostics(context)
@@ -1539,6 +1697,12 @@ export {
   validateConsumerMetadata,
   classifyConsumerMetadata,
   failConsumerMetadata,
+  dispositionFileArgument,
+  skipUnsupportedDshPeerOnPrArgument,
+  isPullRequestRef,
+  unsupportedDshPeerSkipAllowed,
+  writeDispositionFile,
+  PI2DSH_COMPAT_DISPOSITIONS,
   hasFreshResizeWidth,
   isolatedEnvironment,
   isRetryableRegistryFailure,

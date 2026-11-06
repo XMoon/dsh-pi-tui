@@ -1245,6 +1245,7 @@ jobs:
           node scripts/ci-verdict.mjs qualify \
             --mode "$DSH_MODE" \
             --ref "$GITHUB_REF" \
+            --ecosystem-disposition "${{ needs['ecosystem-compat'].outputs.disposition }}" \
             --phase "dsh-context=${{ needs.dsh-context.result }}" \
             --phase "mise-toolchain=${{ needs['mise-toolchain'].result }}" \
             --phase "prepare-dsh-source=${{ needs['prepare-dsh-source'].result }}" \
@@ -1364,6 +1365,7 @@ jobs:
           node scripts/ci-verdict.mjs summary \
             --mode "$DSH_MODE" \
             --ref "$GITHUB_REF" \
+            --ecosystem-disposition "${{ needs['ecosystem-compat'].outputs.disposition }}" \
             --started "${STARTED:-}" \
             $RELEASE_ARG \
             --phase "dsh-context=${{ needs.dsh-context.result }}" \
@@ -1529,6 +1531,11 @@ jobs:
     if: ${{ always() && needs.dsh-context.result == 'success' && needs.qualify.result == 'success' && (needs.dsh-context.outputs.mode == 'npm' || needs.prepare-dsh-source.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    outputs:
+      # The typed ecosystem-compat transport: the ONLY values ci-verdict
+      # accepts are `passed` or the PR-only `skipped-unsupported-dsh-peer`.
+      # An absent/unknown value is a verdict failure, never a default pass.
+      disposition: ${{ steps.run_pi2dsh.outputs.disposition }}
     env:
       DSH_MODE: ${{ needs.dsh-context.outputs.mode }}
 
@@ -1577,6 +1584,7 @@ jobs:
           sudo apt-get install -y tmux
 
       - name: Run pi2dsh compatibility smoke
+        id: run_pi2dsh
         env:
           PI2DSH_COMPAT_DEBUG_DIR: pi2dsh-compat-debug
         shell: bash
@@ -1599,8 +1607,45 @@ jobs:
           # The NARROW stale-peer allowance: only a TUI-peer-only metadata
           # mismatch proceeds to the targeted real runtime smoke (whose
           # result decides). DSH peer mismatches, missing dsh peers, and
-          # runtime/fixture failures stay blocking.
-          node scripts/pi2dsh-compat-smoke.mjs "${TARBALLS[0]}" --allow-stale-tui-peer
+          # runtime/fixture failures stay blocking. The typed
+          # `--skip-unsupported-dsh-peer-on-pr` is added ONLY on a PR merge
+          # ref, and the script itself re-checks the actual GITHUB_REF and the
+          # explicit flag: a release tag or branch can never skip.
+          SMOKE_ARGS=("${TARBALLS[0]}" --allow-stale-tui-peer)
+          DISPOSITION_FILE=""
+          if [ "$DSH_MODE" = "npm" ]; then
+            DISPOSITION_FILE="$RUNNER_TEMP/pi2dsh-disposition"
+            rm -f "$DISPOSITION_FILE"
+            SMOKE_ARGS+=(--disposition-file "$DISPOSITION_FILE")
+            if [[ "$GITHUB_REF" =~ ^refs/pull/[0-9]+/merge$ ]]; then
+              SMOKE_ARGS+=(--skip-unsupported-dsh-peer-on-pr)
+            fi
+          fi
+          node scripts/pi2dsh-compat-smoke.mjs "${SMOKE_ARGS[@]}"
+
+          # The ecosystem gate is npm-only. Source Mode keeps its existing
+          # contract and claims no disposition.
+          if [ "$DSH_MODE" != "npm" ]; then
+            echo "disposition=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # A zero exit is NOT the proof: only the script's typed disposition
+          # is. Missing, empty, mixed-case or unknown values fail closed.
+          if [ ! -f "$DISPOSITION_FILE" ]; then
+            echo "the pi2dsh smoke exited 0 without a disposition file: a run that proved nothing is not a pass" >&2
+            exit 1
+          fi
+          DISPOSITION="$(tr -d '\r\n' < "$DISPOSITION_FILE")"
+          case "$DISPOSITION" in
+            passed|skipped-unsupported-dsh-peer)
+              echo "disposition=$DISPOSITION" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "the pi2dsh smoke wrote an unknown disposition: '$DISPOSITION'" >&2
+              exit 1
+              ;;
+          esac
 
       - name: Upload pi2dsh compatibility diagnostics
         if: failure()

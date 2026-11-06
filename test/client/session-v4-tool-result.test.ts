@@ -25,7 +25,7 @@ import { createToolResultMessage, MessageId, ToolCallId, type ContentBlock } fro
 import { SessionFormatEventCollector } from '@deepseek-ai/dsh-session-format'
 import { createSessionFormatV3ToV4, sessionFormatV3ToV4 } from '@deepseek-ai/dsh-session-format-v3-to-v4'
 import { SessionSeq, TOOL_NOT_STARTED, TOOL_OUTCOME_UNKNOWN, type SessionEvent } from '@deepseek-ai/dsh-session'
-import { resultTextLines, type JsonValue } from '../../src/tui/transcript/tool-presentation.ts'
+import { foldedResultSummaryFor, resultTextLines, type JsonValue } from '../../src/tui/transcript/tool-presentation.ts'
 import { TranscriptFolder, type TranscriptMessage } from '../../src/transcript.ts'
 import { renderTranscriptMarkdown } from '../../src/client/artifact/transcript-markdown.ts'
 
@@ -143,6 +143,54 @@ test('message.isError alone is the outcome authority when no structured error de
   const card = toolCards(messages)[0]!
   assert.equal(card.status, 'error')
   assert.equal(card.error, undefined)
+})
+
+test('rc1 Schedule CRUD results replay as exact tool cards with the folded summary', () => {
+  // The rc1 Schedule tools return their error objects as NORMAL tool results
+  // (the output schema carries `{code,message}`); the card status therefore
+  // follows `message.isError`, while the folded summary still shows the error
+  // code instead of claiming success.
+  const createValue = {
+    id: 's1', kind: 'rrule', status: 'active', title: 'Daily digest', target: { kind: 'thread' },
+    scheduledAt: '2026-11-07T00:00:00Z', scheduledAtLocal: '2026-11-07T08:00:00+08:00', rrule: 'FREQ=DAILY',
+  }
+  const listValue = { items: [createValue], shown: 1, total: 3, limit: 20, offset: 0 }
+  const deletedValue = { id: 's1', deleted: true }
+  const notFoundValue = { id: 's1', code: 'schedule_not_found' }
+  const conflictValue = { id: 's1', code: 'schedule_conflict' }
+  const messages = fold([
+    turnStart(),
+    toolCall(1, 'create-1', 'schedule_create', { title: 'Daily digest', prompt: 'p', rrule: 'FREQ=DAILY', target: 'thread' }),
+    toolResult(2, 'create-1', [text(JSON.stringify(createValue))]),
+    toolCall(3, 'list-1', 'schedule_list', { limit: 20 }),
+    toolResult(4, 'list-1', [text(JSON.stringify(listValue))]),
+    toolCall(5, 'delete-1', 'schedule_edit', { id: 's1', action: 'delete' }),
+    toolResult(6, 'delete-1', [text(JSON.stringify(deletedValue))]),
+    toolCall(7, 'missing-1', 'schedule_edit', { id: 's1', action: 'update' }),
+    toolResult(8, 'missing-1', [text(JSON.stringify(notFoundValue))]),
+    toolCall(9, 'conflict-1', 'schedule_edit', { id: 's1', action: 'update' }),
+    toolResult(10, 'conflict-1', [text(JSON.stringify(conflictValue))], {
+      isError: true,
+      error: { name: 'ScheduleConflictError', code: 'schedule_conflict' },
+    }),
+    turnEnd(11),
+  ])
+  const cards = toolCards(messages)
+  assert.equal(cards.length, 5)
+  assert.deepEqual(cards.map(card => card.status), ['ok', 'ok', 'ok', 'ok', 'error'])
+  // The canonical results are preserved byte for byte for the expanded body.
+  assert.deepEqual(resultTextLines(cards[0]!.resultBlocks ?? []), [JSON.stringify(createValue)])
+  assert.deepEqual(resultTextLines(cards[1]!.resultBlocks ?? []), [JSON.stringify(listValue)])
+  assert.deepEqual(resultTextLines(cards[2]!.resultBlocks ?? []), [JSON.stringify(deletedValue)])
+  // The folded preview derives from the exact result, never the raw JSON.
+  assert.equal(foldedResultSummaryFor(cards[0]!.name, cards[0]!.result), 'rrule · active')
+  assert.equal(foldedResultSummaryFor(cards[1]!.name, cards[1]!.result), '1 of 3 scheduled')
+  assert.equal(foldedResultSummaryFor(cards[2]!.name, cards[2]!.result), 'deleted')
+  assert.equal(foldedResultSummaryFor(cards[3]!.name, cards[3]!.result), 'schedule_not_found',
+    'a normal-result error object never folds to a success phrase')
+  assert.equal(foldedResultSummaryFor(cards[4]!.name, cards[4]!.result), 'schedule_conflict')
+  assert.deepEqual(cards[4]!.error, { name: 'ScheduleConflictError', code: 'schedule_conflict' },
+    'the structured error detail survives only beside an authoritative isError')
 })
 
 test('parallel results settle their own call regardless of arrival order', () => {
