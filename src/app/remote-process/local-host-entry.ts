@@ -1014,14 +1014,18 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
       try {
         await drainHmrTransactions(handle?.ctx as unknown as HostHmrTransactionsContext)
       } catch (drainError) {
-        priorCleanupFailure ??= drainError instanceof Error ? drainError.message : String(drainError)
+        const message = drainError instanceof Error ? drainError.message : String(drainError)
+        // The FIRST cleanup failure stays the final failure reason; this record
+        // names the step's OWN error so a diagnosis does not get the earlier
+        // Loader error attributed to the HMR drain.
+        priorCleanupFailure ??= message
         writeEntryRecord({
           m4a0: 'cleanup-failure',
           processRole: 'host',
           phase: 'after-boot',
           pid: process.pid,
           step: 'hmr-drain',
-          error: priorCleanupFailure,
+          error: message,
         })
       }
       await finishHostFailureCleanup(
