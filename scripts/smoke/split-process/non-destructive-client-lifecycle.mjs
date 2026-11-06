@@ -516,8 +516,9 @@ export async function runNonDestructiveClientLifecycle(context) {
       const childHeader = await waitForHostSessionHeader(dshHome, childId, 'M5N2 the child durable header')
       assert(hostSessionLogCount(dshHome) === sessionsBeforeFork + 1,
         `M5N2 /fork published ${String(hostSessionLogCount(dshHome) - sessionsBeforeFork)} durable Sessions, expected exactly 1`)
-      assert(childHeader.parentSession === sessionX,
-        `M5N2 the child lineage named ${JSON.stringify(childHeader.parentSession)} instead of the source`)
+      assert(childHeader.parentSession === undefined,
+        `M5N2 the independent ordinary fork child recorded parentSession ${JSON.stringify(childHeader.parentSession)}`)
+      assert(childHeader.origin === undefined, 'M5N2 the ordinary fork child copied subagent origin')
       assert(childHeader.isSeeded === true, 'M5N2 the child is not a seeded fork')
       const childUserTexts = hostUserTexts(durableOf(childId))
       assert(childUserTexts.filter(text => text === 'm5n2-x-turn1').length === 1,
@@ -681,7 +682,9 @@ export async function runNonDestructiveClientLifecycle(context) {
         'M5N2 the rewind ended the running source Turn')
       assert(!existsSync(releaseBarrier), 'M5N2 the hold barrier was released during the rewind')
       const rewoundHeader = await waitForHostSessionHeader(dshHome, rewoundChildId, 'M5N2 the rewound child durable header')
-      assert(rewoundHeader.parentSession === sessionX, 'M5N2 the rewound child does not name the source')
+      assert(rewoundHeader.parentSession === undefined,
+        'M5N2 the independent ordinary rewound child recorded a parentSession')
+      assert(rewoundHeader.origin === undefined, 'M5N2 the ordinary rewound child copied subagent origin')
       assert(rewoundHeader.isSeeded === true, 'M5N2 the rewound child is not a seeded fork')
       const rewoundTexts = hostUserTexts(durableOf(rewoundChildId))
       assert(rewoundTexts.filter(text => text === 'm5n2-x-turn3').length === 1,

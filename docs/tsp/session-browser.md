@@ -33,14 +33,17 @@ production default; TSP keeps the experimental opt-in described in
 
 - Browse opens in the current workspace. Workspace membership uses lexical
   `sameWorkspace(row.cwd, currentCwd)`; unknown roots match neither workspace.
-  All-workspaces mode keeps the listed main-session lineage, including
-  cross-workspace parent/child edges. Orphans become roots; cycles are emitted
-  without unbounded traversal.
+  `buildSessionTree()` derives a parent edge ONLY from a real
+  `origin: 'subagent'` row whose parent is listed; because the Browser lists
+  only main Sessions, no displayed row is a subagent child: every Browser row
+  is a root (depth 0). Legacy ordinary-fork `parentSession` metadata therefore
+  never fabricates a parent/child edge; orphans remain listed, and cycles
+  cannot loop.
 - Browse Tree groups only adjacent rows whose workspaces match; repeated
-  workspace headings are intentional. Grouping never reorders the
-  `buildSessionTree()` parent-first sequence or resets row depth; each contiguous
-  run has its own PickerGroup ID. Search is global Cards without workspace
-  groups.
+  workspace headings are intentional. Grouping never reorders the browse
+  sequence or resets row depth (which stays at the tree depth the helper
+  derived); each contiguous run has its own PickerGroup ID. Search is global
+  Cards without workspace groups.
 - A non-empty query is canonicalized once for metadata matching and Host search:
   remove NUL, trim, cap at 500 UTF-16 code units, and avoid a dangling high
   surrogate. Metadata matches only listed-row `id`, `title`, `cwd` and `preset`
