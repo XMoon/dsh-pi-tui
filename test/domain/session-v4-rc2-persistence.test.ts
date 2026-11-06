@@ -28,7 +28,9 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createHash } from 'node:crypto'
 import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { join, relative } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { zstdCompressSync } from 'node:zlib'
 import { Context } from '@deepseek-ai/cordis'
 import { SessionId, SESSION_FORMAT_VERSION, type SessionHeader } from '@deepseek-ai/dsh-session'
@@ -38,6 +40,9 @@ import { SqliteSessionQueryEngine } from '@deepseek-ai/dsh-session-query-sqlite'
 import { restoreReleasedV3Artifact } from '@deepseek-ai/dsh-session-format-v2-to-v3'
 import { RELEASED_V3_EVENT_TYPES } from '@deepseek-ai/dsh-session-format-v3-to-v4'
 import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
+import Storage from '@deepseek-ai/dsh-storage'
+import * as StorageJson from '@deepseek-ai/dsh-storage-json'
+import * as StorageDomain from '@deepseek-ai/dsh-storage-domain'
 import { buildTaskRows } from '../../src/domain/task/browser.ts'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
 
@@ -500,4 +505,151 @@ test('an rc.2 catalog v2 external leaf is carried through and never becomes a br
     'its durable classification stays `external` (never defaulted to a local mode)',
   )
   assert.equal(rows[0]?.kind, 'external')
+})
+
+// ── S3-02: the rc5-era historical Schedule log stays inert ─────────────────
+
+/**
+ * OFFICIAL-SCHEMA FIXTURE, not a product-recorded Session: the historical
+ * version-1 `schedule/change` create payload exactly as the published DSH
+ * `0.2.1-rc.5` `ScheduleCreateChange` / `LegacyScheduleRecord` schema defines
+ * it (fixed rc5 tag `b830ec950faba0a46dda564be3e2d854afed94f1`): a Session-local
+ * `after` reminder WITHOUT the later required Host-task `title`, plus its
+ * canonical `scheduledAt`. The committed released-v1 artifact carries no
+ * schedule event, so this shape is constructed from that published schema and
+ * labelled as such instead of being claimed as an extracted run.
+ */
+const LEGACY_SCHEDULE_CHANGE = {
+  version: 1,
+  operation: 'create',
+  schedule: {
+    id: 'legacy-rc5-reminder',
+    kind: 'after',
+    prompt: 'legacy reminder body',
+    afterSeconds: 90,
+    scheduledAt: '2026-09-16T00:01:30.000Z',
+  },
+} as const
+
+interface ScheduleTaskLike {
+  readonly id: string
+  readonly title: string
+  readonly status: string
+}
+
+interface ScheduleServiceLike {
+  catalog(): Promise<readonly ScheduleTaskLike[]>
+  create(request: {
+    readonly title: string
+    readonly prompt: string
+    readonly timing: { readonly kind: 'after'; readonly after_seconds: number }
+    readonly target: { readonly kind: 'session'; readonly sessionId: SessionId }
+  }): Promise<ScheduleTaskLike>
+}
+
+/** Mount the SHIPPED rc1 Schedule service (`ctx.schedule`). The package is a
+ *  dependency of the official web bundle rather than a direct dependency of
+ *  this checkout, so resolve the exact installed rc1 copy through that official
+ *  bundle's own closure — never a second local implementation. */
+async function mountOfficialScheduleService(ctx: Context): Promise<void> {
+  const anchor = createRequire(import.meta.url).resolve('@deepseek-ai/dsh-web-app/package.json')
+  const entry = createRequire(anchor).resolve('@deepseek-ai/dsh-schedule')
+  const module = await import(pathToFileURL(entry).href) as { readonly default: unknown }
+  await (ctx.plugin as unknown as (plugin: unknown) => Promise<void>)(module.default)
+}
+
+test('a historical rc5 V4 schedule/change event stays inert history and never activates a Host task', async t => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-s3-legacy-schedule-')
+  const sessionsRoot = join(root, 'sessions')
+  const booted = await boot(life, sessionsRoot)
+  await booted.ctx.plugin(Storage)
+  await booted.ctx.plugin(StorageJson, { root: join(root, 'storages') })
+  await booted.ctx.plugin(StorageDomain, { backend: 'json' })
+  await mountOfficialScheduleService(booted.ctx)
+  const schedule = booted.ctx.get('schedule') as ScheduleServiceLike
+  assert.deepEqual(await schedule.catalog(), [], 'the isolated Host starts with no scheduled task')
+
+  // The historical V4 Session: a REAL current-format artifact written by the
+  // installed writer, containing the released rc5 legacy payload.
+  const legacyId = SessionId('session-s3-legacy-schedule')
+  const legacy = await booted.persistence.create({
+    id: legacyId,
+    createdAt: 1_700_000_000_000,
+    version: SESSION_FORMAT_VERSION,
+    cwd: '/work',
+    isSeeded: false,
+    delegationDepth: 0,
+  })
+  await legacy.append([
+    { type: 'schedule/change', seq: 0, time: 1_700_000_000_007, data: LEGACY_SCHEDULE_CHANGE },
+  ] as never)
+  await legacy.flush()
+  await legacy.close()
+
+  // The independent positive control: one REAL Host task in the same Host
+  // store, targeting its own stored Session. It must keep its Host-owned
+  // lifecycle and never merge with the historical Session event.
+  const controlId = SessionId('session-s3-schedule-control')
+  const control = await booted.persistence.create({
+    id: controlId,
+    createdAt: 1_700_000_000_100,
+    version: SESSION_FORMAT_VERSION,
+    cwd: '/work',
+    isSeeded: false,
+    delegationDepth: 0,
+  })
+  await control.flush()
+  await control.close()
+  const controlTask = await schedule.create({
+    title: 'schedule control',
+    prompt: 'control prompt',
+    timing: { kind: 'after', after_seconds: 3_600 },
+    target: { kind: 'session', sessionId: controlId },
+  })
+  assert.equal(controlTask.status, 'active', 'the positive-control task is stored and active')
+  assert.deepEqual(
+    (await schedule.catalog()).map(task => task.id),
+    [controlTask.id],
+    'the independent Host task is the ONLY stored task before the legacy read',
+  )
+
+  const projectDirs = readdirSync(sessionsRoot)
+  assert.equal(projectDirs.length, 1, 'both stored Sessions share the one project directory')
+  const legacyDir = join(sessionsRoot, projectDirs[0]!, String(legacyId))
+  const currentArtifact = `session.v${SESSION_FORMAT_VERSION}.jsonl${CURRENT_SUFFIX}`
+  assert.deepEqual(generationFiles(legacyDir), [currentArtifact], 'the legacy payload is a real current V4 artifact')
+
+  // Classification: the V4 vocabulary row is CURRENT, not a migration source.
+  assert.equal((await booted.persistence.stat(legacyId))?.formatStatus, 'current',
+    'the historical Schedule row is recognized as the current V4 format')
+  assert.equal(
+    (await booted.persistence.list()).find(row => String(row.header.id) === String(legacyId))?.formatStatus,
+    'current',
+  )
+
+  // Readonly load: complete original payload, preserved coordinates/header,
+  // and no write of any kind (successor generation or background business row).
+  const before = treeDigest(root)
+  const readHandle = await booted.persistence.open(legacyId, 'read')
+  const read = await readHandle.read()
+  assert.equal(readHandle.header.cwd, '/work', 'the historical header cwd is not rewritten')
+  assert.equal(readHandle.header.version, SESSION_FORMAT_VERSION)
+  await readHandle.close()
+  assert.equal(read.events.length, 1, 'the complete historical log is returned')
+  assert.equal(read.events[0]!.type, 'schedule/change')
+  assert.equal(read.events[0]!.seq, 0, 'the original epoch/seq coordinates are preserved')
+  assert.equal(read.events[0]!.time, 1_700_000_000_007)
+  assert.deepEqual(read.events[0]!.data, LEGACY_SCHEDULE_CHANGE,
+    'the historical Schedule payload survives verbatim (no interpreter rewrite)')
+  assert.deepEqual(treeDigest(root), before, 'the readonly load writes nothing anywhere under the isolated root')
+  assert.deepEqual(generationFiles(legacyDir), [currentArtifact], 'the readonly load publishes no successor generation')
+
+  // The legacy event NEVER becomes a Host task and never merges with the
+  // independent control task; the Host Schedule service still owns it.
+  const catalogAfter = await schedule.catalog()
+  assert.deepEqual(catalogAfter.map(task => task.id), [controlTask.id],
+    'the legacy event created no Host task and did not touch the control task')
+  assert.equal(JSON.stringify(catalogAfter).includes(LEGACY_SCHEDULE_CHANGE.schedule.id), false,
+    'the historical reminder identity never appears in the Host catalog')
 })

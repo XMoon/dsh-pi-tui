@@ -175,6 +175,7 @@ test('the real all-prompts title reaches the mounted TUI title/OSC, manual wins 
   const adapter = new ScriptedAdapter()
   const app = await startS4D3Application(t, {
     bundles: [B09],
+    presets: true,
     patches: [{ id: 'agent-default-model', config: { provider: 'scripted', model: 'review-model' } }] as never,
     prepareHost: host => { host.ctx.llm.registerAdapter(['scripted'], adapter) },
   })
@@ -396,6 +397,7 @@ test('a real bounded Ralph round reaches the transcript/Activity UI as a foregro
   const adapter = new ScriptedAdapter()
   const app = await startS4D3Application(t, {
     bundles: [B11],
+    presets: true,
     patches: [{ id: 'agent-default-model', config: { provider: 'scripted', model: 'review-model' } }] as never,
     prepareHost: host => { host.ctx.llm.registerAdapter(['scripted'], adapter) },
   })

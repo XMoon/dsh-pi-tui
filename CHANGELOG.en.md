@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Upgrade and security notes
+
+- **DSH 0.2.2 no longer requires a read before a write by default.** The
+  upstream `fs-observation-policy` now defaults to off, and dsh-pi-tui follows
+  that default instead of restoring the old file-observation guard: the model
+  may `write` / `edit` a file it has not read in this Session. A deployment
+  that wants the old read-before-write constraint can re-enable
+  `fs-observation-policy` through an official Profile override; this extension
+  never changes the user's configuration automatically.
+- **`web_fetch` can reach localhost and private destinations.** The upstream
+  HTTP provider no longer refuses non-public addresses in the tool layer, and
+  dsh-pi-tui no longer promises the old private-address blocking. If an
+  environment needs that blocking, use Host process network isolation, a
+  proxy/firewall or an official tool pre-execute policy; do not rely on a TUI
+  URL rule.
+- **Attachment storage on one Host is not Session-isolated.** An authorized
+  caller holding a complete image reference in the same Host AttachmentStore
+  can read an image that another Session never referenced; method-level
+  Gateway/Peer authorization remains the boundary. For per-Session isolation,
+  use separate Hosts with separate `DSH_HOME` directories.
+- **Legacy `schedule/change` events remain history only.** Session-local
+  reminder events from the rc5 era never become new Host Scheduled Tasks;
+  execution and storage of existing Host tasks remain with the official
+  Schedule service. The new `schedule_*` tools manage Host-wide tasks, so note
+  their permission scope; old tool calls/results are still rendered as history.
+- **Back up before upgrading, and never downgrade an upgraded directory in
+  place.** Session, fork and schedule data written under the 0.2.2 semantics is
+  not guaranteed to be readable by rc5. Before upgrading, stop running Agents
+  and background jobs, then back up the old DSH/TUI installation pairing, the
+  Profile and patch, the original Session logs, the workspace and any necessary
+  Host resources or credential references. To roll back, restore the backup
+  into a separate directory and start the matching old DSH/TUI pairing. Keep
+  backups safe and never put sensitive values into diagnostic output.
+- **`pi2dsh` real-terminal compatibility is outside this release's
+  qualification scope.** That external plugin's peer dependencies target a
+  different DSH version, and its real-PTY compatibility was not verified here;
+  follow that external plugin's own instructions.
+
 ### Added
 
 - **A `/web` entry and an "auto-enable the Web frontend on Host startup"

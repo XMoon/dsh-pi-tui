@@ -251,7 +251,6 @@ test('Auto Review: started PTC inner tools are reviewed; the outer run_code is n
       cwd: work,
     })
     await presets.select(agent, 'ptc')
-    assert.ok(host.hasTool('run_code', agent), 'the ptc preset exposes the official run_code transport')
     permissions.set(agent.session, 'auto')
     approval.setPolicy(agent, 'never')
     const code = program ?? `return await tools.write(${JSON.stringify({ file_path: file, content: `inner:${id}` })})`
@@ -261,7 +260,13 @@ test('Auto Review: started PTC inner tools are reviewed; the outer run_code is n
     )
     adapter.reviews.push(review)
     adapter.reviewRequests.length = 0
+    const requestsBefore = adapter.modelRequests.length
     await send(agent, `pc scenario ${id}`)
+    // rc.1 exposes `run_code` as the RESERVED PTC presentation transport: it is
+    // never a registered tool, so the proof is the model-facing catalog of the
+    // real step request, not `ctx.tools.get('run_code')`.
+    assert.ok(adapter.modelRequests[requestsBefore]?.tools?.some(tool => tool.name === 'run_code'),
+      'the ptc preset exposes the official run_code transport to the model')
     return { agent, file }
   }
 
@@ -288,7 +293,7 @@ test('Auto Review: started PTC inner tools are reviewed; the outer run_code is n
   assert.equal(adapter.reviewRequests.length, 0, 'the outer run_code and non-tool JS effects are not reviewed')
 })
 
-test('Auto Review: teardown migrates live Auto sessions to Full access and drains in-flight reviews', { skip }, async t => {
+test('Auto Review: a live integration unload migrates Auto sessions and drains in-flight reviews; a restart drops the bundle', { skip }, async t => {
   let host = await startOptionalBundleHost(t, { bundles: [B03], presets: false })
   const adapter = new ScriptedAdapter()
   host.ctx.llm.registerAdapter(['scripted'], adapter)
@@ -315,29 +320,38 @@ test('Auto Review: teardown migrates live Auto sessions to Full access and drain
   const autoTurn = send(autoAgent, 'held turn')
   await waitFor(() => adapter.reviewRequests.length > 0 && adapter.gate !== undefined)
 
-  // OFF: the official manager deselects the bundle (startup-only profile).
-  const disabled = await host.pluginManager.setBundleEnabled(B03, false) as { application: string }
-  assert.equal(disabled.application, 'restart-required')
-  assert.equal(profileSelectsBundle(host.profileDir, B03), false)
-
-  // RESTART = the official Host teardown: the auto-review integration migrates
-  // every live Auto session before it drains, then a FRESH profile composition
-  // no longer carries the Auto preset.
-  const previousHome = process.env.DSH_HOME
-  host = await host.restart()
-  assert.equal(process.env.DSH_HOME, previousHome)
+  // The REAL live unload: dispose the shipped `auto-review` Loader row while
+  // the Host root remains ACTIVE. rc.1's integration migrates on THIS path; a
+  // full Host teardown runs with the root UNLOADING and deliberately performs
+  // no Session writes, so the bundle-off/restart path below only proves the
+  // startup-only profile write and the fresh composition.
+  const loader = host.ctx.get('loader') as {
+    entries(): Iterable<{ readonly options?: { readonly id?: string }; readonly fiber?: { dispose(): Promise<void> } }>
+  }
+  const autoReviewRow = [...loader.entries()].find(candidate => candidate.options?.id === 'auto-review')
+  assert.ok(autoReviewRow?.fiber !== undefined, 'the shipped auto-review row is a live Loader entry')
+  await autoReviewRow.fiber.dispose()
   await autoTurn
-  assert.equal(existsSync(heldFile), false, 'the in-flight reviewed body never executes after teardown')
+  assert.equal(existsSync(heldFile), false, 'the in-flight reviewed body never executes after the live integration unload')
 
   const presetEvents = (agent: Agent): readonly string[] =>
     (agent.session.snapshotEvents() as readonly { readonly type: string; readonly data?: { readonly preset?: string } }[])
       .filter(event => event.type === 'permission/preset')
       .map(event => event.data?.preset ?? '')
   assert.equal(presetEvents(autoAgent).at(-1), 'danger-full-access',
-    'the official teardown migrated the live Auto session to Full access')
+    'the live integration unload migrated the live Auto session to Full access')
   assert.equal(presetEvents(otherAgent).at(-1), 'workspace-write',
     'a session that was not Auto keeps its permission identity')
+  assert.equal(permissions.names.includes('auto'), false, 'the unloaded integration no longer advertises Auto')
 
+  // OFF: the official manager deselects the bundle (startup-only profile) and
+  // a FRESH profile composition no longer carries the Auto preset.
+  const disabled = await host.pluginManager.setBundleEnabled(B03, false) as { application: string }
+  assert.equal(disabled.application, 'restart-required')
+  assert.equal(profileSelectsBundle(host.profileDir, B03), false)
+  const previousHome = process.env.DSH_HOME
+  host = await host.restart()
+  assert.equal(process.env.DSH_HOME, previousHome)
   const restarted = host.ctx.get('permissionPresets') as { names: readonly string[] }
   assert.equal(restarted.names.includes('auto'), false, 'the restarted composition no longer advertises Auto')
 })
@@ -390,7 +404,9 @@ test('real Host card → controller confirmation → real profile write', { skip
   assert.equal(card.enabled, true)
   assert.ok(card.rows.some(row => row.entryId.length > 0), 'the real Host card carries its addressable row')
 
-  // Filter to the one card, enter Details, open the shared confirmation.
+  // Filter to the one card, enter Details, open the shared confirmation. rc.1
+  // paints the confirmation title as "Disable Auto Review?" and the shared
+  // Owner warning block below it; opening it may take a reveal step.
   harness.vt.sendInput('/')
   await harness.waitForFrame()
   for (const character of 'auto-review') harness.vt.sendInput(character)
@@ -399,9 +415,13 @@ test('real Host card → controller confirmation → real profile write', { skip
   await harness.waitForFrame()
   harness.vt.sendInput('\r') // Details
   await harness.waitForFrame()
-  harness.vt.sendInput('\r') // Disable… -> confirmation
-  await harness.waitForFrame()
+  for (let step = 0; step < 4 && harness.panel.currentView() !== 'confirm'; step += 1) {
+    harness.vt.sendInput('\r') // reveal then dispatch the selected Disable… action
+    await harness.waitForFrame()
+  }
   assert.equal(harness.panel.currentView(), 'confirm')
+  assert.match(harness.view(), /Disable Auto Review\?/u,
+    'the shared confirmation opened with the real rc.1 title')
   assert.match(harness.view().replace(/\s+/gu, ' '), /Disabling Auto Review can change existing Auto sessions to Full access/)
   assert.equal(profileSelectsBundle(host.profileDir, B03), true, 'opening the confirmation does not write the profile')
 

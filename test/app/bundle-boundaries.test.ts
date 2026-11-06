@@ -415,6 +415,7 @@ test('the real Auto preset and the shared Plugin Manager danger confirmation wor
   const adapter = new BoundaryAdapter()
   const app = await startS4D3Application(t, {
     bundles: [],
+    presets: true,
     patches: [{ id: 'agent-default-model', config: { provider: 'scripted', model: 'review-model' } }] as never,
     prepareHost: host => { host.ctx.llm.registerAdapter(['scripted'], adapter) },
   })
@@ -459,20 +460,21 @@ test('the real Auto preset and the shared Plugin Manager danger confirmation wor
   await restarted.settle()
   await restarted.waitFor(() => /Auto Review|auto-review/iu.test(restarted.view()), 'the exact B03 row')
   // Open Details and choose the shared Disable… action; the confirmation is
-  // a PAGE whose default is Cancel.
+  // a PAGE whose default is Cancel. rc.1 paints the page title as
+  // "Disable Auto Review?" (the same Owner warning block follows it).
   for (let step = 0; step < 4; step += 1) {
     restarted.vt.sendInput('\r') // reveal then dispatch the selected Disable… action
     await restarted.settle()
-    if (/safety confirmation/u.test(restarted.view())) break
+    if (/Disable Auto Review\?/u.test(restarted.view())) break
   }
-  assert.match(restarted.view(), /Auto Review safety confirmation/u,
+  assert.match(restarted.view(), /Disable Auto Review\?/u,
     'the shared confirmation opened for the real B03 row')
   assert.match(restarted.view().replace(/\s+/gu, ' '),
     /Disabling Auto Review can change existing Auto sessions to Full access/u)
   assert.match(restarted.view(), /> Cancel/u, 'the shared confirmation defaults to Cancel')
   restarted.vt.sendInput('\r') // activate the DEFAULT Cancel action
   await restarted.settle()
-  await restarted.waitFor(() => !/safety confirmation/u.test(restarted.view()),
+  await restarted.waitFor(() => !/Disable Auto Review\?/u.test(restarted.view()),
     'the default Cancel action closes the confirmation')
   const before = (await restarted.host.pluginManager.listBundles() as readonly { name: string; enabled: boolean }[])
     .find(bundle => bundle.name === B03)

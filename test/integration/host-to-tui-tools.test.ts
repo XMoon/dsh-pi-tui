@@ -102,6 +102,7 @@ function footerLine(view: string): string {
 test('the real create_worktree result and effective cwd reach the mounted TUI', { skip: skippedInstallationReason([B05]) }, async t => {
   const app = await startS4D3Application(t, {
     bundles: [B05],
+    presets: true,
     patches: [{ id: 'agent-default-model', config: { provider: 'scripted', model: 'review-model' } }] as never,
   })
   const adapter = new ScriptedAdapter()
@@ -207,6 +208,7 @@ const sleep = async (ms: number): Promise<void> => { await new Promise<void>(res
 test('the real retained terminal result, Job and close state reach the mounted TUI', { skip: skippedInstallationReason([B07]) }, async t => {
   const app = await startS4D3Application(t, {
     bundles: [B07],
+    presets: true,
     patches: [{ id: 'agent-default-model', config: { provider: 'scripted', model: 'review-model' } }] as never,
   })
   const adapter = new ScriptedAdapter()
@@ -312,6 +314,7 @@ test('the official scoped session_search results reach the PiTui Tool output, ne
   const project = { path: '' }
   const app = await startS4D3Application(t, {
     bundles: [B08],
+    presets: true,
     columns: 160,
     rows: 56,
     patches: [{ id: 'agent-default-model', config: { provider: 'scripted', model: 'review-model' } }] as never,
