@@ -265,7 +265,7 @@ function officialQuestionProjectionPayload(value: SessionProjectionsValue): {
       callId: String(entry.callId),
       state: entry.state,
       intents: entry.questions.flatMap(question =>
-        question.intent === undefined ? [] : [question.intent.kind as string]),
+        question.intent === undefined ? [] : [question.intent.kind]),
     })),
     lanes: inbox === undefined ? [] : (['next-step', 'next-turn'] as const),
   }

@@ -157,7 +157,7 @@ test('L4 both adapters keep caller order, exclude subagents and map running from
   assert.deepEqual(remote.map(fact => fact.attentionSourceState), ['unknown', 'unknown'])
 })
 
-test('L4 running is never the old live bit: an unprovable fact is undefined in both backends', async () => {
+test('L4 running is never the old live bit: a proven list row still answers, an unprovable fact is undefined', async () => {
   const direct = await directFacts({}).readActivity([row('x', { live: true })])
   assert.equal(direct[0].running, undefined, 'Direct has no live Agent for x, and the live bit is not running')
   const remote = await remoteFacts({ listed: [row('x')], stateFailures: ['x'] }).readActivity([row('x')])
