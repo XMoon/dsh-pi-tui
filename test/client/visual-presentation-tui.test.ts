@@ -45,8 +45,8 @@ const SVG_SOURCE = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32">
   + '<rect width="64" height="32" fill="#3b82f6"/>'
   + '<text x="4" y="20" font-size="12" fill="#ffffff">Gateway</text></svg>'
 
-const REF_A = `sv1_${'a'.repeat(20)}`
-const REF_B = `sv1_${'b'.repeat(20)}`
+const REF_A = `sv2_${'a'.repeat(20)}`
+const REF_B = `sv2_${'b'.repeat(20)}`
 
 const CHART: ChartFact = {
   version: 1,

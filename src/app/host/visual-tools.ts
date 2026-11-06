@@ -229,7 +229,6 @@ function projectVisualReference(
   const factBlock = blocks[lastText] as Extract<ContentBlock, { type: 'text' }>
   if (!factBlock.text.startsWith('visual-v1:')) return undefined
   const reference = visualReference({
-    sessionId: exec.agent.session.id as unknown as string,
     turn: boundary.lastTurn,
     stepStartSeq: boundary.lastStepStartSeq,
     callId: exec.callId as unknown as string,
@@ -253,7 +252,7 @@ function chartTool(projections: SessionProjectionReaderLike) {
       + 'Use only when a visual comparison is clearer than prose; never invent data, query a monitor, or imply the values are live measurements. '
       + 'Supports bars or a sparkline with 2 to 12 labelled points and an optional unit. '
       + 'The result always includes every exact label and value as readable text, and carries a stable visual ref '
-      + '(`visual-ref-v1:sv1_…`) you may later pass to present_visual.',
+      + '(`visual-ref-v2:sv2_…`) you may later pass to present_visual.',
     parameters: {
       kind: { type: 'string', enum: ['bars', 'spark'], required: true, description: 'Chart shape: bars or spark.' },
       title: { type: 'string', required: true, description: 'Short chart title (at most 100 Unicode code points).' },
@@ -303,7 +302,7 @@ function svgTool(projections: SessionProjectionReaderLike) {
       + 'Use absolute units (px/pt/pc/mm/cm/in or unitless); relative units (percentages, em/ex/ch/rem/vw/vh) are rejected (a gradient stop offset may be a 0-100% fraction). '
       + 'Always provide a short readable description; the result keeps the description and a short source credential, '
       + 'while the SVG source itself stays in the tool call. The result carries a stable visual ref '
-      + '(`visual-ref-v1:sv1_…`) you may later pass to present_visual.',
+      + '(`visual-ref-v2:sv2_…`) you may later pass to present_visual.',
     parameters: {
       title: { type: 'string', required: true, description: 'Short figure title (at most 100 code points).' },
       description: { type: 'string', required: true, description: 'Short readable description (at most 500 code points).' },
@@ -338,7 +337,7 @@ function presentVisualTool(ctx: Context, projections: SessionProjectionReaderLik
   return defineTool({
     name: PRESENT_VISUAL_TOOL_NAME,
     description: 'Select previously generated chart/SVG visuals for presentation to the user. '
-      + 'First call dsh_pi_tui_chart or dsh_pi_tui_svg and read the `visual-ref-v1:sv1_…` reference in its result. '
+      + 'First call dsh_pi_tui_chart or dsh_pi_tui_svg and read the `visual-ref-v2:sv2_…` reference in its result. '
       + 'Wait until that generating call has finished, then in a LATER model step pass 1 to '
       + `${MAX_PUBLISHED_VISUALS} refs (usually the 1-2 figures that genuinely help the explanation) `
       + 'and briefly explain their content in your final answer. '
@@ -352,7 +351,7 @@ function presentVisualTool(ctx: Context, projections: SessionProjectionReaderLik
           type: 'object',
           additionalProperties: false,
           properties: {
-            ref: { type: 'string', required: true, description: 'The `sv1_…` reference from a chart/SVG tool result.' },
+            ref: { type: 'string', required: true, description: 'The `sv2_…` reference from a chart/SVG tool result.' },
           },
         },
       },
@@ -397,7 +396,6 @@ function presentVisualTool(ctx: Context, projections: SessionProjectionReaderLik
         throw new Error('present_visual aborted: the turn/step boundary changed while reading the Session')
       }
       const decision: PublicationDecision = decidePublication({
-        sessionId: session.id as unknown as string,
         events,
         refs: [...requested],
         turn: before.lastTurn,

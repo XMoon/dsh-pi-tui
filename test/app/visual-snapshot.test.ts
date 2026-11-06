@@ -1,11 +1,11 @@
 /**
- * The visual snapshot provider's ONE bounded fork-lineage task.
+ * The visual snapshot provider: exact display-subject selection plus the
+ * official seed/cut validation that feeds the session-free epoch authority.
  *
- * These cases drive the real provider with a controllable proof promise: the
- * synchronous own-range publish, the single ancestry task per selected
- * identity, the settle→revision→repaint path, the currentness fence, the
- * cached failure state and the live-seq growth of the own range. The proof
- * itself and the real `sessionQuery` read are covered elsewhere.
+ * These cases drive the real provider with hand-built live Session faces. The
+ * provider owns no ancestry query and no async task: a valid log is returned
+ * synchronously, while inconsistent seed metadata makes the whole snapshot
+ * unavailable instead of guessing that the log belongs to the current Session.
  * @module @xmoon76/dsh-pi-tui/app/visual-snapshot.test
  */
 
@@ -15,31 +15,32 @@ import {
   createVisualEventSnapshotProvider,
   type VisualSnapshotSessionLike,
 } from '../../src/app/bootstrap/visual-snapshot.ts'
-import type { VisualLineageProof } from '../../src/app/bootstrap/visual-lineage.ts'
-import { ownVisualOriginSpans } from '../../src/domain/visual/origin.ts'
+
+interface FakeEvent {
+  readonly type: string
+  readonly seq: number
+  readonly data?: unknown
+}
 
 /** A live-shaped Session face with a mutable seq/events pair. */
 interface FakeSession extends VisualSnapshotSessionLike {
   seq: number
-  events: { type: string }[]
+  events: FakeEvent[]
 }
 
 function sessionOf(options: {
-  readonly id: string
+  readonly id?: string
   readonly seeded?: boolean
   readonly cut?: number
-  readonly parentSession?: string
-  readonly events?: readonly { type: string }[]
-}): FakeSession {
+  readonly events?: readonly FakeEvent[]
+} = {}): FakeSession {
+  const events = [...(options.events ?? [])]
   const session: FakeSession = {
-    id: options.id,
-    seq: (options.events ?? []).length,
-    header: {
-      isSeeded: options.seeded === true,
-      ...(options.parentSession === undefined ? {} : { parentSession: options.parentSession }),
-    },
+    id: options.id ?? 'session-main',
+    seq: events.length,
+    header: { isSeeded: options.seeded === true },
     inheritedEventCount: options.cut ?? 0,
-    events: [...(options.events ?? [])],
+    events,
     snapshotEvents() {
       return session.events
     },
@@ -47,263 +48,32 @@ function sessionOf(options: {
   return session
 }
 
-interface Harness {
-  readonly provider: ReturnType<typeof createVisualEventSnapshotProvider>
-  readonly proveCalls: string[];
-  readonly tasks: Promise<void>[];
-  readonly problems: string[];
-  repaints: number;
-  /** Whether the captured subject is still current (the repaint fence). */
-  current: boolean;
-  /** The exact agent currently behind the subject. */
-  agent: { session: FakeSession } | undefined;
-  resolve(proof: VisualLineageProof): Promise<void>;
-  reject(error: unknown): Promise<void>;
-  /** Select another agent as the subject. */
-  select(next: { session: FakeSession } | undefined): void;
-}
+const MAIN = { subjectKind: 'main' as const, subjectId: 'session-main' }
 
-function harnessFor(initial: { session: FakeSession } | undefined): Harness {
-  let resolveProof: ((proof: VisualLineageProof) => void) | undefined
-  let rejectProof: ((error: unknown) => void) | undefined
-  const proof = new Promise<VisualLineageProof>((resolve, reject) => {
-    resolveProof = resolve
-    rejectProof = reject
+test('an unseeded Session returns its committed log synchronously with no parent read', () => {
+  const session = sessionOf({
+    events: [
+      { type: 'turn/start', seq: 0, data: { turn: 1 } },
+      { type: 'assistant/message', seq: 1, data: { turn: 1, step: 0, message: { content: [] } } },
+      { type: 'projection/update', seq: 2 },
+    ],
   })
-  const harness: Harness = {
-    provider: undefined as never,
-    proveCalls: [],
-    tasks: [],
-    problems: [],
-    repaints: 0,
-    current: true,
-    agent: initial,
-    async resolve(next) {
-      resolveProof?.(next)
-      await harness.tasks[harness.tasks.length - 1]
-    },
-    async reject(error) {
-      rejectProof?.(error)
-      await harness.tasks[harness.tasks.length - 1]
-    },
-    select(next) {
-      harness.agent = next
-    },
-  }
   const provider = createVisualEventSnapshotProvider({
     isRemote: () => false,
-    mainAgent: () => harness.agent,
+    mainAgent: () => ({ session }),
     viewedChildAgent: () => undefined,
-    lineage: {
-      prove: (sessionId) => {
-        harness.proveCalls.push(sessionId)
-        return proof
-      },
-      run: (_label, task) => {
-        harness.tasks.push(task())
-      },
-      isCurrentSubject: () => harness.current,
-      requestRepaint: () => {
-        harness.repaints += 1
-      },
-      reportProblem: (message) => {
-        harness.problems.push(message)
-      },
-    },
   })
-  Object.defineProperty(harness, 'provider', { value: provider, enumerable: true })
-  return harness
-}
-
-const MAIN = { subjectKind: 'main' as const, subjectId: 'child' }
-
-test('an unseeded Session proves its whole log synchronously and reads no parent', () => {
-  const session = sessionOf({ id: 'root', events: [{ type: 'turn/start' }, { type: 'turn/end' }] })
-  const harness = harnessFor({ session })
-  const snapshot = harness.provider({ subjectKind: 'main', subjectId: 'root' })
+  const snapshot = provider(MAIN)
   assert.ok(snapshot !== undefined)
-  assert.deepEqual(snapshot.verifiedOriginSpans, ownVisualOriginSpans('root', 0, 2))
-  assert.equal(snapshot.originRevision, 1)
-  assert.deepEqual(harness.proveCalls, [], 'no inherited prefix means no ancestry task')
-  assert.deepEqual(harness.tasks, [])
+  assert.equal(snapshot.session, session, 'the exact live Session object is returned')
+  assert.equal(snapshot.sessionId, 'session-main')
+  assert.equal(snapshot.seq, 3)
+  assert.deepEqual(snapshot.events.map(event => event.type), ['turn/start', 'assistant/message'],
+    'only the authority-relevant committed events are handed on')
 })
 
-test('a seeded Session publishes its own range first and starts exactly one ancestry task', () => {
-  const session = sessionOf({
-    id: 'child', seeded: true, cut: 5, parentSession: 'parent',
-    events: [{ type: 'turn/start' }, { type: 'turn/end' }, { type: 'turn/start' }, { type: 'turn/end' }, { type: 'turn/start' }, { type: 'session/end-seed' }, { type: 'turn/start' }],
-  })
-  const harness = harnessFor({ session })
-  const first = harness.provider(MAIN)
-  assert.ok(first !== undefined)
-  assert.deepEqual(first.verifiedOriginSpans, ownVisualOriginSpans('child', 5, 7),
-    'the inherited prefix stays unproven until the official read settles')
-  assert.equal(harness.proveCalls.length, 1)
-  assert.deepEqual(harness.proveCalls, ['child'])
-  // Repeated frames reuse the same in-flight conclusion.
-  harness.provider(MAIN)
-  harness.provider(MAIN)
-  assert.equal(harness.proveCalls.length, 1, 'one ancestry read per selected identity, never per frame')
-  assert.equal(harness.tasks.length, 1)
-})
-
-test('a settled proof adds the inherited ranges, bumps the revision and requests ONE repaint', async () => {
-  const session = sessionOf({
-    id: 'child', seeded: true, cut: 2, parentSession: 'parent',
-    events: [{ type: 'turn/start' }, { type: 'turn/end' }, { type: 'session/end-seed' }, { type: 'turn/start' }],
-  })
-  const harness = harnessFor({ session })
-  const pending = harness.provider(MAIN)
-  assert.ok(pending !== undefined)
-  assert.equal(pending.originRevision, 1)
-  await harness.resolve({
-    spans: [
-      { startSeq: 0, endSeqExclusive: 2, sessionId: 'parent' },
-      { startSeq: 2, endSeqExclusive: 4, sessionId: 'child' },
-    ],
-    unproven: undefined,
-  })
-  const settled = harness.provider(MAIN)
-  assert.ok(settled !== undefined)
-  assert.deepEqual(settled.verifiedOriginSpans, [
-    { startSeq: 0, endSeqExclusive: 2, sessionId: 'parent' },
-    { startSeq: 2, endSeqExclusive: 4, sessionId: 'child' },
-  ])
-  assert.equal(settled.originRevision, 2, 'the same Session seq now serves a new origin revision')
-  assert.equal(harness.repaints, 1)
-  assert.deepEqual(harness.problems, [])
-  // A settled identity never re-reads the parent on later frames.
-  harness.provider(MAIN)
-  assert.equal(harness.proveCalls.length, 1)
-  assert.equal(harness.repaints, 1)
-})
-
-test('a proof that adds nothing keeps the revision and requests no repaint', async () => {
-  const session = sessionOf({
-    id: 'child', seeded: true, cut: 2, parentSession: 'parent',
-    events: [{ type: 'turn/start' }, { type: 'turn/end' }, { type: 'session/end-seed' }],
-  })
-  const harness = harnessFor({ session })
-  harness.provider(MAIN)
-  const before = harness.provider(MAIN)
-  await harness.resolve({ spans: [], unproven: 'child: the fork parent could not be read' })
-  const after = harness.provider(MAIN)
-  assert.ok(before !== undefined && after !== undefined)
-  assert.equal(after.originRevision, before.originRevision)
-  assert.equal(harness.repaints, 0, 'nothing new to paint, so no extra frame')
-  assert.deepEqual(harness.problems, ['child: the fork parent could not be read'])
-})
-
-test('a failed proof is cached for the identity and reported once', async () => {
-  const session = sessionOf({
-    id: 'child', seeded: true, cut: 2, parentSession: 'parent',
-    events: [{ type: 'turn/start' }, { type: 'turn/end' }, { type: 'session/end-seed' }],
-  })
-  const harness = harnessFor({ session })
-  harness.provider(MAIN)
-  await harness.reject(new Error('sessionQuery exploded'))
-  harness.provider(MAIN)
-  harness.provider(MAIN)
-  assert.equal(harness.proveCalls.length, 1, 'a failed identity is not re-read every frame')
-  assert.equal(harness.problems.length, 1)
-  assert.match(harness.problems[0] ?? '', /sessionQuery exploded/u)
-  assert.equal(harness.repaints, 0)
-})
-
-test('a late proof for a replaced subject never repaints or rewrites the new subject', async () => {
-  const first = sessionOf({
-    id: 'child-a', seeded: true, cut: 2, parentSession: 'parent-a',
-    events: [{ type: 'turn/start' }, { type: 'turn/end' }, { type: 'session/end-seed' }],
-  })
-  const second = sessionOf({ id: 'child-b', events: [{ type: 'turn/start' }] })
-  const harness = harnessFor({ session: first })
-  const firstSnapshot = harness.provider({ subjectKind: 'main', subjectId: 'child-a' })
-  assert.ok(firstSnapshot !== undefined)
-  harness.select({ session: second })
-  const secondSnapshot = harness.provider({ subjectKind: 'main', subjectId: 'child-b' })
-  assert.ok(secondSnapshot !== undefined)
-  assert.deepEqual(secondSnapshot.verifiedOriginSpans, ownVisualOriginSpans('child-b', 0, 1))
-  const secondRevision = secondSnapshot.originRevision
-  await harness.resolve({
-    spans: [
-      { startSeq: 0, endSeqExclusive: 2, sessionId: 'parent-a' },
-      { startSeq: 2, endSeqExclusive: 3, sessionId: 'child-a' },
-    ],
-    unproven: undefined,
-  })
-  assert.equal(harness.repaints, 0, 'a replaced subject never repaints the new one')
-  const after = harness.provider({ subjectKind: 'main', subjectId: 'child-b' })
-  assert.ok(after !== undefined)
-  assert.deepEqual(after.verifiedOriginSpans, ownVisualOriginSpans('child-b', 0, 1))
-  assert.equal(after.originRevision, secondRevision, 'the late result never mutates the new subject state')
-})
-
-test('the currentness fence suppresses the repaint of a subject that was already replaced', async () => {
-  const session = sessionOf({
-    id: 'child', seeded: true, cut: 2, parentSession: 'parent',
-    events: [{ type: 'turn/start' }, { type: 'turn/end' }, { type: 'session/end-seed' }],
-  })
-  const harness = harnessFor({ session })
-  harness.provider(MAIN)
-  harness.current = false
-  await harness.resolve({
-    spans: [
-      { startSeq: 0, endSeqExclusive: 2, sessionId: 'parent' },
-      { startSeq: 2, endSeqExclusive: 3, sessionId: 'child' },
-    ],
-    unproven: undefined,
-  })
-  assert.equal(harness.repaints, 0, 'a disowned subject never drives a surface repaint')
-  assert.equal(harness.provider(MAIN)?.verifiedOriginSpans.length, 2,
-    'the proven ranges are still served to the owning snapshot')
-})
-
-test('the own range follows live appends while the inherited ranges stay fixed', async () => {
-  const session = sessionOf({
-    id: 'child', seeded: true, cut: 2, parentSession: 'parent',
-    events: [{ type: 'turn/start' }, { type: 'turn/end' }, { type: 'session/end-seed' }],
-  })
-  const harness = harnessFor({ session })
-  harness.provider(MAIN)
-  await harness.resolve({
-    spans: [
-      { startSeq: 0, endSeqExclusive: 2, sessionId: 'parent' },
-      { startSeq: 2, endSeqExclusive: 3, sessionId: 'child' },
-    ],
-    unproven: undefined,
-  })
-  assert.equal(harness.repaints, 1)
-  // A live append after the child committed more of its own history.
-  session.events.push({ type: 'turn/start' }, { type: 'step/start' })
-  session.seq = session.events.length
-  const grown = harness.provider(MAIN)
-  assert.ok(grown !== undefined)
-  assert.deepEqual(grown.verifiedOriginSpans, [
-    { startSeq: 0, endSeqExclusive: 2, sessionId: 'parent' },
-    { startSeq: 2, endSeqExclusive: 5, sessionId: 'child' },
-  ])
-  assert.equal(harness.repaints, 1, 'an append does not start a second ancestry read or repaint')
-  assert.equal(harness.proveCalls.length, 1)
-})
-
-test('an A -> B -> A subject round trip proves each binding again instead of reusing the old task', async () => {
-  const first = sessionOf({
-    id: 'child-a', seeded: true, cut: 2, parentSession: 'parent-a',
-    events: [{ type: 'turn/start' }, { type: 'turn/end' }, { type: 'session/end-seed' }],
-  })
-  const second = sessionOf({ id: 'child-b', events: [{ type: 'turn/start' }] })
-  const harness = harnessFor({ session: first })
-  harness.provider({ subjectKind: 'main', subjectId: 'child-a' })
-  harness.select({ session: second })
-  harness.provider({ subjectKind: 'main', subjectId: 'child-b' })
-  harness.select({ session: first })
-  harness.provider({ subjectKind: 'main', subjectId: 'child-a' })
-  assert.equal(harness.proveCalls.length, 2, 'the rebound A identity starts its own proof')
-  assert.equal(harness.proveCalls[1], 'child-a')
-})
-
-test('Remote returns no snapshot at all', () => {
-  const session = sessionOf({ id: 'remote', events: [{ type: 'turn/start' }] })
+test('Remote returns undefined: no trusted complete-log seam', () => {
+  const session = sessionOf()
   const provider = createVisualEventSnapshotProvider({
     isRemote: () => true,
     mainAgent: () => ({ session }),
@@ -312,32 +82,170 @@ test('Remote returns no snapshot at all', () => {
   assert.equal(provider(MAIN), undefined)
 })
 
-test('a subject whose id does not match the live Session is refused', () => {
-  const session = sessionOf({ id: 'live', events: [{ type: 'turn/start' }] })
-  const harness = harnessFor({ session })
-  assert.equal(harness.provider({ subjectKind: 'main', subjectId: 'other' }), undefined)
-  assert.equal(harness.proveCalls.length, 0)
+test('the requested display subject is fenced by the exact Session id', () => {
+  const session = sessionOf()
+  const provider = createVisualEventSnapshotProvider({
+    isRemote: () => false,
+    mainAgent: () => ({ session }),
+    viewedChildAgent: () => undefined,
+  })
+  assert.equal(provider({ subjectKind: 'main', subjectId: 'session-other' }), undefined)
+  assert.ok(provider({ subjectKind: 'main', subjectId: 'session-main' }) !== undefined)
 })
 
-test('inconsistent seed facts prove nothing and start no ancestry task', () => {
-  // A non-seeded header that still records inherited events (or a missing
-  // flag) cannot be split into own/inherited history: attributing the whole
-  // log to the current Session would grant it over an ancestor's events.
-  const inconsistent = sessionOf({
-    id: 'child', seeded: false, cut: 3,
-    events: [{ type: 'turn/start' }, { type: 'turn/end' }, { type: 'session/end-seed' }],
+test('the viewed-child subject reads the viewer Agent, never the main one', () => {
+  const main = sessionOf({ id: 'session-main' })
+  const child = sessionOf({ id: 'session-child' })
+  const provider = createVisualEventSnapshotProvider({
+    isRemote: () => false,
+    mainAgent: () => ({ session: main }),
+    viewedChildAgent: () => ({ session: child }),
   })
-  const harness = harnessFor({ session: inconsistent })
-  const snapshot = harness.provider(MAIN)
+  const snapshot = provider({ subjectKind: 'viewed-child', subjectId: 'session-child' })
   assert.ok(snapshot !== undefined)
-  assert.deepEqual(snapshot.verifiedOriginSpans, [], 'no seq is attributed to any Session')
-  assert.equal(harness.proveCalls.length, 0, 'inconsistent metadata never triggers a parent read')
+  assert.equal(snapshot.session, child)
+  assert.equal(snapshot.sessionId, 'session-child')
+})
 
-  const missingFlag = sessionOf({ id: 'child', events: [{ type: 'turn/start' }] })
-  Object.defineProperty(missingFlag.header, 'isSeeded', { value: undefined, enumerable: true })
-  Object.defineProperty(missingFlag, 'inheritedEventCount', { value: 1, enumerable: true })
-  const absent = harnessFor({ session: missingFlag })
-  assert.deepEqual(absent.provider(MAIN)?.verifiedOriginSpans, [],
-    'an absent seed flag is not a licence to attribute the whole log')
-  assert.equal(absent.proveCalls.length, 0)
+test('the seq memo reuses the filtered log for the same Session and seq, and refreshes on growth', () => {
+  const session = sessionOf({ events: [{ type: 'turn/start', seq: 0, data: { turn: 1 } }] })
+  const provider = createVisualEventSnapshotProvider({
+    isRemote: () => false,
+    mainAgent: () => ({ session }),
+    viewedChildAgent: () => undefined,
+  })
+  const first = provider(MAIN)
+  assert.ok(first !== undefined)
+  const again = provider(MAIN)
+  assert.ok(again !== undefined)
+  assert.equal(again.events, first.events, 'the same seq serves the same filtered array')
+  session.events.push({ type: 'turn/end', seq: 1, data: { turn: 1 } })
+  session.seq = 2
+  const grown = provider(MAIN)
+  assert.ok(grown !== undefined)
+  assert.notEqual(grown.events, first.events, 'a new committed seq re-reads the log')
+  assert.deepEqual(grown.events.map(event => event.type), ['turn/start', 'turn/end'])
+})
+
+test('a same-id successor Session object never reuses the retired object cache', () => {
+  const first = sessionOf({ id: 'session-main' })
+  const second = sessionOf({ id: 'session-main', events: [{ type: 'turn/start', seq: 0, data: { turn: 1 } }] })
+  let current = first
+  const provider = createVisualEventSnapshotProvider({
+    isRemote: () => false,
+    mainAgent: () => ({ session: current }),
+    viewedChildAgent: () => undefined,
+  })
+  const before = provider(MAIN)
+  current = second
+  const after = provider(MAIN)
+  assert.ok(before !== undefined && after !== undefined)
+  assert.equal(before.session, first)
+  assert.equal(after.session, second, 'the exact live Session object is the identity')
+  assert.notEqual(after.events, before.events)
+})
+
+test('inconsistent seed metadata makes the whole visual snapshot unavailable', () => {
+  const cases: readonly {
+    readonly label: string
+    readonly session: FakeSession
+  }[] = [
+    {
+      label: 'missing isSeeded',
+      session: { ...sessionOf(), header: {} },
+    },
+    {
+      label: 'non-seeded with a non-zero inherited count',
+      session: sessionOf({ seeded: false, cut: 1 }),
+    },
+    {
+      label: 'a negative inherited count',
+      session: sessionOf({ seeded: true, cut: -1 }),
+    },
+    {
+      label: 'a non-integer inherited count',
+      session: sessionOf({ seeded: true, cut: 1.5 }),
+    },
+    {
+      label: 'a cut beyond the real log',
+      session: sessionOf({ seeded: true, cut: 4, events: [{ type: 'turn/start', seq: 0 }] }),
+    },
+    {
+      label: 'a cut without the inherited marker',
+      session: sessionOf({
+        seeded: true,
+        cut: 1,
+        events: [
+          { type: 'turn/start', seq: 0, data: { turn: 1 } },
+          { type: 'turn/end', seq: 1, data: { turn: 1 } },
+        ],
+      }),
+    },
+    {
+      label: 'a marker at another seq',
+      session: sessionOf({
+        seeded: true,
+        cut: 1,
+        events: [
+          { type: 'session/end-seed', seq: 0, data: { inherited: true } },
+          { type: 'turn/start', seq: 1, data: { turn: 1 } },
+        ],
+      }),
+    },
+    {
+      label: 'a non-inherited end-seed',
+      session: sessionOf({
+        seeded: true,
+        cut: 1,
+        events: [
+          { type: 'turn/start', seq: 0, data: { turn: 1 } },
+          { type: 'session/end-seed', seq: 1, data: { inherited: false } },
+        ],
+      }),
+    },
+  ]
+  for (const { label, session } of cases) {
+    const provider = createVisualEventSnapshotProvider({
+      isRemote: () => false,
+      mainAgent: () => ({ session }),
+      viewedChildAgent: () => undefined,
+    })
+    assert.equal(provider({ subjectKind: 'main', subjectId: session.id }), undefined, label)
+  }
+})
+
+test('a valid seed cut is accepted and keeps the inherited marker in the authority log', () => {
+  const session = sessionOf({
+    id: 'session-child',
+    seeded: true,
+    cut: 1,
+    events: [
+      { type: 'turn/start', seq: 0, data: { turn: 1 } },
+      { type: 'session/end-seed', seq: 1, data: { inherited: true } },
+      { type: 'turn/start', seq: 2, data: { turn: 2 } },
+    ],
+  })
+  const provider = createVisualEventSnapshotProvider({
+    isRemote: () => false,
+    mainAgent: () => ({ session }),
+    viewedChildAgent: () => undefined,
+  })
+  const snapshot = provider({ subjectKind: 'main', subjectId: 'session-child' })
+  assert.ok(snapshot !== undefined)
+  assert.deepEqual(snapshot.events.map(event => event.type), ['turn/start', 'session/end-seed', 'turn/start'],
+    'the epoch boundary stays visible to the authority')
+})
+
+test('a seeded Session with an empty inherited prefix is valid', () => {
+  const session = sessionOf({
+    seeded: true,
+    cut: 0,
+    events: [{ type: 'turn/start', seq: 0, data: { turn: 1 } }],
+  })
+  const provider = createVisualEventSnapshotProvider({
+    isRemote: () => false,
+    mainAgent: () => ({ session }),
+    viewedChildAgent: () => undefined,
+  })
+  assert.ok(provider(MAIN) !== undefined)
 })

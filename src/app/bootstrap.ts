@@ -128,11 +128,7 @@ import type { NavigationIntent } from '../app/session/transition.ts'
 import { bindSubmissionRuntime, type SubmissionRuntime } from '../app/submission/runtime.ts'
 import type { SessionOwnerRef, SessionSubject } from '../app/session/subject.ts'
 import { createSurfaceRuntime } from '../app/surface/runtime.ts'
-import {
-  createVisualEventSnapshotProvider,
-  type VisualEventSnapshotProvider,
-} from './bootstrap/visual-snapshot.ts'
-import { proveVisualLineage, type VisualLineageQuery } from './bootstrap/visual-lineage.ts'
+import { createVisualEventSnapshotProvider, type VisualEventSnapshotProvider } from './bootstrap/visual-snapshot.ts'
 import type { SurfaceRendererMount } from '../app/surface/runtime.ts'
 import { productionTspConnector, selectRendererMount, tspRequested } from './bootstrap/renderer-selection.ts'
 import { createTerminalOutputGate } from './bootstrap/terminal-output.ts'
@@ -588,11 +584,10 @@ export function applyRunnerWithRuntime(
      * logic lives in the testable wiring helper; Remote returns undefined and
      * keeps PR1's Tool/Work behavior.
      *
-     * The ONE ancestry proof rides the same provider: a forked Session's
-     * inherited prefix is proven once per selected identity through the
-     * official `sessionQuery.observeSession()` read, and a settled proof asks
-     * the mounted surface for one repaint. Remote stays undefined because it
-     * has no trusted complete-log seam.
+     * Fork identity lives INSIDE the committed log as the `session/end-seed`
+     * event epoch, so this wiring owns no ancestry query, no async proof and no
+     * second repaint. Remote stays undefined because it has no trusted
+     * complete-log seam.
      */
     let visualEventSnapshotProvider: VisualEventSnapshotProvider | undefined
     const visualEventSnapshotFor = (subject: {
@@ -603,32 +598,6 @@ export function applyRunnerWithRuntime(
         isRemote: () => remoteSources !== undefined,
         mainAgent: () => agentNow(),
         viewedChildAgent: () => viewerRef?.viewedChildAgent(),
-        lineage: {
-          prove: (sessionId) => {
-            const query = ctx.get('sessionQuery') as VisualLineageQuery | undefined
-            if (query === undefined || typeof query.observeSession !== 'function') {
-              return Promise.resolve({
-                spans: [],
-                unproven: `${sessionId}: the official sessionQuery service is unavailable`,
-              })
-            }
-            return proveVisualLineage(sessionId, query)
-          },
-          run: (label, task) => runDetached(label, task, {
-            diag,
-            sessionId: () => ownership.currentSessionId(),
-          }),
-          isCurrentSubject: (subject, session) => {
-            if (cleanedUp) return false
-            const live = subject.subjectKind === 'main' ? agentNow() : viewerRef?.viewedChildAgent()
-            return live !== undefined && (live as { readonly session?: object }).session === session
-          },
-          requestRepaint: () => {
-            if (cleanedUp) return
-            surface.repaint()
-          },
-          reportProblem: (message) => diag.debug('visual lineage unproven', { message }),
-        },
       })
       return visualEventSnapshotProvider(subject)
     }

@@ -293,7 +293,7 @@ function assistantSvgVisual(svg: string, title = 'Service topology', description
         message: {
           id: MessageId('tmux-sixel-assistant-svg'),
           role: 'assistant',
-          content: [{ type: 'text', text: 'Before.\n\n[dsh-visual-sv1_' + 'a'.repeat(20) + ']: <#>\n\nAfter.' }],
+          content: [{ type: 'text', text: 'Before.\n\n[dsh-visual-sv2_' + 'a'.repeat(20) + ']: <#>\n\nAfter.' }],
           source: { kind: 'model', provider: 'p', model: 'm' },
         },
       },
@@ -304,7 +304,7 @@ function assistantSvgVisual(svg: string, title = 'Service topology', description
   const assistant = folder.messages().find(
     (message): message is TranscriptMessage & { kind: 'assistant' } => message.kind === 'assistant',
   )!
-  const ref = `sv1_${'a'.repeat(20)}`
+  const ref = `sv2_${'a'.repeat(20)}`
   const publication: PublishedVisual = {
     ref,
     turn: 0,

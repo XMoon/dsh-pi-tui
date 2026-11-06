@@ -978,51 +978,53 @@ turn's structural latest step, with renderable content, may own a visual.
 Publication refs from a different turn, a window outside the answer, or a
 replaced/forged receipt never enter the row.
 
-### Fork-inherited history and origin provenance
+### Fork-inherited history and event epochs
 
-A forked Session inherits a durable prefix of its parent's log, and those
-events still belong to the ANCESTOR's identity: the `sv1_…` reference of an
-inherited generating result was derived from the ancestor's Session id, not the
-displayed child's. Replay therefore derives references from per-seq ORIGIN
-RANGES (`src/domain/visual/origin.ts`) instead of one session id:
+A forked Session inherits a durable prefix of its source log. The rc.1 ordinary
+fork carries NO `parentSession`, and a visual reference is SESSION-FREE: the
+`sv2_…` locator is derived from the tuple `[turn, absolute step/start seq,
+callId]`, so the same committed generation keeps the same locator inside the
+inherited prefix. The display never reads an ancestor Session.
 
-- a range attributes a half-open `[startSeq, endSeqExclusive)` window to one
-  Session. Ranges are ordered, non-overlapping and immutable, and a seq that no
-  range covers is UNPROVEN — never "the current Session" and never "the direct
-  parent" (`parentSession ?? current` is forbidden);
-- `src/app/bootstrap/visual-lineage.ts` is the ONE proof. It reads the live
-  Session's `header.isSeeded`, `inheritedEventCount` and the exact child-owned
-  `session/end-seed { inherited: true }` cut, then observes each recorded
-  ancestor through the official `sessionQuery.observeSession()` and requires
-  the observed header identity, the parent's own inherited cut, and full
-  durable event-prefix EQUALITY with the inherited window. An unreadable
-  parent, a mismatched prefix, a missing cut marker, a malformed cut or a
-  repeated Session id in the actual ancestor chain leaves that window unproven
-  and reports a bounded reason; the current Session's own range stays
-  authoritative in every one of those cases;
-- the current Session's own range `[inheritedEventCount, seq)` is proven
-  synchronously, so a child's own new figures work on the first frame, while
-  the inherited window is proven once per selected Session identity off the
-  render path. A settled proof advances one internal provenance revision and
-  requests a single repaint through the exact Agent/Session and
-  surface-currentness fence; a late result for a replaced subject (session
-  switch, A→B→A, disposed surface, new binding) is discarded, and a proven
-  failure is cached for that identity until a real rebind instead of being
-  retried every frame;
-- replay pairs a generating source with its `present_visual` publisher only
-  when BOTH were recorded by the same original Session, in the same turn, with
-  the generating result committed before the publishing call. A child can
-  never publish a figure it merely inherited, a cross-boundary unclosed call
-  never completes, and an unproven occurrence yields no publication at all.
-  The LIVE `decidePublication()` path is unchanged: it still authorizes only
-  the current executing Session's own turn and step.
+- `src/domain/visual/publication.ts` is the ONE authority for the live
+  `decidePublication()` write and the cold `collectPublishedVisuals()` replay.
+  It scans the committed log once and derives an EVENT EPOCH: 0 before the first
+  official `session/end-seed { inherited: true }`, then one increment for every
+  real marker. The epoch is a local index range only; it never enters a Session
+  header, an event, the wire, a cache or a plugin API.
+- A `tool/call` is indexed only inside the open `step/start` of its epoch; its
+  `tool/result` must pair in the SAME epoch and after the call. Synthetic fork
+  closers live after the cut marker and therefore never complete an inherited
+  open call. A generating source and its `present_visual` publisher must also
+  share one epoch and turn, with an EARLIER source step and the source result
+  committed before the publishing call.
+- The inherited SUCCESSFUL publication replays from its own epoch, while a
+  child's `present_visual` request for an inherited GENERATING result is
+  refused: a new publication cannot cross the fork epoch. This keeps the
+  ancestor's published figures visible without granting the child their
+  generation.
+- The absolute `stepStartSeq` (never an epoch-relative position) is one input of
+  `sv2_`. The same tuple in an independent Session may compute the same locator,
+  but it grants nothing without a local committed source and successful receipt
+  pair; a bare marker or receipt is never publication authority.
+- The Direct snapshot entry validates the official seed facts before serving a
+  log: a boolean `header.isSeeded`, a non-negative safe-integer
+  `inheritedEventCount` that fits the real log, and — for a non-empty cut — the
+  official `session/end-seed { inherited: true }` marker at exactly that seq.
+  Inconsistent metadata makes the visual snapshot unavailable (fail closed)
+  instead of treating the log as the current Session's own. There is no async
+  proof and no second repaint: own and inherited figures both work on the first
+  frame.
+- Old `sv1_` / `visual-ref-v1:` machine blocks are NOT migrated and NOT
+  dual-parsed: they remain ordinary readable text (the Tool Card still shows the
+  result) and grant no inline figure.
 
 Remote has no trusted complete-log seam and keeps the pre-existing Tool/Work
 behavior; it never gains an inferred origin.
 
 `src/domain/visual/placement.ts` owns the ONE placement projection. The
 Assistant's original `ContentBlock` text is the sole coordinate authority:
-strict `[dsh-visual-sv1_…]: <#>` top-level definitions are consumed as source
+strict `[dsh-visual-sv2_…]: <#>` top-level definitions are consumed as source
 spans, the renderer receives a single ordered `text | visual` sequence with
 explicit empty boundaries, and unconsumed published refs are appended to the
 answer body in first-publication order before the delivered-files tail. Ordinary

@@ -516,7 +516,7 @@ function presentRows(): never[] {
   return [
     {
       type: 'tool/call', seq: 1, time: 1,
-      data: { turn: 0, step: 1, callId: 'call-present', name: 'present_visual', arguments: JSON.stringify({ visuals: [{ ref: 'sv1_0123456789abcdef0123' }] }) },
+      data: { turn: 0, step: 1, callId: 'call-present', name: 'present_visual', arguments: JSON.stringify({ visuals: [{ ref: 'sv2_0123456789abcdef0123' }] }) },
     } as never,
     {
       type: 'tool/result', seq: 2, time: 1,
@@ -526,7 +526,7 @@ function presentRows(): never[] {
           callId: ToolCallId('call-present'),
           content: [
             { type: 'text', text: 'Selected 1 visual for presentation.' },
-            { type: 'text', text: 'visual-published-v1:{"version":1,"published":[{"ref":"sv1_0123456789abcdef0123"}]}' },
+            { type: 'text', text: 'visual-published-v1:{"version":1,"published":[{"ref":"sv2_0123456789abcdef0123"}]}' },
           ],
           isError: false,
         }),
@@ -546,7 +546,7 @@ test('the publication card shows its human summary and never the receipt machine
   assert.ok(view.includes('Present visuals'), `publication header missing:\n${view}`)
   assert.ok(view.includes('Selected 1 visual for presentation.'), `human summary missing:\n${view}`)
   assert.ok(!view.includes('visual-published-v1:'), `the receipt must never be painted:\n${view}`)
-  assert.ok(!view.includes('sv1_'), `the raw ref never appears in the card:\n${view}`)
+  assert.ok(!view.includes('sv2_'), `the raw ref never appears in the card:\n${view}`)
   app.stop()
 })
 
@@ -557,7 +557,7 @@ test('a failed publication card keeps its readable reason and no receipt', async
   folder.apply([
     {
       type: 'tool/call', seq: 1, time: 1,
-      data: { turn: 0, step: 1, callId: 'call-bad', name: 'present_visual', arguments: JSON.stringify({ visuals: [{ ref: 'sv1_0123456789abcdef0123' }] }) },
+      data: { turn: 0, step: 1, callId: 'call-bad', name: 'present_visual', arguments: JSON.stringify({ visuals: [{ ref: 'sv2_0123456789abcdef0123' }] }) },
     } as never,
     {
       type: 'tool/result', seq: 2, time: 1,
@@ -565,7 +565,7 @@ test('a failed publication card keeps its readable reason and no receipt', async
         turn: 0, step: 1,
         message: createToolResultMessage({
           callId: ToolCallId('call-bad'),
-          content: [{ type: 'text', text: 'unknown visual ref sv1_0123456789abcdef0123' }],
+          content: [{ type: 'text', text: 'unknown visual ref sv2_0123456789abcdef0123' }],
           isError: true,
         }),
       },
@@ -597,14 +597,14 @@ test('a generated visual card never paints the projected reference block', async
     series: [{ label: 'p50', value: 42 }, { label: 'p99', value: 70 }],
   }, [
     blocks[0] as ContentBlock,
-    { type: 'text', text: 'visual-ref-v1:sv1_0123456789abcdef0123' },
+    { type: 'text', text: 'visual-ref-v2:sv2_0123456789abcdef0123' },
     blocks[1] as ContentBlock,
   ]) as never)
   app.setTranscript(folder.messages())
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
   assert.ok(view.includes('p50'), `values visible with a reference block present:\n${view}`)
-  assert.ok(!view.includes('visual-ref-v1:'), `the reference block must never be painted:\n${view}`)
+  assert.ok(!view.includes('visual-ref-v2:'), `the reference block must never be painted:\n${view}`)
   assert.ok(!view.includes('visual-v1:'), 'nor the fact machine line')
   app.stop()
 })
@@ -634,13 +634,13 @@ test('the machine blocks stay hidden across the design-language size matrix', as
       series: [{ label: 'p50', value: 42 }, { label: 'p99', value: 70 }],
     }, [
       blocks[0] as ContentBlock,
-      { type: 'text', text: 'visual-ref-v1:sv1_0123456789abcdef0123' },
+      { type: 'text', text: 'visual-ref-v2:sv2_0123456789abcdef0123' },
       blocks[1] as ContentBlock,
     ]) as never)
     app.setTranscript(folder.messages())
     await vt.waitForRender()
     const view = vt.getViewport().join('\n')
-    assert.ok(!view.includes('visual-ref-v1:'), `${width}x${height}: the reference block must never paint:\n${view}`)
+    assert.ok(!view.includes('visual-ref-v2:'), `${width}x${height}: the reference block must never paint:\n${view}`)
     assert.ok(!view.includes('visual-v1:'), `${width}x${height}: the fact block must never paint:\n${view}`)
     assert.ok(view.includes('Request latency'), `${width}x${height}: the chart identity stays readable:\n${view}`)
     app.stop()
@@ -657,7 +657,7 @@ test('the Work tool card survives unchanged when the final answer also renders t
     series: [{ label: 'p50', value: 42 }, { label: 'p99', value: 70 }],
   }
   const fact = chartFactFromArgs(args)
-  const ref = `sv1_${'8'.repeat(20)}`
+  const ref = `sv2_${'8'.repeat(20)}`
   const marker = `[dsh-visual-${ref}]: <#>`
   const folder = new TranscriptFolder()
   folder.apply([

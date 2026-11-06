@@ -45,8 +45,8 @@ const SVG_SOURCE = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32">
   + '<rect width="64" height="32" fill="#3b82f6"/>'
   + '<text x="4" y="20" font-size="12" fill="#ffffff">Gateway</text></svg>'
 
-const REF_A = `sv1_${'a'.repeat(20)}`
-const REF_B = `sv1_${'b'.repeat(20)}`
+const REF_A = `sv2_${'a'.repeat(20)}`
+const REF_B = `sv2_${'b'.repeat(20)}`
 
 function marker(ref: string): string {
   return `[dsh-visual-${ref}]: <#>`
@@ -385,7 +385,7 @@ test('a half-streamed marker stays visible during the live turn and resolves onl
   folder.apply([{ type: 'turn/start', seq: 0, time: 1, data: { turn: 0 } } as unknown as SessionEvent])
   const partial: AssistantLiveInput = {
     kind: 'chunk', sessionId: 'stream-marker', attemptId: 'attempt-1', turn: 0, step: 0, time: 2,
-    chunk: { type: 'text-delta', index: 0, text: 'Before.\n\n[dsh-visual-sv1_' },
+    chunk: { type: 'text-delta', index: 0, text: 'Before.\n\n[dsh-visual-sv2_' },
   }
   folder.applyLiveInput(partial)
   const { vt, app } = mountApp({ width: 100, height: 60 })
@@ -393,7 +393,7 @@ test('a half-streamed marker stays visible during the live turn and resolves onl
   app.setTranscript(folder.messages(), folder.turnActivities())
   await vt.waitForRender()
   const streaming = vt.getViewport().join('\n')
-  assert.ok(streaming.includes('[dsh-visual-sv1_'), `the incomplete marker is the accepted transient text:\n${streaming}`)
+  assert.ok(streaming.includes('[dsh-visual-sv2_'), `the incomplete marker is the accepted transient text:\n${streaming}`)
   assert.equal(streaming.indexOf('Request latency'), -1, 'no figure is drawn before the complete terminal state')
 
   const text = `Before.\n\n${marker(REF_A)}\n\nAfter.`
@@ -426,7 +426,7 @@ test('a half-streamed marker stays visible during the live turn and resolves onl
   const inline = settled.indexOf('Request latency', settled.indexOf('Before.'))
   assert.ok(inline > settled.indexOf('Before.') && inline < settled.indexOf('After.'),
     `the completed terminal state resolves the marker at its source position:\n${settled}`)
-  assert.ok(!settled.includes('[dsh-visual-sv1_'), 'the complete marker definition is hidden')
+  assert.ok(!settled.includes('[dsh-visual-sv2_'), 'the complete marker definition is hidden')
   app.stop()
 })
 
@@ -507,7 +507,7 @@ test('an image block between text blocks keeps its existing marker row between t
 
 test('twenty definitions and ten figures paint without a linear blank-line prefix or a second bullet', async () => {
   const definitions = Array.from({ length: 20 }, (_, index) => `[d${index}]: https://example.com/${index}`).join('\n')
-  const refs = Array.from({ length: 10 }, (_, index) => `sv1_${index.toString(16).padStart(20, '0')}`)
+  const refs = Array.from({ length: 10 }, (_, index) => `sv2_${index.toString(16).padStart(20, '0')}`)
   const body = `${definitions}\n\nStart.\n\n${refs.map(ref => `${marker(ref)}\n\nfigure ${ref.slice(-2)}`).join('\n\n')}`
   const { folder, assistant } = answerFolder(body)
   setAssistantVisualPresentation(assistant, key(), refs.map((ref, index) => chartPublication(ref, `Chart ${index}`)))
