@@ -1122,3 +1122,31 @@ test('a refused Host version list sanitizes its reason and every attempt reason'
   assert.doesNotMatch(frame, /owned-title|ZXZpbA|secret/u, 'the refused reasons carry no injected terminal text or credential')
   assert.match(frame, /boom red/u, 'the reason text survives in its sanitized form')
 })
+
+test('a read-only Check updates preview never blocks disabling its bundle', async () => {
+  const harness = await open({
+    columns: 120,
+    rows: 40,
+    bundles: [bundle({
+      name: 'updatable',
+      updatable: true,
+      version: '1.0.0',
+      source: 'https://registry.example/updatable',
+      enabled: true,
+    })],
+    plugins: [],
+  })
+  await openCheckUpdates(harness)
+  assert.equal(harness.controller.updateView()?.phase, 'selecting')
+  // Back to the Detail without updating, then Disable….
+  harness.vt.sendInput('\x1b')
+  await harness.waitForFrame()
+  assert.equal(harness.panel.currentView(), 'details')
+  for (let attempt = 0; attempt < 3 && harness.setBundle.length === 0; attempt += 1) {
+    harness.vt.sendInput('\r')
+    await harness.waitForFrame()
+  }
+  assert.deepEqual(harness.setBundle, [{ name: 'updatable', enabled: false }],
+    'a read-only version preview must never block the Host write path')
+  assert.equal(harness.updateCalls.length, 0)
+})

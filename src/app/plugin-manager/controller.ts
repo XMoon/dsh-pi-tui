@@ -857,8 +857,12 @@ export class PluginManagerController {
   private updateBlocksWrites(): boolean {
     const active = this.update
     if (active === undefined) return false
-    if (active.phase === 'done') return false
-    return !(active.phase === 'unknown' && active.acknowledged)
+    // ONLY an in-flight update, or an indeterminate outcome whose successful
+    // authoritative reread has not been acknowledged, owns the write path.
+    // The read-only version preview (checking/selecting/confirm) NEVER holds
+    // the other mutations hostage: it is a registry read, not a Host write.
+    if (active.phase === 'running') return true
+    return active.phase === 'unknown' && !active.acknowledged
   }
 
   /** Refuse an old write entry point while the ONE update still owns the path. */
@@ -887,7 +891,7 @@ export class PluginManagerController {
         return
       }
       if (existing.cardValue === cardValue) {
-        // Re-entry: reuse the SAME list/result. Only an acknowledged
+        // Re-entry: reuse the SAME preview/result. Only an acknowledged
         // indeterminate outcome may start a NEW check for this same bundle.
         if (existing.phase !== 'unknown') return
         if (!existing.acknowledged) {
@@ -895,8 +899,11 @@ export class PluginManagerController {
           this.notifyChanged()
           return
         }
-      } else if (existing.phase !== 'done' && !(existing.phase === 'unknown' && existing.acknowledged)) {
-        this.message = 'another plugin change is still in progress; wait for it to settle'
+      } else if (existing.phase === 'unknown' && !existing.acknowledged) {
+        // An unacknowledged indeterminate write keeps the lock; every other
+        // phase (including a read-only preview) may be replaced by another
+        // bundle's Check updates….
+        this.message = 'the previous update outcome is unknown; acknowledge it before checking another bundle'
         this.notifyChanged()
         return
       }
