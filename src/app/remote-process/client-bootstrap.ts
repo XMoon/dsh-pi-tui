@@ -1084,12 +1084,13 @@ async function startSurfaceLocalClient(
     if (readAuthorityDiag === undefined) {
       throw new Error('local client entry: the read-authority qualification requires the Client diagnostics sink')
     }
-    let chain: Promise<void> = Promise.resolve()
     process.on('SIGUSR2', () => {
-      // Serialized, and each request is an owned detached task: a throwing
-      // telemetry sink or probe body is classified by the repository's failure
-      // model instead of becoming an unhandled rejection on a bare chain.
-      chain = chain.then(() => runDetached('read-authority qualification probe', async () => {
+      // Each SIGUSR2 opens ONE owned detached task: a throwing telemetry sink
+      // or probe body is classified by the failure model instead of becoming an
+      // unhandled rejection. The request file is read synchronously at the task
+      // start, so overlapping triggers stay nonce-correlated (no serialization
+      // is claimed: an overlapping read is a distinct sample, not a queued one).
+      runDetached('read-authority qualification probe', async () => {
         /** Echoes the caller's correlation nonce on every record of ONE op. */
         let nonce: unknown
         const emit = (record: Record<string, unknown>): void => {
@@ -1206,7 +1207,7 @@ async function startSurfaceLocalClient(
               : {}),
           })
         }
-      }, { diag: readAuthorityDiag }))
+      }, { diag: readAuthorityDiag })
     })
   }
   // T34 qualification input: close the writer's pre-dispatch admission while
