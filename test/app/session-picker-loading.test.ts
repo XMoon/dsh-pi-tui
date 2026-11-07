@@ -877,11 +877,12 @@ test('a late listing from a superseded open never repaints the new Picker', asyn
   assert.ok(h.view().includes('freshrow'), 'the new Picker keeps its own roster')
 })
 
-test('typed /resume against an empty roster reports the S2 empty state (RFL-001)', async (t) => {
-  // An empty listing only proves that no Session is READABLE: the official
-  // listing publishes a Session from its header, so an unlistable log looks
-  // exactly like an empty store here. The command result must carry the same
-  // S2 wording as the in-picker status row — never a claim about stored data.
+test('typed /resume against an empty roster reports the same readable-empty state as the Picker', async (t) => {
+  // Regression (empty-roster command wording): an empty listing only proves
+  // that no Session is READABLE — the official listing publishes a Session
+  // from its header, so an unlistable log looks exactly like an empty store
+  // here. The command result must carry the same S2 limited-contract wording
+  // as the in-picker status row, never a claim about stored data.
   const h = harness({
     list: async () => [],
     search: async () => ({ items: [], hasMore: false }),

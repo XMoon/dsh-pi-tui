@@ -928,3 +928,22 @@ test('a typed query replaces the command seed as the one search identity', async
   await waitUntil(() => h.searchCalls.length === 2)
   assert.equal(h.searchCalls[1]!.query, 'alpha', 'the user edit becomes the canonical query')
 })
+
+test('the one-shot seed fills the search editor when no row matches', async (t) => {
+  // No metadata match and an empty Host page: the ONLY place the query text can
+  // appear is the externally-filtered search editor, so this asserts the editor
+  // seed itself (a Host search still runs from the owner's canonical query).
+  const h = harness({
+    rows: rows(),
+    search: async () => ({ items: [], hasMore: false }),
+  })
+  t.after(() => h.app.stop())
+  await h.runSessions('needle')
+  await waitUntil(() => h.searchCalls.length === 1)
+  await waitUntil(() => h.view().includes('Search results'))
+  await h.vt.waitForRender()
+  const view = h.view()
+  assert.ok(view.includes('needle'), `the one-shot seed must be visible in the search editor:\n${view}`)
+  assert.ok(!view.includes('session-alpha'), 'the seed alone never invents a metadata row')
+  assert.ok(!view.includes('session-beta'), 'the seed alone never invents a metadata row')
+})
