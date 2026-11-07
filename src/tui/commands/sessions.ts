@@ -13,6 +13,7 @@ import type { CommandInvocation, CommandResult } from '@deepseek-ai/dsh-commands
 import type { SessionWorkspaceHandle, TuiApp } from '../../tui-app.ts'
 import { createSessionBrowserReadOwner, type SessionBrowserReadOwner, type SessionBrowserReadSettlement, type SessionBrowserResumeSettlement } from '../../app/command/session-browser-read.ts'
 import type {
+  SessionBrowserAnswerEligibility,
   SessionBrowserPanelHandle,
   SessionBrowserPanelRequest,
   SessionBrowserPresentation,
@@ -30,7 +31,7 @@ import {
   sanitizeTerminalText,
   type SessionPickerRow,
 } from '../pickers/sessions.ts'
-import type { WorkspaceFactsHandle } from '../../runtime/session-workspace-facts-port.ts'
+import type { SessionActivityFact, WorkspaceFactsHandle } from '../../runtime/session-workspace-facts-port.ts'
 import type {
   NewSessionId,
   RegisterOne,
@@ -51,6 +52,8 @@ type SessionCommandRunner = Pick<
   | 'effectivePresetId'
   | 'fileStore'
   | 'forkSession'
+  | 'forwardedAnswerEligibility'
+  | 'subscribeForwardedAnswerEligibility'
   | 'imageStore'
   | 'isSessionScopeCurrent'
   | 'openRewindPicker'
@@ -165,13 +168,27 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
   let piTuiOpenIntent: PiTuiOpenIntent | undefined
 
   /** One open PiTUI fullscreen Session Workspace: the app lease handle, this
-   *  open's ONE Workspace follow generation and the per-open token. Every row,
-   *  snippet and status still comes from the shared read owner's snapshot. */
+   *  open's ONE Workspace follow generation, the ONE Activity sample generation
+   *  and the per-open token. Every row, snippet and status still comes from the
+   *  shared read owner's snapshot. */
   interface PiTuiWorkspaceOpen {
     readonly request: SessionBrowserPanelRequest
     handle: SessionWorkspaceHandle | undefined
     readonly controller: AbortController
     workspaces: WorkspaceFactsHandle | undefined
+    /** The ONE in-flight Activity sample; a newer accepted roster aborts it. */
+    activity: AbortController | undefined
+    /** The list revision whose Activity sample this open started last (never a
+     *  second read of the same batch). */
+    sampledRevision: number | undefined
+    /** The last PUBLISHED sample, republished when eligibility changes without
+     *  a new Host read. */
+    activityRevision: number | undefined
+    activityFacts: readonly SessionActivityFact[] | undefined
+    /** The latest Client-root eligibility snapshot; `undefined` means this
+     *  composition has no official forwarded-answer capability at all. */
+    answerEligibility: readonly SessionBrowserAnswerEligibility[] | undefined
+    eligibilitySubscription: (() => void) | undefined
     disposed: boolean
     /** Per-open dedupe of the one notice each snapshot fact may surface. */
     lastNotice: string | undefined
@@ -181,7 +198,9 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
    *  physical fullscreen lease through `app.openSessionWorkspace` and the ONE
    *  per-open official Workspace follow; it owns no list, projection, query
    *  generation or switch (those stay in the shared read owner). */
-  const createPiTuiSessionWorkspacePresentation = (): SessionBrowserPresentation => {
+  const createPiTuiSessionWorkspacePresentation = (
+    requestRosterRefresh: () => void,
+  ): SessionBrowserPresentation => {
     let active: PiTuiWorkspaceOpen | undefined
 
     /** Release this open ONCE: token first, then the follow generation, then
@@ -191,6 +210,11 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
       open.disposed = true
       if (active === open) active = undefined
       open.controller.abort()
+      open.activity?.abort()
+      open.activity = undefined
+      const unsubscribe = open.eligibilitySubscription
+      open.eligibilitySubscription = undefined
+      unsubscribe?.()
       const workspaces = open.workspaces
       open.workspaces = undefined
       workspaces?.dispose()
@@ -242,6 +266,64 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
       })
     }
 
+    /** The ONE Activity sample of ONE accepted roster revision. The roster is
+     *  the read owner's ORIGINAL array (never a copy and never a re-listing),
+     *  and the sample is fenced by this open's token, the captured Session
+     *  subject, the accepted revision and its own AbortController. A sample the
+     *  current frame did not ask for is inert. */
+    const startActivitySample = (open: PiTuiWorkspaceOpen, snapshot: SessionBrowserReadSnapshot): void => {
+      const revision = snapshot.listRevision
+      open.sampledRevision = revision
+      open.activity?.abort()
+      const controller = new AbortController()
+      open.activity = controller
+      const handle = open.handle
+      if (handle === undefined) return
+      runOwned('session workspace activity read', () => runner.sessionWorkspaceFacts.readActivity(snapshot.rows, controller.signal), {
+        diag: runner.diag,
+        sessionId: () => open.request.subject.currentSessionId,
+        isCancellation: () => open.disposed || open.controller.signal.aborted || controller.signal.aborted,
+        onResult: (facts) => {
+          if (open.disposed || controller.signal.aborted) return
+          if (!open.request.subject.isCurrent()) return
+          if (open.sampledRevision !== revision) return
+          open.activityFacts = facts
+          open.activityRevision = revision
+          handle.setActivityFacts({ listRevision: revision, facts, answerEligibility: open.answerEligibility })
+        },
+        onError: (error) => {
+          // A real sample failure (never a cancellation/superseded read) is ONE
+          // visible nonfatal fact: the roster and Peek stay usable, the Activity
+          // rows fall back to Unknown.
+          if (open.disposed || controller.signal.aborted) return
+          if (!open.request.subject.isCurrent()) return
+          if (open.sampledRevision !== revision) return
+          open.activityFacts = undefined
+          open.activityRevision = undefined
+          handle.activityUnavailable(sanitizeTerminalText(safeErrorMessage(error)))
+        },
+      })
+    }
+
+    /** Reproject the SAME last sample against the newest Client-root
+     *  eligibility (no Host read) and request ONE early roster refresh through
+     *  the read owner's single generation, so the next sample's `attention` is
+     *  fresh too. An official request that another Client settled must drop the
+     *  Needs row NOW, not at the next refresh tick. */
+    const applyAnswerEligibility = (open: PiTuiWorkspaceOpen): void => {
+      const read = runner.forwardedAnswerEligibility
+      open.answerEligibility = read === undefined ? undefined : [...read()]
+      const handle = open.handle
+      if (handle !== undefined && open.activityFacts !== undefined && open.activityRevision !== undefined) {
+        handle.setActivityFacts({
+          listRevision: open.activityRevision,
+          facts: open.activityFacts,
+          answerEligibility: open.answerEligibility,
+        })
+      }
+      requestRosterRefresh()
+    }
+
     /** Surface this open's Host/search/projection facts as ONE deduped notice
      *  (Host result first, the secondary projection failure second). The panel
      *  ALSO paints the same status; the notice is the transient companion the
@@ -277,11 +359,18 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
       const intent = piTuiOpenIntent
       piTuiOpenIntent = undefined
       const subject = request.subject
+      const readEligibility = runner.forwardedAnswerEligibility
       const state: PiTuiWorkspaceOpen = {
         request,
         handle: undefined,
         controller: new AbortController(),
         workspaces: undefined,
+        activity: undefined,
+        sampledRevision: undefined,
+        activityRevision: undefined,
+        activityFacts: undefined,
+        answerEligibility: readEligibility === undefined ? undefined : [...readEligibility()],
+        eligibilitySubscription: undefined,
         disposed: false,
         lastNotice: undefined,
       }
@@ -312,12 +401,27 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
       state.handle = handle
       active = state
       startWorkspaceFollow(state, handle)
+      const subscribeEligibility = runner.subscribeForwardedAnswerEligibility
+      if (subscribeEligibility !== undefined) {
+        state.eligibilitySubscription = subscribeEligibility(() => {
+          if (state.disposed) return
+          applyAnswerEligibility(state)
+        })
+      }
       return {
         isDisposed: () => state.disposed || handle.isDisposed(),
         setSnapshot: (snapshot, snapshotOptions) => {
           if (state.disposed) return
           handle.setSnapshot(snapshot, snapshotOptions?.initialQuery)
           emitNotice(state, snapshot)
+          // ONE Activity sample per ACCEPTED roster revision: a projection
+          // batch, a search update or a repeated publish never re-reads the
+          // same batch.
+          if (snapshot.listRevision > 0
+            && snapshot.listRevision !== state.sampledRevision
+            && (snapshot.listState === 'ready' || snapshot.listState === 'empty')) {
+            startActivitySample(state, snapshot)
+          }
         },
         close: () => { release(state, true) },
       }
@@ -329,10 +433,13 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
     }
   }
 
-  const piTuiPresentation = createPiTuiSessionWorkspacePresentation()
-
   let nativeReadOwner: SessionBrowserReadOwner | undefined
   let nativePresentation: SessionBrowserPresentation | undefined
+
+  /** PiTUI-only roster refresh cadence. TSP keeps its historical single read. */
+  const SESSION_WORKSPACE_REFRESH_MS = 20_000
+
+  const piTuiPresentation = createPiTuiSessionWorkspacePresentation(() => { nativeReadOwner?.refresh() })
 
   // The runner lifetime owns the ONE read owner: a quit/HMR aborts it so no
   // pending list, projection batch or debounced search outlives the surface.
@@ -353,6 +460,7 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
     nativeReadOwner = createSessionBrowserReadOwner({
       reader: runner.sessionReader,
       presentation,
+      ...(presentation === piTuiPresentation ? { autoRefreshMs: SESSION_WORKSPACE_REFRESH_MS } : {}),
       captureSubject: () => {
         const scope = runner.captureSessionScope()
         return {

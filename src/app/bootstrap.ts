@@ -2047,6 +2047,17 @@ export function applyRunnerWithRuntime(
         // M5-U-C: the SAME official Host read port the backend resolved; the
         // command runner forwards it unchanged to the PiTUI Session Workspace.
         sessionWorkspaceFacts: backend.sessionWorkspaceFacts,
+        // Split-Client only: the Client-root forwarded-answer eligibility read
+        // view. The Session Workspace uses it ONLY as the positive
+        // answerability gate for `Needs attention`; a Direct/TSP composition
+        // never installs the root delivery owner, so absence is the truthful
+        // "no official answer composition here".
+        ...(interactionDelivery === undefined
+          ? {}
+          : {
+              forwardedAnswerEligibility: () => interactionDelivery.currentEligibleRequests(),
+              subscribeForwardedAnswerEligibility: (listener: () => void) => interactionDelivery.subscribeEligibility(listener),
+            }),
         sessionWriter: backend.sessionWriter,
         interaction: backend.interaction,
         catalog: backend.catalog,

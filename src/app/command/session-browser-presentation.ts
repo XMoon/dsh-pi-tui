@@ -12,6 +12,18 @@ export interface SessionBrowserSearchResult {
   readonly snippet?: string
 }
 
+/**
+ * ONE live official forwarded request THIS Client root still holds for an
+ * answer (G567's transient read view). It carries identity only — never a
+ * question payload, an option, an answer or a Host pending record — and it
+ * vanishes the moment the official invocation settles or aborts.
+ */
+export interface SessionBrowserAnswerEligibility {
+  readonly sessionId: string
+  readonly kind: 'question' | 'approval'
+  readonly live: true
+}
+
 /** Detached state produced only by SessionReader.list/projectionBatch/search. */
 export interface SessionBrowserReadSnapshot {
   readonly listState: SessionBrowserListState
@@ -21,9 +33,17 @@ export interface SessionBrowserReadSnapshot {
   readonly searchState: SessionBrowserSearchState
   readonly searchResults: readonly SessionBrowserSearchResult[]
   readonly hasMore: boolean
+  /** Monotonic roster acceptance revision, starting at 0 before the first
+   *  accepted `list()`. Only an accepted roster increments it; a projection
+   *  batch, a search update or a repaint never does. The PiTUI Session
+   *  Workspace keys its ONE Activity sample on this value. */
+  readonly listRevision: number
   readonly listError?: string
   readonly projectionError?: string
   readonly searchError?: string
+  /** A FAILED background roster refresh. The last good roster stays listed;
+   *  this is a nonfatal freshness fact, cleared by the next success. */
+  readonly refreshError?: string
 }
 
 /** B1-B's narrow handoff, intentionally not connected to any writer in B1-A. */

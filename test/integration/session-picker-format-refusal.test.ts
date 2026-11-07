@@ -87,7 +87,7 @@ for (const [columns, rows] of [[120, 40], [80, 10], [44, 20]] as const) test(`th
   // (refused) row sorts first, so it is the initial selection.
   await (async (): Promise<void> => {
     const deadline = Date.now() + 5_000
-    while (!view().includes('Recent sessions · 2')) {
+    while (!view().includes('Sessions · 2')) {
       if (Date.now() > deadline) throw new Error(`the workspace roster: ${view()}`)
       await new Promise<void>(resolve => setTimeout(resolve, 10))
       await vt.waitForRender()
@@ -96,7 +96,7 @@ for (const [columns, rows] of [[120, 40], [80, 10], [44, 20]] as const) test(`th
   for (const line of vt.getViewport()) {
     assert.ok(visibleWidth(line) <= columns, `no frame row overflows ${columns} cells: ${JSON.stringify(line)}`)
   }
-  assert.match(view(), /Recent sessions · 2/u, `the workspace lists the stored Sessions:\n${view()}`)
+  assert.match(view(), /Sessions · 2/u, `the workspace lists the stored Sessions:\n${view()}`)
   if (columns >= 120) {
     assert.match(view(), /format-n/u)
     assert.match(view(), /format-c/u)

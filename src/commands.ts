@@ -44,6 +44,7 @@ import type { NavigationIntent } from './app/session/transition.ts'
 import type { ClientReloadProcessRefusal } from './app/application-runtime.ts'
 import type { ClientReloadRefusal } from './app/remote-process/client-reload-safety.ts'
 import type { DefaultIntentRecord } from './app/command/model-default-intent.ts'
+import type { SessionBrowserAnswerEligibility } from './app/command/session-browser-presentation.ts'
 import type { SelectionRef } from './app/command/model-selection.ts'
 import type { Component } from '@xmoon76/pi-tui'
 import type { EmbeddedPluginPage } from './tui/plugin-manager/workspace.ts'
@@ -426,6 +427,19 @@ export interface TuiCommandRunner {  ctx: Context
    *  follows Workspace membership per open and never writes a Workspace,
    *  never persists a registry and never guesses membership from a cwd. */
   readonly sessionWorkspaceFacts: SessionWorkspaceFactsPort
+  /**
+   * Split-Client only (G567's Client-root read view, consumed by M5-U-D): the
+   * official forwarded Question/Approval invocations THIS Client still holds
+   * for an answer. It carries identity only — never a question payload, option,
+   * answer or Host pending record — and it is the ONLY positive answerability
+   * gate the Session Workspace may use for `Needs attention`. Absent on Direct
+   * and on a TSP/native composition: absence means "no official answer
+   * composition here", so no row may be classified answerable.
+   */
+  readonly forwardedAnswerEligibility?: () => readonly SessionBrowserAnswerEligibility[]
+  /** Observe eligibility add/remove. A UI invalidation notification, never a
+   *  Host event subscription and never an answer. */
+  readonly subscribeForwardedAnswerEligibility?: (listener: () => void) => () => void
   /** The session WRITE port (D2.1): ordinary prompts, occurrence-level queue
    * steering/removal, cancel and title ops go through the port. Multi-message
    * gestures use runner-level FIFO orchestration; no batch verb crosses it. */

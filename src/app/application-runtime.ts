@@ -30,6 +30,7 @@ import type { SubmissionPresentationSource } from './submission/presentation.ts'
 import type { Backend, BackendKind } from '../runtime/backend.ts'
 import type { SessionOwnerAccess, SessionOwnerRetirement } from './session/owner-access.ts'
 import type { PiTuiExtensionService } from '../extensions.ts'
+import type { SessionBrowserAnswerEligibility } from './command/session-browser-presentation.ts'
 
 /**
  * The one selected application runtime core: the common inputs the bootstrap
@@ -279,6 +280,16 @@ export interface RemoteLiveIngressFactory {
  * structure, and the full seam lives in `runtime/remote/interaction-remote`.
  */
 export interface SplitClientInteractionDeliveryControl {
+  /**
+   * The official forwarded requests this root currently holds and has not
+   * settled — the ONLY positive answerability fact the Session Workspace
+   * classifier may use. An empty array is "composition present, nothing live";
+   * a Direct/TSP composition never supplies this capability at all.
+   */
+  currentEligibleRequests(): readonly SessionBrowserAnswerEligibility[]
+  /** Observe eligibility add/remove. A UI invalidation notification, never a
+   *  Host event subscription: it never answers and never creates a request. */
+  subscribeEligibility(listener: () => void): () => void
   /**
    * Bind the ONE committed-Session authority of the application hosting the
    * current surface revision. A replacement revision replaces the binding; the

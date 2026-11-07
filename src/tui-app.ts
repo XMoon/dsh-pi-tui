@@ -173,7 +173,7 @@ import {
 } from './tui/panels/settings-workspace-panel.ts'
 import type { ModelsInitialView } from './tui/panels/models-workspace-page.ts'
 import type { AccountInitialView } from './tui/panels/account-workspace-page.ts'
-import { SessionWorkspacePanel } from './tui/panels/session-workspace-panel.ts'
+import { SessionWorkspacePanel, type SessionWorkspaceActivityFacts } from './tui/panels/session-workspace-panel.ts'
 import { ScheduleWorkspacePanel } from './tui/schedule/workspace-panel.ts'
 import type {
   SessionBrowserReadSnapshot,
@@ -1832,6 +1832,13 @@ export interface SessionWorkspaceHandle {
   setSnapshot(snapshot: SessionBrowserReadSnapshot, initialQuery?: string): void
   updateWorkspaces(frame: WorkspaceFactsFrame): void
   workspaceUnavailable(message: string): void
+  /** M5-U-D: ONE accepted official Activity sample for the accepted roster
+   *  revision it belongs to, plus the Client-root forwarded-answer eligibility
+   *  read view. A stale/closed lease is inert. */
+  setActivityFacts(facts: SessionWorkspaceActivityFacts): void
+  /** M5-U-D: ONE failed Activity sample. Nonfatal: the roster, search and Peek
+   *  stay usable and every activity fact becomes Unknown. */
+  activityUnavailable(message: string): void
   close(): void
   isDisposed(): boolean
 }
@@ -24642,6 +24649,14 @@ export class TuiApp {
       workspaceUnavailable: (message) => {
         if (!owns()) return
         panel.workspaceUnavailable(message)
+      },
+      setActivityFacts: (facts) => {
+        if (!owns()) return
+        panel.setActivityFacts(facts)
+      },
+      activityUnavailable: (message) => {
+        if (!owns()) return
+        panel.activityUnavailable(message)
       },
       close: () => {
         if (disposed) return

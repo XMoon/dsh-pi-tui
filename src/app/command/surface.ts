@@ -295,6 +295,10 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
      *  the internal command runner. This facade never caches, wraps or
      *  re-derives it; the PiTUI Session Workspace is its only consumer. */
     readonly sessionWorkspaceFacts: TuiCommandRunner['sessionWorkspaceFacts']
+    /** Split-Client only (G567 capability): the Client-root forwarded-answer
+     *  eligibility read view, forwarded unchanged. Direct/TSP supply nothing. */
+    readonly forwardedAnswerEligibility?: TuiCommandRunner['forwardedAnswerEligibility']
+    readonly subscribeForwardedAnswerEligibility?: TuiCommandRunner['subscribeForwardedAnswerEligibility']
     readonly sessionWriter: TuiCommandRunner['sessionWriter']
     readonly interaction: TuiCommandRunner['interaction']
     readonly catalog: TuiCommandRunner['catalog']
@@ -1255,6 +1259,12 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       // through the port, never ctx directly.
       sessionReader: deps.backend.sessionReader,
       sessionWorkspaceFacts: deps.backend.sessionWorkspaceFacts,
+      ...(deps.backend.forwardedAnswerEligibility === undefined
+        ? {}
+        : { forwardedAnswerEligibility: deps.backend.forwardedAnswerEligibility }),
+      ...(deps.backend.subscribeForwardedAnswerEligibility === undefined
+        ? {}
+        : { subscribeForwardedAnswerEligibility: deps.backend.subscribeForwardedAnswerEligibility }),
       // PR D2: the explicit About/status force — measure NOW through the
       // coordinator (mark dirty + semantic reader), repaint the footer
       // cheaply, and return the fresh (or last-good) value for the panel.
