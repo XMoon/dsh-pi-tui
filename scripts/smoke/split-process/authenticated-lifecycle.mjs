@@ -281,7 +281,17 @@ export async function runAuthenticatedLifecycle(context) {
     }
     assert(hostReady.terminalProgressWatches === 0, 'T21 the Host must start with no terminal-progress watchers')
     assert(hostReady.webServer?.host === '127.0.0.1' && hostReady.webServer.port > 0, 'T01 loopback webserver not ready')
-    assert(hostReady.entries.filter(entry => entry.name === '@deepseek-ai/dsh-client-connection').length === 1, 'T01 duplicate Connection row')
+    // The bundle DECLARES the three Direct-only Schedule prerequisites and the
+    // Host-only overlay disables them, so only ENABLED rows own the authority.
+    const activeRowsOf = name => hostReady.entries.filter(entry => entry.name === name && entry.state === 'active')
+    const connectionRows = activeRowsOf('@deepseek-ai/dsh-client-connection')
+    assert(connectionRows.length === 1, 'T01 duplicate Connection row')
+    assert(connectionRows[0].id === 'split-host-connection', `T01 Connection owner is ${connectionRows[0].id}`)
+    assert(hostReady.entries.filter(entry => entry.name === '@deepseek-ai/dsh-client-connection').length === 2,
+      'T01 the bundle declares the Direct prerequisite that the overlay disables')
+    for (const id of ['pi-tui-direct-connection', 'pi-tui-direct-file-upload', 'pi-tui-direct-session-controller']) {
+      assert(hostReady.entries.find(entry => entry.id === id)?.state === 'absent', `T01 ${id} is not disabled`)
+    }
     assert(hostReady.entries.filter(entry => entry.name === '@deepseek-ai/dsh-api-remotes').length === 1, 'T01 duplicate api-remotes row')
     assert(hostReady.entries.filter(entry => entry.id === 'typert-gateway').length === 1, 'T01 duplicate gateway row')
 
