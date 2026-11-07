@@ -134,9 +134,11 @@ export type ScheduleIntent =
   | { readonly kind: 'select-target-session'; readonly sessionId: string }
   | { readonly kind: 'toggle-advanced' }
   | { readonly kind: 'save' }
-  /** Re-read the current task and rebase the draft's CAS revision on it,
-   *  keeping every typed field (the explicit conflict recovery: no silent
-   *  merge, no automatic overwrite). */
+  /** The explicit conflict recovery (plan §5.5): re-read the latest Host
+   *  record and DISPLAY it as the editor content and CAS revision, discarding
+   *  the conflicted draft. It never auto-merges: the user re-applies the changes
+   *  they still want manually, so the Host's newer values are never re-sent as
+   *  an overwrite. */
   | { readonly kind: 'reload-latest' }
   | { readonly kind: 'toggle-active' }
   | { readonly kind: 'ask-run' }
