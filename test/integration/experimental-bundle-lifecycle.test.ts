@@ -25,7 +25,9 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import test, { type TestContext } from 'node:test'
 import { getDshRuntimeVersion } from '@deepseek-ai/dsh-app-boot'
 import {
   S5_OPTIONAL_BUNDLE_IDS,
@@ -36,6 +38,44 @@ import {
 import { startS4D3Application, type S4D3Application } from '../support/application-fixture.ts'
 
 const TARGET_VERSION = getDshRuntimeVersion()
+
+const LIVESHARE_ENV_KEYS = [
+  'LIVESHARE_OWNER_PROVIDER_ID',
+  'LIVESHARE_OWNER_TENANT_ID',
+  'LIVESHARE_OWNER_SUBJECT_ID',
+  'LIVESHARE_OWNER_DISPLAY_NAME',
+  'LIVESHARE_ALLOWED_SUBJECTS',
+  'LIVESHARE_OWNER_STATE_FILE',
+  'LIVESHARE_OWNER_CREDENTIAL_FILE',
+] as const
+
+function isolateLiveshareEnvironment(t: TestContext): void {
+  const previous = new Map(LIVESHARE_ENV_KEYS.map(key => [key, process.env[key]]))
+  for (const key of LIVESHARE_ENV_KEYS) delete process.env[key]
+  t.after(() => {
+    for (const [key, value] of previous) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  })
+}
+
+interface LiveshareOwnerState {
+  readonly relayUrl?: string
+  readonly shares?: readonly { readonly link: string }[]
+  readonly pendingRemovals?: readonly unknown[]
+}
+
+/** Missing owner state is the official empty state; otherwise inspect the exact
+ *  persisted record format used by the published Liveshare Host package. */
+function assertLiveshareOwnerStateEmpty(path: string): void {
+  const state = existsSync(path)
+    ? JSON.parse(readFileSync(path, 'utf8')) as LiveshareOwnerState
+    : undefined
+  assert.equal(state?.relayUrl, undefined, 'the isolated owner state has no saved Relay')
+  assert.deepEqual(state?.shares ?? [], [], 'the isolated owner state has no shares or links')
+  assert.deepEqual(state?.pendingRemovals ?? [], [], 'the isolated owner state owes no Relay removals')
+}
 
 /** The ONE official Loader row that identifies each bundle's purpose after the
  *  restart. A release that renames it must fail this case loudly. */
@@ -134,7 +174,21 @@ const CASES = S5_OPTIONAL_BUNDLE_IDS.map(name => ({
 
 for (const { name, skip, title, coreRow } of CASES) {
   test(title, { skip }, async t => {
+    if (name === '@deepseek-ai/dsh-experimental-liveshare') isolateLiveshareEnvironment(t)
     let app = await startS4D3Application(t, { bundles: [], presets: true, installationBoot: true })
+    let liveshareStateFile: string | undefined
+    if (name === '@deepseek-ai/dsh-experimental-liveshare') {
+      // This initial composition has LiveShare disabled. Give its later boot a
+      // fresh owner-state root under the fixture's isolated Host directory.
+      const liveshareRoot = join(app.host.root, 'liveshare-owner')
+      mkdirSync(liveshareRoot, { recursive: true })
+      liveshareStateFile = join(liveshareRoot, 'owner-state.json')
+      process.env.LIVESHARE_OWNER_STATE_FILE = liveshareStateFile
+      process.env.LIVESHARE_OWNER_CREDENTIAL_FILE = join(liveshareRoot, 'owner-credential.json')
+      assertLiveshareOwnerStateEmpty(liveshareStateFile)
+      assert.equal(existsSync(process.env.LIVESHARE_OWNER_CREDENTIAL_FILE), false,
+        'the test owner credential starts absent')
+    }
 
     // ── OFF: the authoritative Host row and the untouched profile ───────────
     const profileDir = app.host.profileDir
@@ -174,11 +228,16 @@ for (const { name, skip, title, coreRow } of CASES) {
     assert.ok(entry !== undefined, `the restarted Loader carries the ${coreRow} row from the published patch`)
     assert.equal(entry.error, undefined, `${coreRow} carries no failure: ${String(entry.error)}`)
     if (name === '@deepseek-ai/dsh-experimental-liveshare') {
-      // Without a Relay the share host row waits as a real PENDING entry (not
-      // an error and not a claimed share); no share service exists.
-      assert.equal((app.host.ctx as unknown as { get(service: string): unknown }).get('liveshare'), undefined,
-        'no LiveShare service is created without a Relay connection')
-      assert.equal(process.env.LIVESHARE_OWNER_CREDENTIAL_FILE, undefined, 'no Relay/Owner credential was created')
+      // The direct Host owns local state; `liveshareShares` is a Gateway Remote
+      // namespace, not a Cordis service. A fresh owner state proves no saved
+      // Relay, published share/link, or deferred Relay deletion without making
+      // any external request. A pending Loader row is the expected absent
+      // connection prerequisite, not a service or sharing success claim.
+      assert.ok(liveshareStateFile !== undefined)
+      assertLiveshareOwnerStateEmpty(liveshareStateFile)
+      assert.equal(existsSync(process.env.LIVESHARE_OWNER_CREDENTIAL_FILE!), false,
+        'the isolated owner credential file remains absent')
+      assert.equal(entry.state, 0, 'the official share-host row is pending while Host connection is absent')
     }
     if (name === '@deepseek-ai/dsh-experimental-forge-bundle') {
       // The local Forge rows compose without any GitHub authorization; the
@@ -202,6 +261,12 @@ for (const { name, skip, title, coreRow } of CASES) {
     // ── Restart again: the layer is gone and the member stays manageable ──
     app = await app.restart()
     assert.equal(app.host.profileDir, profileDir, 'the disable restart keeps the SAME profile root')
+    if (name === '@deepseek-ai/dsh-experimental-liveshare') {
+      assert.ok(liveshareStateFile !== undefined)
+      assertLiveshareOwnerStateEmpty(liveshareStateFile)
+      assert.equal(existsSync(process.env.LIVESHARE_OWNER_CREDENTIAL_FILE!), false,
+        'no credential was persisted in the isolated owner root during the lifecycle')
+    }
     assert.equal(app.host.activeBundles.includes(name), false, `the restarted Host no longer loads ${name}`)
     assert.equal(app.host.loaderEntries().some(candidate => candidate.id === coreRow), false,
       `the ${coreRow} row is not composed by the disabled bundle`)
@@ -217,7 +282,8 @@ for (const { name, skip, title, coreRow } of CASES) {
     const detail = detailView(app)
     assert.doesNotMatch(detail, /Create…|Not now|Share…|Open PR/u,
       'the TUI paints no Action Card / share / GitHub write action')
-    assert.doesNotMatch(detail, /https?:\/\//u, 'no external share/Forge URL was created or painted')
-    assert.equal(process.env.LIVESHARE_OWNER_CREDENTIAL_FILE, undefined, 'no Relay/Owner credential was created')
+    if (name !== '@deepseek-ai/dsh-experimental-liveshare') {
+      assert.doesNotMatch(detail, /https?:\/\//u, 'no external share/Forge URL was created or painted')
+    }
   })
 }
