@@ -32,7 +32,7 @@ interface FrameSize {
 interface TaskOverrides {
   readonly id: string
   readonly title: string
-  readonly status: ScheduleCatalogEntry['status']
+  readonly status?: ScheduleCatalogEntry['status']
   readonly prompt?: string
   readonly scheduledAt?: string
   readonly executionActive?: true
@@ -50,6 +50,7 @@ function task(overrides: TaskOverrides): ScheduleCatalogEntry {
     prompt: 'Prepare the morning report.',
     target: { kind: 'session', sessionId: 'session-target' },
     involvedSessionIds: [],
+    status: 'active',
     ...overrides,
   } as unknown as ScheduleCatalogEntry
 }
@@ -187,25 +188,31 @@ test('the 60×12 minimum keeps at least three task rows on screen', () => {
   assert.equal(painted.length, 3)
 })
 
-test('the narrow action bar keeps Esc ↑↓ Enter N / first', () => {
+test('the narrow action bar keeps the essential keys and puts Esc last (D8)', () => {
   const lines = harness(LIST, { columns: 60, rows: 12 }).plain()
   const bar = lines[lines.length - 1]
-  assert.ok(bar !== undefined && bar.startsWith('Esc · ↑↓ · Enter · N · /'), `narrow bar: ${JSON.stringify(bar)}`)
+  assert.ok(bar !== undefined, 'the narrow frame paints an action bar')
+  for (const token of ['Enter', 'n', '/', 'Esc']) {
+    assert.ok(bar.includes(token), `the narrow bar keeps \"${token}\": ${JSON.stringify(bar)}`)
+  }
+  const escAt = bar.indexOf('Esc')
+  assert.ok(escAt > 0 && bar.trimEnd().endsWith('close'), `Esc is the LAST segment: ${JSON.stringify(bar)}`)
 })
 
-// ── 2. below-minimum size ────────────────────────────────────────────────────
+// ── 2. no minimum-size refusal gate (design-language §8) ─────────────────────
 
-for (const size of [{ columns: 59, rows: 11 }, { columns: 60, rows: 11 }]) {
-  test(`${size.columns}×${size.rows} is below the minimum and paints only the size gate`, () => {
+for (const size of [{ columns: 44, rows: 20 }, { columns: 80, rows: 10 }, { columns: 59, rows: 11 }]) {
+  test(`${size.columns}×${size.rows} stays fully interactive instead of refusing`, () => {
     const view = harness(LIST, size)
-    assert.deepEqual(view.plain(), ['Terminal too small (60×12 required)', 'Esc close'])
-    for (const key of ['j', 'k', '\x1b[B', '\r', 'n', 'x', '?', '/', 'A']) {
-      view.panel.handleInput(key)
-    }
-    assert.deepEqual(view.dispatches, [], 'a below-minimum frame must never dispatch a task action')
+    const lines = view.plain()
+    assert.ok(lines.some(line => line.includes('Alpha report')), 'the narrow/short frame still paints the task list')
+    assert.ok(lines.every(line => line.length <= size.columns), 'no line exceeds the granted width')
+    view.panel.handleInput('j')
+    view.panel.handleInput('\r')
+    assert.deepEqual(view.dispatches, [{ kind: 'move', delta: 1 }, { kind: 'open-detail' }])
     view.panel.handleInput('\x1b')
-    assert.deepEqual(view.dispatches, [], 'Esc closes, it never dispatches a task action')
-    assert.equal(view.closeCount(), 1)
+    assert.equal(view.closeCount(), undefined === undefined ? view.closeCount() : 0)
+    assert.equal(view.closeCount(), 1, 'Esc still closes the workspace at the list root')
   })
 }
 
@@ -231,13 +238,13 @@ test('an ended task renders status, execution activity and the delivery floor as
   const statusLine = lines.find(line => line.includes('Status'))
   const executionLine = lines.find(line => line.includes('Execution'))
   const floorLine = lines.find(line => line.includes('Delivery floor'))
-  assert.ok(statusLine !== undefined && statusLine.includes('ended'), 'the task status line must say ended')
+  assert.ok(statusLine !== undefined && statusLine.includes('‣ Ended'), 'the task status line uses the ONE shared marker and the Title Case word')
   assert.ok(executionLine !== undefined && executionLine.includes('in progress'), 'execution activity is its own fact')
   assert.ok(floorLine !== undefined && floorLine.includes('until '), 'the delivery floor is its own fact')
   assert.notEqual(statusLine, floorLine)
   assert.ok(!statusLine.includes('until '), 'the delivery floor is never painted as the task status')
-  assert.ok(!floorLine.includes('ended'), 'the delivery floor is never painted as a task status')
-  assert.ok(!executionLine.includes('ended'), 'execution activity is never painted as a task status')
+  assert.ok(!floorLine.includes('Ended'), 'the delivery floor is never painted as a task status')
+  assert.ok(!executionLine.includes('Ended'), 'execution activity is never painted as a task status')
 })
 
 // ── 4. list keys ─────────────────────────────────────────────────────────────
@@ -430,13 +437,13 @@ test('clicking the painted y/n confirmation acts on that painted question', () =
   const confirm = workspace({ confirm: { kind: 'run', token: 9, id: 'task-alpha', title: 'Alpha report' } })
   const view = harness(confirm, { columns: 100, rows: 30 })
   const lines = view.plain()
-  const confirmRow = lines.findIndex(line => line.includes('[y] Confirm'))
+  const confirmRow = lines.findIndex(line => line.includes('y Confirm'))
   assert.ok(confirmRow >= 0)
   const line = lines[confirmRow]!
-  view.panel.onCellClick(line.indexOf('[y] Confirm') + 1, confirmRow)
+  view.panel.onCellClick(line.indexOf('y Confirm') + 1, confirmRow)
   assert.deepEqual(view.dispatches, [{ kind: 'confirm' }])
   view.resetDispatches()
-  view.panel.onCellClick(line.indexOf('[n] Cancel') + 1, confirmRow)
+  view.panel.onCellClick(line.indexOf('n Cancel') + 1, confirmRow)
   assert.deepEqual(view.dispatches, [{ kind: 'cancel' }])
 })
 
@@ -606,8 +613,74 @@ test('clicking the painted help Esc action closes help with the same intent as t
   const view = harness(workspace({ mode: 'help' }), { columns: 100, rows: 30 })
   const lines = view.plain()
   const bar = lines[lines.length - 1]!
-  const column = bar.indexOf('Close help')
+  const column = bar.indexOf('Esc close help')
   assert.ok(column >= 0, JSON.stringify(bar))
   view.panel.onCellClick(column, lines.length - 1)
   assert.deepEqual(view.dispatches, [{ kind: 'close-help' }])
+})
+
+test('a modal confirmation leaves the painted filter and search chrome inert', () => {
+  const view = harness(workspace({
+    rows: FOUR_TASKS,
+    total: FOUR_TASKS.length,
+    selectedId: 'task-alpha',
+    confirm: { kind: 'clear-ended', token: 11 },
+  }), { columns: 100, rows: 30 })
+  const lines = view.plain()
+  const filterRow = lines.findIndex(line => line.includes('[Paused]'))
+  const searchRow = lines.findIndex(line => line.includes('Search /'))
+  assert.ok(filterRow >= 0 && searchRow >= 0)
+  view.panel.onCellClick(lines[filterRow]!.indexOf('[Paused]') + 1, filterRow)
+  view.panel.onCellClick(2, searchRow)
+  assert.deepEqual(view.dispatches, [], 'the confirmation blocks every background click')
+})
+
+test('the RRULE field edits real MULTI-LINE raw text (Enter inserts a line)', () => {
+  const rrule = draft({
+    timing: { kind: 'rrule', rrule: 'DTSTART;TZID=UTC:20260101T090000' },
+    timingEdited: true,
+    focused: 3,
+  })
+  const view = harness(workspace({ mode: 'editor', editor: rrule }), { columns: 100, rows: 30 })
+  view.panel.focused = true
+  view.resetDispatches()
+  view.panel.handleInput('\r')
+  assert.deepEqual(view.dispatches, [{
+    kind: 'set-field',
+    fieldId: 'timing-rrule',
+    value: 'DTSTART;TZID=UTC:20260101T090000\n',
+  }], 'Enter appends a real newline instead of saving')
+  view.resetDispatches()
+  view.panel.handleInput('R')
+  const appended = view.dispatches[0]
+  assert.equal(appended?.kind, 'set-field')
+  assert.equal(appended?.kind === 'set-field' ? appended.value.endsWith('R') : false, true)
+  // The next snapshot carries both lines, and the frame paints each stored
+  // line: the value was never flattened to a single line.
+  const snapshot = workspace({
+    mode: 'editor',
+    editor: draft({
+      timing: { kind: 'rrule', rrule: 'DTSTART;TZID=UTC:20260101T090000\nRRULE:FREQ=DAILY' },
+      timingEdited: true,
+      focused: 3,
+    }),
+  })
+  view.setSnapshot(snapshot)
+  const lines = view.plain()
+  assert.ok(lines.some(line => line.includes('DTSTART;TZID=UTC:20260101T090000')))
+  assert.ok(lines.some(line => line.includes('RRULE:FREQ=DAILY')), `the second stored line is painted as its own row:\n${lines.join('\n')}`)
+})
+
+test('? opens Help from Detail, History and the Editor, not only the list', () => {
+  const detail = harness(workspace({ mode: 'detail', detail: task({ id: 'task-a', title: 'A' }), rows: [task({ id: 'task-a', title: 'A' })], total: 1, selectedId: 'task-a' }), { columns: 100, rows: 30 })
+  detail.panel.handleInput('?')
+  assert.deepEqual(detail.dispatches, [{ kind: 'open-help' }])
+
+  const history = harness(workspace({ mode: 'history', history: { status: 'ready', records: [], earlierRecordsUnavailable: false, earlierRecordsPruned: false } }), { columns: 100, rows: 30 })
+  history.panel.handleInput('?')
+  assert.deepEqual(history.dispatches, [{ kind: 'open-help' }])
+
+  const editor = harness(workspace({ mode: 'editor', editor: draft() }), { columns: 100, rows: 30 })
+  editor.panel.handleInput('?')
+  assert.deepEqual(editor.dispatches, [{ kind: 'open-help' }])
 })

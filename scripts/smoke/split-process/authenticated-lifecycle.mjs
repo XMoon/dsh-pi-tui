@@ -245,8 +245,9 @@ export async function runAuthenticatedLifecycle(context) {
     }
     assert(Object.values(hostReady.services ?? {}).every(Boolean), 'T01 not all Host prerequisites reported present')
     // Host liveness: the ready record and every later status carry one fresh
-    // read-only snapshot. The stock Host must report the unmounted Schedule as
-    // ABSENT and must not claim quiescence while rc.4's pending-interaction
+    // read-only snapshot. The Host-only profile mounts the ONE official
+    // Schedule row (S5-PR4), so a healthy idle Host reports it as IDLE — never
+    // ABSENT — and must not claim quiescence while rc.4's pending-interaction
     // and in-flight-write gaps remain unobservable.
     const startupLiveness = hostReady.liveness
     assert(startupLiveness !== undefined, 'T01 the Host ready record carries no liveness snapshot')
@@ -254,7 +255,7 @@ export async function runAuthenticatedLifecycle(context) {
     for (const source of ['agent', 'jobs', 'goal', 'schedule', 'pending', 'write', 'other']) {
       assert(['ACTIVE', 'IDLE', 'ABSENT', 'UNKNOWN'].includes(startupLiveness.sourceStates?.[source]), `T01 liveness source ${source} missing or invalid: ${JSON.stringify(startupLiveness.sourceStates)}`)
     }
-    assert(startupLiveness.sourceStates.schedule === 'ABSENT', 'T01 the stock Host must report Schedule ABSENT')
+    assert(startupLiveness.sourceStates.schedule === 'IDLE', 'T01 the Host-only profile mounts the Schedule row, so an idle Host reports IDLE')
     assert(startupLiveness.verdict !== 'OBSERVED_QUIESCENT', 'T01 the stock Host cannot prove quiescence with rc.4 pending/write gaps')
     assert(startupLiveness.reasons.includes('pending-interaction-unobservable'), 'T01 the pending-interaction gap is not reported')
     assert(startupLiveness.reasons.includes('inflight-write-unproven'), 'T01 the in-flight-write gap is not reported')

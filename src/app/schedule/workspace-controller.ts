@@ -63,6 +63,7 @@ import {
   scheduleSessionId,
   selectTimingKind,
   sameTargetDraft,
+  sameTimingDraft,
   type ScheduleEditorBaseline,
   type ScheduleTargetDraft,
   type ScheduleTimingDraft,
@@ -111,6 +112,9 @@ export class ScheduleWorkspaceController {
   private editor: ScheduleEditorDraft | undefined
   private editorBaseline: ScheduleEditorBaseline | undefined
   private confirm: ScheduleConfirm | undefined
+  /** The page Help was opened FROM; closing Help returns there with the draft
+   *  and any history page intact. */
+  private helpReturn: ScheduleWorkspaceSnapshot['mode'] | undefined
   private notice: ScheduleNotice | undefined
   private limits: { readonly newSessionIntervalSeconds: number } | undefined
   private sessions: readonly ScheduleSessionChoice[] = []
@@ -125,6 +129,7 @@ export class ScheduleWorkspaceController {
   private detailAbort: AbortController | undefined
   private historyAbort: AbortController | undefined
   private chooserAbort: AbortController | undefined
+  private editReadAbort: AbortController | undefined
   private queuedRefresh = false
   private idle: Promise<void> | undefined
   private resolveIdle: (() => void) | undefined
@@ -157,10 +162,12 @@ export class ScheduleWorkspaceController {
     this.detailAbort?.abort()
     this.historyAbort?.abort()
     this.chooserAbort?.abort()
+    this.editReadAbort?.abort()
     this.readAbort = undefined
     this.detailAbort = undefined
     this.historyAbort = undefined
     this.chooserAbort = undefined
+    this.editReadAbort = undefined
     this.listeners.clear()
   }
 
@@ -294,14 +301,16 @@ export class ScheduleWorkspaceController {
         this.cancelConfirm()
         return
       case 'open-help':
+        // Help is an UNDERLAY: it records the page it was opened from (editor
+        // draft, history page, detail) and returns there. It never opens while
+        // a confirmation owns the surface.
+        if (this.confirm !== undefined) return
+        this.helpReturn = this.mode
         this.mode = 'help'
         this.publish()
         return
       case 'close-help':
-        if (this.mode === 'help') {
-          this.mode = this.detail === undefined ? 'list' : 'detail'
-          this.publish()
-        }
+        if (this.mode === 'help') this.closeHelp()
         return
       case 'dismiss-notice':
         this.notice = undefined
@@ -393,6 +402,9 @@ export class ScheduleWorkspaceController {
       try {
         const result: ScheduleViewResult = await this.port.view({ id: scheduleId(target) }, controller.signal)
         if (this.disposed || epoch !== this.detailEpoch || openEpoch !== this.openEpoch) return
+        // Leaving Detail while the read is in flight retires its answer: the
+        // restored list must not carry a detail snapshot the user left.
+        if (this.mode !== 'detail' || this.selectedId !== target) return
         if ('code' in result) {
           this.notice = errorNotice(SCHEDULE_COPY.taskGone)
           this.detail = undefined
@@ -430,7 +442,6 @@ export class ScheduleWorkspaceController {
       records: before === undefined ? [] : previous?.records ?? [],
       earlierRecordsUnavailable: previous?.earlierRecordsUnavailable ?? false,
       earlierRecordsPruned: previous?.earlierRecordsPruned ?? false,
-      ...(before === undefined || previous?.nextBefore === undefined ? {} : { nextBefore: previous.nextBefore }),
     }
     this.publish()
     try {
@@ -439,6 +450,7 @@ export class ScheduleWorkspaceController {
         controller.signal,
       )
       if (this.disposed || epoch !== this.historyEpoch || openEpoch !== this.openEpoch) return
+      if (this.mode !== 'history') return
       if ('code' in result) {
         // A vanished cursor ENDS this history page: the user must reopen it,
         // and no retained cursor may silently retry the same page.
@@ -474,8 +486,8 @@ export class ScheduleWorkspaceController {
   }
 
   private moreHistory(): void {
-    if (this.mode !== 'history') return
-    const next = this.historyView?.nextBefore
+    if (this.mode !== 'history' || this.historyView?.status !== 'ready') return
+    const next = this.historyView.nextBefore
     // No cursor means the Host proved there is no older saved record; a
     // client-side page index never substitutes for it.
     if (next === undefined) return
@@ -506,13 +518,47 @@ export class ScheduleWorkspaceController {
 
   private async openEdit(): Promise<void> {
     if (this.busy) return
-    const entry = this.detail ?? this.catalog.find(row => row.id === this.selectedId)
-    if (entry === undefined) return
-    const current = this.detail?.id === entry.id ? this.detail : await this.readEntry(entry.id)
-    if (this.disposed || current === undefined) return
+    const known = this.detail?.id === this.selectedId ? this.detail : undefined
+    const id = known?.id ?? this.selectedId
+    if (id === undefined) return
+    // ONE edit-read epoch: a late view of task A can never open the editor for
+    // A after the user selected B, left Detail or the workspace was disposed.
+    const epoch = ++this.detailEpoch
+    const openEpoch = this.openEpoch
+    this.editReadAbort?.abort()
+    const controller = new AbortController()
+    this.editReadAbort = controller
+    let current = known
+    if (current === undefined) {
+      try {
+        const result = await this.port.view({ id: scheduleId(id) }, controller.signal)
+        if (this.disposed || epoch !== this.detailEpoch || openEpoch !== this.openEpoch) return
+        if ('code' in result) {
+          this.notice = errorNotice(SCHEDULE_COPY.taskGone)
+          this.publish()
+          void this.read()
+          return
+        }
+        current = result
+      } catch (error) {
+        if (this.disposed || epoch !== this.detailEpoch || openEpoch !== this.openEpoch) return
+        if (error instanceof SupersededReadError || controller.signal.aborted) return
+        this.notice = errorNotice(this.describeFailure(error))
+        this.publish()
+        return
+      } finally {
+        if (this.editReadAbort === controller) this.editReadAbort = undefined
+      }
+    }
+    if (this.disposed || this.mode !== 'detail' || this.selectedId !== id) return
     const draft = draftFromRecord(current)
     this.mode = 'editor'
-    this.editorBaseline = { title: current.title, prompt: current.prompt }
+    this.editorBaseline = {
+      title: current.title,
+      prompt: current.prompt,
+      timing: draft.timing,
+      target: draft.target,
+    }
     this.editor = {
       mode: 'edit',
       id: current.id,
@@ -529,15 +575,6 @@ export class ScheduleWorkspaceController {
     this.notice = undefined
     this.loadSessionChoices()
     this.publish()
-  }
-
-  private async readEntry(id: string): Promise<ScheduleCatalogEntry | undefined> {
-    try {
-      const result = await this.port.view({ id: scheduleId(id) })
-      return 'code' in result ? undefined : result
-    } catch {
-      return undefined
-    }
   }
 
   private selectTiming(kind: ScheduleTimingKind): void {
@@ -824,7 +861,7 @@ export class ScheduleWorkspaceController {
           action: 'delete',
           expectedUpdatedAt: entry?.updatedAt ?? null,
         })
-        if ('deleted' in result) {
+        if ('deleted' in result && result.deleted === true) {
           this.detail = undefined
           this.selectedId = undefined
           this.mode = 'list'
@@ -870,14 +907,20 @@ export class ScheduleWorkspaceController {
 
   // ── navigation ───────────────────────────────────────────────────────────
 
+  private closeHelp(): void {
+    const returnTo = this.helpReturn
+    this.helpReturn = undefined
+    this.mode = returnTo ?? (this.detail === undefined ? 'list' : 'detail')
+    this.publish()
+  }
+
   private back(): void {
     if (this.confirm !== undefined) {
       this.cancelConfirm()
       return
     }
     if (this.mode === 'help') {
-      this.mode = this.detail === undefined ? 'list' : 'detail'
-      this.publish()
+      this.closeHelp()
       return
     }
     if (this.mode === 'editor') {
@@ -910,13 +953,19 @@ export class ScheduleWorkspaceController {
     const draft = this.editor
     if (draft === undefined) return false
     if (draft.mode === 'create') {
-      return draft.title.trim() !== '' || draft.prompt.trim() !== '' || draft.timingEdited || draft.targetEdited
+      // A create draft is dirty only when it holds a real user value; merely
+      // cycling the timing kind back to its default is not unsaved work.
+      return draft.title.trim() !== '' ||
+        draft.prompt.trim() !== '' ||
+        !sameTimingDraft(draft.timing, DEFAULT_TIMING_DRAFT) ||
+        !sameTargetDraft(draft.target, DEFAULT_TARGET_DRAFT)
     }
-    if (this.editorBaseline === undefined) return true
-    return draft.title !== this.editorBaseline.title ||
-      draft.prompt !== this.editorBaseline.prompt ||
-      draft.timingEdited ||
-      draft.targetEdited
+    const baseline = this.editorBaseline
+    if (baseline === undefined) return true
+    return draft.title !== baseline.title ||
+      draft.prompt !== baseline.prompt ||
+      !sameTimingDraft(draft.timing, baseline.timing) ||
+      !sameTargetDraft(draft.target, baseline.target)
   }
 
   private moveSelection(delta: number): void {
@@ -1031,9 +1080,16 @@ function editRefusal(result: ScheduleEditResult): string | undefined {
   return result.code === 'schedule_conflict' ? SCHEDULE_COPY.conflict : SCHEDULE_COPY.taskGone
 }
 
+/**
+ * The permission refusal the Host itself can PROVE. The installed Gateway's
+ * public code union names exactly one: `gateway/interactions-forbidden`. An
+ * HTTP 401/403 transport rejection reaches the Client as an unproven transport
+ * failure (`gateway/internal`-shaped), so a WRITE keeps the conservative
+ * "outcome unknown" wording instead of claiming a permission verdict the
+ * Client cannot establish.
+ */
 function isPermissionCode(code: string | undefined): boolean {
-  return code === 'gateway/unauthorized' || code === 'connection/unauthorized' ||
-    code === 'authorization/denied' || code === 'permission/denied'
+  return code === 'gateway/interactions-forbidden'
 }
 
 function errorNotice(text: string): ScheduleNotice {

@@ -179,7 +179,7 @@ test('L6C: opening the workspace over the selected backend performs READS only',
     }) as unknown as import('../../src/tui-app.ts').TuiApp,
   })
   assert.deepEqual(opened, { kind: 'success' })
-  await new Promise(resolve => setTimeout(resolve, 0))
+  await new Promise(resolve => setImmediate(resolve))
   assert.deepEqual(port.calls, ['catalog', 'deliveryLimits'], 'a bare open reads the catalog and limits only')
   assert.ok(updates.length >= 1, 'the ready snapshot reaches the leased panel')
   close?.()

@@ -388,6 +388,13 @@ const HOST_AUTHORITY_OWNERS: ReadonlyArray<{ pkg: string; id: string }> = [
   { pkg: '@deepseek-ai/dsh-api-settings-controller', id: 'split-host-settings-controller' },
 ]
 
+/** The Direct-only Schedule activation prerequisites the Host-only overlay disables. */
+const DIRECT_SCHEDULE_PREREQUISITE_IDS: readonly string[] = [
+  'pi-tui-direct-connection',
+  'pi-tui-direct-file-upload',
+  'pi-tui-direct-session-controller',
+]
+
 /** The overlay's LAST insert group is the Web composition declaration. */
 function webInsertGroup(entries: readonly OverlayEntry[]): readonly OverlayRow[] {
   const groups = entries.filter(entry => entry.insert !== undefined)
@@ -449,11 +456,23 @@ function assertWebOwnerDedupe(
     ...bundleEntries.flatMap(entry => entry.insert ?? [entry]),
     ...overlayEntries.flatMap(entry => entry.insert ?? [entry]),
   ]
+  // Rows the overlay disables are DECLARED but never mount in a Host-only PID.
+  // The one-owner property is therefore about ENABLED rows: the bundle's
+  // Direct-only Schedule activation prerequisites exist statically and are
+  // switched off here, so the split-host row remains the only real owner.
+  const overlayDisabled = new Set(overlayEntries.filter(entry => entry.disabled === true).map(entry => entry.id))
+  const enabled = composed.filter(row => overlayDisabled.has(row.id) === false && row.disabled !== true)
   for (const { pkg, id } of HOST_AUTHORITY_OWNERS) {
-    const owners = composed.filter(row => row.name === pkg)
+    const owners = enabled.filter(row => row.name === pkg)
     assert.equal(owners.length, 1,
-      `exactly ONE "${pkg}" row must own the Host authority; found ${owners.map(row => row.id).join(',')}`)
-    assert.equal(owners[0].id, id, `the "${pkg}" authority must stay on the "${id}" row`)
+      `exactly ONE "${pkg}" enabled row must own the Host authority; found ${owners.map(row => row.id).join(',')}`)
+    assert.equal(owners[0].id, id, `the "${pkg}" authority must stay on the enabled "${id}" row`)
+  }
+  // The Direct-only prerequisites stay declared in the bundle for a Direct
+  // Host, and the overlay disables every one of them.
+  for (const direct of DIRECT_SCHEDULE_PREREQUISITE_IDS) {
+    assert.equal(composed.some(row => row.id === direct), true, `the bundle keeps the "${direct}" declaration`)
+    assert.equal(overlayDisabled.has(direct), true, `the Host-only overlay must disable "${direct}"`)
   }
   // The whole overlay keeps ONE row per id: a second owner is an added row, not
   // a renamed one. The three in-place overrides appear once each.
