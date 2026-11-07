@@ -907,6 +907,7 @@ test('the seeded command runs exactly one canonical Host search and keeps the ed
   // owner's canonical-equality guard would itself drop an identical restart,
   // so this observable result is seeding coverage — not an independent probe
   // of the Presenter's applyingSeed suppression.
+  // Bounded observation window: the 250 ms debounce must elapse before a duplicate generation could surface.
   await new Promise<void>(resolve => setTimeout(resolve, 500))
   assert.equal(h.searchCalls.length, 1, 'the seeded open owns exactly one Host search')
   assert.equal(h.searchCalls[0]!.query, 'needle')

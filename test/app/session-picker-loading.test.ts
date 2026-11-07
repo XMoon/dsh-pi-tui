@@ -819,6 +819,7 @@ test('a manual query edit during the listing supersedes the typed /resume direct
   assert.ok(h.view().includes('resume · Search results'),
     'the live edit enters the search projection while the list still pends')
   resolveList(rows)
+  // Bounded negative-observation window: the listing has landed and the 250 ms debounce must elapse first.
   await new Promise<void>(resolve => setTimeout(resolve, 400))
   assert.deepEqual(h.switched, [], 'a user-edited query must suppress the typed direct switch')
   await h.vt.sendInput('\x1b')
