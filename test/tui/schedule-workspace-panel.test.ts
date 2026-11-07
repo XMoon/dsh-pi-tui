@@ -904,3 +904,43 @@ test('a 30-line Prompt scrolls so the caret line is visible in both layouts', ()
     assert.ok(moved !== undefined, 'the caret row stays visible after moving up')
   }
 })
+
+test('cross-line caret movement preserves the VISUAL cell column in mixed CJK/Latin text', () => {
+  const view = harness(workspace({
+    mode: 'editor',
+    editor: draft({ focused: 1, prompt: '汉字\nabcd' }),
+  }), { columns: 100, rows: 30 })
+  view.panel.focused = true
+  view.render()
+  view.panel.handleInput('\x1b[H') // Home: start of the second line
+  view.panel.handleInput('\x1b[C') // Right: after 'a'
+  view.panel.handleInput('\x1b[C') // Right: after 'b' (cell column 2)
+  view.resetDispatches()
+  view.panel.handleInput('\x1b[A') // Up: cell column 2 on '汉字' is after '汉', not after both
+  view.panel.handleInput('X')
+  assert.deepEqual(view.dispatches, [{
+    kind: 'set-field',
+    fieldId: 'prompt',
+    value: '汉X字\nabcd',
+  }], 'Up lands after the wide glyph whose cell width is 2, never after 2 code points')
+
+  // Down from the same visual column lands between 'b' and 'c'.
+  const down = harness(workspace({
+    mode: 'editor',
+    editor: draft({ focused: 1, prompt: '汉字\nabcd' }),
+  }), { columns: 100, rows: 30 })
+  down.panel.focused = true
+  down.render()
+  down.panel.handleInput('\x1b[H')
+  down.panel.handleInput('\x1b[C')
+  down.panel.handleInput('\x1b[C')
+  down.panel.handleInput('\x1b[A')
+  down.panel.handleInput('\x1b[B')
+  down.resetDispatches()
+  down.panel.handleInput('Y')
+  assert.deepEqual(down.dispatches, [{
+    kind: 'set-field',
+    fieldId: 'prompt',
+    value: '汉字\nabYcd',
+  }])
+})

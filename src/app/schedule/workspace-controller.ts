@@ -408,6 +408,10 @@ export class ScheduleWorkspaceController {
     this.selectedId = target
     this.mode = 'detail'
     this.historyView = undefined
+    // A switch IMMEDIATELY retires the previous task's detail: while the new
+    // view is in flight, the right pane and every detail action must not fall
+    // back to the task the user just left.
+    if (this.detail?.id !== target) this.detail = undefined
     this.publish()
     this.own('schedule detail read', () => this.readDetail(target, epoch, openEpoch, controller))
   }
@@ -442,7 +446,9 @@ export class ScheduleWorkspaceController {
   }
 
   private async readHistory(before: string | undefined): Promise<void> {
-    const id = this.detail?.id ?? this.selectedId
+    // The page belongs to the CURRENT selection: a stale detail of the task the
+    // user just left must never own the history read.
+    const id = this.selectedId
     if (id === undefined) return
     const epoch = ++this.historyEpoch
     const openEpoch = this.openEpoch
@@ -789,9 +795,17 @@ export class ScheduleWorkspaceController {
 
   // ── list actions ──────────────────────────────────────────────────────────
 
+  /** The ONE record a detail action may act on: never a previous task's stale
+   *  detail while a different task is selected. */
+  private selectedEntry(): ScheduleCatalogEntry | undefined {
+    if (this.selectedId === undefined) return undefined
+    if (this.detail?.id === this.selectedId) return this.detail
+    return this.catalog.find(row => row.id === this.selectedId)
+  }
+
   private toggleActive(): void {
     if (this.busy) return
-    const entry = this.detail ?? this.catalog.find(row => row.id === this.selectedId)
+    const entry = this.selectedEntry()
     if (entry === undefined) return
     const active = entry.status !== 'active'
     this.startWrite('schedule pause/resume', async () => {
@@ -827,14 +841,14 @@ export class ScheduleWorkspaceController {
   }
 
   private askRun(): void {
-    const entry = this.detail ?? this.catalog.find(row => row.id === this.selectedId)
+    const entry = this.selectedEntry()
     if (entry === undefined || this.busy) return
     this.confirm = { kind: 'run', token: ++this.confirmToken, id: entry.id, title: entry.title }
     this.publish()
   }
 
   private askDelete(): void {
-    const entry = this.detail ?? this.catalog.find(row => row.id === this.selectedId)
+    const entry = this.selectedEntry()
     if (entry === undefined || this.busy) return
     this.confirm = {
       kind: 'delete',

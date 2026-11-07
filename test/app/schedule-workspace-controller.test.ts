@@ -959,3 +959,61 @@ test('L6: the delete confirmation freezes the CAS revision it asked about', asyn
     life.controller.dispose()
   }
 })
+
+test('L6: switching to another task immediately retires the previous detail', async () => {
+  const life = await opened()
+  try {
+    const alpha = entry({ id: 'task-alpha' as never, title: 'Alpha', updatedAt: '2026-01-01T01:00:00.000Z' })
+    const beta = entry({ id: 'task-beta' as never, title: 'Beta', updatedAt: '2026-02-02T02:00:00.000Z' })
+    life.port.entries = [alpha, beta]
+    life.port.viewResults.set('task-alpha', alpha)
+    const pendingBeta = deferred<ScheduleViewResult>()
+    life.port.viewResults.set('task-beta', pendingBeta.promise)
+    life.controller.dispatch({ kind: 'refresh' })
+    await flush()
+
+    life.controller.dispatch({ kind: 'open-detail', id: 'task-alpha' })
+    await flush()
+    assert.equal(life.controller.snapshot().detail?.id, 'task-alpha')
+
+    // B's view is still in flight: the right pane must not keep showing A.
+    life.controller.dispatch({ kind: 'open-detail', id: 'task-beta' })
+    await flush()
+    assert.equal(life.controller.snapshot().selectedId, 'task-beta')
+    assert.equal(life.controller.snapshot().detail, undefined,
+      'the previous task detail is retired as soon as the selection changes')
+
+    // Space (pause/resume) during the switch must act on B, never on A.
+    let submitted: ScheduleEditRequest | undefined
+    life.port.editResult = async request => {
+      submitted = request
+      return { ...beta, title: 'Beta' } as never
+    }
+    life.controller.dispatch({ kind: 'toggle-active' })
+    await flush()
+    await life.controller.whenIdle()
+    assert.equal(submitted?.id, 'task-beta', 'Space never mutates the task the user left')
+    assert.equal((submitted as Extract<ScheduleEditRequest, { action: 'update' }>).expectedUpdatedAt,
+      '2026-02-02T02:00:00.000Z', "the update carries B's own revision")
+    assert.equal(life.port.calls.some(call => call.method === 'edit'
+      && (call.args[0] as ScheduleEditRequest).id === 'task-alpha'), false,
+    'no write may ever target the previous task')
+
+    // History and the confirmation targets follow the CURRENT selection too.
+    await flush()
+    life.controller.dispatch({ kind: 'open-history' })
+    await flush()
+    const historyCall = life.port.calls.filter(call => call.method === 'history').at(-1)
+    assert.equal((historyCall?.args[0] as { id?: string } | undefined)?.id, 'task-beta',
+      'the history page belongs to the current selection')
+    life.controller.dispatch({ kind: 'ask-run' })
+    const runConfirm = life.controller.snapshot().confirm
+    assert.equal(runConfirm?.kind === 'run' ? runConfirm.id : undefined, 'task-beta')
+
+    pendingBeta.resolve(beta)
+    await flush()
+    assert.equal(life.controller.snapshot().detail?.id, 'task-beta')
+  } finally {
+    life.controller.dispose()
+  }
+})
