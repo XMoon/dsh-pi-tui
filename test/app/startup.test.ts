@@ -54,12 +54,13 @@ function mountStartup(t: TestContext, args: string[] = []): Context {
   ctx.provide('cmdlineArgs', { get: () => args })
   // parseCmdline requires the launcher pair (cmdlineArgs + appExit).
   ctx.provide('appExit', ((code: number) => { void code }) as never)
-  applyStartup(ctx)
   // A normal invocation installs the temporary model-listing console
   // interception, which mutates process-global console methods; every mount
   // must unload its row so the wrapper (and any language-level leak) cannot
-  // outlive the test.
+  // outlive the test. Registered BEFORE the action runs, so a throwing
+  // startup cannot strand the wrapper either.
   t.after(async () => { await ctx.fiber.dispose() })
+  applyStartup(ctx)
   return ctx
 }
 
@@ -317,8 +318,8 @@ function mountStartupWithReady(t: TestContext, args: string[] = []): {
   ctx.provide('appReady', ({
     onReady: (listener: () => void) => { listeners.push(listener); return () => {} },
   }) as never)
-  applyStartup(ctx)
   t.after(async () => { await ctx.fiber.dispose() })
+  applyStartup(ctx)
   return { ctx, fireReady: () => { for (const listener of [...listeners]) listener() }, exitCodes, readyListenerCount: () => listeners.length }
 }
 
