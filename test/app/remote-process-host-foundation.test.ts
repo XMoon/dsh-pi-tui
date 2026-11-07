@@ -26,7 +26,7 @@ import { PI_TUI_HOST_READY_SERVICE } from '../../src/app/host/pi-tui-host-runtim
 import { PI_TUI_FILE_REFERENCES_NAMESPACE } from '../../src/runtime/remote/pi-tui-file-reference-contract.ts'
 import { PI_TUI_TERMINAL_PROGRESS_NAMESPACE } from '../../src/runtime/remote/pi-tui-terminal-progress-contract.ts'
 import { PI_TUI_WEB_ACCESS_NAMESPACE } from '../../src/runtime/remote/pi-tui-web-access-contract.ts'
-import { PI_TUI_WEB_ACCESS_ROWS } from '../../src/app/host/features/web-access.ts'
+import { PI_TUI_WEB_ACCESS_ROWS } from '../../src/app/host/features/web-roster.ts'
 
 /** One row of a real patch file (in-place override or `insert` entry). */
 interface OverlayRow {
