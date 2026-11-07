@@ -258,7 +258,13 @@ export const HISTORY_SEARCH_STYLES = `
      never be pushed out of the box (measured on the real client: without the
      explicit shrink guards the short-pane card clipped its own actions and the
      composer). */
-  [data-role='dsh.history.card'] {
+  /* ONE Dock surface in BOTH states: the expanded role is a height state, not
+     a different surface, so it shares the base rule (border, background,
+     radius, margin, padding) and the expanded rule below overrides ONLY the
+     height budget. Keying the shared rule on both selectors is what keeps the
+     light-bordered card from losing its ink when F2 changes the role. */
+  [data-role='dsh.history.card'],
+  [data-role='dsh.history.card-expanded'] {
     display: flex;
     flex-direction: column;
     gap: 6px;
@@ -347,13 +353,7 @@ export const HISTORY_SEARCH_STYLES = `
      reader stayed inside the normal height. The budget is still vh-bounded, so
      the Composer and the Footer below stay reachable at any window height. */
   [data-role='dsh.history.card-expanded'] {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
     max-height: min(620px, 82vh);
-    overflow: hidden;
-    flex-shrink: 0;
-    padding: 10px 12px;
   }
 
   [data-role='dsh.history.query'] {
@@ -489,7 +489,8 @@ export const HISTORY_SEARCH_STYLES = `
      results region keeps a WHOLE row (26px at this type scale). The card never
      grows past its budget, so the Composer and the Footer below stay reachable. */
   @media (max-height: 460px) {
-    [data-role='dsh.history.card'] { max-height: min(176px, 48vh); gap: 4px; padding: 6px 10px; }
+    [data-role='dsh.history.card'],
+    [data-role='dsh.history.card-expanded'] { max-height: min(176px, 48vh); gap: 4px; padding: 6px 10px; }
     [data-role='dsh.history.hint'] { display: none; }
     [data-role='dsh.history.results-head'],
     [data-role='dsh.history.preview-head'] { display: none; }

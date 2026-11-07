@@ -607,6 +607,10 @@ async function mountChain(
     composerActions: true,
     modelQuick: true,
     ...(options.modelPicker === false ? {} : { modelPicker: true }),
+    // TSP I-E: negotiate the kinds the History card really paints, so this
+    // composition can put a real card in the composer seat and prove the
+    // attachment intake refuses to write behind it.
+    historySearch: true,
   })
   life.defer(() => pane.restore())
   const connected = await sdkConnect({ timeout: 500, exitHooks: false })
@@ -728,7 +732,7 @@ async function mountChain(
    */
   const mountPorts: MountPorts = { stagers: [], catalogInstalls: [] }
   const rendererMount: SurfaceRendererMount = {
-    mount: (binding, statusReader) => {
+    mount: (binding, statusReader, historySearch) => {
       mountedRenderer = mountTspRenderer(session, {
         copyVisual: async () => false,
         requestExit: () => {},
@@ -736,6 +740,10 @@ async function mountChain(
       })
       mountedRenderer.bindStatusReader(statusReader)
       mountedRenderer.bindImages(binding)
+      // TSP I-E: the same one-time install the production connector performs,
+      // so this composition really owns a History seat (and the attachment
+      // intake can be tested against a card that holds the composer seat).
+      mountedRenderer.bindHistorySearch(historySearch)
       // The REAL renderer is the mount: every member (dynamic capability
       // getters included) is read live off it. Only the two composition
       // INSTALL ports are recorded, then forwarded verbatim — exactly the
@@ -2236,6 +2244,31 @@ test('a Client-local read still in flight when the seat moves commits nothing ->
   assert.deepEqual(h.editor(), { text: 'look /image real.png ', cursor: 20 },
     'the generation-invalidated settlement wrote no placeholder')
   assert.equal(h.images.values().length, 0, 'a newer generation staged nothing')
+
+  const readsBeforeCard = h.imageRead.calls()
+  // 2c. TSP I-E: the History card takes the composer seat WHILE the read is in
+  // flight. The card owns the draft meanwhile (its Restore target is the same
+  // one editor), so a placeholder landing behind the card would be a hidden
+  // business write into a seat the user is no longer operating.
+  await acceptTheRealRow()
+  await h.press('\u0012')
+  await waitUntil('the History card owns the seat', () =>
+    wireNodes(h.pane).some(node => /history-card-\d+$/.test(String(node.id))))
+  const draftBehindCard = h.editor()
+  h.imageRead.releaseAll()
+  // reason: bounded absence window — a refused intake commits nothing, so the
+  // only observation is that no frame, store entry or notice appears.
+  await new Promise(resolve => setTimeout(resolve, ABSENCE_WINDOW_MS))
+  assert.deepEqual(h.editor(), draftBehindCard, 'the card-owned draft was not written behind the card')
+  assert.equal(h.images.values().length, 0, 'the late intake staged nothing while History owned the seat')
+  assert.equal(h.files.values().length, 0, 'and no generic file either')
+  assert.equal(wireText(h.pane).includes('attached [image'), false, 'no success notice was announced behind the card')
+  // The completion seat is retired when the card opens and no key reaches it
+  // while the card owns every key, so its admission is not black-box witnessed
+  // here: the card's own key ownership is the primary fence. The case's real
+  // witness remains the post-read `current()` refusal above.
+  await h.press('\u001b')
+  await waitUntil('the card closed', () => !wireNodes(h.pane).some(node => /history-card-\d+$/.test(String(node.id))))
 
   // 3. The mount itself dies before the read settles.
   await acceptTheRealRow()

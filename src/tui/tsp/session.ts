@@ -861,6 +861,12 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     const span = acceptance.span
     if (stager === undefined || span === undefined) return
     if (disposed || hydrating) return
+    // TSP I-E: the History card owns the composer seat. An acceptance read that
+    // was started BEFORE the chord still must not write its placeholder into the
+    // draft while the card is what the user is operating — the draft is the
+    // card's Restore target meanwhile, and a hidden write there would be a
+    // second owner of the seat the plan froze to one card.
+    if (historyOwnsComposerSeat()) return
     const acceptedText = acceptance.lines.join('\n')
     let acceptedCursor = acceptance.cursorCol
     for (let index = 0; index < acceptance.cursorLine; index += 1) {
@@ -878,7 +884,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // same document bytes are not the same operation once the draft moved, and
       // this mount's ONE composer object is a mount constant, so identity needs
       // no second fence here.
-      current: () => !disposed && !hydrating
+      current: () => !disposed && !hydrating && !historyOwnsComposerSeat()
         && composer.editRevision() === acceptedRevision
         && composer.getDraft() === acceptedText
         && composer.state().cursor === acceptedCursor,
@@ -907,7 +913,11 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    */
   const completion: TspInputCompletion = createTspInputCompletion({
     composer,
-    admitted: () => visualActionsAdmitted()
+    // The composer seat's ONE admission authority, so a candidate list can
+    // never be operable (or write an accepted inline attachment) while the
+    // History card owns that seat — the same rule Send, Stop, Model and the
+    // Permission menu answer to.
+    admitted: () => composerActionsAdmitted()
       && !permissionMenuOpen
       && modelQuick?.isOpen() !== true,
     requestRender: () => render(),
@@ -1000,9 +1010,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   modelQuick = new TspModelQuickMenu({
     render: () => render(),
     // The same seat admission every composer control uses: a modal, the
-    // temporary Screen, a higher presenter, the hydration window or an unbound
-    // renderer owns the input before this menu does.
-    canInteract: () => visualActionsAdmitted(),
+    // temporary Screen, a higher presenter, the hydration window, an unbound
+    // renderer or the History card owns the input before this menu does.
+    canInteract: () => composerActionsAdmitted(),
     // The ONE focus owner is `applyFocus`; this menu never calls `surface.focus`
     // through a second path.
     setFocus: () => applyFocus(true),

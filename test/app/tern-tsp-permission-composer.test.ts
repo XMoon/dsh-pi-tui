@@ -322,7 +322,8 @@ test('permission menu: the History seat owning the composer refuses both the ope
   // Open the History card, then repeat both gestures.
   pane.key('\u0012')
   await waitUntil('the history card opened', () => wireNodes(pane).some(node => /history-card-\d+$/.test(String(node.id))))
-  assert.equal(textOf(pane, permissionTrigger(pane)).length >= 0, true, 'the trigger is still painted')
+  assert.match(textOf(pane, permissionTrigger(pane)), /Permission|Write|read/i,
+    'the trigger is still PAINTED (and painted disabled) while the card owns the seat')
   click(pane, permissionTrigger(pane))
   await settle(400) // reason: a refused gesture owes no frame, so absence is the observation window
   assert.equal(permissionOptions(pane).length, 0, 'no menu opened behind the card')
