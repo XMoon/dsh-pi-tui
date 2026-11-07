@@ -20,6 +20,10 @@
  *                empty-draft Ctrl+S steer of the other Client's occurrence,
  *                two independent same-text submits (never merged), A -> Y
  *                navigation while B keeps writing X, B-only exit
+ *   G567 navigation-first forwarded interaction: a no-answer Alt+W hold opens
+ *                the existing Session Workspace, the same official request is
+ *                re-offered only after its own Session commits, and a loser
+ *                never resurrects or produces a second Host settlement
  *   T10/T11/T12 Client normal exit, SIGKILL and SIGTERM leave the Host alive
  *   T13 a physical mux drop clears the generation and the same Host replaces it
  *   T14/T16/T17 forged registry, unresponsive Host, protocol/identity/auth failures

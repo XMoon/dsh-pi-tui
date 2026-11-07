@@ -86,7 +86,7 @@ test('the PiTui composer port is the live app and the presenter is the delegatin
   }
 })
 
-test('the PiTui presenter forwards every member to the app receiver and withdraws nothing itself', async () => {
+test('the PiTui presenter forwards every member to the app receiver and forwards presentation withdrawal', async () => {
   const calls: string[] = []
   const app: PiTuiInteractionApp = {
     // `this` identity is the receiver witness: a spread copy (`{ ...app }`)
@@ -113,6 +113,10 @@ test('the PiTui presenter forwards every member to the app receiver and withdraw
       assert.equal(this, app, 'the presenter must call the app as receiver')
       calls.push(`attention:${count}`)
     },
+    withdrawPresentations(lifetimes) {
+      assert.equal(this, app, 'the presenter must call the app as receiver')
+      calls.push(`withdraw:${lifetimes.length}`)
+    },
   }
   const presenter = pituiSurfaceInteractionPresenter(app)
   const outcome = await presenter.showApprovalPrompt({ toolName: 'bash', reason: 'why' }, true)
@@ -121,8 +125,12 @@ test('the PiTui presenter forwards every member to the app receiver and withdraw
   presenter.setSettledQuestionAnswersLookup(undefined)
   presenter.notify('a notice', 'error')
   presenter.setQuestionAttention(3)
-  // The PiTui cancellation owner is the app's own disposal: the adapter must
-  // NOT invent a second withdrawal path on this branch.
+  // A split-Client presentation withdrawal forwards to the mounted app's OWN
+  // seat owner; the adapter invents nothing.
+  const lifetime = new AbortController().signal
+  presenter.withdrawPresentations([lifetime])
+  // The PiTui teardown cancellation owner is the app's own disposal: the
+  // adapter must NOT invent a second pending withdrawal path on this branch.
   presenter.withdrawPending()
   assert.deepEqual(calls, [
     'approval:bash:true',
@@ -130,6 +138,7 @@ test('the PiTui presenter forwards every member to the app receiver and withdraw
     'lookup:clear',
     'notify:a notice:error',
     'attention:3',
+    'withdraw:1',
   ])
 })
 

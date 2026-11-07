@@ -473,6 +473,16 @@ export function applyRunnerWithRuntime(
         surface.retireStaleHistorySeat()
       },
     })
+    // Split-Client only: bind the ROOT interaction delivery to this
+    // application's ONE committed-Session authority. A forwarded request is
+    // presented only while its own Session is the committed subject; the same
+    // subscription wakes the root after a real publish (never a UI focus or
+    // Job). A replacement surface revision replaces this binding.
+    const interactionDelivery = override?.interactionDelivery
+    const interactionDeliveryBinding = interactionDelivery?.bindCommittedSession(
+      () => ownership.currentSessionId(),
+      listener => ownership.subscribeScopeInvalidation(listener),
+    )
     // The A3 command/submission scope authority (plan A3 §1.1): ONE synchronous
     // capture of `{ owner subject, generation, sessionId }`, so no consumer can
     // rebuild an identity from separate reads. A sessionless capture is
@@ -669,6 +679,10 @@ export function applyRunnerWithRuntime(
       // The internal selection seam passes `override` ONLY for the Remote
       // composition (the surface is created before `remoteSources` below).
       mainProgressAuthority: override === undefined ? 'local-events' : 'host-snapshot',
+      // Split-Client only: the PiTUI forwarded-interaction admission narrows to
+      // this application's ONE committed Session (the runner's authoritative
+      // owner publication), never the unconditional Direct delegation.
+      ...(override === undefined ? {} : { committedSessionId: () => ownership.currentSessionId() }),
       // The terminal-progress evidence fold reports an unknown upstream
       // `turn/end.reason.kind` here instead of guessing an outcome.
       diag,
@@ -2577,6 +2591,12 @@ export function applyRunnerWithRuntime(
       disposeSelectedTransport,
       registerDisposal: (dispose) => { ctx.effect(function* () { yield dispose }) },
     })
+    // The root delivery binding belongs to THIS surface revision: a retired
+    // revision must not keep waking (or clearing) a successor's binding. The
+    // delivery owner makes the returned disposer inert once replaced.
+    if (interactionDeliveryBinding !== undefined) {
+      ctx.effect(function* () { yield interactionDeliveryBinding })
+    }
     // The terminal-total fatal catch reaches the SAME surface cleanup authority
     // through this ref (M3-6 PR3 D3), assigned now — before `surface.start`
     // and any later startup operation can fail with the surface owner live.
@@ -3878,6 +3898,28 @@ export function applyRunnerWithRuntime(
       })
     }
     sessionBrowserAvailableOwner = () => command.sessionBrowserAvailable()
+    // Split-Client only: the modal-safe Alt+W entry. It commits the root
+    // presentation-only hold, withdraws the local modal seat, then opens the
+    // EXISTING registered `/sessions` Browser through the SAME command action.
+    // No second listing, no Host cancel/answer, no fallback when the Host owns
+    // the name (the command's own availability answers false).
+    if (interactionDelivery !== undefined) {
+      const delivery = interactionDelivery
+      surface.setNoAnswerNavigation({
+        available: () => command.sessionBrowserAvailable(),
+        begin: () => {
+          const hold = delivery.beginNavigationHold()
+          try {
+            surface.withdrawPresentationForNavigation()
+          } catch (error) {
+            hold.release()
+            throw error
+          }
+          return () => { hold.release() }
+        },
+        open: () => { command.openSessionBrowser() },
+      })
+    }
     // PR4 §2.2: the DIRECT branch's Host command catalog arrives through the
     // pre-mount prefetch above; the REMOTE branch has no Direct agent to
     // prefetch, so a RESUMED session installs its authoritative Host catalog

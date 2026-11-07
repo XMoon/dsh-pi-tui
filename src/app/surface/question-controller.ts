@@ -399,6 +399,27 @@ export class QuestionSurfaceController {
     return { dropped, lifetimes, settle: () => { for (const run of settle) run() } }
   }
 
+  /**
+   * Collect EVERY live foreground presentation (admissible or not) for a
+   * presentation-only navigation hold. The entries leave this controller's
+   * registry FIRST; the caller hands the lifetimes to the presenter in one
+   * atomic batch and only then runs the deferred settlements. Official request
+   * lifetimes are untouched (the split root discards the local cancellations).
+   */
+  collectForegroundPresentations(): { lifetimes: AbortSignal[]; settle: () => void } {
+    const lifetimes: AbortSignal[] = []
+    const settle: Array<() => void> = []
+    for (const [lifetime, live] of [...this.livePresentations]) {
+      this.livePresentations.delete(lifetime)
+      lifetimes.push(lifetime)
+      // A request with NO Host lifetime has no other owner that could ever end
+      // it: the navigation withdrawal ends this local attempt, and the root
+      // delivery re-offers the SAME official invocation when admissible again.
+      if (!live.hasHostLifetime) settle.push(live.retire)
+    }
+    return { lifetimes, settle: () => { for (const run of settle) run() } }
+  }
+
   reconcile(): void {
     if (this.disposed) return
     this.ensureSubscription()

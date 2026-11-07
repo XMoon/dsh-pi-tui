@@ -13,7 +13,9 @@
  * - the two official `remote.$on` registrations (once per Client root);
  * - the CURRENT surface revision's two presentation providers;
  * - an abort-aware wait for the current surface when a forwarded request
- *   arrives before the first revision has attached.
+ *   arrives before the first revision has attached;
+ * - the CURRENT committed Session binding of the application that hosts the
+ *   surface, and a presentation-only navigation hold.
  *
  * It deliberately owns NO Host pending copy, no event-id map and no second
  * RPC: each official invocation is held only by its own async closure and is
@@ -22,6 +24,14 @@
  * revision that has already been detached is discarded while the official
  * request signal is still live, and a replacement revision takes over the
  * SAME invocation.
+ *
+ * Navigation-first admission is the SAME rule: a forwarded request is only
+ * handed to a surface while the application has committed exactly the Session
+ * that owns the request and no navigation hold is active. A local withdrawal
+ * (the navigation hold, or a session subject change) invalidates the
+ * presentation epoch, so its local cancellation can never be forwarded as a
+ * human Host decision; the same official invocation is re-presented when its
+ * Session becomes admissible again.
  *
  * @module app/remote-process/client-interaction-delivery
  */
@@ -34,12 +44,14 @@ import type {
   UserQuestionProvider,
 } from '../../runtime/interaction-port.ts'
 import type {
+  ForwardedAnswerEligibility,
+  NavigationHoldRelease,
   SplitClientInteractionDelivery,
   SplitClientSurfaceInteraction,
 } from '../../runtime/remote/interaction-remote.ts'
 import { runSyncDisposalSteps } from '../../runtime/process/disposal.ts'
 
-export type { SplitClientInteractionDelivery } from '../../runtime/remote/interaction-remote.ts'
+export type { ForwardedAnswerEligibility, NavigationHoldRelease } from '../../runtime/remote/interaction-remote.ts'
 
 /** The Client-root interaction delivery implementation adds its own dispose. */
 export interface SplitClientInteractionDeliveryOwner extends SplitClientInteractionDelivery {
@@ -136,6 +148,12 @@ function abortReason(signal: AbortSignal | undefined): Error {
   return new Error('client interaction delivery: the request lifetime ended before a surface answered')
 }
 
+/** The root-disposal reason: no Host result is fabricated and no local cancel
+ *  is forwarded after the owner is gone. */
+function disposedReason(): Error {
+  return new Error('client interaction delivery: disposed before the official request settled')
+}
+
 /**
  * Create the ONE root interaction delivery owner over the official Client
  * Remote event seat. The caller must have mounted the official Session client
@@ -146,37 +164,149 @@ export function createSplitClientInteractionDelivery(
 ): SplitClientInteractionDeliveryOwner {
   let current: SurfaceAttachment | undefined
   let disposed = false
-  const surfaceWaiters = new Set<() => void>()
-  const owned: Array<() => void> = []
+  /**
+   * Marks every PRESENTATION attempt made before a navigation hold / committed
+   * subject change as stale. This is a presentation fence only: it never
+   * settles or answers the official invocation, and it survives a hold release
+   * so a local cancellation produced by the withdrawal can never be mistaken
+   * for a late human answer.
+   */
+  let presentationEpoch = 0
+  let navigationHold: NavigationHoldRelease | undefined
+  /** Wake-ups for a delivery wait (surface attach, subject change, hold, dispose). */
+  const waiters = new Set<() => void>()
+  /**
+   * The committed-Session authority of the CURRENT surface revision's
+   * application. `undefined` means "not bound yet": a forwarded request waits
+   * rather than presenting into a surface that has no committed subject.
+   */
+  let committedSessionId: (() => string | undefined) | undefined
+  let bindingToken: object | undefined
+  let bindingDisposal: (() => void) | undefined
+  /**
+   * The official invocations this root currently holds. Each entry is created
+   * by its own callback stack and removed when that SAME invocation settles,
+   * aborts or the root disposes — never a Host pending copy.
+   */
+  const eligibleRequests = new Set<ForwardedAnswerEligibility>()
+  const eligibilityListeners = new Set<() => void>()
+  const rootLifetime = new AbortController()
 
-  const notifySurfaceWaiters = (): void => {
-    for (const waiter of [...surfaceWaiters]) {
-      surfaceWaiters.delete(waiter)
+  const wakeWaiters = (): void => {
+    for (const waiter of [...waiters]) {
+      waiters.delete(waiter)
       waiter()
     }
   }
 
-  /** Wait for the current surface attachment or the official request abort. */
-  const waitForSurface = async (signal: AbortSignal | undefined): Promise<SurfaceAttachment> => {
-    if (current !== undefined) return current
-    if (signal?.aborted === true) throw abortReason(signal)
-    return await new Promise<SurfaceAttachment>((resolve, reject) => {
-      const cleanup = (): void => {
-        surfaceWaiters.delete(onSurface)
-        signal?.removeEventListener('abort', onAbort)
+  const notifyEligibility = (): void => {
+    for (const listener of [...eligibilityListeners]) {
+      try {
+        listener()
+      } catch {
+        // A UI invalidation listener must never break the official delivery
+        // owner; the next eligibility change re-invalidates it.
       }
-      const onSurface = (): void => {
-        if (current === undefined) return
-        cleanup()
-        resolve(current)
+    }
+  }
+
+  const addEligible = (sessionId: string, kind: 'question' | 'approval'): ForwardedAnswerEligibility => {
+    const token: ForwardedAnswerEligibility = { sessionId, kind, live: true }
+    eligibleRequests.add(token)
+    notifyEligibility()
+    return token
+  }
+
+  const removeEligible = (token: ForwardedAnswerEligibility): void => {
+    if (eligibleRequests.delete(token)) notifyEligibility()
+  }
+
+  /** The combined official lifetime plus the root lifetime. */
+  const lifetimeOf = (signal: AbortSignal | undefined): AbortSignal =>
+    signal === undefined ? rootLifetime.signal : AbortSignal.any([signal, rootLifetime.signal])
+
+  /** Whether the application has committed exactly the request's Session. */
+  const isCommittedSubject = (sessionId: string): boolean =>
+    committedSessionId !== undefined && committedSessionId() === sessionId
+
+  /** Wake on any state change, then re-check admission. */
+  const waitForWake = (lifetime: AbortSignal): Promise<void> => new Promise<void>((resolve, reject) => {
+    if (lifetime.aborted) {
+      reject(abortReason(lifetime))
+      return
+    }
+    const cleanup = (): void => {
+      waiters.delete(onWake)
+      lifetime.removeEventListener('abort', onAbort)
+    }
+    const onWake = (): void => { cleanup(); resolve() }
+    const onAbort = (): void => { cleanup(); reject(abortReason(lifetime)) }
+    waiters.add(onWake)
+    lifetime.addEventListener('abort', onAbort, { once: true })
+  })
+
+  /**
+   * Wait until the ONE admissible presentation state holds: a surface is
+   * attached, no navigation hold is active, and the request's own Session is
+   * the committed subject. Aborts on the official request lifetime/root
+   * disposal; it never settles the invocation itself.
+   */
+  const waitForAdmission = async (sessionId: string, lifetime: AbortSignal): Promise<void> => {
+    for (;;) {
+      if (disposed) throw disposedReason()
+      if (lifetime.aborted) throw abortReason(lifetime)
+      if (current !== undefined && navigationHold === undefined && isCommittedSubject(sessionId)) return
+      await waitForWake(lifetime)
+    }
+  }
+
+  /**
+   * Run ONE presentation attempt of the SAME official invocation. A local
+   * result is accepted only while the attempt still belongs to the CURRENT
+   * attachment, the SAME presentation epoch, the SAME (absent) hold and the
+   * request's committed Session; otherwise it is dropped and the loop waits for
+   * the next admissible presentation. The official `next` is never called here.
+   */
+  const presentWhenAdmissible = async <T>(
+    sessionId: string,
+    requestSignal: AbortSignal | undefined,
+    invoke: (attachment: SurfaceAttachment) => Promise<T> | T,
+  ): Promise<T> => {
+    const lifetime = lifetimeOf(requestSignal)
+    for (;;) {
+      await waitForAdmission(sessionId, lifetime)
+      const attachment = current
+      if (attachment === undefined) continue
+      const hold = navigationHold
+      const epoch = presentationEpoch
+      let presentation: Promise<T>
+      try {
+        // Call the CURRENT provider synchronously after the admission check:
+        // no extra microtask may let a session commit land between the proof
+        // and the provider's own admission.
+        presentation = Promise.resolve(invoke(attachment))
+      } catch (error) {
+        presentation = Promise.reject(error)
       }
-      const onAbort = (): void => {
-        cleanup()
-        reject(abortReason(signal))
+      try {
+        const result = await raceWithAbort(presentation, lifetime)
+        if (current === attachment
+          && navigationHold === hold
+          && presentationEpoch === epoch
+          && isCommittedSubject(sessionId)) {
+          return result
+        }
+        if (lifetime.aborted) return result
+      } catch (error) {
+        if (lifetime.aborted) throw error
+        if (current === attachment
+          && navigationHold === hold
+          && presentationEpoch === epoch
+          && isCommittedSubject(sessionId)) {
+          throw error
+        }
       }
-      surfaceWaiters.add(onSurface)
-      signal?.addEventListener('abort', onAbort, { once: true })
-    })
+    }
   }
 
   const deliverQuestion = async function (
@@ -197,16 +327,11 @@ export function createSplitClientInteractionDelivery(
       ...(request.signal === undefined ? {} : { signal: request.signal }),
     }
     const nextOnce = onceNext(next)
-    for (;;) {
-      const attachment = await waitForSurface(request.signal)
-      try {
-        const result = await raceWithAbort(Promise.resolve().then(() => attachment.onQuestion(view, nextOnce)), request.signal)
-        if (current === attachment) return result
-        if (request.signal?.aborted === true) return result
-      } catch (error) {
-        if (current === attachment) throw error
-        if (request.signal?.aborted === true) throw error
-      }
+    const eligible = addEligible(sessionId, 'question')
+    try {
+      return await presentWhenAdmissible(sessionId, request.signal, attachment => attachment.onQuestion(view, nextOnce))
+    } finally {
+      removeEligible(eligible)
     }
   }
 
@@ -225,19 +350,15 @@ export function createSplitClientInteractionDelivery(
       sessionId,
     }
     const nextOnce = onceNext(next as () => unknown)
-    for (;;) {
-      const attachment = await waitForSurface(request.signal)
-      try {
-        const result = await raceWithAbort(Promise.resolve().then(() => attachment.onApproval(view, nextOnce)), request.signal)
-        if (current === attachment) return result
-        if (request.signal?.aborted === true) return result
-      } catch (error) {
-        if (current === attachment) throw error
-        if (request.signal?.aborted === true) throw error
-      }
+    const eligible = addEligible(sessionId, 'approval')
+    try {
+      return await presentWhenAdmissible(sessionId, request.signal, attachment => attachment.onApproval(view, nextOnce))
+    } finally {
+      removeEligible(eligible)
     }
   }
 
+  const owned: Array<() => void> = []
   owned.push(options.remote.$on('user-questions/request', deliverQuestion))
   owned.push(options.remote.$on('approval/request', deliverApproval))
 
@@ -246,17 +367,82 @@ export function createSplitClientInteractionDelivery(
       if (disposed) throw new Error('client interaction delivery: disposed')
       const attachment: SurfaceAttachment = { revision, ...input }
       current = attachment
-      notifySurfaceWaiters()
+      wakeWaiters()
       return () => {
         if (current !== attachment) return
         current = undefined
+        wakeWaiters()
       }
+    },
+    currentEligibleRequests(): readonly ForwardedAnswerEligibility[] {
+      return [...eligibleRequests]
+    },
+    subscribeEligibility(listener): () => void {
+      eligibilityListeners.add(listener)
+      return () => { eligibilityListeners.delete(listener) }
+    },
+    bindCommittedSession(currentSessionId, subscribeCommittedSession): () => void {
+      if (disposed) throw new Error('client interaction delivery: disposed')
+      // A replacement surface revision REPLACES the previous binding; only the
+      // newest binding may wake waiters or clear the subject authority.
+      bindingDisposal?.()
+      bindingDisposal = undefined
+      bindingToken = undefined
+      committedSessionId = undefined
+      const token = {}
+      const off = subscribeCommittedSession(() => {
+        if (bindingToken !== token) return
+        presentationEpoch += 1
+        wakeWaiters()
+      })
+      bindingToken = token
+      committedSessionId = currentSessionId
+      bindingDisposal = off
+      presentationEpoch += 1
+      wakeWaiters()
+      return () => {
+        if (bindingToken !== token) return
+        bindingToken = undefined
+        bindingDisposal = undefined
+        committedSessionId = undefined
+        presentationEpoch += 1
+        off()
+        wakeWaiters()
+      }
+    },
+    beginNavigationHold(): NavigationHoldRelease {
+      if (disposed) throw new Error('client interaction delivery: disposed')
+      if (navigationHold !== undefined) throw new Error('client interaction delivery: a navigation hold is already active')
+      presentationEpoch += 1
+      let released = false
+      const handle: NavigationHoldRelease = {
+        release: (): void => {
+          if (released) return
+          released = true
+          if (navigationHold !== handle) return
+          navigationHold = undefined
+          wakeWaiters()
+        },
+      }
+      navigationHold = handle
+      wakeWaiters()
+      return handle
     },
     dispose(): void {
       if (disposed) return
       disposed = true
       current = undefined
+      navigationHold = undefined
+      committedSessionId = undefined
+      bindingToken = undefined
+      const binding = bindingDisposal
+      bindingDisposal = undefined
+      eligibleRequests.clear()
+      notifyEligibility()
+      rootLifetime.abort(disposedReason())
+      wakeWaiters()
       runSyncDisposalSteps('client interaction delivery disposal', [
+        () => binding?.(),
         ...owned.splice(0).map(off => () => { off() }),
       ])
     },

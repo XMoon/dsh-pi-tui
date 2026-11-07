@@ -127,7 +127,12 @@ export interface SurfaceInteractionPresenter {
  */
 export type PiTuiInteractionApp = Pick<
   TuiApp,
-  'showApprovalPrompt' | 'askQuestions' | 'setSettledQuestionAnswersLookup' | 'notify' | 'setQuestionAttention'
+  | 'showApprovalPrompt'
+  | 'askQuestions'
+  | 'setSettledQuestionAnswersLookup'
+  | 'notify'
+  | 'setQuestionAttention'
+  | 'withdrawPresentations'
 >
 
 /**
@@ -137,9 +142,11 @@ export type PiTuiInteractionApp = Pick<
  * `withdrawPending` is deliberately a NO-OP — the app's own `dispose()`, which
  * the surface runs right after the interaction owner, is the ONE cancellation
  * owner on this branch. It never simulates an answer or swallows an app error.
- * `withdrawPresentations` is a NO-OP for the same ownership reason: PiTui keeps
- * its long-standing session-switch behavior (a mounted editor-seat flow is NOT
- * withdrawn by a switch there), and this slice changes no PiTui behavior.
+ * `withdrawPresentations` forwards to the app's OWN withdrawal entry: on the
+ * split Client that entry drops the currently mounted flow/sheet while the
+ * root delivery's navigation hold (or committed-subject change) makes its
+ * local cancellation stale, so no local cancel is ever forwarded as a Host
+ * decision. Direct never reaches it because its admission stays unconditional.
  */
 export function pituiSurfaceInteractionPresenter(app: PiTuiInteractionApp): SurfaceInteractionPresenter {
   return {
@@ -153,7 +160,7 @@ export function pituiSurfaceInteractionPresenter(app: PiTuiInteractionApp): Surf
     // surface's TSP activity projection is a no-op while a TuiApp is mounted,
     // so the read has no reachable sink on this branch.
     withdrawPending: () => {},
-    withdrawPresentations: () => {},
+    withdrawPresentations: lifetimes => { app.withdrawPresentations(lifetimes) },
     closeTransientList: () => {},
   }
 }

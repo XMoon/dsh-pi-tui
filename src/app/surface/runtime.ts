@@ -108,6 +108,7 @@ import {
   type TuiApp,
   type TuiAppEvents,
   type TuiAppOptions,
+  type NoAnswerNavigationControl,
 } from '../../tui-app.ts'
 import { runSyncDisposalSteps } from '../../runtime/process/disposal.ts'
 import type { CompactionPhase } from './compaction-presentation.ts'
@@ -793,6 +794,15 @@ export interface SurfaceRuntimeOptions {
    * (STOP-DOUBLE).
    */
   readonly mainProgressAuthority: MainProgressAuthority
+  /**
+   * Split-Client only: the application's ONE committed-Session authority. When
+   * supplied, the PiTUI branch's forwarded Question/Approval admission is
+   * narrowed from "every request" to exactly this committed subject (plus a
+   * legal opening target), so a request that belongs to another Session is
+   * never presented on the current editor. Direct keeps `undefined`, preserving
+   * its original unconditional delegation.
+   */
+  readonly committedSessionId?: () => string | undefined
   /** The runner's diagnostics channel: the terminal-progress evidence fold
    *  reports an UNKNOWN upstream `turn/end.reason.kind` here instead of
    *  guessing an outcome. Optional for headless fixtures. */
@@ -1151,6 +1161,22 @@ export interface SurfaceRuntime<Event extends RoutedSessionEvent> {
    * a renderer frame failure routes to that renderer's fatal sink.
    */
   withdrawReplacedPresentation(): void
+  /**
+   * Split-Client only: withdraw the CURRENT local modal presentation (Question
+   * flow / Approval sheet) for a presentation-only navigation hold. The caller
+   * MUST have committed the root navigation hold before calling this — the
+   * official request keeps its own Host lifetime and each withdrawn attempt's
+   * local cancellation is discarded by the root delivery, never sent as an
+   * answer. Reuses the SAME collect → atomic withdraw → settle order as
+   * {@link withdrawReplacedPresentation} but is not tied to a subject change.
+   */
+  withdrawPresentationForNavigation(): void
+  /**
+   * Install (or clear) the ONE modal-safe no-answer navigation control the
+   * mounted PiTUI app exposes through Alt+W. A renderer mount without a TuiApp
+   * (the TSP branch) is inert by construction.
+   */
+  setNoAnswerNavigation(control: NoAnswerNavigationControl | undefined): void
   /**
    * Phase 3B / B3-B: retire a mounted History editor-seat tenant whose captured
    * Session scope is no longer current. It is the runner's publication-commit
@@ -1752,17 +1778,38 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     presenter: () => presenterSeam(),
     livePresenter: () => interactionPresenter,
     display: () => displaySeam(),
-    currentSessionId: () => routingSource?.currentSessionId(),
+    // The committed Session authority (split Client) or the routed display
+    // subject (Direct/TSP legacy). When the split authority is supplied it is
+    // the ONLY Session identity this owner reads — a missing committed subject
+    // is a real "no session" fact, never a fallback to a stale routed id.
+    currentSessionId: () => options.committedSessionId !== undefined
+      ? options.committedSessionId()
+      : routingSource?.currentSessionId(),
     // ADMISSION/PRESENTATION currentness (B3 findings F10/F12/F13): the surface's
     // OWN authority — the Session it shows, plus a Session it is currently
     // OPENING (a tentative opening is not an owner replacement, so its request is
-    // still admitted and keeps its flow). A renderer-OWNED presentation (the TSP
-    // modal seat) is the only branch this policy was authorized for: the PiTui
-    // branch — the default and the SDK-declined fallback — answers `true`
-    // unconditionally and keeps its original delegation semantics.
-    isAdmissibleSession: sessionId => rendererOwnedPresentation
-      ? sessionId === routingSource?.currentSessionId() || openingJournal.isOpening(sessionId)
-      : true,
+    // still admitted and keeps its flow). The renderer-OWNED presentation (the
+    // TSP modal seat) keeps its original shown-Session authority; the split
+    // Client's PiTUI branch uses the application's committed subject; Direct
+    // (no committed-session authority supplied) keeps its unconditional
+    // delegation semantics.
+    isAdmissibleSession: sessionId => {
+      // A renderer-OWNED presentation (the TSP modal seat) keeps its original
+      // authority (the surface's shown Session plus a legal opening target).
+      if (rendererOwnedPresentation) {
+        return sessionId === routingSource?.currentSessionId() || openingJournal.isOpening(sessionId)
+      }
+      // The split Client's PiTUI branch narrows to the application's ONE
+      // committed Session: a forwarded request whose own Session is not
+      // committed yet is HELD, never painted over another Session's editor.
+      const committedSessionId = options.committedSessionId?.()
+      if (committedSessionId !== undefined) {
+        return sessionId === committedSessionId || openingJournal.isOpening(sessionId)
+      }
+      // Direct (and every headless fixture without the split authority) keeps
+      // the pre-M5 unconditional delegation unchanged.
+      return true
+    },
     schedulePaint: () => schedulePaint(),
     diag: () => task.diag(),
     isCleanedUp: () => isCleanedUp(),
@@ -2989,6 +3036,14 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     },
     withdrawReplacedPresentation() {
       interaction.withdrawReplacedPresentation()
+    },
+    withdrawPresentationForNavigation() {
+      interaction.withdrawPresentationForNavigation()
+    },
+    setNoAnswerNavigation(control) {
+      // The control is meaningful only for the mounted PiTUI app; a TSP mount
+      // has its own native modal seat and never reaches this entry.
+      app?.setNoAnswerNavigation(control)
     },
     retireStaleHistorySeat() {
       // The PiTui-only mounted app owns the optional seat; a TSP renderer mount

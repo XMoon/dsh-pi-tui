@@ -282,10 +282,37 @@ export interface RemoteLiveIngressFactory {
  *  only. The override carries the narrow service object, NOT the Client
  *  Context or plugin fibers; only the selected PiTuiExtensionService
  *  capability crosses the in-process composition seam. */
+/**
+ * Split-Client only: the narrow root-delivery capability the runner binds and
+ * the modal-safe navigation entry uses. Declared structurally HERE because this
+ * transport-neutral module must not import the Remote runtime; the concrete
+ * owner (`app/remote-process/client-interaction-delivery`) satisfies it by
+ * structure, and the full seam lives in `runtime/remote/interaction-remote`.
+ */
+export interface SplitClientInteractionDeliveryControl {
+  /**
+   * Bind the ONE committed-Session authority of the application hosting the
+   * current surface revision. A replacement revision replaces the binding; the
+   * returned disposer is inert once replaced.
+   */
+  bindCommittedSession(
+    currentSessionId: () => string | undefined,
+    subscribeCommittedSession: (listener: () => void) => () => void,
+  ): () => void
+  /**
+   * Mark a presentation-only navigation hold BEFORE a local modal seat is
+   * withdrawn. The returned release is one-shot; Host request lifetimes and
+   * Session ownership are untouched.
+   */
+  beginNavigationHold(): { release(): void }
+}
+
 export interface RemoteApplicationOverride {
   readonly selected: SelectedApplicationRuntime
   readonly presentation: RemoteApplicationSources
   readonly extensionService: PiTuiExtensionService
+  /** Split-Client only: the Client-root interaction delivery owner. */
+  readonly interactionDelivery?: SplitClientInteractionDeliveryControl
 }
 
 /**

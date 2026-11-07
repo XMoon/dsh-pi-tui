@@ -99,8 +99,59 @@ export interface SplitClientSurfaceInteraction {
   readonly onApproval: ApprovalRequestListener
 }
 
+/**
+ * One forwarded request THIS Client root is still holding for an answer: the
+ * official invocation closure is live and the Gateway has not settled it. It is
+ * a TRANSIENT read view over the delivery owner's own callback stack, never a
+ * Host pending store: no question payload, option, answer or Session snapshot
+ * crosses it, and a token vanishes the moment its invocation settles/aborts or
+ * the Client root disposes.
+ */
+export interface ForwardedAnswerEligibility {
+  readonly sessionId: string
+  readonly kind: 'question' | 'approval'
+  readonly live: true
+}
+
+/** The one-shot navigation-hold release returned by
+ *  {@link SplitClientInteractionDelivery.beginNavigationHold}. */
+export interface NavigationHoldRelease {
+  release(): void
+}
+
+/**
+ * The split Client's root interaction-delivery seam. ONE implementation lives
+ * for the whole Client root and borrows the CURRENT surface revision's two
+ * providers. The revision number is a local identity token, never Host or
+ * Question authority.
+ */
 export interface SplitClientInteractionDelivery {
   attachSurface(revision: number, input: SplitClientSurfaceInteraction): () => void
+  /**
+   * The requests this root currently holds and has not settled. Only an
+   * official, live invocation creates an entry; a Reader-side `attention`
+   * candidate never does.
+   */
+  currentEligibleRequests(): readonly ForwardedAnswerEligibility[]
+  /** Observe eligibility add/remove; the read view itself never answers. */
+  subscribeEligibility(listener: () => void): () => void
+  /**
+   * Bind the ONE committed-Session authority of the application that hosts the
+   * CURRENT surface revision. A new revision replaces the previous binding; the
+   * returned disposer is inert once replaced.
+   */
+  bindCommittedSession(
+    currentSessionId: () => string | undefined,
+    subscribeCommittedSession: (listener: () => void) => () => void,
+  ): () => void
+  /**
+   * Mark a presentation-only navigation hold BEFORE a local modal seat is
+   * withdrawn: every older presentation attempt becomes stale (its local
+   * cancellation can never be forwarded as a Host answer) and no new attempt is
+   * presented until the returned release is called. Host request lifetimes and
+   * Session ownership are untouched.
+   */
+  beginNavigationHold(): NavigationHoldRelease
 }
 
 /** One Client projection face (value deliberately `unknown`). */

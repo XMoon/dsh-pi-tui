@@ -815,6 +815,11 @@ async function startSurfaceLocalClient(
       selected: revision.application.selected,
       presentation: revision.application.presentation,
       extensionService: revision.application.extensionService,
+      // The SAME root delivery owner the revision's Remote interaction adapter
+      // attaches its two providers to. The runner binds the application's ONE
+      // committed-Session authority to it and the modal-safe navigation entry
+      // opens the existing Sessions Workspace through it.
+      interactionDelivery: delivery,
     }
     // Schema defaults + the explicit Client-local startup facts. No fabricated
     // profile document: a preference's absence resolves to its schema default.
