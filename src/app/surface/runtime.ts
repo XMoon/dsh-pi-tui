@@ -802,7 +802,7 @@ export interface SurfaceRuntimeOptions {
    * never presented on the current editor. Direct keeps `undefined`, preserving
    * its original unconditional delegation.
    */
-  readonly committedSessionId?: () => string | undefined
+  readonly committedSessionId?: (() => string | undefined) | null
   /** The runner's diagnostics channel: the terminal-progress evidence fold
    *  reports an UNKNOWN upstream `turn/end.reason.kind` here instead of
    *  guessing an outcome. Optional for headless fixtures. */
@@ -1782,7 +1782,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     // subject (Direct/TSP legacy). When the split authority is supplied it is
     // the ONLY Session identity this owner reads — a missing committed subject
     // is a real "no session" fact, never a fallback to a stale routed id.
-    currentSessionId: () => options.committedSessionId !== undefined
+    currentSessionId: () => options.committedSessionId !== undefined && options.committedSessionId !== null
       ? options.committedSessionId()
       : routingSource?.currentSessionId(),
     // ADMISSION/PRESENTATION currentness (B3 findings F10/F12/F13): the surface's
@@ -1802,12 +1802,16 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       // The split Client's PiTUI branch narrows to the application's ONE
       // committed Session: a forwarded request whose own Session is not
       // committed yet is HELD, never painted over another Session's editor.
-      const committedSessionId = options.committedSessionId?.()
-      if (committedSessionId !== undefined) {
+      // `null` means the authority IS installed and the surface is currently
+      // SESSIONLESS: nothing is admissible (no fallback to the legacy `true`,
+      // which would paint a foreign request over a sessionless editor).
+      // `undefined` means no split authority was supplied at all (Direct,
+      // headless fixtures): the pre-M5 unconditional delegation is kept.
+      if (options.committedSessionId !== undefined) {
+        const committedSessionId = options.committedSessionId?.()
+        if (committedSessionId === undefined) return false
         return sessionId === committedSessionId || openingJournal.isOpening(sessionId)
       }
-      // Direct (and every headless fixture without the split authority) keeps
-      // the pre-M5 unconditional delegation unchanged.
       return true
     },
     schedulePaint: () => schedulePaint(),

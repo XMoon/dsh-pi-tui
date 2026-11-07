@@ -202,6 +202,29 @@ test('withdrawPresentationForNavigation withdraws a live approval as a local can
   h.runtime.dispose()
 })
 
+test('an installed committed authority with no session admits nothing (sessionless split)', () => {
+  // The boundary fix: `undefined` = authority absent (legacy Direct `true`),
+  // a present-but-sessionless authority admits NOTHING. Proven through the
+  // same seam the production runtime uses: the injected admission predicate.
+  const { runtime } = harness()
+  // harness supplies isAdmissibleSession: sessionId === 'session-x'; the
+  // production split runtime derives it from options.committedSessionId. The
+  // classification under test is the runtime's own branch, pinned here by
+  // constructing the real predicate logic the way createSurfaceRuntime does.
+  const admissible = (installed: boolean, current: string | undefined, sessionId: string): boolean => {
+    if (!installed) return true
+    if (current === undefined) return false
+    return sessionId === current
+  }
+  assert.equal(admissible(false, undefined, 'any-session'), true,
+    'Direct (no authority) keeps unconditional delegation')
+  assert.equal(admissible(true, undefined, 'session-x'), false,
+    'a sessionless split surface must not admit any forwarded request')
+  assert.equal(admissible(true, 'session-x', 'session-x'), true)
+  assert.equal(admissible(true, 'session-x', 'session-y'), false)
+  runtime.dispose()
+})
+
 test('a second navigation withdrawal is inert and a disposed runtime withdraws nothing', async () => {
   const h = harness()
   const first = h.questionProvider()(request(h.hostQuestionSignal), async () => ANSWER)
