@@ -545,26 +545,41 @@ test('a settle after the disposal sends neither a blob nor a frame', async () =>
   assert.equal(harness.loader.listenerCount(), 0, 'every presentation subscription is released')
 })
 
-test('a blob-send failure is FATAL: reported once, no further blob, and never mislabelled as a read failure', async () => {
+test('a blob-send failure is FATAL: reported once, no further blob or image load, and never mislabelled as a read failure', async () => {
   const harness = await mountHarness({ failBlobWrite: true })
-  // TWO images in ONE result: the first blob fails, and the second must never
-  // be attempted after the fatal.
-  commit(harness.renderer, [toolRowWithImage(ATTACHMENT, { ...ATTACHMENT, attachmentId: 'att-2' })], {})
-  await until('the first blob attempt to fail', () => harness.tern.blobWrites.length >= 1)
-  await until('the fatal to be routed', () => harness.fatalErrors.length >= 1)
+  const originalLoad = harness.loader.load
+  let loadCalls = 0
+  harness.loader.load = function(this: ImageLoader, ref, scope) {
+    loadCalls += 1
+    return originalLoad.call(this, ref, scope)
+  }
+  try {
+    // TWO images in ONE result: the first blob fails, and the second must never
+    // be attempted after the fatal.
+    commit(harness.renderer, [toolRowWithImage(ATTACHMENT, { ...ATTACHMENT, attachmentId: 'att-2' })], {})
+    await until('the first blob attempt to fail', () => harness.tern.blobWrites.length >= 1)
+    await until('the fatal to be routed', () => harness.fatalErrors.length >= 1)
 
-  assert.equal(harness.fatalErrors.length, 1, 'the fatal is reported exactly once')
-  assert.match(String(harness.fatalErrors[0]), /the tty owner is gone/u,
-    'the fatal carries the real failure')
-  assert.equal(harness.tern.blobWrites.length, 1, 'no further blob is attempted after the fatal')
-  assert.equal(harness.loader.get(ATTACHMENT, harness.scopeValue()).state, 'ready',
-    'the READ itself succeeded: the failure was the blob send')
-  const wire = harness.tern.frames().map(frame => JSON.stringify(frame)).join('\n')
-  assert.equal(wire.includes('Image read failed'), false,
-    'a blob-send failure must not be mislabelled as a read failure')
-  assert.equal(wire.includes('Loading image'), true,
-    'the aborted projection left the last committed frame standing')
-  await harness.dispose()
+    assert.equal(harness.fatalErrors.length, 1, 'the fatal is reported exactly once')
+    assert.match(String(harness.fatalErrors[0]), /the tty owner is gone/u,
+      'the fatal carries the real failure')
+    assert.equal(harness.tern.blobWrites.length, 1, 'no further blob is attempted after the fatal')
+    assert.equal(harness.loader.get(ATTACHMENT, harness.scopeValue()).state, 'ready',
+      'the READ itself succeeded: the failure was the blob send')
+    const wire = harness.tern.frames().map(frame => JSON.stringify(frame)).join('\\n')
+    assert.equal(wire.includes('Image read failed'), false,
+      'a blob-send failure must not be mislabelled as a read failure')
+    assert.equal(wire.includes('Loading image'), true,
+      'the aborted projection left the last committed frame standing')
+
+    const loadsAtFatal = loadCalls
+    commit(harness.renderer, [toolRowWithImage({ ...ATTACHMENT, attachmentId: 'att-after-fatal' })], {})
+    assert.equal(loadCalls, loadsAtFatal, 'a later repaint cannot start another image load after fatal')
+    assert.equal(harness.tern.blobWrites.length, 1, 'a later repaint cannot attempt another blob')
+  } finally {
+    harness.loader.load = originalLoad
+    await harness.dispose()
+  }
 })
 
 // ── T8: the source and the rehydration ──────────────────────────────────────

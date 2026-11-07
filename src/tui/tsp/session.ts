@@ -2418,14 +2418,14 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    *  Preparing rows) under the new subject's scope. */
   const rebuildLastMain = (): boolean => {
     if (disposed || hydrating) return true
+    // PR-C: an aborted projection STAYS aborted. The fatal already took the
+    // renderer down, so no further read or blob may even be ATTEMPTED.
+    if (imageProjectionAborted || visualProjectionAborted) return false
     // Image demand is a projection fact, not a transcript-commit fact: a live
     // DisplayState preset change and a Work disclosure toggle can change which
     // members exist in the current frame without a new setTranscript call.
     visibleMembers = currentVisibleMembers(lastMessages)
     syncImageSubscriptions()
-    // PR-C: an aborted projection STAYS aborted. The fatal already took the
-    // renderer down, so no further blob may even be ATTEMPTED.
-    if (imageProjectionAborted || visualProjectionAborted) return false
     const imageStates = prepareImageStates()
     // PR-C: a fatal blob failure ABORTED this projection: the last committed
     // frame stands and the caller must not render a new one.

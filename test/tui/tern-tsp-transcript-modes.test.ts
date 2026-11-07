@@ -400,7 +400,7 @@ test('a collapsed Activity never demands a Tool SVG blob, and expanding it uses 
   const messages = folder.messages()
   const toolRow = rowOf(folder, (message): message is Extract<TranscriptMessage, { kind: 'tool' }> => message.kind === 'tool')
   let demanded = 0
-  const svgStates = new Map<Extract<TranscriptMessage, { kind: 'tool' }>, never>().set(toolRow, { state: 'ready', fact: { title: 'Box' }, source: svgSource, request: () => { demanded += 1; return 'blob-1' } } as never) 
+  const svgStates = new Map<Extract<TranscriptMessage, { kind: 'tool' }>, never>().set(toolRow, { state: 'ready', fact: { title: 'Box' }, source: svgSource, request: () => { demanded += 1; return 'blob-1' } } as never)
   const collapsed = flatten(messages, { preset: 'compact', scopePrefix: 's1-', window: LATEST_WINDOW, toolSvgStates: svgStates, expandedToolKeys: new Set<string>() })
   assert.equal(demanded, 0, 'a collapsed Activity header sends no SVG blob')
   assert.equal(nodesOf(collapsed, 'image').length, 0, 'and builds no image node')
@@ -488,7 +488,7 @@ test('an earlier Work of a still-open turn stays header-only while only the proj
     'no Work adopts a foreign-turn Preparing')
 })
 
-test('an incomplete latest Work previews Thinking, then turn/end plus final Assistant removes the preview and reveals Thought', () => {
+test('only a truly trailing incomplete Work previews Thinking; an Assistant reply retires the preview before turn/end', () => {
   const open = apply([
     ev('turn/start', { turn: 1 }, 0),
     userMessage(1, 'user-1', 'think only'),
@@ -501,15 +501,24 @@ test('an incomplete latest Work previews Thinking, then turn/end plus final Assi
   const openText = descendantText(openNodes, openSection.id)
   assert.ok(open.turnActivities().get(1)?.completed === false, 'fixture: the owning turn is incomplete')
   assert.ok(openText.includes('Activity'), 'an incomplete Think-only span remains Activity')
-  assert.ok(openText.includes('Think: the only reasoning'), 'the incomplete latest tail may preview Thinking')
+  assert.ok(openText.includes('Think: the only reasoning'), 'the incomplete trailing Work may preview Thinking')
 
-  // Same Work settles, then an intermediate/final Assistant follows before the
-  // authoritative turn boundary. With no Preparing evidence, the settled Work
-  // is completed and non-preview, so the Think-only identity becomes Thought.
-  open.apply([
-    assistantMessage(3, 'a-1', 'the final reply', 1),
-    ev('turn/end', { turn: 1, reason: { kind: 'completed' } }, 4),
-  ])
+  // Capture the frame AFTER assistant/message but BEFORE turn/end: Work is no
+  // longer the canonical trailing block even though the turn remains open.
+  open.apply([assistantMessage(3, 'a-1', 'the final reply', 1)])
+  assert.equal(open.turnActivities().get(1)?.completed, false, 'fixture: turn/end has not arrived')
+  const replyingNodes = flatten(open.messages(), {
+    preset: 'compact', scopePrefix: 's1-', window: LATEST_WINDOW, turnActivities: open.turnActivities(),
+  })
+  const replyingSection = nodesOf(replyingNodes, 'section')[0]!
+  const replyingText = descendantText(replyingNodes, replyingSection.id)
+  assert.ok(replyingText.includes('Thought'), `a Work followed by Assistant is no longer preview-active: ${replyingText}`)
+  assert.ok(!replyingText.includes('Think:'), 'the non-trailing Work preview disappears before turn/end')
+  assert.ok(replyingNodes.some(node => node.parent === 'main' && descendantText(replyingNodes, node.id).includes('the final reply')),
+    'the final Assistant reply stays in the reading flow')
+
+  // The authoritative turn boundary preserves the same settled presentation.
+  open.apply([ev('turn/end', { turn: 1, reason: { kind: 'completed' } }, 4)])
   const settledNodes = flatten(open.messages(), {
     preset: 'compact', scopePrefix: 's1-', window: LATEST_WINDOW, turnActivities: open.turnActivities(),
   })
@@ -517,9 +526,7 @@ test('an incomplete latest Work previews Thinking, then turn/end plus final Assi
   const settledText = descendantText(settledNodes, settledSection.id)
   assert.equal(open.turnActivities().get(1)?.completed, true, 'fixture: the same turn is now settled')
   assert.ok(settledText.includes('Thought'), `a completed non-preview Think-only Work is Thought: ${settledText}`)
-  assert.ok(!settledText.includes('Think:'), 'completed turn state removes the live preview')
-  assert.ok(settledNodes.some(node => node.parent === 'main' && descendantText(settledNodes, node.id).includes('the final reply')),
-    'the final Assistant reply stays in the reading flow')
+  assert.ok(!settledText.includes('Think:'), 'completed turn state keeps the preview retired')
 })
 
 test('a Work with a still-running member omits its duration instead of showing the settled members elapsed time', () => {
@@ -593,8 +600,10 @@ test('the collapsed Action line keeps the running PTC sub-call suffix and drops 
       name: 'bash', arguments: { command: 'echo hi' }, isError: false, content: [{ type: 'text', text: 'hi' }],
     }, 4),
   ])
-  const settledNodes = flatten(folder.messages(), { preset: 'compact', scopePrefix: 's1-', window: LATEST_WINDOW })
+  const settledNodes = flatten(folder.messages(), {
+    preset: 'compact', scopePrefix: 's1-', window: LATEST_WINDOW, turnActivities: folder.turnActivities(),
+  })
   const settledHeader = descendantText(settledNodes, nodesOf(settledNodes, 'section')[0]!.id)
   assert.ok(!/running/u.test(settledHeader), `the settled child drops the suffix: ${settledHeader}`)
-  assert.ok(!settledHeader.includes('Action:'), `the completed turn retires the collapsed preview slot: ${settledHeader}`)
+  assert.ok(settledHeader.includes('Action:'), `the durable Action remains after settlement: ${settledHeader}`)
 })
