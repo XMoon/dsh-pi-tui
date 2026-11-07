@@ -279,6 +279,9 @@ export class ScheduleWorkspaceController {
       }
       case 'set-field': {
         if (this.editor === undefined) return
+        // A user edit supersedes every reload already in flight: the read must
+        // never overwrite content the user typed while waiting.
+        this.reloadEpoch += 1
         this.editor = applyFieldValue(this.editor, intent.fieldId, intent.value)
         this.publish()
         return
@@ -833,6 +836,8 @@ export class ScheduleWorkspaceController {
         prompt: latest.prompt,
         timing: latest.timing,
         target: latest.target,
+        timingMemory: undefined,
+        targetMemory: undefined,
         timingEdited: false,
         targetEdited: false,
         advanced: latest.target.kind !== 'session' && (latest.target.cwd !== '' || latest.target.agentPreset !== ''),
@@ -872,6 +877,9 @@ export class ScheduleWorkspaceController {
       }
       throw error
     }
+    // A write owns the editor from now on: an older reload answer must not
+    // replace the draft this save is about to settle.
+    this.reloadEpoch += 1
     const id = draft.id
     const expectedUpdatedAt = draft.expectedUpdatedAt ?? null
     this.busyEditor = true

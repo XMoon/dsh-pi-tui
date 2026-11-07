@@ -1604,3 +1604,87 @@ test('L6: a reload started before a save cannot rewrite the pending save', async
     life.controller.dispose()
   }
 })
+
+test('L6: an in-flight reload never overwrites input typed while it waits', async () => {
+  const life = await opened()
+  try {
+    life.controller.dispatch({ kind: 'open-detail', id: 'schedule-1' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-edit' })
+    await flush()
+    const titleBefore = life.controller.snapshot().editor?.title
+    const reload = deferred<ScheduleViewResult>()
+    life.port.viewQueue = [reload.promise]
+    life.controller.dispatch({ kind: 'reload-latest' })
+    // The user keeps typing while the read is in flight.
+    life.controller.dispatch({ kind: 'set-field', fieldId: 'prompt', value: 'typed while waiting' })
+    reload.resolve(entry({ title: 'Host', prompt: 'Host prompt', updatedAt: '2026-01-09T00:00:00.000Z' }))
+    await flush()
+    assert.equal(life.controller.snapshot().editor?.prompt, 'typed while waiting',
+      'the user edit survives the older reload answer')
+    assert.equal(life.controller.snapshot().editor?.title, titleBefore, 'the reload did not replace the other field either')
+  } finally {
+    life.controller.dispose()
+  }
+})
+
+test('L6: an in-flight reload cannot overwrite the conflict draft a save just kept', async () => {
+  const life = await opened()
+  try {
+    life.controller.dispatch({ kind: 'open-detail', id: 'schedule-1' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-edit' })
+    await flush()
+    const reload = deferred<ScheduleViewResult>()
+    life.port.viewQueue = [reload.promise]
+    life.controller.dispatch({ kind: 'reload-latest' })
+    life.controller.dispatch({ kind: 'set-field', fieldId: 'title', value: 'Conflicted draft' })
+    life.port.editResult = async () => ({ id: 'schedule-1' as never, code: 'schedule_conflict' })
+    life.controller.dispatch({ kind: 'save' })
+    await flush()
+    await life.controller.whenIdle()
+    assert.equal(life.controller.snapshot().notice?.text, SCHEDULE_COPY.conflict)
+    reload.resolve(entry({ title: 'Host newer', prompt: 'Host prompt', updatedAt: '2026-01-09T00:00:00.000Z' }))
+    await flush()
+    assert.equal(life.controller.snapshot().editor?.title, 'Conflicted draft',
+      'the conflict draft is preserved, not the stale reload answer')
+    assert.equal(life.controller.snapshot().notice?.text, SCHEDULE_COPY.conflict)
+  } finally {
+    life.controller.dispose()
+  }
+})
+
+test('L6: an explicit reload clears the per-kind field memories it replaced', async () => {
+  const life = await opened()
+  try {
+    life.port.entries = [entry({
+      kind: 'cron',
+      expression: '0 17 * * 1-5',
+      timeZone: 'UTC',
+    })]
+    life.controller.dispatch({ kind: 'refresh' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-detail', id: 'schedule-1' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-edit' })
+    await flush()
+    // Build a per-kind memory for the daily editor.
+    life.controller.dispatch({ kind: 'select-timing-kind', timing: 'daily' })
+    life.controller.dispatch({ kind: 'set-field', fieldId: 'timing-time', value: '23:45' })
+    life.controller.dispatch({ kind: 'select-timing-kind', timing: 'cron' })
+    life.port.viewResults.set('schedule-1', entry({
+      kind: 'cron',
+      expression: '0 9 * * *',
+      timeZone: 'UTC',
+      updatedAt: '2026-01-02T00:00:00.000Z',
+    }))
+    life.controller.dispatch({ kind: 'reload-latest' })
+    await flush()
+    life.controller.dispatch({ kind: 'select-timing-kind', timing: 'daily' })
+    const timing = life.controller.snapshot().editor?.timing
+    assert.equal(timing?.kind === 'daily' ? timing.time : undefined, '09:00:00',
+      'the old 23:45 memory was cleared by the explicit reload')
+  } finally {
+    life.controller.dispose()
+  }
+})
