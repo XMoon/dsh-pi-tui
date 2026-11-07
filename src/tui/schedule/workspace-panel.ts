@@ -183,6 +183,11 @@ interface PaintedFrame {
   readonly listSelection: string | null
   /** The History cursor this frame painted (the `more` action pages it). */
   readonly historyCursor: string | null
+  /** The PAGE INSTANCE generation this frame painted. Re-entering a page (an
+   *  editor reopen, a History reopen, a Help reopen) bumps it, so a gesture
+   *  pressed on a closed instance can never act on its reopen even when every
+   *  other painted identity recurs (the ABA identity). */
+  readonly pageEpoch: number
 }
 
 /** One piece of a painted row. */
@@ -257,6 +262,7 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     readonly subjectFacts: string
     readonly listSelection: string | null
     readonly historyCursor: string | null
+    readonly pageEpoch: number
   } | undefined
   private readonly searchInput = new Input({ prompt: '' })
   private readonly editorInput = new Input({ prompt: '' })
@@ -888,6 +894,7 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
         ? (snapshot.selectedId === undefined ? null : String(snapshot.selectedId))
         : null,
       historyCursor: snapshot.mode === 'history' ? (snapshot.history?.nextBefore ?? null) : null,
+      pageEpoch: snapshot.pageEpoch,
     }
     return lines.slice(0, rows)
   }
@@ -1708,6 +1715,7 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
           subjectFacts: frame.subjectFacts,
           listSelection: frame.listSelection,
           historyCursor: frame.historyCursor,
+          pageEpoch: frame.pageEpoch,
         }
   }
 
@@ -1732,7 +1740,8 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
       || pressed.confirmToken !== frame.confirmToken
       || pressed.subjectFacts !== frame.subjectFacts
       || pressed.listSelection !== frame.listSelection
-      || pressed.historyCursor !== frame.historyCursor) {
+      || pressed.historyCursor !== frame.historyCursor
+      || pressed.pageEpoch !== frame.pageEpoch) {
       return
     }
     this.activateHit(hit)
@@ -1779,7 +1788,8 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
       : this.snapshot.mode === 'editor'
         ? (this.snapshot.editor?.id === undefined ? null : String(this.snapshot.editor.id))
         : null
-    return frame.subjectId === currentSubject
+    return frame.pageEpoch === this.snapshot.pageEpoch
+      && frame.subjectId === currentSubject
       && frame.subjectFacts === frameSubjectFacts(this.snapshot)
       && frame.listSelection === (this.snapshot.mode === 'list'
         ? (this.snapshot.selectedId === undefined ? null : String(this.snapshot.selectedId))

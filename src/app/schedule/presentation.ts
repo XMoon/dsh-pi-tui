@@ -115,6 +115,12 @@ export interface ScheduleWorkspaceSnapshot {
   readonly sessions: readonly ScheduleSessionChoice[]
   /** A Host mutation is in flight; the panel refuses a second one. */
   readonly busy: boolean
+  /** Read-only PAGE INSTANCE generation: bumped only when a page RE-ENTERS
+   *  interaction ownership (an editor reopens, History reopens, Help reopens).
+   *  Pure repaints/scrolls/refreshes never change it. The panel freezes it into
+   *  every painted frame so a gesture pressed on a closed page instance can
+   *  never act on its reopen (the ABA identity). */
+  readonly pageEpoch: number
 }
 
 /** Every action the panel can request. The controller owns all semantics; the

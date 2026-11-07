@@ -79,6 +79,7 @@ function workspace(overrides: Partial<ScheduleWorkspaceSnapshot> = {}): Schedule
     mode: 'list',
     sessions: [],
     busy: false,
+    pageEpoch: 0,
     ...overrides,
   }
 }
@@ -243,6 +244,91 @@ test('the list-root keys are real VirtualTerminal input routed by TuiApp into th
   vt.sendInput('\x1b')
   await vt.waitForRender()
   assert.equal(closes, 1, 'the list-root Esc must close the workspace through TuiApp')
+})
+
+import { ScheduleWorkspaceController } from '../../src/app/schedule/workspace-controller.ts'
+import type { ScheduleEditRequest, SchedulePort } from '../../src/runtime/schedule-port.ts'
+import type { SessionReader } from '../../src/runtime/session-reader-port.ts'
+
+/** Minimal recording SchedulePort for the source-to-sink SGR proof. */
+function createRecordingPort(): SchedulePort & { edits: ScheduleEditRequest[] } {
+  const rows = [task({ id: 'task-a', title: 'Alpha report', status: 'active' })]
+  const edits: ScheduleEditRequest[] = []
+  const listeners = new Set<() => void>()
+  return {
+    edits,
+    async catalog() { return rows },
+    async list() { return { items: [...rows], shown: rows.length, total: rows.length, limit: 100, offset: 0 } },
+    async view(request) { return rows.find(row => row.id === request.id) ?? { id: request.id, code: 'schedule_not_found' } },
+    async history(request) { return { id: request.id, code: 'schedule_not_found' } },
+    async deliveryLimits() { return { newSessionIntervalSeconds: 60 } },
+    async create() { throw new Error('not used') },
+    async edit(request) {
+      edits.push(request)
+      return rows.find(row => row.id === request.id) ?? { id: request.id, code: 'schedule_not_found' }
+    },
+    async run() { throw new Error('not used') },
+    async deleteInactive() { return { deleted: 0 } },
+    onChanged(listener) {
+      listeners.add(listener)
+      return () => { listeners.delete(listener) }
+    },
+  } as SchedulePort & { edits: ScheduleEditRequest[] }
+}
+
+function createController(port: SchedulePort): ScheduleWorkspaceController {
+  const sessionReader: SessionReader = {
+    list: async () => [],
+    projectionBatch: async () => new Map(),
+    search: async () => undefined,
+    blank: () => undefined,
+    measureContext: () => undefined,
+    turnOutline: () => undefined,
+    sessionStatus: () => undefined,
+  }
+  const controller = new ScheduleWorkspaceController({ port, sessionReader, runOwned: (_l, t) => { void t() } })
+  controller.open()
+  controller.dispatch({ kind: 'open-detail', id: 'task-a' })
+  return controller
+}
+
+test('a real SGR pointer gesture reaches the Host port through the real Controller', async () => {
+  // v2 §4.4 source-to-sink: VirtualTerminal SGR → TuiApp → alt screen → panel
+  // admission → REAL ScheduleWorkspaceController → SchedulePort stub. The
+  // observed write is the port call, not an intent record.
+  const port = createRecordingPort()
+  const controller = createController(port)
+  const vt = new VirtualTerminal(120, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  started.add(app)
+  const handle = app.openScheduleWorkspace({
+    snapshot: () => controller.snapshot(),
+    dispatch: intent => controller.dispatch(intent),
+    onClose: () => {},
+  })
+  handle.update(controller.snapshot())
+  await vt.waitForRender()
+  const locate = (needle: string): { readonly row: number; readonly column: number } => {
+    const lines = vt.getViewport().map(line => stripTerminalSequences(line))
+    const row = lines.findIndex(line => line.includes(needle))
+    if (row < 0) throw new Error(`no painted row with ${needle}:\n${lines.join('\n')}`)
+    return { row, column: lines[row]!.indexOf(needle) + 2 }
+  }
+  const press = (point: { readonly row: number; readonly column: number }): void => {
+    vt.sendInput(`\x1b[<0;${point.column + 1};${point.row + 1}M`)
+  }
+  const release = (point: { readonly row: number; readonly column: number }): void => {
+    vt.sendInput(`\x1b[<0;${point.column + 1};${point.row + 1}m`)
+  }
+  const pauseRow = locate('Space pause/resume')
+  press(pauseRow)
+  await vt.waitForRender()
+  release(pauseRow)
+  await vt.waitForRender()
+  assert.equal(port.edits.length, 1, 'exactly one Host pause write reached the port')
+  assert.equal(port.edits[0]?.id, 'task-a')
+  app.dispose()
 })
 
 test('a real SGR pointer gesture through TuiApp commits, and a cross-subject one is refused', async () => {

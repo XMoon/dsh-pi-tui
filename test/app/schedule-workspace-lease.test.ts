@@ -34,6 +34,7 @@ function snapshot(overrides: Partial<ScheduleWorkspaceSnapshot> = {}): ScheduleW
     mode: 'list',
     sessions: [],
     busy: false,
+    pageEpoch: 0,
     ...overrides,
   }
 }
