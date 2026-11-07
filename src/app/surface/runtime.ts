@@ -1782,9 +1782,10 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     // subject (Direct/TSP legacy). When the split authority is supplied it is
     // the ONLY Session identity this owner reads — a missing committed subject
     // is a real "no session" fact, never a fallback to a stale routed id.
-    currentSessionId: () => options.committedSessionId !== undefined && options.committedSessionId !== null
-      ? options.committedSessionId()
-      : routingSource?.currentSessionId(),
+    // (`undefined` authority = Direct/headless legacy: the routed subject.)
+    currentSessionId: () => options.committedSessionId === undefined
+      ? routingSource?.currentSessionId()
+      : options.committedSessionId?.(),
     // ADMISSION/PRESENTATION currentness (B3 findings F10/F12/F13): the surface's
     // OWN authority — the Session it shows, plus a Session it is currently
     // OPENING (a tentative opening is not an owner replacement, so its request is

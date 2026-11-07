@@ -258,8 +258,15 @@ test('a live forwarded question paints the navigation hint only after the contro
   assert.match(vt.getViewport().join(''), /Blocked\?/u)
   // Direct (no control installed): no verb.
   assert.doesNotMatch(vt.getViewport().join(''), /browse/u, 'Direct must not advertise the verb')
-  // Installing the control makes the hint appear on the next render.
+  // Installing an UNAVAILABLE control still hides the verb: the hint may
+  // never advertise an entry whose press would answer "unavailable".
   app.setNoAnswerNavigation({ available: () => false, begin: () => () => {}, open: () => {} })
+  app.requestRender()
+  await vt.waitForRender()
+  assert.doesNotMatch(vt.getViewport().join(''), /browse/u,
+    'an unavailable entry must not be advertised')
+  // Making it available paints the verb on the next render.
+  app.setNoAnswerNavigation({ available: () => true, begin: () => () => {}, open: () => {} })
   app.requestRender()
   await vt.waitForRender()
   assert.match(vt.getViewport().join(''), /browse/u, 'the live forwarded form advertises the verb')

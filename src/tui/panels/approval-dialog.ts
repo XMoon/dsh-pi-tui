@@ -23,7 +23,7 @@ import type { Component } from '@xmoon76/pi-tui'
 import { Frame } from '../components/frame.ts'
 import { color } from '../theme/runtime.ts'
 import { componentKeymap } from '../keybindings/component-keymap.ts'
-import { noAnswerNavigationInstalled } from '../interaction/question.ts'
+import { noAnswerNavigationUsable } from '../interaction/question.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
 import { approvalArgumentSections } from '../presentation/approval-arguments.ts'
@@ -544,7 +544,7 @@ class ApprovalSheet implements Component {
     // The action sheet only exists for LIVE forwarded approvals; the verb
     // still paints only where the split composition installed the navigation
     // control (Direct never does).
-    if (titleShown !== '' && noAnswerNavigationInstalled()) {
+    if (titleShown !== '' && noAnswerNavigationUsable()) {
       const browseSuffix = ` · ${componentKeymap.keyHint('interaction.navigateWorkspace')} browse`
       if (visibleWidth(`${titleShown}${browseSuffix}`) <= contentWidth) titleShown += browseSuffix
     }

@@ -25,11 +25,18 @@ import { componentKeymap } from '../keybindings/component-keymap.ts'
  * never paint the navigation verb. The app sets this once per surface mount.
  */
 let noAnswerNavigationInstalledFlag = false
-export function setNoAnswerNavigationInstalled(installed: boolean): void {
+let noAnswerNavigationAvailable: () => boolean = () => false
+export function setNoAnswerNavigationInstalled(installed: boolean, available?: () => boolean): void {
   noAnswerNavigationInstalledFlag = installed
+  noAnswerNavigationAvailable = available ?? (() => false)
 }
 export function noAnswerNavigationInstalled(): boolean {
   return noAnswerNavigationInstalledFlag
+}
+/** Whether the modal-safe navigation may run RIGHT NOW: the hint paints only
+ *  when this is true, matching what pressing the key would actually do. */
+export function noAnswerNavigationUsable(): boolean {
+  return noAnswerNavigationInstalledFlag && noAnswerNavigationAvailable()
 }
 import { color } from '../theme/runtime.ts'
 
@@ -1665,7 +1672,7 @@ export class QuestionFlow implements Component, Focusable {
     // only when the split composition installed the navigation control; a
     // continued late-answer form (and Direct) never shows it. It is LOW
     // priority: narrow widths drop it before the fixed response verbs.
-    const browseVerb = this.status?.navigationEligible === true && noAnswerNavigationInstalled()
+    const browseVerb = this.status?.navigationEligible === true && noAnswerNavigationUsable()
       ? `${componentKeymap.keyHint('interaction.navigateWorkspace')} browse`
       : ''
     if (this.editingOther) {
