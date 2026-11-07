@@ -435,6 +435,26 @@ async function sendPrompt(page, text) {
   result.browserClientActions.push('send-prompt')
 }
 
+/**
+ * Submit the live composer DRAFT with an explicit send gesture and prove the
+ * Host prompt request really started. The quote-only draft is sent with Enter
+ * in the focused composer, so a stale/hidden Send control cannot silently
+ * swallow the submission.
+ */
+async function sendDraft(page) {
+  const composer = page.locator('[role=textbox]').last()
+  await composer.click()
+  await page.waitForTimeout(200)
+  const request = page.waitForRequest(
+    candidate => new URL(candidate.url()).pathname === '/api/session/prompt' && candidate.method() === 'POST',
+    { timeout: 30_000 },
+  )
+  await page.keyboard.press('Enter')
+  await request
+  result.browserClientActions.push('send-draft')
+  recordRequestIds(undefined)
+}
+
 /** The official question card (one pending question batch). */
 async function questionCard(page) {
   return page.evaluate(() => {
@@ -1815,7 +1835,7 @@ const cases = {
       throw new Error(`the current Session lost its Quote draft on navigation: ${JSON.stringify(restored)}`)
     }
     await waitSignal('quote-send-go')
-    await clickSend(page)
+    await sendDraft(page)
     await waitConversation(page, changesMarker, ['w5-quote answer'], 240_000, 'the quoted prompt answer')
     driverFact('quote-sent', { quoted: `> ${sentence}` })
     step('quote-draft-then-send', true, { quoted: `> ${sentence}` })
