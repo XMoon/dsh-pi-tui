@@ -289,7 +289,13 @@ function rowMap (h, texts, snapshot = h.snapshot()) {
 }
 
 export default async function (h) {
-  const ternBin = process.env.TERN_BIN ?? 'tern'
+  // The plan pins ONE operator-supplied binary and this lane hashes it, so a
+  // bare `tern` resolved through PATH is not acceptable: `execFile` would run
+  // it while `readFileSync('tern')` would fail. Require the explicit path.
+  const ternBin = process.env.TERN_BIN
+  if (ternBin === undefined || ternBin === '' || !existsSync(ternBin)) {
+    throw new Error('TERN_BIN must name the pinned Tern binary file for this qualification lane')
+  }
   const ternVersion = execFileSync(ternBin, ['--version'], { encoding: 'utf8' }).trim()
   const lock = readFileSync(join(h.repo, 'pnpm-lock.yaml'), 'utf8')
   const sdkPin = /'@stencil-hq\/tern@0\.2\.0'/u.test(lock) ? '0.2.0' : 'UNVERIFIED'
@@ -468,6 +474,20 @@ export default async function (h) {
     JSON.stringify({ answerCardsLive: answerCardsLive(h), heldAnswerCardsBefore: heldAnswersBefore }))
   if (!heldMounted) { finish(h, extra); return }
 
+  // ARMING IS NOT HOLDING: the Writer returns `committed` before the live Agent
+  // starts its model request, so the reader must not scroll back until the
+  // adapter has REALLY entered `streamHold()`. Without this witness a release
+  // could land in the gap, clear the armed flag, and let the model stream
+  // freely — every geometry assertion would still pass while nothing was held.
+  const holdEntered = await waitUntil(h, 'the live model request entered the hold', () =>
+    records(h).some(entry => entry.kind === 'producer.model.hold.entered'), { limit: 400 })
+  const enteredHold = records(h).filter(entry => entry.kind === 'producer.model.hold.entered').at(-1)
+  h.check('G-TRANSCRIPT-READING-ANCHOR: the live Agent model request really entered the hold BEFORE the reader scrolled back',
+    holdEntered && typeof enteredHold?.holdSeq === 'number' && enteredHold.modelCalls >= 1
+      && answerCardsLive(h) === heldAnswersBefore,
+    JSON.stringify({ holdEntered, enteredHold, answerCardsLive: answerCardsLive(h) }))
+  if (!holdEntered || typeof enteredHold?.holdSeq !== 'number') { finish(h, extra); return }
+
   await h.key('PageUp', 900)
   const pageUpSnapshot = h.snapshot()
   const olderVisible = markers.slice(0, 8).filter(text => clientRow(pageUpSnapshot, text)?.containedXY === true)
@@ -492,9 +512,11 @@ export default async function (h) {
   const beforeReleaseShot = h.capture('transcript-reading-old-before-release', 'the reader parked on older rows while the held turn still runs')
   frameCorrelations.push(frameCorrelation(h, beforeReleaseShot, anchorTexts[0]))
   const releaseResult = await runCase(h, 'release-model')
-  h.check('G-TRANSCRIPT-READING-ANCHOR: the release-model command really released the ONE held model promise',
-    releaseResult?.released === true && releaseResult?.armed === false,
-    JSON.stringify(releaseResult))
+  h.check('G-TRANSCRIPT-READING-ANCHOR: the release resolved the SAME wait the model request entered (not just the armed flag)',
+    releaseResult?.released === true && releaseResult?.holdSeq === enteredHold.holdSeq
+      && releaseResult?.armed === false
+      && records(h).some(entry => entry.kind === 'producer.model.hold.released' && entry.holdSeq === enteredHold.holdSeq),
+    JSON.stringify({ releaseResult, enteredHoldSeq: enteredHold.holdSeq }))
   const released = await waitUntil(h, 'the held Agent stream really produced its answer', () =>
     answerCardsLive(h) === heldAnswersBefore + 1, { limit: 400 })
   const releaseCommit = commits(h, 'production').at(-1)
