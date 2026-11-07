@@ -21,6 +21,7 @@ import { runDetachedTurnInteractions } from '../smoke/split-process/detached-tur
 import { runNonDestructiveClientLifecycle } from '../smoke/split-process/non-destructive-client-lifecycle.mjs'
 import { runReadAuthority } from '../smoke/split-process/read-authority.mjs'
 import { runInteractionNavigationFirst } from '../smoke/split-process/interaction-admission.mjs'
+import { runSessionWorkspaceActivity } from '../smoke/split-process/session-workspace-activity.mjs'
 import { runEntryAdmission } from '../smoke/split-process/entry-admission.mjs'
 import { runOfficialWebComposition } from '../smoke/split-process/official-web-composition.mjs'
 import { runPtySessionWriteRecovery } from '../smoke/split-process/pty-session-write-recovery.mjs'
@@ -104,6 +105,12 @@ const CASE_REGISTRY = Object.freeze([
     id: 'interaction.navigation-first-answerability',
     title: 'navigation-first admission holds a forwarded interaction until its Session commits and re-offers the SAME request after a no-answer navigation',
     run: runInteractionNavigationFirst,
+  }),
+  Object.freeze({
+    suite: 'interaction',
+    id: 'interaction.workspace-needs-attention',
+    title: 'the Session Workspace proves a forwarded Question as a Needs-attention row, keeps its answer modal off the wrong editor, peeks read-only and answers only after the real Session commit',
+    run: runSessionWorkspaceActivity,
   }),
   Object.freeze({
     suite: 'recovery',
