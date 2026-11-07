@@ -296,15 +296,19 @@ export function createSplitClientInteractionDelivery(
       }
       try {
         const result = await raceWithAbort(presentation, lifetime)
+        // A result whose official lifetime already ended (the provider resolved
+        // and the abort fired before this continuation ran) must NEVER be
+        // forwarded: the invocation is dead and the Gateway classifies it by
+        // its own abort, not by a stale local answer.
+        if (lifetime.aborted) throw abortReason(lifetime)
         if (current === attachment
           && navigationHold === hold
           && presentationEpoch === epoch
           && isCommittedSubject(sessionId)) {
           return result
         }
-        if (lifetime.aborted) return result
       } catch (error) {
-        if (lifetime.aborted) throw error
+        if (lifetime.aborted) throw abortReason(lifetime)
         if (current === attachment
           && navigationHold === hold
           && presentationEpoch === epoch

@@ -18,6 +18,19 @@ import type { Component, Focusable } from '@xmoon76/pi-tui'
 import { getGraphemeSegmenter, visibleWidth, wrapTextWithAnsi } from '@xmoon76/pi-tui'
 import { Frame } from '../components/frame.ts'
 import { componentKeymap } from '../keybindings/component-keymap.ts'
+
+/**
+ * Whether the split composition installed the modal-safe no-answer navigation
+ * control on the live TuiApp. Direct/TSP never install one, so their modals
+ * never paint the navigation verb. The app sets this once per surface mount.
+ */
+let noAnswerNavigationInstalledFlag = false
+export function setNoAnswerNavigationInstalled(installed: boolean): void {
+  noAnswerNavigationInstalledFlag = installed
+}
+export function noAnswerNavigationInstalled(): boolean {
+  return noAnswerNavigationInstalledFlag
+}
 import { color } from '../theme/runtime.ts'
 
 const segmenter = getGraphemeSegmenter()
@@ -299,6 +312,12 @@ export interface QuestionMouseGesture {
  * the timed-claim / remaining-time / continued-late-answer guidance. */
 export interface QuestionFlowStatus {
   text?: string
+  /**
+   * Split-Client only: the flow is a LIVE forwarded interaction the Agent is
+   * blocked on. The modal-safe navigation verb paints only when this is true
+   * AND the split composition installed the navigation control.
+   */
+  navigationEligible?: boolean
 }
 
 export class QuestionFlow implements Component, Focusable {
@@ -1642,9 +1661,13 @@ export class QuestionFlow implements Component, Focusable {
     const isLastQuestion = this.tab === this.questions.length - 1
     const continueVerb = isLastQuestion ? '↵ review' : '↵ continue'
     // The modal-safe navigation verb is derived from the component keymap (no
-    // hard-coded chord). It is LOW priority: narrow widths drop it before the
-    // fixed response verbs.
-    const browseVerb = `${componentKeymap.keyHint('interaction.navigateWorkspace')} browse`
+    // hard-coded chord). It paints only for a LIVE forwarded interaction and
+    // only when the split composition installed the navigation control; a
+    // continued late-answer form (and Direct) never shows it. It is LOW
+    // priority: narrow widths drop it before the fixed response verbs.
+    const browseVerb = this.status?.navigationEligible === true && noAnswerNavigationInstalled()
+      ? `${componentKeymap.keyHint('interaction.navigateWorkspace')} browse`
+      : ''
     if (this.editingOther) {
       const editParts = [
         '←→ edit',

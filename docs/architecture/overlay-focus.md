@@ -148,11 +148,14 @@ Keyboard routing follows this priority:
 2. fixed Question response keys (the component) and Approval fixed/reading keys
    (the approval runtime/sheet);
 2a. the split Client's modal-safe no-answer navigation entry (`Alt+W`), only
-   while a forwarded Question/Approval owns the seat and the registered,
+   while a LIVE forwarded Question/Approval owns the seat (the Agent is blocked
+   on this answer — never a continued late-answer form) and the registered,
    presentable Session Workspace entry is installed: it commits the root
    presentation-only hold, withdraws the local modal seat, and opens the ONE
    existing Session Workspace; no cancel, deny, answer or second listing is
    sent. It is the only modal key that suspends the answer seat for navigation;
+   the advertised verb paints only where the control is installed (Direct and
+   the TSP native seat never show it);
 3. a direct trigger of the explicit inspection-safe semantic allowlist;
 4. a leader prefix or completion, when the completed semantic action is in the
    same inspection-safe allowlist;

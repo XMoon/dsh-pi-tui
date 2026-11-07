@@ -32,6 +32,9 @@ afterEach(() => {
 function startApp(): { app: TuiApp; vt: VirtualTerminal } {
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {}, onCancel: () => {} })
+  // The navigation-installed flag is module-global (the modal hint reads it);
+  // clear it BEFORE start so each test begins from the Direct default.
+  app.setNoAnswerNavigation(undefined)
   app.start()
   startedApps.add(app)
   return { app, vt }
@@ -69,7 +72,7 @@ function openWorkspace(app: TuiApp): void {
 test('Alt+W withdraws the mounted question, opens the lease, and releases the hold on the workspace close', async () => {
   const { app, vt } = startApp()
   const controller = new AbortController()
-  const question = app.askQuestions([{ id: 'q1', question: 'Continue?', options: [{ label: 'Proceed' }] }], controller.signal)
+  const question = app.askQuestions([{ id: 'q1', question: 'Continue?', options: [{ label: 'Proceed' }] }], controller.signal, undefined, true)
   const questionOutcome = settleOutcome(question)
   await vt.waitForRender()
   assert.match(vt.getViewport().join(''), /Continue\?/u, 'the question owns the seat first')
@@ -110,7 +113,7 @@ test('Alt+W withdraws the mounted question, opens the lease, and releases the ho
 test('Alt+W withdraws a mounted approval without deciding it and releases on close', async () => {
   const { app, vt } = startApp()
   const controller = new AbortController()
-  const approval = app.showApprovalPrompt({ toolName: 'bash', reason: 'need a decision', signal: controller.signal })
+  const approval = app.showApprovalPrompt({ toolName: 'bash', reason: 'need a decision', signal: controller.signal }, true)
   await vt.waitForRender()
   assert.match(vt.getViewport().join(''), /bash|Approval/iu, 'the approval sheet owns the seat first')
 
@@ -136,7 +139,7 @@ test('Alt+W withdraws a mounted approval without deciding it and releases on clo
 test('Alt+W is inert when the control is absent or unavailable and the modal keeps its fixed keys', async () => {
   const { app, vt } = startApp()
   const controller = new AbortController()
-  const question = app.askQuestions([{ id: 'q1', question: 'Keep me?', options: [{ label: 'Proceed' }] }], controller.signal)
+  const question = app.askQuestions([{ id: 'q1', question: 'Keep me?', options: [{ label: 'Proceed' }] }], controller.signal, undefined, true)
   await vt.waitForRender()
 
   // No control installed (Direct / TSP): the key falls through to the modal,
@@ -213,6 +216,57 @@ test('withdrawPresentations removes every matching queued approval before the ac
   assert.doesNotMatch(vt.getViewport().join(''), /second/u, 'the withdrawn approval successor was never promoted')
 })
 
+test('Alt+W is inert on a continued (agent-not-blocked) question form and no hint paints', async () => {
+  const { app, vt } = startApp()
+  app.setNoAnswerNavigation({
+    available: () => true,
+    begin: () => { throw new Error('continued form must never begin a navigation hold') },
+    open: () => { throw new Error('continued form must never open the workspace') },
+  })
+  // agentInputWait defaults to FALSE: this is a continued late-answer form.
+  let onCancel: ((error: unknown) => void) | undefined
+  const cancelled = new Promise<unknown>((_resolve, reject) => { onCancel = reject })
+  const flow = app.askQuestions(
+    [{ id: 'q1', question: 'Answer later?', options: [{ label: 'Proceed' }] }],
+  )
+  flow.catch(error => onCancel?.(error))
+  await vt.waitForRender()
+  assert.match(vt.getViewport().join(''), /Answer later\?/u)
+  assert.doesNotMatch(vt.getViewport().join(''), /browse/u,
+    'a continued form must not advertise the navigation verb')
+  vt.sendInput('\x1bw')
+  await vt.waitForRender()
+  assert.match(vt.getViewport().join(''), /Answer later\?/u, 'the form is untouched after Alt+W')
+  // Alt+W was inert: settle nothing within a short window.
+  const early = await Promise.race([cancelled.then(() => 'settled', () => 'settled'), new Promise<'quiet'>(r => setTimeout(() => r('quiet'), 300))])
+  assert.equal(early, 'quiet', 'Alt+W on a continued form settles nothing')
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.doesNotMatch(vt.getViewport().join(''), /Answer later\?/u, 'Esc cancelled the continued form')
+})
+
+test('a live forwarded question paints the navigation hint only after the control is installed', async () => {
+  const { app, vt } = startApp()
+  const controller = new AbortController()
+  const outcome = settleOutcome(app.askQuestions(
+    [{ id: 'q1', question: 'Blocked?', options: [{ label: 'Proceed' }] }],
+    controller.signal,
+    undefined,
+    true,
+  ))
+  await vt.waitForRender()
+  assert.match(vt.getViewport().join(''), /Blocked\?/u)
+  // Direct (no control installed): no verb.
+  assert.doesNotMatch(vt.getViewport().join(''), /browse/u, 'Direct must not advertise the verb')
+  // Installing the control makes the hint appear on the next render.
+  app.setNoAnswerNavigation({ available: () => false, begin: () => () => {}, open: () => {} })
+  app.requestRender()
+  await vt.waitForRender()
+  assert.match(vt.getViewport().join(''), /browse/u, 'the live forwarded form advertises the verb')
+  vt.sendInput('\x1b')
+  assert.equal((await outcome).kind, 'rejected')
+})
+
 test('Alt+W is inert outside a modal, e.g. while the Session Workspace owns the seat', async () => {
   const { app, vt } = startApp()
   let beginCalls = 0
@@ -237,7 +291,7 @@ test('Alt+W is inert outside a modal, e.g. while the Session Workspace owns the 
 test('a control that opens no lease releases the hold immediately instead of stranding the editor', async () => {
   const { app, vt } = startApp()
   const controller = new AbortController()
-  const question = app.askQuestions([{ id: 'q1', question: 'Still there?', options: [{ label: 'Proceed' }] }], controller.signal)
+  const question = app.askQuestions([{ id: 'q1', question: 'Still there?', options: [{ label: 'Proceed' }] }], controller.signal, undefined, true)
   const questionOutcome = settleOutcome(question)
   await vt.waitForRender()
   let releaseCalls = 0

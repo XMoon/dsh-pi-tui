@@ -348,6 +348,7 @@ import type { SurfaceHost } from './extension/internal/surface-host.ts'
 import { InputRouter } from './tui/interaction/input-router.ts'
 import { AppActionDispatcher, type AppActionHost } from './tui/keybindings/action-dispatcher.ts'
 import { componentKeymap } from './tui/keybindings/component-keymap.ts'
+import { setNoAnswerNavigationInstalled } from './tui/interaction/question.ts'
 import { parseUserKeybindings } from './tui/keybindings/config.ts'
 import { deriveKeybindingContext } from './tui/keybindings/context.ts'
 import { APP_KEYBINDINGS, VIEWER_BLOCKED_PARENT_ACTIONS } from './tui/keybindings/definitions.ts'
@@ -1316,6 +1317,13 @@ export interface TuiQuestionAnswer {
 export interface TuiQuestionStatus {
   /** Status line rendered above the tabs; `undefined` renders none. */
   text?: string
+  /**
+   * Split-Client only: the flow is a LIVE forwarded interaction the Agent is
+   * blocked on (never a continued late-answer form). The modal-safe
+   * navigation hint paints only when this is true and the navigation control
+   * is installed.
+   */
+  navigationEligible?: boolean
   /** Fired on the FIRST real answer mutation (selection / text / skip). */
   onAnswerMutation?: () => void
   /**
@@ -25845,9 +25853,15 @@ export class TuiApp {
     }
     // The split Client's modal-safe no-answer navigation: an EXPLICIT
     // whitelist between the modal's fixed response keys above and the ordinary
-    // inspection/editor ladder. The root hold is committed before the seat is
-    // withdrawn, so no local cancel can become a Host answer.
-    if (this.noAnswerNavigation !== undefined && componentKeymap.matches(data, 'interaction.navigateWorkspace')) {
+    // inspection/editor ladder. It is enabled ONLY for a LIVE forwarded
+    // interaction (the Agent is blocked on THIS answer: a foreground
+    // Question/Approval, never a continued late-answer form, which is not part
+    // of the forwarded presentation and cannot be suspended by the hold). The
+    // root hold is committed before the seat is withdrawn, so no local cancel
+    // can become a Host answer.
+    if (this.noAnswerNavigation !== undefined
+      && this.agentInputWaitActive()
+      && componentKeymap.matches(data, 'interaction.navigateWorkspace')) {
       this.keybindings.cancelLeader()
       this.clearExitConfirmation()
       this.beginNoAnswerNavigation()
@@ -25918,6 +25932,9 @@ export class TuiApp {
    */
   setNoAnswerNavigation(control: NoAnswerNavigationControl | undefined): void {
     this.noAnswerNavigation = control
+    // The modal hint reads this flag synchronously at render time; Direct/TSP
+    // never install a control and therefore never paint the navigation verb.
+    setNoAnswerNavigationInstalled(control !== undefined)
   }
 
   /**
@@ -26059,9 +26076,16 @@ export class TuiApp {
         reject,
         signal,
         agentInputWait,
-        ...status === undefined ? {} : { status },
+        // The split navigation hint paints only for a LIVE forwarded wait
+        // (the Agent is blocked on THIS answer); a continued late-answer form
+        // or a Client-local ask never carries the fact.
+        ...status === undefined
+          ? (agentInputWait ? { status: { navigationEligible: true } } : {})
+          : {
+            status: agentInputWait ? { ...status, navigationEligible: true } : status,
+          },
       }
-      state.flow.setStatus(status)
+      state.flow.setStatus(state.status)
       if (signal?.aborted === true) {
         reject(cancellationError('question flow aborted'))
         return
