@@ -110,6 +110,11 @@ export class ScheduleWorkspaceController {
   private detail: ScheduleCatalogEntry | undefined
   private historyView: ScheduleHistoryView | undefined
   private editor: ScheduleEditorDraft | undefined
+  /** Monotonic EDITOR INSTANCE identity: two editors of the same task are
+   *  different owners, so an old write/reload cannot settle the new one. */
+  private editorToken = 0
+  /** The newest accepted `reload-latest` request; older answers are discarded. */
+  private reloadEpoch = 0
   private editorBaseline: ScheduleEditorBaseline | undefined
   private confirm: ScheduleConfirm | undefined
   /** The task a confirmed Discard must open next (a navigation that arrived
@@ -469,7 +474,9 @@ export class ScheduleWorkspaceController {
         this.notice = errorNotice(SCHEDULE_COPY.taskGone)
         this.detail = undefined
         this.selectedId = undefined
-        this.mode = 'list'
+        // Help stays open; its underlay becomes the list it now describes.
+        if (this.mode === 'help') this.helpReturn = 'list'
+        else this.mode = 'list'
         this.publish()
         this.own('schedule catalog read', () => this.read())
         return
@@ -560,6 +567,7 @@ export class ScheduleWorkspaceController {
 
   private openCreate(): void {
     if (this.busy) return
+    this.editorToken += 1
     this.pendingDetailId = undefined
     this.mode = 'editor'
     this.editorBaseline = undefined
@@ -617,6 +625,7 @@ export class ScheduleWorkspaceController {
     if (this.disposed || !this.surfaceIs('detail') || this.selectedId !== id) return
     const draft = draftFromRecord(current)
     this.mode = 'editor'
+    this.editorToken += 1
     this.editorBaseline = {
       title: current.title,
       prompt: current.prompt,
@@ -734,25 +743,33 @@ export class ScheduleWorkspaceController {
    * user's typed fields. It never merges automatically and never overwrites.
    */
   /** The page identity a Host write must still own when it settles. */
-  private surfaceStamp(): { readonly page: string; readonly selectedId: string | undefined; readonly editorId: string | undefined } {
+  private surfaceStamp(): { readonly page: string; readonly selectedId: string | undefined; readonly editorId: string | undefined; readonly editorToken: number } {
     // Help is an UNDERLAY: a write issued from the page it covers still owns
     // that page, so a receipt may settle it without closing Help.
     return {
       page: this.mode === 'help' ? (this.helpReturn ?? 'list') : this.mode,
       selectedId: this.selectedId,
       editorId: this.editor?.id,
+      editorToken: this.editorToken,
     }
   }
 
-  private sameSurface(stamp: { readonly page: string; readonly selectedId: string | undefined; readonly editorId: string | undefined }): boolean {
+  private sameSurface(stamp: { readonly page: string; readonly selectedId: string | undefined; readonly editorId: string | undefined; readonly editorToken: number }): boolean {
     const page = this.mode === 'help' ? (this.helpReturn ?? 'list') : this.mode
     return page === stamp.page
       && this.selectedId === stamp.selectedId
-      && (page !== 'editor' || this.editor?.id === stamp.editorId)
+      && (page !== 'editor' || (this.editor?.id === stamp.editorId && this.editorToken === stamp.editorToken))
   }
 
   /** The ONE controller-level mode admission table. */
   private admits(kind: ScheduleIntent['kind']): boolean {
+    // A pending Host write freezes the editor it was issued from: further typing
+    // would be silently discarded by the receipt, so the draft stays exactly the
+    // version that is being saved.
+    if (this.busy && (kind === 'set-field' || kind === 'focus-field' || kind === 'next-field'
+      || kind === 'select-timing-kind' || kind === 'toggle-weekday' || kind === 'select-target-kind'
+      || kind === 'select-target-session' || kind === 'toggle-advanced' || kind === 'save'
+      || kind === 'reload-latest')) return false
     if (kind === 'refresh' || kind === 'dismiss-notice' || kind === 'back'
       || kind === 'confirm' || kind === 'cancel') return true
     if (kind === 'open-help') return this.confirm === undefined
@@ -780,9 +797,14 @@ export class ScheduleWorkspaceController {
     const draft = this.editor
     if (draft === undefined || draft.id === undefined) return
     if (this.editorBaseline === undefined) return
+    const token = this.editorToken
+    const epoch = ++this.reloadEpoch
     try {
       const result = await this.port.view({ id: scheduleId(draft.id) })
       if (this.disposed) return
+      // Only the NEWEST reload for THIS editor instance may touch the draft or
+      // baseline: a slow older answer can never roll the visible task back.
+      if (epoch !== this.reloadEpoch || this.editorToken !== token) return
       if ('code' in result) {
         this.notice = errorNotice(SCHEDULE_COPY.taskGone)
         this.publish()
