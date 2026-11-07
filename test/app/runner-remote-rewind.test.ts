@@ -326,7 +326,9 @@ test('stale rewind: select A\'s old turn → switch away mid-loadThrough → the
   app.submitDraft()
   // The fullscreen Session Workspace covers the transcript while `/resume`
   // resolves its direct match, so "answer 6 is gone" no longer proves the
-  // switch committed. Wait for the replacement Session's own painted identity.
+  // switch committed (the old picker kept the transcript visible). Wait for
+  // the replacement Session's own painted identity, i.e. the same ordering the
+  // case always asserted: the switch has committed while loadThrough is held.
   await waitFor('B is the current subject', () =>
     vt.getViewport().join('').includes(sessionB), 20_000)
 
