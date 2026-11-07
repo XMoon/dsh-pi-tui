@@ -435,18 +435,17 @@ export class ScheduleWorkspaceController {
     // A visible Detail/History page is re-read from the authoritative Host so an
     // invalidated answer can never leave it visibly stuck on "Loading".
     if (this.surfaceIs('detail') && this.selectedId !== undefined) {
+      // Background refresh of the SAME Detail: re-read IN PLACE through the read
+      // path only. It is NOT a user navigation, so it must not retarget the
+      // selection, change the page/mode or bump the interaction-ownership epoch
+      // — an unchanged task must keep the current gesture valid (pure refresh,
+      // not a repaint that retires interaction).
       const id = this.selectedId
-      if (this.mode === 'help') {
-        // Refresh the underlay Detail IN PLACE: Help stays open because this is
-        // a background read, not a user navigation.
-        const epoch = ++this.detailEpoch
-        const openEpoch = this.openEpoch
-        const controller = new AbortController()
-        this.detailAbort = controller
-        this.own('schedule detail read', () => this.readDetail(id, epoch, openEpoch, controller))
-      } else {
-        this.own('schedule detail read', async () => { this.openDetail(id) })
-      }
+      const epoch = ++this.detailEpoch
+      const openEpoch = this.openEpoch
+      const controller = new AbortController()
+      this.detailAbort = controller
+      this.own('schedule detail read', () => this.readDetail(id, epoch, openEpoch, controller))
     }
   }
 
@@ -1285,7 +1284,9 @@ export class ScheduleWorkspaceController {
     if (rows.length === 0) return
     const current = rows.findIndex(row => row.id === this.selectedId)
     const next = (current < 0 ? 0 : current + delta + rows.length) % rows.length
-    this.selectedId = rows[next].id
+    const nextId = rows[next].id
+    if (nextId === this.selectedId) return
+    this.selectedId = nextId
     this.bumpPage()
     if (this.mode === 'detail') this.detail = undefined
     this.publish()

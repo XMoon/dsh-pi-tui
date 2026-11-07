@@ -259,6 +259,27 @@ test('a gesture commits only on the identity it was pressed on', async () => {
       },
     },
     {
+      name: 'background schedule/changed with unchanged facts keeps the gesture',
+      setup: async life => {
+        life.controller.dispatch({ kind: 'open-detail', id: 'task-a' })
+        await flush()
+      },
+      press: life => at(life, 'Space pause/resume'),
+      mutate: async life => {
+        // A Host notification for ANOTHER task: the controller re-reads the
+        // current Detail in place; A's status/revision are unchanged.
+        life.port.invalidate()
+        await flush()
+        life.controller.dispatch({ kind: 'refresh' })
+        await flush()
+      },
+      release: life => at(life, 'Space pause/resume'),
+      assertOutcome: life => {
+        assert.equal(life.edits.length, 1, 'the unchanged background refresh does NOT kill the gesture')
+        assert.equal(life.edits[0]?.id, 'task-a')
+      },
+    },
+    {
       name: 'modal takeover → cancel → stale release',
       setup: async life => {
         life.controller.dispatch({ kind: 'open-detail', id: 'task-a' })
