@@ -1306,6 +1306,22 @@ test('switching sessions tears down the Job status viewer with its Task Browser'
   assert.equal(jobWorkspaceOpen(view()), true, 'the Job workspace owns the surface')
   assert.ok(view().includes('Esc back'), `the Job workspace shows Esc back:\n${view()}`)
 
+  // A fullscreen Session Workspace lease is mutually exclusive with the open
+  // Job workspace: `/resume` is refused and the Task Center stack survives.
+  const refused = await resume({ rawInput: sessionB.id }) as { kind: string; text?: string }
+  await settle()
+  await vt.waitForRender()
+  assert.equal(refused.kind, 'error', 'a /resume while the Job workspace is leased is refused')
+  assert.match(refused.kind === 'error' ? refused.text ?? '' : '', /session workspace unavailable/u)
+  assert.equal(app.overlayGraphState().handles, 1, 'the refused switch keeps the Task Center stack')
+  assert.equal(jobWorkspaceOpen(view()), true, 'the refused switch keeps the Job workspace')
+
+  // Leave the Job workspace (the Task Browser is restored), then the SAME
+  // /resume switches and tears the stack down through the session-switch path.
+  input('\x1b')
+  await settle()
+  await vt.waitForRender()
+  assert.ok(view().includes('↑↓ select'), `the Task Browser is restored:\n${view()}`)
   await resume({ rawInput: sessionB.id })
   await settle()
   await vt.waitForRender()

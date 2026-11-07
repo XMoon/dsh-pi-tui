@@ -131,10 +131,13 @@ production default; TSP keeps the experimental opt-in described in
   (listed main-session rows only). The first listed main-session match starts the
   switch without a second list; a miss, including a subagent-only target, becomes
   the initial global query. A manual Browser query entered while the list loads
-  takes precedence and suppresses a matching typed `/resume` switch. The PiTui
-  Picker presents the same `SessionBrowserReadOwner` snapshot, so the main-only
-  corpus, matcher and query precedence are the rule on every renderer: the PiTui
-  side owns only its physical Picker seat, never a second Reader or query owner.
+  takes precedence and suppresses a matching typed `/resume` switch. The PiTUI
+  renderer consumes the SAME `SessionBrowserReadOwner` through its own
+  fullscreen Session Workspace Presenter (`TuiApp.openSessionWorkspace` +
+  `src/tui/panels/session-workspace-panel.ts`), so the main-only corpus, matcher
+  and query precedence are the rule on every renderer; the PiTUI side owns only
+  its physical screen and Client-local presentation, never a second Reader or
+  query owner. This native TSP Presenter is unchanged.
 - Footer order is Close, Details, Resume. Resume keeps the `primary` action
   designation in every state; it is enabled only for a listed, non-current
   selection while no switch is pending. Loading, empty, unavailable, error, no

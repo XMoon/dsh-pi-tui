@@ -27,6 +27,7 @@ import { TuiApp, type TaskBrowserHandle, type TuiAppOptions } from '../../src/tu
 import { OutputViewerPanel } from '../../src/tui/panels/output-viewer-panel.ts'
 import { JobInspectorPanel } from '../../src/tui/panels/job-inspector-panel.ts'
 import { SettingsWorkspacePanel, type SettingsWorkspaceSource } from '../../src/tui/panels/settings-workspace-panel.ts'
+import { SessionWorkspacePanel } from '../../src/tui/panels/session-workspace-panel.ts'
 import { pituiDisplaySeam } from '../../src/app/surface/display-seam-pitui.ts'
 import { TaskBrowserPanel } from '../../src/tui/panels/task-panel.ts'
 import { createTaskRuntime, type TaskRuntime, type TaskSurfaceSource } from '../../src/app/surface/task-runtime.ts'
@@ -1452,6 +1453,79 @@ test('TuiApp.dispose releases a leased Settings workspace exactly once', async (
   assert.equal(settingsScreenOpen(app), false)
   app.dispose()
   assert.equal(closes, 1, 'a repeated dispose cannot double-notify')
+})
+
+test('the Session Workspace uses the ONE lease latch: mutual exclusion, pre-emption and exactly one release', async () => {
+  const { vt, app } = startApp()
+  let closes = 0
+  const subject = { currentSessionId: 'session-a', currentCwd: '/ws', isCurrent: () => true }
+  const open = () => app.openSessionWorkspace({
+    subject,
+    onQueryChange: () => {},
+    onResume: () => {},
+    onClose: () => { closes += 1 },
+    initialMode: 'browse',
+    initialBrowseScope: 'all',
+  })
+
+  // The paused surface keeps the SAME object tree, focus and draft.
+  app.setDraft('draft-must-survive')
+  const editorBefore = app.focusedComponentForTest()
+  const first = open()
+  await vt.waitForRender()
+  assert.equal(app.focusedComponentForTest() instanceof SessionWorkspacePanel, true,
+    'the Session Workspace panel is the physical keyboard owner')
+  assert.ok(view(vt).includes('Sessions'))
+  // A different workspace kind is refused while Sessions owns the ONE lease.
+  assert.throws(
+    () => app.openSettingsWorkspace(settingsWorkspaceSource(), { aboutVersionFacts: ABOUT_VERSION_FACTS }),
+    /workspace screen is already leased/,
+  )
+
+  // User Esc closes the lease once and restores the SAME editor/focus/draft
+  // without touching the user's fullscreen preference.
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.equal(closes, 1, 'the user close notifies the owner exactly once')
+  assert.equal(app.focusedComponentForTest(), editorBefore, 'the same editor instance is restored')
+  assert.equal(app.getDraft(), 'draft-must-survive', 'the draft survives the workspace round trip')
+  assert.equal(app.isFullscreen(), false, 'the workspace never rewrites the user display preference')
+  assert.ok(!view(vt).includes('Sessions'), 'no Session chrome survives the close')
+
+  // An owner-origin close suppresses the owner notification; a newer lease wins.
+  const second = open()
+  await vt.waitForRender()
+  second.close()
+  await vt.waitForRender()
+  assert.equal(closes, 1, 'an owner-origin close never re-enters the owner')
+  const third = open()
+  await vt.waitForRender()
+  assert.ok(view(vt).includes('Sessions'), 'the newer Session lease owns the screen')
+
+  // A blocking Question closes the lease BEFORE claiming the seat, exactly once.
+  const questions = app.askQuestions([{ id: 'q1', question: 'proceed?', options: [{ label: 'yes' }] }])
+  await vt.waitForRender()
+  assert.equal(closes, 2, 'the blocking owner pre-empts exactly once')
+  assert.ok(view(vt).includes('proceed?'), 'the question owns the restored surface')
+  assert.ok(!view(vt).includes('Sessions'), 'no Session chrome survives behind the question')
+  assert.throws(() => open(), /blocking modal owns the surface/,
+    'a new Session lease is refused while the blocking owner owns the seat')
+
+  vt.sendInput('\x1b')
+  await questions.catch(() => {})
+  await vt.waitForRender()
+  assert.equal(closes, 2, 'the refused lease never resurrects')
+
+  // stop() releases a live lease exactly once; a stale closer is inert.
+  const fourth = open()
+  await vt.waitForRender()
+  app.stop()
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(closes, 3, 'stop releases the live Session lease exactly once')
+  fourth.close()
+  third.close()
+  second.close()
+  assert.equal(closes, 3, 'a repeated/stale close is a strict no-op')
 })
 
 test('a retired Settings lease cannot close a newer lease opened synchronously by onClose', async () => {

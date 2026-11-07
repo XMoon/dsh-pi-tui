@@ -40,7 +40,7 @@ const REFUSED = 'session-format-newer'
 /** The OFFICIAL refusal text the JSONL persistence throws for a newer format. */
 const REFUSAL = 'stored Session uses newer format v5; this build writes v4'
 
-for (const [columns, rows] of [[120, 40], [80, 10], [44, 20]] as const) test(`the real Session Picker format refusal at ${columns}x${rows}`, async t => {
+for (const [columns, rows] of [[120, 40], [80, 10], [44, 20]] as const) test(`the real Session Workspace format refusal at ${columns}x${rows}`, async t => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-format-refusal-')
   const previousHome = process.env.DSH_HOME
@@ -76,19 +76,27 @@ for (const [columns, rows] of [[120, 40], [80, 10], [44, 20]] as const) test(`th
   const view = (): string => vt.getViewport().map(line => line.replace(/\u001b\[[0-9;]*m/g, '')).join('\n')
   await vt.waitForRender()
 
-  // Open the real picker through the real command path.
+  // Open the real fullscreen Session Workspace through the real command path.
   vt.sendInput('/sessions')
   await settle()
   await vt.waitForRender()
   vt.sendInput('\r')
   await settle()
   await vt.waitForRender()
-  // The picker lists BOTH stored Sessions (short display ids) in the current
-  // directory scope; the newer (refused) row sorts first.
+  // The workspace lists BOTH stored Sessions (short display ids); the newer
+  // (refused) row sorts first, so it is the initial selection.
+  await (async (): Promise<void> => {
+    const deadline = Date.now() + 5_000
+    while (!view().includes('Recent sessions · 2')) {
+      if (Date.now() > deadline) throw new Error(`the workspace roster: ${view()}`)
+      await new Promise<void>(resolve => setTimeout(resolve, 10))
+      await vt.waitForRender()
+    }
+  })()
   for (const line of vt.getViewport()) {
     assert.ok(visibleWidth(line) <= columns, `no frame row overflows ${columns} cells: ${JSON.stringify(line)}`)
   }
-  assert.match(view(), /2\/2/u, `the picker lists the stored Sessions:\n${view()}`)
+  assert.match(view(), /Recent sessions · 2/u, `the workspace lists the stored Sessions:\n${view()}`)
   if (columns >= 120) {
     assert.match(view(), /format-n/u)
     assert.match(view(), /format-c/u)
@@ -110,27 +118,13 @@ for (const [columns, rows] of [[120, 40], [80, 10], [44, 20]] as const) test(`th
   }).currentNotice?.()?.text
   assert.equal(noticeText?.includes(REFUSAL), true,
     `the refusal notice is the official message, got: ${String(noticeText)}`)
-  if (columns >= 120) {
-    assert.ok(after.includes(REFUSAL), `the refusal text reaches the user's surface:\n${after}`)
-  } else {
-    const rows = after.split('\n').map(line => line.trim())
-    const reasonPrefix = REFUSAL.slice(0, 20)
-    if (columns >= 80) {
-      // The notice LINE fits the reason's opening words (plus its own prefix).
-      assert.ok(rows.some(row => row.includes(reasonPrefix)),
-        `a painted row carries the opening of the official refusal at ${columns} columns:\n${after}`)
-    } else {
-      // At the 44-column floor the notice line is clipped to a short fragment:
-      // assert that a fragment of the official reason IS painted (the full text
-      // is asserted on the production notice slot above), instead of pretending
-      // the whole sentence is visible.
-      assert.ok(rows.some(row => row.length >= 3 && REFUSAL.includes(row)),
-        `the notice row still paints a fragment of the official refusal at ${columns} columns:\n${after}`)
-    }
-  }
+  assert.ok(after.includes('Sessions'), `a failed resume keeps the SAME workspace:\n${after}`)
+  const reasonPrefix = REFUSAL.slice(0, 12)
+  assert.ok(after.split('\n').some(line => line.includes(reasonPrefix)),
+    `the painted workspace carries the opening of the official refusal at ${columns} columns:\n${after}`)
   // The unreadable Session's own content is never mounted as if it had opened.
   assert.doesNotMatch(after, /stored answer/u, 'the refused log content is never presented')
-  // The failed transition leaves a sessionless surface with the explicit
-  // refusal (this harness cannot prove the runner restores a previous owner
-  // after a failed resume — recorded as NOT_VERIFIED in the S2 evidence).
+  // The refused row stays the selected row in the still-open workspace; the
+  // full official message remains the production notice (asserted above).
+  assert.match(after, /format-n/u)
 })

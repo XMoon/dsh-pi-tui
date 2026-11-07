@@ -779,8 +779,20 @@ test('a main-Session switch with a Stop in flight drops the stale settlement and
     fx.killControl.resolveHeld !== undefined, 10_000)
   const noticesBefore = fx.notices.length
 
-  // Switch the viewed main Session while the observation stream is open and the
-  // Stop settlement is still in flight.
+  // A fullscreen Session Workspace lease is mutually exclusive with the Job
+  // workspace: `/resume` while the Job detail owns the screen is refused and
+  // the Job observation stays intact. This is the M5-U-C lease contract; the
+  // switch itself is re-issued after the user leaves the Job workspace.
+  submit(app, `/resume ${MAIN_B_ID}`)
+  await waitFor('the refused resume is visible', () =>
+    fx.notices.some(notice => notice.includes('session workspace unavailable')), 10_000)
+  assert.ok(jobWorkspacePainted(view()), 'a refused /resume keeps the Job workspace')
+  assert.equal(view().includes('mainb answer 1'), false, 'a refused /resume never switches the Session')
+
+  // Leave the Job workspace (the Task Browser is restored), then switch while
+  // the Stop settlement is STILL in flight.
+  fx.fixture.vt.sendInput('\x1b')
+  await waitFor('the Task Browser is restored', () => view().includes('↑↓ select'), 10_000)
   submit(app, `/resume ${MAIN_B_ID}`)
   await waitFor('the replacement main session hydrated', () => view().includes('mainb answer 1'), 20_000)
   assert.equal(app.statusStore.snapshot().view?.subject?.kind, 'main',
