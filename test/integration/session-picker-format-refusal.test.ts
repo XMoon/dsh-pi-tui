@@ -125,6 +125,8 @@ for (const [columns, rows] of [[120, 40], [80, 10], [44, 20]] as const) test(`th
   // The unreadable Session's own content is never mounted as if it had opened.
   assert.doesNotMatch(after, /stored answer/u, 'the refused log content is never presented')
   // The refused row stays the selected row in the still-open workspace; the
-  // full official message remains the production notice (asserted above).
-  assert.match(after, /format-n/u)
+  // full official message remains the production notice (asserted above). The
+  // short-id row label is width-budgeted (the npm-copy cwd is long enough that
+  // 44 columns only paints its prefix), so only the roomy frame pins the id.
+  if (columns >= 120) assert.match(after, /format-n/u)
 })
