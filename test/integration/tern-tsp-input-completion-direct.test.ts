@@ -65,6 +65,7 @@ import { INPUT_COMPLETION_MAX_ROWS } from '../../src/tui/tsp/input-completion.ts
 import { readImageFileUninjected, setImageReadForTest } from '../../src/client/media/image/intake.ts'
 import { DraftImageStore } from '../../src/client/media/image/draft-store.ts'
 import { DraftFileStore } from '../../src/client/media/attachment/file-draft.ts'
+import { TRANSCRIPT_SAVE_UNAVAILABLE_TEXT } from '../../src/app/command/tsp-capability.ts'
 
 /** The seat's own painted-row window: read the production constant, never a
  *  copy that can drift from the surface it is asserting on. */
@@ -169,11 +170,15 @@ function composerCursor(fixture: DirectTspFixture): number {
  * exist before a submission can prove THAT submission produced the refusal;
  * searching the accumulated output for the phrase cannot.
  */
-function refusalNoticeIds(fixture: DirectTspFixture): string[] {
+function noticeIdsWith(fixture: DirectTspFixture, text: string): string[] {
   return wireNodes(fixture.pane)
     .filter(node => /^dock\.notice-n\d+$/u.test(node.id)
-      && String(node.p.text ?? '').includes(TSP_BUILTIN_REFUSAL))
+      && String(node.p.text ?? '').includes(text))
     .map(node => node.id)
+}
+
+function refusalNoticeIds(fixture: DirectTspFixture): string[] {
+  return noticeIdsWith(fixture, TSP_BUILTIN_REFUSAL)
 }
 
 /** Every file the real Client-local attachment store holds under this work root. */
@@ -734,6 +739,35 @@ test('a TUI builtin this renderer cannot run is never offered as a bare candidat
     assert.equal(recorder.calls(), 0, 'a refused builtin never became a business submission')
     assert.equal(fixture.modelCalls(), 0, 'a refused builtin never reached the model')
     assert.deepEqual(historyRows(fixture.workRoot), [], 'a refused builtin persisted no recall row')
+  } finally {
+    recorder.detach()
+    // reason: fixture.settle() awaits ownership cleanup, not a timer (receiver-blind guard).
+    await fixture.settle()
+  }
+})
+
+test('a sessionless TSP /transcript is refused with the fixed save-dialog copy, restores the draft and starts no save', async (t) => {
+  const life = testLifecycle(t)
+  const fixture = await createDirectTspFixture(life, { deltas: ['IC-TRANSCRIPT'], composerActions: true })
+  const recorder = fixture.recordPrompts(() => {})
+  try {
+    await waitForInputDelivery(fixture.pane)
+    const seen = new Set(noticeIdsWith(fixture, TRANSCRIPT_SAVE_UNAVAILABLE_TEXT))
+    await submitCommand(fixture, '/transcript')
+    // A NEW notice id carrying the plan's fixed copy proves THIS submission was
+    // really refused by the post-classification TSP admission (the typed handler
+    // never runs on a renderer with no save dialog).
+    await waitFor('the fixed /transcript refusal notice', () =>
+      noticeIdsWith(fixture, TRANSCRIPT_SAVE_UNAVAILABLE_TEXT).some(id => !seen.has(id)), 25_000)
+    await waitFor('the refused /transcript draft is restored', () => composerText(fixture) === '/transcript', 25_000)
+    // No Session means no captured originating Agent and therefore no
+    // post-success artifact workflow: the refusal happens before ensureSession.
+    assert.deepEqual(await sessionHeaders(fixture), [], 'the refused /transcript created no Session')
+    assert.equal(recorder.calls(), 0, 'a refused builtin never became a business submission')
+    assert.equal(fixture.modelCalls(), 0, 'a refused builtin never reached the model')
+    assert.deepEqual(historyRows(fixture.workRoot), [], 'a refused builtin persisted no recall row')
+    assert.equal(fixture.pane.output.text().includes(TSP_BUILTIN_REFUSAL), false,
+      'the generic TSP capability copy is not used for /transcript')
   } finally {
     recorder.detach()
     // reason: fixture.settle() awaits ownership cleanup, not a timer (receiver-blind guard).

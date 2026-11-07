@@ -35,6 +35,15 @@
 import type { CommandLineClassification } from '../../domain/command/policy.ts'
 
 /**
+ * S5-PR3: the ONE fixed refusal copy for `/transcript` on a renderer that
+ * mounts no Client-local save dialog. The typed handler never runs on the TSP
+ * renderer (the pre-admission below refuses every PiTui-only builtin), so the
+ * TSP admission emits the SAME copy the handler would return; keeping one
+ * constant prevents the pre-admission and the handler text from drifting.
+ */
+export const TRANSCRIPT_SAVE_UNAVAILABLE_TEXT = 'transcript file save is unavailable on this renderer'
+
+/**
  * The TUI builtins the TSP renderer can execute without any PiTui chrome.
  * `/quit` is `/exit`'s canonical alias (the runner registers both); both
  * route the EXISTING exit orchestration.
