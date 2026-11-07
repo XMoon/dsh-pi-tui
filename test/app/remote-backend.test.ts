@@ -15,11 +15,27 @@ import { createRemoteBackendRuntime } from '../../src/app/remote/runtime.ts'
 import type { BackendKind } from '../../src/runtime/backend.ts'
 
 test('the Remote backend advertises exactly its implemented capabilities', () => {
-  const parts = {
-    subagent: {}, sessionReader: {}, pendingInputReader: {}, sessionWriter: {},
-    sessionLifecycle: {}, interaction: {}, catalog: {}, config: {}, hostFile: {},
-    sessionArchive: {}, sessionMarkdown: {}, hostCommand: {}, pluginManager: {}, jobObservation: {},
-  } as unknown as RemoteBackendParts
+  const parts: RemoteBackendParts = {
+    subagent: {} as RemoteBackendParts['subagent'],
+    sessionReader: {} as RemoteBackendParts['sessionReader'],
+    pendingInputReader: {} as RemoteBackendParts['pendingInputReader'],
+    sessionWriter: {} as RemoteBackendParts['sessionWriter'],
+    sessionLifecycle: {} as RemoteBackendParts['sessionLifecycle'],
+    interaction: {} as RemoteBackendParts['interaction'],
+    catalog: {} as RemoteBackendParts['catalog'],
+    config: {} as RemoteBackendParts['config'],
+    hostFile: {} as RemoteBackendParts['hostFile'],
+    sessionArchive: {} as RemoteBackendParts['sessionArchive'],
+    sessionMarkdown: {} as RemoteBackendParts['sessionMarkdown'],
+    hostCommand: {} as RemoteBackendParts['hostCommand'],
+    pluginManager: {} as RemoteBackendParts['pluginManager'],
+    jobObservation: {} as RemoteBackendParts['jobObservation'],
+    hostUserShell: {} as RemoteBackendParts['hostUserShell'],
+    deliveredFileRead: {} as RemoteBackendParts['deliveredFileRead'],
+    webAccess: {} as RemoteBackendParts['webAccess'],
+    sessionWorkspaceFacts: {} as RemoteBackendParts['sessionWorkspaceFacts'],
+    schedule: {} as RemoteBackendParts['schedule'],
+  }
   const backend = createRemoteBackend(parts)
   assert.equal(backend.kind, 'remote')
   assert.deepEqual([...backend.capabilities].sort(), [...REMOTE_IMPLEMENTED_CAPABILITIES].sort())
@@ -31,6 +47,7 @@ test('the Remote backend advertises exactly its implemented capabilities', () =>
   assert.equal(backend.interaction, parts.interaction)
   assert.equal(backend.sessionArchive, parts.sessionArchive)
   assert.equal(backend.sessionMarkdown, parts.sessionMarkdown)
+  assert.equal(backend.schedule, parts.schedule, 'S5-PR4: the required Schedule port is the very adapter handed in')
 })
 
 test('BackendKind accepts remote while Direct stays the production default', () => {

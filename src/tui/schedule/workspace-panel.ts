@@ -78,10 +78,8 @@ import {
 } from '../presentation/action-bar.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { color } from '../theme/runtime.ts'
+import { formatKeyId } from '../keybindings/hints.ts'
 
-/** The frozen product minimum. Below it the panel paints only the size gate. */
-export const SCHEDULE_MIN_COLUMNS = 60
-export const SCHEDULE_MIN_ROWS = 12
 /** The two-column layout boundary. */
 export const SCHEDULE_WIDE_COLUMNS = 120
 export const SCHEDULE_WIDE_ROWS = 30
@@ -93,18 +91,18 @@ const DETAIL_LABEL_WIDTH = 16
 const EDITOR_FACT_LABEL_WIDTH = 20
 
 /** The responsive shape of one Schedule frame. */
-export type ScheduleWorkspaceLayout = 'too-small' | 'single' | 'wide'
+export type ScheduleWorkspaceLayout = 'single' | 'wide'
 
 /**
- * Derive the responsive layout from the LIVE terminal size. This is the ONE
- * boundary: `too-small` below 60×12, two columns at ≥120×≥30, otherwise the
- * single column.
+ * Derive the responsive layout from the LIVE terminal size. There is NO
+ * minimum-size refusal gate (design-language §8): the two-column layout needs
+ * ≥120×≥30, every narrower or shorter terminal keeps the fully interactive
+ * single column and degrades its decoration instead.
  */
 export function scheduleWorkspaceLayout(columns: number, rows: number): ScheduleWorkspaceLayout {
   const cols = Math.floor(columns)
   const lines = Math.floor(rows)
-  if (!Number.isFinite(cols) || !Number.isFinite(lines)) return 'too-small'
-  if (cols < SCHEDULE_MIN_COLUMNS || lines < SCHEDULE_MIN_ROWS) return 'too-small'
+  if (!Number.isFinite(cols) || !Number.isFinite(lines)) return 'single'
   return cols >= SCHEDULE_WIDE_COLUMNS && lines >= SCHEDULE_WIDE_ROWS ? 'wide' : 'single'
 }
 
@@ -243,6 +241,10 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
   /** The same binding facts for the focused editor text field. */
   private editorBaseline: string | undefined
   private editorDispatched: string | undefined
+  /** The raw multi-line buffer of the focused RRULE field (newlines preserved). */
+  private rruleDraft: string | undefined
+  /** The exact value this panel last dispatched for the RRULE field. */
+  private rruleDispatched: string | undefined
 
   constructor(deps: ScheduleWorkspacePanelDeps) {
     this.deps = deps
@@ -295,6 +297,7 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     this.editorFieldId = undefined
     this.editorBaseline = undefined
     this.editorDispatched = undefined
+    this.rruleDraft = undefined
     this.searchBaseline = undefined
     this.searchDispatched = undefined
     this.searchInput.focused = false
@@ -321,10 +324,6 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
 
   handleInput(data: string): void {
     if (this.disposed) return
-    if (this.currentLayout() === 'too-small') {
-      if (matchesKey(data, 'escape')) this.deps.close()
-      return
-    }
     if (this.snapshot.confirm !== undefined) {
       this.handleConfirmInput(data)
       return
@@ -379,12 +378,10 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
       this.deps.dispatch({ kind: 'move', delta: 1 })
       return
     }
-    if (matchesKey(data, 'tab')) {
-      this.rotateFocus(1)
-      return
-    }
-    if (matchesKey(data, 'shift+tab')) {
-      this.rotateFocus(-1)
+    if (matchesKey(data, 'tab') || matchesKey(data, 'shift+tab')) {
+      // The pane focus rotation is the WIDE layout's; a single column has no
+      // second pane to focus without leaving the screen.
+      if (this.currentLayout() === 'wide') this.rotateFocus(matchesKey(data, 'tab') ? 1 : -1)
       return
     }
     if (matchesKey(data, '/')) {
@@ -429,6 +426,10 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
   }
 
   private handleDetailInput(data: string): void {
+    if (matchesKey(data, '?')) {
+      this.deps.dispatch({ kind: 'open-help' })
+      return
+    }
     if (matchesKey(data, 'escape')) {
       this.deps.dispatch({ kind: 'back' })
       return
@@ -459,6 +460,10 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
   }
 
   private handleHistoryInput(data: string): void {
+    if (matchesKey(data, '?')) {
+      this.deps.dispatch({ kind: 'open-help' })
+      return
+    }
     if (matchesKey(data, 'escape')) {
       this.deps.dispatch({ kind: 'back' })
       return
@@ -475,6 +480,10 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
   private handleEditorInput(data: string): void {
     const draft = this.snapshot.editor
     if (draft === undefined) return
+    if (matchesKey(data, '?')) {
+      this.deps.dispatch({ kind: 'open-help' })
+      return
+    }
     if (matchesKey(data, 'escape')) {
       this.deps.dispatch({ kind: 'back' })
       return
@@ -493,6 +502,13 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
       this.deps.requestRender()
       return
     }
+    const focused = focusedField(draft)
+    if (focused?.id === 'timing-rrule') {
+      // The official RRULE input is MULTI-LINE raw text: Enter inserts a line,
+      // Backspace deletes, printable input (a paste included) appends verbatim.
+      this.handleRruleInput(draft, focused.value, data)
+      return
+    }
     if (matchesKey(data, 'enter')) {
       this.activateField(draft)
       return
@@ -507,6 +523,19 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
       this.deps.dispatch({ kind: 'set-field', fieldId: field.id, value: next })
       this.deps.requestRender()
     }
+  }
+
+  private handleRruleInput(draft: ScheduleEditorDraft, current: string, data: string): void {
+    const buffer = this.rruleDraft ?? current
+    let next: string
+    if (matchesKey(data, 'enter')) next = `${buffer}\n`
+    else if (matchesKey(data, 'backspace') || matchesKey(data, 'delete')) next = buffer.slice(0, -1)
+    else if (/^[\x20-\x7e\n]+$/u.test(data)) next = `${buffer}${data}`
+    else return
+    this.rruleDraft = next
+    this.rruleDispatched = next
+    this.deps.dispatch({ kind: 'set-field', fieldId: 'timing-rrule', value: next })
+    this.deps.requestRender()
   }
 
   private handleHelpInput(data: string): void {
@@ -679,14 +708,6 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     const rows = Math.max(1, Math.floor(this.deps.rows()))
     const columns = Math.max(1, Math.floor(this.deps.columns()))
     const layout = scheduleWorkspaceLayout(Math.min(paintedWidth, columns), rows)
-    if (layout === 'too-small') {
-      this.frame = undefined
-      this.paintedConfirm = undefined
-      return [
-        color.textStrong(truncateToWidth('Terminal too small (60×12 required)', paintedWidth, '…', false)),
-        color.textMuted(truncateToWidth('Esc close', paintedWidth, '…', false)),
-      ]
-    }
     this.syncSearchInput()
     this.syncEditorInput()
     const snapshot = this.snapshot
@@ -696,10 +717,17 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
 
     const lines: string[] = []
     const regions: PaintedRegion[] = []
-    const bodyHeight = Math.max(0, rows - 4)
     this.paintTitleRow(lines, regions, paintedWidth)
     this.paintFilterRow(lines, regions, paintedWidth, layout)
     this.paintSearchRow(lines, regions, paintedWidth)
+    // A stale/error catalog is a fact about EVERY page: the detail and history
+    // snapshots behind it were read before the invalidation, so the banner is
+    // painted above the body instead of only inside the list.
+    const banner = this.listBanner()
+    if (banner !== undefined) {
+      lines.push(banner.paint(truncateToWidth(sanitizedPhysicalLine(banner.text), paintedWidth, '…', false)))
+    }
+    const bodyHeight = Math.max(0, rows - 4 - (banner === undefined ? 0 : 1))
 
     if (snapshot.confirm !== undefined) {
       this.paintSingleBody(lines, regions, paintedWidth, bodyHeight, this.confirmBody(snapshot.confirm, paintedWidth), 0)
@@ -729,9 +757,9 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     if (this.snapshot.mode === 'list' && this.snapshot.confirm === undefined) {
       segments.push(
         { plain: '  ' },
-        { plain: '[N] New', paint: color.textMuted, hit: { kind: 'action', action: 'new' } },
+        { plain: 'New [N]', paint: color.textMuted, hit: { kind: 'action', action: 'new' } },
         { plain: '  ' },
-        { plain: '[R] Refresh', paint: color.textMuted, hit: { kind: 'action', action: 'refresh' } },
+        { plain: 'Refresh [R]', paint: color.textMuted, hit: { kind: 'action', action: 'refresh' } },
       )
     }
     this.pushSegments(lines, regions, width, segments)
@@ -749,6 +777,7 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
       { filter: 'paused', label: 'Paused' },
       { filter: 'ended', label: 'Ended' },
     ]
+    const interactive = this.snapshot.mode === 'list' && this.snapshot.confirm === undefined
     const segments: CellSegment[] = []
     if (layout === 'wide' && this.focusPane === 'filter') {
       segments.push({ plain: '> ', paint: color.primary })
@@ -761,7 +790,7 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
         paint: this.snapshot.filter === entry.filter
           ? text => color.textStrong(text, 'primary')
           : color.textDim,
-        hit: { kind: 'filter', filter: entry.filter },
+        ...(interactive ? { hit: { kind: 'filter', filter: entry.filter } } : {}),
       })
     }
     this.pushSegments(lines, regions, width, segments)
@@ -776,8 +805,8 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     const segments: CellSegment[] = []
     if (focused) segments.push({ plain: prefix, paint: color.primary })
     segments.push({ plain: label, paint: color.textDim })
-    if (focused) {
-      this.searchInput.focused = this._focused
+    if (focused && this._focused) {
+      this.searchInput.focused = true
       const raw = (this.searchInput.render(budget)[0] ?? '').replaceAll(CURSOR_MARKER, '')
       segments.push({ plain: query, raw })
     } else {
@@ -787,7 +816,9 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     }
     const row = lines.length
     this.pushSegments(lines, regions, width, segments)
-    regions.push({ row, from: 0, to: width, hit: { kind: 'search' } })
+    if (this.snapshot.mode === 'list' && this.snapshot.confirm === undefined) {
+      regions.push({ row, from: 0, to: width, hit: { kind: 'search' } })
+    }
   }
 
   private paintSingleMode(
@@ -890,8 +921,6 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
   private listBody(): readonly BodyLine[] {
     const snapshot = this.snapshot
     const content: BodyLine[] = []
-    const banner = this.listBanner()
-    if (banner !== undefined) content.push({ segments: [{ plain: banner.text, paint: banner.paint }] })
     if (snapshot.notice !== undefined) content.push(this.noticeLine(snapshot.notice))
     if (snapshot.rows.length === 0) {
       const empty = snapshot.total > 0
@@ -993,9 +1022,12 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
   private historyBody(width: number): readonly BodyLine[] {
     const out: BodyLine[] = [{ segments: [{ plain: 'Delivery history', paint: color.textStrong }] }]
     const history = this.snapshot.history
-    if (history === undefined || history.status === 'loading') {
+    if (history === undefined) {
       out.push({ segments: [{ plain: 'Loading deliveries…', paint: color.textDim }] })
       return out
+    }
+    if (history.status === 'loading') {
+      out.push({ segments: [{ plain: 'Loading deliveries…', paint: color.textDim }] })
     }
     if (history.status === 'error') {
       out.push({
@@ -1004,13 +1036,9 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
           paint: color.error,
         }],
       })
-      this.historyNotes(history, out)
-      return out
     }
-    if (history.records.length === 0) {
+    if (history.records.length === 0 && history.status === 'ready') {
       out.push({ segments: [{ plain: 'No saved deliveries.', paint: color.textDim }] })
-      this.historyNotes(history, out)
-      return out
     }
     const valueWidth = Math.max(1, width - DETAIL_LABEL_WIDTH - 1)
     for (const [index, record] of history.records.entries()) {
@@ -1025,8 +1053,8 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
           })
         }
       }
-      fact('Scheduled', `${formatLocalInstant(record.scheduledAt)} local`)
-      fact('Delivered', `${formatLocalInstant(record.deliveredAt)} local`)
+      fact('Scheduled', `${formatLocalInstant(record.scheduledAt)} UTC`)
+      fact('Delivered', `${formatLocalInstant(record.deliveredAt)} UTC`)
       fact('Message', record.messageId)
       if (record.prompt !== undefined) {
         for (const [partIndex, part] of wrapTextWithAnsi(sanitizedPhysicalLine(record.prompt), valueWidth).entries()) {
@@ -1096,8 +1124,44 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
         { plain: selected ? '> ' : '  ', paint: selected ? color.primary : undefined },
         { plain: fit(field.label, EDITOR_LABEL_WIDTH), paint: color.textDim },
       ]
-      if (selected && isEditorTextInput(field)) {
-        this.editorInput.focused = this._focused
+      if (field.id === 'timing-rrule') {
+        // Multi-line raw rule: the focused field paints one line per stored
+        // `\n` (the value keeps them; only the display wraps).
+        const buffer = selected && this._focused ? (this.rruleDraft ?? field.value) : field.value
+        const lines = buffer.split('\n')
+        if (selected && this._focused) {
+          for (const [lineIndex, value] of lines.entries()) {
+            const isLast = lineIndex === lines.length - 1
+            out.push({
+              segments: lineIndex === 0
+                ? [
+                    { plain: '> ', paint: color.primary },
+                    { plain: fit(field.label, EDITOR_LABEL_WIDTH), paint: color.textDim },
+                    { plain: sanitizedPhysicalLine(value), paint: color.textStrong },
+                    ...(isLast ? [{ plain: '▏', paint: color.primary }] : []),
+                  ]
+                : [
+                    { plain: '  ' },
+                    { plain: ' '.repeat(EDITOR_LABEL_WIDTH) },
+                    { plain: sanitizedPhysicalLine(value), paint: color.textStrong },
+                    ...(isLast ? [{ plain: '▏', paint: color.primary }] : []),
+                  ],
+              ...(lineIndex === 0 ? { fieldId: field.id } : {}),
+            })
+          }
+          continue
+        }
+        segments.push({
+          plain: lines.join(' ⏎ '),
+          paint: selected ? text => color.textStrong(text) : color.text,
+        })
+        segments.push({ plain: '  ' })
+        segments.push({ plain: hint, paint: color.textMuted })
+        out.push({ segments, fieldId: field.id })
+        continue
+      }
+      if (selected && isEditorTextInput(field) && this._focused) {
+        this.editorInput.focused = true
         segments.push({
           plain: sanitizedPhysicalLine(field.value),
           raw: (this.editorInput.render(valueBudget)[0] ?? '').replaceAll(CURSOR_MARKER, ''),
@@ -1170,10 +1234,10 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
       ['U (detail)', 'Run the task now'],
       ['D (detail)', 'Delete the task'],
       ['Enter (history)', 'Load the next page when More is shown'],
-      ['Tab / Shift+Tab', 'Rotate focus: filter, search, list, detail'],
+      [`${formatKeyId(Key.tab)} / ${formatKeyId(Key.shift(Key.tab))}`, 'Rotate focus: filter, search, list, detail'],
       ['PgUp / PgDn', 'Scroll detail, history or help'],
-      ['Ctrl+S (editor)', 'Save the schedule'],
-      ['Tab / Shift+Tab (editor)', 'Move between fields'],
+      [`${formatKeyId(Key.ctrl('s'))} (editor)`, 'Save the schedule'],
+      [`${formatKeyId(Key.tab)} / ${formatKeyId(Key.shift(Key.tab))} (editor)`, 'Move between fields'],
       ['y / n', 'Confirm or cancel a confirmation'],
       ['Esc', 'Back one layer; close the workspace at the list root'],
     ]
@@ -1362,50 +1426,41 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
       actions.push(action)
     }
     if (this.snapshot.confirm !== undefined) {
-      add('[y] Confirm', 1, 'confirm')
-      add('[n] Cancel', 2, 'cancel')
-      add('[Esc] Cancel', 8, 'cancel')
+      // The action bar stays `<key> <verb>`; `Esc` is the LAST segment while
+      // keeping the highest retained priority (design-language D8).
+      add('y Confirm', 9, 'confirm')
+      add('n Cancel', 8, 'cancel')
+      add('Esc Cancel', 10, 'cancel')
     } else {
       switch (this.snapshot.mode) {
         case 'list':
-          if (width < NARROW_COLUMNS) {
-            // The product order: Esc, ↑↓, Enter, N, / first. The narrow bar
-            // compacts to the key tokens so all five survive at 60 columns.
-            add('[Esc] Close', 8, 'close', 'Esc')
-            add('[↑↓] Move', 7, undefined, '↑↓')
-            add('[Enter] Detail', 6, 'enter-detail', 'Enter')
-            add('[N] Create', 5, 'new', 'N')
-            add('[/] Search', 4, 'search', '/')
-            add('[X] Clear ended', 3, 'clear-ended', 'X')
-            add('[?] Help', 2, 'help', '?')
-          } else {
-            add('[Enter] Detail', 5, 'enter-detail')
-            add('[N] Create', 4, 'new')
-            add('[/] Search', 3, 'search')
-            add('[X] Clear ended', 2, 'clear-ended')
-            add('[?] Help', 1, 'help')
-            add('[Esc] Close', 6, 'close')
-          }
-          break
+          add('Enter details', 9, 'enter-detail', 'Enter')
+          add('n create', 8, 'new', 'n')
+          add('/ search', 7, 'search', '/')
+          add('x clear ended', 5, 'clear-ended', 'x')
+          add('? help', 4, 'help', '?')
+          add('R refresh', 3, 'refresh', 'R')
+          add('Esc close', 10, 'close', 'Esc')
+          break;
         case 'detail':
-          add('[H] History', 2, 'detail-history')
-          add('[E] Edit', 3, 'detail-edit')
-          add('[Space] Toggle active', 4, 'detail-toggle')
-          add('[U] Run now', 5, 'detail-run')
-          add('[D] Delete', 6, 'detail-delete')
-          add('[Esc] Back', 8, 'back')
+          add('h history', 6, 'detail-history')
+          add('e edit', 7, 'detail-edit')
+          add('Space pause/resume', 5, 'detail-toggle')
+          add('u run now', 4, 'detail-run')
+          add('d delete', 3, 'detail-delete')
+          add('Esc back', 10, 'back')
           break
         case 'history':
-          if (this.snapshot.history?.nextBefore !== undefined) add('[Enter] More', 2, 'history-more')
-          add('[Esc] Back', 8, 'back')
+          if (this.snapshot.history?.nextBefore !== undefined) add('Enter more', 6, 'history-more')
+          add('Esc back', 10, 'back')
           break
         case 'editor':
-          add('[Ctrl+S] Save', 2)
-          add('[Tab] Next field', 5, undefined)
-          add('[Esc] Discard', 8, 'back')
+          add(`${formatKeyId(Key.ctrl('s'))} save`, 8)
+          add('Tab next field', 6, undefined)
+          add('Esc discard', 10, 'back')
           break
         case 'help':
-          add('[Esc] Close help', 8, 'close-help')
+          add('Esc close help', 10, 'close-help')
           break
       }
     }
@@ -1578,6 +1633,23 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
       this.editorInput.focused = false
       return
     }
+    if (field.id === 'timing-rrule') {
+      // The multi-line field keeps its own raw buffer; a newer published value
+      // (another window, a controller re-read) is adopted unless it is the echo
+      // of what this panel just dispatched.
+      if (this.editorFieldId !== field.id) {
+        this.editorFieldId = field.id
+        this.rruleDraft = field.value
+        this.rruleDispatched = field.value
+      } else if (field.value !== this.rruleDispatched) {
+        this.rruleDraft = field.value
+        this.rruleDispatched = field.value
+      }
+      this.editorInput.focused = false
+      return
+    }
+    this.rruleDraft = undefined
+    this.rruleDispatched = undefined
     if (this.editorFieldId !== field.id) {
       const display = sanitizedPhysicalLine(field.value)
       this.editorFieldId = field.id
@@ -1656,7 +1728,7 @@ function confirmQuestion(confirm: ScheduleConfirm): string {
     case 'delete':
       return `Delete "${confirm.title}" (${confirm.shortId})? Its saved deliveries are removed too.`
     case 'clear-ended':
-      return 'Remove every ended task? This cannot be undone.'
+      return 'Clear every ended task on this Host — not only the filtered rows? This cannot be undone.'
     case 'run':
       return `Run "${confirm.title}" now? The next scheduled occurrence is not consumed.`
     case 'discard':

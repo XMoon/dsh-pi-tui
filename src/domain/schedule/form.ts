@@ -196,7 +196,7 @@ export function encodeCreate(draft: ScheduleEditorDraft): ScheduleCreateRequest 
  * never re-sent (a `new_once` target would reserve a new Session identity).
  */
 export function encodePatch(
-  baseline: { readonly title: string; readonly prompt: string },
+  baseline: ScheduleEditorBaseline,
   draft: ScheduleEditorDraft,
 ): SchedulePatch {
   const patch: {
@@ -207,18 +207,29 @@ export function encodePatch(
   } = {}
   if (draft.title !== baseline.title) patch.title = requireText('title', draft.title)
   if (draft.prompt !== baseline.prompt) patch.prompt = requireText('prompt', draft.prompt)
-  if (draft.timingEdited) patch.timing = encodeTiming(draft.timing)
-  if (draft.targetEdited) patch.target = encodeTarget(draft.target)
+  // The comparison is between the FINAL typed values, never "did the user
+  // interact": re-sending an unchanged `timing` recompiles/re-anchors the rule,
+  // and re-sending an unchanged `new_once` target re-reserves its Session
+  // identity. Only a genuinely different encoded rule/target travels.
+  if (!sameTimingDraft(draft.timing, baseline.timing)) patch.timing = encodeTiming(draft.timing)
+  if (!sameTargetDraft(draft.target, baseline.target)) patch.target = encodeTarget(draft.target)
   if (Object.keys(patch).length === 0) {
     throw new ScheduleFormError('form', 'Nothing changed yet.')
   }
   return patch
 }
 
-/** The immutable record values one edit patches against. */
+/** The immutable record values one edit patches against, as typed drafts. */
 export interface ScheduleEditorBaseline {
   readonly title: string
   readonly prompt: string
+  readonly timing: ScheduleTimingDraft
+  readonly target: ScheduleTargetDraft
+}
+
+/** Whether two typed timing drafts encode to the SAME official rule. */
+export function sameTimingDraft(left: ScheduleTimingDraft, right: ScheduleTimingDraft): boolean {
+  return JSON.stringify(encodeTiming(left)) === JSON.stringify(encodeTiming(right))
 }
 
 /** The fields the editor shows for one timing kind, in focus order. */

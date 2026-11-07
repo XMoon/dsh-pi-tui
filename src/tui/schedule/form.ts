@@ -46,6 +46,8 @@ export function editorFieldHint(field: ScheduleFormField): string {
       return 'Enter choose Session'
     case 'target-advanced':
       return 'Enter show/hide'
+    case 'timing-rrule':
+      return 'Enter newline · Tab leaves'
     default:
       if (field.kind === 'weekday') return 'Enter toggle day'
       return field.kind === 'text' ? 'Type to edit' : 'Enter change'

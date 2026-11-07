@@ -376,15 +376,16 @@ export async function runDetachedTurnInteractions(context) {
       trace('maintenance-sweep', { hostPid: ready.pid, sessionId, agentStatus: maintenance.agentStatus, verdict: maintenanceLiveness.verdict })
     }
 
-    // Host liveness: the optional official Schedule row is mounted in an
-    // isolated test-only overlay. An active task must block with zero
-    // Clients; deleting it must clear the schedule-active contribution.
+    // Host liveness: the Host-only profile mounts the ONE official Schedule row
+    // (S5-PR4), so this scenario uses the DEFAULT composition — a test-only
+    // second insert would be the duplicate owner the plan forbids. An active
+    // task must block with zero Clients; deleting it must clear the
+    // schedule-active contribution.
     {
-      const schedulePatch = join(workDir, 'host-schedule.patch.yml')
-      const operations = parseYaml(readFileSync(c1Work.patchPath, 'utf8'))
-      operations.push({ insert: [{ id: 'host-schedule', name: '@deepseek-ai/dsh-schedule' }] })
-      writeFileSync(schedulePatch, JSON.stringify(operations, null, 2), { mode: 0o600 })
-      const { host, ready, workRoot } = await startC1Host('schedule', 'host-schedule', { SPLIT_PROCESS_EXTRA_PATCH: schedulePatch })
+      const { host, ready, workRoot } = await startC1Host('schedule', 'host-schedule')
+      const scheduleRows = (ready.entries ?? []).filter(entry => entry.id === 'pi-tui-schedule')
+      assert(scheduleRows.length === 1, `expected exactly one Schedule row, found ${scheduleRows.length}`)
+      assert(scheduleRows[0].state === 'active', `the default Schedule row is not active: ${JSON.stringify(scheduleRows[0])}`)
       const { client } = await startC1Client('schedule C1')
       const sessionId = await openC1Session(client, 'schedule prompt', 'schedule')
       const created = await waitForC1WorkEvent(workRoot, event => event.kind === 'schedule-created' && event.status === 'active', 'schedule created', 120_000)

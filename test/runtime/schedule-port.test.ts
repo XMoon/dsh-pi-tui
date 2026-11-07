@@ -119,7 +119,6 @@ test('L1: a create request is the official shape and the default target is new_o
 })
 
 test('L1: an edit sends ONLY the changed fields and never re-sends an untouched rule or target', () => {
-  const baseline = { title: 'Title', prompt: 'Prompt' }
   const untouched = createDraft({
     mode: 'edit',
     id: 'schedule-1',
@@ -129,8 +128,15 @@ test('L1: an edit sends ONLY the changed fields and never re-sends an untouched 
     timing: { kind: 'cron', expression: '0 9 * * *', timeZone: 'UTC' },
     target: { kind: 'new_once', cwd: '', agentPreset: '' },
   })
+  const baseline = {
+    title: untouched.title,
+    prompt: untouched.prompt,
+    timing: untouched.timing,
+    target: untouched.target,
+  }
   assert.deepEqual(encodePatch(baseline, { ...untouched, title: 'Renamed' }), { title: 'Renamed' })
-  // The same edit with an explicitly edited timing carries the rule exactly.
+  // A genuinely different rule travels exactly; the untouched `new_once`
+  // target (and its reserved Session identity) is never re-sent.
   const timingEdit = encodePatch(baseline, {
     ...untouched,
     timing: { kind: 'cron', expression: '0 10 * * *', timeZone: 'UTC' },
@@ -142,6 +148,19 @@ test('L1: an edit sends ONLY the changed fields and never re-sends an untouched 
   assert.deepEqual(
     encodePatch(baseline, { ...untouched, target: { kind: 'new', cwd: '', agentPreset: '' }, targetEdited: true }),
     { target: { kind: 'new' } },
+  )
+  // Toggle a field away and back: the FINAL typed value equals the stored one,
+  // so the patch stays empty (no rule recompile, no re-reserved Session).
+  assert.throws(
+    () => encodePatch(baseline, {
+      ...untouched,
+      timing: { kind: 'cron', expression: '0 9 * * *', timeZone: 'UTC' },
+      timingEdited: true,
+      target: { kind: 'new_once', cwd: '', agentPreset: '' },
+      targetEdited: true,
+    }),
+    ScheduleFormError,
+    'reverting a field leaves nothing to patch',
   )
   assert.throws(() => encodePatch(baseline, untouched), ScheduleFormError, 'an empty edit is a local refusal')
 })

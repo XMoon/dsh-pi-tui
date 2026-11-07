@@ -30,6 +30,9 @@ import type { ScheduleCatalogEntry, ScheduleService } from '@deepseek-ai/dsh-sch
 import type { SessionController } from '@deepseek-ai/dsh-api-session-controller'
 import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
+import { DirectSchedulePort, type DirectScheduleHostContext } from '../../src/runtime/direct/schedule-direct.ts'
+import { ScheduleWorkspaceController } from '../../src/app/schedule/workspace-controller.ts'
+import type { SessionReader } from '../../src/runtime/session-reader-port.ts'
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const BASE_BUNDLE = '@deepseek-ai/dsh-base'
@@ -88,10 +91,10 @@ async function bootHost(root: string): Promise<BootedHost> {
       symlinkSync(realpathSync(join(source, name)), target, 'dir')
     }
   }
-  symlinkSync(REPO_ROOT, join(nodeModules, TUI_BUNDLE), 'dir')
+  if (!existsSync(join(nodeModules, TUI_BUNDLE))) symlinkSync(REPO_ROOT, join(nodeModules, TUI_BUNDLE), 'dir')
   writeFileSync(join(installationDir, 'package.json'), JSON.stringify({ name: 'schedule-host-profile-installation', private: true }, null, 2))
   mkdirSync(profileDir, { recursive: true })
-  symlinkSync(nodeModules, join(profileDir, 'node_modules'), 'dir')
+  if (!existsSync(join(profileDir, 'node_modules'))) symlinkSync(nodeModules, join(profileDir, 'node_modules'), 'dir')
   writeFileSync(join(profileDir, 'package.json'), JSON.stringify({
     name: 'schedule-host-profile',
     private: true,
@@ -285,4 +288,139 @@ test('L5: the real profile mounts ONE Host Schedule closure and delivers through
   assert.equal(changes.length, settled, 'the unsubscribed listener never hears another commit')
   const afterDelete = await schedule.view({ id: existing.id })
   assert.equal('code' in afterDelete, true, 'the deleted task is really gone')
+})
+
+/** A bounded observation of one authoritative fact: the assertion fails with
+ *  the last observed state instead of passing on a blind sleep. */
+async function waitUntil(
+  probe: () => Promise<boolean> | boolean,
+  label: string,
+  deadlineMs = 120_000,
+): Promise<void> {
+  const started = Date.now()
+  let lastError: unknown
+  while (Date.now() - started < deadlineMs) {
+    try {
+      if (await probe()) return
+    } catch (error) {
+      lastError = error
+    }
+    // bounded observation window: the Host timer is real elapsed time, so the
+    // probe is polled until its deadline instead of sleeping for a fixed guess.
+    await new Promise(resolve => setTimeout(resolve, 250))
+  }
+  throw new Error(`${label} did not settle within ${deadlineMs}ms${lastError === undefined ? '' : `: ${String(lastError)}`}`)
+}
+
+/** The chooser-only Session reader the controller needs beside the REAL port;
+ *  it exposes no second task/Session authority. */
+const CHOOSER_SESSIONS: SessionReader = {
+  list: async () => [],
+  projectionBatch: async () => new Map(),
+  search: async () => undefined,
+  blank: () => undefined,
+  measureContext: () => undefined,
+  turnOutline: () => undefined,
+  sessionStatus: () => undefined,
+}
+
+test('L5: the real DirectSchedulePort drives the controller end to end', async t => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('schedule-host-controller')
+  const host = await bootHost(root)
+  life.defer(() => host.dispose())
+
+  const port = new DirectSchedulePort({
+    get: (name: string) => host.ctx.get(name),
+    on: (event, listener) => host.ctx.on(event, listener),
+  } satisfies DirectScheduleHostContext)
+  const hostSchedule = host.ctx.get('schedule') as unknown as ScheduleService
+  const controller = new ScheduleWorkspaceController({
+    port,
+    sessionReader: CHOOSER_SESSIONS,
+    runOwned: (_label, task) => { void task() },
+  })
+  life.defer(() => controller.dispose())
+  controller.open()
+  await waitUntil(() => controller.snapshot().status === 'ready', 'the first authoritative read')
+
+  // Create through the REAL port + controller seam (not a fake Port).
+  controller.dispatch({ kind: 'open-create' })
+  controller.dispatch({ kind: 'set-field', fieldId: 'title', value: 'controller host task' })
+  controller.dispatch({ kind: 'set-field', fieldId: 'prompt', value: 'controller host prompt' })
+  controller.dispatch({ kind: 'select-timing-kind', timing: 'after' })
+  controller.dispatch({ kind: 'set-field', fieldId: 'timing-after', value: '60' })
+  controller.dispatch({ kind: 'save' })
+  await controller.whenIdle()
+  await waitUntil(() => controller.snapshot().mode === 'detail' && controller.snapshot().detail !== undefined, 'the created task detail')
+  const created = controller.snapshot().detail
+  assert.ok(created !== undefined)
+  const hostRows = await hostSchedule.catalog()
+  const persisted = hostRows.find(entry => entry.id === created.id)
+  assert.ok(persisted !== undefined, 'the controller create really landed in the Host task store')
+  assert.equal(persisted.kind, 'after')
+
+  // Edit through the controller: one CAS update on the revision the detail read.
+  controller.dispatch({ kind: 'open-edit' })
+  await waitUntil(() => controller.snapshot().mode === 'editor', 'the editor')
+  controller.dispatch({ kind: 'set-field', fieldId: 'title', value: 'controller host task renamed' })
+  controller.dispatch({ kind: 'save' })
+  await controller.whenIdle()
+  await waitUntil(() => controller.snapshot().detail?.title === 'controller host task renamed', 'the edited title readback')
+  const edited = await hostSchedule.view({ id: persisted.id })
+  assert.equal('code' in edited, false)
+  assert.equal((edited as ScheduleCatalogEntry).title, 'controller host task renamed')
+
+  // The `new` target creates a FRESH Session for each delivery.
+  const newTarget = await hostSchedule.remoteCreate({
+    title: 'controller new target',
+    prompt: PROMPT,
+    timing: { kind: 'after', after_seconds: 60 },
+    target: { kind: 'new' },
+  })
+  const ranNew = await hostSchedule.run({ id: newTarget.id })
+  assert.equal('code' in ranNew, false)
+  const newDelivery = (ranNew as ScheduleCatalogEntry).lastDelivery
+  assert.ok(newDelivery !== undefined, 'the `new` target delivered')
+  assert.equal((ranNew as ScheduleCatalogEntry).target.kind, 'new')
+  const deliveredNew = await scheduleMessages(host.ctx.get('sessionPersistence') as unknown as SessionPersistence, newDelivery.targetSessionId)
+  assert.ok(deliveredNew.some(message => message.id === newDelivery.messageId),
+    'the Session created by the `new` target durably accepted the message')
+})
+
+test('L5: a durable task survives a Host restart and fires from the Host timer', async t => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('schedule-host-restart')
+  const first = await bootHost(root)
+  const firstSchedule = first.ctx.get('schedule') as unknown as ScheduleService
+  const created = await firstSchedule.remoteCreate({
+    title: 'restart one-shot',
+    prompt: PROMPT,
+    timing: { kind: 'after', after_seconds: 60 },
+    target: { kind: 'new_once' },
+  })
+  const reserved = (created.target as { readonly sessionId: string }).sessionId
+  await first.dispose()
+
+  const second = await bootHost(root)
+  life.defer(() => second.dispose())
+  const schedule = second.ctx.get('schedule') as unknown as ScheduleService
+  const persisted = (await schedule.catalog()).find(entry => entry.id === created.id)
+  assert.ok(persisted !== undefined, 'the durable task survived the Host restart')
+  assert.equal(persisted.scheduledAt, created.scheduledAt, 'the committed occurrence is stable across the restart')
+
+  // Real elapsed time: the official Host timer fires the due occurrence. The
+  // probe is bounded and observes the authoritative receipt; no fixed sleep.
+  // Daylight-saving wall-clock behavior has no injectable clock in rc.1
+  // (ScheduleService reads Date.now()), so DST is NOT_VERIFIED rather than faked.
+  await waitUntil(async () => {
+    const view = await schedule.view({ id: created.id })
+    return !('code' in view) && (view as ScheduleCatalogEntry).lastDelivery !== undefined
+  }, 'the due occurrence delivery', 150_000)
+  const view = await schedule.view({ id: created.id }) as ScheduleCatalogEntry
+  assert.equal(view.lastDelivery?.targetSessionId, reserved)
+  const messages = await scheduleMessages(second.ctx.get('sessionPersistence') as unknown as SessionPersistence, reserved)
+  const delivered = messages.filter(message => message.id === view.lastDelivery?.messageId)
+  assert.ok(delivered.length >= 1, 'the restarted Host delivered into real Session persistence')
+  assert.match(delivered[0].text, /schedule host profile probe/u, 'the persisted message is the delivered prompt')
 })

@@ -24931,10 +24931,11 @@ export class TuiApp {
       } catch (error) {
         this.routeTerminalSettlementFailure(`job workspace abandonment (${context})`, error)
       }
+      const lease = this.workspaceLease
       try {
-        this.workspaceLease?.close()
+        lease?.close()
       } catch (error) {
-        this.routeTerminalSettlementFailure(`workspace abandonment (${context})`, error)
+        this.routeTerminalSettlementFailure(`${lease?.kind ?? 'workspace'} workspace abandonment (${context})`, error)
       }
     } finally {
       this.workspaceLeaseFreezeDepth = freezeDepthBefore

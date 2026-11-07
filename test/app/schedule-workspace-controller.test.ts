@@ -224,13 +224,18 @@ function harness(options: { readonly autoRun?: boolean } = {}): Harness {
 async function opened(options: { readonly autoRun?: boolean } = {}): Promise<Harness> {
   const value = harness(options)
   value.controller.open()
-  await settle()
+  await flush()
   return value
 }
 
-/** Two macrotask turns: enough for the fixture's resolved promises to settle. */
-function settle(): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, 0))
+/**
+ * One event-loop turn: every already-resolved fixture promise (the read's
+ * `Promise.all`, the publication continuation, the owned mutation's
+ * settlement) has run by then. This is a deterministic yield, NOT a time
+ * window: no contract here depends on elapsed time.
+ */
+function flush(): Promise<void> {
+  return new Promise(resolve => setImmediate(resolve))
 }
 
 test('L6: open reads the catalog and limits once and paints ready rows', async () => {
@@ -255,7 +260,7 @@ test('L6: filter and search project the committed catalog with no Host call', as
       entry({ id: 'schedule-b' as never, title: 'Beta review', prompt: 'read imports', status: 'paused' }),
     ]
     life.controller.dispatch({ kind: 'refresh' })
-    await settle()
+    await flush()
     const before = life.port.calls.length
     life.controller.dispatch({ kind: 'set-filter', filter: 'paused' })
     assert.deepEqual(life.controller.snapshot().rows.map(row => row.title), ['Beta review'])
@@ -277,12 +282,12 @@ test('L6: a burst of refresh requests coalesces into ONE newest read', async () 
     life.controller.dispatch({ kind: 'refresh' })
     life.controller.dispatch({ kind: 'refresh' })
     life.controller.dispatch({ kind: 'refresh' })
-    await settle()
+    await flush()
     const catalogs = life.port.methods().filter(method => method === 'catalog').length
     assert.equal(catalogs, 2, 'the open read plus ONE in-flight read; the burst waits')
     life.port.entries = [entry({ title: 'Newest' })]
     gate.resolve([entry({ title: 'Newest' })])
-    await settle()
+    await flush()
     assert.equal(life.controller.snapshot().rows[0].title, 'Newest')
     assert.equal(life.port.methods().filter(method => method === 'catalog').length, 3, 'exactly one queued read follows')
   } finally {
@@ -300,16 +305,16 @@ test('L6: a first failure is an explicit error, a later failure keeps rows as st
   })
   try {
     controller.open()
-    await settle()
+    await flush()
     assert.equal(controller.snapshot().status, 'error')
     assert.deepEqual(controller.snapshot().rows, [])
     assert.equal(controller.snapshot().statusMessage, SCHEDULE_COPY.serviceUnavailable)
     controller.dispatch({ kind: 'refresh' })
-    await settle()
+    await flush()
     assert.equal(controller.snapshot().status, 'ready')
     port.catalogError = new Error('boom')
     controller.dispatch({ kind: 'refresh' })
-    await settle()
+    await flush()
     assert.equal(controller.snapshot().status, 'stale')
     assert.equal(controller.snapshot().rows.length, 1, 'the last successful rows survive')
   } finally {
@@ -325,11 +330,11 @@ test('L6: a late view of the previous selection never repaints the newer one', a
     life.port.viewResults.set('schedule-a', lateA.promise)
     life.port.viewResults.set('schedule-b', entry({ id: 'schedule-b' as never, title: 'B' }))
     life.controller.dispatch({ kind: 'refresh' })
-    await settle()
+    await flush()
     life.controller.dispatch({ kind: 'open-detail', id: 'schedule-a' })
     life.controller.dispatch({ kind: 'open-detail', id: 'schedule-b' })
     lateA.resolve(entry({ id: 'schedule-a' as never, title: 'A' }))
-    await settle()
+    await flush()
     assert.equal(life.controller.snapshot().detail?.id, 'schedule-b')
     assert.equal(life.controller.snapshot().selectedId, 'schedule-b')
   } finally {
@@ -343,11 +348,11 @@ test('L6: an invalidated read never publishes and the invalidation re-reads once
     const gate = deferred<readonly ScheduleCatalogEntry[]>()
     life.port.catalogGate = gate
     life.controller.dispatch({ kind: 'refresh' })
-    await settle()
+    await flush()
     life.port.entries = [entry({ title: 'After invalidation' })]
     life.port.invalidate()
     gate.resolve([entry({ title: 'Obsolete' })])
-    await settle()
+    await flush()
     assert.equal(life.controller.snapshot().rows[0].title, 'After invalidation')
   } finally {
     life.controller.dispose()
@@ -360,7 +365,7 @@ test('L6: a local form refusal never reaches the Host and keeps the draft', asyn
     life.controller.dispatch({ kind: 'open-create' })
     const before = life.port.calls.length
     life.controller.dispatch({ kind: 'save' })
-    await settle()
+    await flush()
     assert.equal(life.port.calls.length, before, 'an empty title is a local refusal')
     assert.equal(life.controller.snapshot().mode, 'editor')
     assert.equal(life.controller.snapshot().notice?.kind, 'error')
@@ -378,9 +383,9 @@ test('L6: create sends ONE explicit new_once request and re-reads the catalog', 
     life.controller.dispatch({ kind: 'set-field', fieldId: 'prompt', value: 'Check nightly' })
     life.controller.dispatch({ kind: 'save' })
     life.controller.dispatch({ kind: 'save' })
-    await settle()
+    await flush()
     await life.controller.whenIdle()
-    await settle()
+    await flush()
     const creates = life.port.calls.filter(call => call.method === 'create')
     assert.equal(creates.length, 1, 'a double Ctrl+S dispatches one create')
     assert.deepEqual(creates[0].args[0], {
@@ -404,9 +409,9 @@ test('L6: an unknown create outcome is reported, re-read, and the draft is kept'
     life.controller.dispatch({ kind: 'set-field', fieldId: 'title', value: 'Maybe' })
     life.controller.dispatch({ kind: 'set-field', fieldId: 'prompt', value: 'Maybe ran' })
     life.controller.dispatch({ kind: 'save' })
-    await settle()
+    await flush()
     await life.controller.whenIdle()
-    await settle()
+    await flush()
     assert.equal(life.controller.snapshot().mode, 'editor', 'the draft is preserved')
     assert.equal(life.controller.snapshot().notice?.text, SCHEDULE_COPY.outcomeUnknown)
     assert.equal(life.port.methods().filter(method => method === 'create').length, 1, 'never replayed')
@@ -420,16 +425,16 @@ test('L6: an edit sends the minimal CAS patch and preserves the draft on conflic
   const life = await opened()
   try {
     life.controller.dispatch({ kind: 'open-detail', id: 'schedule-1' })
-    await settle()
+    await flush()
     life.controller.dispatch({ kind: 'open-edit' })
-    await settle()
+    await flush()
     assert.equal(life.controller.snapshot().mode, 'editor')
     life.port.editResult = async () => ({ id: 'schedule-1' as never, code: 'schedule_conflict' })
     life.controller.dispatch({ kind: 'set-field', fieldId: 'title', value: 'Renamed' })
     life.controller.dispatch({ kind: 'save' })
-    await settle()
+    await flush()
     await life.controller.whenIdle()
-    await settle()
+    await flush()
     const edits = life.port.calls.filter(call => call.method === 'edit')
     assert.equal(edits.length, 1)
     assert.deepEqual(edits[0].args[0], {
@@ -452,9 +457,9 @@ test('L6: pause/resume is one CAS update on the official revision and an ended r
     life.port.entries = [entry({ id: 'schedule-ended' as never, status: 'ended', updatedAt: '2026-01-01T07:00:00.000Z' })]
     life.port.editResult = async request => entry({ ...(request as never as { patch: object }), id: 'schedule-ended' as never })
     life.controller.dispatch({ kind: 'refresh' })
-    await settle()
+    await flush()
     life.controller.dispatch({ kind: 'toggle-active' })
-    await settle()
+    await flush()
     await life.controller.whenIdle()
     const edit = life.port.calls.find(call => call.method === 'edit')
     assert.deepEqual(edit?.args[0], {
@@ -480,9 +485,9 @@ test('L6: delete and clear-ended require one confirmation and commit exactly one
     assert.equal(life.port.calls.length, before, 'cancel writes nothing')
     life.controller.dispatch({ kind: 'ask-delete' })
     life.controller.dispatch({ kind: 'confirm' })
-    await settle()
+    await flush()
     await life.controller.whenIdle()
-    await settle()
+    await flush()
     const deletes = life.port.calls.filter(call => call.method === 'edit' && (call.args[0] as ScheduleEditRequest).action === 'delete')
     assert.equal(deletes.length, 1)
     assert.equal(life.controller.snapshot().mode, 'list')
@@ -491,7 +496,7 @@ test('L6: delete and clear-ended require one confirmation and commit exactly one
     // revision: the list projection carries the same CAS value.
     life.controller.dispatch({ kind: 'ask-delete' })
     life.controller.dispatch({ kind: 'confirm' })
-    await settle()
+    await flush()
     await life.controller.whenIdle()
     const listDeletes = life.port.calls.filter(call => call.method === 'edit' && (call.args[0] as ScheduleEditRequest).action === 'delete')
     assert.equal(listDeletes.length, 2)
@@ -499,9 +504,9 @@ test('L6: delete and clear-ended require one confirmation and commit exactly one
 
     life.controller.dispatch({ kind: 'ask-clear-ended' })
     life.controller.dispatch({ kind: 'confirm' })
-    await settle()
+    await flush()
     await life.controller.whenIdle()
-    await settle()
+    await flush()
     assert.equal(life.port.methods().filter(method => method === 'deleteInactive').length, 1)
     assert.equal(life.controller.snapshot().notice?.text, SCHEDULE_COPY.cleared(3))
   } finally {
@@ -513,17 +518,17 @@ test('L6: run-now distinguishes a queued delivery from a pending execution', asy
   const life = await opened()
   try {
     life.controller.dispatch({ kind: 'open-detail', id: 'schedule-1' })
-    await settle()
+    await flush()
     life.port.runResult = async () => ({ id: 'schedule-1' as never, code: 'schedule_execution_pending' })
     life.controller.dispatch({ kind: 'ask-run' })
     life.controller.dispatch({ kind: 'confirm' })
-    await settle()
+    await flush()
     await life.controller.whenIdle()
     assert.equal(life.controller.snapshot().notice?.text, SCHEDULE_COPY.executionPending)
     life.port.runResult = async () => entry({ lastDelivery: { scheduledAt: '2026-01-01T09:00:00.000Z', deliveredAt: '2026-01-01T09:00:00.100Z', messageId: 'm' as never, targetSessionId: 'session-1' as never } })
     life.controller.dispatch({ kind: 'ask-run' })
     life.controller.dispatch({ kind: 'confirm' })
-    await settle()
+    await flush()
     await life.controller.whenIdle()
     assert.equal(life.controller.snapshot().notice?.text, SCHEDULE_COPY.deliveryQueued)
   } finally {
@@ -545,20 +550,20 @@ test('L6: history pages only by the official nextBefore cursor and reports a van
     life.port.historyResults.set('first', page('m1'))
     life.port.historyResults.set('m1', { id: 'schedule-1' as never, code: 'delivery_cursor_not_found' })
     life.controller.dispatch({ kind: 'open-detail', id: 'schedule-1' })
-    await settle()
+    await flush()
     life.controller.dispatch({ kind: 'open-history' })
-    await settle()
+    await flush()
     assert.equal(life.controller.snapshot().mode, 'history')
     assert.equal(life.controller.snapshot().history?.nextBefore, 'm1')
     life.controller.dispatch({ kind: 'history-more' })
-    await settle()
+    await flush()
     const calls = life.port.calls.filter(call => call.method === 'history')
     assert.equal(calls.length, 2)
     assert.deepEqual(calls[1].args[0], { id: 'schedule-1', limit: 20, before: 'm1' })
     assert.equal(life.controller.snapshot().history?.status, 'error')
     assert.equal(life.controller.snapshot().history?.message, SCHEDULE_COPY.historyChanged)
     life.controller.dispatch({ kind: 'history-more' })
-    await settle()
+    await flush()
     assert.equal(life.port.calls.filter(call => call.method === 'history').length, 2, 'no cursor means no further page')
   } finally {
     life.controller.dispose()
@@ -574,10 +579,10 @@ test('L6: a discarded write is unknown, never a claimed rollback; dispose stops 
     life.controller.dispatch({ kind: 'set-field', fieldId: 'title', value: 'In flight' })
     life.controller.dispatch({ kind: 'set-field', fieldId: 'prompt', value: 'In flight' })
     life.controller.dispatch({ kind: 'save' })
-    await settle()
+    await flush()
     life.controller.dispose()
     gate.reject(new SupersededReadError('closed'))
-    await settle()
+    await flush()
     assert.equal(life.port.listeners.size, 0, 'dispose drops the Host-change subscription')
     assert.equal(life.controller.snapshot().mode, 'editor', 'the closed workspace publishes nothing new')
   } finally {
@@ -589,13 +594,156 @@ test('L6: the Session chooser lists non-subagent Sessions with their projection 
   const life = await opened()
   try {
     life.controller.dispatch({ kind: 'open-create' })
-    await settle()
+    await flush()
     assert.deepEqual(life.controller.snapshot().sessions, [{ id: 'session-a', title: 'Alpha' }])
     life.controller.dispatch({ kind: 'select-target-kind', target: 'session' })
     life.controller.dispatch({ kind: 'select-target-session', sessionId: 'session-a' })
     assert.equal(life.controller.snapshot().editor?.target.kind, 'session')
     const target = life.controller.snapshot().editor?.target
     assert.equal(target?.kind === 'session' ? target.sessionId : undefined, 'session-a')
+  } finally {
+    life.controller.dispose()
+  }
+})
+
+test('L6: a delete that lost the task reports the miss instead of success', async () => {
+  const life = await opened()
+  try {
+    life.port.editResult = async () => {
+      // The task really is gone on the Host: the following authoritative
+      // re-read must show it.
+      life.port.entries = []
+      return { id: 'schedule-1' as never, deleted: false, code: 'schedule_not_found' }
+    }
+    life.controller.dispatch({ kind: 'ask-delete' })
+    life.controller.dispatch({ kind: 'confirm' })
+    await flush()
+    await life.controller.whenIdle()
+    await flush()
+    assert.equal(life.controller.snapshot().notice?.text, SCHEDULE_COPY.taskGone)
+    assert.equal(life.controller.snapshot().notice?.kind, 'error')
+    assert.equal(life.controller.snapshot().mode, 'list')
+    assert.equal(life.controller.snapshot().selectedId, undefined, 'the vanished task stops being selected')
+  } finally {
+    life.controller.dispose()
+  }
+})
+
+test('L6: cycling the timing/target away and back sends no patch for them', async () => {
+  const life = await opened()
+  try {
+    life.port.editResult = async () => entry({ title: 'Renamed' })
+    life.controller.dispatch({ kind: 'open-detail', id: 'schedule-1' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-edit' })
+    await flush()
+    life.controller.dispatch({ kind: 'select-timing-kind', timing: 'cron' })
+    life.controller.dispatch({ kind: 'select-timing-kind', timing: 'daily' })
+    life.controller.dispatch({ kind: 'select-target-kind', target: 'session' })
+    life.controller.dispatch({ kind: 'select-target-kind', target: 'new_once' })
+    life.controller.dispatch({ kind: 'set-field', fieldId: 'title', value: 'Renamed' })
+    life.controller.dispatch({ kind: 'save' })
+    await flush()
+    await life.controller.whenIdle()
+    const edit = life.port.calls.find(call => call.method === 'edit')
+    assert.deepEqual(edit?.args[0], {
+      id: 'schedule-1',
+      action: 'update',
+      patch: { title: 'Renamed' },
+      expectedUpdatedAt: '2026-01-01T08:00:00.000Z',
+    }, 'only the real change travels: no rule recompile, no re-reserved new_once target')
+  } finally {
+    life.controller.dispose()
+  }
+})
+
+test('L6: the edit-open read is fenced and its failure is surfaced', async () => {
+  const life = await opened()
+  try {
+    const late = deferred<ScheduleViewResult>()
+    life.port.viewResults.set('schedule-1', late.promise)
+    life.controller.dispatch({ kind: 'open-detail', id: 'schedule-1' })
+    await flush()
+    // The user leaves Detail while the read is in flight: the late answer must
+    // NOT open an editor over the restored list.
+    life.controller.dispatch({ kind: 'back' })
+    late.resolve(entry())
+    await flush()
+    assert.equal(life.controller.snapshot().mode, 'list')
+
+    // From the list (no detail snapshot) the edit read really happens, and its
+    // failure is a visible error instead of a silent no-op.
+    const failed = deferred<ScheduleViewResult>()
+    life.port.viewResults.set('schedule-1', failed.promise)
+    life.controller.dispatch({ kind: 'open-edit' })
+    // The fake `view` adopts the stored promise one microtask later; reject
+    // only once that adoption handler exists, so the rejection is the real
+    // awaited failure rather than an unhandled-rejection artifact.
+    await flush()
+    failed.reject(new Error('view failed'))
+    await flush()
+    assert.equal(life.controller.snapshot().mode, 'list')
+    assert.equal(life.controller.snapshot().notice?.kind, 'error')
+    assert.match(life.controller.snapshot().notice?.text ?? '', /view failed/u)
+  } finally {
+    life.controller.dispose()
+  }
+})
+
+test('L6: Help is an underlay that returns to the exact page and draft', async () => {
+  const life = await opened()
+  try {
+    life.controller.dispatch({ kind: 'open-create' })
+    life.controller.dispatch({ kind: 'set-field', fieldId: 'title', value: 'Keep me' })
+    life.controller.dispatch({ kind: 'open-help' })
+    assert.equal(life.controller.snapshot().mode, 'help')
+    life.controller.dispatch({ kind: 'close-help' })
+    assert.equal(life.controller.snapshot().mode, 'editor')
+    assert.equal(life.controller.snapshot().editor?.title, 'Keep me')
+    // A confirmation owns the surface: Help never steals it.
+    life.controller.dispatch({ kind: 'back' })
+    life.controller.dispatch({ kind: 'back' })
+    life.controller.dispatch({ kind: 'open-detail', id: 'schedule-1' })
+    await flush()
+    life.controller.dispatch({ kind: 'ask-delete' })
+    life.controller.dispatch({ kind: 'open-help' })
+    assert.equal(life.controller.snapshot().mode, 'detail')
+    assert.equal(life.controller.snapshot().confirm?.kind, 'delete')
+  } finally {
+    life.controller.dispose()
+  }
+})
+
+test('L6: a history page already loading cannot be paged twice', async () => {
+  const life = await opened()
+  try {
+    life.port.historyResults.set('first', {
+      id: 'schedule-1' as never,
+      records: [],
+      earlierRecordsUnavailable: false,
+      earlierRecordsPruned: false,
+      retention: { days: 30, records: 200 },
+      nextBefore: 'm1' as never,
+    })
+    const second = deferred<ScheduleDeliveryHistoryResult>()
+    life.port.historyResults.set('m1', second.promise)
+    life.controller.dispatch({ kind: 'open-detail', id: 'schedule-1' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-history' })
+    await flush()
+    life.controller.dispatch({ kind: 'history-more' })
+    life.controller.dispatch({ kind: 'history-more' })
+    await flush()
+    assert.equal(life.port.calls.filter(call => call.method === 'history').length, 2, 'the loading page owns the cursor')
+    second.resolve({
+      id: 'schedule-1' as never,
+      records: [],
+      earlierRecordsUnavailable: false,
+      earlierRecordsPruned: false,
+      retention: { days: 30, records: 200 },
+    })
+    await flush()
+    assert.equal(life.controller.snapshot().history?.status, 'ready')
   } finally {
     life.controller.dispose()
   }

@@ -418,6 +418,10 @@ const OTHER_HOST_SUBSCRIPTIONS: ReadonlyArray<readonly [string, string]> = [
   // Workspace registry after each committed Workspace domain write (it never
   // derives an increment from the event payload and keeps no second table).
   ['domain/changed', 'src/runtime/direct/session-workspace-facts-direct.ts'],
+  // S5-PR4: the Direct Schedule adapter's ONE invalidation subscription. The
+  // event carries no content, so the listener only re-reads the authoritative
+  // catalog through the one controller.
+  ['schedule/changed', 'src/runtime/direct/schedule-direct.ts'],
 ]
 
 /**

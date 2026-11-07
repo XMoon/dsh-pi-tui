@@ -23,42 +23,35 @@ export type ScheduleTarget = ScheduleCatalogEntry['target']
 export type ScheduleDeliveryReceipt = NonNullable<ScheduleCatalogEntry['lastDelivery']>
 
 /**
- * The ONE status marker set the frozen workspace contract paints
- * (`● active`, `○ paused`, `– ended`).
+ * The ONE shared status marker (design-language D5/D7): every status paints the
+ * same `‣`; the Title Case word carries the state. No per-status glyph exists.
  */
-export function scheduleStatusMarker(status: ScheduleTaskStatus): string {
-  switch (status) {
-    case 'active': return '●'
-    case 'paused': return '○'
-    case 'ended': return '–'
-  }
+export function scheduleStatusMarker(_status: ScheduleTaskStatus): string {
+  return '‣'
 }
 
-/** The user-facing word for an official task status. */
+/** The Title Case user-facing word for an official task status (D12). */
 export function scheduleStatusWord(status: ScheduleTaskStatus): string {
   switch (status) {
-    case 'active': return 'active'
-    case 'paused': return 'paused'
-    case 'ended': return 'ended'
+    case 'active': return 'Active'
+    case 'paused': return 'Paused'
+    case 'ended': return 'Ended'
   }
 }
 
-/** `● active` / `○ paused` / `– ended`. This is the TASK status only. */
+/** `‣ Active` / `‣ Paused` / `‣ Ended`. This is the TASK status only. */
 export function scheduleStatusText(entry: ScheduleCatalogEntry): string {
   return `${scheduleStatusMarker(entry.status)} ${scheduleStatusWord(entry.status)}`
 }
 
 /**
- * Format one official RFC 3339 instant in the terminal user's LOCAL zone.
- * This is display only: correctness never depends on the local clock, and the
- * instant is never recomputed from a rule.
+ * Format one official RFC 3339 instant as the CANONICAL UTC value the Host
+ * committed. Display only: the instant comes from the official record and is
+ * never recomputed, and no Client-local zone is ever inferred (a Split Client
+ * may sit in a different zone than the Host rule).
  */
 export function formatLocalInstant(instant: string): string {
-  const date = new Date(instant)
-  if (Number.isNaN(date.getTime())) return instant
-  const pad = (value: number): string => String(value).padStart(2, '0')
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} `
-    + `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+  return instant
 }
 
 /** The official time zone of one rule. `at`, `after` and `every` records carry
@@ -79,7 +72,7 @@ export function occurrencePrefix(record: ScheduleCatalogEntry): 'next' | 'final'
  * cron/RRULE evaluation happens here.
  */
 export function formatOccurrence(record: ScheduleCatalogEntry): string {
-  return `${occurrencePrefix(record)} ${formatLocalInstant(record.scheduledAt)} local · ${officialTimeZone(record)}`
+  return `${occurrencePrefix(record)} ${formatLocalInstant(record.scheduledAt)} · ${officialTimeZone(record)}`
 }
 
 const WEEKDAY_LABELS: Readonly<Record<number, string>> = {
@@ -102,7 +95,7 @@ export function formatRuleSummary(record: ScheduleCatalogEntry): string {
     case 'after':
       return `after ${formatSeconds(record.afterSeconds)}`
     case 'at':
-      return `at ${formatLocalInstant(record.scheduledAt)} local`
+      return `at ${formatLocalInstant(record.scheduledAt)} UTC`
     case 'every':
       return `every ${formatSeconds(record.everySeconds)}`
     case 'daily':
@@ -139,7 +132,7 @@ export function formatExecutionActivity(entry: ScheduleCatalogEntry): string {
 export function formatDeliveryFloor(entry: ScheduleCatalogEntry): string | undefined {
   return entry.deliveryFloorEndsAt === undefined
     ? undefined
-    : `until ${formatLocalInstant(entry.deliveryFloorEndsAt)} local`
+    : `until ${formatLocalInstant(entry.deliveryFloorEndsAt)} UTC`
 }
 
 /** The official facts of one stored delivery receipt. */
@@ -153,8 +146,8 @@ export interface DeliveryFacts {
 /** Project one receipt into its display facts (no clock, no derivation). */
 export function deliveryFacts(receipt: ScheduleDeliveryReceipt): DeliveryFacts {
   return {
-    scheduledAt: `${formatLocalInstant(receipt.scheduledAt)} local`,
-    deliveredAt: `${formatLocalInstant(receipt.deliveredAt)} local`,
+    scheduledAt: `${formatLocalInstant(receipt.scheduledAt)} UTC`,
+    deliveredAt: `${formatLocalInstant(receipt.deliveredAt)} UTC`,
     messageId: receipt.messageId,
     targetSessionId: receipt.targetSessionId,
   }
