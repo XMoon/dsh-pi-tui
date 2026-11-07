@@ -6357,6 +6357,27 @@ export class TuiApp {
     options?: { readonly allowEditorWorkspaceShortcut?: boolean },
   ): TuiInputListenerResult {
     const allowEditorWorkspaceShortcut = options?.allowEditorWorkspaceShortcut !== false
+    // M5-U-E: whether the plain-Left gesture stage was really consulted for
+    // THIS event. Every early owner return skips it, and a real Left consumed
+    // by a higher-priority owner (a modal, an overlay, an Advanced capture, a
+    // replacement editor, ...) is an INTERVENING input exactly like any other
+    // key — it must invalidate the armed first press, never be stitched over.
+    const gestureExamined = { examined: false }
+    try {
+      return this.runInputLadder(data, allowEditorWorkspaceShortcut, gestureExamined)
+    } finally {
+      if (!gestureExamined.examined && this.isPlainLeftPress(data)) this.clearLeftWorkspaceArm()
+    }
+  }
+
+  /** One pass through the host precedence ladder. Split from
+   * {@link handleInputCore} only so the unexamined-real-Left invalidation above
+   * has ONE exit hook instead of one per branch. */
+  private runInputLadder(
+    data: string,
+    allowEditorWorkspaceShortcut: boolean,
+    gestureExamined: { examined: boolean },
+  ): TuiInputListenerResult {
     // M5-U-E: BEFORE any owner below can consume this event, a REAL key that
     // is not the gesture's own plain Left invalidates the first-Press latch
     // (a Question/Approval/History/overlay-consumed key still means the user
@@ -6877,7 +6898,8 @@ export class TuiApp {
       // the continuable viewer's `viewer-editor`) may arm or complete the Host
       // Editor `←←` gesture. The first press returns false and the fork Editor
       // receives the Left exactly as before; the second consumes it.
-      if (route.kind === 'editor' && this.maybeOpenWorkspaceFromLeft(data, allowEditorWorkspaceShortcut)) {
+      if (route.kind === 'editor'
+        && this.maybeOpenWorkspaceFromLeft(data, allowEditorWorkspaceShortcut, gestureExamined)) {
         return { consume: true }
       }
       // Leave normal host editing to pi-tui's focused-component dispatch.
@@ -17674,6 +17696,9 @@ export class TuiApp {
    * `parseKey` equality additionally refuses them here.
    */
   private isPlainLeftPress(data: string): boolean {
+    // A Kitty repeat/release parses to the SAME key identity as its press, so
+    // the protocol artifact filter is part of the PRESS question itself.
+    if (isKeyRelease(data) || isKeyRepeat(data)) return false
     return matchesKey(data, 'left') && parseKey(data) === 'left'
   }
 
@@ -17750,7 +17775,14 @@ export class TuiApp {
    * scope and consumes the key. Any other combination is a fresh first press
    * (an expired latch is simply overwritten).
    */
-  private maybeOpenWorkspaceFromLeft(data: string, allowed: boolean): boolean {
+  private maybeOpenWorkspaceFromLeft(
+    data: string,
+    allowed: boolean,
+    gestureExamined: { examined: boolean },
+  ): boolean {
+    // Reaching this stage means the plain Left WAS the unclaimed Host Editor
+    // route — whether it arms, opens, or declines for a live-owner reason.
+    gestureExamined.examined = true
     const control = this.editorWorkspaceEntry
     if (!allowed || control === undefined || !control.available()
       || !this.editorWorkspaceShortcutEligible() || !this.isPlainLeftPress(data)) {

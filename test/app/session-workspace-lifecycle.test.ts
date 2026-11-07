@@ -44,6 +44,8 @@ import type { SessionSwitchOutcome } from '../../src/app/session/runtime.ts'
 import type { SessionScope } from '../../src/app/session/scope.ts'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { EditorRegistry } from '../../src/extension/internal/editor-registry.ts'
+import { AdvancedInputRegistry } from '../../src/extension/internal/advanced-input.ts'
+import { normalizeInputEvent } from '../../src/extension/internal/input-events.ts'
 import type { HistoryOpenScope } from '../../src/tui-app.ts'
 import type { HistorySearchSource } from '../../src/client/history/search.ts'
 import type { SettingsWorkspaceSource } from '../../src/tui/panels/settings-workspace-panel.ts'
@@ -263,6 +265,8 @@ function harness(options: {
   readonly isImageDraft?: () => boolean
   /** The Unstable raw interception stage (E-L8 consume/rewrite). */
   readonly unstableInputRoute?: (data: string) => import('../../src/extension/internal/unstable-input.ts').UnstableRawRouteResult
+  /** The real Advanced input capture registry route (E-L13). */
+  readonly advancedInputRoute?: (data: string) => 'consumed' | 'passed'
 }): Harness {
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(
@@ -278,6 +282,7 @@ function harness(options: {
         unstableInputRoute: (data: string) => options.unstableInputRoute!(data),
         unstableInputsLive: () => true,
       }),
+      ...(options.advancedInputRoute === undefined ? {} : { advancedInputRoute: options.advancedInputRoute }),
       ...(options.editorRegistry === undefined ? {} : { editorRegistry: options.editorRegistry }),
       ...(options.historySearchSource === undefined ? {} : { historySearchSource: options.historySearchSource }),
       ...(options.historySearchCwd === undefined ? {} : { historySearchCwd: options.historySearchCwd }),
@@ -1617,4 +1622,45 @@ test('E-L12: a refused open leaves no hidden reader and consumes only that secon
   h.pressLeft()
   await h.vt.waitForRender()
   assert.ok(!h.view().includes('Sessions'), 'an Esc close leaves no armed latch')
+})
+
+test('E-L13: a Left consumed by an Advanced capture invalidates the pair; only a fresh pair opens', async () => {
+  const registry = new AdvancedInputRegistry()
+  let captureLeft = false
+  const capture = registry.register({
+    id: 'ue-consume-left',
+    priority: 0,
+    mode: 'capture',
+    handle: (event) => captureLeft && event.kind === 'key'
+      && event.key.key === 'left'
+      && !event.key.ctrl && !event.key.alt && !event.key.shift && !event.key.super,
+  }, 'ue-owner')
+  const h = harness({
+    currentSessionId: CURRENT,
+    advancedInputRoute: (data) => registry.route(data, normalizeInputEvent),
+  })
+  try {
+    // The first eligible Left reaches the Host editor and arms the window.
+    h.pressLeft()
+    // The Advanced capture now owns the NEXT Left: it never reaches the editor.
+    captureLeft = true
+    h.pressLeft()
+    await h.vt.waitForRender()
+    assert.ok(!h.view().includes('Sessions'), 'a captured second Left never opens')
+    assert.equal(h.listCalls, 0)
+    // The capture releases the key. The first editor Left and THIS editor Left
+    // are not a consecutive pair — the captured Left is an intervening input.
+    captureLeft = false
+    h.pressLeft()
+    await h.vt.waitForRender()
+    assert.ok(!h.view().includes('Sessions'), 'a captured Left between the pair must not be stitched over')
+    assert.equal(h.listCalls, 0)
+    // This third editor Left became the NEW first press: the next one opens.
+    h.pressLeft()
+    await waitUntil(() => h.view().includes('Sessions'), 'a fresh consecutive pair opens')
+    assert.equal(h.listCalls, 1)
+  } finally {
+    capture.dispose()
+    h.close()
+  }
 })
