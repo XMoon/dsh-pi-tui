@@ -433,6 +433,102 @@ test('the Workspace selector is in-place, two options, and a disabled Current ne
   assert.ok(h.view().includes('Workspace: All workspaces [w]'), 'Esc cancels without changing the scope')
 })
 
+test('a row the current frame never painted can never be opened, and resizing re-validates it', async () => {
+  // 80×3 paints only the header/subheader/action bar: no Session row exists.
+  const h = harness({ columns: 80, rows: 3 })
+  h.handle.setSnapshot(snapshot({
+    rows: [row(CURRENT, 3_000, { title: 'Current session' }), row(OTHER, 2_000, { title: 'Other session' })],
+  }))
+  await h.paint()
+  assert.ok(!h.view().includes('Other session'), 'no row is painted at 3 rows')
+  h.vt.sendInput('\x1b[B') // select the non-current row logically
+  await h.paint()
+  h.vt.sendInput('\r')
+  await h.paint()
+  assert.deepEqual(h.resumes, [], 'an unpainted row can never be opened by a blind Enter')
+
+  // Growing the terminal paints the same logical selection; the activation is
+  // now admitted against the actually painted frame.
+  h.vt.resize(80, 24)
+  await h.paint()
+  assert.ok(h.view().includes('Other session'))
+  h.vt.sendInput('\r')
+  await h.paint()
+  assert.deepEqual(h.resumes, [OTHER], 'the re-validated painted row opens')
+})
+
+test('status rows that squeeze the whole list out also withhold activation', async () => {
+  const h = harness({ columns: 80, rows: 8 })
+  h.handle.setSnapshot(snapshot({
+    rows: [row(CURRENT, 3_000, { title: 'Current session' }), row(OTHER, 2_000, { title: 'Other session' })],
+    projectionError: 'projection failed',
+  }))
+  h.handle.workspaceUnavailable('Workspace scope unavailable')
+  await h.paint()
+  const squeezed = h.view()
+  assert.ok(squeezed.includes('Recent sessions · 2'))
+  assert.ok(squeezed.includes('Workspace scope unavailable'))
+  assert.ok(squeezed.includes('Some session details are unavailable'))
+  assert.ok(!squeezed.includes('Other session'), `status rows consumed the list budget:\n${squeezed}`)
+  h.vt.sendInput('\x1b[B')
+  h.vt.sendInput('\r')
+  await h.paint()
+  assert.deepEqual(h.resumes, [], 'a status-squeezed list admits no activation')
+
+  h.vt.resize(80, 24)
+  await h.paint()
+  h.vt.sendInput('\r')
+  await h.paint()
+  assert.deepEqual(h.resumes, [OTHER], 'the visible row opens after the list is painted again')
+})
+
+test('the two-Enter search contract cannot open an unpainted result', async () => {
+  const h = harness({ columns: 80, rows: 3, initialMode: 'search' })
+  h.handle.setSnapshot(snapshot({
+    query: 'needle',
+    searchState: 'ready',
+    searchResults: [{ row: row(OTHER, 2_000, { title: 'Other session' }), source: 'Content', snippet: 'needle found' }],
+  }), 'needle')
+  await h.paint()
+  h.vt.sendInput('\r') // editor -> result focus
+  h.vt.sendInput('\r') // result Enter, but no result was painted
+  await h.paint()
+  assert.deepEqual(h.resumes, [], 'an unpainted result can never be opened')
+
+  h.vt.resize(80, 24)
+  await h.paint()
+  h.vt.sendInput('\r')
+  await h.paint()
+  assert.deepEqual(h.resumes, [OTHER], 'the painted result opens after the resize')
+})
+
+test('a search fact that is also the app notice paints exactly once in the same frame', async () => {
+  const h = harness({ columns: 100, rows: 24, initialMode: 'search' })
+  h.handle.setSnapshot(snapshot({
+    query: 'needle',
+    searchState: 'error',
+    searchError: 'fts backend exploded',
+    searchResults: [],
+  }), 'needle')
+  h.app.notify('session content search failed: fts backend exploded', 'error')
+  await h.paint()
+  const view = h.view()
+  assert.equal(
+    view.split('\n').filter(line => line.includes('session content search failed: fts backend exploded')).length,
+    1,
+    `the same fact has exactly ONE visible exit in the frame:\n${view}`,
+  )
+
+  h.handle.setSnapshot(snapshot({ query: 'needle', searchState: 'ready', hasMore: true, searchResults: [] }))
+  h.app.notify('More content matches exist — refine the search.')
+  await h.paint()
+  assert.equal(
+    h.view().split('\n').filter(line => line.includes('More content matches exist — refine the search.')).length,
+    1,
+    'the hasMore fact is painted once, never as status + notice',
+  )
+})
+
 test('the frozen size matrix keeps the Esc row reachable and every painted cell inside the width', async () => {
   const h = harness({ columns: 80, rows: 24 })
   h.handle.setSnapshot(snapshot({

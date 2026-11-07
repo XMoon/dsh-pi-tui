@@ -67,6 +67,7 @@ class ControlledFactsHandle implements WorkspaceFactsHandle {
   disposed = 0
   private readonly queue: WorkspaceFactsFrame[] = []
   private resolveNext: ((result: IteratorResult<WorkspaceFactsFrame>) => void) | undefined
+  private rejectNext: ((error: unknown) => void) | undefined
   private done = false
   private readonly signal: AbortSignal | undefined
 
@@ -85,11 +86,33 @@ class ControlledFactsHandle implements WorkspaceFactsHandle {
     this.queue.push(frame)
   }
 
+  /** The official stream ENDS normally (no error): the membership proof is
+   *  gone even though nothing threw. */
+  finish(): void {
+    if (this.done) return
+    this.done = true
+    const resolve = this.resolveNext
+    this.resolveNext = undefined
+    this.rejectNext = undefined
+    resolve?.({ done: true, value: undefined })
+  }
+
+  /** The official stream fails with a real generation/transport error. */
+  fail(error: unknown): void {
+    if (this.done) return
+    this.done = true
+    const reject = this.rejectNext
+    this.resolveNext = undefined
+    this.rejectNext = undefined
+    reject?.(error)
+  }
+
   dispose(): void {
     this.disposed += 1
     this.done = true
     const resolve = this.resolveNext
     this.resolveNext = undefined
+    this.rejectNext = undefined
     resolve?.({ done: true, value: undefined })
   }
 
@@ -101,7 +124,10 @@ class ControlledFactsHandle implements WorkspaceFactsHandle {
         yield queued
         continue
       }
-      const next = await new Promise<IteratorResult<WorkspaceFactsFrame>>((resolve) => { this.resolveNext = resolve })
+      const next = await new Promise<IteratorResult<WorkspaceFactsFrame>>((resolve, reject) => {
+        this.resolveNext = resolve
+        this.rejectNext = reject
+      })
       if (next.done === true) return
       yield next.value
     }
@@ -488,6 +514,53 @@ test('a blocking Question pre-empts the workspace, and a refused lease leaves no
   await questions.catch(() => {})
   await h.vt.waitForRender()
   assert.ok(!h.view().includes('Sessions'), 'the refused workspace never resurrects')
+})
+
+test('a normally ended official Workspace stream drops the proved Current scope', async () => {
+  const h = harness({ currentSessionId: CURRENT })
+  await h.runSessions('')
+  await h.vt.waitForRender()
+  h.facts.handles[0]!.push(baseline(
+    { workspaceId: 'ws-a', path: '/ws', title: 'a', sessionIds: [CURRENT] },
+    { workspaceId: 'ws-b', path: '/other', title: 'b', sessionIds: [OTHER] },
+  ))
+  await waitUntil(() => h.view().includes('Current workspace'), 'Current is proved')
+  // The official Remote handle may end iterating after a valid baseline without
+  // throwing; the proof is still gone.
+  h.facts.handles[0]!.finish()
+  await waitUntil(() => h.view().includes('Workspace scope unavailable'), 'the ended stream is visible')
+  const after = h.view()
+  assert.ok(after.includes('Workspace: All workspaces [w]'), 'an ended stream falls back to All')
+  assert.ok(after.includes('Other session'), 'All restores every listed row')
+})
+
+test('a failed official Workspace stream drops the proved Current scope', async () => {
+  const h = harness({ currentSessionId: CURRENT })
+  await h.runSessions('')
+  await h.vt.waitForRender()
+  h.facts.handles[0]!.push(baseline({ workspaceId: 'ws-a', path: '/ws', title: 'a', sessionIds: [CURRENT] }))
+  await waitUntil(() => h.view().includes('Current workspace'), 'Current is proved')
+  h.facts.handles[0]!.fail(new Error('workspace generation superseded'))
+  await waitUntil(() => h.view().includes('Workspace scope unavailable'), 'the failed stream is visible')
+  assert.ok(h.view().includes('Workspace: All workspaces [w]'), 'a failed stream falls back to All')
+})
+
+test('an active close owns the stream end and paints no stale scope failure', async () => {
+  const h = harness({ currentSessionId: CURRENT })
+  await h.runSessions('')
+  await h.vt.waitForRender()
+  h.facts.handles[0]!.push(baseline({ workspaceId: 'ws-a', path: '/ws', title: 'a', sessionIds: [CURRENT] }))
+  await waitUntil(() => h.view().includes('Current workspace'), 'Current is proved')
+  h.vt.sendInput('\x1b') // the user closes the workspace
+  await h.vt.waitForRender()
+  assert.equal(h.facts.handles[0]!.disposed, 1, 'the active close disposes the follow exactly once')
+  h.facts.handles[0]!.finish() // a late normal end after the close
+  await h.vt.waitForRender()
+  assert.equal(
+    h.notices.some(notice => notice.text.includes('Workspace scope unavailable')),
+    false,
+    'an active close never paints a stale scope failure',
+  )
 })
 
 test('stop/dispose closes the lease and the Workspace stream exactly once', async () => {

@@ -224,8 +224,20 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
         diag: runner.diag,
         sessionId: () => open.request.subject.currentSessionId,
         isCancellation: () => open.disposed || open.controller.signal.aborted,
+        // A stream can END normally after a proved baseline (the official
+        // Remote handle releases its subscription without throwing). The
+        // membership proof is then gone: do not keep the old Current scope or
+        // its filtered rows as if the follow were still live. The stale
+        // subject/token cases are silently left to the read-owner retirement.
+        onResult: () => {
+          if (open.disposed || open.controller.signal.aborted) return
+          if (!open.request.subject.isCurrent()) return
+          handle.workspaceUnavailable('Workspace scope unavailable')
+        },
         onError: () => {
-          if (!open.disposed) handle.workspaceUnavailable('Workspace scope unavailable')
+          if (open.disposed || open.controller.signal.aborted) return
+          if (!open.request.subject.isCurrent()) return
+          handle.workspaceUnavailable('Workspace scope unavailable')
         },
       })
     }

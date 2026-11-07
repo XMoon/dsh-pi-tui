@@ -204,6 +204,12 @@ export class SessionWorkspacePanel implements Component {
   private lastBrowseSelection: string | undefined
   private lastBrowseScroll = 0
   private lastPaintedListRows = 1
+  /** The row ids actually painted in the LAST frame of each mode. Activation
+   *  is admitted against this set, never against the logical roster: a row the
+   *  current height/status budget did not paint cannot be opened by a blind
+   *  Enter. */
+  private lastPaintedBrowseIds: string[] = []
+  private lastPaintedResultIds: string[] = []
   /** The one raw search editor. Programmatic seeds are fenced by
    *  `applyingSeed`, so only a real text change reaches the read owner. */
   private readonly searchInput = new Input({ prompt: 'Search: ' })
@@ -529,9 +535,11 @@ export class SessionWorkspacePanel implements Component {
   private resumeSelected(): void {
     if (this.snapshot.resumePending || this.selectedSessionId === undefined) return
     if (this.selectedSessionId === this.options.currentSessionId) return
-    // A scope/membership change can hide the previously selected row; the
-    // visible projection (not the stale id) is the only resumable set.
-    if (!this.currentRows().some((row) => this.rowIdOf(row) === this.selectedSessionId)) return
+    // A scope/membership change can hide the previously selected row, and a
+    // short/status-squeezed frame can paint no rows at all; only the set this
+    // frame really painted may be opened.
+    const painted = this.searchMode ? this.lastPaintedResultIds : this.lastPaintedBrowseIds
+    if (!painted.includes(this.selectedSessionId)) return
     this.host.onResume(this.selectedSessionId)
   }
 
@@ -606,6 +614,10 @@ export class SessionWorkspacePanel implements Component {
   // ── Rendering ───────────────────────────────────────────────────────────
 
   render(width: number): string[] {
+    // Every frame re-establishes which ids are really visible; a resize, a
+    // status row or a result update can remove the selected row entirely.
+    this.lastPaintedBrowseIds = []
+    this.lastPaintedResultIds = []
     const height = Math.max(0, this.host.rows())
     if (height === 0) return []
     const actionBar = this.renderActionBar(width)
@@ -714,6 +726,7 @@ export class SessionWorkspacePanel implements Component {
     const selectedIndex = Math.max(0, rows.findIndex((row) => row.id === this.selectedSessionId))
     this.browseScroll = rebaseOffset(this.browseScroll, selectedIndex, rows.length, budget)
     const visible = rows.slice(this.browseScroll, this.browseScroll + budget)
+    this.lastPaintedBrowseIds = visible.map((row) => row.id)
     return visible.map((row) => fit(this.browseRowLine(row, markSelected && row.id === this.selectedSessionId, width), width))
   }
 
@@ -736,9 +749,9 @@ export class SessionWorkspacePanel implements Component {
     if (rows.length === 0) return []
     const selectedIndex = Math.max(0, rows.findIndex((row) => row.row.id === this.selectedSessionId))
     this.resultScroll = rebaseOffset(this.resultScroll, selectedIndex, rows.length, budget)
-    return rows
-      .slice(this.resultScroll, this.resultScroll + budget)
-      .map((result) => fit(this.searchRowLine(result, result.row.id === this.selectedSessionId, width), width))
+    const visible = rows.slice(this.resultScroll, this.resultScroll + budget)
+    this.lastPaintedResultIds = visible.map((result) => result.row.id)
+    return visible.map((result) => fit(this.searchRowLine(result, result.row.id === this.selectedSessionId, width), width))
   }
 
   private browseRowLine(row: SessionBrowserRow, selected: boolean, width: number): string {
@@ -751,7 +764,8 @@ export class SessionWorkspacePanel implements Component {
       color.textDim(workspaceKey(row.cwd)),
     ].join(color.textMuted(' · '))
     const room = Math.max(1, width - 4 - visibleWidth(meta))
-    const label = selected ? color.primary(truncateToWidth(title, room, '…', false)) : color.text(truncateToWidth(title, room, '…', false))
+    const clipped = truncateToWidth(title, room, '…', false)
+    const label = selected ? color.textStrong(clipped) : color.text(clipped)
     return fit(`${marker}${currentMark}${label}  ${meta}`, width)
   }
 
@@ -768,7 +782,8 @@ export class SessionWorkspacePanel implements Component {
     ].join(color.textMuted(' · '))
     const snippet = result.snippet === undefined ? '' : ` · …${sanitizedPhysicalLine(result.snippet)}…`
     const room = Math.max(1, width - 4 - visibleWidth(meta) - visibleWidth(snippet))
-    const label = selected ? color.primary(truncateToWidth(title, room, '…', false)) : color.text(truncateToWidth(title, room, '…', false))
+    const clipped = truncateToWidth(title, room, '…', false)
+    const label = selected ? color.textStrong(clipped) : color.text(clipped)
     return fit(`${marker}${currentMark}${label}  ${meta}${snippet}`, width)
   }
 
@@ -777,21 +792,19 @@ export class SessionWorkspacePanel implements Component {
   private renderStatusLines(width: number): string[] {
     const lines: string[] = []
     const snapshot = this.snapshot
+    /** Raw projected status texts painted by THIS frame (dedupe key). */
+    const paintedStatuses = new Set<string>()
     const push = (text: string, kind: 'muted' | 'error' = 'muted'): void => {
       // A Host/extension notice is arbitrary bytes: it must cross the SAME
       // one-physical-row projection the title/cwd/snippet do before it paints.
       const line = sanitizedPhysicalLine(text)
+      paintedStatuses.add(line)
       lines.push(kind === 'error'
         ? color.error(truncateToWidth(line, width, '…', false))
         : color.textMuted(truncateToWidth(line, width, '…', false)))
     }
     if (snapshot.resumePending) push('Opening session…')
     if (this.statusMessage !== undefined) push(this.statusMessage)
-    // The app's ONE transient notice (a failed/indeterminate interactive switch,
-    // a clipboard or settings notice). A leased workspace paints it because the
-    // surface that normally does is paused underneath.
-    const notice = this.host.notice()
-    if (notice !== undefined) push(notice.text, notice.kind === 'error' ? 'error' : 'muted')
     if (snapshot.listState === 'error') {
       push(`session listing failed: ${sanitizedPhysicalLine(snapshot.listError ?? 'unknown error')}`, 'error')
     } else if (snapshot.listState === 'unavailable') {
@@ -814,6 +827,14 @@ export class SessionWorkspacePanel implements Component {
     }
     if (snapshot.projectionError !== undefined) {
       push(`Some session details are unavailable: ${sanitizedPhysicalLine(snapshot.projectionError)}`)
+    }
+    // The app's ONE transient notice (a failed/indeterminate interactive switch,
+    // a clipboard or settings notice). It is painted LAST and only when the
+    // same fact is not already an above status line: one visible exit per fact
+    // in this frame, never a global notice plus a panel duplicate.
+    const notice = this.host.notice()
+    if (notice !== undefined && !paintedStatuses.has(sanitizedPhysicalLine(notice.text))) {
+      push(notice.text, notice.kind === 'error' ? 'error' : 'muted')
     }
     return lines
   }
