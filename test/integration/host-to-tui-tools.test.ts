@@ -380,7 +380,7 @@ test('the official scoped session_search results reach the PiTui Tool output, ne
   // query into its own raw editor. `/` focuses the workspace editor and it
   // must start empty.
   app.vt.sendInput('/')
-  await app.settle()
+  await app.waitFor(() => app.view().includes('Search:'), 'the workspace query editor')
   const editor = app.view()
   assert.match(editor, /Search:\s*$/mu, 'the workspace keeps its own EMPTY query editor')
   assert.doesNotMatch(editor, /ALPHA_NEEDLE_PROJECT/u, 'the Host query is not a Session Workspace search injection')
