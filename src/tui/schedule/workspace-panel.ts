@@ -175,6 +175,14 @@ interface PaintedFrame {
    *  different task (or a different editor instance) makes every hit in this
    *  frame stale even though mode/confirmation did not change. */
   readonly subjectId: string | null
+  /** The observed subject FACTS this frame painted (the row the Controller's
+   *  `selectedEntry` precedence would act on: `detail` first, then the catalog
+   *  row) — frozen at paint time, never re-derived at press/release. */
+  readonly subjectFacts: string
+  /** The List selection this frame painted (List actions act on it). */
+  readonly listSelection: string | null
+  /** The History cursor this frame painted (the `more` action pages it). */
+  readonly historyCursor: string | null
 }
 
 /** One piece of a painted row. */
@@ -246,10 +254,9 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     readonly mode: ScheduleWorkspaceSnapshot['mode']
     readonly subjectId: string | null
     readonly confirmToken: number | undefined
-    /** The OBSERVED subject facts the frame painted (detail status/revision).
-     *  A pause pressed on `Active@r1` can never become a resume of
-     *  `Paused@r2`: any observed change repaints and invalidates the gesture. */
     readonly subjectFacts: string
+    readonly listSelection: string | null
+    readonly historyCursor: string | null
   } | undefined
   private readonly searchInput = new Input({ prompt: '' })
   private readonly editorInput = new Input({ prompt: '' })
@@ -873,6 +880,14 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
         : snapshot.mode === 'editor'
           ? (snapshot.editor?.id === undefined ? null : String(snapshot.editor.id))
           : null,
+      // Frozen from the SAME snapshot this frame was painted from, with the
+      // Controller's own precedence (detail first, then the catalog row), so a
+      // press/release can never mix two read generations.
+      subjectFacts: frameSubjectFacts(snapshot),
+      listSelection: snapshot.mode === 'list'
+        ? (snapshot.selectedId === undefined ? null : String(snapshot.selectedId))
+        : null,
+      historyCursor: snapshot.mode === 'history' ? (snapshot.history?.nextBefore ?? null) : null,
     }
     return lines.slice(0, rows)
   }
@@ -1690,7 +1705,9 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
           mode: frame.mode,
           subjectId: frame.subjectId,
           confirmToken: frame.confirmToken,
-          subjectFacts: this.paintedSubjectFacts(),
+          subjectFacts: frame.subjectFacts,
+          listSelection: frame.listSelection,
+          historyCursor: frame.historyCursor,
         }
   }
 
@@ -1713,7 +1730,9 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
       || pressed.mode !== frame.mode
       || pressed.subjectId !== frame.subjectId
       || pressed.confirmToken !== frame.confirmToken
-      || pressed.subjectFacts !== this.paintedSubjectFacts()) {
+      || pressed.subjectFacts !== frame.subjectFacts
+      || pressed.listSelection !== frame.listSelection
+      || pressed.historyCursor !== frame.historyCursor) {
       return
     }
     this.activateHit(hit)
@@ -1747,17 +1766,6 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     return { handled: true, render: true }
   }
 
-  /** The observed subject facts of the CURRENT snapshot (status + revision of
-   *  the selected detail row); the empty string when no such row exists. */
-  private paintedSubjectFacts(): string {
-    const snapshot = this.snapshot
-    const id = snapshot.mode === 'detail' ? snapshot.selectedId : snapshot.editor?.id
-    if (id === undefined) return ''
-    const row = snapshot.rows.find(candidate => candidate.id === id) ?? (snapshot.detail?.id === id ? snapshot.detail : undefined)
-    if (row === undefined) return ''
-    return `${row.status}@${row.updatedAt ?? ''}`
-  }
-
   /** Whether the LAST painted frame still describes the CURRENT page and
    *  confirmation identity; anything else is a stale click. */
   private frameIsCurrent(frame: PaintedFrame | undefined): frame is PaintedFrame {
@@ -1772,6 +1780,11 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
         ? (this.snapshot.editor?.id === undefined ? null : String(this.snapshot.editor.id))
         : null
     return frame.subjectId === currentSubject
+      && frame.subjectFacts === frameSubjectFacts(this.snapshot)
+      && frame.listSelection === (this.snapshot.mode === 'list'
+        ? (this.snapshot.selectedId === undefined ? null : String(this.snapshot.selectedId))
+        : null)
+      && frame.historyCursor === (this.snapshot.mode === 'history' ? (this.snapshot.history?.nextBefore ?? null) : null)
   }
 
   private activateHit(hit: ScheduleHit): void {
@@ -2018,6 +2031,18 @@ function hitKey(hit: ScheduleHit): string {
     case 'action': return `action:${hit.action}`
     case 'field': return `field:${hit.id}`
   }
+}
+
+/** The observed subject facts of one snapshot, using the Controller's own
+ *  precedence (`detail` first, then the catalog row): the identity a Detail
+ *  action would act on. Empty when the page has no such row. */
+function frameSubjectFacts(snapshot: ScheduleWorkspaceSnapshot): string {
+  const id = snapshot.mode === 'detail' ? snapshot.selectedId : snapshot.editor?.id
+  if (id === undefined) return ''
+  const row = (snapshot.detail?.id === id ? snapshot.detail : undefined)
+    ?? snapshot.rows.find(candidate => candidate.id === id)
+  if (row === undefined) return ''
+  return `${row.status}@${row.updatedAt ?? ''}`
 }
 
 /** Resolve the painted region at one cell of the LAST frame. */
