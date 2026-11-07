@@ -834,7 +834,7 @@ test('L6: an invalid intermediate timing is DIRTY, never an exception out of Esc
   }
 })
 
-test('L6: conflict recovery reloads the latest revision while keeping the draft', async () => {
+test('L6: conflict recovery DISPLAYS the latest revision; the user re-applies by hand', async () => {
   const life = await opened()
   try {
     life.controller.dispatch({ kind: 'open-detail', id: 'schedule-1' })
@@ -855,12 +855,14 @@ test('L6: conflict recovery reloads the latest revision while keeping the draft'
     }))
     life.controller.dispatch({ kind: 'reload-latest' })
     await flush()
-    assert.equal(life.controller.snapshot().notice?.text, SCHEDULE_COPY.reloadConflict('the title'))
-    assert.equal(life.controller.snapshot().notice?.kind, 'error', 'a field edited on BOTH sides is an observable conflict')
-    assert.equal(life.controller.snapshot().editor?.title, 'My edit', 'the user draft is never overwritten')
+    assert.equal(life.controller.snapshot().notice?.text, SCHEDULE_COPY.reloaded)
+    assert.equal(life.controller.snapshot().editor?.title, 'Host side edit',
+      'reload shows the Host facts; it never auto-merges the old draft')
     assert.equal(life.controller.snapshot().editor?.expectedUpdatedAt, '2026-01-02T00:00:00.000Z',
-      'the rebased CAS revision is the latest Host one')
+      'the explicit reload adopts the latest CAS revision')
 
+    // Re-apply manually: the user retypes the change they still want.
+    life.controller.dispatch({ kind: 'set-field', fieldId: 'title', value: 'My edit' })
     life.port.editResult = async () => entry({ title: 'My edit', updatedAt: '2026-01-03T00:00:00.000Z' })
     life.controller.dispatch({ kind: 'save' })
     await flush()
@@ -1065,11 +1067,12 @@ test('L6: reload-latest never overwrites fields another client changed but the u
     }))
     life.controller.dispatch({ kind: 'reload-latest' })
     await flush()
-    assert.equal(life.controller.snapshot().notice?.text, SCHEDULE_COPY.reloaded,
-      'no field was edited on both sides: this is a clean rebase')
-    assert.equal(life.controller.snapshot().editor?.title, 'B', "the untouched field follows the Host's newer value")
-    assert.equal(life.controller.snapshot().editor?.prompt, 'P2', 'the user edit is kept')
+    assert.equal(life.controller.snapshot().notice?.text, SCHEDULE_COPY.reloaded)
+    assert.equal(life.controller.snapshot().editor?.title, 'B', "the editor now displays the Host's newer value")
+    assert.equal(life.controller.snapshot().editor?.prompt, 'P', 'no automatic field-level merge carries the old edit')
 
+    // The user re-applies the prompt change manually on top of the latest facts.
+    life.controller.dispatch({ kind: 'set-field', fieldId: 'prompt', value: 'P2' })
     life.port.editResult = async () => entry({ title: 'B', prompt: 'P2', updatedAt: '2026-01-03T00:00:00.000Z' })
     life.controller.dispatch({ kind: 'save' })
     await flush()
@@ -1084,7 +1087,7 @@ test('L6: reload-latest never overwrites fields another client changed but the u
   }
 })
 
-test('L6: reload-latest keeps the user value for the SAME field and reports the overlap', async () => {
+test('L6: reload-latest shows the Host value for a field edited on both sides', async () => {
   const life = await opened()
   try {
     life.port.entries = [entry({ title: 'A', prompt: 'P' })]
@@ -1102,9 +1105,10 @@ test('L6: reload-latest keeps the user value for the SAME field and reports the 
     }))
     life.controller.dispatch({ kind: 'reload-latest' })
     await flush()
-    assert.equal(life.controller.snapshot().notice?.kind, 'error')
-    assert.match(life.controller.snapshot().notice?.text ?? '', /also changed the prompt/u)
-    assert.equal(life.controller.snapshot().editor?.prompt, 'Mine', 'the user value is preserved for the field they edited')
+    assert.equal(life.controller.snapshot().notice?.text, SCHEDULE_COPY.reloaded)
+    assert.equal(life.controller.snapshot().editor?.prompt, 'Theirs',
+      'the Host value is displayed; the user decides what to re-apply')
+    life.controller.dispatch({ kind: 'set-field', fieldId: 'prompt', value: 'Mine' })
     life.port.editResult = async () => entry({ prompt: 'Mine', updatedAt: '2026-01-03T00:00:00.000Z' })
     life.controller.dispatch({ kind: 'save' })
     await flush()
@@ -1134,15 +1138,18 @@ test('L6: consecutive reloads adopt each Host revision without inventing user in
     life.controller.dispatch({ kind: 'reload-latest' })
     await flush()
     assert.equal(life.controller.snapshot().editor?.title, 'B')
-    assert.equal(life.controller.snapshot().editor?.prompt, 'P2')
+    assert.equal(life.controller.snapshot().editor?.prompt, 'P', 'the old edit is not carried automatically')
+    life.controller.dispatch({ kind: 'set-field', fieldId: 'prompt', value: 'P2' })
 
     // Second reload: the title changed AGAIN (B -> C) while the user still only
     // edits the prompt. The adopted B must not be mistaken for user intent.
     life.port.viewResults.set('schedule-1', entry({ title: 'C', prompt: 'P', updatedAt: '2026-01-03T00:00:00.000Z' }))
     life.controller.dispatch({ kind: 'reload-latest' })
     await flush()
-    assert.equal(life.controller.snapshot().editor?.title, 'C', 'the twice-adopted title follows the Host')
+    assert.equal(life.controller.snapshot().editor?.title, 'C', 'the editor shows the Host each time')
+    assert.equal(life.controller.snapshot().editor?.prompt, 'P', 'still no automatic carry-over')
     assert.equal(life.controller.snapshot().notice?.text, SCHEDULE_COPY.reloaded)
+    life.controller.dispatch({ kind: 'set-field', fieldId: 'prompt', value: 'P2' })
 
     life.port.editResult = async () => entry({ title: 'C', prompt: 'P2', updatedAt: '2026-01-04T00:00:00.000Z' })
     life.controller.dispatch({ kind: 'save' })
@@ -1206,7 +1213,7 @@ test('L6: a schedule/changed signal refreshes a Help underlay without closing it
   }
 })
 
-test('L6: a value reverted to the baseline is not a pending edit', async () => {
+test('L6: reload never re-sends a reverted or old draft value', async () => {
   const life = await opened()
   try {
     life.port.entries = [entry({ title: 'A', prompt: 'P' })]
@@ -1218,12 +1225,16 @@ test('L6: a value reverted to the baseline is not a pending edit', async () => {
     await flush()
     life.controller.dispatch({ kind: 'set-field', fieldId: 'title', value: 'X' })
     life.controller.dispatch({ kind: 'set-field', fieldId: 'title', value: 'A' })
-    assert.equal(life.controller.snapshot().editor?.title, 'A')
     life.port.viewResults.set('schedule-1', entry({ title: 'B', prompt: 'P', updatedAt: '2026-01-02T00:00:00.000Z' }))
     life.controller.dispatch({ kind: 'reload-latest' })
     await flush()
-    assert.equal(life.controller.snapshot().editor?.title, 'B', 'the reverted title is untouched and follows the Host')
-    assert.equal(life.controller.snapshot().notice?.text, SCHEDULE_COPY.reloaded, 'no overlap was invented')
+    assert.equal(life.controller.snapshot().editor?.title, 'B')
+    assert.equal(life.controller.snapshot().editor?.prompt, 'P')
+    life.controller.dispatch({ kind: 'save' })
+    await flush()
+    assert.equal(life.controller.snapshot().notice?.text, 'Nothing changed yet.')
+    assert.equal(life.port.calls.some(call => call.method === 'edit'), false,
+      'a reverted/old draft value is never sent on the new revision')
   } finally {
     life.controller.dispose()
   }
@@ -1557,6 +1568,38 @@ test('L6: a catalog refresh during a pending Edit never strands the successful r
     assert.equal(life.controller.snapshot().editor, undefined, 'the successful Edit closes its OWN editor')
     assert.equal(life.controller.snapshot().mode, 'detail')
     assert.equal(life.controller.snapshot().detail?.id, 'task-a')
+  } finally {
+    life.controller.dispose()
+  }
+})
+
+test('L6: a reload started before a save cannot rewrite the pending save', async () => {
+  const life = await opened()
+  try {
+    life.controller.dispatch({ kind: 'open-detail', id: 'schedule-1' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-edit' })
+    await flush()
+    life.controller.dispatch({ kind: 'set-field', fieldId: 'title', value: 'Draft title' })
+    const reload = deferred<ScheduleViewResult>()
+    life.port.viewQueue = [reload.promise]
+    life.controller.dispatch({ kind: 'reload-latest' })
+    const save = deferred<ScheduleEditResult>()
+    life.port.editResult = () => save.promise
+    life.controller.dispatch({ kind: 'save' })
+    assert.equal(life.controller.snapshot().busy, true)
+    // The reload settles while the save is pending: it must not touch the draft
+    // or the revision the save already fixed.
+    reload.resolve(entry({ title: 'Host newer', prompt: 'Host prompt', updatedAt: '2026-01-09T00:00:00.000Z' }))
+    await flush()
+    save.resolve(entry({ title: 'Draft title', updatedAt: '2026-01-10T00:00:00.000Z' }))
+    await flush()
+    await life.controller.whenIdle()
+    const edits = life.port.calls.filter(call => call.method === 'edit')
+    const request = edits[edits.length - 1]?.args[0] as Extract<ScheduleEditRequest, { action: 'update' }> | undefined
+    assert.deepEqual(request?.patch, { title: 'Draft title' })
+    assert.equal(request?.expectedUpdatedAt, '2026-01-01T08:00:00.000Z',
+      'the save keeps the revision it captured, not the reload answer')
   } finally {
     life.controller.dispose()
   }

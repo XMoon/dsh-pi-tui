@@ -68,6 +68,7 @@ import {
   formatTargetSummary,
   officialTimeZone,
   scheduleStatusText,
+  scheduleStatusWord,
   shortScheduleId,
   type ScheduleTaskStatus,
 } from './format.ts'
@@ -1101,7 +1102,9 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
       }
     }
     fact('Title', entry.title, color.textStrong)
-    fact('Status', scheduleStatusText(entry), this.statusPaint(entry.status))
+    // D14.3: the shared marker belongs to the standalone status group (the list
+    // column). An inline fact row shows the word only.
+    fact('Status', scheduleStatusWord(entry.status), this.statusPaint(entry.status))
     fact('Execution', formatExecutionActivity(entry), entry.executionActive === true ? color.primary : color.textDim)
     const floor = formatDeliveryFloor(entry)
     fact('Delivery floor', floor ?? 'none', floor === undefined ? color.textDim : color.text)

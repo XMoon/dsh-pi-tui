@@ -238,7 +238,9 @@ test('an ended task renders status, execution activity and the delivery floor as
   const statusLine = lines.find(line => line.includes('Status'))
   const executionLine = lines.find(line => line.includes('Execution'))
   const floorLine = lines.find(line => line.includes('Delivery floor'))
-  assert.ok(statusLine !== undefined && statusLine.includes('‣ Ended'), 'the task status line uses the ONE shared marker and the Title Case word')
+  assert.ok(statusLine !== undefined && statusLine.includes('Ended'),
+    'the Detail status fact uses the Title Case word (the marker belongs to the list status column)')
+  assert.equal(statusLine.includes('‣'), false, 'D14.3: no repeated marker in an inline fact')
   assert.ok(executionLine !== undefined && executionLine.includes('in progress'), 'execution activity is its own fact')
   assert.ok(floorLine !== undefined && floorLine.includes('until '), 'the delivery floor is its own fact')
   assert.notEqual(statusLine, floorLine)
@@ -943,4 +945,18 @@ test('cross-line caret movement preserves the VISUAL cell column in mixed CJK/La
     fieldId: 'prompt',
     value: '汉字\nabYcd',
   }])
+})
+
+test('the Detail Status fact shows the word only, without the shared marker (D14.3)', () => {
+  const selected = task({ id: 'task-status', title: 'Plain title', status: 'active' })
+  const lines = harness(workspace({
+    mode: 'detail',
+    detail: selected,
+    rows: [selected],
+    total: 1,
+    selectedId: selected.id,
+  }), { columns: 80, rows: 30 }).plain()
+  const status = lines.find(line => line.includes('Status'))
+  assert.ok(status !== undefined && status.includes('Active'), `the Detail Status fact shows the word: ${JSON.stringify(status)}`)
+  assert.equal(status.includes('‣'), false, 'the marker belongs to the standalone status group only')
 })
