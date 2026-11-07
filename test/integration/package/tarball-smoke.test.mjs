@@ -75,6 +75,14 @@ test('tarball smoke flags a CI workspace path', (t) => {
   assert.match(result.stdout, /FAIL no workspace absolute paths in packaged files/)
 })
 
+test('tarball smoke allows escaped slash sequences in regex literals', (t) => {
+  const life = testLifecycle(t)
+  const fakeCursorPattern = String.raw`const marker = /(\\x1b_pi:c\\x07)\\x1b_pi:fc\\x07(.*?)(?:\\x1b_pi:\\/fc\\x07|$)/s;`
+  const { tarball } = leakTarball(life, fakeCursorPattern)
+  const result = runSmoke(tarball)
+  assert.doesNotMatch(result.stdout, /FAIL no workspace absolute paths in packaged files/)
+})
+
 test('tarball smoke flags a Windows drive path', (t) => {
   const life = testLifecycle(t)
   const { tarball } = leakTarball(life, 'C:\\Users\\dev\\project\\dist\\index.mjs')

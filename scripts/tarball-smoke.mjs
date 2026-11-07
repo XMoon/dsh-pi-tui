@@ -345,7 +345,7 @@ function main() {
       /\/home\/[^/"']+/,
       /\/Users\/[^/"']+/,
       /\/home\/runner\/work\//,
-      /[A-Za-z]:\\(?:[^\\"']*\\)+/,
+      /[A-Za-z]:\\(?:[^\\/"']+[\\/]){2,}[^\\/"']+/,
     ]
     const workspaceLeaks = textFiles.filter(file => {
       const text = readFileSync(file, 'utf8')
