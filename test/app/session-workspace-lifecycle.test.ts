@@ -534,6 +534,29 @@ test('a normally ended official Workspace stream drops the proved Current scope'
   assert.ok(after.includes('Other session'), 'All restores every listed row')
 })
 
+test('a missing-Current fallback followed by a stream end paints ONE scope state', async () => {
+  const h = harness({ currentSessionId: CURRENT })
+  await h.runSessions('')
+  await h.vt.waitForRender()
+  // The initial current intent cannot be proved by this baseline: the one-time
+  // fallback line is painted. The stream then ends without a proof.
+  h.facts.handles[0]!.push(baseline({ workspaceId: 'ws-b', path: '/other', title: 'b', sessionIds: [OTHER] }))
+  await waitUntil(() => h.view().includes('Current workspace unavailable'), 'the missing-Current fallback is painted')
+  h.facts.handles[0]!.finish()
+  await waitUntil(() => h.view().includes('Workspace scope unavailable'), 'the ended stream is visible')
+  const after = h.view()
+  assert.equal(
+    after.split('\n').filter(line => line.includes('Current workspace unavailable')).length,
+    0,
+    `the superseded fallback must not survive beside the stream failure:\n${after}`,
+  )
+  assert.equal(
+    after.split('\n').filter(line => line.includes('Workspace scope unavailable')).length,
+    1,
+    `the current scope fact is painted once:\n${after}`,
+  )
+})
+
 test('a failed official Workspace stream drops the proved Current scope', async () => {
   const h = harness({ currentSessionId: CURRENT })
   await h.runSessions('')
