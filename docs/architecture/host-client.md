@@ -384,9 +384,12 @@ service or setting survives an arbitrary reload.
 A Split Host owns the official Web frontend as a TOGGLEABLE Host capability, not
 as a boot mode. The Host-only overlay declares the official Web-only Loader row
 set the installed DSH Web composition needs once — including the mandatory
-`dsh.client.inject` closure of the shipped official Client UIs, so the Browser
-graph those packages declare can actually resolve — every one `disabled: true`,
-so an ordinary Split Host serves no SPA root and no `/plugins` browser graph;
+`dsh.client.inject` closure of the shipped official Client UIs, the official
+file-actions and message-quotes Client features, and the official
+`workspace-changes` Host recorder the deliverables UI injects, so the Browser
+graph and the Host service those packages declare can actually resolve. Every
+row starts `disabled: true`, so an ordinary Split Host serves no SPA root and no
+`/plugins` browser graph;
 `/connect` and `/api` remain the only network surface, and a real TUI Client
 connects and operates without Web. The private `piTuiWebAccess` namespace of the
 same built-in runtime's ONE Typert contribution is the ONLY control surface:
@@ -453,12 +456,44 @@ Host owners: `webserver`, Gateway, Connection, Session/Agent/Job/Workspace/LLM
 rows and the built-in PiTui Host Runtime keep their lifetime, accepted Host work
 continues, and `/connect` plus `/api` stay authenticated and reachable. A failed
 enable withdraws whatever it mounted; a disable that cannot prove the Web state
-closed reports `unavailable` instead of claiming success. `ui-deliverables` may
-legitimately remain PENDING on its `workspaceChanges` dependency; that pending
-optional Browser feature is not a Web failure. A row that instead belongs to the
-mandatory Client dependency closure of the shipped official UIs is an ordinary
-mandatory row: it must reach ACTIVE for `enabled`, and a PENDING one makes the
-composition `unavailable`.
+closed reports `unavailable` instead of claiming success. EVERY declared row must
+reach ACTIVE for `enabled`: the `workspace-changes` provider is activated BEFORE
+the `ui-deliverables` consumer that injects it (the toggle activates one awaited
+row at a time), so a PENDING consumer or a missing provider makes the composition
+`unavailable` and the failed enable rolls the whole roster back. There is no
+tolerated PENDING row: `enabled` always means the complete official Web surface,
+including the changed-files UI, is actually live.
+
+The changed-files surface is ONE official chain, not a pi-tui feature: the
+Web-only `workspace-changes` Host row records each eligible top-level turn's
+working-tree changes (git snapshots plus whole-file captures around file-tool
+intents), appends a Session-log `workspace/changes` event carrying only the turn
+number, and keeps the summary and per-file comparisons in Host process memory
+while that Session lives. The official `ui-deliverables` Host face serves them
+through its authenticated `/api/changes.summary`, `/api/changes.diff` and
+`/api/changes.open` routes, and the Browser paints the Changed Files card and
+Review page from exactly those answers. Consequences of this contract:
+
+- The chain exists only while Web is enabled; with Web off the row is not mounted
+  and no turn is observed, and the Direct Host never mounts it.
+- A summary or comparison the Host process no longer owns (Session disposed, Host
+  restarted) stays unavailable: no card is painted for it and the routes answer
+  404 instead of replaying a persisted shadow cache.
+- The recorder's official default budgets and classifications apply (git command
+  timeout, output/file caps, binary/oversized refusal), and a turn with a tool
+  result but no file change appends no event and paints no card. Git operations
+  may write git's own `core.splitIndex`/git-lfs state inside the repository, so
+  the row observes the user's own workspace rather than providing a sandboxed
+  read-only mirror.
+- The file actions are the official Client capability: `Download` hands the
+  original bytes to the Browser (the browser owns the destination, and Web offers
+  no Desktop-only Save as), while `Copy image` uses the Browser Clipboard API and
+  fails visibly when the permission or the source is unavailable; neither action
+  makes the Host write the file. `message-quotes` inserts a Markdown `> `
+  blockquote into the current composer draft and writes nothing until the user
+  explicitly sends, at which point it is an ordinary user message. The iframe
+  sidebar browser, the Office converter and the model-facing file references stay
+  uncomposed.
 
 The Client-side `/web` menu is the ONE user entry and it holds no Web state of
 its own: it reads the Host status through the semantic WebAccessPort, performs

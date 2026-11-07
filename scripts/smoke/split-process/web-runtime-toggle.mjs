@@ -116,13 +116,13 @@ export async function runWebRuntimeToggle(context) {
     assert((ready.entries ?? []).filter(entry => entry.name === PR_A_CLIENT_MODULES_PACKAGE && entry.state === 'active').length === 0,
       `${label}: an official Web module graph owner is active with Web off`)
   }
-  /** Every Web row is ACTIVE except the ONE allowed PENDING row. */
+  /** EVERY declared Web row is ACTIVE: the toggle has no tolerated PENDING row. */
   const assertWebFullyOn = (ready, label) => {
     const states = webStates(ready)
     const missing = [...states].filter(([, state]) => state === undefined).map(([id]) => id)
     assert(missing.length === 0, `${label}: the Web roster is not declared: ${missing.join(',')}`)
     const notActive = [...states]
-      .filter(([id, state]) => id !== 'ui-deliverables' && state !== 'active')
+      .filter(([, state]) => state !== 'active')
       .map(([id, state]) => `${id}:${state}`)
     assert(notActive.length === 0, `${label}: these Web rows are not active: ${notActive.join(',')}`)
     return states
@@ -325,12 +325,17 @@ export async function runWebRuntimeToggle(context) {
     for (const id of ['web-runtime', 'modules', 'client-hmr', 'cordis-client-runner', 'terminal-controller']) {
       assert(enabledStates.get(id) === 'active', `PB-02 the "${id}" row is ${enabledStates.get(id)}, not active`)
     }
-    // `ui-deliverables` is the ONE row allowed to stay PENDING on its
-    // `workspaceChanges` dependency; this stage does not mount it. Either
-    // verdict is allowed, but WHICH one must be recorded, never assumed.
-    const deliverablesState = enabledStates.get('ui-deliverables')
-    assert(deliverablesState === 'state-0' || deliverablesState === 'active',
-      `PB-02 the optional deliverables row is ${deliverablesState}; an optional Web feature may be pending or active, never silently broken`)
+    // S5-PR5: the changed-files Host recorder and its consumer must BOTH be
+    // part of the enabled composition; a PENDING `ui-deliverables` would mean
+    // the advertised Deliverables surface is not actually live.
+    for (const id of ['workspace-changes', 'ui-deliverables']) {
+      assert(enabledStates.get(id) === 'active',
+        `PB-02 the "${id}" row is ${enabledStates.get(id)}, not active; an enabled Web claim requires it`)
+    }
+    const workspaceChangesRows = (enabledStatus.entries ?? [])
+      .filter(entry => entry.name === '@deepseek-ai/dsh-workspace-changes')
+    assert(workspaceChangesRows.length === 1,
+      `PB-02 expected exactly ONE "@deepseek-ai/dsh-workspace-changes" Host row, found ${workspaceChangesRows.length}`)
     // The shared Host owners keep their LIVE fiber: the toggle mounted the Web
     // rows and nothing else.
     const enabledUids = rowUids(enabledStatus)
@@ -350,6 +355,7 @@ export async function runWebRuntimeToggle(context) {
       sseStatus: serving.sse,
       unknownPluginStatus: serving.unknownPlugin,
       uiDeliverables: enabledStates.get('ui-deliverables'),
+      workspaceChanges: enabledStates.get('workspace-changes'),
       hostOwnersRemounted: false,
     })
 
@@ -365,6 +371,12 @@ export async function runWebRuntimeToggle(context) {
     assertToggle(await webAccess(peer, 'PB-04', false), 'disabled', 'PB-04 setEnabled(false)')
     const disabledStatus = await hostStatus(host)
     assertWebFullyOff(disabledStatus, 'PB-04')
+    const disabledStates = webStates(disabledStatus)
+    for (const id of ['workspace-changes', 'ui-deliverables']) {
+      const state = disabledStates.get(id)
+      assert(state === 'absent' || state === 'state-4',
+        `PB-04 the "${id}" row is ${String(state)} after the disable, expected a released fiber`)
+    }
     assertProtectedOwners(disabledStatus, 'PB-04')
     assertIdentityFields(disabledStatus.localHost, ready.localHost, 'PB-04 Host identity')
     const disabledUids = rowUids(disabledStatus)
@@ -427,7 +439,11 @@ export async function runWebRuntimeToggle(context) {
     // ── D. Enable again on the SAME Host (PB-07) ────────────────────────
     assertToggle(await webAccess(peer, 'PB-07', true), 'enabled', 'PB-07 setEnabled(true) again')
     const reenabledStatus = await hostStatus(host)
-    assertWebFullyOn(reenabledStatus, 'PB-07')
+    const reenabledStates = assertWebFullyOn(reenabledStatus, 'PB-07')
+    for (const id of ['workspace-changes', 'ui-deliverables']) {
+      assert(reenabledStates.get(id) === 'active',
+        `PB-07 the "${id}" row is ${reenabledStates.get(id)}, not active after the re-enable`)
+    }
     assertProtectedOwners(reenabledStatus, 'PB-07')
     assertIdentityFields(reenabledStatus.localHost, ready.localHost, 'PB-07 Host identity')
     const reenabledUids = rowUids(reenabledStatus)

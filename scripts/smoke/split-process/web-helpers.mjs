@@ -1,7 +1,7 @@
 /**
  * Shared Web qualification helpers for the four PR2-D Web cases.
  *
- * This is the ONE owner of the official 60-row oracle, the authenticated
+ * This is the ONE owner of the official Web-row oracle, the authenticated
  * launch-token -> cookie -> index -> graph chain, the bounded SSE probes, the
  * credential redactor and the abortable Browser-driver waits. The host cases
  * import these helpers; no copy remains in the lane entry.
@@ -20,7 +20,7 @@ function assert(condition, message) {
 }
 
 /**
- * M5-W PR-A: the 60 official Web rows the Host-only overlay declares, in order.
+ * M5-W PR-A + S5-PR5: the official Web rows the Host-only overlay declares, in order.
  *
  * The isolated qualification re-reads the LIVE overlay patch the running Host
  * wrote and compares it against this FROZEN list, so a dropped, renamed,
@@ -33,6 +33,7 @@ export const PR_A_WEB_ROWS = [
   { id: 'modules', name: '@deepseek-ai/dsh-client-modules' },
   { id: 'client-hmr', name: '@deepseek-ai/dsh-client-hmr' },
   { id: 'cordis-client-runner', name: '@deepseek-ai/dsh-cordis-client-runner' },
+  { id: 'ui-file-actions', name: '@deepseek-ai/dsh-client-ui-file-actions' },
   { id: 'ui-context-menu', name: '@deepseek-ai/dsh-client-ui-context-menu' },
   { id: 'ui-open-in-app', name: '@deepseek-ai/dsh-client-ui-open-in-app' },
   { id: 'ui-settings-account', name: '@deepseek-ai/dsh-client-ui-settings-account' },
@@ -56,12 +57,14 @@ export const PR_A_WEB_ROWS = [
   { id: 'ui-settings-plugin-inventory', name: '@deepseek-ai/dsh-client-ui-settings-plugin-inventory' },
   { id: 'ui-conversation', name: '@deepseek-ai/dsh-client-ui-conversation' },
   { id: 'ui-approval', name: '@deepseek-ai/dsh-client-ui-approval' },
+  { id: 'message-quotes', name: '@deepseek-ai/dsh-message-quotes' },
   { id: 'ui-chat', name: '@deepseek-ai/dsh-client-ui-chat' },
   { id: 'ui-brand-official', name: '@deepseek-ai/dsh-client-ui-brand-official' },
   { id: 'ui-attachment', name: '@deepseek-ai/dsh-client-ui-attachment' },
   { id: 'ui-file-drag', name: '@deepseek-ai/dsh-client-ui-file-drag' },
   { id: 'ui-tool', name: '@deepseek-ai/dsh-client-ui-tool' },
   { id: 'ui-cordis', name: '@deepseek-ai/dsh-client-ui-cordis' },
+  { id: 'workspace-changes', name: '@deepseek-ai/dsh-workspace-changes' },
   { id: 'ui-deliverables', name: '@deepseek-ai/dsh-client-ui-deliverables' },
   { id: 'ui-workspace', name: '@deepseek-ai/dsh-client-ui-workspace' },
   { id: 'ui-workflow-run', name: '@deepseek-ai/dsh-client-ui-workflow-run' },
