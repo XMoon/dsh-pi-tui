@@ -43,6 +43,10 @@ import type {
 import type { SessionSwitchOutcome } from '../../src/app/session/runtime.ts'
 import type { SessionScope } from '../../src/app/session/scope.ts'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
+import { EditorRegistry } from '../../src/extension/internal/editor-registry.ts'
+import type { HistoryOpenScope } from '../../src/tui-app.ts'
+import type { HistorySearchSource } from '../../src/client/history/search.ts'
+import type { SettingsWorkspaceSource } from '../../src/tui/panels/settings-workspace-panel.ts'
 import { sessionScopeFacts } from '../support/session-scope-facts.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
 import { unavailableWebAccess } from '../support/web-access-fake.ts'
@@ -245,9 +249,16 @@ function harness(options: {
   readonly projection?: () => Promise<Map<string, { readonly title?: string; readonly preset?: string }>>
   /** The real `/sessions` registration's own availability fact (E-L9). */
   readonly browserAvailable?: () => boolean
-  /** A mounted TuiApp WITHOUT the composition control (the TSP-shaped mount,
-   *  E-L10). */
+  /** A mounted TuiApp WITHOUT the composition control (the PiTUI window
+   *  before the post-registration install, E-L10). */
   readonly installControl?: false
+  /** A real extension editor registry, installed BEFORE the surface starts
+   *  (the replacement-editor seat, E-L6). */
+  readonly editorRegistry?: EditorRegistry
+  /** The real History-seat search source and scope capture (E-L6). */
+  readonly historySearchSource?: HistorySearchSource
+  readonly historySearchCwd?: () => string
+  readonly captureHistoryScope?: () => HistoryOpenScope
   /** A staged image-only draft fact (the runner's `events.isImageDraft`). */
   readonly isImageDraft?: () => boolean
   /** The Unstable raw interception stage (E-L8 consume/rewrite). */
@@ -267,6 +278,10 @@ function harness(options: {
         unstableInputRoute: (data: string) => options.unstableInputRoute!(data),
         unstableInputsLive: () => true,
       }),
+      ...(options.editorRegistry === undefined ? {} : { editorRegistry: options.editorRegistry }),
+      ...(options.historySearchSource === undefined ? {} : { historySearchSource: options.historySearchSource }),
+      ...(options.historySearchCwd === undefined ? {} : { historySearchCwd: options.historySearchCwd }),
+      ...(options.captureHistoryScope === undefined ? {} : { captureHistoryScope: options.captureHistoryScope }),
     },
   )
   app.start()
@@ -986,6 +1001,20 @@ function viewerTarget(mode: 'one-shot' | 'continuable'): SubagentViewerTarget {
   }
 }
 
+/** The minimal read-only Settings projection the Settings-workspace lease
+ *  needs; the real `/settings` builder is exercised by its own suite. */
+function settingsWorkspaceSource(): SettingsWorkspaceSource {
+  return {
+    readSnapshot: () => ({
+      configReadiness: 'ready',
+      capturedAt: Date.now(),
+      rows: [
+        { id: 'theme', category: 'appearance', label: 'Configured theme', summary: 'auto', value: 'auto', scope: 'TUI settings document', freshness: 'ready', description: 'palette' },
+      ],
+    }),
+  }
+}
+
 /** The minimal Save-Location deps: the prompt only has to MOUNT and own the
  *  seat; Esc cancels it (no filesystem fixture is needed for the seat gate). */
 function saveLocationDeps(): import('../../src/tui/interaction/save-location.ts').SaveLocationDeps {
@@ -1269,6 +1298,78 @@ test('E-L6: every higher seat keeps its own input; two Lefts never open the work
   assert.ok(!hsearch.view().includes('Sessions'))
   assert.equal(hsearch.listCalls, 0)
   hsearch.close()
+
+  // Settings fullscreen (its workspace lease owns the physical screen).
+  const hset = harness({ currentSessionId: CURRENT })
+  const settingsHandle = hset.app.openSettingsWorkspace(settingsWorkspaceSource(), {
+    aboutVersionFacts: { tui: '0.0.0-test', dsh: undefined },
+  })
+  await hset.vt.waitForRender()
+  assert.ok(hset.view().includes('Settings ·'), `the Settings workspace owns the screen:\n${hset.view()}`)
+  hset.pressLeft()
+  hset.pressLeft()
+  await hset.vt.waitForRender()
+  assert.ok(!hset.view().includes('Sessions'))
+  assert.ok(hset.view().includes('Settings ·'), 'the Settings workspace still owns the screen')
+  assert.equal(hset.listCalls, 0)
+  settingsHandle.close()
+  hset.close()
+
+  // History optional seat (the Ctrl+R tenant replaces the editor seat).
+  const hhist = harness({
+    currentSessionId: CURRENT,
+    historySearchSource: { search: async () => ({ results: [], exhausted: true }) },
+    historySearchCwd: () => '/ws',
+    captureHistoryScope: () => ({ sessionId: CURRENT, isCurrent: () => true }),
+  })
+  hhist.app.openHistorySearch()
+  await hhist.vt.waitForRender()
+  assert.ok(hhist.view().includes('Input History'), `the History seat owns the editor seat:\n${hhist.view()}`)
+  hhist.pressLeft()
+  hhist.pressLeft()
+  await hhist.vt.waitForRender()
+  assert.ok(!hhist.view().includes('Sessions'))
+  assert.ok(hhist.view().includes('Input History'), 'the History seat still owns the editor seat')
+  assert.equal(hhist.listCalls, 0)
+  hhist.close()
+
+  // A replacement (plugin) editor owns the seat: the HOST editor is not the
+  // physical owner, so the gesture cannot run — the editor keeps both Lefts.
+  const registry = new EditorRegistry()
+  const hplug = harness({ currentSessionId: CURRENT, editorRegistry: registry })
+  let pluginLefts = 0
+  const pluginHandle = registry.register({
+    id: 'ue-replacement-editor',
+    priority: 0,
+    create: () => ({
+      component: { kind: 'text', spans: [{ text: '' }] },
+      getText: () => '',
+      setText: () => {},
+      getCursor: () => 0,
+      setCursor: () => {},
+      get focused() { return false },
+      borderColor: (text: string) => text,
+      handleInput: (event) => {
+        if (event.kind === 'key' && event.key.key === 'left'
+          && !event.key.ctrl && !event.key.alt && !event.key.shift && !event.key.super) {
+          pluginLefts += 1
+        }
+        return true
+      },
+      dispose: () => {},
+    }),
+  }, 'plugin')
+  hplug.app.reconcileEditorNow()
+  await hplug.vt.waitForRender()
+  assert.equal(hplug.app.seatEditorForTest().id, 'ue-replacement-editor', 'the replacement editor owns the seat')
+  hplug.pressLeft()
+  hplug.pressLeft()
+  await hplug.vt.waitForRender()
+  assert.equal(pluginLefts, 2, 'the replacement editor receives both Left presses')
+  assert.ok(!hplug.view().includes('Sessions'))
+  assert.equal(hplug.listCalls, 0)
+  pluginHandle.dispose()
+  hplug.close()
 })
 
 test('E-L7: Kitty repeat/release never complete the gesture; a second independent Press does', async () => {
@@ -1377,12 +1478,16 @@ test('E-L9: an unavailable entry or a Host user remap never gets pre-empted', as
   hr.close()
 })
 
-test('E-L10: a mount without the control keeps both Lefts native; the argument-free entry stays Current', async () => {
+test('E-L10: a PiTUI mount without the installed control keeps both Lefts native; the argument-free entry stays Current', async () => {
+  // The window between `TuiApp.start()` and the post-registration control
+  // install (bootstrap). The TSP mount has NO TuiApp at all; its production
+  // proof lives in `test/app/tern-tsp-live-mount.test.ts` (the runtime bridge
+  // is inert there).
   const h = harness({ currentSessionId: CURRENT, installControl: false })
   h.pressLeft()
   h.pressLeft()
   await h.vt.waitForRender()
-  assert.ok(!h.view().includes('Sessions'), 'no control means no gesture (the TSP-shaped mount)')
+  assert.ok(!h.view().includes('Sessions'), 'no control means no gesture')
   assert.equal(h.listCalls, 0)
 
   // The registered UI body with no scope (the Welcome/TSP caller) asks Current.

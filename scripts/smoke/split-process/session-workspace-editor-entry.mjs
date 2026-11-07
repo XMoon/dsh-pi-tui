@@ -35,6 +35,18 @@ const LEFT = '\x1b[D'
 /** The panel's identity-first short id (the row label next to the title). */
 const shortSessionId = id => id.replace(/^session[-_]/i, '').slice(0, 8)
 
+/**
+ * Whether the painter composer box carries NO document text: only its border
+ * glyphs, padding and the `❯` prompt chrome remain. The box text is the WHOLE
+ * composer region (`composerText`), not the editor's own draft string, so an
+ * empty draft is whitespace/chrome-only.
+ */
+const composerDraftEmpty = composer => composer !== undefined
+  && composer.split('\n').every(line => line
+    .replace(/[│┌┐└┘─]/gu, ' ')
+    .replace(/❯/gu, ' ')
+    .trim() === '')
+
 /** Run the Host Editor `←←` Workspace-entry qualification. */
 export async function runSessionWorkspaceEditorEntry(context) {
   const { dshHome, trace } = context
@@ -48,9 +60,12 @@ export async function runSessionWorkspaceEditorEntry(context) {
   assert(lastSurfaceStatus(clientA)?.openSessionId === sessionY,
     'U-E Client A did not start committed on Session Y')
 
-  // A's MAIN editor is empty: the gesture's strict draft precondition.
-  const draftBefore = await clientA.composerText()
-  assert(draftBefore === '', `U-E Client A's main editor was not empty: ${JSON.stringify(draftBefore)}`)
+  // A's MAIN editor is empty: `startDualSurfaceScene` just submitted `/new`
+  // through the real editor (its readiness marker was cleared), and the
+  // gesture's own strict-empty admission below is the product proof that the
+  // draft really is empty — a non-empty draft cannot open the workspace.
+  assert(composerDraftEmpty(await clientA.composerText()),
+    `U-E Client A's composer was not empty after /new: ${JSON.stringify(await clientA.composerText())}`)
 
   // B owns X and triggers the ONE real forwarded Question.
   await submitPrompt(clientB, 'm5c-question-trigger', 'U-E question trigger')
@@ -109,8 +124,8 @@ export async function runSessionWorkspaceEditorEntry(context) {
   assert(!afterClose.includes('Workspace: '), `U-E the workspace did not close:\n${afterClose}`)
   assert(lastSurfaceStatus(clientA)?.openSessionId === sessionY,
     'U-E closing the workspace changed A\'s committed Session')
-  assert((await clientA.composerText()) === '',
-    'U-E closing the workspace changed A\'s main draft')
+  assert(composerDraftEmpty(await clientA.composerText()),
+    'U-E closing the workspace left a changed/dirty main draft')
   trace('ue-editor-entry-closed', { sessionX, sessionY, hostPid })
 
   // B's live Turn/Question survived A's open/close untouched.
@@ -128,9 +143,17 @@ export async function runSessionWorkspaceEditorEntry(context) {
   const withDraft = await viewportText(clientA)
   assert(!withDraft.includes('Workspace: '),
     `U-E a non-empty draft plus two Lefts opened the workspace:\n${withDraft}`)
-  assert((await clientA.composerText()) === 'x', 'U-E the negative path changed the draft')
-  clientA.send('\x15') // clear the fixture draft
-  await sleep(200)
+  assert(!composerDraftEmpty(await clientA.composerText()), 'U-E the negative path changed the draft')
+  // Clear the fixture draft through the REAL editor and WAIT for the empty
+  // frame before typing anything else: an unobserved `/exit` would be appended
+  // to the leftover draft and submitted as a prompt instead of the command.
+  // The two Lefts parked the cursor at column 0, so End first (a Backspace at
+  // column 0 would delete nothing).
+  clientA.send('\x1b[F')
+  await sleep(150)
+  await clientA.clearComposerDraft('x')
+  assert(composerDraftEmpty(await clientA.composerText()),
+    'U-E the negative fixture draft did not clear before exit')
   trace('ue-editor-entry-negative', { sessionX, sessionY, hostPid })
 
   // ── B answers the ORIGINAL pending exactly once; A never answered it ─────
