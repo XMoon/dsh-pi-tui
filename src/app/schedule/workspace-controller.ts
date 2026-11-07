@@ -758,9 +758,18 @@ export class ScheduleWorkspaceController {
 
   private sameSurface(stamp: { readonly page: string; readonly selectedId: string | undefined; readonly editorId: string | undefined; readonly editorToken: number }): boolean {
     const page = this.mode === 'help' ? (this.helpReturn ?? 'list') : this.mode
-    return page === stamp.page
-      && this.selectedId === stamp.selectedId
-      && (page !== 'editor' || (this.editor?.id === stamp.editorId && this.editorToken === stamp.editorToken))
+    if (page !== stamp.page) return false
+    // An EDITOR is owned by its instance, not by the catalog's selection cursor:
+    // a background catalog refresh may move `selectedId` while a Create/Edit is
+    // in flight, and that must not strand a successful receipt on the form.
+    if (page === 'editor') {
+      return this.editor !== undefined
+        && this.editor.id === stamp.editorId
+        && this.editorToken === stamp.editorToken
+    }
+    // Detail/list actions ARE scoped to the selected task: a receipt for a task
+    // the user left must never touch the page they are on.
+    return this.selectedId === stamp.selectedId
   }
 
   /** The ONE controller-level mode admission table. */

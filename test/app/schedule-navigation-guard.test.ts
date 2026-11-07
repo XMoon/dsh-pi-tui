@@ -213,8 +213,12 @@ test('the panel does not edit its local buffer while a save is pending', async (
     dispatch: intent => controller.dispatch(intent),
     requestRender: () => {},
     rows: () => 30,
-    columns: () => 100,
+    columns: () => 120,
     close: () => {},
+  })
+  // The PRODUCTION update chain: controller publish -> panel snapshot -> paint.
+  const unsubscribe = controller.subscribe(() => {
+    panel.setSnapshot(controller.snapshot())
   })
   try {
     controller.open()
@@ -224,10 +228,7 @@ test('the panel does not edit its local buffer while a save is pending', async (
     controller.dispatch({ kind: 'open-edit' })
     await flush()
     // The PRODUCTION update chain: every snapshot change reaches the panel.
-    const sync = (): readonly string[] => {
-      panel.setSnapshot(controller.snapshot())
-      return panel.render(120)
-    }
+    const sync = (): readonly string[] => panel.render(120)
     panel.focused = true
     sync()
     // Type 'Renamed' into Title through the REAL panel input path.
@@ -250,7 +251,8 @@ test('the panel does not edit its local buffer while a save is pending', async (
     // Neither the mouse row nor Esc may create a stale Discard question while
     // the save is pending.
     const taskBRow = frozen.findIndex(line => line.includes('Task B'))
-    if (taskBRow >= 0) panel.onCellClick(3, taskBRow)
+    assert.ok(taskBRow >= 0, `the WIDE layout paints the left task rows:\n${frozen.join('\n')}`)
+    panel.onCellClick(3, taskBRow)
     panel.handleInput('\x1b')
     assert.equal(controller.snapshot().confirm, undefined, 'no stale Discard question while saving')
     assert.equal(controller.snapshot().mode, 'editor')
@@ -263,6 +265,7 @@ test('the panel does not edit its local buffer while a save is pending', async (
     panel.handleInput('y')
     assert.equal(controller.snapshot().editor?.title, 'Task ARenamedy', 'the rejected key is not replayed')
   } finally {
+    unsubscribe()
     controller.dispose()
   }
 })

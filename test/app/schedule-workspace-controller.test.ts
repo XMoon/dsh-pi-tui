@@ -1498,3 +1498,66 @@ test('L6: a reload that finishes after the editor closed publishes nothing', asy
     life.controller.dispose()
   }
 })
+
+test('L6: a catalog refresh during a pending Create never strands the successful receipt', async () => {
+  const life = await opened()
+  try {
+    life.port.entries = []
+    life.controller.dispatch({ kind: 'refresh' })
+    await flush()
+    assert.equal(life.controller.snapshot().selectedId, undefined)
+    life.controller.dispatch({ kind: 'open-create' })
+    life.controller.dispatch({ kind: 'set-field', fieldId: 'title', value: 'Task A' })
+    life.controller.dispatch({ kind: 'set-field', fieldId: 'prompt', value: 'prompt A' })
+    const pending = deferred<ScheduleCatalogEntry>()
+    life.port.createResult = () => pending.promise
+    life.controller.dispatch({ kind: 'save' })
+    // Another client creates B; the background catalog read moves the cursor.
+    life.port.entries = [entry({ id: 'task-b' as never, title: 'B' })]
+    life.port.invalidate()
+    await flush()
+    assert.equal(life.controller.snapshot().selectedId, 'task-b', 'the cursor drifted while Create was pending')
+    life.port.entries = [entry({ id: 'task-b' as never, title: 'B' }), entry({ id: 'task-a' as never, title: 'Task A' })]
+    pending.resolve(entry({ id: 'task-a' as never, title: 'Task A' }))
+    await flush()
+    await life.controller.whenIdle()
+    assert.equal(life.controller.snapshot().editor, undefined, 'the successful Create closes its OWN editor')
+    assert.equal(life.controller.snapshot().mode, 'detail')
+    assert.equal(life.controller.snapshot().selectedId, 'task-a')
+    assert.equal(life.controller.snapshot().detail?.id, 'task-a')
+  } finally {
+    life.controller.dispose()
+  }
+})
+
+test('L6: a catalog refresh during a pending Edit never strands the successful receipt', async () => {
+  const life = await opened()
+  try {
+    const a = entry({ id: 'task-a' as never, title: 'A' })
+    life.port.entries = [a]
+    life.port.viewResults.set('task-a', a)
+    life.controller.dispatch({ kind: 'refresh' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-detail', id: 'task-a' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-edit' })
+    await flush()
+    life.controller.dispatch({ kind: 'set-field', fieldId: 'title', value: 'Renamed A' })
+    const pending = deferred<ScheduleEditResult>()
+    life.port.editResult = () => pending.promise
+    life.controller.dispatch({ kind: 'save' })
+    life.port.entries = [entry({ id: 'task-b' as never, title: 'B' })]
+    life.port.invalidate()
+    await flush()
+    assert.notEqual(life.controller.snapshot().selectedId, 'task-a', 'the cursor drifted away from the edited task')
+    life.port.entries = [entry({ id: 'task-b' as never, title: 'B' }), entry({ id: 'task-a' as never, title: 'Renamed A' })]
+    pending.resolve(entry({ id: 'task-a' as never, title: 'Renamed A', updatedAt: '2026-01-05T00:00:00.000Z' }))
+    await flush()
+    await life.controller.whenIdle()
+    assert.equal(life.controller.snapshot().editor, undefined, 'the successful Edit closes its OWN editor')
+    assert.equal(life.controller.snapshot().mode, 'detail')
+    assert.equal(life.controller.snapshot().detail?.id, 'task-a')
+  } finally {
+    life.controller.dispose()
+  }
+})
