@@ -240,7 +240,13 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
   private helpScroll = 0
   private frame: PaintedFrame | undefined
   private paintedConfirm: PaintedConfirm | undefined
-  private pressed: { readonly key: string } | undefined
+  /** One in-flight press: the hit key AND the painted identity it started on. */
+  private pressed: {
+    readonly key: string
+    readonly mode: ScheduleWorkspaceSnapshot['mode']
+    readonly subjectId: string | null
+    readonly confirmToken: number | undefined
+  } | undefined
   private readonly searchInput = new Input({ prompt: '' })
   private readonly editorInput = new Input({ prompt: '' })
   private editorFieldId: string | undefined
@@ -1671,7 +1677,11 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
       return
     }
     const hit = regionAt(frame, x, y)
-    this.pressed = hit === undefined ? undefined : { key: hitKey(hit) }
+    // Freeze the PRESSED hit together with the frame's subject: a release on a
+    // newer frame (same action, different task) must not commit anything.
+    this.pressed = hit === undefined
+      ? undefined
+      : { key: hitKey(hit), mode: frame.mode, subjectId: frame.subjectId, confirmToken: frame.confirmToken }
   }
 
   onCellClick(x: number, y: number): void {
@@ -1682,7 +1692,15 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     if (!this.frameIsCurrent(frame) || x < 0 || y < 0 || x >= frame.width || y >= frame.height) return
     const hit = regionAt(frame, x, y)
     if (hit === undefined) return
-    if (pressed !== undefined && pressed.key !== hitKey(hit)) return
+    // The release must match the PRESS (action AND painted subject/confirm
+    // identity), not merely the current frame's action: a same-action hit on a
+    // newer task's frame is a different click.
+    if (pressed !== undefined
+      && (pressed.key !== hitKey(hit)
+        || pressed.subjectId !== frame.subjectId
+        || pressed.confirmToken !== frame.confirmToken)) {
+      return
+    }
     this.activateHit(hit)
   }
 

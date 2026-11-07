@@ -11,6 +11,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { stripTerminalSequences } from '@xmoon76/pi-tui'
 import test from 'node:test'
 import { ScheduleWorkspaceController } from '../../src/app/schedule/workspace-controller.ts'
 import { ScheduleWorkspacePanel } from '../../src/tui/schedule/workspace-panel.ts'
@@ -81,6 +82,10 @@ const sessionReader: SessionReader = {
   turnOutline: () => undefined,
   sessionStatus: () => undefined,
 }
+
+
+/** ANSI-stripped lines of one painted frame (index math must use plain text). */
+const plainLines = (lines: readonly string[]): readonly string[] => lines.map(line => stripTerminalSequences(line))
 
 function flush(): Promise<void> {
   return new Promise(resolve => setImmediate(resolve))
@@ -312,6 +317,71 @@ test('a stale Detail frame from task A cannot pause task B after a same-mode swi
     await controller.whenIdle()
     assert.equal(edits.length, 0, 'a click on A’s stale frame performed ZERO Host writes')
     assert.equal(controller.snapshot().selectedId, 'task-b', 'the current selection is unchanged')
+  } finally {
+    controller.dispose()
+  }
+})
+
+test('a press on task A and a release on task B\'s newer frame commit nothing', async () => {
+  const controller = new ScheduleWorkspaceController({
+    port: new StubPort(),
+    sessionReader,
+    runOwned: (_label, task) => { void task() },
+  })
+  const panel = new ScheduleWorkspacePanel({
+    snapshot: () => controller.snapshot(),
+    dispatch: intent => controller.dispatch(intent),
+    requestRender: () => {},
+    rows: () => 30,
+    columns: () => 120,
+    close: () => {},
+  })
+  const edits: ScheduleEditRequest[] = []
+  ;(controller as unknown as { port: StubPort }).port.editResult = async request => {
+    edits.push(request)
+    return { id: request.id as never, deleted: false } as never
+  }
+  try {
+    controller.open()
+    await flush()
+    controller.dispatch({ kind: 'open-detail', id: 'task-a' })
+    await flush()
+    panel.setSnapshot(controller.snapshot())
+    const frameA = plainLines(panel.render(120))
+    const row = frameA.findIndex(line => line.includes('Space pause/resume'))
+    assert.ok(row >= 0, `the Detail action bar paints the pause hit:\n${frameA.join('\n')}`)
+    const column = frameA[row]!.indexOf('Space pause/resume') + 2
+
+    // PRESS on A's painted frame.
+    panel.onCellPress(column, row)
+    // The selection moves to B and B's frame is PAINTED before the release.
+    controller.dispatch({ kind: 'open-detail', id: 'task-b' })
+    await flush()
+    panel.setSnapshot(controller.snapshot())
+    const frameB = plainLines(panel.render(120))
+    assert.ok(frameB.some(line => line.includes('Space pause/resume')), 'B paints the same action')
+
+    // RELEASE at the same coordinates: the same action on a DIFFERENT subject
+    // must not commit anything.
+    panel.onCellClick(column, row)
+    await flush()
+    await controller.whenIdle()
+    assert.equal(edits.length, 0, 'press(A) + release(B) performs ZERO Host writes')
+    assert.equal(controller.snapshot().selectedId, 'task-b')
+
+    // The same-coordinate press+release on ONE task's own CURRENT frame works.
+    // (Repaint the CURRENT frame so the release is evaluated against the frame
+    // the press froze, exactly like the real terminal does.)
+    panel.setSnapshot(controller.snapshot())
+    const frameNow = plainLines(panel.render(120))
+    const rowNow = frameNow.findIndex(line => line.includes('Space pause/resume'))
+    const columnNow = frameNow[rowNow]!.indexOf('Space pause/resume') + 2
+    panel.onCellPress(columnNow, rowNow)
+    panel.onCellClick(columnNow, rowNow)
+    await flush()
+    await controller.whenIdle()
+    assert.equal(edits.length, 1, 'a press+release on one task own frame commits')
+    assert.equal(edits[0]?.id, 'task-b')
   } finally {
     controller.dispose()
   }
