@@ -53,6 +53,46 @@ const BUNDLE_ROWS = BUNDLE_ENTRIES.flatMap(entry => entry.insert ?? [entry])
 
 const WORKSPACE_CONTROLLER_PACKAGE = '@deepseek-ai/dsh-api-workspace-controller'
 const WORKSPACE_REGISTRY_PACKAGE = '@deepseek-ai/dsh-workspace'
+const DELIVERABLE_GUIDANCE_ID = 'deliverable-file-references'
+const DELIVERABLE_GUIDANCE_PACKAGE = '@deepseek-ai/dsh-deliverable-file-references'
+const OFFICE_PACKAGE = '@deepseek-ai/dsh-office-to-pdf'
+const HARNESS_DEV_CONTEXT_PACKAGE = '@deepseek-ai/dsh-harness-dev-context'
+
+/**
+ * The shared deliverable guidance is a base-profile Host row. Direct and Split
+ * inherit it; the Web overlay owns neither a copy nor the Web-only Office row.
+ */
+function assertSharedDeliverableGuidance(
+  bundleEntries: readonly OverlayEntry[],
+  overlayEntries: readonly OverlayEntry[],
+): void {
+  const bundle = bundleEntries.flatMap(entry => entry.insert ?? [entry])
+  const overlay = overlayEntries.flatMap(entry => entry.insert ?? [entry])
+  const guidance = bundle.filter(candidate => candidate.id === DELIVERABLE_GUIDANCE_ID)
+  assert.equal(guidance.length, 1, 'the base profile must own exactly one deliverable guidance row')
+  assert.equal(guidance[0].name, DELIVERABLE_GUIDANCE_PACKAGE,
+    'the shared guidance row must load the official package')
+  assert.notEqual(guidance[0].disabled, true,
+    'the shared guidance row must remain enabled for Direct and Split Host')
+  const fileReferenceIndex = bundle.findIndex(candidate => candidate.id === 'file-reference-local')
+  const guidanceIndex = bundle.findIndex(candidate => candidate.id === DELIVERABLE_GUIDANCE_ID)
+  const presetRegistryIndex = bundle.findIndex(candidate => candidate.id === 'agent-preset-registry')
+  assert.equal(guidanceIndex, fileReferenceIndex + 1,
+    'the shared guidance row must immediately follow file-reference-local')
+  assert.ok(guidanceIndex < presetRegistryIndex,
+    'the shared guidance row must precede the agent preset registry')
+  assert.equal(bundle.filter(candidate => candidate.name === DELIVERABLE_GUIDANCE_PACKAGE).length, 1,
+    'the official shared guidance package must have exactly one base-profile owner')
+  assert.equal(overlay.some(candidate => candidate.id === DELIVERABLE_GUIDANCE_ID
+    || candidate.name === DELIVERABLE_GUIDANCE_PACKAGE), false,
+  'the Host-only overlay must inherit shared guidance without declaring a second row')
+  assert.equal(bundle.some(candidate => candidate.name === OFFICE_PACKAGE), false,
+    'the Web-only Office package must not enter the common Direct profile')
+  assert.equal(bundle.some(candidate => candidate.name === HARNESS_DEV_CONTEXT_PACKAGE), false,
+    'the DSH GUI development context must stay out of the common profile')
+  assert.equal(overlay.some(candidate => candidate.name === HARNESS_DEV_CONTEXT_PACKAGE), false,
+    'the DSH GUI development context must stay out of the Split Host overlay')
+}
 
 function row(id: string): OverlayRow {
   const matches = OVERLAY_ROWS.filter(candidate => candidate.id === id)
@@ -164,6 +204,41 @@ const FOUNDATION_ROWS: ReadonlyArray<{ owner: string; id: string; name: string }
   { owner: 'sessionLogExport', id: 'split-host-session-log-download', name: '@deepseek-ai/dsh-session-log-export' },
   { owner: 'piTuiHostRuntime', id: 'split-host-pi-tui-runtime', name: '@xmoon76/dsh-pi-tui/host-runtime' },
 ]
+
+test('the shared deliverable guidance is inherited by Direct and Split without Web coupling', () => {
+  assertSharedDeliverableGuidance(BUNDLE_ENTRIES, OVERLAY_ENTRIES)
+  const guidanceGroup = BUNDLE_ENTRIES.find(entry => entry.insert?.some(row => row.id === DELIVERABLE_GUIDANCE_ID))
+  assert.ok(guidanceGroup?.insert !== undefined, 'the base profile must contain the shared guidance in an insert group')
+  const mutateBundle = (mutate: (rows: readonly OverlayRow[]) => readonly OverlayRow[]): OverlayEntry[] =>
+    BUNDLE_ENTRIES.map(entry => entry === guidanceGroup ? { ...entry, insert: mutate(entry.insert ?? []) } : entry)
+
+  assert.throws(
+    () => assertSharedDeliverableGuidance(
+      mutateBundle(rows => rows.filter(candidate => candidate.id !== DELIVERABLE_GUIDANCE_ID)),
+      OVERLAY_ENTRIES,
+    ),
+    /exactly one deliverable guidance row/u,
+    'a missing shared row must fail the common-profile assertion',
+  )
+  assert.throws(
+    () => assertSharedDeliverableGuidance(
+      mutateBundle(rows => rows.map(candidate => candidate.id === DELIVERABLE_GUIDANCE_ID
+        ? { ...candidate, name: '@deepseek-ai/dsh-file-reference-local' }
+        : candidate)),
+      OVERLAY_ENTRIES,
+    ),
+    /official package/u,
+    'a repointed shared row must fail the common-profile assertion',
+  )
+  assert.throws(
+    () => assertSharedDeliverableGuidance(
+      mutateBundle(rows => [...rows, { id: DELIVERABLE_GUIDANCE_ID, name: DELIVERABLE_GUIDANCE_PACKAGE }]),
+      OVERLAY_ENTRIES,
+    ),
+    /exactly one deliverable guidance row/u,
+    'a duplicated shared row must fail the common-profile assertion',
+  )
+})
 
 test('the Host-only overlay declares the six official rows and ONE built-in Host Runtime row', () => {
   // B1 rows unchanged.
@@ -313,6 +388,7 @@ const WEB_ROWS: ReadonlyArray<{ id: string; name: string }> = [
   { id: 'resources', name: '@deepseek-ai/dsh-client-resources' },
   { id: 'ui-sidebar', name: '@deepseek-ai/dsh-client-ui-sidebar' },
   { id: 'ui-sidebar-right', name: '@deepseek-ai/dsh-client-ui-sidebar-right' },
+  { id: 'office-to-pdf', name: '@deepseek-ai/dsh-office-to-pdf' },
   { id: 'ui-sidebar-documentpreview', name: '@deepseek-ai/dsh-client-ui-sidebar-documentpreview' },
   { id: 'ui-sidebar-terminal', name: '@deepseek-ai/dsh-client-ui-sidebar-terminal' },
   { id: 'ui-sidebar-files', name: '@deepseek-ai/dsh-client-ui-sidebar-files' },
@@ -713,6 +789,15 @@ function officialWebAppManifest(): { readonly version: string } {
   return JSON.parse(readFileSync(anchor, 'utf8')) as { readonly version: string }
 }
 
+/** Read an installed official package manifest through the Web bundle dependency graph. */
+function officialPackageVersion(pkg: string): string {
+  const anchor = createRequire(import.meta.url).resolve('@deepseek-ai/dsh-web-app/package.json')
+  const manifestPath = createRequire(anchor).resolve(`${pkg}/package.json`)
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { readonly version?: unknown }
+  assert.equal(typeof manifest.version, 'string', `the official "${pkg}" manifest must declare its version`)
+  return manifest.version as string
+}
+
 /**
  * Read one installed official manifest's `dsh.client.inject` list. A missing
  * package, an unreadable manifest or an unknown shape fails closed instead of
@@ -767,6 +852,10 @@ test('the Web roster satisfies the official Client inject closure of the pinned 
   }).devDependencies['@deepseek-ai/dsh-web-app']
   assert.equal(webApp.version, pinned,
     'the installed official Web bundle must be the DSH family this repository pins')
+  for (const pkg of [DELIVERABLE_GUIDANCE_PACKAGE, OFFICE_PACKAGE, HARNESS_DEV_CONTEXT_PACKAGE]) {
+    assert.equal(officialPackageVersion(pkg), webApp.version,
+      `the official "${pkg}" must resolve from the pinned Web bundle dependency family`)
+  }
   const manifests = new Map<string, readonly string[]>()
   for (const pkg of OFFICIAL_CLIENT_UI_PACKAGES) {
     const manifest = readOfficialClientInject(pkg)

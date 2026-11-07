@@ -47,6 +47,7 @@ export const PR_A_WEB_ROWS = [
   { id: 'resources', name: '@deepseek-ai/dsh-client-resources' },
   { id: 'ui-sidebar', name: '@deepseek-ai/dsh-client-ui-sidebar' },
   { id: 'ui-sidebar-right', name: '@deepseek-ai/dsh-client-ui-sidebar-right' },
+  { id: 'office-to-pdf', name: '@deepseek-ai/dsh-office-to-pdf' },
   { id: 'ui-sidebar-documentpreview', name: '@deepseek-ai/dsh-client-ui-sidebar-documentpreview' },
   { id: 'ui-sidebar-terminal', name: '@deepseek-ai/dsh-client-ui-sidebar-terminal' },
   { id: 'ui-sidebar-files', name: '@deepseek-ai/dsh-client-ui-sidebar-files' },

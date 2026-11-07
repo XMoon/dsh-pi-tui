@@ -9,7 +9,7 @@
  * @module split-smoke-fixtures
  */
 
-import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { parse as parseYaml } from 'yaml'
@@ -29,20 +29,55 @@ function sleep(ms) {
 /** The test-only offline Host LLM route (official Loader row + patch override). */
 export function writeSurfaceLlmFixture(profileDir, workDir) {
   const stubPath = join(profileDir, 'm4b2s-stub-llm.mjs')
-  writeFileSync(stubPath, `import { LlmAdapter } from '@deepseek-ai/dsh-llm'
+  const promptEvidencePath = join(workDir, 'prompt-evidence.jsonl')
+  writeFileSync(promptEvidencePath, '', { mode: 0o600 })
+  const fixtureSource = `import { appendFileSync } from 'node:fs'
+import { LlmAdapter } from '@deepseek-ai/dsh-llm'
 export const name = 'm4b2s-stub-llm'
 export const inject = ['llm']
+const evidencePath = process.env.SPLIT_PROCESS_PROMPT_EVIDENCE
+const guidanceMarker = 'Prefer showing the primary results within your final response'
+const presentInstruction = 'Use present to publish complete deliverables'
+function textOf(value) {
+  if (typeof value === 'string') return value
+  if (Array.isArray(value)) return value.map(textOf).join('\\n')
+  if (value !== null && typeof value === 'object') {
+    const record = value
+    if (Object.hasOwn(record, 'content')) return textOf(record.content)
+    if (Object.hasOwn(record, 'text')) return textOf(record.text)
+  }
+  return ''
+}
+function recordPrompt(options) {
+  if (evidencePath === undefined || evidencePath === '') return
+  const systemText = [options.system, ...(options.messages ?? [])
+    .filter(message => message?.role === 'system')
+    .map(message => message.content)]
+    .map(textOf).join('\\n')
+  const markerCount = systemText.split(guidanceMarker).length - 1
+  const toolNames = Array.isArray(options.tools)
+    ? options.tools.map(tool => tool?.name).filter(name => typeof name === 'string').sort()
+    : []
+  appendFileSync(evidencePath, JSON.stringify({
+    markerCount,
+    presentInstruction: systemText.includes(presentInstruction),
+    presentTool: toolNames.includes('present'),
+    toolNames,
+  }) + '\\n', { mode: 0o600 })
+}
 class StubLlmAdapter extends LlmAdapter {
   resolveModel(provider, model) { return Promise.resolve({ provider: 'stub', id: model, name: model }) }
   listModels() { return Promise.resolve([{ provider: 'stub', id: 'stub', name: 'stub' }]) }
-  async *stream() {
+  async *stream(options) {
+    recordPrompt(options)
     yield { type: 'block-start', index: 0, blockType: 'text' }
     yield { type: 'text-delta', index: 0, text: 'stub answer' }
     yield { type: 'block-end', index: 0, block: { type: 'text', text: 'stub answer' } }
   }
 }
 export function apply(ctx) { ctx.llm.registerAdapter(['stub'], new StubLlmAdapter()) }
-`, { mode: 0o600 })
+`
+  writeFileSync(stubPath, fixtureSource, { mode: 0o600 })
   const patchPath = join(workDir, 'm4b2s-llm.patch.yml')
   writeFileSync(patchPath, [
     '- insert:',
@@ -55,7 +90,7 @@ export function apply(ctx) { ctx.llm.registerAdapter(['stub'], new StubLlmAdapte
     '    model: stub',
     '',
   ].join('\n'), { mode: 0o600 })
-  return { stubPath, patchPath }
+  return { stubPath, patchPath, promptEvidencePath }
 }
 
 /**

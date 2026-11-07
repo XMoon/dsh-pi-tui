@@ -53,6 +53,12 @@
   的改动对比页；这些改动只在 Web 开启期间由 Host 记录，Host 重启或会话结束后旧
   的摘要与对比不再可用。Direct 模式与未启用 Web 时均不记录，宿主进程、会话与
   定时任务不受影响。
+- **TUI 与 Web 共享官方文件链接与交付指导。** 支持的 Agent 现在会在合适的
+  preset 中获得官方文件链接、图片引用与 `present` 交付建议；该指导不依赖 Web
+  是否启用，现有 `present` 工具与 TUI `/deliverables` 面板仍可独立使用。
+- **Split Web 文档预览启用官方 Office 转 PDF provider。** 启用 Web 后，官方文档
+  预览可以使用 DSH 提供的 Office 转换能力；停用 Web 会释放该能力，同时保留
+  Host、TUI 会话与其它共享服务。
 - **Split Client 的 `/web` 入口与「下次 Host 启动自动启用 Web 前端」偏好。**
   在 Split Client 中输入 `/web` 可查看当前 Host 官方 Web 前端的真实状态，并只按
   该状态提供启用、停用、打开浏览器、复制认证链接与只读详情；打开菜单或查看详情

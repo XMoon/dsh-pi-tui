@@ -44,7 +44,7 @@ const FIBER_ACTIVE = 2
 const FIBER_DISPOSED = 4
 
 /** The official Web services whose presence the status vocabulary claims. */
-const WEB_SERVICES = ['webApp', 'clientModules', 'terminalController'] as const
+const WEB_SERVICES = ['webApp', 'clientModules', 'terminalController', 'officeToPdf'] as const
 
 /** The Host owners that must keep their fiber identity across every toggle. */
 const PROTECTED_ROWS: ReadonlyArray<{ readonly id: string; readonly name: string }> = [
@@ -164,6 +164,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<WebAccessFix
     ['modules', { provide: 'clientModules' }],
     ['client-hmr', { inject: ['clientModules', 'webServer'] }],
     ['terminal-controller', { provide: 'terminalController' }],
+    ['office-to-pdf', { provide: 'officeToPdf' }],
     // The changed-files Host recorder `ui-deliverables` injects. The fixture
     // provides the SERVICE (topology only); the real Git recorder is qualified
     // by the split-process Host lane, never here.
@@ -617,6 +618,25 @@ test('a missing required Web service keeps the composition unavailable', async t
   // Recovery keeps closing: no SPA row stays mounted behind an unavailable graph.
   assert.equal(fixture.webServer.facts().registered, false)
   assertAllRowsDisabled(fixture)
+})
+
+test('an active Office row without its provider rolls Web back without remounting protected Host owners', async t => {
+  const fixture = await createFixture({ overrides: new Map<string, RowOverride>([['office-to-pdf', {}]]) })
+  t.after(() => fixture.dispose())
+  const protectedUids = new Map(PROTECTED_ROWS.map(row => [row.id, fixture.rows.get(row.id)?.fiber?.uid]))
+  const protectedApplies = new Map(PROTECTED_ROWS.map(row => [row.id, fixture.facts.get(row.name)?.applies]))
+
+  const status = await fixture.service.setEnabled(true)
+  assert.equal(status.state, 'unavailable')
+  assert.match((status as { reason: string }).reason, /officeToPdf|office-to-pdf/u)
+  assertAllRowsDisabled(fixture)
+  assert.equal(fixture.ctx.reflect.get('officeToPdf'), undefined)
+  for (const row of PROTECTED_ROWS) {
+    assert.equal(fixture.rows.get(row.id)?.fiber?.uid, protectedUids.get(row.id),
+      `the protected "${row.id}" owner must keep its fiber after Office rollback`)
+    assert.equal(fixture.facts.get(row.name)?.applies, protectedApplies.get(row.id),
+      `the protected "${row.id}" owner must not be re-applied by Office rollback`)
+  }
 })
 
 test('a missing workspaceChanges provider keeps the deliverables consumer from an enabled claim', async t => {

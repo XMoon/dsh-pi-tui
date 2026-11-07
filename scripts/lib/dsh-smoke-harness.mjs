@@ -473,6 +473,65 @@ export function writeHeaderProbePackage(workDir) {
   return probeDir
 }
 
+export function writePromptQualificationPackage(workDir, llmModulePath) {
+  const packageName = 'dsh-pi-tui-prompt-qualification'
+  const probeDir = join(workDir, 'prompt-qualification')
+  mkdirSync(probeDir, { recursive: true })
+  writeFileSync(join(probeDir, 'package.json'), JSON.stringify({
+    name: packageName,
+    version: '0.0.0',
+    type: 'module',
+    main: 'index.mjs',
+    exports: { '.': './index.mjs' },
+    files: ['index.mjs', 'cordis.patch.yml'],
+    dsh: { bundle: { patch: './cordis.patch.yml' } },
+  }, null, 2) + '\n', 'utf8')
+  writeFileSync(join(probeDir, 'cordis.patch.yml'), [
+    '- insert:',
+    '    - id: prompt-qualification-llm',
+    `      name: '${packageName}'`,
+    '      inject: [llm]',
+    '- id: agent-default-model',
+    '  config:',
+    '    provider: prompt-qualification',
+    '    model: prompt-qualification',
+    '',
+  ].join('\n'), 'utf8')
+  writeFileSync(join(probeDir, 'index.mjs'), [
+    "import { appendFileSync } from 'node:fs'",
+    `import { LlmAdapter } from ${JSON.stringify(llmModulePath)}`,
+    `export const name = '${packageName}'`,
+    "export const inject = ['llm']",
+    'const evidencePath = process.env.DSH_SMOKE_PROMPT_EVIDENCE',
+    "const guidanceMarker = 'Prefer showing the primary results within your final response'",
+    "const presentInstruction = 'Use present to publish complete deliverables'",
+    'function textOf(value) {',
+    "  if (typeof value === 'string') return value",
+    "  if (Array.isArray(value)) return value.map(textOf).join('\\n')",
+    "  if (value !== null && typeof value === 'object') {",
+    "    if (Object.hasOwn(value, 'content')) return textOf(value.content)",
+    "    if (Object.hasOwn(value, 'text')) return textOf(value.text)",
+    '  }',
+    "  return ''",
+    '}',
+    'class QualificationLlm extends LlmAdapter {',
+    "  resolveModel(provider, model) { return Promise.resolve({ provider, id: model, name: model }) }",
+    "  listModels(provider) { return Promise.resolve([{ provider, id: 'prompt-qualification', name: 'prompt-qualification' }]) }",
+    '  async *stream(options) {',
+    '    const systemText = [options.system, ...(options.messages ?? []).filter(message => message?.role === \'system\').map(message => message.content)].map(textOf).join(\'\\n\')',
+    '    const toolNames = Array.isArray(options.tools) ? options.tools.map(tool => tool?.name).filter(name => typeof name === \'string\').sort() : []',
+    '    if (evidencePath) appendFileSync(evidencePath, JSON.stringify({ markerCount: systemText.split(guidanceMarker).length - 1, presentInstruction: systemText.includes(presentInstruction), presentTool: toolNames.includes(\'present\'), toolNames }) + \'\\n\', { mode: 0o600 })',
+    "    yield { type: 'block-start', index: 0, blockType: 'text' }",
+    "    yield { type: 'text-delta', index: 0, text: 'direct qualification answer' }",
+    "    yield { type: 'block-end', index: 0, block: { type: 'text', text: 'direct qualification answer' } }",
+    "    yield { type: 'finish', reason: { kind: 'stop' } }",
+    '  }',
+    '}',
+    'export function apply(ctx) { ctx.llm.registerAdapter([\'prompt-qualification\'], new QualificationLlm()) }',
+    '',
+  ].join('\n'), 'utf8')
+  return probeDir
+}
 export function writeLauncher(path, invocation, env, presetId) {
   const preset = presetId === undefined ? '' : ` --preset ${shellQuote(presetId)}`
   const lines = [
@@ -482,6 +541,7 @@ export function writeLauncher(path, invocation, env, presetId) {
     `export DSH_HOME=${shellQuote(env.DSH_HOME)}`,
     `export DSH_SMOKE_EVIDENCE=${shellQuote(env.DSH_SMOKE_EVIDENCE)}`,
     `export DSH_SMOKE_HEADER_EVIDENCE=${shellQuote(env.DSH_SMOKE_HEADER_EVIDENCE)}`,
+    ...(env.DSH_SMOKE_PROMPT_EVIDENCE === undefined ? [] : [`export DSH_SMOKE_PROMPT_EVIDENCE=${shellQuote(env.DSH_SMOKE_PROMPT_EVIDENCE)}`]),
     `export npm_config_registry=${shellQuote(env.npm_config_registry)}`,
     `export NPM_CONFIG_REGISTRY=${shellQuote(env.NPM_CONFIG_REGISTRY)}`,
     `export npm_config_minimum_release_age=${shellQuote(env.npm_config_minimum_release_age)}`,

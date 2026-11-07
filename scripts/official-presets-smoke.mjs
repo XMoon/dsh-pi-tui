@@ -18,7 +18,8 @@
  * @module official-presets-smoke
  */
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -51,6 +52,7 @@ import {
   waitUntil,
   writeHeaderProbePackage,
   writeLauncher,
+  writePromptQualificationPackage,
 } from './lib/dsh-smoke-harness.mjs'
 import {
   DEFAULT_SOURCE_CONFIG,
@@ -249,7 +251,7 @@ export function officialPresetStatusVisible(presetId, pane) {
  * and checks the scoped command catalog. A standing fallback or mount error is
  * always a failure rather than a successful degraded boot.
  */
-export async function smokeOfficialPresetMounts(invocation, workDir, env) {
+export async function smokeOfficialPresetMounts(invocation, workDir, env, promptEvidencePath) {
   for (const presetId of OFFICIAL_PRESET_IDS) {
     const socket = `dsh-preset-health-${process.pid}-${presetId}`
     const session = `preset-health-${process.pid}-${presetId}`
@@ -295,6 +297,20 @@ export async function smokeOfficialPresetMounts(invocation, workDir, env) {
           && evidence.sessionId.length > 0
       }, 'COMPAT_BOOT_FAILURE')
       assertOfficialPresetHeader(presetId, env.DSH_SMOKE_HEADER_EVIDENCE)
+      if (presetId === 'standard' && promptEvidencePath !== undefined) {
+        tmux.sendLiteral('pr-e direct standard prompt')
+        tmux.sendKey('Enter')
+        await waitUntil('Direct standard prompt answer', TIMEOUTS.command, () => {
+          if (!tmux.hasSession()) return false
+          return tmux.capturePane().includes('direct qualification answer')
+        }, 'COMPAT_BOOT_FAILURE')
+        const evidence = readFileSync(promptEvidencePath, 'utf8').trim()
+        const records = evidence === '' ? [] : evidence.split('\n').map(line => JSON.parse(line))
+        const standard = records.filter(record => record.presentTool === true)
+        if (standard.length !== 1 || standard[0].markerCount !== 1 || standard[0].presentInstruction !== true) {
+          fail('COMPAT_BOOT_FAILURE', `Direct standard effective prompt qualification failed: ${JSON.stringify({ records: records.length, standard })}`)
+        }
+      }
       tmux.sendLiteral(officialPresetStatusCommand())
       await delay(350)
       tmux.sendKey('Enter')
@@ -387,7 +403,12 @@ async function main() {
   mkdirSync(harnessDir, { recursive: true })
   writeFileSync(join(workDir, 'npmrc'), 'registry=https://registry.npmjs.org\n', 'utf8')
   const evidencePath = join(workDir, 'evidence.json')
-  const env = isolatedEnvironment(workDir, home, dshHome, evidencePath)
+  const promptEvidencePath = join(workDir, 'prompt-evidence.jsonl')
+  writeFileSync(promptEvidencePath, '', { mode: 0o600 })
+  const env = {
+    ...isolatedEnvironment(workDir, home, dshHome, evidencePath),
+    DSH_SMOKE_PROMPT_EVIDENCE: promptEvidencePath,
+  }
 
   try {
     writeFileSync(join(harnessDir, 'package.json'), JSON.stringify({
@@ -407,9 +428,12 @@ async function main() {
     if (version.status !== 0) throw new Error(`installed DSH --version failed:\n${commandOutput(version)}`)
     requireExactVersion('DSH', commandOutput(version).split(/\r?\n/u).find(line => line.trim() !== '')?.trim(), targetDshVersion)
 
+    const llmModulePath = createRequire(dsh[1]).resolve('@deepseek-ai/dsh-llm')
+    const promptPackage = writePromptQualificationPackage(workDir, llmModulePath)
     installPlugin(dsh, tarball, harnessDir, env, false)
+    installPlugin(dsh, promptPackage, harnessDir, env, false)
     installPlugin(dsh, writeHeaderProbePackage(workDir), harnessDir, env, false)
-    await smokeOfficialPresetMounts(dsh, workDir, env)
+    await smokeOfficialPresetMounts(dsh, workDir, env, promptEvidencePath)
     console.log(`official preset assembly smoke passed — ${basename(tarball)} × DSH ${targetDshVersion}`)
   } finally {
     if (process.env.OFFICIAL_PRESETS_KEEP !== '1') rmSync(workDir, { recursive: true, force: true })

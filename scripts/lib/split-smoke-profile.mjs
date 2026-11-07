@@ -146,7 +146,11 @@ export function createSplitSmokeProfile({ tarball, targetDshVersion, workDir }) 
   const surfaceLlm = writeSurfaceLlmFixture(profileDir, workDir)
   const base = {
     cwd: profileDir,
-    env: { ...env, SPLIT_PROCESS_EXTRA_PATCH: surfaceLlm.patchPath },
+    env: {
+      ...env,
+      SPLIT_PROCESS_EXTRA_PATCH: surfaceLlm.patchPath,
+      SPLIT_PROCESS_PROMPT_EVIDENCE: surfaceLlm.promptEvidencePath,
+    },
     anchor,
     profile: 'pi-tui',
     scratch,

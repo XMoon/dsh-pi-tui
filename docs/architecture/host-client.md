@@ -491,9 +491,22 @@ Review page from exactly those answers. Consequences of this contract:
   fails visibly when the permission or the source is unavailable; neither action
   makes the Host write the file. `message-quotes` inserts a Markdown `> `
   blockquote into the current composer draft and writes nothing until the user
-  explicitly sends, at which point it is an ordinary user message. The iframe
-  sidebar browser, the Office converter and the model-facing file references stay
-  uncomposed.
+  explicitly sends, at which point it is an ordinary user message.
+- The shared `dsh-deliverable-file-references` Host row stays mounted in the base
+  PiTUI profile with Web off and on. Its official system-prompt section is
+  consumed by the effective Agent/preset assembly, while the `present` tool and
+  the TUI `/deliverables` panel remain separate capabilities with no Web
+  prerequisite. The effective assembled prompt, not the Loader row inventory,
+  is the authority for whether a preset consumes that guidance.
+- The Office-to-PDF provider is Web-only: enabling the official Browser graph
+  publishes `officeToPdf` for the document-preview sidebar, and disabling Web
+  disposes that provider together with the Web graph while retaining protected
+  Host owners.
+- `harness-dev-context` remains deliberately uncomposed. Its developer
+  instructions assume that the Agent is editing the DSH GUI that serves the
+  page, and expose the DSH implementation path, GUI URL and HMR/build workflow;
+  those are not ordinary PiTUI coding instructions. `web-runtime` therefore
+  keeps `surfaceContext: false`.
 
 The Client-side `/web` menu is the ONE user entry and it holds no Web state of
 its own: it reads the Host status through the semantic WebAccessPort, performs

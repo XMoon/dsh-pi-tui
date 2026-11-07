@@ -94,7 +94,34 @@ function prepareWorkRoot(rawRoot) {
   return { root: rawRoot, proof }
 }
 
-/** The scripted model. All work is driven through the official Agent loop. */
+function textOf(value) {
+  if (typeof value === 'string') return value
+  if (Array.isArray(value)) return value.map(textOf).join('\\n')
+  if (value !== null && typeof value === 'object') {
+    if (Object.hasOwn(value, 'content')) return textOf(value.content)
+    if (Object.hasOwn(value, 'text')) return textOf(value.text)
+  }
+  return ''
+}
+
+function recordPromptFacts(options) {
+  const evidencePath = process.env.SPLIT_PROCESS_PROMPT_EVIDENCE
+  if (typeof evidencePath !== 'string' || evidencePath === '') return
+  const systemText = [options.system, ...(options.messages ?? [])
+    .filter(message => message?.role === 'system')
+    .map(message => message.content)]
+    .map(textOf).join('\\n')
+  const toolNames = Array.isArray(options.tools)
+    ? options.tools.map(tool => tool?.name).filter(name => typeof name === 'string').sort()
+    : []
+  appendFileSync(evidencePath, JSON.stringify({
+    markerCount: systemText.split('Prefer showing the primary results within your final response').length - 1,
+    presentInstruction: systemText.includes('Use present to publish complete deliverables'),
+    presentTool: toolNames.includes('present'),
+    toolNames,
+  }) + '\n', { mode: 0o600 })
+}
+
 class C1Model extends LlmAdapter {
   constructor(scenario, proof, root, agentStatusOf) {
     super()
@@ -129,6 +156,7 @@ class C1Model extends LlmAdapter {
       yield { type: 'finish', reason: { kind: 'stop' } }
       return
     }
+    recordPromptFacts(options)
     const userText = allUserText(options.messages ?? [])
     const afterTool = Array.isArray(options.messages) && options.messages.at(-1)?.role === 'tool'
     const token = `${this.scenario}-${sessionId}`
