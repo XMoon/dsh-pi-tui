@@ -1,11 +1,11 @@
 /**
- * PR-D: search and Markdown export read the durable visual facts, never a
- * rendered PNG/blob derivative.
+ * Visual search reads the durable visual facts, never a rendered PNG/blob
+ * derivative.
  *
  * The chart values live in the final result text; the SVG source lives in the
  * durable tool-call arguments and the result carries the description plus the
- * credential. Both consumers therefore reproduce the authorized facts on a
- * cold path.
+ * credential. The search corpus therefore reproduces the authorized facts on
+ * a cold path.
  * @module @xmoon76/dsh-pi-tui/visual-artifact.test
  */
 

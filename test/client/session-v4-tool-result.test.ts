@@ -12,7 +12,7 @@
  * - call/result pairing by native `toolCallId` for interleaved parallel calls
  *   including same-name calls;
  * - empty and multimodal result content preserved verbatim (order included);
- * - the Markdown transcript projection reading `message.content` directly;
+ * - the TUI transcript fold reading `message.content` directly;
  * - historical released-V3 data reaching the fold ONLY through the official
  *   `@deepseek-ai/dsh-session-format-v3-to-v4` migration.
  *
@@ -427,8 +427,8 @@ test('a reused call id from another turn or step must not donate its tool name',
 test('an earlier observed call does not leak across a reused id in another step', () => {
   // Malformed/id-reusing log: c1 genuinely starts and settles in step 0,
   // then a LATER request reuses c1 in step 2 and closes not-started. The
-  // earlier observation must not suppress the later recovery diagnostic —
-  // both in the fold and in the Markdown export.
+  // earlier observation must not suppress the later recovery diagnostic in
+  // the TUI transcript fold.
   const events = [
     turnStart(),
     event('step/start', { turn: 0, step: 0 }, 1),
