@@ -164,6 +164,16 @@ export interface TspHistorySearchPorts {
 export interface TspHistorySearchSeat {
   /** Whether the card currently owns the keyboard (open, not parked). */
   isOpen(): boolean
+  /**
+   * Whether the SAME card instance is still a LIVE seat occupant, including a
+   * Modal park. This is a different fact from {@link isOpen}: while a Modal owns
+   * the keys the card is parked, not closed, and its Compose Seat must stay
+   * withheld from any asynchronous Composer intake that started before the
+   * park. An Async read settled during the park must NEVER be allowed to write
+   * the draft just because the keyboard owner changed.
+   * `false` once the card retired or its captured Session scope died.
+   */
+  holdsSeat(): boolean
   /** The ONE keyboard owner while the card is the current seat. `true` = the
    *  key was consumed here and never reached the Composer reducer. */
   handleKey(key: Key): boolean
@@ -928,7 +938,17 @@ export function createTspHistorySearch(
       if (!owner.scopeCapture.isCurrent()) return false
       return ports.admitted()
     },
-    // Supported = this mount received the ONE History bundle AND the pane
+    holdsSeat: () => {
+      const owner = state
+      // Parked counts: the card is still the SAME instance with its query,
+      // selection and in-flight read, and it comes back when the last blocker
+      // settles. A dead captured scope means it will never return, so the
+      // Compose Seat is no longer withheld by it.
+      return owner !== undefined && !owner.retired
+        && (owner.phase === 'open' || owner.phase === 'parked')
+        && owner.scopeCapture.isCurrent()
+    },
+    // Supported = this mount received the ONE History bundle and the pane
     // negotiated what the card actually paints. `binding === undefined` IS the
     // "no bound source" case: the bundle's `source` member is typed
     // `OptionCapability<'historySearchSource'>` = `NonNullable<…>`, so a bound

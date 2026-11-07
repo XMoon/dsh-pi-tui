@@ -1039,6 +1039,46 @@ test('a control byte typed into the query is projected to display text, never ca
   assert.equal(h.requests.at(-1)?.query.includes('\n'), false, 'and the source query stays one line')
 })
 
+test('holdsSeat covers a Modal park but releases on retire and on a dead captured scope', async (t) => {
+  // The two facts the external review separated: `isOpen` is the KEYBOARD
+  // owner, `holdsSeat` is the SAME card instance's seat LIFECYCLE (open OR
+  // parked). An attachment read that settles under a park must still see the
+  // seat withheld, while a retired or stale card must release it.
+  let current = true
+  const seat = createTspHistorySearch({
+    admitted: () => true,
+    requestRender: () => {},
+    setFocus: () => {},
+    restoreToComposer: () => {},
+    copyRaw: () => {},
+    reveal: () => {},
+    scroll: () => {},
+    reportFatal: () => {},
+    reportSecondaryFailure: () => {},
+  }, {
+    source: { search: () => Promise.resolve({ results: [], exhausted: true }) },
+    cwd: () => '/work/alpha',
+    captureScope: () => ({ sessionId: 'ses_a', isCurrent: () => current }),
+  }, () => true)
+  t.after(() => seat.retire())
+  assert.equal(seat.holdsSeat(), false, 'no card holds the seat before the chord')
+  seat.open()
+  assert.equal(seat.isOpen(), true, 'the open card owns the keys')
+  assert.equal(seat.holdsSeat(), true, 'and holds the Composer seat')
+  seat.syncBlocker(true)
+  await settle(ABSENCE_WINDOW_MS)
+  assert.equal(seat.isOpen(), false, 'a Modal park takes the keyboard away')
+  assert.equal(seat.holdsSeat(), true, 'but the SAME card still withholds the Composer seat')
+  current = false
+  assert.equal(seat.holdsSeat(), false, 'a dead captured scope releases it even while parked')
+  current = true
+  seat.syncBlocker(false)
+  seat.open()
+  assert.equal(seat.holdsSeat(), true, 'a fresh open holds it again')
+  seat.retire()
+  assert.equal(seat.holdsSeat(), false, 'and retirement releases it for good')
+})
+
 test('a read that settles while a Modal parks the card keeps the SAME instance and its page', async (t) => {
   // The park window is exactly where the old code destroyed the card: the
   // mount's seat admission is false under a Modal, and the settlement read it.
@@ -1222,6 +1262,7 @@ test('a retirement the settlement performs owns the frame it asks for too', asyn
   assert.match(String((fatal[0] as Error)?.message ?? ''), /simulated ViewError on the retirement frame/)
   assert.deepEqual(rejections, [], 'and nothing escaped as an unhandled rejection')
   assert.equal(seat.renderState(), undefined, 'the card is gone regardless')
+  assert.equal(seat.holdsSeat(), false, 'and a retired card releases the Composer seat')
 })
 
 test('the seat routes a frame commit that throws in its OWN settlement to the fatal owner', async (t) => {

@@ -517,6 +517,9 @@ interface MountOptions {
   /** Hold the Client-local image read until the case releases it: the ONE way
    *  to make an intake genuinely in flight instead of racing the filesystem. */
   readonly holdImageRead?: boolean
+  /** Advertise the native modal kinds, so a real Approval can PARK the History
+   *  card while an attachment read is still in flight. */
+  readonly nativeInteraction?: boolean
   /** Whether the composition supplies the ONE stager install seam. `false`
    *  models an assembly with no TSP attachment plane (the command layer then
    *  installs nothing, exactly like an absent optional port). */
@@ -611,6 +614,7 @@ async function mountChain(
     // composition can put a real card in the composer seat and prove the
     // attachment intake refuses to write behind it.
     historySearch: true,
+    ...(options.nativeInteraction === true ? { nativeInteraction: true } : {}),
   })
   life.defer(() => pane.restore())
   const connected = await sdkConnect({ timeout: 500, exitHooks: false })
@@ -2302,6 +2306,78 @@ test('a Client-local read still in flight when the seat moves commits nothing ->
 })
 
 // ── P. The `@` scope is the LIVE session, resolved per query (matrix D02) ─────
+
+test('a Client-local read in flight through an open History card AND a Modal park commits nothing, while the same read without a History seat stages normally', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('pi-tui-tsp-id-park-intake-')
+  writeClientFiles(home, ['park.png'])
+  const h = await mountChain(life, home, { holdImageRead: true, nativeInteraction: true })
+  assert.equal(h.mountPorts.stagers.length, 1, 'the ONE stager is installed on this mount')
+
+  // POSITIVE CONTROL: with no History seat the same held read stages exactly
+  // one attachment and writes exactly one placeholder.
+  await h.setDraft('look /image park')
+  await h.triggerQuietly(TAB)
+  await waitUntil('the path row painted', () => h.rows().length > 0)
+  await h.press(ENTER)
+  await waitUntil('the accepted path is on the wire', () => h.editor().text === 'look /image park.png ')
+  await waitUntil('the read is really in flight', () => h.imageRead.heldCount() === 1)
+  h.imageRead.releaseAll()
+  await waitUntil('the positive control staged its attachment', () => h.images.values().length === 1)
+  assert.ok(h.editor().text.includes('[image #1'), 'and wrote the placeholder')
+  // The stores are reset by the next draft, so every later assertion below is a
+  // DELTA against the state at the second acceptance, never an absolute count.
+  const stagedAtAccept = h.images.values().length
+
+  // THE RACE: read pending → History open → Modal park → read settles.
+  await h.setDraft('look /image park')
+  await h.triggerQuietly(TAB)
+  await waitUntil('the second path row painted', () => h.rows().length > 0)
+  await h.press(ENTER)
+  await waitUntil('the second accepted path is on the wire', () => h.editor().text === 'look /image park.png ')
+  const draftAtAccept = h.editor()
+  const stagedBeforePark = h.images.values().length
+  await waitUntil('the second read is in flight', () => h.imageRead.heldCount() === 1)
+  await h.press('\u0012')
+  await waitUntil('the History card opened', () =>
+    wireNodes(h.pane).some(node => /history-card-\d+$/.test(String(node.id))))
+  let settled = false
+  const outcome = h.renderer().interaction.showApprovalPrompt(
+    { toolName: 'tool-a', reason: 'attachment park race', arguments: '{}' }, true)
+  void outcome.then(() => { settled = true })
+  await waitUntil('the modal parked the card', () =>
+    !wireNodes(h.pane).some(node => /history-card-\d+$/.test(String(node.id))))
+  // The positive control's success notice is still present in the dock, so the
+  // parked read must add NO NEW notice: count the painted dock notices.
+  const noticeCountAtPark = wireText(h.pane).split('attached [image').length - 1
+  // isOpen() is now FALSE, but the SAME card instance is still there: a park is
+  // not a release of the Composer seat.
+  h.imageRead.releaseAll()
+  // reason: bounded absence window — a refusal commits no frame and no store
+  // entry, so the only observation is that nothing changed.
+  await new Promise(resolve => setTimeout(resolve, ABSENCE_WINDOW_MS))
+  assert.deepEqual(h.editor(), draftAtAccept,
+    'the draft the card will restore into was not written behind the park')
+  assert.equal(h.images.values().length, stagedBeforePark,
+    `the parked read staged NO new attachment (before=${stagedBeforePark}, positive control staged ${stagedAtAccept})`)
+  assert.equal(h.files.values().length, 0, 'and no generic file either')
+  assert.equal(wireText(h.pane).split('attached [image').length - 1, noticeCountAtPark,
+    'the parked read announced NO new success notice behind the park')
+  assert.equal(h.submits.length, 0, 'nothing submitted')
+
+  // Settle the modal: the SAME card returns (park, not retire), still with no
+  // late write.
+  await h.press('y')
+  await waitUntil('the approval settled', () => settled)
+  await waitUntil('the SAME card returned', () =>
+    wireNodes(h.pane).some(node => /history-card-\d+$/.test(String(node.id))))
+  assert.deepEqual(h.editor(), draftAtAccept, 'resume did not let the late read in')
+  assert.equal(h.images.values().length, stagedBeforePark, 'and nothing was staged on resume')
+  await h.press('\u001b')
+  await waitUntil('the card closed', () =>
+    !wireNodes(h.pane).some(node => /history-card-\d+$/.test(String(node.id))))
+  assert.deepEqual(h.editor(), draftAtAccept, 'the original draft is byte-identical at the end')
+})
 
 test('the @ seat resolves its Host scope at query time -> the sessionless surface asks the workspace cwd, a live Session answers with its own id and no reinstall happens, and an answer captured for the outgoing session is refused mid-flight', async (t) => {
   const life = testLifecycle(t)
