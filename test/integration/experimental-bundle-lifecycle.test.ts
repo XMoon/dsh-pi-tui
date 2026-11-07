@@ -130,6 +130,7 @@ for (const { name, skip, title, coreRow } of CASES) {
     let app = await startS4D3Application(t, { bundles: [], presets: true, installationBoot: true })
 
     // ── OFF: the authoritative Host row and the untouched profile ───────────
+    const profileDir = app.host.profileDir
     const off = await bundleRow(app, name)
     assert.ok(off !== undefined, `the real Host catalog lists ${name}`)
     assert.equal(off.official, true)
@@ -160,6 +161,7 @@ for (const { name, skip, title, coreRow } of CASES) {
     const previousContext = app.host.ctx
     app = await app.restart()
     assert.notEqual(app.host.ctx, previousContext, 'the restart boots a FRESH Host Context')
+    assert.equal(app.host.profileDir, profileDir, 'the restart reuses the SAME profile root')
     assert.ok(app.host.activeBundles.includes(name), `the restarted Host selected ${name}`)
     const entry = app.host.loaderEntries().find(candidate => candidate.id === coreRow)
     assert.ok(entry !== undefined, `the restarted Loader carries the ${coreRow} row from the published patch`)
@@ -192,6 +194,7 @@ for (const { name, skip, title, coreRow } of CASES) {
 
     // ── Restart again: the layer is gone and the member stays manageable ──
     app = await app.restart()
+    assert.equal(app.host.profileDir, profileDir, 'the disable restart keeps the SAME profile root')
     assert.equal(app.host.activeBundles.includes(name), false, `the restarted Host no longer loads ${name}`)
     assert.equal(app.host.loaderEntries().some(candidate => candidate.id === coreRow), false,
       `the ${coreRow} row is not composed by the disabled bundle`)

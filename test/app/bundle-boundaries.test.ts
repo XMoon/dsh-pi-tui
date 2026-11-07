@@ -167,13 +167,14 @@ test('the real Host catalog paints all 14 verified B01–B14 boundaries through 
   /** The DETAIL column of the embedded dual frame, whitespace-normalized. In a
    *  dual frame a plain row-wise flatten would interleave the List column with
    *  the Details column, so the pane is sliced from its real split. */
-  const detailFrame = (): string => {
+  const rawDetail = (): string => {
     const split = panel.contentLayout()
     const lines = vt.getViewport().map(line => plain([line]))
-    if (!split.dual) return lines.join('\n').replace(/\s+/gu, ' ')
+    if (!split.dual) return lines.join('\n')
     const start = split.leftWidth + 2
-    return lines.map(line => line.slice(start)).join('\n').replace(/\s+/gu, ' ')
+    return lines.map(line => line.slice(start)).join('\n')
   }
+  const detailFrame = (): string => rawDetail().replace(/\s+/gu, ' ')
   // The catalog is the COMPLETE official roster (shipped Optional bundles +
   // on-demand catalog entries); the 14 B01–B14 UI boundaries below are the
   // TUI's own verified subset, not the catalog size.
@@ -428,13 +429,14 @@ test('the release Experimental members paint their real TUI surface and platform
     for (let index = 0; index < rounds; index += 1) await new Promise<void>(resolve => setTimeout(resolve, 0))
     await vt.waitForRender()
   }
-  const detailFrame = (): string => {
+  const rawDetail = (): string => {
     const split = panel.contentLayout()
     const lines = vt.getViewport().map(line => plain([line]))
-    if (!split.dual) return lines.join('\n').replace(/\s+/gu, ' ')
+    if (!split.dual) return lines.join('\n')
     const start = split.leftWidth + 2
-    return lines.map(line => line.slice(start)).join('\n').replace(/\s+/gu, ' ')
+    return lines.map(line => line.slice(start)).join('\n')
   }
+  const detailFrame = (): string => rawDetail().replace(/\s+/gu, ' ')
   const waitFor = async (predicate: () => boolean, label: string, timeoutMs = 60_000): Promise<void> => {
     const deadline = Date.now() + timeoutMs
     while (Date.now() < deadline) {
@@ -474,6 +476,11 @@ test('the release Experimental members paint their real TUI surface and platform
     assert.equal(panel.selectedCardValue(), `bundle:${name}`, `the explicit search reveals ${name}`)
     vt.sendInput('\r')
     await waitFor(() => plain(vt.getViewport()).includes('Official DSH catalog entry'), `the ${name} Detail`)
+    // The CURRENT painted Detail column (never the search box or the
+    // controller model) must carry the exact identity. Whitespace is removed
+    // because the narrow detail column wraps the package name across lines.
+    await waitFor(() => rawDetail().replace(/\s+/gu, '').includes(name),
+      `the painted Detail carries the exact ${name} identity`)
     let painted = detailFrame()
     for (let page = 0; page < 20 && !/TUI surface/u.test(painted); page += 1) {
       vt.sendInput('\x1b[6~')
@@ -526,11 +533,11 @@ test('the release Experimental members paint their real TUI surface and platform
     vt.sendInput('\x1b') // leave Details
     await settle()
   }
-  // ONE representative same-name official:false package: the Host fact keeps
-  // it Third-party, so it inherits neither the Experimental identity nor the
-  // release support copy (the legacy B01 mechanism is covered separately by
-  // plugin-manager-classify.test.ts; this proves the NEW copy is name-keyed
-  // only behind the official/section guard).
+  // Supplemental model-level control (NOT mounted-frame evidence): ONE
+  // representative same-name official:false package. The Host fact keeps it
+  // Third-party, so it inherits neither the Experimental identity nor the new
+  // release support copy; the mounted negative remains the existing
+  // plugin-manager-classify.test.ts same-name case.
   const impostorName = '@deepseek-ai/dsh-experimental-forge-bundle'
   const impostorSnapshot = detachPluginManagerSnapshot({
     bundles: [{
