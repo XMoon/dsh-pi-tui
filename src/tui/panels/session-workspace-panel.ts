@@ -133,7 +133,11 @@ function rowColumns(titleWidth: number, width: number): { readonly identity: num
  *  otherwise identical). The id stays visible; the title uses the remaining
  *  identity cells and yields to the id, never the reverse. */
 function identityText(shortId: string, title: string | undefined, selected: boolean): string {
-  if (title === undefined || title === '') return color.textDim(shortId)
+  if (title === undefined || title === '') {
+    // An untitled row's ID *is* its identity: it takes the normal text role and
+    // the selected strong role, not the secondary dim role.
+    return selected ? color.textStrong(shortId) : color.text(shortId)
+  }
   const paintedTitle = selected ? color.textStrong(title) : color.text(title)
   return `${color.textDim(shortId)}  ${paintedTitle}`
 }
