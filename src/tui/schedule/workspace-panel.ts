@@ -246,6 +246,8 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
   private rawDraft: string | undefined
   /** The exact value this panel last dispatched for that RAW field. */
   private rawDispatched: string | undefined
+  /** The raw field's caret, as a CODE-POINT index into {@link rawDraft}. */
+  private rawCursor: number | undefined
 
   constructor(deps: ScheduleWorkspacePanelDeps) {
     this.deps = deps
@@ -545,19 +547,73 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
 
   private handleRawInput(draft: ScheduleEditorDraft, field: ScheduleFormField, data: string): void {
     const buffer = this.rawDraft ?? field.value
-    // Terminals wrap a paste in bracketed-paste markers; the RRULE field is raw
-    // multi-line text, so the payload (newlines included) is inserted verbatim.
+    const points = Array.from(buffer)
+    let caret = Math.max(0, Math.min(this.rawCursor ?? points.length, points.length))
+    const lineStart = (at: number): number => {
+      const newline = points.lastIndexOf('\n', at - 1)
+      return newline < 0 ? 0 : newline + 1
+    }
+    const lineEnd = (at: number): number => {
+      const newline = points.indexOf('\n', at)
+      return newline < 0 ? points.length : newline
+    }
+    let insert: string[] | undefined
     const pasted = data.match(/^\x1b\[200~([\s\S]*)\x1b\[201~$/u)?.[1]
-    let next: string
-    if (pasted !== undefined) next = `${buffer}${pasted}`
-    else if (matchesKey(data, 'enter')) next = `${buffer}\n`
-    else if (matchesKey(data, 'backspace') || matchesKey(data, 'delete')) next = buffer.slice(0, -1)
-    else if (/^[\x20-\x7e\n]+$/u.test(data)) next = `${buffer}${data}`
-    else return
-    this.rawDraft = next
-    this.rawDispatched = next
-    this.deps.dispatch({ kind: 'set-field', fieldId: field.id, value: next })
+    if (pasted !== undefined) insert = Array.from(pasted)
+    else if (matchesKey(data, 'enter')) insert = ['\n']
+    else if (matchesKey(data, 'backspace')) {
+      if (caret > 0) { points.splice(caret - 1, 1); caret -= 1 }
+    } else if (matchesKey(data, 'delete')) {
+      if (caret < points.length) points.splice(caret, 1)
+    } else if (matchesKey(data, 'left')) {
+      caret = Math.max(0, caret - 1)
+    } else if (matchesKey(data, 'right')) {
+      caret = Math.min(points.length, caret + 1)
+    } else if (matchesKey(data, 'home')) {
+      caret = lineStart(caret)
+    } else if (matchesKey(data, 'end')) {
+      caret = lineEnd(caret)
+    } else if (matchesKey(data, 'up') || matchesKey(data, 'down')) {
+      // Keep the visual column across lines, like every multi-line editor.
+      const start = lineStart(caret)
+      const column = caret - start
+      if (matchesKey(data, 'up') && start > 0) {
+        const previousStart = lineStart(start - 1)
+        caret = Math.min(previousStart + column, start - 1)
+      } else if (matchesKey(data, 'down') && lineEnd(caret) < points.length) {
+        const nextStart = lineEnd(caret) + 1
+        caret = Math.min(nextStart + column, lineEnd(nextStart))
+      }
+    } else if (this.isPrintableInput(data)) {
+      insert = Array.from(data)
+    } else {
+      return
+    }
+    if (insert !== undefined) {
+      points.splice(caret, 0, ...insert)
+      caret += insert.length
+    }
+    const next = points.join('')
+    this.rawCursor = caret
+    // Caret-only movement changes no text: it must not publish a draft write.
+    if (next !== buffer) {
+      this.rawDraft = next
+      this.rawDispatched = next
+      this.deps.dispatch({ kind: 'set-field', fieldId: field.id, value: next })
+    }
     this.deps.requestRender()
+  }
+
+  /** Any printable Unicode input (CJK, emoji, text pastes) — only C0/C1
+   *  control bytes (and the ESC introducer) are input protocol, never text. */
+  private isPrintableInput(data: string): boolean {
+    if (data.length === 0) return false
+    for (const character of data) {
+      const code = character.codePointAt(0) ?? 0
+      if (code === 0x0a) continue
+      if (code < 0x20 || (code >= 0x7f && code <= 0x9f)) return false
+    }
+    return true
   }
 
   private handleHelpInput(data: string): void {
@@ -1162,21 +1218,47 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
         const buffer = selected && this._focused ? (this.rawDraft ?? field.value) : field.value
         const lines = buffer.split('\n')
         if (selected && this._focused) {
+          const caret = Math.max(0, Math.min(this.rawCursor ?? Array.from(buffer).length, Array.from(buffer).length))
+          // Locate the caret line/column in CODE POINTS so CJK/emoji are never
+          // split, then paint a window around it (the caret stays visible on a
+          // long line).
+          let consumed = 0
+          let caretLine = 0
+          let caretColumn = 0
           for (const [lineIndex, value] of lines.entries()) {
-            const isLast = lineIndex === lines.length - 1
+            const length = Array.from(value).length
+            if (caret <= consumed + length) {
+              caretLine = lineIndex
+              caretColumn = caret - consumed
+              break
+            }
+            consumed += length + 1
+            caretLine = lineIndex + 1
+            caretColumn = 0
+          }
+          const window = Math.max(1, valueBudget - 1)
+          for (const [lineIndex, value] of lines.entries()) {
+            const points = Array.from(value)
+            let shown = value
+            if (lineIndex === caretLine) {
+              const offset = Math.max(0, caretColumn - (window - 1))
+              const before = points.slice(offset, caretColumn).join('')
+              const after = points.slice(caretColumn, offset + window - (caretColumn - offset)).join('')
+              shown = `${before}▏${after}`
+            } else {
+              shown = points.slice(0, window).join('')
+            }
             out.push({
               segments: lineIndex === 0
                 ? [
                     { plain: '> ', paint: color.primary },
                     { plain: fit(field.label, EDITOR_LABEL_WIDTH), paint: color.textDim },
-                    { plain: sanitizedPhysicalLine(value), paint: color.textStrong },
-                    ...(isLast ? [{ plain: '▏', paint: color.primary }] : []),
+                    { plain: sanitizedPhysicalLine(shown), paint: color.textStrong },
                   ]
                 : [
                     { plain: '  ' },
                     { plain: ' '.repeat(EDITOR_LABEL_WIDTH) },
-                    { plain: sanitizedPhysicalLine(value), paint: color.textStrong },
-                    ...(isLast ? [{ plain: '▏', paint: color.primary }] : []),
+                    { plain: sanitizedPhysicalLine(shown), paint: color.textStrong },
                   ],
               ...(lineIndex === 0 ? { fieldId: field.id } : {}),
             })
@@ -1461,9 +1543,9 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     if (this.snapshot.confirm !== undefined) {
       // The action bar stays `<key> <verb>`; `Esc` is the LAST segment while
       // keeping the highest retained priority (design-language D8).
-      add('Confirm [Y]', 9, 'confirm')
-      add('Cancel [N]', 8, 'cancel')
-      add('Cancel [Esc]', 10, 'cancel')
+      add('y confirm', 9, 'confirm')
+      add('n cancel', 8, 'cancel')
+      add('Esc cancel', 10, 'cancel')
     } else {
       switch (this.snapshot.mode) {
         case 'list':
@@ -1679,15 +1761,18 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
         this.editorFieldId = field.id
         this.rawDraft = field.value
         this.rawDispatched = field.value
+        this.rawCursor = Array.from(field.value).length
       } else if (field.value !== this.rawDispatched) {
         this.rawDraft = field.value
         this.rawDispatched = field.value
+        this.rawCursor = Array.from(field.value).length
       }
       this.editorInput.focused = false
       return
     }
     this.rawDraft = undefined
     this.rawDispatched = undefined
+    this.rawCursor = undefined
     if (this.editorFieldId !== field.id) {
       const display = sanitizedPhysicalLine(field.value)
       this.editorFieldId = field.id
