@@ -492,6 +492,27 @@ export async function runInteractionNavigationFirst(context) {
         'G567-N3a question tool result', 120_000)
       assert(settledCount(workRoot, sessionX, 'question') === 1 && toolResults(sessionX, callId).length === 1,
         'G567-N3a the stale keys plus B\'s answer produced more than one Host settlement')
+      // The LATE half: B's settlement happens while A still shows Y. Any stale
+      // presenter callback for the already-settled X request arriving at A
+      // after that point must neither re-present an answerable form nor write
+      // a second result. Waiting on the REAL Host settlement event is the
+      // observable late-completion; A re-reads its own surface afterwards.
+      const lateIndex = eventsOf(sessionX).length
+      await sleep(2_000)
+      const viewportLate = (await clientA.viewport()).join('\n')
+      assert(!viewportLate.includes('[1] Proceed'),
+        'G567-N3a a late presenter callback re-presented the settled X question on A(Y)')
+      assert(eventsOf(sessionX).slice(lateIndex)
+        .every(event => event.type !== 'tool/result' && event.type !== 'turn/start'),
+      'G567-N3a a late presenter callback produced new Host activity on X')
+      assert(settledCount(workRoot, sessionX, 'question') === 1,
+        'G567-N3a a late presenter callback wrote a second settlement')
+      // A returns to X AFTER the settlement: the settled request must not
+      // reappear as answerable there either.
+      await resumeSession(clientA, sessionX, 'G567-N3a A returns to X after settlement')
+      await sleep(1_500)
+      assert(!(await clientA.viewport()).join('\n').includes('[1] Proceed'),
+        'G567-N3a returning to X resurrected the settled question as answerable')
       // Clear A's editor of the stale keys so /exit remains a command.
       clientA.send('\x15')
       for (const [side, ready] of [['A', aReady], ['B', bReady]]) {
