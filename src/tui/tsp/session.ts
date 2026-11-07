@@ -106,7 +106,7 @@ import type { TranscriptMessage, TranscriptToolMessage, TurnActivity } from '../
 import type { TranscriptWindowState } from '../../domain/transcript/window.ts'
 import type { TodoItem, TranscriptSearchPresentation } from '../../tui-app.ts'
 import type { StreamingToolPreview } from '../../app/surface/streaming-tool-preparing.ts'
-import { TranscriptNodeKeys, transcriptView, transcriptViewForPreset, toolRowImageBlocks, imageRefProblem, imageDisplayName, imageIdentityText, dockDraftImageNodes, DOCK_DRAFT_SINGLE_PREVIEW_COLS, DOCK_DRAFT_TWO_PREVIEW_COLS, MAX_IMAGE_BLOB_BYTES, type DockDraftImageEntry, type ToolSvgState } from './transcript-view.ts'
+import { TranscriptNodeKeys, transcriptView, transcriptViewForPreset, visibleTranscriptMembers, toolRowImageBlocks, imageRefProblem, imageDisplayName, imageIdentityText, dockDraftImageNodes, DOCK_DRAFT_SINGLE_PREVIEW_COLS, DOCK_DRAFT_TWO_PREVIEW_COLS, MAX_IMAGE_BLOB_BYTES, type DockDraftImageEntry, type ToolSvgState } from './transcript-view.ts'
 import { admitSvg, type SvgAdmission } from '../../domain/visual/svg-admission.ts'
 import { authorizeSvg, svgDigest } from '../../domain/visual/svg.ts'
 import { visualFactLine, visualPartsFromText } from '../../domain/visual/visual-facts.ts'
@@ -1251,10 +1251,11 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    * redraws the SAME rows instead of dropping them for one frame.
    */
   let lastStreamingToolPreviews: readonly StreamingToolPreview[] = []
-  /** The last formally committed transcript window. It is retained INPUT for
-   *  the Compact tail-preview admission only: no mirror map, no stats authority
-   *  and no second window owner. */
+  /** The last formally committed transcript window and turn boundaries.
+   *  These are retained inputs for tail-preview admission and proven Activity
+   *  close times only; no mirror stats authority or second window owner. */
   let lastWindowState: (TranscriptWindowState & { firstTurn?: number; lastTurn?: number; hasNewer?: boolean }) | undefined
+  let lastTurnActivities: ReadonlyMap<number, TurnActivity> | undefined
   /** The ONE renderer-local Compact Work disclosure owner set, keyed by the
    *  canonical span owner OBJECT identity. Never merged with expandedToolKeys
    *  (which owns SVG blob demand). Retired with the source/hydration/dispose. */
@@ -1262,6 +1263,18 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   /** The CURRENT frame's Compact Activity node-key PATH → span owner. Rebuilt
    *  from the real `lastMain` tree on every projection; empty in Full/Focus. */
   const workDisclosureByPath = new Map<string, TranscriptMessage>()
+  /**
+   * The members the CURRENT projection actually materializes.
+   *
+   * A Compact Activity builds NO member node while it is collapsed, so a Tool
+   * image inside such a Work is NOT visible and must not start an attachment
+   * read or a blob send. The image demand therefore follows THIS set, not the
+   * raw window: it is derived from the SAME canonical structure the projection
+   * consumes, and it is a per-commit disposable, never a second transcript
+   * store. Full/Focus materialize every member, so their demand is the whole
+   * window.
+   */
+  let visibleMembers: ReadonlySet<TranscriptMessage> = new Set()
   /**
    * PR-C: the ONE image binding of this renderer, installed by the mount
    * BEFORE the first tool projection. It carries the mount's loader (the
@@ -1897,6 +1910,12 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    * (`displayBlocks` outranks settled `content` while an opaque block is open;
    * User reads `content`), so a body the mapper draws block-wise is a body
    * whose images are read, and a legacy flat body reads nothing.
+   *
+   * A collapsed Compact Activity materializes NO member node, so the demand
+   * follows the CURRENT projection's visible member set: a hidden Tool image
+   * starts no read and sends no blob. The set is derived from the SAME
+   * canonical structure the view materializes, so the reader and the view can
+   * never disagree about what is on screen.
    */
   const projectedImageRefs = (): ImageAttachmentRefLike[] => {
     const refs: ImageAttachmentRefLike[] = []
@@ -1925,7 +1944,13 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       for (const block of toolRowImageBlocks(message)) push(block.attachment)
       for (const child of message.subCalls ?? []) visit(child)
     }
-    for (const message of lastMessages) visit(message)
+    for (const message of lastMessages) {
+      // The demand follows the CURRENT projection: a member the view does not
+      // materialize (a collapsed Compact Work's Tool row) starts no read and
+      // sends no blob.
+      if (!visibleMembers.has(message)) continue
+      visit(message)
+    }
     return refs
   }
 
@@ -1933,6 +1958,24 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   const releaseImageSubscriptions = (): void => {
     for (const unsubscribe of imageSubscriptions.values()) unsubscribe()
     imageSubscriptions.clear()
+  }
+
+  /**
+   * The members the CURRENT projection materializes, for the image demand.
+   *
+   * It is derived from the SAME canonical structure and the SAME disclosure
+   * owners the view uses, so a hidden member and a wanted member can never
+   * disagree. A mount with no display authority (the historical standalone
+   * layout) materializes every member, so its demand stays the whole window.
+   */
+  const currentVisibleMembers = (messages: readonly TranscriptMessage[]): ReadonlySet<TranscriptMessage> => {
+    const displayState = options.displayState
+    if (displayState === undefined) return new Set(messages)
+    return visibleTranscriptMembers(messages, {
+      preset: displayState.preset,
+      expandedWorkOwners,
+      ...(lastWindowState === undefined ? {} : { window: lastWindowState }),
+    })
   }
 
   /**
@@ -2375,6 +2418,11 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    *  Preparing rows) under the new subject's scope. */
   const rebuildLastMain = (): boolean => {
     if (disposed || hydrating) return true
+    // Image demand is a projection fact, not a transcript-commit fact: a live
+    // DisplayState preset change and a Work disclosure toggle can change which
+    // members exist in the current frame without a new setTranscript call.
+    visibleMembers = currentVisibleMembers(lastMessages)
+    syncImageSubscriptions()
     // PR-C: an aborted projection STAYS aborted. The fatal already took the
     // renderer down, so no further blob may even be ATTEMPTED.
     if (imageProjectionAborted || visualProjectionAborted) return false
@@ -2387,9 +2435,17 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     if (visualProjectionAborted) return false
     const figureSources = visualFigureSources()
     const displayState = options.displayState
-    const workSpans = displayState !== undefined && displayState.preset === 'compact'
-      ? projectTranscriptStructure(lastMessages).flatMap(block => block.kind === 'work' ? [block.span] : [])
-      : []
+    // ONE lookup table for this frame's Activity roots: the canonical Work
+    // spans keyed by their section node key. The previous per-section linear
+    // scan was O(W²) for W Work spans; this map is built once per projection
+    // and is a disposable frame index, never a second authority.
+    const workOwnersBySectionKey = new Map<string, TranscriptMessage>()
+    if (displayState !== undefined && displayState.preset === 'compact') {
+      for (const block of projectTranscriptStructure(lastMessages)) {
+        if (block.kind !== 'work') continue
+        workOwnersBySectionKey.set(`${scopePrefix}work-${scopeKeys.keyFor(block.span.owner)}`, block.span.owner)
+      }
+    }
     const build = (selection: SelectedVisualState | undefined): Node => {
       const viewOptions = {
         ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
@@ -2411,6 +2467,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         ...viewOptions,
         preset: displayState.preset,
         expandedWorkOwners,
+        turnActivities: lastTurnActivities,
         window: lastWindowState,
       })
     }
@@ -2452,8 +2509,8 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // key is `work-<canonical owner key>`. Resolve the owner from the SAME
       // canonical structure (object identity), never from the node key string.
       if (compactWork && node.kind === 'section' && (node.props as { collapsible?: boolean }).collapsible === true && nodeKey !== undefined) {
-        const span = workSpans.find(candidate => nodeKey === `${scopePrefix}work-${scopeKeys.keyFor(candidate.owner)}`)
-        if (span !== undefined) workDisclosureByPath.set(path, span.owner)
+        const owner = workOwnersBySectionKey.get(nodeKey)
+        if (owner !== undefined) workDisclosureByPath.set(path, owner)
       }
       for (const [index, child] of node.children.entries()) {
         const childKey = (child.props as { key?: string }).key
@@ -2659,7 +2716,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   const loadingMain = (): Node => ui.col({ key: 'transcript' }, ui.md({ key: 'loading', text: 'Loading session…' }))
   const setTranscript = (
     messages: readonly TranscriptMessage[],
-    _activities?: ReadonlyMap<number, TurnActivity>,
+    activities?: ReadonlyMap<number, TurnActivity>,
     window?: TranscriptWindowState & { firstTurn?: number; lastTurn?: number; hasNewer?: boolean },
     streamingToolPreviews?: readonly StreamingToolPreview[],
     _searchPresentation?: TranscriptSearchPresentation,
@@ -2734,6 +2791,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // fence — a retired frame contributes no preview to the new subject.
     lastMessages = messages
     lastStreamingToolPreviews = streamingToolPreviews ?? []
+    lastTurnActivities = activities
     lastWindowState = window
     // A manual Work owner survives ordinary same-source deltas only while the
     // SAME source message is still in the loaded window. Prune by canonical
@@ -2742,9 +2800,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       const loaded = new Set(projectTranscriptStructure(messages).flatMap(block => block.kind === 'work' ? [block.span.owner] : []))
       for (const owner of expandedWorkOwners) if (!loaded.has(owner)) expandedWorkOwners.delete(owner)
     }
-    // PR-C: the image subscriptions follow the CURRENT window: an attachment
-    // that left it is unsubscribed, a new one is subscribed and read.
-    syncImageSubscriptions()
+    // PR-C: rebuildLastMain recomputes the CURRENT projection's visible member
+    // set and reconciles image subscriptions before it prepares image states.
+    // A collapsed Compact Work member therefore starts no read or blob demand.
     if (!rebuildLastMain()) return
     render()
   }
@@ -2896,6 +2954,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       expandedWorkOwners.clear()
       workDisclosureByPath.clear()
       lastWindowState = undefined
+      lastTurnActivities = undefined
       lastMain = loadingMain()
       render()
     },
@@ -4432,6 +4491,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       expandedWorkOwners.clear()
       workDisclosureByPath.clear()
       lastWindowState = undefined
+      lastTurnActivities = undefined
       // B3-A2 §9: the shared Promise's IDENTITY is latched BEFORE any cleanup
       // runs at all. Two separate hazards require this exact shape:
       //   1. the seat/Hub retirements call out to owner callbacks that may

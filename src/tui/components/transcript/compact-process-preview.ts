@@ -105,7 +105,7 @@ export function compactThinkSlotLine(options: { text: string; running: boolean; 
  * type (durable dispatch order) with its own count plus the remaining
  * running count (`Bash ×2 +1 running`). Titles go through the existing
  * tool-title mapping. */
-function activeSubCallSuffix(active: readonly { name: string; count: number }[]): string {
+export function activeSubCallSuffix(active: readonly { name: string; count: number }[]): string {
   if (active.length === 1) {
     const { name, count } = active[0]!
     return `${toolTitle(name)}${count > 1 ? ` ×${count}` : ''} running`
@@ -114,6 +114,23 @@ function activeSubCallSuffix(active: readonly { name: string; count: number }[])
   const rest = active.slice(1).reduce((sum, entry) => sum + entry.count, 0)
   const firstCount = first.count > 1 ? ` ×${first.count}` : ''
   return `${toolTitle(first.name)}${firstCount} +${rest} running`
+}
+
+/**
+ * The WIDTH-FREE Action body: the status prefix + the display + the active
+ * PTC sub-call suffix.
+ *
+ * This is the shared SEMANTIC of the collapsed Action row, so every surface
+ * renders the same facts: the PiTui slot line adds the label column and its
+ * width-degradation ladder on top, and a surface with its own clipping (the
+ * TSP native section head) uses this body directly. A running sub-call is
+ * never dropped by one surface and kept by the other.
+ */
+export function compactActionBody(presentation: CompactActionPresentation): string {
+  const prefix = presentation.status === 'ok' ? '✓ ' : presentation.status === 'error' ? '✗ ' : ''
+  const active = presentation.activeSubCalls ?? []
+  if (active.length === 0) return `${prefix}${presentation.display}`
+  return `${prefix}${presentation.display} · ${activeSubCallSuffix(active)}`
 }
 
 /**
@@ -144,7 +161,9 @@ export function compactActionSlotLine(options: {
   const suffix = activeSubCallSuffix(active)
   const lead = slotLead('Action:')
   const bodyBudget = width - visibleWidth(lead)
-  const full = `${prefix}${display} · ${suffix}`
+  // The shared WIDTH-FREE body is the semantic source of this row's text; the
+  // ladder below only degrades a too-long rendering of the SAME facts.
+  const full = compactActionBody({ kind: 'tool', ...(options.status === undefined ? {} : { status: options.status }), display, ...(options.rootName === undefined ? {} : { rootName: options.rootName }), activeSubCalls: active })
   if (bodyBudget > 0 && visibleWidth(full) <= bodyBudget) return compactSlotLine('Action:', full, width)
   const degraded = `${prefix}${toolTitle(options.rootName ?? '')} · ${suffix}`
   if (bodyBudget > 0 && visibleWidth(degraded) <= bodyBudget) return compactSlotLine('Action:', degraded, width)
