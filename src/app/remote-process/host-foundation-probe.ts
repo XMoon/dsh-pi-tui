@@ -52,6 +52,26 @@ interface WorkspaceFacts {
   readonly sessionIds: readonly string[]
 }
 
+/** The Schedule subset this probe reads back out of the official namespace. */
+interface ScheduleEntryFacts {
+  readonly id: string
+  readonly title: string
+}
+
+/** The official `schedule/create` request shape this probe sends. */
+interface ScheduleCreateRequestLike {
+  readonly title: string
+  readonly prompt: string
+  readonly timing: { readonly kind: 'after'; readonly after_seconds: number }
+}
+
+/** The official `schedule/edit` request shape this probe sends (one CAS update). */
+interface ScheduleEditRequestLike {
+  readonly id: string
+  readonly action: 'update'
+  readonly patch: { readonly title: string }
+}
+
 /** One `workspace/follow` frame, structurally (only the fields this probe reads). */
 interface WorkspaceFollowFrameLike {
   readonly type: string
@@ -79,6 +99,11 @@ interface HostFoundationRemote {
   readonly workspace: {
     create(request: { readonly path: string }): Promise<RemoteResultLike<WorkspaceCreateValueLike>>
     follow(signal?: AbortSignal): RemoteStreamHandle<WorkspaceFollowFrameLike, never>
+  }
+  readonly schedule: {
+    catalog(): Promise<RemoteResultLike<readonly ScheduleEntryFacts[]>>
+    create(request: ScheduleCreateRequestLike): Promise<RemoteResultLike<ScheduleEntryFacts>>
+    edit(request: ScheduleEditRequestLike): Promise<RemoteResultLike<unknown>>
   }
   $mount(contribution: TypertRemoteContribution): Promise<() => Promise<void>>
 }
@@ -117,6 +142,13 @@ export interface HostFoundationProbeOptions {
    * `dropCarrier`; the probe never reaches into the Client Context for it.
    */
   readonly readGeneration?: () => number | undefined
+  /**
+   * Qualification-only: request the official `schedule` Remote namespace proof.
+   * Absent = the caller does not request it (an older Host, or the cross-build
+   * lane, may expose no `schedule` namespace). A requested Schedule proof is
+   * all-or-nothing: it produces every field below or fails the whole probe.
+   */
+  readonly schedule?: boolean
 }
 
 /** The structured proof written as one `m4b2hf: 'host-rpc-proof'` record. */
@@ -151,6 +183,18 @@ export interface HostFoundationProof {
   readonly workspaceHeldStreamClosed?: boolean
   /** A NEW stream on the same Client recovered the Host's complete baseline. */
   readonly workspaceRestoredBaseline?: boolean
+  /** The official generated `schedule` namespace answered through the Host.
+   *  Present only when the caller passed `schedule: true`. */
+  readonly scheduleRemote?: true
+  /** `schedule/catalog` answered with a real Host task list. */
+  readonly scheduleCatalog?: true
+  /** `schedule/create` returned the Host-assigned task identity. */
+  readonly scheduleCreate?: true
+  /** `schedule/edit` applied the CAS update to the created task. */
+  readonly scheduleEdit?: true
+  /** After a physical carrier replacement, a NEW `catalog` still listed the
+   *  created task (present only when the generation-resume control was used). */
+  readonly scheduleReconnectCatalog?: boolean
   readonly cleaned: true
 }
 
@@ -514,6 +558,109 @@ async function proveWorkspace(
 }
 
 /**
+ * Qualification-only generation-currentness control for the Schedule catalog:
+ * drop the physical carrier the Client transport owns, then wait until the
+ * Client publishes a replacement Connection generation. The probe never issues
+ * a control request while the transport is mid-replacement.
+ */
+interface ScheduleResumeControl {
+  readGeneration(): number | undefined
+  dropCarrier(): void
+}
+
+/** Wait until the Client's own Connection generation advances past `before`. */
+async function waitForCarrierReplacement(
+  readGeneration: () => number | undefined,
+  before: number | undefined,
+): Promise<void> {
+  const deadline = Date.now() + WORKSPACE_FRAME_TIMEOUT_MS
+  let after = readGeneration()
+  while (after === undefined || before === undefined || after <= before) {
+    if (Date.now() > deadline) {
+      throw new Error(
+        `host foundation probe: the Schedule catalog did not observe a replacement Connection generation (${String(before)} -> ${String(after)})`,
+      )
+    }
+    await new Promise(resolve => setTimeout(resolve, 25))
+    after = readGeneration()
+  }
+}
+
+/**
+ * Prove the official `schedule` namespace over the authenticated link on the
+ * SAME live Client Context: a real `catalog`, a Host-created task returned with
+ * its identity, one CAS `edit`, and — when the resume control is supplied — a
+ * fresh `catalog` on a replacement Connection generation that STILL lists the
+ * created task. A failure in any stage throws; the probe never swallows a
+ * business/transport error into a false PASS.
+ */
+async function proveSchedule(
+  remote: HostFoundationRemote,
+  resume?: ScheduleResumeControl,
+): Promise<{
+  readonly catalog: true
+  readonly create: true
+  readonly edit: true
+  readonly reconnectCatalog?: boolean
+}> {
+  const opening = await remote.schedule.catalog()
+  if (opening.ok !== true || !Array.isArray(opening.value)) {
+    throw new Error(`host foundation probe: schedule/catalog did not return ok with an entry array: ${JSON.stringify(opening)}`)
+  }
+  const baselineIds = new Set(opening.value.map(entry => entry.id))
+
+  const title = `probe-schedule-${Date.now()}-${process.pid}`
+  const created = await remote.schedule.create({
+    title,
+    prompt: 'host foundation probe schedule task',
+    // A far-future one-shot occurrence: the Host never delivers it during the
+    // probe, so the proof observes only creation/edit/catalog state.
+    timing: { kind: 'after', after_seconds: 3600 },
+  })
+  if (created.ok !== true || created.value === undefined) {
+    throw new Error(`host foundation probe: schedule/create did not return ok: ${JSON.stringify(created)}`)
+  }
+  const entry = created.value
+  if (typeof entry.id !== 'string' || entry.id === '' || entry.title !== title) {
+    throw new Error(`host foundation probe: schedule/create did not return the created task identity: ${JSON.stringify(entry)}`)
+  }
+  if (baselineIds.has(entry.id)) {
+    throw new Error(`host foundation probe: schedule/create returned an identity the opening catalog already held: ${entry.id}`)
+  }
+
+  const editedTitle = `${title}-edited`
+  const edited = await remote.schedule.edit({ id: entry.id, action: 'update', patch: { title: editedTitle } })
+  if (edited.ok !== true || edited.value === undefined) {
+    throw new Error(`host foundation probe: schedule/edit did not return ok: ${JSON.stringify(edited)}`)
+  }
+  const editedEntry = edited.value as Partial<ScheduleEntryFacts>
+  if (editedEntry.id !== entry.id || editedEntry.title !== editedTitle) {
+    throw new Error(`host foundation probe: schedule/edit did not return the updated task: ${JSON.stringify(editedEntry)}`)
+  }
+
+  let reconnectCatalog: boolean | undefined
+  if (resume !== undefined) {
+    const generationBefore = resume.readGeneration()
+    resume.dropCarrier()
+    await waitForCarrierReplacement(resume.readGeneration, generationBefore)
+    // A NEW unary call on the replacement generation must reach the SAME Host
+    // authority and still list the task the previous generation created.
+    const after = await remote.schedule.catalog()
+    if (after.ok !== true || !Array.isArray(after.value)) {
+      throw new Error(`host foundation probe: the post-replacement schedule/catalog did not return ok: ${JSON.stringify(after)}`)
+    }
+    reconnectCatalog = after.value.some(candidate => candidate.id === entry.id)
+    if (!reconnectCatalog) {
+      throw new Error(
+        `host foundation probe: the post-replacement schedule/catalog dropped the task the Host had already created (${entry.id})`,
+      )
+    }
+  }
+
+  return { catalog: true, create: true, edit: true, ...resume === undefined ? {} : { reconnectCatalog } }
+}
+
+/**
  * Execute the real Host RPC proof on the caller's live Client Context.
  *
  * Contribution mounts are recorded immediately after each `$mount` resolves;
@@ -540,6 +687,9 @@ export async function runHostFoundationProbe(
   const workspaceRemote = workspaceRequest === undefined
     ? undefined
     : await loadInstalledRemote(options.dshAnchor, '@deepseek-ai/dsh-api-workspace-controller/remote')
+  const scheduleRemote = options.schedule === true
+    ? await loadInstalledRemote(options.dshAnchor, '@deepseek-ai/dsh-schedule/remote')
+    : undefined
   const disposers: Array<() => Promise<void>> = []
   const cleanupErrors: unknown[] = []
   let watch: RemoteStreamHandle<PiTuiTerminalProgressFrame, never> | undefined
@@ -554,6 +704,7 @@ export async function runHostFoundationProbe(
     disposers.push(await remote.$mount(PI_TUI_CLIENT_CONTRIBUTION))
     disposers.push(await remote.$mount(sessionRemote))
     if (workspaceRemote !== undefined) disposers.push(await remote.$mount(workspaceRemote))
+    if (scheduleRemote !== undefined) disposers.push(await remote.$mount(scheduleRemote))
 
     const list = await remote.session.list({})
     if (list.ok !== true || !Array.isArray(list.value?.items)) {
@@ -616,10 +767,34 @@ export async function runHostFoundationProbe(
               },
         )
 
+    // The official `schedule` namespace on the SAME authenticated link. When
+    // the generation-resume control is live it drops the carrier a second time
+    // and reads the catalog on the replacement generation; otherwise it proves
+    // catalog/create/edit only.
+    const schedule = options.schedule === true
+      ? await proveSchedule(
+          remote,
+          dropCarrier === undefined || readGeneration === undefined
+            ? undefined
+            : { readGeneration, dropCarrier },
+        )
+      : undefined
+
     result = {
       officialSessionList: true,
       privateFileRpc: true,
       terminalSnapshot: true,
+      ...schedule === undefined
+        ? {}
+        : {
+            scheduleRemote: true as const,
+            scheduleCatalog: schedule.catalog,
+            scheduleCreate: schedule.create,
+            scheduleEdit: schedule.edit,
+            ...schedule.reconnectCatalog === undefined
+              ? {}
+              : { scheduleReconnectCatalog: schedule.reconnectCatalog },
+          },
       ...workspace === undefined
         ? {}
         : {

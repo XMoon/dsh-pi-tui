@@ -586,6 +586,7 @@ export async function runAuthenticatedLifecycle(context) {
         requestId,
         workspacePath: probeWorkspacePath,
         ...probeOptions.resume === true ? { workspaceResume: true } : {},
+        ...probeOptions.schedule === true ? { schedule: true } : {},
       })
       // The probe holds the real Host watch open after its opening snapshot and
       // waits for the private barrier file, so the harness can observe the live
@@ -630,7 +631,7 @@ export async function runAuthenticatedLifecycle(context) {
       const after = await waitForHostWatchCount(0, `${label} watch release`)
       return { proof, during, after }
     }
-    const firstProbe = await runHostFoundationProbe(c1, 't22-24', { resume: true })
+    const firstProbe = await runHostFoundationProbe(c1, 't22-24', { resume: true, schedule: true })
     const hostRpcProof = firstProbe.proof
     assert(hostRpcProof.hostPid === hostReady.pid, 'T22 probe Host PID mismatch')
     assert(hostRpcProof.hostInstanceId === hostReady.localHost.instanceId, 'T22 probe Host instance mismatch')
@@ -661,6 +662,14 @@ export async function runAuthenticatedLifecycle(context) {
       'WS1-05 the held Workspace stream neither ended nor failed after its generation was replaced')
     assert(hostRpcProof.workspaceRestoredBaseline === true,
       'WS1-05 a NEW stream did not recover the authoritative Host baseline after the replacement')
+    // A12/A3: the official `schedule` Remote namespace over the SAME
+    // authenticated link proved catalog, create, edit AND a post-replacement
+    // catalog that still lists the created Host task.
+    for (const field of ['scheduleRemote', 'scheduleCatalog', 'scheduleCreate', 'scheduleEdit']) {
+      assert(hostRpcProof[field] === true, `A3 ${field} is not proven`)
+    }
+    assert(hostRpcProof.scheduleReconnectCatalog === true,
+      'A3 the post-replacement schedule/catalog did not still list the created task')
     const workspaceId = hostRpcProof.workspaceId
     const repeatedProbe = await runHostFoundationProbe(c1, 't25-repeat')
     const repeatedProof = repeatedProbe.proof
@@ -697,6 +706,11 @@ export async function runAuthenticatedLifecycle(context) {
       workspaceHeldStreamClosed: hostRpcProof.workspaceHeldStreamClosed,
       workspaceRestoredBaseline: hostRpcProof.workspaceRestoredBaseline,
       workspaceIdDigest: createHash('sha256').update(workspaceId).digest('hex').slice(0, 16),
+      scheduleRemote: true,
+      scheduleCatalog: hostRpcProof.scheduleCatalog,
+      scheduleCreate: hostRpcProof.scheduleCreate,
+      scheduleEdit: hostRpcProof.scheduleEdit,
+      scheduleReconnectCatalog: hostRpcProof.scheduleReconnectCatalog,
       cleaned: true,
       hostTerminalProgressWatchesBefore: hostReady.terminalProgressWatches,
       hostTerminalProgressWatchesDuring: firstProbe.during.terminalProgressWatches,
