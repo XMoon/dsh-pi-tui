@@ -171,6 +171,10 @@ interface PaintedFrame {
    *  (or another confirmation identity) is stale and must do nothing. */
   readonly mode: ScheduleWorkspaceSnapshot['mode']
   readonly confirmToken: number | undefined
+  /** The TASK the Detail/Editor page was painted for. A same-mode switch to a
+   *  different task (or a different editor instance) makes every hit in this
+   *  frame stale even though mode/confirmation did not change. */
+  readonly subjectId: string | null
 }
 
 /** One piece of a painted row. */
@@ -854,6 +858,11 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
       regions,
       mode: snapshot.mode,
       confirmToken: snapshot.confirm?.token,
+      subjectId: snapshot.mode === 'detail'
+        ? (snapshot.selectedId === undefined ? null : String(snapshot.selectedId))
+        : snapshot.mode === 'editor'
+          ? (snapshot.editor?.id === undefined ? null : String(snapshot.editor.id))
+          : null,
     }
     return lines.slice(0, rows)
   }
@@ -1710,7 +1719,15 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
   private frameIsCurrent(frame: PaintedFrame | undefined): frame is PaintedFrame {
     if (frame === undefined) return false
     if (frame.mode !== this.snapshot.mode) return false
-    return frame.confirmToken === this.snapshot.confirm?.token
+    if (frame.confirmToken !== this.snapshot.confirm?.token) return false
+    // The painted SUBJECT must still be the current one: a same-mode switch to
+    // another task (or another editor instance) retires every hit in this frame.
+    const currentSubject = this.snapshot.mode === 'detail'
+      ? (this.snapshot.selectedId === undefined ? null : String(this.snapshot.selectedId))
+      : this.snapshot.mode === 'editor'
+        ? (this.snapshot.editor?.id === undefined ? null : String(this.snapshot.editor.id))
+        : null
+    return frame.subjectId === currentSubject
   }
 
   private activateHit(hit: ScheduleHit): void {
