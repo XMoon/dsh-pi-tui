@@ -11,18 +11,13 @@ import {
   type DirectSurfaceAuthorityContext,
 } from '../../../src/runtime/direct/surface-authority-direct.ts'
 
-test('checks live eligibility without reading catalog services', () => {
-  const ctx = { get: () => { assert.fail('eligibility must not discover catalogs') } }
-  let agent: DirectSurfaceAuthorityAgent | undefined
+test('an absent live Agent returns undefined without reading catalog services', async () => {
+  const ctx = { get: () => { assert.fail('an absent Agent must not discover catalogs') } }
   const reader = new DirectSurfaceAuthorityReader(ctx, sessionId => {
     assert.equal(sessionId, 'session-a')
-    return agent
+    return undefined
   })
-  assert.equal(reader.isLive('session-a'), false)
-  agent = { ctx, session: { header: {} } }
-  assert.equal(reader.isLive('session-a'), true)
-  agent = undefined
-  assert.equal(reader.isLive('session-a'), false)
+  assert.equal(await reader.read('session-a'), undefined)
 })
 
 test('requires and forwards the live Agent context for scoped skill authority', async () => {

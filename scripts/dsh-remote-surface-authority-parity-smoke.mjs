@@ -39,7 +39,6 @@ import { SqliteSessionQueryEngine } from '@deepseek-ai/dsh-session-query-sqlite'
 import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
 import { DirectSurfaceAuthorityReader } from '../src/runtime/direct/surface-authority-direct.ts'
 import { RemoteSurfaceAuthorityReader } from '../src/runtime/remote/surface-authority-remote.ts'
-import { RemoteSurfaceAuthorityShadow } from '../src/runtime/remote/surface-authority-shadow.ts'
 
 function installModuleLoader() {
   const nodeRequire = createRequire(import.meta.url)
@@ -236,14 +235,6 @@ async function createHost() {
   return { ctx, session, agent, agentScope }
 }
 
-async function waitFor(description, predicate, timeoutMs = 5_000) {
-  const started = Date.now()
-  while (!predicate()) {
-    if (Date.now() - started > timeoutMs) throw new Error(`timed out waiting for ${description}`)
-    await new Promise(resolve => setTimeout(resolve, 10))
-  }
-}
-
 /** The real Session directory this run created; removed in `main`'s cleanup. */
 let authorityCwd
 
@@ -277,7 +268,6 @@ async function main() {
   const loader = installModuleLoader()
   let client
   let host
-  let shadow
   try {
     const connectionClient = await loader.importClient('@deepseek-ai/dsh-client-connection/client')
     const gatewayClient = await loader.importClient('@deepseek-ai/dsh-api-gateway/client')
@@ -317,15 +307,9 @@ async function main() {
       },
       connection.generation,
     )
-    shadow = new RemoteSurfaceAuthorityShadow(direct, remote, connection.generation)
-    const outcome = await shadow.compare({ sessionId: 'authority-session' })
-    assert.equal(outcome.status, 'compared')
-    assert.ok(outcome.status === 'compared')
-    assert.equal(outcome.report.comparable, true)
-    assert.deepEqual(outcome.report.mismatches, [])
-
     const directSnapshot = await direct.read('authority-session')
     const remoteSnapshot = await remote.read('authority-session')
+    assert.ok(directSnapshot !== undefined && remoteSnapshot !== undefined)
     assert.deepEqual(remoteSnapshot, directSnapshot)
     assert.ok((remoteSnapshot?.commands.length ?? 0) >= 3, 'Remote command authority must be non-empty')
     assert.equal(remoteSnapshot?.commands.find(command => command.name === 'fixture-execute')?.definitionId, 'fixture/execute')
@@ -343,12 +327,6 @@ async function main() {
     assert.equal(remoteSnapshot?.skills.find(skill => skill.name === 'fixture-model-only'), undefined)
     assert.ok(remoteSnapshot?.skills.every(skill => !('path' in skill)), 'Host-local skill paths must stay out of the semantic snapshot')
 
-    const directClaims = outcome.report.commandClaims.direct
-    assert.deepEqual(directClaims.find(claim => claim.name === 'fixture-execute')?.claim, { bare: true, withArguments: false })
-    assert.deepEqual(directClaims.find(claim => claim.name === 'fixture-leading')?.claim, { bare: true, withArguments: true })
-    assert.deepEqual(directClaims.find(claim => claim.name === 'fixture-shadow')?.claim, { bare: true, withArguments: true })
-    assert.deepEqual(outcome.report.commandClaims.remote, directClaims)
-
     const addedCommandDispose = host.ctx.get('commands').register({
       definitionId: CommandDefinitionId('fixture/added-command'),
       name: 'fixture-added',
@@ -361,81 +339,25 @@ async function main() {
       content: 'added fixture body',
       invocation: { modelInvocable: true, userInvocable: true },
     })
-    const afterAdd = await shadow.compare({ sessionId: 'authority-session' })
-    assert.equal(afterAdd.status, 'compared')
-    assert.ok(afterAdd.status === 'compared')
-    assert.equal(afterAdd.report.comparable, true)
     const addedDirect = await direct.read('authority-session')
     const addedRemote = await remote.read('authority-session')
+    assert.ok(addedDirect !== undefined && addedRemote !== undefined)
+    assert.deepEqual(addedRemote, addedDirect)
     assert.ok(addedDirect?.commands.some(command => command.name === 'fixture-added'))
     assert.ok(addedRemote?.commands.some(command => command.name === 'fixture-added'))
     assert.ok(addedDirect?.skills.some(skill => skill.name === 'fixture-added-skill'))
     assert.ok(addedRemote?.skills.some(skill => skill.name === 'fixture-added-skill'))
     addedCommandDispose()
     addedSkillDispose()
-    const afterDispose = await shadow.compare({ sessionId: 'authority-session' })
-    assert.equal(afterDispose.status, 'compared')
-    assert.ok(afterDispose.status === 'compared')
-    assert.equal(afterDispose.report.comparable, true)
+    const disposedDirect = await direct.read('authority-session')
     const disposedRemote = await remote.read('authority-session')
+    assert.ok(disposedDirect !== undefined && disposedRemote !== undefined)
+    assert.deepEqual(disposedRemote, disposedDirect)
     assert.equal(disposedRemote?.commands.some(command => command.name === 'fixture-added'), false)
     assert.equal(disposedRemote?.skills.some(skill => skill.name === 'fixture-added-skill'), false)
 
-    // Delay a real Remote reader, then let the official Connection replace its
-    // generation. The old operation must be discarded, not committed.
-    const oldGeneration = connection.generation.getSnapshot()
-    assert.ok(oldGeneration !== undefined)
-    const releaseSuccess = Promise.withResolvers()
-    const delayedRemote = {
-      read: async (sessionId, signal) => {
-        await releaseSuccess.promise
-        return remote.read(sessionId, signal)
-      },
-    }
-    const generationShadow = new RemoteSurfaceAuthorityShadow(direct, delayedRemote, connection.generation)
-    const delayedSuccess = generationShadow.compare({ sessionId: 'authority-session' })
-    await Promise.resolve()
-    connection.reconnect()
-    await waitFor('official Connection generation loss', () => connection.generation.getSnapshot() === undefined)
-    releaseSuccess.resolve()
-    assert.deepEqual(await delayedSuccess, { status: 'discarded', reason: 'stale-generation' })
-    await waitFor(
-      'official Connection generation replacement',
-      () => {
-        const generation = connection.generation.getSnapshot()
-        return generation !== undefined && generation.id !== oldGeneration.id
-      },
-    )
-    generationShadow.dispose()
-
-    const failureGeneration = connection.generation.getSnapshot()
-    assert.ok(failureGeneration !== undefined)
-    const releaseFailure = Promise.withResolvers()
-    const delayedFailureRemote = {
-      read: async () => {
-        await releaseFailure.promise
-        throw new Error('late stale authority failure')
-      },
-    }
-    const failureShadow = new RemoteSurfaceAuthorityShadow(direct, delayedFailureRemote, connection.generation)
-    const delayedFailure = failureShadow.compare({ sessionId: 'authority-session' })
-    await Promise.resolve()
-    connection.reconnect()
-    await waitFor('second official Connection generation loss', () => connection.generation.getSnapshot() === undefined)
-    releaseFailure.resolve()
-    assert.deepEqual(await delayedFailure, { status: 'discarded', reason: 'stale-generation' })
-    await waitFor(
-      'second official Connection generation replacement',
-      () => {
-        const generation = connection.generation.getSnapshot()
-        return generation !== undefined && generation.id !== failureGeneration.id
-      },
-    )
-    failureShadow.dispose()
-
-    console.log('dsh same-Host surface authority parity smoke passed — live commands/list and skills/list matched Direct metadata and claim policy')
+    console.log('dsh same-Host surface authority parity smoke passed — real Direct/Remote catalog metadata parity across initial/add/remove')
   } finally {
-    shadow?.dispose()
     if (client !== undefined) await client.fiber.dispose()
     if (host !== undefined) {
       await host.agentScope.dispose()
