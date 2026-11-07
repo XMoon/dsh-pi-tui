@@ -2126,13 +2126,16 @@ export const runWebProductQualification = async context => {
             const userCountAtDraft = durableOf(wp11Session).filter(event => event.type === 'user/message').length
             assert(userCountAtDraft === userCountBeforeQuote,
               `WP-11 the Quote draft added ${String(userCountAtDraft - userCountBeforeQuote)} user message(s); selection must not submit`)
+            // A separate TUI Session is kept for the Web-off continuity Turn;
+            // the Browser's cross-Session check uses its own new Session in the
+            // same dedicated Workspace.
             const otherSession = await tuiNewSession(tuiW, 'WP-11 other Session')
-            // The Web sidebar lists Sessions with durable content; seed one real
-            // TUI Turn so the Browser can open the SAME Session from its list.
-            await tuiTurn(tuiW, otherSession, `w5-other-${changesNonce}`, 'WP-11 other Session seed')
-            writeFileSync(join(handle.coord, 'browser-other-session.json'), `${JSON.stringify({ sessionId: otherSession })}\n`, { mode: 0o600 })
             const other = await handle.waitFact('quote-other-session', 'WP-11 other-Session check', 300_000)
-            assert(other.sessionId === otherSession, 'WP-11 the Browser opened the wrong other Session')
+            assert(typeof other.sessionId === 'string' && other.sessionId !== wp11Session,
+              'WP-11 the other-Session check reused the quoted Session')
+            assert(!String(other.draft ?? '').includes(`w5-editing ${changesNonce}`)
+              && !(other.quotes ?? []).some(text => String(text).includes(`w5-editing ${changesNonce}`)),
+            'WP-11 the Quote draft leaked into another Session')
             assert(durableOf(wp11Session).filter(event => event.type === 'user/message').length === userCountBeforeQuote,
               'WP-11 navigating to another Session wrote the Quote into the original Session')
             const authoredAtDraft = durableOf(wp11Session)
