@@ -700,9 +700,11 @@ test('L6: Help is an underlay that returns to the exact page and draft', async (
     life.controller.dispatch({ kind: 'close-help' })
     assert.equal(life.controller.snapshot().mode, 'editor')
     assert.equal(life.controller.snapshot().editor?.title, 'Keep me')
-    // A confirmation owns the surface: Help never steals it.
+    // Leave the dirty editor through the CONFIRMED discard, then navigate.
     life.controller.dispatch({ kind: 'back' })
-    life.controller.dispatch({ kind: 'back' })
+    assert.equal(life.controller.snapshot().confirm?.kind, 'discard')
+    life.controller.dispatch({ kind: 'confirm' })
+    assert.equal(life.controller.snapshot().mode, 'list')
     life.controller.dispatch({ kind: 'open-detail', id: 'schedule-1' })
     await flush()
     life.controller.dispatch({ kind: 'ask-delete' })
@@ -833,7 +835,8 @@ test('L6: conflict recovery reloads the latest revision while keeping the draft'
     }))
     life.controller.dispatch({ kind: 'reload-latest' })
     await flush()
-    assert.equal(life.controller.snapshot().notice?.text, SCHEDULE_COPY.reloaded)
+    assert.equal(life.controller.snapshot().notice?.text, SCHEDULE_COPY.reloadConflict('the title'))
+    assert.equal(life.controller.snapshot().notice?.kind, 'error', 'a field edited on BOTH sides is an observable conflict')
     assert.equal(life.controller.snapshot().editor?.title, 'My edit', 'the user draft is never overwritten')
     assert.equal(life.controller.snapshot().editor?.expectedUpdatedAt, '2026-01-02T00:00:00.000Z',
       'the rebased CAS revision is the latest Host one')
@@ -1013,6 +1016,84 @@ test('L6: switching to another task immediately retires the previous detail', as
     pendingBeta.resolve(beta)
     await flush()
     assert.equal(life.controller.snapshot().detail?.id, 'task-beta')
+  } finally {
+    life.controller.dispose()
+  }
+})
+
+test('L6: reload-latest never overwrites fields another client changed but the user did not', async () => {
+  const life = await opened()
+  try {
+    life.port.entries = [entry({ title: 'A', prompt: 'P' })]
+    life.controller.dispatch({ kind: 'refresh' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-detail', id: 'schedule-1' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-edit' })
+    await flush()
+    // The user edits ONLY the prompt.
+    life.controller.dispatch({ kind: 'set-field', fieldId: 'prompt', value: 'P2' })
+    life.port.editResult = async () => ({ id: 'schedule-1' as never, code: 'schedule_conflict' })
+    life.controller.dispatch({ kind: 'save' })
+    await flush()
+    await life.controller.whenIdle()
+    assert.equal(life.controller.snapshot().notice?.text, SCHEDULE_COPY.conflict)
+
+    // Meanwhile another client renamed the task; the user never touched the title.
+    life.port.viewResults.set('schedule-1', entry({
+      title: 'B',
+      prompt: 'P',
+      updatedAt: '2026-01-02T00:00:00.000Z',
+    }))
+    life.controller.dispatch({ kind: 'reload-latest' })
+    await flush()
+    assert.equal(life.controller.snapshot().notice?.text, SCHEDULE_COPY.reloaded,
+      'no field was edited on both sides: this is a clean rebase')
+    assert.equal(life.controller.snapshot().editor?.title, 'B', "the untouched field follows the Host's newer value")
+    assert.equal(life.controller.snapshot().editor?.prompt, 'P2', 'the user edit is kept')
+
+    life.port.editResult = async () => entry({ title: 'B', prompt: 'P2', updatedAt: '2026-01-03T00:00:00.000Z' })
+    life.controller.dispatch({ kind: 'save' })
+    await flush()
+    await life.controller.whenIdle()
+    const edits = life.port.calls.filter(call => call.method === 'edit')
+    const request = edits[edits.length - 1]?.args[0] as Extract<ScheduleEditRequest, { action: 'update' }> | undefined
+    assert.deepEqual(request?.patch, { prompt: 'P2' },
+      "the untouched title is NOT re-sent, so the other client's rename survives")
+    assert.equal(request?.expectedUpdatedAt, '2026-01-02T00:00:00.000Z')
+  } finally {
+    life.controller.dispose()
+  }
+})
+
+test('L6: reload-latest keeps the user value for the SAME field and reports the overlap', async () => {
+  const life = await opened()
+  try {
+    life.port.entries = [entry({ title: 'A', prompt: 'P' })]
+    life.controller.dispatch({ kind: 'refresh' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-detail', id: 'schedule-1' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-edit' })
+    await flush()
+    life.controller.dispatch({ kind: 'set-field', fieldId: 'prompt', value: 'Mine' })
+    life.port.viewResults.set('schedule-1', entry({
+      title: 'A',
+      prompt: 'Theirs',
+      updatedAt: '2026-01-02T00:00:00.000Z',
+    }))
+    life.controller.dispatch({ kind: 'reload-latest' })
+    await flush()
+    assert.equal(life.controller.snapshot().notice?.kind, 'error')
+    assert.match(life.controller.snapshot().notice?.text ?? '', /also changed the prompt/u)
+    assert.equal(life.controller.snapshot().editor?.prompt, 'Mine', 'the user value is preserved for the field they edited')
+    life.port.editResult = async () => entry({ prompt: 'Mine', updatedAt: '2026-01-03T00:00:00.000Z' })
+    life.controller.dispatch({ kind: 'save' })
+    await flush()
+    await life.controller.whenIdle()
+    const edits = life.port.calls.filter(call => call.method === 'edit')
+    const request = edits[edits.length - 1]?.args[0] as Extract<ScheduleEditRequest, { action: 'update' }> | undefined
+    assert.deepEqual(request?.patch, { prompt: 'Mine' })
   } finally {
     life.controller.dispose()
   }

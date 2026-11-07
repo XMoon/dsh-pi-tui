@@ -1693,6 +1693,10 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
   }
 
   private activateHit(hit: ScheduleHit): void {
+    // A painted confirmation owns the surface: a row/action hit left over from
+    // the PREVIOUS frame can only be the confirmation's own y/n/Esc.
+    if (this.snapshot.confirm !== undefined
+      && (hit.kind !== 'action' || (hit.action !== 'confirm' && hit.action !== 'cancel'))) return
     switch (hit.kind) {
       case 'row':
         if (!this.snapshot.rows.some(row => row.id === hit.id)) return
