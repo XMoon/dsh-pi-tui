@@ -858,6 +858,8 @@ export class ScheduleWorkspaceController {
       this.publish()
     } catch (error) {
       if (this.disposed) return
+      // A superseded or old-editor failure must not replace the newest notice.
+      if (epoch !== this.reloadEpoch || this.editorToken !== token) return
       this.notice = errorNotice(this.describeFailure(error))
       this.publish()
     }

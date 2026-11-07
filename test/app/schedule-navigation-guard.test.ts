@@ -48,6 +48,7 @@ function entry(id: string, title: string): ScheduleCatalogEntry {
 
 class StubPort implements SchedulePort {
   readonly entries = [entry('task-a', 'Task A'), entry('task-b', 'Task B')]
+  editResult: ((request: ScheduleEditRequest) => Promise<ScheduleEditResult>) | undefined
   async catalog(): Promise<readonly ScheduleCatalogEntry[]> { return this.entries }
   async list(_request: ScheduleListRequest): Promise<ScheduleListResult> {
     return { items: [...this.entries], shown: this.entries.length, total: this.entries.length, limit: 100, offset: 0 }
@@ -62,7 +63,10 @@ class StubPort implements SchedulePort {
     return { newSessionIntervalSeconds: 60 }
   }
   async create(): Promise<ScheduleCatalogEntry> { throw new Error('not used') }
-  async edit(_request: ScheduleEditRequest): Promise<ScheduleEditResult> { throw new Error('not used') }
+  async edit(request: ScheduleEditRequest): Promise<ScheduleEditResult> {
+    if (this.editResult === undefined) throw new Error('the fixture never edits')
+    return this.editResult(request)
+  }
   async run(_request: ScheduleRunRequest): Promise<ScheduleRunResult> { throw new Error('not used') }
   async deleteInactive(): Promise<{ deleted: number }> { return { deleted: 0 } }
   onChanged(): () => void { return () => {} }
@@ -192,6 +196,58 @@ test('a stale list-frame action cannot open a new editor over a dirty draft', as
     assert.equal(controller.snapshot().mode, 'editor', 'stale LIST actions do not leave the dirty editor')
     assert.equal(controller.snapshot().editor?.prompt, 'dirty draft')
     assert.equal(controller.snapshot().confirm, undefined, 'no confirmation was bypassed or invented')
+  } finally {
+    controller.dispose()
+  }
+})
+
+test('the panel does not edit its local buffer while a save is pending', async () => {
+  const port = new StubPort()
+  const controller = new ScheduleWorkspaceController({
+    port,
+    sessionReader,
+    runOwned: (_label, task) => { void task() },
+  })
+  const panel = new ScheduleWorkspacePanel({
+    snapshot: () => controller.snapshot(),
+    dispatch: intent => controller.dispatch(intent),
+    requestRender: () => {},
+    rows: () => 30,
+    columns: () => 100,
+    close: () => {},
+  })
+  try {
+    controller.open()
+    await flush()
+    controller.dispatch({ kind: 'open-detail', id: 'task-a' })
+    await flush()
+    controller.dispatch({ kind: 'open-edit' })
+    await flush()
+    panel.setSnapshot(controller.snapshot())
+    panel.focused = true
+    panel.render(100)
+    // Type 'Renamed' into Title through the REAL panel input path.
+    for (const character of 'Renamed') panel.handleInput(character)
+    assert.equal(controller.snapshot().editor?.title, 'Task ARenamed')
+    let resolveEdit!: (value: ScheduleEditResult) => void
+    port.editResult = () => new Promise<ScheduleEditResult>(resolve => { resolveEdit = resolve })
+    panel.handleInput('\x13') // Ctrl+S
+    assert.equal(controller.snapshot().busy, true)
+    // The pending write freezes the VISIBLE buffer too: this key must be a no-op
+    // and must not be carried into the next draft.
+    panel.handleInput('x')
+    panel.setSnapshot(controller.snapshot())
+    const frozen = panel.render(100)
+    assert.ok(!frozen.some(line => line.includes('Renamedx')), 'the frozen buffer does not show the rejected key')
+    // A conflict keeps the controller draft; the next accepted key must append to
+    // 'Renamed' only.
+    resolveEdit({ id: 'task-a' as never, code: 'schedule_conflict' })
+    await flush()
+    await controller.whenIdle()
+    panel.setSnapshot(controller.snapshot())
+    panel.render(100)
+    panel.handleInput('y')
+    assert.equal(controller.snapshot().editor?.title, 'Task ARenamedy', 'the rejected key is not replayed')
   } finally {
     controller.dispose()
   }
