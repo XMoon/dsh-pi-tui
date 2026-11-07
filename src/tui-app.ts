@@ -173,6 +173,12 @@ import {
 } from './tui/panels/settings-workspace-panel.ts'
 import type { ModelsInitialView } from './tui/panels/models-workspace-page.ts'
 import type { AccountInitialView } from './tui/panels/account-workspace-page.ts'
+import { SessionWorkspacePanel } from './tui/panels/session-workspace-panel.ts'
+import type {
+  SessionBrowserReadSnapshot,
+  SessionBrowserSubject,
+} from './app/command/session-browser-presentation.ts'
+import type { WorkspaceFactsFrame } from './runtime/session-workspace-facts-port.ts'
 import type { TaskPanelItem } from './app/surface/task-presentation.ts'
 import type { JobInspectorState, TaskBrowserViewState } from './app/surface/task-runtime.ts'
 import type { TaskBrowserSummary } from './app/surface/task-browser-runtime.ts'
@@ -1796,12 +1802,36 @@ export interface SettingsWorkspaceHandle {
   whenInitialSpecialistSettled(): Promise<import('./tui/panels/settings-workspace-panel.ts').SettingsInitialSpecialistSettlement>
 }
 
+/** The ONE per-open capture and callback set the PiTUI Session Workspace
+ *  command layer supplies. `subject` is the only currentness this open may
+ *  use: the panel never re-reads the live Session. */
+export interface SessionWorkspaceOpenOptions {
+  readonly subject: SessionBrowserSubject
+  readonly onQueryChange: (raw: string) => void
+  readonly onResume: (sessionId: string) => void
+  /** The physical lease's ONE close notification (user Esc, blocking-owner
+   *  pre-emption or surface teardown). An owner-origin `close()` suppresses it. */
+  readonly onClose: () => void
+  readonly initialMode: 'browse' | 'search'
+  readonly initialBrowseScope: 'current' | 'all'
+}
+
+/** The returned control of ONE open Session Workspace, fenced by THIS lease
+ *  record: a stale handle can never repaint or close a newer screen. */
+export interface SessionWorkspaceHandle {
+  setSnapshot(snapshot: SessionBrowserReadSnapshot, initialQuery?: string): void
+  updateWorkspaces(frame: WorkspaceFactsFrame): void
+  workspaceUnavailable(message: string): void
+  close(): void
+  isDisposed(): boolean
+}
+
 /**
- * The ONE short-lived Settings workspace screen lease (Phase 3B / B2-A). Like
- * the Job workspace it renders in a temporary alt screen while the surface that
- * opened it — object tree, focus, draft and scroll state — is only STOPPED, and
- * it is MUTUALLY EXCLUSIVE with the Job lease: at most one workspace owns the
- * terminal at any time.
+ * The ONE short-lived workspace screen lease (Settings, the Session Workspace
+ * and the Image UX screens). Like the Job workspace it renders in a temporary
+ * alt screen while the surface that opened it — object tree, focus, draft and
+ * scroll state — is only STOPPED, and it is MUTUALLY EXCLUSIVE with the Job
+ * lease: at most one workspace owns the terminal at any time.
  */
 /** The layout-root panel a workspace lease hosts (the Settings workspace). */
 type WorkspaceLeasePanel = Component & {
@@ -1811,11 +1841,12 @@ type WorkspaceLeasePanel = Component & {
   handleMouse?(event: TuiMouseEvent): TuiMouseEventResult | undefined
 }
 
-/** The ONE temporary fullscreen workspace lease (the Settings workspace or the
- *  Image UX PR2 picker/Viewer screen). The Plugin Manager is a CHILD of the
- *  Settings lease and never takes a workspace screen of its own. */
+/** The ONE temporary fullscreen workspace lease (the Settings workspace, the
+ *  Session Workspace or the Image UX PR2 picker/Viewer screen). The Plugin
+ *  Manager is a CHILD of the Settings lease and never takes a workspace screen
+ *  of its own. */
 interface WorkspaceLeaseRecord {
-  readonly kind: 'settings' | 'image'
+  readonly kind: 'settings' | 'image' | 'sessions'
   readonly token: object
   readonly screen: TuiAltScreen
   readonly panel: WorkspaceLeasePanel
@@ -24498,6 +24529,71 @@ export class TuiApp {
   }
 
   /**
+   * M5-U-C: open the ONE PiTUI fullscreen Session Workspace on the SAME
+   * temporary physical-screen lease as Settings/Image. The lease is latched
+   * before anything else happens: a refused lease (blocking Question/Approval/
+   * Save, another workspace, a transition freeze or a disposed surface) throws
+   * synchronously, and the command layer is the ONE owner of the resulting
+   * error. A successful open does NOT start any Host read; the caller starts
+   * the per-open Workspace follow only after this method returns.
+   * @param options - the captured subject, callbacks and the command intent.
+   * @returns the instance-fenced handle of THIS workspace.
+   */
+  openSessionWorkspace(options: SessionWorkspaceOpenOptions): SessionWorkspaceHandle {
+    this.assertWorkspaceLeaseAvailable('Sessions')
+    let record!: WorkspaceLeaseRecord
+    // An owner-origin close (the command/presenter retired this open) must not
+    // re-enter the owner's `onClose`; a user Esc, modal pre-emption or teardown
+    // still notifies it exactly once through the lease's close path.
+    let closingFromOwner = false
+    let disposed = false
+    const panel = new SessionWorkspacePanel({
+      rows: () => this.terminal.rows,
+      columns: () => this.terminal.columns,
+      requestRender: () => this.requestRender(),
+      notice: () => this.workspaceNotice(),
+      onQueryChange: (raw) => {
+        if (this.workspaceLease === record) options.onQueryChange(raw)
+      },
+      onResume: (sessionId) => {
+        if (this.workspaceLease === record) options.onResume(sessionId)
+      },
+      onClose: () => {
+        record.close()
+      },
+    }, {
+      initialMode: options.initialMode,
+      initialBrowseScope: options.initialBrowseScope,
+      currentSessionId: options.subject.currentSessionId,
+    })
+    record = this.leaseWorkspaceScreen('sessions', panel, () => {
+      if (!closingFromOwner) options.onClose()
+    })
+    const owns = (): boolean => !this.disposed && !disposed && this.workspaceLease === record
+    return {
+      setSnapshot: (snapshot, initialQuery) => {
+        if (!owns()) return
+        panel.setSnapshot(snapshot, initialQuery === undefined ? undefined : { initialQuery })
+      },
+      updateWorkspaces: (frame) => {
+        if (!owns()) return
+        panel.updateWorkspaces(frame)
+      },
+      workspaceUnavailable: (message) => {
+        if (!owns()) return
+        panel.workspaceUnavailable(message)
+      },
+      close: () => {
+        if (disposed) return
+        disposed = true
+        closingFromOwner = true
+        record.close()
+      },
+      isDisposed: () => disposed || this.disposed || this.workspaceLease !== record,
+    }
+  }
+
+  /**
    * Refuse a workspace lease unless the surface is idle and unclaimed. A
    * lifecycle transition, a Job lease, a second workspace, or a blocking
    * Question/Approval/Save owner all refuse; a focused Task Quick is retired
@@ -24539,13 +24635,19 @@ export class TuiApp {
    * workspace screen of its own.
    */
   private leaseWorkspaceScreen(
-    kind: 'settings' | 'image',
+    kind: 'settings' | 'image' | 'sessions',
     panel: WorkspaceLeasePanel,
     onClose?: () => void,
   ): WorkspaceLeaseRecord {
-    this.assertWorkspaceLeaseAvailable(kind === 'settings' ? 'Settings' : 'Image')
+    this.assertWorkspaceLeaseAvailable(kind === 'settings' ? 'Settings' : kind === 'sessions' ? 'Sessions' : 'Image')
     const returnScreen: TuiMainScreen | TuiAltScreen = this.fullscreen ?? this.tui
     const returnFocus = returnScreen.getFocusedComponent()
+    // A same-process temporary screen (the Session Workspace) never hands the
+    // PTY to another owner: the progress presentation must stay authoritative
+    // across the lease rather than churn clear -> settled-record (which would
+    // resurrect a settled `done` the current owner already reported). Settings
+    // and Image keep their historical leave/enter handoff unchanged.
+    const preserveTerminalPresentation = kind === 'sessions'
     const token: object = {}
     const screen = new TuiAltScreen(this.terminal, undefined, undefined, {
       imageProtocolOverride: this.altScreenImageProtocol,
@@ -24574,14 +24676,14 @@ export class TuiApp {
     }
     const close = (): void => {
       if (finalized) return
-      runSyncDisposalSteps('settings workspace close', [
+      runSyncDisposalSteps('workspace close', [
         finalizeOnce,
         () => screen.stop({ preserveScreen: true }),
         () => panel.dispose?.(),
         () => {
           // Restore ONLY while no newer physical owner exists.
           if (!this.disposed && this.workspaceLease === undefined && this.activeScreen === returnScreen) {
-            this.resumeReturnSurface(returnScreen, returnFocus)
+            this.resumeReturnSurface(returnScreen, returnFocus, preserveTerminalPresentation)
           }
         },
         () => { onClose?.() },
@@ -24596,14 +24698,14 @@ export class TuiApp {
     record = { kind, token, screen, panel, returnScreen, returnFocus, finalizeOnce, close }
     this.workspaceLease = record
     try {
-      this.leaveTerminalPresentation()
+      if (!preserveTerminalPresentation) this.leaveTerminalPresentation()
       assertStillOpening()
       returnScreen.stop({ preserveScreen: true })
       assertStillOpening()
       screen.start()
       assertStillOpening()
       screen.setTerminalColorSchemeNotifications(this.followingTerminalTheme)
-      this.enterTerminalPresentation()
+      if (!preserveTerminalPresentation) this.enterTerminalPresentation()
       assertStillOpening()
       this.refreshSchemeRegistrations()
       screen.setFocus(panel)
@@ -24616,7 +24718,7 @@ export class TuiApp {
         () => { if (!alreadyClosed) panel.dispose?.() },
         () => {
           if (!alreadyClosed && !this.disposed && this.workspaceLease === undefined && this.activeScreen === returnScreen) {
-            this.resumeReturnSurface(returnScreen, returnFocus)
+            this.resumeReturnSurface(returnScreen, returnFocus, preserveTerminalPresentation)
           }
         },
       ])
@@ -24669,7 +24771,11 @@ export class TuiApp {
    * re-assigned when the paused screen has NO focused component left — its own
    * focus survived the pause, and the workspace never forces the editor back.
    */
-  private resumeReturnSurface(screen: TuiMainScreen | TuiAltScreen, returnFocus: Component | null): void {
+  private resumeReturnSurface(
+    screen: TuiMainScreen | TuiAltScreen,
+    returnFocus: Component | null,
+    preserveTerminalPresentation = false,
+  ): void {
     screen.start()
     if (screen === this.tui) {
       // The alt screen's stop disabled focus reporting (?1004l rides the
@@ -24683,7 +24789,7 @@ export class TuiApp {
       }
     }
     if (screen.getFocusedComponent() === null) screen.setFocus(returnFocus)
-    this.enterTerminalPresentation()
+    if (!preserveTerminalPresentation) this.enterTerminalPresentation()
     this.refreshSchemeRegistrations()
     // A detection issued from the temporary workspace screen died with it; when the latest
     // DELIBERATE selection still follows the terminal, the restored screen re-samples, so
@@ -24767,7 +24873,7 @@ export class TuiApp {
       try {
         this.workspaceLease?.close()
       } catch (error) {
-        this.routeTerminalSettlementFailure(`settings workspace abandonment (${context})`, error)
+        this.routeTerminalSettlementFailure(`workspace abandonment (${context})`, error)
       }
     } finally {
       this.workspaceLeaseFreezeDepth = freezeDepthBefore

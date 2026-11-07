@@ -66,6 +66,7 @@ import { SupersededReadError } from './runtime/read-error.ts'
 import type { SessionStatsFacts } from './domain/status/stats.ts'
 import type { SessionReader } from './runtime/session-reader-port.ts'
 import type { SessionWriter } from './runtime/session-writer-port.ts'
+import type { SessionWorkspaceFactsPort } from './runtime/session-workspace-facts-port.ts'
 import type { InteractionPort } from './runtime/interaction-port.ts'
 import type {
   CreateSessionRequest,
@@ -206,10 +207,6 @@ export type { DefaultIntentRecord } from './app/command/model-default-intent.ts'
 /** The /new session-id constructor: the ONE place the dsh-session `SessionId`
  * value import lives (domain modules consume the typed result, never the package). */
 export type NewSessionId = () => SessionId
-
-/** The /sessions category/search helpers (moved to `src/tui/commands/sessions.ts`,
- * re-exported here to keep the stable command-surface import path). */
-export { sessionPickerCategories, sessionSearchCategory } from './tui/commands/sessions.ts'
 
 /** The shipped-preset display copy (moved to `src/tui/pickers/preset-display.ts`,
  * re-exported here to keep the stable command-surface import path). */
@@ -423,6 +420,11 @@ export interface TuiCommandRunner {  ctx: Context
    * the title batches, the context measurement and the export read go
    * through the port, never ctx directly. */
   readonly sessionReader: SessionReader
+  /** The official Host Workspace facts READ port (M5-U-A), internal to the
+   *  command runner. The PiTUI Session Workspace is its only consumer: it
+   *  follows Workspace membership per open and never writes a Workspace,
+   *  never persists a registry and never guesses membership from a cwd. */
+  readonly sessionWorkspaceFacts: SessionWorkspaceFactsPort
   /** The session WRITE port (D2.1): ordinary prompts, occurrence-level queue
    * steering/removal, cancel and title ops go through the port. Multi-message
    * gestures use runner-level FIFO orchestration; no batch verb crosses it. */

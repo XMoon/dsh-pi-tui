@@ -10,15 +10,13 @@
  */
 
 import type { CommandInvocation, CommandResult } from '@deepseek-ai/dsh-commands'
-import type { PickerCategory, PickerHandle, TuiApp } from '../../tui-app.ts'
+import type { SessionWorkspaceHandle, TuiApp } from '../../tui-app.ts'
 import { createSessionBrowserReadOwner, type SessionBrowserReadOwner, type SessionBrowserReadSettlement, type SessionBrowserResumeSettlement } from '../../app/command/session-browser-read.ts'
 import type {
   SessionBrowserPanelHandle,
   SessionBrowserPanelRequest,
   SessionBrowserPresentation,
   SessionBrowserReadSnapshot,
-  SessionBrowserSearchResult,
-  SessionBrowserSubject,
 } from '../../app/command/session-browser-presentation.ts'
 import { TransitionInProgressError } from '../../app/session/operation-barrier.ts'
 import { SessionScopeSupersededError, type SessionScope } from '../../app/session/scope.ts'
@@ -28,16 +26,11 @@ import { cancellationError, isCancellation, runOwned } from '../../runtime/proce
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import { LifecycleError, WorkspaceSelectionError, type ResolvedWorkspaceSelection } from '../../runtime/session-lifecycle-port.ts'
 import {
-  buildSessionTree,
   findSessionMatch,
-  sameWorkspace,
   sanitizeTerminalText,
-  sessionLabelParts,
-  sessionSearchItem,
-  sessionPickerItem,
-  type SessionPickerItem,
   type SessionPickerRow,
 } from '../pickers/sessions.ts'
+import type { WorkspaceFactsHandle } from '../../runtime/session-workspace-facts-port.ts'
 import type {
   NewSessionId,
   RegisterOne,
@@ -64,6 +57,7 @@ type SessionCommandRunner = Pick<
   | 'requireLiveSessionScope'
   | 'sessionCwd'
   | 'sessionReader'
+  | 'sessionWorkspaceFacts'
   | 'sessionBrowserPresentation'
   | 'sessionWriter'
   | 'signal'
@@ -125,89 +119,6 @@ export function displaySessionId(id: string): string {
   return id.length > 28 ? `${id.slice(0, 28)}…` : id
 }
 
-export function sessionPickerCategories(
-  rowsOf: () => readonly SessionPickerRow[],
-  currentCwd: string,
-  header: string,
-  itemFor: (row: SessionPickerRow, indent?: number) => SessionPickerItem,
-  placeholder?: () => SessionPickerItem,
-): PickerCategory[] {
-  return [
-    {
-      id: 'current',
-      label: 'Current directory',
-      header: `${header} · Current directory`,
-      // The same flat list as "All directories", built over the CURRENT
-      // workspace's subset. This category excludes subagent rows, and an rc.1
-      // ordinary fork has no parent edge (legacy ordinary-fork parentSession
-      // metadata is flat too), so every row stays at depth 0 — never lost,
-      // never mis-nested under an unrelated root.
-      items: () => {
-        const rows = rowsOf()
-        const mainRows = rows.filter(row => row.origin !== 'subagent')
-        if (rows.length === 0 && placeholder !== undefined) return [placeholder()]
-        return buildSessionTree(
-          mainRows.filter(row => sameWorkspace(row.cwd, currentCwd)),
-        ).map(entry => itemFor(entry.row, entry.depth))
-      },
-    },
-    {
-      id: 'all',
-      label: 'All directories',
-      header: `${header} · All directories`,
-      // This category lists only non-subagent rows: rc.1 ordinary forks carry
-      // no parent edge, and legacy ordinary-fork parentSession metadata never
-      // fabricates one, so the list is flat. The shared `buildSessionTree`
-      // contract (and its `placed` cycle guard) still owns real subagent
-      // lineage wherever that tree is used.
-      items: () => {
-        const rows = rowsOf()
-        const mainRows = rows.filter(row => row.origin !== 'subagent')
-        if (rows.length === 0 && placeholder !== undefined) return [placeholder()]
-        return buildSessionTree(mainRows).map(entry => itemFor(entry.row, entry.depth))
-      },
-    },
-  ]
-}
-
-/**
- * The Session Browser's SEARCH projection category: a PURE presentation of the
- * shared read owner's already-merged `SessionBrowserSearchResult[]` (M5-U-B).
- * The owner owns the membership — the global union of metadata matches and the
- * bounded Host content page in Host page order — so this projection never
- * re-filters, never re-merges and never appends the query to a description.
- * The category is EXTERNALLY filtered: the SelectList renders without its
- * internal substring filter, because this projection's items ARE the
- * membership (a Host-authoritative hit is never dropped by a substring
- * re-filter, regardless of snippet length or query normalization). The
- * category is non-cyclable: Tab never leaves it while a query is active, and
- * browse mode skips it.
- */
-export function sessionSearchCategory(options: {
-  header: string
-  /** The owner-merged results (Host page order), read at activation time. */
-  results: () => readonly SessionBrowserSearchResult[]
-  /** Whether the browse roster itself is non-empty. Only an empty roster is
-   * replaced by the status/loading row: an empty RESULT set is a real "no
-   * matches" state, not a status phase. */
-  hasRoster: () => boolean
-  /** The SEARCH item builder (the cwd joins the searchable description). */
-  itemFor: (result: SessionBrowserSearchResult) => SessionPickerItem
-  placeholder?: () => SessionPickerItem
-}): PickerCategory {
-  return {
-    id: 'search',
-    label: 'Search results',
-    header: `${options.header} · Search results`,
-    cyclable: false,
-    externalFilter: true,
-    items: () => {
-      if (!options.hasRoster() && options.placeholder !== undefined) return [options.placeholder()]
-      return options.results().map(result => options.itemFor(result))
-    },
-  }
-}
-
 /**
  * Create the session-command registrars over the coordinator's primitives.
  * The factory only closes over its dependencies; it registers nothing until
@@ -242,95 +153,88 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
     )
   }
 
-  /** The Session Browser command edge under which the PiTui Picker opened. It
-   * is written synchronously immediately before the shared read owner opens
-   * the panel, so the presenter labels THIS open and nothing else. */
-  type SessionBrowserHeader = 'sessions' | 'resume' | 'search'
-  let piTuiBrowserHeader: SessionBrowserHeader = 'sessions'
+  /** The Session Browser command edge under which the ONE PiTUI fullscreen
+   *  Workspace opens. It is written synchronously immediately before the
+   *  shared read owner opens the panel and consumed-and-reset by the
+   *  presenter's `open()`, so a re-entrant open never inherits a stale intent. */
+  interface PiTuiOpenIntent {
+    readonly header: 'sessions' | 'resume' | 'search'
+    readonly scope: 'current' | 'all'
+    readonly searchRequested: boolean
+  }
+  let piTuiOpenIntent: PiTuiOpenIntent | undefined
 
-  /** One PiTui Session Browser view: the physical Picker plus the per-open
-   * presentation state. Every row, snippet and status comes from the shared
-   * read owner's snapshot; this view owns no list, projection or search
-   * lifecycle of its own (M5-U-B). */
-  interface PiTuiBrowserPanel {
+  /** One open PiTUI fullscreen Session Workspace: the app lease handle, this
+   *  open's ONE Workspace follow generation and the per-open token. Every row,
+   *  snippet and status still comes from the shared read owner's snapshot. */
+  interface PiTuiWorkspaceOpen {
     readonly request: SessionBrowserPanelRequest
-    readonly subject: SessionBrowserSubject
-    picker: PickerHandle | undefined
-    snapshot: SessionBrowserReadSnapshot
+    handle: SessionWorkspaceHandle | undefined
+    readonly controller: AbortController
+    workspaces: WorkspaceFactsHandle | undefined
     disposed: boolean
-    /** The Picker physically closed itself (select/Esc); the logical command
-     * operation may still be pending. */
-    physicalClosed: boolean
-    /** The owner's one-shot editor seed has been consumed. */
-    seedApplied: boolean
-    /** The presenter is writing the seed itself: that filter change is NOT a
-     * user edit and must not reach the read owner. */
-    applyingSeed: boolean
-    /** A real edit happened; the seed must never overwrite it. */
-    userEdited: boolean
-    /** Browse tab to restore when the query is cleared. */
-    lastBrowseCategory: 'current' | 'all'
-    /** A selection started a command-level resume operation. */
-    selectionPending: boolean
-    /** The last notice emitted for this snapshot stream (dedupe only). */
+    /** Per-open dedupe of the one notice each snapshot fact may surface. */
     lastNotice: string | undefined
   }
 
-  const EMPTY_BROWSER_SNAPSHOT: SessionBrowserReadSnapshot = {
-    listState: 'loading',
-    rows: [],
-    query: '',
-    resumePending: false,
-    searchState: 'idle',
-    searchResults: [],
-    hasMore: false,
-  }
+  /** The ONE PiTUI Session Workspace presentation (M5-U-C). It owns the
+   *  physical fullscreen lease through `app.openSessionWorkspace` and the ONE
+   *  per-open official Workspace follow; it owns no list, projection, query
+   *  generation or switch (those stay in the shared read owner). */
+  const createPiTuiSessionWorkspacePresentation = (): SessionBrowserPresentation => {
+    let active: PiTuiWorkspaceOpen | undefined
 
-  /** The ONE PiTui Session Browser presentation. It renders the shared read
-   * owner's snapshot through the existing Picker; the owner keeps the single
-   * list/projection/search lifecycle (M5-U-B). */
-  const createPiTuiSessionBrowser = (): SessionBrowserPresentation => {
-    let active: PiTuiBrowserPanel | undefined
-
-    /** The status row a category renders while its roster is still empty. */
-    const statusRow = (panel: PiTuiBrowserPanel): SessionPickerItem => {
-      const snapshot = panel.snapshot
-      if (snapshot.listState === 'error') {
-        return {
-          value: '',
-          label: `session listing failed: ${sanitizeTerminalText(snapshot.listError ?? 'unknown error')}`,
-          description: '',
-          group: '',
-        }
-      }
-      if (snapshot.listState === 'unavailable') {
-        // The store may hold logs the reader refuses: never claim there are
-        // no persisted sessions (the S2 limited contract).
-        return { value: '', label: 'session persistence unavailable', description: '', group: '' }
-      }
-      if (snapshot.listState === 'empty') {
-        return { value: '', label: 'No readable sessions', description: '', group: '' }
-      }
-      return { value: '', label: 'Loading sessions…', description: '', group: '' }
+    /** Release this open ONCE: token first, then the follow generation, then
+     *  (only for an owner-origin close) the physical lease. */
+    const release = (open: PiTuiWorkspaceOpen, closeLease: boolean): void => {
+      if (open.disposed) return
+      open.disposed = true
+      if (active === open) active = undefined
+      open.controller.abort()
+      const workspaces = open.workspaces
+      open.workspaces = undefined
+      workspaces?.dispose()
+      if (closeLease) open.handle?.close()
     }
 
-    /** Release this view ONCE. The owner-notification path must never call
-     * back into the presenter's own `close()`; the physical Picker is closed
-     * here regardless of which side retired it. */
-    const release = (panel: PiTuiBrowserPanel, notifyOwner: boolean): void => {
-      if (panel.disposed) return
-      panel.disposed = true
-      panel.physicalClosed = true
-      panel.selectionPending = false
-      if (active === panel) active = undefined
-      panel.picker?.close()
-      if (notifyOwner) panel.request.onClose()
+    /** Start the ONE per-open Workspace follow AFTER the lease exists. Every
+     *  frame re-proves this open's token and the captured subject; a failed
+     *  stream degrades to All with one visible message and never closes the
+     *  Session list/search. */
+    const startWorkspaceFollow = (open: PiTuiWorkspaceOpen, handle: SessionWorkspaceHandle): void => {
+      let facts: WorkspaceFactsHandle
+      try {
+        facts = runner.sessionWorkspaceFacts.followWorkspaces(open.controller.signal)
+      } catch {
+        handle.workspaceUnavailable('Workspace scope unavailable')
+        return
+      }
+      if (open.disposed) {
+        facts.dispose()
+        return
+      }
+      open.workspaces = facts
+      runOwned('session workspace follow', async () => {
+        for await (const frame of facts) {
+          if (open.disposed || open.controller.signal.aborted) return
+          if (!open.request.subject.isCurrent()) return
+          handle.updateWorkspaces(frame)
+        }
+      }, {
+        diag: runner.diag,
+        sessionId: () => open.request.subject.currentSessionId,
+        isCancellation: () => open.disposed || open.controller.signal.aborted,
+        onError: () => {
+          if (!open.disposed) handle.workspaceUnavailable('Workspace scope unavailable')
+        },
+      })
     }
 
     /** Surface this open's Host/search/projection facts as ONE deduped notice
-     * (the Host result first, the secondary projection failure second). */
-    const emitNotice = (panel: PiTuiBrowserPanel): void => {
-      const snapshot = panel.snapshot
+     *  (Host result first, the secondary projection failure second). The panel
+     *  ALSO paints the same status; the notice is the transient companion the
+     *  U-B contract already promised, never a second authority. */
+    const emitNotice = (open: PiTuiWorkspaceOpen, snapshot: SessionBrowserReadSnapshot): void => {
       let key: string
       let text: string
       let kind: 'info' | 'error' = 'info'
@@ -345,174 +249,65 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
         key = `search-more:${snapshot.query}`
         text = 'More content matches exist — refine the search.'
       } else if (snapshot.projectionError !== undefined) {
-        // One notice per open: a persistent enrichment failure must not repeat
-        // on every later snapshot (the Host/search result stays the primary).
         key = 'projection-error'
         text = `Some session details are unavailable: ${sanitizeTerminalText(snapshot.projectionError)}`
       } else {
         return
       }
-      if (key === panel.lastNotice) return
-      panel.lastNotice = key
+      if (open.lastNotice === key) return
+      open.lastNotice = key
       app.notify(text, kind)
-    }
-
-    /** Project the current snapshot onto the Picker: the search projection is
-     * entered/left from the snapshot's canonical query, and a cleared query
-     * restores the browse tab the user was last on. */
-    const paint = (panel: PiTuiBrowserPanel): void => {
-      if (panel.disposed || panel.physicalClosed) return
-      const category = panel.picker?.getCategory?.()
-      if (panel.snapshot.query !== '') {
-        if (category === 'search') {
-          panel.picker?.refresh?.()
-        } else {
-          if (category === 'current' || category === 'all') panel.lastBrowseCategory = category
-          panel.picker?.setCategory?.('search')
-        }
-      } else if (category === 'search') {
-        panel.picker?.setCategory?.(panel.lastBrowseCategory)
-      } else {
-        if (category === 'current' || category === 'all') panel.lastBrowseCategory = category
-        panel.picker?.refresh?.()
-      }
-      emitNotice(panel)
-    }
-
-    const applySnapshot = (
-      panel: PiTuiBrowserPanel,
-      snapshot: SessionBrowserReadSnapshot,
-      options?: { readonly initialQuery?: string },
-    ): void => {
-      if (panel.disposed) return
-      panel.snapshot = snapshot
-      if (panel.physicalClosed) {
-        // The Picker is gone. Only an ACCEPTED resume handoff (the owner
-        // published `resumePending` synchronously BEFORE dispatching the real
-        // switch) may keep this command operation alive; its terminal
-        // settlement releases the view exactly once. A stale subject is left
-        // to the owner's own retirement, never re-entered from here.
-        if (panel.selectionPending && snapshot.resumePending) return
-        release(panel, panel.request.subject.isCurrent())
-        return
-      }
-      paint(panel)
-      // The one-shot initial seed: the owner's canonical query becomes the
-      // editor text only while this panel has never been edited. The resulting
-      // programmatic filter change is suppressed, so it can neither be mistaken
-      // for a user edit nor mint another query generation.
-      if (options?.initialQuery !== undefined && !panel.seedApplied && !panel.userEdited && !panel.disposed) {
-        panel.seedApplied = true
-        panel.applyingSeed = true
-        try {
-          panel.picker?.setFilter?.(options.initialQuery)
-        } finally {
-          panel.applyingSeed = false
-        }
-      }
     }
 
     const open = (request: SessionBrowserPanelRequest): SessionBrowserPanelHandle => {
       const previous = active
-      if (previous !== undefined) release(previous, false)
-      const header = piTuiBrowserHeader
-      piTuiBrowserHeader = 'sessions'
-      const panel: PiTuiBrowserPanel = {
+      if (previous !== undefined) release(previous, true)
+      const intent = piTuiOpenIntent
+      piTuiOpenIntent = undefined
+      const subject = request.subject
+      const state: PiTuiWorkspaceOpen = {
         request,
-        subject: request.subject,
-        picker: undefined,
-        snapshot: EMPTY_BROWSER_SNAPSHOT,
+        handle: undefined,
+        controller: new AbortController(),
+        workspaces: undefined,
         disposed: false,
-        physicalClosed: false,
-        seedApplied: false,
-        applyingSeed: false,
-        userEdited: false,
-        lastBrowseCategory: 'current',
-        selectionPending: false,
         lastNotice: undefined,
       }
-      active = panel
-      const currentId = request.subject.currentSessionId ?? ''
-      const browseItem = (row: SessionPickerRow, indent = 0): SessionPickerItem =>
-        sessionPickerItem(row, currentId, indent)
-      const searchItem = (result: SessionBrowserSearchResult): SessionPickerItem =>
-        sessionSearchItem(
-          result.row,
-          currentId,
-          0,
-          result.snippet === undefined ? undefined : { snippet: result.snippet },
-        )
-      const categories = [
-        ...sessionPickerCategories(
-          () => panel.snapshot.rows,
-          request.subject.currentCwd,
-          header,
-          browseItem,
-          () => statusRow(panel),
-        ),
-        sessionSearchCategory({
-          header,
-          results: () => panel.snapshot.searchResults,
-          hasRoster: () => panel.snapshot.rows.length > 0,
-          itemFor: searchItem,
-          placeholder: () => statusRow(panel),
-        }),
-      ]
-      const picker = app.openPicker(
-        categories[0]!.items(),
-        (id) => {
-          if (panel.disposed) return
-          panel.physicalClosed = true
-          // The loading/status placeholder and the current Session row end the
-          // view; neither ever resumes.
-          if (id === '' || id === currentId) {
-            release(panel, true)
-            return
-          }
-          panel.selectionPending = true
+      // The lease is the ONLY physical owner. A refused lease throws here,
+      // BEFORE any Workspace follow or Host list starts; the read owner retires
+      // its just-created panel and the command reports one error.
+      const handle = app.openSessionWorkspace({
+        subject,
+        onQueryChange: (raw) => {
+          if (!state.disposed) request.onQueryChange(raw)
+        },
+        onResume: (sessionId) => {
+          if (state.disposed) return
           request.onResumeIntent({
-            sessionId: id,
-            currentSessionId: request.subject.currentSessionId,
+            sessionId,
+            currentSessionId: subject.currentSessionId,
             source: 'enter',
           })
-          // The owner accepts an intent ONLY by publishing `resumePending`
-          // synchronously before it dispatches the real switch. Anything else
-          // (stale subject, unlisted row, duplicate pending) ends this hidden
-          // view immediately — no invisible active reader survives it.
-          if (!panel.disposed && panel.snapshot.resumePending) return
-          release(panel, panel.request.subject.isCurrent())
         },
-        () => {
-          release(panel, true)
+        onClose: () => {
+          if (state.disposed) return
+          release(state, false)
+          request.onClose()
         },
-        {
-          enableSearch: true,
-          header: categories[0]!.header,
-          noMatchText: '  no matching sessions',
-          initialQuery: '',
-          width: 76,
-          maxHeight: 26,
-          showHint: true,
-          categories,
-          signal,
-          // The selected session's long title marquees; the row prefix (when
-          // present) and the `●` current marker stay fixed (plan §7.6/§7.7).
-          marquee: { labelPartsOf: sessionLabelParts },
-          // Raw editor text is the Presenter's ONLY query input: the read owner
-          // canonicalizes it (NUL → trim → cap) as the one search identity. The
-          // one-shot programmatic seed is not a user edit.
-          onFilterChange: (raw) => {
-            if (panel.disposed || panel.applyingSeed) return
-            panel.userEdited = true
-            request.onQueryChange(raw)
-          },
-        },
-      )
-      panel.picker = picker
+        initialMode: intent?.searchRequested === true ? 'search' : 'browse',
+        initialBrowseScope: intent?.scope === 'all' || subject.currentSessionId === undefined ? 'all' : 'current',
+      })
+      state.handle = handle
+      active = state
+      startWorkspaceFollow(state, handle)
       return {
-        isDisposed: () => panel.disposed,
-        setSnapshot: (snapshot, options) => applySnapshot(panel, snapshot, options),
-        close: () => release(panel, false),
+        isDisposed: () => state.disposed || handle.isDisposed(),
+        setSnapshot: (snapshot, snapshotOptions) => {
+          if (state.disposed) return
+          handle.setSnapshot(snapshot, snapshotOptions?.initialQuery)
+          emitNotice(state, snapshot)
+        },
+        close: () => { release(state, true) },
       }
     }
 
@@ -522,7 +317,7 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
     }
   }
 
-  const piTuiPresentation = createPiTuiSessionBrowser()
+  const piTuiPresentation = createPiTuiSessionWorkspacePresentation()
 
   let nativeReadOwner: SessionBrowserReadOwner | undefined
   let nativePresentation: SessionBrowserPresentation | undefined
@@ -624,7 +419,7 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
   /** The narrow open options the three Session Browser entries really need
    * (plan §8.2) — not a controller/framework abstraction. */
   interface SessionPickerOpenOptions {
-    readonly header: SessionBrowserHeader
+    readonly header: PiTuiOpenIntent['header']
     /** `/resume <arg>`: after the ONE shared listing lands, resolve the
      * argument as a direct id/prefix match — the first listed MAIN match closes
      * the picker and switches; no match falls through to the filtered picker
@@ -686,10 +481,31 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
     }
     const presentation = runner.sessionBrowserPresentation
     if (presentation !== undefined) return openNativeSessionBrowser(invocation, options, presentation)
-    // The PiTui Picker renders the same read owner; its per-open command label
-    // is captured synchronously, before the read owner can open the panel.
-    piTuiBrowserHeader = options.header
-    return openNativeSessionBrowser(invocation, options, piTuiPresentation)
+    // The ONE PiTUI fullscreen Workspace renders the same read owner. The
+    // per-open intent is captured synchronously before the read owner can open
+    // the panel; the presenter consumes and resets it inside `open()`.
+    const raw = invocation.rawInput.trim()
+    piTuiOpenIntent = {
+      header: options.header,
+      scope: 'current',
+      // `/sessions <query>` and `/search <query>` open the global editor; the
+      // bare commands open the browse list. A typed `/resume` still tries its
+      // direct match first and only falls back to the editor through the read
+      // owner's one-shot seed.
+      searchRequested: options.header === 'search' || (options.header === 'sessions' && raw !== ''),
+    }
+    try {
+      return openNativeSessionBrowser(invocation, options, piTuiPresentation)
+    } catch (error) {
+      // A synchronous fullscreen-lease refusal (blocking modal, another
+      // workspace, a transition freeze) is ONE real command error; the read
+      // owner already retired its panel and started no Host read.
+      piTuiOpenIntent = undefined
+      return Promise.resolve({
+        kind: 'error',
+        text: `session workspace unavailable: ${sanitizeTerminalText(safeErrorMessage(error))}`,
+      })
+    }
   }
 
   // Shared by /title and its /rename alias. With an argument, pins the

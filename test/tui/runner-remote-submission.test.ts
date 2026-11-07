@@ -561,9 +561,16 @@ test('a submit inside a session transition is refused, keeps the draft and dispa
   // same transition through the Browser selection (a non-FIFO navigation)
   // while keeping the hydration fence real.
   submitDraft(fixture, '/sessions')
-  await waitFor('the Session Browser is open', () => fixture.vt.getViewport().join('\n').includes('sessions'), 15_000)
+  await waitFor('the Session Workspace is open', () => fixture.vt.getViewport().join('\n').includes('Sessions'), 15_000)
+  // The fullscreen workspace never consumes printable bytes in the list seat:
+  // `/` focuses the global editor, the raw query paints there, and the safe
+  // two-Enter contract (results, then resume) is the only navigation path.
+  fixture.vt.sendInput('/')
+  await fixture.vt.waitForRender()
   fixture.vt.sendInput('pr3-transition-b')
   await waitFor('the target row is filtered', () => fixture.vt.getViewport().join('\n').includes('pr3-transition-b'), 15_000)
+  fixture.vt.sendInput('\r')
+  await fixture.vt.waitForRender()
   fixture.vt.sendInput('\r')
   await waitFor('the transition committed and parked its surface hydration', () => parked >= 1, 15_000)
   const app = fixture.runnerApp() as unknown as { setDraft(text: string): void; submitDraft(): void; getDraft(): string }

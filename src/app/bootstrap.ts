@@ -2023,6 +2023,9 @@ export function applyRunnerWithRuntime(
       backend: {
         kind: selectedRuntime.kind,
         sessionReader: backend.sessionReader,
+        // M5-U-C: the SAME official Host read port the backend resolved; the
+        // command runner forwards it unchanged to the PiTUI Session Workspace.
+        sessionWorkspaceFacts: backend.sessionWorkspaceFacts,
         sessionWriter: backend.sessionWriter,
         interaction: backend.interaction,
         catalog: backend.catalog,

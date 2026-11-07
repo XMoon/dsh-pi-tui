@@ -507,15 +507,26 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
         resumeHandleSettled: false,
       }
       active = panel
-      const presentationHandle = options.presentation.open({
-        subject: panel.subject,
-        onQueryChange: (query) => changeQuery(panel, query),
-        onResumeIntent: (intent) => {
-          if (intent.source === 'direct') return
-          requestResume(panel, intent, panel.rows)
-        },
-        onClose: () => retire(panel, false),
-      })
+      let presentationHandle: SessionBrowserPanelHandle
+      try {
+        presentationHandle = options.presentation.open({
+          subject: panel.subject,
+          onQueryChange: (query) => changeQuery(panel, query),
+          onResumeIntent: (intent) => {
+            if (intent.source === 'direct') return
+            requestResume(panel, intent, panel.rows)
+          },
+          onClose: () => retire(panel, false),
+        })
+      } catch (error) {
+        // A presenter that refuses to open (the PiTUI fullscreen lease is held
+        // by a blocking modal, another workspace or a transition freeze) must
+        // not leave a hidden, still-active read generation behind. Retire this
+        // panel WITHOUT closing a presenter that never opened, start no list
+        // and re-throw the real refusal to the command that owns the result.
+        retire(panel, false)
+        throw error
+      }
       panel.handle = presentationHandle
       const handle: SessionBrowserReadHandle = { settlement, resumeSettlement, close: () => retire(panel, true) }
       if (!isActive(panel)) {

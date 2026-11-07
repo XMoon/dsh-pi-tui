@@ -660,7 +660,7 @@ workspace/question/approval store and keeps no cross-session cache.
 - **Browser read lifecycle.** Every renderer's Session Browser presents one
   renderer-neutral `SessionBrowserReadOwner` over `SessionReader.list()`,
   `projectionBatch()` and `search()`; the renderer owns only its physical
-  Presenter seat (the PiTui modal picker, the native TSP picker) and keeps no
+  Presenter seat (the PiTUI fullscreen Session Workspace, the native TSP picker) and keeps no
   second roster, query generation, search timer or reader. An accepted Resume
   carries the captured `SessionScope` into
   `SessionRuntime.switchSessionOutcome(target, expectedScope)`, and only its

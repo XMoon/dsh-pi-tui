@@ -1,11 +1,11 @@
 /**
- * Input-first lifecycle regression for the /sessions picker (the official
- * /resume fix, mirrored): the overlay opens and owns the input BEFORE any
- * Host read settles — Esc works while `list()` pends forever, arrows /
- * search / category cycling work while a projection batch pends, closing
- * the picker aborts the scan, a late settlement never refreshes a closed
- * or superseded picker, and a progressive title refresh neither clears the
- * live search query nor re-triggers a resume.
+ * Input-first lifecycle regression for the /sessions fullscreen Session
+ * Workspace: the leased screen opens and owns the input BEFORE any Host read
+ * settles — Esc works while `list()` pends forever, arrows/search work while a
+ * projection batch pends, closing the workspace aborts the scan, a late
+ * settlement never refreshes a closed or superseded workspace, and a
+ * progressive title refresh neither clears the live search query nor
+ * re-triggers a resume.
  * @module @xmoon76/dsh-pi-tui/session-picker-loading.test
  */
 
@@ -164,7 +164,12 @@ function harness(
     switchSessionOutcome: async (id: string, scope?: import('../../src/app/session/scope.ts').SessionScope): Promise<SessionSwitchOutcome> => {
       switched.push(id)
       switchScopes.push(scope)
-      return switchOutcome === undefined ? { kind: 'committed', sessionId: id } : switchOutcome(id)
+      const outcome = switchOutcome === undefined ? { kind: 'committed' as const, sessionId: id } : await switchOutcome(id)
+      // A REAL committed switch publishes the target Session; the captured
+      // subject of the workspace open is then stale. Mirror that retirement so
+      // the fixture cannot pass by keeping a subject the runtime already left.
+      if (outcome.kind === 'committed') state.agent = { session: { id: outcome.sessionId } } as unknown as Agent
+      return outcome
     },
     transitionTo: async <T>(steps: { create: () => Promise<T> }) => ({ ok: true, next: await steps.create() }),
     currentPreset: () => undefined,
@@ -221,7 +226,7 @@ function harness(
 
 const pendingList = (): Promise<never> => new Promise(() => {})
 
-test('the picker opens and Esc cancels while list() pends forever', async (t) => {
+test('the workspace opens and Esc cancels while list() pends forever', async (t) => {
   const h = harness({
     list: pendingList,
     search: async () => ({ items: [], hasMore: false }),
@@ -241,7 +246,7 @@ test('the picker opens and Esc cancels while list() pends forever', async (t) =>
   // Esc closes the overlay immediately — no listing settlement involved.
   h.vt.sendInput('\x1b')
   await h.vt.waitForRender()
-  assert.ok(!h.view().includes('Loading sessions…'), 'Esc must close the pending picker immediately')
+  assert.ok(!h.view().includes('Loading sessions…'), 'Esc must close the pending workspace immediately')
 })
 
 test('Enter on the loading placeholder never triggers a resume', async (t) => {
@@ -288,20 +293,28 @@ test('arrows, search, and Esc stay responsive while a projection batch pends', a
   let view = h.view()
   assert.ok(view.includes('row3'), 'the rows stay rendered while enrichment pends')
 
-  // Typing narrows the corpus (search works mid-enrichment).
+  // `/` focuses the global editor; typing narrows the corpus (search works
+  // mid-enrichment). The list itself never consumes printable bytes.
+  h.vt.sendInput('/')
+  await h.vt.waitForRender()
   h.vt.sendInput('row3')
   await h.vt.waitForRender()
   view = h.view()
+  assert.ok(view.includes('Search all workspaces'), `the query editor must be visible:\n${view}`)
   assert.ok(view.includes('row3'), `the search filter must apply while enrichment pends:\n${view}`)
   assert.ok(!view.includes('row0'), 'non-matching rows must be filtered mid-enrichment')
 
-  // Esc aborts the pending batch and closes the picker.
+  // Esc returns from the query editor to the browse list, then closes it and
+  // aborts the pending batch.
   h.vt.sendInput('\x1b')
   await h.vt.waitForRender()
-  assert.ok(!h.view().includes('row3'), 'Esc must close the picker during pending enrichment')
+  assert.ok(!h.view().includes('Search all workspaces'), 'the first Esc must restore the browse list')
+  h.vt.sendInput('\x1b')
+  await h.vt.waitForRender()
+  assert.ok(!h.view().includes('row3'), 'Esc must close the workspace during pending enrichment')
 })
 
-test('closing the picker aborts the pending projection batch', async (t) => {
+test('closing the workspace aborts the pending projection batch', async (t) => {
   let observedSignal: AbortSignal | undefined
   let settleBatch!: () => void
   const rows = [{ id: 'session-a', updatedAt: 10, cwd: '/ws', live: false }]
@@ -324,11 +337,11 @@ test('closing the picker aborts the pending projection batch', async (t) => {
   await h.vt.waitForRender()
   assert.equal(observedSignal?.aborted, true, 'Esc must abort the pending scan')
 
-  // A late settlement must not resurrect the closed picker.
+  // A late settlement must not resurrect the closed workspace.
   settleBatch()
   await new Promise<void>(resolve => setImmediate(resolve))
   const view = h.view()
-  assert.ok(!view.includes('session-a'), 'a late batch result must not refresh the closed picker')
+  assert.ok(!view.includes('session-a'), 'a late batch result must not refresh the closed workspace')
 })
 
 test('a superseding open fences the previous load out of the UI', async (t) => {
@@ -438,8 +451,11 @@ test('progressive title enrichment preserves the live search query', async (t) =
 
   await h.runSessions()
   await waitUntil(() => h.view().includes('needle'))
-  // Filter down to one row, then let the late title land: the query must
-  // survive the refresh and the enriched title must enter the corpus.
+  // Filter down to one row (`/` focuses the global editor), then let the late
+  // title land: the query must survive the refresh and the enriched title must
+  // enter the corpus.
+  h.vt.sendInput('/')
+  await h.vt.waitForRender()
   h.vt.sendInput('needle')
   await h.vt.waitForRender()
   assert.ok(!h.view().includes('other'), 'the filter applies before enrichment')
@@ -470,12 +486,12 @@ test('/resume <arg> is input-first: the overlay opens while list() pends forever
   // the filter yet — the true Loading row stays visible (never "no
   // matching sessions" while the scan still runs).
   const view = h.view()
-  assert.ok(view.includes('resume · Current directory'), `the overlay must be open without list() settling:\n${view}`)
+  assert.ok(view.includes('Sessions'), `the fullscreen workspace must be open without list() settling:\n${view}`)
   assert.ok(view.includes('Loading sessions…'), `the loading row must be visible behind an unresolved argument:\n${view}`)
 
   h.vt.sendInput('\x1b')
   await h.vt.waitForRender()
-  assert.ok(!h.view().includes('resume · Current directory'), 'Esc must close the pending /resume picker immediately')
+  assert.ok(!h.view().includes('Loading sessions…'), 'Esc must close the pending /resume workspace immediately')
   const result = await resultPromise
   assert.deepEqual(result, { kind: 'error', text: 'resume cancelled' }, 'Esc during the pending listing cancels the resume')
 })
@@ -500,16 +516,20 @@ test('/resume <arg> with NO match lists exactly once and keeps the argument as t
   t.after(() => h.app.stop())
 
   // 'eed' is a SUBSTRING of the row label but not an id/prefix match, so
-  // the direct fast path finds nothing and the same picker fills in.
+  // the direct fast path finds nothing and the same workspace fills in.
   await h.runResume('eed')
   await waitUntil(() => h.view().includes('needle1'))
-  assert.equal(listCalls, 1, 'an unmatched argument must fall back to the SAME picker, never a second listing')
+  assert.equal(listCalls, 1, 'an unmatched argument must fall back to the SAME workspace, never a second listing')
   const view = h.view()
   assert.ok(!view.includes('other'), 'the argument stays as the live search query (non-matching rows filtered)')
 
+  // The seeded fallback starts in the global editor: the first Esc restores
+  // the browse list, the second closes the workspace.
   h.vt.sendInput('\x1b')
   await h.vt.waitForRender()
-  assert.ok(!h.view().includes('Current directory'), 'Esc closes the filtered picker')
+  h.vt.sendInput('\x1b')
+  await h.vt.waitForRender()
+  assert.ok(!h.view().includes('Workspace: '), 'Esc closes the filtered workspace')
 })
 
 test('/resume <arg> with a unique match switches after exactly one listing', async (t) => {
@@ -537,8 +557,8 @@ test('/resume <arg> with a unique match switches after exactly one listing', asy
   assert.ok(h.switchScopes[0] !== undefined,
     'the typed /resume must pass the SYNCHRONOUSLY captured source scope, never an unscoped switch')
   assert.equal(listCalls, 1, 'the direct fast path resolves against the ONE shared input-first listing')
-  await waitUntil(() => !h.view().includes('Current directory'), 3000)
-  assert.deepEqual(h.switched, ['session-target'], 'no further switch may fire after the picker closes')
+  await waitUntil(() => !h.view().includes('Workspace: '), 3000)
+  assert.deepEqual(h.switched, ['session-target'], 'no further switch may fire after the workspace settles')
 })
 
 test('/resume <arg> does not report success until the tracked switch commits', async (t) => {
@@ -563,7 +583,7 @@ test('/resume <arg> does not report success until the tracked switch commits', a
   let settled = false
   void result.then(() => { settled = true })
   await new Promise<void>(resolve => setImmediate(resolve))
-  assert.equal(settled, false, 'a matched picker close must not settle the command as success')
+  assert.equal(settled, false, 'a matched workspace open must not settle the command as success')
   resolveSwitch({ kind: 'failed', message: 'session "session-target" is not available' })
   assert.deepEqual(await result, { kind: 'error', text: 'session "session-target" is not available' })
   assert.deepEqual(h.switched, ['session-target'], 'the tracked switch is dispatched exactly once')
@@ -710,9 +730,10 @@ test('a cancelled PiTui direct switch settles the resume command instead of hang
     'a cancelled switch must settle the awaiting resume rather than leave it pending')
 })
 
-// ── M5-U-B: the Picker renders the shared SessionBrowserReadOwner snapshot ──
-// The physical Picker closes itself BEFORE `onSelect` runs (vendored
-// `openCategorizedPicker`), so the command-level switch result and the stale
+// ── M5-U-B/M5-U-C: the workspace renders the shared ReadOwner snapshot ──
+// The physical workspace stays open while the accepted switch pends; a
+// committed outcome retires the captured subject and closes it once, so the
+// command-level switch result and the stale
 // fence are the only owners of the terminal feedback. These tests exercise the
 // REAL PiTui Presenter (no injected native presentation).
 
@@ -721,7 +742,7 @@ const interactiveRows = (): Array<{ id: string; updatedAt: number; cwd: string; 
   { id: 'session-other', updatedAt: 10, cwd: '/ws', live: false },
 ]
 
-test('an interactive selection closes the Picker and reports its failed switch exactly once (UB-08/UB-13)', async (t) => {
+test('an interactive selection stays pending and reports its failed switch exactly once (UB-08/UB-13)', async (t) => {
   let resolveSwitch!: (outcome: SessionSwitchOutcome) => void
   const gate = new Promise<SessionSwitchOutcome>(resolve => { resolveSwitch = resolve })
   const h = harness({
@@ -738,19 +759,20 @@ test('an interactive selection closes the Picker and reports its failed switch e
   await waitUntil(() => h.view().includes('target'))
   h.vt.sendInput('\r')
   await h.vt.waitForRender()
-  assert.ok(!h.view().includes('Current directory'), 'the Picker physically closes on select')
+  assert.ok(h.view().includes('Opening session…'), 'the accepted intent is pending, never a success')
+  assert.ok(h.view().includes('Sessions'), 'the workspace stays open while the switch pends')
   assert.deepEqual(h.switched, ['session-target'], 'the accepted intent dispatches the real switch once')
 
-  // The overlay is gone, but the command operation still owns its final result.
+  // A failed switch keeps the SAME workspace and still owns ONE final result.
   resolveSwitch({ kind: 'failed', message: 'session open failed: lease held' })
   await waitUntil(() => h.notices.some(notice => notice.text.includes('lease held')))
   assert.equal(
     h.notices.filter(notice => notice.text.includes('lease held')).length,
     1,
-    'the closed Picker keeps exactly one owner for the real failure notice',
+    'the live workspace keeps exactly one owner for the real failure notice',
   )
-  await h.vt.waitForRender()
-  assert.ok(!h.view().includes('Current directory'), 'a failed switch never resurrects the closed Picker')
+  await waitUntil(() => !h.view().includes('Opening session…'))
+  assert.ok(h.view().includes('Sessions'), 'a failed switch never hides the authoritative current reading')
   assert.deepEqual(h.switched, ['session-target'], 'a failed switch never retries by itself')
 })
 
@@ -769,9 +791,9 @@ test('an interactive selection that commits ends without an error notice', async
   await waitUntil(() => h.view().includes('target'))
   h.vt.sendInput('\r')
   await waitUntil(() => h.switched.length === 1)
-  await new Promise<void>(resolve => setImmediate(resolve))
-  await h.vt.waitForRender()
-  assert.ok(!h.view().includes('Current directory'), 'the committed selection ends the Picker')
+  // The committed outcome publishes the target Session: the captured subject
+  // retires and the workspace closes exactly once, with no error notice.
+  await waitUntil(() => !h.view().includes('Sessions'))
   assert.deepEqual(h.notices, [], 'a committed switch is not an error')
 })
 
@@ -796,7 +818,7 @@ test('Enter on the current Session row never starts a switch', async (t) => {
   h.vt.sendInput('\r')
   await h.vt.waitForRender()
   assert.deepEqual(h.switched, [], 'the current Session row is a no-op, never a resume')
-  assert.ok(!h.view().includes('Current directory'), 'that no-op still closes the Picker')
+  assert.ok(h.view().includes('Sessions'), 'the no-op keeps the current workspace open')
 })
 
 test('a manual query edit during the listing supersedes the typed /resume direct match (UB-07)', async (t) => {
@@ -814,16 +836,20 @@ test('a manual query edit during the listing supersedes the typed /resume direct
 
   const result = h.runResume('target') as Promise<{ kind: string; text?: string }>
   await h.vt.waitForRender()
+  // A real edit starts at the global editor: `/` focuses it and the printable
+  // bytes reach the Input, which supersedes the typed direct match.
+  h.vt.sendInput('/')
+  await h.vt.waitForRender()
   h.vt.sendInput('zzz')
   await h.vt.waitForRender()
-  assert.ok(h.view().includes('resume · Search results'),
-    'the live edit enters the search projection while the list still pends')
+  assert.ok(h.view().includes('Search all workspaces') && h.view().includes('zzz'),
+    'the live edit enters the global search editor while the list still pends')
   resolveList(rows)
   // The command settlement is the authoritative "listing landed" signal: a
   // wrongly admitted direct switch would already have been dispatched
   // synchronously before this promise resolves.
   assert.deepEqual(await result, { kind: 'success' },
-    'the unmatched typed resume falls through to the filtered picker')
+    'the unmatched typed resume falls through to the filtered workspace')
   assert.deepEqual(h.switched, [], 'a user-edited query must suppress the typed direct switch')
   await h.vt.sendInput('\x1b')
   await h.vt.waitForRender()
@@ -846,10 +872,10 @@ test('/resume never switches to a subagent-only target', async (t) => {
   await h.vt.waitForRender()
   assert.deepEqual(result, { kind: 'success' }, 'the subagent target becomes the initial query, not a switch')
   assert.deepEqual(h.switched, [], 'a subagent row never participates in Resume')
-  assert.ok(h.view().includes('Search results'), 'the unmatched target stays in the SAME picker')
+  assert.ok(h.view().includes('Search all workspaces'), 'the unmatched target stays in the SAME fullscreen workspace')
 })
 
-test('a late listing from a superseded open never repaints the new Picker', async (t) => {
+test('a late listing from a superseded open never repaints the new workspace', async (t) => {
   let resolveFirst!: (value: Array<{ id: string; updatedAt: number; cwd: string; live: boolean }>) => void
   let calls = 0
   const h = harness({
@@ -875,16 +901,16 @@ test('a late listing from a superseded open never repaints the new Picker', asyn
   resolveFirst([{ id: 'session-stalerow', updatedAt: 30, cwd: '/ws', live: false }])
   await new Promise<void>(resolve => setImmediate(resolve))
   await h.vt.waitForRender()
-  assert.ok(!h.view().includes('stalerow'), 'the superseded listing must never repaint the new Picker')
-  assert.ok(h.view().includes('freshrow'), 'the new Picker keeps its own roster')
+  assert.ok(!h.view().includes('stalerow'), 'the superseded listing must never repaint the new workspace')
+  assert.ok(h.view().includes('freshrow'), 'the new workspace keeps its own roster')
 })
 
-test('typed /resume against an empty roster reports the same readable-empty state as the Picker', async (t) => {
+test('typed /resume against an empty roster reports the same readable-empty state as the workspace', async (t) => {
   // Regression (empty-roster command wording): an empty listing only proves
   // that no Session is READABLE — the official listing publishes a Session
   // from its header, so an unlistable log looks exactly like an empty store
   // here. The command result must carry the same S2 limited-contract wording
-  // as the in-picker status row, never a claim about stored data.
+  // as the in-workspace status row, never a claim about stored data.
   const h = harness({
     list: async () => [],
     search: async () => ({ items: [], hasMore: false }),

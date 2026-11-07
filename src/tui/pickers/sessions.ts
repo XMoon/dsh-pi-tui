@@ -141,28 +141,6 @@ export function sessionPickerItem(row: SessionPickerRow, currentId: string, inde
   }
 }
 
-/** Assemble one SEARCH-projection row: the browse presentation plus the
- * workspace in the searchable description. The search projection's
- * membership considers cwd, and the SelectList's substring filter searches
- * value/label/description only (never the group header) — so the search
- * view must carry the cwd in the description, or a cwd query would match
- * the union yet stay invisible. */
-export function sessionSearchItem(
-  row: SessionPickerRow,
-  currentId: string,
-  indent = 0,
-  contentHit?: SessionContentHit,
-): SessionPickerItem {
-  const item = sessionPickerItem(row, currentId, indent, contentHit)
-  // The cwd is a Host/persistence boundary value — sanitize it before it
-  // enters the searchable description (a raw ESC/C1/newline in a workspace
-  // path must never reach the terminal).
-  if (row.cwd !== undefined && row.cwd !== '') {
-    item.description = `${item.description} · ${sanitizeTerminalText(row.cwd)}`
-  }
-  return item
-}
-
 /**
  * Split a session picker label into its FIXED presentation prefix (tree
  * connector + current-session marker) and the marqueeable title (plan

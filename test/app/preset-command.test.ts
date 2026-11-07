@@ -758,17 +758,17 @@ test('/sessions opens input-first and shows projection-pending rows before enric
   })
   const result = await t.runCommand('sessions')
   assert.deepEqual(result, { kind: 'success' })
-  // The overlay owns the input immediately (loading frame); the listing is
-  // behind a scheduler yield, so poll until the row lands — still without
-  // the pending preset.
+  // The workspace owns the input immediately (loading frame); the listing is
+  // behind a scheduler yield, so poll until the row lands — still without the
+  // pending projection's title enrichment.
   const initial = await t.view()
   assert.ok(initial.includes('Loading sessions…') || initial.includes('cold'),
     `the first frame must be interactive (loading row or listed row):\n${initial}`)
   await waitFor(async () => (await t.view()).includes('cold'))
   const pending = await t.view()
-  assert.ok(!pending.includes('preset:standard'), 'a pending projection must not show an effective preset')
-  resolveBatch(new Map([['session-cold', { preset: 'standard' }]]))
-  await waitFor(async () => (await t.view()).includes('preset:standard'))
+  assert.ok(!pending.includes('cold projected title'), 'a pending projection must not show an enriched title')
+  resolveBatch(new Map([['session-cold', { title: 'cold projected title' }]]))
+  await waitFor(async () => (await t.view()).includes('cold projected title'))
   t.app.stop()
 })
 

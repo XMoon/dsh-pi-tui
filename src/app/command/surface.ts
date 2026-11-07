@@ -289,6 +289,10 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
   readonly backend: {
     readonly kind: BackendKind
     readonly sessionReader: TuiCommandRunner['sessionReader']
+    /** M5-U-C: the official Host Workspace facts port, forwarded unchanged to
+     *  the internal command runner. This facade never caches, wraps or
+     *  re-derives it; the PiTUI Session Workspace is its only consumer. */
+    readonly sessionWorkspaceFacts: TuiCommandRunner['sessionWorkspaceFacts']
     readonly sessionWriter: TuiCommandRunner['sessionWriter']
     readonly interaction: TuiCommandRunner['interaction']
     readonly catalog: TuiCommandRunner['catalog']
@@ -1248,6 +1252,7 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       // the title batches, the context measurement and the export read go
       // through the port, never ctx directly.
       sessionReader: deps.backend.sessionReader,
+      sessionWorkspaceFacts: deps.backend.sessionWorkspaceFacts,
       // PR D2: the explicit About/status force — measure NOW through the
       // coordinator (mark dirty + semantic reader), repaint the footer
       // cheaply, and return the fresh (or last-good) value for the panel.

@@ -374,15 +374,14 @@ test('the official scoped session_search results reach the PiTui Tool output, ne
     await app.settle()
   }
   const browser = app.view()
-  assert.match(browser, /sessions · Current directory/u, 'the existing Session Browser opens')
-  assert.match(browser, /Type to filter/u, 'the picker keeps its own query input')
-  // The Host query is a Tool result; opening the Browser never carries that
-  // query into the picker's own search input. Read the OVERLAY cells only (the
-  // transcript remains painted to its left).
-  const overlay = browser.split('\n')
-  const top = overlay.findIndex(line => line.includes('sessions · Current directory'))
-  assert.ok(top >= 0)
-  const left = overlay[top]!.indexOf('╭')
-  const overlayText = overlay.slice(top).map(line => line.slice(left)).join('\n')
-  assert.doesNotMatch(overlayText, /ALPHA_NEEDLE_PROJECT/u, 'the Host query is not a Session Browser search injection')
+  assert.match(browser, /Sessions/u, 'the fullscreen Session Workspace opens')
+  assert.match(browser, /Workspace: /u, 'the workspace keeps its own scope chrome')
+  // The Host query is a Tool result; opening the workspace never carries that
+  // query into its own raw editor. `/` focuses the workspace editor and it
+  // must start empty.
+  app.vt.sendInput('/')
+  await app.settle()
+  const editor = app.view()
+  assert.match(editor, /Search:\s*$/mu, 'the workspace keeps its own EMPTY query editor')
+  assert.doesNotMatch(editor, /ALPHA_NEEDLE_PROJECT/u, 'the Host query is not a Session Workspace search injection')
 })

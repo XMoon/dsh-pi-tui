@@ -40,11 +40,14 @@ import type { HumanSkillCatalog } from '../../src/domain/catalog/skill.ts'
 import type { CatalogRefreshOutcome, CatalogRefreshSource } from '../../src/app/command/catalog-refresh.ts'
 import { computeStats, type SessionStats } from '../../src/domain/status/stats.ts'
 import type { SurfaceCommandSummary } from '../../src/domain/catalog/surface.ts'
+import type { SessionWorkspaceFactsPort } from '../../src/runtime/session-workspace-facts-port.ts'
+import { unconfiguredSessionWorkspaceFacts } from './session-workspace-facts-fake.ts'
 
 /** The subset of `TuiCommandRunner` the scope helper supplies: the CAPTURE
- * members plus the A3-2 scope-bound facades. A stub must also expose
- * `currentSessionId` from its OWN live state (a live getter, or `undefined`
- * for a sessionless stub). */
+ * members plus the A3-2 scope-bound facades, and the required M5-U-C
+ * Workspace facts seam (an unused suite fails fast through the shared
+ * unconfigured fake). A stub must also expose `currentSessionId` from its OWN
+ * live state (a live getter, or `undefined` for a sessionless stub). */
 export interface SessionScopeFacts {
   captureSessionScope(): SessionScope
   captureLiveSessionScope(): LiveSessionScope | undefined
@@ -75,6 +78,7 @@ export interface SessionScopeFacts {
     signal?: AbortSignal,
   ): Promise<PermissionPresetResult>
   setSessionApprovalPolicy(scope: LiveSessionScope, value: 'ask' | 'never'): 'applied' | 'superseded'
+  sessionWorkspaceFacts: SessionWorkspaceFactsPort
 }
 
 /** The permission-preset port the scope-bound write delegates to. */
@@ -137,6 +141,7 @@ export function sessionScopeFacts(
   }
 
   return {
+    sessionWorkspaceFacts: unconfiguredSessionWorkspaceFacts(),
     captureSessionScope: () => scopeAuthority.capture(),
     captureLiveSessionScope: () => scopeAuthority.captureLive(),
     isSessionScopeCurrent: (scope) => scopeAuthority.isCurrent(scope),

@@ -376,6 +376,7 @@ function fakeRunnerDeps(options: {
     backend: {
       kind: options.remoteSource === undefined ? 'direct' : 'remote',
       sessionReader: runner.sessionReader,
+      sessionWorkspaceFacts: runner.sessionWorkspaceFacts,
       sessionWriter: runner.sessionWriter,
       interaction: runner.interaction,
       catalog: runner.catalog,
@@ -492,6 +493,19 @@ test('a synchronous subscription-time generation notification is NOT a duplicate
     // … but NO reconnect-owned catalog read was issued.
     assert.deepEqual(source.reads, [],
       'a synchronous current-token notification must not trigger a catalog read')
+  } finally {
+    harness.dispose()
+  }
+})
+
+test('the official Workspace facts port crosses the command facade BY IDENTITY (M5-U-C)', () => {
+  const harness = fakeRunnerDeps({ currentSessionId: () => 'session-a' })
+  try {
+    harness.register()
+    const built = harness.builtRunner()
+    assert.ok(built !== undefined, 'buildRunner must expose the real TuiCommandRunner facade')
+    assert.equal(built.sessionWorkspaceFacts, harness.runner.sessionWorkspaceFacts,
+      'the facade forwards the SAME backend port — no copy, wrapper or second registry')
   } finally {
     harness.dispose()
   }

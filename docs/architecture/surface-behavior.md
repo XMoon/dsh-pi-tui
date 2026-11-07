@@ -155,6 +155,47 @@ Must-not: add a second observer/screen owner, concatenate status/label/output,
 claim full history, move the background transcript, or give a Label Job a
 Command page.
 
+## Session Workspace
+
+`/sessions`, `/search <query>` and bare `/resume` open ONE fullscreen Session
+Workspace over the existing `SessionBrowserReadOwner`; the retired PiTUI Picker
+is not a fallback. TSP keeps its own native Presenter over the same owner (see
+[tsp/session-browser.md](../tsp/session-browser.md)).
+
+- The command classifier, `SessionReader.list/projectionBatch/search` and the
+  Resume settlement stay the shared read owner's. The panel owns only
+  Client-local selection/scope/focus/scroll/editor state; it never opens,
+  writes, stops or answers a Session.
+- `Current workspace` is proved only by the official Workspace facts
+  (`workspaceId` + `sessionIds`) followed once per open. A missing, ambiguous,
+  denied or lost membership falls back to `All workspaces` with an explicit
+  status; a cwd never proves membership. The per-open projection is disposable
+  and never persisted or reused across opens.
+- Global search is independent of the browse scope. Only a real editor text
+  change reaches the read owner, which canonicalizes it and owns the one Host
+  search generation/Abort. Results are the owner's merged union in Host page
+  order and are never re-filtered by the panel.
+- Selection is not currentness: only a listed, non-current main row may emit
+  ONE Resume intent. Only the runtime's `committed` is success; `failed` and
+  `indeterminate` stay on the workspace with one sanitized status and never
+  retry automatically. `Enter` in the search editor only enters the result
+  list; a second `Enter` from the results is the Resume.
+- Esc returns one level at a time (results → editor → browse) and the root Esc
+  closes the workspace to the SAME paused surface. The physical lease and
+  blocking-owner precedence are owned by
+  [overlay-focus.md](./overlay-focus.md).
+- U-C paints `Sessions / Recent sessions` only. It shows no `Needs attention`,
+  `Working` or answerable-pending state; activity classification and
+  other-Session answerability stay deferred.
+
+Authority: `TuiApp.openSessionWorkspace` + `SessionWorkspacePanel`,
+`SessionBrowserReadOwner`, `SessionWorkspaceFactsPort`; sink: the leased
+fullscreen screen.
+
+Must-not: add a second Session list, a Workspace registry or a persisted
+Workspace table, re-filter Host search results, infer membership from a cwd, or
+treat an accepted Resume intent as a committed switch.
+
 ## Web frontend control (`/web`)
 
 `/web` is ONE local, sessionless Client command that controls the Split Host's

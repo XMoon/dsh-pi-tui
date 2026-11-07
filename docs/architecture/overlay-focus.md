@@ -843,6 +843,29 @@ modal-pre-emption, exactly-once close and final-dispose rules.
   remain deferred to separate renderer/protocol work. Transcript thumbnails
   keep their existing per-surface capability behavior.
 
+### 10.5 Session Workspace: the fourth leased screen
+
+`/sessions`, `/search` and bare `/resume` lease the SAME temporary screen
+through `TuiApp.openSessionWorkspace` (`kind: 'sessions'`). It is mutually
+exclusive with the Job, Settings and Image leases and obeys the same paused
+return surface, blocking-owner pre-emption, re-entrant `assertStillOpening` and
+final-dispose rules; the panel's root Esc and every forced teardown close
+through the ONE record `close()`.
+
+- **Owner-origin close is quiet.** When the read owner/presenter retires its
+  own workspace it calls the handle's `close()`, which suppresses the lease's
+  `onClose` notification; a user Esc, blocking-owner pre-emption or surface
+  teardown still notifies the owner exactly once. The retirement callback can
+  therefore never re-enter the owner that triggered it.
+- **The lease is latched before any read.** A refused lease throws before the
+  per-open official Workspace follow or the Session listing starts, and the
+  command returns one error instead of leaving a hidden reader.
+- **The per-open Workspace follow is caller-owned.** On close the token is
+  retired FIRST, then its `AbortController` is aborted, then its handle is
+  disposed exactly once, then the lease closes; every later frame is fenced by
+  the token and the captured subject, so a late baseline can never repaint a
+  replacement screen.
+
 ## 11. Optional seat tenant: PARK / REFUSE
 A private Client-local caller may project ONE optional tenant into the editor
 seat. The seam and its arbitration are shipped; its first real tenant is

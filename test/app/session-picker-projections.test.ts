@@ -1,8 +1,8 @@
 /**
  * Orchestration regression for the combined projection batch behind the
- * /sessions and /resume picker: every MAIN row the picker can display must
+ * /sessions and /resume workspace: every MAIN row the workspace can display must
  * enter `sessionReader.projectionBatch()` — including rows beyond any read
- * window — while SUBAGENT rows (never shown in the human session picker)
+ * window — while SUBAGENT rows (never shown in the human Session Workspace)
  * must not be read at all, and each main id must enter the batch exactly
  * once across the progressive slices.
  *
@@ -60,7 +60,7 @@ function row(id: string, createdAt: number): import('../../src/tui/pickers/sessi
   return { id, updatedAt: createdAt, createdAt, cwd: '/ws/project-a', live: false }
 }
 
-test('the picker projection loader covers EVERY main row beyond the legacy window, and never reads subagents', async (t) => {
+test('the workspace projection loader covers EVERY main row beyond the legacy window, and never reads subagents', async (t) => {
   const ctx = new Context()
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
