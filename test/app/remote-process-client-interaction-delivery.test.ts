@@ -454,6 +454,68 @@ test('Abort during a navigation hold terminates the wait without a second presen
   assert.deepEqual(seat.offCalls, ['user-questions/request', 'approval/request'])
 })
 
+test('a provider result that resolves before an official abort is never forwarded', async () => {
+  const { seat, delivery } = createDelivery()
+  const controller = new AbortController()
+  let providerCalls = 0
+  let releaseProvider: ((value: AskUserQuestionAnswer) => void) | undefined
+  let nextCalls = 0
+  const result = seat.emitQuestion(
+    { questions: QUESTIONS, wait: { callId: 'call-race-q' }, signal: controller.signal },
+    async () => { nextCalls += 1; return PROCEED },
+  )
+  delivery.attachSurface(1, {
+    onQuestion: () => new Promise<AskUserQuestionAnswer>(resolve => {
+      providerCalls += 1
+      releaseProvider = resolve
+    }),
+    onApproval: () => 'rejected',
+  })
+  await tick()
+  assert.equal(providerCalls, 1)
+  // Provider resolve FIRST; the official abort fires before the delivery's
+  // await continuation runs. The resolved answer must NOT reach the Gateway.
+  releaseProvider?.(PROCEED)
+  controller.abort(new Error('question was withdrawn by the Host'))
+  // Two microtasks: the promise.resolve(invoke) wrapper and the
+  // raceWithAbort .then hop. By the time the delivery continuation runs the
+  // abort is already observable, which is exactly the reviewed race.
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(controller.signal.aborted, true)
+  await assert.rejects(result, /question was withdrawn by the Host/u,
+    'a provider answer that raced the official abort must not be forwarded')
+  delivery.dispose()
+})
+
+test('an approval decision that resolves before an official abort is never forwarded', async () => {
+  const { seat, delivery } = createDelivery()
+  const controller = new AbortController()
+  let providerCalls = 0
+  let releaseProvider: ((value: unknown) => void) | undefined
+  const result = Promise.resolve(seat.emitApproval(
+    { toolName: 'bash', callId: 'call-race-a', signal: controller.signal },
+    async () => 'next',
+  ))
+  delivery.attachSurface(1, {
+    onQuestion: async () => PROCEED,
+    onApproval: () => new Promise<unknown>(resolve => {
+      providerCalls += 1
+      releaseProvider = resolve
+    }),
+  })
+  await tick()
+  assert.equal(providerCalls, 1)
+  releaseProvider?.('allowed-once')
+  controller.abort(new Error('approval was withdrawn by the Host'))
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(controller.signal.aborted, true)
+  await assert.rejects(result, /approval was withdrawn by the Host/u,
+    'a stale allowed-once that raced the official abort must not be forwarded')
+  delivery.dispose()
+})
+
 test('the eligibility read view notifies on add and remove but never answers', async () => {
   const { seat, delivery } = createDelivery()
   const events: string[] = []
