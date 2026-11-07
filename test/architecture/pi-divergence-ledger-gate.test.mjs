@@ -180,8 +180,10 @@ test('report rendering is deterministic and naturally sorts mixed IDs', () => {
   assert.ok(first.indexOf('### X044') < first.indexOf('### X045'))
   assert.ok(first.indexOf('### X045') < first.indexOf('### X046'))
   assert.ok(first.indexOf('### X046') < first.indexOf('### X047'))
-  assert.ok(first.includes('- Baseline compared: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`'))
-  assert.ok(first.includes('- Reference snapshot: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`'))
+  const baseline = manifest.baseline
+  const upstream = manifest.verification.referenceSnapshots.upstream
+  assert.ok(first.includes(`- Baseline compared: \`${baseline.repository}@${baseline.commit}\``))
+  assert.ok(first.includes(`- Reference snapshot: \`${upstream.repository}@${upstream.commit}\``))
   assert.equal(first.endsWith('\n'), true)
   assert.equal(first.endsWith('\n\n'), false)
   assert.equal(first.includes('\n\n\n'), false)
