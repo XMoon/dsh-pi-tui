@@ -307,7 +307,7 @@ export default async function (h) {
     cpu: cpus()[0]?.model ?? 'UNVERIFIED', cores: cpus().length,
   }
   const extra = { tern: ternVersion, sdk: { pin: sdkPin, integrity }, dsh: { pin: dshPin, mode: dshMode } }
-  h.check('G-TRANSCRIPT-EVIDENCE: the exact the agent harness npm baseline is resolved from this repository and matched by the Session package',
+  h.check('G-TRANSCRIPT-EVIDENCE: the exact DSH npm baseline is resolved from this repository and matched by the Session package',
     dshPin === '0.2.2-rc.1' && dshSessionPin === dshPin && dshMode === 'npm',
     JSON.stringify({ dshPin, dshSessionPin, dshMode }))
 
