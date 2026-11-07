@@ -159,9 +159,7 @@ export const SCHEDULE_COPY = {
   permissionDenied: 'Schedule permission denied.',
   outcomeUnknown: 'Outcome unknown. Refresh before retrying.',
   updated: 'Updated',
-  reloaded: 'Loaded the latest Host revision. Unchanged fields follow the Host; review your draft, then save again.',
-  reloadConflict: (fields: string) =>
-    `The Host also changed ${fields}. Your draft keeps your edit only for the fields you changed; review before saving.`,
+  reloaded: 'Loaded the latest Host revision. Re-apply the changes you still want, then save.',
   deliveryQueued: 'Delivery queued',
   noEnded: 'No ended tasks to clear.',
   cleared: (count: number) => `Cleared ${count} ended tasks.`,

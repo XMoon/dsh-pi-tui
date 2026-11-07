@@ -738,12 +738,6 @@ export class ScheduleWorkspaceController {
       }
   }
 
-  /** The UNIQUE save action: one local refusal or one Host create/edit. */
-  /**
-   * The explicit conflict recovery (plan A6/§5.5): re-read the latest Host
-   * record and rebase the edit's `expectedUpdatedAt` on it while KEEPING the
-   * user's typed fields. It never merges automatically and never overwrites.
-   */
   /** The page identity a Host write must still own when it settles. */
   private surfaceStamp(): { readonly page: string; readonly selectedId: string | undefined; readonly editorId: string | undefined; readonly editorToken: number } {
     // Help is an UNDERLAY: a write issued from the page it covers still owns
@@ -807,25 +801,22 @@ export class ScheduleWorkspaceController {
   private async reloadLatest(): Promise<void> {
     const draft = this.editor
     if (draft === undefined || draft.id === undefined) return
-    if (this.editorBaseline === undefined) return
+    if (this.editorBaseline === undefined || this.busy) return
     const token = this.editorToken
     const epoch = ++this.reloadEpoch
     try {
       const result = await this.port.view({ id: scheduleId(draft.id) })
       if (this.disposed) return
-      // Only the NEWEST reload for THIS still-open editor instance may touch the
-      // draft, baseline or notice: a slow older answer can never roll the
-      // visible task back, and an answer for a closed editor is not published.
+      // A superseded reload, another editor instance, a closed editor or a save
+      // that started meanwhile all invalidate this read.
       if (epoch !== this.reloadEpoch || this.editorToken !== token) return
+      if (this.busy) return
       if (this.editor === undefined || this.editor.id !== draft.id) return
       if ('code' in result) {
         this.notice = errorNotice(SCHEDULE_COPY.taskGone)
         this.publish()
         return
       }
-      const current = this.editor
-      const baseline = this.editorBaseline
-      if (baseline === undefined) return
       const fromRecord = draftFromRecord(result)
       const latest: ScheduleEditorBaseline = {
         title: result.title,
@@ -833,45 +824,25 @@ export class ScheduleWorkspaceController {
         timing: fromRecord.timing,
         target: fromRecord.target,
       }
-      // Intent comes from the STABLE user-edited set (host-adopted values never
-      // enter it), never from a fixed open-time snapshot: consecutive reloads
-      // stay correct even when the Host changes a different field each time.
-      // Intent is derived from the CURRENT baseline: a value reverted back to the
-      // baseline is untouched, and a value a previous reload adopted is the
-      // baseline itself, so consecutive reloads stay correct without a
-      // monotonically growing flag set.
-      const userTitle = current.title !== baseline.title
-      const userPrompt = current.prompt !== baseline.prompt
-      const userTiming = !safeSameTiming(current.timing, baseline.timing)
-      const userTarget = !sameTargetDraft(current.target, baseline.target)
-      const overlaps: string[] = []
-      if (userTitle && latest.title !== baseline.title) overlaps.push('the title')
-      if (userPrompt && latest.prompt !== baseline.prompt) overlaps.push('the prompt')
-      if (userTiming && !safeSameTiming(latest.timing, baseline.timing)) overlaps.push('the timing')
-      if (userTarget && !sameTargetDraft(latest.target, baseline.target)) overlaps.push('the target')
-      const rebasedTarget = userTarget ? current.target : latest.target
+      // The editor now shows the HOST's latest facts and revision; the user
+      // re-applies what they still want on top of them. No field-level merge,
+      // and the Host's newer values are never re-sent as an overwrite.
       this.editor = {
-        ...current,
-        title: userTitle ? current.title : latest.title,
-        prompt: userPrompt ? current.prompt : latest.prompt,
-        timing: userTiming ? current.timing : latest.timing,
-        target: rebasedTarget,
-        timingEdited: userTiming,
-        targetEdited: userTarget,
-        advanced: rebasedTarget.kind !== 'session' && (rebasedTarget.cwd !== '' || rebasedTarget.agentPreset !== ''),
+        ...draft,
+        title: latest.title,
+        prompt: latest.prompt,
+        timing: latest.timing,
+        target: latest.target,
+        timingEdited: false,
+        targetEdited: false,
+        advanced: latest.target.kind !== 'session' && (latest.target.cwd !== '' || latest.target.agentPreset !== ''),
         expectedUpdatedAt: result.updatedAt ?? null,
       }
-      // The CAS baseline is the LATEST Host record; the draft now differs from it
-      // only in the fields the user actually changed.
       this.editorBaseline = latest
-      this.notice = overlaps.length === 0
-        ? infoNotice(SCHEDULE_COPY.reloaded)
-        : errorNotice(SCHEDULE_COPY.reloadConflict(overlaps.join(' and ')))
+      this.notice = infoNotice(SCHEDULE_COPY.reloaded)
       this.publish()
     } catch (error) {
       if (this.disposed) return
-      // A superseded, old-editor or closed-editor failure must not replace the
-      // newest notice on whatever page the user is on now.
       if (epoch !== this.reloadEpoch || this.editorToken !== token) return
       if (this.editor === undefined || this.editor.id !== draft.id) return
       this.notice = errorNotice(this.describeFailure(error))
@@ -879,6 +850,7 @@ export class ScheduleWorkspaceController {
     }
   }
 
+  /** The UNIQUE save action: one local refusal or one Host create/edit. */
   private save(): void {
     const draft = this.editor
     if (draft === undefined || this.busy) return
