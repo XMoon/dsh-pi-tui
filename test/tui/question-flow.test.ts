@@ -10,14 +10,16 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { setKittyProtocolActive } from '@xmoon76/pi-tui'
+import { setKittyProtocolActive, stripTerminalSequences } from '@xmoon76/pi-tui'
 import { QuestionFlow, type QuestionFlowQuestion } from '../../src/tui/interaction/question.ts'
 
 const BUDGETS = [8, 12, 22, 24]
 const WIDTHS = [50, 100]
 
 function strip(line: string): string {
-  return line.replace(/\x1b\[[0-9;]*m/g, '')
+  // U1 components emit zero-width fake-cursor APC markers; visible text must
+  // be read after removing every terminal sequence, not only SGR.
+  return stripTerminalSequences(line)
 }
 
 function makeFlow(questions: QuestionFlowQuestion[], budget: number): QuestionFlow {

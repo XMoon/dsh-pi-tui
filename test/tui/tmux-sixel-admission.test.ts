@@ -459,3 +459,23 @@ test('an unregistered managed-looking DCS writes zero bytes and never bypasses t
     cli.dispose()
   }
 })
+
+/**
+ * The tmux SIXEL facade wraps the real terminal for graphics admission, so it
+ * must forward U1's synchronous process-exit restoration exactly once instead
+ * of becoming a no-op on the optional Terminal member.
+ */
+test('the tmux SIXEL facade forwards sync exit restoration exactly once', () => {
+  const sink = new VirtualTerminal()
+  const calls: Array<[string, string]> = []
+  sink.restoreOnExit = (before, after) => {
+    calls.push([before, after])
+  }
+  const facade = new TmuxSixelTerminal(sink, {} as TmuxSixelAdmission, () => false)
+  facade.restoreOnExit('BEFORE', 'AFTER')
+  assert.deepEqual(calls, [['BEFORE', 'AFTER']])
+
+  const bare = new VirtualTerminal()
+  const bareFacade = new TmuxSixelTerminal(bare, {} as TmuxSixelAdmission, () => false)
+  assert.doesNotThrow(() => bareFacade.restoreOnExit('BEFORE', 'AFTER'))
+})

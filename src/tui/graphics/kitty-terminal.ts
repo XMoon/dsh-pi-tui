@@ -338,6 +338,12 @@ export class KittyTerminalFacade implements Terminal {
     this.inner.setProgramStatus(status)
   }
 
+  /** U1 sync process-exit restoration: the inner ProcessTerminal owns fd and
+   *  write policy; the facade only forwards the before/after bytes. */
+  restoreOnExit(before: string, after: string): void {
+    this.inner.restoreOnExit?.(before, after)
+  }
+
   /**
    * Optional terminal capabilities are delegated by RUNTIME presence, not
    * re-declared: a facade that always exposes `setProgressState` makes

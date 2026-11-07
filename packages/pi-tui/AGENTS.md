@@ -1,9 +1,9 @@
 # pi-tui Agent Guide
 
 `packages/pi-tui` is a vendored copy of pi-tui from the upstream pi-mono
-project, pinned to Earendil `v1.1.0` (see `UPSTREAM.json` — the single
-source of truth for the baseline; generated reports may repeat the pin but
-must not become a second hand-maintained source). It is no longer patched via
+project, pinned according to `UPSTREAM.json` (currently Earendil `v1.5.0`) —
+the single source of truth for the baseline; generated reports may repeat the
+pin but must not become a second hand-maintained source. It is no longer patched via
 pnpm patches — all local fixes are applied directly to the source. The differential-rendering behavior in `src/tui.ts`
 matches upstream; the schema-v2 `vendor-divergences.json` is the authoritative
 inventory, and `DIVERGENCES.md` is the generated human report.

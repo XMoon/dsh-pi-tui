@@ -10,6 +10,7 @@ import {
 	type ProgramStatus,
 } from "./program-status.ts";
 import { StdinBuffer } from "./stdin-buffer.ts";
+import { replaceControlCharacters } from "./utils.ts";
 
 const TERMINAL_PROGRESS_KEEPALIVE_MS = 1000;
 /** OSC 9;4 state 1 value 0 — a WORKING progress state whose completion
@@ -77,12 +78,19 @@ export function refreshTerminalDimensions(): void {
 	}
 }
 
+// Some Apple Terminal setups send ESC+CR (Alt+Enter) for Shift+Enter (#11559).
+function isNativeShiftEnterCandidate(data: string): boolean {
+	return data === "\r" || data === "\x1b\r";
+}
+
 export function normalizeNativeShiftEnterInput(
 	data: string,
 	shouldDetectNativeShiftEnter: boolean,
 	isShiftPressed: boolean,
 ): string {
-	if (shouldDetectNativeShiftEnter && data === "\r" && isShiftPressed) return NATIVE_SHIFT_ENTER_SEQUENCE;
+	if (shouldDetectNativeShiftEnter && isNativeShiftEnterCandidate(data) && isShiftPressed) {
+		return NATIVE_SHIFT_ENTER_SEQUENCE;
+	}
 	return data;
 }
 
@@ -99,6 +107,12 @@ export interface Terminal {
 
 	// Stop the terminal and restore state
 	stop(): void;
+
+	/**
+	 * Synchronously restore terminal modes from a process `exit` handler when stop() did not run.
+	 * Writes `before`, then this terminal's own mode resets, then `after`.
+	 */
+	restoreOnExit?(before: string, after: string): void;
 
 	/**
 	 * Drain stdin before exiting to prevent Kitty key release events from
@@ -542,7 +556,7 @@ export class ProcessTerminal implements Terminal {
 	private forwardInputSequence(sequence: string): void {
 		if (!this.inputHandler) return;
 		const shouldDetectNativeShiftEnter =
-			sequence === "\r" && (isAppleTerminalSession() || process.platform === "win32");
+			isNativeShiftEnterCandidate(sequence) && (isAppleTerminalSession() || process.platform === "win32");
 		const input = normalizeNativeShiftEnterInput(
 			sequence,
 			shouldDetectNativeShiftEnter,
@@ -679,6 +693,23 @@ export class ProcessTerminal implements Terminal {
 		this.started = false;
 	}
 
+	restoreOnExit(before: string, after: string): void {
+		let sequence = before;
+		// X059: `paused` has no heartbeat interval while its OSC 9;4 state is
+		// still painted, so the interval-only predicate would leak it past exit.
+		if (this.progressState !== "clear") sequence += TERMINAL_PROGRESS_CLEAR_SEQUENCE;
+		sequence += "\x1b[?2004l";
+		if (this.keyboardProtocolPushed || this._kittyProtocolActive) sequence += "\x1b[<u";
+		if (this._modifyOtherKeysActive) sequence += "\x1b[>4;0m";
+		sequence += after;
+		try {
+			// process.stdout.write() may be asynchronous (e.g. Windows TTYs) and would not flush during exit.
+			fs.writeSync(process.stdout.fd, sequence);
+		} catch {
+			// The terminal may already be gone.
+		}
+	}
+
 	write(data: string): void {
 		process.stdout.write(data);
 		if (this.writeLogPath) {
@@ -730,8 +761,9 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	setTitle(title: string): void {
-		// OSC 0;title BEL - set terminal window title
-		process.stdout.write(`\x1b]0;${title}\x07`);
+		// OSC 0;title BEL - set terminal window title. A BEL or ESC in the title would end the sequence early and
+		// send the rest to the terminal as escape sequences (session names come from session files).
+		process.stdout.write(`\x1b]0;${replaceControlCharacters(title)}\x07`);
 	}
 
 	setProgramStatus(status: ProgramStatus): void {

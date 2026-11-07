@@ -37,6 +37,13 @@ describe("normalizeNativeShiftEnterInput", () => {
 		assert.equal(normalizeNativeShiftEnterInput("\r", true, true), "\x1b[13;2u");
 	});
 
+	it("rewrites ESC+CR to CSI-u Shift+Enter when Shift is pressed", () => {
+		// #11559
+		assert.equal(normalizeNativeShiftEnterInput("\x1b\r", true, true), "\x1b[13;2u");
+		assert.equal(normalizeNativeShiftEnterInput("\x1b\r", true, false), "\x1b\r");
+		assert.equal(normalizeNativeShiftEnterInput("\x1b\r", false, true), "\x1b\r");
+	});
+
 	it("leaves Return unchanged when native Shift detection is disabled", () => {
 		assert.equal(normalizeNativeShiftEnterInput("\r", false, true), "\r");
 	});
@@ -1229,6 +1236,26 @@ describe("ProcessTerminal resize listener (dsh-pi-tui divergence X016)", () => {
 				Reflect.deleteProperty(process.stdin, "setRawMode");
 			}
 			setKittyProtocolActive(false);
+		}
+	});
+});
+
+describe("ProcessTerminal title", () => {
+	it("replaces control characters so the title cannot end the OSC sequence", () => {
+		const terminal = new ProcessTerminal();
+		const writes: string[] = [];
+		const previousWrite = process.stdout.write;
+
+		process.stdout.write = ((chunk: string | Uint8Array) => {
+			writes.push(String(chunk));
+			return true;
+		}) as typeof process.stdout.write;
+
+		try {
+			terminal.setTitle("pi - work\x07\x1b]52;c;Zm9v\x07\u009b2J - repo");
+			assert.deepEqual(writes, ["\x1b]0;pi - work ]52;c;Zm9v 2J - repo\x07"]);
+		} finally {
+			process.stdout.write = previousWrite;
 		}
 	});
 });

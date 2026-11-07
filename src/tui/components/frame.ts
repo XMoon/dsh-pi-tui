@@ -49,6 +49,15 @@ export class Frame implements Component {
   }
 
   /**
+   * The mounted unit owns the fork's viewport-key capture: a private child that
+   * captures PageUp/PageDown must reach the dispatcher through this frame, or
+   * the transcript would preempt the visible list's own page navigation.
+   */
+  get capturesViewportInput(): boolean | undefined {
+    return this.child.capturesViewportInput
+  }
+
+  /**
    * Transparent mouse wrapper (v0.85.1 mouse integration): translate the
    * event into the child's content box (borders + one padding cell each
    * side) and forward. The gesture target is rewritten to THIS frame — the

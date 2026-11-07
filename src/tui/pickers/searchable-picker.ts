@@ -229,6 +229,9 @@ export interface SearchablePickerOptions {
 }
 
 export class SearchablePicker implements Component, Focusable {
+  /** The picker owns tui.select.pageUp/pageDown itself: a mounted picker must
+   *  keep those keys instead of letting the background transcript scroll. */
+  readonly capturesViewportInput = true
   private items: SearchablePickerItem[] = []
   private filteredItems: SearchablePickerItem[] = []
   /**

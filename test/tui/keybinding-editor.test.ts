@@ -10,7 +10,7 @@ import { KeybindingEditorPanel, KeybindingEditorUnavailablePanel } from '../../s
 import { KeyRecorder } from '../../src/tui/keybindings/ui/recorder.ts'
 import type { KeybindingMutationResult } from '../../src/tui/keybindings/ui/controller.ts'
 import { buildKeybindingEditorModel } from '../../src/tui/keybindings/ui/model.ts'
-import { CURSOR_MARKER, visibleWidth } from '@xmoon76/pi-tui'
+import { CURSOR_MARKER, stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import { mountEmbeddedPage } from '../support/embedded-page-harness.ts'
 
 
@@ -24,7 +24,8 @@ afterEach(() => {
 })
 
 function plain(text: string): string {
-  return text.replace(/\x1b\[[0-9;]*m/g, '')
+  // U1 fake-cursor markers are terminal sequences too; strip the full set.
+  return stripTerminalSequences(text)
 }
 
 function makePanel(onClose: () => void) {

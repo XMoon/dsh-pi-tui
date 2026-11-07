@@ -9,7 +9,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { CURSOR_MARKER, TuiAltScreen, visibleWidth } from '@xmoon76/pi-tui'
+import { CURSOR_MARKER, stripTerminalSequences, Text, TuiAltScreen, visibleWidth } from '@xmoon76/pi-tui'
 import {
   SearchablePicker,
   type SearchablePickerTheme,
@@ -664,7 +664,9 @@ test('search Input click repositions the search cursor (mouse parity)', () => {
   const result = picker.handleMouse(mouse('press', 3, 0, 80, 10))
   assert.ok(result?.handled, 'press on the search row must be handled')
   picker.handleInput('X')
-  const rendered = picker.render(80).map(line => line.replace(/\x1b\[[0-9;]*m/gu, ''))
+  // The U1 fake cursor is a zero-width APC around the cursor cell; stripping
+  // only SGR would leave its marker inside the asserted text.
+  const rendered = picker.render(80).map(line => stripTerminalSequences(line))
   assert.ok(rendered.some(line => line.includes('aXb')), 'typing after the click must insert at the clicked filter column')
 })
 
@@ -1057,4 +1059,35 @@ test('a custom multiline hint projects to ONE physical row', () => {
     assert.ok(visibleWidth(row) <= 80, `a hint row exceeds the grant: ${JSON.stringify(row)}`)
   }
   assert.ok(rows.some(row => row.includes('foo bar')), `the collapsed hint must render:\n${rows.join('\n')}`)
+})
+
+/**
+ * Reachability: the picker mounted as the FOCUSED COMPONENT (not an overlay)
+ * must keep PageDown/PageUp, exactly like the fork's SelectList. The capture
+ * comes from the focused picker, not from mounting it: the same key with no
+ * focused capturer still scrolls the transcript.
+ */
+test('a focused picker mounted as a component keeps page keys and the transcript stays fixed', async () => {
+  const terminal = new VirtualTerminal(40, 8)
+  const tui = new TuiAltScreen(terminal)
+  tui.addChild(new Text(Array.from({ length: 30 }, (_, index) => `line ${index + 1}`).join('\n'), 0, 0))
+  const items = Array.from({ length: 10 }, (_, index) => ({ value: `v${index}`, label: `item ${index}` }))
+  const picker = new SearchablePicker(items, 3, testTheme, {}, { enableSearch: false })
+  tui.addChild(picker)
+  tui.setFocus(picker)
+  tui.start()
+  await terminal.waitForRender()
+  const top = tui.viewportTop
+  const before = picker.getSelectedIndex()
+
+  terminal.sendInput('\x1b[6~')
+  await terminal.waitForRender()
+  assert.equal(picker.getSelectedIndex(), before + 3, 'PageDown advances the focused picker')
+  assert.equal(tui.viewportTop, top, 'the background transcript must not scroll')
+
+  tui.setFocus(null)
+  terminal.sendInput('\x1b[5~')
+  await terminal.waitForRender()
+  assert.ok(tui.viewportTop < top, 'without a focused capturer the same key still scrolls the transcript')
+  tui.stop()
 })

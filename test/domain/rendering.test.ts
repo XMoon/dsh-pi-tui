@@ -5445,3 +5445,20 @@ test('a width-clipped ANSI/CJK folded preview keeps exactly ONE hidden-content m
   assert.equal(tool.result, raw, 'the raw result is untouched')
   app.stop()
 })
+
+test('a bare URL stops before a balanced full-width parenthetical at the assistant transcript sink', async () => {
+  const { vt, app, writes } = startAppWithWrites(100)
+  const source = '见 https://example.com/issues/521（说明） 的说明'
+  const message: TranscriptMessage = { kind: 'assistant', turn: 0, text: source }
+  app.setTranscript([message])
+  await vt.waitForRender()
+
+  const stream = writes.join('')
+  assert.ok(stream.includes('\u001b]8;;https://example.com/issues/521\u001b\\'),
+    'the OSC 8 target stops before the full-width parenthesis')
+  assert.ok(!/\u001b\]8;;[^\u001b]*（/.test(stream), 'no hyperlink target contains CJK punctuation')
+  const painted = vt.getViewport().join('')
+  assert.ok(painted.includes('（说明）'), 'the following parenthetical stays visible and unlinked')
+  assert.equal(message.text, source, 'the display projection never rewrites the raw transcript text')
+  app.stop()
+})
