@@ -2237,7 +2237,11 @@ export const runWebProductQualification = async context => {
               `WP-11 the C1 model issued ${String(write2Proof.length)} second write calls, expected exactly 1`)
             assert(write2Proof[0].nonce === changesNonce
               && write2Proof[0].userText.includes(`w5-changes2-${changesNonce}`),
-            'WP-11 the second model write proof belongs to another session/prompt')
+            `WP-11 the second model write proof belongs to another prompt (nonce=${String(write2Proof[0].nonce)})`)
+            assert(durableOf(wp11Session).filter(event => event.type === 'user/message'
+              && event.data?.source?.kind === 'user'
+              && JSON.stringify(event).includes(`w5-changes2-${changesNonce}`)).length === 1,
+            'WP-11 the second write prompt was not committed as exactly one authored user message')
             const secondTurnEvents = durableOf(wp11Session).filter(event => event.data?.turn === wp11Turn2)
             const secondWriteCalls = secondTurnEvents.filter(event => event.type === 'tool/call' && event.data?.name === 'write')
             assert(secondWriteCalls.length === 1,
