@@ -3,17 +3,17 @@
  "baseline": {
   "repository": "earendil-works/pi",
   "package": "packages/tui",
-  "tag": "v1.1.0",
-  "commit": "abe508e1b89912adde45528136c3221eb69acdd7"
+  "tag": "v1.5.0",
+  "commit": "f9a26365568127461c47a07a37dcb42c140a3ac5"
  },
  "verification": {
-  "auditedAt": "2026-10-11",
-  "branch": "chore/div-retire-c-collapse-tail",
-  "auditedSourceCommit": "653a2aab4ea00de2e4056f6774d21bd216848917",
+  "auditedAt": "2026-11-07",
+  "branch": "chore/pi-tui-v1.5.0-revendor",
+  "auditedSourceCommit": "9d6079af46deb29a92a85b589679b28e9984d09b",
   "referenceSnapshots": {
    "upstream": {
     "repository": "earendil-works/pi",
-    "commit": "abe508e1b89912adde45528136c3221eb69acdd7"
+    "commit": "f9a26365568127461c47a07a37dcb42c140a3ac5"
    },
    "kimi": {
     "repository": "MoonshotAI/kimi-code",
@@ -28,7 +28,11 @@
    "Validated against the immutable source snapshot recorded in verification.auditedSourceCommit.",
    "Post-PR272 DIV retirement audit (PR A): X027 and X049 were retired by product decision, their fork hunks deleted and packages/pi-tui/src/autocomplete.ts plus src/alt-screen-search.ts restored to the pinned v1.1.0 blobs byte-for-byte; both records describe the post-retirement reality, including the deliberate loss of the retired local behavior.",
    "Post-PR272 DIV retirement audit (PR B): X038 was retired by product decision — src/paste-burst.ts deleted, the Editor paste-burst state/option/setter/feeds and the Enter-suppression branch removed — and the record describes the post-retirement reality, including the deliberate loss of the lost-marker paste fallback; true bracketed paste and X037 submit remapping stay intact.",
-   "Post-PR272 DIV retirement audit (PR C): X057 was retired by product decision — the dedicated expanded-user tail control row (its hit slot, height rule, mount branch and renderer), the painted-frame copyBlankRows cache and the fork copy-source seam were deleted together — and the record describes the post-retirement reality, including the deliberate loss of the tail label and its copy filter."
+   "Post-PR272 DIV retirement audit (PR C): X057 was retired by product decision — the dedicated expanded-user tail control row (its hit slot, height rule, mount branch and renderer), the painted-frame copyBlankRows cache and the fork copy-source seam were deleted together — and the record describes the post-retirement reality, including the deliberate loss of the tail label and its copy filter.",
+   "v1.5.0 diff-first re-vendor: froze main at 41e2c1a31eb41526cbd2b969f60cd8ff8b3c8d6a, extracted the exact U0 (v1.1.0, abe508e1b89912adde45528136c3221eb69acdd7) and U1 (v1.5.0, f9a26365568127461c47a07a37dcb42c140a3ac5) trees from the upstream Git checkout, ran a per-file `git merge-file -p --diff3 U1 U0 L` for all 16 bilateral source files, classified every local source hunk (KEEP_AUTO / KEEP_RECONCILE / REMOVE_HISTORICAL / RETIRE_CANDIDATE), and reconciled the textual conflicts against the upstream implementation, the fork contract and its callers.",
+   "Every source-active record was re-verified at v1.5.0 against the extracted U1 tree: its local hunk is present in the candidate source, its upstream comparison was re-run against v1.5.0, and its listed guarding tests pass on the candidate (fork package lane and the Host product lane).",
+   "X031 was superseded by an explicit Owner product decision: the fork CjkBoundaryUrlTokenizer and its balanced-full-width-parenthesis rule were deleted, the official v1.5.0 MarkdownTokenizer bare-URL punctuation boundary is the sole policy, and the intentionally changed visible behavior is recorded instead of claiming semantic equivalence.",
+   "Host compatibility was migrated with the minimum edits: synchronous Terminal.restoreOnExit forwarding in the two graphics facades, the derived Frame viewport-capture getter, the Host SearchablePicker page-key ownership flag, and marked-cjk-friendly as a root runtime dependency of the bundled fork."
   ],
   "notes": [
    "The v0.85.1 baseline (c505f4c19 'fix(tui): remove coding-agent config reads from pi-tui') had already removed the PI_HARDWARE_CURSOR / PI_CLEAR_ON_SHRINK / PI_CODING_AGENT_DIR environment knobs that existed in v0.84.4; the fork follows upstream (hardcoded defaults, constructor parameters remain the contract). Guarded by the showHardwareCursor constructor-parameter test in tui-alt-screen.test.ts.",
@@ -36,7 +40,9 @@
    "PR #272 closure: X008 (full-query serialization) is SUPERSEDED and the narrow OSC 11 observation took its place (X060). The upstream full-query implementation and its tests are used verbatim; the host no longer issues the full transaction.",
    "PR A closure: X027 (fd trailing-separator-independent directory typing) and X049 (fork built-in fullscreen search query-Input mouse forwarding) are REMOVED_UNUSED. The surviving host surfaces are the upstream provider path and the host-owned TranscriptSearchComponent, whose routing is pinned by test/transcript-search-interaction.test.ts.",
    "PR B closure: X038 (PasteBurst non-bracketed paste fallback and its opt-out API) is REMOVED_UNUSED. Rapid plain typing followed by a submit key now submits normally; real bracketed paste, X004A paste markers, X004B undo/redo and the X037 editor-owned submit binding are unchanged and still covered.",
-   "PR C closure: X057 (copy-source line filter for host presentation chrome) is REMOVED_UNUSED. The expanded long-user message is collapsed by a plain click on its BODY in every surface, no `▴ Collapse` chrome is painted, the copy source is the real transcript content, and Ctrl+O keeps its existing ownership."
+   "PR C closure: X057 (copy-source line filter for host presentation chrome) is REMOVED_UNUSED. The expanded long-user message is collapsed by a plain click on its BODY in every surface, no `▴ Collapse` chrome is painted, the copy source is the real transcript content, and Ctrl+O keeps its existing ownership.",
+   "v1.5.0 re-vendor: U1 adds APC fake-cursor markers resolved by the renderers, Component.capturesViewportInput, synchronous Terminal.restoreOnExit process-exit restoration, OSC 133 filtering, Markdown block/Text caching plus marked-cjk-friendly, Kitty clipping, and fragmented terminal replies. The fork keeps its X### contracts (X005 latest-wins autocomplete, X016/X066 teardown, X018/X042/X052 focus and mouse identity, X058 viewport passthrough, X059/X060/X071 status and background ownership, X067-X074 image lifecycles, X010 fragmented-input cap, X021 ANSI close, X035 main-screen cache); U1's new focus capture joins the existing dispatcher after the X058 passthrough allowlist, and U1's Kitty scan bound is integrated without retiring the SIXEL reservation.",
+   "X031 is SUPERSEDED (semantic equivalence NO) by the 2026-11-07 Owner decision: a bare URL now terminates at the first CJK punctuation character, including full-width parentheses; explicit Markdown links and angle autolinks still carry punctuation, and raw Session/copy text is never rewritten."
   ]
  },
  "categoryDefinitions": {
@@ -319,8 +325,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/components/select-list.ts"
@@ -346,7 +352,7 @@
     ]
    },
    "audit": {
-    "lastAuditedAt": "2026-09-07",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -421,8 +427,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/components/select-list.ts"
@@ -446,7 +452,7 @@
     ]
    },
    "audit": {
-    "lastAuditedAt": "2026-09-07",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -506,8 +512,8 @@
     "equivalence": "YES",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/components/editor.ts"
@@ -527,7 +533,7 @@
     ]
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -599,8 +605,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/components/editor.ts"
@@ -617,7 +623,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-11",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -689,8 +695,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/components/editor.ts",
@@ -707,7 +713,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-11",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -782,8 +788,8 @@
     "equivalence": "PARTIAL",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/components/editor.ts"
@@ -800,7 +806,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-11",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -870,8 +876,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/word-navigation.ts"
@@ -887,7 +893,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-11",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -984,8 +990,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/tui.ts",
@@ -1008,7 +1014,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-11",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -1083,8 +1089,8 @@
     "equivalence": "YES",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/tui.ts",
@@ -1112,7 +1118,7 @@
     ]
    },
    "audit": {
-    "lastAuditedAt": "2026-10-11",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -1182,8 +1188,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/tui-main-screen.ts"
@@ -1199,7 +1205,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-11",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -1268,8 +1274,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/stdin-buffer.ts"
@@ -1285,7 +1291,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-11",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -1357,8 +1363,8 @@
     "equivalence": "YES",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/components/input.ts"
@@ -1378,7 +1384,7 @@
     ]
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -1447,8 +1453,8 @@
     "equivalence": "YES",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/fuzzy.ts",
@@ -1473,7 +1479,7 @@
     ]
    },
    "audit": {
-    "lastAuditedAt": "2026-09-07",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -1533,8 +1539,8 @@
     "equivalence": "YES",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/components/loader.ts"
@@ -1554,7 +1560,7 @@
     ]
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -1628,8 +1634,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/layout.ts"
@@ -1646,7 +1652,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-11",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -1713,8 +1719,8 @@
     "equivalence": "YES",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/keys.ts"
@@ -1734,7 +1740,7 @@
     ]
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -1811,8 +1817,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/terminal.ts"
@@ -1829,7 +1835,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-11",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -1900,8 +1906,8 @@
     "equivalence": "YES",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/tui-main-screen.ts",
@@ -1922,7 +1928,7 @@
     ]
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -2040,8 +2046,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/tui-alt-screen.ts"
@@ -2057,7 +2063,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-11",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -2131,8 +2137,8 @@
     "equivalence": "PARTIAL",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/components/text.ts",
@@ -2158,7 +2164,7 @@
     ]
    },
    "audit": {
-    "lastAuditedAt": "2026-09-07",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -2233,8 +2239,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/components/editor.ts"
@@ -2250,7 +2256,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-11",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -2323,8 +2329,8 @@
     "equivalence": "PARTIAL",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/utils.ts",
@@ -2342,7 +2348,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-11",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -2416,8 +2422,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/components/editor.ts"
@@ -2433,7 +2439,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-11",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -2515,8 +2521,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/components/editor.ts"
@@ -2533,7 +2539,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-11",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -2608,8 +2614,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/tui-alt-screen.ts"
@@ -2626,7 +2632,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-11",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -2702,8 +2708,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/native-module-path.ts",
@@ -2721,7 +2727,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-11",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -2794,8 +2800,8 @@
     "equivalence": "YES",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/tui-alt-screen.ts"
@@ -2817,7 +2823,7 @@
     ]
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -2880,8 +2886,8 @@
     "equivalence": "YES",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/autocomplete.ts"
@@ -2902,7 +2908,7 @@
     ]
    },
    "audit": {
-    "lastAuditedAt": "2026-10-11",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -2995,8 +3001,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/tui-alt-screen.ts",
@@ -3014,7 +3020,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-11",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -3090,8 +3096,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/components/editor.ts"
@@ -3107,7 +3113,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-11",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -3180,8 +3186,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/index.ts",
@@ -3199,7 +3205,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-11",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -3213,7 +3219,7 @@
   },
   "X031": {
    "title": "CJK URL boundary tokenizer",
-   "status": "ACTIVE",
+   "status": "SUPERSEDED",
    "category": [
     "BUGFIX_MISSING_UPSTREAM"
    ],
@@ -3221,77 +3227,83 @@
    "files": [
     "src/components/markdown.ts"
    ],
-   "why": "Marked GFM autolinks can absorb CJK or full-width punctuation after a bare URL. The tokenizer cuts at the first boundary while keeping balanced full-width parentheses in the URL.",
+   "why": "Marked GFM autolinks can absorb CJK or full-width punctuation after a bare URL. The official v1.5.0 MarkdownTokenizer stops the bare URL at that first punctuation character. The Owner explicitly retired the previous fork rule that kept a balanced full-width parenthetical inside the bare URL, so the visible loss is deliberate and recorded, not an equivalence claim.",
    "changedSurface": [
-    "CjkBoundaryUrlTokenizer URL token boundary logic",
-    "Markdown parser extension registration"
+    "retired: fork CjkBoundaryUrlTokenizer/full-width balanced-parenthesis rule",
+    "replacement: upstream MarkdownTokenizer.url CJK punctuation boundary"
    ],
    "dependencies": {
     "vendorInternal": {
      "audited": true,
      "items": [
-      "Markdown parser tokenizers and rendered link nodes share the boundary result."
+      "The Markdown component now registers the official v1.5.0 MarkdownTokenizer; no fork tokenizer class remains."
      ],
-     "notes": "The change is inside the fork Markdown component."
+     "notes": "The whole custom tokenizer and its parser registration were deleted; the file matches the pinned v1.5.0 blob."
     },
     "inheritanceStructural": {
      "audited": true,
      "items": [
-      "Markdown component wraps marked output without a host subclass override."
+      "Markdown wraps marked output without a host subclass override."
      ],
-     "notes": "No structural consumer found beyond the component path."
+     "notes": "No structural consumer found beyond the component path; the replacement is the official tokenizer inside the same component."
     },
     "host": {
      "audited": true,
      "items": [
       "TranscriptFolder output and message renderers display Markdown containing CJK URLs."
      ],
-     "notes": "transcript.ts emits message/fold data; package Markdown and host renderers perform wrapping and display. Host transcript content supplies the real punctuation cases."
+     "notes": "The Host transcript renders the component output; the production-shaped /issues/521（说明） case is proved at the real TuiApp transcript sink."
     },
     "publicExtension": {
      "audited": true,
      "items": [
       "Public Markdown component/render path consumes marked tokens."
      ],
-     "notes": "Rendered href/text are observable."
+     "notes": "Rendered href/text remain observable; the OSC 8 target stops before the CJK punctuation."
     },
     "behavioral": {
      "audited": true,
      "items": [
-      "CJK punctuation is not included in bare URL href/text",
-      "balanced full-width parentheses remain eligible",
-      "ordinary Latin URLs retain marked behavior"
+      "bare URLs stop at the first CJK punctuation character, including full-width parentheses",
+      "explicit Markdown links and angle autolinks still carry CJK punctuation",
+      "raw Session/copy source text is not rewritten"
      ],
-     "notes": "A generic URL tokenizer with a similar name is not enough without boundary semantics."
+     "notes": "Owner-approved visible change: a bare URL with balanced full-width parentheses now terminates before the parenthesis."
     }
    },
    "tests": [
-    "packages/pi-tui/test/markdown.test.ts: CJK and full-width punctuation after bare URLs",
-    "test/rendering.test.ts: transcript Markdown rendering"
+    "packages/pi-tui/test/markdown.test.ts: official v1.5.0 CJK punctuation matrix over bare URLs, CJK paths, explicit links and angle autolinks",
+    "packages/pi-tui/test/markdown.test.ts: the production-shaped /issues/521（说明） target stops at the parenthesis and the following text stays visible",
+    "test/domain/rendering.test.ts: the real assistant transcript sink emits the same OSC 8 target and keeps the raw Session text unchanged"
    ],
    "upstream": {
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/components/markdown.ts"
     ],
     "relevantIssues": [],
-    "semanticDelta": "Both the pinned baseline and the audited upstream reference marked configuration does not contain the CJK boundary tokenizer; the old landed-upstream note was incorrect."
+    "semanticDelta": "U1 official tokenizer truncates bare URLs at the first CJK punctuation; prior local implementation admitted matched full-width parentheses. Owner approved the changed visible behavior; semantic equivalence NO."
    },
    "retirement": {
     "conditions": [
-     "Retire only when upstream or the Markdown owner provides equivalent CJK/full-width URL boundary and balanced-parenthesis behavior.",
-     "Run Markdown link and transcript rendering tests."
+     "Remove custom tokenizer, keep official parser, prove OSC8 and preservation of following visible text, run package/root/typecheck/ledger/diff gates"
     ],
-    "replacementMapping": [],
-    "evidence": []
+    "replacementMapping": [
+     "fork bare-URL balanced-fullwidth tokenizer -> official MarkdownTokenizer.url (packages/pi-tui/src/components/markdown.ts), selected U1 bare-URL punctuation behavior; tests: packages/pi-tui/test/markdown.test.ts upstream CJK punctuation/OSC8 and /issues/521（说明）"
+    ],
+    "evidence": [
+     "Deletion: findCjkUrlBoundary/CjkBoundaryUrlTokenizer and their markdownParser registration were removed; packages/pi-tui/src/components/markdown.ts now equals the pinned v1.5.0 blob (strict vendor diff gate).",
+     "Tests: the official URL matrix and the /issues/521（说明） OSC8 regression pass in the fork package lane; the assistant transcript sink test proves the same target through TuiApp and leaves the raw Session text unchanged.",
+     "Owner decision (2026-11-07 execution plan): retire X031 and adopt the official bare-URL punctuation behavior, accepting that balanced full-width parentheses in a bare URL leave the link target."
+    ]
    },
    "audit": {
-    "lastAuditedAt": "2026-10-11",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -3300,7 +3312,7 @@
      "behavioral",
      "tests"
     ],
-    "notes": "Both the pinned baseline and the audited upstream reference source were checked; no issue closure was treated as absorption."
+    "notes": "The pinned v1.5.0 MarkdownTokenizer was read directly, the old fork hunk is absent from the candidate, and the official behavior is proved by the URL matrix plus the production-shaped OSC8 sink test. X031 is SUPERSEDED by Owner decision, not absorbed upstream."
    }
   },
   "X032": {
@@ -3364,8 +3376,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/tui.ts"
@@ -3381,7 +3393,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-11",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -3455,8 +3467,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/tui-main-screen.ts"
@@ -3473,7 +3485,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-11",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -3546,8 +3558,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/components/editor.ts"
@@ -3563,7 +3575,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-11",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -3646,8 +3658,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/tui-main-screen.ts",
@@ -3666,7 +3678,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-11",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -3740,8 +3752,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/tui-alt-screen.ts"
@@ -3757,7 +3769,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-11",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -3840,8 +3852,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/keybindings.ts",
@@ -3859,7 +3871,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-11",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -3926,8 +3938,8 @@
     "equivalence": "YES",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/components/editor.ts"
@@ -3949,7 +3961,7 @@
     ]
    },
    "audit": {
-    "lastAuditedAt": "2026-10-11",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -4021,8 +4033,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/utils.ts"
@@ -4039,7 +4051,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-11",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -4117,8 +4129,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/components/input.ts",
@@ -4135,7 +4147,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-11",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -4216,8 +4228,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/components/select-list.ts",
@@ -4244,7 +4256,7 @@
     ]
    },
    "audit": {
-    "lastAuditedAt": "2026-09-07",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -4332,8 +4344,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/components/select-list.ts",
@@ -4358,7 +4370,7 @@
     ]
    },
    "audit": {
-    "lastAuditedAt": "2026-10-11",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -4437,8 +4449,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/tui-alt-screen.ts"
@@ -4455,7 +4467,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-11",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -4535,8 +4547,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/components/editor.ts"
@@ -4553,7 +4565,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-11",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -4630,8 +4642,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/components/editor.ts"
@@ -4648,7 +4660,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-11",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -4723,8 +4735,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/tui.ts"
@@ -4741,7 +4753,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-11",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -4818,8 +4830,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/keys.ts",
@@ -4838,7 +4850,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-11",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -4910,8 +4922,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/components/input.ts"
@@ -4927,7 +4939,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-11",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -4990,8 +5002,8 @@
     "equivalence": "YES",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/alt-screen-search.ts"
@@ -5012,7 +5024,7 @@
     ]
    },
    "audit": {
-    "lastAuditedAt": "2026-10-11",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -5091,8 +5103,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/components/editor.ts"
@@ -5108,7 +5120,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-11",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -5193,8 +5205,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/tui.ts",
@@ -5211,7 +5223,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-11",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -5287,7 +5299,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-11",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -5309,8 +5321,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/components/select-list.ts"
@@ -5383,8 +5395,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/components/input.ts"
@@ -5400,7 +5412,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-11",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -5492,8 +5504,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/tui-alt-screen.ts"
@@ -5509,7 +5521,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-11",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -5590,8 +5602,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/components/scroll-view.ts"
@@ -5607,7 +5619,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-11",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -5740,8 +5752,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/tui.ts"
@@ -5758,7 +5770,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-11",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -5822,8 +5834,8 @@
     "equivalence": "YES",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/tui-alt-screen.ts"
@@ -5845,7 +5857,7 @@
     ]
    },
    "audit": {
-    "lastAuditedAt": "2026-10-11",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -5935,8 +5947,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/tui.ts",
@@ -5953,7 +5965,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-11",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -6065,8 +6077,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/terminal.ts"
@@ -6082,7 +6094,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-11",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -6163,8 +6175,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/tui.ts",
@@ -6182,7 +6194,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-11",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -6263,8 +6275,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/components/settings-list.ts"
@@ -6281,7 +6293,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-14",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -6364,8 +6376,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/components/editor.ts"
@@ -6382,7 +6394,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-14",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -6460,8 +6472,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/components/settings-list.ts"
@@ -6478,7 +6490,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-14",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -6570,8 +6582,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "packages/tui/src/components/editor.ts",
@@ -6589,7 +6601,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-24",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -6666,8 +6678,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "notes": "Upstream keeps the registrar internal to its image component; a host that owns its own graphics lifecycle has no way to register geometry.",
     "relevantFiles": [
@@ -6686,7 +6698,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-27",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -6758,8 +6770,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "src/tui.ts",
@@ -6776,7 +6788,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-27",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -6863,8 +6875,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "src/layout.ts",
@@ -6881,7 +6893,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-27",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -6974,8 +6986,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "src/tui.ts",
@@ -6992,7 +7004,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-27",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -7070,8 +7082,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "src/terminal-image.ts"
@@ -7087,7 +7099,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-28",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -7168,8 +7180,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "src/tui-alt-screen.ts"
@@ -7185,7 +7197,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-28",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -7267,8 +7279,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "src/terminal.ts"
@@ -7285,7 +7297,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-29",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -7374,8 +7386,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "src/terminal-image.ts",
@@ -7393,7 +7405,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-29",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -7482,8 +7494,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "src/tui-main-screen.ts"
@@ -7500,7 +7512,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-29",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -7592,8 +7604,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "src/tui-alt-screen.ts",
@@ -7611,7 +7623,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-29",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -7690,8 +7702,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
-     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
     },
     "relevantFiles": [
      "src/components/editor.ts"
@@ -7708,7 +7720,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-11-03",
+    "lastAuditedAt": "2026-11-07",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
