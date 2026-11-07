@@ -63,6 +63,7 @@ interface Harness {
   view: () => string
   switched: string[]
   switchScopes: Array<import('../../src/app/session/scope.ts').SessionScope | undefined>
+  notices: Array<{ text: string; kind: string }>
 }
 
 /** Mount the command surface with an injectable sessionReader. */
@@ -71,12 +72,19 @@ function harness(
   size: { readonly columns: number; readonly rows: number } = { columns: 80, rows: 24 },
   switchOutcome?: (id: string) => Promise<SessionSwitchOutcome>,
   nativePresentation?: SessionBrowserPresentation,
+  currentSessionId?: string,
 ): Harness {
   const ctx = new Context()
   const vt = new VirtualTerminal(size.columns, size.rows)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
   startedApps.add(app)
+  const notices: Array<{ text: string; kind: string }> = []
+  const recordNotify = app.notify.bind(app)
+  app.notify = (text, kind = 'info') => {
+    notices.push({ text, kind })
+    recordNotify(text, kind)
+  }
   const defs: { name: string; handler?: unknown }[] = []
   const commands = {
     register: (def: { name: string; handler?: unknown }): (() => void) => {
@@ -88,7 +96,11 @@ function harness(
     execute: async () => undefined,
   }
   ctx.provide('commands', commands as never)
-  const state: { agent: Agent | undefined } = { agent: undefined }
+  const state: { agent: Agent | undefined } = {
+    agent: currentSessionId === undefined
+      ? undefined
+      : { session: { id: currentSessionId } } as unknown as Agent,
+  }
   const switched: string[] = []
   const switchScopes: Array<import('../../src/app/session/scope.ts').SessionScope | undefined> = []
   const runner: TuiCommandRunner = {
@@ -203,6 +215,7 @@ function harness(
     view: () => vt.getViewport().join('\n'),
     switched,
     switchScopes,
+    notices,
   }
 }
 
@@ -695,4 +708,171 @@ test('a cancelled PiTui direct switch settles the resume command instead of hang
   const result = h.runResume('target') as Promise<{ kind: string; text?: string }>
   assert.deepEqual(await result, { kind: 'error', text: 'resume cancelled' },
     'a cancelled switch must settle the awaiting resume rather than leave it pending')
+})
+
+// ── M5-U-B: the Picker renders the shared SessionBrowserReadOwner snapshot ──
+// The physical Picker closes itself BEFORE `onSelect` runs (vendored
+// `openCategorizedPicker`), so the command-level switch result and the stale
+// fence are the only owners of the terminal feedback. These tests exercise the
+// REAL PiTui Presenter (no injected native presentation).
+
+const interactiveRows = (): Array<{ id: string; updatedAt: number; cwd: string; live: boolean }> => [
+  { id: 'session-target', updatedAt: 20, cwd: '/ws', live: false },
+  { id: 'session-other', updatedAt: 10, cwd: '/ws', live: false },
+]
+
+test('an interactive selection closes the Picker and reports its failed switch exactly once (UB-08/UB-13)', async (t) => {
+  let resolveSwitch!: (outcome: SessionSwitchOutcome) => void
+  const gate = new Promise<SessionSwitchOutcome>(resolve => { resolveSwitch = resolve })
+  const h = harness({
+    list: async () => interactiveRows(),
+    search: async () => ({ items: [], hasMore: false }),
+    projectionBatch: async () => new Map(),
+    blank: () => undefined, measureContext: () => undefined,
+    turnOutline: () => undefined,
+    sessionStatus: () => undefined,
+  }, undefined, () => gate)
+  t.after(() => h.app.stop())
+
+  await h.runSessions()
+  await waitUntil(() => h.view().includes('target'))
+  h.vt.sendInput('\r')
+  await h.vt.waitForRender()
+  assert.ok(!h.view().includes('Current directory'), 'the Picker physically closes on select')
+  assert.deepEqual(h.switched, ['session-target'], 'the accepted intent dispatches the real switch once')
+
+  // The overlay is gone, but the command operation still owns its final result.
+  resolveSwitch({ kind: 'failed', message: 'session open failed: lease held' })
+  await waitUntil(() => h.notices.some(notice => notice.text.includes('lease held')))
+  assert.equal(
+    h.notices.filter(notice => notice.text.includes('lease held')).length,
+    1,
+    'the closed Picker keeps exactly one owner for the real failure notice',
+  )
+  await h.vt.waitForRender()
+  assert.ok(!h.view().includes('Current directory'), 'a failed switch never resurrects the closed Picker')
+  assert.deepEqual(h.switched, ['session-target'], 'a failed switch never retries by itself')
+})
+
+test('an interactive selection that commits ends without an error notice', async (t) => {
+  const h = harness({
+    list: async () => interactiveRows(),
+    search: async () => ({ items: [], hasMore: false }),
+    projectionBatch: async () => new Map(),
+    blank: () => undefined, measureContext: () => undefined,
+    turnOutline: () => undefined,
+    sessionStatus: () => undefined,
+  })
+  t.after(() => h.app.stop())
+
+  await h.runSessions()
+  await waitUntil(() => h.view().includes('target'))
+  h.vt.sendInput('\r')
+  await waitUntil(() => h.switched.length === 1)
+  await new Promise<void>(resolve => setImmediate(resolve))
+  await h.vt.waitForRender()
+  assert.ok(!h.view().includes('Current directory'), 'the committed selection ends the Picker')
+  assert.deepEqual(h.notices, [], 'a committed switch is not an error')
+})
+
+test('Enter on the current Session row never starts a switch', async (t) => {
+  const rows = [
+    { id: 'session-currentrow', updatedAt: 20, cwd: '/ws', live: true },
+    { id: 'session-otherrow', updatedAt: 10, cwd: '/ws', live: false },
+  ]
+  const h = harness({
+    list: async () => rows,
+    search: async () => ({ items: [], hasMore: false }),
+    projectionBatch: async () => new Map(),
+    blank: () => undefined, measureContext: () => undefined,
+    turnOutline: () => undefined,
+    sessionStatus: () => undefined,
+  }, undefined, undefined, undefined, 'session-currentrow')
+  t.after(() => h.app.stop())
+
+  await h.runSessions()
+  await waitUntil(() => h.view().includes('otherrow'))
+  assert.ok(h.view().includes('● currentr'), 'the captured current Session carries the marker')
+  h.vt.sendInput('\r')
+  await h.vt.waitForRender()
+  assert.deepEqual(h.switched, [], 'the current Session row is a no-op, never a resume')
+  assert.ok(!h.view().includes('Current directory'), 'that no-op still closes the Picker')
+})
+
+test('a manual query edit during the listing supersedes the typed /resume direct match (UB-07)', async (t) => {
+  const rows = interactiveRows()
+  let resolveList!: (value: Array<{ id: string; updatedAt: number; cwd: string; live: boolean }>) => void
+  const h = harness({
+    list: () => new Promise<Array<{ id: string; updatedAt: number; cwd: string; live: boolean }>>(resolve => { resolveList = resolve }),
+    search: async () => ({ items: [], hasMore: false }),
+    projectionBatch: async () => new Map(),
+    blank: () => undefined, measureContext: () => undefined,
+    turnOutline: () => undefined,
+    sessionStatus: () => undefined,
+  })
+  t.after(() => h.app.stop())
+
+  const result = h.runResume('target') as Promise<{ kind: string; text?: string }>
+  await h.vt.waitForRender()
+  h.vt.sendInput('zzz')
+  await h.vt.waitForRender()
+  assert.ok(h.view().includes('resume · Search results'),
+    'the live edit enters the search projection while the list still pends')
+  resolveList(rows)
+  await new Promise<void>(resolve => setTimeout(resolve, 400))
+  assert.deepEqual(h.switched, [], 'a user-edited query must suppress the typed direct switch')
+  await h.vt.sendInput('\x1b')
+  await h.vt.waitForRender()
+  assert.deepEqual(await result, { kind: 'success' },
+    'the unmatched typed resume falls through to the filtered picker')
+})
+
+test('/resume never switches to a subagent-only target', async (t) => {
+  const h = harness({
+    list: async () => [
+      { id: 'session-childonly', updatedAt: 20, cwd: '/ws', origin: 'subagent' as const, live: false },
+    ],
+    search: async () => ({ items: [], hasMore: false }),
+    projectionBatch: async () => new Map(),
+    blank: () => undefined, measureContext: () => undefined,
+    turnOutline: () => undefined,
+    sessionStatus: () => undefined,
+  })
+  t.after(() => h.app.stop())
+
+  const result = await (h.runResume('childonly') as Promise<{ kind: string; text?: string }>)
+  await h.vt.waitForRender()
+  assert.deepEqual(result, { kind: 'success' }, 'the subagent target becomes the initial query, not a switch')
+  assert.deepEqual(h.switched, [], 'a subagent row never participates in Resume')
+  assert.ok(h.view().includes('Search results'), 'the unmatched target stays in the SAME picker')
+})
+
+test('a late listing from a superseded open never repaints the new Picker', async (t) => {
+  let resolveFirst!: (value: Array<{ id: string; updatedAt: number; cwd: string; live: boolean }>) => void
+  let calls = 0
+  const h = harness({
+    list: () => {
+      calls += 1
+      if (calls === 1) {
+        return new Promise<Array<{ id: string; updatedAt: number; cwd: string; live: boolean }>>(resolve => { resolveFirst = resolve })
+      }
+      return Promise.resolve([{ id: 'session-freshrow', updatedAt: 20, cwd: '/ws', live: false }])
+    },
+    search: async () => ({ items: [], hasMore: false }),
+    projectionBatch: async () => new Map(),
+    blank: () => undefined, measureContext: () => undefined,
+    turnOutline: () => undefined,
+    sessionStatus: () => undefined,
+  })
+  t.after(() => h.app.stop())
+
+  await h.runSessions()
+  await h.vt.waitForRender()
+  await h.runSessions()
+  await waitUntil(() => h.view().includes('freshrow'))
+  resolveFirst([{ id: 'session-stalerow', updatedAt: 30, cwd: '/ws', live: false }])
+  await new Promise<void>(resolve => setImmediate(resolve))
+  await h.vt.waitForRender()
+  assert.ok(!h.view().includes('stalerow'), 'the superseded listing must never repaint the new Picker')
+  assert.ok(h.view().includes('freshrow'), 'the new Picker keeps its own roster')
 })

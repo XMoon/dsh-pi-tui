@@ -657,6 +657,16 @@ question answer, approval, cancel, open, retain or create, owns no Client
 workspace/question/approval store and keeps no cross-session cache.
 `SessionReader` remains the ONE Session-listing authority.
 
+- **Browser read lifecycle.** Every renderer's Session Browser presents the ONE
+  renderer-neutral `SessionBrowserReadOwner` over `SessionReader.list()`,
+  `projectionBatch()` and `search()`; the renderer owns only its physical
+  Presenter seat (the PiTui modal picker, the native TSP picker) and keeps no
+  second roster, query generation, search timer or reader. An accepted Resume
+  carries the captured `SessionScope` into
+  `SessionRuntime.switchSessionOutcome(target, expectedScope)`, and only its
+  settled `committed` outcome is success — an accepted intent, a matched row or
+  a closed Presenter is not.
+
 - **Roster.** `readActivity(rows, signal)` consumes exactly the main rows the
   caller obtained from `SessionReader.list()`; it never lists, refreshes or
   probes an alternative corpus, and a `subagent` child row is excluded. It adds

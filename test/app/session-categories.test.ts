@@ -14,10 +14,12 @@ import {
   buildSessionTree,
   sessionLabelParts,
   sessionPickerItem,
+  sessionSearchItem,
   type SessionPickerItem,
   type SessionPickerRow,
 } from '../../src/tui/pickers/sessions.ts'
-import { sessionPickerCategories } from '../../src/commands.ts'
+import { sessionPickerCategories, sessionSearchCategory } from '../../src/commands.ts'
+import type { SessionBrowserSearchResult } from '../../src/app/command/session-browser-presentation.ts'
 import { MARQUEE_STEP_MS } from '../../src/tui/components/marquee.ts'
 import type { PickerCategory } from '../../src/tui-app.ts'
 import { TuiApp } from '../../src/tui-app.ts'
@@ -177,7 +179,7 @@ test('the All category keeps ordinary forks flat and badges only historical meta
   const plainItem = (row: SessionPickerRow, indent = 0): { value: string; label: string; description: string; group: string } =>
     sessionPickerItem(row, '', indent)
   const categories = sessionPickerCategories(
-    [
+    () => [
       { id: 'session-parent', createdAt: 5, updatedAt: 5, cwd: '/ws', live: false },
       { id: 'session-legacy', createdAt: 4, updatedAt: 4, cwd: '/ws', parentSession: 'session-parent', live: false },
       { id: 'session-new', createdAt: 3, updatedAt: 3, cwd: '/ws', live: false },
@@ -218,7 +220,7 @@ const plainItem = (row: SessionPickerRow): { value: string; label: string; descr
   sessionPickerItem(row, '')
 
 test('sessionPickerCategories scopes Current to the workspace and never shows subagents', () => {
-  const categories = sessionPickerCategories(pickerRows, '/ws/project-a', 'sessions', plainItem)
+  const categories = sessionPickerCategories(() => pickerRows, '/ws/project-a', 'sessions', plainItem)
   assert.deepEqual(categories.map(category => category.label), ['Current directory', 'All directories'],
     'the old Main/Subagents/All triad is gone')
   assert.equal(categories[0]!.header, 'sessions · Current directory')
@@ -238,7 +240,7 @@ test('sessionPickerCategories scopes Current to the workspace and never shows su
 })
 
 test('sessionPickerCategories treats a trailing-slash cwd as the same workspace', () => {
-  const categories = sessionPickerCategories(pickerRows, '/ws/project-a/', 'sessions', plainItem)
+  const categories = sessionPickerCategories(() => pickerRows, '/ws/project-a/', 'sessions', plainItem)
   const currentIds = categories[0]!.items().map(row => row.value).sort()
   assert.deepEqual(currentIds, ['session-current-1', 'session-current-2'],
     `/ws/project-a/ scopes the same sessions as /ws/project-a:\n${JSON.stringify(currentIds)}`)
@@ -247,7 +249,7 @@ test('sessionPickerCategories treats a trailing-slash cwd as the same workspace'
 test('the Current category keeps ordinary forks and orphans flat', () => {
   const treeItem = (row: SessionPickerRow, indent = 0): SessionPickerItem => sessionPickerItem(row, '', indent)
   const categories = sessionPickerCategories(
-    [
+    () => [
       { id: 'session-parent', createdAt: 4, updatedAt: 4, cwd: '/ws', live: false },
       { id: 'session-legacy', createdAt: 3, updatedAt: 3, cwd: '/ws', parentSession: 'session-parent', live: false },
       { id: 'session-other-cwd', createdAt: 2, updatedAt: 2, cwd: '/other', parentSession: 'session-parent', live: false },
@@ -877,4 +879,73 @@ test('a synchronous switch to a later external category reports the seed from th
   assert.ok(view.includes('zulu'), `membership must reflect the reported query:\n${view}`)
   assert.ok(!view.includes('alpha'), `a non-matching row must stay hidden:\n${view}`)
   handle.close()
+})
+
+// ── M5-U-B: the search category is a pure projection of the owner snapshot ──
+
+test('the search category renders exactly the read owner’s merged results, never re-filtering them', () => {
+  const results: SessionBrowserSearchResult[] = [
+    {
+      row: { id: 'session-beta', updatedAt: 1, cwd: '/other', live: false },
+      source: 'Content',
+      snippet: 'host excerpt without the literal term',
+    },
+    {
+      row: { id: 'session-alpha', updatedAt: 2, cwd: '/ws', title: 'the alpha title', live: false },
+      source: 'Metadata',
+    },
+  ]
+  const category = sessionSearchCategory({
+    header: 'sessions',
+    results: () => results,
+    hasRoster: () => true,
+    itemFor: result => sessionSearchItem(
+      result.row,
+      '',
+      0,
+      result.snippet === undefined ? undefined : { snippet: result.snippet },
+    ),
+  })
+  assert.equal(category.id, 'search')
+  assert.equal(category.header, 'sessions · Search results')
+  assert.equal(category.externalFilter, true, 'the owner’s results ARE the membership')
+  assert.equal(category.cyclable, false, 'Tab never leaves global search while a query is active')
+  const items = category.items()
+  assert.deepEqual(items.map(item => item.value), ['session-beta', 'session-alpha'],
+    'the owner’s Host page order is both the membership and the rendered order')
+  assert.ok((items[0]!.description ?? '').includes('host excerpt without the literal term'),
+    'a Host hit whose snippet lacks the query literal is rendered, not substring-filtered out')
+})
+
+test('the search category shows a status row only while the browse roster is empty', () => {
+  const category = sessionSearchCategory({
+    header: 'sessions',
+    results: () => [],
+    hasRoster: () => false,
+    itemFor: result => sessionPickerItem(result.row, ''),
+    placeholder: () => ({ value: '', label: 'Loading sessions…', description: '', group: '' }),
+  })
+  assert.deepEqual(category.items().map(item => item.label), ['Loading sessions…'],
+    'an empty roster shows the shared status row, never a fake result')
+})
+
+test('an empty result set with a non-empty roster is a real no-match state', () => {
+  const category = sessionSearchCategory({
+    header: 'sessions',
+    results: () => [],
+    hasRoster: () => true,
+    itemFor: result => sessionPickerItem(result.row, ''),
+    placeholder: () => ({ value: '', label: 'Loading sessions…', description: '', group: '' }),
+  })
+  assert.deepEqual(category.items(), [],
+    'no result may be invented from the roster and no status row may mask a real no-match')
+})
+
+test('sessionPickerCategories reads the live roster on every activation', () => {
+  let roster: SessionPickerRow[] = [{ id: 'session-one', updatedAt: 2, cwd: '/ws', live: false }]
+  const categories = sessionPickerCategories(() => roster, '/ws', 'sessions', row => sessionPickerItem(row, ''))
+  assert.deepEqual(categories[1]!.items().map(item => item.value), ['session-one'])
+  roster = [{ id: 'session-two', updatedAt: 1, cwd: '/ws', live: false }]
+  assert.deepEqual(categories[1]!.items().map(item => item.value), ['session-two'],
+    'the category must read the current snapshot rows, not a captured array')
 })

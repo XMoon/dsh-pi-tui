@@ -1859,7 +1859,6 @@ export function registerTuiCommands(
     app: app as TuiApp,
     registerOne,
     registerTuiCommand,
-    detach,
     recordCommandDraftDisposition,
     newSessionId,
     notify,

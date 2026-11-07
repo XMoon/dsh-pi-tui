@@ -1,7 +1,7 @@
 /** Read-owner orchestration for the internal, read-only Session Browser. */
 import { scheduler } from 'node:timers/promises'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
-import { runOwned } from '../../runtime/process/tasks.ts'
+import { cancellationError, runOwned } from '../../runtime/process/tasks.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import type {
   SessionContentSearchPage,
@@ -369,7 +369,14 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
 
   const startList = (panel: ActiveRead): void => {
     if (!isActive(panel)) return
-    runOwned('session browser list', () => options.reader.list(panel.subject.currentSessionId, panel.controller.signal), {
+    runOwned('session browser list', async () => {
+      // The presented panel gets one REAL event-loop turn (not a microtask):
+      // its loading frame must be painted and focused before any Host read can
+      // settle into it (the shared input-first ordering for both renderers).
+      await scheduler.yield()
+      if (cancellation(panel)) throw cancellationError('session browser list cancelled')
+      return options.reader.list(panel.subject.currentSessionId, panel.controller.signal)
+    }, {
       diag: options.diag,
       sessionId: options.sessionId,
       isCancellation: () => cancellation(panel),
