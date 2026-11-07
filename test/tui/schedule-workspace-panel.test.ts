@@ -192,9 +192,10 @@ test('the narrow action bar keeps the essential keys and puts Esc last (D8)', ()
   const lines = harness(LIST, { columns: 60, rows: 12 }).plain()
   const bar = lines[lines.length - 1]
   assert.ok(bar !== undefined, 'the narrow frame paints an action bar')
-  for (const token of ['Enter', 'n', '/', 'Esc']) {
+  for (const token of ['Enter', 'n', '/', 'Esc close']) {
     assert.ok(bar.includes(token), `the narrow bar keeps \"${token}\": ${JSON.stringify(bar)}`)
   }
+  assert.match(bar, /\bEnter\b/u, `the Enter affordance survives narrow truncation: ${JSON.stringify(bar)}`)
   const escAt = bar.indexOf('Esc')
   assert.ok(escAt > 0 && bar.trimEnd().endsWith('close'), `Esc is the LAST segment: ${JSON.stringify(bar)}`)
 })
@@ -211,7 +212,6 @@ for (const size of [{ columns: 44, rows: 20 }, { columns: 80, rows: 10 }, { colu
     view.panel.handleInput('\r')
     assert.deepEqual(view.dispatches, [{ kind: 'move', delta: 1 }, { kind: 'open-detail' }])
     view.panel.handleInput('\x1b')
-    assert.equal(view.closeCount(), undefined === undefined ? view.closeCount() : 0)
     assert.equal(view.closeCount(), 1, 'Esc still closes the workspace at the list root')
   })
 }
@@ -669,6 +669,17 @@ test('the RRULE field edits real MULTI-LINE raw text (Enter inserts a line)', ()
   const lines = view.plain()
   assert.ok(lines.some(line => line.includes('DTSTART;TZID=UTC:20260101T090000')))
   assert.ok(lines.some(line => line.includes('RRULE:FREQ=DAILY')), `the second stored line is painted as its own row:\n${lines.join('\n')}`)
+  // A terminal bracketed paste inserts its payload (newlines included) verbatim.
+  view.resetDispatches()
+  view.setSnapshot(workspace({ mode: 'editor', editor: draft({
+    timing: { kind: 'rrule', rrule: 'A' },
+    timingEdited: true,
+    focused: 3,
+  }) }))
+  view.panel.handleInput('\x1b[200~DTSTART:20260101T090000\nRRULE:FREQ=DAILY\x1b[201~')
+  const pasted = view.dispatches[0]
+  assert.equal(pasted?.kind, 'set-field')
+  assert.equal(pasted?.kind === 'set-field' ? pasted.value : '', 'ADTSTART:20260101T090000\nRRULE:FREQ=DAILY')
 })
 
 test('? opens Help from Detail, History and the Editor, not only the list', () => {

@@ -73,6 +73,12 @@ export interface ScheduleEditorDraft {
   readonly advanced: boolean
   /** The focused field index within {@link editorFields}. */
   readonly focused: number
+  /** Per-kind LAST typed timing values, so switching kind away and back never
+   *  resets the user's rule to a default. */
+  readonly timingMemory?: Readonly<Partial<Record<ScheduleTimingKind, ScheduleTimingDraft>>>
+  /** Per-kind LAST target values, so switching target away and back preserves
+   *  the chosen Session / creation values. */
+  readonly targetMemory?: Readonly<Partial<Record<ScheduleTargetKind, ScheduleTargetDraft>>>
 }
 
 /** The default new-task timing: a daily wall-clock reminder in UTC. UTC is

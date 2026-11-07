@@ -1821,7 +1821,7 @@ test('the built-in command decomposition preserves the exact primary set and reg
     services.registered.filter(name => !ALIASES.has(name)),
     [
       'exit', 'reload-client', 'settings', 'web', 'footer', 'display', 'focus', 'sessions', 'skill', 'reload', 'model',
-      'new', 'tasks', 'plugins', 'yolo', 'preset', 'search', 'title', 'copy', 'attach', 'view-image',
+      'new', 'tasks', 'schedule', 'plugins', 'yolo', 'preset', 'search', 'title', 'copy', 'attach', 'view-image',
       'export', 'transcript', 'deliverables', 'fork', 'rewind', 'login', 'logout', 'help', 'keybindings',
     ],
   )
@@ -1838,6 +1838,7 @@ test('the built-in command decomposition preserves the exact primary set and reg
     'model',
     'new',
     'tasks', 'subagents',
+    'schedule',
     'plugins',
     'yolo', 'preset',
     'search',
