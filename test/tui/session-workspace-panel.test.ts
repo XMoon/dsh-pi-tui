@@ -598,6 +598,33 @@ test('an id-derived header/row label is sanitized like every other Host value', 
   assert.ok(view.includes('Hostile id row'), 'the readable title still paints')
 })
 
+test('two same-title same-cwd same-age Sessions keep distinct stable ids and resume targets', async () => {
+  const shared = { updatedAt: 3_000, cwd: '/app/service', live: false }
+  const h = harness({ columns: 44, rows: 24 })
+  h.handle.setSnapshot(snapshot({
+    rows: [row(CURRENT, 3_000, { ...shared, title: 'Fix pipeline' }), row(OTHER, 3_000, { ...shared, title: 'Fix pipeline' })],
+  }))
+  await h.paint()
+  for (const width of [44, 80, 120] as const) {
+    h.vt.resize(width, 24)
+    await h.paint()
+    const view = h.view()
+    assert.ok(view.includes('current-') && view.includes('other-se'),
+      `${width} columns: both stable short ids are painted:\n${view}`)
+    assert.equal(view.split('\n').filter(line => line.includes('Fix pipeline')).length, 2,
+      `${width} columns: both same-title rows remain painted:\n${view}`)
+    for (const line of h.vt.getViewport()) {
+      assert.ok(visibleWidth(line) <= width, `${width} columns: a row overflows: ${JSON.stringify(line)}`)
+    }
+  }
+  // The two rows remain different activation identities, not two copies of the
+  // same painted label.
+  h.vt.sendInput('\x1b[B')
+  h.vt.sendInput('\r')
+  await h.paint()
+  assert.deepEqual(h.resumes, [OTHER], 'the second same-title row resumes its own Session id')
+})
+
 test('a long cwd or Host snippet never squeezes the Session identity out of a row', async () => {
   const longCwd = '/very/long/shared/workspace/path/with/a/deep/project-alpha'
   const alpha = row(CURRENT, 3_000, { title: 'Alpha session', cwd: longCwd })

@@ -128,6 +128,21 @@ function rowColumns(titleWidth: number, width: number): { readonly identity: num
   return { identity, meta }
 }
 
+/** Compose the row IDENTITY: the stable short Session id always precedes the
+ *  title (a title alone can repeat across Sessions whose id, cwd and age are
+ *  otherwise identical). The id stays visible; the title uses the remaining
+ *  identity cells and yields to the id, never the reverse. */
+function identityText(shortId: string, title: string | undefined, selected: boolean): string {
+  if (title === undefined || title === '') return color.textDim(shortId)
+  const paintedTitle = selected ? color.textStrong(title) : color.text(title)
+  return `${color.textDim(shortId)}  ${paintedTitle}`
+}
+
+/** The visible text width of the identity composition (title + stable id). */
+function identityWidth(shortId: string, title: string | undefined): number {
+  return title === undefined || title === '' ? visibleWidth(shortId) : visibleWidth(shortId) + 2 + visibleWidth(title)
+}
+
 /** Pad one already-truncated column to its exact cell budget. */
 function padColumn(text: string, cells: number): string {
   const padding = cells - visibleWidth(text)
@@ -793,14 +808,14 @@ export class SessionWorkspacePanel implements Component {
     const current = row.id === this.options.currentSessionId
     const marker = selected ? color.primary('> ') : '  '
     const currentMark = current ? color.success('● ') : ''
-    const title = row.title === undefined ? sanitizedPhysicalLine(shortSessionId(row.id)) : sanitizedPhysicalLine(row.title)
+    const shortId = sanitizedPhysicalLine(shortSessionId(row.id))
+    const title = row.title === undefined ? undefined : sanitizedPhysicalLine(row.title)
     const meta = [
       color.textMuted(formatSessionAge(row.updatedAt)),
       color.textDim(workspaceKey(row.cwd)),
     ].join(color.textMuted(' · '))
-    const columns = rowColumns(visibleWidth(title), width)
-    const clipped = truncateToWidth(title, columns.identity, '…', false)
-    const label = selected ? color.textStrong(clipped) : color.text(clipped)
+    const columns = rowColumns(identityWidth(shortId, title), width)
+    const label = truncateToWidth(identityText(shortId, title, selected), columns.identity, '…', false)
     const secondary = columns.meta > 0 ? truncateToWidth(meta, columns.meta, '…', false) : ''
     return fit(
       `${marker}${currentMark}${padColumn(label, columns.identity)}${secondary === '' ? '' : `  ${secondary}`}`,
@@ -813,16 +828,16 @@ export class SessionWorkspacePanel implements Component {
     const current = row.id === this.options.currentSessionId
     const marker = selected ? color.primary('> ') : '  '
     const currentMark = current ? color.success('● ') : ''
-    const title = row.title === undefined ? sanitizedPhysicalLine(shortSessionId(row.id)) : sanitizedPhysicalLine(row.title)
+    const shortId = sanitizedPhysicalLine(shortSessionId(row.id))
+    const title = row.title === undefined ? undefined : sanitizedPhysicalLine(row.title)
     const source = result.source === 'Both' ? 'metadata+content' : result.source.toLowerCase()
     const meta = [
       color.textMuted(`${source} · ${formatSessionAge(row.updatedAt)}`),
       color.textDim(workspaceKey(row.cwd)),
     ].join(color.textMuted(' · '))
     const snippet = result.snippet === undefined ? '' : ` · …${sanitizedPhysicalLine(result.snippet)}…`
-    const columns = rowColumns(visibleWidth(title), width)
-    const clipped = truncateToWidth(title, columns.identity, '…', false)
-    const label = selected ? color.textStrong(clipped) : color.text(clipped)
+    const columns = rowColumns(identityWidth(shortId, title), width)
+    const label = truncateToWidth(identityText(shortId, title, selected), columns.identity, '…', false)
     const secondary = columns.meta > 0 ? truncateToWidth(`${meta}${snippet}`, columns.meta, '…', false) : ''
     return fit(
       `${marker}${currentMark}${padColumn(label, columns.identity)}${secondary === '' ? '' : `  ${secondary}`}`,
