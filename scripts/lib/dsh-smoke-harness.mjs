@@ -473,7 +473,7 @@ export function writeHeaderProbePackage(workDir) {
   return probeDir
 }
 
-export function writePromptQualificationPackage(workDir, llmModulePath) {
+export function writePromptQualificationPackage(workDir, dshVersion) {
   const packageName = 'dsh-pi-tui-prompt-qualification'
   const probeDir = join(workDir, 'prompt-qualification')
   mkdirSync(probeDir, { recursive: true })
@@ -484,6 +484,7 @@ export function writePromptQualificationPackage(workDir, llmModulePath) {
     main: 'index.mjs',
     exports: { '.': './index.mjs' },
     files: ['index.mjs', 'cordis.patch.yml'],
+    dependencies: { '@deepseek-ai/dsh-llm': dshVersion },
     dsh: { bundle: { patch: './cordis.patch.yml' } },
   }, null, 2) + '\n', 'utf8')
   writeFileSync(join(probeDir, 'cordis.patch.yml'), [
@@ -499,7 +500,7 @@ export function writePromptQualificationPackage(workDir, llmModulePath) {
   ].join('\n'), 'utf8')
   writeFileSync(join(probeDir, 'index.mjs'), [
     "import { appendFileSync } from 'node:fs'",
-    `import { LlmAdapter } from ${JSON.stringify(llmModulePath)}`,
+    "import { LlmAdapter } from '@deepseek-ai/dsh-llm'",
     `export const name = '${packageName}'`,
     "export const inject = ['llm']",
     'const evidencePath = process.env.DSH_SMOKE_PROMPT_EVIDENCE',
