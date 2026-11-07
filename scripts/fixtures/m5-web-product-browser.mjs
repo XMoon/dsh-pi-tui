@@ -1172,6 +1172,28 @@ async function dragSelectText(page, text) {
   return page.evaluate(() => document.getSelection()?.toString() ?? '')
 }
 
+/** The number of official turn-completion lines the conversation paints. */
+async function completedTurnCount(page) {
+  return page.evaluate(() => (document.body.innerText.match(/Completed in/gu) ?? []).length)
+}
+
+/**
+ * Wait until a NEW official turn-completion line is painted. The Web client
+ * applies the ORDERED Session event stream, and a turn's `workspace/changes`
+ * event (when one exists) is appended BEFORE its `turn/end`; observing this
+ * turn's completion therefore proves every earlier event of the turn has
+ * already been applied.
+ */
+async function waitCompletedTurn(page, before, timeoutMs) {
+  const deadline = Date.now() + timeoutMs
+  let count = await completedTurnCount(page)
+  while (count <= before && Date.now() < deadline) {
+    await page.waitForTimeout(150)
+    count = await completedTurnCount(page)
+  }
+  return count
+}
+
 /** Every changed-files card the conversation currently paints. */
 async function changedCards(page) {
   return page.evaluate(() => [...document.querySelectorAll('[data-changed-files]')]
@@ -1677,24 +1699,27 @@ const cases = {
 
     // ── W5-CHANGES negative: a tool-active Turn with NO file change paints no card.
     const cardsBefore = (await changedCards(page)).length
+    const completedBefore = await completedTurnCount(page)
     const noChangeMarker = `w5-nochange-${changesNonce}`
     await promptAndWait(page, noChangeMarker, 'w5-nochange answer')
-    // The rendered card list is not the authority: wait for the runner's
-    // durable turn/end + no-new-`workspace/changes` settlement, then hold a
-    // bounded observation window. A fixed sleep alone would not prove absence.
+    // The rendered card list is not the authority: the runner waits for the
+    // durable turn/end AND proves no `workspace/changes` event was appended.
     driverFact('nochange-prompted', {})
     await waitSignal('nochange-settled')
-    const stableUntil = Date.now() + 3_000
-    let cardsAfter = await changedCards(page)
-    while (cardsAfter.length === cardsBefore && Date.now() < stableUntil) {
-      await page.waitForTimeout(250)
-      cardsAfter = await changedCards(page)
+    // Official render barrier, not a fixed sleep: this turn's completion line
+    // proves the ordered event stream was applied through its `turn/end`, so a
+    // changed-files event for the turn (which would precede `turn/end`) cannot
+    // still be pending in the client.
+    const completedAfter = await waitCompletedTurn(page, completedBefore, 30_000)
+    if (completedAfter <= completedBefore) {
+      throw new Error('the no-change Turn never rendered its official completion state')
     }
+    const cardsAfter = await changedCards(page)
     if (cardsAfter.length !== cardsBefore) {
       throw new Error(`a no-change Turn painted ${String(cardsAfter.length - cardsBefore)} new changed-files card(s)`)
     }
     await screenshot(page, 'no-change-turn')
-    driverFact('nochange', { cardsBefore, cardsAfter: cardsAfter.length })
+    driverFact('nochange', { cardsBefore, cardsAfter: cardsAfter.length, completedBefore, completedAfter })
     step('no-false-changed-files-card', true, { cardsBefore })
   },
   /** WP-10: the honest visible-feature inventory. */
