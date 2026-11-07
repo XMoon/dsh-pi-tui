@@ -176,7 +176,10 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   sample, and a sample the current open no longer owns is inert. `running`,
   `pending` and `attentionSourceState` keep their own provenance: `running:
   undefined` is `Running unknown`, never idle, and `unknown`/`unavailable`/
-  `denied` are distinct visible states, never `No pending`.
+  `denied` are distinct visible states, never `No pending`. A `Working` row
+  keeps its unproved pending state visible beside the running fact
+  (`Pending unknown · Working`, `Pending denied · Working`), never a bare
+  `Working`.
 - **Answerability is a gate, not a classification.** Only a pending candidate
   this Client can really answer may enter `Needs attention`: a live forwarded
   Question/Approval invocation held by the Client-root delivery owner
@@ -186,7 +189,10 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   with `Pending unverified`; it is never a Needs row, never answerable from the
   list, and never retried. `readActivity.attention` is a candidate, not
   permission, and the answer itself always happens after the Session is
-  committed, through the surface's existing Question/Approval owner.
+  committed, through the surface's existing Question/Approval owner. Every
+  Activity sample and every eligibility change applies in the SAME frame: a
+  revoked answerability immediately leaves `Needs attention` and its count,
+  because a classification is a fact and not a deferred animation.
 - **One Workspace scope union.** `All workspaces`, `Current workspace`, every
   official Workspace in `follow` order and `Unassigned` are the only options,
   chosen in place from the header (no second screen). `Current` is proved only
@@ -210,7 +216,11 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   running, pending, source) and nothing else: no Agent, no Question/Approval
   form, no Session `open`/`retain`, no writer and no Host call. `Esc` returns to
   the previous focus with the same selection, scope, query and scroll; `Enter`
-  still has to pass the read owner's eligibility/currentness before any switch.
+  opens the PINNED Session and still has to pass the read owner's
+  eligibility/currentness before any switch. The Peek is pinned to ITS Session
+  id: if a roster/search refresh no longer lists that Session, the Peek exits to
+  its previous focus and the list re-anchors on a listed row — it never silently
+  shows, or switches to, a different Session.
 - **Focus ring and layout.** `Tab`/`Shift+Tab` cycle list → Workspace selector →
   search editor → list without submitting or consuming a literal `/`. From
   `112x12` the frame is two columns: the list keeps at least 44 cells, a
@@ -223,16 +233,20 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   the `w`/`/ Search` header hints, the Peek back affordance and the
   outside-attention line. A click acts only on the SAME frame revision and the
   SAME target range as its press; any scroll, resize, scope, search, Activity or
-  content change between press and release drops the gesture. A plain row click
+  content change between press and release drops the gesture. A hit region uses
+  the SAME cell budget as the paint, so a header hint the frame clipped (for
+  example `[w]` behind a long Workspace label) has no region and can never take
+  a click from the affordance that is really painted. A plain row click
   only selects — `Enter` stays the only Resume verb — and an item the frame did
   not paint has no hit region at all.
 - **One lifecycle.** Each open keeps exactly one Workspace follow, one roster
   read owner, one Activity sample generation and one fullscreen lease. The close
   path aborts list/search/Activity, disposes the follow once, stops the screen
   once and restores the return surface once; a late result from any of the three
-  sources can never paint into a newer open. An Activity re-order is held while
-  the user is actively browsing and commits on an idle cursor, re-anchoring the
-  scroll on the selected Session id rather than on a stale index.
+  sources can never paint into a newer open. An Activity update never moves the
+  cursor to another Session: the selection is preserved by Session id and the
+  scroll anchor by the visible row id, so the user keeps browsing the same row
+  while the groups and statuses repaint truthfully.
 
 Authority: `TuiApp.openSessionWorkspace` + `SessionWorkspacePanel`,
 `buildSessionWorkspaceView` (the ONE pure classifier), `SessionBrowserReadOwner`,
