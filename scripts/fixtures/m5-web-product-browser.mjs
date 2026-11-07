@@ -1200,6 +1200,10 @@ async function waitCompletedTurn(page, before, timeoutMs) {
  */
 async function readClipboardPng(page) {
   return page.evaluate(async () => {
+    const sha = async value => {
+      const digest = await crypto.subtle.digest('SHA-256', value)
+      return [...new Uint8Array(digest)].map(item => item.toString(16).padStart(2, '0')).join('')
+    }
     try {
       const items = await navigator.clipboard.read()
       for (const item of items) {
@@ -1207,9 +1211,23 @@ async function readClipboardPng(page) {
         const blob = await item.getType('image/png')
         const bytes = new Uint8Array(await blob.arrayBuffer())
         const signature = bytes.length >= 8 && [137, 80, 78, 71, 13, 10, 26, 10].every((value, index) => bytes[index] === value)
-        const digest = await crypto.subtle.digest('SHA-256', bytes)
-        const sha256 = [...new Uint8Array(digest)].map(value => value.toString(16).padStart(2, '0')).join('')
-        return { ok: true, type: 'image/png', bytes: bytes.length, pngSignature: signature, sha256 }
+        // The stable contract is the DECODED image, not the byte encoding:
+        // Chromium is free to re-encode the PNG on the clipboard.
+        const bitmap = await createImageBitmap(blob)
+        const canvas = new OffscreenCanvas(bitmap.width, bitmap.height)
+        const context = canvas.getContext('2d')
+        context.drawImage(bitmap, 0, 0)
+        const rgba = context.getImageData(0, 0, bitmap.width, bitmap.height).data
+        return {
+          ok: true,
+          type: 'image/png',
+          bytes: bytes.length,
+          pngSignature: signature,
+          sha256: await sha(bytes),
+          width: bitmap.width,
+          height: bitmap.height,
+          pixelSha256: await sha(rgba),
+        }
       }
       return { ok: false, reason: 'no image/png clipboard item' }
     } catch (error) {
@@ -1723,8 +1741,29 @@ const cases = {
     const copied = await waitForClipboardPng(page, 15_000)
     if (copied.ok !== true) throw new Error(`Copy image put no PNG on the clipboard: ${JSON.stringify(copied)}`)
     if (copied.pngSignature !== true) throw new Error('the clipboard image/png is not a real PNG')
-    result.copyImage = { ...copied, labels: imageLabels }
-    driverFact('copy-image', { ...copied, labels: imageLabels })
+    // Equivalence is pixel-level: Chromium may re-encode the PNG bytes.
+    const source = await image.evaluate(async element => {
+      const response = await fetch(element.src, { cache: 'no-store' })
+      const blob = await response.blob()
+      const bitmap = await createImageBitmap(blob)
+      const canvas = new OffscreenCanvas(bitmap.width, bitmap.height)
+      const context = canvas.getContext('2d')
+      context.drawImage(bitmap, 0, 0)
+      const rgba = context.getImageData(0, 0, bitmap.width, bitmap.height).data
+      const digest = await crypto.subtle.digest('SHA-256', rgba)
+      return {
+        width: bitmap.width,
+        height: bitmap.height,
+        pixelSha256: [...new Uint8Array(digest)].map(item => item.toString(16).padStart(2, '0')).join(''),
+      }
+    })
+    const pixelsEqual = source.width === copied.width && source.height === copied.height
+      && source.pixelSha256 === copied.pixelSha256
+    if (!pixelsEqual) {
+      throw new Error(`the clipboard PNG pixels differ from the source image: clipboard ${JSON.stringify(copied)} source ${JSON.stringify(source)}`)
+    }
+    result.copyImage = { ...copied, source, pixelsEqual, labels: imageLabels }
+    driverFact('copy-image', { ...copied, source, pixelsEqual, labels: imageLabels })
 
     // Chromium's permission type behind the clipboard API is
     // `clipboardReadWrite`; the Chrome "denied" setting is a real browser
