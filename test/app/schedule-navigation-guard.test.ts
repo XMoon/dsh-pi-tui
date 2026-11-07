@@ -151,3 +151,48 @@ test('a real panel row click cannot discard a dirty editor without confirmation'
     controller.dispose()
   }
 })
+
+test('a stale list-frame action cannot open a new editor over a dirty draft', async () => {
+  const controller = new ScheduleWorkspaceController({
+    port: new StubPort(),
+    sessionReader,
+    runOwned: (_label, task) => { void task() },
+  })
+  const panel = new ScheduleWorkspacePanel({
+    snapshot: () => controller.snapshot(),
+    dispatch: intent => controller.dispatch(intent),
+    requestRender: () => {},
+    rows: () => 40,
+    columns: () => 120,
+    close: () => {},
+  })
+  try {
+    controller.open()
+    await flush()
+    // Paint the LIST frame: it carries the clickable New [N] and the rows.
+    panel.setSnapshot(controller.snapshot())
+    const listLines = panel.render(120)
+    const newRow = listLines.findIndex(line => line.includes('New [N]'))
+    assert.ok(newRow >= 0, `the list frame paints New [N]:\n${listLines.join('\n')}`)
+    const newColumn = listLines[newRow]!.indexOf('New [N]') + 2
+    const taskBRow = listLines.findIndex(line => line.includes('Task B'))
+    assert.ok(taskBRow >= 0)
+
+    // A real dirty editor is now the current page, but the panel still holds the
+    // LIST frame (the next paint has not happened yet).
+    controller.dispatch({ kind: 'open-detail', id: 'task-a' })
+    await flush()
+    controller.dispatch({ kind: 'open-edit' })
+    await flush()
+    controller.dispatch({ kind: 'set-field', fieldId: 'prompt', value: 'dirty draft' })
+    panel.setSnapshot(controller.snapshot())
+
+    panel.onCellClick(newColumn, newRow)
+    panel.onCellClick(3, taskBRow)
+    assert.equal(controller.snapshot().mode, 'editor', 'stale LIST actions do not leave the dirty editor')
+    assert.equal(controller.snapshot().editor?.prompt, 'dirty draft')
+    assert.equal(controller.snapshot().confirm, undefined, 'no confirmation was bypassed or invented')
+  } finally {
+    controller.dispose()
+  }
+})

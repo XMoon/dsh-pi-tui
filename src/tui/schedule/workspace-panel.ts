@@ -166,6 +166,10 @@ interface PaintedFrame {
   readonly width: number
   readonly height: number
   readonly regions: readonly PaintedRegion[]
+  /** The page this frame was painted for: a click on a frame from another mode
+   *  (or another confirmation identity) is stale and must do nothing. */
+  readonly mode: ScheduleWorkspaceSnapshot['mode']
+  readonly confirmToken: number | undefined
 }
 
 /** One piece of a painted row. */
@@ -843,6 +847,8 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
       width: paintedWidth,
       height: lines.length,
       regions,
+      mode: snapshot.mode,
+      confirmToken: snapshot.confirm?.token,
     }
     return lines.slice(0, rows)
   }
@@ -1644,7 +1650,7 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
       return
     }
     const frame = this.frame
-    if (frame === undefined || x < 0 || y < 0 || x >= frame.width || y >= frame.height) {
+    if (!this.frameIsCurrent(frame) || x < 0 || y < 0 || x >= frame.width || y >= frame.height) {
       this.pressed = undefined
       return
     }
@@ -1657,7 +1663,7 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     const frame = this.frame
     const pressed = this.pressed
     this.pressed = undefined
-    if (frame === undefined || x < 0 || y < 0 || x >= frame.width || y >= frame.height) return
+    if (!this.frameIsCurrent(frame) || x < 0 || y < 0 || x >= frame.width || y >= frame.height) return
     const hit = regionAt(frame, x, y)
     if (hit === undefined) return
     if (pressed !== undefined && pressed.key !== hitKey(hit)) return
@@ -1690,6 +1696,14 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     }
     this.deps.requestRender()
     return { handled: true, render: true }
+  }
+
+  /** Whether the LAST painted frame still describes the CURRENT page and
+   *  confirmation identity; anything else is a stale click. */
+  private frameIsCurrent(frame: PaintedFrame | undefined): frame is PaintedFrame {
+    if (frame === undefined) return false
+    if (frame.mode !== this.snapshot.mode) return false
+    return frame.confirmToken === this.snapshot.confirm?.token
   }
 
   private activateHit(hit: ScheduleHit): void {

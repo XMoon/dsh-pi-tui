@@ -458,6 +458,8 @@ test('L6: pause/resume is one CAS update on the official revision and an ended r
     life.port.editResult = async request => entry({ ...(request as never as { patch: object }), id: 'schedule-ended' as never })
     life.controller.dispatch({ kind: 'refresh' })
     await flush()
+    life.controller.dispatch({ kind: 'open-detail', id: 'schedule-ended' })
+    await flush()
     life.controller.dispatch({ kind: 'toggle-active' })
     await flush()
     await life.controller.whenIdle()
@@ -478,6 +480,8 @@ test('L6: delete and clear-ended require one confirmation and commit exactly one
   try {
     life.port.editResult = async () => ({ id: 'schedule-1' as never, deleted: true })
     life.port.deleteInactiveResult = async () => ({ deleted: 3 })
+    life.controller.dispatch({ kind: 'open-detail', id: 'schedule-1' })
+    await flush()
     const before = life.port.calls.length
     life.controller.dispatch({ kind: 'ask-delete' })
     assert.equal(life.controller.snapshot().confirm?.kind, 'delete')
@@ -492,8 +496,10 @@ test('L6: delete and clear-ended require one confirmation and commit exactly one
     assert.equal(deletes.length, 1)
     assert.equal(life.controller.snapshot().mode, 'list')
 
-    // A delete from the LIST (no open detail) still sends the row's official
-    // revision: the list projection carries the same CAS value.
+    // The delete action belongs to Detail; re-open it and the row's official
+    // revision is captured again.
+    life.controller.dispatch({ kind: 'open-detail', id: 'schedule-1' })
+    await flush()
     life.controller.dispatch({ kind: 'ask-delete' })
     life.controller.dispatch({ kind: 'confirm' })
     await flush()
@@ -615,6 +621,8 @@ test('L6: a delete that lost the task reports the miss instead of success', asyn
       life.port.entries = []
       return { id: 'schedule-1' as never, deleted: false, code: 'schedule_not_found' }
     }
+    life.controller.dispatch({ kind: 'open-detail', id: 'schedule-1' })
+    await flush()
     life.controller.dispatch({ kind: 'ask-delete' })
     life.controller.dispatch({ kind: 'confirm' })
     await flush()
@@ -673,8 +681,16 @@ test('L6: the edit-open read is fenced and its failure is surfaced', async () =>
 
     // From the list (no detail snapshot) the edit read really happens, and its
     // failure is a visible error instead of a silent no-op.
+    // From Detail with a moved (detail-less) selection the edit-open read really
+    // happens; its failure is visible instead of a silent no-op.
+    life.port.entries = [entry({ id: 'schedule-a' as never, title: 'A' }), entry({ id: 'schedule-b' as never, title: 'B' })]
+    life.controller.dispatch({ kind: 'refresh' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-detail', id: 'schedule-a' })
+    await flush()
+    life.controller.dispatch({ kind: 'move', delta: 1 })
     const failed = deferred<ScheduleViewResult>()
-    life.port.viewResults.set('schedule-1', failed.promise)
+    life.port.viewResults.set('schedule-b', failed.promise)
     life.controller.dispatch({ kind: 'open-edit' })
     // The fake `view` adopts the stored promise one microtask later; reject
     // only once that adoption handler exists, so the rejection is the real
@@ -682,7 +698,7 @@ test('L6: the edit-open read is fenced and its failure is surfaced', async () =>
     await flush()
     failed.reject(new Error('view failed'))
     await flush()
-    assert.equal(life.controller.snapshot().mode, 'list')
+    assert.equal(life.controller.snapshot().mode, 'detail')
     assert.equal(life.controller.snapshot().notice?.kind, 'error')
     assert.match(life.controller.snapshot().notice?.text ?? '', /view failed/u)
   } finally {
@@ -886,25 +902,19 @@ test('L6: Help under an in-flight history page keeps its answer, and invalidatio
     assert.equal(life.controller.snapshot().history?.status, 'ready', 'the underlay page is not left loading forever')
     assert.equal(life.controller.snapshot().history?.records.length, 1)
 
-    // An invalidation while another page is loading re-reads the page instead of
-    // leaving it visibly stuck.
-    const reread = deferred<ScheduleDeliveryHistoryResult>()
-    life.port.historyResults.set('first', reread.promise)
-    life.controller.dispatch({ kind: 'open-history' })
-    await flush()
+    // An invalidation while Help is the underlay never closes Help and never
+    // resets the user's history pagination: it is a background data signal, not
+    // a navigation.
+    life.controller.dispatch({ kind: 'open-help' })
     const callsBefore = life.port.calls.filter(call => call.method === 'history').length
     life.port.invalidate()
     await flush()
-    assert.ok(life.port.calls.filter(call => call.method === 'history').length > callsBefore,
-      'the invalidated history page is re-read')
-    reread.resolve({
-      id: 'schedule-1' as never,
-      records: [],
-      earlierRecordsUnavailable: false,
-      earlierRecordsPruned: false,
-      retention: { days: 30, records: 200 },
-    })
-    await flush()
+    assert.equal(life.controller.snapshot().mode, 'help', 'a schedule/changed signal never closes Help')
+    assert.equal(life.port.calls.filter(call => call.method === 'history').length, callsBefore,
+      'a user-owned history page is not reset by a background invalidation')
+    life.controller.dispatch({ kind: 'close-help' })
+    assert.equal(life.controller.snapshot().mode, 'history')
+    assert.equal(life.controller.snapshot().history?.records.length, 1, 'the page context is preserved')
   } finally {
     life.controller.dispose()
   }
@@ -940,6 +950,8 @@ test('L6: a multi-line Prompt keeps its exact bytes through an edit and save', a
 test('L6: the delete confirmation freezes the CAS revision it asked about', async () => {
   const life = await opened()
   try {
+    life.controller.dispatch({ kind: 'open-detail', id: 'schedule-1' })
+    await flush()
     life.controller.dispatch({ kind: 'ask-delete' })
     // Another Client changes the task AFTER the question opened: the local
     // snapshot now carries a newer revision, but the question confirmed V1.
@@ -1002,16 +1014,18 @@ test('L6: switching to another task immediately retires the previous detail', as
       && (call.args[0] as ScheduleEditRequest).id === 'task-alpha'), false,
     'no write may ever target the previous task')
 
-    // History and the confirmation targets follow the CURRENT selection too.
+    // The confirmation target follows the CURRENT selection too.
     await flush()
+    life.controller.dispatch({ kind: 'ask-run' })
+    const runConfirm = life.controller.snapshot().confirm
+    assert.equal(runConfirm?.kind === 'run' ? runConfirm.id : undefined, 'task-beta')
+    life.controller.dispatch({ kind: 'cancel' })
+    // History belongs to the current selection as well.
     life.controller.dispatch({ kind: 'open-history' })
     await flush()
     const historyCall = life.port.calls.filter(call => call.method === 'history').at(-1)
     assert.equal((historyCall?.args[0] as { id?: string } | undefined)?.id, 'task-beta',
       'the history page belongs to the current selection')
-    life.controller.dispatch({ kind: 'ask-run' })
-    const runConfirm = life.controller.snapshot().confirm
-    assert.equal(runConfirm?.kind === 'run' ? runConfirm.id : undefined, 'task-beta')
 
     pendingBeta.resolve(beta)
     await flush()
@@ -1094,6 +1108,95 @@ test('L6: reload-latest keeps the user value for the SAME field and reports the 
     const edits = life.port.calls.filter(call => call.method === 'edit')
     const request = edits[edits.length - 1]?.args[0] as Extract<ScheduleEditRequest, { action: 'update' }> | undefined
     assert.deepEqual(request?.patch, { prompt: 'Mine' })
+  } finally {
+    life.controller.dispose()
+  }
+})
+
+test('L6: consecutive reloads adopt each Host revision without inventing user intent', async () => {
+  const life = await opened()
+  try {
+    life.port.entries = [entry({ title: 'A', prompt: 'P' })]
+    life.controller.dispatch({ kind: 'refresh' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-detail', id: 'schedule-1' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-edit' })
+    await flush()
+    life.controller.dispatch({ kind: 'set-field', fieldId: 'prompt', value: 'P2' })
+
+    // First reload: another client renamed A -> B; the user never touched title.
+    life.port.viewResults.set('schedule-1', entry({ title: 'B', prompt: 'P', updatedAt: '2026-01-02T00:00:00.000Z' }))
+    life.controller.dispatch({ kind: 'reload-latest' })
+    await flush()
+    assert.equal(life.controller.snapshot().editor?.title, 'B')
+    assert.equal(life.controller.snapshot().editor?.prompt, 'P2')
+
+    // Second reload: the title changed AGAIN (B -> C) while the user still only
+    // edits the prompt. The adopted B must not be mistaken for user intent.
+    life.port.viewResults.set('schedule-1', entry({ title: 'C', prompt: 'P', updatedAt: '2026-01-03T00:00:00.000Z' }))
+    life.controller.dispatch({ kind: 'reload-latest' })
+    await flush()
+    assert.equal(life.controller.snapshot().editor?.title, 'C', 'the twice-adopted title follows the Host')
+    assert.equal(life.controller.snapshot().notice?.text, SCHEDULE_COPY.reloaded)
+
+    life.port.editResult = async () => entry({ title: 'C', prompt: 'P2', updatedAt: '2026-01-04T00:00:00.000Z' })
+    life.controller.dispatch({ kind: 'save' })
+    await flush()
+    await life.controller.whenIdle()
+    const edits = life.port.calls.filter(call => call.method === 'edit')
+    const request = edits[edits.length - 1]?.args[0] as Extract<ScheduleEditRequest, { action: 'update' }> | undefined
+    assert.deepEqual(request?.patch, { prompt: 'P2' }, 'only the user-edited prompt travels')
+  } finally {
+    life.controller.dispose()
+  }
+})
+
+test('L6: a Run receipt never lands on the page the user switched to', async () => {
+  const life = await opened()
+  try {
+    const alpha = entry({ id: 'task-alpha' as never, title: 'Alpha' })
+    const beta = entry({ id: 'task-beta' as never, title: 'Beta' })
+    life.port.entries = [alpha, beta]
+    life.port.viewResults.set('task-alpha', alpha)
+    life.port.viewResults.set('task-beta', beta)
+    life.controller.dispatch({ kind: 'refresh' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-detail', id: 'task-alpha' })
+    await flush()
+    const pending = deferred<ScheduleRunResult>()
+    life.port.runResult = () => pending.promise
+    life.controller.dispatch({ kind: 'ask-run' })
+    life.controller.dispatch({ kind: 'confirm' })
+    // The user moves to B while A's Host run is still in flight.
+    life.controller.dispatch({ kind: 'move', delta: 1 })
+    await flush()
+    pending.resolve({ ...alpha, status: 'active' } as never)
+    await flush()
+    await life.controller.whenIdle()
+    assert.equal(life.controller.snapshot().selectedId, 'task-beta', 'the selection stays on B')
+    assert.equal(life.controller.snapshot().detail?.id ?? undefined, undefined,
+      "A's receipt never becomes B's Detail")
+    assert.equal(life.controller.snapshot().notice?.text, SCHEDULE_COPY.deliveryQueued,
+      'the Host receipt is still reported')
+  } finally {
+    life.controller.dispose()
+  }
+})
+
+test('L6: a schedule/changed signal refreshes a Help underlay without closing it', async () => {
+  const life = await opened()
+  try {
+    life.controller.dispatch({ kind: 'open-detail', id: 'schedule-1' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-help' })
+    assert.equal(life.controller.snapshot().mode, 'help')
+    life.port.invalidate()
+    await flush()
+    assert.equal(life.controller.snapshot().mode, 'help', 'the underlay refresh is not a navigation')
+    life.controller.dispatch({ kind: 'close-help' })
+    assert.equal(life.controller.snapshot().mode, 'detail')
+    assert.equal(life.controller.snapshot().detail?.id, 'schedule-1')
   } finally {
     life.controller.dispose()
   }

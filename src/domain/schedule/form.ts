@@ -201,9 +201,14 @@ export function encodeCreate(draft: ScheduleEditorDraft): ScheduleCreateRequest 
  * recompile the rule and re-anchor its occurrence), and an untouched target is
  * never re-sent (a `new_once` target would reserve a new Session identity).
  */
+/** The four editable field groups one edit patch may carry. */
+export type ScheduleEditField = 'title' | 'prompt' | 'timing' | 'target'
+
 export function encodePatch(
   baseline: ScheduleEditorBaseline,
   draft: ScheduleEditorDraft,
+  /** The fields the USER edited. Omitted = compare every field by value. */
+  edited?: ReadonlySet<ScheduleEditField>,
 ): SchedulePatch {
   const patch: {
     title?: string
@@ -211,14 +216,15 @@ export function encodePatch(
     timing?: ScheduleTiming
     target?: ScheduleTargetRequest
   } = {}
-  if (draft.title !== baseline.title) patch.title = requireText('title', draft.title)
-  if (draft.prompt !== baseline.prompt) patch.prompt = requireText('prompt', draft.prompt)
+  const intent = (field: ScheduleEditField): boolean => edited === undefined || edited.has(field)
+  if (intent('title') && draft.title !== baseline.title) patch.title = requireText('title', draft.title)
+  if (intent('prompt') && draft.prompt !== baseline.prompt) patch.prompt = requireText('prompt', draft.prompt)
   // The comparison is between the FINAL typed values, never "did the user
   // interact": re-sending an unchanged `timing` recompiles/re-anchors the rule,
   // and re-sending an unchanged `new_once` target re-reserves its Session
   // identity. Only a genuinely different encoded rule/target travels.
-  if (!sameTimingDraft(draft.timing, baseline.timing)) patch.timing = encodeTiming(draft.timing)
-  if (!sameTargetDraft(draft.target, baseline.target)) patch.target = encodeTarget(draft.target)
+  if (intent('timing') && !sameTimingDraft(draft.timing, baseline.timing)) patch.timing = encodeTiming(draft.timing)
+  if (intent('target') && !sameTargetDraft(draft.target, baseline.target)) patch.target = encodeTarget(draft.target)
   if (Object.keys(patch).length === 0) {
     throw new ScheduleFormError('form', 'Nothing changed yet.')
   }
