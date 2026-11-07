@@ -184,6 +184,8 @@ interface BodyLine {
   readonly segments: readonly CellSegment[]
   readonly rowId?: string
   readonly fieldId?: string
+  /** The physical row the multi-line field's caret is on (scroll anchor). */
+  readonly caretRow?: boolean
   /** The open editor chooser's heading, and the selected option's index. */
   readonly chooserTitle?: boolean
   readonly chooserIndex?: number
@@ -1236,17 +1238,30 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
             caretLine = lineIndex + 1
             caretColumn = 0
           }
-          const window = Math.max(1, valueBudget - 1)
+          // The horizontal window is measured in TERMINAL CELLS, not code
+          // points: wide CJK/emoji would otherwise be cut after composeRow()
+          // truncation and hide the caret.
+          const windowCells = Math.max(1, valueBudget - 1)
           for (const [lineIndex, value] of lines.entries()) {
             const points = Array.from(value)
-            let shown = value
+            let shown: string
             if (lineIndex === caretLine) {
-              const offset = Math.max(0, caretColumn - (window - 1))
-              const before = points.slice(offset, caretColumn).join('')
-              const after = points.slice(caretColumn, offset + window - (caretColumn - offset)).join('')
-              shown = `${before}▏${after}`
+              const beforePoints = points.slice(0, caretColumn)
+              // Keep the END of the text before the caret, then fill the rest
+              // with text after it; the caret itself always fits.
+              let kept = ''
+              let used = 0
+              for (let index = beforePoints.length - 1; index >= 0; index -= 1) {
+                const width = visibleWidth(beforePoints[index] ?? '')
+                if (used + width > windowCells) break
+                kept = (beforePoints[index] ?? '') + kept
+                used += width
+              }
+              const remaining = Math.max(0, windowCells - used)
+              const after = truncateToWidth(points.slice(caretColumn).join(''), remaining, '', false)
+              shown = `${kept}▏${after}`
             } else {
-              shown = points.slice(0, window).join('')
+              shown = truncateToWidth(value, windowCells, '', false)
             }
             out.push({
               segments: lineIndex === 0
@@ -1260,7 +1275,8 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
                     { plain: ' '.repeat(EDITOR_LABEL_WIDTH) },
                     { plain: sanitizedPhysicalLine(shown), paint: color.textStrong },
                   ],
-              ...(lineIndex === 0 ? { fieldId: field.id } : {}),
+              fieldId: field.id,
+              ...(lineIndex === caretLine ? { caretRow: true } : {}),
             })
           }
           continue
@@ -1831,7 +1847,10 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     if (draft === undefined) return 0
     const field = focusedField(draft)
     if (field === undefined) return 0
-    const index = content.findIndex(line => line.fieldId === field.id)
+    // A multi-line RAW field renders one body row per stored line: scroll to the
+    // row the CARET is on, never merely to the field's first row.
+    const caretIndex = content.findIndex(line => line.fieldId === field.id && line.caretRow === true)
+    const index = caretIndex >= 0 ? caretIndex : content.findIndex(line => line.fieldId === field.id)
     let next = scroll
     if (bodyHeight > 0 && index >= 0) {
       if (index < next) next = index
