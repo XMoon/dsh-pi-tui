@@ -31,9 +31,9 @@ import {
   PI_TUI_WEB_ACCESS_DISABLE_ORDER,
   PI_TUI_WEB_ACCESS_ENABLE_ORDER,
   PI_TUI_WEB_ACCESS_OPTIONAL_PENDING_ROWS,
-  PI_TUI_WEB_ACCESS_ROWS,
   PiTuiWebAccessHostService,
 } from '../../../src/app/host/features/web-access.ts'
+import { PI_TUI_WEB_ACCESS_ROWS } from '../../../src/app/host/features/web-roster.ts'
 import {
   PI_TUI_WEB_ACCESS_SET_ENABLED,
   parsePiTuiWebAccessStatus,

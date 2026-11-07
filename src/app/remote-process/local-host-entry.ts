@@ -35,6 +35,7 @@ import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { attachEntryControl, createEntryDiag, writeEntryRecord } from './entry-control.ts'
 import { HostActivityObserver } from './host-activity.ts'
+import { PI_TUI_WEB_ACCESS_ROWS } from '../host/features/web-roster.ts'
 import {
   bindProcessSeat,
   installedPackageRootFromEntry,
@@ -53,6 +54,23 @@ import {
   type PiTuiWebAccessStatus,
 } from '../../runtime/remote/pi-tui-web-access-contract.ts'
 import { cleanupOwnedFiles, type LocalInstanceRecord } from './local-discovery.ts'
+
+/** The official Web-only rows of the Host overlay, rendered from the ONE
+ * production roster (`host/features/web-roster.ts`). Pure template data: no
+ * parser, no discovery and no state — the same table the `piTuiWebAccess`
+ * service verifies the live Loader against. */
+const WEB_ONLY_ROWS_YAML = PI_TUI_WEB_ACCESS_ROWS.map(({ id, name }) => [
+  `    - id: ${id}`,
+  `      name: '${name}'`,
+  '      disabled: true',
+  ...(id === 'web-runtime' ? [
+    '      inject: [webServer]',
+    '      config:',
+    '        openBrowser: false',
+    '        printUrl: false',
+    '        surfaceContext: false',
+  ] : []),
+].join('\n')).join('\n')
 
 /**
  * The Host-only overlay applied over the profile's own patch stack. It keeps
@@ -166,191 +184,7 @@ export const HOST_ONLY_PATCH = `# M4-B1 Host-only profile overlay: production Ho
 # dist and is explicitly told to stay silent: no browser launch, no printed
 # token URL and no DSH_WEB_URL shell variable.
 - insert:
-    - id: web-runtime
-      name: '@deepseek-ai/dsh-web-app'
-      disabled: true
-      inject: [webServer]
-      config:
-        openBrowser: false
-        printUrl: false
-        surfaceContext: false
-    - id: modules
-      name: '@deepseek-ai/dsh-client-modules'
-      disabled: true
-    - id: client-hmr
-      name: '@deepseek-ai/dsh-client-hmr'
-      disabled: true
-    - id: cordis-client-runner
-      name: '@deepseek-ai/dsh-cordis-client-runner'
-      disabled: true
-    - id: ui-context-menu
-      name: '@deepseek-ai/dsh-client-ui-context-menu'
-      disabled: true
-    - id: ui-open-in-app
-      name: '@deepseek-ai/dsh-client-ui-open-in-app'
-      disabled: true
-    - id: ui-settings-account
-      name: '@deepseek-ai/dsh-client-ui-settings-account'
-      disabled: true
-    - id: ui-theme
-      name: '@deepseek-ai/dsh-client-ui-theme'
-      disabled: true
-    - id: locale
-      name: '@deepseek-ai/dsh-client-locale'
-      disabled: true
-    - id: shortcuts
-      name: '@deepseek-ai/dsh-client-shortcuts'
-      disabled: true
-    - id: ui-shortcuts
-      name: '@deepseek-ai/dsh-client-ui-shortcuts'
-      disabled: true
-    - id: ui-layout
-      name: '@deepseek-ai/dsh-client-ui-layout'
-      disabled: true
-    - id: ui-renderer
-      name: '@deepseek-ai/dsh-client-ui-renderer'
-      disabled: true
-    - id: ui-session
-      name: '@deepseek-ai/dsh-client-ui-session'
-      disabled: true
-    - id: resources
-      name: '@deepseek-ai/dsh-client-resources'
-      disabled: true
-    - id: ui-sidebar
-      name: '@deepseek-ai/dsh-client-ui-sidebar'
-      disabled: true
-    - id: ui-sidebar-right
-      name: '@deepseek-ai/dsh-client-ui-sidebar-right'
-      disabled: true
-    - id: ui-sidebar-documentpreview
-      name: '@deepseek-ai/dsh-client-ui-sidebar-documentpreview'
-      disabled: true
-    - id: ui-sidebar-terminal
-      name: '@deepseek-ai/dsh-client-ui-sidebar-terminal'
-      disabled: true
-    - id: ui-sidebar-files
-      name: '@deepseek-ai/dsh-client-ui-sidebar-files'
-      disabled: true
-    - id: ui-settings
-      name: '@deepseek-ai/dsh-client-ui-settings'
-      disabled: true
-    - id: ui-settings-general
-      name: '@deepseek-ai/dsh-client-ui-settings-general'
-      disabled: true
-    - id: ui-settings-models
-      name: '@deepseek-ai/dsh-client-ui-settings-models'
-      disabled: true
-    - id: ui-plugin-manager
-      name: '@deepseek-ai/dsh-client-ui-plugin-manager'
-      disabled: true
-    - id: ui-settings-plugin-inventory
-      name: '@deepseek-ai/dsh-client-ui-settings-plugin-inventory'
-      disabled: true
-    - id: ui-conversation
-      name: '@deepseek-ai/dsh-client-ui-conversation'
-      disabled: true
-    - id: ui-approval
-      name: '@deepseek-ai/dsh-client-ui-approval'
-      disabled: true
-    - id: ui-chat
-      name: '@deepseek-ai/dsh-client-ui-chat'
-      disabled: true
-    - id: ui-brand-official
-      name: '@deepseek-ai/dsh-client-ui-brand-official'
-      disabled: true
-    - id: ui-attachment
-      name: '@deepseek-ai/dsh-client-ui-attachment'
-      disabled: true
-    - id: ui-file-drag
-      name: '@deepseek-ai/dsh-client-ui-file-drag'
-      disabled: true
-    - id: ui-tool
-      name: '@deepseek-ai/dsh-client-ui-tool'
-      disabled: true
-    - id: ui-cordis
-      name: '@deepseek-ai/dsh-client-ui-cordis'
-      disabled: true
-    - id: ui-deliverables
-      name: '@deepseek-ai/dsh-client-ui-deliverables'
-      disabled: true
-    - id: ui-workspace
-      name: '@deepseek-ai/dsh-client-ui-workspace'
-      disabled: true
-    - id: ui-workflow-run
-      name: '@deepseek-ai/dsh-client-ui-workflow-run'
-      disabled: true
-    - id: ui-input-trigger
-      name: '@deepseek-ai/dsh-client-ui-input-trigger'
-      disabled: true
-    - id: ui-commands
-      name: '@deepseek-ai/dsh-client-ui-commands'
-      disabled: true
-    - id: ui-skill
-      name: '@deepseek-ai/dsh-client-ui-skill'
-      disabled: true
-    - id: ui-subagent
-      name: '@deepseek-ai/dsh-client-ui-subagent'
-      disabled: true
-    - id: ui-reference
-      name: '@deepseek-ai/dsh-client-ui-reference'
-      disabled: true
-    - id: ui-secret-mask
-      name: '@deepseek-ai/dsh-client-ui-secret-mask'
-      disabled: true
-    - id: ui-jobs
-      name: '@deepseek-ai/dsh-client-ui-jobs'
-      disabled: true
-    - id: ui-schedule
-      name: '@deepseek-ai/dsh-client-ui-schedule'
-      disabled: true
-    - id: ui-goal
-      name: '@deepseek-ai/dsh-client-ui-goal'
-      disabled: true
-    - id: ui-message-feedback
-      name: '@deepseek-ai/dsh-client-ui-message-feedback'
-      disabled: true
-    - id: ui-model-selection
-      name: '@deepseek-ai/dsh-client-ui-model-selection'
-      disabled: true
-    - id: ui-permission
-      name: '@deepseek-ai/dsh-client-ui-permission-presets'
-      disabled: true
-    - id: ui-agent-preset
-      name: '@deepseek-ai/dsh-client-ui-agent-preset'
-      disabled: true
-    - id: entry-customization
-      name: '@deepseek-ai/dsh-client-ui-entry-customization'
-      disabled: true
-    - id: ui-settings-session-log
-      name: '@deepseek-ai/dsh-client-ui-settings-session-log'
-      disabled: true
-    - id: ui-settings-plugins
-      name: '@deepseek-ai/dsh-client-ui-settings-plugins'
-      disabled: true
-    - id: ui-settings-shell
-      name: '@deepseek-ai/dsh-client-ui-settings-shell'
-      disabled: true
-    - id: ui-settings-agent-loop
-      name: '@deepseek-ai/dsh-client-ui-settings-agent-loop'
-      disabled: true
-    - id: ui-settings-subagent
-      name: '@deepseek-ai/dsh-client-ui-settings-subagent'
-      disabled: true
-    - id: ui-settings-web-search
-      name: '@deepseek-ai/dsh-client-ui-settings-web-search'
-      disabled: true
-    - id: ui-plan
-      name: '@deepseek-ai/dsh-client-ui-plan'
-      disabled: true
-    - id: ui-user-questions
-      name: '@deepseek-ai/dsh-client-ui-user-questions'
-      disabled: true
-    - id: ui-trajectory
-      name: '@deepseek-ai/dsh-client-ui-trajectory'
-      disabled: true
-    - id: terminal-controller
-      name: '@deepseek-ai/dsh-api-terminal-controller'
-      disabled: true
+${WEB_ONLY_ROWS_YAML}
 `
 
 interface OfficialDshModules {
