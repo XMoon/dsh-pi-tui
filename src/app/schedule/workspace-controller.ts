@@ -842,6 +842,10 @@ export class ScheduleWorkspaceController {
       id: entry.id,
       title: entry.title,
       shortId: entry.id.slice(-8),
+      // Freeze the revision the user is confirming NOW; the write submits it
+      // verbatim, so a concurrent edit turns into a conflict, never a silent
+      // delete of a newer version.
+      expectedUpdatedAt: entry.updatedAt ?? null,
     }
     this.publish()
   }
@@ -871,7 +875,7 @@ export class ScheduleWorkspaceController {
         this.runNow(confirm.id)
         return
       case 'delete':
-        this.deleteTask(confirm.id)
+        this.deleteTask(confirm.id, confirm.expectedUpdatedAt)
         return
       case 'clear-ended':
         this.clearEnded()
@@ -912,17 +916,13 @@ export class ScheduleWorkspaceController {
     })
   }
 
-  private deleteTask(id: string): void {
+  private deleteTask(id: string, expectedUpdatedAt: string | null): void {
     this.startWrite('schedule delete', async () => {
       try {
-        // The CAS revision always comes from the authoritative record the user
-        // acted on: a list row carries it too, and sending `null` against a
-        // stored revision would be a guaranteed conflict.
-        const entry = this.detail?.id === id ? this.detail : this.catalog.find(row => row.id === id)
         const result = await this.port.edit({
           id: scheduleId(id),
           action: 'delete',
-          expectedUpdatedAt: entry?.updatedAt ?? null,
+          expectedUpdatedAt,
         })
         if ('deleted' in result && result.deleted === true) {
           this.detail = undefined

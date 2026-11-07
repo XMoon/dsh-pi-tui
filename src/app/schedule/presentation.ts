@@ -58,7 +58,17 @@ export interface ScheduleHistoryView {
 /** The ONE pending confirmation. Exactly one question is open at a time, and
  *  its `token` is the generation a `y` commits against. */
 export type ScheduleConfirm =
-  | { readonly kind: 'delete'; readonly token: number; readonly id: string; readonly title: string; readonly shortId: string }
+  | {
+    readonly kind: 'delete'
+    readonly token: number
+    readonly id: string
+    readonly title: string
+    readonly shortId: string
+    /** The CAS revision captured WHEN THE QUESTION OPENED: the confirmed task
+     *  version is frozen, so a change during the confirmation is a conflict
+     *  instead of deleting content the user never saw. */
+    readonly expectedUpdatedAt: string | null
+  }
   | { readonly kind: 'clear-ended'; readonly token: number }
   | { readonly kind: 'run'; readonly token: number; readonly id: string; readonly title: string }
   | { readonly kind: 'discard'; readonly token: number }

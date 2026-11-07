@@ -241,10 +241,11 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
   /** The same binding facts for the focused editor text field. */
   private editorBaseline: string | undefined
   private editorDispatched: string | undefined
-  /** The raw multi-line buffer of the focused RRULE field (newlines preserved). */
-  private rruleDraft: string | undefined
-  /** The exact value this panel last dispatched for the RRULE field. */
-  private rruleDispatched: string | undefined
+  /** The raw multi-line buffer of the focused RAW field (Prompt/RRULE,
+   *  newlines preserved: the stored bytes are never flattened). */
+  private rawDraft: string | undefined
+  /** The exact value this panel last dispatched for that RAW field. */
+  private rawDispatched: string | undefined
 
   constructor(deps: ScheduleWorkspacePanelDeps) {
     this.deps = deps
@@ -300,7 +301,7 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     this.editorFieldId = undefined
     this.editorBaseline = undefined
     this.editorDispatched = undefined
-    this.rruleDraft = undefined
+    this.rawDraft = undefined
     this.searchBaseline = undefined
     this.searchDispatched = undefined
     this.searchInput.focused = false
@@ -483,7 +484,12 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
   private handleEditorInput(data: string): void {
     const draft = this.snapshot.editor
     if (draft === undefined) return
-    if (matchesKey(data, '?')) {
+    const focused = focusedField(draft)
+    // A TEXT field owns every printable character, `?` included; Help is the
+    // `?` action only where there is no text to type (the kind/target/advanced
+    // /weekday controls). The choice/kind fields open their chooser on Enter.
+    const typing = focused !== undefined && (isEditorTextInput(focused) || (focused !== undefined && this.isRawEditorField(focused)))
+    if (matchesKey(data, '?') && !typing) {
       this.deps.dispatch({ kind: 'open-help' })
       return
     }
@@ -509,11 +515,10 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
       this.deps.requestRender()
       return
     }
-    const focused = focusedField(draft)
-    if (focused?.id === 'timing-rrule') {
-      // The official RRULE input is MULTI-LINE raw text: Enter inserts a line,
-      // Backspace deletes, printable input (a paste included) appends verbatim.
-      this.handleRruleInput(draft, focused.value, data)
+    if (focused !== undefined && this.isRawEditorField(focused)) {
+      // A RAW field is MULTI-LINE text: Enter inserts a line, Backspace deletes,
+      // printable input (a paste included) appends verbatim.
+      this.handleRawInput(draft, focused, data)
       return
     }
     if (matchesKey(data, 'enter')) {
@@ -532,8 +537,14 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     }
   }
 
-  private handleRruleInput(draft: ScheduleEditorDraft, current: string, data: string): void {
-    const buffer = this.rruleDraft ?? current
+  /** Prompt and RRULE are RAW multi-line fields: their stored bytes (newlines
+   *  included) are edited verbatim, never through the single-line sanitizer. */
+  private isRawEditorField(field: ScheduleFormField): boolean {
+    return field.id === 'prompt' || field.id === 'timing-rrule'
+  }
+
+  private handleRawInput(draft: ScheduleEditorDraft, field: ScheduleFormField, data: string): void {
+    const buffer = this.rawDraft ?? field.value
     // Terminals wrap a paste in bracketed-paste markers; the RRULE field is raw
     // multi-line text, so the payload (newlines included) is inserted verbatim.
     const pasted = data.match(/^\x1b\[200~([\s\S]*)\x1b\[201~$/u)?.[1]
@@ -543,9 +554,9 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     else if (matchesKey(data, 'backspace') || matchesKey(data, 'delete')) next = buffer.slice(0, -1)
     else if (/^[\x20-\x7e\n]+$/u.test(data)) next = `${buffer}${data}`
     else return
-    this.rruleDraft = next
-    this.rruleDispatched = next
-    this.deps.dispatch({ kind: 'set-field', fieldId: 'timing-rrule', value: next })
+    this.rawDraft = next
+    this.rawDispatched = next
+    this.deps.dispatch({ kind: 'set-field', fieldId: field.id, value: next })
     this.deps.requestRender()
   }
 
@@ -768,9 +779,9 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     if (this.snapshot.mode === 'list' && this.snapshot.confirm === undefined) {
       segments.push(
         { plain: '  ' },
-        { plain: 'New [N]', paint: color.textMuted, hit: { kind: 'action', action: 'new' } },
+        { plain: 'New [N]', paint: color.primary, hit: { kind: 'action', action: 'new' } },
         { plain: '  ' },
-        { plain: 'Refresh [R]', paint: color.textMuted, hit: { kind: 'action', action: 'refresh' } },
+        { plain: 'Refresh [R]', paint: color.primary, hit: { kind: 'action', action: 'refresh' } },
       )
     }
     this.pushSegments(lines, regions, width, segments)
@@ -1015,8 +1026,13 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     fact('Id', entry.id, color.textDim)
     out.push({ segments: [{ plain: '' }] })
     out.push({ segments: [{ plain: 'Prompt', paint: color.textDim }] })
-    for (const line of wrapTextWithAnsi(sanitizedPhysicalLine(entry.prompt), Math.max(1, width))) {
-      out.push({ segments: [{ plain: line, paint: color.text }] })
+    // The stored prompt may be multi-line: every stored line is painted as its
+    // own block instead of flattening the instruction into one line.
+    for (const stored of entry.prompt.split('\n')) {
+      const wrapped = wrapTextWithAnsi(sanitizedPhysicalLine(stored), Math.max(1, width))
+      for (const line of wrapped.length === 0 ? [''] : wrapped) {
+        out.push({ segments: [{ plain: line, paint: color.text }] })
+      }
     }
     if (entry.lastDelivery !== undefined) {
       const receipt = deliveryFacts(entry.lastDelivery)
@@ -1068,13 +1084,18 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
       fact('Delivered', `${formatLocalInstant(record.deliveredAt)} UTC`)
       fact('Message', record.messageId)
       if (record.prompt !== undefined) {
-        for (const [partIndex, part] of wrapTextWithAnsi(sanitizedPhysicalLine(record.prompt), valueWidth).entries()) {
-          out.push({
-            segments: [
-              { plain: partIndex === 0 ? fit('Prompt', DETAIL_LABEL_WIDTH) : ' '.repeat(DETAIL_LABEL_WIDTH), paint: color.textDim },
-              { plain: part, paint: color.text },
-            ],
-          })
+        let first = true
+        for (const stored of record.prompt.split('\n')) {
+          const wrapped = wrapTextWithAnsi(sanitizedPhysicalLine(stored), valueWidth)
+          for (const part of wrapped.length === 0 ? [''] : wrapped) {
+            out.push({
+              segments: [
+                { plain: first ? fit('Prompt', DETAIL_LABEL_WIDTH) : ' '.repeat(DETAIL_LABEL_WIDTH), paint: color.textDim },
+                { plain: part, paint: color.text },
+              ],
+            })
+            first = false
+          }
         }
       }
     }
@@ -1135,10 +1156,10 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
         { plain: selected ? '> ' : '  ', paint: selected ? color.primary : undefined },
         { plain: fit(field.label, EDITOR_LABEL_WIDTH), paint: color.textDim },
       ]
-      if (field.id === 'timing-rrule') {
-        // Multi-line raw rule: the focused field paints one line per stored
-        // `\n` (the value keeps them; only the display wraps).
-        const buffer = selected && this._focused ? (this.rruleDraft ?? field.value) : field.value
+      if (this.isRawEditorField(field)) {
+        // Multi-line raw text: one painted row per stored `\n` (the value keeps
+        // the bytes; only the display wraps).
+        const buffer = selected && this._focused ? (this.rawDraft ?? field.value) : field.value
         const lines = buffer.split('\n')
         if (selected && this._focused) {
           for (const [lineIndex, value] of lines.entries()) {
@@ -1277,9 +1298,9 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     out.push({ segments: [{ plain: '' }] })
     out.push({
       segments: [
-        { plain: '[y] Confirm', paint: text => color.textStrong(text, 'primary'), hit: { kind: 'action', action: 'confirm' } },
+        { plain: 'Confirm [Y]', paint: text => color.textStrong(text, 'primary'), hit: { kind: 'action', action: 'confirm' } },
         { plain: '   ' },
-        { plain: '[n] Cancel', paint: color.textDim, hit: { kind: 'action', action: 'cancel' } },
+        { plain: 'Cancel [N]', paint: color.textDim, hit: { kind: 'action', action: 'cancel' } },
         { plain: '   ' },
         { plain: 'Esc cancel', paint: color.textMuted },
       ],
@@ -1440,9 +1461,9 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     if (this.snapshot.confirm !== undefined) {
       // The action bar stays `<key> <verb>`; `Esc` is the LAST segment while
       // keeping the highest retained priority (design-language D8).
-      add('y Confirm', 9, 'confirm')
-      add('n Cancel', 8, 'cancel')
-      add('Esc Cancel', 10, 'cancel')
+      add('Confirm [Y]', 9, 'confirm')
+      add('Cancel [N]', 8, 'cancel')
+      add('Cancel [Esc]', 10, 'cancel')
     } else {
       switch (this.snapshot.mode) {
         case 'list':
@@ -1650,23 +1671,23 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
       this.editorInput.focused = false
       return
     }
-    if (field.id === 'timing-rrule') {
+    if (this.isRawEditorField(field)) {
       // The multi-line field keeps its own raw buffer; a newer published value
       // (another window, a controller re-read) is adopted unless it is the echo
       // of what this panel just dispatched.
       if (this.editorFieldId !== field.id) {
         this.editorFieldId = field.id
-        this.rruleDraft = field.value
-        this.rruleDispatched = field.value
-      } else if (field.value !== this.rruleDispatched) {
-        this.rruleDraft = field.value
-        this.rruleDispatched = field.value
+        this.rawDraft = field.value
+        this.rawDispatched = field.value
+      } else if (field.value !== this.rawDispatched) {
+        this.rawDraft = field.value
+        this.rawDispatched = field.value
       }
       this.editorInput.focused = false
       return
     }
-    this.rruleDraft = undefined
-    this.rruleDispatched = undefined
+    this.rawDraft = undefined
+    this.rawDispatched = undefined
     if (this.editorFieldId !== field.id) {
       const display = sanitizedPhysicalLine(field.value)
       this.editorFieldId = field.id

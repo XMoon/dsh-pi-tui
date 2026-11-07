@@ -408,7 +408,7 @@ test('typing into an editor text field dispatches set-field for the focused fiel
 // ── 6. confirmation fence ────────────────────────────────────────────────────
 
 test('y confirms, n and Esc cancel the painted confirmation', () => {
-  const confirm = workspace({ rows: [FOUR_TASKS[0]!], total: 1, confirm: { kind: 'delete', token: 3, id: 'task-alpha', title: 'Alpha report', shortId: 'task-alpha' } })
+  const confirm = workspace({ rows: [FOUR_TASKS[0]!], total: 1, confirm: { kind: 'delete', token: 3, id: 'task-alpha', title: 'Alpha report', shortId: 'task-alpha', expectedUpdatedAt: null } })
   const view = harness(confirm, { columns: 100, rows: 30 })
   view.render()
   view.panel.handleInput('y')
@@ -422,7 +422,7 @@ test('y confirms, n and Esc cancel the painted confirmation', () => {
 })
 
 test('a stale y cannot confirm a newer painted confirmation identity', () => {
-  const older = workspace({ confirm: { kind: 'delete', token: 4, id: 'task-alpha', title: 'Alpha report', shortId: 'task-alpha' } })
+  const older = workspace({ confirm: { kind: 'delete', token: 4, id: 'task-alpha', title: 'Alpha report', shortId: 'task-alpha', expectedUpdatedAt: null } })
   const view = harness(older, { columns: 100, rows: 30 })
   view.render()
   view.setSnapshot(workspace({ confirm: { kind: 'clear-ended', token: 5 } }))
@@ -437,13 +437,13 @@ test('clicking the painted y/n confirmation acts on that painted question', () =
   const confirm = workspace({ confirm: { kind: 'run', token: 9, id: 'task-alpha', title: 'Alpha report' } })
   const view = harness(confirm, { columns: 100, rows: 30 })
   const lines = view.plain()
-  const confirmRow = lines.findIndex(line => line.includes('y Confirm'))
+  const confirmRow = lines.findIndex(line => line.includes('Confirm [Y]'))
   assert.ok(confirmRow >= 0)
   const line = lines[confirmRow]!
-  view.panel.onCellClick(line.indexOf('y Confirm') + 1, confirmRow)
+  view.panel.onCellClick(line.indexOf('Confirm [Y]') + 1, confirmRow)
   assert.deepEqual(view.dispatches, [{ kind: 'confirm' }])
   view.resetDispatches()
-  view.panel.onCellClick(line.indexOf('n Cancel') + 1, confirmRow)
+  view.panel.onCellClick(line.indexOf('Cancel [N]') + 1, confirmRow)
   assert.deepEqual(view.dispatches, [{ kind: 'cancel' }])
 })
 
@@ -691,7 +691,128 @@ test('? opens Help from Detail, History and the Editor, not only the list', () =
   history.panel.handleInput('?')
   assert.deepEqual(history.dispatches, [{ kind: 'open-help' }])
 
-  const editor = harness(workspace({ mode: 'editor', editor: draft() }), { columns: 100, rows: 30 })
-  editor.panel.handleInput('?')
-  assert.deepEqual(editor.dispatches, [{ kind: 'open-help' }])
+  // Inside the editor, Help is the `?` action only on a NON-text field; a text
+  // field owns the printable character.
+  const editorChoice = harness(workspace({ mode: 'editor', editor: draft({ focused: 2 }) }), { columns: 100, rows: 30 })
+  editorChoice.panel.handleInput('?')
+  assert.deepEqual(editorChoice.dispatches, [{ kind: 'open-help' }])
+})
+
+test('a text field receives a literal question mark instead of opening Help', () => {
+  // Title (focused 0), Prompt (1), Cron (3) and the multi-line RRULE (3).
+  const title = harness(workspace({ mode: 'editor', editor: draft({ focused: 0 }) }), { columns: 100, rows: 30 })
+  title.panel.handleInput('?')
+  assert.deepEqual(title.dispatches, [{ kind: 'set-field', fieldId: 'title', value: '?' }])
+  assert.equal(title.dispatches.some(intent => intent.kind === 'open-help'), false)
+
+  const prompt = harness(workspace({
+    mode: 'editor',
+    editor: draft({ focused: 1, prompt: 'Check' }),
+  }), { columns: 100, rows: 30 })
+  prompt.panel.handleInput('?')
+  assert.deepEqual(prompt.dispatches, [{ kind: 'set-field', fieldId: 'prompt', value: 'Check?' }])
+
+  const cron = harness(workspace({
+    mode: 'editor',
+    editor: draft({
+      focused: 3,
+      timing: { kind: 'cron', expression: '0 9 * * *', timeZone: 'UTC' },
+    }),
+  }), { columns: 100, rows: 30 })
+  cron.panel.handleInput('?')
+  assert.deepEqual(cron.dispatches, [{ kind: 'set-field', fieldId: 'timing-cron', value: '0 9 * * *?' }])
+
+  const rrule = harness(workspace({
+    mode: 'editor',
+    editor: draft({
+      focused: 3,
+      timing: { kind: 'rrule', rrule: 'DTSTART;TZID=UTC:20260101T090000' },
+    }),
+  }), { columns: 100, rows: 30 })
+  rrule.panel.handleInput('?')
+  assert.deepEqual(rrule.dispatches, [{
+    kind: 'set-field',
+    fieldId: 'timing-rrule',
+    value: 'DTSTART;TZID=UTC:20260101T090000?',
+  }])
+  assert.equal(rrule.dispatches.some(intent => intent.kind === 'open-help'), false)
+})
+
+test('a multi-line Prompt is edited raw and painted line by line', () => {
+  const raw = draft({ focused: 1, prompt: 'first line\nsecond line' })
+  const view = harness(workspace({ mode: 'editor', editor: raw }), { columns: 100, rows: 30 })
+  view.panel.focused = true
+  view.resetDispatches()
+  view.panel.handleInput('X')
+  const edit = view.dispatches[0]
+  assert.equal(edit?.kind, 'set-field')
+  assert.equal(edit?.kind === 'set-field' ? edit.value : '', 'first line\nsecond lineX',
+    'the stored newline is preserved and the typed character is appended')
+
+  const stored = task({ id: 'task-multi', title: 'Multi', prompt: 'first line\nsecond line' })
+  const detail = harness(workspace({ mode: 'detail', detail: stored, rows: [stored], total: 1, selectedId: stored.id }), { columns: 100, rows: 30 })
+  const lines = detail.plain()
+  assert.ok(lines.some(line => line.includes('first line')), 'the first stored line is painted')
+  assert.ok(lines.some(line => line.includes('second line')), 'the second stored line is painted separately')
+})
+
+test('a paused task paints a neutral scheduled occurrence, never "final"', () => {
+  const paused = task({ id: 'task-paused', title: 'Paused', status: 'paused' })
+  const view = harness(workspace({
+    mode: 'detail',
+    detail: paused,
+    rows: [paused],
+    total: 1,
+    selectedId: paused.id,
+  }), { columns: 120, rows: 30 })
+  const lines = view.plain()
+  const occurrence = lines.find(line => line.includes('Occurrence'))
+  assert.ok(occurrence !== undefined && occurrence.includes('scheduled '), `paused occurrence: ${JSON.stringify(occurrence)}`)
+  assert.ok(!occurrence.includes('final '), 'a paused task has no final occurrence')
+})
+
+test('every page stays inside the design-language size matrix', () => {
+  const sizes: readonly { readonly columns: number; readonly rows: number }[] = [
+    { columns: 44, rows: 20 },
+    { columns: 80, rows: 10 },
+    { columns: 80, rows: 24 },
+    { columns: 120, rows: 40 },
+    { columns: 200, rows: 50 },
+  ]
+  const selected = task({ id: 'task-matrix', title: 'Matrix task' })
+  const pages: readonly { readonly label: string; readonly snapshot: ScheduleWorkspaceSnapshot }[] = [
+    { label: 'list', snapshot: workspace({ rows: FOUR_TASKS, total: FOUR_TASKS.length, selectedId: FOUR_TASKS[0]!.id }) },
+    { label: 'detail', snapshot: workspace({ mode: 'detail', detail: selected, rows: [selected], total: 1, selectedId: selected.id }) },
+    {
+      label: 'history',
+      snapshot: workspace({
+        mode: 'history',
+        rows: [selected],
+        total: 1,
+        selectedId: selected.id,
+        history: {
+          status: 'ready',
+          records: [{ scheduledAt: '2026-06-01T09:00:00.000Z', deliveredAt: '2026-06-01T09:00:00.100Z', messageId: 'm1' }],
+          earlierRecordsUnavailable: false,
+          earlierRecordsPruned: false,
+        },
+      }),
+    },
+    { label: 'editor', snapshot: workspace({ mode: 'editor', editor: draft() }) },
+    {
+      label: 'confirm',
+      snapshot: workspace({ confirm: { kind: 'clear-ended', token: 12 } }),
+    },
+  ]
+  for (const size of sizes) {
+    for (const page of pages) {
+      const lines = harness(page.snapshot, size).plain()
+      assert.ok(lines.length <= size.rows, `${page.label} ${size.columns}×${size.rows}: too many rows`)
+      for (const line of lines) {
+        assert.ok(!line.includes('\n'), `${page.label} ${size.columns}×${size.rows}: embedded newline`)
+      }
+      assert.ok(lines.some(line => /Esc|Confirm \[Y\]|Save/.test(line)),
+        `${page.label} ${size.columns}×${size.rows} keeps an actionable Esc/Save hint`)
+    }
+  }
 })

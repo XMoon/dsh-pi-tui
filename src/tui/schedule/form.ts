@@ -46,6 +46,7 @@ export function editorFieldHint(field: ScheduleFormField): string {
       return 'Enter choose Session'
     case 'target-advanced':
       return 'Enter show/hide'
+    case 'prompt':
     case 'timing-rrule':
       return 'Enter newline · Tab leaves'
     default:
