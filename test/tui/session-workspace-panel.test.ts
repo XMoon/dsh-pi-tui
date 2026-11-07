@@ -1004,7 +1004,7 @@ test('the header affordances are real hit targets: w, / Search and the outside-a
   assert.ok(h.view().includes('Search all workspaces'), 'the / Search hint enters the global search')
 })
 
-test('an Activity reorder is held while the cursor is busy, then committed without losing the selection', async () => {
+test('an Activity sample applies immediately, including a revocation, and never moves the cursor', async () => {
   const h = harness({ columns: 100, rows: 24 })
   h.handle.setSnapshot(snapshot({
     rows: [row(CURRENT, 3_000, { title: 'Current session' }), row(OTHER, 2_000, { title: 'Other session' })],
@@ -1021,8 +1021,9 @@ test('an Activity reorder is held while the cursor is busy, then committed witho
   h.vt.sendInput('\x1b[B')
   await h.paint()
   assert.ok(/^> .*Other session/m.test(h.view()), 'the second row is selected')
-  // The official sample now proves a need on the SELECTED row: its label must
-  // update immediately, but the group order waits for an idle cursor.
+  // The official sample now proves a need on the SELECTED row: the label AND
+  // its group membership are live immediately (a group change is a fact
+  // change, never a deferred animation), and the cursor keeps its Session.
   h.handle.setActivityFacts({
     listRevision: 1,
     facts: [
@@ -1032,20 +1033,133 @@ test('an Activity reorder is held while the cursor is busy, then committed witho
     answerEligibility: [eligibility(OTHER)],
   })
   await h.paint()
-  const held = h.view()
-  assert.ok(held.includes('Question'), `the row label updates immediately:\n${held}`)
-  assert.ok(!held.includes('Needs attention'), `the group order is held while the cursor is busy:\n${held}`)
-  assert.ok(/^> .*Other session/m.test(held), 'the cursor never jumps on an activity update')
-  // After the idle window the delayed order commits and the selection follows
-  // its own id, not a stale index.
-  const deadline = Date.now() + 4_000
-  while (!h.view().includes('Needs attention') && Date.now() < deadline) {
-    await new Promise(resolve => setTimeout(resolve, 25))
-    await h.paint()
-  }
-  const committed = h.view()
-  assert.ok(committed.includes('Needs attention · 1'), `the delayed reorder commits:\n${committed}`)
-  assert.ok(/^> .*Other session/m.test(committed), `the selection is re-anchored on its id:\n${committed}`)
+  const proved = h.view()
+  assert.ok(proved.includes('Needs attention · 1'), `the proved need is painted at once:\n${proved}`)
+  assert.ok(/^> .*Other session/m.test(proved), 'the cursor never jumps on an activity update')
+  // A revocation is the same class of fact: it disappears in the SAME frame,
+  // never behind a delayed group order.
+  h.handle.setActivityFacts({
+    listRevision: 1,
+    facts: [
+      fact(CURRENT, { running: false, attention: 'none', attentionSourceState: 'known' }),
+      fact(OTHER, { running: true, attention: 'unknown', attentionSourceState: 'unknown' }),
+    ],
+    answerEligibility: [],
+  })
+  await h.paint()
+  const revoked = h.view()
+  assert.ok(!revoked.includes('Needs attention'), `the revoked need never lingers:\n${revoked}`)
+  assert.ok(revoked.includes('Pending unknown · Working'),
+    `the row keeps its unproved pending state while working:\n${revoked}`)
+})
+
+test('a Peek is pinned to its own Session and exits when that Session leaves the roster', async () => {
+  const h = harness({ columns: 100, rows: 24 })
+  h.handle.setSnapshot(snapshot({
+    rows: [row(CURRENT, 3_000, { title: 'Current session' }), row(OTHER, 2_000, { title: 'Other session' })],
+  }))
+  h.handle.setActivityFacts({
+    listRevision: 1,
+    facts: [
+      fact(CURRENT, { running: false, attention: 'none', attentionSourceState: 'known' }),
+      fact(OTHER, { running: false, attention: 'none', attentionSourceState: 'known' }),
+    ],
+    answerEligibility: [],
+  })
+  await h.paint()
+  h.vt.sendInput('\x1b[B')
+  await h.paint()
+  h.vt.sendInput(' ')
+  await h.paint()
+  assert.ok(h.view().includes('Peek · other-se'), 'the Peek names its own Session')
+  // The refresh drops the peeked Session and re-anchors the list selection: the
+  // Peek must exit instead of silently showing the next selected Session.
+  h.handle.setSnapshot(snapshot({ rows: [row(CURRENT, 3_000, { title: 'Current session' })] }))
+  await h.paint()
+  const view = h.view()
+  assert.ok(!view.includes('Peek ·'), `the Peek exits when its target is gone:\n${view}`)
+  assert.ok(!view.includes('Other session'), 'the removed Session never paints')
+  assert.ok(/^> .*Current session/m.test(view), 'the list selection re-anchored on a listed row')
+  h.vt.sendInput('\r')
+  await h.paint()
+  assert.deepEqual(h.resumes, [], 'the Peek exit never resumes any Session')
+})
+
+test('a Peek opened from search results also exits when its target leaves the results', async () => {
+  const h = harness({ columns: 100, rows: 24, initialMode: 'search' })
+  h.handle.setSnapshot(snapshot({
+    query: 'needle',
+    searchState: 'ready',
+    searchResults: [{ row: row(OTHER, 2_000, { title: 'Other session' }), source: 'Content', snippet: 'needle' }],
+  }), 'needle')
+  await h.paint()
+  h.vt.sendInput('\r') // editor -> results
+  await h.paint()
+  h.vt.sendInput(' ')
+  await h.paint()
+  assert.ok(h.view().includes('Peek · other-se'))
+  h.handle.setSnapshot(snapshot({ query: 'needle', searchState: 'ready', searchResults: [] }))
+  await h.paint()
+  assert.ok(!h.view().includes('Peek ·'), `the Peek exits when the result is gone:\n${h.view()}`)
+  assert.ok(h.view().includes('Search all workspaces'), 'the search editor owns the keyboard again')
+})
+
+test('a clipped [w] hint keeps no hit region: the painted / Search wins the click', async () => {
+  const h = harness({ columns: 60, rows: 24 })
+  h.handle.setSnapshot(snapshot())
+  h.handle.updateWorkspaces({
+    type: 'baseline',
+    items: [{
+      workspaceId: 'ws-long',
+      path: '/ws/long',
+      // 40 columns: the applied scope label plus ` [w]` is 55 cells, so the
+      // hint is clipped by the trailing reservation but still STARTS inside the
+      // painted row — the exact overlap a naive hit map would create.
+      title: 'Long workspace name pushing hint off row',
+      sessionIds: [CURRENT],
+    }],
+  })
+  await h.paint()
+  h.vt.sendInput('w')
+  await h.paint()
+  h.vt.sendInput('\x1b[B')
+  h.vt.sendInput('\x1b[B')
+  h.vt.sendInput('\r')
+  await h.paint()
+  const subHeader = panelFrame(h)[1]!
+  assert.ok(subHeader.includes('Workspace: Long workspace'), 'the long official title is the applied scope label')
+  assert.ok(!subHeader.includes('[w]'), `the hint is really clipped at 60 columns:\n${subHeader}`)
+  assert.ok(subHeader.includes('/ Search'), `the painted trailing affordance:\n${subHeader}`)
+  await clickCell(h, subHeader.indexOf('/ Search') + 1, 1)
+  const view = h.view()
+  assert.ok(view.includes('Search all workspaces'), `the painted / Search opens the search:\n${view}`)
+  assert.ok(!view.includes('Workspace scope:'), 'the clipped [w] never opens the selector')
+})
+
+test('a Working row keeps its unproved Pending state visible', async () => {
+  const h = harness({ columns: 100, rows: 24 })
+  h.handle.setSnapshot(snapshot({
+    rows: [
+      row('session-denied', 3_000, { title: 'Denied row' }),
+      row('session-unknown', 2_000, { title: 'Unknown row' }),
+      row('session-unavailable', 1_000, { title: 'Unavailable row' }),
+    ],
+  }))
+  h.handle.setActivityFacts({
+    listRevision: 1,
+    facts: [
+      fact('session-denied', { running: true, attention: 'unknown', attentionSourceState: 'denied' }),
+      fact('session-unknown', { running: true, attention: 'unknown', attentionSourceState: 'unknown' }),
+      fact('session-unavailable', { running: true, attention: 'unknown', attentionSourceState: 'unavailable' }),
+    ],
+    answerEligibility: [],
+  })
+  await h.paint()
+  const view = h.view()
+  assert.ok(view.includes('Working · 3'), `all three running rows share the Working group:\n${view}`)
+  assert.ok(view.includes('Pending denied · Working'), `a denied pending state stays visible:\n${view}`)
+  assert.ok(view.includes('Pending unknown · Working'), `an unknown pending state stays visible:\n${view}`)
+  assert.ok(view.includes('Pending unavailable · Working'), `an unavailable pending state stays visible:\n${view}`)
 })
 
 test('the read-only Peek names the OFFICIAL Workspace id, not only its title', async () => {

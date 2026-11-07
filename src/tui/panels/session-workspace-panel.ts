@@ -122,9 +122,6 @@ const WIDE_MIN_COLUMNS = 112
 const WIDE_MIN_ROWS = 12
 /** The smallest left column of the two-column layout. */
 const WIDE_LEFT_MIN_CELLS = 44
-/** How long a group re-order waits for an idle cursor after an Activity update. */
-const ORDER_HOLD_MS = 1500
-
 const GROUP_LABEL: Record<SessionWorkspaceGroup, string> = {
   needs: 'Needs attention',
   working: 'Working',
@@ -346,12 +343,9 @@ export class SessionWorkspacePanel implements Component {
    *  Enter. */
   private lastPaintedBrowseIds: string[] = []
   private lastPaintedResultIds: string[] = []
-  /** The groups of the last frame painted WITHOUT an order hold. */
+  /** The ordered groups of the last painted frame (the stable tie-break for
+   *  rows whose official `updatedAt` collides). */
   private paintedGroups: readonly SessionWorkspaceGroupView[] = []
-  /** A held pre-Activity group order; committed after {@link ORDER_HOLD_MS}. */
-  private heldGroups: readonly SessionWorkspaceGroupView[] | undefined
-  private orderTimer: ReturnType<typeof setTimeout> | undefined
-  private lastUserInputAt = 0
   /** The one raw search editor. Programmatic seeds are fenced by
    *  `applyingSeed`, so only a real text change reaches the read owner. */
   private readonly searchInput = new Input({ prompt: 'Search: ' })
@@ -446,9 +440,11 @@ export class SessionWorkspacePanel implements Component {
   }
 
   /** Publish ONE accepted official Activity sample for one roster revision.
-   *  The row STATUSES update immediately; a changed group ORDER is held for
-   *  {@link ORDER_HOLD_MS} so an activity refresh never yanks the cursor the
-   *  user is browsing. */
+   *  Every row STATUS and its group membership change IMMEDIATELY: a revoked
+   *  answerability must never be painted as a live `Needs attention` row, not
+   *  even for one frame. The cursor and the scroll anchor are preserved by
+   *  Session id, so an Activity refresh never moves the selection to another
+   *  Session. */
   setActivityFacts(input: SessionWorkspaceActivityFacts): void {
     if (this.disposed) return
     // A sample (including a re-published eligibility with its older facts) is
@@ -506,8 +502,6 @@ export class SessionWorkspacePanel implements Component {
 
   dispose(): void {
     this.disposed = true
-    if (this.orderTimer !== undefined) clearTimeout(this.orderTimer)
-    this.orderTimer = undefined
     this.pressed = undefined
   }
 
@@ -541,69 +535,17 @@ export class SessionWorkspacePanel implements Component {
     })
   }
 
-  /** The groups to paint: the live projection, or the held pre-Activity order
-   *  extended with the genuinely new ids while the cursor was busy. */
+  /** The groups to paint: ALWAYS the live classification. An Activity update
+   *  is a fact change, never a deferred animation. */
   private displayGroups(view: SessionWorkspaceView): readonly SessionWorkspaceGroupView[] {
-    if (this.heldGroups === undefined) return view.groups
-    const live = new Set(view.listIds)
-    const buckets = new Map<SessionWorkspaceGroup, string[]>()
-    for (const group of GROUP_ORDER) buckets.set(group, [])
-    const covered = new Set<string>()
-    for (const group of this.heldGroups) {
-      const bucket = buckets.get(group.kind)!
-      for (const id of group.ids) {
-        if (!live.has(id) || covered.has(id)) continue
-        bucket.push(id)
-        covered.add(id)
-      }
-    }
-    for (const group of view.groups) {
-      const bucket = buckets.get(group.kind)!
-      for (const id of group.ids) {
-        if (covered.has(id)) continue
-        bucket.push(id)
-        covered.add(id)
-      }
-    }
-    const groups: SessionWorkspaceGroupView[] = []
-    for (const kind of GROUP_ORDER) {
-      const ids = buckets.get(kind)!
-      if (ids.length > 0) groups.push({ kind, ids })
-    }
-    return groups
+    return view.groups
   }
 
-  /** Update the visible statuses immediately and hold only the group ORDER
-   *  while the user is actively browsing. */
+  /** The ONE reaction to a new Activity sample or a lost eligibility: repaint
+   *  the live facts and keep the cursor on its own Session id. */
   private applyActivityChange(): void {
-    const view = this.view(this.paintedGroups.flatMap(group => group.ids))
-    const now = Date.now()
-    const idleFor = now - this.lastUserInputAt
-    if (this.heldGroups === undefined && idleFor < ORDER_HOLD_MS && this.orderChanged(view)) {
-      this.heldGroups = this.paintedGroups
-      if (this.orderTimer !== undefined) clearTimeout(this.orderTimer)
-      this.orderTimer = setTimeout(() => {
-        this.orderTimer = undefined
-        if (this.disposed) return
-        this.heldGroups = undefined
-        this.ensureSelection()
-        this.host.requestRender()
-      }, ORDER_HOLD_MS - idleFor)
-    }
     this.ensureSelection()
     this.host.requestRender()
-  }
-
-  private orderChanged(view: SessionWorkspaceView): boolean {
-    const painted = this.paintedGroups.flatMap(group => group.ids)
-    if (painted.length !== view.listIds.length) return true
-    return painted.some((id, index) => view.listIds[index] !== id)
-  }
-
-  private releaseOrderHold(): void {
-    if (this.orderTimer !== undefined) clearTimeout(this.orderTimer)
-    this.orderTimer = undefined
-    this.heldGroups = undefined
   }
 
   // ── Workspace scope ──────────────────────────────────────────────────────
@@ -649,12 +591,6 @@ export class SessionWorkspacePanel implements Component {
    *  that was proven and is now missing falls back to All once, and a lost
    *  explicit Workspace/Unassigned scope falls back with ONE visible message. */
   private recomputeWorkspaceScope(): void {
-    const before = this.scopeKey()
-    this.recomputeWorkspaceScopeFromFacts()
-    if (this.scopeKey() !== before) this.releaseOrderHold()
-  }
-
-  private recomputeWorkspaceScopeFromFacts(): void {
     if (this.scope.kind === 'workspace' && !this.workspaces.byId.has(this.scope.workspaceId)) {
       this.scope = { kind: 'all' }
       this.notifyOnce('workspace-scope-lost', 'Workspace scope unavailable — showing all workspaces')
@@ -738,10 +674,20 @@ export class SessionWorkspacePanel implements Component {
   private ensureSelection(): void {
     this.selectorIndex = Math.min(this.selectorIndex, Math.max(0, this.selectorOptions().length - 1))
     const view = this.view()
+    const resultIds = this.snapshot.searchResults.map(result => result.row.id)
+    // A Peek pins its OWN Session id. If that Session is no longer listed (a
+    // roster refresh, a scope/search change or another Client removing it), the
+    // Peek exits to its previous focus; it must never silently show — or switch
+    // to — whatever row the selection re-anchored to.
+    if (this.peek !== undefined && !(this.searchMode ? resultIds : view.listIds).includes(this.peek.sessionId)) {
+      const returnFocus = this.peek.returnFocus
+      this.peek = undefined
+      if (this.focus === 'peek') this.focus = returnFocus
+      this.host.requestRender()
+    }
     if (this.searchMode) {
       // The visible rows ARE the Host+metadata results; the browse anchor and
       // selection stay untouched until the user leaves the search.
-      const resultIds = this.snapshot.searchResults.map(result => result.row.id)
       if (resultIds.length === 0) return
       if (!resultIds.includes(this.selectedSessionId ?? '')) this.selectedSessionId = resultIds[0]!
       return
@@ -755,12 +701,6 @@ export class SessionWorkspacePanel implements Component {
     if (this.selectedSessionIdOfIds(ids) !== undefined) return
     const anchorIndex = this.browseAnchorId === undefined ? 0 : Math.max(0, ids.indexOf(this.browseAnchorId))
     this.selectedSessionId = ids[Math.min(anchorIndex, ids.length - 1)]!
-  }
-
-  /** A one-line identity of the current browse scope: any change is an explicit
-   *  scope change, so a delayed Activity re-order must commit immediately. */
-  private scopeKey(): string {
-    return this.scope.kind === 'workspace' ? `workspace:${this.scope.workspaceId}` : this.scope.kind
   }
 
   private selectedSessionIdOfIds(ids: readonly string[]): string | undefined {
@@ -785,7 +725,6 @@ export class SessionWorkspacePanel implements Component {
 
   handleInput(data: string): void {
     if (this.disposed) return
-    this.lastUserInputAt = Date.now()
     if (matchesKey(data, Key.escape)) {
       this.handleEscape()
       return
@@ -1010,17 +949,23 @@ export class SessionWorkspacePanel implements Component {
   }
 
   private resumeSelected(): void {
-    if (this.snapshot.resumePending || this.selectedSessionId === undefined) return
-    if (this.selectedSessionId === this.options.currentSessionId) return
-    // A scope/membership change can hide the previously selected row, and a
-    // short/status-squeezed frame can paint no rows at all; only the set this
-    // frame really painted may be opened — EXCEPT inside Peek, whose body names
-    // the exact row the user opened.
+    if (this.snapshot.resumePending) return
+    // The Peek RESUMES ITS OWN pinned Session, never whatever row the list
+    // selection re-anchored to after a refresh. Outside Peek a scope/membership
+    // change can hide the previously selected row, and a short/status-squeezed
+    // frame can paint no rows at all: only the set this frame really painted may
+    // be opened.
+    const target = this.focus === 'peek' ? this.peek?.sessionId : this.selectedSessionId
+    if (target === undefined || target === this.options.currentSessionId) return
+    const listed = this.searchMode
+      ? this.snapshot.searchResults.map(result => result.row.id)
+      : this.view().listIds
+    if (!listed.includes(target)) return
     const painted = this.focus === 'peek'
-      ? this.peek !== undefined && this.view().listIds.includes(this.selectedSessionId) ? [this.selectedSessionId] : []
+      ? [target]
       : this.searchMode ? this.lastPaintedResultIds : this.lastPaintedBrowseIds
-    if (!painted.includes(this.selectedSessionId)) return
-    this.host.onResume(this.selectedSessionId)
+    if (!painted.includes(target)) return
+    this.host.onResume(target)
   }
 
   // ── Search / selector ───────────────────────────────────────────────────
@@ -1030,7 +975,6 @@ export class SessionWorkspacePanel implements Component {
       this.lastBrowseSelection = this.selectedSessionId
       this.lastBrowseAnchorId = this.browseAnchorId
     }
-    this.releaseOrderHold()
     this.searchMode = true
     this.focus = focus
     this.ensureSelection()
@@ -1038,7 +982,6 @@ export class SessionWorkspacePanel implements Component {
   }
 
   private leaveSearch(): void {
-    this.releaseOrderHold()
     this.searchMode = false
     this.focus = 'list'
     this.selectedSessionId = this.lastBrowseSelection
@@ -1074,7 +1017,6 @@ export class SessionWorkspacePanel implements Component {
     if (scope.kind === 'unassigned' && !this.workspaces.proven) return
     if (this.scopeMatches(scope)) return
     this.scope = scope
-    this.releaseOrderHold()
     this.defaultScope = scope.kind === 'current' ? 'current' : 'all'
     this.selectedSessionId = this.browseAnchorId
     this.ensureSelection()
@@ -1195,7 +1137,6 @@ export class SessionWorkspacePanel implements Component {
         // The affordance's ONE meaning: show every listed main Session in All.
         this.scope = { kind: 'all' }
         this.defaultScope = 'all'
-        this.releaseOrderHold()
         this.ensureSelection()
         break
       }
@@ -1212,7 +1153,7 @@ export class SessionWorkspacePanel implements Component {
     this.lastPaintedBrowseIds = []
     this.lastPaintedResultIds = []
     const view = this.view(this.paintedGroups.flatMap(group => group.ids))
-    if (this.heldGroups === undefined) this.paintedGroups = view.groups
+    this.paintedGroups = view.groups
     this.paintView = view
     const height = Math.max(0, this.host.rows())
     if (height === 0) return this.publishFrame([], [])
@@ -1274,13 +1215,18 @@ export class SessionWorkspacePanel implements Component {
     const left = `${color.textDim('Workspace: ')}${color.text(this.scopeLabel())}${scopeHint}`
     const trailing = color.textMuted('/ Search')
     const line = withTrailing(left, trailing, width)
+    // The hit map must use the SAME cell budget the paint used: `withTrailing`
+    // clips the left label to `width - trailingWidth`, and when that room is
+    // not positive the trailing is not painted at all. A clipped `[w]` keeps NO
+    // region, so it can never steal a click from the painted `/ Search`.
+    const room = width - visibleWidth(trailing)
     const regions: HitRegion[] = []
-    const hintStart = visibleWidth(left) - visibleWidth(scopeHint)
-    if (hintStart >= 0 && hintStart + visibleWidth(scopeHint) <= width) {
-      regions.push({ kind: 'workspace-hint', xStart: hintStart, xEnd: hintStart + visibleWidth(scopeHint) - 1, line: 0 })
-    }
-    const trailingStart = width - visibleWidth(trailing)
-    if (trailingStart >= 0) {
+    if (room > 0) {
+      const hintStart = visibleWidth(left) - visibleWidth(scopeHint)
+      if (hintStart >= 0 && hintStart + visibleWidth(scopeHint) <= room) {
+        regions.push({ kind: 'workspace-hint', xStart: hintStart, xEnd: hintStart + visibleWidth(scopeHint) - 1, line: 0 })
+      }
+      const trailingStart = width - visibleWidth(trailing)
       regions.push({ kind: 'search-hint', xStart: trailingStart, xEnd: width - 1, line: 0 })
     }
     return { line, regions }
@@ -1518,7 +1464,9 @@ export class SessionWorkspacePanel implements Component {
   /** The read-only Peek body: ONE scrollable plain-text column. */
   private renderPeekPane(width: number, budget: number): PaneRender {
     const peek = this.peek
-    const row = this.selectedRow()
+    // The Peek body is pinned to its OWN Session id: a roster refresh that
+    // re-anchors the list selection must never swap the visible detail.
+    const row = peek === undefined ? undefined : this.rowById(peek.sessionId)
     if (peek === undefined || row === undefined) {
       return { lines: [color.textMuted('Peek closed')].slice(0, budget), regions: [] }
     }
@@ -1563,10 +1511,13 @@ export class SessionWorkspacePanel implements Component {
     return lines
   }
 
+  private rowById(sessionId: string): SessionBrowserRow | undefined {
+    return this.snapshot.rows.find(row => row.id === sessionId)
+      ?? this.snapshot.searchResults.find(result => result.row.id === sessionId)?.row
+  }
+
   private selectedRow(): SessionBrowserRow | undefined {
-    if (this.selectedSessionId === undefined) return undefined
-    return this.snapshot.rows.find(row => row.id === this.selectedSessionId)
-      ?? this.snapshot.searchResults.find(result => result.row.id === this.selectedSessionId)?.row
+    return this.selectedSessionId === undefined ? undefined : this.rowById(this.selectedSessionId)
   }
 
   /** The ONE truthful status text of one classified row. */
@@ -1576,7 +1527,10 @@ export class SessionWorkspacePanel implements Component {
       return fact.running === true ? `${pending} · Working` : pending
     }
     if (fact.group === 'working') {
-      return fact.pending === 'unverified' ? `${pending} · Working` : 'Working'
+      // Running is one official fact, the pending read is another: a denied or
+      // unreadable pending state must stay visible on a Working row, never be
+      // collapsed into a bare `Working`.
+      return fact.pending === 'none' ? 'Working' : `${pending} · Working`
     }
     return fact.running === undefined ? `${pending} · Running unknown` : pending
   }

@@ -734,14 +734,18 @@ test('an eligibility loss drops the Needs row immediately and asks for ONE early
   await h.runSessions('')
   await waitUntil(() => h.view().includes('Needs attention'), 'the proved need paints')
   const listCalls = h.listCalls
-  // Another Client wins the official request: the root drops the token. The
-  // next Activity sample is held so the immediate drop can only come from the
-  // eligibility invalidation itself.
+  // The user is ACTIVELY browsing (a fresh keyboard gesture) when another
+  // Client wins the official request. The Needs group must drop in the SAME
+  // frame of the invalidation: a revocation is a fact, not an animation.
+  h.vt.sendInput('\x1b[B')
+  await h.vt.waitForRender()
   h.facts.holdNext()
   h.facts.setFacts([activityFact(CURRENT, { attention: 'none', attentionSourceState: 'known' })])
   eligible = []
   h.notifyEligibility()
-  await waitUntil(() => !h.view().includes('Needs attention'), 'the stale Needs row is dropped immediately')
+  await h.vt.waitForRender()
+  assert.ok(!h.view().includes('Needs attention'),
+    `a revoked need never survives a busy cursor:\n${h.view()}`)
   assert.equal(h.listCalls, listCalls + 1, 'the early refresh goes through the ONE read owner generation')
   await waitUntil(() => h.facts.reads.length === 2, 'the refreshed roster triggers its own Activity sample')
   h.facts.releaseHeld()
