@@ -324,8 +324,11 @@ test('stale rewind: select A\'s old turn → switch away mid-loadThrough → the
   const hostIdsBefore = new Set(host.ctx.sessions.list().map(session => String(session.id)))
   app.setDraft(`/resume ${sessionB}`)
   app.submitDraft()
+  // The fullscreen Session Workspace covers the transcript while `/resume`
+  // resolves its direct match, so "answer 6 is gone" no longer proves the
+  // switch committed. Wait for the replacement Session's own painted identity.
   await waitFor('B is the current subject', () =>
-    vt.getViewport().join('').includes('answer 6') === false, 20_000)
+    vt.getViewport().join('').includes(sessionB), 20_000)
 
   // Release: the stale selection must NOT fork — no new child session, no
   // draft install, and the truthful notice on the CURRENT surface.
