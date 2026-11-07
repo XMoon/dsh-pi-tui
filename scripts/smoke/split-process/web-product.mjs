@@ -1,8 +1,8 @@
 /**
- * M5-W PR-D product Browser-by-real-TUI qualification (T75/WP-01..WP-10).
+ * M5-W PR-D / S5-PR5 product Browser-by-real-TUI qualification (T75/WP-01..WP-11).
  *
  * This module owns the complete product composite: the single Group-A Host,
- * the per-case isolated Host scenes, the real 22-case Chromium driver runs and
+ * the per-case isolated Host scenes, the real Chromium driver runs and
  * the WC-01..12 evidence matrix writer. The Browser driver remains
  * `scripts/fixtures/m5-web-product-browser.mjs`; this module never stubs it.
  *
@@ -24,7 +24,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs'
-import { basename, dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve, sep } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 
@@ -48,6 +48,7 @@ import {
   waitGone,
 } from '../../lib/split-smoke-processes.mjs'
 import {
+  hostAssistantHasText,
   hostSessionEvents,
   sha16,
   waitForHostSessionEvent,
@@ -583,10 +584,12 @@ export const runWebProductQualification = async context => {
       .filter(([, state]) => state !== 'absent' && state !== 'state-4')
     assert(live.length === 0, `the Web rows are not plainly off: ${live.map(([id, state]) => `${id}:${state ?? 'missing'}`).join(',')}`)
   }
+  // EVERY declared Web row must be active: S5-PR5 removed the tolerated
+  // `ui-deliverables` PENDING state now that the Host mounts `workspace-changes`.
   const webFullyOn = ready => {
     const notActive = PR_A_WEB_ROWS
       .map(row => [row.id, (ready.entries ?? []).find(entry => entry.id === row.id)?.state])
-      .filter(([id, state]) => id !== 'ui-deliverables' && state !== 'active')
+      .filter(([, state]) => state !== 'active')
     assert(notActive.length === 0, `the Web rows are not active: ${notActive.map(([id, state]) => `${id}:${state ?? 'missing'}`).join(',')}`)
   }
   let browserRun = 0
@@ -1029,7 +1032,7 @@ export const runWebProductQualification = async context => {
       // The TUI keeps working on the SAME Host while Web is off.
       await tuiTurn(groupTui, sessionToggle, `W-${productNonce}-tui-while-off`, 'WP-08 TUI while off')
       // The old page is deliberately NOT guaranteed to stay usable: the
-      // product contract stops serving the page and unloads the 60 rows;
+      // product contract stops serving the page and unloads the Web rows;
       // the re-enable is proved by a NEW authenticated page below.
       await enableWeb(groupTui, 'WP-08 re-enable')
       assertToggle(await webAccess(togglePeer, 'WP-08 after re-enable', undefined), 'enabled', 'WP-08 after re-enable')
@@ -1064,7 +1067,7 @@ export const runWebProductQualification = async context => {
     }
     recordSession('wp08-web-toggle', sessionToggle)
     await ptyFrames('wp08-web-toggle', groupTui)
-    setWc('WC-09', 'PASS', 'the real TUI `/web Disable` unloaded the 60 rows and stopped serving while the Host/TUI kept working; Enable and a settings recomposition restored the final enabled state', ['WP-08'])
+    setWc('WC-09', 'PASS', 'the real TUI `/web Disable` unloaded the Web rows and stopped serving while the Host/TUI kept working; Enable and a settings recomposition restored the final enabled state', ['WP-08'])
     assert(await togglePeer.shutdown() !== undefined, 'WP-08 the qualification Peer did not stop')
     const peerIndex = peers.indexOf(togglePeer)
     if (peerIndex >= 0) peers.splice(peerIndex, 1)
@@ -1873,6 +1876,272 @@ export const runWebProductQualification = async context => {
           }
         }
       }
+      // ── Group W: WP-11 (S5-PR5) official Web user capabilities ─────────
+      // One real Host, one real PTY TUI, one real Chromium: the official
+      // file-actions Download, message-quotes draft, and the Host-recorded
+      // changed-files card/review. The Browser driver owns every user gesture;
+      // this runner owns the authoritative Host facts and the official
+      // authenticated routes.
+      {
+        const changesNonce = productNonce
+        // The earlier WP-07 group leaves the profile-owned Auto-start
+        // preference On (its own cold-boot scene). WP-11 starts from the
+        // product default, Off, through the OFFICIAL settings wire — never a
+        // direct patch write.
+        {
+          const resetHost = await startHost('web-workspace-changes', 'wp11-pref-reset', { C1_CHANGES_NONCE: changesNonce })
+          const resetPeer = await startPeer('WP-11 preference reset')
+          try {
+            const reset = await webPreference(resetPeer, 'WP-11 preference reset', false)
+            assert(reset.ok === true && reset.readBack === true,
+              `WP-11 could not reset the profile Auto-start preference to Off: ${JSON.stringify(reset)}`)
+          } finally {
+            try { await resetPeer.shutdown() } catch { /* best effort */ }
+            if (!resetHost.host.exited) { try { await resetHost.host.shutdown() } catch { /* best effort */ } }
+          }
+        }
+        const wp11 = await startHost('web-workspace-changes', 'wp11-capabilities', { C1_CHANGES_NONCE: changesNonce })
+        let wp11Next
+        let wp11Peer
+        let tuiW
+        try {
+          assertSingleHostOwners(wp11.ready, 'WP-11 Host')
+          tuiW = (await startTui('wp11-capabilities')).tui
+          await enableWeb(tuiW, 'WP-11', { requireDisabled: true })
+          const enabled11 = await hostStatus(wp11.host)
+          assertSingleHostOwners(enabled11, 'WP-11 enabled Host')
+          webFullyOn(enabled11)
+          for (const id of ['workspace-changes', 'ui-deliverables']) {
+            const entry = (enabled11.entries ?? []).find(candidate => candidate.id === id)
+            assert(entry?.state === 'active', `WP-11 the "${id}" row is ${String(entry?.state)}, not active`)
+          }
+          assert((enabled11.entries ?? []).filter(entry => entry.name === '@deepseek-ai/dsh-workspace-changes').length === 1,
+            'WP-11 expected exactly ONE official workspace-changes Host row')
+          const launch11 = launchOf(wp11.ready)
+          const index11 = await readHostWebIndex(wp11.ready.localHost.origin, launch11, 'WP-11')
+          assertWebIndexQualified(index11, 'WP-11', targetDshVersion)
+
+          let wp11Session
+          let wp11Seq
+          let wp11Turn
+          let wp11Cwd
+          let wp11HostBytes
+          let wp11Diff
+          let wp11Download
+          await browserCase('wp11-official-web-capabilities', { changesNonce }, async handle => {
+            const session = await handle.waitFact('session', 'WP-11 Browser Session creation', 240_000)
+            wp11Session = session.sessionId
+            assert(typeof wp11Session === 'string' && wp11Session !== '', 'WP-11 the Browser created no Host Session')
+            const header = await waitForHostSessionHeader(dshHome, wp11Session, 'WP-11 Session header')
+            wp11Cwd = header.cwd
+            assert(typeof wp11Cwd === 'string' && wp11Cwd !== '', 'WP-11 the Session records no authoritative cwd')
+            // The workspace registry may (legitimately) keep a default workspace
+            // created by an earlier isolated case of THIS lane, so the check is
+            // the disposable smoke work root, never the developer's repository.
+            const isolatedRoot = resolve(workDir)
+            assert(resolve(wp11Cwd) === isolatedRoot || resolve(wp11Cwd).startsWith(`${isolatedRoot}${sep}`),
+              `WP-11 the Session cwd is outside the isolated smoke work root: ${wp11Cwd}`)
+            // The isolated, disposable Git work tree at the Session's OWN cwd.
+            const git = args => spawnSync('git', args, { cwd: wp11Cwd, encoding: 'utf8' })
+            const init = git(['init', '--quiet'])
+            assert(init.status === 0, `WP-11 could not initialize the isolated Git work tree: ${init.stderr}`)
+            writeFileSync(join(wp11Cwd, 'README.md'), `w5-base-${changesNonce}\n`, { mode: 0o600 })
+            assert(git(['add', '--all']).status === 0, 'WP-11 could not stage the initial work tree')
+            const committed = git(['-c', 'user.name=WP11', '-c', 'user.email=wp11@example.invalid', 'commit', '--quiet', '-m', 'w5 baseline'])
+            assert(committed.status === 0, `WP-11 could not create the initial commit: ${committed.stderr}`)
+            handle.signal('workspace-ready')
+
+            // W5-CHANGES source: the durable event, the live official summary/diff
+            // routes, and the real file bytes agree.
+            const boundary = durableOf(wp11Session).length
+            const changesEvent = await waitForHostSessionEventAfter(dshHome, wp11Session, boundary,
+              event => event.type === 'workspace/changes', 'WP-11 durable workspace/changes event', 300_000)
+            assert(Number.isSafeInteger(changesEvent.data?.turn) && changesEvent.data.turn >= 1,
+              `WP-11 the workspace/changes event carries no turn: ${JSON.stringify(changesEvent.data)}`)
+            wp11Seq = changesEvent.seq
+            wp11Turn = changesEvent.data.turn
+            const coordinates = new URLSearchParams({ sessionId: wp11Session, seq: String(wp11Seq) })
+            const summaryUrl = `${wp11.ready.localHost.origin}/api/changes.summary?${coordinates}`
+            const summary = await fetchStatus(summaryUrl, { headers: { cookie: index11.cookie } })
+            assert(summary.status === 200, `WP-11 the authenticated summary route returned HTTP ${String(summary.status)}`)
+            const summaryBody = JSON.parse(summary.body)
+            assert(summaryBody.turn === wp11Turn, 'WP-11 the summary turn differs from the announced event turn')
+            const fileIndex = summaryBody.files.findIndex(file => file.path === 'changed.txt' || file.path.endsWith('/changed.txt'))
+            assert(fileIndex >= 0, `WP-11 the summary does not list changed.txt: ${JSON.stringify(summaryBody.files)}`)
+            assert(summaryBody.files[fileIndex].added >= 1, 'WP-11 the summary reports no added line for the real write')
+            wp11HostBytes = readFileSync(join(wp11Cwd, 'changed.txt'))
+            assert(wp11HostBytes.toString('utf8') === `w5-change-${changesNonce}\n`,
+              'WP-11 the Host file does not hold the exact written content')
+            const diffUrl = `${wp11.ready.localHost.origin}/api/changes.diff?${coordinates}&index=${String(fileIndex)}`
+            const diff = await fetchStatus(diffUrl, { headers: { cookie: index11.cookie } })
+            assert(diff.status === 200, `WP-11 the authenticated comparison route returned HTTP ${String(diff.status)}`)
+            wp11Diff = JSON.parse(diff.body)
+            assert(wp11Diff.kind === 'text' && wp11Diff.before === false && wp11Diff.after === true,
+              `WP-11 the comparison is not the created text file: ${JSON.stringify({ kind: wp11Diff.kind, before: wp11Diff.before, after: wp11Diff.after })}`)
+            const addedText = wp11Diff.hunks.flatMap(hunk => hunk.lines).filter(line => line.startsWith('+')).join('\n')
+            assert(addedText.includes(`w5-change-${changesNonce}`),
+              'WP-11 the official comparison does not serve the recorded line')
+            const anonymous = await fetchStatus(summaryUrl)
+            assert(anonymous.status === 401,
+              `WP-11 the unauthenticated summary route was not refused (HTTP ${String(anonymous.status)})`)
+            await handle.signal('changes-review-go')
+
+            // The Browser sink: the card and its Review page paint the Host facts.
+            const card = await handle.waitFact('changes-card', 'WP-11 changed-files card', 300_000)
+            assert(typeof card.text === 'string' && card.text.includes('changed.txt'),
+              'WP-11 the changed-files card does not name the changed file')
+            const review = await handle.waitFact('review', 'WP-11 changes review', 300_000)
+            assert(review.state === 'ready', `WP-11 the changes review state is ${String(review.state)}`)
+            assert(typeof review.file === 'string' && review.file.endsWith('changed.txt'),
+              `WP-11 the review opened ${String(review.file)}, not changed.txt`)
+            assert((review.text ?? '').includes(`w5-change-${changesNonce}`),
+              'WP-11 the review does not paint the Host-served change')
+            const network = review.network ?? {}
+            assert((network.statuses ?? []).some(entry => entry.path === '/api/changes.summary' && entry.status === 200),
+              'WP-11 the Browser never read the official summary route')
+            assert((network.statuses ?? []).some(entry => entry.path === '/api/changes.diff' && entry.status === 200),
+              'WP-11 the Browser never read the official comparison route')
+
+            // W5-FILE: the downloaded bytes ARE the Host bytes.
+            wp11Download = await handle.waitFact('download', 'WP-11 real Browser download', 300_000)
+            const hostHash = createHash('sha256').update(wp11HostBytes).digest('hex')
+            assert(wp11Download.sha256 === hostHash,
+              `WP-11 the downloaded bytes (${String(wp11Download.sha256)}) are not the Host file (${hostHash})`)
+            assert(wp11Download.bytes === wp11HostBytes.length,
+              `WP-11 the downloaded byte count ${String(wp11Download.bytes)} differs from the Host file`)
+            assert(!(wp11Download.labels ?? []).some(label => /^Save as/u.test(label)),
+              'WP-11 the Web file menu offered the Desktop-only Save as')
+            const fileNegative = await handle.waitFact('file-negative', 'WP-11 missing-file refusal', 300_000)
+            assert(fileNegative.downloadStarted === false, 'WP-11 a missing Session file started a download')
+            assert(readFileSync(join(wp11Cwd, 'changed.txt')).equals(wp11HostBytes),
+              'WP-11 the refused file action modified the Host file')
+
+            // W5-QUOTE: selection drafts only; the explicit Send is the ONE write.
+            // The Host appends its own per-turn runtime/time context as
+            // user-role messages, so the comparison is the LIVE count at the
+            // moment the selection was admitted, never a hard-coded 1.
+            const userCountBeforeQuote = durableOf(wp11Session).filter(event => event.type === 'user/message').length
+            const draft = await handle.waitFact('quote-draft', 'WP-11 Quote draft', 300_000)
+            assert(Array.isArray(draft.quoteNodes)
+              && draft.quoteNodes.some(text => typeof text === 'string' && text.includes(`w5-editing ${changesNonce}`)),
+            'WP-11 the Quote action did not insert the selected text as an atomic draft quote')
+            // The draft's model-visible Markdown is the official editor's own
+            // clipboard serialization; a refused Clipboard API is recorded, not claimed.
+            assert(draft.markdownDraft === null
+              || (typeof draft.markdownDraft === 'string' && draft.markdownDraft.includes(`> w5-editing ${changesNonce}`)),
+            `WP-11 the composer draft is not the expected Markdown blockquote: ${JSON.stringify(draft.markdownDraft)}`)
+            const userCountAtDraft = durableOf(wp11Session).filter(event => event.type === 'user/message').length
+            assert(userCountAtDraft === userCountBeforeQuote,
+              `WP-11 the Quote draft added ${String(userCountAtDraft - userCountBeforeQuote)} user message(s); selection must not submit`)
+            const otherSession = await tuiNewSession(tuiW, 'WP-11 other Session')
+            // The Web sidebar lists Sessions with durable content; seed one real
+            // TUI Turn so the Browser can open the SAME Session from its list.
+            await tuiTurn(tuiW, otherSession, `w5-other-${changesNonce}`, 'WP-11 other Session seed')
+            writeFileSync(join(handle.coord, 'browser-other-session.json'), `${JSON.stringify({ sessionId: otherSession })}\n`, { mode: 0o600 })
+            const other = await handle.waitFact('quote-other-session', 'WP-11 other-Session check', 300_000)
+            assert(other.sessionId === otherSession, 'WP-11 the Browser opened the wrong other Session')
+            assert(durableOf(wp11Session).filter(event => event.type === 'user/message').length === userCountBeforeQuote,
+              'WP-11 navigating to another Session wrote the Quote into the original Session')
+            await handle.signal('quote-send-go')
+            await handle.waitFact('quote-sent', 'WP-11 quoted Send', 300_000)
+            const afterSend = durableOf(wp11Session)
+            const quotedWrites = afterSend.filter(event => event.type === 'user/message'
+              && event.data?.source?.kind === 'user'
+              && JSON.stringify(event).includes(`> w5-editing ${changesNonce}`))
+            assert(quotedWrites.length === 1,
+              `WP-11 the quoted prompt was committed ${String(quotedWrites.length)} times, expected exactly 1`)
+            assert(hostAssistantHasText(afterSend, 'w5-quote answer'),
+              'WP-11 the quoted prompt produced no normal assistant answer')
+
+            // W5-CHANGES negative: a tool-active Turn with no file change stays card-free.
+            const noChange = await handle.waitFact('nochange', 'WP-11 no-change turn', 300_000)
+            assert(noChange.cardsAfter === noChange.cardsBefore,
+              'WP-11 a no-change Turn painted a new changed-files card')
+            const changesAfter = durableOf(wp11Session).filter(event => event.type === 'workspace/changes')
+            assert(changesAfter.length === 1,
+              `WP-11 the Host persisted ${String(changesAfter.length)} workspace/changes events, expected exactly the changed Turn`)
+            // The retained, redacted WP-11 evidence record (no prompt text, no
+            // Cookie, no launch token, no private absolute path beyond the
+            // isolated smoke root that the run already owns).
+            evidence.fact('wp11-official-web-capabilities', 'web-capabilities', {
+              hostPid: wp11.ready.pid,
+              hostInstanceIdDigest: sha16(wp11.ready.localHost.instanceId),
+              sessionId: wp11Session,
+              otherSession,
+              cwd: wp11Cwd,
+              changesEvent: { turn: wp11Turn, seq: wp11Seq },
+              summary: { status: summary.status, turn: summaryBody.turn, total: summaryBody.total, files: summaryBody.files.map(file => file.path) },
+              diff: { status: diff.status, kind: wp11Diff.kind, hunks: wp11Diff.hunks.length },
+              anonymousSummaryStatus: anonymous.status,
+              webRows: { workspaceChanges: 'active', uiDeliverables: 'active' },
+              download: wp11Download,
+              quote: {
+                quoteNodes: draft.quoteNodes,
+                markdownDraft: draft.markdownDraft,
+                userMessagesBeforeSend: userCountBeforeQuote,
+                quotedUserMessages: quotedWrites.length,
+              },
+              fileNegative: { downloadStarted: fileNegative.downloadStarted, rows: fileNegative.rows },
+              noChange,
+            })
+            recordSession('wp11-official-web-capabilities', wp11Session)
+            await ptyFrames('wp11-capabilities', tuiW)
+            trace('t75-web-product-wp11', {
+              sessionId: wp11Session,
+              otherSession,
+              turn: wp11Turn,
+              seq: wp11Seq,
+              cwd: wp11Cwd,
+              download: { bytes: wp11Download.bytes, sha256: wp11Download.sha256 },
+              diffKind: wp11Diff.kind,
+              workspaceChanges: 'active',
+              uiDeliverables: 'active',
+            })
+          })
+
+          // The real TUI has proven the product enable; dispose it BEFORE the
+          // Host stop so no Client owns a live surface across the restart.
+          try { await tuiW.dispose() } catch { /* the global backstop owns leftovers */ }
+          // Stale coordinates after a REAL Host restart: the old summary/diff
+          // must be unavailable, and the new Host must never replay the content.
+          const stop = await wp11.host.shutdown()
+          assert(stop.code === 0, 'WP-11 the first qualification Host did not stop normally')
+          wp11Next = await startHost('web-workspace-changes', 'wp11-restart', { C1_CHANGES_NONCE: changesNonce })
+          wp11Peer = await startPeer('WP-11 restart peer')
+          assertToggle(await webAccess(wp11Peer, 'WP-11 restart', true), 'enabled', 'WP-11 restart webAccess')
+          const restartFacts = await readHostWebIndex(wp11Next.ready.localHost.origin, launchOf(wp11Next.ready), 'WP-11 restart')
+          assertWebIndexQualified(restartFacts, 'WP-11 restart', targetDshVersion)
+          const coordinates = new URLSearchParams({ sessionId: wp11Session, seq: String(wp11Seq) })
+          const staleSummary = await fetchStatus(`${wp11Next.ready.localHost.origin}/api/changes.summary?${coordinates}`,
+            { headers: { cookie: restartFacts.cookie } })
+          assert(staleSummary.status === 404,
+            `WP-11 a restarted Host served the old summary (HTTP ${String(staleSummary.status)})`)
+          const staleDiff = await fetchStatus(`${wp11Next.ready.localHost.origin}/api/changes.diff?${coordinates}&index=0`,
+            { headers: { cookie: restartFacts.cookie } })
+          assert(staleDiff.status === 404,
+            `WP-11 a restarted Host served the old comparison (HTTP ${String(staleDiff.status)})`)
+          for (const body of [staleSummary.body, staleDiff.body]) {
+            assert(!body.includes(`w5-change-${changesNonce}`),
+              'WP-11 a restarted Host replayed content it no longer owns')
+          }
+          evidence.fact('wp11-restart', 'stale-coordinates', {
+            summary: staleSummary.status,
+            diff: staleDiff.status,
+            replayRefused: true,
+          })
+          trace('t75-web-product-wp11-stale', {
+            summary: staleSummary.status,
+            diff: staleDiff.status,
+            replayRefused: true,
+          })
+        } finally {
+          if (tuiW !== undefined && !tuiW.exited) { try { await tuiW.dispose() } catch { /* best effort */ } }
+          if (wp11Peer !== undefined && !wp11Peer.exited) { try { await wp11Peer.shutdown() } catch { /* best effort */ } }
+          if (wp11Next !== undefined && !wp11Next.host.exited) { try { await wp11Next.host.shutdown() } catch { /* best effort */ } }
+          if (!wp11.host.exited) { try { await wp11.host.shutdown() } catch { /* best effort */ } }
+        }
+      }
+
       for (const client of clients.splice(0)) {
         if (client.exited) continue
         try { await client.dispose() } catch { /* the global backstop owns leftovers */ }
