@@ -2193,6 +2193,30 @@ export const runWebProductQualification = async context => {
               'WP-11 post-re-enable workspace/changes event', 180_000)
             wp11Seq2 = secondEvent.seq
             wp11Turn2 = secondEvent.data.turn
+            // RFL-006: the SECOND real change must carry the SAME official
+            // write-tool source witness as the first one.
+            const write2Proof = readC1WorkEvents(wp11.workRoot)
+              .filter(event => event.kind === 'web-changes-write2-issued' && event.sessionId === wp11Session)
+            assert(write2Proof.length === 1,
+              `WP-11 the C1 model issued ${String(write2Proof.length)} second write calls, expected exactly 1`)
+            assert(write2Proof[0].nonce === changesNonce
+              && write2Proof[0].userText.includes(`w5-changes2-${changesNonce}`),
+            'WP-11 the second model write proof belongs to another session/prompt')
+            const secondTurnEvents = durableOf(wp11Session).filter(event => event.data?.turn === wp11Turn2)
+            const secondWriteCalls = secondTurnEvents.filter(event => event.type === 'tool/call' && event.data?.name === 'write')
+            assert(secondWriteCalls.length === 1,
+              `WP-11 the post-re-enable turn persisted ${String(secondWriteCalls.length)} official write tool calls, expected exactly 1`)
+            const secondWriteArgs = JSON.parse(secondWriteCalls[0].data.arguments)
+            assert(JSON.stringify(secondWriteArgs) === JSON.stringify({ file_path: 'changed2.txt', content: `w5-change2-${changesNonce}\n` }),
+              `WP-11 the second write tool arguments drifted: ${JSON.stringify(secondWriteArgs)}`)
+            const secondWriteResults = secondTurnEvents.filter(event => event.type === 'tool/result'
+              && event.data?.message?.toolCallId === secondWriteCalls[0].data.callId)
+            assert(secondWriteResults.length === 1,
+              `WP-11 the second write tool call settled ${String(secondWriteResults.length)} times, expected exactly 1`)
+            assert(secondWriteResults[0].data.message.isError === false,
+              'WP-11 the second official write tool result reports an error')
+            assert(secondWriteResults[0].seq > secondWriteCalls[0].seq && secondEvent.seq > secondWriteResults[0].seq,
+              'WP-11 the post-re-enable workspace/changes event does not follow the successful write tool result')
             const secondCoordinates = new URLSearchParams({ sessionId: wp11Session, seq: String(wp11Seq2) })
             const secondSummary = await fetchStatus(`${wp11.ready.localHost.origin}/api/changes.summary?${secondCoordinates}`,
               { headers: { cookie: index11.cookie } })

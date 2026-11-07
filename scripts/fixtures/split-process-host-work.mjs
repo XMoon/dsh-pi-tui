@@ -181,7 +181,7 @@ class C1Model extends LlmAdapter {
         if (!this.secondIssued?.has(sessionId)) {
           this.secondIssued ??= new Set()
           this.secondIssued.add(sessionId)
-          this.record('web-changes-write2-issued', { sessionId, nonce })
+          this.record('web-changes-write2-issued', { sessionId, nonce, userText: prompt.slice(0, 200) })
           yield { type: 'block-start', index: 0, blockType: 'tool-call' }
           yield toolCall(`w5-write2-${sessionId}`, 'write', { file_path: 'changed2.txt', content: `w5-change2-${nonce}\n` })
           yield { type: 'finish', reason: { kind: 'tool-calls' } }
