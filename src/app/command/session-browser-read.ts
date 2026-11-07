@@ -412,6 +412,15 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     panel.refreshError = undefined
     panel.listRevision += 1
     panel.projectionGeneration += 1
+    // A presented search RESULT is a claim about one roster row: when the
+    // accepted roster no longer lists that Session, the result must disappear
+    // in the SAME publication. Waiting for the refreshed Host search (or a
+    // projection batch, or a search that never re-runs after an unavailable/
+    // error state) would leave a removed Session selectable and peekable.
+    if (panel.searchResults.length > 0) {
+      const live = new Set(panel.rows.map((row) => row.id))
+      panel.searchResults = panel.searchResults.filter((result) => live.has(result.row.id))
+    }
     return listedRows
   }
 

@@ -838,3 +838,54 @@ test('a stale projection batch never enriches a newer accepted roster', async ()
   pending[1]!(new Map([[CURRENT, { title: 'Fresh title' }]]))
   await waitUntil(() => h.view().includes('Fresh title'), 'the current roster batch enriches the rows')
 })
+
+test('a roster refresh drops search results for removed Sessions before the next Host search', async () => {
+  let listed: readonly SessionSummary[] = [row(CURRENT, 3_000), row(OTHER, 2_000)]
+  let searchCalls = 0
+  const heldSearches: Array<() => void> = []
+  const h = harness({
+    currentSessionId: CURRENT,
+    eligibility: () => [],
+    list: async () => listed,
+    // The projection batch is held FOREVER: no later enrichment may filter the
+    // search results for us, so only the accepted roster can close them.
+    projection: () => new Promise(() => {}),
+    search: async () => {
+      searchCalls += 1
+      if (searchCalls === 1) {
+        return { items: [{ sessionId: OTHER, snippet: 'needle in other' }], hasMore: false }
+      }
+      // The refreshed Host search is HELD: only the accepted roster can close
+      // the stale result in this window.
+      await new Promise<void>(resolve => heldSearches.push(resolve))
+      return { items: [], hasMore: false }
+    },
+  })
+  await h.runSessions('')
+  await h.vt.waitForRender()
+  h.vt.sendInput('/')
+  await h.vt.waitForRender()
+  h.vt.sendInput('needle')
+  await waitUntil(() => h.view().includes('needle in other'), 'the real Host content hit paints')
+  await h.vt.waitForRender()
+  h.vt.sendInput('\r')
+  await h.vt.waitForRender()
+  h.vt.sendInput(' ')
+  await h.vt.waitForRender()
+  assert.ok(h.view().includes('Peek · other-se'), `the search Peek is open:\n${h.view()}`)
+
+  // Another Client removes that Session: the next accepted roster no longer
+  // lists it, while the refreshed Host search is still pending.
+  listed = [row(CURRENT, 3_000)]
+  const listCalls = h.listCalls
+  h.notifyEligibility() // the ONE early roster refresh
+  await waitUntil(() => h.listCalls > listCalls, 'the refreshed roster was accepted')
+  await h.vt.waitForRender()
+  const view = h.view()
+  assert.ok(!view.includes('Peek ·'),
+    `a removed Session never stays peekable through the search refresh window:\n${view}`)
+  assert.ok(!view.includes('needle in other'),
+    `the stale Host hit disappears with its roster row, before the next search:\n${view}`)
+  assert.ok(view.includes('needle'), 'the user query is preserved')
+  assert.equal(heldSearches.length <= 1, true, 'the refreshed Host search is still pending')
+})

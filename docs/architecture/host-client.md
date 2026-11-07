@@ -699,7 +699,11 @@ workspace/question/approval store and keeps no cross-session cache.
   refresh through the SAME owner generation — a UI invalidation (for example a
   forwarded request settled by another Client) never starts a second Host
   scan. The native TSP Presenter keeps its historical single read, and a failed
-  refresh keeps the last accepted roster with a nonfatal freshness status.
+  refresh keeps the last accepted roster with a nonfatal freshness status. An
+  accepted roster also re-filters the presented search results to the Sessions
+  it still lists, so a removed Session is never selectable (or peekable) while
+  the refreshed Host search, a projection batch or an unavailable/error search
+  state is still pending.
 
 - **Roster.** `readActivity(rows, signal)` consumes exactly the main rows the
   caller obtained from `SessionReader.list()`; it never lists, refreshes or
