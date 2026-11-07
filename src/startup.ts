@@ -339,6 +339,89 @@ const MODEL_LISTING_TAGS: readonly string[] = [
   '[llm-deepseek-api-key]',
 ]
 
+/** One live model-listing log sink. `active` turns false when its last owner
+ * unloads, so a wrapper still held by another owner's later wrapper passes
+ * through instead of reopening a log this workaround no longer owns. */
+interface ModelListingLog {
+  /** Resolved once, when the first owner installs the interception. */
+  logPath: string
+  fileHandle?: number
+  fileDisabled: boolean
+  active: boolean
+}
+
+/**
+ * The process-wide interception. The workaround is a process-global resource:
+ * a row can be RE-APPLIED before its previous fiber unloads (HMR), so
+ * overlapping installs share ONE console chain and ONE log file instead of
+ * nesting wrappers. The log path is resolved once because it is process-scoped
+ * (`<pid>` plus `$DSH_HOME`).
+ */
+let modelListingLog: ModelListingLog | undefined
+let modelListingLogOwners = 0
+let restoreModelListingConsole: (() => void) | undefined
+
+/** Append one diagnostic line to the workaround's log, reporting whether the
+ * write succeeded. A failure disables the file sink for the rest of the
+ * process and lets the caller fall back to the original console. */
+function appendModelListingLine(log: ModelListingLog, tag: string, message: string): boolean {
+  if (log.fileDisabled) return false
+  if (log.fileHandle === undefined) {
+    try {
+      mkdirSync(dirname(log.logPath), { recursive: true })
+      log.fileHandle = openSync(log.logPath, 'a', 0o600)
+    } catch {
+      log.fileDisabled = true
+      return false
+    }
+  }
+  try {
+    writeSync(log.fileHandle, `${new Date().toISOString()} ${tag} ${message}\n`)
+    return true
+  } catch {
+    log.fileDisabled = true
+    return false
+  }
+}
+
+/** Replace `console.error`/`console.warn` with the diverting wrappers for one
+ * log sink and return the disposer that restores them. Only the verified
+ * `(tag, message)` shape of the two official provider tags is diverted; every
+ * other call is handed back to the method captured here. */
+function interceptModelListingConsole(log: ModelListingLog): () => void {
+  const intercept = (original: (...args: unknown[]) => void): (...args: unknown[]) => void => {
+    return (...args: unknown[]): void => {
+      const [tag, message] = args
+      if (log.active && args.length === 2 && typeof tag === 'string' && MODEL_LISTING_TAGS.includes(tag) && typeof message === 'string') {
+        if (appendModelListingLine(log, tag, message)) return
+      }
+      original.apply(console, args)
+    }
+  }
+
+  const originalError = console.error as (...args: unknown[]) => void
+  const originalWarn = console.warn as (...args: unknown[]) => void
+  const errorWrapper = intercept(originalError)
+  const warnWrapper = intercept(originalWarn)
+  console.error = errorWrapper
+  console.warn = warnWrapper
+
+  return () => {
+    // Restore only the methods this handler still owns: a later wrapper
+    // installed by another owner must survive this row's unload.
+    if (console.error === errorWrapper) console.error = originalError
+    if (console.warn === warnWrapper) console.warn = originalWarn
+    if (log.fileHandle !== undefined) {
+      try {
+        closeSync(log.fileHandle)
+      } catch {
+        // A closed descriptor is not a failure.
+      }
+      log.fileHandle = undefined
+    }
+  }
+}
+
 /**
  * Route the two official providers' model-listing diagnostics to a file
  * instead of the interactive terminal.
@@ -354,78 +437,38 @@ const MODEL_LISTING_TAGS: readonly string[] = [
  * output: a broken diagnostics directory must never keep the TUI from
  * starting, and the diagnostic must never disappear silently.
  *
- * @returns the disposer that restores the console methods and closes the log.
+ * @returns the disposer that releases this owner; the console methods are
+ * restored when the LAST owner unloads.
  */
 function installModelListingLogInterceptor(): () => void {
-  const logPath = join(
-    process.env.DSH_HOME !== undefined && process.env.DSH_HOME !== ''
-      ? process.env.DSH_HOME
-      : join(homedir(), '.dsh'),
-    'logs',
-    `dsh-model-listing-${process.pid}.log`,
-  )
-  let fileHandle: number | undefined
-  let fileDisabled = false
-  let disposed = false
-
-  /** Append one diagnostic line to the log file, reporting whether the write
-   * succeeded. A failure disables the file sink for the rest of the session
-   * and lets the caller fall back to the terminal. */
-  const appendLine = (tag: string, message: string): boolean => {
-    if (fileDisabled) return false
-    if (fileHandle === undefined) {
-      try {
-        mkdirSync(dirname(logPath), { recursive: true })
-        fileHandle = openSync(logPath, 'a', 0o600)
-      } catch {
-        fileDisabled = true
-        return false
-      }
+  if (modelListingLogOwners === 0) {
+    const log: ModelListingLog = {
+      logPath: join(
+        process.env.DSH_HOME !== undefined && process.env.DSH_HOME !== ''
+          ? process.env.DSH_HOME
+          : join(homedir(), '.dsh'),
+        'logs',
+        `dsh-model-listing-${process.pid}.log`,
+      ),
+      fileDisabled: false,
+      active: true,
     }
-    try {
-      writeSync(fileHandle, `${new Date().toISOString()} ${tag} ${message}\n`)
-      return true
-    } catch {
-      fileDisabled = true
-      return false
-    }
+    modelListingLog = log
+    restoreModelListingConsole = interceptModelListingConsole(log)
   }
-
-  const intercept = (original: (...args: unknown[]) => void): (...args: unknown[]) => void => {
-    return (...args: unknown[]): void => {
-      const [tag, message] = args
-      // Only the verified `(tag, message)` shape is diverted; a differently
-      // shaped call keeps its original console behavior and terminal
-      // visibility. A wrapper still held by another owner after this row
-      // unloads behaves like the original instead of reopening the log.
-      if (!disposed && args.length === 2 && typeof tag === 'string' && MODEL_LISTING_TAGS.includes(tag) && typeof message === 'string') {
-        if (appendLine(tag, message)) return
-      }
-      original.apply(console, args)
-    }
-  }
-
-  const originalError = console.error as (...args: unknown[]) => void
-  const originalWarn = console.warn as (...args: unknown[]) => void
-  const errorWrapper = intercept(originalError)
-  const warnWrapper = intercept(originalWarn)
-  console.error = errorWrapper
-  console.warn = warnWrapper
-
+  modelListingLogOwners += 1
+  let released = false
   return () => {
-    disposed = true
-    // Restore only the methods this handler still owns: a later wrapper
-    // installed by another owner must survive this row's unload.
-    if (console.error === errorWrapper) console.error = originalError
-    if (console.warn === warnWrapper) console.warn = originalWarn
-    if (fileHandle !== undefined) {
-      try {
-        closeSync(fileHandle)
-      } catch {
-        // A closed descriptor is not a failure.
-      }
-      fileHandle = undefined
-    }
+    if (released) return
+    released = true
+    modelListingLogOwners -= 1
+    if (modelListingLogOwners > 0) return
+    const log = modelListingLog
+    modelListingLog = undefined
+    if (log !== undefined) log.active = false
+    const restore = restoreModelListingConsole
+    restoreModelListingConsole = undefined
+    restore?.()
   }
 }
 

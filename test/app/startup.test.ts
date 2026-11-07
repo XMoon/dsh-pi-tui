@@ -108,6 +108,9 @@ test('an older harness gets actionable npm upgrade guidance without a hard Loade
     const ctx = new Context()
     ctx.provide('cmdlineArgs', { get: () => ['--session', 's1'] })
     ctx.provide('appExit', ((code: number) => { void code }) as never)
+    // The normal action installs the process-global model-listing console
+    // interception, so this row must unload like any other mounted row.
+    t.after(async () => { await ctx.fiber.dispose() })
     assert.doesNotThrow(() => applyStartup(ctx), 'the advisory notice must not block concurrent profile mounting')
     assert.equal((ctx.get(TUI_STARTUP_SERVICE) as { sessionId: string }).sessionId, 's1')
     const joined = stderr.lines.join('')
@@ -678,7 +681,12 @@ test('a wrapper still held by another owner passes through after unload', async 
   }
 })
 
-test('re-mounting the startup row does not wrap the console twice', async (t) => {
+/** Count the non-empty lines of the interception's log file. */
+function listingLogLines(home: string): number {
+  return readFileSync(listingLogPath(home), 'utf8').split('\n').filter(line => line !== '').length
+}
+
+test('a re-applied row shares the chain instead of nesting a second wrapper', async (t) => {
   const life = testLifecycle(t)
   const home = isolatedDshHome(life)
   const terminal = captureConsole()
@@ -686,12 +694,60 @@ test('re-mounting the startup row does not wrap the console twice', async (t) =>
   const firstError = console.error
   const second = mountStartup(t, [])
   try {
-    assert.notEqual(console.error, firstError, 'the second mount installs its own wrapper')
-    console.error(ACCOUNT_TAG, 'a tagged line after re-mounting')
+    assert.equal(console.error, firstError, 'the re-applied row must not nest another wrapper')
+    console.error(ACCOUNT_TAG, 'a tagged line after re-applying')
     assert.deepEqual(terminal.errors, [], 'the tagged line must not reach the terminal')
-    const content = readFileSync(listingLogPath(home.home), 'utf8')
-    assert.equal(content.split('\n').filter(line => line !== '').length, 1,
-      'the tagged line must be recorded exactly once, not once per wrapper')
+    assert.equal(listingLogLines(home.home), 1, 'the tagged line must be recorded exactly once')
+  } finally {
+    terminal.restore()
+    home.restore()
+  }
+})
+
+test('releasing the older owner first keeps the interception until the last owner unloads', async (t) => {
+  const life = testLifecycle(t)
+  const home = isolatedDshHome(life)
+  const terminal = captureConsole()
+  const preInstallError = console.error
+  const preInstallWarn = console.warn
+  const older = mountStartup(t, [])
+  const newer = mountStartup(t, [])
+  try {
+    await older.fiber.dispose()
+    assert.notEqual(console.error, preInstallError, 'the interception stays installed while an owner remains')
+    console.warn(API_KEY_TAG, 'model listing from https://example.test/models loaded 2 model(s)')
+    assert.deepEqual(terminal.warns, [], 'the remaining owner still diverts tagged output')
+    await newer.fiber.dispose()
+    assert.equal(console.error, preInstallError, 'the last owner unload restores console.error')
+    assert.equal(console.warn, preInstallWarn, 'the last owner unload restores console.warn')
+    console.error(ACCOUNT_TAG, 'a tagged line after the last owner unloaded')
+    assert.equal(terminal.errors.length, 1, 'a closed interception must not reopen the log')
+    assert.equal(listingLogLines(home.home), 1, 'the closed interception must not append after unload')
+  } finally {
+    terminal.restore()
+    home.restore()
+  }
+})
+
+test('releasing the newer owner first keeps the interception until the last owner unloads', async (t) => {
+  const life = testLifecycle(t)
+  const home = isolatedDshHome(life)
+  const terminal = captureConsole()
+  const preInstallError = console.error
+  const preInstallWarn = console.warn
+  const older = mountStartup(t, [])
+  const newer = mountStartup(t, [])
+  try {
+    await newer.fiber.dispose()
+    assert.notEqual(console.error, preInstallError, 'the remaining owner keeps the interception installed')
+    console.error(ACCOUNT_TAG, 'model listing from https://example.test/models loaded 3 model(s)')
+    assert.deepEqual(terminal.errors, [], 'the remaining owner still diverts tagged output')
+    await older.fiber.dispose()
+    assert.equal(console.error, preInstallError, 'the last owner unload restores console.error')
+    assert.equal(console.warn, preInstallWarn, 'the last owner unload restores console.warn')
+    console.warn(API_KEY_TAG, 'a tagged line after the last owner unloaded')
+    assert.equal(terminal.warns.length, 1, 'a closed interception must not reopen the log')
+    assert.equal(listingLogLines(home.home), 1, 'the closed interception must not append after unload')
   } finally {
     terminal.restore()
     home.restore()
