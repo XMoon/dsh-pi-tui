@@ -113,6 +113,8 @@ export class ScheduleWorkspaceController {
   /** Monotonic EDITOR INSTANCE identity: two editors of the same task are
    *  different owners, so an old write/reload cannot settle the new one. */
   private editorToken = 0
+  /** Whether the pending write was issued from an Editor (create/edit). */
+  private busyEditor = false
   /** The newest accepted `reload-latest` request; older answers are discarded. */
   private reloadEpoch = 0
   private editorBaseline: ScheduleEditorBaseline | undefined
@@ -763,13 +765,13 @@ export class ScheduleWorkspaceController {
 
   /** The ONE controller-level mode admission table. */
   private admits(kind: ScheduleIntent['kind']): boolean {
-    // A pending Host write freezes the editor it was issued from: further typing
-    // would be silently discarded by the receipt, so the draft stays exactly the
-    // version that is being saved.
-    if (this.busy && (kind === 'set-field' || kind === 'focus-field' || kind === 'next-field'
-      || kind === 'select-timing-kind' || kind === 'toggle-weekday' || kind === 'select-target-kind'
-      || kind === 'select-target-session' || kind === 'toggle-advanced' || kind === 'save'
-      || kind === 'reload-latest')) return false
+    // A pending EDITOR save freezes the whole editor surface, not only its text:
+    // leaving, discarding or navigating to another task would race the receipt
+    // and could create a stale Discard question. Detail/list writes keep
+    // navigation free — the settlement stamp already protects their page.
+    if (this.busy && this.busyEditor) {
+      return kind === 'refresh' || kind === 'dismiss-notice' || kind === 'open-help' || kind === 'close-help'
+    }
     if (kind === 'refresh' || kind === 'dismiss-notice' || kind === 'back'
       || kind === 'confirm' || kind === 'cancel') return true
     if (kind === 'open-help') return this.confirm === undefined
@@ -802,15 +804,16 @@ export class ScheduleWorkspaceController {
     try {
       const result = await this.port.view({ id: scheduleId(draft.id) })
       if (this.disposed) return
-      // Only the NEWEST reload for THIS editor instance may touch the draft or
-      // baseline: a slow older answer can never roll the visible task back.
+      // Only the NEWEST reload for THIS still-open editor instance may touch the
+      // draft, baseline or notice: a slow older answer can never roll the
+      // visible task back, and an answer for a closed editor is not published.
       if (epoch !== this.reloadEpoch || this.editorToken !== token) return
+      if (this.editor === undefined || this.editor.id !== draft.id) return
       if ('code' in result) {
         this.notice = errorNotice(SCHEDULE_COPY.taskGone)
         this.publish()
         return
       }
-      if (this.editor === undefined || this.editor.id !== draft.id) return
       const current = this.editor
       const baseline = this.editorBaseline
       if (baseline === undefined) return
@@ -858,8 +861,10 @@ export class ScheduleWorkspaceController {
       this.publish()
     } catch (error) {
       if (this.disposed) return
-      // A superseded or old-editor failure must not replace the newest notice.
+      // A superseded, old-editor or closed-editor failure must not replace the
+      // newest notice on whatever page the user is on now.
       if (epoch !== this.reloadEpoch || this.editorToken !== token) return
+      if (this.editor === undefined || this.editor.id !== draft.id) return
       this.notice = errorNotice(this.describeFailure(error))
       this.publish()
     }
@@ -888,6 +893,7 @@ export class ScheduleWorkspaceController {
     }
     const id = draft.id
     const expectedUpdatedAt = draft.expectedUpdatedAt ?? null
+    this.busyEditor = true
     this.startWrite(draft.mode === 'create' ? 'schedule create' : 'schedule edit', async () => {
       if (request.kind === 'create') await this.createTask(request.create)
       else if (id !== undefined) await this.editTask(id, request.patch, expectedUpdatedAt)
@@ -914,6 +920,8 @@ export class ScheduleWorkspaceController {
       this.notice = errorNotice(this.describeFailure(error))
       this.publish()
       if (error instanceof ScheduleOutcomeUnknownError) await this.refreshNow()
+    } finally {
+      this.busyEditor = false
     }
   }
 
@@ -949,6 +957,8 @@ export class ScheduleWorkspaceController {
       this.notice = errorNotice(this.describeFailure(error))
       this.publish()
       if (error instanceof ScheduleOutcomeUnknownError) await this.refreshNow()
+    } finally {
+      this.busyEditor = false
     }
   }
 
