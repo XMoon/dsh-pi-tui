@@ -479,10 +479,6 @@ export function applyRunnerWithRuntime(
     // subscription wakes the root after a real publish (never a UI focus or
     // Job). A replacement surface revision replaces this binding.
     const interactionDelivery = override?.interactionDelivery
-    const interactionDeliveryBinding = interactionDelivery?.bindCommittedSession(
-      () => ownership.currentSessionId(),
-      listener => ownership.subscribeScopeInvalidation(listener),
-    )
     // The A3 command/submission scope authority (plan A3 §1.1): ONE synchronous
     // capture of `{ owner subject, generation, sessionId }`, so no consumer can
     // rebuild an identity from separate reads. A sessionless capture is
@@ -2591,12 +2587,6 @@ export function applyRunnerWithRuntime(
       disposeSelectedTransport,
       registerDisposal: (dispose) => { ctx.effect(function* () { yield dispose }) },
     })
-    // The root delivery binding belongs to THIS surface revision: a retired
-    // revision must not keep waking (or clearing) a successor's binding. The
-    // delivery owner makes the returned disposer inert once replaced.
-    if (interactionDeliveryBinding !== undefined) {
-      ctx.effect(function* () { yield interactionDeliveryBinding })
-    }
     // The terminal-total fatal catch reaches the SAME surface cleanup authority
     // through this ref (M3-6 PR3 D3), assigned now — before `surface.start`
     // and any later startup operation can fail with the surface owner live.
@@ -3117,6 +3107,23 @@ export function applyRunnerWithRuntime(
     // (`supportsLocalShellCards`, `supportsTuiBuiltinUi`) must report the TSP
     // renderer from the first bound key.
     tspRendererActive = rendererMount !== undefined
+    // Split-Client PiTUI ONLY: bind the ROOT interaction delivery to this
+    // application's ONE committed-Session authority. `rendererMount !==
+    // undefined` is the TSP branch, whose native modal seat keeps its own
+    // admission and MUST NOT be upgraded by the new gate; the unbound delivery
+    // therefore preserves its pre-G567 behavior. The binding is installed
+    // before `surface.attachInteraction()` registers the providers.
+    const interactionDeliveryBinding = override !== undefined
+      && rendererMount === undefined
+      && interactionDelivery !== undefined
+      ? interactionDelivery.bindCommittedSession(
+          () => ownership.currentSessionId(),
+          listener => ownership.subscribeScopeInvalidation(listener),
+        )
+      : undefined
+    if (interactionDeliveryBinding !== undefined) {
+      ctx.effect(function* () { yield interactionDeliveryBinding })
+    }
     // A4: mount through the surface owner. The surface builds the surface-local
     // option wiring (image loader, history-search binding, clipboard/link
     // capabilities, extension registries + input routes, resize/workflow hooks)
@@ -3903,7 +3910,7 @@ export function applyRunnerWithRuntime(
     // EXISTING registered `/sessions` Browser through the SAME command action.
     // No second listing, no Host cancel/answer, no fallback when the Host owns
     // the name (the command's own availability answers false).
-    if (interactionDelivery !== undefined) {
+    if (interactionDelivery !== undefined && rendererMount === undefined) {
       const delivery = interactionDelivery
       surface.setNoAnswerNavigation({
         available: () => command.sessionBrowserAvailable(),

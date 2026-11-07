@@ -72,6 +72,23 @@ export async function runInteractionNavigationFirst(context) {
     throw new SplitSmokeAssertionError(`${label}: the search result never took focus (${marker})`)
   }
 
+  /** Alt+W from the live modal and stop in the workspace (no navigation). */
+  const enterNavigationHold = async (client, label) => {
+    client.send('\x1bw')
+    await client.waitForScreen('Workspace: Current workspace', `${label} workspace opened`, 30_000)
+    await client.waitForScreenGone('[1] Proceed', `${label} modal withdrawn for the hold`, 30_000)
+  }
+
+  /** A real process exit while the navigation hold owns the presentation. */
+  const terminateClient = async (client, pid, label) => {
+    client.signalBusiness('SIGTERM')
+    const exit = await client.waitForExit(60_000)
+    assert(exit.code === 0 && exit.signal === null, `${label} exit was ${JSON.stringify(exit)}`)
+    for (let poll = 0; poll < 150 && alive(pid); poll += 1) await sleep(100)
+    assert(!alive(pid), `${label} process survived its SIGTERM`)
+    await client.dispose()
+  }
+
   /**
    * Alt+W from the live modal, then search the OTHER Session by its exact id
    * and resume it through the workspace's two-Enter contract. Returns after
@@ -284,6 +301,67 @@ export async function runInteractionNavigationFirst(context) {
       })
       await exitC1Client(clientB, 'G567-N1 B')
       await exitC1Client(clientA, 'G567-N1 A')
+      await stopC1Host(host)
+    }
+
+    // ── N2a: a real Client process exit during the navigation hold ──────────
+    {
+      const { host, hostBefore, workRoot, clientA, clientB, aReady, bReady, sessionX, sessionY } =
+        await startDualSurfaceScene('question', 'g567-root-dispose')
+      await resumeSession(clientA, sessionX, 'G567-N2a A resume X')
+      const triggerIndex = eventsOf(sessionX).length
+      await submitPrompt(clientB, 'm5c-question-trigger', 'G567-N2a question trigger')
+      const call = await waitForHostSessionEventAfter(dshHome, sessionX, triggerIndex,
+        event => event.type === 'tool/call' && event.data?.name === 'ask_user_question',
+        'G567-N2a question tool/call', 120_000)
+      const callId = call.data.callId
+      await waitForC1WorkEvent(workRoot,
+        event => event.kind === 'question-request' && event.sessionId === sessionX,
+        'G567-N2a Host question request', 120_000)
+      await clientA.waitForScreen('[1] Proceed', 'G567-N2a A question modal', 120_000)
+      await clientB.waitForScreen('[1] Proceed', 'G567-N2a B question modal', 120_000)
+
+      // A commits the presentation-only hold, then its REAL process exits
+      // inside the workspace. That teardown must not settle the Host request.
+      await enterNavigationHold(clientA, 'G567-N2a A')
+      const exitIndex = eventsOf(sessionX).length
+      await terminateClient(clientA, aReady.pid, 'G567-N2a A')
+      await sleep(1_000)
+      assert(readC1WorkEvents(workRoot).every(event =>
+        event.kind !== 'question-settled' && event.kind !== 'question-failed'),
+      'G567-N2a A\'s process exit settled or cancelled the Host question')
+      assert(eventsOf(sessionX).slice(exitIndex)
+        .every(event => event.type !== 'tool/result' && event.type !== 'turn/end'),
+      'G567-N2a A\'s process exit produced Host result activity')
+      // B still owns the SAME pending delivery and gives the ONE answer.
+      await clientB.waitForScreen('[1] Proceed', 'G567-N2a B still paints the answerable modal', 60_000)
+      const answerIndex = eventsOf(sessionX).length
+      clientB.send('1')
+      await clientB.waitForScreen('Review your answer before submit', 'G567-N2a B answer review', 30_000)
+      clientB.send('\r')
+      const settled = await waitForC1WorkEvent(workRoot,
+        event => event.kind === 'question-settled' && event.sessionId === sessionX,
+        'G567-N2a Host question settled by B', 120_000)
+      assert(settled.answers?.[0]?.selected?.[0] === 'Proceed',
+        `G567-N2a the Host received ${JSON.stringify(settled.answers)} instead of Proceed`)
+      await waitForHostSessionEventAfter(dshHome, sessionX, answerIndex,
+        event => event.type === 'tool/result' && String(event.data?.message?.toolCallId) === callId,
+        'G567-N2a question tool result', 120_000)
+      assert(settledCount(workRoot, sessionX, 'question') === 1 && toolResults(sessionX, callId).length === 1,
+        'G567-N2a the process exit plus B\'s answer produced more than one Host settlement')
+      assert(alive(bReady.pid) && alive(hostBefore.hostPid), 'G567-N2a A\'s exit killed B or the Host')
+      trace('g567-n2a', {
+        hostPid: hostBefore.hostPid,
+        clientAPid: aReady.pid,
+        clientBPid: bReady.pid,
+        sessionX,
+        sessionY,
+        questionCallId: callId,
+        aExitedInHold: true,
+        hostSettlements: 1,
+        settledBy: 'B',
+      })
+      await exitC1Client(clientB, 'G567-N2a B')
       await stopC1Host(host)
     }
   } finally {

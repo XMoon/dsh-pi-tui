@@ -25847,7 +25847,7 @@ export class TuiApp {
     // whitelist between the modal's fixed response keys above and the ordinary
     // inspection/editor ladder. The root hold is committed before the seat is
     // withdrawn, so no local cancel can become a Host answer.
-    if (this.noAnswerNavigation !== undefined && matchesKey(data, 'alt+w')) {
+    if (this.noAnswerNavigation !== undefined && componentKeymap.matches(data, 'interaction.navigateWorkspace')) {
       this.keybindings.cancelLeader()
       this.clearExitConfirmation()
       this.beginNoAnswerNavigation()

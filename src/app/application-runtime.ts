@@ -271,17 +271,6 @@ export interface RemoteLiveIngressFactory {
   }
 }
 
-/** The pre-composed Remote application input for the internal L6
- *  composition entry (M3-4 PR2): the aggregate the caller already built
- *  through `createRemoteApplicationRuntime` (ONE Host/Client/Backend/owner
- *  graph), its presentation source bundle, and the SELECTED Client-local
- *  extension service from that same aggregate (M3-6 PR1: the Remote branch's
- *  UI extension authority — the Client Context's `piTuiExtensions`, never a
- *  Host-context lookup). The selection seam re-uses the aggregate's selected
- *  core instead of constructing a second Remote graph; internal/test paths
- *  only. The override carries the narrow service object, NOT the Client
- *  Context or plugin fibers; only the selected PiTuiExtensionService
- *  capability crosses the in-process composition seam. */
 /**
  * Split-Client only: the narrow root-delivery capability the runner binds and
  * the modal-safe navigation entry uses. Declared structurally HERE because this
@@ -307,6 +296,17 @@ export interface SplitClientInteractionDeliveryControl {
   beginNavigationHold(): { release(): void }
 }
 
+/** The pre-composed Remote application input for the internal L6
+ *  composition entry (M3-4 PR2): the aggregate the caller already built
+ *  through `createRemoteApplicationRuntime` (ONE Host/Client/Backend/owner
+ *  graph), its presentation source bundle, and the SELECTED Client-local
+ *  extension service from that same aggregate (M3-6 PR1: the Remote branch's
+ *  UI extension authority — the Client Context's `piTuiExtensions`, never a
+ *  Host-context lookup). The selection seam re-uses the aggregate's selected
+ *  core instead of constructing a second Remote graph; internal/test paths
+ *  only. The override carries the narrow service object, NOT the Client
+ *  Context or plugin fibers; only the selected PiTuiExtensionService
+ *  capability crosses the in-process composition seam. */
 export interface RemoteApplicationOverride {
   readonly selected: SelectedApplicationRuntime
   readonly presentation: RemoteApplicationSources

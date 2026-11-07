@@ -91,6 +91,9 @@ export type AppKeybindingId =
   | 'question.pageDown'
   | 'question.toggleExpand'
   | 'question.toggleSelection'
+  /** Split-Client forwarded Question/Approval seat: open the existing Session
+   *  Workspace without answering the pending interaction. */
+  | 'interaction.navigateWorkspace'
   // Focused component: the Task Center (plan §3.3/§29)
   | 'tasks.open'
   | 'tasks.search.enter'

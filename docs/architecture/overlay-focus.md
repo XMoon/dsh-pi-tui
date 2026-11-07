@@ -294,7 +294,20 @@ frame, auto-reopen, report a Host-driven end as user cancel, or add an
 `ASK_ABORTED`, `QUESTION_REPLY_QUEUED`, `ContinuedQuestionEntry`),
 `QuestionFlow`, `src/runtime/interaction-port.ts`.
 
-### 6.3 Navigation-first forwarded interaction admission
+### 6.3 Esc and visible-seat priority
+
+- The Host busy-cancel runs before the shell-mode exit and before a replacement
+  editor's Esc; a DECLINED plugin Esc falls through to the host ladder; a
+  CONSUMED Esc disarms the pending double-Esc window.
+- The `↓` Task Browser gate and the footer `↓ view` hint read the VISIBLE seat
+  mode. Host execution callbacks (`onSubmit`, MentionProvider mode source,
+  delegated `getMode`) read the Host editor mode freshly decoded from a plugin
+  wire document.
+- Never let a mode-less plugin seat inject `prompt` into a Host `!` submit (that
+  would leak a session-excluded command into the model path), and never let a
+  stale hidden-host mode drive completion routing.
+
+### 6.4 Navigation-first forwarded interaction admission
 
 The split Client's ONE root interaction delivery owner holds each official
 forwarded Question/Approval invocation. The PiTUI/Split surface presents that
@@ -304,11 +317,14 @@ hold is active, and the official request signal is live. A request for another
 Session is HELD, never painted onto the current editor; a Reader-side
 `attention` candidate is not answer authority.
 
-A local modal withdrawal (the `Alt+W` navigation hold, or a committed Session
-replacement) bumps the root presentation epoch BEFORE the seat is withdrawn.
-The withdrawn attempt's local cancellation therefore cannot be forwarded as a
-human Host decision, and the SAME official invocation (the original callback
-and `nextOnce`) is re-offered only when its Session is current again. The
+For the `Alt+W` navigation hold, the root hold and presentation epoch are
+committed BEFORE the local seat is withdrawn. A committed-Session replacement
+is instead fenced synchronously by the committed-subject check: once the new
+owner is published, the outgoing request's Session is no longer the committed
+subject, and the coalesced scope notification also bumps the epoch. In both
+cases the withdrawn attempt's local cancellation cannot be forwarded as a human
+Host decision, and the SAME official invocation (the original callback and
+`nextOnce`) is re-offered only when its Session is current again. The
 official request aborts, the first settlement by another Client, or root
 disposal ends the wait; no local pending DTO, second RPC or request id is
 created.
@@ -324,21 +340,13 @@ Authority: `src/app/remote-process/client-interaction-delivery.ts`,
 `src/app/surface/interaction-runtime.ts`, `src/app/surface/runtime.ts`,
 `src/tui-app.ts`.
 
-Proof: `test/app/question-park-reopen.test.ts`,
-`test/app/question-remote-lifecycle.test.ts`.
+Proof: `test/app/remote-process-client-interaction-delivery.test.ts`
+(root admission, epoch, hold, re-offer), `test/app/no-answer-navigation.test.ts`
+(Alt+W seat withdrawal and workspace-close release),
+`test/app/interaction-navigation-yield.test.ts` (surface collect/atomic
+withdraw/settle), and the real two-PTY split-process case
+`interaction.navigation-first-answerability`.
 
-### 6.3 Esc and visible-seat priority
-
-- The Host busy-cancel runs before the shell-mode exit and before a replacement
-  editor's Esc; a DECLINED plugin Esc falls through to the host ladder; a
-  CONSUMED Esc disarms the pending double-Esc window.
-- The `↓` Task Browser gate and the footer `↓ view` hint read the VISIBLE seat
-  mode. Host execution callbacks (`onSubmit`, MentionProvider mode source,
-  delegated `getMode`) read the Host editor mode freshly decoded from a plugin
-  wire document.
-- Never let a mode-less plugin seat inject `prompt` into a Host `!` submit (that
-  would leak a session-excluded command into the model path), and never let a
-  stale hidden-host mode drive completion routing.
 
 ## 7. Regression checklist for future changes
 

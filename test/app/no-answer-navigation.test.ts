@@ -167,6 +167,73 @@ test('Alt+W is inert when the control is absent or unavailable and the modal kee
   assert.match(String((outcome as { error: unknown }).error), /question flow cancelled/u)
 })
 
+test('withdrawPresentations removes every matching queued question before the active one settles', async () => {
+  const { app, vt } = startApp()
+  const firstController = new AbortController()
+  const secondController = new AbortController()
+  const first = app.askQuestions([{ id: 'q1', question: 'first queue?', options: [{ label: 'a' }] }], firstController.signal)
+  const firstOutcome = settleOutcome(first)
+  const second = app.askQuestions([{ id: 'q2', question: 'second queue?', options: [{ label: 'a' }] }], secondController.signal)
+  const secondOutcome = settleOutcome(second)
+  await vt.waitForRender()
+  assert.match(vt.getViewport().join(''), /first queue\?/u)
+  assert.doesNotMatch(vt.getViewport().join(''), /second queue\?/u, 'the second flow is queued, not mounted')
+
+  app.withdrawPresentations([firstController.signal, secondController.signal])
+  assert.equal((await firstOutcome).kind, 'rejected', 'the active flow is withdrawn locally')
+  assert.equal((await secondOutcome).kind, 'rejected', 'the queued flow is withdrawn without mounting')
+  await vt.waitForRender()
+  assert.doesNotMatch(vt.getViewport().join(''), /second queue\?/u, 'the withdrawn successor was never promoted')
+
+  // A fresh question still takes the seat: nothing was stranded.
+  const third = app.askQuestions([{ id: 'q3', question: 'still works?', options: [{ label: 'a' }] }])
+  const thirdOutcome = settleOutcome(third)
+  await vt.waitForRender()
+  assert.match(vt.getViewport().join(''), /still works\?/u)
+  vt.sendInput('\x1b')
+  assert.equal((await thirdOutcome).kind, 'rejected')
+})
+
+test('withdrawPresentations removes every matching queued approval before the active one settles', async () => {
+  const { app, vt } = startApp()
+  const firstController = new AbortController()
+  const secondController = new AbortController()
+  const first = app.showApprovalPrompt({ toolName: 'bash', reason: 'first', signal: firstController.signal })
+  const firstOutcome = settleOutcome(first)
+  const second = app.showApprovalPrompt({ toolName: 'bash', reason: 'second', signal: secondController.signal })
+  const secondOutcome = settleOutcome(second)
+  await vt.waitForRender()
+  assert.match(vt.getViewport().join(''), /first/u)
+  assert.doesNotMatch(vt.getViewport().join(''), /second/u, 'the second approval is queued, not mounted')
+
+  app.withdrawPresentations([firstController.signal, secondController.signal])
+  assert.deepEqual(await firstOutcome, { kind: 'resolved', value: 'cancelled' })
+  assert.deepEqual(await secondOutcome, { kind: 'resolved', value: 'cancelled' })
+  await vt.waitForRender()
+  assert.doesNotMatch(vt.getViewport().join(''), /second/u, 'the withdrawn approval successor was never promoted')
+})
+
+test('Alt+W is inert outside a modal, e.g. while the Session Workspace owns the seat', async () => {
+  const { app, vt } = startApp()
+  let beginCalls = 0
+  let openCalls = 0
+  app.setNoAnswerNavigation({
+    available: () => true,
+    begin: () => { beginCalls += 1; return () => {} },
+    open: () => { openCalls += 1 },
+  })
+  openWorkspace(app)
+  await vt.waitForRender()
+  assert.match(vt.getViewport().join(''), /All workspaces|Recent sessions|sessions/iu)
+  // With no active Question/Approval the key never reaches the modal-safe
+  // entry; it must not open a second Browser or submit the workspace search.
+  vt.sendInput('\x1bw')
+  await vt.waitForRender()
+  assert.equal(beginCalls, 0, 'no navigation hold outside a modal')
+  assert.equal(openCalls, 0, 'no second Session Workspace outside a modal')
+  assert.match(vt.getViewport().join(''), /All workspaces|Recent sessions|sessions/iu)
+})
+
 test('a control that opens no lease releases the hold immediately instead of stranding the editor', async () => {
   const { app, vt } = startApp()
   const controller = new AbortController()

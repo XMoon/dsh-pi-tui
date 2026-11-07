@@ -632,21 +632,24 @@ before that owner is attached. Use the official Loader readiness contract for
 that ordering. A private PiTui pending store, permanent pending promise or
 Gateway monkey-patch is not a substitute for this composition contract.
 
-Navigation-first admission (split Client): the ONE root interaction delivery
-owner holds each official forwarded invocation and hands it to the current
-surface only while the application has committed the request's own Session,
-no presentation-only navigation hold is active, and the official request
-signal is live. A request whose Session is not the committed subject waits; it
-is never painted onto another Session's editor, and a Reader-side
-`attention` candidate is not a substitute for that live forwarded request. The
-PiTUI modal-safe `Alt+W` entry commits the hold first, withdraws the local
-modal seat, and opens the existing registered Session Workspace; the same
-official invocation is re-offered after the user returns to its Session. A
-local withdrawal bumps a presentation epoch so its local cancellation is
-never sent as a human answer, cancel or deny. The hold is released by the
-physical Workspace close, or at once when that entry cannot present. Direct
-keeps its unconditional presentation delegation, and the TSP native seat keeps
-its own admission.
+Navigation-first admission (split Client, PiTUI surface only): the ONE root
+interaction delivery owner holds each official forwarded invocation and hands
+it to the current surface only while the application has committed the
+request's own Session, no presentation-only navigation hold is active, and the
+official request signal is live. A request whose Session is not the committed
+subject waits; it is never painted onto another Session's editor, and a
+Reader-side `attention` candidate is not a substitute for that live forwarded
+request. The PiTUI modal-safe `Alt+W` entry commits the hold first, withdraws
+the local modal seat, and opens the existing registered Session Workspace; the
+same official invocation is re-offered after the user returns to its Session.
+The hold bumps a presentation epoch before the seat is withdrawn; a committed
+Session replacement instead fences the outgoing request through the synchronous
+committed-subject check (the coalesced scope notification also bumps the
+epoch). In both cases the local cancellation is never sent as a human answer,
+cancel or deny. The hold is released by the physical Workspace close, or at
+once when that entry cannot present. A TSP split surface is not bound to the
+committed-subject gate and keeps its native admission; Direct keeps its
+unconditional presentation delegation.
 
 A Remote Client may resume a Session whose Host Turn is still running, because
 a pending Question or Approval is exactly such a Turn. Its startup therefore
