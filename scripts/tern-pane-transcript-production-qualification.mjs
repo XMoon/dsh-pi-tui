@@ -28,7 +28,9 @@
  * A `setTranscript` recorder entry is never evidence that anything was painted.
  */
 import { execFileSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { arch, platform, cpus, release, type } from 'node:os'
 import { join } from 'node:path'
 import { rect, visibleSpan, visibleBox, containedXY, index } from './tern-pane-geometry.mjs'
 
@@ -197,6 +199,40 @@ async function requiredWait (h, label, predicate, options) {
   return ok
 }
 
+/** The highest frame sequence the SDK has actually written at this instant. */
+const latestFrameSeq = h => {
+  const frames = wireRecords(h).filter(entry => entry.dir === 'out' && entry.verb === 'f')
+  return frames.at(-1)?.body?.s ?? null
+}
+
+/** `marker + frame seq + capture id` recorded AT the capture instant: the
+ *  Session switch legitimately retires source A's rows later, so a historical
+ *  correlation must never be recomputed from the final live wire fold. */
+function frameCorrelation (h, captureId, marker) {
+  const live = foldLive(h)
+  const rowIds = [...live.keys()].filter(id => ROW_ID.test(id) && subtreeText(live, id).includes(marker))
+  return {
+    capture: captureId, marker,
+    frameSeq: latestFrameSeq(h),
+    rowId: rowIds[0] ?? null,
+    wire: wirePath(h),
+    tree: join(h.root, `${captureId}.tree.json`),
+    png: join(h.root, 'shots', 'serve', `${captureId}.png`),
+    layout: join(h.root, 'shots', 'serve', `${captureId}.layout.json`),
+  }
+}
+
+/** Every capture id this flow issues, so the evidence gate cannot check only
+ *  the four viewport cells and pass with a missing/corrupt earlier artifact. */
+function allCaptureIds (h) {
+  const ids = []
+  for (const line of readFileSync(join(h.root, 'run.log'), 'utf8').split('\n')) {
+    const match = line.match(/^SHOT (\S+) ::/u)
+    if (match !== null) ids.push(match[1])
+  }
+  return ids
+}
+
 const settledWrites = h => records(h).filter(entry => entry.kind === 'producer.writer.settled')
 const modelCalls = h => records(h).filter(entry => entry.kind === 'producer.model.calls').at(-1)?.calls ?? 0
 const commits = (h, origin) => records(h)
@@ -259,9 +295,21 @@ export default async function (h) {
   const sdkPin = /'@stencil-hq\/tern@0\.2\.0'/u.test(lock) ? '0.2.0' : 'UNVERIFIED'
   const integrity = lock.match(/'@stencil-hq\/tern@0\.2\.0':\s*\n\s*resolution: \{integrity: ([^}]+)\}/u)?.[1] ?? 'UNVERIFIED'
   const manifest = JSON.parse(readFileSync(join(h.repo, 'package.json'), 'utf8'))
-  const dshPin = manifest.devDependencies?.['@deepseek-ai/dsh'] ?? manifest.dependencies?.['@deepseek-ai/dsh'] ?? 'UNVERIFIED'
+  // `mise.toml` derives the CLI pin from the Agent package's devDependency:
+  // there is no `@deepseek-ai/dsh` package entry in this repository.
+  const dshPin = manifest.devDependencies?.['@deepseek-ai/dsh-agent']
+  const dshSessionPin = manifest.devDependencies?.['@deepseek-ai/dsh-session']
   const dshMode = readJson(join(h.repo, 'test', 'compat', 'dsh-mode.json'))?.mode ?? 'UNVERIFIED'
-  const extra = { tern: ternVersion, sdk: { pin: sdkPin, integrity } }
+  const ternBytes = readFileSync(ternBin)
+  const ternSha256 = createHash('sha256').update(ternBytes).digest('hex')
+  const host = {
+    os: `${type()} ${release()}`, platform: platform(), arch: arch(),
+    cpu: cpus()[0]?.model ?? 'UNVERIFIED', cores: cpus().length,
+  }
+  const extra = { tern: ternVersion, sdk: { pin: sdkPin, integrity }, dsh: { pin: dshPin, mode: dshMode } }
+  h.check('G-TRANSCRIPT-EVIDENCE: the exact the agent harness npm baseline is resolved from this repository and matched by the Session package',
+    dshPin === '0.2.2-rc.1' && dshSessionPin === dshPin && dshMode === 'npm',
+    JSON.stringify({ dshPin, dshSessionPin, dshMode }))
 
   // ─────────────────── group 1: baseline and bootstrap ───────────────────
   await h.resize(1280, 800)
@@ -279,9 +327,11 @@ export default async function (h) {
   const subjectReady = records(h).find(entry => entry.kind === 'subject.ready')
   writeLedger(h, 'environment.json', {
     tern: ternVersion,
+    ternBinary: { path: ternBin, sha256: ternSha256, bytes: ternBytes.length },
     ternTopology: 'one headless tern serve --control pane, ONE inline TSP Surface, main/dock/layer regions',
+    host,
     sdk: { pin: sdkPin, integrity },
-    dsh: { mode: dshMode, pin: dshPin },
+    dsh: { mode: dshMode, cliPin: dshPin, agentPin: dshPin, sessionPin: dshSessionPin },
     hello: {
       ver: hello?.body?.ver, term: hello?.body?.term, kinds: hello?.body?.kinds,
       features: hello?.body?.features, credits: hello?.body?.credits, cell: hello?.body?.cell, dark: hello?.body?.dark,
@@ -359,6 +409,7 @@ export default async function (h) {
     })
   }
   const mainShot = h.capture('transcript-main-direct-1280x800-dark', 'eight real Direct turns in the production TSP Main')
+  const frameCorrelations = [frameCorrelation(h, mainShot, markers[7])]
   writeLedger(h, 'source-decision-sink-production.json', {
     chain: 'CONTROL_INJECTED type+Return -> SDK key -> SubmissionController -> DirectSessionWriter -> SessionEvent + AssistantLiveInput -> one Folder + 50ms repaint -> repaintTarget -> display.setTranscript(origin=production) -> SDK f frame -> Tern client Main',
     turns,
@@ -388,9 +439,15 @@ export default async function (h) {
   // and settle commits: one source seq, one card per message, no re-scope.
   const productionCommits = commits(h, 'production')
   const sourceSeqs = [...new Set(productionCommits.map(commit => commit.sourceSeq))]
-  h.check('G-TRANSCRIPT-NODE-IDENTITY: the eight real streaming/settle commits stayed in one presentation scope with one card per row',
-    sourceSeqs.length === 1 && mountedRowTexts(h, markers.slice(0, 8)).length === 8,
-    JSON.stringify({ sourceSeqs, unmounted: markers.slice(0, 8).filter(text => rowIdFor(h, text) === undefined) }))
+  const identityPairs = turns.map(turn => ({
+    ordinal: turn.ordinal, marker: turn.marker,
+    capturedId: turn.rowId, currentId: rowIdFor(h, turn.marker),
+    same: turn.rowId !== undefined && turn.rowId === rowIdFor(h, turn.marker),
+  }))
+  h.check('G-TRANSCRIPT-NODE-IDENTITY: the eight real streaming/settle commits stayed in one presentation scope and every captured row id is still the SAME wire id',
+    sourceSeqs.length === 1 && mountedRowTexts(h, markers.slice(0, 8)).length === 8
+      && identityPairs.every(pair => pair.same) && new Set(identityPairs.map(pair => pair.currentId)).size === 8,
+    JSON.stringify({ sourceSeqs, identityPairs }))
 
   // A held turn is an ALREADY RUNNING Agent turn: the reader scrolls back, then
   // that same turn releases. A new own submission would legitimately re-tail.
@@ -433,6 +490,7 @@ export default async function (h) {
   const anchorTexts = olderVisible.slice(0, 3)
   const beforeRelease = rowMap(h, anchorTexts)
   const beforeReleaseShot = h.capture('transcript-reading-old-before-release', 'the reader parked on older rows while the held turn still runs')
+  frameCorrelations.push(frameCorrelation(h, beforeReleaseShot, anchorTexts[0]))
   const releaseResult = await runCase(h, 'release-model')
   h.check('G-TRANSCRIPT-READING-ANCHOR: the release-model command really released the ONE held model promise',
     releaseResult?.released === true && releaseResult?.armed === false,
@@ -452,18 +510,21 @@ export default async function (h) {
     beforeId: beforeRelease[text]?.id,
     afterId: afterRelease[text]?.id,
   }))
+  const afterReleaseShot = h.snapshot()
+  const tailRowAfterRelease = clientRow(afterReleaseShot, heldPrompt.marker)
   writeLedger(h, 'reading-anchor.json', {
     beforeReleaseShot, before: beforeRelease, after: afterRelease, deltas,
-    tailRowAfterRelease: clientRow(h.snapshot(), heldPrompt.marker),
+    tailRowAfterRelease,
     productionCommitsDuringRelease: commits(h, 'production').slice(-4),
   })
   h.check(`G-TRANSCRIPT-READING-ANCHOR: every overlap row kept its wire id and its physical position within ${TOLERANCE_PX} CSS px while the released answer streamed`,
     deltas.length >= 2 && deltas.every(entry => entry.beforeId !== undefined && entry.beforeId === entry.afterId
       && Number.isFinite(entry.delta) && entry.delta <= TOLERANCE_PX),
     JSON.stringify(deltas))
-  h.check('G-TRANSCRIPT-READING-ANCHOR: the reader was not dragged down to the new reply',
-    clientRow(h.snapshot(), heldPrompt.marker)?.containedXY !== true,
-    JSON.stringify(clientRow(h.snapshot(), heldPrompt.marker)))
+  h.check('G-TRANSCRIPT-READING-ANCHOR: the held user row is still mounted but the reader was not dragged down to the new reply',
+    rowIdFor(h, heldPrompt.marker) !== undefined && tailRowAfterRelease !== undefined
+      && tailRowAfterRelease.containedXY === false && tailRowAfterRelease.visibleSpanY === 0,
+    JSON.stringify({ tailRowAfterRelease, heldRowId: rowIdFor(h, heldPrompt.marker) }))
   h.capture('transcript-stream-while-reading-old', 'the released answer streamed while the older rows stayed put')
 
   // ─────── group 3: TEST-ONLY re-window and Reveal against the same Presenter ───────
@@ -497,8 +558,9 @@ export default async function (h) {
   const secondOverlapText = overlap[1][0]
   const secondOverlap = clientRow(h.snapshot(), secondOverlapText)
   writeLedger(h, 'reveal-mounted.json', { revealId, revealText, revealedBefore, revealedAfter, secondOverlap })
-  h.check('G-TRANSCRIPT-REVEAL: revealing a MOUNTED id put that row inside the client viewport and left a second overlap row positioned',
-    revealMoved && revealedAfter?.containedXY === true && secondOverlap !== undefined,
+  h.check('G-TRANSCRIPT-REVEAL: revealing a MOUNTED id put that row inside the client viewport and left a second overlap row fully visible',
+    revealMoved && revealedAfter?.containedXY === true
+      && secondOverlap !== undefined && secondOverlap.containedXY === true,
     JSON.stringify({ revealMoved, revealedAfter, secondOverlap }))
   h.capture('transcript-reveal-mounted-tail-window', 'the tail window after a native reveal of a mounted id')
 
@@ -506,14 +568,22 @@ export default async function (h) {
   const overlapPair = [revealText, secondOverlapText]
   const beforePrefix = rowMap(h, overlapPair)
   const prefixBeforeShot = h.capture('transcript-prefix-before', 'the tail window immediately before the full prefix returns')
+  frameCorrelations.push(frameCorrelation(h, prefixBeforeShot, revealText))
   const fullResult = await runCase(h, 'project-full-window')
   const prefixSnapshot = h.snapshot()
   const afterPrefix = rowMap(h, overlapPair, prefixSnapshot)
   const restoredOlder = dropped.slice(0, 2).map(entry => ({ text: entry[0], id: rowIdFor(h, entry[0]), row: clientRow(prefixSnapshot, entry[0]) }))
-  const overlapShift = Math.abs((afterPrefix[revealText]?.row?.y ?? Number.NaN) - (beforePrefix[revealText]?.row?.y ?? Number.NaN))
+  const overlapShifts = overlapPair.map(text => ({
+    text,
+    beforeY: beforePrefix[text]?.row?.y,
+    afterY: afterPrefix[text]?.row?.y,
+    delta: Math.abs((afterPrefix[text]?.row?.y ?? Number.NaN) - (beforePrefix[text]?.row?.y ?? Number.NaN)),
+    sameId: beforePrefix[text]?.id === afterPrefix[text]?.id && afterPrefix[text]?.id !== undefined,
+    afterContained: afterPrefix[text]?.row?.containedXY === true,
+  }))
   const lastCommit = commits(h).at(-1)
   writeLedger(h, 'prefix-prepend.json', {
-    prefixBeforeShot, before: beforePrefix, after: afterPrefix, overlapShift, restoredOlder, fullResult,
+    prefixBeforeShot, before: beforePrefix, after: afterPrefix, overlapShifts, restoredOlder, fullResult,
     sourceSeqBefore: sourceSeqBeforeRewindow, sourceSeqAfter: lastCommit?.sourceSeq, origin: lastCommit?.origin,
   })
   h.check('G-TRANSCRIPT-HISTORY-PREPEND: the full prefix came back to the SAME source and the SAME mounted Presenter',
@@ -521,10 +591,10 @@ export default async function (h) {
       && lastCommit?.origin === 'subject-probe' && lastCommit?.sourceSeq === sourceSeqBeforeRewindow
       && (fullResult.messageCount ?? 0) >= (fullMessages ?? 0),
     JSON.stringify({ fullResult, lastCommit, fullMessages }))
-  h.check(`G-TRANSCRIPT-HISTORY-PREPEND: both overlap rows kept their SDK node ids and their physical position within ${TOLERANCE_PX} CSS px`,
-    overlapPair.every(text => beforePrefix[text]?.id === afterPrefix[text]?.id && afterPrefix[text]?.id !== undefined)
-      && Number.isFinite(overlapShift) && overlapShift <= TOLERANCE_PX,
-    JSON.stringify({ before: beforePrefix, after: afterPrefix, overlapShift }))
+  h.check(`G-TRANSCRIPT-HISTORY-PREPEND: BOTH overlap rows kept their SDK node ids, stayed fully visible and kept their physical position within ${TOLERANCE_PX} CSS px`,
+    overlapShifts.length === 2 && overlapShifts.every(entry => entry.sameId && entry.afterContained
+      && Number.isFinite(entry.delta) && entry.delta <= TOLERANCE_PX),
+    JSON.stringify({ before: beforePrefix, after: afterPrefix, overlapShifts }))
   h.check('G-TRANSCRIPT-HISTORY-PREPEND: the restored older rows sit physically IN FRONT of the overlap row in the same document',
     restoredOlder.length >= 2 && restoredOlder.every(entry => typeof entry.id === 'string' && entry.row !== undefined
       && entry.row.y < (afterPrefix[revealText]?.row?.y ?? -1)),
@@ -538,9 +608,11 @@ export default async function (h) {
   await runCase(h, 'project-tail-window')
   const secondTailOk = await waitUntil(h, 'the second tail window unmounted the old prefix again', () =>
     rowIdFor(h, staleText) === undefined, { limit: 150 })
+  const staleRowAfterSecondTail = clientRow(h.snapshot(), staleText)
   h.check('G-TRANSCRIPT-REVEAL: the id captured from the full window is genuinely absent from the SDK node set now',
-    secondTailOk && typeof staleId === 'string' && foldLive(h).has(staleId) === false,
-    JSON.stringify({ staleId, secondTailOk, stillMounted: rowIdFor(h, staleText) }))
+    secondTailOk && typeof staleId === 'string' && foldLive(h).has(staleId) === false
+      && staleRowAfterSecondTail === undefined,
+    JSON.stringify({ staleId, secondTailOk, stillMounted: rowIdFor(h, staleText), staleRowAfterSecondTail }))
   const errorsBefore = sdkErrors(h).length
   await runCase(h, 'reveal-node', { nodeId: staleId })
   const refused = await waitUntil(h, 'the client answered the unmounted reveal with its own protocol error', () =>
@@ -565,8 +637,12 @@ export default async function (h) {
   const remountedVisible = await waitUntil(h, 'the re-mounted id became visible through reveal', () =>
     clientRow(h.snapshot(), staleText)?.containedXY === true, { limit: 150 })
   writeLedger(h, 'reveal-stale-and-restored.json', {
-    staleId, staleText, beforeRefusal: revealedBefore, afterSecondTail: staleBeforeReveal,
-    afterRestore: clientRow(h.snapshot(), staleText), errors: sdkErrors(h),
+    staleId, staleText,
+    mountedTailReveal: { text: revealText, before: revealedBefore, after: revealedAfter },
+    staleRowAfterSecondTail: staleRowAfterSecondTail ?? null,
+    staleRowBeforeRemountReveal: staleBeforeReveal,
+    staleRowAfterRemountReveal: clientRow(h.snapshot(), staleText),
+    errors: sdkErrors(h),
   })
   h.check('G-TRANSCRIPT-REVEAL: revealing the re-mounted id makes it physically visible at a real client position',
     remountedVisible, JSON.stringify({ before: staleBeforeReveal, after: clientRow(h.snapshot(), staleText) }))
@@ -605,13 +681,15 @@ export default async function (h) {
   const resumeSnapshot = h.snapshot()
   const resumeButton = h.classNodes(resumeSnapshot, 'pk-btn').find(node => h.descendantsText(node).replace(' [Enter]', '') === 'Resume')
   const productionBeforeSwitch = commits(h, 'production').length
+  // Start the timer BEFORE the one irreversible click, so the reported settle
+  // and commit durations include the control-injected Resume delivery.
+  const switchStartedAt = Date.now()
   const resumeClicked = resumeButton !== undefined && await h.click(resumeSnapshot.chains, resumeButton)
   h.check('the user clicked the native Resume button once', resumeClicked === true,
     JSON.stringify({ resumeClicked, rect: resumeButton === undefined ? null : rect(resumeButton) }))
   // The official transition is timed, not assumed: the real `agents.resume(B)`
   // settle and the incoming source's own commit are separate observable facts,
   // and the switch is measurably slow in this environment.
-  const switchStartedAt = Date.now()
   const resumeSettled = resumeClicked && await waitUntil(h, 'the official agents.resume(B) settled', () =>
     records(h).some(entry => entry.kind === 'agents.resume.settled' && entry.sessionId === testInput.sessions.b),
   { limit: 1200 })
@@ -681,6 +759,7 @@ export default async function (h) {
     await h.sleep(400)
     const viewport = h.ctl('stats').viewport
     const id = h.capture(`transcript-viewport-${width}x${height}-${appearance}`, `responsive cell ${width}x${height} ${appearance}`)
+    if (width === 900 && height === 700) frameCorrelations.push(frameCorrelation(h, id, bPrompt.marker))
     const snap = index(readJson(join(h.root, `${id}.tree.json`))?.tree ?? [])
     const layout = readJson(join(h.root, 'shots', 'serve', `${id}.layout.json`))
     const main = regionNode(snap, 'sf-main')
@@ -749,25 +828,49 @@ export default async function (h) {
     pageUp: join(h.root, 'pageup-geometry.json'),
   }
   const missing = Object.entries(evidenceFiles).filter(([, path]) => !existsSync(path)).map(entry => entry[0])
-  const captureEvidence = cells.map(cell => {
-    const tree = join(h.root, `${cell.capture}.tree.json`)
-    const png = join(h.root, 'shots', 'serve', `${cell.capture}.png`)
-    const layout = join(h.root, 'shots', 'serve', `${cell.capture}.layout.json`)
-    return { capture: cell.capture, tree: existsSync(tree), png: existsSync(png), layout: existsSync(layout) }
+  const captureIds = allCaptureIds(h)
+  const captureEvidence = captureIds.map(capture => {
+    const tree = join(h.root, `${capture}.tree.json`)
+    const png = join(h.root, 'shots', 'serve', `${capture}.png`)
+    const layout = join(h.root, 'shots', 'serve', `${capture}.layout.json`)
+    return {
+      capture,
+      tree: existsSync(tree), png: existsSync(png), layout: existsSync(layout),
+      treeBytes: existsSync(tree) ? readFileSync(tree).length : 0,
+      pngBytes: existsSync(png) ? readFileSync(png).length : 0,
+    }
   })
+  // Explicit marker + frame sequence + screenshot id correlations, each one
+  // sampled at its own capture instant (see frameCorrelations below).
+  writeLedger(h, 'frame-correlations.json', frameCorrelations)
   writeLedger(h, 'lane-ledger.json', {
-    tern: ternVersion, sdk: { pin: sdkPin, integrity }, dsh: { mode: dshMode, pin: dshPin },
+    tern: ternVersion, ternSha256,
+    sdk: { pin: sdkPin, integrity },
+    dsh: { mode: dshMode, cliPin: dshPin, agentPin: dshPin, sessionPin: dshSessionPin },
+    host,
     PRODUCTION_DIRECT_MAIN: 'G-TRANSCRIPT-WRITER-TO-MAIN',
     PRESENTER_TEST_REWINDOW: 'TEST_ONLY_REWINDOW: a Subject command channel, never a user Older/Newer/Latest entry',
     PRODUCT_USER_PAGING: 'NOT_IMPLEMENTED',
     PROGRAMMATIC_LATEST_REARMS_FOLLOW: 'NOT_PROVEN',
     PHYSICAL_GUI_G8: 'NOT_VERIFIED (headless tern serve with control-injected input)',
     inputMode: 'CONTROL_INJECTED, each delivered exactly once and never retried',
-    evidence: { ...evidenceFiles, productionCommits: commits(h, 'production').length, probeCommits: commits(h, 'subject-probe').length, sdkErrors: sdkErrors(h).length },
+    verifyRelease: 'NOT_RUN on this lane: the narrow and product lanes in this run directory are the required checks for the two new scripts; no stage-final release claim is made',
+    evidence: {
+      ...evidenceFiles, productionCommits: commits(h, 'production').length,
+      probeCommits: commits(h, 'subject-probe').length, sdkErrors: sdkErrors(h).length,
+      captures: captureIds, frameCorrelations,
+    },
   })
-  h.check('G-TRANSCRIPT-EVIDENCE: every required evidence artifact exists in this run directory (events, wire, prompts, PNG, tree, layout, ledger, copies)',
-    missing.length === 0 && captureEvidence.every(entry => entry.tree && entry.png && entry.layout),
+  h.check('G-TRANSCRIPT-EVIDENCE: every capture this run issued has a real tree, PNG and layout, and every required ledger/event/wire file exists',
+    missing.length === 0 && captureIds.length >= 14
+      && captureEvidence.every(entry => entry.tree && entry.png && entry.layout
+        && entry.treeBytes > 0 && entry.pngBytes > 0),
     JSON.stringify({ missing, captureEvidence }))
+  h.check('G-TRANSCRIPT-EVIDENCE: each named marker is correlated with one live SDK row id, the current wire frame sequence and its own screenshot id',
+    frameCorrelations.length === 4 && frameCorrelations.every(entry => typeof entry.rowId === 'string'
+      && ROW_ID.test(entry.rowId) && typeof entry.frameSeq === 'number'
+      && existsSync(entry.png) && existsSync(entry.tree)),
+    JSON.stringify(frameCorrelations))
   finish(h, {
     ...extra,
     sessions: testInput.sessions,
