@@ -7,7 +7,8 @@
  */
 
 import { Command } from 'commander'
-import { readFileSync, realpathSync } from 'node:fs'
+import { closeSync, mkdirSync, openSync, readFileSync, realpathSync, writeSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { parseCmdline } from '@deepseek-ai/dsh-cmdline'
@@ -320,6 +321,114 @@ Examples:
 `)
 }
 
+// ── TEMPORARY: official DSH model-listing console output ────────────────
+//
+// TEMPORARY DSH UPSTREAM WORKAROUND (dsh-v0.2.2-rc.1).
+// The official llm-deepseek-account and llm-deepseek-api-key model-listing
+// providers send routine catalog diagnostics through console.error/console.warn,
+// which corrupts the interactive TUI. Route only these tagged messages to a file.
+// REMOVE this interception after the upstream DSH release routes model-listing
+// diagnostics through a non-terminal log sink; verify both providers first.
+// Source: packages/llm/llm-deepseek/src/host.ts:createModelListingCache.
+
+/** The two official provider tags whose model-listing diagnostics leave the
+ * terminal. The tag is the provider plugin name in brackets, exactly as
+ * `createModelListingCache` builds it from its `owner` argument. */
+const MODEL_LISTING_TAGS: readonly string[] = [
+  '[llm-deepseek-account]',
+  '[llm-deepseek-api-key]',
+]
+
+/**
+ * Route the two official providers' model-listing diagnostics to a file
+ * instead of the interactive terminal.
+ *
+ * The interception is deliberately narrow: only a `console.error`/`console.warn`
+ * call with exactly two arguments — one of the two provider tags and a string
+ * message — is diverted. Every other call is handed back to the original
+ * method untouched.
+ *
+ * The log file is opened lazily (only when the first matching line arrives),
+ * so a plain `--help` run or a session that never lists models leaves no
+ * empty file behind. A write failure falls back to the original console
+ * output: a broken diagnostics directory must never keep the TUI from
+ * starting, and the diagnostic must never disappear silently.
+ *
+ * @returns the disposer that restores the console methods and closes the log.
+ */
+function installModelListingLogInterceptor(): () => void {
+  const logPath = join(
+    process.env.DSH_HOME !== undefined && process.env.DSH_HOME !== ''
+      ? process.env.DSH_HOME
+      : join(homedir(), '.dsh'),
+    'logs',
+    `dsh-model-listing-${process.pid}.log`,
+  )
+  let fileHandle: number | undefined
+  let fileDisabled = false
+  let disposed = false
+
+  /** Append one diagnostic line to the log file, reporting whether the write
+   * succeeded. A failure disables the file sink for the rest of the session
+   * and lets the caller fall back to the terminal. */
+  const appendLine = (tag: string, message: string): boolean => {
+    if (fileDisabled) return false
+    if (fileHandle === undefined) {
+      try {
+        mkdirSync(dirname(logPath), { recursive: true })
+        fileHandle = openSync(logPath, 'a', 0o600)
+      } catch {
+        fileDisabled = true
+        return false
+      }
+    }
+    try {
+      writeSync(fileHandle, `${new Date().toISOString()} ${tag} ${message}\n`)
+      return true
+    } catch {
+      fileDisabled = true
+      return false
+    }
+  }
+
+  const intercept = (original: (...args: unknown[]) => void): (...args: unknown[]) => void => {
+    return (...args: unknown[]): void => {
+      const [tag, message] = args
+      // Only the verified `(tag, message)` shape is diverted; a differently
+      // shaped call keeps its original console behavior and terminal
+      // visibility. A wrapper still held by another owner after this row
+      // unloads behaves like the original instead of reopening the log.
+      if (!disposed && args.length === 2 && typeof tag === 'string' && MODEL_LISTING_TAGS.includes(tag) && typeof message === 'string') {
+        if (appendLine(tag, message)) return
+      }
+      original.apply(console, args)
+    }
+  }
+
+  const originalError = console.error as (...args: unknown[]) => void
+  const originalWarn = console.warn as (...args: unknown[]) => void
+  const errorWrapper = intercept(originalError)
+  const warnWrapper = intercept(originalWarn)
+  console.error = errorWrapper
+  console.warn = warnWrapper
+
+  return () => {
+    disposed = true
+    // Restore only the methods this handler still owns: a later wrapper
+    // installed by another owner must survive this row's unload.
+    if (console.error === errorWrapper) console.error = originalError
+    if (console.warn === warnWrapper) console.warn = originalWarn
+    if (fileHandle !== undefined) {
+      try {
+        closeSync(fileHandle)
+      } catch {
+        // A closed descriptor is not a failure.
+      }
+      fileHandle = undefined
+    }
+  }
+}
+
 /**
  * Parse and provide the TUI invocation as an ordinary Cordis service. The
  * command's action publishes the flags this invocation named; on `--help`
@@ -329,6 +438,15 @@ Examples:
 export function apply(ctx: Context): void {
   const program = tuiCommand()
   program.action(() => {
+    // The model-listing interception is installed as early as the action
+    // allows: the provider's listing diagnostics arrive while the session
+    // connects, so the interception must be in place before this row
+    // publishes the startup service. `--help` never reaches the action, so
+    // the help path installs nothing. A Host-only process keeps its own
+    // standalone log behavior — the TUI must not change it.
+    if (!isHostOnlyRole()) {
+      ctx.effect(() => installModelListingLogInterceptor(), 'tui-startup model-listing log interception')
+    }
     // Startup compatibility notice: an incompatible harness (see
     // HARNESS_COMPAT) is outside this bundle's peer window, but this row must
     // not make the loader's concurrent mount ordering part of the contract.

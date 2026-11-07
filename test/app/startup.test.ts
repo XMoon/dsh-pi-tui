@@ -12,11 +12,12 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { apply as applyStartup, TUI_STARTUP_SERVICE, HARNESS_COMPAT, bundleVersionLabel, harnessCompatEntryFor, incompatibleHarnessMessage } from '../../src/startup.ts'
+import type { TestContext } from 'node:test'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
 
 /** The recovery expectations every below-floor notice shares, derived from the
@@ -48,12 +49,17 @@ function captureStderr(): { lines: string[]; restore: () => void } {
   return { lines, restore: () => { process.stderr.write = original } }
 }
 
-function mountStartup(args: string[] = []): Context {
+function mountStartup(t: TestContext, args: string[] = []): Context {
   const ctx = new Context()
   ctx.provide('cmdlineArgs', { get: () => args })
   // parseCmdline requires the launcher pair (cmdlineArgs + appExit).
   ctx.provide('appExit', ((code: number) => { void code }) as never)
   applyStartup(ctx)
+  // A normal invocation installs the temporary model-listing console
+  // interception, which mutates process-global console methods; every mount
+  // must unload its row so the wrapper (and any language-level leak) cannot
+  // outlive the test.
+  t.after(async () => { await ctx.fiber.dispose() })
   return ctx
 }
 
@@ -120,7 +126,7 @@ test('the published 0.2.2-rc.1 harness version starts normally and provides the 
   const launcher = fakeLauncher(life, '0.2.2-rc.1')
   const stderr = captureStderr()
   try {
-    const ctx = mountStartup(['--session', 's1'])
+    const ctx = mountStartup(t, ['--session', 's1'])
     assert.ok(ctx.get(TUI_STARTUP_SERVICE) !== undefined, 'the startup service must be provided')
     assert.equal((ctx.get(TUI_STARTUP_SERVICE) as { sessionId: string }).sessionId, 's1')
     assert.equal(stderr.lines.length, 0, 'no gate message on a supported harness')
@@ -135,7 +141,7 @@ test('the previous 0.2.0-rc.2 family is below the floor and gets the fallback no
   const launcher = fakeLauncher(life, '0.2.0-rc.2')
   const stderr = captureStderr()
   try {
-    const ctx = mountStartup(['--session', 's1'])
+    const ctx = mountStartup(t, ['--session', 's1'])
     assert.ok(ctx.get(TUI_STARTUP_SERVICE) !== undefined, 'the advisory notice must not block mounting')
     const joined = stderr.lines.join('')
     assert.ok(joined.includes(EXPECTED_REQUIREMENT), `stderr must name the new floor:\n${joined}`)
@@ -156,7 +162,7 @@ test('the intermediate 0.2.1-rc.1 release is REFUSED at runtime with no TUI pair
   const launcher = fakeLauncher(life, '0.2.1-rc.1')
   const stderr = captureStderr()
   try {
-    const ctx = mountStartup(['--session', 's1'])
+    const ctx = mountStartup(t, ['--session', 's1'])
     assert.ok(ctx.get(TUI_STARTUP_SERVICE) !== undefined, 'the advisory notice must not block mounting')
     const joined = stderr.lines.join('')
     assert.ok(joined.includes('running dsh 0.2.1-rc.1'), `stderr must name the installed version:\n${joined}`)
@@ -179,7 +185,7 @@ test('an older alpha.1 line is rejected by the current npm gate', (t) => {
   const launcher = fakeLauncher(life, '0.1.3-alpha.1')
   const stderr = captureStderr()
   try {
-    const ctx = mountStartup(['--session', 's1'])
+    const ctx = mountStartup(t, ['--session', 's1'])
     assert.ok(ctx.get(TUI_STARTUP_SERVICE) !== undefined, 'the advisory notice must not block concurrent profile mounting')
     const joined = stderr.lines.join('')
     assert.ok(joined.includes('running dsh 0.1.3-alpha.1'), `stderr must name the installed version:\n${joined}`)
@@ -199,7 +205,7 @@ test('the previous alpha.3 line is rejected by the 0.2.0-rc.2 npm gate', (t) => 
   const launcher = fakeLauncher(life, '0.1.2-alpha.3')
   const stderr = captureStderr()
   try {
-    const ctx = mountStartup(['--session', 's1'])
+    const ctx = mountStartup(t, ['--session', 's1'])
     assert.ok(ctx.get(TUI_STARTUP_SERVICE) !== undefined, 'the advisory notice must not block concurrent profile mounting')
     const joined = stderr.lines.join('')
     assert.ok(joined.includes('running dsh 0.1.2-alpha.3'), `stderr must name the installed version:\n${joined}`)
@@ -219,7 +225,7 @@ test('the previous alpha.4/alpha.5 line is rejected by the 0.2.0-rc.2 npm gate',
   const launcher = fakeLauncher(life, '0.1.2-alpha.5')
   const stderr = captureStderr()
   try {
-    const ctx = mountStartup(['--session', 's1'])
+    const ctx = mountStartup(t, ['--session', 's1'])
     assert.ok(ctx.get(TUI_STARTUP_SERVICE) !== undefined, 'the advisory notice must not block concurrent profile mounting')
     const joined = stderr.lines.join('')
     assert.ok(joined.includes('running dsh 0.1.2-alpha.5'), `stderr must name the installed version:\n${joined}`)
@@ -237,7 +243,7 @@ test('the published floor and future stable lines start normally', (t) => {
     const life = testLifecycle(t)
     const launcher = fakeLauncher(life, version)
     try {
-      const ctx = mountStartup([])
+      const ctx = mountStartup(t, [])
       assert.ok(ctx.get(TUI_STARTUP_SERVICE) !== undefined, `${version} should be supported`)
     } finally {
       launcher.restore()
@@ -254,7 +260,7 @@ test('the published 0.1.6-alpha.1 harness is refused by the alpha.2 contract gat
   const launcher = fakeLauncher(life, '0.1.6-alpha.1')
   const stderr = captureStderr()
   try {
-    const ctx = mountStartup(['--session', 's1'])
+    const ctx = mountStartup(t, ['--session', 's1'])
     assert.ok(ctx.get(TUI_STARTUP_SERVICE) !== undefined, 'the advisory notice must not block concurrent profile mounting')
     const joined = stderr.lines.join('')
     assert.ok(joined.includes('running dsh 0.1.6-alpha.1'), `stderr must name the installed version:\n${joined}`)
@@ -266,13 +272,13 @@ test('the published 0.1.6-alpha.1 harness is refused by the alpha.2 contract gat
   }
 })
 
-test('an unresolvable launcher version does not block startup', () => {
+test('an unresolvable launcher version does not block startup', (t) => {
   // process.argv[1] points at a path with no @deepseek-ai/dsh manifest: the
   // gate cannot prove incompatibility, so it must not refuse to start.
   const previous = process.argv[1]
   process.argv[1] = join(tmpdir(), 'dsh-startup-gate-nonexistent-bin')
   try {
-    const ctx = mountStartup([])
+    const ctx = mountStartup(t, [])
     assert.ok(ctx.get(TUI_STARTUP_SERVICE) !== undefined, 'unknown harness version must not block startup')
   } finally {
     process.argv[1] = previous
@@ -284,7 +290,7 @@ test('--help never runs the action, on any harness', (t) => {
   const launcher = fakeLauncher(life, '0.1.0-rc.8')
   const stderr = captureStderr()
   try {
-    const ctx = mountStartup(['--help'])
+    const ctx = mountStartup(t, ['--help'])
     assert.equal(ctx.get(TUI_STARTUP_SERVICE), undefined, '--help must not provide the startup service')
     assert.equal(stderr.lines.length, 0, '--help must not print the compatibility notice')
   } finally {
@@ -294,7 +300,7 @@ test('--help never runs the action, on any harness', (t) => {
 })
 
 /** Mount the startup row with captured `appReady` listeners and `appExit` codes. */
-function mountStartupWithReady(args: string[] = []): {
+function mountStartupWithReady(t: TestContext, args: string[] = []): {
   ctx: Context
   fireReady: () => void
   exitCodes: number[]
@@ -309,11 +315,12 @@ function mountStartupWithReady(args: string[] = []): {
     onReady: (listener: () => void) => { listeners.push(listener); return () => {} },
   }) as never)
   applyStartup(ctx)
+  t.after(async () => { await ctx.fiber.dispose() })
   return { ctx, fireReady: () => { for (const listener of [...listeners]) listener() }, exitCodes, readyListenerCount: () => listeners.length }
 }
 
-test('committed readiness without a mounted TUI surface exits nonzero with an actionable error', () => {
-  const { ctx, fireReady, exitCodes } = mountStartupWithReady([])
+test('committed readiness without a mounted TUI surface exits nonzero with an actionable error', (t) => {
+  const { ctx, fireReady, exitCodes } = mountStartupWithReady(t, [])
   const startup = ctx.get(TUI_STARTUP_SERVICE) as { markSurfaceMounted?: () => void } | undefined
   assert.ok(startup !== undefined, 'a normal invocation provides the startup service')
   assert.equal(typeof startup.markSurfaceMounted, 'function', 'the runner mount seam must be provided')
@@ -329,8 +336,8 @@ test('committed readiness without a mounted TUI surface exits nonzero with an ac
   assert.match(joined, /--profile pi-tui/u)
 })
 
-test('a mounted surface leaves committed readiness untouched', () => {
-  const { ctx, fireReady, exitCodes } = mountStartupWithReady([])
+test('a mounted surface leaves committed readiness untouched', (t) => {
+  const { ctx, fireReady, exitCodes } = mountStartupWithReady(t, [])
   const startup = ctx.get(TUI_STARTUP_SERVICE) as { markSurfaceMounted?: () => void } | undefined
   startup?.markSurfaceMounted?.()
   const stderr = captureStderr()
@@ -343,10 +350,10 @@ test('a mounted surface leaves committed readiness untouched', () => {
   assert.deepEqual(stderr.lines, [])
 })
 
-test('--help never arms the missing-surface handshake', () => {
+test('--help never arms the missing-surface handshake', (t) => {
   // `--help` runs no action, so the readiness handshake is never registered
   // (commander's own help path exits 0 through appExit, which is unrelated).
-  const { ctx, fireReady, exitCodes, readyListenerCount } = mountStartupWithReady(['--help'])
+  const { ctx, fireReady, exitCodes, readyListenerCount } = mountStartupWithReady(t, ['--help'])
   assert.equal(ctx.get(TUI_STARTUP_SERVICE), undefined)
   assert.equal(readyListenerCount(), 0, '--help must not register a readiness listener')
   fireReady()
@@ -458,4 +465,282 @@ test('harnessCompatEntryFor follows the official DSH tag matrix below the publis
   assert.equal(harnessCompatEntryFor('0.2.2'), undefined, 'the stable line above the floor is supported')
   assert.equal(harnessCompatEntryFor('0.2.3'), undefined)
   assert.equal(harnessCompatEntryFor('1.0.0'), undefined)
+})
+
+// ── the temporary model-listing log interception ─────────────────────────
+//
+// The official llm-deepseek-account and llm-deepseek-api-key providers send
+// their model-listing diagnostics to console.error/console.warn with the
+// provider tag as the first argument. Those lines corrupt the full-screen
+// TUI, so the startup row diverts exactly those tagged lines to
+// `$DSH_HOME/logs/dsh-model-listing-<pid>.log`.
+
+/** The provider tags the official DSH providers use, exactly as
+ * `createModelListingCache` builds them from the provider plugin name. */
+const ACCOUNT_TAG = '[llm-deepseek-account]'
+const API_KEY_TAG = '[llm-deepseek-api-key]'
+
+/** Capture console.error/console.warn calls made through the CURRENT
+ * console methods, restoring the previous identity at teardown. */
+function captureConsole(): {
+  errors: unknown[][]
+  warns: unknown[][]
+  restore: () => void
+} {
+  const errors: unknown[][] = []
+  const warns: unknown[][] = []
+  const originalError = console.error
+  const originalWarn = console.warn
+  console.error = (...args: unknown[]) => { errors.push(args) }
+  console.warn = (...args: unknown[]) => { warns.push(args) }
+  return {
+    errors,
+    warns,
+    restore: () => {
+      console.error = originalError
+      console.warn = originalWarn
+    },
+  }
+}
+
+/** Point `$DSH_HOME` at an isolated directory for the duration of a test. */
+function isolatedDshHome(life: TestLifecycle): { home: string, restore: () => void } {
+  const home = life.tempDir('dsh-model-listing-home-')
+  const previous = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  return {
+    home,
+    restore: () => {
+      if (previous === undefined) delete process.env.DSH_HOME
+      else process.env.DSH_HOME = previous
+    },
+  }
+}
+
+/** The log file path the interception must use under the given home. */
+function listingLogPath(home: string): string {
+  return join(home, 'logs', `dsh-model-listing-${process.pid}.log`)
+}
+
+test('both provider tags are diverted to the log file and leave the terminal untouched', async (t) => {
+  const life = testLifecycle(t)
+  const home = isolatedDshHome(life)
+  const terminal = captureConsole()
+  const ctx = mountStartup(t, [])
+  try {
+    console.error(ACCOUNT_TAG, 'model listing from https://example.test/models loaded 3 model(s), skipped 0 row(s)')
+    console.warn(API_KEY_TAG, 'model listing from https://example.test/models failed (boom); using the bundled catalog')
+    console.error(API_KEY_TAG, 'model listing from https://example.test/models loaded 1 model(s), skipped 2 row(s)')
+    console.warn(ACCOUNT_TAG, 'model "hidden-model" is not supported by this client')
+
+    assert.deepEqual(terminal.errors, [], 'no matching console.error may reach the terminal')
+    assert.deepEqual(terminal.warns, [], 'no matching console.warn may reach the terminal')
+
+    const path = listingLogPath(home.home)
+    assert.ok(existsSync(path), `the log file must exist at ${path}`)
+    const content = readFileSync(path, 'utf8')
+    assert.match(content, /^\d{4}-\d{2}-\d{2}T[\d:.]+Z \[llm-deepseek-account\] model listing from https:\/\/example\.test\/models loaded 3 model\(s\), skipped 0 row\(s\)$/mu,
+      `the account success line must keep its tag and message:\n${content}`)
+    assert.match(content, /\[llm-deepseek-api-key\] model listing from https:\/\/example\.test\/models failed \(boom\); using the bundled catalog$/mu,
+      `the api-key failure line must keep its tag and message:\n${content}`)
+    assert.match(content, /\[llm-deepseek-api-key\] model listing from https:\/\/example\.test\/models loaded 1 model\(s\), skipped 2 row\(s\)$/mu,
+      `the api-key success line must keep its tag and message:\n${content}`)
+    assert.match(content, /\[llm-deepseek-account\] model "hidden-model" is not supported by this client$/mu,
+      `the account catalog problem must keep its tag and message:\n${content}`)
+    assert.equal(content.split('\n').filter(line => line !== '').length, 4, 'exactly the four matching lines are recorded')
+  } finally {
+    terminal.restore()
+    home.restore()
+  }
+})
+
+test('unrelated console output still reaches the terminal', async (t) => {
+  const life = testLifecycle(t)
+  const home = isolatedDshHome(life)
+  const terminal = captureConsole()
+  const ctx = mountStartup(t, [])
+  try {
+    console.warn('some other warning')
+    console.error('some other error')
+    console.warn('[llm-deepseek-other]', 'a different provider tag')
+    console.error(`${ACCOUNT_TAG} suffix`, 'a tag that only starts the same')
+    console.error(ACCOUNT_TAG, { not: 'a string message' })
+    console.error(ACCOUNT_TAG, 'model listing failed', new Error('an extra argument'))
+
+    assert.equal(terminal.warns.length, 2, 'the unrelated warnings must reach the terminal')
+    assert.equal(terminal.errors.length, 4, 'the unrelated errors must reach the terminal')
+    assert.ok(!existsSync(listingLogPath(home.home)), 'no unrelated output may create the log file')
+  } finally {
+    terminal.restore()
+    home.restore()
+  }
+})
+
+test('--help installs no interception and creates no log file', async (t) => {
+  const life = testLifecycle(t)
+  const home = isolatedDshHome(life)
+  const terminal = captureConsole()
+  const ctx = mountStartup(t, ['--help'])
+  try {
+    console.error(ACCOUNT_TAG, 'a tagged line after --help')
+    assert.equal(terminal.errors.length, 1, '--help must not intercept the console')
+    assert.ok(!existsSync(listingLogPath(home.home)), '--help must not create the log file')
+  } finally {
+    terminal.restore()
+    home.restore()
+  }
+})
+
+test('a Host-only process installs no interception', async (t) => {
+  const life = testLifecycle(t)
+  const home = isolatedDshHome(life)
+  const terminal = captureConsole()
+  const previousRole = process.env.DSH_PI_TUI_ROLE
+  const previousEntry = process.env.DSH_PI_TUI_HOST_ENTRY
+  // `isHostOnlyRole()` requires the marker to name the running main module
+  // and that module to be the internal `local-host.mjs` artifact, so the
+  // fixture points both at a fabricated file with that exact basename.
+  const hostEntry = join(life.tempDir('dsh-host-only-'), 'local-host.mjs')
+  writeFileSync(hostEntry, '')
+  const previousArgv = process.argv[1]
+  process.argv[1] = hostEntry
+  process.env.DSH_PI_TUI_ROLE = 'host'
+  process.env.DSH_PI_TUI_HOST_ENTRY = hostEntry
+  const ctx = mountStartup(t, [])
+  try {
+    console.error(ACCOUNT_TAG, 'a tagged line in a Host-only process')
+    assert.equal(terminal.errors.length, 1, 'a Host-only process must keep its own console behavior')
+    assert.ok(!existsSync(listingLogPath(home.home)), 'a Host-only process must not create the log file')
+  } finally {
+    process.argv[1] = previousArgv
+    if (previousRole === undefined) delete process.env.DSH_PI_TUI_ROLE
+    else process.env.DSH_PI_TUI_ROLE = previousRole
+    if (previousEntry === undefined) delete process.env.DSH_PI_TUI_HOST_ENTRY
+    else process.env.DSH_PI_TUI_HOST_ENTRY = previousEntry
+    terminal.restore()
+    home.restore()
+  }
+})
+
+test('an unwritable log directory keeps the diagnostic on the terminal', async (t) => {
+  const life = testLifecycle(t)
+  const home = isolatedDshHome(life)
+  // A regular file where the logs directory must be makes both the directory
+  // creation and the file open fail.
+  mkdirSync(home.home, { recursive: true })
+  writeFileSync(join(home.home, 'logs'), 'not a directory')
+  const terminal = captureConsole()
+  const ctx = mountStartup(t, [])
+  try {
+    console.error(ACCOUNT_TAG, 'model listing from https://example.test/models loaded 3 model(s)')
+    assert.equal(terminal.errors.length, 1, 'a write failure must fall back to the terminal')
+    assert.deepEqual(terminal.errors[0], [ACCOUNT_TAG, 'model listing from https://example.test/models loaded 3 model(s)'],
+      'the original tag and message must be preserved')
+  } finally {
+    terminal.restore()
+    home.restore()
+  }
+})
+
+test('unloading the startup row restores the console methods', async (t) => {
+  const life = testLifecycle(t)
+  const home = isolatedDshHome(life)
+  const originalError = console.error
+  const originalWarn = console.warn
+  const ctx = mountStartup(t, [])
+  try {
+    assert.notEqual(console.error, originalError, 'the interception must be installed')
+    assert.notEqual(console.warn, originalWarn, 'the interception must be installed')
+    await ctx.fiber.dispose()
+    assert.equal(console.error, originalError, 'unloading must restore console.error')
+    assert.equal(console.warn, originalWarn, 'unloading must restore console.warn')
+  } finally {
+    console.error = originalError
+    console.warn = originalWarn
+    home.restore()
+  }
+})
+
+test('a wrapper still held by another owner passes through after unload', async (t) => {
+  const life = testLifecycle(t)
+  const home = isolatedDshHome(life)
+  const terminal = captureConsole()
+  const ctx = mountStartup(t, [])
+  const heldWrapper = console.error
+  await ctx.fiber.dispose()
+  try {
+    heldWrapper(ACCOUNT_TAG, 'model listing from https://example.test/models loaded 1 model(s)')
+    assert.equal(terminal.errors.length, 1, 'a wrapper held past unload must fall back to the original')
+    assert.ok(!existsSync(listingLogPath(home.home)), 'a wrapper held past unload must not reopen the log')
+  } finally {
+    terminal.restore()
+    home.restore()
+  }
+})
+
+test('re-mounting the startup row does not wrap the console twice', async (t) => {
+  const life = testLifecycle(t)
+  const home = isolatedDshHome(life)
+  const terminal = captureConsole()
+  const first = mountStartup(t, [])
+  const firstError = console.error
+  const second = mountStartup(t, [])
+  try {
+    assert.notEqual(console.error, firstError, 'the second mount installs its own wrapper')
+    console.error(ACCOUNT_TAG, 'a tagged line after re-mounting')
+    assert.deepEqual(terminal.errors, [], 'the tagged line must not reach the terminal')
+    const content = readFileSync(listingLogPath(home.home), 'utf8')
+    assert.equal(content.split('\n').filter(line => line !== '').length, 1,
+      'the tagged line must be recorded exactly once, not once per wrapper')
+  } finally {
+    terminal.restore()
+    home.restore()
+  }
+})
+
+test('the log file is created with owner-only permissions', async (t) => {
+  const life = testLifecycle(t)
+  const home = isolatedDshHome(life)
+  const terminal = captureConsole()
+  const ctx = mountStartup(t, [])
+  try {
+    console.warn(ACCOUNT_TAG, 'model "hidden-model" is not supported by this client')
+    const mode = statSync(listingLogPath(home.home)).mode & 0o777
+    assert.equal(mode, 0o600, `the log file must be owner-only, got ${mode.toString(8)}`)
+  } finally {
+    terminal.restore()
+    home.restore()
+  }
+})
+
+test('a session that never lists models leaves no log file behind', async (t) => {
+  const life = testLifecycle(t)
+  const home = isolatedDshHome(life)
+  const terminal = captureConsole()
+  const ctx = mountStartup(t, [])
+  try {
+    console.warn('an unrelated warning')
+    assert.ok(!existsSync(listingLogPath(home.home)), 'no matching message must not create the log file')
+  } finally {
+    terminal.restore()
+    home.restore()
+  }
+})
+
+test('an existing log file keeps its earlier lines', async (t) => {
+  const life = testLifecycle(t)
+  const home = isolatedDshHome(life)
+  mkdirSync(join(home.home, 'logs'), { recursive: true })
+  writeFileSync(listingLogPath(home.home), 'an earlier line from a previous run\n')
+  const terminal = captureConsole()
+  const ctx = mountStartup(t, [])
+  try {
+    console.warn(API_KEY_TAG, 'model listing from https://example.test/models failed (boom); using the bundled catalog')
+    const content = readFileSync(listingLogPath(home.home), 'utf8')
+    assert.ok(content.startsWith('an earlier line from a previous run\n'), `the existing content must be kept:\n${content}`)
+    assert.match(content, /\[llm-deepseek-api-key\] model listing from https:\/\/example\.test\/models failed \(boom\); using the bundled catalog$/mu)
+  } finally {
+    terminal.restore()
+    home.restore()
+  }
 })
