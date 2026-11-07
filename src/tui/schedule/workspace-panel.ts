@@ -1692,13 +1692,17 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     if (!this.frameIsCurrent(frame) || x < 0 || y < 0 || x >= frame.width || y >= frame.height) return
     const hit = regionAt(frame, x, y)
     if (hit === undefined) return
-    // The release must match the PRESS (action AND painted subject/confirm
-    // identity), not merely the current frame's action: a same-action hit on a
-    // newer task's frame is a different click.
-    if (pressed !== undefined
-      && (pressed.key !== hitKey(hit)
-        || pressed.subjectId !== frame.subjectId
-        || pressed.confirmToken !== frame.confirmToken)) {
+    // A release is only actionable when a VALID press exists (a bare release
+    // over a button that only appeared after the press window is not a click),
+    // and it must match the PRESS on EVERY painted identity: page mode, task
+    // subject, confirmation token AND action. A press on `Esc discard` in the
+    // Editor therefore cannot become `Esc back` on the same task's Detail, and
+    // a press on a blank cell cannot become whatever later appeared there.
+    if (pressed === undefined
+      || pressed.key !== hitKey(hit)
+      || pressed.mode !== frame.mode
+      || pressed.subjectId !== frame.subjectId
+      || pressed.confirmToken !== frame.confirmToken) {
       return
     }
     this.activateHit(hit)

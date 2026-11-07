@@ -17,10 +17,11 @@ import { ScheduleWorkspaceController } from '../../src/app/schedule/workspace-co
 import { ScheduleWorkspacePanel } from '../../src/tui/schedule/workspace-panel.ts'
 import type {
   ScheduleCatalogEntry,
+  ScheduleEditResult,
   ScheduleDeliveryHistoryRequest,
   ScheduleDeliveryHistoryResult,
   ScheduleEditRequest,
-  ScheduleEditResult,
+
   ScheduleListRequest,
   ScheduleListResult,
   SchedulePort,
@@ -117,16 +118,20 @@ test('a real panel row click cannot discard a dirty editor without confirmation'
 
     const paint = (): { readonly lines: readonly string[]; readonly row: number } => {
       panel.setSnapshot(controller.snapshot())
-      const lines = panel.render(120)
+      const lines = plainLines(panel.render(120))
       const row = lines.findIndex(line => line.includes('Task B'))
       assert.ok(row >= 0, `the wide list paints Task B:\n${lines.join('\n')}`)
       return { lines, row }
+    }
+    const clickTaskB = (painting: { readonly row: number }): void => {
+      panel.onCellPress(3, painting.row)
+      panel.onCellClick(3, painting.row)
     }
 
     // The click reaches the REAL controller through the panel: it must ask to
     // discard, not silently navigate.
     const first = paint()
-    panel.onCellClick(3, first.row)
+    clickTaskB(first)
     assert.equal(controller.snapshot().confirm?.kind, 'discard')
     assert.equal(controller.snapshot().mode, 'editor', 'the editor is still the visible page')
     assert.equal(controller.snapshot().editor?.prompt, 'unsaved edit of A', 'the draft is intact')
@@ -135,6 +140,7 @@ test('a real panel row click cannot discard a dirty editor without confirmation'
     // The SAME coordinates from the PREVIOUS frame are still live (the panel has
     // not painted the confirmation yet): this stale hit must not bypass it.
     panel.setSnapshot(controller.snapshot())
+    panel.onCellPress(3, first.row)
     panel.onCellClick(3, first.row)
     assert.equal(controller.snapshot().confirm?.kind, 'discard', 'the same question stays open')
     assert.equal(controller.snapshot().selectedId, 'task-a')
@@ -146,7 +152,7 @@ test('a real panel row click cannot discard a dirty editor without confirmation'
     assert.equal(controller.snapshot().editor?.prompt, 'unsaved edit of A')
 
     const second = paint()
-    panel.onCellClick(3, second.row)
+    clickTaskB(second)
     assert.equal(controller.snapshot().confirm?.kind, 'discard')
     panel.setSnapshot(controller.snapshot())
     // `y` commits the PAINTED question: paint the confirmation frame first.
@@ -381,6 +387,123 @@ test('a press on task A and a release on task B\'s newer frame commit nothing', 
     await flush()
     await controller.whenIdle()
     assert.equal(edits.length, 1, 'a press+release on one task own frame commits')
+    assert.equal(edits[0]?.id, 'task-b')
+  } finally {
+    controller.dispose()
+  }
+})
+
+test('an editor Esc press cannot become the detail Esc back after the save settles', async () => {
+  const controller = new ScheduleWorkspaceController({
+    port: new StubPort(),
+    sessionReader,
+    runOwned: (_label, task) => { void task() },
+  })
+  const panel = new ScheduleWorkspacePanel({
+    snapshot: () => controller.snapshot(),
+    dispatch: intent => controller.dispatch(intent),
+    requestRender: () => {},
+    rows: () => 30,
+    columns: () => 70,
+    close: () => {},
+  })
+  const closes: string[] = []
+  const dispatch = panel['deps'] as unknown as undefined
+  try {
+    controller.open()
+    await flush()
+    controller.dispatch({ kind: 'open-detail', id: 'task-a' })
+    await flush()
+    controller.dispatch({ kind: 'open-edit' })
+    await flush()
+    controller.dispatch({ kind: 'set-field', fieldId: 'title', value: 'Draft' })
+    let resolveEdit!: (value: ScheduleEditResult) => void
+    ;(controller as unknown as { port: StubPort }).port.editResult = () =>
+      new Promise<ScheduleEditResult>(resolve => { resolveEdit = resolve })
+    controller.dispatch({ kind: 'save' })
+    // PRESS on the pending editor's Esc segment (the frame keeps mode editor).
+    panel.setSnapshot(controller.snapshot())
+    const editorFrame = plainLines(panel.render(70))
+    const escRow = editorFrame.findIndex(line => line.includes('Esc discard'))
+    assert.ok(escRow >= 0, `the pending editor paints Esc discard:\n${editorFrame.join('\n')}`)
+    const escColumn = editorFrame[escRow]!.indexOf('Esc discard') + 2
+    panel.onCellPress(escColumn, escRow)
+
+    // The save settles and the SAME task paints its Detail with Esc back.
+    resolveEdit((controller as unknown as { port: StubPort }).port.entries[0] as never)
+    await flush()
+    await controller.whenIdle()
+    assert.equal(controller.snapshot().mode, 'detail')
+    panel.setSnapshot(controller.snapshot())
+    const detailFrame = plainLines(panel.render(70))
+    assert.ok(detailFrame.some(line => line.includes('Esc back')), 'the settled Detail paints Esc back')
+
+    // RELEASE at the same coordinates: the old editor gesture must not close
+    // the Detail page.
+    const backRow = detailFrame.findIndex(line => line.includes('Esc back'))
+    const backColumn = detailFrame[backRow]!.indexOf('Esc back') + 2
+    const modesBefore = controller.snapshot().mode
+    panel.onCellClick(backColumn, backRow)
+    assert.equal(controller.snapshot().mode, modesBefore, 'the editor press does not become the detail back')
+    assert.equal(closes.length, 0)
+    void dispatch
+  } finally {
+    controller.dispose()
+  }
+})
+
+test('a release without a matching press commits nothing', async () => {
+  const controller = new ScheduleWorkspaceController({
+    port: new StubPort(),
+    sessionReader,
+    runOwned: (_label, task) => { void task() },
+  })
+  const panel = new ScheduleWorkspacePanel({
+    snapshot: () => controller.snapshot(),
+    dispatch: intent => controller.dispatch(intent),
+    requestRender: () => {},
+    rows: () => 30,
+    columns: () => 120,
+    close: () => {},
+  })
+  const edits: ScheduleEditRequest[] = []
+  ;(controller as unknown as { port: StubPort }).port.editResult = async request => {
+    edits.push(request)
+    return (controller as unknown as { port: StubPort }).port.entries.find(e => e.id === request.id) as never
+  }
+  try {
+    controller.open()
+    await flush()
+    controller.dispatch({ kind: 'open-detail', id: 'task-b' })
+    await flush()
+    panel.setSnapshot(controller.snapshot())
+    const frame = plainLines(panel.render(120))
+    const row = frame.findIndex(line => line.includes('Space pause/resume'))
+    const column = frame[row]!.indexOf('Space pause/resume') + 2
+
+    // A release with NO press at all (a button that appeared mid-gesture) must
+    // not commit.
+    panel.onCellClick(column, row)
+    await flush()
+    await controller.whenIdle()
+    assert.equal(edits.length, 0, 'a release without a press commits nothing')
+
+    // A press on a BLANK cell followed by a release over the button is not a
+    // click either.
+    const blankRow = frame.findIndex(line => line.trim() === '')
+    assert.ok(blankRow >= 0)
+    panel.onCellPress(3, blankRow)
+    panel.onCellClick(column, row)
+    await flush()
+    await controller.whenIdle()
+    assert.equal(edits.length, 0, 'a press on a blank cell cannot become a button release')
+
+    // The real press+release on the button still commits exactly one write.
+    panel.onCellPress(column, row)
+    panel.onCellClick(column, row)
+    await flush()
+    await controller.whenIdle()
+    assert.equal(edits.length, 1)
     assert.equal(edits[0]?.id, 'task-b')
   } finally {
     controller.dispose()
