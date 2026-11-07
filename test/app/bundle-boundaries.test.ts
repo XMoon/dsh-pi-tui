@@ -31,7 +31,7 @@ import {
   classifyPluginPackages,
   type PluginClassificationInput,
 } from '../../src/app/plugin-manager/classify.ts'
-import { buildPluginManagerModel, bundleValue } from '../../src/app/plugin-manager/model.ts'
+import { buildPluginDetailView, buildPluginManagerModel, bundleValue } from '../../src/app/plugin-manager/model.ts'
 import { detachPluginManagerSnapshot } from '../../src/runtime/plugin-manager-mapping.ts'
 import { DirectPluginManagerPort, type PluginManagerServiceLike } from '../../src/runtime/direct/plugin-manager-direct.ts'
 import { PluginManagerController } from '../../src/app/plugin-manager/controller.ts'
@@ -282,7 +282,7 @@ test('the real Host catalog paints all 14 verified B01–B14 boundaries through 
 import { createUserMessage, LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { startS4D3Application } from '../support/application-fixture.ts'
-import { skippedInstallationReason, type OptionalBundleId } from '../support/optional-bundle-fixture.ts'
+import { profileSelectsBundle, skippedInstallationReason, type OptionalBundleId } from '../support/optional-bundle-fixture.ts'
 
 type BoundaryScript =
   | { readonly kind: 'tool'; readonly name: string; readonly arguments: string; readonly callId: string }
@@ -357,6 +357,224 @@ function countPluginMutations(service: unknown): { readonly counts: Record<'setB
   }
   return { counts, restore() { for (const [name, original] of originals) proto[name] = original } }
 }
+
+/**
+ * The Release-added Experimental members' real frame: the four catalog entries
+ * the current release adds beyond B01–B14 are painted through the SAME mounted
+ * Plugin Manager. Their bounded TUI surface/Risk copy, their legal actions and
+ * the Host platform refusal of the hidden CUA entry are read from the frame,
+ * never from a local support guess. The profile manifests here are the
+ * file's own seeded metadata: this case proves the mounted presentation and
+ * actions, not that the published packages were loaded (S5-PR1 and the
+ * lifecycle/Forge cases own that).
+ */
+const RELEASE_FRAME_NAMES = [
+  '@deepseek-ai/dsh-personalized-recommendations',
+  '@deepseek-ai/dsh-experimental-liveshare',
+  '@deepseek-ai/dsh-experimental-forge-bundle',
+  '@deepseek-ai/dsh-cua-bundle',
+] as const
+
+const RELEASE_FRAME_HINTS: Readonly<Record<typeof RELEASE_FRAME_NAMES[number], RegExp>> = {
+  '@deepseek-ai/dsh-personalized-recommendations': /no native Action Card interaction/u,
+  '@deepseek-ai/dsh-experimental-liveshare': /no native share controller/u,
+  '@deepseek-ai/dsh-experimental-forge-bundle': /no native Forge panel/u,
+  '@deepseek-ai/dsh-cua-bundle': /darwin-only platform/u,
+}
+
+const CUA_BUNDLE = '@deepseek-ai/dsh-cua-bundle'
+
+test('the release Experimental members paint their real TUI surface and platform admission', async t => {
+  const life = testLifecycle(t)
+  const workRoot = life.tempDir('s4-d3-release-frame-')
+  const profileContext = seedProfile(workRoot)
+  const ctx = new Context()
+  life.defer(() => disposeContext(ctx))
+  ctx.provide('profileContext', profileContext as never)
+  await ctx.plugin(Loader)
+  await ctx.plugin(PluginManager, {})
+  const service = ctx.get('pluginManager') as PluginManagerServiceLike
+  const port = new DirectPluginManagerPort({ get: name => name === 'pluginManager' ? service : undefined, on: () => () => false })
+  const mutations = countPluginMutations(service)
+  t.after(mutations.restore)
+
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const controller = new PluginManagerController(port, {
+    requestRender: () => app.requestRender(),
+    notify: () => {},
+    isOpen: () => true,
+    diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
+  })
+  const panel = new PluginManagerWorkspacePanel(controller, {
+    requestRender: () => app.requestRender(),
+    onCopy: () => {},
+    onYieldNavigation: () => {},
+  }, { onDispose: () => {} })
+  const settings = app.openSettingsWorkspace(
+    { readSnapshot: () => ({ configReadiness: 'ready', rows: [], capturedAt: Date.now() }) },
+    {
+      aboutVersionFacts: { tui: 'test-bundle', dsh: undefined },
+      initialCategory: 'plugins',
+      onOpenPlugins: () => {
+        controller.open()
+        return panel
+      },
+    },
+  )
+  life.defer(() => { try { settings.close() } catch {} try { app.dispose() } catch {} controller.dispose() })
+  const settle = async (rounds = 10): Promise<void> => {
+    for (let index = 0; index < rounds; index += 1) await new Promise<void>(resolve => setTimeout(resolve, 0))
+    await vt.waitForRender()
+  }
+  const detailFrame = (): string => {
+    const split = panel.contentLayout()
+    const lines = vt.getViewport().map(line => plain([line]))
+    if (!split.dual) return lines.join('\n').replace(/\s+/gu, ' ')
+    const start = split.leftWidth + 2
+    return lines.map(line => line.slice(start)).join('\n').replace(/\s+/gu, ' ')
+  }
+  const waitFor = async (predicate: () => boolean, label: string, timeoutMs = 60_000): Promise<void> => {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      if (predicate()) return
+      await new Promise<void>(resolve => setTimeout(resolve, 10))
+      await vt.waitForRender()
+    }
+    throw new Error(`timed out waiting for ${label}: ${plain(vt.getViewport())}`)
+  }
+  await settle()
+  await waitFor(() => controller.model().cards.length === OPTIONAL_BUNDLES.length + ON_DEMAND.length,
+    'the real Host catalog read')
+
+  // The Host hides the CUA entry by default; the painted list advertises the
+  // explicit-search affordance and never paints the hidden card while paging
+  // the complete untouched list.
+  let defaultList = plain(vt.getViewport())
+  for (let page = 0; page < 12; page += 1) {
+    const before = plain(vt.getViewport())
+    vt.sendInput('\x1b[6~')
+    await settle()
+    const after = plain(vt.getViewport())
+    if (after === before) break
+    defaultList += `\n${after}`
+  }
+  assert.match(defaultList, /searches hidden official/u, 'the list advertises the explicit search of hidden bundles')
+  assert.doesNotMatch(defaultList, /dsh-cua-bundle/u, 'the Host-hidden CUA entry is absent from the default list')
+
+  for (const name of RELEASE_FRAME_NAMES) {
+    // Exact-name search from the page's own search seat.
+    vt.sendInput('/')
+    vt.sendInput('\x1b')
+    vt.sendInput('/')
+    for (const character of name) vt.sendInput(character)
+    vt.sendInput('\r')
+    await settle()
+    assert.equal(panel.selectedCardValue(), `bundle:${name}`, `the explicit search reveals ${name}`)
+    vt.sendInput('\r')
+    await waitFor(() => plain(vt.getViewport()).includes('Official DSH catalog entry'), `the ${name} Detail`)
+    let painted = detailFrame()
+    for (let page = 0; page < 20 && !/TUI surface/u.test(painted); page += 1) {
+      vt.sendInput('\x1b[6~')
+      await settle()
+      painted += `\n${detailFrame()}`
+    }
+    assert.match(painted, /TUI surface/u, `${name} paints its bounded TUI surface:\n${painted}`)
+    for (let page = 0; page < 20 && !RELEASE_FRAME_HINTS[name].test(painted); page += 1) {
+      vt.sendInput('\x1b[6~')
+      await settle()
+      painted += `\n${detailFrame()}`
+    }
+    assert.match(painted, RELEASE_FRAME_HINTS[name], `${name} paints its exact limit:\n${painted}`)
+    assert.match(painted, /\[experimental\]/u, `${name} is painted in the Experimental section`)
+    // The action block sits below the bounded facts; page until the frame
+    // really paints the primary action this card offers.
+    for (let page = 0; page < 40 && !/> (?:Enable|Install)…/u.test(painted); page += 1) {
+      vt.sendInput('\x1b[6~')
+      await settle()
+      painted += `\n${detailFrame()}`
+    }
+
+    if (name === CUA_BUNDLE) {
+      assert.doesNotMatch(painted, /> Enable…/u, `${name} is missing and never offers Enable`)
+      if (process.platform === 'darwin') {
+        // On its supported Host this case only reads the catalog/offered
+        // version; it never installs the package or requests native permission.
+        assert.match(painted, /> Install…/u, `${name} offers the official Install action on its supported Host`)
+        assert.match(painted, /Install target\s+@deepseek-ai\/dsh-cua-bundle@[0-9]/u,
+          `${name} paints the official offered install target`)
+      } else {
+        // The real Host catalog error is painted on the disabled Install action.
+        assert.match(painted, /Install… — unsupported-platform/u, `${name} paints the Host platform refusal:\n${painted}`)
+        assert.match(painted, /This bundle cannot be enabled on the DSH Host platform/u)
+        // The disabled action is readable but inert: invoking it only explains
+        // the refusal and writes neither the profile nor a Host install request.
+        const before = { ...mutations.counts }
+        vt.sendInput('\r')
+        await settle()
+        await waitFor(() => /cannot be enabled on the DSH Host platform/u.test(plain(vt.getViewport())),
+          'the disabled Install explanation')
+        assert.deepEqual(mutations.counts, before, 'the refused Install dispatches no Host mutation')
+      }
+    } else {
+      assert.match(painted, /> Enable…/u, `${name} offers the official Enable action for its shipped installation`)
+      assert.doesNotMatch(painted, /Remove…/u, `${name} is shipped, so the TUI offers no Remove action`)
+      assert.doesNotMatch(painted, /Create…|Not now|Share…|Open PR/u,
+        `${name} paints no phantom Web/Relay/Forge action:\n${painted}`)
+    }
+    vt.sendInput('\x1b') // leave Details
+    await settle()
+  }
+  // ONE representative same-name official:false package: the Host fact keeps
+  // it Third-party, so it inherits neither the Experimental identity nor the
+  // release support copy (the legacy B01 mechanism is covered separately by
+  // plugin-manager-classify.test.ts; this proves the NEW copy is name-keyed
+  // only behind the official/section guard).
+  const impostorName = '@deepseek-ai/dsh-experimental-forge-bundle'
+  const impostorSnapshot = detachPluginManagerSnapshot({
+    bundles: [{
+      name: impostorName,
+      official: false,
+      availability: 'profile',
+      enabled: true,
+      installed: true,
+      removable: true,
+      rows: [],
+      overrides: [],
+    }] as never,
+    plugins: [],
+    registries: { registry: null, fallbackRegistries: [], resolved: null },
+    exemptions: { exemptions: {}, warnings: [] },
+  })
+  const impostorModel = buildPluginManagerModel(
+    impostorSnapshot,
+    classifyPluginPackages([{
+      key: bundleValue(impostorName),
+      bundleName: impostorName,
+      entryIds: [],
+      official: false,
+      availability: 'profile',
+      installed: true,
+    }], []),
+  )
+  const impostor = impostorModel.cards.find(card => card.name === impostorName)!
+  assert.equal(impostor.section, 'third-party', 'an official:false same-name package stays Third-party')
+  assert.equal(impostor.experimental, false)
+  assert.equal(buildPluginDetailView(impostor).groups.flatMap(group => group.facts)
+    .some(fact => fact.label === 'TUI surface'), false, 'the forged identity inherits no release support copy')
+
+  // The presentation case never wrote the profile or dispatched a Host mutation.
+  assert.deepEqual(mutations.counts, {
+    setBundleEnabled: 0,
+    setPluginEnabled: 0,
+    removeBundle: 0,
+  }, 'the frame case performed ZERO Host writes')
+  for (const name of RELEASE_FRAME_NAMES) {
+    assert.equal(profileSelectsBundle(String(profileContext['dir']), name), false, `${name} was never selected by this frame case`)
+  }
+  assert.equal(process.env.LIVESHARE_OWNER_CREDENTIAL_FILE, undefined, 'no Relay credential was created')
+})
 
 test('the mounted TUI keeps Team capability in the existing Tool/Activity views and invents no Team board', { skip: skippedInstallationReason([B01]) }, async t => {
   const adapter = new BoundaryAdapter()
