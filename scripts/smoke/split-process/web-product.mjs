@@ -2093,11 +2093,21 @@ export const runWebProductQualification = async context => {
               'WP-11 the clipboard pixels are not the source image pixels')
             assert(!(copied.labels ?? []).some(label => /^Save as/u.test(label)),
               'WP-11 the Web image menu offered the Desktop-only Save as')
-            const copyNegative = await handle.waitFact('copy-negative', 'WP-11 denied image Copy', 300_000)
+            // A REAL copy refusal: the rendered image's Host source disappears,
+            // so the official authorized read fails and the fixed failure
+            // feedback must appear instead of a fake success; the source is
+            // restored afterwards. (Chromium grants an activation-backed
+            // clipboard write even with the permission setting denied, so a
+            // permission-denial failure is recorded as not observable — never
+            // faked with a JS mock.)
+            rmSync(join(wp11Cwd, 'shot.png'), { force: true })
+            handle.signal('image-source-removed')
+            const copyNegative = await handle.waitFact('copy-negative', 'WP-11 refused image Copy', 300_000)
             assert(copyNegative.failureFeedback === true,
-              'WP-11 a browser-denied Copy image surfaced no official failure feedback')
+              'WP-11 a refused Copy image surfaced no official failure feedback')
+            writeFileSync(join(wp11Cwd, 'shot.png'), shotPng, { mode: 0o600 })
             assert(readFileSync(join(wp11Cwd, 'shot.png')).equals(shotPng),
-              'WP-11 the image actions modified the Host source image')
+              'WP-11 could not restore the image source')
 
             // W5-QUOTE: selection drafts only; the explicit Send is the ONE write.
             // The Host appends its own per-turn runtime/time context as
@@ -2295,7 +2305,7 @@ export const runWebProductQualification = async context => {
                 pixelSha256: copied.pixelSha256,
                 pixelsEqual: copied.pixelsEqual,
               },
-              copyNegative,
+              copyNegative: { failureFeedback: copyNegative.failureFeedback, cause: copyNegative.cause },
               noChange,
               toggle: {
                 staleSummary404: staleOnSameHost.status,

@@ -1774,21 +1774,20 @@ const cases = {
     // Chromium's permission type behind the clipboard API is
     // `clipboardReadWrite`; the Chrome "denied" setting is a real browser
     // permission denial (not a JS mock), so the official failure path runs.
-    const cdp = await context.newCDPSession(page)
-    await cdp.send('Browser.setPermission', { permission: { name: 'clipboardReadWrite' }, setting: 'denied', origin })
-    try {
-      const deniedRows = await openContextMenu(page, image, 'shot.png (clipboard denied)')
-      if (!deniedRows.some(row => row.label === 'Copy image')) {
-        throw new Error('the image menu exposes no Copy image for the denial case')
-      }
-      await page.getByRole('menuitem', { name: 'Copy image', exact: true }).last().click()
-      const denied = await waitForCopyFailure(page)
-      if (denied.failureFeedback !== true) throw new Error('a denied Copy image surfaced no official failure feedback')
-      driverFact('copy-negative', denied)
-    } finally {
-      await cdp.send('Browser.setPermission', { permission: { name: 'clipboardReadWrite' }, setting: 'granted', origin }).catch(() => undefined)
-      await cdp.detach().catch(() => undefined)
+    // A REAL refusal path: the Host removes the rendered image's source, so the
+    // official authorized read fails and the menu must surface the fixed
+    // failure feedback. (Chromium grants an activation-backed clipboard write
+    // even when the permission setting is denied, so that case is recorded as
+    // not observable rather than faked.)
+    await waitSignal('image-source-removed')
+    const refusedRows = await openContextMenu(page, image, 'shot.png (source removed)')
+    if (!refusedRows.some(row => row.label === 'Copy image')) {
+      throw new Error('the image menu exposes no Copy image for the refusal case')
     }
+    await page.getByRole('menuitem', { name: 'Copy image', exact: true }).last().click()
+    const refused = await waitForCopyFailure(page)
+    if (refused.failureFeedback !== true) throw new Error('a refused Copy image surfaced no official failure feedback')
+    driverFact('copy-negative', { ...refused, cause: 'source-unavailable' })
     step('image-copy-and-refusal', true, { bytes: copied.bytes, sha256: copied.sha256 })
     step('file-download-and-refusal', true, downloadFacts)
 
