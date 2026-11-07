@@ -11,6 +11,7 @@
  */
 
 import type { StatusSnapshotReader } from '../../domain/status/types.ts'
+import type { DisplayState } from '../../domain/display/preset.ts'
 import type { TspNativeFooterConfig } from '../../domain/footer/tsp-native-config.ts'
 import type { SurfaceRendererMount } from '../surface/runtime.ts'
 
@@ -176,6 +177,9 @@ export async function selectRendererMount(deps: RendererSelectionDeps): Promise<
 /** The PRODUCTION connector inputs: lazy import + the official SDK connect. */
 export interface ProductionTspConnectorDeps {
   readonly cwd: string
+  /** The ONE live display authority the composition root resolved before the
+   *  first compose; forwarded as the SAME object, never a boot-time snapshot. */
+  readonly displayState: DisplayState
   readonly requestExit: () => void
   readonly onFatal: (error: unknown) => void
   readonly log: (message: string, fields?: Record<string, unknown>) => void
