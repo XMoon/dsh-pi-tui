@@ -2064,10 +2064,14 @@ export const runWebProductQualification = async context => {
             const copied = await handle.waitFact('copy-image', 'WP-11 image Copy', 300_000)
             assert(copied.ok === true && copied.type === 'image/png' && copied.pngSignature === true,
               `WP-11 Copy image did not put a real PNG on the clipboard: ${JSON.stringify(copied)}`)
-            assert(copied.bytes === shotPng.length,
-              `WP-11 the clipboard PNG has ${String(copied.bytes)} bytes, expected ${String(shotPng.length)}`)
-            assert(copied.sha256 === shotHash,
-              `WP-11 the clipboard PNG (${String(copied.sha256)}) is not the workspace shot.png (${shotHash})`)
+            // Clipboard equivalence is DECODED-pixel level: Chromium may
+            // re-encode the PNG bytes, so the byte sha256 is informational only.
+            assert(copied.pixelsEqual === true,
+              `WP-11 the clipboard PNG pixels differ from the workspace source: ${JSON.stringify({ width: copied.width, height: copied.height, pixelSha256: copied.pixelSha256, source: copied.source })}`)
+            assert(copied.width === 1 && copied.height === 1,
+              `WP-11 the clipboard PNG is ${String(copied.width)}x${String(copied.height)}, expected the 1x1 fixture`)
+            assert(copied.source?.pixelSha256 === copied.pixelSha256,
+              'WP-11 the clipboard pixels are not the source image pixels')
             assert(!(copied.labels ?? []).some(label => /^Save as/u.test(label)),
               'WP-11 the Web image menu offered the Desktop-only Save as')
             const copyNegative = await handle.waitFact('copy-negative', 'WP-11 denied image Copy', 300_000)
@@ -2262,7 +2266,16 @@ export const runWebProductQualification = async context => {
                 quotedUserMessages: quotedWrites.length,
               },
               fileNegative: { downloadStarted: fileNegative.downloadStarted, rows: fileNegative.rows },
-              copyImage: { type: copied.type, bytes: copied.bytes, sha256: copied.sha256, pngSignature: copied.pngSignature },
+              copyImage: {
+                type: copied.type,
+                bytes: copied.bytes,
+                sha256: copied.sha256,
+                sourceSha256: shotHash,
+                width: copied.width,
+                height: copied.height,
+                pixelSha256: copied.pixelSha256,
+                pixelsEqual: copied.pixelsEqual,
+              },
               copyNegative,
               noChange,
               toggle: {
