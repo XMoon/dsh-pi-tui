@@ -7,11 +7,12 @@
  *   UA-01/02  Client A shows Session Y and has NEVER retained Session X; the
  *             official passive read still reports X's Host running state and
  *             pending kind, while Y reports its own idle state.
- *   UA-03     X's real Host Question is read by A through the port BEFORE any
- *             answer; A's existing first-settlement modal then settles the ONE
- *             Host request; B's stale modal is withdrawn and its late key is
- *             inert; A re-enters X through the old `/resume` path and reads the
- *             durable result.
+ *   UA-03     X's real Host Question is read by A(Y) through the port BEFORE any
+ *             answer; G567 navigation-first admission keeps A's modal OFF the Y
+ *             editor, and A's existing first-settlement modal appears only
+ *             after `/resume X` commits; it then settles the ONE Host request;
+ *             B's stale modal is withdrawn and its late key is inert; A reads
+ *             the durable result on X.
  *   UA-04     the symmetric real Approval: A reads `approval`, allows once, the
  *             Host Gateway settles exactly one `allowed-once`, B cannot
  *             re-decide.
@@ -47,7 +48,7 @@ import {
   waitForHostSessionEvent,
   waitForHostSessionEventAfter,
 } from '../../lib/split-smoke-sessions.mjs'
-import { createC1Scene } from './c1-scene.mjs'
+import { createDualSurfaceSceneTools } from './dual-surface-scene.mjs'
 
 function assert(condition, message) {
   if (!condition) throw new SplitSmokeAssertionError(message)
@@ -61,8 +62,8 @@ const textOf = message => (message?.content ?? [])
 /** Run the U-A read-authority qualification on this installation. */
 export async function runReadAuthority(context) {
   const { workDir, dshHome, trace } = context
-  const scene = createC1Scene(context)
-  const { startC1Host, startC1Client, exitC1Client, stopC1Host, hostIdentityFacts } = scene
+  const tools = createDualSurfaceSceneTools(context)
+  const { scene, exitC1Client, stopC1Host, submitPrompt, resumeSession } = tools
 
   // ── The ONE qualification probe (no product surface) ──────────────────────
   const requestPath = join(workDir, 'ua-read-authority-request.json')
@@ -101,113 +102,15 @@ export async function runReadAuthority(context) {
       `${label}: the port read never satisfied the predicate; last=${JSON.stringify(last?.facts)}`)
   }
 
-  /**
-   * Submit one line from a PROVEN-ready editor seat. A keystroke the session
-   * transition (or a closing modal) drops is lost for good, so readiness is
-   * observed first with a harmless marker draft, and once the editor holds it
-   * the real line and its Enter are sent as ONE write (a separately delivered
-   * Enter can be consumed by an open command-completion list instead of
-   * submitting `/resume <id>`).
-   */
-  let submitMarkerSequence = 0
-  const submitPrompt = async (client, text, label) => {
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      const marker = `ua-ready-${String(++submitMarkerSequence)}`
-      client.send(marker)
-      try {
-        await client.waitForComposerDraft(marker, 8_000)
-      } catch {
-        client.send('\x15')
-        await sleep(300)
-        continue
-      }
-      client.send('\x15')
-      let cleared = false
-      for (let poll = 0; poll < 60; poll += 1) {
-        const draft = await client.composerText()
-        if (draft !== undefined && !draft.includes(marker)) {
-          cleared = true
-          break
-        }
-        await sleep(100)
-      }
-      if (!cleared) continue
-      client.send(`${text}\r`)
-      return
-    }
-    throw new SplitSmokeAssertionError(`${label}: the editor seat never accepted the submitted line`)
-  }
-
-  /** Enter a Session through the OLD `/resume <id>` path, idempotently: the
-   *  command is a real navigation that can occasionally be superseded by the
-   *  surrounding interaction churn, so it is retried (a retry that arrives when
-   *  X is already current is the harmless `already on this session` no-op) and
-   *  the committed visible status is the ONLY success. */
-  const resumeSession = async (client, sessionId, label) => {
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      if (lastSurfaceStatus(client)?.openSessionId === sessionId) return
-      await submitPrompt(client, `/resume ${sessionId}`, `${label} attempt ${String(attempt + 1)}`)
-      try {
-        await waitForSurfaceStatus(client,
-          record => record.sessionOpen === true && record.openSessionId === sessionId,
-          `${label} committed`,
-          25_000)
-        return
-      } catch {
-        client.send('\x15')
-        await sleep(500)
-      }
-    }
-    throw new SplitSmokeAssertionError(
-      `${label}: /resume never committed (open=${JSON.stringify(lastSurfaceStatus(client)?.openSessionId)})`)
-  }
-
-  /** Admit A on Session Y, and (by default) B on a DIFFERENT Session X. */
-  const startDualSurfaceScene = async (scenario, label, extraEnv = {}, options = { openB: true, bCwd: undefined, bEnv: {} }) => {
-    const { host, ready: hostReady, workRoot } = await startC1Host(scenario, label, extraEnv)
-    const hostBefore = await hostIdentityFacts(host)
-    assert(hostBefore.hostPid === hostReady.pid, `${label} the Host ready record does not own the Host identity`)
-    const { client: clientA, ready: aReady } = await startC1Client(`${label} A`, {
-      SPLIT_PROCESS_CLIENT_READ_AUTHORITY_PROOF: requestPath,
+  /** The U-A scene always carries the ONE read-authority probe env. */
+  const startDualSurfaceScene = (scenario, label, extraHostEnv = {}, options = {}) =>
+    tools.startDualSurfaceScene(scenario, label, extraHostEnv, {
+      ...options,
+      clientEnv: {
+        SPLIT_PROCESS_CLIENT_READ_AUTHORITY_PROOF: requestPath,
+        ...options.clientEnv,
+      },
     })
-    await submitPrompt(clientA, '/new', `${label} A /new`)
-    const aOpen = await waitForSurfaceStatus(clientA,
-      record => record.sessionOpen === true
-        && typeof record.openSessionId === 'string'
-        && record.transport === 'connected'
-        && record.surfaceMounted === true,
-      `${label} Client A opened Session Y`,
-      120_000)
-    const sessionY = aOpen.openSessionId
-    const { client: clientB, ready: bReady } = await startC1Client(`${label} B`, {
-      SPLIT_PROCESS_CLIENT_READ_AUTHORITY_PROOF: requestPath,
-      ...options.bEnv,
-    }, options.bCwd === undefined ? {} : { cwd: options.bCwd })
-    let sessionX
-    if (options.openB) {
-      await submitPrompt(clientB, '/new', `${label} B /new`)
-      const bOpen = await waitForSurfaceStatus(clientB,
-        record => record.sessionOpen === true
-          && typeof record.openSessionId === 'string'
-          && record.transport === 'connected'
-          && record.surfaceMounted === true,
-        `${label} Client B opened Session X`,
-        120_000)
-      sessionX = bOpen.openSessionId
-      assert(typeof sessionX === 'string' && sessionX !== '',
-        `${label} Client B published no Session identity`)
-      assert(sessionX !== sessionY, `${label} A and B opened the SAME Session; the scene needs two`)
-    }
-    assert(typeof sessionY === 'string' && sessionY !== '', `${label} Client A published no Session identity`)
-    for (const [side, ready] of [['A', aReady], ['B', bReady]]) {
-      assert(Number.isInteger(ready.pid) && ready.pid > 0 && ready.pid !== hostBefore.hostPid,
-        `${label} Client ${side} published no live business PID distinct from the Host`)
-      assert(alive(ready.pid), `${label} Client ${side} is not a live business process`)
-    }
-    assert(aReady.pid !== bReady.pid, `${label} the two Clients must be two different business PIDs`)
-    assert(alive(hostBefore.hostPid), `${label} the Host died while both Clients were admitted`)
-    return { host, hostBefore, workRoot, clientA, clientB, aReady, bReady, sessionX, sessionY }
-  }
 
   /** The ONE row/fact for a Session id, with a diagnosable failure. */
   const factOf = (record, sessionId, label) => {
@@ -244,10 +147,15 @@ export async function runReadAuthority(context) {
       await waitForC1WorkEvent(workRoot,
         event => event.kind === 'question-request' && event.sessionId === sessionX,
         'UA Host question request', 120_000)
-      // Both real PTYs paint the answerable modal; the question is a real
-      // forwarded Host waterfall, not a replay.
-      await clientA.waitForScreen('[1] Proceed', 'UA A question modal', 120_000)
+      // B owns Session X and paints the answerable modal. A owns Session Y:
+      // PR-G567 navigation-first admission must keep X's modal OFF A's Y
+      // editor even though the same forwarded Host waterfall reached A's root.
       await clientB.waitForScreen('[1] Proceed', 'UA B question modal', 120_000)
+      await sleep(1_000)
+      assert(!(await clientA.viewport()).join('\n').includes('[1] Proceed'),
+        'UA-03 A painted X\'s question modal while its committed Session was Y')
+      assert(!readC1WorkEvents(workRoot).some(event => event.kind === 'question-settled'),
+        'UA-03 a modal presentation settled the Host question before any answer')
       assert(lastSurfaceStatus(clientA)?.openSessionId === sessionY,
         'UA Client A stopped showing Session Y before the read')
       const writesBefore = (hostSessionEvents(dshHome, sessionX) ?? []).length
@@ -284,9 +192,16 @@ export async function runReadAuthority(context) {
       assert(readAgain.sessionOpen === true && readAgain.openSessionId === sessionY,
         'UA a read moved Client A off Session Y')
 
-      // UA-03: A's EXISTING first-settlement modal answers the ONE Host
-      // request. A has never retained X; the answer travels back through the
-      // Host's own forwarded-event correlation.
+      // UA-03: G567 navigation-first — A re-enters X through the OLD
+      // `/resume` path FIRST; only the committed X editor receives the SAME
+      // live request's modal, whose answer then travels back through the Host's
+      // own forwarded-event correlation.
+      const navigateIndex = (hostSessionEvents(dshHome, sessionX) ?? []).length
+      await resumeSession(clientA, sessionX, 'UA A /resume X before the answer')
+      assert((hostSessionEvents(dshHome, sessionX) ?? []).slice(navigateIndex)
+        .every(event => event.type !== 'tool/result' && event.type !== 'turn/end'),
+      'UA-03 navigating to X settled the Host question')
+      await clientA.waitForScreen('[1] Proceed', 'UA A question modal after the X commit', 120_000)
       const answerIndex = (hostSessionEvents(dshHome, sessionX) ?? []).length
       clientA.send('1')
       await clientA.waitForScreen('Review your answer before submit', 'UA A question review', 30_000)
@@ -379,8 +294,12 @@ export async function runReadAuthority(context) {
       await waitForC1WorkEvent(workRoot,
         event => event.kind === 'approval-request' && event.sessionId === sessionX,
         'UA Host approval request', 120_000)
-      await clientA.waitForScreen('[y] Allow once', 'UA A approval sheet', 120_000)
       await clientB.waitForScreen('[y] Allow once', 'UA B approval sheet', 120_000)
+      await sleep(1_000)
+      assert(!(await clientA.viewport()).join('\n').includes('[y] Allow once'),
+        'UA-04 A painted X\'s approval sheet while its committed Session was Y')
+      assert(!(hostSessionEvents(dshHome, sessionX) ?? []).some(event => event.type === 'approval/decided'),
+        'UA-04 a presentation decided the Host approval before any answer')
       assert(lastSurfaceStatus(clientA)?.openSessionId === sessionY,
         'UA Client A stopped showing Session Y before the approval read')
       const writesBefore = (hostSessionEvents(dshHome, sessionX) ?? []).length
@@ -395,7 +314,14 @@ export async function runReadAuthority(context) {
       assert(Array.isArray(factX.pendingKinds) && factX.pendingKinds.includes('approval'),
         `UA X approval pending kinds were ${JSON.stringify(factX.pendingKinds)}`)
       assertNoHostWrite(sessionX, writesBefore, 'UA read of approval X')
-      // A allows once through the SAME existing ApprovalSheet.
+      // G567 navigation-first: A commits X first; the SAME live approval then
+      // mounts on X and allows once through the SAME existing ApprovalSheet.
+      const navigateIndex = (hostSessionEvents(dshHome, sessionX) ?? []).length
+      await resumeSession(clientA, sessionX, 'UA A /resume X before the approval decision')
+      assert((hostSessionEvents(dshHome, sessionX) ?? []).slice(navigateIndex)
+        .every(event => event.type !== 'approval/decided' && event.type !== 'tool/result'),
+      'UA-04 navigating to X decided the Host approval')
+      await clientA.waitForScreen('[y] Allow once', 'UA A approval sheet after the X commit', 120_000)
       const decideIndex = (hostSessionEvents(dshHome, sessionX) ?? []).length
       clientA.send('y')
       const decided = await waitForHostSessionEventAfter(dshHome, sessionX, decideIndex,
@@ -426,8 +352,9 @@ export async function runReadAuthority(context) {
         .filter(event => event.type === 'approval/decided' && String(event.data?.id) === requestId)
       assert(decisions.length === 1 && decisions[0].data.outcome === 'allowed-once',
         'UA the late loser key produced a second/changed Host approval decision')
-      // A re-enters X through the old path and reads the durable settlement.
-      await resumeSession(clientA, sessionX, 'UA A /resume X after the approval')
+      // A is already on X (the navigation-first commit above); the durable
+      // settlement is read from that SAME committed Session.
+      await resumeSession(clientA, sessionX, 'UA A already on X after the approval')
       await clientA.waitForScreen('approval settled', 'UA A read the Host settlement after resuming X', 120_000)
       const readAfterResume = await readFacts(clientA, 'UA A read of the resumed approval X')
       const factAfter = factOf(readAfterResume, sessionX, 'UA approval fact after resume')

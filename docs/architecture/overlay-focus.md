@@ -147,6 +147,12 @@ Keyboard routing follows this priority:
    support it;
 2. fixed Question response keys (the component) and Approval fixed/reading keys
    (the approval runtime/sheet);
+2a. the split Client's modal-safe no-answer navigation entry (`Alt+W`), only
+   while a forwarded Question/Approval owns the seat and the registered,
+   presentable Session Workspace entry is installed: it commits the root
+   presentation-only hold, withdraws the local modal seat, and opens the ONE
+   existing Session Workspace; no cancel, deny, answer or second listing is
+   sent. It is the only modal key that suspends the answer seat for navigation;
 3. a direct trigger of the explicit inspection-safe semantic allowlist;
 4. a leader prefix or completion, when the completed semantic action is in the
    same inspection-safe allowlist;
@@ -287,6 +293,36 @@ frame, auto-reopen, report a Host-driven end as user cancel, or add an
 `src/app/surface/question-controller.ts` (`ASK_TIMED_OUT`, `ASK_CANCELLED`,
 `ASK_ABORTED`, `QUESTION_REPLY_QUEUED`, `ContinuedQuestionEntry`),
 `QuestionFlow`, `src/runtime/interaction-port.ts`.
+
+### 6.3 Navigation-first forwarded interaction admission
+
+The split Client's ONE root interaction delivery owner holds each official
+forwarded Question/Approval invocation. The PiTUI/Split surface presents that
+invocation only while all of these hold: the application has committed the
+request's own Session as the current subject, no presentation-only navigation
+hold is active, and the official request signal is live. A request for another
+Session is HELD, never painted onto the current editor; a Reader-side
+`attention` candidate is not answer authority.
+
+A local modal withdrawal (the `Alt+W` navigation hold, or a committed Session
+replacement) bumps the root presentation epoch BEFORE the seat is withdrawn.
+The withdrawn attempt's local cancellation therefore cannot be forwarded as a
+human Host decision, and the SAME official invocation (the original callback
+and `nextOnce`) is re-offered only when its Session is current again. The
+official request aborts, the first settlement by another Client, or root
+disposal ends the wait; no local pending DTO, second RPC or request id is
+created.
+
+The hold is released by the physical Session Workspace close (user Esc, a
+committed Session switch, or blocking-owner pre-emption). If the entry cannot
+lease/present, the hold is released at once so the original dialog is
+re-offered instead of leaving the editor under a hold with no future close.
+Direct keeps its original unconditional presentation delegation; the TSP
+native modal seat keeps its own admission.
+
+Authority: `src/app/remote-process/client-interaction-delivery.ts`,
+`src/app/surface/interaction-runtime.ts`, `src/app/surface/runtime.ts`,
+`src/tui-app.ts`.
 
 Proof: `test/app/question-park-reopen.test.ts`,
 `test/app/question-remote-lifecycle.test.ts`.

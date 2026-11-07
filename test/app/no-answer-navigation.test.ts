@@ -1,0 +1,190 @@
+/**
+ * PR-G567: the modal-safe no-answer navigation entry (Alt+W) of the split
+ * Client's PiTUI modal seat.
+ *
+ * Evidence level: L3 over the ONE mounted TuiApp. The real Host + two-PTY
+ * scene is proven by the split-process smoke; this suite pins the local
+ * behavior that makes it safe:
+ *
+ * - Alt+W is inert without the installed control and while the modal owns a
+ *   fixed response key (the modal response ladder stays authoritative);
+ * - `begin()` withdraws the mounted Question/Approval seat and the local
+ *   cancellation is a presentation fact, never a decision;
+ * - the root hold is released by the physical Session Workspace close, not by
+ *   the key press;
+ * - when the Browser cannot lease/open, the hold is released at once so the
+ *   editor is never stranded.
+ *
+ * @module @xmoon76/dsh-pi-tui/no-answer-navigation.test
+ */
+
+import assert from 'node:assert/strict'
+import { afterEach, test } from 'node:test'
+import { TuiApp } from '../../src/tui-app.ts'
+import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
+import { VirtualTerminal } from '../support/virtual-terminal.ts'
+
+const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
+afterEach(() => {
+  disposeStartedApps()
+})
+
+function startApp(): { app: TuiApp; vt: VirtualTerminal } {
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {}, onCancel: () => {} })
+  app.start()
+  startedApps.add(app)
+  return { app, vt }
+}
+
+async function settleOutcome<T>(
+  promise: Promise<T>,
+  timeoutMs = 1_000,
+): Promise<{ kind: 'resolved'; value: T } | { kind: 'rejected'; error: unknown } | { kind: 'timeout' }> {
+  return Promise.race([
+    promise.then(
+      value => ({ kind: 'resolved' as const, value }),
+      error => ({ kind: 'rejected' as const, error }),
+    ),
+    new Promise<{ kind: 'timeout' }>(resolve => {
+      const timer = setTimeout(() => resolve({ kind: 'timeout' }), timeoutMs)
+      timer.unref?.()
+    }),
+  ])
+}
+
+/** Open the REAL Session Workspace lease on the app (the command layer's own
+ *  entry) with inert callbacks. */
+function openWorkspace(app: TuiApp): void {
+  app.openSessionWorkspace({
+    subject: { currentSessionId: 'session-X', currentCwd: '/tmp', isCurrent: () => true },
+    onQueryChange: () => {},
+    onResume: () => {},
+    onClose: () => {},
+    initialMode: 'browse',
+    initialBrowseScope: 'current',
+  })
+}
+
+test('Alt+W withdraws the mounted question, opens the lease, and releases the hold on the workspace close', async () => {
+  const { app, vt } = startApp()
+  const controller = new AbortController()
+  const question = app.askQuestions([{ id: 'q1', question: 'Continue?', options: [{ label: 'Proceed' }] }], controller.signal)
+  const questionOutcome = settleOutcome(question)
+  await vt.waitForRender()
+  assert.match(vt.getViewport().join(''), /Continue\?/u, 'the question owns the seat first')
+
+  let beginCalls = 0
+  let openCalls = 0
+  let releaseCalls = 0
+  app.setNoAnswerNavigation({
+    available: () => true,
+    begin: () => {
+      beginCalls += 1
+      app.withdrawPresentations([controller.signal])
+      return () => { releaseCalls += 1 }
+    },
+    open: () => {
+      openCalls += 1
+      openWorkspace(app)
+    },
+  })
+
+  vt.sendInput('\x1bw')
+  await vt.waitForRender()
+  assert.equal(beginCalls, 1, 'Alt+W commits the hold before anything else')
+  assert.equal(openCalls, 1, 'Alt+W opens the EXISTING Session Workspace lease')
+  assert.match(vt.getViewport().join(''), /All workspaces|Recent sessions|sessions/iu,
+    'the fullscreen Session Workspace is the visible surface')
+  const outcome = await questionOutcome
+  assert.equal(outcome.kind, 'rejected', 'the withdrawn local question attempts no Host answer')
+  assert.match(String((outcome as { error: unknown }).error), /question flow cancelled/u)
+  assert.equal(releaseCalls, 0, 'the hold stays committed while the Browser is open')
+
+  // Esc closes the physical workspace: THAT is the hold-release fact.
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.equal(releaseCalls, 1, 'the workspace close releases the navigation hold exactly once')
+})
+
+test('Alt+W withdraws a mounted approval without deciding it and releases on close', async () => {
+  const { app, vt } = startApp()
+  const controller = new AbortController()
+  const approval = app.showApprovalPrompt({ toolName: 'bash', reason: 'need a decision', signal: controller.signal })
+  await vt.waitForRender()
+  assert.match(vt.getViewport().join(''), /bash|Approval/iu, 'the approval sheet owns the seat first')
+
+  let releaseCalls = 0
+  app.setNoAnswerNavigation({
+    available: () => true,
+    begin: () => {
+      app.withdrawPresentations([controller.signal])
+      return () => { releaseCalls += 1 }
+    },
+    open: () => { openWorkspace(app) },
+  })
+  vt.sendInput('\x1bw')
+  await vt.waitForRender()
+  assert.deepEqual(await settleOutcome(approval), { kind: 'resolved', value: 'cancelled' },
+    'the withdrawn approval is a local presentation cancellation, not a Host decision')
+  assert.equal(releaseCalls, 0)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.equal(releaseCalls, 1, 'the workspace close releases the hold')
+})
+
+test('Alt+W is inert when the control is absent or unavailable and the modal keeps its fixed keys', async () => {
+  const { app, vt } = startApp()
+  const controller = new AbortController()
+  const question = app.askQuestions([{ id: 'q1', question: 'Keep me?', options: [{ label: 'Proceed' }] }], controller.signal)
+  await vt.waitForRender()
+
+  // No control installed (Direct / TSP): the key falls through to the modal,
+  // which consumes it as ordinary input; nothing opens and nothing settles.
+  vt.sendInput('\x1bw')
+  await vt.waitForRender()
+  assert.match(vt.getViewport().join(''), /Keep me\?/u, 'the modal is still mounted')
+  assert.equal((await settleOutcome(question, 50)).kind, 'timeout', 'Alt+W settles nothing')
+
+  let beginCalls = 0
+  let openCalls = 0
+  app.setNoAnswerNavigation({
+    available: () => false,
+    begin: () => { beginCalls += 1; return () => {} },
+    open: () => { openCalls += 1 },
+  })
+  vt.sendInput('\x1bw')
+  await vt.waitForRender()
+  assert.equal(beginCalls, 0, 'an unavailable Browser never takes the hold')
+  assert.equal(openCalls, 0)
+  assert.match(vt.getViewport().join(''), /Keep me\?/u, 'the dialog stays mounted')
+  assert.match(vt.getViewport().join(''), /Session browsing is not available/u, 'the refusal is visible')
+
+  // The fixed response key still wins: Esc settles the flow as the human cancel.
+  vt.sendInput('\x1b')
+  const outcome = await settleOutcome(question)
+  assert.equal(outcome.kind, 'rejected')
+  assert.match(String((outcome as { error: unknown }).error), /question flow cancelled/u)
+})
+
+test('a control that opens no lease releases the hold immediately instead of stranding the editor', async () => {
+  const { app, vt } = startApp()
+  const controller = new AbortController()
+  const question = app.askQuestions([{ id: 'q1', question: 'Still there?', options: [{ label: 'Proceed' }] }], controller.signal)
+  const questionOutcome = settleOutcome(question)
+  await vt.waitForRender()
+  let releaseCalls = 0
+  app.setNoAnswerNavigation({
+    available: () => true,
+    begin: () => {
+      app.withdrawPresentations([controller.signal])
+      return () => { releaseCalls += 1 }
+    },
+    open: () => {},
+  })
+  vt.sendInput('\x1bw')
+  await vt.waitForRender()
+  assert.equal(releaseCalls, 1, 'no lease means no future close: the hold is released at once')
+  assert.match(vt.getViewport().join(''), /Sessions could not be opened/u, 'the failure is explicit')
+  assert.equal((await questionOutcome).kind, 'rejected', 'the local presentation settled')
+})

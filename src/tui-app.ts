@@ -1827,6 +1827,25 @@ export interface SessionWorkspaceHandle {
 }
 
 /**
+ * Split-Client only: the ONE modal-safe no-answer navigation control Alt+W
+ * uses while a forwarded Question/Approval owns the editor seat.
+ *
+ * `begin()` commits the Client-root presentation-only hold and withdraws the
+ * local modal seat, returning the one-shot release; the official request stays
+ * live and keeps its Host lifetime. `open()` exercises the EXISTING registered
+ * `/sessions` entry (never a second listing or a private fallback). The
+ * composition root installs this only after the command registration settled.
+ */
+export interface NoAnswerNavigationControl {
+  /** Whether the registered `/sessions` entry can present its Browser here. */
+  available(): boolean
+  /** Commit the root hold and withdraw the local modal seat. */
+  begin(): () => void
+  /** Open the EXISTING registered Session Workspace. */
+  open(): void
+}
+
+/**
  * The ONE short-lived workspace screen lease (Settings, the Session Workspace
  * and the Image UX screens). Like the Job workspace it renders in a temporary
  * alt screen while the surface that opened it — object tree, focus, draft and
@@ -3257,6 +3276,19 @@ export class TuiApp {
   })
   /** The active user-questions flow, if any (one on screen at a time). */
   private activeQuestions: QuestionState | undefined
+  /**
+   * Split-Client only: the ONE modal-safe no-answer navigation entry (Alt+W),
+   * installed by the composition root after the `/sessions` registration
+   * settled. Absent on Direct and on a renderer mount without a TuiApp, where
+   * Alt+W stays inert.
+   */
+  private noAnswerNavigation: NoAnswerNavigationControl | undefined
+  /**
+   * One-shot callbacks armed by Alt+W: the Session Workspace close (or a
+   * blocking-owner pre-emption) releases the root navigation hold. A set keeps
+   * the close path independent of the lease's own `onClose`.
+   */
+  private readonly workspaceCloseHooks = new Set<() => void>()
   /**
    * M3-3B final-answer enrichment: the authoritative settled answers of one
    * timed `ask_user_question` call (the `userQuestions.settled` projection),
@@ -24687,6 +24719,13 @@ export class TuiApp {
           }
         },
         () => { onClose?.() },
+        // The split Client's Alt+W hold is released by the physical close of
+        // the Browser lease (including a blocking-owner pre-emption), never by
+        // the mere key press. One-shot: the hooks clear themselves.
+        () => {
+          for (const hook of [...this.workspaceCloseHooks]) hook()
+          this.workspaceCloseHooks.clear()
+        },
       ])
     }
     /** A synchronous callback during ANY physical step of the open sequence may
@@ -25742,6 +25781,16 @@ export class TuiApp {
       this.keybindings.cancelLeader()
       return undefined
     }
+    // The split Client's modal-safe no-answer navigation: an EXPLICIT
+    // whitelist between the modal's fixed response keys above and the ordinary
+    // inspection/editor ladder. The root hold is committed before the seat is
+    // withdrawn, so no local cancel can become a Host answer.
+    if (this.noAnswerNavigation !== undefined && matchesKey(data, 'alt+w')) {
+      this.keybindings.cancelLeader()
+      this.clearExitConfirmation()
+      this.beginNoAnswerNavigation()
+      return { consume: true }
+    }
     for (const action of MODAL_INSPECTION_ACTIONS) {
       if (!this.keybindings.matches(data, action)) continue
       // A direct inspection key is its own gesture; never leave a half-armed
@@ -25797,6 +25846,89 @@ export class TuiApp {
     lookup: ((callId: string) => readonly { id: string; selected: string[]; custom?: string }[] | undefined) | undefined,
   ): void {
     this.settledQuestionAnswers = lookup
+  }
+
+  /**
+   * Install (or clear) the ONE modal-safe no-answer navigation entry the split
+   * composition root wires after the `/sessions` command registration settled.
+   * Alt+W is inert without it (Direct, TSP and headless fixtures never install
+   * one).
+   */
+  setNoAnswerNavigation(control: NoAnswerNavigationControl | undefined): void {
+    this.noAnswerNavigation = control
+  }
+
+  /**
+   * Withdraw the PRESENTATION of the listed live Question/Approval requests
+   * without answering or cancelling the official invocation. Matching queued
+   * flows leave their queues BEFORE the active one settles, so no withdrawn
+   * successor is ever promoted onto the seat. The split root delivery's hold /
+   * epoch makes every local cancellation here stale; Direct never calls this.
+   */
+  withdrawPresentations(lifetimes: readonly AbortSignal[]): void {
+    if (lifetimes.length === 0) return
+    const selected = new Set(lifetimes)
+    for (const state of [...this.questionQueue]) {
+      if (state.signal !== undefined && selected.has(state.signal)) this.abortQuestion(state)
+    }
+    const active = this.activeQuestions
+    if (active !== undefined && active.signal !== undefined && selected.has(active.signal)) {
+      this.settleQuestions(active, undefined)
+    }
+    this.approvals.withdrawPresentations(lifetimes)
+  }
+
+  /**
+   * The split Client's modal-safe Alt+W: commit the root presentation-only hold
+   * FIRST, withdraw the local modal seat, then open the EXISTING registered
+   * Session Workspace. The hold is released when that lease closes — or at
+   * once when the entry cannot present/lease, which restores the original
+   * dialog through the root delivery's normal re-offer path.
+   */
+  private beginNoAnswerNavigation(): void {
+    const navigation = this.noAnswerNavigation
+    if (navigation === undefined) return
+    if (!navigation.available()) {
+      this.notify('Session browsing is not available here; the dialog stays open.', 'error')
+      return
+    }
+    let release: (() => void) | undefined
+    try {
+      release = navigation.begin()
+    } catch (error) {
+      this.notify(`Could not suspend the dialog for navigation: ${safeErrorMessage(error)}`, 'error')
+      return
+    }
+    let removeCloseHook: (() => void) | undefined
+    const releaseOnce = (): void => {
+      removeCloseHook?.()
+      removeCloseHook = undefined
+      const run = release
+      release = undefined
+      run?.()
+    }
+    removeCloseHook = this.armWorkspaceCloseHook(releaseOnce)
+    try {
+      navigation.open()
+    } catch (error) {
+      releaseOnce()
+      this.notify(`Could not open sessions: ${safeErrorMessage(error)}`, 'error')
+      return
+    }
+    // The command opens the fullscreen lease SYNCHRONOUSLY; a refused/absent
+    // lease means the Browser never appeared, so the dialog must come back
+    // instead of leaving the editor under a hold that no close would release.
+    if (this.workspaceLease?.kind !== 'sessions') {
+      releaseOnce()
+      this.notify('Sessions could not be opened; the dialog is back.', 'error')
+    }
+  }
+
+  /** Arm ONE one-shot callback for the next physical workspace close. */
+  private armWorkspaceCloseHook(hook: () => void): () => void {
+    const entry = (): void => { hook() }
+    this.workspaceCloseHooks.add(entry)
+    return () => { this.workspaceCloseHooks.delete(entry) }
   }
 
   /**

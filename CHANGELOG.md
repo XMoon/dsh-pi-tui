@@ -50,6 +50,13 @@
   `/image`；文件仍在读取时按 Enter / 发送 / 转向会被拒绝并提示重试，读取失败则
   保留原路径文字。PiTui 与 TSP 两种渲染器均支持，图片仍走既有的草稿与提交链。
 
+- **Split Client 的待答问题/审批只在所属 Session。** 另一个 Session 的未决 Question
+  或 Approval 不再弹到当前会话的编辑器上；通过 `/sessions` 或 `/resume` 真正切换到
+  该 Session 后，同一个官方请求才重新出现并可回答。在 Question/Approval 模态上按
+  `Alt+W` 可以「暂不回答」地打开会话工作区：不取消、不拒绝、不提交 Host 请求；
+  浏览到别的 Session 或关闭工作区后，回到原 Session 时原请求重新出现。Direct 与
+  TSP 原生模态行为保持不变。
+
 ### 变更
 
 - **（不兼容）公开的 `composeAgent(ctx, ModelSelectionRef)` 调用已退休。** DSH 0.2.2

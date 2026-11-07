@@ -141,6 +141,15 @@ export interface InteractionRuntime {
    */
   withdrawReplacedPresentation(): void
   /**
+   * Split-Client only: withdraw EVERY live presentation for a presentation-only
+   * navigation hold (the caller already committed the root hold/epoch). Unlike
+   * {@link withdrawReplacedPresentation} this is not tied to a subject change:
+   * every live Question flow/entry and approval prompt leaves the seat, their
+   * local cancellations are discarded by the root delivery, and the official
+   * requests keep their Host lifetimes.
+   */
+  withdrawPresentationForNavigation(): void
+  /**
    * M4 PR4: whether this surface currently holds UNSETTLED Client-local
    * Question/Approval input — a live approval prompt (presented or FIFO-queued
    * behind another modal), a refused-admission wait this owner would have to
@@ -325,6 +334,39 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
       if (live.retire !== undefined) settle.push(live.retire)
     }
     return { lifetimes, settle }
+  }
+
+  /**
+   * Collect EVERY live approval presentation (not only the replaced ones) for
+   * a presentation-only navigation hold. The approval registry entry leaves
+   * first; the caller hands the whole batch to the presenter and only then runs
+   * the deferred local settlements.
+   */
+  const collectAllApprovalPresentations = (): { lifetimes: AbortSignal[]; settle: Array<() => void> } => {
+    const lifetimes: AbortSignal[] = []
+    const settle: Array<() => void> = []
+    for (const [lifetime, live] of [...liveApprovals]) {
+      liveApprovals.delete(lifetime)
+      lifetimes.push(lifetime)
+      if (live.retire !== undefined) settle.push(live.retire)
+    }
+    return { lifetimes, settle }
+  }
+
+  /**
+   * Withdraw EVERY live presentation for a navigation hold. The caller commits
+   * the root hold/epoch BEFORE this runs, so every local cancellation produced
+   * by the withdrawal is stale to the root delivery and is never forwarded as a
+   * human answer. The official requests keep their Host lifetimes.
+   */
+  const withdrawPresentationForNavigation = (): void => {
+    if (options.isCleanedUp()) return
+    const questions = questionController?.collectForegroundPresentations()
+      ?? { lifetimes: [], settle: () => {} }
+    const approvals = collectAllApprovalPresentations()
+    options.livePresenter()?.withdrawPresentations([...questions.lifetimes, ...approvals.lifetimes])
+    questions.settle()
+    for (const run of approvals.settle) run()
   }
 
   /**
@@ -547,6 +589,7 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
     reconcilePresentation,
     reconcilePublishedPresentation,
     withdrawReplacedPresentation,
+    withdrawPresentationForNavigation,
     dispose() {
       if (ended) return
       ended = true

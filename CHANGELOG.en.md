@@ -68,6 +68,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   PiTui and TSP renderers support it, and images keep flowing through the
   existing draft and submission chain.
 
+- **Split Client pending Questions/Approvals belong to their own Session.** A
+  Question or Approval owned by another Session no longer opens over the
+  current editor; after a real `/sessions` or `/resume` switch to that Session,
+  the same official request is offered again and can be answered. From a
+  Question/Approval modal, `Alt+W` opens the Session Workspace as a
+  "keep pending" navigation without cancelling, rejecting or answering the Host
+  request; closing the workspace or browsing another Session keeps the request
+  suspended until its own Session is current again. Direct and the TSP native
+  modal seat keep their existing behavior.
+
 ### Changed
 
 - **Breaking: the public `composeAgent(ctx, ModelSelectionRef)` call is retired.**

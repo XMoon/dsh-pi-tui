@@ -20,6 +20,7 @@ import { runClientHmrSignals } from '../smoke/split-process/client-hmr-signals.m
 import { runDetachedTurnInteractions } from '../smoke/split-process/detached-turn-interactions.mjs'
 import { runNonDestructiveClientLifecycle } from '../smoke/split-process/non-destructive-client-lifecycle.mjs'
 import { runReadAuthority } from '../smoke/split-process/read-authority.mjs'
+import { runInteractionNavigationFirst } from '../smoke/split-process/interaction-admission.mjs'
 import { runEntryAdmission } from '../smoke/split-process/entry-admission.mjs'
 import { runOfficialWebComposition } from '../smoke/split-process/official-web-composition.mjs'
 import { runPtySessionWriteRecovery } from '../smoke/split-process/pty-session-write-recovery.mjs'
@@ -97,6 +98,12 @@ const CASE_REGISTRY = Object.freeze([
     id: 'read.official-read-authority',
     title: 'A(Y) reads X\'s real Host pending/Workspace facts through the ONE read-authority port and answers X through the existing first-settlement path',
     run: runReadAuthority,
+  }),
+  Object.freeze({
+    suite: 'interaction',
+    id: 'interaction.navigation-first-answerability',
+    title: 'navigation-first admission holds a forwarded interaction until its Session commits and re-offers the SAME request after a no-answer navigation',
+    run: runInteractionNavigationFirst,
   }),
   Object.freeze({
     suite: 'recovery',
