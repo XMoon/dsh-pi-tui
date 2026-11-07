@@ -61,6 +61,9 @@ export const GATEWAY_PRE_INVOCATION_CODES: ReadonlySet<string> = new Set([
   'gateway/provider-mismatch',
   'gateway/service-unavailable',
   'gateway/signature-invalid',
+  // The Gateway refuses a non-owner Peer BEFORE the addressed method runs: the
+  // operation definitely did not commit.
+  'gateway/interactions-forbidden',
 ])
 
 /**

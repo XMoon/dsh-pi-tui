@@ -124,6 +124,10 @@ export type ScheduleIntent =
   | { readonly kind: 'select-target-session'; readonly sessionId: string }
   | { readonly kind: 'toggle-advanced' }
   | { readonly kind: 'save' }
+  /** Re-read the current task and rebase the draft's CAS revision on it,
+   *  keeping every typed field (the explicit conflict recovery: no silent
+   *  merge, no automatic overwrite). */
+  | { readonly kind: 'reload-latest' }
   | { readonly kind: 'toggle-active' }
   | { readonly kind: 'ask-run' }
   | { readonly kind: 'ask-delete' }
@@ -145,6 +149,7 @@ export const SCHEDULE_COPY = {
   permissionDenied: 'Schedule permission denied.',
   outcomeUnknown: 'Outcome unknown. Refresh before retrying.',
   updated: 'Updated',
+  reloaded: 'Loaded the latest Host revision. Review your draft, then save again.',
   deliveryQueued: 'Delivery queued',
   noEnded: 'No ended tasks to clear.',
   cleared: (count: number) => `Cleared ${count} ended tasks.`,

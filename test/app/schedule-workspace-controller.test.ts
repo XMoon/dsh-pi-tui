@@ -748,3 +748,161 @@ test('L6: a history page already loading cannot be paged twice', async () => {
     life.controller.dispose()
   }
 })
+
+test('L6: cycling timing/target away and back preserves NON-DEFAULT typed values', async () => {
+  const life = await opened()
+  try {
+    life.port.entries = [entry({
+      id: 'schedule-cron' as never,
+      kind: 'cron',
+      expression: '0 17 * * 1-5',
+      timeZone: 'UTC',
+      target: { kind: 'new_once', sessionId: 'session-9' as never, create: { cwd: '/work' } },
+    })]
+    life.port.editResult = async () => entry({ id: 'schedule-cron' as never, title: 'Renamed cron' })
+    life.controller.dispatch({ kind: 'refresh' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-detail', id: 'schedule-cron' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-edit' })
+    await flush()
+    life.controller.dispatch({ kind: 'select-timing-kind', timing: 'daily' })
+    life.controller.dispatch({ kind: 'select-timing-kind', timing: 'cron' })
+    life.controller.dispatch({ kind: 'select-target-kind', target: 'new' })
+    life.controller.dispatch({ kind: 'select-target-kind', target: 'new_once' })
+    const editor = life.controller.snapshot().editor
+    assert.equal(editor?.timing.kind, 'cron')
+    assert.equal(editor?.timing.kind === 'cron' ? editor.timing.expression : '', '0 17 * * 1-5',
+      'the stored expression is not reset to a default')
+    assert.equal(editor?.target.kind, 'new_once')
+    assert.equal(editor?.target.kind === 'new_once' ? editor.target.cwd : '', '/work',
+      'the stored creation directory survives the kind cycle')
+    life.controller.dispatch({ kind: 'set-field', fieldId: 'title', value: 'Renamed cron' })
+    life.controller.dispatch({ kind: 'save' })
+    await flush()
+    await life.controller.whenIdle()
+    const edit = life.port.calls.find(call => call.method === 'edit')
+    assert.deepEqual(edit?.args[0], {
+      id: 'schedule-cron',
+      action: 'update',
+      patch: { title: 'Renamed cron' },
+      expectedUpdatedAt: '2026-01-01T08:00:00.000Z',
+    }, 'a kind cycle never re-sends the rule or the reserved new_once target')
+  } finally {
+    life.controller.dispose()
+  }
+})
+
+test('L6: an invalid intermediate timing is DIRTY, never an exception out of Esc', async () => {
+  const life = await opened()
+  try {
+    life.port.entries = [entry({ id: 'schedule-cron' as never, kind: 'cron', expression: '0 17 * * 1-5', timeZone: 'UTC' })]
+    life.controller.dispatch({ kind: 'refresh' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-detail', id: 'schedule-cron' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-edit' })
+    await flush()
+    life.controller.dispatch({ kind: 'set-field', fieldId: 'timing-cron', value: '' })
+    // Esc on an invalid intermediate value must ask to discard, not throw.
+    assert.doesNotThrow(() => life.controller.dispatch({ kind: 'back' }))
+    assert.equal(life.controller.snapshot().confirm?.kind, 'discard')
+  } finally {
+    life.controller.dispose()
+  }
+})
+
+test('L6: conflict recovery reloads the latest revision while keeping the draft', async () => {
+  const life = await opened()
+  try {
+    life.controller.dispatch({ kind: 'open-detail', id: 'schedule-1' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-edit' })
+    await flush()
+    life.port.editResult = async () => ({ id: 'schedule-1' as never, code: 'schedule_conflict' })
+    life.controller.dispatch({ kind: 'set-field', fieldId: 'title', value: 'My edit' })
+    life.controller.dispatch({ kind: 'save' })
+    await flush()
+    await life.controller.whenIdle()
+    assert.equal(life.controller.snapshot().notice?.text, SCHEDULE_COPY.conflict)
+    assert.equal(life.controller.snapshot().editor?.title, 'My edit')
+
+    life.port.viewResults.set('schedule-1', entry({
+      title: 'Host side edit',
+      updatedAt: '2026-01-02T00:00:00.000Z',
+    }))
+    life.controller.dispatch({ kind: 'reload-latest' })
+    await flush()
+    assert.equal(life.controller.snapshot().notice?.text, SCHEDULE_COPY.reloaded)
+    assert.equal(life.controller.snapshot().editor?.title, 'My edit', 'the user draft is never overwritten')
+    assert.equal(life.controller.snapshot().editor?.expectedUpdatedAt, '2026-01-02T00:00:00.000Z',
+      'the rebased CAS revision is the latest Host one')
+
+    life.port.editResult = async () => entry({ title: 'My edit', updatedAt: '2026-01-03T00:00:00.000Z' })
+    life.controller.dispatch({ kind: 'save' })
+    await flush()
+    await life.controller.whenIdle()
+    const edits = life.port.calls.filter(call => call.method === 'edit')
+    assert.equal((edits[edits.length - 1]?.args[0] as ScheduleEditRequest).expectedUpdatedAt, '2026-01-02T00:00:00.000Z')
+  } finally {
+    life.controller.dispose()
+  }
+})
+
+test('L6: Help under an in-flight history page keeps its answer, and invalidation re-reads', async () => {
+  const life = await opened()
+  try {
+    life.port.historyResults.set('first', {
+      id: 'schedule-1' as never,
+      records: [],
+      earlierRecordsUnavailable: false,
+      earlierRecordsPruned: false,
+      retention: { days: 30, records: 200 },
+      nextBefore: 'm1' as never,
+    })
+    const page = deferred<ScheduleDeliveryHistoryResult>()
+    life.port.historyResults.set('m1', page.promise)
+    life.controller.dispatch({ kind: 'open-detail', id: 'schedule-1' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-history' })
+    await flush()
+    life.controller.dispatch({ kind: 'history-more' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-help' })
+    assert.equal(life.controller.snapshot().mode, 'help')
+    page.resolve({
+      id: 'schedule-1' as never,
+      records: [{ scheduledAt: '2026-01-01T09:00:00.000Z', deliveredAt: '2026-01-01T09:00:00.100Z', messageId: 'm2' as never, targetSessionId: 'session-1' as never }],
+      earlierRecordsUnavailable: false,
+      earlierRecordsPruned: false,
+      retention: { days: 30, records: 200 },
+    })
+    await flush()
+    life.controller.dispatch({ kind: 'close-help' })
+    assert.equal(life.controller.snapshot().mode, 'history')
+    assert.equal(life.controller.snapshot().history?.status, 'ready', 'the underlay page is not left loading forever')
+    assert.equal(life.controller.snapshot().history?.records.length, 1)
+
+    // An invalidation while another page is loading re-reads the page instead of
+    // leaving it visibly stuck.
+    const reread = deferred<ScheduleDeliveryHistoryResult>()
+    life.port.historyResults.set('first', reread.promise)
+    life.controller.dispatch({ kind: 'open-history' })
+    await flush()
+    const callsBefore = life.port.calls.filter(call => call.method === 'history').length
+    life.port.invalidate()
+    await flush()
+    assert.ok(life.port.calls.filter(call => call.method === 'history').length > callsBefore,
+      'the invalidated history page is re-read')
+    reread.resolve({
+      id: 'schedule-1' as never,
+      records: [],
+      earlierRecordsUnavailable: false,
+      earlierRecordsPruned: false,
+      retention: { days: 30, records: 200 },
+    })
+    await flush()
+  } finally {
+    life.controller.dispose()
+  }
+})

@@ -147,7 +147,7 @@ export class ScheduleWorkspaceController {
     if (this.disposed) return
     this.openEpoch += 1
     this.unsubscribeChanged = this.port.onChanged(() => this.invalidate())
-    void this.read()
+    this.own('schedule catalog read', () => this.read())
   }
 
   /** Drop every subscription and make late async results unpublishable. It
@@ -223,7 +223,7 @@ export class ScheduleWorkspaceController {
         this.openDetail(intent.id)
         return
       case 'open-history':
-        void this.readHistory(undefined)
+        this.own('schedule history read', () => this.readHistory(undefined))
         return
       case 'history-more':
         this.moreHistory()
@@ -232,13 +232,16 @@ export class ScheduleWorkspaceController {
         this.back()
         return
       case 'refresh':
-        void this.read()
+        this.own('schedule catalog read', () => this.read())
         return
       case 'open-create':
         this.openCreate()
         return
       case 'open-edit':
-        void this.openEdit()
+        this.own('schedule editor open', () => this.openEdit())
+        return
+      case 'reload-latest':
+        this.own('schedule reload latest', () => this.reloadLatest())
         return
       case 'focus-field': {
         if (this.editor === undefined) return
@@ -360,7 +363,7 @@ export class ScheduleWorkspaceController {
       if (this.readAbort === controller) this.readAbort = undefined
       if (!this.disposed && this.queuedRefresh) {
         this.queuedRefresh = false
-        void this.read()
+        this.own('schedule catalog read', () => this.read())
       }
     }
   }
@@ -372,7 +375,7 @@ export class ScheduleWorkspaceController {
     this.readEpoch += 1
     this.readAbort?.abort()
     this.readAbort = undefined
-    void this.read()
+    this.own('schedule catalog read', () => this.read())
     // A detail/history page also belongs to the invalidated generation.
     this.detailEpoch += 1
     this.detailAbort?.abort()
@@ -383,6 +386,14 @@ export class ScheduleWorkspaceController {
     if (this.status === 'ready') this.status = 'stale'
     this.publish()
     this.onChange()
+    // A visible Detail/History page is re-read from the authoritative Host so an
+    // invalidated answer can never leave it visibly stuck on "Loading".
+    if (this.surfaceIs('detail') && this.selectedId !== undefined) {
+      const id = this.selectedId
+      this.own('schedule detail read', async () => { this.openDetail(id) })
+    } else if (this.surfaceIs('history') && this.historyView !== undefined) {
+      this.own('schedule history read', () => this.readHistory(undefined))
+    }
   }
 
   private openDetail(id?: string): void {
@@ -398,33 +409,36 @@ export class ScheduleWorkspaceController {
     this.mode = 'detail'
     this.historyView = undefined
     this.publish()
-    void (async () => {
-      try {
-        const result: ScheduleViewResult = await this.port.view({ id: scheduleId(target) }, controller.signal)
-        if (this.disposed || epoch !== this.detailEpoch || openEpoch !== this.openEpoch) return
-        // Leaving Detail while the read is in flight retires its answer: the
-        // restored list must not carry a detail snapshot the user left.
-        if (this.mode !== 'detail' || this.selectedId !== target) return
-        if ('code' in result) {
-          this.notice = errorNotice(SCHEDULE_COPY.taskGone)
-          this.detail = undefined
-          this.selectedId = undefined
-          this.mode = 'list'
-          this.publish()
-          void this.read()
-          return
-        }
-        this.detail = result
+    this.own('schedule detail read', () => this.readDetail(target, epoch, openEpoch, controller))
+  }
+
+  private async readDetail(target: string, epoch: number, openEpoch: number, controller: AbortController): Promise<void> {
+    try {
+      const result: ScheduleViewResult = await this.port.view({ id: scheduleId(target) }, controller.signal)
+      if (this.disposed || epoch !== this.detailEpoch || openEpoch !== this.openEpoch) return
+      // Leaving Detail (or opening a confirmation) while the read is in flight
+      // retires its answer: the restored page must not carry a detail snapshot
+      // the user left. A confirmation over Detail is still that page.
+      if (!this.surfaceIs('detail') || this.selectedId !== target) return
+      if ('code' in result) {
+        this.notice = errorNotice(SCHEDULE_COPY.taskGone)
+        this.detail = undefined
+        this.selectedId = undefined
+        this.mode = 'list'
         this.publish()
-      } catch (error) {
-        if (this.disposed || epoch !== this.detailEpoch || openEpoch !== this.openEpoch) return
-        if (error instanceof SupersededReadError || controller.signal.aborted) return
-        this.notice = errorNotice(this.describeFailure(error))
-        this.publish()
-      } finally {
-        if (this.detailAbort === controller) this.detailAbort = undefined
+        this.own('schedule catalog read', () => this.read())
+        return
       }
-    })()
+      this.detail = result
+      this.publish()
+    } catch (error) {
+      if (this.disposed || epoch !== this.detailEpoch || openEpoch !== this.openEpoch) return
+      if (error instanceof SupersededReadError || controller.signal.aborted) return
+      this.notice = errorNotice(this.describeFailure(error))
+      this.publish()
+    } finally {
+      if (this.detailAbort === controller) this.detailAbort = undefined
+    }
   }
 
   private async readHistory(before: string | undefined): Promise<void> {
@@ -450,7 +464,7 @@ export class ScheduleWorkspaceController {
         controller.signal,
       )
       if (this.disposed || epoch !== this.historyEpoch || openEpoch !== this.openEpoch) return
-      if (this.mode !== 'history') return
+      if (!this.surfaceIs('history')) return
       if ('code' in result) {
         // A vanished cursor ENDS this history page: the user must reopen it,
         // and no retained cursor may silently retry the same page.
@@ -491,7 +505,7 @@ export class ScheduleWorkspaceController {
     // No cursor means the Host proved there is no older saved record; a
     // client-side page index never substitutes for it.
     if (next === undefined) return
-    void this.readHistory(next)
+    this.own('schedule history read', () => this.readHistory(next))
   }
 
   // ── editor ────────────────────────────────────────────────────────────────
@@ -536,7 +550,7 @@ export class ScheduleWorkspaceController {
         if ('code' in result) {
           this.notice = errorNotice(SCHEDULE_COPY.taskGone)
           this.publish()
-          void this.read()
+          this.own('schedule catalog read', () => this.read())
           return
         }
         current = result
@@ -550,7 +564,7 @@ export class ScheduleWorkspaceController {
         if (this.editReadAbort === controller) this.editReadAbort = undefined
       }
     }
-    if (this.disposed || this.mode !== 'detail' || this.selectedId !== id) return
+    if (this.disposed || !this.surfaceIs('detail') || this.selectedId !== id) return
     const draft = draftFromRecord(current)
     this.mode = 'editor'
     this.editorBaseline = {
@@ -580,11 +594,17 @@ export class ScheduleWorkspaceController {
   private selectTiming(kind: ScheduleTimingKind): void {
     if (this.editor === undefined) return
     const edited = this.editor
-    this.editor = {
-      ...edited,
-      timing: selectTimingKind(edited.timing, kind as FormTimingKind),
-      timingEdited: true,
-    }
+    // Remember every kind's LAST typed value, so switching away and back never
+    // resets the user's rule to a default (and never re-sends a different rule
+    // for an unchanged field).
+    const timingMemory = { ...(edited.timingMemory ?? {}), [edited.timing.kind]: edited.timing }
+    const remembered = timingMemory[kind as FormTimingKind]
+    const timing: ScheduleTimingDraft = remembered ?? (
+      this.editorBaseline?.timing.kind === kind
+        ? this.editorBaseline.timing
+        : selectTimingKind(edited.timing, kind as FormTimingKind)
+    )
+    this.editor = { ...edited, timing, timingMemory, timingEdited: true }
     this.publish()
   }
 
@@ -602,10 +622,19 @@ export class ScheduleWorkspaceController {
     if (this.editor === undefined) return
     const current = this.editor.target
     if (current.kind === kind) return
-    const target: ScheduleTargetDraft = kind === 'session'
+    const targetMemory = { ...(this.editor.targetMemory ?? {}), [current.kind]: current }
+    const remembered = targetMemory[kind]
+    const baselineTarget = this.editorBaseline?.target.kind === kind ? this.editorBaseline.target : undefined
+    const target: ScheduleTargetDraft = remembered ?? baselineTarget ?? (kind === 'session'
       ? { kind, sessionId: undefined }
-      : { kind, cwd: '', agentPreset: '' }
-    this.editor = { ...this.editor, target, targetEdited: true, advanced: false }
+      : { kind, cwd: '', agentPreset: '' })
+    this.editor = {
+      ...this.editor,
+      target,
+      targetMemory,
+      targetEdited: true,
+      advanced: target.kind !== 'session' && (target.cwd !== '' || target.agentPreset !== ''),
+    }
     this.publish()
   }
 
@@ -620,7 +649,10 @@ export class ScheduleWorkspaceController {
     const controller = new AbortController()
     this.chooserAbort = controller
     const openEpoch = this.openEpoch
-    void (async () => {
+    this.own('schedule session chooser read', () => this.readSessionChoices(openEpoch, controller))
+  }
+
+  private async readSessionChoices(openEpoch: number, controller: AbortController): Promise<void> {
       try {
         const rows = await this.sessionReader.list(undefined, controller.signal)
         if (this.disposed || openEpoch !== this.openEpoch) return
@@ -643,10 +675,41 @@ export class ScheduleWorkspaceController {
         this.notice = errorNotice(this.describeFailure(error))
         this.publish()
       }
-    })()
   }
 
   /** The UNIQUE save action: one local refusal or one Host create/edit. */
+  /**
+   * The explicit conflict recovery (plan A6/§5.5): re-read the latest Host
+   * record and rebase the edit's `expectedUpdatedAt` on it while KEEPING the
+   * user's typed fields. It never merges automatically and never overwrites.
+   */
+  private async reloadLatest(): Promise<void> {
+    const draft = this.editor
+    if (draft === undefined || draft.id === undefined) return
+    try {
+      const result = await this.port.view({ id: scheduleId(draft.id) })
+      if (this.disposed) return
+      if ('code' in result) {
+        this.notice = errorNotice(SCHEDULE_COPY.taskGone)
+        this.publish()
+        return
+      }
+      if (this.editor === undefined || this.editor.id !== draft.id) return
+      this.editorBaseline = {
+        ...draftFromRecord(result),
+        title: result.title,
+        prompt: result.prompt,
+      }
+      this.editor = { ...this.editor, expectedUpdatedAt: result.updatedAt ?? null }
+      this.notice = infoNotice(SCHEDULE_COPY.reloaded)
+      this.publish()
+    } catch (error) {
+      if (this.disposed) return
+      this.notice = errorNotice(this.describeFailure(error))
+      this.publish()
+    }
+  }
+
   private save(): void {
     const draft = this.editor
     if (draft === undefined || this.busy) return
@@ -912,6 +975,14 @@ export class ScheduleWorkspaceController {
     this.helpReturn = undefined
     this.mode = returnTo ?? (this.detail === undefined ? 'list' : 'detail')
     this.publish()
+    // A page whose read was retired while Help was up gets ONE newest read; it
+    // never stays visibly loading forever.
+    if (this.mode === 'history' && this.historyView?.status === 'loading') {
+      this.own('schedule history read', () => this.readHistory(undefined))
+    } else if (this.mode === 'detail' && this.detail === undefined && this.selectedId !== undefined) {
+      const id = this.selectedId
+      this.own('schedule detail read', async () => { this.openDetail(id) })
+    }
   }
 
   private back(): void {
@@ -957,14 +1028,14 @@ export class ScheduleWorkspaceController {
       // cycling the timing kind back to its default is not unsaved work.
       return draft.title.trim() !== '' ||
         draft.prompt.trim() !== '' ||
-        !sameTimingDraft(draft.timing, DEFAULT_TIMING_DRAFT) ||
+        !safeSameTiming(draft.timing, DEFAULT_TIMING_DRAFT) ||
         !sameTargetDraft(draft.target, DEFAULT_TARGET_DRAFT)
     }
     const baseline = this.editorBaseline
     if (baseline === undefined) return true
     return draft.title !== baseline.title ||
       draft.prompt !== baseline.prompt ||
-      !sameTimingDraft(draft.timing, baseline.timing) ||
+      !safeSameTiming(draft.timing, baseline.timing) ||
       !sameTargetDraft(draft.target, baseline.target)
   }
 
@@ -1025,6 +1096,18 @@ export class ScheduleWorkspaceController {
     this.runOwned(label, settle)
   }
 
+  /** Run one controller workflow through the app-owned task entry (the ONE
+   *  promise-ownership sink; no hand-written `void` chain exists here). */
+  private own(label: string, task: () => Promise<void>): void {
+    this.runOwned(label, task)
+  }
+
+  /** Whether `page` is the surface the user is actually looking at: Help is an
+   *  UNDERLAY, so a read answer for its `helpReturn` page stays publishable. */
+  private surfaceIs(page: 'list' | 'detail' | 'history' | 'editor'): boolean {
+    return this.mode === page || (this.mode === 'help' && this.helpReturn === page)
+  }
+
   /** One read that must be newest: used after a mutation settlement. */
   private async refreshNow(): Promise<void> {
     this.readEpoch += 1
@@ -1054,6 +1137,16 @@ export class ScheduleWorkspaceController {
     if (code === 'schedule/target-archived') return SCHEDULE_COPY.targetArchived
     if (isPermissionCode(code)) return SCHEDULE_COPY.permissionDenied
     return remoteFailureMessage(error) || safeErrorMessage(error)
+  }
+}
+
+/** Whether two timing drafts are the SAME encoded rule; an INVALID intermediate
+ *  draft is never "unchanged" (Esc must still treat it as unsaved work). */
+function safeSameTiming(left: ScheduleTimingDraft, right: ScheduleTimingDraft): boolean {
+  try {
+    return sameTimingDraft(left, right)
+  } catch {
+    return false
   }
 }
 

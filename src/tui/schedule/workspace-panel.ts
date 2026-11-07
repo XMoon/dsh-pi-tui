@@ -284,6 +284,9 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
       this.searchDispatched = undefined
     }
     if (snapshot.confirm === undefined) this.paintedConfirm = undefined
+    // Adopt a newer field value BEFORE the next input event: a snapshot change
+    // is committed here, not only on the next frame.
+    if (snapshot.mode === 'editor') this.syncEditorInput()
   }
 
   /** Release panel-local state exactly once (idempotent). */
@@ -492,6 +495,10 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
       this.deps.dispatch({ kind: 'save' })
       return
     }
+    if (matchesKey(data, 'ctrl+r')) {
+      this.deps.dispatch({ kind: 'reload-latest' })
+      return
+    }
     if (matchesKey(data, 'tab')) {
       this.deps.dispatch(editorFocusIntent(draft, 1))
       this.deps.requestRender()
@@ -527,8 +534,12 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
 
   private handleRruleInput(draft: ScheduleEditorDraft, current: string, data: string): void {
     const buffer = this.rruleDraft ?? current
+    // Terminals wrap a paste in bracketed-paste markers; the RRULE field is raw
+    // multi-line text, so the payload (newlines included) is inserted verbatim.
+    const pasted = data.match(/^\x1b\[200~([\s\S]*)\x1b\[201~$/u)?.[1]
     let next: string
-    if (matchesKey(data, 'enter')) next = `${buffer}\n`
+    if (pasted !== undefined) next = `${buffer}${pasted}`
+    else if (matchesKey(data, 'enter')) next = `${buffer}\n`
     else if (matchesKey(data, 'backspace') || matchesKey(data, 'delete')) next = buffer.slice(0, -1)
     else if (/^[\x20-\x7e\n]+$/u.test(data)) next = `${buffer}${data}`
     else return
@@ -1237,6 +1248,7 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
       [`${formatKeyId(Key.tab)} / ${formatKeyId(Key.shift(Key.tab))}`, 'Rotate focus: filter, search, list, detail'],
       ['PgUp / PgDn', 'Scroll detail, history or help'],
       [`${formatKeyId(Key.ctrl('s'))} (editor)`, 'Save the schedule'],
+      [`${formatKeyId(Key.ctrl('r'))} (editor)`, 'Reload the latest Host revision, keeping your draft'],
       [`${formatKeyId(Key.tab)} / ${formatKeyId(Key.shift(Key.tab))} (editor)`, 'Move between fields'],
       ['y / n', 'Confirm or cancel a confirmation'],
       ['Esc', 'Back one layer; close the workspace at the list root'],
@@ -1439,7 +1451,7 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
           add('/ search', 7, 'search', '/')
           add('x clear ended', 5, 'clear-ended', 'x')
           add('? help', 4, 'help', '?')
-          add('R refresh', 3, 'refresh', 'R')
+          add('r refresh', 3, 'refresh', 'r')
           add('Esc close', 10, 'close', 'Esc')
           break;
         case 'detail':
@@ -1456,6 +1468,7 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
           break
         case 'editor':
           add(`${formatKeyId(Key.ctrl('s'))} save`, 8)
+          add(`${formatKeyId(Key.ctrl('r'))} reload latest`, 7, undefined)
           add('Tab next field', 6, undefined)
           add('Esc discard', 10, 'back')
           break
@@ -1549,9 +1562,13 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
         this.deps.dispatch({ kind: 'open-detail', id: hit.id })
         return
       case 'filter':
+        // The chips are list-page affordances; a stale hit from another page
+        // must never change the filter.
+        if (this.snapshot.mode !== 'list' || this.snapshot.confirm !== undefined) return
         this.deps.dispatch({ kind: 'set-filter', filter: hit.filter })
         return
       case 'search':
+        if (this.snapshot.mode !== 'list' || this.snapshot.confirm !== undefined) return
         this.focusSearch()
         return
       case 'field': {

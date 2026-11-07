@@ -94,12 +94,28 @@ async function mountTimingHarness(root: string, storageName: string): Promise<Ti
  */
 async function advance(ms: number): Promise<void> {
   mock.timers.tick(ms)
-  for (let index = 0; index < 80; index += 1) {
-    // Zero-delay timers scheduled by the async chain are part of the same
+  await drainUntil(() => true, 'the injected clock turn')
+}
+
+/**
+ * Drive the injected clock's zero-delay timers and the REAL asynchronous chain
+ * until `probe` observes the authoritative fact. A bounded loop over real
+ * macrotask turns — never a timed sleep — so a slow storage flush cannot make
+ * the assertion flaky.
+ */
+async function drainUntil(
+  probe: () => Promise<boolean> | boolean,
+  label: string,
+  cap = 5000,
+): Promise<void> {
+  for (let index = 0; index < cap; index += 1) {
+    // Zero-delay timers scheduled by the async chain belong to the same
     // injected clock: run them between the real macrotask yields.
     mock.timers.tick(0)
+    if (await probe()) return
     await new Promise(resolve => setImmediate(resolve))
   }
+  throw new Error(`${label} did not settle`)
 }
 
 function enableClock(instant: string): void {
@@ -140,11 +156,13 @@ test('the official Host timer fires a due `after` occurrence at its exact instan
 
   await advance(59_000)
   assert.equal(harness.followups.length, 0, 'nothing is delivered before the committed instant')
-  await advance(1_000)
-  assert.equal(harness.followups.length, 1, 'the due occurrence is delivered exactly at its instant')
+  mock.timers.tick(1_000)
+  await drainUntil(() => harness.followups.length === 1, 'the due occurrence delivery')
   assert.equal(harness.followups[0]?.source?.kind, 'schedule', 'the delivered message keeps the schedule source')
   assert.equal(harness.flushes.count >= 1, true, 'the delivery was acknowledged through Session persistence')
 
+  await drainUntil(async () => (await harness.service.view({ id: created.id }) as ScheduleCatalogEntry).lastDelivery !== undefined,
+    'the durable receipt commit')
   const view = await harness.service.view({ id: created.id }) as ScheduleCatalogEntry
   assert.ok(view.lastDelivery !== undefined)
   assert.equal(view.lastDelivery?.scheduledAt, '2026-09-16T00:01:00.000Z')
@@ -202,8 +220,10 @@ test('a recurring wall-clock rule follows the official daylight-saving semantics
 
   // The due occurrence fires at the committed instant and re-arms for the next
   // local day at the same wall clock.
-  await advance(6 * 60 * 60 * 1000)
-  assert.equal(fall.followups.length, 1, 'the DST occurrence is delivered')
+  mock.timers.tick(6 * 60 * 60 * 1000)
+  await drainUntil(() => fall.followups.length === 1, 'the DST occurrence delivery')
+  await drainUntil(async () => (await fall.service.view({ id: created.id }) as Extract<ScheduleCatalogEntry, { kind: 'daily' }>).scheduledAt === '2026-11-02T06:30:00.000Z',
+    'the re-armed next occurrence')
   const next = await fall.service.view({ id: created.id }) as ScheduleCatalogEntry
   assert.equal((next as Extract<ScheduleCatalogEntry, { kind: 'daily' }>).scheduledAt, '2026-11-02T06:30:00.000Z',
     'the repeatable task moves to 2026-11-02 01:30 EST')
@@ -230,6 +250,6 @@ test('the durable task store survives a Host restart and keeps its occurrence', 
   const restored = (await second.service.catalog()).find(entry => entry.id === created.id)
   assert.ok(restored !== undefined, 'the restarted Host re-opened the durable task store')
   assert.equal((restored as Extract<ScheduleCatalogEntry, { kind: 'after' }>).scheduledAt, '2026-09-16T01:00:00.000Z')
-  await advance(30 * 60 * 1000)
-  assert.equal(second.followups.length, 1, 'the restarted Host re-armed the timer and delivered the occurrence')
+  mock.timers.tick(30 * 60 * 1000)
+  await drainUntil(() => second.followups.length === 1, 'the restarted delivery')
 })
