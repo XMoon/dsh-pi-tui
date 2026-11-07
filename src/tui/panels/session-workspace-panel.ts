@@ -292,6 +292,13 @@ export class SessionWorkspacePanel implements Component {
     const proven = uniqueCurrentWorkspace(this.workspaces, this.options.currentSessionId)
     this.currentWorkspaceId = proven
     if (proven !== undefined) {
+      // A LATER official frame can prove the membership the one-time fallback
+      // reported as missing. That status line describes a current fact, so it
+      // must not contradict the now-enabled Current scope.
+      if (this.lastNotice === 'current-workspace-unavailable' || this.lastNotice === 'current-workspace-lost') {
+        this.lastNotice = undefined
+        this.statusMessage = undefined
+      }
       if (this.scope === 'pending') this.scope = this.defaultScope
       return
     }
