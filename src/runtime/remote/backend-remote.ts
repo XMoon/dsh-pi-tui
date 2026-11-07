@@ -39,6 +39,7 @@ import type { HostUserShellPort } from '../host-user-shell-port.ts'
 import type { DeliveredFileReadPort } from '../deliverables-port.ts'
 import type { WebAccessPort } from '../web-access-port.ts'
 import type { SessionWorkspaceFactsPort } from '../session-workspace-facts-port.ts'
+import type { SchedulePort } from '../schedule-port.ts'
 
 /** Every semantic port the Remote backend serves (one adapter each). */
 export interface RemoteBackendParts {
@@ -66,6 +67,8 @@ export interface RemoteBackendParts {
   readonly webAccess: WebAccessPort
   /** The Remote read-authority adapter (M5-U-A). */
   readonly sessionWorkspaceFacts: SessionWorkspaceFactsPort
+  /** The official generated `schedule` namespace adapter (S5-PR4). */
+  readonly schedule: SchedulePort
 }
 
 /** Assemble the experimental Remote `Backend` from its proven adapters. */

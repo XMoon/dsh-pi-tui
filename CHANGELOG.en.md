@@ -60,6 +60,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it defaults to Off, changing it never enables or disables the running Host, and
   the browser still opens only on an explicit user action. Direct mode states
   that these controls are available only in a Split Client.
+- **Host Schedule management (`/schedule`).** On both Direct and Split, any user
+  can open the Host-wide task catalog without an existing Session: search and
+  filter by `All / Active / Paused / Ended`, read the next occurrence, the full
+  stored rule and time zone, the delivery target, the latest delivery, and page
+  through the delivery history. Creating and editing submit one of the seven
+  official timings and one of the three official targets; edits send one atomic
+  CAS update with `expectedUpdatedAt`, and a conflict keeps the draft instead of
+  silently overwriting. Pause/resume, run now, delete and clear-ended each need
+  an explicit confirmation and report the Host's real answer plus a re-read. The
+  command is sessionless: opening the workspace creates no Session and calls no
+  model. The Host owns the timer, so closing the Client or the Web frontend does
+  not stop due deliveries; a stopped Host has no background execution. The TSP
+  renderer does not support this page yet — it answers the generic
+  unsupported-capability notice and restores the draft — and the official Web
+  task page is unchanged.
 - **Terminal image-file pastes are attached automatically.** Pasting a local
   image file into the composer of a terminal such as Tern or Hedr now reads the
   image and replaces the path with the standard `[image #N (W×H)]` token, with

@@ -59,7 +59,7 @@ Consequences that are part of the contract:
 `pendingInputReader`, `sessionWriter`, `sessionLifecycle`, `interaction`,
 `catalog`, `config`, `hostFile`, `sessionArchive`, `sessionMarkdown`,
 `hostCommand`, `pluginManager`, `jobObservation`, `hostUserShell`,
-`deliveredFileRead`, `webAccess`, `sessionWorkspaceFacts`), never a
+`deliveredFileRead`, `webAccess`, `sessionWorkspaceFacts`, `schedule`), never a
 `TuiBackend` god object. A port exposes detached semantic facts, opaque identities/request ids,
 event surfaces (for example authorization: begin → attemptId → notice/prompt →
 respond/cancel) and semantic operations. It owns no Host database, state machine
@@ -1014,6 +1014,53 @@ Proof: `test/runtime/direct/session-markdown-direct.test.ts`,
 `test/runtime/remote/remote-session-markdown.test.ts`,
 `test/app/remote-semantics-smoke.test.ts`, `test/app/export-command.test.ts`,
 `test/extension/runner-remote-command-plane.test.ts`.
+
+## Host Schedule management
+
+`SchedulePort` is the ONE semantic seam for the Host-wide task manager behind
+`/schedule`. The task store, the single timer, the session FIFO, the CAS
+revision and the delivery receipts are owned by the official Host
+`@deepseek-ai/dsh-schedule` domain; the port carries official records and
+official refusal codes unchanged, so neither adapter owns a task copy, a cron
+evaluator or a notification queue. Method surface: `catalog`, `list`, `view`,
+`history`, `deliveryLimits`, `create`, `edit`, `run`, `deleteInactive` and
+`onChanged`; `signal` is a Client-local currentness fence, not a wire field.
+
+Locality and activation are split in one place each:
+
+- **Direct** mounts, once per Host process, the official `schedule` row plus the
+  three official activation prerequisites its Session-creating targets need —
+  `connection`, `fileUploads` and `sessionController` — gated on the profile's
+  TUI startup admission. `DirectSchedulePort` resolves the in-process service
+  per operation; a Host without it answers the ONE truthful
+  `ScheduleUnavailableError`, never an empty catalog.
+- **Split Host-only** keeps the SAME `schedule` row and drops only its direct
+  admission gate; the three Direct-only prerequisites are disabled there because
+  the overlay already mounts its own `split-host-connection`,
+  `split-host-file-upload` and `split-host-session-controller` exactly once.
+  Never a second Schedule row: the Host timer must not depend on a Client or the
+  optional Web frontend.
+- **Split Client** mounts the official `@deepseek-ai/dsh-schedule/remote`
+  contribution in the ONE Client Domain roster and reads the generated `schedule`
+  namespace over the authenticated Gateway. `schedule/changed` is part of the
+  official forwarded-event allowlist, so an invalidation never needs a private
+  wire message.
+
+Currentness: a read whose reply belongs to a superseded Connection generation
+is superseded and never painted as the current Host state. A mutation that was
+dispatched but whose settlement cannot be proven — a transport failure, a
+cancellation that raced the Host transaction, or a reply landing after the
+generation was replaced — is an UNKNOWN outcome: it is never replayed and never
+reported as a rollback; the workspace re-reads the authoritative catalog once
+the connection is current again. The delivery receipt proves a durable Session
+inbox acknowledgement, never a completed model turn.
+
+Proof: `test/runtime/schedule-port.test.ts`,
+`test/runtime/direct/schedule-direct.test.ts`,
+`test/runtime/remote/schedule-remote.test.ts`,
+`test/runtime/parity/schedule-management-parity.test.ts`,
+`test/app/schedule-workspace-controller.test.ts`,
+`test/app/schedule-host-profile.test.ts`.
 
 ## Workflow terminal-state authority
 

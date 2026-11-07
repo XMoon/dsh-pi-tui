@@ -213,7 +213,7 @@ function setupSettings(options: { notificationMode?: string; notificationMethod?
     setTerminalProgressMode: () => {}, setNotificationMethod: (method) => { appliedMethods.push(method); liveMethod = parseNotificationMethod(method) },
     updateWelcomeCard: () => {},
     openJobView: () => {},
-    openTasksBrowser: () => {}, createPluginManagerPage: () => undefined,
+    openTasksBrowser: () => {}, openScheduleWorkspace: () => ({ kind: 'success' } as const), createPluginManagerPage: () => undefined,
     openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),

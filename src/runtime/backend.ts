@@ -29,6 +29,7 @@ import type { HostUserShellPort } from './host-user-shell-port.ts'
 import type { DeliveredFileReadPort } from './deliverables-port.ts'
 import type { WebAccessPort } from './web-access-port.ts'
 import type { SessionWorkspaceFactsPort } from './session-workspace-facts-port.ts'
+import type { SchedulePort } from './schedule-port.ts'
 
 /** The transport backends the TUI can run on. `direct` remains the
  * production/default; `remote` is the experimental M3-3B assembly that can be
@@ -92,6 +93,11 @@ export interface Backend {
    *  the caller's authorized roster plus the ONE official Workspace stream.
    *  Read-only; it owns no writer, store or cross-session cache. */
   readonly sessionWorkspaceFacts: SessionWorkspaceFactsPort
+  /** The Host Schedule management port (S5-PR4): the official Host task
+   *  domain with its CAS writes and delivery receipts. Direct forwards to the
+   *  in-process service, Remote to the authenticated generated namespace; the
+   *  Host stays the only task store and the only timer. */
+  readonly schedule: SchedulePort
 }
 
 /** Assemble the Direct backend: in-process adapters over `ctx.*` services.
@@ -116,6 +122,7 @@ export function createDirectBackend(
   deliveredFileRead: DeliveredFileReadPort,
   webAccess: WebAccessPort,
   sessionWorkspaceFacts: SessionWorkspaceFactsPort,
+  schedule: SchedulePort,
 ): Backend {
   return {
     kind: 'direct',
@@ -138,5 +145,6 @@ export function createDirectBackend(
     deliveredFileRead,
     webAccess,
     sessionWorkspaceFacts,
+    schedule,
   }
 }

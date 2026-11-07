@@ -1237,6 +1237,57 @@ Derive only from `availability`, `canRemove`, `isSelf`, `version`,
 
 The guidance never dispatches a mutation and never echoes full userinfo/tokens.
 
+## Schedule workspace (`/schedule`)
+
+`/schedule` is the ONE Client entry of the Host Schedule manager. It is a
+sessionless local command: it never creates or opens a Session, never submits a
+prompt and never calls a model, and it takes no arguments (`/schedule <text>` is
+an explicit parameter error, not a task). It is not an alias of `/tasks`, which
+keeps its Job/Subagent Task Center semantics.
+
+The leased fullscreen workspace (see `overlay-focus.md` §10.5) is ONE
+`ScheduleWorkspacePanel` whose states share the lease:
+
+- **List** — Host tasks with status, title, the stored rule, the delivery
+  target and the next occurrence. Filters `All / Active / Paused / Ended` and a
+  search over title+prompt are a LOCAL projection of the committed catalog (no
+  Host read per keystroke). `R` re-reads the authoritative catalog; a failed
+  read keeps the last successful rows labelled stale.
+- **Detail** — the official `view` record: full prompt, official timing and
+  time zone, target, task status, `executionActive` and `deliveryFloorEndsAt`
+  as SEPARATE facts (the delivery floor is never a task status), and the latest
+  delivery receipt.
+- **History** — newest-first delivery pages of 20, with paging only by the
+  official `nextBefore` cursor. `earlierRecordsUnavailable` and
+  `earlierRecordsPruned` are separate notes; a vanished cursor ends the page.
+- **Editor** — one official timing out of seven (`after`, `at`, `every`,
+  `daily`, `weekly`, `cron`, `rrule`) and one official target out of three
+  (`session`, `new_once`, `new`). `Ctrl+S` is the only Save: local structural
+  refusals happen first, then one Host `create`/`edit`. An edit sends the
+  minimal CAS patch with `expectedUpdatedAt`; an untouched timing or target is
+  never re-sent. `Esc` with dirty fields asks to discard, never auto-saves.
+- **Confirmation** — Run now, Delete and Clear ended require one explicit
+  confirmation (`y`); a stale confirmation cannot commit a newer question.
+- **Help** — one in-panel key list; no second screen.
+
+Copy semantics that must not be softened: a successful `run` proves a durable
+Session-inbox delivery (`Delivery queued`), never a completed model turn and
+never "executed exactly once"; `schedule_execution_pending` means
+`Run not started: another execution is pending.`; a CAS mismatch keeps the draft
+and says the task changed on the Host; an unproven mutation outcome says the
+outcome is unknown and requires a re-read before any retry.
+
+Renderer scope: the PiTui renderer owns this workspace. TSP does not admit
+`/schedule` (it receives the generic unsupported-capability refusal and the
+draft is restored, with zero Session/model/Host Schedule write); a native TSP
+Schedule page requires its own UX design freeze and is out of this surface's
+scope. The official Web `ui-schedule` row stays the official browser UI and is
+independent of this workspace.
+
+Proof: `test/tui/schedule-workspace-panel.test.ts`,
+`test/app/schedule-workspace-controller.test.ts`,
+`test/app/schedule-command.test.ts`.
+
 ## Attachments and input completion
 
 Attachment completion and intake are Client-local:

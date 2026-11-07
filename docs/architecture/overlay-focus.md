@@ -866,6 +866,32 @@ through the ONE record `close()`.
   the token and the captured subject, so a late baseline can never repaint a
   replacement screen.
 
+### 10.6 Schedule workspace: the fifth leased screen
+
+`/schedule` opens the Host task manager through the SAME temporary
+physical-screen primitive as §10.1–§10.5 (`leaseWorkspaceScreen('schedule', …)`
+commits the one `this.workspaceLease`), never an OverlayBroker node. It is
+mutually exclusive with the Job/Image/Settings leases and obeys the same
+paused-return-surface, modal-pre-emption, exactly-once close and final-dispose
+rules; a blocking Question/Approval/Save owner refuses the lease outright.
+
+- **One panel, layered states.** The leased layout root is the single
+  `ScheduleWorkspacePanel`. List, detail, delivery history, editor, one help
+  page and ONE confirmation question are STATES of that panel — never nested
+  screens, overlays or a second lease. `Esc` walks one layer back
+  (help/confirm → editor/history → detail → list) and closes the workspace only
+  at the list root.
+- **The panel owns no Host.** It paints the controller snapshot and dispatches
+  user intents; every Host read/write, read epoch, confirmation generation and
+  CAS revision lives in the controller (and, below it, the Host). Render never
+  starts a read. Pointer actions are resolved against the row ids painted in the
+  LATEST frame, so a click on a stale frame performs nothing.
+- **Screen teardown never cancels a dispatched write.** Closing the workspace,
+  a session switch, pre-emption or final dispose disposes the controller and
+  drops every subscription; a Host write that was already dispatched simply
+  becomes unknown until the next authoritative read. Focus and the paused
+  return surface behave exactly like the other three workspaces.
+
 ## 11. Optional seat tenant: PARK / REFUSE
 A private Client-local caller may project ONE optional tenant into the editor
 seat. The seam and its arbitration are shipped; its first real tenant is

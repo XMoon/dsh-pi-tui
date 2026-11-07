@@ -245,6 +245,8 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
     openJobView(jobId: string): void
     /** B4-B: the Full Task Center only — the quick modal is retired. */
     openTasksBrowser(viewMode: 'full'): void
+    /** S5-PR4: lease the ONE Schedule workspace over the selected backend. */
+    openScheduleWorkspace(): import('@deepseek-ai/dsh-commands').CommandResult
     /**
      * Image UX PR3-B: the LIVE mounted composer of the current renderer (the
      * draft seat the `/attach` `/image` intake commits into). Read at call
@@ -1408,6 +1410,7 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       // The zero-arg runner callback (commands.ts) is the `/tasks` surface:
       // it opens the FULL browser explicitly.
       openTasksBrowser: () => deps.surface.openTasksBrowser('full'),
+      openScheduleWorkspace: () => deps.surface.openScheduleWorkspace(),
       // Delivered files (PR1 / M2): the functional read capability the
       // `/deliverables` handler forwards to the mounted surface; no Folder or
       // runtime object crosses this seam.

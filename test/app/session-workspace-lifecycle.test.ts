@@ -250,6 +250,7 @@ function harness(options: {
     app,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
     get defaultIntentOutcome() { return undefined },
+    openScheduleWorkspace: () => ({ kind: 'success' } as const),
     ...sessionScopeFacts(() => state.agent, () => 1),
     sessionWorkspaceFacts: facts.port,
     ...(options.nativePresentation === undefined ? {} : { sessionBrowserPresentation: options.nativePresentation }),

@@ -62,6 +62,9 @@ export const SESSIONLESS_COMMANDS = new Set([
   // installed build — it never needs a Session and must not create one on a
   // first-boot invocation (a sessionless split Client is a legal reload).
   'reload-client',
+  // `/schedule` (S5-PR4) opens the Host-wide Schedule manager. It must answer
+  // before any Session exists: managing Host tasks never creates or opens one.
+  'schedule',
 ])
 
 /**
@@ -109,6 +112,10 @@ export const LOCAL_COMMANDS = new Set([
   // reserved local name (plugins can never shadow it) and is NOT the
   // catalog/settings `/reload`, which keeps its own unchanged semantics.
   'reload-client',
+  // `/schedule` (S5-PR4) is a reserved local name: it opens the Client's ONE
+  // Schedule workspace and is never a Host/model line. Its panel performs
+  // Host writes only through the controller's owned, confirmed operations.
+  'schedule',
 ])
 
 /**

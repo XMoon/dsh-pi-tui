@@ -105,6 +105,25 @@ export const HOST_ONLY_PATCH = `# M4-B1 Host-only profile overlay: production Ho
 - id: workspace-controller
   inject: []
 
+# Host Schedule management (S5-PR4): the bundle's ONE official Schedule row
+# stays this bundle's row; the overlay only drops its Direct tuiStartup
+# admission gate so the Host timer keeps running after the Client and the Web
+# UI are gone. sessionController remains the readiness barrier and resolves to
+# the existing split-host-session-controller below. Never insert a second
+# Schedule row here.
+- id: pi-tui-schedule
+  inject: [sessionController]
+# The three Direct-only activation prerequisites are DISABLED here: the
+# overlay already mounts the split-host-connection / split-host-file-upload /
+# split-host-session-controller rows exactly once, and a second Connection,
+# FileUploads or Session controller would give one Host PID two owners.
+- id: pi-tui-direct-connection
+  disabled: true
+- id: pi-tui-direct-file-upload
+  disabled: true
+- id: pi-tui-direct-session-controller
+  disabled: true
+
 - insert:
     # One official Connection owner (loopback /connect + /api) behind the
     # profile's existing webserver (whose Host-only lifetime is independent of

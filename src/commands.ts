@@ -96,6 +96,7 @@ import { commandSummaryOf, type SurfaceCatalogSnapshot, type SurfaceCommandSumma
 import { isUserInvocableSkill, type HumanSkillCatalog, type HumanSkillSummary } from './domain/catalog/skill.ts'
 import { registerExitCommand, registerHelpCommand, registerReloadClientCommand } from './tui/commands/utility.ts'
 import { registerPluginsCommand, registerTasksCommand } from './tui/commands/tasks.ts'
+import { registerScheduleCommand } from './tui/commands/schedule.ts'
 import { createModelCommands } from './tui/commands/models.ts'
 import type { ModelPresentation } from './app/command/model-presentation.ts'
 import type { WebAccessPresentation } from './app/command/web-access-presentation.ts'
@@ -744,6 +745,12 @@ export interface TuiCommandRunner {  ctx: Context
    * the on-demand Task Quick.
    */
   openTasksBrowser(): void
+  /**
+   * S5-PR4: lease the ONE Schedule workspace over the selected backend. The
+   * command-side entry behind `/schedule`; it creates no Session, performs no
+   * Host write and returns a REAL error when no PiTui surface is mounted.
+   */
+  openScheduleWorkspace(): CommandResult
   /**
    * Delivered files (PR1 / M2): the on-demand catalog of the CURRENT display
    * subject's delivered Turns, derived from the selected Folder's full grouped
@@ -2387,6 +2394,14 @@ export function registerTuiCommands(
   sessionCommands.registerNew()
 
   registerTasksCommand({ runner, registerTuiCommand })
+
+  // `/schedule` (S5-PR4): the ONE Host Schedule management entry. It sits
+  // beside the other sessionless workspace entries and is NOT an alias of
+  // `/tasks` (the Job/Subagent Task Center keeps its own semantics).
+  registerScheduleCommand({
+    openScheduleWorkspace: () => runner.openScheduleWorkspace(),
+    registerTuiCommand,
+  })
 
   // `/plugins` (P1-A / PR2): the canonical sessionless deep link into
   // `Settings → Plugins` (see `src/tui/commands/tasks.ts`). It takes the SAME

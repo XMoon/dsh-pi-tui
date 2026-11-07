@@ -48,6 +48,7 @@ test('the Direct assembly exposes the Job observation port through the Backend',
   assert.equal(typeof backend.jobObservation.open, 'function')
   assert.equal(typeof backend.pluginManager.snapshot, 'function')
   assert.ok(backend.capabilities.has('job-observation'))
+  assert.equal(typeof backend.schedule.catalog, 'function', 'S5-PR4: the Host Schedule port is a required backend member')
   assert.deepEqual([...backend.capabilities].sort(), [...DIRECT_IMPLEMENTED_CAPABILITIES].sort())
 })
 
@@ -69,6 +70,7 @@ test('each backend domain is served by its own adapter instance', () => {
     backend.pluginManager,
     backend.jobObservation,
     backend.sessionWorkspaceFacts,
+    backend.schedule,
   ]
   assert.equal(new Set(ports).size, ports.length, 'no adapter instance may serve two domains')
 })
