@@ -1089,3 +1089,33 @@ test('Host titles that sanitize to the same visible text are still distinguishab
   assert.ok(options.every(line => line.includes('ws-collision')),
     `a collision after sanitization still carries the official id:\n${options.join('\n')}`)
 })
+
+test('official Workspace ids that share a prefix stay distinguishable in the selector and Peek', async () => {
+  const h = harness({ columns: 160, rows: 30 })
+  h.handle.setSnapshot(snapshot())
+  h.handle.updateWorkspaces({
+    type: 'baseline',
+    items: [
+      { workspaceId: 'workspace-abcdef-1', path: '/ws/1', title: 'Shared', sessionIds: [CURRENT] },
+      { workspaceId: 'workspace-abcdef-2', path: '/ws/2', title: 'Shared', sessionIds: [OTHER] },
+    ],
+  })
+  await h.paint()
+  h.vt.sendInput('w')
+  await h.paint()
+  const options = h.view().split('\n').filter(line => line.includes('Shared'))
+  assert.equal(options.length, 2, `both same-title Workspaces are listed:\n${h.view()}`)
+  // A fixed-length truncation would render both labels identically; the labels
+  // must resolve to DIFFERENT official identities.
+  assert.ok(options.some(line => line.includes('workspace-abcdef-1')), options.join('\n'))
+  assert.ok(options.some(line => line.includes('workspace-abcdef-2')), options.join('\n'))
+  h.vt.sendInput('\x1b')
+  await h.paint()
+  h.vt.sendInput('\x1b[B')
+  await h.paint()
+  h.vt.sendInput(' ')
+  await h.paint()
+  const peek = h.view()
+  assert.ok(peek.includes('(workspace-abcdef-2)'),
+    `the Peek carries the FULL official Workspace id:\n${peek}`)
+})

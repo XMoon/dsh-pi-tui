@@ -225,10 +225,18 @@ function rebaseOffset(offset: number, selected: number, count: number, viewport:
   return Math.min(Math.max(0, next), Math.max(0, count - viewport))
 }
 
-/** A Workspace id is a Host string: shorten it for a disambiguating label and
- *  keep it one physical row. */
-function shortWorkspaceId(workspaceId: string): string {
-  return workspaceId.length > 12 ? `${workspaceId.slice(0, 12)}…` : workspaceId
+/** The SHORTEST prefix of one official Workspace id that no OTHER id in the
+ *  same visible set shares (never a fixed truncation: two ids that only differ
+ *  past the truncation point must stay distinguishable). Falls back to the full
+ *  id when even the whole string is needed. */
+function distinguishingWorkspaceId(ids: readonly string[], index: number, minLength = 6): string {
+  const id = ids[index]!
+  const others = ids.filter((_, other) => other !== index)
+  for (let length = Math.max(1, Math.min(minLength, id.length)); length <= id.length; length += 1) {
+    const prefix = id.slice(0, length)
+    if (!others.some(other => other.slice(0, length) === prefix)) return prefix
+  }
+  return id
 }
 
 /** The disposable per-open Workspace membership projection. It is never
@@ -609,10 +617,32 @@ export class SessionWorkspacePanel implements Component {
       case 'current':
         return 'Current workspace'
       case 'workspace':
-        return this.workspaces.byId.get(this.scope.workspaceId)?.title ?? shortWorkspaceId(this.scope.workspaceId)
+        return this.workspaceLabels().get(this.scope.workspaceId)
+          ?? sanitizedPhysicalLine(this.scope.workspaceId)
       case 'unassigned':
         return 'Unassigned'
     }
+  }
+
+  /** The ONE visible label of every official Workspace. A Host title is display
+   *  text (it may repeat, be empty, or collapse after sanitization), so an
+   *  ambiguous label carries a SHORTEST-UNIQUE prefix of the official
+   *  WorkspaceId. Recomputed from the current facts per frame, never cached
+   *  across opens. */
+  private workspaceLabels(): ReadonlyMap<string, string> {
+    const facts = this.workspaceFacts()
+    const titles = facts.map(fact => sanitizedPhysicalLine(fact.title))
+    const ids = facts.map(fact => sanitizedPhysicalLine(fact.workspaceId))
+    const counts = new Map<string, number>()
+    for (const title of titles) counts.set(title, (counts.get(title) ?? 0) + 1)
+    const labels = new Map<string, string>()
+    facts.forEach((fact, index) => {
+      const title = titles[index]!
+      const base = title === '' ? 'Workspace' : title
+      const ambiguous = title === '' || (counts.get(title) ?? 0) > 1
+      labels.set(fact.workspaceId, ambiguous ? `${base} (${distinguishingWorkspaceId(ids, index)})` : base)
+    })
+    return labels
   }
 
   /** Re-derive the ONE Current Workspace after every official frame. A membership
@@ -675,6 +705,7 @@ export class SessionWorkspacePanel implements Component {
   private selectorOptions(): readonly SelectorOption[] {
     const facts = this.workspaceFacts()
     const currentId = currentWorkspaceOf(facts, this.options.currentSessionId)
+    const labels = this.workspaceLabels()
     const options: SelectorOption[] = [
       { scope: { kind: 'all' }, label: 'All workspaces', enabled: true },
       {
@@ -683,20 +714,13 @@ export class SessionWorkspacePanel implements Component {
         enabled: currentId !== undefined,
       },
     ]
-    // Disambiguate the VISIBLE title: two different Host titles that sanitize to
-    // the same one-physical-row text are indistinguishable to the user even
-    // though their raw bytes differ.
-    const titles = facts.map(fact => sanitizedPhysicalLine(fact.title))
-    const titleCounts = new Map<string, number>()
-    for (const title of titles) titleCounts.set(title, (titleCounts.get(title) ?? 0) + 1)
-    facts.forEach((fact, index) => {
-      const title = titles[index]!
-      // A duplicated or empty Host title would make two options indistinguishable:
-      // the (sanitized) official id disambiguates them, never a guessed path.
-      const needsId = title === '' || (titleCounts.get(title) ?? 0) > 1
-      const label = `${title === '' ? 'Workspace' : title}${needsId ? ` (${sanitizedPhysicalLine(shortWorkspaceId(fact.workspaceId))})` : ''}`
-      options.push({ scope: { kind: 'workspace', workspaceId: fact.workspaceId }, label, enabled: true })
-    })
+    for (const fact of facts) {
+      options.push({
+        scope: { kind: 'workspace', workspaceId: fact.workspaceId },
+        label: labels.get(fact.workspaceId) ?? sanitizedPhysicalLine(fact.workspaceId),
+        enabled: true,
+      })
+    }
     options.push({
       scope: { kind: 'unassigned' },
       label: this.workspaces.proven ? 'Unassigned' : 'Unassigned unavailable',
@@ -1568,11 +1592,12 @@ export class SessionWorkspacePanel implements Component {
         return `Ambiguous (${fact.membership.workspaceIds.map(id => sanitizedPhysicalLine(id)).join(', ')})`
       case 'assigned':
         // The official Workspace id is the authoritative identity; the Host
-        // title is display text that may repeat or be empty.
+        // title is display text that may repeat or be empty. Peek/preview keep
+        // the FULL sanitized id so the read-only identity is unambiguous.
         return fact.membership.workspaceIds
           .map(id => {
             const title = sanitizedPhysicalLine(this.workspaces.byId.get(id)?.title ?? '')
-            return `${title === '' ? 'Workspace' : title} (${sanitizedPhysicalLine(shortWorkspaceId(id))})`
+            return `${title === '' ? 'Workspace' : title} (${sanitizedPhysicalLine(id)})`
           })
           .join(' · ')
     }
