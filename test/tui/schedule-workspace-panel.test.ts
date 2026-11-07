@@ -85,6 +85,8 @@ function draft(overrides: Partial<ScheduleEditorDraft> = {}): ScheduleEditorDraf
 }
 
 interface Harness {
+  /** One real pointer gesture: press then release on the same cell. */
+  click(x: number, y: number): void
   readonly panel: ScheduleWorkspacePanel
   readonly dispatches: ScheduleIntent[]
   readonly snapshot: () => ScheduleWorkspaceSnapshot
@@ -108,6 +110,10 @@ function harness(initial: ScheduleWorkspaceSnapshot, size: FrameSize): Harness {
     close: () => { closed += 1 },
   })
   return {
+    click: (x: number, y: number): void => {
+      panel.onCellPress(x, y)
+      panel.onCellClick(x, y)
+    },
     panel,
     dispatches,
     snapshot: () => snapshot,
@@ -442,10 +448,10 @@ test('clicking the painted y/n confirmation acts on that painted question', () =
   const confirmRow = lines.findIndex(line => line.includes('Confirm [Y]'))
   assert.ok(confirmRow >= 0)
   const line = lines[confirmRow]!
-  view.panel.onCellClick(line.indexOf('Confirm [Y]') + 1, confirmRow)
+  view.click(line.indexOf('Confirm [Y]') + 1, confirmRow)
   assert.deepEqual(view.dispatches, [{ kind: 'confirm' }])
   view.resetDispatches()
-  view.panel.onCellClick(line.indexOf('Cancel [N]') + 1, confirmRow)
+  view.click(line.indexOf('Cancel [N]') + 1, confirmRow)
   assert.deepEqual(view.dispatches, [{ kind: 'cancel' }])
 })
 
@@ -456,7 +462,7 @@ test('clicking a painted task row dispatches open-detail with that stable id', (
   const lines = view.plain()
   const row = lines.findIndex(line => line.includes('Alpha report'))
   assert.ok(row >= 0)
-  view.panel.onCellClick(2, row)
+  view.click(2, row)
   assert.deepEqual(view.dispatches, [{ kind: 'open-detail', id: 'task-alpha' }])
 })
 
@@ -470,7 +476,7 @@ test('a click after setSnapshot removed the painted row does nothing', () => {
     total: FOUR_TASKS.length - 1,
     selectedId: 'task-bravo',
   }))
-  view.panel.onCellClick(2, row)
+  view.click(2, row)
   assert.deepEqual(view.dispatches, [], 'the painted id left the latest snapshot, so the stale cell is inert')
 })
 
@@ -480,7 +486,7 @@ test('clicking the painted New action dispatches open-create', () => {
   const title = lines[0]!
   const column = title.indexOf('New')
   assert.ok(column >= 0, JSON.stringify(title))
-  view.panel.onCellClick(column, 0)
+  view.click(column, 0)
   assert.deepEqual(view.dispatches, [{ kind: 'open-create' }])
 })
 
@@ -489,7 +495,7 @@ test('clicking a painted filter chip dispatches set-filter', () => {
   const lines = view.plain()
   const filterRow = lines.findIndex(line => line.includes('[Paused]'))
   assert.ok(filterRow >= 0)
-  view.panel.onCellClick(lines[filterRow]!.indexOf('[Paused]') + 1, filterRow)
+  view.click(lines[filterRow]!.indexOf('[Paused]') + 1, filterRow)
   assert.deepEqual(view.dispatches, [{ kind: 'set-filter', filter: 'paused' }])
 })
 
@@ -498,15 +504,15 @@ test('clicking a painted editor field focuses that stable field identity', () =>
   const lines = view.plain()
   const fieldRow = lines.findIndex(line => line.includes('Title'))
   assert.ok(fieldRow >= 0)
-  view.panel.onCellClick(30, fieldRow)
+  view.click(30, fieldRow)
   assert.deepEqual(view.dispatches, [{ kind: 'focus-field', index: 0 }])
 })
 
 test('a pointer event outside the painted frame dispatches nothing', () => {
   const view = harness(LIST, { columns: 100, rows: 30 })
   view.render()
-  view.panel.onCellClick(500, 0)
-  view.panel.onCellClick(0, 500)
+  view.click(500, 0)
+  view.click(0, 500)
   assert.deepEqual(view.dispatches, [])
 })
 
@@ -617,7 +623,7 @@ test('clicking the painted help Esc action closes help with the same intent as t
   const bar = lines[lines.length - 1]!
   const column = bar.indexOf('Esc close help')
   assert.ok(column >= 0, JSON.stringify(bar))
-  view.panel.onCellClick(column, lines.length - 1)
+  view.click(column, lines.length - 1)
   assert.deepEqual(view.dispatches, [{ kind: 'close-help' }])
 })
 
@@ -632,8 +638,8 @@ test('a modal confirmation leaves the painted filter and search chrome inert', (
   const filterRow = lines.findIndex(line => line.includes('[Paused]'))
   const searchRow = lines.findIndex(line => line.includes('Search /'))
   assert.ok(filterRow >= 0 && searchRow >= 0)
-  view.panel.onCellClick(lines[filterRow]!.indexOf('[Paused]') + 1, filterRow)
-  view.panel.onCellClick(2, searchRow)
+  view.click(lines[filterRow]!.indexOf('[Paused]') + 1, filterRow)
+  view.click(2, searchRow)
   assert.deepEqual(view.dispatches, [], 'the confirmation blocks every background click')
 })
 
