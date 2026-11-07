@@ -22,7 +22,7 @@
  * @module split-process/interaction-admission
  */
 
-import { existsSync } from 'node:fs'
+import { existsSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 
@@ -362,6 +362,155 @@ export async function runInteractionNavigationFirst(context) {
         settledBy: 'B',
       })
       await exitC1Client(clientB, 'G567-N2a B')
+      await stopC1Host(host)
+    }
+
+    // ── N2-b: the OFFICIAL request is cancelled while A holds it in the
+    //    navigation hold. The withdrawn hold must never re-present or answer
+    //    the dead request; B/C2 or the Host keeps the ONE settlement.
+    {
+      const cancelBarrier = join(context.workDir, 'g567-n2b-cancel.release')
+      const { host, hostBefore, workRoot, clientA, clientB, aReady, bReady, sessionX, sessionY } =
+        await startDualSurfaceScene('approval-allow', 'g567-official-abort', { C1_CANCEL_AGENT: cancelBarrier })
+      await resumeSession(clientA, sessionX, 'G567-N2b A resume X')
+      const triggerIndex = eventsOf(sessionX).length
+      await submitPrompt(clientB, 'm5c-approval-reject-trigger', 'G567-N2b approval trigger')
+      const asked = await waitForHostSessionEventAfter(dshHome, sessionX, triggerIndex,
+        event => event.type === 'approval/asked', 'G567-N2b approval/asked', 120_000)
+      const requestId = String(asked.data.id)
+      await clientA.waitForScreen('[y] Allow once', 'G567-N2b A approval sheet', 120_000)
+      // A suspends the live sheet for navigation (hold + workspace, still on X).
+      clientA.send('\x1bw')
+      await clientA.waitForScreen('Workspace: Current workspace', 'G567-N2b workspace opened', 30_000)
+      await clientA.waitForScreenGone('[y] Allow once', 'G567-N2b sheet withdrawn for the hold', 30_000)
+      // The OFFICIAL Host Agent cancel aborts the pending request while A is
+      // inside the hold: not a Client exit, the request lifetime itself ends.
+      writeFileSync(cancelBarrier, 'cancel\n', { mode: 0o600 })
+      await waitForC1WorkEvent(workRoot, event => event.kind === 'agent-cancel-requested', 'G567-N2b Host Agent cancel', 60_000)
+      const decided = await waitForHostSessionEventAfter(dshHome, sessionX, triggerIndex,
+        event => event.type === 'approval/decided' && String(event.data?.id) === requestId,
+        'G567-N2b approval/decided (cancelled)', 120_000)
+      assert(decided.data.outcome === 'cancelled',
+        `G567-N2b unexpected Host abort taxonomy: ${JSON.stringify(decided.data.outcome)}`)
+      // Close the workspace and return to X: the dead request must NOT come
+      // back as an answerable sheet, and A's stale key must not decide again.
+      clientA.send('\x1b')
+      await waitForSurfaceStatus(clientA,
+        record => record.sessionOpen === true && record.openSessionId === sessionX,
+        'G567-N2b A back on X',
+        60_000)
+      await sleep(1_500)
+      clientA.send('y')
+      await sleep(1_000)
+      assert(!(await clientA.viewport()).join('\n').includes('[y] Allow once'),
+        'G567-N2b the aborted approval resurrected as an answerable sheet')
+      assert(approvalDecisions(sessionX, requestId).length === 1,
+        'G567-N2b the aborted request was decided twice')
+      assert(!existsSync(join(workRoot, 'approval-allow.marker')),
+        'G567-N2b a stale key executed the command after the official abort')
+      // The stale `y` landed in the editor after the sheet was withdrawn; clear
+      // it so the normal `/exit` below is still a command (the T55b lesson).
+      clientA.send('\x15')
+      await sleep(300)
+      for (const [side, ready] of [['A', aReady], ['B', bReady]]) {
+        assert(alive(ready.pid), `G567-N2b Client ${side} died`)
+      }
+      assert(alive(hostBefore.hostPid), 'G567-N2b the Host died')
+      trace('g567-n2b', {
+        hostPid: hostBefore.hostPid,
+        clientAPid: aReady.pid,
+        clientBPid: bReady.pid,
+        sessionX,
+        sessionY,
+        approvalRequestId: requestId,
+        abortedDuringHold: true,
+        hostOutcome: decided.data.outcome,
+        decisions: 1,
+        resurrected: false,
+      })
+      await exitC1Client(clientB, 'G567-N2b B')
+      await exitC1Client(clientA, 'G567-N2b A')
+      await stopC1Host(host)
+    }
+
+    // ── N3-a: A switches to Y, THEN the old X presenter callback would run.
+    //    A(Y) shows no answerable X UI and cannot submit the old answer.
+    {
+      const { host, hostBefore, workRoot, clientA, clientB, aReady, bReady, sessionX, sessionY } =
+        await startDualSurfaceScene('question', 'g567-stale-scope')
+      await resumeSession(clientA, sessionX, 'G567-N3a A resume X')
+      const triggerIndex = eventsOf(sessionX).length
+      await submitPrompt(clientB, 'm5c-question-trigger', 'G567-N3a question trigger')
+      const call = await waitForHostSessionEventAfter(dshHome, sessionX, triggerIndex,
+        event => event.type === 'tool/call' && event.data?.name === 'ask_user_question',
+        'G567-N3a question tool/call', 120_000)
+      const callId = call.data.callId
+      await waitForC1WorkEvent(workRoot,
+        event => event.kind === 'question-request' && event.sessionId === sessionX,
+        'G567-N3a Host question request', 120_000)
+      await clientA.waitForScreen('[1] Proceed', 'G567-N3a A question modal on X', 120_000)
+      // A suspends for navigation and COMMITS a real switch to Y while the
+      // request stays live the whole time.
+      await holdAndNavigateTo(clientA, sessionY, 'G567-N3a A')
+      const staleIndex = eventsOf(sessionX).length
+      // The stale option key arrives while A shows Y. It must remain plain
+      // editor input — NOT an answer to the still-live X request, and never a
+      // submitted prompt on Y either (a submitted Y prompt would start Y's own
+      // first-turn question, which is a different request, not this proof).
+      // Enter is deliberately NOT sent: with no modal on Y it would submit a
+      // new prompt, which is legal editor behavior and not this negative.
+      clientA.send('1')
+      await sleep(1_500)
+      assert(!(await clientA.viewport()).join('\n').includes('[1] Proceed'),
+        'G567-N3a A(Y) painted the stale X question as answerable')
+      // The stale digit stayed a draft on Y (no new Y turn, no new request).
+      await clientA.waitForComposerDraft('1', 8_000)
+      clientA.send('\x15')
+      assert(settledCount(workRoot, sessionX, 'question') === 0,
+        'G567-N3a the stale option key settled the still-live Host question')
+      assert(readC1WorkEvents(workRoot)
+        .every(event => !(event.kind === 'question-request' && event.sessionId === sessionY)),
+        'G567-N3a the stale option key started a new Y request')
+      assert(eventsOf(sessionX).slice(staleIndex)
+        .every(event => event.type !== 'tool/result' && event.type !== 'turn/end'),
+      'G567-N3a the stale answer keys produced Host result activity')
+      assert(lastSurfaceStatus(clientA)?.openSessionId === sessionY,
+        'G567-N3a A did not stay on Y')
+      // B still owns the SAME live delivery and gives the ONE answer.
+      await clientB.waitForScreen('[1] Proceed', 'G567-N3a B still paints the answerable modal', 60_000)
+      const answerIndex = eventsOf(sessionX).length
+      clientB.send('1')
+      await clientB.waitForScreen('Review your answer before submit', 'G567-N3a B answer review', 30_000)
+      clientB.send('\r')
+      const settled = await waitForC1WorkEvent(workRoot,
+        event => event.kind === 'question-settled' && event.sessionId === sessionX,
+        'G567-N3a Host question settled by B', 120_000)
+      assert(settled.answers?.[0]?.selected?.[0] === 'Proceed',
+        `G567-N3a the Host received ${JSON.stringify(settled.answers)} instead of Proceed`)
+      await waitForHostSessionEventAfter(dshHome, sessionX, answerIndex,
+        event => event.type === 'tool/result' && String(event.data?.message?.toolCallId) === callId,
+        'G567-N3a question tool result', 120_000)
+      assert(settledCount(workRoot, sessionX, 'question') === 1 && toolResults(sessionX, callId).length === 1,
+        'G567-N3a the stale keys plus B\'s answer produced more than one Host settlement')
+      // Clear A's editor of the stale keys so /exit remains a command.
+      clientA.send('\x15')
+      for (const [side, ready] of [['A', aReady], ['B', bReady]]) {
+        assert(alive(ready.pid), `G567-N3a Client ${side} died`)
+      }
+      assert(alive(hostBefore.hostPid), 'G567-N3a the Host died')
+      trace('g567-n3a', {
+        hostPid: hostBefore.hostPid,
+        clientAPid: aReady.pid,
+        clientBPid: bReady.pid,
+        sessionX,
+        sessionY,
+        questionCallId: callId,
+        staleKeysSettled: false,
+        settledBy: 'B',
+        hostSettlements: 1,
+      })
+      await exitC1Client(clientB, 'G567-N3a B')
+      await exitC1Client(clientA, 'G567-N3a A')
       await stopC1Host(host)
     }
   } finally {
