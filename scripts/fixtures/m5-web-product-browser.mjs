@@ -209,17 +209,6 @@ async function waitSignal(name, timeoutMs = 300_000) {
   throw new Error(`browser timed out waiting for the runner signal "${name}"`)
 }
 
-/** Wait for one fact the RUNNER writes into the shared coordination directory. */
-async function waitForFactFile(name, timeoutMs) {
-  const path = join(coordinationDir, `browser-${name}.json`)
-  const deadline = Date.now() + timeoutMs
-  while (Date.now() < deadline) {
-    if (existsSync(path)) return readJson(path)
-    await sleep(100)
-  }
-  throw new Error(`browser timed out waiting for the runner fact "${name}"`)
-}
-
 function step(id, passed, refs = {}) {
   result.steps.push({ id, passed, observedEventRefs: refs })
 }
@@ -1809,18 +1798,17 @@ const cases = {
     await screenshot(page, 'quote-draft')
     driverFact('quote-draft', { quoteNodes, markdownDraft: markdown.ok ? markdown.text : null, clipboardRefused: markdown.ok ? null : markdown.reason })
 
-    // Negative: the draft belongs to the current Session. Opening another
-    // Session must not carry it there, so the quoted text cannot be sent into
+    // Negative: the draft belongs to the current Session. A NEW Session in the
+    // same Workspace must not carry it, so the quoted text cannot be sent into
     // the wrong Session.
-    const other = await waitForFactFile('other-session', 180_000)
-    await openSession(page, other.sessionId)
+    const otherSessionId = await newSessionInWorkspace(page, 'w5-changed-files')
     const otherDraft = await composerDraft(page)
     const otherQuotes = await composerQuotes(page)
     if ((typeof otherDraft === 'string' && otherDraft.includes(sentence))
       || otherQuotes.some(text => text.includes(sentence))) {
       throw new Error('the Quote draft leaked into another Session')
     }
-    driverFact('quote-other-session', { sessionId: other.sessionId, draft: otherDraft ?? null, quotes: otherQuotes })
+    driverFact('quote-other-session', { sessionId: otherSessionId, draft: otherDraft ?? null, quotes: otherQuotes })
     await openSession(page, sessionId)
     const restored = await composerQuotes(page)
     if (!restored.some(text => text.includes(sentence))) {
