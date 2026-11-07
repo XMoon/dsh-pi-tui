@@ -161,6 +161,7 @@ export class AppActionDispatcher {
       case 'question.pageDown':
       case 'question.toggleExpand':
       case 'question.toggleSelection':
+      case 'interaction.navigateWorkspace':
       case 'tasks.open':
       case 'tasks.search.enter':
       case 'tasks.search.exit':

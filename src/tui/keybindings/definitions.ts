@@ -394,6 +394,22 @@ export const APP_KEYBINDINGS: Record<AppKeybindingId, AppKeybindingDefinition> =
     configurable: false,
   },
 
+  // ── Focused component: forwarded Question/Approval seat (split Client) ──
+  'interaction.navigateWorkspace': {
+    id: 'interaction.navigateWorkspace',
+    defaultKeys: ['alt+w'],
+    // Key-neutral on purpose: /keybindings lists the action and the copy must
+    // not hard-code the physical chord (component actions are non-configurable
+    // in this version, but the gate's copy convention still applies).
+    description: 'Open the Session Workspace without answering the pending interaction',
+    category: 'Question',
+    // The action is dispatched from BOTH the Question and Approval seats, so it
+    // declares the mutually-exclusive capturing-overlay context rather than
+    // narrowing to the QuestionFlow scope.
+    scope: 'overlay',
+    configurable: false,
+  },
+
   // ── Focused component: Task Center (plan §3.3/§29) ──────────────────────
   'tasks.open': {
     id: 'tasks.open',

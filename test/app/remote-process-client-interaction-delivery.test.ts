@@ -144,35 +144,6 @@ test('a request that arrives before any surface attaches waits, then answers thr
   delivery.dispose()
 })
 
-test('a request that arrives before the committed subject is bound waits, then presents for that subject', async () => {
-  const seat = new EventSeat()
-  const delivery = createSplitClientInteractionDelivery({
-    remote: seat as unknown as SplitClientInteractionEventsSource,
-    sessions: new SessionSeat(),
-  })
-  let currentSessionId: string | undefined
-  const listeners = new Set<() => void>()
-  let providerCalls = 0
-  delivery.attachSurface(1, {
-    onQuestion: async () => { providerCalls += 1; return PROCEED },
-    onApproval: () => 'rejected',
-  })
-  const result = seat.emitQuestion({ questions: QUESTIONS, wait: { callId: 'call-bind' } }, async () => PROCEED)
-  await tick()
-  assert.equal(providerCalls, 0, 'a request must not present before a committed-Session authority exists')
-  delivery.bindCommittedSession(
-    () => currentSessionId,
-    (listener) => { listeners.add(listener); return () => { listeners.delete(listener) } },
-  )
-  await tick()
-  assert.equal(providerCalls, 0, 'still no committed subject, so nothing is presented')
-  currentSessionId = 'session-1'
-  for (const listener of [...listeners]) listener()
-  assert.deepEqual(await result, PROCEED)
-  assert.equal(providerCalls, 1)
-  delivery.dispose()
-})
-
 test('an aborted request lifetime settles without delegating or leaking a pending task', async () => {
   const { seat, delivery } = createDelivery()
   const controller = new AbortController()
@@ -266,6 +237,25 @@ test('the current revision decision is forwarded unchanged, including a human re
     onApproval: () => 'rejected',
   })
   assert.equal(await seat.emitApproval({ toolName: 'bash', callId: 'call-5' }, async () => 'next'), 'rejected')
+  delivery.dispose()
+})
+
+test('an unbound delivery keeps the legacy immediate forward (TSP split)', async () => {
+  const seat = new EventSeat()
+  const delivery = createSplitClientInteractionDelivery({
+    remote: seat as unknown as SplitClientInteractionEventsSource,
+    sessions: new SessionSeat(),
+  })
+  // No committed-Session authority is installed: this is the TSP split path,
+  // whose native modal seat keeps its own admission. The root must forward
+  // immediately (pre-G567 behavior), not hold the request.
+  let providerCalls = 0
+  delivery.attachSurface(1, {
+    onQuestion: async () => { providerCalls += 1; return PROCEED },
+    onApproval: () => 'rejected',
+  })
+  assert.deepEqual(await seat.emitQuestion({ questions: QUESTIONS, wait: { callId: 'legacy' } }, async () => CANCEL), PROCEED)
+  assert.equal(providerCalls, 1)
   delivery.dispose()
 })
 

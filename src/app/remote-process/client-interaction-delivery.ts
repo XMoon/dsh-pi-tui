@@ -225,9 +225,15 @@ export function createSplitClientInteractionDelivery(
   const lifetimeOf = (signal: AbortSignal | undefined): AbortSignal =>
     signal === undefined ? rootLifetime.signal : AbortSignal.any([signal, rootLifetime.signal])
 
-  /** Whether the application has committed exactly the request's Session. */
+  /**
+   * Whether the application has committed exactly the request's Session.
+   * An UNBOUND delivery is the legacy path (TSP split / a composition that
+   * never installs the PiTUI split authority): it keeps the pre-G567 forward
+   * behavior, and the surface's own admission still applies. The PiTUI split
+   * runner binds BEFORE the surface's interaction providers attach.
+   */
   const isCommittedSubject = (sessionId: string): boolean =>
-    committedSessionId !== undefined && committedSessionId() === sessionId
+    committedSessionId === undefined || committedSessionId() === sessionId
 
   /** Wake on any state change, then re-check admission. */
   const waitForWake = (lifetime: AbortSignal): Promise<void> => new Promise<void>((resolve, reject) => {

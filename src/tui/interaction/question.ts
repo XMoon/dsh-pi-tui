@@ -1641,11 +1641,16 @@ export class QuestionFlow implements Component, Focusable {
     const scrollable = this.lastExpandable
     const isLastQuestion = this.tab === this.questions.length - 1
     const continueVerb = isLastQuestion ? '↵ review' : '↵ continue'
+    // The modal-safe navigation verb is derived from the component keymap (no
+    // hard-coded chord). It is LOW priority: narrow widths drop it before the
+    // fixed response verbs.
+    const browseVerb = `${componentKeymap.keyHint('interaction.navigateWorkspace')} browse`
     if (this.editingOther) {
       const editParts = [
         '←→ edit',
         continueVerb,
         scrollable ? 'pgup/pgdn scroll' : '',
+        browseVerb,
       ].filter(part => part !== '')
       const cancel = 'esc back'
       let hint = ''
@@ -1663,6 +1668,7 @@ export class QuestionFlow implements Component, Focusable {
       const navParts = [
         '↵ edit',
         this.questions.length > 1 || this.tab > 0 ? '← back · → skip' : '→ skip',
+        browseVerb,
       ].filter(part => part !== '')
       const cancel = 'esc cancel'
       let hint = ''
@@ -1683,6 +1689,7 @@ export class QuestionFlow implements Component, Focusable {
       scrollable ? 'pgup/pgdn scroll' : '',
       this.bodyExpanded ? 'e collapse' : scrollable ? 'e expand' : '',
       this.questions.length > 1 ? '← back · → skip' : '→ skip',
+      browseVerb,
       'esc cancel',
     ].filter(part => part !== '')
     const cancel = 'esc cancel'

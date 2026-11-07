@@ -121,6 +121,14 @@ a way across a modal. `test/tui/surface-modal-affordance.test.ts` locks the
 modal source→route→footer behavior, and the keybinding integration suite
 locks the remap/leader boundary.
 
+The forwarded Question/Approval seat (split Client) exposes the
+non-configurable component action `interaction.navigateWorkspace` (default
+`Alt+W`). It is matched through the component keymap — never a raw physical
+chord — and sits after the modal's fixed response keys but before the ordinary
+editor/plugin ladder. It commits the presentation-only navigation hold and
+opens the existing Session Workspace without answering the pending
+interaction; it is not a global editor binding.
+
 The hint also tracks the EFFECTIVE keymap, not only the seat/modal state. It
 advertises the `↓` trigger, so the gate asks whether the action still owns
 that key in the live read model —

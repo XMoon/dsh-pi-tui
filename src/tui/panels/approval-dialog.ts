@@ -22,6 +22,7 @@ import { matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from '@xm
 import type { Component } from '@xmoon76/pi-tui'
 import { Frame } from '../components/frame.ts'
 import { color } from '../theme/runtime.ts'
+import { componentKeymap } from '../keybindings/component-keymap.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
 import { approvalArgumentSections } from '../presentation/approval-arguments.ts'
@@ -534,6 +535,14 @@ class ApprovalSheet implements Component {
           titleShown = `${warningPrefix}${truncateToWidth(compactIdentity, titleBudget, '…')}${shortSuffix}`
         }
       }
+    }
+
+    // The modal-safe navigation verb is derived from the component keymap (no
+    // hard-coded chord) and rides the title row only when it fits; it never
+    // becomes a clickable action segment or a decision key.
+    if (titleShown !== '') {
+      const browseSuffix = ` · ${componentKeymap.keyHint('interaction.navigateWorkspace')} browse`
+      if (visibleWidth(`${titleShown}${browseSuffix}`) <= contentWidth) titleShown += browseSuffix
     }
 
     const lines: string[] = []

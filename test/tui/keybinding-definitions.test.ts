@@ -131,6 +131,9 @@ test('non-configurable actions are the focused-component set plus the reserved s
   for (const action of NON_CONFIGURABLE_ACTIONS) {
     assert.ok(action.startsWith('question.') || action.startsWith('tasks.')
       || action.startsWith('app.transcript.search.')
+      // The split Client's forwarded Question/Approval seat is a focused
+      // component contract, like the QuestionFlow keys themselves.
+      || action === 'interaction.navigateWorkspace'
       // The RESERVED session/model actions are not implemented this
       // version — never user-configurable no-op keys (convergence §7).
       || action.startsWith('app.session.') || action === 'app.model.open',
