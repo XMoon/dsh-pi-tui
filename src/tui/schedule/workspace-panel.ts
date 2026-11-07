@@ -246,6 +246,10 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     readonly mode: ScheduleWorkspaceSnapshot['mode']
     readonly subjectId: string | null
     readonly confirmToken: number | undefined
+    /** The OBSERVED subject facts the frame painted (detail status/revision).
+     *  A pause pressed on `Active@r1` can never become a resume of
+     *  `Paused@r2`: any observed change repaints and invalidates the gesture. */
+    readonly subjectFacts: string
   } | undefined
   private readonly searchInput = new Input({ prompt: '' })
   private readonly editorInput = new Input({ prompt: '' })
@@ -1681,7 +1685,13 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     // newer frame (same action, different task) must not commit anything.
     this.pressed = hit === undefined
       ? undefined
-      : { key: hitKey(hit), mode: frame.mode, subjectId: frame.subjectId, confirmToken: frame.confirmToken }
+      : {
+          key: hitKey(hit),
+          mode: frame.mode,
+          subjectId: frame.subjectId,
+          confirmToken: frame.confirmToken,
+          subjectFacts: this.paintedSubjectFacts(),
+        }
   }
 
   onCellClick(x: number, y: number): void {
@@ -1702,7 +1712,8 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
       || pressed.key !== hitKey(hit)
       || pressed.mode !== frame.mode
       || pressed.subjectId !== frame.subjectId
-      || pressed.confirmToken !== frame.confirmToken) {
+      || pressed.confirmToken !== frame.confirmToken
+      || pressed.subjectFacts !== this.paintedSubjectFacts()) {
       return
     }
     this.activateHit(hit)
@@ -1734,6 +1745,17 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     }
     this.deps.requestRender()
     return { handled: true, render: true }
+  }
+
+  /** The observed subject facts of the CURRENT snapshot (status + revision of
+   *  the selected detail row); the empty string when no such row exists. */
+  private paintedSubjectFacts(): string {
+    const snapshot = this.snapshot
+    const id = snapshot.mode === 'detail' ? snapshot.selectedId : snapshot.editor?.id
+    if (id === undefined) return ''
+    const row = snapshot.rows.find(candidate => candidate.id === id) ?? (snapshot.detail?.id === id ? snapshot.detail : undefined)
+    if (row === undefined) return ''
+    return `${row.status}@${row.updatedAt ?? ''}`
   }
 
   /** Whether the LAST painted frame still describes the CURRENT page and

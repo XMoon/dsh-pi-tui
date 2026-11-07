@@ -49,7 +49,8 @@ function entry(id: string, title: string): ScheduleCatalogEntry {
 }
 
 class StubPort implements SchedulePort {
-  readonly entries = [entry('task-a', 'Task A'), entry('task-b', 'Task B')]
+  entries = [entry('task-a', 'Task A'), entry('task-b', 'Task B')]
+  private readonly invalidators = new Set<() => void>()
   editResult: ((request: ScheduleEditRequest) => Promise<ScheduleEditResult>) | undefined
   async catalog(): Promise<readonly ScheduleCatalogEntry[]> { return this.entries }
   async list(_request: ScheduleListRequest): Promise<ScheduleListResult> {
@@ -71,7 +72,14 @@ class StubPort implements SchedulePort {
   }
   async run(_request: ScheduleRunRequest): Promise<ScheduleRunResult> { throw new Error('not used') }
   async deleteInactive(): Promise<{ deleted: number }> { return { deleted: 0 } }
-  onChanged(): () => void { return () => {} }
+  onChanged(listener: () => void): () => void {
+    this.invalidators.add(listener)
+    return () => { this.invalidators.delete(listener) }
+  }
+
+  invalidate(): void {
+    for (const listener of this.invalidators) listener()
+  }
 }
 
 const sessionReader: SessionReader = {
@@ -505,6 +513,70 @@ test('a release without a matching press commits nothing', async () => {
     await controller.whenIdle()
     assert.equal(edits.length, 1)
     assert.equal(edits[0]?.id, 'task-b')
+  } finally {
+    controller.dispose()
+  }
+})
+
+test('an observed Active→Paused change invalidates the pressed pause gesture', async () => {
+  const controller = new ScheduleWorkspaceController({
+    port: new StubPort(),
+    sessionReader,
+    runOwned: (_label, task) => { void task() },
+  })
+  const panel = new ScheduleWorkspacePanel({
+    snapshot: () => controller.snapshot(),
+    dispatch: intent => controller.dispatch(intent),
+    requestRender: () => {},
+    rows: () => 30,
+    columns: () => 120,
+    close: () => {},
+  })
+  const stub = controller as unknown as { port: StubPort }
+  const edits: ScheduleEditRequest[] = []
+  stub.port.editResult = async request => {
+    edits.push(request)
+    return stub.port.entries.find(e => e.id === request.id) as never
+  }
+  try {
+    controller.open()
+    await flush()
+    controller.dispatch({ kind: 'open-detail', id: 'task-a' })
+    await flush()
+    panel.setSnapshot(controller.snapshot())
+    const frame = plainLines(panel.render(120))
+    const row = frame.findIndex(line => line.includes('Space pause/resume'))
+    const column = frame[row]!.indexOf('Space pause/resume') + 2
+    panel.onCellPress(column, row)
+
+    // Another client pauses the SAME task; the observed revision changes and a
+    // new frame is painted before the release.
+    stub.port.entries = stub.port.entries.map(e => e.id === 'task-a'
+      ? { ...e, status: 'paused' as never, updatedAt: '2026-01-02T00:00:00.000Z' }
+      : e)
+    stub.port.invalidate()
+    await flush()
+    panel.setSnapshot(controller.snapshot())
+    const repainted = plainLines(panel.render(120))
+    assert.ok(repainted.some(l => l.includes('Space pause/resume')), 'the paused task still paints the toggle')
+
+    // The pressed PAUSE (Active@r1) must not be reinterpreted as a RESUME of
+    // Paused@r2.
+    const newRow = repainted.findIndex(l => l.includes('Space pause/resume'))
+    const newColumn = repainted[newRow]!.indexOf('Space pause/resume') + 2
+    panel.onCellClick(newColumn, newRow)
+    await flush()
+    await controller.whenIdle()
+    assert.equal(edits.length, 0, 'the observed Active→Paused change rejects the old pause gesture')
+
+    // A NEW gesture on the current facts performs the resume with the current
+    // revision (Host CAS remains the final protection).
+    panel.onCellPress(newColumn, newRow)
+    panel.onCellClick(newColumn, newRow)
+    await flush()
+    await controller.whenIdle()
+    assert.equal(edits.length, 1)
+    assert.equal((edits[0] as Extract<ScheduleEditRequest, { action: 'update' }>).expectedUpdatedAt, '2026-01-02T00:00:00.000Z')
   } finally {
     controller.dispose()
   }
