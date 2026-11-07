@@ -65,6 +65,7 @@ function workspace(overrides: Partial<ScheduleWorkspaceSnapshot> = {}): Schedule
     mode: 'list',
     sessions: [],
     busy: false,
+    pageEpoch: 0,
     ...overrides,
   }
 }

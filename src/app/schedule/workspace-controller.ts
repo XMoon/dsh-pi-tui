@@ -130,6 +130,9 @@ export class ScheduleWorkspaceController {
   private sessions: readonly ScheduleSessionChoice[] = []
   private busy = false
 
+  /** Page INSTANCE generation (snapshot `pageEpoch`): bumped when a page
+   *  re-enters interaction ownership, never on repaint/scroll/refresh. */
+  private pageEpoch = 0
   private openEpoch = 0
   private readEpoch = 0
   private detailEpoch = 0
@@ -209,6 +212,7 @@ export class ScheduleWorkspaceController {
       ...(this.limits === undefined ? {} : { limits: this.limits }),
       sessions: this.sessions,
       busy: this.busy,
+      pageEpoch: this.pageEpoch,
     }
   }
 
@@ -241,6 +245,7 @@ export class ScheduleWorkspaceController {
         this.requestDetail(intent.id)
         return
       case 'open-history':
+        this.pageEpoch += 1
         this.own('schedule history read', () => this.readHistory(undefined))
         return
       case 'history-more':
@@ -332,6 +337,7 @@ export class ScheduleWorkspaceController {
         this.cancelConfirm()
         return
       case 'open-help':
+        this.pageEpoch += 1
         // Help is an UNDERLAY: it records the page it was opened from (editor
         // draft, history page, detail) and returns there. It never opens while
         // a confirmation owns the surface.
@@ -579,6 +585,7 @@ export class ScheduleWorkspaceController {
 
   private openCreate(): void {
     if (this.busy) return
+    this.pageEpoch += 1
     this.editorToken += 1
     this.pendingDetailId = undefined
     this.mode = 'editor'
@@ -637,6 +644,7 @@ export class ScheduleWorkspaceController {
     if (this.disposed || !this.surfaceIs('detail') || this.selectedId !== id) return
     const draft = draftFromRecord(current)
     this.mode = 'editor'
+    this.pageEpoch += 1
     this.editorToken += 1
     this.editorBaseline = {
       title: current.title,

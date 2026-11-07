@@ -51,6 +51,7 @@ function entry(id: string, title: string): ScheduleCatalogEntry {
 class StubPort implements SchedulePort {
   entries = [entry('task-a', 'Task A'), entry('task-b', 'Task B')]
   readonly historyResults = new Map<string, ScheduleDeliveryHistoryResult>()
+  historyReads = 0
   private readonly invalidators = new Set<() => void>()
   editResult: ((request: ScheduleEditRequest) => Promise<ScheduleEditResult>) | undefined
   async catalog(): Promise<readonly ScheduleCatalogEntry[]> { return this.entries }
@@ -61,6 +62,7 @@ class StubPort implements SchedulePort {
     return this.entries.find(candidate => candidate.id === request.id) ?? { id: request.id, code: 'schedule_not_found' }
   }
   async history(request: ScheduleDeliveryHistoryRequest): Promise<ScheduleDeliveryHistoryResult> {
+    this.historyReads += 1
     const page = this.historyResults.get(String(request.before ?? 'first'))
     if (page !== undefined) return page
     return { id: request.id, code: 'schedule_not_found' }
@@ -234,6 +236,59 @@ test('a gesture commits only on the identity it was pressed on', async () => {
       release: life => at(life, 'Space pause/resume'),
       assertOutcome: life => {
         assert.equal(life.edits.length, 0, 'G1: zero Host writes')
+      },
+    },
+    {
+      // G6: page-instance ABA — press the editor's Esc, leave via KEYBOARD,
+      // reopen the SAME task's editor, release: the closed instance's gesture
+      // must not act on the reopen.
+      name: 'G6 editor Esc press → reopen → release (page-instance ABA)',
+      setup: async life => {
+        life.controller.dispatch({ kind: 'open-detail', id: 'task-a' })
+        await flush()
+        life.controller.dispatch({ kind: 'open-edit' })
+        await flush()
+      },
+      press: life => at(life, 'Esc discard'),
+      mutate: async life => {
+        life.controller.dispatch({ kind: 'back' }) // clean draft leaves directly
+        life.controller.dispatch({ kind: 'confirm' }) // in case it was dirty
+        life.controller.dispatch({ kind: 'open-edit' })
+        await flush()
+      },
+      release: life => at(life, 'Esc discard'),
+      assertOutcome: life => {
+        assert.equal(life.controller.snapshot().mode, 'editor', 'G6: the reopened editor is not exited by the stale release')
+      },
+    },
+    {
+      // G6 (History): press History's Esc back, leave, open ANOTHER task's
+      // History, release: the old gesture must not close it.
+      name: 'G6 history Esc press → another task history → release',
+      setup: async life => {
+        life.controller.dispatch({ kind: 'open-detail', id: 'task-a' })
+        await flush()
+        life.port.historyResults.set('first', {
+          id: 'task-a' as never,
+          records: [],
+          earlierRecordsUnavailable: false,
+          earlierRecordsPruned: false,
+          retention: { days: 30, records: 200 },
+        })
+        life.controller.dispatch({ kind: 'open-history' })
+        await flush()
+      },
+      press: life => at(life, 'Esc back'),
+      mutate: async life => {
+        life.controller.dispatch({ kind: 'back' })
+        life.controller.dispatch({ kind: 'open-detail', id: 'task-b' })
+        await flush()
+        life.controller.dispatch({ kind: 'open-history' })
+        await flush()
+      },
+      release: life => at(life, 'Esc back'),
+      assertOutcome: life => {
+        assert.equal(life.controller.snapshot().mode, 'history', 'G6: the reopened History is not closed by the stale release')
       },
     },
     {
@@ -463,52 +518,6 @@ test('the panel does not edit its local buffer while a save is pending', async (
   }
 })
 
-test('a stale Detail frame from task A cannot pause task B after a same-mode switch', async () => {
-  const controller = new ScheduleWorkspaceController({
-    port: new StubPort(),
-    sessionReader,
-    runOwned: (_label, task) => { void task() },
-  })
-  const panel = new ScheduleWorkspacePanel({
-    snapshot: () => controller.snapshot(),
-    dispatch: intent => controller.dispatch(intent),
-    requestRender: () => {},
-    rows: () => 30,
-    columns: () => 120,
-    close: () => {},
-  })
-  const edits: ScheduleEditRequest[] = []
-  ;(controller as unknown as { port: StubPort }).port.editResult = async request => {
-    edits.push(request)
-    return { id: request.id as never, deleted: false } as never
-  }
-  try {
-    controller.open()
-    await flush()
-    controller.dispatch({ kind: 'open-detail', id: 'task-a' })
-    await flush()
-    // Paint the Detail frame for task A, including its action-bar Pause hit.
-    panel.setSnapshot(controller.snapshot())
-    const detailFrame = panel.render(120)
-    const toggleRow = detailFrame.findIndex(line => line.includes('Space pause/resume'))
-    assert.ok(toggleRow >= 0, `the Detail action bar paints the Pause/Resume hit:\n${detailFrame.join('\n')}`)
-    const toggleColumn = detailFrame[toggleRow]!.indexOf('Space pause/resume') + 2
-
-    // Switch to task B and resolve its Detail, but do NOT paint a new frame.
-    controller.dispatch({ kind: 'open-detail', id: 'task-b' })
-    await flush()
-    assert.equal(controller.snapshot().selectedId, 'task-b')
-    assert.equal(controller.snapshot().mode, 'detail')
-    panel.setSnapshot(controller.snapshot())
-    panel.onCellClick(toggleColumn, toggleRow)
-    await flush()
-    await controller.whenIdle()
-    assert.equal(edits.length, 0, 'a click on A’s stale frame performed ZERO Host writes')
-    assert.equal(controller.snapshot().selectedId, 'task-b', 'the current selection is unchanged')
-  } finally {
-    controller.dispose()
-  }
-})
 
 
 
@@ -556,37 +565,31 @@ test('list Enter and history more are bound to the selection/cursor they were pr
       })
       life.controller.dispatch({ kind: 'open-history' })
       await flush()
-      const before = life.controller.snapshot().history?.records.length ?? 0
-      const pressed = at(life, 'Enter more')
-      gesture(life, pressed.column, pressed.row, { pressOnly: true })
-      // The cursor advances (this page is consumed) and the frame repaints
-      // without a `more` affordance.
+      // Press the painted cursor's `more`, then page with the KEYBOARD so the
+      // SECOND page (which still carries a THIRD-page cursor) repaints with a
+      // `more` affordance: the stale release path is genuinely exercised.
+      const pressedPoint = at(life, 'Enter more')
+      gesture(life, pressedPoint.column, pressedPoint.row, { pressOnly: true })
       life.port.historyResults.set('m2', {
         id: 'task-a' as never,
         records: [{ scheduledAt: '2026-01-01T09:00:00.000Z', deliveredAt: '2026-01-01T09:00:00.100Z', messageId: 'm3' as never, targetSessionId: 'session-1' as never }],
         earlierRecordsUnavailable: false,
         earlierRecordsPruned: false,
         retention: { days: 30, records: 200 },
+        nextBefore: 'm4' as never,
       })
       life.controller.dispatch({ kind: 'history-more' })
       await flush()
-      const records = life.controller.snapshot().history?.records.length ?? 0
-      assert.ok(records > before, 'the real gesture paged exactly once')
-      // A repaint happens before the release; if the newer frame still paints
-      // `more` (a newer cursor), the pressed cursor's release is still refused
-      // by the frozen historyCursor identity — assert via the identity, not by
-      // assuming the page is exhausted.
-      const pressedCursor = life.controller.snapshot().history?.nextBefore
-      life.panel.setSnapshot(life.controller.snapshot())
-      const stillMore = plainLines(life.panel.render(120)).some(line => line.includes('Enter more'))
-      if (stillMore && pressedCursor !== undefined) {
-        const released = at(life, 'Enter more')
-        const historyCalls = life.controller.snapshot().history?.records.length ?? 0
-        gesture(life, released.column, released.row, { releaseOnly: true })
-        await flush()
-        assert.equal(life.controller.snapshot().history?.records.length ?? 0, historyCalls,
-          'G9: the stale cursor release does not page again')
-      }
+      const readsBefore = life.port.historyReads
+      const released = at(life, 'Enter more')
+      gesture(life, released.column, released.row, { releaseOnly: true })
+      await flush()
+      assert.equal(life.port.historyReads, readsBefore,
+        'G9: the stale cursor release does not page from the new cursor')
+      // A genuine gesture on the CURRENT cursor pages normally.
+      gesture(life, released.column, released.row)
+      await flush()
+      assert.ok(life.port.historyReads > readsBefore, 'a genuine gesture on the current cursor pages')
     } finally {
       life.controller.dispose()
     }
