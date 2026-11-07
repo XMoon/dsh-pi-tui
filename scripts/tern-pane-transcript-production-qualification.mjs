@@ -838,8 +838,13 @@ export default async function (h) {
       tree: existsSync(tree), png: existsSync(png), layout: existsSync(layout),
       treeBytes: existsSync(tree) ? readFileSync(tree).length : 0,
       pngBytes: existsSync(png) ? readFileSync(png).length : 0,
+      layoutBytes: existsSync(layout) ? readFileSync(layout).length : 0,
     }
   })
+  // Every capture must be a DISTINCT step id (`NN-<name>`), so a duplicated or
+  // missing SHOT line can never be compensated by another capture's artifacts.
+  const uniqueCaptureIds = new Set(captureIds).size === captureIds.length
+  const distinctSteps = new Set(captureIds.map(capture => capture.split('-')[0])).size === captureIds.length
   // Explicit marker + frame sequence + screenshot id correlations, each one
   // sampled at its own capture instant (see frameCorrelations below).
   writeLedger(h, 'frame-correlations.json', frameCorrelations)
@@ -861,11 +866,11 @@ export default async function (h) {
       captures: captureIds, frameCorrelations,
     },
   })
-  h.check('G-TRANSCRIPT-EVIDENCE: every capture this run issued has a real tree, PNG and layout, and every required ledger/event/wire file exists',
-    missing.length === 0 && captureIds.length >= 14
+  h.check('G-TRANSCRIPT-EVIDENCE: exactly the fourteen distinct captures this flow issues each have a non-empty tree, PNG and layout, and every required ledger/event/wire file exists',
+    missing.length === 0 && captureIds.length === 14 && uniqueCaptureIds && distinctSteps
       && captureEvidence.every(entry => entry.tree && entry.png && entry.layout
-        && entry.treeBytes > 0 && entry.pngBytes > 0),
-    JSON.stringify({ missing, captureEvidence }))
+        && entry.treeBytes > 0 && entry.pngBytes > 0 && entry.layoutBytes > 0),
+    JSON.stringify({ missing, uniqueCaptureIds, distinctSteps, captureEvidence }))
   h.check('G-TRANSCRIPT-EVIDENCE: each named marker is correlated with one live SDK row id, the current wire frame sequence and its own screenshot id',
     frameCorrelations.length === 4 && frameCorrelations.every(entry => typeof entry.rowId === 'string'
       && ROW_ID.test(entry.rowId) && typeof entry.frameSeq === 'number'
