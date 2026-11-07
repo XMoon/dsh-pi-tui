@@ -158,7 +158,7 @@ test('the real create_worktree result and effective cwd reach the mounted TUI', 
   // never inherits the previous session's effective worktree directory.
   adapter.scripts.push({ kind: 'text', text: 'Fresh session ready.' })
   for (const character of '/new') app.vt.sendInput(character)
-  await app.settle()
+  await app.waitFor(() => app.view().includes('❯ /new'), 'the painted /new command')
   app.vt.sendInput('\r')
   await app.waitFor(() => app.agent() !== undefined && String(app.agent()!.session.id) !== String(agent.session.id),
     'the production /new session transition')
@@ -517,7 +517,7 @@ test('the experimental Forge bundle drives the real create_worktree Git/cwd path
   // The /new Session starts from the launch project, never the Forge checkout.
   adapter.scripts.push({ kind: 'text', text: 'Fresh Forge session ready.' })
   for (const character of '/new') app.vt.sendInput(character)
-  await app.settle()
+  await app.waitFor(() => app.view().includes('❯ /new'), 'the painted /new command')
   app.vt.sendInput('\r')
   await app.waitFor(() => app.agent() !== undefined && String(app.agent()!.session.id) !== String(agent.session.id),
     'the production /new session transition')

@@ -425,7 +425,7 @@ test('the release Experimental members paint their real TUI surface and platform
     },
   )
   life.defer(() => { try { settings.close() } catch {} try { app.dispose() } catch {} controller.dispose() })
-  const settle = async (rounds = 10): Promise<void> => {
+  const renderFrame = async (rounds = 10): Promise<void> => {
     for (let index = 0; index < rounds; index += 1) await new Promise<void>(resolve => setTimeout(resolve, 0))
     await vt.waitForRender()
   }
@@ -446,7 +446,7 @@ test('the release Experimental members paint their real TUI surface and platform
     }
     throw new Error(`timed out waiting for ${label}: ${plain(vt.getViewport())}`)
   }
-  await settle()
+  await renderFrame()
   await waitFor(() => controller.model().cards.length === OPTIONAL_BUNDLES.length + ON_DEMAND.length,
     'the real Host catalog read')
 
@@ -457,7 +457,7 @@ test('the release Experimental members paint their real TUI surface and platform
   for (let page = 0; page < 12; page += 1) {
     const before = plain(vt.getViewport())
     vt.sendInput('\x1b[6~')
-    await settle()
+    await renderFrame()
     const after = plain(vt.getViewport())
     if (after === before) break
     defaultList += `\n${after}`
@@ -472,7 +472,7 @@ test('the release Experimental members paint their real TUI surface and platform
     vt.sendInput('/')
     for (const character of name) vt.sendInput(character)
     vt.sendInput('\r')
-    await settle()
+    await renderFrame()
     assert.equal(panel.selectedCardValue(), `bundle:${name}`, `the explicit search reveals ${name}`)
     vt.sendInput('\r')
     await waitFor(() => plain(vt.getViewport()).includes('Official DSH catalog entry'), `the ${name} Detail`)
@@ -484,13 +484,13 @@ test('the release Experimental members paint their real TUI surface and platform
     let painted = detailFrame()
     for (let page = 0; page < 20 && !/TUI surface/u.test(painted); page += 1) {
       vt.sendInput('\x1b[6~')
-      await settle()
+      await renderFrame()
       painted += `\n${detailFrame()}`
     }
     assert.match(painted, /TUI surface/u, `${name} paints its bounded TUI surface:\n${painted}`)
     for (let page = 0; page < 20 && !RELEASE_FRAME_HINTS[name].test(painted); page += 1) {
       vt.sendInput('\x1b[6~')
-      await settle()
+      await renderFrame()
       painted += `\n${detailFrame()}`
     }
     assert.match(painted, RELEASE_FRAME_HINTS[name], `${name} paints its exact limit:\n${painted}`)
@@ -499,7 +499,7 @@ test('the release Experimental members paint their real TUI surface and platform
     // really paints the primary action this card offers.
     for (let page = 0; page < 40 && !/> (?:Enable|Install)…/u.test(painted); page += 1) {
       vt.sendInput('\x1b[6~')
-      await settle()
+      await renderFrame()
       painted += `\n${detailFrame()}`
     }
 
@@ -519,7 +519,7 @@ test('the release Experimental members paint their real TUI surface and platform
         // the refusal and writes neither the profile nor a Host install request.
         const before = { ...mutations.counts }
         vt.sendInput('\r')
-        await settle()
+        await renderFrame()
         await waitFor(() => /cannot be enabled on the DSH Host platform/u.test(plain(vt.getViewport())),
           'the disabled Install explanation')
         assert.deepEqual(mutations.counts, before, 'the refused Install dispatches no Host mutation')
@@ -531,7 +531,7 @@ test('the release Experimental members paint their real TUI surface and platform
         `${name} paints no phantom Web/Relay/Forge action:\n${painted}`)
     }
     vt.sendInput('\x1b') // leave Details
-    await settle()
+    await renderFrame()
   }
   // Supplemental model-level control (NOT mounted-frame evidence): ONE
   // representative same-name official:false package. The Host fact keeps it

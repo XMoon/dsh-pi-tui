@@ -80,12 +80,12 @@ function detailView(app: S4D3Application): string {
 /** Enter the production `/plugins` workspace through the real slash command. */
 async function openPluginWorkspace(app: S4D3Application): Promise<void> {
   for (const character of '/plugins') app.vt.sendInput(character)
-  await app.settle()
+  await settleFrame(app)
   app.vt.sendInput('\r')
-  await app.settle()
+  await settleFrame(app)
   if (app.view().includes('❯ /plugins')) {
     app.vt.sendInput('\r')
-    await app.settle()
+    await settleFrame(app)
   }
   await app.waitFor(() => app.view().includes('Settings · Plugins'), 'the Settings plugin workspace')
 }
@@ -96,11 +96,11 @@ async function openPluginWorkspace(app: S4D3Application): Promise<void> {
  */
 async function openSearchedDetail(app: S4D3Application, name: string): Promise<void> {
   app.vt.sendInput('/')
-  await app.settle()
+  await settleFrame(app)
   for (const character of name) app.vt.sendInput(character)
-  await app.settle()
+  await settleFrame(app)
   app.vt.sendInput('\r')
-  await app.settle()
+  await settleFrame(app)
   app.vt.sendInput('\r') // the selected exact row → Details
   await app.waitFor(() => app.view().includes('Official DSH catalog entry'), `the ${name} Detail`)
   // The DETAIL column (never the search box text) must carry the exact
@@ -108,12 +108,19 @@ async function openSearchedDetail(app: S4D3Application, name: string): Promise<v
   await app.waitFor(() => detailView(app).includes(name), `the exact ${name} identity in the Detail`)
 }
 
+/** Deterministic VirtualTerminal drain: the production runner's own settle loop
+ *  owns the rounds; this wrapper carries no fixed millisecond window. */
+async function settleFrame(app: S4D3Application): Promise<void> {
+  // Bounded render drain: no blind fixed wait is used here.
+  await app.settle()
+}
+
 /** Page the Detail until the frame really paints the wanted primary action. */
 async function revealPrimaryAction(app: S4D3Application, label: 'Enable…' | 'Disable…'): Promise<void> {
   for (let page = 0; page < 40; page += 1) {
     if (app.view().includes(label)) return
     app.vt.sendInput('\x1b[6~')
-    await app.settle()
+    await settleFrame(app)
   }
   throw new Error(`the ${label} action was never painted:\n${app.view()}`)
 }
