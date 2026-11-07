@@ -1928,6 +1928,8 @@ export const runWebProductQualification = async context => {
           let wp11HostBytes
           let wp11Diff
           let wp11Download
+          let wp11Seq2
+          let wp11Turn2
           await browserCase('wp11-official-web-capabilities', { changesNonce }, async handle => {
             const session = await handle.waitFact('session', 'WP-11 Browser Session creation', 240_000)
             wp11Session = session.sessionId
@@ -1948,6 +1950,14 @@ export const runWebProductQualification = async context => {
             const init = git(['init', '--quiet'])
             assert(init.status === 0, `WP-11 could not initialize the isolated Git work tree: ${init.stderr}`)
             writeFileSync(join(wp11Cwd, 'README.md'), `w5-base-${changesNonce}\n`, { mode: 0o600 })
+            // The W5-FILE Copy image source: a real PNG inside the dedicated
+            // workspace, part of the baseline (never a turn change).
+            const shotPng = Buffer.from(
+              'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+              'base64',
+            )
+            writeFileSync(join(wp11Cwd, 'shot.png'), shotPng, { mode: 0o600 })
+            const shotHash = createHash('sha256').update(shotPng).digest('hex')
             assert(git(['add', '--all']).status === 0, 'WP-11 could not stage the initial work tree')
             const committed = git(['-c', 'user.name=WP11', '-c', 'user.email=wp11@example.invalid', 'commit', '--quiet', '-m', 'w5 baseline'])
             assert(committed.status === 0, `WP-11 could not create the initial commit: ${committed.stderr}`)
@@ -2049,6 +2059,23 @@ export const runWebProductQualification = async context => {
             assert(readFileSync(join(wp11Cwd, 'changed.txt')).equals(wp11HostBytes),
               'WP-11 the refused file action modified the Host file')
 
+            // W5-FILE image: the official image menu's Copy image must place the
+            // ORIGINAL workspace PNG on the real browser clipboard.
+            const copied = await handle.waitFact('copy-image', 'WP-11 image Copy', 300_000)
+            assert(copied.ok === true && copied.type === 'image/png' && copied.pngSignature === true,
+              `WP-11 Copy image did not put a real PNG on the clipboard: ${JSON.stringify(copied)}`)
+            assert(copied.bytes === shotPng.length,
+              `WP-11 the clipboard PNG has ${String(copied.bytes)} bytes, expected ${String(shotPng.length)}`)
+            assert(copied.sha256 === shotHash,
+              `WP-11 the clipboard PNG (${String(copied.sha256)}) is not the workspace shot.png (${shotHash})`)
+            assert(!(copied.labels ?? []).some(label => /^Save as/u.test(label)),
+              'WP-11 the Web image menu offered the Desktop-only Save as')
+            const copyNegative = await handle.waitFact('copy-negative', 'WP-11 denied image Copy', 300_000)
+            assert(copyNegative.failureFeedback === true,
+              'WP-11 a browser-denied Copy image surfaced no official failure feedback')
+            assert(readFileSync(join(wp11Cwd, 'shot.png')).equals(shotPng),
+              'WP-11 the image actions modified the Host source image')
+
             // W5-QUOTE: selection drafts only; the explicit Send is the ONE write.
             // The Host appends its own per-turn runtime/time context as
             // user-role messages, so the comparison is the LIVE count at the
@@ -2126,6 +2153,68 @@ export const runWebProductQualification = async context => {
             const noChange = await handle.waitFact('nochange', 'WP-11 no-change Browser frame', 120_000)
             assert(noChange.cardsAfter === noChange.cardsBefore,
               'WP-11 a no-change Turn painted a new changed-files card')
+
+            // ── A5 same-Host isolation: with a live Changes summary, Web off ->
+            // TUI keeps working -> Web on. The new recorder must not reuse the
+            // old coordinates, and a NEW real write must record normally.
+            const toggleBoundary = durableOf(wp11Session).length
+            const identityBeforeToggle = (await hostStatus(wp11.host)).localHost
+            const generationBeforeToggle = lastSurfaceStatus(tuiW)?.generationId
+            await handle.waitFact('toggle-ready', 'WP-11 toggle checkpoint', 300_000)
+            await disableWeb(tuiW, 'WP-11 disable')
+            const disabled11 = await hostStatus(wp11.host)
+            webFullyOff(disabled11)
+            assertSingleHostOwners(disabled11, 'WP-11 disabled Host')
+            assertIdentityFields(disabled11.localHost, identityBeforeToggle, 'WP-11 disable kept the Host identity')
+            // The TUI keeps operating on the SAME Host while Web is off.
+            await tuiTurn(tuiW, otherSession, `w5-during-disable-${changesNonce}`, 'WP-11 TUI while Web off')
+            assert(lastSurfaceStatus(tuiW)?.generationId === generationBeforeToggle,
+              'WP-11 the TUI transport generation changed while Web was off')
+            await enableWeb(tuiW, 'WP-11 re-enable')
+            const reenabled11 = await hostStatus(wp11.host)
+            webFullyOn(reenabled11)
+            assertSingleHostOwners(reenabled11, 'WP-11 re-enabled Host')
+            assertIdentityFields(reenabled11.localHost, identityBeforeToggle, 'WP-11 re-enable kept the Host identity')
+            assert(lastSurfaceStatus(tuiW)?.generationId === generationBeforeToggle,
+              'WP-11 the TUI transport generation changed across the Web toggle')
+            // The freshly composed recorder must NOT serve the old coordinates.
+            const staleOnSameHost = await fetchStatus(summaryUrl, { headers: { cookie: index11.cookie } })
+            assert(staleOnSameHost.status === 404,
+              `WP-11 the re-enabled Host served the pre-disable summary (HTTP ${String(staleOnSameHost.status)})`)
+            const staleDiffSameHost = await fetchStatus(diffUrl, { headers: { cookie: index11.cookie } })
+            assert(staleDiffSameHost.status === 404,
+              `WP-11 the re-enabled Host served the pre-disable comparison (HTTP ${String(staleDiffSameHost.status)})`)
+            handle.signal('toggle-reenabled')
+            const secondChange = await handle.waitFact('toggle-second-change', 'WP-11 post-re-enable change', 300_000)
+            assert((secondChange.text ?? []).some(text => String(text).includes('changed2.txt')),
+              'WP-11 the post-re-enable Turn painted no changed2.txt card')
+            const secondEvent = await waitForHostSessionEventAfter(dshHome, wp11Session, toggleBoundary,
+              event => event.type === 'workspace/changes' && event.seq > wp11Seq,
+              'WP-11 post-re-enable workspace/changes event', 180_000)
+            wp11Seq2 = secondEvent.seq
+            wp11Turn2 = secondEvent.data.turn
+            const secondCoordinates = new URLSearchParams({ sessionId: wp11Session, seq: String(wp11Seq2) })
+            const secondSummary = await fetchStatus(`${wp11.ready.localHost.origin}/api/changes.summary?${secondCoordinates}`,
+              { headers: { cookie: index11.cookie } })
+            assert(secondSummary.status === 200,
+              `WP-11 the post-re-enable summary route returned HTTP ${String(secondSummary.status)}`)
+            const secondSummaryBody = JSON.parse(secondSummary.body)
+            assert(secondSummaryBody.total === 1 && secondSummaryBody.files.length === 1
+              && secondSummaryBody.files[0].path === 'changed2.txt',
+            `WP-11 the post-re-enable summary is not the one new file: ${JSON.stringify(secondSummaryBody.files)}`)
+            const secondDiff = await fetchStatus(`${wp11.ready.localHost.origin}/api/changes.diff?${secondCoordinates}&index=0`,
+              { headers: { cookie: index11.cookie } })
+            assert(secondDiff.status === 200,
+              `WP-11 the post-re-enable comparison route returned HTTP ${String(secondDiff.status)}`)
+            const secondDiffBody = JSON.parse(secondDiff.body)
+            assert(secondDiffBody.kind === 'text'
+              && secondDiffBody.hunks.flatMap(hunk => hunk.lines).some(line => line.includes(`w5-change2-${changesNonce}`)),
+            'WP-11 the post-re-enable comparison does not serve the new change')
+            const secondHostBytes = readFileSync(join(wp11Cwd, 'changed2.txt'))
+            assert(secondHostBytes.toString('utf8') === `w5-change2-${changesNonce}\n`,
+              'WP-11 the new Host file does not hold the second written content')
+            assert((await fetchStatus(summaryUrl, { headers: { cookie: index11.cookie } })).status === 404,
+              'WP-11 the pre-disable summary came back after the new Turn')
             // The retained, redacted WP-11 evidence record: no prompt text, no
             // Cookie, no launch token and no absolute private path (the cwd is a
             // digest only).
@@ -2149,7 +2238,16 @@ export const runWebProductQualification = async context => {
                 quotedUserMessages: quotedWrites.length,
               },
               fileNegative: { downloadStarted: fileNegative.downloadStarted, rows: fileNegative.rows },
+              copyImage: { type: copied.type, bytes: copied.bytes, sha256: copied.sha256, pngSignature: copied.pngSignature },
+              copyNegative,
               noChange,
+              toggle: {
+                staleSummary404: staleOnSameHost.status,
+                staleDiff404: staleDiffSameHost.status,
+                disabledRowsReleased: true,
+                reenabledRowsActive: true,
+                secondChange: { turn: wp11Turn2, seq: wp11Seq2, files: ['changed2.txt'] },
+              },
             })
             recordSession('wp11-official-web-capabilities', wp11Session)
             await ptyFrames('wp11-capabilities', tuiW)
@@ -2160,6 +2258,9 @@ export const runWebProductQualification = async context => {
               seq: wp11Seq,
               cwdDigest: sha16(wp11Cwd),
               download: { bytes: wp11Download.bytes, sha256: wp11Download.sha256 },
+              copyImage: { bytes: copied.bytes, sha256: copied.sha256 },
+              copyDeniedFeedback: copyNegative.failureFeedback,
+              secondChange: { turn: wp11Turn2, seq: wp11Seq2 },
               diffKind: wp11Diff.kind,
               workspaceChanges: 'active',
               uiDeliverables: 'active',

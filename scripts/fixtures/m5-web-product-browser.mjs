@@ -1194,6 +1194,43 @@ async function waitCompletedTurn(page, before, timeoutMs) {
   return count
 }
 
+/**
+ * Read the Browser Clipboard's image/png content: type, byte length, PNG
+ * signature and sha256. A refused Clipboard API is reported, never guessed.
+ */
+async function readClipboardPng(page) {
+  return page.evaluate(async () => {
+    try {
+      const items = await navigator.clipboard.read()
+      for (const item of items) {
+        if (!item.types.includes('image/png')) continue
+        const blob = await item.getType('image/png')
+        const bytes = new Uint8Array(await blob.arrayBuffer())
+        const signature = bytes.length >= 8 && [137, 80, 78, 71, 13, 10, 26, 10].every((value, index) => bytes[index] === value)
+        const digest = await crypto.subtle.digest('SHA-256', bytes)
+        const sha256 = [...new Uint8Array(digest)].map(value => value.toString(16).padStart(2, '0')).join('')
+        return { ok: true, type: 'image/png', bytes: bytes.length, pngSignature: signature, sha256 }
+      }
+      return { ok: false, reason: 'no image/png clipboard item' }
+    } catch (error) {
+      return { ok: false, reason: String(error?.name ?? error) }
+    }
+  })
+}
+
+/** Wait for the official file-actions copy-failure feedback. */
+async function waitForCopyFailure(page, timeoutMs = 20_000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const text = await page.evaluate(() => document.body.innerText ?? '')
+    if (text.includes('Could not copy. Check that the content is available, then retry.')) {
+      return { failureFeedback: true }
+    }
+    await page.waitForTimeout(150)
+  }
+  return { failureFeedback: false }
+}
+
 /** Every changed-files card the conversation currently paints. */
 async function changedCards(page) {
   return page.evaluate(() => [...document.querySelectorAll('[data-changed-files]')]
@@ -1654,6 +1691,45 @@ const cases = {
     await dismissMenu(page)
     if (started) throw new Error('a missing Session file still started a download')
     driverFact('file-negative', { rows: missingRows, downloadStarted: false })
+
+    // W5-FILE image: the official image menu's Copy image must put the ORIGINAL
+    // PNG on the real browser clipboard. A permission denial must surface the
+    // official failure feedback, never a fake success.
+    const image = page.locator('img[alt="shot"]').last()
+    await image.scrollIntoViewIfNeeded({ timeout: 30_000 }).catch(() => undefined)
+    await image.waitFor({ state: 'visible', timeout: 60_000 })
+    const imageRows = await openContextMenu(page, image, 'shot.png')
+    await screenshot(page, 'image-menu')
+    const imageLabels = imageRows.map(row => row.label)
+    if (!imageLabels.includes('Copy image')) {
+      throw new Error(`the image menu exposes no Copy image: ${JSON.stringify(imageLabels)}`)
+    }
+    await page.getByRole('menuitem', { name: 'Copy image', exact: true }).last().click()
+    const copied = await readClipboardPng(page)
+    if (copied.ok !== true) throw new Error(`Copy image put no PNG on the clipboard: ${JSON.stringify(copied)}`)
+    if (copied.pngSignature !== true) throw new Error('the clipboard image/png is not a real PNG')
+    result.copyImage = { ...copied, labels: imageLabels }
+    driverFact('copy-image', { ...copied, labels: imageLabels })
+
+    // Chromium's permission type behind the clipboard API is
+    // `clipboardReadWrite`; the Chrome "denied" setting is a real browser
+    // permission denial (not a JS mock), so the official failure path runs.
+    const cdp = await context.newCDPSession(page)
+    await cdp.send('Browser.setPermission', { permission: { name: 'clipboardReadWrite' }, setting: 'denied', origin })
+    try {
+      const deniedRows = await openContextMenu(page, image, 'shot.png (clipboard denied)')
+      if (!deniedRows.some(row => row.label === 'Copy image')) {
+        throw new Error('the image menu exposes no Copy image for the denial case')
+      }
+      await page.getByRole('menuitem', { name: 'Copy image', exact: true }).last().click()
+      const denied = await waitForCopyFailure(page)
+      if (denied.failureFeedback !== true) throw new Error('a denied Copy image surfaced no official failure feedback')
+      driverFact('copy-negative', denied)
+    } finally {
+      await cdp.send('Browser.setPermission', { permission: { name: 'clipboardReadWrite' }, setting: 'granted', origin }).catch(() => undefined)
+      await cdp.detach().catch(() => undefined)
+    }
+    step('image-copy-and-refusal', true, { bytes: copied.bytes, sha256: copied.sha256 })
     step('file-download-and-refusal', true, downloadFacts)
 
     // ── W5-QUOTE: a real selection becomes a composer draft, never a Session write.
@@ -1721,6 +1797,26 @@ const cases = {
     await screenshot(page, 'no-change-turn')
     driverFact('nochange', { cardsBefore, cardsAfter: cardsAfter.length, completedBefore, completedAfter })
     step('no-false-changed-files-card', true, { cardsBefore })
+
+    // ── A5 same-Host isolation: Web disable -> TUI keeps working -> re-enable.
+    // The old recorder/summary must not be reused, and a NEW real write must
+    // record through the freshly composed chain.
+    driverFact('toggle-ready', {})
+    await waitSignal('toggle-reenabled')
+    await page.reload({ waitUntil: 'load', timeout: 120_000 })
+    await waitShell(page)
+    await assertNoPreviewNotice(page)
+    await openSession(page, sessionId)
+    const secondMarker = `w5-changes2-${changesNonce}`
+    await sendPrompt(page, secondMarker)
+    await waitConversation(page, secondMarker, ['w5-editing2'], 240_000, 'the post-re-enable changed-files answer')
+    const cardsAfterReenable = await changedCards(page)
+    if (!cardsAfterReenable.some(card => card.text.includes('changed2.txt'))) {
+      throw new Error(`the post-re-enable Turn painted no changed2.txt card: ${JSON.stringify(cardsAfterReenable)}`)
+    }
+    await screenshot(page, 'post-reenable-change')
+    driverFact('toggle-second-change', { cards: cardsAfterReenable.length, text: cardsAfterReenable.map(card => card.text) })
+    step('same-host-toggle-isolation', true, { cards: cardsAfterReenable.length })
   },
   /** WP-10: the honest visible-feature inventory. */
   'wp10-inventory': async context => {
