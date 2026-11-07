@@ -242,6 +242,40 @@ test('a gesture commits only on the identity it was pressed on', async () => {
       // G6: page-instance ABA — press the editor's Esc, leave via KEYBOARD,
       // reopen the SAME task's editor, release: the closed instance's gesture
       // must not act on the reopen.
+      name: 'detail leave → reopen same task (ownership ABA)',
+      setup: async life => {
+        life.controller.dispatch({ kind: 'open-detail', id: 'task-a' })
+        await flush()
+      },
+      press: life => at(life, 'Space pause/resume'),
+      mutate: async life => {
+        life.controller.dispatch({ kind: 'back' })
+        life.controller.dispatch({ kind: 'open-detail', id: 'task-a' })
+        await flush()
+      },
+      release: life => at(life, 'Space pause/resume'),
+      assertOutcome: life => {
+        assert.equal(life.edits.length, 0, 'ABA(detail): zero Host writes across the reopen')
+      },
+    },
+    {
+      name: 'modal takeover → cancel → stale release',
+      setup: async life => {
+        life.controller.dispatch({ kind: 'open-detail', id: 'task-a' })
+        await flush()
+      },
+      press: life => at(life, 'Space pause/resume'),
+      mutate: async life => {
+        life.controller.dispatch({ kind: 'ask-run' })
+        life.controller.dispatch({ kind: 'cancel' })
+        await flush()
+      },
+      release: life => at(life, 'Space pause/resume'),
+      assertOutcome: life => {
+        assert.equal(life.edits.length, 0, 'modal takeover: the pre-modal gesture is dead')
+      },
+    },
+    {
       name: 'G6 editor Esc press → reopen → release (page-instance ABA)',
       setup: async life => {
         life.controller.dispatch({ kind: 'open-detail', id: 'task-a' })

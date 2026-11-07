@@ -130,9 +130,19 @@ export class ScheduleWorkspaceController {
   private sessions: readonly ScheduleSessionChoice[] = []
   private busy = false
 
-  /** Page INSTANCE generation (snapshot `pageEpoch`): bumped when a page
-   *  re-enters interaction ownership, never on repaint/scroll/refresh. */
+  /** Page INSTANCE generation (snapshot `pageEpoch`): the interaction-ownership
+   *  generation. Bumped by EVERY accepted user navigation that leaves, re-enters
+   *  or retargets a page (openDetail/back/Help/Editor/History entry, selection
+   *  move, modal takeover and its settlement). Never bumped by background
+   *  re-reads, pure repaints, scrolls or Host facts updates (those stay guarded
+   *  by subjectFacts + Host CAS), so a normal repaint never invalidates a
+   *  gesture (G0). */
   private pageEpoch = 0
+
+  /** The ONE interaction-ownership transition marker. */
+  private bumpPage(): void {
+    this.pageEpoch += 1
+  }
   private openEpoch = 0
   private readEpoch = 0
   private detailEpoch = 0
@@ -266,7 +276,8 @@ export class ScheduleWorkspaceController {
       case 'reload-latest':
         // Reload is LOSSY: an unsaved draft must be discarded explicitly.
         if (this.editorDirty()) {
-          this.confirm = { kind: 'reload', token: ++this.confirmToken }
+          this.bumpPage()
+    this.confirm = { kind: 'reload', token: ++this.confirmToken }
           this.publish()
           return
         }
@@ -450,7 +461,8 @@ export class ScheduleWorkspaceController {
     if (this.mode === 'editor') {
       if (this.editorDirty()) {
         this.pendingDetailId = target
-        this.confirm = { kind: 'discard', token: ++this.confirmToken }
+        this.bumpPage()
+    this.confirm = { kind: 'discard', token: ++this.confirmToken }
         this.publish()
         return
       }
@@ -470,6 +482,7 @@ export class ScheduleWorkspaceController {
     const controller = new AbortController()
     this.detailAbort = controller
     this.selectedId = target
+    this.bumpPage()
     this.mode = 'detail'
     this.historyView = undefined
     // A switch IMMEDIATELY retires the previous task's detail: while the new
@@ -1023,6 +1036,7 @@ export class ScheduleWorkspaceController {
   private askRun(): void {
     const entry = this.selectedEntry()
     if (entry === undefined || this.busy) return
+    this.bumpPage()
     this.confirm = { kind: 'run', token: ++this.confirmToken, id: entry.id, title: entry.title }
     this.publish()
   }
@@ -1030,6 +1044,7 @@ export class ScheduleWorkspaceController {
   private askDelete(): void {
     const entry = this.selectedEntry()
     if (entry === undefined || this.busy) return
+    this.bumpPage()
     this.confirm = {
       kind: 'delete',
       token: ++this.confirmToken,
@@ -1046,6 +1061,7 @@ export class ScheduleWorkspaceController {
 
   private askClearEnded(): void {
     if (this.busy) return
+    this.bumpPage()
     this.confirm = { kind: 'clear-ended', token: ++this.confirmToken }
     this.publish()
   }
@@ -1056,6 +1072,7 @@ export class ScheduleWorkspaceController {
     // Commit the intent BEFORE any Host call: one confirmation generation owns
     // exactly one write, and a stale `y` cannot act on a newer question.
     this.confirm = undefined
+    this.bumpPage()
     this.publish()
     switch (confirm.kind) {
       case 'discard': {
@@ -1065,6 +1082,7 @@ export class ScheduleWorkspaceController {
         this.editorBaseline = undefined
         this.notice = undefined
         if (pending !== undefined) {
+          this.bumpPage()
           this.openDetail(pending)
           return
         }
@@ -1090,6 +1108,7 @@ export class ScheduleWorkspaceController {
   private cancelConfirm(): void {
     if (this.confirm === undefined) return
     this.confirm = undefined
+    this.bumpPage()
     this.pendingDetailId = undefined
     this.publish()
   }
@@ -1138,6 +1157,7 @@ export class ScheduleWorkspaceController {
             this.detail = undefined
             this.selectedId = undefined
             this.historyView = undefined
+            this.bumpPage()
             if (underHelp) this.helpReturn = 'list'
             else this.mode = 'list'
           }
@@ -1182,6 +1202,7 @@ export class ScheduleWorkspaceController {
   // ── navigation ───────────────────────────────────────────────────────────
 
   private closeHelp(): void {
+    this.bumpPage()
     const returnTo = this.helpReturn
     this.helpReturn = undefined
     this.mode = returnTo ?? (this.detail === undefined ? 'list' : 'detail')
@@ -1208,23 +1229,27 @@ export class ScheduleWorkspaceController {
     if (this.mode === 'editor') {
       if (this.editorDirty()) {
         this.pendingDetailId = undefined
-        this.confirm = { kind: 'discard', token: ++this.confirmToken }
+        this.bumpPage()
+    this.confirm = { kind: 'discard', token: ++this.confirmToken }
         this.publish()
         return
       }
       this.editor = undefined
       this.editorBaseline = undefined
+      this.bumpPage()
       this.mode = this.detail === undefined ? 'list' : 'detail'
       this.publish()
       return
     }
     if (this.mode === 'history') {
+      this.bumpPage()
       this.mode = 'detail'
       this.historyView = undefined
       this.publish()
       return
     }
     if (this.mode === 'detail') {
+      this.bumpPage()
       this.mode = 'list'
       this.detail = undefined
       this.publish()
@@ -1261,6 +1286,7 @@ export class ScheduleWorkspaceController {
     const current = rows.findIndex(row => row.id === this.selectedId)
     const next = (current < 0 ? 0 : current + delta + rows.length) % rows.length
     this.selectedId = rows[next].id
+    this.bumpPage()
     if (this.mode === 'detail') this.detail = undefined
     this.publish()
   }
