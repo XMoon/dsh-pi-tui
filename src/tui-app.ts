@@ -25870,9 +25870,14 @@ export class TuiApp {
    */
   setNoAnswerNavigation(control: NoAnswerNavigationControl | undefined): void {
     this.noAnswerNavigation = control
-    // The modal hint reads this flag synchronously at render time; Direct/TSP
-    // never install a control and therefore never paint the navigation verb.
-    setNoAnswerNavigationInstalled(control !== undefined)
+    // The modal hint reads these synchronously at render time: the verb paints
+    // only where the control is installed AND actually usable right now (the
+    // same predicate the key press consults), so the hint can never advertise
+    // an entry that would answer "unavailable".
+    setNoAnswerNavigationInstalled(
+      control !== undefined,
+      control === undefined ? undefined : () => control.available(),
+    )
   }
 
   /**

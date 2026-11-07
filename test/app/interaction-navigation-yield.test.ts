@@ -34,6 +34,11 @@ import type {
   UserQuestionProvider,
 } from '../../src/runtime/interaction-port.ts'
 import type { Diag } from '../../src/runtime/process/diagnostics.ts'
+import { VirtualTerminal } from '../support/virtual-terminal.ts'
+import { installVirtualProcessTerminal } from '../support/runner-harness.ts'
+import { stripVTControlCharacters } from 'node:util'
+import { createSurfaceRuntime } from '../../src/app/surface/runtime.ts'
+import { createPluginManagerWorkspacePanel } from '../../src/tui/plugin-manager/workspace.ts'
 import type { TuiQuestionAnswer } from '../../src/tui-app.ts'
 import type { ApprovalOutcome } from '../../src/tui/panels/approval-dialog.ts'
 
@@ -202,27 +207,101 @@ test('withdrawPresentationForNavigation withdraws a live approval as a local can
   h.runtime.dispose()
 })
 
-test('an installed committed authority with no session admits nothing (sessionless split)', () => {
-  // The boundary fix: `undefined` = authority absent (legacy Direct `true`),
-  // a present-but-sessionless authority admits NOTHING. Proven through the
-  // same seam the production runtime uses: the injected admission predicate.
-  const { runtime } = harness()
-  // harness supplies isAdmissibleSession: sessionId === 'session-x'; the
-  // production split runtime derives it from options.committedSessionId. The
-  // classification under test is the runtime's own branch, pinned here by
-  // constructing the real predicate logic the way createSurfaceRuntime does.
-  const admissible = (installed: boolean, current: string | undefined, sessionId: string): boolean => {
-    if (!installed) return true
-    if (current === undefined) return false
-    return sessionId === current
+test('a sessionless committed surface admits no forwarded request and reads no stale routed id', async () => {
+  // REAL production seams: createSurfaceRuntime + a mounted PiTUI surface
+  // (surface.start over a VirtualTerminal with the virtual ProcessTerminal
+  // installed, like the terminal-progress harness) + attachInteraction. The
+  // routed subject deliberately still names the OLD session while the
+  // installed committed authority reports "no session".
+  const committed: { current: string | undefined } = { current: undefined }
+  const vt = new VirtualTerminal(100, 30)
+  installVirtualProcessTerminal(vt)
+  const surface = createSurfaceRuntime({
+    tuiVersion: '0.0.0-test',
+    notificationPresentation: { showNotice: () => {}, clearNotice: () => {} } as never,
+    notificationMode: undefined,
+    notificationMethod: undefined,
+    terminalProgress: undefined,
+    mainProgressAuthority: 'local-events',
+    createPluginManagerPanel: createPluginManagerWorkspacePanel,
+    committedSessionId: () => committed.current,
+  })
+  try {
+    surface.attachEventRouting({ currentSessionId: () => 'session-x' } as never)
+    surface.start({
+      events: { onSubmit: () => {}, onExit: () => {} },
+      workspaceRoot: '/tmp',
+      iconStyle: 'emoji',
+      displayState: { preset: 'compact' },
+      historySearchSource: { search: () => Promise.reject(new Error('not exercised')) },
+      readImage: () => Promise.reject(new Error('not exercised')),
+      imageScope: () => undefined,
+      present: { call: () => undefined, result: () => undefined },
+      sessionCwd: () => '/tmp',
+      captureHistoryScope: () => ({ sessionId: 'session-x', isCurrent: () => true }),
+      onTerminalResize: () => {},
+      copySelection: async () => false,
+      deliveredFiles: { snapshot: () => undefined, isCurrent: () => false },
+      openExternalUrl: () => {},
+      readClipboardText: async () => undefined,
+      imageFallbackColor: (text: string) => text,
+    } as never)
+    surface.attachTasks({} as never, { isCleanedUp: () => false } as never)
+    type Provider = (request: unknown, next: () => unknown) => unknown
+    let provider: Provider | undefined
+    surface.attachInteraction({
+      questions: {
+        onRequest: (next: never) => { provider = next as Provider; return true },
+        snapshot: () => undefined,
+        subscribe: () => () => {},
+        claimTimedWait: async () => undefined,
+        answerContinued: async () => 'queued',
+      },
+      onApprovalRequest: () => {},
+      setApprovalPolicy: () => false,
+    }, { lookupCallArgs: () => undefined, dangerCommand: () => false })
+    assert.ok(provider !== undefined, 'the runtime registered the live question provider')
+    const question = {
+      sessionId: 'session-x',
+      callId: 'call-1',
+      timed: false,
+      questions: [{ id: 'q1', question: 'Continue the C1 test?', options: [{ label: 'Proceed' }] }],
+    }
+    const painted = (): boolean => stripVTControlCharacters(vt.getViewport().join('\n')).includes('Continue the C1 test?')
+
+    // 1. SESSIONLESS: the authority is installed and reports no session; the
+    //    STALE routed id ('session-x') must not rescue admission.
+    const controller = new AbortController()
+    const asked = Promise.resolve(provider(
+      { ...question, signal: controller.signal },
+      () => 'next',
+    ))
+    asked.catch(() => {})
+    for (let poll = 0; poll < 40 && !painted(); poll += 1) await new Promise(resolve => setTimeout(resolve, 25))
+    assert.equal(painted(), false, 'a sessionless surface presents nothing')
+    const early = await Promise.race([
+      asked.then(() => 'settled', () => 'settled'),
+      new Promise<'pending'>(resolve => { setTimeout(() => resolve('pending'), 200).unref?.() }),
+    ])
+    assert.equal(early, 'pending', 'the sessionless wait settles nothing by itself')
+
+    // 2. The official abort ends it as the LOCAL fail-closed classification
+    //    (ASK_ABORTED — never an answer). The delivery layer's rejection
+    //    contract is pinned in its own suite.
+    controller.abort(new Error('withdrawn'))
+    await assert.rejects(asked, /aborted before the user answered/u)
+
+    // 3. COMMIT: the SAME class of request presents through the real seam.
+    committed.current = 'session-x'
+    const asked2 = Promise.resolve(provider({ ...question, callId: 'call-2' }, () => 'next'))
+    asked2.catch(() => {})
+    for (let poll = 0; poll < 120 && !painted(); poll += 1) await new Promise(resolve => setTimeout(resolve, 25))
+    assert.equal(painted(), true, 'the committed session presents the question flow')
+    vt.sendInput('\x1b')
+    await assert.rejects(asked2, /cancelled/u, 'cleanup: the flow cancels normally')
+  } finally {
+    surface.dispose()
   }
-  assert.equal(admissible(false, undefined, 'any-session'), true,
-    'Direct (no authority) keeps unconditional delegation')
-  assert.equal(admissible(true, undefined, 'session-x'), false,
-    'a sessionless split surface must not admit any forwarded request')
-  assert.equal(admissible(true, 'session-x', 'session-x'), true)
-  assert.equal(admissible(true, 'session-x', 'session-y'), false)
-  runtime.dispose()
 })
 
 test('a second navigation withdrawal is inert and a disposed runtime withdraws nothing', async () => {

@@ -433,8 +433,10 @@ export async function runInteractionNavigationFirst(context) {
       await stopC1Host(host)
     }
 
-    // ── N3-a: A switches to Y, THEN the old X presenter callback would run.
-    //    A(Y) shows no answerable X UI and cannot submit the old answer.
+    // ── N3-a: A switches to Y; the old X answer path must be unreachable.
+    //    Deterministic halves: (1) the stale ANSWER KEY on Y, (2) a REAL
+    //    re-offered presenter callback that arrives while Y is committed again,
+    //    (3) B the ONE answerer, (4) no resurrection on return.
     {
       const { host, hostBefore, workRoot, clientA, clientB, aReady, bReady, sessionX, sessionY } =
         await startDualSurfaceScene('question', 'g567-stale-scope')
@@ -449,8 +451,7 @@ export async function runInteractionNavigationFirst(context) {
         event => event.kind === 'question-request' && event.sessionId === sessionX,
         'G567-N3a Host question request', 120_000)
       await clientA.waitForScreen('[1] Proceed', 'G567-N3a A question modal on X', 120_000)
-      // A suspends for navigation and COMMITS a real switch to Y while the
-      // request stays live the whole time.
+      // Half 1: suspend for navigation, commit Y, then the stale option key.
       await holdAndNavigateTo(clientA, sessionY, 'G567-N3a A')
       const staleIndex = eventsOf(sessionX).length
       // The stale option key arrives while A shows Y. It must remain plain
@@ -463,7 +464,6 @@ export async function runInteractionNavigationFirst(context) {
       await sleep(1_500)
       assert(!(await clientA.viewport()).join('\n').includes('[1] Proceed'),
         'G567-N3a A(Y) painted the stale X question as answerable')
-      // The stale digit stayed a draft on Y (no new Y turn, no new request).
       await clientA.waitForComposerDraft('1', 8_000)
       clientA.send('\x15')
       assert(settledCount(workRoot, sessionX, 'question') === 0,
@@ -473,10 +473,27 @@ export async function runInteractionNavigationFirst(context) {
         'G567-N3a the stale option key started a new Y request')
       assert(eventsOf(sessionX).slice(staleIndex)
         .every(event => event.type !== 'tool/result' && event.type !== 'turn/end'),
-      'G567-N3a the stale answer keys produced Host result activity')
+      'G567-N3a the stale option key produced Host result activity')
       assert(lastSurfaceStatus(clientA)?.openSessionId === sessionY,
         'G567-N3a A did not stay on Y')
-      // B still owns the SAME live delivery and gives the ONE answer.
+      // Half 2: the DETERMINISTIC late presenter callback. A re-enters X (the
+      // SAME live request is genuinely re-offered and mounts on X), then
+      // suspends it again for a committed switch BACK to Y before answering.
+      // The re-offered presentation is now stale while Y is current: it must
+      // leave A(Y)'s screen and write nothing to the Host.
+      await resumeSession(clientA, sessionX, 'G567-N3a A re-enters X (re-offer)')
+      await clientA.waitForScreen('[1] Proceed', 'G567-N3a the SAME request re-presented on X', 120_000)
+      await holdAndNavigateTo(clientA, sessionY, 'G567-N3a A back to Y')
+      const lateIndex = eventsOf(sessionX).length
+      await sleep(1_000)
+      assert(!(await clientA.viewport()).join('\n').includes('[1] Proceed'),
+        'G567-N3a the stale re-offered presentation leaked onto A(Y)')
+      assert(eventsOf(sessionX).slice(lateIndex)
+        .every(event => event.type !== 'tool/result' && event.type !== 'turn/end'),
+      'G567-N3a the stale re-offered presentation wrote Host activity on X')
+      assert(settledCount(workRoot, sessionX, 'question') === 0,
+        'G567-N3a the re-offer or its withdrawal settled the Host question')
+      // Half 3: B is still the answerer of the SAME live delivery.
       await clientB.waitForScreen('[1] Proceed', 'G567-N3a B still paints the answerable modal', 60_000)
       const answerIndex = eventsOf(sessionX).length
       clientB.send('1')
@@ -491,30 +508,12 @@ export async function runInteractionNavigationFirst(context) {
         event => event.type === 'tool/result' && String(event.data?.message?.toolCallId) === callId,
         'G567-N3a question tool result', 120_000)
       assert(settledCount(workRoot, sessionX, 'question') === 1 && toolResults(sessionX, callId).length === 1,
-        'G567-N3a the stale keys plus B\'s answer produced more than one Host settlement')
-      // The LATE half: B's settlement happens while A still shows Y. Any stale
-      // presenter callback for the already-settled X request arriving at A
-      // after that point must neither re-present an answerable form nor write
-      // a second result. Waiting on the REAL Host settlement event is the
-      // observable late-completion; A re-reads its own surface afterwards.
-      const lateIndex = eventsOf(sessionX).length
-      await sleep(2_000)
-      const viewportLate = (await clientA.viewport()).join('\n')
-      assert(!viewportLate.includes('[1] Proceed'),
-        'G567-N3a a late presenter callback re-presented the settled X question on A(Y)')
-      assert(eventsOf(sessionX).slice(lateIndex)
-        .every(event => event.type !== 'tool/result' && event.type !== 'turn/start'),
-      'G567-N3a a late presenter callback produced new Host activity on X')
-      assert(settledCount(workRoot, sessionX, 'question') === 1,
-        'G567-N3a a late presenter callback wrote a second settlement')
-      // A returns to X AFTER the settlement: the settled request must not
-      // reappear as answerable there either.
+        'G567-N3a the stale paths plus B\'s answer produced more than one Host settlement')
+      // Half 4: returning to X after the settlement resurrects nothing.
       await resumeSession(clientA, sessionX, 'G567-N3a A returns to X after settlement')
       await sleep(1_500)
       assert(!(await clientA.viewport()).join('\n').includes('[1] Proceed'),
         'G567-N3a returning to X resurrected the settled question as answerable')
-      // Clear A's editor of the stale keys so /exit remains a command.
-      clientA.send('\x15')
       for (const [side, ready] of [['A', aReady], ['B', bReady]]) {
         assert(alive(ready.pid), `G567-N3a Client ${side} died`)
       }
