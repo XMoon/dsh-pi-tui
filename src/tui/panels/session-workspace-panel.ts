@@ -104,6 +104,36 @@ function fit(text: string, width: number): string {
   return padding > 0 ? clamped + ' '.repeat(padding) : clamped
 }
 
+/** The minimum cells a row's IDENTITY (title, or the short id when untitled)
+ *  owns before secondary meta may use the row: two same-cwd Sessions must stay
+ *  distinguishable even in a narrow terminal. */
+const MIN_IDENTITY_CELLS = 12
+
+/**
+ * Split one row into an identity column and a secondary column. The identity
+ * gets its full width when short, otherwise at least {@link MIN_IDENTITY_CELLS}
+ * and at most 60% of the available cells; a meta column that cannot fit a
+ * two-cell gap plus one word is dropped entirely so the identity never collapses
+ * to `…`.
+ */
+function rowColumns(titleWidth: number, width: number): { readonly identity: number; readonly meta: number } {
+  const available = Math.max(1, width - 4)
+  const identity = Math.min(
+    available,
+    Math.max(1, Math.min(titleWidth, Math.max(MIN_IDENTITY_CELLS, Math.floor(available * 0.6)))),
+  )
+  let meta = Math.max(0, available - identity)
+  if (meta < 3) return { identity: available, meta: 0 }
+  meta -= 2 // the two-cell gap between the columns
+  return { identity, meta }
+}
+
+/** Pad one already-truncated column to its exact cell budget. */
+function padColumn(text: string, cells: number): string {
+  const padding = cells - visibleWidth(text)
+  return padding > 0 ? text + ' '.repeat(padding) : text
+}
+
 /** Right-align a trailing fact on one already-composed left label. */
 function withTrailing(left: string, trailing: string, width: number): string {
   const room = width - visibleWidth(trailing)
@@ -768,10 +798,14 @@ export class SessionWorkspacePanel implements Component {
       color.textMuted(formatSessionAge(row.updatedAt)),
       color.textDim(workspaceKey(row.cwd)),
     ].join(color.textMuted(' · '))
-    const room = Math.max(1, width - 4 - visibleWidth(meta))
-    const clipped = truncateToWidth(title, room, '…', false)
+    const columns = rowColumns(visibleWidth(title), width)
+    const clipped = truncateToWidth(title, columns.identity, '…', false)
     const label = selected ? color.textStrong(clipped) : color.text(clipped)
-    return fit(`${marker}${currentMark}${label}  ${meta}`, width)
+    const secondary = columns.meta > 0 ? truncateToWidth(meta, columns.meta, '…', false) : ''
+    return fit(
+      `${marker}${currentMark}${padColumn(label, columns.identity)}${secondary === '' ? '' : `  ${secondary}`}`,
+      width,
+    )
   }
 
   private searchRowLine(result: SessionBrowserSearchResult, selected: boolean, width: number): string {
@@ -786,10 +820,14 @@ export class SessionWorkspacePanel implements Component {
       color.textDim(workspaceKey(row.cwd)),
     ].join(color.textMuted(' · '))
     const snippet = result.snippet === undefined ? '' : ` · …${sanitizedPhysicalLine(result.snippet)}…`
-    const room = Math.max(1, width - 4 - visibleWidth(meta) - visibleWidth(snippet))
-    const clipped = truncateToWidth(title, room, '…', false)
+    const columns = rowColumns(visibleWidth(title), width)
+    const clipped = truncateToWidth(title, columns.identity, '…', false)
     const label = selected ? color.textStrong(clipped) : color.text(clipped)
-    return fit(`${marker}${currentMark}${label}  ${meta}${snippet}`, width)
+    const secondary = columns.meta > 0 ? truncateToWidth(`${meta}${snippet}`, columns.meta, '…', false) : ''
+    return fit(
+      `${marker}${currentMark}${padColumn(label, columns.identity)}${secondary === '' ? '' : `  ${secondary}`}`,
+      width,
+    )
   }
 
   /** The ONE status projection shared by browse and search. Never a fabricated
