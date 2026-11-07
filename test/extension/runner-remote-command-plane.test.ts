@@ -344,19 +344,21 @@ interface RouteMarkdownInput {
 }
 
 /**
- * Observe the two Host services the official Markdown route reads. The spies
- * keep the exact `this`, arguments, result and failure of each call; only their
- * route-time inputs become the test's byte-exact oracle. A request fence proves
- * the captured pair belongs to THIS `/transcript` read, not a background stat.
+ * Observe the two Host services the official Markdown route reads. Both spies
+ * are ONE-TO-ONE passthroughs: the exact `this`, arguments, resolved result
+ * identity and rejection of every call are preserved, and nothing is rewritten.
+ * The route is the only code that reads this Session during the export, so the
+ * captured pair is proven to be the route's own inputs by requiring exactly one
+ * read and exactly one stat for the Session (a background interleaving would
+ * make the count ambiguous and fail loudly instead of picking a heuristic).
  */
 function captureRouteMarkdownInput(
   life: TestLifecycle,
   hostCtx: Fixture['host']['ctx'],
   expectedSessionId: string,
-  options: { readonly routeSourcePath?: null } = {},
 ): {
-  observed(): RouteMarkdownInput | undefined
   assertRouteObserved(): RouteMarkdownInput
+  laterStat(): Promise<{ readonly location?: { readonly path?: string } } | undefined>
 } {
   const query = unwrapService(hostCtx.get('sessionQuery')) as {
     readSession(id: unknown): Promise<{ readonly events: readonly SessionEvent[] }>
@@ -369,19 +371,17 @@ function captureRouteMarkdownInput(
   }
   const originalRead = query.readSession
   const originalStat = persistence.stat
-  let armed = false
+  let seq = 0
   let reads = 0
+  let readSeq = -1
   let routeSnapshot: { readonly events: readonly SessionEvent[] } | undefined
-  let statCalls = 0
-  let routeSourcePath: string | undefined
-  let observedStat = false
-  let observed: RouteMarkdownInput | undefined
+  const routeStats: Array<{ seq: number; path: string | undefined; signal: AbortSignal | undefined }> = []
 
   query.readSession = function patchedReadSession(this: unknown, id: unknown): Promise<{ readonly events: readonly SessionEvent[] }> {
-    assert.equal(String(id), expectedSessionId, 'the Markdown route reads the command-origin Session')
-    assert.equal(armed, false, 'exactly one official Markdown route read is observed')
-    armed = true
+    if (String(id) !== expectedSessionId) return originalRead.call(this, id)
     reads += 1
+    seq += 1
+    readSeq = seq
     return originalRead.call(this, id).then(snapshot => {
       routeSnapshot = snapshot
       return snapshot
@@ -392,23 +392,11 @@ function captureRouteMarkdownInput(
     id: unknown,
     statOptions?: { readonly signal?: AbortSignal },
   ): Promise<{ readonly location?: { readonly path?: string } } | undefined> {
-    if (armed === false || statCalls > 0) return originalStat.call(this, id, statOptions)
-    assert.equal(String(id), expectedSessionId, 'the route stat targets the same Session')
-    assert.equal(reads, 1, 'the route stat follows the one route read')
-    assert.equal(observedStat, false, 'the route performs one stat for the export')
-    assert.ok(statOptions?.signal instanceof AbortSignal, 'the official route passes its request signal to stat')
-    statCalls += 1
+    if (String(id) !== expectedSessionId) return originalStat.call(this, id, statOptions)
+    seq += 1
+    const callSeq = seq
     return originalStat.call(this, id, statOptions).then(metadata => {
-      if (options.routeSourcePath !== null) return metadata
-      // The official `stat` answer for an unmaterialized Session legitimately
-      // has no `location`. Keep the production formatter path intact and
-      // force exactly that legal export-time observation for the witness.
-      return metadata === undefined ? undefined : { ...metadata, location: undefined }
-    }).then(metadata => {
-      if (options.routeSourcePath === null) routeSourcePath = undefined
-      else routeSourcePath = metadata?.location?.path
-      observedStat = true
-      observed = { events: routeSnapshot!.events, ...routeSourcePath === undefined ? {} : { sourcePath: routeSourcePath } }
+      routeStats.push({ seq: callSeq, path: metadata?.location?.path, signal: statOptions?.signal })
       return metadata
     })
   }
@@ -417,13 +405,20 @@ function captureRouteMarkdownInput(
     persistence.stat = originalStat
   })
   return {
-    observed: () => observed,
     assertRouteObserved: () => {
       assert.equal(reads, 1, 'the official Host route performed exactly one Session Query read')
-      assert.equal(observedStat, true, 'the official Host route consumed exactly one stat result')
-      assert.ok(observed !== undefined, 'the route-time snapshot and source path belong to the same request')
-      return observed
+      assert.ok(routeSnapshot !== undefined, 'the route-time Session Query snapshot was captured')
+      assert.equal(routeStats.length, 1,
+        'exactly one Host stat targets the Session during the export (a background stat would make the oracle ambiguous)')
+      const stat = routeStats[0]
+      assert.ok(stat !== undefined, 'the route-time stat was captured')
+      assert.ok(stat.seq > readSeq, 'the captured stat follows the captured route read')
+      assert.ok(stat.signal instanceof AbortSignal, 'the official route passes its request signal to stat')
+      return { events: routeSnapshot.events, ...stat.path === undefined ? {} : { sourcePath: stat.path } }
     },
+    // The witness's post-export observation calls the REAL service directly (the
+    // spy only observes); it never feeds the route-time oracle.
+    laterStat: () => originalStat.call(persistence, SessionId(expectedSessionId)),
   }
 }
 
@@ -1046,12 +1041,17 @@ test('L6: Remote /transcript writes the official Host Markdown to a Client-local
 })
 
 test('a missing export-time Session path omits Session file even when a later Host stat finds the artifact', async (t) => {
-  await assertRemoteTranscriptRoute(t, { routeSourcePath: null, expectLaterPath: true })
+  // The fixture's Session is created and seeded but NOT flushed: DSH keeps it
+  // pending (`stat` answers a header with no `location`) until a durability
+  // barrier materializes the artifact. The export therefore observes a GENUINE
+  // absent source path — nothing is rewritten — and the later barrier is what
+  // makes a post-export `stat` disagree with the bytes already written.
+  await assertRemoteTranscriptRoute(t, { materializeBeforeExport: false })
 })
 
 async function assertRemoteTranscriptRoute(
   t: TestContext,
-  options: { readonly routeSourcePath?: null; readonly expectLaterPath?: boolean } = {},
+  options: { readonly materializeBeforeExport?: boolean } = {},
 ): Promise<void> {
   // The REAL Remote composition: the Client-local `/transcript` command keeps
   // its Client dispatch, the post-success save opens the Client Save Location,
@@ -1059,26 +1059,33 @@ async function assertRemoteTranscriptRoute(
   // Host Session Query snapshot. The Host executor is never entered and the
   // saved bytes equal the official formatter output over the SAME route inputs.
   const life = testLifecycle(t)
-  const mainId = `m3-4-pr4-transcript-${options.routeSourcePath === null ? 'absent-path' : 'route-inputs'}`
+  const materializeBefore = options.materializeBeforeExport !== false
+  const mainId = `m3-4-pr4-transcript-${materializeBefore ? 'route-inputs' : 'absent-path'}`
   const outDir = life.tempDir('dsh-remote-transcript-')
   const fixture = await mountRunner(life, {
     resumeSessionId: mainId,
-    seed: (append) => {
-      // One completed turn: a real conversation subject, with the durable
-      // append-origin markers the official formatter selects on.
-      append('turn/start', { turn: 1 })
-      append('step/start', { turn: 1, step: 1 })
-      append('user/message', {
-        id: 'u-transcript', role: 'user', content: [{ type: 'text', text: 'transcript prompt 汉字' }], source: { kind: 'user' },
-      }, { surfaceOp: 'append' })
-      append('assistant/message', {
-        turn: 1, step: 1,
-        message: { id: 'a-transcript', role: 'assistant', content: [{ type: 'text', text: 'official answer 🙂' }], source: { kind: 'model', provider: 'smoke', model: 'smoke' } },
-        stream: [], usage: { inputTokens: 1, outputTokens: 1 },
-      }, { surfaceOp: 'append' })
-      append('step/end', { turn: 1, step: 1 })
-      append('turn/end', { turn: 1, reason: { kind: 'completed' } })
-    },
+    // The path-present control seeds a real turn. The absent-path witness keeps
+    // the Session NEVER-APPENDED: DSH holds a created-but-unwritten Session
+    // pending (a `stat` header with no `location`) until an explicit durability
+    // barrier, so the export observes a genuine absent path with no rewriting.
+    ...(materializeBefore ? {
+      seed: (append: (type: string, data: unknown, options?: { surfaceOp?: 'append' }) => void) => {
+        // One completed turn: a real conversation subject, with the durable
+        // append-origin markers the official formatter selects on.
+        append('turn/start', { turn: 1 })
+        append('step/start', { turn: 1, step: 1 })
+        append('user/message', {
+          id: 'u-transcript', role: 'user', content: [{ type: 'text', text: 'transcript prompt 汉字' }], source: { kind: 'user' },
+        }, { surfaceOp: 'append' })
+        append('assistant/message', {
+          turn: 1, step: 1,
+          message: { id: 'a-transcript', role: 'assistant', content: [{ type: 'text', text: 'official answer 🙂' }], source: { kind: 'model', provider: 'smoke', model: 'smoke' } },
+          stream: [], usage: { inputTokens: 1, outputTokens: 1 },
+        }, { surfaceOp: 'append' })
+        append('step/end', { turn: 1, step: 1 })
+        append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+      },
+    } : {}),
   })
   // The save prompt is CLIENT-local UI: patch the production prototype so the
   // test observes the REAL workflow's entry into the Client filesystem.
@@ -1089,7 +1096,19 @@ async function assertRemoteTranscriptRoute(
     return { kind: 'selected', directory: outDir, overwrite: false }
   }
   life.defer(() => { TuiApp.prototype.askSaveLocation = originalAsk })
-  const routeInput = captureRouteMarkdownInput(life, fixture.host.ctx, mainId, options)
+  const routeInput = captureRouteMarkdownInput(life, fixture.host.ctx, mainId)
+  const sessions = unwrapService(fixture.host.ctx.get('sessions')) as {
+    get(id: unknown): unknown
+    flush(session: unknown): Promise<boolean>
+  }
+  const session = sessions.get(SessionId(mainId))
+  assert.ok(session !== undefined, 'the command-origin Session is live for the durability barrier')
+  if (materializeBefore) {
+    // Deterministic path-present control: the barrier runs BEFORE the export, so
+    // the official route genuinely observes the materialized artifact path.
+    assert.equal(await sessions.flush(session), true,
+      'the Host durability barrier materialized the artifact before the export')
+  }
   await settle(120)
   submit(fixture, '/transcript')
   const target = join(outDir, `dsh-session-${mainId}.md`)
@@ -1101,30 +1120,26 @@ async function assertRemoteTranscriptRoute(
   const content = readFileSync(target, 'utf8')
   assert.equal(content, formatSessionMarkdown(captured.events, captured.sourcePath),
     'the Remote file bytes are the official formatter output over the actual Host route inputs')
-  if (options.expectLaterPath === true) {
-    // The old oracle consulted this LATER stat; here it is deliberately
-    // different from the export-time answer, so a post-export re-read is a
-    // demonstrably wrong oracle for this saved file.
-    const sessions = unwrapService(fixture.host.ctx.get('sessions')) as {
-      get(id: unknown): unknown
-      flush(session: unknown): Promise<boolean>
-    }
-    const session = sessions.get(SessionId(mainId))
-    assert.ok(session !== undefined, 'the original Session is still live for the durability barrier')
-    assert.equal(await sessions.flush(session), true, 'the Host durability barrier materialized the Session artifact')
-    const laterMetadata = await (fixture.host.ctx as unknown as {
-      sessionPersistence: { stat(id: unknown): Promise<{ location?: { path?: string } } | undefined> }
-    }).sessionPersistence.stat(SessionId(mainId))
-    const laterPath = laterMetadata?.location?.path
-    assert.equal(typeof laterPath, 'string', 'the later Host stat sees a real artifact path')
-    assert.equal(captured.sourcePath, undefined, 'the route saw no source path at export time')
+  if (materializeBefore) {
+    const sourcePath = captured.sourcePath
+    assert.ok(typeof sourcePath === 'string', 'the route observed the materialized Host path')
+    assert.match(content, /Session file:/u, 'the present source path is emitted in the official source block')
+    assert.ok(content.includes(sourcePath), 'the Host artifact path appears verbatim in the Markdown')
+    assert.match(content, /> transcript prompt 汉字/u, 'the human question is an official blockquote')
+    assert.match(content, /official answer 🙂/u)
+  } else {
+    assert.equal(captured.sourcePath, undefined, 'the pending Session had no artifact path at export time')
     assert.doesNotMatch(content, /Session file:/u,
       'the saved bytes keep the legal export-time absence of the optional source block')
+    // Only NOW materialize: a post-export stat disagrees with the bytes already
+    // written, which is exactly why the retired later-stat oracle was wrong.
+    assert.equal(await sessions.flush(session), true,
+      'the post-export Host durability barrier materialized the Session artifact')
+    const laterPath = (await routeInput.laterStat())?.location?.path
+    assert.equal(typeof laterPath, 'string', 'the later Host stat sees a real artifact path')
     assert.notEqual(content, formatSessionMarkdown(captured.events, laterPath),
       'the retired post-export oracle would reject this official response')
   }
-  assert.match(content, /> transcript prompt 汉字/u, 'the human question is an official blockquote')
-  assert.match(content, /official answer 🙂/u)
   assert.doesNotMatch(content, /^## (User|Assistant)$/mu, 'the retired Client-local format never ran')
   assert.equal(content.endsWith('\n'), true)
   // The save target is the CLIENT-selected directory, never the Host path.
