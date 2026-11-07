@@ -1935,12 +1935,14 @@ export const runWebProductQualification = async context => {
             const header = await waitForHostSessionHeader(dshHome, wp11Session, 'WP-11 Session header')
             wp11Cwd = header.cwd
             assert(typeof wp11Cwd === 'string' && wp11Cwd !== '', 'WP-11 the Session records no authoritative cwd')
-            // The workspace registry may (legitimately) keep a default workspace
-            // created by an earlier isolated case of THIS lane, so the check is
-            // the disposable smoke work root, never the developer's repository.
-            const isolatedRoot = resolve(workDir)
-            assert(resolve(wp11Cwd) === isolatedRoot || resolve(wp11Cwd).startsWith(`${isolatedRoot}${sep}`),
-              `WP-11 the Session cwd is outside the isolated smoke work root: ${wp11Cwd}`)
+            // The plan-fixed fixture: the Session's authoritative cwd is the
+            // DEDICATED, disposable Default-workspace folder under this lane's
+            // isolated product root — never the profile directory, the smoke
+            // work root itself, or the developer's repository.
+            const dedicatedWorkspace = join(productRoot, 'documents', 'deepseek-harness', 'default-workspace')
+            assert(resolve(wp11Cwd) === resolve(dedicatedWorkspace),
+              `WP-11 the Session cwd is not the dedicated Default workspace of this lane: ${wp11Cwd} != ${dedicatedWorkspace}`)
+            assert(existsSync(dedicatedWorkspace) === true, 'WP-11 the dedicated workspace folder does not exist')
             // The isolated, disposable Git work tree at the Session's OWN cwd.
             const git = args => spawnSync('git', args, { cwd: wp11Cwd, encoding: 'utf8' })
             const init = git(['init', '--quiet'])
@@ -1951,7 +1953,8 @@ export const runWebProductQualification = async context => {
             assert(committed.status === 0, `WP-11 could not create the initial commit: ${committed.stderr}`)
             handle.signal('workspace-ready')
 
-            // W5-CHANGES source: the durable event, the live official summary/diff
+            // W5-CHANGES source: the scripted model's OWN proof, the durable
+            // official `write` tool call/result, the live official summary/diff
             // routes, and the real file bytes agree.
             const boundary = durableOf(wp11Session).length
             const changesEvent = await waitForHostSessionEventAfter(dshHome, wp11Session, boundary,
@@ -1960,14 +1963,44 @@ export const runWebProductQualification = async context => {
               `WP-11 the workspace/changes event carries no turn: ${JSON.stringify(changesEvent.data)}`)
             wp11Seq = changesEvent.seq
             wp11Turn = changesEvent.data.turn
+            // The scripted model's own proof that IT issued the call (not the
+            // fixture writing the file), matched to this Session and nonce.
+            const writeProof = readC1WorkEvents(wp11.workRoot)
+              .filter(event => event.kind === 'web-changes-write-issued' && event.sessionId === wp11Session)
+            assert(writeProof.length === 1,
+              `WP-11 the C1 model issued ${String(writeProof.length)} write calls for this Session, expected exactly 1`)
+            assert(writeProof[0].nonce === changesNonce, 'WP-11 the model write proof belongs to another nonce')
+            assert(writeProof[0].userText.includes(`w5-changes-${changesNonce}`),
+              'WP-11 the model write proof was not issued for the qualification prompt')
+            // The Host's OWN official write tool executed the fixed call inside
+            // this turn, and its successful result precedes the announced event.
+            const turnEvents = durableOf(wp11Session).filter(event => event.data?.turn === wp11Turn)
+            const writeCalls = turnEvents.filter(event => event.type === 'tool/call' && event.data?.name === 'write')
+            assert(writeCalls.length === 1,
+              `WP-11 the turn persisted ${String(writeCalls.length)} official write tool calls, expected exactly 1`)
+            const writeArgs = JSON.parse(writeCalls[0].data.arguments)
+            assert(JSON.stringify(writeArgs) === JSON.stringify({ file_path: 'changed.txt', content: `w5-change-${changesNonce}\n` }),
+              `WP-11 the write tool arguments drifted: ${JSON.stringify(writeArgs)}`)
+            const writeResults = turnEvents.filter(event => event.type === 'tool/result'
+              && event.data?.message?.toolCallId === writeCalls[0].data.callId)
+            assert(writeResults.length === 1,
+              `WP-11 the write tool call settled ${String(writeResults.length)} times, expected exactly 1`)
+            assert(writeResults[0].data.message.isError === false,
+              'WP-11 the official write tool result reports an error')
+            assert(writeResults[0].seq > writeCalls[0].seq && changesEvent.seq > writeResults[0].seq,
+              'WP-11 the workspace/changes event does not follow the successful write tool result')
             const coordinates = new URLSearchParams({ sessionId: wp11Session, seq: String(wp11Seq) })
             const summaryUrl = `${wp11.ready.localHost.origin}/api/changes.summary?${coordinates}`
             const summary = await fetchStatus(summaryUrl, { headers: { cookie: index11.cookie } })
             assert(summary.status === 200, `WP-11 the authenticated summary route returned HTTP ${String(summary.status)}`)
             const summaryBody = JSON.parse(summary.body)
             assert(summaryBody.turn === wp11Turn, 'WP-11 the summary turn differs from the announced event turn')
-            const fileIndex = summaryBody.files.findIndex(file => file.path === 'changed.txt' || file.path.endsWith('/changed.txt'))
-            assert(fileIndex >= 0, `WP-11 the summary does not list changed.txt: ${JSON.stringify(summaryBody.files)}`)
+            assert(Array.isArray(summaryBody.files) && summaryBody.files.length === 1,
+              `WP-11 the dedicated workspace summary must list exactly the one written file: ${JSON.stringify(summaryBody.files)}`)
+            assert(summaryBody.files[0].path === 'changed.txt',
+              `WP-11 the summary path drifted from the written file: ${JSON.stringify(summaryBody.files[0]?.path)}`)
+            assert(summaryBody.total === 1, `WP-11 the summary total is ${String(summaryBody.total)}, expected 1`)
+            const fileIndex = 0
             assert(summaryBody.files[fileIndex].added >= 1, 'WP-11 the summary reports no added line for the real write')
             wp11HostBytes = readFileSync(join(wp11Cwd, 'changed.txt'))
             assert(wp11HostBytes.toString('utf8') === `w5-change-${changesNonce}\n`,
@@ -2042,33 +2075,67 @@ export const runWebProductQualification = async context => {
             assert(other.sessionId === otherSession, 'WP-11 the Browser opened the wrong other Session')
             assert(durableOf(wp11Session).filter(event => event.type === 'user/message').length === userCountBeforeQuote,
               'WP-11 navigating to another Session wrote the Quote into the original Session')
+            const authoredAtDraft = durableOf(wp11Session)
+              .filter(event => event.type === 'user/message' && event.data?.source?.kind === 'user').length
+            const systemBeforeSend = durableOf(wp11Session)
+              .filter(event => event.type === 'system/message' || event.type === 'developer/message').length
+            const lastTurnEndBeforeQuote = durableOf(wp11Session)
+              .filter(event => event.type === 'turn/end').at(-1)?.seq ?? 0
             await handle.signal('quote-send-go')
             await handle.waitFact('quote-sent', 'WP-11 quoted Send', 300_000)
             const afterSend = durableOf(wp11Session)
-            const quotedWrites = afterSend.filter(event => event.type === 'user/message'
-              && event.data?.source?.kind === 'user'
-              && JSON.stringify(event).includes(`> w5-editing ${changesNonce}`))
+            const authoredAfterSend = afterSend
+              .filter(event => event.type === 'user/message' && event.data?.source?.kind === 'user')
+            assert(authoredAfterSend.length === authoredAtDraft + 1,
+              `WP-11 the explicit Send wrote ${String(authoredAfterSend.length - authoredAtDraft)} user-authored messages, expected exactly 1`)
+            const quotedWrites = authoredAfterSend.filter(event => JSON.stringify(event).includes(`> w5-editing ${changesNonce}`))
             assert(quotedWrites.length === 1,
               `WP-11 the quoted prompt was committed ${String(quotedWrites.length)} times, expected exactly 1`)
+            assert(quotedWrites[0] === authoredAfterSend[authoredAfterSend.length - 1],
+              'WP-11 the quoted prompt is not the one user message the explicit Send appended')
             assert(hostAssistantHasText(afterSend, 'w5-quote answer'),
               'WP-11 the quoted prompt produced no normal assistant answer')
+            assert(afterSend.filter(event => event.type === 'system/message' || event.type === 'developer/message').length === systemBeforeSend,
+              'WP-11 the Quote inserted a system/developer message')
+            // Anchor the two later settlement barriers on durable turn ends:
+            // the quoted turn, then the no-change turn.
+            const quoteTurnEnd = await waitForHostSessionEvent(dshHome, wp11Session,
+              event => event.type === 'turn/end' && event.seq > lastTurnEndBeforeQuote,
+              'WP-11 quoted turn/end', 180_000)
 
             // W5-CHANGES negative: a tool-active Turn with no file change stays card-free.
-            const noChange = await handle.waitFact('nochange', 'WP-11 no-change turn', 300_000)
-            assert(noChange.cardsAfter === noChange.cardsBefore,
-              'WP-11 a no-change Turn painted a new changed-files card')
-            const changesAfter = durableOf(wp11Session).filter(event => event.type === 'workspace/changes')
+            await handle.waitFact('nochange-prompted', 'WP-11 no-change prompt', 300_000)
+            // The Host's own turn settlement is the barrier: no fixed sleep can
+            // prove a card absence, and the durable events are the authority.
+            await waitForHostSessionEvent(dshHome, wp11Session,
+              event => event.type === 'turn/end' && event.seq > quoteTurnEnd.seq,
+              'WP-11 no-change turn/end', 180_000)
+            assert(durableOf(wp11Session).filter(event => event.type === 'user/message'
+              && JSON.stringify(event).includes(`w5-nochange-${changesNonce}`)).length === 1,
+            'WP-11 the no-change prompt was not committed exactly once')
+            let changesAfter = []
+            const changesStableUntil = Date.now() + 2_000
+            while (Date.now() < changesStableUntil) {
+              changesAfter = durableOf(wp11Session).filter(event => event.type === 'workspace/changes')
+              if (changesAfter.length !== 1) break
+              await sleep(100)
+            }
             assert(changesAfter.length === 1,
               `WP-11 the Host persisted ${String(changesAfter.length)} workspace/changes events, expected exactly the changed Turn`)
-            // The retained, redacted WP-11 evidence record (no prompt text, no
-            // Cookie, no launch token, no private absolute path beyond the
-            // isolated smoke root that the run already owns).
+            handle.signal('nochange-settled')
+            const noChange = await handle.waitFact('nochange', 'WP-11 no-change Browser frame', 120_000)
+            assert(noChange.cardsAfter === noChange.cardsBefore,
+              'WP-11 a no-change Turn painted a new changed-files card')
+            // The retained, redacted WP-11 evidence record: no prompt text, no
+            // Cookie, no launch token and no absolute private path (the cwd is a
+            // digest only).
             evidence.fact('wp11-official-web-capabilities', 'web-capabilities', {
               hostPid: wp11.ready.pid,
               hostInstanceIdDigest: sha16(wp11.ready.localHost.instanceId),
               sessionId: wp11Session,
               otherSession,
-              cwd: wp11Cwd,
+              workspace: 'dedicated-default-workspace',
+              cwdDigest: sha16(wp11Cwd),
               changesEvent: { turn: wp11Turn, seq: wp11Seq },
               summary: { status: summary.status, turn: summaryBody.turn, total: summaryBody.total, files: summaryBody.files.map(file => file.path) },
               diff: { status: diff.status, kind: wp11Diff.kind, hunks: wp11Diff.hunks.length },
@@ -2091,7 +2158,7 @@ export const runWebProductQualification = async context => {
               otherSession,
               turn: wp11Turn,
               seq: wp11Seq,
-              cwd: wp11Cwd,
+              cwdDigest: sha16(wp11Cwd),
               download: { bytes: wp11Download.bytes, sha256: wp11Download.sha256 },
               diffKind: wp11Diff.kind,
               workspaceChanges: 'active',

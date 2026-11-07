@@ -427,7 +427,8 @@ test('the enable and disable orders are the frozen production orders', () => {
 /**
  * The two official Client dependencies every shipped UI manifest injects
  * (`ui-context-menu`, `ui-file-drag`) are MANDATORY rows: they mount with the
- * graph, release with it and can never be excused as optional PENDING.
+ * graph and release with it. No row may stay PENDING: the Web composition
+ * reports `enabled` only when every declared row is ACTIVE.
  */
 const MANDATORY_CLIENT_ROWS: ReadonlyArray<{ readonly id: string; readonly name: string }> = [
   { id: 'ui-context-menu', name: '@deepseek-ai/dsh-client-ui-context-menu' },
@@ -458,8 +459,8 @@ test('the mandatory Client dependency rows mount, release and never stay PENDING
   }
 
   // Negative control: a real dependency failure on EITHER mandatory row is a
-  // Web failure, not the tolerated optional PENDING. The failed enable must
-  // withdraw the whole roster instead of claiming enabled.
+  // Web failure, not a tolerated PENDING. The failed enable must withdraw the
+  // whole roster instead of claiming enabled.
   for (const row of MANDATORY_CLIENT_ROWS) {
     const pending = await createFixture({
       overrides: new Map<string, RowOverride>([[row.id, { inject: ['fixtureDependencyThatNeverSettles'] }]]),
