@@ -445,14 +445,26 @@ async function sendDraft(page) {
   const composer = page.locator('[role=textbox]').last()
   await composer.click()
   await page.waitForTimeout(200)
-  const request = page.waitForRequest(
+  const promptRequest = timeout => page.waitForRequest(
     candidate => new URL(candidate.url()).pathname === '/api/session/prompt' && candidate.method() === 'POST',
-    { timeout: 30_000 },
+    { timeout },
   )
-  await page.keyboard.press('Enter')
-  await request
+  try {
+    // The composer's own Enter send; a quote-only draft never relies on a
+    // possibly stale Send control from a previous Session.
+    const sent = promptRequest(2_500)
+    await page.keyboard.press('Enter')
+    await sent
+  } catch {
+    // Fallback for a composer that does not submit on Enter: click the Send
+    // control with the same request barrier.
+    const point = await controlCentre(page, { aria: 'Send message' })
+    if (point === null) throw new Error('the composer has no Send control for the quote draft')
+    const sent = promptRequest(30_000)
+    await clickCentre(page, point)
+    await sent
+  }
   result.browserClientActions.push('send-draft')
-  recordRequestIds(undefined)
 }
 
 /** The official question card (one pending question batch). */
