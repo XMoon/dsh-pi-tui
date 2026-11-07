@@ -598,6 +598,44 @@ test('an id-derived header/row label is sanitized like every other Host value', 
   assert.ok(view.includes('Hostile id row'), 'the readable title still paints')
 })
 
+test('a long cwd or Host snippet never squeezes the Session identity out of a row', async () => {
+  const longCwd = '/very/long/shared/workspace/path/with/a/deep/project-alpha'
+  const alpha = row(CURRENT, 3_000, { title: 'Alpha session', cwd: longCwd })
+  const beta = row(OTHER, 2_000, { title: 'Beta session', cwd: longCwd })
+  const h = harness({ columns: 44, rows: 24 })
+  h.handle.setSnapshot(snapshot({ rows: [alpha, beta] }))
+  await h.paint()
+  for (const width of [44, 80, 120] as const) {
+    h.vt.resize(width, 24)
+    await h.paint()
+    const view = h.view()
+    assert.ok(view.includes('Alpha session'), `${width} columns: the first identity survives a long cwd:\n${view}`)
+    assert.ok(view.includes('Beta session'), `${width} columns: two same-cwd Sessions stay distinguishable:\n${view}`)
+    for (const line of h.vt.getViewport()) {
+      assert.ok(visibleWidth(line) <= width, `${width} columns: a row overflows: ${JSON.stringify(line)}`)
+    }
+  }
+
+  // A long Host snippet is a secondary column: it may be truncated or dropped,
+  // but it never steals the identity budget.
+  h.vt.resize(44, 24)
+  h.handle.setSnapshot(snapshot({
+    query: 'needle',
+    searchState: 'ready',
+    searchResults: [{
+      row: { ...alpha, title: 'Alpha session' },
+      source: 'Content',
+      snippet: 'a very long Host excerpt that does not contain the literal query term and must yield to the identity',
+    }],
+  }), 'needle')
+  await h.paint()
+  const searchView = h.view()
+  assert.ok(searchView.includes('Alpha session'), `the search identity survives a long snippet:\n${searchView}`)
+  for (const line of h.vt.getViewport()) {
+    assert.ok(visibleWidth(line) <= 44, `the search row fits 44 columns: ${JSON.stringify(line)}`)
+  }
+})
+
 test('a released handle is inert and cannot repaint or close a newer workspace', async () => {
   const h = harness()
   h.handle.setSnapshot(snapshot())
