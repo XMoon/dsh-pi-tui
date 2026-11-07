@@ -15,6 +15,18 @@
  *   N1  B answers while A is inside the navigation hold: A's old modal never
  *       resurrects, A never produces a second Host result, and the ONE Host
  *       settlement is B's.
+ *   N2a a real Client process exit during the hold: no Host settlement or
+ *       cancellation, B remains the ONE answerer.
+ *   N2b the official request is cancelled (real Host Agent cancel) while A
+ *       holds it: no resurrection, one `cancelled` decision, stale key inert.
+ *   N3a a committed switch to Y plus the stale answer key: A(Y) shows no
+ *       answerable X UI, writes nothing, B answers; a REAL re-offer that goes
+ *       stale after switching back to Y also never leaks; no resurrection on
+ *       return.
+ *   N3b the exact late ordering: A is ALREADY committed on Y when X's
+ *       official Question is created; the forwarded eligibility arrives while
+ *       Y is current, A paints no answerable UI and writes nothing, and the
+ *       SAME request is answered only after switching back to X.
  *
  * The proof is the real Host event stream / work fixture / two surface PIDs /
  * PTY frames. No private RPC, no second listing, no fake Peer.
@@ -531,6 +543,84 @@ export async function runInteractionNavigationFirst(context) {
       })
       await exitC1Client(clientB, 'G567-N3a B')
       await exitC1Client(clientA, 'G567-N3a A')
+      await stopC1Host(host)
+    }
+
+    // ── N3-b: the OFFICIAL X question arrives only AFTER A committed Y ────
+    //    The exact missing ordering: A is on Y FIRST, then B triggers X's
+    //    question. A(Y) must observe the request (it is a legal answer
+    //    client) but never paint an answerable UI; switching back to X
+    //    answers the SAME request.
+    {
+      const { host, hostBefore, workRoot, clientA, clientB, aReady, bReady, sessionX, sessionY } =
+        await startDualSurfaceScene('question', 'g567-late-arrival')
+      // A is ALREADY committed on Y (its own opened Session): no X request
+      // exists yet, and no navigation is needed — Y was committed first.
+      assert(lastSurfaceStatus(clientA)?.openSessionId === sessionY,
+        'G567-N3b A did not commit Y before the request existed')
+      // NOW B triggers X's official question. The forwarded delivery reaches
+      // A while Y is the committed subject.
+      const triggerIndex = eventsOf(sessionX).length
+      await submitPrompt(clientB, 'm5c-question-trigger', 'G567-N3b question trigger')
+      const call = await waitForHostSessionEventAfter(dshHome, sessionX, triggerIndex,
+        event => event.type === 'tool/call' && event.data?.name === 'ask_user_question',
+        'G567-N3b question tool/call', 120_000)
+      const callId = call.data.callId
+      await waitForC1WorkEvent(workRoot,
+        event => event.kind === 'question-request' && event.sessionId === sessionX,
+        'G567-N3b Host question request', 120_000)
+      // A(Y): no answerable UI, ever, for the whole observation window. The
+      // eligibility change itself is observable through the Host request fact.
+      await clientB.waitForScreen('[1] Proceed', 'G567-N3b B paints the modal', 120_000)
+      const arrivalIndex = eventsOf(sessionX).length
+      await sleep(2_000) // fixed window: negative-observation window — nothing to poll, the absence of a paint IS the fact
+      const viewportA = (await clientA.viewport()).join('\n')
+      assert(!viewportA.includes('[1] Proceed'),
+        'G567-N3b A(Y) painted X\'s question after it arrived late')
+      assert(viewportA.includes('Workspace') || viewportA.length > 0,
+        'G567-N3b A(Y) lost its surface entirely')
+      assert(eventsOf(sessionX).slice(arrivalIndex)
+        .every(event => event.type !== 'tool/result' && event.type !== 'turn/end'),
+      'G567-N3b A(Y) wrote Host activity for the late-arriving X request')
+      assert(settledCount(workRoot, sessionX, 'question') === 0,
+        'G567-N3b the late arrival settled anything')
+      assert(lastSurfaceStatus(clientA)?.openSessionId === sessionY,
+        'G567-N3b A was moved off Y by the late request')
+      // A switches back to X: the SAME request is presented and answered once.
+      await resumeSession(clientA, sessionX, 'G567-N3b A back to X')
+      await clientA.waitForScreen('[1] Proceed', 'G567-N3b the same request presented on X', 120_000)
+      const answerIndex = eventsOf(sessionX).length
+      clientA.send('1')
+      await clientA.waitForScreen('Review your answer before submit', 'G567-N3b A answer review', 30_000)
+      clientA.send('\r')
+      const settled = await waitForC1WorkEvent(workRoot,
+        event => event.kind === 'question-settled' && event.sessionId === sessionX,
+        'G567-N3b Host question settled by A', 120_000)
+      assert(settled.answers?.[0]?.selected?.[0] === 'Proceed',
+        `G567-N3b the Host received ${JSON.stringify(settled.answers)} instead of Proceed`)
+      await waitForHostSessionEventAfter(dshHome, sessionX, answerIndex,
+        event => event.type === 'tool/result' && String(event.data?.message?.toolCallId) === callId,
+        'G567-N3b question tool result', 120_000)
+      assert(settledCount(workRoot, sessionX, 'question') === 1 && toolResults(sessionX, callId).length === 1,
+        'G567-N3b the late-arrival path produced more than one Host settlement')
+      for (const [side, ready] of [['A', aReady], ['B', bReady]]) {
+        assert(alive(ready.pid), `G567-N3b Client ${side} died`)
+      }
+      assert(alive(hostBefore.hostPid), 'G567-N3b the Host died')
+      trace('g567-n3b', {
+        hostPid: hostBefore.hostPid,
+        clientAPid: aReady.pid,
+        clientBPid: bReady.pid,
+        sessionX,
+        sessionY,
+        questionCallId: callId,
+        committedYBeforeArrival: true,
+        paintedOnY: false,
+        settledBy: 'A',
+        hostSettlements: 1,
+      })
+      await exitC1Client(clientB, 'G567-N3b B')
+      await exitC1Client(clientA, 'G567-N3b A')
       await stopC1Host(host)
     }
   } finally {
