@@ -281,6 +281,100 @@ test('an ambiguous initial Current membership falls back to All with one explici
     'an ambiguous membership is stated once')
 })
 
+test('a missing-Current fallback status is cleared when a later replace proves Current', async () => {
+  const h = harness({ initialBrowseScope: 'current' })
+  h.handle.setSnapshot(snapshot())
+  await h.paint()
+  h.handle.updateWorkspaces({
+    type: 'baseline',
+    items: [{ workspaceId: 'ws-b', path: '/other', title: 'other', sessionIds: [OTHER] }],
+  })
+  await h.paint()
+  assert.ok(h.view().includes('Current workspace unavailable — showing all workspaces'))
+  // A LATER `replace` proves the unique membership: the stale fallback line must
+  // not contradict the now-enabled Current scope.
+  h.handle.updateWorkspaces({
+    type: 'replace',
+    items: [
+      { workspaceId: 'ws-a', path: '/ws', title: 'a', sessionIds: [CURRENT] },
+      { workspaceId: 'ws-b', path: '/other', title: 'b', sessionIds: [OTHER] },
+    ],
+  })
+  await h.paint()
+  assert.ok(!h.view().includes('Current workspace unavailable'), 'the old fallback line is cleared')
+  h.vt.sendInput('w')
+  await h.paint()
+  assert.ok(h.view().includes('Workspace scope:') && !h.view().includes('Current workspace unavailable'),
+    'the Current option is enabled again without a contradictory status')
+})
+
+test('a lost-Current fallback status is cleared when a later upsert re-proves it', async () => {
+  const h = harness()
+  h.handle.setSnapshot(snapshot())
+  h.handle.updateWorkspaces({
+    type: 'baseline',
+    items: [{ workspaceId: 'ws-a', path: '/ws', title: 'a', sessionIds: [CURRENT] }],
+  })
+  await h.paint()
+  h.vt.sendInput('w')
+  await h.paint()
+  h.vt.sendInput('\x1b[B')
+  h.vt.sendInput('\r')
+  await h.paint()
+  assert.ok(h.view().includes('Workspace: Current workspace [w]'))
+  h.handle.updateWorkspaces({ type: 'remove', workspaceId: 'ws-a' })
+  await h.paint()
+  assert.ok(h.view().includes('Current workspace unavailable — showing all workspaces'))
+  h.handle.updateWorkspaces({
+    type: 'upsert',
+    workspace: { workspaceId: 'ws-a', path: '/ws', title: 'a', sessionIds: [CURRENT] },
+  })
+  await h.paint()
+  assert.ok(!h.view().includes('Current workspace unavailable'),
+    'a re-proved membership clears the lost-membership status')
+})
+
+test('replace and upsert refold the official membership used by Current', async () => {
+  const h = harness()
+  h.handle.setSnapshot(snapshot({
+    rows: [row(CURRENT, 3_000, { title: 'Current session' }), row(OTHER, 2_000, { title: 'Other session' }), row(THIRD, 1_000, { title: 'Third session' })],
+  }))
+  h.handle.updateWorkspaces({
+    type: 'baseline',
+    items: [
+      { workspaceId: 'ws-a', path: '/ws', title: 'a', sessionIds: [CURRENT] },
+      { workspaceId: 'ws-b', path: '/other', title: 'b', sessionIds: [OTHER] },
+    ],
+  })
+  await h.paint()
+  h.vt.sendInput('w')
+  await h.paint()
+  h.vt.sendInput('\x1b[B')
+  h.vt.sendInput('\r')
+  await h.paint()
+  assert.ok(h.view().includes('Workspace: Current workspace [w]'))
+  assert.ok(!h.view().includes('Other session'))
+  // replace: the SAME Workspace gains a member.
+  h.handle.updateWorkspaces({
+    type: 'replace',
+    items: [
+      { workspaceId: 'ws-a', path: '/ws', title: 'a', sessionIds: [CURRENT, OTHER] },
+      { workspaceId: 'ws-b', path: '/other', title: 'b', sessionIds: [] },
+    ],
+  })
+  await h.paint()
+  assert.ok(h.view().includes('Other session'), 'a replace membership change is applied to Current')
+  // upsert adds a workspace that does not contain the current Session: Current
+  // stays anchored to the unique proven Workspace.
+  h.handle.updateWorkspaces({
+    type: 'upsert',
+    workspace: { workspaceId: 'ws-c', path: '/third', title: 'c', sessionIds: [THIRD] },
+  })
+  await h.paint()
+  assert.ok(h.view().includes('Workspace: Current workspace [w]'))
+  assert.ok(!h.view().includes('Third session'), 'an upsert never creates a Current member')
+})
+
 test('a scope/membership change re-anchors the selection and never resumes a hidden row', async () => {
   const h = harness()
   h.handle.setSnapshot(snapshot({
