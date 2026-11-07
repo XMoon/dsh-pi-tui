@@ -954,13 +954,28 @@ test('the same accepted text twice creates one real history row and one candidat
   const recorder = fixture.recordPrompts(() => {})
   try {
     await waitForInputDelivery(fixture.pane)
-    for (const _attempt of [0, 1]) {
+    const observedSessions: string[] = []
+    for (const attempt of [0, 1]) {
       await queryRows(fixture, '/ne')
       fixture.pane.input.type(ENTER)
       await waitFor('the accept to complete /new', () => composerText(fixture) === '/new ', 25_000)
       assert.equal(slashRows(fixture).length, 0, 'the accepted frame shows no list')
+      const beforeSubmitFrames = fixture.pane.frames().length
       fixture.pane.input.type(ENTER)
-      await waitFor('the submitted line to leave the composer', () => composerText(fixture) !== '/new ', 30_000)
+      // The Composer clears BEFORE /new's async single-flight guard is released.
+      // Each round waits for the distinct durable Session, its live Agent and
+      // the renderer's hydration→ready commit before the next /new gesture.
+      // The Composer probe alone only proves that the editor accepts a key.
+      const headers = await waitForSessionHeaders(fixture, attempt + 1, `the /new Session ${String(attempt + 1)}`)
+      const freshSession = headers.find(id => !observedSessions.includes(id))
+      assert.ok(freshSession, `the /new command ${String(attempt + 1)} published a distinct Session`)
+      observedSessions.push(freshSession)
+      await waitFor(`the /new Session ${String(attempt + 1)} to own a live Agent`, () =>
+        liveAgentIds(fixture).includes(freshSession), 30_000)
+      await waitFor(`the /new Session ${String(attempt + 1)} to commit its presented Main`, () =>
+        wireNodes(fixture.pane).every(node => node.id !== 'main.loading')
+        && fixture.pane.frames().slice(beforeSubmitFrames).some(frame =>
+          frame.ops.some(op => op[0] === 'add' && op[1] === 'main.loading')), 30_000)
       await composerReady(fixture)
     }
     const headers = await waitForSessionHeaders(fixture, 2, 'the two /new Sessions')
