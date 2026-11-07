@@ -395,6 +395,41 @@ async function clickSend(page) {
   await clickCentre(page, point)
 }
 
+/**
+ * Create one Session inside a NAMED Workspace through that Workspace row's own
+ * "New session in <name>" action, so the Session's authoritative cwd is the
+ * Workspace folder the action names.
+ */
+async function newSessionInWorkspace(page, workspaceLabel) {
+  const rowPoint = await page.evaluate(label => {
+    for (const row of document.querySelectorAll('[data-row-key^="workspace:"]')) {
+      if (!(row.innerText ?? '').includes(label)) continue
+      row.scrollIntoView({ block: 'center' })
+      const rect = row.getBoundingClientRect()
+      if (rect.width > 0 && rect.height > 0) return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 }
+    }
+    return null
+  }, workspaceLabel)
+  if (rowPoint === null) throw new Error(`the Web sidebar paints no workspace "${workspaceLabel}"`)
+  // The row action is revealed by hover; the create itself is the official
+  // per-Workspace start-session path.
+  await page.mouse.move(rowPoint.x, rowPoint.y)
+  await page.waitForTimeout(300)
+  const capture = captureNextSessionCreate(page)
+  const action = page.getByRole('button', { name: `New session in ${workspaceLabel}`, exact: true }).last()
+  await action.waitFor({ state: 'visible', timeout: 30_000 })
+  await action.click()
+  const created = await capture.settle()
+  const sessionId = created?.result?.value?.sessionId
+  if (typeof sessionId !== 'string' || sessionId === '') {
+    throw new Error(`the "${workspaceLabel}" New-session action created no Host Session`)
+  }
+  result.sessionId = sessionId
+  result.browserClientActions.push(`new-session-in:${workspaceLabel}`)
+  recordRequestIds(created)
+  return sessionId
+}
+
 /** Submit one prompt through the real composer and Send control. */
 async function sendPrompt(page, text) {
   const composer = page.locator('[role=textbox]').last()
@@ -1497,7 +1532,10 @@ const cases = {
     // The Clipboard API is permission-gated by the browser; the W5-FILE case
     // records a refusal honestly instead of claiming a copy.
     await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin }).catch(() => undefined)
-    const sessionId = await newSession(page)
+    // The Session's authoritative cwd must be the isolated, disposable
+    // Default-workspace folder (the fixture's dedicated Git work tree), never
+    // the profile directory or the developer's repository.
+    const sessionId = await newSessionInWorkspace(page, 'Default workspace')
     result.sessionId = sessionId
     driverFact('session', { sessionId })
     await waitSignal('workspace-ready')
@@ -1641,8 +1679,17 @@ const cases = {
     const cardsBefore = (await changedCards(page)).length
     const noChangeMarker = `w5-nochange-${changesNonce}`
     await promptAndWait(page, noChangeMarker, 'w5-nochange answer')
-    await page.waitForTimeout(1_500)
-    const cardsAfter = await changedCards(page)
+    // The rendered card list is not the authority: wait for the runner's
+    // durable turn/end + no-new-`workspace/changes` settlement, then hold a
+    // bounded observation window. A fixed sleep alone would not prove absence.
+    driverFact('nochange-prompted', {})
+    await waitSignal('nochange-settled')
+    const stableUntil = Date.now() + 3_000
+    let cardsAfter = await changedCards(page)
+    while (cardsAfter.length === cardsBefore && Date.now() < stableUntil) {
+      await page.waitForTimeout(250)
+      cardsAfter = await changedCards(page)
+    }
     if (cardsAfter.length !== cardsBefore) {
       throw new Error(`a no-change Turn painted ${String(cardsAfter.length - cardsBefore)} new changed-files card(s)`)
     }
