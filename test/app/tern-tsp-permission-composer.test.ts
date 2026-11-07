@@ -40,10 +40,14 @@ async function mountPermissionComposer(options: {
   /** TSP-7 PR-G: advertise the kinds the composer's combined Model·Effort
    *  quick menu needs, so the two composer menus can be exercised together. */
   readonly modelQuick?: boolean
+  /** TSP I-E: bind the real History seat, so the Permission control can be
+   *  exercised while ANOTHER owner holds the composer seat. */
+  readonly historySearch?: boolean
 } = {}): Promise<Mounted> {
   const pane = installTspPane({
     composerActions: true,
     ...(options.modelQuick === true ? { modelPicker: true, modelQuick: true } : {}),
+    ...(options.historySearch === true ? { historySearch: true } : {}),
   })
   const session = await connect({ timeout: 500, exitHooks: false })
   assert.ok(session)
@@ -81,6 +85,21 @@ async function mountPermissionComposer(options: {
   let current = permissionSnapshot('workspace-write', 'Workspace Write')
   const reader: StatusSnapshotReader = { snapshot: () => current }
   renderer.bindStatusReader(reader)
+  if (options.historySearch === true) {
+    renderer.bindHistorySearch({
+      source: {
+        search: () => Promise.resolve({
+          results: [{ id: 'h:0', content: 'alpha one', cwd: '/work/alpha', ts: 1_700_000_000_000,
+            sessionId: 'ses_a', sourceFile: 'h', sourceByteOffset: 0 },
+            { id: 'h:1', content: 'beta two', cwd: '/work/alpha', ts: 1_700_000_060_000,
+              sessionId: 'ses_a', sourceFile: 'h', sourceByteOffset: 1 }],
+          exhausted: true,
+        }),
+      },
+      cwd: () => '/work/alpha',
+      captureScope: () => ({ sessionId: 'ses_a', isCurrent: () => true }),
+    })
+  }
   const mounted: Mounted = {
     pane,
     renderer,
@@ -283,6 +302,43 @@ test('permission menu: a disposed renderer never dispatches a late option click'
 
 // TSP-7 PR-G: the two composer menus are mutually exclusive, and the quick
 // menu's keys never leak into the Permission menu's keyboard route.
+test('permission menu: the History seat owning the composer refuses both the open and the write', async (t) => {
+  // TSP I-E: the Permission control is a COMPOSER control, so while the History
+  // card owns that seat it must neither open nor select. The projection already
+  // painted it disabled; a click that still reached `selectPermission` behind
+  // the card would be a business write the user cannot see and a second owner
+  // of the seat the plan froze to one card.
+  const mounted = await mountPermissionComposer({ historySearch: true })
+  t.after(() => mounted.dispose())
+  const { pane, calls } = mounted
+  // Positive control: with the composer owning its seat the same click works.
+  click(pane, permissionTrigger(pane))
+  await waitUntil('the permission menu opened', () => permissionOptions(pane).length > 0)
+  const option = permissionOptions(pane)[0]!
+  click(pane, option)
+  await waitUntil('the preset write landed', () => calls.selects.length === 1)
+  const selectsBefore = calls.selects.length
+
+  // Open the History card, then repeat both gestures.
+  pane.key('\u0012')
+  await waitUntil('the history card opened', () => wireNodes(pane).some(node => /history-card-\d+$/.test(String(node.id))))
+  assert.equal(textOf(pane, permissionTrigger(pane)).length >= 0, true, 'the trigger is still painted')
+  click(pane, permissionTrigger(pane))
+  await settle(400) // reason: a refused gesture owes no frame, so absence is the observation window
+  assert.equal(permissionOptions(pane).length, 0, 'no menu opened behind the card')
+  assert.equal(calls.selects.length, selectsBefore, 'and no preset was selected')
+  // A stale option cell from before the card cannot write either.
+  click(pane, option)
+  await settle(400) // reason: same bounded absence window for a refused click
+  assert.equal(calls.selects.length, selectsBefore, 'a stale option click writes nothing')
+
+  // Once the card is gone the control behaves exactly as before.
+  pane.key('\u001b')
+  await waitUntil('the card closed', () => !wireNodes(pane).some(node => /history-card-\d+$/.test(String(node.id))))
+  click(pane, permissionTrigger(pane))
+  await waitUntil('the menu works again after the seat is released', () => permissionOptions(pane).length > 0)
+})
+
 test('permission menu and the model quick menu are never both expanded', async (t) => {
   const m = await mountPermissionComposer({ modelQuick: true })
   t.after(() => { void m.dispose() })

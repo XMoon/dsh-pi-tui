@@ -118,7 +118,16 @@ mountTspRenderer = function (...args) {
 const commandPath = join(paneRoot, 'case')
 const commandResultPath = join(paneRoot, 'case-result')
 const SESSION_A = 'session-history-search-a'
+// Oldest first, newest last (the store returns newest-first pages). The three
+// named rows stay the NEWEST so every existing claim about the first selection,
+// the copy payload and the restored draft still names a known row. The filler
+// rows exist for ONE reason: with three short rows the card is never clipped,
+// so a taller `F2` budget is geometrically invisible on the real client (this
+// was measured: normal 232.9px vs expanded 230.9px). A page that exceeds the
+// normal budget is the only state in which the expansion claim can be tested
+// honestly.
 const HISTORY_ROWS = [
+  ...Array.from({ length: 24 }, (_unused, index) => ({ content: `filler stored prompt ${index} for the expand measurement` })),
   { content: 'oldest stored prompt' },
   { content: 'middle stored prompt about tern' },
   { content: 'newest stored prompt\nwith a long second line' },

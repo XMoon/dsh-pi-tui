@@ -38,7 +38,7 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { index, rect, visibleSpan, containedXY } from './tern-pane-geometry.mjs'
+import { index, rect, visibleSpan, containedXY, ancestorsOf } from './tern-pane-geometry.mjs'
 
 const VIEWPORTS = [
   { name: '1280x800', width: 1280, height: 800 },
@@ -397,6 +397,52 @@ export default async function (h) {
     JSON.stringify({ restored, promptsBefore, writerPrompts: records(h).filter(entry => entry.kind === 'writer.prompt').length }))
   h.capture('04-restore-1280x800', 'the real ONE composer after a control-injected Restore, card closed')
 
+  // 4b. F2 must change the card's REAL height, not only its label. The client's
+  //     own boxes are the authority: the card container is the clipped ancestor
+  //     of its title, and the composer below must stay reachable in BOTH states.
+  const cardBox = (label) => {
+    const snap = h.snapshot()
+    const title = nodeWithText(snap, 'Input History')
+    if (title === undefined) return undefined
+    const chain = ancestorsOf(snap.chains, title)
+    // The card is the smallest container that still holds the title: the dock and
+    // the pane are larger, so take the SMALLEST ancestor box that contains it.
+    const boxes = chain.map(node => ({ node, box: rect(node), span: visibleSpan(snap.chains, node, 'y') }))
+      .filter(entry => entry.box[3] > 40 && entry.span > 40)
+    const card = boxes.sort((a, b) => a.box[3] - b.box[3])[0]
+    const editor = editorNode(snap)
+    return {
+      label,
+      cardHeight: card?.box[3] ?? 0,
+      cardVisibleSpanY: card?.span ?? 0,
+      cardRole: card?.node.class ?? null,
+      composerContained: editor !== undefined ? containedXY(snap.chains, editor) : false,
+      composerHeight: editor === undefined ? 0 : rect(editor)[3],
+      composerVisibleSpanY: editor === undefined ? 0 : visibleSpan(snap.chains, editor, 'y'),
+    }
+  }
+  // Re-open the card for this measurement (the previous step restored a draft).
+  await safeKey(h, 'Ctrl+R reopens the card for the expand measurement', CTRL_R, 450)
+  await requiredWait(h, 'the card is open for the expand measurement', () => cardLive(h), { limit: 90 })
+  const normal = cardBox('normal')
+  await safeKey(h, 'F2 expands in the real client', 'F2', 450)
+  await requiredWait(h, 'the real client states the collapse affordance', () => h.texts(h.snapshot()).includes('Collapse'), { limit: 90 })
+  const expanded = cardBox('expanded')
+  writeLedger(h, 'expand-geometry.json', { normal, expanded })
+  h.check('F2 gives the reader MORE real height in the client (the card box grows, not just the label)',
+    expanded.cardHeight > normal.cardHeight + 8 && expanded.cardVisibleSpanY > normal.cardVisibleSpanY + 8,
+    JSON.stringify({ normal, expanded }))
+  h.check('the expanded card never pushes the ONE composer out of the client clipping',
+    expanded.composerContained === true && expanded.composerVisibleSpanY >= expanded.composerHeight - 0.5,
+    JSON.stringify(expanded))
+  await safeKey(h, 'F2 collapses again in the real client', 'F2', 450)
+  await requiredWait(h, 'the real client states the expand affordance again', () => h.texts(h.snapshot()).includes('Expand'), { limit: 90 })
+  const collapsed = cardBox('collapsed')
+  h.check('collapsing returns the card to its normal budget',
+    Math.abs(collapsed.cardHeight - normal.cardHeight) <= 1,
+    JSON.stringify({ normal, collapsed }))
+  await safeKey(h, 'Esc closes the card after the expand cycle', 'Escape', 400)
+
   // 5. Esc is a seat cancel only: the draft and caret survive, Cancel is 0.
   await safeKey(h, 'Ctrl+R reopens one card', CTRL_R, 450)
   await requiredWait(h, 'the card reopened in the real pane', () => cardOnScreen(h).painted, { limit: 90 })
@@ -446,6 +492,26 @@ export default async function (h) {
     shortCells.length === 2 && shortCells.every(cell => (cell.completeRows ?? 0) >= 1),
     JSON.stringify(shortCells.map(cell => ({ a: cell.appearance, completeRows: cell.completeRows,
       rowBoxes: cell.rowBoxes }))))
+  // The short band is where an expanded card could push the composer out, so
+  // the expansion is measured THERE too, not only at a tall viewport.
+  await h.resize(900, 360)
+  if (!cardLive(h)) await safeKey(h, 'reopen the card at the short band', CTRL_R, 450)
+  await requiredWait(h, 'the card is open at 900x360', () => cardLive(h), { limit: 90 })
+  const shortNormal = cardBox('short-normal')
+  await safeKey(h, 'F2 expands at the short band', 'F2', 450)
+  await requiredWait(h, 'the short band card is expanded', () => h.texts(h.snapshot()).includes('Collapse'), { limit: 90 })
+  const shortExpanded = cardBox('short-expanded')
+  writeLedger(h, 'short-band-expand-geometry.json', { normal: shortNormal, expanded: shortExpanded })
+  h.check('at 900x360 the expanded card still grows the reader\u2019s space by a real amount',
+    shortExpanded.cardHeight >= shortNormal.cardHeight + 8, JSON.stringify({ shortNormal, shortExpanded }))
+  h.check('at 900x360 the expanded card keeps the ONE composer fully visible and reachable',
+    shortExpanded.composerContained === true
+      && shortExpanded.composerVisibleSpanY >= shortExpanded.composerHeight - 0.5,
+    JSON.stringify(shortExpanded))
+  await safeKey(h, 'F2 collapses at the short band', 'F2', 450)
+  await requiredWait(h, 'the short band card is collapsed again', () => h.texts(h.snapshot()).includes('Expand'), { limit: 90 })
+  await h.resize(1280, 800)
+
   const narrowCells = cells.filter(cell => cell.viewport === '400x600')
   if (narrowCells.length === 2) {
     h.check('400x600 keeps the secondary Copy all reachable in BOTH appearances',

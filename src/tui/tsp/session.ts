@@ -3381,8 +3381,14 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   /** The edit-time admission of the permission menu: a real main-subject
    *  permission fact, a non-empty standard roster, the bound UI owner and no
    *  modal/Reader/picker/hydration/disposed owner. */
+  // The Permission menu is a COMPOSER control, so it answers to the composer
+  // seat's own admission: while the History card owns that seat the menu can
+  // neither open nor choose, exactly like Send and the Model quick panel.
+  // Reading the bare `visualActionsAdmitted()` here left a business write
+  // (selectPermission) reachable behind the card the user was looking at, while
+  // the projection already painted the button disabled — a click that lied.
   const permissionMenuAdmitted = (): boolean =>
-    permissionComposerAffordance() && visualActionsAdmitted()
+    permissionComposerAffordance() && composerActionsAdmitted()
 
   /** TSP I-E: whether the History card currently owns the composer seat. The
    *  Quiet Composer stays VISIBLE and is the ONE editor either way; while the
