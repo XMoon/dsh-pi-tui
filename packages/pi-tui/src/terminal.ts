@@ -698,6 +698,9 @@ export class ProcessTerminal implements Terminal {
 		// X059: `paused` has no heartbeat interval while its OSC 9;4 state is
 		// still painted, so the interval-only predicate would leak it past exit.
 		if (this.progressState !== "clear") sequence += TERMINAL_PROGRESS_CLEAR_SEQUENCE;
+		if (this.programStatusSupported && this.programStatus) {
+			sequence += formatProgramStatus({ state: "clear" });
+		}
 		sequence += "\x1b[?2004l";
 		if (this.keyboardProtocolPushed || this._kittyProtocolActive) sequence += "\x1b[<u";
 		if (this._modifyOtherKeysActive) sequence += "\x1b[>4;0m";
