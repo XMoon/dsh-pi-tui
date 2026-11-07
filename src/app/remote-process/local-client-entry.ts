@@ -1905,6 +1905,7 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
         const qualificationRequest = request as EntryControlRequest & {
           readonly workspacePath?: unknown
           readonly workspaceResume?: unknown
+          readonly schedule?: unknown
         }
         const workspacePath = qualificationRequest.workspacePath
         if (workspacePath !== undefined && (typeof workspacePath !== 'string' || workspacePath === '')) {
@@ -1922,11 +1923,19 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
         if (workspaceResume === true && workspacePath === undefined) {
           throw new Error('local client entry: the generation-resume control requires a workspacePath')
         }
+        // `schedule` asks for the official Schedule Remote namespace proof. It
+        // is a qualification control input only and must never leak into the
+        // surface runtime or the package API.
+        const schedule = qualificationRequest.schedule
+        if (schedule !== undefined && schedule !== true) {
+          throw new Error('local client entry: schedule must be the boolean true when supplied')
+        }
         const { runHostFoundationProbe } = await import('./host-foundation-probe.ts')
         const proof = await runHostFoundationProbe(context, {
           dshAnchor: options.dshAnchor,
           host,
           ...(workspacePath === undefined ? {} : { workspacePath }),
+          ...(schedule === true ? { schedule: true } : {}),
           ...(workspaceResume !== true
             ? {}
             : {
