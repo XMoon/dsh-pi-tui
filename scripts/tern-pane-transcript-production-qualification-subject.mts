@@ -237,20 +237,38 @@ const observeCommit = (args: readonly unknown[]): void => {
 ;(globalThis as unknown as GlobalProbe).__transcriptQualificationObserveCommit = observeCommit
 
 // ── The scripted model hold: the fixture's OWN `streamHold` parameter ──
+// ARMING is not HOLDING. `DirectSessionWriter.prompt` returns `committed` as
+// soon as `agent.followup()` accepts the message; the live Agent starts its
+// model request afterwards, and only THEN does the adapter call `streamHold()`.
+// A release that lands in that window would merely clear the armed flag while
+// the model still streams freely, so the entered wait is recorded as its own
+// fact and a release must prove it resolved THAT wait.
 let holdingArmed = false
 let heldResolve: (() => void) | undefined
 let heldPromise: Promise<void> | undefined
+let nextHoldSeq = 0
+let pendingHoldSeq: number | undefined
 const streamHold = (): Promise<void> => {
   if (!holdingArmed) return Promise.resolve()
-  heldPromise ??= new Promise<void>(resolve => { heldResolve = resolve })
+  if (heldPromise === undefined) {
+    nextHoldSeq += 1
+    pendingHoldSeq = nextHoldSeq
+    heldPromise = new Promise<void>(resolve => { heldResolve = resolve })
+    note({ kind: 'producer.model.hold.entered', holdSeq: nextHoldSeq, modelCalls: fixture?.modelCalls() ?? 0 })
+  }
   return heldPromise
 }
-const releaseHeldStream = (): void => {
+const releaseHeldStream = (): { released: boolean; holdSeq: number | null; armed: boolean } => {
   const resolve = heldResolve
+  const seq = pendingHoldSeq
   heldResolve = undefined
   heldPromise = undefined
+  pendingHoldSeq = undefined
   holdingArmed = false
-  resolve?.()
+  if (resolve === undefined) return { released: false, holdSeq: null, armed: false }
+  resolve()
+  note({ kind: 'producer.model.hold.released', holdSeq: seq })
+  return { released: true, holdSeq: seq ?? null, armed: false }
 }
 
 // ── Lifecycle ──
@@ -319,9 +337,9 @@ async function runCase (command: { kind: string; nodeId?: string }): Promise<Rec
     return { armed: true, note: 'the fixture ScriptedStreamingAdapter only: no renderer or currentness effect' }
   }
   if (command.kind === 'release-model') {
-    const wasArmed = holdingArmed
-    releaseHeldStream()
-    return { released: wasArmed, armed: holdingArmed }
+    // The result reports the WAIT that was really resolved, never the armed
+    // flag: `released:false` means no model request had entered the hold.
+    return releaseHeldStream()
   }
   if (command.kind === 'project-tail-window' || command.kind === 'project-full-window') {
     return projectWindow(command.kind === 'project-tail-window' ? 'tail' : 'full')
