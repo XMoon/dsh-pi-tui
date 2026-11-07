@@ -1407,7 +1407,7 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
       [`${formatKeyId(Key.tab)} / ${formatKeyId(Key.shift(Key.tab))}`, 'Rotate focus: filter, search, list, detail'],
       ['PgUp / PgDn', 'Scroll detail, history or help'],
       [`${formatKeyId(Key.ctrl('s'))} (editor)`, 'Save the schedule'],
-      [`${formatKeyId(Key.ctrl('r'))} (editor)`, 'Reload the latest Host revision, keeping your draft'],
+      [`${formatKeyId(Key.ctrl('r'))} (editor)`, 'Reload the latest Host revision and discard unsaved changes (asks first)'],
       [`${formatKeyId(Key.tab)} / ${formatKeyId(Key.shift(Key.tab))} (editor)`, 'Move between fields'],
       ['y / n', 'Confirm or cancel a confirmation'],
       ['Esc', 'Back one layer; close the workspace at the list root'],
@@ -1935,6 +1935,8 @@ function confirmQuestion(confirm: ScheduleConfirm): string {
       return `Run "${confirm.title}" now? The next scheduled occurrence is not consumed.`
     case 'discard':
       return 'Discard the unsaved schedule changes?'
+    case 'reload':
+      return 'Reload the latest Host revision? Your unsaved changes will be discarded.'
   }
 }
 

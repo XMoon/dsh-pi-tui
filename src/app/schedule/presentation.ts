@@ -59,6 +59,12 @@ export interface ScheduleHistoryView {
  *  its `token` is the generation a `y` commits against. */
 export type ScheduleConfirm =
   | {
+    /** The explicit, LOSSY reload: discards unsaved draft edits after the user
+     *  confirms, then adopts the latest Host record. */
+    readonly kind: 'reload'
+    readonly token: number
+  }
+  | {
     readonly kind: 'delete'
     readonly token: number
     readonly id: string
@@ -134,11 +140,10 @@ export type ScheduleIntent =
   | { readonly kind: 'select-target-session'; readonly sessionId: string }
   | { readonly kind: 'toggle-advanced' }
   | { readonly kind: 'save' }
-  /** The explicit conflict recovery (plan §5.5): re-read the latest Host
-   *  record and DISPLAY it as the editor content and CAS revision, discarding
-   *  the conflicted draft. It never auto-merges: the user re-applies the changes
-   *  they still want manually, so the Host's newer values are never re-sent as
-   *  an overwrite. */
+  /** The explicit conflict recovery (plan §5.5): re-read the latest Host record
+   *  and DISPLAY it as the editor content and CAS revision, discarding the
+   *  conflicted draft. It is LOSSY, so a dirty draft must confirm first. It never
+   *  auto-merges: the user re-applies the changes they still want manually. */
   | { readonly kind: 'reload-latest' }
   | { readonly kind: 'toggle-active' }
   | { readonly kind: 'ask-run' }
