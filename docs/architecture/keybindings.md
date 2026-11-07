@@ -279,6 +279,15 @@ rebuild alone.
     inert and the Action Bar advertises none of them. The Command page
     never advertises or dispatches Stop; `Esc` there is the page's own
     return to Output, and only an Output-page `Esc` runs the close.
+14. **The Host Editor `←←` Workspace entry is a contextual editor gesture,
+    not a binding.** `left` stays in `EDITOR_OWNED_KEY_IDS`, so the first
+    unclaimed Left always reaches the fork editor and a user remap or a
+    higher-priority Host winner keeps its own route. Two such presses in the
+    empty Host main Editor open the EXISTING registered Session Workspace;
+    that behavior is owned by
+    [surface-behavior.md](./surface-behavior.md#session-workspace). There is
+    no bindable action for it, and `app.session.open` remains reserved and
+    unbindable.
 
 ## User configuration
 

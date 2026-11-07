@@ -261,6 +261,16 @@ export class TuiEditor extends Editor {
   }
 
   /**
+   * First-party Host probe only; does not consume/cancel the paste. True while
+   * a bracketed paste is still being captured at the raw layer or a split
+   * paste marker is pending — the Host Editor gesture must never arm on input
+   * that belongs to an in-flight paste.
+   */
+  isPasteCapturePending(): boolean {
+    return this.pasteCapture !== null || this.pendingPasteMarker !== null
+  }
+
+  /**
    * Whether a real Down press at the CURRENT state would leave this editor at
    * its last VISUAL line (the Task Quick on-demand entry seam, Phase 3B/B4-B).
    * The optional boundary is an X063 post-transition fact supplied by the

@@ -658,7 +658,7 @@ export function applyRunnerWithRuntime(
      * registered command owns every listing, switch, notice and settlement;
      * this slot only opens it.
      */
-    let openRegisteredSessionBrowser: (() => void) | undefined
+    let openRegisteredSessionBrowser: ((scope?: 'current' | 'all') => void) | undefined
     /** TSP-7 Welcome D: the real `/sessions` business-entry availability,
      *  late-bound with the opener above. */
     let sessionBrowserAvailableOwner: (() => boolean) | undefined
@@ -3909,8 +3909,8 @@ export function applyRunnerWithRuntime(
     // arming window (before `bindRendererInput()` can deliver the first bound
     // click). The command owns the listing, the switch and every notice; this
     // entry only opens it.
-    openRegisteredSessionBrowser = () => {
-      runOwned('welcome session browser UI entry', () => command.openSessionBrowser(), {
+    openRegisteredSessionBrowser = (scope) => {
+      runOwned('welcome session browser UI entry', () => command.openSessionBrowser(scope), {
         diag,
         sessionId: () => ownership.currentSessionId(),
       })
@@ -3936,6 +3936,24 @@ export function applyRunnerWithRuntime(
           return () => { hold.release() }
         },
         open: () => { command.openSessionBrowser() },
+      })
+    }
+    // M5-U-E: the PiTUI Host Editor `←←` gesture's ONLY composition entry,
+    // installed under the same post-registration window as the surfaces above.
+    // The control carries no listing, Session identity or Screen: availability
+    // is the registered `/sessions` entry's own fact, currentness is the A3
+    // scope authority's synchronous capture, and `openAll` is the SAME
+    // registered command body with the frozen All initial browse scope. A TSP
+    // mount (`rendererMount !== undefined`) has no TuiApp and keeps its native
+    // input untouched.
+    if (rendererMount === undefined) {
+      surface.setEditorWorkspaceEntry({
+        available: () => command.sessionBrowserAvailable(),
+        captureIsCurrent: () => {
+          const token = sessionScope.capture()
+          return () => sessionScope.isCurrent(token)
+        },
+        openAll: () => { command.openSessionBrowser('all') },
       })
     }
     // PR4 §2.2: the DIRECT branch's Host command catalog arrives through the

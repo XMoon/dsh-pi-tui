@@ -162,6 +162,23 @@ Workspace over the existing `SessionBrowserReadOwner`; the retired PiTUI Picker
 is not a fallback. TSP keeps its own native Presenter over the same owner (see
 [tsp/session-browser.md](../tsp/session-browser.md)).
 
+- **The Host Editor `←←` entry is contextual, never a global binding.** Two
+  independent, unmodified `Left` presses within 600 ms from the empty PiTUI Host
+  main Editor open the SAME fullscreen Workspace with the frozen
+  `All workspaces` initial scope, while bare `/sessions`, bare `/resume` and the
+  Welcome entry keep `Current`. The gesture requires the Host editor to be the
+  real physical keyboard owner on the main surface, prompt mode and a strictly
+  empty draft: any text (whitespace included), a staged attachment, an
+  in-flight bracketed paste, an open autocomplete and every higher-priority
+  seat/modal/overlay leave it inert. The FIRST press is an ordinary editor
+  Left; the second consumes that one key. Only a real press counts — Kitty
+  repeat/release are protocol artifacts of the same physical press, a paste or
+  an Unstable raw rewrite never synthesizes the gesture, and a terminal that
+  carries no key-event types cannot strictly distinguish OS auto-repeat from a
+  human second press (that limitation is a protocol fact, not a policy). `Esc`
+  restores the same Session, draft, editor focus and screen; the gesture never
+  switches, stops or writes by itself. TSP has no PiTUI TuiApp, installs no such
+  entry and keeps its native Browser.
 - **ONE list, one row per Session.** The browse list paints `Needs attention` →
   `Working` → `Recent`, omitting an empty group. A Session belongs to exactly
   one group and appears once; inside a group the official `updatedAt` orders
