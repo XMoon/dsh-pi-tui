@@ -173,14 +173,15 @@ test('the npm release-tag split-process job pins and requires both Browser quali
 })
 
 test('the frozen Web roster matches the Host-only overlay exactly and stays default-disabled', () => {
-  assert.equal(PR_A_WEB_ROWS.length, 60, 'the PR-A Web roster is exactly 60 official rows')
   const ids = PR_A_WEB_ROWS.map(row => row.id)
   assert.equal(new Set(ids).size, ids.length, 'the frozen roster owns each row id once')
-  // The mandatory Client dependency closure of the shipped official UIs, and the
-  // deleted official label, are stated independently here: the oracle may not
-  // silently keep a dead package or drop a mandatory row.
-  for (const id of ['ui-context-menu', 'ui-file-drag']) {
-    assert.equal(ids.includes(id), true, `the frozen roster must include the mandatory "${id}" row`)
+  // The mandatory Client dependency closure of the shipped official UIs, the
+  // official file-actions / message-quotes / changed-files capability rows and
+  // the deleted official label are stated independently here: the oracle may
+  // not silently keep a dead package or drop a required row. The SET is the
+  // contract, never a historical row count.
+  for (const id of ['ui-context-menu', 'ui-file-drag', 'ui-file-actions', 'message-quotes', 'workspace-changes', 'ui-deliverables']) {
+    assert.equal(ids.includes(id), true, `the frozen roster must include the official "${id}" row`)
   }
   assert.equal(ids.includes('ui-deepseek-model-label-1017'), false,
     'the deleted official label may not return to the frozen roster')

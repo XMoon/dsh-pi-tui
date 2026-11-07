@@ -75,19 +75,11 @@ const FIBER_ACTIVE = 2
  */
 const REQUIRED_WEB_SERVICES = ['webApp', 'clientModules', 'terminalController'] as const
 
-/**
- * The ONLY row allowed to stay PENDING while the composition reports
- * `enabled`: `ui-deliverables` awaits the Host-side `workspaceChanges`
- * projection this stage does not mount. A pending OPTIONAL Browser feature is
- * recorded, never reported as a core Web failure.
- */
-export const PI_TUI_WEB_ACCESS_OPTIONAL_PENDING_ROWS: ReadonlySet<string> = new Set(['ui-deliverables'])
-
-/** The five rows that must be assembled first/last around the other 55. */
+/** The Browser graph rows that must be assembled first and released last. */
 const BROWSER_GRAPH_ROWS = ['modules', 'client-hmr', 'cordis-client-runner', 'terminal-controller'] as const
 const SPA_ROW = 'web-runtime'
 
-/** The 55 Browser presentation rows, in the overlay's canonical order. */
+/** The Browser presentation rows, in the overlay's canonical order. */
 const PRESENTATION_ROWS = PI_TUI_WEB_ACCESS_ROWS
   .map(row => row.id)
   .filter(id => id !== SPA_ROW && !(BROWSER_GRAPH_ROWS as readonly string[]).includes(id))
@@ -451,7 +443,6 @@ export class PiTuiWebAccessHostService extends TypertRemoteService {
       const entry = roster.get(row.id) as LoaderEntryLike
       const state = entry.fiber?.state
       if (state === FIBER_ACTIVE) continue
-      if (PI_TUI_WEB_ACCESS_OPTIONAL_PENDING_ROWS.has(row.id)) continue
       return {
         state: 'unavailable',
         reason: `web access: the "${row.id}" row is ${state === undefined ? 'not started' : `state-${String(state)}`}, not active`,

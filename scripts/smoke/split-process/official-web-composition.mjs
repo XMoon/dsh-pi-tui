@@ -222,7 +222,7 @@ export async function runOfficialWebComposition(context) {
       tuiAnswer: 'painted',
     })
 
-    // ── B. Isolated qualification: the 60 rows enabled by ONE patch ─────
+    // ── B. Isolated qualification: the whole roster enabled by ONE patch ─
     // The override rows are appended to the SAME single extra patch this
     // lane already uses for its offline Host LLM. The entry accepts exactly
     // ONE extra patch file, so splitting them would silently drop one.
@@ -260,10 +260,19 @@ export async function runOfficialWebComposition(context) {
     for (const id of [PR_A_WEB_RUNTIME_ID, 'modules', 'client-hmr', 'cordis-client-runner', 'terminal-controller']) {
       assert(webEntriesById.get(id)?.state === 'active', `PA-02 the qualified Host did not activate "${id}"`)
     }
-    // `ui-deliverables` may legitimately stay PENDING (state 0) until the
-    // Host-side workspaceChanges projection exists. This stage does not add
-    // it and does not claim Deliverables support; the fact is recorded.
+    // S5-PR5: the changed-files provider and its consumer are BOTH part of the
+    // enabled composition. `ui-deliverables` may no longer stay PENDING: the
+    // official `workspace-changes` Host row provides the `workspaceChanges`
+    // service it injects, and exactly one such row may own that package.
+    for (const id of ['workspace-changes', 'ui-deliverables']) {
+      const state = webEntriesById.get(id)?.state
+      assert(state === 'active', `PA-02 the qualified Host did not activate "${id}" (state ${String(state)})`)
+    }
+    const workspaceChangesRows = webReady.entries.filter(entry => entry.name === '@deepseek-ai/dsh-workspace-changes')
+    assert(workspaceChangesRows.length === 1,
+      `PA-02 expected exactly ONE "@deepseek-ai/dsh-workspace-changes" Host row, found ${workspaceChangesRows.length}`)
     const deliverablesState = webEntriesById.get('ui-deliverables')?.state
+    const workspaceChangesState = webEntriesById.get('workspace-changes')?.state
     const launch = launchOf(webReady)
     const facts = await readHostWebIndex(webReady.localHost.origin, launch, 'PA-02')
     assertWebIndexQualified(facts, 'PA-02', targetDshVersion)
@@ -340,6 +349,7 @@ export async function runOfficialWebComposition(context) {
       unknownPluginStatus: unknownPlugin.status,
       webSseStatus: webSse.status,
       uiDeliverablesState: deliverablesState,
+      workspaceChangesState,
       agentShellVar: 'DSH_WEB_URL stays unregistered by design (surfaceContext:false); asserted structurally and by the absent stdout/records evidence — no private probe row exists in this lane',
     })
 
