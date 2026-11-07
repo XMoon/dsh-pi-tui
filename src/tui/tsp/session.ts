@@ -100,12 +100,13 @@ import { runSyncDisposalSteps } from '../../runtime/process/disposal.ts'
 import type { TaskPanelItem } from '../../app/surface/task-presentation.ts'
 import type { PendingInputPresentation, PendingTailRow, QueueItem } from '../../app/surface/pending-presentation.ts'
 import { projectTranscriptStructure } from '../transcript/structure.ts'
+import type { DisplayState } from '../../domain/display/preset.ts'
 import type { ToolPresenter } from '../transcript/tool-presentation.ts'
 import type { TranscriptMessage, TranscriptToolMessage, TurnActivity } from '../../domain/transcript/types.ts'
 import type { TranscriptWindowState } from '../../domain/transcript/window.ts'
 import type { TodoItem, TranscriptSearchPresentation } from '../../tui-app.ts'
 import type { StreamingToolPreview } from '../../app/surface/streaming-tool-preparing.ts'
-import { TranscriptNodeKeys, transcriptView, toolRowImageBlocks, imageRefProblem, imageDisplayName, imageIdentityText, dockDraftImageNodes, DOCK_DRAFT_SINGLE_PREVIEW_COLS, DOCK_DRAFT_TWO_PREVIEW_COLS, MAX_IMAGE_BLOB_BYTES, type DockDraftImageEntry, type ToolSvgState } from './transcript-view.ts'
+import { TranscriptNodeKeys, transcriptView, transcriptViewForPreset, toolRowImageBlocks, imageRefProblem, imageDisplayName, imageIdentityText, dockDraftImageNodes, DOCK_DRAFT_SINGLE_PREVIEW_COLS, DOCK_DRAFT_TWO_PREVIEW_COLS, MAX_IMAGE_BLOB_BYTES, type DockDraftImageEntry, type ToolSvgState } from './transcript-view.ts'
 import { admitSvg, type SvgAdmission } from '../../domain/visual/svg-admission.ts'
 import { authorizeSvg, svgDigest } from '../../domain/visual/svg.ts'
 import { visualFactLine, visualPartsFromText } from '../../domain/visual/visual-facts.ts'
@@ -340,6 +341,13 @@ export interface TspInputBinding {
 export interface TspRendererOptions {
   /** The workspace root for tool-args path relativization in the mapper. */
   readonly cwd?: string
+  /**
+   * The ONE live display authority. Optional ONLY at this renderer boundary so
+   * the existing standalone pure SDK mounts keep the historical Work-section
+   * layout; the production connector declares it REQUIRED. It is read live at
+   * every formal projection — never copied into a mount-local preset.
+   */
+  readonly displayState?: DisplayState
   /**
    * The exit intent: invoked ONCE on the quit key. Routes through the SAME
    * exit orchestration as `/exit` (surface teardown, Host retirement,
@@ -1243,6 +1251,17 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    * redraws the SAME rows instead of dropping them for one frame.
    */
   let lastStreamingToolPreviews: readonly StreamingToolPreview[] = []
+  /** The last formally committed transcript window. It is retained INPUT for
+   *  the Compact tail-preview admission only: no mirror map, no stats authority
+   *  and no second window owner. */
+  let lastWindowState: (TranscriptWindowState & { firstTurn?: number; lastTurn?: number; hasNewer?: boolean }) | undefined
+  /** The ONE renderer-local Compact Work disclosure owner set, keyed by the
+   *  canonical span owner OBJECT identity. Never merged with expandedToolKeys
+   *  (which owns SVG blob demand). Retired with the source/hydration/dispose. */
+  const expandedWorkOwners = new Set<TranscriptMessage>()
+  /** The CURRENT frame's Compact Activity node-key PATH → span owner. Rebuilt
+   *  from the real `lastMain` tree on every projection; empty in Full/Focus. */
+  const workDisclosureByPath = new Map<string, TranscriptMessage>()
   /**
    * PR-C: the ONE image binding of this renderer, installed by the mount
    * BEFORE the first tool projection. It carries the mount's loader (the
@@ -2367,10 +2386,12 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // PR-D: the same fatal fence for the native SVG blob sender.
     if (visualProjectionAborted) return false
     const figureSources = visualFigureSources()
-    const build = (selection: SelectedVisualState | undefined): Node => transcriptView(
-      projectTranscriptStructure(lastMessages),
-      scopeKeys,
-      {
+    const displayState = options.displayState
+    const workSpans = displayState !== undefined && displayState.preset === 'compact'
+      ? projectTranscriptStructure(lastMessages).flatMap(block => block.kind === 'work' ? [block.span] : [])
+      : []
+    const build = (selection: SelectedVisualState | undefined): Node => {
+      const viewOptions = {
         ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
         scopePrefix,
         ...(settledQuestionAnswers === undefined ? {} : { settledQuestionAnswersLookup: settledQuestionAnswers }),
@@ -2383,8 +2404,16 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         nativeImagesSupported: nativeImagesSupported(),
         requestPublishedSvgBlob,
         ...(selection === undefined ? {} : { selectedVisual: selection }),
-      },
-    )
+      }
+      if (displayState === undefined) return transcriptView(projectTranscriptStructure(lastMessages), scopeKeys, viewOptions)
+      // Read the LIVE authority at the commit point; never a mount-time copy.
+      return transcriptViewForPreset(lastMessages, scopeKeys, {
+        ...viewOptions,
+        preset: displayState.preset,
+        expandedWorkOwners,
+        window: lastWindowState,
+      })
+    }
     // The painted selection follows the frame's REAL order: a transcript
     // change can add, remove or reorder figures while a selection exists. The
     // first build is the normal path; only a changed selection fact triggers
@@ -2407,6 +2436,8 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // The walk uses the real parent/child key chain, so a dotted subCallId is
     // never split and an absent ToggleEvent.key never needs a fallback.
     toolDisclosureByPath.clear()
+    workDisclosureByPath.clear()
+    const compactWork = displayState !== undefined && displayState.preset === 'compact'
     const recordDisclosures = (node: Node, path: string, parentTool: string | undefined): void => {
       const nodeKey = (node.props as { key?: string }).key
       let tool = parentTool
@@ -2416,6 +2447,13 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
           : nodeKey.startsWith('msg-') ? nodeKey : undefined
         tool = own ?? (parentTool !== undefined ? `${parentTool}/${nodeKey}` : undefined)
         if (tool !== undefined) toolDisclosureByPath.set(path, tool)
+      }
+      // The Activity root is the ONLY collapsible transcript section, and its
+      // key is `work-<canonical owner key>`. Resolve the owner from the SAME
+      // canonical structure (object identity), never from the node key string.
+      if (compactWork && node.kind === 'section' && (node.props as { collapsible?: boolean }).collapsible === true && nodeKey !== undefined) {
+        const span = workSpans.find(candidate => nodeKey === `${scopePrefix}work-${scopeKeys.keyFor(candidate.owner)}`)
+        if (span !== undefined) workDisclosureByPath.set(path, span.owner)
       }
       for (const [index, child] of node.children.entries()) {
         const childKey = (child.props as { key?: string }).key
@@ -2622,7 +2660,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   const setTranscript = (
     messages: readonly TranscriptMessage[],
     _activities?: ReadonlyMap<number, TurnActivity>,
-    _window?: TranscriptWindowState & { firstTurn?: number; lastTurn?: number; hasNewer?: boolean },
+    window?: TranscriptWindowState & { firstTurn?: number; lastTurn?: number; hasNewer?: boolean },
     streamingToolPreviews?: readonly StreamingToolPreview[],
     _searchPresentation?: TranscriptSearchPresentation,
     source?: object,
@@ -2680,6 +2718,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       releaseImageSubscriptions()
       svgBlobIds.clear()
       expandedToolKeys.clear()
+      // The outgoing subject's manual Work disclosures and frame index die
+      // with its scope; the incoming subject starts collapsed.
+      expandedWorkOwners.clear()
+      workDisclosureByPath.clear()
       // PR3: the old frame's figure ids, Copy targets and selection belong to
       // the retired scope; the new subject starts with no selected figure.
       clearVisualFrameState()
@@ -2692,6 +2734,14 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // fence — a retired frame contributes no preview to the new subject.
     lastMessages = messages
     lastStreamingToolPreviews = streamingToolPreviews ?? []
+    lastWindowState = window
+    // A manual Work owner survives ordinary same-source deltas only while the
+    // SAME source message is still in the loaded window. Prune by canonical
+    // owner identity so a long session never retains retired message objects.
+    if (expandedWorkOwners.size > 0) {
+      const loaded = new Set(projectTranscriptStructure(messages).flatMap(block => block.kind === 'work' ? [block.span.owner] : []))
+      for (const owner of expandedWorkOwners) if (!loaded.has(owner)) expandedWorkOwners.delete(owner)
+    }
     // PR-C: the image subscriptions follow the CURRENT window: an attachment
     // that left it is unsubscribed, a new one is subscribed and read.
     syncImageSubscriptions()
@@ -2841,6 +2891,11 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // PR-B3: the retired subject's Preparing rows go with it — the new
       // subject's own snapshot replaces them when it commits.
       lastStreamingToolPreviews = []
+      // The retired subject's Work disclosure owners and frame index are
+      // revoked BEFORE the Loading frame is painted.
+      expandedWorkOwners.clear()
+      workDisclosureByPath.clear()
+      lastWindowState = undefined
       lastMain = loadingMain()
       render()
     },
@@ -3998,6 +4053,34 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // underlying composer. A terminal focus claim must not move the caret
       // away from an open form, so the seat's own focus is re-asserted; every
       // other event keeps its existing (unhandled) course.
+      // The Compact Activity root is admitted BEFORE the Tool-only toggle
+      // branch, through the SAME single event loop. Its native section carries
+      // no onToggle handler (the SDK would consume the event before this
+      // iterator), and the id must EXACTLY match a current registered path.
+      if (input.event.ev === 'toggle' && input.event.sf === surface.id
+        && !hydrating && inputBound
+        && options.displayState?.preset === 'compact'
+        && !seat.hasModalSeat()
+        && detailsSlot === undefined && !openingDetails
+        && workHub?.isOpen() !== true && sessionBrowser?.isOpen() !== true
+        && webPicker?.isOpen() !== true && presetPicker?.isOpen() !== true
+        && modelPicker?.isOpen() !== true && modelQuick?.isOpen() !== true
+        && historySearch?.isOpen() !== true) {
+        // EXACT current-path admission: the SDK derives a main-region id as
+        // `main.<child-key path>`, so only that one fixed outer prefix (or the
+        // bare path) is accepted. A substring/Work-name match, an arbitrary
+        // ancestor prefix and a sibling suffix are all refused.
+        const owner = workDisclosureByPath.get(input.event.id)
+          ?? workDisclosureByPath.get(input.event.id.startsWith('main.') ? input.event.id.slice('main.'.length) : input.event.id)
+        if (owner !== undefined) {
+          // `collapsed` is the client's REPORTED target state: idempotent
+          // add/delete, never a local inversion (no double toggle).
+          if (input.event.collapsed === true) expandedWorkOwners.delete(owner)
+          else expandedWorkOwners.add(owner)
+          if (rebuildLastMain()) render()
+          return false
+        }
+      }
       // PR-D RFL-016: the Tern disclosure event. A ready SVG card starts
       // collapsed; expanding it is the real display demand that sends the
       // blob. The node id's last segment is the `ui.tool` key (the same key the
@@ -4344,6 +4427,11 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     dispose: () => {
       if (disposeTask !== undefined) return disposeTask
       disposed = true
+      // Disposable presentation state: a disposed mount owns no Work owner,
+      // frame index or retained projection input for a late event.
+      expandedWorkOwners.clear()
+      workDisclosureByPath.clear()
+      lastWindowState = undefined
       // B3-A2 §9: the shared Promise's IDENTITY is latched BEFORE any cleanup
       // runs at all. Two separate hazards require this exact shape:
       //   1. the seat/Hub retirements call out to owner callbacks that may

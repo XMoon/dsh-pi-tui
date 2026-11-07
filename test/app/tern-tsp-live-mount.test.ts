@@ -47,6 +47,7 @@ import { resolveTspNativeFooterConfig } from '../../src/domain/footer/tsp-native
 import { createPluginManagerWorkspacePanel } from '../../src/tui/plugin-manager/workspace.ts'
 import { isQuitKey, mountTspRenderer, type TspRenderer } from '../../src/tui/tsp/session.ts'
 import { foldWireNodes, wireNodes } from '../support/tsp-picker-wire.ts'
+import { svgContentBlocks, svgFactFromArgs } from '../../src/domain/visual/svg.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 import { createInputHistory } from '../../src/app/surface/input-history.ts'
 import type { SurfaceDisplaySeam } from '../../src/app/surface/display-seam.ts'
@@ -260,8 +261,18 @@ async function mountTspHarness(options: {
    *  events table declares NO predicate at all (the PiTui `?.() === false`
    *  shape then accepts). */
   shouldRememberInput?: (text: string) => boolean
+  /** The ONE live display authority. When present, the SAME object goes to
+   *  both `surface.start` and the production `mountTspRenderer`, exactly as the
+   *  composition root wires it. Absent keeps the historical standalone mount
+   *  (no renderer displayState) that every older case asserts. */
+  displayState?: { preset: 'focus' | 'compact' | 'full' }
+  /** Advertise the native `image` kind + `blobs` feature so a ready Tool SVG
+   *  really carries its own collapsible disclosure. */
+  nativeImages?: boolean
 } = {}): Promise<Harness & { session: Session }> {
-  const hello = options.sessionBrowserCapabilities
+  const hello = options.nativeImages === true
+    ? { ...HELLO, kinds: [...HELLO.kinds, 'image', 'text'], features: [...HELLO.features, 'blobs'] }
+    : options.sessionBrowserCapabilities
     ? {
       ...HELLO,
       kinds: [...HELLO.kinds, 'picker', 'row', 'overlay', 'text', 'md'],
@@ -353,6 +364,7 @@ async function mountTspHarness(options: {
           options.requestExit?.()
         },
         ...(options.onFatal === undefined ? {} : { onFatal: options.onFatal }),
+        ...(options.displayState === undefined ? {} : { displayState: options.displayState }),
       })
       // TSP-7 PR-A: the status reader is bound BEFORE the image binding, like
       // the production mount — a renderer that fails its image bind still
@@ -390,7 +402,7 @@ async function mountTspHarness(options: {
     renderer,
     workspaceRoot: '/tmp',
     iconStyle: 'emoji',
-    displayState: { preset: 'compact' },
+    displayState: options.displayState ?? { preset: 'compact' },
     historySearchSource: { search: () => Promise.reject(new Error('not exercised')) },
     readImage: () => Promise.reject(new Error('not exercised')),
     imageScope: () => undefined,
@@ -1390,7 +1402,7 @@ test('the PRODUCTION connector handshake releases a mount a REAL surface.start r
     env: { DSH_PI_TUI_RENDERER: 'tsp' },
     resolveFooterConfig: () => resolveTspNativeFooterConfig({ doc: { footer: 'default' }, readiness: 'ready', userItems: { items: [], invalidCount: 0 } }),
     connectTsp: productionTspConnector({ copyVisual: async () => false,
-      cwd: '/tmp', requestExit, onFatal: () => {}, log: () => {}, logError: () => {},
+      cwd: '/tmp', displayState: { preset: 'full' }, requestExit, onFatal: () => {}, log: () => {}, logError: () => {},
       connect: async () => session,
     }),
   })
@@ -2148,6 +2160,308 @@ test('a real TSP Enter reaches the production history owner, writes its row and 
     })
     assert.equal(harness.renderer().scopeFactCountForTest(), 0,
       'a disposed mount refuses the late settlement instead of reopening recall state')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+// ── Canonical Full/Compact transcript modes on the mounted production renderer ──
+
+/** The folded node shape the shared pane helper actually returns. */
+interface ModeWireNode {
+  readonly id: string
+  readonly k: string
+  readonly p: Record<string, unknown>
+  readonly c?: ModeWireNode[]
+}
+
+/** The live wire node set of the mounted base surface. */
+function mountedNodes(harness: Harness): ModeWireNode[] {
+  return wireNodes({ frames: () => harness.tern.frames }) as unknown as ModeWireNode[]
+}
+
+const mountedSections = (harness: Harness): ModeWireNode[] => mountedNodes(harness).filter(node => node.k === 'section')
+
+/** The real SDK node id of the first Compact Activity section. */
+function firstActivityId(harness: Harness): string {
+  const section = mountedSections(harness).find(node => node.p['collapsible'] === true)
+  assert.ok(section !== undefined, 'the frame carries a collapsible Activity section')
+  return section.id
+}
+
+/** Drive one canonical two-Work turn through the REAL event route. */
+function routeTwoWorkTurn(harness: Harness): void {
+  harness.route(ev('turn/start', { turn: 1 }, 0))
+  harness.route(userMessage(1, 'inspect the repository'))
+  harness.route(ev('assistant/message', {
+    turn: 1, step: 0,
+    message: {
+      id: MessageId('think-a'), role: 'assistant',
+      content: [{ type: 'reasoning', text: 'reading the structure first' }],
+      source: { kind: 'model', provider: 'p', model: 'm' },
+      stream: [
+        { type: 'chunk', time: T0 + 2, chunk: { type: 'block-start', index: 0, blockType: 'reasoning' } },
+        { type: 'chunk', time: T0 + 4000, chunk: { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'reading the structure first' } } },
+      ],
+    },
+  }, 2))
+  harness.route(toolCall(3, 'call-read'))
+  harness.route(toolResult(4, 'call-read', 'the file body'))
+  harness.route(ev('assistant/message', {
+    turn: 1, step: 1,
+    message: { id: MessageId('mid-1'), role: 'assistant', content: [{ type: 'text', text: 'intermediate narration' }], source: { kind: 'model', provider: 'p', model: 'm' }, stream: [] },
+  }, 5))
+  harness.route(ev('tool/call', { turn: 1, step: 2, callId: ToolCallId('call-bash'), name: 'bash', arguments: '{"command":"echo hi"}' }, 6))
+  harness.route(ev('tool/result', {
+    turn: 1, step: 2,
+    message: { id: MessageId('result-bash'), role: 'tool', toolCallId: ToolCallId('call-bash'), content: [{ type: 'text', text: 'hi' }], source: { kind: 'tool', callId: ToolCallId('call-bash') } },
+  }, 7))
+  harness.route(ev('assistant/message', {
+    turn: 1, step: 3,
+    message: { id: MessageId('final-1'), role: 'assistant', content: [{ type: 'text', text: 'the final answer' }], source: { kind: 'model', provider: 'p', model: 'm' }, stream: [] },
+  }, 8))
+  harness.route(ev('turn/end', { turn: 1, reason: { kind: 'completed' } }, 9))
+  harness.surface.paintNow()
+}
+
+const nodeText = (node: ModeWireNode): string => {
+  const parts: string[] = []
+  const visit = (current: ModeWireNode): void => {
+    if (typeof current.p['text'] === 'string') parts.push(current.p['text'])
+    for (const child of current.c ?? []) visit(child)
+  }
+  visit(node)
+  return parts.join(' ')
+}
+
+test('the SAME live DisplayState object drives Full flat and then Compact Activity on the next formal commit', async () => {
+  const displayState: { preset: 'focus' | 'compact' | 'full' } = { preset: 'full' }
+  const harness = await mountTspHarness({ displayState })
+  try {
+    harness.surface.bindRendererInput()
+    routeTwoWorkTurn(harness)
+    await awaitWireFact(() => mountedNodes(harness).some(node => nodeText(node).includes('the final answer')), 'the Full turn frame')
+    assert.equal(mountedSections(harness).length, 0, 'Full paints no Work/Activity container')
+    assert.ok(mountedNodes(harness).some(node => node.k === 'tool'), 'Full keeps the native Tool rows')
+
+    // The authority is the SAME object the composition root owns: mutating it
+    // is the production `/display` write, and the NEXT formal commit must read
+    // it live (no mount-time snapshot, no second mode owner).
+    displayState.preset = 'compact'
+    harness.route(ev('assistant/message', {
+      turn: 1, step: 4,
+      message: { id: MessageId('final-2'), role: 'assistant', content: [{ type: 'text', text: 'a later formal commit' }], source: { kind: 'model', provider: 'p', model: 'm' }, stream: [] },
+    }, 10))
+    harness.surface.paintNow()
+    await awaitWireFact(() => mountedSections(harness).length === 2, 'the Compact Activity sections after the mode change')
+    const sections = mountedSections(harness)
+    assert.ok(sections.every(section => section.p['collapsible'] === true && section.p['collapsed'] === true),
+      'Compact defaults every canonical Work collapsed')
+    assert.ok(mountedNodes(harness).some(node => nodeText(node).includes('intermediate narration')),
+      'the intermediate Assistant remains readable outside the Activity')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('a real toggle on the measured Activity node id expands exactly that Work, and a repeated target state is idempotent', async () => {
+  const harness = await mountTspHarness({ displayState: { preset: 'compact' } })
+  try {
+    harness.surface.bindRendererInput()
+    routeTwoWorkTurn(harness)
+    await awaitWireFact(() => mountedSections(harness).length === 2, 'the two Compact Activity sections')
+    const sections = mountedSections(harness)
+    const first = sections[0]
+    const second = sections[1]
+    assert.ok(first !== undefined && second !== undefined, 'both Activity sections exist')
+    const targetId = first.id
+    const otherId = second.id
+    assert.equal(mountedNodes(harness).filter(node => node.k === 'tool').length, 0, 'collapsed Activities build no Tool node')
+
+    const sf = harness.tern.frames.at(-1)!.sf
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: targetId, collapsed: false, key: targetId.slice(targetId.lastIndexOf('.') + 1), raw: {} })
+    await awaitWireFact(() => mountedNodes(harness).some(node => node.k === 'tool'), 'the first Work Tool body after the real toggle')
+    let current = mountedSections(harness)
+    assert.equal(current.find(node => node.id === targetId)?.p['collapsed'], false, 'Work A is open')
+    assert.equal(current.find(node => node.id === otherId)?.p['collapsed'], true, 'Work B is untouched')
+    assert.equal(mountedNodes(harness).filter(node => node.k === 'tool').length, 1, 'only Work A materialized its Tool')
+
+    // A repeated `collapsed:false` is the client's REPORTED target state: it
+    // must not invert the local owner (no double toggle).
+    const framesBefore = harness.tern.frames.length
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: targetId, collapsed: false, raw: {} })
+    await settle() // bounded observation window: a refused toggle must paint no frame
+    current = mountedSections(harness)
+    assert.equal(current.find(node => node.id === targetId)?.p['collapsed'], false, 'the repeated expand did not collapse the Work')
+    assert.equal(harness.tern.frames.length, framesBefore, 'an unchanged target state paints no new frame')
+
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: targetId, collapsed: true, raw: {} })
+    await awaitWireFact(() => mountedNodes(harness).filter(node => node.k === 'tool').length === 0, 'the Work collapse retires its Tool node')
+    assert.equal(mountedSections(harness).find(node => node.id === targetId)?.p['collapsed'], true, 'Work A is collapsed again')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('a foreign surface, an unknown node id and a stale scope toggle never open a Work', async () => {
+  const harness = await mountTspHarness({ displayState: { preset: 'compact' } })
+  try {
+    harness.surface.bindRendererInput()
+    routeTwoWorkTurn(harness)
+    await awaitWireFact(() => mountedSections(harness).length === 2, 'the Compact Activity sections')
+    const targetId = firstActivityId(harness)
+    const lastFrame = harness.tern.frames.at(-1)
+    assert.ok(lastFrame !== undefined)
+    const sf = lastFrame.sf
+    const before = harness.tern.frames.length
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf: 'some-other-surface', id: targetId, collapsed: false, raw: {} })
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: 'main.not-a-real-node', collapsed: false, raw: {} })
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: `${targetId}-suffix`, collapsed: false, raw: {} })
+    // An arbitrary ancestor prefix is NOT the SDK's fixed `main.` namespace.
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: `layer.${targetId.slice('main.'.length)}`, collapsed: false, raw: {} })
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: `other.${targetId.slice('main.'.length)}`, collapsed: false, raw: {} })
+    await settle() // bounded observation window: a refused toggle must paint no frame
+    assert.equal(harness.tern.frames.length, before, 'no rejected toggle painted a frame')
+    assert.ok(mountedSections(harness).every(section => section.p['collapsed'] === true), 'every Work stays collapsed')
+
+    // A REAL expand first, so the stale-scope negative has something to lose.
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: targetId, collapsed: false, raw: {} })
+    await awaitWireFact(() => mountedSections(harness).some(section => section.p['collapsed'] === false), 'the real expand')
+    const staleId = targetId
+    harness.surface.display.beginSessionHydration()
+    await settle() // bounded observation window: a refused toggle must paint no frame
+    const duringHydration = harness.tern.frames.length
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: staleId, collapsed: false, raw: {} })
+    await settle() // bounded observation window: a refused toggle must paint no frame
+    assert.equal(harness.tern.frames.length, duringHydration, 'the hydration window refuses the old Work toggle')
+
+    // The new subject commits under a NEW scope; the old node id is gone.
+    harness.replaceMain()
+    harness.route(ev('turn/start', { turn: 1 }, 20))
+    harness.route(userMessage(21, 'the incoming subject'))
+    harness.route(toolCall(22, 'call-new'))
+    harness.route(toolResult(23, 'call-new', 'new body'))
+    harness.surface.paintNow()
+    await awaitWireFact(() => mountedNodes(harness).some(node => nodeText(node).includes('the incoming subject')), 'the new subject frame')
+    const newSections = mountedSections(harness)
+    assert.ok(newSections.length > 0, 'the new subject has its own Activity')
+    assert.ok(!newSections.some(section => section.id === staleId), 'the retired scope id is absent')
+    assert.ok(newSections.every(section => section.p['collapsed'] === true), 'the incoming subject starts collapsed')
+    const framesNow = harness.tern.frames.length
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: staleId, collapsed: false, raw: {} })
+    await settle() // bounded observation window: a refused toggle must paint no frame
+    assert.equal(harness.tern.frames.length, framesNow, 'the retired id cannot open the new subject Work')
+    assert.ok(mountedSections(harness).every(section => section.p['collapsed'] === true), 'the new Work stays collapsed')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('an open modal seat blocks the base Activity toggle without reaching the background Tool owner', async () => {
+  const harness = await mountTspHarness({ displayState: { preset: 'compact' } })
+  try {
+    harness.surface.bindRendererInput()
+    routeTwoWorkTurn(harness)
+    await awaitWireFact(() => mountedSections(harness).length === 2, 'the Compact Activity sections')
+    const targetId = firstActivityId(harness)
+    const lastFrame = harness.tern.frames.at(-1)
+    assert.ok(lastFrame !== undefined)
+    const sf = lastFrame.sf
+    // The REAL interaction owner opens a modal seat (never a fabricated flag).
+    const pending = harness.renderer().interaction.askQuestions([
+      { id: 'q1', question: 'Proceed?' },
+    ], undefined, undefined, false)
+    pending.catch(() => {})
+    await awaitWireFact(() => harness.tern.output.text().includes('Proceed?'), 'the real modal frame')
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: targetId, collapsed: false, raw: {} })
+    await settle() // bounded observation window: a refused toggle must paint no frame
+    assert.ok(mountedSections(harness).every(section => section.p['collapsed'] === true), 'the modal seat keeps every Work collapsed')
+    assert.equal(mountedNodes(harness).filter(node => node.k === 'tool').length, 0,
+      'the covered toggle reached neither the Work nor a background Tool owner')
+    harness.renderer().interaction.withdrawPending()
+    await pending.catch(() => {})
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('a same-source streaming delta keeps an opened Work expanded, and dispose retires the Work owner', async () => {
+  const harness = await mountTspHarness({ displayState: { preset: 'compact' } })
+  try {
+    harness.surface.bindRendererInput()
+    routeTwoWorkTurn(harness)
+    await awaitWireFact(() => mountedSections(harness).length === 2, 'the Compact Activity sections')
+    const targetId = firstActivityId(harness)
+    const lastFrame = harness.tern.frames.at(-1)
+    assert.ok(lastFrame !== undefined)
+    const sf = lastFrame.sf
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: targetId, collapsed: false, raw: {} })
+    await awaitWireFact(() => mountedSections(harness).some(section => section.p['collapsed'] === false), 'the manual expand')
+
+    // An ordinary same-source delta: a NEW open turn of the SAME fold streams
+    // live text (the production assistant-stream path, same source token).
+    harness.route(ev('turn/start', { turn: 2 }, 11))
+    harness.route(ev('user/message', { id: MessageId('user-2'), role: 'user', content: [{ type: 'text', text: 'a later prompt' }], source: { kind: 'user' } }, 12))
+    harness.surface.applyAssistantInput({
+      kind: 'chunk', sessionId: SESSION_ID, attemptId: 'attempt-later', turn: 2, step: 0,
+      time: T0 + 13_000, chunk: { type: 'text-delta', index: 0, text: 'a later delta' },
+    } as never)
+    harness.surface.paintNow()
+    await awaitWireFact(() => mountedNodes(harness).some(node => nodeText(node).includes('a later delta')), 'the delta frame')
+    assert.equal(mountedSections(harness).find(section => section.id === targetId)?.p['collapsed'], false,
+      'the same-source delta did not reset the manual Work expansion')
+
+    await harness.dispose()
+    const afterDispose = harness.tern.frames.length
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: targetId, collapsed: false, raw: {} })
+    await settle() // bounded observation window: a refused toggle must paint no frame
+    assert.equal(harness.tern.frames.length, afterDispose, 'a disposed mount paints nothing for a late Work toggle')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('a Work toggle never demands a Tool SVG blob and a Tool toggle never changes the Work owner', async () => {
+  const harness = await mountTspHarness({ displayState: { preset: 'compact' }, nativeImages: true })
+  try {
+    harness.surface.bindRendererInput()
+    harness.route(ev('turn/start', { turn: 1 }, 0))
+    harness.route(userMessage(1, 'draw a figure'))
+    const svgArgs = { title: 'Box', description: 'a box', svg: '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10"/></svg>' }
+    harness.route(ev('tool/call', {
+      turn: 1, step: 0, callId: ToolCallId('svg-1'), name: 'dsh_pi_tui_svg',
+      arguments: JSON.stringify(svgArgs),
+    }, 2))
+    harness.route(ev('tool/result', {
+      turn: 1, step: 0,
+      // The REAL credential producer, so the fold admits a ready SVG state.
+      message: { id: MessageId('svg-result'), role: 'tool', toolCallId: ToolCallId('svg-1'), content: svgContentBlocks(svgFactFromArgs(svgArgs)), source: { kind: 'tool', callId: ToolCallId('svg-1') } },
+    }, 3))
+    harness.surface.paintNow()
+    await awaitWireFact(() => mountedSections(harness).length === 1, 'the SVG Work Activity')
+    const sectionId = firstActivityId(harness)
+    const lastFrame = harness.tern.frames.at(-1)
+    assert.ok(lastFrame !== undefined)
+    const sf = lastFrame.sf
+    assert.equal(mountedNodes(harness).filter(node => node.k === 'image').length, 0, 'the collapsed Activity draws no image')
+
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: sectionId, collapsed: false, raw: {} })
+    await awaitWireFact(() => mountedNodes(harness).some(node => node.k === 'tool'), 'the expanded Work Tool card')
+    const toolNode = mountedNodes(harness).find(node => node.k === 'tool')!
+    assert.equal(toolNode.p['collapsed'], true, 'the Tool SVG card keeps its OWN collapsed disclosure')
+    assert.equal(mountedNodes(harness).filter(node => node.k === 'image').length, 0, 'opening the Work demanded no SVG blob')
+
+    // The Tool's OWN toggle is the display demand; it must not touch the Work.
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: toolNode.id, collapsed: false, raw: {} })
+    await settle() // bounded observation window: a refused toggle must paint no frame
+    assert.equal(mountedSections(harness).find(section => section.id === sectionId)?.p['collapsed'], false,
+      'the Tool toggle left the Work expansion alone')
   } finally {
     await harness.dispose()
     await harness.session.close()
