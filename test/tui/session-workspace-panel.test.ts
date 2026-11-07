@@ -1047,3 +1047,45 @@ test('an Activity reorder is held while the cursor is busy, then committed witho
   assert.ok(committed.includes('Needs attention · 1'), `the delayed reorder commits:\n${committed}`)
   assert.ok(/^> .*Other session/m.test(committed), `the selection is re-anchored on its id:\n${committed}`)
 })
+
+test('the read-only Peek names the OFFICIAL Workspace id, not only its title', async () => {
+  const h = harness({ columns: 120, rows: 24 })
+  h.handle.setSnapshot(snapshot())
+  h.handle.updateWorkspaces({
+    type: 'baseline',
+    items: [
+      { workspaceId: 'ws-alpha', path: '/ws/alpha', title: 'Alpha', sessionIds: [CURRENT] },
+      { workspaceId: 'ws-beta', path: '/ws/beta', title: 'Beta', sessionIds: [OTHER] },
+    ],
+  })
+  await h.paint()
+  h.vt.sendInput('\x1b[B')
+  await h.paint()
+  h.vt.sendInput(' ')
+  await h.paint()
+  const peek = h.view()
+  assert.ok(peek.includes('Beta (ws-beta)'),
+    `the Peek keeps the official Workspace identity beside the Host title:\n${peek}`)
+  assert.ok(peek.includes('Running: Unknown'), 'a missing Activity sample is stated, not guessed')
+})
+
+test('Host titles that sanitize to the same visible text are still distinguishable', async () => {
+  const h = harness({ columns: 120, rows: 24 })
+  h.handle.setSnapshot(snapshot())
+  h.handle.updateWorkspaces({
+    type: 'baseline',
+    items: [
+      // The raw titles differ, but the visible one-physical-row text is the
+      // same: a duplicated VISIBLE label needs the official id.
+      { workspaceId: 'ws-collision-one', path: '/ws/1', title: 'Alpha\u001b[31m', sessionIds: [CURRENT] },
+      { workspaceId: 'ws-collision-two', path: '/ws/2', title: 'Alpha', sessionIds: [OTHER] },
+    ],
+  })
+  await h.paint()
+  h.vt.sendInput('w')
+  await h.paint()
+  const options = h.view().split('\n').filter(line => line.includes('Alpha'))
+  assert.equal(options.length, 2, `both colliding Workspaces are listed:\n${h.view()}`)
+  assert.ok(options.every(line => line.includes('ws-collision')),
+    `a collision after sanitization still carries the official id:\n${options.join('\n')}`)
+})

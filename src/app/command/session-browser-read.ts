@@ -68,6 +68,9 @@ interface ActiveRead {
   listError: string | undefined
   /** The last accepted roster revision (see `SessionBrowserReadSnapshot`). */
   listRevision: number
+  /** The accepted roster GENERATION of the projection batches: a refresh that
+   *  accepts a new roster invalidates every in-flight batch of the old one. */
+  projectionGeneration: number
   refreshError: string | undefined
   /** The ONE single-re-arm roster refresh timer; undefined while idle/other. */
   refreshTimer: ReturnType<typeof setTimeout> | undefined
@@ -232,7 +235,12 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     return results
   }
 
-  const startProjectionBatch = (panel: ActiveRead, offset: number, limit: number): void => {
+  const startProjectionBatch = (
+    panel: ActiveRead,
+    offset: number,
+    limit: number,
+    generation: number = panel.projectionGeneration,
+  ): void => {
     const batch = panel.rows.slice(offset, offset + limit)
     if (batch.length === 0 || !isActive(panel)) return
     const signal = panel.controller.signal
@@ -244,7 +252,9 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
       sessionId: options.sessionId,
       isCancellation: () => cancellation(panel),
       onResult: (projections: Map<string, SessionProjectionSummary>) => {
-        if (!isActive(panel)) return
+        // A batch read from an older accepted roster must never enrich (or
+        // continue against) a newer one: its ids/titles may already be stale.
+        if (!isActive(panel) || panel.projectionGeneration !== generation) return
         const enriched = panel.rows.map((row) => {
           const projection = projections.get(row.id)
           if (projection === undefined) return row
@@ -263,11 +273,11 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
         publish(panel)
         if (!isActive(panel)) return
         if (offset + batch.length < panel.rows.length) {
-          startProjectionBatch(panel, offset + batch.length, PROJECTION_BATCH_SIZE)
+          startProjectionBatch(panel, offset + batch.length, PROJECTION_BATCH_SIZE, generation)
         }
       },
       onError: (error) => {
-        if (!isActive(panel)) return
+        if (!isActive(panel) || panel.projectionGeneration !== generation) return
         panel.projectionError = safeErrorMessage(error)
         publish(panel)
       },
@@ -401,6 +411,7 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     panel.listError = undefined
     panel.refreshError = undefined
     panel.listRevision += 1
+    panel.projectionGeneration += 1
     return listedRows
   }
 
@@ -581,6 +592,7 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
         listState: 'loading',
         listError: undefined,
         listRevision: 0,
+        projectionGeneration: 0,
         refreshError: undefined,
         refreshTimer: undefined,
         refreshing: false,

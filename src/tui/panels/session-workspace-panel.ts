@@ -412,6 +412,14 @@ export class SessionWorkspacePanel implements Component {
    *  `initialQuery` option may write the editor, and never after a real edit. */
   setSnapshot(snapshot: SessionBrowserReadSnapshot, options?: { readonly initialQuery?: string }): void {
     if (this.disposed) return
+    if (snapshot.listRevision !== this.activitySampleRevision) {
+      // The roster was re-accepted: the previous sample belongs to the OLD
+      // revision and may not be painted over the new one. An old positive
+      // Pending is never a current answerability promise — the row falls back
+      // to Unknown until THIS revision's sample is accepted.
+      this.activity = undefined
+      this.activityError = undefined
+    }
     this.snapshot = snapshot
     // An EMPTY seed is not a search: the bare `/sessions` command carries one
     // only because its command edge always passes a trimmed argument.
@@ -435,6 +443,10 @@ export class SessionWorkspacePanel implements Component {
    *  user is browsing. */
   setActivityFacts(input: SessionWorkspaceActivityFacts): void {
     if (this.disposed) return
+    // A sample (including a re-published eligibility with its older facts) is
+    // valid ONLY for the roster revision it was read from: a late publication
+    // must never mix old facts into a newer list.
+    if (input.listRevision !== this.snapshot.listRevision) return
     this.activity = input.facts
     this.answerEligibility = input.answerEligibility
     this.activityError = undefined
@@ -671,16 +683,20 @@ export class SessionWorkspacePanel implements Component {
         enabled: currentId !== undefined,
       },
     ]
+    // Disambiguate the VISIBLE title: two different Host titles that sanitize to
+    // the same one-physical-row text are indistinguishable to the user even
+    // though their raw bytes differ.
+    const titles = facts.map(fact => sanitizedPhysicalLine(fact.title))
     const titleCounts = new Map<string, number>()
-    for (const fact of facts) titleCounts.set(fact.title, (titleCounts.get(fact.title) ?? 0) + 1)
-    for (const fact of facts) {
-      const title = sanitizedPhysicalLine(fact.title)
+    for (const title of titles) titleCounts.set(title, (titleCounts.get(title) ?? 0) + 1)
+    facts.forEach((fact, index) => {
+      const title = titles[index]!
       // A duplicated or empty Host title would make two options indistinguishable:
       // the (sanitized) official id disambiguates them, never a guessed path.
-      const needsId = title === '' || (titleCounts.get(fact.title) ?? 0) > 1
+      const needsId = title === '' || (titleCounts.get(title) ?? 0) > 1
       const label = `${title === '' ? 'Workspace' : title}${needsId ? ` (${sanitizedPhysicalLine(shortWorkspaceId(fact.workspaceId))})` : ''}`
       options.push({ scope: { kind: 'workspace', workspaceId: fact.workspaceId }, label, enabled: true })
-    }
+    })
     options.push({
       scope: { kind: 'unassigned' },
       label: this.workspaces.proven ? 'Unassigned' : 'Unassigned unavailable',
@@ -1551,8 +1567,13 @@ export class SessionWorkspacePanel implements Component {
       case 'ambiguous':
         return `Ambiguous (${fact.membership.workspaceIds.map(id => sanitizedPhysicalLine(id)).join(', ')})`
       case 'assigned':
+        // The official Workspace id is the authoritative identity; the Host
+        // title is display text that may repeat or be empty.
         return fact.membership.workspaceIds
-          .map(id => sanitizedPhysicalLine(this.workspaces.byId.get(id)?.title ?? '') || sanitizedPhysicalLine(shortWorkspaceId(id)))
+          .map(id => {
+            const title = sanitizedPhysicalLine(this.workspaces.byId.get(id)?.title ?? '')
+            return `${title === '' ? 'Workspace' : title} (${sanitizedPhysicalLine(shortWorkspaceId(id))})`
+          })
           .join(' · ')
     }
   }
