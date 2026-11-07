@@ -563,6 +563,13 @@ export const runWebProductQualification = async context => {
     return peer.waitFor(entry => entry.op === 'web-access' && entry.requestId === requestId,
       `${label} web-access`, 300_000)
   }
+  /** One correlated `qualification-workspace-create` round trip. */
+  const workspaceCreate = async (peer, label, workspacePath) => {
+    const requestId = `prd-ws-${++statusSequence}`
+    peer.send({ op: 'qualification-workspace-create', requestId, workspacePath })
+    return peer.waitFor(entry => entry.op === 'workspace-create' && entry.requestId === requestId,
+      `${label} workspace-create`, 120_000)
+  }
   const webPreference = async (peer, label, value) => {
     const requestId = `prd-pref-${++statusSequence}`
     peer.send({
@@ -1920,6 +1927,19 @@ export const runWebProductQualification = async context => {
           const launch11 = launchOf(wp11.ready)
           const index11 = await readHostWebIndex(wp11.ready.localHost.origin, launch11, 'WP-11')
           assertWebIndexQualified(index11, 'WP-11', targetDshVersion)
+          // The W5-CHANGES fixture: ONE dedicated, disposable folder under this
+          // lane's product root, adopted as a Workspace through the official
+          // generated workspace wire; the REAL Browser then starts the Session
+          // in it through its own "New session in <Workspace>" action.
+          const dedicatedWorkspace = join(productRoot, 'documents', 'w5-changed-files')
+          mkdirSync(dedicatedWorkspace, { recursive: true, mode: 0o700 })
+          const workspacePeer = await startPeer('WP-11 workspace')
+          const workspaceFacts = await workspaceCreate(workspacePeer, 'WP-11 workspace', dedicatedWorkspace)
+          assert(workspaceFacts.ok === true,
+            `WP-11 could not adopt the dedicated Workspace through the official wire: ${JSON.stringify(workspaceFacts)}`)
+          await workspacePeer.shutdown()
+          const workspaceIndex = peers.indexOf(workspacePeer)
+          if (workspaceIndex >= 0) peers.splice(workspaceIndex, 1)
 
           let wp11Session
           let wp11Seq
@@ -1941,7 +1961,6 @@ export const runWebProductQualification = async context => {
             // DEDICATED, disposable Default-workspace folder under this lane's
             // isolated product root — never the profile directory, the smoke
             // work root itself, or the developer's repository.
-            const dedicatedWorkspace = join(productRoot, 'documents', 'deepseek-harness', 'default-workspace')
             assert(resolve(wp11Cwd) === resolve(dedicatedWorkspace),
               `WP-11 the Session cwd is not the dedicated Default workspace of this lane: ${wp11Cwd} != ${dedicatedWorkspace}`)
             assert(existsSync(dedicatedWorkspace) === true, 'WP-11 the dedicated workspace folder does not exist')
@@ -2251,7 +2270,7 @@ export const runWebProductQualification = async context => {
               hostInstanceIdDigest: sha16(wp11.ready.localHost.instanceId),
               sessionId: wp11Session,
               otherSession,
-              workspace: 'dedicated-default-workspace',
+              workspace: 'dedicated-w5-changed-files',
               cwdDigest: sha16(wp11Cwd),
               changesEvent: { turn: wp11Turn, seq: wp11Seq },
               summary: { status: summary.status, turn: summaryBody.turn, total: summaryBody.total, files: summaryBody.files.map(file => file.path) },

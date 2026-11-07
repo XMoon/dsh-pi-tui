@@ -401,16 +401,22 @@ async function clickSend(page) {
  * Workspace folder the action names.
  */
 async function newSessionInWorkspace(page, workspaceLabel) {
-  const rowPoint = await page.evaluate(label => {
-    for (const row of document.querySelectorAll('[data-row-key^="workspace:"]')) {
-      if (!(row.innerText ?? '').includes(label)) continue
-      row.scrollIntoView({ block: 'center' })
-      const rect = row.getBoundingClientRect()
-      if (rect.width > 0 && rect.height > 0) return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 }
-    }
-    return null
-  }, workspaceLabel)
-  if (rowPoint === null) throw new Error(`the Web sidebar paints no workspace "${workspaceLabel}"`)
+  // The Workspace row arrives through the live Workspace stream; wait for it.
+  const rowDeadline = Date.now() + 60_000
+  let rowPoint = null
+  while (rowPoint === null && Date.now() < rowDeadline) {
+    rowPoint = await page.evaluate(label => {
+      for (const row of document.querySelectorAll('[data-row-key^="workspace:"]')) {
+        if (!(row.innerText ?? '').includes(label)) continue
+        row.scrollIntoView({ block: 'center' })
+        const rect = row.getBoundingClientRect()
+        if (rect.width > 0 && rect.height > 0) return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 }
+      }
+      return null
+    }, workspaceLabel)
+    if (rowPoint === null) await page.waitForTimeout(250)
+  }
+  if (rowPoint === null) throw new Error(`the Web sidebar never painted the workspace "${workspaceLabel}"`)
   // The row action is revealed by hover; the create itself is the official
   // per-Workspace start-session path.
   await page.mouse.move(rowPoint.x, rowPoint.y)
@@ -1624,7 +1630,7 @@ const cases = {
     // The Session's authoritative cwd must be the isolated, disposable
     // Default-workspace folder (the fixture's dedicated Git work tree), never
     // the profile directory or the developer's repository.
-    const sessionId = await newSessionInWorkspace(page, 'Default workspace')
+    const sessionId = await newSessionInWorkspace(page, 'w5-changed-files')
     result.sessionId = sessionId
     driverFact('session', { sessionId })
     await waitSignal('workspace-ready')

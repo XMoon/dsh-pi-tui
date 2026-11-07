@@ -73,6 +73,13 @@ export interface EntryControlRequest {
    * `autoStart`. Internal control channel only.
    */
   readonly webAutoStart?: unknown
+  /**
+   * Qualification-only target of the `qualification-workspace-create` op: an
+   * existing absolute directory the qualification Peer adopts as a Workspace
+   * through the official generated `workspace.create` wire. Internal control
+   * channel only.
+   */
+  readonly workspacePath?: unknown
 }
 
 /** Handles one control request; `true` means the process should stop reading. */
