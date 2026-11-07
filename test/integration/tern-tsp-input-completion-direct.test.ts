@@ -238,6 +238,26 @@ async function waitForSessionHeaders(fixture: DirectTspFixture, expected: number
   }
 }
 
+/**
+ * The production transition's TERMINAL report. `reportSwitch` writes
+ * `diag.info('switch ok', { from, to })` as the LAST step of `transitionTo`,
+ * only after the committed owner's surface rebuild AND live-catalog refresh have
+ * settled — immediately before the `/new` handler's `finally` releases its
+ * single-flight marker. A durable header / live Agent / hydration frame can all
+ * appear while that marker is still held, so this report (the same signal the
+ * sibling submission lanes wait on) is the real completion boundary for the next
+ * `/new` gesture. The `to` id ties it to THIS round's Session.
+ */
+function switchReported(fixture: DirectTspFixture, toSessionId: string): boolean {
+  let text: string
+  try {
+    text = readFileSync(join(fixture.workRoot, 'diag.log'), 'utf8')
+  } catch {
+    return false
+  }
+  return text.split('\n').some(line => line.includes('switch ok') && line.includes(`to=${toSessionId}`))
+}
+
 function liveAgentIds(fixture: DirectTspFixture): string[] {
   const agents = fixture.ctx.get('agents') as unknown as {
     list(): readonly { session: { id: string } }[]
@@ -963,9 +983,11 @@ test('the same accepted text twice creates one real history row and one candidat
       const beforeSubmitFrames = fixture.pane.frames().length
       fixture.pane.input.type(ENTER)
       // The Composer clears BEFORE /new's async single-flight guard is released.
-      // Each round waits for the distinct durable Session, its live Agent and
-      // the renderer's hydration→ready commit before the next /new gesture.
-      // The Composer probe alone only proves that the editor accepts a key.
+      // Each round waits for THIS round's business facts (distinct durable
+      // Session, its live Agent, the renderer's hydration→ready commit) AND the
+      // production transition's terminal `switch ok` report, which precedes the
+      // handler's marker release. The Composer probe alone only proves that the
+      // editor accepts a key.
       const headers = await waitForSessionHeaders(fixture, attempt + 1, `the /new Session ${String(attempt + 1)}`)
       const freshSession = headers.find(id => !observedSessions.includes(id))
       assert.ok(freshSession, `the /new command ${String(attempt + 1)} published a distinct Session`)
@@ -976,6 +998,8 @@ test('the same accepted text twice creates one real history row and one candidat
         wireNodes(fixture.pane).every(node => node.id !== 'main.loading')
         && fixture.pane.frames().slice(beforeSubmitFrames).some(frame =>
           frame.ops.some(op => op[0] === 'add' && op[1] === 'main.loading')), 30_000)
+      await waitFor(`the /new command ${String(attempt + 1)} to finish its transition`, () =>
+        switchReported(fixture, freshSession), 30_000)
       await composerReady(fixture)
     }
     const headers = await waitForSessionHeaders(fixture, 2, 'the two /new Sessions')
