@@ -300,6 +300,7 @@ export class ScheduleWorkspaceController {
         return
       case 'toggle-advanced':
         if (this.editor === undefined || this.editor.target.kind === 'session') return
+        this.reloadEpoch += 1
         this.editor = { ...this.editor, advanced: !this.editor.advanced }
         this.publish()
         return
@@ -658,6 +659,9 @@ export class ScheduleWorkspaceController {
   private selectTiming(kind: ScheduleTimingKind): void {
     if (this.editor === undefined) return
     const edited = this.editor
+    if (edited.timing.kind === kind) return
+    // Any accepted draft mutation supersedes reloads already in flight.
+    this.reloadEpoch += 1
     // Remember every kind's LAST typed value, so switching away and back never
     // resets the user's rule to a default (and never re-sends a different rule
     // for an unchanged field).
@@ -674,6 +678,7 @@ export class ScheduleWorkspaceController {
 
   private toggleWeekday(weekday: number): void {
     if (this.editor === undefined || this.editor.timing.kind !== 'weekly') return
+    this.reloadEpoch += 1
     const timing: ScheduleTimingDraft = this.editor.timing
     const weekdays = timing.weekdays.includes(weekday)
       ? timing.weekdays.filter(day => day !== weekday)
@@ -686,6 +691,7 @@ export class ScheduleWorkspaceController {
     if (this.editor === undefined) return
     const current = this.editor.target
     if (current.kind === kind) return
+    this.reloadEpoch += 1
     const targetMemory = { ...(this.editor.targetMemory ?? {}), [current.kind]: current }
     const remembered = targetMemory[kind]
     const baselineTarget = this.editorBaseline?.target.kind === kind ? this.editorBaseline.target : undefined
@@ -704,6 +710,7 @@ export class ScheduleWorkspaceController {
 
   private selectTargetSession(sessionId: string): void {
     if (this.editor === undefined) return
+    this.reloadEpoch += 1
     this.editor = { ...this.editor, target: { kind: 'session', sessionId }, targetEdited: true }
     this.publish()
   }

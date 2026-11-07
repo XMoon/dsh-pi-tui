@@ -1688,3 +1688,69 @@ test('L6: an explicit reload clears the per-kind field memories it replaced', as
     life.controller.dispose()
   }
 })
+
+test('L6: every accepted draft mutation supersedes an in-flight reload', async () => {
+  const life = await opened()
+  try {
+    life.port.entries = [entry({
+      kind: 'cron',
+      expression: '0 17 * * 1-5',
+      timeZone: 'UTC',
+      target: { kind: 'new_once', sessionId: 'reserved' as never, create: { cwd: '/work' } },
+    })]
+    life.controller.dispatch({ kind: 'refresh' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-detail', id: 'schedule-1' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-edit' })
+    await flush()
+    const host = entry({
+      kind: 'cron',
+      expression: '0 9 * * *',
+      timeZone: 'UTC',
+      target: { kind: 'new_once', sessionId: 'reserved' as never, create: { cwd: '/host' } },
+      updatedAt: '2026-01-09T00:00:00.000Z',
+    })
+
+    const reload1 = deferred<ScheduleViewResult>()
+    life.port.viewQueue = [reload1.promise]
+    life.controller.dispatch({ kind: 'reload-latest' })
+    life.controller.dispatch({ kind: 'select-timing-kind', timing: 'daily' })
+    reload1.resolve(host)
+    await flush()
+    assert.equal(life.controller.snapshot().editor?.timing.kind, 'daily',
+      'a timing-kind change typed during the reload survives')
+
+    life.controller.dispatch({ kind: 'select-timing-kind', timing: 'weekly' })
+    const reload2 = deferred<ScheduleViewResult>()
+    life.port.viewQueue = [reload2.promise]
+    life.controller.dispatch({ kind: 'reload-latest' })
+    life.controller.dispatch({ kind: 'toggle-weekday', weekday: 6 })
+    reload2.resolve(host)
+    await flush()
+    const weekly = life.controller.snapshot().editor?.timing
+    assert.equal(weekly?.kind === 'weekly' ? weekly.weekdays.includes(6) : false, true,
+      'a weekday toggle made during the reload survives')
+
+    const reload3 = deferred<ScheduleViewResult>()
+    life.port.viewQueue = [reload3.promise]
+    life.controller.dispatch({ kind: 'reload-latest' })
+    life.controller.dispatch({ kind: 'select-target-kind', target: 'new' })
+    reload3.resolve(host)
+    await flush()
+    assert.equal(life.controller.snapshot().editor?.target.kind, 'new',
+      'a target-kind change made during the reload survives')
+
+    const reload4 = deferred<ScheduleViewResult>()
+    life.port.viewQueue = [reload4.promise]
+    life.controller.dispatch({ kind: 'reload-latest' })
+    life.controller.dispatch({ kind: 'select-target-session', sessionId: 'session-9' })
+    reload4.resolve(host)
+    await flush()
+    const target = life.controller.snapshot().editor?.target
+    assert.equal(target?.kind === 'session' ? target.sessionId : undefined, 'session-9',
+      'a Session selection made during the reload survives')
+  } finally {
+    life.controller.dispose()
+  }
+})
