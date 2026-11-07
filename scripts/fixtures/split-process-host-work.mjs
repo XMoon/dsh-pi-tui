@@ -175,6 +175,25 @@ class C1Model extends LlmAdapter {
         index: 0,
         block: { type: 'tool-call', id, name: toolName, arguments: JSON.stringify(args) },
       })
+      if (prompt.includes('w5-changes2-')) {
+        // The post-disable/re-enable Turn (F2): a SECOND real official `write`
+        // through the same standard preset, into a different file.
+        if (!this.secondIssued?.has(sessionId)) {
+          this.secondIssued ??= new Set()
+          this.secondIssued.add(sessionId)
+          this.record('web-changes-write2-issued', { sessionId, nonce })
+          yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+          yield toolCall(`w5-write2-${sessionId}`, 'write', { file_path: 'changed2.txt', content: `w5-change2-${nonce}\n` })
+          yield { type: 'finish', reason: { kind: 'tool-calls' } }
+          return
+        }
+        const secondText = `w5-editing2 ${nonce}\n\n[changed2.txt](changed2.txt)\n\nw5-second answer ${nonce}`
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: secondText }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: secondText } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+        return
+      }
       if (!wrote && prompt.includes('w5-changes-')) {
         this.toolIssued.add(sessionId)
         this.record('web-changes-write-issued', { sessionId, nonce, userText: prompt.slice(0, 200) })
@@ -194,7 +213,7 @@ class C1Model extends LlmAdapter {
       }
       const tail = prompt.includes('w5-nochange') ? 'w5-nochange answer'
         : prompt.includes('> w5-editing') ? 'w5-quote answer' : 'w5-done answer'
-      const text = `w5-editing ${nonce}\n\n[changed.txt](changed.txt) [missing-sentinel.txt](missing-sentinel.txt)\n\n${tail} ${nonce}`
+      const text = `w5-editing ${nonce}\n\n[changed.txt](changed.txt) [missing-sentinel.txt](missing-sentinel.txt)\n\n![shot](shot.png)\n\n${tail} ${nonce}`
       this.record('web-changes-answer', { sessionId, nonce, tail })
       yield { type: 'block-start', index: 0, blockType: 'text' }
       yield { type: 'text-delta', index: 0, text }
