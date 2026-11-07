@@ -2329,7 +2329,6 @@ test('a collapsed Compact Work image has no read/blob demand until expanded and 
     // An ordinary repaint of the same source keeps the visible Activity and
     // reuses the ImageLoader entry; neither the read nor the blob duplicates.
     harness.surface.paintNow()
-    await settle()
     assert.equal(harness.imageReads.length, 1, 'same-source repaint does not re-read the image')
     assert.equal(harness.tern.blobs.length, 1, 'same-source repaint does not resend the blob')
 

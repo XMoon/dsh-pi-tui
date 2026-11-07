@@ -1516,14 +1516,17 @@ export function transcriptViewForPreset(
       clusterHeader: false,
       workHeader: true,
     })
-    const tailWork = [...structure].reverse().find(block => block.kind === 'work')
+    // Only the actual canonical trailing block may own the tail preview. A
+    // preceding Work followed by an Assistant is no longer the projected tail,
+    // even when its TurnActivity remains incomplete.
+    const tailWork = trailing?.kind === 'work' ? trailing : undefined
     const workLifetimes = resolveWorkLifetimes(structure, options.turnActivities ?? EMPTY_TURN_ACTIVITIES)
     // Only the TRAILING open Work adopts its own turn's Preparing rows; every
     // other turn already failed open as standalone rows above. The adopted rows
     // belong to the projected TAIL Work alone — a turn key is not an owner.
     return compactView(
       blocks, keys, options, prefix,
-      tailWork?.kind === 'work' ? tailWork.span.owner : undefined,
+      tailWork?.span.owner,
       adopted, workLifetimes, standalone,
     )
   }
