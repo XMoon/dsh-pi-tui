@@ -1245,7 +1245,7 @@ prompt and never calls a model, and it takes no arguments (`/schedule <text>` is
 an explicit parameter error, not a task). It is not an alias of `/tasks`, which
 keeps its Job/Subagent Task Center semantics.
 
-The leased fullscreen workspace (see `overlay-focus.md` §10.5) is ONE
+The leased fullscreen workspace (see `overlay-focus.md` §10.6) is ONE
 `ScheduleWorkspacePanel` whose states share the lease:
 
 - **List** — Host tasks with status, title, the stored rule, the delivery

@@ -259,7 +259,13 @@ export class ScheduleWorkspaceController {
         this.own('schedule editor open', () => this.openEdit())
         return
       case 'reload-latest':
-        this.own('schedule reload latest', () => this.reloadLatest())
+        // Reload is LOSSY: an unsaved draft must be discarded explicitly.
+        if (this.editorDirty()) {
+          this.confirm = { kind: 'reload', token: ++this.confirmToken }
+          this.publish()
+          return
+        }
+        this.own('schedule reload latest', () => this.performReload())
         return
       case 'focus-field': {
         if (this.editor === undefined) return
@@ -808,7 +814,7 @@ export class ScheduleWorkspaceController {
     return false
   }
 
-  private async reloadLatest(): Promise<void> {
+  private async performReload(): Promise<void> {
     const draft = this.editor
     if (draft === undefined || draft.id === undefined) return
     if (this.editorBaseline === undefined || this.busy) return
@@ -1058,6 +1064,9 @@ export class ScheduleWorkspaceController {
         this.publish()
         return
       }
+      case 'reload':
+        this.own('schedule reload latest', () => this.performReload())
+        return
       case 'run':
         this.runNow(confirm.id)
         return

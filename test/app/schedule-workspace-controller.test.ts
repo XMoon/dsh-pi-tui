@@ -238,6 +238,12 @@ async function opened(options: { readonly autoRun?: boolean } = {}): Promise<Har
  * settlement) has run by then. This is a deterministic yield, NOT a time
  * window: no contract here depends on elapsed time.
  */
+/** The explicit reload is LOSSY: a dirty draft confirms first. */
+function reloadNow(life: { controller: ScheduleWorkspaceController }): void {
+  life.controller.dispatch({ kind: 'reload-latest' })
+  if (life.controller.snapshot().confirm?.kind === 'reload') life.controller.dispatch({ kind: 'confirm' })
+}
+
 function flush(): Promise<void> {
   return new Promise(resolve => setImmediate(resolve))
 }
@@ -853,7 +859,7 @@ test('L6: conflict recovery DISPLAYS the latest revision; the user re-applies by
       title: 'Host side edit',
       updatedAt: '2026-01-02T00:00:00.000Z',
     }))
-    life.controller.dispatch({ kind: 'reload-latest' })
+    reloadNow(life)
     await flush()
     assert.equal(life.controller.snapshot().notice?.text, SCHEDULE_COPY.reloaded)
     assert.equal(life.controller.snapshot().editor?.title, 'Host side edit',
@@ -1065,7 +1071,7 @@ test('L6: reload-latest never overwrites fields another client changed but the u
       prompt: 'P',
       updatedAt: '2026-01-02T00:00:00.000Z',
     }))
-    life.controller.dispatch({ kind: 'reload-latest' })
+    reloadNow(life)
     await flush()
     assert.equal(life.controller.snapshot().notice?.text, SCHEDULE_COPY.reloaded)
     assert.equal(life.controller.snapshot().editor?.title, 'B', "the editor now displays the Host's newer value")
@@ -1103,7 +1109,7 @@ test('L6: reload-latest shows the Host value for a field edited on both sides', 
       prompt: 'Theirs',
       updatedAt: '2026-01-02T00:00:00.000Z',
     }))
-    life.controller.dispatch({ kind: 'reload-latest' })
+    reloadNow(life)
     await flush()
     assert.equal(life.controller.snapshot().notice?.text, SCHEDULE_COPY.reloaded)
     assert.equal(life.controller.snapshot().editor?.prompt, 'Theirs',
@@ -1135,7 +1141,7 @@ test('L6: consecutive reloads adopt each Host revision without inventing user in
 
     // First reload: another client renamed A -> B; the user never touched title.
     life.port.viewResults.set('schedule-1', entry({ title: 'B', prompt: 'P', updatedAt: '2026-01-02T00:00:00.000Z' }))
-    life.controller.dispatch({ kind: 'reload-latest' })
+    reloadNow(life)
     await flush()
     assert.equal(life.controller.snapshot().editor?.title, 'B')
     assert.equal(life.controller.snapshot().editor?.prompt, 'P', 'the old edit is not carried automatically')
@@ -1144,7 +1150,7 @@ test('L6: consecutive reloads adopt each Host revision without inventing user in
     // Second reload: the title changed AGAIN (B -> C) while the user still only
     // edits the prompt. The adopted B must not be mistaken for user intent.
     life.port.viewResults.set('schedule-1', entry({ title: 'C', prompt: 'P', updatedAt: '2026-01-03T00:00:00.000Z' }))
-    life.controller.dispatch({ kind: 'reload-latest' })
+    reloadNow(life)
     await flush()
     assert.equal(life.controller.snapshot().editor?.title, 'C', 'the editor shows the Host each time')
     assert.equal(life.controller.snapshot().editor?.prompt, 'P', 'still no automatic carry-over')
@@ -1226,7 +1232,7 @@ test('L6: reload never re-sends a reverted or old draft value', async () => {
     life.controller.dispatch({ kind: 'set-field', fieldId: 'title', value: 'X' })
     life.controller.dispatch({ kind: 'set-field', fieldId: 'title', value: 'A' })
     life.port.viewResults.set('schedule-1', entry({ title: 'B', prompt: 'P', updatedAt: '2026-01-02T00:00:00.000Z' }))
-    life.controller.dispatch({ kind: 'reload-latest' })
+    reloadNow(life)
     await flush()
     assert.equal(life.controller.snapshot().editor?.title, 'B')
     assert.equal(life.controller.snapshot().editor?.prompt, 'P')
@@ -1258,7 +1264,7 @@ test('L6: toggling Advanced alone never counts as a Target edit', async () => {
       target: { kind: 'new_once', sessionId: 'reserved' as never, create: { cwd: '/host-new' } },
       updatedAt: '2026-01-02T00:00:00.000Z',
     }))
-    life.controller.dispatch({ kind: 'reload-latest' })
+    reloadNow(life)
     await flush()
     const target = life.controller.snapshot().editor?.target
     assert.equal(target?.kind === 'new_once' ? target.cwd : undefined, '/host-new',
@@ -1396,8 +1402,8 @@ test('L6: an older reload answer never rolls the editor back', async () => {
     const older = deferred<ScheduleViewResult>()
     // R1 (older request) gets `older`, R2 (newest) gets `newer`; R2 settles first.
     life.port.viewQueue = [older.promise, newer.promise]
-    life.controller.dispatch({ kind: 'reload-latest' })
-    life.controller.dispatch({ kind: 'reload-latest' })
+    reloadNow(life)
+    reloadNow(life)
     newer.resolve(entry({ title: 'V2', updatedAt: '2026-01-03T00:00:00.000Z' }))
     await flush()
     older.resolve(entry({ title: 'V1', updatedAt: '2026-01-02T00:00:00.000Z' }))
@@ -1418,7 +1424,7 @@ test('L6: a reload from a closed editor never touches the reopened one', async (
     await flush()
     const pending = deferred<ScheduleViewResult>()
     life.port.viewQueue = [pending.promise]
-    life.controller.dispatch({ kind: 'reload-latest' })
+    reloadNow(life)
     // Close the editor (confirmed discard) and reopen the SAME task.
     life.controller.dispatch({ kind: 'back' })
     life.controller.dispatch({ kind: 'confirm' })
@@ -1464,8 +1470,8 @@ test('L6: an older reload failure never replaces the newest success notice', asy
     const newer = deferred<ScheduleViewResult>()
     const older = deferred<ScheduleViewResult>()
     life.port.viewQueue = [older.promise, newer.promise]
-    life.controller.dispatch({ kind: 'reload-latest' })
-    life.controller.dispatch({ kind: 'reload-latest' })
+    reloadNow(life)
+    reloadNow(life)
     newer.resolve(entry({ title: 'V2', updatedAt: '2026-01-03T00:00:00.000Z' }))
     await flush()
     older.reject(new Error('stale network error'))
@@ -1487,7 +1493,7 @@ test('L6: a reload that finishes after the editor closed publishes nothing', asy
     await flush()
     const failed = deferred<ScheduleViewResult>()
     life.port.viewQueue = [failed.promise]
-    life.controller.dispatch({ kind: 'reload-latest' })
+    reloadNow(life)
     life.controller.dispatch({ kind: 'back' }) // a clean editor leaves without a question
     assert.equal(life.controller.snapshot().mode, 'detail')
     failed.reject(new Error('stale reload error'))
@@ -1499,7 +1505,7 @@ test('L6: a reload that finishes after the editor closed publishes nothing', asy
     await flush()
     const missing = deferred<ScheduleViewResult>()
     life.port.viewQueue = [missing.promise]
-    life.controller.dispatch({ kind: 'reload-latest' })
+    reloadNow(life)
     life.controller.dispatch({ kind: 'back' })
     missing.resolve({ id: 'schedule-1' as never, code: 'schedule_not_found' })
     await flush()
@@ -1583,7 +1589,7 @@ test('L6: a reload started before a save cannot rewrite the pending save', async
     life.controller.dispatch({ kind: 'set-field', fieldId: 'title', value: 'Draft title' })
     const reload = deferred<ScheduleViewResult>()
     life.port.viewQueue = [reload.promise]
-    life.controller.dispatch({ kind: 'reload-latest' })
+    reloadNow(life)
     const save = deferred<ScheduleEditResult>()
     life.port.editResult = () => save.promise
     life.controller.dispatch({ kind: 'save' })
@@ -1615,7 +1621,7 @@ test('L6: an in-flight reload never overwrites input typed while it waits', asyn
     const titleBefore = life.controller.snapshot().editor?.title
     const reload = deferred<ScheduleViewResult>()
     life.port.viewQueue = [reload.promise]
-    life.controller.dispatch({ kind: 'reload-latest' })
+    reloadNow(life)
     // The user keeps typing while the read is in flight.
     life.controller.dispatch({ kind: 'set-field', fieldId: 'prompt', value: 'typed while waiting' })
     reload.resolve(entry({ title: 'Host', prompt: 'Host prompt', updatedAt: '2026-01-09T00:00:00.000Z' }))
@@ -1637,7 +1643,7 @@ test('L6: an in-flight reload cannot overwrite the conflict draft a save just ke
     await flush()
     const reload = deferred<ScheduleViewResult>()
     life.port.viewQueue = [reload.promise]
-    life.controller.dispatch({ kind: 'reload-latest' })
+    reloadNow(life)
     life.controller.dispatch({ kind: 'set-field', fieldId: 'title', value: 'Conflicted draft' })
     life.port.editResult = async () => ({ id: 'schedule-1' as never, code: 'schedule_conflict' })
     life.controller.dispatch({ kind: 'save' })
@@ -1678,7 +1684,7 @@ test('L6: an explicit reload clears the per-kind field memories it replaced', as
       timeZone: 'UTC',
       updatedAt: '2026-01-02T00:00:00.000Z',
     }))
-    life.controller.dispatch({ kind: 'reload-latest' })
+    reloadNow(life)
     await flush()
     life.controller.dispatch({ kind: 'select-timing-kind', timing: 'daily' })
     const timing = life.controller.snapshot().editor?.timing
@@ -1714,7 +1720,7 @@ test('L6: every accepted draft mutation supersedes an in-flight reload', async (
 
     const reload1 = deferred<ScheduleViewResult>()
     life.port.viewQueue = [reload1.promise]
-    life.controller.dispatch({ kind: 'reload-latest' })
+    reloadNow(life)
     life.controller.dispatch({ kind: 'select-timing-kind', timing: 'daily' })
     reload1.resolve(host)
     await flush()
@@ -1724,7 +1730,7 @@ test('L6: every accepted draft mutation supersedes an in-flight reload', async (
     life.controller.dispatch({ kind: 'select-timing-kind', timing: 'weekly' })
     const reload2 = deferred<ScheduleViewResult>()
     life.port.viewQueue = [reload2.promise]
-    life.controller.dispatch({ kind: 'reload-latest' })
+    reloadNow(life)
     life.controller.dispatch({ kind: 'toggle-weekday', weekday: 6 })
     reload2.resolve(host)
     await flush()
@@ -1734,7 +1740,7 @@ test('L6: every accepted draft mutation supersedes an in-flight reload', async (
 
     const reload3 = deferred<ScheduleViewResult>()
     life.port.viewQueue = [reload3.promise]
-    life.controller.dispatch({ kind: 'reload-latest' })
+    reloadNow(life)
     life.controller.dispatch({ kind: 'select-target-kind', target: 'new' })
     reload3.resolve(host)
     await flush()
@@ -1743,7 +1749,7 @@ test('L6: every accepted draft mutation supersedes an in-flight reload', async (
 
     const reload4 = deferred<ScheduleViewResult>()
     life.port.viewQueue = [reload4.promise]
-    life.controller.dispatch({ kind: 'reload-latest' })
+    reloadNow(life)
     life.controller.dispatch({ kind: 'select-target-session', sessionId: 'session-9' })
     reload4.resolve(host)
     await flush()
