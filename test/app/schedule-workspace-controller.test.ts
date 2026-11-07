@@ -1466,3 +1466,35 @@ test('L6: an older reload failure never replaces the newest success notice', asy
     life.controller.dispose()
   }
 })
+
+test('L6: a reload that finishes after the editor closed publishes nothing', async () => {
+  const life = await opened()
+  try {
+    life.controller.dispatch({ kind: 'open-detail', id: 'schedule-1' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-edit' })
+    await flush()
+    const failed = deferred<ScheduleViewResult>()
+    life.port.viewQueue = [failed.promise]
+    life.controller.dispatch({ kind: 'reload-latest' })
+    life.controller.dispatch({ kind: 'back' }) // a clean editor leaves without a question
+    assert.equal(life.controller.snapshot().mode, 'detail')
+    failed.reject(new Error('stale reload error'))
+    await flush()
+    assert.equal(life.controller.snapshot().mode, 'detail')
+    assert.equal(life.controller.snapshot().notice, undefined, 'a closed editor never receives the old error')
+
+    life.controller.dispatch({ kind: 'open-edit' })
+    await flush()
+    const missing = deferred<ScheduleViewResult>()
+    life.port.viewQueue = [missing.promise]
+    life.controller.dispatch({ kind: 'reload-latest' })
+    life.controller.dispatch({ kind: 'back' })
+    missing.resolve({ id: 'schedule-1' as never, code: 'schedule_not_found' })
+    await flush()
+    assert.equal(life.controller.snapshot().mode, 'detail')
+    assert.equal(life.controller.snapshot().notice, undefined, 'nor a stale "task gone" notice')
+  } finally {
+    life.controller.dispose()
+  }
+})

@@ -223,29 +223,43 @@ test('the panel does not edit its local buffer while a save is pending', async (
     await flush()
     controller.dispatch({ kind: 'open-edit' })
     await flush()
-    panel.setSnapshot(controller.snapshot())
+    // The PRODUCTION update chain: every snapshot change reaches the panel.
+    const sync = (): readonly string[] => {
+      panel.setSnapshot(controller.snapshot())
+      return panel.render(120)
+    }
     panel.focused = true
-    panel.render(100)
+    sync()
     // Type 'Renamed' into Title through the REAL panel input path.
     for (const character of 'Renamed') panel.handleInput(character)
     assert.equal(controller.snapshot().editor?.title, 'Task ARenamed')
+    const listFrame = ((): readonly string[] => {
+      panel.setSnapshot(controller.snapshot())
+      return panel.render(120)
+    })()
     let resolveEdit!: (value: ScheduleEditResult) => void
     port.editResult = () => new Promise<ScheduleEditResult>(resolve => { resolveEdit = resolve })
     panel.handleInput('\x13') // Ctrl+S
+    sync()
     assert.equal(controller.snapshot().busy, true)
     // The pending write freezes the VISIBLE buffer too: this key must be a no-op
-    // and must not be carried into the next draft.
+    // on BOTH sides of the production snapshot chain.
     panel.handleInput('x')
-    panel.setSnapshot(controller.snapshot())
-    const frozen = panel.render(100)
+    const frozen = sync()
     assert.ok(!frozen.some(line => line.includes('Renamedx')), 'the frozen buffer does not show the rejected key')
+    // Neither the mouse row nor Esc may create a stale Discard question while
+    // the save is pending.
+    const taskBRow = frozen.findIndex(line => line.includes('Task B'))
+    if (taskBRow >= 0) panel.onCellClick(3, taskBRow)
+    panel.handleInput('\x1b')
+    assert.equal(controller.snapshot().confirm, undefined, 'no stale Discard question while saving')
+    assert.equal(controller.snapshot().mode, 'editor')
     // A conflict keeps the controller draft; the next accepted key must append to
     // 'Renamed' only.
     resolveEdit({ id: 'task-a' as never, code: 'schedule_conflict' })
     await flush()
     await controller.whenIdle()
-    panel.setSnapshot(controller.snapshot())
-    panel.render(100)
+    sync()
     panel.handleInput('y')
     assert.equal(controller.snapshot().editor?.title, 'Task ARenamedy', 'the rejected key is not replayed')
   } finally {
