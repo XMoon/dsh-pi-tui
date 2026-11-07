@@ -688,15 +688,11 @@ workspace/question/approval store and keeps no cross-session cache.
   first-settlement own answer authority and final settlement. Host permission
   to read `session.state` is NOT answer authorization, and this port makes no
   answerability claim for an arbitrary read-allowed peer; a non-owner peer
-  composition is outside its qualified use. In the qualified U-A path the
-  current surface's existing forwarded presenter answers the live request, and
-  a later `/resume` is a separate navigation. A navigation-first journey
-  (Workspace attention → switch → answer the SAME request) is NOT qualified by
-  U-A: the forwarded request is presented before any switch and is not
-  re-mounted after deferral, so navigation-first answerability remains a U-C/U-D
-  admission gate. A consumer must never treat `attention:'question'` alone as
-  proof that the request is still answerable; the official request lifecycle
-  decides.
+  composition is outside this port's supported use. A Client navigation or
+  Session reference change is never an answer: a consumer must re-check the
+  live forwarded request through the existing interaction lifecycle and must
+  never treat `attention:'question'` alone as proof that the request is still
+  answerable. The official request lifecycle decides.
 - **Failure vocabulary.** `remote-access/denied` is `denied`,
   `gateway/invocation-unavailable` is `unavailable` (the optional read method is
   genuinely not registered), and every network/Host/codec/timeout failure is
