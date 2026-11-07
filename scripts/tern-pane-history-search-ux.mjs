@@ -425,10 +425,32 @@ export default async function (h) {
   await safeKey(h, 'Ctrl+R reopens the card for the expand measurement', CTRL_R, 450)
   await requiredWait(h, 'the card is open for the expand measurement', () => cardLive(h), { limit: 90 })
   const normal = cardBox('normal')
+  const normalShot = h.capture('expand-normal', 'the ONE Dock card in its normal height budget')
   await safeKey(h, 'F2 expands in the real client', 'F2', 450)
   await requiredWait(h, 'the real client states the collapse affordance', () => h.texts(h.snapshot()).includes('Collapse'), { limit: 90 })
   const expanded = cardBox('expanded')
-  writeLedger(h, 'expand-geometry.json', { normal, expanded })
+  const expandedShot = h.capture('expand-expanded', 'the SAME Dock card in its expanded height budget')
+  // RFL-028: the expanded role must keep the SAME light-bordered Dock surface.
+  // The client's own layout artifact carries the resolved backgroundColor of
+  // every element, so this is a real computed-style fact, not a CSS reading.
+  const cardInk = (id) => {
+    const layout = layoutOf(h, id)
+    const card = (layout?.elements ?? []).find(entry =>
+      /sf-col/.test(String(entry.path)) && (entry.rect?.[2] ?? 0) > 900 && (entry.rect?.[3] ?? 0) > 100)
+    return { backgroundColor: card?.backgroundColor ?? null, rect: card?.rect ?? null }
+  }
+  const normalInk = cardInk(normalShot)
+  const expandedInk = cardInk(expandedShot)
+  h.check('the expanded card keeps the SAME resolved surface background as the normal card',
+    normalInk.backgroundColor !== null && normalInk.backgroundColor === expandedInk.backgroundColor
+      && normalInk.backgroundColor !== 'rgba(0, 0, 0, 0)',
+    JSON.stringify({ normalInk, expandedInk }))
+  writeLedger(h, 'expand-geometry.json', {
+    normal, expanded, normalInk, expandedInk,
+    normalShot: join(h.root, 'shots', 'serve', `${normalShot}.png`),
+    expandedShot: join(h.root, 'shots', 'serve', `${expandedShot}.png`),
+    normalRoleOnWire: wireIds(h, CARD_ID).length === 1 ? wireIds(h, CARD_ID)[0] : null,
+  })
   h.check('F2 gives the reader MORE real height in the client (the card box grows, not just the label)',
     expanded.cardHeight > normal.cardHeight + 8 && expanded.cardVisibleSpanY > normal.cardVisibleSpanY + 8,
     JSON.stringify({ normal, expanded }))
