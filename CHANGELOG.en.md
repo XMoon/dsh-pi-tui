@@ -67,7 +67,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   through the delivery history. Creating and editing submit one of the seven
   official timings and one of the three official targets; an edit that would
   overwrite a newer change is refused and keeps your draft instead of silently
-  overwriting. Pause/resume, run now, delete and clear-ended each need
+  overwriting. Pause/resume applies directly against the latest revision, while
+  run now, delete and clear-ended each need
   an explicit confirmation and report the Host's real answer plus a re-read. The
   command is sessionless: opening the workspace creates no Session and calls no
   model. The Host owns the timer, so closing the Client or the Web frontend does
