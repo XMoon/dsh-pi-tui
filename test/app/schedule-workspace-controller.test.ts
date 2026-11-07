@@ -906,3 +906,56 @@ test('L6: Help under an in-flight history page keeps its answer, and invalidatio
     life.controller.dispose()
   }
 })
+
+test('L6: a multi-line Prompt keeps its exact bytes through an edit and save', async () => {
+  const life = await opened()
+  try {
+    life.port.entries = [entry({ prompt: 'first line\nsecond line' })]
+    life.port.editResult = async () => entry({ prompt: 'first line\nsecond lineX' })
+    life.controller.dispatch({ kind: 'refresh' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-detail', id: 'schedule-1' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-edit' })
+    await flush()
+    assert.equal(life.controller.snapshot().editor?.prompt, 'first line\nsecond line',
+      'opening the editor preserves the stored newline')
+    life.controller.dispatch({ kind: 'set-field', fieldId: 'prompt', value: 'first line\nsecond lineX' })
+    life.controller.dispatch({ kind: 'save' })
+    await flush()
+    await life.controller.whenIdle()
+    const edit = life.port.calls.find(call => call.method === 'edit')
+    const request = edit?.args[0] as ScheduleEditRequest | undefined
+    assert.equal(request?.action, 'update')
+    assert.equal(request?.action === 'update' ? request.patch.prompt : undefined, 'first line\nsecond lineX',
+      'the submitted patch carries the original lines plus the one changed character')
+  } finally {
+    life.controller.dispose()
+  }
+})
+
+test('L6: the delete confirmation freezes the CAS revision it asked about', async () => {
+  const life = await opened()
+  try {
+    life.controller.dispatch({ kind: 'ask-delete' })
+    // Another Client changes the task AFTER the question opened: the local
+    // snapshot now carries a newer revision, but the question confirmed V1.
+    life.port.entries = [entry({ title: 'Host side rename', updatedAt: '2026-01-02T00:00:00.000Z' })]
+    let submitted: ScheduleEditRequest | undefined
+    life.port.editResult = async request => {
+      submitted = request
+      return { id: 'schedule-1' as never, code: 'schedule_conflict' }
+    }
+    life.controller.dispatch({ kind: 'confirm' })
+    await flush()
+    await life.controller.whenIdle()
+    assert.equal(submitted?.action, 'delete')
+    assert.equal((submitted as Extract<ScheduleEditRequest, { action: 'delete' }>).expectedUpdatedAt,
+      '2026-01-01T08:00:00.000Z', 'the confirmed V1 revision is submitted, not the newer V2 one')
+    assert.equal(life.controller.snapshot().notice?.text, SCHEDULE_COPY.conflict)
+    assert.equal(life.controller.snapshot().notice?.kind, 'error', 'a conflict never claims the deletion')
+    assert.equal(life.controller.snapshot().selectedId, 'schedule-1', 'the still-existing task stays selected')
+  } finally {
+    life.controller.dispose()
+  }
+})

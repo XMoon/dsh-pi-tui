@@ -61,9 +61,14 @@ export function officialTimeZone(record: ScheduleCatalogEntry): string {
   return 'timeZone' in record ? record.timeZone : 'UTC'
 }
 
-/** The occurrence prefix: only an ACTIVE record has a next occurrence. */
-export function occurrencePrefix(record: ScheduleCatalogEntry): 'next' | 'final' {
-  return record.status === 'active' ? 'next' : 'final'
+/**
+ * The occurrence prefix. An ACTIVE record has a next obligation, a PAUSED one
+ * keeps its stored (not yet executed) occurrence, and only an ENDED one has a
+ * final occurrence — a pause never means "already executed".
+ */
+export function occurrencePrefix(record: ScheduleCatalogEntry): 'next' | 'scheduled' | 'final' {
+  if (record.status === 'active') return 'next'
+  return record.status === 'ended' ? 'final' : 'scheduled'
 }
 
 /**
@@ -111,15 +116,16 @@ export function formatRuleSummary(record: ScheduleCatalogEntry): string {
   }
 }
 
-/** `→ session <id>`, `→ new_once`, or `→ new`. */
+/** `target session <id>`, `target new_once`, or `target new` (plain text: the
+ *  arrow is an EAW-ambiguous glyph and is not part of this surface's chrome). */
 export function formatTargetSummary(target: ScheduleTarget): string {
   switch (target.kind) {
     case 'session':
-      return `→ session ${target.sessionId}`
+      return `target session ${target.sessionId}`
     case 'new_once':
-      return '→ new_once'
+      return 'target new_once'
     case 'new':
-      return '→ new'
+      return 'target new'
   }
 }
 
