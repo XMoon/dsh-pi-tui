@@ -893,7 +893,7 @@ test('opening /sessions, filtering, closing and /search never switch the Session
 // a second query generation (which would abort and restart the identical Host
 // search) and it must not overwrite a user edit.
 
-test('the one-shot canonical seed never echoes back as a second query generation', async (t) => {
+test('the seeded command runs exactly one canonical Host search and keeps the editor seed', async (t) => {
   const h = harness({
     rows: rows(),
     search: async () => ({ items: [{ sessionId: 'session-alpha', snippet: 'needle alpha' }], hasMore: false }),
@@ -902,10 +902,13 @@ test('the one-shot canonical seed never echoes back as a second query generation
   await h.runSessions('needle')
   await waitUntil(() => h.searchCalls.length === 1)
   await waitUntil(() => h.view().includes('needle alpha'))
-  // Wait past the whole debounce window: a seeded filter reported back to the
-  // owner as a user edit would abort/restart the identical search here.
+  // Wait past the whole debounce window: the seeded open must settle on ONE
+  // Host search, and the seeded text must stay in the editor. NOTE: the read
+  // owner's canonical-equality guard would itself drop an identical restart,
+  // so this observable result is seeding coverage — not an independent probe
+  // of the Presenter's applyingSeed suppression.
   await new Promise<void>(resolve => setTimeout(resolve, 500))
-  assert.equal(h.searchCalls.length, 1, 'the programmatic seed must not restart the Host search')
+  assert.equal(h.searchCalls.length, 1, 'the seeded open owns exactly one Host search')
   assert.equal(h.searchCalls[0]!.query, 'needle')
   assert.ok(h.view().includes('sessions · Search results'), 'the seeded command opens the owner-driven search projection')
 })

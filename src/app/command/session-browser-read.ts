@@ -399,8 +399,12 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
         panel.listError = undefined
         const directMatch = panel.openOptions.directMatch
         if (directMatch !== undefined && listedRows.length === 0) {
+          // An EMPTY roster only proves "no readable sessions": the official
+          // listing publishes a Session from its header only, so a store whose
+          // logs the reader refuses is indistinguishable here. Never claim
+          // there are no persisted Sessions (the S2 limited contract).
           publish(panel)
-          panel.settle({ kind: 'refused', text: 'no persisted sessions' })
+          panel.settle({ kind: 'refused', text: 'No readable sessions' })
           return
         }
         // Native TSP direct matching is limited to visible main-session rows,

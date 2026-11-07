@@ -876,3 +876,28 @@ test('a late listing from a superseded open never repaints the new Picker', asyn
   assert.ok(!h.view().includes('stalerow'), 'the superseded listing must never repaint the new Picker')
   assert.ok(h.view().includes('freshrow'), 'the new Picker keeps its own roster')
 })
+
+test('typed /resume against an empty roster reports the S2 empty state (RFL-001)', async (t) => {
+  // An empty listing only proves that no Session is READABLE: the official
+  // listing publishes a Session from its header, so an unlistable log looks
+  // exactly like an empty store here. The command result must carry the same
+  // S2 wording as the in-picker status row — never a claim about stored data.
+  const h = harness({
+    list: async () => [],
+    search: async () => ({ items: [], hasMore: false }),
+    projectionBatch: async () => new Map(),
+    blank: () => undefined, measureContext: () => undefined,
+    turnOutline: () => undefined,
+    sessionStatus: () => undefined,
+  })
+  t.after(() => h.app.stop())
+
+  const result = await (h.runResume('anything') as Promise<{ kind: string; text?: string }>)
+  assert.deepEqual(result, { kind: 'error', text: 'No readable sessions' })
+  assert.ok(!/no persisted sessions/iu.test(result.text ?? ''),
+    'the empty roster never claims there are no stored Sessions')
+  await waitUntil(() => h.view().includes('No readable sessions'))
+  h.vt.sendInput('\x1b')
+  await h.vt.waitForRender()
+  assert.deepEqual(h.switched, [], 'an empty roster never starts a switch')
+})
