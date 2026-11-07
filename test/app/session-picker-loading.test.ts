@@ -819,13 +819,14 @@ test('a manual query edit during the listing supersedes the typed /resume direct
   assert.ok(h.view().includes('resume · Search results'),
     'the live edit enters the search projection while the list still pends')
   resolveList(rows)
-  // Bounded negative-observation window: the listing has landed and the 250 ms debounce must elapse first.
-  await new Promise<void>(resolve => setTimeout(resolve, 400))
+  // The command settlement is the authoritative "listing landed" signal: a
+  // wrongly admitted direct switch would already have been dispatched
+  // synchronously before this promise resolves.
+  assert.deepEqual(await result, { kind: 'success' },
+    'the unmatched typed resume falls through to the filtered picker')
   assert.deepEqual(h.switched, [], 'a user-edited query must suppress the typed direct switch')
   await h.vt.sendInput('\x1b')
   await h.vt.waitForRender()
-  assert.deepEqual(await result, { kind: 'success' },
-    'the unmatched typed resume falls through to the filtered picker')
 })
 
 test('/resume never switches to a subagent-only target', async (t) => {
