@@ -867,3 +867,40 @@ test('the action bar keeps <key> <verb> while the body buttons use Verb [Key]', 
   assert.ok(bar.includes('n cancel'), `action bar uses <key> <verb>: ${JSON.stringify(bar)}`)
   assert.ok(bar.trimEnd().endsWith('Esc cancel'), `Esc stays the LAST segment: ${JSON.stringify(bar)}`)
 })
+
+test('a long CJK line keeps the caret inside the visible cell budget', () => {
+  const prompt = '汉'.repeat(60)
+  const view = harness(workspace({
+    mode: 'editor',
+    editor: draft({ focused: 1, prompt }),
+  }), { columns: 80, rows: 24 })
+  view.panel.focused = true
+  const lines = view.plain()
+  const caretLine = lines.find(line => line.includes('▏'))
+  assert.ok(caretLine !== undefined, `the caret is painted on a long CJK line:\n${lines.join('\n')}`)
+  // The caret is inside the granted width, not truncated away by composeRow().
+  assert.ok(visibleWidth(caretLine) <= 80, `the caret row fits 80 cells: ${visibleWidth(caretLine)}`)
+  assert.ok(caretLine.indexOf('▏') < 80)
+})
+
+test('a 30-line Prompt scrolls so the caret line is visible in both layouts', () => {
+  const prompt = Array.from({ length: 30 }, (_, index) => `line ${index + 1} of the prompt`).join('\n')
+  for (const size of [{ columns: 80, rows: 24 }, { columns: 120, rows: 40 }]) {
+    const view = harness(workspace({
+      mode: 'editor',
+      editor: draft({ focused: 1, prompt }),
+    }), size)
+    view.panel.focused = true
+    view.render()
+    const lines = view.plain()
+    const caretLine = lines.find(line => line.includes('▏'))
+    assert.ok(caretLine !== undefined,
+      `${size.columns}×${size.rows}: the caret row is scrolled into view:\n${lines.join('\n')}`)
+    assert.ok(caretLine.includes('line 30'), 'the caret starts at the end of the stored text')
+    // Moving up keeps the caret visible as the anchor follows it.
+    for (let step = 0; step < 3; step += 1) view.panel.handleInput('\x1b[A')
+    view.render()
+    const moved = view.plain().find(line => line.includes('▏'))
+    assert.ok(moved !== undefined, 'the caret row stays visible after moving up')
+  }
+})
