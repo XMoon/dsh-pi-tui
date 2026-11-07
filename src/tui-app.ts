@@ -174,11 +174,13 @@ import {
 import type { ModelsInitialView } from './tui/panels/models-workspace-page.ts'
 import type { AccountInitialView } from './tui/panels/account-workspace-page.ts'
 import { SessionWorkspacePanel } from './tui/panels/session-workspace-panel.ts'
+import { ScheduleWorkspacePanel } from './tui/schedule/workspace-panel.ts'
 import type {
   SessionBrowserReadSnapshot,
   SessionBrowserSubject,
 } from './app/command/session-browser-presentation.ts'
 import type { WorkspaceFactsFrame } from './runtime/session-workspace-facts-port.ts'
+import type { ScheduleIntent, ScheduleWorkspaceSnapshot } from './app/schedule/presentation.ts'
 import type { TaskPanelItem } from './app/surface/task-presentation.ts'
 import type { JobInspectorState, TaskBrowserViewState } from './app/surface/task-runtime.ts'
 import type { TaskBrowserSummary } from './app/surface/task-browser-runtime.ts'
@@ -1826,6 +1828,24 @@ export interface SessionWorkspaceHandle {
   isDisposed(): boolean
 }
 
+/** The controller-backed bindings of ONE Schedule workspace open. */
+export interface ScheduleWorkspaceBindings {
+  /** The CURRENT controller snapshot (the panel reads it on every frame). */
+  readonly snapshot: () => ScheduleWorkspaceSnapshot
+  /** The ONE intent entry; the controller owns every semantic. */
+  readonly dispatch: (intent: ScheduleIntent) => void
+  /** Teardown notification of THIS lease (the controller is disposed here). */
+  readonly onClose?: () => void
+}
+
+/** The instance-fenced handle of ONE Schedule workspace open. */
+export interface ScheduleWorkspaceHandle {
+  /** Leave the Schedule workspace and restore the surface that opened it. */
+  close(): void
+  /** Publish a newer controller snapshot and repaint; inert once superseded. */
+  update(snapshot: ScheduleWorkspaceSnapshot): void
+}
+
 /**
  * The ONE short-lived workspace screen lease (Settings, the Session Workspace
  * and the Image UX screens). Like the Job workspace it renders in a temporary
@@ -1846,7 +1866,7 @@ type WorkspaceLeasePanel = Component & {
  *  Manager is a CHILD of the Settings lease and never takes a workspace screen
  *  of its own. */
 interface WorkspaceLeaseRecord {
-  readonly kind: 'settings' | 'image' | 'sessions'
+  readonly kind: 'settings' | 'image' | 'sessions' | 'schedule'
   readonly token: object
   readonly screen: TuiAltScreen
   readonly panel: WorkspaceLeasePanel
@@ -24594,6 +24614,47 @@ export class TuiApp {
   }
 
   /**
+   * Open the fullscreen Schedule workspace (S5-PR4): the SAME ONE temporary
+   * `TuiAltScreen` lease primitive as Settings/Image, with the bundle's single
+   * `ScheduleWorkspacePanel` as layout root, keyboard focus target and mouse
+   * hitmap owner. The screen that opened it is only STOPPED with
+   * `preserveScreen` — its tree, draft, focus and scroll survive the round trip.
+   *
+   * The lease is committed BEFORE the physical switch, and it is mutually
+   * exclusive with the Job, Settings and Image workspaces: at most ONE
+   * workspace owns the terminal. A blocking Question/Approval/Save owner still
+   * refuses the lease outright.
+   * @param bindings - the controller-backed snapshot source, the ONE intent
+   *   dispatch and the teardown notification of THIS open.
+   * @returns the instance-fenced handle of THIS workspace.
+   */
+  openScheduleWorkspace(bindings: ScheduleWorkspaceBindings): ScheduleWorkspaceHandle {
+    this.assertWorkspaceLeaseAvailable('Schedule')
+    // The lease record exists only after the panel is constructed; a close
+    // request can only arrive from input, so the thunk is never called during
+    // construction and the binding is resolved by then.
+    let record: WorkspaceLeaseRecord | undefined
+    const panel = new ScheduleWorkspacePanel({
+      snapshot: bindings.snapshot,
+      dispatch: bindings.dispatch,
+      requestRender: () => this.requestRender(),
+      rows: () => this.terminal.rows,
+      columns: () => this.terminal.columns,
+      close: () => record?.close(),
+    })
+    record = this.leaseWorkspaceScreen('schedule', panel, () => bindings.onClose?.())
+    const close = (): void => record.close()
+    return {
+      close,
+      update: (snapshot: ScheduleWorkspaceSnapshot) => {
+        if (this.disposed || this.workspaceLease !== record || record.kind !== 'schedule') return
+        panel.setSnapshot(snapshot)
+        this.requestRender()
+      },
+    }
+  }
+
+  /**
    * Refuse a workspace lease unless the surface is idle and unclaimed. A
    * lifecycle transition, a Job lease, a second workspace, or a blocking
    * Question/Approval/Save owner all refuse; a focused Task Quick is retired
@@ -24635,11 +24696,11 @@ export class TuiApp {
    * workspace screen of its own.
    */
   private leaseWorkspaceScreen(
-    kind: 'settings' | 'image' | 'sessions',
+    kind: 'settings' | 'image' | 'sessions' | 'schedule',
     panel: WorkspaceLeasePanel,
     onClose?: () => void,
   ): WorkspaceLeaseRecord {
-    this.assertWorkspaceLeaseAvailable(kind === 'settings' ? 'Settings' : kind === 'sessions' ? 'Sessions' : 'Image')
+    this.assertWorkspaceLeaseAvailable(kind === 'settings' ? 'Settings' : kind === 'sessions' ? 'Sessions' : kind === 'image' ? 'Image' : 'Schedule')
     const returnScreen: TuiMainScreen | TuiAltScreen = this.fullscreen ?? this.tui
     const returnFocus = returnScreen.getFocusedComponent()
     // A same-process temporary screen (the Session Workspace) never hands the

@@ -53,11 +53,17 @@ import type { RemoteWorkspaceFilesNamespace } from '../../runtime/remote/deliver
 import type { SessionWorkspaceFactsPort } from '../../runtime/session-workspace-facts-port.ts'
 import { RemoteSessionWorkspaceFacts, type RemoteSessionFactsRemotes } from '../../runtime/remote/session-workspace-facts-remote.ts'
 import type { RemoteWebAccessNamespace } from '../../runtime/remote/web-access-remote.ts'
+import {
+  RemoteSchedulePort,
+  type RemoteScheduleEvents,
+  type RemoteScheduleNamespace,
+} from '../../runtime/remote/schedule-remote.ts'
 import type { RemoteJobObservationSource } from '../../runtime/remote/job-observation-remote.ts'
 import { RemoteJobObservationPort } from '../../runtime/remote/job-observation-remote.ts'
 import type { PluginManagerPort } from '../../runtime/plugin-manager-port.ts'
 import type { JobObservationPort } from '../../runtime/job-observation-port.ts'
 import type { DeliveredFileReadPort } from '../../runtime/deliverables-port.ts'
+import type { SchedulePort } from '../../runtime/schedule-port.ts'
 import type { InteractionPort } from '../../runtime/interaction-port.ts'
 import { RemoteSessionReader } from '../../runtime/remote/session-reader-remote.ts'
 import { RemotePendingInputReader } from '../../runtime/remote/pending-input-reader-remote.ts'
@@ -97,6 +103,9 @@ export interface RemoteM3ASemantics {
   /** The UI-neutral read-authority port (M5-U-A): passive Session activity
    *  facts and the official Workspace follow stream. Read-only. */
   readonly sessionWorkspaceFacts: SessionWorkspaceFactsPort
+  /** The Host Schedule management port (S5-PR4): the official generated
+   *  `schedule` namespace over the SAME authenticated Connection. */
+  readonly schedule: SchedulePort
   /** Drop adapter-owned caches/subscriptions. Runs BEFORE the Client
    *  Context disposal (`RemoteClientRuntime.dispose()`). */
   dispose(): void
@@ -167,6 +176,10 @@ export interface RemoteM3ARuntimeSource {
      *  lifecycle adopts it as the one pre-selection authority — never a second
      *  Client, store or cached Workspace list. */
     readonly workspace: RemoteWorkspaceNamespaceLike
+    /** The official generated `schedule` namespace (S5-PR4): the Host Schedule
+     *  domain's management face. Absent until the installed contribution is
+     *  mounted, so the port answers the ONE truthful unavailable error. */
+    readonly schedule: RemoteScheduleNamespace | undefined
     /** The official generated config-plane namespaces (the SAME Client
      *  Remote service): settings, credentials and permission presets. The
      *  M3-3A adapters ignore them; the Remote Backend's ConfigPort reads them
@@ -211,7 +224,8 @@ export function createRemoteM3ASemantics(
   // P11 same-Host wire smoke caught exactly that). The cast only restores the
   // overload set of the two per-adapter event declarations.
   const forwardedEvents = remote.$on.bind(remote) as unknown as
-    RemoteInteractionRuntimeSource['remote']['$on'] & RemotePluginManagerSource['$on']
+    RemoteInteractionRuntimeSource['remote']['$on']
+      & RemotePluginManagerSource['$on']
   const modelCatalog = new RemoteModelCatalog(remote.session, sessions, generation, remote.llm)
   const interaction = new RemoteInteractionPort({
     sessions,
@@ -259,6 +273,18 @@ export function createRemoteM3ASemantics(
       remote: { session: remote.session, workspace: remote.workspace },
       connection: { generation },
     }),
+    // S5-PR4: the official generated `schedule` namespace over the SAME
+    // Client Remote and the SAME Connection generation; a missing namespace is
+    // a truthful unavailable, never a Direct fallback.
+    // The forwarded-event seat is the SAME method-bound `$on`; `schedule/changed`
+    // is part of the installed rc.1 forwarded-event allowlist (the
+    // schedule-remote contract test proves that from the installed package), so
+    // the narrow schedule face is a typed view of THIS one method.
+    schedule: new RemoteSchedulePort(
+      remote.schedule,
+      forwardedEvents as unknown as RemoteScheduleEvents,
+      generation,
+    ),
     dispose(): void {
       if (disposed) return
       disposed = true

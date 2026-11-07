@@ -1,0 +1,613 @@
+/**
+ * The Schedule workspace panel: the responsive frame, the semantic key
+ * ladder, the distinct status/execution/delivery-floor facts, the one
+ * confirmation fence and the last-painted-frame mouse map.
+ *
+ * These cases drive the REAL panel with a structural controller snapshot; a
+ * fake dispatch records exactly the intents the host would receive. They do
+ * not run a Host, a screen lease or a terminal.
+ *
+ * @module @xmoon76/dsh-pi-tui/schedule-workspace-panel.test
+ */
+
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
+import {
+  ScheduleWorkspacePanel,
+  scheduleWorkspaceLayout,
+} from '../../src/tui/schedule/workspace-panel.ts'
+import type {
+  ScheduleCatalogEntry,
+  ScheduleIntent,
+  ScheduleWorkspaceSnapshot,
+} from '../../src/app/schedule/presentation.ts'
+import type { ScheduleEditorDraft } from '../../src/domain/schedule/form.ts'
+
+interface FrameSize {
+  readonly columns: number
+  readonly rows: number
+}
+
+interface TaskOverrides {
+  readonly id: string
+  readonly title: string
+  readonly status: ScheduleCatalogEntry['status']
+  readonly prompt?: string
+  readonly scheduledAt?: string
+  readonly executionActive?: true
+  readonly deliveryFloorEndsAt?: string
+  readonly lastDelivery?: NonNullable<ScheduleCatalogEntry['lastDelivery']>
+}
+
+/** One official-shaped catalog row (the brand is compile-time only). */
+function task(overrides: TaskOverrides): ScheduleCatalogEntry {
+  return {
+    kind: 'daily',
+    time: '09:00:00',
+    timeZone: 'Asia/Shanghai',
+    scheduledAt: '2026-06-01T09:00:00.000Z',
+    prompt: 'Prepare the morning report.',
+    target: { kind: 'session', sessionId: 'session-target' },
+    involvedSessionIds: [],
+    ...overrides,
+  } as unknown as ScheduleCatalogEntry
+}
+
+function workspace(overrides: Partial<ScheduleWorkspaceSnapshot> = {}): ScheduleWorkspaceSnapshot {
+  return {
+    status: 'ready',
+    filter: 'all',
+    query: '',
+    rows: [],
+    total: 0,
+    mode: 'list',
+    sessions: [],
+    busy: false,
+    ...overrides,
+  }
+}
+
+function draft(overrides: Partial<ScheduleEditorDraft> = {}): ScheduleEditorDraft {
+  return {
+    mode: 'create',
+    title: '',
+    prompt: '',
+    timing: { kind: 'daily', time: '09:00:00', timeZone: 'UTC' },
+    timingEdited: false,
+    target: { kind: 'new_once', cwd: '', agentPreset: '' },
+    targetEdited: false,
+    advanced: false,
+    focused: 0,
+    ...overrides,
+  }
+}
+
+interface Harness {
+  readonly panel: ScheduleWorkspacePanel
+  readonly dispatches: ScheduleIntent[]
+  readonly snapshot: () => ScheduleWorkspaceSnapshot
+  readonly setSnapshot: (snapshot: ScheduleWorkspaceSnapshot) => void
+  readonly closeCount: () => number
+  readonly render: () => string[]
+  readonly plain: () => string[]
+  readonly resetDispatches: () => void
+}
+
+function harness(initial: ScheduleWorkspaceSnapshot, size: FrameSize): Harness {
+  let snapshot = initial
+  let closed = 0
+  const dispatches: ScheduleIntent[] = []
+  const panel = new ScheduleWorkspacePanel({
+    snapshot: () => snapshot,
+    dispatch: intent => { dispatches.push(intent) },
+    requestRender: () => {},
+    rows: () => size.rows,
+    columns: () => size.columns,
+    close: () => { closed += 1 },
+  })
+  return {
+    panel,
+    dispatches,
+    snapshot: () => snapshot,
+    setSnapshot: next => {
+      snapshot = next
+      panel.setSnapshot(next)
+    },
+    closeCount: () => closed,
+    render: () => panel.render(size.columns),
+    plain: () => panel.render(size.columns).map(stripTerminalSequences),
+    resetDispatches: () => { dispatches.length = 0 },
+  }
+}
+
+const FOUR_TASKS: readonly ScheduleCatalogEntry[] = [
+  task({ id: 'task-alpha', title: 'Alpha report', status: 'active' }),
+  task({ id: 'task-bravo', title: 'Bravo digest', status: 'active', scheduledAt: '2026-06-01T10:00:00.000Z' }),
+  task({ id: 'task-charlie', title: 'Charlie review', status: 'paused', scheduledAt: '2026-06-01T11:00:00.000Z' }),
+  task({ id: 'task-delta', title: 'Delta cleanup', status: 'ended', scheduledAt: '2026-06-01T12:00:00.000Z' }),
+]
+
+const LIST = workspace({
+  rows: FOUR_TASKS,
+  total: FOUR_TASKS.length,
+  selectedId: 'task-alpha',
+})
+
+// ── 1. responsive frame ──────────────────────────────────────────────────────
+
+test('the four product sizes paint width-safe frames and switch layout at 120×30', () => {
+  const sizes: readonly FrameSize[] = [
+    { columns: 160, rows: 50 },
+    { columns: 100, rows: 30 },
+    { columns: 80, rows: 24 },
+    { columns: 60, rows: 12 },
+  ]
+  for (const size of sizes) {
+    const view = harness(LIST, size)
+    const lines = view.render()
+    assert.ok(lines.length > 0, `${size.columns}×${size.rows} painted nothing`)
+    for (const line of lines) {
+      assert.ok(visibleWidth(line) <= size.columns, `${size.columns}×${size.rows} row exceeds the width: ${JSON.stringify(line)}`)
+    }
+    assert.equal(
+      scheduleWorkspaceLayout(size.columns, size.rows),
+      size.columns >= 120 && size.rows >= 30 ? 'wide' : 'single',
+      `${size.columns}×${size.rows} layout`,
+    )
+  }
+  assert.equal(scheduleWorkspaceLayout(120, 30), 'wide')
+  assert.equal(scheduleWorkspaceLayout(119, 30), 'single')
+  assert.equal(scheduleWorkspaceLayout(120, 29), 'single')
+})
+
+test('the wide frame paints the detail column beside the task catalog', () => {
+  const view = harness(LIST, { columns: 160, rows: 50 })
+  const lines = view.plain()
+  const wideLine = lines.find(line => line.includes('Details'))
+  assert.ok(wideLine !== undefined, 'the wide frame must paint the detail column')
+  assert.ok(wideLine.includes('Alpha report'), 'the task row must stay in the left column')
+  assert.ok(
+    wideLine.indexOf('Details') > wideLine.indexOf('Alpha report'),
+    'the detail heading must be painted to the right of the catalog row',
+  )
+  assert.ok(wideLine.indexOf('Details') >= Math.floor((160 - 2) * 0.4))
+})
+
+test('the single-column frames do not paint the wide detail column', () => {
+  for (const size of [{ columns: 100, rows: 30 }, { columns: 80, rows: 24 }, { columns: 60, rows: 12 }]) {
+    const lines = harness(LIST, size).plain()
+    assert.ok(!lines.some(line => line.includes('Details')), `${size.columns}×${size.rows} painted a second column`)
+  }
+})
+
+test('the 60×12 minimum keeps at least three task rows on screen', () => {
+  const lines = harness(LIST, { columns: 60, rows: 12 }).plain()
+  const painted = ['Alpha report', 'Bravo digest', 'Charlie review'].filter(title => lines.some(line => line.includes(title)))
+  assert.equal(painted.length, 3)
+})
+
+test('the narrow action bar keeps Esc ↑↓ Enter N / first', () => {
+  const lines = harness(LIST, { columns: 60, rows: 12 }).plain()
+  const bar = lines[lines.length - 1]
+  assert.ok(bar !== undefined && bar.startsWith('Esc · ↑↓ · Enter · N · /'), `narrow bar: ${JSON.stringify(bar)}`)
+})
+
+// ── 2. below-minimum size ────────────────────────────────────────────────────
+
+for (const size of [{ columns: 59, rows: 11 }, { columns: 60, rows: 11 }]) {
+  test(`${size.columns}×${size.rows} is below the minimum and paints only the size gate`, () => {
+    const view = harness(LIST, size)
+    assert.deepEqual(view.plain(), ['Terminal too small (60×12 required)', 'Esc close'])
+    for (const key of ['j', 'k', '\x1b[B', '\r', 'n', 'x', '?', '/', 'A']) {
+      view.panel.handleInput(key)
+    }
+    assert.deepEqual(view.dispatches, [], 'a below-minimum frame must never dispatch a task action')
+    view.panel.handleInput('\x1b')
+    assert.deepEqual(view.dispatches, [], 'Esc closes, it never dispatches a task action')
+    assert.equal(view.closeCount(), 1)
+  })
+}
+
+// ── 3. status truth ──────────────────────────────────────────────────────────
+
+test('an ended task renders status, execution activity and the delivery floor as separate facts', () => {
+  const ended = task({
+    id: 'task-ended',
+    title: 'Ended run',
+    status: 'ended',
+    executionActive: true,
+    deliveryFloorEndsAt: '2026-06-02T12:00:00.000Z',
+    scheduledAt: '2026-06-01T09:00:00.000Z',
+  })
+  const snapshot = workspace({
+    mode: 'detail',
+    detail: ended,
+    rows: [ended],
+    total: 1,
+    selectedId: ended.id,
+  })
+  const lines = harness(snapshot, { columns: 100, rows: 30 }).plain()
+  const statusLine = lines.find(line => line.includes('Status'))
+  const executionLine = lines.find(line => line.includes('Execution'))
+  const floorLine = lines.find(line => line.includes('Delivery floor'))
+  assert.ok(statusLine !== undefined && statusLine.includes('ended'), 'the task status line must say ended')
+  assert.ok(executionLine !== undefined && executionLine.includes('in progress'), 'execution activity is its own fact')
+  assert.ok(floorLine !== undefined && floorLine.includes('until '), 'the delivery floor is its own fact')
+  assert.notEqual(statusLine, floorLine)
+  assert.ok(!statusLine.includes('until '), 'the delivery floor is never painted as the task status')
+  assert.ok(!floorLine.includes('ended'), 'the delivery floor is never painted as a task status')
+  assert.ok(!executionLine.includes('ended'), 'execution activity is never painted as a task status')
+})
+
+// ── 4. list keys ─────────────────────────────────────────────────────────────
+
+test('list navigation forwards one move intent per key', () => {
+  const view = harness(LIST, { columns: 100, rows: 30 })
+  view.panel.handleInput('\x1b[A')
+  view.panel.handleInput('\x1b[B')
+  view.panel.handleInput('j')
+  view.panel.handleInput('k')
+  assert.deepEqual(view.dispatches, [
+    { kind: 'move', delta: -1 },
+    { kind: 'move', delta: 1 },
+    { kind: 'move', delta: 1 },
+    { kind: 'move', delta: -1 },
+  ])
+})
+
+test('search is local to the panel and set-query is dispatched per keystroke', () => {
+  const view = harness(LIST, { columns: 100, rows: 30 })
+  view.panel.handleInput('/')
+  assert.deepEqual(view.dispatches, [], 'focusing search is panel-local')
+  view.panel.handleInput('a')
+  view.panel.handleInput('b')
+  view.panel.handleInput('c')
+  assert.deepEqual(view.dispatches, [
+    { kind: 'set-query', query: 'a' },
+    { kind: 'set-query', query: 'ab' },
+    { kind: 'set-query', query: 'abc' },
+  ])
+  view.resetDispatches()
+  view.panel.handleInput('\x1b')
+  assert.deepEqual(view.dispatches, [], 'Esc leaves search without a Host action or a close')
+  assert.equal(view.closeCount(), 0)
+})
+
+test('filter, refresh, create, clear, help, detail and root Esc dispatch their intents', () => {
+  const view = harness(LIST, { columns: 100, rows: 30 })
+  view.panel.handleInput('A')
+  view.panel.handleInput('P')
+  view.panel.handleInput('E')
+  view.panel.handleInput('L')
+  view.panel.handleInput('R')
+  view.panel.handleInput('N')
+  view.panel.handleInput('X')
+  view.panel.handleInput('?')
+  view.panel.handleInput('\r')
+  assert.deepEqual(view.dispatches, [
+    { kind: 'set-filter', filter: 'active' },
+    { kind: 'set-filter', filter: 'paused' },
+    { kind: 'set-filter', filter: 'ended' },
+    { kind: 'set-filter', filter: 'all' },
+    { kind: 'refresh' },
+    { kind: 'open-create' },
+    { kind: 'ask-clear-ended' },
+    { kind: 'open-help' },
+    { kind: 'open-detail' },
+  ])
+  const root = harness(LIST, { columns: 100, rows: 30 })
+  root.panel.handleInput('\x1b')
+  assert.deepEqual(root.dispatches, [])
+  assert.equal(root.closeCount(), 1, 'the list root Esc closes the workspace')
+})
+
+// ── 5. detail / history / editor ─────────────────────────────────────────────
+
+test('detail keys dispatch history, edit, toggle, run and delete', () => {
+  const selected = task({ id: 'task-alpha', title: 'Alpha report', status: 'active' })
+  const detail = workspace({ mode: 'detail', detail: selected, rows: [selected], total: 1, selectedId: selected.id })
+  const view = harness(detail, { columns: 100, rows: 30 })
+  view.panel.handleInput('H')
+  view.panel.handleInput('E')
+  view.panel.handleInput(' ')
+  view.panel.handleInput('U')
+  view.panel.handleInput('D')
+  assert.deepEqual(view.dispatches, [
+    { kind: 'open-history' },
+    { kind: 'open-edit' },
+    { kind: 'toggle-active' },
+    { kind: 'ask-run' },
+    { kind: 'ask-delete' },
+  ])
+  view.resetDispatches()
+  view.panel.handleInput('\x1b')
+  assert.deepEqual(view.dispatches, [{ kind: 'back' }])
+})
+
+test('history More is dispatched only while the Host reports a next cursor', () => {
+  const withCursor = workspace({
+    mode: 'history',
+    history: {
+      status: 'ready',
+      records: [],
+      earlierRecordsUnavailable: false,
+      earlierRecordsPruned: false,
+      nextBefore: 'message-before',
+    },
+  })
+  const more = harness(withCursor, { columns: 100, rows: 30 })
+  more.panel.handleInput('\r')
+  assert.deepEqual(more.dispatches, [{ kind: 'history-more' }])
+  more.resetDispatches()
+  more.panel.handleInput('\x1b')
+  assert.deepEqual(more.dispatches, [{ kind: 'back' }])
+
+  const exhausted = workspace({
+    mode: 'history',
+    history: {
+      status: 'ready',
+      records: [],
+      earlierRecordsUnavailable: false,
+      earlierRecordsPruned: false,
+    },
+  })
+  const lastPage = harness(exhausted, { columns: 100, rows: 30 })
+  lastPage.panel.handleInput('\r')
+  assert.deepEqual(lastPage.dispatches, [], 'no cursor means no More action')
+})
+
+test('editor Ctrl+S saves, Tab steps fields and Esc backs out', () => {
+  const save = harness(workspace({ mode: 'editor', editor: draft() }), { columns: 100, rows: 30 })
+  save.panel.handleInput('\x13')
+  assert.deepEqual(save.dispatches, [{ kind: 'save' }])
+
+  const tab = harness(workspace({ mode: 'editor', editor: draft() }), { columns: 100, rows: 30 })
+  tab.panel.handleInput('\t')
+  assert.deepEqual(tab.dispatches, [{ kind: 'next-field', delta: 1 }])
+
+  const backTab = harness(workspace({ mode: 'editor', editor: draft({ focused: 1 }) }), { columns: 100, rows: 30 })
+  backTab.panel.handleInput('\x1b[Z')
+  assert.deepEqual(backTab.dispatches, [{ kind: 'next-field', delta: -1 }])
+
+  const back = harness(workspace({ mode: 'editor', editor: draft() }), { columns: 100, rows: 30 })
+  back.panel.handleInput('\x1b')
+  assert.deepEqual(back.dispatches, [{ kind: 'back' }])
+})
+
+test('an editor Tab past the last field uses focus-field instead of an out-of-range next-field', () => {
+  const fields = draft({ focused: 6 })
+  const view = harness(workspace({ mode: 'editor', editor: fields }), { columns: 100, rows: 30 })
+  view.panel.handleInput('\t')
+  assert.deepEqual(view.dispatches, [{ kind: 'focus-field', index: 0 }])
+  view.resetDispatches()
+  const first = harness(workspace({ mode: 'editor', editor: draft({ focused: 0 }) }), { columns: 100, rows: 30 })
+  first.panel.handleInput('\x1b[Z')
+  assert.deepEqual(first.dispatches, [{ kind: 'focus-field', index: 6 }])
+})
+
+test('typing into an editor text field dispatches set-field for the focused field', () => {
+  const view = harness(workspace({ mode: 'editor', editor: draft({ title: '' }) }), { columns: 100, rows: 30 })
+  view.panel.handleInput('N')
+  view.panel.handleInput('e')
+  view.panel.handleInput('w')
+  assert.deepEqual(view.dispatches, [
+    { kind: 'set-field', fieldId: 'title', value: 'N' },
+    { kind: 'set-field', fieldId: 'title', value: 'Ne' },
+    { kind: 'set-field', fieldId: 'title', value: 'New' },
+  ])
+})
+
+// ── 6. confirmation fence ────────────────────────────────────────────────────
+
+test('y confirms, n and Esc cancel the painted confirmation', () => {
+  const confirm = workspace({ rows: [FOUR_TASKS[0]!], total: 1, confirm: { kind: 'delete', token: 3, id: 'task-alpha', title: 'Alpha report', shortId: 'task-alpha' } })
+  const view = harness(confirm, { columns: 100, rows: 30 })
+  view.render()
+  view.panel.handleInput('y')
+  assert.deepEqual(view.dispatches, [{ kind: 'confirm' }])
+  view.resetDispatches()
+  view.panel.handleInput('n')
+  assert.deepEqual(view.dispatches, [{ kind: 'cancel' }])
+  view.resetDispatches()
+  view.panel.handleInput('\x1b')
+  assert.deepEqual(view.dispatches, [{ kind: 'cancel' }])
+})
+
+test('a stale y cannot confirm a newer painted confirmation identity', () => {
+  const older = workspace({ confirm: { kind: 'delete', token: 4, id: 'task-alpha', title: 'Alpha report', shortId: 'task-alpha' } })
+  const view = harness(older, { columns: 100, rows: 30 })
+  view.render()
+  view.setSnapshot(workspace({ confirm: { kind: 'clear-ended', token: 5 } }))
+  view.panel.handleInput('y')
+  assert.deepEqual(view.dispatches, [], 'a y for the previous confirm kind/token must not commit the newer one')
+  view.render()
+  view.panel.handleInput('y')
+  assert.deepEqual(view.dispatches, [{ kind: 'confirm' }])
+})
+
+test('clicking the painted y/n confirmation acts on that painted question', () => {
+  const confirm = workspace({ confirm: { kind: 'run', token: 9, id: 'task-alpha', title: 'Alpha report' } })
+  const view = harness(confirm, { columns: 100, rows: 30 })
+  const lines = view.plain()
+  const confirmRow = lines.findIndex(line => line.includes('[y] Confirm'))
+  assert.ok(confirmRow >= 0)
+  const line = lines[confirmRow]!
+  view.panel.onCellClick(line.indexOf('[y] Confirm') + 1, confirmRow)
+  assert.deepEqual(view.dispatches, [{ kind: 'confirm' }])
+  view.resetDispatches()
+  view.panel.onCellClick(line.indexOf('[n] Cancel') + 1, confirmRow)
+  assert.deepEqual(view.dispatches, [{ kind: 'cancel' }])
+})
+
+// ── 7. mouse hit map ─────────────────────────────────────────────────────────
+
+test('clicking a painted task row dispatches open-detail with that stable id', () => {
+  const view = harness(LIST, { columns: 100, rows: 30 })
+  const lines = view.plain()
+  const row = lines.findIndex(line => line.includes('Alpha report'))
+  assert.ok(row >= 0)
+  view.panel.onCellClick(2, row)
+  assert.deepEqual(view.dispatches, [{ kind: 'open-detail', id: 'task-alpha' }])
+})
+
+test('a click after setSnapshot removed the painted row does nothing', () => {
+  const view = harness(LIST, { columns: 100, rows: 30 })
+  const lines = view.plain()
+  const row = lines.findIndex(line => line.includes('Alpha report'))
+  assert.ok(row >= 0)
+  view.setSnapshot(workspace({
+    rows: FOUR_TASKS.slice(1),
+    total: FOUR_TASKS.length - 1,
+    selectedId: 'task-bravo',
+  }))
+  view.panel.onCellClick(2, row)
+  assert.deepEqual(view.dispatches, [], 'the painted id left the latest snapshot, so the stale cell is inert')
+})
+
+test('clicking the painted New action dispatches open-create', () => {
+  const view = harness(LIST, { columns: 100, rows: 30 })
+  const lines = view.plain()
+  const title = lines[0]!
+  const column = title.indexOf('New')
+  assert.ok(column >= 0, JSON.stringify(title))
+  view.panel.onCellClick(column, 0)
+  assert.deepEqual(view.dispatches, [{ kind: 'open-create' }])
+})
+
+test('clicking a painted filter chip dispatches set-filter', () => {
+  const view = harness(LIST, { columns: 100, rows: 30 })
+  const lines = view.plain()
+  const filterRow = lines.findIndex(line => line.includes('[Paused]'))
+  assert.ok(filterRow >= 0)
+  view.panel.onCellClick(lines[filterRow]!.indexOf('[Paused]') + 1, filterRow)
+  assert.deepEqual(view.dispatches, [{ kind: 'set-filter', filter: 'paused' }])
+})
+
+test('clicking a painted editor field focuses that stable field identity', () => {
+  const view = harness(workspace({ mode: 'editor', editor: draft() }), { columns: 100, rows: 30 })
+  const lines = view.plain()
+  const fieldRow = lines.findIndex(line => line.includes('Title'))
+  assert.ok(fieldRow >= 0)
+  view.panel.onCellClick(30, fieldRow)
+  assert.deepEqual(view.dispatches, [{ kind: 'focus-field', index: 0 }])
+})
+
+test('a pointer event outside the painted frame dispatches nothing', () => {
+  const view = harness(LIST, { columns: 100, rows: 30 })
+  view.render()
+  view.panel.onCellClick(500, 0)
+  view.panel.onCellClick(0, 500)
+  assert.deepEqual(view.dispatches, [])
+})
+
+// ── 8. render purity ────────────────────────────────────────────────────────
+
+test('render alone dispatches nothing and never closes the workspace', () => {
+  for (const snapshot of [
+    LIST,
+    workspace({ mode: 'detail', detail: FOUR_TASKS[0], rows: [FOUR_TASKS[0]!], total: 1 }),
+    workspace({ mode: 'history', history: { status: 'ready', records: [], earlierRecordsUnavailable: true, earlierRecordsPruned: true, nextBefore: 'cursor' } }),
+    workspace({ mode: 'editor', editor: draft() }),
+    workspace({ mode: 'help' }),
+    workspace({ confirm: { kind: 'clear-ended', token: 1 } }),
+  ]) {
+    const view = harness(snapshot, { columns: 160, rows: 50 })
+    view.render()
+    assert.deepEqual(view.dispatches, [], 'render must not dispatch')
+    assert.equal(view.closeCount(), 0, 'render must not close')
+  }
+})
+
+// ── editor choosers and toggles ──────────────────────────────────────────────
+
+test('editor choice fields open a chooser and dispatch the chosen official value', () => {
+  const timing = harness(workspace({ mode: 'editor', editor: draft({ focused: 2 }) }), { columns: 100, rows: 30 })
+  timing.panel.handleInput('\r')
+  assert.deepEqual(timing.dispatches, [], 'opening the chooser is panel-local')
+  timing.panel.handleInput('\x1b[B')
+  timing.panel.handleInput('\x1b[B')
+  timing.panel.handleInput('\x1b[B')
+  timing.panel.handleInput('\r')
+  assert.deepEqual(timing.dispatches, [{ kind: 'select-timing-kind', timing: 'daily' }])
+
+  const target = harness(workspace({ mode: 'editor', editor: draft({ focused: 5 }) }), { columns: 100, rows: 30 })
+  target.panel.handleInput('\r')
+  target.panel.handleInput('\r')
+  assert.deepEqual(target.dispatches, [{ kind: 'select-target-kind', target: 'session' }])
+})
+
+test('editor weekday and advanced fields toggle in place', () => {
+  const weekly = draft({
+    timing: { kind: 'weekly', time: '09:00:00', timeZone: 'UTC', weekdays: [1] },
+    focused: 5,
+  })
+  const weekday = harness(workspace({ mode: 'editor', editor: weekly }), { columns: 100, rows: 30 })
+  weekday.panel.handleInput('\r')
+  assert.deepEqual(weekday.dispatches, [{ kind: 'toggle-weekday', weekday: 1 }])
+
+  const advanced = harness(workspace({ mode: 'editor', editor: draft({ focused: 6 }) }), { columns: 100, rows: 30 })
+  advanced.panel.handleInput('\r')
+  assert.deepEqual(advanced.dispatches, [{ kind: 'toggle-advanced' }])
+})
+
+// ── wheel and help click ─────────────────────────────────────────────────────
+
+test('the wheel scrolls the panel-local list viewport without a Host intent', () => {
+  const many = Array.from({ length: 16 }, (_, index) => task({
+    id: `task-${index}`,
+    title: `Task ${index}`,
+    status: 'active',
+  }))
+  const view = harness(workspace({ rows: many, total: many.length, selectedId: 'task-0' }), { columns: 60, rows: 12 })
+  const before = view.plain()
+  assert.ok(before.some(line => line.includes('Task 0')))
+  const consumed = view.panel.handleMouse({
+    type: 'wheel',
+    button: 'none',
+    x: 1,
+    y: 5,
+    screenX: 1,
+    screenY: 5,
+    width: 60,
+    height: 12,
+    shift: false,
+    alt: false,
+    ctrl: false,
+    wheelDelta: 1,
+  })
+  assert.deepEqual(consumed, { handled: true, render: true })
+  const after = view.plain()
+  assert.ok(!after.some(line => line.includes('Task 0')), 'the first painted row scrolled away')
+  assert.ok(after.some(line => line.includes('Task 8')))
+  assert.deepEqual(view.dispatches, [], 'wheel scrolling never dispatches')
+})
+
+test('a non-wheel pointer event is not consumed', () => {
+  const view = harness(LIST, { columns: 100, rows: 30 })
+  view.render()
+  const result = view.panel.handleMouse({
+    type: 'press',
+    button: 'left',
+    x: 1,
+    y: 4,
+    screenX: 1,
+    screenY: 4,
+    width: 100,
+    height: 30,
+    shift: false,
+    alt: false,
+    ctrl: false,
+  })
+  assert.equal(result, undefined)
+})
+
+test('clicking the painted help Esc action closes help with the same intent as the key', () => {
+  const view = harness(workspace({ mode: 'help' }), { columns: 100, rows: 30 })
+  const lines = view.plain()
+  const bar = lines[lines.length - 1]!
+  const column = bar.indexOf('Close help')
+  assert.ok(column >= 0, JSON.stringify(bar))
+  view.panel.onCellClick(column, lines.length - 1)
+  assert.deepEqual(view.dispatches, [{ kind: 'close-help' }])
+})

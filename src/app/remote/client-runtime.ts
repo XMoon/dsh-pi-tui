@@ -47,6 +47,7 @@ import userQuestionsRemote from '@deepseek-ai/dsh-user-questions/remote'
 import fileUploadsRemote from '@deepseek-ai/dsh-client-file-upload/remote'
 import workspaceFilesRemote from '@deepseek-ai/dsh-api-workspace-files/remote'
 import workspaceRemote from '@deepseek-ai/dsh-api-workspace-controller/remote'
+import scheduleRemote from '@deepseek-ai/dsh-schedule/remote'
 import { PI_TUI_CLIENT_CONTRIBUTION } from '../../runtime/remote/pi-tui-remote-contribution.ts'
 import { mergeCause } from './dispose-cause.ts'
 
@@ -353,6 +354,11 @@ export const REMOTE_CONTRIBUTIONS = [
   // `follow` and nothing else: this Client mounts no Workspace model, store or
   // UI, so no Client-side Workspace state exists to keep current.
   workspaceRemote,
+  // The official generated `schedule` namespace (S5-PR4). The Host-only
+  // profile already mounts the ONE `@deepseek-ai/dsh-schedule` row; this
+  // contribution only publishes its Remote face to the authenticated Client,
+  // and `schedule/changed` is already in the forwarded-event allowlist.
+  scheduleRemote,
 ] as const
 
 /**
@@ -376,6 +382,7 @@ export const REMOTE_CONTRIBUTION_SPECIFIERS = [
   '@deepseek-ai/dsh-user-questions/remote',
   '@deepseek-ai/dsh-api-workspace-files/remote',
   '@deepseek-ai/dsh-api-workspace-controller/remote',
+  '@deepseek-ai/dsh-schedule/remote',
 ] as const
 
 /** The official Client-side modules and generated `/remote` contributions one

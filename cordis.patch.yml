@@ -155,6 +155,50 @@
       name: '@deepseek-ai/dsh-api-workspace-controller'
       inject: [tuiStartup]
 
+    # ── Host Schedule management (S5-PR4) ──────────────────────────────────
+    # ONE Host Schedule domain shared by Direct and the Host-only Split
+    # overlay: the official durable task store, the single timer, the session
+    # FIFO and the delivery receipts all belong to this row. The Host-only
+    # overlay removes only the `tuiStartup` gate IN PLACE (`inject:
+    # [sessionController]`) and never inserts a second copy.
+    #
+    # `sessionController` is injected as a readiness barrier, not as a second
+    # owner: the Schedule runtime creates a `new`/`new_once` target Session
+    # through the one official Host Session controller, so the row must not
+    # arm its timer before that provider exists. The class's own inject still
+    # supplies agents/sessions/storageDomain/sessionPersistence, and
+    # `--help` (no tuiStartup) mounts neither this row nor the three Direct
+    # prerequisites below.
+    - id: pi-tui-schedule
+      name: '@deepseek-ai/dsh-schedule'
+      inject: [tuiStartup, sessionController]
+
+    # The three OFFICIAL Direct activation prerequisites of a Schedule target
+    # that creates Sessions, declared exactly once for the Direct graph:
+    # `SessionController` injects `fileUploads`, and `FileUploads` injects the
+    # Host `connection`. They are the same packages the web bundle and the
+    # Split Host-only overlay mount; the Split overlay disables exactly these
+    # three Direct rows so one Host PID never holds two Connections, two
+    # FileUploads or two Session controllers. `trustedHosts: []` keeps the
+    # loopback listener and the listener's own bind IP as the only accepted
+    # authorities, and `nativeOpen: false` keeps the controller from opening a
+    # host-side native surface for a Remote client.
+    - id: pi-tui-direct-connection
+      name: '@deepseek-ai/dsh-client-connection'
+      inject: [tuiStartup, credentials, webServer]
+      config:
+        trustedHosts: []
+
+    - id: pi-tui-direct-file-upload
+      name: '@deepseek-ai/dsh-client-file-upload'
+      inject: [tuiStartup, agents, attachments, commands, connection]
+
+    - id: pi-tui-direct-session-controller
+      name: '@deepseek-ai/dsh-api-session-controller'
+      inject: [tuiStartup, agentDefaultModel, agents, attachments, fileUploads, fs, llm, remoteAccess, sessions, sessionProjections, sessionQuery, typert, typertGateway, workspaceRegistry]
+      config:
+        nativeOpen: false
+
     # The OFFICIAL Host `@`-file reference authority (M3-3A): this row is
     # the same one the official web bundle mounts. It provides
     # `ctx.fileReferences` (the discovery service the Session Controller's

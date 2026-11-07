@@ -86,6 +86,7 @@ import { PI_TUI_EXTENSIONS_SERVICE, type PiTuiExtensionService } from '../extens
 import { type CommandRegistryLike, type TuiCommandRunner } from '../commands.ts'
 import { diagFromEnv, dshHome, type Diag } from '../runtime/process/diagnostics.ts'
 import { runDetached, runOwned } from '../runtime/process/tasks.ts'
+import { openScheduleWorkspace } from './schedule/runtime.ts'
 import { FileHistorySearchSource } from '../client/history/search.ts'
 import { safeErrorMessage } from '../runtime/process/errors.ts'
 import { DraftImageStore } from '../client/media/image/draft-store.ts'
@@ -1988,6 +1989,16 @@ export function applyRunnerWithRuntime(
         setTerminalProgressMode: (mode) => surface.setTerminalProgressMode(mode),
         openJobView: (jobId) => surface.openJobView(jobId),
         openTasksBrowser: (viewMode) => surface.openTasksBrowser(viewMode),
+        // S5-PR4: the ONE Schedule workspace entry. The controller is built
+        // from the SELECTED backend's Schedule port and Session reader inside
+        // this composition zone (never from `runner.ctx.schedule`), and every
+        // Host write it performs runs through the app-owned `runOwned` entry.
+        openScheduleWorkspace: () => openScheduleWorkspace({
+          port: backend.schedule,
+          sessionReader: backend.sessionReader,
+          app: () => surface.app,
+          runOwned: (label, task) => { runOwned(label, task, { diag }) },
+        }),
         // Image UX PR3-B: the LIVE composer of the mounted renderer. Command
         // registration runs AFTER the mount, so this getter (never an eagerly
         // captured value) is what the attachment intake reads.

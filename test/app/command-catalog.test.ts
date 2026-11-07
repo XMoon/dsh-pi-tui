@@ -229,7 +229,7 @@ function stubRunner(
     setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
-    openTasksBrowser: () => {}, createPluginManagerPage: () => undefined,
+    openTasksBrowser: () => {}, openScheduleWorkspace: () => ({ kind: 'success' } as const), createPluginManagerPage: () => undefined,
     openRewindPicker: () => {},
     sessionTransitionPending: () => options.transitionPending ?? false,
     withSessionTransition: async <T>(

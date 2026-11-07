@@ -42,6 +42,7 @@ import { DirectJobObservationPort } from './job-observation-direct.ts'
 import { DirectHostUserShellPort, type DirectShellCapability } from './host-user-shell-direct.ts'
 import { DirectDeliveredFileReadPort } from './deliverables-direct.ts'
 import { DirectSessionWorkspaceFacts } from './session-workspace-facts-direct.ts'
+import { DirectSchedulePort } from './schedule-direct.ts'
 import type { WebAccessPort, WebAccessStatus, WebAccessUrl } from '../web-access-port.ts'
 
 /** The minimal Host context surface the Direct adapters need (structural;
@@ -148,5 +149,9 @@ export function createDirectRuntimeBackend(deps: DirectBackendDeps): Backend {
     // and the official Workspace registry it already owns; it never fabricates
     // a cross-Session pending fact.
     new DirectSessionWorkspaceFacts(deps.ctx, deps.agentFor),
+    // S5-PR4: the official Host Schedule domain, resolved per operation from
+    // the SAME Host Context. Never a Client task store and never a
+    // `runner.ctx.schedule` shortcut around this port.
+    new DirectSchedulePort(deps.ctx),
   )
 }

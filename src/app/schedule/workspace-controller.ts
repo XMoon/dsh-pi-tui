@@ -1,0 +1,1049 @@
+/**
+ * The ONE Schedule workspace controller (S5-PR4): the transport-neutral state
+ * machine behind `/schedule`. It owns the open workspace's read epochs, the
+ * filter/search projection, the selected task, the editor draft and the one
+ * in-flight mutation; it never renders, never imports a TUI module and never
+ * keeps a second Host task store.
+ *
+ * Currentness rules that every path below obeys:
+ *
+ * - `catalog`/`view`/`history` results are published only while their own read
+ *   epoch is still current, so an earlier selection's late answer can never
+ *   repaint a newer one;
+ * - an invalidation (`schedule/changed` or a Connection replacement) makes the
+ *   in-flight read obsolete and coalesces into ONE newest read;
+ * - a mutation is dispatched at most once per draft, and a dispatched mutation
+ *   whose outcome is unknown is NEVER replayed — the workspace re-reads the
+ *   authoritative catalog instead;
+ * - the last successful catalog survives a failed read as `stale` rows, but a
+ *   first failure is an explicit `error` with no rows and no behavior.
+ *
+ * Host writes run through the injected owned-task entry (`runOwned`), so a
+ * `/reload-client` cannot run silently between a confirmation and the Host's
+ * settlement. The controller never cancels a dispatched write on close: the
+ * Host state simply becomes unknown until the next read.
+ *
+ * @module @xmoon76/dsh-pi-tui/app/schedule/workspace-controller
+ */
+
+import type {
+  ScheduleCatalogEntry,
+  ScheduleConfirm,
+  ScheduleEditorDraft,
+  ScheduleFilter,
+  ScheduleHistoryView,
+  ScheduleIntent,
+  ScheduleNotice,
+  ScheduleSessionChoice,
+  ScheduleTimingKind,
+  ScheduleTargetKind,
+  ScheduleWorkspaceSnapshot,
+  ScheduleWorkspaceStatus,
+} from './presentation.ts'
+import { SCHEDULE_COPY } from './presentation.ts'
+import type { SchedulePort } from '../../runtime/schedule-port.ts'
+import {
+  ScheduleOutcomeUnknownError,
+  ScheduleUnavailableError,
+  type ScheduleDeliveryHistoryResult,
+  type ScheduleEditResult,
+  type ScheduleViewResult,
+} from '../../runtime/schedule-port.ts'
+import type { SessionReader } from '../../runtime/session-reader-port.ts'
+import {
+  DEFAULT_TARGET_DRAFT,
+  DEFAULT_TIMING_DRAFT,
+  ScheduleFormError,
+  applyFieldValue,
+  draftFromRecord,
+  editorFields,
+  encodeCreate,
+  encodePatch,
+  encodeTarget,
+  scheduleSessionId,
+  selectTimingKind,
+  sameTargetDraft,
+  type ScheduleEditorBaseline,
+  type ScheduleTargetDraft,
+  type ScheduleTimingDraft,
+  type ScheduleTimingKind as FormTimingKind,
+} from '../../domain/schedule/form.ts'
+import { copyFailureDetails, remoteFailureCode, remoteFailureMessage } from '../../runtime/remote/write-failure.ts'
+import { SupersededReadError } from '../../runtime/read-error.ts'
+import { safeErrorMessage } from '../../runtime/process/errors.ts'
+
+/** The owned-task entry the composition supplies (the app's `runOwned`). */
+export type ScheduleOwnedRunner = (label: string, task: () => Promise<void>) => void
+
+/** The controller's construction inputs. */
+export interface ScheduleWorkspaceControllerDeps {
+  readonly port: SchedulePort
+  readonly sessionReader: SessionReader
+  /** The app-owned task entry: one visible owner per Host mutation. */
+  readonly runOwned: ScheduleOwnedRunner
+  /** Called when a Host change/invalidation must repaint the screen. */
+  readonly onChange?: () => void
+}
+
+/** The initial list page size the Host catalog read asks for. */
+const LIST_PAGE_SIZE = 500
+/** The history page size the plan fixes for the first read. */
+const HISTORY_PAGE_SIZE = 20
+
+/** The ONE Schedule workspace state machine. */
+export class ScheduleWorkspaceController {
+  private readonly port: SchedulePort
+  private readonly sessionReader: SessionReader
+  private readonly runOwned: ScheduleOwnedRunner
+  private readonly onChange: () => void
+  private readonly listeners = new Set<() => void>()
+
+  private disposed = false
+  private status: ScheduleWorkspaceStatus = 'loading'
+  private statusMessage: string | undefined
+  private catalog: readonly ScheduleCatalogEntry[] = []
+  private filter: ScheduleFilter = 'all'
+  private query = ''
+  private selectedId: string | undefined
+  private mode: ScheduleWorkspaceSnapshot['mode'] = 'list'
+  private detail: ScheduleCatalogEntry | undefined
+  private historyView: ScheduleHistoryView | undefined
+  private editor: ScheduleEditorDraft | undefined
+  private editorBaseline: ScheduleEditorBaseline | undefined
+  private confirm: ScheduleConfirm | undefined
+  private notice: ScheduleNotice | undefined
+  private limits: { readonly newSessionIntervalSeconds: number } | undefined
+  private sessions: readonly ScheduleSessionChoice[] = []
+  private busy = false
+
+  private openEpoch = 0
+  private readEpoch = 0
+  private detailEpoch = 0
+  private historyEpoch = 0
+  private confirmToken = 0
+  private readAbort: AbortController | undefined
+  private detailAbort: AbortController | undefined
+  private historyAbort: AbortController | undefined
+  private chooserAbort: AbortController | undefined
+  private queuedRefresh = false
+  private idle: Promise<void> | undefined
+  private resolveIdle: (() => void) | undefined
+  private unsubscribeChanged: (() => void) | undefined
+
+  constructor(deps: ScheduleWorkspaceControllerDeps) {
+    this.port = deps.port
+    this.sessionReader = deps.sessionReader
+    this.runOwned = deps.runOwned
+    this.onChange = deps.onChange ?? (() => {})
+  }
+
+  /** Begin the ONE open workspace: the first authoritative read starts now. */
+  open(): void {
+    if (this.disposed) return
+    this.openEpoch += 1
+    this.unsubscribeChanged = this.port.onChanged(() => this.invalidate())
+    void this.read()
+  }
+
+  /** Drop every subscription and make late async results unpublishable. It
+   *  never cancels a Host write that was already dispatched. */
+  dispose(): void {
+    if (this.disposed) return
+    this.disposed = true
+    this.openEpoch += 1
+    this.unsubscribeChanged?.()
+    this.unsubscribeChanged = undefined
+    this.readAbort?.abort()
+    this.detailAbort?.abort()
+    this.historyAbort?.abort()
+    this.chooserAbort?.abort()
+    this.readAbort = undefined
+    this.detailAbort = undefined
+    this.historyAbort = undefined
+    this.chooserAbort = undefined
+    this.listeners.clear()
+  }
+
+  /** Resolves when no Host mutation is in flight (tests and teardown use it). */
+  whenIdle(): Promise<void> {
+    return this.idle ?? Promise.resolve()
+  }
+
+  subscribe(listener: () => void): () => void {
+    this.listeners.add(listener)
+    return () => { this.listeners.delete(listener) }
+  }
+
+  snapshot(): ScheduleWorkspaceSnapshot {
+    return {
+      status: this.status,
+      ...(this.statusMessage === undefined ? {} : { statusMessage: this.statusMessage }),
+      filter: this.filter,
+      query: this.query,
+      rows: this.projectedRows(),
+      total: this.catalog.length,
+      ...(this.selectedId === undefined ? {} : { selectedId: this.selectedId }),
+      mode: this.mode,
+      ...(this.detail === undefined ? {} : { detail: this.detail }),
+      ...(this.historyView === undefined ? {} : { history: this.historyView }),
+      ...(this.editor === undefined ? {} : { editor: this.editor }),
+      ...(this.confirm === undefined ? {} : { confirm: this.confirm }),
+      ...(this.notice === undefined ? {} : { notice: this.notice }),
+      ...(this.limits === undefined ? {} : { limits: this.limits }),
+      sessions: this.sessions,
+      busy: this.busy,
+    }
+  }
+
+  /** The ONE intent entry: every user action lands here. */
+  dispatch(intent: ScheduleIntent): void {
+    if (this.disposed) return
+    switch (intent.kind) {
+      case 'set-filter':
+        this.filter = intent.filter
+        this.settleSelection()
+        this.publish()
+        return
+      case 'set-query':
+        this.query = intent.query
+        this.settleSelection()
+        this.publish()
+        return
+      case 'move':
+        this.moveSelection(intent.delta)
+        return
+      case 'open-detail':
+        this.openDetail(intent.id)
+        return
+      case 'open-history':
+        void this.readHistory(undefined)
+        return
+      case 'history-more':
+        this.moreHistory()
+        return
+      case 'back':
+        this.back()
+        return
+      case 'refresh':
+        void this.read()
+        return
+      case 'open-create':
+        this.openCreate()
+        return
+      case 'open-edit':
+        void this.openEdit()
+        return
+      case 'focus-field': {
+        if (this.editor === undefined) return
+        const fields = editorFields(this.editor)
+        const index = Math.max(0, Math.min(intent.index, fields.length - 1))
+        this.editor = { ...this.editor, focused: index }
+        this.publish()
+        return
+      }
+      case 'next-field': {
+        if (this.editor === undefined) return
+        const fields = editorFields(this.editor)
+        const next = (this.editor.focused + intent.delta + fields.length) % fields.length
+        this.editor = { ...this.editor, focused: next }
+        this.publish()
+        return
+      }
+      case 'set-field': {
+        if (this.editor === undefined) return
+        this.editor = applyFieldValue(this.editor, intent.fieldId, intent.value)
+        this.publish()
+        return
+      }
+      case 'select-timing-kind':
+        this.selectTiming(intent.timing)
+        return
+      case 'toggle-weekday':
+        this.toggleWeekday(intent.weekday)
+        return
+      case 'select-target-kind':
+        this.selectTarget(intent.target)
+        return
+      case 'select-target-session':
+        this.selectTargetSession(intent.sessionId)
+        return
+      case 'toggle-advanced':
+        if (this.editor === undefined || this.editor.target.kind === 'session') return
+        this.editor = { ...this.editor, advanced: !this.editor.advanced }
+        this.publish()
+        return
+      case 'save':
+        this.save()
+        return
+      case 'toggle-active':
+        this.toggleActive()
+        return
+      case 'ask-run':
+        this.askRun()
+        return
+      case 'ask-delete':
+        this.askDelete()
+        return
+      case 'ask-clear-ended':
+        this.askClearEnded()
+        return
+      case 'confirm':
+        this.commitConfirm()
+        return
+      case 'cancel':
+        this.cancelConfirm()
+        return
+      case 'open-help':
+        this.mode = 'help'
+        this.publish()
+        return
+      case 'close-help':
+        if (this.mode === 'help') {
+          this.mode = this.detail === undefined ? 'list' : 'detail'
+          this.publish()
+        }
+        return
+      case 'dismiss-notice':
+        this.notice = undefined
+        this.publish()
+        return
+    }
+  }
+
+  // ── reads ────────────────────────────────────────────────────────────────
+
+  /** The ONE authoritative catalog read. A read already in flight makes the
+   *  next one wait and run once, so a burst of invalidations costs one read. */
+  private async read(): Promise<void> {
+    if (this.disposed) return
+    if (this.readAbort !== undefined) {
+      this.queuedRefresh = true
+      return
+    }
+    const epoch = ++this.readEpoch
+    const controller = new AbortController()
+    this.readAbort = controller
+    const openEpoch = this.openEpoch
+    if (this.catalog.length === 0) {
+      this.status = 'loading'
+      this.publish()
+    }
+    try {
+      const [entries, limits] = await Promise.all([
+        this.port.catalog(controller.signal),
+        this.port.deliveryLimits(controller.signal),
+      ])
+      if (!this.isCurrentRead(epoch, openEpoch)) return
+      this.catalog = entries
+      this.limits = limits
+      this.status = 'ready'
+      this.statusMessage = undefined
+      this.settleSelection()
+      this.publish()
+    } catch (error) {
+      if (!this.isCurrentRead(epoch, openEpoch)) return
+      if (controller.signal.aborted) return
+      if (error instanceof SupersededReadError) return
+      this.status = this.catalog.length === 0 ? 'error' : 'stale'
+      this.statusMessage = this.describeFailure(error)
+      this.publish()
+    } finally {
+      if (this.readAbort === controller) this.readAbort = undefined
+      if (!this.disposed && this.queuedRefresh) {
+        this.queuedRefresh = false
+        void this.read()
+      }
+    }
+  }
+
+  /** An invalidation: the committed catalog may have changed. A read in
+   *  flight is superseded; one newest read follows. */
+  private invalidate(): void {
+    if (this.disposed) return
+    this.readEpoch += 1
+    this.readAbort?.abort()
+    this.readAbort = undefined
+    void this.read()
+    // A detail/history page also belongs to the invalidated generation.
+    this.detailEpoch += 1
+    this.detailAbort?.abort()
+    this.detailAbort = undefined
+    this.historyEpoch += 1
+    this.historyAbort?.abort()
+    this.historyAbort = undefined
+    if (this.status === 'ready') this.status = 'stale'
+    this.publish()
+    this.onChange()
+  }
+
+  private openDetail(id?: string): void {
+    const target = id ?? this.selectedId
+    if (target === undefined) return
+    this.detailEpoch += 1
+    const epoch = this.detailEpoch
+    const openEpoch = this.openEpoch
+    this.detailAbort?.abort()
+    const controller = new AbortController()
+    this.detailAbort = controller
+    this.selectedId = target
+    this.mode = 'detail'
+    this.historyView = undefined
+    this.publish()
+    void (async () => {
+      try {
+        const result: ScheduleViewResult = await this.port.view({ id: scheduleId(target) }, controller.signal)
+        if (this.disposed || epoch !== this.detailEpoch || openEpoch !== this.openEpoch) return
+        if ('code' in result) {
+          this.notice = errorNotice(SCHEDULE_COPY.taskGone)
+          this.detail = undefined
+          this.selectedId = undefined
+          this.mode = 'list'
+          this.publish()
+          void this.read()
+          return
+        }
+        this.detail = result
+        this.publish()
+      } catch (error) {
+        if (this.disposed || epoch !== this.detailEpoch || openEpoch !== this.openEpoch) return
+        if (error instanceof SupersededReadError || controller.signal.aborted) return
+        this.notice = errorNotice(this.describeFailure(error))
+        this.publish()
+      } finally {
+        if (this.detailAbort === controller) this.detailAbort = undefined
+      }
+    })()
+  }
+
+  private async readHistory(before: string | undefined): Promise<void> {
+    const id = this.detail?.id ?? this.selectedId
+    if (id === undefined) return
+    const epoch = ++this.historyEpoch
+    const openEpoch = this.openEpoch
+    this.historyAbort?.abort()
+    const controller = new AbortController()
+    this.historyAbort = controller
+    const previous = before === undefined ? undefined : this.historyView
+    this.mode = 'history'
+    this.historyView = {
+      status: 'loading',
+      records: before === undefined ? [] : previous?.records ?? [],
+      earlierRecordsUnavailable: previous?.earlierRecordsUnavailable ?? false,
+      earlierRecordsPruned: previous?.earlierRecordsPruned ?? false,
+      ...(before === undefined || previous?.nextBefore === undefined ? {} : { nextBefore: previous.nextBefore }),
+    }
+    this.publish()
+    try {
+      const result: ScheduleDeliveryHistoryResult = await this.port.history(
+        { id: scheduleId(id), limit: HISTORY_PAGE_SIZE, ...(before === undefined ? {} : { before: messageId(before) }) },
+        controller.signal,
+      )
+      if (this.disposed || epoch !== this.historyEpoch || openEpoch !== this.openEpoch) return
+      if ('code' in result) {
+        // A vanished cursor ENDS this history page: the user must reopen it,
+        // and no retained cursor may silently retry the same page.
+        this.historyView = {
+          status: 'error',
+          records: before === undefined ? [] : previous?.records ?? [],
+          earlierRecordsUnavailable: previous?.earlierRecordsUnavailable ?? false,
+          earlierRecordsPruned: previous?.earlierRecordsPruned ?? false,
+          missCode: result.code,
+          message: result.code === 'delivery_cursor_not_found'
+            ? SCHEDULE_COPY.historyChanged
+            : SCHEDULE_COPY.taskGone,
+        }
+        this.publish()
+        return
+      }
+      this.historyView = {
+        status: 'ready',
+        records: [...(before === undefined ? [] : previous?.records ?? []), ...result.records],
+        earlierRecordsUnavailable: result.earlierRecordsUnavailable,
+        earlierRecordsPruned: result.earlierRecordsPruned,
+        ...(result.nextBefore === undefined ? {} : { nextBefore: result.nextBefore }),
+      }
+      this.publish()
+    } catch (error) {
+      if (this.disposed || epoch !== this.historyEpoch || openEpoch !== this.openEpoch) return
+      if (error instanceof SupersededReadError || controller.signal.aborted) return
+      this.historyView = { ...this.historyView, status: 'error', message: this.describeFailure(error) }
+      this.publish()
+    } finally {
+      if (this.historyAbort === controller) this.historyAbort = undefined
+    }
+  }
+
+  private moreHistory(): void {
+    if (this.mode !== 'history') return
+    const next = this.historyView?.nextBefore
+    // No cursor means the Host proved there is no older saved record; a
+    // client-side page index never substitutes for it.
+    if (next === undefined) return
+    void this.readHistory(next)
+  }
+
+  // ── editor ────────────────────────────────────────────────────────────────
+
+  private openCreate(): void {
+    if (this.busy) return
+    this.mode = 'editor'
+    this.editorBaseline = undefined
+    this.editor = {
+      mode: 'create',
+      title: '',
+      prompt: '',
+      timing: DEFAULT_TIMING_DRAFT,
+      timingEdited: false,
+      target: DEFAULT_TARGET_DRAFT,
+      targetEdited: false,
+      advanced: false,
+      focused: 0,
+    }
+    this.notice = undefined
+    this.loadSessionChoices()
+    this.publish()
+  }
+
+  private async openEdit(): Promise<void> {
+    if (this.busy) return
+    const entry = this.detail ?? this.catalog.find(row => row.id === this.selectedId)
+    if (entry === undefined) return
+    const current = this.detail?.id === entry.id ? this.detail : await this.readEntry(entry.id)
+    if (this.disposed || current === undefined) return
+    const draft = draftFromRecord(current)
+    this.mode = 'editor'
+    this.editorBaseline = { title: current.title, prompt: current.prompt }
+    this.editor = {
+      mode: 'edit',
+      id: current.id,
+      expectedUpdatedAt: current.updatedAt ?? null,
+      title: draft.title,
+      prompt: draft.prompt,
+      timing: draft.timing,
+      timingEdited: false,
+      target: draft.target,
+      targetEdited: false,
+      advanced: draft.target.kind !== 'session' && (draft.target.cwd !== '' || draft.target.agentPreset !== ''),
+      focused: 0,
+    }
+    this.notice = undefined
+    this.loadSessionChoices()
+    this.publish()
+  }
+
+  private async readEntry(id: string): Promise<ScheduleCatalogEntry | undefined> {
+    try {
+      const result = await this.port.view({ id: scheduleId(id) })
+      return 'code' in result ? undefined : result
+    } catch {
+      return undefined
+    }
+  }
+
+  private selectTiming(kind: ScheduleTimingKind): void {
+    if (this.editor === undefined) return
+    const edited = this.editor
+    this.editor = {
+      ...edited,
+      timing: selectTimingKind(edited.timing, kind as FormTimingKind),
+      timingEdited: true,
+    }
+    this.publish()
+  }
+
+  private toggleWeekday(weekday: number): void {
+    if (this.editor === undefined || this.editor.timing.kind !== 'weekly') return
+    const timing: ScheduleTimingDraft = this.editor.timing
+    const weekdays = timing.weekdays.includes(weekday)
+      ? timing.weekdays.filter(day => day !== weekday)
+      : [...timing.weekdays, weekday].sort((left, right) => left - right)
+    this.editor = { ...this.editor, timing: { ...timing, weekdays }, timingEdited: true }
+    this.publish()
+  }
+
+  private selectTarget(kind: ScheduleTargetKind): void {
+    if (this.editor === undefined) return
+    const current = this.editor.target
+    if (current.kind === kind) return
+    const target: ScheduleTargetDraft = kind === 'session'
+      ? { kind, sessionId: undefined }
+      : { kind, cwd: '', agentPreset: '' }
+    this.editor = { ...this.editor, target, targetEdited: true, advanced: false }
+    this.publish()
+  }
+
+  private selectTargetSession(sessionId: string): void {
+    if (this.editor === undefined) return
+    this.editor = { ...this.editor, target: { kind: 'session', sessionId }, targetEdited: true }
+    this.publish()
+  }
+
+  private loadSessionChoices(): void {
+    this.chooserAbort?.abort()
+    const controller = new AbortController()
+    this.chooserAbort = controller
+    const openEpoch = this.openEpoch
+    void (async () => {
+      try {
+        const rows = await this.sessionReader.list(undefined, controller.signal)
+        if (this.disposed || openEpoch !== this.openEpoch) return
+        const candidates = (rows ?? []).filter(row => row.origin !== 'subagent')
+        if (candidates.length === 0) {
+          this.sessions = []
+          this.publish()
+          return
+        }
+        const projections = await this.sessionReader.projectionBatch(candidates, controller.signal)
+        if (this.disposed || openEpoch !== this.openEpoch) return
+        this.sessions = candidates.map(row => {
+          const title = projections.get(row.id)?.title
+          return { id: row.id, ...(title === undefined ? {} : { title }) }
+        })
+        this.publish()
+      } catch (error) {
+        if (this.disposed || openEpoch !== this.openEpoch || controller.signal.aborted) return
+        this.sessions = []
+        this.notice = errorNotice(this.describeFailure(error))
+        this.publish()
+      }
+    })()
+  }
+
+  /** The UNIQUE save action: one local refusal or one Host create/edit. */
+  private save(): void {
+    const draft = this.editor
+    if (draft === undefined || this.busy) return
+    let request:
+      | { readonly kind: 'create'; readonly create: ReturnType<typeof encodeCreate> }
+      | { readonly kind: 'edit'; readonly patch: ReturnType<typeof encodePatch> }
+    try {
+      if (draft.mode === 'create') {
+        request = { kind: 'create', create: encodeCreate(draft) }
+      } else {
+        if (this.editorBaseline === undefined) return
+        request = { kind: 'edit', patch: encodePatch(this.editorBaseline, draft) }
+      }
+    } catch (error) {
+      if (error instanceof ScheduleFormError) {
+        this.notice = errorNotice(error.message)
+        this.publish()
+        return
+      }
+      throw error
+    }
+    const id = draft.id
+    const expectedUpdatedAt = draft.expectedUpdatedAt ?? null
+    this.startWrite(draft.mode === 'create' ? 'schedule create' : 'schedule edit', async () => {
+      if (request.kind === 'create') await this.createTask(request.create)
+      else if (id !== undefined) await this.editTask(id, request.patch, expectedUpdatedAt)
+    })
+  }
+
+  private async createTask(create: ReturnType<typeof encodeCreate>): Promise<void> {
+    try {
+      const entry = await this.port.create(create)
+      this.editor = undefined
+      this.editorBaseline = undefined
+      this.notice = infoNotice(SCHEDULE_COPY.updated)
+      this.detail = entry
+      this.selectedId = entry.id
+      this.mode = 'detail'
+      this.publish()
+      await this.refreshNow()
+    } catch (error) {
+      this.notice = errorNotice(this.describeFailure(error))
+      this.publish()
+      if (error instanceof ScheduleOutcomeUnknownError) await this.refreshNow()
+    }
+  }
+
+  private async editTask(id: string, patch: ReturnType<typeof encodePatch>, expectedUpdatedAt: string | null): Promise<void> {
+    try {
+      const result: ScheduleEditResult = await this.port.edit({
+        id: scheduleId(id),
+        action: 'update',
+        patch,
+        expectedUpdatedAt,
+      })
+      const refusal = editRefusal(result)
+      if (refusal !== undefined) {
+        // The draft stays; the user must re-read the latest task explicitly.
+        this.notice = errorNotice(refusal)
+        this.publish()
+        if ('code' in result && result.code === 'schedule_not_found') await this.refreshNow()
+        return
+      }
+      this.editor = undefined
+      this.editorBaseline = undefined
+      this.detail = result as ScheduleCatalogEntry
+      this.notice = infoNotice(SCHEDULE_COPY.updated)
+      this.mode = 'detail'
+      this.publish()
+      await this.refreshNow()
+    } catch (error) {
+      this.notice = errorNotice(this.describeFailure(error))
+      this.publish()
+      if (error instanceof ScheduleOutcomeUnknownError) await this.refreshNow()
+    }
+  }
+
+  // ── list actions ──────────────────────────────────────────────────────────
+
+  private toggleActive(): void {
+    if (this.busy) return
+    const entry = this.detail ?? this.catalog.find(row => row.id === this.selectedId)
+    if (entry === undefined) return
+    const active = entry.status !== 'active'
+    this.startWrite('schedule pause/resume', async () => {
+      try {
+        const result = await this.port.edit({
+          id: scheduleId(entry.id),
+          action: 'update',
+          patch: { active },
+          expectedUpdatedAt: entry.updatedAt ?? null,
+        })
+        const refusal = editRefusal(result)
+        if (refusal !== undefined) {
+          this.notice = errorNotice(refusal)
+          this.publish()
+          if ('code' in result && result.code === 'schedule_not_found') {
+            this.detail = undefined
+            this.selectedId = undefined
+            this.mode = 'list'
+          }
+          await this.refreshNow()
+          return
+        }
+        this.detail = result as ScheduleCatalogEntry
+        this.notice = infoNotice(SCHEDULE_COPY.updated)
+        this.publish()
+        await this.refreshNow()
+      } catch (error) {
+        this.notice = errorNotice(this.describeFailure(error))
+        this.publish()
+        await this.refreshNow()
+      }
+    })
+  }
+
+  private askRun(): void {
+    const entry = this.detail ?? this.catalog.find(row => row.id === this.selectedId)
+    if (entry === undefined || this.busy) return
+    this.confirm = { kind: 'run', token: ++this.confirmToken, id: entry.id, title: entry.title }
+    this.publish()
+  }
+
+  private askDelete(): void {
+    const entry = this.detail ?? this.catalog.find(row => row.id === this.selectedId)
+    if (entry === undefined || this.busy) return
+    this.confirm = {
+      kind: 'delete',
+      token: ++this.confirmToken,
+      id: entry.id,
+      title: entry.title,
+      shortId: entry.id.slice(-8),
+    }
+    this.publish()
+  }
+
+  private askClearEnded(): void {
+    if (this.busy) return
+    this.confirm = { kind: 'clear-ended', token: ++this.confirmToken }
+    this.publish()
+  }
+
+  private commitConfirm(): void {
+    const confirm = this.confirm
+    if (confirm === undefined || this.busy) return
+    // Commit the intent BEFORE any Host call: one confirmation generation owns
+    // exactly one write, and a stale `y` cannot act on a newer question.
+    this.confirm = undefined
+    this.publish()
+    switch (confirm.kind) {
+      case 'discard':
+        this.editor = undefined
+        this.editorBaseline = undefined
+        this.mode = this.detail === undefined ? 'list' : 'detail'
+        this.notice = undefined
+        this.publish()
+        return
+      case 'run':
+        this.runNow(confirm.id)
+        return
+      case 'delete':
+        this.deleteTask(confirm.id)
+        return
+      case 'clear-ended':
+        this.clearEnded()
+        return
+    }
+  }
+
+  private cancelConfirm(): void {
+    if (this.confirm === undefined) return
+    this.confirm = undefined
+    this.publish()
+  }
+
+  private runNow(id: string): void {
+    this.startWrite('schedule run now', async () => {
+      try {
+        const result = await this.port.run({ id: scheduleId(id) })
+        if ('code' in result && result.code === 'schedule_execution_pending') {
+          this.notice = errorNotice(SCHEDULE_COPY.executionPending)
+          this.publish()
+          return
+        }
+        if ('code' in result) {
+          this.notice = errorNotice(SCHEDULE_COPY.taskGone)
+          this.publish()
+          await this.refreshNow()
+          return
+        }
+        this.detail = result
+        this.notice = infoNotice(SCHEDULE_COPY.deliveryQueued)
+        this.publish()
+        await this.refreshNow()
+      } catch (error) {
+        this.notice = errorNotice(this.describeFailure(error))
+        this.publish()
+        if (error instanceof ScheduleOutcomeUnknownError) await this.refreshNow()
+      }
+    })
+  }
+
+  private deleteTask(id: string): void {
+    this.startWrite('schedule delete', async () => {
+      try {
+        // The CAS revision always comes from the authoritative record the user
+        // acted on: a list row carries it too, and sending `null` against a
+        // stored revision would be a guaranteed conflict.
+        const entry = this.detail?.id === id ? this.detail : this.catalog.find(row => row.id === id)
+        const result = await this.port.edit({
+          id: scheduleId(id),
+          action: 'delete',
+          expectedUpdatedAt: entry?.updatedAt ?? null,
+        })
+        if ('deleted' in result) {
+          this.detail = undefined
+          this.selectedId = undefined
+          this.mode = 'list'
+          this.historyView = undefined
+          this.notice = infoNotice(SCHEDULE_COPY.updated)
+          this.publish()
+          await this.refreshNow()
+          return
+        }
+        const refusal = editRefusal(result)
+        this.notice = errorNotice(refusal ?? SCHEDULE_COPY.taskGone)
+        if ('code' in result && result.code === 'schedule_not_found') {
+          this.detail = undefined
+          this.selectedId = undefined
+          this.mode = 'list'
+        }
+        this.publish()
+        await this.refreshNow()
+      } catch (error) {
+        this.notice = errorNotice(this.describeFailure(error))
+        this.publish()
+        if (error instanceof ScheduleOutcomeUnknownError) await this.refreshNow()
+      }
+    })
+  }
+
+  private clearEnded(): void {
+    this.startWrite('schedule clear ended', async () => {
+      try {
+        const result = await this.port.deleteInactive()
+        this.notice = infoNotice(result.deleted === 0
+          ? SCHEDULE_COPY.noEnded
+          : SCHEDULE_COPY.cleared(result.deleted))
+        this.publish()
+        await this.refreshNow()
+      } catch (error) {
+        this.notice = errorNotice(this.describeFailure(error))
+        this.publish()
+        if (error instanceof ScheduleOutcomeUnknownError) await this.refreshNow()
+      }
+    })
+  }
+
+  // ── navigation ───────────────────────────────────────────────────────────
+
+  private back(): void {
+    if (this.confirm !== undefined) {
+      this.cancelConfirm()
+      return
+    }
+    if (this.mode === 'help') {
+      this.mode = this.detail === undefined ? 'list' : 'detail'
+      this.publish()
+      return
+    }
+    if (this.mode === 'editor') {
+      if (this.editorDirty()) {
+        this.confirm = { kind: 'discard', token: ++this.confirmToken }
+        this.publish()
+        return
+      }
+      this.editor = undefined
+      this.editorBaseline = undefined
+      this.mode = this.detail === undefined ? 'list' : 'detail'
+      this.publish()
+      return
+    }
+    if (this.mode === 'history') {
+      this.mode = 'detail'
+      this.historyView = undefined
+      this.publish()
+      return
+    }
+    if (this.mode === 'detail') {
+      this.mode = 'list'
+      this.detail = undefined
+      this.publish()
+      return
+    }
+  }
+
+  private editorDirty(): boolean {
+    const draft = this.editor
+    if (draft === undefined) return false
+    if (draft.mode === 'create') {
+      return draft.title.trim() !== '' || draft.prompt.trim() !== '' || draft.timingEdited || draft.targetEdited
+    }
+    if (this.editorBaseline === undefined) return true
+    return draft.title !== this.editorBaseline.title ||
+      draft.prompt !== this.editorBaseline.prompt ||
+      draft.timingEdited ||
+      draft.targetEdited
+  }
+
+  private moveSelection(delta: number): void {
+    if (this.mode !== 'list' && this.mode !== 'detail') return
+    const rows = this.projectedRows()
+    if (rows.length === 0) return
+    const current = rows.findIndex(row => row.id === this.selectedId)
+    const next = (current < 0 ? 0 : current + delta + rows.length) % rows.length
+    this.selectedId = rows[next].id
+    if (this.mode === 'detail') this.detail = undefined
+    this.publish()
+  }
+
+  // ── projection / settlement ───────────────────────────────────────────────
+
+  /** The read-only projection of the committed catalog: the filter and then the
+   *  case-insensitive substring over title+prompt. It never requests a Host. */
+  private projectedRows(): readonly ScheduleCatalogEntry[] {
+    const query = this.query.trim().toLowerCase()
+    return this.catalog.filter(entry => {
+      if (this.filter === 'active' && entry.status !== 'active') return false
+      if (this.filter === 'paused' && entry.status !== 'paused') return false
+      if (this.filter === 'ended' && entry.status !== 'ended') return false
+      if (query === '') return true
+      return entry.title.toLowerCase().includes(query) || entry.prompt.toLowerCase().includes(query)
+    })
+  }
+
+  private settleSelection(): void {
+    const rows = this.projectedRows()
+    if (this.selectedId !== undefined && rows.some(row => row.id === this.selectedId)) return
+    this.selectedId = rows[0]?.id
+    if (this.mode === 'detail') this.detail = undefined
+  }
+
+  private startWrite(label: string, work: () => Promise<void>): void {
+    if (this.busy || this.disposed) return
+    this.busy = true
+    this.idle = new Promise<void>(resolve => { this.resolveIdle = resolve })
+    this.publish()
+    const settle = async (): Promise<void> => {
+      try {
+        await work()
+      } catch (error) {
+        if (!this.disposed) {
+          this.notice = errorNotice(this.describeFailure(error))
+          this.publish()
+        }
+      } finally {
+        this.busy = false
+        this.resolveIdle?.()
+        this.resolveIdle = undefined
+        this.idle = undefined
+        if (!this.disposed) this.publish()
+      }
+    }
+    this.runOwned(label, settle)
+  }
+
+  /** One read that must be newest: used after a mutation settlement. */
+  private async refreshNow(): Promise<void> {
+    this.readEpoch += 1
+    this.readAbort?.abort()
+    this.readAbort = undefined
+    await this.read()
+  }
+
+  private publish(): void {
+    if (this.disposed) return
+    for (const listener of this.listeners) listener()
+  }
+
+  private isCurrentRead(epoch: number, openEpoch: number): boolean {
+    return !this.disposed && epoch === this.readEpoch && openEpoch === this.openEpoch
+  }
+
+  private describeFailure(error: unknown): string {
+    if (error instanceof ScheduleUnavailableError) return SCHEDULE_COPY.serviceUnavailable
+    if (error instanceof ScheduleOutcomeUnknownError) return SCHEDULE_COPY.outcomeUnknown
+    const code = remoteFailureCode(error)
+    if (code === 'schedule/input-invalid') {
+      const details = copyFailureDetails(error)
+      const detailCode = typeof details?.code === 'string' ? details.code : 'invalid'
+      return SCHEDULE_COPY.invalid(detailCode)
+    }
+    if (code === 'schedule/target-archived') return SCHEDULE_COPY.targetArchived
+    if (isPermissionCode(code)) return SCHEDULE_COPY.permissionDenied
+    return remoteFailureMessage(error) || safeErrorMessage(error)
+  }
+}
+
+/** The editor baseline one edit patches against. */
+export type { ScheduleEditorBaseline }
+
+/** The official task identity admitted at the adapter boundary. */
+function scheduleId(id: string): Parameters<SchedulePort['view']>[0]['id'] {
+  // The id came from the Host catalog itself; only the compile-time brand is
+  // added here, exactly like the other Direct/Remote identity boundaries.
+  return id as Parameters<SchedulePort['view']>[0]['id']
+}
+
+function messageId(id: string): NonNullable<Parameters<SchedulePort['history']>[0]['before']> {
+  // The cursor came from the Host page itself (the previous `nextBefore`).
+  return id as NonNullable<Parameters<SchedulePort['history']>[0]['before']>
+}
+
+/** The refusal copy of one edit result, or `undefined` for a committed value. */
+function editRefusal(result: ScheduleEditResult): string | undefined {
+  // A committed entry (`kind`) and a completed deletion (`deleted`) carry no
+  // refusal code; only the two official non-mutating refusals do.
+  if (!('code' in result)) return undefined
+  return result.code === 'schedule_conflict' ? SCHEDULE_COPY.conflict : SCHEDULE_COPY.taskGone
+}
+
+function isPermissionCode(code: string | undefined): boolean {
+  return code === 'gateway/unauthorized' || code === 'connection/unauthorized' ||
+    code === 'authorization/denied' || code === 'permission/denied'
+}
+
+function errorNotice(text: string): ScheduleNotice {
+  return { text, kind: 'error' }
+}
+
+function infoNotice(text: string): ScheduleNotice {
+  return { text, kind: 'info' }
+}
+
+/** Re-exported for the composition/tests: the draft target type the panel
+ *  encodes through the same form module. */
+export type { ScheduleTargetDraft }

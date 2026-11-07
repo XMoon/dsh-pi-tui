@@ -1205,7 +1205,7 @@ async function waitForWorkspaceUpsert(
 test('WS1-TABLE. the two frozen /remote tables agree and the Client plugin allowlist stays six', () => {
   assert.equal(OFFICIAL_CLIENT_BUNDLES.length, 6,
     'the official Client plugin allowlist must stay exactly six bundles')
-  assert.equal(REMOTE_CONTRIBUTIONS.length, 13, 'the explicit /remote table carries thirteen generated contributions')
+  assert.equal(REMOTE_CONTRIBUTIONS.length, 14, 'the explicit /remote table carries fourteen generated contributions')
   assert.equal(REMOTE_CONTRIBUTION_SPECIFIERS.length, REMOTE_CONTRIBUTIONS.length,
     'the statically imported and installed-anchor tables must have the same length')
   assert.deepEqual(
@@ -1215,6 +1215,8 @@ test('WS1-TABLE. the two frozen /remote tables agree and the Client plugin allow
   )
   assert.equal(REMOTE_CONTRIBUTION_SPECIFIERS[12], '@deepseek-ai/dsh-api-workspace-controller/remote',
     'the Workspace namespace is the thirteenth generated contribution')
+  assert.equal(REMOTE_CONTRIBUTION_SPECIFIERS[13], '@deepseek-ai/dsh-schedule/remote',
+    'S5-PR4 adds the Schedule namespace as the fourteenth generated contribution')
   assert.equal(OFFICIAL_CLIENT_BUNDLES.some(bundle => /workspace-controller/u.test(bundle.specifier)), false,
     'the Workspace Controller is a /remote descriptor, never a seventh Client plugin')
 })

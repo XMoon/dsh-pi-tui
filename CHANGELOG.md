@@ -45,6 +45,15 @@
   → Auto-enable Web on Host startup` 把该偏好持久化到当前 DSH Profile，只在下一次
   Split Host 冷启动时生效：默认关闭，切换偏好不会立即启用或停用正在运行的 Host，
   浏览器仍只在用户操作时打开。Direct 模式会明确提示该能力仅在 Split Client 可用。
+- **Host Schedule 管理（`/schedule`）。** 在 Direct 与 Split 两种形态下，任何用户
+  都可直接打开 Host 全局任务目录：搜索并按 `All / Active / Paused / Ended` 过滤，
+  查看下一次执行、完整规则与时区、执行目标、最新投递，并分页浏览投递历史。新建与
+  编辑只提交官方七种 timing 与三种 target，编辑按 `expectedUpdatedAt` 做原子 CAS
+  更新，冲突时保留草稿且绝不静默覆盖；暂停/恢复、立即执行、删除与清理已结束任务
+  都需要明确确认，并以 Host 真实返回与重新读取为准。该命令不需要会话：打开界面
+  不会创建或切换会话、不会调用模型。Host 定时器由常驻 Host 持有，关闭 Client 或
+  Web 端不影响已到期任务的递送；Host 退出后不再有后台执行。TSP 渲染器暂不支持该
+  页面，会给出通用的「能力暂不可用」提示并恢复草稿；官方 Web 的任务页保持不变。
 - **终端粘贴图片路径自动附件化。** 在 Tern / Hedr 等终端里把本地图片文件粘贴到
   输入框时，dsh-pi-tui 会自动读取该图片并替换成标准 `[image #N (W×H)]`，无需手动
   `/image`；文件仍在读取时按 Enter / 发送 / 转向会被拒绝并提示重试，读取失败则

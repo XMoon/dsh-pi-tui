@@ -295,7 +295,7 @@ function fakeRunnerDeps(options: {
     setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
-    openTasksBrowser: () => {}, createPluginManagerPage: () => undefined,
+    openTasksBrowser: () => {}, openScheduleWorkspace: () => ({ kind: 'success' } as const), createPluginManagerPage: () => undefined,
     openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
@@ -358,7 +358,7 @@ function fakeRunnerDeps(options: {
       setNotificationMode: () => {}, currentNotificationMode: () => 'unfocused', currentNotificationMethod: () => 'auto',
       setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
       openJobView: () => {},
-      openTasksBrowser: () => {},
+      openTasksBrowser: () => {}, openScheduleWorkspace: () => ({ kind: 'success' } as const),
       // Image UX PR3-B: the CommandSurface's live composer seam. This harness
       // mounts the real PiTui app, which is its own composer port.
       composer: () => app,

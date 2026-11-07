@@ -246,10 +246,23 @@ test('the Direct backend is the current production surface and serves EXACTLY th
       throw new Error('the fixture never follows Workspaces')
     },
   }
-  // S5-PR3 and M5-U-A add TWO independent required ports: the official Session
-  // Markdown read and the UI-neutral read-authority facts. Both stay wired and
-  // asserted below; neither replaces the other.
-  const backend = createDirectBackend(subagent, sessionReader, pendingInputReader, sessionWriter, sessionLifecycle, interaction, catalog, config, hostFile, sessionArchive, sessionMarkdown, hostCommand, pluginManager, jobObservation, hostUserShell, deliveredFileRead, webAccess, sessionWorkspaceFacts)
+  const schedule: import('../../src/runtime/schedule-port.ts').SchedulePort = {
+    catalog: async () => [],
+    list: async () => ({ items: [], shown: 0, total: 0, limit: 100, offset: 0 }),
+    view: async request => ({ id: request.id, code: 'schedule_not_found' as const }),
+    history: async request => ({ id: request.id, code: 'delivery_cursor_not_found' as const }),
+    deliveryLimits: async () => ({ newSessionIntervalSeconds: 60 }),
+    create: async () => { throw new Error('the fixture never creates a task') },
+    edit: async () => { throw new Error('the fixture never edits a task') },
+    run: async () => { throw new Error('the fixture never runs a task') },
+    deleteInactive: async () => ({ deleted: 0 }),
+    onChanged: () => () => {},
+  }
+  // S5-PR3, M5-U-A and S5-PR4 add THREE independent required ports: the official
+  // Session Markdown read, the UI-neutral read-authority facts and the Host
+  // Schedule management surface. All stay wired and asserted below; none
+  // replaces another.
+  const backend = createDirectBackend(subagent, sessionReader, pendingInputReader, sessionWriter, sessionLifecycle, interaction, catalog, config, hostFile, sessionArchive, sessionMarkdown, hostCommand, pluginManager, jobObservation, hostUserShell, deliveredFileRead, webAccess, sessionWorkspaceFacts, schedule)
   assert.equal(backend.kind, 'direct')
   assert.equal(backend.subagent, subagent)
   assert.equal(backend.sessionReader, sessionReader)
@@ -266,6 +279,7 @@ test('the Direct backend is the current production surface and serves EXACTLY th
   assert.equal(backend.pluginManager, pluginManager)
   assert.equal(backend.jobObservation, jobObservation)
   assert.equal(backend.sessionWorkspaceFacts, sessionWorkspaceFacts)
+  assert.equal(backend.schedule, schedule)
   // Truthful advertisement: the backend serves EXACTLY the implemented
   // ports — nothing is advertised without a port.
   for (const capability of DIRECT_IMPLEMENTED_CAPABILITIES) {
