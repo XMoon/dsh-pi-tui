@@ -679,11 +679,24 @@ workspace/question/approval store and keeps no cross-session cache.
   `null`, `migration-required` (including cache hints) or a missing
   `userQuestions` unit is `unknown`, never `active: []`. Two sources that
   genuinely conflict fail closed to `unknown`. The answer itself never travels
-  through this port: a live forwarded request is settled by the existing
-  Question/Approval first-settlement path (the Client's forwarded-event
-  presenter → Host settlement), while a UI flow that navigates first enters the
-  Session through `switchSessionOutcome` and then presents the SAME request.
-  This port only classifies the candidate; it has no answer/write endpoint.
+  through this port, and the port makes no answer-authority claim: `attention`
+  is a candidate classification for the SUPPORTED authenticated owner
+  answer-Client composition (the split Client's ONE `interactions:'answer'`
+  owner with the root Question/Approval listener). The official
+  `session.state`/`session.projections` reads supply the Host facts and
+  visibility; the existing owner event consumer plus the Gateway's
+  first-settlement own answer authority and final settlement. Host permission
+  to read `session.state` is NOT answer authorization, and this port makes no
+  answerability claim for an arbitrary read-allowed peer; a non-owner peer
+  composition is outside its qualified use. In the qualified U-A path the
+  current surface's existing forwarded presenter answers the live request, and
+  a later `/resume` is a separate navigation. A navigation-first journey
+  (Workspace attention → switch → answer the SAME request) is NOT qualified by
+  U-A: the forwarded request is presented before any switch and is not
+  re-mounted after deferral, so navigation-first answerability remains a U-C/U-D
+  admission gate. A consumer must never treat `attention:'question'` alone as
+  proof that the request is still answerable; the official request lifecycle
+  decides.
 - **Failure vocabulary.** `remote-access/denied` is `denied`,
   `gateway/invocation-unavailable` is `unavailable` (the optional read method is
   genuinely not registered), and every network/Host/codec/timeout failure is
