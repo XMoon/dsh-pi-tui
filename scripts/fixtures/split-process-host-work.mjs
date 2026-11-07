@@ -15,7 +15,7 @@
  * Scenario protocol (frozen):
  *   C1_SCENARIO = long-turn | foreground-tool | job | child | question |
  *                 approval-allow | approval-reject | goal-armed | goal-round |
- *                 maintenance | schedule | unowned-job
+ *                 maintenance | schedule | unowned-job | web-workspace-changes
  *   C1_WORK_ROOT = private 0700 directory under the isolated work dir
  *   C1_HOLD_<NAME> = absolute barrier file path the smoke releases
  *   C1_HAS_LIVE_CLIENT_PROBE = set to sample Gateway.hasLiveClient() transitions
@@ -45,6 +45,10 @@ const SCENARIOS = new Set([
   'maintenance',
   'schedule',
   'unowned-job',
+  // S5-PR5 W5-CHANGES: one real `write` tool call through the official
+  // standard preset, so the official `workspace-changes` recorder observes a
+  // real file intent and a real working-tree change.
+  'web-workspace-changes',
 ])
 
 /** Quote one token for the Host shell used by the harmless fixture commands. */
@@ -150,6 +154,70 @@ class C1Model extends LlmAdapter {
       await waitForBarrier(process.env.C1_HOLD_LONG_TURN, signal)
       this.record('long-turn-released', { sessionId, attempt })
       yield { type: 'block-end', index: 0, block: { type: 'text', text: `long-turn answer ${String(attempt)} ${token}` } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+      return
+    }
+
+    if (this.scenario === 'web-workspace-changes') {
+      // The FIRST turn of a Session performs exactly ONE official `write` tool
+      // call (the standard preset's real tool); the follow-up stream after its
+      // result answers. Every later turn is a plain answer, and a
+      // `w5-nochange` prompt runs one official `bash` tool call that changes no
+      // file, so the recorder's genuine no-change path is exercised too.
+      // The Host appends its OWN runtime/time context as user-role messages
+      // AFTER the author's prompt, so the whole user text is matched instead of
+      // a positional "last user message".
+      const nonce = process.env.C1_CHANGES_NONCE ?? 'c1'
+      const wrote = this.toolIssued.has(sessionId)
+      const prompt = userText
+      const toolCall = (id, toolName, args) => ({
+        type: 'block-end',
+        index: 0,
+        block: { type: 'tool-call', id, name: toolName, arguments: JSON.stringify(args) },
+      })
+      if (prompt.includes('w5-changes2-')) {
+        // The post-disable/re-enable Turn (F2): a SECOND real official `write`
+        // through the same standard preset, into a different file.
+        if (!this.secondIssued?.has(sessionId)) {
+          this.secondIssued ??= new Set()
+          this.secondIssued.add(sessionId)
+          this.record('web-changes-write2-issued', { sessionId, nonce, userText: prompt.slice(0, 200) })
+          yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+          yield toolCall(`w5-write2-${sessionId}`, 'write', { file_path: 'changed2.txt', content: `w5-change2-${nonce}\n` })
+          yield { type: 'finish', reason: { kind: 'tool-calls' } }
+          return
+        }
+        const secondText = `w5-editing2 ${nonce}\n\n[changed2.txt](changed2.txt)\n\nw5-second answer ${nonce}`
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: secondText }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: secondText } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+        return
+      }
+      if (!wrote && prompt.includes('w5-changes-')) {
+        this.toolIssued.add(sessionId)
+        this.record('web-changes-write-issued', { sessionId, nonce, userText: prompt.slice(0, 200) })
+        yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+        yield toolCall(`w5-write-${sessionId}`, 'write', { file_path: 'changed.txt', content: `w5-change-${nonce}\n` })
+        yield { type: 'finish', reason: { kind: 'tool-calls' } }
+        return
+      }
+      if (prompt.includes('w5-nochange') && !this.noChangeIssued?.has(sessionId)) {
+        this.noChangeIssued ??= new Set()
+        this.noChangeIssued.add(sessionId)
+        this.record('web-changes-nochange-tool-issued', { sessionId, nonce })
+        yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+        yield toolCall(`w5-nochange-${sessionId}`, 'read', { file_path: 'README.md' })
+        yield { type: 'finish', reason: { kind: 'tool-calls' } }
+        return
+      }
+      const tail = prompt.includes('w5-nochange') ? 'w5-nochange answer'
+        : prompt.includes('> w5-editing') ? 'w5-quote answer' : 'w5-done answer'
+      const text = `w5-editing ${nonce}\n\n[changed.txt](changed.txt) [missing-sentinel.txt](missing-sentinel.txt)\n\n![shot](shot.png)\n\n${tail} ${nonce}`
+      this.record('web-changes-answer', { sessionId, nonce, tail })
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text } }
       yield { type: 'finish', reason: { kind: 'stop' } }
       return
     }

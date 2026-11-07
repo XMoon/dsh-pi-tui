@@ -19,14 +19,17 @@
  */
 
 /**
- * The 60 official Web-only Loader rows, in the overlay's canonical order, with
- * the exact official package each row loads.
+ * The official Web-only Loader rows, in the overlay's canonical order, with the
+ * exact official package each row loads. The set, never a count, is the
+ * composition contract: every entry is the ONE owner of its published package.
  */
 export const PI_TUI_WEB_ACCESS_ROWS: ReadonlyArray<{ readonly id: string; readonly name: string }> = [
   { id: 'web-runtime', name: '@deepseek-ai/dsh-web-app' },
   { id: 'modules', name: '@deepseek-ai/dsh-client-modules' },
   { id: 'client-hmr', name: '@deepseek-ai/dsh-client-hmr' },
   { id: 'cordis-client-runner', name: '@deepseek-ai/dsh-cordis-client-runner' },
+  // Browser file actions (download / clipboard) for the Session's own files.
+  { id: 'ui-file-actions', name: '@deepseek-ai/dsh-client-ui-file-actions' },
   { id: 'ui-context-menu', name: '@deepseek-ai/dsh-client-ui-context-menu' },
   { id: 'ui-open-in-app', name: '@deepseek-ai/dsh-client-ui-open-in-app' },
   { id: 'ui-settings-account', name: '@deepseek-ai/dsh-client-ui-settings-account' },
@@ -50,12 +53,17 @@ export const PI_TUI_WEB_ACCESS_ROWS: ReadonlyArray<{ readonly id: string; readon
   { id: 'ui-settings-plugin-inventory', name: '@deepseek-ai/dsh-client-ui-settings-plugin-inventory' },
   { id: 'ui-conversation', name: '@deepseek-ai/dsh-client-ui-conversation' },
   { id: 'ui-approval', name: '@deepseek-ai/dsh-client-ui-approval' },
+  // Selection-to-quote over the current Session; writes only the composer draft.
+  { id: 'message-quotes', name: '@deepseek-ai/dsh-message-quotes' },
   { id: 'ui-chat', name: '@deepseek-ai/dsh-client-ui-chat' },
   { id: 'ui-brand-official', name: '@deepseek-ai/dsh-client-ui-brand-official' },
   { id: 'ui-attachment', name: '@deepseek-ai/dsh-client-ui-attachment' },
   { id: 'ui-file-drag', name: '@deepseek-ai/dsh-client-ui-file-drag' },
   { id: 'ui-tool', name: '@deepseek-ai/dsh-client-ui-tool' },
   { id: 'ui-cordis', name: '@deepseek-ai/dsh-client-ui-cordis' },
+  // The Host recorder `ui-deliverables` injects; it MUST come before its
+  // consumer because the toggle activates one row at a time and awaits it.
+  { id: 'workspace-changes', name: '@deepseek-ai/dsh-workspace-changes' },
   { id: 'ui-deliverables', name: '@deepseek-ai/dsh-client-ui-deliverables' },
   { id: 'ui-workspace', name: '@deepseek-ai/dsh-client-ui-workspace' },
   { id: 'ui-workflow-run', name: '@deepseek-ai/dsh-client-ui-workflow-run' },

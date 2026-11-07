@@ -193,11 +193,14 @@ export const HOST_ONLY_PATCH = `# M4-B1 Host-only profile overlay: production Ho
 # every row whose authority ALREADY exists in this Host: the second
 # 'connection', 'api-remotes', 'file-upload', 'workspace'/'workspace-controller',
 # 'session-controller', 'settings-controller', 'webserver', 'frontend-static'
-# fallback, 'web-startup' parser and the Web-only Host business rows are NOT
-# declared here. The mandatory client-dependency closure of the official UIs
-# ('ui-context-menu', 'ui-file-drag') is part of it; new optional feature rows
-# are not. 'terminal-controller' is the ONE official Host row added on top of
-# the browser roster (the real Browser x TUI composition needs it).
+# fallback and 'web-startup' parser are NOT declared here. The mandatory
+# client-dependency closure of the official UIs ('ui-context-menu',
+# 'ui-file-drag'), the official Client file-actions / message-quotes features
+# and the 'workspace-changes' Host recorder that 'ui-deliverables' injects are
+# part of it. 'workspace-changes' is declared BEFORE its consumer because the
+# toggle activates one row at a time and awaits each fiber.
+# 'terminal-controller' is the ONE official Host row added on top of the
+# browser roster (the real Browser x TUI composition needs it).
 #
 # 'web-runtime' owns the single 'frontend-static' fallback over the official
 # dist and is explicitly told to stay silent: no browser launch, no printed

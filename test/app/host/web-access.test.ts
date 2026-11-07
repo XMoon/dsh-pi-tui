@@ -3,14 +3,14 @@
  *
  * Evidence level: L5 composition over the REAL pinned Cordis Loader/Entry
  * (`@deepseek-ai/cordis-plugin-loader@1.0.6`) with lightweight controlled
- * plugins standing in for the 60 official Web packages. The Loader,
+ * plugins standing in for the official Web packages. The Loader,
  * `Entry.update`, fiber activation/disposal/settlement, the fallback seat
  * semantics and the service registry are the real ones; only the package
  * modules are fixtures. The two-OS-process HTTP/Browser proof is
  * `scripts/split-process-smoke.mjs` `t73-web-runtime-toggle`.
  *
  * The contract pinned here:
- *   - the toggle drives exactly the 60 declared rows, in the frozen
+ *   - the toggle drives exactly the declared rows, in the frozen
  *     enable/disable order, through `Entry.update({ disabled })`;
  *   - `disabled` / `enabled` / `changing` / `unavailable` are read from the
  *     live Loader and the official Web services, never from the request;
@@ -30,7 +30,6 @@ import Loader from '@deepseek-ai/cordis-plugin-loader'
 import {
   PI_TUI_WEB_ACCESS_DISABLE_ORDER,
   PI_TUI_WEB_ACCESS_ENABLE_ORDER,
-  PI_TUI_WEB_ACCESS_OPTIONAL_PENDING_ROWS,
   PiTuiWebAccessHostService,
 } from '../../../src/app/host/features/web-access.ts'
 import { PI_TUI_WEB_ACCESS_ROWS } from '../../../src/app/host/features/web-roster.ts'
@@ -41,7 +40,6 @@ import {
 } from '../../../src/runtime/remote/pi-tui-web-access-contract.ts'
 
 /** Cordis `FiberState` values (the enum is a const enum with no runtime value). */
-const FIBER_PENDING = 0
 const FIBER_ACTIVE = 2
 const FIBER_DISPOSED = 4
 
@@ -153,7 +151,7 @@ interface FixtureOptions {
 }
 
 /**
- * Build the real Loader, the 60 declared rows (disabled, exactly like the
+ * Build the real Loader, the declared rows (disabled, exactly like the
  * Host-only overlay) and the mounted service. `loader.internal` is the Loader's
  * own documented module-import hook: it lets the REAL `Entry.update` import a
  * controlled module while every row keeps its exact official package name.
@@ -166,8 +164,10 @@ async function createFixture(options: FixtureOptions = {}): Promise<WebAccessFix
     ['modules', { provide: 'clientModules' }],
     ['client-hmr', { inject: ['clientModules', 'webServer'] }],
     ['terminal-controller', { provide: 'terminalController' }],
-    // The ONE row allowed to stay PENDING: its real dependency
-    // (`workspaceChanges`) is not part of this stage.
+    // The changed-files Host recorder `ui-deliverables` injects. The fixture
+    // provides the SERVICE (topology only); the real Git recorder is qualified
+    // by the split-process Host lane, never here.
+    ['workspace-changes', { provide: 'workspaceChanges' }],
     ['ui-deliverables', { inject: ['workspaceChanges'] }],
   ])
   for (const [id, behaviour] of defaults) if (!behaviours.has(id)) behaviours.set(id, behaviour)
@@ -336,18 +336,12 @@ test('the toggle drives off -> on -> off -> on through the real Entry.update', a
   // ── enable ───────────────────────────────────────────────────────────────
   assert.deepEqual(await fixture.service.setEnabled(true), { state: 'enabled' })
   for (const row of PI_TUI_WEB_ACCESS_ROWS) {
-    const state = fiberState(fixture, row.id)
-    if (PI_TUI_WEB_ACCESS_OPTIONAL_PENDING_ROWS.has(row.id)) {
-      assert.equal(state, FIBER_PENDING, `"${row.id}" is the one optional PENDING row`)
-      continue
-    }
-    assert.equal(state, FIBER_ACTIVE, `"${row.id}" must be active after enable`)
+    assert.equal(fiberState(fixture, row.id), FIBER_ACTIVE, `"${row.id}" must be active after enable`)
   }
   assert.deepEqual(fixture.webServer.facts(), { registered: true, registrations: 1, disposals: 0 })
-  // Every row whose graph is mounted applied exactly once; the single optional
-  // PENDING row never applied because its dependency is absent by design.
-  assert.equal(webApplies(fixture), PI_TUI_WEB_ACCESS_ROWS.length - PI_TUI_WEB_ACCESS_OPTIONAL_PENDING_ROWS.size,
-    'each mounted row applied exactly once')
+  // Every declared row applied exactly once: there is no tolerated PENDING row.
+  assert.equal(webApplies(fixture), PI_TUI_WEB_ACCESS_ROWS.length,
+    'each declared row applied exactly once')
   for (const service of WEB_SERVICES) {
     assert.notEqual(fixture.ctx.reflect.get(service), undefined, `the official "${service}" service must be live`)
   }
@@ -389,8 +383,8 @@ test('the toggle drives off -> on -> off -> on through the real Entry.update', a
 function assertFrozenOrders(enable: readonly string[], disable: readonly string[]): void {
   const ids = PI_TUI_WEB_ACCESS_ROWS.map(row => row.id)
   for (const [label, order] of [['enable', enable], ['disable', disable]] as const) {
-    assert.equal(order.length, 60, `the ${label} order must name the whole 60-row roster`)
-    assert.equal(new Set(order).size, 60, `the ${label} order must name every row exactly once`)
+    assert.equal(order.length, ids.length, `the ${label} order must name the whole Web roster`)
+    assert.equal(new Set(order).size, ids.length, `the ${label} order must name every row exactly once`)
     assert.deepEqual([...order].sort(), [...ids].sort(), `the ${label} order must be the roster, not a subset`)
   }
   // The browser graph is assembled first, the SPA fallback is mounted last.
@@ -402,7 +396,7 @@ function assertFrozenOrders(enable: readonly string[], disable: readonly string[
   assert.equal(disable[0], 'web-runtime', 'the SPA fallback row must be withdrawn FIRST')
   assert.deepEqual(disable.slice(-4), ['terminal-controller', 'cordis-client-runner', 'client-hmr', 'modules'],
     'the browser graph rows must be withdrawn last, in reverse order')
-  // The 55 presentation rows keep the overlay's canonical order on the way out
+  // The presentation rows keep the overlay's canonical order on the way out
   // and its reverse on the way in.
   const presentation = ids.filter(id => !['web-runtime', 'modules', 'client-hmr', 'cordis-client-runner', 'terminal-controller'].includes(id))
   assert.deepEqual(enable.slice(4, -1), presentation, 'the presentation rows keep the canonical order on enable')
@@ -426,28 +420,27 @@ test('the enable and disable orders are the frozen production orders', () => {
   )
   assert.throws(
     () => assertFrozenOrders(PI_TUI_WEB_ACCESS_ENABLE_ORDER.slice(1), PI_TUI_WEB_ACCESS_DISABLE_ORDER),
-    /60-row roster/u,
+    /must name the whole Web roster/u,
   )
 })
 
 /**
  * The two official Client dependencies every shipped UI manifest injects
  * (`ui-context-menu`, `ui-file-drag`) are MANDATORY rows: they mount with the
- * graph, release with it and can never be excused as optional PENDING.
+ * graph and release with it. No row may stay PENDING: the Web composition
+ * reports `enabled` only when every declared row is ACTIVE.
  */
 const MANDATORY_CLIENT_ROWS: ReadonlyArray<{ readonly id: string; readonly name: string }> = [
   { id: 'ui-context-menu', name: '@deepseek-ai/dsh-client-ui-context-menu' },
   { id: 'ui-file-drag', name: '@deepseek-ai/dsh-client-ui-file-drag' },
 ]
 
-test('the mandatory Client dependency rows mount, release and never become optional PENDING', async t => {
+test('the mandatory Client dependency rows mount, release and never stay PENDING', async t => {
   for (const row of MANDATORY_CLIENT_ROWS) {
     assert.ok(PI_TUI_WEB_ACCESS_ROWS.some(candidate => candidate.id === row.id),
       `the mandatory "${row.id}" row belongs to the runtime roster`)
     assert.equal(PI_TUI_WEB_ACCESS_ROWS.find(candidate => candidate.id === row.id)?.name, row.name,
       `the "${row.id}" row must load its exact official package`)
-    assert.equal(PI_TUI_WEB_ACCESS_OPTIONAL_PENDING_ROWS.has(row.id), false,
-      `"${row.id}" is mandatory: ui-deliverables is the only row allowed to stay PENDING`)
   }
 
   const fixture = await createFixture()
@@ -466,8 +459,8 @@ test('the mandatory Client dependency rows mount, release and never become optio
   }
 
   // Negative control: a real dependency failure on EITHER mandatory row is a
-  // Web failure, not the tolerated optional PENDING. The failed enable must
-  // withdraw the whole roster instead of claiming enabled.
+  // Web failure, not a tolerated PENDING. The failed enable must withdraw the
+  // whole roster instead of claiming enabled.
   for (const row of MANDATORY_CLIENT_ROWS) {
     const pending = await createFixture({
       overrides: new Map<string, RowOverride>([[row.id, { inject: ['fixtureDependencyThatNeverSettles'] }]]),
@@ -626,6 +619,27 @@ test('a missing required Web service keeps the composition unavailable', async t
   assertAllRowsDisabled(fixture)
 })
 
+test('a missing workspaceChanges provider keeps the deliverables consumer from an enabled claim', async t => {
+  // The real dependency loop: `workspace-changes` mounts but publishes no
+  // `workspaceChanges` (an install/order regression), so `ui-deliverables`
+  // cannot become active. The composition must roll back instead of reporting
+  // "enabled without changed files".
+  const fixture = await createFixture({
+    overrides: new Map<string, RowOverride>([['workspace-changes', {}]]),
+  })
+  t.after(() => fixture.dispose())
+  const status = await fixture.service.setEnabled(true)
+  assert.equal(status.state, 'unavailable', 'a PENDING consumer must never report enabled')
+  assert.match((status as { reason: string }).reason, /"ui-deliverables" row is state-0, not active/u,
+    'the failure must name the PENDING consumer with its live fiber state')
+  // The SPA row was mounted LAST and then withdrawn by the rollback: the
+  // listener briefly registered the fallback exactly once and released it.
+  assert.deepEqual(fixture.webServer.facts(), { registered: false, registrations: 1, disposals: 1 },
+    'the rollback must withdraw the SPA fallback instead of leaving a half-enabled Web')
+  assertAllRowsDisabled(fixture)
+  assert.deepEqual(await fixture.service.getStatus(), { state: 'disabled' })
+})
+
 test('a partial teardown is never reported as disabled', async t => {
   // The `clientModules` owner outlives its row (it is provided from the ROOT
   // context): the real shape of a teardown that did not close what the graph
@@ -652,7 +666,8 @@ test('the status reads the live Loader on every call, never a cached flag', asyn
     .update({ disabled: true })
   const status = await fixture.service.getStatus()
   assert.equal(status.state, 'unavailable')
-  assert.match((status as { reason: string }).reason, /1 of the 60 Web rows are disabled/u)
+  assert.match((status as { reason: string }).reason,
+    new RegExp(`1 of the ${String(PI_TUI_WEB_ACCESS_ROWS.length)} Web rows are disabled`, 'u'))
   assert.match((status as { reason: string }).reason, /terminal-controller/u,
     'the partial-state diagnostic must name the rows that left the graph')
 })

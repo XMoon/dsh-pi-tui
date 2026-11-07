@@ -58,6 +58,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   overlay never triggers the gesture, and `Esc` returns to the same Session,
   draft and editor focus without switching or stopping anything. The TSP
   renderer keeps its native Session Browser unchanged.
+- **The Split Web frontend gained official file download, text quoting and a
+  Changed Files page.** Once `/web` is enabled, the official Web page can
+  download the original bytes of Session files from their context menu, copy
+  images when the browser grants the clipboard permission (Web offers no
+  Desktop-only "Save as"), and quote selected conversation text into the
+  composer — a quote only fills the draft, and an explicit Send produces one
+  ordinary user message. A top-level turn that really changed workspace files
+  ends with a Changed Files card that opens that turn's comparison page. These
+  changes are recorded by the Host only while Web is enabled: after a Host
+  restart or once the Session is gone, the old summary and comparison are no
+  longer available. Direct mode and a Host with Web off record nothing, and the
+  Host process, Sessions and scheduled tasks are unaffected.
 - **A `/web` entry and an "auto-enable the Web frontend on Host startup"
   preference for the Split Client.** `/web` shows the current Host's real
   official-Web-frontend state and offers only the actions that state admits —

@@ -278,21 +278,28 @@ test('the protected eleven-row dependency assertion rejects a duplicated protect
 })
 
 /**
- * M5-W PR-A: the 60 official Web rows the Host-only overlay declares, in order.
- * This list is FROZEN here on purpose: the composition assertion below compares
- * the real overlay against it, so a silently dropped, renamed, reordered or
- * re-enabled Web row fails the test instead of being mirrored by a generated
- * list. It is the official browser graph of the installed DSH family minus every
- * row whose authority already exists in this Host, plus the one official
- * `terminal-controller` row the Browser x TUI composition needs. The mandatory
- * client-dependency closure of the shipped official UIs (`ui-context-menu`,
- * `ui-file-drag`) is part of it; new optional feature rows are not.
+ * M5-W PR-A + S5-PR5: the official Web rows the Host-only overlay declares, in
+ * order. This list is FROZEN here on purpose: the composition assertion below
+ * compares the real overlay against it, so a silently dropped, renamed,
+ * reordered or re-enabled Web row fails the test instead of being mirrored by a
+ * generated list. It is the official browser graph of the installed DSH family
+ * minus every row whose authority already exists in this Host, plus the one
+ * official `terminal-controller` row the Browser x TUI composition needs. The
+ * mandatory client-dependency closure of the shipped official UIs
+ * (`ui-context-menu`, `ui-file-drag`), the official file-actions /
+ * message-quotes Client features and the `workspace-changes` Host recorder
+ * `ui-deliverables` injects are part of it.
+ *
+ * The list is the contract, not its length: a legitimate future official
+ * package may extend it, and the assertion proves the exact set — never a
+ * bare count.
  */
 const WEB_ROWS: ReadonlyArray<{ id: string; name: string }> = [
   { id: 'web-runtime', name: '@deepseek-ai/dsh-web-app' },
   { id: 'modules', name: '@deepseek-ai/dsh-client-modules' },
   { id: 'client-hmr', name: '@deepseek-ai/dsh-client-hmr' },
   { id: 'cordis-client-runner', name: '@deepseek-ai/dsh-cordis-client-runner' },
+  { id: 'ui-file-actions', name: '@deepseek-ai/dsh-client-ui-file-actions' },
   { id: 'ui-context-menu', name: '@deepseek-ai/dsh-client-ui-context-menu' },
   { id: 'ui-open-in-app', name: '@deepseek-ai/dsh-client-ui-open-in-app' },
   { id: 'ui-settings-account', name: '@deepseek-ai/dsh-client-ui-settings-account' },
@@ -316,12 +323,14 @@ const WEB_ROWS: ReadonlyArray<{ id: string; name: string }> = [
   { id: 'ui-settings-plugin-inventory', name: '@deepseek-ai/dsh-client-ui-settings-plugin-inventory' },
   { id: 'ui-conversation', name: '@deepseek-ai/dsh-client-ui-conversation' },
   { id: 'ui-approval', name: '@deepseek-ai/dsh-client-ui-approval' },
+  { id: 'message-quotes', name: '@deepseek-ai/dsh-message-quotes' },
   { id: 'ui-chat', name: '@deepseek-ai/dsh-client-ui-chat' },
   { id: 'ui-brand-official', name: '@deepseek-ai/dsh-client-ui-brand-official' },
   { id: 'ui-attachment', name: '@deepseek-ai/dsh-client-ui-attachment' },
   { id: 'ui-file-drag', name: '@deepseek-ai/dsh-client-ui-file-drag' },
   { id: 'ui-tool', name: '@deepseek-ai/dsh-client-ui-tool' },
   { id: 'ui-cordis', name: '@deepseek-ai/dsh-client-ui-cordis' },
+  { id: 'workspace-changes', name: '@deepseek-ai/dsh-workspace-changes' },
   { id: 'ui-deliverables', name: '@deepseek-ai/dsh-client-ui-deliverables' },
   { id: 'ui-workspace', name: '@deepseek-ai/dsh-client-ui-workspace' },
   { id: 'ui-workflow-run', name: '@deepseek-ai/dsh-client-ui-workflow-run' },
@@ -403,6 +412,17 @@ function webInsertGroup(entries: readonly OverlayEntry[]): readonly OverlayRow[]
 }
 
 /**
+ * The S5-PR5 official additions: each is an ONE-owner row of the shared
+ * composition, so a roster that loses one of them is an incomplete Web graph
+ * rather than a shorter list.
+ */
+const PR5_REQUIRED_WEB_ROWS: ReadonlyArray<{ readonly id: string; readonly name: string }> = [
+  { id: 'ui-file-actions', name: '@deepseek-ai/dsh-client-ui-file-actions' },
+  { id: 'message-quotes', name: '@deepseek-ai/dsh-message-quotes' },
+  { id: 'workspace-changes', name: '@deepseek-ai/dsh-workspace-changes' },
+]
+
+/**
  * Group 1 — the frozen Web roster: exact ids, exact packages, order, ONE row
  * per id and the three runtime values the plan fixes. Shared by the positive
  * assertion and its negative controls so each control proves THIS assertion
@@ -413,7 +433,7 @@ function assertWebRoster(
   expected: readonly { readonly id: string; readonly name: string }[] = WEB_ROWS,
 ): void {
   assert.deepEqual(web.map(candidate => candidate.id), expected.map(row => row.id),
-    'the Web insert must declare exactly the frozen 60 row ids in order')
+    'the Web insert must declare exactly the official Web rows in order')
   assert.deepEqual(web.map(candidate => candidate.name), expected.map(row => row.name),
     'every Web row id must keep its exact official package')
   for (const candidate of web) {
@@ -431,6 +451,20 @@ function assertWebRoster(
   }
   const ids = web.map(candidate => candidate.id)
   assert.equal(new Set(ids).size, ids.length, 'a duplicated Web row would activate one package twice')
+  // S5-PR5 required closure: every added official capability is owned by
+  // exactly ONE row loading its exact official package.
+  for (const required of PR5_REQUIRED_WEB_ROWS) {
+    const owners = web.filter(candidate => candidate.name === required.name)
+    assert.equal(owners.length, 1, `exactly ONE Web row must load "${required.name}", found ${String(owners.length)}`)
+    assert.equal(owners[0].id, required.id, `"${required.name}" must be owned by the "${required.id}" row`)
+  }
+  // The changed-files provider is enabled before its consumer: the toggle
+  // activates one awaited row at a time, so a consumer that mounts first would
+  // stay PENDING and roll the whole Web composition back.
+  const providerIndex = ids.indexOf('workspace-changes')
+  const consumerIndex = ids.indexOf('ui-deliverables')
+  assert.ok(providerIndex >= 0 && consumerIndex >= 0 && providerIndex < consumerIndex,
+    'the "workspace-changes" provider must precede its "ui-deliverables" consumer')
   assert.equal(ids.includes('ui-deliverables'), true, 'the official deliverables UI row belongs to the roster')
   assert.equal(ids.includes('terminal-controller'), true, 'the ONE official Host row on top of the roster is terminal-controller')
   assert.equal(ids.includes('workspace-controller'), false,
@@ -492,7 +526,7 @@ function assertWebOwnerDedupe(
     'the fallback is web-runtime-owned: no separate frontend-static row may be declared')
 }
 
-test('the Host-only overlay declares the 60 official Web rows DEFAULT-DISABLED on ONE insert', () => {
+test('the Host-only overlay declares the official Web rows DEFAULT-DISABLED on ONE insert', () => {
   assertWebRoster(webInsertGroup(OVERLAY_ENTRIES))
   // The composition is static: no production switch selects these rows.
   assert.doesNotMatch(HOST_ONLY_PATCH, /WEB_ENABLED|M5_WEB_MODE|--web\b/u,
@@ -506,7 +540,7 @@ test('the Web composition reuses the existing Host authorities instead of declar
 /**
  * M5-W PR-B — the runtime toggle's roster must BE the overlay's roster.
  *
- * The service owns a frozen 60-row table (id + official package) because it
+ * The service owns a frozen table of official Web rows (id + package) because it
  * flips those exact rows at runtime. This assertion compares that table with
  * the real `HOST_ONLY_PATCH` insert, so a silently added, dropped, renamed or
  * reordered declaration cannot leave the toggle driving a different graph than
@@ -526,7 +560,6 @@ function assertWebAccessRoster(web: readonly OverlayRow[]): void {
 
 test('the runtime toggle owns exactly the overlay Web roster', () => {
   assertWebAccessRoster(webInsertGroup(OVERLAY_ENTRIES))
-  assert.equal(PI_TUI_WEB_ACCESS_ROWS.length, 60, 'the toggle owns the complete 60-row Web roster')
 })
 
 test('the toggle roster assertion rejects a missing, renamed, duplicated or foreign row', () => {
@@ -536,7 +569,7 @@ test('the toggle roster assertion rejects a missing, renamed, duplicated or fore
   const mutateWeb = (
     mutate: (rows: readonly OverlayRow[]) => readonly OverlayRow[],
   ): readonly OverlayRow[] => mutate(webGroup.insert ?? [])
-  // Drift 1: a removed declaration row would make the toggle's 59-id table name
+  // Drift 1: a removed declaration row would make the toggle's table name
   // a row this Host never mounts.
   assert.throws(
     () => assertWebAccessRoster(mutateWeb(rows => rows.filter(row => row.id !== 'terminal-controller'))),
@@ -610,7 +643,7 @@ test('the Web composition assertion rejects a re-enabled row, a browser launch a
   for (const dependency of MANDATORY_CLIENT_DEPENDENCY_PACKAGES) {
     assert.throws(
       () => assertWebRoster(webInsertGroup(OVERLAY_ENTRIES), WEB_ROWS.filter(row => row.name !== dependency)),
-      /must declare exactly the frozen 60 row ids in order/u,
+      /must declare exactly the official Web rows in order/u,
       `dropping "${dependency}" from the frozen roster must fail the composition assertion`,
     )
   }
@@ -621,7 +654,7 @@ test('the Web composition assertion rejects a re-enabled row, a browser launch a
       id: 'ui-deepseek-model-label-1017',
       name: '@deepseek-ai/dsh-client-ui-deepseek-model-label-1017',
     }]),
-    /must declare exactly the frozen 60 row ids in order/u,
+    /must declare exactly the official Web rows in order/u,
     'the deleted 1017 label must fail the roster comparison instead of being re-added',
   )
   // Drift 8/9: a second `connection`/`api-remotes` owner in the Web insert (or at
@@ -661,6 +694,11 @@ const OFFICIAL_CLIENT_UI_PACKAGES = [
   '@deepseek-ai/dsh-client-ui-open-in-app',
   '@deepseek-ai/dsh-client-ui-sidebar-right',
   '@deepseek-ai/dsh-client-ui-deliverables',
+  // S5-PR5 additions: their real manifests prove the official packages resolve
+  // from the pinned family and that their inject closure is satisfied by the
+  // roster below.
+  '@deepseek-ai/dsh-client-ui-file-actions',
+  '@deepseek-ai/dsh-message-quotes',
 ] as const
 
 /** The mandatory Client packages whose only owner is one Web-only roster row. */

@@ -839,6 +839,14 @@ interface PeerRemoteService {
       expectedRevision?: number,
     ): Promise<PeerRemoteResult>
   }
+  /**
+   * The official generated Workspace namespace. The qualification Peer adopts
+   * ONE existing absolute directory as a Workspace through the SAME wire the
+   * Web/UI domains use; it creates no Host route and writes no profile file.
+   */
+  readonly workspace?: {
+    create(input: { readonly path: string }): Promise<PeerRemoteResult>
+  }
 }
 
 /** One RemoteResult as the Client face resolves it (structural, non-secret). */
@@ -1461,6 +1469,39 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
                 : {
                     errorCode: result.error?.code,
                     ...(result.error?.message === undefined ? {} : { error: result.error.message.slice(0, 300) }),
+                  }),
+              ...(request.requestId === undefined ? {} : { requestId: request.requestId }),
+            })
+            return false
+          }
+          if (request.op === 'qualification-workspace-create') {
+            // Qualification-only: adopt ONE existing absolute directory as a
+            // Workspace through the official generated `workspace` Remote. The
+            // real Browser then starts the Session in that Workspace through its
+            // own UI; no Host route, profile file or second authority is added.
+            const workspace = remoteService?.workspace
+            if (workspace === undefined) {
+              throw new Error('local client entry: the qualification Peer has no workspace namespace')
+            }
+            const path = request.workspacePath
+            if (typeof path !== 'string' || path === '') {
+              throw new Error('local client entry: qualification-workspace-create requires an absolute workspacePath')
+            }
+            const result = await workspace.create({ path })
+            const value = result.ok
+              ? result.value as { readonly created?: unknown; readonly workspace?: { readonly workspaceId?: unknown } } | undefined
+              : undefined
+            emit({
+              m4a0: 'qualification',
+              op: 'workspace-create',
+              processRole: 'client',
+              pid: process.pid,
+              ok: result.ok === true,
+              ...(value === undefined
+                ? { errorCode: result.error?.code }
+                : {
+                    created: value.created === true,
+                    ...(typeof value.workspace?.workspaceId === 'string' ? { workspaceId: value.workspace.workspaceId } : {}),
                   }),
               ...(request.requestId === undefined ? {} : { requestId: request.requestId }),
             })

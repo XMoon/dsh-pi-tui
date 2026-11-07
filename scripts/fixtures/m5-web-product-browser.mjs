@@ -384,6 +384,47 @@ async function clickSend(page) {
   await clickCentre(page, point)
 }
 
+/**
+ * Create one Session inside a NAMED Workspace through that Workspace row's own
+ * "New session in <name>" action, so the Session's authoritative cwd is the
+ * Workspace folder the action names.
+ */
+async function newSessionInWorkspace(page, workspaceLabel) {
+  // The Workspace row arrives through the live Workspace stream; wait for it.
+  const rowDeadline = Date.now() + 60_000
+  let rowPoint = null
+  while (rowPoint === null && Date.now() < rowDeadline) {
+    rowPoint = await page.evaluate(label => {
+      for (const row of document.querySelectorAll('[data-row-key^="workspace:"]')) {
+        if (!(row.innerText ?? '').includes(label)) continue
+        row.scrollIntoView({ block: 'center' })
+        const rect = row.getBoundingClientRect()
+        if (rect.width > 0 && rect.height > 0) return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 }
+      }
+      return null
+    }, workspaceLabel)
+    if (rowPoint === null) await page.waitForTimeout(250)
+  }
+  if (rowPoint === null) throw new Error(`the Web sidebar never painted the workspace "${workspaceLabel}"`)
+  // The row action is revealed by hover; the create itself is the official
+  // per-Workspace start-session path.
+  await page.mouse.move(rowPoint.x, rowPoint.y)
+  await page.waitForTimeout(300)
+  const capture = captureNextSessionCreate(page)
+  const action = page.getByRole('button', { name: `New session in ${workspaceLabel}`, exact: true }).last()
+  await action.waitFor({ state: 'visible', timeout: 30_000 })
+  await action.click()
+  const created = await capture.settle()
+  const sessionId = created?.result?.value?.sessionId
+  if (typeof sessionId !== 'string' || sessionId === '') {
+    throw new Error(`the "${workspaceLabel}" New-session action created no Host Session`)
+  }
+  result.sessionId = sessionId
+  result.browserClientActions.push(`new-session-in:${workspaceLabel}`)
+  recordRequestIds(created)
+  return sessionId
+}
+
 /** Submit one prompt through the real composer and Send control. */
 async function sendPrompt(page, text) {
   const composer = page.locator('[role=textbox]').last()
@@ -1008,6 +1049,219 @@ async function inventory(page) {
   return createdSession
 }
 
+
+/** The shared context-menu popup's live rows (label + disabled), read from its real DOM. */
+async function menuRows(page) {
+  return page.evaluate(() => [...document.querySelectorAll('button[role="menuitem"]')]
+    .map(node => ({
+      label: (node.textContent ?? '').replace(/\s+/gu, ' ').trim(),
+      disabled: node.getAttribute('aria-disabled') === 'true' || node.disabled === true,
+    })))
+}
+
+/** Wait until the ONE shared context-menu popup owns no row (its exit finished). */
+async function waitMenuClosed(page, timeoutMs = 15_000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if ((await menuRows(page)).length === 0) return
+    await page.waitForTimeout(100)
+  }
+  throw new Error('the shared context menu did not close')
+}
+
+/**
+ * Open the REAL right-click menu of one visible control and return its rows.
+ * The shared popup is single: the previous menu's exit animation must finish
+ * BEFORE the next read, or a stale (enabled) row would answer for the new
+ * target.
+ */
+async function openContextMenu(page, locator, label) {
+  await waitMenuClosed(page)
+  await locator.waitFor({ state: 'visible', timeout: 120_000 })
+  await locator.click({ button: 'right' })
+  const deadline = Date.now() + 30_000
+  while (Date.now() < deadline) {
+    const rows = await menuRows(page)
+    // The file-actions contribution resolves asynchronously (an authorized
+    // stat); only a menu that already carries its Download row is complete.
+    if (rows.some(row => row.label === 'Download')) return rows
+    await page.waitForTimeout(150)
+  }
+  throw new Error(`the context menu of ${label} exposed no complete file-action menu`)
+}
+
+/** Close the shared menu without selecting an action. */
+async function dismissMenu(page) {
+  await page.keyboard.press('Escape')
+  await page.waitForTimeout(250)
+}
+
+/** The composer's live draft text (the LAST role=textbox is the official composer). */
+async function composerDraft(page) {
+  return page.evaluate(() => {
+    const node = [...document.querySelectorAll('[role=textbox]')].at(-1)
+    if (node === undefined) return null
+    if (node instanceof HTMLTextAreaElement || node instanceof HTMLInputElement) return node.value
+    return node.innerText
+  })
+}
+
+/** The atomic Quote previews currently inside the composer (exact visible text). */
+async function composerQuotes(page) {
+  return page.evaluate(() => [...document.querySelectorAll('[role=textbox] [data-quote-preview-text]')]
+    .map(node => node.textContent ?? ''))
+}
+
+/**
+ * The model-visible Markdown of the live composer draft. The official editor
+ * exposes it through its OWN clipboard serialization, so a real select-all +
+ * copy runs the production path; an unavailable Clipboard API is reported as a
+ * refusal, never as a claimed success.
+ */
+async function composerMarkdownDraft(page) {
+  const composer = page.locator('[role=textbox]').last()
+  await composer.click()
+  await page.keyboard.press('ControlOrMeta+a')
+  await page.keyboard.press('ControlOrMeta+c')
+  await page.waitForTimeout(250)
+  return page.evaluate(async () => {
+    try {
+      return { ok: true, text: await navigator.clipboard.readText() }
+    } catch (error) {
+      return { ok: false, reason: String(error?.name ?? error) }
+    }
+  })
+}
+
+/**
+ * Select one occurrence of `text` with a REAL pointer drag (pointerdown inside
+ * the conversation, move, pointerup) and return the resulting DOM selection.
+ */
+async function dragSelectText(page, text) {
+  const rect = await page.evaluate(needle => {
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT)
+    let node = walker.nextNode()
+    while (node !== null) {
+      const content = node.textContent ?? ''
+      const at = content.indexOf(needle)
+      if (at >= 0) {
+        const range = document.createRange()
+        range.setStart(node, at)
+        range.setEnd(node, at + needle.length)
+        const box = range.getBoundingClientRect()
+        if (box.width > 0 && box.height > 0) {
+          return { x: box.x, y: box.y, width: box.width, height: box.height }
+        }
+      }
+      node = walker.nextNode()
+    }
+    return null
+  }, text)
+  if (rect === null) throw new Error(`the conversation does not paint "${text}"`)
+  const y = rect.y + rect.height / 2
+  await page.mouse.move(rect.x + 1, y)
+  await page.mouse.down()
+  await page.mouse.move(rect.x + rect.width - 1, y, { steps: 8 })
+  await page.mouse.up()
+  await page.waitForTimeout(400)
+  return page.evaluate(() => document.getSelection()?.toString() ?? '')
+}
+
+/** The number of official turn-completion lines the conversation paints. */
+async function completedTurnCount(page) {
+  return page.evaluate(() => (document.body.innerText.match(/Completed in/gu) ?? []).length)
+}
+
+/**
+ * Wait until a NEW official turn-completion line is painted. The Web client
+ * applies the ORDERED Session event stream, and a turn's `workspace/changes`
+ * event (when one exists) is appended BEFORE its `turn/end`; observing this
+ * turn's completion therefore proves every earlier event of the turn has
+ * already been applied.
+ */
+async function waitCompletedTurn(page, before, timeoutMs) {
+  const deadline = Date.now() + timeoutMs
+  let count = await completedTurnCount(page)
+  while (count <= before && Date.now() < deadline) {
+    await page.waitForTimeout(150)
+    count = await completedTurnCount(page)
+  }
+  return count
+}
+
+/**
+ * Read the Browser Clipboard's image/png content: type, byte length, PNG
+ * signature and sha256. A refused Clipboard API is reported, never guessed.
+ */
+async function readClipboardPng(page) {
+  return page.evaluate(async () => {
+    const sha = async value => {
+      const digest = await crypto.subtle.digest('SHA-256', value)
+      return [...new Uint8Array(digest)].map(item => item.toString(16).padStart(2, '0')).join('')
+    }
+    try {
+      const items = await navigator.clipboard.read()
+      for (const item of items) {
+        if (!item.types.includes('image/png')) continue
+        const blob = await item.getType('image/png')
+        const bytes = new Uint8Array(await blob.arrayBuffer())
+        const signature = bytes.length >= 8 && [137, 80, 78, 71, 13, 10, 26, 10].every((value, index) => bytes[index] === value)
+        // The stable contract is the DECODED image, not the byte encoding:
+        // Chromium is free to re-encode the PNG on the clipboard.
+        const bitmap = await createImageBitmap(blob)
+        const canvas = new OffscreenCanvas(bitmap.width, bitmap.height)
+        const context = canvas.getContext('2d')
+        context.drawImage(bitmap, 0, 0)
+        const rgba = context.getImageData(0, 0, bitmap.width, bitmap.height).data
+        return {
+          ok: true,
+          type: 'image/png',
+          bytes: bytes.length,
+          pngSignature: signature,
+          sha256: await sha(bytes),
+          width: bitmap.width,
+          height: bitmap.height,
+          pixelSha256: await sha(rgba),
+        }
+      }
+      return { ok: false, reason: 'no image/png clipboard item' }
+    } catch (error) {
+      return { ok: false, reason: String(error?.name ?? error) }
+    }
+  })
+}
+
+/** Poll the Clipboard until the Copy action's async write lands (bounded). */
+async function waitForClipboardPng(page, timeoutMs) {
+  const deadline = Date.now() + timeoutMs
+  let last = { ok: false, reason: 'not read' }
+  while (Date.now() < deadline) {
+    last = await readClipboardPng(page)
+    if (last.ok === true) return last
+    await page.waitForTimeout(200)
+  }
+  return last
+}
+
+/** Wait for the official file-actions copy-failure feedback. */
+async function waitForCopyFailure(page, timeoutMs = 20_000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const text = await page.evaluate(() => document.body.innerText ?? '')
+    if (text.includes('Could not copy. Check that the content is available, then retry.')) {
+      return { failureFeedback: true }
+    }
+    await page.waitForTimeout(150)
+  }
+  return { failureFeedback: false }
+}
+
+/** Every changed-files card the conversation currently paints. */
+async function changedCards(page) {
+  return page.evaluate(() => [...document.querySelectorAll('[data-changed-files]')]
+    .map(node => ({ text: (node.innerText ?? '').replace(/\s+/gu, ' ').trim() })))
+}
+
 /** The case programs. A case name is the frozen coordination interface. */
 const cases = {
   /** WP-01: login, dynamic resources, a real Session UI action. */
@@ -1349,6 +1603,268 @@ const cases = {
     step('host-owned-terminal-command', true, hostShell)
   },
 
+
+  /**
+   * WP-11 (S5-PR5): the official Web file actions, message quotes and
+   * Host-recorded changed files on ONE real Host + Browser.
+   */
+  'wp11-official-web-capabilities': async context => {
+    const changesNonce = caseConfig.changesNonce
+    if (typeof changesNonce !== 'string' || changesNonce === '') throw new Error('wp11 requires caseConfig.changesNonce')
+    const page = await login(context)
+    const origin = currentLaunch().url.origin
+    // The Clipboard API is permission-gated by the browser; the W5-FILE case
+    // records a refusal honestly instead of claiming a copy.
+    await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin }).catch(() => undefined)
+    // The Session's authoritative cwd must be the isolated, disposable
+    // Default-workspace folder (the fixture's dedicated Git work tree), never
+    // the profile directory or the developer's repository.
+    const sessionId = await newSessionInWorkspace(page, 'w5-changed-files')
+    result.sessionId = sessionId
+    driverFact('session', { sessionId })
+    await waitSignal('workspace-ready')
+
+    // ── W5-CHANGES positive: one real official `write` tool call changed the
+    // working tree; the official recorder announces the turn and the card must
+    // render it.
+    const changesMarker = `w5-changes-${changesNonce}`
+    await sendPrompt(page, changesMarker)
+    await waitConversation(page, changesMarker, ['w5-editing'], 240_000, 'the changed-files answer')
+    const card = page.locator('[data-changed-files]').last()
+    await card.waitFor({ state: 'visible', timeout: 120_000 })
+    const cardText = (await card.innerText()).replace(/\s+/gu, ' ').trim()
+    if (!cardText.includes('changed.txt')) throw new Error(`the changed-files card does not name changed.txt: ${cardText}`)
+    await screenshot(page, 'changed-files-card')
+    driverFact('changes-card', { text: cardText })
+    await waitSignal('changes-review-go')
+
+    // The card opens the REAL review tab; its summary/diff come from the
+    // official authenticated Host routes.
+    const sidebar = await findControlMatching(page, /open right sidebar/iu, 1_500)
+    if (sidebar !== null) {
+      await clickCentre(page, sidebar)
+      await page.waitForTimeout(400)
+    }
+    await card.locator('button').first().click()
+    await page.locator('[data-changes-review]').last().waitFor({ state: 'visible', timeout: 120_000 })
+    let reviewFacts = null
+    const reviewDeadline = Date.now() + 120_000
+    while (Date.now() < reviewDeadline) {
+      reviewFacts = await page.evaluate(() => {
+        const root = [...document.querySelectorAll('[data-changes-review]')].at(-1)
+        if (root === undefined) return null
+        return {
+          state: root.getAttribute('data-review-state'),
+          file: root.querySelector('[data-review-file]')?.getAttribute('data-review-file') ?? null,
+          text: (root.innerText ?? '').replace(/\s+/gu, ' ').trim(),
+        }
+      })
+      if (reviewFacts?.state === 'ready' && (reviewFacts.text ?? '').includes(`w5-change-${changesNonce}`)) break
+      await page.waitForTimeout(250)
+    }
+    if (reviewFacts?.state !== 'ready') throw new Error(`the changes review did not become ready (${String(reviewFacts?.state)})`)
+    if (typeof reviewFacts.file !== 'string' || !reviewFacts.file.endsWith('changed.txt')) {
+      throw new Error(`the changes review opened ${String(reviewFacts.file)}, not changed.txt`)
+    }
+    if (!reviewFacts.text.includes(`w5-change-${changesNonce}`)) {
+      throw new Error('the review does not paint the exact changed content the Host recorded')
+    }
+    await screenshot(page, 'changes-review')
+    const routeReads = result.network.statuses
+      .filter(entry => entry.path === '/api/changes.summary' || entry.path === '/api/changes.diff')
+    driverFact('review', { ...reviewFacts, network: { statuses: routeReads } })
+    step('changes-card-to-review', true, { file: reviewFacts.file })
+
+    // ── W5-FILE positive: the official right-click Download of a Session file.
+    const fileLink = page.getByRole('button', { name: 'changed.txt', exact: true }).last()
+    const fileRows = await openContextMenu(page, fileLink, 'changed.txt')
+    const fileLabels = fileRows.map(row => row.label)
+    if (!fileLabels.includes('Download')) throw new Error(`the file menu exposes no Download: ${JSON.stringify(fileLabels)}`)
+    if (fileLabels.some(label => /^Save as/u.test(label))) {
+      throw new Error('the Web file menu exposed the Desktop-only Save as')
+    }
+    const downloadsDir = join(coordinationDir, 'downloads')
+    mkdirSync(downloadsDir, { recursive: true, mode: 0o700 })
+    chmodSync(downloadsDir, 0o700)
+    await screenshot(page, 'file-menu')
+    const downloadPromise = page.waitForEvent('download', { timeout: 60_000 })
+    await page.getByRole('menuitem', { name: 'Download', exact: true }).last().click()
+    const download = await downloadPromise
+    const savedPath = join(downloadsDir, `changed-${nonce}.txt`)
+    await download.saveAs(savedPath)
+    const bytes = readFileSync(savedPath)
+    const downloadFacts = {
+      suggestedFilename: download.suggestedFilename(),
+      bytes: bytes.length,
+      sha256: createHash('sha256').update(bytes).digest('hex'),
+      labels: fileLabels,
+    }
+    result.downloads = [downloadFacts]
+    driverFact('download', downloadFacts)
+
+    // W5-FILE negative: a missing Session file cannot start a download and its
+    // action is disabled by the official metadata read.
+    const missingRows = await openContextMenu(page,
+      page.getByRole('button', { name: 'missing-sentinel.txt', exact: true }).last(), 'missing-sentinel.txt')
+    const missingDownload = missingRows.find(row => row.label === 'Download')
+    if (missingDownload === undefined) throw new Error('the missing file menu exposes no Download row to refuse')
+    await screenshot(page, 'file-menu-missing')
+    if (missingDownload.disabled !== true) throw new Error('a missing Session file left Download enabled')
+    const attempted = page.waitForEvent('download', { timeout: 3_000 }).then(() => true, () => false)
+    await page.getByRole('menuitem', { name: 'Download', exact: true }).last().click({ force: true }).catch(() => undefined)
+    const started = await attempted
+    await dismissMenu(page)
+    if (started) throw new Error('a missing Session file still started a download')
+    driverFact('file-negative', { rows: missingRows, downloadStarted: false })
+
+    // W5-FILE image: the official image menu's Copy image must put the ORIGINAL
+    // PNG on the real browser clipboard. A permission denial must surface the
+    // official failure feedback, never a fake success.
+    const image = page.locator('img[alt="shot"]').last()
+    await image.scrollIntoViewIfNeeded({ timeout: 30_000 }).catch(() => undefined)
+    await image.waitFor({ state: 'visible', timeout: 60_000 })
+    const imageRows = await openContextMenu(page, image, 'shot.png')
+    await screenshot(page, 'image-menu')
+    const imageLabels = imageRows.map(row => row.label)
+    if (!imageLabels.includes('Copy image')) {
+      throw new Error(`the image menu exposes no Copy image: ${JSON.stringify(imageLabels)}`)
+    }
+    await page.bringToFront()
+    await page.getByRole('menuitem', { name: 'Copy image', exact: true }).last().click()
+    // The official copy action is async (authorized read + clipboard write); the
+    // menu click returns first, so the clipboard is polled to a bounded settle.
+    const copied = await waitForClipboardPng(page, 15_000)
+    if (copied.ok !== true) throw new Error(`Copy image put no PNG on the clipboard: ${JSON.stringify(copied)}`)
+    if (copied.pngSignature !== true) throw new Error('the clipboard image/png is not a real PNG')
+    // Equivalence is pixel-level: Chromium may re-encode the PNG bytes.
+    const source = await image.evaluate(async element => {
+      const response = await fetch(element.src, { cache: 'no-store' })
+      const blob = await response.blob()
+      const bitmap = await createImageBitmap(blob)
+      const canvas = new OffscreenCanvas(bitmap.width, bitmap.height)
+      const context = canvas.getContext('2d')
+      context.drawImage(bitmap, 0, 0)
+      const rgba = context.getImageData(0, 0, bitmap.width, bitmap.height).data
+      const digest = await crypto.subtle.digest('SHA-256', rgba)
+      return {
+        width: bitmap.width,
+        height: bitmap.height,
+        pixelSha256: [...new Uint8Array(digest)].map(item => item.toString(16).padStart(2, '0')).join(''),
+      }
+    })
+    const pixelsEqual = source.width === copied.width && source.height === copied.height
+      && source.pixelSha256 === copied.pixelSha256
+    if (!pixelsEqual) {
+      throw new Error(`the clipboard PNG pixels differ from the source image: clipboard ${JSON.stringify(copied)} source ${JSON.stringify(source)}`)
+    }
+    result.copyImage = { ...copied, source, pixelsEqual, labels: imageLabels }
+    driverFact('copy-image', { ...copied, source, pixelsEqual, labels: imageLabels })
+
+    // Chromium's permission type behind the clipboard API is
+    // `clipboardReadWrite`; the Chrome "denied" setting is a real browser
+    // permission denial (not a JS mock), so the official failure path runs.
+    // A REAL refusal path: the Host removes the rendered image's source, so the
+    // official authorized read fails and the menu must surface the fixed
+    // failure feedback. (Chromium grants an activation-backed clipboard write
+    // even when the permission setting is denied, so that case is recorded as
+    // not observable rather than faked.)
+    await waitSignal('image-source-removed')
+    const refusedRows = await openContextMenu(page, image, 'shot.png (source removed)')
+    if (!refusedRows.some(row => row.label === 'Copy image')) {
+      throw new Error('the image menu exposes no Copy image for the refusal case')
+    }
+    await page.getByRole('menuitem', { name: 'Copy image', exact: true }).last().click()
+    const refused = await waitForCopyFailure(page)
+    if (refused.failureFeedback !== true) throw new Error('a refused Copy image surfaced no official failure feedback')
+    driverFact('copy-negative', { ...refused, cause: 'source-unavailable' })
+    step('image-copy-and-refusal', true, { bytes: copied.bytes, sha256: copied.sha256 })
+    step('file-download-and-refusal', true, downloadFacts)
+
+    // ── W5-QUOTE: a real selection becomes a composer draft, never a Session write.
+    const sentence = `w5-editing ${changesNonce}`
+    const selected = await dragSelectText(page, sentence)
+    if (!selected.includes(sentence)) throw new Error(`the pointer drag selected ${JSON.stringify(selected)}, not the fixture sentence`)
+    const quoteButton = page.getByRole('button', { name: 'Quote text', exact: true }).last()
+    await quoteButton.waitFor({ state: 'visible', timeout: 30_000 })
+    await quoteButton.click()
+    const quoteNodes = await composerQuotes(page)
+    if (!quoteNodes.some(text => text.includes(sentence))) {
+      throw new Error(`the Quote action inserted no atomic quote into the composer: ${JSON.stringify(quoteNodes)}`)
+    }
+    const markdown = await composerMarkdownDraft(page)
+    if (markdown.ok && !markdown.text.includes(`> ${sentence}`)) {
+      throw new Error(`the composer's Markdown draft is not a blockquote: ${JSON.stringify(markdown.text)}`)
+    }
+    await screenshot(page, 'quote-draft')
+    driverFact('quote-draft', { quoteNodes, markdownDraft: markdown.ok ? markdown.text : null, clipboardRefused: markdown.ok ? null : markdown.reason })
+
+    // Negative: the draft belongs to the current Session. A NEW Session in the
+    // same Workspace must not carry it, so the quoted text cannot be sent into
+    // the wrong Session.
+    const otherSessionId = await newSessionInWorkspace(page, 'w5-changed-files')
+    const otherDraft = await composerDraft(page)
+    const otherQuotes = await composerQuotes(page)
+    if ((typeof otherDraft === 'string' && otherDraft.includes(sentence))
+      || otherQuotes.some(text => text.includes(sentence))) {
+      throw new Error('the Quote draft leaked into another Session')
+    }
+    driverFact('quote-other-session', { sessionId: otherSessionId, draft: otherDraft ?? null, quotes: otherQuotes })
+    await openSession(page, sessionId)
+    const restored = await composerQuotes(page)
+    if (!restored.some(text => text.includes(sentence))) {
+      throw new Error(`the current Session lost its Quote draft on navigation: ${JSON.stringify(restored)}`)
+    }
+    await waitSignal('quote-send-go')
+    await clickSend(page)
+    await waitConversation(page, changesMarker, ['w5-quote answer'], 240_000, 'the quoted prompt answer')
+    driverFact('quote-sent', { quoted: `> ${sentence}` })
+    step('quote-draft-then-send', true, { quoted: `> ${sentence}` })
+
+    // ── W5-CHANGES negative: a tool-active Turn with NO file change paints no card.
+    const cardsBefore = (await changedCards(page)).length
+    const completedBefore = await completedTurnCount(page)
+    const noChangeMarker = `w5-nochange-${changesNonce}`
+    await promptAndWait(page, noChangeMarker, 'w5-nochange answer')
+    // The rendered card list is not the authority: the runner waits for the
+    // durable turn/end AND proves no `workspace/changes` event was appended.
+    driverFact('nochange-prompted', {})
+    await waitSignal('nochange-settled')
+    // Official render barrier, not a fixed sleep: this turn's completion line
+    // proves the ordered event stream was applied through its `turn/end`, so a
+    // changed-files event for the turn (which would precede `turn/end`) cannot
+    // still be pending in the client.
+    const completedAfter = await waitCompletedTurn(page, completedBefore, 30_000)
+    if (completedAfter <= completedBefore) {
+      throw new Error('the no-change Turn never rendered its official completion state')
+    }
+    const cardsAfter = await changedCards(page)
+    if (cardsAfter.length !== cardsBefore) {
+      throw new Error(`a no-change Turn painted ${String(cardsAfter.length - cardsBefore)} new changed-files card(s)`)
+    }
+    await screenshot(page, 'no-change-turn')
+    driverFact('nochange', { cardsBefore, cardsAfter: cardsAfter.length, completedBefore, completedAfter })
+    step('no-false-changed-files-card', true, { cardsBefore })
+
+    // ── A5 same-Host isolation: Web disable -> TUI keeps working -> re-enable.
+    // The old recorder/summary must not be reused, and a NEW real write must
+    // record through the freshly composed chain.
+    driverFact('toggle-ready', {})
+    await waitSignal('toggle-reenabled')
+    await page.reload({ waitUntil: 'load', timeout: 120_000 })
+    await waitShell(page)
+    await assertNoPreviewNotice(page)
+    await openSession(page, sessionId)
+    const secondMarker = `w5-changes2-${changesNonce}`
+    await sendPrompt(page, secondMarker)
+    await waitConversation(page, secondMarker, ['w5-editing2'], 240_000, 'the post-re-enable changed-files answer')
+    const cardsAfterReenable = await changedCards(page)
+    if (!cardsAfterReenable.some(card => card.text.includes('changed2.txt'))) {
+      throw new Error(`the post-re-enable Turn painted no changed2.txt card: ${JSON.stringify(cardsAfterReenable)}`)
+    }
+    await screenshot(page, 'post-reenable-change')
+    driverFact('toggle-second-change', { cards: cardsAfterReenable.length, text: cardsAfterReenable.map(card => card.text) })
+    step('same-host-toggle-isolation', true, { cards: cardsAfterReenable.length })
+  },
   /** WP-10: the honest visible-feature inventory. */
   'wp10-inventory': async context => {
     const page = await login(context)
