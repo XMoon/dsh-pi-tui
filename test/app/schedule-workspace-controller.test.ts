@@ -73,6 +73,8 @@ class FakePort implements SchedulePort {
   catalogGate: ReturnType<typeof deferred<readonly ScheduleCatalogEntry[]>> | undefined
   catalogError: unknown
   viewResults = new Map<string, ScheduleViewResult | Promise<ScheduleViewResult>>()
+  /** Ordered answers for consecutive `view` calls (reload races). */
+  viewQueue: Array<ScheduleViewResult | Promise<ScheduleViewResult>> = []
   historyResults = new Map<string, ScheduleDeliveryHistoryResult | Promise<ScheduleDeliveryHistoryResult>>()
   createResult: ((request: ScheduleCreateRequest) => Promise<ScheduleCatalogEntry>) | undefined
   editResult: ((request: ScheduleEditRequest) => Promise<ScheduleEditResult>) | undefined
@@ -103,6 +105,8 @@ class FakePort implements SchedulePort {
 
   async view(request: ScheduleViewRequest): Promise<ScheduleViewResult> {
     this.calls.push({ method: 'view', args: [request] })
+    const queued = this.viewQueue.shift()
+    if (queued !== undefined) return queued
     const value = this.viewResults.get(String(request.id))
     if (value !== undefined) return value
     const found = this.entries.find(candidate => candidate.id === request.id)
@@ -1301,6 +1305,139 @@ test('L6: a not-found pause receipt never resets the page the user switched to',
     assert.equal(life.controller.snapshot().selectedId, 'task-beta', 'the stale miss does not clear the new selection')
     assert.equal(life.controller.snapshot().mode, 'detail')
     assert.notEqual(life.controller.snapshot().detail?.id, 'task-alpha')
+  } finally {
+    life.controller.dispose()
+  }
+})
+
+test('L6: a pending save freezes the draft it is saving (edit and create)', async () => {
+  const life = await opened()
+  try {
+    life.port.entries = [entry({ title: 'A', prompt: 'P' })]
+    life.controller.dispatch({ kind: 'refresh' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-detail', id: 'schedule-1' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-edit' })
+    await flush()
+    life.controller.dispatch({ kind: 'set-field', fieldId: 'title', value: 'Saved title' })
+    const pending = deferred<ScheduleEditResult>()
+    life.port.editResult = () => pending.promise
+    life.controller.dispatch({ kind: 'save' })
+    // A second edit during the pending write must not enter the draft that the
+    // receipt will clear.
+    life.controller.dispatch({ kind: 'set-field', fieldId: 'prompt', value: 'late prompt' })
+    assert.equal(life.controller.snapshot().editor?.prompt, 'P', 'typing is frozen while the save is pending')
+    pending.resolve(entry({ title: 'Saved title', prompt: 'P', updatedAt: '2026-01-03T00:00:00.000Z' }))
+    await flush()
+    await life.controller.whenIdle()
+    assert.equal(life.controller.snapshot().mode, 'detail')
+
+    // Create has the same window (the create entry belongs to the list page).
+    life.controller.dispatch({ kind: 'back' })
+    life.controller.dispatch({ kind: 'open-create' })
+    life.controller.dispatch({ kind: 'set-field', fieldId: 'title', value: 'New task' })
+    life.controller.dispatch({ kind: 'set-field', fieldId: 'prompt', value: 'created prompt' })
+    const creating = deferred<ScheduleCatalogEntry>()
+    life.port.createResult = () => creating.promise
+    life.controller.dispatch({ kind: 'save' })
+    life.controller.dispatch({ kind: 'set-field', fieldId: 'title', value: 'late title' })
+    assert.equal(life.controller.snapshot().editor?.title, 'New task', 'create typing is frozen too')
+    creating.resolve(entry({ id: 'task-new' as never, title: 'New task' }))
+    await flush()
+    await life.controller.whenIdle()
+    assert.equal(life.controller.snapshot().mode, 'detail')
+  } finally {
+    life.controller.dispose()
+  }
+})
+
+test('L6: a failed save unfreezes the unchanged draft', async () => {
+  const life = await opened()
+  try {
+    life.controller.dispatch({ kind: 'open-detail', id: 'schedule-1' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-edit' })
+    await flush()
+    life.controller.dispatch({ kind: 'set-field', fieldId: 'title', value: 'Renamed' })
+    life.port.editResult = async () => ({ id: 'schedule-1' as never, code: 'schedule_conflict' })
+    life.controller.dispatch({ kind: 'save' })
+    await flush()
+    await life.controller.whenIdle()
+    assert.equal(life.controller.snapshot().mode, 'editor')
+    assert.equal(life.controller.snapshot().notice?.text, SCHEDULE_COPY.conflict)
+    // After settlement the editor is live again.
+    life.controller.dispatch({ kind: 'set-field', fieldId: 'prompt', value: 'second edit' })
+    assert.equal(life.controller.snapshot().editor?.prompt, 'second edit')
+  } finally {
+    life.controller.dispose()
+  }
+})
+
+test('L6: an older reload answer never rolls the editor back', async () => {
+  const life = await opened()
+  try {
+    life.controller.dispatch({ kind: 'open-detail', id: 'schedule-1' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-edit' })
+    await flush()
+    const newer = deferred<ScheduleViewResult>()
+    const older = deferred<ScheduleViewResult>()
+    // R1 (older request) gets `older`, R2 (newest) gets `newer`; R2 settles first.
+    life.port.viewQueue = [older.promise, newer.promise]
+    life.controller.dispatch({ kind: 'reload-latest' })
+    life.controller.dispatch({ kind: 'reload-latest' })
+    newer.resolve(entry({ title: 'V2', updatedAt: '2026-01-03T00:00:00.000Z' }))
+    await flush()
+    older.resolve(entry({ title: 'V1', updatedAt: '2026-01-02T00:00:00.000Z' }))
+    await flush()
+    assert.equal(life.controller.snapshot().editor?.title, 'V2', 'the newest reload wins')
+    assert.equal(life.controller.snapshot().editor?.expectedUpdatedAt, '2026-01-03T00:00:00.000Z')
+  } finally {
+    life.controller.dispose()
+  }
+})
+
+test('L6: a reload from a closed editor never touches the reopened one', async () => {
+  const life = await opened()
+  try {
+    life.controller.dispatch({ kind: 'open-detail', id: 'schedule-1' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-edit' })
+    await flush()
+    const pending = deferred<ScheduleViewResult>()
+    life.port.viewQueue = [pending.promise]
+    life.controller.dispatch({ kind: 'reload-latest' })
+    // Close the editor (confirmed discard) and reopen the SAME task.
+    life.controller.dispatch({ kind: 'back' })
+    life.controller.dispatch({ kind: 'confirm' })
+    assert.equal(life.controller.snapshot().mode, 'detail')
+    life.controller.dispatch({ kind: 'open-edit' })
+    await flush()
+    life.controller.dispatch({ kind: 'set-field', fieldId: 'title', value: 'fresh draft' })
+    pending.resolve(entry({ title: 'stale reload', updatedAt: '2026-01-09T00:00:00.000Z' }))
+    await flush()
+    assert.equal(life.controller.snapshot().mode, 'editor')
+    assert.equal(life.controller.snapshot().editor?.title, 'fresh draft', 'the old reload result is discarded')
+  } finally {
+    life.controller.dispose()
+  }
+})
+
+test('L6: a deleted underlay task keeps Help open and returns to the list', async () => {
+  const life = await opened()
+  try {
+    life.controller.dispatch({ kind: 'open-detail', id: 'schedule-1' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-help' })
+    life.port.viewResults.set('schedule-1', { id: 'schedule-1' as never, code: 'schedule_not_found' })
+    life.port.entries = []
+    life.port.invalidate()
+    await flush()
+    assert.equal(life.controller.snapshot().mode, 'help', 'a background not-found never closes Help')
+    assert.equal(life.controller.snapshot().notice?.text, SCHEDULE_COPY.taskGone)
+    life.controller.dispatch({ kind: 'close-help' })
+    assert.equal(life.controller.snapshot().mode, 'list', 'the underlay became the list')
   } finally {
     life.controller.dispose()
   }
