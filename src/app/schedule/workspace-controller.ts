@@ -64,7 +64,6 @@ import {
   selectTimingKind,
   sameTargetDraft,
   sameTimingDraft,
-  type ScheduleEditField,
   type ScheduleEditorBaseline,
   type ScheduleTargetDraft,
   type ScheduleTimingDraft,
@@ -112,9 +111,6 @@ export class ScheduleWorkspaceController {
   private historyView: ScheduleHistoryView | undefined
   private editor: ScheduleEditorDraft | undefined
   private editorBaseline: ScheduleEditorBaseline | undefined
-  /** The field groups the USER edited since the editor opened. Host-adopted
-   *  values never enter this set, so it survives any number of reloads. */
-  private editorEdited = new Set<ScheduleEditField>()
   private confirm: ScheduleConfirm | undefined
   /** The task a confirmed Discard must open next (a navigation that arrived
    *  while the dirty editor was still open). */
@@ -277,7 +273,6 @@ export class ScheduleWorkspaceController {
       case 'set-field': {
         if (this.editor === undefined) return
         this.editor = applyFieldValue(this.editor, intent.fieldId, intent.value)
-        this.markEdited(intent.fieldId)
         this.publish()
         return
       }
@@ -296,7 +291,6 @@ export class ScheduleWorkspaceController {
       case 'toggle-advanced':
         if (this.editor === undefined || this.editor.target.kind === 'session') return
         this.editor = { ...this.editor, advanced: !this.editor.advanced }
-        this.editorEdited.add('target')
         this.publish()
         return
       case 'save':
@@ -569,7 +563,6 @@ export class ScheduleWorkspaceController {
     this.pendingDetailId = undefined
     this.mode = 'editor'
     this.editorBaseline = undefined
-    this.editorEdited = new Set()
     this.editor = {
       mode: 'create',
       title: '',
@@ -630,7 +623,6 @@ export class ScheduleWorkspaceController {
       timing: draft.timing,
       target: draft.target,
     }
-    this.editorEdited = new Set()
     this.editor = {
       mode: 'edit',
       id: current.id,
@@ -663,7 +655,6 @@ export class ScheduleWorkspaceController {
         : selectTimingKind(edited.timing, kind as FormTimingKind)
     )
     this.editor = { ...edited, timing, timingMemory, timingEdited: true }
-    this.editorEdited.add('timing')
     this.publish()
   }
 
@@ -674,7 +665,6 @@ export class ScheduleWorkspaceController {
       ? timing.weekdays.filter(day => day !== weekday)
       : [...timing.weekdays, weekday].sort((left, right) => left - right)
     this.editor = { ...this.editor, timing: { ...timing, weekdays }, timingEdited: true }
-    this.editorEdited.add('timing')
     this.publish()
   }
 
@@ -695,14 +685,12 @@ export class ScheduleWorkspaceController {
       targetEdited: true,
       advanced: target.kind !== 'session' && (target.cwd !== '' || target.agentPreset !== ''),
     }
-    this.editorEdited.add('target')
     this.publish()
   }
 
   private selectTargetSession(sessionId: string): void {
     if (this.editor === undefined) return
     this.editor = { ...this.editor, target: { kind: 'session', sessionId }, targetEdited: true }
-    this.editorEdited.add('target')
     this.publish()
   }
 
@@ -746,12 +734,21 @@ export class ScheduleWorkspaceController {
    * user's typed fields. It never merges automatically and never overwrites.
    */
   /** The page identity a Host write must still own when it settles. */
-  private surfaceStamp(): { readonly mode: ScheduleWorkspaceSnapshot['mode']; readonly selectedId: string | undefined; readonly editorId: string | undefined } {
-    return { mode: this.mode, selectedId: this.selectedId, editorId: this.editor?.id }
+  private surfaceStamp(): { readonly page: string; readonly selectedId: string | undefined; readonly editorId: string | undefined } {
+    // Help is an UNDERLAY: a write issued from the page it covers still owns
+    // that page, so a receipt may settle it without closing Help.
+    return {
+      page: this.mode === 'help' ? (this.helpReturn ?? 'list') : this.mode,
+      selectedId: this.selectedId,
+      editorId: this.editor?.id,
+    }
   }
 
-  private sameSurface(stamp: { readonly mode: string; readonly selectedId: string | undefined; readonly editorId: string | undefined }): boolean {
-    return this.mode === stamp.mode && this.selectedId === stamp.selectedId && this.editor?.id === stamp.editorId
+  private sameSurface(stamp: { readonly page: string; readonly selectedId: string | undefined; readonly editorId: string | undefined }): boolean {
+    const page = this.mode === 'help' ? (this.helpReturn ?? 'list') : this.mode
+    return page === stamp.page
+      && this.selectedId === stamp.selectedId
+      && (page !== 'editor' || this.editor?.id === stamp.editorId)
   }
 
   /** The ONE controller-level mode admission table. */
@@ -779,20 +776,6 @@ export class ScheduleWorkspaceController {
     return false
   }
 
-  /** Map one editor field id onto its user-intent group. */
-  private markEdited(fieldId: string): void {
-    if (fieldId === 'title' || fieldId === 'prompt') this.editorEdited.add(fieldId)
-    else if (fieldId.startsWith('timing-')) this.editorEdited.add('timing')
-    else if (fieldId.startsWith('target-')) this.editorEdited.add('target')
-  }
-
-  /**
-   * The explicit conflict recovery (plan A6/§5.5): re-read the latest Host
-   * record and rebase the edit's `expectedUpdatedAt` on it while KEEPING the
-   * user's edited fields. It never merges automatically and never overwrites:
-   * fields the user did NOT edit are adopted from the latest revision, and a
-   * field edited on BOTH sides keeps the user's value with an explicit notice.
-   */
   private async reloadLatest(): Promise<void> {
     const draft = this.editor
     if (draft === undefined || draft.id === undefined) return
@@ -819,21 +802,28 @@ export class ScheduleWorkspaceController {
       // Intent comes from the STABLE user-edited set (host-adopted values never
       // enter it), never from a fixed open-time snapshot: consecutive reloads
       // stay correct even when the Host changes a different field each time.
-      const edited = this.editorEdited
+      // Intent is derived from the CURRENT baseline: a value reverted back to the
+      // baseline is untouched, and a value a previous reload adopted is the
+      // baseline itself, so consecutive reloads stay correct without a
+      // monotonically growing flag set.
+      const userTitle = current.title !== baseline.title
+      const userPrompt = current.prompt !== baseline.prompt
+      const userTiming = !safeSameTiming(current.timing, baseline.timing)
+      const userTarget = !sameTargetDraft(current.target, baseline.target)
       const overlaps: string[] = []
-      if (edited.has('title') && latest.title !== baseline.title) overlaps.push('the title')
-      if (edited.has('prompt') && latest.prompt !== baseline.prompt) overlaps.push('the prompt')
-      if (edited.has('timing') && !safeSameTiming(latest.timing, baseline.timing)) overlaps.push('the timing')
-      if (edited.has('target') && !sameTargetDraft(latest.target, baseline.target)) overlaps.push('the target')
-      const rebasedTarget = edited.has('target') ? current.target : latest.target
+      if (userTitle && latest.title !== baseline.title) overlaps.push('the title')
+      if (userPrompt && latest.prompt !== baseline.prompt) overlaps.push('the prompt')
+      if (userTiming && !safeSameTiming(latest.timing, baseline.timing)) overlaps.push('the timing')
+      if (userTarget && !sameTargetDraft(latest.target, baseline.target)) overlaps.push('the target')
+      const rebasedTarget = userTarget ? current.target : latest.target
       this.editor = {
         ...current,
-        title: edited.has('title') ? current.title : latest.title,
-        prompt: edited.has('prompt') ? current.prompt : latest.prompt,
-        timing: edited.has('timing') ? current.timing : latest.timing,
+        title: userTitle ? current.title : latest.title,
+        prompt: userPrompt ? current.prompt : latest.prompt,
+        timing: userTiming ? current.timing : latest.timing,
         target: rebasedTarget,
-        timingEdited: edited.has('timing'),
-        targetEdited: edited.has('target'),
+        timingEdited: userTiming,
+        targetEdited: userTarget,
         advanced: rebasedTarget.kind !== 'session' && (rebasedTarget.cwd !== '' || rebasedTarget.agentPreset !== ''),
         expectedUpdatedAt: result.updatedAt ?? null,
       }
@@ -862,7 +852,7 @@ export class ScheduleWorkspaceController {
         request = { kind: 'create', create: encodeCreate(draft) }
       } else {
         if (this.editorBaseline === undefined) return
-        request = { kind: 'edit', patch: encodePatch(this.editorBaseline, draft, this.editorEdited) }
+        request = { kind: 'edit', patch: encodePatch(this.editorBaseline, draft) }
       }
     } catch (error) {
       if (error instanceof ScheduleFormError) {
@@ -881,14 +871,19 @@ export class ScheduleWorkspaceController {
   }
 
   private async createTask(create: ReturnType<typeof encodeCreate>): Promise<void> {
+    const stamp = this.surfaceStamp()
     try {
       const entry = await this.port.create(create)
-      this.editor = undefined
-      this.editorBaseline = undefined
       this.notice = infoNotice(SCHEDULE_COPY.updated)
-      this.detail = entry
-      this.selectedId = entry.id
-      this.mode = 'detail'
+      if (this.sameSurface(stamp) && this.editor?.mode === 'create') {
+        const underHelp = this.mode === 'help'
+        this.editor = undefined
+        this.editorBaseline = undefined
+        this.detail = entry
+        this.selectedId = entry.id
+        if (underHelp) this.helpReturn = 'detail'
+        else this.mode = 'detail'
+      }
       this.publish()
       await this.refreshNow()
     } catch (error) {
@@ -915,11 +910,15 @@ export class ScheduleWorkspaceController {
         if ('code' in result && result.code === 'schedule_not_found') await this.refreshNow()
         return
       }
-      this.editor = undefined
-      this.editorBaseline = undefined
-      this.detail = result as ScheduleCatalogEntry
       this.notice = infoNotice(SCHEDULE_COPY.updated)
-      this.mode = 'detail'
+      if (this.sameSurface(stamp) && this.editor?.mode === 'edit') {
+        const underHelp = this.mode === 'help'
+        this.editor = undefined
+        this.editorBaseline = undefined
+        this.detail = result as ScheduleCatalogEntry
+        if (underHelp) this.helpReturn = 'detail'
+        else this.mode = 'detail'
+      }
       this.publish()
       await this.refreshNow()
     } catch (error) {
@@ -957,7 +956,7 @@ export class ScheduleWorkspaceController {
         if (refusal !== undefined) {
           this.notice = errorNotice(refusal)
           this.publish()
-          if ('code' in result && result.code === 'schedule_not_found') {
+          if ('code' in result && result.code === 'schedule_not_found' && this.sameSurface(stamp)) {
             this.detail = undefined
             this.selectedId = undefined
             this.mode = 'list'
@@ -1020,7 +1019,6 @@ export class ScheduleWorkspaceController {
         this.pendingDetailId = undefined
         this.editor = undefined
         this.editorBaseline = undefined
-        this.editorEdited = new Set()
         this.notice = undefined
         if (pending !== undefined) {
           this.openDetail(pending)
@@ -1089,10 +1087,12 @@ export class ScheduleWorkspaceController {
         if ('deleted' in result && result.deleted === true) {
           this.notice = infoNotice(SCHEDULE_COPY.updated)
           if (this.sameSurface(stamp)) {
+            const underHelp = this.mode === 'help'
             this.detail = undefined
             this.selectedId = undefined
-            this.mode = 'list'
             this.historyView = undefined
+            if (underHelp) this.helpReturn = 'list'
+            else this.mode = 'list'
           }
           this.publish()
           await this.refreshNow()
@@ -1198,11 +1198,13 @@ export class ScheduleWorkspaceController {
     }
     const baseline = this.editorBaseline
     if (baseline === undefined) return true
-    const edited = this.editorEdited
-    return (edited.has('title') && draft.title !== baseline.title) ||
-      (edited.has('prompt') && draft.prompt !== baseline.prompt) ||
-      (edited.has('timing') && !safeSameTiming(draft.timing, baseline.timing)) ||
-      (edited.has('target') && !sameTargetDraft(draft.target, baseline.target))
+    // VALUE comparison against the current accepted baseline: a field reverted
+    // to its baseline value is not a pending edit, and an untouched field that a
+    // reload adopted is not one either.
+    return draft.title !== baseline.title ||
+      draft.prompt !== baseline.prompt ||
+      !safeSameTiming(draft.timing, baseline.timing) ||
+      !sameTargetDraft(draft.target, baseline.target)
   }
 
   private moveSelection(delta: number): void {

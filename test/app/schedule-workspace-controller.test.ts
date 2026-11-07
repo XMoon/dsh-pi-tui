@@ -1201,3 +1201,107 @@ test('L6: a schedule/changed signal refreshes a Help underlay without closing it
     life.controller.dispose()
   }
 })
+
+test('L6: a value reverted to the baseline is not a pending edit', async () => {
+  const life = await opened()
+  try {
+    life.port.entries = [entry({ title: 'A', prompt: 'P' })]
+    life.controller.dispatch({ kind: 'refresh' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-detail', id: 'schedule-1' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-edit' })
+    await flush()
+    life.controller.dispatch({ kind: 'set-field', fieldId: 'title', value: 'X' })
+    life.controller.dispatch({ kind: 'set-field', fieldId: 'title', value: 'A' })
+    assert.equal(life.controller.snapshot().editor?.title, 'A')
+    life.port.viewResults.set('schedule-1', entry({ title: 'B', prompt: 'P', updatedAt: '2026-01-02T00:00:00.000Z' }))
+    life.controller.dispatch({ kind: 'reload-latest' })
+    await flush()
+    assert.equal(life.controller.snapshot().editor?.title, 'B', 'the reverted title is untouched and follows the Host')
+    assert.equal(life.controller.snapshot().notice?.text, SCHEDULE_COPY.reloaded, 'no overlap was invented')
+  } finally {
+    life.controller.dispose()
+  }
+})
+
+test('L6: toggling Advanced alone never counts as a Target edit', async () => {
+  const life = await opened()
+  try {
+    life.port.entries = [entry({
+      target: { kind: 'new_once', sessionId: 'reserved' as never, create: { cwd: '/work' } },
+    })]
+    life.controller.dispatch({ kind: 'refresh' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-detail', id: 'schedule-1' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-edit' })
+    await flush()
+    life.controller.dispatch({ kind: 'toggle-advanced' })
+    life.controller.dispatch({ kind: 'toggle-advanced' })
+    life.port.viewResults.set('schedule-1', entry({
+      target: { kind: 'new_once', sessionId: 'reserved' as never, create: { cwd: '/host-new' } },
+      updatedAt: '2026-01-02T00:00:00.000Z',
+    }))
+    life.controller.dispatch({ kind: 'reload-latest' })
+    await flush()
+    const target = life.controller.snapshot().editor?.target
+    assert.equal(target?.kind === 'new_once' ? target.cwd : undefined, '/host-new',
+      'an untouched target follows the Host even after Advanced was toggled')
+    assert.equal(life.controller.snapshot().notice?.text, SCHEDULE_COPY.reloaded)
+  } finally {
+    life.controller.dispose()
+  }
+})
+
+test('L6: an edit receipt settles under Help and never closes it', async () => {
+  const life = await opened()
+  try {
+    life.controller.dispatch({ kind: 'open-detail', id: 'schedule-1' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-edit' })
+    await flush()
+    life.controller.dispatch({ kind: 'set-field', fieldId: 'title', value: 'Renamed' })
+    const pending = deferred<ScheduleEditResult>()
+    life.port.editResult = () => pending.promise
+    life.controller.dispatch({ kind: 'save' })
+    life.controller.dispatch({ kind: 'open-help' })
+    pending.resolve(entry({ title: 'Renamed', updatedAt: '2026-01-02T00:00:00.000Z' }))
+    await flush()
+    await life.controller.whenIdle()
+    assert.equal(life.controller.snapshot().mode, 'help', 'the receipt never closes Help')
+    life.controller.dispatch({ kind: 'close-help' })
+    assert.equal(life.controller.snapshot().mode, 'detail', 'closing Help shows the settled Detail')
+    assert.equal(life.controller.snapshot().editor, undefined)
+    assert.equal(life.controller.snapshot().detail?.title, 'Renamed')
+  } finally {
+    life.controller.dispose()
+  }
+})
+
+test('L6: a not-found pause receipt never resets the page the user switched to', async () => {
+  const life = await opened()
+  try {
+    const alpha = entry({ id: 'task-alpha' as never, title: 'Alpha' })
+    const beta = entry({ id: 'task-beta' as never, title: 'Beta' })
+    life.port.entries = [alpha, beta]
+    life.port.viewResults.set('task-alpha', alpha)
+    life.controller.dispatch({ kind: 'refresh' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-detail', id: 'task-alpha' })
+    await flush()
+    const pending = deferred<ScheduleEditResult>()
+    life.port.editResult = () => pending.promise
+    life.controller.dispatch({ kind: 'toggle-active' })
+    life.controller.dispatch({ kind: 'move', delta: 1 })
+    await flush()
+    pending.resolve({ id: 'task-alpha' as never, code: 'schedule_not_found' })
+    await flush()
+    await life.controller.whenIdle()
+    assert.equal(life.controller.snapshot().selectedId, 'task-beta', 'the stale miss does not clear the new selection')
+    assert.equal(life.controller.snapshot().mode, 'detail')
+    assert.notEqual(life.controller.snapshot().detail?.id, 'task-alpha')
+  } finally {
+    life.controller.dispose()
+  }
+})
