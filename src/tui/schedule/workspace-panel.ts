@@ -576,15 +576,33 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     } else if (matchesKey(data, 'end')) {
       caret = lineEnd(caret)
     } else if (matchesKey(data, 'up') || matchesKey(data, 'down')) {
-      // Keep the visual column across lines, like every multi-line editor.
+      // Keep the VISUAL (terminal-cell) column across lines: a code-point
+      // column would misplace the caret in mixed CJK/Latin text (e.g. after
+      // '汉' the cell column is 2, not 1).
       const start = lineStart(caret)
-      const column = caret - start
+      const columnCells = visibleWidth(points.slice(start, caret).join(''))
+      const indexAtCells = (from: number, to: number): number => {
+        let used = 0
+        let index = from
+        while (index < to) {
+          const width = visibleWidth(points[index] ?? '')
+          if (used + width > columnCells) break
+          used += width
+          index += 1
+        }
+        // A wide glyph straddling the target column: land on its nearer side.
+        if (index < to) {
+          const width = visibleWidth(points[index] ?? '')
+          if (columnCells - used >= width / 2) index += 1
+        }
+        return index
+      }
       if (matchesKey(data, 'up') && start > 0) {
         const previousStart = lineStart(start - 1)
-        caret = Math.min(previousStart + column, start - 1)
+        caret = indexAtCells(previousStart, start - 1)
       } else if (matchesKey(data, 'down') && lineEnd(caret) < points.length) {
         const nextStart = lineEnd(caret) + 1
-        caret = Math.min(nextStart + column, lineEnd(nextStart))
+        caret = indexAtCells(nextStart, lineEnd(nextStart))
       }
     } else if (this.isPrintableInput(data)) {
       insert = Array.from(data)
