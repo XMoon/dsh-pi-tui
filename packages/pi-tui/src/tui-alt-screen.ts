@@ -86,8 +86,9 @@ const MAX_CACHED_OFFSCREEN_KITTY_DECODED_BYTES = 64 * 1024 * 1024;
 const DOUBLE_CLICK_INTERVAL_MS = 500;
 const COPY_ERROR_FLASH_DURATION_MS = 5000;
 // Regular mode delegates double-click selection to the terminal emulator. Fullscreen owns mouse selection,
-// so mirror common terminal word-selection behavior by keeping paths and kebab-case tokens whole.
-const TERMINAL_WORD_SELECTION_JOINERS = new Set(["/", "-"]);
+// so it uses iTerm2's default "characters considered part of a word" set:
+// https://github.com/gnachman/iTerm2/blob/7f4ff739721f95d0b93003d8701c4523a7edf261/sources/Settings/iTermPreferences.m#L743
+const TERMINAL_WORD_SELECTION_JOINERS = new Set(["/", "-", "+", "\\", "~", "_", "."]);
 const wordSegmenter = getWordSegmenter();
 
 interface CachedKittyImage {
@@ -616,7 +617,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			this.terminal.write(`${BEGIN_SYNCHRONIZED_OUTPUT}${EXIT_ALT_SCREEN}\x1b[?25h${END_SYNCHRONIZED_OUTPUT}`);
 		} else {
 			const width = Math.max(1, this.terminal.columns);
-			const documentLines = this.render(width)
+			const documentLines = this.resolveFakeCursors(this.render(width))
 				.map((line) => line.replace(OSC133_ZONE_PREFIX, ""))
 				// A component emits an inert candidate marker, never a DCS: the stopped
 				// alt screen must replay its safe text, not the internal identity.
@@ -644,6 +645,17 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			setCapabilities(this.savedCapabilities);
 			this.savedCapabilities = undefined;
 		}
+	}
+
+	protected override getExitRestorePrefix(): string {
+		const prefix = super.getExitRestorePrefix();
+		if (!this.altScreenActive) return prefix;
+		return `${END_SYNCHRONIZED_OUTPUT}${this.mouseEnabled ? DISABLE_MOUSE : ""}${ENABLE_AUTOWRAP}${prefix}`;
+	}
+
+	protected override getExitRestoreSuffix(): string {
+		// Kitty keyboard flags are per screen, so the terminal pops them before the alternate screen is left.
+		return `${super.getExitRestoreSuffix()}${this.altScreenActive ? `${EXIT_ALT_SCREEN}\x1b[?25h` : ""}`;
 	}
 
 	private deleteKittyImages(): string {
@@ -972,6 +984,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.flashes.flash(message, durationMs);
 	}
 
+	/** Focused overlays and components that capture viewport input receive viewport keys instead of the transcript. */
 	private shouldDeferViewportInputToOverlay(): boolean {
 		return this.isOverlayFocused() && this.activeSearch?.overlay?.isFocused() !== true;
 	}
@@ -1229,6 +1242,11 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			}
 		}
 		if (this.shouldDeferViewportInputToOverlay()) return undefined;
+		// The focused component's capture is a VIEWPORT-key policy only: it joins
+		// the dispatcher after mouse/wheel and the X058 passthrough allowlist, so
+		// a list that owns PageUp/PageDown keeps those keys without turning into a
+		// global input capture. (U1 capturesViewportInput.)
+		if (this.getFocusedComponent()?.capturesViewportInput === true) return undefined;
 		if (!isRelease && this.onBeforeViewportInput?.(data) === true) return { consume: true };
 		// When the primary scroll view has nothing to scroll (short content, or a
 		// full-screen component mounted as the layout root), let navigation keys
@@ -2576,7 +2594,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				nextLayout = renderLayoutFrame(root, width, height, () => this.requestRender(), this.sixelScreen);
 			}
 		}
-		let screen = nextLayout.lines.map((line) => line.replace(OSC133_ZONE_PREFIX, ""));
+		// Resolve fake cursors before highlighting and compositing, which only track SGR codes
+		let screen = this.resolveFakeCursors(nextLayout.lines.map((line) => line.replace(OSC133_ZONE_PREFIX, "")));
 		screen = this.applySearchHighlights(screen, nextLayout);
 		screen = this.compositeScrollToEndIndicator(screen, nextLayout, width);
 		screen = this.compositeOverlays(screen, width, height);

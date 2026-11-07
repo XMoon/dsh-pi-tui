@@ -72,6 +72,7 @@ class RecordingTerminal implements Terminal {
   setProgress(): void {}
   setProgramStatus(): void {}
   setProgressState(_state: TerminalProgressState): void {}
+  restoreOnExit?: (before: string, after: string) => void
 }
 
 function harness(options: { onEvent?: (event: KittyGraphicsEvent) => void } = {}) {
@@ -948,5 +949,36 @@ test('a pending tmux U1 probe never registers or paints a virtual occurrence', (
     graphics.dispose()
   } finally {
     cli.dispose()
+  }
+})
+
+/**
+ * U1's Terminal.restoreOnExit is the SYNCHRONOUS process-exit restoration, and
+ * the facade must forward it to the real sink exactly once: a facade that
+ * silently drops it leaves bracketed paste / Kitty keyboard / alt-screen state
+ * behind when the process exits without stop().
+ */
+test('the facade forwards sync exit restoration to the real terminal exactly once', () => {
+  const terminal = new RecordingTerminal()
+  const calls: Array<[string, string]> = []
+  terminal.restoreOnExit = (before, after) => {
+    calls.push([before, after])
+  }
+  const facade = new KittyTerminalFacade(terminal, new KittyGraphicsCore())
+  try {
+    facade.restoreOnExit('BEFORE', 'AFTER')
+    assert.deepEqual(calls, [['BEFORE', 'AFTER']])
+  } finally {
+    facade.dispose()
+  }
+
+  // The member is a RUNTIME capability of the real terminal: forwarding to a
+  // sink that does not implement it is a harmless no-op, never a throw.
+  const bare = new RecordingTerminal()
+  const bareFacade = new KittyTerminalFacade(bare, new KittyGraphicsCore())
+  try {
+    assert.doesNotThrow(() => bareFacade.restoreOnExit('BEFORE', 'AFTER'))
+  } finally {
+    bareFacade.dispose()
   }
 })

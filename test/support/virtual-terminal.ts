@@ -20,6 +20,9 @@ export class VirtualTerminal implements Terminal {
 	/** Test hook: every raw chunk written to the terminal, in order — the
 	 * FINAL terminal-bound bytes (framing, colors and payload alike). */
 	readonly writes: string[] = [];
+	/** U1 synchronous process-exit restoration; tests install a spy, while an
+	 * unset member keeps the runtime-capability semantics of the real sink. */
+	restoreOnExit?: (before: string, after: string) => void;
 
 	constructor(columns = 80, rows = 24) {
 		this._columns = columns;

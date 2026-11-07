@@ -6,6 +6,9 @@ import type { Terminal } from "./terminal.ts";
 import { SEGMENT_RESET, type TUI, TuiBase, type TuiStopOptions } from "./tui.ts";
 import { asciiVisibleWidthEarlyExit, normalizeTerminalOutput, sliceByColumn, visibleWidth } from "./utils.ts";
 
+/** OSC 133 prompt markers at the start of a rendered line. Fullscreen uses them for prompt navigation. */
+const OSC133_ZONE_PREFIX = /^(?:\x1b\]133;[ABC](?:\x07|\x1b\\))+/;
+
 const KITTY_SEQUENCE_PREFIX = "\x1b_G";
 const MAX_RENDER_WRITE_CHARS = 1024 * 1024;
 const EMPTY_IMAGE_IDS: readonly number[] = [];
@@ -567,10 +570,14 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			return targetScreenRow - currentScreenRow;
 		};
 
-		// Render all components to get new lines. In SIXEL mode these lines carry
-		// inert candidate markers, not device commands: the final viewport below
-		// decides which occurrences are granted pixels. (X073.)
-		let rawLines = this.render(width);
+		// Render all components to get new lines. Resolve fake cursors and drop
+		// OSC 133 prompt zones before compositing and line slicing so overlays and
+		// the raw-line cache see only plain SGR text. The terminal reads 133;A as
+		// a new shell prompt, which ends program status (OSC 7501).
+		// In SIXEL mode these lines carry inert candidate markers, not device
+		// commands: the final viewport below decides which occurrences are
+		// granted pixels. (X073.)
+		let rawLines = this.resolveFakeCursors(this.render(width).map((line) => line.replace(OSC133_ZONE_PREFIX, "")));
 
 		// Composite overlays into the rendered lines (before differential compare)
 		if (this.hasOverlayEntries) {

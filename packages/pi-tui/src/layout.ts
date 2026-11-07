@@ -4,6 +4,7 @@ import { getLayoutNode } from "./layout-node.ts";
 import {
 	cropKittyImageLine,
 	getKittyImageMetadata,
+	getMaxKittyImageRows,
 	MANAGED_KITTY_VIRTUAL_MARKER_PREFIX,
 	getKittyVirtualPlacementAnchor,
 	getManagedKittyVirtualMarker,
@@ -561,52 +562,66 @@ function paintBox(
 	for (const child of box.children) paintBox(child, screen, totalWidth, context);
 
 	if (box.scrollView && box.scrollContentLines && box.scrollView.scrollTop > 0 && box.rect.height > 0) {
-		const scanFloor = Math.max(0, box.scrollView.scrollTop - MAX_SIXEL_CROP_SCAN_ROWS);
-		for (let imageRow = box.scrollView.scrollTop - 1; imageRow >= 0; imageRow--) {
+		const scrollTop = box.scrollView.scrollTop;
+		// U1 bounds the Kitty scan by the tallest registered image. L bounds the
+		// SIXEL reservation by the owner's own body budget (X072) so an anchor
+		// above text or beyond the budget is never repainted.
+		const kittyScanFloor = Math.max(0, scrollTop - getMaxKittyImageRows());
+		const sixelScanFloor = Math.max(0, scrollTop - MAX_SIXEL_CROP_SCAN_ROWS);
+		let sixelSearch = true;
+		// Two independent bounds: U1's Kitty scan stops at the tallest registered
+		// image, while the trusted SIXEL reservation keeps its own body budget
+		// (X072). One exhausted search must not cut the other one short.
+		let kittySearch = true;
+		for (let imageRow = scrollTop - 1; imageRow >= 0; imageRow--) {
+			if (!sixelSearch && !kittySearch) break;
 			const imageLine = box.scrollContentLines[imageRow] ?? "";
-			const block = sixelBlock(imageLine, sixelScreen);
-			if (block !== undefined) {
-				const hiddenRows = box.scrollView.scrollTop - imageRow;
-				const visibleRows = Math.min(box.rect.height, block.rows - hiddenRows);
-				if (
-					hiddenRows < block.rows
-					&& visibleRows > 0
-					&& box.rect.x === 0
-					&& box.rect.width >= totalWidth
-				) {
-					// The anchor scrolled above the viewport: re-encode the SAME source
-					// from its real top crop instead of relocating the unclipped DCS
-					// (which would paint above the box).
-					if (block.kind === "candidate") {
-						context.sixelDemands.push({
-							line: imageLine,
-							cropTopRows: hiddenRows,
-							visibleRows,
-							physicalRow: box.rect.y,
-						});
-						screen[box.rect.y] = sixelScreen?.materialize(imageLine, hiddenRows, visibleRows) ?? block.fallback;
-					} else {
-						const cropped = sixelScreen?.crop(imageLine, hiddenRows, visibleRows);
-						if (cropped !== undefined) screen[box.rect.y] = cropped;
+			if (sixelSearch) {
+				const block = sixelBlock(imageLine, sixelScreen);
+				if (block !== undefined) {
+					const hiddenRows = scrollTop - imageRow;
+					const visibleRows = Math.min(box.rect.height, block.rows - hiddenRows);
+					if (
+						hiddenRows < block.rows
+						&& visibleRows > 0
+						&& box.rect.x === 0
+						&& box.rect.width >= totalWidth
+					) {
+						// The anchor scrolled above the viewport: re-encode the SAME source
+						// from its real top crop instead of relocating the unclipped DCS
+						// (which would paint above the box).
+						if (block.kind === "candidate") {
+							context.sixelDemands.push({
+								line: imageLine,
+								cropTopRows: hiddenRows,
+								visibleRows,
+								physicalRow: box.rect.y,
+							});
+							screen[box.rect.y] = sixelScreen?.materialize(imageLine, hiddenRows, visibleRows) ?? block.fallback;
+						} else {
+							const cropped = sixelScreen?.crop(imageLine, hiddenRows, visibleRows);
+							if (cropped !== undefined) screen[box.rect.y] = cropped;
+						}
 					}
+					break;
 				}
-				break;
 			}
-			const metadata = getKittyImageMetadata(imageLine);
-			if (metadata) {
-				const hiddenRows = box.scrollView.scrollTop - imageRow;
-				if (hiddenRows < metadata.rows) {
-					const visibleRows = Math.min(box.rect.height, metadata.rows - hiddenRows);
-					const cropped = cropKittyImageLine(imageLine, hiddenRows, visibleRows);
-					if (box.rect.x === 0 && box.rect.width >= totalWidth) screen[box.rect.y] = cropped;
+			if (kittySearch) {
+				const metadata = getKittyImageMetadata(imageLine);
+				if (metadata) {
+					const hiddenRows = scrollTop - imageRow;
+					if (hiddenRows < metadata.rows) {
+						const visibleRows = Math.min(box.rect.height, metadata.rows - hiddenRows);
+						const cropped = cropKittyImageLine(imageLine, hiddenRows, visibleRows);
+						if (box.rect.x === 0 && box.rect.width >= totalWidth) screen[box.rect.y] = cropped;
+					}
+					break;
 				}
-				break;
 			}
-			if (imageLine !== "") break;
-			// A SIXEL block never spans further than the owner's own body budget, so
-			// the upward search is bounded instead of scanning the whole corpus.
-			// Kitty keeps its upstream unbounded contiguous-blank scan.
-			if (sixelScreen !== undefined && imageRow <= scanFloor) break;
+			// A SIXEL reservation never crosses a non-empty row or its own body
+			// budget; Kitty keeps scanning non-image rows under U1's height bound.
+			if (sixelSearch && (imageLine !== "" || imageRow <= sixelScanFloor)) sixelSearch = false;
+			if (kittySearch && imageRow <= kittyScanFloor) kittySearch = false;
 		}
 	}
 
