@@ -258,8 +258,15 @@ test('/transcript gates on the REAL mounted save UI and never on a backend capab
   const handler = artifacts.slice(handlerAt)
   assert.ok(handler.includes('if (app === undefined)'),
     'the handler refuses when the renderer mounts no TuiApp (no save location)')
-  assert.ok(handler.includes('transcript file save is unavailable on this renderer'),
-    'the app-less refusal keeps its fixed actionable message')
+  assert.ok(handler.includes('TRANSCRIPT_SAVE_UNAVAILABLE_TEXT'),
+    'the app-less refusal returns the ONE shared fixed copy')
+  const capability = code('app/command/tsp-capability.ts')
+  assert.ok(capability.includes(
+    "export const TRANSCRIPT_SAVE_UNAVAILABLE_TEXT = 'transcript file save is unavailable on this renderer'",
+  ), 'the shared copy matches the exact plan text')
+  const controller = code('app/submission/controller.ts')
+  assert.ok(controller.includes('transcript ? TRANSCRIPT_SAVE_UNAVAILABLE_TEXT'),
+    'the real TSP pre-admission emits the same copy for /transcript')
   assert.ok(handler.includes("'The /transcript command does not accept a path.'"),
     'the no-argument grammar refusal is unchanged')
 })

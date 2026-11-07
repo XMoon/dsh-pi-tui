@@ -20,6 +20,7 @@ import { probeAttachment } from '../../client/media/attachment/intake.ts'
 import { parseShellWords } from '../../client/shell/words.ts'
 import type { RegisterOne, RegisterTuiCommand, TuiCommandRunner } from '../../commands.ts'
 import type { SessionScope } from '../../app/session/scope.ts'
+import { TRANSCRIPT_SAVE_UNAVAILABLE_TEXT } from '../../app/command/tsp-capability.ts'
 import type {
   InlineAttachmentStager,
   InlineAttachmentStake,
@@ -565,7 +566,7 @@ export function createArtifactsCommands(deps: ArtifactsCommandDeps): ArtifactsCo
         // explicitly instead of reporting a success whose post-success save can
         // never run.
         if (app === undefined) {
-          return { kind: 'error', text: 'transcript file save is unavailable on this renderer' }
+          return { kind: 'error', text: TRANSCRIPT_SAVE_UNAVAILABLE_TEXT }
         }
         return { kind: 'success', text: 'Transcript export requested.' }
       },

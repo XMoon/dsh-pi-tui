@@ -36,7 +36,7 @@ import { classifyCommandLine, isBareCommandLine, isLocalCommandLine, isPlainExit
 import { resolveSubmitDelivery } from './command-policy.ts'
 import { isIndeterminateSkillWrite, type HostCommandClaim, type SubmitDelivery } from '../../commands.ts'
 import type { ClientCommandRegistry } from '../command/client-command-registry.ts'
-import { TSP_B2A_RESULT_NOTICE_COMMANDS, tspBuiltinAvailability } from '../command/tsp-capability.ts'
+import { TRANSCRIPT_SAVE_UNAVAILABLE_TEXT, TSP_B2A_RESULT_NOTICE_COMMANDS, tspBuiltinAvailability } from '../command/tsp-capability.ts'
 import type { TuiLocalCommandHandler } from '../../extension/public-types.ts'
 import { PendingSubmissions, type PendingSubmissionPlacement } from './pending-submission.ts'
 import { queueInboxMessageOf } from './pending-input.ts'
@@ -1844,7 +1844,15 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       // (the B2 review's F1).
       if (availability.kind === 'unsupported' && !deps.supportsTuiBuiltinUi) {
         deps.app().setEditorText(mergeDraft(deps.app().getDraft(), text))
-        deps.app().notify("This command's UI is not available in TSP yet", 'info')
+        // `/transcript` has a dedicated fixed copy: its typed handler can never
+        // run here (no mounted save dialog), so the pre-admission is the ONLY
+        // place the user can observe the plan's explicit refusal. Everything
+        // else keeps the generic capability notice.
+        const transcript = parsed.name === 'transcript'
+        deps.app().notify(
+          transcript ? TRANSCRIPT_SAVE_UNAVAILABLE_TEXT : "This command's UI is not available in TSP yet",
+          transcript ? 'error' : 'info',
+        )
         return
       }
     }
