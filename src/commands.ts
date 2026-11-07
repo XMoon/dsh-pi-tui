@@ -1073,8 +1073,11 @@ export function registerTuiCommands(
    * degraded (a Host-owned same-name command): the UI opener then does not
    * exist and the Welcome paints its disabled form through the command
    * surface's own availability fact.
+   *
+   * The optional scope is the PiTUI Host Editor gesture's initial browse
+   * scope (`'all'`); the Welcome calls it without one and keeps Current.
    */
-  openSessionBrowser?(): Promise<CommandResult>
+  openSessionBrowser?(scope?: 'current' | 'all'): Promise<CommandResult>
 } {
   const { ctx, app } = runner
   // PR3-A: `app` is undefined while a non-PiTui renderer owns the terminal
@@ -2599,7 +2602,7 @@ export function registerTuiCommands(
     ...(registrationFailures.some(failure => failure.startsWith('/sessions:'))
       ? {}
       : {
-          openSessionBrowser: (): Promise<CommandResult> => sessionCommands.openSessions(),
+          openSessionBrowser: (scope): Promise<CommandResult> => sessionCommands.openSessions(scope),
         }),
     takeCommandDraftDisposition: (commandId?: string): CommandDraftDisposition | undefined => {
       if (commandId !== undefined) {

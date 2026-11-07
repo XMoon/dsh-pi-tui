@@ -113,8 +113,13 @@ export interface SessionCommandRegistrars {
    * route. It carries no query (the Welcome offers no filter affordance);
    * the typed handler keeps passing its own invocation, so a
    * `/sessions <query>` argument still seeds the Browser.
+   *
+   * The optional scope is the internal initial BROWSE scope the PiTUI Host
+   * Editor gesture passes (`'all'`); every pre-existing caller omits it and
+   * keeps the Current default. The TSP native presentation ignores it — the
+   * SDK owns that list's scope.
    */
-  openSessions(): Promise<CommandResult>
+  openSessions(scope?: 'current' | 'all'): Promise<CommandResult>
 }
 
 /** Shorten a session id for read-only display rows, capped at 28 characters. */
@@ -540,6 +545,9 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
    * (plan §8.2) — not a controller/framework abstraction. */
   interface SessionPickerOpenOptions {
     readonly header: PiTuiOpenIntent['header']
+    /** The PiTUI Host Editor gesture asks for the All-workspaces initial
+     * browse scope; every typed/pre-existing caller omits it (Current). */
+    readonly browseScope?: 'current' | 'all'
     /** `/resume <arg>`: after the ONE shared listing lands, resolve the
      * argument as a direct id/prefix match — the first listed MAIN match closes
      * the picker and switches; no match falls through to the filtered picker
@@ -607,7 +615,7 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
     const raw = invocation.rawInput.trim()
     piTuiOpenIntent = {
       header: options.header,
-      scope: 'current',
+      scope: options.browseScope ?? 'current',
       // `/sessions <query>` and `/search <query>` open the global editor; the
       // bare commands open the browse list. A typed `/resume` still tries its
       // direct match first and only falls back to the editor through the read
@@ -731,11 +739,14 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
    * its own invocation (so a `/sessions <query>` argument still seeds the
    * Browser); the Welcome's UI entry passes an empty one. Both are the SAME
    * shared lifecycle — one picker generation, one read owner, one query and
-   * one switch route — never a second listing or a copied presenter.
+   * one switch route — never a second listing or a copied presenter. The
+   * PiTUI Host Editor `←←` gesture is the ONE caller that passes `'all'`
+   * (its frozen initial scope); the typed and Welcome entries keep Current.
    */
   const openSessionsBody = (
     invocation: { rawInput: string; commandId?: string },
-  ): Promise<CommandResult> => openSessionPicker(invocation, { header: 'sessions' })
+    scope: 'current' | 'all' = 'current',
+  ): Promise<CommandResult> => openSessionPicker(invocation, { header: 'sessions', browseScope: scope })
 
   const registerSessions = (): void => {
     registerTuiCommand({
@@ -1005,6 +1016,6 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
     registerFork,
     registerRewind,
     // TSP-7 Welcome D: the argument-free UI entry over the SAME body.
-    openSessions: () => openSessionsBody({ rawInput: '' }),
+    openSessions: (scope) => openSessionsBody({ rawInput: '' }, scope),
   }
 }

@@ -474,8 +474,12 @@ export interface CommandSurface<Selection extends ModelSelectionValue, ExactAgen
    * renderer really offers a Session Browser presentation; a refusal states
    * itself through the existing notice path. The command owns every listing,
    * switch, cancel and outcome — this entry opens it and nothing else.
+   *
+   * The optional scope is the PiTUI Host Editor gesture's frozen initial
+   * browse scope (`'all'`); the Welcome and every pre-existing caller omit it
+   * and keep the Current default.
    */
-  openSessionBrowser(): void
+  openSessionBrowser(scope?: 'current' | 'all'): void
   /** Whether that `/sessions` UI entry is actually installed (registered AND
    *  presentable on this mount) — the business-entry fact the Welcome button
    *  paints, never the presence of a painted button. */
@@ -624,7 +628,8 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
    * public entry refuses through the existing notice path instead of opening a
    * Browser of its own.
    */
-  let sessionBrowserOpener: (() => Promise<import('@deepseek-ai/dsh-commands').CommandResult>) | undefined
+  let sessionBrowserOpener:
+    ((scope?: 'current' | 'all') => Promise<import('@deepseek-ai/dsh-commands').CommandResult>) | undefined
 
   /** Consume TUI-local command draft dispositions after DSH normalizes the
    * public CommandResult. A missing id is used only for a thrown command
@@ -905,7 +910,7 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
    * session list and switches nothing: every settlement, notice, cancel and
    * stale check stays with the `/sessions` command and its Browser owner.
    */
-  const openSessionBrowser = (): void => {
+  const openSessionBrowser = (scope?: 'current' | 'all'): void => {
     if (!commandsRegistered || sessionBrowserOpener === undefined) {
       deps.notify('session resume is unavailable in this session (the /sessions command is not registered)', 'error')
       return
@@ -917,7 +922,7 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       deps.notify("This command's UI is not available in TSP yet", 'error')
       return
     }
-    const opened = sessionBrowserOpener()
+    const opened = sessionBrowserOpener(scope)
     void opened.then((result) => { // allowlist: result observer — the command owns the task
       if (result.kind === 'error' && typeof result.text === 'string' && result.text !== '') {
         deps.notify(result.text, 'error')

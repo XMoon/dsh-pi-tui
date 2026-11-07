@@ -21,7 +21,7 @@ import { stripTerminalSequences } from '@xmoon76/pi-tui'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { registerTuiCommands, type TuiCommandRunner } from '../../src/commands.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
-import { TuiApp } from '../../src/tui-app.ts'
+import { TuiApp, type EditorWorkspaceEntryControl, type SubagentViewerTarget } from '../../src/tui-app.ts'
 import { DraftImageStore } from '../../src/client/media/image/draft-store.ts'
 import { DirectCatalogPort } from '../../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../../src/runtime/direct/config-direct.ts'
@@ -217,6 +217,16 @@ interface Harness {
   notifyEligibility(): void
   settleSwitch(outcome: SessionSwitchOutcome): void
   runSessions(rawInput?: string): Promise<{ kind: 'success' } | { kind: 'error'; text: string }>
+  /** Run any command registered by this harness (e.g. `/search`). */
+  runCommand(name: string, rawInput?: string): Promise<{ kind: 'success' } | { kind: 'error'; text: string }>
+  /** The Opened `/sessions` UI body, exactly as the CommandSurface calls it. */
+  openSessionBrowser(scope?: 'current' | 'all'): Promise<{ kind: 'success' } | { kind: 'error'; text: string }>
+  /** Install/replace/clear the ONE Host Editor `←←` control, as bootstrap does. */
+  installControl(control?: EditorWorkspaceEntryControl): void
+  /** ONE raw terminal Left press through the real input listener. */
+  pressLeft(): void
+  /** Final disposal of THIS harness's TuiApp (the process slot is global). */
+  close(): void
   view(): string
   setAgent(id: string | undefined): void
 }
@@ -233,9 +243,32 @@ function harness(options: {
   readonly initialFacts?: readonly SessionActivityFact[]
   /** Replace the one projection batch reader (the default resolves titles). */
   readonly projection?: () => Promise<Map<string, { readonly title?: string; readonly preset?: string }>>
+  /** The real `/sessions` registration's own availability fact (E-L9). */
+  readonly browserAvailable?: () => boolean
+  /** A mounted TuiApp WITHOUT the composition control (the TSP-shaped mount,
+   *  E-L10). */
+  readonly installControl?: false
+  /** A staged image-only draft fact (the runner's `events.isImageDraft`). */
+  readonly isImageDraft?: () => boolean
+  /** The Unstable raw interception stage (E-L8 consume/rewrite). */
+  readonly unstableInputRoute?: (data: string) => import('../../src/extension/internal/unstable-input.ts').UnstableRawRouteResult
 }): Harness {
   const vt = new VirtualTerminal(100, 30)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { notifyDurationMs: 60_000 })
+  const app = new TuiApp(
+    vt,
+    {
+      onSubmit: () => {},
+      onExit: () => {},
+      ...(options.isImageDraft === undefined ? {} : { isImageDraft: options.isImageDraft }),
+    },
+    {
+      notifyDurationMs: 60_000,
+      ...(options.unstableInputRoute === undefined ? {} : {
+        unstableInputRoute: (data: string) => options.unstableInputRoute!(data),
+        unstableInputsLive: () => true,
+      }),
+    },
+  )
   app.start()
   started.add(app)
   const facts = factsSource(options.initialFacts ?? [])
@@ -395,16 +428,48 @@ function harness(options: {
     extensions: undefined,
     exit: () => {},
   }
-  registerTuiCommandsWithDirectSeams(runner)
+  const installed = registerTuiCommandsWithDirectSeams(runner)
   const def = defs.find(entry => entry.name === 'sessions')
   assert.ok(def?.handler !== undefined, 'the sessions command must register')
-  const invoke = (rawInput: string) =>
-    (def!.handler as (inv: { commandId: ReturnType<typeof CommandId>; agent: never; rawInput: string; signal: AbortSignal }) => Promise<{ kind: 'success' } | { kind: 'error'; text: string }>)({
+  type CommandOutcome = { kind: 'success' } | { kind: 'error'; text: string }
+  const invokeDefinition = (target: { handler?: unknown }, rawInput: string): Promise<CommandOutcome> =>
+    (target.handler as (inv: { commandId: ReturnType<typeof CommandId>; agent: never; rawInput: string; signal: AbortSignal }) => Promise<CommandOutcome>)({
       commandId: CommandId('cmd-workspace-test'),
       agent: undefined as never,
       rawInput,
       signal: new AbortController().signal,
     })
+  const invoke = (rawInput: string): Promise<CommandOutcome> => invokeDefinition(def!, rawInput)
+  const openSessionBrowser = (scope?: 'current' | 'all'): Promise<CommandOutcome> => {
+    const opened = installed.openSessionBrowser
+    assert.ok(opened !== undefined, 'the registered /sessions UI body must exist')
+    const result = opened(scope)
+    // The CommandSurface's own observer: a command error is ONE notice and
+    // never an unhandled rejection (the production entry does exactly this).
+    void result.then((outcome) => {
+      if (outcome.kind === 'error' && outcome.text !== '') app.notify(outcome.text, 'error')
+    }, (error: unknown) => { app.notify(`session browser UI entry failed: ${String(error)}`, 'error') })
+    return result
+  }
+  const installControl = (control?: EditorWorkspaceEntryControl): void => {
+    app.setEditorWorkspaceEntry(control === undefined ? undefined : {
+      available: control.available,
+      captureIsCurrent: () => {
+        const token = runner.captureSessionScope()
+        return () => runner.isSessionScopeCurrent(token)
+      },
+      openAll: control.openAll,
+    })
+  }
+  // The production bootstrap installs this control after the `/sessions`
+  // registration settled, on every PiTUI mount (Direct and Split).
+  if (options.installControl !== false) {
+    installControl({
+      available: options.browserAvailable ?? (() => true),
+      captureIsCurrent: () => () => true,
+      openAll: () => { void openSessionBrowser('all') },
+    })
+  }
   return {
     vt,
     app,
@@ -416,6 +481,18 @@ function harness(options: {
     notifyEligibility: () => { for (const listener of [...eligibilityListeners]) listener() },
     settleSwitch: (outcome) => { assert.ok(pendingSwitch !== undefined, 'no accepted resume is pending'); pendingSwitch(outcome) },
     runSessions: invoke,
+    runCommand: (name, rawInput = '') => {
+      const command = defs.find(entry => entry.name === name)
+      assert.ok(command?.handler !== undefined, `the ${name} command must register`)
+      return invokeDefinition(command!, rawInput)
+    },
+    openSessionBrowser,
+    installControl,
+    pressLeft: () => { vt.sendInput('\x1b[D') },
+    close: () => {
+      started.delete(app)
+      app.dispose()
+    },
     view: () => vt.getViewport().map(stripTerminalSequences).join('\n'),
     setAgent: (id) => { state.agent = id === undefined ? undefined : { session: { id } } as unknown as Agent },
   }
@@ -888,4 +965,551 @@ test('a roster refresh drops search results for removed Sessions before the next
     `the stale Host hit disappears with its roster row, before the next search:\n${view}`)
   assert.ok(view.includes('needle'), 'the user query is preserved')
   assert.equal(heldSearches.length <= 1, true, 'the refreshed Host search is still pending')
+})
+
+// ── M5-U-E: the Host Editor `←←` Session Workspace gesture ───────────────────
+
+const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms))
+
+/** The complete Kitty arrow-event forms (flag 2): press / repeat / release. */
+const KITTY_LEFT_PRESS = '\x1b[1;1D'
+const KITTY_LEFT_REPEAT = '\x1b[1;1:2D'
+const KITTY_LEFT_RELEASE = '\x1b[1;1:3D'
+
+function viewerTarget(mode: 'one-shot' | 'continuable'): SubagentViewerTarget {
+  return {
+    parentSessionId: CURRENT,
+    childSessionId: 'child-1',
+    label: 'research',
+    mode,
+    activity: 'inactive',
+  }
+}
+
+/** The minimal Save-Location deps: the prompt only has to MOUNT and own the
+ *  seat; Esc cancels it (no filesystem fixture is needed for the seat gate). */
+function saveLocationDeps(): import('../../src/tui/interaction/save-location.ts').SaveLocationDeps {
+  return {
+    resolveDirectory: () => '/ws',
+    isDirectory: () => false,
+    targetExists: () => false,
+    complete: async () => null,
+  }
+}
+
+test('E-L1: the FIRST unclaimed Left is delivered to the host editor and opens nothing', async () => {
+  const h = harness({ currentSessionId: CURRENT })
+  h.pressLeft()
+  await h.vt.waitForRender()
+  assert.ok(!h.view().includes('Sessions'), `a single Left never opens the workspace:\n${h.view()}`)
+  assert.equal(h.facts.followCalls, 0, 'no Workspace follow starts')
+  assert.equal(h.listCalls, 0, 'no roster read starts')
+  assert.equal(h.pickerCalls, 0, 'the retired picker never opens')
+  assert.equal(h.app.getDraft(), '')
+  assert.deepEqual(h.switchCalls, [])
+})
+
+test('E-L2: the second Left within the window opens the ONE All-scope workspace; Esc restores the same editor', async () => {
+  const h = harness({ currentSessionId: CURRENT })
+  h.pressLeft()
+  h.pressLeft()
+  await waitUntil(() => h.facts.followCalls === 1, 'the second Left opens the ONE physical workspace')
+  await h.vt.waitForRender()
+  assert.ok(h.view().includes('Sessions'), `the fullscreen workspace owns the screen:\n${h.view()}`)
+  assert.equal(h.listCalls, 1, 'exactly ONE roster read owner')
+  h.facts.handles[0]!.push(baseline(
+    { workspaceId: 'ws-a', path: '/ws', title: 'project-a', sessionIds: [CURRENT, OTHER] },
+  ))
+  await waitUntil(() => h.view().includes('Workspace: All workspaces [w]'), 'the gesture asks for All workspaces')
+  const all = h.view()
+  assert.ok(all.includes('Other session'), `All lists every Workspace row:\n${all}`)
+  assert.ok(all.includes('Recent · '), `the grouped main list paints:\n${all}`)
+  assert.deepEqual(h.switchCalls, [], 'the gesture itself never switches a Session')
+
+  // Esc: the SAME main screen, draft, Session and editor focus — no stop/submit.
+  h.vt.sendInput('\x1b')
+  await h.vt.waitForRender()
+  assert.ok(!h.view().includes('Workspace:'), 'Esc closes the workspace')
+  assert.equal(h.app.getDraft(), '', 'the draft is byte-identical')
+  assert.equal(h.app.focusSeatForTest(), 'editor', 'the editor owns the seat again')
+  assert.equal(h.app.isFullscreen(), false)
+  assert.deepEqual(h.switchCalls, [], 'closing never switches, stops or submits')
+  assert.equal(h.facts.handles[0]!.disposed, 1, 'the per-open follow is disposed once')
+  assert.equal(h.listCalls, 1)
+})
+
+test('E-L3: an expired first press never opens; the late press restarts the window', async () => {
+  const h = harness({ currentSessionId: CURRENT })
+  h.pressLeft()
+  // The contract IS the 600ms window: wait deliberately PAST its deadline.
+  await sleep(700)
+  h.pressLeft()
+  await h.vt.waitForRender()
+  assert.ok(!h.view().includes('Sessions'), `the expired gesture never opens:\n${h.view()}`)
+  assert.equal(h.listCalls, 0)
+  // The expired second press became a NEW first press: the very next press
+  // inside its own window completes the gesture.
+  h.pressLeft()
+  await waitUntil(() => h.view().includes('Sessions'), 'the new pair opens')
+  assert.equal(h.listCalls, 1)
+})
+
+test('E-L4: text, whitespace, multiline or image-only drafts never open; edits invalidate an armed press', async () => {
+  const h = harness({ currentSessionId: CURRENT })
+  for (const draft of ['x', '   ', 'a\nb']) {
+    h.app.setEditorText(draft)
+    await h.vt.waitForRender()
+    h.pressLeft()
+    h.pressLeft()
+    await h.vt.waitForRender()
+    assert.ok(!h.view().includes('Sessions'), `draft ${JSON.stringify(draft)} must not open:\n${h.view()}`)
+    assert.equal(h.app.getDraft(), draft, 'the draft is untouched')
+  }
+  assert.equal(h.listCalls, 0)
+  h.close()
+
+  // A staged image-only draft is a payload even when the text is empty.
+  const hi = harness({ currentSessionId: CURRENT, isImageDraft: () => true })
+  hi.pressLeft()
+  hi.pressLeft()
+  await hi.vt.waitForRender()
+  assert.ok(!hi.view().includes('Sessions'), 'an image-only draft must not open')
+  assert.equal(hi.listCalls, 0)
+  hi.close()
+
+  // A document mutation between the presses (the programmatic restore below
+  // fires onChange) invalidates the latch even when the text returns to empty.
+  const hm = harness({ currentSessionId: CURRENT })
+  hm.pressLeft()
+  hm.app.setEditorText('')
+  await hm.vt.waitForRender()
+  hm.pressLeft()
+  await hm.vt.waitForRender()
+  assert.ok(!hm.view().includes('Sessions'), 'an editor mutation invalidates the armed first press')
+  assert.equal(hm.listCalls, 0)
+  hm.close()
+})
+
+test('E-L5: an intervening key/seat/focus/keymap/Session change restarts the gesture; resize alone does not', async () => {
+  const h = harness({ currentSessionId: CURRENT })
+  // Right is a real intervening key AND the reset between the sub-cases: a
+  // single verification press below stays a FIRST press.
+  const reset = (): void => { h.vt.sendInput('\x1b[C') }
+  // An ordinary intervening key.
+  h.pressLeft()
+  h.vt.sendInput('\x1b[C')
+  h.pressLeft()
+  await h.vt.waitForRender()
+  assert.ok(!h.view().includes('Sessions'), 'a key between the presses invalidates the gesture')
+  assert.equal(h.listCalls, 0)
+  // The press after the intervening key became the new first press.
+  h.pressLeft()
+  await waitUntil(() => h.view().includes('Sessions'), 'the next pair opens')
+  h.vt.sendInput('\x1b')
+  await h.vt.waitForRender()
+  reset()
+
+  // A focus change (the transcript-search overlay owns the keyboard).
+  h.pressLeft()
+  h.app.startTranscriptSearch()
+  await h.vt.waitForRender()
+  h.app.closeTranscriptSearch()
+  await h.vt.waitForRender()
+  h.pressLeft()
+  await h.vt.waitForRender()
+  assert.ok(!h.view().includes('Sessions'), 'a focus change invalidates the gesture')
+  reset()
+
+  // A keymap rebuild.
+  h.pressLeft()
+  h.app.applyUserKeybindings({}, () => {})
+  h.pressLeft()
+  await h.vt.waitForRender()
+  assert.ok(!h.view().includes('Sessions'), 'a keymap rebuild invalidates the gesture')
+  reset()
+
+  // The captured Session scope is no longer current (owner swap between the
+  // presses): the stale arm is never accepted, and the press restarts the
+  // window on the NEW owner.
+  h.pressLeft()
+  h.setAgent(OTHER)
+  h.pressLeft()
+  await h.vt.waitForRender()
+  assert.ok(!h.view().includes('Sessions'), 'a stale captured Session scope never opens')
+  h.pressLeft()
+  await waitUntil(() => h.view().includes('Sessions'), 'two fresh presses open on the new owner')
+  h.vt.sendInput('\x1b')
+  await h.vt.waitForRender()
+  h.setAgent(CURRENT)
+  await h.vt.waitForRender()
+  reset()
+
+  // Resize alone is NOT an owner change: the same real physical editor stays
+  // the keyboard owner, so the pair still opens (no invented Session fact).
+  h.pressLeft()
+  h.vt.resize(120, 40)
+  h.pressLeft()
+  await waitUntil(() => h.view().includes('Sessions'), 'resize alone keeps the pair valid')
+  h.vt.sendInput('\x1b')
+  await h.vt.waitForRender()
+  h.close()
+})
+
+test('E-L6: every higher seat keeps its own input; two Lefts never open the workspace', async () => {
+  // Question.
+  const hq = harness({ currentSessionId: CURRENT })
+  const question = hq.app.askQuestions([{ id: 'q1', question: 'proceed?', options: [{ label: 'yes' }] }])
+  await hq.vt.waitForRender()
+  hq.pressLeft()
+  hq.pressLeft()
+  await hq.vt.waitForRender()
+  assert.ok(hq.view().includes('proceed?'), 'the Question still owns the seat')
+  assert.ok(!hq.view().includes('Sessions'))
+  assert.equal(hq.listCalls, 0)
+  hq.vt.sendInput('\x1b')
+  await question.catch(() => {})
+  hq.close()
+
+  // Approval.
+  const ha = harness({ currentSessionId: CURRENT })
+  const approval = ha.app.showApprovalPrompt({ toolName: 'bash', reason: 'run a command?' })
+  await ha.vt.waitForRender()
+  ha.pressLeft()
+  ha.pressLeft()
+  await ha.vt.waitForRender()
+  assert.ok(ha.view().includes('run a command?'), 'the Approval still owns the seat')
+  assert.ok(!ha.view().includes('Sessions'))
+  assert.equal(ha.listCalls, 0)
+  ha.vt.sendInput('y')
+  assert.equal(await approval, 'allowed-once')
+  ha.close()
+
+  // Save Location.
+  const hs = harness({ currentSessionId: CURRENT })
+  const save = hs.app.askSaveLocation(
+    { title: 'Save session archive', filename: 'dsh-session-session-abc.zip', initialDirectory: './' },
+    saveLocationDeps(),
+  )
+  await hs.vt.waitForRender()
+  hs.pressLeft()
+  hs.pressLeft()
+  await hs.vt.waitForRender()
+  assert.ok(hs.view().includes('Save session archive'), 'the Save Location prompt still owns the seat')
+  assert.ok(!hs.view().includes('Sessions'))
+  hs.vt.sendInput('\x1b')
+  assert.deepEqual(await save, { kind: 'cancelled' })
+  hs.close()
+
+  // Task Quick.
+  const ht = harness({ currentSessionId: CURRENT })
+  ht.app.setQuickTaskItems([{ value: 'job:bash-1', label: 'pnpm build', status: 'running', source: 'job' }])
+  ht.app.setTasks([{ id: 'bash-1', label: 'pnpm build', status: 'running', kind: 'bash' }])
+  await ht.vt.waitForRender()
+  ht.vt.sendInput('\x1b[B') // Down enters Quick
+  await ht.vt.waitForRender()
+  assert.equal(ht.app.taskQuickFocusedForTest(), true, 'the Quick owns the focused seat')
+  ht.pressLeft()
+  ht.pressLeft()
+  await ht.vt.waitForRender()
+  assert.ok(!ht.view().includes('Sessions'))
+  assert.equal(ht.listCalls, 0)
+  ht.close()
+
+  // Read-only and continuable subagent viewers.
+  const hv = harness({ currentSessionId: CURRENT })
+  hv.app.setViewerMode(viewerTarget('one-shot'))
+  await hv.vt.waitForRender()
+  hv.pressLeft()
+  hv.pressLeft()
+  await hv.vt.waitForRender()
+  assert.ok(!hv.view().includes('Sessions'), 'the read-only viewer consumes both Lefts')
+  hv.vt.sendInput('\x1b')
+  hv.app.setViewerMode(viewerTarget('continuable'))
+  await hv.vt.waitForRender()
+  hv.pressLeft()
+  hv.pressLeft()
+  await hv.vt.waitForRender()
+  assert.ok(!hv.view().includes('Sessions'), 'the continuable viewer routes the child editor')
+  assert.equal(hv.listCalls, 0)
+  hv.close()
+
+  // Shell editor mode.
+  const hh = harness({ currentSessionId: CURRENT })
+  hh.vt.sendInput('!')
+  await hh.vt.waitForRender()
+  assert.equal(hh.app.inputModeForTest(), 'shell-context')
+  hh.pressLeft()
+  hh.pressLeft()
+  await hh.vt.waitForRender()
+  assert.ok(!hh.view().includes('Sessions'))
+  assert.equal(hh.listCalls, 0)
+  hh.close()
+
+  // Autocomplete dropdown.
+  const hc = harness({ currentSessionId: CURRENT })
+  hc.app.setCommandCompletions([{ name: 'help', description: 'Show help' }], '/ws', null)
+  hc.vt.sendInput('/')
+  await hc.vt.waitForRender()
+  assert.equal(hc.app.isShowingAutocompleteForTest(), true, 'the completion dropdown is open')
+  hc.pressLeft()
+  hc.pressLeft()
+  await hc.vt.waitForRender()
+  assert.ok(!hc.view().includes('Sessions'))
+  assert.equal(hc.listCalls, 0)
+  hc.close()
+
+  // Transcript search overlay.
+  const hsearch = harness({ currentSessionId: CURRENT })
+  hsearch.app.startTranscriptSearch()
+  await hsearch.vt.waitForRender()
+  assert.equal(hsearch.app.isSearching(), true)
+  hsearch.pressLeft()
+  hsearch.pressLeft()
+  await hsearch.vt.waitForRender()
+  assert.ok(!hsearch.view().includes('Sessions'))
+  assert.equal(hsearch.listCalls, 0)
+  hsearch.close()
+})
+
+test('E-L7: Kitty repeat/release never complete the gesture; a second independent Press does', async () => {
+  const h = harness({ currentSessionId: CURRENT })
+  h.vt.sendInput(KITTY_LEFT_PRESS)
+  h.vt.sendInput(KITTY_LEFT_REPEAT)
+  h.vt.sendInput(KITTY_LEFT_RELEASE)
+  await h.vt.waitForRender()
+  assert.ok(!h.view().includes('Sessions'), 'one physical press cannot open through its repeat/release')
+  assert.equal(h.listCalls, 0)
+  // Only a SEPARATE press inside the same window completes the gesture.
+  h.vt.sendInput(KITTY_LEFT_PRESS)
+  await waitUntil(() => h.view().includes('Sessions'), 'a second independent Press opens')
+  assert.equal(h.listCalls, 1)
+  h.vt.sendInput('\x1b')
+  await h.vt.waitForRender()
+
+  // The same artifact stream, then an EXPIRED press: the repeat/release were
+  // never counted as the second press.
+  h.vt.sendInput(KITTY_LEFT_PRESS)
+  h.vt.sendInput(KITTY_LEFT_REPEAT)
+  h.vt.sendInput(KITTY_LEFT_RELEASE)
+  // The 600ms window is the contract: wait past its deadline on purpose.
+  await sleep(700)
+  h.vt.sendInput(KITTY_LEFT_PRESS)
+  await h.vt.waitForRender()
+  assert.ok(!h.view().includes('Sessions'), 'the expired press is a new first press, not a completion')
+})
+
+test('E-L8: bracketed paste and Unstable consume/rewrite never synthesize the gesture', async () => {
+  // A paste whose CONTENT carries a literal Left sequence byte stays content.
+  const hp = harness({ currentSessionId: CURRENT })
+  hp.vt.sendInput('\x1b[200~left bytes \x1b[D inside the paste\x1b[201~')
+  await hp.vt.waitForRender()
+  hp.pressLeft()
+  hp.pressLeft()
+  await hp.vt.waitForRender()
+  assert.ok(!hp.view().includes('Sessions'), 'a paste body never drives the gesture')
+  assert.notEqual(hp.app.getDraft(), '', 'the pasted content is owned by the editor')
+  assert.equal(hp.listCalls, 0)
+  hp.close()
+
+  // A paste marker split across chunks is still the paste owner.
+  const hs = harness({ currentSessionId: CURRENT })
+  hs.vt.sendInput('\x1b[200~')
+  hs.vt.sendInput('abc')
+  hs.vt.sendInput('\x1b[201~')
+  await hs.vt.waitForRender()
+  hs.pressLeft()
+  hs.pressLeft()
+  await hs.vt.waitForRender()
+  assert.ok(!hs.view().includes('Sessions'))
+  assert.equal(hs.listCalls, 0)
+  hs.close()
+
+  // The Unstable raw stage CONSUMES both Lefts: they never become a press.
+  const hc = harness({
+    currentSessionId: CURRENT,
+    unstableInputRoute: (data) => data === '\x1b[D' ? { action: 'consume' } : { action: 'pass' },
+  })
+  hc.pressLeft()
+  hc.pressLeft()
+  await hc.vt.waitForRender()
+  assert.ok(!hc.view().includes('Sessions'), 'a consumed raw Left is not a physical press')
+  assert.equal(hc.listCalls, 0)
+  hc.close()
+
+  // The Unstable raw stage REWRITES a Right into a Left: synthesized chunks
+  // never enter the gesture.
+  const hr = harness({
+    currentSessionId: CURRENT,
+    unstableInputRoute: (data) => data === '\x1b[C' ? { action: 'rewrite', data: '\x1b[D' } : { action: 'pass' },
+  })
+  hr.vt.sendInput('\x1b[C')
+  hr.vt.sendInput('\x1b[C')
+  await hr.vt.waitForRender()
+  assert.ok(!hr.view().includes('Sessions'), 'a rewritten Left is not a real physical Left')
+  assert.equal(hr.listCalls, 0)
+  hr.close()
+})
+
+test('E-L9: an unavailable entry or a Host user remap never gets pre-empted', async () => {
+  const h = harness({ currentSessionId: CURRENT, browserAvailable: () => false })
+  h.pressLeft()
+  h.pressLeft()
+  await h.vt.waitForRender()
+  assert.ok(!h.view().includes('Sessions'), 'an unavailable entry opens nothing')
+  assert.equal(h.listCalls, 0)
+  assert.equal(h.facts.followCalls, 0)
+  assert.equal(h.pickerCalls, 0)
+  assert.equal(h.notices.length, 0, 'no fake availability prompt')
+  h.close()
+
+  // A Host user remap of Left keeps its OWN route: the host action consumes
+  // both presses before the editor gesture is ever consulted.
+  const hr = harness({ currentSessionId: CURRENT })
+  hr.app.applyUserKeybindings({ bindings: { 'app.transcript.search': 'left' } }, () => {})
+  hr.pressLeft()
+  await hr.vt.waitForRender()
+  assert.equal(hr.app.isSearching(), true, 'the user remap keeps its meaningful route')
+  hr.pressLeft()
+  await hr.vt.waitForRender()
+  assert.ok(!hr.view().includes('Sessions'), 'a remapped Left never opens the workspace')
+  assert.equal(hr.listCalls, 0)
+  hr.app.closeTranscriptSearch()
+  hr.close()
+})
+
+test('E-L10: a mount without the control keeps both Lefts native; the argument-free entry stays Current', async () => {
+  const h = harness({ currentSessionId: CURRENT, installControl: false })
+  h.pressLeft()
+  h.pressLeft()
+  await h.vt.waitForRender()
+  assert.ok(!h.view().includes('Sessions'), 'no control means no gesture (the TSP-shaped mount)')
+  assert.equal(h.listCalls, 0)
+
+  // The registered UI body with no scope (the Welcome/TSP caller) asks Current.
+  h.openSessionBrowser()
+  await h.vt.waitForRender()
+  assert.ok(h.view().includes('Sessions'), 'the registered UI entry still opens the ONE workspace')
+  h.facts.handles[0]!.push(baseline(
+    { workspaceId: 'ws-a', path: '/ws', title: 'project-a', sessionIds: [CURRENT] },
+    { workspaceId: 'ws-b', path: '/other', title: 'project-b', sessionIds: [OTHER] },
+  ))
+  await waitUntil(() => h.view().includes('Workspace: Current workspace'), 'the default scope is Current')
+  assert.ok(!h.view().includes('Other session'), 'Current never lists an unproved Workspace row')
+  h.close()
+})
+
+test('E-L11: typed /sessions and /resume keep their Current/direct semantics; only the gesture asks All', async () => {
+  const h = harness({ currentSessionId: CURRENT })
+  const typed = h.runSessions('')
+  await h.vt.waitForRender()
+  h.facts.handles.at(-1)!.push(baseline(
+    { workspaceId: 'ws-a', path: '/ws', title: 'project-a', sessionIds: [CURRENT] },
+    { workspaceId: 'ws-b', path: '/other', title: 'project-b', sessionIds: [OTHER] },
+  ))
+  await waitUntil(() => h.view().includes('Workspace: Current workspace'), 'the typed command keeps Current')
+  assert.ok(!h.view().includes('Other session'), 'the typed command never widens to All')
+  h.vt.sendInput('\x1b')
+  await h.vt.waitForRender()
+  await typed
+
+  // The argument-free UI entry (the Welcome's only action) also keeps Current.
+  const welcome = h.openSessionBrowser()
+  await h.vt.waitForRender()
+  h.facts.handles.at(-1)!.push(baseline(
+    { workspaceId: 'ws-a', path: '/ws', title: 'project-a', sessionIds: [CURRENT] },
+    { workspaceId: 'ws-b', path: '/other', title: 'project-b', sessionIds: [OTHER] },
+  ))
+  await waitUntil(() => h.view().includes('Workspace: Current workspace'), 'the argument-free entry keeps Current')
+  assert.ok(!h.view().includes('Other session'))
+  h.vt.sendInput('\x1b')
+  await h.vt.waitForRender()
+  await welcome
+
+  // ONLY the Host Editor gesture asks for All.
+  h.pressLeft()
+  h.pressLeft()
+  await waitUntil(() => h.view().includes('Workspace: All workspaces [w]'), 'the gesture asks All')
+  h.facts.handles.at(-1)!.push(baseline(
+    { workspaceId: 'ws-a', path: '/ws', title: 'project-a', sessionIds: [CURRENT] },
+    { workspaceId: 'ws-b', path: '/other', title: 'project-b', sessionIds: [OTHER] },
+  ))
+  await waitUntil(() => h.view().includes('Other session'), 'All lists the other Workspace row')
+  h.vt.sendInput('\x1b')
+  await h.vt.waitForRender()
+
+  // `/sessions <query>` / `/search <query>` keep the GLOBAL content search.
+  const query = h.runSessions('needle')
+  await waitUntil(() => h.view().includes('Search all workspaces'), 'a query keeps the global content search')
+  h.vt.sendInput('\x1b')
+  await h.vt.waitForRender()
+  await query
+  const search = h.runCommand('search', 'needle')
+  await waitUntil(() => h.view().includes('Search all workspaces'), '/search keeps the global content search')
+  h.vt.sendInput('\x1b')
+  await h.vt.waitForRender()
+  await search
+
+  // `/resume <id>` keeps its direct match and its committed switch settlement.
+  const resumed = h.runCommand('resume', OTHER)
+  await waitUntil(() => h.switchCalls.length === 1, 'the direct match reaches the runtime')
+  assert.equal(h.switchCalls[0]!.id, OTHER)
+  h.setAgent(OTHER)
+  h.settleSwitch({ kind: 'committed', sessionId: OTHER })
+  const outcome = await resumed
+  assert.equal(outcome.kind, 'success')
+  h.setAgent(CURRENT)
+  h.close()
+})
+
+test('E-L12: a refused open leaves no hidden reader and consumes only that second press', async () => {
+  const h = harness({ currentSessionId: CURRENT })
+  // A synchronous lease refusal from the real command body: the opener's own
+  // error notice is the ONE report, and no read/follow/screen survives it.
+  const original = h.app.openSessionWorkspace.bind(h.app)
+  h.app.openSessionWorkspace = (() => { throw new Error('another workspace screen is already leased') }) as typeof h.app.openSessionWorkspace
+  h.pressLeft()
+  h.pressLeft()
+  await waitUntil(() => h.notices.some(notice => notice.text.includes('session workspace unavailable')),
+    'the refusal reaches the existing notice sink')
+  await h.vt.waitForRender()
+  assert.ok(!h.view().includes('Sessions'), 'a refused lease paints no workspace')
+  assert.equal(h.facts.followCalls, 0, 'a refused lease starts no Workspace follow')
+  assert.equal(h.listCalls, 0, 'a refused lease starts no roster read')
+  assert.equal(h.notices.filter(notice => notice.text.includes('session workspace unavailable')).length, 1,
+    'the refusal is reported exactly once')
+  h.app.openSessionWorkspace = original
+
+  // A throwing control is reported once too, and never leaves an implicit
+  // second Browser behind.
+  h.installControl({
+    available: () => true,
+    captureIsCurrent: () => () => true,
+    openAll: () => { throw new Error('control refused') },
+  })
+  h.pressLeft()
+  h.pressLeft()
+  await waitUntil(() => h.notices.some(notice => notice.text.includes('Could not open sessions')),
+    'a synchronous control failure is reported once')
+  assert.ok(!h.view().includes('Sessions'))
+  assert.equal(h.facts.followCalls, 0)
+
+  // The refused second press was CONSUMED (never typed into the draft), and
+  // the NEXT pair starts from a clean latch and opens the real workspace.
+  assert.equal(h.app.getDraft(), '')
+  h.installControl(undefined)
+  h.installControl({
+    available: () => true,
+    captureIsCurrent: () => () => true,
+    openAll: () => { void h.openSessionBrowser('all') },
+  })
+  h.pressLeft()
+  h.pressLeft()
+  await waitUntil(() => h.view().includes('Sessions'), 'the next clean pair opens normally')
+  h.vt.sendInput('\x1b')
+  await h.vt.waitForRender()
+
+  // After an Esc close, the stale latch is gone: a single Left does not reopen.
+  h.pressLeft()
+  await h.vt.waitForRender()
+  assert.ok(!h.view().includes('Sessions'), 'an Esc close leaves no armed latch')
 })

@@ -47,6 +47,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Two `←` presses in the PiTui main editor open the Session Workspace.**
+  While the Host main editor really owns the keyboard, is in plain prompt mode
+  and the draft is strictly empty (no text or whitespace, no staged image and
+  no in-flight paste), two independent unmodified `←` presses within 600 ms
+  open the existing fullscreen Session Workspace with `All workspaces` as the
+  initial scope, while bare `/sessions`, `/resume` and the Welcome entry keep
+  `Current`. The first `←` is still an ordinary cursor move; a Question,
+  Approval, Save Location, History or Task panel, viewer, autocomplete or
+  overlay never triggers the gesture, and `Esc` returns to the same Session,
+  draft and editor focus without switching or stopping anything. The TSP
+  renderer keeps its native Session Browser unchanged.
 - **A `/web` entry and an "auto-enable the Web frontend on Host startup"
   preference for the Split Client.** `/web` shows the current Host's real
   official-Web-frontend state and offers only the actions that state admits —

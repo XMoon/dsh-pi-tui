@@ -36,6 +36,7 @@ import {
   isKeyRelease,
   isKeyRepeat,
   matchesKey,
+  parseKey,
   truncateToWidth,
   visibleWidth,
   wrapTextWithAnsi,
@@ -1881,6 +1882,38 @@ export interface NoAnswerNavigationControl {
 }
 
 /**
+ * The ONE PiTUI Host Editor `←←` composition control (M5-U-E).
+ *
+ * It is deliberately NARROW: the composition root installs the already
+ * registered `/sessions` entry's availability, the A3 scope authority's
+ * synchronous capture and the SAME command body opened with the All initial
+ * browse scope. The gesture itself (two unclaimed physical Left presses, the
+ * transient latch, its invalidation) stays inside this TuiApp instance; this
+ * control never owns a listing, a Session identity, a Screen or a Host read.
+ */
+export interface EditorWorkspaceEntryControl {
+  /** Whether the registered `/sessions` entry can present its Browser here. */
+  available(): boolean
+  /** Capture the app's ONE current Session/generation (sessionless included). */
+  captureIsCurrent(): () => boolean
+  /** Invoke the registered `/sessions` UI body with the All initial scope. */
+  openAll(): void
+}
+
+/**
+ * The ONE transient first-Press latch of the Host Editor `←←` gesture. Purely
+ * discardable surface state: it pins the monotonic first-press clock, the
+ * editor edit epoch, the installed control identity and the captured Session
+ * scope currentness. Nothing durable (SessionId, Screen, Reader) is stored.
+ */
+interface LeftWorkspaceArm {
+  readonly at: number
+  readonly editEpoch: number
+  readonly control: EditorWorkspaceEntryControl
+  readonly current: () => boolean
+}
+
+/**
  * The ONE short-lived workspace screen lease (Settings, the Session Workspace
  * and the Image UX screens). Like the Job workspace it renders in a temporary
  * alt screen while the surface that opened it — object tree, focus, draft and
@@ -3319,6 +3352,14 @@ export class TuiApp {
    */
   private noAnswerNavigation: NoAnswerNavigationControl | undefined
   /**
+   * M5-U-E: the ONE PiTUI Host Editor `←←` composition control, installed by
+   * the composition root after the `/sessions` registration settled. Absent on
+   * a TSP mount (no TuiApp) and inert without a registered entry.
+   */
+  private editorWorkspaceEntry: EditorWorkspaceEntryControl | undefined
+  /** The transient first-Press latch of {@link EditorWorkspaceEntryControl}. */
+  private leftWorkspaceArm: LeftWorkspaceArm | undefined
+  /**
    * One-shot callbacks armed by Alt+W: the Session Workspace close (or a
    * blocking-owner pre-emption) releases the root navigation hold. A set keeps
    * the close path independent of the lease's own `onClose`.
@@ -3796,6 +3837,9 @@ export class TuiApp {
   private lastEscapeAt: number | undefined
   /** Idle double-Esc window in ms. */
   private static readonly ESCAPE_CANCEL_WINDOW_MS = 400
+  /** M5-U-E: the two-press Host Editor `←←` window, measured from the FIRST
+   *  eligible press with the monotonic clock. No timer is armed for it. */
+  private static readonly LEFT_WORKSPACE_WINDOW_MS = 600
   /**
    * The agent-busy state pushed by the runner at turn/compaction
    * boundaries (pi parity): while busy, a SINGLE Esc stops the current
@@ -4590,8 +4634,10 @@ export class TuiApp {
       // messagesView exists.
       onInvalidate: () => {
         // A keymap rebuild changes the effective trigger identity; never
-        // allow a confirmation armed under the old map to carry over.
+        // allow a confirmation armed under the old map to carry over. The same
+        // rule applies to the transient Host Editor `←←` first-Press latch.
         this.clearExitConfirmation()
+        this.clearLeftWorkspaceArm()
         if (this.messagesView !== undefined) {
           this.refreshTranscriptWindowHint()
           this.rebuildMessages('theme-keymap')
@@ -4871,7 +4917,11 @@ export class TuiApp {
       this.events.onSubmit(serialized, 'enter', scopeToken)
     }
     this.editor.onChange = () => {
-      // FIRST: the paste range leases consume the input's EXACT splice before
+      // FIRST: the Host Editor `←←` first-Press latch dies with ANY document
+      // mutation — typing, deletion, paste, Undo, history recall or a
+      // programmatic restore — even when the text ends up identical (ABA).
+      this.clearLeftWorkspaceArm()
+      // The paste range leases consume the input's EXACT splice before
       // any external callback (undo retention, seat subscribers) can act on a
       // stale offset. No common-prefix/suffix guess is made here.
       this.observePasteMutation()
@@ -5461,6 +5511,9 @@ export class TuiApp {
       // second press of a pre-stop one — convergence findings).
       () => this.keybindings.cancelLeader(),
       () => { this.lastEscapeAt = undefined },
+      // A stop/start cycle may keep the instance but swap the physical screen:
+      // the transient Host Editor `←←` latch never crosses that boundary.
+      () => this.clearLeftWorkspaceArm(),
       () => this.working.dispose(),
       // Every pending question flow settles rejected: a stopped TUI must
       // not leave askQuestions promises hanging forever.
@@ -5910,6 +5963,8 @@ export class TuiApp {
     this.optionalSeat = undefined
     if (optionalSeat !== undefined) optionalSeat.finalized = true
     runSyncDisposalSteps('tui dispose', [
+      // The transient Host Editor `←←` latch dies with the surface.
+      () => this.clearLeftWorkspaceArm(),
       // Delivered files (PR1): the retained panel is released BEFORE the
       // broker's physical unmount, so its recorded hit map can never survive
       // into a dying surface.
@@ -6248,16 +6303,24 @@ export class TuiApp {
         }
         this.notify('unstable captures released (emergency fail-safe)', 'info')
         if (isKeyRelease(data) || isKeyRepeat(data)) return { consume: true }
+        // A consumed real key is an intervening action: the Host Editor `←←`
+        // latch must never survive it.
+        this.clearLeftWorkspaceArm()
         this.clearExitConfirmation()
         return { consume: true }
       }
       const outcome = this.unstableInputRoute(data, this.extensionHost?.surfaceId ?? 'tui')
       if (outcome.action === 'consume') {
         if (isKeyRelease(data) || isKeyRepeat(data)) return { consume: true }
+        this.clearLeftWorkspaceArm()
         this.clearExitConfirmation()
         return { consume: true }
       }
       if (outcome.action === 'rewrite') {
+        // A rewrite is NOT a real physical key: the Host Editor `←←` gesture
+        // must never count a synthesized Left, and an already armed latch must
+        // never survive the rewrite.
+        this.clearLeftWorkspaceArm()
         // A rewrite INTO a focus-control sequence is refused: focus
         // reports are HOST-reserved, and the tracker must never be
         // spoofed into a false focus transition (a synthesized ESC[O
@@ -6277,7 +6340,7 @@ export class TuiApp {
           && !isKeyRepeat(outcome.data)) {
           this.events.onUserInput?.()
         }
-        const result = this.handleInputCore(outcome.data)
+        const result = this.handleInputCore(outcome.data, { allowEditorWorkspaceShortcut: false })
         if (result === undefined) return { data: outcome.data }
         return result
       }
@@ -6286,8 +6349,20 @@ export class TuiApp {
   }
 
   /** The host's own input precedence ladder (the raw stage has already
-   * run — see {@link handleInput}). */
-  private handleInputCore(data: string): TuiInputListenerResult {
+   * run — see {@link handleInput}). `allowEditorWorkspaceShortcut` is false
+   * ONLY for the Unstable raw stage's rewrite path: a synthesized chunk is
+   * never a real physical Left press for the Host Editor `←←` gesture. */
+  private handleInputCore(
+    data: string,
+    options?: { readonly allowEditorWorkspaceShortcut?: boolean },
+  ): TuiInputListenerResult {
+    const allowEditorWorkspaceShortcut = options?.allowEditorWorkspaceShortcut !== false
+    // M5-U-E: BEFORE any owner below can consume this event, a REAL key that
+    // is not the gesture's own plain Left invalidates the first-Press latch
+    // (a Question/Approval/History/overlay-consumed key still means the user
+    // did something else in between). Kitty repeat/release are artifacts of
+    // the SAME press and deliberately leave the latch alone.
+    this.observeWorkspaceGestureInterveningInput(data)
     // The approval action sheet is a blocking FULLSCREEN pointer owner: a
     // wheel over its painted body scrolls the reading viewport and every other
     // wheel is inert behind the modal (the transcript's background wheel stays
@@ -6798,6 +6873,13 @@ export class TuiApp {
       // the app's own listeners) keep it, and the hidden host draft never
       // diverges from what the user sees.
       if (this.seatEditor().id !== 'host') return { consume: true }
+      // M5-U-E: the LAST stage — only an unclaimed real `editor` route (never
+      // the continuable viewer's `viewer-editor`) may arm or complete the Host
+      // Editor `←←` gesture. The first press returns false and the fork Editor
+      // receives the Left exactly as before; the second consumes it.
+      if (route.kind === 'editor' && this.maybeOpenWorkspaceFromLeft(data, allowEditorWorkspaceShortcut)) {
+        return { consume: true }
+      }
       // Leave normal host editing to pi-tui's focused-component dispatch.
       // Returning undefined is important: TuiBase then calls Editor.handleInput
       // and schedules its immediate active-screen repaint. Calling the editor
@@ -17582,6 +17664,129 @@ export class TuiApp {
     return true
   }
 
+  /**
+   * M5-U-E: whether this raw input is ONE unmodified Left PRESS — the only
+   * input the Host Editor `←←` gesture ever counts. The fork's own key
+   * identity decides (legacy `\x1b[D`, Kitty left with no modifiers,
+   * modifyOtherKeys alike); a compound/multi-key chunk, a modified arrow or a
+   * non-key sequence is never a press for this feature. Kitty repeat/release
+   * artifacts are filtered by the caller before this point; the strict
+   * `parseKey` equality additionally refuses them here.
+   */
+  private isPlainLeftPress(data: string): boolean {
+    return matchesKey(data, 'left') && parseKey(data) === 'left'
+  }
+
+  /** Drop the Host Editor `←←` first-Press latch (idempotent, allocation-free). */
+  private clearLeftWorkspaceArm(): void {
+    this.leftWorkspaceArm = undefined
+  }
+
+  /**
+   * Invalidate the Host Editor `←←` latch on every REAL input event that is
+   * not the gesture's own plain Left press. Called on EVERY
+   * `handleInputCore` entry, BEFORE any higher-priority owner can consume the
+   * key — a Question/Approval/History/overlay consumed key still means the
+   * user did something else between the two presses. Kitty repeat/release are
+   * protocol artifacts of the SAME physical press: they neither count as the
+   * second press nor clear the latch (the host protocol sink consumes them).
+   */
+  private observeWorkspaceGestureInterveningInput(data: string): void {
+    if (isKeyRelease(data) || isKeyRepeat(data)) return
+    if (!this.isPlainLeftPress(data)) this.clearLeftWorkspaceArm()
+  }
+
+  /**
+   * The non-geometric live-owner facts the Host Editor `←←` gesture requires
+   * (M5-U-E). Every check is O(1) field state re-read on EVERY press; the
+   * caller's ladder position already guarantees `InputRouter.route` returned
+   * the unclaimed `editor` route, so no higher-priority owner is displaced.
+   *
+   * - the composition control is installed AND the registered `/sessions`
+   *   entry is really usable right now;
+   * - the HOST editor is the seat editor AND the real physical keyboard owner
+   *   on the main surface (never a leased/paused workspace screen);
+   * - strict prompt mode with a strictly-empty draft (whitespace is text), no
+   *   staged image, no in-flight paste, no autocomplete;
+   * - no blocking/optional/modal/workspace/leader owner above the editor.
+   */
+  private editorWorkspaceShortcutEligible(): boolean {
+    if (this.disposed) return false
+    const control = this.editorWorkspaceEntry
+    if (control === undefined || !control.available()) return false
+    if (this.seatEditor().id !== 'host') return false
+    if (!this.ownsPhysicalKeyboard(this.editor)) return false
+    if (this.activeScreen !== (this.fullscreen ?? this.tui)) return false
+    if (this.seatInputMode() !== 'prompt') return false
+    if (this.editor.getText() !== '') return false
+    if (this.events.isImageDraft?.() === true) return false
+    if (this.editor.isPasteCapturePending()) return false
+    if (this.editor.isShowingAutocomplete()) return false
+    if (this.activeQuestions !== undefined) return false
+    if (this.approvals.hasPending()) return false
+    if (this.activeSaveLocation !== undefined) return false
+    if (this.optionalTenantOwnsSeat()) return false
+    if (this.overlayBroker.hasFocusedOverlay()) return false
+    if (this.jobWorkspace !== undefined) return false
+    if (this.workspaceLease !== undefined) return false
+    if (this.taskQuick.focused) return false
+    if (this.viewerMode !== undefined) return false
+    if (this.searchOverlay !== undefined) return false
+    if (this.keybindings.leaderMachine()?.pending === true) return false
+    return true
+  }
+
+  /**
+   * M5-U-E: the ONE Host Editor `←←` admission and transient first-Press
+   * latch. Called ONLY after the whole existing owner/keymap/Advanced/
+   * InputRouter ladder returned the unclaimed Host Editor route.
+   *
+   * The FIRST eligible press arms the latch and returns false — the Left goes
+   * to the fork Editor exactly as before (an empty draft's cursor move). The
+   * SECOND eligible press within {@link LEFT_WORKSPACE_WINDOW_MS} of the
+   * monotonic first-press clock, with the same editor edit epoch, the same
+   * installed control and the captured Session scope still current, clears the
+   * latch FIRST, invokes the registered `/sessions` body with the All initial
+   * scope and consumes the key. Any other combination is a fresh first press
+   * (an expired latch is simply overwritten).
+   */
+  private maybeOpenWorkspaceFromLeft(data: string, allowed: boolean): boolean {
+    const control = this.editorWorkspaceEntry
+    if (!allowed || control === undefined || !control.available()
+      || !this.editorWorkspaceShortcutEligible() || !this.isPlainLeftPress(data)) {
+      this.clearLeftWorkspaceArm()
+      return false
+    }
+    const now = performance.now()
+    const armed = this.leftWorkspaceArm
+    if (armed !== undefined
+      && armed.control === control
+      && now - armed.at <= TuiApp.LEFT_WORKSPACE_WINDOW_MS
+      && this.editorEditEpoch === armed.editEpoch
+      && armed.current()) {
+      // Commit the cleared latch BEFORE the open callback: the command leases
+      // the fullscreen screen synchronously, and any re-entrant input must
+      // never read this same arm as a third press.
+      this.leftWorkspaceArm = undefined
+      try {
+        control.openAll()
+      } catch (error) {
+        // The command's own sink owns its async outcomes; a SYNCHRONOUS
+        // refusal (lease, moment-in-time registration) is reported once and
+        // never retried into an implicit second Browser.
+        this.notify(`Could not open sessions: ${safeErrorMessage(error)}`, 'error')
+      }
+      return true
+    }
+    this.leftWorkspaceArm = {
+      at: now,
+      editEpoch: this.editorEditEpoch,
+      control,
+      current: control.captureIsCurrent(),
+    }
+    return false
+  }
+
   /** Admission facts that do not depend on Footer/Quick geometry. Kept
    *  separate so the geometry probe can render the Footer candidate with its
    *  hint enabled without calling back into this predicate. */
@@ -20856,6 +21061,9 @@ export class TuiApp {
   private setFocusSeat(seat: 'editor' | 'overlay' | 'editor-panel' | 'none'): void {
     if (this.focusSeat === seat) return
     this.focusSeat = seat
+    // M5-U-E: a seat transition is a real owner change between the two Left
+    // presses — the first-Press latch never survives it.
+    this.clearLeftWorkspaceArm()
     this.projectSurface({ focusedSeat: seat })
     this.renderFooter()
     if (this.focusSeatPublishScheduled || this.disposed) return
@@ -25955,6 +26163,18 @@ export class TuiApp {
       control !== undefined,
       control === undefined ? undefined : () => control.available(),
     )
+  }
+
+  /**
+   * Install (or clear) the ONE PiTUI Host Editor `←←` control the composition
+   * root wires after the `/sessions` command registration settled. The gesture
+   * is inert without it (TSP, headless fixtures and an unregistered `/sessions`
+   * never install a usable one). Installing or replacing the control drops any
+   * first-Press latch armed under the previous instance.
+   */
+  setEditorWorkspaceEntry(control: EditorWorkspaceEntryControl | undefined): void {
+    this.editorWorkspaceEntry = control
+    this.clearLeftWorkspaceArm()
   }
 
   /**

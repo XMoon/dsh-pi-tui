@@ -109,6 +109,7 @@ import {
   type TuiAppEvents,
   type TuiAppOptions,
   type NoAnswerNavigationControl,
+  type EditorWorkspaceEntryControl,
 } from '../../tui-app.ts'
 import { runSyncDisposalSteps } from '../../runtime/process/disposal.ts'
 import type { CompactionPhase } from './compaction-presentation.ts'
@@ -1177,6 +1178,13 @@ export interface SurfaceRuntime<Event extends RoutedSessionEvent> {
    * (the TSP branch) is inert by construction.
    */
   setNoAnswerNavigation(control: NoAnswerNavigationControl | undefined): void
+  /**
+   * Install (or clear) the ONE PiTUI Host Editor `←←` composition control: the
+   * registered `/sessions` availability, the A3 scope currentness capture and
+   * the All-scope open of that same command. A renderer mount without a TuiApp
+   * (the TSP branch) is inert by construction.
+   */
+  setEditorWorkspaceEntry(control: EditorWorkspaceEntryControl | undefined): void
   /**
    * Phase 3B / B3-B: retire a mounted History editor-seat tenant whose captured
    * Session scope is no longer current. It is the runner's publication-commit
@@ -3049,6 +3057,12 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       // The control is meaningful only for the mounted PiTUI app; a TSP mount
       // has its own native modal seat and never reaches this entry.
       app?.setNoAnswerNavigation(control)
+    },
+    setEditorWorkspaceEntry(control) {
+      // Same renderer mount ownership as the no-answer control above: the TSP
+      // branch has no TuiApp, so the Host Editor gesture simply does not exist
+      // there.
+      app?.setEditorWorkspaceEntry(control)
     },
     retireStaleHistorySeat() {
       // The PiTui-only mounted app owns the optional seat; a TSP renderer mount
