@@ -825,6 +825,17 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   /** TSP I-E: the one-time History bind latch (a lifecycle fact, not a cache). */
   let historySearchInstalled = false
   /**
+   * TSP I-E: the History card's SEAT LIFECYCLE fact, including a Modal park.
+   * This is deliberately NOT `historySearch.isOpen()`: while a Modal owns the
+   * keys the card is parked, `isOpen()` answers false, but the SAME instance
+   * still holds the Composer seat and comes back when the blocker settles. An
+   * asynchronous Composer intake that started BEFORE the park must stay
+   * refused for that whole window — the park must not re-open a hidden business
+   * write into the draft the card will restore into. The keyboard owner, the
+   * painted projection and the click admissions keep using `isOpen()`.
+   */
+  const historyHoldsComposerSeat = (): boolean => historySearch?.holdsSeat() === true
+  /**
    * TSP I-D: the ONE inline-attachment stager of this mount, installed by the
    * command layer through the renderer's `installInlineAttachmentStager` port at
    * the SAME single registration site where PiTui receives
@@ -866,7 +877,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // draft while the card is what the user is operating — the draft is the
     // card's Restore target meanwhile, and a hidden write there would be a
     // second owner of the seat the plan froze to one card.
-    if (historyOwnsComposerSeat()) return
+    if (historyHoldsComposerSeat()) return
     const acceptedText = acceptance.lines.join('\n')
     let acceptedCursor = acceptance.cursorCol
     for (let index = 0; index < acceptance.cursorLine; index += 1) {
@@ -884,7 +895,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // same document bytes are not the same operation once the draft moved, and
       // this mount's ONE composer object is a mount constant, so identity needs
       // no second fence here.
-      current: () => !disposed && !hydrating && !historyOwnsComposerSeat()
+      current: () => !disposed && !hydrating && !historyHoldsComposerSeat()
         && composer.editRevision() === acceptedRevision
         && composer.getDraft() === acceptedText
         && composer.state().cursor === acceptedCursor,
@@ -3400,11 +3411,12 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   const permissionMenuAdmitted = (): boolean =>
     permissionComposerAffordance() && composerActionsAdmitted()
 
-  /** TSP I-E: whether the History card currently owns the composer seat. The
+  /** TSP I-E: whether the card is CURRENTLY OPERABLE (open, not parked). The
    *  Quiet Composer stays VISIBLE and is the ONE editor either way; while the
-   *  card owns the seat its business controls are painted disabled and every
-   *  callback admission refuses, so a click can never send, stop or open a
-   *  second popover behind the card the user is looking at. */
+   *  card is the keyboard seat its business controls are painted disabled and
+   *  every click admission refuses, so a click can never send, stop or open a
+   *  second popover behind the card the user is looking at. Async settlements
+   *  must use {@link historyHoldsComposerSeat}, which also covers a park. */
   const historyOwnsComposerSeat = (): boolean => historySearch?.isOpen() === true
 
   /** Toggle the menu; opening starts a NEW expansion identity and lands the
