@@ -626,6 +626,33 @@ test('SurfaceRuntime retires all native presenter getters on dispose', async () 
   }
 })
 
+test('the PiTUI Host Editor workspace control is inert on a TSP mount', async () => {
+  const harness = await mountTspHarness({ sessionBrowserCapabilities: true })
+  const session = harness.session
+  try {
+    // The TSP renderer branch has NO TuiApp: the runtime bridge's `app?.` call
+    // is a strict no-op, so the `←←` gesture (a TuiApp-local state machine)
+    // cannot exist on this mount at all.
+    assert.throws(() => harness.surface.app, /the surface is not mounted/u)
+    const nativeBrowser = harness.surface.sessionBrowserPresentation
+    assert.ok(nativeBrowser !== undefined, 'the TSP renderer keeps its native Session Browser presenter')
+    let touched = 0
+    assert.doesNotThrow(() => harness.surface.setEditorWorkspaceEntry({
+      available: () => { touched += 1; return true },
+      captureIsCurrent: () => { touched += 1; return () => true },
+      openAll: () => { touched += 1 },
+    }))
+    assert.equal(touched, 0, 'an inert bridge never evaluates the control')
+    assert.throws(() => harness.surface.app, /the surface is not mounted/u,
+      'the install attempt must never create a TuiApp')
+    assert.equal(harness.surface.sessionBrowserPresentation, nativeBrowser,
+      'the native Session Browser presenter is unchanged')
+  } finally {
+    await harness.dispose().catch(() => {})
+    await session.close().catch(() => {})
+  }
+})
+
 // ── B3-A3: the Task Center capability is the NEGOTIATED pane truth ──────────
 
 test('the default HELLO (no picker/row/text/scroll) declares no Task Center', async () => {
