@@ -47,6 +47,8 @@ import { resolveTspNativeFooterConfig } from '../../src/domain/footer/tsp-native
 import { createPluginManagerWorkspacePanel } from '../../src/tui/plugin-manager/workspace.ts'
 import { isQuitKey, mountTspRenderer, type TspRenderer } from '../../src/tui/tsp/session.ts'
 import { foldWireNodes, wireNodes } from '../support/tsp-picker-wire.ts'
+import { readTspBlobMessages, type ObservedTspBlob } from '../support/tsp-blob-wire.ts'
+import type { ImageAttachmentRefLike } from '../../src/domain/media/types.ts'
 import { svgContentBlocks, svgFactFromArgs } from '../../src/domain/visual/svg.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 import { createInputHistory } from '../../src/app/surface/input-history.ts'
@@ -127,6 +129,7 @@ class ScriptedTern {
   readonly input = new FakeInput()
   readonly output = new FakeOutput()
   readonly frames: WireFrame[] = []
+  readonly blobs: ObservedTspBlob[] = []
   readonly closeBodies: unknown[] = []
   /** The pane-shaped frame reader the shared wire helpers fold. */
   readonly pane = { frames: (): readonly WireFrame[] => this.frames }
@@ -138,6 +141,7 @@ class ScriptedTern {
         setTimeout(() => this.input.type(`\u001b_tsp;r;${JSON.stringify(hello)}\u001b\\\u001b[?62;52;c`), 1)
         return
       }
+      for (const blob of readTspBlobMessages(bytes)) this.blobs.push(blob)
       for (const match of text.matchAll(/\u001b_tsp;x;([\s\S]*?)\u001b\\/g)) {
         try { this.closeBodies.push(JSON.parse(match[1]!)) } catch { /* ignore */ }
       }
@@ -232,6 +236,8 @@ interface Harness {
   /** The REAL `surface.start` inputs, so a second start can be driven as-is. */
   readonly startDeps: Parameters<SurfaceRuntime<SessionEvent>['start']>[0]
   readonly tern: ScriptedTern
+  readonly imageReads: { readonly attachmentId: string; readonly scope: unknown }[]
+  setImageScope(scope: unknown): void
   route(event: SessionEvent): void
   /** Replace the main fold under the same session id (re-hydration shape). */
   replaceMain(): void
@@ -266,6 +272,9 @@ async function mountTspHarness(options: {
    *  composition root wires it. Absent keeps the historical standalone mount
    *  (no renderer displayState) that every older case asserts. */
   displayState?: { preset: 'focus' | 'compact' | 'full' }
+  /** Observe the production mount's authorized image-read port. */
+  readImage?: (ref: ImageAttachmentRefLike, scope: unknown) => Promise<{ ref: unknown; data: Uint8Array }>
+  imageScope?: unknown
   /** Advertise the native `image` kind + `blobs` feature so a ready Tool SVG
    *  really carries its own collapsible disclosure. */
   nativeImages?: boolean
@@ -283,6 +292,8 @@ async function mountTspHarness(options: {
       : HELLO
   const tern = new ScriptedTern(hello)
   const session = await openSession(tern)
+  const imageReads: { readonly attachmentId: string; readonly scope: unknown }[] = []
+  let activeImageScope: unknown = options.imageScope ?? { scope: 'test-image-scope' }
   let folder = new TranscriptFolder()
   const controller = new TranscriptWindowController({ windowTurns: 20, stepTurns: 10 })
   let exitCount = 0
@@ -404,8 +415,12 @@ async function mountTspHarness(options: {
     iconStyle: 'emoji',
     displayState: options.displayState ?? { preset: 'compact' },
     historySearchSource: { search: () => Promise.reject(new Error('not exercised')) },
-    readImage: () => Promise.reject(new Error('not exercised')),
-    imageScope: () => undefined,
+    readImage: async (ref, scope) => {
+      imageReads.push({ attachmentId: ref.attachmentId, scope })
+      if (options.readImage === undefined) throw new Error('image read was not configured for this harness')
+      return await options.readImage(ref, scope)
+    },
+    imageScope: () => activeImageScope,
     present: { call: () => undefined, result: () => undefined },
     sessionCwd: () => '/tmp',
     captureHistoryScope: () => ({ sessionId: SESSION_ID, isCurrent: () => true }),
@@ -423,6 +438,8 @@ async function mountTspHarness(options: {
     startDeps,
     tern,
     session,
+    imageReads,
+    setImageScope(scope) { activeImageScope = scope },
     route(event) {
       surface.routeSessionEvent({ id: SESSION_ID }, event)
     },
@@ -2265,6 +2282,83 @@ test('the SAME live DisplayState object drives Full flat and then Compact Activi
     await harness.session.close()
   }
 })
+
+test('a collapsed Compact Work image has no read/blob demand until expanded and never crosses source scopes', async () => {
+  const scopeA = { scope: 'image-A' }
+  const scopeB = { scope: 'image-B' }
+  const attachment: ImageAttachmentRefLike = {
+    attachmentId: 'att-compact-work', mediaType: 'image/png', bytes: 4, width: 2, height: 2, name: 'hidden.png',
+  }
+  const harness = await mountTspHarness({
+    displayState: { preset: 'compact' },
+    nativeImages: true,
+    imageScope: scopeA,
+    readImage: async (ref, scope) => ({ ref, data: new Uint8Array([scope === scopeA ? 1 : 2, 3, 4]) }),
+  })
+  const routeImageWork = (base: number): void => {
+    harness.route(ev('turn/start', { turn: 1 }, base))
+    harness.route(userMessage(base + 1, 'inspect the hidden image', `user-image-${base}`))
+    const callId = `call-image-${base}`
+    harness.route(ev('tool/call', { turn: 1, step: 0, callId: ToolCallId(callId), name: 'read_image', arguments: '{}' }, base + 2))
+    harness.route(ev('tool/result', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId(`result-image-${base}`), role: 'tool', toolCallId: ToolCallId(callId),
+        content: [{ type: 'text', text: 'image result' }, { type: 'image', attachment }],
+        source: { kind: 'tool', callId },
+      },
+    }, base + 3))
+    harness.surface.paintNow()
+  }
+  try {
+    harness.surface.bindRendererInput()
+    routeImageWork(0)
+    await awaitWireFact(() => mountedSections(harness).length === 1, 'the collapsed Activity containing the image Tool')
+    assert.equal(harness.imageReads.length, 0, 'collapsed Work starts no attachment read')
+    assert.equal(harness.tern.blobs.length, 0, 'collapsed Work sends no blob')
+    assert.equal(mountedNodes(harness).filter(node => node.k === 'image').length, 0, 'the hidden member has no image node')
+
+    const sectionA = mountedSections(harness)[0]!
+    const sfA = harness.tern.frames.at(-1)!.sf
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf: sfA, id: sectionA.id, collapsed: false, raw: {} })
+    await awaitWireFact(() => mountedNodes(harness).some(node => node.k === 'image'), 'the image node after expanding Work A')
+    assert.deepEqual(harness.imageReads.map(read => [read.attachmentId, read.scope]), [['att-compact-work', scopeA]],
+      'expansion starts exactly one read through the owning scope')
+    assert.equal(harness.tern.blobs.length, 1, 'the expanded Tool sends one image blob')
+
+    // An ordinary repaint of the same source keeps the visible Activity and
+    // reuses the ImageLoader entry; neither the read nor the blob duplicates.
+    harness.surface.paintNow()
+    await settle()
+    assert.equal(harness.imageReads.length, 1, 'same-source repaint does not re-read the image')
+    assert.equal(harness.tern.blobs.length, 1, 'same-source repaint does not resend the blob')
+
+    // Retire the expanded subject through the real generation/hydration path.
+    harness.surface.display.beginSessionHydration()
+    await awaitWireFact(() => harness.tern.output.text().includes('Loading session…'), 'the hydration fence')
+    harness.setImageScope(scopeB)
+    harness.replaceMain()
+    routeImageWork(10)
+    await awaitWireFact(() => mountedSections(harness).length === 1, 'the collapsed Activity for source B')
+    assert.equal(mountedSections(harness)[0]!.p['collapsed'], true, 'source B starts with a retired Work disclosure state')
+    assert.equal(harness.imageReads.length, 1, 'collapsed source B starts no second read')
+    assert.strictEqual(harness.imageReads[0]?.scope, scopeA, 'the only read remains owned by source A')
+    assert.equal(harness.tern.blobs.length, 1, 'the source switch sends no hidden or stale blob')
+    assert.equal(mountedNodes(harness).filter(node => node.k === 'image').length, 0, 'source A image node is retired')
+
+    const sectionB = mountedSections(harness)[0]!
+    const sfB = harness.tern.frames.at(-1)!.sf
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf: sfB, id: sectionB.id, collapsed: false, raw: {} })
+    await awaitWireFact(() => harness.imageReads.length === 2, 'the source B image read')
+    assert.deepEqual(harness.imageReads.map(read => read.scope), [scopeA, scopeB], 'source B reads only under its own scope')
+    await awaitWireFact(() => harness.tern.blobs.length === 2, 'the source B blob')
+    await awaitWireFact(() => mountedNodes(harness).filter(node => node.k === 'image').length === 1, 'source B image frame')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
 
 test('a real toggle on the measured Activity node id expands exactly that Work, and a repeated target state is idempotent', async () => {
   const harness = await mountTspHarness({ displayState: { preset: 'compact' } })

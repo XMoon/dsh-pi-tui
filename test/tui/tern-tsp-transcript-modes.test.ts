@@ -334,7 +334,7 @@ test('the Activity header reports the span action stats and a proven duration, n
   const spans = projectTranscriptStructure(messages).flatMap(block => block.kind === 'work' ? [block.span] : [])
   const timing = spans.flatMap(span => span.members).map(message => transcriptTimingOf(message)).find(value => value !== undefined)
   assert.ok(timing !== undefined, 'the real fold produced a timing sidecar for this fixture')
-  const nodes = flatten(messages, { preset: 'compact', scopePrefix: 's1-', window: LATEST_WINDOW })
+  const nodes = flatten(messages, { preset: 'compact', scopePrefix: 's1-', window: LATEST_WINDOW, turnActivities: folder.turnActivities() })
   const header = descendantText(nodes, nodesOf(nodes, 'section')[0]!.id)
   assert.ok(header.includes('1 action'), 'the header uses the shared action-stat cardinality')
   assert.ok(!header.includes('0s'), 'no zero-second duration is painted')
@@ -488,16 +488,113 @@ test('an earlier Work of a still-open turn stays header-only while only the proj
     'no Work adopts a foreign-turn Preparing')
 })
 
-test('a settled think-only tail Work still reads Activity with a preview so the identity never flips', () => {
-  const folder = apply([
+test('an incomplete latest Work previews Thinking, then turn/end plus final Assistant removes the preview and reveals Thought', () => {
+  const open = apply([
     ev('turn/start', { turn: 1 }, 0),
     userMessage(1, 'user-1', 'think only'),
     reasoningMessage(2, 'think-tail', 'the only reasoning', undefined, 0),
-    ev('turn/end', { turn: 1, reason: { kind: 'completed' } }, 3),
   ])
-  const nodes = flatten(folder.messages(), { preset: 'compact', scopePrefix: 's1-', window: LATEST_WINDOW })
-  const section = nodesOf(nodes, 'section')[0]!
-  const text = descendantText(nodes, section.id)
-  assert.ok(text.includes('Activity'), 'the settled tail think-only span stays Activity, never Thought')
-  assert.ok(text.includes('Think: the only reasoning'), 'the true latest tail keeps its bounded preview')
+  const openNodes = flatten(open.messages(), {
+    preset: 'compact', scopePrefix: 's1-', window: LATEST_WINDOW, turnActivities: open.turnActivities(),
+  })
+  const openSection = nodesOf(openNodes, 'section')[0]!
+  const openText = descendantText(openNodes, openSection.id)
+  assert.ok(open.turnActivities().get(1)?.completed === false, 'fixture: the owning turn is incomplete')
+  assert.ok(openText.includes('Activity'), 'an incomplete Think-only span remains Activity')
+  assert.ok(openText.includes('Think: the only reasoning'), 'the incomplete latest tail may preview Thinking')
+
+  // Same Work settles, then an intermediate/final Assistant follows before the
+  // authoritative turn boundary. With no Preparing evidence, the settled Work
+  // is completed and non-preview, so the Think-only identity becomes Thought.
+  open.apply([
+    assistantMessage(3, 'a-1', 'the final reply', 1),
+    ev('turn/end', { turn: 1, reason: { kind: 'completed' } }, 4),
+  ])
+  const settledNodes = flatten(open.messages(), {
+    preset: 'compact', scopePrefix: 's1-', window: LATEST_WINDOW, turnActivities: open.turnActivities(),
+  })
+  const settledSection = nodesOf(settledNodes, 'section')[0]!
+  const settledText = descendantText(settledNodes, settledSection.id)
+  assert.equal(open.turnActivities().get(1)?.completed, true, 'fixture: the same turn is now settled')
+  assert.ok(settledText.includes('Thought'), `a completed non-preview Think-only Work is Thought: ${settledText}`)
+  assert.ok(!settledText.includes('Think:'), 'completed turn state removes the live preview')
+  assert.ok(settledNodes.some(node => node.parent === 'main' && descendantText(settledNodes, node.id).includes('the final reply')),
+    'the final Assistant reply stays in the reading flow')
+})
+
+test('a Work with a still-running member omits its duration instead of showing the settled members elapsed time', () => {
+  // The previous Tool settled at T+3s while a LATER Thinking member is still
+  // streaming: the Work has no proven close boundary, so its header must not
+  // present `1s` as if the Activity had finished.
+  const folder = apply([
+    ev('turn/start', { turn: 1 }, 0),
+    userMessage(1, 'user-1', 'keep streaming'),
+    toolCall(2, 'call-a', 'read', {}, 0),
+    toolResult(3, 'call-a', 'first body', 0),
+  ])
+  folder.applyLiveInput({
+    kind: 'chunk', sessionId: 'modes-live', attemptId: 'attempt-1', turn: 1, step: 1,
+    time: T0 + 9_000, chunk: { type: 'block-start', index: 0, blockType: 'reasoning' },
+  } as never)
+  folder.applyLiveInput({
+    kind: 'chunk', sessionId: 'modes-live', attemptId: 'attempt-1', turn: 1, step: 1,
+    time: T0 + 9_100, chunk: { type: 'reasoning-delta', index: 0, text: 'still streaming' },
+  } as never)
+  const spans = projectTranscriptStructure(folder.messages()).flatMap(block => block.kind === 'work' ? [block.span] : [])
+  assert.equal(spans.length, 1)
+  const timing = summarizeWorkSpan(spans[0]!).timing
+  assert.ok(timing !== undefined && timing.endedAt !== undefined, 'fixture: an earlier member really settled')
+  assert.equal(timing.running, true, 'fixture: the Work has a still-running member')
+  const nodes = flatten(folder.messages(), {
+    preset: 'compact', scopePrefix: 's1-', window: LATEST_WINDOW, turnActivities: folder.turnActivities(),
+  })
+  const header = descendantText(nodes, nodesOf(nodes, 'section')[0]!.id)
+  assert.ok(header.includes('Activity'), 'the identity stays Activity while the Work runs')
+  assert.ok(!/\d+s\b/u.test(header.split('Activity')[1] ?? ''), `no settled duration is painted for a running Work: ${header}`)
+  assert.ok(header.includes('Think: still streaming'), 'the live Think preview keeps following the stream')
+
+  // The same fold with the reasoning settled proves a real duration appears.
+  const settled = apply([
+    ev('turn/start', { turn: 1 }, 0),
+    userMessage(1, 'user-1', 'finish the work'),
+    toolCall(2, 'call-a', 'read', {}, 0),
+    toolResult(3, 'call-a', 'first body', 0),
+    reasoningMessage(4, 'think-settled', 'the finished reasoning', undefined, 1),
+    assistantMessage(5, 'a-1', 'done', 1),
+    ev('turn/end', { turn: 1, reason: { kind: 'completed' } }, 6),
+  ])
+  const settledNodes = flatten(settled.messages(), {
+    preset: 'compact', scopePrefix: 's1-', window: LATEST_WINDOW, turnActivities: settled.turnActivities(),
+  })
+  const settledHeader = descendantText(settledNodes, nodesOf(settledNodes, 'section')[0]!.id)
+  assert.ok(/Activity( · \d+s|\s\d+s)/u.test(settledHeader), `a proven settled span paints its duration: ${settledHeader}`)
+})
+
+test('the collapsed Action line keeps the running PTC sub-call suffix and drops it once settled', () => {
+  const folder = apply([
+    ev('turn/start', { turn: 1 }, 0),
+    userMessage(1, 'user-1', 'run the program'),
+    toolCall(2, 'call-code', 'run_code', { code: 'print(1)' }, 0),
+    ev('tool/ptc-dispatch-start', {
+      rootCallId: ToolCallId('call-code'), parentCallId: ToolCallId('call-code'), subCallId: 'call-code:bash:1', name: 'bash', arguments: { command: 'echo hi' },
+    }, 3),
+  ])
+  const nodes = flatten(folder.messages(), {
+    preset: 'compact', scopePrefix: 's1-', window: LATEST_WINDOW, turnActivities: folder.turnActivities(),
+  })
+  const header = descendantText(nodes, nodesOf(nodes, 'section')[0]!.id)
+  assert.ok(header.includes('Action:'), 'the collapsed Work shows an Action preview line')
+  assert.ok(/Bash running/u.test(header), `the running sub-call stays visible in the Action line: ${header}`)
+
+  // The child settles: the suffix must disappear from the same projection.
+  folder.apply([
+    ev('tool/ptc-dispatch', {
+      rootCallId: ToolCallId('call-code'), parentCallId: ToolCallId('call-code'), subCallId: 'call-code:bash:1',
+      name: 'bash', arguments: { command: 'echo hi' }, isError: false, content: [{ type: 'text', text: 'hi' }],
+    }, 4),
+  ])
+  const settledNodes = flatten(folder.messages(), { preset: 'compact', scopePrefix: 's1-', window: LATEST_WINDOW })
+  const settledHeader = descendantText(settledNodes, nodesOf(settledNodes, 'section')[0]!.id)
+  assert.ok(!/running/u.test(settledHeader), `the settled child drops the suffix: ${settledHeader}`)
+  assert.ok(!settledHeader.includes('Action:'), `the completed turn retires the collapsed preview slot: ${settledHeader}`)
 })

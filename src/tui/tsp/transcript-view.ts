@@ -30,14 +30,15 @@ import { contextFormOf } from '../../domain/transcript/context-semantics.ts'
 import { subCallDisplayStatus } from '../../domain/transcript/folder.ts'
 import { formatBytes } from '../../domain/media/format.ts'
 import type { ImageAttachmentRefLike } from '../../domain/media/types.ts'
-import { THINKING_TAIL_CAP, type AssistantDisplayBlock, type TranscriptMessage, type TranscriptToolMessage } from '../../domain/transcript/types.ts'
+import { THINKING_TAIL_CAP, type AssistantDisplayBlock, type TranscriptMessage, type TranscriptToolMessage, type TurnActivity } from '../../domain/transcript/types.ts'
 import type { TranscriptWindowState } from '../../domain/transcript/window.ts'
 import { contextPresentationKind } from '../transcript/context-structure.ts'
 import type { ContextCluster } from '../transcript/context-structure.ts'
 import { contextClusterSummaryParts } from '../transcript/context-summary.ts'
 import { projectCompact, type CompactProjectedBlock } from '../transcript/compact-projection.ts'
 import type { TranscriptContainerPath } from '../transcript/container-owner.ts'
-import { compactActionPresentation, compactPreparingSummary } from '../components/transcript/compact-process-preview.ts'
+import { resolveWorkLifetimes, type WorkLifetime } from '../transcript/activity-clock.ts'
+import { compactActionBody, compactActionPresentation, compactPreparingSummary } from '../components/transcript/compact-process-preview.ts'
 import { compactActionStatParts, formatCompactDuration } from '../transcript/process-summary.ts'
 import type { TranscriptStructureBlock, TranscriptWorkSpan } from '../transcript/structure.ts'
 import { projectTranscriptStructure } from '../transcript/structure.ts'
@@ -190,6 +191,10 @@ export interface TranscriptPresetViewOptions extends TranscriptViewOptions {
   readonly preset: DisplayPreset
   /** The renderer-local Compact Work-span disclosure owners (object identity). */
   readonly expandedWorkOwners?: ReadonlySet<TranscriptMessage>
+  /** The current committed turn-boundary facts from the same transcript
+   *  snapshot. Used only to resolve proven Activity close times; never as a
+   *  Work stats or preview authority. */
+  readonly turnActivities?: ReadonlyMap<number, TurnActivity>
   /** The current committed transcript window, read only for the tail/latest
    *  preview admission. */
   readonly window?: (TranscriptWindowState & { readonly hasNewer?: boolean }) | undefined
@@ -1205,16 +1210,18 @@ function boundedThinkPreview(text: string): string | undefined {
 }
 
 /** Whether a collapsed Work may show at most two bounded preview rows. The
- *  window must PROVE it is the latest (`hasNewer === false`, never an absent
- *  window) AND the span must be the projected TAIL Work — the same
- *  `isTrueLatestWork` authority PiTui uses. An earlier Work of a still-open
- *  turn is historical and stays header-only; the latest think-only span keeps
- *  `Activity` + its preview so the identity never flips while streaming. */
+ *  window must PROVE it is latest (`hasNewer === false`, never absent), and the
+ *  owner must be the last canonical Work span. A true tail alone is not enough:
+ *  the same-snapshot TurnActivity must still be incomplete, or this Work must
+ *  have adopted its existing same-turn Preparing evidence. */
 function workPreviewAdmitted(
+  span: TranscriptWorkSpan,
   tailWork: boolean,
+  hasPreparing: boolean,
   options: TranscriptPresetViewOptions,
 ): boolean {
-  return options.window?.hasNewer === false && tailWork
+  if (options.window?.hasNewer !== false || !tailWork) return false
+  return options.turnActivities?.get(span.turn)?.completed === false || hasPreparing
 }
 
 /** The Compact Activity header + optional bounded preview, drawn as the
@@ -1222,6 +1229,7 @@ function workPreviewAdmitted(
  *  nodes, so no Tool SVG blob or image demand can start from a header. */
 function compactWorkHead(
   summary: ReturnType<typeof summarizeWorkSpan>,
+  activityEndedAt: number | undefined,
   previewAdmitted: boolean,
   expanded: boolean,
   previews: readonly StreamingToolPreview[],
@@ -1231,10 +1239,13 @@ function compactWorkHead(
     && summary.think !== undefined
     && summary.action === undefined
     && summary.actionStats.total === 0
-  // A proven positive span is required: unknown is omitted, and a sub-second
-  // span must not round into a bogus `0s`.
-  const measured = summary.timing?.endedAt !== undefined && summary.timing.endedAt > summary.timing.startedAt
-    ? formatCompactDuration(summary.timing.endedAt - summary.timing.startedAt)
+  // Member settlement is not an Activity boundary. Only the canonical
+  // lifetime's proven structural/turn-end boundary can produce a duration.
+  const startedAt = summary.timing?.startedAt
+  const measured = startedAt !== undefined
+    && activityEndedAt !== undefined
+    && activityEndedAt > startedAt
+    ? formatCompactDuration(activityEndedAt - startedAt)
     : undefined
   const duration = measured === '0s' ? undefined : measured
   const stats = compactActionStatParts(summary.actionStats).map(sanitizedPhysicalLine).join(' · ')
@@ -1254,8 +1265,11 @@ function compactWorkHead(
         ...(options.toolPresenter === undefined ? {} : { presenter: options.toolPresenter }),
         ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
       })
-    const oneLine = preparing
-      ?? (action === undefined ? undefined : `${action.status === 'ok' ? '✓ ' : action.status === 'error' ? '✗ ' : ''}${action.display}`)
+    // The SHARED width-free Action body: the status prefix, the display and the
+    // running PTC sub-call suffix. Tern owns the physical clipping, so the
+    // PiTui width ladder is not reimplemented here — only the semantics are
+    // shared, so a running sub-call is never dropped by one surface.
+    const oneLine = preparing ?? (action === undefined ? undefined : compactActionBody(action))
     if (oneLine !== undefined) rows.push(ui.text({ key: 'action', text: sanitizedPhysicalLine(`Action: ${oneLine}`), wrap: 'none' }))
   }
   return ui.col({ key: 'head' }, ...rows)
@@ -1299,6 +1313,45 @@ function workOwnerOf(path: TranscriptContainerPath | undefined): TranscriptMessa
   return entry?.kind === 'work' ? entry.owner : undefined
 }
 
+/** The members one projection ACTUALLY materializes.
+ *
+ * Compact collapses a Work to its header, so its members (and any image they
+ * carry) are NOT visible until the user opens the Activity. The image demand
+ * must follow THIS set, never the raw window: a hidden Tool image must not
+ * start an attachment read or a blob send. The set is a per-call projection
+ * result, derived from the SAME canonical structure the view materializes.
+ */
+export function visibleTranscriptMembers(
+  messages: readonly TranscriptMessage[],
+  options: TranscriptPresetViewOptions,
+): ReadonlySet<TranscriptMessage> {
+  const visible = new Set<TranscriptMessage>()
+  const structure = projectTranscriptStructure(messages)
+  // Full and Focus materialize EVERY member, so their demand is the window.
+  if (options.preset !== 'compact') {
+    for (const message of messages) visible.add(message)
+    return visible
+  }
+  const expanded = options.expandedWorkOwners ?? EMPTY_MESSAGE_SET
+  for (const block of structure) {
+    if (block.kind === 'message') {
+      visible.add(block.message)
+      continue
+    }
+    if (block.kind === 'context-cluster') {
+      for (const member of block.cluster.members) visible.add(member)
+      continue
+    }
+    // A collapsed Work materializes only its header: its members stay hidden.
+    if (!expanded.has(block.span.owner)) continue
+    for (const part of block.span.parts) {
+      if (part.kind === 'message') visible.add(part.message)
+      else for (const member of part.cluster.members) visible.add(member)
+    }
+  }
+  return visible
+}
+
 /** Compact consumes `projectCompact`'s output order: every canonical Work span
  *  owns exactly one Activity section, and its FLAT member blocks (including a
  *  carried snapshot cluster's members under clusterHeader:false) become that
@@ -1311,6 +1364,7 @@ function compactView(
   prefix: string,
   tailWorkOwner: TranscriptMessage | undefined,
   adoptedPreviews: readonly StreamingToolPreview[],
+  workLifetimes: ReadonlyMap<TranscriptMessage, WorkLifetime>,
   standalone: readonly Node[],
 ): Node {
   /** One call-local assembly record per emitted Work header. Children are
@@ -1334,10 +1388,10 @@ function compactView(
       const isTail = tailWorkOwner === block.span.owner
       const previews = isTail ? adoptedPreviews : []
       const summary = summarizeWorkSpan(block.span)
-      const previewAdmitted = workPreviewAdmitted(isTail, options)
+      const previewAdmitted = workPreviewAdmitted(block.span, isTail, previews.length > 0, options)
       const slot: WorkSlot = {
         key: `${prefix}work-${keys.keyFor(block.span.owner)}`,
-        head: compactWorkHead(summary, previewAdmitted, expanded, previews, options),
+        head: compactWorkHead(summary, workLifetimes.get(block.span.owner)?.endedAt, previewAdmitted, expanded, previews, options),
         expanded,
         members: [],
         preparing: expanded ? previews.map(preview => preparingRow(preview, options.cwd, '')) : [],
@@ -1463,10 +1517,15 @@ export function transcriptViewForPreset(
       workHeader: true,
     })
     const tailWork = [...structure].reverse().find(block => block.kind === 'work')
+    const workLifetimes = resolveWorkLifetimes(structure, options.turnActivities ?? EMPTY_TURN_ACTIVITIES)
     // Only the TRAILING open Work adopts its own turn's Preparing rows; every
     // other turn already failed open as standalone rows above. The adopted rows
     // belong to the projected TAIL Work alone — a turn key is not an owner.
-    return compactView(blocks, keys, options, prefix, tailWork?.kind === 'work' ? tailWork.span.owner : undefined, adopted, standalone)
+    return compactView(
+      blocks, keys, options, prefix,
+      tailWork?.kind === 'work' ? tailWork.span.owner : undefined,
+      adopted, workLifetimes, standalone,
+    )
   }
   return transcriptView(structure, keys, options)
 }
@@ -1474,3 +1533,4 @@ export function transcriptViewForPreset(
 /** A read-only empty disclosure set for this projection call (no search reveal
  *  or cluster disclosure owner exists in this build). */
 const EMPTY_MESSAGE_SET: ReadonlySet<TranscriptMessage> = new Set<TranscriptMessage>()
+const EMPTY_TURN_ACTIVITIES: ReadonlyMap<number, TurnActivity> = new Map<number, TurnActivity>()
