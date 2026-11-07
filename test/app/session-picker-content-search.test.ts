@@ -887,3 +887,41 @@ test('opening /sessions, filtering, closing and /search never switch the Session
   await waitUntil(() => h.view().includes('alpha'))
   assert.deepEqual(h.switched, [], 'a /search alone must never switch')
 })
+
+// ── M5-U-B: the PiTui Presenter renders the read owner's merged results ─────
+// The canonical seed is an EDITOR fill, never an input event: it must not mint
+// a second query generation (which would abort and restart the identical Host
+// search) and it must not overwrite a user edit.
+
+test('the one-shot canonical seed never echoes back as a second query generation', async (t) => {
+  const h = harness({
+    rows: rows(),
+    search: async () => ({ items: [{ sessionId: 'session-alpha', snippet: 'needle alpha' }], hasMore: false }),
+  })
+  t.after(() => h.app.stop())
+  await h.runSessions('needle')
+  await waitUntil(() => h.searchCalls.length === 1)
+  await waitUntil(() => h.view().includes('needle alpha'))
+  // Wait past the whole debounce window: a seeded filter reported back to the
+  // owner as a user edit would abort/restart the identical search here.
+  await new Promise<void>(resolve => setTimeout(resolve, 500))
+  assert.equal(h.searchCalls.length, 1, 'the programmatic seed must not restart the Host search')
+  assert.equal(h.searchCalls[0]!.query, 'needle')
+  assert.ok(h.view().includes('sessions · Search results'), 'the seeded command opens the owner-driven search projection')
+})
+
+test('a typed query replaces the command seed as the one search identity', async (t) => {
+  const h = harness({
+    rows: rows(),
+    search: async (query) => ({ items: [{ sessionId: 'session-alpha', snippet: `hit ${query}` }], hasMore: false }),
+  })
+  t.after(() => h.app.stop())
+  await h.runSessions('needle')
+  await waitUntil(() => h.searchCalls.length === 1)
+  // Replace the seeded text with a real edit: only the user's query may drive
+  // the Host search from here on.
+  for (let i = 0; i < 'needle'.length; i += 1) h.vt.sendInput('\x7f')
+  h.vt.sendInput('alpha')
+  await waitUntil(() => h.searchCalls.length === 2)
+  assert.equal(h.searchCalls[1]!.query, 'alpha', 'the user edit becomes the canonical query')
+})

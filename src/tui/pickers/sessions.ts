@@ -28,15 +28,6 @@ export {
   sessionRowMatchesQuery,
 } from '../../domain/session/browser.ts'
 
-/** First-batch size for the progressive projection loader: the visible
- * picker window fills immediately, then the remaining rows load behind it. */
-export const PROJECTION_FIRST_BATCH = 20
-/** Batch size for the remaining projection loads after the first batch. */
-export const PROJECTION_BATCH_SIZE = 50
-/** Content-search debounce (dsh-web parity): a filter must stay stable for
- * this long before the Host content search runs. */
-export const CONTENT_SEARCH_DEBOUNCE_MS = 250
-
 /** Strip the `session-` prefix and keep the first 8 characters, like the
  * kimicode card's short id. */
 export function shortSessionId(id: string): string {

@@ -1,19 +1,25 @@
 /**
  * Session-domain command definitions: /sessions (+ /resume), /new, /search,
  * /title (+ /rename), /fork and /rewind, plus the ONE shared Session Browser
- * lifecycle (displaySessionId, sessionPickerCategories, sessionSearchCategory,
- * openSessionPicker) that all of them consume.
+ * lifecycle (the `SessionBrowserReadOwner` plus the PiTui Picker Presentation
+ * that renders its snapshot) that /sessions, /resume and /search consume.
  *
  * Registration is explicit: the coordinator (src/commands.ts) calls each
  * registrar at its frozen position and owns catalog/provenance/disposal state.
  * @module @xmoon76/dsh-pi-tui/commands/sessions
  */
 
-import { scheduler } from 'node:timers/promises'
 import type { CommandInvocation, CommandResult } from '@deepseek-ai/dsh-commands'
-import type { PickerCategory, TuiApp } from '../../tui-app.ts'
+import type { PickerCategory, PickerHandle, TuiApp } from '../../tui-app.ts'
 import { createSessionBrowserReadOwner, type SessionBrowserReadOwner, type SessionBrowserReadSettlement, type SessionBrowserResumeSettlement } from '../../app/command/session-browser-read.ts'
-import type { SessionBrowserPresentation } from '../../app/command/session-browser-presentation.ts'
+import type {
+  SessionBrowserPanelHandle,
+  SessionBrowserPanelRequest,
+  SessionBrowserPresentation,
+  SessionBrowserReadSnapshot,
+  SessionBrowserSearchResult,
+  SessionBrowserSubject,
+} from '../../app/command/session-browser-presentation.ts'
 import { TransitionInProgressError } from '../../app/session/operation-barrier.ts'
 import { SessionScopeSupersededError, type SessionScope } from '../../app/session/scope.ts'
 import { SessionNavigationStopError, type NavigationIntent } from '../../app/session/transition.ts'
@@ -22,25 +28,17 @@ import { cancellationError, isCancellation, runOwned } from '../../runtime/proce
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import { LifecycleError, WorkspaceSelectionError, type ResolvedWorkspaceSelection } from '../../runtime/session-lifecycle-port.ts'
 import {
-  CONTENT_SEARCH_DEBOUNCE_MS,
-  PROJECTION_BATCH_SIZE,
-  PROJECTION_FIRST_BATCH,
   buildSessionTree,
   findSessionMatch,
   sameWorkspace,
-  sanitizeSessionSearchInput,
   sanitizeTerminalText,
   sessionLabelParts,
-  sessionRowMatchesQuery,
   sessionSearchItem,
   sessionPickerItem,
-  type SessionContentHit,
   type SessionPickerItem,
   type SessionPickerRow,
 } from '../pickers/sessions.ts'
-import type { SessionSummary } from '../../runtime/session-reader-port.ts'
 import type {
-  DetachTask,
   NewSessionId,
   RegisterOne,
   RegisterTuiCommand,
@@ -81,7 +79,6 @@ export interface SessionCommandDeps {
   app: TuiApp
   registerOne: RegisterOne
   registerTuiCommand: RegisterTuiCommand
-  detach: DetachTask
   recordCommandDraftDisposition: (commandId: string | undefined, disposition: 'restored' | 'suppressed') => void
   newSessionId: NewSessionId
   /**
@@ -129,7 +126,7 @@ export function displaySessionId(id: string): string {
 }
 
 export function sessionPickerCategories(
-  rows: readonly SessionPickerRow[],
+  rowsOf: () => readonly SessionPickerRow[],
   currentCwd: string,
   header: string,
   itemFor: (row: SessionPickerRow, indent?: number) => SessionPickerItem,
@@ -146,6 +143,7 @@ export function sessionPickerCategories(
       // metadata is flat too), so every row stays at depth 0 — never lost,
       // never mis-nested under an unrelated root.
       items: () => {
+        const rows = rowsOf()
         const mainRows = rows.filter(row => row.origin !== 'subagent')
         if (rows.length === 0 && placeholder !== undefined) return [placeholder()]
         return buildSessionTree(
@@ -163,6 +161,7 @@ export function sessionPickerCategories(
       // contract (and its `placed` cycle guard) still owns real subagent
       // lineage wherever that tree is used.
       items: () => {
+        const rows = rowsOf()
         const mainRows = rows.filter(row => row.origin !== 'subagent')
         if (rows.length === 0 && placeholder !== undefined) return [placeholder()]
         return buildSessionTree(mainRows).map(entry => itemFor(entry.row, entry.depth))
@@ -172,72 +171,39 @@ export function sessionPickerCategories(
 }
 
 /**
- * The Session Browser's SEARCH projection category (review P1/P2): with a
- * non-empty query the picker enters a GLOBAL search view whose membership is
- * the explicit union of local metadata matches and Host content hits —
- * never a workspace-scoped post-filter of the bounded Host page (the Host
- * returns a global top-20; scoping it afterwards would hide a real
- * current-workspace match ranked beyond the window), and never a fake query
- * append in the description (membership and presentation stay separate).
- * The category is EXTERNALLY filtered (review P1): the SelectList renders
- * without its internal substring filter, so the projection's items ARE the
- * membership — a Host-authoritative hit is never dropped by a substring
- * re-filter, regardless of snippet length or query normalization. The
- * category is non-cyclable: Tab never leaves it while a query is active,
- * and browse mode skips it.
+ * The Session Browser's SEARCH projection category: a PURE presentation of the
+ * shared read owner's already-merged `SessionBrowserSearchResult[]` (M5-U-B).
+ * The owner owns the membership — the global union of metadata matches and the
+ * bounded Host content page in Host page order — so this projection never
+ * re-filters, never re-merges and never appends the query to a description.
+ * The category is EXTERNALLY filtered: the SelectList renders without its
+ * internal substring filter, because this projection's items ARE the
+ * membership (a Host-authoritative hit is never dropped by a substring
+ * re-filter, regardless of snippet length or query normalization). The
+ * category is non-cyclable: Tab never leaves it while a query is active, and
+ * browse mode skips it.
  */
 export function sessionSearchCategory(options: {
-  rows: readonly SessionPickerRow[]
   header: string
+  /** The owner-merged results (Host page order), read at activation time. */
+  results: () => readonly SessionBrowserSearchResult[]
+  /** Whether the browse roster itself is non-empty. Only an empty roster is
+   * replaced by the status/loading row: an empty RESULT set is a real "no
+   * matches" state, not a status phase. */
+  hasRoster: () => boolean
   /** The SEARCH item builder (the cwd joins the searchable description). */
-  itemFor: (row: SessionPickerRow, indent?: number) => SessionPickerItem
-  /** The LIVE CANONICAL filter text (read at activation time) — the one
-   * semantic query that also drives the Host search. */
-  queryOf: () => string
-  /** The merged Host content hits (live map, Host page order). */
-  contentHitsById: ReadonlyMap<string, SessionContentHit>
-  /** The enriched metadata (title/preset) for the local match — the raw
-   * list rows carry neither until the projection batch lands. */
-  metadataOf: (id: string) => { title?: string; preset?: string }
+  itemFor: (result: SessionBrowserSearchResult) => SessionPickerItem
   placeholder?: () => SessionPickerItem
 }): PickerCategory {
-  const { rows, header, itemFor, queryOf, contentHitsById, metadataOf, placeholder } = options
   return {
     id: 'search',
     label: 'Search results',
-    header: `${header} · Search results`,
+    header: `${options.header} · Search results`,
     cyclable: false,
-    // The externally-filtered mode (review P1): the SelectList renders
-    // WITHOUT its internal substring filter — this projection's items ARE
-    // the membership, and a Host-authoritative hit is never dropped by a
-    // substring re-filter.
     externalFilter: true,
     items: () => {
-      if (rows.length === 0 && placeholder !== undefined) return [placeholder()]
-      const mainRows = rows.filter(row => row.origin !== 'subagent')
-      const query = queryOf()
-      // Flat merged search projection (review P2): local metadata matches
-      // keep the newest-first list order; content-only matches keep the
-      // Host page order (the map's insertion order); a row that is both is
-      // a local match with the snippet merged. No browse tree ordering.
-      const localMatches = query === '' ? [] : mainRows.filter(row => {
-        const meta = metadataOf(row.id)
-        return sessionRowMatchesQuery({
-          ...row,
-          title: meta.title,
-          preset: meta.preset ?? row.preset,
-        }, query)
-      })
-      const localIds = new Set(localMatches.map(row => row.id))
-      // Content-only matches keep the HOST PAGE order — iterate the hit
-      // map (its insertion order IS the Host page order), never the
-      // newest-first list order.
-      const rowById = new Map(mainRows.map(row => [row.id, row]))
-      const contentOnly = [...contentHitsById.keys()]
-        .filter(id => !localIds.has(id))
-        .map(id => rowById.get(id))
-        .filter((row): row is SessionPickerRow => row !== undefined)
-      return [...localMatches, ...contentOnly].map(row => itemFor(row, 0))
+      if (!options.hasRoster() && options.placeholder !== undefined) return [options.placeholder()]
+      return options.results().map(result => options.itemFor(result))
     },
   }
 }
@@ -254,7 +220,6 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
     app,
     registerOne,
     registerTuiCommand,
-    detach,
     recordCommandDraftDisposition,
     newSessionId,
     notify,
@@ -263,28 +228,10 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
   } = deps
   const { cwd, signal } = runner
 
-  /** Switch sessions with full rejection handling (the runner resolves an
-   * error STRING for user-facing failures, but an unexpected rejection must
-   * not become an unhandled rejection either). An owned workflow: the
-   * outcome drives the notify — runOwned (AGENTS.md); the classification
-   * diagnostics are recorded by runOwned itself. */
-  const switchSession = (id: string): void => {
-    runOwned('session switch', () => runner.switchSession(id), {
-      diag: runner.diag,
-      sessionId: () => id,
-      onResult: (error) => {
-        if (error !== undefined) app.notify(error, 'error')
-      },
-      onError: (error: unknown) => {
-        const message = safeErrorMessage(error)
-        app.notify(`session switch failed: ${message}`, 'error')
-      },
-    })
-  }
-
-  /** The tracked switch settlement used by `/resume`: `matched`/accepted is
-   * not success; only a committed target counts. Legacy narrow fakes without
-   * the tracked entry keep the old string result (undefined = committed). */
+  /** The tracked switch settlement used by `/resume` and by an interactive
+   * Picker selection: `matched`/accepted is not success; only a committed
+   * target counts. Legacy narrow fakes without the tracked entry keep the old
+   * string result (undefined = committed). */
   const switchSessionOutcome = (id: string, scope?: SessionScope): Promise<SessionSwitchOutcome> => {
     if (runner.switchSessionOutcome !== undefined) return runner.switchSessionOutcome(id, scope)
     return runner.switchSession(id, scope).then(
@@ -295,24 +242,303 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
     )
   }
 
-  // Shared /sessions + /resume + /search body — input-first (the official
-  // /resume fix): the picker overlay opens IMMEDIATELY on a loading
-  // placeholder and owns the input (Esc, arrows, search) while the Host
-  // listing and the combined projection enrichment land in the background.
-  // The header option lets each entry present itself under its own name.
-  /** Generation/staleness fence for the open picker load: a superseding
-   * open bumps the generation and aborts the previous scan, and any late
-   * settlement from a closed/superseded picker is dropped. */
-  let sessionPickerGeneration = 0
-  let activeSessionPickerScan: AbortController | undefined
-  /** The debounced content-search timer/controller shared across picker
-   * opens: a superseding open cancels the previous picker's pending or
-   * in-flight content search exactly like its scan. */
-  let activeContentSearchTimer: ReturnType<typeof setTimeout> | undefined
-  let activeContentSearch: AbortController | undefined
+  /** The Session Browser command edge under which the PiTui Picker opened. It
+   * is written synchronously immediately before the shared read owner opens
+   * the panel, so the presenter labels THIS open and nothing else. */
+  type SessionBrowserHeader = 'sessions' | 'resume' | 'search'
+  let piTuiBrowserHeader: SessionBrowserHeader = 'sessions'
+
+  /** One PiTui Session Browser view: the physical Picker plus the per-open
+   * presentation state. Every row, snippet and status comes from the shared
+   * read owner's snapshot; this view owns no list, projection or search
+   * lifecycle of its own (M5-U-B). */
+  interface PiTuiBrowserPanel {
+    readonly request: SessionBrowserPanelRequest
+    readonly subject: SessionBrowserSubject
+    picker: PickerHandle | undefined
+    snapshot: SessionBrowserReadSnapshot
+    disposed: boolean
+    /** The Picker physically closed itself (select/Esc); the logical command
+     * operation may still be pending. */
+    physicalClosed: boolean
+    /** The owner's one-shot editor seed has been consumed. */
+    seedApplied: boolean
+    /** The presenter is writing the seed itself: that filter change is NOT a
+     * user edit and must not reach the read owner. */
+    applyingSeed: boolean
+    /** A real edit happened; the seed must never overwrite it. */
+    userEdited: boolean
+    /** Browse tab to restore when the query is cleared. */
+    lastBrowseCategory: 'current' | 'all'
+    /** A selection started a command-level resume operation. */
+    selectionPending: boolean
+    /** The last notice emitted for this snapshot stream (dedupe only). */
+    lastNotice: string | undefined
+  }
+
+  const EMPTY_BROWSER_SNAPSHOT: SessionBrowserReadSnapshot = {
+    listState: 'loading',
+    rows: [],
+    query: '',
+    resumePending: false,
+    searchState: 'idle',
+    searchResults: [],
+    hasMore: false,
+  }
+
+  /** The ONE PiTui Session Browser presentation. It renders the shared read
+   * owner's snapshot through the existing Picker; the owner keeps the single
+   * list/projection/search lifecycle (M5-U-B). */
+  const createPiTuiSessionBrowser = (): SessionBrowserPresentation => {
+    let active: PiTuiBrowserPanel | undefined
+
+    /** The status row a category renders while its roster is still empty. */
+    const statusRow = (panel: PiTuiBrowserPanel): SessionPickerItem => {
+      const snapshot = panel.snapshot
+      if (snapshot.listState === 'error') {
+        return {
+          value: '',
+          label: `session listing failed: ${sanitizeTerminalText(snapshot.listError ?? 'unknown error')}`,
+          description: '',
+          group: '',
+        }
+      }
+      if (snapshot.listState === 'unavailable') {
+        // The store may hold logs the reader refuses: never claim there are
+        // no persisted sessions (the S2 limited contract).
+        return { value: '', label: 'session persistence unavailable', description: '', group: '' }
+      }
+      if (snapshot.listState === 'empty') {
+        return { value: '', label: 'No readable sessions', description: '', group: '' }
+      }
+      return { value: '', label: 'Loading sessions…', description: '', group: '' }
+    }
+
+    /** Release this view ONCE. The owner-notification path must never call
+     * back into the presenter's own `close()`; the physical Picker is closed
+     * here regardless of which side retired it. */
+    const release = (panel: PiTuiBrowserPanel, notifyOwner: boolean): void => {
+      if (panel.disposed) return
+      panel.disposed = true
+      panel.physicalClosed = true
+      panel.selectionPending = false
+      if (active === panel) active = undefined
+      panel.picker?.close()
+      if (notifyOwner) panel.request.onClose()
+    }
+
+    /** Surface this open's Host/search/projection facts as ONE deduped notice
+     * (the Host result first, the secondary projection failure second). */
+    const emitNotice = (panel: PiTuiBrowserPanel): void => {
+      const snapshot = panel.snapshot
+      let key: string
+      let text: string
+      let kind: 'info' | 'error' = 'info'
+      if (snapshot.searchState === 'unavailable') {
+        key = 'search-unavailable'
+        text = 'content search unavailable'
+      } else if (snapshot.searchState === 'error') {
+        key = `search-error:${snapshot.searchError ?? ''}`
+        text = `session content search failed: ${sanitizeTerminalText(snapshot.searchError ?? 'unknown error')}`
+        kind = 'error'
+      } else if (snapshot.hasMore) {
+        key = `search-more:${snapshot.query}`
+        text = 'More content matches exist — refine the search.'
+      } else if (snapshot.projectionError !== undefined) {
+        // One notice per open: a persistent enrichment failure must not repeat
+        // on every later snapshot (the Host/search result stays the primary).
+        key = 'projection-error'
+        text = `Some session details are unavailable: ${sanitizeTerminalText(snapshot.projectionError)}`
+      } else {
+        return
+      }
+      if (key === panel.lastNotice) return
+      panel.lastNotice = key
+      app.notify(text, kind)
+    }
+
+    /** Project the current snapshot onto the Picker: the search projection is
+     * entered/left from the snapshot's canonical query, and a cleared query
+     * restores the browse tab the user was last on. */
+    const paint = (panel: PiTuiBrowserPanel): void => {
+      if (panel.disposed || panel.physicalClosed) return
+      const category = panel.picker?.getCategory?.()
+      if (panel.snapshot.query !== '') {
+        if (category === 'search') {
+          panel.picker?.refresh?.()
+        } else {
+          if (category === 'current' || category === 'all') panel.lastBrowseCategory = category
+          panel.picker?.setCategory?.('search')
+        }
+      } else if (category === 'search') {
+        panel.picker?.setCategory?.(panel.lastBrowseCategory)
+      } else {
+        if (category === 'current' || category === 'all') panel.lastBrowseCategory = category
+        panel.picker?.refresh?.()
+      }
+      emitNotice(panel)
+    }
+
+    const applySnapshot = (
+      panel: PiTuiBrowserPanel,
+      snapshot: SessionBrowserReadSnapshot,
+      options?: { readonly initialQuery?: string },
+    ): void => {
+      if (panel.disposed) return
+      panel.snapshot = snapshot
+      if (panel.physicalClosed) {
+        // The Picker is gone. Only an ACCEPTED resume handoff (the owner
+        // published `resumePending` synchronously BEFORE dispatching the real
+        // switch) may keep this command operation alive; its terminal
+        // settlement releases the view exactly once. A stale subject is left
+        // to the owner's own retirement, never re-entered from here.
+        if (panel.selectionPending && snapshot.resumePending) return
+        release(panel, panel.request.subject.isCurrent())
+        return
+      }
+      paint(panel)
+      // The one-shot initial seed: the owner's canonical query becomes the
+      // editor text only while this panel has never been edited. The resulting
+      // programmatic filter change is suppressed, so it can neither be mistaken
+      // for a user edit nor mint another query generation.
+      if (options?.initialQuery !== undefined && !panel.seedApplied && !panel.userEdited && !panel.disposed) {
+        panel.seedApplied = true
+        panel.applyingSeed = true
+        try {
+          panel.picker?.setFilter?.(options.initialQuery)
+        } finally {
+          panel.applyingSeed = false
+        }
+      }
+    }
+
+    const open = (request: SessionBrowserPanelRequest): SessionBrowserPanelHandle => {
+      const previous = active
+      if (previous !== undefined) release(previous, false)
+      const header = piTuiBrowserHeader
+      piTuiBrowserHeader = 'sessions'
+      const panel: PiTuiBrowserPanel = {
+        request,
+        subject: request.subject,
+        picker: undefined,
+        snapshot: EMPTY_BROWSER_SNAPSHOT,
+        disposed: false,
+        physicalClosed: false,
+        seedApplied: false,
+        applyingSeed: false,
+        userEdited: false,
+        lastBrowseCategory: 'current',
+        selectionPending: false,
+        lastNotice: undefined,
+      }
+      active = panel
+      const currentId = request.subject.currentSessionId ?? ''
+      const browseItem = (row: SessionPickerRow, indent = 0): SessionPickerItem =>
+        sessionPickerItem(row, currentId, indent)
+      const searchItem = (result: SessionBrowserSearchResult): SessionPickerItem =>
+        sessionSearchItem(
+          result.row,
+          currentId,
+          0,
+          result.snippet === undefined ? undefined : { snippet: result.snippet },
+        )
+      const categories = [
+        ...sessionPickerCategories(
+          () => panel.snapshot.rows,
+          request.subject.currentCwd,
+          header,
+          browseItem,
+          () => statusRow(panel),
+        ),
+        sessionSearchCategory({
+          header,
+          results: () => panel.snapshot.searchResults,
+          hasRoster: () => panel.snapshot.rows.length > 0,
+          itemFor: searchItem,
+          placeholder: () => statusRow(panel),
+        }),
+      ]
+      const picker = app.openPicker(
+        categories[0]!.items(),
+        (id) => {
+          if (panel.disposed) return
+          panel.physicalClosed = true
+          // The loading/status placeholder and the current Session row end the
+          // view; neither ever resumes.
+          if (id === '' || id === currentId) {
+            release(panel, true)
+            return
+          }
+          panel.selectionPending = true
+          request.onResumeIntent({
+            sessionId: id,
+            currentSessionId: request.subject.currentSessionId,
+            source: 'enter',
+          })
+          // The owner accepts an intent ONLY by publishing `resumePending`
+          // synchronously before it dispatches the real switch. Anything else
+          // (stale subject, unlisted row, duplicate pending) ends this hidden
+          // view immediately — no invisible active reader survives it.
+          if (!panel.disposed && panel.snapshot.resumePending) return
+          release(panel, panel.request.subject.isCurrent())
+        },
+        () => {
+          release(panel, true)
+        },
+        {
+          enableSearch: true,
+          header: categories[0]!.header,
+          noMatchText: '  no matching sessions',
+          initialQuery: '',
+          width: 76,
+          maxHeight: 26,
+          showHint: true,
+          categories,
+          signal,
+          // The selected session's long title marquees; the row prefix (when
+          // present) and the `●` current marker stay fixed (plan §7.6/§7.7).
+          marquee: { labelPartsOf: sessionLabelParts },
+          // Raw editor text is the Presenter's ONLY query input: the read owner
+          // canonicalizes it (NUL → trim → cap) as the one search identity. The
+          // one-shot programmatic seed is not a user edit.
+          onFilterChange: (raw) => {
+            if (panel.disposed || panel.applyingSeed) return
+            panel.userEdited = true
+            request.onQueryChange(raw)
+          },
+        },
+      )
+      panel.picker = picker
+      return {
+        isDisposed: () => panel.disposed,
+        setSnapshot: (snapshot, options) => applySnapshot(panel, snapshot, options),
+        close: () => release(panel, false),
+      }
+    }
+
+    return {
+      open,
+      notify: (message, kind) => { app.notify(message, kind) },
+    }
+  }
+
+  const piTuiPresentation = createPiTuiSessionBrowser()
+
   let nativeReadOwner: SessionBrowserReadOwner | undefined
   let nativePresentation: SessionBrowserPresentation | undefined
 
+  // The runner lifetime owns the ONE read owner: a quit/HMR aborts it so no
+  // pending list, projection batch or debounced search outlives the surface.
+  if (!signal.aborted) {
+    signal.addEventListener('abort', () => {
+      nativeReadOwner?.dispose()
+      nativeReadOwner = undefined
+      nativePresentation = undefined
+    }, { once: true })
+  }
+
+  /** The ONE Reader-owner factory: a stable presentation keeps its owner; a
+   * different renderer presentation retires the previous owner outright. */
   const nativeReadOwnerFor = (presentation: SessionBrowserPresentation): SessionBrowserReadOwner => {
     if (nativeReadOwner !== undefined && nativePresentation === presentation) return nativeReadOwner
     nativeReadOwner?.dispose()
@@ -327,14 +553,15 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
           subject: {
             currentSessionId: scope.sessionId,
             currentCwd: runner.sessionCwd(),
-            isCurrent: () => runner.isSessionScopeCurrent(scope),
+            isCurrent: () => !signal.aborted && runner.isSessionScopeCurrent(scope),
           },
         }
       },
       diag: runner.diag,
       sessionId: () => runner.currentSessionId,
       onResumeIntent: (intent, scope, settle, isCurrent) => {
-        if (!runner.isSessionScopeCurrent(scope)
+        if (signal.aborted
+          || !runner.isSessionScopeCurrent(scope)
           || intent.currentSessionId !== scope.sessionId
           || intent.sessionId === scope.sessionId) {
           settle({ kind: 'cancelled' })
@@ -354,10 +581,10 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
           if (!direct) presentation.notify(sanitizeTerminalText(text), 'error')
           settle({ kind: 'failed', text })
         }
-        // The native Browser's `resumePending` is the non-terminal indicator;
-        // the command owner receives the real outcome below. Do not paint a
-        // transient notice from inside the read-owner callback: a native
-        // presentation may already be closed/replaced.
+        // The Browser's `resumePending` is the non-terminal indicator; the
+        // command owner receives the real outcome below. Do not paint a
+        // transient notice from inside the read-owner callback: a presentation
+        // may already be closed/replaced.
         runOwned('session browser resume', () => switchSessionOutcome(intent.sessionId, scope), {
           diag: runner.diag,
           sessionId: () => intent.sessionId,
@@ -397,10 +624,10 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
   /** The narrow open options the three Session Browser entries really need
    * (plan §8.2) — not a controller/framework abstraction. */
   interface SessionPickerOpenOptions {
-    readonly header: 'sessions' | 'resume' | 'search'
+    readonly header: SessionBrowserHeader
     /** `/resume <arg>`: after the ONE shared listing lands, resolve the
-     * argument as a direct id/prefix match — the first listed match closes the
-     * picker and switches; no match falls through to the filtered picker
+     * argument as a direct id/prefix match — the first listed MAIN match closes
+     * the picker and switches; no match falls through to the filtered picker
      * (the argument stays as the live search query). */
     readonly directMatchQuery?: string
     /** `/search` only: the query is required — an empty argument is
@@ -419,11 +646,11 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
       ? undefined
       : {
           query: options.directMatchQuery,
-          // Owner ruling: Native TSP typed `/resume` matches the Browser's
-          // listed main-session rows only. The PiTui fallback retains its
-          // existing matcher behavior.
           find: (rows: readonly SessionPickerRow[], query: string) => findSessionMatch(rows, query),
         }
+    // `open()` captures the typed `/resume` scope SYNCHRONOUSLY (before any
+    // listing await), so a navigation that wins during the listing leaves this
+    // intent superseded instead of falling back to an unscoped gate capture.
     const handle = nativeReadOwnerFor(presentation).open({
       ...(initialQuery === undefined ? {} : { initialQuery }),
       ...(directMatch === undefined ? {} : { directMatch }),
@@ -447,456 +674,22 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
     })
   }
 
-  const openSessionPicker = async (
+  /** Open the ONE Session Browser: the native TSP Presenter when the renderer
+   * provides one, otherwise the PiTui Picker Presentation. Both consume the
+   * same `SessionBrowserReadOwner` snapshot and the same resume settlement. */
+  const openSessionPicker = (
     invocation: { rawInput: string; commandId?: string },
     options: SessionPickerOpenOptions,
   ): Promise<{ kind: 'success' } | { kind: 'error'; text: string }> => {
     if (options.requireQuery === true && invocation.rawInput.trim() === '') {
-      return { kind: 'error', text: 'search needs a query' }
+      return Promise.resolve({ kind: 'error', text: 'search needs a query' })
     }
-    // `/resume <arg>` captures its source generation SYNCHRONOUSLY, before the
-    // input-first listing await. A navigation that wins during the listing
-    // must leave this intent superseded — it must never fall back to an
-    // unscoped capture at gate time and stop the NEW owner.
-    const resumeScope = options.directMatchQuery === undefined ? undefined : runner.captureSessionScope()
     const presentation = runner.sessionBrowserPresentation
     if (presentation !== undefined) return openNativeSessionBrowser(invocation, options, presentation)
-    // The current marker is the live session's id; before the first session
-    // (deferred start) no row is marked current, and the picker can still
-    // browse and switch to a persisted session without creating one.
-    const currentId = runner.currentSessionId
-    // A NEW picker open supersedes the previous one outright: bump the
-    // generation, cancel its scan AND its content search, and take over
-    // as the active load.
-    sessionPickerGeneration += 1
-    const generation = sessionPickerGeneration
-    activeSessionPickerScan?.abort()
-    if (activeContentSearchTimer !== undefined) {
-      clearTimeout(activeContentSearchTimer)
-      activeContentSearchTimer = undefined
-    }
-    activeContentSearch?.abort()
-    activeContentSearch = undefined
-    const controller = new AbortController()
-    activeSessionPickerScan = controller
-    const scanSignal = AbortSignal.any([signal, controller.signal])
-    /** True when this load's result may no longer touch the UI: the picker
-     * closed (abort), the runner quit, or a newer open superseded it. */
-    const stale = (): boolean => scanSignal.aborted || generation !== sessionPickerGeneration
-
-    // The picker rows: EMPTY until `list()` lands. The category factories
-    // read this shared array at activation time, so the loading placeholder
-    // renders first and the late rows appear through the same factories.
-    const rows: SessionPickerRow[] = []
-    // Live enrichment maps: the background projection batch fills them, and
-    // the category factories re-read them on every activation (Tab cycle,
-    // refresh). The category scopes see the FULL row set, so "All
-    // directories" really lists every main session (round-1 review finding:
-    // the old code capped the rows themselves at MAX_PICKER_SESSIONS).
-    const titlesById = new Map<string, string>()
-    const presetsById = new Map<string, string>()
-    // Content-search enrichment (plan §10.2): Host hits merge onto
-    // already-listed rows — the list stays the row authority, the search
-    // page only adds snippets. Cleared per query; the unavailable notice
-    // fires at most once per picker lifecycle.
-    const contentHitsById = new Map<string, SessionContentHit>()
-    let contentHasMore = false
-    let contentSearchNoticeShown = false
-    const itemFor = (row: SessionPickerRow, indent = 0): SessionPickerItem =>
-      sessionPickerItem({
-        ...row,
-        title: titlesById.get(row.id),
-        preset: presetsById.get(row.id) ?? row.preset,
-      }, runner.currentSessionId ?? '', indent, contentHitsById.get(row.id))
-    // Category tabs (Tab cycles while the picker is open): the session
-    // picker is a HUMAN surface, so subagent children never appear in
-    // either scope — /tasks and the subagent viewer own that surface now
-    // (the 2026-08-22 plan, item 3; kimi's directory-scope direction).
-    // Current directory scopes to the live session's workspace (the
-    // sessionCwd the whole surface follows); All directories lists every
-    // main session, grouped by its workspace.
-    const loadingItem: SessionPickerItem = {
-      value: '',
-      label: 'Loading sessions…',
-      description: '',
-      group: '',
-    }
-    // The status row the categories render while `rows` is still empty: the
-    // loading label first, swapped for the refusal text when the listing
-    // fails (the overlay is already open — an in-picker refusal beats a
-    // dead loading frame; Esc still closes it).
-    let statusRow = loadingItem
-    const categories = [
-      ...sessionPickerCategories(rows, runner.sessionCwd(), options.header, itemFor, () => statusRow),
-      // The search projection (review P1/P2): with a non-empty query the
-      // picker switches to this GLOBAL view — local metadata matches UNION
-      // Host content hits, never scoped by the Current/All browse tabs.
-      sessionSearchCategory({
-        rows,
-        header: options.header,
-        // The search item builder: the cwd joins the searchable description
-        // (the SelectList never searches the group header), and the
-        // enriched title/preset are synthesized exactly like the browse rows.
-        itemFor: (row, indent = 0) => sessionSearchItem({
-          ...row,
-          title: titlesById.get(row.id),
-          preset: presetsById.get(row.id) ?? row.preset,
-        }, runner.currentSessionId ?? '', indent, contentHitsById.get(row.id)),
-        queryOf: () => pendingContentQuery,
-        contentHitsById,
-        metadataOf: id => ({ title: titlesById.get(id), preset: presetsById.get(id) }),
-        placeholder: () => statusRow,
-      }),
-    ]
-    /** The `/resume <arg>` outcome of the ONE shared listing, resolved by
-     * the detached load task — the overlay stays interactive the whole
-     * time, and the awaiting handler keeps the OLD synchronous semantics
-     * (the switch has started before the handler returns). */
-    type ListingOutcome =
-      | { kind: 'switched' }
-      | { kind: 'indeterminate'; text: string }
-      | { kind: 'picker' }
-      | { kind: 'refused'; text: string }
-      | { kind: 'cancelled' }
-    let settleListing: ((outcome: ListingOutcome) => void) | undefined
-    let switchInFlight = false
-    const listing = options.directMatchQuery === undefined
-      ? undefined
-      : new Promise<ListingOutcome>(resolve => { settleListing = resolve })
-    /** Idempotent outcome settle — later calls are no-ops (the abort
-     * listener races the task's own settles). */
-    const settleOnce = (outcome: ListingOutcome): void => {
-      settleListing?.(outcome)
-      settleListing = undefined
-    }
-    if (listing !== undefined) {
-      // Esc / any close settles the awaiting /resume <arg> handler. A closed
-      // picker that is carrying a switch in flight must NOT be reported as a
-      // cancellation: the tracked switch result owns the final settlement.
-      controller.signal.addEventListener('abort', () => {
-        if (!switchInFlight) settleOnce({ kind: 'cancelled' })
-      }, { once: true })
-    }
-    // Content-search lifecycle (plan §9 + review P1/P2): local metadata
-    // filtering is immediate; Host content search is a 250ms-debounced
-    // async augmentation that must never block keyboard input. The query is
-    // only recorded until the list baseline lands; clearing the filter drops
-    // the content enrichment; close/supersede/quit cancels everything. A
-    // non-empty query switches the picker into the GLOBAL search projection
-    // (scope is browse state — it never wraps the bounded Host results);
-    // clearing restores the browse category that was active before.
-    let listLanded = false
-    let pendingContentQuery = ''
-    let browseCategory = 'current'
-    /** Run one Host content search for a settled non-empty query. */
-    const runContentSearch = (query: string): void => {
-      if (stale()) return
-      const controller = new AbortController()
-      activeContentSearch = controller
-      const searchSignal = AbortSignal.any([scanSignal, controller.signal])
-      detach('session content search', async () => {
-        try {
-          const page = await runner.sessionReader.search(query, searchSignal)
-          if (stale() || controller.signal.aborted) return
-          if (page === undefined) {
-            // Capability unavailable/disabled (e.g. the default
-            // `openAt: never` FTS policy): the picker stays open with its
-            // local metadata filtering; notice once per picker lifecycle.
-            if (!contentSearchNoticeShown) {
-              contentSearchNoticeShown = true
-              app.notify('content search unavailable', 'info')
-            }
-            return
-          }
-          // Merge (plan §10.2 + review P2): only already-listed MAIN rows
-          // accept hits — the search page never creates rows, and subagent
-          // children stay out of the human Session Browser. Membership is
-          // the explicit union in the search projection; the row carries
-          // ONLY the real Host snippet (never a fake query append).
-          contentHitsById.clear()
-          contentHasMore = page.hasMore
-          const knownIds = new Set(rows.filter(row => row.origin !== 'subagent').map(row => row.id))
-          for (const item of page.items) {
-            if (knownIds.has(item.sessionId)) {
-              contentHitsById.set(item.sessionId, { snippet: item.snippet })
-            }
-          }
-          picker.refresh?.()
-          if (contentHasMore) app.notify('More content matches exist — refine the search.', 'info')
-        } catch (error) {
-          if (stale() || controller.signal.aborted) return
-          // Non-fatal: local rows stay and the picker stays open. The
-          // error text is a Host/provider boundary value — sanitize it
-          // before the notify writes it to the terminal (a raw ESC/OSC in
-          // an error message must never inject terminal sequences). The
-          // rethrow records the real diagnostic through runDetached.
-          app.notify(`session content search failed: ${sanitizeTerminalText(safeErrorMessage(error))}`, 'error')
-          throw error
-        }
-      })
-    }
-    /** Debounce a non-empty query: 250ms of stability before the Host
-     * content search runs (dsh-web parity). */
-    const scheduleContentSearch = (query: string): void => {
-      if (activeContentSearchTimer !== undefined) clearTimeout(activeContentSearchTimer)
-      activeContentSearchTimer = setTimeout(() => {
-        activeContentSearchTimer = undefined
-        runContentSearch(query)
-      }, CONTENT_SEARCH_DEBOUNCE_MS)
-    }
-    /** Cancel the pending debounce and any in-flight content search. */
-    const cancelContentSearch = (): void => {
-      if (activeContentSearchTimer !== undefined) {
-        clearTimeout(activeContentSearchTimer)
-        activeContentSearchTimer = undefined
-      }
-      activeContentSearch?.abort()
-      activeContentSearch = undefined
-    }
-    const picker = app.openPicker(
-      categories[0]!.items(),
-      (id) => {
-        // Any close — including the loading row's Enter — ends the scan
-        // and the content search: the picker is gone, so late enrichment
-        // may not touch the UI.
-        if (id !== '' && id !== currentId) settleOnce({ kind: 'switched' })
-        controller.abort()
-        cancelContentSearch()
-        // Enter on the loading placeholder (value '') must never resume.
-        if (id === '' || id === currentId) return
-        switchSession(id)
-      },
-      () => {
-        controller.abort()
-        cancelContentSearch()
-      },
-      {
-        enableSearch: true,
-        header: categories[0]!.header,
-        noMatchText: '  no matching sessions',
-        // The command argument is applied AFTER the rows land (below), not
-        // as initialQuery: a prefilled filter would hide the STATUS rows
-        // (loading / refusal / already-on) behind "no matching sessions"
-        // while the scan is still running.
-        initialQuery: '',
-        width: 76,
-        maxHeight: 26,
-        showHint: true,
-        categories,
-        // A closed picker (select, Esc) aborts the background scan through
-        // the same controller; a runner exit closes the overlay AND cancels
-        // the scan through the shared signal.
-        signal: scanSignal,
-        // The selected session's long title marquees; the row prefix (when
-        // present) and the `●` current marker stay fixed (plan §7.6/§7.7).
-        marquee: { labelPartsOf: sessionLabelParts },
-        // The Session Browser's content-search hook: every filter change
-        // (typed or programmatic) feeds the 250ms debounce; before the
-        // list baseline lands the query is only recorded. ANY change drops
-        // the previous query's enrichment — stale snippets must never
-        // match the new filter (plan §18), and an unavailable/failed new
-        // search must not leave the old query's hits behind.
-        onFilterChange: (query) => {
-          // ONE canonical client query (review P1): remove NUL → trim →
-          // cap 500 UTF-16 units. The SAME canonical drives the local
-          // metadata projection AND the Host search (whose authoritative
-          // validation is then a no-op) — the input box keeps the raw
-          // text the user typed, but membership never drifts from what
-          // was searched.
-          const canonical = sanitizeSessionSearchInput(query)
-          // The canonical is the semantic identity: a raw edit that does
-          // not change it (e.g. padding whitespace or NULs around the
-          // same term) must not abort/restart the identical Host search.
-          if (canonical === pendingContentQuery) return
-          pendingContentQuery = canonical
-          cancelContentSearch()
-          contentHitsById.clear()
-          contentHasMore = false
-          // A whitespace-only filter is an empty query: no Host request
-          // (the official contract rejects empty queries — a whitespace
-          // filter must not surface as a search failure).
-          if (canonical === '') {
-            // Back to the browse state (the category that was active
-            // before the query started).
-            if (picker.getCategory?.() !== browseCategory) picker.setCategory?.(browseCategory)
-            return
-          }
-          // Enter the GLOBAL search projection: scope is browse state and
-          // never wraps the bounded Host results (review P1). The switch
-          // happens once per query; further typing re-runs the active
-          // factory through refresh.
-          if (picker.getCategory?.() !== 'search') {
-            browseCategory = picker.getCategory?.() ?? 'current'
-            picker.setCategory?.('search')
-          } else {
-            picker.refresh?.()
-          }
-          if (listLanded) scheduleContentSearch(canonical)
-        },
-      },
-    )
-    // The listing + progressive enrichment run behind the open overlay.
-    // Cancellations (picker close, TUI quit, a superseding open) are
-    // debug-level through the unified entry; a real failure lands in
-    // diagnostics instead of being swallowed. Every await re-checks the
-    // staleness fence so a late settlement never refreshes a picker that
-    // already closed or was replaced.
-    detach('session picker load', async () => {
-      // The FIRST thing the scan does is a real event-loop yield: the
-      // overlay must be registered, focused, and repainted before any Host
-      // work starts (a microtask yield would not guarantee the terminal
-      // I/O phase a turn).
-      await scheduler.yield()
-      scanSignal.throwIfAborted()
-
-      // The session READ port (migration M1.3): semantic listing with
-      // capability-aware activity ordering lives in the Direct adapter, never here.
-      let listed: readonly SessionSummary[] | undefined
-      try {
-        listed = await runner.sessionReader.list(currentId, scanSignal)
-      } catch (error) {
-        // A real listing failure surfaces in-picker (the overlay is already
-        // open) and settles the awaiting /resume <arg> handler — never a
-        // dead loading frame, never a hanging handler.
-        if (stale()) return
-        const message = safeErrorMessage(error)
-        statusRow = { value: '', label: `session listing failed: ${message}`, description: '', group: '' }
-        picker.refresh?.()
-        settleOnce({ kind: 'refused', text: message })
-        return
-      }
-      if (stale()) return
-      if (listed === undefined || listed.length === 0) {
-        // The overlay is already open — keep it open on the refusal row
-        // (Esc closes as always) instead of leaving a dead loading frame.
-        // An EMPTY roster is `No readable sessions`: the official listing
-        // publishes a Session from its header only, so a store whose logs the
-        // reader refuses is indistinguishable from an empty one here — never
-        // claim "no persisted sessions" (the S2 limited contract, recorded in
-        // docs/architecture/host-client.md).
-        const text = listed === undefined ? 'session persistence unavailable' : 'No readable sessions'
-        statusRow = { value: '', label: text, description: '', group: '' }
-        picker.refresh?.()
-        settleOnce({ kind: 'refused', text })
-        return
-      }
-      // `/resume <arg>` direct fast path, resolved against the ONE shared
-      // listing (never a second one): a unique id/prefix match closes the
-      // picker and settles the command with the TRACKED switch outcome — the
-      // picker close itself is never success; matching the
-      // CURRENT session surfaces the already-on notice; no match falls
-      // through to the filtered picker with the argument preserved as the
-      // live search query.
-      if (options.directMatchQuery !== undefined) {
-        const match = findSessionMatch(listed, options.directMatchQuery)
-        if (match !== undefined) {
-          if (match.id === currentId) {
-            // Nothing to switch and nothing to browse: close the overlay —
-            // the error result is the whole feedback (a status row would
-            // linger behind the argument filter).
-            settleOnce({ kind: 'refused', text: 'already on this session' })
-            controller.abort()
-            picker.close()
-            return
-          }
-          switchInFlight = true
-          controller.abort()
-          picker.close()
-          app.notify('switching session…', 'info')
-          runOwned('session switch', () => switchSessionOutcome(match.id, resumeScope), {
-            diag: runner.diag,
-            sessionId: () => match.id,
-            onResult: (outcome) => {
-              if (outcome.kind === 'committed') settleOnce({ kind: 'switched' })
-              else if (outcome.kind === 'cancelled') settleOnce({ kind: 'cancelled' })
-              else if (outcome.kind === 'indeterminate') settleOnce({ kind: 'indeterminate', text: outcome.message })
-              else settleOnce({ kind: 'refused', text: outcome.message })
-            },
-            onCancel: () => settleOnce({ kind: 'cancelled' }),
-            onError: (error) => settleOnce({ kind: 'refused', text: `session switch failed: ${safeErrorMessage(error)}` }),
-          })
-          return
-        }
-        settleOnce({ kind: 'picker' })
-      }
-      // Mutate the shared row array in place: the category factories read
-      // it at activation time, so this one splice swaps the loading
-      // placeholder for the real rows on the next refresh.
-      rows.push(...listed)
-      picker.refresh?.()
-      // The list baseline is in: content search may start now (plan §9.3).
-      listLanded = true
-      // NOW the command argument becomes the live filter — real rows are
-      // in, so it narrows sessions instead of hiding the status phase. A
-      // query the USER typed during the load is never clobbered.
-      const pendingQuery = invocation.rawInput.trim()
-      if (pendingQuery !== '' && picker.getFilter?.() === '') {
-        picker.setFilter?.(pendingQuery)
-      }
-      // A filter that was only recorded during the load (or just applied
-      // above) now enters the normal debounced content-search flow. The
-      // query is canonicalized (trimmed) exactly like the interactive
-      // path: trim BEFORE the client cap, so a whitespace-padded filter
-      // never loses a character to the 500-unit window (official
-      // semantics: trim, then cap).
-      if (pendingContentQuery !== '' && activeContentSearchTimer === undefined && activeContentSearch === undefined) {
-        scheduleContentSearch(pendingContentQuery)
-      }
-
-      // Progressive combined projection batches: the first
-      // PROJECTION_FIRST_BATCH rows fill the visible window, then
-      // PROJECTION_BATCH_SIZE chunks refresh behind it. Each row's title
-      // and preset arrive TOGETHER from the one DSH projection batch (one
-      // cache lookup per session, never one scan per field), and the yield
-      // between batches keeps the event loop responsive to input while the
-      // cache hints settle. Cold misses remain unknown. The batches cover MAIN
-      // rows only (the categories never show subagents) and the FULL main-row set — NOT
-      // the `shown` window: a session beyond MAX_PICKER_SESSIONS that IS
-      // displayed (e.g. an old session in the "Current directory" scope)
-      // would otherwise never be enriched and would show a bare short id
-      // forever.
-      const mainRows = listed.filter(row => row.origin !== 'subagent')
-      const loadBatch = async (batch: readonly SessionSummary[]): Promise<void> => {
-        const projections = await runner.sessionReader.projectionBatch(batch, scanSignal)
-        if (stale()) return
-        let enriched = false
-        for (const [id, projection] of projections) {
-          if (projection.title !== undefined) {
-            titlesById.set(id, projection.title)
-            enriched = true
-          }
-          if (projection.preset !== undefined) {
-            presetsById.set(id, projection.preset)
-            enriched = true
-          }
-        }
-        if (enriched) picker.refresh?.()
-      }
-      await loadBatch(mainRows.slice(0, PROJECTION_FIRST_BATCH))
-      if (stale()) return
-      for (let offset = PROJECTION_FIRST_BATCH; offset < mainRows.length; offset += PROJECTION_BATCH_SIZE) {
-        // Yield between batches so input/repaint keep their turns even when
-        // every projection is a cold miss.
-        await scheduler.yield()
-        if (stale()) return
-        await loadBatch(mainRows.slice(offset, offset + PROJECTION_BATCH_SIZE))
-      }
-    })
-    if (listing === undefined) return { kind: 'success' }
-    // `/resume <arg>` keeps the OLD synchronous command semantics — the
-    // switch has started before the handler returns — while the overlay
-    // stays interactive during the wait (Esc cancels). No match settles as
-    // success with the filtered picker; a refusal returns the error text.
-    const outcome = await listing
-    if (outcome.kind === 'indeterminate') {
-      // The Host may have opened the target; never restore `/resume ...` as a
-      // plain retry intent.
-      recordCommandDraftDisposition(invocation.commandId, 'suppressed')
-      return { kind: 'error', text: outcome.text }
-    }
-    if (outcome.kind === 'refused') return { kind: 'error', text: outcome.text }
-    if (outcome.kind === 'cancelled') return { kind: 'error', text: 'resume cancelled' }
-    return { kind: 'success' }
+    // The PiTui Picker renders the same read owner; its per-open command label
+    // is captured synchronously, before the read owner can open the panel.
+    piTuiBrowserHeader = options.header
+    return openNativeSessionBrowser(invocation, options, piTuiPresentation)
   }
 
   // Shared by /title and its /rename alias. With an argument, pins the

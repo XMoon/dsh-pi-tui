@@ -131,9 +131,10 @@ production default; TSP keeps the experimental opt-in described in
   (listed main-session rows only). The first listed main-session match starts the
   switch without a second list; a miss, including a subagent-only target, becomes
   the initial global query. A manual Browser query entered while the list loads
-  takes precedence and suppresses a matching typed `/resume` switch. This
-  main-only corpus is the Native TSP rule; the PiTui fallback direct matcher is
-  unchanged.
+  takes precedence and suppresses a matching typed `/resume` switch. The PiTui
+  Picker presents the same `SessionBrowserReadOwner` snapshot, so the main-only
+  corpus, matcher and query precedence are the rule on every renderer: the PiTui
+  side owns only its physical Picker seat, never a second Reader or query owner.
 - Footer order is Close, Details, Resume. Resume keeps the `primary` action
   designation in every state; it is enabled only for a listed, non-current
   selection while no switch is pending. Loading, empty, unavailable, error, no
