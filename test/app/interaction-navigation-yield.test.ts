@@ -281,6 +281,8 @@ test('a sessionless committed surface admits no forwarded request and reads no s
     assert.equal(painted(), false, 'a sessionless surface presents nothing')
     const early = await Promise.race([
       asked.then(() => 'settled', () => 'settled'),
+      // fixed window: negative-observation deadline — the wait must stay
+      // unsettled for a bounded window with nothing to poll (no signal exists).
       new Promise<'pending'>(resolve => { setTimeout(() => resolve('pending'), 200).unref?.() }),
     ])
     assert.equal(early, 'pending', 'the sessionless wait settles nothing by itself')
