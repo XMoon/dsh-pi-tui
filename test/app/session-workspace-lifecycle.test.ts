@@ -29,12 +29,17 @@ import { DirectHostFilePort } from '../../src/runtime/direct/host-file-direct.ts
 import { createClientCommandRegistry } from '../../src/app/command/client-command-registry.ts'
 import type { SessionContentSearchPage, SessionReader, SessionSummary } from '../../src/runtime/session-reader-port.ts'
 import type {
+  SessionActivityFact,
   SessionWorkspaceFact,
   SessionWorkspaceFactsPort,
   WorkspaceFactsFrame,
   WorkspaceFactsHandle,
 } from '../../src/runtime/session-workspace-facts-port.ts'
-import type { SessionBrowserPresentation, SessionBrowserReadSnapshot } from '../../src/app/command/session-browser-presentation.ts'
+import type {
+  SessionBrowserAnswerEligibility,
+  SessionBrowserPresentation,
+  SessionBrowserReadSnapshot,
+} from '../../src/app/command/session-browser-presentation.ts'
 import type { SessionSwitchOutcome } from '../../src/app/session/runtime.ts'
 import type { SessionScope } from '../../src/app/session/scope.ts'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
@@ -138,14 +143,39 @@ interface FactsSource {
   readonly port: SessionWorkspaceFactsPort
   readonly handles: ControlledFactsHandle[]
   readonly followCalls: number
+  /** Every official Activity sample the workspace requested, in order. */
+  readonly reads: Array<{ readonly rows: readonly SessionSummary[]; readonly signal: AbortSignal | undefined }>
+  setFacts(facts: readonly SessionActivityFact[]): void
+  failNext(error: Error): void
+  /** Hold the NEXT sample open until `releaseHeld()`. */
+  holdNext(): void
+  releaseHeld(): void
 }
 
-function factsSource(): FactsSource {
+function factsSource(initial: readonly SessionActivityFact[] = []): FactsSource {
   const handles: ControlledFactsHandle[] = []
-  const state = { followCalls: 0 }
+  const reads: Array<{ rows: readonly SessionSummary[]; signal: AbortSignal | undefined }> = []
+  const state = {
+    followCalls: 0,
+    facts: initial,
+    failNext: undefined as Error | undefined,
+    hold: false,
+    held: [] as Array<() => void>,
+  }
   const port: SessionWorkspaceFactsPort = {
-    readActivity: async () => {
-      throw new Error('readActivity is U-D only; U-C must never call it')
+    readActivity: (rows, signal) => {
+      reads.push({ rows, signal })
+      const failure = state.failNext
+      if (failure !== undefined) {
+        state.failNext = undefined
+        return Promise.reject(failure)
+      }
+      const facts = state.facts
+      if (!state.hold) return Promise.resolve(facts)
+      return new Promise((resolve, reject) => {
+        state.held.push(() => resolve(facts))
+        signal?.addEventListener('abort', () => reject(new Error('activity read aborted')), { once: true })
+      })
     },
     followWorkspaces: (signal) => {
       state.followCalls += 1
@@ -157,7 +187,16 @@ function factsSource(): FactsSource {
   return {
     port,
     handles,
+    reads,
     get followCalls() { return state.followCalls },
+    setFacts: (facts) => { state.facts = facts },
+    failNext: (error) => { state.failNext = error },
+    holdNext: () => { state.hold = true },
+    releaseHeld: () => {
+      state.hold = false
+      const held = state.held.splice(0)
+      for (const release of held) release()
+    },
   }
 }
 
@@ -171,7 +210,11 @@ interface Harness {
   readonly facts: FactsSource
   readonly switchCalls: Array<{ readonly id: string; readonly scope: SessionScope | undefined }>
   readonly pickerCalls: number
+  /** Every official roster read this open performed (initial + refreshes). */
+  readonly listCalls: number
   readonly notices: Array<{ readonly text: string; readonly kind: string }>
+  /** Fire the Client-root eligibility invalidation the delivery owner emits. */
+  notifyEligibility(): void
   settleSwitch(outcome: SessionSwitchOutcome): void
   runSessions(rawInput?: string): Promise<{ kind: 'success' } | { kind: 'error'; text: string }>
   view(): string
@@ -184,12 +227,17 @@ function harness(options: {
   readonly list?: () => Promise<readonly SessionSummary[]>
   readonly search?: (query: string, signal?: AbortSignal) => Promise<SessionContentSearchPage | undefined>
   readonly nativePresentation?: SessionBrowserPresentation
+  /** The Client-root forwarded-answer eligibility read view (G567). Absent on
+   *  the Direct/TSP composition. */
+  readonly eligibility?: () => readonly SessionBrowserAnswerEligibility[]
+  readonly initialFacts?: readonly SessionActivityFact[]
 }): Harness {
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { notifyDurationMs: 60_000 })
   app.start()
   started.add(app)
-  const facts = factsSource()
+  const facts = factsSource(options.initialFacts ?? [])
+  const eligibilityListeners = new Set<() => void>()
   const notices: Array<{ text: string; kind: string }> = []
   const originalNotify = app.notify.bind(app)
   app.notify = (text, kind = 'info') => {
@@ -227,10 +275,11 @@ function harness(options: {
     row(OTHER, 2_000),
     row(THIRD, 1_000),
   ]
+  const listCalls = { value: 0 }
   const sessionReader: SessionReader = {
     list: options.list === undefined
-      ? async () => rows.map(entry => ({ ...entry }))
-      : async () => (await options.list!()).map(entry => ({ ...entry })),
+      ? async () => { listCalls.value += 1; return rows.map(entry => ({ ...entry })) }
+      : async () => { listCalls.value += 1; return (await options.list!()).map(entry => ({ ...entry })) },
     projectionBatch: async () => new Map([
       [CURRENT, { title: 'Current session' }],
       [OTHER, { title: 'Other session' }],
@@ -254,6 +303,13 @@ function harness(options: {
     ...sessionScopeFacts(() => state.agent, () => 1),
     sessionWorkspaceFacts: facts.port,
     ...(options.nativePresentation === undefined ? {} : { sessionBrowserPresentation: options.nativePresentation }),
+    ...(options.eligibility === undefined ? {} : {
+      forwardedAnswerEligibility: options.eligibility,
+      subscribeForwardedAnswerEligibility: (listener: () => void) => {
+        eligibilityListeners.add(listener)
+        return () => { eligibilityListeners.delete(listener) }
+      },
+    }),
     get currentSessionId() { return state.agent?.session.id },
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
@@ -353,7 +409,9 @@ function harness(options: {
     facts,
     switchCalls,
     get pickerCalls() { return picker.calls },
+    get listCalls() { return listCalls.value },
     notices,
+    notifyEligibility: () => { for (const listener of [...eligibilityListeners]) listener() },
     settleSwitch: (outcome) => { assert.ok(pendingSwitch !== undefined, 'no accepted resume is pending'); pendingSwitch(outcome) },
     runSessions: invoke,
     view: () => vt.getViewport().map(stripTerminalSequences).join('\n'),
@@ -614,5 +672,123 @@ test('the native TSP presenter branch never subscribes to the PiTUI Workspace fa
   await h.runSessions('')
   await h.vt.waitForRender()
   assert.equal(h.facts.followCalls, 0, 'the native TSP branch must not subscribe to the PiTUI seam')
+  assert.equal(h.facts.reads.length, 0, 'the native TSP branch never samples the PiTUI Activity seam')
   assert.equal(h.pickerCalls, 0)
+})
+
+// ── M5-U-D: the ONE Activity sample, its fences and the eligibility gate ─────
+
+function activityFact(sessionId: string, extra: Partial<SessionActivityFact> = {}): SessionActivityFact {
+  return {
+    sessionId,
+    running: undefined,
+    pendingKinds: undefined,
+    continuedQuestionCallIds: undefined,
+    attention: 'unknown',
+    attentionSourceState: 'unknown',
+    ...extra,
+  }
+}
+
+function questionFact(sessionId: string): SessionActivityFact {
+  return activityFact(sessionId, {
+    running: false,
+    pendingKinds: ['question'],
+    continuedQuestionCallIds: [],
+    attention: 'question',
+    attentionSourceState: 'known',
+  })
+}
+
+test('the workspace samples Activity ONCE per accepted roster revision, on the read owner roster', async () => {
+  const h = harness({
+    currentSessionId: CURRENT,
+    initialFacts: [questionFact(CURRENT)],
+    eligibility: () => [{ sessionId: CURRENT, kind: 'question', live: true }],
+  })
+  await h.runSessions('')
+  await waitUntil(() => h.view().includes('Needs attention'), 'the proved need paints')
+  assert.equal(h.facts.reads.length, 1, 'one accepted roster revision = exactly ONE Activity sample')
+  assert.deepEqual(
+    h.facts.reads[0]!.rows.map(entry => entry.id),
+    [CURRENT, OTHER, THIRD],
+    'the sample consumes the ORIGINAL roster array the read owner listed',
+  )
+  assert.deepEqual(h.switchCalls, [], 'sampling never switches, opens or answers a Session')
+  // The progressive projection batch repaints titles: a repaint must never
+  // re-read the same batch.
+  await waitUntil(() => h.view().includes('Current session'), 'the projection titles land')
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(h.facts.reads.length, 1, 'a projection repaint never re-samples Activity')
+})
+
+test('an eligibility loss drops the Needs row immediately and asks for ONE early roster refresh', async () => {
+  let eligible: readonly SessionBrowserAnswerEligibility[] = [{ sessionId: CURRENT, kind: 'question', live: true }]
+  const h = harness({
+    currentSessionId: CURRENT,
+    initialFacts: [questionFact(CURRENT)],
+    eligibility: () => eligible,
+  })
+  await h.runSessions('')
+  await waitUntil(() => h.view().includes('Needs attention'), 'the proved need paints')
+  const listCalls = h.listCalls
+  // Another Client wins the official request: the root drops the token. The
+  // next Activity sample is held so the immediate drop can only come from the
+  // eligibility invalidation itself.
+  h.facts.holdNext()
+  h.facts.setFacts([activityFact(CURRENT, { attention: 'none', attentionSourceState: 'known' })])
+  eligible = []
+  h.notifyEligibility()
+  await waitUntil(() => !h.view().includes('Needs attention'), 'the stale Needs row is dropped immediately')
+  assert.equal(h.listCalls, listCalls + 1, 'the early refresh goes through the ONE read owner generation')
+  await waitUntil(() => h.facts.reads.length === 2, 'the refreshed roster triggers its own Activity sample')
+  h.facts.releaseHeld()
+  await h.vt.waitForRender()
+  assert.ok(!h.view().includes('Needs attention'), 'the refreshed sample confirms no proved need')
+})
+
+test('closing the workspace aborts the in-flight Activity sample and publishes nothing', async () => {
+  const h = harness({ currentSessionId: CURRENT })
+  h.facts.holdNext()
+  await h.runSessions('')
+  await waitUntil(() => h.facts.reads.length === 1, 'the Activity sample starts')
+  const signal = h.facts.reads[0]!.signal
+  h.vt.sendInput('\x1b')
+  await h.vt.waitForRender()
+  assert.equal(signal?.aborted, true, 'the physical lease close aborts the in-flight sample')
+  assert.equal(h.facts.handles[0]!.disposed, 1, 'the per-open Workspace follow is disposed once')
+  h.facts.releaseHeld()
+  await new Promise<void>(resolve => setImmediate(resolve))
+  await h.vt.waitForRender()
+  assert.ok(!h.view().includes('Sessions'), 'a late sample result never resurrects the closed workspace')
+})
+
+test('a newer accepted roster revision supersedes the in-flight sample', async () => {
+  const h = harness({ currentSessionId: CURRENT, eligibility: () => [] })
+  h.facts.holdNext()
+  await h.runSessions('')
+  await waitUntil(() => h.facts.reads.length === 1, 'the first Activity sample starts')
+  const first = h.facts.reads[0]!.signal
+  h.notifyEligibility()
+  await waitUntil(() => h.facts.reads.length === 2, 'the refreshed roster samples again')
+  assert.equal(first?.aborted, true, 'the superseded sample is aborted')
+  h.facts.releaseHeld()
+  await new Promise<void>(resolve => setImmediate(resolve))
+  await h.vt.waitForRender()
+  assert.ok(!h.view().includes('Activity unavailable'), 'an aborted sample is a cancellation, never a visible failure')
+  assert.ok(h.view().includes('Current session'), 'the roster survives the superseded sample')
+})
+
+test('a failed Activity sample is ONE nonfatal line and keeps the roster and a Resume usable', async () => {
+  const h = harness({ currentSessionId: CURRENT })
+  h.facts.failNext(new Error('activity read exploded'))
+  await h.runSessions('')
+  await waitUntil(() => h.view().includes('Activity unavailable: activity read exploded'),
+    'the sample failure is visible as one nonfatal line')
+  assert.ok(h.view().includes('Current session'), 'the roster is never emptied by a failed sample')
+  h.vt.sendInput('\x1b[B')
+  await h.vt.waitForRender()
+  h.vt.sendInput('\r')
+  await waitUntil(() => h.switchCalls.length === 1, 'a Resume still reaches the runtime after a failed sample')
+  h.settleSwitch({ kind: 'failed', message: 'refused by the Host' })
 })

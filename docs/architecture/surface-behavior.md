@@ -162,39 +162,88 @@ Workspace over the existing `SessionBrowserReadOwner`; the retired PiTUI Picker
 is not a fallback. TSP keeps its own native Presenter over the same owner (see
 [tsp/session-browser.md](../tsp/session-browser.md)).
 
-- The command classifier, `SessionReader.list/projectionBatch/search` and the
-  Resume settlement stay the shared read owner's. The panel owns only
-  Client-local selection/scope/focus/scroll/editor state; it never opens,
-  writes, stops or answers a Session.
-- `Current workspace` is proved only by the official Workspace facts
-  (`workspaceId` + `sessionIds`) followed once per open. A missing, ambiguous,
-  denied or lost membership falls back to `All workspaces` with an explicit
-  status; a cwd never proves membership. The per-open projection is disposable
-  and never persisted or reused across opens.
-- Global search is independent of the browse scope. Only a real editor text
-  change reaches the read owner, which canonicalizes it and owns the one Host
-  search generation/Abort. Results are the owner's merged union in Host page
-  order and are never re-filtered by the panel.
-- Selection is not currentness: only a listed, non-current main row may emit
-  ONE Resume intent. Only the runtime's `committed` is success; `failed` and
-  `indeterminate` stay on the workspace with one sanitized status and never
-  retry automatically. `Enter` in the search editor only enters the result
-  list; a second `Enter` from the results is the Resume.
-- Esc returns one level at a time (results → editor → browse) and the root Esc
-  closes the workspace to the SAME paused surface. The physical lease and
-  blocking-owner precedence are owned by
-  [overlay-focus.md](./overlay-focus.md).
-- U-C paints `Sessions / Recent sessions` only. It shows no `Needs attention`,
-  `Working` or answerable-pending state; activity classification and
-  other-Session answerability stay deferred.
+- **ONE list, one row per Session.** The browse list paints `Needs attention` →
+  `Working` → `Recent`, omitting an empty group. A Session belongs to exactly
+  one group and appears once; inside a group the official `updatedAt` orders
+  rows newest first and the roster order breaks ties. A `Needs attention` row
+  that is also running stays ONE row and reports the running sub-fact instead of
+  a second row. There are no Type tabs, no `Completed` group and no second list.
+- **Activity is sampled, never inferred.** One accepted roster revision (the
+  read owner's `listRevision`) produces ONE sample from the existing
+  `SessionWorkspaceFactsPort.readActivity(rows, signal)` over the read owner's
+  own roster array. A projection batch, a search page, a repaint or a repeated
+  snapshot never re-reads the same batch; a newer revision aborts the older
+  sample, and a sample the current open no longer owns is inert. `running`,
+  `pending` and `attentionSourceState` keep their own provenance: `running:
+  undefined` is `Running unknown`, never idle, and `unknown`/`unavailable`/
+  `denied` are distinct visible states, never `No pending`.
+- **Answerability is a gate, not a classification.** Only a pending candidate
+  this Client can really answer may enter `Needs attention`: a live forwarded
+  Question/Approval invocation held by the Client-root delivery owner
+  ([host-client.md](./host-client.md)), or a `continued` Question whose official
+  projection proves no queued reply while this composition holds the answer
+  capability. A pending candidate without that proof stays in its base group
+  with `Pending unverified`; it is never a Needs row, never answerable from the
+  list, and never retried. `readActivity.attention` is a candidate, not
+  permission, and the answer itself always happens after the Session is
+  committed, through the surface's existing Question/Approval owner.
+- **One Workspace scope union.** `All workspaces`, `Current workspace`, every
+  official Workspace in `follow` order and `Unassigned` are the only options,
+  chosen in place from the header (no second screen). `Current` is proved only
+  by a unique official `sessionIds` membership; an ambiguous, missing, denied or
+  lost membership falls back to `All workspaces` with one explicit status and a
+  cwd never proves membership. `Unassigned` requires a valid baseline and never
+  claims a Session with one or more memberships. A failed or ended follow
+  invalidates the membership proof instead of keeping stale members.
+- **Outside attention is truthful or it is unknown.** Under a narrowed scope the
+  header reports the count of proved Needs rows outside it only when every other
+  listed row's pending fact is proved; otherwise it says
+  `Outside attention unknown` and paints no number, and "0 outside" is stated
+  only when it is proved.
+- **Search stays global.** The panel never re-filters the Host's bounded search
+  page by the browse scope; only a real editor text change reaches the read
+  owner's one debounced Host search generation. `Enter` in the editor only moves
+  focus to the first real result; a second `Enter` from the results list is the
+  ONE Resume intent. Results are never re-grouped by Activity.
+- **`Space` is a read-only Peek.** It opens a plain-text detail of the selected
+  painted row (identity, official Workspace membership, cwd, preset, updated,
+  running, pending, source) and nothing else: no Agent, no Question/Approval
+  form, no Session `open`/`retain`, no writer and no Host call. `Esc` returns to
+  the previous focus with the same selection, scope, query and scroll; `Enter`
+  still has to pass the read owner's eligibility/currentness before any switch.
+- **Focus ring and layout.** `Tab`/`Shift+Tab` cycle list → Workspace selector →
+  search editor → list without submitting or consuming a literal `/`. From
+  `112x12` the frame is two columns: the list keeps at least 44 cells, a
+  two-cell gap, and the rest is the read-only preview/Peek; below that it is one
+  column. Frame-level facts (search editor, status and Host error lines, help)
+  span the full width; the Esc action bar is always the last physical row, and a
+  short frame withholds activation instead of opening a row it did not paint.
+- **Mouse is the last painted hit-map.** One render commits a frame revision and
+  the REAL painted cell ranges of list rows, search results, selector options,
+  the `w`/`/ Search` header hints, the Peek back affordance and the
+  outside-attention line. A click acts only on the SAME frame revision and the
+  SAME target range as its press; any scroll, resize, scope, search, Activity or
+  content change between press and release drops the gesture. A plain row click
+  only selects — `Enter` stays the only Resume verb — and an item the frame did
+  not paint has no hit region at all.
+- **One lifecycle.** Each open keeps exactly one Workspace follow, one roster
+  read owner, one Activity sample generation and one fullscreen lease. The close
+  path aborts list/search/Activity, disposes the follow once, stops the screen
+  once and restores the return surface once; a late result from any of the three
+  sources can never paint into a newer open. An Activity re-order is held while
+  the user is actively browsing and commits on an idle cursor, re-anchoring the
+  scroll on the selected Session id rather than on a stale index.
 
 Authority: `TuiApp.openSessionWorkspace` + `SessionWorkspacePanel`,
-`SessionBrowserReadOwner`, `SessionWorkspaceFactsPort`; sink: the leased
-fullscreen screen.
+`buildSessionWorkspaceView` (the ONE pure classifier), `SessionBrowserReadOwner`,
+`SessionWorkspaceFactsPort` and the Client-root forwarded-answer eligibility
+view; sink: the leased fullscreen screen.
 
-Must-not: add a second Session list, a Workspace registry or a persisted
-Workspace table, re-filter Host search results, infer membership from a cwd, or
-treat an accepted Resume intent as a committed switch.
+Must-not: add a second Session roster, a second Activity reader, a Host pending
+store, a Workspace registry or a persisted Workspace table, re-filter Host
+search results, infer membership from a cwd, treat `attention` as answer
+authority, expose an answer form in Peek, give a row a hit region the frame did
+not paint, or treat an accepted Resume intent as a committed switch.
 
 ## Web frontend control (`/web`)
 

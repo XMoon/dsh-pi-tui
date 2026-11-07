@@ -18,9 +18,11 @@ import test, { afterEach } from 'node:test'
 import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import { TuiApp, type SessionWorkspaceHandle } from '../../src/tui-app.ts'
 import type {
+  SessionBrowserAnswerEligibility,
   SessionBrowserReadSnapshot,
   SessionBrowserSubject,
 } from '../../src/app/command/session-browser-presentation.ts'
+import type { SessionActivityFact } from '../../src/runtime/session-workspace-facts-port.ts'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 
@@ -46,6 +48,7 @@ function snapshot(overrides: Partial<SessionBrowserReadSnapshot> = {}): SessionB
     searchState: 'idle',
     searchResults: [],
     hasMore: false,
+    listRevision: 1,
     ...overrides,
   }
 }
@@ -114,7 +117,7 @@ test('the browse list paints the header, the current marker and the selected row
   assert.ok(view.includes('Sessions'), `the header names the workspace:\n${view}`)
   assert.ok(view.includes('Current: curren'), `the current Session is stated separately from the selection:\n${view}`)
   assert.ok(view.includes('Workspace: All workspaces [w]'), `the browse scope is stated:\n${view}`)
-  assert.ok(view.includes('Recent sessions · 2'), `the roster count is stated:\n${view}`)
+  assert.ok(view.includes('Sessions · 2'), `the roster count is stated:\n${view}`)
   assert.ok(view.includes('Current session') && view.includes('Other session'), `both titles paint:\n${view}`)
   const lines = view.split('\n')
   assert.ok(lines[lines.length - 1]!.includes('Esc close'), 'the action bar is the last physical row')
@@ -409,25 +412,24 @@ test('a scope/membership change re-anchors the selection and never resumes a hid
   assert.ok(h.view().includes('Other session'), 'All restores every listed row')
 })
 
-test('the Workspace selector is in-place, two options, and a disabled Current never switches', async () => {
+test('the Workspace selector is in-place, lists every official option, and a disabled option never switches', async () => {
   const h = harness()
   h.handle.setSnapshot(snapshot())
   await h.paint()
   h.vt.sendInput('w')
   await h.paint()
   const open = h.view()
-  assert.ok(open.includes('Workspace scope:'), `the selector paints inside the header:\n${open}`)
-  assert.ok(open.includes('All workspaces') && open.includes('Current workspace unavailable'), 'both options are stated')
+  assert.ok(open.includes('Workspace scope:'), `the selector paints inside the header header row:\n${open}`)
+  assert.ok(open.includes('All workspaces'), 'the All option is stated')
+  assert.ok(open.includes('Current workspace unavailable'), 'an unproven Current is stated as unavailable')
   // Move the selector cursor onto the DISABLED Current option and confirm it
-  // cannot switch: the cursor is not the selection authority.
+  // cannot switch: the cursor is not the scope authority and Enter is inert.
   h.vt.sendInput('\x1b[B')
   await h.paint()
   assert.ok(h.view().includes('Workspace scope:'), 'the selector stays open on the disabled option')
   h.vt.sendInput('\r')
   await h.paint()
-  assert.ok(h.view().includes('Workspace: All workspaces [w]'), 'a disabled Current never changes the scope')
-  h.vt.sendInput('w')
-  await h.paint()
+  assert.ok(h.view().includes('Workspace scope:'), 'Enter on a disabled option is inert')
   h.vt.sendInput('\x1b')
   await h.paint()
   assert.ok(h.view().includes('Workspace: All workspaces [w]'), 'Esc cancels without changing the scope')
@@ -466,7 +468,7 @@ test('status rows that squeeze the whole list out also withhold activation', asy
   h.handle.workspaceUnavailable('Workspace scope unavailable')
   await h.paint()
   const squeezed = h.view()
-  assert.ok(squeezed.includes('Recent sessions · 2'))
+  assert.ok(squeezed.includes('Sessions · 2'))
   assert.ok(squeezed.includes('Workspace scope unavailable'))
   assert.ok(squeezed.includes('Some session details are unavailable'))
   assert.ok(!squeezed.includes('Other session'), `status rows consumed the list budget:\n${squeezed}`)
@@ -611,8 +613,10 @@ test('two same-title same-cwd same-age Sessions keep distinct stable ids and res
     const view = h.view()
     assert.ok(view.includes('current-') && view.includes('other-se'),
       `${width} columns: both stable short ids are painted:\n${view}`)
-    assert.equal(view.split('\n').filter(line => line.includes('Fix pipeline')).length, 2,
-      `${width} columns: both same-title rows remain painted:\n${view}`)
+    // The wide layout ALSO paints the selected row's read-only preview: count
+    // the two LIST rows by their identity columns, never the pane total.
+    const listRows = view.split('\n').filter(line => /^[ >] *(● )?(current-|other-se)/.test(line))
+    assert.equal(listRows.length, 2, `${width} columns: both same-title rows remain painted:\n${view}`)
     for (const line of h.vt.getViewport()) {
       assert.ok(visibleWidth(line) <= width, `${width} columns: a row overflows: ${JSON.stringify(line)}`)
     }
@@ -691,4 +695,355 @@ test('a released handle is inert and cannot repaint or close a newer workspace',
   await h.paint()
   assert.ok(h.view().includes('Newer workspace'), 'the newer workspace survives the stale closer')
   second.close()
+})
+
+// ── M5-U-D: groups, Peek, the full selector, the wide layout and the mouse ──
+
+function fact(sessionId: string, extra: Partial<SessionActivityFact> = {}): SessionActivityFact {
+  return {
+    sessionId,
+    running: undefined,
+    pendingKinds: undefined,
+    continuedQuestionCallIds: undefined,
+    attention: 'unknown',
+    attentionSourceState: 'unknown',
+    ...extra,
+  }
+}
+
+function questionFact(sessionId: string, extra: Partial<SessionActivityFact> = {}): SessionActivityFact {
+  return fact(sessionId, {
+    running: false,
+    pendingKinds: ['question'],
+    continuedQuestionCallIds: [],
+    attention: 'question',
+    attentionSourceState: 'known',
+    ...extra,
+  })
+}
+
+function eligibility(sessionId: string, kind: 'question' | 'approval' = 'question'): SessionBrowserAnswerEligibility {
+  return { sessionId, kind, live: true }
+}
+
+/** The painted panel frame of the LAST render, in panel-relative 0-based rows.
+ *  Read from the real physical viewport: calling `render()` again would paint a
+ *  newer frame than the one the user (and the mouse gesture) acted on. */
+function panelFrame(h: Harness): string[] {
+  return h.view().split('\n')
+}
+
+function lineIndexOf(frame: readonly string[], needle: string): number {
+  const index = frame.findIndex(line => line.includes(needle))
+  assert.ok(index >= 0, `the frame paints ${JSON.stringify(needle)}:\n${frame.join('\n')}`)
+  return index
+}
+
+/** One SGR primary press + release at the SAME 0-based panel cell. */
+async function clickCell(h: Harness, x: number, y: number): Promise<void> {
+  h.vt.sendInput(`\x1b[<0;${x + 1};${y + 1}M`)
+  await h.paint()
+  h.vt.sendInput(`\x1b[<0;${x + 1};${y + 1}m`)
+  await h.paint()
+}
+
+test('the grouped list paints Needs attention → Working → Recent with plain status labels and counts', async () => {
+  const h = harness({ columns: 100, rows: 24 })
+  h.handle.setSnapshot(snapshot({
+    rows: [
+      row('session-needs', 4_000, { title: 'Needs row' }),
+      row('session-working', 3_000, { title: 'Working row' }),
+      row('session-unverified', 2_000, { title: 'Unproved row' }),
+      row('session-recent', 1_000, { title: 'Recent row' }),
+    ],
+  }))
+  h.handle.setActivityFacts({
+    listRevision: 1,
+    facts: [
+      questionFact('session-needs', { running: true }),
+      fact('session-working', { running: true, attention: 'none', attentionSourceState: 'known' }),
+      questionFact('session-unverified'),
+      fact('session-recent', { running: false, attention: 'none', attentionSourceState: 'known' }),
+    ],
+    answerEligibility: [eligibility('session-needs')],
+  })
+  await h.paint()
+  const view = h.view()
+  assert.ok(view.includes('Needs attention · 1'), `the Needs group is stated with its count:\n${view}`)
+  assert.ok(view.includes('Working · 1'), `the Working group is stated:\n${view}`)
+  assert.ok(view.includes('Recent · 2'), `the unproved and idle rows stay in Recent:\n${view}`)
+  assert.ok(/Question · Working/.test(view), `a needs+running row carries the running sub-fact:\n${view}`)
+  assert.ok(view.includes('Pending unverified'),
+    `a pending candidate this Client cannot answer is never a Needs row:\n${view}`)
+  assert.ok(!view.includes('Running unknown'), 'a proved running fact never paints Running unknown')
+  // The group order is frozen: Needs first, Recent last.
+  assert.ok(view.indexOf('Needs attention · 1') < view.indexOf('Working · 1'))
+  assert.ok(view.indexOf('Working · 1') < view.indexOf('Recent · 2'))
+})
+
+test('Space opens a read-only Peek: no Host write, Esc restores the browse selection, Enter resumes', async () => {
+  const h = harness({ columns: 100, rows: 24 })
+  h.handle.setSnapshot(snapshot({
+    rows: [row(CURRENT, 3_000, { title: 'Current session' }), row(OTHER, 2_000, { title: 'Other session', preset: 'plan' })],
+  }))
+  h.handle.setActivityFacts({
+    listRevision: 1,
+    facts: [
+      fact(CURRENT, { running: false, attention: 'none', attentionSourceState: 'known' }),
+      questionFact(OTHER),
+    ],
+    answerEligibility: [],
+  })
+  await h.paint()
+  h.vt.sendInput('\x1b[B')
+  await h.paint()
+  h.vt.sendInput(' ')
+  await h.paint()
+  const peek = h.view()
+  assert.ok(peek.includes('Peek · other-se'), `the Peek names the stable Session id:\n${peek}`)
+  assert.ok(peek.includes('Title:') && peek.includes('Other session'), 'the title is a read-only field')
+  assert.ok(peek.includes('Workspace: Unknown'), 'a missing baseline is Unknown, never Unassigned')
+  assert.ok(peek.includes('Preset: plan'), 'the projected preset is read-only detail')
+  assert.ok(peek.includes('Running: No'), 'the official running fact is stated')
+  assert.ok(peek.includes('Pending: Pending unverified'), 'no answerability proof is stated as unverified')
+  assert.ok(peek.includes('Esc back'), 'the Peek advertises its own exit')
+  assert.ok(!/Allow|Deny|Reject|Answer/.test(peek), `Peek carries no answer form:\n${peek}`)
+  assert.deepEqual(h.resumes, [], 'opening Peek never resumes or writes anything')
+  assert.deepEqual(h.queries, [], 'opening Peek never edits the search')
+
+  h.vt.sendInput('\x1b')
+  await h.paint()
+  const restored = h.view()
+  assert.ok(restored.includes('Workspace: All workspaces [w]'), 'Esc returns to the browse list')
+  assert.ok(/^> .*Other session/m.test(restored), `the Peek returns to the SAME selected row:\n${restored}`)
+  h.vt.sendInput('\r')
+  await h.paint()
+  assert.deepEqual(h.resumes, [OTHER], 'Enter from Peek is the ONE re-proved resume intent')
+})
+
+test('the selector lists every official Workspace, filters by the official membership and keeps Unassigned proved-only', async () => {
+  const h = harness({ columns: 100, rows: 24 })
+  h.handle.setSnapshot(snapshot({
+    rows: [row(CURRENT, 4_000, { title: 'Current session' }), row(OTHER, 3_000, { title: 'Other session' }), row(THIRD, 2_000, { title: 'Cold session' })],
+  }))
+  h.handle.updateWorkspaces({
+    type: 'baseline',
+    items: [
+      { workspaceId: 'ws-a', path: '/ws/a', title: 'Alpha', sessionIds: [CURRENT] },
+      { workspaceId: 'ws-b', path: '/ws/b', title: 'Beta', sessionIds: [OTHER] },
+      { workspaceId: 'ws-empty', path: '/ws/empty', title: 'Empty', sessionIds: [] },
+    ],
+  })
+  await h.paint()
+  h.vt.sendInput('w')
+  await h.paint()
+  const open = h.view()
+  for (const label of ['All workspaces', 'Current workspace', 'Alpha', 'Beta', 'Empty', 'Unassigned']) {
+    assert.ok(open.includes(label), `the selector lists ${label}:\n${open}`)
+  }
+  // all → current → Alpha → Beta → Empty → Unassigned: choose Beta.
+  h.vt.sendInput('\x1b[B')
+  h.vt.sendInput('\x1b[B')
+  h.vt.sendInput('\x1b[B')
+  h.vt.sendInput('\r')
+  await h.paint()
+  const scoped = h.view()
+  assert.ok(scoped.includes('Workspace: Beta'), `the official WorkspaceId scope is applied:\n${scoped}`)
+  assert.ok(scoped.includes('Other session'), 'the official member is listed')
+  assert.ok(!scoped.includes('Current session'), 'a non-member is filtered out')
+  // Unassigned lists only the Session no official Workspace contains.
+  h.vt.sendInput('w')
+  await h.paint()
+  h.vt.sendInput('\x1b[B')
+  h.vt.sendInput('\x1b[B')
+  h.vt.sendInput('\x1b[B')
+  h.vt.sendInput('\x1b[B')
+  h.vt.sendInput('\x1b[B')
+  h.vt.sendInput('\r')
+  await h.paint()
+  const unassigned = h.view()
+  assert.ok(unassigned.includes('Workspace: Unassigned'), `the Unassigned scope is applied:\n${unassigned}`)
+  assert.ok(unassigned.includes('Cold session'), 'a zero-membership Session is listed')
+  assert.ok(!unassigned.includes('Other session'), 'a proved member is never Unassigned')
+})
+
+test('duplicate Workspace titles are disambiguated by the official id, never guessed from a path', async () => {
+  const h = harness({ columns: 120, rows: 24 })
+  h.handle.setSnapshot(snapshot())
+  h.handle.updateWorkspaces({
+    type: 'baseline',
+    items: [
+      { workspaceId: 'ws-duplicate-one', path: '/ws/one', title: 'Same title', sessionIds: [CURRENT] },
+      { workspaceId: 'ws-duplicate-two', path: '/ws/two', title: 'Same title', sessionIds: [OTHER] },
+    ],
+  })
+  await h.paint()
+  h.vt.sendInput('w')
+  await h.paint()
+  const view = h.view()
+  const options = view.split('\n').filter(line => line.includes('Same title'))
+  assert.equal(options.length, 2, `both same-title Workspaces are listed:\n${view}`)
+  assert.ok(options.some(line => line.includes('ws-duplicate')),
+    `a duplicated Host title carries the official id:\n${view}`)
+})
+
+test('the wide layout paints the read-only preview beside the list; a narrow one stays single-column', async () => {
+  const h = harness({ columns: 120, rows: 24 })
+  h.handle.setSnapshot(snapshot())
+  h.handle.setActivityFacts({
+    listRevision: 1,
+    facts: [fact(CURRENT, { running: false, attention: 'none', attentionSourceState: 'known' })],
+    answerEligibility: [],
+  })
+  await h.paint()
+  const wide = panelFrame(h).join('\n')
+  assert.ok(wide.includes('Space for read-only details'), `the wide layout paints a preview pane:\n${wide}`)
+  assert.ok(wide.includes('Sessions · 2'), 'the list pane stays beside the preview')
+  h.vt.resize(80, 24)
+  await h.paint()
+  assert.ok(!panelFrame(h).join('\n').includes('Space for read-only details'),
+    'a narrow terminal never splits into two columns')
+  // A short narrow frame still opens Peek and keeps its ONE Esc exit usable.
+  h.vt.resize(80, 10)
+  await h.paint()
+  h.vt.sendInput('\x1b[B')
+  await h.paint()
+  h.vt.sendInput(' ')
+  await h.paint()
+  const short = h.view()
+  assert.ok(short.includes('Peek ·'), `Peek opens on a short terminal:\n${short}`)
+  const frame = panelFrame(h)
+  assert.ok(frame[frame.length - 1]!.includes('Esc'), 'the Esc action stays the last physical row')
+  h.vt.sendInput('\x1b')
+  await h.paint()
+  assert.ok(h.view().includes('Workspace: All workspaces [w]'), 'Esc leaves Peek even at 80x10')
+  assert.deepEqual(h.resumes, [], 'no invisible row was activated while Peek was open')
+})
+
+test('a mouse click only SELECTS a painted row; a repaint between press and release drops the gesture', async () => {
+  const h = harness({ columns: 100, rows: 24 })
+  h.handle.setSnapshot(snapshot())
+  h.handle.setActivityFacts({
+    listRevision: 1,
+    facts: [
+      fact(CURRENT, { running: false, attention: 'none', attentionSourceState: 'known' }),
+      fact(OTHER, { running: false, attention: 'none', attentionSourceState: 'known' }),
+    ],
+    answerEligibility: [],
+  })
+  await h.paint()
+  const frame = panelFrame(h)
+  const otherLine = lineIndexOf(frame, 'Other session')
+  await clickCell(h, 3, otherLine)
+  const clicked = h.view()
+  assert.ok(/^> .*Other session/m.test(clicked), `clicking a row selects it:\n${clicked}`)
+  assert.deepEqual(h.resumes, [], 'a click never implies Enter / Resume')
+  // Back to the first row, then a CONTENT change between the press and the
+  // release: the official order flips, so the pressed cell now holds a
+  // DIFFERENT row. The release must not act on that cell.
+  const firstLine = lineIndexOf(panelFrame(h), 'Current session')
+  await clickCell(h, 3, firstLine)
+  assert.ok(/^> .*Current session/m.test(h.view()), 'the second click selects the first row')
+  h.vt.sendInput(`\x1b[<0;3;${otherLine + 1}M`)
+  await h.paint()
+  // The official roster drops the pressed row between the press and the
+  // release: the cell no longer holds the target the user pressed.
+  h.handle.setSnapshot(snapshot({ rows: [row(CURRENT, 3_000, { title: 'Current session' })] }))
+  await h.paint()
+  const repainted = panelFrame(h)
+  assert.ok(!repainted.some(line => line.includes('Other session')),
+    `the pressed row is gone from the new frame:\n${repainted.join('\n')}`)
+  h.vt.sendInput(`\x1b[<0;3;${otherLine + 1}m`)
+  await h.paint()
+  assert.ok(/^> .*Current session/m.test(h.view()),
+    'a content change between press and release drops the click instead of selecting whatever moved under the cell')
+  assert.deepEqual(h.resumes, [], 'the dropped gesture never resumes a Session')
+})
+
+test('the header affordances are real hit targets: w, / Search and the outside-attention line', async () => {
+  const h = harness({ columns: 120, rows: 24 })
+  h.handle.setSnapshot(snapshot({
+    rows: [row(CURRENT, 3_000, { title: 'Current session' }), row(OTHER, 2_000, { title: 'Other session' })],
+  }))
+  h.handle.updateWorkspaces({
+    type: 'baseline',
+    items: [{ workspaceId: 'ws-a', path: '/ws/a', title: 'Alpha', sessionIds: [CURRENT] }],
+  })
+  h.handle.setActivityFacts({
+    listRevision: 1,
+    facts: [
+      fact(CURRENT, { running: false, attention: 'none', attentionSourceState: 'known' }),
+      questionFact(OTHER),
+    ],
+    answerEligibility: [eligibility(OTHER)],
+  })
+  await h.paint()
+  // Current scope proves the outside need; the header states it without a guess.
+  h.vt.sendInput('w')
+  await h.paint()
+  h.vt.sendInput('\x1b[B')
+  h.vt.sendInput('\r')
+  await h.paint()
+  const scoped = panelFrame(h)
+  assert.ok(scoped.join('\n').includes('1 other session needs attention'),
+    `the outside attention line states the proved count:\n${scoped.join('\n')}`)
+  const outsideLine = lineIndexOf(scoped, 'needs attention')
+  const attentionText = scoped[outsideLine]!
+  await clickCell(h, attentionText.indexOf('needs attention'), outsideLine)
+  assert.ok(h.view().includes('Workspace: All workspaces [w]'),
+    'clicking the outside-attention affordance returns to All')
+  // The `[w]` header hint opens the in-place selector.
+  const subHeader = panelFrame(h)[1]!
+  await clickCell(h, subHeader.indexOf('[w]') + 1, 1)
+  assert.ok(h.view().includes('Workspace scope:'), 'the [w] hint opens the selector')
+  h.vt.sendInput('\x1b')
+  await h.paint()
+  // The `/ Search` hint focuses the global editor.
+  const searchHeader = panelFrame(h)[1]!
+  await clickCell(h, searchHeader.indexOf('/ Search') + 1, 1)
+  assert.ok(h.view().includes('Search all workspaces'), 'the / Search hint enters the global search')
+})
+
+test('an Activity reorder is held while the cursor is busy, then committed without losing the selection', async () => {
+  const h = harness({ columns: 100, rows: 24 })
+  h.handle.setSnapshot(snapshot({
+    rows: [row(CURRENT, 3_000, { title: 'Current session' }), row(OTHER, 2_000, { title: 'Other session' })],
+  }))
+  h.handle.setActivityFacts({
+    listRevision: 1,
+    facts: [
+      fact(CURRENT, { running: false, attention: 'none', attentionSourceState: 'known' }),
+      fact(OTHER, { running: false, attention: 'none', attentionSourceState: 'known' }),
+    ],
+    answerEligibility: [eligibility(OTHER)],
+  })
+  await h.paint()
+  h.vt.sendInput('\x1b[B')
+  await h.paint()
+  assert.ok(/^> .*Other session/m.test(h.view()), 'the second row is selected')
+  // The official sample now proves a need on the SELECTED row: its label must
+  // update immediately, but the group order waits for an idle cursor.
+  h.handle.setActivityFacts({
+    listRevision: 1,
+    facts: [
+      fact(CURRENT, { running: false, attention: 'none', attentionSourceState: 'known' }),
+      questionFact(OTHER),
+    ],
+    answerEligibility: [eligibility(OTHER)],
+  })
+  await h.paint()
+  const held = h.view()
+  assert.ok(held.includes('Question'), `the row label updates immediately:\n${held}`)
+  assert.ok(!held.includes('Needs attention'), `the group order is held while the cursor is busy:\n${held}`)
+  assert.ok(/^> .*Other session/m.test(held), 'the cursor never jumps on an activity update')
+  // After the idle window the delayed order commits and the selection follows
+  // its own id, not a stale index.
+  const deadline = Date.now() + 4_000
+  while (!h.view().includes('Needs attention') && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 25))
+    await h.paint()
+  }
+  const committed = h.view()
+  assert.ok(committed.includes('Needs attention · 1'), `the delayed reorder commits:\n${committed}`)
+  assert.ok(/^> .*Other session/m.test(committed), `the selection is re-anchored on its id:\n${committed}`)
 })

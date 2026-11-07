@@ -636,7 +636,13 @@ Navigation-first admission (split Client, PiTUI surface only): the ONE root
 interaction delivery owner holds each official forwarded invocation and hands
 it to the current surface only while the application has committed the
 request's own Session, no presentation-only navigation hold is active, and the
-official request signal is live. A request whose Session is not the committed
+official request signal is live. The owner's ONLY outward answerability view is
+`currentEligibleRequests()`: a transient, identity-only list (Session id +
+`question`/`approval`) of the invocations THIS Client root still holds, removed
+the moment one settles, aborts or the root disposes. It carries no request
+body, option, answer or Host pending record; a UI may use it as a POSITIVE
+answerability fact and must never treat its absence, a Reader `attention`
+value or the right to read `session.state` as one. A request whose Session is not the committed
 subject waits; it is never painted onto another Session's editor, and a
 Reader-side `attention` candidate is not a substitute for that live forwarded
 request. The PiTUI modal-safe `Alt+W` entry commits the hold first, withdraws
@@ -685,6 +691,15 @@ workspace/question/approval store and keeps no cross-session cache.
   `SessionRuntime.switchSessionOutcome(target, expectedScope)`, and only its
   settled `committed` outcome is success — an accepted intent, a matched row or
   a closed Presenter is not.
+- **Roster refresh.** The owner accepts ONE roster per read and advances a
+  monotonic `listRevision` only when an official `list()` succeeds; a projection
+  batch, a search page or a repaint never advances it. The PiTUI fullscreen
+  workspace opts into ONE single-re-armed refresh timer (a completed read
+  schedules the next; two roster reads never overlap) and may request one early
+  refresh through the SAME owner generation — a UI invalidation (for example a
+  forwarded request settled by another Client) never starts a second Host
+  scan. The native TSP Presenter keeps its historical single read, and a failed
+  refresh keeps the last accepted roster with a nonfatal freshness status.
 
 - **Roster.** `readActivity(rows, signal)` consumes exactly the main rows the
   caller obtained from `SessionReader.list()`; it never lists, refreshes or

@@ -251,7 +251,7 @@ for (const { columns, rows, cardVisible } of SIZES) test(`the REAL Session Works
   // committed: the workspace opens immediately and `Loading sessions…` is a
   // legitimate intermediate state. Wait for the FINAL roster before judging it.
   await waitUntil(
-    () => view().includes('Recent sessions · 2') && view().includes('readable') && !view().includes('newerfmt'),
+    () => view().includes('Sessions · 2') && view().includes('readable') && !view().includes('newerfmt'),
     `the Session Workspace roster at ${columns}x${rows}`,
   )
   await vt.waitForRender()
@@ -259,7 +259,7 @@ for (const { columns, rows, cardVisible } of SIZES) test(`the REAL Session Works
   for (const line of vt.getViewport()) {
     assert.ok(visibleWidth(line) <= columns, `no listed frame row overflows ${columns} cells: ${JSON.stringify(line)}`)
   }
-  assert.match(listed, /Recent sessions · 2/u, `the workspace knows both readable logs:\n${listed}`)
+  assert.match(listed, /Sessions · 2/u, `the workspace knows both readable logs:\n${listed}`)
   assert.ok(listed.includes('readable'), `the live readable Session is painted:\n${listed}`)
   assert.ok(!listed.includes('newerfmt'),
     `the LIST_EXCLUDED log is never presented (and never shown as an empty Session):\n${listed}`)

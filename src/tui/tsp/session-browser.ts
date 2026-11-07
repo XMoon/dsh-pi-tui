@@ -68,6 +68,7 @@ const EMPTY_SNAPSHOT: SessionBrowserReadSnapshot = {
   searchState: 'idle',
   searchResults: [],
   hasMore: false,
+  listRevision: 0,
 }
 
 const graphemeSegmenter = new Intl.Segmenter('en', { granularity: 'grapheme' })

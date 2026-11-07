@@ -93,6 +93,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   request; closing the workspace or browsing another Session keeps the request
   suspended until its own Session is current again. Direct and the TSP native
   modal seat keep their existing behavior.
+- **Session Workspace: a Needs-attention-first grouped list, the complete
+  Workspace scope and a read-only Peek.** The fullscreen workspace opened by
+  `/sessions`, `/search` and `/resume` is now ONE `Needs attention → Working →
+  Recent` list: only a pending request this Client can really still answer
+  enters the first group, and a candidate without that proof is shown as
+  "pending state unverified" instead of pretending to be answerable. Running
+  Sessions form their own group, the rest are ordered by last update, and
+  unknown/denied/unavailable states stay truthful instead of being painted as
+  idle. `w` offers `Current`, every official Workspace and `Unassigned`, and the
+  current Session's Workspace is proved only by official membership. `Space`
+  opens a read-only detail of the selected row (Session ID, title, Workspace,
+  cwd, preset, updated, running and pending state); `Esc` returns unchanged and
+  never opens, retains or answers a Session. A wide terminal also shows a
+  read-only preview beside the list, while a narrow or short one stays single
+  column. Row clicks only select — `Enter` remains the only switch verb. Session
+  activity refreshes on the workspace's refresh cadence and once more when a
+  pending request's state changes, and a refresh never steals the cursor,
+  selection or scroll position you are using.
 
 ### Changed
 

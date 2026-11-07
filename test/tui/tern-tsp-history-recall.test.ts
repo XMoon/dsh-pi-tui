@@ -241,6 +241,7 @@ const SESSION_ROWS: SessionBrowserReadSnapshot = {
   searchState: 'idle',
   searchResults: [],
   hasMore: false,
+  listRevision: 0,
 }
 
 const HUB_ITEMS: readonly TaskPanelItem[] = [

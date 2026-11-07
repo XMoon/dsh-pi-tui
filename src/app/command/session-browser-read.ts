@@ -66,10 +66,20 @@ interface ActiveRead {
   rows: SessionBrowserRow[]
   listState: SessionBrowserListState
   listError: string | undefined
+  /** The last accepted roster revision (see `SessionBrowserReadSnapshot`). */
+  listRevision: number
+  refreshError: string | undefined
+  /** The ONE single-re-arm roster refresh timer; undefined while idle/other. */
+  refreshTimer: ReturnType<typeof setTimeout> | undefined
+  /** Whether a roster refresh read is in flight (never two in parallel). */
+  refreshing: boolean
   projectionError: string | undefined
   query: string
   userQueryChanged: boolean
   queryGeneration: number
+  /** Fences the ONE content search of a query generation: a search started by
+   *  a roster refresh must not lose to an older in-flight search result. */
+  searchRun: number
   queryController: AbortController | undefined
   queryTimer: ReturnType<typeof setTimeout> | undefined
   searchState: SessionBrowserSearchState
@@ -96,6 +106,10 @@ export interface SessionBrowserReadHandle {
 
 export interface SessionBrowserReadOwner {
   open(options?: SessionBrowserOpenOptions): SessionBrowserReadHandle
+  /** Ask the CURRENT panel to re-read its ONE roster now, through the SAME
+   *  single refresh generation the timer uses. Inert with no active panel, a
+   *  still-loading first read or a refresh already in flight. */
+  refresh(): void
   dispose(): void
 }
 
@@ -105,6 +119,10 @@ export interface SessionBrowserReadOwnerOptions {
   readonly captureSubject: () => CapturedSessionBrowserSubject
   readonly diag: Diag
   readonly sessionId?: () => string | undefined
+  /** PiTUI only: re-read the ONE roster on a single re-armed timer so the
+   *  fullscreen Workspace does not paint a stale Session list. TSP leaves it
+   *  undefined and keeps its historical single read. */
+  readonly autoRefreshMs?: number
   /** App-owned handoff to the one existing SessionRuntime switch entry. The
    * callback MUST call `settle` with the REAL final outcome; an accepted
    * request is not a committed switch. `isCurrent` identifies the exact panel
@@ -130,9 +148,11 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     searchState: panel.searchState,
     searchResults: panel.searchResults,
     hasMore: panel.hasMore,
+    listRevision: panel.listRevision,
     ...(panel.listError === undefined ? {} : { listError: panel.listError }),
     ...(panel.projectionError === undefined ? {} : { projectionError: panel.projectionError }),
     ...(panel.searchError === undefined ? {} : { searchError: panel.searchError }),
+    ...(panel.refreshError === undefined ? {} : { refreshError: panel.refreshError }),
   })
 
   const isActive = (panel: ActiveRead): boolean => {
@@ -163,6 +183,9 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     }
     if (panel.queryTimer !== undefined) clearTimeout(panel.queryTimer)
     panel.queryTimer = undefined
+    if (panel.refreshTimer !== undefined) clearTimeout(panel.refreshTimer)
+    panel.refreshTimer = undefined
+    panel.refreshing = false
     panel.queryController?.abort()
     panel.controller.abort()
     panel.rows = []
@@ -257,15 +280,17 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     if (queryController === undefined) return
     panel.queryTimer = undefined
     const query = panel.query
+    const run = ++panel.searchRun
     const signal = AbortSignal.any([panel.controller.signal, queryController.signal])
     runOwned('session browser content search', () => options.reader.search(query, signal), {
       diag: options.diag,
       sessionId: options.sessionId,
       isCancellation: () => cancellation(panel)
         || queryController.signal.aborted
-        || panel.queryGeneration !== expectedGeneration,
+        || panel.queryGeneration !== expectedGeneration
+        || panel.searchRun !== run,
       onResult: (page) => {
-        if (!isActive(panel) || panel.queryGeneration !== expectedGeneration) return
+        if (!isActive(panel) || panel.queryGeneration !== expectedGeneration || panel.searchRun !== run) return
         panel.searchPage = page
         if (page === undefined) {
           panel.searchState = 'unavailable'
@@ -279,7 +304,7 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
         publish(panel)
       },
       onError: (error) => {
-        if (!isActive(panel) || panel.queryGeneration !== expectedGeneration) return
+        if (!isActive(panel) || panel.queryGeneration !== expectedGeneration || panel.searchRun !== run) return
         panel.searchState = 'error'
         panel.searchResults = localResults(panel)
         panel.searchPage = undefined
@@ -367,6 +392,71 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     return true
   }
 
+  /** Accept ONE official roster as this panel's ONLY listing: the subagent
+   *  children never enter it and the accepted revision advances. */
+  const acceptRoster = (panel: ActiveRead, listed: readonly SessionBrowserRow[]): readonly SessionBrowserRow[] => {
+    const listedRows = listed.map((row): SessionBrowserRow => ({ ...row }))
+    panel.rows = listedRows.filter((row) => row.origin !== 'subagent')
+    panel.listState = panel.rows.length === 0 ? 'empty' : 'ready'
+    panel.listError = undefined
+    panel.refreshError = undefined
+    panel.listRevision += 1
+    return listedRows
+  }
+
+  /** Re-arm the ONE refresh timer. Only a COMPLETED read re-arms it, so two
+   *  roster reads never overlap; a retired panel never re-arms. */
+  const scheduleRefresh = (panel: ActiveRead): void => {
+    if (options.autoRefreshMs === undefined || panel.disposed || panel.controller.signal.aborted) return
+    if (panel.refreshTimer !== undefined) return
+    panel.refreshTimer = setTimeout(() => {
+      panel.refreshTimer = undefined
+      startRefresh(panel)
+    }, options.autoRefreshMs)
+  }
+
+  /** ONE background roster refresh through the SAME reader/owner. It never
+   *  re-runs the direct match, never resolves a settlement, never rewrites the
+   *  user's editor text and never resumes a Session. */
+  const startRefresh = (panel: ActiveRead): void => {
+    if (!isActive(panel) || panel.refreshing || panel.listState === 'loading') return
+    panel.refreshing = true
+    runOwned('session browser list refresh', () => options.reader.list(panel.subject.currentSessionId, panel.controller.signal), {
+      diag: options.diag,
+      sessionId: options.sessionId,
+      isCancellation: () => cancellation(panel),
+      onResult: (listed) => {
+        panel.refreshing = false
+        if (!isActive(panel)) return
+        if (listed === undefined) {
+          // A failed refresh NEVER empties the roster it already proved. The
+          // nonfatal freshness fact is painted beside the last good list.
+          panel.refreshError = 'session persistence unavailable'
+          publish(panel)
+          scheduleRefresh(panel)
+          return
+        }
+        acceptRoster(panel, listed as readonly SessionBrowserRow[])
+        publish(panel)
+        if (!isActive(panel)) return
+        startProjectionBatch(panel, 0, FIRST_PROJECTION_BATCH)
+        // Re-run the ONE content search of the CURRENT query generation against
+        // the refreshed roster. No second timer, no second generation.
+        if (panel.query !== '' && panel.queryController !== undefined && panel.searchState === 'ready') {
+          startSearch(panel, panel.queryGeneration)
+        }
+        scheduleRefresh(panel)
+      },
+      onError: (error) => {
+        panel.refreshing = false
+        if (!isActive(panel)) return
+        panel.refreshError = safeErrorMessage(error)
+        publish(panel)
+        scheduleRefresh(panel)
+      },
+    })
+  }
+
   const startList = (panel: ActiveRead): void => {
     if (!isActive(panel)) return
     runOwned('session browser list', async () => {
@@ -391,12 +481,13 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
           panel.searchError = undefined
           publish(panel)
           panel.settle({ kind: 'refused', text: 'session persistence unavailable' })
+          // The fullscreen Workspace stays mounted on a refused first read: the
+          // ONE refresh generation keeps trying instead of freezing the panel
+          // on a transient Host outage.
+          scheduleRefresh(panel)
           return
         }
-        const listedRows = listed.map((row): SessionBrowserRow => ({ ...row }))
-        panel.rows = listedRows.filter((row) => row.origin !== 'subagent')
-        panel.listState = panel.rows.length === 0 ? 'empty' : 'ready'
-        panel.listError = undefined
+        const listedRows = acceptRoster(panel, listed as readonly SessionBrowserRow[])
         const directMatch = panel.openOptions.directMatch
         if (directMatch !== undefined && listedRows.length === 0) {
           // An EMPTY roster only proves "no readable sessions": the official
@@ -445,6 +536,7 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
         panel.settle({ kind: 'ready' })
         if (!isActive(panel)) return
         startProjectionBatch(panel, 0, FIRST_PROJECTION_BATCH)
+        scheduleRefresh(panel)
       },
       onError: (error) => {
         if (!isActive(panel)) return
@@ -456,6 +548,7 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
         panel.searchResults = []
         publish(panel)
         panel.settle({ kind: 'refused', text: message })
+        scheduleRefresh(panel)
       },
     })
   }
@@ -487,10 +580,15 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
         rows: [],
         listState: 'loading',
         listError: undefined,
+        listRevision: 0,
+        refreshError: undefined,
+        refreshTimer: undefined,
+        refreshing: false,
         projectionError: undefined,
         query: '',
         userQueryChanged: false,
         queryGeneration: 0,
+        searchRun: 0,
         queryController: undefined,
         queryTimer: undefined,
         searchState: 'idle',
@@ -546,6 +644,14 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
       if (!isActive(panel)) return handle
       startList(panel)
       return handle
+    },
+    refresh() {
+      if (active === undefined || !isActive(active)) return
+      if (active.refreshTimer !== undefined) {
+        clearTimeout(active.refreshTimer)
+        active.refreshTimer = undefined
+      }
+      startRefresh(active)
     },
     dispose() {
       if (disposed) return
