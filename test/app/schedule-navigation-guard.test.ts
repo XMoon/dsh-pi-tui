@@ -269,3 +269,50 @@ test('the panel does not edit its local buffer while a save is pending', async (
     controller.dispose()
   }
 })
+
+test('a stale Detail frame from task A cannot pause task B after a same-mode switch', async () => {
+  const controller = new ScheduleWorkspaceController({
+    port: new StubPort(),
+    sessionReader,
+    runOwned: (_label, task) => { void task() },
+  })
+  const panel = new ScheduleWorkspacePanel({
+    snapshot: () => controller.snapshot(),
+    dispatch: intent => controller.dispatch(intent),
+    requestRender: () => {},
+    rows: () => 30,
+    columns: () => 120,
+    close: () => {},
+  })
+  const edits: ScheduleEditRequest[] = []
+  ;(controller as unknown as { port: StubPort }).port.editResult = async request => {
+    edits.push(request)
+    return { id: request.id as never, deleted: false } as never
+  }
+  try {
+    controller.open()
+    await flush()
+    controller.dispatch({ kind: 'open-detail', id: 'task-a' })
+    await flush()
+    // Paint the Detail frame for task A, including its action-bar Pause hit.
+    panel.setSnapshot(controller.snapshot())
+    const detailFrame = panel.render(120)
+    const toggleRow = detailFrame.findIndex(line => line.includes('Space pause/resume'))
+    assert.ok(toggleRow >= 0, `the Detail action bar paints the Pause/Resume hit:\n${detailFrame.join('\n')}`)
+    const toggleColumn = detailFrame[toggleRow]!.indexOf('Space pause/resume') + 2
+
+    // Switch to task B and resolve its Detail, but do NOT paint a new frame.
+    controller.dispatch({ kind: 'open-detail', id: 'task-b' })
+    await flush()
+    assert.equal(controller.snapshot().selectedId, 'task-b')
+    assert.equal(controller.snapshot().mode, 'detail')
+    panel.setSnapshot(controller.snapshot())
+    panel.onCellClick(toggleColumn, toggleRow)
+    await flush()
+    await controller.whenIdle()
+    assert.equal(edits.length, 0, 'a click on A’s stale frame performed ZERO Host writes')
+    assert.equal(controller.snapshot().selectedId, 'task-b', 'the current selection is unchanged')
+  } finally {
+    controller.dispose()
+  }
+})
