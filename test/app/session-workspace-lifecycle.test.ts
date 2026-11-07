@@ -231,6 +231,8 @@ function harness(options: {
    *  the Direct/TSP composition. */
   readonly eligibility?: () => readonly SessionBrowserAnswerEligibility[]
   readonly initialFacts?: readonly SessionActivityFact[]
+  /** Replace the one projection batch reader (the default resolves titles). */
+  readonly projection?: () => Promise<Map<string, { readonly title?: string; readonly preset?: string }>>
 }): Harness {
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { notifyDurationMs: 60_000 })
@@ -280,11 +282,11 @@ function harness(options: {
     list: options.list === undefined
       ? async () => { listCalls.value += 1; return rows.map(entry => ({ ...entry })) }
       : async () => { listCalls.value += 1; return (await options.list!()).map(entry => ({ ...entry })) },
-    projectionBatch: async () => new Map([
+    projectionBatch: options.projection ?? (async () => new Map([
       [CURRENT, { title: 'Current session' }],
       [OTHER, { title: 'Other session' }],
       [THIRD, { title: 'Third session' }],
-    ]),
+    ])),
     search: options.search ?? (async () => ({ items: [], hasMore: false })),
     blank: () => undefined,
     measureContext: () => undefined,
@@ -791,4 +793,44 @@ test('a failed Activity sample is ONE nonfatal line and keeps the roster and a R
   h.vt.sendInput('\r')
   await waitUntil(() => h.switchCalls.length === 1, 'a Resume still reaches the runtime after a failed sample')
   h.settleSwitch({ kind: 'failed', message: 'refused by the Host' })
+})
+
+test('a newer accepted roster revision never paints the previous sample as a Needs promise', async () => {
+  const h = harness({
+    currentSessionId: CURRENT,
+    initialFacts: [questionFact(CURRENT)],
+    eligibility: () => [{ sessionId: CURRENT, kind: 'question', live: true }],
+  })
+  await h.runSessions('')
+  await waitUntil(() => h.view().includes('Needs attention'), 'the first revision sample paints')
+  // The next roster revision's sample is held. The previous sample belongs to
+  // the OLD roster: an old positive Pending is not a current promise.
+  h.facts.holdNext()
+  h.notifyEligibility()
+  await waitUntil(() => h.facts.reads.length === 2, 'the refreshed roster starts its OWN sample')
+  await h.vt.waitForRender()
+  assert.ok(!h.view().includes('Needs attention'),
+    `the previous revision needs survived into the new roster:\n${h.view()}`)
+  h.facts.releaseHeld()
+  await waitUntil(() => h.view().includes('Needs attention'), 'the new revision sample re-proves the need')
+})
+
+test('a stale projection batch never enriches a newer accepted roster', async () => {
+  const pending: Array<(projections: Map<string, { readonly title?: string; readonly preset?: string }>) => void> = []
+  const h = harness({
+    currentSessionId: CURRENT,
+    eligibility: () => [],
+    projection: () => new Promise(resolve => { pending.push(resolve) }),
+  })
+  await h.runSessions('')
+  await waitUntil(() => pending.length === 1, 'the first projection batch starts')
+  h.notifyEligibility() // the ONE early roster refresh
+  await waitUntil(() => pending.length === 2, 'the newer roster starts its own projection batch')
+  pending[0]!(new Map([[CURRENT, { title: 'Stale title' }]]))
+  await new Promise<void>(resolve => setImmediate(resolve))
+  await h.vt.waitForRender()
+  assert.ok(!h.view().includes('Stale title'),
+    `a batch read from the superseded roster never enriched the new one:\n${h.view()}`)
+  pending[1]!(new Map([[CURRENT, { title: 'Fresh title' }]]))
+  await waitUntil(() => h.view().includes('Fresh title'), 'the current roster batch enriches the rows')
 })
