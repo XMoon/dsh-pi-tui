@@ -9,8 +9,10 @@
  * Agent idle and the next turn/start carry no Workflow authority and must
  * never settle (or "interrupt") a run.
  *
- * The same projection serves the visual Transcript fold AND the `/transcript`
- * Markdown export, so the two can never drift.
+ * TranscriptFolder consumes this projection for the visual TUI transcript and
+ * its search derivation. The `/transcript` Markdown export is NOT a consumer:
+ * its content authority is the official Host `formatSessionMarkdown`, which
+ * reads the committed Session events directly.
  * @module @xmoon76/dsh-pi-tui/domain/transcript/workflow-projection
  */
 
@@ -93,14 +95,13 @@ function workflowRunStatus(stopReason: 'completed' | 'cancelled' | 'error'): Wor
 }
 
 /**
- * The shared Workflow semantic projection (plan §5/§6): ONE terminal-event
- * state machine consumed by BOTH the visual Transcript fold and the
- * `/transcript` markdown export, so the two can never drift on run/member
- * statuses. Run-start creates an open `running` record; only the matching
- * `run-end` settles the run and only the matching `(runId, seq)` `agent-end`
- * settles a member. The optional `onChange` hook fires whenever a run's
- * message mutated (member/run settlement) so the visual fold can mark its
- * search entry dirty; the export passes no hook.
+ * The Workflow semantic projection (plan §5/§6): ONE terminal-event state
+ * machine for the TUI Transcript fold and its search corpus. Run-start
+ * creates an open `running` record; only the matching `run-end` settles the
+ * run and only the matching `(runId, seq)` `agent-end` settles a member. The
+ * optional `onChange` hook fires whenever a run's message mutated
+ * (member/run settlement) so the visual fold can mark its search entry dirty.
+ * The official `/transcript` Markdown export does not consume this class.
  */
 export class WorkflowProjection {
   /** Open records only: a run leaves this map at its authoritative run-end.
@@ -169,8 +170,8 @@ export class WorkflowProjection {
 
   /** One run settled by its own `run-end`: set the terminal status, notify,
    * and drop the fold state (the message itself stays in the transcript
-   * items / export). Members keep their own agent-end facts; a run outcome
-   * never back-fills a member.
+   * items). Members keep their own agent-end facts; a run outcome never
+   * back-fills a member.
    * @returns the final message, or `undefined` when the run was unknown. */
   onRunEnd(runId: WorkflowRunId, stopReason: 'completed' | 'cancelled' | 'error'): TranscriptWorkflowMessage | undefined {
     const message = this.runs.get(runId)
@@ -182,8 +183,8 @@ export class WorkflowProjection {
   }
 
   /** Every run still active (no terminal event observed), in run-start order
-   * — the export's full-log flush. These records are OPEN durable facts, not
-   * proof of a live process. */
+   * — the open records of the live fold. These records are OPEN durable
+   * facts, not proof of a live process. */
   activeRuns(): readonly TranscriptWorkflowMessage[] {
     return [...this.runs.values()]
   }

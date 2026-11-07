@@ -621,13 +621,16 @@ the current switch value.
   the official `session/end-seed { inherited: true }` markers: an inherited
   SUCCESSFUL publication replays from its own epoch, while a child's
   `present_visual` of an inherited generating result is refused across epochs.
-- Human-facing surfaces (Tool Card folded preview and expanded body, TSP result
-  nodes, transcript search, `/transcript` readable Markdown) drop ONLY the
-  official tail machine blocks of these three tools, identified by position plus
-  the tool NAME proven from the durable `tool/call`. Another tool whose text
-  merely resembles a machine line keeps its full text, and the raw Session
-  JSONL keeps every block. Current renderers still show the ordinary Tool Card;
-  Assistant in-place or trailing visuals are a later stage.
+- TUI/TSP/search display derivations (Tool Card folded preview and expanded
+  body, TSP result nodes, transcript search) drop ONLY the official tail machine
+  blocks of these three tools, identified by position plus the tool NAME proven
+  from the durable `tool/call`. Another tool whose text merely resembles a
+  machine line keeps its full text, and the raw Session JSONL keeps every block.
+  The `/transcript` readable Markdown does NOT consume this derivation: its
+  content authority is the official Host `formatSessionMarkdown` over the
+  committed Session events, which does not promise the same filtering. Current
+  renderers still show the ordinary Tool Card; Assistant in-place or trailing
+  visuals are a later stage.
 
 
 - A chart result carries one versioned machine line in its own text block
@@ -664,9 +667,13 @@ the current switch value.
   a platform with a verified native memory bound (Linux today) and mounts the
   existing image component/budget; macOS/Windows keep the description + source
   text fallback, and a failed memory-cap installation never reaches the native
-  rasterizer. Neither derivative is a durable fact: cold replay, search and
-  Markdown export read the final result content and the durable call arguments,
-  never a blob id, a PNG or a cache.
+  rasterizer. Neither derivative is a durable fact: cold replay, search and the
+  TSP/graphical display derivations read the final result content and the
+  durable call arguments, never a blob id, a PNG or a cache. The independent
+  `/transcript` export is produced by the official Host formatter from the
+  committed Session events — its `tool/call` arguments and `tool/result`
+  content — so it may retain machine text and does not call this visual
+  placement/filtering.
 - All three tool definitions are Host-plane registrations (explicit `inject` +
   `ctx.reflect.get`) independent of the renderer, Tern hello, client capability,
   session or resize. Direct and Remote consume the same durable facts; a
