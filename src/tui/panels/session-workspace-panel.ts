@@ -277,8 +277,13 @@ export class SessionWorkspacePanel implements Component {
     this.currentWorkspaceId = undefined
     this.scope = 'all'
     this.defaultScope = 'all'
-    // `workspaceError` IS the one visible status line; a second `notifyOnce`
-    // copy would paint the same fact twice on the next frame.
+    // The stream failure IS the current scope fact. A one-time missing/lost
+    // Current fallback that this same open set earlier is now superseded by
+    // it; painting both would state two scope facts in one frame.
+    if (this.lastNotice === 'current-workspace-unavailable' || this.lastNotice === 'current-workspace-lost') {
+      this.lastNotice = undefined
+      this.statusMessage = undefined
+    }
     this.host.requestRender()
   }
 
