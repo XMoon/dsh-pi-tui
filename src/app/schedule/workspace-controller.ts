@@ -111,7 +111,13 @@ export class ScheduleWorkspaceController {
   private historyView: ScheduleHistoryView | undefined
   private editor: ScheduleEditorDraft | undefined
   private editorBaseline: ScheduleEditorBaseline | undefined
+  /** The record values the editor was OPENED with: the user's field-level
+   *  intent is always this comparison, never a reloaded baseline. */
+  private editorOrigin: ScheduleEditorBaseline | undefined
   private confirm: ScheduleConfirm | undefined
+  /** The task a confirmed Discard must open next (a navigation that arrived
+   *  while the dirty editor was still open). */
+  private pendingDetailId: string | undefined
   /** The page Help was opened FROM; closing Help returns there with the draft
    *  and any history page intact. */
   private helpReturn: ScheduleWorkspaceSnapshot['mode'] | undefined
@@ -205,6 +211,9 @@ export class ScheduleWorkspaceController {
   /** The ONE intent entry: every user action lands here. */
   dispatch(intent: ScheduleIntent): void {
     if (this.disposed) return
+    // ONE confirmation owns the surface: a stale row hit from the previous
+    // frame can never navigate, write or open an editor behind it.
+    if (this.confirm !== undefined && intent.kind !== 'confirm' && intent.kind !== 'cancel' && intent.kind !== 'back') return
     switch (intent.kind) {
       case 'set-filter':
         this.filter = intent.filter
@@ -220,7 +229,7 @@ export class ScheduleWorkspaceController {
         this.moveSelection(intent.delta)
         return
       case 'open-detail':
-        this.openDetail(intent.id)
+        this.requestDetail(intent.id)
         return
       case 'open-history':
         this.own('schedule history read', () => this.readHistory(undefined))
@@ -396,6 +405,27 @@ export class ScheduleWorkspaceController {
     }
   }
 
+  /**
+   * The ONE navigation entry into Detail. A dirty editor is never discarded by
+   * navigation: the click asks to discard first, remembers the target, and only
+   * a confirmed `y` moves there; a cancel keeps the exact draft.
+   */
+  private requestDetail(id?: string): void {
+    const target = id ?? this.selectedId
+    if (target === undefined) return
+    if (this.mode === 'editor') {
+      if (this.editorDirty()) {
+        this.pendingDetailId = target
+        this.confirm = { kind: 'discard', token: ++this.confirmToken }
+        this.publish()
+        return
+      }
+      this.editor = undefined
+      this.editorBaseline = undefined
+    }
+    this.openDetail(target)
+  }
+
   private openDetail(id?: string): void {
     const target = id ?? this.selectedId
     if (target === undefined) return
@@ -518,8 +548,10 @@ export class ScheduleWorkspaceController {
 
   private openCreate(): void {
     if (this.busy) return
+    this.pendingDetailId = undefined
     this.mode = 'editor'
     this.editorBaseline = undefined
+    this.editorOrigin = undefined
     this.editor = {
       mode: 'create',
       title: '',
@@ -538,6 +570,7 @@ export class ScheduleWorkspaceController {
 
   private async openEdit(): Promise<void> {
     if (this.busy) return
+    this.pendingDetailId = undefined
     const known = this.detail?.id === this.selectedId ? this.detail : undefined
     const id = known?.id ?? this.selectedId
     if (id === undefined) return
@@ -579,6 +612,7 @@ export class ScheduleWorkspaceController {
       timing: draft.timing,
       target: draft.target,
     }
+    this.editorOrigin = this.editorBaseline
     this.editor = {
       mode: 'edit',
       id: current.id,
@@ -692,6 +726,8 @@ export class ScheduleWorkspaceController {
   private async reloadLatest(): Promise<void> {
     const draft = this.editor
     if (draft === undefined || draft.id === undefined) return
+    const origin = this.editorOrigin
+    if (origin === undefined) return
     try {
       const result = await this.port.view({ id: scheduleId(draft.id) })
       if (this.disposed) return
@@ -701,13 +737,49 @@ export class ScheduleWorkspaceController {
         return
       }
       if (this.editor === undefined || this.editor.id !== draft.id) return
-      this.editorBaseline = {
-        ...draftFromRecord(result),
+      const current = this.editor
+      const fromRecord = draftFromRecord(result)
+      const latest: ScheduleEditorBaseline = {
         title: result.title,
         prompt: result.prompt,
+        timing: fromRecord.timing,
+        target: fromRecord.target,
       }
-      this.editor = { ...this.editor, expectedUpdatedAt: result.updatedAt ?? null }
-      this.notice = infoNotice(SCHEDULE_COPY.reloaded)
+      // Field-level intent: only fields the USER changed against the ORIGINAL
+      // record travel on the next save. Fields the other client changed alone
+      // are adopted from the latest Host record, so reloading never turns an
+      // untouched old value into an overwrite.
+      const userTitle = current.title !== origin.title
+      const userPrompt = current.prompt !== origin.prompt
+      const userTiming = !safeSameTiming(current.timing, origin.timing)
+      const userTarget = !sameTargetDraft(current.target, origin.target)
+      const hostTitle = latest.title !== origin.title
+      const hostPrompt = latest.prompt !== origin.prompt
+      const hostTiming = !safeSameTiming(latest.timing, origin.timing)
+      const hostTarget = !sameTargetDraft(latest.target, origin.target)
+      const overlaps: string[] = []
+      if (userTitle && hostTitle) overlaps.push('the title')
+      if (userPrompt && hostPrompt) overlaps.push('the prompt')
+      if (userTiming && hostTiming) overlaps.push('the timing')
+      if (userTarget && hostTarget) overlaps.push('the target')
+      const rebasedTarget = userTarget ? current.target : latest.target
+      this.editor = {
+        ...current,
+        title: userTitle ? current.title : latest.title,
+        prompt: userPrompt ? current.prompt : latest.prompt,
+        timing: userTiming ? current.timing : latest.timing,
+        target: rebasedTarget,
+        timingEdited: userTiming,
+        targetEdited: userTarget,
+        advanced: rebasedTarget.kind !== 'session' && (rebasedTarget.cwd !== '' || rebasedTarget.agentPreset !== ''),
+        expectedUpdatedAt: result.updatedAt ?? null,
+      }
+      // The CAS baseline is the LATEST Host record; the draft now differs from it
+      // only in the fields the user actually changed.
+      this.editorBaseline = latest
+      this.notice = overlaps.length === 0
+        ? infoNotice(SCHEDULE_COPY.reloaded)
+        : errorNotice(SCHEDULE_COPY.reloadConflict(overlaps.join(' and ')))
       this.publish()
     } catch (error) {
       if (this.disposed) return
@@ -878,13 +950,21 @@ export class ScheduleWorkspaceController {
     this.confirm = undefined
     this.publish()
     switch (confirm.kind) {
-      case 'discard':
+      case 'discard': {
+        const pending = this.pendingDetailId
+        this.pendingDetailId = undefined
         this.editor = undefined
         this.editorBaseline = undefined
-        this.mode = this.detail === undefined ? 'list' : 'detail'
+        this.editorOrigin = undefined
         this.notice = undefined
+        if (pending !== undefined) {
+          this.openDetail(pending)
+          return
+        }
+        this.mode = this.detail === undefined ? 'list' : 'detail'
         this.publish()
         return
+      }
       case 'run':
         this.runNow(confirm.id)
         return
@@ -900,6 +980,7 @@ export class ScheduleWorkspaceController {
   private cancelConfirm(): void {
     if (this.confirm === undefined) return
     this.confirm = undefined
+    this.pendingDetailId = undefined
     this.publish()
   }
 
@@ -1010,6 +1091,7 @@ export class ScheduleWorkspaceController {
     }
     if (this.mode === 'editor') {
       if (this.editorDirty()) {
+        this.pendingDetailId = undefined
         this.confirm = { kind: 'discard', token: ++this.confirmToken }
         this.publish()
         return
