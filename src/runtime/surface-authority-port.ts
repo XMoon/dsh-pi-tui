@@ -1,7 +1,7 @@
 /**
- * The live Session surface-authority read seam used by the M2 migration shadow.
- * It carries only detached command and human-skill metadata; production
- * completion and execution remain on the Direct path.
+ * The live Session surface-authority read seam implemented by the Direct and
+ * Remote readers. It carries only detached command and human-skill metadata;
+ * production completion and execution remain on the Direct path.
  *
  * @module @xmoon76/dsh-pi-tui/runtime/surface-authority-port
  */
