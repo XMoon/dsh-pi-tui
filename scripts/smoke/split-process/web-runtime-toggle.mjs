@@ -249,6 +249,12 @@ export async function runWebRuntimeToggle(context) {
   const profilePatchBefore = existsSync(hostProfiles.profilePath)
     ? readFileSync(hostProfiles.profilePath)
     : undefined
+  const promptEvidence = () => {
+    const text = readFileSync(promptEvidencePath, 'utf8').trim()
+    return text === '' ? [] : text.split('\n').map(line => JSON.parse(line))
+  }
+  const promptEvidencePath = join(toggleRoot, 'prompt-evidence.jsonl')
+  writeFileSync(promptEvidencePath, '', { mode: 0o600 })
   const playwrightRoot = process.env.SPLIT_PROCESS_PLAYWRIGHT_ROOT
   /** The real Chromium verdict: only a completed driver run is a PASS. */
   let browserCase = 'NOT_RUN'
@@ -260,6 +266,7 @@ export async function runWebRuntimeToggle(context) {
       env: {
         ...base.env,
         SPLIT_PROCESS_EXTRA_PATCH: hostPatch,
+        SPLIT_PROCESS_PROMPT_EVIDENCE: promptEvidencePath,
         C1_SCENARIO: 'long-turn',
         C1_WORK_ROOT: workRoot,
         C1_HOLD_LONG_TURN: longTurnBarrier,
@@ -412,7 +419,9 @@ export async function runWebRuntimeToggle(context) {
     await tui.waitForScreen(heldAnswer, 'PB-06 the TUI painted the answer after the disable', 180_000)
     // The same TUI Session accepts a NEW prompt with Web still off.
     const afterDisableStart = (hostSessionEvents(dshHome, sessionT) ?? []).length
-    tui.send('pr-b after disable\r')
+    const postDisablePrompt = 'pr-b after disable'
+    const postDisableEvidenceStart = promptEvidence().length
+    tui.send(`${postDisablePrompt}\r`)
     await tui.waitForScreen('pr-b after disable', 'PB-06 the TUI prompt painted with Web off', 120_000)
     await waitForHostSessionEventAfter(dshHome, sessionT, afterDisableStart,
       event => event.type === 'user/message' && JSON.stringify(event).includes('pr-b after disable'),
@@ -421,6 +430,11 @@ export async function runWebRuntimeToggle(context) {
       event => event.type === 'turn/end', 'PB-06 the post-disable Turn settled', 180_000)
     const postDisableAnswer = answerPrefix((hostSessionEvents(dshHome, sessionT) ?? []).slice(afterDisableStart))
     await tui.waitForScreen(postDisableAnswer, 'PB-06 the TUI painted the post-disable answer', 180_000)
+    const postDisableRequests = promptEvidence().slice(postDisableEvidenceStart)
+    const postDisableStandard = postDisableRequests.filter(record => record.presentTool === true)
+    assert(postDisableStandard.length === 1 && postDisableStandard[0].markerCount === 1
+      && postDisableStandard[0].presentInstruction === true,
+    `PB-06 the Web-off fresh standard prompt lost shared delivery guidance: ${JSON.stringify({ records: postDisableRequests.length, standard: postDisableStandard })}`)
     trace('t73-web-disabled-live', {
       webRowsLive: 0,
       webRowStates: 'state-4 (every Web row DISPOSED by the toggle)',
@@ -637,6 +651,7 @@ export async function runWebRuntimeToggle(context) {
         env: {
           ...base.env,
           SPLIT_PROCESS_EXTRA_PATCH: hostPatch,
+        SPLIT_PROCESS_PROMPT_EVIDENCE: promptEvidencePath,
           C1_SCENARIO: 'long-turn',
           C1_WORK_ROOT: workRoot,
           C1_HOLD_LONG_TURN: longTurnBarrier,
@@ -692,6 +707,7 @@ export async function runWebRuntimeToggle(context) {
         env: {
           ...base.env,
           SPLIT_PROCESS_EXTRA_PATCH: hostPatch,
+        SPLIT_PROCESS_PROMPT_EVIDENCE: promptEvidencePath,
           C1_SCENARIO: 'long-turn',
           C1_WORK_ROOT: workRoot,
           C1_HOLD_LONG_TURN: longTurnBarrier,
@@ -761,6 +777,7 @@ export async function runWebRuntimeToggle(context) {
       env: {
         ...base.env,
         SPLIT_PROCESS_EXTRA_PATCH: hostPatch,
+        SPLIT_PROCESS_PROMPT_EVIDENCE: promptEvidencePath,
         C1_SCENARIO: 'long-turn',
         C1_WORK_ROOT: workRoot,
         C1_HOLD_LONG_TURN: longTurnBarrier,

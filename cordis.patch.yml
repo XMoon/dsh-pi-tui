@@ -212,6 +212,11 @@
     - id: file-reference-local
       name: '@deepseek-ai/dsh-file-reference-local'
 
+    # Shared Host prompt guidance for delivered file links and present results.
+    # Independent of Web serving; inherited unchanged by Direct and Split Host.
+    - id: deliverable-file-references
+      name: '@deepseek-ai/dsh-deliverable-file-references'
+
     # The 0.1.7 declarative preset registry: preset identity, revisions and
     # default/selection policy are registry-owned (deployment `default` here;
     # the user's `selectedDefault` rides the profile form). The four shipped

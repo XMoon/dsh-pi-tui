@@ -70,6 +70,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   restart or once the Session is gone, the old summary and comparison are no
   longer available. Direct mode and a Host with Web off record nothing, and the
   Host process, Sessions and scheduled tasks are unaffected.
+- **TUI and Web now share the official file-link and delivery guidance.** Supported
+  Agent presets receive the official advice for file links, image references and
+  `present` deliveries where applicable; the guidance does not depend on Web
+  being enabled, and the existing `present` tool and TUI `/deliverables` panel
+  remain independently usable.
+- **Split Web document preview now activates the official Office-to-PDF provider.**
+  When Web is enabled, the official document preview can use DSH's Office
+  conversion capability; disabling Web releases it while retaining the Host,
+  TUI Sessions and other shared services.
 - **A `/web` entry and an "auto-enable the Web frontend on Host startup"
   preference for the Split Client.** `/web` shows the current Host's real
   official-Web-frontend state and offers only the actions that state admits —

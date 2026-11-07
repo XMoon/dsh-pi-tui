@@ -71,6 +71,17 @@ function assert(condition, message) {
 export async function runOfficialWebComposition(context) {
   const { EntryProcess, SurfaceEntryProcess, workDir, dshHome, base, entries, tarball, candidateSha256, targetDshVersion, trace, mode } = context
   const { env, anchor, surfaceLlm } = context.installation
+  const promptEvidence = () => {
+    const text = readFileSync(surfaceLlm.promptEvidencePath, 'utf8').trim()
+    return text === '' ? [] : text.split('\n').map(line => JSON.parse(line))
+  }
+  const assertStandardPrompt = (start, label) => {
+    const records = promptEvidence().slice(start)
+    const candidates = records.filter(record => record.presentTool === true)
+    assert(candidates.length === 1, `${label}: expected one standard request with present, observed ${candidates.length} of ${records.length}`)
+    assert(candidates[0].markerCount === 1, `${label}: official delivery guidance occurred ${String(candidates[0].markerCount)} times`)
+    assert(candidates[0].presentInstruction === true, `${label}: the effective request has no present delivery instruction`)
+  }
   const requireBrowser = mode === 'selected' || process.env.SPLIT_PROCESS_REQUIRE_WEB_BROWSER === '1'
   let webScopeSuffix
   const webRoot = join(workDir, 'pr-a-web')
@@ -201,16 +212,36 @@ export async function runOfficialWebComposition(context) {
     assert(plainClientReady.surfaceMounted === true && plainClientReady.transport === 'connected',
       'PA-01 the plain Host no longer serves a real TUI Client')
     const plainPrompt = `pr-a plain tui ${randomUUID().slice(0, 8)}`
+    const plainPromptEvidenceStart = promptEvidence().length
     plainClient.send(`${plainPrompt}\r`)
     await plainClient.waitForScreen(plainPrompt, 'PA-01 plain TUI prompt painted', 120_000)
     await waitForSurfaceStatus(plainClient, record => record.sessionOpen === true && typeof record.openSessionId === 'string', 'PA-01 plain TUI session')
     await plainClient.waitForScreen('stub answer', 'PA-01 plain TUI answer painted', 120_000)
+    assertStandardPrompt(plainPromptEvidenceStart, 'PA-01 Web-off TUI standard prompt')
     plainClient.send('/exit\r')
     const plainExit = await plainClient.waitForExit(60_000)
     assert(plainExit.code === 0 && plainExit.signal === null, `PA-01 plain TUI exit was ${JSON.stringify(plainExit)}`)
-    const plainShutdown = await plainHost.shutdown()
-    assert(plainShutdown.code === 0, `PA-01 plain Host shutdown exit was ${JSON.stringify(plainShutdown)}`)
-    trace('t67-web-default-off', {
+
+    // The official minimal preset is composed by the real Client startup path;
+    // its complete persona must not receive guidance for an absent `present` tool.
+    await seatFree(`\0dsh-pi-tui-c-${webScopeSuffix}`, 15_000)
+    const minimalClient = new SurfaceEntryProcess(entries.client, {
+      ...base,
+      workDir,
+      env: { ...base.env, SPLIT_PROCESS_CLIENT_PRESET: 'minimal' },
+    })
+    webClients.push(minimalClient)
+    await minimalClient.waitFor(record => record.m4a0 === 'ready', 'PA-01 minimal TUI ready', 180_000)
+    const minimalPrompt = `pr-a minimal tui ${randomUUID().slice(0, 8)}`
+    const minimalPromptEvidenceStart = promptEvidence().length
+    minimalClient.send(`${minimalPrompt}\r`)
+    await minimalClient.waitForScreen(minimalPrompt, 'PA-01 minimal TUI prompt painted', 120_000)
+    await minimalClient.waitForScreen('stub answer', 'PA-01 minimal TUI answer painted', 120_000)
+    const minimalRequests = promptEvidence().slice(minimalPromptEvidenceStart)
+    assert(minimalRequests.length > 0, 'PA-01 the minimal preset produced no real model request')
+    assert(minimalRequests.every(record => record.presentTool === false && record.presentInstruction === false),
+      'PA-01 the effective minimal request exposes an absent present tool or instruction')
+    const plainResult = {
       webRowsDeclared: declaredRows.length,
       webRowsDisabled: declaredRows.filter(row => row.disabled === true).length,
       rootStatus: plainRoot.status,
@@ -220,6 +251,17 @@ export async function runOfficialWebComposition(context) {
       connectStatus: plainConnect.status,
       tuiSession: 'painted',
       tuiAnswer: 'painted',
+      standardPrompt: 'official delivery guidance once; present tool available',
+      minimalPrompt: 'no present tool or present delivery instruction',
+    }
+    minimalClient.send('/exit\r')
+    const minimalExit = await minimalClient.waitForExit(60_000)
+    assert(minimalExit.code === 0 && minimalExit.signal === null,
+      `PA-01 minimal TUI exit was ${JSON.stringify(minimalExit)}`)
+    const plainShutdown = await plainHost.shutdown()
+    assert(plainShutdown.code === 0, `PA-01 plain Host shutdown exit was ${JSON.stringify(plainShutdown)}`)
+    trace('t67-web-default-off', {
+      ...plainResult,
     })
 
     // ── B. Isolated qualification: the whole roster enabled by ONE patch ─
@@ -424,6 +466,13 @@ export async function runOfficialWebComposition(context) {
         assert(tuiReady.transport === 'connected', 'PA-05 the TUI did not connect to the Web Host')
         await waitForSurfaceStatus(tui, record => record.sessionOpen === true && record.openSessionId === browserSession,
           'PA-05 TUI attached to the Browser Session')
+        const webOnPromptEvidenceStart = promptEvidence().length
+        const tuiPrompt = `pr-a web-on tui ${randomUUID().slice(0, 8)}`
+        tui.send(`${tuiPrompt}\r`)
+        await tui.waitForScreen(tuiPrompt, 'PA-05 Web-on TUI prompt painted', 120_000)
+        await tui.waitForScreen('stub answer', 'PA-05 Web-on TUI answer painted', 120_000)
+        assertStandardPrompt(webOnPromptEvidenceStart, 'PA-05 Web-on TUI standard prompt')
+        const browserRequestEvidenceStart = promptEvidence().length
         // Release the Browser prompt only now: both Clients observe ONE Turn.
         writeFileSync(join(coordination, 'browser-go'), `${Date.now()}\n`, { mode: 0o600 })
         // The TUI paint is NOT gated on Browser liveness: the Host committed
@@ -442,6 +491,14 @@ export async function runOfficialWebComposition(context) {
         assert(browserReport.indexStatus === 200, `PA-05 the real Browser loaded no authenticated index (${browserReport.indexStatus})`)
         assert(browserReport.sessionId === browserSession, 'PA-05 the Browser reported a different Session')
         assert(browserReport.answerSeen === true, 'PA-05 the Browser never painted the Host answer')
+        const browserRequests = promptEvidence().slice(browserRequestEvidenceStart)
+        const browserStandardRequests = browserRequests.filter(record => record.presentTool === true)
+        assert(browserStandardRequests.length === 1,
+          `PA-05 expected one Browser standard model request, observed ${browserStandardRequests.length} of ${browserRequests.length}`)
+        assert(browserStandardRequests[0].markerCount === 1,
+          `PA-05 the Browser effective prompt contains delivery guidance ${String(browserStandardRequests[0].markerCount)} times`)
+        assert(browserStandardRequests[0].presentInstruction === true,
+          'PA-05 the Browser standard request does not pair delivery guidance with the present tool')
         browserFacts = {
           indexStatus: browserReport.indexStatus,
           sessionId: browserSession,

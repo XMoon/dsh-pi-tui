@@ -43,6 +43,8 @@ export const PI_TUI_WEB_ACCESS_ROWS: ReadonlyArray<{ readonly id: string; readon
   { id: 'resources', name: '@deepseek-ai/dsh-client-resources' },
   { id: 'ui-sidebar', name: '@deepseek-ai/dsh-client-ui-sidebar' },
   { id: 'ui-sidebar-right', name: '@deepseek-ai/dsh-client-ui-sidebar-right' },
+  // Official Host Office conversion service for Browser document preview.
+  { id: 'office-to-pdf', name: '@deepseek-ai/dsh-office-to-pdf' },
   { id: 'ui-sidebar-documentpreview', name: '@deepseek-ai/dsh-client-ui-sidebar-documentpreview' },
   { id: 'ui-sidebar-terminal', name: '@deepseek-ai/dsh-client-ui-sidebar-terminal' },
   { id: 'ui-sidebar-files', name: '@deepseek-ai/dsh-client-ui-sidebar-files' },
