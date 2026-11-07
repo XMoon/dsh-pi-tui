@@ -60,8 +60,13 @@ export type TspHistorySearchIntent =
   | { readonly kind: 'preview-scroll'; readonly to: ScrollTo; readonly serial: number; readonly revision: number }
   | { readonly kind: 'expand'; readonly serial: number; readonly revision: number }
   | { readonly kind: 'retry'; readonly serial: number; readonly revision: number }
-  | { readonly kind: 'copy'; readonly serial: number; readonly revision: number }
-  | { readonly kind: 'restore'; readonly serial: number; readonly revision: number }
+  /** `selectedId` is the row the CELL WAS PAINTED FOR. Moving the highlight
+   *  does not bump `queryRevision`, so serial+revision alone cannot tell a
+   *  lagging click which selection the user was looking at; without this the
+   *  stale button would act on the NEWER selection. Raw row identity never
+   *  reaches a node key or attribute — it travels only inside this intent. */
+  | { readonly kind: 'copy'; readonly selectedId: string | undefined; readonly serial: number; readonly revision: number }
+  | { readonly kind: 'restore'; readonly selectedId: string | undefined; readonly serial: number; readonly revision: number }
   | { readonly kind: 'close'; readonly serial: number; readonly revision: number }
 
 /** The painted row of the results list: one sanitized summary plus the short
@@ -99,6 +104,9 @@ export interface TspHistorySearchRenderState {
   readonly queryCursor: number
   readonly status: TspHistorySearchStatus
   readonly expanded: boolean
+  /** The row the action cells were painted against (see the Copy/Restore
+   *  intents); `undefined` when nothing is selected. */
+  readonly selectedId: string | undefined
   readonly resultsKey: string
   readonly previewKey: string
   readonly header: string
@@ -388,6 +396,14 @@ export function createTspHistorySearch(
   const actionKeyOf = (owner: HistorySeatState, token: string): string =>
     `h${owner.openSerial}-r${owner.queryRevision}-${token}`
 
+  /** An action cell whose meaning depends on WHICH row is highlighted: the
+   *  selected row's position joins the key, so a repaint that moved the
+   *  selection retires the old cell's identity along with it. */
+  const selectionActionKeyOf = (owner: HistorySeatState, token: string): string => {
+    const index = owner.rows.findIndex((row) => row.id === owner.selectedId)
+    return `h${owner.openSerial}-r${owner.queryRevision}-s${index}-${token}`
+  }
+
   /** The state half of every ACTING entry: this exact card, open, admitted by
    *  the mount, and still on the Session scope captured at open. A parked card
    *  answers `false`, so a Modal always owns the keys meanwhile. */
@@ -590,6 +606,18 @@ export function createTspHistorySearch(
     change(owner)
   }
 
+  /** The pointer's own selection fence. A Copy/Restore cell was painted against
+   *  ONE highlighted row, and moving that highlight changes neither the card's
+   *  serial nor its query revision, so serial+revision alone cannot tell a
+   *  lagging click which selection the user was looking at. A stale gesture is
+   *  refused unless the row it was PAINTED for is still the selected one — it
+   *  must never borrow the newer selection's business action. The keyboard
+   *  route mints its intent from the live selection, so it always matches. */
+  const selectionStillPainted = (
+    owner: HistorySeatState,
+    intent: Extract<TspHistorySearchIntent, { readonly kind: 'copy' } | { readonly kind: 'restore' }>,
+  ): boolean => intent.selectedId !== undefined && intent.selectedId === owner.selectedId
+
   /** The row a Restore or Copy may act on: settled, current, and one of THIS
    *  frame's real rows — never a row a newer query already replaced. */
   const settledSelected = (owner: HistorySeatState): HistorySearchResult | undefined => {
@@ -664,6 +692,7 @@ export function createTspHistorySearch(
         return
       }
       case 'copy': {
+        if (!selectionStillPainted(owner, intent)) return
         const row = settledSelected(owner)
         if (row === undefined) return
         // The RAW stored content is captured at admission and never re-read from
@@ -694,6 +723,7 @@ export function createTspHistorySearch(
         return
       }
       case 'restore': {
+        if (!selectionStillPainted(owner, intent)) return
         const row = settledSelected(owner)
         if (row === undefined) return
         const raw = row.content
@@ -747,7 +777,7 @@ export function createTspHistorySearch(
       return { kind: 'focus-query', serial, revision }
     }
     if (key.alt === true && key.ctrl !== true && key.meta !== true) {
-      if (key.name === 'c' && !key.shift) return { kind: 'copy', serial, revision }
+      if (key.name === 'c' && !key.shift) return { kind: 'copy', selectedId: owner.selectedId, serial, revision }
       const previewStep: ScrollTo | undefined = key.name === 'up' ? 'line-up'
         : key.name === 'down' ? 'line-down'
           : key.name === 'page_up' ? 'page-up'
@@ -761,7 +791,7 @@ export function createTspHistorySearch(
     if (key.ctrl === true || key.meta === true) return undefined
     if (key.name === 'tab') return { kind: 'scope', delta: key.shift === true ? -1 : 1, serial, revision }
     if (key.name === 'f2') return { kind: 'expand', serial, revision }
-    if (key.name === 'enter') return { kind: 'restore', serial, revision }
+    if (key.name === 'enter') return { kind: 'restore', selectedId: owner.selectedId, serial, revision }
     if (key.name === 'up') return { kind: 'browse', step: 'up', serial, revision }
     if (key.name === 'down') return { kind: 'browse', step: 'down', serial, revision }
     if (key.name === 'page_up') return { kind: 'browse', step: 'page-up', serial, revision }
@@ -823,6 +853,7 @@ export function createTspHistorySearch(
       queryCursor: owner.queryCursor,
       status: owner.status,
       expanded: owner.expanded,
+      selectedId: owner.selectedId,
       resultsKey: containerKeyOf(owner.openSerial, 'results-scroll'),
       previewKey: containerKeyOf(owner.openSerial, 'preview-scroll'),
       header,
@@ -835,9 +866,17 @@ export function createTspHistorySearch(
         + ` · ${HISTORY_CHORDS.expand.label} ${owner.expanded ? 'collapse' : 'expand'}`
         + ` · ${HISTORY_CHORDS.accept.label} restore · ${HISTORY_CHORDS.cancel.label} cancel`,
       copyLabel: `Copy all · ${HISTORY_CHORDS.copy.label}`,
-      copyKey: actionKeyOf(owner, 'copy'),
+      // The two ACTING verbs are keyed by the selection they were painted for.
+      // Moving the highlight changes neither the card serial nor the query
+      // revision, so without this the Restore/Copy node id would survive the
+      // move and a lagging click would be dispatched to the CURRENT selection
+      // — the closure can refuse nothing, because by then the intent is minted
+      // from the newer state. A changed id is what the SDK's own stale-frame
+      // refusal acts on. The token is the row's POSITION, never its raw source
+      // identity, so no file path or result id reaches an HTML key.
+      copyKey: selectionActionKeyOf(owner, 'copy'),
       restoreLabel: `Restore to draft · ${HISTORY_CHORDS.accept.label}`,
-      restoreKey: actionKeyOf(owner, 'restore'),
+      restoreKey: selectionActionKeyOf(owner, 'restore'),
       retryLabel: 'Retry',
       retryKey: actionKeyOf(owner, 'retry'),
       actionsEnabled: selected !== undefined,

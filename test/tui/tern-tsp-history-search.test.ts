@@ -78,6 +78,7 @@ interface HistoryPane {
   readonly pane: TspPane
   readonly renderer: TspRenderer
   readonly calls: Record<'submits' | 'cancels' | 'exits' | 'steers' | 'pastes' | 'notes' | 'receipts', number>
+  readonly permissions: string[]
   readonly copies: string[]
   readonly requests: HistorySearchRequest[]
   /** Releases the read the scripted source parked on the query `hold`. */
@@ -94,6 +95,9 @@ interface HistoryPane {
   ids(match: RegExp): string[]
   key(bytes: string): void
   click(id: string): void
+  /** A gesture expected to be REFUSED: it owes no frame, so waiting for one
+   *  would turn a correct refusal into a timeout. */
+  clickRefused(id: string): void
   painted(predicate: () => boolean, label: string): Promise<void>
   observeAbsence(): Promise<void>
   dispose(): Promise<void>
@@ -182,6 +186,9 @@ async function mountHistoryPane(
 
   const scripted = scriptSource(options.rows ?? DEFAULT_ROWS)
   const calls = { submits: 0, cancels: 0, exits: 0, steers: 0, pastes: 0, notes: 0, receipts: 0 }
+  /** The Permission write is a SEPARATE witness: it records the id the app was
+   *  asked to select, so a refusal is provable rather than assumed. */
+  const permissions: string[] = []
   const copies: string[] = []
   const renderer = mountTspRenderer(session, {
     copyVisual: async (text) => { copies.push(text); return options.copyOk !== false },
@@ -207,6 +214,8 @@ async function mountHistoryPane(
     steer: () => { calls.steers += 1 },
     pasteMedia: () => { calls.pastes += 1 },
     pastedPath: () => { calls.receipts += 1 },
+    // The Permission business write the review named: counted, never faked.
+    selectPermission: (id: string) => { permissions.push(id) },
     admitPastedPathDelivery: () => true,
     shouldRememberInput: () => true,
     noteUserInput: () => { calls.notes += 1 },
@@ -228,6 +237,7 @@ async function mountHistoryPane(
     pane,
     renderer,
     calls,
+    permissions,
     copies,
     requests: scripted.requests,
     resolveHeld: scripted.resolveHeld,
@@ -253,6 +263,9 @@ async function mountHistoryPane(
     ids: (match) => wireNodes(pane).map(node => node.id).filter(id => match.test(id)),
     key(bytes: string) { pane.key(bytes) },
     click(id: string) { clickNodeById(pane, id) },
+    /** A gesture that is expected to be REFUSED: it owes no frame, so waiting
+     *  for one would turn a correct refusal into a timeout. */
+    clickRefused(id: string) { clickNodeById(pane, id) },
     async painted(predicate, label) { await waitUntil(label, predicate) },
     async observeAbsence() {
       // reason: the absence contract is "no later round and no repaint", which
@@ -1414,6 +1427,69 @@ test('a Composer focus event while the card owns the seat re-asserts the query c
   h.key('x')
   await h.painted(() => (h.queryField()?.text ?? '').includes('x'), 'typing still edits the query')
   assert.equal(h.composer().text, '', 'and never the draft')
+})
+
+test('F2 changes the card\u2019s real height budget, not only its button label', async (t) => {
+  // The review's P2: `expanded` used to reach only the label. The card root now
+  // carries the expansion as its `data-role`, which is what this client's
+  // stylesheet selects on, so the height claim is observable on the wire.
+  const h = await mountHistoryPane(t)
+  h.key(CTRL_R)
+  await h.painted(() => h.cardPainted(), 'the card opened')
+  const cardOf = (match: RegExp) => h.ids(match)[0] ?? ''
+  assert.ok(/history-card-\d+$/.test(cardOf(/history-card/)), 'the card node exists')
+  const normalRole = wireNodes(h.pane).find(node => /history-card-\d+$/.test(node.id))?.p.role
+  assert.equal(normalRole, 'dsh.history.card', 'normal height role')
+  assert.ok(h.texts().some(text => text === 'Expand'), 'and the button says Expand')
+
+  h.key(F2)
+  await h.painted(() => h.texts().some(text => text === 'Collapse'), 'F2 renamed the control')
+  assert.equal(wireNodes(h.pane).find(node => /history-card-\d+$/.test(node.id))?.p.role,
+    'dsh.history.card-expanded', 'the SAME node carries the expanded height budget')
+  assert.equal(h.ids(/history-card-\d+$/).length, 1, 'ONE card node, never a second surface')
+  const query = h.queryField()
+  assert.ok(query !== undefined, 'the query survived the expansion')
+
+  h.key(F2)
+  await h.painted(() => h.texts().some(text => text === 'Expand'), 'F2 collapses again')
+  assert.equal(wireNodes(h.pane).find(node => /history-card-\d+$/.test(node.id))?.p.role,
+    'dsh.history.card', 'and the height budget returns')
+})
+
+test('a lagging Copy or Restore click cannot act on a selection the user already moved', async (t) => {
+  // The review's P2: serial + query revision do NOT change when the highlight
+  // moves, so the action cells kept one identity across a selection change. A
+  // click painted against row A must not perform row B's business action.
+  const h = await mountHistoryPane(t)
+  h.key(CTRL_R)
+  await h.painted(() => h.selected().length === 1, 'the page settled with a selection')
+  const restore = h.ids(/-restore$/)[0]!
+  const copy = h.ids(/-copy$/)[0]!
+  assert.ok(/-s\d+-restore$/.test(restore) && /-s\d+-copy$/.test(copy),
+    `the acting cells are bound to a selection position: ${JSON.stringify([restore, copy])}`)
+  const first = h.selected()[0] ?? ''
+  assert.ok(first.includes('alpha one'), `row A is selected: ${JSON.stringify(first)}`)
+
+  // Move the highlight to B, then let a click that was painted against A land.
+  h.key(DOWN)
+  await h.painted(() => (h.selected()[0] ?? '') !== first, 'the selection moved to another row')
+  const moved = h.selected()[0] ?? ''
+  h.clickRefused(restore)
+  h.clickRefused(copy)
+  await h.observeAbsence()
+  assert.equal(h.composer().text, '', 'the stale Restore performed no draft write')
+  assert.deepEqual(h.copies, [], 'and the stale Copy emitted nothing')
+
+  // The control that proves the fence is not just a broken button: the cell the
+  // CURRENT frame paints acts normally, against the NEW selection. Its id moved
+  // with the highlight, which is exactly what retired the stale gesture above.
+  const currentRestore = h.ids(/-restore$/)[0]!
+  assert.notEqual(currentRestore, restore, 'the acting cell identity moved with the selection')
+  assert.ok(/-s\d+-restore$/.test(currentRestore), `the cell names its painted row position: ${currentRestore}`)
+  h.click(currentRestore)
+  await h.painted(() => h.composer().text !== '', 'the current Restore button still works')
+  assert.ok(moved.replace(/^›/u, '') === h.composer().text,
+    `the current button wrote the row the user actually selected: ${JSON.stringify({ moved, draft: h.composer().text })}`)
 })
 
 // ── H. The composer chrome stays honest while the card owns the seat ─────────

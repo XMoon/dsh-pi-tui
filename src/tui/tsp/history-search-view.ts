@@ -32,6 +32,13 @@ export const HISTORY_SEARCH_SHEET = 'dsh-history-search'
  *  Composer shell, the Footer, the Transcript or another TSP panel. */
 export const HISTORY_SEARCH_ROLES = {
   card: 'dsh.history.card',
+  /** The SAME card node in its expanded height budget. This client's stylesheet
+   *  selects by data-role, and a container node carries no attrs (only el
+   *  does), so the height state is a role token on the existing node: never a
+   *  second node and never a remount, because the id derives from the key,
+   *  which does not change. The button's own label flips between Expand and
+   *  Collapse, so the disclosure states itself without a new attribute slot. */
+  cardExpanded: 'dsh.history.card-expanded',
   head: 'dsh.history.head',
   headEnd: 'dsh.history.head-end',
   title: 'dsh.history.title',
@@ -186,7 +193,11 @@ export function historySearchView(input: TspHistorySearchViewInput): Node {
     : ui.col({ key: `h${serial}-body`, role: HISTORY_SEARCH_ROLES.body, gap: 'sm' }, results, preview)
 
   return ui.col(
-    { key: `history-card-${serial}`, role: HISTORY_SEARCH_ROLES.card, gap: 'none' },
+    {
+      key: `history-card-${serial}`,
+      role: state.expanded ? HISTORY_SEARCH_ROLES.cardExpanded : HISTORY_SEARCH_ROLES.card,
+      gap: 'none',
+    },
     ui.row(
       { key: `h${serial}-head`, role: HISTORY_SEARCH_ROLES.head, gap: 'sm', align: 'center' },
       ui.text({ key: `h${serial}-title`, role: HISTORY_SEARCH_ROLES.title, wrap: 'none', text: 'Input History' }),
@@ -225,11 +236,15 @@ export function historySearchView(input: TspHistorySearchViewInput): Node {
         { key: `h${serial}-actions-end`, role: HISTORY_SEARCH_ROLES.actionsEnd, gap: 'sm', align: 'center' },
         chromeButton(state.copyKey, HISTORY_SEARCH_ROLES.copy, state.copyLabel,
           state.actionsEnabled ? 'Copy the selected entry exactly as stored' : 'Nothing selected to copy',
-          state.actionsEnabled, () => onIntent({ kind: 'copy', serial, revision })),
+          // The cell binds the selection it was painted for, and its node key
+          // carries that position, so a click that arrives after the highlight
+          // moved is refused by the client's own stale-frame rule instead of
+          // borrowing the newer selection's business action.
+          state.actionsEnabled, () => onIntent({ kind: 'copy', selectedId: state.selectedId, serial, revision })),
         chromeButton(state.restoreKey, HISTORY_SEARCH_ROLES.restore, state.restoreLabel,
           state.actionsEnabled ? 'Restore the selected entry into the composer; it never sends it'
             : 'Select a settled history entry to restore it',
-          state.actionsEnabled, () => onIntent({ kind: 'restore', serial, revision }))),
+          state.actionsEnabled, () => onIntent({ kind: 'restore', selectedId: state.selectedId, serial, revision }))),
     ),
   )
 }
@@ -327,6 +342,20 @@ export const HISTORY_SEARCH_STYLES = `
     color: var(--t4);
     filter: none;
   }
+  /* Expanded: the SAME card asks for a taller budget. This is the rule that
+     makes F2 real: without it the button would only rename itself while the
+     reader stayed inside the normal height. The budget is still vh-bounded, so
+     the Composer and the Footer below stay reachable at any window height. */
+  [data-role='dsh.history.card-expanded'] {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-height: min(620px, 82vh);
+    overflow: hidden;
+    flex-shrink: 0;
+    padding: 10px 12px;
+  }
+
   [data-role='dsh.history.query'] {
     margin: 0;
     flex-shrink: 0;
@@ -464,6 +493,12 @@ export const HISTORY_SEARCH_STYLES = `
     [data-role='dsh.history.hint'] { display: none; }
     [data-role='dsh.history.results-head'],
     [data-role='dsh.history.preview-head'] { display: none; }
+    /* At a short pane the expansion may only take what the pane can spare:
+       measured on the real client at 900x360, a 62vh budget grew the card by
+       50px and left 12.8px of the 33px composer visible. The dock keeps the
+       rest, so the composer and the footer stay reachable and the expansion is
+       still a real gain. */
+    [data-role='dsh.history.card-expanded'] { max-height: min(200px, 54vh); }
     [data-role='dsh.history.results-scroll'] { min-height: 26px; flex-grow: 2; }
     [data-role='dsh.history.preview-scroll'] { min-height: 0; }
     [data-role='dsh.history.preview'] { flex-basis: 0; }
