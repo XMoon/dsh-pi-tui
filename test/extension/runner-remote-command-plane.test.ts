@@ -50,9 +50,10 @@
 import assert from 'node:assert/strict'
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import test from 'node:test'
+import test, { type TestContext } from 'node:test'
 import type { Fiber } from '@deepseek-ai/cordis'
 import { symbols } from '@deepseek-ai/cordis'
+import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { formatSessionMarkdown } from '@deepseek-ai/dsh-session-log-export'
 import { Config as TuiConfigSchema } from '../../src/index.ts'
@@ -335,6 +336,95 @@ function submit(fixture: Fixture, text: string): void {
   const app = fixture.app()
   app.setDraft(text)
   app.submitDraft()
+}
+
+interface RouteMarkdownInput {
+  readonly events: readonly SessionEvent[]
+  readonly sourcePath?: string
+}
+
+/**
+ * Observe the two Host services the official Markdown route reads. The spies
+ * keep the exact `this`, arguments, result and failure of each call; only their
+ * route-time inputs become the test's byte-exact oracle. A request fence proves
+ * the captured pair belongs to THIS `/transcript` read, not a background stat.
+ */
+function captureRouteMarkdownInput(
+  life: TestLifecycle,
+  hostCtx: Fixture['host']['ctx'],
+  expectedSessionId: string,
+  options: { readonly routeSourcePath?: null } = {},
+): {
+  observed(): RouteMarkdownInput | undefined
+  assertRouteObserved(): RouteMarkdownInput
+} {
+  const query = unwrapService(hostCtx.get('sessionQuery')) as {
+    readSession(id: unknown): Promise<{ readonly events: readonly SessionEvent[] }>
+  }
+  const persistence = unwrapService(hostCtx.get('sessionPersistence')) as {
+    stat(
+      id: unknown,
+      options?: { readonly signal?: AbortSignal },
+    ): Promise<{ readonly location?: { readonly path?: string } } | undefined>
+  }
+  const originalRead = query.readSession
+  const originalStat = persistence.stat
+  let armed = false
+  let reads = 0
+  let routeSnapshot: { readonly events: readonly SessionEvent[] } | undefined
+  let statCalls = 0
+  let routeSourcePath: string | undefined
+  let observedStat = false
+  let observed: RouteMarkdownInput | undefined
+
+  query.readSession = function patchedReadSession(this: unknown, id: unknown): Promise<{ readonly events: readonly SessionEvent[] }> {
+    assert.equal(String(id), expectedSessionId, 'the Markdown route reads the command-origin Session')
+    assert.equal(armed, false, 'exactly one official Markdown route read is observed')
+    armed = true
+    reads += 1
+    return originalRead.call(this, id).then(snapshot => {
+      routeSnapshot = snapshot
+      return snapshot
+    })
+  }
+  persistence.stat = function patchedStat(
+    this: unknown,
+    id: unknown,
+    statOptions?: { readonly signal?: AbortSignal },
+  ): Promise<{ readonly location?: { readonly path?: string } } | undefined> {
+    if (armed === false || statCalls > 0) return originalStat.call(this, id, statOptions)
+    assert.equal(String(id), expectedSessionId, 'the route stat targets the same Session')
+    assert.equal(reads, 1, 'the route stat follows the one route read')
+    assert.equal(observedStat, false, 'the route performs one stat for the export')
+    assert.ok(statOptions?.signal instanceof AbortSignal, 'the official route passes its request signal to stat')
+    statCalls += 1
+    return originalStat.call(this, id, statOptions).then(metadata => {
+      if (options.routeSourcePath !== null) return metadata
+      // The official `stat` answer for an unmaterialized Session legitimately
+      // has no `location`. Keep the production formatter path intact and
+      // force exactly that legal export-time observation for the witness.
+      return metadata === undefined ? undefined : { ...metadata, location: undefined }
+    }).then(metadata => {
+      if (options.routeSourcePath === null) routeSourcePath = undefined
+      else routeSourcePath = metadata?.location?.path
+      observedStat = true
+      observed = { events: routeSnapshot!.events, ...routeSourcePath === undefined ? {} : { sourcePath: routeSourcePath } }
+      return metadata
+    })
+  }
+  life.defer(() => {
+    query.readSession = originalRead
+    persistence.stat = originalStat
+  })
+  return {
+    observed: () => observed,
+    assertRouteObserved: () => {
+      assert.equal(reads, 1, 'the official Host route performed exactly one Session Query read')
+      assert.equal(observedStat, true, 'the official Host route consumed exactly one stat result')
+      assert.ok(observed !== undefined, 'the route-time snapshot and source path belong to the same request')
+      return observed
+    },
+  }
 }
 
 async function settle(ms = 60): Promise<void> {
@@ -952,13 +1042,24 @@ test('sessionless standing skill: the Remote refresh reports EXPLICIT unavailabl
 })
 
 test('L6: Remote /transcript writes the official Host Markdown to a Client-local file (real authenticated route)', async (t) => {
+  await assertRemoteTranscriptRoute(t)
+})
+
+test('a missing export-time Session path omits Session file even when a later Host stat finds the artifact', async (t) => {
+  await assertRemoteTranscriptRoute(t, { routeSourcePath: null, expectLaterPath: true })
+})
+
+async function assertRemoteTranscriptRoute(
+  t: TestContext,
+  options: { readonly routeSourcePath?: null; readonly expectLaterPath?: boolean } = {},
+): Promise<void> {
   // The REAL Remote composition: the Client-local `/transcript` command keeps
   // its Client dispatch, the post-success save opens the Client Save Location,
   // and the official authenticated `GET /api/session.markdown` route serves the
   // Host Session Query snapshot. The Host executor is never entered and the
-  // saved bytes equal the official formatter output over the SAME snapshot.
+  // saved bytes equal the official formatter output over the SAME route inputs.
   const life = testLifecycle(t)
-  const mainId = 'm3-4-pr4-transcript-success'
+  const mainId = `m3-4-pr4-transcript-${options.routeSourcePath === null ? 'absent-path' : 'route-inputs'}`
   const outDir = life.tempDir('dsh-remote-transcript-')
   const fixture = await mountRunner(life, {
     resumeSessionId: mainId,
@@ -988,46 +1089,47 @@ test('L6: Remote /transcript writes the official Host Markdown to a Client-local
     return { kind: 'selected', directory: outDir, overwrite: false }
   }
   life.defer(() => { TuiApp.prototype.askSaveLocation = originalAsk })
-  // Instrument the EXACT Host sessionQuery instance (unwrapped from the
-  // traceable service proxy, never `.bind`-ed) so the official route's Host
-  // read is observable: only the Host route can reach this object from the
-  // Client.
-  const query = unwrapService(fixture.host.ctx.get('sessionQuery')) as {
-    readSession(id: unknown): Promise<unknown>
-  }
-  const originalRead = query.readSession
-  let queryReads = 0
-  query.readSession = function patchedReadSession(this: unknown, id: unknown): Promise<unknown> {
-    queryReads += 1
-    return originalRead.call(this, id)
-  }
-  life.defer(() => { query.readSession = originalRead })
+  const routeInput = captureRouteMarkdownInput(life, fixture.host.ctx, mainId, options)
   await settle(120)
   submit(fixture, '/transcript')
   const target = join(outDir, `dsh-session-${mainId}.md`)
   await waitFor('the Client-local Markdown file landed', () => existsSync(target), 15_000)
   assert.equal(savePrompts, 1, 'the Client Save Location opened exactly once')
-  assert.equal(queryReads, 1, 'the official Host route performed exactly one Session Query read')
   assert.equal(fixture.hostCommandRuns(mainId), 0,
     'the Client-local /transcript never reaches the Host command executor')
-  // The saved bytes are the official formatter output over the same committed
-  // Host snapshot (and carry the Host metadata path, kept verbatim).
-  const snapshot = await (fixture.host.ctx as unknown as {
-    sessionQuery: { readSession(id: unknown): Promise<{ events: readonly never[] }> }
-  }).sessionQuery.readSession(SessionId(mainId))
-  const metadata = await (fixture.host.ctx as unknown as {
-    sessionPersistence: { stat(id: unknown): Promise<{ location?: { path?: string } } | undefined> }
-  }).sessionPersistence.stat(SessionId(mainId))
+  const captured = routeInput.assertRouteObserved()
   const content = readFileSync(target, 'utf8')
-  assert.equal(content, formatSessionMarkdown(snapshot.events, metadata?.location?.path),
-    'the Remote file bytes are the official Host-authored Markdown')
+  assert.equal(content, formatSessionMarkdown(captured.events, captured.sourcePath),
+    'the Remote file bytes are the official formatter output over the actual Host route inputs')
+  if (options.expectLaterPath === true) {
+    // The old oracle consulted this LATER stat; here it is deliberately
+    // different from the export-time answer, so a post-export re-read is a
+    // demonstrably wrong oracle for this saved file.
+    const sessions = unwrapService(fixture.host.ctx.get('sessions')) as {
+      get(id: unknown): unknown
+      flush(session: unknown): Promise<boolean>
+    }
+    const session = sessions.get(SessionId(mainId))
+    assert.ok(session !== undefined, 'the original Session is still live for the durability barrier')
+    assert.equal(await sessions.flush(session), true, 'the Host durability barrier materialized the Session artifact')
+    const laterMetadata = await (fixture.host.ctx as unknown as {
+      sessionPersistence: { stat(id: unknown): Promise<{ location?: { path?: string } } | undefined> }
+    }).sessionPersistence.stat(SessionId(mainId))
+    const laterPath = laterMetadata?.location?.path
+    assert.equal(typeof laterPath, 'string', 'the later Host stat sees a real artifact path')
+    assert.equal(captured.sourcePath, undefined, 'the route saw no source path at export time')
+    assert.doesNotMatch(content, /Session file:/u,
+      'the saved bytes keep the legal export-time absence of the optional source block')
+    assert.notEqual(content, formatSessionMarkdown(captured.events, laterPath),
+      'the retired post-export oracle would reject this official response')
+  }
   assert.match(content, /> transcript prompt 汉字/u, 'the human question is an official blockquote')
   assert.match(content, /official answer 🙂/u)
   assert.doesNotMatch(content, /^## (User|Assistant)$/mu, 'the retired Client-local format never ran')
   assert.equal(content.endsWith('\n'), true)
   // The save target is the CLIENT-selected directory, never the Host path.
   assert.ok(existsSync(join(outDir, `dsh-session-${mainId}.md`)))
-})
+}
 
 test('stale catalog (M3-6 PR2): refresh A → Connection replacement → the old snapshot cannot commit and generation B AUTOMATICALLY re-reads the Host catalog without /reload', async (t) => {
   // The F2a install fence over the MOUNTED composition, plus the M3-6 PR2
