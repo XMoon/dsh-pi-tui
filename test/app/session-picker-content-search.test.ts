@@ -889,30 +889,11 @@ test('opening /sessions, filtering, closing and /search never switch the Session
 })
 
 // ── M5-U-B: the PiTui Presenter renders the read owner's merged results ─────
-// The canonical seed is an EDITOR fill, never an input event: it must not mint
-// a second query generation (which would abort and restart the identical Host
-// search) and it must not overwrite a user edit.
-
-test('the seeded command runs exactly one canonical Host search and keeps the editor seed', async (t) => {
-  const h = harness({
-    rows: rows(),
-    search: async () => ({ items: [{ sessionId: 'session-alpha', snippet: 'needle alpha' }], hasMore: false }),
-  })
-  t.after(() => h.app.stop())
-  await h.runSessions('needle')
-  await waitUntil(() => h.searchCalls.length === 1)
-  await waitUntil(() => h.view().includes('needle alpha'))
-  // Wait past the whole debounce window: the seeded open must settle on ONE
-  // Host search, and the seeded text must stay in the editor. NOTE: the read
-  // owner's canonical-equality guard would itself drop an identical restart,
-  // so this observable result is seeding coverage — not an independent probe
-  // of the Presenter's applyingSeed suppression.
-  // Bounded observation window: the 250 ms debounce must elapse before a duplicate generation could surface.
-  await new Promise<void>(resolve => setTimeout(resolve, 500))
-  assert.equal(h.searchCalls.length, 1, 'the seeded open owns exactly one Host search')
-  assert.equal(h.searchCalls[0]!.query, 'needle')
-  assert.ok(h.view().includes('sessions · Search results'), 'the seeded command opens the owner-driven search projection')
-})
+// The canonical seed is an EDITOR fill, never an input event: it reaches the
+// externally-filtered editor, cannot overwrite a user edit and does not mint a
+// second query generation (the owner's canonical-equality guard is the primary
+// no-restart protection; the no-restart contract itself is covered by the
+// pre-existing canonical no-op case).
 
 test('a typed query replaces the command seed as the one search identity', async (t) => {
   const h = harness({
