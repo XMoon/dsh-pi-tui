@@ -1442,3 +1442,27 @@ test('L6: a deleted underlay task keeps Help open and returns to the list', asyn
     life.controller.dispose()
   }
 })
+
+test('L6: an older reload failure never replaces the newest success notice', async () => {
+  const life = await opened()
+  try {
+    life.controller.dispatch({ kind: 'open-detail', id: 'schedule-1' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-edit' })
+    await flush()
+    const newer = deferred<ScheduleViewResult>()
+    const older = deferred<ScheduleViewResult>()
+    life.port.viewQueue = [older.promise, newer.promise]
+    life.controller.dispatch({ kind: 'reload-latest' })
+    life.controller.dispatch({ kind: 'reload-latest' })
+    newer.resolve(entry({ title: 'V2', updatedAt: '2026-01-03T00:00:00.000Z' }))
+    await flush()
+    older.reject(new Error('stale network error'))
+    await flush()
+    assert.equal(life.controller.snapshot().notice?.text, SCHEDULE_COPY.reloaded, 'the superseded failure is silent')
+    assert.equal(life.controller.snapshot().editor?.title, 'V2')
+    assert.equal(life.controller.snapshot().editor?.expectedUpdatedAt, '2026-01-03T00:00:00.000Z')
+  } finally {
+    life.controller.dispose()
+  }
+})

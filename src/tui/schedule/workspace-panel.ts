@@ -492,6 +492,10 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
   private handleEditorInput(data: string): void {
     const draft = this.snapshot.editor
     if (draft === undefined) return
+    // The Controller freezes the draft while a Host write is pending; the panel
+    // owns the local input buffers and must honour the SAME contract, or a
+    // rejected `set-field` would leave the visible buffer ahead of the draft.
+    if (this.snapshot.busy) return
     const focused = focusedField(draft)
     // A TEXT field owns every printable character, `?` included; Help is the
     // `?` action only where there is no text to type (the kind/target/advanced
