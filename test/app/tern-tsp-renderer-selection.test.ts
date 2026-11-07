@@ -198,6 +198,7 @@ async function selectRenderer(options: {
   const { selectRendererMount, productionTspConnector } = await import('../../src/app/bootstrap/renderer-selection.ts')
   const production = productionTspConnector({ copyVisual: async () => false,
     cwd: '/tmp',
+    displayState: { preset: 'full' },
     requestExit: options.requestExit ?? ((): void => {}),
     onFatal: options.onFatal ?? ((): void => {}),
     log: (): void => {},

@@ -23,17 +23,25 @@
 import { ui } from '@stencil-hq/tern'
 import type { Node, Spans, Status } from '@stencil-hq/tern'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
+import type { DisplayPreset } from '../../domain/display/preset.ts'
 import type { SettledQuestionAnswersLookup } from '../../app/surface/interaction-presenter.ts'
 import type { StreamingToolPreview } from '../../app/surface/streaming-tool-preparing.ts'
 import { contextFormOf } from '../../domain/transcript/context-semantics.ts'
 import { subCallDisplayStatus } from '../../domain/transcript/folder.ts'
 import { formatBytes } from '../../domain/media/format.ts'
 import type { ImageAttachmentRefLike } from '../../domain/media/types.ts'
-import type { AssistantDisplayBlock, TranscriptMessage, TranscriptToolMessage } from '../../domain/transcript/types.ts'
+import { THINKING_TAIL_CAP, type AssistantDisplayBlock, type TranscriptMessage, type TranscriptToolMessage } from '../../domain/transcript/types.ts'
+import type { TranscriptWindowState } from '../../domain/transcript/window.ts'
 import { contextPresentationKind } from '../transcript/context-structure.ts'
 import type { ContextCluster } from '../transcript/context-structure.ts'
 import { contextClusterSummaryParts } from '../transcript/context-summary.ts'
+import { projectCompact, type CompactProjectedBlock } from '../transcript/compact-projection.ts'
+import type { TranscriptContainerPath } from '../transcript/container-owner.ts'
+import { compactActionPresentation, compactPreparingSummary } from '../components/transcript/compact-process-preview.ts'
+import { compactActionStatParts, formatCompactDuration } from '../transcript/process-summary.ts'
 import type { TranscriptStructureBlock, TranscriptWorkSpan } from '../transcript/structure.ts'
+import { projectTranscriptStructure } from '../transcript/structure.ts'
+import { summarizeWorkSpan } from '../transcript/work-summary.ts'
 import { systemContextBody, toolCardHeader, toolTitle, relativizeToCwd } from '../transcript/tool-presentation.ts'
 import type { ToolPresenter } from '../transcript/tool-presentation.ts'
 import { toolTargetFactsOf, toolTargetKind } from '../transcript/tool-target-semantics.ts'
@@ -172,6 +180,19 @@ export interface TranscriptViewOptions {
    * painted only on the matching published figure.
    */
   readonly selectedVisual?: SelectedVisualState
+}
+
+/** Explicit inputs for the typed Full/Compact entry. It keeps the old
+ *  `transcriptView` structural contract unchanged for standalone pure mounts
+ *  and takes the RAW window so Compact consumes the same canonical projection
+ *  input as Full, never a flattened/re-derived row sequence. */
+export interface TranscriptPresetViewOptions extends TranscriptViewOptions {
+  readonly preset: DisplayPreset
+  /** The renderer-local Compact Work-span disclosure owners (object identity). */
+  readonly expandedWorkOwners?: ReadonlySet<TranscriptMessage>
+  /** The current committed transcript window, read only for the tail/latest
+   *  preview admission. */
+  readonly window?: (TranscriptWindowState & { readonly hasNewer?: boolean }) | undefined
 }
 
 /** PR-D: one SVG row's prepared display state. */
@@ -1171,6 +1192,183 @@ function clusterNode(cluster: ContextCluster, keys: TranscriptNodeKeys, options:
   )
 }
 
+/** The last non-empty logical line of the ALREADY-BOUNDED reasoning tail.
+ *  Tern owns physical clipping; the preview never scans a full reasoning body
+ *  and never adds a second row. */
+function boundedThinkPreview(text: string): string | undefined {
+  const lines = (text.length > THINKING_TAIL_CAP ? text.slice(-THINKING_TAIL_CAP) : text).split(/\r\n|\r|\n/u)
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index]!.trim()
+    if (line !== '') return line
+  }
+  return undefined
+}
+
+/** Whether a collapsed Work may show at most two bounded preview rows. The
+ *  window must PROVE it is the latest (`hasNewer === false`, never an absent
+ *  window) AND the span must be the projected TAIL Work — the same
+ *  `isTrueLatestWork` authority PiTui uses. An earlier Work of a still-open
+ *  turn is historical and stays header-only; the latest think-only span keeps
+ *  `Activity` + its preview so the identity never flips while streaming. */
+function workPreviewAdmitted(
+  tailWork: boolean,
+  options: TranscriptPresetViewOptions,
+): boolean {
+  return options.window?.hasNewer === false && tailWork
+}
+
+/** The Compact Activity header + optional bounded preview, drawn as the
+ *  section's native head. A collapsed Work owns no hidden member/tool/image
+ *  nodes, so no Tool SVG blob or image demand can start from a header. */
+function compactWorkHead(
+  summary: ReturnType<typeof summarizeWorkSpan>,
+  previewAdmitted: boolean,
+  expanded: boolean,
+  previews: readonly StreamingToolPreview[],
+  options: TranscriptViewOptions,
+): Node {
+  const thought = !previewAdmitted
+    && summary.think !== undefined
+    && summary.action === undefined
+    && summary.actionStats.total === 0
+  // A proven positive span is required: unknown is omitted, and a sub-second
+  // span must not round into a bogus `0s`.
+  const measured = summary.timing?.endedAt !== undefined && summary.timing.endedAt > summary.timing.startedAt
+    ? formatCompactDuration(summary.timing.endedAt - summary.timing.startedAt)
+    : undefined
+  const duration = measured === '0s' ? undefined : measured
+  const stats = compactActionStatParts(summary.actionStats).map(sanitizedPhysicalLine).join(' · ')
+  const parts = [
+    thought ? 'Thought' : 'Activity',
+    ...(duration === undefined ? [] : [duration]),
+    ...(stats === '' ? [] : [stats]),
+  ].join(' · ')
+  const rows: Node[] = [ui.text({ key: 'title', text: sanitizedPhysicalLine(parts), wrap: 'none' })]
+  if (previewAdmitted && !expanded) {
+    const think = summary.think === undefined ? undefined : boundedThinkPreview(summary.think.text)
+    if (think !== undefined) rows.push(ui.text({ key: 'think', text: sanitizedPhysicalLine(`Think: ${think}`), wrap: 'none' }))
+    const preparing = compactPreparingSummary(previews.map(entry => ({ index: entry.index, ...(entry.name === undefined ? {} : { name: entry.name }) })))
+    const action = summary.action === undefined
+      ? undefined
+      : compactActionPresentation(summary.action, {
+        ...(options.toolPresenter === undefined ? {} : { presenter: options.toolPresenter }),
+        ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
+      })
+    const oneLine = preparing
+      ?? (action === undefined ? undefined : `${action.status === 'ok' ? '✓ ' : action.status === 'error' ? '✗ ' : ''}${action.display}`)
+    if (oneLine !== undefined) rows.push(ui.text({ key: 'action', text: sanitizedPhysicalLine(`Action: ${oneLine}`), wrap: 'none' }))
+  }
+  return ui.col({ key: 'head' }, ...rows)
+}
+
+/** Full materializes `projectTranscriptStructure` flat: canonical Work members
+ *  keep their exact raw positions and no Work container is painted. */
+function fullView(
+  structure: readonly TranscriptStructureBlock[],
+  keys: TranscriptNodeKeys,
+  options: TranscriptViewOptions,
+  prefix: string,
+  trailing: TranscriptStructureBlock | undefined,
+  adopted: readonly StreamingToolPreview[],
+  standalone: readonly Node[],
+): Node {
+  const rows: Node[] = []
+  for (const block of structure) {
+    if (block.kind === 'message') {
+      rows.push(messageNode(block.message, `${prefix}${keys.keyFor(block.message)}`, options))
+      continue
+    }
+    if (block.kind === 'context-cluster') {
+      rows.push(clusterNode(block.cluster, keys, options, prefix))
+      continue
+    }
+    for (const part of block.span.parts) {
+      rows.push(part.kind === 'message'
+        ? messageNode(part.message, `${prefix}${keys.keyFor(part.message)}`, options)
+        : clusterNode(part.cluster, keys, options, prefix))
+    }
+    if (block === trailing) for (const preview of adopted) rows.push(preparingRow(preview, options.cwd, prefix))
+  }
+  return ui.col({ key: 'transcript' }, ...rows, ...standalone)
+}
+
+/** The Work owner of one projected member, from its canonical containerPath
+ *  only — never a turn number, a tool name or an adjacent visual row. */
+function workOwnerOf(path: TranscriptContainerPath | undefined): TranscriptMessage | undefined {
+  const entry = path?.find(owner => owner.kind === 'work')
+  return entry?.kind === 'work' ? entry.owner : undefined
+}
+
+/** Compact consumes `projectCompact`'s output order: every canonical Work span
+ *  owns exactly one Activity section, and its FLAT member blocks (including a
+ *  carried snapshot cluster's members under clusterHeader:false) become that
+ *  section's children. Conversation/Attention/command/ambient Context stays in
+ *  the main reading flow in raw order. */
+function compactView(
+  blocks: readonly CompactProjectedBlock[],
+  keys: TranscriptNodeKeys,
+  options: TranscriptPresetViewOptions,
+  prefix: string,
+  tailWorkOwner: TranscriptMessage | undefined,
+  adoptedPreviews: readonly StreamingToolPreview[],
+  standalone: readonly Node[],
+): Node {
+  /** One call-local assembly record per emitted Work header. Children are
+   *  collected from the projection's own flat member blocks, then the section
+   *  is built ONCE — no node is rebuilt or mutated after construction. */
+  interface WorkSlot {
+    readonly key: string
+    readonly head: Node
+    readonly expanded: boolean
+    readonly members: Node[]
+    readonly preparing: Node[]
+  }
+  const slots = new Map<TranscriptMessage, WorkSlot>()
+  const rows: (Node | WorkSlot)[] = []
+  for (const block of blocks) {
+    if (block.kind === 'work') {
+      const expanded = options.expandedWorkOwners?.has(block.span.owner) === true
+      // ONLY the projected TAIL Work may adopt the live Preparing rows: an
+      // earlier Work of the same still-open turn is historical, and a turn key
+      // is not an owner identity.
+      const isTail = tailWorkOwner === block.span.owner
+      const previews = isTail ? adoptedPreviews : []
+      const summary = summarizeWorkSpan(block.span)
+      const previewAdmitted = workPreviewAdmitted(isTail, options)
+      const slot: WorkSlot = {
+        key: `${prefix}work-${keys.keyFor(block.span.owner)}`,
+        head: compactWorkHead(summary, previewAdmitted, expanded, previews, options),
+        expanded,
+        members: [],
+        preparing: expanded ? previews.map(preview => preparingRow(preview, options.cwd, '')) : [],
+      }
+      slots.set(block.span.owner, slot)
+      rows.push(slot)
+      continue
+    }
+    if (block.kind === 'context-cluster') {
+      // clusterHeader:false in projectCompact always emits FLAT member rows;
+      // a cluster header here would be a second, inoperable disclosure owner.
+      continue
+    }
+    const owner = workOwnerOf(block.containerPath)
+    const slot = owner === undefined ? undefined : slots.get(owner)
+    if (slot === undefined) {
+      rows.push(messageNode(block.message, `${prefix}${keys.keyFor(block.message)}`, options))
+      continue
+    }
+    // The member belongs to this Work by its canonical containerPath only.
+    slot.members.push(messageNode(block.message, keys.keyFor(block.message), options))
+  }
+  return ui.col(
+    { key: 'transcript' },
+    ...rows.map(row => 'key' in row
+      ? ui.section({ key: row.key, head: row.head, collapsible: true, collapsed: !row.expanded }, ...row.members, ...row.preparing)
+      : row),
+    ...standalone,
+  )
+}
+
 /**
  * Map the canonical structural blocks of one transcript window onto a native
  * TSP view: the whole structure as ONE `col` root, in raw visual order.
@@ -1223,3 +1421,56 @@ export function transcriptView(
     ...standalone,
   )
 }
+
+/**
+ * The typed Full/Compact entry the production session calls with the RAW
+ * window. `projectTranscriptStructure` stays the ONE segmentation authority:
+ * Full flattens its canonical parts, Compact materializes `projectCompact`
+ * over the SAME raw messages. `focus` (and any future preset without a TSP
+ * projection) keeps the historical Work-section layout unchanged.
+ */
+export function transcriptViewForPreset(
+  messages: readonly TranscriptMessage[],
+  keys: TranscriptNodeKeys,
+  options: TranscriptPresetViewOptions,
+): Node {
+  // Allocate every row's presentation key in RAW order BEFORE materializing.
+  // A collapsed Work builds no member nodes, so without this pass expanding it
+  // would shift every later `msg-N` and remount unrelated rows: disclosure
+  // state must never change a retained message's identity.
+  for (const message of messages) keys.keyFor(message)
+  const structure = projectTranscriptStructure(messages)
+  const prefix = options.scopePrefix ?? ''
+  const groups = groupPreparingPreviews(options.preparingPreviews ?? [])
+  const trailing = structure.length === 0 ? undefined : structure[structure.length - 1]
+  const openTurn = trailing?.kind === 'work' ? trailing.span.turn : undefined
+  let adopted: readonly StreamingToolPreview[] = []
+  const standalone: Node[] = []
+  for (const [turn, group] of groups) {
+    if (turn === openTurn) {
+      adopted = group
+      continue
+    }
+    for (const preview of group) standalone.push(preparingRow(preview, options.cwd, prefix))
+  }
+  if (options.preset === 'full') return fullView(structure, keys, options, prefix, trailing, adopted, standalone)
+  if (options.preset === 'compact') {
+    const blocks = projectCompact(messages, {
+      expandedWorkOwners: options.expandedWorkOwners ?? EMPTY_MESSAGE_SET,
+      expandedClusters: EMPTY_MESSAGE_SET,
+      forcedExpanded: EMPTY_MESSAGE_SET,
+      clusterHeader: false,
+      workHeader: true,
+    })
+    const tailWork = [...structure].reverse().find(block => block.kind === 'work')
+    // Only the TRAILING open Work adopts its own turn's Preparing rows; every
+    // other turn already failed open as standalone rows above. The adopted rows
+    // belong to the projected TAIL Work alone — a turn key is not an owner.
+    return compactView(blocks, keys, options, prefix, tailWork?.kind === 'work' ? tailWork.span.owner : undefined, adopted, standalone)
+  }
+  return transcriptView(structure, keys, options)
+}
+
+/** A read-only empty disclosure set for this projection call (no search reveal
+ *  or cluster disclosure owner exists in this build). */
+const EMPTY_MESSAGE_SET: ReadonlySet<TranscriptMessage> = new Set<TranscriptMessage>()

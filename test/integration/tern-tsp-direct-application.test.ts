@@ -304,3 +304,105 @@ test('a real Ctrl+V with a TEXT clipboard inserts at the caret and stages no ima
 function paneHasImageNotice(wire: string): boolean {
   return wire.includes('attached [image') || wire.includes('Image read failed')
 }
+
+// ── Canonical Full/Compact: the REAL configured preset reaches the TSP frame ──
+
+/** Fold the pane's SDK frames into the live node set (retired nodes are gone). */
+function liveNodes(wire: string): Array<{ id: string; k: string; p: Record<string, unknown>; c?: unknown[] }> {
+  const nodes = new Map<string, { id: string; k: string; p: Record<string, unknown>; c?: unknown[] }>()
+  const drop = (id: string): void => {
+    for (const key of [...nodes.keys()]) if (key === id || key.startsWith(`${id}.`)) nodes.delete(key)
+  }
+  const visit = (node: { id: string; k: string; p: Record<string, unknown>; c?: unknown[] }): void => {
+    nodes.set(node.id, node)
+    for (const child of node.c ?? []) visit(child as never)
+  }
+  for (const match of wire.matchAll(/\u001b_tsp;f;([\s\S]*?)\u001b\\/g)) {
+    const frame = JSON.parse(match[1]!) as { ops: unknown[][] }
+    for (const op of frame.ops) {
+      if (op[0] === 'add') visit(op[4] as never)
+      else if (op[0] === 'del') drop(String(op[1]))
+      else if (op[0] === 'set' && typeof op[1] === 'string') {
+        const node = nodes.get(op[1])
+        if (node !== undefined) node.p = { ...node.p, ...(op[2] as Record<string, unknown>) }
+      }
+    }
+  }
+  return [...nodes.values()]
+}
+
+const nodeText = (node: { p: Record<string, unknown>; c?: unknown[] }): string => {
+  const parts: string[] = []
+  const visit = (current: { p: Record<string, unknown>; c?: unknown[] }): void => {
+    if (typeof current.p['text'] === 'string') parts.push(current.p['text'])
+    for (const child of current.c ?? []) visit(child as never)
+  }
+  visit(node)
+  return parts.join(' ')
+}
+
+/**
+ * The configured DisplayPreset must travel the WHOLE production chain:
+ * `tuiConfig.displayPreset` → the real Runner ConfigPort → `resolveDisplayPreset`
+ * → the ONE `displayState` → `productionTspConnector` → the mounted renderer →
+ * the SDK frame. A real Composer Enter drives a real Agent turn whose scripted
+ * model requests the REAL registered `job_list` tool, so the Compact frame has
+ * a genuine Process Work span to disclose.
+ */
+for (const preset of ['compact', 'full'] as const) {
+  test(`a real configured displayPreset '${preset}' reaches the TSP Main frame after a real Agent tool turn`, async (t) => {
+    const { testLifecycle } = await import('../support/temp-lifecycle.ts')
+    const life = testLifecycle(t)
+    const fixture = await createDirectTspFixture(life, {
+      tuiConfig: { displayPreset: preset },
+      deltas: ['MODE-', 'DIRECT-', 'OK'],
+      scriptedToolCall: { callId: 'call-mode-jobs', name: 'job_list', arguments: '{}' },
+    })
+    const recorder = fixture.recordPrompts(() => {})
+    try {
+      await waitForInputDelivery(fixture.pane)
+      fixture.pane.input.type('list the background jobs')
+      await waitFor('the composer to hold the typed draft', () =>
+        latestComposerText(fixture.pane.output.text()) === 'list the background jobs', 25_000)
+      // NEGATIVE CONTROL: neither the scripted reply nor the tool row exists
+      // before the gesture, so the later frame is caused by the real submit.
+      assert.ok(!fixture.pane.output.text().includes('MODE-DIRECT-OK'), 'no assistant text before the submit')
+      assert.equal(recorder.calls(), 0, 'no prompt write before the submit')
+      assert.equal(liveNodes(fixture.pane.output.text()).filter(node => node.k === 'section' && node.p['collapsible'] === true).length, 0,
+        'no Activity section before the submit')
+
+      fixture.pane.input.type('\r')
+      await waitFor('the committed prompt write to settle', () => recorder.calls() === 1, 30_000)
+      // The REAL registered tool executed and the loop's next step streamed the
+      // scripted reply: both are wire facts, not the adapter's request counter.
+      // The mode-specific container is the preset's own frame evidence.
+      const modeFrame = (): boolean => {
+        const wire = fixture.pane.output.text()
+        return wire.includes('MODE-DIRECT-OK')
+          && (preset === 'compact' ? wire.includes('s1-work-msg-') : wire.includes('"k":"tool"'))
+      }
+      await waitFor('the real Agent tool turn and scripted reply', modeFrame, 30_000)
+      await directSettle(1_500)
+
+      const nodes = liveNodes(fixture.pane.output.text())
+      const activities = nodes.filter(node => node.k === 'section' && node.p['collapsible'] === true)
+      const tools = nodes.filter(node => node.k === 'tool')
+      assert.ok(nodes.some(node => nodeText(node).includes('MODE-DIRECT-OK')), 'the scripted assistant reply reached Main')
+      assert.ok(nodes.some(node => nodeText(node).includes('list the background jobs')), 'the real user row reached Main')
+      if (preset === 'compact') {
+        assert.ok(activities.length >= 1, 'the configured Compact preset produced a native collapsible Activity')
+        assert.ok(activities.every(node => node.p['collapsed'] === true), 'the Activity defaults collapsed')
+        assert.ok(activities.some(node => node.id.includes('-work-')), 'the Activity key carries the canonical Work owner')
+        assert.equal(tools.length, 0, 'a collapsed Activity builds no hidden Tool node')
+      } else {
+        assert.equal(activities.length, 0, 'the configured Full preset paints no Work/Activity container')
+        assert.ok(tools.length >= 1, 'Full keeps the real Tool row flat in the reading flow')
+        assert.ok(tools.some(node => nodeText(node).includes('job_list') || node.id.includes('-msg-')),
+          'the real tool row is a top-level scoped node')
+      }
+    } finally {
+      recorder.detach()
+      await fixture.settle()
+    }
+  })
+}

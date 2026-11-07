@@ -3057,6 +3057,7 @@ export function applyRunnerWithRuntime(
         resolveFooterConfig: () => settings.resolveTspFooterConfig(),
         connectTsp: productionTspConnector({
           cwd,
+          displayState,
           requestExit: () => requestExit(),
           onFatal: rendererOnFatal,
           log: (message, fields) => diag.info(message, fields),
