@@ -21,7 +21,7 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import test, { type TestContext } from 'node:test'
 import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
@@ -57,12 +57,16 @@ class LauncherReadiness {
   }
 }
 
-/** Mount the startup row against a launcher that owns readiness and exit. */
-function mountStartup(readiness: LauncherReadiness, exitCodes: number[]): Context {
+/** Mount the startup row against a launcher that owns readiness and exit.
+ * The row is unloaded with its test: a normal invocation installs the
+ * process-global model-listing console interception, so the wrapper must not
+ * outlive the test. The teardown is registered before the action runs. */
+function mountStartup(t: TestContext, readiness: LauncherReadiness, exitCodes: number[]): Context {
   const ctx = new Context()
   ctx.provide('cmdlineArgs', { get: () => [] })
   ctx.provide('appExit', ((code: number) => { exitCodes.push(code) }) as never)
   ctx.provide('appReady', readiness.service as never)
+  t.after(async () => { await ctx.fiber.dispose() })
   applyStartup(ctx)
   return ctx
 }
@@ -84,12 +88,12 @@ function markMounted(ctx: Context): void {
 
 // ── the cold start ──────────────────────────────────────────────────────────
 
-test('a cold startup whose TUI surface never mounts exits nonzero', () => {
+test('a cold startup whose TUI surface never mounts exits nonzero', (t) => {
   // The cold-start contract: readiness is committed AFTER the tree mounted, so
   // the handshake observes the missing surface and the invocation fails loudly.
   const readiness = new LauncherReadiness()
   const exitCodes: number[] = []
-  const ctx = mountStartup(readiness, exitCodes)
+  const ctx = mountStartup(t, readiness, exitCodes)
   const stderr = captureStderr()
   try {
     readiness.commit()
@@ -100,10 +104,10 @@ test('a cold startup whose TUI surface never mounts exits nonzero', () => {
   assert.match(stderr.lines.join(''), /required TUI surface did not mount/u)
 })
 
-test('a cold startup whose TUI surface mounted does not exit', () => {
+test('a cold startup whose TUI surface mounted does not exit', (t) => {
   const readiness = new LauncherReadiness()
   const exitCodes: number[] = []
-  const ctx = mountStartup(readiness, exitCodes)
+  const ctx = mountStartup(t, readiness, exitCodes)
   markMounted(ctx)
   const stderr = captureStderr()
   try {
@@ -117,7 +121,7 @@ test('a cold startup whose TUI surface mounted does not exit', () => {
 
 // ── the runtime replacement ─────────────────────────────────────────────────
 
-test('a startup row applied AFTER readiness was committed does not exit the running application', () => {
+test('a startup row applied AFTER readiness was committed does not exit the running application', (t) => {
   // The runtime HMR path: the launcher already committed readiness, and the
   // recomposition re-applies the startup row. The launcher's contract runs a
   // listener registered after the commit SYNCHRONOUSLY, so the handshake runs
@@ -128,7 +132,7 @@ test('a startup row applied AFTER readiness was committed does not exit the runn
   const exitCodes: number[] = []
   const stderr = captureStderr()
   try {
-    mountStartup(readiness, exitCodes)
+    mountStartup(t, readiness, exitCodes)
   } finally {
     stderr.restore()
   }
@@ -136,7 +140,7 @@ test('a startup row applied AFTER readiness was committed does not exit the runn
   assert.deepEqual(stderr.lines, [], 'a re-applied startup row must not report a missing surface')
 })
 
-test('the re-applied row observes the SYNCHRONOUS callback inside its own apply()', () => {
+test('the re-applied row observes the SYNCHRONOUS callback inside its own apply()', (t) => {
   // The regression's exact shape: the callback must run BEFORE `apply()`
   // returns, i.e. inside the `onReady` call stack, not in a later tick. A fix
   // that only defers the callback would still exit the running application.
@@ -155,6 +159,7 @@ test('the re-applied row observes the SYNCHRONOUS callback inside its own apply(
       return () => {}
     },
   }) as never)
+  t.after(async () => { await ctx.fiber.dispose() })
   applyStartup(ctx)
   order.push('apply:return')
   assert.deepEqual(order, ['onReady:enter', 'onReady:return', 'apply:return'],
@@ -162,7 +167,7 @@ test('the re-applied row observes the SYNCHRONOUS callback inside its own apply(
   assert.deepEqual(exitCodes, [], 'the synchronous callback must not exit')
 })
 
-test('a re-applied row does not judge a startup it never witnessed', () => {
+test('a re-applied row does not judge a startup it never witnessed', (t) => {
   // The re-applied row owns no startup verdict: readiness was committed before
   // it existed, so the startup it could "judge" is not its own. The cold-start
   // case above owns that failure, because there the row DID witness the
@@ -172,7 +177,7 @@ test('a re-applied row does not judge a startup it never witnessed', () => {
   const exitCodes: number[] = []
   const stderr = captureStderr()
   try {
-    mountStartup(readiness, exitCodes)
+    mountStartup(t, readiness, exitCodes)
   } finally {
     stderr.restore()
   }
@@ -180,7 +185,7 @@ test('a re-applied row does not judge a startup it never witnessed', () => {
   assert.deepEqual(stderr.lines, [])
 })
 
-test('a re-applied row whose surface is never restored delivers no verdict at all', () => {
+test('a re-applied row whose surface is never restored delivers no verdict at all', (t) => {
   // The BOUNDED consequence of the runtime path, pinned here so it cannot
   // drift silently: the re-applied row's readiness callback has ALREADY run
   // by the time the row can act, and nothing re-arms it. A replacement that
@@ -193,7 +198,7 @@ test('a re-applied row whose surface is never restored delivers no verdict at al
   const stderr = captureStderr()
   try {
     // The runner row never marks the surface: the replacement failed.
-    mountStartup(readiness, exitCodes)
+    mountStartup(t, readiness, exitCodes)
     // Nothing re-arms the callback, so no later moment can produce a verdict.
     readiness.commit()
   } finally {
@@ -203,7 +208,7 @@ test('a re-applied row whose surface is never restored delivers no verdict at al
   assert.deepEqual(stderr.lines, [], 'the re-applied row must not print the missing-surface notice at runtime')
 })
 
-test('a re-applied row that IS told its surface mounted stays silent', () => {
+test('a re-applied row that IS told its surface mounted stays silent', (t) => {
   // The positive counterpart of the runtime path: when the replacement's
   // runner does mark the surface, nothing is reported and nothing exits.
   const readiness = new LauncherReadiness()
@@ -211,7 +216,7 @@ test('a re-applied row that IS told its surface mounted stays silent', () => {
   const exitCodes: number[] = []
   const stderr = captureStderr()
   try {
-    const ctx = mountStartup(readiness, exitCodes)
+    const ctx = mountStartup(t, readiness, exitCodes)
     markMounted(ctx)
   } finally {
     stderr.restore()
@@ -220,7 +225,7 @@ test('a re-applied row that IS told its surface mounted stays silent', () => {
   assert.deepEqual(stderr.lines, [])
 })
 
-test('the readiness listener is cancelled when the row is unloaded BEFORE the commit', async () => {
+test('the readiness listener is cancelled when the row is unloaded BEFORE the commit', async (t) => {
   // The launcher's `commit()` clears its listener set, so a listener that
   // already ran cannot outlive the commit. The OTHER path needs the
   // cancellation: the row is unloaded BEFORE the launcher commits, so its
@@ -228,7 +233,7 @@ test('the readiness listener is cancelled when the row is unloaded BEFORE the co
   // never witnessed.
   const readiness = new LauncherReadiness()
   const exitCodes: number[] = []
-  const ctx = mountStartup(readiness, exitCodes)
+  const ctx = mountStartup(t, readiness, exitCodes)
   await ctx.fiber?.dispose()
   const stderr = captureStderr()
   try {
@@ -240,7 +245,7 @@ test('the readiness listener is cancelled when the row is unloaded BEFORE the co
   assert.deepEqual(stderr.lines, [])
 })
 
-test('the launcher clears its listeners at the commit, so a committed listener cannot outlive it', () => {
+test('the launcher clears its listeners at the commit, so a committed listener cannot outlive it', (t) => {
   // The launcher's own contract: `commit()` runs the pending listeners and
   // clears the set. The row's cancellation therefore covers only the
   // pre-commit unload path, and this test pins that the launcher behaves
@@ -248,7 +253,7 @@ test('the launcher clears its listeners at the commit, so a committed listener c
   // the committed path).
   const readiness = new LauncherReadiness()
   const exitCodes: number[] = []
-  const ctx = mountStartup(readiness, exitCodes)
+  const ctx = mountStartup(t, readiness, exitCodes)
   markMounted(ctx)
   readiness.commit()
   const stderr = captureStderr()
@@ -282,7 +287,7 @@ test('a host-only process provides tuiStartup but does not deliver the TUI-surfa
   const exitCodes: number[] = []
   const stderr = captureStderr()
   try {
-    const ctx = mountStartup(readiness, exitCodes)
+    const ctx = mountStartup(t, readiness, exitCodes)
     assert.notEqual(ctx.get(TUI_STARTUP_SERVICE), undefined, 'the Host rows still need the startup facts')
     readiness.commit()
   } finally {
@@ -297,7 +302,7 @@ test('a host-only process provides tuiStartup but does not deliver the TUI-surfa
   assert.deepEqual(stderr.lines, [])
 })
 
-test('an ordinary CLI that merely inherits the host role string still delivers the missing-surface verdict', () => {
+test('an ordinary CLI that merely inherits the host role string still delivers the missing-surface verdict', (t) => {
   const previousRole = process.env.DSH_PI_TUI_ROLE
   const previousEntry = process.env.DSH_PI_TUI_HOST_ENTRY
   process.env.DSH_PI_TUI_ROLE = 'host'
@@ -306,7 +311,7 @@ test('an ordinary CLI that merely inherits the host role string still delivers t
   const exitCodes: number[] = []
   const stderr = captureStderr()
   try {
-    mountStartup(readiness, exitCodes)
+    mountStartup(t, readiness, exitCodes)
     readiness.commit()
   } finally {
     stderr.restore()
@@ -318,14 +323,14 @@ test('an ordinary CLI that merely inherits the host role string still delivers t
   assert.deepEqual(exitCodes, [1], 'the role string alone is not Host-entry admission')
 })
 
-test('the host-only role leaves the ordinary missing-surface verdict unchanged', () => {
+test('the host-only role leaves the ordinary missing-surface verdict unchanged', (t) => {
   const previous = process.env.DSH_PI_TUI_ROLE
   delete process.env.DSH_PI_TUI_ROLE
   const readiness = new LauncherReadiness()
   const exitCodes: number[] = []
   const stderr = captureStderr()
   try {
-    mountStartup(readiness, exitCodes)
+    mountStartup(t, readiness, exitCodes)
     readiness.commit()
   } finally {
     stderr.restore()
