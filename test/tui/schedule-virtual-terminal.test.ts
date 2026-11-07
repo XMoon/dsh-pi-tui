@@ -244,3 +244,67 @@ test('the list-root keys are real VirtualTerminal input routed by TuiApp into th
   await vt.waitForRender()
   assert.equal(closes, 1, 'the list-root Esc must close the workspace through TuiApp')
 })
+
+test('a real SGR pointer gesture through TuiApp commits, and a cross-subject one is refused', async () => {
+  // G0 + G2 through the REAL fork input chain: the VirtualTerminal emits SGR
+  // sequences, TuiApp routes them, the alt screen synthesizes press/click and
+  // the panel's admission decides. No panel handler is called directly.
+  const intents: ScheduleIntent[] = []
+  let snapshot = LIST
+  const vt = new VirtualTerminal(120, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  started.add(app)
+  const handle = app.openScheduleWorkspace({
+    snapshot: () => snapshot,
+    dispatch: intent => { intents.push(intent) },
+    onClose: () => {},
+  })
+  handle.update(snapshot)
+  await vt.waitForRender()
+  const locate = (needle: string): { readonly row: number; readonly column: number } => {
+    const lines = vt.getViewport().map(line => stripTerminalSequences(line))
+    const row = lines.findIndex(line => line.includes(needle))
+    if (row < 0) throw new Error(`no painted row with ${needle}:\n${lines.join('\n')}`)
+    return { row, column: lines[row]!.indexOf(needle) + 2 }
+  }
+  const press = (point: { readonly row: number; readonly column: number }): void => {
+    vt.sendInput(`\x1b[<0;${point.column + 1};${point.row + 1}M`)
+  }
+  const release = (point: { readonly row: number; readonly column: number }): void => {
+    vt.sendInput(`\x1b[<0;${point.column + 1};${point.row + 1}m`)
+  }
+
+  // G0: press + release on the painted New action → exactly one admitted intent.
+  const target = locate('n create')
+  press(target)
+  await vt.waitForRender()
+  release(target)
+  await vt.waitForRender()
+  assert.equal(intents.filter(intent => intent.kind === 'open-create').length, 1,
+    'G0: the real SGR press+release commits exactly once')
+
+  // Back to the list, then G2: press on row A, the selection moves to B and the
+  // frame repaints before the release → zero navigation writes.
+  snapshot = LIST
+  handle.update(snapshot)
+  await vt.waitForRender()
+  const rowA = locate('Alpha report')
+  press(rowA)
+  snapshot = { ...LIST, selectedId: 'task-bravo' }
+  handle.update(snapshot)
+  await vt.waitForRender()
+  const rowB = locate('Bravo digest')
+  release(rowB)
+  await vt.waitForRender()
+  assert.equal(intents.filter(intent => intent.kind === 'open-detail').length, 0,
+    'G2: a press on A and a release on B navigates nowhere')
+
+  // A genuine gesture on B's own frame still opens B.
+  press(rowB)
+  await vt.waitForRender()
+  release(rowB)
+  await vt.waitForRender()
+  assert.equal(intents.filter(intent => intent.kind === 'open-detail').length, 1)
+  app.dispose()
+})
