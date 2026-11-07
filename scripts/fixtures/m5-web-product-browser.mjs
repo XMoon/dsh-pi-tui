@@ -1218,6 +1218,18 @@ async function readClipboardPng(page) {
   })
 }
 
+/** Poll the Clipboard until the Copy action's async write lands (bounded). */
+async function waitForClipboardPng(page, timeoutMs) {
+  const deadline = Date.now() + timeoutMs
+  let last = { ok: false, reason: 'not read' }
+  while (Date.now() < deadline) {
+    last = await readClipboardPng(page)
+    if (last.ok === true) return last
+    await page.waitForTimeout(200)
+  }
+  return last
+}
+
 /** Wait for the official file-actions copy-failure feedback. */
 async function waitForCopyFailure(page, timeoutMs = 20_000) {
   const deadline = Date.now() + timeoutMs
@@ -1704,8 +1716,11 @@ const cases = {
     if (!imageLabels.includes('Copy image')) {
       throw new Error(`the image menu exposes no Copy image: ${JSON.stringify(imageLabels)}`)
     }
+    await page.bringToFront()
     await page.getByRole('menuitem', { name: 'Copy image', exact: true }).last().click()
-    const copied = await readClipboardPng(page)
+    // The official copy action is async (authorized read + clipboard write); the
+    // menu click returns first, so the clipboard is polled to a bounded settle.
+    const copied = await waitForClipboardPng(page, 15_000)
     if (copied.ok !== true) throw new Error(`Copy image put no PNG on the clipboard: ${JSON.stringify(copied)}`)
     if (copied.pngSignature !== true) throw new Error('the clipboard image/png is not a real PNG')
     result.copyImage = { ...copied, labels: imageLabels }
