@@ -816,3 +816,54 @@ test('every page stays inside the design-language size matrix', () => {
     }
   }
 })
+
+test('the raw Prompt accepts Unicode input and edits at the caret', () => {
+  // Empty prompt: a CJK character is text, not a protocol byte.
+  const empty = harness(workspace({
+    mode: 'editor',
+    editor: draft({ focused: 1, prompt: '' }),
+  }), { columns: 100, rows: 30 })
+  empty.panel.focused = true
+  empty.resetDispatches()
+  empty.panel.handleInput('检')
+  assert.deepEqual(empty.dispatches, [{ kind: 'set-field', fieldId: 'prompt', value: '检' }])
+  empty.resetDispatches()
+  empty.panel.handleInput('查')
+  assert.deepEqual(empty.dispatches, [{ kind: 'set-field', fieldId: 'prompt', value: '检查' }])
+
+  // Existing two-line CJK prompt: Home/Up/End/Left put the caret in the MIDDLE
+  // of the first line, and a CJK character is inserted there.
+  const stored = '检查服务器状态\n发现异常后汇报'
+  const view = harness(workspace({
+    mode: 'editor',
+    editor: draft({ focused: 1, prompt: stored }),
+  }), { columns: 100, rows: 30 })
+  view.panel.focused = true
+  view.render()
+  view.resetDispatches()
+  view.panel.handleInput('\x1b[H') // Home: start of the last line
+  view.panel.handleInput('\x1b[A') // Up: same column (0) on the previous line
+  view.panel.handleInput('\x1b[F') // End: end of the first line
+  view.panel.handleInput('\x1b[D') // Left: before the last character
+  view.panel.handleInput('中')
+  assert.deepEqual(view.dispatches, [{
+    kind: 'set-field',
+    fieldId: 'prompt',
+    value: '检查服务器状中态\n发现异常后汇报',
+  }])
+  // Backspace removes the caret-previous character; Delete removes the one after.
+  view.resetDispatches()
+  view.panel.handleInput('\x7f')
+  assert.equal((view.dispatches[0] as { value?: string } | undefined)?.value, '检查服务器状态\n发现异常后汇报')
+})
+
+test('the action bar keeps <key> <verb> while the body buttons use Verb [Key]', () => {
+  const confirm = workspace({ confirm: { kind: 'clear-ended', token: 21 } })
+  const lines = harness(confirm, { columns: 120, rows: 30 }).plain()
+  const body = lines.find(line => line.includes('Confirm [Y]'))
+  assert.ok(body !== undefined && body.includes('Cancel [N]'), 'body buttons use Verb [Key]')
+  const bar = lines[lines.length - 1]!
+  assert.ok(bar.includes('y confirm'), `action bar uses <key> <verb>: ${JSON.stringify(bar)}`)
+  assert.ok(bar.includes('n cancel'), `action bar uses <key> <verb>: ${JSON.stringify(bar)}`)
+  assert.ok(bar.trimEnd().endsWith('Esc cancel'), `Esc stays the LAST segment: ${JSON.stringify(bar)}`)
+})
