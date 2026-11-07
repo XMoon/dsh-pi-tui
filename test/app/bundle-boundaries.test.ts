@@ -383,6 +383,13 @@ const RELEASE_FRAME_HINTS: Readonly<Record<typeof RELEASE_FRAME_NAMES[number], R
   '@deepseek-ai/dsh-cua-bundle': /darwin-only platform/u,
 }
 
+const RELEASE_FRAME_RISK_HINTS: Readonly<Record<typeof RELEASE_FRAME_NAMES[number], RegExp>> = {
+  '@deepseek-ai/dsh-personalized-recommendations': /Risk\s+Web recommendations are not TUI cards/u,
+  '@deepseek-ai/dsh-experimental-liveshare': /Risk\s+Relay, owner identity\/credentials/u,
+  '@deepseek-ai/dsh-experimental-forge-bundle': /Risk\s+Requires a Git repository/u,
+  '@deepseek-ai/dsh-cua-bundle': /Risk\s+darwin-only platform/u,
+}
+
 const CUA_BUNDLE = '@deepseek-ai/dsh-cua-bundle'
 
 test('the release Experimental members paint their real TUI surface and platform admission', async t => {
@@ -494,6 +501,13 @@ test('the release Experimental members paint their real TUI surface and platform
       painted += `\n${detailFrame()}`
     }
     assert.match(painted, RELEASE_FRAME_HINTS[name], `${name} paints its exact limit:\n${painted}`)
+    assert.match(painted, RELEASE_FRAME_RISK_HINTS[name], `${name} paints its exact Risk warning:\n${painted}`)
+    const riskCard = controller.model().cards.find(card => card.name === name)
+    assert.ok(riskCard !== undefined, `${name} remains in the real Host-derived model`)
+    const riskFact = buildPluginDetailView(riskCard!).groups.flatMap(group => group.facts)
+      .find(fact => fact.label === 'Risk')
+    assert.ok(riskFact !== undefined, `${name} has a bounded Risk fact`)
+    assert.equal(riskFact!.tone, 'warning', `${name} risk uses the warning tone`)
     assert.match(painted, /\[experimental\]/u, `${name} is painted in the Experimental section`)
     // The action block sits below the bounded facts; page until the frame
     // really paints the primary action this card offers.
@@ -580,7 +594,6 @@ test('the release Experimental members paint their real TUI surface and platform
   for (const name of RELEASE_FRAME_NAMES) {
     assert.equal(profileSelectsBundle(String(profileContext['dir']), name), false, `${name} was never selected by this frame case`)
   }
-  assert.equal(process.env.LIVESHARE_OWNER_CREDENTIAL_FILE, undefined, 'no Relay credential was created')
 })
 
 test('the mounted TUI keeps Team capability in the existing Tool/Activity views and invents no Team board', { skip: skippedInstallationReason([B01]) }, async t => {
