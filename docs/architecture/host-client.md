@@ -657,7 +657,7 @@ question answer, approval, cancel, open, retain or create, owns no Client
 workspace/question/approval store and keeps no cross-session cache.
 `SessionReader` remains the ONE Session-listing authority.
 
-- **Browser read lifecycle.** Every renderer's Session Browser presents the ONE
+- **Browser read lifecycle.** Every renderer's Session Browser presents one
   renderer-neutral `SessionBrowserReadOwner` over `SessionReader.list()`,
   `projectionBatch()` and `search()`; the renderer owns only its physical
   Presenter seat (the PiTui modal picker, the native TSP picker) and keeps no
