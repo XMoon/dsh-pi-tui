@@ -30,7 +30,7 @@ import { TuiApp, BulletedComponent, TRANSCRIPT_RIGHT_GUTTER, transcriptContentWi
 import { WorkingIndicator, workingFramesFor } from '../../src/tui/components/working-indicator.ts'
 import { TranscriptFolder, type TranscriptMessage, type TurnActivity, type WorkflowRunId } from '../../src/transcript.ts'
 import { TranscriptWindowController } from '../../src/domain/transcript/window.ts'
-import { Text, visibleWidth, wrapTextWithAnsi, stripTerminalSequences, type Terminal } from '@xmoon76/pi-tui'
+import { resetCapabilitiesCache, setCapabilities, Text, visibleWidth, wrapTextWithAnsi, stripTerminalSequences, type Terminal } from '@xmoon76/pi-tui'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { mountEmbeddedPage } from '../support/embedded-page-harness.ts'
 import { hasFocusHeader } from '../support/focus-header.ts'
@@ -5447,18 +5447,25 @@ test('a width-clipped ANSI/CJK folded preview keeps exactly ONE hidden-content m
 })
 
 test('a bare URL stops before a balanced full-width parenthetical at the assistant transcript sink', async () => {
-  const { vt, app, writes } = startAppWithWrites(100)
-  const source = '见 https://example.com/issues/521（说明） 的说明'
-  const message: TranscriptMessage = { kind: 'assistant', turn: 0, text: source }
-  app.setTranscript([message])
-  await vt.waitForRender()
+  // Hyperlinks are a terminal CAPABILITY: the headless sink emits OSC 8 only
+  // when the capability is declared, so pin it for this production-shaped case.
+  setCapabilities({ images: null, trueColor: true, hyperlinks: true })
+  try {
+    const { vt, app, writes } = startAppWithWrites(100)
+    const source = '见 https://example.com/issues/521（说明） 的说明'
+    const message: TranscriptMessage = { kind: 'assistant', turn: 0, text: source }
+    app.setTranscript([message])
+    await vt.waitForRender()
 
-  const stream = writes.join('')
-  assert.ok(stream.includes('\u001b]8;;https://example.com/issues/521\u001b\\'),
-    'the OSC 8 target stops before the full-width parenthesis')
-  assert.ok(!/\u001b\]8;;[^\u001b]*（/.test(stream), 'no hyperlink target contains CJK punctuation')
-  const painted = vt.getViewport().join('')
-  assert.ok(painted.includes('（说明）'), 'the following parenthetical stays visible and unlinked')
-  assert.equal(message.text, source, 'the display projection never rewrites the raw transcript text')
-  app.stop()
+    const stream = writes.join('')
+    assert.ok(stream.includes('\u001b]8;;https://example.com/issues/521\u001b\\'),
+      'the OSC 8 target stops before the full-width parenthesis')
+    assert.ok(!/\u001b\]8;;[^\u001b]*（/.test(stream), 'no hyperlink target contains CJK punctuation')
+    const painted = vt.getViewport().join('')
+    assert.ok(painted.includes('（说明）'), 'the following parenthetical stays visible and unlinked')
+    assert.equal(message.text, source, 'the display projection never rewrites the raw transcript text')
+    app.stop()
+  } finally {
+    resetCapabilitiesCache()
+  }
 })
