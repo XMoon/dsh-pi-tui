@@ -1762,18 +1762,20 @@
    "files": [
     "src/terminal.ts"
    ],
-   "why": "Restarting ProcessTerminal during fullscreen transitions must replace every owned listener and buffer exactly once, preserve the original raw mode, and keep Kitty keyboard negotiation balanced.",
+   "why": "Restarting ProcessTerminal during fullscreen transitions must replace every owned listener and buffer exactly once, preserve the original raw mode, and keep Kitty keyboard negotiation balanced. The synchronous process-exit recovery also clears an active OSC 7501 status only when support was confirmed, so an abnormal exit cannot leave the terminal's previous working/blocked state stale.",
    "changedSurface": [
     "remove-before-assign resize and stdin data listeners",
     "destroy previous StdinBuffer and clear negotiation state",
     "capture raw state only on first start",
-    "push Kitty protocol once per start/stop cycle"
+    "push Kitty protocol once per start/stop cycle",
+    "synchronous process-exit recovery clears supported, active OSC 7501 status exactly once; unsupported or inactive status is left untouched"
    ],
    "dependencies": {
     "vendorInternal": {
      "audited": true,
      "items": [
-      "ProcessTerminal start/stop, StdinBuffer callback, resize listener, raw mode, and Kitty push/pop state form one lifecycle."
+      "ProcessTerminal start/stop, StdinBuffer callback, resize listener, raw mode, and Kitty push/pop state form one lifecycle.",
+      "ProcessTerminal.restoreOnExit appends OSC 7501 state=clear only when support is confirmed and programStatus is active; normal stop removes the TuiBase exit handler, preventing a second clear."
      ],
      "notes": "Fixing only resize leaves duplicate stdin delivery or raw-mode leaks."
     },
@@ -1804,14 +1806,18 @@
       "one stdin chunk reaches the handler once",
       "stop restores the original cooked/raw state",
       "Kitty push/pop remains balanced",
-      "resize ownership does not accumulate"
+      "resize ownership does not accumulate",
+      "process exit without stop writes one state=clear after a supported active status",
+      "process exit writes no status clear when support is absent or no status is active",
+      "normal stop clears active status once and unregisters the process-exit hook"
      ],
      "notes": "The type shape remains unchanged while runtime delivery duplicates."
     }
    },
    "tests": [
     "packages/pi-tui/test/terminal.test.ts: repeated resize listener, stdin listener, raw state, and Kitty protocol tests",
-    "test/process-tui-slot.test.ts and fullscreen restart coverage"
+    "test/process-tui-slot.test.ts and fullscreen restart coverage",
+    "packages/pi-tui/test/exit-restore.test.ts: active supported Program Status clears once on direct process exit; unsupported and inactive negative controls; normal stop clears once without process-exit duplication"
    ],
    "upstream": {
     "equivalence": "NO",
@@ -1824,7 +1830,7 @@
      "packages/tui/src/terminal.ts"
     ],
     "relevantIssues": [],
-    "semanticDelta": "Upstream stacks listeners and re-captures state on repeated start; it does not provide the local all-resource swap and negotiation balance."
+    "semanticDelta": "Upstream stacks listeners and re-captures state on repeated start; it does not provide the local all-resource swap and negotiation balance. U1's restoreOnExit() also omits OSC 7501 state clearing, unlike stop(); the fork clears it only when supported and active."
    },
    "retirement": {
     "conditions": [
@@ -1835,7 +1841,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-11-07",
+    "lastAuditedAt": "2026-11-08",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -1844,7 +1850,7 @@
      "behavioral",
      "tests"
     ],
-    "notes": "Rechecked the full resource graph, not only the original resize-listener symptom. KEEP HARD."
+    "notes": "Rechecked the ProcessTerminal lifecycle at PR #584 follow-up: repeated-start ownership remains unchanged, and direct process.exit() now clears OSC 7501 only when supported and active. Guarded by test/exit-restore.test.ts positive/negative cases; normal stop remains exactly once."
    }
   },
   "X017": {

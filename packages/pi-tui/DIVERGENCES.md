@@ -1435,12 +1435,12 @@ The former local cleanup targeted _lastEventType. The field is still written by 
 - Category: `BUGFIX_MISSING_UPSTREAM`
 - Risk: `CRITICAL`
 - Files: `src/terminal.ts`
-- Last audited: `2026-11-07`
+- Last audited: `2026-11-08`
 - Baseline compared: `earendil-works/pi@f9a26365568127461c47a07a37dcb42c140a3ac5`
 
 #### Why it exists
 
-Restarting ProcessTerminal during fullscreen transitions must replace every owned listener and buffer exactly once, preserve the original raw mode, and keep Kitty keyboard negotiation balanced.
+Restarting ProcessTerminal during fullscreen transitions must replace every owned listener and buffer exactly once, preserve the original raw mode, and keep Kitty keyboard negotiation balanced. The synchronous process-exit recovery also clears an active OSC 7501 status only when support was confirmed, so an abnormal exit cannot leave the terminal's previous working/blocked state stale.
 
 #### Changed surface
 
@@ -1448,11 +1448,13 @@ Restarting ProcessTerminal during fullscreen transitions must replace every owne
 - destroy previous StdinBuffer and clear negotiation state
 - capture raw state only on first start
 - push Kitty protocol once per start/stop cycle
+- synchronous process-exit recovery clears supported, active OSC 7501 status exactly once; unsupported or inactive status is left untouched
 
 #### Dependency map
 
 **Vendor internal**
 - ProcessTerminal start/stop, StdinBuffer callback, resize listener, raw mode, and Kitty push/pop state form one lifecycle.
+- ProcessTerminal.restoreOnExit appends OSC 7501 state=clear only when support is confirmed and programStatus is active; normal stop removes the TuiBase exit handler, preventing a second clear.
 - Audit note: Fixing only resize leaves duplicate stdin delivery or raw-mode leaks.
 
 **Inheritance / structural**
@@ -1472,12 +1474,16 @@ Restarting ProcessTerminal during fullscreen transitions must replace every owne
 - stop restores the original cooked/raw state
 - Kitty push/pop remains balanced
 - resize ownership does not accumulate
+- process exit without stop writes one state=clear after a supported active status
+- process exit writes no status clear when support is absent or no status is active
+- normal stop clears active status once and unregisters the process-exit hook
 - Audit note: The type shape remains unchanged while runtime delivery duplicates.
 
 #### Guarding tests
 
 - packages/pi-tui/test/terminal.test.ts: repeated resize listener, stdin listener, raw state, and Kitty protocol tests
 - test/process-tui-slot.test.ts and fullscreen restart coverage
+- packages/pi-tui/test/exit-restore.test.ts: active supported Program Status clears once on direct process exit; unsupported and inactive negative controls; normal stop clears once without process-exit duplication
 
 #### Upstream comparison
 
@@ -1488,7 +1494,7 @@ Restarting ProcessTerminal during fullscreen transitions must replace every owne
 - packages/tui/src/terminal.ts
 - Relevant issues/PRs:
 - None recorded; issue/PR state was not used as semantic proof.
-- Remaining semantic delta: Upstream stacks listeners and re-captures state on repeated start; it does not provide the local all-resource swap and negotiation balance.
+- Remaining semantic delta: Upstream stacks listeners and re-captures state on repeated start; it does not provide the local all-resource swap and negotiation balance. U1's restoreOnExit() also omits OSC 7501 state clearing, unlike stop(); the fork clears it only when supported and active.
 
 #### Retirement conditions
 
@@ -1506,7 +1512,7 @@ Restarting ProcessTerminal during fullscreen transitions must replace every owne
 #### Audit record
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
-- Notes: Rechecked the full resource graph, not only the original resize-listener symptom. KEEP HARD.
+- Notes: Rechecked the ProcessTerminal lifecycle at PR #584 follow-up: repeated-start ownership remains unchanged, and direct process.exit() now clears OSC 7501 only when supported and active. Guarded by test/exit-restore.test.ts positive/negative cases; normal stop remains exactly once.
 
 ### X017 — Regular mode owns no mouse
 
