@@ -501,7 +501,9 @@ test('a delayed content-search failure after a refused resume stays within the 4
   assert.ok(!notice.text.includes(hostilePath), 'the raw-log path is omitted from the visible projection')
   assert.ok(h.diagnostics.some(line => line.includes(searchError)),
     'the full parser error and raw-log path remain in diagnostics')
-  assert.equal(h.view().split('\n').filter(line => line.includes(notice.text)).length, 1,
+  await waitUntil(() => h.view().includes(notice.text))
+  const painted = h.view()
+  assert.equal(painted.split('\n').filter(line => line.includes(notice.text)).length, 1,
     'the identical panel status and transient notice paint only once')
   assert.ok(hostilePath.includes('(archive)'), 'the input includes a legal parenthesized path')
   assert.ok(h.view().includes('Search all workspaces'), 'the refused resume keeps the same search workspace open')
@@ -529,7 +531,9 @@ test('a projection failure uses the same bounded notice projection at 44x20', as
   assert.ok(!notice.text.includes(hostilePath), 'the raw-log path is omitted from the visible projection')
   assert.ok(h.diagnostics.some(line => line.includes(projectionError)),
     'the full projection error and raw-log path remain in diagnostics')
-  assert.equal(h.view().split('\n').filter(line => line.includes(notice.text)).length, 1,
+  await waitUntil(() => h.view().includes(notice.text))
+  const painted = h.view()
+  assert.equal(painted.split('\n').filter(line => line.includes(notice.text)).length, 1,
     'the identical panel status and transient notice paint only once')
   assert.ok(hostilePath.includes('(archive)'), 'the input includes a legal parenthesized path')
   assert.ok(h.view().includes('Sessions'), 'the Session Workspace remains visible')
@@ -548,6 +552,9 @@ test('hasMore shows the refine hint', async (t) => {
   await h.runSearch('needle')
   await waitUntil(() => h.searchCalls.length === 1)
   await waitUntil(() => h.notices.some(notice => notice.text === 'More content matches exist — refine the search.'))
+  await waitUntil(() => h.view().includes('More content matches exist — refine the search.'))
+  assert.ok(h.view().includes('More content matches exist — refine the search.'),
+    'the refine hint must be painted in the workspace')
 })
 
 test('/resume with a unique match switches without starting a content search', async (t) => {
@@ -711,6 +718,7 @@ test('a malicious provider error message never reaches the terminal raw', async 
   const notice = h.notices.find(entry => entry.text.startsWith('Search failed:'))!
   assert.ok(!notice.text.includes('\x1b'), 'the notice text must be sanitized')
   assert.ok(!notice.text.includes('PWNED'), 'the OSC payload must not survive in the notice')
+  await waitUntil(() => h.view().includes('Search failed:'))
   const raw = h.rawWrites.join('')
   assert.ok(!raw.includes('\x1b]0;PWNED'), 'the raw terminal stream must never carry the injected sequence')
 })
