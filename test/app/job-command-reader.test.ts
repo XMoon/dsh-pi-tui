@@ -37,6 +37,7 @@ import * as ToolTasks from '@deepseek-ai/dsh-tool-jobs'
 import * as ToolPwsh from '@deepseek-ai/dsh-tool-pwsh'
 import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
 import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
+import { highlightColumnRanges } from '../../src/tui/components/transcript/search-presentation.ts'
 import type { OwnedRunner } from '../../src/tui-app.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import { JobInspectorPanel, type JobCopyRequest, type JobInspectorPanelIntents } from '../../src/tui/panels/job-inspector-panel.ts'
@@ -559,6 +560,25 @@ test('the header click must re-prove the same painted target; a narrowed button 
   clipped.panel.handleInput('c')
   assert.deepEqual(clipped.copies, [{ source: 'command-all', text: 'echo one' }], '`C` stays reachable')
   clipped.panel.dispose()
+})
+
+test('overlapping ranges on a painted Command row preserve source text and cell width', () => {
+  const harness = makePanel(observedState({ label: 'echo one' }))
+  harness.panel.handleInput('\t')
+  const lines = paint(harness, 80)
+  const row = lines.findIndex(line => stripTerminalSequences(line).includes('Full command'))
+  assert.ok(row >= 0, `the real Command page heading is painted:\n${lines.join('\n')}`)
+  const plain = stripTerminalSequences(lines[row]!)
+  const startCol = visibleWidth(plain.slice(0, plain.indexOf('Full command')))
+  const ranges = new Map([[row, [
+    { range: { startCol, endCol: startCol + 6 }, style: (text: string) => `\x1b[7m${text}\x1b[27m` },
+    { range: { startCol: startCol + 5, endCol: startCol + 12 }, style: (text: string) => `\x1b[7m${text}\x1b[27m` },
+  ]]])
+  const painted = highlightColumnRanges(lines, ranges)
+  assert.equal(stripTerminalSequences(painted[row]!), plain, 'overlap never duplicates the source substring')
+  assert.equal(visibleWidth(painted[row]!), visibleWidth(lines[row]!), 'the shared painter keeps the original cell width')
+  assert.ok(painted[row]!.includes('\x1b[27m'), 'the selected range reset remains in the painted row')
+  harness.panel.dispose()
 })
 
 test('a changed label or a resize cancels the gesture instead of copying stale offsets', async () => {

@@ -13,13 +13,17 @@
 
 import {
   findAltScreenSearchMatches,
+  getGraphemeSegmenter,
   sliceByColumn,
+  stripTerminalSequences,
   visibleWidth,
   type AltScreenSearchMatch,
   type AltScreenSearchSegment,
   type Component,
 } from '@xmoon76/pi-tui'
 import { color } from '../../theme/runtime.ts'
+
+const graphemeSegmenter = getGraphemeSegmenter()
 
 /** The weak highlight of a visible non-current occurrence — the native
  * fullscreen search default. */
@@ -48,17 +52,18 @@ export interface SearchSourceRegion {
   readonly rowStart: number
   readonly rowEnd: number
   readonly columns?: { readonly startCol: number; readonly endCol: number }
-  /** Whether rendered matches inside this region may be numbered as PROVEN
-   * source occurrences. False means the region is position-only (a transformed
-   * / relativized / truncated projection): it anchors, never enumerates — the
-   * generic layer must not infer provenance from render order. */
+  /** Untransformed semantic text for a DIRECT, single-line region. Absence
+   * means position-only; this short-lived evidence is not another search corpus. */
+  readonly sourceText?: string
+  /** Whether rendered matches may be used as navigation candidates. False keeps
+   * the region position-only even when it has visible columns. */
   readonly enumerable?: boolean
 }
 
-/** One PROVEN occurrence mapping: the semantic source-local ordinal and the
- * rendered match (`matchIndex` indexes the card's matcher result) it maps to. */
+/** One proven semantic occurrence and its exact rendered match. */
 export interface RenderedSourceOccurrence {
   readonly sourceOccurrence: number
+  readonly normalizedSourceRange: { readonly start: number; readonly end: number }
   readonly matchIndex: number
   readonly segments: readonly AltScreenSearchSegment[]
 }
@@ -83,6 +88,9 @@ export interface RenderedSearchSelector {
   readonly query: string
   /** The semantic source-local ordinal of the target match. */
   readonly sourceOccurrence: number
+  /** The current semantic source-local normalized range; unlike the stable key,
+   * it changes when content reflows or a hit moves within its source. */
+  readonly normalizedSourceRange?: { readonly start: number; readonly end: number }
   readonly geometry?: RenderedSourceGeometry
   readonly weakOnly?: boolean
 }
@@ -156,40 +164,113 @@ function matchInsideRegion(match: AltScreenSearchMatch, region: SearchSourceRegi
   return true
 }
 
-/** Build the PROVEN geometry of one source from the card's matcher result and
- * the renderer-declared regions. Matches are claimed in render order, so the
- * source ordinal follows the VISIBLE text, never a raw-corpus ordinal. */
+function graphemeBoundaries(text: string): Set<number> {
+  const boundaries = new Set<number>([0, text.length])
+  for (const segment of graphemeSegmenter.segment(text)) boundaries.add(segment.index)
+  return boundaries
+}
+
+function proveDirectFieldOccurrences(
+  matches: readonly AltScreenSearchMatch[],
+  renderedLines: readonly string[],
+  region: SearchSourceRegion,
+  query: string,
+): RenderedSourceOccurrence[] | undefined {
+  const sourceText = region.sourceText
+  const columns = region.columns
+  const row = region.rowStart
+  if (sourceText === undefined || /[\r\n]/u.test(sourceText) || region.enumerable === false) return undefined
+  if (region.rowEnd !== row + 1 || region.anchorRow !== row || row < 0 || row >= renderedLines.length) return undefined
+  if (columns === undefined
+    || !Number.isInteger(columns.startCol) || !Number.isInteger(columns.endCol)
+    || columns.startCol < 0 || columns.endCol <= columns.startCol) return undefined
+
+  const line = renderedLines[row]!
+  const fieldWidth = columns.endCol - columns.startCol
+  if (columns.endCol > visibleWidth(line) || visibleWidth(sourceText) !== fieldWidth) return undefined
+  const paintedField = stripTerminalSequences(sliceByColumn(line, columns.startCol, fieldWidth, true))
+  if (visibleWidth(paintedField) !== fieldWidth) return undefined
+
+  const trimmedQuery = query.trim()
+  const needle = trimmedQuery.toLowerCase()
+  if (needle === '' || needle.length !== trimmedQuery.length || needle.replace(/\s+/gu, ' ') !== needle) return undefined
+  const normalizedSource = sourceText.toLowerCase()
+  const normalizedPainted = paintedField.toLowerCase()
+  if (normalizedSource.length !== sourceText.length
+    || normalizedPainted.length !== paintedField.length
+    || normalizedSource !== normalizedPainted) return undefined
+
+  const sourceBoundaries = graphemeBoundaries(sourceText)
+  const normalizedSourceBoundaries = graphemeBoundaries(normalizedSource)
+  const paintedBoundaries = graphemeBoundaries(paintedField)
+  const normalizedPaintedBoundaries = graphemeBoundaries(normalizedPainted)
+  const semanticRanges: Array<{ sourceOccurrence: number; start: number; end: number }> = []
+  let start = 0
+  while (true) {
+    const index = normalizedSource.indexOf(needle, start)
+    if (index < 0) break
+    const end = index + needle.length
+    if (!sourceBoundaries.has(index) || !sourceBoundaries.has(end)
+      || !normalizedSourceBoundaries.has(index) || !normalizedSourceBoundaries.has(end)
+      || !paintedBoundaries.has(index) || !paintedBoundaries.has(end)
+      || !normalizedPaintedBoundaries.has(index) || !normalizedPaintedBoundaries.has(end)) return undefined
+    semanticRanges.push({ sourceOccurrence: semanticRanges.length, start: index, end })
+    start = index + Math.max(1, needle.length)
+  }
+
+  const candidates = matches
+    .map((match, matchIndex) => ({ match, matchIndex }))
+    .filter(candidate => matchInsideRegion(candidate.match, region))
+  if (candidates.length !== semanticRanges.length) return undefined
+
+  const occurrences: RenderedSourceOccurrence[] = []
+  for (let index = 0; index < semanticRanges.length; index += 1) {
+    const semantic = semanticRanges[index]!
+    const candidate = candidates[index]!
+    if (candidate.match.segments.length !== 1) return undefined
+    const segment = candidate.match.segments[0]!
+    const startCol = columns.startCol + visibleWidth(paintedField.slice(0, semantic.start))
+    const endCol = columns.startCol + visibleWidth(paintedField.slice(0, semantic.end))
+    if (segment.row !== row || segment.startCol !== startCol || segment.endCol !== endCol) return undefined
+    occurrences.push({
+      sourceOccurrence: semantic.sourceOccurrence,
+      normalizedSourceRange: { start: semantic.start, end: semantic.end },
+      matchIndex: candidate.matchIndex,
+      segments: candidate.match.segments,
+    })
+  }
+  return occurrences
+}
+
+/** Build the PROVEN geometry of one source from the current render and a
+ * renderer-supplied direct-field source. Missing, transformed or ambiguous
+ * provenance yields a real anchor geometry with no exact occurrences. */
 export function buildSourceGeometry(
   matches: readonly AltScreenSearchMatch[],
+  renderedLines: readonly string[],
   regions: readonly SearchSourceRegion[],
   sourceKey: string,
+  query: string,
 ): RenderedSourceGeometry | undefined {
   const sourceRegions = regions.filter(region => region.sourceKey === sourceKey)
   if (sourceRegions.length === 0) return undefined
-  const occurrences: RenderedSourceOccurrence[] = []
-  const enumerable = sourceRegions.some(region => region.enumerable !== false)
-  if (enumerable) {
-    matches.forEach((match, matchIndex) => {
-      const region = sourceRegions.find(candidate => candidate.enumerable !== false && matchInsideRegion(match, candidate))
-      if (region === undefined) return
-      occurrences.push({ sourceOccurrence: occurrences.length, matchIndex, segments: match.segments })
-    })
+  const evidenceRegions = sourceRegions.filter(region => region.sourceText !== undefined)
+  const directRegion = evidenceRegions.length === 1 && evidenceRegions[0]!.enumerable !== false
+    ? evidenceRegions[0]
+    : undefined
+  const occurrences = directRegion === undefined
+    ? []
+    : proveDirectFieldOccurrences(matches, renderedLines, directRegion, query) ?? []
+  return {
+    sourceKey,
+    anchorRow: directRegion?.anchorRow ?? sourceRegions[0]!.anchorRow,
+    occurrences,
   }
-  return { sourceKey, anchorRow: sourceRegions[0]!.anchorRow, occurrences }
 }
 
-/**
- * Select the rendered occurrence that belongs to the semantic source.
- * An exact highlight requires a PROVEN occurrence; otherwise the selection
- * anchors at the source region row (or the card top) and shows NO strong
- * highlight — a wrong strong highlight would misrepresent the N/M identity.
- *
- * NOTE (best-effort boundary): the index query is `trim().toLowerCase()` while
- * the fork matcher collapses internal whitespace (`/\s+/g` → single space), so
- * a semantic occurrence and the rendered occurrence set can differ for exotic
- * whitespace. A mapping is therefore always a best-effort claim, never a
- * guarantee.
- */
+/** Select the occurrence whose source ordinal AND normalized source range
+ * match a field geometry proven against the current rendered lines. Matcher
+ * order or occurrence count alone never proves semantic identity. */
 export function selectRenderedSearchMatch(
   matches: readonly AltScreenSearchMatch[],
   selector: RenderedSearchSelector,
@@ -199,11 +280,18 @@ export function selectRenderedSearchMatch(
     return { matches, selectedIndex: -1, selectedRow: undefined, exact: false }
   }
   const geometry = selector.geometry
-  if (geometry !== undefined) {
-    const occurrence = geometry.occurrences.find(candidate => candidate.sourceOccurrence === selector.sourceOccurrence)
+  if (geometry !== undefined && selector.normalizedSourceRange !== undefined) {
+    const targetRange = selector.normalizedSourceRange
+    const occurrence = geometry.occurrences.find(candidate =>
+      candidate.sourceOccurrence === selector.sourceOccurrence
+      && candidate.normalizedSourceRange.start === targetRange.start
+      && candidate.normalizedSourceRange.end === targetRange.end)
     if (occurrence !== undefined) {
       return { matches, selectedIndex: occurrence.matchIndex, selectedRow: occurrence.segments[0]?.row, exact: true }
     }
+    return { matches, selectedIndex: -1, selectedRow: geometry.anchorRow, exact: false }
+  }
+  if (geometry !== undefined) {
     return { matches, selectedIndex: -1, selectedRow: geometry.anchorRow, exact: false }
   }
   // No source geometry at all: anchor the card top, never strong-highlight.
@@ -219,12 +307,9 @@ function renderedSearchMatchRowRange(match: AltScreenSearchMatch | undefined): R
   }
 }
 
-/** Choose navigation-only geometry without changing provenance selection.
- * Exact selections use the proven rendered occurrence. Anchor-only selections
- * prefer matches inside the current source's regions (including
- * `enumerable:false` position-only regions), then fall back to card-wide
- * matches only when no region exists at all. The semantic selection remains
- * untouched by this best-effort range. */
+/** Choose conservative navigation geometry without changing provenance
+ * selection. A single first candidate may be used only when the region itself
+ * identifies a field or starts below card chrome; this remains inexact. */
 export function selectRenderedSearchScrollRange(
   matches: readonly AltScreenSearchMatch[],
   selection: RenderedSearchSelection,
@@ -240,19 +325,20 @@ export function selectRenderedSearchScrollRange(
 
   const sourceKey = selector.geometry?.sourceKey
   const sourceRegions = sourceKey === undefined
-    ? undefined
+    ? []
     : regions.filter(region => region.sourceKey === sourceKey)
-  const candidates = sourceRegions === undefined
-    ? matches
-    : matches.filter(match => sourceRegions.some(region => matchInsideRegion(match, region)))
-  if (candidates.length > 0) {
-    const candidateIndex = Math.min(Math.max(selector.sourceOccurrence, 0), candidates.length - 1)
-    const candidateRange = renderedSearchMatchRowRange(candidates[candidateIndex])
-    if (candidateRange !== undefined) return candidateRange
+  if (sourceRegions.length > 0) {
+    const candidates = matches.filter(match => sourceRegions.some(region => matchInsideRegion(match, region)))
+    if (selector.sourceOccurrence === 0 && candidates.length === 1
+      && sourceRegions.some(region => region.columns !== undefined || region.rowStart > 0)) {
+      const candidateRange = renderedSearchMatchRowRange(candidates[0])
+      if (candidateRange !== undefined) return candidateRange
+    }
+    const anchor = selection.selectedRow
+    return anchor === undefined ? undefined : { startRow: anchor, endRow: anchor }
   }
 
-  if (selection.selectedRow === undefined) return undefined
-  return { startRow: selection.selectedRow, endRow: selection.selectedRow }
+  return { startRow: 0, endRow: 0 }
 }
 
 /** One visible-column range to decorate on one rendered row. */
@@ -294,7 +380,7 @@ export function highlightColumnRanges(
     let output = ''
     let cursor = 0
     for (const highlight of sorted) {
-      const startCol = Math.min(highlight.range.startCol, lineWidth)
+      const startCol = Math.max(cursor, Math.min(highlight.range.startCol, lineWidth))
       const endCol = Math.min(highlight.range.endCol, lineWidth)
       if (endCol <= startCol) continue
       if (startCol > cursor) output += sliceByColumn(line, cursor, startCol - cursor, true)
@@ -322,17 +408,41 @@ export function highlightSearchLines(
 ): string[] {
   let result = [...lines]
   if (selection.matches.length > 0) {
-    const rangesByRow = new Map<number, RenderedColumnHighlight[]>()
+    const candidatesByRow = new Map<number, Array<{ range: RenderedColumnRange; current: boolean }>>()
     selection.matches.forEach((match, matchIndex) => {
       for (const segment of match.segments) {
-        const highlights = rangesByRow.get(segment.row) ?? []
-        highlights.push({
+        const candidates = candidatesByRow.get(segment.row) ?? []
+        candidates.push({
           range: { startCol: segment.startCol, endCol: segment.endCol },
-          style: matchIndex === selection.selectedIndex ? SEARCH_CURRENT_MATCH_STYLE : SEARCH_MATCH_STYLE,
+          current: matchIndex === selection.selectedIndex,
         })
-        rangesByRow.set(segment.row, highlights)
+        candidatesByRow.set(segment.row, candidates)
       }
     })
+
+    const rangesByRow = new Map<number, RenderedColumnHighlight[]>()
+    for (const [row, candidates] of candidatesByRow) {
+      candidates.sort((left, right) => left.range.startCol - right.range.startCol || right.range.endCol - left.range.endCol)
+      const merged: Array<{ range: RenderedColumnRange; current: boolean }> = []
+      for (const candidate of candidates) {
+        const previous = merged.at(-1)
+        if (previous !== undefined && candidate.range.startCol < previous.range.endCol) {
+          merged[merged.length - 1] = {
+            range: {
+              startCol: previous.range.startCol,
+              endCol: Math.max(previous.range.endCol, candidate.range.endCol),
+            },
+            current: previous.current || candidate.current,
+          }
+        } else {
+          merged.push(candidate)
+        }
+      }
+      rangesByRow.set(row, merged.map(item => ({
+        range: item.range,
+        style: item.current ? SEARCH_CURRENT_MATCH_STYLE : SEARCH_MATCH_STYLE,
+      })))
+    }
     result = highlightColumnRanges(result, rangesByRow)
   }
   // The ANCHOR-ONLY current result (plan S3 §6.3): no proven occurrence, so

@@ -77,6 +77,7 @@ test('navigation: the current strong highlight moves between occurrences in one 
     query: 'needle',
     match: {
       id: 0, turn: 0, occurrence,
+      normalizedSourceRange: occurrence === 0 ? { start: 0, end: 6 } : { start: 13, end: 19 },
       source: { kind: 'workflow-member' as const, phaseKey: workflowPhaseKey('P'), seq: 0, field: 'label' as const },
       sourceOccurrence: occurrence,
     },
@@ -97,7 +98,7 @@ test('navigation: the current strong highlight moves between occurrences in one 
   app.stop()
 })
 
-test('navigation: a reveal expands an anchor-only card and targets its rendered hit', async () => {
+test('navigation: a reveal expands an anchor-only card but keeps its card-top destination', async () => {
   const { vt, app } = startApp(100, 20)
   const longText = Array.from({ length: 24 }, (_, index) => `line ${index}`).join('\n')
     + '\nneedle in the compacted middle\n' + Array.from({ length: 6 }, (_, index) => `tail ${index}`).join('\n')
@@ -115,19 +116,20 @@ test('navigation: a reveal expands an anchor-only card and targets its rendered 
   })
   app.scrollToSearchTarget()
   const revealed = (await viewport(vt)).join('\n')
-  // A compact-capable long bubble inserts marker/tail chrome rows, so its whole
-  // card is NOT occurrence-preserving: the reveal still EXPANDS it, while the
-  // viewport may use the rendered hit only as approximate navigation.
-  assert.ok(!revealed.includes('rows compacted'), `the search reveal must expand the bubble:\n${revealed}`)
-  const targetRow = revealed.split('\n').findIndex(line => line.includes('needle in the compacted middle'))
-  assert.ok(targetRow >= 0, `the rendered query hit must be visible:\n${revealed}`)
-  const targetCol = revealed.split('\n')[targetRow]!.indexOf('compacted middle')
-  assert.ok(targetCol >= 0)
-  assert.ok(!isStrongCell(vt, targetRow, targetCol), 'approximate anchor navigation never fabricates a strong occurrence')
+  assert.ok(!revealed.includes('rows compacted'), `the search reveal still opens the bubble:\n${revealed}`)
+  assert.ok(!revealed.includes('needle in the compacted middle'), 'the unsupported nth target is not guessed')
+  assert.equal(app.fullscreenScrollForTest()?.scrollTop, 0, 'the inexact message source stays anchored at card top')
+  const mounted = (app as unknown as {
+    mountedTranscriptBlocks: ReadonlyArray<{ block: { message?: TranscriptMessage }; searchSelection?: { selectedIndex: number; exact: boolean; selectedRow?: number } }>
+  }).mountedTranscriptBlocks
+  const selection = mounted.find(entry => entry.block.message === message)?.searchSelection
+  assert.equal(selection?.selectedIndex, -1)
+  assert.equal(selection?.exact, false)
+  assert.equal(selection?.selectedRow, 0)
   app.stop()
 })
 
-test('navigation: multiple anchor-only hits use separate approximate viewport targets', async () => {
+test('navigation: multiple anchor-only hits keep the same card-top destination', async () => {
   const { vt, app } = startApp(100, 12)
   const text = [
     'top filler',
@@ -151,17 +153,24 @@ test('navigation: multiple anchor-only hits use separate approximate viewport ta
   app.setTranscriptSearchTarget(target(0))
   app.scrollToSearchTarget()
   let lines = await viewport(vt)
-  let row = lines.findIndex(line => line.includes('needle first hit'))
-  assert.ok(row >= 0, `the first approximate hit must be visible:\n${lines.join('\n')}`)
-  assert.ok(!isStrongCell(vt, row, lines[row]!.indexOf('needle')), 'anchor-only hit 0 stays weak')
+  assert.equal(app.fullscreenScrollForTest()?.scrollTop, 0, 'without provenance the first hit does not move off the card anchor')
+  assert.ok(lines.some(line => line.includes('needle first hit')), `the first hit happens to be visible near the card top:\n${lines.join('\n')}`)
+  assert.ok(!isStrongCell(vt, lines.findIndex(line => line.includes('needle first hit')), lines.find(line => line.includes('needle first hit'))!.indexOf('needle')),
+    'the anchor-only hit stays weak')
 
   app.setTranscriptSearchTarget(target(1))
   app.scrollToSearchTarget()
   lines = await viewport(vt)
-  row = lines.findIndex(line => line.includes('needle second hit'))
-  assert.ok(row >= 0, `the second approximate hit must be visible:\n${lines.join('\n')}`)
-  assert.ok(!isStrongCell(vt, row, lines[row]!.indexOf('needle')), 'anchor-only hit 1 stays weak')
-  assert.equal(app.transcriptSearchPresentationForTest()?.sourceOccurrence, 1, 'semantic source occurrence remains independent')
+  assert.equal(app.fullscreenScrollForTest()?.scrollTop, 0, 'the second ordinal cannot guess a later row')
+  assert.ok(!lines.some(line => line.includes('needle second hit')), `the unsupported second hit stays offscreen:\n${lines.join('\n')}`)
+  assert.equal(app.transcriptSearchPresentationForTest()?.sourceOccurrence, 1, 'the semantic source occurrence remains independent')
+  const mounted = (app as unknown as {
+    mountedTranscriptBlocks: ReadonlyArray<{ block: { message?: TranscriptMessage }; searchSelection?: { selectedIndex: number; exact: boolean; selectedRow?: number } }>
+  }).mountedTranscriptBlocks
+  const selection = mounted.find(entry => entry.block.message === message)?.searchSelection
+  assert.equal(selection?.selectedIndex, -1)
+  assert.equal(selection?.exact, false)
+  assert.equal(selection?.selectedRow, 0)
   app.stop()
 })
 
@@ -341,6 +350,7 @@ test('dismiss promotion: Workflow Run and Phase owners become durable after dism
   app.setTranscript([card])
   const match = {
     id: 0, turn: 0, occurrence: 0,
+    normalizedSourceRange: { start: 0, end: 6 },
     source: { kind: 'workflow-member' as const, phaseKey: workflowPhaseKey('P'), seq: 5, field: 'label' as const },
     sourceOccurrence: 0,
   }
@@ -441,7 +451,12 @@ test('navigation: every visible matching card is weak-highlighted, the current c
   app.setSearchMatchMessages(new Set([a, b]))
   app.setTranscriptSearchTarget({
     query: 'needle',
-    match: { id: 0, turn: 0, occurrence: 0, source: { kind: 'workflow-member', phaseKey: workflowPhaseKey('P'), seq: 0, field: 'label' }, sourceOccurrence: 0 },
+    match: {
+      id: 0, turn: 0, occurrence: 0,
+      normalizedSourceRange: { start: 6, end: 12 },
+      source: { kind: 'workflow-member', phaseKey: workflowPhaseKey('P'), seq: 0, field: 'label' },
+      sourceOccurrence: 0,
+    },
     message: a,
   })
   const lines = await viewport(vt)
@@ -760,6 +775,7 @@ test('navigation: a narrow width still paints the exact current occurrence', asy
     query: 'needle',
     match: {
       id: 0, turn: 0, occurrence: 1,
+      normalizedSourceRange: { start: 13, end: 19 },
       source: { kind: 'workflow-member', phaseKey: workflowPhaseKey('P'), seq: 0, field: 'label' },
       sourceOccurrence: 1,
     },
@@ -1116,7 +1132,7 @@ test('a visual Assistant keeps the search anchor for a folded delivered-file tar
   app.stop()
 })
 
-test('a search target below an inline figure scrolls the viewport to the rendered answer row', async () => {
+test('a message target below an inline figure stays at the card anchor without provenance', async () => {
   const ref = `sv2_${'f'.repeat(20)}`
   const marker = `[dsh-visual-${ref}]: <#>`
   const filler = Array.from({ length: 30 }, (_, index) => `filler line ${index}`).join('\n')
@@ -1127,15 +1143,21 @@ test('a search target below an inline figure scrolls the viewport to the rendere
   await vt.waitForRender()
   app.setTranscriptSearchTarget({
     query: 'needle',
-    match: { id: 0, turn: 0, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    match: folder.search('needle').find(match => match.source.kind === 'message')!,
     message: assistant,
   })
   app.scrollToSearchTarget()
   const lines = await viewport(vt)
-  assert.ok(lines.some(line => line.includes('After needle.')),
-    `the destination row is visible after the figure:\n${lines.join('\n')}`)
-  assert.ok((app.fullscreenScrollForTest()?.scrollTop ?? 0) > 0,
-    'the source-local destination is below the card top')
+  assert.ok(!lines.some(line => line.includes('After needle.')),
+    `a message source without cell provenance does not guess the row after the figure:\n${lines.join('\n')}`)
+  assert.equal(app.fullscreenScrollForTest()?.scrollTop, 0, 'the inexact message source stays at the card top')
+  const mounted = (app as unknown as {
+    mountedTranscriptBlocks: ReadonlyArray<{ block: { message?: TranscriptMessage }; searchSelection?: { selectedIndex: number; exact: boolean; selectedRow?: number } }>
+  }).mountedTranscriptBlocks
+  const selection = mounted.find(entry => entry.block.message === assistant)?.searchSelection
+  assert.equal(selection?.selectedIndex, -1)
+  assert.equal(selection?.exact, false)
+  assert.equal(selection?.selectedRow, 0)
   app.stop()
 })
 

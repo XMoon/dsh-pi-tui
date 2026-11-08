@@ -88,6 +88,13 @@ export interface TranscriptSearchMatch {
   readonly occurrence: number
   readonly source: TranscriptSearchSource
   readonly sourceOccurrence: number
+  /** Half-open UTF-16 offsets in the matching source chunk's normalized text.
+   * Present only when the whole hit is within that chunk; never stable identity
+   * or persistence. */
+  readonly normalizedSourceRange?: {
+    readonly start: number
+    readonly end: number
+  }
 }
 
 /** The stable occurrence identity used by the overlay's stale-refresh

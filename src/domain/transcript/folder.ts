@@ -4332,7 +4332,18 @@ export class TranscriptFolder {
         const sourceKey = span?.sourceKey ?? 'message'
         const sourceOccurrence = sourceOccurrences.get(sourceKey) ?? 0
         sourceOccurrences.set(sourceKey, sourceOccurrence + 1)
-        matches.push({ id: representative, turn: entry.turn, occurrence, source, sourceOccurrence })
+        const end = index + needle.length
+        const normalizedSourceRange = span !== undefined && end <= span.end
+          ? { start: index - span.start, end: end - span.start }
+          : undefined
+        matches.push({
+          id: representative,
+          turn: entry.turn,
+          occurrence,
+          source,
+          sourceOccurrence,
+          ...(normalizedSourceRange === undefined ? {} : { normalizedSourceRange }),
+        })
         occurrence += 1
         start = index + Math.max(1, needle.length)
       }
