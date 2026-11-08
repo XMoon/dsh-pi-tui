@@ -13,6 +13,7 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { visibleWidth } from '@xmoon76/pi-tui'
 import { TuiApp } from '../../src/tui-app.ts'
 import { darkColors, lightColors } from '../../src/domain/display/theme.ts'
+import { currentPalette } from '../../src/tui/theme/runtime.ts'
 import { TranscriptFolder, workflowPhaseKey, type TranscriptMessage, type TranscriptToolMessage } from '../../src/transcript.ts'
 import { deliveredFilesCapabilityStub } from '../support/delivered-files.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
@@ -63,64 +64,71 @@ function click(vt: VirtualTerminal, x: number, y: number): void {
 }
 
 test('navigation: direct Workflow provenance remains visible across the frozen size, theme and icon matrix', async () => {
+  const previousPalette = currentPalette
   const vt = new VirtualTerminal(100, 40)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
     deliveredFiles: deliveredFilesCapabilityStub,
   })
   app.start()
   startedApps.add(app)
-  app.setFullscreen(true)
-  const card = {
-    kind: 'workflow', turn: 0, runId: 'run-visual-matrix' as never, name: '任务 needle-run', status: 'running',
-    members: [],
-  } as Extract<TranscriptMessage, { kind: 'workflow' }>
-  const sizes = [[200, 50], [120, 40], [100, 40], [80, 24], [80, 10], [72, 24], [44, 20]] as const
-  const iconStyles = ['emoji', 'symbols', 'minimal'] as const
+  try {
+    app.setFullscreen(true)
+    const card = {
+      kind: 'workflow', turn: 0, runId: 'run-visual-matrix' as never, name: '任务 needle-run', status: 'running',
+      members: [],
+    } as Extract<TranscriptMessage, { kind: 'workflow' }>
+    const sizes = [[200, 50], [120, 40], [100, 40], [80, 24], [80, 10], [72, 24], [44, 20]] as const
+    const iconStyles = ['emoji', 'symbols', 'minimal'] as const
 
-  for (const [theme, width, height] of [
-    ...sizes.map(([columns, rows]) => ['dark', columns, rows] as const),
-    ...sizes.map(([columns, rows]) => ['light', columns, rows] as const),
-    ...sizes.map(([columns, rows]) => ['custom', columns, rows] as const),
-  ]) {
-    for (const iconStyle of iconStyles) {
-      vt.resize(width, height)
-      if (theme === 'dark' || theme === 'light') app.applyTheme(theme)
-      else app.applyPalette({ ...darkColors, searchCurrentBg: '#123456' })
-      app.setIconStyle(iconStyle)
-      app.setTranscript([card])
-      app.setTranscriptSearchTarget(undefined)
-      let lines = await viewport(vt)
-      const row = lines.findIndex(line => line.includes('任务 needle-run'))
-      assert.ok(row >= 0, `Workflow field is visible at ${width}x${height}, ${theme}, ${iconStyle}:\n${lines.join('\n')}`)
-      const column = visibleWidth(lines[row]!.slice(0, lines[row]!.indexOf('needle')))
-      const beforeBg = vt.getCellBgRgb(row, column)
-      assert.notEqual(beforeBg, 0xf5c542, 'the pre-search field cell is not painted as current')
+    for (const [theme, width, height] of [
+      ...sizes.map(([columns, rows]) => ['dark', columns, rows] as const),
+      ...sizes.map(([columns, rows]) => ['light', columns, rows] as const),
+      ...sizes.map(([columns, rows]) => ['custom', columns, rows] as const),
+    ]) {
+      for (const iconStyle of iconStyles) {
+        vt.resize(width, height)
+        if (theme === 'dark' || theme === 'light') app.applyTheme(theme)
+        else app.applyPalette({ ...darkColors, searchCurrentBg: '#123456' })
+        app.setIconStyle(iconStyle)
+        app.setTranscript([card])
+        app.setTranscriptSearchTarget(undefined)
+        let lines = await viewport(vt)
+        const row = lines.findIndex(line => line.includes('任务 needle-run'))
+        assert.ok(row >= 0, `Workflow field is visible at ${width}x${height}, ${theme}, ${iconStyle}:\n${lines.join('\n')}`)
+        const column = visibleWidth(lines[row]!.slice(0, lines[row]!.indexOf('needle')))
+        const beforeBg = vt.getCellBgRgb(row, column)
+        assert.notEqual(beforeBg, 0xf5c542, 'the pre-search field cell is not painted as current')
 
-      app.setTranscriptSearchTarget({
-        query: 'needle',
-        match: {
-          id: 0, turn: 0, occurrence: 0,
-          normalizedSourceRange: { start: 3, end: 9 },
-          source: { kind: 'workflow-run', field: 'name' },
-          sourceOccurrence: 0,
-        },
-        message: card,
-      })
-      lines = await viewport(vt)
-      const targetRow = lines.findIndex(line => line.includes('任务 needle-run'))
-      assert.ok(targetRow >= 0, `searched Workflow field stays visible at ${width}x${height}, ${theme}, ${iconStyle}`)
-      const targetColumn = visibleWidth(lines[targetRow]!.slice(0, lines[targetRow]!.indexOf('needle')))
-      assert.ok(vt.getCellBgRgb(targetRow, targetColumn) !== beforeBg,
-        `the exact current source cell changes at ${width}x${height}, ${theme}, ${iconStyle}`)
-      const mounted = (app as unknown as {
-        mountedTranscriptBlocks: ReadonlyArray<{ block: { message?: TranscriptMessage }; searchSelection?: { exact: boolean; selectedIndex: number } }>
-      }).mountedTranscriptBlocks
-      const selection = mounted.find(entry => entry.block.message === card)?.searchSelection
-      assert.equal(selection?.exact, true, `the direct field proof holds at ${width}x${height}, ${theme}, ${iconStyle}`)
-      assert.ok(selection!.selectedIndex >= 0)
+        app.setTranscriptSearchTarget({
+          query: 'needle',
+          match: {
+            id: 0, turn: 0, occurrence: 0,
+            normalizedSourceRange: { start: 3, end: 9 },
+            source: { kind: 'workflow-run', field: 'name' },
+            sourceOccurrence: 0,
+          },
+          message: card,
+        })
+        lines = await viewport(vt)
+        const targetRow = lines.findIndex(line => line.includes('任务 needle-run'))
+        assert.ok(targetRow >= 0, `searched Workflow field stays visible at ${width}x${height}, ${theme}, ${iconStyle}`)
+        const targetColumn = visibleWidth(lines[targetRow]!.slice(0, lines[targetRow]!.indexOf('needle')))
+        assert.ok(vt.getCellBgRgb(targetRow, targetColumn) !== beforeBg,
+          `the exact current source cell changes at ${width}x${height}, ${theme}, ${iconStyle}`)
+        const mounted = (app as unknown as {
+          mountedTranscriptBlocks: ReadonlyArray<{ block: { message?: TranscriptMessage }; searchSelection?: { exact: boolean; selectedIndex: number } }>
+        }).mountedTranscriptBlocks
+        const selection = mounted.find(entry => entry.block.message === card)?.searchSelection
+        assert.equal(selection?.exact, true, `the direct field proof holds at ${width}x${height}, ${theme}, ${iconStyle}`)
+        assert.ok(selection!.selectedIndex >= 0)
+      }
     }
+  } finally {
+    if (previousPalette === darkColors) app.applyTheme('dark')
+    else if (previousPalette === lightColors) app.applyTheme('light')
+    else app.applyPalette(previousPalette)
+    app.stop()
   }
-  app.stop()
 })
 test('navigation: a reveal expands an anchor-only card but keeps its card-top destination', async () => {
   const { vt, app } = startApp(100, 20)
