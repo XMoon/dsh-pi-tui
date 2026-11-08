@@ -103,4 +103,5 @@ export async function runSessionWorkspaceActivity(context) {
   assert(!(await viewportText(clientB)).includes('[1] Proceed'),
     'U-D the loser Client B kept an answerable modal after the first settlement')
   trace('ud-workspace-answered', { sessionX, sessionY })
+  await tools.scene.dispose()
 }

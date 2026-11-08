@@ -2,8 +2,9 @@
  * Split-process smoke wiring guard.
  *
  * The real OS qualification lives in `scripts/split-process-smoke.mjs` and is
- * driven by the dedicated CI split-process job on an npm release tag. An
- * ordinary PR legally skips that job — that skip is NOT the full smoke
+ * driven by the dedicated CI split-process job on npm release-tag pushes, or
+ * by an explicitly opted-in workflow_dispatch on main. An ordinary PR or
+ * branch push legally skips the job — that skip is NOT the full smoke
  * passing: split-process development work runs `pnpm smoke:split-process`
  * manually under its own task plan. This tooling test is a lightweight
  * wiring/selector/CI/utility guard: it does NOT prove the real 14/14 cases,
@@ -50,25 +51,31 @@ function workRootsIn(tmpRoot) {
   return readdirSync(tmpRoot).filter(name => name.startsWith('dsh-split-process-'))
 }
 
-test('the split-process smoke is a package script and a release-tag-only CI job', () => {
+test('the split-process smoke runs on tag pushes or explicit main dispatch', () => {
   const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
   assert.equal(pkg.scripts?.['smoke:split-process'], 'node scripts/split-process-smoke.mjs')
   const ci = readFileSync(join(ROOT, '.github', 'workflows', 'ci.yml'), 'utf8')
 
   // Parse the two jobs rather than matching raw text: the split-process job
-  // must own the npm release-tag gate AND execute the real lane against the
-  // downloaded candidate, and `qualify` must explicitly record the source-mode
-  // skip for both npm-only surfaces. A text-only assertion could keep passing
-  // while the run step was removed or the job-level gate was dropped.
+  // must run for npm release-tag pushes and explicit main dispatches AND execute
+  // the real lane against the downloaded candidate. An ordinary branch/PR skip
+  // remains the default; the qualifier verdict requires success for opted-in runs.
   const workflow = parseYaml(ci)
   const job = workflow.jobs['split-process']
   assert.ok(job, 'the split-process smoke must be its own CI job')
   const splitRun = job.steps?.find(step => typeof step.run === 'string'
     && step.run.trim() === 'pnpm smoke:split-process -- "$CANDIDATE"')
   assert.ok(splitRun, 'the split-process job must execute the real lane against the downloaded candidate')
-  assert.match(job.if, /startsWith\(github\.ref, 'refs\/tags\/'\)/u,
-    'the split-process job must only run on a release tag; an ordinary PR skips it')
-  assert.match(job.if, /outputs\.mode == 'npm'/u, 'the split-process job must only run in npm mode')
+  assert.equal(job.if,
+    "${{ always() && needs.dsh-context.result == 'success' && needs.candidate.result == 'success' && needs.dsh-context.outputs.mode == 'npm' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.run_split_process)) }}",
+    'only npm release-tag pushes or the explicit main dispatch input may run this job')
+  const dispatch = (workflow.on ?? workflow['on']).workflow_dispatch
+  assert.equal(dispatch.inputs.run_split_process.default, false,
+    'manual Split qualification is opt-in')
+  const ciVerdict = workflow.jobs.qualified.steps.find(step => typeof step.run === 'string'
+    && step.run.includes('ci-verdict.mjs qualify'))
+  assert.ok(ciVerdict?.run.includes('--phase "split-process=${{ needs[\'split-process\'].result }}"'),
+    'qualification verdict must consume the actual split-process job result')
   // The real npm run once skipped this job because its transitive
   // prepare-dsh-source need is legitimately skipped; without always() the
   // implicit all-needs success check propagates that skip and leaves the
