@@ -313,8 +313,11 @@ test('the failure report path stays bounded and keeps the --evidence FAIL twin',
   assert.match(source, /process\.stderr\.write\(`\$\{diagnostics\.identityLine\(\)\}\\n`\)/u)
   assert.match(source, /emitInputFailure\(\{[\s\S]{0,200}evidencePath: options\?\.evidence/u)
   assert.match(source, /SPLIT_PROCESS_UPGRADE_SMOKE_FAILURE: \$\{safeFailureSummary\(error\)\}/u)
-  assert.match(source, /if \(KEEP\) process\.stderr\.write\(`SPLIT_PROCESS_UPGRADE_SMOKE_FORENSICS: \$\{forensicErrorText\(error\)\}\\n`\)/u)
-  assert.doesNotMatch(source, /SPLIT_PROCESS_UPGRADE_SMOKE_FAILURE: \$\{error instanceof Error \? error\.message/u)
+  // The raw caught error is part of the default output; KEEP only preserves the
+  // scene and no FORENSICS-only branch exists anymore.
+  assert.match(source, /process\.stderr\.write\(`\$\{error instanceof Error \? \(error\.stack \?\? `\$\{error\.name\}: \$\{error\.message\}`\) : String\(error \?\? ''\)\}\\n`\)/u)
+  assert.doesNotMatch(source, /FORENSICS/u)
+  assert.doesNotMatch(source, /forensicErrorText/u)
   assert.match(source, /export \{ waitForAcceptedHandoff, waitForReloadNotice \} from '\.\/lib\/split-upgrade-support\.mjs'/u,
     'the shared diagnostics tooling keeps its single import path')
   const support = readFileSync(join(ROOT, 'scripts', 'lib', 'split-upgrade-support.mjs'), 'utf8')

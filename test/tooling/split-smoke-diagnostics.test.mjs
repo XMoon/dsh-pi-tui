@@ -31,7 +31,6 @@ import { npmDshVersion } from '../../scripts/lib/dsh-distribution.mjs'
 import {
   classifyHandoffRejection,
   FAILURE_CATEGORIES,
-  forensicErrorText,
   formatFailureSummary,
   LANE_ERROR_CODES,
   emitInputFailure,
@@ -278,8 +277,9 @@ test('the process lane refuses a candidate with another exact pin before any ins
 // ── The default failure report ──────────────────────────────────────────────
 
 const REPORT_KEYS = [
-  'schemaVersion', 'lane', 'status', 'category', 'reason', 'checkpoint', 'assertion', 'waitLabel',
-  'elapsedMs', 'runtimeDshPin', 'artifacts', 'expected', 'observed', 'progress', 'processes',
+  'schemaVersion', 'lane', 'status', 'category', 'reason', 'checkpoint', 'failedStep', 'assertion',
+  'waitLabel', 'elapsedMs', 'runtimeDshPin', 'artifacts', 'expected', 'observed', 'progress', 'processes',
+  'error',
 ]
 
 /** Capture one function's stderr writes without losing the real stream. */
@@ -357,7 +357,7 @@ test('the report holds only the whitelisted fields inside its fixed budgets', (t
   }
 })
 
-test('the default report and stderr summary never carry payload', (t) => {
+test('the report keeps the raw error while the summary stays a fixed projection', (t) => {
   const privateTmp = testLifecycle(t).tempDir('split-smoke-report-root-')
   process.env.TMPDIR = privateTmp
   t.after(() => { delete process.env.TMPDIR })
@@ -380,26 +380,114 @@ test('the default report and stderr summary never carry payload', (t) => {
     }),
     { processes: failureHandles(3, 4), evidencePath },
   ))
+  // The human summary is the fixed projection: no free-form payload.
   for (const sentinel of ['COOKIE_SENTINEL', 'TOKEN_SENTINEL', 'secret.invalid', 'user text', 'raw terminal', 'raw pty', 'raw stderr']) {
     assert.ok(!stderr.includes(sentinel), `the stderr summary must not contain ${sentinel}`)
   }
-  // The written report must say the same.
   const reported = stderr.match(/report: (\S+)/u)?.[1]
   assert.ok(reported !== undefined, `the summary must print the report path:\n${stderr}`)
   const content = readFileSync(reported, 'utf8')
-  for (const sentinel of ['COOKIE_SENTINEL', 'TOKEN_SENTINEL', 'secret.invalid', 'user text', 'raw terminal', 'raw pty', 'raw stderr']) {
-    assert.ok(!content.includes(sentinel), `the report must not contain ${sentinel}`)
-  }
+  const report = JSON.parse(content)
+  // The report is where the REAL root cause must survive: name + message +
+  // stack are retained (bounded), while the summary above stays fixed.
+  assert.equal(report.error?.name, 'SplitSmokeWaitError')
+  assert.match(report.error?.message ?? '', /PROCESS_EXITED.*Host ready/u)
+  assert.match(report.error?.stack ?? '', /SplitSmokeWaitError/u)
   const info = statSync(reported)
   assert.equal(info.mode & 0o777, 0o600, 'the report file is private')
   assert.equal(statSync(dirname(reported)).mode & 0o777, 0o700, 'the report directory is private')
-  assert.equal(readFileSync(evidencePath, 'utf8'), content, 'the CI evidence twin contains the same bounded safe report')
+  assert.equal(readFileSync(evidencePath, 'utf8'), content, 'the CI evidence twin contains the same report')
   assert.equal(statSync(evidencePath).mode & 0o777, 0o600, 'the CI evidence twin is private')
   assert.equal(statSync(evidenceDirectory).mode & 0o777, 0o700, 'the CI evidence directory is private')
   assert.equal(basename(reported), 'failure.json')
   rmSync(dirname(reported), { recursive: true, force: true })
 })
 
+
+test('runStep reports START/DONE/ERROR and names the failed scope', async (t) => {
+  const privateTmp = testLifecycle(t).tempDir('split-smoke-runstep-')
+  process.env.TMPDIR = privateTmp
+  t.after(() => { delete process.env.TMPDIR })
+  const diagnostics = createSmokeDiagnostics({
+    lane: 'split-process',
+    heading: 'SPLIT_PROCESS_SMOKE',
+    marker: 'T',
+    runtimeDshPin: TARGET_PIN,
+  })
+  const chunks = []
+  const original = process.stderr.write
+  process.stderr.write = (chunk) => { chunks.push(String(chunk)); return true }
+  let caught
+  try {
+    await diagnostics.runStep('case/ok', async () => 'done')
+    await diagnostics.runStep('case/outer', async () => {
+      await diagnostics.runStep('case/outer/inner', async () => {
+        throw new SplitSmokeAssertionError('maintenance did not leave the Host UNKNOWN')
+      })
+    })
+  } catch (error) {
+    caught = error
+  } finally {
+    process.stderr.write = original
+  }
+  const stderr = chunks.join('')
+  const lines = stderr.split('\n').filter(line => line.startsWith('[split] '))
+  assert.equal(lines.length, 6, `expected START/DONE + START/START/ERROR/ERROR, got:\n${stderr}`)
+  assert.match(lines[0], /^\[split\] \d{4}-\d{2}-\d{2}T[\d:.]+Z START case\/ok$/u)
+  assert.match(lines[1], /^\[split\] \d{4}-\d{2}-\d{2}T[\d:.]+Z DONE case\/ok durationMs=\d+$/u)
+  assert.match(lines[2], /^\[split\] \S+ START case\/outer$/u)
+  assert.match(lines[3], /^\[split\] \S+ START case\/outer\/inner$/u)
+  assert.match(lines[4], /^\[split\] \S+ ERROR case\/outer\/inner durationMs=\d+$/u)
+  assert.match(lines[5], /^\[split\] \S+ ERROR case\/outer durationMs=\d+$/u)
+  // The progress ring records phases (not a second checkpoint vocabulary), and
+  // the failed scope is the last ERROR — never the earlier DONE.
+  const progress = diagnostics.progress()
+  assert.equal(progress.filter(step => step.phase === 'done').length, 1)
+  assert.equal(progress.filter(step => step.phase === 'error').length, 2)
+  assert.equal(diagnostics.failedStep(), 'case/outer/inner')
+  assert.equal(caught.category, 'ASSERTION_FAILED')
+  const report = diagnostics.reportFailure(caught)
+  assert.equal(report.failedStep, 'case/outer/inner')
+  // The raw assertion text and its stack are retained in the report.
+  assert.match(report.error?.message ?? '', /maintenance did not leave the Host UNKNOWN/u)
+  assert.match(report.error?.stack ?? '', /SplitSmokeAssertionError/u)
+  // The fixed summary never quotes that text.
+  assert.ok(!stderr.includes('maintenance did not leave the Host UNKNOWN'))
+})
+
+test('only a Web case scope is passed through the credential redactor', async (t) => {
+  const privateTmp = testLifecycle(t).tempDir('split-smoke-web-redaction-')
+  process.env.TMPDIR = privateTmp
+  t.after(() => { delete process.env.TMPDIR })
+  const secret = 'tok-SENTINEL-123456'
+  const browserMessage = `driver failed: https://127.0.0.1:4567/x?token=${secret}\nCookie: session=${secret}\nAuthorization: Bearer ${secret}`
+  const runOne = async (stepName) => {
+    const diagnostics = createSmokeDiagnostics({
+      lane: 'split-process',
+      heading: 'SPLIT_PROCESS_SMOKE',
+      marker: 'T',
+      runtimeDshPin: TARGET_PIN,
+    })
+    let caught
+    try {
+      await diagnostics.runStep(stepName, async () => { throw new Error(browserMessage) })
+    } catch (error) {
+      caught = error
+    }
+    return { diagnostics, report: diagnostics.reportFailure(caught) }
+  }
+  const web = await runOne('case/web.product-browser-tui')
+  const webText = JSON.stringify(web.report)
+  for (const forbidden of [secret, '127.0.0.1:4567', 'Bearer tok']) {
+    assert.ok(!webText.includes(forbidden), `the Web report leaked ${forbidden}:\n${webText}`)
+  }
+  assert.match(web.report.error?.message ?? '', /<redacted>/u)
+  assert.equal(web.report.failedStep, 'case/web.product-browser-tui')
+  // A non-Web scope keeps its real message: the redactor is targeted, not a
+  // blanket "hide every error" policy.
+  const plain = await runOne('case/transport.authenticated-lifecycle')
+  assert.match(plain.report.error?.message ?? '', new RegExp(secret, 'u'))
+})
 
 test('a qualified run announces its identity and creates NO report artifact', (t) => {
   const life = testLifecycle(t)
@@ -727,9 +815,10 @@ test('the default final line is the fixed classification, never an Error.message
     observed: 'TARGET_INVALID_DSH_PIN_MISMATCH',
   })
   assert.equal(safeFailureSummary(wait), 'UNEXPECTED_RELOAD_REFUSAL: PROCESS_REFUSED_RELOAD')
-  // The forensic projection is a separate call the lanes take only under KEEP.
-  assert.match(forensicErrorText(foreign), /COOKIE_SENTINEL/u)
-  assert.equal(forensicErrorText(undefined), '(no detail)')
+  // The real error object still carries its own message, and the report
+  // projection retains it; the summary line never does.
+  assert.match(foreign.message, /COOKIE_SENTINEL/u)
+  assert.match(projectFailureReport({ lane: 'split-upgrade', error: foreign }).error?.message ?? '', /COOKIE_SENTINEL/u)
 })
 
 test('a failure before the diagnostics collector still leaves one safe report', (t) => {
@@ -745,11 +834,10 @@ test('a failure before the diagnostics collector still leaves one safe report', 
   assert.equal(result.signal, null, 'the lane must fail by itself inside the budget')
   assert.match(result.stderr, /SPLIT_PROCESS_UPGRADE_SMOKE_FAILURE/u)
   assert.match(result.stderr, /category: INFRA_FAILURE/u)
-  // The artifact path is the operator's own input, but the default projection
-  // stays field-shaped and never echoes it as free text.
-  for (const path of [join(dir, 'missing-old.tgz'), join(dir, 'missing-new.tgz')]) {
-    assert.ok(!result.stderr.includes(path), `the raw artifact path must not be echoed:\n${result.stderr}`)
-  }
+  // The real caught error is part of the default output now: the FIRST missing
+  // artifact is named by the actual error instead of being hidden.
+  assert.ok(result.stderr.includes(join(dir, 'missing-old.tgz')),
+    `the real error must name the first missing artifact:\n${result.stderr}`)
   assertNoLaneSetup(dir, 'dsh-split-upgrade-')
   const report = JSON.parse(readFileSync(evidence, 'utf8'))
   assert.equal(report.status, 'FAIL')
@@ -759,7 +847,7 @@ test('a failure before the diagnostics collector still leaves one safe report', 
   assert.equal(report.processes, undefined, 'no process may be invented')
 })
 
-test('an unreadable artifact reports the category without tar or parser text', (t) => {
+test('an unreadable artifact reports the category and the real error', (t) => {
   const life = testLifecycle(t)
   const dir = life.tempDir('split-upgrade-unreadable-')
   writeFileSync(join(dir, 'junk-old.tgz'), 'not a gzip stream at all\n')
@@ -769,10 +857,13 @@ test('an unreadable artifact reports the category without tar or parser text', (
   ], dir)
   assert.notEqual(result.status, 0)
   assert.match(result.stderr, /category: INFRA_FAILURE/u)
-  assert.ok(!/gzip|tar:|invalid|JSON/u.test(result.stderr), `foreign tool text leaked:\n${result.stderr}`)
+  // The root cause is no longer hidden behind the fixed category: the real
+  // caught error text is printed by default.
+  assert.match(result.stderr, /SPLIT_PROCESS_UPGRADE_SMOKE_FAILURE: INFRA_FAILURE/u)
+  assert.match(result.stderr, /not a gzip stream at all|Error:/u)
 })
 
-test('KEEP is the only mode that prints the raw error text', (t) => {
+test('the raw error is printed without KEEP and KEEP only preserves the scene', (t) => {
   const life = testLifecycle(t)
   const dir = life.tempDir('split-upgrade-forensics-')
   const args = [
@@ -780,16 +871,21 @@ test('KEEP is the only mode that prints the raw error text', (t) => {
     '--new', syntheticTarball(dir, 'new', manifestOf('0.5.5', TARGET_PIN)),
   ]
   const quiet = runLane(UPGRADE_SCRIPT, args, dir)
-  assert.ok(!quiet.stderr.includes('FORENSICS'), `a default run must not print forensics:\n${quiet.stderr}`)
-  const started = Date.now()
+  assert.notEqual(quiet.status, 0)
+  assert.match(quiet.stderr, /SPLIT_PROCESS_UPGRADE_SMOKE_FAILURE: INPUT_UNQUALIFIED/u)
+  // The real error name/message is part of the default output, not a KEEP-only
+  // forensic line.
+  assert.match(quiet.stderr, /SplitSmokeInputError/u)
+  assert.ok(!quiet.stderr.includes('FORENSICS'), `KEEP-only wording must be gone:\n${quiet.stderr}`)
   const kept = spawnSync(process.execPath, [UPGRADE_SCRIPT, ...args], {
     encoding: 'utf8',
     timeout: 5_000,
     env: { ...process.env, TMPDIR: dir, SPLIT_UPGRADE_KEEP: '1' },
   })
   assert.notEqual(kept.status, 0)
-  assert.ok(Date.now() - started < 5_000)
-  assert.match(kept.stderr, /SPLIT_PROCESS_UPGRADE_SMOKE_FORENSICS: SplitSmokeInputError: INPUT_UNQUALIFIED/u)
+  assert.match(kept.stderr, /SplitSmokeInputError/u)
+  assert.ok(kept.stderr.length >= quiet.stderr.length,
+    'KEEP may only add the preserved-scene information, never remove the error')
 })
 
 test('an existing --evidence file is replaced on a private inode, never rewritten in place', (t) => {
@@ -1380,7 +1476,10 @@ test('a setup failure is reported and leaves no half-created scene behind', (t) 
   assert.match(result.stderr, /category: INFRA_FAILURE/u)
   assert.match(result.stderr, /DIAGNOSTIC_WRITE_FAILURE: E[A-Z]+/u)
   assert.match(result.stderr, /SPLIT_PROCESS_SMOKE_FAILURE: INFRA_FAILURE$/mu)
-  assert.ok(!/ENOENT|EACCES: |syscall|errno:/.test(result.stderr), `a system error text leaked:\n${result.stderr}`)
+  // The report could not be written, but the REAL caught error is still part of
+  // the default output; only the errno vocabulary is used for the write failure
+  // announcement itself.
+  assert.match(result.stderr, /Error: EACCES/u)
   assert.deepEqual(readdirSync(locked), [], 'no work root may survive the setup failure')
   assert.equal(selected.signal, null, `the selected lane must fail by itself: ${selected.error?.message}`)
   assert.notEqual(selected.status, 0)
@@ -1388,6 +1487,7 @@ test('a setup failure is reported and leaves no half-created scene behind', (t) 
   assert.match(selected.stderr, /category: INFRA_FAILURE/u)
   assert.match(selected.stderr, /DIAGNOSTIC_WRITE_FAILURE: E[A-Z]+/u)
   assert.match(selected.stderr, /SPLIT_PROCESS_SMOKE_FAILURE: INFRA_FAILURE$/mu)
+  assert.match(selected.stderr, /Error: EACCES/u)
   assert.deepEqual(readdirSync(locked), [], 'no work root may survive the selected setup failure')
 })
 

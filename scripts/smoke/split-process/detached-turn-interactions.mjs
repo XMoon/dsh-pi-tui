@@ -47,8 +47,11 @@ function assert(condition, message) {
  * official durable Session log is the settlement authority.
  */
 export async function runDetachedTurnInteractions(context) {
-  const { EntryProcess, entries, base, workDir, dshHome, trace, failpoint } = context
+  const { EntryProcess, entries, base, workDir, dshHome, trace, failpoint, runStep } = context
   const scene = createC1Scene(context)
+  /** One lifecycle scope under the case: the runner already owns the case scope. */
+  const step = (name, operation) =>
+    runStep(`case/recovery.detached-turn-interactions/${name}`, operation)
   const {
     c1Work,
     c1JobWorkRoot,
@@ -65,7 +68,7 @@ export async function runDetachedTurnInteractions(context) {
     // T44: a real accepted Turn survives a Client SIGKILL. The LLM stream is
     // held by the Host fixture; the Client disappears while the Host Agent is
     // running, then the SAME Host writes the final assistant message.
-    {
+    await step('t44', async () => {
       const releaseBarrier = join(workDir, 't44-long-turn.release')
       const { host, ready, workRoot } = await startC1Host('long-turn', 't44', {
         C1_HOLD_LONG_TURN: releaseBarrier,
@@ -110,10 +113,10 @@ export async function runDetachedTurnInteractions(context) {
         promptReplays: 1,
         c2Readback: true,
       })
-    }
+    })
 
     // T45: the same running Turn survives a CLEAN Client exit (`/exit`).
-    {
+    await step('t45', async () => {
       const releaseBarrier = join(workDir, 't45-long-turn.release')
       const { host, ready, workRoot } = await startC1Host('long-turn', 't45', {
         C1_HOLD_LONG_TURN: releaseBarrier,
@@ -138,11 +141,11 @@ export async function runDetachedTurnInteractions(context) {
       await exitC1Client(c2, 'T45 C2')
       await stopC1Host(host)
       trace('t45', { hostPid: ready.pid, sessionId, cleanExitDidNotCancel: true, c2Readback: true })
-    }
+    })
 
     // T46: a real foreground Host Tool call survives the Client exit and its
     // result is written exactly once by the Host Tool authority.
-    {
+    await step('t46', async () => {
       const releaseBarrier = join(workDir, 't46-tool.release')
       const { host, ready, workRoot } = await startC1Host('foreground-tool', 't46', {
         C1_HOLD_TOOL: releaseBarrier,
@@ -170,11 +173,11 @@ export async function runDetachedTurnInteractions(context) {
       await exitC1Client(c2, 'T46 C2')
       await stopC1Host(host)
       trace('t46', { hostPid: ready.pid, sessionId, callId: toolStarted.callId, toolResults: 1, hostAlive: true })
-    }
+    })
 
     // T47: a real background Job (official ctx.jobs registry + OS process)
     // keeps running after the Client exits and settles without one.
-    {
+    await step('t47', async () => {
       const releaseBarrier = join(workDir, 't47-job.release')
       const { host, ready, workRoot } = await startC1Host('job', 't47', {}, c1JobWorkRoot('t47'))
       const jobRelease = join(workRoot, 'job.release')
@@ -211,12 +214,12 @@ export async function runDetachedTurnInteractions(context) {
       await exitC1Client(c2, 'T47 C2')
       await stopC1Host(host)
       trace('t47', { hostPid: ready.pid, sessionId, jobId: registered.jobId, jobStatus: settled.status, hostAlive: true, processOutput: true })
-    }
+    })
 
     // Host liveness: one real DSH JobRegistry unowned Job. No Client and no
     // Agent is involved; the observer must see the registry's unowned list
     // and event lifecycle directly.
-    {
+    await step('unowned-job-arm', async () => {
       const { host, ready, workRoot } = await startC1Host('unowned-job', 'unowned-job-arm', {
         C1_UNOWNED_JOB_ARM: join(workDir, 'unowned-job-arm.arm'),
       })
@@ -235,7 +238,7 @@ export async function runDetachedTurnInteractions(context) {
       assert(settledLiveness.sourceStates?.jobs === 'IDLE', `the unowned Job source did not return to IDLE: ${JSON.stringify(settledLiveness.sourceStates)}`)
       await stopC1Host(host)
       trace('unowned-job-arm', { hostPid: ready.pid, jobId: created.jobId, runningVerdict: runningLiveness.verdict, settledJobsState: settledLiveness.sourceStates.jobs })
-    }
+    })
 
     // Host liveness: ONE real armed Goal is the only thing that keeps this
     // Host from claiming quiescence. The automatic `goal-round-driver` row is
@@ -245,7 +248,7 @@ export async function runDetachedTurnInteractions(context) {
     // armed state would then be a transient window whose Host status depends
     // on when the read lands, so the driver's own reservation is qualified
     // separately by the goal-round case below.
-    {
+    await step('goal-armed', async () => {
       const armedPatch = join(workDir, 'goal-armed.patch.yml')
       const operations = parseYaml(readFileSync(c1Work.patchPath, 'utf8'))
       operations.push({ id: 'goal-round-driver', disabled: true })
@@ -303,7 +306,7 @@ export async function runDetachedTurnInteractions(context) {
         goalState: goalLiveness.sourceStates.goal,
         agentState: goalLiveness.sourceStates.agent,
       })
-    }
+    })
 
     // The REAL `goal-round-driver` owns the automatic reservation: the
     // fixture only creates the governing Goal through the official service
@@ -312,7 +315,7 @@ export async function runDetachedTurnInteractions(context) {
     // armed state. It reads no Host liveness, because with this driver
     // mounted the armed Goal is transient by design; the stable armed-Goal
     // liveness proof is the goal-armed case above.
-    {
+    await step('goal-round', async () => {
       const { host, ready, workRoot } = await startC1Host('goal-round', 'goal-round')
       // Positive control for the armed case's row vocabulary: the same id,
       // name and `active` state are what the real driver mounts when the
@@ -354,34 +357,42 @@ export async function runDetachedTurnInteractions(context) {
         agentStatus: round.agentStatus,
         blockCode: blocked.blockCode,
       })
-    }
+    })
 
     // Host liveness: Agent.runMaintenance() is really executing while the
     // public Agent status stays idle. The observer must not claim quiescence;
     // rc.4 has no synchronous maintenance getter, so UNKNOWN is correct.
-    {
+    await step('maintenance-sweep', async () => {
       const { host, ready, workRoot } = await startC1Host('maintenance', 'maintenance-sweep')
       const { client } = await startC1Client('maintenance C1')
       const sessionId = await openC1Session(client, 'maintenance prompt', 'maintenance')
-      const maintenance = await waitForC1WorkEvent(workRoot, event => event.kind === 'maintenance' && event.phase === 'running', 'maintenance running', 120_000)
-      assert(maintenance.agentStatus === 'idle', `maintenance ran while the Agent was ${JSON.stringify(maintenance.agentStatus)}`)
-      const maintenanceLiveness = (await hostStatus(host)).liveness
-      assert(maintenanceLiveness?.verdict === 'UNKNOWN', `maintenance did not leave the Host UNKNOWN: ${JSON.stringify(maintenanceLiveness)}`)
-      assert(maintenanceLiveness.verdict !== 'OBSERVED_QUIESCENT', 'maintenance was reported as quiescent')
-      assert(maintenanceLiveness.reasons?.includes('agent-maintenance-unproven'), 'the maintenance gap is not reported')
-      writeFileSync(join(workRoot, 'maintenance.release'), 'release\n', { mode: 0o600 })
-      await waitForC1WorkEvent(workRoot, event => event.kind === 'maintenance' && event.phase === 'settled', 'maintenance settled', 120_000)
-      await exitC1Client(client, 'maintenance C1')
-      await stopC1Host(host)
+      const maintenance = await step('maintenance-wait-running', async () => {
+        const running = await waitForC1WorkEvent(workRoot, event => event.kind === 'maintenance' && event.phase === 'running', 'maintenance running', 120_000)
+        assert(running.agentStatus === 'idle', `maintenance ran while the Agent was ${JSON.stringify(running.agentStatus)}`)
+        return running
+      })
+      const maintenanceLiveness = await step('maintenance-read-liveness', async () => {
+        const liveness = (await hostStatus(host)).liveness
+        assert(liveness?.verdict === 'UNKNOWN', `maintenance did not leave the Host UNKNOWN: ${JSON.stringify(liveness)}`)
+        assert(liveness.verdict !== 'OBSERVED_QUIESCENT', 'maintenance was reported as quiescent')
+        assert(liveness.reasons?.includes('agent-maintenance-unproven'), 'the maintenance gap is not reported')
+        return liveness
+      })
+      await step('maintenance-release-and-settle', async () => {
+        writeFileSync(join(workRoot, 'maintenance.release'), 'release\n', { mode: 0o600 })
+        await waitForC1WorkEvent(workRoot, event => event.kind === 'maintenance' && event.phase === 'settled', 'maintenance settled', 120_000)
+        await exitC1Client(client, 'maintenance C1')
+        await stopC1Host(host)
+      })
       trace('maintenance-sweep', { hostPid: ready.pid, sessionId, agentStatus: maintenance.agentStatus, verdict: maintenanceLiveness.verdict })
-    }
+    })
 
     // Host liveness: the Host-only profile mounts the ONE official Schedule row
     // (S5-PR4), so this scenario uses the DEFAULT composition — a test-only
     // second insert would be the duplicate owner the plan forbids. An active
     // task must block with zero Clients; deleting it must clear the
     // schedule-active contribution.
-    {
+    await step('host-schedule', async () => {
       const { host, ready, workRoot } = await startC1Host('schedule', 'host-schedule')
       const scheduleRows = (ready.entries ?? []).filter(entry => entry.id === 'pi-tui-schedule')
       assert(scheduleRows.length === 1, `expected exactly one Schedule row, found ${scheduleRows.length}`)
@@ -401,11 +412,11 @@ export async function runDetachedTurnInteractions(context) {
       assert(deletedLiveness.sourceStates?.schedule === 'IDLE', `the schedule source did not return to IDLE: ${JSON.stringify(deletedLiveness.sourceStates)}`)
       await stopC1Host(host)
       trace('host-schedule', { hostPid: ready.pid, sessionId, scheduleId: created.scheduleId, activeVerdict: activeLiveness.verdict, deletedScheduleState: deletedLiveness.sourceStates.schedule })
-    }
+    })
 
     // T48: a real continuable Child survives the Client exit; the Child
     // Session's own durable log carries its final assistant message.
-    {
+    await step('t48', async () => {
       const releaseBarrier = join(workDir, 't48-child.release')
       const { host, ready, workRoot } = await startC1Host('child', 't48', {
         C1_HOLD_CHILD: releaseBarrier,
@@ -440,7 +451,7 @@ export async function runDetachedTurnInteractions(context) {
       await exitC1Client(c2, 'T48 C2')
       await stopC1Host(host)
       trace('t48', { hostPid: ready.pid, parentSessionId: sessionId, childId: started.childId, runId: started.runId, childDurable: true })
-    }
+    })
 
     // rc.4 exposes no pending inventory: after a Client detaches, the Host
     // status must keep the pending source fail-closed as UNKNOWN with the
@@ -471,6 +482,7 @@ export async function runDetachedTurnInteractions(context) {
     // Client exit. C2 receives the ORIGINAL callId through the Host Gateway
     // and its answer settles the same Host flow exactly once.
     for (const [mode, label] of [['kill', 't49'], ['exit', 't50']]) {
+      await step(label, async () => {
       // B-03 eligibility control: the kill case drives the full real Gateway
       // owner-event-stream lifecycle (none -> C1 -> none -> C2 -> none) and
       // one non-answering Peer negative control. The clean-exit case keeps
@@ -569,6 +581,7 @@ export async function runDetachedTurnInteractions(context) {
         hostSettlements: settlements.length,
         ...(eligibilityProbe ? { gatewayEligibility: 'none>c1>none>c2>none', nonAnsweringPeer: 'refused' } : {}),
       })
+      })
     }
 
     // T51: after the original Client is gone, a legal new TUI answers the
@@ -576,7 +589,7 @@ export async function runDetachedTurnInteractions(context) {
     // A separate test-only non-TUI answering Peer holds the OLD legal
     // delivery and submits its stale frame AFTER C2 settled. The Host must
     // ignore it: no second request, settlement or tool result.
-    {
+    await step('t51', async () => {
       let peer
       try {
         const { host, ready, workRoot } = await startC1Host('question', 't51')
@@ -642,14 +655,14 @@ export async function runDetachedTurnInteractions(context) {
           await peer.shutdown().catch(() => {})
         }
       }
-    }
+    })
 
     // T52: the official TIMED question becomes a durable `continued` entry.
     // C2 reopens it from the Task Quick projection, submits a late answer,
     // and the Host queues exactly one `user-question-reply` message. This is
     // the official askTimed()/continued lifetime, NOT a 30-minute orphan
     // expiry test.
-    {
+    await step('t52', async () => {
       const afterTimedBarrier = join(workDir, 't52-after-timed.release')
       const duplicateProbeBarrier = join(workDir, 't52-duplicate-probe.release')
       const expiredProbeBarrier = join(workDir, 't52-expired-probe.release')
@@ -735,7 +748,7 @@ export async function runDetachedTurnInteractions(context) {
         duplicateAnswer: 'REPLY_QUEUED',
         expiredAnswer: 'not-continued',
       })
-    }
+    })
 
     // T53/T54: an official Approval request survives the Client exit and a
     // fresh Client settles the SAME Host request exactly once. `allowed-once`
@@ -744,6 +757,7 @@ export async function runDetachedTurnInteractions(context) {
       ['approval-allow', 'y', 'allowed-once', 'approval-allow.marker'],
       ['approval-reject', 'n', 'rejected', 'approval-reject.marker'],
     ]) {
+      await step(scenario === 'approval-allow' ? 't53' : 't54', async () => {
       const label = scenario === 'approval-allow' ? 't53' : 't54'
       const { host, ready, workRoot } = await startC1Host(scenario, label)
       const { client: c1 } = await startC1Client(`${label.toUpperCase()} C1`)
@@ -784,12 +798,13 @@ export async function runDetachedTurnInteractions(context) {
       await exitC1Client(c2, `${label} C2`)
       await stopC1Host(host)
       trace(label, { hostPid: ready.pid, sessionId, requestId, decision: expected, decisions: 1, marker: existsSync(marker) })
+      })
     }
 
     // T55a: an old, still-authenticated non-TUI Peer holds the original
     // approval delivery while the legal C2 rejects it. The old peer's late
     // `allowed-once` frame must not execute the tool or add a decision.
-    {
+    await step('t55a', async () => {
       let peer
       try {
         const { host, ready, workRoot } = await startC1Host('approval-allow', 't55a')
@@ -835,12 +850,12 @@ export async function runDetachedTurnInteractions(context) {
           await peer.shutdown().catch(() => {})
         }
       }
-    }
+    })
 
     // T55b: a formal Host Agent cancel while the approval is pending must
     // settle the request as the official cancellation taxonomy; a late `y`
     // must not execute the marker.
-    {
+    await step('t55b', async () => {
       const cancelBarrier = join(workDir, 't55b-cancel.release')
       const { host, ready, workRoot } = await startC1Host('approval-allow', 't55b', { C1_CANCEL_AGENT: cancelBarrier })
       const { client } = await startC1Client('T55B C1')
@@ -864,7 +879,7 @@ export async function runDetachedTurnInteractions(context) {
       await exitC1Client(client, 'T55B C1')
       await stopC1Host(host)
       trace('t55b', { hostPid: ready.pid, sessionId, requestId, hostAbortTaxonomy: decided.data.outcome, lateAllowExecuted: false })
-    }
+    })
 
     // T55c: same-PID HMR while a pending Question/Approval owns the modal.
     // The root delivery survives the revision swap; the new surface shows
@@ -873,6 +888,7 @@ export async function runDetachedTurnInteractions(context) {
       ['question', 'question', 't55c-question', 'Continue the C1 test?', '1', 1],
       ['approval', 'approval-allow', 't55c-approval', '[y] Allow once', 'y', 1],
     ]) {
+      await step(label, async () => {
       const { host, ready, workRoot } = await startC1Host(scenario, label)
       const { client } = await startC1Client(`${label} Client`, { SPLIT_PROCESS_CLIENT_HMR_PROBE: '1' })
       const sessionId = await openC1Session(client, `${label} prompt`, label.toUpperCase())
@@ -932,11 +948,12 @@ export async function runDetachedTurnInteractions(context) {
       await exitC1Client(client, `${label} Client`)
       await stopC1Host(host)
       trace(label, { hostPid: ready.pid, sessionId, samePid: true, sameGeneration: true, pendingReattached: true })
+      })
     }
 
     // T56: a new Client is a fresh Peer/binding; it reads the exact history
     // once and a new prompt appends live without duplication.
-    {
+    await step('t56', async () => {
       const releaseBarrier = join(workDir, 't56-long-turn.release')
       const rebuilt = await startC1Host('long-turn', 't56', { C1_HOLD_LONG_TURN: releaseBarrier })
       const { client: c1 } = await startC1Client('T56 C1b')
@@ -959,7 +976,7 @@ export async function runDetachedTurnInteractions(context) {
       await exitC1Client(c2, 'T56 C2')
       await stopC1Host(rebuilt.host)
       trace('t56', { hostPid: rebuilt.ready.pid, sessionId, historyOnce: true, liveAppend: true })
-    }
+    })
   } finally {
     await scene.dispose()
   }
