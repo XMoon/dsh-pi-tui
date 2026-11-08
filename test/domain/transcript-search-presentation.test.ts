@@ -476,6 +476,52 @@ test('presentation: a same-width content change never reuses stale strong geomet
   assert.ok(!second[0]!.includes('needle'), 'the old occurrence is gone from the render')
 })
 
+test('presentation: stale Thinking geometry suppresses title and hint matches after width or content changes', () => {
+  const sourceLines = ['🌊 Thinking', '  thinking body', '  click to expand']
+  const selectors: RenderedSearchSelector[] = [
+    { query: 'thinking', sourceOccurrence: 0, weakOnly: true, suppressMatchesOnStaleGeometry: true },
+    {
+      query: 'thinking', sourceOccurrence: 0, suppressMatchesOnStaleGeometry: true,
+      geometry: { sourceKey: 'message', anchorRow: 1, occurrences: [] },
+    },
+  ]
+  const initialMatches = findAltScreenSearchMatches(sourceLines, 'thinking')
+    .filter(match => match.segments.every(segment => segment.row === 1))
+  assert.equal(initialMatches.length, 1, 'the current Thinking body row is initially eligible')
+
+  for (const selector of selectors) {
+    const initialSelection = selectRenderedSearchMatch(initialMatches, selector)
+    for (const stale of [
+      { width: 10, lines: ['🌊', 'Thinking', '  thinking', '  click to expand'] },
+      { width: 40, lines: ['🌊 Thinking', '  thinking body changed', '  click to expand'] },
+    ]) {
+      let renderedInitial = false
+      const child: Component = {
+        render: () => {
+          if (renderedInitial) return [...stale.lines]
+          renderedInitial = true
+          return [...sourceLines]
+        },
+        invalidate: () => {},
+      }
+      const component = new SearchHighlightComponent(child, selector, initialSelection, 40, sourceLines)
+      const before = component.render(40)
+      if (selector.weakOnly) {
+        assert.ok(before[1]!.includes('\x1b[4mthinking\x1b[24m'), 'the non-current body is weakly decorated')
+      } else {
+        assert.ok(before[1]!.includes(color.searchAnchorBg('  ')), 'the current body source has its anchor wash')
+      }
+
+      const after = component.render(stale.width)
+      assert.deepEqual(after.map(stripTerminalSequences), [...stale.lines], 'stale geometry preserves every rendered row verbatim')
+      assert.ok(after.every(line => !line.includes('\x1b[4m') && !line.includes('\x1b[1;7m')),
+        'stale Thinking geometry suppresses matches rather than highlighting title or hint chrome')
+      assert.ok(after.every(line => !line.includes(color.searchAnchorBg('Thinking'))),
+        'stale Thinking geometry cannot row-wash the wrapped title')
+    }
+  }
+})
+
 test('presentation: clear() stops decorating a mounted wrapper', () => {
   const lines = ['alpha needle beta']
   const child = linesComponent(lines)
