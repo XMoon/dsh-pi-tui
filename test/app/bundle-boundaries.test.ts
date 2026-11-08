@@ -456,11 +456,16 @@ test('the release Experimental members paint their real TUI surface and platform
   await renderFrame()
   await waitFor(() => controller.model().cards.length === OPTIONAL_BUNDLES.length + ON_DEMAND.length,
     'the real Host catalog read')
+  await waitFor(() => {
+    const frame = plain(vt.getViewport())
+    return frame.includes('Experimental') && !frame.includes('Loading plugins…')
+  }, 'the first painted Plugin Manager catalog')
 
-  // The Host hides the CUA entry by default; the painted list advertises the
-  // explicit-search affordance and never paints the hidden card while paging
-  // the complete untouched list.
-  let defaultList = plain(vt.getViewport())
+  // The Host hides the CUA entry by default; the initial painted list advertises
+  // explicit search, and paging the list never paints the hidden card.
+  const firstPage = plain(vt.getViewport())
+  assert.match(firstPage, /searches hidden official/u, 'the initial list advertises explicit search')
+  let defaultList = firstPage
   for (let page = 0; page < 12; page += 1) {
     const before = plain(vt.getViewport())
     vt.sendInput('\x1b[6~')
@@ -469,7 +474,6 @@ test('the release Experimental members paint their real TUI surface and platform
     if (after === before) break
     defaultList += `\n${after}`
   }
-  assert.match(defaultList, /searches hidden official/u, 'the list advertises the explicit search of hidden bundles')
   assert.doesNotMatch(defaultList, /dsh-cua-bundle/u, 'the Host-hidden CUA entry is absent from the default list')
 
   for (const name of RELEASE_FRAME_NAMES) {
