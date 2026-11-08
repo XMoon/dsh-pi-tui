@@ -624,6 +624,31 @@ test('a task occurrence is a second clickable row with the official time and zon
   assert.deepEqual(view.dispatches, [{ kind: 'open-detail', id: 'task-long-title' }])
 })
 
+test('rendering hundreds of rows constructs one date formatter per official zone', () => {
+  const rows = Array.from({ length: 500 }, (_, index) => task({
+    id: `task-${index}`,
+    title: `Task ${index}`,
+    timeZone: 'Pacific/Chatham',
+  }))
+  const descriptor = Object.getOwnPropertyDescriptor(Intl, 'DateTimeFormat')!
+  let constructions = 0
+  const tracked = new Proxy(descriptor.value as typeof Intl.DateTimeFormat, {
+    construct(target, args, newTarget) {
+      constructions += 1
+      return Reflect.construct(target, args, newTarget)
+    },
+  })
+  Object.defineProperty(Intl, 'DateTimeFormat', { ...descriptor, value: tracked })
+  try {
+    const view = harness(workspace({ rows, total: rows.length, selectedId: 'task-0' }), { columns: 120, rows: 40 })
+    const lines = view.plain()
+    assert.ok(lines.some(line => line.includes('Task 0')))
+    assert.equal(constructions, 1, 'the list reuses one formatter for all rows in the same official zone')
+  } finally {
+    Object.defineProperty(Intl, 'DateTimeFormat', descriptor)
+  }
+})
+
 test('the selected two-line task group stays together when the list scrolls to it', () => {
   const many = Array.from({ length: 20 }, (_, index) => task({
     id: `task-${index}`,

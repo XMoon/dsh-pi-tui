@@ -58,6 +58,17 @@ test('a committed occurrence is formatted in its explicit official zone, indepen
   }
 })
 
+test('list occurrence years retain the official four-digit year width', () => {
+  assert.equal(formatListOccurrence(catalogEntry(daily({
+    scheduledAt: '0001-01-01T09:00:00.000Z',
+    timeZone: 'UTC',
+  }))), 'Next 0001-01-01 09:00 UTC')
+  assert.equal(formatListOccurrence(catalogEntry(daily({
+    scheduledAt: '0099-12-31T23:00:00.000Z',
+    timeZone: 'UTC',
+  }))), 'Next 0099-12-31 23:00 UTC')
+})
+
 test('a later delivery floor is shown as eligibility, while an earlier floor leaves the committed Next time', () => {
   const scheduledAt = '2026-06-01T09:00:00.000Z'
   assert.equal(formatListOccurrence(catalogEntry(daily(), {

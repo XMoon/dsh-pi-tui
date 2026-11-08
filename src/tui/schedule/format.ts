@@ -80,6 +80,8 @@ export function formatOccurrence(record: ScheduleCatalogEntry): string {
   return `${occurrencePrefix(record)} ${formatLocalInstant(record.scheduledAt)} · ${officialTimeZone(record)}`
 }
 
+const listDateTimeFormatters = new Map<string, Intl.DateTimeFormat>()
+
 /**
  * A compact list-only occurrence. It displays the Host-committed instant in
  * the rule's official zone; a later delivery floor is only an eligibility
@@ -103,17 +105,23 @@ export function formatListOccurrence(entry: ScheduleCatalogEntry): string {
   }
 
   const zone = officialTimeZone(entry)
-  const parts = new Intl.DateTimeFormat('en-GB', {
-    timeZone: zone,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    hourCycle: 'h23',
-  }).formatToParts(new Date(instant))
+  let formatter = listDateTimeFormatters.get(zone)
+  if (formatter === undefined) {
+    formatter = new Intl.DateTimeFormat('en-GB', {
+      timeZone: zone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+    })
+    listDateTimeFormatters.set(zone, formatter)
+  }
+  const parts = formatter.formatToParts(new Date(instant))
   const part = (type: Intl.DateTimeFormatPartTypes): string => parts.find(value => value.type === type)!.value
-  return `${prefix} ${part('year')}-${part('month')}-${part('day')} ${part('hour')}:${part('minute')} ${zone}`
+  const year = part('year').padStart(4, '0')
+  return `${prefix} ${year}-${part('month')}-${part('day')} ${part('hour')}:${part('minute')} ${zone}`
 }
 
 /** A short, non-evaluated summary of the official repeat rule. */
