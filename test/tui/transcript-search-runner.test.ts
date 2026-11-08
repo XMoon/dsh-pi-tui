@@ -14,6 +14,7 @@ import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import { SESSION_FORMAT_VERSION, type SessionEvent } from '@deepseek-ai/dsh-session'
+import { stripTerminalSequences } from '@xmoon76/pi-tui'
 import { TuiApp } from '../../src/tui-app.ts'
 import { TranscriptFolder } from '../../src/transcript.ts'
 import {
@@ -606,4 +607,78 @@ test('runner search: every operation performs exactly one representative pass', 
     process.stderr.write = originalWrite
     delete process.env.DSH_TUI_SEARCH_PROFILE
   }
+})
+
+test('runner search: passive assistant settlement refreshes the source range for the stable target', async (t) => {
+  const events = [
+    event('turn/start', { turn: 0 }, 0),
+    event('assistant/message', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('search-range-assistant'),
+        role: 'assistant',
+        content: [{ type: 'text', text: 'needle' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+      stream: [],
+    }, 1),
+  ]
+  const fixture = await mountSearchRunner(t, 1, [], 'needle', events)
+  const { app, projections, context, harness } = fixture
+  app.startTranscriptSearch()
+  await fixture.settleRender()
+  typeQuery(fixture, 'needle')
+  await fixture.settleRender()
+  const initial = app.transcriptSearchPresentationForTest()
+  assert.equal(initial?.sourceKey, 'message')
+  const readRange = (): { start: number; end: number } | undefined =>
+    (app as unknown as { searchTarget?: { match: { normalizedSourceRange?: { start: number; end: number } } } })
+      .searchTarget?.match.normalizedSourceRange
+  assert.deepEqual(readRange(), { start: 0, end: 6 })
+
+  const liveSession = (harness.sessions as { get(id: string): unknown }).get(fixture.sessionId)
+  const emit = (context as unknown as { emit(name: string, ...args: unknown[]): void }).emit
+  projections.reset()
+  app.resetSearchPresentationDiagnosticsForTest()
+  emit('session/event', liveSession, event('assistant/message', {
+    turn: 0, step: 0,
+    message: {
+      id: MessageId('search-range-assistant'),
+      role: 'assistant',
+      content: [{ type: 'text', text: 'prefix needle' }],
+      source: { kind: 'model', provider: 'p', model: 'm' },
+    },
+    stream: [],
+  }, 2))
+  await fixture.settleRender()
+
+  const updated = app.transcriptSearchPresentationForTest()
+  assert.equal(updated?.matchId, initial?.matchId, 'the target keeps its stable message identity')
+  assert.equal(updated?.occurrence, initial?.occurrence)
+  assert.equal(updated?.sourceOccurrence, initial?.sourceOccurrence)
+  assert.deepEqual(readRange(), { start: 7, end: 13 }, 'passive binding carries the current source-local offset')
+  assert.equal(projections.count(), 1, 'the settlement projects once')
+  assert.ok(app.searchPresentationDiagnosticsForTest().rebuilds <= 1, 'the offset refresh commits at most one rebuild')
+})
+
+test('runner search: a Folder Workflow name range reaches its exact VirtualTerminal cell', async (t) => {
+  const events = [
+    event('turn/start', { turn: 0 }, 0),
+    event('tool-workflow/run-start', { runId: 'workflow-search-run' as never, name: 'needle-run' }, 1),
+  ]
+  const fixture = await mountSearchRunner(t, 1, [], 'needle', events)
+  fixture.app.startTranscriptSearch()
+  await fixture.settleRender()
+  typeQuery(fixture, 'needle')
+  await fixture.settleRender()
+
+  const target = fixture.app.transcriptSearchPresentationForTest()
+  assert.equal(target?.sourceKey, 'workflow-run.name', 'the real Folder hit retains its semantic field source')
+  assert.equal(target?.message?.kind, 'workflow', 'the production runner resolves the Workflow card')
+  const lines = fixture.vt.getViewport()
+  const row = lines.findIndex(line => stripTerminalSequences(line).includes('needle-run'))
+  assert.ok(row >= 0, `the Workflow header is painted:\n${lines.join('\n')}`)
+  const column = stripTerminalSequences(lines[row]!).indexOf('needle')
+  assert.equal(fixture.vt.getCellBgRgb(row, column), 0xf5c542,
+    `the real semantic match range reaches the exact painted cell:\n${lines[row]}`)
 })

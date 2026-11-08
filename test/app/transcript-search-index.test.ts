@@ -788,6 +788,19 @@ test('a settled assistant message created WITHOUT chunks stays searchable after 
   assertCorpusParity(folder, ['replaced authoritative', 'streamed tail'])
 })
 
+test('occurrence: assistant settlement recomputes a moved source range without changing match identity', () => {
+  const folder = new TranscriptFolder()
+  applyLive(folder, [turnStart(0, 0), ...assistantChunks(1, 0, 0, ['needle'])])
+  const streamed = folder.search('needle')[0]!
+  assert.deepEqual(streamed.normalizedSourceRange, { start: 0, end: 6 })
+
+  folder.apply([assistantMessage(2, 0, 0, 'prefix needle')])
+  const settled = folder.search('needle')[0]!
+  assert.equal(settled.id, streamed.id, 'settlement preserves the message match id')
+  assert.equal(transcriptSearchMatchKey(settled), transcriptSearchMatchKey(streamed), 'offset movement never changes the stable key')
+  assert.deepEqual(settled.normalizedSourceRange, { start: 7, end: 13 }, 'the settled text publishes its new source-local offset')
+})
+
 test('interleaved reasoning and text deltas search their OWN entries (namespaced projection)', () => {
   const folder = new TranscriptFolder()
   applyLive(folder, [
@@ -1108,6 +1121,49 @@ test('occurrence: case-insensitive enumeration keeps every occurrence', () => {
   assert.equal(folder.search('foo').length, 4)
 })
 
+test('occurrence: source-local normalized ranges preserve stable match identity', () => {
+  const folder = new TranscriptFolder()
+  folder.hydrate([turnStart(0, 0), userMessage(1, 'alpha needle needle'), turnEnd(2, 0)])
+  const matches = folder.search('needle')
+  assert.deepEqual(matches.map(match => match.normalizedSourceRange), [
+    { start: 6, end: 12 },
+    { start: 13, end: 19 },
+  ])
+  assert.deepEqual(matches.map(match => match.sourceOccurrence), [0, 1])
+  for (const match of matches) {
+    assert.equal(
+      transcriptSearchMatchKey(match),
+      transcriptSearchMatchKey({ ...match, normalizedSourceRange: { start: 0, end: 1 } }),
+      'the ephemeral source range never enters the stable key',
+    )
+  }
+})
+
+test('occurrence: Workflow field ranges are source-local and cross-field hits have no range', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    turnStart(0, 0),
+    rawEvent('tool-workflow/run-start', { runId: 'run1', name: 'audit' }, 1),
+    rawEvent('tool-workflow/agent-start', { runId: 'run1', seq: 1, label: 'shard-5', phase: 'Migration', childId: 'session-1' }, 2),
+  ])
+  const name = folder.search('udit').find(match => match.source.kind === 'workflow-run' && match.source.field === 'name')
+  assert.deepEqual(name?.normalizedSourceRange, { start: 1, end: 5 })
+  const status = folder.search('running').find(match => match.source.kind === 'workflow-run' && match.source.field === 'status')
+  assert.deepEqual(status?.normalizedSourceRange, { start: 0, end: 7 })
+  const crossing = folder.search('shard-5 running')
+  assert.equal(crossing.length, 1, 'the cross-field semantic match remains in the result list')
+  assert.equal(crossing[0]!.normalizedSourceRange, undefined, 'a range never crosses a source span boundary')
+})
+
+test('occurrence: lowercase expansion is represented in normalized UTF-16 coordinates', () => {
+  const folder = new TranscriptFolder()
+  folder.hydrate([turnStart(0, 0), userMessage(1, 'İ i'), turnEnd(2, 0)])
+  assert.deepEqual(folder.search('i').map(match => match.normalizedSourceRange), [
+    { start: 0, end: 1 },
+    { start: 3, end: 4 },
+  ])
+})
+
 test('occurrence: a tool card maps name/args/result occurrences to semantic sources', () => {
   const folder = new TranscriptFolder()
   folder.apply([
@@ -1337,6 +1393,7 @@ test('cross-span: a workflow member label+status query keeps the member source',
   ])
   const matches = folder.search('shard-5 running')
   assert.equal(matches.length, 1, 'the cross-span occurrence is preserved')
+  assert.equal(matches[0]!.normalizedSourceRange, undefined, 'the hit crosses its source chunk boundary')
   assert.deepEqual(matches[0]!.source, {
     kind: 'workflow-member',
     phaseKey: 'value:9:Migration',

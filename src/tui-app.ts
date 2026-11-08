@@ -285,7 +285,7 @@ import { SaveLocationPrompt, SaveLocationFrame, type SaveLocationDeps, type Save
 export type { QuestionFlowDraft } from './tui/interaction/question.ts'
 export type { SaveLocationResult } from './tui/interaction/save-location.ts'
 import { createInstalledAutocompleteProvider } from './tui/interaction/autocomplete/installed-provider.ts'
-import { assistantPresentationRevision, PTC_MAX_DEPTH, recentTurnThreshold, textWithAttachmentMarkers, transcriptSearchSourceKey, type AssistantDisplayBlock, subCallDisplayStatus, type PresentedFilePresentation, type TranscriptMessage, type TranscriptSearchMatch, type TurnActivity, type WorkflowMemberView, type WorkflowRunStatus, workflowPhaseKey } from './transcript.ts'
+import { assistantPresentationRevision, PTC_MAX_DEPTH, recentTurnThreshold, textWithAttachmentMarkers, transcriptSearchSourceKey, type AssistantDisplayBlock, subCallDisplayStatus, type PresentedFilePresentation, type TranscriptMessage, type TranscriptSearchMatch, type TurnActivity, type WorkflowMemberView, type WorkflowRunStatus, workflowPhaseKey, workflowReadablePhase } from './transcript.ts'
 import { classifyTranscriptMessage, isSurfacedInteractionTool, isSurfacedContext } from './domain/transcript/semantics.ts'
 import {
   SearchHighlightComponent,
@@ -670,6 +670,13 @@ function sameSearchTarget(left: TranscriptSearchPresentationTarget | undefined, 
   if (left.query !== right.query || left.message !== right.message) return false
   if (left.match.id !== right.match.id || left.match.turn !== right.match.turn) return false
   if (left.match.occurrence !== right.match.occurrence || left.match.sourceOccurrence !== right.match.sourceOccurrence) return false
+  const leftRange = left.match.normalizedSourceRange
+  const rightRange = right.match.normalizedSourceRange
+  if (leftRange === undefined || rightRange === undefined) {
+    if (leftRange !== rightRange) return false
+  } else if (leftRange.start !== rightRange.start || leftRange.end !== rightRange.end) {
+    return false
+  }
   return transcriptSearchSourceKey(left.match.source) === transcriptSearchSourceKey(right.match.source)
 }
 
@@ -11534,7 +11541,15 @@ export class TuiApp {
     // Non-current cards must be SEMANTIC match representatives: a card that
     // merely renders the query in UI chrome is never highlighted.
     if (!current && !this.searchMatchMessages.has(block.message)) return { current: false }
-    const matches = this.renderedSearchMatchesFor(block.message, rendered, target.query)
+    const messageEntry = this.messageComponents.get(block.message)
+    const hostThinkingBody = block.message.kind === 'thinking'
+      && messageEntry !== undefined
+      && messageEntry.rendererId === undefined
+      && rendered.length > 1
+    const renderedMatches = this.renderedSearchMatchesFor(block.message, rendered, target.query)
+    const matches = hostThinkingBody
+      ? renderedMatches.filter(match => match.segments.every(segment => segment.row >= 1 && segment.row < rendered.length))
+      : renderedMatches
     if (!current && matches.length === 0) return { current: false }
     if (current
       && matches.length === 0
@@ -11547,19 +11562,23 @@ export class TuiApp {
     }
     if (current) {
       const regions = this.searchSourceRegionsFor(block.message, rendered.length, subCallRegions, deliverableRegions)
-      const geometry = buildSourceGeometry(matches, regions, transcriptSearchSourceKey(target.match.source))
+      const geometry = buildSourceGeometry(matches, rendered, regions, transcriptSearchSourceKey(target.match.source), target.query)
       const selector: RenderedSearchSelector = {
         query: target.query,
         sourceOccurrence: target.match.sourceOccurrence,
+        ...(target.match.normalizedSourceRange === undefined ? {} : { normalizedSourceRange: target.match.normalizedSourceRange }),
         ...(geometry === undefined ? {} : { geometry }),
       }
       const selection = selectRenderedSearchMatch(matches, selector)
       const scrollRange = selectRenderedSearchScrollRange(matches, selection, selector, regions)
-      return {
-        selector,
-        selection: scrollRange === undefined ? selection : { ...selection, scrollRange },
-        current,
-      }
+      const committedSelection = scrollRange === undefined
+        ? selection
+        : {
+            ...selection,
+            ...(selection.exact ? {} : { selectedRow: scrollRange.startRow }),
+            scrollRange,
+          }
+      return { selector, selection: committedSelection, current }
     }
     const selector: RenderedSearchSelector = { query: target.query, sourceOccurrence: 0, weakOnly: true }
     return { selector, selection: selectRenderedSearchMatch(matches, selector), current }
@@ -11579,14 +11598,18 @@ export class TuiApp {
     const cardRegions = this.searchSourceRegionsByMessage.get(message)
     if (cardRegions !== undefined) regions.push(...cardRegions)
     if (deliverableRegions !== undefined) regions.push(...deliverableRegions)
-    // A message-kind card's rendered body ALWAYS includes UI chrome (a
-    // `Thinking` header, the user bubble's `❯` marker/continuation indent,
-    // markdown transforms, attachments, the delivered-files tail, …), so the
-    // whole card is never an occurrence-ordinal-preserving projection of
-    // `message.text`: anchor-only. A renderer may later register a
-    // source-only region to upgrade it.
+    // Message-kind cards include UI chrome or transformed content, so their
+    // message source stays position-only. Host Thinking starts below its title
+    // when a body row is present; plugin-owned and body-less cards anchor at top.
     if (message.kind !== 'tool' && message.kind !== 'workflow') {
-      regions.push({ sourceKey: 'message', anchorRow: 0, rowStart: 0, rowEnd: renderedLength, enumerable: false })
+      const entry = this.messageComponents.get(message)
+      const bodyStart = message.kind === 'thinking'
+        && entry !== undefined
+        && entry.rendererId === undefined
+        && renderedLength > 1
+        ? 1
+        : 0
+      regions.push({ sourceKey: 'message', anchorRow: bodyStart, rowStart: bodyStart, rowEnd: renderedLength, enumerable: false })
     }
     return regions
   }
@@ -19918,7 +19941,8 @@ export class TuiApp {
     const icon = iconPrefix('workflow', this.iconStyle)
     const disclosure = runOpen ? '▼' : '▶'
     const runName = sanitizedPhysicalLine(message.name)
-    const head = `${color.textDim(`${disclosure} ${icon}Workflow ${runName}`)} ${workflowStatusPill(message.status)}`
+    const statusPill = workflowStatusPill(message.status)
+    const head = `${color.textDim(`${disclosure} ${icon}Workflow ${runName}`)} ${statusPill}`
     const rows: string[] = []
     const hits: Array<{ top: number; height: number; hit: WorkflowHit }> = []
     const regions: SearchSourceRegion[] = []
@@ -19931,8 +19955,8 @@ export class TuiApp {
       const statusStart = labelEnd + visibleWidth(' — ')
       return { labelStart, labelEnd, statusStart, statusEnd: statusStart + visibleWidth(status) }
     }
-    const pushFieldRegion = (sourceKey: string, row: number, startCol: number, endCol: number): void => {
-      if (endCol > startCol) regions.push({ sourceKey, anchorRow: row, rowStart: row, rowEnd: row + 1, columns: { startCol, endCol } })
+    const pushFieldRegion = (sourceKey: string, row: number, startCol: number, endCol: number, sourceText: string): void => {
+      if (endCol > startCol) regions.push({ sourceKey, anchorRow: row, rowStart: row, rowEnd: row + 1, columns: { startCol, endCol }, sourceText })
     }
     rows.push(truncateToWidth(head, width, '…'))
     hits.push({ top: 0, height: 1, hit: { kind: 'run', runId } })
@@ -19945,10 +19969,10 @@ export class TuiApp {
     const runNameStart = runKindEnd + 1
     const runNameEnd = runNameStart + visibleWidth(runName)
     const runStatusStart = runNameEnd + 1
-    const runStatusEnd = runStatusStart + visibleWidth(workflowStatusPill(message.status))
-    pushFieldRegion('workflow-run.kind', 0, runKindStart, runKindEnd)
-    pushFieldRegion('workflow-run.name', 0, runNameStart, runNameEnd)
-    pushFieldRegion('workflow-run.status', 0, runStatusStart, runStatusEnd)
+    const runStatusEnd = runStatusStart + visibleWidth(statusPill)
+    pushFieldRegion('workflow-run.kind', 0, runKindStart, runKindEnd, 'workflow')
+    pushFieldRegion('workflow-run.name', 0, runNameStart, runNameEnd, message.name)
+    pushFieldRegion('workflow-run.status', 0, runStatusStart + 1, runStatusEnd - 1, message.status)
     // The aggregate summary renders in BOTH states (plan §5.6: a compact
     // completed run still shows `126 agents · completed` — the phases and
     // members stay hidden, the aggregate never does).
@@ -19971,7 +19995,7 @@ export class TuiApp {
         hits.push({ top: rows.length - 1, height: 1, hit: { kind: 'phase', runId, phaseKey: phase.key } })
         const phasePrefix = `  ${phaseDisclosure} `
         const phaseSpan = fieldSpans(phasePrefix, phaseLabel, undefined)
-        pushFieldRegion(`workflow-phase.${phase.key}`, rows.length - 1, phaseSpan.labelStart, phaseSpan.labelEnd)
+        pushFieldRegion(`workflow-phase.${phase.key}`, rows.length - 1, phaseSpan.labelStart, phaseSpan.labelEnd, workflowReadablePhase(phase.members[0]!.phase))
         if (!phaseOpen) continue
         if (phase.mode === 'inline') {
           // Small phase: every member in durable seq order. Only a RUNNING
@@ -19988,8 +20012,8 @@ export class TuiApp {
             ))
             const spans = fieldSpans(prefix, memberLabel, memberStatus)
             const memberBase = `workflow-member.${phase.key}.${member.seq}`
-            pushFieldRegion(`${memberBase}.label`, rows.length - 1, spans.labelStart, spans.labelEnd)
-            pushFieldRegion(`${memberBase}.status`, rows.length - 1, spans.statusStart, spans.statusEnd)
+            pushFieldRegion(`${memberBase}.label`, rows.length - 1, spans.labelStart, spans.labelEnd, member.label)
+            pushFieldRegion(`${memberBase}.status`, rows.length - 1, spans.statusStart, spans.statusEnd, member.status)
             if (member.status === 'running') {
               hits.push({ top: rows.length - 1, height: 1, hit: { kind: 'member', runId, seq: member.seq, childId: String(member.childId) } })
             }
@@ -20009,7 +20033,7 @@ export class TuiApp {
             // context row is deliberately suppressed for previewed members).
             // Its status text is not rendered, so only the label region exists.
             const spans = fieldSpans(prefix, memberLabel, undefined)
-            pushFieldRegion(`workflow-member.${phase.key}.${member.seq}.label`, rows.length - 1, spans.labelStart, spans.labelEnd)
+            pushFieldRegion(`workflow-member.${phase.key}.${member.seq}.label`, rows.length - 1, spans.labelStart, spans.labelEnd, member.label)
           }
           if (phase.hiddenAnomalyCount > 0) {
             rows.push(truncateToWidth(color.textDim(`    … ${phase.hiddenAnomalyCount} more abnormal`), width, '…'))
@@ -20035,8 +20059,8 @@ export class TuiApp {
             ))
             const spans = fieldSpans(prefix, contextLabel, contextStatus)
             const memberBase = `workflow-member.${phase.key}.${context.seq}`
-            pushFieldRegion(`${memberBase}.label`, rows.length - 1, spans.labelStart, spans.labelEnd)
-            pushFieldRegion(`${memberBase}.status`, rows.length - 1, spans.statusStart, spans.statusEnd)
+            pushFieldRegion(`${memberBase}.label`, rows.length - 1, spans.labelStart, spans.labelEnd, context.label)
+            pushFieldRegion(`${memberBase}.status`, rows.length - 1, spans.statusStart, spans.statusEnd, context.status)
           }
         }
       }

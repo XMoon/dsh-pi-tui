@@ -13,6 +13,7 @@ import { findAltScreenSearchMatches, stripTerminalSequences, visibleWidth, type 
 import {
   SearchHighlightComponent,
   buildSourceGeometry,
+  highlightColumnRanges,
   highlightSearchLines,
   selectRenderedSearchMatch,
   selectRenderedSearchScrollRange,
@@ -34,10 +35,41 @@ function linesComponent(lines: readonly string[]): Component {
 }
 
 /** A selector whose single region is the whole card (a message-kind source). */
+function sourceRangeFor(sourceText: string | undefined, query: string, sourceOccurrence: number): { start: number; end: number } | undefined {
+  if (sourceText === undefined) return undefined
+  const needle = query.trim().toLowerCase()
+  if (needle === '') return undefined
+  let start = 0
+  let occurrence = 0
+  while (true) {
+    const index = sourceText.toLowerCase().indexOf(needle, start)
+    if (index < 0) return undefined
+    if (occurrence === sourceOccurrence) return { start: index, end: index + needle.length }
+    occurrence += 1
+    start = index + Math.max(1, needle.length)
+  }
+}
+
+/** A single rendered line can act as direct-source evidence in these pure
+ * presentation cases. Multi-row fixtures stay position-only. */
 function wholeCardSelector(lines: readonly string[], query: string, sourceOccurrence = 0): RenderedSearchSelector {
   const matches = findAltScreenSearchMatches(lines, query)
-  const geometry = buildSourceGeometry(matches, [{ sourceKey: 'message', anchorRow: 0, rowStart: 0, rowEnd: lines.length }], 'message')
-  return { query, sourceOccurrence, ...(geometry === undefined ? {} : { geometry }) }
+  const regions: SearchSourceRegion[] = lines.length === 1
+    ? [{
+        sourceKey: 'message', anchorRow: 0, rowStart: 0, rowEnd: 1,
+        columns: { startCol: 0, endCol: visibleWidth(lines[0]!) },
+        sourceText: stripTerminalSequences(lines[0]!),
+      }]
+    : [{ sourceKey: 'message', anchorRow: 0, rowStart: 0, rowEnd: lines.length, enumerable: false }]
+  const geometry = buildSourceGeometry(matches, lines, regions, 'message', query)
+  return {
+    query,
+    sourceOccurrence,
+    ...(sourceRangeFor(regions[0]?.sourceText, query, sourceOccurrence) === undefined
+      ? {}
+      : { normalizedSourceRange: sourceRangeFor(regions[0]?.sourceText, query, sourceOccurrence)! }),
+    ...(geometry === undefined ? {} : { geometry }),
+  }
 }
 
 function selectorForRegions(
@@ -48,8 +80,17 @@ function selectorForRegions(
   sourceOccurrence = 0,
 ): RenderedSearchSelector {
   const matches = findAltScreenSearchMatches(lines, query)
-  const geometry = buildSourceGeometry(matches, regions, sourceKey)
-  return { query, sourceOccurrence, ...(geometry === undefined ? {} : { geometry }) }
+  const sourceTexts = regions.filter(region => region.sourceKey === sourceKey && region.sourceText !== undefined)
+  const normalizedSourceRange = sourceTexts.length === 1
+    ? sourceRangeFor(sourceTexts[0]!.sourceText, query, sourceOccurrence)
+    : undefined
+  const geometry = buildSourceGeometry(matches, lines, regions, sourceKey, query)
+  return {
+    query,
+    sourceOccurrence,
+    ...(normalizedSourceRange === undefined ? {} : { normalizedSourceRange }),
+    ...(geometry === undefined ? {} : { geometry }),
+  }
 }
 
 test('presentation: the current occurrence is strong, the others weak', () => {
@@ -102,9 +143,40 @@ test('presentation: an occurrence wrapped across two lines highlights both rows'
   }
 })
 
+test('presentation: overlapping matches in one ZWJ grapheme paint once with the strong style', () => {
+  const lines = ['👩‍👩‍👦 needle']
+  const matches = findAltScreenSearchMatches(lines, '👩')
+  assert.equal(matches.length, 2, 'both semantic regex hits map onto the family grapheme')
+  assert.deepEqual(matches.map(match => match.segments), [
+    [{ row: 0, startCol: 0, endCol: 2 }],
+    [{ row: 0, startCol: 0, endCol: 2 }],
+  ])
+  const decorated = highlightSearchLines(lines, { matches, selectedIndex: 1, selectedRow: 0, exact: true })
+  assert.equal(stripTerminalSequences(decorated[0]!), lines[0], 'the shared grapheme is never duplicated')
+  assert.equal(visibleWidth(decorated[0]!), visibleWidth(lines[0]!))
+  assert.ok(decorated[0]!.includes(strong('👩‍👩‍👦')), 'the overlapping current hit wins over the weak hit')
+  assert.ok(!decorated[0]!.includes('\x1b[4m'), 'the merged interval is not also painted weak')
+})
+
+test('presentation: the shared painter clamps overlapping Job-style ranges to original cells', () => {
+  const lines = ['abcdef']
+  const ranges = new Map([[0, [
+    { range: { startCol: 1, endCol: 4 }, style: (text: string) => `\x1b[31m${text}\x1b[39m` },
+    { range: { startCol: 3, endCol: 6 }, style: (text: string) => `\x1b[32m${text}\x1b[39m` },
+  ]]])
+  const painted = highlightColumnRanges(lines, ranges)
+  assert.equal(stripTerminalSequences(painted[0]!), 'abcdef')
+  assert.equal(visibleWidth(painted[0]!), visibleWidth(lines[0]!))
+})
+
 test('presentation: image protocol lines are never text-highlighted', () => {
   const lines = ['\x1b_Ga=T,f=100;AAAA\x1b\\', 'needle here']
-  const selection = selectRenderedSearchMatch(findAltScreenSearchMatches(lines, 'needle'), wholeCardSelector(lines, 'needle'))
+  const regions: SearchSourceRegion[] = [{
+    sourceKey: 'message', anchorRow: 1, rowStart: 1, rowEnd: 2,
+    columns: { startCol: 0, endCol: visibleWidth('needle here') }, sourceText: 'needle here',
+  }]
+  const selector = selectorForRegions(lines, 'needle', regions, 'message')
+  const selection = selectRenderedSearchMatch(findAltScreenSearchMatches(lines, 'needle'), selector)
   const decorated = highlightSearchLines(lines, selection)
   assert.equal(decorated[0], lines[0], 'the image line is untouched')
   assert.ok(decorated[1]!.includes(strong('needle')))
@@ -112,13 +184,70 @@ test('presentation: image protocol lines are never text-highlighted', () => {
 
 test('presentation: a proven source region scopes the exact occurrence', () => {
   const lines = ['needle in header', 'body needle', 'needle in footer']
-  const regions: SearchSourceRegion[] = [{ sourceKey: 's', anchorRow: 1, rowStart: 1, rowEnd: 2 }]
+  const regions: SearchSourceRegion[] = [{
+    sourceKey: 's', anchorRow: 1, rowStart: 1, rowEnd: 2,
+    columns: { startCol: 0, endCol: visibleWidth('body needle') }, sourceText: 'body needle',
+  }]
   const selection = selectRenderedSearchMatch(findAltScreenSearchMatches(lines, 'needle'), selectorForRegions(lines, 'needle', regions, 's'))
   assert.equal(selection.exact, true, 'the in-region occurrence is exact')
   const decorated = highlightSearchLines(lines, selection)
   assert.ok(!decorated[0]!.includes(strong('needle')), 'the header occurrence is not current')
   assert.ok(decorated[1]!.includes(strong('needle')), 'the body occurrence is current')
   assert.ok(!decorated[2]!.includes(strong('needle')), 'the footer occurrence is not current')
+})
+
+test('presentation: normalized source offset selects the matching cell in one direct field', () => {
+  const sourceText = 'needle needle'
+  const startCol = visibleWidth('Workflow name ')
+  const lines = [`Workflow name ${sourceText}`]
+  const regions: SearchSourceRegion[] = [{
+    sourceKey: 'workflow-name', anchorRow: 0, rowStart: 0, rowEnd: 1,
+    columns: { startCol, endCol: startCol + visibleWidth(sourceText) }, sourceText,
+  }]
+  const matches = findAltScreenSearchMatches(lines, 'needle')
+  const selector = selectorForRegions(lines, 'needle', regions, 'workflow-name', 1)
+  const selection = selectRenderedSearchMatch(matches, selector)
+  assert.deepEqual(selector.normalizedSourceRange, { start: 7, end: 13 })
+  assert.equal(selection.exact, true)
+  assert.equal(selection.selectedIndex, 1)
+  assert.deepEqual(selection.matches[selection.selectedIndex]!.segments, [{ row: 0, startCol: startCol + 7, endCol: startCol + 13 }])
+})
+
+test('presentation: source proof rejects Unicode, whitespace, ANSI, truncation and grapheme ambiguity', () => {
+  const cases = [
+    { line: 'İ i', sourceText: 'İ i', query: 'i' },
+    { line: 'ſ s', sourceText: 'ſ s', query: 's' },
+    { line: 'alpha  beta', sourceText: 'alpha  beta', query: 'alpha  beta' },
+    { line: '👩‍👩‍👦 needle', sourceText: '👩‍👩‍👦 needle', query: '👩' },
+    { line: 'safe field', sourceText: 'safe\u001b[2J field', query: 'field' },
+    { line: 'needle…', sourceText: 'needle after truncation', query: 'needle' },
+  ]
+  for (const item of cases) {
+    const lines = [item.line]
+    const regions: SearchSourceRegion[] = [{
+      sourceKey: 'field', anchorRow: 0, rowStart: 0, rowEnd: 1,
+      columns: { startCol: 0, endCol: visibleWidth(item.line) }, sourceText: item.sourceText,
+    }]
+    const selector = selectorForRegions(lines, item.query, regions, 'field')
+    const selection = selectRenderedSearchMatch(findAltScreenSearchMatches(lines, item.query), selector)
+    assert.equal(selection.exact, false, `${JSON.stringify(item)} must not claim exact provenance`)
+    assert.equal(selection.selectedIndex, -1, `${JSON.stringify(item)} must remain anchor-only`)
+    assert.equal(selector.geometry?.occurrences.length, 0, `${JSON.stringify(item)} produces no proven geometry`)
+  }
+})
+
+test('presentation: multiple direct regions for one source do not create ambiguous geometry', () => {
+  const lines = ['needle needle']
+  const sourceText = 'needle needle'
+  const region = {
+    sourceKey: 'field', anchorRow: 0, rowStart: 0, rowEnd: 1,
+    columns: { startCol: 0, endCol: visibleWidth(sourceText) }, sourceText,
+  }
+  const selector = selectorForRegions(lines, 'needle', [region, region], 'field')
+  const selection = selectRenderedSearchMatch(findAltScreenSearchMatches(lines, 'needle'), selector)
+  assert.equal(selection.exact, false)
+  assert.equal(selection.selectedIndex, -1)
+  assert.equal(selector.geometry?.occurrences.length, 0)
 })
 
 test('presentation: a visible source region with no provable occurrence anchors it (no strong)', () => {
@@ -134,7 +263,10 @@ test('presentation: a visible source region with no provable occurrence anchors 
 
 test('presentation: a source ordinal with no matching rendered occurrence anchors', () => {
   const lines = ['foo A', 'foo B']
-  const regions: SearchSourceRegion[] = [{ sourceKey: 's', anchorRow: 0, rowStart: 0, rowEnd: 1 }]
+  const regions: SearchSourceRegion[] = [{
+    sourceKey: 's', anchorRow: 0, rowStart: 0, rowEnd: 1,
+    columns: { startCol: 0, endCol: visibleWidth('foo A') }, sourceText: 'foo A',
+  }]
   const selection = selectRenderedSearchMatch(findAltScreenSearchMatches(lines, 'foo'), selectorForRegions(lines, 'foo', regions, 's', 1))
   assert.equal(selection.exact, false, 'an ordinal beyond the proven occurrences is inexact')
   assert.equal(selection.selectedIndex, -1, 'no guessed strong highlight')
@@ -156,8 +288,14 @@ test('presentation: tool args and result map through distinct proven regions', (
   // Body row: the result. Two separate source regions.
   const lines = ['bash echo needle', 'needle output']
   const regions: SearchSourceRegion[] = [
-    { sourceKey: 'tool.args', anchorRow: 0, rowStart: 0, rowEnd: 1, columns: { startCol: 5, endCol: 16 } },
-    { sourceKey: 'tool.result', anchorRow: 1, rowStart: 1, rowEnd: 2 },
+    {
+      sourceKey: 'tool.args', anchorRow: 0, rowStart: 0, rowEnd: 1,
+      columns: { startCol: 5, endCol: 16 }, sourceText: 'echo needle',
+    },
+    {
+      sourceKey: 'tool.result', anchorRow: 1, rowStart: 1, rowEnd: 2,
+      columns: { startCol: 0, endCol: visibleWidth('needle output') }, sourceText: 'needle output',
+    },
   ]
   const args = selectRenderedSearchMatch(
     findAltScreenSearchMatches(lines, 'needle'),
@@ -187,17 +325,20 @@ test('presentation: an enumerable:false region anchors and never claims an occur
 })
 
 test('presentation: exact scroll range follows the selected rendered occurrence', () => {
-  const lines = ['split', 'word', 'split word again']
-  const selector = wholeCardSelector(lines, 'split word')
-  const matches = findAltScreenSearchMatches(lines, 'split word')
+  const lines = ['split word once']
+  const selector = wholeCardSelector(lines, 'split')
+  const matches = findAltScreenSearchMatches(lines, 'split')
   const selection = selectRenderedSearchMatch(matches, selector)
   assert.equal(selection.exact, true)
   assert.deepEqual(selectRenderedSearchScrollRange(matches, selection, selector, [
-    { sourceKey: 'message', anchorRow: 0, rowStart: 0, rowEnd: lines.length },
-  ]), { startRow: 0, endRow: 1 })
+    {
+      sourceKey: 'message', anchorRow: 0, rowStart: 0, rowEnd: lines.length,
+      columns: { startCol: 0, endCol: visibleWidth(lines[0]!) }, sourceText: 'split word once',
+    },
+  ]), { startRow: 0, endRow: 0 })
 })
 
-test('presentation: anchor-only scroll range prefers source-local position regions', () => {
+test('presentation: anchor-only navigation does not infer an ordinal from multiple source hits', () => {
   const lines = ['needle top', 'filler', 'needle middle', 'needle outside']
   const regions: SearchSourceRegion[] = [{ sourceKey: 's', anchorRow: 0, rowStart: 0, rowEnd: 3, enumerable: false }]
   const selector = selectorForRegions(lines, 'needle', regions, 's', 1)
@@ -207,7 +348,20 @@ test('presentation: anchor-only scroll range prefers source-local position regio
   assert.equal(selection.selectedIndex, -1)
   assert.equal(selection.exact, false)
   assert.equal(selection.selectedRow, 0)
-  assert.deepEqual(range, { startRow: 2, endRow: 2 }, 'the second in-region hit wins over an unrelated card hit')
+  assert.deepEqual(range, { startRow: 0, endRow: 0 }, 'multiple possible rows stay on the source anchor')
+})
+
+test('presentation: one candidate after a card header is navigable but remains anchor-only', () => {
+  const lines = ['card header', 'needle in source']
+  const regions: SearchSourceRegion[] = [{ sourceKey: 's', anchorRow: 1, rowStart: 1, rowEnd: 2, enumerable: false }]
+  const selector = selectorForRegions(lines, 'needle', regions, 's', 0)
+  const matches = findAltScreenSearchMatches(lines, 'needle')
+  const selection = selectRenderedSearchMatch(matches, selector)
+  const range = selectRenderedSearchScrollRange(matches, selection, selector, regions)
+  assert.equal(selection.selectedIndex, -1)
+  assert.equal(selection.exact, false)
+  assert.equal(selection.selectedRow, 1)
+  assert.deepEqual(range, { startRow: 1, endRow: 1 })
 })
 
 test('presentation: a source region with no rendered hit falls back to its anchor', () => {
@@ -219,13 +373,13 @@ test('presentation: a source region with no rendered hit falls back to its ancho
   assert.deepEqual(selectRenderedSearchScrollRange(matches, selection, selector, regions), { startRow: 1, endRow: 1 })
 })
 
-test('presentation: no source region allows card-wide approximate navigation', () => {
+test('presentation: no source region falls back to the card top', () => {
   const lines = ['needle first', 'filler', 'needle second']
   const selector: RenderedSearchSelector = { query: 'needle', sourceOccurrence: 1 }
   const matches = findAltScreenSearchMatches(lines, 'needle')
   const selection = selectRenderedSearchMatch(matches, selector)
   assert.equal(selection.selectedIndex, -1)
-  assert.deepEqual(selectRenderedSearchScrollRange(matches, selection, selector, []), { startRow: 2, endRow: 2 })
+  assert.deepEqual(selectRenderedSearchScrollRange(matches, selection, selector, []), { startRow: 0, endRow: 0 })
 })
 
 test('presentation: no rendered hit keeps the honest anchor row', () => {
@@ -350,7 +504,10 @@ test('presentation: an anchor-only current washes ONLY the anchor row and keeps 
 
 test('presentation: the exact occurrence is NOT row-washed', () => {
   const lines = ['needle A', 'needle B']
-  const regions: SearchSourceRegion[] = [{ sourceKey: 's', anchorRow: 1, rowStart: 1, rowEnd: 2 }]
+  const regions: SearchSourceRegion[] = [{
+    sourceKey: 's', anchorRow: 1, rowStart: 1, rowEnd: 2,
+    columns: { startCol: 0, endCol: visibleWidth('needle B') }, sourceText: 'needle B',
+  }]
   const selection = selectRenderedSearchMatch(findAltScreenSearchMatches(lines, 'needle'), selectorForRegions(lines, 'needle', regions, 's'))
   assert.equal(selection.exact, true)
   assert.equal(selection.selectedRow, 1)

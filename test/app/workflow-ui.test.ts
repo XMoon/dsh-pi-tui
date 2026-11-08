@@ -1149,6 +1149,7 @@ test('workflow search: a hidden large-phase member gets ONE search-only context 
     query: 'shard-5',
     match: {
       id: 0, turn: 0, occurrence: 0,
+      normalizedSourceRange: { start: 0, end: 7 },
       source: { kind: 'workflow-member', phaseKey: workflowPhaseKey('Migration'), seq: 5, field: 'label' },
       sourceOccurrence: 0,
     },
@@ -1188,6 +1189,7 @@ test('workflow search: a member already inline uses the existing row (no duplica
     query: 'b',
     match: {
       id: 0, turn: 0, occurrence: 0,
+      normalizedSourceRange: { start: 0, end: 1 },
       source: { kind: 'workflow-member', phaseKey: workflowPhaseKey('Research'), seq: 1, field: 'label' },
       sourceOccurrence: 0,
     },
@@ -1214,6 +1216,7 @@ test('workflow search: a run-level hit opens the run without writing userOpen', 
     query: 'audit',
     match: {
       id: 0, turn: 0, occurrence: 0,
+      normalizedSourceRange: { start: 0, end: 5 },
       source: { kind: 'workflow-run', field: 'name' },
       sourceOccurrence: 0,
     },
@@ -1250,6 +1253,7 @@ test('workflow search: the status field is disambiguated from the label on one r
     query: 'a',
     match: {
       id: 0, turn: 0, occurrence: 0,
+      normalizedSourceRange: { start: 1, end: 2 },
       source: { kind: 'workflow-member', phaseKey: workflowPhaseKey('Research'), seq: 0, field: 'status' },
       sourceOccurrence: 0,
     },
@@ -1285,6 +1289,7 @@ test('workflow search: an anomaly-preview member row carries the member range', 
     query: 'bad-a',
     match: {
       id: 0, turn: 0, occurrence: 0,
+      normalizedSourceRange: { start: 0, end: 5 },
       source: { kind: 'workflow-member', phaseKey: workflowPhaseKey('Migration'), seq: 0, field: 'label' },
       sourceOccurrence: 0,
     },
@@ -1316,6 +1321,7 @@ test('workflow search: clicking an UNRELATED phase does not hide the search targ
     query: 'a-ok-0',
     match: {
       id: 0, turn: 0, occurrence: 0,
+      normalizedSourceRange: { start: 0, end: 6 },
       source: { kind: 'workflow-member', phaseKey: workflowPhaseKey('A'), seq: 1, field: 'label' },
       sourceOccurrence: 0,
     },
@@ -1335,5 +1341,61 @@ test('workflow search: clicking an UNRELATED phase does not hide the search targ
   await clickCell(vt, 10, aRow)
   view = stripped(await viewport(vt))
   assert.ok(!view.includes('a-ok-0'), `clicking the target phase must close it and drop the context row:\n${view}`)
+  app.stop()
+})
+
+test('workflow search: an offset-only passive rebind remeasures without regranting a collapsed phase', async () => {
+  const { vt, app } = startApp()
+  const card = workflow({
+    status: 'completed',
+    members: [member(0, 'needle initial', 'Research', 'completed')],
+  })
+  app.setFullscreen(true)
+  app.setTranscript([card])
+  const target = (start: number) => ({
+    query: 'needle',
+    match: {
+      id: 0, turn: 0, occurrence: 0,
+      normalizedSourceRange: { start, end: start + 6 },
+      source: { kind: 'workflow-member' as const, phaseKey: workflowPhaseKey('Research'), seq: 0, field: 'label' as const },
+      sourceOccurrence: 0,
+    },
+    message: card,
+  })
+  app.setTranscriptSearchTarget(target(0))
+  await viewport(vt)
+  const initialCell = cellOf(vt, 'needle')
+  assert.equal(vt.getCellBgRgb(initialCell.row, initialCell.col), 0xf5c542, 'the initial source offset is exact')
+  assert.equal(app.transcriptSearchPresentationForTest()?.revealGranted, true)
+
+  let view = stripped(await viewport(vt))
+  const runRow = rowOf(view, 'Workflow audit')
+  await clickCell(vt, 10, runRow)
+  view = stripped(await viewport(vt))
+  assert.equal(runChevron(view), '▶', `the user collapse takes effect:\n${view}`)
+  assert.equal(app.transcriptSearchPresentationForTest()?.revealGranted, false, 'manual collapse revokes the temporary reveal')
+
+  card.members = [member(0, 'prefix needle initial', 'Research', 'completed')]
+  app.setTranscript([card])
+  assert.equal(app.setTranscriptSearchPresentation({
+    matchMessages: app.searchMatchMessagesForTest(),
+    target: target(7),
+    grantReveal: false,
+  }), true, 'the changed source offset commits a fresh presentation')
+  view = stripped(await viewport(vt))
+  assert.equal(runChevron(view), '▶', `passive rebind keeps the run collapsed:\n${view}`)
+  assert.equal(app.transcriptSearchPresentationForTest()?.revealGranted, false, 'the passive offset update does not regrant reveal')
+
+  await clickCell(vt, 10, rowOf(view, 'Workflow audit'))
+  view = stripped(await viewport(vt))
+  const phaseRow = rowOf(view, 'Research 1 agent')
+  if (stripTerminalSequences(vt.getViewport()[phaseRow]!).includes('▶')) {
+    await clickCell(vt, 10, phaseRow)
+    view = stripped(await viewport(vt))
+  }
+  assert.ok(view.includes('prefix needle initial'), `the live source field is painted after the user opens it:\n${view}`)
+  const updatedCell = cellOf(vt, 'needle')
+  assert.equal(vt.getCellBgRgb(updatedCell.row, updatedCell.col), 0xf5c542, 'the refreshed offset selects the new cell')
+  assert.equal(app.transcriptSearchPresentationForTest()?.revealGranted, false, 'user opening the phase does not restore search ownership')
   app.stop()
 })
