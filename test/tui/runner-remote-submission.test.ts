@@ -292,20 +292,48 @@ test('prompt negative: an empty or whitespace-only draft dispatches nothing', as
   const fixture = await mountPr3Runner(life, { presetId, resumeSessionId: mainId, host })
   await waitFor('mount paint', () => fixture.vt.getViewport().join('').length > 0, 10_000)
 
+  // Count every SessionFace.prompt on the production Client Session class.
+  // Install before either negative gesture; the valid control below takes the
+  // same submit FIFO turn and settles after any earlier dispatch.
+  const binding = fixture.aggregate.wire.client.sessions.binding(SessionId(mainId) as never)
+  assert.ok(binding !== undefined, 'the mounted Client retains the current Session binding')
+  const sessionFace = binding.session
+  const sessionPrototype = Object.getPrototypeOf(sessionFace) as { prompt: typeof sessionFace.prompt }
+  const originalPrompt = sessionPrototype.prompt
+  type PromptResult = Awaited<ReturnType<typeof originalPrompt>>
+  const promptCalls: Array<{ sessionId: string; result: PromptResult | undefined }> = []
+  sessionPrototype.prompt = function (this: typeof sessionFace, ...args: Parameters<typeof originalPrompt>) {
+    const call = { sessionId: this.sessionId, result: undefined as PromptResult | undefined }
+    promptCalls.push(call)
+    return originalPrompt.call(this, ...args).then(result => {
+      call.result = result
+      return result
+    })
+  }
+  life.defer(() => { sessionPrototype.prompt = originalPrompt })
+
   submitDraft(fixture, '')
   submitDraft(fixture, '   ')
-  // Give any (wrong) dispatch a chance to land, then require NOTHING: no
-  // durable user-rpc event, no official submission echo.
-  await new Promise(resolve => setTimeout(resolve, 500))
-  assert.equal(hostUserRows(fixture, mainId).length, 0,
-    'an empty/whitespace draft never reaches the Host')
-  const pending = fixture.aggregate.presentation.submissionPresentation.snapshot(mainId)
-  assert.ok(pending === undefined || pending.length === 0,
-    'no official submission echo exists for an empty draft')
-  // The real prompt path still works afterwards (the editor was never poisoned).
+
+  // A real accepted prompt is the positive completion control. Its settlement
+  // drains earlier FIFO work; the durable row separately witnesses Host commit.
   submitDraft(fixture, 'after empty gamma')
-  await waitFor('the real prompt lands', () =>
+  await waitFor('the real SessionFace prompt settles', () =>
+    promptCalls.length === 1 && promptCalls[0]?.result !== undefined, 20_000)
+  assert.equal(promptCalls[0]?.sessionId, mainId)
+  assert.equal(promptCalls[0]?.result?.ok, true, 'the positive control was accepted by the official Client')
+  await waitFor('the positive control reaches Host durable history', () =>
     hostUserRows(fixture, mainId).some(row => row.includes('after empty gamma')), 20_000)
+  assert.equal(promptCalls.length, 1, 'empty and whitespace-only submits never call the official SessionFace.prompt')
+
+  const rows = hostUserRows(fixture, mainId)
+  assert.equal(rows.filter(row => row.includes('after empty gamma')).length, 1,
+    'the positive control creates exactly one durable Host row')
+  assert.equal(rows.filter(row => row.trim() === '').length, 0,
+    'an empty/whitespace draft never reaches the Host')
+  const pending = fixture.aggregate.presentation.submissionPresentation.snapshot(mainId) ?? []
+  assert.equal(pending.some(item => item.text.trim() === ''), false,
+    'no official submission echo exists for an empty draft')
 })
 
 test('prompt: a sessionless first prompt creates the Session, then reaches the Host durable log', async (t) => {
@@ -600,6 +628,25 @@ test('a Remote submit after /resume targets the replacement current Session, nev
   await host.harness.create(SessionId('pr3-stale-b'), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
   const fixture = await mountPr3Runner(life, { presetId, resumeSessionId: 'pr3-stale-a', host })
   await waitFor('mount paint', () => fixture.vt.getViewport().join('').length > 0, 10_000)
+  // Patch the actual official SessionFace prototype before B is materialized.
+  // The production Remote writer uses this ClientSessions binding source for
+  // both A and the replacement B; the original method keeps its real receiver.
+  const bindingA = fixture.aggregate.wire.client.sessions.binding(SessionId('pr3-stale-a') as never)
+  assert.ok(bindingA !== undefined, 'the mounted Client retains Session A')
+  const sessionFace = bindingA.session
+  const sessionPrototype = Object.getPrototypeOf(sessionFace) as { prompt: typeof sessionFace.prompt }
+  const originalPrompt = sessionPrototype.prompt
+  type PromptResult = Awaited<ReturnType<typeof originalPrompt>>
+  const promptCalls: Array<{ sessionId: string; result: PromptResult | undefined }> = []
+  sessionPrototype.prompt = function (this: typeof sessionFace, ...args: Parameters<typeof originalPrompt>) {
+    const call = { sessionId: this.sessionId, result: undefined as PromptResult | undefined }
+    promptCalls.push(call)
+    return originalPrompt.call(this, ...args).then(result => {
+      call.result = result
+      return result
+    })
+  }
+  life.defer(() => { sessionPrototype.prompt = originalPrompt })
   // PR4 §1.2: switch A -> B through the seam a REAL user drives — a /resume
   // submit through the mounted surface (the Client command registry executes
   // the TUI built-in; the Host commands service carries no TUI callback on
@@ -609,15 +656,20 @@ test('a Remote submit after /resume targets the replacement current Session, nev
   // live catalog are ready — the product's own completion signal, i.e. exactly
   // what a real user waits for before pressing Enter again.
   await waitFor('the switch transaction reports completion', () => switchReported(host, 'pr3-stale-a'), 20_000)
+  assert.equal(promptCalls.length, 0, '/resume changes the current Session without sending a prompt')
   // ONE submit after that signal, without retrying: the post-transition submit
   // contract is "dispatch exactly once into the new current owner".
   submitDraft(fixture, 'switched-session row epsilon')
+  await waitFor('the single replacement SessionFace prompt settles', () =>
+    promptCalls.length === 1 && promptCalls[0]?.result !== undefined, 20_000)
+  assert.equal(promptCalls[0]?.sessionId, 'pr3-stale-b',
+    'the official prompt call is addressed to the replacement Session B')
+  assert.equal(promptCalls[0]?.result?.ok, true,
+    'the official prompt settles with Host acceptance')
+  assert.equal(promptCalls.length, 1, 'one post-switch submit invokes SessionFace.prompt exactly once')
   const inB = (): number => hostUserRows(fixture, 'pr3-stale-b').filter(row => row.includes('switched-session row epsilon')).length
-  await waitFor('the single post-switch submit lands in B', () => inB() === 1, 20_000)
-  // A duplicate could still land after the first row, so give the settled state
-  // a bounded look before asserting the exact count.
-  await new Promise(resolve => setTimeout(resolve, 250))
-  assert.equal(inB(), 1, 'the post-switch submit dispatches exactly once into B')
+  await waitFor('the single post-switch submit reaches B durable history', () => inB() === 1, 20_000)
+  assert.equal(inB(), 1, 'the post-switch submit creates exactly one durable row in B')
   // …and NEVER in the retired session A. Scope note: this proves the
   // post-switch gesture uses the NEW current owner (rebind correctness), not
   // the pre-dispatch stale-capture race — that counterfactual (capture A →
