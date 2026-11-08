@@ -9,6 +9,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { visibleWidth } from '@xmoon76/pi-tui'
 import { unavailableWebAccess } from '../support/web-access-fake.ts'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { createClientCommandRegistry } from '../../src/app/command/client-command-registry.ts'
@@ -58,6 +59,7 @@ interface Harness {
   view: () => string
   switched: string[]
   notices: Array<{ text: string; kind: string }>
+  diagnostics: string[]
   searchCalls: SearchCall[]
   rawWrites: string[]
 }
@@ -76,6 +78,7 @@ function harness(options: {
   search?: (query: string, signal?: AbortSignal) => Promise<SessionContentSearchPage | undefined>
   list?: (id: string | undefined, signal?: AbortSignal) => Promise<Row[] | undefined>
   projectionBatch?: () => Promise<Map<string, { title?: string; preset?: string }>>
+  switchSession?: (id: string) => Promise<string | undefined>
 }): Harness {
   const ctx = new Context()
   const vt = new VirtualTerminal(80, 24)
@@ -83,6 +86,7 @@ function harness(options: {
   // check the write stream, not the viewport (an OSC/CSI payload is
   // consumed by the emulator and may never appear in the view).
   const rawWrites: string[] = []
+  const diagnostics: string[] = []
   const originalWrite = vt.write.bind(vt)
   vt.write = (data: string) => {
     rawWrites.push(data)
@@ -135,7 +139,7 @@ function harness(options: {
     deliveredFilesSnapshot: () => undefined,
     ctx,
     app,
-    diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
+    diag: createDiag({ filePath: undefined, stderrLevel: 'off', sinks: [{ write: line => diagnostics.push(line) }] }),
     get defaultIntentOutcome() { return undefined },
     ...sessionScopeFacts(() => state.agent, () => 1),
     get currentSessionId() { return state.agent?.session.id },
@@ -184,7 +188,7 @@ function harness(options: {
     signal: new AbortController().signal,
     switchSession: async (id: string): Promise<string | undefined> => {
       switched.push(id)
-      return undefined
+      return options.switchSession?.(id)
     },
     transitionTo: async <T>(steps: { create: () => Promise<T> }) => ({ ok: true, next: await steps.create() }),
     currentPreset: () => undefined,
@@ -237,6 +241,7 @@ function harness(options: {
     view: () => vt.getViewport().join('\n'),
     switched,
     notices,
+    diagnostics,
     searchCalls,
     rawWrites,
   }
@@ -420,6 +425,36 @@ test('closing the workspace aborts the in-flight content search', async (t) => {
   assert.ok(!h.view().includes('late'), 'a late result must not refresh the closed workspace')
 })
 
+test('a delayed search failure from a replaced workspace does not notify the new workspace', async (t) => {
+  let rejectSearch!: (error: unknown) => void
+  const observed: AbortSignal[] = []
+  const h = harness({
+    rows: rows(),
+    search: async (_query, signal) => {
+      observed.push(signal!)
+      return new Promise<SessionContentSearchPage>((_resolve, reject) => { rejectSearch = reject })
+    },
+  })
+  t.after(() => h.app.stop())
+  await h.runSearch('needle')
+  await waitUntil(() => observed.length === 1)
+  h.vt.sendInput('\x1b')
+  await h.vt.waitForRender()
+  h.vt.sendInput('\x1b')
+  await h.vt.waitForRender()
+  assert.equal(observed[0]!.aborted, true, 'closing the original workspace aborts its search')
+
+  await h.runSessions('')
+  await waitUntil(() => h.view().includes('Sessions') && h.view().includes('alpha'))
+  const noticeCount = h.notices.length
+  rejectSearch(new Error('late failure from the retired workspace'))
+  await new Promise<void>(resolve => setImmediate(resolve))
+  await h.vt.waitForRender()
+  assert.equal(h.notices.length, noticeCount, 'the retired workspace cannot notify over its replacement')
+  assert.ok(h.view().includes('Sessions'), 'the replacement workspace remains current')
+  assert.ok(h.view().includes('alpha'), 'the replacement Session row remains visible')
+})
+
 test('a provider failure keeps the local rows and the workspace open', async (t) => {
   const h = harness({
     rows: rows(),
@@ -428,10 +463,80 @@ test('a provider failure keeps the local rows and the workspace open', async (t)
   t.after(() => h.app.stop())
   await h.runSearch('alpha')
   await waitUntil(() => h.view().includes('alpha'))
-  await waitUntil(() => h.notices.some(notice => notice.text === 'session content search failed: fts backend exploded'))
+  await waitUntil(() => h.notices.some(notice => notice.text.startsWith('Search failed:')))
+  const notice = h.notices.find(entry => entry.text.startsWith('Search failed:'))!
+  assert.equal(notice.kind, 'error', 'the provider failure keeps its error classification')
+  assert.ok(visibleWidth(notice.text) <= 40, 'the transient error notice stays within the narrow-screen bound')
   const view = h.view()
   assert.ok(view.includes('Search all workspaces'), 'the workspace must stay open after a provider failure')
   assert.ok(view.includes('alpha'), 'local rows must survive a provider failure')
+})
+
+test('a delayed content-search failure after a refused resume stays within the 44x20 notice row', async (t) => {
+  let rejectSearch!: (error: unknown) => void
+  const hostilePath = `/tmp/${'long-directory-'.repeat(12)}(archive)/session.v4.jsonl.zstd`
+  const searchError = `session "session-alpha" contains event type "unknown/custom-event" (seq 0) not marked ignorable; refusing to interpret the log (raw log: ${hostilePath})`
+  const h = harness({
+    rows: rows(),
+    search: async () => new Promise<SessionContentSearchPage>((_resolve, reject) => { rejectSearch = reject }),
+    switchSession: async () => 'the selected Session refused this open',
+  })
+  h.vt.resize(44, 20)
+  t.after(() => h.app.stop())
+  await h.runSearch('alpha')
+  await waitUntil(() => h.searchCalls.length === 1 && h.view().includes('alpha'))
+
+  h.vt.sendInput('\r')
+  await h.vt.waitForRender()
+  h.vt.sendInput('\r')
+  await waitUntil(() => h.notices.some(notice => notice.text.includes('selected Session refused')))
+  assert.deepEqual(h.switched, ['session-alpha'], 'the refused row was the only attempted Session open')
+
+  rejectSearch(new Error(searchError))
+  await waitUntil(() => h.notices.some(notice => notice.text.startsWith('unknown event ')))
+  const notice = h.notices.find(entry => entry.text.startsWith('unknown event '))!
+  assert.equal(notice.kind, 'error', 'the provider failure keeps its error classification')
+  assert.equal(notice.text, 'unknown event unknown/custom-event', 'the parser reason stays visible')
+  assert.ok(visibleWidth(notice.text) <= 40, `the error notice fits the 44-column content row: ${notice.text}`)
+  assert.ok(!notice.text.includes(hostilePath), 'the raw-log path is omitted from the visible projection')
+  assert.ok(h.diagnostics.some(line => line.includes(searchError)),
+    'the full parser error and raw-log path remain in diagnostics')
+  assert.equal(h.view().split('\n').filter(line => line.includes(notice.text)).length, 1,
+    'the identical panel status and transient notice paint only once')
+  assert.ok(hostilePath.includes('(archive)'), 'the input includes a legal parenthesized path')
+  assert.ok(h.view().includes('Search all workspaces'), 'the refused resume keeps the same search workspace open')
+  assert.ok(h.view().includes('alpha'), 'the listed Session row remains visible after the delayed search failure')
+  for (const line of h.vt.getViewport()) {
+    assert.ok(visibleWidth(line) <= 44, `the 44-column frame does not overflow: ${JSON.stringify(line)}`)
+  }
+})
+
+test('a projection failure uses the same bounded notice projection at 44x20', async (t) => {
+  const hostilePath = `/tmp/${'projection-directory-'.repeat(8)}(archive)/index.sqlite`
+  const projectionError = `session "session-alpha" contains event type "unknown/projection-event" (seq 0) not marked ignorable (raw log: ${hostilePath})`
+  const h = harness({
+    rows: rows(),
+    projectionBatch: async () => { throw new Error(projectionError) },
+  })
+  h.vt.resize(44, 20)
+  t.after(() => h.app.stop())
+  await h.runSessions('')
+  await waitUntil(() => h.notices.some(notice => notice.text.startsWith('unknown event ')))
+  const notice = h.notices.find(entry => entry.text.startsWith('unknown event '))!
+  assert.equal(notice.kind, 'info', 'projection failure classification stays informational')
+  assert.equal(notice.text, 'unknown event unknown/projection-event', 'the parser reason stays visible')
+  assert.ok(visibleWidth(notice.text) <= 40, `the projection notice fits the 44-column content row: ${notice.text}`)
+  assert.ok(!notice.text.includes(hostilePath), 'the raw-log path is omitted from the visible projection')
+  assert.ok(h.diagnostics.some(line => line.includes(projectionError)),
+    'the full projection error and raw-log path remain in diagnostics')
+  assert.equal(h.view().split('\n').filter(line => line.includes(notice.text)).length, 1,
+    'the identical panel status and transient notice paint only once')
+  assert.ok(hostilePath.includes('(archive)'), 'the input includes a legal parenthesized path')
+  assert.ok(h.view().includes('Sessions'), 'the Session Workspace remains visible')
+  assert.ok(h.view().includes('alpha'), 'the normal Session row remains visible')
+  for (const line of h.vt.getViewport()) {
+    assert.ok(visibleWidth(line) <= 44, `the 44-column frame does not overflow: ${JSON.stringify(line)}`)
+  }
 })
 
 test('hasMore shows the refine hint', async (t) => {
@@ -600,10 +705,10 @@ test('a malicious provider error message never reaches the terminal raw', async 
   })
   t.after(() => h.app.stop())
   await h.runSearch('alpha')
-  await waitUntil(() => h.notices.some(notice => notice.text.startsWith('session content search failed')))
+  await waitUntil(() => h.notices.some(notice => notice.text.startsWith('Search failed:')))
   // The notify text itself is sanitized (the notice is captured before
   // rendering), and the RAW write stream must never carry the payload.
-  const notice = h.notices.find(entry => entry.text.startsWith('session content search failed'))!
+  const notice = h.notices.find(entry => entry.text.startsWith('Search failed:'))!
   assert.ok(!notice.text.includes('\x1b'), 'the notice text must be sanitized')
   assert.ok(!notice.text.includes('PWNED'), 'the OSC payload must not survive in the notice')
   const raw = h.rawWrites.join('')

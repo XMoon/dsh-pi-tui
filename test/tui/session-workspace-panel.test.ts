@@ -470,7 +470,7 @@ test('status rows that squeeze the whole list out also withhold activation', asy
   const squeezed = h.view()
   assert.ok(squeezed.includes('Sessions · 2'))
   assert.ok(squeezed.includes('Workspace scope unavailable'))
-  assert.ok(squeezed.includes('Some session details are unavailable'))
+  assert.ok(squeezed.includes('Session details unavailable'))
   assert.ok(!squeezed.includes('Other session'), `status rows consumed the list budget:\n${squeezed}`)
   h.vt.sendInput('\x1b[B')
   h.vt.sendInput('\r')
