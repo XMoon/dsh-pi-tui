@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
     inputs:
       run_split_process:
-        description: Run Host/Client Split qualification on main
+        description: Run full Host/Client Split qualification on the selected npm-mode branch
         required: false
         type: boolean
         default: false
@@ -1062,9 +1062,10 @@ jobs:
   # the digest is re-proven before and after the run so the probe can never
   # qualify a tarball other than the one every other gate saw.
   #
-  # The smoke is npm-only and required on release tags. Main may run the same
-  # candidate-backed proof through workflow_dispatch when the explicit boolean
-  # input is enabled; ordinary pushes, PRs, next and Source Mode skip it.
+  # The smoke is npm-only and required on release tags. Any npm-mode
+  # refs/heads/... branch may run the same candidate-backed proof through
+  # workflow_dispatch when the explicit boolean input is enabled; ordinary
+  # pushes, PRs and Source Mode skip it.
   # ---------------------------------------------------------------------------
   split-process:
     name: Host/Client split-process bootstrap
@@ -1073,9 +1074,10 @@ jobs:
       - candidate
     # `always()` suppresses the implicit all-needs success check: npm mode
     # skips the transitive source-pack need. Tags always run the proof; a manual
-    # run is allowed only on main with the explicit boolean input. The verdict
-    # receives the same event/input facts and requires success when requested.
-    if: ${{ always() && needs.dsh-context.result == 'success' && needs.candidate.result == 'success' && needs.dsh-context.outputs.mode == 'npm' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.run_split_process)) }}
+    # run is allowed on any npm-mode refs/heads/... branch with the explicit
+    # boolean input. The verdict receives the same event/input facts and
+    # requires success when requested.
+    if: ${{ always() && needs.dsh-context.result == 'success' && needs.candidate.result == 'success' && needs.dsh-context.outputs.mode == 'npm' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/') && inputs.run_split_process)) }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:

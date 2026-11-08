@@ -320,11 +320,14 @@ locked project toolchain, proves the DSH CLI version and setup in npm mode, and
 proves the Source toolchain contract without running npm setup in source mode. The remaining jobs
 run `smoke:boundary`, `smoke:official-presets`, `compat:dsh:client-family`, the
 tarball smokes and `pnpm audit`. `split-process` runs on npm release-tag pushes and is required for publication. The `workflow_dispatch` input `run_split_process` can also run the packed Split
-smoke on npm-mode `main`; when enabled, the CI verdict requires it to succeed.
+smoke on any npm-mode `refs/heads/...` branch; when enabled, the CI verdict requires it to succeed.
 Without that explicit input, PR, branch and Source Mode runs keep the job
 `skipped`. Host/Client split-process development work may also run
 `pnpm smoke:split-process` manually against the actual candidate tarball under
-its task plan. The lanes CI does NOT run — therefore the only ones a stage-final pass
+its task plan. The Split lane prints `START/DONE/ERROR` scopes (case and
+recovery subscene) with UTC time and duration, and its default failure output
+includes the real error stack; `SPLIT_PROCESS_SMOKE_KEEP=1` only preserves the
+temporary scene. The lanes CI does NOT run — therefore the only ones a stage-final pass
 must run locally — are
 `compat:dsh:npm`, `gate:keybindings`, `gate:boundary`, `gate:architecture`,
 `scripts/check-no-session-events.mjs`, `gate:dsh-preset-parity`,

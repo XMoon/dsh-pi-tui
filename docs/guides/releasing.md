@@ -276,17 +276,20 @@ re-proved at every consumer. `scripts/ci-verdict.mjs` is the final gate:
 every required job must be exactly `success`, the mode-dependent jobs must
 show the status their mode requires, and the split-process job must be exactly
 `success` on npm release-tag pushes, exactly `success` on an explicitly opted-in
-npm `main` workflow dispatch, and exactly `skipped` on ordinary PR/branch runs
-and Source Mode. The Linux split-process smoke is required for tag publication.
-To exercise that exact lane against the current `main` candidate before tagging,
-use GitHub Actions **Run workflow** on the `main` branch and enable `Run
-Host/Client Split qualification on main`. This manual input is restricted to
-npm-mode `main`; the verdict then requires the Split job to succeed. Leaving it
-disabled preserves the normal status (`skipped`). A manual main run qualifies
-the main candidate only; it does not replace any gate on the release-tag
+npm `workflow_dispatch` on any `refs/heads/...` branch, and exactly `skipped`
+on ordinary PR/branch runs and Source Mode. The Linux split-process smoke is
+required for tag publication. To exercise that exact lane against a branch's
+current candidate before tagging, use GitHub Actions **Run workflow** on that
+npm-mode remote branch and enable `Run full Host/Client Split qualification on
+the selected npm-mode branch`. This manual input works on any npm-mode
+`refs/heads/...` branch; the verdict then requires the Split job to succeed.
+Leaving it disabled preserves the normal status (`skipped`), and a Source Mode
+or non-branch ref request fails explicitly. A manual run qualifies only the
+candidate SHA of that run; it does not replace any gate on the release-tag
 candidate or authorize publication. When the Split smoke writes its bounded
-failure report, the job uploads only that sanitized `failure.json` as the
-`split-process-failure` artifact. Download it before considering a rerun:
+failure report, the job uploads `failure.json` as the `split-process-failure`
+artifact; it now includes the real error message/stack (Web credential values
+redacted). Download it before considering a rerun:
 
 ```sh
 gh run download <RUN_ID> --name split-process-failure --dir <destination>
