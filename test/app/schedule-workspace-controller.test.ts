@@ -32,6 +32,7 @@ import {
   type ScheduleViewRequest,
   type ScheduleViewResult,
 } from '../../src/runtime/schedule-port.ts'
+import { scheduleSessionId } from '../../src/domain/schedule/form.ts'
 import type {
   SessionProjectionSummary,
   SessionReader,
@@ -418,7 +419,7 @@ test('L6: create sends ONE explicit new_once request and re-reads the catalog', 
     assert.deepEqual(creates[0].args[0], {
       title: 'Nightly',
       prompt: 'Check nightly',
-      timing: { kind: 'daily', daily: { time: '09:00:00', time_zone: 'UTC' } },
+      timing: { kind: 'after', after_seconds: 3600 },
       target: { kind: 'new_once' },
     })
     assert.equal(life.controller.snapshot().mode, 'detail')
@@ -440,9 +441,13 @@ test('L6: an unknown create outcome is reported, re-read, and the draft is kept'
     await life.controller.whenIdle()
     await flush()
     assert.equal(life.controller.snapshot().mode, 'editor', 'the draft is preserved')
-    assert.equal(life.controller.snapshot().notice?.text, SCHEDULE_COPY.outcomeUnknown)
+    assert.equal(life.controller.snapshot().editorRecovery, 'unknown')
+    assert.equal(life.controller.snapshot().notice?.text, SCHEDULE_COPY.createUnknown)
     assert.equal(life.port.methods().filter(method => method === 'create').length, 1, 'never replayed')
     assert.equal(life.port.methods().filter(method => method === 'catalog').length, 2, 'the workspace re-read the Host')
+    life.controller.dispatch({ kind: 'save' })
+    await flush()
+    assert.equal(life.port.methods().filter(method => method === 'create').length, 1, 'a settled unknown create stays locked')
   } finally {
     life.controller.dispose()
   }
@@ -623,6 +628,190 @@ test('L6: a discarded write is unknown, never a claimed rollback; dispose stops 
   }
 })
 
+test('L6: every guided timing preset selects its official rule without translating advanced text', async () => {
+  const life = await opened()
+  try {
+    life.controller.dispatch({ kind: 'open-create' })
+    life.controller.dispatch({ kind: 'select-timing-preset', preset: 'every-seconds' })
+    assert.deepEqual(life.controller.snapshot().editor?.timing, {
+      kind: 'every', everySeconds: '60', quantityUnit: 'seconds',
+    })
+    life.controller.dispatch({ kind: 'select-timing-preset', preset: 'once-after' })
+    const expected = [
+      ['once-after', 'after'],
+      ['once-at', 'at'],
+      ['every-minutes', 'every'],
+      ['every-hours', 'every'],
+      ['every-seconds', 'every'],
+      ['daily', 'daily'],
+      ['weekly', 'weekly'],
+      ['cron', 'cron'],
+      ['rrule', 'rrule'],
+    ] as const
+    for (const [preset, kind] of expected) {
+      life.controller.dispatch({ kind: 'select-timing-preset', preset })
+      const timing = life.controller.snapshot().editor?.timing
+      assert.equal(timing?.kind, kind, `${preset} selects the intended official kind`)
+      if (preset === 'once-at') {
+        assert.equal(timing?.kind === 'at' ? timing.timeZone : undefined, 'UTC')
+        assert.match(timing?.kind === 'at' ? timing.time : '', /^\d{2}:\d{2}:\d{2}$/u)
+      }
+      if (preset === 'every-seconds') {
+        assert.deepEqual(timing, { kind: 'every', everySeconds: '3600', quantityUnit: 'seconds' })
+      }
+      if (preset === 'rrule') {
+        assert.match(timing?.kind === 'rrule' ? timing.rrule : '', /^DTSTART:\d{8}T\d{6}Z\nRRULE:FREQ=DAILY$/u)
+      }
+    }
+  } finally {
+    life.controller.dispose()
+  }
+})
+
+test('L6: guided timing presets convert quantities without rounding the current rule', async () => {
+  const life = await opened()
+  try {
+    life.controller.dispatch({ kind: 'open-create' })
+    life.controller.dispatch({ kind: 'set-field', fieldId: 'title', value: 'Interval' })
+    life.controller.dispatch({ kind: 'set-field', fieldId: 'prompt', value: 'Run interval task' })
+    life.controller.dispatch({ kind: 'select-timing-preset', preset: 'every-minutes' })
+    assert.deepEqual(life.controller.snapshot().editor?.timing, {
+      kind: 'every', everySeconds: '60', quantityUnit: 'minutes',
+    })
+    life.controller.dispatch({ kind: 'set-field', fieldId: 'timing-quantity', value: '90' })
+    assert.deepEqual(life.controller.snapshot().editor?.timing, {
+      kind: 'every', everySeconds: '5400', quantityUnit: 'minutes',
+    })
+    life.controller.dispatch({ kind: 'select-timing-preset', preset: 'every-hours' })
+    assert.deepEqual(life.controller.snapshot().editor?.timing, {
+      kind: 'every', everySeconds: '3600', quantityUnit: 'hours',
+    }, 'a non-exact unit conversion starts at one selected unit instead of rounding')
+    life.controller.dispatch({ kind: 'select-timing-preset', preset: 'every-minutes' })
+    assert.deepEqual(life.controller.snapshot().editor?.timing, {
+      kind: 'every', everySeconds: '3600', quantityUnit: 'minutes',
+    }, 'after an explicit non-exact unit switch, the current rule stays at one hour')
+    life.port.createResult = async request => {
+      assert.deepEqual(request.timing, { kind: 'every', every_seconds: 3600 })
+      return entry({ id: 'schedule-interval' as never, kind: 'every', everySeconds: 3600 })
+    }
+    life.controller.dispatch({ kind: 'save' })
+    await flush()
+    await life.controller.whenIdle()
+    assert.equal(life.port.methods().filter(method => method === 'create').length, 1)
+  } finally {
+    life.controller.dispose()
+  }
+})
+
+test('L6: unknown edit blocks repeated writes until a successful Review read', async () => {
+  const life = await opened()
+  try {
+    life.controller.dispatch({ kind: 'open-detail', id: 'schedule-1' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-edit' })
+    await flush()
+    life.controller.dispatch({ kind: 'set-field', fieldId: 'title', value: 'My title' })
+    life.port.editResult = async () => { throw new ScheduleOutcomeUnknownError('lost edit reply') }
+    life.controller.dispatch({ kind: 'save' })
+    await flush()
+    await life.controller.whenIdle()
+    assert.equal(life.controller.snapshot().editorRecovery, 'unknown')
+    assert.equal(life.controller.snapshot().notice?.text, SCHEDULE_COPY.editorUnknown)
+    life.controller.dispatch({ kind: 'save' })
+    await flush()
+    assert.equal(life.port.methods().filter(method => method === 'edit').length, 1)
+
+    const pending = deferred<ScheduleViewResult>()
+    life.port.viewQueue = [pending.promise]
+    life.controller.dispatch({ kind: 'review-with-my-edits' })
+    await flush()
+    life.controller.dispatch({ kind: 'set-field', fieldId: 'prompt', value: 'Typed during Review' })
+    pending.resolve(entry({ title: 'Host title', prompt: 'Host prompt', updatedAt: '2026-01-04T00:00:00.000Z' }))
+    await flush()
+    assert.equal(life.controller.snapshot().editorRecovery, 'unknown')
+    assert.equal(life.controller.snapshot().editor?.title, 'My title')
+    assert.equal(life.controller.snapshot().editor?.prompt, 'Typed during Review',
+      'a local edit invalidates the pending Review answer')
+
+    life.port.viewResults.set('schedule-1', entry({
+      title: 'Host title', prompt: 'Host prompt', updatedAt: '2026-01-05T00:00:00.000Z',
+    }))
+    life.controller.dispatch({ kind: 'review-with-my-edits' })
+    await flush()
+    assert.equal(life.controller.snapshot().editorRecovery, undefined)
+    assert.equal(life.controller.snapshot().editor?.title, 'My title')
+    assert.equal(life.controller.snapshot().editor?.prompt, 'Typed during Review')
+    life.port.editResult = async () => entry({ title: 'My title', prompt: 'Typed during Review' })
+    life.controller.dispatch({ kind: 'save' })
+    await flush()
+    await life.controller.whenIdle()
+    const edits = life.port.calls.filter(call => call.method === 'edit')
+    assert.deepEqual(edits[1]?.args[0], {
+      id: 'schedule-1',
+      action: 'update',
+      patch: { title: 'My title', prompt: 'Typed during Review' },
+      expectedUpdatedAt: '2026-01-05T00:00:00.000Z',
+    })
+  } finally {
+    life.controller.dispose()
+  }
+})
+
+test('L6: a missing edit keeps the draft and never becomes a Create or retry path', async () => {
+  const life = await opened()
+  try {
+    life.controller.dispatch({ kind: 'open-detail', id: 'schedule-1' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-edit' })
+    await flush()
+    life.controller.dispatch({ kind: 'set-field', fieldId: 'title', value: 'Keep draft' })
+    life.port.editResult = async () => ({ id: 'schedule-1' as never, code: 'schedule_not_found' })
+    life.controller.dispatch({ kind: 'save' })
+    await flush()
+    await life.controller.whenIdle()
+    assert.equal(life.controller.snapshot().editorRecovery, 'missing')
+    life.controller.dispatch({ kind: 'save' })
+    life.controller.dispatch({ kind: 'review-with-my-edits' })
+    life.controller.dispatch({ kind: 'reload-latest' })
+    await flush()
+    assert.equal(life.controller.snapshot().confirm, undefined, 'missing does not offer reload as a task recreation path')
+    assert.equal(life.port.methods().filter(method => method === 'edit').length, 1)
+    assert.equal(life.port.methods().filter(method => method === 'create').length, 0)
+    assert.equal(life.controller.snapshot().editor?.title, 'Keep draft')
+  } finally {
+    life.controller.dispose()
+  }
+})
+
+test('L6: a failed conflict Review read keeps the recovery lock and complete draft', async () => {
+  const life = await opened()
+  try {
+    life.controller.dispatch({ kind: 'open-detail', id: 'schedule-1' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-edit' })
+    await flush()
+    life.controller.dispatch({ kind: 'set-field', fieldId: 'title', value: 'Conflict draft' })
+    life.port.editResult = async () => ({ id: 'schedule-1' as never, code: 'schedule_conflict' })
+    life.controller.dispatch({ kind: 'save' })
+    await flush()
+    await life.controller.whenIdle()
+    const failedRead = deferred<ScheduleViewResult>()
+    life.port.viewQueue = [failedRead.promise]
+    life.controller.dispatch({ kind: 'review-with-my-edits' })
+    await flush()
+    failedRead.reject(new Error('review read failed'))
+    await flush()
+    assert.equal(life.controller.snapshot().editorRecovery, 'conflict')
+    assert.equal(life.controller.snapshot().editor?.title, 'Conflict draft')
+    assert.match(life.controller.snapshot().notice?.text ?? '', /review read failed/u)
+    life.controller.dispatch({ kind: 'save' })
+    await flush()
+    assert.equal(life.port.methods().filter(method => method === 'edit').length, 1)
+  } finally {
+    life.controller.dispose()
+  }
+})
+
 test('L6: the Session chooser lists non-subagent Sessions with their projection titles', async () => {
   const life = await opened()
   try {
@@ -672,8 +861,8 @@ test('L6: cycling the timing/target away and back sends no patch for them', asyn
     await flush()
     life.controller.dispatch({ kind: 'open-edit' })
     await flush()
-    life.controller.dispatch({ kind: 'select-timing-kind', timing: 'cron' })
-    life.controller.dispatch({ kind: 'select-timing-kind', timing: 'daily' })
+    life.controller.dispatch({ kind: 'select-timing-preset', preset: 'cron' })
+    life.controller.dispatch({ kind: 'select-timing-preset', preset: 'daily' })
     life.controller.dispatch({ kind: 'select-target-kind', target: 'session' })
     life.controller.dispatch({ kind: 'select-target-kind', target: 'new_once' })
     life.controller.dispatch({ kind: 'set-field', fieldId: 'title', value: 'Renamed' })
@@ -811,8 +1000,8 @@ test('L6: cycling timing/target away and back preserves NON-DEFAULT typed values
     await flush()
     life.controller.dispatch({ kind: 'open-edit' })
     await flush()
-    life.controller.dispatch({ kind: 'select-timing-kind', timing: 'daily' })
-    life.controller.dispatch({ kind: 'select-timing-kind', timing: 'cron' })
+    life.controller.dispatch({ kind: 'select-timing-preset', preset: 'daily' })
+    life.controller.dispatch({ kind: 'select-timing-preset', preset: 'cron' })
     life.controller.dispatch({ kind: 'select-target-kind', target: 'new' })
     life.controller.dispatch({ kind: 'select-target-kind', target: 'new_once' })
     const editor = life.controller.snapshot().editor
@@ -857,44 +1046,225 @@ test('L6: an invalid intermediate timing is DIRTY, never an exception out of Esc
   }
 })
 
-test('L6: conflict recovery DISPLAYS the latest revision; the user re-applies by hand', async () => {
+test('L6: a conflicted edit reviews the latest Host groups and saves only the merged user patch', async () => {
   const life = await opened()
   try {
     life.controller.dispatch({ kind: 'open-detail', id: 'schedule-1' })
     await flush()
     life.controller.dispatch({ kind: 'open-edit' })
     await flush()
+
+    life.controller.dispatch({ kind: 'set-field', fieldId: 'prompt', value: 'Local prompt' })
+    life.controller.dispatch({ kind: 'select-timing-preset', preset: 'weekly' })
+    life.controller.dispatch({ kind: 'set-field', fieldId: 'timing-time', value: '10:30' })
+    life.controller.dispatch({ kind: 'select-target-kind', target: 'new' })
     life.port.editResult = async () => ({ id: 'schedule-1' as never, code: 'schedule_conflict' })
-    life.controller.dispatch({ kind: 'set-field', fieldId: 'title', value: 'My edit' })
     life.controller.dispatch({ kind: 'save' })
     await flush()
     await life.controller.whenIdle()
-    assert.equal(life.controller.snapshot().notice?.text, SCHEDULE_COPY.conflict)
-    assert.equal(life.controller.snapshot().editor?.title, 'My edit')
 
+    assert.equal(life.controller.snapshot().editorRecovery, 'conflict')
+    assert.equal(life.port.calls.filter(call => call.method === 'edit').length, 1)
     life.port.viewResults.set('schedule-1', entry({
-      title: 'Host side edit',
+      title: 'Host title',
+      time: '08:00:00',
+      target: { kind: 'session', sessionId: scheduleSessionId('session-a') },
       updatedAt: '2026-01-02T00:00:00.000Z',
     }))
-    reloadNow(life)
+    life.controller.dispatch({ kind: 'review-with-my-edits' })
     await flush()
-    assert.equal(life.controller.snapshot().notice?.text, SCHEDULE_COPY.reloaded)
-    assert.equal(life.controller.snapshot().editor?.title, 'Host side edit',
-      'reload shows the Host facts; it never auto-merges the old draft')
-    assert.equal(life.controller.snapshot().editor?.expectedUpdatedAt, '2026-01-02T00:00:00.000Z',
-      'the explicit reload adopts the latest CAS revision')
 
-    // Re-apply manually: the user retypes the change they still want.
-    life.controller.dispatch({ kind: 'set-field', fieldId: 'title', value: 'My edit' })
-    life.port.editResult = async () => entry({ title: 'My edit', updatedAt: '2026-01-03T00:00:00.000Z' })
+    const reviewed = life.controller.snapshot()
+    assert.equal(reviewed.editorRecovery, undefined)
+    assert.equal(reviewed.editor?.title, 'Host title', 'Host-only title is adopted')
+    assert.equal(reviewed.editor?.prompt, 'Local prompt', 'local-only prompt is preserved')
+    assert.deepEqual(reviewed.editor?.timing, {
+      kind: 'weekly', time: '10:30', timeZone: 'UTC', weekdays: [1, 2, 3, 4, 5],
+    }, 'the locally changed timing group wins')
+    assert.equal(reviewed.editor?.target.kind, 'new', 'the locally changed destination group wins')
+    assert.equal(reviewed.editor?.expectedUpdatedAt, '2026-01-02T00:00:00.000Z')
+    assert.equal(reviewed.notice?.text, SCHEDULE_COPY.bothChanged('Repeat/Destination'))
+    assert.equal(life.port.calls.filter(call => call.method === 'edit').length, 1, 'Review is a read and performs no write')
+
+    life.port.editResult = async () => entry({ title: 'Host title', prompt: 'Local prompt' })
     life.controller.dispatch({ kind: 'save' })
     await flush()
     await life.controller.whenIdle()
     const edits = life.port.calls.filter(call => call.method === 'edit')
-    assert.equal((edits[edits.length - 1]?.args[0] as ScheduleEditRequest).expectedUpdatedAt, '2026-01-02T00:00:00.000Z')
+    assert.deepEqual(edits[1]?.args[0], {
+      id: 'schedule-1',
+      action: 'update',
+      patch: {
+        prompt: 'Local prompt',
+        timing: { kind: 'weekly', weekly: { time: '10:30:00', time_zone: 'UTC', weekdays: [1, 2, 3, 4, 5] } },
+        target: { kind: 'new' },
+      },
+      expectedUpdatedAt: '2026-01-02T00:00:00.000Z',
+    })
   } finally {
     life.controller.dispose()
   }
+})
+
+test('L6: Review reports a shared final value as already matching and never writes again', async () => {
+  const life = await opened()
+  try {
+    life.controller.dispatch({ kind: 'open-detail', id: 'schedule-1' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-edit' })
+    await flush()
+    life.controller.dispatch({ kind: 'set-field', fieldId: 'title', value: 'Merged title' })
+    life.port.editResult = async () => ({ id: 'schedule-1' as never, code: 'schedule_conflict' })
+    life.controller.dispatch({ kind: 'save' })
+    await flush()
+    await life.controller.whenIdle()
+
+    life.port.viewResults.set('schedule-1', entry({
+      title: 'Merged title',
+      updatedAt: '2026-01-02T00:00:00.000Z',
+    }))
+    life.controller.dispatch({ kind: 'review-with-my-edits' })
+    await flush()
+    assert.equal(life.controller.snapshot().editorDirty, false)
+    assert.equal(life.controller.snapshot().notice?.text, SCHEDULE_COPY.hostMatchesWithOverlap('Title'))
+    assert.equal(life.port.calls.filter(call => call.method === 'edit').length, 1)
+
+    life.controller.dispatch({ kind: 'save' })
+    await flush()
+    assert.equal(life.port.calls.filter(call => call.method === 'edit').length, 1, 'a clean reviewed draft sends no Host write')
+    assert.equal(life.controller.snapshot().notice?.text, SCHEDULE_COPY.hostMatchesWithOverlap('Title'),
+      'Ctrl+S keeps the truthful already-matches result')
+  } finally {
+    life.controller.dispose()
+  }
+})
+
+test('L6: a Review read settles into the same Editor under Help and keeps its rebased draft', async () => {
+  const life = await opened()
+  try {
+    life.controller.dispatch({ kind: 'open-detail', id: 'schedule-1' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-edit' })
+    await flush()
+    life.controller.dispatch({ kind: 'set-field', fieldId: 'title', value: 'Local title' })
+    life.port.editResult = async () => ({ id: 'schedule-1' as never, code: 'schedule_conflict' })
+    life.controller.dispatch({ kind: 'save' })
+    await flush()
+    await life.controller.whenIdle()
+
+    const read = deferred<ScheduleViewResult>()
+    life.port.viewQueue = [read.promise]
+    life.controller.dispatch({ kind: 'review-with-my-edits' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-help' })
+    assert.equal(life.controller.snapshot().mode, 'help')
+    read.resolve(entry({ title: 'Remote title', updatedAt: '2026-01-11T00:00:00.000Z' }))
+    await flush()
+    assert.equal(life.controller.snapshot().mode, 'help')
+    assert.equal(life.controller.snapshot().editor?.title, 'Local title')
+    assert.equal(life.controller.snapshot().editor?.expectedUpdatedAt, '2026-01-11T00:00:00.000Z')
+    life.controller.dispatch({ kind: 'close-help' })
+    assert.equal(life.controller.snapshot().mode, 'editor')
+    assert.equal(life.controller.snapshot().editor?.title, 'Local title')
+  } finally {
+    life.controller.dispose()
+  }
+})
+
+test('L6: opening the lossy reload confirmation cancels an older Review answer', async () => {
+  const life = await opened()
+  try {
+    life.controller.dispatch({ kind: 'open-detail', id: 'schedule-1' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-edit' })
+    await flush()
+    life.controller.dispatch({ kind: 'set-field', fieldId: 'title', value: 'Local title' })
+    life.port.editResult = async () => ({ id: 'schedule-1' as never, code: 'schedule_conflict' })
+    life.controller.dispatch({ kind: 'save' })
+    await flush()
+    await life.controller.whenIdle()
+
+    const read = deferred<ScheduleViewResult>()
+    life.port.viewQueue = [read.promise]
+    life.controller.dispatch({ kind: 'review-with-my-edits' })
+    await flush()
+    life.controller.dispatch({ kind: 'reload-latest' })
+    assert.equal(life.controller.snapshot().confirm?.kind, 'reload')
+    read.resolve(entry({ title: 'Late Host title', updatedAt: '2026-01-12T00:00:00.000Z' }))
+    await flush()
+    assert.equal(life.controller.snapshot().confirm?.kind, 'reload')
+    assert.equal(life.controller.snapshot().editorRecovery, 'conflict')
+    assert.equal(life.controller.snapshot().editor?.title, 'Local title')
+    life.controller.dispatch({ kind: 'cancel' })
+    assert.equal(life.controller.snapshot().editor?.title, 'Local title')
+    assert.equal(life.controller.snapshot().editorRecovery, 'conflict')
+  } finally {
+    life.controller.dispose()
+  }
+})
+
+test('L6: a Review answer from Editor A cannot replace the newly opened Editor B', async () => {
+  const life = await opened()
+  try {
+    life.port.entries = [entry({ id: 'schedule-a' as never, title: 'A' }), entry({ id: 'schedule-b' as never, title: 'B' })]
+    life.controller.dispatch({ kind: 'refresh' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-detail', id: 'schedule-a' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-edit' })
+    await flush()
+    life.controller.dispatch({ kind: 'set-field', fieldId: 'title', value: 'Local A' })
+    life.port.editResult = async () => ({ id: 'schedule-a' as never, code: 'schedule_conflict' })
+    life.controller.dispatch({ kind: 'save' })
+    await flush()
+    await life.controller.whenIdle()
+
+    const oldRead = deferred<ScheduleViewResult>()
+    life.port.viewResults.set('schedule-a', oldRead.promise)
+    life.controller.dispatch({ kind: 'review-with-my-edits' })
+    await flush()
+    life.controller.dispatch({ kind: 'back' })
+    life.controller.dispatch({ kind: 'confirm' })
+    assert.equal(life.controller.snapshot().mode, 'detail')
+    life.controller.dispatch({ kind: 'back' })
+    life.controller.dispatch({ kind: 'open-detail', id: 'schedule-b' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-edit' })
+    await flush()
+    assert.equal(life.controller.snapshot().editor?.title, 'B')
+    oldRead.resolve(entry({ id: 'schedule-a' as never, title: 'Late A', updatedAt: '2026-01-13T00:00:00.000Z' }))
+    await flush()
+    assert.equal(life.controller.snapshot().editor?.id, 'schedule-b')
+    assert.equal(life.controller.snapshot().editor?.title, 'B')
+    assert.equal(life.controller.snapshot().editorRecovery, undefined)
+  } finally {
+    life.controller.dispose()
+  }
+})
+
+test('L6: a Review answer settling after dispose publishes nothing', async () => {
+  const life = await opened()
+  life.controller.dispatch({ kind: 'open-detail', id: 'schedule-1' })
+  await flush()
+  life.controller.dispatch({ kind: 'open-edit' })
+  await flush()
+  life.controller.dispatch({ kind: 'set-field', fieldId: 'title', value: 'Local title' })
+  life.port.editResult = async () => ({ id: 'schedule-1' as never, code: 'schedule_conflict' })
+  life.controller.dispatch({ kind: 'save' })
+  await flush()
+  await life.controller.whenIdle()
+  const read = deferred<ScheduleViewResult>()
+  life.port.viewQueue = [read.promise]
+  life.controller.dispatch({ kind: 'review-with-my-edits' })
+  await flush()
+  let publications = 0
+  life.controller.subscribe(() => { publications += 1 })
+  life.controller.dispose()
+  const settledPublications = publications
+  read.resolve(entry({ title: 'Late Host', updatedAt: '2026-01-14T00:00:00.000Z' }))
+  await flush()
+  assert.equal(publications, settledPublications)
+  assert.equal(life.controller.snapshot().editor?.title, 'Local title')
 })
 
 test('L6: Help under an in-flight history page keeps its answer, and invalidation re-reads', async () => {
@@ -1255,7 +1625,7 @@ test('L6: reload never re-sends a reverted or old draft value', async () => {
     assert.equal(life.controller.snapshot().editor?.prompt, 'P')
     life.controller.dispatch({ kind: 'save' })
     await flush()
-    assert.equal(life.controller.snapshot().notice?.text, 'Nothing changed yet.')
+    assert.equal(life.controller.snapshot().notice?.text, SCHEDULE_COPY.reloaded)
     assert.equal(life.port.calls.some(call => call.method === 'edit'), false,
       'a reverted/old draft value is never sent on the new revision')
   } finally {
@@ -1692,9 +2062,9 @@ test('L6: an explicit reload clears the per-kind field memories it replaced', as
     life.controller.dispatch({ kind: 'open-edit' })
     await flush()
     // Build a per-kind memory for the daily editor.
-    life.controller.dispatch({ kind: 'select-timing-kind', timing: 'daily' })
+    life.controller.dispatch({ kind: 'select-timing-preset', preset: 'daily' })
     life.controller.dispatch({ kind: 'set-field', fieldId: 'timing-time', value: '23:45' })
-    life.controller.dispatch({ kind: 'select-timing-kind', timing: 'cron' })
+    life.controller.dispatch({ kind: 'select-timing-preset', preset: 'cron' })
     life.port.viewResults.set('schedule-1', entry({
       kind: 'cron',
       expression: '0 9 * * *',
@@ -1703,7 +2073,7 @@ test('L6: an explicit reload clears the per-kind field memories it replaced', as
     }))
     reloadNow(life)
     await flush()
-    life.controller.dispatch({ kind: 'select-timing-kind', timing: 'daily' })
+    life.controller.dispatch({ kind: 'select-timing-preset', preset: 'daily' })
     const timing = life.controller.snapshot().editor?.timing
     assert.equal(timing?.kind === 'daily' ? timing.time : undefined, '09:00:00',
       'the old 23:45 memory was cleared by the explicit reload')
@@ -1738,13 +2108,13 @@ test('L6: every accepted draft mutation supersedes an in-flight reload', async (
     const reload1 = deferred<ScheduleViewResult>()
     life.port.viewQueue = [reload1.promise]
     reloadNow(life)
-    life.controller.dispatch({ kind: 'select-timing-kind', timing: 'daily' })
+    life.controller.dispatch({ kind: 'select-timing-preset', preset: 'daily' })
     reload1.resolve(host)
     await flush()
     assert.equal(life.controller.snapshot().editor?.timing.kind, 'daily',
       'a timing-kind change typed during the reload survives')
 
-    life.controller.dispatch({ kind: 'select-timing-kind', timing: 'weekly' })
+    life.controller.dispatch({ kind: 'select-timing-preset', preset: 'weekly' })
     const reload2 = deferred<ScheduleViewResult>()
     life.port.viewQueue = [reload2.promise]
     reloadNow(life)

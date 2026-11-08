@@ -15,7 +15,7 @@ import type {
   ScheduleRunResult,
   ScheduleViewResult,
 } from '../../runtime/schedule-port.ts'
-import type { ScheduleEditorDraft, ScheduleTimingKind, ScheduleTargetKind } from '../../domain/schedule/form.ts'
+import type { ScheduleEditorDraft, ScheduleTargetKind, ScheduleTimingPreset } from '../../domain/schedule/form.ts'
 
 export type {
   ScheduleCatalogEntry,
@@ -25,7 +25,7 @@ export type {
   ScheduleRunResult,
   ScheduleViewResult,
   ScheduleEditorDraft,
-  ScheduleTimingKind,
+  ScheduleTimingPreset,
   ScheduleTargetKind,
 }
 
@@ -85,6 +85,9 @@ export interface ScheduleNotice {
   readonly kind: 'info' | 'error'
 }
 
+/** Client-local admission state for the current editor instance. */
+export type ScheduleEditorRecovery = 'conflict' | 'unknown' | 'missing'
+
 /** One Session candidate the `session` target chooser offers: a listed,
  *  non-subagent Session with its projection title when the Host supplied one. */
 export interface ScheduleSessionChoice {
@@ -117,6 +120,8 @@ export interface ScheduleWorkspaceSnapshot {
   readonly detail?: ScheduleCatalogEntry
   readonly history?: ScheduleHistoryView
   readonly editor?: ScheduleEditorDraft
+  readonly editorDirty?: boolean
+  readonly editorRecovery?: ScheduleEditorRecovery
   readonly confirm?: ScheduleConfirm
   readonly notice?: ScheduleNotice
   readonly limits?: { readonly newSessionIntervalSeconds: number }
@@ -148,16 +153,15 @@ export type ScheduleIntent =
   | { readonly kind: 'focus-field'; readonly index: number }
   | { readonly kind: 'next-field'; readonly delta: number }
   | { readonly kind: 'set-field'; readonly fieldId: string; readonly value: string }
-  | { readonly kind: 'select-timing-kind'; readonly timing: ScheduleTimingKind }
+  | { readonly kind: 'select-timing-preset'; readonly preset: ScheduleTimingPreset }
   | { readonly kind: 'toggle-weekday'; readonly weekday: number }
   | { readonly kind: 'select-target-kind'; readonly target: ScheduleTargetKind }
   | { readonly kind: 'select-target-session'; readonly sessionId: string }
   | { readonly kind: 'toggle-advanced' }
   | { readonly kind: 'save' }
-  /** The explicit conflict recovery (plan §5.5): re-read the latest Host record
-   *  and DISPLAY it as the editor content and CAS revision, discarding the
-   *  conflicted draft. It is LOSSY, so a dirty draft must confirm first. It never
-   *  auto-merges: the user re-applies the changes they still want manually. */
+  /** Re-read the Host and merge the local edits by atomic field group; never writes. */
+  | { readonly kind: 'review-with-my-edits' }
+  /** Explicitly discard the draft and adopt the latest Host record. */
   | { readonly kind: 'reload-latest' }
   | { readonly kind: 'toggle-active' }
   | { readonly kind: 'ask-run' }
@@ -173,14 +177,21 @@ export type ScheduleIntent =
 export const SCHEDULE_COPY = {
   serviceUnavailable: 'Schedule service is unavailable on this Host.',
   taskGone: 'Task no longer exists. Reload tasks.',
-  conflict: 'Task changed on the Host. Review latest before saving.',
+  conflict: 'Host changed. Edits kept; Save is blocked.',
+  editorUnknown: 'Edit outcome unknown. Review the latest Host version before saving.',
+  createUnknown: 'Creation outcome unknown. The Host catalog was re-read; inspect tasks before creating again.',
+  missing: 'Task no longer exists. Your edits are kept; Save is blocked.',
   executionPending: 'Run not started: another execution is pending.',
   historyChanged: 'Delivery history changed. Reopen history.',
   targetArchived: 'Target Session is archived. Choose another.',
   permissionDenied: 'Schedule permission denied.',
   outcomeUnknown: 'Outcome unknown. Refresh before retrying.',
   updated: 'Updated',
-  reloaded: 'Loaded the latest Host revision. Re-apply the changes you still want, then save.',
+  reloaded: 'Loaded the latest Host version. Unsaved changes were discarded.',
+  reviewed: 'Your edits are kept for review; nothing was saved.',
+  bothChanged: (groups: string) => `Both changed: ${groups}. Your edits are kept for review; nothing was saved.`,
+  hostMatches: 'The Host already matches your edits. Nothing to save.',
+  hostMatchesWithOverlap: (groups: string) => `The Host already matches your edits. Nothing to save. Both changed: ${groups}.`,
   deliveryQueued: 'Delivery queued',
   noEnded: 'No ended tasks to clear.',
   cleared: (count: number) => `Cleared ${count} ended tasks.`,

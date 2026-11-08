@@ -38,23 +38,23 @@ import type {
 import {
   editorFields,
   focusedField,
+  SCHEDULE_WEEKDAYS,
   type ScheduleEditorDraft,
   type ScheduleFormField,
   type ScheduleTargetKind,
-  type ScheduleTimingKind,
+  type ScheduleTimingPreset,
 } from '../../domain/schedule/form.ts'
 import {
   EDITOR_LABEL_WIDTH,
   editorChooserTitle,
   editorFieldHint,
+  editorFieldValue,
   editorFocusIntent,
-  editorModeLabel,
   fieldIndexById,
   isEditorTextInput,
   sessionChooserOptions,
   targetChooserOptions,
   timingChooserOptions,
-  weekdayFromField,
   type ScheduleEditorChoice,
 } from './form.ts'
 import {
@@ -92,8 +92,6 @@ const FILTER_CYCLE_HINT = `${formatKeyId(Key.tab)}/${formatKeyId(Key.shift(Key.t
 
 /** The label column of a detail fact row. */
 const DETAIL_LABEL_WIDTH = 16
-/** The editor's fact label column (mode, revision, creation floor). */
-const EDITOR_FACT_LABEL_WIDTH = 20
 
 /** The responsive shape of one Schedule frame. */
 export type ScheduleWorkspaceLayout = 'single' | 'wide'
@@ -109,6 +107,14 @@ export function scheduleWorkspaceLayout(columns: number, rows: number): Schedule
   const lines = Math.floor(rows)
   if (!Number.isFinite(cols) || !Number.isFinite(lines)) return 'single'
   return cols >= SCHEDULE_WIDE_COLUMNS && lines >= SCHEDULE_WIDE_ROWS ? 'wide' : 'single'
+}
+
+function weekdayChooserOptions(): readonly ScheduleEditorChoice[] {
+  const labels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+  return SCHEDULE_WEEKDAYS.map((weekday, index) => ({
+    label: labels[index]!,
+    value: String(weekday),
+  }))
 }
 
 /** The panel's construction inputs. */
@@ -216,10 +222,12 @@ interface BodyLine {
 
 /** The panel-local chooser one editor field opens. */
 interface OpenChooser {
+  readonly kind: 'choice' | 'weekdays'
   readonly fieldId: string
   readonly title: string
   readonly options: readonly ScheduleEditorChoice[]
   readonly index: number
+  readonly pageEpoch: number
 }
 
 /** The identity of the confirmation the last frame painted. */
@@ -309,6 +317,13 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
       this.listScrollPinned = false
     }
     if (snapshot.mode !== 'editor') {
+      this.chooser = undefined
+      this.editorFieldId = undefined
+      this.editorBaseline = undefined
+      this.editorDispatched = undefined
+    } else if (snapshot.pageEpoch !== previous.pageEpoch
+      || (this.chooser !== undefined
+        && (snapshot.editor === undefined || !editorFields(snapshot.editor).some(field => field.id === this.chooser?.fieldId)))) {
       this.chooser = undefined
       this.editorFieldId = undefined
       this.editorBaseline = undefined
@@ -523,10 +538,8 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     // rejected `set-field` would leave the visible buffer ahead of the draft.
     if (this.snapshot.busy) return
     const focused = focusedField(draft)
-    // A TEXT field owns every printable character, `?` included; Help is the
-    // `?` action only where there is no text to type (the kind/target/advanced
-    // /weekday controls). The choice/kind fields open their chooser on Enter.
-    const typing = focused !== undefined && (isEditorTextInput(focused) || (focused !== undefined && this.isRawEditorField(focused)))
+    // Text fields own printable input; help is available only from a choice field.
+    const typing = focused !== undefined && (isEditorTextInput(focused) || this.isRawEditorField(focused))
     if (matchesKey(data, '?') && !typing) {
       this.deps.dispatch({ kind: 'open-help' })
       return
@@ -539,8 +552,16 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
       this.deps.dispatch({ kind: 'save' })
       return
     }
+    if (matchesKey(data, 'ctrl+g')) {
+      if (draft.mode === 'edit' && (this.snapshot.editorRecovery === 'conflict' || this.snapshot.editorRecovery === 'unknown')) {
+        this.deps.dispatch({ kind: 'review-with-my-edits' })
+      }
+      return
+    }
     if (matchesKey(data, 'ctrl+r')) {
-      this.deps.dispatch({ kind: 'reload-latest' })
+      if (draft.mode === 'edit' && this.snapshot.editorRecovery !== 'missing') {
+        this.deps.dispatch({ kind: 'reload-latest' })
+      }
       return
     }
     if (matchesKey(data, 'tab')) {
@@ -566,7 +587,17 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     const field = focusedField(draft)
     if (field === undefined || !isEditorTextInput(field)) return
     this.syncEditorInput()
-    this.editorInput.handleInput(data)
+    let input = data
+    if (field.id === 'timing-quantity') {
+      const pasted = data.match(/^\x1b\[200~([\s\S]*)\x1b\[201~$/u)?.[1]
+      if (pasted !== undefined) {
+        if (!/^\d*$/.test(pasted)) return
+        input = pasted
+      } else if (this.isPrintableInput(data) && !/^\d+$/.test(data)) {
+        return
+      }
+    }
+    this.editorInput.handleInput(input)
     const next = this.editorInput.getValue()
     if (next !== this.editorDispatched) {
       this.editorDispatched = next
@@ -702,8 +733,19 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
   private handleChooserInput(data: string): void {
     const chooser = this.chooser
     if (chooser === undefined) return
+    if (chooser.pageEpoch !== this.snapshot.pageEpoch || this.snapshot.mode !== 'editor') {
+      this.chooser = undefined
+      return
+    }
     if (matchesKey(data, 'escape')) {
       this.chooser = undefined
+      this.deps.requestRender()
+      return
+    }
+    if (matchesKey(data, 'tab') || matchesKey(data, 'shift+tab')) {
+      this.chooser = undefined
+      const draft = this.snapshot.editor
+      if (draft !== undefined) this.deps.dispatch(editorFocusIntent(draft, matchesKey(data, 'shift+tab') ? -1 : 1))
       this.deps.requestRender()
       return
     }
@@ -717,7 +759,13 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
       this.deps.requestRender()
       return
     }
-    if (matchesKey(data, 'enter')) this.chooseOption(chooser)
+    if (chooser.kind === 'weekdays' && (matchesKey(data, 'space') || matchesKey(data, 'enter'))) {
+      const option = chooser.options[chooser.index]
+      if (option !== undefined) this.deps.dispatch({ kind: 'toggle-weekday', weekday: Number(option.value) })
+      this.deps.requestRender()
+      return
+    }
+    if (chooser.kind === 'choice' && matchesKey(data, 'enter')) this.chooseOption(chooser)
   }
 
   private chooseOption(chooser: OpenChooser): void {
@@ -729,7 +777,7 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     }
     switch (chooser.fieldId) {
       case 'timing-kind':
-        this.deps.dispatch({ kind: 'select-timing-kind', timing: option.value as ScheduleTimingKind })
+        this.deps.dispatch({ kind: 'select-timing-preset', preset: option.value as ScheduleTimingPreset })
         return
       case 'target-kind':
         this.deps.dispatch({ kind: 'select-target-kind', target: option.value as ScheduleTargetKind })
@@ -757,12 +805,8 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
       this.openChooser(field, sessionChooserOptions(this.snapshot.sessions))
       return
     }
-    if (field.kind === 'weekday') {
-      const weekday = weekdayFromField(field)
-      if (weekday !== undefined) {
-        this.deps.dispatch({ kind: 'toggle-weekday', weekday })
-        this.deps.requestRender()
-      }
+    if (field.id === 'timing-weekdays') {
+      this.openChooser(field, weekdayChooserOptions(), 'weekdays')
       return
     }
     if (field.kind === 'toggle') {
@@ -771,12 +815,23 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     }
   }
 
-  private openChooser(field: ScheduleFormField, options: readonly ScheduleEditorChoice[]): void {
+  private openChooser(
+    field: ScheduleFormField,
+    options: readonly ScheduleEditorChoice[],
+    kind: OpenChooser['kind'] = 'choice',
+  ): void {
     if (options.length === 0) {
       this.deps.requestRender()
       return
     }
-    this.chooser = { fieldId: field.id, title: editorChooserTitle(field), options, index: 0 }
+    this.chooser = {
+      kind,
+      fieldId: field.id,
+      title: editorChooserTitle(field),
+      options,
+      index: 0,
+      pageEpoch: this.snapshot.pageEpoch,
+    }
     this.deps.requestRender()
   }
 
@@ -845,10 +900,17 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     // snapshots behind it were read before the invalidation, so the banner is
     // painted above the body instead of only inside the list.
     const banner = this.listBanner()
-    if (banner !== undefined) {
+    const editorNotice = snapshot.mode === 'editor' && snapshot.confirm === undefined
+      ? snapshot.notice
+      : undefined
+    if (editorNotice !== undefined) {
+      const notice = this.noticeLine(editorNotice)
+      const composed = this.composeRow(paintedWidth, notice.segments)
+      lines.push(composed.line)
+    } else if (banner !== undefined) {
       lines.push(banner.paint(truncateToWidth(sanitizedPhysicalLine(banner.text), paintedWidth, '…', false)))
     }
-    const chromeRows = 1 + (isListPage ? 2 : 0) + (banner === undefined ? 0 : 1) + 1
+    const chromeRows = 1 + (isListPage ? 2 : 0) + (banner === undefined && editorNotice === undefined ? 0 : 1) + 1
     const bodyHeight = Math.max(0, rows - chromeRows)
 
     if (snapshot.confirm !== undefined) {
@@ -1315,22 +1377,28 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     const fact = (label: string, value: string, paint: (text: string) => string = color.text): void => {
       out.push({
         segments: [
-          { plain: fit(label, EDITOR_FACT_LABEL_WIDTH), paint: color.textDim },
+          { plain: fit(label, EDITOR_LABEL_WIDTH), paint: color.textDim },
           { plain: sanitizedPhysicalLine(value), paint },
         ],
       })
     }
-    out.push({ segments: [{ plain: 'Schedule editor', paint: color.textStrong }] })
-    fact('Mode', editorModeLabel(draft.mode))
-    if (draft.mode === 'edit') {
-      fact('Expected updated at', draft.expectedUpdatedAt === undefined || draft.expectedUpdatedAt === null
-        ? 'none'
-        : draft.expectedUpdatedAt)
+    out.push({ segments: [{
+      plain: draft.mode === 'create' ? 'Create task' : 'Edit task',
+      paint: color.textStrong,
+    }] })
+    const status = this.snapshot.busy
+      ? { text: 'Saving…', paint: color.textDim }
+      : this.snapshot.editorDirty === true
+        ? { text: 'Unsaved changes', paint: color.warning }
+        : { text: 'No changes', paint: color.textMuted }
+    fact('Status', status.text, status.paint)
+    if (draft.target.kind === 'new') {
+      const limits = this.snapshot.limits
+      fact('New-conversation minimum interval', limits === undefined
+        ? 'unknown'
+        : formatSeconds(limits.newSessionIntervalSeconds))
     }
-    const limits = this.snapshot.limits
-    fact('New Session floor', limits === undefined ? 'unknown' : formatSeconds(limits.newSessionIntervalSeconds))
-    if (this.snapshot.notice !== undefined) out.push(this.noticeLine(this.snapshot.notice))
-    out.push({ segments: [{ plain: '' }] })
+
 
     const fields = editorFields(draft)
     const focused = Math.max(0, Math.min(draft.focused, Math.max(0, fields.length - 1)))
@@ -1342,6 +1410,7 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
       const segments: CellSegment[] = [
         { plain: selected ? '> ' : '  ', paint: selected ? color.primary : undefined },
         { plain: fit(field.label, EDITOR_LABEL_WIDTH), paint: color.textDim },
+        { plain: ' ' },
       ]
       if (this.isRawEditorField(field)) {
         // Multi-line raw text: one painted row per stored `\n` (the value keeps
@@ -1397,11 +1466,13 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
                 ? [
                     { plain: '> ', paint: color.primary },
                     { plain: fit(field.label, EDITOR_LABEL_WIDTH), paint: color.textDim },
+                    { plain: ' ' },
                     { plain: sanitizedPhysicalLine(shown), paint: color.textStrong },
                   ]
                 : [
                     { plain: '  ' },
                     { plain: ' '.repeat(EDITOR_LABEL_WIDTH) },
+                    { plain: ' ' },
                     { plain: sanitizedPhysicalLine(shown), paint: color.textStrong },
                   ],
               fieldId: field.id,
@@ -1427,7 +1498,7 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
         })
       } else {
         segments.push({
-          plain: sanitizedPhysicalLine(field.value),
+          plain: sanitizedPhysicalLine(editorFieldValue(field, draft, this.snapshot.sessions)),
           paint: selected ? text => color.textStrong(text) : color.text,
         })
       }
@@ -1436,39 +1507,27 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
       out.push({ segments, fieldId: field.id })
     }
 
-    out.push({ segments: [{ plain: '' }] })
-    out.push({ segments: [{ plain: 'Sessions', paint: color.textDim }] })
-    if (this.snapshot.sessions.length === 0) {
-      out.push({ segments: [{ plain: 'No Sessions available', paint: color.textDim }] })
-    } else {
-      const chosen = draft.target.kind === 'session' ? draft.target.sessionId : undefined
-      for (const session of this.snapshot.sessions) {
-        const segments: CellSegment[] = [
-          { plain: sanitizedPhysicalLine(`  ${session.id}`), paint: color.text },
-        ]
-        if (session.title !== undefined) {
-          segments.push({ plain: sanitizedPhysicalLine(`  ${session.title}`), paint: color.textDim })
-        }
-        if (chosen === session.id) segments.push({ plain: '  [current]', paint: color.textMuted })
-        out.push({ segments })
-      }
-    }
-
     if (this.chooser !== undefined) {
       out.push({ segments: [{ plain: '' }] })
       out.push({
         segments: [{
-          plain: sanitizedPhysicalLine(`${this.chooser.title} · Enter choose · Esc cancel`),
+          plain: sanitizedPhysicalLine(this.chooser.kind === 'weekdays'
+            ? `${this.chooser.title} · Space/Enter toggle · Esc close · Tab next field`
+            : `${this.chooser.title} · Enter choose · Esc close`),
           paint: color.textStrong,
         }],
         chooserTitle: true,
       })
       for (const [index, option] of this.chooser.options.entries()) {
         const selected = index === this.chooser.index
+        const currentDay = this.chooser.kind === 'weekdays'
+          && draft.timing.kind === 'weekly'
+          && draft.timing.weekdays.includes(Number(option.value))
         out.push({
           segments: [
             { plain: selected ? '> ' : '  ', paint: selected ? color.primary : undefined },
             { plain: sanitizedPhysicalLine(option.label), paint: selected ? text => color.textStrong(text) : color.text },
+            ...(currentDay ? [{ plain: ' [current]', paint: color.textMuted }] : []),
           ],
           chooserIndex: index,
         })
@@ -1497,8 +1556,16 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
       ['Enter (history)', 'Load the next page when More is shown'],
       ['PgUp / PgDn', 'Scroll detail, history or help'],
       [`${formatKeyId(Key.ctrl('s'))} (editor)`, 'Save the schedule'],
-      [`${formatKeyId(Key.ctrl('r'))} (editor)`, 'Reload the latest Host revision and discard unsaved changes (asks first)'],
-      [`${formatKeyId(Key.tab)} / ${formatKeyId(Key.shift(Key.tab))} (editor)`, 'Move between fields'],
+      [`${formatKeyId(Key.ctrl('g'))} (conflict / unknown edit)`, 'Review the latest Host version with your edits; nothing is saved'],
+      [`${formatKeyId(Key.ctrl('r'))} (edit)`, 'Discard your edits and reload the latest Host version (asks first)'],
+      [`${formatKeyId(Key.tab)} / ${formatKeyId(Key.shift(Key.tab))} (editor)`, 'Move between logical fields'],
+      ['Repeat (editor)', 'Once after delay, once at date/time, every minutes/hours/seconds, daily, weekly, Custom Cron or Custom RRULE'],
+      ['Create default', 'One hour after Save · Create and reuse conversation'],
+      ['Existing conversation', 'Deliver to the selected existing conversation'],
+      ['Create and reuse conversation', 'Create one conversation at first delivery and reuse it later'],
+      ['New conversation each run', 'Create a separate conversation at every delivery'],
+      ['Weekdays (editor)', 'Space/Enter toggles a day; Esc closes and keeps changes; Tab moves to the next field'],
+      ['Destination (editor)', 'Existing conversation, create and reuse conversation, or new conversation each run'],
       ['y / n', 'Confirm or cancel a confirmation'],
       ['Esc', 'Back one layer; close the workspace at the list root'],
     ]
@@ -1716,12 +1783,25 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
           if (this.snapshot.history?.nextBefore !== undefined) add('Enter more', 6, 'history-more')
           add('Esc back', 10, 'back')
           break
-        case 'editor':
-          add(`${formatKeyId(Key.ctrl('s'))} save`, 8)
-          add(`${formatKeyId(Key.ctrl('r'))} reload latest`, 7, undefined)
-          add('Tab next field', 6, undefined)
-          add('Esc discard', 10, 'back')
+        case 'editor': {
+          const recovery = this.snapshot.editorRecovery
+          const mode = this.snapshot.editor?.mode
+          if (this.snapshot.busy) {
+            add('Saving…', 9)
+          } else if (mode === 'edit' && (recovery === 'conflict' || recovery === 'unknown')) {
+            add(`${formatKeyId(Key.ctrl('g'))} review`, 9)
+            add(`${formatKeyId(Key.ctrl('r'))} reload`, 8)
+          } else if (recovery === undefined
+            && (mode === 'create' || this.snapshot.editorDirty !== false)) {
+            add(`${formatKeyId(Key.ctrl('s'))} save`, 9)
+            if (mode === 'edit') add(`${formatKeyId(Key.ctrl('r'))} discard/reload`, 7)
+          } else if (recovery === undefined && mode === 'edit') {
+            add(`${formatKeyId(Key.ctrl('r'))} reload`, 7)
+          }
+          if (!this.snapshot.busy) add(`${formatKeyId(Key.tab)} next field`, 6, undefined, `${formatKeyId(Key.tab)} next`)
+          add(this.snapshot.busy ? 'Esc wait' : 'Esc back', 10, 'back')
           break
+        }
         case 'help':
           add('Esc close help', 10, 'close-help')
           break
@@ -1752,7 +1832,7 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
   // ── pointer ───────────────────────────────────────────────────────────────
 
   onCellPress(x: number, y: number): void {
-    if (this.disposed) {
+    if (this.disposed || this.chooser !== undefined) {
       this.pressed = undefined
       return
     }
@@ -1779,7 +1859,7 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
   }
 
   onCellClick(x: number, y: number): void {
-    if (this.disposed) return
+    if (this.disposed || this.chooser !== undefined) return
     const frame = this.frame
     const pressed = this.pressed
     this.pressed = undefined

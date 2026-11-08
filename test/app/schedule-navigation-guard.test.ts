@@ -205,7 +205,7 @@ test('a gesture commits only on the identity it was pressed on', async () => {
       },
     },
     {
-      name: 'G3 editor Esc press → settled Detail back release (same task, same action)',
+      name: 'G3 editor Esc back press → settled Detail back release (same task, same action)',
       setup: async life => {
         life.controller.dispatch({ kind: 'open-detail', id: 'task-a' })
         await flush()
@@ -213,7 +213,7 @@ test('a gesture commits only on the identity it was pressed on', async () => {
         await flush()
         life.controller.dispatch({ kind: 'set-field', fieldId: 'title', value: 'Draft' })
       },
-      press: life => at(life, 'Esc discard'),
+      press: life => at(life, 'Esc back'),
       mutate: async life => {
         life.settleEdit(life.port.entries[0] as never)
         life.controller.dispatch({ kind: 'save' })
@@ -297,21 +297,21 @@ test('a gesture commits only on the identity it was pressed on', async () => {
       },
     },
     {
-      name: 'G6 editor Esc press → reopen → release (page-instance ABA)',
+      name: 'G6 editor Esc back press → reopen → release (page-instance ABA)',
       setup: async life => {
         life.controller.dispatch({ kind: 'open-detail', id: 'task-a' })
         await flush()
         life.controller.dispatch({ kind: 'open-edit' })
         await flush()
       },
-      press: life => at(life, 'Esc discard'),
+      press: life => at(life, 'Esc back'),
       mutate: async life => {
         life.controller.dispatch({ kind: 'back' }) // clean draft leaves directly
         life.controller.dispatch({ kind: 'confirm' }) // in case it was dirty
         life.controller.dispatch({ kind: 'open-edit' })
         await flush()
       },
-      release: life => at(life, 'Esc discard'),
+      release: life => at(life, 'Esc back'),
       assertOutcome: life => {
         assert.equal(life.controller.snapshot().mode, 'editor', 'G6: the reopened editor is not exited by the stale release')
       },

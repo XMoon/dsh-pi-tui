@@ -43,8 +43,11 @@ interface Size {
 /** The frozen product size matrix (also the short/narrow extremes). */
 const SIZES: readonly Size[] = [
   { columns: 44, rows: 20 },
+  { columns: 60, rows: 12 },
+  { columns: 72, rows: 24 },
   { columns: 80, rows: 10 },
   { columns: 80, rows: 24 },
+  { columns: 100, rows: 40 },
   { columns: 120, rows: 40 },
   { columns: 200, rows: 50 },
 ]
@@ -66,6 +69,7 @@ function task(overrides: {
     target: { kind: 'session', sessionId: 'session-target' },
     involvedSessionIds: [],
     status: 'active',
+    updatedAt: '2026-06-01T08:00:00.000Z',
     ...overrides,
   } as unknown as ScheduleCatalogEntry
 }
@@ -93,7 +97,7 @@ function draft(overrides: Partial<ScheduleEditorDraft> = {}): ScheduleEditorDraf
     mode: 'create',
     title: '',
     prompt: '',
-    timing: { kind: 'daily', time: '09:00:00', timeZone: 'UTC' },
+    timing: { kind: 'after', afterSeconds: '3600', quantityUnit: 'hours' },
     timingEdited: false,
     target: { kind: 'new_once', cwd: '', agentPreset: '' },
     targetEdited: false,
@@ -169,9 +173,100 @@ const PAGES: readonly Page[] = [
   { name: 'List', snapshot: LIST, heading: 'Alpha report', hints: ['Esc close', 'Enter details'] },
   { name: 'Detail', snapshot: DETAIL, heading: 'Details', hints: ['Esc back'] },
   { name: 'History', snapshot: HISTORY, heading: 'Delivery history', hints: ['Esc back', 'Enter more'] },
-  { name: 'Editor', snapshot: EDITOR, heading: 'Schedule editor', hints: ['save', 'Esc discard'] },
+  { name: 'Editor', snapshot: EDITOR, heading: 'Create task', hints: ['save', 'Esc back'] },
   { name: 'Confirm', snapshot: CONFIRM, heading: 'Confirm', hints: ['Confirm [Y]'] },
 ]
+
+test('real VirtualTerminal keeps guided Editor, RAW RRULE, conflict and Weekdays reachable across sizes', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  started.add(app)
+  const dispatches: ScheduleIntent[] = []
+  let current = workspace({
+    mode: 'editor',
+    pageEpoch: 1,
+    editor: draft({ focused: 0 }),
+  })
+  const handle = app.openScheduleWorkspace({
+    snapshot: () => current,
+    dispatch: intent => { dispatches.push(intent) },
+    onClose: () => {},
+  })
+  try {
+    await vt.waitForRender()
+    for (const size of SIZES) {
+      vt.resize(size.columns, size.rows)
+      await vt.waitForRender()
+
+      current = workspace({ mode: 'editor', pageEpoch: 10, editor: draft({ focused: 0 }) })
+      handle.update(current)
+      await vt.waitForRender()
+      let frame = vt.getViewport().map(stripTerminalSequences).join('\n')
+      assert.ok(frame.includes('Create task'), `${size.columns}×${size.rows}: Create identity\n${frame}`)
+      assert.ok(frame.includes('Delay (hours)'), `${size.columns}×${size.rows}: one-hour default\n${frame}`)
+      assert.ok(frame.includes('Destination'), `${size.columns}×${size.rows}: destination field\n${frame}`)
+
+      current = workspace({
+        mode: 'editor',
+        pageEpoch: 11,
+        editor: draft({
+          timing: { kind: 'rrule', rrule: 'DTSTART:20261201T090000Z\nRRULE:FREQ=DAILY' },
+          focused: 3,
+        }),
+      })
+      handle.update(current)
+      await vt.waitForRender()
+      frame = vt.getViewport().map(stripTerminalSequences).join('\n')
+      assert.ok(frame.includes('RRULE'), `${size.columns}×${size.rows}: custom RAW editor field\n${frame}`)
+
+      current = workspace({
+        mode: 'editor',
+        pageEpoch: 12,
+        editor: draft({ mode: 'edit', id: 'task-a', title: 'Local title' }),
+        editorDirty: true,
+        editorRecovery: 'conflict',
+        notice: { text: 'Host changed. Edits kept; Save is blocked.', kind: 'error' },
+      })
+      handle.update(current)
+      await vt.waitForRender()
+      frame = vt.getViewport().map(stripTerminalSequences).join('\n')
+      const actionBar = frame.split('\n').at(-1) ?? ''
+      assert.ok(frame.includes('Save is blocked'), `${size.columns}×${size.rows}: pinned conflict status\n${frame}`)
+      assert.ok(actionBar.includes('Ctrl+G review'), `${size.columns}×${size.rows}: Review remains visible\n${actionBar}`)
+      assert.ok(actionBar.includes('Ctrl+R reload'), `${size.columns}×${size.rows}: Reload remains visible\n${actionBar}`)
+      assert.ok(actionBar.trimEnd().endsWith('Esc back'), `${size.columns}×${size.rows}: Esc stays last\n${actionBar}`)
+      vt.sendInput('\x07')
+      await vt.waitForRender()
+      assert.equal(dispatches.at(-1)?.kind, 'review-with-my-edits', `${size.columns}×${size.rows}: real Ctrl+G route`)
+
+      current = workspace({
+        mode: 'editor',
+        pageEpoch: 13,
+        editor: draft({
+          timing: { kind: 'weekly', time: '09:00:00', timeZone: 'UTC', weekdays: [1, 2, 3, 4, 5] },
+          focused: 5,
+        }),
+      })
+      handle.update(current)
+      await vt.waitForRender()
+      vt.sendInput('\r')
+      await vt.waitForRender()
+      frame = vt.getViewport().map(stripTerminalSequences).join('\n')
+      assert.ok(frame.includes('Space/Enter toggle'), `${size.columns}×${size.rows}: composite chooser action\n${frame}`)
+      for (let day = 0; day < 6; day += 1) {
+        vt.sendInput('\x1b[B')
+        await vt.waitForRender()
+      }
+      frame = vt.getViewport().map(stripTerminalSequences).join('\n')
+      assert.ok(frame.includes('> Sun'), `${size.columns}×${size.rows}: Weekdays chooser scrolls to Sunday\n${frame}`)
+      vt.sendInput('\x1b')
+      await vt.waitForRender()
+    }
+  } finally {
+    app.dispose()
+  }
+})
 
 test('the real TuiApp alt-screen paints List/Detail/History/Editor/Confirm within every product size', async () => {
   const vt = new VirtualTerminal(80, 24)
@@ -251,7 +346,12 @@ test('the list-root keys are real VirtualTerminal input routed by TuiApp into th
 })
 
 import { ScheduleWorkspaceController } from '../../src/app/schedule/workspace-controller.ts'
-import type { ScheduleEditRequest, SchedulePort } from '../../src/runtime/schedule-port.ts'
+import type {
+  ScheduleCreateRequest,
+  ScheduleEditRequest,
+  ScheduleEditResult,
+  SchedulePort,
+} from '../../src/runtime/schedule-port.ts'
 import type { SessionReader } from '../../src/runtime/session-reader-port.ts'
 
 /** Minimal recording SchedulePort for the source-to-sink SGR proof. */
@@ -261,21 +361,46 @@ function createRecordingPort(
     task({ id: 'task-b', title: 'Bravo digest', status: 'paused' }),
     task({ id: 'task-c', title: 'Charlie review', status: 'ended' }),
   ],
-): SchedulePort & { edits: ScheduleEditRequest[]; readonly catalogCalls: number } {
+): SchedulePort & {
+  edits: ScheduleEditRequest[]
+  creates: ScheduleCreateRequest[]
+  editReplies: ScheduleEditResult[]
+  views: string[]
+  readonly catalogCalls: number
+} {
   const edits: ScheduleEditRequest[] = []
-  const state = { catalogCalls: 0 }
+  const creates: ScheduleCreateRequest[] = []
+  const editReplies: ScheduleEditResult[] = []
+  const views: string[] = []
+  const state = { catalogCalls: 0, created: undefined as ScheduleCatalogEntry | undefined }
   const listeners = new Set<() => void>()
   return {
     edits,
+    creates,
+    editReplies,
+    views,
     get catalogCalls() { return state.catalogCalls },
-    async catalog() { state.catalogCalls += 1; return rows },
+    async catalog() {
+      state.catalogCalls += 1
+      return state.created === undefined ? rows : [...rows, state.created]
+    },
     async list() { return { items: [...rows], shown: rows.length, total: rows.length, limit: 100, offset: 0 } },
-    async view(request) { return rows.find(row => row.id === request.id) ?? { id: request.id, code: 'schedule_not_found' } },
+    async view(request) {
+      views.push(String(request.id))
+      if (state.created?.id === request.id) return state.created
+      return rows.find(row => row.id === request.id) ?? { id: request.id, code: 'schedule_not_found' }
+    },
     async history(request) { return { id: request.id, code: 'schedule_not_found' } },
     async deliveryLimits() { return { newSessionIntervalSeconds: 60 } },
-    async create() { throw new Error('not used') },
+    async create(request) {
+      creates.push(request)
+      state.created = task({ id: 'task-created', title: request.title, prompt: request.prompt })
+      return state.created
+    },
     async edit(request) {
       edits.push(request)
+      const reply = editReplies.shift()
+      if (reply !== undefined) return reply
       return rows.find(row => row.id === request.id) ?? { id: request.id, code: 'schedule_not_found' }
     },
     async run() { throw new Error('not used') },
@@ -284,7 +409,13 @@ function createRecordingPort(
       listeners.add(listener)
       return () => { listeners.delete(listener) }
     },
-  } as SchedulePort & { edits: ScheduleEditRequest[]; readonly catalogCalls: number }
+  } as SchedulePort & {
+    edits: ScheduleEditRequest[]
+    creates: ScheduleCreateRequest[]
+    editReplies: ScheduleEditResult[]
+    views: string[]
+    readonly catalogCalls: number
+  }
 }
 
 function createController(port: SchedulePort, openDetail = true): ScheduleWorkspaceController {
@@ -303,6 +434,118 @@ function createController(port: SchedulePort, openDetail = true): ScheduleWorksp
   return controller
 }
 
+test('real Ctrl+G input reviews a Host conflict before one latest-revision edit', async () => {
+  const port = createRecordingPort()
+  const controller = createController(port)
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  started.add(app)
+  const handle = app.openScheduleWorkspace({
+    snapshot: () => controller.snapshot(),
+    dispatch: intent => controller.dispatch(intent),
+    onClose: () => {},
+  })
+  const unsubscribe = controller.subscribe(() => handle.update(controller.snapshot()))
+  try {
+    await vt.waitForRender()
+    controller.dispatch({ kind: 'open-edit' })
+    await vt.waitForRender()
+    controller.dispatch({ kind: 'set-field', fieldId: 'title', value: 'Local title' })
+    port.editReplies.push({ id: 'task-a' as never, code: 'schedule_conflict' })
+
+    const beforeSave = vt.getViewport().map(stripTerminalSequences).join('\n')
+    assert.ok(beforeSave.includes('Edit task'))
+    vt.sendInput('\x13')
+    await controller.whenIdle()
+    await vt.waitForRender()
+    assert.equal(controller.snapshot().editorRecovery, 'conflict')
+    assert.equal(port.edits.length, 1)
+    const conflictFrame = vt.getViewport().map(stripTerminalSequences).join('\n')
+    assert.ok(conflictFrame.includes('Ctrl+G review'))
+    assert.ok(conflictFrame.includes('Save is blocked'))
+
+    const viewsBeforeReview = port.views.length
+    vt.sendInput('\x07')
+    await vt.waitForRender()
+    assert.equal(port.views.length, viewsBeforeReview + 1, 'the real Ctrl+G key performs the official read')
+    assert.equal(controller.snapshot().editorRecovery, undefined)
+    assert.equal(controller.snapshot().editor?.title, 'Local title')
+    assert.equal(port.edits.length, 1, 'Review itself performs no edit')
+
+    vt.sendInput('\x13')
+    await controller.whenIdle()
+    await vt.waitForRender()
+    assert.equal(port.edits.length, 2)
+    assert.deepEqual(port.edits[1], {
+      id: 'task-a',
+      action: 'update',
+      patch: { title: 'Local title' },
+      expectedUpdatedAt: '2026-06-01T08:00:00.000Z',
+    }, 'the explicit Save sends one patch using the reviewed revision')
+  } finally {
+    unsubscribe()
+    app.dispose()
+    controller.dispose()
+  }
+})
+
+test('real VirtualTerminal Weekdays multi-select reaches one Host create', async () => {
+  const port = createRecordingPort()
+  const controller = createController(port, false)
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  started.add(app)
+  const handle = app.openScheduleWorkspace({
+    snapshot: () => controller.snapshot(),
+    dispatch: intent => controller.dispatch(intent),
+    onClose: () => {},
+  })
+  const unsubscribe = controller.subscribe(() => handle.update(controller.snapshot()))
+  const press = async (input: string): Promise<string> => {
+    vt.sendInput(input)
+    await vt.waitForRender()
+    return vt.getViewport().map(stripTerminalSequences).join('\n')
+  }
+  try {
+    await vt.waitForRender()
+    await press('n')
+    controller.dispatch({ kind: 'set-field', fieldId: 'title', value: 'Weekly task' })
+    controller.dispatch({ kind: 'set-field', fieldId: 'prompt', value: 'Check weekly' })
+    await press('\t')
+    await press('\t')
+    await press('\r')
+    for (let index = 0; index < 6; index += 1) await press('\x1b[B')
+    await press('\r')
+    assert.equal(controller.snapshot().editor?.timing.kind, 'weekly')
+    await press('\t')
+    await press('\t')
+    await press('\t')
+    const chooser = await press('\r')
+    assert.ok(chooser.includes('Space/Enter toggle'))
+    await press('\x1b[B')
+    const toggled = await press(' ')
+    assert.ok(toggled.includes('Weekdays'))
+    await press('\x1b')
+    const closed = await press('\t')
+    assert.ok(closed.includes('Destination'))
+    assert.equal(port.creates.length, 0, 'weekday toggle and chooser navigation do not write')
+    await press('\x13')
+    await controller.whenIdle()
+    await vt.waitForRender()
+    assert.equal(port.creates.length, 1)
+    assert.deepEqual(port.creates[0]?.timing, {
+      kind: 'weekly',
+      weekly: { time: '09:00:00', time_zone: 'UTC', weekdays: [1, 3, 4, 5] },
+    })
+    assert.deepEqual(port.edits, [])
+  } finally {
+    unsubscribe()
+    app.dispose()
+    controller.dispose()
+  }
+})
 test('real VirtualTerminal Tab input cycles full-catalog filters through the Controller at every planned width', async () => {
   const port = createRecordingPort()
   const controller = createController(port, false)

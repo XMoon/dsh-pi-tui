@@ -8,21 +8,39 @@
  */
 
 import {
-  TARGET_LABELS,
-  TIMING_LABELS,
-  TARGET_KINDS,
-  TIMING_KINDS,
   editorFields,
   type ScheduleEditorDraft,
   type ScheduleFormField,
+  type ScheduleTargetKind,
+  type ScheduleTimingKind,
+  type ScheduleTimingPreset,
 } from '../../domain/schedule/form.ts'
 import type { ScheduleIntent, ScheduleSessionChoice } from '../../app/schedule/presentation.ts'
 
 /** One option painted by an in-panel editor chooser. */
-export interface ScheduleEditorChoice {
+export interface ScheduleEditorChoice<Value extends string = string> {
   readonly label: string
-  readonly value: string
+  readonly value: Value
 }
+
+/** The only UI vocabulary for the nine timing presets. */
+const TIMING_PRESETS: readonly ScheduleEditorChoice<ScheduleTimingPreset>[] = [
+  { label: 'Once · after delay', value: 'once-after' },
+  { label: 'Once · at date/time', value: 'once-at' },
+  { label: 'Every · minutes', value: 'every-minutes' },
+  { label: 'Every · hours', value: 'every-hours' },
+  { label: 'Every · exact seconds (advanced)', value: 'every-seconds' },
+  { label: 'Daily', value: 'daily' },
+  { label: 'Weekly', value: 'weekly' },
+  { label: 'Custom · Cron', value: 'cron' },
+  { label: 'Custom · RRULE', value: 'rrule' },
+]
+
+const TARGET_CHOICES: readonly ScheduleEditorChoice<ScheduleTargetKind>[] = [
+  { label: 'Existing conversation', value: 'session' },
+  { label: 'Create and reuse conversation', value: 'new_once' },
+  { label: 'New conversation each run', value: 'new' },
+]
 
 /** The field label column shared by every editor row. */
 export const EDITOR_LABEL_WIDTH = 18
@@ -33,38 +51,39 @@ export function editorModeLabel(mode: ScheduleEditorDraft['mode']): string {
 }
 
 /**
- * The ONE hint of a field. A text field is typed into; a choice/weekday/toggle
- * field is activated with Enter (which opens the chooser or toggles in place).
+ * The ONE hint of a field. A text field is typed into; a choice/toggle field
+ * is activated with Enter.
  */
 export function editorFieldHint(field: ScheduleFormField): string {
   switch (field.id) {
     case 'timing-kind':
-      return 'Enter choose timing'
+      return 'Enter choose repeat'
     case 'target-kind':
-      return 'Enter choose target'
+      return 'Enter choose destination'
     case 'target-session':
-      return 'Enter choose Session'
+      return 'Enter choose conversation'
+    case 'timing-weekdays':
+      return 'Enter choose weekdays'
     case 'target-advanced':
       return 'Enter show/hide'
+    case 'timing-quantity':
+      return 'Type a whole number'
+    case 'timing-date':
+      return 'YYYY-MM-DD'
+    case 'timing-time':
+      return 'HH:mm or HH:mm:ss[.SSS]'
+    case 'timing-zone':
+      return 'UTC / Asia/Shanghai'
     case 'prompt':
     case 'timing-rrule':
       return 'Enter newline · Tab leaves'
     default:
-      if (field.kind === 'weekday') return 'Enter toggle day'
       return field.kind === 'text' ? 'Type to edit' : 'Enter change'
   }
 }
 
-/** Whether the focused field accepts typed text. */
 export function isEditorTextInput(field: ScheduleFormField): boolean {
   return field.kind === 'text'
-}
-
-/** The ISO weekday (1–7) one weekday field toggles, or undefined. */
-export function weekdayFromField(field: ScheduleFormField): number | undefined {
-  if (field.kind !== 'weekday' || !field.id.startsWith('timing-weekday-')) return undefined
-  const day = Number(field.id.slice('timing-weekday-'.length))
-  return Number.isInteger(day) && day >= 1 && day <= 7 ? day : undefined
 }
 
 /** The current index of a stable field identity, or undefined when it left. */
@@ -90,36 +109,73 @@ export function editorFocusIntent(draft: ScheduleEditorDraft, delta: number): Sc
   return { kind: 'focus-field', index: (target + fields.length) % fields.length }
 }
 
+/** The display value for one choice field, derived from its typed draft. */
+export function editorFieldValue(
+  field: ScheduleFormField,
+  draft: ScheduleEditorDraft,
+  sessions: readonly ScheduleSessionChoice[],
+): string {
+  if (field.id === 'timing-kind') {
+    const preset = timingPresetForDraft(draft.timing)
+    return TIMING_PRESETS.find(option => option.value === preset)!.label
+  }
+  if (field.id === 'target-kind') {
+    return TARGET_CHOICES.find(option => option.value === draft.target.kind)!.label
+  }
+  if (field.id === 'target-session') {
+    const session = sessions.find(candidate => candidate.id === field.value)
+    return session === undefined ? field.value : `${session.title ?? session.id} · ${session.id}`
+  }
+  return field.value
+}
+
+function timingPresetForDraft(timing: ScheduleEditorDraft['timing']): ScheduleTimingPreset {
+  switch (timing.kind) {
+    case 'after': return 'once-after'
+    case 'at': return 'once-at'
+    case 'every':
+      return timing.quantityUnit === 'minutes'
+        ? 'every-minutes'
+        : timing.quantityUnit === 'hours' ? 'every-hours' : 'every-seconds'
+    case 'daily': return 'daily'
+    case 'weekly': return 'weekly'
+    case 'cron': return 'cron'
+    case 'rrule': return 'rrule'
+  }
+}
+
 /** The heading of the chooser one field opens. */
 export function editorChooserTitle(field: ScheduleFormField): string {
   switch (field.id) {
     case 'timing-kind':
-      return 'Choose timing'
+      return 'Choose repeat'
     case 'target-kind':
-      return 'Choose target'
+      return 'Choose destination'
     case 'target-session':
-      return 'Choose Session'
+      return 'Choose existing conversation'
+    case 'timing-weekdays':
+      return 'Choose weekdays'
     default:
       return 'Choose'
   }
 }
 
-/** Every selectable official timing kind. */
-export function timingChooserOptions(): readonly ScheduleEditorChoice[] {
-  return TIMING_KINDS.map(kind => ({ label: TIMING_LABELS[kind], value: kind }))
+/** The nine guided timing presets in their frozen user-facing order. */
+export function timingChooserOptions(): readonly ScheduleEditorChoice<ScheduleTimingPreset>[] {
+  return TIMING_PRESETS
 }
 
-/** Every selectable official target kind. */
-export function targetChooserOptions(): readonly ScheduleEditorChoice[] {
-  return TARGET_KINDS.map(kind => ({ label: TARGET_LABELS[kind], value: kind }))
+/** The three business-facing destination choices. */
+export function targetChooserOptions(): readonly ScheduleEditorChoice<ScheduleTargetKind>[] {
+  return TARGET_CHOICES
 }
 
-/** The listed Session candidates as chooser options: id, then optional title. */
+/** The listed Session candidates as chooser options: title, then identity. */
 export function sessionChooserOptions(
   sessions: readonly ScheduleSessionChoice[],
 ): readonly ScheduleEditorChoice[] {
   return sessions.map(session => ({
-    label: session.title === undefined ? session.id : `${session.id} · ${session.title}`,
+    label: session.title === undefined ? session.id : `${session.title} · ${session.id}`,
     value: session.id,
   }))
 }
