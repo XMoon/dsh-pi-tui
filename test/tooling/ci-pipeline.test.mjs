@@ -758,6 +758,27 @@ test('the qualified job RUNS on a failed graph, and the verdict gates before any
   }
 })
 
+test('the official preset job uploads its failure-only evidence without changing the required phase', () => {
+  const job = workflow().jobs['official-preset-assembly']
+  assert.ok(REQUIRED_PHASES.includes('official-preset-assembly'))
+  assert.equal(job.env.OFFICIAL_PRESETS_FAILURE_EVIDENCE, undefined,
+    'runner context is unavailable in job-level env; inject it on the smoke step')
+  const runIndex = job.steps.findIndex(step => step.name === 'Run official preset assembly smoke')
+  const run = job.steps[runIndex]
+  assert.equal(run.env.OFFICIAL_PRESETS_FAILURE_EVIDENCE,
+    '${{ runner.temp }}/dsh-pi-tui-official-preset-failure/failure.json')
+  const uploadIndex = job.steps.findIndex(step => step.name === 'Upload sanitized official preset failure evidence')
+  const upload = job.steps[uploadIndex]
+  assert.equal(uploadIndex, runIndex + 1, 'failure evidence uploads immediately after the required smoke')
+  assert.equal(upload.if, 'always()')
+  assert.equal(upload.uses, 'actions/upload-artifact@v7')
+  assert.equal(upload.with.name, 'official-preset-failure')
+  assert.equal(upload.with.path, '${{ runner.temp }}/dsh-pi-tui-official-preset-failure/failure.json')
+  assert.equal(upload.with['if-no-files-found'], 'ignore', 'successful runs create no placeholder artifact')
+  assert.equal(upload.with.overwrite, true)
+  assert.equal(upload.with['retention-days'], 7)
+})
+
 test('every artifact upload REPLACES its name so a partial re-run can recover', () => {
   // "Re-run failed jobs" re-executes a producer while the successful jobs keep
   // the artifact they already uploaded. A same-name upload without `overwrite`
