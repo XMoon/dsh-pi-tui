@@ -59,6 +59,7 @@ import {
   AltScreenSearchIndex,
   dispatchMouseEvent,
   type AltScreenSearchMatch,
+  type AltScreenSearchSegment,
 } from '@xmoon76/pi-tui'
 import {
   SearchablePicker,
@@ -297,6 +298,10 @@ import {
   type RenderedSearchSelector,
   type SearchSourceRegion,
 } from './tui/components/transcript/search-presentation.ts'
+import {
+  preparePlainTextSourceProbe,
+  provePlainTextPaintedSegments,
+} from './tui/components/transcript/plain-text-source-proof.ts'
 import {
   workflowCountsText,
   workflowPhasePresentations,
@@ -627,6 +632,9 @@ export interface TranscriptSearchPresentationDiagnostics {
   fullRenders: number
   /** `setTranscript()` commits. */
   transcriptSets: number
+  /** Disposable source-cell probe renders for the current plain-text target.
+   * A static frame and every non-current card must contribute zero. */
+  plainTextProofs: number
 }
 
 /** Test-only counters for transcript presentation invalidation. These counters
@@ -777,6 +785,19 @@ function preview(text: string, lines: number): string {
   // shown records as the complete output; the dropped case reserves the last
   // cell for that marker, and a width-clipped result already ends in one.
   return dropped && clipped === first ? `${clipped}…` : clipped
+}
+
+/** The ONE expanded-Host-Thinking text constructor: the dim `Thinking` title
+ * plus the sanitized reasoning body, each logical body line indented two cells.
+ * The live card and the disposable search-cell witness both build through it,
+ * so a probe can never drift from the painted layout. `undefined` keeps the
+ * original no-body shape for an empty reasoning source. */
+function expandedThinkingTextComponent(safeBodyText: string | undefined, iconStyle: IconStyle): Text {
+  const head = color.textDim(`${iconLead('thinking', iconStyle)}Thinking`)
+  const body = safeBodyText === undefined
+    ? ''
+    : safeBodyText.split('\n').map(line => `  ${line}`).join('\n')
+  return new Text([head, color.textDimItalic(body)].filter(line => line !== '').join('\n'), 0, 0)
 }
 
 
@@ -3680,6 +3701,7 @@ export class TuiApp {
     renderedMatchResultCacheHits: 0,
     fullRenders: 0,
     transcriptSets: 0,
+    plainTextProofs: 0,
   }
   /** Test-only structural/content invalidation counters. */
   private readonly transcriptPresentationDiagnostics: TranscriptPresentationDiagnostics = {
@@ -9324,6 +9346,7 @@ export class TuiApp {
     this.searchPresentationDiagnostics.renderedMatchResultCacheHits = 0
     this.searchPresentationDiagnostics.fullRenders = 0
     this.searchPresentationDiagnostics.transcriptSets = 0
+    this.searchPresentationDiagnostics.plainTextProofs = 0
   }
 
   /** Test-only transcript presentation counters. */
@@ -11583,14 +11606,64 @@ export class TuiApp {
         hostThinkingBodyRange,
       )
       const geometry = buildSourceGeometry(matches, rendered, regions, transcriptSearchSourceKey(target.match.source), target.query)
+      // Host plain text (a pure-text User bubble or an EXPANDED Host Thinking
+      // body) can prove this one source occurrence against the cells it really
+      // painted. A collapsed compact bubble, a plugin renderer, mixed content
+      // and a body-less Thinking card stay on the PR-A source anchor.
+      const plainTextProofHost = messageEntry !== undefined
+        && messageEntry.rendererId === undefined
+        && (block.message.kind === 'user'
+          ? block.message.content?.some(part => part.type !== 'text') !== true
+            && messageEntry.component instanceof UserBubbleComponent
+            && messageEntry.component.compactMarkerRow() === undefined
+          : block.message.kind === 'thinking'
+            && messageEntry.expanded === true
+            && hostThinkingBodyRange !== undefined
+            && hostThinkingBodyRange.rowStart < hostThinkingBodyRange.rowEnd
+            && messageEntry.component instanceof Text)
       const selector: RenderedSearchSelector = {
         query: target.query,
         sourceOccurrence: target.match.sourceOccurrence,
         ...(target.match.normalizedSourceRange === undefined ? {} : { normalizedSourceRange: target.match.normalizedSourceRange }),
-        ...(hostThinkingBodyRange === undefined ? {} : { suppressMatchesOnStaleGeometry: true }),
+        ...(hostThinkingBodyRange === undefined && !plainTextProofHost ? {} : { suppressMatchesOnStaleGeometry: true }),
         ...(geometry === undefined ? {} : { geometry }),
       }
-      const selection = selectRenderedSearchMatch(matches, selector)
+      let painted: readonly AltScreenSearchSegment[] | undefined
+      if (plainTextProofHost && messageEntry !== undefined
+        && (block.message.kind === 'user' || block.message.kind === 'thinking')
+        && target.match.source.kind === 'message' && target.match.normalizedSourceRange !== undefined) {
+        const proof = preparePlainTextSourceProbe(
+          block.message.text,
+          target.match.normalizedSourceRange,
+          target.query.trim().toLowerCase(),
+        )
+        if (proof !== undefined) {
+          this.searchPresentationDiagnostics.plainTextProofs += 1
+          if (block.message.kind === 'user' && messageEntry.component instanceof UserBubbleComponent) {
+            painted = provePlainTextPaintedSegments(
+              rendered,
+              messageEntry.component.renderSourceProbe(proof.taggedDisplayText, renderWidth),
+              proof.expectedVisibleMatch,
+            )
+          } else if (block.message.kind === 'thinking') {
+            painted = provePlainTextPaintedSegments(
+              rendered,
+              expandedThinkingTextComponent(proof.taggedDisplayText, this.iconStyle).render(renderWidth),
+              proof.expectedVisibleMatch,
+            )
+          }
+        }
+      }
+      let selection = selectRenderedSearchMatch(matches, selector)
+      if (painted !== undefined) {
+        selection = {
+          ...selection,
+          exact: true,
+          selectedIndex: -1,
+          exactPaintedSegments: painted,
+          selectedRow: painted[0]!.row,
+        }
+      }
       const scrollRange = selectRenderedSearchScrollRange(matches, selection, selector, regions)
       const committedSelection = scrollRange === undefined
         ? selection
@@ -19110,9 +19183,10 @@ export class TuiApp {
       if (!expanded) {
         return new ThinkingCompactComponent(message, this.expandHint(expandHint), this.iconStyle)
       }
-      const head = color.textDim(`${iconLead('thinking', this.iconStyle)}Thinking`)
-      const body = message.text === '' ? '' : sanitizeDisplayText(message.text).split('\n').map(line => `  ${line}`).join('\n')
-      return new Text([head, color.textDimItalic(body)].filter(line => line !== '').join('\n'), 0, 0)
+      return expandedThinkingTextComponent(
+        message.text === '' ? undefined : sanitizeDisplayText(message.text),
+        this.iconStyle,
+      )
     }
     if (message.kind === 'system') {
       // Form-aware surfaced Context: a known notice/relay/recall form owns a

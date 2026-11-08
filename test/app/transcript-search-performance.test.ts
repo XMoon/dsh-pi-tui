@@ -31,10 +31,22 @@ function userMessage(turn: number, text: string): Extract<TranscriptMessage, { k
   return { kind: 'user', turn, text }
 }
 
-function target(message: TranscriptMessage, query = 'needle', sourceOccurrence = 0) {
+function target(
+  message: TranscriptMessage,
+  query = 'needle',
+  sourceOccurrence = 0,
+  normalizedSourceRange?: { readonly start: number; readonly end: number },
+) {
   return {
     query,
-    match: { id: 0, turn: 'turn' in message ? message.turn : 0, occurrence: 0, source: { kind: 'message' as const }, sourceOccurrence },
+    match: {
+      id: 0,
+      turn: 'turn' in message ? message.turn : 0,
+      occurrence: 0,
+      source: { kind: 'message' as const },
+      sourceOccurrence,
+      ...(normalizedSourceRange === undefined ? {} : { normalizedSourceRange }),
+    },
     message,
   }
 }
@@ -153,13 +165,21 @@ test('perf: indexed search reuses the entry across query changes and invalidates
   const presentation = (app as unknown as {
     mountedTranscriptBlocks: ReadonlyArray<{
       block: { kind: string; message?: TranscriptMessage }
-      searchSelection?: { matches: readonly unknown[]; selectedIndex: number }
+      searchSelection?: {
+        matches: readonly unknown[]
+        selectedIndex: number
+        exact: boolean
+        exactPaintedSegments?: ReadonlyArray<{ row: number; startCol: number; endCol: number }>
+      }
     }>
   })
   const currentSelection = () => presentation.mountedTranscriptBlocks.find(entry => entry.block.message === message)?.searchSelection
 
-  app.setTranscriptSearchTarget(target(message))
+  app.setTranscriptSearchTarget(target(message, 'needle', 0, { start: 0, end: 6 }))
   assert.equal(currentSelection()?.matches.length, 1, 'the initial query has one rendered match')
+  assert.equal(currentSelection()?.exact, true, 'the current source cell is proven')
+  const initialStartCol = currentSelection()?.exactPaintedSegments?.[0]?.startCol
+  assert.ok(initialStartCol !== undefined, 'the initial proof publishes painted cells')
   const cache = (app as unknown as {
     messageComponents: Map<TranscriptMessage, { renderedSearchIndex?: { search: (lines: readonly string[], query: string) => { matches: readonly unknown[] } } }>
   }).messageComponents
@@ -174,9 +194,47 @@ test('perf: indexed search reuses the entry across query changes and invalidates
     'line invalidation cannot report a complete result-cache hit')
   assert.strictEqual(cache.get(message)?.renderedSearchIndex, index, 'the same entry keeps the same index object')
 
-  app.setTranscriptSearchTarget(target(message, 'omega'))
-  assert.equal(currentSelection()?.matches.length, 1, 'the new query matches the changed rendered lines')
-  assert.equal(currentSelection()?.selectedIndex, -1, 'message provenance remains anchor-only')
+  // Same stable match identity, moved source text: the proof re-locates the
+  // painted cell instead of reusing the old column.
+  message.text = 'prefix needle after'
+  app.setTranscript([message])
+  app.setTranscriptSearchTarget(target(message, 'needle', 0, { start: 7, end: 13 }))
+  const moved = currentSelection()
+  assert.equal(moved?.matches.length, 1, 'the new query matches the changed rendered lines')
+  assert.equal(moved?.selectedIndex, -1, 'the plain-text channel never uses a rendered ordinal')
+  assert.equal(moved?.exact, true, 'the moved source occurrence is re-proven')
+  assert.equal(moved?.exactPaintedSegments?.[0]?.startCol, initialStartCol! + 7,
+    'a real text prefix shift moves the proven cell by exactly the inserted prefix width')
+  app.stop()
+})
+
+test('perf: the plain-text proof runs once for the current target, never per frame or per history card', async () => {
+  const { vt, app } = startApp()
+  const longText = `${'filler '.repeat(1400)}needle ${'tail '.repeat(1000)}`
+  const current = userMessage(0, longText)
+  const history = Array.from({ length: 8 }, (_, index) => userMessage(index + 1, `needle history ${index} ${'x'.repeat(40)}`))
+  app.setFullscreen(true)
+  app.setTranscript([current, ...history])
+  await vt.waitForRender()
+
+  app.resetSearchPresentationDiagnosticsForTest()
+  app.setTranscriptSearchTarget(target(current, 'needle', 0, { start: 9800, end: 9806 }))
+  const diagnostics = app.searchPresentationDiagnosticsForTest()
+  assert.equal(diagnostics.plainTextProofs, 1,
+    'exactly ONE disposable source-cell proof for the current target — never one per history card')
+  assert.ok(diagnostics.plainTextProofs < history.length + 1)
+
+  await vt.waitForRender()
+  app.resetSearchPresentationDiagnosticsForTest()
+  await vt.waitForRender()
+  await vt.waitForRender()
+  assert.equal(app.searchPresentationDiagnosticsForTest().plainTextProofs, 0,
+    'settled repaints never repeat the probe')
+
+  app.resetSearchPresentationDiagnosticsForTest()
+  app.setTranscriptSearchTarget(target(history[0]!, 'needle', 0, { start: 0, end: 6 }))
+  assert.equal(app.searchPresentationDiagnosticsForTest().plainTextProofs, 1,
+    'switching the current target proves only the new current card once')
   app.stop()
 })
 

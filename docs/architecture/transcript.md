@@ -882,6 +882,22 @@ promotes every currently necessary node atomically; an explicit collapse revokes
 the temporary reveal so the owner cannot instantly reopen. A flat/fail-open
 container mints no reveal node.
 
+### Source-cell proof of a rendered search hit
+
+Transcript search exactness is a per-render proof, never a stored position map:
+the current semantic match's source range must map back to real source
+codepoint/grapheme boundaries and be verified against the cells the CURRENT
+Host component actually painted. Plain Host user text and expanded Host Thinking
+may prove their cells through a disposable zero-width witness rendered by the
+SAME text/bubble constructor as the live card; a failed visible-row/width
+comparison, a collapsed or hidden body, a plugin renderer, or mixed/transformed
+content keeps the source-anchor degradation. The witness string never reaches
+the terminal, a mounted component, a log or a persisted field. Exactness never
+changes the search corpus, N/M identity, reveal ownership or viewport ownership;
+source-local offsets are ephemeral and never stable match identity. Any width,
+source text or layout epoch change re-proves from scratch, and a proven
+selection must not re-enable a reveal the user collapsed.
+
 ## Hardening guarantees
 
 These guarantees hold under bad input, long sessions and rapid live updates:

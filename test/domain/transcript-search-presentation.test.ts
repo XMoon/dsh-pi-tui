@@ -9,7 +9,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { findAltScreenSearchMatches, stripTerminalSequences, visibleWidth, type Component } from '@xmoon76/pi-tui'
+import { Text, findAltScreenSearchMatches, stripTerminalSequences, visibleWidth, type Component } from '@xmoon76/pi-tui'
 import {
   SearchHighlightComponent,
   buildSourceGeometry,
@@ -20,6 +20,12 @@ import {
   type RenderedSearchSelector,
   type SearchSourceRegion,
 } from '../../src/tui/components/transcript/search-presentation.ts'
+import {
+  preparePlainTextSourceProbe,
+  provePlainTextPaintedSegments,
+} from '../../src/tui/components/transcript/plain-text-source-proof.ts'
+import { rawSourceRangeForNormalizedMatch } from '../../src/domain/transcript/search.ts'
+import { sanitizeDisplayText } from '../../src/tui/presentation/terminal-text.ts'
 import { darkColors } from '../../src/domain/display/theme.ts'
 import { color, setTheme } from '../../src/tui/theme/runtime.ts'
 
@@ -614,4 +620,166 @@ test('presentation: a palette that predates the search tokens still paints an ex
   } finally {
     setTheme('dark')
   }
+})
+
+// ── plain-text source-to-cell proof (PR-B) ─────────────────────────────────
+
+/** The disposable witness URL is the ONLY source-cell evidence; it must never
+ * reach a painted line. */
+const PROBE_URL = 'https://dsh-pi-tui-search-proof.invalid/current'
+
+/** Prepare a source, render the original and the tagged probe through the SAME
+ * Text layout, and hand both to the proof. */
+function plainTextProof(
+  sourceText: string,
+  needle: string,
+  occurrence = 0,
+  width = 40,
+): { lines: string[]; probe: string[]; expected: string; segments: ReturnType<typeof provePlainTextPaintedSegments> } | undefined {
+  const normalized = sourceText.toLowerCase()
+  let start = 0
+  let found = 0
+  let range: { start: number; end: number } | undefined
+  while (true) {
+    const index = normalized.indexOf(needle, start)
+    if (index < 0) break
+    if (found === occurrence) {
+      range = { start: index, end: index + needle.length }
+      break
+    }
+    found += 1
+    start = index + Math.max(1, needle.length)
+  }
+  if (range === undefined) return undefined
+  const prepared = preparePlainTextSourceProbe(sourceText, range, needle)
+  if (prepared === undefined) return undefined
+  const lines = new Text(sanitizeDisplayText(sourceText), 0, 0).render(width)
+  const probe = new Text(prepared.taggedDisplayText, 0, 0).render(width)
+  return {
+    lines,
+    probe,
+    expected: prepared.expectedVisibleMatch,
+    segments: provePlainTextPaintedSegments(lines, probe, prepared.expectedVisibleMatch),
+  }
+}
+
+test('proof: normalized offsets resolve only to real codepoint boundaries', () => {
+  // `İ` lowercases to TWO code units; the first `i` sits inside the
+  // expansion and has no raw codepoint boundary.
+  assert.equal(rawSourceRangeForNormalizedMatch('İ i', { start: 0, end: 1 }), undefined)
+  assert.deepEqual(rawSourceRangeForNormalizedMatch('İ i', { start: 3, end: 4 }), { start: 2, end: 3 })
+  // A whole astral codepoint (surrogate pair) is a real boundary; its interior
+  // UTF-16 index is never considered.
+  assert.deepEqual(rawSourceRangeForNormalizedMatch('👩 needle', { start: 0, end: 2 }), { start: 0, end: 2 })
+  assert.equal(rawSourceRangeForNormalizedMatch('abc', { start: 1.5, end: 2 }), undefined)
+  assert.equal(rawSourceRangeForNormalizedMatch('abc', { start: 1, end: 1 }), undefined)
+  assert.equal(rawSourceRangeForNormalizedMatch('abc', { start: 0, end: 4 }), undefined)
+  assert.equal(rawSourceRangeForNormalizedMatch('abc', { start: -1, end: 2 }), undefined)
+})
+
+test('proof: preparation rejects expansion interiors, grapheme splits, whitespace-only and split escapes', () => {
+  assert.equal(preparePlainTextSourceProbe('İ i', { start: 0, end: 1 }, 'i'), undefined,
+    'a lowercase expansion interior is not a source span')
+  assert.ok(preparePlainTextSourceProbe('İ i', { start: 3, end: 4 }, 'i') !== undefined,
+    'the second, real codepoint is proveable')
+  assert.equal(preparePlainTextSourceProbe('👩‍👩‍👦 needle', { start: 0, end: 2 }, '👩'), undefined,
+    'a ZWJ family interior is not a grapheme boundary')
+  assert.equal(preparePlainTextSourceProbe('e\u0301 needle', { start: 0, end: 1 }, 'e'), undefined,
+    'a combining-mark interior is not a grapheme boundary')
+  assert.ok(preparePlainTextSourceProbe('👩 needle', { start: 0, end: 2 }, '👩') !== undefined)
+  assert.ok(preparePlainTextSourceProbe('检索 needle', { start: 0, end: 2 }, '检索') !== undefined)
+  assert.equal(preparePlainTextSourceProbe('a b', { start: 1, end: 2 }, ' '), undefined,
+    'a whitespace-only match has no painted cell to prove')
+  assert.equal(preparePlainTextSourceProbe('a\x1b[31mb', { start: 3, end: 4 }, '3'), undefined,
+    'a range crossing half an escape sequence cannot project consistently')
+  assert.equal(preparePlainTextSourceProbe('needle', { start: 0, end: 6 }, 'other'), undefined,
+    'a stale normalized offset never proves the CURRENT query')
+})
+
+test('proof: ANSI/CRLF/TAB sources recover their real painted cells', () => {
+  for (const item of [
+    { source: 'line one\r\nneedle line two', needle: 'needle' },
+    { source: 'col\tneedle\tend', needle: 'needle' },
+    { source: 'before \x1b[31mneedle\x1b[39m after', needle: 'needle' },
+    { source: 'prefix needle middle needle tail', needle: 'needle', occurrence: 1 },
+    { source: '检索 目标词 检索', needle: '检索', occurrence: 1 },
+  ]) {
+    const proved = plainTextProof(item.source, item.needle, item.occurrence ?? 0, 40)
+    assert.ok(proved !== undefined, `precondition: ${JSON.stringify(item)} prepares a witness`)
+    assert.ok(proved.segments !== undefined && proved.segments.length > 0, JSON.stringify(item))
+    assert.deepEqual(proved.probe.map(stripTerminalSequences), proved.lines.map(stripTerminalSequences),
+      'the witness never changes the visible source text')
+    assert.deepEqual(proved.probe.map(visibleWidth), proved.lines.map(visibleWidth),
+      'the witness never changes the painted width')
+    assert.ok(proved.probe.every(line => !stripTerminalSequences(line).includes(PROBE_URL)),
+      'the witness URL is zero-width and never visible')
+  }
+})
+
+test('proof: a match broken by the real soft wrap yields one segment per painted row', () => {
+  const proved = plainTextProof('needleword suffix', 'needleword', 0, 6)
+  assert.ok(proved !== undefined)
+  assert.ok(proved.segments !== undefined, `the split word still proves its cells:\n${proved.probe.join('\n')}`)
+  assert.equal(new Set(proved.segments!.map(segment => segment.row)).size, 2, 'two painted rows own the match')
+  assert.deepEqual(proved.probe.map(stripTerminalSequences), proved.lines.map(stripTerminalSequences))
+  assert.deepEqual(proved.probe.map(visibleWidth), proved.lines.map(visibleWidth))
+})
+
+test('proof: any probe/render divergence fails closed', () => {
+  const proved = plainTextProof('alpha needle beta', 'needle', 0, 40)
+  assert.ok(proved !== undefined)
+  assert.ok(proved.segments !== undefined, 'precondition: the baseline witness proves')
+  assert.equal(provePlainTextPaintedSegments(proved.lines, [...proved.probe, ''], proved.expected), undefined,
+    'an extra probe row is not the same render')
+  assert.equal(provePlainTextPaintedSegments([...proved.lines, 'extra'], proved.probe, proved.expected), undefined,
+    'an extra live row is not the same render')
+  assert.equal(provePlainTextPaintedSegments(
+    proved.lines,
+    proved.probe.map((line, index) => index === 0 ? line.replace('needle', 'other!') : line),
+    proved.expected,
+  ), undefined, 'different visible text is not a proof')
+  assert.equal(provePlainTextPaintedSegments(proved.lines, proved.probe.map(line => `${line} `), proved.expected), undefined,
+    'a different visible width is not the same frame')
+  assert.equal(provePlainTextPaintedSegments(proved.lines, proved.probe, 'wrong'), undefined,
+    'the recovered graphemes must equal the projected match')
+  assert.equal(provePlainTextPaintedSegments(proved.lines, proved.probe, ''), undefined,
+    'an empty expectation is never a proof')
+})
+
+test('proof: exactPaintedSegments paints only the proven cell and never anchor-washes', () => {
+  const lines = ['alpha needle beta needle']
+  const matches = findAltScreenSearchMatches(lines, 'needle')
+  const selection = highlightSearchLines(lines, {
+    matches,
+    selectedIndex: -1,
+    selectedRow: 0,
+    exact: true,
+    exactPaintedSegments: [{ row: 0, startCol: 18, endCol: 24 }],
+  })
+  assert.equal(stripTerminalSequences(selection[0]!), lines[0], 'the painted text is unchanged')
+  assert.equal(visibleWidth(selection[0]!), visibleWidth(lines[0]!), 'the painted width is unchanged')
+  assert.ok(selection[0]!.includes(strong('needle')), 'the proven second occurrence is current')
+  assert.equal(selection[0]!.split(strong('needle')).length - 1, 1, 'exactly ONE occurrence is current')
+  assert.ok(selection[0]!.includes('\x1b[4mneedle\x1b[24m'), 'the unproven first occurrence stays weak')
+  assert.ok(!selection[0]!.includes(color.searchAnchorBg('alpha')), 'an exact selection is never row-washed')
+
+  const overlapping = highlightSearchLines(lines, {
+    matches,
+    selectedIndex: -1,
+    selectedRow: 0,
+    exact: true,
+    exactPaintedSegments: [{ row: 0, startCol: 6, endCol: 12 }],
+  })
+  assert.ok(overlapping[0]!.includes(strong('needle')), 'the proven cell wins over its weak candidate')
+  assert.equal(overlapping[0]!.split('\x1b[4mneedle').length - 1, 1,
+    'the merged proven cell is not also painted weak (only the other occurrence is)')
+
+  const range = selectRenderedSearchScrollRange(matches, {
+    matches,
+    selectedIndex: -1,
+    selectedRow: 0,
+    exact: true,
+    exactPaintedSegments: [{ row: 0, startCol: 18, endCol: 24 }],
+  }, { query: 'needle', sourceOccurrence: 1 }, [])
+  assert.deepEqual(range, { startRow: 0, endRow: 0 }, 'the exact scroll range follows the painted cells')
 })
