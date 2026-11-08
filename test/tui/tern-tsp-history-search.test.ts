@@ -1021,13 +1021,12 @@ test('a hostile cwd and session id in the source row never reach painted text, t
   assert.deepEqual(h.copies, ['a row with hostile metadata'], 'the row CONTENT still copies byte-exact: sanitizing metadata never touched the payload')
 })
 
-test('a control byte typed into the query is projected to display text, never carried into the field or the source query', async (t) => {
+test('bracketed paste input collapses line breaks and stays control-free in the query', async (t) => {
   const h = await mountHistoryPane(t)
   h.key(CTRL_R)
   await h.painted(() => h.requests.length === 1, 'the first round')
-  // The SDK decodes 0x01..0x1a to a ctrl+letter Key, so the only printable text
-  // a query can receive is real text; a C1 byte arriving as key.text must still
-  // be projected, and a bracketed paste must collapse to one line.
+  // A plain typed prefix plus bracketed paste reaches the query; the paste must
+  // collapse to one line before the field and source query consume it.
   h.pane.key('a\u001b[200~line-one\nline-two\u001b[201~')
   await h.painted(() => (h.queryField()?.text ?? '').includes('line-one'), 'the pasted text reached the query field')
   const field = h.queryField()

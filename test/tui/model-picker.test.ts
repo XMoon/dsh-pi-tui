@@ -67,10 +67,6 @@ const cellIndexOf = (vt: VirtualTerminal, row: number, needle: string): number =
 const rowLine = (vt: VirtualTerminal, label: string): string | undefined =>
   contentLinesOf(vt).find(line => line.includes(label))
 
-async function settle(): Promise<void> {
-  await new Promise(resolve => setTimeout(resolve, 30))
-}
-
 interface EffortShape {
   readonly id: string
   readonly name: string
@@ -296,13 +292,13 @@ test('loading: Enter and effort keys are inert (no write) and Esc closes', async
   h.vt.sendInput(ENTER)
   h.vt.sendInput(RIGHT)
   h.vt.sendInput(LEFT)
-  await settle()
+  // VirtualTerminal dispatches synchronously; the loading guard returns before runOwned.
   assert.deepEqual(h.applied, [], 'no write may be dispatched before hydration')
   h.vt.sendInput('\x1b')
   await h.vt.waitForRender()
   assert.equal(h.closeCount(), 1, 'Esc closes the loading panel')
   h.vt.sendInput(ENTER)
-  await settle()
+  // A closed picker is disposed; the synchronous input guard owns this no-write fact.
   assert.deepEqual(h.applied, [], 'a closed loading panel must stay inert')
   h.app.stop()
 })
@@ -322,7 +318,7 @@ test('a failed directory read becomes an in-panel error state, not a second over
   assert.equal(h.vt.getCellFgRgb(failureRow, cellIndexOf(h.vt, failureRow, 'connection refused')), hexToRgb(currentPalette.textMuted),
     `the failure detail keeps the placeholder ink:\n${viewOf(h.vt)}`)
   h.vt.sendInput(ENTER)
-  await settle()
+  // setLoadError clears modelRows; activateModel returns synchronously before runOwned.
   assert.deepEqual(h.applied, [], 'Enter on the error state must be inert')
   h.vt.sendInput('\x1b')
   await h.vt.waitForRender()
@@ -465,7 +461,7 @@ test('provider failure rows are searchable, inert and show their message on sele
   await h.vt.waitForRender()
   assert.ok(viewOf(h.vt).includes('connection refused'), `failure detail:\n${viewOf(h.vt)}`)
   h.vt.sendInput(ENTER)
-  await settle()
+  // Failure rows are absent from modelRows, so activateModel has no apply producer.
   assert.deepEqual(h.applied, [], 'a failure row must never submit')
   h.app.stop()
 })
@@ -539,7 +535,6 @@ test('a model without a concrete default shows provider default', async () => {
   assert.deepEqual(h.applied, [], 'focusing must not write')
   assert.ok(rowLine(h.vt, 'No Default')?.includes('effort [ Default ]'), viewOf(h.vt))
   h.vt.sendInput(ENTER) // commit
-  await settle()
   assert.deepEqual(h.applied, [{ provider: 'p1', model: 'nodefault' }], 'provider default must omit reasoningEffort')
   h.app.stop()
 })
@@ -631,7 +626,6 @@ test('the second Enter commits the model with its currently displayed effort', a
   await h.vt.waitForRender()
   assert.deepEqual(h.applied, [], 'focusing/cycling must not write')
   h.vt.sendInput(ENTER) // commit
-  await settle()
   assert.deepEqual(h.applied, [{ provider: 'p1', model: 'sol', reasoningEffort: 'high' }])
   h.app.stop()
 })
@@ -639,7 +633,6 @@ test('the second Enter commits the model with its currently displayed effort', a
 test('Enter on a no-effort model commits immediately in ONE step', async () => {
   const h = await openPicker({ directory: EFFORT_DIRECTORY, current: { provider: 'p1', model: 'plain' } })
   h.vt.sendInput(ENTER)
-  await settle()
   assert.deepEqual(h.applied, [{ provider: 'p1', model: 'plain' }])
   h.app.stop()
 })
@@ -651,7 +644,6 @@ for (const outcome of ['rejected', 'cancelled', 'unsupported'] as const) {
   test(`a ${outcome} write keeps the picker usable`, async () => {
     const h = await openPicker({ directory: EFFORT_DIRECTORY, current: { provider: 'p1', model: 'plain' }, outcome })
     h.vt.sendInput(ENTER)
-    await settle()
     await h.vt.waitForRender()
     assert.deepEqual(h.applied, [{ provider: 'p1', model: 'plain' }])
     assert.equal(h.closeCount(), 0, `a ${outcome} write must not dismiss the overlay`)
@@ -675,7 +667,6 @@ for (const outcome of ['rejected', 'cancelled', 'unsupported'] as const) {
     await h.vt.waitForRender()
     assert.ok(viewOf(h.vt).includes('Selecting'), `Selecting must be painted first:\n${viewOf(h.vt)}`)
     resolveOutcome(outcome)
-    await settle()
     await h.vt.waitForRender()
     assert.ok(!viewOf(h.vt).includes('Selecting'), `the failure must not leave Selecting… painted:\n${viewOf(h.vt)}`)
     assert.ok(viewOf(h.vt).includes('Models'), `the list must be restored:\n${viewOf(h.vt)}`)
@@ -687,7 +678,6 @@ for (const outcome of ['rejected', 'cancelled', 'unsupported'] as const) {
 test('an indeterminate write dismisses the overlay', async () => {
   const h = await openPicker({ directory: EIGHT_MODELS, current: { provider: 'p1', model: 'm0' }, outcome: 'indeterminate' })
   h.vt.sendInput(ENTER)
-  await settle()
   await h.vt.waitForRender()
   assert.equal(h.closeCount(), 1)
   h.app.stop()
@@ -696,7 +686,8 @@ test('an indeterminate write dismisses the overlay', async () => {
 test('a superseded write makes no close/open decision and repaints nothing', async () => {
   const h = await openPicker({ directory: EFFORT_DIRECTORY, current: { provider: 'p1', model: 'plain' }, outcome: 'superseded' })
   h.vt.sendInput(ENTER)
-  await settle()
+  // The outcome settles through runOwned's promise reactions; one real frame
+  // covers those microtasks and the renderer's bounded paint window.
   await h.vt.waitForRender()
   assert.equal(h.closeCount(), 0)
   assert.ok(viewOf(h.vt).includes('Selecting'), `a superseded op must not repaint:\n${viewOf(h.vt)}`)
@@ -708,12 +699,10 @@ test('a second Enter while selecting does not dispatch a duplicate write', async
   const deferredOutcome = new Promise<ModelApplyOutcome>((resolve) => { resolveOutcome = resolve })
   const h = await openPicker({ directory: EIGHT_MODELS, current: { provider: 'p1', model: 'm0' }, apply: () => deferredOutcome })
   h.vt.sendInput(ENTER)
-  await settle()
   h.vt.sendInput(ENTER)
-  await settle()
   assert.equal(h.applied.length, 1)
   resolveOutcome('committed')
-  await settle()
+  await h.vt.waitForRender()
   h.app.stop()
 })
 
@@ -722,10 +711,11 @@ test('externally disposing the picker fences a late settlement from acting', asy
   const deferredOutcome = new Promise<ModelApplyOutcome>((resolve) => { resolveOutcome = resolve })
   const h = await openPicker({ directory: EIGHT_MODELS, current: { provider: 'p1', model: 'm0' }, apply: () => deferredOutcome })
   h.vt.sendInput(ENTER)
-  await settle()
   h.picker.dispose()
   resolveOutcome('committed')
-  await settle()
+  // Disposal has no repaint signal; one renderer window lets the owned result
+  // settle before the no-close assertion without inventing an operation timer.
+  await h.vt.waitForRender()
   assert.equal(h.closeCount(), 0, 'teardown is not a user choice')
   h.app.stop()
 })
@@ -744,7 +734,6 @@ test('a late hydration on a disposed picker is a no-op', async () => {
 test('the picker reflows to a short terminal without losing the selected model', async () => {
   const h = await openPicker({ directory: EIGHT_MODELS, current: { provider: 'p1', model: 'm7' } })
   h.vt.resize(80, 8)
-  await settle()
   await h.vt.waitForRender()
   const lines = linesOf(h.vt)
   assert.ok(lines.length <= 8, `frame must fit the terminal, got ${lines.length}`)
@@ -776,7 +765,6 @@ test('a mouse click submits the model with its inline effort (mouse parity)', as
   assert.ok(row >= 0)
   h.picker.handleMouse(mouse('press', 5, row, 72, 24))
   h.picker.handleMouse(mouse('click', 5, row, 72, 24))
-  await settle()
   assert.deepEqual(h.applied, [{ provider: 'p1', model: 'plain' }])
   h.app.stop()
 })
@@ -787,11 +775,9 @@ test('an approval over the picker restores the picker and its physical focus', a
   await h.vt.waitForRender()
   void h.app.showApprovalPrompt({ toolName: 'bash', reason: 'run a command' })
   await h.vt.waitForRender()
-  await settle()
   assert.ok(viewOf(h.vt).includes('Approve bash?'), viewOf(h.vt))
   h.vt.sendInput('y')
   await h.vt.waitForRender()
-  await settle()
   assert.ok(viewOf(h.vt).includes('Models'), `the picker must be restored:\n${viewOf(h.vt)}`)
   assert.notEqual(h.app.focusedComponentForTest(), h.app.seatEditorForTest().component,
     'the restored picker must hold PHYSICAL focus')
@@ -805,13 +791,11 @@ test('a Save Location prompt suspends the picker and restores it on settle', asy
     { resolveDirectory: input => input, isDirectory: () => true, targetExists: () => false, complete: async () => [] },
   )
   await h.vt.waitForRender()
-  await settle()
   assert.ok(viewOf(h.vt).includes('Save session archive'), viewOf(h.vt))
   assert.ok(!viewOf(h.vt).includes('Models'), `the picker must be suspended:\n${viewOf(h.vt)}`)
   h.vt.sendInput('\x1b')
-  await h.vt.waitForRender()
-  await settle()
   assert.deepEqual(await pending, { kind: 'cancelled' })
+  await h.vt.waitForRender()
   assert.ok(viewOf(h.vt).includes('Models'), `the picker must be restored:\n${viewOf(h.vt)}`)
   h.app.stop()
 })
@@ -828,7 +812,6 @@ test('a fullscreen swap remounts the SAME picker with its query and inline effor
   assert.ok(!viewOf(h.vt).includes('Plain'), `the query must filter before the swap:\n${viewOf(h.vt)}`)
   h.app.setFullscreen(false)
   await h.vt.waitForRender()
-  await settle()
   const view = viewOf(h.vt)
   assert.ok(view.includes('Models'), `the picker must survive the swap:\n${view}`)
   assert.ok(rowLine(h.vt, 'Sol')?.includes('effort ‹High›'), `the inline effort must survive:\n${view}`)
@@ -844,7 +827,6 @@ test('a query typed while loading survives a fullscreen migration and hydration'
   await h.vt.waitForRender()
   h.app.setFullscreen(false)
   await h.vt.waitForRender()
-  await settle()
   h.hydrate(EFFORT_DIRECTORY, { provider: 'p1', model: 'sol' })
   await h.vt.waitForRender()
   const view = viewOf(h.vt)
@@ -858,7 +840,6 @@ test('a fullscreen swap while LOADING hydrates the migrated picker in place', as
   assert.ok(viewOf(h.vt).includes('Loading models…'), viewOf(h.vt))
   h.app.setFullscreen(false)
   await h.vt.waitForRender()
-  await settle()
   h.hydrate(EFFORT_DIRECTORY, { provider: 'p1', model: 'sol' })
   await h.vt.waitForRender()
   assert.ok(viewOf(h.vt).includes('Sol'), `the migrated picker must hydrate:\n${viewOf(h.vt)}`)
@@ -900,14 +881,12 @@ test('an approval over a LOADING picker hydrates and restores it', async () => {
   const h = await openPicker({ loading: true })
   void h.app.showApprovalPrompt({ toolName: 'bash', reason: 'run a command' })
   await h.vt.waitForRender()
-  await settle()
   assert.ok(viewOf(h.vt).includes('Approve bash?'), viewOf(h.vt))
   assert.ok(!viewOf(h.vt).includes('Models'), `the loading picker must be suspended:\n${viewOf(h.vt)}`)
   // The directory settles WHILE the approval covers the picker.
   h.hydrate(EFFORT_DIRECTORY, { provider: 'p1', model: 'sol' })
   h.vt.sendInput('y') // settle the approval
   await h.vt.waitForRender()
-  await settle()
   assert.ok(viewOf(h.vt).includes('Sol'), `the restored picker must show the loaded models:\n${viewOf(h.vt)}`)
   assert.ok(!viewOf(h.vt).includes('Loading models…'), viewOf(h.vt))
   h.app.stop()
@@ -918,7 +897,7 @@ test('loading: Enter and effort keys are inert (there is no effort to focus)', a
   h.vt.sendInput(ENTER)
   h.vt.sendInput(RIGHT)
   h.vt.sendInput(LEFT)
-  await settle()
+  // With no hydrated row, synchronous key dispatch never reaches runOwned.
   assert.deepEqual(h.applied, [], 'a loading picker must not write')
   assert.ok(viewOf(h.vt).includes('Loading models…'), viewOf(h.vt))
   h.app.stop()
@@ -971,7 +950,6 @@ test('a delayed thrown write repaints the list after Selecting…', async () => 
   await h.vt.waitForRender()
   assert.ok(viewOf(h.vt).includes('Selecting'), `Selecting must be painted first:\n${viewOf(h.vt)}`)
   rejectOutcome(new Error('transport exploded'))
-  await settle()
   await h.vt.waitForRender()
   assert.ok(!viewOf(h.vt).includes('Selecting'), `the error must clear Selecting…:\n${viewOf(h.vt)}`)
   assert.ok(viewOf(h.vt).includes('Models'), `the list must be restored:\n${viewOf(h.vt)}`)
@@ -983,7 +961,6 @@ test('a delayed thrown write repaints the list after Selecting…', async () => 
 test('an 80x6 terminal still shows the selected model primary row and its arrow', async () => {
   const h = await openPicker({ directory: EIGHT_MODELS, current: { provider: 'p1', model: 'm0' } })
   h.vt.resize(80, 6)
-  await settle()
   await h.vt.waitForRender()
   assert.ok(linesOf(h.vt).length <= 6, `frame must fit the terminal:\n${viewOf(h.vt)}`)
   assert.ok(contentLinesOf(h.vt).some(line => line.startsWith('> ') && line.includes('Model 0')),
@@ -1000,14 +977,12 @@ test('a mouse click before the post-resize repaint is rejected by the geometry f
   // changed since the last paint, so the stale hit map must reject it.
   h.vt.sendInput(`\x1b[<0;5;${row + 1}M`)
   h.vt.sendInput(`\x1b[<0;5;${row + 1}m`)
-  await settle()
   assert.deepEqual(h.applied, [], `a stale-geometry click must be rejected:\n${viewOf(h.vt)}`)
   await h.vt.waitForRender()
   const repaintedRow = linesOf(h.vt).findIndex(line => line.includes('Model 3'))
   assert.ok(repaintedRow >= 0)
   h.vt.sendInput(`\x1b[<0;5;${repaintedRow + 1}M`)
   h.vt.sendInput(`\x1b[<0;5;${repaintedRow + 1}m`)
-  await settle()
   assert.deepEqual(h.applied, [{ provider: 'p1', model: 'm3' }],
     `a fresh post-resize click must apply:\n${viewOf(h.vt)}`)
   h.app.stop()
@@ -1022,14 +997,12 @@ test('a resize that does not change the clamped overlay geometry still fences st
   h.vt.resize(90, 24)
   h.vt.sendInput(`\x1b[<0;20;${row + 1}M`)
   h.vt.sendInput(`\x1b[<0;20;${row + 1}m`)
-  await settle()
   assert.deepEqual(h.applied, [], `a capped-geometry stale click must be rejected:\n${viewOf(h.vt)}`)
   await h.vt.waitForRender()
   const repaintedRow = linesOf(h.vt).findIndex(line => line.includes('Model 3'))
   assert.ok(repaintedRow >= 0)
   h.vt.sendInput(`\x1b[<0;20;${repaintedRow + 1}M`)
   h.vt.sendInput(`\x1b[<0;20;${repaintedRow + 1}m`)
-  await settle()
   assert.deepEqual(h.applied, [{ provider: 'p1', model: 'm3' }],
     `a fresh click after the capped resize must apply:\n${viewOf(h.vt)}`)
   h.app.stop()
@@ -1124,13 +1097,11 @@ test('closing the picker while suspended does not resurrect it when the prompt s
     { resolveDirectory: input => input, isDirectory: () => true, targetExists: () => false, complete: async () => [] },
   )
   await h.vt.waitForRender()
-  await settle()
   assert.ok(!viewOf(h.vt).includes('Models'), `the picker must be suspended:\n${viewOf(h.vt)}`)
   h.close() // programmatic close of the suspended overlay
   h.vt.sendInput('\x1b') // cancel the save-location prompt
-  await h.vt.waitForRender()
-  await settle()
   assert.deepEqual(await pending, { kind: 'cancelled' })
+  await h.vt.waitForRender()
   assert.ok(!viewOf(h.vt).includes('Models'), `a closed picker must not be resurrected:\n${viewOf(h.vt)}`)
   assert.equal(h.closeCount(), 0, 'the programmatic app-level close is not the picker user-close path')
   h.app.stop()
@@ -1142,17 +1113,14 @@ test('an approval over the picker survives fullscreen migration in the same stac
   await h.vt.waitForRender()
   void h.app.showApprovalPrompt({ toolName: 'bash', reason: 'run a command' })
   await h.vt.waitForRender()
-  await settle()
   assert.ok(viewOf(h.vt).includes('Approve bash?'), `approval must be visible:\n${viewOf(h.vt)}`)
   assert.ok(!viewOf(h.vt).includes('Models'), `the picker must be suspended beneath:\n${viewOf(h.vt)}`)
   h.app.setFullscreen(false)
   await h.vt.waitForRender()
-  await settle()
   assert.ok(viewOf(h.vt).includes('Approve bash?'), `the approval must survive the swap:\n${viewOf(h.vt)}`)
   assert.ok(!viewOf(h.vt).includes('Models'), `the picker must stay suspended after the swap:\n${viewOf(h.vt)}`)
   h.vt.sendInput('y') // settle the approval
   await h.vt.waitForRender()
-  await settle()
   assert.ok(viewOf(h.vt).includes('Models'), `the migrated picker must be restored:\n${viewOf(h.vt)}`)
   assert.ok(!viewOf(h.vt).includes('Approve bash?'), 'the approval must be gone')
   h.app.stop()
@@ -1165,7 +1133,6 @@ test('the migratable picker is disposed exactly once on close', async () => {
   h.picker.dispose = () => { disposals += 1; original() }
   h.app.setFullscreen(false)
   await h.vt.waitForRender()
-  await settle()
   assert.equal(disposals, 0, 'a screen swap must not dispose the retained picker')
   h.vt.sendInput('\x1b')
   await h.vt.waitForRender()
@@ -1205,7 +1172,6 @@ test('a no-effort model has no effort focus and commits in one Enter', async () 
   assert.ok(!rowLine(h.vt, 'Plain')?.includes('effort ‹'),
     `←/→ must not invent an effort token on a no-effort model:\n${viewOf(h.vt)}`)
   h.vt.sendInput(ENTER)
-  await settle()
   assert.deepEqual(h.applied, [{ provider: 'p1', model: 'plain' }], 'one Enter commits, omitting reasoningEffort')
   h.app.stop()
 })
@@ -1364,7 +1330,6 @@ test('the effort row shows the human name while the payload carries the protocol
   assert.ok(rowLine(h.vt, 'Zed')?.includes('effort [ Extra High ]'), `active token:\n${viewOf(h.vt)}`)
   assert.deepEqual(h.applied, [], 'focusing must not write')
   h.vt.sendInput(ENTER) // commit
-  await settle()
   assert.deepEqual(h.applied, [{ provider: 'p1', model: 'm', reasoningEffort: 'xhigh' }])
   h.app.stop()
 })
@@ -1401,7 +1366,7 @@ test('Enter is inert on a zero-result list', async () => {
   h.vt.sendInput(ENTER)
   h.vt.sendInput(RIGHT)
   h.vt.sendInput(LEFT)
-  await settle()
+  // No selected item exists; the synchronous Enter handler cannot start runOwned.
   assert.deepEqual(h.applied, [])
   assert.ok(viewOf(h.vt).includes('No matching models'), viewOf(h.vt))
   h.app.stop()
@@ -1419,7 +1384,7 @@ test('Enter is inert on a failure row', async () => {
   h.vt.sendInput(ENTER)
   h.vt.sendInput(RIGHT)
   h.vt.sendInput(LEFT)
-  await settle()
+  // The highlighted failure row has no modelRows entry, so no async apply starts.
   assert.deepEqual(h.applied, [])
   assert.ok(viewOf(h.vt).includes('Custom Gateway'), viewOf(h.vt))
   h.app.stop()
@@ -1436,11 +1401,9 @@ test('a wrapped badge row is mouse-inert while the model row focuses the effort'
   h.picker.render(26)
   h.picker.handleMouse(mouse('press', 3, modelRow, 26, 24))
   h.picker.handleMouse(mouse('click', 3, modelRow, 26, 24))
-  await settle()
   assert.deepEqual(h.applied, [], 'a reasoning-model click focuses the effort, it does not commit')
   assert.ok(renderAt(h, 60).some(line => line.includes('effort [ High ]')), 'the click must focus the effort')
   h.vt.sendInput(ENTER)
-  await settle()
   assert.deepEqual(h.applied, [{ provider: 'p1', model: 'sol', reasoningEffort: 'high' }])
   h.app.stop()
 })
@@ -1473,14 +1436,12 @@ test('a wide-to-narrow wrap transition fences the stale single-line hit map', as
   // (the row above now wraps onto two physical lines).
   h.vt.sendInput(`\x1b[<0;20;${wideRow + 1}M`)
   h.vt.sendInput(`\x1b[<0;20;${wideRow + 1}m`)
-  await settle()
   assert.deepEqual(h.applied, [], `a stale wrap-transition click must be rejected:\n${viewOf(h.vt)}`)
   await h.vt.waitForRender()
   const narrowRow = linesOf(h.vt).findIndex(line => line.includes('Second'))
   assert.ok(narrowRow >= 0, viewOf(h.vt))
   h.vt.sendInput(`\x1b[<0;20;${narrowRow + 1}M`)
   h.vt.sendInput(`\x1b[<0;20;${narrowRow + 1}m`)
-  await settle()
   assert.deepEqual(h.applied, [{ provider: 'p1', model: 'm2' }], `a fresh click must apply:\n${viewOf(h.vt)}`)
   h.app.stop()
 })
@@ -1682,7 +1643,6 @@ test('a narrow-to-wide unwrap transition fences the stale two-line hit map', asy
   // Narrow first: the long-named model wraps onto two lines.
   h.vt.resize(50, 24)
   await h.vt.waitForRender()
-  await settle()
   assert.ok(linesOf(h.vt).some(line => line.includes('Second')), viewOf(h.vt))
   const narrowRow = linesOf(h.vt).findIndex(line => line.includes('Second'))
   // Back to wide: the row above loses its wrapped line, so the stale two-line
@@ -1691,7 +1651,6 @@ test('a narrow-to-wide unwrap transition fences the stale two-line hit map', asy
   h.vt.resize(80, 24)
   h.vt.sendInput(`\x1b[<0;5;${narrowRow + 1}M`)
   h.vt.sendInput(`\x1b[<0;5;${narrowRow + 1}m`)
-  await settle()
   assert.deepEqual(h.applied, [], `a stale unwrap-transition click must be rejected:\n${viewOf(h.vt)}`)
   await h.vt.waitForRender()
   // The widened row renders on one line again...
@@ -1705,7 +1664,6 @@ test('a narrow-to-wide unwrap transition fences the stale two-line hit map', asy
   h.picker.render(72)
   h.picker.handleMouse(mouse('press', 3, second, 72, 24))
   h.picker.handleMouse(mouse('click', 3, second, 72, 24))
-  await settle()
   assert.deepEqual(h.applied, [{ provider: 'p1', model: 'm2' }], `a fresh wide click must apply:\n${viewOf(h.vt)}`)
   h.app.stop()
 })
@@ -1828,7 +1786,6 @@ for (const outcome of ['rejected', 'cancelled', 'unsupported'] as const) {
     await h.vt.waitForRender()
     assert.ok(rowLine(h.vt, 'Sol')?.includes('effort [ High ]'), viewOf(h.vt))
     h.vt.sendInput(ENTER) // commit -> refused
-    await settle()
     await h.vt.waitForRender()
     const view = viewOf(h.vt)
     assert.deepEqual(h.applied, [{ provider: 'p1', model: 'sol', reasoningEffort: 'high' }])
@@ -1859,7 +1816,6 @@ test('a delayed effort-mode refusal repaints back to Model mode after Selecting�
   await h.vt.waitForRender()
   assert.ok(viewOf(h.vt).includes('Selecting'), `Selecting must be painted first:\n${viewOf(h.vt)}`)
   resolveOutcome('rejected')
-  await settle()
   await h.vt.waitForRender()
   const view = viewOf(h.vt)
   assert.ok(!view.includes('Selecting'), `the refusal must clear Selecting…:\n${view}`)
@@ -1874,7 +1830,6 @@ test('an active effort-mode indeterminate commit dismisses the overlay', async (
   h.vt.sendInput(RIGHT)
   await h.vt.waitForRender()
   h.vt.sendInput(ENTER)
-  await settle()
   await h.vt.waitForRender()
   assert.deepEqual(h.applied, [{ provider: 'p1', model: 'sol', reasoningEffort: 'high' }])
   assert.equal(h.closeCount(), 1)
@@ -1887,7 +1842,8 @@ test('an active effort-mode superseded commit makes no close decision and does n
   h.vt.sendInput(RIGHT)
   await h.vt.waitForRender()
   h.vt.sendInput(ENTER)
-  await settle()
+  // The resolved apply has no completion UI signal; this frame window lets its
+  // runOwned result handler finish before checking that it neither closes nor repaints.
   await h.vt.waitForRender()
   assert.equal(h.closeCount(), 0)
   assert.ok(viewOf(h.vt).includes('Selecting'), `a superseded op must not repaint:\n${viewOf(h.vt)}`)
@@ -1909,7 +1865,6 @@ test('an active effort-mode thrown write returns to Model mode', async () => {
   await h.vt.waitForRender()
   assert.ok(viewOf(h.vt).includes('Selecting'), viewOf(h.vt))
   rejectOutcome(new Error('transport exploded'))
-  await settle()
   await h.vt.waitForRender()
   const view = viewOf(h.vt)
   assert.ok(!view.includes('Selecting'), `the error must clear Selecting…:\n${view}`)
@@ -2018,7 +1973,6 @@ test('a refresh that drops the reasoning metadata exits Effort mode to the no-ef
   assert.ok(!view.includes('Esc back'), `the effort-mode hint must be dropped:\n${view}`)
   assert.ok(view.includes('Enter effort/select'), `the model-mode hint must return:\n${view}`)
   h.vt.sendInput(ENTER) // the no-effort fast path commits directly
-  await settle()
   assert.deepEqual(h.applied, [{ provider: 'p1', model: 'sol' }])
   h.app.stop()
 })
@@ -2083,7 +2037,6 @@ test('a refresh that moves the configured selection keeps the Effort-bound row s
   await h.vt.waitForRender()
   assert.ok(rowLine(h.vt, 'Sol')?.includes('effort [ Low ]'), `← must still act on the bound row:\n${viewOf(h.vt)}`)
   h.vt.sendInput(ENTER)
-  await settle()
   assert.deepEqual(h.applied, [{ provider: 'p1', model: 'sol', reasoningEffort: 'low' }])
   h.app.stop()
 })
@@ -2175,7 +2128,6 @@ test('a hostile single-row model label keeps its painted click map', async () =>
   assert.ok(row >= 0, `the collapsed hostile row is painted:\n${rendered.join('\n')}`)
   h.picker.handleMouse(mouse('press', 5, row, 72, 24))
   h.picker.handleMouse(mouse('click', 5, row, 72, 24))
-  await settle()
   assert.deepEqual(h.applied, [{ provider: 'p1', model: 'm1' }],
     `the click map must address the collapsed row itself:\n${rendered.join('\n')}`)
   h.app.stop()
@@ -2230,27 +2182,29 @@ test('the real rc.2 DeepSeek catalog exposes deepseek-flash to the mounted /mode
 
   const agent = await app.submitFirstPrompt('Start the model route check')
   await agent.whenIdle()
+  const modelSelections = () => (agent.session.snapshotEvents() as readonly { readonly type?: string }[])
+    .filter(event => event.type === 'model/selection').length
+  const initialSelectionCount = modelSelections()
   // `/model` through the production command path, then search the exact id.
   for (const character of '/model') app.vt.sendInput(character)
-  await settle()
+  await app.waitFor(() => app.view().includes('/model'), 'the /model command input')
   app.vt.sendInput('\r')
-  await settle()
-  if ((app.vt.getViewport().join('\n')).includes('❯ /model')) {
+  await app.waitFor(() => app.view().includes('Models') || app.view().includes('❯ /model'), 'the /model command result')
+  if (app.view().includes('❯ /model')) {
     app.vt.sendInput('\r')
-    await settle()
+    await app.waitFor(() => app.view().includes('Models'), 'the mounted model picker')
   }
   for (const character of 'deepseek-flash') app.vt.sendInput(character)
-  await new Promise<void>(resolve => setTimeout(resolve, 200))
-  const list = app.vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/gu, '')).join('\n')
-  assert.match(list, /DeepSeek-V4.1-Flash/u, `the real flash row is listed:\n${list}`)
+  await app.waitFor(() => app.view().includes('DeepSeek-V4.1-Flash'), 'the official picker row')
   app.vt.sendInput('\r') // select the highlighted exact identity
-  await new Promise<void>(resolve => setTimeout(resolve, 250))
-  // A model with declared reasoning efforts opens the SAME panel's effort
-  // choice; accept its default with the next Enter (the real apply path).
-  if (/\beffort\b/iu.test(app.vt.getViewport().join('\n'))) {
+  await app.waitFor(() => modelSelections() > initialSelectionCount || /effort \[/iu.test(app.view()),
+    'model selection or inline effort focus')
+  if (/effort \[/iu.test(app.view())) {
+    // A model with declared reasoning efforts opens the SAME panel's effort
+    // choice; accept its default with the next Enter (the real apply path).
     app.vt.sendInput('\r')
-    await new Promise<void>(resolve => setTimeout(resolve, 300))
   }
+  await app.waitFor(() => modelSelections() > initialSelectionCount, 'the durable model/selection event')
   const durable = agent.session.snapshotEvents() as readonly { readonly type?: string; readonly data?: unknown }[]
   const selection = durable.filter(event => event.type === 'model/selection').at(-1)?.data as
     | { provider?: string; model?: string }
@@ -2263,10 +2217,13 @@ test('the real rc.2 DeepSeek catalog exposes deepseek-flash to the mounted /mode
 
   // Reopen: the committed selection carries the current marker.
   for (const character of '/model') app.vt.sendInput(character)
-  await settle()
+  await app.waitFor(() => app.view().includes('/model'), 'the reopened /model command input')
   app.vt.sendInput('\r')
-  await settle()
-  await new Promise<void>(resolve => setTimeout(resolve, 250))
+  await app.waitFor(() => app.view().includes('Models') || app.view().includes('❯ /model'), 'the reopened model command')
+  if (app.view().includes('❯ /model')) app.vt.sendInput('\r')
+  await app.waitFor(() => app.view().split('\n').some(line =>
+    line.includes('DeepSeek-V4.1-Flash') && line.includes('current')),
+  'the reopened current model row')
   const reopened = app.vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/gu, ''))
   const flashRow = reopened.findIndex(line => line.includes('DeepSeek-V4.1-Flash'))
   assert.ok(flashRow >= 0, `the reopened picker lists the model:\n${reopened.join('\n')}`)
@@ -2278,10 +2235,14 @@ test('without a readable official catalog deepseek-flash is absent, never fabric
   const llm = app.host.ctx.llm as unknown as { listModels(provider: string): Promise<readonly { id: string }[]> }
   assert.deepEqual(await llm.listModels('deepseek-official'), [], 'no credential and no discovery result')
   for (const character of '/model') app.vt.sendInput(character)
-  await settle()
+  await app.waitFor(() => app.view().includes('/model'), 'the /model command input')
   app.vt.sendInput('\r')
-  await settle()
-  await new Promise<void>(resolve => setTimeout(resolve, 200))
+  await app.waitFor(() => app.view().includes('Models') || app.view().includes('❯ /model'), 'the /model command result')
+  if (app.view().includes('❯ /model')) {
+    app.vt.sendInput('\r')
+    await app.waitFor(() => app.view().includes('Models'), 'the mounted model picker')
+  }
+  await app.waitFor(() => app.view().includes('No models available'), 'the settled empty model catalog')
   const frame = app.vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/gu, ''))
   const top = frame.findIndex(line => line.includes('Models'))
   assert.ok(top >= 0, `the /model picker opened:\n${frame.join('\n')}`)
@@ -2318,22 +2279,26 @@ test('a legal non-empty deployment catalog without deepseek-flash is authoritati
   const agent = await app.submitFirstPrompt('Start the override catalog check')
   await agent.whenIdle()
   for (const character of '/model') app.vt.sendInput(character)
-  await settle()
+  await app.waitFor(() => app.view().includes('/model'), 'the /model command input')
   app.vt.sendInput('\r')
-  await settle()
+  await app.waitFor(() => app.view().includes('Models') || app.view().includes('❯ /model'), 'the /model command result')
   if (app.view().includes('❯ /model')) {
     app.vt.sendInput('\r')
-    await settle()
+    await app.waitFor(() => app.view().includes('Models'), 'the mounted model picker')
   }
   for (const character of 'flash') app.vt.sendInput(character)
-  await new Promise<void>(resolve => setTimeout(resolve, 200))
+  await app.waitFor(() => /Models\s+0\/1/u.test(app.view()) && app.view().includes('No matching models'),
+    'the override picker no-match frame')
   const frame = app.vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/gu, ''))
   assert.ok(frame.some(line => /Models\s+0\/1/u.test(line)), `the override catalog is the picker's only source:\n${frame.join('\n')}`)
   assert.ok(frame.some(line => /No matching models/u.test(line)), 'searching flash has no hit in the override')
   assert.ok(!frame.some(line => line.includes('DeepSeek-V4.1-Flash')), 'the omitted Flash display name is never painted')
+  const selectionCountBeforeInertEnter = (agent.session.snapshotEvents() as readonly { readonly type?: string }[])
+    .filter(event => event.type === 'model/selection').length
   app.vt.sendInput('\r') // inert: there is no Flash row to submit
-  await new Promise<void>(resolve => setTimeout(resolve, 150))
   const durable = agent.session.snapshotEvents() as readonly { readonly type?: string; readonly data?: unknown }[]
+  assert.equal(durable.filter(event => event.type === 'model/selection').length, selectionCountBeforeInertEnter,
+    'the zero-result key handler has no selection producer')
   const selection = durable.filter(event => event.type === 'model/selection').at(-1)?.data as
     | { provider?: string; model?: string }
     | undefined
