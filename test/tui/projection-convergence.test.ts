@@ -11,6 +11,8 @@
  */
 
 import assert from 'node:assert/strict'
+import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
+import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { afterEach, test } from 'node:test'
 import { projectCompact } from '../../src/tui/transcript/compact-projection.ts'
@@ -24,7 +26,7 @@ import {
   type TranscriptStructureBlock,
   type TranscriptWorkSpan,
 } from '../../src/tui/transcript/structure.ts'
-import type { TranscriptMessage, TurnActivity } from '../../src/transcript.ts'
+import { TranscriptFolder, type TranscriptMessage, type TurnActivity } from '../../src/transcript.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 
@@ -296,7 +298,7 @@ test('expanded Focus materializes the canonical tail structure as nested Work (b
   const tailRows = flattenStructure(tailStructure)
   const prefix = messages.slice(0, messages.length - tailRows.length)
   const expected = [...prefix, ...tailRows]
-  const blocks = projectFocus(messages, new Map(), new Set([TURN]), true)
+  const blocks = projectFocus(messages, new Map([[TURN, perfActivity]]), new Set([TURN]), true)
   const emitted = blocks.flatMap(block => block.kind === 'work'
     ? [...block.span.members]
     : block.kind === 'message' ? [block.message] : [])
@@ -312,7 +314,7 @@ test('expanded Focus materializes the canonical tail structure as nested Work (b
 
 test('expanded Focus emits nested Work containers and leaves persistent rows outside them', () => {
   const { messages, rows } = convergenceFixture()
-  const blocks = projectFocus(messages, new Map(), new Set([TURN]), true)
+  const blocks = projectFocus(messages, new Map([[TURN, perfActivity]]), new Set([TURN]), true)
   // F6 materializes every canonical Process run as a nested Work container
   // owned by the expanded Thought; its members no longer appear as flat rows.
   const workBlocks = blocks.filter(block => block.kind === 'work')
@@ -333,6 +335,45 @@ test('expanded Focus emits nested Work containers and leaves persistent rows out
   for (const persistent of [rows.user, rows.ambient1, rows.ambient2, rows.notice, rows.question, rows.relay, rows.plan]) {
     assert.equal(containerOf(persistent), undefined, 'a persistent row is never owned by the Thought container')
   }
+})
+
+test('expanded Focus marks physical root placement without changing semantic ancestry or chronology', () => {
+  const fixture = convergenceFixture()
+  const { rows } = fixture
+  const messages = fixture.messages.slice(0, -1)
+  const blocks = projectFocus(messages, new Map([[TURN, perfActivity]]), new Set([TURN]), true)
+  const rootOwner = rows.user
+  const placed = blocks.filter(block => block.kind === 'work'
+    || (block.kind === 'message' && block.message !== rows.user))
+
+  assert.ok(placed.length > 0)
+  for (const block of placed) {
+    if (block.kind === 'activity') continue
+    assert.equal(block.focusPresentationOwner, rootOwner, 'each expanded child names its exact Thought occurrence')
+  }
+  const initial = blocks.find(block => block.kind === 'message' && block.message === rows.user)
+  assert.equal(initial?.kind === 'message' ? initial.focusPresentationOwner : undefined,
+    undefined, 'the initial prompt stays outside the Thought')
+  const persistent = blocks.find(block => block.kind === 'message' && block.message === rows.ambient1)
+  assert.equal(persistent?.kind === 'message' ? persistent.containerPath : undefined,
+    undefined, 'physical placement does not rewrite persistent semantic ancestry')
+  const intermediate = blocks.find(block => block.kind === 'message' && block.message === rows.intermediate)
+  assert.deepEqual(intermediate?.kind === 'message' ? intermediate.containerPath : undefined,
+    [{ kind: 'focus-root', turn: TURN }], 'ordinary Process ancestry remains unchanged')
+  assert.deepEqual(blocks.flatMap(block => block.kind === 'work'
+    ? [...block.span.members]
+    : block.kind === 'message' ? [block.message] : []), messages,
+  'placement metadata preserves the expanded output order and membership')
+})
+
+test('Focus fails open in raw order when a partial window has no TurnActivity', () => {
+  const { messages } = convergenceFixture()
+  const blocks = projectFocus(messages, new Map(), new Set(), true)
+
+  assert.deepEqual(blocks.map(block => block.kind), messages.map(() => 'message'),
+    'no Thought or Work is fabricated without the authoritative activity')
+  assert.deepEqual(blocks.map(block => block.kind === 'message' ? block.message : undefined), messages,
+    'every raw row remains visible exactly once in chronology')
 })
 
 // --- Preparing convergence (plan §29) --------------------------------------
@@ -374,8 +415,12 @@ function startApp(preset: 'focus' | 'compact' | 'full'): { vt: VirtualTerminal; 
   return { vt, app }
 }
 
-function show(app: TuiApp, messages: readonly TranscriptMessage[]): void {
-  app.setTranscript(messages, new Map())
+function show(
+  app: TuiApp,
+  messages: readonly TranscriptMessage[],
+  activities: ReadonlyMap<number, TurnActivity> = new Map(),
+): void {
+  app.setTranscript(messages, activities)
 }
 
 // A Work header is `Activity`, or `Thought` for a historical think-only span
@@ -443,7 +488,15 @@ test('a Full search never mints a Work disclosure owner (Work is flat)', async (
 test('an expanded-Focus search reveals the nested Work without minting a manual owner', async () => {
   const { vt, app } = startApp('focus')
   const { messages, process } = surfaceFixture()
-  show(app, messages)
+  show(app, messages, new Map([[TURN, {
+    turn: TURN,
+    startedAt: 1_700_000_000_000,
+    completed: false,
+    assistantMessages: 0,
+    toolCalls: 0,
+    tools: new Map(),
+    revision: 1,
+  }]]))
   app.setFullscreen(true)
   app.expandFocusTurn(TURN)
   await vt.waitForRender()
@@ -626,4 +679,84 @@ test('large snapshot and mixed Context clusters project linearly in structure an
   // Old per-member cluster qualification rescanned the whole run once per
   // member (64x here); the linear implementation is ~8x. Broad bound only.
   assert.ok(large < small * 20 + 100, `8x input took ${large.toFixed(1)}ms vs ${small.toFixed(2)}ms`)
+})
+
+/** Build a real Folder fold with one canonical Process span per completed turn. */
+function manyFocusTurnEvents(turnCount: number): SessionEvent[] {
+  const events: SessionEvent[] = []
+  let seq = 0
+  const push = (type: string, data: unknown): void => {
+    events.push({ type, seq: SessionSeq(seq), time: 1_700_000_000_000 + seq, data } as SessionEvent)
+    seq += 1
+  }
+  for (let turn = 1; turn <= turnCount; turn += 1) {
+    const callId = ToolCallId(`scale-call-${turn}`)
+    push('turn/start', { turn })
+    push('user/message', {
+      id: MessageId(`scale-user-${turn}`), role: 'user',
+      content: [{ type: 'text', text: `prompt ${turn}` }], source: { kind: 'user' },
+    })
+    push('assistant/chunk', {
+      turn, step: 0,
+      chunk: { type: 'reasoning-delta', index: 0, text: `reason ${turn}` },
+    })
+    push('tool/call', { turn, step: 0, callId, name: 'read', arguments: '{}' })
+    push('tool/result', {
+      turn, step: 0,
+      message: {
+        id: MessageId(`scale-result-${turn}`), role: 'tool', toolCallId: callId,
+        content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId },
+      },
+    })
+    push('assistant/message', {
+      turn, step: 1,
+      message: {
+        id: MessageId(`scale-final-${turn}`), role: 'assistant',
+        content: [{ type: 'text', text: `final ${turn}` }],
+        source: { kind: 'model', provider: 'scale', model: 'fixed' },
+      },
+    })
+    push('turn/end', { turn, reason: { kind: 'completed' } })
+  }
+  return events
+}
+
+test('100/200 Focus roots and Work spans retain bounded source reads with one fixed Folder fold', () => {
+  const folder = new TranscriptFolder()
+  folder.apply(manyFocusTurnEvents(200))
+  const source = folder.messages()
+  const activities = folder.turnActivities()
+  const focusReads = (turnCount: number): number => {
+    const window = source.slice(0, turnCount * 3)
+    const turns = new Set(Array.from({ length: turnCount }, (_, index) => index + 1))
+    const activityWindow = new Map([...activities].filter(([turn]) => turns.has(turn)))
+    const readCount = { value: 0 }
+    const numericIndex = /^(0|[1-9][0-9]*)$/u
+    const counted = new Proxy(window, {
+      get(target, property, receiver) {
+        if (typeof property === 'string' && numericIndex.test(property)) readCount.value += 1
+        return Reflect.get(target, property, receiver)
+      },
+    })
+    const blocks = projectFocus(counted, activityWindow, turns, true)
+    const canonical = projectTranscriptStructure(window)
+    const compact = projectCompact(window, {
+      expandedWorkOwners: new Set(), expandedClusters: new Set(), forcedExpanded: new Set(),
+    })
+    const canonicalSpans = workSpansOf(canonical)
+    const compactSpans = compact.flatMap(block => block.kind === 'work' ? [block.span] : [])
+    const focusSpans = blocks.flatMap(block => block.kind === 'work' ? [block.span] : [])
+    assert.equal(blocks.filter(block => block.kind === 'activity').length, turnCount,
+      `${turnCount} source turns produce one Focus occurrence each`)
+    assert.equal(canonicalSpans.length, turnCount, 'the canonical Fold contains one Work span per turn')
+    assertSameSpans(compactSpans, canonicalSpans)
+    assertSameSpans(focusSpans, canonicalSpans)
+    return readCount.value
+  }
+
+  const reads100 = focusReads(100)
+  const reads200 = focusReads(200)
+  assert.ok(reads100 > 0)
+  assert.ok(reads200 <= reads100 * 3,
+    `doubling 100→200 roots must stay below the 3x linearity bound; indexed reads ${reads100}→${reads200}`)
 })

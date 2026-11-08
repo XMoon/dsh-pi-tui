@@ -128,6 +128,7 @@ test('fullscreen row-map refresh never rebuilds or disposes the mounted transcri
       content: [{ type: 'text', text: 'ANCHOR-ONE\nANCHOR-TWO\nANCHOR-THREE\nANCHOR-FOUR' }],
       source: { kind: 'user' },
     }, 2),
+    eventAt('step/start', { turn: 1, step: 1 }, 3),
   ])
   try {
     app.setFocusMode(true)

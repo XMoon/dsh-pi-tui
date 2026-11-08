@@ -121,6 +121,37 @@ function contextEvent(id: string, source: Record<string, unknown>, text: string,
   }, time, seq)
 }
 
+/** A real Folder stream with an earlier Work and a trailing Work in one open Turn. */
+function focusNestedWorkFixture(historicalTool: boolean): TranscriptFolder {
+  const folder = new TranscriptFolder()
+  const events: SessionEvent[] = [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('user/message', {
+      id: MessageId('focus-nested-user'), role: 'user',
+      content: [{ type: 'text', text: 'inspect the work' }], source: { kind: 'user' },
+    }, T0 + 1, 1),
+    eventAt('assistant/chunk', {
+      turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: historicalTool ? 'older focus reasoning' : 'think only focus reasoning' },
+    }, T0 + 2, 2),
+  ]
+  if (historicalTool) {
+    events.push(
+      eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('focus-nested-read'), name: 'read', arguments: '{}' }, T0 + 3, 3),
+      toolResultEvent('focus-nested-read', T0 + 4, 4),
+    )
+  }
+  events.push(
+    eventAt('assistant/message', {
+      turn: 1, step: 1,
+      message: { id: MessageId('focus-nested-boundary'), role: 'assistant', content: [{ type: 'text', text: 'boundary' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, T0 + 5, 5),
+    eventAt('assistant/chunk', { turn: 1, step: 2, chunk: { type: 'reasoning-delta', index: 0, text: 'latest focus reasoning' } }, T0 + 6, 6),
+    eventAt('tool/call', { turn: 1, step: 2, callId: ToolCallId('focus-nested-bash'), name: 'bash', arguments: '{}' }, T0 + 7, 7),
+  )
+  applyMixed(folder, events)
+  return folder
+}
+
 /** Turn 1: user, reasoning, one tool, intermediate assistant, more reasoning,
  * tool, final — the Compact Work chronology fixture. */
 function workFixture(): SessionEvent[] {
@@ -657,20 +688,11 @@ test('search reveal of a hidden historical Thought member restores and dismisses
 
 test('the historical compaction never leaks into expanded Focus nested Work', async () => {
   // Plan §3/§6.5: the historical preview policy (and the `Thought` identity
-  // derived from it) is COMPACT-ONLY. Expanded Focus materializes the same
-  // canonical spans through the same CompactWorkComponent path, so a preset
-  // gate must keep its collapsed historical Work on the original
-  // header + Think/Action contract.
+  // derived from it) is COMPACT-ONLY. Expanded Focus materializes canonical
+  // spans under a real TurnActivity owner without changing the nested Work UX.
   const { vt, app } = startApp('focus')
-  const oldWorkOwner: TranscriptMessage = { kind: 'thinking', turn: 1, text: 'older focus reasoning' }
-  const oldTool: TranscriptMessage = { kind: 'tool', turn: 1, name: 'read', args: '{}', result: 'ok', status: 'ok' }
-  app.setTranscript([
-    oldWorkOwner,
-    oldTool,
-    { kind: 'assistant', turn: 1, text: 'boundary' },
-    { kind: 'thinking', turn: 1, text: 'latest focus reasoning' },
-    { kind: 'tool', turn: 1, name: 'bash', args: '{}', result: 'ok', status: 'ok' },
-  ], new Map())
+  const folder = focusNestedWorkFixture(true)
+  app.setTranscript(folder.messages(), folder.turnActivities())
   app.setFullscreen(true)
   // Opening the Thought root materializes the turn's spans as nested Work
   // containers (collapsed headers + previews).
@@ -687,13 +709,8 @@ test('the historical compaction never leaks into expanded Focus nested Work', as
 
 test('a historical think-only nested Work stays Activity on expanded Focus', async () => {
   const { vt, app } = startApp('focus')
-  const thinkOnlyOwner: TranscriptMessage = { kind: 'thinking', turn: 1, text: 'think only focus reasoning' }
-  app.setTranscript([
-    thinkOnlyOwner,
-    { kind: 'assistant', turn: 1, text: 'boundary' },
-    { kind: 'thinking', turn: 1, text: 'latest focus reasoning' },
-    { kind: 'tool', turn: 1, name: 'read', args: '{}', result: 'ok', status: 'ok' },
-  ], new Map())
+  const folder = focusNestedWorkFixture(false)
+  app.setTranscript(folder.messages(), folder.turnActivities())
   app.setFullscreen(true)
   app.expandFocusTurn(1)
   await vt.waitForRender()

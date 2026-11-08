@@ -77,6 +77,7 @@ export {
   assistantLatestStepOf,
   assistantPresentationRevision,
   assistantStepOf,
+  assistantStepSettledOf,
   childOwnEvents,
   foldTranscript,
   subCallDisplayStatus,

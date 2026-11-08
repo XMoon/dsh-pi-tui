@@ -24,6 +24,9 @@
 
 import {
   assistantCommittedBeforeSteer,
+  assistantLatestStepOf,
+  assistantStepOf,
+  assistantStepSettledOf,
 } from '../../domain/transcript/folder.ts'
 import { eligibleFinalAssistant } from '../../domain/transcript/final-assistant.ts'
 import type { TranscriptMessage, TurnActivity } from '../../domain/transcript/types.ts'
@@ -86,6 +89,12 @@ export type FocusProjectedBlock =
      * back final carry NO path — they are not owned by the Thought.
      */
     containerPath?: TranscriptContainerPath
+    /**
+     * The exact Focus occurrence whose native section physically contains this
+     * row in expanded Focus. This is placement metadata only: it never changes
+     * `containerPath`, which remains the semantic ancestry produced here.
+     */
+    focusPresentationOwner?: TranscriptMessage
   }
   | {
     kind: 'activity'
@@ -130,6 +139,8 @@ export type FocusProjectedBlock =
     /** The outer-to-inner ancestor of the Work container (set when TuiApp
      * materializes the nested header). */
     containerPath?: TranscriptContainerPath
+    /** The exact Focus occurrence that physically owns this nested Work node. */
+    focusPresentationOwner?: TranscriptMessage
   }
 
 /**
@@ -241,6 +252,12 @@ export function projectFocus(
     const group = consecutiveTurnGroup(messages, index, turn)
     index += group.length
     const activity = activities.get(turn)
+    // A partial/legacy window without the authoritative activity cannot own a
+    // Thought. Keep every original row in chronology instead of hiding Process.
+    if (activity === undefined) {
+      for (const member of group) out.push({ kind: 'message', message: member })
+      continue
+    }
     const actionStats = actionStatsByTurn.get(turn) ?? EMPTY_ACTION_STATS
     const expanded = expandedTurns.has(turn)
     // The final assistant is decided ONCE from the exact last assistant
@@ -249,7 +266,33 @@ export function projectFocus(
     const final = eligibleFinalAssistant(activity, group)
     const isCommittedAnswer = (member: TranscriptMessage): boolean =>
       activity !== undefined && assistantCommittedBeforeSteer(activity, member)
+    // Before `turn/end`, a settled Assistant that still owns the structural
+    // latest step is not yet known to be the official final. Keep it out of
+    // expanded chronology instead of treating the missing final qualification
+    // as permission to render it as a normal process row. A later Tool or other
+    // process row confirms the Assistant as intermediate; open display blocks
+    // and pre-steer committed answers keep their existing semantics.
+    let latestAssistantIndex = -1
+    for (let memberIndex = group.length - 1; memberIndex >= 0; memberIndex -= 1) {
+      if (group[memberIndex]?.kind === 'assistant') {
+        latestAssistantIndex = memberIndex
+        break
+      }
+    }
+    const latestAssistant = latestAssistantIndex < 0 ? undefined : group[latestAssistantIndex]
+    const laterProcess = latestAssistantIndex < 0 ? false : group.slice(latestAssistantIndex + 1)
+      .some(member => member.kind !== 'user' && !isSurfacedContext(member))
+    const pendingFinalAssistant = !activity.completed
+      && latestAssistant?.kind === 'assistant'
+      && assistantStepOf(latestAssistant) === assistantLatestStepOf(activity)
+      && assistantStepSettledOf(activity, latestAssistant)
+      && latestAssistant.displayBlocks === undefined
+      && !isCommittedAnswer(latestAssistant)
+      && !laterProcess
+      ? latestAssistant
+      : undefined
     if (expanded) {
+      const rootOwner = group[0]!
       // The open Thought reveals the FULL process in ORIGINAL order —
       // compaction cards included at their chronological position — with
       // the final assistant held back and appended LAST (a max-tokens
@@ -278,15 +321,21 @@ export function projectFocus(
       if (activity !== undefined) out.push(...focusActivityBlock(activity, group[0]!, actionStats, undefined))
       const emitTailRow = (member: TranscriptMessage): void => {
         if (isFocusPersistentInputRow(member)) {
-          out.push({ kind: 'message', message: member })
+          out.push({ kind: 'message', message: member, focusPresentationOwner: rootOwner })
           return
         }
         if (final !== undefined && member === final.message) return
+        if (member === pendingFinalAssistant) return
         if (isCommittedAnswer(member)) {
-          out.push({ kind: 'message', message: member })
+          out.push({ kind: 'message', message: member, focusPresentationOwner: rootOwner })
           return
         }
-        out.push({ kind: 'message', message: member, containerPath: [{ kind: 'focus-root', turn }] })
+        out.push({
+          kind: 'message',
+          message: member,
+          containerPath: [{ kind: 'focus-root', turn }],
+          focusPresentationOwner: rootOwner,
+        })
       }
       // The tail consumes the SAME canonical segmentation as Compact/Full
       // (`structure.ts`), computed over the UNFILTERED tail so the
@@ -297,7 +346,7 @@ export function projectFocus(
       // Focus-projected position.
       for (const block of focusExpandedTailStructure(group, boundary)) {
         if (block.kind === 'work') {
-          out.push({ kind: 'work', span: block.span, focusOwnerTurn: turn })
+          out.push({ kind: 'work', span: block.span, focusOwnerTurn: turn, focusPresentationOwner: rootOwner })
         } else if (block.kind === 'context-cluster') {
           for (const member of block.cluster.members) emitTailRow(member)
         } else {

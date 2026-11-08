@@ -156,6 +156,15 @@ export function assistantStepOf(message: TranscriptMessage): number | undefined 
   return message.kind === 'assistant' ? assistantStepIdentities.get(message) : undefined
 }
 
+/** Whether this exact Assistant row's step has an authoritative durable/live
+ * settlement in the Folder. This is a read-only view of the existing per-turn
+ * settled-step fence; it neither infers settlement from row shape nor changes
+ * Fold state. */
+export function assistantStepSettledOf(activity: TurnActivity, message: TranscriptMessage): boolean {
+  const step = assistantStepOf(message)
+  return step !== undefined && (activity as MutableTurnActivity).settledSteps.has(step)
+}
+
 /** Read the private latest-step fence without exposing it on the public
  * TurnActivity shape. Focus uses this only to select the structural owner. */
 export function assistantLatestStepOf(activity: TurnActivity): number | undefined {

@@ -93,6 +93,7 @@ test('expanded live Markdown preserves wheel intent across historical growth and
       content: [{ type: 'text', text: 'STATIC-ONE\nSTATIC-TWO\nJITTER-ANCHOR\nSTATIC-FOUR' }],
       source: { kind: 'user' },
     }, 2),
+    eventAt('step/start', { turn: 1, step: 1 }, 3),
   ])
   try {
     app.setFocusMode(true)

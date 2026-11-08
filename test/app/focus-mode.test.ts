@@ -11,7 +11,7 @@ import test from 'node:test'
 import { visibleWidth } from '@xmoon76/pi-tui'
 import { ToolCallId, MessageId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { TranscriptFolder, groupConsecutiveReads, isPostTurnReplayEvidence, type TranscriptMessage, type TurnActivity } from '../../src/transcript.ts'
+import { TranscriptFolder, assistantStepSettledOf, groupConsecutiveReads, isPostTurnReplayEvidence, type TranscriptMessage, type TurnActivity } from '../../src/transcript.ts'
 import { projectCompact } from '../../src/tui/transcript/compact-projection.ts'
 import { isTranscriptWorkMember, projectTranscriptStructure } from '../../src/tui/transcript/structure.ts'
 import type { AssistantLiveChunk, AssistantLiveInput } from '../../src/runtime/assistant-stream-port.ts'
@@ -2379,6 +2379,67 @@ test('no final assistant before turn/end (running collapsed)', () => {
   assert.deepEqual(blockKinds(blocks), ['user', 'activity'])
 })
 
+test('an incomplete expanded turn holds its last settled Assistant until turn/end', () => {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, completedTurn(0, 0, 1000).slice(0, -1))
+  const blocks = projectFocusFlat(folder.messages(), folder.turnActivities(), new Set([0]), true)
+  assert.deepEqual(blockKinds(blocks), ['user', 'activity', 'thinking', 'tool'])
+  assert.ok(!blocks.some(block => block.kind === 'message' && block.message.kind === 'assistant'))
+})
+
+test('an incomplete expanded turn keeps a Tool-confirmed intermediate Assistant but holds its trailing answer', () => {
+  const folder = new TranscriptFolder()
+  const events = [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('user/message', {
+      id: MessageId('pending-intermediate-user'), role: 'user',
+      content: [{ type: 'text', text: 'inspect then answer' }], source: { kind: 'user' },
+    }, 1001, 1),
+    eventAt('assistant/message', {
+      turn: 0, step: 0,
+      message: { id: MessageId('pending-intermediate'), role: 'assistant', content: [{ type: 'text', text: 'I will inspect first' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1002, 2),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('pending-intermediate-tool'), name: 'read', arguments: '{}' }, 1003, 3),
+    eventAt('tool/result', {
+      turn: 0, step: 0,
+      message: { id: MessageId('pending-intermediate-result'), role: 'tool', toolCallId: ToolCallId('pending-intermediate-tool'), content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('pending-intermediate-tool') } },
+    }, 1004, 4),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('pending-trailing-final'), role: 'assistant', content: [{ type: 'text', text: 'final answer stays held' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1005, 5),
+  ]
+  applyMixed(folder, events)
+  const activity = folder.turnActivity(0)
+  const trailing = folder.messages().find(message => message.kind === 'assistant' && message.text === 'final answer stays held')
+  assert.ok(activity !== undefined && trailing?.kind === 'assistant')
+  assert.equal(assistantStepSettledOf(activity, trailing), true, 'the Folder recognizes the exact trailing durable settlement')
+  const blocks = projectFocusFlat(folder.messages(), folder.turnActivities(), new Set([0]), true)
+  const assistants = blocks.filter((block): block is Extract<FocusProjectedBlock, { kind: 'message' }> =>
+    block.kind === 'message' && block.message.kind === 'assistant')
+  assert.deepEqual(assistants.map(block => block.message.kind === 'assistant' ? block.message.text : ''), ['I will inspect first'])
+})
+
+test('an expanded Focus keeps the unsettled live Assistant candidate visible', () => {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('user/message', {
+      id: MessageId('live-candidate-user'), role: 'user',
+      content: [{ type: 'text', text: 'answer while streaming' }], source: { kind: 'user' },
+    }, 1001, 1),
+    eventAt('step/start', { turn: 0, step: 0 }, 1002, 2),
+  ])
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 0, text: 'streaming answer' }, 1003))
+  const activity = folder.turnActivity(0)
+  const candidate = folder.messages().find(message => message.kind === 'assistant')
+  assert.ok(activity !== undefined && candidate?.kind === 'assistant')
+  assert.equal(assistantStepSettledOf(activity, candidate), false, 'the Fold owns no durable settlement for this live candidate')
+  const blocks = projectFocusFlat(folder.messages(), folder.turnActivities(), new Set([0]), true)
+  assert.ok(blocks.some(block => block.kind === 'message' && block.message === candidate),
+    'a still-streaming Assistant is process content, not a pending final answer')
+})
+
 test('FocusActivity always precedes the final assistant', () => {
   const folder = new TranscriptFolder()
   applyMixed(folder, completedTurn(0, 0, 1000))
@@ -2667,6 +2728,18 @@ test('collapsed turns never render process rows at all (no Ctrl+O leak)', () => 
   const blocks = projectFocusFlat(messages, folder.turnActivities(), new Set(), true)
   assert.ok(!blocks.some(b => b.kind === 'message' && (b.message.kind === 'tool' || b.message.kind === 'thinking')),
     'a collapsed Focus turn must hide its process regardless of Ctrl+O')
+})
+
+test('a missing TurnActivity keeps the Focus projection in raw chronology', () => {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, completedTurn(0, 0, 1000))
+  const messages = folder.messages()
+  const blocks = projectFocus(messages, new Map(), new Set([0]), true)
+
+  assert.equal(blocks.length, messages.length, 'the partial window does not drop transcript rows')
+  assert.ok(blocks.every(block => block.kind === 'message'), 'no Focus or Work disclosure is invented')
+  assert.deepEqual(blocks.map(block => block.kind === 'message' ? block.message : undefined), messages,
+    'the shared projection keeps the exact raw chronology for PiTui and TSP')
 })
 
 test('compaction cards keep their existing lifecycle under Focus', () => {
@@ -4028,11 +4101,10 @@ test('a Snapshot-only turn hides its rows only when a real Thought owner exists'
   const owned = projectTools(messages, folder.turnActivities(), new Set())
   assert.deepEqual(blockKinds(owned), ['user', 'activity', 'assistant'])
   assert.ok(!owned.some(block => block.kind === 'message' && block.message === snapshot))
-  // A window with no activity owner must FAIL OPEN rather than drop the row.
-  // (The final assistant is also activity-derived, so this truncated window
-  // has no held-back final.)
+  // A window with no activity owner fails open as the complete raw group.
   const failOpen = projectTools(messages, new Map(), new Set())
-  assert.deepEqual(blockKinds(failOpen), ['user', 'system'])
+  assert.deepEqual(failOpen.map(block => block.kind === 'message' ? block.message : undefined), messages,
+    'without an owner every row, including the Assistant, remains in raw order')
   assert.ok(failOpen.some(block => block.kind === 'message' && block.message === snapshot))
 })
 
@@ -4059,8 +4131,8 @@ test('a snapshot-only raw cluster is hidden as one unit inside a real Thought', 
   const owned = projectTools(messages, folder.turnActivities(), new Set())
   assert.deepEqual(blockKinds(owned), ['user', 'activity', 'assistant'], 'the cluster never leaks outside the Thought')
   const failOpen = projectTools(messages, new Map(), new Set())
-  assert.deepEqual(blockKinds(failOpen), ['user', 'system', 'system'],
-    'without an owner every member fails open')
+  assert.deepEqual(failOpen.map(block => block.kind === 'message' ? block.message : undefined), messages,
+    'without an owner every cluster member and following row fails open in raw order')
   const expanded = projectTools(messages, folder.turnActivities(), new Set([0]))
   assert.equal(blockKinds(expanded).filter(kind => kind === 'system').length, 2,
     'both cluster members are restored exactly once when expanded')

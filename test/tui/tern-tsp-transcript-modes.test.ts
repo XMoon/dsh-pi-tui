@@ -28,6 +28,7 @@ import {
   TranscriptNodeKeys,
   transcriptView,
   transcriptViewForPreset,
+  visibleTranscriptMembers,
   type TranscriptPresetViewOptions,
 } from '../../src/tui/tsp/transcript-view.ts'
 
@@ -411,17 +412,248 @@ test('a collapsed Activity never demands a Tool SVG blob, and expanding it uses 
   assert.equal(demanded, 0, 'opening the Work is NOT a Tool SVG disclosure: the tool card stays collapsed until its own toggle')
 })
 
-test('Focus and an absent displayState keep the historical Work-section layout unchanged', () => {
+test('Focus materializes one native Thought root per occurrence and nests collapsed canonical Work', () => {
   const folder = twoWorkFolder()
   const messages = folder.messages()
-  const structure = projectTranscriptStructure(messages)
-  const legacy = View.from({ main: transcriptView(structure, new TranscriptNodeKeys(), { scopePrefix: 's1-' }) })
-  const focus = View.from({ main: transcriptViewForPreset(messages, new TranscriptNodeKeys(), { preset: 'focus', scopePrefix: 's1-' }) })
-  assert.deepEqual(JSON.parse(JSON.stringify(focus.regions[0]?.wire())), JSON.parse(JSON.stringify(legacy.regions[0]?.wire())),
-    'Focus is byte-identical to the historical TSP projector in this PR')
+  const activities = folder.turnActivities()
+  const keys = new TranscriptNodeKeys()
+  const collapsed = flatten(messages, {
+    preset: 'focus',
+    scopePrefix: 's1-',
+    turnActivities: activities,
+    window: LATEST_WINDOW,
+  }, keys)
+  const roots = nodesOf(collapsed, 'section').filter(node => node.parent === 'main')
+  assert.equal(roots.length, 1, 'one consecutive turn occurrence paints one top-level Thought section')
+  assert.equal(roots[0]!.props['collapsible'], true)
+  assert.equal(roots[0]!.props['collapsed'], true, 'Focus roots start collapsed')
+  assert.equal(nodesOf(collapsed, 'section').length, 1, 'there is no parallel top-level Action disclosure')
+  assert.equal(nodesOf(collapsed, 'tool').length, 0, 'collapsed Focus materializes no hidden Work tool')
+  assert.ok(descendantText(collapsed, roots[0]!.id).includes('Think:'), 'the root carries inert Think preview text')
+  assert.ok(descendantText(collapsed, roots[0]!.id).includes('Action:'), 'the root carries inert Action preview text')
+  assert.ok(collapsed.some(node => node.parent === 'main' && descendantText(collapsed, node.id).includes('inspect the repository')),
+    'the initial input remains outside the root')
+  assert.ok(collapsed.some(node => node.parent === 'main' && descendantText(collapsed, node.id).includes('the final answer')),
+    'the official final remains outside the root')
+
+  const expanded = flatten(messages, {
+    preset: 'focus',
+    scopePrefix: 's1-',
+    turnActivities: activities,
+    window: LATEST_WINDOW,
+    expandedFocusTurns: new Set([1]),
+  }, keys)
+  const expandedRoots = nodesOf(expanded, 'section').filter(node => node.parent === 'main')
+  const workSections = nodesOf(expanded, 'section').filter(node => node.parent === expandedRoots[0]!.id)
+  assert.equal(expandedRoots.length, 1, 'opening reuses the same root occurrence')
+  assert.equal(expandedRoots[0]!.id, roots[0]!.id, 'the root node identity is stable')
+  assert.equal(expandedRoots[0]!.props['collapsed'], false)
+  assert.equal(workSections.length, 2, 'the canonical two Work spans are nested under the root')
+  assert.ok(workSections.every(section => section.props['collapsible'] === true && section.props['collapsed'] === true),
+    'each nested Work starts independently collapsed')
+  assert.equal(nodesOf(expanded, 'tool').length, 0, 'opening only the root does not materialize hidden Work members')
+})
+
+test('same-turn Focus occurrences split by a session command share expansion without merging roots', () => {
+  const folder = apply([
+    ev('turn/start', { turn: 1 }, 0),
+    userMessage(1, 'user-1', 'inspect both stages'),
+    reasoningMessage(2, 'think-a', 'first stage', undefined, 0),
+    toolCall(3, 'call-a', 'read', {}, 0),
+    toolResult(4, 'call-a', 'first result', 0),
+    ev('command/run', { commandId: CommandId('focus-boundary'), name: 'status', source: { kind: 'user' } }, 5),
+    ev('command/done', { commandId: CommandId('focus-boundary'), kind: 'success', text: 'session healthy' }, 6),
+    reasoningMessage(7, 'think-b', 'second stage', undefined, 1),
+    toolCall(8, 'call-b', 'bash', { command: 'echo second' }, 1),
+    toolResult(9, 'call-b', 'second result', 1),
+    assistantMessage(10, 'final-split', 'one final answer', 2),
+    ev('turn/end', { turn: 1, reason: { kind: 'completed' } }, 11),
+  ])
+  const messages = folder.messages()
+  const keys = new TranscriptNodeKeys()
+  const collapsed = flatten(messages, {
+    preset: 'focus', scopePrefix: 's1-', turnActivities: folder.turnActivities(), window: LATEST_WINDOW,
+  }, keys)
+  const roots = nodesOf(collapsed, 'section').filter(node => node.parent === 'main')
+  assert.equal(roots.length, 2, 'the turnless command splits two distinct Thought occurrences')
+  assert.notEqual(roots[0]!.id, roots[1]!.id, 'occurrence ids use distinct message owners')
+  assert.ok(collapsed.some(node => node.parent === 'main' && descendantText(collapsed, node.id).includes('session healthy')),
+    'the turnless command remains a standalone row between the roots')
+
+  const expanded = flatten(messages, {
+    preset: 'focus', scopePrefix: 's1-', turnActivities: folder.turnActivities(), window: LATEST_WINDOW,
+    expandedFocusTurns: new Set([1]),
+  }, keys)
+  const expandedRoots = nodesOf(expanded, 'section').filter(node => node.parent === 'main')
+  assert.deepEqual(expandedRoots.map(node => node.id), roots.map(node => node.id), 'both occurrence node identities stay stable')
+  assert.ok(expandedRoots.every(node => node.props['collapsed'] === false),
+    'one Turn disclosure choice opens both occurrence roots')
+  assert.equal(nodesOf(expanded, 'tool').length, 0, 'the inner Work owners remain independently collapsed')
+  const finals = expanded.filter(node => node.parent === 'main' && descendantText(expanded, node.id).includes('one final answer'))
+  assert.equal(finals.length, 1, 'the qualified final remains one top-level Assistant card')
+  assert.ok(!finals[0]!.id.startsWith(`${expandedRoots[0]!.id}.`) && !finals[0]!.id.startsWith(`${expandedRoots[1]!.id}.`),
+    'the final is not absorbed by either occurrence')
+})
+
+test('Focus image demand follows the materialized root and Work members', () => {
+  const folder = twoWorkFolder()
+  const messages = folder.messages()
+  const toolRow = rowOf(folder, (message): message is Extract<TranscriptMessage, { kind: 'tool' }> => message.kind === 'tool')
+  const work = projectTranscriptStructure(messages).find(block => block.kind === 'work')
+  assert.ok(work?.kind === 'work')
+  const base = {
+    preset: 'focus' as const,
+    turnActivities: folder.turnActivities(),
+    window: LATEST_WINDOW,
+  }
+  const collapsed = visibleTranscriptMembers(messages, base)
+  assert.ok(!collapsed.has(toolRow), 'a collapsed Focus root reads no hidden Work image')
+  const rootExpanded = visibleTranscriptMembers(messages, { ...base, expandedFocusTurns: new Set([1]) })
+  assert.ok(!rootExpanded.has(toolRow), 'an open root with closed Work still reads no Work image')
+  const workExpanded = visibleTranscriptMembers(messages, {
+    ...base,
+    expandedFocusTurns: new Set([1]),
+    expandedWorkOwners: new Set([work.span.owner]),
+  })
+  assert.ok(workExpanded.has(toolRow), 'opening the owning Work makes its real member visible')
+})
+
+test('a missing Focus activity fails open and an unbound mount keeps the legacy layout', () => {
+  const folder = twoWorkFolder()
+  const messages = folder.messages()
+  const legacy = View.from({ main: transcriptView(projectTranscriptStructure(messages), new TranscriptNodeKeys(), { scopePrefix: 's1-' }) })
+  const focusWithoutActivity = flatten(messages, {
+    preset: 'focus', scopePrefix: 's1-', window: LATEST_WINDOW,
+  })
+  assert.equal(nodesOf(focusWithoutActivity, 'section').length, 0,
+    'without TurnActivity the Focus projector fails open without a phantom root')
+  assert.ok(focusWithoutActivity.filter(node => node.parent === 'main' && node.id !== 'main').length >= messages.length,
+    'every original row remains visible')
   const legacySection = legacy.regions[0]?.children.find(child => child.kind === 'section')
   assert.ok(legacySection !== undefined)
-  assert.equal(legacySection.props['collapsible'], undefined, 'the legacy Work section advertises no new toggle affordance')
+  assert.equal(legacySection.props['collapsible'], undefined, 'unbound standalone layout keeps its legacy Work shape')
+})
+
+test('an ownerless Focus Preparing stays on its real root without inventing Work', () => {
+  const folder = apply([
+    ev('turn/start', { turn: 1 }, 0),
+    userMessage(1, 'user-pending', 'prepare the next tool'),
+  ])
+  const messages = folder.messages()
+  const preview: StreamingToolPreview = {
+    callId: 'focus-ownerless', turn: 1, step: 0, index: 0, name: 'bash', argumentBytes: 12,
+  }
+  const options = {
+    preset: 'focus' as const,
+    scopePrefix: 's1-',
+    turnActivities: folder.turnActivities(),
+    window: LATEST_WINDOW,
+    preparingPreviews: [preview],
+  }
+  const collapsed = flatten(messages, options)
+  const root = nodesOf(collapsed, 'section')[0]!
+  assert.ok(descendantText(collapsed, root.id).includes('Action: Preparing Bash'),
+    'the collapsed root uses the bounded Preparing summary in its Action slot')
+  assert.equal(nodesOf(collapsed, 'section').length, 1, 'no pseudo Work section is created')
+
+  const expanded = flatten(messages, { ...options, expandedFocusTurns: new Set([1]) })
+  const expandedRoot = nodesOf(expanded, 'section')[0]!
+  assert.equal(expandedRoot.props['collapsed'], false)
+  assert.equal(nodesOf(expanded, 'section').length, 1, 'the open root still has no durable Work child')
+  assert.equal(expanded.filter(node => node.id.includes('preparing-focus-ownerless') && node.parent === expandedRoot.id).length, 1,
+    'the ownerless Preparing row remains a root child when expanded')
+})
+
+test('a new Focus Preparing after an Assistant stays outside the earlier Work', () => {
+  const folder = apply([
+    ev('turn/start', { turn: 1 }, 0),
+    userMessage(1, 'user-pending-after-work', 'inspect then continue'),
+    toolCall(2, 'prior-work', 'read'),
+    toolResult(3, 'prior-work', 'first result'),
+    assistantMessage(4, 'before-pending', 'the first result is ready', 1),
+    ev('step/start', { turn: 1, step: 2 }, 5),
+  ])
+  const messages = folder.messages()
+  const structure = projectTranscriptStructure(messages)
+  const priorWork = structure.find(block => block.kind === 'work')
+  assert.ok(priorWork?.kind === 'work')
+  assert.equal(structure.at(-1)?.kind, 'message', 'the new pending run has no durable Work')
+  const options = {
+    preset: 'focus' as const, scopePrefix: 's1-', turnActivities: folder.turnActivities(),
+    window: LATEST_WINDOW,
+    preparingPreviews: [{
+      callId: 'focus-after-assistant', turn: 1, step: 2, index: 0, name: 'bash', argumentBytes: 12,
+    }],
+  }
+  const collapsed = flatten(messages, options)
+  assert.ok(descendantText(collapsed, nodesOf(collapsed, 'section')[0]!.id).includes('Action: Preparing Bash'))
+  for (const expandedWorkOwners of [new Set<TranscriptMessage>(), new Set([priorWork.span.owner])]) {
+    const expanded = flatten(messages, { ...options, expandedFocusTurns: new Set([1]), expandedWorkOwners })
+    const root = nodesOf(expanded, 'section').find(node => node.parent === 'main')!
+    const works = nodesOf(expanded, 'section').filter(node => node.parent === root.id)
+    assert.equal(works.length, 1, 'the pending run never invents a second Work')
+    assert.ok(!descendantText(expanded, works[0]!.id).includes('Preparing'), 'the earlier Work never adopts the new run')
+    const rows = nodesOf(expanded, 'row').filter(node => node.id.includes('preparing-focus-after-assistant'))
+    assert.equal(rows.length, 1, 'the new run stays visible exactly once with either earlier Work disclosure')
+    assert.equal(rows[0]!.parent, root.id, 'Preparing is an ordinary child of the expanded Root')
+  }
+})
+
+test('Focus Preparing previews attach once to the exact trailing Work owner', () => {
+  const folder = apply([
+    ev('turn/start', { turn: 1 }, 0),
+    userMessage(1, 'user-focus-preparing', 'inspect and run'),
+    reasoningMessage(2, 'think-work-a', 'first work', undefined, 0),
+    toolCall(3, 'call-work-a', 'read', {}, 0),
+    toolResult(4, 'call-work-a', 'first result', 0),
+    assistantMessage(5, 'assistant-between-works', 'intermediate reply', 1),
+    reasoningMessage(6, 'think-work-b', 'second work', undefined, 2),
+    toolCall(7, 'call-work-b', 'bash', { command: 'echo pending' }, 2),
+  ])
+  const messages = folder.messages()
+  const activities = folder.turnActivities()
+  assert.equal(activities.get(1)?.completed, false, 'the Turn is still running')
+  const spans = projectTranscriptStructure(messages).flatMap(block => block.kind === 'work' ? [block.span] : [])
+  assert.equal(spans.length, 2, 'the intermediate Assistant splits two canonical Work spans')
+  const [workA, workB] = spans
+  assert.ok(workA !== undefined && workB !== undefined)
+  const preparing: StreamingToolPreview = {
+    callId: 'focus-tail-preparing', turn: 1, step: 2, index: 0, name: 'bash', argumentBytes: 24,
+  }
+  const keys = new TranscriptNodeKeys()
+  const collapsed = flatten(messages, {
+    preset: 'focus', scopePrefix: 's1-', turnActivities: activities, window: LATEST_WINDOW,
+    preparingPreviews: [preparing],
+  }, keys)
+  const collapsedRoot = nodesOf(collapsed, 'section').find(node => node.parent === 'main')!
+  assert.ok(descendantText(collapsed, collapsedRoot.id).includes('Action: Preparing Bash'),
+    'the collapsed root uses its bounded Turn Action preview')
+  assert.equal(nodesOf(collapsed, 'row').filter(node => textOf(node).includes('Preparing')).length, 0,
+    'the collapsed frame materializes no standalone Preparing row')
+
+  const expanded = flatten(messages, {
+    preset: 'focus', scopePrefix: 's1-', turnActivities: activities, window: LATEST_WINDOW,
+    expandedFocusTurns: new Set([1]), preparingPreviews: [preparing],
+  }, keys)
+  const root = nodesOf(expanded, 'section').find(node => node.parent === 'main')!
+  const works = nodesOf(expanded, 'section').filter(node => node.parent === root.id)
+  assert.equal(works.length, 2, 'both Work occurrences remain separate native sections')
+  assert.ok(!descendantText(expanded, works[0]!.id).includes('Preparing'),
+    'the earlier Work never adopts the later Working preview')
+  assert.ok(descendantText(expanded, works[1]!.id).includes('Action: Preparing Bash'),
+    'only the exact trailing Work head owns its collapsed Preparing summary')
+  assert.equal(nodesOf(expanded, 'row').filter(node => textOf(node).includes('Preparing')).length, 0,
+    'the collapsed trailing Work does not build its hidden Preparing row')
+
+  const expandedTail = flatten(messages, {
+    preset: 'focus', scopePrefix: 's1-', turnActivities: activities, window: LATEST_WINDOW,
+    expandedFocusTurns: new Set([1]), expandedWorkOwners: new Set([workB.owner]), preparingPreviews: [preparing],
+  }, keys)
+  const tailSection = nodesOf(expandedTail, 'section').find(node => node.id === works[1]!.id)!
+  assert.ok(!descendantText(expandedTail, works[0]!.id).includes('Preparing'),
+    'opening the tail Work never copies Preparing into the earlier Work')
+  assert.equal(expandedTail.filter(node => node.id.includes('preparing-focus-tail-preparing') && node.parent === tailSection.id).length, 1,
+  `opening the exact trailing Work materializes one Preparing row inside that Work: ${JSON.stringify(expandedTail.filter(node => node.id.includes('preparing-focus-tail-preparing')))}`)
 })
 
 test('a replaced source scope cannot reuse the previous Work section identity', () => {
