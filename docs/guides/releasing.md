@@ -274,14 +274,17 @@ the startup handshake. There is no second pack route and no
 content-equivalence proof: the candidate's identity is its SHA-256,
 re-proved at every consumer. `scripts/ci-verdict.mjs` is the final gate:
 every required job must be exactly `success`, the mode-dependent jobs must
-show the status their mode requires, and the split-process job must be
-exactly `success` on an npm release tag and exactly `skipped` on PR/branch
-refs (Source Mode always requires `skipped`). The Linux split-process smoke
-runs automatically ONLY on an npm release tag; ordinary PR and branch CI
-reports it as `skipped`. Host/Client split-process development work must run
-`pnpm smoke:split-process -- <candidate>` manually under its task plan against
-the actual candidate tarball and report the package SHA, DSH version, command,
-and PASS/FAIL (or `NOT_RUN`).
+show the status their mode requires, and the split-process job must be exactly
+`success` on npm release-tag pushes, exactly `success` on an explicitly opted-in
+npm `main` workflow dispatch, and exactly `skipped` on ordinary PR/branch runs
+and Source Mode. The Linux split-process smoke is required for tag publication.
+To exercise that exact lane against the current `main` candidate before tagging,
+use GitHub Actions **Run workflow** on the `main` branch and enable `Run
+Host/Client Split qualification on main`. This manual input is restricted to
+npm-mode `main`; the verdict then requires the Split job to succeed. Leaving it
+disabled preserves the normal status (`skipped`). A manual main run qualifies
+the main candidate only; it does not replace any gate on the release-tag
+candidate or authorize publication.
 
 A failed run is recovered without re-testing the jobs that already passed:
 GitHub's "Re-run failed jobs" (`gh run rerun <RUN_ID> --failed`) keeps the

@@ -20,10 +20,8 @@
  *     Source Mode the pinned distribution must have been built (`success`),
  *     and the npm-only client-family gate must be `skipped`; in npm mode the
  *     distribution must be `skipped` and client-family `success`. The
- *     split-process proof is npm-only AND release-tag-only: it is required on
- *     a release tag in npm mode and must be exactly `skipped` on every
- *     ordinary PR / branch ref (a job that unexpectedly runs is structural
- *     drift, not a bonus);
+ *     split-process is required on npm release-tag pushes; an explicit main
+ *     workflow_dispatch can require it too. All other refs/modes require skipped;
  *   - on a RELEASE TAG the release phases are required too.
  *
  * Usage:
@@ -122,12 +120,18 @@ export function isSupportedRef(ref) {
 /**
  * The single expectation for the split-process phase.
  *
- * - npm release tag: the real smoke MUST have run and succeeded;
- * - npm PR / branch: it MUST be skipped (an unexpected run is graph drift);
+ * - npm release-tag pushes: the real smoke MUST have run and succeeded;
+ * - npm main manual dispatch: it succeeds only when explicitly requested;
+ * - other npm PR / branch refs: it MUST be skipped (unexpected run is graph drift);
  * - any Source Mode ref: skipped, because the smoke is npm-only.
  */
-export function expectedSplitProcessStatus(mode, ref) {
-  return mode === 'npm' && isReleaseTagRef(ref) ? 'success' : 'skipped'
+export function expectedSplitProcessStatus(mode, ref, { eventName = '', runSplitProcess = false } = {}) {
+  if (mode !== 'npm') return 'skipped'
+  if (eventName === 'workflow_dispatch') {
+    return ref === 'refs/heads/main' && runSplitProcess ? 'success' : 'skipped'
+  }
+  if (isReleaseTagRef(ref)) return 'success'
+  return 'skipped'
 }
 
 function fail(message) {
@@ -137,10 +141,10 @@ function fail(message) {
 /**
  * Decide whether this run qualifies.
  *
- * @param {{role: 'qualify'|'summary', mode: string, ref: string, phases: Array<{name: string, result: string}>, release?: boolean, started?: string}} options
+ * @param {{role: 'qualify'|'summary', mode: string, ref: string, phases: Array<{name: string, result: string}>, eventName?: string, runSplitProcess?: boolean, release?: boolean, started?: string}} options
  * @returns {{ok: boolean, failures: string[], lines: string[], elapsedSeconds: number|null}} the verdict.
  */
-export function verdict({ role, mode, ref, phases, release = false, started }) {
+export function verdict({ role, mode, ref, phases, eventName = '', runSplitProcess = false, release = false, started }) {
   const failures = []
   const byName = new Map()
   for (const phase of phases) byName.set(phase.name, phase.result)
@@ -183,11 +187,14 @@ export function verdict({ role, mode, ref, phases, release = false, started }) {
     }
   }
 
-  // split-process has exactly ONE expectation, decided by the actual ref and
-  // mode. When the ref is unusable the expectation is not guessed; the ref
-  // failure above is the verdict.
+  // split-process is required on npm release tags. Main may opt in through the
+  // explicit workflow_dispatch input so the exact candidate can be exercised
+  // before a release tag exists; no other manual ref may claim that proof.
+  if (runSplitProcess && !(eventName === 'workflow_dispatch' && ref === 'refs/heads/main' && mode === 'npm')) {
+    failures.push('a manual split-process request is allowed only for npm workflow_dispatch on refs/heads/main')
+  }
   if (refOk && expected !== undefined) {
-    const wanted = expectedSplitProcessStatus(mode, ref)
+    const wanted = expectedSplitProcessStatus(mode, ref, { eventName, runSplitProcess })
     const actual = byName.get(SPLIT_PROCESS_PHASE)
     if (actual !== wanted) {
       failures.push(`the phase '${SPLIT_PROCESS_PHASE}' is '${actual ?? '(absent)'}', but mode '${mode}' on '${ref}' requires '${wanted}'`)
@@ -247,7 +254,7 @@ function main() {
   const args = process.argv.slice(2)
   const role = args[0]
   if (role !== 'qualify' && role !== 'summary') {
-    console.error('usage: node scripts/ci-verdict.mjs <qualify|summary> --mode <npm|source> --ref <github-ref> [--release] [--started <epoch>] --phase <job>=<result>...')
+    console.error('usage: node scripts/ci-verdict.mjs <qualify|summary> --mode <npm|source> --ref <github-ref> [--event <event>] [--run-split-process] [--release] [--started <epoch>] --phase <job>=<result>...')
     process.exit(2)
   }
   const valueOf = (name) => {
@@ -269,6 +276,8 @@ function main() {
     role,
     mode,
     ref,
+    eventName: valueOf('--event') ?? process.env.GITHUB_EVENT_NAME ?? '',
+    runSplitProcess: args.includes('--run-split-process'),
     phases,
     release: args.includes('--release'),
     started: valueOf('--started'),
