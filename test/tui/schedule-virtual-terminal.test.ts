@@ -21,10 +21,11 @@ import assert from 'node:assert/strict'
 import test, { afterEach } from 'node:test'
 import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import { TuiApp } from '../../src/tui-app.ts'
-import type {
-  ScheduleCatalogEntry,
-  ScheduleIntent,
-  ScheduleWorkspaceSnapshot,
+import {
+  SCHEDULE_COPY,
+  type ScheduleCatalogEntry,
+  type ScheduleIntent,
+  type ScheduleWorkspaceSnapshot,
 } from '../../src/app/schedule/presentation.ts'
 import type { ScheduleEditorDraft } from '../../src/domain/schedule/form.ts'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
@@ -243,6 +244,22 @@ test('real VirtualTerminal keeps guided Editor, RAW RRULE, conflict and Weekdays
       current = workspace({
         mode: 'editor',
         pageEpoch: 13,
+        editor: draft({ mode: 'edit', id: 'task-a', title: 'Merged title' }),
+        editorDirty: false,
+        notice: { text: SCHEDULE_COPY.hostMatchesWithOverlap('Title'), kind: 'info' },
+      })
+      handle.update(current)
+      await vt.waitForRender()
+      frame = vt.getViewport().map(stripTerminalSequences).join('\n')
+      const compactNoticeFrame = frame.split('\n').map(line => line.trim()).join(' ')
+      const cleanActionBar = frame.split('\n').at(-1) ?? ''
+      assert.ok(compactNoticeFrame.includes(SCHEDULE_COPY.hostMatches), `${size.columns}×${size.rows}: Host already matches\n${frame}`)
+      assert.ok(compactNoticeFrame.includes('Both changed: Title.'), `${size.columns}×${size.rows}: overlap is visible\n${frame}`)
+      assert.ok(!cleanActionBar.includes('Ctrl+S save'), `${size.columns}×${size.rows}: no no-op Save\n${cleanActionBar}`)
+
+      current = workspace({
+        mode: 'editor',
+        pageEpoch: 14,
         editor: draft({
           timing: { kind: 'weekly', time: '09:00:00', timeZone: 'UTC', weekdays: [1, 2, 3, 4, 5] },
           focused: 5,

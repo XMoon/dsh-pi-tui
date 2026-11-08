@@ -17,10 +17,11 @@ import {
   ScheduleWorkspacePanel,
   scheduleWorkspaceLayout,
 } from '../../src/tui/schedule/workspace-panel.ts'
-import type {
-  ScheduleCatalogEntry,
-  ScheduleIntent,
-  ScheduleWorkspaceSnapshot,
+import {
+  SCHEDULE_COPY,
+  type ScheduleCatalogEntry,
+  type ScheduleIntent,
+  type ScheduleWorkspaceSnapshot,
 } from '../../src/app/schedule/presentation.ts'
 import { editorFields } from '../../src/domain/schedule/form.ts'
 import type { ScheduleEditorDraft } from '../../src/domain/schedule/form.ts'
@@ -892,6 +893,27 @@ test('a narrow Editor keeps focused fields and recovery status inside the painte
     }
   }
 })
+test('the 44×20 Editor wraps HostMatches and overlapping groups without offering Save', () => {
+  const notice = SCHEDULE_COPY.hostMatchesWithOverlap('Title')
+  const snapshot = workspace({
+    mode: 'editor',
+    editor: draft({ mode: 'edit', id: 'schedule-1', title: 'Merged title' }),
+    editorDirty: false,
+    notice: { text: notice, kind: 'info' },
+  })
+  const view = harness(snapshot, { columns: 44, rows: 20 })
+  const lines = view.plain()
+  const visible = lines.slice(0, -1).map(line => line.trim()).join(' ')
+  const actionBar = lines.at(-1) ?? ''
+
+  assert.ok(visible.includes(SCHEDULE_COPY.hostMatches), `${visible}`)
+  assert.ok(visible.includes('Both changed: Title.'), `${visible}`)
+  assert.ok(!actionBar.includes('Ctrl+S save'), actionBar)
+  assert.ok(actionBar.includes('Ctrl+R reload'), actionBar)
+  assert.ok(actionBar.trimEnd().endsWith('Esc back'), actionBar)
+  assert.ok(lines.every(line => visibleWidth(line) <= 44))
+})
+
 test('the weekly editor has one logical field and its chooser keeps toggles across Esc', () => {
   const weekly = draft({
     timing: { kind: 'weekly', time: '09:00:00', timeZone: 'UTC', weekdays: [1] },
