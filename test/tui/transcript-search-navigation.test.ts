@@ -10,7 +10,7 @@ import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { afterEach, test } from 'node:test'
 import { MessageId, ToolCallId, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { visibleWidth } from '@xmoon76/pi-tui'
+import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import { TuiApp } from '../../src/tui-app.ts'
 import { darkColors, lightColors } from '../../src/domain/display/theme.ts'
 import { currentPalette } from '../../src/tui/theme/runtime.ts'
@@ -62,6 +62,86 @@ function click(vt: VirtualTerminal, x: number, y: number): void {
   vt.sendInput(`\x1b[<0;${x};${y}M`)
   vt.sendInput(`\x1b[<0;${x};${y}m`)
 }
+
+function sessionEvent(type: string, data: Record<string, unknown>, seq: number): SessionEvent {
+  return { type, seq, time: 1_700_000_000_000 + seq, data } as SessionEvent
+}
+
+/** Fold one real user turn so every match comes from the authoritative
+ * `TranscriptFolder.search()` (never a hand-built source range). */
+function userMessageFolder(text: string, turn = 0): {
+  folder: TranscriptFolder
+  message: Extract<TranscriptMessage, { kind: 'user' }>
+} {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    sessionEvent('turn/start', { turn }, 0),
+    sessionEvent('user/message', {
+      id: MessageId(`search-user-${turn}`),
+      role: 'user',
+      content: [{ type: 'text', text }],
+      source: { kind: 'user' },
+    }, 1),
+    sessionEvent('turn/end', { turn, reason: { kind: 'completed' } }, 2),
+  ])
+  const message = folder.messages().find(
+    (candidate): candidate is Extract<TranscriptMessage, { kind: 'user' }> => candidate.kind === 'user',
+  )
+  assert.ok(message !== undefined, 'fixture: the folded user message exists')
+  return { folder, message }
+}
+
+/** Fold one real reasoning attempt into a Host Thinking row. */
+function thinkingMessageFolder(text: string, turn = 0): {
+  folder: TranscriptFolder
+  message: Extract<TranscriptMessage, { kind: 'thinking' }>
+} {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    sessionEvent('turn/start', { turn }, 0),
+    sessionEvent('assistant/attempt', {
+      turn,
+      step: 0,
+      stream: [{ type: 'chunk', time: 1_700_000_000_002, chunk: { type: 'reasoning-delta', index: 0, text } }],
+    }, 1),
+    sessionEvent('turn/end', { turn, reason: { kind: 'completed' } }, 2),
+  ])
+  const message = folder.messages().find(
+    (candidate): candidate is Extract<TranscriptMessage, { kind: 'thinking' }> => candidate.kind === 'thinking',
+  )
+  assert.ok(message !== undefined, 'fixture: the folded Thinking row exists')
+  return { folder, message }
+}
+
+interface MountedSearchSelectionForTest {
+  readonly selectedIndex: number
+  readonly selectedRow?: number
+  readonly exact: boolean
+  readonly exactPaintedSegments?: ReadonlyArray<{ readonly row: number; readonly startCol: number; readonly endCol: number }>
+}
+
+function mountedSelectionFor(app: TuiApp, message: TranscriptMessage): MountedSearchSelectionForTest | undefined {
+  const mounted = (app as unknown as {
+    mountedTranscriptBlocks: ReadonlyArray<{ block: { message?: TranscriptMessage }; searchSelection?: MountedSearchSelectionForTest }>
+  }).mountedTranscriptBlocks
+  return mounted.find(entry => entry.block.message === message)?.searchSelection
+}
+
+/** The terminal column of one visible needle occurrence, measured with the
+ * same cell width the terminal uses (never a JS string index). */
+function columnOf(line: string, needle: string, occurrence = 0): number {
+  let index = -1
+  let from = 0
+  for (let occurrenceIndex = 0; occurrenceIndex <= occurrence; occurrenceIndex += 1) {
+    index = line.indexOf(needle, from)
+    assert.ok(index >= 0, `occurrence ${occurrenceIndex} of ${JSON.stringify(needle)} missing from ${JSON.stringify(line)}`)
+    from = index + needle.length
+  }
+  return visibleWidth(line.slice(0, index))
+}
+
+const STRONG_BG = 0xf5c542
+const ANCHOR_BG = 0x3a3220
 
 test('navigation: direct Workflow provenance remains visible across the frozen size, theme and icon matrix', async () => {
   const previousPalette = currentPalette
@@ -130,150 +210,215 @@ test('navigation: direct Workflow provenance remains visible across the frozen s
     app.stop()
   }
 })
-test('navigation: a reveal expands an anchor-only card but keeps its card-top destination', async () => {
+test('navigation: a search reveal proves the hidden User body and scrolls to it', async () => {
   const { vt, app } = startApp(100, 20)
   const longText = Array.from({ length: 24 }, (_, index) => `line ${index}`).join('\n')
     + '\nneedle in the compacted middle\n' + Array.from({ length: 6 }, (_, index) => `tail ${index}`).join('\n')
-  const message: TranscriptMessage = { kind: 'user', turn: 0, text: longText }
+  const { folder, message } = userMessageFolder(longText)
+  const match = folder.search('needle')[0]
+  assert.ok(match !== undefined)
   app.setFullscreen(true)
-  app.setTranscript([message])
-  const collapsed = (await viewport(vt)).join('\n')
+  app.setTranscript([message], folder.turnActivities())
+  let lines = await viewport(vt)
+  const collapsed = lines.join('\n')
   assert.ok(!collapsed.includes('needle in the compacted middle'), 'precondition: the middle is compacted away')
   assert.ok(collapsed.includes('rows compacted'), 'precondition: the bubble is compacted')
 
-  app.setTranscriptSearchTarget({
-    query: 'compacted middle',
-    match: { id: 0, turn: 0, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
-    message,
+  app.setTranscriptSearchPresentation({
+    matchMessages: new Set([message]),
+    target: { query: 'needle', match, message },
+    grantReveal: true,
   })
   app.scrollToSearchTarget()
-  const revealed = (await viewport(vt)).join('\n')
+  lines = await viewport(vt)
+  const revealed = lines.join('\n')
   assert.ok(!revealed.includes('rows compacted'), `the search reveal still opens the bubble:\n${revealed}`)
-  assert.ok(!revealed.includes('needle in the compacted middle'), 'the unsupported nth target is not guessed')
-  assert.equal(app.fullscreenScrollForTest()?.scrollTop, 0, 'the inexact message source stays anchored at card top')
-  const mounted = (app as unknown as {
-    mountedTranscriptBlocks: ReadonlyArray<{ block: { message?: TranscriptMessage }; searchSelection?: { selectedIndex: number; exact: boolean; selectedRow?: number } }>
-  }).mountedTranscriptBlocks
-  const selection = mounted.find(entry => entry.block.message === message)?.searchSelection
-  assert.equal(selection?.selectedIndex, -1)
-  assert.equal(selection?.exact, false)
-  assert.equal(selection?.selectedRow, 0)
+  const row = lines.findIndex(line => line.includes('needle in the compacted middle'))
+  assert.ok(row >= 0, `the revealed target body is visible:\n${revealed}`)
+  assert.ok((app.fullscreenScrollForTest()?.scrollTop ?? 0) > 0, 'the proven painted row is below the card top')
+  assert.equal(vt.getCellBgRgb(row, columnOf(lines[row]!, 'needle')), STRONG_BG, 'the revealed source cell is current')
+  const selection = mountedSelectionFor(app, message)
+  assert.equal(selection?.exact, true, 'the revealed body is proven, not guessed')
+  assert.equal(selection?.selectedIndex, -1, 'the plain-text channel never needs a rendered ordinal')
+  assert.equal(selection?.selectedRow, selection?.exactPaintedSegments?.[0]?.row)
+  assert.ok((selection?.exactPaintedSegments?.length ?? 0) > 0)
+
+  // An explicit body click collapses the target and revokes the temporary
+  // reveal; a later passive rebind must not re-open it.
+  click(vt, 10, row)
+  lines = await viewport(vt)
+  assert.ok(lines.join('\n').includes('rows compacted'), 'the explicit collapse hides the body again')
+  assert.equal(app.transcriptSearchPresentationForTest()?.revealGranted, false, 'an explicit collapse revokes the reveal')
+  app.setTranscriptSearchPresentation({
+    matchMessages: new Set([message]),
+    target: { query: 'needle', match, message },
+    grantReveal: false,
+  })
+  lines = await viewport(vt)
+  assert.ok(!lines.join('\n').includes('needle in the compacted middle'), 'a passive rebind never re-grants the reveal')
+  const passive = mountedSelectionFor(app, message)
+  assert.equal(passive?.exact, false, 'a collapsed body has no cell proof')
+  assert.equal(passive?.exactPaintedSegments, undefined, 'no stale painted segments survive the collapse')
+  assert.equal(passive?.selectedRow, 0, 'the honest source anchor is the card top')
+
+  // An explicit navigation re-grants and re-opens the body, which re-proves
+  // its painted cells at the current width.
+  app.setTranscriptSearchTarget({ query: 'needle', match, message })
+  app.scrollToSearchTarget()
+  lines = await viewport(vt)
+  assert.ok(lines.join('\n').includes('needle in the compacted middle'), 'the explicit navigation re-opens the body')
+  const reproved = mountedSelectionFor(app, message)
+  assert.equal(reproved?.exact, true)
+  assert.ok((reproved?.exactPaintedSegments?.length ?? 0) > 0)
+
+  // Dismiss promotes the durable long-user owner (PR-A semantics unchanged).
+  app.finishTranscriptSearchPresentation(new Set(), { preserveCurrentReveal: true })
+  lines = await viewport(vt)
+  assert.ok(lines.join('\n').includes('needle in the compacted middle'), 'dismiss keeps the revealed body open')
+  const overrides = (app as unknown as { expandedOverride: Map<object, boolean> }).expandedOverride
+  assert.equal(overrides.get(message), true, 'dismiss promotes the durable long-user owner')
   app.stop()
 })
 
-test('navigation: multiple anchor-only hits keep the same card-top destination', async () => {
-  const { vt, app } = startApp(100, 12)
+test('navigation: two distant User hits scroll to their own painted cells', async () => {
   const text = [
     'top filler',
     'needle first hit',
-    ...Array.from({ length: 18 }, (_, index) => `middle filler ${index}`),
+    ...Array.from({ length: 20 }, (_, index) => `middle filler ${index}`),
     'needle second hit',
     'bottom filler',
   ].join('\n')
-  const message: TranscriptMessage = { kind: 'user', turn: 0, text }
+  const { folder, message } = userMessageFolder(text)
+  const matches = folder.search('needle')
+  assert.equal(matches.length, 2, 'the authoritative corpus owns exactly two occurrences')
+  const other: TranscriptMessage = { kind: 'user', turn: 1, text: 'another needle card' }
+  const { vt, app } = startApp(100, 12)
   app.setFullscreen(true)
-  app.setTranscript([message])
-  app.scrollToBottom()
+  app.setTranscript([message, other], folder.turnActivities())
   await viewport(vt)
+  const representatives = new Set([message, other])
+  const navigate = (occurrence: number): void => {
+    app.setTranscriptSearchPresentation({
+      matchMessages: representatives,
+      target: { query: 'needle', match: matches[occurrence]!, message },
+      grantReveal: true,
+    })
+    app.scrollToSearchTarget()
+  }
 
-  const target = (sourceOccurrence: number) => ({
-    query: 'needle',
-    match: { id: sourceOccurrence, turn: 0, occurrence: sourceOccurrence, source: { kind: 'message' as const }, sourceOccurrence },
-    message,
-  })
-
-  app.setTranscriptSearchTarget(target(0))
-  app.scrollToSearchTarget()
+  navigate(0)
   let lines = await viewport(vt)
-  assert.equal(app.fullscreenScrollForTest()?.scrollTop, 0, 'without provenance the first hit does not move off the card anchor')
-  assert.ok(lines.some(line => line.includes('needle first hit')), `the first hit happens to be visible near the card top:\n${lines.join('\n')}`)
-  assert.ok(!isStrongCell(vt, lines.findIndex(line => line.includes('needle first hit')), lines.find(line => line.includes('needle first hit'))!.indexOf('needle')),
-    'the anchor-only hit stays weak')
-
-  app.setTranscriptSearchTarget(target(1))
-  app.scrollToSearchTarget()
-  lines = await viewport(vt)
-  assert.equal(app.fullscreenScrollForTest()?.scrollTop, 0, 'the second ordinal cannot guess a later row')
-  assert.ok(!lines.some(line => line.includes('needle second hit')), `the unsupported second hit stays offscreen:\n${lines.join('\n')}`)
-  assert.equal(app.transcriptSearchPresentationForTest()?.sourceOccurrence, 1, 'the semantic source occurrence remains independent')
-  const mounted = (app as unknown as {
-    mountedTranscriptBlocks: ReadonlyArray<{ block: { message?: TranscriptMessage }; searchSelection?: { selectedIndex: number; exact: boolean; selectedRow?: number } }>
-  }).mountedTranscriptBlocks
-  const selection = mounted.find(entry => entry.block.message === message)?.searchSelection
+  let row = lines.findIndex(line => line.includes('needle first hit'))
+  assert.ok(row >= 0, `the first target is visible:\n${lines.join('\n')}`)
+  assert.equal(vt.getCellBgRgb(row, columnOf(lines[row]!, 'needle')), STRONG_BG, 'the first occurrence is current')
+  let selection = mountedSelectionFor(app, message)
+  assert.equal(selection?.exact, true)
   assert.equal(selection?.selectedIndex, -1)
-  assert.equal(selection?.exact, false)
-  assert.equal(selection?.selectedRow, 0)
+  assert.equal(selection?.exactPaintedSegments?.[0]?.row, selection?.selectedRow)
+  const firstScrollTop = app.fullscreenScrollForTest()!.scrollTop
+  const otherRow = lines.findIndex(line => line.includes('another needle card'))
+  if (otherRow >= 0) {
+    assert.ok(vt.getCellUnderline(otherRow, columnOf(lines[otherRow]!, 'needle')), 'the other matching card is weak')
+    assert.notEqual(vt.getCellBgRgb(otherRow, columnOf(lines[otherRow]!, 'needle')), STRONG_BG,
+      'a different card never borrows the current strong block')
+  }
+
+  navigate(1)
+  lines = await viewport(vt)
+  row = lines.findIndex(line => line.includes('needle second hit'))
+  assert.ok(row >= 0, `the second target is visible:\n${lines.join('\n')}`)
+  assert.ok(!lines.some(line => line.includes('needle first hit')), 'the first occurrence is not the viewport destination')
+  assert.notEqual(app.fullscreenScrollForTest()!.scrollTop, firstScrollTop, 'Next moves the viewport to the proven row')
+  assert.equal(vt.getCellBgRgb(row, columnOf(lines[row]!, 'needle')), STRONG_BG, 'the second occurrence is current')
+  selection = mountedSelectionFor(app, message)
+  assert.equal(selection?.exact, true)
+  assert.equal(selection?.exactPaintedSegments?.[0]?.row, selection?.selectedRow)
+
+  navigate(0)
+  lines = await viewport(vt)
+  const backRow = lines.findIndex(line => line.includes('needle first hit'))
+  assert.ok(backRow >= 0, `Prev returns to the first occurrence:\n${lines.join('\n')}`)
+  assert.equal(vt.getCellBgRgb(backRow, columnOf(lines[backRow]!, 'needle')), STRONG_BG, 'the first cell is current again')
   app.stop()
 })
 
-test('navigation: clearing the target removes the reveal and every decoration', async () => {
+test('navigation: clearing the target removes every proven decoration', async () => {
+  const { folder, message } = userMessageFolder('needle alpha needle beta')
+  const match = folder.search('needle')[0]
+  assert.ok(match !== undefined)
   const { vt, app } = startApp()
-  const message: TranscriptMessage = { kind: 'user', turn: 0, text: 'needle alpha needle beta' }
   app.setFullscreen(true)
-  app.setTranscript([message])
-  app.setTranscriptSearchTarget({
-    query: 'needle',
-    match: { id: 0, turn: 0, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
-    message,
+  app.setTranscript([message], folder.turnActivities())
+  app.setTranscriptSearchPresentation({
+    matchMessages: new Set([message]),
+    target: { query: 'needle', match, message },
+    grantReveal: true,
   })
   let lines = await viewport(vt)
   let cells = occurrenceCells(lines)
-  // A user bubble's whole card injects the `❯` marker: anchor-only, so the
-  // current card's matches are decorated WEAKLY.
-  assert.ok(vt.getCellUnderline(cells.row, cells.first), 'precondition: the target occurrence is weak-decorated')
-  assert.ok(!isStrongCell(vt, cells.row, cells.first), 'a message-kind card is anchor-only')
+  assert.equal(mountedSelectionFor(app, message)?.exact, true, 'precondition: the current User hit is proven')
+  assert.equal(vt.getCellBgRgb(cells.row, cells.first), STRONG_BG, 'precondition: the current occurrence is strong')
+  assert.ok(vt.getCellUnderline(cells.row, cells.second), 'precondition: the other occurrence is weak')
 
   app.setTranscriptSearchTarget(undefined)
   lines = await viewport(vt)
   cells = occurrenceCells(lines)
-  assert.ok(!vt.getCellUnderline(cells.row, cells.first), 'clearing removes the first decoration')
-  assert.ok(!vt.getCellUnderline(cells.row, cells.second), 'clearing removes every decoration')
-  assert.ok(!isStrongCell(vt, cells.row, cells.first), 'clearing leaves no strong highlight')
+  assert.equal(vt.getCellUnderline(cells.row, cells.first), false, 'clearing removes the first decoration')
+  assert.equal(vt.getCellUnderline(cells.row, cells.second), false, 'clearing removes every decoration')
+  assert.notEqual(vt.getCellBgRgb(cells.row, cells.first), STRONG_BG, 'clearing leaves no strong highlight')
+  assert.notEqual(vt.getCellBgRgb(cells.row, cells.second), STRONG_BG, 'the other occurrence is not strong either')
   app.stop()
 })
 
-test('navigation: resize recomputes the approximate range from current wrapped lines', async () => {
+test('navigation: resize re-proves the current wrapped User cell at the new width', async () => {
+  const text = `${'prefix filler '.repeat(14)}needle wrapped target ${'suffix filler '.repeat(14)}`
+  const { folder, message } = userMessageFolder(text)
+  const match = folder.search('needle')[0]
+  assert.ok(match !== undefined)
   const { vt, app } = startApp(100, 14)
-  const message: TranscriptMessage = {
-    kind: 'user',
-    turn: 0,
-    text: `${'prefix filler '.repeat(14)}needle wrapped target ${'suffix filler '.repeat(14)}`,
-  }
   app.setFullscreen(true)
-  app.setTranscript([message])
-  app.setTranscriptSearchTarget({
-    query: 'needle wrapped',
-    match: { id: 0, turn: 0, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
-    message,
+  app.setTranscript([message], folder.turnActivities())
+  app.setTranscriptSearchPresentation({
+    matchMessages: new Set([message]),
+    target: { query: 'needle', match, message },
+    grantReveal: true,
   })
   app.scrollToSearchTarget()
-  await viewport(vt)
-  assert.ok(vt.getViewport().some(line => line.includes('needle')), 'the target is visible before resize')
+  let lines = await viewport(vt)
+  let row = lines.findIndex(line => line.includes('needle'))
+  assert.ok(row >= 0, `the target is visible before resize:\n${lines.join('\n')}`)
+  assert.equal(vt.getCellBgRgb(row, columnOf(lines[row]!, 'needle')), STRONG_BG, 'the pre-resize cell is exact')
 
   vt.resize(40, 14)
   await viewport(vt)
   app.scrollToSearchTarget()
-  const lines = await viewport(vt)
-  const targetRow = lines.findIndex(line => line.includes('needle'))
-  assert.ok(targetRow >= 0, `the target remains visible after wrapped-line remeasurement:\n${lines.join('\n')}`)
-  assert.ok(!isStrongCell(vt, targetRow, lines[targetRow]!.indexOf('needle')), 'resize never turns anchor-only navigation into strong provenance')
+  lines = await viewport(vt)
+  row = lines.findIndex(line => line.includes('needle'))
+  assert.ok(row >= 0, `the target remains visible after re-wrapping:\n${lines.join('\n')}`)
+  assert.equal(vt.getCellBgRgb(row, columnOf(lines[row]!, 'needle')), STRONG_BG,
+    'resize re-proves the current cells at the new width instead of reusing stale columns')
+  const selection = mountedSelectionFor(app, message)
+  assert.equal(selection?.exact, true)
+  assert.equal(selection?.selectedRow, selection?.exactPaintedSegments?.[0]?.row)
   app.stop()
 })
 
-test('navigation: an already-visible approximate range does not jitter the viewport', async () => {
+test('navigation: an already-visible proven range does not jitter the viewport', async () => {
   const { vt, app } = startApp(100, 12)
   const text = [
     ...Array.from({ length: 5 }, (_, index) => `prefix ${index}`),
     'needle visible target',
     ...Array.from({ length: 18 }, (_, index) => `suffix ${index}`),
   ].join('\n')
-  const message: TranscriptMessage = { kind: 'user', turn: 0, text }
+  const { folder, message } = userMessageFolder(text)
+  const match = folder.search('needle')[0]
+  assert.ok(match !== undefined)
   app.setFullscreen(true)
-  app.setTranscript([message])
-  app.setTranscriptSearchTarget({
-    query: 'needle',
-    match: { id: 0, turn: 0, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
-    message,
+  app.setTranscript([message], folder.turnActivities())
+  app.setTranscriptSearchPresentation({
+    matchMessages: new Set([message]),
+    target: { query: 'needle', match, message },
+    grantReveal: true,
   })
   app.scrollToSearchTarget()
   const scroll = app.fullscreenScrollForTest()
@@ -284,27 +429,26 @@ test('navigation: an already-visible approximate range does not jitter the viewp
   const before = app.fullscreenScrollForTest()!.scrollTop
   assert.ok(vt.getViewport().some(line => line.includes('needle visible target')), 'precondition: target remains visible after a manual scroll')
   app.scrollToSearchTarget()
-  assert.equal(app.fullscreenScrollForTest()!.scrollTop, before, 'an already-visible range must not be re-centered')
+  assert.equal(app.fullscreenScrollForTest()!.scrollTop, before, 'an already-visible proven range must not be re-centered')
   app.stop()
 })
 
 test('navigation: a passive transcript repaint does not snap back to the search range', async () => {
   const { vt, app } = startApp(100, 14)
-  const targetMessage: TranscriptMessage = {
-    kind: 'user',
-    turn: 0,
-    text: [
-      ...Array.from({ length: 20 }, (_, index) => `prefix ${index}`),
-      'needle passive target',
-      ...Array.from({ length: 12 }, (_, index) => `suffix ${index}`),
-    ].join('\n'),
-  }
+  const text = [
+    ...Array.from({ length: 20 }, (_, index) => `prefix ${index}`),
+    'needle passive target',
+    ...Array.from({ length: 12 }, (_, index) => `suffix ${index}`),
+  ].join('\n')
+  const { folder, message: targetMessage } = userMessageFolder(text)
+  const match = folder.search('needle')[0]
+  assert.ok(match !== undefined)
   app.setFullscreen(true)
-  app.setTranscript([targetMessage])
-  app.setTranscriptSearchTarget({
-    query: 'needle',
-    match: { id: 0, turn: 0, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
-    message: targetMessage,
+  app.setTranscript([targetMessage], folder.turnActivities())
+  app.setTranscriptSearchPresentation({
+    matchMessages: new Set([targetMessage]),
+    target: { query: 'needle', match, message: targetMessage },
+    grantReveal: true,
   })
   app.scrollToSearchTarget()
   await viewport(vt)
@@ -716,62 +860,97 @@ test('navigation: a PTC child result maps to its body, not the header or the roo
   app.stop()
 })
 
-test('navigation: a Thinking header chrome is never strong-highlighted for a body hit', async () => {
+test('navigation: expanded Thinking proves the body, never the title chrome', async () => {
+  const { folder, message } = thinkingMessageFolder('thinking about search')
+  const match = folder.search('thinking').find(candidate => candidate.source.kind === 'message')
+  assert.ok(match !== undefined, 'fixture: the reasoning body is the semantic source')
   const { vt, app } = startApp()
-  const message: TranscriptMessage = { kind: 'thinking', turn: 0, text: 'thinking about search' }
   app.setFullscreen(true)
-  app.setTranscript([message])
-  app.setTranscriptSearchTarget({
-    query: 'thinking',
-    match: { id: 0, turn: 0, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
-    message,
+  app.setTranscript(folder.messages(), folder.turnActivities())
+  app.setTranscriptSearchPresentation({
+    matchMessages: new Set([message]),
+    target: { query: 'thinking', match, message },
+    grantReveal: true,
   })
+  app.scrollToSearchTarget()
   const lines = await viewport(vt)
   const headerRow = lines.findIndex(line => /Thinking/.test(line))
   assert.ok(headerRow >= 0, `thinking header must render:\n${lines.join('\n')}`)
-  assert.ok(!isStrongCell(vt, headerRow, 0), 'the injected Thinking header must NOT be the current occurrence')
+  const titleColumn = columnOf(lines[headerRow]!, 'Thinking')
+  assert.notEqual(vt.getCellBgRgb(headerRow, titleColumn), STRONG_BG, 'the injected Thinking title is not the body hit')
+  assert.notEqual(vt.getCellBgRgb(headerRow, 0), ANCHOR_BG, 'an exact body proof never washes the title row')
   const bodyRow = lines.findIndex(line => line.includes('about search'))
   assert.ok(bodyRow >= 0, `thinking body must render:\n${lines.join('\n')}`)
-  assert.ok(!isStrongCell(vt, bodyRow, lines[bodyRow]!.indexOf('about')), 'the thinking body is anchor-only (no strong)')
+  assert.equal(vt.getCellBgRgb(bodyRow, columnOf(lines[bodyRow]!, 'thinking')), STRONG_BG,
+    'only the reasoning body occurrence is current')
+  const selection = mountedSelectionFor(app, message)
+  assert.equal(selection?.exact, true)
+  assert.equal(selection?.selectedIndex, -1, 'the body proof does not guess a rendered title ordinal')
+  assert.ok((selection?.exactPaintedSegments?.length ?? 0) > 0)
+  assert.ok(selection!.exactPaintedSegments!.every(segment => segment.row >= 1),
+    'the title row is excluded from the painted-cell channel')
+  assert.equal(selection?.selectedRow, selection?.exactPaintedSegments?.[0]?.row)
   app.stop()
 })
 
-test('navigation: the user bubble marker is never strong-highlighted for a body hit', async () => {
+test('navigation: the bubble marker is never the proven User source cell', async () => {
+  const { folder, message } = userMessageFolder('❯ body')
+  const match = folder.search('❯')[0]
+  assert.ok(match !== undefined)
   const { vt, app } = startApp()
-  const message: TranscriptMessage = { kind: 'user', turn: 0, text: '❯ body' }
   app.setFullscreen(true)
-  app.setTranscript([message])
-  app.setTranscriptSearchTarget({
-    query: '❯',
-    match: { id: 0, turn: 0, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
-    message,
+  app.setTranscript([message], folder.turnActivities())
+  app.setTranscriptSearchPresentation({
+    matchMessages: new Set([message]),
+    target: { query: '❯', match, message },
+    grantReveal: true,
   })
   const lines = await viewport(vt)
   const row = lines.findIndex(line => line.includes('body'))
   assert.ok(row >= 0, `user bubble must render:\n${lines.join('\n')}`)
-  const markerCol = lines[row]!.indexOf('❯')
-  assert.ok(markerCol >= 0, `the bubble marker must render:\n${lines.join('\n')}`)
-  assert.ok(!isStrongCell(vt, row, markerCol), 'the injected bubble marker must NOT be the current occurrence')
+  const markerColumn = columnOf(lines[row]!, '❯', 0)
+  const sourceColumn = columnOf(lines[row]!, '❯', 1)
+  assert.notEqual(vt.getCellBgRgb(row, markerColumn), STRONG_BG, 'the injected bubble marker is not the current occurrence')
+  assert.equal(vt.getCellBgRgb(row, sourceColumn), STRONG_BG, 'the source occurrence cell is current')
+  assert.equal(mountedSelectionFor(app, message)?.exact, true)
   app.stop()
 })
 
-test('navigation: an anchor-only current shows a weaker anchor wash and no strong occurrence', async () => {
+test('navigation: an anchor-only mixed User card keeps the weaker row wash', async () => {
   const { vt, app } = startApp()
-  const message: TranscriptMessage = { kind: 'user', turn: 0, text: 'needle alpha needle beta' }
+  const text = 'needle alpha needle beta'
+  const message: TranscriptMessage = {
+    kind: 'user',
+    turn: 0,
+    text,
+    content: [
+      { type: 'text', text },
+      { type: 'image', attachment: { type: 'image', name: 'note.png' } },
+    ] as ContentBlock[],
+  }
   app.setFullscreen(true)
   app.setTranscript([message])
   app.setTranscriptSearchTarget({
     query: 'needle',
-    match: { id: 0, turn: 0, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    match: {
+      id: 0, turn: 0, occurrence: 0,
+      normalizedSourceRange: { start: 0, end: 6 },
+      source: { kind: 'message' },
+      sourceOccurrence: 0,
+    },
     message,
   })
   const lines = await viewport(vt)
   const cells = occurrenceCells(lines)
-  // The occurrences stay WEAK; the card's anchor row carries the weaker
-  // "current result lives here" wash — never the exact occurrence block.
-  assert.ok(vt.getCellUnderline(cells.row, cells.first), 'the occurrence is weak-decorated')
-  assert.notEqual(vt.getCellBgRgb(cells.row, 0), 0xf5c542, 'an anchor-only current never paints the exact block')
-  assert.equal(vt.getCellBgRgb(cells.row, 0), 0x3a3220, `the anchor row carries the weaker current wash:\n${lines.join('\n')}`)
+  // Mixed content has no single Host Text layout to witness, so this card
+  // keeps the PR-A anchor: weak occurrences plus the weaker row wash.
+  assert.ok(vt.getCellUnderline(cells.row, cells.first), 'the occurrence stays weak')
+  assert.notEqual(vt.getCellBgRgb(cells.row, cells.first), STRONG_BG, 'mixed content never claims an exact cell')
+  assert.equal(vt.getCellBgRgb(cells.row, 0), ANCHOR_BG, `the anchor row carries the weaker current wash:\n${lines.join('\n')}`)
+  const selection = mountedSelectionFor(app, message)
+  assert.equal(selection?.exact, false)
+  assert.equal(selection?.selectedIndex, -1)
+  assert.equal(selection?.exactPaintedSegments, undefined)
   app.stop()
 })
 
@@ -1374,5 +1553,236 @@ test('search reveals a relay folded inside a Focus Thought and dismissal restore
   await vt.waitForRender()
   assert.ok(!view().includes('FOLDED_RELAY_PAYLOAD'), `dismissal restores the collapsed Thought:\n${view()}`)
   assert.equal(app.focusExpandedTurnsForTest().size, 0, 'no permanent manual Thought expansion is left behind')
+  app.stop()
+})
+
+// ── PR-B: plain-text source-to-cell proof at real widths ───────────────────
+
+/** Every viewport cell where a visible `needle` starts and carries the strong
+ * block. Ambiguity-free: the caller compares the count and the row. */
+function strongNeedleStarts(vt: VirtualTerminal, lines: readonly string[]): Array<{ row: number; column: number }> {
+  const starts: Array<{ row: number; column: number }> = []
+  for (let row = 0; row < lines.length; row += 1) {
+    const line = lines[row]!
+    for (let index = line.indexOf('needle'); index >= 0; index = line.indexOf('needle', index + 'needle'.length)) {
+      const column = visibleWidth(line.slice(0, index))
+      if (vt.getCellBgRgb(row, column) === STRONG_BG) starts.push({ row, column })
+    }
+  }
+  return starts
+}
+
+test('navigation: proven User cells hold across standard and wrapped widths', async () => {
+  const text = 'needle alpha needle'
+  const { folder, message } = userMessageFolder(text)
+  const matches = folder.search('needle')
+  assert.equal(matches.length, 2)
+  const { vt, app } = startApp(160, 30)
+  app.setFullscreen(true)
+  app.setTranscript([message], folder.turnActivities())
+  await viewport(vt)
+  for (const width of [160, 100, 80, 20]) {
+    vt.resize(width, 30)
+    await viewport(vt)
+    app.setTranscriptSearchPresentation({
+      matchMessages: new Set([message]),
+      target: { query: 'needle', match: matches[1]!, message },
+      grantReveal: true,
+    })
+    app.scrollToSearchTarget()
+    const lines = await viewport(vt)
+    const strong = strongNeedleStarts(vt, lines)
+    assert.equal(strong.length, 1, `width ${width}: exactly ONE occurrence is current:\n${lines.join('\n')}`)
+    const selection = mountedSelectionFor(app, message)
+    assert.equal(selection?.exact, true, `width ${width}: the source hit is proven`)
+    assert.ok((selection?.exactPaintedSegments?.length ?? 0) > 0, `width ${width}: painted cells exist`)
+    if (width !== 20) {
+      const row = strong[0]!.row
+      const first = columnOf(lines[row]!, 'needle', 0)
+      assert.ok(strong[0]!.column > first, `width ${width}: the SECOND occurrence is current, not the first`)
+    }
+  }
+  app.stop()
+})
+
+test('navigation: a very narrow User bubble still proves its wrapped cell', async () => {
+  const { folder, message } = userMessageFolder('needle alpha beta')
+  const match = folder.search('needle')[0]
+  assert.ok(match !== undefined)
+  const { vt, app } = startApp(12, 24)
+  app.setFullscreen(true)
+  app.setTranscript([message], folder.turnActivities())
+  app.setTranscriptSearchPresentation({
+    matchMessages: new Set([message]),
+    target: { query: 'needle', match, message },
+    grantReveal: true,
+  })
+  app.scrollToSearchTarget()
+  const lines = await viewport(vt)
+  const row = lines.findIndex(line => line.includes('needle'))
+  assert.ok(row >= 0, `the wrapped source is visible at 12 columns:\n${lines.join('\n')}`)
+  assert.equal(vt.getCellBgRgb(row, columnOf(lines[row]!, 'needle')), STRONG_BG)
+  const selection = mountedSelectionFor(app, message)
+  assert.equal(selection?.exact, true)
+  assert.equal(selection?.selectedRow, selection?.exactPaintedSegments?.[0]?.row)
+  app.stop()
+})
+
+test('navigation: wide CJK and ZWJ emoji User cells map to terminal columns', async () => {
+  const text = '检索 目标词\n👩‍👩‍👦 needle\n检索 tail'
+  const { folder, message } = userMessageFolder(text)
+  const cjk = folder.search('检索')
+  const emoji = folder.search('👩‍👩‍👦')
+  assert.equal(cjk.length, 2, 'the authoritative corpus has two CJK occurrences')
+  assert.equal(emoji.length, 1)
+  const { vt, app } = startApp(60, 30)
+  app.setFullscreen(true)
+  app.setTranscript([message], folder.turnActivities())
+
+  app.setTranscriptSearchPresentation({
+    matchMessages: new Set([message]),
+    target: { query: '检索', match: cjk[1]!, message },
+    grantReveal: true,
+  })
+  let lines = await viewport(vt)
+  let row = lines.findIndex(line => line.includes('检索 tail'))
+  assert.ok(row >= 0, `the second CJK occurrence is visible:\n${lines.join('\n')}`)
+  const cjkColumn = columnOf(lines[row]!, '检索')
+  assert.equal(vt.getCellBgRgb(row, cjkColumn), STRONG_BG, 'the first CJK cell is current')
+  assert.equal(vt.getCellBgRgb(row, cjkColumn + 1), STRONG_BG, 'the second CJK cell belongs to the same current grapheme')
+
+  app.setTranscriptSearchPresentation({
+    matchMessages: new Set([message]),
+    target: { query: '👩‍👩‍👦', match: emoji[0]!, message },
+    grantReveal: true,
+  })
+  lines = await viewport(vt)
+  row = lines.findIndex(line => line.includes('👩‍👩‍👦'))
+  assert.ok(row >= 0, `the ZWJ cluster is visible:\n${lines.join('\n')}`)
+  const emojiColumn = columnOf(lines[row]!, '👩‍👩‍👦')
+  assert.equal(vt.getCellBgRgb(row, emojiColumn), STRONG_BG, 'the leading cell of the ZWJ cluster is current')
+  assert.equal(vt.getCellBgRgb(row, emojiColumn + 1), STRONG_BG, 'the whole wide grapheme is painted, never half')
+  assert.equal(mountedSelectionFor(app, message)?.exact, true)
+  app.stop()
+})
+
+test('navigation: the source-cell witness never reaches the painted frame', async () => {
+  const { folder, message } = userMessageFolder('needle alpha needle beta')
+  const matches = folder.search('needle')
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  app.setTranscript([message], folder.turnActivities())
+  await viewport(vt)
+  const renderedRows = (): readonly string[] => {
+    const mounted = (app as unknown as {
+      mountedTranscriptBlocks: ReadonlyArray<{ block: { message?: TranscriptMessage }; rendered: readonly string[] }>
+    }).mountedTranscriptBlocks
+    return mounted.find(entry => entry.block.message === message)!.rendered
+  }
+  const plain = renderedRows()
+  app.setTranscriptSearchPresentation({
+    matchMessages: new Set([message]),
+    target: { query: 'needle', match: matches[1]!, message },
+    grantReveal: true,
+  })
+  await viewport(vt)
+  const decorated = renderedRows()
+  assert.deepEqual(decorated.map(stripTerminalSequences), plain.map(stripTerminalSequences),
+    'the live child rows keep exactly the pre-search visible text')
+  assert.deepEqual(decorated.map(visibleWidth), plain.map(visibleWidth),
+    'the witness never changes the painted width')
+  assert.ok(!vt.writes.join('').includes('dsh-pi-tui-search-proof'),
+    'the disposable witness URL never reaches terminal writes')
+  app.stop()
+})
+
+test('navigation: a passively targeted compact Thinking stays anchor-only', async () => {
+  const { folder, message } = thinkingMessageFolder('thinking preview about needle')
+  const match = folder.search('thinking').find(candidate => candidate.source.kind === 'message')
+  assert.ok(match !== undefined)
+  const { vt, app } = startApp(100, 30)
+  app.setFullscreen(true)
+  app.setTranscript(folder.messages(), folder.turnActivities())
+  // A PASSIVE rebind carries the target without granting the reveal, so the
+  // compact preview stays the only visible body evidence.
+  app.setTranscriptSearchPresentation({
+    matchMessages: new Set([message]),
+    target: { query: 'thinking', match, message },
+    grantReveal: false,
+  })
+  const lines = await viewport(vt)
+  const titleRow = lines.findIndex(line => /Thinking/.test(line))
+  const previewRow = lines.findIndex(line => line.includes('preview about needle'))
+  assert.ok(titleRow >= 0 && previewRow >= 0, `the compact Thinking rows are painted:\n${lines.join('\n')}`)
+  for (const row of [titleRow, previewRow]) {
+    for (let column = 0; column < visibleWidth(lines[row]!); column += 1) {
+      assert.notEqual(vt.getCellBgRgb(row, column), STRONG_BG,
+        `the compact Thinking row ${row} never claims a proven source cell`)
+    }
+  }
+  const selection = mountedSelectionFor(app, message)
+  assert.equal(selection?.exact, false, 'a compact preview is not the reasoning source layout')
+  assert.equal(selection?.selectedIndex, -1)
+  assert.equal(selection?.exactPaintedSegments, undefined)
+  app.stop()
+})
+
+test('navigation: the regular surface paints the proven User cell without a scroll owner', async () => {
+  const { folder, message } = userMessageFolder('needle alpha needle beta')
+  const matches = folder.search('needle')
+  const { vt, app } = startApp(100, 30)
+  app.setTranscript([message], folder.turnActivities())
+  app.setTranscriptSearchPresentation({
+    matchMessages: new Set([message]),
+    target: { query: 'needle', match: matches[1]!, message },
+    grantReveal: true,
+  })
+  const lines = await viewport(vt)
+  const row = lines.findIndex(line => line.includes('needle alpha needle beta'))
+  assert.ok(row >= 0, `the regular User row is painted:\n${lines.join('\n')}`)
+  assert.equal(vt.getCellBgRgb(row, columnOf(lines[row]!, 'needle', 1)), STRONG_BG,
+    'the second regular-surface occurrence is the proven current cell')
+  assert.notEqual(vt.getCellBgRgb(row, columnOf(lines[row]!, 'needle', 0)), STRONG_BG,
+    'the first occurrence is not current')
+  assert.equal(app.fullscreenScrollForTest(), undefined,
+    'a regular surface never gains a Fullscreen scroll controller from search exactness')
+  assert.equal(mountedSelectionFor(app, message)?.exact, true)
+  app.stop()
+})
+
+test('navigation: a plugin-rendered User or Thinking card never claims Host source cells', async () => {
+  const { RendererRegistry } = await import('../../src/extension/internal/renderer-registry.ts')
+  const registry = new RendererRegistry()
+  registry.registerMessageRenderer({
+    id: 'plugin-thinking-proof', kind: 'thinking',
+    render: snapshot => ({ kind: 'text', spans: [{ text: `plugin ${snapshot.text ?? ''}` }] }),
+  }, 'plugin')
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    renderers: registry,
+    deliveredFiles: deliveredFilesCapabilityStub,
+  })
+  app.start()
+  startedApps.add(app)
+  const { folder, message } = thinkingMessageFolder('thinking needle body')
+  const match = folder.search('needle').find(candidate => candidate.source.kind === 'message')
+  assert.ok(match !== undefined)
+  app.setFullscreen(true)
+  app.setTranscript(folder.messages(), folder.turnActivities())
+  app.setTranscriptSearchPresentation({
+    matchMessages: new Set([message]),
+    target: { query: 'needle', match, message },
+    grantReveal: true,
+  })
+  const lines = await viewport(vt)
+  const row = lines.findIndex(line => line.includes('plugin') && line.includes('needle'))
+  assert.ok(row >= 0, `the plugin renderer owns the card:\n${lines.join('\n')}`)
+  for (let column = 0; column < visibleWidth(lines[row]!); column += 1) {
+    assert.notEqual(vt.getCellBgRgb(row, column), STRONG_BG,
+      'a plugin-rendered card never becomes an exact Host cell even when its text matches')
+  }
+  const selection = mountedSelectionFor(app, message)
+  assert.equal(selection?.exact, false)
+  assert.equal(selection?.exactPaintedSegments, undefined)
   app.stop()
 })

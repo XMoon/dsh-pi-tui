@@ -108,13 +108,21 @@ export interface RenderedSearchScrollRange {
 }
 
 /** One block's rendered search selection. `exact` is true ONLY when the
- * semantic occurrence was PROVEN to a rendered occurrence; a false selection is
- * an anchor-only degradation and must NOT strong-highlight anything. */
+ * semantic occurrence was PROVEN to rendered cells; a false selection is an
+ * anchor-only degradation and must NOT strong-highlight anything. Two mutually
+ * exclusive exactness channels exist: a proven rendered occurrence ordinal
+ * (`selectedIndex >= 0`, direct single-line fields) and source-proven painted
+ * cells (`exactPaintedSegments`, wrapped Host plain text). Never treat
+ * `selectedIndex === -1` alone as "anchor-only". */
 export interface RenderedSearchSelection {
   readonly matches: readonly AltScreenSearchMatch[]
   readonly selectedIndex: number
   readonly selectedRow: number | undefined
   readonly exact: boolean
+  /** Current source-proven cells independent of any rendered regex ordinal.
+   * Present only for a freshly verified plain-text proof; it expires with the
+   * selection and is never persisted or used as match identity. */
+  readonly exactPaintedSegments?: readonly AltScreenSearchSegment[]
   /** Best-effort viewport geometry; never semantic occurrence proof. */
   readonly scrollRange?: RenderedSearchScrollRange
 }
@@ -321,6 +329,16 @@ export function selectRenderedSearchScrollRange(
 ): RenderedSearchScrollRange | undefined {
   if (selector.weakOnly === true) return undefined
 
+  // The plain-text source proof owns REAL painted cells, so its first/last row
+  // is the exact destination regardless of the rendered matcher's ordinal.
+  const painted = selection.exactPaintedSegments
+  if (painted !== undefined && painted.length > 0) {
+    return {
+      startRow: painted[0]!.row,
+      endRow: painted[painted.length - 1]!.row,
+    }
+  }
+
   if (selection.exact && selection.selectedIndex >= 0) {
     const exactRange = renderedSearchMatchRowRange(matches[selection.selectedIndex])
     if (exactRange !== undefined) return exactRange
@@ -402,15 +420,17 @@ export function highlightColumnRanges(
 /** Decorate every visible occurrence of `selection.matches` without changing
  * row count or visible width. `selectedIndex >= 0` marks that occurrence
  * strong; `-1` with matches present decorates all of them weak (the other
- * visible cards while the current card owns the strong occurrence). An
- * anchor-only current also washes `selectedRow` even when the card has NO
- * visible occurrence of the query (the source may live behind a transform). */
+ * visible cards while the current card owns the strong occurrence). Source-
+ * proven `exactPaintedSegments` are appended as strong cells: the shared
+ * overlap merge lets them win over a weak occurrence on the same cells. An
+ * anchor-only current also washes `selectedRow` — but never when a proof
+ * channel owns the selection. */
 export function highlightSearchLines(
   lines: readonly string[],
   selection: RenderedSearchSelection,
 ): string[] {
   let result = [...lines]
-  if (selection.matches.length > 0) {
+  if (selection.matches.length > 0 || (selection.exactPaintedSegments?.length ?? 0) > 0) {
     const candidatesByRow = new Map<number, Array<{ range: RenderedColumnRange; current: boolean }>>()
     selection.matches.forEach((match, matchIndex) => {
       for (const segment of match.segments) {
@@ -422,6 +442,14 @@ export function highlightSearchLines(
         candidatesByRow.set(segment.row, candidates)
       }
     })
+    for (const segment of selection.exactPaintedSegments ?? []) {
+      const candidates = candidatesByRow.get(segment.row) ?? []
+      candidates.push({
+        range: { startCol: segment.startCol, endCol: segment.endCol },
+        current: true,
+      })
+      candidatesByRow.set(segment.row, candidates)
+    }
 
     const rangesByRow = new Map<number, RenderedColumnHighlight[]>()
     for (const [row, candidates] of candidatesByRow) {
@@ -450,11 +478,12 @@ export function highlightSearchLines(
   }
   // The ANCHOR-ONLY current result (plan S3 §6.3): no proven occurrence, so
   // every match stays weak — but the owning source/card row gets a weaker
-  // background so the user can still see WHERE the current N/M lives. The
-  // occurrence provenance (selectedIndex = -1), the count and the scroll anchor
-  // are all unchanged. This applies EVEN with no visible occurrence: the
-  // source region is the honest anchor in that case.
-  if (selection.selectedIndex < 0 && selection.selectedRow !== undefined) {
+  // background so the user can still see WHERE the current N/M lives. Any
+  // exact channel keeps its own strong cells unwashed. The occurrence
+  // provenance (selectedIndex = -1), the count and the scroll anchor are all
+  // unchanged. This applies EVEN with no visible occurrence: the source region
+  // is the honest anchor in that case.
+  if (!selection.exact && selection.selectedRow !== undefined) {
     const row = selection.selectedRow
     const line = result[row]
     if (line !== undefined && !isImageLine(line)) result[row] = styleVisibleText(line, SEARCH_ANCHOR_STYLE)

@@ -158,6 +158,36 @@ function typeQuery(fixture: RunnerFixture, query: string): void {
   for (const char of query) fixture.input(char)
 }
 
+interface RunnerSearchSelection {
+  readonly selectedIndex: number
+  readonly selectedRow?: number
+  readonly exact: boolean
+  readonly exactPaintedSegments?: ReadonlyArray<{ readonly row: number; readonly startCol: number; readonly endCol: number }>
+  readonly matches?: ReadonlyArray<{ readonly segments: ReadonlyArray<{ readonly row: number }> }>
+}
+
+function mountedSearchSelection(app: TuiApp, message: TranscriptMessage): RunnerSearchSelection | undefined {
+  const mounted = (app as unknown as {
+    mountedTranscriptBlocks: ReadonlyArray<{ block: { message?: TranscriptMessage }; searchSelection?: RunnerSearchSelection }>
+  }).mountedTranscriptBlocks
+  return mounted.find(entry => entry.block.message === message)?.searchSelection
+}
+
+/** The terminal column of one visible needle occurrence (cell width, never a
+ * JS string index). */
+function columnOf(line: string, needle: string, occurrence = 0): number {
+  let index = -1
+  let from = 0
+  for (let occurrenceIndex = 0; occurrenceIndex <= occurrence; occurrenceIndex += 1) {
+    index = line.indexOf(needle, from)
+    assert.ok(index >= 0, `occurrence ${occurrenceIndex} of ${JSON.stringify(needle)} missing from ${JSON.stringify(line)}`)
+    from = index + needle.length
+  }
+  return visibleWidth(line.slice(0, index))
+}
+
+const STRONG_BG = 0xf5c542
+
 test('runner search: a same-window query re-windows zero times and rebuilds at most once', async (t) => {
   const fixture = await mountSearchRunner(t, 30, [25, 29])
   const { app, projections } = fixture
@@ -610,6 +640,84 @@ test('runner search: every operation performs exactly one representative pass', 
   }
 })
 
+test('runner search: a real User hit proves both occurrences at their painted cells', async (t) => {
+  const text = [
+    'top filler',
+    'needle first hit',
+    ...Array.from({ length: 20 }, (_, index) => `middle filler ${index}`),
+    'needle second hit',
+    'bottom filler',
+  ].join('\n')
+  const events = [
+    event('turn/start', { turn: 0 }, 0),
+    event('user/message', {
+      id: MessageId('user-proof-message'),
+      role: 'user',
+      content: [{ type: 'text', text }],
+      source: { kind: 'user' },
+    }, 1),
+    event('assistant/message', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('user-proof-answer'),
+        role: 'assistant',
+        content: [{ type: 'text', text: 'done' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+      stream: [],
+    }, 2),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 3),
+  ]
+  const fixture = await mountSearchRunner(t, 1, [], 'needle', events)
+  const { app, vt } = fixture
+  app.startTranscriptSearch()
+  await fixture.settleRender()
+  typeQuery(fixture, 'needle')
+  await fixture.settleRender()
+
+  const firstTarget = app.transcriptSearchPresentationForTest()
+  assert.equal(firstTarget?.sourceKey, 'message', 'the real Folder hit is the User message source')
+  assert.equal(firstTarget?.sourceOccurrence, 0)
+  const message = firstTarget?.message
+  assert.ok(message?.kind === 'user')
+  let selection = mountedSearchSelection(app, message)
+  assert.equal(selection?.exact, true, 'the real runner proves the User source cell, not a guessed ordinal')
+  assert.equal(selection?.selectedIndex, -1, 'the plain-text channel needs no rendered regex ordinal')
+  assert.equal(selection?.selectedRow, selection?.exactPaintedSegments?.[0]?.row)
+  assert.ok((selection?.exactPaintedSegments?.length ?? 0) > 0)
+  let lines = vt.getViewport()
+  let row = lines.findIndex(line => line.includes('needle first hit'))
+  assert.ok(row >= 0, `the first painted target is visible:\n${lines.join('\n')}`)
+  assert.equal(vt.getCellBgRgb(row, columnOf(lines[row]!, 'needle')), STRONG_BG,
+    'the first occurrence owns its real painted cell')
+  const firstScrollTop = app.fullscreenScrollForTest()?.scrollTop ?? 0
+
+  fixture.input('\r')
+  await fixture.settleRender()
+  const secondTarget = app.transcriptSearchPresentationForTest()
+  assert.equal(secondTarget?.sourceOccurrence, 1, 'Next reaches the second authoritative occurrence')
+  selection = mountedSearchSelection(app, message)
+  assert.equal(selection?.exact, true)
+  assert.equal(selection?.selectedIndex, -1)
+  lines = vt.getViewport()
+  row = lines.findIndex(line => line.includes('needle second hit'))
+  assert.ok(row >= 0, `the second painted target is visible:\n${lines.join('\n')}`)
+  assert.ok(!lines.some(line => line.includes('needle first hit')),
+    'the first occurrence is not the second destination')
+  assert.notEqual(app.fullscreenScrollForTest()?.scrollTop ?? 0, firstScrollTop,
+    'Next moves the viewport to the second proven row')
+  assert.equal(vt.getCellBgRgb(row, columnOf(lines[row]!, 'needle')), STRONG_BG,
+    'the second occurrence owns its real painted cell')
+
+  fixture.input('\x1b[13;2u')
+  await fixture.settleRender()
+  assert.equal(app.transcriptSearchPresentationForTest()?.sourceOccurrence, 0, 'Prev returns to the first occurrence')
+  lines = vt.getViewport()
+  row = lines.findIndex(line => line.includes('needle first hit'))
+  assert.ok(row >= 0, `Prev returns the first painted row:\n${lines.join('\n')}`)
+  assert.equal(vt.getCellBgRgb(row, columnOf(lines[row]!, 'needle')), STRONG_BG)
+})
+
 test('runner search: sanitized Thinking bodies exclude title and hint from semantic matches', async (t) => {
   const rawControlOnly = '\x1b[?25i'
   assert.equal(sanitizeDisplayText(rawControlOnly), '', 'the control-only Thinking source has no safe display body')
@@ -708,27 +816,26 @@ test('runner search: expanded Thinking body starts after a wrapped title at narr
   assert.ok(iconTitleRow >= 0 && titleTextRow > iconTitleRow && bodyRow > titleTextRow,
     `the narrow expanded title wraps before the body:\n${lines.join('\n')}`)
 
-  const mounted = (app as unknown as {
-    mountedTranscriptBlocks: ReadonlyArray<{
-      block: { message?: TranscriptMessage }
-      searchSelection?: { matches: Array<{ segments: Array<{ row: number }> }>; selectedIndex: number; selectedRow?: number; exact: boolean }
-    }>
-  }).mountedTranscriptBlocks
   const selected = app.transcriptSearchPresentationForTest()?.message
   assert.equal(selected?.kind, 'thinking')
-  const selection = mounted.find(entry => entry.block.message === selected)?.searchSelection
+  const selection = mountedSearchSelection(app, selected!)
   assert.ok(selection !== undefined)
-  assert.equal(selection.exact, false, 'Thinking remains position-only')
-  assert.equal(selection.selectedIndex, -1)
+  assert.equal(selection.exact, true, 'the expanded reasoning body is proven at narrow width')
+  assert.equal(selection.selectedIndex, -1, 'no rendered title ordinal is guessed')
   const titleRows = titleTextRow - iconTitleRow + 1
-  assert.equal(selection.selectedRow, titleRows, 'the source anchor follows every wrapped title row')
-  assert.ok(selection.matches.length > 0, 'the body occurrence remains available as a weak hint')
-  assert.ok(selection.matches.every(match => match.segments.every(segment => segment.row >= titleRows)),
+  const painted = selection.exactPaintedSegments
+  assert.ok(painted !== undefined && painted.length > 0)
+  assert.equal(selection.selectedRow, painted![0]!.row)
+  assert.ok(painted!.every(segment => segment.row >= titleRows), 'every proven cell is below the wrapped title')
+  assert.ok((selection.matches?.length ?? 0) > 0, 'the body occurrence remains available as a weak hint')
+  assert.ok(selection.matches!.every(match => match.segments.every(segment => segment.row >= titleRows)),
     'rendered title rows are excluded from the same matcher list')
-  assert.equal(vt.getCellUnderline(titleTextRow, visibleWidth(lines[titleTextRow]!.slice(0, lines[titleTextRow]!.indexOf('Thinking')))), false,
-    'the wrapped Thinking title is not weak-highlighted')
-  assert.equal(vt.getCellUnderline(bodyRow, visibleWidth(lines[bodyRow]!.slice(0, lines[bodyRow]!.toLowerCase().indexOf('thinking')))), true,
-    'the real body match remains weak-highlighted')
+  const titleColumn = visibleWidth(lines[titleTextRow]!.slice(0, lines[titleTextRow]!.indexOf('Thinking')))
+  assert.notEqual(vt.getCellBgRgb(titleTextRow, titleColumn), STRONG_BG,
+    'the wrapped Thinking title word is never the body source cell')
+  const bodyColumn = visibleWidth(lines[bodyRow]!.slice(0, lines[bodyRow]!.toLowerCase().indexOf('thinking')))
+  assert.equal(vt.getCellBgRgb(bodyRow, bodyColumn), STRONG_BG,
+    'the real body occurrence is the current painted cell')
 })
 
 test('runner search: passive assistant settlement refreshes the source range for the stable target', async (t) => {
