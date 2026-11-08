@@ -32,7 +32,7 @@ import {
   type ScheduleViewRequest,
   type ScheduleViewResult,
 } from '../../src/runtime/schedule-port.ts'
-import { scheduleSessionId } from '../../src/domain/schedule/form.ts'
+import { editorFields, scheduleSessionId } from '../../src/domain/schedule/form.ts'
 import type {
   SessionProjectionSummary,
   SessionReader,
@@ -668,6 +668,46 @@ test('L6: every guided timing preset selects its official rule without translati
   }
 })
 
+test('L6: selecting the current Once-after preset preserves its exact stored seconds', async () => {
+  for (const seconds of [90, 61, 3600]) {
+    const life = await opened()
+    try {
+      life.port.entries = [entry({ kind: 'after', afterSeconds: seconds })]
+      life.controller.dispatch({ kind: 'refresh' })
+      await flush()
+      life.controller.dispatch({ kind: 'open-detail', id: 'schedule-1' })
+      await flush()
+      life.controller.dispatch({ kind: 'open-edit' })
+      await flush()
+
+      const original = life.controller.snapshot().editor?.timing
+      assert.deepEqual(original, {
+        kind: 'after',
+        afterSeconds: String(seconds),
+        quantityUnit: seconds % 3600 === 0 ? 'hours' : 'seconds',
+      })
+      life.controller.dispatch({ kind: 'select-timing-preset', preset: 'once-after' })
+      assert.deepEqual(life.controller.snapshot().editor?.timing, original,
+        `reselecting Once-after does not change ${seconds} stored seconds`)
+
+      life.controller.dispatch({ kind: 'set-field', fieldId: 'title', value: 'Renamed' })
+      life.port.editResult = async request => {
+        if (request.action !== 'update') throw new Error('expected one update request')
+        assert.deepEqual(request.patch, { title: 'Renamed' }, 'reselecting Once-after adds no timing patch')
+        return entry({ title: 'Renamed', kind: 'after', afterSeconds: seconds })
+      }
+      life.controller.dispatch({ kind: 'save' })
+      await flush()
+      await life.controller.whenIdle()
+      const request = life.port.calls.find(call => call.method === 'edit')?.args[0] as ScheduleEditRequest
+      if (request.action !== 'update') throw new Error('expected one update request')
+      assert.deepEqual(request.patch, { title: 'Renamed' })
+    } finally {
+      life.controller.dispose()
+    }
+  }
+})
+
 test('L6: guided timing presets convert quantities without rounding the current rule', async () => {
   const life = await opened()
   try {
@@ -1265,6 +1305,69 @@ test('L6: a Review answer settling after dispose publishes nothing', async () =>
   await flush()
   assert.equal(publications, settledPublications)
   assert.equal(life.controller.snapshot().editor?.title, 'Local title')
+})
+
+test('L6: Review settles without restoring a stale field focus', async () => {
+  const life = await opened()
+  try {
+    life.controller.dispatch({ kind: 'open-detail', id: 'schedule-1' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-edit' })
+    await flush()
+    life.controller.dispatch({ kind: 'set-field', fieldId: 'title', value: 'Local title' })
+    life.port.editResult = async () => ({ id: 'schedule-1' as never, code: 'schedule_conflict' })
+    life.controller.dispatch({ kind: 'save' })
+    await flush()
+    await life.controller.whenIdle()
+
+    const read = deferred<ScheduleViewResult>()
+    life.port.viewQueue = [read.promise]
+    life.controller.dispatch({ kind: 'review-with-my-edits' })
+    await flush()
+    life.controller.dispatch({ kind: 'focus-field', index: 1 })
+    assert.equal(life.controller.snapshot().editor?.focused, 1)
+    read.resolve(entry({
+      title: 'Host title',
+      prompt: 'Host prompt',
+      updatedAt: '2026-01-15T00:00:00.000Z',
+    }))
+    await flush()
+    const editor = life.controller.snapshot().editor
+    assert.equal(editor?.focused, 1)
+    assert.equal(editorFields(editor!).map(field => field.id)[editor!.focused], 'prompt')
+  } finally {
+    life.controller.dispose()
+  }
+})
+
+test('L6: Reload settles without restoring a stale field focus', async () => {
+  const life = await opened()
+  try {
+    life.controller.dispatch({ kind: 'open-detail', id: 'schedule-1' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-edit' })
+    await flush()
+    life.controller.dispatch({ kind: 'set-field', fieldId: 'title', value: 'Local title' })
+
+    const read = deferred<ScheduleViewResult>()
+    life.port.viewQueue = [read.promise]
+    life.controller.dispatch({ kind: 'reload-latest' })
+    assert.equal(life.controller.snapshot().confirm?.kind, 'reload')
+    life.controller.dispatch({ kind: 'confirm' })
+    await flush()
+    life.controller.dispatch({ kind: 'focus-field', index: 1 })
+    read.resolve(entry({
+      title: 'Host title',
+      prompt: 'Host prompt',
+      updatedAt: '2026-01-16T00:00:00.000Z',
+    }))
+    await flush()
+    const editor = life.controller.snapshot().editor
+    assert.equal(editor?.focused, 1)
+    assert.equal(editorFields(editor!).map(field => field.id)[editor!.focused], 'prompt')
+  } finally {
+    life.controller.dispose()
+  }
 })
 
 test('L6: Help under an in-flight history page keeps its answer, and invalidation re-reads', async () => {

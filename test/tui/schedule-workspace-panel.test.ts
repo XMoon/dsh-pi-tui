@@ -1325,6 +1325,57 @@ test('the raw Prompt accepts Unicode input and edits at the caret', () => {
   assert.equal((view.dispatches[0] as { value?: string } | undefined)?.value, '检查服务器状态\n发现异常后汇报')
 })
 
+test('canceling Editor discard confirmation preserves plain and RAW input cursors', () => {
+  const plain = harness(workspace({
+    mode: 'editor',
+    pageEpoch: 1,
+    editorEpoch: 7,
+    editor: draft({ mode: 'edit', id: 'schedule-1', title: 'A', focused: 0 }),
+  }), { columns: 100, rows: 30 })
+  plain.panel.focused = true
+  plain.render()
+  plain.panel.handleInput('X')
+  plain.setSnapshot({
+    ...plain.snapshot(),
+    editor: { ...plain.snapshot().editor!, title: 'AX' },
+    editorDirty: true,
+  })
+  plain.panel.handleInput('\x1b[D')
+  plain.setSnapshot({
+    ...plain.snapshot(),
+    pageEpoch: 2,
+    confirm: { kind: 'discard', token: 1 },
+  })
+  plain.panel.handleInput('n')
+  plain.setSnapshot({ ...plain.snapshot(), pageEpoch: 3, confirm: undefined })
+  plain.resetDispatches()
+  plain.panel.handleInput('Y')
+  assert.deepEqual(plain.dispatches, [{ kind: 'set-field', fieldId: 'title', value: 'AYX' }],
+    'plain Input keeps its middle caret when the confirmation is canceled')
+
+  const raw = harness(workspace({
+    mode: 'editor',
+    pageEpoch: 1,
+    editorEpoch: 9,
+    editor: draft({ mode: 'edit', id: 'schedule-2', prompt: 'Alpha\nBeta', focused: 1 }),
+  }), { columns: 100, rows: 30 })
+  raw.panel.focused = true
+  raw.render()
+  raw.panel.handleInput('\x1b[D')
+  raw.setSnapshot({
+    ...raw.snapshot(),
+    pageEpoch: 2,
+    editorDirty: true,
+    confirm: { kind: 'discard', token: 2 },
+  })
+  raw.panel.handleInput('n')
+  raw.setSnapshot({ ...raw.snapshot(), pageEpoch: 3, confirm: undefined })
+  raw.resetDispatches()
+  raw.panel.handleInput('X')
+  assert.deepEqual(raw.dispatches, [{ kind: 'set-field', fieldId: 'prompt', value: 'Alpha\nBetXa' }],
+    'RAW Prompt keeps its code-point caret when the confirmation is canceled')
+})
+
 test('the action bar keeps <key> <verb> while the body buttons use Verb [Key]', () => {
   const confirm = workspace({ confirm: { kind: 'clear-ended', token: 21 } })
   const lines = harness(confirm, { columns: 120, rows: 30 }).plain()

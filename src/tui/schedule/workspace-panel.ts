@@ -316,18 +316,25 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
       // again over a wheel gesture that pinned the viewport.
       this.listScrollPinned = false
     }
-    if (snapshot.mode !== 'editor') {
+    const editorInstanceChanged = snapshot.editorEpoch !== previous.editorEpoch
+      || snapshot.editor?.id !== previous.editor?.id
+      || snapshot.editor?.mode !== previous.editor?.mode
+      || (snapshot.editor === undefined) !== (previous.editor === undefined)
+    if (editorInstanceChanged || snapshot.editor === undefined) {
       this.chooser = undefined
       this.editorFieldId = undefined
       this.editorBaseline = undefined
       this.editorDispatched = undefined
-    } else if (snapshot.pageEpoch !== previous.pageEpoch
+      this.rawDraft = undefined
+      this.rawDispatched = undefined
+      this.rawCursor = undefined
+    } else if (snapshot.mode !== 'editor'
+      || snapshot.pageEpoch !== previous.pageEpoch
       || (this.chooser !== undefined
-        && (snapshot.editor === undefined || !editorFields(snapshot.editor).some(field => field.id === this.chooser?.fieldId)))) {
+        && !editorFields(snapshot.editor).some(field => field.id === this.chooser?.fieldId))) {
+      // A confirm/help/page-generation change invalidates panel-local chooser
+      // hits, but the same Editor instance still owns its text and caret state.
       this.chooser = undefined
-      this.editorFieldId = undefined
-      this.editorBaseline = undefined
-      this.editorDispatched = undefined
     }
     if (snapshot.mode !== 'list') {
       this.searchFocused = false
