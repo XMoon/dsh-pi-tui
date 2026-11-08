@@ -374,12 +374,13 @@ test('L6: an invalidated read never publishes and the invalidation re-reads once
     life.port.catalogGate = gate
     life.controller.dispatch({ kind: 'refresh' })
     await flush()
-    life.port.entries = [entry({ title: 'After invalidation' })]
+    life.port.entries = [entry({ title: 'After invalidation', status: 'paused' })]
     life.port.invalidate()
-    gate.resolve([entry({ title: 'Obsolete' })])
+    gate.resolve([entry({ title: 'Obsolete', status: 'active' })])
     await flush()
     assert.equal(life.controller.snapshot().rows[0].title, 'After invalidation')
-    assert.deepEqual(life.controller.snapshot().statusCounts, { active: 1, paused: 0, ended: 0 })
+    assert.deepEqual(life.controller.snapshot().statusCounts, { active: 0, paused: 1, ended: 0 },
+      'the committed counts follow the accepted invalidation read, not the obsolete epoch')
   } finally {
     life.controller.dispose()
   }
