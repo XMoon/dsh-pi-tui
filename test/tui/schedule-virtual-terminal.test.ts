@@ -55,6 +55,7 @@ function task(overrides: {
   readonly title: string
   readonly status?: ScheduleCatalogEntry['status']
   readonly scheduledAt?: string
+  readonly prompt?: string
 }): ScheduleCatalogEntry {
   return {
     kind: 'daily',
@@ -254,12 +255,13 @@ import type { ScheduleEditRequest, SchedulePort } from '../../src/runtime/schedu
 import type { SessionReader } from '../../src/runtime/session-reader-port.ts'
 
 /** Minimal recording SchedulePort for the source-to-sink SGR proof. */
-function createRecordingPort(): SchedulePort & { edits: ScheduleEditRequest[]; readonly catalogCalls: number } {
-  const rows = [
+function createRecordingPort(
+  rows: readonly ScheduleCatalogEntry[] = [
     task({ id: 'task-a', title: 'Alpha report', status: 'active' }),
     task({ id: 'task-b', title: 'Bravo digest', status: 'paused' }),
     task({ id: 'task-c', title: 'Charlie review', status: 'ended' }),
-  ]
+  ],
+): SchedulePort & { edits: ScheduleEditRequest[]; readonly catalogCalls: number } {
   const edits: ScheduleEditRequest[] = []
   const state = { catalogCalls: 0 }
   const listeners = new Set<() => void>()
@@ -301,7 +303,7 @@ function createController(port: SchedulePort, openDetail = true): ScheduleWorksp
   return controller
 }
 
-test('real VirtualTerminal Tab input cycles full-catalog filters through the Controller without another Host read', async () => {
+test('real VirtualTerminal Tab input cycles full-catalog filters through the Controller at every planned width', async () => {
   const port = createRecordingPort()
   const controller = createController(port, false)
   const vt = new VirtualTerminal(80, 24)
@@ -319,6 +321,12 @@ test('real VirtualTerminal Tab input cycles full-catalog filters through the Con
     handle.update(controller.snapshot())
     await vt.waitForRender()
     const catalogCalls = port.catalogCalls
+    const sizes: readonly Size[] = [
+      { columns: 44, rows: 20 },
+      { columns: 60, rows: 12 },
+      { columns: 80, rows: 24 },
+      { columns: 160, rows: 50 },
+    ]
     const cases = [
       ['\t', 'active', 'Enabled', 1, 'task-a'],
       ['\t', 'paused', 'Paused', 1, 'task-b'],
@@ -327,17 +335,77 @@ test('real VirtualTerminal Tab input cycles full-catalog filters through the Con
       ['\x1b[Z', 'ended', 'Ended', 1, 'task-c'],
       ['\x1b[Z', 'paused', 'Paused', 1, 'task-b'],
       ['\x1b[Z', 'active', 'Enabled', 1, 'task-a'],
+      ['\x1b[Z', 'all', 'All', 3, 'task-a'],
     ] as const
-    for (const [input, filter, label, count, selectedId] of cases) {
-      vt.sendInput(input)
+    for (const size of sizes) {
+      vt.resize(size.columns, size.rows)
       await vt.waitForRender()
-      assert.equal(controller.snapshot().filter, filter)
-      const frame = vt.getViewport().map(stripTerminalSequences).join('\n')
-      assert.ok(frame.includes(`[${label} ${count}]`), `${filter} paints its current full-catalog count:\n${frame}`)
-      assert.equal(controller.snapshot().selectedId, selectedId, 'filter cycling preserves the selected task when it remains visible')
-      assert.equal(port.catalogCalls, catalogCalls, 'local filter intents do not reread the Host catalog')
-      assert.deepEqual(port.edits, [], 'filter cycling dispatches no Host write')
+      for (const [input, filter, label, count, selectedId] of cases) {
+        vt.sendInput(input)
+        await vt.waitForRender()
+        assert.equal(controller.snapshot().filter, filter, `${size.columns} columns`)
+        const frame = vt.getViewport().map(stripTerminalSequences).join('\n')
+        assert.ok(frame.includes(`[${label} ${count}]`), `${size.columns}×${size.rows} ${filter} count:\n${frame}`)
+        assert.equal(controller.snapshot().selectedId, selectedId, 'filter cycling preserves the selected task when it remains visible')
+        assert.equal(port.catalogCalls, catalogCalls, 'local filter intents do not reread the Host catalog')
+        assert.deepEqual(port.edits, [], 'filter cycling dispatches no Host write')
+      }
     }
+  } finally {
+    unsubscribe()
+    app.dispose()
+    controller.dispose()
+  }
+})
+
+test('real SGR wheel input scrolls only the pointed wide-pane through TuiApp', async () => {
+  const rows = Array.from({ length: 40 }, (_, index) => task({
+    id: `task-${index}`,
+    title: `Task ${index}`,
+    status: index % 3 === 0 ? 'active' : index % 3 === 1 ? 'paused' : 'ended',
+    ...(index === 0 ? { prompt: Array.from({ length: 100 }, (_, line) => `Preview line ${line}`).join('\n') } : {}),
+  }))
+  const port = createRecordingPort(rows)
+  const controller = createController(port, false)
+  const vt = new VirtualTerminal(160, 50)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  started.add(app)
+  const handle = app.openScheduleWorkspace({
+    snapshot: () => controller.snapshot(),
+    dispatch: intent => { controller.dispatch(intent) },
+    onClose: () => {},
+  })
+  const unsubscribe = controller.subscribe(() => handle.update(controller.snapshot()))
+  try {
+    await controller.whenIdle()
+    handle.update(controller.snapshot())
+    await vt.waitForRender()
+    const catalogCalls = port.catalogCalls
+    const leftWidth = Math.max(20, Math.floor((vt.columns - 2) * 0.4))
+    const frame = (): string[] => vt.getViewport().map(stripTerminalSequences)
+    const before = frame()
+    assert.ok(before.some(line => line.slice(0, leftWidth).includes('Task 0')))
+    assert.ok(before.some(line => line.slice(leftWidth + 2).includes('Details')))
+    assert.ok(before.some(line => line.slice(leftWidth + 2).includes('Preview line 0')))
+
+    vt.sendInput(`\x1b[<65;${leftWidth + 2 + 10 + 1};11M`)
+    await vt.waitForRender()
+    const rightScrolled = frame()
+    assert.ok(rightScrolled.some(line => line.slice(0, leftWidth).includes('Task 0')),
+      'a right-pane wheel leaves the selected task visible on the left')
+    assert.ok(!rightScrolled.some(line => line.slice(leftWidth + 2).includes('Details')),
+      'a right-pane wheel advances the read-only Detail preview')
+
+    vt.sendInput('\x1b[<65;6;11M')
+    await vt.waitForRender()
+    const leftScrolled = frame()
+    assert.ok(!leftScrolled.some(line => line.slice(0, leftWidth).includes('Task 0')),
+      'a left-pane wheel advances the task catalog')
+    assert.ok(!leftScrolled.some(line => line.slice(leftWidth + 2).includes('Details')),
+      'left scrolling does not reset the right Detail preview position')
+    assert.equal(port.catalogCalls, catalogCalls, 'pane scrolling is panel-local')
+    assert.deepEqual(port.edits, [], 'wheel input dispatches no Host write')
   } finally {
     unsubscribe()
     app.dispose()

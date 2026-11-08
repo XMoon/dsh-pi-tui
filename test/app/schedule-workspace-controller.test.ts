@@ -379,6 +379,7 @@ test('L6: an invalidated read never publishes and the invalidation re-reads once
     gate.resolve([entry({ title: 'Obsolete' })])
     await flush()
     assert.equal(life.controller.snapshot().rows[0].title, 'After invalidation')
+    assert.deepEqual(life.controller.snapshot().statusCounts, { active: 1, paused: 0, ended: 0 })
   } finally {
     life.controller.dispose()
   }
