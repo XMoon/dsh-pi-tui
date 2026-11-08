@@ -7,6 +7,7 @@ import { testLifecycle } from '../support/temp-lifecycle.ts'
 import {
   assertNoPresetCompatibilityFailures,
   assertOfficialPresetHeader,
+  directPromptTimeoutDiagnostic,
   officialPresetStatusCommand,
   officialPresetStatusVisible,
   presetDegradationLine,
@@ -19,6 +20,25 @@ test('the official preset matrix is independently callable and reports the live 
   assert.equal(officialPresetStatusCommand(), '/preset status')
   assert.equal(officialPresetStatusVisible('ptc', 'preset: ptc · default: ptc'), true)
   assert.equal(officialPresetStatusVisible('ptc', 'preset: standard · default: ptc'), false)
+})
+
+test('Direct prompt timeout diagnostics expose only stable model-request facts', () => {
+  const diagnostic = directPromptTimeoutDiagnostic('model-answer', true, [{
+    markerCount: 1,
+    presentTool: true,
+    presentInstruction: true,
+    toolNames: ['/tmp/private-profile', 'present'],
+    prompt: 'full prompt with TOKEN_SENTINEL',
+    path: '/home/runner/private-session',
+    log: 'arbitrary runtime log SECRET_SENTINEL',
+  }])
+  assert.deepEqual(JSON.parse(diagnostic), {
+    stage: 'model-answer',
+    surfaceAlive: true,
+    requestCount: 1,
+    modelRequests: [{ markerCount: 1, presentTool: true, presentInstruction: true }],
+  })
+  assert.doesNotMatch(diagnostic, /TOKEN_SENTINEL|SECRET_SENTINEL|private-profile|private-session|full prompt|runtime log/u)
 })
 
 test('official preset settings snapshots read the filtered /help frame rather than stale pane text', () => {
