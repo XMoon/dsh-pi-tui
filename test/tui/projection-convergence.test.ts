@@ -176,15 +176,6 @@ test('the canonical structure segments the comprehensive fixture into the exact 
   ])
 })
 
-test('the canonical structure partitions the raw window exactly: no row dropped, duplicated or reordered', () => {
-  const { messages } = convergenceFixture()
-  const flattened = flattenStructure(projectTranscriptStructure(messages))
-  assert.equal(flattened.length, messages.length)
-  for (let index = 0; index < messages.length; index += 1) {
-    assert.equal(flattened[index], messages[index], `row ${index} keeps its exact identity and position`)
-  }
-})
-
 test('Work owner and members always reference the original rows; the owner is the first member', () => {
   const { messages } = convergenceFixture()
   const spans = workSpansOf(projectTranscriptStructure(messages))
@@ -277,7 +268,10 @@ test('Full materialization is the canonical flat chronology: Work expands, no Wo
   // Full is the canonical structure with Work flattened and clusters presented
   // by surface capability. Its message chronology MUST equal the raw window.
   const flattened = flattenStructure(projectTranscriptStructure(messages))
-  assert.deepEqual(flattened, messages)
+  assert.equal(flattened.length, messages.length)
+  for (let index = 0; index < messages.length; index += 1) {
+    assert.equal(flattened[index], messages[index], `row ${index} keeps its exact identity and position`)
+  }
 })
 
 // --- Expanded Focus consumes the canonical structure -----------------------
