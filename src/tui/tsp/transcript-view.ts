@@ -1555,7 +1555,7 @@ function focusPreparingPlacement(
 } {
   const groups = groupPreparingPreviews(options.preparingPreviews ?? [])
   if (groups.length === 0 || options.window?.hasNewer !== false) {
-    return { byRootOwner: new Map(), byWorkOwner: new Map(), standalone: groups.flatMap(([, previews]) => previews) }
+    return { byRootOwner: new Map(), byWorkOwner: new Map(), standalone: [] }
   }
   const activities = options.turnActivities ?? EMPTY_TURN_ACTIVITIES
   const expandedBlocks = projectFocus(messages, activities, new Set(activities.keys()), true)

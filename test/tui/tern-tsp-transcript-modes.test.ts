@@ -20,9 +20,14 @@ import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import { CommandId } from '@deepseek-ai/dsh-commands'
 import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { TranscriptFolder, transcriptTimingOf } from '../../src/domain/transcript/folder.ts'
+import { TranscriptWindowController } from '../../src/domain/transcript/window.ts'
+import { StatsFolder } from '../../src/domain/status/stats.ts'
+import { applyAssistantLiveInput } from '../../src/app/surface/session-presentation.ts'
+import { streamingToolPreviewSnapshot } from '../../src/app/surface/streaming-tool-preparing.ts'
 import type { TranscriptMessage } from '../../src/domain/transcript/types.ts'
 import { projectTranscriptStructure } from '../../src/tui/transcript/structure.ts'
 import { summarizeWorkSpan } from '../../src/tui/transcript/work-summary.ts'
+import { toolSummaryKeys } from '../../src/tui/transcript/tool-presentation.ts'
 import type { StreamingToolPreview } from '../../src/app/surface/streaming-tool-preparing.ts'
 import {
   TranscriptNodeKeys,
@@ -534,6 +539,50 @@ test('a missing Focus activity fails open and an unbound mount keeps the legacy 
   assert.equal(legacySection.props['collapsible'], undefined, 'unbound standalone layout keeps its legacy Work shape')
 })
 
+test('Focus renders a live Preparing only in the latest window selected from the same Folder', () => {
+  const folder = apply([
+    ev('turn/start', { turn: 1 }, 0),
+    userMessage(1, 'history-user', 'an earlier prompt'),
+    assistantMessage(2, 'history-answer', 'an earlier answer'),
+    ev('turn/end', { turn: 1, reason: { kind: 'completed' } }, 3),
+    ev('turn/start', { turn: 2 }, 4),
+    userMessage(5, 'live-user', 'prepare the next tool'),
+    ev('step/start', { turn: 2, step: 0 }, 6),
+  ])
+  const previews = new Map<string, StreamingToolPreview>()
+  applyAssistantLiveInput(folder, new StatsFolder(), previews, {
+    kind: 'chunk', sessionId: 'window-preparing', attemptId: 'live-preparing', turn: 2, step: 0,
+    time: T0 + 7000,
+    chunk: { type: 'tool-call-delta', index: 0, id: 'window-live-bash', name: 'bash', argumentsDelta: '{"command":"echo pending"}' },
+  }, toolSummaryKeys)
+  const preparingPreviews = streamingToolPreviewSnapshot(previews)
+  assert.equal(preparingPreviews.length, 1, 'the production live applier produced the preview')
+  const controller = new TranscriptWindowController({ windowTurns: 1, stepTurns: 1, turns: folder.groupedTurns() })
+  const latest = folder.window({ maxTurns: controller.windowTurns })
+  assert.equal(controller.snapshot().hasNewer, false)
+  assert.equal(latest.hasNewer, false)
+  assert.equal(controller.anchorAt(1), true, 'the Folder controller selects the earlier turn')
+  assert.equal(controller.snapshot().hasNewer, true)
+  const historyEndTurn = controller.endTurn()
+  assert.equal(historyEndTurn, 1)
+  const history = folder.window({
+    maxTurns: controller.windowTurns,
+    ...(historyEndTurn === undefined ? {} : { endTurn: historyEndTurn }),
+  })
+  assert.equal(history.hasNewer, true)
+  assert.ok(history.messages.every(message => !('turn' in message) || message.turn !== 2),
+    'the selected historical Folder window excludes the current turn')
+  const base = { preset: 'focus' as const, turnActivities: folder.turnActivities(), preparingPreviews }
+  for (const expandedFocusTurns of [new Set<number>(), new Set([1, 2])]) {
+    const latestNodes = flatten(latest.messages, { ...base, expandedFocusTurns, window: { mode: 'latest', hasNewer: latest.hasNewer } })
+    assert.ok(latestNodes.some(node => textOf(node).includes('Preparing Bash')),
+      'the latest window materializes its current Preparing as a summary or row')
+    const historyNodes = flatten(history.messages, { ...base, expandedFocusTurns, window: { mode: 'history', hasNewer: history.hasNewer } })
+    assert.ok(!historyNodes.some(node => textOf(node).includes('Preparing') || node.id.includes('preparing-window-live-bash')),
+      'the actual history window never materializes the live preview, including standalone rows')
+  }
+})
+
 test('an ownerless Focus Preparing stays on its real root without inventing Work', () => {
   const folder = apply([
     ev('turn/start', { turn: 1 }, 0),
@@ -555,6 +604,10 @@ test('an ownerless Focus Preparing stays on its real root without inventing Work
   assert.ok(descendantText(collapsed, root.id).includes('Action: Preparing Bash'),
     'the collapsed root uses the bounded Preparing summary in its Action slot')
   assert.equal(nodesOf(collapsed, 'section').length, 1, 'no pseudo Work section is created')
+
+  const unknownWindow = flatten(messages, { ...options, window: undefined })
+  assert.ok(!unknownWindow.some(node => node.id.includes('preparing-focus-ownerless')),
+    'an unproven latest window does not materialize live Preparing')
 
   const expanded = flatten(messages, { ...options, expandedFocusTurns: new Set([1]) })
   const expandedRoot = nodesOf(expanded, 'section')[0]!

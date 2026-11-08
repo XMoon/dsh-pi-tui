@@ -33,6 +33,7 @@ import { connect as sdkConnect, concatBytes, ui } from '@stencil-hq/tern'
 import type { Op, Session, TermInput, TermOutput, WireNode } from '@stencil-hq/tern'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
+import type { ModelPickerRequest } from '../../src/app/command/model-presentation.ts'
 import { applyAssistantLiveInput } from '../../src/app/surface/session-presentation.ts'
 import { StatsFolder } from '../../src/domain/status/stats.ts'
 import { toolSummaryKeys } from '../../src/tui/transcript/tool-presentation.ts'
@@ -242,6 +243,9 @@ interface Harness {
   readonly imageReads: { readonly attachmentId: string; readonly scope: unknown }[]
   setImageScope(scope: unknown): void
   route(event: SessionEvent): void
+  selectHistoryTurn(turn: number): boolean
+  selectLatestWindow(): boolean
+  windowSnapshot(): ReturnType<TranscriptWindowController['snapshot']>
   /** Replace the main fold under the same session id (re-hydration shape). */
   replaceMain(): void
   exitRequested(): boolean
@@ -282,17 +286,19 @@ async function mountTspHarness(options: {
    *  really carries its own collapsible disclosure. */
   nativeImages?: boolean
 } = {}): Promise<Harness & { session: Session }> {
-  const hello = options.nativeImages === true
-    ? { ...HELLO, kinds: [...HELLO.kinds, 'image', 'text'], features: [...HELLO.features, 'blobs'] }
-    : options.sessionBrowserCapabilities
-    ? {
-      ...HELLO,
-      kinds: [...HELLO.kinds, 'picker', 'row', 'overlay', 'text', 'md'],
-      features: [...HELLO.features, 'scroll'],
-    }
-    : options.composerActions === true
-      ? { ...HELLO, kinds: [...HELLO.kinds, 'el'] }
-      : HELLO
+  const kinds = new Set(HELLO.kinds)
+  const features = new Set(HELLO.features)
+  if (options.nativeImages === true) {
+    kinds.add('image')
+    kinds.add('text')
+    features.add('blobs')
+  }
+  if (options.sessionBrowserCapabilities === true) {
+    for (const kind of ['picker', 'row', 'overlay', 'text', 'md']) kinds.add(kind)
+    features.add('scroll')
+  }
+  if (options.composerActions === true) kinds.add('el')
+  const hello = { ...HELLO, kinds: [...kinds], features: [...features] }
   const tern = new ScriptedTern(hello)
   const session = await openSession(tern)
   const imageReads: { readonly attachmentId: string; readonly scope: unknown }[] = []
@@ -447,6 +453,15 @@ async function mountTspHarness(options: {
     setImageScope(scope) { activeImageScope = scope },
     route(event) {
       surface.routeSessionEvent({ id: SESSION_ID }, event)
+    },
+    selectHistoryTurn(turn) {
+      return controller.anchorAt(turn)
+    },
+    selectLatestWindow() {
+      return controller.latest()
+    },
+    windowSnapshot() {
+      return controller.snapshot()
     },
     replaceMain() {
       folder = new TranscriptFolder()
@@ -2488,6 +2503,63 @@ test('Focus root and nested Work toggles keep one semantic owner and reset only 
   }
 })
 
+test('live Focus Preparing follows the latest window and disappears when the same Folder selects history', async () => {
+  const harness = await mountTspHarness({ displayState: { preset: 'focus' } })
+  try {
+    harness.surface.bindRendererInput()
+    routeTwoWorkTurn(harness)
+    harness.route(ev('turn/start', { turn: 2 }, 10))
+    harness.route(userMessage(11, 'prepare the next operation', 'user-live-turn-2'))
+    harness.route(ev('step/start', { turn: 2, step: 0 }, 12))
+    harness.surface.applyAssistantInput({
+      kind: 'chunk', sessionId: SESSION_ID, attemptId: 'history-live-preparing', turn: 2, step: 0,
+      time: T0 + 13,
+      chunk: { type: 'tool-call-delta', index: 0, id: 'history-live-bash', name: 'bash', argumentsDelta: '{"command":"echo pending"}' },
+    } as never)
+    harness.surface.paintNow()
+    await awaitWireFact(() => mountedNodes(harness).some(node => String(node.p['text'] ?? '').includes('Preparing Bash')),
+      'the live Preparing summary in the selected latest window')
+    const latestNodes = mountedNodes(harness)
+    assert.equal(harness.windowSnapshot().hasNewer, false, 'the same Folder controller proves this is latest')
+    assert.ok(latestNodes.some(node => node.p['text'] === 'prepare the next operation'),
+      'the latest window contains the current live turn')
+    assert.ok(latestNodes.some(node => String(node.p['text'] ?? '').includes('Preparing Bash')),
+      'the latest Root carries the current Preparing summary')
+    const sf = harness.tern.frames.at(-1)!.sf
+    const currentRoot = mountedSections(harness).at(-1)!
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: currentRoot.id, collapsed: false, raw: {} })
+    await awaitWireFact(() => mountedNodes(harness).some(node => node.id.includes('preparing-history-live-bash')),
+      'the live Preparing row inside its opened Root')
+
+    assert.equal(harness.selectHistoryTurn(1), true, 'the production window controller selects the earlier turn')
+    assert.equal(harness.windowSnapshot().mode, 'history', 'the production controller owns a history selection')
+    assert.equal(harness.windowSnapshot().hasNewer, true, 'the selected Folder window proves newer turns exist')
+    const beforeHistoryFrame = harness.tern.frames.length
+    harness.surface.paintNow()
+    await awaitWireFact(() => harness.tern.frames.length > beforeHistoryFrame, 'the Main frame for the selected history window')
+    const historyNodes = mountedNodes(harness)
+    assert.ok(historyNodes.some(node => node.p['text'] === 'inspect the repository'),
+      'the selected Folder history window retains its earlier content')
+    assert.ok(!historyNodes.some(node => node.p['text'] === 'prepare the next operation'),
+      'the selected history window excludes the current user turn')
+    assert.ok(!historyNodes.some(node => node.id.includes('preparing-history-live-bash')),
+      'the selected history window never materializes the latest live Preparing')
+
+    assert.equal(harness.selectLatestWindow(), true, 'the production window controller resumes the latest tail')
+    const beforeLatestFrame = harness.tern.frames.length
+    harness.surface.paintNow()
+    await awaitWireFact(() => harness.tern.frames.length > beforeLatestFrame, 'the Main frame for the latest window')
+    assert.ok(mountedNodes(harness).some(node => String(node.p['text'] ?? '').includes('Preparing Bash')),
+      'the same live Preparing summary returns with the latest window')
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: currentRoot.id, collapsed: false, raw: {} })
+    await awaitWireFact(() => mountedNodes(harness).some(node => node.id.includes('preparing-history-live-bash')),
+      'the same live Preparing row returns inside its reopened Root')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
 test('a new Preparing after an Assistant remains a Root row beside an earlier Focus Work', async () => {
   const harness = await mountTspHarness({ displayState: { preset: 'focus' } })
   try {
@@ -2874,7 +2946,8 @@ test('a closed Focus root or Work starts no image read until its owning disclosu
     harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: work.id, collapsed: false, raw: {} })
     await awaitWireFact(() => harness.imageReads.length === 1, 'the opened Work image read')
     await awaitWireFact(() => harness.tern.blobs.length === 1, 'the opened Work image blob')
-    assert.ok(mountedNodes(harness).some(node => node.k === 'image'), 'only the opened member paints its image')
+    await awaitWireFact(() => mountedNodes(harness).some(node => node.k === 'image'),
+      'the opened member image frame')
 
     harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: root.id, collapsed: true, raw: {} })
     await awaitWireFact(() => mountedNodes(harness).every(node => node.k !== 'image'), 'root close hides the image node')
@@ -2950,7 +3023,117 @@ test('closing a Focus root resets only its nested Tool SVG disclosure', async ()
   }
 })
 
-test('a Work toggle never demands a Tool SVG blob and a Tool toggle never changes the Work owner', async () => {
+test('a materialized Focus Tool toggle waits for the Question Modal and native Picker seats', async () => {
+  const harness = await mountTspHarness({
+    displayState: { preset: 'focus' },
+    nativeImages: true,
+    sessionBrowserCapabilities: true,
+  })
+  try {
+    harness.surface.bindRendererInput()
+    harness.route(ev('turn/start', { turn: 1 }, 0))
+    harness.route(userMessage(1, 'draw two figures'))
+    for (const [step, id] of ['modal-tool', 'picker-tool'].entries()) {
+      const callId = `focus-svg-${id}`
+      const args = {
+        title: `Figure ${step + 1}`,
+        description: `Focus-owned SVG ${step + 1}`,
+        svg: `<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="${step + 1}" height="10"/></svg>`,
+      }
+      harness.route(ev('tool/call', {
+        turn: 1, step, callId: ToolCallId(callId), name: 'dsh_pi_tui_svg', arguments: JSON.stringify(args),
+      }, 2 + step * 2))
+      harness.route(ev('tool/result', {
+        turn: 1, step,
+        message: {
+          id: MessageId(`result-${id}`), role: 'tool', toolCallId: ToolCallId(callId),
+          content: svgContentBlocks(svgFactFromArgs(args)), source: { kind: 'tool', callId },
+        },
+      }, 3 + step * 2))
+    }
+    harness.route(ev('turn/end', { turn: 1, reason: { kind: 'completed' } }, 6))
+    harness.surface.paintNow()
+    const sf = harness.tern.frames.at(-1)!.sf
+    await awaitWireFact(() => mountedSections(harness).some(node => node.id.includes('focus-')),
+      'the collapsed Focus root')
+    const root = mountedSections(harness).find(node => node.id.includes('focus-'))!
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: root.id, collapsed: false, raw: {} })
+    await awaitWireFact(() => mountedSections(harness).some(node => node.id.startsWith(`${root.id}.s1-work-`)),
+      'the nested canonical Work')
+    const works = mountedSections(harness).filter(node => node.id.startsWith(`${root.id}.s1-work-`))
+    for (const work of works) {
+      harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: work.id, collapsed: false, raw: {} })
+      await awaitWireFact(() => mountedSections(harness).find(node => node.id === work.id)?.p['collapsed'] === false,
+        'the Focus Work expansion frame')
+    }
+    const materializedTools = mountedNodes(harness).filter(node => node.k === 'tool')
+    assert.equal(materializedTools.length, 2,
+      `both materialized SVG Tool nodes: ${JSON.stringify({ nodes: mountedNodes(harness), sections: mountedSections(harness), tools: materializedTools })}`)
+    const [modalTool, pickerTool] = materializedTools
+    assert.ok(modalTool !== undefined && pickerTool !== undefined)
+    assert.equal(modalTool.p['collapsed'], true)
+    assert.equal(pickerTool.p['collapsed'], true)
+
+    const pending = harness.renderer().interaction.askQuestions([{ id: 'focus-seat-q', question: 'Proceed?' }], undefined, undefined, false)
+    pending.catch(() => {})
+    await awaitWireFact(() => harness.tern.output.text().includes('Proceed?'), 'the actual Question Modal seat')
+    await settle() // bounded window: the Modal's initial frame and focus update have landed
+    const modalFrames = harness.tern.frames.length
+    const modalBlobs = harness.tern.blobs.length
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: modalTool.id, collapsed: false, raw: {} })
+    await settle() // bounded window: an admitted toggle must paint a frame; the seat must suppress it
+    assert.equal(harness.tern.frames.length, modalFrames, 'the covered Tool toggle paints no Main frame')
+    assert.equal(harness.tern.blobs.length, modalBlobs, 'the covered Tool toggle requests no SVG Blob')
+    assert.equal(mountedNodes(harness).find(node => node.id === modalTool.id)?.p['collapsed'], true,
+      'the covered Tool keeps its collapsed state')
+    harness.renderer().interaction.withdrawPending()
+    await pending.catch(() => {})
+
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: modalTool.id, collapsed: false, raw: {} })
+    await awaitWireFact(() => mountedNodes(harness).some(node => node.k === 'image'),
+      'the same Tool node expands after the modal releases its seat')
+    await awaitWireFact(() => harness.tern.blobs.length === modalBlobs + 1, 'the admitted SVG Blob')
+
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: modalTool.id, collapsed: true, raw: {} })
+    await awaitWireFact(() => mountedNodes(harness).find(node => node.id === modalTool.id)?.p['collapsed'] === true,
+      'the first Tool is collapsed before the picker case')
+    const modelPresentation = harness.renderer().modelPresentation
+    assert.ok(modelPresentation !== undefined, 'the pane negotiated the native Model Picker')
+    const picker = modelPresentation.open({
+      subject: { sessionless: false },
+      entry: 'models',
+      apply() { throw new Error('model selection is not exercised') },
+      retry() { throw new Error('model retry is not exercised') },
+      isCurrent: () => true,
+      runOwned() { throw new Error('model tasks are not exercised') },
+    } satisfies ModelPickerRequest)
+    await awaitWireFact(() => mountedNodes(harness).some(node => node.k === 'picker'), 'the native Model Picker frame')
+    await settle() // bounded window: the Picker's initial frame and focus update have landed
+    const pickerFrames = harness.tern.frames.length
+    const pickerBlobs = harness.tern.blobs.length
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: pickerTool.id, collapsed: false, raw: {} })
+    await settle() // bounded window: an admitted toggle must paint a frame; the seat must suppress it
+    assert.equal(harness.tern.frames.length, pickerFrames, 'the covered Tool toggle paints no Main frame')
+    assert.equal(harness.tern.blobs.length, pickerBlobs, 'the covered Tool toggle requests no SVG Blob')
+    assert.equal(mountedNodes(harness).find(node => node.id === pickerTool.id)?.p['collapsed'], true,
+      'the covered Tool keeps its collapsed state')
+    picker.close()
+    await awaitWireFact(() => mountedNodes(harness).every(node => node.k !== 'picker'), 'the native Picker retirement')
+
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: pickerTool.id, collapsed: false, raw: {} })
+    await awaitWireFact(() => mountedNodes(harness).find(node => node.id === pickerTool.id)?.p['collapsed'] === false,
+      'the same Tool node expands after the Picker retires')
+    await awaitWireFact(() => mountedNodes(harness).some(node => node.k === 'image' && node.id.startsWith(`${pickerTool.id}.`)),
+      'the expanded Tool materializes its SVG image after the Picker retires')
+    await awaitWireFact(() => harness.tern.blobs.length === pickerBlobs + 1,
+      'the expanded Tool requests its own Blob after the Picker retires')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('a Compact Tool toggle is isolated by the Question Modal and expands when its seat releases', async () => {
   const harness = await mountTspHarness({ displayState: { preset: 'compact' }, nativeImages: true })
   try {
     harness.surface.bindRendererInput()
@@ -2980,11 +3163,28 @@ test('a Work toggle never demands a Tool SVG blob and a Tool toggle never change
     assert.equal(toolNode.p['collapsed'], true, 'the Tool SVG card keeps its OWN collapsed disclosure')
     assert.equal(mountedNodes(harness).filter(node => node.k === 'image').length, 0, 'opening the Work demanded no SVG blob')
 
-    // The Tool's OWN toggle is the display demand; it must not touch the Work.
+    const pending = harness.renderer().interaction.askQuestions([{ id: 'compact-seat-q', question: 'Proceed?' }], undefined, undefined, false)
+    pending.catch(() => {})
+    await awaitWireFact(() => harness.tern.output.text().includes('Proceed?'), 'the actual Question Modal seat')
+    await settle() // bounded window: the Modal's initial frame and focus update have landed
+    const modalFrames = harness.tern.frames.length
+    const modalBlobs = harness.tern.blobs.length
     harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: toolNode.id, collapsed: false, raw: {} })
-    await settle() // bounded observation window: a refused toggle must paint no frame
+    await settle() // bounded window: an admitted toggle must paint a frame; the seat must suppress it
+    assert.equal(harness.tern.frames.length, modalFrames, 'the covered Compact Tool toggle paints no Main frame')
+    assert.equal(harness.tern.blobs.length, modalBlobs, 'the covered Compact Tool toggle requests no SVG Blob')
+    assert.equal(mountedNodes(harness).find(node => node.id === toolNode.id)?.p['collapsed'], true,
+      'the covered Compact Tool keeps its collapsed state')
     assert.equal(mountedSections(harness).find(section => section.id === sectionId)?.p['collapsed'], false,
-      'the Tool toggle left the Work expansion alone')
+      'the Tool toggle leaves its owning Activity expanded')
+    harness.renderer().interaction.withdrawPending()
+    await pending.catch(() => {})
+
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: toolNode.id, collapsed: false, raw: {} })
+    await awaitWireFact(() => mountedNodes(harness).some(node => node.k === 'image' && node.id.startsWith(`${toolNode.id}.`)),
+      'the same Compact Tool node expands after the Modal releases its seat')
+    await awaitWireFact(() => harness.tern.blobs.length === modalBlobs + 1,
+      'the admitted Compact Tool requests its SVG Blob')
   } finally {
     await harness.dispose()
     await harness.session.close()
