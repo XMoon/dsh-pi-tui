@@ -88,6 +88,7 @@ export const SCHEDULE_WIDE_ROWS = 30
 /** The narrow (<80 columns) action-bar order. */
 const NARROW_COLUMNS = 80
 const FILTER_CYCLE: readonly ScheduleFilter[] = ['active', 'paused', 'ended', 'all']
+const FILTER_CYCLE_HINT = `${formatKeyId(Key.tab)}/${formatKeyId(Key.shift(Key.tab))}`
 
 /** The label column of a detail fact row. */
 const DETAIL_LABEL_WIDTH = 16
@@ -952,7 +953,7 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
       (total, item) => total + visibleWidth(item.plain),
       0,
     )
-    const fullHint = [...segments, { plain: '  ' }, { plain: 'Tab/Shift+Tab filters', paint: color.textMuted }]
+    const fullHint = [...segments, { plain: '  ' }, { plain: `${FILTER_CYCLE_HINT} filters`, paint: color.textMuted }]
     if (widthOf(fullHint) <= width) return { segments: fullHint, actionBarHint: false }
     if (widthOf(segments) <= width) {
       const shortHint = [...segments, { plain: '  ' }, { plain: 'Tab filters', paint: color.textMuted }]
