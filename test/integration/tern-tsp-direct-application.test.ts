@@ -349,7 +349,7 @@ const nodeText = (node: { p: Record<string, unknown>; c?: unknown[] }): string =
  * model requests the REAL registered `job_list` tool, so the Compact frame has
  * a genuine Process Work span to disclose.
  */
-for (const preset of ['compact', 'full'] as const) {
+for (const preset of ['compact', 'full', 'focus'] as const) {
   test(`a real configured displayPreset '${preset}' reaches the TSP Main frame after a real Agent tool turn`, async (t) => {
     const { testLifecycle } = await import('../support/temp-lifecycle.ts')
     const life = testLifecycle(t)
@@ -379,7 +379,9 @@ for (const preset of ['compact', 'full'] as const) {
       const modeFrame = (): boolean => {
         const wire = fixture.pane.output.text()
         return wire.includes('MODE-DIRECT-OK')
-          && (preset === 'compact' ? wire.includes('s1-work-msg-') : wire.includes('"k":"tool"'))
+          && (preset === 'compact'
+            ? wire.includes('s1-work-msg-')
+            : preset === 'focus' ? wire.includes('s1-focus-msg-') : wire.includes('"k":"tool"'))
       }
       await waitFor('the real Agent tool turn and scripted reply', modeFrame, 30_000)
       await directSettle(1_500)
@@ -394,6 +396,14 @@ for (const preset of ['compact', 'full'] as const) {
         assert.ok(activities.every(node => node.p['collapsed'] === true), 'the Activity defaults collapsed')
         assert.ok(activities.some(node => node.id.includes('-work-')), 'the Activity key carries the canonical Work owner')
         assert.equal(tools.length, 0, 'a collapsed Activity builds no hidden Tool node')
+      } else if (preset === 'focus') {
+        const roots = activities.filter(node => node.id.includes('-focus-'))
+        assert.equal(roots.length, 1, 'the configured Focus preset produced one native Turn root')
+        assert.equal(roots[0]!.p['collapsed'], true, 'the Focus root defaults collapsed')
+        assert.equal(tools.length, 0, 'a collapsed Focus root builds no hidden Tool node')
+        const finalCards = nodes.filter(node => node.k === 'card' && nodeText(node).includes('MODE-DIRECT-OK'))
+        assert.equal(finalCards.length, 1, 'the official final appears exactly once as an independent Assistant card')
+        assert.ok(!finalCards[0]!.id.startsWith(`${roots[0]!.id}.`), 'the official final remains outside the Focus root')
       } else {
         assert.equal(activities.length, 0, 'the configured Full preset paints no Work/Activity container')
         assert.ok(tools.length >= 1, 'Full keeps the real Tool row flat in the reading flow')
@@ -406,3 +416,49 @@ for (const preset of ['compact', 'full'] as const) {
     }
   })
 }
+
+test('the real Direct Focus stream holds its final outside the Thought until turn/end', async (t) => {
+  const { testLifecycle } = await import('../support/temp-lifecycle.ts')
+  const life = testLifecycle(t)
+  let releaseStream!: () => void
+  const heldStream = new Promise<void>(resolve => { releaseStream = resolve })
+  const fixture = await createDirectTspFixture(life, {
+    tuiConfig: { displayPreset: 'focus' },
+    deltas: ['FOCUS-', 'DIRECT-', 'FINAL'],
+    streamHold: () => heldStream,
+    scriptedToolCall: { callId: 'call-focus-jobs', name: 'job_list', arguments: '{}' },
+  })
+  const recorder = fixture.recordPrompts(() => {})
+  try {
+    await waitForInputDelivery(fixture.pane)
+    fixture.pane.input.type('inspect jobs before the final')
+    await waitFor('the composer to hold the Focus prompt', () =>
+      latestComposerText(fixture.pane.output.text()) === 'inspect jobs before the final', 25_000)
+    fixture.pane.input.type('\r')
+    await waitFor('the real Direct prompt write to settle', () => recorder.calls() === 1, 30_000)
+    await waitFor('the official Agent starts the held post-tool stream', () => fixture.modelCalls() === 1, 30_000)
+    await waitFor('the collapsed Focus root reaches the SDK wire', () =>
+      liveNodes(fixture.pane.output.text()).some(node => node.k === 'section' && node.id.includes('-focus-')), 30_000)
+
+    const heldWire = fixture.pane.output.text()
+    const heldNodes = liveNodes(heldWire)
+    const root = heldNodes.find(node => node.k === 'section' && node.id.includes('-focus-'))!
+    assert.equal(root.p['collapsed'], true, 'the live Focus root remains collapsed while the model stream is held')
+    assert.ok(!heldWire.includes('FOCUS-DIRECT-FINAL'), 'the final text is absent before the held model stream settles')
+    assert.equal(heldNodes.filter(node => node.k === 'tool').length, 0, 'the collapsed real Direct root builds no hidden Tool node')
+
+    releaseStream()
+    await waitFor('the authoritative Direct final reaches the Main frame', () =>
+      fixture.pane.output.text().includes('FOCUS-DIRECT-FINAL'), 30_000)
+    const settledNodes = liveNodes(fixture.pane.output.text())
+    const roots = settledNodes.filter(node => node.k === 'section' && node.id.includes('-focus-'))
+    const finals = settledNodes.filter(node => node.k === 'card' && nodeText(node).includes('FOCUS-DIRECT-FINAL'))
+    assert.equal(roots.length, 1, 'the same Direct turn keeps one Focus root occurrence')
+    assert.equal(finals.length, 1, 'the authoritative final appears exactly once')
+    assert.ok(!finals[0]!.id.startsWith(`${roots[0]!.id}.`), 'the final remains outside the Thought')
+  } finally {
+    releaseStream()
+    recorder.detach()
+    await fixture.settle()
+  }
+})

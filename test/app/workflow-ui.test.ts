@@ -370,8 +370,10 @@ test('outer run close/open never clears the phase user choice', async () => {
 
 test('collapsed Focus hides the Workflow card; expanded Focus shows one Run disclosure', async () => {
   const { vt, app } = startApp()
+  const folder = new TranscriptFolder()
+  folder.apply([{ type: 'turn/start', seq: 0, time: 1_700_000_000_000, data: { turn: 0 } } as SessionEvent])
   app.setFocusMode(true)
-  app.setTranscript([workflow({ members: [member(0, 'a', 'P', 'running')] })])
+  app.setTranscript([workflow({ members: [member(0, 'a', 'P', 'running')] })], folder.turnActivities())
   let view = await viewport(vt)
   assert.ok(!view.includes('Workflow audit'), `collapsed Focus must hide the workflow card:\n${view}`)
   app.expandFocusTurn(0)

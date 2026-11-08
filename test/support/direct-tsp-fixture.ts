@@ -127,6 +127,71 @@ export class ScriptedStreamingAdapter extends LlmAdapter {
   }
 }
 
+/** One real model step in a scripted Direct qualification sequence. An optional
+ *  `toolCall` is emitted as a native DSH call; a text-only step becomes a
+ *  durable Assistant intermediate row between surrounding Work spans. */
+interface ScriptedModelStep {
+  readonly text: string
+  readonly toolCall?: { readonly callId: string; readonly name: string; readonly arguments: string }
+}
+
+/** The adapter with a finite sequence of real model steps (the production
+ *  Agent loop executes every Tool call), followed by its ordinary final text. */
+class ScriptedToolStepSequenceAdapter extends ScriptedStreamingAdapter {
+  private readonly scriptedSteps: readonly ScriptedModelStep[]
+  private readonly holdBeforeStep: ((stepIndex: number, signal?: AbortSignal) => Promise<void>) | undefined
+  private readonly holdToolArguments: ((stepIndex: number, signal?: AbortSignal) => Promise<void>) | undefined
+  private stepIndex = 0
+
+  constructor(
+    deltas: readonly string[],
+    steps: readonly ScriptedModelStep[],
+    hold?: () => Promise<void>,
+    holdBeforeStep?: (stepIndex: number, signal?: AbortSignal) => Promise<void>,
+    holdToolArguments?: (stepIndex: number, signal?: AbortSignal) => Promise<void>,
+  ) {
+    super(deltas, hold)
+    this.scriptedSteps = steps
+    this.holdBeforeStep = holdBeforeStep
+    this.holdToolArguments = holdToolArguments
+  }
+
+  override async *stream(options: { readonly signal?: AbortSignal }): AsyncIterable<StreamChunk> {
+    const scripted = this.scriptedSteps[this.stepIndex]
+    if (scripted === undefined) {
+      yield* super.stream(options)
+      return
+    }
+    const stepIndex = this.stepIndex
+    this.calls += 1
+    await this.holdBeforeStep?.(stepIndex, options.signal)
+    this.stepIndex += 1
+    const { text, toolCall } = scripted
+    yield { type: 'block-start', index: 0, blockType: 'text' }
+    yield { type: 'text-delta', index: 0, text }
+    yield { type: 'block-end', index: 0, block: { type: 'text', text } }
+    if (toolCall === undefined) {
+      yield { type: 'finish', reason: { kind: 'stop' } }
+      return
+    }
+    yield { type: 'block-start', index: 1, blockType: 'tool-call' }
+    yield {
+      type: 'tool-call-delta',
+      index: 1,
+      id: ToolCallId(toolCall.callId),
+      name: toolCall.name,
+      argumentsDelta: toolCall.arguments,
+    }
+    await this.holdToolArguments?.(stepIndex, options.signal)
+    yield {
+      type: 'block-end',
+      index: 1,
+      block: { type: 'tool-call', id: ToolCallId(toolCall.callId), name: toolCall.name, arguments: toolCall.arguments },
+    }
+    yield { type: 'finish', reason: { kind: 'tool-calls' } }
+  }
+}
+
 /** The adapter with ONE scripted model tool call on its first stream (the real
  *  Agent loop executes it), then the ordinary scripted text. */
 class ScriptedToolCallAdapter extends ScriptedStreamingAdapter {
@@ -262,6 +327,15 @@ export interface DirectTspFixtureOptions {
   /** Script ONE real model tool call on the first stream (the production Agent
    *  loop executes it), then continue with the scripted text. */
   readonly scriptedToolCall?: { readonly callId: string; readonly name: string; readonly arguments: string }
+  /** Script several real model tool calls on consecutive Agent requests; each
+   *  request's optional text becomes an official Assistant message between
+   *  canonical Work spans. */
+  readonly scriptedToolCalls?: readonly ScriptedModelStep[]
+  /** A narrow, test-only observation barrier before one sequence index; when
+   *  supplied the callback owns the release/abort race for that model step. */
+  readonly holdScriptedToolStep?: (stepIndex: number, signal?: AbortSignal) => Promise<void>
+  /** Hold one native tool-call argument stream before its authoritative block end. */
+  readonly holdScriptedToolCallArguments?: (stepIndex: number, signal?: AbortSignal) => Promise<void>
   /** Extra TUI plugin config (e.g. `{ busyEnter: 'steer' }`) — the SAME
    *  volatile authority `applyRunner` reads, so the busy preference under
    *  test is the real configured one. */
@@ -495,9 +569,17 @@ export async function createDirectTspFixture(
   await mountAgentLoopTestDependencies(ctx, options.workingDirectory === true ? { workingDirectory: true } : {})
   persistenceFiber = await ctx.plugin(JsonlSessionPersistence, { root: join(workRoot, 'persistence') })
   await mountAgentLoopTestHarness(ctx)
-  llmAdapter = options.scriptedToolCall === undefined
-    ? new ScriptedStreamingAdapter(options.deltas ?? ['B2', '-DIRECT', '-OK'], options.streamHold)
-    : new ScriptedToolCallAdapter(options.deltas ?? ['B2', '-DIRECT', '-OK'], options.scriptedToolCall, options.streamHold)
+  llmAdapter = options.scriptedToolCalls !== undefined
+    ? new ScriptedToolStepSequenceAdapter(
+      options.deltas ?? ['B2', '-DIRECT', '-OK'],
+      options.scriptedToolCalls,
+      options.streamHold,
+      options.holdScriptedToolStep,
+      options.holdScriptedToolCallArguments,
+    )
+    : options.scriptedToolCall === undefined
+      ? new ScriptedStreamingAdapter(options.deltas ?? ['B2', '-DIRECT', '-OK'], options.streamHold)
+      : new ScriptedToolCallAdapter(options.deltas ?? ['B2', '-DIRECT', '-OK'], options.scriptedToolCall, options.streamHold)
   ctx.llm.registerAdapter([DIRECT_TSP_PROVIDER], llmAdapter)
   await ctx.plugin(CommandRuntime)
   for (const command of options.hostCommands ?? []) {

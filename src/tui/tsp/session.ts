@@ -100,6 +100,8 @@ import { runSyncDisposalSteps } from '../../runtime/process/disposal.ts'
 import type { TaskPanelItem } from '../../app/surface/task-presentation.ts'
 import type { PendingInputPresentation, PendingTailRow, QueueItem } from '../../app/surface/pending-presentation.ts'
 import { projectTranscriptStructure } from '../transcript/structure.ts'
+import { projectFocus, type FocusProjectedBlock } from '../transcript/focus-projection.ts'
+import { FocusTimingStore } from '../transcript/focus-timing.ts'
 import type { DisplayState } from '../../domain/display/preset.ts'
 import type { ToolPresenter } from '../transcript/tool-presentation.ts'
 import type { TranscriptMessage, TranscriptToolMessage, TurnActivity } from '../../domain/transcript/types.ts'
@@ -1256,6 +1258,17 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    *  close times only; no mirror stats authority or second window owner. */
   let lastWindowState: (TranscriptWindowState & { firstTurn?: number; lastTurn?: number; hasNewer?: boolean }) | undefined
   let lastTurnActivities: ReadonlyMap<number, TurnActivity> | undefined
+  /** The ONE renderer-local Focus Turn disclosure owner set. Separate
+   *  occurrence node keys are derived from the projected owner object; the
+   *  semantic open decision remains the turn number. */
+  const expandedFocusTurns = new Set<number>()
+  const focusDisclosureByPath = new Map<string, number>()
+  const focusTiming = new FocusTimingStore()
+  /** The current Focus frame's Work owner/turn indexes, rebuilt from the
+   *  exact expanded projection that produced its native sections. */
+  let focusWorkTurnByOwner: ReadonlyMap<TranscriptMessage, number> = new Map()
+  let focusWorkOwnersByTurn: ReadonlyMap<number, ReadonlySet<TranscriptMessage>> = new Map()
+  let focusToolKeysByTurn: ReadonlyMap<number, ReadonlySet<string>> = new Map()
   /** The ONE renderer-local Compact Work disclosure owner set, keyed by the
    *  canonical span owner OBJECT identity. Never merged with expandedToolKeys
    *  (which owns SVG blob demand). Retired with the source/hydration/dispose. */
@@ -1380,6 +1393,18 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    *  unambiguous. A toggle whose id does not end with a current path is
    *  stale/foreign and is ignored. */
   const toolDisclosureByPath = new Map<string, string>()
+  const retireTranscriptDisclosureScope = (): void => {
+    expandedFocusTurns.clear()
+    focusDisclosureByPath.clear()
+    focusTiming.resetSessionScope()
+    focusWorkTurnByOwner = new Map()
+    focusWorkOwnersByTurn = new Map()
+    focusToolKeysByTurn = new Map()
+    expandedWorkOwners.clear()
+    workDisclosureByPath.clear()
+    expandedToolKeys.clear()
+    toolDisclosureByPath.clear()
+  }
   /**
    * PR3: the CURRENT committed frame's Assistant figures — the published refs
    * in paint order, each figure's wrapper node id, and the two Copy-target
@@ -1974,6 +1999,8 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     return visibleTranscriptMembers(messages, {
       preset: displayState.preset,
       expandedWorkOwners,
+      expandedFocusTurns,
+      turnActivities: lastTurnActivities,
       ...(lastWindowState === undefined ? {} : { window: lastWindowState }),
     })
   }
@@ -2446,6 +2473,47 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         workOwnersBySectionKey.set(`${scopePrefix}work-${scopeKeys.keyFor(block.span.owner)}`, block.span.owner)
       }
     }
+    // The current Focus disclosure indexes and local reset targets come from
+    // the exact Focus blocks that the mapper consumes, never from node-key text.
+    const focusRootTurnsBySectionKey = new Map<string, number>()
+    const focusWorkBySectionKey = new Map<string, { readonly owner: TranscriptMessage; readonly turn: number }>()
+    const focusWorkTurn = new Map<TranscriptMessage, number>()
+    const focusWorksByTurn = new Map<number, Set<TranscriptMessage>>()
+    const focusToolsByTurn = new Map<number, Set<string>>()
+    const turnActivities = lastTurnActivities ?? new Map<number, TurnActivity>()
+    const focusBlocks = displayState?.preset === 'focus'
+      ? projectFocus(lastMessages, turnActivities, expandedFocusTurns, true)
+      : []
+    for (const block of focusBlocks) {
+      if (block.kind === 'activity') {
+        focusRootTurnsBySectionKey.set(`${scopePrefix}focus-${scopeKeys.keyFor(block.owner)}`, block.activity.turn)
+        continue
+      }
+      if (block.kind !== 'work') continue
+      const key = `${scopePrefix}work-${scopeKeys.keyFor(block.span.owner)}`
+      focusWorkBySectionKey.set(key, { owner: block.span.owner, turn: block.focusOwnerTurn })
+      focusWorkTurn.set(block.span.owner, block.focusOwnerTurn)
+      const owners = focusWorksByTurn.get(block.focusOwnerTurn) ?? new Set<TranscriptMessage>()
+      owners.add(block.span.owner)
+      focusWorksByTurn.set(block.focusOwnerTurn, owners)
+      const toolKeys = focusToolsByTurn.get(block.focusOwnerTurn) ?? new Set<string>()
+      for (const part of block.span.parts) {
+        if (part.kind !== 'message' || part.message.kind !== 'tool') continue
+        toolKeys.add(scopeKeys.keyFor(part.message))
+      }
+      focusToolsByTurn.set(block.focusOwnerTurn, toolKeys)
+    }
+    const focusPhase = displayState?.preset === 'focus' ? presentedStatus?.activity.phase : undefined
+    let focusElapsedMs: ReadonlyMap<TurnActivity, number> | undefined
+    if (focusPhase !== undefined && lastTurnActivities !== undefined) {
+      const now = Date.now()
+      const elapsed = new Map<TurnActivity, number>()
+      for (const activity of lastTurnActivities.values()) {
+        const activeMillis = focusTiming.activeMillis(activity, focusPhase, now)
+        if (activeMillis !== undefined) elapsed.set(activity, activeMillis)
+      }
+      focusElapsedMs = elapsed
+    }
     const build = (selection: SelectedVisualState | undefined): Node => {
       const viewOptions = {
         ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
@@ -2467,8 +2535,11 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         ...viewOptions,
         preset: displayState.preset,
         expandedWorkOwners,
+        expandedFocusTurns,
         turnActivities: lastTurnActivities,
         window: lastWindowState,
+        ...(focusPhase === undefined ? {} : { focusPhase }),
+        ...(focusElapsedMs === undefined ? {} : { focusElapsedMs }),
       })
     }
     // The painted selection follows the frame's REAL order: a transcript
@@ -2494,7 +2565,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // never split and an absent ToggleEvent.key never needs a fallback.
     toolDisclosureByPath.clear()
     workDisclosureByPath.clear()
+    focusDisclosureByPath.clear()
     const compactWork = displayState !== undefined && displayState.preset === 'compact'
+    const focus = displayState !== undefined && displayState.preset === 'focus'
     const recordDisclosures = (node: Node, path: string, parentTool: string | undefined): void => {
       const nodeKey = (node.props as { key?: string }).key
       let tool = parentTool
@@ -2505,12 +2578,18 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         tool = own ?? (parentTool !== undefined ? `${parentTool}/${nodeKey}` : undefined)
         if (tool !== undefined) toolDisclosureByPath.set(path, tool)
       }
-      // The Activity root is the ONLY collapsible transcript section, and its
-      // key is `work-<canonical owner key>`. Resolve the owner from the SAME
-      // canonical structure (object identity), never from the node key string.
-      if (compactWork && node.kind === 'section' && (node.props as { collapsible?: boolean }).collapsible === true && nodeKey !== undefined) {
-        const owner = workOwnersBySectionKey.get(nodeKey)
-        if (owner !== undefined) workDisclosureByPath.set(path, owner)
+      if (node.kind === 'section' && (node.props as { collapsible?: boolean }).collapsible === true && nodeKey !== undefined) {
+        if (focus) {
+          const turn = focusRootTurnsBySectionKey.get(nodeKey)
+          if (turn !== undefined) focusDisclosureByPath.set(path, turn)
+          const work = focusWorkBySectionKey.get(nodeKey)
+          if (work !== undefined) workDisclosureByPath.set(path, work.owner)
+        } else if (compactWork) {
+          // Compact Activity identity resolves from the same canonical Work
+          // structure (object identity), never from the node key string.
+          const owner = workOwnersBySectionKey.get(nodeKey)
+          if (owner !== undefined) workDisclosureByPath.set(path, owner)
+        }
       }
       for (const [index, child] of node.children.entries()) {
         const childKey = (child.props as { key?: string }).key
@@ -2518,6 +2597,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       }
     }
     recordDisclosures(lastMain, '', undefined)
+    focusWorkTurnByOwner = focusWorkTurn
+    focusWorkOwnersByTurn = focusWorksByTurn
+    focusToolKeysByTurn = focusToolsByTurn
     if (visualProjectionAborted) return false
     return true
   }
@@ -2746,6 +2828,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // state. Ordinary deltas keep the same source and the same keys.
     if (source !== undefined && source !== projectionScope) {
       projectionScope = source
+      retireTranscriptDisclosureScope()
       retiredSource = undefined
       // The new subject committed: the hydration input fence lifts with it.
       hydrating = false
@@ -2774,11 +2857,6 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // re-resolved when a read settles.
       releaseImageSubscriptions()
       svgBlobIds.clear()
-      expandedToolKeys.clear()
-      // The outgoing subject's manual Work disclosures and frame index die
-      // with its scope; the incoming subject starts collapsed.
-      expandedWorkOwners.clear()
-      workDisclosureByPath.clear()
       // PR3: the old frame's figure ids, Copy targets and selection belong to
       // the retired scope; the new subject starts with no selected figure.
       clearVisualFrameState()
@@ -2793,12 +2871,21 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     lastStreamingToolPreviews = streamingToolPreviews ?? []
     lastTurnActivities = activities
     lastWindowState = window
+    if (expandedFocusTurns.size > 0) {
+      const focusBlocks = projectFocus(messages, activities ?? new Map(), expandedFocusTurns, true)
+      const visibleTurns = new Set(focusBlocks.flatMap(block => block.kind === 'activity' ? [block.activity.turn] : []))
+      for (const turn of expandedFocusTurns) if (!visibleTurns.has(turn)) expandedFocusTurns.delete(turn)
+    }
     // A manual Work owner survives ordinary same-source deltas only while the
     // SAME source message is still in the loaded window. Prune by canonical
     // owner identity so a long session never retains retired message objects.
     if (expandedWorkOwners.size > 0) {
       const loaded = new Set(projectTranscriptStructure(messages).flatMap(block => block.kind === 'work' ? [block.span.owner] : []))
       for (const owner of expandedWorkOwners) if (!loaded.has(owner)) expandedWorkOwners.delete(owner)
+    }
+    if (presentedStatus !== undefined && activities !== undefined) {
+      const now = Date.now()
+      for (const activity of activities.values()) focusTiming.observe(activity, presentedStatus.activity.phase, now)
     }
     // PR-C: rebuildLastMain recomputes the CURRENT projection's visible member
     // set and reconciles image subscriptions before it prepares image states.
@@ -2861,6 +2948,13 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       }
       const previous = presentedStatus
       presentedStatus = statusReader.snapshot()
+      const now = Date.now()
+      focusTiming.notePhase(presentedStatus.activity.phase, now)
+      if (lastTurnActivities !== undefined) {
+        for (const activity of lastTurnActivities.values()) {
+          focusTiming.observe(activity, presentedStatus.activity.phase, now)
+        }
+      }
       // PR-C (external review r3): every FALSE→TRUE busy edge of the committed
       // snapshot starts a NEW busy lifetime — the next Stop button paints under
       // a fresh node identity, so a stale click from the PREVIOUS run of the
@@ -2871,6 +2965,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         && previous.activity.busy !== true
         && presentedStatus.activity.busy === true) {
         busyEpoch += 1
+      }
+      if (options.displayState?.preset === 'focus' && !hydrating && lastMessages.length > 0) {
+        if (!rebuildLastMain()) return
       }
       render()
     },
@@ -2890,6 +2987,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     },
     beginSessionHydration() {
       if (disposed) return
+      retireTranscriptDisclosureScope()
       // TSP-7 PR-E: the open Permission menu belongs to the outgoing subject;
       // revoke its expansion identity with the subject before any later frame
       // can paint a stale option target.
@@ -2949,10 +3047,6 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // PR-B3: the retired subject's Preparing rows go with it — the new
       // subject's own snapshot replaces them when it commits.
       lastStreamingToolPreviews = []
-      // The retired subject's Work disclosure owners and frame index are
-      // revoked BEFORE the Loading frame is painted.
-      expandedWorkOwners.clear()
-      workDisclosureByPath.clear()
       lastWindowState = undefined
       lastTurnActivities = undefined
       lastMain = loadingMain()
@@ -4108,35 +4202,68 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
           return false
         }
       }
-      // PR3-B B3 (§3.5.5): the modal seat gates events addressed at the
-      // underlying composer. A terminal focus claim must not move the caret
-      // away from an open form, so the seat's own focus is re-asserted; every
-      // other event keeps its existing (unhandled) course.
-      // The Compact Activity root is admitted BEFORE the Tool-only toggle
-      // branch, through the SAME single event loop. Its native section carries
-      // no onToggle handler (the SDK would consume the event before this
-      // iterator), and the id must EXACTLY match a current registered path.
+      // Focus Root, Work and Tool disclosures all use this Session iterator;
+      // each native node has one exact current-frame owner and no onToggle hook.
       if (input.event.ev === 'toggle' && input.event.sf === surface.id
         && !hydrating && inputBound
-        && options.displayState?.preset === 'compact'
+        && options.displayState?.preset === 'focus'
         && !seat.hasModalSeat()
         && detailsSlot === undefined && !openingDetails
         && workHub?.isOpen() !== true && sessionBrowser?.isOpen() !== true
         && webPicker?.isOpen() !== true && presetPicker?.isOpen() !== true
         && modelPicker?.isOpen() !== true && modelQuick?.isOpen() !== true
         && historySearch?.isOpen() !== true) {
-        // EXACT current-path admission: the SDK derives a main-region id as
-        // `main.<child-key path>`, so only that one fixed outer prefix (or the
-        // bare path) is accepted. A substring/Work-name match, an arbitrary
-        // ancestor prefix and a sibling suffix are all refused.
+        const path = input.event.id.startsWith('main.') ? input.event.id.slice('main.'.length) : input.event.id
+        const turn = focusDisclosureByPath.get(input.event.id) ?? focusDisclosureByPath.get(path)
+        if (turn !== undefined) {
+          const wasExpanded = expandedFocusTurns.has(turn)
+          const targetExpanded = input.event.collapsed !== true
+          if (wasExpanded !== targetExpanded) {
+            if (targetExpanded) {
+              expandedFocusTurns.add(turn)
+            } else {
+              expandedFocusTurns.delete(turn)
+              for (const owner of focusWorkOwnersByTurn.get(turn) ?? []) expandedWorkOwners.delete(owner)
+              const toolKeys = focusToolKeysByTurn.get(turn)
+              if (toolKeys !== undefined) {
+                for (const expandedKey of expandedToolKeys) {
+                  const slash = expandedKey.indexOf('/')
+                  const rootKey = slash < 0 ? expandedKey : expandedKey.slice(0, slash)
+                  if (toolKeys.has(rootKey)) expandedToolKeys.delete(expandedKey)
+                }
+              }
+            }
+            if (rebuildLastMain()) render()
+          }
+          return false
+        }
+      }
+      // Compact Activity and an already-open Focus Work use the same Work owner
+      // set. Root and Work targets are disjoint because their exact keys differ.
+      if (input.event.ev === 'toggle' && input.event.sf === surface.id
+        && !hydrating && inputBound
+        && (options.displayState?.preset === 'compact' || options.displayState?.preset === 'focus')
+        && !seat.hasModalSeat()
+        && detailsSlot === undefined && !openingDetails
+        && workHub?.isOpen() !== true && sessionBrowser?.isOpen() !== true
+        && webPicker?.isOpen() !== true && presetPicker?.isOpen() !== true
+        && modelPicker?.isOpen() !== true && modelQuick?.isOpen() !== true
+        && historySearch?.isOpen() !== true) {
+        // EXACT current-path admission: only the real current id or its one
+        // fixed `main.` region prefix is accepted.
         const owner = workDisclosureByPath.get(input.event.id)
           ?? workDisclosureByPath.get(input.event.id.startsWith('main.') ? input.event.id.slice('main.'.length) : input.event.id)
-        if (owner !== undefined) {
-          // `collapsed` is the client's REPORTED target state: idempotent
-          // add/delete, never a local inversion (no double toggle).
-          if (input.event.collapsed === true) expandedWorkOwners.delete(owner)
-          else expandedWorkOwners.add(owner)
-          if (rebuildLastMain()) render()
+        const turn = owner === undefined ? undefined : focusWorkTurnByOwner.get(owner)
+        const admitted = options.displayState?.preset === 'compact'
+          || (turn !== undefined && expandedFocusTurns.has(turn))
+        if (owner !== undefined && admitted) {
+          const wasExpanded = expandedWorkOwners.has(owner)
+          const targetExpanded = input.event.collapsed !== true
+          if (wasExpanded !== targetExpanded) {
+            if (targetExpanded) expandedWorkOwners.add(owner)
+            else expandedWorkOwners.delete(owner)
+            if (rebuildLastMain()) render()
+          }
           return false
         }
       }
@@ -4486,10 +4613,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     dispose: () => {
       if (disposeTask !== undefined) return disposeTask
       disposed = true
+      retireTranscriptDisclosureScope()
       // Disposable presentation state: a disposed mount owns no Work owner,
       // frame index or retained projection input for a late event.
-      expandedWorkOwners.clear()
-      workDisclosureByPath.clear()
       lastWindowState = undefined
       lastTurnActivities = undefined
       // B3-A2 §9: the shared Promise's IDENTITY is latched BEFORE any cleanup

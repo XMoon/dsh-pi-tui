@@ -65,7 +65,7 @@ export function compactSlotLine(label: string, text: string, width: number): str
  * grow must never keep rendering its first line. Blank lines carry no
  * reasoning evidence, so a blank latest line falls back to the previous
  * one and an all-blank body yields '' (never a fake placeholder). */
-function latestReasoningLine(text: string): string {
+export function latestReasoningLine(text: string): string {
   const tail = text.length > THINKING_TAIL_CAP ? text.slice(-THINKING_TAIL_CAP) : text
   const lines = tail.split(/\r\n|\r|\n/)
   for (let index = lines.length - 1; index >= 0; index -= 1) {

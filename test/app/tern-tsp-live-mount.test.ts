@@ -33,6 +33,9 @@ import { connect as sdkConnect, concatBytes, ui } from '@stencil-hq/tern'
 import type { Op, Session, TermInput, TermOutput, WireNode } from '@stencil-hq/tern'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
+import { applyAssistantLiveInput } from '../../src/app/surface/session-presentation.ts'
+import { StatsFolder } from '../../src/domain/status/stats.ts'
+import { toolSummaryKeys } from '../../src/tui/transcript/tool-presentation.ts'
 import type { AssistantLiveInput } from '../../src/runtime/assistant-stream-port.ts'
 import type { ComposerSubmitRequest } from '../../src/tui-app.ts'
 import type { SurfaceEventRoutingSource } from '../../src/app/surface/event-routing.ts'
@@ -295,6 +298,8 @@ async function mountTspHarness(options: {
   const imageReads: { readonly attachmentId: string; readonly scope: unknown }[] = []
   let activeImageScope: unknown = options.imageScope ?? { scope: 'test-image-scope' }
   let folder = new TranscriptFolder()
+  let statsFolder = new StatsFolder()
+  let mainPreviews = new Map<string, import('../../src/app/surface/streaming-tool-preparing.ts').StreamingToolPreview>()
   const controller = new TranscriptWindowController({ windowTurns: 20, stepTurns: 10 })
   let exitCount = 0
 
@@ -308,9 +313,9 @@ async function mountTspHarness(options: {
     appendOpeningViewerEvent: () => false,
     main: () => ({
       folder: { apply: (events: readonly SessionEvent[]) => folder.apply(events) },
-      stats: { apply: () => {} },
+      stats: { apply: (events: readonly SessionEvent[]) => statsFolder.apply(events) },
       get window() { return controller },
-      previews: new Map(),
+      previews: mainPreviews,
       applyToolPreview: () => {},
       refreshRecentPerformanceAvailability: () => {},
     }),
@@ -343,7 +348,7 @@ async function mountTspHarness(options: {
     setViewedQueueAgent: () => {},
     agentForSession: () => undefined,
     applyViewedChildAssistantInput: () => { throw new Error('no viewer in this harness') },
-    applyMainAssistantInput: input => folder.applyLiveInput(input),
+    applyMainAssistantInput: input => applyAssistantLiveInput(folder, statsFolder, mainPreviews, input, toolSummaryKeys),
   }
 
   const surface = createSurfaceRuntime<SessionEvent>({
@@ -445,6 +450,8 @@ async function mountTspHarness(options: {
     },
     replaceMain() {
       folder = new TranscriptFolder()
+      statsFolder = new StatsFolder()
+      mainPreviews = new Map()
       controller.setTurns(folder.groupedTurns())
     },
     exitRequested: () => exitCount > 0,
@@ -2252,9 +2259,16 @@ const nodeText = (node: ModeWireNode): string => {
   return parts.join(' ')
 }
 
-test('the SAME live DisplayState object drives Full flat and then Compact Activity on the next formal commit', async () => {
+test('the SAME live DisplayState drives Full, Compact and Focus while preserving same-source Turn choice', async () => {
   const displayState: { preset: 'focus' | 'compact' | 'full' } = { preset: 'full' }
   const harness = await mountTspHarness({ displayState })
+  const appendAssistant = (seq: number, id: string, text: string): void => {
+    harness.route(ev('assistant/message', {
+      turn: 1, step: seq,
+      message: { id: MessageId(id), role: 'assistant', content: [{ type: 'text', text }], source: { kind: 'model', provider: 'p', model: 'm' }, stream: [] },
+    }, seq))
+    harness.surface.paintNow()
+  }
   try {
     harness.surface.bindRendererInput()
     routeTwoWorkTurn(harness)
@@ -2262,21 +2276,36 @@ test('the SAME live DisplayState object drives Full flat and then Compact Activi
     assert.equal(mountedSections(harness).length, 0, 'Full paints no Work/Activity container')
     assert.ok(mountedNodes(harness).some(node => node.k === 'tool'), 'Full keeps the native Tool rows')
 
-    // The authority is the SAME object the composition root owns: mutating it
-    // is the production `/display` write, and the NEXT formal commit must read
-    // it live (no mount-time snapshot, no second mode owner).
+    // The authority is the SAME object the composition root owns: each mode
+    // switch is observed by the next real transcript commit.
     displayState.preset = 'compact'
-    harness.route(ev('assistant/message', {
-      turn: 1, step: 4,
-      message: { id: MessageId('final-2'), role: 'assistant', content: [{ type: 'text', text: 'a later formal commit' }], source: { kind: 'model', provider: 'p', model: 'm' }, stream: [] },
-    }, 10))
-    harness.surface.paintNow()
+    appendAssistant(10, 'mode-compact', 'a later Compact commit')
     await awaitWireFact(() => mountedSections(harness).length === 2, 'the Compact Activity sections after the mode change')
-    const sections = mountedSections(harness)
-    assert.ok(sections.every(section => section.p['collapsible'] === true && section.p['collapsed'] === true),
+    assert.ok(mountedSections(harness).every(section => section.p['collapsible'] === true && section.p['collapsed'] === true),
       'Compact defaults every canonical Work collapsed')
-    assert.ok(mountedNodes(harness).some(node => nodeText(node).includes('intermediate narration')),
-      'the intermediate Assistant remains readable outside the Activity')
+
+    displayState.preset = 'focus'
+    appendAssistant(11, 'mode-focus', 'a later Focus commit')
+    await awaitWireFact(() => mountedSections(harness).some(node => node.id.includes('focus-')), 'the Focus root after the mode change')
+    const root = mountedSections(harness).find(node => node.id.includes('focus-'))!
+    assert.equal(mountedSections(harness).filter(node => node.id.startsWith(`${root.id}.s1-work-`)).length, 0,
+      'Focus Work is absent while the root is collapsed')
+    const sf = harness.tern.frames.at(-1)!.sf
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: root.id, collapsed: false, raw: {} })
+    await awaitWireFact(() => mountedSections(harness).find(node => node.id === root.id)?.p['collapsed'] === false,
+      'the current Focus root opens')
+
+    displayState.preset = 'full'
+    appendAssistant(12, 'mode-full-again', 'a later Full commit')
+    await awaitWireFact(() => mountedSections(harness).length === 0, 'Full has no remaining disclosure roots')
+    assert.ok(mountedNodes(harness).some(node => node.k === 'tool'), 'Full restores flat Tool rows')
+
+    displayState.preset = 'focus'
+    appendAssistant(13, 'mode-focus-again', 'a later Focus commit')
+    await awaitWireFact(() => mountedSections(harness).some(node => node.id === root.id && node.p['collapsed'] === false),
+      'the same-source Focus choice survives Full and returns expanded')
+    assert.ok(mountedSections(harness).some(node => node.id.startsWith(`${root.id}.s1-work-`)),
+      'the expanded root restores its nested canonical Work sections')
   } finally {
     await harness.dispose()
     await harness.session.close()
@@ -2399,6 +2428,260 @@ test('a real toggle on the measured Activity node id expands exactly that Work, 
   }
 })
 
+test('Focus root and nested Work toggles keep one semantic owner and reset only its children', async () => {
+  const harness = await mountTspHarness({ displayState: { preset: 'focus' } })
+  try {
+    harness.surface.bindRendererInput()
+    routeTwoWorkTurn(harness)
+    await awaitWireFact(() => mountedSections(harness).some(node => node.id.includes('focus-')),
+      'the native Focus root')
+    const sections = mountedSections(harness)
+    const root = sections.find(node => node.id.includes('focus-'))
+    assert.ok(root !== undefined)
+    assert.equal(sections.filter(node => node.id.startsWith(`${root.id}.work-`)).length, 0,
+      'collapsed root has no nested Work nodes')
+    assert.equal(root.p['collapsed'], true)
+    assert.equal(sections.filter(node => !node.id.includes('.work-')).length, 1,
+      'Focus paints one top-level disclosure root, not an Action sibling')
+
+    const sf = harness.tern.frames.at(-1)!.sf
+    const rootId = root.id
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: rootId, collapsed: false, raw: {} })
+    await awaitWireFact(() => mountedSections(harness).filter(node => node.id.startsWith(`${rootId}.s1-work-`)).length === 2,
+      'the expanded Focus root Work children')
+    assert.equal(mountedSections(harness).find(node => node.id === rootId)?.p['collapsed'], false,
+      'the same root id opens')
+    assert.equal(mountedNodes(harness).filter(node => node.k === 'tool').length, 0,
+      'opening the root leaves both nested Work spans collapsed')
+
+    const works = mountedSections(harness).filter(node => node.id.startsWith(`${rootId}.s1-work-`))
+    const workA = works[0]!
+    const workB = works[1]!
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: workB.id, collapsed: false, raw: {} })
+    await awaitWireFact(() => mountedNodes(harness).some(node => node.k === 'tool' && node.id.startsWith(`${workB.id}.`)),
+      'only Work B materializes its Tool')
+    assert.equal(mountedSections(harness).find(node => node.id === workA.id)?.p['collapsed'], true,
+      'Work A stays closed')
+    assert.equal(mountedSections(harness).find(node => node.id === workB.id)?.p['collapsed'], false,
+      'Work B has its own native disclosure owner')
+
+    const beforeRepeated = harness.tern.frames.length
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: rootId, collapsed: false, raw: {} })
+    await settle() // bounded observation window: a repeated target state must paint no frame
+    assert.equal(harness.tern.frames.length, beforeRepeated, 'a repeated root target is idempotent')
+
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: rootId, collapsed: true, raw: {} })
+    await awaitWireFact(() => mountedNodes(harness).filter(node => node.k === 'tool').length === 0,
+      'closing the root removes its Work Tool nodes')
+    assert.equal(mountedSections(harness).find(node => node.id === rootId)?.p['collapsed'], true)
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: rootId, collapsed: false, raw: {} })
+    await awaitWireFact(() => mountedSections(harness).find(node => node.id === rootId)?.p['collapsed'] === false,
+      'the same root reopens')
+    const reopenedWorks = mountedSections(harness).filter(node => node.id.startsWith(`${rootId}.s1-work-`))
+    assert.equal(reopenedWorks.length, 2)
+    assert.ok(reopenedWorks.every(node => node.p['collapsed'] === true),
+      'closing the root reset only its nested Work expansions')
+    assert.equal(mountedNodes(harness).filter(node => node.k === 'tool').length, 0)
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('a new Preparing after an Assistant remains a Root row beside an earlier Focus Work', async () => {
+  const harness = await mountTspHarness({ displayState: { preset: 'focus' } })
+  try {
+    harness.surface.bindRendererInput()
+    harness.route(ev('turn/start', { turn: 1 }, 0))
+    harness.route(userMessage(1, 'inspect then prepare'))
+    harness.route(toolCall(2, 'focus-before-pending'))
+    harness.route(toolResult(3, 'focus-before-pending', 'first result'))
+    harness.route(ev('assistant/message', {
+      turn: 1, step: 1,
+      message: { id: MessageId('focus-before-ownerless'), role: 'assistant', content: [{ type: 'text', text: 'intermediate answer' }], source: { kind: 'model', provider: 'p', model: 'm' }, stream: [] },
+    }, 4))
+    harness.route(ev('step/start', { turn: 1, step: 2 }, 5))
+    harness.surface.applyAssistantInput({
+      kind: 'chunk', sessionId: SESSION_ID, attemptId: 'focus-ownerless-attempt', turn: 1, step: 2,
+      time: T0 + 6,
+      chunk: { type: 'tool-call-delta', index: 0, id: 'focus-after-assistant', name: 'bash', argumentsDelta: '{"command":"echo pending"}' },
+    } as never)
+    harness.surface.paintNow()
+    await awaitWireFact(() => mountedSections(harness).some(node => nodeText(node).includes('Action: Preparing Bash')),
+      'the collapsed root shows the new streamed Preparing')
+    const root = mountedSections(harness).find(node => node.id.includes('focus-'))!
+    const sf = harness.tern.frames.at(-1)!.sf
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: root.id, collapsed: false, raw: {} })
+    await awaitWireFact(() => mountedSections(harness).find(node => node.id === root.id)?.p['collapsed'] === false,
+      'the same Focus root expands')
+    const works = mountedSections(harness).filter(node => node.id.startsWith(`${root.id}.s1-work-`))
+    assert.equal(works.length, 1, 'the pending run creates no phantom Work')
+    assert.ok(!nodeText(works[0]!).includes('Preparing'), 'the earlier Work never adopts the new preview')
+    const rows = mountedNodes(harness).filter(node => node.k === 'row' && node.id.includes('preparing-focus-after-assistant'))
+    assert.equal(rows.length, 1, 'opening the root retains the new Preparing exactly once')
+    assert.equal(rows[0]!.id, `${root.id}.preparing-focus-after-assistant`, 'the row belongs directly to its real Root')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('a streamed Preparing preview is owned only by the exact trailing Focus Work', async () => {
+  const harness = await mountTspHarness({ displayState: { preset: 'focus' } })
+  try {
+    harness.surface.bindRendererInput()
+    harness.route(ev('turn/start', { turn: 1 }, 0))
+    harness.route(userMessage(1, 'inspect then prepare'))
+    harness.route(toolCall(2, 'focus-live-read'))
+    harness.route(toolResult(3, 'focus-live-read', 'first result'))
+    harness.route(ev('assistant/message', {
+      turn: 1, step: 1,
+      message: { id: MessageId('focus-between-works'), role: 'assistant', content: [{ type: 'text', text: 'intermediate answer' }], source: { kind: 'model', provider: 'p', model: 'm' }, stream: [] },
+    }, 4))
+    harness.surface.applyAssistantInput({
+      kind: 'chunk', sessionId: SESSION_ID, attemptId: 'focus-preparing-attempt', turn: 1, step: 2,
+      time: T0 + 5,
+      chunk: { type: 'block-start', index: 0, blockType: 'reasoning' },
+    } as never)
+    harness.surface.applyAssistantInput({
+      kind: 'chunk', sessionId: SESSION_ID, attemptId: 'focus-preparing-attempt', turn: 1, step: 2,
+      time: T0 + 6,
+      chunk: { type: 'reasoning-delta', index: 0, text: 'preparing the final check' },
+    } as never)
+    harness.surface.applyAssistantInput({
+      kind: 'chunk', sessionId: SESSION_ID, attemptId: 'focus-preparing-attempt', turn: 1, step: 2,
+      time: T0 + 7,
+      chunk: {
+        type: 'tool-call-delta', index: 1, id: 'focus-live-preparing', name: 'bash',
+        argumentsDelta: '{"command":"echo pending"}',
+      },
+    } as never)
+    harness.surface.paintNow()
+    await awaitWireFact(() => mountedSections(harness).some(node => node.id.includes('focus-')),
+      'the current Focus root with a live Preparing preview')
+
+    const collapsedRoot = mountedSections(harness).find(node => node.id.includes('focus-'))!
+    assert.ok(nodeText(collapsedRoot).includes('Action: Preparing Bash'),
+      `the collapsed root Action slot uses the current preview: ${JSON.stringify({ root: collapsedRoot, nodes: mountedNodes(harness).map(node => ({ id: node.id, text: node.p['text'] })) })}`)
+    assert.equal(mountedSections(harness).length, 1, 'no synthetic Preparing Work section is created')
+
+    const sf = harness.tern.frames.at(-1)!.sf
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: collapsedRoot.id, collapsed: false, raw: {} })
+    await awaitWireFact(() => mountedSections(harness).filter(node => node.id.startsWith(`${collapsedRoot.id}.s1-work-`)).length === 2,
+      'the expanded root has both canonical Work owners')
+    const works = mountedSections(harness).filter(node => node.id.startsWith(`${collapsedRoot.id}.s1-work-`))
+    const earlierWork = works.find(node => nodeText(node).includes('read ×1'))
+    const trailingWork = works.find(node => nodeText(node).includes('Preparing Bash'))
+    assert.ok(earlierWork !== undefined, `the first canonical Work is present: ${JSON.stringify(works.map(node => nodeText(node)))}`)
+    assert.ok(trailingWork !== undefined, `the trailing Work owns the summary: ${JSON.stringify(works.map(node => nodeText(node)))}`)
+    assert.notEqual(earlierWork.id, trailingWork.id, 'the two canonical Work owners remain distinct')
+    assert.equal(works.filter(node => nodeText(node).includes('Preparing Bash')).length, 1,
+      'only one nested Work header owns the same-Turn preview')
+
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: trailingWork.id, collapsed: false, raw: {} })
+    await awaitWireFact(() => mountedNodes(harness).some(node => node.id.includes('preparing-focus-live-preparing')),
+      'the real mapped Preparing row inside the opened tail Work')
+    const preparingRows = mountedNodes(harness).filter(node => node.k === 'row'
+      && node.id.includes('preparing-focus-live-preparing'))
+    assert.equal(preparingRows.length, 1, 'the live preview is materialized exactly once')
+    assert.ok(preparingRows[0]!.id.startsWith(`${trailingWork.id}.`), 'the row belongs to the exact trailing Work node')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('Focus root toggle is refused by modal and retired source fences', async () => {
+  const harness = await mountTspHarness({ displayState: { preset: 'focus' } })
+  try {
+    harness.surface.bindRendererInput()
+    routeTwoWorkTurn(harness)
+    await awaitWireFact(() => mountedSections(harness).some(node => node.id.includes('focus-')),
+      'the Focus root before modal admission')
+    const root = mountedSections(harness).find(node => node.id.includes('focus-'))!
+    const rootId = root.id
+    const sf = harness.tern.frames.at(-1)!.sf
+    const beforeUnknown = harness.tern.frames.length
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: 'main.not-a-real-focus-root', collapsed: false, raw: {} })
+    await settle() // bounded observation window: a refused toggle must paint no frame
+    assert.equal(harness.tern.frames.length, beforeUnknown, 'an unknown root id paints no frame')
+    assert.equal(mountedSections(harness).find(node => node.id === rootId)?.p['collapsed'], true,
+      'an unknown id cannot alter the real root owner')
+    const pending = harness.renderer().interaction.askQuestions([{ id: 'focus-q', question: 'Continue?' }], undefined, undefined, false)
+    pending.catch(() => {})
+    await awaitWireFact(() => harness.tern.output.text().includes('Continue?'), 'the real modal seat')
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: rootId, collapsed: false, raw: {} })
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf: 'foreign-surface', id: rootId, collapsed: false, raw: {} })
+    await settle() // bounded observation window: covered and foreign toggles must paint no frame
+    assert.equal(mountedSections(harness).find(node => node.id === rootId)?.p['collapsed'], true,
+      'covered and foreign root events leave the Focus owner closed')
+    assert.equal(mountedNodes(harness).filter(node => node.k === 'tool').length, 0,
+      'the covered toggle never materializes background Work members')
+    harness.renderer().interaction.withdrawPending()
+    await pending.catch(() => {})
+
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: rootId, collapsed: false, raw: {} })
+    await awaitWireFact(() => mountedSections(harness).find(node => node.id === rootId)?.p['collapsed'] === false,
+      'the current root opens after the modal retires')
+    harness.surface.display.beginSessionHydration()
+    await awaitWireFact(() => mountedNodes(harness).some(node => nodeText(node).includes('Loading session')),
+      'hydration paints the Loading state')
+    const duringHydration = harness.tern.frames.length
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: rootId, collapsed: false, raw: {} })
+    await settle() // bounded observation window: a hydration-retired id must paint no frame
+    assert.equal(harness.tern.frames.length, duringHydration, 'the retired root id is refused during hydration')
+
+    harness.replaceMain()
+    routeTwoWorkTurn(harness)
+    await awaitWireFact(() => mountedSections(harness).some(node => node.id.includes('focus-') && node.id !== rootId),
+      'the replacement source Focus root')
+    const replacement = mountedSections(harness).find(node => node.id.includes('focus-'))!
+    assert.notEqual(replacement.id, rootId, 'the replacement source receives a new root namespace')
+    assert.equal(replacement.p['collapsed'], true, 'the replacement source inherits no Focus disclosure')
+    const beforeStale = harness.tern.frames.length
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: rootId, collapsed: false, raw: {} })
+    await settle() // bounded observation window: the prior source id must paint no frame
+    assert.equal(harness.tern.frames.length, beforeStale, 'the prior source root id cannot alter the replacement')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('a formal status commit refreshes the Focus root without a transcript commit', async () => {
+  const harness = await mountTspHarness({ displayState: { preset: 'focus' } })
+  try {
+    harness.surface.bindRendererInput()
+    harness.route(ev('turn/start', { turn: 1 }, 0))
+    harness.route(userMessage(1, 'waiting on the user'))
+    harness.surface.applyAssistantInput({
+      kind: 'chunk', sessionId: SESSION_ID, attemptId: 'attempt-focus-status', turn: 1, step: 0,
+      time: T0 + 2, chunk: { type: 'reasoning-delta', index: 0, text: 'checking the request' },
+    } as never)
+    harness.surface.paintNow()
+    await awaitWireFact(() => mountedSections(harness).some(node => node.id.includes('focus-')),
+      'the live Focus root before its phase transition')
+    const root = mountedSections(harness).find(node => node.id.includes('focus-'))!
+    const rootTitle = (): string => String(mountedNodes(harness).find(node => node.id === `${root.id}.head.title`)?.p['text'] ?? '')
+    assert.ok(rootTitle().includes('Working'), 'the initial formal phase reads Working')
+
+    harness.surface.commitStatus({
+      activity: { phase: 'waiting-question', busy: true, queuedCount: 0, taskCount: 0, childAgentCount: 0, todoCount: 0 },
+    } as never, {}, undefined)
+    await awaitWireFact(() => rootTitle().includes('Waiting for input'),
+      'the status commit repaints the same root without a transcript commit')
+
+    harness.surface.commitStatus({
+      activity: { phase: 'working', busy: true, queuedCount: 0, taskCount: 0, childAgentCount: 0, todoCount: 0 },
+    } as never, {}, undefined)
+    await awaitWireFact(() => rootTitle().includes('Working'),
+      'resuming the official phase repaints the same root')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
 test('a foreign surface, an unknown node id and a stale scope toggle never open a Work', async () => {
   const harness = await mountTspHarness({ displayState: { preset: 'compact' } })
   try {
@@ -2514,6 +2797,153 @@ test('a same-source streaming delta keeps an opened Work expanded, and dispose r
     harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: targetId, collapsed: false, raw: {} })
     await settle() // bounded observation window: a refused toggle must paint no frame
     assert.equal(harness.tern.frames.length, afterDispose, 'a disposed mount paints nothing for a late Work toggle')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('an unsettled streamed Assistant remains visible inside an expanded Focus root', async () => {
+  const harness = await mountTspHarness({ displayState: { preset: 'focus' } })
+  try {
+    harness.surface.bindRendererInput()
+    harness.route(ev('turn/start', { turn: 1 }, 0))
+    harness.route(userMessage(1, 'read the live answer'))
+    harness.route(ev('step/start', { turn: 1, step: 0 }, 2))
+    harness.surface.applyAssistantInput({
+      kind: 'chunk', sessionId: SESSION_ID, attemptId: 'focus-live-answer', turn: 1, step: 0,
+      time: T0 + 3, chunk: { type: 'text-delta', index: 0, text: 'LIVE-ANSWER-CHUNK' },
+    } as never)
+    harness.surface.paintNow()
+    await awaitWireFact(() => mountedSections(harness).some(node => node.id.includes('focus-')),
+      'the running Focus root with a live Assistant candidate')
+    assert.equal(harness.imageReads.length, 0, 'the text candidate has no image read side effect')
+
+    const root = mountedSections(harness).find(node => node.id.includes('focus-'))!
+    const sf = harness.tern.frames.at(-1)!.sf
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: root.id, collapsed: false, raw: {} })
+    await awaitWireFact(() => mountedNodes(harness).some(node => node.k === 'card' && nodeText(node).includes('LIVE-ANSWER-CHUNK')),
+      'the unsettled Assistant candidate is painted as live process content inside the expanded Root')
+    assert.ok(mountedSections(harness).find(node => node.id === root.id)?.p['collapsed'] === false,
+      'the same Focus root owns the live candidate')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('a closed Focus root or Work starts no image read until its owning disclosures open', async () => {
+  const attachment: ImageAttachmentRefLike = {
+    attachmentId: 'focus-hidden-image', mediaType: 'image/png', bytes: 4, width: 2, height: 2, name: 'hidden.png',
+  }
+  const harness = await mountTspHarness({
+    displayState: { preset: 'focus' },
+    nativeImages: true,
+    readImage: async ref => ({ ref, data: new Uint8Array([1, 2, 3, 4]) }),
+  })
+  try {
+    harness.surface.bindRendererInput()
+    harness.route(ev('turn/start', { turn: 1 }, 0))
+    harness.route(userMessage(1, 'inspect hidden image'))
+    const callId = 'focus-image-call'
+    harness.route(ev('tool/call', { turn: 1, step: 0, callId: ToolCallId(callId), name: 'read_image', arguments: '{}' }, 2))
+    harness.route(ev('tool/result', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('focus-image-result'), role: 'tool', toolCallId: ToolCallId(callId),
+        content: [{ type: 'text', text: 'image result' }, { type: 'image', attachment }],
+        source: { kind: 'tool', callId },
+      },
+    }, 3))
+    harness.route(ev('turn/end', { turn: 1, reason: { kind: 'completed' } }, 4))
+    harness.surface.paintNow()
+    await awaitWireFact(() => mountedSections(harness).some(node => node.id.includes('focus-')),
+      'the collapsed Focus image root')
+    const root = mountedSections(harness).find(node => node.id.includes('focus-'))!
+    assert.equal(harness.imageReads.length, 0, 'the collapsed root subscribes to no hidden image')
+    assert.equal(harness.tern.blobs.length, 0, 'the collapsed root sends no blob')
+
+    const sf = harness.tern.frames.at(-1)!.sf
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: root.id, collapsed: false, raw: {} })
+    await awaitWireFact(() => mountedSections(harness).some(node => node.id.startsWith(`${root.id}.s1-work-`)),
+      'the root-open but Work-collapsed image frame')
+    assert.equal(harness.imageReads.length, 0, 'opening the root alone leaves the Work image hidden')
+    assert.equal(harness.tern.blobs.length, 0, 'opening the root alone sends no image blob')
+
+    const work = mountedSections(harness).find(node => node.id.startsWith(`${root.id}.s1-work-`))!
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: work.id, collapsed: false, raw: {} })
+    await awaitWireFact(() => harness.imageReads.length === 1, 'the opened Work image read')
+    await awaitWireFact(() => harness.tern.blobs.length === 1, 'the opened Work image blob')
+    assert.ok(mountedNodes(harness).some(node => node.k === 'image'), 'only the opened member paints its image')
+
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: root.id, collapsed: true, raw: {} })
+    await awaitWireFact(() => mountedNodes(harness).every(node => node.k !== 'image'), 'root close hides the image node')
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: root.id, collapsed: false, raw: {} })
+    await awaitWireFact(() => mountedSections(harness).find(node => node.id === root.id)?.p['collapsed'] === false,
+      'the Focus root opens again')
+    assert.ok(mountedSections(harness).filter(node => node.id.startsWith(`${root.id}.s1-work-`)).every(node => node.p['collapsed'] === true),
+      'the nested Work does not inherit its former open state')
+    assert.equal(harness.tern.blobs.length, 1, 'reopening a collapsed root does not send another hidden blob')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('closing a Focus root resets only its nested Tool SVG disclosure', async () => {
+  const harness = await mountTspHarness({ displayState: { preset: 'focus' }, nativeImages: true })
+  try {
+    harness.surface.bindRendererInput()
+    harness.route(ev('turn/start', { turn: 1 }, 0))
+    harness.route(userMessage(1, 'draw one figure'))
+    const svgArgs = {
+      title: 'Focus Box',
+      description: 'one Focus-owned SVG',
+      svg: '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10"/></svg>',
+    }
+    harness.route(ev('tool/call', {
+      turn: 1, step: 0, callId: ToolCallId('focus-svg-call'), name: 'dsh_pi_tui_svg', arguments: JSON.stringify(svgArgs),
+    }, 2))
+    harness.route(ev('tool/result', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('focus-svg-result'), role: 'tool', toolCallId: ToolCallId('focus-svg-call'),
+        content: svgContentBlocks(svgFactFromArgs(svgArgs)), source: { kind: 'tool', callId: 'focus-svg-call' },
+      },
+    }, 3))
+    harness.route(ev('turn/end', { turn: 1, reason: { kind: 'completed' } }, 4))
+    harness.surface.paintNow()
+    await awaitWireFact(() => mountedSections(harness).some(node => node.id.includes('focus-')),
+      'the collapsed Focus SVG root')
+    const root = mountedSections(harness).find(node => node.id.includes('focus-'))!
+    const sf = harness.tern.frames.at(-1)!.sf
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: root.id, collapsed: false, raw: {} })
+    await awaitWireFact(() => mountedSections(harness).some(node => node.id.startsWith(`${root.id}.s1-work-`)),
+      'the Focus nested Work section')
+    const work = mountedSections(harness).find(node => node.id.startsWith(`${root.id}.s1-work-`))!
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: work.id, collapsed: false, raw: {} })
+    await awaitWireFact(() => mountedNodes(harness).some(node => node.k === 'tool'), 'the SVG Tool node inside its Work')
+    const tool = mountedNodes(harness).find(node => node.k === 'tool')!
+    assert.equal(tool.p['collapsed'], true, 'the SVG Tool owns an independent disclosure')
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: tool.id, collapsed: false, raw: {} })
+    await awaitWireFact(() => mountedNodes(harness).some(node => node.k === 'image'), 'the opened SVG image node')
+    assert.equal(harness.tern.blobs.length, 1, 'only the Tool disclosure requested the SVG blob')
+
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: root.id, collapsed: true, raw: {} })
+    await awaitWireFact(() => mountedSections(harness).find(node => node.id === root.id)?.p['collapsed'] === true,
+      'the Focus root closes')
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: root.id, collapsed: false, raw: {} })
+    await awaitWireFact(() => mountedSections(harness).find(node => node.id === root.id)?.p['collapsed'] === false,
+      'the same Focus root opens again')
+    const reopenedWork = mountedSections(harness).find(node => node.id.startsWith(`${root.id}.s1-work-`))!
+    assert.equal(reopenedWork.p['collapsed'], true, 'the root close reset its nested Work')
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: reopenedWork.id, collapsed: false, raw: {} })
+    await awaitWireFact(() => mountedNodes(harness).some(node => node.k === 'tool'), 'the Work reopens')
+    const reopenedTool = mountedNodes(harness).find(node => node.k === 'tool')!
+    assert.equal(reopenedTool.p['collapsed'], true, 'the root close reset only this Turn Tool disclosure')
+    assert.equal(mountedNodes(harness).some(node => node.k === 'image'), false,
+      'the SVG stays hidden until its own disclosure is reopened')
+    assert.equal(harness.tern.blobs.length, 1, 'reopening the root and Work sends no second blob')
   } finally {
     await harness.dispose()
     await harness.session.close()
