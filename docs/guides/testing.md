@@ -402,38 +402,45 @@ pin. The full and selected entries use the same preflight; a selected case
 installs nothing until that preflight has qualified the exact pin.
 
 A default run is diagnosable without any environment variable. Both lanes
-announce the qualified artifact identity at startup and one checkpoint per
-phase on stderr; on failure they print a fixed summary and write exactly one
-default-retained artifact — a `failure.json` in a fresh private directory under
-the OS temp root (directory `0700`, file `0600`), never inside the work root
-the lane deletes during cleanup. The report and that summary carry only
-whitelisted fields (lane, category, stable code, checkpoint, assertion site, wait
-label, elapsed, target pin, artifact name/version/SHA, expected and observed
-notice, recent checkpoints, per-process exit and official event names). A failed
-lane assertion is locatable through its own `<lane>.mjs:<line>` site — the only
-part of it the default output may carry; the site is derived from the real stack,
-restricted to the lane scripts and their extracted case/support modules, and
-omitted entirely when nothing trusted can be read. No
-`Error.message` is ever copied into the default output — the lane assertion,
-the tool failure and the parser text all stay out of it — so terminal bytes,
-captured stderr, record contents, session text, cookies, tokens and connect
-URLs are never reported. The only code a report may name is one the lanes
+announce the qualified artifact identity at startup, one checkpoint per setup
+phase, and one lifecycle scope per case and Recovery subscene:
+`[split] <ISO-UTC> START <scope>`, then `DONE <scope> durationMs=…` or
+`ERROR <scope> durationMs=…` (nested scopes print their own ERROR; the raw
+stack is printed once). On failure they print a fixed summary plus the REAL
+caught error (its stack when available) and write exactly one default-retained
+artifact — a `failure.json` in a fresh private directory under the OS temp root
+(directory `0700`, file `0600`), never inside the work root the lane deletes
+during cleanup. The report keeps the structural fields (lane, category, stable
+code, checkpoint, `failedStep`, assertion site, wait label, elapsed, target pin,
+artifact name/version/SHA, expected and observed notice, recent lifecycle
+entries, per-process exit and official event names) and appends the caught
+`error.name` / `message` / `stack`, bounded but UTF-8 intact, so the root cause
+does not disappear. A failed lane assertion is locatable through its own
+`<lane>.mjs:<line>` site, derived from the real stack, restricted to the lane
+scripts and their extracted case/support modules, and omitted entirely when
+nothing trusted can be read. The only code a report may name is one the lanes
 declare; an unknown `error.code` leaves the entry at its category instead of
 becoming reported text, and a report write that fails is announced as
 `DIAGNOSTIC_WRITE_FAILURE` with its errno only — never turning a failure into a
 pass or blocking the cleanup. A passing run writes no report.
 
-`SPLIT_PROCESS_SMOKE_KEEP=1` and `SPLIT_UPGRADE_KEEP=1` are the explicit
-forensic mode: they preserve the isolated work root, which holds the real
-profile, session logs and private telemetry of the run, and they add one
-`*_SMOKE_FORENSICS` line carrying the raw error text. That directory stays
-local: never attach or upload it as evidence. `--evidence` is a requested
+The only redaction applied to that text is the concrete Web credential policy:
+a failure whose `failedStep` is a `case/web.*` scope passes the existing
+redactor over the launch token, `token=` query value, Cookie/Set-Cookie/
+Authorization header and loopback origin before the terminal and the report.
+Non-Web scopes keep their real error text. The diagnostics never capture raw
+terminal bytes, record contents or session text on their own.
+
+`SPLIT_PROCESS_SMOKE_KEEP=1` and `SPLIT_UPGRADE_KEEP=1` preserve the isolated
+work root, which holds the real profile, session logs and private telemetry of
+the run; they do not gate whether the error text is visible. That directory
+stays local: never attach or upload it as evidence. `--evidence` is a requested
 deliverable, not a diagnostic: the PASS document is written onto a freshly
 created private `0600` inode BEFORE the success marker is printed, so a lane
 that cannot land the evidence its operator asked for fails instead of
 announcing a pass, and a pre-existing target never keeps a looser mode. A
-failure writes the same safe failure projection to that path instead. Its path
-is outside the work root.
+failure writes the same failure projection to that path instead. Its path is
+outside the work root.
 
 Record a lane result exactly as the lane reports it: the candidate and old
 package SHA256 values, the exact DSH pin, the command, and the per-lane
