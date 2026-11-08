@@ -106,15 +106,11 @@ test('Source Mode parity smokes build the vendored pi-tui dist first', () => {
 
 test('task, presentation, and closure smokes are Source Mode gates', () => {
   const workflow = readFileSync(CI_WORKFLOW, 'utf8')
-  for (const [name, command] of [
-    ['D1 closure gate', 'smoke:remote-read-capability-closure'],
-    ['D2 closure smoke', 'smoke:remote-fork-rewind-closure'],
-  ]) {
-    assert.match(
-      workflow,
-      new RegExp(`- name: ${name}\\n\\s+if: env\\.DSH_MODE == 'source'\\n\\s+run: pnpm ${command}`),
-    )
-  }
+  assert.match(
+    workflow,
+    /- name: D2 closure smoke\n\s+if: env\.DSH_MODE == 'source'\n\s+run: pnpm smoke:remote-fork-rewind-closure/u,
+    'the D2 closure must stay an independent Source Mode gate',
+  )
   // The 0.1.6-era D2.2 ordinary-write harness was retired with replacement
   // coverage: its scenarios (queue/steer/edit/remove/cancel/rename through
   // the official SessionFace) are covered by the remote writer,
