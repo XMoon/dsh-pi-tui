@@ -92,6 +92,13 @@ export interface ScheduleSessionChoice {
   readonly title?: string
 }
 
+/** Counts from the full committed catalog, independent of list projection. */
+export interface ScheduleStatusCounts {
+  readonly active: number
+  readonly paused: number
+  readonly ended: number
+}
+
 /** The complete painted state of the Schedule workspace. */
 export interface ScheduleWorkspaceSnapshot {
   readonly status: ScheduleWorkspaceStatus
@@ -103,6 +110,7 @@ export interface ScheduleWorkspaceSnapshot {
   readonly rows: readonly ScheduleCatalogEntry[]
   /** The number of Host tasks BEFORE the filter/search projection. */
   readonly total: number
+  readonly statusCounts: ScheduleStatusCounts
   readonly selectedId?: string
   readonly mode: 'list' | 'detail' | 'history' | 'editor' | 'help'
   /** The detail snapshot (the official `view` value). */

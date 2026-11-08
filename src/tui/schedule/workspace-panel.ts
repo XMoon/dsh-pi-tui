@@ -62,12 +62,13 @@ import {
   formatDeliveryFloor,
   formatExecutionActivity,
   formatLocalInstant,
+  formatListOccurrence,
+  formatListRepeat,
   formatOccurrence,
   formatRuleSummary,
   formatSeconds,
   formatTargetSummary,
   officialTimeZone,
-  scheduleStatusText,
   scheduleStatusWord,
   shortScheduleId,
   type ScheduleTaskStatus,
@@ -86,6 +87,8 @@ export const SCHEDULE_WIDE_COLUMNS = 120
 export const SCHEDULE_WIDE_ROWS = 30
 /** The narrow (<80 columns) action-bar order. */
 const NARROW_COLUMNS = 80
+const FILTER_CYCLE: readonly ScheduleFilter[] = ['active', 'paused', 'ended', 'all']
+
 /** The label column of a detail fact row. */
 const DETAIL_LABEL_WIDTH = 16
 /** The editor's fact label column (mode, revision, creation floor). */
@@ -122,9 +125,6 @@ export interface ScheduleWorkspacePanelDeps {
   /** Close the workspace (only the list root's Esc does this). */
   readonly close: () => void
 }
-
-/** The four panes Tab rotates through in the wide layout. */
-type FocusPane = 'filter' | 'search' | 'list' | 'detail'
 
 /** A semantic action painted somewhere in the frame. */
 type ScheduleAction =
@@ -242,7 +242,6 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
   private disposed = false
   private _focused = false
   private searchFocused = false
-  private focusPane: FocusPane = 'list'
   private chooser: OpenChooser | undefined
   private listScroll = 0
   /** A wheel gesture owns the list viewport until the selection changes. */
@@ -316,7 +315,6 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     }
     if (snapshot.mode !== 'list') {
       this.searchFocused = false
-      this.focusPane = 'list'
       this.searchBaseline = undefined
       this.searchDispatched = undefined
     }
@@ -419,9 +417,8 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
       return
     }
     if (matchesKey(data, 'tab') || matchesKey(data, 'shift+tab')) {
-      // The pane focus rotation is the WIDE layout's; a single column has no
-      // second pane to focus without leaving the screen.
-      if (this.currentLayout() === 'wide') this.rotateFocus(matchesKey(data, 'tab') ? 1 : -1)
+      const delta = matchesKey(data, 'shift+tab') ? -1 : 1
+      this.deps.dispatch({ kind: 'set-filter', filter: nextListFilter(this.snapshot.filter, delta) })
       return
     }
     if (matchesKey(data, '/')) {
@@ -688,8 +685,7 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
       return
     }
     if (matchesKey(data, 'tab') || matchesKey(data, 'shift+tab')) {
-      if (this.currentLayout() === 'wide') this.rotateFocus(matchesKey(data, 'tab') ? 1 : -1)
-      else this.exitSearch()
+      this.exitSearch()
       return
     }
     this.syncSearchInput()
@@ -785,26 +781,13 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
 
   private focusSearch(): void {
     this.searchFocused = true
-    this.focusPane = 'search'
     this.syncSearchInput()
     this.deps.requestRender()
   }
 
   private exitSearch(): void {
     this.searchFocused = false
-    this.focusPane = 'list'
     this.searchInput.focused = false
-    this.deps.requestRender()
-  }
-
-  private rotateFocus(delta: number): void {
-    const order: readonly FocusPane[] = ['filter', 'search', 'list', 'detail']
-    const index = order.indexOf(this.focusPane)
-    const next = order[wrapIndex(index + delta, order.length)]
-    this.focusPane = next
-    this.searchFocused = next === 'search'
-    if (this.searchFocused) this.syncSearchInput()
-    else this.searchInput.focused = false
     this.deps.requestRender()
   }
 
@@ -851,9 +834,12 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
 
     const lines: string[] = []
     const regions: PaintedRegion[] = []
+    const isListPage = snapshot.mode === 'list' && snapshot.confirm === undefined
     this.paintTitleRow(lines, regions, paintedWidth)
-    this.paintFilterRow(lines, regions, paintedWidth, layout)
-    this.paintSearchRow(lines, regions, paintedWidth)
+    if (isListPage) {
+      this.paintFilterRow(lines, regions, paintedWidth)
+      this.paintSearchRow(lines, regions, paintedWidth)
+    }
     // A stale/error catalog is a fact about EVERY page: the detail and history
     // snapshots behind it were read before the invalidation, so the banner is
     // painted above the body instead of only inside the list.
@@ -861,7 +847,8 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     if (banner !== undefined) {
       lines.push(banner.paint(truncateToWidth(sanitizedPhysicalLine(banner.text), paintedWidth, '…', false)))
     }
-    const bodyHeight = Math.max(0, rows - 4 - (banner === undefined ? 0 : 1))
+    const chromeRows = 1 + (isListPage ? 2 : 0) + (banner === undefined ? 0 : 1) + 1
+    const bodyHeight = Math.max(0, rows - chromeRows)
 
     if (snapshot.confirm !== undefined) {
       this.paintSingleBody(lines, regions, paintedWidth, bodyHeight, this.confirmBody(snapshot.confirm, paintedWidth), 0)
@@ -900,10 +887,17 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
   }
 
   private paintTitleRow(lines: string[], regions: PaintedRegion[], width: number): void {
-    const segments: CellSegment[] = [{ plain: 'Schedule · Host tasks', paint: color.textStrong }]
-    // The New/Refresh shortcuts are the list root's; a modal confirmation and
-    // every other mode own the keyboard, so their buttons are not painted (and
-    // therefore cannot be clicked) there either.
+    const titles: Record<ScheduleWorkspaceSnapshot['mode'], string> = {
+      list: 'Tasks',
+      detail: 'Details',
+      history: 'History',
+      editor: 'Editor',
+      help: 'Help',
+    }
+    const title = this.snapshot.confirm === undefined
+      ? `Schedule · ${titles[this.snapshot.mode]}`
+      : 'Schedule · Confirm'
+    const segments: CellSegment[] = [{ plain: title, paint: color.textStrong }]
     if (this.snapshot.mode === 'list' && this.snapshot.confirm === undefined) {
       segments.push(
         { plain: '  ' },
@@ -915,35 +909,71 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     this.pushSegments(lines, regions, width, segments)
   }
 
-  private paintFilterRow(
-    lines: string[],
-    regions: PaintedRegion[],
-    width: number,
-    layout: ScheduleWorkspaceLayout,
-  ): void {
+  private paintFilterRow(lines: string[], regions: PaintedRegion[], width: number): void {
+    this.pushSegments(lines, regions, width, this.filterPresentation(width).segments)
+  }
+
+  private filterPresentation(width: number): {
+    readonly segments: readonly CellSegment[]
+    readonly actionBarHint: boolean
+  } {
     const filters: readonly { readonly filter: ScheduleFilter; readonly label: string }[] = [
-      { filter: 'all', label: 'All' },
-      { filter: 'active', label: 'Active' },
+      { filter: 'active', label: 'Enabled' },
       { filter: 'paused', label: 'Paused' },
       { filter: 'ended', label: 'Ended' },
+      { filter: 'all', label: 'All' },
     ]
-    const interactive = this.snapshot.mode === 'list' && this.snapshot.confirm === undefined
+    const countsKnown = this.snapshot.status === 'ready' || this.snapshot.status === 'stale'
+    const countFor = (filter: ScheduleFilter): string => {
+      if (!countsKnown) return '—'
+      return String(filter === 'all' ? this.snapshot.total : this.snapshot.statusCounts[filter])
+    }
+    const chip = (filter: ScheduleFilter, label: string, count: string): CellSegment[] => {
+      const hit: ScheduleHit = { kind: 'filter', filter }
+      if (filter === this.snapshot.filter) {
+        const active = (text: string): string => color.textStrong(text, 'primary')
+        return [
+          { plain: `[${label} `, paint: active, hit },
+          { plain: count, paint: color.textMuted, hit },
+          { plain: ']', paint: active, hit },
+        ]
+      }
+      return [
+        { plain: `${label} `, paint: color.textDim, hit },
+        { plain: count, paint: color.textMuted, hit },
+      ]
+    }
     const segments: CellSegment[] = []
-    if (layout === 'wide' && this.focusPane === 'filter') {
-      segments.push({ plain: '> ', paint: color.primary })
-    }
     for (const [index, entry] of filters.entries()) {
-      if (index > 0) segments.push({ plain: ' ' })
-      const chip = `[${entry.label}]`
-      segments.push({
-        plain: chip,
-        paint: this.snapshot.filter === entry.filter
-          ? text => color.textStrong(text, 'primary')
-          : color.textDim,
-        ...(interactive ? { hit: { kind: 'filter', filter: entry.filter } } : {}),
-      })
+      if (index > 0) segments.push({ plain: '  ' })
+      segments.push(...chip(entry.filter, entry.label, countFor(entry.filter)))
     }
-    this.pushSegments(lines, regions, width, segments)
+    const widthOf = (items: readonly CellSegment[]): number => items.reduce(
+      (total, item) => total + visibleWidth(item.plain),
+      0,
+    )
+    const fullHint = [...segments, { plain: '  ' }, { plain: 'Tab/Shift+Tab filters', paint: color.textMuted }]
+    if (widthOf(fullHint) <= width) return { segments: fullHint, actionBarHint: false }
+    if (widthOf(segments) <= width) {
+      const shortHint = [...segments, { plain: '  ' }, { plain: 'Tab filters', paint: color.textMuted }]
+      return widthOf(shortHint) <= width
+        ? { segments: shortHint, actionBarHint: false }
+        : { segments, actionBarHint: true }
+    }
+
+    const current = filters.find(entry => entry.filter === this.snapshot.filter)!
+    const compact = (count: string): CellSegment[] => [
+      ...chip(current.filter, current.label, count),
+      { plain: '  ' },
+      {
+        plain: 'Next filter [Tab]',
+        paint: color.primary,
+        hit: { kind: 'filter', filter: nextListFilter(this.snapshot.filter, 1) },
+      },
+    ]
+    const compactSegments = compact(countFor(current.filter))
+    if (widthOf(compactSegments) <= width) return { segments: compactSegments, actionBarHint: false }
+    return { segments: compact(countsKnown ? '999+' : '—'), actionBarHint: false }
   }
 
   private paintSearchRow(lines: string[], regions: PaintedRegion[], width: number): void {
@@ -1011,9 +1041,13 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     width: number,
     bodyHeight: number,
   ): void {
-    const content = this.listBody()
+    const content = this.listBody(width)
     this.listScroll = this.listViewport(content, bodyHeight)
     this.paintSingleBody(lines, regions, width, bodyHeight, content, this.listScroll)
+  }
+
+  private wideLeftWidth(width: number): number {
+    return Math.max(20, Math.floor((width - 2) * 0.4))
   }
 
   private paintWideBody(
@@ -1022,9 +1056,9 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     width: number,
     bodyHeight: number,
   ): void {
-    const leftWidth = Math.max(20, Math.floor((width - 2) * 0.4))
+    const leftWidth = this.wideLeftWidth(width)
     const rightWidth = Math.max(1, width - 2 - leftWidth)
-    const list = this.listBody()
+    const list = this.listBody(leftWidth)
     this.listScroll = this.listViewport(list, bodyHeight)
     const right = this.wideRightBody(rightWidth)
     let rightScroll: number
@@ -1068,7 +1102,7 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     }
   }
 
-  private listBody(): readonly BodyLine[] {
+  private listBody(width: number): readonly BodyLine[] {
     const snapshot = this.snapshot
     const content: BodyLine[] = []
     if (snapshot.notice !== undefined) content.push(this.noticeLine(snapshot.notice))
@@ -1080,12 +1114,57 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
       return content
     }
     for (const entry of snapshot.rows) {
+      const selected = entry.id === snapshot.selectedId
       content.push({
-        segments: this.listRowSegments(entry, entry.id === snapshot.selectedId),
+        segments: this.listTitleSegments(entry, selected),
+        rowId: entry.id,
+      })
+      content.push({
+        segments: this.listOccurrenceSegments(entry, width),
         rowId: entry.id,
       })
     }
     return content
+  }
+
+  private listTitleSegments(entry: ScheduleCatalogEntry, selected: boolean): readonly CellSegment[] {
+    return [
+      { plain: selected ? '> ' : '  ', paint: selected ? color.primary : undefined },
+      {
+        plain: sanitizedPhysicalLine(entry.title),
+        paint: selected ? text => color.textStrong(text) : color.text,
+      },
+    ]
+  }
+
+  private listOccurrenceSegments(entry: ScheduleCatalogEntry, width: number): readonly CellSegment[] {
+    const parts = formatListOccurrence(entry).split(' ')
+    const zone = parts.pop()!
+    const time = parts.pop()!
+    const date = parts.pop()!
+    const prefix = parts.join(' ')
+    const prefixText = `${prefix} `
+    const instantText = `${date} ${time}`
+    const beforeZoneWidth = 2 + visibleWidth(prefixText) + visibleWidth(instantText) + 1
+    const zoneBudget = Math.max(0, width - beforeZoneWidth)
+    const zoneFits = visibleWidth(zone) <= zoneBudget
+    const segments: CellSegment[] = [
+      { plain: '  ' },
+      {
+        plain: prefixText,
+        paint: entry.status === 'active' ? color.textDim : this.statusPaint(entry.status),
+      },
+      { plain: instantText, paint: color.textDim },
+      { plain: ' ' },
+      { plain: truncateToWidth(zone, zoneBudget, '…', false), paint: color.textMuted },
+    ]
+    if (zoneFits) {
+      const repeat = ` · ${formatListRepeat(entry)}`
+      if (beforeZoneWidth + visibleWidth(zone) + visibleWidth(repeat) <= width) {
+        segments.push({ plain: repeat, paint: color.textDim })
+      }
+    }
+    return segments
   }
 
   private listBanner(): PaintedBanner | undefined {
@@ -1101,31 +1180,8 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     return { text: `Showing the last read catalog${detail}`, paint: color.warning }
   }
 
-  private listRowSegments(entry: ScheduleCatalogEntry, selected: boolean): readonly CellSegment[] {
-    return [
-      { plain: selected ? '> ' : '  ', paint: selected ? color.primary : undefined },
-      { plain: scheduleStatusText(entry), paint: this.statusPaint(entry.status) },
-      { plain: '  ' },
-      { plain: sanitizedPhysicalLine(entry.title), paint: selected ? text => color.textStrong(text) : color.text },
-      { plain: '  ' },
-      { plain: sanitizedPhysicalLine(formatRuleSummary(entry)), paint: color.textDim },
-      { plain: '  ' },
-      { plain: sanitizedPhysicalLine(formatTargetSummary(entry.target)), paint: color.textDim },
-      { plain: '  ' },
-      { plain: sanitizedPhysicalLine(formatOccurrence(entry)), paint: color.textMuted },
-    ]
-  }
-
   private detailBody(entry: ScheduleCatalogEntry | undefined, width: number): readonly BodyLine[] {
-    const active = this.snapshot.mode === 'list'
-      && this.focusPane === 'detail'
-      && this.currentLayout() === 'wide'
-    const out: BodyLine[] = [{
-      segments: [{
-        plain: active ? '[Details]' : 'Details',
-        paint: active ? text => color.textStrong(text, 'primary') : color.textStrong,
-      }],
-    }]
+    const out: BodyLine[] = [{ segments: [{ plain: 'Details', paint: color.textStrong }] }]
     if (entry === undefined) {
       out.push({ segments: [{ plain: 'Loading task…', paint: color.textDim }] })
       return out
@@ -1427,7 +1483,9 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
       ['N', 'Create a task'],
       ['R', 'Refresh the Host catalog'],
       ['/', 'Focus search; Esc returns to the list'],
-      ['A / P / E / L', 'Filter All / Active / Paused / Ended'],
+      ['A / P / E / L', 'Filter Enabled / Paused / Ended / All'],
+      [`${formatKeyId(Key.tab)} / ${formatKeyId(Key.shift(Key.tab))} (list)`, 'Cycle Enabled, Paused, Ended, All filters'],
+      [`${formatKeyId(Key.tab)} / ${formatKeyId(Key.shift(Key.tab))} (search)`, 'Return to the task list without changing the filter'],
       ['X', 'Clear ended tasks'],
       ['?', 'This help page'],
       ['H (detail)', 'Delivery history'],
@@ -1436,7 +1494,6 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
       ['U (detail)', 'Run the task now'],
       ['D (detail)', 'Delete the task'],
       ['Enter (history)', 'Load the next page when More is shown'],
-      [`${formatKeyId(Key.tab)} / ${formatKeyId(Key.shift(Key.tab))}`, 'Rotate focus: filter, search, list, detail'],
       ['PgUp / PgDn', 'Scroll detail, history or help'],
       [`${formatKeyId(Key.ctrl('s'))} (editor)`, 'Save the schedule'],
       [`${formatKeyId(Key.ctrl('r'))} (editor)`, 'Reload the latest Host revision and discard unsaved changes (asks first)'],
@@ -1643,6 +1700,7 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
           add('x clear ended', 5, 'clear-ended', 'x')
           add('? help', 4, 'help', '?')
           add('r refresh', 3, 'refresh', 'r')
+          if (this.filterPresentation(width).actionBarHint) add('Tab filters', 1, undefined, 'Tab')
           add('Esc close', 10, 'close', 'Esc')
           break;
         case 'detail':
@@ -1756,7 +1814,8 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     const step = delta < 0 ? -1 : 1
     if (this.snapshot.confirm !== undefined) return undefined
     if (this.snapshot.mode === 'list') {
-      if (this.focusPane === 'detail') {
+      const layout = scheduleWorkspaceLayout(frame.width, frame.height)
+      if (layout === 'wide' && event.x >= this.wideLeftWidth(frame.width) + 2) {
         this.detailScroll = Math.max(0, this.detailScroll + step)
       } else {
         this.listScroll = Math.max(0, this.listScroll + step)
@@ -1811,6 +1870,7 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
         // The chips are list-page affordances; a stale hit from another page
         // must never change the filter.
         if (this.snapshot.mode !== 'list' || this.snapshot.confirm !== undefined) return
+        if (this.searchFocused) this.exitSearch()
         this.deps.dispatch({ kind: 'set-filter', filter: hit.filter })
         return
       case 'search':
@@ -1855,10 +1915,6 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
   }
 
   // ── panel-local state ──────────────────────────────────────────────────────
-
-  private currentLayout(): ScheduleWorkspaceLayout {
-    return scheduleWorkspaceLayout(this.deps.columns(), this.deps.rows())
-  }
 
   private syncSearchInput(): void {
     if (!this.searchFocused) {
@@ -1949,10 +2005,14 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     bodyHeight: number,
   ): number {
     const selected = content.findIndex(line => line.rowId !== undefined && line.rowId === this.snapshot.selectedId)
+    if (bodyHeight <= 0 || selected < 0) return this.scrolled(scroll, content.length, bodyHeight)
+    const selectedNextLine = content[selected + 1]?.rowId === this.snapshot.selectedId ? selected + 1 : selected
     let next = scroll
-    if (bodyHeight > 0 && selected >= 0) {
-      if (selected < next) next = selected
-      else if (selected >= next + bodyHeight) next = selected - bodyHeight + 1
+    if (selected < next) next = selected
+    else if (bodyHeight >= 2 && selectedNextLine > selected && selectedNextLine >= next + bodyHeight) {
+      next = selectedNextLine - bodyHeight + 1
+    } else if (selected >= next + bodyHeight) {
+      next = selected - bodyHeight + 1
     }
     return this.scrolled(next, content.length, bodyHeight)
   }
@@ -2012,6 +2072,10 @@ function fit(text: string, width: number): string {
   if (width <= 0) return ''
   const clamped = truncateToWidth(text, width, '…', false)
   return clamped + ' '.repeat(Math.max(0, width - visibleWidth(clamped)))
+}
+
+function nextListFilter(filter: ScheduleFilter, delta: 1 | -1): ScheduleFilter {
+  return FILTER_CYCLE[wrapIndex(FILTER_CYCLE.indexOf(filter) + delta, FILTER_CYCLE.length)]!
 }
 
 /** Wrap one index into `[0, length)`. */

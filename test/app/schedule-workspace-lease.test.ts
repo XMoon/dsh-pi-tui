@@ -25,12 +25,15 @@ const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecy
 afterEach(() => { disposeStartedApps() })
 
 function snapshot(overrides: Partial<ScheduleWorkspaceSnapshot> = {}): ScheduleWorkspaceSnapshot {
+  const statusCounts = { active: 0, paused: 0, ended: 0 }
+  for (const row of overrides.rows ?? []) statusCounts[row.status] += 1
   return {
     status: 'ready',
     filter: 'all',
     query: '',
     rows: [],
     total: 0,
+    statusCounts,
     mode: 'list',
     sessions: [],
     busy: false,
@@ -70,7 +73,7 @@ test('the Schedule workspace is the ONE leased screen with exactly-once close', 
   // The lease paints the panel as the physical root.
   await vt.waitForRender()
   const frame = vt.getViewport().map(stripTerminalSequences).join('\n')
-  assert.match(frame, /Schedule · Host tasks/u, `the leased panel is painted:\n${frame}`)
+  assert.match(frame, /Schedule · Tasks/u, `the leased panel is painted:\n${frame}`)
 
   // ONE workspace owns the terminal: a second lease is refused, never nested.
   assert.throws(() => app.openScheduleWorkspace(bindings().bindings), /a workspace screen is already leased/u)

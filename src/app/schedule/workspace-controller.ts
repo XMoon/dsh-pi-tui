@@ -205,6 +205,8 @@ export class ScheduleWorkspaceController {
   }
 
   snapshot(): ScheduleWorkspaceSnapshot {
+    const statusCounts = { active: 0, paused: 0, ended: 0 }
+    for (const entry of this.catalog) statusCounts[entry.status] += 1
     return {
       status: this.status,
       ...(this.statusMessage === undefined ? {} : { statusMessage: this.statusMessage }),
@@ -212,6 +214,7 @@ export class ScheduleWorkspaceController {
       query: this.query,
       rows: this.projectedRows(),
       total: this.catalog.length,
+      statusCounts,
       ...(this.selectedId === undefined ? {} : { selectedId: this.selectedId }),
       mode: this.mode,
       ...(this.detail === undefined ? {} : { detail: this.detail }),

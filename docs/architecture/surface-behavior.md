@@ -1328,11 +1328,27 @@ keeps its Job/Subagent Task Center semantics.
 The leased fullscreen workspace (see `overlay-focus.md` §10.6) is ONE
 `ScheduleWorkspacePanel` whose states share the lease:
 
-- **List** — Host tasks with status, title, the stored rule, the delivery
-  target and the next occurrence. Filters `All / Active / Paused / Ended` and a
-  search over title+prompt are a LOCAL projection of the committed catalog (no
-  Host read per keystroke). `R` re-reads the authoritative catalog; a failed
-  read keeps the last successful rows labelled stale.
+- **List** — Host tasks are browsed as two-line items: the task title first, then
+  the official occurrence and a compact repeat summary. The four filters are
+  `Enabled`, `Paused`, `Ended`, and `All` (internally `active`, `paused`,
+  `ended`, and `all`); the initial filter is `All`. `Tab` / `Shift+Tab` cycle Enabled →
+  Paused → Ended → All in either narrow or wide layouts. Legacy `A / P / E / L`
+  shortcuts keep their Enabled / Paused / Ended / All mapping. Counts come from
+  the full committed Host catalog, not the filtered or searched rows; before the
+  first successful read they are unknown, and a stale catalog keeps its last
+  successful counts and stale notice. Search covers title+prompt and remains a
+  LOCAL projection of the committed catalog (no Host read per keystroke); Tab
+  while Search is focused only returns to the list and does not change its filter.
+  The occurrence is the Host-committed `scheduledAt` displayed in the rule's
+  official zone (UTC for rules without one). An active task with a later
+  `deliveryFloorEndsAt` is labelled `Eligible from`, not `Next`; paused and ended
+  tasks are labelled `Paused · Scheduled` and `Ended · Final`. The repeat summary
+  never evaluates cron/RRULE or predicts a new occurrence. `R` re-reads the
+  authoritative catalog; a failed read keeps the last successful rows labelled
+  stale. On a wide List, the task catalog stays left and a read-only Detail
+  preview stays right; each task's two lines share one click target, and wheel
+  input scrolls the pane under the pointer. Filter and Search chrome appears only
+  on List; the other modes retain their own page title, body and keyboard owner.
 - **Detail** — the official `view` record: full prompt, official timing and
   time zone, target, task status, `executionActive` and `deliveryFloorEndsAt`
   as SEPARATE facts (the delivery floor is never a task status), and the latest

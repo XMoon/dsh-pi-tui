@@ -70,12 +70,15 @@ function task(overrides: {
 }
 
 function workspace(overrides: Partial<ScheduleWorkspaceSnapshot> = {}): ScheduleWorkspaceSnapshot {
+  const statusCounts = { active: 0, paused: 0, ended: 0 }
+  for (const row of overrides.rows ?? []) statusCounts[row.status] += 1
   return {
     status: 'ready',
     filter: 'all',
     query: '',
     rows: [],
     total: 0,
+    statusCounts,
     mode: 'list',
     sessions: [],
     busy: false,
@@ -251,13 +254,19 @@ import type { ScheduleEditRequest, SchedulePort } from '../../src/runtime/schedu
 import type { SessionReader } from '../../src/runtime/session-reader-port.ts'
 
 /** Minimal recording SchedulePort for the source-to-sink SGR proof. */
-function createRecordingPort(): SchedulePort & { edits: ScheduleEditRequest[] } {
-  const rows = [task({ id: 'task-a', title: 'Alpha report', status: 'active' })]
+function createRecordingPort(): SchedulePort & { edits: ScheduleEditRequest[]; readonly catalogCalls: number } {
+  const rows = [
+    task({ id: 'task-a', title: 'Alpha report', status: 'active' }),
+    task({ id: 'task-b', title: 'Bravo digest', status: 'paused' }),
+    task({ id: 'task-c', title: 'Charlie review', status: 'ended' }),
+  ]
   const edits: ScheduleEditRequest[] = []
+  const state = { catalogCalls: 0 }
   const listeners = new Set<() => void>()
   return {
     edits,
-    async catalog() { return rows },
+    get catalogCalls() { return state.catalogCalls },
+    async catalog() { state.catalogCalls += 1; return rows },
     async list() { return { items: [...rows], shown: rows.length, total: rows.length, limit: 100, offset: 0 } },
     async view(request) { return rows.find(row => row.id === request.id) ?? { id: request.id, code: 'schedule_not_found' } },
     async history(request) { return { id: request.id, code: 'schedule_not_found' } },
@@ -273,10 +282,10 @@ function createRecordingPort(): SchedulePort & { edits: ScheduleEditRequest[] } 
       listeners.add(listener)
       return () => { listeners.delete(listener) }
     },
-  } as SchedulePort & { edits: ScheduleEditRequest[] }
+  } as SchedulePort & { edits: ScheduleEditRequest[]; readonly catalogCalls: number }
 }
 
-function createController(port: SchedulePort): ScheduleWorkspaceController {
+function createController(port: SchedulePort, openDetail = true): ScheduleWorkspaceController {
   const sessionReader: SessionReader = {
     list: async () => [],
     projectionBatch: async () => new Map(),
@@ -288,9 +297,53 @@ function createController(port: SchedulePort): ScheduleWorkspaceController {
   }
   const controller = new ScheduleWorkspaceController({ port, sessionReader, runOwned: (_l, t) => { void t() } })
   controller.open()
-  controller.dispatch({ kind: 'open-detail', id: 'task-a' })
+  if (openDetail) controller.dispatch({ kind: 'open-detail', id: 'task-a' })
   return controller
 }
+
+test('real VirtualTerminal Tab input cycles full-catalog filters through the Controller without another Host read', async () => {
+  const port = createRecordingPort()
+  const controller = createController(port, false)
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  started.add(app)
+  const handle = app.openScheduleWorkspace({
+    snapshot: () => controller.snapshot(),
+    dispatch: intent => { controller.dispatch(intent) },
+    onClose: () => {},
+  })
+  const unsubscribe = controller.subscribe(() => handle.update(controller.snapshot()))
+  try {
+    await controller.whenIdle()
+    handle.update(controller.snapshot())
+    await vt.waitForRender()
+    const catalogCalls = port.catalogCalls
+    const cases = [
+      ['\t', 'active', 'Enabled', 1, 'task-a'],
+      ['\t', 'paused', 'Paused', 1, 'task-b'],
+      ['\t', 'ended', 'Ended', 1, 'task-c'],
+      ['\t', 'all', 'All', 3, 'task-c'],
+      ['\x1b[Z', 'ended', 'Ended', 1, 'task-c'],
+      ['\x1b[Z', 'paused', 'Paused', 1, 'task-b'],
+      ['\x1b[Z', 'active', 'Enabled', 1, 'task-a'],
+    ] as const
+    for (const [input, filter, label, count, selectedId] of cases) {
+      vt.sendInput(input)
+      await vt.waitForRender()
+      assert.equal(controller.snapshot().filter, filter)
+      const frame = vt.getViewport().map(stripTerminalSequences).join('\n')
+      assert.ok(frame.includes(`[${label} ${count}]`), `${filter} paints its current full-catalog count:\n${frame}`)
+      assert.equal(controller.snapshot().selectedId, selectedId, 'filter cycling preserves the selected task when it remains visible')
+      assert.equal(port.catalogCalls, catalogCalls, 'local filter intents do not reread the Host catalog')
+      assert.deepEqual(port.edits, [], 'filter cycling dispatches no Host write')
+    }
+  } finally {
+    unsubscribe()
+    app.dispose()
+    controller.dispose()
+  }
+})
 
 test('a real SGR pointer gesture reaches the Host port through the real Controller', async () => {
   // v2 §4.4 source-to-sink: VirtualTerminal SGR → TuiApp → alt screen → panel
@@ -375,12 +428,12 @@ test('a real SGR pointer gesture through TuiApp commits, and a cross-subject one
   snapshot = LIST
   handle.update(snapshot)
   await vt.waitForRender()
-  const rowA = locate('Alpha report')
+  const rowA = locate('Next 2026-06-01 17:00 Asia/Shanghai')
   press(rowA)
   snapshot = { ...LIST, selectedId: 'task-bravo' }
   handle.update(snapshot)
   await vt.waitForRender()
-  const rowB = locate('Bravo digest')
+  const rowB = locate('Next 2026-06-01 18:00 Asia/Shanghai')
   release(rowB)
   await vt.waitForRender()
   assert.equal(intents.filter(intent => intent.kind === 'open-detail').length, 0,
