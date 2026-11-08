@@ -284,7 +284,15 @@ Host/Client Split qualification on main`. This manual input is restricted to
 npm-mode `main`; the verdict then requires the Split job to succeed. Leaving it
 disabled preserves the normal status (`skipped`). A manual main run qualifies
 the main candidate only; it does not replace any gate on the release-tag
-candidate or authorize publication.
+candidate or authorize publication. When the Split smoke writes its bounded
+failure report, the job uploads only that sanitized `failure.json` as the
+`split-process-failure` artifact. Download it before considering a rerun:
+
+```sh
+gh run download <RUN_ID> --name split-process-failure --dir <destination>
+```
+
+Raw PTY logs and credentials are not included in that artifact.
 
 A failed run is recovered without re-testing the jobs that already passed:
 GitHub's "Re-run failed jobs" (`gh run rerun <RUN_ID> --failed`) keeps the

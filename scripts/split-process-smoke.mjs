@@ -181,7 +181,12 @@ async function main(explicitPath) {
     // reexec preflight applies to a replacement target.
     candidate = inspectSplitCandidate(explicitPath)
   } catch (error) {
-    emitInputFailure({ lane: 'split-process', heading: 'SPLIT_PROCESS_SMOKE', error })
+    emitInputFailure({
+      lane: 'split-process',
+      heading: 'SPLIT_PROCESS_SMOKE',
+      error,
+      evidencePath: process.env.SPLIT_PROCESS_FAILURE_EVIDENCE,
+    })
     throw error
   }
   const { tarball, manifest: candidateManifest, candidateSha256, targetDshVersion } = candidate
@@ -365,7 +370,10 @@ async function main(explicitPath) {
     // Report BEFORE the cleanup below: the failure projection must read the
     // still-live process handles, and the work root must still exist while the
     // report is built. The original error is rethrown so the lane still fails.
-    diagnostics.reportFailure(error, { processes: [...activeProcesses] })
+    diagnostics.reportFailure(error, {
+      processes: [...activeProcesses],
+      evidencePath: process.env.SPLIT_PROCESS_FAILURE_EVIDENCE,
+    })
     throw error
   } finally {
     // A failed assertion must not leave a live Host/Client probe behind; each
@@ -503,7 +511,12 @@ async function runSelectedCases(selection) {
     }
     candidate = inspectSplitCandidate(selection.candidate)
   } catch (error) {
-    emitInputFailure({ lane: 'split-process', heading: 'SPLIT_PROCESS_SMOKE', error })
+    emitInputFailure({
+      lane: 'split-process',
+      heading: 'SPLIT_PROCESS_SMOKE',
+      error,
+      evidencePath: process.env.SPLIT_PROCESS_FAILURE_EVIDENCE,
+    })
     throw error
   }
   const { tarball, candidateSha256, targetDshVersion } = candidate
@@ -560,7 +573,10 @@ async function runSelectedCases(selection) {
     // Report BEFORE the cleanup below: the failure projection must read the
     // still-live process handles, and the work root must still exist while the
     // report is built. The original error is rethrown so the lane still fails.
-    diagnostics.reportFailure(error, { processes: [...activeProcesses] })
+    diagnostics.reportFailure(error, {
+      processes: [...activeProcesses],
+      evidencePath: process.env.SPLIT_PROCESS_FAILURE_EVIDENCE,
+    })
     throw error
   } finally {
     for (const run of [...activeProcesses]) {
@@ -590,7 +606,12 @@ async function runLane() {
   } catch (error) {
     // A selector error exists before any reporter: it leaves the ONE fixed
     // input projection and never a work root, an install or a process.
-    emitInputFailure({ lane: 'split-process', heading: 'SPLIT_PROCESS_SMOKE', error })
+    emitInputFailure({
+      lane: 'split-process',
+      heading: 'SPLIT_PROCESS_SMOKE',
+      error,
+      evidencePath: process.env.SPLIT_PROCESS_FAILURE_EVIDENCE,
+    })
     throw error
   }
   if (selection.mode === 'list') {

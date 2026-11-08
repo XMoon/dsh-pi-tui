@@ -66,6 +66,21 @@ test('the split-process smoke runs on tag pushes or explicit main dispatch', () 
   const splitRun = job.steps?.find(step => typeof step.run === 'string'
     && step.run.trim() === 'pnpm smoke:split-process -- "$CANDIDATE"')
   assert.ok(splitRun, 'the split-process job must execute the real lane against the downloaded candidate')
+  const smokeSource = readFileSync(SCRIPT, 'utf8')
+  const failureMirrors = smokeSource.match(/evidencePath: process\.env\.SPLIT_PROCESS_FAILURE_EVIDENCE/gu) ?? []
+  assert.equal(failureMirrors.length, 5, 'every full/selected/input failure boundary mirrors the safe CI report')
+  const evidenceSetupIndex = job.steps.findIndex(step => step.name === 'Prepare private Split failure evidence directory')
+  const runIndex = job.steps.indexOf(splitRun)
+  assert.ok(evidenceSetupIndex >= 0 && evidenceSetupIndex < runIndex,
+    'the private evidence destination is ready before the smoke starts')
+  const failureUpload = job.steps.find(step => step.name === 'Upload sanitized Split smoke failure report')
+  assert.equal(failureUpload?.uses, 'actions/upload-artifact@v7')
+  assert.equal(failureUpload?.if, 'always()')
+  assert.equal(failureUpload?.with?.name, 'split-process-failure')
+  assert.equal(failureUpload?.with?.path, '${{ runner.temp }}/dsh-pi-tui-split-failure/failure.json')
+  assert.equal(failureUpload?.with?.['if-no-files-found'], 'ignore')
+  assert.equal(failureUpload?.with?.overwrite, true)
+
   assert.equal(job.if,
     "${{ always() && needs.dsh-context.result == 'success' && needs.candidate.result == 'success' && needs.dsh-context.outputs.mode == 'npm' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.run_split_process)) }}",
     'only npm release-tag pushes or the explicit main dispatch input may run this job')

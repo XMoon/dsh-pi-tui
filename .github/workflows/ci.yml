@@ -1156,8 +1156,26 @@ jobs:
           echo "CANDIDATE=${TARBALLS[0]}" >> "$GITHUB_ENV"
           echo "the candidate is the produced tarball ($ACTUAL)"
 
+      - name: Prepare private Split failure evidence directory
+        run: |
+          set -euo pipefail
+          EVIDENCE_DIR="$RUNNER_TEMP/dsh-pi-tui-split-failure"
+          install -d -m 700 "$EVIDENCE_DIR"
+          echo "SPLIT_PROCESS_FAILURE_EVIDENCE=$EVIDENCE_DIR/failure.json" >> "$GITHUB_ENV"
+
       - name: Host/Client split-process bootstrap
+        id: split_smoke
         run: pnpm smoke:split-process -- "$CANDIDATE"
+
+      - name: Upload sanitized Split smoke failure report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: split-process-failure
+          path: ${{ runner.temp }}/dsh-pi-tui-split-failure/failure.json
+          if-no-files-found: ignore
+          overwrite: true
+          retention-days: 7
 
       - name: Upload the product Browser qualification evidence
         if: always()
