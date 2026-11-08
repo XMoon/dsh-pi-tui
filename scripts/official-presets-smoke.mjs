@@ -222,6 +222,18 @@ export function assertNoPresetCompatibilityFailures(tuiLog, tmux) {
   assertNoCompatibilityFailures(tuiLog, tmux, line => `official preset smoke reported an incompatible surface: ${line}`)
 }
 
+export function directPromptTimeoutDiagnostic(stage, surfaceAlive, records) {
+  return JSON.stringify({
+    stage,
+    surfaceAlive,
+    requestCount: records.length,
+    modelRequests: records.map(record => ({
+      markerCount: record.markerCount,
+      presentTool: record.presentTool === true,
+      presentInstruction: record.presentInstruction === true,
+    })),
+  })
+}
 export function assertOfficialPresetHeader(presetId, evidencePath) {
   const evidence = readOptionalJson(evidencePath)
   if (evidence?.error !== undefined) {
@@ -299,28 +311,21 @@ export async function smokeOfficialPresetMounts(invocation, workDir, env, prompt
       assertOfficialPresetHeader(presetId, env.DSH_SMOKE_HEADER_EVIDENCE)
       if (presetId === 'standard' && promptEvidencePath !== undefined) {
         const directPrompt = 'pr-e direct standard prompt'
-        const waitForDirectPromptFact = async (label, predicate) => {
+        const waitForDirectPromptFact = async (stage, label, predicate) => {
           try {
             await waitUntil(label, TIMEOUTS.command, predicate, 'COMPAT_BOOT_FAILURE')
           } catch (error) {
             if (!(error instanceof CompatFailure)) throw error
-            const pane = stripTerminalControl(tmux.capturePane())
             const evidence = readFileSync(promptEvidencePath, 'utf8').trim()
-            fail(error.phase, `${error.message}\n${[
-              'tmux pane tail:',
-              redact(tail(pane, 20)),
-              'TUI log tail:',
-              redact(tail(readText(tuiLog), 20)),
-              'model-request facts:',
-              redact(tail(evidence, 12)),
-            ].join('\\n')}`)
+            const records = evidence === '' ? [] : evidence.split('\n').map(line => JSON.parse(line))
+            fail(error.phase, `${error.message}; qualification=${directPromptTimeoutDiagnostic(stage, tmux.hasSession(), records)}`)
           }
         }
         tmux.sendLiteral(directPrompt)
-        await waitForDirectPromptFact('Direct standard prompt in composer', () =>
+        await waitForDirectPromptFact('composer-input', 'Direct standard prompt in composer', () =>
           tmux.hasSession() && tmux.capturePane().includes(directPrompt))
         tmux.sendKey('Enter')
-        await waitForDirectPromptFact('Direct standard prompt answer', () =>
+        await waitForDirectPromptFact('model-answer', 'Direct standard prompt answer', () =>
           tmux.hasSession() && tmux.capturePane().includes('direct qualification answer'))
         const evidence = readFileSync(promptEvidencePath, 'utf8').trim()
         const records = evidence === '' ? [] : evidence.split('\n').map(line => JSON.parse(line))
