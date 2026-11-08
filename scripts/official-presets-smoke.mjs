@@ -298,12 +298,30 @@ export async function smokeOfficialPresetMounts(invocation, workDir, env, prompt
       }, 'COMPAT_BOOT_FAILURE')
       assertOfficialPresetHeader(presetId, env.DSH_SMOKE_HEADER_EVIDENCE)
       if (presetId === 'standard' && promptEvidencePath !== undefined) {
-        tmux.sendLiteral('pr-e direct standard prompt')
+        const directPrompt = 'pr-e direct standard prompt'
+        const waitForDirectPromptFact = async (label, predicate) => {
+          try {
+            await waitUntil(label, TIMEOUTS.command, predicate, 'COMPAT_BOOT_FAILURE')
+          } catch (error) {
+            if (!(error instanceof CompatFailure)) throw error
+            const pane = stripTerminalControl(tmux.capturePane())
+            const evidence = readFileSync(promptEvidencePath, 'utf8').trim()
+            fail(error.phase, `${error.message}\n${[
+              'tmux pane tail:',
+              redact(tail(pane, 20)),
+              'TUI log tail:',
+              redact(tail(readText(tuiLog), 20)),
+              'model-request facts:',
+              redact(tail(evidence, 12)),
+            ].join('\\n')}`)
+          }
+        }
+        tmux.sendLiteral(directPrompt)
+        await waitForDirectPromptFact('Direct standard prompt in composer', () =>
+          tmux.hasSession() && tmux.capturePane().includes(directPrompt))
         tmux.sendKey('Enter')
-        await waitUntil('Direct standard prompt answer', TIMEOUTS.command, () => {
-          if (!tmux.hasSession()) return false
-          return tmux.capturePane().includes('direct qualification answer')
-        }, 'COMPAT_BOOT_FAILURE')
+        await waitForDirectPromptFact('Direct standard prompt answer', () =>
+          tmux.hasSession() && tmux.capturePane().includes('direct qualification answer'))
         const evidence = readFileSync(promptEvidencePath, 'utf8').trim()
         const records = evidence === '' ? [] : evidence.split('\n').map(line => JSON.parse(line))
         const standard = records.filter(record => record.presentTool === true)
