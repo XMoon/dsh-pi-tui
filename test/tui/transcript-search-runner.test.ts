@@ -14,7 +14,7 @@ import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import { SESSION_FORMAT_VERSION, type SessionEvent } from '@deepseek-ai/dsh-session'
-import { stripTerminalSequences } from '@xmoon76/pi-tui'
+import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import { sanitizeDisplayText } from '../../src/tui/presentation/terminal-text.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import { TranscriptFolder, type TranscriptMessage } from '../../src/transcript.ts'
@@ -728,6 +728,120 @@ test('runner search: passive assistant settlement refreshes the source range for
   assert.deepEqual(readRange(), { start: 7, end: 13 }, 'passive binding carries the current source-local offset')
   assert.equal(projections.count(), 1, 'the settlement projects once')
   assert.ok(app.searchPresentationDiagnosticsForTest().rebuilds <= 1, 'the offset refresh commits at most one rebuild')
+})
+
+test('runner search: Folder Workflow run status maps to the pill interior without its brackets', async (t) => {
+  const events = [
+    event('turn/start', { turn: 0 }, 0),
+    event('tool-workflow/run-start', { runId: 'workflow-status-run' as never, name: 'audit' }, 1),
+    event('tool-workflow/run-end', { runId: 'workflow-status-run' as never, stopReason: 'completed' }, 2),
+  ]
+  const fixture = await mountSearchRunner(t, 1, [], 'completed', events)
+  fixture.app.setIconStyle('minimal')
+  await fixture.settleRender()
+  fixture.app.startTranscriptSearch()
+  await fixture.settleRender()
+  typeQuery(fixture, 'completed')
+  await fixture.settleRender()
+
+  assert.equal(fixture.app.transcriptSearchPresentationForTest()?.sourceKey, 'workflow-run.status')
+  const lines = fixture.vt.getViewport().map(stripTerminalSequences)
+  const row = lines.findIndex(line => line.includes('Workflow audit [completed]'))
+  assert.ok(row >= 0, `the real Workflow status pill is painted:\n${lines.join('\n')}`)
+  const status = visibleWidth(lines[row]!.slice(0, lines[row]!.indexOf('completed')))
+  const mounted = (fixture.app as unknown as {
+    mountedTranscriptBlocks: ReadonlyArray<{ block: { message?: TranscriptMessage }; searchSelection?: { exact: boolean } }>
+  }).mountedTranscriptBlocks
+  assert.equal(mounted.find(entry => entry.block.message?.kind === 'workflow')?.searchSelection?.exact, true,
+    'the real Folder run-status range is proven at paint time')
+  assert.equal(fixture.vt.getCellBgRgb(row, status), 0xf5c542, 'the status text is the current cell')
+  assert.notEqual(fixture.vt.getCellBgRgb(row, status - 1), 0xf5c542, 'the opening bracket is outside the exact field')
+  assert.notEqual(fixture.vt.getCellBgRgb(row, status + visibleWidth('completed')), 0xf5c542, 'the closing bracket is outside the exact field')
+})
+
+test('runner search: Folder Workflow phase label maps to its exact painted cell', async (t) => {
+  const events = [
+    event('turn/start', { turn: 0 }, 0),
+    event('tool-workflow/run-start', { runId: 'workflow-phase-run' as never, name: 'audit' }, 1),
+    event('tool-workflow/agent-start', {
+      runId: 'workflow-phase-run' as never, seq: 1, label: 'worker', phase: 'needle phase', childId: 'child-phase' as never,
+    }, 2),
+  ]
+  const fixture = await mountSearchRunner(t, 1, [], 'needle', events)
+  fixture.app.startTranscriptSearch()
+  await fixture.settleRender()
+  typeQuery(fixture, 'needle')
+  await fixture.settleRender()
+
+  assert.ok(fixture.app.transcriptSearchPresentationForTest()?.sourceKey.startsWith('workflow-phase.'),
+    'the Folder phase source survives the real runner binding')
+  const lines = fixture.vt.getViewport().map(stripTerminalSequences)
+  const row = lines.findIndex(line => line.includes('needle phase'))
+  assert.ok(row >= 0, `the real Workflow phase label is painted:\n${lines.join('\n')}`)
+  const column = lines[row]!.indexOf('needle')
+  assert.equal(fixture.vt.getCellBgRgb(row, column), 0xf5c542, 'the phase field is the current cell')
+})
+
+test('runner search: Folder Workflow member occurrences map to separate painted cells', async (t) => {
+  const events = [
+    event('turn/start', { turn: 0 }, 0),
+    event('tool-workflow/run-start', { runId: 'workflow-member-run' as never, name: 'audit' }, 1),
+    event('tool-workflow/agent-start', {
+      runId: 'workflow-member-run' as never, seq: 1, label: 'needle member needle', phase: 'P', childId: 'child-member' as never,
+    }, 2),
+  ]
+  const fixture = await mountSearchRunner(t, 1, [], 'needle', events)
+  fixture.app.startTranscriptSearch()
+  await fixture.settleRender()
+  typeQuery(fixture, 'needle')
+  await fixture.settleRender()
+
+  let target = fixture.app.transcriptSearchPresentationForTest()
+  assert.ok(target?.sourceKey.endsWith('.label'), 'the real Folder result is the member label field')
+  let lines = fixture.vt.getViewport().map(stripTerminalSequences)
+  let row = lines.findIndex(line => line.includes('needle member needle'))
+  assert.ok(row >= 0, `the member label row is painted:\n${lines.join('\n')}`)
+  let first = lines[row]!.indexOf('needle')
+  let second = lines[row]!.lastIndexOf('needle')
+  assert.equal(fixture.vt.getCellBgRgb(row, first), 0xf5c542)
+  assert.equal(fixture.vt.getCellBgRgb(row, second), undefined)
+
+  fixture.input('\r')
+  await fixture.settleRender()
+  target = fixture.app.transcriptSearchPresentationForTest()
+  assert.equal(target?.sourceOccurrence, 1)
+  lines = fixture.vt.getViewport().map(stripTerminalSequences)
+  row = lines.findIndex(line => line.includes('needle member needle'))
+  assert.ok(row >= 0)
+  first = lines[row]!.indexOf('needle')
+  second = lines[row]!.lastIndexOf('needle')
+  assert.equal(fixture.vt.getCellBgRgb(row, first), undefined)
+  assert.equal(fixture.vt.getCellBgRgb(row, second), 0xf5c542)
+})
+
+test('runner search: Folder Workflow member status maps to its exact painted cell', async (t) => {
+  const events = [
+    event('turn/start', { turn: 0 }, 0),
+    event('tool-workflow/run-start', { runId: 'workflow-member-status-run' as never, name: 'audit' }, 1),
+    event('tool-workflow/agent-start', {
+      runId: 'workflow-member-status-run' as never, seq: 1, label: 'worker', phase: 'P', childId: 'child-status' as never,
+    }, 2),
+    event('tool-workflow/agent-end', { runId: 'workflow-member-status-run' as never, seq: 1, outcome: 'cancelled' }, 3),
+    event('tool-workflow/run-end', { runId: 'workflow-member-status-run' as never, stopReason: 'completed' }, 4),
+  ]
+  const fixture = await mountSearchRunner(t, 1, [], 'cancelled', events)
+  fixture.app.startTranscriptSearch()
+  await fixture.settleRender()
+  typeQuery(fixture, 'cancelled')
+  await fixture.settleRender()
+
+  assert.ok(fixture.app.transcriptSearchPresentationForTest()?.sourceKey.endsWith('.status'),
+    'the Folder result is the member status field')
+  const lines = fixture.vt.getViewport().map(stripTerminalSequences)
+  const row = lines.findIndex(line => line.includes('worker — cancelled'))
+  assert.ok(row >= 0, `the settled member status is painted:\n${lines.join('\n')}`)
+  const column = lines[row]!.indexOf('cancelled')
+  assert.equal(fixture.vt.getCellBgRgb(row, column), 0xf5c542, 'the member status text is the current cell')
 })
 
 test('runner search: a Folder Workflow name range reaches its exact VirtualTerminal cell', async (t) => {
