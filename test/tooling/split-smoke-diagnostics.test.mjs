@@ -368,6 +368,9 @@ test('the default report and stderr summary never carry payload', (t) => {
     runtimeDshPin: TARGET_PIN,
     artifacts: [smokeArtifactIdentity('candidate', manifestOf('0.5.5', TARGET_PIN), 'c'.repeat(64))],
   })
+  const evidenceDirectory = join(privateTmp, 'ci-evidence')
+  mkdirSync(evidenceDirectory, { mode: 0o700 })
+  const evidencePath = join(evidenceDirectory, 'failure.json')
   const stderr = captureStderr(() => diagnostics.reportFailure(
     new SplitSmokeWaitError('PROCESS_EXITED', {
       code: 'PROCESS_EXITED_BEFORE_RECORD',
@@ -375,7 +378,7 @@ test('the default report and stderr summary never carry payload', (t) => {
       processRole: 'host',
       elapsedMs: 500,
     }),
-    { processes: failureHandles(3, 4) },
+    { processes: failureHandles(3, 4), evidencePath },
   ))
   for (const sentinel of ['COOKIE_SENTINEL', 'TOKEN_SENTINEL', 'secret.invalid', 'user text', 'raw terminal', 'raw pty', 'raw stderr']) {
     assert.ok(!stderr.includes(sentinel), `the stderr summary must not contain ${sentinel}`)
@@ -390,6 +393,9 @@ test('the default report and stderr summary never carry payload', (t) => {
   const info = statSync(reported)
   assert.equal(info.mode & 0o777, 0o600, 'the report file is private')
   assert.equal(statSync(dirname(reported)).mode & 0o777, 0o700, 'the report directory is private')
+  assert.equal(readFileSync(evidencePath, 'utf8'), content, 'the CI evidence twin contains the same bounded safe report')
+  assert.equal(statSync(evidencePath).mode & 0o777, 0o600, 'the CI evidence twin is private')
+  assert.equal(statSync(evidenceDirectory).mode & 0o777, 0o700, 'the CI evidence directory is private')
   assert.equal(basename(reported), 'failure.json')
   rmSync(dirname(reported), { recursive: true, force: true })
 })
