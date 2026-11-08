@@ -477,10 +477,11 @@ function sameSourceLines(left: readonly string[] | undefined, right: readonly st
  * current search selection. The child component (and its render cache) is
  * reused; the caller's selection for THIS render epoch is reused too (no second
  * matcher scan). The wrapper NEVER reuses a strong selection against lines the
- * geometry was not measured on: a same-width content change (dynamic component,
- * image load, …) or a width change downgrades to weak-only until the next
- * rebuild recomputes geometry. `updateSelector`/`clear` keep the mounted
- * wrapper on the same epoch as the row map.
+ * geometry was not measured on: generic selectors downgrade to weak-only after
+ * a same-width content change or width change; when source-row eligibility is
+ * renderer-specific and cannot be recomputed here, the selector can fail closed
+ * with no matches until the owner remeasures. `updateSelector`/`clear` keep the
+ * mounted wrapper on the same epoch as the row map.
  */
 export class SearchHighlightComponent implements Component {
   private readonly child: Component
@@ -524,9 +525,10 @@ export class SearchHighlightComponent implements Component {
     const lines = this.child.render(width)
     if (this.disabled) return lines
     if (width !== this.selectionWidth || !sameSourceLines(lines, this.sourceLines)) {
-      // The recorded geometry does not describe these lines: decorate the
-      // visible matches weak-only and never paint a stale strong occurrence or
-      // a stale anchor row.
+      // The recorded geometry does not describe these lines, so never paint a
+      // stale strong occurrence or anchor wash. Generic selectors can retain
+      // visible weak matches; renderer-specific source-row policies fail closed
+      // until their owner measures and supplies a fresh selector.
       const matches = this.selector.suppressMatchesOnStaleGeometry === true
         ? []
         : findAltScreenSearchMatches(lines, this.selector.query)
