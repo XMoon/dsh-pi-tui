@@ -35,6 +35,7 @@ interface TaskOverrides {
   readonly status?: ScheduleCatalogEntry['status']
   readonly prompt?: string
   readonly scheduledAt?: string
+  readonly timeZone?: string
   readonly executionActive?: true
   readonly deliveryFloorEndsAt?: string
   readonly lastDelivery?: NonNullable<ScheduleCatalogEntry['lastDelivery']>
@@ -56,12 +57,15 @@ function task(overrides: TaskOverrides): ScheduleCatalogEntry {
 }
 
 function workspace(overrides: Partial<ScheduleWorkspaceSnapshot> = {}): ScheduleWorkspaceSnapshot {
+  const statusCounts = { active: 0, paused: 0, ended: 0 }
+  for (const row of overrides.rows ?? []) statusCounts[row.status] += 1
   return {
     status: 'ready',
     filter: 'all',
     query: '',
     rows: [],
     total: 0,
+    statusCounts,
     mode: 'list',
     sessions: [],
     busy: false,
@@ -189,10 +193,14 @@ test('the single-column frames do not paint the wide detail column', () => {
   }
 })
 
-test('the 60×12 minimum keeps at least three task rows on screen', () => {
+test('the 60×12 minimum keeps three complete task title and occurrence pairs visible', () => {
   const lines = harness(LIST, { columns: 60, rows: 12 }).plain()
-  const painted = ['Alpha report', 'Bravo digest', 'Charlie review'].filter(title => lines.some(line => line.includes(title)))
-  assert.equal(painted.length, 3)
+  for (const title of ['Alpha report', 'Bravo digest', 'Charlie review']) {
+    const row = lines.findIndex(line => line.includes(title))
+    assert.ok(row >= 0, `${title} is visible`)
+    assert.match(lines[row + 1] ?? '', /(?:Next|Paused · Scheduled|Ended · Final).*Asia\/Shanghai/u,
+      `${title} keeps its matching occurrence on the next physical row`)
+  }
 })
 
 test('the narrow action bar keeps the essential keys and puts Esc last (D8)', () => {
@@ -272,22 +280,133 @@ test('list navigation forwards one move intent per key', () => {
   ])
 })
 
-test('search is local to the panel and set-query is dispatched per keystroke', () => {
+test('search is local to the panel and Tab exits without changing the filter', () => {
   const view = harness(LIST, { columns: 100, rows: 30 })
   view.panel.handleInput('/')
   assert.deepEqual(view.dispatches, [], 'focusing search is panel-local')
-  view.panel.handleInput('a')
-  view.panel.handleInput('b')
-  view.panel.handleInput('c')
+  for (const letter of ['a', 'p', 'e', 'l']) view.panel.handleInput(letter)
   assert.deepEqual(view.dispatches, [
     { kind: 'set-query', query: 'a' },
-    { kind: 'set-query', query: 'ab' },
-    { kind: 'set-query', query: 'abc' },
+    { kind: 'set-query', query: 'ap' },
+    { kind: 'set-query', query: 'ape' },
+    { kind: 'set-query', query: 'apel' },
   ])
   view.resetDispatches()
-  view.panel.handleInput('\x1b')
-  assert.deepEqual(view.dispatches, [], 'Esc leaves search without a Host action or a close')
+  view.panel.handleInput('\t')
+  assert.deepEqual(view.dispatches, [], 'Tab only exits Search')
+  view.panel.handleInput('a')
+  assert.deepEqual(view.dispatches, [{ kind: 'set-filter', filter: 'active' }], 'the next list key changes the filter')
   assert.equal(view.closeCount(), 0)
+
+  const reverse = harness(LIST, { columns: 44, rows: 20 })
+  reverse.panel.handleInput('/')
+  reverse.panel.handleInput('search query')
+  reverse.resetDispatches()
+  reverse.panel.handleInput('\x1b[Z')
+  assert.deepEqual(reverse.dispatches, [], 'Shift+Tab also only exits Search')
+
+  const escape = harness(LIST, { columns: 100, rows: 30 })
+  escape.panel.handleInput('/')
+  escape.panel.handleInput('\x1b')
+  assert.deepEqual(escape.dispatches, [], 'Esc exits Search without closing the workspace')
+  assert.equal(escape.closeCount(), 0)
+})
+
+test('Tab cycles the same local filters in both directions at every terminal width', () => {
+  const sizes: readonly FrameSize[] = [
+    { columns: 44, rows: 20 },
+    { columns: 60, rows: 12 },
+    { columns: 80, rows: 24 },
+    { columns: 160, rows: 50 },
+  ]
+  for (const size of sizes) {
+    const view = harness(LIST, size)
+    let snapshot = LIST
+    for (const filter of ['active', 'paused', 'ended', 'all', 'active'] as const) {
+      view.setSnapshot(snapshot)
+      view.resetDispatches()
+      view.panel.handleInput('\t')
+      assert.deepEqual(view.dispatches, [{ kind: 'set-filter', filter }], `${size.columns} columns, forward to ${filter}`)
+      snapshot = { ...snapshot, filter }
+    }
+    for (const filter of ['all', 'ended', 'paused', 'active', 'all'] as const) {
+      view.setSnapshot(snapshot)
+      view.resetDispatches()
+      view.panel.handleInput('\x1b[Z')
+      assert.deepEqual(view.dispatches, [{ kind: 'set-filter', filter }], `${size.columns} columns, reverse to ${filter}`)
+      snapshot = { ...snapshot, filter }
+    }
+  }
+})
+
+test('filter labels show full-catalog counts and preserve the Tab hint by measured width', () => {
+  const narrow = harness(LIST, { columns: 44, rows: 20 }).plain()
+  const narrowFilters = narrow[1]!
+  for (const label of ['Enabled 2', 'Paused 1', 'Ended 1', '[All 4]']) assert.ok(narrowFilters.includes(label))
+  assert.ok(narrowFilters.indexOf('Enabled 2') < narrowFilters.indexOf('Paused 1'))
+  assert.ok(narrowFilters.indexOf('Paused 1') < narrowFilters.indexOf('Ended 1'))
+  assert.ok(narrowFilters.indexOf('Ended 1') < narrowFilters.indexOf('[All 4]'))
+  const narrowBar = narrow.at(-1) ?? ''
+  assert.match(narrowBar, /\bTab\b/u, 'the compressed action bar still advertises filter navigation')
+  assert.ok(narrowBar.trimEnd().endsWith('Esc close'), 'Esc remains the physical last action')
+
+  const mediumFilters = harness(LIST, { columns: 60, rows: 12 }).plain()[1]!
+  assert.ok(mediumFilters.includes('Tab filters'))
+  const wideFilters = harness(LIST, { columns: 80, rows: 24 }).plain()[1]!
+  assert.ok(wideFilters.includes('Tab/Shift+Tab filters'))
+
+  const loading = harness(workspace({ status: 'loading' }), { columns: 80, rows: 24 }).plain()[1]!
+  assert.ok(loading.includes('Enabled —'))
+  assert.ok(!loading.includes('Enabled 0'))
+  const failed = harness(workspace({ status: 'error' }), { columns: 80, rows: 24 }).plain()
+  assert.ok(failed[1]?.includes('Enabled —'))
+  assert.ok(failed.some(line => line.includes('Schedule unavailable')))
+  const stale = harness(workspace({ status: 'stale', rows: FOUR_TASKS, total: 4 }), { columns: 80, rows: 24 }).plain()
+  assert.ok(stale.some(line => line.includes('Enabled 2')))
+  assert.ok(stale.some(line => line.includes('Showing the last read catalog')))
+})
+
+test('an unknown filter count stays unknown even in a very narrow compact row', () => {
+  const view = harness(workspace({ status: 'loading' }), { columns: 20, rows: 8 })
+  const row = view.plain()[1]!
+  assert.ok(row.includes('[All —]'))
+  assert.ok(!row.includes('999+'))
+  view.panel.handleInput('\t')
+  assert.deepEqual(view.dispatches, [{ kind: 'set-filter', filter: 'active' }])
+})
+
+test('an extreme count compacts to 999+ while the next-filter chip remains clickable', () => {
+  const huge = workspace({
+    total: 1e20,
+    statusCounts: { active: 1e20, paused: 0, ended: 0 },
+  })
+  const view = harness(huge, { columns: 44, rows: 20 })
+  const lines = view.plain()
+  const row = lines[1]!
+  assert.ok(row.includes('[All 999+]'))
+  assert.ok(row.includes('Next filter [Tab]'))
+  view.click(row.indexOf('Next filter') + 1, 1)
+  assert.deepEqual(view.dispatches, [{ kind: 'set-filter', filter: 'active' }])
+})
+
+test('detail, history, help and confirmation Tab keys never dispatch a list filter', () => {
+  const modes = [
+    workspace({ mode: 'detail' }),
+    workspace({ mode: 'history' }),
+    workspace({ mode: 'help' }),
+    workspace({ confirm: { kind: 'clear-ended', token: 2 } }),
+  ]
+  for (const snapshot of modes) {
+    const view = harness(snapshot, { columns: 160, rows: 50 })
+    view.panel.handleInput('\t')
+    view.panel.handleInput('\x1b[Z')
+    assert.deepEqual(view.dispatches, [], `${snapshot.mode} does not switch the list filter`)
+  }
+  const chooser = harness(workspace({ mode: 'editor', editor: draft({ focused: 2 }) }), { columns: 100, rows: 30 })
+  chooser.panel.handleInput('\r')
+  chooser.panel.handleInput('\t')
+  chooser.panel.handleInput('\x1b[Z')
+  assert.deepEqual(chooser.dispatches, [], 'the editor chooser keeps ownership of Tab')
 })
 
 test('filter, refresh, create, clear, help, detail and root Esc dispatch their intents', () => {
@@ -481,6 +600,40 @@ test('a click after setSnapshot removed the painted row does nothing', () => {
   assert.deepEqual(view.dispatches, [], 'the painted id left the latest snapshot, so the stale cell is inert')
 })
 
+test('a task occurrence is a second clickable row with the official time and zone before repeat text', () => {
+  const longTitle = task({
+    id: 'task-long-title',
+    title: '汉'.repeat(40),
+    timeZone: 'America/Argentina/ComodRivadavia',
+  })
+  const view = harness(workspace({ rows: [longTitle], total: 1, selectedId: longTitle.id }), { columns: 60, rows: 12 })
+  const lines = view.plain()
+  const titleRow = lines.findIndex(line => line.includes('汉'))
+  assert.ok(titleRow >= 0)
+  assert.ok(lines[titleRow]!.trimEnd().endsWith('…'), 'the title uses the first row before any secondary metadata')
+  const occurrence = lines[titleRow + 1]!
+  assert.ok(occurrence.includes('Next 2026-06-01 06:00'))
+  assert.ok(occurrence.includes('America/Argentina/ComodRivadavia'))
+  assert.ok(!occurrence.includes('session-target'), 'the target is not repeated in the task list')
+  assert.ok(visibleWidth(lines[titleRow]!) <= 60 && visibleWidth(occurrence) <= 60)
+  view.click(4, titleRow + 1)
+  assert.deepEqual(view.dispatches, [{ kind: 'open-detail', id: 'task-long-title' }])
+})
+
+test('the selected two-line task group stays together when the list scrolls to it', () => {
+  const many = Array.from({ length: 20 }, (_, index) => task({
+    id: `task-${index}`,
+    title: `Task ${index}`,
+  }))
+  const selected = 'task-12'
+  const view = harness(workspace({ rows: many, total: many.length, selectedId: selected }), { columns: 60, rows: 12 })
+  const lines = view.plain()
+  const titleRow = lines.findIndex(line => line.includes('Task 12'))
+  assert.ok(titleRow >= 0)
+  assert.ok(lines[titleRow + 1]?.includes('Next 2026-06-01 17:00 Asia/Shanghai'),
+    'selection reveal keeps the task occurrence visible beside its title')
+})
+
 test('clicking the painted New action dispatches open-create', () => {
   const view = harness(LIST, { columns: 100, rows: 30 })
   const lines = view.plain()
@@ -494,10 +647,26 @@ test('clicking the painted New action dispatches open-create', () => {
 test('clicking a painted filter chip dispatches set-filter', () => {
   const view = harness(LIST, { columns: 100, rows: 30 })
   const lines = view.plain()
-  const filterRow = lines.findIndex(line => line.includes('[Paused]'))
+  const filterRow = lines.findIndex(line => line.includes('Paused 1'))
   assert.ok(filterRow >= 0)
-  view.click(lines[filterRow]!.indexOf('[Paused]') + 1, filterRow)
+  view.click(lines[filterRow]!.indexOf('Paused 1') + 1, filterRow)
   assert.deepEqual(view.dispatches, [{ kind: 'set-filter', filter: 'paused' }])
+})
+
+test('clicking a filter while Search is focused exits Search before dispatching the filter', () => {
+  const view = harness(LIST, { columns: 100, rows: 30 })
+  let lines = view.plain()
+  const searchRow = lines.findIndex(line => line.includes('Search /'))
+  assert.ok(searchRow >= 0)
+  view.click(2, searchRow)
+  lines = view.plain()
+  const filterRow = lines.findIndex(line => line.includes('Paused 1'))
+  assert.ok(filterRow >= 0)
+  view.click(lines[filterRow]!.indexOf('Paused 1') + 1, filterRow)
+  assert.deepEqual(view.dispatches, [{ kind: 'set-filter', filter: 'paused' }])
+  view.resetDispatches()
+  view.panel.handleInput('x')
+  assert.deepEqual(view.dispatches, [{ kind: 'ask-clear-ended' }], 'the next key no longer belongs to Search')
 })
 
 test('clicking a painted editor field focuses that stable field identity', () => {
@@ -507,6 +676,32 @@ test('clicking a painted editor field focuses that stable field identity', () =>
   assert.ok(fieldRow >= 0)
   view.click(30, fieldRow)
   assert.deepEqual(view.dispatches, [{ kind: 'focus-field', index: 0 }])
+})
+
+test('list-only chrome and mode-specific titles disappear outside the list root', () => {
+  const selected = FOUR_TASKS[0]!
+  const pages: readonly [ScheduleWorkspaceSnapshot, string][] = [
+    [workspace({ mode: 'detail', detail: selected, rows: [selected], total: 1, selectedId: selected.id }), 'Schedule · Details'],
+    [workspace({ mode: 'history' }), 'Schedule · History'],
+    [workspace({ mode: 'editor', editor: draft() }), 'Schedule · Editor'],
+    [workspace({ mode: 'help' }), 'Schedule · Help'],
+    [workspace({ confirm: { kind: 'clear-ended', token: 15 } }), 'Schedule · Confirm'],
+  ]
+  for (const [snapshot, title] of pages) {
+    const lines = harness(snapshot, { columns: 100, rows: 30 }).plain()
+    assert.ok(lines[0]?.includes(title), `${snapshot.mode} identity: ${lines[0]}`)
+    assert.equal(lines.some(line => line.includes('Search /')), false)
+    assert.equal(lines.some(line => line.includes('Enabled 2') || line.includes('[All 4]')), false)
+    assert.equal(lines.some(line => line.includes('New [N]')), false)
+  }
+})
+
+test('Help describes list and search Tab behavior without the retired pane rotation', () => {
+  const help = harness(workspace({ mode: 'help' }), { columns: 120, rows: 40 }).plain().join('\n')
+  assert.ok(help.includes('Cycle Enabled, Paused, Ended, All filters'))
+  assert.ok(help.includes('Return to the task list without changing the filter'))
+  assert.ok(help.includes('Filter Enabled / Paused / Ended / All'))
+  assert.ok(!help.includes('Rotate focus'))
 })
 
 test('a pointer event outside the painted frame dispatches nothing', () => {
@@ -595,8 +790,68 @@ test('the wheel scrolls the panel-local list viewport without a Host intent', ()
   assert.deepEqual(consumed, { handled: true, render: true })
   const after = view.plain()
   assert.ok(!after.some(line => line.includes('Task 0')), 'the first painted row scrolled away')
-  assert.ok(after.some(line => line.includes('Task 8')))
+  assert.ok(after.some(line => line.includes('Task 3')))
   assert.deepEqual(view.dispatches, [], 'wheel scrolling never dispatches')
+})
+
+test('wide list wheel coordinates scroll only the matching pane, while narrow wheel keeps the list owner', () => {
+  const many = Array.from({ length: 30 }, (_, index) => task({
+    id: `task-${index}`,
+    title: `Task ${index}`,
+    status: 'active',
+    ...(index === 0 ? { prompt: Array.from({ length: 80 }, (_, line) => `Prompt line ${line}`).join('\n') } : {}),
+  }))
+  const view = harness(workspace({ rows: many, total: many.length, selectedId: 'task-0' }), { columns: 160, rows: 50 })
+  const wheel = (x: number, width: number, height: number): void => {
+    const result = view.panel.handleMouse({
+      type: 'wheel',
+      button: 'none',
+      x,
+      y: 10,
+      screenX: x,
+      screenY: 10,
+      width,
+      height,
+      shift: false,
+      alt: false,
+      ctrl: false,
+      wheelDelta: 1,
+    })
+    assert.deepEqual(result, { handled: true, render: true })
+  }
+
+  const before = view.plain()
+  assert.ok(before.some(line => line.includes('Task 0')))
+  assert.ok(before.some(line => line.includes('Details')))
+  wheel(120, 160, 50)
+  const rightScrolled = view.plain()
+  assert.ok(rightScrolled.some(line => line.includes('Task 0')), 'right wheel leaves the list column in place')
+  assert.ok(!rightScrolled.some(line => line.includes('Details')), 'right wheel advances the detail preview')
+
+  wheel(1, 160, 50)
+  const leftScrolled = view.plain()
+  assert.ok(leftScrolled.every(line => !line.slice(0, 63).includes('Task 0')),
+    'left wheel advances the list independently of the right Detail preview')
+  assert.deepEqual(view.dispatches, [], 'pane scrolling never sends a Controller intent')
+
+  const narrow = harness(workspace({ rows: many, total: many.length, selectedId: 'task-0' }), { columns: 80, rows: 24 })
+  narrow.plain()
+  narrow.panel.handleMouse({
+    type: 'wheel',
+    button: 'none',
+    x: 70,
+    y: 10,
+    screenX: 70,
+    screenY: 10,
+    width: 80,
+    height: 24,
+    shift: false,
+    alt: false,
+    ctrl: false,
+    wheelDelta: 1,
+  })
+  assert.ok(!narrow.plain().some(line => line.includes('Task 0')), 'all narrow-screen wheel positions scroll the list')
+  assert.deepEqual(narrow.dispatches, [])
 })
 
 test('a non-wheel pointer event is not consumed', () => {
@@ -628,7 +883,7 @@ test('clicking the painted help Esc action closes help with the same intent as t
   assert.deepEqual(view.dispatches, [{ kind: 'close-help' }])
 })
 
-test('a modal confirmation leaves the painted filter and search chrome inert', () => {
+test('a modal confirmation owns the screen without list filter or search chrome', () => {
   const view = harness(workspace({
     rows: FOUR_TASKS,
     total: FOUR_TASKS.length,
@@ -636,12 +891,10 @@ test('a modal confirmation leaves the painted filter and search chrome inert', (
     confirm: { kind: 'clear-ended', token: 11 },
   }), { columns: 100, rows: 30 })
   const lines = view.plain()
-  const filterRow = lines.findIndex(line => line.includes('[Paused]'))
-  const searchRow = lines.findIndex(line => line.includes('Search /'))
-  assert.ok(filterRow >= 0 && searchRow >= 0)
-  view.click(lines[filterRow]!.indexOf('[Paused]') + 1, filterRow)
-  view.click(2, searchRow)
-  assert.deepEqual(view.dispatches, [], 'the confirmation blocks every background click')
+  assert.equal(lines.some(line => line.includes('[Paused 1]')), false)
+  assert.equal(lines.some(line => line.includes('Search /')), false)
+  view.panel.handleInput('\t')
+  assert.deepEqual(view.dispatches, [], 'confirmation input never reaches the list filter')
 })
 
 test('the RRULE field edits real MULTI-LINE raw text (Enter inserts a line)', () => {

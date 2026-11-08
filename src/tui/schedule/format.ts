@@ -80,6 +80,58 @@ export function formatOccurrence(record: ScheduleCatalogEntry): string {
   return `${occurrencePrefix(record)} ${formatLocalInstant(record.scheduledAt)} · ${officialTimeZone(record)}`
 }
 
+/**
+ * A compact list-only occurrence. It displays the Host-committed instant in
+ * the rule's official zone; a later delivery floor is only an eligibility
+ * threshold, never a promise that a run will occur then.
+ */
+export function formatListOccurrence(entry: ScheduleCatalogEntry): string {
+  let prefix: string
+  let instant = entry.scheduledAt
+  if (entry.status === 'active') {
+    const floor = entry.deliveryFloorEndsAt
+    if (floor !== undefined && Number.isFinite(Date.parse(floor)) && Date.parse(floor) > Date.parse(instant)) {
+      prefix = 'Eligible from'
+      instant = floor
+    } else {
+      prefix = 'Next'
+    }
+  } else if (entry.status === 'paused') {
+    prefix = 'Paused · Scheduled'
+  } else {
+    prefix = 'Ended · Final'
+  }
+
+  const zone = officialTimeZone(entry)
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: zone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(new Date(instant))
+  const part = (type: Intl.DateTimeFormatPartTypes): string => parts.find(value => value.type === type)!.value
+  return `${prefix} ${part('year')}-${part('month')}-${part('day')} ${part('hour')}:${part('minute')} ${zone}`
+}
+
+/** A short, non-evaluated summary of the official repeat rule. */
+export function formatListRepeat(entry: ScheduleCatalogEntry): string {
+  switch (entry.kind) {
+    case 'after': return `Once after ${formatSeconds(entry.afterSeconds)}`
+    case 'at': return 'Once'
+    case 'every': return `Every ${formatSeconds(entry.everySeconds)}`
+    case 'daily': return 'Daily'
+    case 'weekly':
+      return `Weekly ${entry.weekdays.length === 5 && entry.weekdays.every((day, index) => day === index + 1)
+        ? 'Mon–Fri'
+        : entry.weekdays.map(day => WEEKDAY_LABELS[day] ?? String(day)).join(',')}`
+    case 'cron': return 'Cron'
+    case 'rrule': return 'Custom'
+  }
+}
+
 const WEEKDAY_LABELS: Readonly<Record<number, string>> = {
   1: 'Mon',
   2: 'Tue',

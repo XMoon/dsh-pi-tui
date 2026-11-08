@@ -267,17 +267,28 @@ test('L6: filter and search project the committed catalog with no Host call', as
   try {
     life.port.entries = [
       entry({ id: 'schedule-a' as never, title: 'Alpha build', prompt: 'run tests', status: 'active' }),
-      entry({ id: 'schedule-b' as never, title: 'Beta review', prompt: 'read imports', status: 'paused' }),
+      entry({ id: 'schedule-b' as never, title: 'Alpha deploy', prompt: 'check logs', status: 'active' }),
+      entry({ id: 'schedule-c' as never, title: 'Beta review', prompt: 'read imports', status: 'paused' }),
+      entry({ id: 'schedule-d' as never, title: 'Gamma cleanup', prompt: 'remove artifacts', status: 'ended' }),
     ]
     life.controller.dispatch({ kind: 'refresh' })
     await flush()
     const before = life.port.calls.length
-    life.controller.dispatch({ kind: 'set-filter', filter: 'paused' })
-    assert.deepEqual(life.controller.snapshot().rows.map(row => row.title), ['Beta review'])
+    assert.deepEqual(life.controller.snapshot().statusCounts, { active: 2, paused: 1, ended: 1 })
+    assert.equal(life.controller.snapshot().total, 4)
+
+    for (const [filter, expectedRows] of [['active', 2], ['paused', 1], ['ended', 1], ['all', 4]] as const) {
+      life.controller.dispatch({ kind: 'set-filter', filter })
+      assert.equal(life.controller.snapshot().rows.length, expectedRows)
+      assert.deepEqual(life.controller.snapshot().statusCounts, { active: 2, paused: 1, ended: 1 })
+      assert.equal(life.controller.snapshot().total, 4)
+    }
     life.controller.dispatch({ kind: 'set-query', query: 'IMPORTS' })
     assert.deepEqual(life.controller.snapshot().rows.map(row => row.title), ['Beta review'])
     life.controller.dispatch({ kind: 'set-query', query: 'zzz' })
     assert.deepEqual(life.controller.snapshot().rows, [])
+    assert.deepEqual(life.controller.snapshot().statusCounts, { active: 2, paused: 1, ended: 1 })
+    assert.equal(life.controller.snapshot().total, 4)
     assert.equal(life.port.calls.length, before, 'filter/search never reaches the Host')
   } finally {
     life.controller.dispose()
@@ -318,15 +329,19 @@ test('L6: a first failure is an explicit error, a later failure keeps rows as st
     await flush()
     assert.equal(controller.snapshot().status, 'error')
     assert.deepEqual(controller.snapshot().rows, [])
+    assert.deepEqual(controller.snapshot().statusCounts, { active: 0, paused: 0, ended: 0 })
     assert.equal(controller.snapshot().statusMessage, SCHEDULE_COPY.serviceUnavailable)
+    port.entries = [entry({ status: 'active' }), entry({ id: 'schedule-paused' as never, status: 'paused' })]
     controller.dispatch({ kind: 'refresh' })
     await flush()
     assert.equal(controller.snapshot().status, 'ready')
+    assert.deepEqual(controller.snapshot().statusCounts, { active: 1, paused: 1, ended: 0 })
     port.catalogError = new Error('boom')
     controller.dispatch({ kind: 'refresh' })
     await flush()
     assert.equal(controller.snapshot().status, 'stale')
-    assert.equal(controller.snapshot().rows.length, 1, 'the last successful rows survive')
+    assert.equal(controller.snapshot().rows.length, 2, 'the last successful rows survive')
+    assert.deepEqual(controller.snapshot().statusCounts, { active: 1, paused: 1, ended: 0 }, 'stale counts come from the retained catalog')
   } finally {
     controller.dispose()
   }
