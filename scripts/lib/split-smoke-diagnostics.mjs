@@ -883,9 +883,11 @@ export function createSmokeDiagnostics({ lane, heading, marker, runtimeDshPin, a
     progress() {
       return steps.map(step => ({ ...step }))
     },
-    /** The innermost scope that reported ERROR: the first failure's own step. */
+    /** The innermost scope that reported ERROR; undefined when none did. */
     failedStep() {
-      return firstErrorStep() ?? steps.at(-1)?.name
+      // Never fall back to the last DONE/checkpoint: a completed scope is not
+      // a failure scope (the report uses the same firstErrorStep rule).
+      return firstErrorStep()
     },
     /** The one-line startup identity — only ever printed AFTER preflight passed. */
     identityLine() {

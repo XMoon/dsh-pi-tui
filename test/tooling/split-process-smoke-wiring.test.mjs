@@ -23,8 +23,9 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { parse as parseYaml } from 'yaml'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
-import { assertSelectedVerdict, waitForCondition } from '../../scripts/split-process-smoke.mjs'
+import { assertSelectedVerdict, runSelectedCase, waitForCondition } from '../../scripts/split-process-smoke.mjs'
 import { PR_A_WEB_ROWS, raceWithAbortableDeadline, redactWebQualificationText } from '../../scripts/smoke/split-process/web-helpers.mjs'
+import { createSmokeDiagnostics } from '../../scripts/lib/split-smoke-diagnostics.mjs'
 import { statusMatches } from '../../scripts/lib/split-smoke-processes.mjs'
 import {
   listSelectableCases,
@@ -182,8 +183,13 @@ test('the extracted split-smoke modules import without starting a lane', (t) => 
 
 test('the Split lifecycle log owns START/DONE/ERROR and the Recovery subscenes', () => {
   const processSource = readFileSync(SCRIPT, 'utf8')
-  assert.equal((processSource.match(/const result = await diagnostics\.runStep\(/gu) ?? []).length, 2,
-    'both the full and selected registry loops own their case scope')
+  assert.equal((processSource.match(/const result = await diagnostics\.runStep\(/gu) ?? []).length, 1,
+    'the full registry loop owns its case scope')
+  assert.equal((processSource.match(/export async function runSelectedCase\(/gu) ?? []).length, 1,
+    'the selected case and its verdict admission share one helper')
+  assert.match(processSource,
+    /export async function runSelectedCase\(diagnostics, selectedCase, context\) \{\n  return diagnostics\.runStep\(`case\/\$\{selectedCase\.id\}`, async \(\) => \{\n    const result = await selectedCase\.run\(context\)\n    assertSelectedVerdict\(selectedCase\.id, result\)\n    return result\n  \}\)\n\}/u,
+    'the selected verdict assertion must run INSIDE the case lifecycle scope')
   assert.equal((processSource.match(/runStep: \(name, operation\) => diagnostics\.runStep\(name, operation\)/gu) ?? []).length, 2,
     'both lane contexts expose the same collector to the scenarios')
   // trace() is the optional business JSONL stream only; it must not print a
@@ -202,6 +208,46 @@ test('the Split lifecycle log owns START/DONE/ERROR and the Recovery subscenes',
     't49/t50 and t55c own one scope per iteration')
   assert.match(scenario, /await step\(scenario === 'approval-allow' \? 't53' : 't54'/u,
     't53/t54 own one scope per iteration')
+})
+
+test('a rejected selected verdict fails inside the case scope', async (t) => {
+  const dir = testLifecycle(t).tempDir('split-selected-verdict-')
+  const previousTmp = process.env.TMPDIR
+  process.env.TMPDIR = dir
+  t.after(() => {
+    if (previousTmp === undefined) delete process.env.TMPDIR
+    else process.env.TMPDIR = previousTmp
+  })
+  const diagnostics = createSmokeDiagnostics({
+    lane: 'split-process',
+    heading: 'SPLIT_PROCESS_SMOKE',
+    marker: 'T',
+    runtimeDshPin: '0.2.2-rc.1',
+  })
+  const chunks = []
+  const original = process.stderr.write
+  process.stderr.write = (chunk) => { chunks.push(String(chunk)); return true }
+  let caught
+  try {
+    await runSelectedCase(diagnostics, {
+      id: 'web.official-composition',
+      run: async () => ({ status: 'FAIL', browser: 'FAIL' }),
+    }, {})
+  } catch (error) {
+    caught = error
+  } finally {
+    process.stderr.write = original
+  }
+  const stderr = chunks.join('')
+  assert.match(stderr, /\[split\] \S+ START case\/web\.official-composition/u)
+  assert.match(stderr, /\[split\] \S+ ERROR case\/web\.official-composition durationMs=\d+/u)
+  assert.doesNotMatch(stderr, /DONE case\/web\.official-composition/u,
+    'a rejected verdict must not leave the case marked DONE')
+  // The failed scope is the rejected case, not a missing post-DONE step.
+  assert.equal(diagnostics.failedStep(), 'case/web.official-composition')
+  const report = diagnostics.reportFailure(caught)
+  assert.equal(report.failedStep, 'case/web.official-composition')
+  assert.match(report.error?.message ?? '', /selected web\.official-composition/u)
 })
 
 test('the npm release-tag split-process job pins and requires both Browser qualifications', () => {

@@ -160,6 +160,20 @@ function assert(condition, message) {
   if (!condition) throw new SplitSmokeAssertionError(message)
 }
 
+/**
+ * Run one selected case AND its verdict admission inside the SAME lifecycle
+ * scope. A rejected selected verdict is the case's own ERROR (and therefore the
+ * report's `failedStep`), never a post-DONE lane failure attributed to a
+ * completed case. Exported for the tooling guard.
+ */
+export async function runSelectedCase(diagnostics, selectedCase, context) {
+  return diagnostics.runStep(`case/${selectedCase.id}`, async () => {
+    const result = await selectedCase.run(context)
+    assertSelectedVerdict(selectedCase.id, result)
+    return result
+  })
+}
+
 function sleep(ms) {
   return new Promise(resolveSleep => setTimeout(resolveSleep, ms))
 }
@@ -566,11 +580,7 @@ async function runSelectedCases(selection) {
     }
     const selected = []
     for (const selectedCase of selection.cases) {
-      const result = await diagnostics.runStep(
-        `case/${selectedCase.id}`,
-        () => selectedCase.run(context),
-      )
-      assertSelectedVerdict(selectedCase.id, result)
+      await runSelectedCase(diagnostics, selectedCase, context)
       selected.push(selectedCase.id)
     }
     assert(createHash('sha256').update(readFileSync(tarball)).digest('hex') === candidateSha256,
