@@ -14,6 +14,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
+import { credentialKey, credentialRef } from '@deepseek-ai/dsh-credentials'
 import { DirectConfigPort, type HostContextLike } from '../../src/runtime/direct/config-direct.ts'
 import { CredentialWorkflow, resolveLoginDestination, resolveLogoutDestination } from '../../src/app/command/credential-workflow.ts'
 import type { ProviderProfileConfig } from '../../src/runtime/config-port.ts'
@@ -985,8 +986,8 @@ test('credential onChanged subscribes both reference- and record-updated', async
   const refreshes: string[] = []
   new DirectConfigPort(ctx as never, undefined, () => undefined)
     .credentials.onChanged(() => { refreshes.push('refresh') })
-  ctx.emit('credentials/reference-updated', 'DEEPSEEK_API_KEY' as never)
-  ctx.emit('credentials/record-updated', 'llm-pi-ai/openai' as never)
+  ctx.emit('credentials/reference-updated', credentialRef('DEEPSEEK_API_KEY'))
+  ctx.emit('credentials/record-updated', credentialKey('llm-pi-ai', 'openai'))
   await Promise.resolve()
   assert.deepEqual(refreshes, ['refresh', 'refresh'])
 })
