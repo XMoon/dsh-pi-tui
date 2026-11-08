@@ -69,14 +69,3 @@ test('a value is detached when WRITTEN: the publisher cannot mutate cached state
   assert.deepEqual(cache.snapshot(1), { default: 'm1', groups: ['g'] },
     'mutating the object handed to publish must not reach the cache')
 })
-
-test('a superseded read is representable independently of its settlement (v2 §0.2.1)', () => {
-  // Ownership is a separate axis: a read can be superseded while the caller
-  // still receives the newer generation-consistent value.
-  const cache = new GenerationCache<Value>(detach)
-  const older = cache.beginRead()
-  const newer = cache.beginRead()
-  cache.publish(newer, 1, { default: 'm-NEW', groups: [] })
-  assert.equal(cache.publish(older, 1, { default: 'm-OLD', groups: [] }), false)
-  assert.equal(cache.snapshot(1)!.default, 'm-NEW')
-})

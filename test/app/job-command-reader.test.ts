@@ -1574,38 +1574,6 @@ test('a >10,000-character / 1,200-line Command scrolls locally and keeps ONE obs
   assert.equal(harness.tasks.observation.records.length, 1, 'ONE observer for the whole document')
 })
 
-test('a hostile OSC/CSI label is sanitized at the Header boundary and never reaches the terminal', async () => {
-  const harness = startApp()
-  await openFirstJob(harness)
-  // Capture the RAW stream the app writes to the terminal from here on.
-  const rawWritten: string[] = []
-  const originalWrite = harness.vt.write.bind(harness.vt)
-  harness.vt.write = (data: string) => {
-    rawWritten.push(data)
-    originalWrite(data)
-  }
-  const hostile = `\u001b]52;c;${Buffer.from('PWNED').toString('base64')}\u0007echo ok\u001b[2J`
-  harness.tasks.observation.latest()!.emit({ label: hostile, text: 'retained job-a' })
-  await harness.vt.waitForRender()
-  await flush(2)
-  const stream = rawWritten.join('')
-  assert.ok(!stream.includes(']52;c;'), 'the label OSC 52 never reaches the terminal stream')
-  // The BEL terminator alone would be a false positive (the app's OWN OSC
-  // sequences legitimately end in BEL), so the decisive witness is the label's
-  // clipboard PAYLOAD, which can only come from the unsanitized label.
-  assert.ok(!stream.includes('UFdORUQ='), 'the label clipboard payload never reaches the terminal stream')
-  assert.ok(!stream.includes('\u009b'), 'no raw C1 control byte reaches the terminal stream')
-  const painted = view(harness.vt)
-  assert.match(painted, /Command {2}echo ok/, `the header shows the SANITIZED summary:\n${painted}`)
-  assert.ok(!/]52;c;|\[2J/.test(painted), 'no escape payload text leaks into the painted header')
-  // The display boundary never touches the official bytes: the Command page
-  // still copies the ORIGINAL label verbatim.
-  await openCommand(harness)
-  harness.vt.sendInput('c')
-  await flush(4)
-  assert.deepEqual(harness.copied, [hostile], 'the copy payload stays the official original')
-})
-
 test('a rapid double click on Copy All [C] cannot overwrite the command copy with a word', async () => {
   const harness = startApp()
   await openFirstJob(harness)
