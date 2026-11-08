@@ -98,6 +98,12 @@ export interface RenderedSearchSelector {
   readonly weakOnly?: boolean
 }
 
+/** Paint-time policy only; semantic source proof stays on the Full selector. */
+export type SearchHighlightPaintSelector = Pick<
+  RenderedSearchSelector,
+  'query' | 'suppressMatchesOnStaleGeometry'
+>
+
 /** Navigation-only rendered row range. It is best-effort geometry and does
  * not prove semantic occurrence correspondence. */
 export interface RenderedSearchScrollRange {
@@ -107,13 +113,10 @@ export interface RenderedSearchScrollRange {
   readonly endRow: number
 }
 
-/** One block's rendered search selection. `exact` is true ONLY when the
- * semantic occurrence was PROVEN to rendered cells; a false selection is an
- * anchor-only degradation and must NOT strong-highlight anything. Two mutually
- * exclusive exactness channels exist: a proven rendered occurrence ordinal
- * (`selectedIndex >= 0`, direct single-line fields) and source-proven painted
- * cells (`exactPaintedSegments`, wrapped Host plain text). Never treat
- * `selectedIndex === -1` alone as "anchor-only". */
+/** One block's rendered search selection. Full uses `exact` only when its
+ * semantic source was proven against painted cells. View may use a selected
+ * rendered ordinal for strong decoration with `exact: false`; that does not
+ * claim Full source proof. */
 export interface RenderedSearchSelection {
   readonly matches: readonly AltScreenSearchMatch[]
   readonly selectedIndex: number
@@ -514,7 +517,7 @@ function sameSourceLines(left: readonly string[] | undefined, right: readonly st
  */
 export class SearchHighlightComponent implements Component {
   private readonly child: Component
-  private selector: RenderedSearchSelector
+  private selector: SearchHighlightPaintSelector
   private selection: RenderedSearchSelection
   private selectionWidth: number
   private sourceLines: readonly string[]
@@ -522,7 +525,7 @@ export class SearchHighlightComponent implements Component {
 
   constructor(
     child: Component,
-    selector: RenderedSearchSelector,
+    selector: SearchHighlightPaintSelector,
     selection: RenderedSearchSelection,
     width: number,
     lines: readonly string[],
@@ -536,7 +539,7 @@ export class SearchHighlightComponent implements Component {
 
   /** Re-sync the wrapper with the geometry of the current render epoch (the
    * remeasure pass owns the row map and must not diverge from the paint). */
-  updateSelector(selector: RenderedSearchSelector, selection: RenderedSearchSelection, width: number, lines: readonly string[]): void {
+  updateSelector(selector: SearchHighlightPaintSelector, selection: RenderedSearchSelection, width: number, lines: readonly string[]): void {
     this.selector = selector
     this.selection = selection
     this.selectionWidth = width

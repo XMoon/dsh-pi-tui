@@ -213,3 +213,55 @@ test('fullscreen row-map refresh never rebuilds or disposes the mounted transcri
     startedApps.delete(app)
   }
 })
+
+test('fullscreen row-map remeasure keeps the active View wrapper on the mounted Focus component', async () => {
+  const { vt, app } = startApp(80, 29)
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 1 }, 1),
+    eventAt('user/message', {
+      id: MessageId('mounted-view-user'),
+      role: 'user',
+      content: [{ type: 'text', text: 'anchor text' }],
+      source: { kind: 'user' },
+    }, 2),
+  ])
+  try {
+    app.setFocusMode(true)
+    app.setFullscreen(true)
+    app.setWorking(true)
+    folder.applyLiveInput(liveStart())
+    folder.applyLiveInput(liveText('STREAM-ONE\nSTREAM-TWO\n'))
+    show(app, folder)
+    await vt.waitForRender()
+    app.toggleFocusTurn(1)
+    await vt.waitForRender()
+
+    assert.deepEqual(app.setRenderedViewSearchQuery('STREAM'), { currentIndex: 0, count: 2 })
+    await vt.waitForRender()
+    const before = mountedBatch(app)!
+    const assistant = before.find(entry => entry.block.kind === 'message' && entry.block.message?.kind === 'assistant')!
+    const wrapper = (assistant as unknown as { mountedComponent?: unknown }).mountedComponent
+    assert.ok(wrapper !== undefined, 'a matching Focus block mounts its View highlight wrapper')
+    const component = assistant.component
+    let disposals = 0
+    const disposable = component as { dispose?: () => void }
+    const originalDispose = disposable.dispose?.bind(disposable)
+    disposable.dispose = (): void => {
+      disposals += 1
+      originalDispose?.()
+    }
+
+    vt.resize(44, 29)
+    await vt.waitForRender()
+    const after = mountedBatch(app)!
+    const refreshed = after.find(entry => entry.block.kind === 'message' && entry.block.message?.kind === 'assistant')!
+    assert.strictEqual(refreshed.component, component, 'remeasure retains the exact mounted Focus component')
+    assert.equal(disposals, 0, 'View remeasure never disposes the live mounted component')
+    assert.deepEqual(app.renderedViewSearchStatus(), { currentIndex: 0, count: 2 },
+      'the same live rows remain searchable after width reflow')
+  } finally {
+    app.dispose()
+    startedApps.delete(app)
+  }
+})

@@ -2461,6 +2461,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
   }
 
   const resetSearchPresentation = (options: { preserveCurrentReveal?: boolean; rebuild?: boolean } = {}): void => {
+    app?.clearRenderedViewSearch({ rebuild: false })
     // Only a runner that actually holds search state needs to publish the
     // atomic clear: an unconditional empty commit would force a pointless
     // message-tree rebuild on every Ctrl+End in regular fullscreen use.
