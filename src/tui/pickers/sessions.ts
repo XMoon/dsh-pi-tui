@@ -13,6 +13,7 @@
  * @module @xmoon76/dsh-pi-tui/tui/pickers/sessions
  */
 
+import { truncateToWidth } from '@xmoon76/pi-tui'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import {
   buildSessionTree,
@@ -111,6 +112,17 @@ export interface SessionContentHit {
  * not displayed. */
 export function sanitizeTerminalText(value: string): string {
   return sanitizedPhysicalLine(value)
+}
+
+/** Project the Session Browser's persisted error onto its shared one-row
+ * status/notice text. The raw-log suffix stays in diagnostics, not on screen. */
+export function sessionBrowserErrorNotice(kind: 'search' | 'projection', message: string): string {
+  const safe = sanitizeTerminalText(message).replace(/\s+\(raw log: .*\)$/u, '')
+  const unknownEvent = /contains event type "([^"]+)"/u.exec(safe)?.[1]
+  const text = unknownEvent === undefined
+    ? `${kind === 'search' ? 'Search failed' : 'Session details unavailable'}: ${safe}`
+    : `unknown event ${unknownEvent}`
+  return truncateToWidth(text, 40, '…')
 }
 
 /** Assemble one session row for the picker, marking the current session.

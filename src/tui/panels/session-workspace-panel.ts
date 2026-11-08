@@ -59,7 +59,7 @@ import {
   type SessionWorkspaceView,
 } from '../presentation/session-workspace-view.ts'
 import { color } from '../theme/runtime.ts'
-import { formatSessionAge, shortSessionId, workspaceKey } from '../pickers/sessions.ts'
+import { formatSessionAge, sessionBrowserErrorNotice, shortSessionId, workspaceKey } from '../pickers/sessions.ts'
 
 /** The logical focus of one Session Workspace frame. `workspace` is the
  *  in-place header scope selector; `search` is the raw global query editor;
@@ -1657,12 +1657,12 @@ export class SessionWorkspacePanel implements Component {
       } else if (snapshot.searchState === 'unavailable') {
         push('content search unavailable')
       } else if (snapshot.searchState === 'error') {
-        push(`session content search failed: ${sanitizedPhysicalLine(snapshot.searchError ?? 'unknown error')}`, 'error')
+        push(sessionBrowserErrorNotice('search', snapshot.searchError ?? 'unknown error'), 'error')
       }
       if (snapshot.hasMore) push('More content matches exist — refine the search.')
     }
     if (snapshot.projectionError !== undefined) {
-      push(`Some session details are unavailable: ${sanitizedPhysicalLine(snapshot.projectionError)}`)
+      push(sessionBrowserErrorNotice('projection', snapshot.projectionError))
     }
     // The transient freshness fact paints LAST among the panel's own statuses:
     // a short frame must never spend its budget on "still reading" while a real

@@ -29,6 +29,7 @@ import { LifecycleError, WorkspaceSelectionError, type ResolvedWorkspaceSelectio
 import {
   findSessionMatch,
   sanitizeTerminalText,
+  sessionBrowserErrorNotice,
   type SessionPickerRow,
 } from '../pickers/sessions.ts'
 import type { SessionActivityFact, WorkspaceFactsHandle } from '../../runtime/session-workspace-facts-port.ts'
@@ -342,14 +343,14 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
         text = 'content search unavailable'
       } else if (snapshot.searchState === 'error') {
         key = `search-error:${snapshot.searchError ?? ''}`
-        text = `session content search failed: ${sanitizeTerminalText(snapshot.searchError ?? 'unknown error')}`
+        text = sessionBrowserErrorNotice('search', snapshot.searchError ?? 'unknown error')
         kind = 'error'
       } else if (snapshot.hasMore) {
         key = `search-more:${snapshot.query}`
         text = 'More content matches exist — refine the search.'
       } else if (snapshot.projectionError !== undefined) {
         key = 'projection-error'
-        text = `Some session details are unavailable: ${sanitizeTerminalText(snapshot.projectionError)}`
+        text = sessionBrowserErrorNotice('projection', snapshot.projectionError)
       } else {
         return
       }

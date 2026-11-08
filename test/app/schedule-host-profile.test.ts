@@ -165,36 +165,59 @@ function rowIds(ctx: Context): string[] {
   return ids
 }
 
-async function scheduleMessages(persistence: SessionPersistence, sessionId: string): Promise<Array<{ readonly id: string; readonly text: string }>> {
+function scheduledInboxMessages(events: readonly unknown[], receiptId: string): Array<{ readonly id: string; readonly text: string }> {
+  const describe = (message: { readonly id: unknown; readonly content?: readonly unknown[] }): { readonly id: string; readonly text: string } => ({
+    id: String(message.id),
+    text: (message.content ?? [])
+      .map(part => (typeof (part as { readonly text?: unknown }).text === 'string' ? (part as { readonly text: string }).text : ''))
+      .join(''),
+  })
+  const scheduled = (source: unknown): boolean =>
+    (source as { readonly kind?: unknown } | undefined)?.kind === 'schedule'
+  const out: Array<{ readonly id: string; readonly text: string }> = []
+  for (const rawEvent of events) {
+    const event = rawEvent as {
+      readonly type?: unknown
+      readonly data?: { readonly inserted?: readonly ({ readonly id: unknown; readonly source?: unknown; readonly content?: readonly unknown[] } | undefined)[] }
+    }
+    if (event.type !== 'agent/inbox/spliced') continue
+    for (const message of event.data?.inserted ?? []) {
+      if (message !== undefined && scheduled(message.source) && String(message.id) === receiptId) {
+        out.push(describe(message))
+      }
+    }
+  }
+  return out
+}
+
+async function scheduleMessages(
+  persistence: SessionPersistence,
+  sessionId: string,
+  receiptId: string,
+): Promise<Array<{ readonly id: string; readonly text: string }>> {
   const handle = await persistence.open(sessionId as Parameters<SessionPersistence['open']>[0], 'read')
   try {
     const { events } = await handle.read()
-    const describe = (message: { readonly id: unknown; readonly content?: readonly unknown[] }): { readonly id: string; readonly text: string } => ({
-      id: String(message.id),
-      text: (message.content ?? [])
-        .map(part => (typeof (part as { readonly text?: unknown }).text === 'string' ? (part as { readonly text: string }).text : ''))
-        .join(''),
-    })
-    const out: Array<{ readonly id: string; readonly text: string }> = []
-    // The official `MessageSourceMap` gains its `schedule` member in the Host
-    // package's runtime augmentation, which is not part of this test's type
-    // graph; the persisted value is read structurally instead of asserting a
-    // narrower union than the Host writes.
-    const scheduled = (source: unknown): boolean =>
-      (source as { readonly kind?: unknown } | undefined)?.kind === 'schedule'
-    for (const event of events) {
-      if (event.type === 'user/message' && scheduled(event.data?.source)) out.push(describe(event.data))
-      if (event.type === 'agent/inbox/spliced') {
-        for (const message of event.data?.inserted ?? []) {
-          if (scheduled(message?.source)) out.push(describe(message))
-        }
-      }
-    }
-    return out
+    return scheduledInboxMessages(events, receiptId)
   } finally {
     await handle.close()
   }
 }
+
+test('the Schedule receipt observer counts inbox insertions, not later message consumption', () => {
+  const message = { id: 'receipt-1', source: { kind: 'schedule' }, content: [{ type: 'text', text: PROMPT }] }
+  const consumed = scheduledInboxMessages([
+    { type: 'agent/inbox/spliced', data: { inserted: [message] } },
+    { type: 'user/message', data: message },
+  ], 'receipt-1')
+  assert.equal(consumed.length, 1, 'later consumption of the same receipt identity is not another inbox insertion')
+
+  const duplicateInsertions = scheduledInboxMessages([
+    { type: 'agent/inbox/spliced', data: { inserted: [message] } },
+    { type: 'agent/inbox/spliced', data: { inserted: [message] } },
+  ], 'receipt-1')
+  assert.equal(duplicateInsertions.length, 2, 'two actual inbox insertions of one receipt identity remain visible')
+})
 
 const PROMPT = 'schedule host profile probe'
 
@@ -244,7 +267,7 @@ test('L5: the real profile mounts ONE Host Schedule closure and delivers through
   assert.equal(delivered.lastDelivery?.targetSessionId, reservedSessionId)
   assert.equal(delivered.lastDelivery?.messageId !== undefined, true)
 
-  const messages = await scheduleMessages(persistence, reservedSessionId)
+  const messages = await scheduleMessages(persistence, reservedSessionId, delivered.lastDelivery!.messageId!)
   const delivery = messages.filter(message => message.id === delivered.lastDelivery?.messageId)
   assert.equal(delivery.length, 1, 'the persisted inbox message carries the receipt identity')
   assert.match(delivery[0].text, /schedule host profile probe/u, 'the persisted message is the delivered prompt')
@@ -261,7 +284,7 @@ test('L5: the real profile mounts ONE Host Schedule closure and delivers through
   assert.equal('code' in ranExisting, false)
   const existingDelivery = (ranExisting as ScheduleCatalogEntry).lastDelivery
   assert.equal(existingDelivery?.targetSessionId, plain.sessionId)
-  const existingMessages = await scheduleMessages(persistence, plain.sessionId)
+  const existingMessages = await scheduleMessages(persistence, plain.sessionId, existingDelivery!.messageId!)
   assert.equal(
     existingMessages.filter(message => message.id === existingDelivery?.messageId).length,
     1,
@@ -383,7 +406,7 @@ test('L5: the real DirectSchedulePort drives the controller end to end', async t
   const newDelivery = (ranNew as ScheduleCatalogEntry).lastDelivery
   assert.ok(newDelivery !== undefined, 'the `new` target delivered')
   assert.equal((ranNew as ScheduleCatalogEntry).target.kind, 'new')
-  const deliveredNew = await scheduleMessages(host.ctx.get('sessionPersistence') as unknown as SessionPersistence, newDelivery.targetSessionId)
+  const deliveredNew = await scheduleMessages(host.ctx.get('sessionPersistence') as unknown as SessionPersistence, newDelivery.targetSessionId, newDelivery.messageId)
   assert.ok(deliveredNew.some(message => message.id === newDelivery.messageId),
     'the Session created by the `new` target durably accepted the message')
 })
