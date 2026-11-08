@@ -1735,6 +1735,8 @@ jobs:
 
       - name: Run official preset assembly smoke
         shell: bash
+        env:
+          OFFICIAL_PRESETS_FAILURE_EVIDENCE: ${{ runner.temp }}/dsh-pi-tui-official-preset-failure/failure.json
         run: |
           set -euo pipefail
           mapfile -t TARBALLS < <(
@@ -1753,6 +1755,16 @@ jobs:
           else
             node scripts/official-presets-smoke.mjs "${TARBALLS[0]}"
           fi
+
+      - name: Upload sanitized official preset failure evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: official-preset-failure
+          path: ${{ runner.temp }}/dsh-pi-tui-official-preset-failure/failure.json
+          if-no-files-found: ignore
+          overwrite: true
+          retention-days: 7
 
   # ---------------------------------------------------------------------------
   # Verify the EXACT packed artifact rejects the old Harness. The unsupported
