@@ -296,6 +296,7 @@ import {
   type RenderedSearchSelection,
   type RenderedSearchScrollRange,
   type RenderedSearchSelector,
+  type SearchHighlightPaintSelector,
   type SearchSourceRegion,
 } from './tui/components/transcript/search-presentation.ts'
 import {
@@ -2981,6 +2982,28 @@ function userDisclosureMountAction(
   return hits.some(hit => hit.action === 'collapse') ? 'collapse' : 'expand'
 }
 
+type RenderedViewSearchHit = {
+  readonly component: Component
+  readonly blockIndex: number
+  readonly localMatchIndex: number
+  readonly matchKey: string
+  readonly firstTranscriptRow: number
+  readonly lastTranscriptRow: number
+}
+
+type RenderedViewSearchBlockSnapshot = {
+  readonly component: Component
+  readonly lines: readonly string[]
+}
+
+type RenderedViewSearchState = {
+  readonly query: string
+  readonly hits: readonly RenderedViewSearchHit[]
+  readonly blocks: readonly RenderedViewSearchBlockSnapshot[]
+  readonly currentIndex: number
+  readonly width: number
+}
+
 /** One transcript block rendered once for the current Focus projection. The
  * shared result keeps the painted component tree and the fullscreen hit map
  * on the same measured rows without a second live render. */
@@ -2996,7 +3019,10 @@ type RenderedTranscriptBlock = {
   searchSelection?: RenderedSearchSelection
   /** The selector matching {@link searchSelection} for the CURRENT render
    * epoch: remeasure uses it to re-sync the mounted highlight wrapper. */
-  searchSelector?: RenderedSearchSelector
+  searchSelector?: SearchHighlightPaintSelector
+  /** Rendered-view matcher/results owned by this mounted block only. */
+  renderedViewIndex?: AltScreenSearchIndex
+  renderedViewMatches?: readonly AltScreenSearchMatch[]
   /** Physical non-owning gutter mount; absent for zero-height blocks. */
   mount?: TranscriptGutterComponent
   truncatedMarker: boolean
@@ -3658,6 +3684,8 @@ export class TuiApp {
    * card is revealed and the query highlighted — presentation only, never
    * written into any user disclosure map. */
   private searchTarget: TranscriptSearchPresentationTarget | undefined
+  /** Current mounted-rendered View query and occurrence selection. */
+  private renderedViewSearch: RenderedViewSearchState | undefined
   /** The representative cards of the CURRENT semantic search result set
    * (runner-owned). Only these cards may receive a weak visual highlight; a
    * card that merely renders the query in UI chrome is never decorated. */
@@ -6104,6 +6132,7 @@ export class TuiApp {
       () => this.terminalSchemeListeners.clear(),
       () => this.expandedOverride.clear(),
       () => this.pendingUserExpanded.clear(),
+      () => this.clearRenderedViewSearch({ rebuild: false }),
       () => this.disposeMessageComponents(),
       () => { this.localMessages.length = 0 },
       () => { this.pendingTailRows = [] },
@@ -8088,6 +8117,7 @@ export class TuiApp {
     this.keybindings.cancelLeader()
     const active = this.fullscreen !== undefined
     if (enabled === active) return
+    this.clearRenderedViewSearch({ rebuild: false })
     // B4-B: the on-demand Task Quick is retired on ANY screen hand-off — the
     // accessory instance is shared by both roots and its `focused` flag would
     // otherwise survive the swap while the new screen focuses the editor,
@@ -9114,6 +9144,91 @@ export class TuiApp {
     })
   }
 
+  /** Set the transient rendered-window query. Full search remains a separate
+   * semantic owner and must be retired before this test/V2 seam is activated. */
+  setRenderedViewSearchQuery(query: string): { currentIndex: number; count: number } {
+    if (query.trim() === '') {
+      this.clearRenderedViewSearch()
+      return { currentIndex: -1, count: 0 }
+    }
+    if (this.fullscreenScroll === undefined) {
+      throw new Error('rendered View search requires the mounted fullscreen transcript')
+    }
+    if (this.searchTarget !== undefined || this.searchMatchMessages.size > 0) {
+      throw new Error('rendered View search cannot overlap Full search presentation')
+    }
+    const width = this.transcriptRenderWidth()
+    const current = this.renderedViewSearch
+    if (current?.query === query && current.width === width) {
+      return { currentIndex: current.currentIndex, count: current.hits.length }
+    }
+    this.renderedViewSearch = {
+      query,
+      hits: [],
+      blocks: [],
+      currentIndex: -1,
+      width,
+    }
+    this.rebuildMessages('search-presentation')
+    const next = this.renderedViewSearch!
+    this.scrollToSearchTarget()
+    this.requestRender()
+    return { currentIndex: next.currentIndex, count: next.hits.length }
+  }
+
+  /** Move the rendered occurrence cursor without rescanning or rebuilding. */
+  stepRenderedViewSearch(direction: 1 | -1): { currentIndex: number; count: number } {
+    const state = this.renderedViewSearch
+    if (state === undefined) return { currentIndex: -1, count: 0 }
+    if (this.fullscreenScroll === undefined) {
+      throw new Error('rendered View search lost its fullscreen transcript')
+    }
+    if (this.fullscreenRowsDirty) this.refreshMessageRows()
+    const current = this.renderedViewSearch!
+    const count = current.hits.length
+    if (count === 0) return { currentIndex: -1, count: 0 }
+    const currentIndex = current.currentIndex < 0
+      ? direction > 0 ? 0 : count - 1
+      : (current.currentIndex + direction + count) % count
+    const previousHit = current.hits[current.currentIndex]
+    const nextHit = current.hits[currentIndex]!
+    this.renderedViewSearch = { ...current, currentIndex }
+    const blockIndices = new Set<number>()
+    if (previousHit !== undefined) blockIndices.add(previousHit.blockIndex)
+    blockIndices.add(nextHit.blockIndex)
+    for (const blockIndex of blockIndices) {
+      this.applyRenderedViewSearchSelection(this.mountedTranscriptBlocks[blockIndex]!, blockIndex, current.width)
+    }
+    this.currentSearchTranscriptRange = {
+      startRow: nextHit.firstTranscriptRow,
+      endRow: nextHit.lastTranscriptRow,
+    }
+    this.scrollToSearchTarget()
+    this.requestRender()
+    return { currentIndex, count }
+  }
+
+  /** Clear only View decoration; never promotes or mutates Full disclosure. */
+  clearRenderedViewSearch(options: { rebuild?: boolean } = {}): void {
+    if (this.renderedViewSearch === undefined) return
+    this.renderedViewSearch = undefined
+    this.currentSearchTranscriptRange = undefined
+    for (const entry of this.mountedTranscriptBlocks) {
+      if (entry.mountedComponent instanceof SearchHighlightComponent) entry.mountedComponent.clear()
+      entry.searchSelection = undefined
+      entry.searchSelector = undefined
+      entry.renderedViewMatches = undefined
+      entry.renderedViewIndex = undefined
+    }
+    if (options.rebuild !== false) this.rebuildMessages('search-presentation')
+  }
+
+  /** Read the active rendered-window projection without exposing its hits. */
+  renderedViewSearchStatus(): { currentIndex: number; count: number } | undefined {
+    const state = this.renderedViewSearch
+    return state === undefined ? undefined : { currentIndex: state.currentIndex, count: state.hits.length }
+  }
+
   /** Set (or clear) the TEMPORARY search presentation target (plan §6). The
    * target drives effective reveal (Focus Thought, secondary cards, Thinking,
    * long user, PTC ancestors, Workflow run/phase, the Workflow hidden-member
@@ -9128,6 +9243,7 @@ export class TuiApp {
    * S2 §5.1): a query change / Next / Prev reaches the message tree as ONE
    * rebuild. Returns whether anything actually changed. */
   setTranscriptSearchPresentation(presentation: TranscriptSearchPresentation): boolean {
+    this.clearRenderedViewSearch({ rebuild: false })
     if (!this.applySearchPresentation(presentation)) return false
     this.rebuildMessages('search-presentation')
     return true
@@ -11500,8 +11616,152 @@ export class TuiApp {
     return result.matches
   }
 
-  /**
-   * Display-only suppression of a "void" search target: the semantic corpus
+  /** Search one mounted block, reusing the live message cache only when its
+   * component identity still belongs to that exact message object. */
+  private renderedViewMatchesFor(
+    entry: RenderedTranscriptBlock,
+    query: string,
+  ): readonly AltScreenSearchMatch[] {
+    if (entry.rendered.length === 0) return []
+    if (entry.block.kind === 'message') {
+      const messageEntry = this.messageComponents.get(entry.block.message)
+      if (messageEntry?.component === entry.component) {
+        return this.renderedSearchMatchesFor(entry.block.message, entry.rendered, query)
+      }
+    }
+    const index = entry.renderedViewIndex ??= new AltScreenSearchIndex()
+    const result = index.search(entry.rendered, query)
+    this.searchPresentationDiagnostics.renderedMatchLookups += 1
+    if (!result.changed) this.searchPresentationDiagnostics.renderedMatchResultCacheHits += 1
+    return result.matches
+  }
+
+  /** Rebuild the ephemeral View hits from one measured mounted batch. */
+  private updateRenderedViewSearchGeometry(
+    renderedBlocks: readonly RenderedTranscriptBlock[],
+    width: number,
+    paddingRows: ReadonlyMap<number, number>,
+  ): void {
+    const previous = this.renderedViewSearch
+    if (previous === undefined) return
+    if (this.fullscreenScroll === undefined) {
+      throw new Error('rendered View search requires the mounted fullscreen transcript')
+    }
+
+    const hits: RenderedViewSearchHit[] = []
+    let transcriptRow = 0
+    for (let blockIndex = 0; blockIndex < renderedBlocks.length; blockIndex += 1) {
+      const entry = renderedBlocks[blockIndex]!
+      const matches = this.renderedViewMatchesFor(entry, previous.query)
+      entry.renderedViewMatches = matches
+      const height = this.normalTranscriptBlockHeight(entry, blockIndex, renderedBlocks.length)
+      if (height > 0) {
+        for (let localMatchIndex = 0; localMatchIndex < matches.length; localMatchIndex += 1) {
+          const match = matches[localMatchIndex]!
+          const first = match.segments[0]
+          const last = match.segments.at(-1)
+          if (first === undefined || last === undefined) continue
+          // Keep the fork match-key format without adding a private import from
+          // the protected package; the matcher remains the geometry authority.
+          hits.push({
+            component: entry.component,
+            blockIndex,
+            localMatchIndex,
+            matchKey: `${first.row}:${first.startCol}:${last.row}:${last.endCol}`,
+            firstTranscriptRow: transcriptRow + first.row,
+            lastTranscriptRow: transcriptRow + last.row,
+          })
+        }
+      }
+      transcriptRow += height + (paddingRows.get(blockIndex) ?? 0)
+    }
+
+    const sameSource = previous.width === width
+      && previous.blocks.length === renderedBlocks.length
+      && previous.blocks.every((snapshot, index) => {
+        const entry = renderedBlocks[index]!
+        return snapshot.component === entry.component
+          && snapshot.lines.length === entry.rendered.length
+          && snapshot.lines.every((line, row) => line === entry.rendered[row])
+      })
+    const sameHits = sameSource
+      && previous.hits.length === hits.length
+      && previous.hits.every((hit, index) => {
+        const next = hits[index]!
+        return hit.component === next.component
+          && hit.blockIndex === next.blockIndex
+          && hit.localMatchIndex === next.localMatchIndex
+          && hit.matchKey === next.matchKey
+          && hit.firstTranscriptRow === next.firstTranscriptRow
+          && hit.lastTranscriptRow === next.lastTranscriptRow
+      })
+    let currentIndex = sameHits ? previous.currentIndex : -1
+    if (hits.length > 0 && currentIndex < 0) {
+      const viewportTop = this.fullscreenScroll.scrollTop - this.transcriptWelcomeHeight
+      const afterTop = hits.findIndex(hit => hit.firstTranscriptRow >= viewportTop)
+      currentIndex = afterTop < 0 ? 0 : afterTop
+    }
+    const nextState = {
+      query: previous.query,
+      hits,
+      blocks: renderedBlocks.map(entry => ({ component: entry.component, lines: entry.rendered })),
+      currentIndex,
+      width,
+    }
+    this.renderedViewSearch = nextState
+    this.currentSearchTranscriptRange = currentIndex < 0
+      ? undefined
+      : {
+          startRow: hits[currentIndex]!.firstTranscriptRow,
+          endRow: hits[currentIndex]!.lastTranscriptRow,
+        }
+    for (let blockIndex = 0; blockIndex < renderedBlocks.length; blockIndex += 1) {
+      this.applyRenderedViewSearchSelection(renderedBlocks[blockIndex]!, blockIndex, width)
+    }
+  }
+
+  private applyRenderedViewSearchSelection(
+    entry: RenderedTranscriptBlock,
+    blockIndex: number,
+    width: number,
+  ): void {
+    const state = this.renderedViewSearch
+    if (state === undefined) return
+    const matches = entry.renderedViewMatches ?? []
+    if (matches.length === 0) {
+      if (entry.mountedComponent instanceof SearchHighlightComponent) entry.mountedComponent.clear()
+      entry.searchSelection = undefined
+      entry.searchSelector = undefined
+      return
+    }
+    const hit = state.hits[state.currentIndex]
+    const selectedIndex = hit?.blockIndex === blockIndex ? hit.localMatchIndex : -1
+    const selectedMatch = selectedIndex < 0 ? undefined : matches[selectedIndex]
+    const first = selectedMatch?.segments[0]
+    const last = selectedMatch?.segments.at(-1)
+    const selector: SearchHighlightPaintSelector = { query: state.query }
+    const selection: RenderedSearchSelection = {
+      matches,
+      selectedIndex,
+      selectedRow: undefined,
+      exact: false,
+      ...(first === undefined || last === undefined
+        ? {}
+        : { scrollRange: { startRow: first.row, endRow: last.row } }),
+    }
+    const mounted = entry.mountedComponent
+    if (mounted instanceof SearchHighlightComponent) {
+      mounted.updateSelector(selector, selection, width, entry.rendered)
+    } else {
+      const wrapper = new SearchHighlightComponent(entry.component, selector, selection, width, entry.rendered)
+      entry.mount?.replace(wrapper)
+      entry.mountedComponent = wrapper
+    }
+    entry.searchSelector = selector
+    entry.searchSelection = selection
+  }
+
+  /** Display-only suppression of a "void" search target: the semantic corpus
    * still contains the hidden marker line, but no painted row does. Suppress
    * the anchor wash for that exact case only; the N/M navigation count and the
    * raw search authority are deliberately unchanged.
@@ -12037,8 +12297,9 @@ export class TuiApp {
     mount: boolean,
   ): void {
     const paddingRows = this.focusLivePaddingFor(renderedBlocks, projectionExpanded, width)
-    const rows: FullscreenRowEntry[] = []
     this.currentSearchTranscriptRange = undefined
+    this.updateRenderedViewSearchGeometry(renderedBlocks, width, paddingRows)
+    const rows: FullscreenRowEntry[] = []
     let transcriptRow = 0
     renderedBlocks.forEach((entry, index) => {
       const height = this.normalTranscriptBlockHeight(entry, index, renderedBlocks.length)
@@ -12189,7 +12450,7 @@ export class TuiApp {
       // Search highlight wrappers carry geometry tied to the old rendered
       // text. Until an in-place wrapper update is proven safe, one structural
       // rebuild is the correctness-preserving fallback.
-      if (this.searchTarget !== undefined) {
+      if (this.searchTarget !== undefined || this.renderedViewSearch !== undefined) {
         return { kind: 'structural', dirtyBlocks, mountReplacements }
       }
       const next = this.renderTranscriptBlock(block, projectionExpanded, boundary, userBoundary, width, component)
@@ -12393,23 +12654,26 @@ export class TuiApp {
     // Keep the MOUNTED highlight wrapper on the SAME geometry epoch as this
     // row map / scroll anchor: a stale selector would paint a strong occurrence
     // for geometry the viewport no longer uses.
-    for (const entry of renderedBlocks) {
-      const mounted = entry.mountedComponent
-      if (!(mounted instanceof SearchHighlightComponent)) continue
-      if (entry.searchSelector !== undefined && entry.searchSelection !== undefined) {
-        mounted.updateSelector(entry.searchSelector, entry.searchSelection, width, entry.rendered)
-      } else {
-        // The block is no longer part of the presentation: a measurement-only
-        // remeasure keeps the mounted wrapper, so explicitly stop decorating.
-        mounted.clear()
+    if (this.renderedViewSearch === undefined) {
+      for (const entry of renderedBlocks) {
+        const mounted = entry.mountedComponent
+        if (!(mounted instanceof SearchHighlightComponent)) continue
+        if (entry.searchSelector !== undefined && entry.searchSelection !== undefined) {
+          mounted.updateSelector(entry.searchSelector, entry.searchSelection, width, entry.rendered)
+        } else {
+          // The block is no longer part of the presentation: a measurement-only
+          // remeasure keeps the mounted wrapper, so explicitly stop decorating.
+          mounted.clear()
+        }
       }
     }
     // Publish the remeasured metadata too. Otherwise the next no-op/content
     // commit could reuse stale rendered lengths after an async image resize.
     this.mountedTranscriptBlocks = renderedBlocks
     const paddingRows = this.focusLivePaddingFor(renderedBlocks, projectionExpanded, width)
-    const rows: FullscreenRowEntry[] = []
     this.currentSearchTranscriptRange = undefined
+    this.updateRenderedViewSearchGeometry(renderedBlocks, width, paddingRows)
+    const rows: FullscreenRowEntry[] = []
     let transcriptRow = 0
     for (let index = 0; index < renderedBlocks.length; index += 1) {
       const entry = renderedBlocks[index]!
@@ -15636,6 +15900,16 @@ export class TuiApp {
     legacy: Partial<StatusData>,
     presentation: DisplaySubjectPresentation | undefined,
   ): void {
+    const previousSubject = this.statusStore.snapshot().view.subject
+    const nextSubject = patch.view?.subject
+    if (nextSubject !== undefined && (
+      previousSubject.kind !== nextSubject.kind
+      || previousSubject.kind === 'subagent'
+        && nextSubject.kind === 'subagent'
+        && previousSubject.id !== nextSubject.id
+    )) {
+      this.clearRenderedViewSearch({ rebuild: false })
+    }
     this.displaySubjectPresentation = presentation
     // The ACTIVITY section is display-subject-scoped too (its `todoCount` is
     // the display-subject list length): it must travel in the SAME store

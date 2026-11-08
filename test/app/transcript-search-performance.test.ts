@@ -258,6 +258,41 @@ test('perf: the cached content geometry matches the rendered mounted view', asyn
   app.stop()
 })
 
+test('perf: rendered View navigation and passive scroll do not rescan or rebuild the mounted window', async () => {
+  const { vt, app } = startApp(80, 12)
+  const messages = Array.from({ length: 24 }, (_, turn) => userMessage(turn, `turn ${turn} needle content`))
+  app.setFullscreen(true)
+  app.setTranscript(messages)
+  await vt.waitForRender()
+  const initial = app.setRenderedViewSearchQuery('needle')
+  assert.equal(initial.count, messages.length)
+  assert.ok(initial.currentIndex >= 0, 'a non-empty View query selects one mounted occurrence')
+  await vt.waitForRender()
+
+  app.resetSearchPresentationDiagnosticsForTest()
+  const expectedNext = (initial.currentIndex + 1) % messages.length
+  assert.deepEqual(app.stepRenderedViewSearch(1), { currentIndex: expectedNext, count: messages.length })
+  let diagnostics = app.searchPresentationDiagnosticsForTest()
+  assert.equal(diagnostics.renderedMatchLookups, 0, 'Next uses the existing occurrence list')
+  assert.equal(diagnostics.rebuilds, 0, 'Next updates only the old/new mounted wrappers')
+  assert.equal(diagnostics.remeasures, 0, 'clean geometry does not remeasure on Next')
+  assert.equal(diagnostics.fullRenders, 0, 'Next does not render the whole transcript')
+  assert.equal(diagnostics.transcriptSets, 0, 'Next never reprojects the transcript')
+
+  const before = app.fullscreenScrollForTest()!
+  assert.ok(before.maxScrollTop > 0, 'the transcript overflows the viewport')
+  app.resetSearchPresentationDiagnosticsForTest()
+  vt.sendInput(before.scrollTop > 0 ? '\u001b[<64;5;8M' : '\u001b[<65;5;8M')
+  await vt.waitForRender()
+  const after = app.fullscreenScrollForTest()!
+  assert.notEqual(after.scrollTop, before.scrollTop, 'the real wheel event moves the viewport')
+  diagnostics = app.searchPresentationDiagnosticsForTest()
+  assert.equal(diagnostics.renderedMatchLookups, 0, 'passive scrolling performs no rendered-index lookup')
+  assert.equal(diagnostics.rebuilds, 0, 'passive scrolling does not rebuild the mounted window')
+  assert.equal(diagnostics.remeasures, 0, 'the geometry-epoch snapshot is reused while scrolling')
+  app.dispose()
+})
+
 test('perf: the search profiler is a no-op unless enabled and emits the plan stage set once per operation', () => {
   assert.equal(searchProfilingEnabled({ DSH_TUI_SEARCH_PROFILE: '1' }), true)
   assert.equal(searchProfilingEnabled({}), false)
