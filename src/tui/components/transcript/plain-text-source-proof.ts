@@ -119,6 +119,9 @@ export function provePlainTextPaintedSegments(
   const collected: string[] = []
   for (let row = 0; row < probeLines.length; row += 1) {
     const line = probeLines[row]!
+    // Only a row that really carries the witness can own a marked cell; the
+    // rest of the card must not pay a per-grapheme column scan.
+    if (!line.includes(PROBE_URL)) continue
     let column = 0
     for (const { segment } of graphemeSegmenter.segment(stripTerminalSequences(line))) {
       const width = visibleWidth(segment)
