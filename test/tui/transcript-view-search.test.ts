@@ -2,13 +2,14 @@ import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { findAltScreenSearchMatches, getCapabilities, resetCapabilitiesCache, setCapabilities, stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
+import { findAltScreenSearchMatches, getCapabilities, getOsc8LinkAtColumn, resetCapabilitiesCache, setCapabilities, stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import { ImageLoader } from '../../src/client/media/image/loader.ts'
+import { currentPalette } from '../../src/tui/theme/runtime.ts'
 import { TuiApp } from '../../src/tui-app.ts'
-import type { AssistantLiveInput } from '../../src/runtime/assistant-stream-port.ts'
+import { TranscriptWindowController } from '../../src/domain/transcript/window.ts'
 import { TranscriptFolder, type TranscriptMessage } from '../../src/transcript.ts'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
-import { enterChildDisplaySubject } from '../support/display-subject.ts'
+import { enterChildDisplaySubject, exitChildDisplaySubject } from '../support/display-subject.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 
 const STRONG_BG = 0xf5c542
@@ -81,6 +82,14 @@ function strongOccurrences(
   query: string,
 ): Array<{ row: number; column: number }> {
   return occurrences(lines, query).filter(({ row, column }) => vt.getCellBgRgb(row, column) === STRONG_BG)
+}
+
+function weakOccurrences(
+  vt: VirtualTerminal,
+  lines: readonly string[],
+  query: string,
+): Array<{ row: number; column: number }> {
+  return occurrences(lines, query).filter(({ row, column }) => vt.getCellUnderline(row, column))
 }
 
 async function paintTranscript(
@@ -162,6 +171,63 @@ test('rendered View searches text emitted by the mounted plugin renderer', async
   }
 })
 
+test('rendered View searches visible Workflow text but excludes hidden members and mounted chrome', async () => {
+  const { vt, app } = startApp(120, 40)
+  try {
+    const workflow: TranscriptMessage = {
+      kind: 'workflow',
+      turn: 0,
+      runId: 'view-workflow' as never,
+      name: 'workflow-visible-needle',
+      status: 'completed',
+      members: Array.from({ length: 6 }, (_, seq) => ({
+        seq,
+        label: seq === 5 ? 'hidden-field-only-needle' : `completed worker ${seq}`,
+        phase: 'batch',
+        childId: `view-child-${seq}` as never,
+        status: 'completed' as const,
+      })),
+    } as Extract<TranscriptMessage, { kind: 'workflow' }>
+    app.setFullscreen(true)
+    app.setTranscript([workflow])
+    await vt.waitForRender()
+    const initial = vt.getViewport().map(stripTerminalSequences)
+    assert.ok(initial.some(line => line.includes('workflow-visible-needle')),
+      `the Workflow name is painted:\\n${initial.join('\\n')}`)
+    assert.ok(!initial.some(line => line.includes('hidden-field-only-needle')),
+      'the large collapsed phase does not paint its hidden final member label')
+
+    assert.deepEqual(app.setRenderedViewSearchQuery('workflow-visible-needle'), { currentIndex: 0, count: 1 },
+      'the painted Workflow name participates in View search')
+    await vt.waitForRender()
+    let lines = vt.getViewport()
+    assert.equal(strongOccurrences(vt, lines, 'workflow-visible-needle').length, 1)
+    assert.deepEqual(app.setRenderedViewSearchQuery('hidden-field-only-needle'), { currentIndex: -1, count: 0 },
+      'an unpainted Workflow member field is not counted')
+
+    app.setSessionTitle('chrome-only-needle')
+    app.notify('chrome-only-needle', 'info')
+    app.setEditorText('chrome-only-needle')
+    app.setFooterCommandRows(['chrome-only-needle'])
+    await vt.waitForRender()
+    lines = vt.getViewport()
+    assert.ok(occurrences(lines, 'chrome-only-needle').length >= 4,
+      'the same text is visibly present in header, notice, editor and footer chrome')
+    assert.deepEqual(app.renderedViewSearchStatus(), { currentIndex: -1, count: 0 },
+      'header/notice/editor rows stay outside mounted transcript blocks')
+    assert.deepEqual(app.setRenderedViewSearchQuery('chrome-only-needle'), { currentIndex: -1, count: 0 },
+      'a query present only in mounted chrome has no View result')
+    await vt.waitForRender()
+    lines = vt.getViewport()
+    assert.equal(strongOccurrences(vt, lines, 'chrome-only-needle').length, 0)
+    assert.equal(weakOccurrences(vt, lines, 'chrome-only-needle').length, 0)
+  } finally {
+    app.clearNotify()
+    app.setFooterCommandRows(undefined)
+    app.clearRenderedViewSearch()
+  }
+})
+
 test('rendered View counts painted Markdown text but excludes a hidden href without changing Full results', async () => {
   const previousCapabilities = getCapabilities()
   setCapabilities({ images: null, trueColor: true, hyperlinks: true })
@@ -169,31 +235,90 @@ test('rendered View counts painted Markdown text but excludes a hidden href with
   try {
     const folder = assistantFolder([{
       id: 'view-markdown',
-      text: '# needle\n\nVisible **needle** and [label needle](https://example.invalid/needle)\n\n- needle\n\n`needle`',
+      text: [
+        '# needle',
+        '',
+        'paragraph needle **bold needle** and *italic needle*',
+        '',
+        '> blockquote needle',
+        '',
+        '- list needle',
+        '',
+        '`inline needle`',
+        '',
+        '```ts',
+        'const fenced = "needle"',
+        '```',
+        '',
+        '[label needle](https://example.invalid/needle)',
+      ].join('\n'),
     }])
     const fullBefore = folder.search('needle').map(match => ({
       id: match.id,
       sourceOccurrence: match.sourceOccurrence,
       range: match.normalizedSourceRange,
     }))
-    assert.equal(fullBefore.length, 6, 'Full retains the raw hidden href occurrence')
+    assert.equal(fullBefore.length, 10, 'Full retains the raw hidden href occurrence')
     await paintTranscript(app, vt, folder)
+    const mountedBlock = (app as unknown as {
+      mountedTranscriptBlocks: Array<{
+        block: { message?: TranscriptMessage }
+        rendered: readonly string[]
+        mount?: { render(width: number): string[] }
+      }>
+    }).mountedTranscriptBlocks.find(entry => entry.block.message === folder.messages()[0])!
+    const linkTarget = (line: string): string | undefined => {
+      const plain = stripTerminalSequences(line)
+      const labelStart = plain.indexOf('label needle')
+      assert.ok(labelStart >= 0, `the visible link label exists in ${JSON.stringify(plain)}`)
+      return getOsc8LinkAtColumn(line, visibleWidth(plain.slice(0, labelStart)))
+    }
+    const sourceLinkLine = mountedBlock.rendered.find(line => stripTerminalSequences(line).includes('label needle'))!
+    const rawHrefBefore = linkTarget(sourceLinkLine)
+    assert.equal(rawHrefBefore, 'https://example.invalid/needle', 'the source renderer paints the declared OSC8 target')
     const plainBefore = vt.getViewport().map(stripTerminalSequences)
 
-    assert.deepEqual(app.setRenderedViewSearchQuery('needle'), { currentIndex: 0, count: 5 })
+    assert.deepEqual(app.setRenderedViewSearchQuery('needle'), { currentIndex: 0, count: 9 })
     await vt.waitForRender()
     const lines = vt.getViewport()
-    assert.equal(occurrences(lines, 'needle').length, 5, 'the mounted Markdown paints five searchable occurrences')
-    assert.equal(strongOccurrences(vt, lines, 'needle').length, 1, 'only the selected painted occurrence is strong')
+    const painted = occurrences(lines, 'needle')
+    assert.equal(painted.length, 9, 'the mounted Markdown paints heading, prose, emphasis, quote, list, both code forms and link label')
+    assert.deepEqual(strongOccurrences(vt, lines, 'needle'), [painted[0]],
+      'the first painted occurrence is the one strong result')
+    const weakPainted = painted.filter(({ row, column }) =>
+      vt.getCellUnderline(row, column) && vt.getCellBgRgb(row, column) !== STRONG_BG)
+    assert.deepEqual(weakPainted, painted.slice(1),
+      'every non-current painted occurrence has the weak-only underline style')
+    for (const paintedText of ['paragraph needle', 'italic needle', 'blockquote needle', 'list needle', 'inline needle', 'fenced = "needle"', 'label needle']) {
+      assert.ok(lines.some(line => stripTerminalSequences(line).includes(paintedText)),
+        `the real Markdown renderer paints ${paintedText}:\\n${lines.join('\\n')}`)
+    }
     assert.ok(lines.some(line => stripTerminalSequences(line).includes('label needle')),
       'the visible link label remains painted')
     assert.deepEqual(lines.map(stripTerminalSequences), plainBefore,
       'highlighting preserves visible text, ANSI/OSC-stripped layout and link label')
+    const decoratedLines = mountedBlock.mount!.render(vt.columns)
+    const decoratedLinkLine = decoratedLines.find(line => stripTerminalSequences(line).includes('label needle'))!
+    assert.equal(linkTarget(decoratedLinkLine), rawHrefBefore,
+      'the real View wrapper preserves the original OSC8 href target')
+    const sourceWidth = visibleWidth(stripTerminalSequences(sourceLinkLine))
+    assert.equal(visibleWidth(stripTerminalSequences(decoratedLinkLine)), sourceWidth,
+      'View decoration does not change the link row cell width')
     assert.deepEqual(folder.search('needle').map(match => ({
       id: match.id,
       sourceOccurrence: match.sourceOccurrence,
       range: match.normalizedSourceRange,
     })), fullBefore, 'View does not mutate Full match identity or source ranges')
+
+    for (const marker of ['#', '**']) {
+      assert.deepEqual(app.setRenderedViewSearchQuery(marker), { currentIndex: -1, count: 0 },
+        `${JSON.stringify(marker)} is Markdown syntax, not painted transcript text`)
+      await vt.waitForRender()
+      assert.equal(strongOccurrences(vt, vt.getViewport(), marker).length, 0,
+        `${JSON.stringify(marker)} never receives a current painted cell`)
+    }
+    assert.deepEqual(app.setRenderedViewSearchQuery('needle'), { currentIndex: 0, count: 9 })
+    await vt.waitForRender()
 
     assert.deepEqual(app.setRenderedViewSearchQuery(''), { currentIndex: -1, count: 0 },
       'an empty query clears the current occurrence and returns 0/0')
@@ -209,7 +334,7 @@ test('rendered View counts painted Markdown text but excludes a hidden href with
       'a Full semantic target cannot coexist with the rendered View selection')
     assert.equal(app.transcriptSearchPresentationForTest()?.sourceOccurrence, fullMatch.sourceOccurrence,
       'the Full semantic source ordinal is not replaced by the rendered View ordinal')
-    assert.equal(folder.search('needle').length, 6, 'Full continues to include the hidden href occurrence')
+    assert.equal(folder.search('needle').length, 10, 'Full continues to include the hidden href occurrence')
   } finally {
     setCapabilities(previousCapabilities)
   }
@@ -225,24 +350,31 @@ test('rendered View navigation distinguishes repeated painted occurrences and wr
     let lines = vt.getViewport()
     assert.equal(occurrences(lines, 'needle').length, 3)
     assert.deepEqual(strongOccurrences(vt, lines, 'needle'), [occurrences(lines, 'needle')[0]])
+    assert.deepEqual(weakOccurrences(vt, lines, 'needle'), occurrences(lines, 'needle').slice(1),
+      'every non-current same-block duplicate is painted weak')
 
     assert.deepEqual(app.stepRenderedViewSearch(1), { currentIndex: 1, count: 3 })
     await vt.waitForRender()
     lines = vt.getViewport()
     assert.deepEqual(strongOccurrences(vt, lines, 'needle'), [occurrences(lines, 'needle')[1]])
+    assert.deepEqual(weakOccurrences(vt, lines, 'needle'), [occurrences(lines, 'needle')[0], occurrences(lines, 'needle')[2]])
 
     assert.deepEqual(app.stepRenderedViewSearch(1), { currentIndex: 2, count: 3 })
     await vt.waitForRender()
     lines = vt.getViewport()
     assert.deepEqual(strongOccurrences(vt, lines, 'needle'), [occurrences(lines, 'needle')[2]])
+    assert.deepEqual(weakOccurrences(vt, lines, 'needle'), [occurrences(lines, 'needle')[0], occurrences(lines, 'needle')[1]])
 
     assert.deepEqual(app.stepRenderedViewSearch(1), { currentIndex: 0, count: 3 }, 'Next wraps to the first occurrence')
     await vt.waitForRender()
-    assert.deepEqual(strongOccurrences(vt, vt.getViewport(), 'needle'), [occurrences(vt.getViewport(), 'needle')[0]])
+    lines = vt.getViewport()
+    assert.deepEqual(strongOccurrences(vt, lines, 'needle'), [occurrences(lines, 'needle')[0]])
+    assert.deepEqual(weakOccurrences(vt, lines, 'needle'), occurrences(lines, 'needle').slice(1))
     assert.deepEqual(app.stepRenderedViewSearch(-1), { currentIndex: 2, count: 3 }, 'Prev wraps to the last occurrence')
     await vt.waitForRender()
     lines = vt.getViewport()
     assert.deepEqual(strongOccurrences(vt, lines, 'needle'), [occurrences(lines, 'needle')[2]])
+    assert.deepEqual(weakOccurrences(vt, lines, 'needle'), occurrences(lines, 'needle').slice(0, 2))
     assert.equal(app.transcriptSearchPresentationForTest(), undefined, 'View never installs a Full semantic target')
   } finally {
     app.clearRenderedViewSearch()
@@ -324,6 +456,81 @@ test('rendered View searches each mounted block independently and follows a repl
   }
 })
 
+test('rendered View follows streaming Assistant rows through partial append and durable settlement', async () => {
+  const { vt, app } = startApp(100, 30)
+  const folder = new TranscriptFolder()
+  const stream = {
+    sessionId: 'view-stream-session',
+    attemptId: 'view-stream-attempt',
+    turn: 0,
+    step: 0,
+  } as const
+  try {
+    folder.apply([
+      event('turn/start', { turn: 0 }, 0),
+      event('user/message', {
+        id: MessageId('view-stream-user'),
+        role: 'user',
+        content: [{ type: 'text', text: 'stream prompt' }],
+        source: { kind: 'user' },
+      }, 1),
+    ])
+    folder.applyLiveInput({ kind: 'start', ...stream })
+    folder.applyLiveInput({
+      kind: 'chunk',
+      ...stream,
+      time: 1_700_000_000_010,
+      chunk: { type: 'text-delta', index: 0, text: 'stream needle' },
+    })
+    app.setFullscreen(true)
+    app.setTranscript(folder.messages(), folder.turnActivities())
+    await vt.waitForRender()
+    assert.deepEqual(app.setRenderedViewSearchQuery('needle'), { currentIndex: 0, count: 1 },
+      'the first live partial row is searchable')
+    await vt.waitForRender()
+
+    folder.applyLiveInput({
+      kind: 'chunk',
+      ...stream,
+      time: 1_700_000_000_011,
+      chunk: { type: 'text-delta', index: 0, text: ' needle' },
+    })
+    app.setTranscript(folder.messages(), folder.turnActivities())
+    await vt.waitForRender()
+    assert.deepEqual(app.renderedViewSearchStatus(), { currentIndex: 0, count: 2 },
+      'a streaming append reindexes the active mounted block without dropping its query')
+    let lines = vt.getViewport()
+    assert.equal(occurrences(lines, 'needle').length, 2)
+    assert.equal(strongOccurrences(vt, lines, 'needle').length, 1)
+    assert.equal(weakOccurrences(vt, lines, 'needle').length, 1,
+      'the newly appended duplicate stays weak while the first remains current')
+
+    folder.apply([event('assistant/message', {
+      turn: 0,
+      step: 0,
+      message: {
+        id: MessageId('view-stream-settled'),
+        role: 'assistant',
+        content: [{ type: 'text', text: 'stream needle needle' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+      stream: [],
+    }, 2)])
+    folder.applyLiveInput({ kind: 'end', ...stream, status: 'committed', settlement: 'message' })
+    folder.apply([event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 3)])
+    app.setTranscript(folder.messages(), folder.turnActivities())
+    await vt.waitForRender()
+    assert.deepEqual(app.renderedViewSearchStatus(), { currentIndex: 0, count: 2 },
+      'durable settlement replaces the live component while preserving the View matches')
+    lines = vt.getViewport()
+    assert.equal(occurrences(lines, 'needle').length, 2)
+    assert.equal(strongOccurrences(vt, lines, 'needle').length, 1)
+    assert.equal(weakOccurrences(vt, lines, 'needle').length, 1)
+  } finally {
+    app.clearRenderedViewSearch()
+  }
+})
+
 test('rendered View reflows CJK, emoji and combining graphemes at supported transcript widths', async () => {
   const { vt, app } = startApp(120, 40)
   try {
@@ -355,6 +562,149 @@ test('rendered View reflows CJK, emoji and combining graphemes at supported tran
     }
   } finally {
     app.clearRenderedViewSearch()
+  }
+})
+
+test('rendered View query and navigation leave the Full semantic current and exact painted state unchanged', async () => {
+  const previousCapabilities = getCapabilities()
+  setCapabilities({ images: null, trueColor: true, hyperlinks: true })
+  const { vt, app } = startApp(120, 40)
+  try {
+    const folder = new TranscriptFolder()
+    folder.apply([
+      event('turn/start', { turn: 0 }, 0),
+      event('user/message', {
+        id: MessageId('view-full-user'),
+        role: 'user',
+        content: [{ type: 'text', text: 'needle user needle source' }],
+        source: { kind: 'user' },
+      }, 1),
+      event('assistant/message', {
+        turn: 0,
+        step: 0,
+        message: {
+          id: MessageId('view-full-assistant'),
+          role: 'assistant',
+          content: [{ type: 'text', text: '[visible label](https://example.invalid/needle)' }],
+          source: { kind: 'model', provider: 'p', model: 'm' },
+        },
+        stream: [],
+      }, 2),
+      event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 3),
+    ])
+    const user = folder.messages()[0]!
+    const rawAssistantSource = JSON.stringify(folder.messages()[1])
+    const matchesBefore = folder.search('needle').map(match => ({
+      id: match.id,
+      turn: match.turn,
+      source: match.source,
+      sourceOccurrence: match.sourceOccurrence,
+      range: match.normalizedSourceRange,
+    }))
+    assert.equal(matchesBefore.length, 3, 'Full owns two user hits and the hidden href occurrence')
+    await paintTranscript(app, vt, folder)
+
+    const fullMatch = folder.search('needle')[0]!
+    app.setTranscriptSearchTarget({ query: 'needle', match: fullMatch, message: user })
+    await vt.waitForRender()
+    const selectionFor = (): {
+      readonly matches: readonly { readonly segments: readonly { readonly row: number; readonly startCol: number; readonly endCol: number }[] }[]
+      readonly selectedIndex: number
+      readonly selectedRow: number | undefined
+      readonly exact: boolean
+      readonly exactPaintedSegments?: readonly { readonly row: number; readonly startCol: number; readonly endCol: number }[]
+    } | undefined => (app as unknown as {
+      mountedTranscriptBlocks: Array<{
+        block: { message?: TranscriptMessage }
+        searchSelection?: {
+          readonly matches: readonly { readonly segments: readonly { readonly row: number; readonly startCol: number; readonly endCol: number }[] }[]
+          readonly selectedIndex: number
+          readonly selectedRow: number | undefined
+          readonly exact: boolean
+          readonly exactPaintedSegments?: readonly { readonly row: number; readonly startCol: number; readonly endCol: number }[]
+        }
+      }>
+    }).mountedTranscriptBlocks.find(entry => entry.block.message === user)?.searchSelection
+    const fullState = () => ({
+      presentation: app.transcriptSearchPresentationForTest(),
+      selection: selectionFor(),
+    })
+    const before = fullState()
+    assert.equal(before.presentation?.revealGranted, true)
+    assert.equal(before.selection?.exact, true, 'the Full User source has its existing proven-cell channel')
+    assert.ok((before.selection?.exactPaintedSegments?.length ?? 0) > 0,
+      'the Full current stores its semantic source-proven painted cells')
+    assert.throws(() => app.setRenderedViewSearchQuery('needle'), /cannot overlap Full search presentation/,
+      'View refuses to claim state while Full presentation remains active')
+    assert.deepEqual(fullState(), before, 'a refused View activation leaves Full current/reveal/exact cells unchanged')
+
+    assert.equal(app.finishTranscriptSearchPresentation(new Set(), { rebuild: true }), true)
+    await vt.waitForRender()
+    assert.deepEqual(app.setRenderedViewSearchQuery('needle'), { currentIndex: 0, count: 2 },
+      'View sees both User hits but not the hidden href occurrence')
+    assert.deepEqual(app.stepRenderedViewSearch(1), { currentIndex: 1, count: 2 })
+    await vt.waitForRender()
+    assert.equal(app.transcriptSearchPresentationForTest(), undefined,
+      'View Next does not create a Full semantic current')
+    assert.deepEqual(folder.search('needle').map(match => ({
+      id: match.id,
+      turn: match.turn,
+      source: match.source,
+      sourceOccurrence: match.sourceOccurrence,
+      range: match.normalizedSourceRange,
+    })), matchesBefore, 'View query/Next leave Full count, ids, source order and raw href ranges intact')
+    assert.equal(JSON.stringify(folder.messages()[1]), rawAssistantSource,
+      'the semantic Assistant source and its original Markdown href bytes remain unchanged')
+
+    app.clearRenderedViewSearch()
+    await vt.waitForRender()
+    app.setTranscriptSearchTarget({ query: 'needle', match: fullMatch, message: user })
+    await vt.waitForRender()
+    assert.deepEqual(fullState(), before,
+      'after the explicit scope handoff, the same Full target re-proves its original reveal and exact painted cells')
+  } finally {
+    app.clearRenderedViewSearch()
+    setCapabilities(previousCapabilities)
+  }
+})
+
+test('rendered View remeasures active occurrences across preset, icon and theme changes', async () => {
+  const previousPalette = currentPalette
+  const { vt, app } = startApp(120, 40, 'full')
+  try {
+    const folder = assistantFolder([{ id: 'view-presentation-refresh', text: 'presentation needle survives' }])
+    await paintTranscript(app, vt, folder)
+    assert.deepEqual(app.setRenderedViewSearchQuery('needle'), { currentIndex: 0, count: 1 })
+    await vt.waitForRender()
+
+    app.setIconStyle('symbols')
+    await vt.waitForRender()
+    assert.deepEqual(app.renderedViewSearchStatus(), { currentIndex: 0, count: 1 },
+      'the icon rebuild preserves the active View projection')
+    let lines = vt.getViewport()
+    assert.equal(occurrences(lines, 'needle').length, 1)
+    assert.equal(lines.flatMap((line, row) => occurrences([line], 'needle').map(cell => vt.getCellBold(row, cell.column)))
+      .filter(Boolean).length, 1, 'the icon rebuild leaves one current strong painted cell')
+
+    app.setDisplayPreset('compact')
+    await vt.waitForRender()
+    assert.deepEqual(app.renderedViewSearchStatus(), { currentIndex: 0, count: 1 },
+      'the Compact projection remeasures the active View query')
+    lines = vt.getViewport()
+    assert.equal(occurrences(lines, 'needle').length, 1)
+    assert.equal(lines.flatMap((line, row) => occurrences([line], 'needle').map(cell => vt.getCellBold(row, cell.column)))
+      .filter(Boolean).length, 1)
+
+    app.applyTheme('light')
+    await vt.waitForRender()
+    assert.deepEqual(app.renderedViewSearchStatus(), { currentIndex: 0, count: 1 },
+      'the palette rebuild preserves the active occurrence identity')
+    lines = vt.getViewport()
+    assert.equal(lines.flatMap((line, row) => occurrences([line], 'needle').map(cell => vt.getCellBold(row, cell.column)))
+      .filter(Boolean).length, 1, 'the light theme still paints one strong current cell')
+  } finally {
+    app.clearRenderedViewSearch()
+    app.applyPalette(previousPalette)
   }
 })
 
@@ -465,6 +815,22 @@ test('rendered View remeasures its current cell when an async image changes the 
       'the current highlight follows the answer row after the preceding image gains rows')
     assert.notEqual(vt.getCellBgRgb(before.row, before.column), STRONG_BG,
       'the old viewport cell is no longer strong after reflow')
+
+    const mountedImage = (app as unknown as {
+      mountedTranscriptBlocks: Array<{ block: { kind: string; message?: TranscriptMessage }; rendered: readonly string[] }>
+    }).mountedTranscriptBlocks.find(entry => entry.block.kind === 'message'
+      && entry.block.message?.kind === 'user')!
+    assert.ok(vt.writes.some(write => write.includes('iVBORw0KGgo')),
+      'the VirtualTerminal receives the PNG payload through the Kitty upload protocol')
+    assert.ok(mountedImage.rendered.some(line => line.includes('\x1b_Ga=p')),
+      `the mounted block carries a Kitty placement control row: ${JSON.stringify(mountedImage.rendered)}`)
+    assert.deepEqual(app.setRenderedViewSearchQuery('a=p'), { currentIndex: -1, count: 0 },
+      'Kitty placement metadata is stripped instead of becoming searchable text')
+    assert.deepEqual(app.setRenderedViewSearchQuery('iVBORw0KGgo'), { currentIndex: -1, count: 0 },
+      'image payload bytes never enter the rendered text corpus')
+    await vt.waitForRender()
+    assert.equal(strongOccurrences(vt, vt.getViewport(), 'iVBORw0KGgo').length, 0,
+      'searching image payload bytes paints no text cell')
   } finally {
     try {
       if (!app.isDisposed()) app.dispose()
@@ -598,6 +964,57 @@ test('rendered View does not reveal collapsed Focus text and tracks manual discl
   }
 })
 
+test('rendered View follows real transcript window paging without searching unloaded history', async () => {
+  const { vt, app } = startApp(100, 30)
+  try {
+    const folder = assistantFolder([
+      { id: 'view-window-old', text: 'historical-only-needle' },
+      { id: 'view-window-middle', text: 'middle content' },
+      { id: 'view-window-latest', text: 'latest content' },
+    ])
+    const controller = new TranscriptWindowController({
+      windowTurns: 2,
+      stepTurns: 1,
+      turns: folder.groupedTurns(),
+    })
+    const commitCurrentWindow = (): void => {
+      const projection = folder.window({ maxTurns: controller.windowTurns, endTurn: controller.endTurn() })
+      app.setTranscript(projection.messages, folder.turnActivities(), {
+        ...controller.state(),
+        ...(projection.firstTurn === undefined ? {} : { firstTurn: projection.firstTurn }),
+        ...(projection.lastTurn === undefined ? {} : { lastTurn: projection.lastTurn }),
+        hasNewer: projection.hasNewer,
+      })
+    }
+
+    app.setFullscreen(true)
+    commitCurrentWindow()
+    await vt.waitForRender()
+    assert.ok(vt.getViewport().some(line => stripTerminalSequences(line).includes('latest content')))
+    assert.ok(!vt.getViewport().some(line => stripTerminalSequences(line).includes('historical-only-needle')),
+      'the current latest projection has no row for the older history match')
+    assert.deepEqual(app.setRenderedViewSearchQuery('historical-only-needle'), { currentIndex: -1, count: 0 },
+      'unloaded turns are absent from the current View corpus')
+
+    assert.equal(controller.moveOlder(), true, 'the real window controller pages to an older range')
+    commitCurrentWindow()
+    await vt.waitForRender()
+    assert.deepEqual(app.renderedViewSearchStatus(), { currentIndex: 0, count: 1 },
+      'the same View query reindexes the newly committed history window')
+    assert.ok(vt.getViewport().some(line => stripTerminalSequences(line).includes('historical-only-needle')))
+    assert.equal(strongOccurrences(vt, vt.getViewport(), 'historical-only-needle').length, 1)
+
+    assert.equal(controller.moveNewer(), true, 'the real window controller returns to its latest projection')
+    commitCurrentWindow()
+    await vt.waitForRender()
+    assert.deepEqual(app.renderedViewSearchStatus(), { currentIndex: -1, count: 0 },
+      'paging forward drops matches outside the newly mounted batch')
+    assert.ok(!vt.getViewport().some(line => stripTerminalSequences(line).includes('historical-only-needle')))
+  } finally {
+    app.clearRenderedViewSearch()
+  }
+})
+
 test('rendered View uses the mounted component when an equivalent summary object replaces its source object', async () => {
   const { vt, app } = startApp(100, 30)
   try {
@@ -605,20 +1022,25 @@ test('rendered View uses the mounted component when an equivalent summary object
     app.setFullscreen(true)
     app.setTranscript([first])
     await vt.waitForRender()
+    assert.deepEqual(app.setRenderedViewSearchQuery('needle'), { currentIndex: 0, count: 1 })
+    await vt.waitForRender()
+    const beforeStrong = strongOccurrences(vt, vt.getViewport(), 'needle')
+    assert.equal(beforeStrong.length, 1, 'the existing mounted Summary owns one active painted hit')
     const batch = (app as unknown as {
       mountedTranscriptBlocks: Array<{ block: { kind: string }; component: unknown }>
     }).mountedTranscriptBlocks
     const component = batch[0]!.component
 
     app.setTranscript([{ kind: 'summary', text: 'Window summary needle' }])
+    await vt.waitForRender()
     assert.strictEqual((app as unknown as {
       mountedTranscriptBlocks: Array<{ block: { kind: string }; component: unknown }>
     }).mountedTranscriptBlocks[0]!.component, component,
-    'the equivalent summary keeps its mounted component')
-    assert.deepEqual(app.setRenderedViewSearchQuery('needle'), { currentIndex: 0, count: 1 },
-      'View indexes the mounted summary without requiring a cache entry for its replacement object')
-    await vt.waitForRender()
-    assert.equal(strongOccurrences(vt, vt.getViewport(), 'needle').length, 1)
+    'the equivalent summary keeps its mounted component during active View search')
+    assert.deepEqual(app.renderedViewSearchStatus(), { currentIndex: 0, count: 1 },
+      'the active View query survives an equivalent Summary content refresh')
+    assert.deepEqual(strongOccurrences(vt, vt.getViewport(), 'needle'), beforeStrong,
+      'the refreshed Summary retains the same painted current occurrence')
   } finally {
     app.clearRenderedViewSearch()
   }
@@ -646,6 +1068,13 @@ test('rendered View is retired before a display-subject identity change commits'
     await vt.waitForRender()
     assert.equal(strongOccurrences(vt, vt.getViewport(), 'needle').length, 0,
       'the retired subject loses its strong painted cells')
+
+    exitChildDisplaySubject(app, { cwd: '/workspace/main' })
+    assert.equal(app.renderedViewSearchStatus(), undefined,
+      'returning to main does not resurrect either subject\'s old View query')
+    await vt.waitForRender()
+    assert.equal(strongOccurrences(vt, vt.getViewport(), 'needle').length, 0,
+      'the main-subject repaint has no stale strong View cell')
   } finally {
     app.clearRenderedViewSearch()
   }
