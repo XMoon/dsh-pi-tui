@@ -1315,7 +1315,6 @@ test('closing the Models page while a native attempt runs cancels it and the own
   await signInTask
   // If the owned sign-in task is still pending this test times out; the
   // assertion above plus the await is the no-hang evidence.
-  assert.ok(true)
 })
 
 test('a failed credential-record refresh invalidates the old presence instead of keeping it (P2)', async () => {

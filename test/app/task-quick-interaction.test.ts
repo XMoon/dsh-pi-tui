@@ -1162,9 +1162,6 @@ test('the 44-col CJK wrapped draft enters; an extreme frame declines the entry',
     guard += 1
   }
   assert.ok(h.band().identity >= 0, `the wrapped draft reaches the Quick at 44 cols:\n${view(h.vt)}`)
-  for (const line of h.band().items) {
-    assert.ok(true, 'rows measured elsewhere; this witness is the entry')
-  }
   assert.ok(view(h.vt).includes('构建任务'), `the CJK label paints:\n${view(h.vt)}`)
   // The process slot is single-owner: dispose this app before the next one.
   h.app.dispose()

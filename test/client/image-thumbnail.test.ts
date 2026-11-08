@@ -169,7 +169,6 @@ test('dispose releases the loader subscription (round-2 finding 2/7)', async () 
   component.dispose()
   component.dispose() // idempotent
   component.render(80) // disposed render must not crash
-  assert.ok(true)
 })
 
 test('a capability flip (kitty → unsupported) drops the cached inline lines', async () => {
@@ -548,7 +547,7 @@ test('the shared MIME table stays PNG-only for Kitty (the 6B Viewer boundary)', 
 test('dispose during a pending conversion releases the subscription: no settle repaint', async () => {
   resetCapabilitiesCache()
   setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
-  let releaseDerived!: () => void
+  let releaseDerived: (() => void) | undefined
   const loader = imageLoaderWith(SAMPLE_JPEG, () => new Promise(resolve => {
     releaseDerived = () => resolve({
       base64: '',
@@ -560,12 +559,14 @@ test('dispose during a pending conversion releases the subscription: no settle r
   loader.load(JPEG_REF)
   await until(() => loader.get(JPEG_REF).state === 'ready', 'the raw JPEG')
   let repaints = 0
-  const component = new ImageThumbnail(JPEG_REF, loader, THEME, () => { repaints += 1 })
+  const graphics = { mode: 'native', canPaint: () => true } as ImageGraphics
+  const component = new ImageThumbnail(JPEG_REF, loader, THEME, () => { repaints += 1 }, undefined, undefined, undefined, graphics)
   component.render(80)
-  await new Promise(resolve => setImmediate(resolve))
+  await until(() => releaseDerived !== undefined, 'the preview converter release callback')
   component.dispose()
+  assert.ok(releaseDerived !== undefined, 'the preview converter is pending before dispose')
   releaseDerived()
-  await new Promise(resolve => setTimeout(resolve, 40))
+  await until(() => loader.getKittyThumbnail(JPEG_REF).state === 'ready', 'the derived PNG after dispose')
   assert.equal(repaints, 0, 'a disposed occurrence is never woken by a late conversion')
 })
 

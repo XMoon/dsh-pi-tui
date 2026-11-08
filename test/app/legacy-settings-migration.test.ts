@@ -152,14 +152,6 @@ agent-presets:
 
 test('legacy focusMode converges into displayPreset and is never carried as a field', async () => {
   const { diag } = diagHarness()
-  const focusOnly = legacyHome('dsh-pi-tui:\n  focusMode: "on"\n')
-  try {
-    await migrateLegacySettings(input(focusOnly, formsHarness().forms, 0, alwaysResolves, diag))
-    // §19.2 — asserted below through the shared helper; see the focused cases.
-  } finally {
-    rmSync(focusOnly, { recursive: true, force: true })
-  }
-
   const cases: readonly { document: string; expected: string }[] = [
     { document: 'dsh-pi-tui:\n  focusMode: "on"\n', expected: 'focus' },
     { document: 'dsh-pi-tui:\n  focusMode: "off"\n', expected: 'full' },
