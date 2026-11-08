@@ -182,12 +182,49 @@ const MAX_PROCESS_EVENTS = 8
 const MAX_ARTIFACTS = 3
 const MAX_NAME_CHARS = 80
 const MAX_LABEL_CHARS = 120
+/** The raw failure text kept in the report: generous, bounded, UTF-8 intact. */
+const MAX_ERROR_MESSAGE_CHARS = 16_000
+const MAX_ERROR_STACK_CHARS = 64_000
 
 /** Keep only printable ASCII inside a fixed length: no ANSI, no newlines, no dump. */
 function bounded(value, limit) {
   if (typeof value !== 'string') return undefined
   const clean = value.replace(/[^\x20-\x7e]/gu, '').slice(0, limit)
   return clean === '' ? undefined : clean
+}
+
+/**
+ * Keep a real error text (message/stack) readable: UTF-8 and newlines survive,
+ * and only an absurd payload is cut. The root cause must never disappear
+ * because of the bound.
+ */
+function boundedText(value, limit) {
+  if (typeof value !== 'string' || value === '') return undefined
+  if (value.length <= limit) return value
+  return `${value.slice(0, limit)}\n…[truncated ${String(value.length - limit)} chars]`
+}
+
+/**
+ * Remove every credential shape a Browser/driver diagnostic could carry before
+ * it is retained in a trace, a log line or a report: the exact launch token,
+ * any `token=` query value, Cookie/Authorization headers and any loopback
+ * origin. This is the ONE redactor; the Web producers and the shared failure
+ * output both use it.
+ */
+export function redactWebQualificationText(text, secrets = []) {
+  let value = String(text)
+  for (const secret of secrets) {
+    if (typeof secret !== 'string' || secret === '') continue
+    value = value.split(secret).join('<redacted-token>')
+  }
+  return value
+    .replace(/([?&]token=)[^&\s"']+/gu, '$1<redacted>')
+    .replace(/http:\/\/127\.0\.0\.1:\d+/gu, 'http://127.0.0.1:<port>')
+    .replace(/https:\/\/127\.0\.0\.1:\d+/gu, 'https://127.0.0.1:<port>')
+    .replace(/(?:wss?):\/\/127\.0\.0\.1:\d+/gu, 'ws://127.0.0.1:<port>')
+    .replace(/(^|\n)\s*(cookie|set-cookie|authorization)\s*:[^\n]*/giu, '$1$2: <redacted>')
+    .replace(/\b(cookie|set-cookie|authorization)=([^\s;,]+)/giu, '$1=<redacted>')
+    .replace(/\b(Bearer\s+)[A-Za-z0-9._~+\/-]+=*/gu, '$1<redacted>')
 }
 
 export function boundedName(value) {
@@ -465,6 +502,34 @@ function projectArtifacts(artifacts) {
  * cannot state is omitted, never guessed, and nothing outside the whitelist is
  * copied.
  */
+/**
+ * The ONE redaction policy for a caught error at a named lifecycle scope: only
+ * a Web case can carry the real launch token/Cookie/Authorization, so only
+ * that scope is passed through the concrete redactor. The lane's final stderr
+ * and the structured report both call this, never their own copy.
+ */
+export function redactErrorForStep(text, failedStep) {
+  const value = String(text ?? '')
+  return typeof failedStep === 'string' && /(^|\/)case\/web\./u.test(failedStep)
+    ? redactWebQualificationText(value)
+    : value
+}
+
+/** The raw caught-error facts a human needs, without inventing fields. */
+function projectErrorFacts(error) {
+  if (error === undefined || error === null) return undefined
+  const name = boundedText(typeof error.name === 'string' ? error.name : undefined, 200) ?? 'Error'
+  const message = boundedText(
+    typeof error.message === 'string' ? error.message : String(error),
+    MAX_ERROR_MESSAGE_CHARS,
+  )
+  const stack = typeof error?.stack === 'string' ? boundedText(error.stack, MAX_ERROR_STACK_CHARS) : undefined
+  const facts = { name }
+  if (message !== undefined) facts.message = message
+  if (stack !== undefined) facts.stack = stack
+  return facts
+}
+
 export function projectFailureReport(input = {}) {
   const report = {
     schemaVersion: 1,
@@ -478,6 +543,10 @@ export function projectFailureReport(input = {}) {
   if (reason !== undefined) report.reason = reason
   const checkpoint = boundedName(input.checkpoint)
   if (checkpoint !== undefined) report.checkpoint = checkpoint
+  const failedStep = boundedName(input.failedStep)
+  if (failedStep !== undefined) report.failedStep = failedStep
+  const error = projectErrorFacts(input.error)
+  if (error !== undefined) report.error = error
   // The assertion locator must satisfy the shape AND belong to a trusted lane
   // source. A shape-only check would let any error that happens to carry an
   // `assertion` property name a file the locator never vouched for.
@@ -498,7 +567,11 @@ export function projectFailureReport(input = {}) {
     .map(step => {
       const name = boundedName(step?.name)
       if (name === undefined) return undefined
-      return Number.isInteger(step.elapsedMs) ? { name, elapsedMs: step.elapsedMs } : { name }
+      const entry = { name }
+      if (step?.phase === 'start' || step?.phase === 'done' || step?.phase === 'error') entry.phase = step.phase
+      if (Number.isInteger(step?.elapsedMs)) entry.elapsedMs = step.elapsedMs
+      if (Number.isInteger(step?.durationMs)) entry.durationMs = step.durationMs
+      return entry
     })
     .filter(step => step !== undefined)
     .slice(-MAX_CHECKPOINTS)
@@ -538,22 +611,13 @@ export function safeFailureSummary(error) {
 }
 
 /**
- * The explicit forensic detail, printed ONLY when the operator already asked
- * for the preserved work root (`KEEP`). The default and CI path never calls it.
- */
-export function forensicErrorText(error, limit = 2_000) {
-  const text = error instanceof Error ? `${error.name}: ${error.message}` : String(error ?? '')
-  return bounded(text, limit) ?? '(no detail)'
-}
-
-/**
- * A lane assertion that can be LOCATED without being quoted.
+ * A lane assertion that can be LOCATED without quoting it in the machine
+ * summary.
  *
- * `ASSERTION_FAILED` was previously an ordinary `Error`, so once the message was
- * kept out of the default output (rightly: it interpolates records and tool
- * text) a failed check became `ASSERTION_FAILED` and nothing else. This carries
- * the one locator that is safe to publish — the calling file's BASENAME and its
- * line number — derived from the stack and filtered against the lane's own
+ * `ASSERTION_FAILED` used to be an ordinary `Error`, so a failed check became a
+ * bare category and nothing else. This carries the one locator the summary
+ * publishes — the calling file's BASENAME and its line number — derived from
+ * the real stack and filtered against the lane's own
  * assert helpers, so it names the check site rather than a helper frame. The
  * message itself stays out of the default report and is printed only under
  * `KEEP`, where the operator already kept the private scene.
@@ -707,6 +771,7 @@ export function formatFailureSummary(report, reportPath) {
   add('category', report.category)
   add('reason', report.reason)
   add('checkpoint', report.checkpoint)
+  add('failedStep', report.failedStep)
   add('assertion', report.assertion)
   add('wait', report.waitLabel)
   add('elapsedMs', report.elapsedMs)
@@ -754,6 +819,7 @@ export function emitInputFailure({ lane, heading, error, reason, evidencePath })
     category: failureCategoryOf(error),
     reason: reason ?? error?.code,
     assertion: publishedAssertionOf(error),
+    error,
     runtimeDshPin: inputFacts?.targetDshVersion,
     artifacts,
   })
@@ -773,17 +839,53 @@ export function createSmokeDiagnostics({ lane, heading, marker, runtimeDshPin, a
   const steps = []
   const pinned = exactPinOrUndefined(runtimeDshPin)
   const identity = projectArtifacts(artifacts)
+  const logPrefix = lane === 'split-process' ? 'split' : 'split-upgrade'
+  const record = (entry) => {
+    steps.push(entry)
+    if (steps.length > MAX_CHECKPOINTS) steps.shift()
+  }
+  const firstErrorStep = () => steps.find(step => step.phase === 'error')?.name
   return {
-    /** One phase boundary: remembered, and announced on stderr by default. */
+    /** A non-lifecycle qualification phase (preflight/setup): announced, no duration. */
     checkpoint(name) {
       const step = boundedName(name)
       if (step === undefined) return
-      steps.push({ name: step, elapsedMs: Date.now() - startedAt })
-      if (steps.length > MAX_CHECKPOINTS) steps.shift()
+      record({ name: step, elapsedMs: Date.now() - startedAt })
       process.stderr.write(`[${marker} checkpoint] ${step}\n`)
+    },
+    /**
+     * The ONE lifecycle event producer: START before, DONE/ERROR after, with
+     * the scope name, UTC instant and monotonic duration. The caught error is
+     * rethrown unchanged so its original type and cause reach the failure
+     * report. Nested scopes print their own START/ERROR — that is the causal
+     * chain, while the raw stack is printed once by the lane's exit path.
+     */
+    async runStep(name, operation) {
+      const step = boundedName(name) ?? '(unnamed-step)'
+      const elapsedMs = () => Date.now() - startedAt
+      const startedAtMono = process.hrtime.bigint()
+      const durationMs = () => Number((process.hrtime.bigint() - startedAtMono) / 1_000_000n)
+      process.stderr.write(`[${logPrefix}] ${new Date().toISOString()} START ${step}\n`)
+      record({ name: step, phase: 'start', elapsedMs: elapsedMs() })
+      try {
+        const value = await operation()
+        const ms = durationMs()
+        record({ name: step, phase: 'done', elapsedMs: elapsedMs(), durationMs: ms })
+        process.stderr.write(`[${logPrefix}] ${new Date().toISOString()} DONE ${step} durationMs=${ms}\n`)
+        return value
+      } catch (error) {
+        const ms = durationMs()
+        record({ name: step, phase: 'error', elapsedMs: elapsedMs(), durationMs: ms })
+        process.stderr.write(`[${logPrefix}] ${new Date().toISOString()} ERROR ${step} durationMs=${ms}\n`)
+        throw error
+      }
     },
     progress() {
       return steps.map(step => ({ ...step }))
+    },
+    /** The innermost scope that reported ERROR: the first failure's own step. */
+    failedStep() {
+      return firstErrorStep() ?? steps.at(-1)?.name
     },
     /** The one-line startup identity — only ever printed AFTER preflight passed. */
     identityLine() {
@@ -802,11 +904,28 @@ export function createSmokeDiagnostics({ lane, heading, marker, runtimeDshPin, a
      * same safe fields (`0600`). A missing path is simply no twin.
      */
     reportFailure(error, { processes = [], evidencePath, ...extra } = {}) {
+      // `failedStep` is only ever a scope that itself reported ERROR: the
+      // INNERMOST one (the first failure), never a guessed checkpoint/DONE.
+      const failedStep = extra.failedStep ?? firstErrorStep()
+      const errorFacts = extra.error ?? projectErrorFacts(error)
+      // A Web case's driver error is the ONE place a real launch token/Cookie/
+      // Authorization can appear in a caught error. The shared policy applies
+      // the existing concrete redactor only to that scope.
+      if (errorFacts !== undefined) {
+        if (errorFacts.message !== undefined) {
+          errorFacts.message = boundedText(redactErrorForStep(errorFacts.message, failedStep), MAX_ERROR_MESSAGE_CHARS)
+        }
+        if (errorFacts.stack !== undefined) {
+          errorFacts.stack = boundedText(redactErrorForStep(errorFacts.stack, failedStep), MAX_ERROR_STACK_CHARS)
+        }
+      }
       const report = projectFailureReport({
         lane,
         category: extra.category ?? failureCategoryOf(error),
         reason: extra.reason ?? error?.code,
         checkpoint: extra.checkpoint ?? steps.at(-1)?.name,
+        failedStep,
+        error: errorFacts,
         assertion: extra.assertion ?? publishedAssertionOf(error),
         waitLabel: extra.waitLabel ?? error?.waitLabel,
         elapsedMs: extra.elapsedMs ?? error?.elapsedMs,

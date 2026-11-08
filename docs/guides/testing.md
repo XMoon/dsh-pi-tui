@@ -295,10 +295,26 @@ environment.
 
 `pnpm smoke:split-process` is a Linux-only real two-process distribution
 proof, not part of `verify:release`. GitHub CI runs it automatically only on
-an npm release tag; an ordinary PR's `skipped` status is not the proof.
-Host/Client split-process development work must run it manually against the
-actual candidate tarball and record the package SHA, DSH version, command, and
-PASS/FAIL (or `NOT_RUN`).
+an npm release tag; an ordinary PR's `skipped` status is not the proof. Any
+npm-mode remote `refs/heads/...` branch can run the same full, candidate-backed
+proof explicitly: use GitHub Actions **Run workflow** on that branch and enable
+`Run full Host/Client Split qualification on the selected npm-mode branch`
+(`run_split_process=true`). The verdict then requires the Split job to succeed
+on that run. The manual input stays opt-in, and Source Mode is rejected rather
+than silently skipped. Host/Client split-process development work may also run
+the lane manually against the actual candidate tarball and record the package
+SHA, DSH version, command, and PASS/FAIL (or `NOT_RUN`).
+
+A failed lane prints the REAL caught error (stack when available) by default;
+`SPLIT_PROCESS_SMOKE_KEEP=1` only preserves the temporary scene and no longer
+decides whether you can see the cause. Each lifecycle scope prints
+`[split] <ISO-UTC> START <step>`, then `DONE <step> durationMs=…` or
+`ERROR <step> durationMs=…`; the failure report records the failing scope as
+`failedStep` and keeps the named case/subscene scopes nested (for example
+`case/recovery.detached-turn-interactions/maintenance-sweep`). The structured
+`failure.json` retains the raw error message/stack; the Web credential
+redactor is applied only to Web-case scopes. `SPLIT_PROCESS_TRACE=<path>` still
+appends optional JSONL business facts and is not required to diagnose a failure.
 
 The lane has one command entry with a strict selector. The DEFAULT form (no
 selector) is the complete qualification: it runs every registered case in the

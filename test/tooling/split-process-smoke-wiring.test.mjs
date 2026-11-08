@@ -172,6 +172,30 @@ test('the extracted split-smoke modules import without starting a lane', (t) => 
   assert.deepEqual(readdirSync(dir), [], 'an import may not create a work root or report directory')
 })
 
+test('the Split lifecycle log owns START/DONE/ERROR and the Recovery subscenes', () => {
+  const processSource = readFileSync(SCRIPT, 'utf8')
+  assert.equal((processSource.match(/const result = await diagnostics\.runStep\(/gu) ?? []).length, 2,
+    'both the full and selected registry loops own their case scope')
+  assert.equal((processSource.match(/runStep: \(name, operation\) => diagnostics\.runStep\(name, operation\)/gu) ?? []).length, 2,
+    'both lane contexts expose the same collector to the scenarios')
+  // trace() is the optional business JSONL stream only; it must not print a
+  // second lifecycle/checkpoint vocabulary.
+  assert.doesNotMatch(processSource, /diagnostics\?\.checkpoint\(event\)/u)
+  assert.match(processSource, /redactErrorForStep\(raw, failedStep\)/u,
+    'the default failure output uses the ONE Web/non-Web redaction policy')
+  const scenario = readFileSync(join(ROOT, 'scripts', 'smoke', 'split-process', 'detached-turn-interactions.mjs'), 'utf8')
+  for (const name of ['t44', 't45', 't46', 't47', 'unowned-job-arm', 'goal-armed', 'goal-round',
+    'maintenance-sweep', 'maintenance-wait-running', 'maintenance-read-liveness',
+    'maintenance-release-and-settle', 'host-schedule', 't48', 't51', 't52', 't55a', 't55b', 't56']) {
+    assert.ok(scenario.includes(`step('${name}'`), `the Recovery subscene ${name} must own a START/DONE/ERROR scope`)
+  }
+  // The loop-driven cases produce one scope PER ITERATION, never one merged step.
+  assert.equal((scenario.match(/await step\(label, async \(\) => \{/gu) ?? []).length, 2,
+    't49/t50 and t55c own one scope per iteration')
+  assert.match(scenario, /await step\(scenario === 'approval-allow' \? 't53' : 't54'/u,
+    't53/t54 own one scope per iteration')
+})
+
 test('the npm release-tag split-process job pins and requires both Browser qualifications', () => {
   // The release-tag CI job installs ONE pinned Playwright and requires BOTH
   // Browser flags; no floating version and no PR-run Browser PASS.

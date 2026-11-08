@@ -670,7 +670,7 @@ export const runWebProductQualification = async context => {
       assert(finished.code === 0,
         `PR-D ${caseId}: the product Browser driver failed (exit ${JSON.stringify(finished.code)}/${String(finished.signal)}): ${redactWebQualificationText(report.error ?? 'driver-failure')}`)
       assert(report.ok === true && report.caseId === caseId && report.nonce === productNonce,
-        `PR-D ${caseId}: the product Browser result is not a completed PASS (${String(report.error ?? 'no error')})`)
+        `PR-D ${caseId}: the product Browser result is not a completed PASS (${redactWebQualificationText(String(report.error ?? 'no error'))})`)
       // RFL-001: the Driver's observed ids are the start; the AUTHORITATIVE
       // correlations are the durable Host ids of this case's Session. Enrich
       // the retained result BEFORE it leaves the run, so the evidence copy is

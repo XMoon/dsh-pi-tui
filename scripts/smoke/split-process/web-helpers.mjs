@@ -12,8 +12,16 @@
 import { request as httpRequest } from 'node:http'
 import { setTimeout as sleepTimer } from 'node:timers/promises'
 
-import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
+import {
+  redactWebQualificationText,
+  SplitSmokeAssertionError,
+} from '../../lib/split-smoke-diagnostics.mjs'
 import { fetchStatus } from '../../lib/split-smoke-processes.mjs'
+
+// Re-exported for the Web producers and their tooling guards: the
+// implementation is owned by the shared diagnostics module so the same concrete
+// redactor also protects the default failure output.
+export { redactWebQualificationText }
 
 function assert(condition, message) {
   if (!condition) throw new SplitSmokeAssertionError(message)
@@ -184,24 +192,9 @@ export function openSseFrames (origin, path, headers = {}) {
 }
 
 /**
- * Remove every credential shape a Browser/driver diagnostic could carry before
- * it is retained in a trace, a log line or a report: the exact launch token,
- * any `token=` query value and any loopback origin. The plan forbids the
- * authenticated URL/token in the trace, stdout and PR material.
+ * The credential redactor now lives in `split-smoke-diagnostics.mjs` (the ONE
+ * owner) and is re-exported here for the Web producers.
  */
-export function redactWebQualificationText (text, secrets = []) {
-  let value = String(text)
-  for (const secret of secrets) {
-    if (typeof secret !== 'string' || secret === '') continue
-    value = value.split(secret).join('<redacted-token>')
-  }
-  return value
-    .replace(/([?&]token=)[^&\s"']+/gu, '$1<redacted>')
-    .replace(/http:\/\/127\.0\.0\.1:\d+/gu, 'http://127.0.0.1:<port>')
-    .replace(/(^|\n)\s*(cookie|set-cookie|authorization)\s*:[^\n]*/giu, '$1$2: <redacted>')
-    .replace(/\b(cookie|set-cookie|authorization)=([^\s;,]+)/giu, '$1=<redacted>')
-    .replace(/\b(Bearer\s+)[A-Za-z0-9._~+\/-]+=*/gu, '$1<redacted>')
-}
 
 /**
  * Race one promise against an ABORTABLE deadline. The deadline is cancelled in

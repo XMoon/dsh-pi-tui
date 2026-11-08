@@ -82,7 +82,7 @@ import {
   boundedName,
   createSmokeDiagnostics,
   emitInputFailure,
-  forensicErrorText,
+  redactErrorForStep,
   safeFailureSummary,
   smokeArtifactIdentity,
   SplitSmokeAssertionError,
@@ -143,13 +143,11 @@ const { EntryProcess, SurfaceEntryProcess, activeProcesses } = createSplitProces
 const trackedProcesses = new Map()
 
 /**
- * One qualification checkpoint. The event NAME is always remembered (bounded to
- * a fixed length) and announced on stderr, so a default run is diagnosable
- * without `SPLIT_PROCESS_TRACE`; the fields stay out of the default output and
- * are written to the explicit trace file exactly as before. Never pass a secret.
+ * One optional JSONL business fact. The lifecycle log (START/DONE/ERROR) is
+ * owned by `diagnostics.runStep`; this function only writes the explicit
+ * `SPLIT_PROCESS_TRACE` file when the operator asked for it. Never pass a secret.
  */
 function trace(event, fields = {}) {
-  diagnostics?.checkpoint(event)
   if (TRACE_PATH === undefined || TRACE_PATH === '') return
   if (traceFd === undefined) {
     mkdirSync(dirname(resolve(TRACE_PATH)), { recursive: true })
@@ -257,6 +255,9 @@ async function main(explicitPath) {
       trace,
       failpoint,
       mode: 'full',
+      // The scenario's own lifecycle scopes (START/DONE/ERROR) share this ONE
+      // diagnostics collector; the runner adds the enclosing case scope.
+      runStep: (name, operation) => diagnostics.runStep(name, operation),
       // Backstop only: the case kills its own detached processes first.
       trackDetachedPid: (pid, starttime) => trackedProcesses.set(pid, starttime),
     }
@@ -267,8 +268,10 @@ async function main(explicitPath) {
      */
     const actualCaseResults = []
     for (const registeredCase of listSelectableCases()) {
-      diagnostics.checkpoint(`case/${registeredCase.id}`)
-      const result = await registeredCase.run(context)
+      const result = await diagnostics.runStep(
+        `case/${registeredCase.id}`,
+        () => registeredCase.run(context),
+      )
       actualCaseResults.push({
         id: registeredCase.id,
         status: typeof result?.status === 'string' ? result.status : 'PASS',
@@ -556,13 +559,17 @@ async function runSelectedCases(selection) {
       trace,
       failpoint,
       mode: 'selected',
+      // Same lifecycle owner as the full lane: one collector, nested scopes.
+      runStep: (name, operation) => diagnostics.runStep(name, operation),
       // Backstop only: the case kills its own detached processes first.
       trackDetachedPid: (pid, starttime) => trackedProcesses.set(pid, starttime),
     }
     const selected = []
     for (const selectedCase of selection.cases) {
-      diagnostics.checkpoint(`case/${selectedCase.id}`)
-      const result = await selectedCase.run(context)
+      const result = await diagnostics.runStep(
+        `case/${selectedCase.id}`,
+        () => selectedCase.run(context),
+      )
       assertSelectedVerdict(selectedCase.id, result)
       selected.push(selectedCase.id)
     }
@@ -627,13 +634,16 @@ async function runLane() {
 
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   runLane().catch(error => {
-    // One concise final line: the fixed category and its stable code. The
-    // structured report (written BEFORE the work root was deleted) owns the
-    // safe diagnosis; an `Error.message` of any origin is never copied here.
+    // The stable machine identifier first, then the REAL caught error (stack
+    // preferred). `KEEP` no longer decides whether the root cause is visible;
+    // it only preserves the temporary scene. A Web-case scope applies the one
+    // concrete credential redactor before the text leaves the process.
     console.error(`SPLIT_PROCESS_SMOKE_FAILURE: ${safeFailureSummary(error)}`)
-    // Forensics stay explicit: `KEEP` is the operator's own preserved-scene
-    // mode, and this is the only path that prints the raw error text.
-    if (KEEP) console.error(`SPLIT_PROCESS_SMOKE_FORENSICS: ${forensicErrorText(error)}`)
+    const failedStep = diagnostics?.failedStep?.()
+    const raw = error instanceof Error
+      ? (error.stack ?? `${error.name}: ${error.message}`)
+      : String(error ?? '')
+    console.error(redactErrorForStep(raw, failedStep))
     process.exitCode = 1
   })
 }

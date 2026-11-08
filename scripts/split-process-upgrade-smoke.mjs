@@ -79,7 +79,6 @@ import {
   boundedName,
   createSmokeDiagnostics,
   emitInputFailure,
-  forensicErrorText,
   requireExactSmokeDshPin,
   safeFailureSummary,
   smokeArtifactIdentity,
@@ -567,13 +566,10 @@ async function runLane() {
 
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   runLane().catch(error => {
-    // One concise final line: the fixed category and its stable code. The
-    // structured report (written BEFORE the work root was deleted) owns the
-    // safe diagnosis; an `Error.message` of any origin is never copied here.
+    // The machine identifier, then the REAL caught error. `KEEP` only preserves
+    // the temporary scene; it never decides whether the root cause is visible.
     process.stderr.write(`SPLIT_PROCESS_UPGRADE_SMOKE_FAILURE: ${safeFailureSummary(error)}\n`)
-    // Forensics stay explicit: `KEEP` is the operator's own preserved-scene
-    // mode, and this is the only path that prints the raw error text.
-    if (KEEP) process.stderr.write(`SPLIT_PROCESS_UPGRADE_SMOKE_FORENSICS: ${forensicErrorText(error)}\n`)
+    process.stderr.write(`${error instanceof Error ? (error.stack ?? `${error.name}: ${error.message}`) : String(error ?? '')}\n`)
     process.exitCode = 1
   })
 }
