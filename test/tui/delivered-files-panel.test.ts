@@ -1020,6 +1020,7 @@ interface PreviewHarness extends Harness {
   readonly resolveRead: (page: DeliveredFilePage) => void
   readonly rejectRead: (error: unknown) => void
   readonly preview: () => DeliveredFilesPreviewState
+  readonly waitForPreviewState: (kind: DeliveredFilesPreviewState['kind']) => Promise<void>
 }
 
 /** A real panel over a snapshot with a CONTROLLABLE Host read. */
@@ -1035,6 +1036,7 @@ function previewHarness(
   } = {},
 ): PreviewHarness {
   let renderCount = 0
+  const renderWaiters = new Set<() => void>()
   let statCount = 0
   const readCalls: { offset: number; limit: number }[] = []
   const diagnostics: string[] = []
@@ -1044,7 +1046,11 @@ function previewHarness(
     snapshot,
     ...(options.initial === undefined ? {} : { initial: options.initial }),
     pointerActions: options.pointerActions === true,
-    requestRender: () => { renderCount += 1 },
+    requestRender: () => {
+      renderCount += 1
+      for (const resolve of renderWaiters) resolve()
+      renderWaiters.clear()
+    },
     close: () => {},
     copyPath: (_path, settle) => settle(true),
     ...(options.preview === false ? {} : {
@@ -1101,10 +1107,38 @@ function previewHarness(
     resolveRead: (page) => { pendingReads.shift()?.resolve(page) },
     rejectRead: (error) => { pendingReads.shift()?.reject(error) },
     preview: () => (panel as unknown as { preview: DeliveredFilesPreviewState }).preview,
+    waitForPreviewState: async (kind) => {
+      // The render waiter is the success signal; this deadline only fails a stuck test.
+      const deadline = Date.now() + 15_000
+      while ((panel as unknown as { preview: DeliveredFilesPreviewState }).preview.kind !== kind) {
+        const remaining = deadline - Date.now()
+        if (remaining <= 0) {
+          const current = (panel as unknown as { preview: DeliveredFilesPreviewState }).preview.kind
+          throw new Error(`timed out waiting for preview ${kind}; current state is ${current}`)
+        }
+        await new Promise<void>((resolve, reject) => {
+          let timer: ReturnType<typeof setTimeout> | undefined
+          let settled = false
+          const onRender = (): void => {
+            if (settled) return
+            settled = true
+            if (timer !== undefined) clearTimeout(timer)
+            renderWaiters.delete(onRender)
+            resolve()
+          }
+          timer = setTimeout(() => {
+            if (settled) return
+            settled = true
+            renderWaiters.delete(onRender)
+            const current = (panel as unknown as { preview: DeliveredFilesPreviewState }).preview.kind
+            reject(new Error(`timed out waiting for preview ${kind}; current state is ${current}`))
+          }, remaining)
+          renderWaiters.add(onRender)
+        })
+      }
+    },
   }
 }
-
-const settlePreview = (): Promise<void> => new Promise(resolve => setTimeout(resolve, 0))
 
 test('Enter Preview stats first, then reads exactly ONE 120-line page', async () => {
   const h = previewHarness(snapshotOf([{ turn: 1, files: ['/ws/report.md'] }]))
@@ -1114,7 +1148,7 @@ test('Enter Preview stats first, then reads exactly ONE 120-line page', async ()
   assert.ok(h.rows().some(row => row.includes('Loading…')))
 
   h.resolveStat({ version: 'v1', bytes: 42 })
-  await settlePreview()
+  await h.waitForPreviewState('loading-page')
   assert.deepEqual(h.readCalls(), [{ offset: 1, limit: 120 }], 'one page, the fixed window')
   assert.equal(h.preview().kind, 'loading-page')
 
@@ -1122,7 +1156,7 @@ test('Enter Preview stats first, then reads exactly ONE 120-line page', async ()
     stat: { version: 'v1', bytes: 42 }, offset: 1, limit: 120,
     text: 'first line\nsecond line', lines: 2, eof: false,
   })
-  await settlePreview()
+  await h.waitForPreviewState('text-page')
   const rows = h.rows().join('\n')
   assert.ok(rows.includes('first line') && rows.includes('second line'), rows)
   assert.ok(rows.includes('/ws/report.md'), 'the declared Host path stays visible')
@@ -1132,7 +1166,7 @@ test('a known binary suffix shows metadata only and never reads', async () => {
   const h = previewHarness(snapshotOf([{ turn: 1, files: ['/ws/chart.png'] }]))
   h.type('enter')
   h.resolveStat({ version: 'v1', bytes: 900 })
-  await settlePreview()
+  await h.waitForPreviewState('metadata')
   assert.deepEqual(h.readCalls(), [], 'no bytes are read for a binary suffix')
   const rows = h.rows().join('\n')
   assert.ok(rows.includes('Preview unavailable for this file type'), rows)
@@ -1152,7 +1186,7 @@ test('every refusal paints its FIXED text and keeps the copy affordance', async 
     const h = previewHarness(snapshotOf([{ turn: 1, files: ['/ws/report.md'] }]))
     h.type('enter')
     h.rejectStat(new DeliveredFileReadError(code, 'refused'))
-    await settlePreview()
+    await h.waitForPreviewState('failure')
     const rows = h.rows().join('\n')
     assert.ok(rows.includes(text), `${code}: ${rows}`)
     assert.ok(rows.includes('Shift+C Copy path'), `${code}: the keyboard Copy stays available`)
@@ -1164,7 +1198,7 @@ test('an unclassified failure is generic AND reported to diagnostics', async () 
   const h = previewHarness(snapshotOf([{ turn: 1, files: ['/ws/report.md'] }]))
   h.type('enter')
   h.rejectStat(new Error('weird transport'))
-  await settlePreview()
+  await h.waitForPreviewState('failure')
   assert.ok(h.rows().join('\n').includes('Unable to preview file'))
   assert.deepEqual(h.diagnostics(), ['delivered file preview'], 'the cause reaches the diagnostic sink')
 })
@@ -1178,10 +1212,13 @@ test('a superseded request never paints over the newer one', async () => {
   h.type('down')
   h.type('enter')
   h.resolveStat({ version: 'stale', bytes: 1 })
-  await settlePreview()
-  assert.equal(h.preview().kind, 'loading-stat',
+  const currentStat = h.waitForPreviewState('loading-page')
+  h.resolveStat({ version: 'current', bytes: 2 })
+  await currentStat
+  assert.equal(h.preview().kind, 'loading-page',
     'the stale reply never becomes the state (only the CURRENT stat may paint)')
-  assert.deepEqual(h.readCalls(), [], 'a stale metadata reply cannot start a read')
+  assert.deepEqual(h.readCalls(), [{ offset: 1, limit: 120 }],
+    'only the current metadata reply starts a read')
 })
 
 test('a changed version restarts the preview instead of splicing pages', async () => {
@@ -1189,15 +1226,15 @@ test('a changed version restarts the preview instead of splicing pages', async (
   const h = previewHarness(snapshot)
   h.type('enter')
   h.resolveStat({ version: 'v1', bytes: 10 })
-  await settlePreview()
+  await h.waitForPreviewState('loading-page')
   h.resolveRead({ stat: { version: 'v1', bytes: 10 }, offset: 1, limit: 120, text: 'one', lines: 1, eof: false })
-  await settlePreview()
+  await h.waitForPreviewState('text-page')
   // Ask for the next page; the Host reports a NEW version for it.
   h.type('pageDown')
   h.type('pageDown')
   assert.deepEqual(h.readCalls().at(-1), { offset: 121, limit: 120 })
   h.resolveRead({ stat: { version: 'v2', bytes: 12 }, offset: 121, limit: 120, text: 'two', lines: 1, eof: true })
-  await settlePreview()
+  await h.waitForPreviewState('loading-stat')
   const rows = h.rows().join('\n')
   assert.ok(rows.includes('File changed; preview restarted'), rows)
   assert.ok(!rows.includes('two'), 'the other version is never spliced in')
@@ -1207,9 +1244,9 @@ test('an EOF page is a definite end, never a retry loop', async () => {
   const h = previewHarness(snapshotOf([{ turn: 1, files: ['/ws/short.md'] }]))
   h.type('enter')
   h.resolveStat({ version: 'v1' })
-  await settlePreview()
+  await h.waitForPreviewState('loading-page')
   h.resolveRead({ stat: { version: 'v1' }, offset: 1, limit: 120, text: '', lines: 0, eof: true })
-  await settlePreview()
+  await h.waitForPreviewState('text-page')
   assert.ok(h.rows().join('\n').includes('(end of file)'))
   const reads = h.readCalls().length
   h.type('pageDown')
@@ -1277,7 +1314,7 @@ test('a superseded read is discarded SILENTLY and ends in a neutral, recoverable
   // refuses with the UI-silent `SupersededReadError`.
   const { SupersededReadError } = await import('../../src/runtime/read-error.ts')
   h.rejectStat(new SupersededReadError('generation'))
-  await new Promise(resolve => setTimeout(resolve, 10))
+  await h.waitForPreviewState('idle')
   const rows = h.rows()
   const text = rows.join('\n')
   // A neutral, NON-claiming state: no loading, no stale bytes, no failure claim.
@@ -1319,7 +1356,7 @@ test('a near-limit single line is wrapped for the VIEWPORT, not re-wrapped per k
   })
   h.setSize(40, 16)
   h.type('enter')
-  await new Promise(resolve => setTimeout(resolve, 20))
+  await h.waitForPreviewState('text-page')
   interface WrapProbe { readonly wrappedSourceLines: number; readonly wrappedPhysicalRows: number }
   const probe = (): number => (h.panel as unknown as WrapProbe).wrappedSourceLines
   const physical = (): number => (h.panel as unknown as WrapProbe).wrappedPhysicalRows
@@ -1372,7 +1409,7 @@ test('a 12-column terminal wraps a near-limit line without blowing the stack', a
   })
   h.setSize(16, 14)
   h.type('enter')
-  await new Promise(resolve => setTimeout(resolve, 20))
+  await h.waitForPreviewState('text-page')
   interface WrapProbe { readonly wrappedPhysicalRows: number }
   const physical = (): number => (h.panel as unknown as WrapProbe).wrappedPhysicalRows
   // Opening at the narrowest usable width must NOT throw, and must not build the
@@ -1394,7 +1431,7 @@ test('the restart notice survives the reloaded first page', async () => {
   h.type('enter')
   // First page of version v1.
   h.resolveStat({ version: 'v1', bytes: 20 })
-  await new Promise(resolve => setTimeout(resolve, 10))
+  await h.waitForPreviewState('loading-page')
   h.resolveRead({
     stat: { version: 'v1', bytes: 20 },
     offset: 1,
@@ -1403,7 +1440,7 @@ test('the restart notice survives the reloaded first page', async () => {
     text: 'version one',
     eof: false,
   })
-  await new Promise(resolve => setTimeout(resolve, 10))
+  await h.waitForPreviewState('text-page')
   assert.ok(h.rows().join('\n').includes('version one'))
 
   // PgDn at the page edge requests the next window; the Host reports a CHANGED
@@ -1417,11 +1454,11 @@ test('the restart notice survives the reloaded first page', async () => {
     text: 'stale window',
     eof: true,
   })
-  await new Promise(resolve => setTimeout(resolve, 10))
+  await h.waitForPreviewState('loading-stat')
   h.rows()
   // The restart itself asks for a fresh stat + first page.
   h.resolveStat({ version: 'v2', bytes: 20 })
-  await new Promise(resolve => setTimeout(resolve, 10))
+  await h.waitForPreviewState('loading-page')
   h.resolveRead({
     stat: { version: 'v2', bytes: 20 },
     offset: 1,
@@ -1430,7 +1467,7 @@ test('the restart notice survives the reloaded first page', async () => {
     text: 'version two',
     eof: true,
   })
-  await new Promise(resolve => setTimeout(resolve, 10))
+  await h.waitForPreviewState('text-page')
   const painted = h.rows().join('\n')
   // The NEW page is painted AND the restart notice is still visible with it.
   assert.ok(painted.includes('version two'), `the reloaded page is painted:\n${painted}`)

@@ -277,7 +277,7 @@ test('ctrl+g opens the external editor and restores its content', async () => {
   vt.sendInput('draft')
   vt.sendInput('\x07') // ctrl+g
   // The TUI stops and restarts around the external editor round-trip.
-  await new Promise(resolve => setTimeout(resolve, 30))
+  await viewport(vt)
   vt.sendInput('\r')
   await viewport(vt)
   assert.deepEqual(submitted, ['edited: draft'], 'external editor content must replace the draft')
@@ -298,7 +298,7 @@ test('an external editor saving the draft unchanged does not touch the editor', 
   vt.sendInput('draft text')
   await viewport(vt)
   vt.sendInput('\x07') // ctrl+g → editor round-trip returns the identical draft
-  await new Promise(resolve => setTimeout(resolve, 30))
+  await viewport(vt)
   // The draft is untouched and no update/repaint churn was triggered.
   assert.equal(app.getDraft(), 'draft text', 'an unchanged save must not rewrite the draft')
   vt.sendInput('\r')
@@ -328,10 +328,9 @@ test('an external editor launch failure is caught: no unhandled rejection, app r
     startedApps.add(app)
     vt.sendInput('draft')
     vt.sendInput('\x07') // ctrl+g → the editor promise rejects
-    await new Promise(resolve => setTimeout(resolve, 30))
+    const view = await viewport(vt)
     assert.deepEqual(unhandled, [], 'a failed external editor must not leak an unhandled rejection')
     // The TUI restarted (finally) and the failure is visible as a notice.
-    const view = await viewport(vt)
     assert.ok(view.includes('external editor failed: editor not found'), `notice missing:\n${view}`)
     // The app still accepts input after the failure.
     vt.sendInput('more')
@@ -363,7 +362,7 @@ test('ctrl+g without an editor hook is a documented no-op, never a crash', async
   vt.sendInput('draft text')
   await viewport(vt)
   vt.sendInput('\x07') // ctrl+g: no editor configured
-  await new Promise(resolve => setTimeout(resolve, 30))
+  // Input dispatch is synchronous; without an editor hook it starts no owned task.
   assert.equal(app.getDraft(), 'draft text', 'the draft must be untouched')
   // The key was consumed but nothing launched; the app stays live.
   vt.sendInput(' more')
@@ -395,14 +394,13 @@ test('two ctrl+g in one input batch start the external editor only once (single-
   // be consumed without starting another editor (one terminal ownership).
   vt.sendInput('\x07')
   vt.sendInput('\x07')
-  await new Promise(resolve => setTimeout(resolve, 30))
+  // runOwned invokes the launch factory synchronously; the callback is the producer.
   assert.equal(calls, 1, 'a pending launch must be single-flight')
   assert.equal(release !== undefined, true, 'the first launch must be in flight')
   // The latch releases when the launch settles: a later Ctrl+G launches again.
   release('edited')
-  await new Promise(resolve => setTimeout(resolve, 30))
+  await viewport(vt)
   vt.sendInput('\x07')
-  await new Promise(resolve => setTimeout(resolve, 30))
   assert.equal(calls, 2, 'the latch must release after a successful launch')
   app.stop()
 })
@@ -474,11 +472,11 @@ test('the editor single-flight latch releases after a failed launch', async () =
 
   startedApps.add(app)
   vt.sendInput('\x07')
-  await new Promise(resolve => setTimeout(resolve, 30))
+  await viewport(vt)
   assert.equal(calls, 1)
   // Failure is a terminal outcome: the latch must be free again.
   vt.sendInput('\x07')
-  await new Promise(resolve => setTimeout(resolve, 30))
+  await viewport(vt)
   assert.equal(calls, 2, 'the latch must release after a failed launch')
   app.stop()
 })
@@ -557,7 +555,7 @@ test('app.stop is idempotent: repeated calls neither throw nor double-teardown',
   // After stop, rendering has halted: the viewport no longer advances.
   const frozen = await viewport(vt)
   vt.sendInput('world')
-  await new Promise(resolve => setTimeout(resolve, 20))
+  // Keep one renderer observation window after input: a stopped surface must not paint.
   const still = await viewport(vt)
   assert.deepEqual(still, frozen, 'no rendering after stop')
 })

@@ -328,3 +328,79 @@ test('custom: a component that settles from onBlur closes its lease exactly once
   assert.equal(app.pendingBrokerSettlesForTest(), 0, 'no stale settle remains')
   app.stop()
 })
+
+test('extension owner unload settles its pending select and closes the mounted picker', async () => {
+  const { Context } = await import('@deepseek-ai/cordis')
+  const Loader = (await import('@deepseek-ai/cordis-plugin-loader')).default
+  const { PI_TUI_EXTENSIONS_SERVICE, apply: applyExtensionHost } = await import('../../src/extensions.ts')
+  const { TUI_STARTUP_SERVICE } = await import('../../src/startup.ts')
+  const { advanced } = await import('../../src/extension/advanced.ts')
+  const { createExtensionRuntime } = await import('../../src/app/surface/extension-runtime.ts')
+  const { TuiApp } = await import('../../src/tui-app.ts')
+  const { VirtualTerminal } = await import('../support/virtual-terminal.ts')
+  const ctx = new Context()
+  let app: InstanceType<typeof TuiApp> | undefined
+  let extensionRuntime: ReturnType<typeof createExtensionRuntime> | undefined
+  let disposeOwner: (() => Promise<void>) | undefined
+  try {
+    const loader = ctx.plugin(Loader)
+    await loader
+    const startup = ctx.plugin(context => { context.provide(TUI_STARTUP_SERVICE, {}) })
+    await startup
+    const extensionHost = ctx.plugin(applyExtensionHost)
+    await extensionHost
+
+    const vt = new VirtualTerminal(80, 24)
+    app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+    app.start()
+    startedApps.add(app)
+    extensionRuntime = createExtensionRuntime({ mounted: () => app! })
+    extensionRuntime.attachHost(ctx.get(PI_TUI_EXTENSIONS_SERVICE) as never)
+    extensionRuntime.attachSeams({ refreshCommandCompletions: () => {} })
+    extensionRuntime.bindPluginKeybinds()
+    await vt.waitForRender()
+
+    let settled = false
+    let pending!: Promise<string | undefined>
+    const owner = ctx.plugin(context => {
+      const service = context.get(PI_TUI_EXTENSIONS_SERVICE) as never
+      pending = advanced(service).ui.select({
+        items: [{ value: 'answer', label: 'Pending choice' }],
+        header: 'Owner prompt',
+      })
+    })
+    await owner
+    disposeOwner = () => owner.dispose()
+    const observed = pending.then(value => {
+      settled = true
+      return value
+    })
+    await vt.waitForRender()
+
+    const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+    let view = vt.getViewport().map(strip).join('\n')
+    assert.ok(view.includes('Owner prompt') && view.includes('Pending choice'),
+      `the real broker picker is painted:\n${view}`)
+    assert.equal(settled, false, 'the imperative select is still pending after its frame paints')
+    assert.equal(app.pendingBrokerSettlesForTest(), 1, 'the real broker owns one pending settle')
+    assert.equal(app.overlayGraphState().handles, 1, 'the painted picker owns one overlay')
+
+    await disposeOwner()
+    disposeOwner = undefined
+    assert.equal(await observed, undefined, 'owner unload aborts the pending select to undefined')
+    assert.equal(settled, true, 'the public prompt promise has settled')
+    await vt.waitForRender()
+    view = vt.getViewport().map(strip).join('\n')
+    assert.equal(app.pendingBrokerSettlesForTest(), 0, 'owner unload removes the broker settle')
+    assert.equal(app.overlayGraphState().handles, 0, 'owner unload closes the picker overlay')
+    assert.ok(!view.includes('Owner prompt') && !view.includes('Pending choice'),
+      `the picker is gone after owner unload:\n${view}`)
+  } finally {
+    await disposeOwner?.()
+    extensionRuntime?.dispose()
+    app?.dispose()
+    for (const runtime of [...ctx.registry.values()]) {
+      for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())
+    }
+  }
+})
