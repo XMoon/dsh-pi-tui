@@ -65,12 +65,11 @@ interface ScheduleCreateRequestLike {
   readonly timing: { readonly kind: 'after'; readonly after_seconds: number }
 }
 
-/** The official `schedule/edit` request shape this probe sends (one CAS update). */
-interface ScheduleEditRequestLike {
-  readonly id: string
-  readonly action: 'update'
-  readonly patch: { readonly title: string }
-}
+/** The official `schedule/edit` request shapes this probe sends: one CAS update,
+ *  then the cleanup delete that leaves the durable catalog as it found it. */
+type ScheduleEditRequestLike =
+  | { readonly id: string; readonly action: 'update'; readonly patch: { readonly title: string } }
+  | { readonly id: string; readonly action: 'delete' }
 
 /** One `workspace/follow` frame, structurally (only the fields this probe reads). */
 interface WorkspaceFollowFrameLike {
@@ -195,6 +194,10 @@ export interface HostFoundationProof {
   /** After a physical carrier replacement, a NEW `catalog` still listed the
    *  created task (present only when the generation-resume control was used). */
   readonly scheduleReconnectCatalog?: boolean
+  /** The probe deleted the task it created and re-read the catalog without it.
+   *  A qualification Host profile is durable and shared by later scenarios, so a
+   *  leftover ACTIVE task would corrupt their liveness observation. */
+  readonly scheduleDeleted?: true
   readonly cleaned: true
 }
 
@@ -601,6 +604,7 @@ async function proveSchedule(
   readonly catalog: true
   readonly create: true
   readonly edit: true
+  readonly deleted: true
   readonly reconnectCatalog?: boolean
 }> {
   const opening = await remote.schedule.catalog()
@@ -657,7 +661,23 @@ async function proveSchedule(
     }
   }
 
-  return { catalog: true, create: true, edit: true, ...resume === undefined ? {} : { reconnectCatalog } }
+  // The probe runs inside a durable Host profile that later qualification
+  // scenarios share: an ACTIVE task left behind would make their Host-liveness
+  // observation legitimately BLOCKED (`schedule-active`). Delete the task the
+  // probe created and prove the catalog no longer lists it.
+  const deleted = await remote.schedule.edit({ id: entry.id, action: 'delete' })
+  if (deleted.ok !== true) {
+    throw new Error(`host foundation probe: schedule/edit(delete) did not return ok: ${JSON.stringify(deleted)}`)
+  }
+  const afterDelete = await remote.schedule.catalog()
+  if (afterDelete.ok !== true || !Array.isArray(afterDelete.value)) {
+    throw new Error(`host foundation probe: the post-delete schedule/catalog did not return ok: ${JSON.stringify(afterDelete)}`)
+  }
+  if (afterDelete.value.some(candidate => candidate.id === entry.id)) {
+    throw new Error(`host foundation probe: the deleted schedule task is still listed: ${entry.id}`)
+  }
+
+  return { catalog: true, create: true, edit: true, deleted: true, ...resume === undefined ? {} : { reconnectCatalog } }
 }
 
 /**
@@ -791,6 +811,7 @@ export async function runHostFoundationProbe(
             scheduleCatalog: schedule.catalog,
             scheduleCreate: schedule.create,
             scheduleEdit: schedule.edit,
+            scheduleDeleted: schedule.deleted,
             ...schedule.reconnectCatalog === undefined
               ? {}
               : { scheduleReconnectCatalog: schedule.reconnectCatalog },

@@ -608,7 +608,13 @@ export const LANE_SOURCE_FILES = Object.freeze(LANE_SOURCE_LIST)
 export function isLaneSourceFile(basename) {
   return LANE_SOURCES.has(basename)
 }
-const STACK_FRAME = /^at (?:async )?(?:(?<fn>[A-Za-z0-9_$.<>| ]+?) \()?(?<path>[^\s()]+):(?<line>\d+):\d+\)?$/u
+/**
+ * One V8 frame. The callee is captured as the text before the LAST ` (`: a
+ * function stored on a registry entry is rendered with its alias —
+ * `Object.runDetachedTurnInteractions [as run] (...)` — and an alias suffix,
+ * including its brackets, is still the same callee.
+ */
+const STACK_FRAME = /^at (?:async )?(?:(?<fn>.*?) \()?(?<path>[^\s()]+):(?<line>\d+):\d+\)?$/u
 const SAFE_BASENAME = /^[A-Za-z0-9._-]{1,64}\.mjs$/u
 /** The published assertion-site shape; the source check is separate. */
 const ASSERTION_SITE = /^[A-Za-z0-9._-]{1,64}\.mjs:[1-9][0-9]{0,6}$/u
@@ -637,7 +643,9 @@ export function laneAssertionSite(holder, sources) {
     const m = STACK_FRAME.exec(frame.trim())
     if (m === null) continue
     const groups = m.groups ?? {}
-    const fn = (groups.fn ?? '').trim().split(/\s+/).at(-1) ?? ''
+    // `[as alias]` is V8's rendering of an aliased callee, not a function name.
+    // Without stripping it the helper test below would compare `assert]`.
+    const fn = (groups.fn ?? '').trim().replace(/\s*\[as [^\]]*\]$/u, '').split(/\s+/).at(-1) ?? ''
     if (ASSERT_HELPER_FRAMES.test(fn)) continue
     const file = String(groups.path ?? groups.bare ?? '').split('/').pop()
     const line = Number(groups.line)

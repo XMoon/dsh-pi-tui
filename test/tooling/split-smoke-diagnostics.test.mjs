@@ -1030,6 +1030,47 @@ test('an assertion failure is locatable without quoting its message', () => {
   }
 })
 
+test('a registry-aliased scenario assertion still reports the scenario location', (t) => {
+  const dir = testLifecycle(t).tempDir('split-smoke-alias-locator-')
+  writeFileSync(join(dir, 'detached-turn-interactions.mjs'), `
+    import { SplitSmokeAssertionError } from ${JSON.stringify(pathToFileURL(LIB).href)}
+    function assert(condition, message) {
+      if (!condition) throw new SplitSmokeAssertionError(message)
+    }
+    export async function runDetachedTurnInteractions() {
+      await Promise.resolve()
+      assert(false, 'maintenance did not leave the Host UNKNOWN')
+    }
+  `)
+  writeFileSync(join(dir, 'split-process-smoke.mjs'), `
+    import { runDetachedTurnInteractions } from './detached-turn-interactions.mjs'
+    const cases = [{ run: runDetachedTurnInteractions }]
+    let caught
+    for (const registeredCase of cases) {
+      try {
+        await registeredCase.run()
+      } catch (error) {
+        caught = error
+        break
+      }
+    }
+    process.stdout.write(JSON.stringify({ assertion: caught.assertion }))
+  `)
+  const result = spawnSync(process.execPath, [join(dir, 'split-process-smoke.mjs')], {
+    encoding: 'utf8',
+    timeout: 20_000,
+  })
+  assert.equal(result.status, 0, `the alias probe must run: ${result.stderr}`)
+  const { assertion } = JSON.parse(result.stdout)
+  // The registry stores the case as `run: runDetachedTurnInteractions`, so V8
+  // renders the frame with an `[as run]` alias. That frame is the REAL
+  // assertion site; the async caller frame (the registry loop) must never win.
+  assert.match(String(assertion), /^detached-turn-interactions\.mjs:\d+$/u,
+    `the aliased scenario frame must become the locator, got ${String(assertion)}`)
+  assert.ok(!String(assertion).startsWith('split-process-smoke.mjs:'),
+    'the async registry caller line must not be reported as the assertion')
+})
+
 test('the locator trusts only the lane sources and fails closed otherwise', () => {
   const attempt = (sources) => {
     try {
