@@ -844,6 +844,67 @@ test('runner search: Folder Workflow member status maps to its exact painted cel
   assert.equal(fixture.vt.getCellBgRgb(row, column), 0xf5c542, 'the member status text is the current cell')
 })
 
+test('runner search: Folder Workflow kind maps lowercase semantics to the painted title cell', async (t) => {
+  const events = [
+    event('turn/start', { turn: 0 }, 0),
+    event('tool-workflow/run-start', { runId: 'workflow-kind-run' as never, name: 'audit' }, 1),
+  ]
+  const fixture = await mountSearchRunner(t, 1, [], 'workflow', events)
+  fixture.app.startTranscriptSearch()
+  await fixture.settleRender()
+  typeQuery(fixture, 'workflow')
+  await fixture.settleRender()
+
+  assert.equal(fixture.app.transcriptSearchPresentationForTest()?.sourceKey, 'workflow-run.kind',
+    'the semantic source is the lowercase run kind')
+  const lines = fixture.vt.getViewport().map(stripTerminalSequences)
+  const row = lines.findIndex(line => line.includes('Workflow audit'))
+  assert.ok(row >= 0, `the real Workflow header is painted:\n${lines.join('\n')}`)
+  const column = visibleWidth(lines[row]!.slice(0, lines[row]!.indexOf('Workflow')))
+  assert.equal(fixture.vt.getCellBgRgb(row, column), 0xf5c542,
+    'the lowercase semantic kind proves its painted title cell')
+})
+
+test('runner search: hidden Workflow member status proves the generated context-row cell', async (t) => {
+  const events: SessionEvent[] = [
+    event('turn/start', { turn: 0 }, 0),
+    event('tool-workflow/run-start', { runId: 'workflow-context-status-run' as never, name: 'audit' }, 1),
+  ]
+  for (let seq = 0; seq < 6; seq += 1) {
+    events.push(event('tool-workflow/agent-start', {
+      runId: 'workflow-context-status-run' as never,
+      seq,
+      label: seq === 0 ? 'failed worker' : `worker-${seq}`,
+      phase: 'Research',
+      childId: `context-child-${seq}` as never,
+    }, 2 + seq))
+  }
+  events.push(event('tool-workflow/agent-end', {
+    runId: 'workflow-context-status-run' as never, seq: 0, outcome: 'failed',
+  }, 8))
+  events.push(event('tool-workflow/agent-end', {
+    runId: 'workflow-context-status-run' as never, seq: 1, outcome: 'completed',
+  }, 9))
+
+  const fixture = await mountSearchRunner(t, 1, [], 'completed', events)
+  fixture.app.startTranscriptSearch()
+  await fixture.settleRender()
+  typeQuery(fixture, 'completed')
+  await fixture.settleRender()
+
+  const target = fixture.app.transcriptSearchPresentationForTest()
+  assert.ok(target?.sourceKey.endsWith('.status'), 'Folder source authority is the hidden member status')
+  const lines = fixture.vt.getViewport().map(stripTerminalSequences)
+  const row = lines.findIndex(line => line.includes('↳ worker-1 — completed'))
+  assert.ok(row >= 0, `the production renderer publishes the search-only context row:\n${lines.join('\n')}`)
+  const label = lines[row]!.indexOf('worker-1')
+  const status = lines[row]!.indexOf('completed')
+  assert.equal(fixture.vt.getCellBgRgb(row, visibleWidth(lines[row]!.slice(0, status))), 0xf5c542,
+    'the hidden member status maps to the exact context-row cell')
+  assert.notEqual(fixture.vt.getCellBgRgb(row, visibleWidth(lines[row]!.slice(0, label))), 0xf5c542,
+    'the neighboring context label is outside the status source')
+})
+
 test('runner search: a Folder Workflow name range reaches its exact VirtualTerminal cell', async (t) => {
   const events = [
     event('turn/start', { turn: 0 }, 0),
