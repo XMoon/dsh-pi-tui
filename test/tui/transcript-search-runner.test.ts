@@ -678,6 +678,59 @@ test('runner search: sanitized Thinking bodies exclude title and hint from seman
     'the current body-less Thinking title is never underlined as a source match')
 })
 
+test('runner search: expanded Thinking body starts after a wrapped title at narrow width', async (t) => {
+  const events = [
+    event('turn/start', { turn: 0 }, 0),
+    event('user/message', {
+      id: MessageId('thinking-wrapped-title-user'),
+      role: 'user',
+      content: [{ type: 'text', text: 'ordinary prompt' }],
+      source: { kind: 'user' },
+    }, 1),
+    event('assistant/attempt', {
+      turn: 0, step: 0,
+      stream: [{ type: 'chunk', time: 1_700_000_000_002, chunk: { type: 'reasoning-delta', index: 0, text: 'thinking about the issue' } }],
+    }, 2),
+  ]
+  const fixture = await mountSearchRunner(t, 1, [], 'thinking', events)
+  const { app, vt } = fixture
+  vt.resize(12, 24)
+  await fixture.settleRender()
+  app.startTranscriptSearch()
+  await fixture.settleRender()
+  typeQuery(fixture, 'thinking')
+  await fixture.settleRender()
+
+  const lines = vt.getViewport().map(stripTerminalSequences)
+  const iconTitleRow = lines.findIndex(line => line.includes('🌊'))
+  const titleTextRow = lines.findIndex((line, index) => index > iconTitleRow && line.includes('Thinking'))
+  const bodyRow = lines.findIndex((line, index) => index > titleTextRow && line.includes('thinking'))
+  assert.ok(iconTitleRow >= 0 && titleTextRow > iconTitleRow && bodyRow > titleTextRow,
+    `the narrow expanded title wraps before the body:\n${lines.join('\n')}`)
+
+  const mounted = (app as unknown as {
+    mountedTranscriptBlocks: ReadonlyArray<{
+      block: { message?: TranscriptMessage }
+      searchSelection?: { matches: Array<{ segments: Array<{ row: number }> }>; selectedIndex: number; selectedRow?: number; exact: boolean }
+    }>
+  }).mountedTranscriptBlocks
+  const selected = app.transcriptSearchPresentationForTest()?.message
+  assert.equal(selected?.kind, 'thinking')
+  const selection = mounted.find(entry => entry.block.message === selected)?.searchSelection
+  assert.ok(selection !== undefined)
+  assert.equal(selection.exact, false, 'Thinking remains position-only')
+  assert.equal(selection.selectedIndex, -1)
+  const titleRows = titleTextRow - iconTitleRow + 1
+  assert.equal(selection.selectedRow, titleRows, 'the source anchor follows every wrapped title row')
+  assert.ok(selection.matches.length > 0, 'the body occurrence remains available as a weak hint')
+  assert.ok(selection.matches.every(match => match.segments.every(segment => segment.row >= titleRows)),
+    'rendered title rows are excluded from the same matcher list')
+  assert.equal(vt.getCellUnderline(titleTextRow, visibleWidth(lines[titleTextRow]!.slice(0, lines[titleTextRow]!.indexOf('Thinking')))), false,
+    'the wrapped Thinking title is not weak-highlighted')
+  assert.equal(vt.getCellUnderline(bodyRow, visibleWidth(lines[bodyRow]!.slice(0, lines[bodyRow]!.toLowerCase().indexOf('thinking')))), true,
+    'the real body match remains weak-highlighted')
+})
+
 test('runner search: passive assistant settlement refreshes the source range for the stable target', async (t) => {
   const events = [
     event('turn/start', { turn: 0 }, 0),

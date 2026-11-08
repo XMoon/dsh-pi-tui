@@ -91,6 +91,9 @@ export interface RenderedSearchSelector {
   /** The current semantic source-local normalized range; unlike the stable key,
    * it changes when content reflows or a hit moves within its source. */
   readonly normalizedSourceRange?: { readonly start: number; readonly end: number }
+  /** Suppress rendered matching until the owner remeasures when source-row
+   * eligibility depends on renderer-specific layout such as wrapped chrome. */
+  readonly suppressMatchesOnStaleGeometry?: boolean
   readonly geometry?: RenderedSourceGeometry
   readonly weakOnly?: boolean
 }
@@ -524,7 +527,10 @@ export class SearchHighlightComponent implements Component {
       // The recorded geometry does not describe these lines: decorate the
       // visible matches weak-only and never paint a stale strong occurrence or
       // a stale anchor row.
-      this.selection = { matches: findAltScreenSearchMatches(lines, this.selector.query), selectedIndex: -1, selectedRow: undefined, exact: false }
+      const matches = this.selector.suppressMatchesOnStaleGeometry === true
+        ? []
+        : findAltScreenSearchMatches(lines, this.selector.query)
+      this.selection = { matches, selectedIndex: -1, selectedRow: undefined, exact: false }
       this.selectionWidth = width
       this.sourceLines = lines
     }

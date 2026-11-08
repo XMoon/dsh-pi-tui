@@ -11423,7 +11423,7 @@ export class TuiApp {
       let mountedComponent: Component | undefined
       let searchSelection: RenderedSearchSelection | undefined
       let searchSelector: RenderedSearchSelector | undefined
-      const presentation = this.blockSearchPresentation(block, rendered, subCallRegions, deliverableRegions)
+      const presentation = this.blockSearchPresentation(block, rendered, width, subCallRegions, deliverableRegions)
       if (presentation.selector !== undefined && presentation.selection !== undefined) {
         searchSelection = presentation.selection
         searchSelector = presentation.selector
@@ -11532,6 +11532,7 @@ export class TuiApp {
   private blockSearchPresentation(
     block: TranscriptRenderBlock,
     rendered: readonly string[],
+    renderWidth: number,
     subCallRegions: ReadonlyArray<SearchSourceRegion> | undefined,
     deliverableRegions: ReadonlyArray<SearchSourceRegion> | undefined,
   ): { selector?: RenderedSearchSelector; selection?: RenderedSearchSelection; current: boolean } {
@@ -11546,10 +11547,13 @@ export class TuiApp {
     if (block.message.kind === 'thinking' && messageEntry !== undefined && messageEntry.rendererId === undefined) {
       const displayText = sanitizeDisplayText(block.message.text)
       const hasBody = messageEntry.expanded ? displayText !== '' : latestLine(displayText) !== ''
+      const titleRows = messageEntry.expanded
+        ? new Text(color.textDim(`${iconLead('thinking', this.iconStyle)}Thinking`), 0, 0).render(renderWidth).length
+        : 1
       hostThinkingBodyRange = hasBody
         ? {
-            anchorRow: 1,
-            rowStart: 1,
+            anchorRow: titleRows,
+            rowStart: titleRows,
             rowEnd: messageEntry.expanded ? rendered.length : Math.min(rendered.length, 2),
           }
         : { anchorRow: 0, rowStart: rendered.length, rowEnd: rendered.length }
@@ -11583,6 +11587,7 @@ export class TuiApp {
         query: target.query,
         sourceOccurrence: target.match.sourceOccurrence,
         ...(target.match.normalizedSourceRange === undefined ? {} : { normalizedSourceRange: target.match.normalizedSourceRange }),
+        ...(hostThinkingBodyRange === undefined ? {} : { suppressMatchesOnStaleGeometry: true }),
         ...(geometry === undefined ? {} : { geometry }),
       }
       const selection = selectRenderedSearchMatch(matches, selector)
@@ -11596,7 +11601,12 @@ export class TuiApp {
           }
       return { selector, selection: committedSelection, current }
     }
-    const selector: RenderedSearchSelector = { query: target.query, sourceOccurrence: 0, weakOnly: true }
+    const selector: RenderedSearchSelector = {
+      query: target.query,
+      sourceOccurrence: 0,
+      weakOnly: true,
+      ...(hostThinkingBodyRange === undefined ? {} : { suppressMatchesOnStaleGeometry: true }),
+    }
     return { selector, selection: selectRenderedSearchMatch(matches, selector), current }
   }
 
@@ -11793,7 +11803,7 @@ export class TuiApp {
       const workflowHits = workflowInfo === undefined
         ? undefined
         : workflowInfo.hits.map(hit => ({ ...hit, top: hit.top + rendered.length - workflowInfo.total }))
-      const searchPresentation = this.blockSearchPresentation(entry.block, rendered, subCallRegions, deliverableRegions)
+      const searchPresentation = this.blockSearchPresentation(entry.block, rendered, width, subCallRegions, deliverableRegions)
       const searchSelection = searchPresentation.selection
       return {
         ...entry,
