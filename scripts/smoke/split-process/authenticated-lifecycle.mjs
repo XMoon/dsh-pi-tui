@@ -664,8 +664,11 @@ export async function runAuthenticatedLifecycle(context) {
       'WS1-05 a NEW stream did not recover the authoritative Host baseline after the replacement')
     // A12/A3: the official `schedule` Remote namespace over the SAME
     // authenticated link proved catalog, create, edit AND a post-replacement
-    // catalog that still lists the created Host task.
-    for (const field of ['scheduleRemote', 'scheduleCatalog', 'scheduleCreate', 'scheduleEdit']) {
+    // catalog that still lists the created Host task. The probe must then
+    // DELETE its task: the durable Host profile is shared with every later
+    // scenario, whose Host-liveness observation would otherwise be BLOCKED by
+    // a leftover ACTIVE task the lane never intended to create.
+    for (const field of ['scheduleRemote', 'scheduleCatalog', 'scheduleCreate', 'scheduleEdit', 'scheduleDeleted']) {
       assert(hostRpcProof[field] === true, `A3 ${field} is not proven`)
     }
     assert(hostRpcProof.scheduleReconnectCatalog === true,
@@ -711,6 +714,7 @@ export async function runAuthenticatedLifecycle(context) {
       scheduleCreate: hostRpcProof.scheduleCreate,
       scheduleEdit: hostRpcProof.scheduleEdit,
       scheduleReconnectCatalog: hostRpcProof.scheduleReconnectCatalog,
+      scheduleDeleted: hostRpcProof.scheduleDeleted,
       cleaned: true,
       hostTerminalProgressWatchesBefore: hostReady.terminalProgressWatches,
       hostTerminalProgressWatchesDuring: firstProbe.during.terminalProgressWatches,
