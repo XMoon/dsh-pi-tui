@@ -148,12 +148,16 @@ const LIST = workspace({
 
 // ── 1. responsive frame ──────────────────────────────────────────────────────
 
-test('the four product sizes paint width-safe frames and switch layout at 120×30', () => {
+test('the responsive panel matrix paints width-safe frames and switches layout at 120×30', () => {
   const sizes: readonly FrameSize[] = [
     { columns: 160, rows: 50 },
+    { columns: 120, rows: 30 },
     { columns: 100, rows: 30 },
     { columns: 80, rows: 24 },
+    { columns: 72, rows: 24 },
     { columns: 60, rows: 12 },
+    { columns: 44, rows: 20 },
+    { columns: 80, rows: 10 },
   ]
   for (const size of sizes) {
     const view = harness(LIST, size)
@@ -1035,11 +1039,17 @@ test('a paused task paints a neutral scheduled occurrence, never "final"', () =>
 
 test('every page stays inside the design-language size matrix', () => {
   const sizes: readonly { readonly columns: number; readonly rows: number }[] = [
-    { columns: 44, rows: 20 },
-    { columns: 80, rows: 10 },
-    { columns: 80, rows: 24 },
-    { columns: 120, rows: 40 },
     { columns: 200, rows: 50 },
+    { columns: 160, rows: 50 },
+    { columns: 120, rows: 40 },
+    { columns: 120, rows: 30 },
+    { columns: 100, rows: 40 },
+    { columns: 100, rows: 30 },
+    { columns: 80, rows: 24 },
+    { columns: 80, rows: 10 },
+    { columns: 72, rows: 24 },
+    { columns: 60, rows: 12 },
+    { columns: 44, rows: 20 },
   ]
   const selected = task({ id: 'task-matrix', title: 'Matrix task' })
   const pages: readonly { readonly label: string; readonly snapshot: ScheduleWorkspaceSnapshot }[] = [
