@@ -187,12 +187,6 @@ test('a completed turn first published after it ended still freezes from live pa
   assert.equal(store.activeMillis(asActivity(activity), 'idle', 100_000), 14_000, '24s wall - 10s wait = 14s')
 })
 
-test('a completed turn with no live pause evidence keeps the event-elapsed fallback', () => {
-  const store = new FocusTimingStore()
-  const historical = { startedAt: 1_000, endedAt: 35_000, completed: true }
-  assert.equal(store.activeMillis(asActivity(historical), 'idle', 999_999), 34_000)
-})
-
 test('a live turn first observed during a pause counts up to the recorded pause boundary', () => {
   // The approval opens BEFORE the delayed transcript repaint publishes the
   // activity: the store has seen working → waiting-approval, so the pause

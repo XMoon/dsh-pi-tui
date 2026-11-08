@@ -1982,46 +1982,6 @@ test('masked custom shows bullets in list mode after revisit, never plaintext', 
   assert.ok(!view.includes('secret'), `the plaintext must NEVER render:\n${view}`)
 })
 
-test('single-select existing selection + empty custom Enter survives (regression)', () => {
-  // Plan §14.9 (single variant): selected A, enter OTHER, do not type,
-  // Enter — the answer stays ['A']. (The comprehensive walkthrough lives
-  // in 'Enter on empty custom text never wipes an existing selection'
-  // above; this is the §14.9-anchored minimal pin.)
-  let done: unknown
-  const f = new QuestionFlow([
-    { id: 'q1', question: 'Pick', options: [{ label: 'A' }, { label: 'B' }] },
-  ], (answers) => { done = answers }, () => {})
-  f.setMaxRows(24)
-  render(f, 100)
-  f.handleInput('1') // select A → review
-  render(f, 100)
-  f.handleInput('\x1b[D') // ← back
-  enterOtherEdit(f, 2) // enter the edit (seeded with the empty draft)
-  f.handleInput('\r') // Enter with EMPTY text
-  render(f, 100)
-  f.handleInput('\r') // submit
-  assert.deepEqual(done, [{ id: 'q1', selected: ['A'] }])
-})
-
-test('multi-select existing selection + empty custom Enter survives (regression)', () => {
-  // Plan §14.9 (multi variant): the comprehensive walkthrough lives in
-  // 'Enter on empty custom text never wipes an existing selection'; this
-  // is the §14.9-anchored minimal pin with the NEW Space toggle entry.
-  let done: unknown
-  const f = new QuestionFlow([
-    { id: 'q1', question: 'Pick many', multiSelect: true, options: [{ label: 'X' }, { label: 'Y' }] },
-  ], (answers) => { done = answers }, () => {})
-  f.setMaxRows(24)
-  render(f, 100)
-  f.handleInput(' ') // toggle X (Space)
-  render(f, 100)
-  enterOtherEdit(f, 2) // enter the edit (empty draft)
-  f.handleInput('\r') // Enter with EMPTY text → keep selection, advance
-  render(f, 100)
-  f.handleInput('\r') // submit
-  assert.deepEqual(done, [{ id: 'q1', selected: ['X'] }])
-})
-
 test('multi-select mouse click toggles without advancing (mouse parity)', () => {
   // Plan §14.13: clickRow → confirm() used to be the universal mouse
   // entry; the multi-select click must be the SELECTION action.

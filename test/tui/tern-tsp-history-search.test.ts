@@ -1030,7 +1030,6 @@ test('a control byte typed into the query is projected to display text, never ca
   // be projected, and a bracketed paste must collapse to one line.
   h.pane.key('a\u001b[200~line-one\nline-two\u001b[201~')
   await h.painted(() => (h.queryField()?.text ?? '').includes('line-one'), 'the pasted text reached the query field')
-  await h.painted(() => (h.queryField()?.text ?? '').includes('line-one'), 'the pasted text reached the query field')
   const field = h.queryField()
   assert.equal(/[\u0000-\u0008\u000a-\u001f\u007f-\u009f]/.test(field?.text ?? ''), false,
     `the query field carries no control byte: ${JSON.stringify(field)}`)
