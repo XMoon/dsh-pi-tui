@@ -11542,14 +11542,24 @@ export class TuiApp {
     // merely renders the query in UI chrome is never highlighted.
     if (!current && !this.searchMatchMessages.has(block.message)) return { current: false }
     const messageEntry = this.messageComponents.get(block.message)
-    const hostThinkingBody = block.message.kind === 'thinking'
-      && messageEntry !== undefined
-      && messageEntry.rendererId === undefined
-      && rendered.length > 1
+    let hostThinkingBodyRange: { anchorRow: number; rowStart: number; rowEnd: number } | undefined
+    if (block.message.kind === 'thinking' && messageEntry !== undefined && messageEntry.rendererId === undefined) {
+      const displayText = sanitizeDisplayText(block.message.text)
+      const hasBody = messageEntry.expanded ? displayText !== '' : latestLine(displayText) !== ''
+      hostThinkingBodyRange = hasBody
+        ? {
+            anchorRow: 1,
+            rowStart: 1,
+            rowEnd: messageEntry.expanded ? rendered.length : Math.min(rendered.length, 2),
+          }
+        : { anchorRow: 0, rowStart: rendered.length, rowEnd: rendered.length }
+    }
     const renderedMatches = this.renderedSearchMatchesFor(block.message, rendered, target.query)
-    const matches = hostThinkingBody
-      ? renderedMatches.filter(match => match.segments.every(segment => segment.row >= 1 && segment.row < rendered.length))
-      : renderedMatches
+    const bodyRange = hostThinkingBodyRange
+    const matches = bodyRange === undefined
+      ? renderedMatches
+      : renderedMatches.filter(match => match.segments.every(segment =>
+          segment.row >= bodyRange.rowStart && segment.row < bodyRange.rowEnd))
     if (!current && matches.length === 0) return { current: false }
     if (current
       && matches.length === 0
@@ -11561,7 +11571,13 @@ export class TuiApp {
       return { current: false }
     }
     if (current) {
-      const regions = this.searchSourceRegionsFor(block.message, rendered.length, subCallRegions, deliverableRegions)
+      const regions = this.searchSourceRegionsFor(
+        block.message,
+        rendered.length,
+        subCallRegions,
+        deliverableRegions,
+        hostThinkingBodyRange,
+      )
       const geometry = buildSourceGeometry(matches, rendered, regions, transcriptSearchSourceKey(target.match.source), target.query)
       const selector: RenderedSearchSelector = {
         query: target.query,
@@ -11592,6 +11608,7 @@ export class TuiApp {
     renderedLength: number,
     subCallRegions: ReadonlyArray<SearchSourceRegion> | undefined,
     deliverableRegions: ReadonlyArray<SearchSourceRegion> | undefined,
+    thinkingBodyRange: { anchorRow: number; rowStart: number; rowEnd: number } | undefined,
   ): SearchSourceRegion[] {
     const regions: SearchSourceRegion[] = []
     if (subCallRegions !== undefined) regions.push(...subCallRegions)
@@ -11602,14 +11619,11 @@ export class TuiApp {
     // message source stays position-only. Host Thinking starts below its title
     // when a body row is present; plugin-owned and body-less cards anchor at top.
     if (message.kind !== 'tool' && message.kind !== 'workflow') {
-      const entry = this.messageComponents.get(message)
-      const bodyStart = message.kind === 'thinking'
-        && entry !== undefined
-        && entry.rendererId === undefined
-        && renderedLength > 1
-        ? 1
-        : 0
-      regions.push({ sourceKey: 'message', anchorRow: bodyStart, rowStart: bodyStart, rowEnd: renderedLength, enumerable: false })
+      if (message.kind === 'thinking' && thinkingBodyRange !== undefined) {
+        regions.push({ sourceKey: 'message', ...thinkingBodyRange, enumerable: false })
+      } else {
+        regions.push({ sourceKey: 'message', anchorRow: 0, rowStart: 0, rowEnd: renderedLength, enumerable: false })
+      }
     }
     return regions
   }

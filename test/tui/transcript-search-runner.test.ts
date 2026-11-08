@@ -15,8 +15,9 @@ import { Context } from '@deepseek-ai/cordis'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import { SESSION_FORMAT_VERSION, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { stripTerminalSequences } from '@xmoon76/pi-tui'
+import { sanitizeDisplayText } from '../../src/tui/presentation/terminal-text.ts'
 import { TuiApp } from '../../src/tui-app.ts'
-import { TranscriptFolder } from '../../src/transcript.ts'
+import { TranscriptFolder, type TranscriptMessage } from '../../src/transcript.ts'
 import {
   disposeContext,
   event,
@@ -607,6 +608,74 @@ test('runner search: every operation performs exactly one representative pass', 
     process.stderr.write = originalWrite
     delete process.env.DSH_TUI_SEARCH_PROFILE
   }
+})
+
+test('runner search: sanitized Thinking bodies exclude title and hint from semantic matches', async (t) => {
+  const rawControlOnly = '\x1b[?25i'
+  assert.equal(sanitizeDisplayText(rawControlOnly), '', 'the control-only Thinking source has no safe display body')
+  const events = [
+    event('turn/start', { turn: 0 }, 0),
+    event('user/message', {
+      id: MessageId('thinking-search-user'),
+      role: 'user',
+      content: [{ type: 'text', text: 'i' }],
+      source: { kind: 'user' },
+    }, 1),
+    event('assistant/attempt', {
+      turn: 0, step: 0,
+      stream: [{ type: 'chunk', time: 1_700_000_000_002, chunk: { type: 'reasoning-delta', index: 0, text: rawControlOnly } }],
+    }, 2),
+    event('assistant/attempt', {
+      turn: 0, step: 1,
+      stream: [{ type: 'chunk', time: 1_700_000_000_003, chunk: { type: 'reasoning-delta', index: 0, text: 'visible i preview' } }],
+    }, 3),
+  ]
+  const fixture = await mountSearchRunner(t, 1, [], 'i', events)
+  const { app, vt } = fixture
+  app.startTranscriptSearch()
+  await fixture.settleRender()
+  typeQuery(fixture, 'i')
+  await fixture.settleRender()
+
+  const thinkingCards = [...app.searchMatchMessagesForTest()].filter(
+    (message): message is Extract<TranscriptMessage, { kind: 'thinking' }> => message.kind === 'thinking',
+  )
+  const controlOnly = thinkingCards.find(message => message.text === rawControlOnly)
+  const visiblePreview = thinkingCards.find(message => message.text === 'visible i preview')
+  assert.ok(controlOnly !== undefined, 'raw control bytes still produce the semantic Thinking match')
+  assert.ok(visiblePreview !== undefined, 'the safe preview remains a separate semantic match')
+
+  const lines = vt.getViewport().map(stripTerminalSequences)
+  const titleRow = lines.findIndex(line => line.includes('Thinking'))
+  const hintRow = lines.findIndex(line => line.includes('click to expand'))
+  const previewRow = lines.findIndex(line => line.includes('visible i preview'))
+  assert.ok(titleRow >= 0 && hintRow >= 0 && previewRow >= 0, `all compact Thinking rows are painted:\n${lines.join('\n')}`)
+  assert.equal(vt.getCellUnderline(titleRow, lines[titleRow]!.indexOf('i')), false,
+    'a non-current body-less Thinking title is not a weak message match')
+  assert.equal(vt.getCellUnderline(hintRow, lines[hintRow]!.indexOf('i')), false,
+    'a compact disclosure hint is not part of the Thinking message source')
+  assert.equal(vt.getCellUnderline(previewRow, lines[previewRow]!.indexOf('i')), true,
+    'the visible compact preview remains weakly searchable')
+
+  fixture.input('\r')
+  await fixture.settleRender()
+  assert.equal(app.transcriptSearchPresentationForTest()?.message, controlOnly,
+    'Next reaches the body-less Thinking semantic result')
+  const mounted = (app as unknown as {
+    mountedTranscriptBlocks: ReadonlyArray<{
+      block: { message?: TranscriptMessage }
+      searchSelection?: { matches: readonly unknown[]; selectedIndex: number; selectedRow?: number; exact: boolean }
+    }>
+  }).mountedTranscriptBlocks
+  const selection = mounted.find(entry => entry.block.message === controlOnly)?.searchSelection
+  assert.deepEqual(selection?.matches, [], 'the empty safe body contributes no rendered candidates')
+  assert.equal(selection?.selectedIndex, -1)
+  assert.equal(selection?.selectedRow, 0, 'the empty body falls back to the card top')
+  assert.equal(selection?.exact, false)
+  const currentTitleRow = vt.getViewport().map(stripTerminalSequences).findIndex(line => line.includes('Thinking'))
+  assert.ok(currentTitleRow >= 0)
+  assert.equal(vt.getCellUnderline(currentTitleRow, stripTerminalSequences(vt.getViewport()[currentTitleRow]!).indexOf('i')), false,
+    'the current body-less Thinking title is never underlined as a source match')
 })
 
 test('runner search: passive assistant settlement refreshes the source range for the stable target', async (t) => {

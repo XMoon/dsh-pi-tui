@@ -37,7 +37,6 @@ import * as ToolTasks from '@deepseek-ai/dsh-tool-jobs'
 import * as ToolPwsh from '@deepseek-ai/dsh-tool-pwsh'
 import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
 import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
-import { highlightColumnRanges } from '../../src/tui/components/transcript/search-presentation.ts'
 import type { OwnedRunner } from '../../src/tui-app.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import { JobInspectorPanel, type JobCopyRequest, type JobInspectorPanelIntents } from '../../src/tui/panels/job-inspector-panel.ts'
@@ -562,25 +561,43 @@ test('the header click must re-prove the same painted target; a narrowed button 
   clipped.panel.dispose()
 })
 
-test('overlapping ranges on a painted Command row preserve source text and cell width', () => {
-  const harness = makePanel(observedState({ label: 'echo one' }))
-  harness.panel.handleInput('\t')
-  const lines = paint(harness, 80)
-  const row = lines.findIndex(line => stripTerminalSequences(line).includes('Full command'))
-  assert.ok(row >= 0, `the real Command page heading is painted:\n${lines.join('\n')}`)
-  const plain = stripTerminalSequences(lines[row]!)
-  const startCol = visibleWidth(plain.slice(0, plain.indexOf('Full command')))
-  const ranges = new Map([[row, [
-    { range: { startCol, endCol: startCol + 6 }, style: (text: string) => `\x1b[7m${text}\x1b[27m` },
-    { range: { startCol: startCol + 5, endCol: startCol + 12 }, style: (text: string) => `\x1b[7m${text}\x1b[27m` },
-  ]]])
-  const painted = highlightColumnRanges(lines, ranges)
-  assert.equal(stripTerminalSequences(painted[row]!), plain, 'overlap never duplicates the source substring')
-  assert.equal(visibleWidth(painted[row]!), visibleWidth(lines[row]!), 'the shared painter keeps the original cell width')
-  assert.ok(painted[row]!.includes('\x1b[27m'), 'the selected range reset remains in the painted row')
-  harness.panel.dispose()
-})
+test('the Command reader selection overlays its search highlight without changing painted cells', async () => {
+  const harness = startApp()
+  await openFirstJob(harness)
+  const label = 'echo needle value'
+  harness.tasks.observation.latest()!.emit({ label })
+  await harness.vt.waitForRender()
+  await flush(2)
+  await openCommand(harness)
 
+  harness.vt.sendInput('/')
+  await harness.vt.waitForRender()
+  harness.vt.sendInput('needle')
+  harness.vt.sendInput('\r')
+  await harness.vt.waitForRender()
+  await flush(2)
+
+  const row = bodyRow(harness.vt, label)
+  const original = rawView(harness.vt)[row]!
+  const plain = stripTerminalSequences(original)
+  const startCol = cellIndexOf(plain, 'needle')
+  assert.ok(startCol >= 0)
+  assert.ok(harness.vt.getCellBgRgb(row, startCol) !== undefined, 'Find paints its current occurrence before selection')
+
+  press(harness.vt, row, startCol)
+  drag(harness.vt, row, startCol + 'needle'.length - 1)
+  release(harness.vt, row, startCol + 'needle'.length - 1)
+  await harness.vt.waitForRender()
+  await flush(2)
+
+  const selectedRow = bodyRow(harness.vt, label)
+  const selected = rawView(harness.vt)[selectedRow]!
+  assert.equal(stripTerminalSequences(selected), plain, 'the actual reader keeps the original visible source text')
+  assert.equal(visibleWidth(selected), visibleWidth(original), 'selection and Find preserve the rendered cell width')
+  assert.ok(harness.vt.getCellInverse(selectedRow, startCol), 'the Command reader selection overlays the Find-painted cell')
+  assert.ok(harness.vt.writes.some(write => write.includes('\x1b[7m') && write.includes('\x1b[27m')),
+    'the production reader path emits a bounded reverse-video selection')
+})
 test('a changed label or a resize cancels the gesture instead of copying stale offsets', async () => {
   const harness = startApp()
   await openFirstJob(harness)
