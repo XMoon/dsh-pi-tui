@@ -10,7 +10,7 @@ import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { afterEach, test } from 'node:test'
 import { MessageId, ToolCallId, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
+import { getCapabilities, setCapabilities, stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import { TuiApp } from '../../src/tui-app.ts'
 import { darkColors, lightColors } from '../../src/domain/display/theme.ts'
 import { currentPalette } from '../../src/tui/theme/runtime.ts'
@@ -1785,4 +1785,133 @@ test('navigation: a plugin-rendered User or Thinking card never claims Host sour
   assert.equal(selection?.exact, false)
   assert.equal(selection?.exactPaintedSegments, undefined)
   app.stop()
+})
+
+
+// ── C0 negative guards: a hidden Markdown href never becomes a visible Exact ──
+
+/** Fold one real Assistant message (the authoritative `assistant/message`
+ * event), so the markdown source and its semantic occurrences are produced by
+ * the same fold the live transcript uses. */
+function assistantSearchFolder(text: string, id: string): {
+  folder: TranscriptFolder
+  message: Extract<TranscriptMessage, { kind: 'assistant' }>
+} {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    sessionEvent('turn/start', { turn: 0 }, 0),
+    sessionEvent('assistant/message', {
+      turn: 0,
+      step: 0,
+      message: {
+        id: MessageId(id),
+        role: 'assistant',
+        content: [{ type: 'text', text }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+      stream: [],
+    }, 1),
+    sessionEvent('turn/end', { turn: 0, reason: { kind: 'completed' } }, 2),
+  ])
+  const message = folder.messages().find(
+    (candidate): candidate is Extract<TranscriptMessage, { kind: 'assistant' }> => candidate.kind === 'assistant',
+  )
+  assert.ok(message !== undefined, 'fixture: the folded assistant message exists')
+  return { folder, message }
+}
+
+/** Terminal columns of every visible occurrence on one rendered row, measured
+ * on the VISIBLE text (an OSC 8 href parameter may itself contain the
+ * needle and must never be counted as a painted occurrence). */
+function visibleColumnsOf(line: string, needle: string): number[] {
+  const plain = stripTerminalSequences(line)
+  const columns: number[] = []
+  for (let index = plain.indexOf(needle); index >= 0; index = plain.indexOf(needle, index + needle.length)) {
+    columns.push(visibleWidth(plain.slice(0, index)))
+  }
+  return columns
+}
+
+test('a hidden Markdown href search hit never strong-highlights a visible homonym', async () => {
+  const previousCapabilities = getCapabilities()
+  setCapabilities({ images: null, trueColor: true, hyperlinks: true })
+  try {
+    const { folder, message } = assistantSearchFolder('[display](https://example.invalid/needle) needle', 'assistant-hidden-href')
+    const matches = folder.search('needle')
+    assert.equal(matches.length, 2, 'the raw corpus owns the href hit and the visible body hit')
+    const match = matches[0]!
+    assert.deepEqual(match.source, { kind: 'message' })
+    assert.ok(match.normalizedSourceRange !== undefined, 'the href hit has a source-local range')
+    const { vt, app } = startApp(100, 30)
+    app.setFullscreen(true)
+    app.setTranscript(folder.messages(), folder.turnActivities())
+    app.setTranscriptSearchTarget({ query: 'needle', match, message })
+    const lines = await viewport(vt)
+    const row = lines.findIndex(line => stripTerminalSequences(line).includes('display'))
+    assert.ok(row >= 0, `the linked answer is painted:\n${lines.join('\n')}`)
+    const columns = visibleColumnsOf(lines[row]!, 'needle')
+    assert.equal(columns.length, 1, `only the body homonym is visible:\n${lines[row]}`)
+    for (let offset = 0; offset < 'needle'.length; offset += 1) {
+      assert.notEqual(vt.getCellBgRgb(row, columns[0]! + offset), STRONG_BG,
+        'a hidden href never strong-highlights the visible homonym')
+    }
+    const selection = mountedSelectionFor(app, message)
+    assert.equal(selection?.exact, false, 'the hidden href target is not a proven cell')
+    assert.equal(selection?.selectedIndex, -1)
+    assert.equal(selection?.exactPaintedSegments, undefined)
+    const presentation = app.transcriptSearchPresentationForTest()
+    assert.equal(presentation?.query, 'needle', 'the query identity is unchanged')
+    assert.equal(presentation?.sourceKey, 'message')
+    assert.equal(presentation?.sourceOccurrence, match.sourceOccurrence, 'the source ordinal is unchanged')
+    assert.equal(presentation?.matchId, match.id)
+    assert.equal(presentation?.matchTurn, match.turn)
+    assert.equal(folder.search('needle').length, 2, 'the semantic N/M corpus is unchanged')
+    app.stop()
+  } finally {
+    setCapabilities(previousCapabilities)
+  }
+})
+
+test('a hidden Markdown href between two visible homonyms never selects either text cell', async () => {
+  const previousCapabilities = getCapabilities()
+  setCapabilities({ images: null, trueColor: true, hyperlinks: true })
+  try {
+    const { folder, message } = assistantSearchFolder('[needle](https://example.invalid/needle) needle', 'assistant-hidden-href-between')
+    const matches = folder.search('needle')
+    assert.equal(matches.length, 3, 'label, hidden href and body are three semantic occurrences')
+    const match = matches[1]!
+    assert.deepEqual(match.source, { kind: 'message' })
+    assert.ok(match.normalizedSourceRange !== undefined)
+    const { vt, app } = startApp(80, 30)
+    app.setFullscreen(true)
+    app.setTranscript(folder.messages(), folder.turnActivities())
+    app.setTranscriptSearchTarget({ query: 'needle', match, message })
+    for (const width of [80, 44]) {
+      vt.resize(width, 30)
+      const lines = await viewport(vt)
+      const row = lines.findIndex(line => visibleColumnsOf(line, 'needle').length >= 1)
+      assert.ok(row >= 0, `width ${width}: the linked answer is painted:\n${lines.join('\n')}`)
+      const columns = visibleColumnsOf(lines[row]!, 'needle')
+      assert.equal(columns.length, 2, `width ${width}: only the link label and the body are visible:\n${lines[row]}`)
+      for (const column of columns) {
+        for (let offset = 0; offset < 'needle'.length; offset += 1) {
+          assert.notEqual(vt.getCellBgRgb(row, column + offset), STRONG_BG,
+            `width ${width}: neither visible homonym becomes the hidden href's current cell`)
+        }
+      }
+      const selection = mountedSelectionFor(app, message)
+      assert.equal(selection?.exact, false, `width ${width}: the hidden href target is not a proven cell`)
+      assert.equal(selection?.selectedIndex, -1)
+      assert.equal(selection?.exactPaintedSegments, undefined)
+    }
+    const presentation = app.transcriptSearchPresentationForTest()
+    assert.equal(presentation?.query, 'needle', 'the query identity is unchanged')
+    assert.equal(presentation?.sourceKey, 'message')
+    assert.equal(presentation?.sourceOccurrence, match.sourceOccurrence, 'the hidden href source ordinal is unchanged')
+    assert.equal(presentation?.matchId, match.id)
+    assert.equal(folder.search('needle').length, 3, 'the semantic N/M corpus is unchanged')
+    app.stop()
+  } finally {
+    setCapabilities(previousCapabilities)
+  }
 })
