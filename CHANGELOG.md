@@ -7,116 +7,49 @@
 
 ## [Unreleased]
 
+## [0.5.6] - 2026-11-08
+
+### 安装与版本对应
+
+本版要求 DSH `>=0.2.2-rc.1`，精确验证目标为 `0.2.2-rc.1`，Node.js `>=24.9.0`；不兼容 DSH `0.2.1-rc.*`。安装 DSH 需允许官方原生安装脚本：
+
+```sh
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.2-rc.1
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.5.6
+dsh --profile pi-tui
+```
+
+从 `0.5.5` 升级也必须切换 DSH。先结束 Agent 回合和后台工作、正常退出旧 TUI/Host，并备份 Profile/patch、Session 原始日志、Workspace 及所需 Host 资源和凭据引用；本版不支持热升级。0.2.2 写入的数据不保证能由 rc5 原地读取。回退时将备份恢复到独立目录，并启动原有 DSH/TUI 配对，不要在已升级目录降级。
+
 ### 升级与安全须知
 
-- **DSH 0.2.2 默认不再强制「先读后写」。** 上游把
-  `fs-observation-policy` 改为默认关闭，dsh-pi-tui 跟随该默认，不恢复旧的
-  文件观察守卫；模型可以直接 `write` / `edit` 未在本会话读取过的文件。若部署
-  需要旧的先读后写约束，请通过官方 Profile 覆盖重新启用
-  `fs-observation-policy`；本扩展不会自动修改用户配置。
-- **`web_fetch` 可以访问 localhost 与私网目标。** 上游 HTTP provider 不再在
-  工具层拒绝非公网地址，dsh-pi-tui 也不再承诺旧的私网拦截。若环境需要屏蔽，
-  请使用 Host 进程级网络隔离、代理/防火墙或官方 tool pre-execute policy；
-  不要依赖 TUI 自身的 URL 规则。
-- **同一 Host 的附件存储不是按会话隔离的。** 合法调用者在同一 Host 的
-  AttachmentStore 内持有完整图片引用时，可以读取其他 Session 未引用过的图片；
-  Gateway / Peer 的方法级授权仍是权限边界。若要求按会话隔离，请使用各自独立的
-  Host 与 `DSH_HOME`。
-- **旧 `schedule/change` 事件只保留为历史日志。** rc5 时代的会话内提醒事件不会
-  自动变成新的 Host Scheduled Task；已有 Host 任务的执行与存储仍由官方
-  Schedule 服务负责。新的 `schedule_*` 工具管理的是 Host-wide 任务，使用者需
-  注意其权限范围；旧工具调用/结果仍按历史记录展示。
-- **升级前请备份，且不要对已升级目录原地降级。** 0.2.2 新语义写入的
-  Session、fork 与 schedule 数据不保证能被 rc5 读取。升级前请停止正在运行的
-  Agent 与后台任务，备份旧 DSH/TUI 安装配对、Profile 与 patch、Session 原始
-  日志、Workspace 与必要的 Host 资源/凭据引用；需要退回时，把备份恢复到独立
-  目录并用匹配的旧 DSH/TUI 配对启动。备份材料应安全保存，不要把敏感信息写入
-  诊断输出。
-- **`pi2dsh` 的真实终端兼容性未纳入本版资格范围。** 该外部插件的 peer 依赖指向
-  不同的 DSH 版本，本版未验证其真实 PTY 兼容；请按该外部插件自身的说明使用。
+- **DSH 0.2.2 默认不再要求先读后写。** 上游关闭了 `fs-observation-policy` 默认值；需要该约束时，请用官方 Profile override 重新启用，本扩展不会替你修改配置。
+- **`web_fetch` 可访问 localhost 和私网地址。** 需要限制时使用 Host 网络隔离、代理/防火墙或官方 tool pre-execute policy，不要依赖 TUI URL 规则。
+- **同一 Host 的附件存储不按 Session 隔离。** Gateway/Peer 方法级授权仍是权限边界；需要会话隔离时使用不同 Host 和 `DSH_HOME`。
+- **旧 `schedule/change` 事件不会迁移为 Host Scheduled Task。** 新 `schedule_*` 工具管理 Host-wide 任务，旧调用和结果仅作为历史记录展示。
+- 旧版配对仍有效：`@deepseek-ai/dsh@0.2.1-rc.5` 搭配 `@xmoon76/dsh-pi-tui@0.5.5`；`@deepseek-ai/dsh@0.2.0-rc.2` 搭配 `@xmoon76/dsh-pi-tui@0.5.2-rc.1`。
 
 ### 新增
 
-- **PiTui 主编辑器连按两次 `←` 打开 Session Workspace。** 当主编辑器真实持有键盘、
-  处于普通输入模式且草稿严格为空（没有文字或空白、没有已暂存图片、也没有正在粘贴的
-  内容）时，600ms 内两次独立按下不带修饰键的 `←` 会直接打开现有的全屏 Session
-  Workspace 并默认显示 `All workspaces`；裸 `/sessions`、`/resume` 与欢迎页入口仍
-  保持 `Current`。第一次 `←` 仍是普通的光标左移；提问、审批、保存位置、历史与任务
-  面板、查看器、自动补全、浮层等更高优先级界面不会触发该手势；`Esc` 回到原会话、
-  原草稿与编辑器焦点，不会因此切换或停止会话。TSP 渲染器保持原有原生会话浏览器
-  不变。
-- **Split Web 前端新增官方文件下载、文本引用与 Changed Files 页面。** 在
-  `/web` 启用后，官方 Web 页面可通过文件右键菜单下载会话文件的原字节、在浏览器
-  允许剪贴板时复制图片（Web 不提供桌面端专有的「另存为」），并可在对话中选中文本
-  直接引用到输入框——引用只写入草稿，只有再次发送才产生一条普通用户消息。每个
-  顶层回合若真实修改了工作区文件，结束处会出现 Changed Files 卡，点击进入该回合
-  的改动对比页；这些改动只在 Web 开启期间由 Host 记录，Host 重启或会话结束后旧
-  的摘要与对比不再可用。Direct 模式与未启用 Web 时均不记录，宿主进程、会话与
-  定时任务不受影响。
-- **TUI 与 Web 共享官方文件链接与交付指导。** 支持的 Agent 现在会在合适的
-  preset 中获得官方文件链接、图片引用与 `present` 交付建议；该指导不依赖 Web
-  是否启用，现有 `present` 工具与 TUI `/deliverables` 面板仍可独立使用。
-- **Split Web 文档预览启用官方 Office 转 PDF provider。** 启用 Web 后，官方文档
-  预览可以使用 DSH 提供的 Office 转换能力；停用 Web 会释放该能力，同时保留
-  Host、TUI 会话与其它共享服务。
-- **Split Client 的 `/web` 入口与「下次 Host 启动自动启用 Web 前端」偏好。**
-  在 Split Client 中输入 `/web` 可查看当前 Host 官方 Web 前端的真实状态，并只按
-  该状态提供启用、停用、打开浏览器、复制认证链接与只读详情；打开菜单或查看详情
-  不会改动 Host，认证链接只在用户明确选择「打开浏览器/复制链接」时才向当前 Host
-  取得，不会自动打开浏览器、打印 URL、创建会话或再起一个 Host。`/settings → Tools
-  → Auto-enable Web on Host startup` 把该偏好持久化到当前 DSH Profile，只在下一次
-  Split Host 冷启动时生效：默认关闭，切换偏好不会立即启用或停用正在运行的 Host，
-  浏览器仍只在用户操作时打开。Direct 模式会明确提示该能力仅在 Split Client 可用。
-- **Host Schedule 管理（`/schedule`）。** 在 Direct 与 Split 两种形态下，任何用户
-  都可直接打开 Host 全局任务目录：搜索并按 `All / Active / Paused / Ended` 过滤，
-  查看下一次执行、完整规则与时区、执行目标、最新投递，并分页浏览投递历史。新建与
-  编辑只提交官方七种 timing 与三种 target；若任务在你编辑期间已被别处改动，保存会被
-  拒绝并保留你的草稿，不会静默覆盖对方的修改；暂停/恢复按最新版本校验后直接生效，立即执行、
-  删除与清理已结束任务需要明确确认，并以 Host 真实返回与重新读取为准。该命令不需要会话：打开界面
-  不会创建或切换会话、不会调用模型。Host 定时器由常驻 Host 持有，关闭 Client 或
-  Web 端不影响已到期任务的递送；Host 退出后不再有后台执行。TSP 渲染器暂不支持该
-  页面，会给出通用的「能力暂不可用」提示并恢复草稿；官方 Web 的任务页保持不变。
-- **终端粘贴图片路径自动附件化。** 在 Tern / Hedr 等终端里把本地图片文件粘贴到
-  输入框时，dsh-pi-tui 会自动读取该图片并替换成标准 `[image #N (W×H)]`，无需手动
-  `/image`；文件仍在读取时按 Enter / 发送 / 转向会被拒绝并提示重试，读取失败则
-  保留原路径文字。PiTui 与 TSP 两种渲染器均支持，图片仍走既有的草稿与提交链。
-
-- **Split Client 的待答问题/审批只在所属 Session。** 另一个 Session 的未决 Question
-  或 Approval 不再弹到当前会话的编辑器上；通过 `/sessions` 或 `/resume` 真正切换到
-  该 Session 后，同一个官方请求才重新出现并可回答。在 Question/Approval 模态上按
-  `Alt+W` 可以「暂不回答」地打开会话工作区：不取消、不拒绝、不提交 Host 请求；
-  浏览到别的 Session 或关闭工作区后，回到原 Session 时原请求重新出现。Direct 与
-  TSP 原生模态行为保持不变。
-- **会话工作区：Needs attention 优先的分组列表、完整 Workspace 选择与只读 Peek。**
-  `/sessions`、`/search` 与 `/resume` 打开的全屏会话工作区现在是一张
-  `Needs attention → Working → Recent` 的单列表：只有本客户端确实仍能回答的待答请求
-  才进入第一组，证据不足的候选项明确显示「待答状态未确认」而不是假装可答；运行中的
-  会话单独成组，其余按最后更新时间排列，未知、被拒与不可用的状态如实呈现而不写成
-  空闲。`w` 可展开 `Current`、每个官方 Workspace 与 `Unassigned`，当前会话所属
-  Workspace 只由官方成员关系证明。选中行按 `Space` 打开只读详情（会话 ID、标题、
-  Workspace、cwd、preset、更新时间、运行与待答状态），`Esc` 原样返回，不打开、不保留
-  也不答复会话。宽屏在列表右侧同时显示只读预览，窄屏或矮屏自动单列；列表行支持鼠标
-  单击选中，`Enter` 仍是唯一的切换动作。会话活动会在打开后按下一次刷新周期更新，并在
-  待答请求状态变化时提前刷新一次；刷新不会抢走正在使用的光标、选中项或滚动位置。
+- **Host Schedule 管理。** PiTui Direct 的 `/schedule` 管理 Host-wide 任务，不需要 Session；任务由 Host 执行。
+- **PiTui Session Workspace。** `/sessions`、`/search`、`/resume` 按 Needs attention、Working、Recent 分组，可按 Workspace 浏览；`Space` 查看只读 Peek，`Enter` 才切换。Direct 下新 Session（包括 `/new`）由官方 Host Workspace 决定归属。主编辑器严格空白时，600ms 内两次无修饰 `←` 打开 All workspaces，第一次仍是普通左移。
+- **插件版本更新。** Plugin Manager 可检查 Host 标记为可更新的第三方 Registry Profile bundle，选择具体版本并确认更新；结果以 Host 回读为准，当前运行的 TUI 不能从自身面板更新。
+- **共享文件交付指导。** 支持的 Agent preset 获得官方文件链接、图片引用和 `present` 交付建议；不依赖 Web 是否启用。
+- **粘贴图片路径自动附件化。** 支持的终端中，可识别的本地绝对图片路径粘贴后会成为图片附件；读取期间不能发送，失败时保留路径文字。
 
 ### 变更
 
-- **（不兼容）公开的 `composeAgent(ctx, ModelSelectionRef)` 调用已退休。** DSH 0.2.2
-  将模型选择所有权移入 Agent（`AgentModel` + 会话 `modelSelection` 投影），上游删除了
-  `ModelSelectionRef` 与 `installModelSelection(ctx, ref)`，因此本版本不再接受调用方
-  自持的模型选择 ref；不存在可兼容的本地替身。迁移方式：把
-  `composeAgent(ctx, ref, ...)` 改为
-  `composeAgent(ctx, (agentCtx, agent) => { /* 安装 Agent 级贡献 */ }, ...)`，模型选择
-  由 Agent 自身管理（读写 `agent.model`；`/model` 仍通过既有 catalog 端口提交）。仅使用
-  内置 TUI 的 profile 无需改动。
-
-- **`/transcript` 改为官方 Session Markdown，导出内容格式随之变化。** `/transcript` 现在在 Direct 与 Split Client 上都读取官方 Host `formatSessionMarkdown` 生成的完整已提交 Session Markdown（含 fork 继承前缀与最新标题），再由客户端本地保存流程写入 `.md`；不再使用 TUI 自研的 `## User` / `## Assistant`、Workflow/PTC 小节和视觉结果过滤。用户消息变为引用块，最终回答为普通 Markdown，之前的工具与过程活动折叠进 `<details>`，需要时附带官方 `Session file:` 源路径。文件名、无参数语法、保存位置/重名确认/取消以及 `/export` 的 ZIP 归档行为保持不变；Split Client 的 `/transcript` 由原先的“此 backend 不可用”变为真实可用。
+- **（不兼容）DSH 扩展 API。** DSH 0.2.2 移除了 `composeAgent(ctx, ModelSelectionRef)`。扩展应改用 Agent-scoped compose callback，并通过 `agent.model` 读写模型选择；仅使用内置 TUI 的 Profile 无需改动。
+- **（不兼容）图表/SVG 引用改用 `sv2`。** `sv1_…`、`visual-ref-v1:` 和 `[dsh-visual-sv1_…]` 不迁移也不再解析；旧内联图表可能退化为文本。
+- **普通 Fork/Rewind 不再显示为父子 Session lineage。** DSH 0.2.2 将其作为独立 Session；Session lineage 仅表示 Subagent 关系。
+- **`/transcript` 改为官方 Session Markdown。** Direct 下导出 Host 官方格式，用户消息为引用块，过程内容可折叠。`/export` ZIP 行为不变。
+- **Markdown 裸 URL 的标点边界调整。** 裸 URL 在首个 CJK/全角标点处结束链接，包括平衡全角括号；可见正文、显式 Markdown 链接和复制文本不变。
 
 ### 修复
 
-- **修复新版 DSH 下 Split Host 的官方 Web 前端无法加载的问题。** 新版官方 Web 前端删除了已不存在的模型标签插件，并要求聊天、附件与会话等既有界面依赖上下文菜单与文件拖拽这两项官方客户端能力；Split Host 的 Web 组件清单现已同步这组真实依赖，`/web` 启停、`autoStart` 偏好与浏览器访问路径保持不变。
-- **正文内联附件的成功提示不再被吞掉。** 在正文里接受 `/image` / `/attach` 的路径候选后，占位符与草稿附件其实已经落地，但 `attached … — Enter to send` 提示被「写入前的草稿快照」守卫判为已过期而静默丢弃（正是这次写入让该快照失效），PiTui 与 TSP 两种渲染器都受影响；首行 `/attach <path>`、`/image <path>` 与剪贴板 / 终端粘贴路径的提示保持不变。现在成功提示以「写入确实完成 + 当前会话所有权」为准；同时修掉另一侧——写入被拒绝时原先仍会播报成功，现在只回滚该条目，不再假报 `attached`。
-- 修复 `/new` 后立即 `/exit` 时退出日志出现 `retire phase failed phase=flush: flush on a closed handle` 的竞态：退出/热重载/驻留会话的退休不再对 DSH 已开始关闭的写句柄重复执行显式 flush，最终持久化由 `AgentHandle.dispose` 加入 DSH 的关闭/排空完成；普通会话切换的旧 owner 仍保留显式 flush，且新提交的空会话在提交后、任何长时间 drain 可能被退出接管之前，立即建立可恢复的持久化边界（失败会明确提示，不再静默）。
+- **内联附件完成后显示成功提示。** PiTui 正文中的 `/image`、`/attach` 候选已成功写入草稿时显示提示；写入被拒绝则不再误报成功。
+- **修复新建会话后立即退出的保存竞态。** `/new` 后紧接 `/exit` 不再因重复 flush 已关闭的句柄而产生退出错误。
+- **退出时清除受支持终端的过期程序状态。** 仅已启用 Program Status 上报的终端会收到清除序列。
 
 ## [0.5.5] - 2026-11-03
 
@@ -1794,7 +1727,8 @@ dsh --profile pi-tui
 - 全屏布局、Ctrl+F 搜索、主题系统。
 - 单包发布模型。
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.5...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.6...HEAD
+[0.5.6]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.5...v0.5.6
 [0.5.5]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.4...v0.5.5
 [0.5.4]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.5.2-rc.1...v0.5.3
