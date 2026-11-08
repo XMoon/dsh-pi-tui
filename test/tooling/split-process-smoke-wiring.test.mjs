@@ -3,8 +3,9 @@
  *
  * The real OS qualification lives in `scripts/split-process-smoke.mjs` and is
  * driven by the dedicated CI split-process job on npm release-tag pushes, or
- * by an explicitly opted-in workflow_dispatch on main. An ordinary PR or
- * branch push legally skips the job — that skip is NOT the full smoke
+ * by an explicitly opted-in workflow_dispatch on any npm-mode
+ * refs/heads/... branch. An ordinary PR or branch push legally skips the job
+ * — that skip is NOT the full smoke
  * passing: split-process development work runs `pnpm smoke:split-process`
  * manually under its own task plan. This tooling test is a lightweight
  * wiring/selector/CI/utility guard: it does NOT prove the real 14/14 cases,
@@ -51,15 +52,16 @@ function workRootsIn(tmpRoot) {
   return readdirSync(tmpRoot).filter(name => name.startsWith('dsh-split-process-'))
 }
 
-test('the split-process smoke runs on tag pushes or explicit main dispatch', () => {
+test('the split-process smoke runs on tag pushes or an explicit branch dispatch', () => {
   const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
   assert.equal(pkg.scripts?.['smoke:split-process'], 'node scripts/split-process-smoke.mjs')
   const ci = readFileSync(join(ROOT, '.github', 'workflows', 'ci.yml'), 'utf8')
 
   // Parse the two jobs rather than matching raw text: the split-process job
-  // must run for npm release-tag pushes and explicit main dispatches AND execute
-  // the real lane against the downloaded candidate. An ordinary branch/PR skip
-  // remains the default; the qualifier verdict requires success for opted-in runs.
+  // must run for npm release-tag pushes and explicit npm-mode branch dispatches
+  // AND execute the real lane against the downloaded candidate. An ordinary
+  // branch/PR skip remains the default; the qualifier verdict requires success
+  // for opted-in runs.
   const workflow = parseYaml(ci)
   const job = workflow.jobs['split-process']
   assert.ok(job, 'the split-process smoke must be its own CI job')
@@ -82,11 +84,17 @@ test('the split-process smoke runs on tag pushes or explicit main dispatch', () 
   assert.equal(failureUpload?.with?.overwrite, true)
 
   assert.equal(job.if,
-    "${{ always() && needs.dsh-context.result == 'success' && needs.candidate.result == 'success' && needs.dsh-context.outputs.mode == 'npm' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.run_split_process)) }}",
-    'only npm release-tag pushes or the explicit main dispatch input may run this job')
+    "${{ always() && needs.dsh-context.result == 'success' && needs.candidate.result == 'success' && needs.dsh-context.outputs.mode == 'npm' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/') && inputs.run_split_process)) }}",
+    'only npm release-tag pushes or an explicit npm-mode branch dispatch may run this job')
   const dispatch = (workflow.on ?? workflow['on']).workflow_dispatch
   assert.equal(dispatch.inputs.run_split_process.default, false,
     'manual Split qualification is opt-in')
+  assert.equal(dispatch.inputs.run_split_process.description,
+    'Run full Host/Client Split qualification on the selected npm-mode branch')
+  assert.match(job.if, /startsWith\(github\.ref, 'refs\/heads\/'\)/u,
+    'the manual dispatch must accept any refs/heads/... branch')
+  assert.doesNotMatch(job.if, /github\.ref == 'refs\/heads\/main'/u,
+    'the manual dispatch must not stay main-only')
   const ciVerdict = workflow.jobs.qualified.steps.find(step => typeof step.run === 'string'
     && step.run.includes('ci-verdict.mjs qualify'))
   assert.ok(ciVerdict?.run.includes('--phase "split-process=${{ needs[\'split-process\'].result }}"'),
