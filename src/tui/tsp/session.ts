@@ -4202,76 +4202,62 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
           return false
         }
       }
-      // Focus Root, Work and Tool disclosures all use this Session iterator;
-      // each native node has one exact current-frame owner and no onToggle hook.
+      // Focus Root, Work and Tool disclosures all use this Session iterator and
+      // share the same current-frame and input-seat admission before changing
+      // any renderer-local disclosure owner or creating image demand.
       if (input.event.ev === 'toggle' && input.event.sf === surface.id
         && !hydrating && inputBound
-        && options.displayState?.preset === 'focus'
         && !seat.hasModalSeat()
         && detailsSlot === undefined && !openingDetails
         && workHub?.isOpen() !== true && sessionBrowser?.isOpen() !== true
         && webPicker?.isOpen() !== true && presetPicker?.isOpen() !== true
         && modelPicker?.isOpen() !== true && modelQuick?.isOpen() !== true
         && historySearch?.isOpen() !== true) {
-        const path = input.event.id.startsWith('main.') ? input.event.id.slice('main.'.length) : input.event.id
-        const turn = focusDisclosureByPath.get(input.event.id) ?? focusDisclosureByPath.get(path)
-        if (turn !== undefined) {
-          const wasExpanded = expandedFocusTurns.has(turn)
-          const targetExpanded = input.event.collapsed !== true
-          if (wasExpanded !== targetExpanded) {
-            if (targetExpanded) {
-              expandedFocusTurns.add(turn)
-            } else {
-              expandedFocusTurns.delete(turn)
-              for (const owner of focusWorkOwnersByTurn.get(turn) ?? []) expandedWorkOwners.delete(owner)
-              const toolKeys = focusToolKeysByTurn.get(turn)
-              if (toolKeys !== undefined) {
-                for (const expandedKey of expandedToolKeys) {
-                  const slash = expandedKey.indexOf('/')
-                  const rootKey = slash < 0 ? expandedKey : expandedKey.slice(0, slash)
-                  if (toolKeys.has(rootKey)) expandedToolKeys.delete(expandedKey)
+        const preset = options.displayState?.preset
+        if (preset === 'focus') {
+          const path = input.event.id.startsWith('main.') ? input.event.id.slice('main.'.length) : input.event.id
+          const turn = focusDisclosureByPath.get(input.event.id) ?? focusDisclosureByPath.get(path)
+          if (turn !== undefined) {
+            const wasExpanded = expandedFocusTurns.has(turn)
+            const targetExpanded = input.event.collapsed !== true
+            if (wasExpanded !== targetExpanded) {
+              if (targetExpanded) {
+                expandedFocusTurns.add(turn)
+              } else {
+                expandedFocusTurns.delete(turn)
+                for (const owner of focusWorkOwnersByTurn.get(turn) ?? []) expandedWorkOwners.delete(owner)
+                const toolKeys = focusToolKeysByTurn.get(turn)
+                if (toolKeys !== undefined) {
+                  for (const expandedKey of expandedToolKeys) {
+                    const slash = expandedKey.indexOf('/')
+                    const rootKey = slash < 0 ? expandedKey : expandedKey.slice(0, slash)
+                    if (toolKeys.has(rootKey)) expandedToolKeys.delete(expandedKey)
+                  }
                 }
               }
+              if (rebuildLastMain()) render()
             }
-            if (rebuildLastMain()) render()
+            return false
           }
-          return false
         }
-      }
-      // Compact Activity and an already-open Focus Work use the same Work owner
-      // set. Root and Work targets are disjoint because their exact keys differ.
-      if (input.event.ev === 'toggle' && input.event.sf === surface.id
-        && !hydrating && inputBound
-        && (options.displayState?.preset === 'compact' || options.displayState?.preset === 'focus')
-        && !seat.hasModalSeat()
-        && detailsSlot === undefined && !openingDetails
-        && workHub?.isOpen() !== true && sessionBrowser?.isOpen() !== true
-        && webPicker?.isOpen() !== true && presetPicker?.isOpen() !== true
-        && modelPicker?.isOpen() !== true && modelQuick?.isOpen() !== true
-        && historySearch?.isOpen() !== true) {
-        // EXACT current-path admission: only the real current id or its one
-        // fixed `main.` region prefix is accepted.
-        const owner = workDisclosureByPath.get(input.event.id)
-          ?? workDisclosureByPath.get(input.event.id.startsWith('main.') ? input.event.id.slice('main.'.length) : input.event.id)
-        const turn = owner === undefined ? undefined : focusWorkTurnByOwner.get(owner)
-        const admitted = options.displayState?.preset === 'compact'
-          || (turn !== undefined && expandedFocusTurns.has(turn))
-        if (owner !== undefined && admitted) {
-          const wasExpanded = expandedWorkOwners.has(owner)
-          const targetExpanded = input.event.collapsed !== true
-          if (wasExpanded !== targetExpanded) {
-            if (targetExpanded) expandedWorkOwners.add(owner)
-            else expandedWorkOwners.delete(owner)
-            if (rebuildLastMain()) render()
+        if (preset === 'compact' || preset === 'focus') {
+          // EXACT current-path admission: only the real current id or its one
+          // fixed `main.` region prefix is accepted.
+          const owner = workDisclosureByPath.get(input.event.id)
+            ?? workDisclosureByPath.get(input.event.id.startsWith('main.') ? input.event.id.slice('main.'.length) : input.event.id)
+          const turn = owner === undefined ? undefined : focusWorkTurnByOwner.get(owner)
+          const admitted = preset === 'compact' || (turn !== undefined && expandedFocusTurns.has(turn))
+          if (owner !== undefined && admitted) {
+            const wasExpanded = expandedWorkOwners.has(owner)
+            const targetExpanded = input.event.collapsed !== true
+            if (wasExpanded !== targetExpanded) {
+              if (targetExpanded) expandedWorkOwners.add(owner)
+              else expandedWorkOwners.delete(owner)
+              if (rebuildLastMain()) render()
+            }
+            return false
           }
-          return false
         }
-      }
-      // PR-D RFL-016: the Tern disclosure event. A ready SVG card starts
-      // collapsed; expanding it is the real display demand that sends the
-      // blob. The node id's last segment is the `ui.tool` key (the same key the
-      // mapper wrote), with the event's optional `key` taking precedence.
-      if (input.event.ev === 'toggle' && input.event.sf === surface.id) {
         // The SDK node id still carries the B2 child key (`sub-...`); the
         // disclosure identity is the parent-scoped path from the last tool-card
         // key (`msg-N`) through that child key. The mapper builds exactly the
@@ -4285,10 +4271,11 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
             matched = path.length
           }
         }
-        if (disclosure === undefined) return false
-        if (input.event.collapsed) expandedToolKeys.delete(disclosure)
-        else expandedToolKeys.add(disclosure)
-        if (rebuildLastMain()) render()
+        if (disclosure !== undefined) {
+          if (input.event.collapsed) expandedToolKeys.delete(disclosure)
+          else expandedToolKeys.add(disclosure)
+          if (rebuildLastMain()) render()
+        }
         return false
       }
       if (input.event.ev === 'resize' && input.event.sf === surface.id && typeof input.event.cols === 'number') {
