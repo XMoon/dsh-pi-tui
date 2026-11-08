@@ -222,7 +222,11 @@ export class ScheduleWorkspaceController {
       mode: this.mode,
       ...(this.detail === undefined ? {} : { detail: this.detail }),
       ...(this.historyView === undefined ? {} : { history: this.historyView }),
-      ...(this.editor === undefined ? {} : { editor: this.editor, editorDirty: this.editorDirty() }),
+      ...(this.editor === undefined ? {} : {
+        editor: this.editor,
+        editorEpoch: this.editorToken,
+        editorDirty: this.editorDirty(),
+      }),
       ...(this.editorRecovery === undefined ? {} : { editorRecovery: this.editorRecovery }),
       ...(this.confirm === undefined ? {} : { confirm: this.confirm }),
       ...(this.notice === undefined ? {} : { notice: this.notice }),
@@ -744,6 +748,7 @@ export class ScheduleWorkspaceController {
     }
 
     const currentTiming = edited.timing
+    if (preset === 'once-after' && currentTiming.kind === 'after') return
     if (currentTiming.kind === kind) {
       if (quantityUnit === undefined) return
       const timing = selectTimingQuantityUnit(currentTiming, quantityUnit)
@@ -913,7 +918,6 @@ export class ScheduleWorkspaceController {
     this.editReadAbort = controller
     const token = this.editorToken
     const epoch = ++this.reloadEpoch
-    const focusedId = editorFields(draft)[draft.focused]?.id ?? 'timing-kind'
     try {
       const result = await this.port.view({ id: scheduleId(draft.id) }, controller.signal)
       if (!this.isCurrentEditorRead(epoch, token, draft.id, controller)) return
@@ -943,7 +947,11 @@ export class ScheduleWorkspaceController {
         advanced: latest.target.kind !== 'session' && (latest.target.cwd !== '' || latest.target.agentPreset !== ''),
         expectedUpdatedAt: result.updatedAt ?? null,
       }
-      this.editor = { ...next, focused: editorFocusIndex(next, focusedId) }
+      const currentEditor = this.editor
+      const currentFocusedId = currentEditor === undefined
+        ? 'timing-kind'
+        : editorFields(currentEditor)[currentEditor.focused]?.id ?? 'timing-kind'
+      this.editor = { ...next, focused: editorFocusIndex(next, currentFocusedId) }
       this.editorBaseline = latest
       this.editorRecovery = undefined
       this.notice = infoNotice(SCHEDULE_COPY.reloaded)
@@ -973,7 +981,6 @@ export class ScheduleWorkspaceController {
     }
     const token = this.editorToken
     const id = draft.id
-    const focusedId = editorFields(draft)[draft.focused]?.id ?? 'timing-kind'
     this.editReadAbort?.abort()
     const controller = new AbortController()
     this.editReadAbort = controller
@@ -1014,7 +1021,11 @@ export class ScheduleWorkspaceController {
         advanced: target.kind !== 'session' && (target.cwd !== '' || target.agentPreset !== ''),
         expectedUpdatedAt: result.updatedAt ?? null,
       }
-      this.editor = { ...next, focused: editorFocusIndex(next, focusedId) }
+      const currentEditor = this.editor
+      const currentFocusedId = currentEditor === undefined
+        ? 'timing-kind'
+        : editorFields(currentEditor)[currentEditor.focused]?.id ?? 'timing-kind'
+      this.editor = { ...next, focused: editorFocusIndex(next, currentFocusedId) }
       this.editorBaseline = latest
       this.editorRecovery = undefined
       const bothChanged = [

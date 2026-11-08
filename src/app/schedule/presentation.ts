@@ -120,6 +120,8 @@ export interface ScheduleWorkspaceSnapshot {
   readonly detail?: ScheduleCatalogEntry
   readonly history?: ScheduleHistoryView
   readonly editor?: ScheduleEditorDraft
+  /** Stable across Help/Confirm/page transitions; changes only when an Editor instance is replaced. */
+  readonly editorEpoch?: number
   readonly editorDirty?: boolean
   readonly editorRecovery?: ScheduleEditorRecovery
   readonly confirm?: ScheduleConfirm
