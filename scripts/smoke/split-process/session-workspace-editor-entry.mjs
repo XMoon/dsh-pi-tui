@@ -174,4 +174,5 @@ export async function runSessionWorkspaceEditorEntry(context) {
   const hostAfter = await hostIdentityFacts(host)
   assert(hostAfter.hostPid === hostPid, 'U-E the Host identity changed after A exited')
   trace('ue-editor-entry-answered', { sessionX, sessionY, hostPid })
+  await tools.scene.dispose()
 }
