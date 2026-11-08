@@ -7,163 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.6] - 2026-11-08
+
+### Installation and version pairing
+
+This release requires DSH `>=0.2.2-rc.1`, targets `0.2.2-rc.1` for exact validation, and requires Node.js `>=24.9.0`. It is not compatible with DSH `0.2.1-rc.*`. Allow DSH's official native install scripts:
+
+```sh
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.2-rc.1
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.5.6
+dsh --profile pi-tui
+```
+
+Upgrading from `0.5.5` also requires changing DSH. Let Agent turns and background work finish, exit the old TUI/Host normally, and back up the Profile/patch, raw Session logs, Workspace and necessary Host resources or credential references. Hot upgrade is not supported. Data written under 0.2.2 semantics is not guaranteed readable by rc5 in place. To roll back, restore the backup into a separate directory and start the matching old DSH/TUI pair.
+
 ### Upgrade and security notes
 
-- **DSH 0.2.2 no longer requires a read before a write by default.** The
-  upstream `fs-observation-policy` now defaults to off, and dsh-pi-tui follows
-  that default instead of restoring the old file-observation guard: the model
-  may `write` / `edit` a file it has not read in this Session. A deployment
-  that wants the old read-before-write constraint can re-enable
-  `fs-observation-policy` through an official Profile override; this extension
-  never changes the user's configuration automatically.
-- **`web_fetch` can reach localhost and private destinations.** The upstream
-  HTTP provider no longer refuses non-public addresses in the tool layer, and
-  dsh-pi-tui no longer promises the old private-address blocking. If an
-  environment needs that blocking, use Host process network isolation, a
-  proxy/firewall or an official tool pre-execute policy; do not rely on a TUI
-  URL rule.
-- **Attachment storage on one Host is not Session-isolated.** An authorized
-  caller holding a complete image reference in the same Host AttachmentStore
-  can read an image that another Session never referenced; method-level
-  Gateway/Peer authorization remains the boundary. For per-Session isolation,
-  use separate Hosts with separate `DSH_HOME` directories.
-- **Legacy `schedule/change` events remain history only.** Session-local
-  reminder events from the rc5 era never become new Host Scheduled Tasks;
-  execution and storage of existing Host tasks remain with the official
-  Schedule service. The new `schedule_*` tools manage Host-wide tasks, so note
-  their permission scope; old tool calls/results are still rendered as history.
-- **Back up before upgrading, and never downgrade an upgraded directory in
-  place.** Session, fork and schedule data written under the 0.2.2 semantics is
-  not guaranteed to be readable by rc5. Before upgrading, stop running Agents
-  and background jobs, then back up the old DSH/TUI installation pairing, the
-  Profile and patch, the original Session logs, the workspace and any necessary
-  Host resources or credential references. To roll back, restore the backup
-  into a separate directory and start the matching old DSH/TUI pairing. Keep
-  backups safe and never put sensitive values into diagnostic output.
-- **`pi2dsh` real-terminal compatibility is outside this release's
-  qualification scope.** That external plugin's peer dependencies target a
-  different DSH version, and its real-PTY compatibility was not verified here;
-  follow that external plugin's own instructions.
+- **DSH 0.2.2 no longer requires read-before-write by default.** Upstream now defaults `fs-observation-policy` to Off. Re-enable it with an official Profile override if needed; this extension does not change the setting for you.
+- **`web_fetch` can reach localhost and private addresses.** Use Host network isolation, a proxy/firewall or an official tool pre-execute policy when access must be restricted; do not rely on a TUI URL rule.
+- **Attachment storage is not Session-isolated within one Host.** Gateway/Peer method authorization remains the boundary; use separate Hosts and `DSH_HOME` directories for Session isolation.
+- **Legacy `schedule/change` events do not migrate to Host Scheduled Tasks.** New `schedule_*` tools manage Host-wide tasks; old calls and results remain history.
+- Historical pairings remain: `@deepseek-ai/dsh@0.2.1-rc.5` with `@xmoon76/dsh-pi-tui@0.5.5`, and `@deepseek-ai/dsh@0.2.0-rc.2` with `@xmoon76/dsh-pi-tui@0.5.2-rc.1`.
 
 ### Added
 
-- **Two `←` presses in the PiTui main editor open the Session Workspace.**
-  While the Host main editor really owns the keyboard, is in plain prompt mode
-  and the draft is strictly empty (no text or whitespace, no staged image and
-  no in-flight paste), two independent unmodified `←` presses within 600 ms
-  open the existing fullscreen Session Workspace with `All workspaces` as the
-  initial scope, while bare `/sessions`, `/resume` and the Welcome entry keep
-  `Current`. The first `←` is still an ordinary cursor move; a Question,
-  Approval, Save Location, History or Task panel, viewer, autocomplete or
-  overlay never triggers the gesture, and `Esc` returns to the same Session,
-  draft and editor focus without switching or stopping anything. The TSP
-  renderer keeps its native Session Browser unchanged.
-- **The Split Web frontend gained official file download, text quoting and a
-  Changed Files page.** Once `/web` is enabled, the official Web page can
-  download the original bytes of Session files from their context menu, copy
-  images when the browser grants the clipboard permission (Web offers no
-  Desktop-only "Save as"), and quote selected conversation text into the
-  composer — a quote only fills the draft, and an explicit Send produces one
-  ordinary user message. A top-level turn that really changed workspace files
-  ends with a Changed Files card that opens that turn's comparison page. These
-  changes are recorded by the Host only while Web is enabled: after a Host
-  restart or once the Session is gone, the old summary and comparison are no
-  longer available. Direct mode and a Host with Web off record nothing, and the
-  Host process, Sessions and scheduled tasks are unaffected.
-- **TUI and Web now share the official file-link and delivery guidance.** Supported
-  Agent presets receive the official advice for file links, image references and
-  `present` deliveries where applicable; the guidance does not depend on Web
-  being enabled, and the existing `present` tool and TUI `/deliverables` panel
-  remain independently usable.
-- **Split Web document preview now activates the official Office-to-PDF provider.**
-  When Web is enabled, the official document preview can use DSH's Office
-  conversion capability; disabling Web releases it while retaining the Host,
-  TUI Sessions and other shared services.
-- **A `/web` entry and an "auto-enable the Web frontend on Host startup"
-  preference for the Split Client.** `/web` shows the current Host's real
-  official-Web-frontend state and offers only the actions that state admits —
-  enable, disable, open the browser, copy the authenticated link and a read-only
-  Details page. Opening the menu or reading Details never changes the Host, and
-  the authenticated link is requested from the current Host only when the user
-  explicitly chooses Open Browser or Copy Link; nothing opens a browser
-  automatically, prints the URL, creates a Session or starts a second Host.
-  `/settings → Tools → Auto-enable Web on Host startup` persists the preference
-  in the current DSH Profile and applies it only to the NEXT Split Host launch:
-  it defaults to Off, changing it never enables or disables the running Host, and
-  the browser still opens only on an explicit user action. Direct mode states
-  that these controls are available only in a Split Client.
-- **Host Schedule management (`/schedule`).** On both Direct and Split, any user
-  can open the Host-wide task catalog without an existing Session: search and
-  filter by `All / Active / Paused / Ended`, read the next occurrence, the full
-  stored rule and time zone, the delivery target, the latest delivery, and page
-  through the delivery history. Creating and editing submit one of the seven
-  official timings and one of the three official targets; an edit that would
-  overwrite a newer change is refused and keeps your draft instead of silently
-  overwriting. Pause/resume applies directly against the latest revision, while
-  run now, delete and clear-ended each need
-  an explicit confirmation and report the Host's real answer plus a re-read. The
-  command is sessionless: opening the workspace creates no Session and calls no
-  model. The Host owns the timer, so closing the Client or the Web frontend does
-  not stop due deliveries; a stopped Host has no background execution. The TSP
-  renderer does not support this page yet — it answers the generic
-  unsupported-capability notice and restores the draft — and the official Web
-  task page is unchanged.
-- **Terminal image-file pastes are attached automatically.** Pasting a local
-  image file into the composer of a terminal such as Tern or Hedr now reads the
-  image and replaces the path with the standard `[image #N (W×H)]` token, with
-  no manual `/image`. While the file is still being read, Enter / Send / steer
-  is refused with a retry notice; a failed read keeps the path text. Both the
-  PiTui and TSP renderers support it, and images keep flowing through the
-  existing draft and submission chain.
-
-- **Split Client pending Questions/Approvals belong to their own Session.** A
-  Question or Approval owned by another Session no longer opens over the
-  current editor; after a real `/sessions` or `/resume` switch to that Session,
-  the same official request is offered again and can be answered. From a
-  Question/Approval modal, `Alt+W` opens the Session Workspace as a
-  "keep pending" navigation without cancelling, rejecting or answering the Host
-  request; closing the workspace or browsing another Session keeps the request
-  suspended until its own Session is current again. Direct and the TSP native
-  modal seat keep their existing behavior.
-- **Session Workspace: a Needs-attention-first grouped list, the complete
-  Workspace scope and a read-only Peek.** The fullscreen workspace opened by
-  `/sessions`, `/search` and `/resume` is now ONE `Needs attention → Working →
-  Recent` list: only a pending request this Client can really still answer
-  enters the first group, and a candidate without that proof is shown as
-  "pending state unverified" instead of pretending to be answerable. Running
-  Sessions form their own group, the rest are ordered by last update, and
-  unknown/denied/unavailable states stay truthful instead of being painted as
-  idle. `w` offers `Current`, every official Workspace and `Unassigned`, and the
-  current Session's Workspace is proved only by official membership. `Space`
-  opens a read-only detail of the selected row (Session ID, title, Workspace,
-  cwd, preset, updated, running and pending state); `Esc` returns unchanged and
-  never opens, retains or answers a Session. A wide terminal also shows a
-  read-only preview beside the list, while a narrow or short one stays single
-  column. Row clicks only select — `Enter` remains the only switch verb. Session
-  activity refreshes on the workspace's refresh cadence and once more when a
-  pending request's state changes, and a refresh never steals the cursor,
-  selection or scroll position you are using.
+- **Host Schedule management.** PiTui Direct `/schedule` manages Host-wide tasks without a Session. The Host owns execution.
+- **PiTui Session Workspace.** `/sessions`, `/search` and `/resume` group Sessions into Needs attention, Working and Recent, with Workspace scopes and a read-only `Space` Peek; `Enter` switches. In Direct mode, new Sessions including `/new` use the official Host Workspace. With a strictly empty main editor, two unmodified `←` presses within 600 ms open All workspaces; the first remains ordinary cursor movement.
+- **Plugin version updates.** The Plugin Manager can inspect versions of third-party Registry Profile bundles the Host marks as updatable, then update after an explicit version choice and confirmation. Results follow the Host read-back; the running TUI cannot update itself from this page.
+- **Shared file-delivery guidance.** Supported Agent presets receive official file-link, image-reference and `present` delivery guidance, independently of Web availability.
+- **Pasted image paths become attachments.** In supported terminals, a recognized local absolute image path can be staged as an image attachment. Sending is blocked while it is read; a failed read keeps the path text.
 
 ### Changed
 
-- **Breaking: the public `composeAgent(ctx, ModelSelectionRef)` call is retired.**
-  DSH 0.2.2 moved model-selection ownership into the Agent (`AgentModel` plus the
-  Session `modelSelection` projection) and removed `ModelSelectionRef` /
-  `installModelSelection(ctx, ref)` upstream, so this release no longer accepts a
-  caller-owned model-selection ref; no compatible local shim exists. Migration:
-  replace `composeAgent(ctx, ref, ...)` with
-  `composeAgent(ctx, (agentCtx, agent) => { /* install Agent-scoped contributions */ }, ...)`;
-  model selection is Agent-owned (read/write `agent.model`; `/model` still commits
-  through the existing catalog port). Profiles that only use the built-in TUI need
-  no change.
-
-- **`/transcript` now writes the official Session Markdown, so the exported format changes.** On both Direct and the Split Client, `/transcript` reads the complete committed Session Markdown produced by the official Host `formatSessionMarkdown` (including the fork-inherited prefix and the latest title) and writes it through the existing Client-local save workflow. The retired Client-local `## User` / `## Assistant` sections, Workflow/PTC blocks and visual-result filtering no longer appear: human messages are blockquotes, the final answer is plain Markdown, and earlier tool/process activity collapses into `<details>`, with the official `Session file:` source path when the Host provides one. The filename, argument-free grammar, save-location/collision/cancel behavior and the `/export` ZIP archive are unchanged; the Split Client's `/transcript` is now genuinely available instead of reporting "unavailable on this backend".
+- **Breaking: DSH extension API.** DSH 0.2.2 removed `composeAgent(ctx, ModelSelectionRef)`. Extensions should use the Agent-scoped compose callback and `agent.model`; Profiles using only the built-in TUI need no change.
+- **Breaking: chart/SVG references now use `sv2`.** `sv1_…`, `visual-ref-v1:` and `[dsh-visual-sv1_…]` are not migrated or parsed; old inline figures may fall back to text.
+- **Ordinary Fork/Rewind Sessions are no longer shown as parent/child lineage.** DSH 0.2.2 treats them as independent Sessions; Session lineage represents Subagents only.
+- **`/transcript` now exports official Session Markdown.** In Direct mode it uses the Host format, with user messages as blockquotes and process activity collapsible. `/export` ZIP behavior is unchanged.
+- **Markdown bare-URL punctuation boundary changed.** Bare URLs stop at the first CJK/full-width punctuation, including balanced full-width parentheses. Visible text, explicit Markdown links and copied text are unchanged.
 
 ### Fixed
 
-- **Fixed the official Web frontend failing to load on the Split Host under the current DSH release.** The new official Web frontend removed the retired model-label plugin and requires two official client capabilities — the context menu and file drag — that its existing chat, attachment and session surfaces inject; the Split Host Web composition now matches that real dependency closure, while the `/web` toggle, the `autoStart` preference and the browser access path are unchanged.
-- **The inline attachment success notice is no longer swallowed.** Accepting an `/image` / `/attach` path candidate in the body of a draft really staged the file and spliced its placeholder, but the `attached … — Enter to send` notice was silently dropped because that notice re-used the pre-write draft snapshot — the very write that invalidates it. Both the PiTui and TSP renderers were affected; the first-line `/attach <path>` / `/image <path>` routes and the clipboard / terminal-paste routes keep their existing notices. A completed write is now announced on the completed commit plus the current Session owner, and the opposite hole is fixed too: a refused write rolled its entry back and still announced success, and now rolls back and stays silent.
-- Fixed the exit race that logged `retire phase failed phase=flush: flush on a closed handle` after `/new` followed by `/exit`: exit/HMR/parked-session retirements no longer issue an explicit flush against a write handle DSH has already started closing — final durability is settled by `AgentHandle.dispose` joining DSH's close/drain. Ordinary session switches keep the explicit old-owner flush, and a newly committed empty session now establishes its resumable persistence boundary right after the commit, before any long drain can be overtaken by a shutdown (failures are clearly reported, never silent).
+- **Inline attachment completion now reports success.** In the PiTui composer, accepted `/image` and `/attach` candidates show a notice after the draft write commits; refused writes no longer report false success.
+- **Fixed the save race when exiting just after creating a Session.** `/new` followed immediately by `/exit` no longer reports a flush on an already-closed handle.
+- **Clear stale program status on exit where supported.** The clear sequence is sent only when terminal Program Status reporting is enabled.
 
 ## [0.5.5] - 2026-11-03
 
@@ -2304,7 +2190,8 @@ Users who must keep DSH `0.1.1-rc.2` should use `@xmoon76/dsh-pi-tui@0.3`.
 - Fullscreen layout, Ctrl+F transcript search, theme system.
 - Single-package release model.
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.5...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.6...HEAD
+[0.5.6]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.5...v0.5.6
 [0.5.5]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.4...v0.5.5
 [0.5.4]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.5.2-rc.1...v0.5.3

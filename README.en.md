@@ -24,6 +24,16 @@ dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@latest
 dsh --profile pi-tui
 ```
 
+### Exact version pairing (0.5.6)
+
+This release requires DSH `>=0.2.2-rc.1`, targets `0.2.2-rc.1` for exact validation, and requires Node.js `>=24.9.0`. Finish Agent turns and exit the old TUI/Host normally before installing or upgrading; hot upgrade is not supported.
+
+```sh
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.2-rc.1
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.5.6
+dsh --profile pi-tui
+```
+
 ### Next / npm line (validation)
 
 Preview installation uses the DSH `alpha` channel and the TUI `next` channel.
@@ -35,15 +45,7 @@ dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
 dsh --profile pi-tui
 ```
 
-> **Those two channels are not an installable compatible pair today.** They are
-> channel pointers only: `@deepseek-ai/dsh@alpha` currently resolves to
-> `0.2.1-alpha.5`, while `@xmoon76/dsh-pi-tui@next` still resolves to
-> `0.5.2-rc.1` (peer floor `>=0.2.0-rc.2`, and npm semver excludes a
-> different-major.minor.patch prerelease). Use the pairing table below and
-> [compatibility guide](docs/guides/dsh-compatibility.md) for the matching rules; the
-> stable `0.5.5` publishes to `@latest`, not `@next`, so no installable compatible
-> combination exists on those two moving channels. Validate this exact checkout
-> with `pnpm compat:dsh:npm`.
+> **Next/alpha are independent moving pointers, not a guaranteed installable DSH/TUI pair.** Check the actual published versions and their peer/engines ranges before installing; do not mix incompatible DSH families. Use the pinned commands above for the exact 0.5.6 pairing. To qualify this checkout, run `pnpm compat:dsh:npm`.
 
 Use the isolated npm driver (it installs the exact DSH version declared by this
 checkout and exercises the full build/test/package path):
@@ -64,8 +66,8 @@ next compatibility range, and fallback paths.
 
 | TUI package line | Official DSH tags for the pairing | Notes |
 |---|---|---|
-| `0.5.6` (reserved candidate / unreleased) | `dsh-v0.2.2-rc.1` | Candidate identity reserved by this checkout, not published to npm; the minimum DSH version is 0.2.2-rc.1 and the exact validation target is 0.2.2-rc.1 |
-| `0.5.5` (stable / `@latest`) | `dsh-v0.2.1-rc.2`, `dsh-v0.2.1-rc.3`, `dsh-v0.2.1-rc.4`, `dsh-v0.2.1-rc.5` | Current published stable line; the minimum DSH version is 0.2.1-rc.2, and it passes validation across that 0.2.1-rc.* family |
+| `0.5.6` (stable / `@latest`) | `dsh-v0.2.2-rc.1` | Current stable release; minimum and exact validation target DSH is `0.2.2-rc.1`, Node.js `>=24.9.0`; incompatible with `0.2.1-rc.*` |
+| `0.5.5` (previous stable) | `dsh-v0.2.1-rc.2`, `dsh-v0.2.1-rc.3`, `dsh-v0.2.1-rc.4`, `dsh-v0.2.1-rc.5` | Previous stable release; minimum DSH version `0.2.1-rc.2` |
 | `0.5.4` (stable, previous) | `dsh-v0.2.1-rc.2`, `dsh-v0.2.1-rc.3`, `dsh-v0.2.1-rc.4` | Previous stable line; the minimum DSH version is 0.2.1-rc.2, and it passes the official preset assembly on all three DSH versions |
 | `0.5.3` (stable, previous) | `dsh-v0.2.1-rc.2`, `dsh-v0.2.1-rc.3`, `dsh-v0.2.1-rc.4` | Previous stable line; the minimum DSH version is 0.2.1-rc.2, and it passes the official preset assembly on all three DSH versions |
 | `0.5.1` (stable, previous) | `dsh-v0.2.0-rc.2` | Previous stable line; both the minimum and the exact validation target are the 0.2.0-rc.2 family |
@@ -77,37 +79,7 @@ next compatibility range, and fallback paths.
 | `0.4.6` (stable, previous) | `dsh-v0.1.5-rc.1`, `dsh-v0.1.5-rc.2` | Previous stable; the compatible TUI for a 0.1.5 runtime |
 | `0.4.7-alpha.2` (next, previous) | `dsh-v0.1.6-alpha.2` | Previous next line; the compatible TUI for a 0.1.6-alpha.2 runtime |
 
-Do not mix the stable and `@next` prerelease lines. `0.5.5` is the current
-published stable release: its minimum DSH version (peer floor) stays the
-`0.2.1-rc.2` family, and it passes validation across `0.2.1-rc.2` through
-`0.2.1-rc.5`. The published `0.5.4` and `0.5.3` are the previous stable lines
-and also pair with `0.2.1-rc.2`, `0.2.1-rc.3` and `0.2.1-rc.4`. The safe order
-for upgrading from an older stable line to `0.5.5`: let in-flight conversation
-turns and background jobs finish, exit the old TUI/DSH process normally, then install
-`0.5.5` with the official plugin command and start it again. Do not install
-the new package while an old process is still live and expect a
-zero-interruption hot swap; no in-place lossless upgrade of a running old
-Host is promised. This checkout reserves the **unreleased** `0.5.6` candidate
-identity: it lifts the whole DSH peer floor to `>=0.2.2-rc.1` and the minimum
-Node version to `>=24.9.0`, so it no longer supports the `0.2.1-rc.*` family;
-upgrading to that candidate also requires in-flight turns and background jobs
-to finish first. The intermediate
-`dsh-v0.2.1-rc.1` has no paired TUI, and `0.5.2-rc.1` is the previous preview
-published to the npm `next` channel (its pairing, 0.2.0-rc.2, stays in the table
-above; it does not cover 0.2.1-rc.2). The previous stable
-`0.5.1` keeps pairing with 0.2.0-rc.2: it lifts the whole DSH peer floor to
-`>=0.2.0-rc.2` (the Question lifecycle consumes contracts published only in
-that rc.2 family). The previous stable `0.5.0`
-line keeps its `>=0.1.7-rc.2` floor (exact validation target 0.2.0-rc.1);
-older runtimes fail at the normal
-incompatible-runtime boundary, so install the paired TUI line from the table
-above. The startup notice
-is best-effort rather than a Loader startup-order guarantee. The pairing table
-above is the published-line summary; see the [compatibility
-guide](docs/guides/dsh-compatibility.md) for general matching, fallback and
-diagnosis, and the [latest `next`
-README](https://github.com/XMoon/dsh-pi-tui/blob/next/README.md) for the current
-integration status.
+Do not mix the stable and `@next` prerelease lines. `0.5.6` is the current stable release: it requires DSH `>=0.2.2-rc.1` and is not compatible with `0.2.1-rc.*`. Before upgrading, let turns and background work finish, exit the old TUI/Host normally, and back up the Profile/patch, raw Session logs, Workspace and necessary Host resources or credential references. Hot upgrade is not supported. Data written under 0.2.2 semantics is not guaranteed readable by rc5 in place; restore a backup to a separate directory and use the matching old DSH/TUI pair to roll back. Historical pairings are in the table above. See the [compatibility guide](docs/guides/dsh-compatibility.md) for matching and diagnosis, and the [next branch README](https://github.com/XMoon/dsh-pi-tui/blob/next/README.md) for its integration status.
 
 New agent sessions use the official roster's selected preset id. A custom DSH
 preset literally named `code` is valid and remains `code` when it exists in the
@@ -159,6 +131,9 @@ dsh --profile pi-tui --session <session-id>
 * Chart/SVG tools, `present_visual` publication and inline final-answer rendering
 * Delivered-files tail and the `/deliverables` browser
 * Experimental TSP renderer: native tool cards, Work Hub, images and published figures
+* Host-wide Scheduled Task management in PiTui Direct
+* Plugin Manager: inspect and update third-party Registry bundles marked updatable by the Host
+* Agent guidance for file links, image references and `present` deliveries
 * Plan Review
 * Todo / Goal status
 * Human-readable terminal window titles
@@ -191,7 +166,7 @@ Supports persisted DSH Sessions, including:
 * Rewind
 * Session lineage
 * `/export` — full Session archive (descendants + attachments) saved to a Client-local directory
-* `/transcript` — readable Markdown transcript saved to a Client-local directory
+* `/transcript` — official DSH Session Markdown in Direct mode, saved to a Client-local directory
 
 Use:
 
@@ -203,9 +178,13 @@ Use:
 /transcript
 ```
 
+In Direct mode, `/transcript` reads official Host Session Markdown and saves a local `.md` file; user messages are blockquotes and process activity may be inside `<details>`. `/export` remains a separate ZIP archive.
+
 When the Agent is idle and the editor is empty, pressing `Esc` twice quickly also opens Rewind.
 
-Rewind creates a new Child Session from a selected historical User Turn and restores that Prompt into the editor. The original Session is left unchanged.
+Rewind creates a new Child Session from a selected historical User Turn and restores that Prompt into the editor. The original Session is unchanged. Ordinary Fork/Rewind Sessions are independent, not parent/child lineage; Session lineage represents Subagents.
+
+In PiTui, `/sessions`, `/search` and `/resume` open the fullscreen Session Workspace, grouped into Needs attention, Working and Recent. Filter by Current, a Workspace or Unassigned; `Space` opens a read-only Peek and `Enter` switches Sessions. In Direct mode, new Sessions including `/new` use the official Host Workspace. When the main editor owns the keyboard and the draft is strictly empty, two unmodified `←` presses within 600 ms open All workspaces; the first remains ordinary cursor movement.
 
 ### Input history
 
@@ -258,11 +237,7 @@ again needs six real business-body rows, otherwise it degrades to one column; be
 76 columns it is one column. Install, dangerous confirmations and Diagnostics
 always take the full width so risk text is never squeezed. Settings paints the
 shared header/metadata/rule/pane header and the single last-row action bar; the
-plugin page contributes only its business body. Search, status filters,
-provenance/status facts, official catalog installs, enablement and removal are
-available from the page; the actual Host-reported version, restart requirement
-and errors are shown verbatim. The `dsh-pi-tui` bundle currently providing the
-surface is read-only and cannot be disabled or removed from its own screen. The
+plugin page contributes only its business body. Search, status filters, provenance/status facts, official catalog installs, enablement and removal are available from the page; third-party Registry Profile bundles marked updatable by the Host can show available versions and be updated after explicit confirmation. The actual Host-reported version, restart requirement and errors are shown verbatim. The `dsh-pi-tui` bundle currently providing the surface is read-only and cannot be updated, disabled or removed from its own screen. The
 category preview and `/plugins` share one page instance and one background
 install request: `Esc` from the List returns to the Settings category and a
 second `Esc` closes the workspace. Press `d` inside the page
@@ -405,7 +380,7 @@ Typing `@` opens workspace file search and completion:
 @"path with spaces/file.ts"
 ```
 
-`/attach <path>` is the unified Client-local image/file intake; `/image <path>` keeps its image-only compatibility semantics. Both complete files and directories; paths with spaces, quotes, or Windows separators preserve the input dialect, and directories can be expanded further.
+`/attach <path>` is the unified Client-local image/file intake; `/image <path>` keeps its image-only compatibility semantics. Both complete files and directories; paths with spaces, quotes or Windows separators preserve the input dialect, and directories can be expanded further. In terminals with bracketed-paste support, a recognized local absolute image path can be staged as an attachment; sending is blocked while it is read, and a failed read keeps the path text.
 
 Resolvable relative paths are canonicalized before submission.
 
@@ -419,6 +394,7 @@ Common entry points:
 
 ```text
 /model
+/schedule
 /settings
 /status
 /deliverables
@@ -433,6 +409,8 @@ Common entry points:
 ```
 
 Model selection, Reasoning Effort, permission presets, Plan, and Goal all keep the corresponding DSH runtime semantics. `/model` candidates come only from the Host catalog: `deepseek-flash` is identified by the exact `(provider, model)` pair (the display name `DeepSeek-V4.1-Flash` is never the ID), and a selection writes the official Session/global default. A deployment catalog that no longer offers the ID shows no invented row.
+
+In PiTui Direct, `/schedule` opens the Host-wide task workspace without a Session. The Host owns its timer; stopping the Host stops background delivery.
 
 `/settings` and `/status` open the same full-screen settings workspace on the
 About home. Wide and medium terminals show a category rail plus the content

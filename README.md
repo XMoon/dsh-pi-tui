@@ -23,6 +23,16 @@ dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@latest
 dsh --profile pi-tui
 ```
 
+### 精确版本配对（0.5.6）
+
+本版要求 DSH `>=0.2.2-rc.1`，精确验证目标为 `0.2.2-rc.1`，并要求 Node.js `>=24.9.0`。安装或升级前先正常结束 Agent 回合、退出旧 TUI/Host；不支持热升级。
+
+```sh
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.2-rc.1
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.5.6
+dsh --profile pi-tui
+```
+
 ### Next / npm 线（验证）
 
 预览安装使用 DSH 的 `alpha` channel 与 TUI 的 `next` channel；安装 DSH
@@ -34,13 +44,7 @@ dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
 dsh --profile pi-tui
 ```
 
-> **这两个 channel 今天不构成可安装的兼容 pair。** 它们只是通道指针：当前
-> `@deepseek-ai/dsh@alpha` 指向 `0.2.1-alpha.5`，而 `@xmoon76/dsh-pi-tui@next`
-> 仍指向 `0.5.2-rc.1`（peer floor `>=0.2.0-rc.2`，npm semver 不接受不同
-> major.minor.patch tuple 的 prerelease）。请以下方版本对应表和
-> [兼容性指南](docs/guides/dsh-compatibility.md) 的通用匹配原则为准；稳定版 `0.5.5` 发布在
-> `@latest` 而不是 `@next`，因此这两个移动 channel 上没有可安装的兼容组合。
-> 本 checkout 的精确验证请使用 `pnpm compat:dsh:npm`。
+> **Next/alpha 是独立移动指针，不保证构成可安装的 DSH/TUI 配对。** 安装前请核对两个包实际发布的版本及 peer/engines 范围，不要混用不兼容的 DSH 系列。确定的 0.5.6 配对见上方命令；验证当前 checkout 可运行 `pnpm compat:dsh:npm`。
 
 隔离的 npm 驱动仍按本 checkout 声明的精确 DSH 版本运行，并执行完整的
 build/test/package 路径：
@@ -60,8 +64,8 @@ pnpm compat:dsh:npm
 
 | TUI 包版本 | 对应的官方 DSH tags | 说明 |
 |---|---|---|
-| `0.5.6`（reserved candidate / 未发布） | `dsh-v0.2.2-rc.1` | 本仓库当前 checkout 预留的候选身份，尚未发布到 npm；最低 DSH 版本为 0.2.2-rc.1，精确验证目标同为 0.2.2-rc.1 |
-| `0.5.5`（stable / `@latest`） | `dsh-v0.2.1-rc.2`、`dsh-v0.2.1-rc.3`、`dsh-v0.2.1-rc.4`、`dsh-v0.2.1-rc.5` | 当前已发布稳定版；最低 DSH 版本为 0.2.1-rc.2，已在该 0.2.1-rc.* 家族通过验证 |
+| `0.5.6`（stable / `@latest`） | `dsh-v0.2.2-rc.1` | 当前正式版；最低与精确验证目标为 DSH `0.2.2-rc.1`，Node.js `>=24.9.0`；不兼容 `0.2.1-rc.*` |
+| `0.5.5`（stable，历史） | `dsh-v0.2.1-rc.2`、`dsh-v0.2.1-rc.3`、`dsh-v0.2.1-rc.4`、`dsh-v0.2.1-rc.5` | 上一正式版；最低 DSH 版本为 `0.2.1-rc.2` |
 | `0.5.4`（stable，历史） | `dsh-v0.2.1-rc.2`、`dsh-v0.2.1-rc.3`、`dsh-v0.2.1-rc.4` | 上一稳定版；最低 DSH 版本为 0.2.1-rc.2，已在该三个 DSH 版本通过官方 preset assembly |
 | `0.5.3`（stable，历史） | `dsh-v0.2.1-rc.2`、`dsh-v0.2.1-rc.3`、`dsh-v0.2.1-rc.4` | 上一稳定版；最低 DSH 版本为 0.2.1-rc.2，已在该三个 DSH 版本通过官方 preset assembly |
 | `0.5.1`（stable，历史） | `dsh-v0.2.0-rc.2` | 上一稳定版；最低与精确验证目标均为 0.2.0-rc.2 family |
@@ -73,25 +77,7 @@ pnpm compat:dsh:npm
 | `0.4.6`（stable，历史） | `dsh-v0.1.5-rc.1`、`dsh-v0.1.5-rc.2` | 上一稳定版；0.1.5 runtime 的兼容 TUI |
 | `0.4.7-alpha.2`（next，历史） | `dsh-v0.1.6-alpha.2` | 上一条 next 线；0.1.6-alpha.2 runtime 的兼容 TUI |
 
-不要把稳定线与 `@next` 预发布线混装。`0.5.5` 是当前已发布稳定版：它的最低 DSH
-版本（peer floor）仍是 `0.2.1-rc.2` family，已在 `0.2.1-rc.2` – `0.2.1-rc.5`
-通过验证。已发布的 `0.5.4`、`0.5.3` 是上一稳定版，同样可与
-`0.2.1-rc.2`、`0.2.1-rc.3`、`0.2.1-rc.4` 配对使用。从旧的稳定版升级到 `0.5.5`
-的安全顺序：先让进行中的对话回合与后台任务正常结束，再正常退出旧的
-TUI/DSH 进程，然后用官方 plugin 命令安装 `0.5.5` 并重新启动；不要在旧版本
-进程仍活跃运行时直接安装新包并期待零中断热替换，本版不承诺对运行中的旧
-Host 做原地无损升级。本仓库当前 checkout 预留的是**尚未发布**的 `0.5.6`
-候选身份：它把整个 DSH peer floor 提升到 `>=0.2.2-rc.1`、最低 Node 提升到
-`>=24.9.0`，因此不再支持 `0.2.1-rc.*` family；升级到该候选版本时同样要先让
-进行中的回合与后台任务结束。中间的
-`dsh-v0.2.1-rc.1` 没有配对 TUI，`0.5.2-rc.1` 是上一轮已发布到 npm `next` 通道的
-预览身份（配对 0.2.0-rc.2；它不覆盖 0.2.1-rc.2）。上一稳定版 `0.5.1` 继续配对
-0.2.0-rc.2：它把整个 DSH peer floor 提升到 `>=0.2.0-rc.2`（Question 生命周期消费
-rc.2 才发布的公开契约）。更早的 `0.5.0`
-保持 `>=0.1.7-rc.2` floor 不变（精确验证目标 0.2.0-rc.1）；旧 runtime 会在正常的
-不兼容边界以非零状态失败，请按上表安装配对的 TUI 线。上方的版本对应表是已发布
-线的摘要；通用版本匹配原则与回退/诊断流程见[兼容性指南](docs/guides/dsh-compatibility.md)；要查看 `@next` 的最新集成
-状态，请看 [next 分支 README](https://github.com/XMoon/dsh-pi-tui/blob/next/README.md)。
+不要混装稳定线与 `@next` 预发布线。`0.5.6` 是当前正式版，要求 DSH `>=0.2.2-rc.1`，且不兼容 `0.2.1-rc.*`。升级前让回合和后台任务结束，正常退出旧 TUI/Host，并备份 Profile/patch、Session 原始日志、Workspace 及所需 Host 资源与凭据引用；不支持热升级。0.2.2 写入的数据不保证能由 rc5 原地读取，回退时须恢复到独立目录并使用匹配的旧版 DSH/TUI。历史配对见上表；通用匹配和诊断方式见[兼容性指南](docs/guides/dsh-compatibility.md)，`@next` 集成状态见 [next 分支 README](https://github.com/XMoon/dsh-pi-tui/blob/next/README.md)。
 
 新的 Agent preset 使用当前 roster 中选定的 id。DSH 允许合法的自定义
 `code` preset；只要当前 roster 存在它，显式输入和持久化状态都会保留 `code`。
@@ -142,6 +128,9 @@ dsh --profile pi-tui --session <session-id>
 * 图表/SVG 工具、`present_visual` 发布与最终回答内联显示
 * 交付文件尾部与 `/deliverables` 浏览器
 * 实验性 TSP renderer：原生工具卡、Work Hub、图片与已发布图
+* Host-wide Scheduled Task 管理（PiTui Direct）
+* Plugin Manager：检查并更新 Host 标记可更新的第三方 Registry bundle
+* Agent 文件链接、图片引用与 `present` 交付指导
 * Plan Review
 * Todo / Goal 状态展示
 * 可读的终端窗口标题
@@ -174,7 +163,7 @@ dsh --profile pi-tui --session <session-id>
 * Rewind
 * Session lineage
 * `/export` — 完整 Session 归档(含子代理与附件),保存到 Client 本地目录
-* `/transcript` — 可读 Markdown 对话记录,保存到 Client 本地目录
+* `/transcript` — 官方 DSH Session Markdown（Direct），保存到 Client 本地目录
 
 使用：
 
@@ -186,9 +175,13 @@ dsh --profile pi-tui --session <session-id>
 /transcript
 ```
 
+`/transcript` 在 Direct 下读取官方 Host Session Markdown 并保存为本地 `.md`；用户消息使用引用块，过程内容可折叠在 `<details>` 中。`/export` 仍是独立 ZIP 归档。
+
 空闲且编辑器为空时也可以快速按两次 `Esc` 打开 Rewind。
 
-Rewind 会从选中的历史 User Turn 创建新的 Child Session，并把对应 Prompt 放回编辑器。原 Session 不会被修改。
+Rewind 会从选中的历史 User Turn 创建新的 Child Session，并把对应 Prompt 放回编辑器。原 Session 不会被修改。普通 Fork/Rewind 创建独立 Session，不形成父子 lineage；Session lineage 用于显示 Subagent 关系。
+
+PiTui 的 `/sessions`、`/search` 和 `/resume` 打开全屏 Session Workspace，按 Needs attention、Working、Recent 分组，可按 Current、各 Workspace 或 Unassigned 筛选。`Space` 查看只读 Peek，`Enter` 才切换。Direct 下新建 Session（包括 `/new`）依据官方 Host Workspace 确定归属。主编辑器持有键盘且草稿严格为空时，600ms 内连续两次无修饰 `←` 打开 All workspaces；第一次仍是普通左移。
 
 ### 输入历史
 
@@ -210,7 +203,7 @@ Rewind 会从选中的历史 User Turn 创建新的 Child Session，并把对应
 
 Task Center 的 `ACTIVE` / `TRACKED` 是展示范围：`ACTIVE` 只显示当前活动项，`TRACKED` 显示当前跟踪源（Job Registry / Subagent catalog）仍列出的全部项；`TRACKED` 不是 Session 执行历史。DSH `0.1.7` 会在普通前台 `bash` / `pwsh` 执行期间临时注册 Job，使其可以在 Task Center 中观察和停止；如果命令在前台等待内完成，DSH 会移除该临时记录，最终结果仍保留在 Transcript 的 tool card 中。显式 `run_in_background: true` 或被提升为后台的 Job 在完成后，只要 Job Registry 继续保留其记录，就仍可在 `TRACKED` 中查看。
 
-`/plugins` 是 `/settings → Plugins` 的深链：两者使用同一个 Settings 全屏 lease 与同一个 Plugin Manager 页面，不再有独立的插件全屏界面，也不会新建或切换 Session。目录固定为 TUI & Extensions / Official DSH / Third-party / Experimental（实验组最后），可搜索、筛选、查看来源与状态，并从官方目录执行安装、启用/禁用与删除；结果以 Host 实际返回的版本、重启要求和错误为准。≥120 列且能留出至少 6 行真实业务正文时同屏显示 `类别 | 插件列表 | 详情`；76–119 列按键盘焦点显示 `类别 | 列表` 或 `列表 | 详情`（`列表 | 详情` 同样要求至少 6 行真实业务正文，不足则退化为单栏），<76 列单栏；安装、危险确认与 Diagnostics 始终占满整宽，以免压缩风险文案。顶部身份/元数据/分隔线/面栏和最后一行操作栏由 Settings 统一绘制，插件只占业务正文。正在提供当前界面的 `dsh-pi-tui` 只读且不可从自身界面禁用或移除。从 Settings 的 `Plugins` 分类预览或 `/plugins` 进入都保留同一个页面实例与后台安装请求：Esc 从列表回到 Settings 分类，再按一次 Esc 关闭。页面内按 `d` 打开只读的 **Diagnostics**：按 owner 分组显示 extension 贡献的 `active/failed/shadowed` 状态与完整 `lastError`、各 registry 计数、实际 capabilities，以及无法证明 Loader entry 归属的贡献（单列 `Unassociated extension contributions`）；`c` 复制所选事实、`C` 复制全部、`r` 重新读取、Esc 返回。Diagnostics 只读 extension ledger，不把 Host 包安装状态或安装日志混入其中；`copy` 仍只证明已发送，不证明操作系统剪贴板已收到。
+`/plugins` 是 `/settings → Plugins` 的深链：两者使用同一个 Settings 全屏 lease 与同一个 Plugin Manager 页面，不再有独立的插件全屏界面，也不会新建或切换 Session。目录固定为 TUI & Extensions / Official DSH / Third-party / Experimental（实验组最后），可搜索、筛选、查看来源与状态，并从官方目录执行安装、启用/禁用与删除；Host 标记可更新的第三方 Registry Profile bundle 还可查看可用版本并经确认更新；结果以 Host 实际返回的版本、重启要求和错误为准。≥120 列且能留出至少 6 行真实业务正文时同屏显示 `类别 | 插件列表 | 详情`；76–119 列按键盘焦点显示 `类别 | 列表` 或 `列表 | 详情`（`列表 | 详情` 同样要求至少 6 行真实业务正文，不足则退化为单栏），<76 列单栏；安装、危险确认与 Diagnostics 始终占满整宽，以免压缩风险文案。顶部身份/元数据/分隔线/面栏和最后一行操作栏由 Settings 统一绘制，插件只占业务正文。正在提供当前界面的 `dsh-pi-tui` 只读，不能从自身界面更新、禁用或移除。从 Settings 的 `Plugins` 分类预览或 `/plugins` 进入都保留同一个页面实例与后台安装请求：Esc 从列表回到 Settings 分类，再按一次 Esc 关闭。页面内按 `d` 打开只读的 **Diagnostics**：按 owner 分组显示 extension 贡献的 `active/failed/shadowed` 状态与完整 `lastError`、各 registry 计数、实际 capabilities，以及无法证明 Loader entry 归属的贡献（单列 `Unassociated extension contributions`）；`c` 复制所选事实、`C` 复制全部、`r` 重新读取、Esc 返回。Diagnostics 只读 extension ledger，不把 Host 包安装状态或安装日志混入其中；`copy` 仍只证明已发送，不证明操作系统剪贴板已收到。
 
 Experimental 组的 14 个官方 rc.2 实验包在 Detail 中给出固定的终端可用面与限制/风险说明（Web-only、Host-only、B04 的 WEB_ONLY/Host 行未挂载（Owner 已接受）、B13/B14 的已验证 one-shot/provider 边界等），这些说明只随精确官方包身份出现，不随启用状态伪装成 Host 能力通过；升级指引按 Host 事实区分「随 DSH 发行升级」「profile 包先 Remove 再显式 Install」「官方 on-demand 目标」和「当前 TUI 由外部管理」，不提供原地更新、版本选择器或静默重装。
 
@@ -319,7 +312,7 @@ product-model  官方署名 + Assisted-By: <provider>/<model>
 @"path with spaces/file.ts"
 ```
 
-`/attach <path>` 是统一的 Client-local 图片/文件入口；`/image <path>` 保持图片专用兼容语义。两者都支持文件与目录补全；带空格、引号或 Windows 分隔符的路径会保留输入方言，目录可以继续展开。
+`/attach <path>` 是统一的 Client-local 图片/文件入口；`/image <path>` 保持图片专用兼容语义。两者都支持文件与目录补全；带空格、引号或 Windows 分隔符的路径会保留输入方言，目录可以继续展开。支持括号粘贴的终端中，粘贴可识别的本地绝对图片路径可直接暂存为图片附件；读取未完成时不能发送，读取失败会保留原路径文字。
 
 能够解析的相对路径会在提交时转换为明确的文件路径。
 
@@ -333,6 +326,7 @@ TUI 使用 DSH 提供的模型和设置服务。
 
 ```text
 /model
+/schedule
 /settings
 /status
 /deliverables
@@ -347,6 +341,8 @@ TUI 使用 DSH 提供的模型和设置服务。
 ```
 
 模型切换、Reasoning Effort、权限 Preset、Plan 和 Goal 都沿用 DSH 对应的运行时语义。`/model` 的候选完全来自 Host 的模型目录：`deepseek-flash` 以精确 `(provider, model)` 身份出现（显示名 `DeepSeek-V4.1-Flash` 不当作 ID），选择后写回官方 Session/global 默认；部署覆盖目录不再提供该 ID 时不会凭空显示。
+
+`/schedule` 在 PiTui Direct 中打开 Host-wide 任务工作区，不需要 Session；定时任务由 Host 持有，停止 Host 后不再后台执行。
 
 `/settings` 与 `/status` 打开同一个全屏设置工作区，默认落在 About。宽/中屏为分类栏
 + 内容栏，窄屏（<76 列）直接显示 About；一级分类固定为 About / Models / Account /
