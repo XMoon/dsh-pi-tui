@@ -403,7 +403,9 @@ installs nothing until that preflight has qualified the exact pin.
 
 A default run is diagnosable without any environment variable. Both lanes
 announce the qualified artifact identity at startup, one checkpoint per setup
-phase, and one lifecycle scope per case and Recovery subscene:
+phase and per business milestone (for example the Web Product group,
+stale-peer and WP11 markers, so a long scene keeps default-visible interim
+progress), and one lifecycle scope per case and Recovery subscene:
 `[split] <ISO-UTC> START <scope>`, then `DONE <scope> durationMs=…` or
 `ERROR <scope> durationMs=…` (nested scopes print their own ERROR; the raw
 stack is printed once). On failure they print a fixed summary plus the REAL

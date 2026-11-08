@@ -8,9 +8,10 @@
  * — that skip is NOT the full smoke
  * passing: split-process development work runs `pnpm smoke:split-process`
  * manually under its own task plan. This tooling test is a lightweight
- * wiring/selector/CI/utility guard: it does NOT prove the real 14/14 cases,
- * Host/Client behaviour, Browser qualification or a Full PASS. Those claims
- * are owned by the real lane runs and the shared diagnostics tests.
+ * wiring/selector/CI/utility guard: it does NOT prove the full registered
+ * case set (currently 18), Host/Client behaviour, Browser qualification or a
+ * Full PASS. Those claims are owned by the real lane runs and the shared
+ * diagnostics tests.
  *
  * @module split-process-smoke-wiring.test
  */
@@ -192,9 +193,11 @@ test('the Split lifecycle log owns START/DONE/ERROR and the Recovery subscenes',
     'the selected verdict assertion must run INSIDE the case lifecycle scope')
   assert.equal((processSource.match(/runStep: \(name, operation\) => diagnostics\.runStep\(name, operation\)/gu) ?? []).length, 2,
     'both lane contexts expose the same collector to the scenarios')
-  // trace() is the optional business JSONL stream only; it must not print a
-  // second lifecycle/checkpoint vocabulary.
-  assert.doesNotMatch(processSource, /diagnostics\?\.checkpoint\(event\)/u)
+  // trace() must keep emitting the business-milestone checkpoint on default
+  // stderr (long scenes otherwise lose their intermediate progress); the
+  // START/DONE/ERROR lifecycle scopes stay owned by runStep.
+  assert.match(processSource, /diagnostics\?\.checkpoint\(event\)/u,
+    'business milestones remain visible without SPLIT_PROCESS_TRACE')
   assert.match(processSource, /redactErrorForStep\(raw, failedStep\)/u,
     'the default failure output uses the ONE Web/non-Web redaction policy')
   const scenario = readFileSync(join(ROOT, 'scripts', 'smoke', 'split-process', 'detached-turn-interactions.mjs'), 'utf8')
