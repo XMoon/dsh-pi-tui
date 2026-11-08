@@ -914,6 +914,22 @@ test('the 44×20 Editor wraps HostMatches and overlapping groups without offerin
   assert.ok(lines.every(line => visibleWidth(line) <= 44))
 })
 
+test('an unbounded Editor notice cannot push the 80×10 action bar out of the frame', () => {
+  const view = harness(workspace({
+    mode: 'editor',
+    editor: draft({ mode: 'edit', id: 'schedule-1', title: 'Local title' }),
+    editorDirty: true,
+    editorRecovery: 'unknown',
+    notice: { text: `Remote failure: ${'details '.repeat(120)}`, kind: 'error' },
+  }), { columns: 80, rows: 10 })
+  const lines = view.plain()
+  assert.equal(lines.length, 10)
+  assert.ok(lines.at(-1)?.trimEnd().endsWith('Esc back'), `${lines.join('\n')}`)
+  assert.ok(lines.slice(0, -1).some(line => line.trimEnd().endsWith('…')),
+    'a longer failure message indicates omitted text instead of consuming the action row')
+  assert.ok(lines.every(line => visibleWidth(line) <= 80))
+})
+
 test('the weekly editor has one logical field and its chooser keeps toggles across Esc', () => {
   const weekly = draft({
     timing: { kind: 'weekly', time: '09:00:00', timeZone: 'UTC', weekdays: [1] },

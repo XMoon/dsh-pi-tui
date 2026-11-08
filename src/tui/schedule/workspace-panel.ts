@@ -903,12 +903,24 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     const editorNotice = snapshot.mode === 'editor' && snapshot.confirm === undefined
       ? snapshot.notice
       : undefined
-    const editorNoticeLines = editorNotice === undefined
+    const wrappedEditorNotice = editorNotice === undefined
       ? []
       : wrapTextWithAnsi(
           sanitizedPhysicalLine(editorNotice.text),
           Math.max(1, paintedWidth - 2),
         )
+    const statusBudget = Math.max(1, rows - 1 - (isListPage ? 2 : 0) - 1 - 1)
+    const editorNoticeLines = wrappedEditorNotice.length > statusBudget
+      ? [
+          ...wrappedEditorNotice.slice(0, statusBudget - 1),
+          `${truncateToWidth(
+            wrappedEditorNotice[statusBudget - 1] ?? '',
+            Math.max(1, paintedWidth - 3),
+            '',
+            false,
+          )}…`,
+        ]
+      : wrappedEditorNotice
     if (editorNotice !== undefined) {
       for (const [index, text] of editorNoticeLines.entries()) {
         const prefix = index === 0 ? `${editorNotice.kind === 'error' ? '✗' : 'ℹ'} ` : '  '
