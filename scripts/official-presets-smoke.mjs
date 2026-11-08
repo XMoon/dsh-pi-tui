@@ -429,7 +429,7 @@ async function main() {
     requireExactVersion('DSH', commandOutput(version).split(/\r?\n/u).find(line => line.trim() !== '')?.trim(), targetDshVersion)
 
     const promptPackage = writePromptQualificationPackage(workDir, targetDshVersion)
-    runPnpmInstall(promptPackage, env)
+    runPnpmInstall(promptPackage, env, distribution)
     const promptLlmManifest = createRequire(join(promptPackage, 'package.json')).resolve('@deepseek-ai/dsh-llm/package.json')
     requireExactVersion('@deepseek-ai/dsh-llm qualification dependency', readOptionalJson(promptLlmManifest)?.version, targetDshVersion)
     installPlugin(dsh, tarball, harnessDir, env, false)
