@@ -143,11 +143,14 @@ const { EntryProcess, SurfaceEntryProcess, activeProcesses } = createSplitProces
 const trackedProcesses = new Map()
 
 /**
- * One optional JSONL business fact. The lifecycle log (START/DONE/ERROR) is
- * owned by `diagnostics.runStep`; this function only writes the explicit
- * `SPLIT_PROCESS_TRACE` file when the operator asked for it. Never pass a secret.
+ * One business milestone: its bounded NAME is announced on stderr by default
+ * (so a long scene keeps visible intermediate progress) and its optional
+ * fields go to the explicit SPLIT_PROCESS_TRACE JSONL. Lifecycle scopes
+ * (START/DONE/ERROR with durations) stay owned by `diagnostics.runStep`; this
+ * function never prints the raw event fields. Never pass a secret.
  */
 function trace(event, fields = {}) {
+  diagnostics?.checkpoint(event)
   if (TRACE_PATH === undefined || TRACE_PATH === '') return
   if (traceFd === undefined) {
     mkdirSync(dirname(resolve(TRACE_PATH)), { recursive: true })

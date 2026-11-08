@@ -619,8 +619,8 @@ export function safeFailureSummary(error) {
  * publishes — the calling file's BASENAME and its line number — derived from
  * the real stack and filtered against the lane's own
  * assert helpers, so it names the check site rather than a helper frame. The
- * message itself stays out of the default report and is printed only under
- * `KEEP`, where the operator already kept the private scene.
+ * message itself is printed by the default failure output and retained in the
+ * report's `error`; `KEEP` only preserves the private scene.
  */
 const ASSERT_HELPER_FRAMES = /^(?:assert|assertEqual|assertNotEqual|assertDeepEqual|assertMatch|laneAssertionError|SplitSmokeAssertionError)$/u
 
