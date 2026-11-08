@@ -371,8 +371,6 @@ test('L5: the real DirectSchedulePort drives the controller end to end', async t
   controller.dispatch({ kind: 'open-create' })
   controller.dispatch({ kind: 'set-field', fieldId: 'title', value: 'controller host task' })
   controller.dispatch({ kind: 'set-field', fieldId: 'prompt', value: 'controller host prompt' })
-  controller.dispatch({ kind: 'select-timing-kind', timing: 'after' })
-  controller.dispatch({ kind: 'set-field', fieldId: 'timing-after', value: '60' })
   controller.dispatch({ kind: 'save' })
   await controller.whenIdle()
   await waitUntil(() => controller.snapshot().mode === 'detail' && controller.snapshot().detail !== undefined, 'the created task detail')
@@ -382,6 +380,8 @@ test('L5: the real DirectSchedulePort drives the controller end to end', async t
   const persisted = hostRows.find(entry => entry.id === created.id)
   assert.ok(persisted !== undefined, 'the controller create really landed in the Host task store')
   assert.equal(persisted.kind, 'after')
+  assert.equal(persisted.kind === 'after' ? persisted.afterSeconds : undefined, 3600,
+    'the new-task default is one hour after Host acceptance')
 
   // Edit through the controller: one CAS update on the revision the detail read.
   controller.dispatch({ kind: 'open-edit' })

@@ -1356,12 +1356,9 @@ The leased fullscreen workspace (see `overlay-focus.md` §10.6) is ONE
 - **History** — newest-first delivery pages of 20, with paging only by the
   official `nextBefore` cursor. `earlierRecordsUnavailable` and
   `earlierRecordsPruned` are separate notes; a vanished cursor ends the page.
-- **Editor** — one official timing out of seven (`after`, `at`, `every`,
-  `daily`, `weekly`, `cron`, `rrule`) and one official target out of three
-  (`session`, `new_once`, `new`). `Ctrl+S` is the only Save: local structural
-  refusals happen first, then one Host `create`/`edit`. An edit sends the
-  minimal CAS patch with `expectedUpdatedAt`; an untouched timing or target is
-  never re-sent. `Esc` with dirty fields asks to discard, never auto-saves.
+- **Editor** — one official timing out of seven (`after`, `at`, `every`, `daily`, `weekly`, `cron`, `rrule`) and one official target out of three (`session`, `new_once`, `new`). Its guided Repeat choices are Once · after delay, Once · at date/time, Every · minutes, Every · hours, Every · exact seconds (advanced), Daily, Weekly, Custom · Cron and Custom · RRULE. A new task starts at `after_seconds: 3600` with `new_once`; the delay begins only when the Host accepts creation, and no Client time zone is guessed. Quantity units and the composite Weekdays chooser edit the typed draft only; they do not add a Client schedule or alter the Host timing union. Time and target fields use the labels `Time zone`, `Existing conversation`, `Create and reuse conversation` and `New conversation each run`. Session candidates appear only in their chooser.
+  `Ctrl+S` is the only Save: local structural refusals happen first, then one Host `create`/`edit`. An edit sends the minimal CAS patch with `expectedUpdatedAt`; an untouched timing or target is never re-sent. `Esc` with dirty fields asks to discard, never auto-saves. A `schedule_conflict` or an unknown edit outcome blocks Save until `Ctrl+G` reads the latest official record and rebases the four atomic groups (title, instruction, timing, target): locally changed groups stay in the draft, unchanged groups adopt the Host value, and overlapping groups are disclosed. Review is read-only; the next explicit Save uses the latest Host revision. `Ctrl+R` remains the distinct lossy reload and asks before discarding a dirty draft. A missing task blocks Save and can only be discarded. An unknown Create stays locked in that editor after the catalog refresh; leave it and inspect the task list before deciding whether to create a new task. Neither a catalog refresh nor a read result retries a dispatched write.
+
 - **Confirmation** — Run now, Delete and Clear ended require one explicit
   confirmation (`y`); a stale confirmation cannot commit a newer question.
 - **Help** — one in-panel key list; no second screen.

@@ -22,6 +22,7 @@ import type {
   ScheduleIntent,
   ScheduleWorkspaceSnapshot,
 } from '../../src/app/schedule/presentation.ts'
+import { editorFields } from '../../src/domain/schedule/form.ts'
 import type { ScheduleEditorDraft } from '../../src/domain/schedule/form.ts'
 
 interface FrameSize {
@@ -79,7 +80,7 @@ function draft(overrides: Partial<ScheduleEditorDraft> = {}): ScheduleEditorDraf
     mode: 'create',
     title: '',
     prompt: '',
-    timing: { kind: 'daily', time: '09:00:00', timeZone: 'UTC' },
+    timing: { kind: 'after', afterSeconds: '3600', quantityUnit: 'hours' },
     timingEdited: false,
     target: { kind: 'new_once', cwd: '', agentPreset: '' },
     targetEdited: false,
@@ -410,7 +411,10 @@ test('detail, history, help and confirmation Tab keys never dispatch a list filt
   chooser.panel.handleInput('\r')
   chooser.panel.handleInput('\t')
   chooser.panel.handleInput('\x1b[Z')
-  assert.deepEqual(chooser.dispatches, [], 'the editor chooser keeps ownership of Tab')
+  assert.deepEqual(chooser.dispatches, [
+    { kind: 'next-field', delta: 1 },
+    { kind: 'next-field', delta: -1 },
+  ], 'the editor chooser closes and moves between logical fields')
 })
 
 test('filter, refresh, create, clear, help, detail and root Esc dispatch their intents', () => {
@@ -515,14 +519,14 @@ test('editor Ctrl+S saves, Tab steps fields and Esc backs out', () => {
 })
 
 test('an editor Tab past the last field uses focus-field instead of an out-of-range next-field', () => {
-  const fields = draft({ focused: 6 })
+  const fields = draft({ focused: 5 })
   const view = harness(workspace({ mode: 'editor', editor: fields }), { columns: 100, rows: 30 })
   view.panel.handleInput('\t')
   assert.deepEqual(view.dispatches, [{ kind: 'focus-field', index: 0 }])
   view.resetDispatches()
   const first = harness(workspace({ mode: 'editor', editor: draft({ focused: 0 }) }), { columns: 100, rows: 30 })
   first.panel.handleInput('\x1b[Z')
-  assert.deepEqual(first.dispatches, [{ kind: 'focus-field', index: 6 }])
+  assert.deepEqual(first.dispatches, [{ kind: 'focus-field', index: 5 }])
 })
 
 test('typing into an editor text field dispatches set-field for the focused field', () => {
@@ -761,32 +765,161 @@ test('render alone dispatches nothing and never closes the workspace', () => {
 
 // ── editor choosers and toggles ──────────────────────────────────────────────
 
-test('editor choice fields open a chooser and dispatch the chosen official value', () => {
+test('editor choice fields open in-panel choosers and dispatch preset or destination IDs', () => {
   const timing = harness(workspace({ mode: 'editor', editor: draft({ focused: 2 }) }), { columns: 100, rows: 30 })
   timing.panel.handleInput('\r')
-  assert.deepEqual(timing.dispatches, [], 'opening the chooser is panel-local')
-  timing.panel.handleInput('\x1b[B')
-  timing.panel.handleInput('\x1b[B')
-  timing.panel.handleInput('\x1b[B')
+  const timingLines = timing.plain().join('\n')
+  const presetLabels = [
+    'Once · after delay',
+    'Once · at date/time',
+    'Every · minutes',
+    'Every · hours',
+    'Every · exact seconds (advanced)',
+    'Daily',
+    'Weekly',
+    'Custom · Cron',
+    'Custom · RRULE',
+  ]
+  let previousIndex = -1
+  for (const label of presetLabels) {
+    const index = timingLines.indexOf(label)
+    assert.ok(index > previousIndex, `${label} follows the previous frozen preset`)
+    previousIndex = index
+  }
+  for (let index = 0; index < 5; index += 1) timing.panel.handleInput('\x1b[B')
   timing.panel.handleInput('\r')
-  assert.deepEqual(timing.dispatches, [{ kind: 'select-timing-kind', timing: 'daily' }])
+  assert.deepEqual(timing.dispatches, [{ kind: 'select-timing-preset', preset: 'daily' }])
 
-  const target = harness(workspace({ mode: 'editor', editor: draft({ focused: 5 }) }), { columns: 100, rows: 30 })
+  const target = harness(workspace({ mode: 'editor', editor: draft({ focused: 4 }) }), { columns: 100, rows: 30 })
   target.panel.handleInput('\r')
+  const targetChoices = target.plain().join('\n')
+  const targetLabels = ['Existing conversation', 'Create and reuse conversation', 'New conversation each run']
+  const chooserStart = targetChoices.indexOf('Choose destination')
+  assert.ok(chooserStart >= 0)
+  let previousTarget = chooserStart
+  for (const label of targetLabels) {
+    const index = targetChoices.indexOf(label, chooserStart)
+    assert.ok(index > previousTarget, `${label} follows the previous destination`)
+    previousTarget = index
+  }
   target.panel.handleInput('\r')
   assert.deepEqual(target.dispatches, [{ kind: 'select-target-kind', target: 'session' }])
+
+  const existing = harness(workspace({ mode: 'editor', editor: draft({
+    target: { kind: 'session', sessionId: 'session-a' },
+    focused: 5,
+  }), sessions: [{ id: 'session-a', title: 'Alpha' }] }), { columns: 100, rows: 30 })
+  existing.panel.handleInput('\r')
+  existing.panel.handleInput('\r')
+  assert.deepEqual(existing.dispatches, [{ kind: 'select-target-session', sessionId: 'session-a' }])
 })
 
-test('editor weekday and advanced fields toggle in place', () => {
+test('editor recovery keys dispatch only their admitted intents', () => {
+  const conflictSnapshot = workspace({
+    mode: 'editor',
+    editor: draft({ mode: 'edit', id: 'schedule-1' }),
+    editorDirty: true,
+    editorRecovery: 'conflict',
+  })
+  const conflict = harness(conflictSnapshot, { columns: 100, rows: 30 })
+  const bar = conflict.plain().at(-1) ?? ''
+  assert.ok(bar.includes('Ctrl+G review'))
+  assert.ok(bar.includes('Ctrl+R reload'))
+  assert.ok(!bar.includes('Ctrl+S save'))
+  conflict.panel.handleInput('\x13')
+  conflict.panel.handleInput('\x07')
+  conflict.panel.handleInput('\x12')
+  assert.deepEqual(conflict.dispatches, [
+    { kind: 'save' },
+    { kind: 'review-with-my-edits' },
+    { kind: 'reload-latest' },
+  ])
+
+  const cleanEdit = harness(workspace({
+    mode: 'editor',
+    editor: draft({ mode: 'edit', id: 'schedule-1' }),
+    editorDirty: false,
+  }), { columns: 100, rows: 30 })
+  const cleanEditBar = cleanEdit.plain().at(-1) ?? ''
+  assert.ok(!cleanEditBar.includes('Ctrl+S save'))
+  assert.ok(cleanEditBar.includes('Ctrl+R reload'))
+
+  const missing = harness({ ...conflictSnapshot, editorRecovery: 'missing' }, { columns: 100, rows: 30 })
+  missing.panel.handleInput('\x07')
+  missing.panel.handleInput('\x12')
+  assert.deepEqual(missing.dispatches, [])
+
+  const unknownCreate = harness(workspace({
+    mode: 'editor',
+    editor: draft({ title: 'Maybe created', prompt: 'Maybe delivered' }),
+    editorRecovery: 'unknown',
+    editorDirty: true,
+  }), { columns: 100, rows: 30 })
+  const unknownCreateBar = unknownCreate.plain().at(-1) ?? ''
+  assert.ok(!unknownCreateBar.includes('Ctrl+S save'))
+  assert.ok(!unknownCreateBar.includes('Ctrl+G'))
+  assert.ok(!unknownCreateBar.includes('Ctrl+R'))
+  unknownCreate.panel.handleInput('\x07')
+  unknownCreate.panel.handleInput('\x12')
+  assert.deepEqual(unknownCreate.dispatches, [], 'an unknown Create has no retry or Edit review path')
+
+  const create = harness(workspace({ mode: 'editor', editor: draft() }), { columns: 100, rows: 30 })
+  assert.ok(!create.plain().at(-1)?.includes('Ctrl+R'))
+  create.panel.handleInput('\x12')
+  assert.deepEqual(create.dispatches, [])
+})
+
+test('a narrow Editor keeps focused fields and recovery status inside the painted viewport', () => {
+  for (const size of [{ columns: 44, rows: 20 }, { columns: 80, rows: 10 }]) {
+    for (const focused of [0, 2, 3, 4, 5]) {
+      const snapshot = workspace({
+        mode: 'editor',
+        editor: draft({ focused }),
+        editorRecovery: focused === 2 ? 'conflict' : undefined,
+        editorDirty: true,
+        notice: focused === 2 ? { text: 'Task changed. Save is blocked.', kind: 'error' } : undefined,
+      })
+      const lines = harness(snapshot, size).plain()
+      assert.ok(lines.length <= size.rows, `${size.columns}×${size.rows} stays inside height`)
+      assert.ok(lines.every(line => visibleWidth(line) <= size.columns), `${size.columns} columns stay width-safe`)
+      assert.ok(lines[0]?.includes('Schedule · Editor'))
+      assert.ok(lines.at(-1)?.includes('Esc back'), `${size.columns}×${size.rows} keeps Esc last`)
+      if (focused === 2) assert.ok(lines.some(line => line.includes('Task changed.')))
+      const fields = editorFields(snapshot.editor!)
+      const label = fields[focused]?.label
+      assert.ok(label !== undefined && lines.some(line => line.includes(label.slice(0, 12))),
+        `${size.columns}×${size.rows} keeps focused field ${String(label)} reachable`)
+    }
+  }
+})
+test('the weekly editor has one logical field and its chooser keeps toggles across Esc', () => {
   const weekly = draft({
     timing: { kind: 'weekly', time: '09:00:00', timeZone: 'UTC', weekdays: [1] },
     focused: 5,
   })
   const weekday = harness(workspace({ mode: 'editor', editor: weekly }), { columns: 100, rows: 30 })
+  assert.equal(weekday.plain().filter(line => /Weekdays/.test(line)).length, 1)
+  const fieldRow = weekday.plain().findIndex(line => line.includes('Weekdays'))
+  assert.ok(fieldRow >= 0)
+  weekday.panel.onCellPress(2, fieldRow)
   weekday.panel.handleInput('\r')
-  assert.deepEqual(weekday.dispatches, [{ kind: 'toggle-weekday', weekday: 1 }])
+  weekday.panel.onCellClick(2, fieldRow)
+  assert.deepEqual(weekday.dispatches, [], 'a pre-chooser field press cannot commit after the chooser takes input')
+  const chooser = weekday.plain().join('\n')
+  assert.match(chooser, /Space\/Enter toggle/u)
+  assert.match(chooser, /Mon \[current\]/u)
+  weekday.panel.handleInput(' ')
+  weekday.panel.handleInput('\x1b[B')
+  weekday.panel.handleInput('\r')
+  weekday.panel.handleInput('\x1b')
+  weekday.panel.handleInput('\t')
+  assert.deepEqual(weekday.dispatches, [
+    { kind: 'toggle-weekday', weekday: 1 },
+    { kind: 'toggle-weekday', weekday: 2 },
+    { kind: 'next-field', delta: 1 },
+  ], 'Esc closes without undo; Tab closes and leaves the composite field')
 
-  const advanced = harness(workspace({ mode: 'editor', editor: draft({ focused: 6 }) }), { columns: 100, rows: 30 })
+  const advanced = harness(workspace({ mode: 'editor', editor: draft({ focused: 5 }) }), { columns: 100, rows: 30 })
   advanced.panel.handleInput('\r')
   assert.deepEqual(advanced.dispatches, [{ kind: 'toggle-advanced' }])
 })

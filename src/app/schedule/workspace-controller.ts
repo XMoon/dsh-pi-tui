@@ -29,13 +29,13 @@
 import type {
   ScheduleCatalogEntry,
   ScheduleConfirm,
+  ScheduleEditorRecovery,
   ScheduleEditorDraft,
   ScheduleFilter,
   ScheduleHistoryView,
   ScheduleIntent,
   ScheduleNotice,
   ScheduleSessionChoice,
-  ScheduleTimingKind,
   ScheduleTargetKind,
   ScheduleWorkspaceSnapshot,
   ScheduleWorkspaceStatus,
@@ -62,12 +62,14 @@ import {
   encodeTarget,
   scheduleSessionId,
   selectTimingKind,
+  selectTimingQuantityUnit,
   sameTargetDraft,
   sameTimingDraft,
   type ScheduleEditorBaseline,
+  type ScheduleQuantityUnit,
   type ScheduleTargetDraft,
   type ScheduleTimingDraft,
-  type ScheduleTimingKind as FormTimingKind,
+  type ScheduleTimingPreset,
 } from '../../domain/schedule/form.ts'
 import { copyFailureDetails, remoteFailureCode, remoteFailureMessage } from '../../runtime/remote/write-failure.ts'
 import { SupersededReadError } from '../../runtime/read-error.ts'
@@ -118,6 +120,7 @@ export class ScheduleWorkspaceController {
   /** The newest accepted `reload-latest` request; older answers are discarded. */
   private reloadEpoch = 0
   private editorBaseline: ScheduleEditorBaseline | undefined
+  private editorRecovery: ScheduleEditorRecovery | undefined
   private confirm: ScheduleConfirm | undefined
   /** The task a confirmed Discard must open next (a navigation that arrived
    *  while the dirty editor was still open). */
@@ -219,7 +222,8 @@ export class ScheduleWorkspaceController {
       mode: this.mode,
       ...(this.detail === undefined ? {} : { detail: this.detail }),
       ...(this.historyView === undefined ? {} : { history: this.historyView }),
-      ...(this.editor === undefined ? {} : { editor: this.editor }),
+      ...(this.editor === undefined ? {} : { editor: this.editor, editorDirty: this.editorDirty() }),
+      ...(this.editorRecovery === undefined ? {} : { editorRecovery: this.editorRecovery }),
       ...(this.confirm === undefined ? {} : { confirm: this.confirm }),
       ...(this.notice === undefined ? {} : { notice: this.notice }),
       ...(this.limits === undefined ? {} : { limits: this.limits }),
@@ -277,10 +281,13 @@ export class ScheduleWorkspaceController {
         this.own('schedule editor open', () => this.openEdit())
         return
       case 'reload-latest':
+        // A missing Host task has no revision to reload or recreate from.
+        if (this.editorRecovery === 'missing') return
         // Reload is LOSSY: an unsaved draft must be discarded explicitly.
+        this.invalidateEditorRead()
         if (this.editorDirty()) {
           this.bumpPage()
-    this.confirm = { kind: 'reload', token: ++this.confirmToken }
+          this.confirm = { kind: 'reload', token: ++this.confirmToken }
           this.publish()
           return
         }
@@ -306,13 +313,13 @@ export class ScheduleWorkspaceController {
         if (this.editor === undefined) return
         // A user edit supersedes every reload already in flight: the read must
         // never overwrite content the user typed while waiting.
-        this.reloadEpoch += 1
+        this.invalidateEditorRead()
         this.editor = applyFieldValue(this.editor, intent.fieldId, intent.value)
         this.publish()
         return
       }
-      case 'select-timing-kind':
-        this.selectTiming(intent.timing)
+      case 'select-timing-preset':
+        this.selectTimingPreset(intent.preset)
         return
       case 'toggle-weekday':
         this.toggleWeekday(intent.weekday)
@@ -325,12 +332,15 @@ export class ScheduleWorkspaceController {
         return
       case 'toggle-advanced':
         if (this.editor === undefined || this.editor.target.kind === 'session') return
-        this.reloadEpoch += 1
+        this.invalidateEditorRead()
         this.editor = { ...this.editor, advanced: !this.editor.advanced }
         this.publish()
         return
       case 'save':
         this.save()
+        return
+      case 'review-with-my-edits':
+        this.own('schedule editor review', () => this.performReview())
         return
       case 'toggle-active':
         this.toggleActive()
@@ -461,15 +471,17 @@ export class ScheduleWorkspaceController {
     const target = id ?? this.selectedId
     if (target === undefined) return
     if (this.mode === 'editor') {
+      this.invalidateEditorRead()
       if (this.editorDirty()) {
         this.pendingDetailId = target
         this.bumpPage()
-    this.confirm = { kind: 'discard', token: ++this.confirmToken }
+        this.confirm = { kind: 'discard', token: ++this.confirmToken }
         this.publish()
         return
       }
       this.editor = undefined
       this.editorBaseline = undefined
+      this.editorRecovery = undefined
     }
     this.openDetail(target)
   }
@@ -601,7 +613,9 @@ export class ScheduleWorkspaceController {
   private openCreate(): void {
     if (this.busy) return
     this.pageEpoch += 1
+    this.invalidateEditorRead()
     this.editorToken += 1
+    this.editorRecovery = undefined
     this.pendingDetailId = undefined
     this.mode = 'editor'
     this.editorBaseline = undefined
@@ -631,7 +645,7 @@ export class ScheduleWorkspaceController {
     // A after the user selected B, left Detail or the workspace was disposed.
     const epoch = ++this.detailEpoch
     const openEpoch = this.openEpoch
-    this.editReadAbort?.abort()
+    this.invalidateEditorRead()
     const controller = new AbortController()
     this.editReadAbort = controller
     let current = known
@@ -659,6 +673,7 @@ export class ScheduleWorkspaceController {
     if (this.disposed || !this.surfaceIs('detail') || this.selectedId !== id) return
     const draft = draftFromRecord(current)
     this.mode = 'editor'
+    this.editorRecovery = undefined
     this.pageEpoch += 1
     this.editorToken += 1
     this.editorBaseline = {
@@ -685,29 +700,81 @@ export class ScheduleWorkspaceController {
     this.publish()
   }
 
-  private selectTiming(kind: ScheduleTimingKind): void {
-    if (this.editor === undefined) return
+  private selectTimingPreset(preset: ScheduleTimingPreset): void {
     const edited = this.editor
-    if (edited.timing.kind === kind) return
-    // Any accepted draft mutation supersedes reloads already in flight.
-    this.reloadEpoch += 1
-    // Remember every kind's LAST typed value, so switching away and back never
-    // resets the user's rule to a default (and never re-sends a different rule
-    // for an unchanged field).
-    const timingMemory = { ...(edited.timingMemory ?? {}), [edited.timing.kind]: edited.timing }
-    const remembered = timingMemory[kind as FormTimingKind]
-    const timing: ScheduleTimingDraft = remembered ?? (
-      this.editorBaseline?.timing.kind === kind
-        ? this.editorBaseline.timing
-        : selectTimingKind(edited.timing, kind as FormTimingKind)
-    )
+    if (edited === undefined) return
+    let kind: ScheduleTimingDraft['kind']
+    let quantityUnit: ScheduleQuantityUnit | undefined
+    let firstEverySeconds: string | undefined
+    switch (preset) {
+      case 'once-after':
+        kind = 'after'
+        quantityUnit = 'hours'
+        break
+      case 'once-at':
+        kind = 'at'
+        break
+      case 'every-minutes':
+        kind = 'every'
+        quantityUnit = 'minutes'
+        firstEverySeconds = '60'
+        break
+      case 'every-hours':
+        kind = 'every'
+        quantityUnit = 'hours'
+        firstEverySeconds = '3600'
+        break
+      case 'every-seconds':
+        kind = 'every'
+        quantityUnit = 'seconds'
+        firstEverySeconds = '60'
+        break
+      case 'daily':
+        kind = 'daily'
+        break
+      case 'weekly':
+        kind = 'weekly'
+        break
+      case 'cron':
+        kind = 'cron'
+        break
+      case 'rrule':
+        kind = 'rrule'
+        break
+    }
+
+    const currentTiming = edited.timing
+    if (currentTiming.kind === kind) {
+      if (quantityUnit === undefined) return
+      const timing = selectTimingQuantityUnit(currentTiming, quantityUnit)
+      if (timing === currentTiming) return
+      this.invalidateEditorRead()
+      const timingMemory = { ...(edited.timingMemory ?? {}), [kind]: timing }
+      this.editor = { ...edited, timing, timingMemory, timingEdited: true }
+      this.publish()
+      return
+    }
+
+    this.invalidateEditorRead()
+    const timingMemory = { ...(edited.timingMemory ?? {}), [currentTiming.kind]: currentTiming }
+    const remembered = timingMemory[kind]
+    const baseline = this.editorBaseline?.timing.kind === kind ? this.editorBaseline.timing : undefined
+    let timing = remembered ?? baseline
+    if (timing === undefined) {
+      timing = selectTimingKind(currentTiming, kind, new Date())
+      if (timing.kind === 'every' && quantityUnit !== undefined && firstEverySeconds !== undefined) {
+        timing = { ...timing, everySeconds: firstEverySeconds, quantityUnit }
+      }
+    } else if (quantityUnit !== undefined) {
+      timing = selectTimingQuantityUnit(timing, quantityUnit)
+    }
     this.editor = { ...edited, timing, timingMemory, timingEdited: true }
     this.publish()
   }
 
   private toggleWeekday(weekday: number): void {
     if (this.editor === undefined || this.editor.timing.kind !== 'weekly') return
-    this.reloadEpoch += 1
+    this.invalidateEditorRead()
     const timing: ScheduleTimingDraft = this.editor.timing
     const weekdays = timing.weekdays.includes(weekday)
       ? timing.weekdays.filter(day => day !== weekday)
@@ -720,7 +787,7 @@ export class ScheduleWorkspaceController {
     if (this.editor === undefined) return
     const current = this.editor.target
     if (current.kind === kind) return
-    this.reloadEpoch += 1
+    this.invalidateEditorRead()
     const targetMemory = { ...(this.editor.targetMemory ?? {}), [current.kind]: current }
     const remembered = targetMemory[kind]
     const baselineTarget = this.editorBaseline?.target.kind === kind ? this.editorBaseline.target : undefined
@@ -739,7 +806,7 @@ export class ScheduleWorkspaceController {
 
   private selectTargetSession(sessionId: string): void {
     if (this.editor === undefined) return
-    this.reloadEpoch += 1
+    this.invalidateEditorRead()
     this.editor = { ...this.editor, target: { kind: 'session', sessionId }, targetEdited: true }
     this.publish()
   }
@@ -819,8 +886,8 @@ export class ScheduleWorkspaceController {
     if (kind === 'open-help') return this.confirm === undefined
     if (kind === 'close-help') return this.mode === 'help'
     const editorOnly: readonly ScheduleIntent['kind'][] = [
-      'set-field', 'focus-field', 'next-field', 'select-timing-kind', 'toggle-weekday',
-      'select-target-kind', 'select-target-session', 'toggle-advanced', 'save', 'reload-latest',
+      'set-field', 'focus-field', 'next-field', 'select-timing-preset', 'toggle-weekday',
+      'select-target-kind', 'select-target-session', 'toggle-advanced', 'save', 'review-with-my-edits', 'reload-latest',
     ]
     if (editorOnly.includes(kind)) return this.mode === 'editor'
     if (kind === 'open-detail') return this.mode === 'list' || this.mode === 'detail' || this.mode === 'editor'
@@ -839,20 +906,20 @@ export class ScheduleWorkspaceController {
 
   private async performReload(): Promise<void> {
     const draft = this.editor
-    if (draft === undefined || draft.id === undefined) return
-    if (this.editorBaseline === undefined || this.busy) return
+    const baseline = this.editorBaseline
+    if (draft === undefined || draft.id === undefined || baseline === undefined || this.busy) return
+    this.editReadAbort?.abort()
+    const controller = new AbortController()
+    this.editReadAbort = controller
     const token = this.editorToken
     const epoch = ++this.reloadEpoch
+    const focusedId = editorFields(draft)[draft.focused]?.id ?? 'timing-kind'
     try {
-      const result = await this.port.view({ id: scheduleId(draft.id) })
-      if (this.disposed) return
-      // A superseded reload, another editor instance, a closed editor or a save
-      // that started meanwhile all invalidate this read.
-      if (epoch !== this.reloadEpoch || this.editorToken !== token) return
-      if (this.busy) return
-      if (this.editor === undefined || this.editor.id !== draft.id) return
+      const result = await this.port.view({ id: scheduleId(draft.id) }, controller.signal)
+      if (!this.isCurrentEditorRead(epoch, token, draft.id, controller)) return
       if ('code' in result) {
-        this.notice = errorNotice(SCHEDULE_COPY.taskGone)
+        this.editorRecovery = 'missing'
+        this.notice = errorNotice(SCHEDULE_COPY.missing)
         this.publish()
         return
       }
@@ -863,10 +930,7 @@ export class ScheduleWorkspaceController {
         timing: fromRecord.timing,
         target: fromRecord.target,
       }
-      // The editor now shows the HOST's latest facts and revision; the user
-      // re-applies what they still want on top of them. No field-level merge,
-      // and the Host's newer values are never re-sent as an overwrite.
-      this.editor = {
+      const next: ScheduleEditorDraft = {
         ...draft,
         title: latest.title,
         prompt: latest.prompt,
@@ -879,22 +943,130 @@ export class ScheduleWorkspaceController {
         advanced: latest.target.kind !== 'session' && (latest.target.cwd !== '' || latest.target.agentPreset !== ''),
         expectedUpdatedAt: result.updatedAt ?? null,
       }
+      this.editor = { ...next, focused: editorFocusIndex(next, focusedId) }
       this.editorBaseline = latest
+      this.editorRecovery = undefined
       this.notice = infoNotice(SCHEDULE_COPY.reloaded)
       this.publish()
     } catch (error) {
-      if (this.disposed) return
-      if (epoch !== this.reloadEpoch || this.editorToken !== token) return
-      if (this.editor === undefined || this.editor.id !== draft.id) return
+      if (controller.signal.aborted || error instanceof SupersededReadError) return
+      if (!this.isCurrentEditorRead(epoch, token, draft.id, controller)) return
       this.notice = errorNotice(this.describeFailure(error))
       this.publish()
+    } finally {
+      if (this.editReadAbort === controller) this.editReadAbort = undefined
     }
+  }
+
+  private async performReview(): Promise<void> {
+    const draft = this.editor
+    const baseline = this.editorBaseline
+    if (draft === undefined || draft.mode !== 'edit' || draft.id === undefined || baseline === undefined
+      || this.busy || this.confirm !== undefined
+      || (this.editorRecovery !== 'conflict' && this.editorRecovery !== 'unknown')) return
+
+    const localChanged = {
+      title: draft.title !== baseline.title,
+      prompt: draft.prompt !== baseline.prompt,
+      timing: !safeSameTiming(draft.timing, baseline.timing),
+      target: !sameTargetDraft(draft.target, baseline.target),
+    }
+    const token = this.editorToken
+    const id = draft.id
+    const focusedId = editorFields(draft)[draft.focused]?.id ?? 'timing-kind'
+    this.editReadAbort?.abort()
+    const controller = new AbortController()
+    this.editReadAbort = controller
+    const epoch = ++this.reloadEpoch
+    try {
+      const result = await this.port.view({ id: scheduleId(id) }, controller.signal)
+      if (!this.isCurrentEditorRead(epoch, token, id, controller)) return
+      if ('code' in result) {
+        this.editorRecovery = 'missing'
+        this.notice = errorNotice(SCHEDULE_COPY.missing)
+        this.publish()
+        return
+      }
+      const fromRecord = draftFromRecord(result)
+      const latest: ScheduleEditorBaseline = {
+        title: result.title,
+        prompt: result.prompt,
+        timing: fromRecord.timing,
+        target: fromRecord.target,
+      }
+      const remoteChanged = {
+        title: latest.title !== baseline.title,
+        prompt: latest.prompt !== baseline.prompt,
+        timing: !safeSameTiming(latest.timing, baseline.timing),
+        target: !sameTargetDraft(latest.target, baseline.target),
+      }
+      const target = localChanged.target ? draft.target : latest.target
+      const next: ScheduleEditorDraft = {
+        ...draft,
+        title: localChanged.title ? draft.title : latest.title,
+        prompt: localChanged.prompt ? draft.prompt : latest.prompt,
+        timing: localChanged.timing ? draft.timing : latest.timing,
+        target,
+        timingMemory: undefined,
+        targetMemory: undefined,
+        timingEdited: localChanged.timing,
+        targetEdited: localChanged.target,
+        advanced: target.kind !== 'session' && (target.cwd !== '' || target.agentPreset !== ''),
+        expectedUpdatedAt: result.updatedAt ?? null,
+      }
+      this.editor = { ...next, focused: editorFocusIndex(next, focusedId) }
+      this.editorBaseline = latest
+      this.editorRecovery = undefined
+      const bothChanged = [
+        localChanged.title && remoteChanged.title ? 'Title' : undefined,
+        localChanged.prompt && remoteChanged.prompt ? 'Instruction' : undefined,
+        localChanged.timing && remoteChanged.timing ? 'Repeat' : undefined,
+        localChanged.target && remoteChanged.target ? 'Destination' : undefined,
+      ].filter((group): group is string => group !== undefined)
+      const unchanged = next.title === latest.title
+        && next.prompt === latest.prompt
+        && safeSameTiming(next.timing, latest.timing)
+        && sameTargetDraft(next.target, latest.target)
+      this.notice = infoNotice(unchanged
+        ? bothChanged.length > 0
+          ? SCHEDULE_COPY.hostMatchesWithOverlap(bothChanged.join('/'))
+          : SCHEDULE_COPY.hostMatches
+        : bothChanged.length > 0
+          ? SCHEDULE_COPY.bothChanged(bothChanged.join('/'))
+          : SCHEDULE_COPY.reviewed)
+      this.publish()
+    } catch (error) {
+      if (controller.signal.aborted || error instanceof SupersededReadError) return
+      if (!this.isCurrentEditorRead(epoch, token, id, controller)) return
+      this.notice = errorNotice(this.describeFailure(error))
+      this.publish()
+    } finally {
+      if (this.editReadAbort === controller) this.editReadAbort = undefined
+    }
+  }
+
+  private isCurrentEditorRead(
+    epoch: number,
+    token: number,
+    id: string,
+    controller: AbortController,
+  ): boolean {
+    return !this.disposed
+      && !controller.signal.aborted
+      && this.editReadAbort === controller
+      && epoch === this.reloadEpoch
+      && token === this.editorToken
+      && this.editor?.id === id
+      && this.surfaceIs('editor')
+      && this.confirm === undefined
+      && !this.busy
   }
 
   /** The UNIQUE save action: one local refusal or one Host create/edit. */
   private save(): void {
     const draft = this.editor
-    if (draft === undefined || this.busy) return
+    if (draft === undefined || this.busy || this.editorRecovery !== undefined) return
+    if (draft.mode === 'edit' && !this.editorDirty()) return
     let request:
       | { readonly kind: 'create'; readonly create: ReturnType<typeof encodeCreate> }
       | { readonly kind: 'edit'; readonly patch: ReturnType<typeof encodePatch> }
@@ -913,9 +1085,8 @@ export class ScheduleWorkspaceController {
       }
       throw error
     }
-    // A write owns the editor from now on: an older reload answer must not
-    // replace the draft this save is about to settle.
-    this.reloadEpoch += 1
+    // A write owns the editor from now on; an older read cannot replace this draft.
+    this.invalidateEditorRead()
     const id = draft.id
     const expectedUpdatedAt = draft.expectedUpdatedAt ?? null
     this.busyEditor = true
@@ -929,21 +1100,27 @@ export class ScheduleWorkspaceController {
     const stamp = this.surfaceStamp()
     try {
       const entry = await this.port.create(create)
-      this.notice = infoNotice(SCHEDULE_COPY.updated)
       if (this.sameSurface(stamp) && this.editor?.mode === 'create') {
         const underHelp = this.mode === 'help'
         this.editor = undefined
         this.editorBaseline = undefined
+        this.editorRecovery = undefined
         this.detail = entry
         this.selectedId = entry.id
         if (underHelp) this.helpReturn = 'detail'
         else this.mode = 'detail'
       }
+      this.notice = infoNotice(SCHEDULE_COPY.updated)
       this.publish()
       await this.refreshNow()
     } catch (error) {
-      this.notice = errorNotice(this.describeFailure(error))
-      this.publish()
+      if (this.sameSurface(stamp)) {
+        this.editorRecovery = error instanceof ScheduleOutcomeUnknownError ? 'unknown' : undefined
+        this.notice = errorNotice(error instanceof ScheduleOutcomeUnknownError
+          ? SCHEDULE_COPY.createUnknown
+          : this.describeFailure(error))
+        this.publish()
+      }
       if (error instanceof ScheduleOutcomeUnknownError) await this.refreshNow()
     } finally {
       this.busyEditor = false
@@ -959,28 +1136,35 @@ export class ScheduleWorkspaceController {
         patch,
         expectedUpdatedAt,
       })
-      const refusal = editRefusal(result)
-      if (refusal !== undefined) {
-        // The draft stays; the user must re-read the latest task explicitly.
-        this.notice = errorNotice(refusal)
-        this.publish()
-        if ('code' in result && result.code === 'schedule_not_found') await this.refreshNow()
+      if ('code' in result) {
+        if (this.sameSurface(stamp) && this.editor?.mode === 'edit') {
+          this.editorRecovery = result.code === 'schedule_conflict' ? 'conflict' : 'missing'
+          this.notice = errorNotice(result.code === 'schedule_conflict' ? SCHEDULE_COPY.conflict : SCHEDULE_COPY.missing)
+          this.publish()
+        }
+        if (result.code === 'schedule_not_found') await this.refreshNow()
         return
       }
-      this.notice = infoNotice(SCHEDULE_COPY.updated)
       if (this.sameSurface(stamp) && this.editor?.mode === 'edit') {
         const underHelp = this.mode === 'help'
         this.editor = undefined
         this.editorBaseline = undefined
+        this.editorRecovery = undefined
         this.detail = result as ScheduleCatalogEntry
         if (underHelp) this.helpReturn = 'detail'
         else this.mode = 'detail'
       }
+      this.notice = infoNotice(SCHEDULE_COPY.updated)
       this.publish()
       await this.refreshNow()
     } catch (error) {
-      this.notice = errorNotice(this.describeFailure(error))
-      this.publish()
+      if (this.sameSurface(stamp)) {
+        this.editorRecovery = error instanceof ScheduleOutcomeUnknownError ? 'unknown' : undefined
+        this.notice = errorNotice(error instanceof ScheduleOutcomeUnknownError
+          ? SCHEDULE_COPY.editorUnknown
+          : this.describeFailure(error))
+        this.publish()
+      }
       if (error instanceof ScheduleOutcomeUnknownError) await this.refreshNow()
     } finally {
       this.busyEditor = false
@@ -1080,8 +1264,10 @@ export class ScheduleWorkspaceController {
       case 'discard': {
         const pending = this.pendingDetailId
         this.pendingDetailId = undefined
+        this.invalidateEditorRead()
         this.editor = undefined
         this.editorBaseline = undefined
+        this.editorRecovery = undefined
         this.notice = undefined
         if (pending !== undefined) {
           this.bumpPage()
@@ -1229,15 +1415,17 @@ export class ScheduleWorkspaceController {
       return
     }
     if (this.mode === 'editor') {
+      this.invalidateEditorRead()
       if (this.editorDirty()) {
         this.pendingDetailId = undefined
         this.bumpPage()
-    this.confirm = { kind: 'discard', token: ++this.confirmToken }
+        this.confirm = { kind: 'discard', token: ++this.confirmToken }
         this.publish()
         return
       }
       this.editor = undefined
       this.editorBaseline = undefined
+      this.editorRecovery = undefined
       this.bumpPage()
       this.mode = this.detail === undefined ? 'list' : 'detail'
       this.publish()
@@ -1347,6 +1535,12 @@ export class ScheduleWorkspaceController {
     this.runOwned(label, task)
   }
 
+  private invalidateEditorRead(): void {
+    this.reloadEpoch += 1
+    this.editReadAbort?.abort()
+    this.editReadAbort = undefined
+  }
+
   /** Whether `page` is the surface the user is actually looking at: Help is an
    *  UNDERLAY, so a read answer for its `helpReturn` page stays publishable. */
   private surfaceIs(page: 'list' | 'detail' | 'history' | 'editor'): boolean {
@@ -1383,6 +1577,13 @@ export class ScheduleWorkspaceController {
     if (isPermissionCode(code)) return SCHEDULE_COPY.permissionDenied
     return remoteFailureMessage(error) || safeErrorMessage(error)
   }
+}
+
+function editorFocusIndex(draft: ScheduleEditorDraft, fieldId: string): number {
+  const fields = editorFields(draft)
+  const index = fields.findIndex(field => field.id === fieldId)
+  if (index >= 0) return index
+  return fields.findIndex(field => field.id === 'timing-kind')
 }
 
 /** Whether two timing drafts are the SAME encoded rule; an INVALID intermediate

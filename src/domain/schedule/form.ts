@@ -6,7 +6,7 @@
  *
  * This module is pure data and encoding. It performs the SMALL structural
  * checks a text field can prove locally (a non-empty title/prompt, an integer
- * second count, a `YYYY-MM-DD`/`HH:mm:ss` shape, a non-empty weekday set, a
+ * second count, a `YYYY-MM-DD`/`HH:mm`/`HH:mm:ss[.SSS]` shape, a non-empty weekday set, a
  * present Session choice) and leaves every calendar, time-zone, futureness,
  * cron and RRULE rule to the official Host — a local refusal here never
  * becomes a Host write, and nothing here ever talks to a Host.
@@ -24,6 +24,21 @@ import type {
   ScheduleTiming,
 } from '../../runtime/schedule-port.ts'
 
+/** A user-facing unit for the exact integer seconds in an after/every rule. */
+export type ScheduleQuantityUnit = 'seconds' | 'minutes' | 'hours'
+
+/** One UI action that chooses an official timing kind and its input unit. */
+export type ScheduleTimingPreset =
+  | 'once-after'
+  | 'once-at'
+  | 'every-minutes'
+  | 'every-hours'
+  | 'every-seconds'
+  | 'daily'
+  | 'weekly'
+  | 'cron'
+  | 'rrule'
+
 /** One of the seven official timing kinds the editor can select. */
 export type ScheduleTimingKind = ScheduleTiming['kind']
 
@@ -31,11 +46,12 @@ export type ScheduleTimingKind = ScheduleTiming['kind']
 export type ScheduleTargetKind = ScheduleTargetRequest['kind']
 
 /** The typed draft of the seven official timing selectors. Text fields stay
- *  strings until encoding, so the user can type freely. */
+ *  strings until encoding, so the user can type freely. The quantity unit is a
+ *  presentation of the same exact seconds value and is never sent to the Host. */
 export type ScheduleTimingDraft =
-  | { readonly kind: 'after'; readonly afterSeconds: string }
+  | { readonly kind: 'after'; readonly afterSeconds: string; readonly quantityUnit: ScheduleQuantityUnit }
   | { readonly kind: 'at'; readonly date: string; readonly time: string; readonly timeZone: string }
-  | { readonly kind: 'every'; readonly everySeconds: string }
+  | { readonly kind: 'every'; readonly everySeconds: string; readonly quantityUnit: ScheduleQuantityUnit }
   | { readonly kind: 'daily'; readonly time: string; readonly timeZone: string }
   | {
     readonly kind: 'weekly'
@@ -81,12 +97,11 @@ export interface ScheduleEditorDraft {
   readonly targetMemory?: Readonly<Partial<Record<ScheduleTargetKind, ScheduleTargetDraft>>>
 }
 
-/** The default new-task timing: a daily wall-clock reminder in UTC. UTC is
- *  deliberate — the form never guesses the terminal's zone. */
+/** The default new-task timing: one hour after the Host accepts the create. */
 export const DEFAULT_TIMING_DRAFT: ScheduleTimingDraft = {
-  kind: 'daily',
-  time: '09:00:00',
-  timeZone: 'UTC',
+  kind: 'after',
+  afterSeconds: '3600',
+  quantityUnit: 'hours',
 }
 
 /** The default new-task target: the official omission semantics (one Session
@@ -104,9 +119,14 @@ export class ScheduleFormError extends Error {
   }
 }
 
-const CLOCK_PATTERN = /^\d{2}:\d{2}:\d{2}(\.\d{1,3})?$/
+const CLOCK_PATTERN = /^\d{2}:\d{2}(?::\d{2}(\.\d{1,3})?)?$/
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/
 const WEEKDAYS = [1, 2, 3, 4, 5, 6, 7] as const
+const QUANTITY_FACTORS: Readonly<Record<ScheduleQuantityUnit, bigint>> = {
+  seconds: 1n,
+  minutes: 60n,
+  hours: 3600n,
+}
 
 /** Encode one timing draft into the official request union. */
 export function encodeTiming(draft: ScheduleTimingDraft): ScheduleTiming {
@@ -118,7 +138,7 @@ export function encodeTiming(draft: ScheduleTimingDraft): ScheduleTiming {
         kind: 'at',
         at: {
           date: requirePattern('date', draft.date, DATE_PATTERN, 'YYYY-MM-DD'),
-          time: requirePattern('time', draft.time, CLOCK_PATTERN, 'HH:mm:ss'),
+          time: encodeTime('time', draft.time),
           time_zone: requireTimeZone(draft.timeZone),
         },
       }
@@ -128,7 +148,7 @@ export function encodeTiming(draft: ScheduleTimingDraft): ScheduleTiming {
       return {
         kind: 'daily',
         daily: {
-          time: requirePattern('time', draft.time, CLOCK_PATTERN, 'HH:mm:ss'),
+          time: encodeTime('time', draft.time),
           time_zone: requireTimeZone(draft.timeZone),
         },
       }
@@ -136,7 +156,7 @@ export function encodeTiming(draft: ScheduleTimingDraft): ScheduleTiming {
       return {
         kind: 'weekly',
         weekly: {
-          time: requirePattern('time', draft.time, CLOCK_PATTERN, 'HH:mm:ss'),
+          time: encodeTime('time', draft.time),
           time_zone: requireTimeZone(draft.timeZone),
           weekdays: normalizeWeekdaySelection(draft.weekdays),
         },
@@ -246,7 +266,7 @@ export interface ScheduleFormField {
   readonly label: string
   /** `text` fields edit a string; `choice`/`weekday`/`toggle` fields are
    *  activated rather than typed into. */
-  readonly kind: 'text' | 'choice' | 'weekday' | 'toggle'
+  readonly kind: 'text' | 'choice' | 'toggle'
   readonly value: string
 }
 
@@ -257,17 +277,17 @@ export interface ScheduleFormField {
 export function editorFields(draft: ScheduleEditorDraft): readonly ScheduleFormField[] {
   const fields: ScheduleFormField[] = [
     { id: 'title', label: 'Title', kind: 'text', value: draft.title },
-    { id: 'prompt', label: 'Prompt', kind: 'text', value: draft.prompt },
-    { id: 'timing-kind', label: 'Timing', kind: 'choice', value: TIMING_LABELS[draft.timing.kind] },
+    { id: 'prompt', label: 'Instruction', kind: 'text', value: draft.prompt },
+    { id: 'timing-kind', label: 'Repeat', kind: 'choice', value: draft.timing.kind },
     ...timingFields(draft.timing),
-    { id: 'target-kind', label: 'Target', kind: 'choice', value: TARGET_LABELS[draft.target.kind] },
+    { id: 'target-kind', label: 'Destination', kind: 'choice', value: draft.target.kind },
     ...targetFields(draft),
   ]
   if (draft.target.kind !== 'session') {
-    fields.push({ id: 'target-advanced', label: 'Advanced create values', kind: 'toggle', value: draft.advanced ? 'shown' : 'hidden' })
+    fields.push({ id: 'target-advanced', label: 'Advanced creation options', kind: 'toggle', value: draft.advanced ? 'shown' : 'hidden' })
     if (draft.advanced) {
       fields.push(
-        { id: 'target-cwd', label: 'cwd', kind: 'text', value: draft.target.cwd },
+        { id: 'target-cwd', label: 'Working directory', kind: 'text', value: draft.target.cwd },
         { id: 'target-agent-preset', label: 'Agent preset', kind: 'text', value: draft.target.agentPreset },
       )
     }
@@ -310,20 +330,19 @@ export const SCHEDULE_WEEKDAYS: readonly number[] = [...WEEKDAYS]
 
 /** Replace one timing kind, keeping the shared wall-clock/zone values a user
  *  already typed when the new kind has them. */
-export function selectTimingKind(current: ScheduleTimingDraft, kind: ScheduleTimingKind): ScheduleTimingDraft {
+export function selectTimingKind(
+  current: ScheduleTimingDraft,
+  kind: ScheduleTimingKind,
+  now: Date,
+): ScheduleTimingDraft {
   if (current.kind === kind) return current
   switch (kind) {
     case 'after':
-      return { kind, afterSeconds: current.kind === 'after' ? current.afterSeconds : '60' }
+      return { kind, afterSeconds: '3600', quantityUnit: 'hours' }
     case 'every':
-      return { kind, everySeconds: current.kind === 'every' ? current.everySeconds : '3600' }
+      return { kind, everySeconds: '3600', quantityUnit: 'hours' }
     case 'at':
-      return {
-        kind,
-        date: current.kind === 'at' ? current.date : utcToday(),
-        time: sharedTime(current),
-        timeZone: sharedZone(current),
-      }
+      return { kind, ...defaultAtFrom(now), timeZone: 'UTC' }
     case 'daily':
       return { kind, time: sharedTime(current), timeZone: sharedZone(current) }
     case 'weekly':
@@ -340,11 +359,29 @@ export function selectTimingKind(current: ScheduleTimingDraft, kind: ScheduleTim
         timeZone: sharedZone(current),
       }
     case 'rrule':
-      return {
-        kind,
-        rrule: current.kind === 'rrule' ? current.rrule : 'DTSTART;TZID=UTC:20260101T090000\nRRULE:FREQ=DAILY',
-      }
+      return { kind, rrule: defaultRRuleFrom(now) }
   }
+}
+
+/** Change only the input unit; the official seconds change only when they are
+ *  not exactly representable in the selected unit. */
+export function selectTimingQuantityUnit(
+  timing: ScheduleTimingDraft,
+  quantityUnit: ScheduleQuantityUnit,
+): ScheduleTimingDraft {
+  if (timing.kind !== 'after' && timing.kind !== 'every') return timing
+  if (timing.quantityUnit === quantityUnit) return timing
+  const seconds = timing.kind === 'after' ? timing.afterSeconds : timing.everySeconds
+  const factor = QUANTITY_FACTORS[quantityUnit]
+  const exact = /^\d+$/.test(seconds) && BigInt(seconds) % factor === 0n
+  const nextSeconds = exact
+    ? seconds
+    : timing.kind === 'every' && quantityUnit === 'seconds'
+      ? '60'
+      : String(factor)
+  return timing.kind === 'after'
+    ? { ...timing, afterSeconds: nextSeconds, quantityUnit }
+    : { ...timing, everySeconds: nextSeconds, quantityUnit }
 }
 
 /** Replace one focusable field's string value. Unknown ids are ignored. */
@@ -385,35 +422,30 @@ export function sameTargetDraft(left: ScheduleTargetDraft, right: ScheduleTarget
 function timingFields(timing: ScheduleTimingDraft): readonly ScheduleFormField[] {
   switch (timing.kind) {
     case 'after':
-      return [{ id: 'timing-after', label: 'Delay seconds', kind: 'text', value: timing.afterSeconds }]
+      return [{ id: 'timing-quantity', label: `Delay (${timing.quantityUnit})`, kind: 'text', value: quantityForUnit(timing.afterSeconds, timing.quantityUnit) }]
     case 'at':
       return [
-        { id: 'timing-date', label: 'Date (YYYY-MM-DD)', kind: 'text', value: timing.date },
-        { id: 'timing-time', label: 'Time (HH:mm:ss)', kind: 'text', value: timing.time },
-        { id: 'timing-zone', label: 'IANA time zone', kind: 'text', value: timing.timeZone },
+        { id: 'timing-date', label: 'Date', kind: 'text', value: timing.date },
+        { id: 'timing-time', label: 'Time', kind: 'text', value: timing.time },
+        { id: 'timing-zone', label: 'Time zone', kind: 'text', value: timing.timeZone },
       ]
     case 'every':
-      return [{ id: 'timing-every', label: 'Interval seconds', kind: 'text', value: timing.everySeconds }]
+      return [{ id: 'timing-quantity', label: `Interval (${timing.quantityUnit})`, kind: 'text', value: quantityForUnit(timing.everySeconds, timing.quantityUnit) }]
     case 'daily':
       return [
-        { id: 'timing-time', label: 'Time (HH:mm:ss)', kind: 'text', value: timing.time },
-        { id: 'timing-zone', label: 'IANA time zone', kind: 'text', value: timing.timeZone },
+        { id: 'timing-time', label: 'Time', kind: 'text', value: timing.time },
+        { id: 'timing-zone', label: 'Time zone', kind: 'text', value: timing.timeZone },
       ]
     case 'weekly':
       return [
-        { id: 'timing-time', label: 'Time (HH:mm:ss)', kind: 'text', value: timing.time },
-        { id: 'timing-zone', label: 'IANA time zone', kind: 'text', value: timing.timeZone },
-        ...WEEKDAYS.map(day => ({
-          id: `timing-weekday-${day}`,
-          label: WEEKDAY_LABELS[day],
-          kind: 'weekday' as const,
-          value: timing.weekdays.includes(day) ? 'on' : 'off',
-        })),
+        { id: 'timing-time', label: 'Time', kind: 'text', value: timing.time },
+        { id: 'timing-zone', label: 'Time zone', kind: 'text', value: timing.timeZone },
+        { id: 'timing-weekdays', label: 'Weekdays', kind: 'choice', value: weekdaySummary(timing.weekdays) },
       ]
     case 'cron':
       return [
-        { id: 'timing-cron', label: 'Cron (minute hour day month weekday)', kind: 'text', value: timing.expression },
-        { id: 'timing-zone', label: 'IANA time zone', kind: 'text', value: timing.timeZone },
+        { id: 'timing-cron', label: 'Cron expression', kind: 'text', value: timing.expression },
+        { id: 'timing-zone', label: 'Time zone', kind: 'text', value: timing.timeZone },
       ]
     case 'rrule':
       return [{ id: 'timing-rrule', label: 'RRULE', kind: 'text', value: timing.rrule }]
@@ -424,7 +456,7 @@ function targetFields(draft: ScheduleEditorDraft): readonly ScheduleFormField[] 
   if (draft.target.kind !== 'session') return []
   return [{
     id: 'target-session',
-    label: 'Session',
+    label: 'Existing conversation',
     kind: 'choice',
     value: draft.target.sessionId ?? '',
   }]
@@ -435,20 +467,15 @@ function applyTimingField(
   fieldId: string,
   value: string,
 ): ScheduleTimingDraft | undefined {
-  if (fieldId.startsWith('timing-weekday-')) {
-    if (timing.kind !== 'weekly') return undefined
-    const day = Number(fieldId.slice('timing-weekday-'.length))
-    const selected = value === 'on'
-    const weekdays = selected
-      ? [...new Set([...timing.weekdays, day])].sort((left, right) => left - right)
-      : timing.weekdays.filter(entry => entry !== day)
-    return { ...timing, weekdays }
-  }
   switch (fieldId) {
-    case 'timing-after':
-      return timing.kind === 'after' ? { ...timing, afterSeconds: value } : undefined
-    case 'timing-every':
-      return timing.kind === 'every' ? { ...timing, everySeconds: value } : undefined
+    case 'timing-quantity':
+      if (timing.kind === 'after') {
+        return { ...timing, afterSeconds: secondsFromQuantity(value, timing.quantityUnit) }
+      }
+      if (timing.kind === 'every') {
+        return { ...timing, everySeconds: secondsFromQuantity(value, timing.quantityUnit) }
+      }
+      return undefined
     case 'timing-date':
       return timing.kind === 'at' ? { ...timing, date: value } : undefined
     case 'timing-time':
@@ -478,15 +505,19 @@ function applyTargetField(
 
 function timingDraftFromRecord(record: ScheduleRecord): ScheduleTimingDraft {
   switch (record.kind) {
-    case 'after':
-      return { kind: 'after', afterSeconds: String(record.afterSeconds) }
+    case 'after': {
+      const afterSeconds = String(record.afterSeconds)
+      return { kind: 'after', afterSeconds, quantityUnit: quantityUnitFromSeconds(afterSeconds) }
+    }
     case 'at':
       // The official `at` record stores only the committed UTC instant. The
       // draft renders it in UTC so a resubmission without an explicit edit is
       // the SAME instant; it never guesses a local zone.
       return { kind: 'at', ...utcParts(record.scheduledAt), timeZone: 'UTC' }
-    case 'every':
-      return { kind: 'every', everySeconds: String(record.everySeconds) }
+    case 'every': {
+      const everySeconds = String(record.everySeconds)
+      return { kind: 'every', everySeconds, quantityUnit: quantityUnitFromSeconds(everySeconds) }
+    }
     case 'daily':
       return { kind: 'daily', time: record.time, timeZone: record.timeZone }
     case 'weekly':
@@ -545,6 +576,51 @@ function normalizeWeekdaySelection(weekdays: readonly number[]): number[] {
   return unique
 }
 
+function encodeTime(label: string, value: string): string {
+  const trimmed = value.trim()
+  const withSeconds = /^\d{2}:\d{2}$/.test(trimmed) ? `${trimmed}:00` : trimmed
+  return requirePattern(label, withSeconds, CLOCK_PATTERN, 'HH:mm or HH:mm:ss[.SSS]')
+}
+
+function secondsFromQuantity(value: string, quantityUnit: ScheduleQuantityUnit): string {
+  if (value === '' || !/^\d+$/.test(value)) return value
+  return String(BigInt(value) * QUANTITY_FACTORS[quantityUnit])
+}
+
+function quantityUnitFromSeconds(seconds: string): ScheduleQuantityUnit {
+  const value = BigInt(seconds)
+  if (value > 0n && value % QUANTITY_FACTORS.hours === 0n) return 'hours'
+  if (value > 0n && value % QUANTITY_FACTORS.minutes === 0n) return 'minutes'
+  return 'seconds'
+}
+
+function quantityForUnit(seconds: string, quantityUnit: ScheduleQuantityUnit): string {
+  if (!/^\d+$/.test(seconds)) return seconds
+  const value = BigInt(seconds)
+  const factor = QUANTITY_FACTORS[quantityUnit]
+  return value % factor === 0n ? String(value / factor) : seconds
+}
+
+function weekdaySummary(weekdays: readonly number[]): string {
+  return weekdays.length === 0
+    ? 'None selected'
+    : [...weekdays].sort((left, right) => left - right).map(day => WEEKDAY_LABELS[day]).join(' ')
+}
+
+function defaultAtFrom(now: Date): { readonly date: string; readonly time: string } {
+  const next = new Date(Math.ceil(now.getTime() / 60_000) * 60_000 + 3_600_000).toISOString()
+  return { date: next.slice(0, 10), time: next.slice(11, 19) }
+}
+
+function defaultRRuleFrom(now: Date): string {
+  const start = new Date(Math.ceil(now.getTime() / 60_000) * 60_000 + 3_600_000)
+    .toISOString()
+    .slice(0, 19)
+    .replaceAll('-', '')
+    .replaceAll(':', '')
+  return `DTSTART:${start}Z\nRRULE:FREQ=DAILY`
+}
+
 function sharedTime(timing: ScheduleTimingDraft): string {
   return 'time' in timing ? timing.time : '09:00:00'
 }
@@ -554,11 +630,7 @@ function sharedZone(timing: ScheduleTimingDraft): string {
 }
 
 function utcParts(instant: string): { readonly date: string; readonly time: string } {
-  return { date: instant.slice(0, 10), time: instant.slice(11, 19) }
-}
-
-function utcToday(): string {
-  return new Date().toISOString().slice(0, 10)
+  return { date: instant.slice(0, 10), time: instant.slice(11, -1) }
 }
 
 const WEEKDAY_LABELS: Readonly<Record<number, string>> = {
