@@ -40,9 +40,10 @@ test('DSH mode resolver follows the tracked policy for next, npm elsewhere', () 
   assert.equal(resolveDshMode({ eventName: 'push', ref: 'refs/heads/main' }), 'npm')
   assert.equal(resolveDshMode({ eventName: 'pull_request', ref: 'refs/pull/2/merge', baseRef: 'main' }), 'npm')
   assert.equal(resolveDshMode({ eventName: 'push', ref: 'refs/heads/feature/next' }), 'npm')
-  // Manual/scheduled runs remain npm unless the workflow explicitly supplies
-  // the source mode context; only push and next-targeted PRs follow the policy.
-  assert.equal(resolveDshMode({ eventName: 'workflow_dispatch', ref: 'refs/heads/next' }), 'npm')
+  // Manual dispatch follows the selected long-lived branch's tracked policy;
+  // schedules and unrelated refs remain npm.
+  assert.equal(resolveDshMode({ eventName: 'workflow_dispatch', ref: 'refs/heads/next' }), trackedMode)
+  assert.equal(resolveDshMode({ eventName: 'workflow_dispatch', ref: 'refs/heads/main' }), 'npm')
   assert.equal(resolveDshMode({ eventName: 'schedule', ref: 'refs/heads/next' }), 'npm')
 })
 
@@ -54,6 +55,8 @@ test('a tracked source policy flips next to source mode (one-line branch switch)
     resolveDshMode({ eventName: 'pull_request', ref: 'refs/pull/1/merge', baseRef: 'next', modeConfigPath: path }),
     'source',
   )
+  // Manual dispatch on next must use the same tracked DSH family as its pushes.
+  assert.equal(resolveDshMode({ eventName: 'workflow_dispatch', ref: 'refs/heads/next', modeConfigPath: path }), 'source')
   // Non-next branches ignore the policy.
   assert.equal(resolveDshMode({ eventName: 'push', ref: 'refs/heads/main', modeConfigPath: path }), 'npm')
 })

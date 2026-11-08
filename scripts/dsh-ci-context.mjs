@@ -2,8 +2,8 @@
 /**
  * Resolve the one DSH distribution mode used by a GitHub Actions run.
  *
- * Tags are always npm mode. A push to next and a pull request targeting
- * next follow the TRACKED branch-level mode policy
+ * Tags are always npm mode. A push or manual dispatch to next, and a pull
+ * request targeting next, follow the TRACKED branch-level mode policy
  * (test/compat/dsh-mode.json) — one line flips the whole branch between
  * the pinned source pack and the registry-backed npm distribution. All
  * other branches/PR bases use npm mode. Source Mode reads its version from
@@ -62,7 +62,7 @@ export function readTrackedMode(path = MODE_CONFIG) {
 export function resolveDshMode({ eventName = '', ref = '', baseRef = '', forcedMode, modeConfigPath = MODE_CONFIG } = {}) {
   const tag = ref.startsWith('refs/tags/')
   const isNext = (eventName === 'pull_request' && baseRef === 'next')
-    || (eventName === 'push' && ref === 'refs/heads/next')
+    || (['push', 'workflow_dispatch'].includes(eventName) && ref === 'refs/heads/next')
   const computed = tag
     ? 'npm'
     : isNext

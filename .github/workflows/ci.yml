@@ -9,6 +9,13 @@ on:
       - 'v*'
       - 'next-v*'
   pull_request:
+  workflow_dispatch:
+    inputs:
+      run_split_process:
+        description: Run Host/Client Split qualification on main
+        required: false
+        type: boolean
+        default: false
 
 # Default to the minimum permission required by normal CI jobs.
 # The publish job explicitly adds id-token: write for npm Trusted Publishing.
@@ -17,7 +24,7 @@ permissions:
 
 # Cancel superseded branch/PR runs, but never cancel release-tag runs.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}${{ github.event_name == 'workflow_dispatch' && inputs.run_split_process && '-split-manual' || '' }}
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 # PARTIAL RE-RUNS. GitHub's "Re-run failed jobs" re-executes only the failed
@@ -242,7 +249,7 @@ jobs:
   # ---------------------------------------------------------------------------
   release-context:
     name: Resolve release context
-    if: startsWith(github.ref, 'refs/tags/')
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -1055,24 +1062,20 @@ jobs:
   # the digest is re-proven before and after the run so the probe can never
   # qualify a tarball other than the one every other gate saw.
   #
-  # The smoke is npm-only AND release-tag-only: ordinary PRs and branch pushes
-  # do not run it (split-process development work runs it manually under its
-  # own task plan); in Source Mode this job is skipped and `ci-verdict` requires
-  # exactly that `skipped`, never a silent success. On an npm release tag a
-  # skipped, failed or cancelled run is a publication blocker.
+  # The smoke is npm-only and required on release tags. Main may run the same
+  # candidate-backed proof through workflow_dispatch when the explicit boolean
+  # input is enabled; ordinary pushes, PRs, next and Source Mode skip it.
   # ---------------------------------------------------------------------------
   split-process:
     name: Host/Client split-process bootstrap
     needs:
       - dsh-context
       - candidate
-    # `always()` suppresses the implicit all-needs success check: in npm mode
-    # the transitive `prepare-dsh-source` need is legitimately skipped, and
-    # without `always()` that skip propagates into this job and leaves the
-    # required split-process proof unrun. The explicit result checks and the
-    # ref/tag condition below keep the gate fail-closed: only an npm release
-    # tag runs it.
-    if: ${{ always() && startsWith(github.ref, 'refs/tags/') && needs.dsh-context.result == 'success' && needs.candidate.result == 'success' && needs.dsh-context.outputs.mode == 'npm' }}
+    # `always()` suppresses the implicit all-needs success check: npm mode
+    # skips the transitive source-pack need. Tags always run the proof; a manual
+    # run is allowed only on main with the explicit boolean input. The verdict
+    # receives the same event/input facts and requires success when requested.
+    if: ${{ always() && needs.dsh-context.result == 'success' && needs.candidate.result == 'success' && needs.dsh-context.outputs.mode == 'npm' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.run_split_process)) }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -1158,11 +1161,13 @@ jobs:
 
       - name: Upload the product Browser qualification evidence
         if: always()
-        uses: actions/upload-artifact@v8
+        uses: actions/upload-artifact@v7
         with:
           name: m5-web-product-evidence
           path: ${{ runner.temp }}/m5-web-product-evidence
           if-no-files-found: ignore
+          overwrite: true
+          retention-days: 3
 
       - name: Re-prove the candidate was not replaced during qualification
         env:
@@ -1239,11 +1244,16 @@ jobs:
       - name: Require every upstream phase to have SUCCEEDED
         env:
           DSH_MODE: ${{ needs.dsh-context.outputs.mode }}
+          RUN_SPLIT_PROCESS: ${{ inputs.run_split_process }}
         run: |
           set -euo pipefail
+          SPLIT_PROCESS_ARGS=()
+          if [ "${RUN_SPLIT_PROCESS:-false}" = "true" ]; then SPLIT_PROCESS_ARGS+=(--run-split-process); fi
           node scripts/ci-verdict.mjs qualify \
             --mode "$DSH_MODE" \
             --ref "$GITHUB_REF" \
+            --event "$GITHUB_EVENT_NAME" \
+            "${SPLIT_PROCESS_ARGS[@]}" \
             --phase "dsh-context=${{ needs.dsh-context.result }}" \
             --phase "mise-toolchain=${{ needs['mise-toolchain'].result }}" \
             --phase "prepare-dsh-source=${{ needs['prepare-dsh-source'].result }}" \
@@ -1352,17 +1362,22 @@ jobs:
           DSH_MODE: ${{ needs.dsh-context.outputs.mode }}
           EFFECTIVE_CONFIG: ${{ needs.dsh-context.outputs.effective_config }}
           STARTED: ${{ needs.dsh-context.outputs.started_epoch }}
-          IS_RELEASE: ${{ startsWith(github.ref, 'refs/tags/') }}
+          IS_RELEASE: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
+          RUN_SPLIT_PROCESS: ${{ inputs.run_split_process }}
         run: |
           set -euo pipefail
           RELEASE_ARG=""
           if [ "$IS_RELEASE" = "true" ]; then RELEASE_ARG="--release"; fi
+          SPLIT_PROCESS_ARGS=()
+          if [ "${RUN_SPLIT_PROCESS:-false}" = "true" ]; then SPLIT_PROCESS_ARGS+=(--run-split-process); fi
           echo "effective configuration: ${EFFECTIVE_CONFIG:-<unresolved>}"
           node scripts/ci-verdict.mjs summary \
             --mode "$DSH_MODE" \
             --ref "$GITHUB_REF" \
+            --event "$GITHUB_EVENT_NAME" \
             --started "${STARTED:-}" \
             $RELEASE_ARG \
+            "${SPLIT_PROCESS_ARGS[@]}" \
             --phase "dsh-context=${{ needs.dsh-context.result }}" \
             --phase "mise-toolchain=${{ needs['mise-toolchain'].result }}" \
             --phase "prepare-dsh-source=${{ needs['prepare-dsh-source'].result }}" \
@@ -1828,7 +1843,7 @@ jobs:
   release-metadata:
     name: Prepare release metadata
 
-    if: startsWith(github.ref, 'refs/tags/')
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
     needs:
       - release-context
 
@@ -1888,7 +1903,7 @@ jobs:
     needs:
       - dsh-context
       - qualified
-    if: ${{ always() && startsWith(github.ref, 'refs/tags/') && needs.dsh-context.result == 'success' && needs.qualified.result == 'success' && needs.dsh-context.outputs.mode == 'npm' }}
+    if: ${{ always() && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && needs.dsh-context.result == 'success' && needs.qualified.result == 'success' && needs.dsh-context.outputs.mode == 'npm' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -1966,7 +1981,7 @@ jobs:
   publish:
     name: Publish to npm
 
-    if: ${{ always() && startsWith(github.ref, 'refs/tags/') && needs.dsh-context.result == 'success' && needs.release-context.result == 'success' && needs.source-checks.result == 'success' && needs.qualified.result == 'success' && needs.client-family-compat.result == 'success' && needs.compat-smoke.result == 'success' && needs.official-preset-assembly.result == 'success' && needs.runtime-boundary.result == 'success' && needs.security-audit.result == 'success' && needs.release-metadata.result == 'success' && needs.release-packed-check.result == 'success' && needs.dsh-context.outputs.mode == 'npm' }}
+    if: ${{ always() && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && needs.dsh-context.result == 'success' && needs.release-context.result == 'success' && needs.source-checks.result == 'success' && needs.qualified.result == 'success' && needs.client-family-compat.result == 'success' && needs.compat-smoke.result == 'success' && needs.official-preset-assembly.result == 'success' && needs.runtime-boundary.result == 'success' && needs.security-audit.result == 'success' && needs.release-metadata.result == 'success' && needs.release-packed-check.result == 'success' && needs.dsh-context.outputs.mode == 'npm' }}
 
     needs:
       - dsh-context
@@ -2094,7 +2109,7 @@ jobs:
   release:
     name: Create GitHub Release
 
-    if: ${{ always() && startsWith(github.ref, 'refs/tags/') && needs.dsh-context.result == 'success' && needs.release-context.result == 'success' && needs.publish.result == 'success' && needs.qualified.result == 'success' && needs.release-metadata.result == 'success' && needs.dsh-context.outputs.mode == 'npm' }}
+    if: ${{ always() && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && needs.dsh-context.result == 'success' && needs.release-context.result == 'success' && needs.publish.result == 'success' && needs.qualified.result == 'success' && needs.release-metadata.result == 'success' && needs.dsh-context.outputs.mode == 'npm' }}
 
     needs:
       - dsh-context
