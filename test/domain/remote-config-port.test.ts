@@ -1693,6 +1693,21 @@ test('missing Web settings sections stay unavailable and no defaults or writes a
   }
 })
 
+test('a stale provider intent is refused after the Remote mirror already refreshed to a custom route', async () => {
+  const { port, state, emit } = createBackend(current => { seedWebNamespaces(current) })
+  await port.describe()
+  const web = state.namespaces.get(WEB_NS)!
+  web.value.searchProvider = 'custom-search'
+  web.revision += 1
+  emit('settings/document-updated')
+  assert.equal((await port.web.read())?.searchProvider, 'custom-search',
+    'the Host document update has already committed into the current mirror')
+  const callsBefore = state.mutateCalls.length
+  await assert.rejects(port.web.setSearchProvider('deepseek-search-api'), /custom route/u)
+  assert.equal(state.mutateCalls.length, callsBefore, 'the older provider intent never dispatches with the refreshed revision')
+  assert.equal(state.namespaces.get(WEB_NS)?.value.searchProvider, 'custom-search')
+})
+
 test('invalid Remote Web candidates match Direct validation and never read or mutate the Host', async () => {
   const remote = createBackend()
   const direct = new DirectWebProviderConfig({ get: (_name: string) => undefined } satisfies HostContextLike)
