@@ -693,7 +693,7 @@ test('a History Open link resets manual scroll so a failed navigation keeps its 
       deliveredAt: '2026-06-02T09:01:00.000Z',
       messageId: 'link-scroll-receipt-two' as never,
       targetSessionId: 'session-two' as never,
-      prompt: 'Second receipt instruction',
+      prompt: Array.from({ length: 28 }, (_, index) => `Second instruction line ${index + 1}`).join('\n'),
     },
   ]
   for (const size of [{ columns: 100, rows: 14 }, { columns: 160, rows: 18 }]) {
@@ -703,12 +703,17 @@ test('a History Open link resets manual scroll so a failed navigation keeps its 
       history: { status: 'ready', records, earlierRecordsUnavailable: false, earlierRecordsPruned: false },
       sessionRosterState: 'ready',
       availableSessionIds: ['session-one', 'session-two'],
+      notice: { kind: 'info', text: 'Opening conversation…' },
     })
     const view = harness(initial, size)
     view.plain()
+    view.panel.handleInput('j')
     view.panel.handleInput('x')
     view.plain()
-    view.panel.handleInput('\x1b[6~')
+    view.panel.handleInput('k')
+    view.plain()
+    view.panel.handleInput('x')
+    view.plain()
     const wheel = (): void => {
       const result = view.panel.handleMouse({
         type: 'wheel',
@@ -727,12 +732,17 @@ test('a History Open link resets manual scroll so a failed navigation keeps its 
       assert.deepEqual(result, { handled: true, render: true })
     }
     let lines = view.plain()
-    for (let turn = 0; turn < 80 && !lines.some(line => line.includes('session-two')); turn += 1) {
+    for (let turn = 0; turn < 100 && (!lines.some(line => line.includes('Open conversation · session-two'))
+      || lines.some(line => line.includes('#2 Delivered'))); turn += 1) {
       wheel()
       lines = view.plain()
     }
-    const linkRow = lines.findIndex(line => line.includes('Open conversation') && line.includes('session-two'))
+    const linkRow = lines.findIndex(line => line.includes('Open conversation · session-two'))
     assert.ok(linkRow >= 0, `${size.columns}x${size.rows} the second receiver link was scrolled into view`)
+    assert.ok(!lines.some(line => line.includes('#2 Delivered')),
+      `${size.columns}x${size.rows} the second receipt header is outside the viewport before clicking`)
+    assert.ok(lines.some(line => line.includes('session-two')),
+      `${size.columns}x${size.rows} the second link’s receiver remains visible:\n${lines.join('\n')}`)
     const linkColumn = lines[linkRow]!.indexOf('Open conversation') + 1
     view.panel.onCellPress(linkColumn, linkRow)
     view.panel.onCellClick(linkColumn, linkRow)
