@@ -200,6 +200,49 @@ test('Full stays flat while Compact and Focus preserve one canonical owner per W
   assert.equal(focusOpen.filter(node => node.kind === 'section' && String(node.props['key']).includes('work-')).length, 1)
 })
 
+
+test('two Work, Thinking and Cluster occurrences keep distinct bounded structural owners', () => {
+  const events: SessionEvent[] = [ev('turn/start', { turn: 1 }, 0)]
+  for (let index = 0; index < 2; index += 1) {
+    events.push(user(index * 10 + 1, `scale-user-${index}`, `scale-user-${index}`))
+    events.push(thinking(index * 10 + 2, index, `scale-thinking-${index}`))
+    events.push(toolCall(index * 10 + 3, `scale-tool-${index}`, 'read', '{}', index))
+    events.push(toolResult(index * 10 + 4, `scale-tool-${index}`, `scale-result-${index}`, index))
+    events.push(context(index * 10 + 5, `scale-context-${index}-a`, `scale-context-${index}-a`, { kind: 'plugin', form: 'snapshot', plugin: `scale-${index}` }))
+    events.push(context(index * 10 + 6, `scale-context-${index}-b`, `scale-context-${index}-b`, { kind: 'plugin', form: 'snapshot', plugin: `scale-${index}` }))
+    events.push(assistant(index * 10 + 7, index + 1, `scale-final-${index}`))
+  }
+  events.push(ev('turn/end', { turn: 1, reason: { kind: 'completed' } }, 30))
+  const source = folder(events)
+  const messages = source.messages()
+  const structure = projectTranscriptStructure(messages)
+  const workOwners = structure.filter(block => block.kind === 'work').map(block => block.span.owner)
+  const clusters = structure.flatMap(block => block.kind === 'work'
+    ? block.span.parts.filter(part => part.kind === 'context-cluster').map(part => part.cluster.owner)
+    : block.kind === 'context-cluster' ? [block.cluster.owner] : [])
+  const thinkingOwners = messages.filter(row => row.kind === 'thinking')
+  assert.equal(workOwners.length, 2)
+  assert.equal(thinkingOwners.length, 2)
+  assert.equal(clusters.length, 2)
+  const keys = new TranscriptNodeKeys()
+  const focus = flatten(messages, 'focus', keys, {
+    turnActivities: source.turnActivities(),
+    expandedFocusTurns: new Set([1]),
+    expandedWorkOwners: new Set(workOwners),
+    expandedThinkingOwners: new Set(thinkingOwners),
+    expandedClusterOwners: new Set(clusters),
+  })
+  const ids = focus.map(node => node.id)
+  assert.equal(new Set(ids).size, ids.length, 'the 2x Work/Thinking/Cluster view has no duplicate native ids')
+  assert.equal(focus.filter(node => node.kind === 'section' && String(node.props['key']).includes('work-')).length, 2)
+  assert.equal(focus.filter(node => node.kind === 'section' && String(node.props['key']).includes('ctx-')).length, 2)
+  for (const owner of thinkingOwners) {
+    const key = keys.keyFor(owner)
+    assert.ok(focus.some(node => node.id.endsWith(`.${key}`) || node.id.endsWith(`-${key}`)),
+      `the Thinking owner ${key} has a native occurrence in the Focus tree`)
+  }
+})
+
 test('Thinking exposes only its bounded latest line until the stable native Section opens', () => {
   const messages = workFolder().messages()
   const thinkingRow = rowOf(messages, (row): row is Extract<TranscriptMessage, { kind: 'thinking' }> => row.kind === 'thinking')
