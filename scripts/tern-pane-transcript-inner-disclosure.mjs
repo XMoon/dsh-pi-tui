@@ -720,6 +720,11 @@ export default async function (h) {
         find: tree => mainNodes(tree).find(node => String(node.class ?? '').split(/\s+/u).includes('sf-tool-head')
           && h.descendantsText(node).includes('job_list')),
       },
+      {
+        name: 'context',
+        find: tree => mainNodes(tree).find(node => String(node.class ?? '').split(/\s+/u).includes('sf-section-head')
+          && (h.descendantsText(node).includes('inner-context-0') || h.descendantsText(node).includes('runtime-context'))),
+      },
     ]
     const innerGeometry = {}
     for (const target of innerHeaders) {
