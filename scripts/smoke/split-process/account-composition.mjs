@@ -633,6 +633,9 @@ export async function runF2AccountComposition(context) {
       webAccountUi: 'inactive',
       independentClients: 2,
       initialWatchSnapshots: 2,
+      initialSignedOutWatch: true,
+      accountRouteChangedFromStub: auth.runningRequestModel === 'deepseek-flash',
+      hostTaskKnownFalseObserved: true,
       accountConnectionReconnect: {
         generationBefore: initialBeforeReconnect.generationId,
         generationAfter: initialReconnected.generationId,
