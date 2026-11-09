@@ -931,7 +931,7 @@ test('Help describes List/Search navigation and Schedule conversation actions cl
   assert.ok(help.includes('Cycle filters on List'))
   assert.ok(help.includes('return from Search without changing the filter'))
   assert.ok(help.includes('Filter Enabled / Paused / Ended / All'))
-  assert.ok(help.includes('R (detail/history) Refresh conversation availability'))
+  assert.ok(help.includes('r (detail/history) Refresh conversation availability'))
   assert.ok(help.includes(SCHEDULE_COPY.deliveryInboxNotCompleted))
   assert.ok(!help.includes('Rotate focus'))
   assert.ok(lines.every(line => visibleWidth(line) <= 120))
