@@ -2265,6 +2265,7 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
           || !this.snapshot.history?.records.some(record => record.messageId === hit.messageId)
           || this.snapshot.navigationPending) return
         this.historySelectedMessageId = hit.messageId as ScheduleHistoryMessageId
+        this.historyScrollPinned = false
         this.deps.dispatch({ kind: 'open-delivery-conversation', messageId: hit.messageId })
         return
       case 'detail-link':
