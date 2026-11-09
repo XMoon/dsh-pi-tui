@@ -199,6 +199,7 @@ function deferRecordedFixtureCleanup(life, dir) {
 
 /** A flow that finishes immediately; the run's exit code then means what it says. */
 const CHECKED_FLOW = 'export default async function (h) { h.check("the flow ran", true) }\n'
+const LYING_QUALIFICATION_FLOW = 'export default async function (h) { h.check("the native toggle failed", false, "no event"); h.finish({ qualification: "REAL_TERN_INNER_DISCLOSURE_PASS" }) }\n'
 /** A flow that throws: a red run, not a missing one. */
 const THROWING_FLOW = 'export default async function () { throw new Error("the flow failed") }\n'
 /** A flow that parks forever: the test needs a LIVE driver to signal. */
@@ -311,6 +312,16 @@ test('a flow that throws still tears down its serve process before the driver ex
   })
   const ledger = JSON.parse(readFileSync(joinPath(out, 'assertions.json'), 'utf8'))
   assert.equal(ledger.failed, 1, 'the throwing flow is a red run, not a missing one')
+})
+
+test('the final headless evidence ledger retains qualification metadata and rejects a failed assertion', async (t) => {
+  const { out } = await assertFinishedRunTearsDown(t, 'tern-pane-qualification-', {
+    flow: LYING_QUALIFICATION_FLOW,
+    expectedStatus: 1,
+  })
+  const ledger = JSON.parse(readFileSync(joinPath(out, 'assertions.json'), 'utf8'))
+  assert.equal(ledger.failed, 1)
+  assert.equal(ledger.qualification, 'FAILED_ASSERTIONS')
 })
 
 test('a serve that exits during startup fails the startup after teardown', async (t) => {

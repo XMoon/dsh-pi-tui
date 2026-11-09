@@ -28,7 +28,8 @@
  * `scripts/tern-pane-drive.mjs scripts/tern-pane-transcript-modes.mjs`.
  * @module scripts/tern-pane-transcript-modes-subject
  */
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, unwatchFile, watchFile, writeFileSync } from 'node:fs'
+import { MessageId } from '@deepseek-ai/dsh-llm'
 import { join } from 'node:path'
 import { registerHooks } from 'node:module'
 
@@ -39,9 +40,14 @@ if (paneRoot === undefined) throw new Error('TERN_PANE_DIR is required by the re
 // second source.
 const modePath = join(paneRoot, 'mode.json')
 if (!existsSync(modePath)) throw new Error(`the flow must write ${modePath} before launching this subject`)
-const mode = JSON.parse(readFileSync(modePath, 'utf8')).mode
-if (mode !== 'full' && mode !== 'compact') {
-  throw new Error('the flow must select exactly full or compact for this qualification lane')
+const modeConfig = JSON.parse(readFileSync(modePath, 'utf8')) as { readonly mode?: string; readonly scenario?: string }
+const mode = modeConfig.mode
+const scenario = modeConfig.scenario ?? 'modes'
+if (mode !== 'full' && mode !== 'compact' && mode !== 'focus') {
+  throw new Error('the flow must select exactly full, compact or focus')
+}
+if (scenario !== 'modes' && scenario !== 'inner-disclosure') {
+  throw new Error(`unknown transcript Tern scenario ${scenario}`)
 }
 const workRoot = join(paneRoot, 'dsh-home')
 const wireRecordPath = join(paneRoot, 'sdk-wire.jsonl')
@@ -49,6 +55,19 @@ const eventsPath = join(paneRoot, 'events.jsonl')
 const promptsPath = join(paneRoot, 'prompts.json')
 const casePath = join(paneRoot, 'case.json')
 const caseResultPath = join(paneRoot, 'case-result.json')
+const releaseToolArgumentsPath = join(paneRoot, 'release-tool-arguments.json')
+let releaseToolArguments!: () => void
+const heldToolArguments = new Promise<void>(resolve => { releaseToolArguments = resolve })
+let toolArgumentsReleased = false
+writeFileSync(releaseToolArgumentsPath, `${JSON.stringify({ release: false })}\n`)
+const onReleaseToolArguments = (): void => {
+  if (!existsSync(releaseToolArgumentsPath)) return
+  const state = JSON.parse(readFileSync(releaseToolArgumentsPath, 'utf8')) as { release?: boolean }
+  if (state.release !== true || toolArgumentsReleased) return
+  toolArgumentsReleased = true
+  releaseToolArguments()
+  note({ kind: 'subject.tool-arguments.released' })
+}
 
 // The DSH home and the SDK wire recorder are process-level facts that must
 // exist BEFORE the Host composition is imported (both are read at connect).
@@ -61,15 +80,16 @@ const note = (event: Record<string, unknown>): void => {
 }
 
 // ── Fixed, isolated, deterministic test input (the ONLY prompt definition) ──
-const SESSION_ID = 'transcript-modes-source'
-const PROMPT = 'MODES-01 Please list the background jobs and then answer with one short plain note '
-  + 'about the canonical transcript reading flow, mixing English with 中文混排 so the real client wraps it.'
+const PROMPT = scenario === 'inner-disclosure'
+  ? `INNER-${mode.toUpperCase()} Inspect the live reasoning, tool details and context disclosures.`
+  : 'MODES-01 Please list the background jobs and then answer with one short plain note '
+    + 'about the canonical transcript reading flow, mixing English with 中文混排 so the real client wraps it.'
 writeFileSync(promptsPath, `${JSON.stringify({
   mode,
-  session: SESSION_ID,
-  assistantMarker: 'MODES-DIRECT-ANSWER',
+  scenario,
+  assistantMarker: scenario === 'inner-disclosure' ? `INNER-${mode.toUpperCase()}-ANSWER` : 'MODES-DIRECT-ANSWER',
   toolName: 'job_list',
-  prompts: [{ session: SESSION_ID, ordinal: 1, marker: 'MODES-01', text: PROMPT }],
+  prompts: [{ ordinal: 1, marker: scenario === 'inner-disclosure' ? `INNER-${mode.toUpperCase()}` : 'MODES-01', text: PROMPT }],
 }, null, 1)}\n`)
 
 // ── ONE-TO-ONE recorder around the production mount (append-only) ──
@@ -202,6 +222,7 @@ const life: import('../test/support/temp-lifecycle.ts').TestLifecycle = {
 const { createDirectTspFixture } = await import('../test/support/direct-tsp-fixture.ts')
 type Fixture = import('../test/support/direct-tsp-fixture.ts').DirectTspExternalFixture
 let fixture: Fixture | undefined
+let mainSessionId: string | undefined
 let promptsSeen = 0
 
 /** Re-project the SAME already-committed message objects: a second FORMAL
@@ -237,11 +258,43 @@ const handleOneBatch = async (): Promise<void> => {
   note({ kind: 'case.received', seq, command: kind })
   try {
     if (fixture === undefined) throw new Error('the Direct fixture is not ready')
-    if (kind !== 'reproject') throw new Error(`unknown subject command kind ${kind}`)
-    const payload = { seq, command: kind, status: 'ok', ...reproject() }
-    writeFileSync(`${caseResultPath}.tmp`, `${JSON.stringify(payload)}\n`)
-    renameSync(`${caseResultPath}.tmp`, caseResultPath)
-    note({ kind: 'case.finished', ...payload })
+    if (kind === 'reproject') {
+      const payload = { seq, command: kind, status: 'ok', ...reproject() }
+      writeFileSync(`${caseResultPath}.tmp`, `${JSON.stringify(payload)}\n`)
+      renameSync(`${caseResultPath}.tmp`, caseResultPath)
+      note({ kind: 'case.finished', ...payload })
+      return
+    }
+    if (kind === 'append-context') {
+      if (mainSessionId === undefined) throw new Error('no production Direct writer has selected the main Session')
+      const agent = fixture.ctx.agents.get(mainSessionId as never)
+      if (agent === undefined) throw new Error('the Direct Session agent is not available')
+      for (const [index, text] of ['first native context detail', 'second native context detail'].entries()) {
+        agent.session.append('user/message', {
+          id: MessageId(`inner-context-${mode}-${index}`),
+          role: 'user',
+          content: [{ type: 'text', text }],
+          source: { kind: 'plugin', form: 'snapshot', plugin: `inner-context-${index}` },
+        }, { surfaceOp: 'append' })
+      }
+      const payload = { seq, command: kind, status: 'ok' }
+      writeFileSync(`${caseResultPath}.tmp`, `${JSON.stringify(payload)}\n`)
+      renameSync(`${caseResultPath}.tmp`, caseResultPath)
+      note({ kind: 'case.finished', ...payload })
+      return
+    }
+    if (kind === 'release-tool-arguments') {
+      writeFileSync(releaseToolArgumentsPath, `${JSON.stringify({ release: true })}\n`)
+      onReleaseToolArguments()
+      if (!toolArgumentsReleased) throw new Error('the real model step is not holding Tool arguments')
+      await heldToolArguments
+      const payload = { seq, command: kind, status: 'ok' }
+      writeFileSync(`${caseResultPath}.tmp`, `${JSON.stringify(payload)}\n`)
+      renameSync(`${caseResultPath}.tmp`, caseResultPath)
+      note({ kind: 'case.finished', ...payload })
+      return
+    }
+    throw new Error(`unknown subject command kind ${kind}`)
   } catch (error) {
     const payload = { seq, command: kind, status: 'error', error: String(error) }
     writeFileSync(`${caseResultPath}.tmp`, `${JSON.stringify(payload)}\n`)
@@ -249,6 +302,7 @@ const handleOneBatch = async (): Promise<void> => {
     note({ kind: 'case.finished', ...payload })
   }
 }
+watchFile(releaseToolArgumentsPath, { interval: 50 }, onReleaseToolArguments)
 const caseTimer = setInterval(() => {
   if (polling) return
   polling = true
@@ -274,24 +328,29 @@ try {
   note({
     kind: 'subject.ready',
     mode,
+    scenario,
     workRoot,
     wireRecordPath,
     eventsPath,
     promptsPath,
     casePath,
-    session: SESSION_ID,
     clientRequirement: 'the subject must run inside a real Tern pane (TERN_PANE_DIR + the SDK handshake)',
   })
   fixture = await createDirectTspFixture(life, {
     externalTern: true,
     workRoot,
-    startup: { sessionId: SESSION_ID },
     // The ONE production mode authority: the real Runner volatile config that
     // `resolveDisplayPreset` reads. No renderer-local preset is set anywhere.
     tuiConfig: { displayPreset: mode },
-    deltas: ['MODES-', 'DIRECT-', 'ANSWER'],
-    // ONE real registered Host tool, executed by the production Agent loop.
-    scriptedToolCall: { callId: 'call-modes-jobs', name: 'job_list', arguments: '{}' },
+    deltas: scenario === 'inner-disclosure' ? [`INNER-${mode.toUpperCase()}-`, 'ANSWER'] : ['MODES-', 'DIRECT-', 'ANSWER'],
+    ...(scenario === 'inner-disclosure' ? {
+      scriptedToolCalls: [{ text: 'the production Agent is checking the jobs', toolCall: { callId: 'call-inner-jobs', name: 'job_list', arguments: '{}' } }],
+      scriptedReasoningDeltas: ['checking the first row\n', 'latest reasoning line'],
+      holdScriptedToolCallArguments: async (step: number) => { if (step === 0) await heldToolArguments },
+    } : {
+      // ONE real registered Host tool, executed by the production Agent loop.
+      scriptedToolCall: { callId: 'call-modes-jobs', name: 'job_list', arguments: '{}' },
+    }),
     appExit: () => {
       note({ kind: 'app.exit' })
       setImmediate(resolveExit)
@@ -299,15 +358,17 @@ try {
   }) as Fixture
   fixture.recordPrompts(call => {
     promptsSeen += 1
+    mainSessionId = call.sessionId
     note({ kind: 'producer.writer.settled', settledCount: promptsSeen, sessionId: call.sessionId, mode: call.mode, outcomeKind: call.outcome.kind })
   })
   const rendererObserved = await awaitRenderer()
   note({
     kind: 'fixture.ready',
     mode,
+    scenario,
+    session: mainSessionId ?? null,
     workRoot,
     wireRecordPath,
-    session: SESSION_ID,
     rendererObserved,
     productionComposition: 'createDirectTspFixture(externalTern=true, tuiConfig.displayPreset) -> resolveDisplayPreset -> productionTspConnector -> mountTspRenderer over the shipped SDK connect()',
     standIns: [
@@ -321,11 +382,13 @@ try {
   console.log(`transcript modes pane ready (${mode})`)
   await exitRequested
   clearInterval(caseTimer)
+  unwatchFile(releaseToolArgumentsPath, onReleaseToolArguments)
   await handling
   await setupCleanup!()
   note({ kind: 'fixture.settled', promptsSeen })
 } finally {
   clearInterval(caseTimer)
+  unwatchFile(releaseToolArgumentsPath, onReleaseToolArguments)
   await handling
   await setupCleanup?.()
   note({ kind: 'subject.final', promptsSeen })

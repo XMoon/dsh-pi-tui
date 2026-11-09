@@ -511,15 +511,16 @@ test('Focus image demand follows the materialized root and Work members', () => 
     turnActivities: folder.turnActivities(),
     window: LATEST_WINDOW,
   }
-  const collapsed = visibleTranscriptMembers(messages, base)
+  const nodeKeys = new TranscriptNodeKeys()
+  const collapsed = visibleTranscriptMembers(messages, base, nodeKeys)
   assert.ok(!collapsed.has(toolRow), 'a collapsed Focus root reads no hidden Work image')
-  const rootExpanded = visibleTranscriptMembers(messages, { ...base, expandedFocusTurns: new Set([1]) })
+  const rootExpanded = visibleTranscriptMembers(messages, { ...base, expandedFocusTurns: new Set([1]) }, nodeKeys)
   assert.ok(!rootExpanded.has(toolRow), 'an open root with closed Work still reads no Work image')
   const workExpanded = visibleTranscriptMembers(messages, {
     ...base,
     expandedFocusTurns: new Set([1]),
     expandedWorkOwners: new Set([work.span.owner]),
-  })
+  }, nodeKeys)
   assert.ok(workExpanded.has(toolRow), 'opening the owning Work makes its real member visible')
 })
 
