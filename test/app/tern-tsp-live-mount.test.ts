@@ -1849,10 +1849,8 @@ test('a routed PTC child start/settle reaches the mounted renderer wire', async 
     assert.equal(parent.p['collapsible'], true)
     assert.equal(parent.p['collapsed'], true, 'the PTC subtree starts hidden with its parent body')
     harnessFreeInput(harness.tern, { ev: 'toggle', sf: harness.tern.frames.at(-1)!.sf, id: parent.id, collapsed: false, raw: {} })
-    await settle()
-    const parentAfterToggle = mountedNodes(harness).find(node => node.id === parent.id)
-    assert.equal(parentAfterToggle?.p['collapsed'], false,
-      'the exact parent Tool toggle opens the current owner')
+    await awaitWireFact(() => mountedNodes(harness).find(node => node.id === parent.id)?.p['collapsed'] === false,
+      'the current parent owner receives its exact native disclosure target')
     await awaitWireFact(() => mountedNodes(harness).some(node => node.id.endsWith('.sub-code-1:code:1')),
       'the child header after the parent body opens')
     harness.route(toolResult(4, 'code-1', 'program output'))
@@ -2356,6 +2354,7 @@ test('inner Thinking, Context and Tool toggles use the exact current node owner 
     pending.catch(() => {})
     await awaitWireFact(() => harness.tern.output.text().includes('Proceed?'), 'the current modal seat')
     harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: thinking.id, collapsed: true, raw: {} })
+    // Bounded negative observation: a modal-covered pointer must paint no late frame.
     await settle()
     const openedThinking = current().find(node => node.id === thinking.id)
     assert.equal(openedThinking?.p['collapsed'], false,
@@ -2370,6 +2369,7 @@ test('inner Thinking, Context and Tool toggles use the exact current node owner 
     await awaitWireFact(() => current().some(node => nodeText(node).includes('Loading session')), 'the source retirement frame')
     const framesDuringHydration = harness.tern.frames.length
     harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: oldIds[0]!, collapsed: true, raw: {} })
+    // Bounded negative observation: a hydration-retired id must paint no frame.
     await settle()
     assert.equal(harness.tern.frames.length, framesDuringHydration, 'a retired exact node id is rejected during hydration')
     harness.replaceMain()
@@ -2386,6 +2386,7 @@ test('inner Thinking, Context and Tool toggles use the exact current node owner 
     assert.equal(incomingThinking.p['collapsed'], true, 'the new Source starts with no inherited inner expansion')
     const beforeLate = harness.tern.frames.length
     harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: oldIds[1]!, collapsed: true, raw: {} })
+    // Bounded negative observation: a retired Context Cluster id must paint no late frame.
     await settle()
     assert.equal(harness.tern.frames.length, beforeLate, 'a retired Context cluster id cannot act on the new Source')
   } finally {
