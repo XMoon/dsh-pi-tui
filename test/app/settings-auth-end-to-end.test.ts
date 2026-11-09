@@ -262,7 +262,7 @@ function open(width = 120, height = 40, authorizationOverride?: unknown): Harnes
           calls.push('signOut')
           return accountState.view
         },
-        hasRunningAccountTasks: () => false,
+        hasRunningAccountTasks: async () => false,
       },
     },
     catalog: { models: { available: () => true, discoverModels: async () => [{ id: 'acme-1' }] } },

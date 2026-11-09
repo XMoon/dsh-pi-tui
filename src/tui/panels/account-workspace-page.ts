@@ -42,6 +42,12 @@ type QueryState<T> =
   | { readonly kind: 'failed'; readonly reason: string }
   | { readonly kind: 'signed-out' }
 
+type SignOutTaskCheck =
+  | { readonly kind: 'idle' }
+  | { readonly kind: 'checking' }
+  | { readonly kind: 'known'; readonly running: boolean }
+  | { readonly kind: 'unavailable'; readonly reason: string }
+
 interface ActionLine {
   readonly id: string
   readonly label: string
@@ -93,8 +99,11 @@ export class AccountWorkspacePage implements Component {
   private profile: QueryState<import('../../runtime/config-port.ts').AccountProfile> = { kind: 'idle' }
   private balance: QueryState<{ readonly value: readonly AccountWallet[]; readonly bonusWallets: readonly AccountWallet[] }> = { kind: 'idle' }
   private signOutConfirm = false
+  private stateRecheckRequired = false
   private signOutIdentity: string | undefined
-  private runningTasks = false
+  private taskCheck: SignOutTaskCheck = { kind: 'idle' }
+  private signOutConfirmationSerial = 0
+  private runningTaskCheckSerial = 0
   private notice: string | undefined
   private busy: 'signin' | 'signout' | 'cancel' | undefined
   private cursor = 0
@@ -137,7 +146,7 @@ export class AccountWorkspacePage implements Component {
 
   private start(): void {
     if (!this.source.available()) {
-      this.stateFailure = 'DeepSeek Account is not supported on this backend'
+      this.stateFailure = 'the Host Account service is unavailable on this connection'
       this.initializing = false
       return
     }
@@ -195,40 +204,85 @@ export class AccountWorkspacePage implements Component {
     if (serial === this.stateSerial) this.commitView(view)
   }
 
-  private invalidateSignOutConfirmation(reason: string): void {
+  private closeSignOutConfirmation(): void {
     if (!this.signOutConfirm) return
     this.signOutConfirm = false
     this.signOutIdentity = undefined
-    this.runningTasks = false
+    this.signOutConfirmationSerial += 1
+    this.runningTaskCheckSerial += 1
+    this.taskCheck = { kind: 'idle' }
     this.cursor = 0
+  }
+
+  private invalidateSignOutConfirmation(reason: string): void {
+    if (!this.signOutConfirm) return
+    this.closeSignOutConfirmation()
     this.notice = reason
   }
 
-  /** Apply one Host AccountView. A credential transition starts the independent
-   * profile/balance reads; a signed-out state clears them. */
+  private runningTaskCheckIsCurrent(
+    serial: number,
+    stateSerial: number,
+    confirmationSerial: number,
+    view: AccountView,
+  ): boolean {
+    return !this.disposed
+      && serial === this.runningTaskCheckSerial
+      && stateSerial === this.stateSerial
+      && confirmationSerial === this.signOutConfirmationSerial
+      && this.view === view
+      && view.status === 'credential-stored'
+  }
+
+  /** Read the live Host risk fact; a late read cannot authorize another view. */
+  private checkRunningTaskFact(view: AccountView): void {
+    const serial = ++this.runningTaskCheckSerial
+    const stateSerial = this.stateSerial
+    const confirmationSerial = this.signOutConfirmationSerial
+    this.taskCheck = { kind: 'checking' }
+    this.source.run('account running-task check', async () => {
+      let running: boolean
+      try {
+        running = await this.source.hasRunningAccountTasks()
+      } catch (error) {
+        if (!this.runningTaskCheckIsCurrent(serial, stateSerial, confirmationSerial, view)) return
+        this.settle(() => {
+          this.taskCheck = { kind: 'unavailable', reason: errorText(error) }
+        })
+        return
+      }
+      if (!this.runningTaskCheckIsCurrent(serial, stateSerial, confirmationSerial, view)) return
+      this.settle(() => { this.taskCheck = { kind: 'known', running } })
+    })
+  }
+
+  /** Apply one Host AccountView. A credential transition starts independent
+   * profile, balance and running-task reads; signed-out state clears them. */
   private applyView(view: AccountView, readDetails = true): void {
     this.settle(() => {
       const previous = this.view?.status
       this.view = view
+      this.stateRecheckRequired = false
       this.stateFailure = undefined
       this.initializing = false
       if (view.status === 'credential-stored') {
-        this.runningTasks = this.source.hasRunningAccountTasks()
-        // AccountView.status does not carry the grant identity: a same-status
-        // watch update can mean account A was replaced by account B. Invalidate
-        // any open destructive confirmation and re-read the identity facts.
+        // AccountView.status does not carry grant identity: a same-status watch
+        // update can mean account A was replaced by account B. Any confirmation
+        // and its outstanding task read lose authority before the new reads.
         if (previous !== undefined) this.invalidateSignOutConfirmation('the Host account changed — confirm sign-out again')
+        this.checkRunningTaskFact(view)
         if (readDetails) {
           this.readProfile()
           this.readBalance()
         }
       } else {
         if (previous !== undefined) this.invalidateSignOutConfirmation('the Host account changed — sign-out confirmation cleared')
+        this.runningTaskCheckSerial += 1
+        this.taskCheck = { kind: 'idle' }
         this.profileSerial += 1
         this.balanceSerial += 1
         this.profile = { kind: 'signed-out' }
         this.balance = { kind: 'signed-out' }
-        this.runningTasks = false
       }
     })
   }
@@ -241,7 +295,9 @@ export class AccountWorkspacePage implements Component {
       const outcome = await this.source.getProfile()
       this.settle(() => {
         if (serial !== this.profileSerial) return
-        this.profile = queryStateOf(outcome)
+        const state = queryStateOf(outcome)
+        if (state === undefined) return
+        this.profile = state
       })
     })
   }
@@ -254,7 +310,9 @@ export class AccountWorkspacePage implements Component {
       const outcome = await this.source.getBalance()
       this.settle(() => {
         if (serial !== this.balanceSerial) return
-        this.balance = queryStateOf(outcome)
+        const state = queryStateOf(outcome)
+        if (state === undefined) return
+        this.balance = state
       })
     })
   }
@@ -272,7 +330,7 @@ export class AccountWorkspacePage implements Component {
   }
 
   private signIn(): void {
-    if (this.busy !== undefined) return
+    if (this.busy !== undefined || this.stateRecheckRequired) return
     const serial = ++this.stateSerial
     if (this.source.callbackOrigin() === undefined) {
       this.notice = 'the Host browser callback listener is unavailable — browser sign-in cannot complete'
@@ -292,16 +350,18 @@ export class AccountWorkspacePage implements Component {
         })
       } catch (error) {
         this.settle(() => {
+          this.stateRecheckRequired = true
           this.busy = undefined
-          this.notice = `sign-in could not start: ${errorText(error)}`
+          this.notice = `sign-in could not start: ${errorText(error)} — refreshing Host account state`
         })
+        this.refresh()
       }
     })
   }
 
   private cancelAttempt(): void {
     const attempt = this.activeAttempt()
-    if (attempt === undefined || this.busy !== undefined) return
+    if (attempt === undefined || this.busy !== undefined || this.stateRecheckRequired) return
     const serial = ++this.stateSerial
     this.busy = 'cancel'
     this.revision += 1
@@ -315,49 +375,67 @@ export class AccountWorkspacePage implements Component {
         })
       } catch (error) {
         this.settle(() => {
+          this.stateRecheckRequired = true
           this.busy = undefined
-          this.notice = `cancel failed: ${errorText(error)}`
+          this.notice = `cancel failed: ${errorText(error)} — refreshing Host account state`
         })
+        this.refresh()
       }
     })
   }
 
   private confirmSignOut(): void {
-    if (this.busy !== undefined) return
+    if (this.busy !== undefined || this.stateRecheckRequired || this.stateFailure !== undefined) return
     const view = this.view
     if (view === undefined || view.status !== 'credential-stored') return
     this.signOutConfirm = true
+    this.signOutConfirmationSerial += 1
+    this.taskCheck = { kind: 'checking' }
     this.revision += 1
     this.signOutIdentity = this.profile.kind === 'ready'
       ? this.profile.value.name ?? this.profile.value.id ?? 'the stored DeepSeek Account'
       : 'the stored DeepSeek Account'
-    this.runningTasks = this.source.hasRunningAccountTasks()
     this.cursor = 0
     this.requestRender()
+    this.checkRunningTaskFact(view)
   }
 
   private signOut(): void {
-    if (this.busy !== undefined) return
+    const view = this.view
+    const confirmationSerial = this.signOutConfirmationSerial
+    const taskCheckSerial = this.runningTaskCheckSerial
+    if (this.busy !== undefined
+      || !this.signOutConfirm
+      || this.stateRecheckRequired
+      || this.stateFailure !== undefined
+      || view === undefined
+      || view.status !== 'credential-stored'
+      || this.taskCheck.kind !== 'known') return
+    if (this.view !== view
+      || this.signOutConfirmationSerial !== confirmationSerial
+      || this.runningTaskCheckSerial !== taskCheckSerial) return
     const serial = ++this.stateSerial
     this.busy = 'signout'
     this.revision += 1
     this.requestRender()
     this.source.run('account sign out', async () => {
       try {
-        const view = await this.source.signOut()
+        const result = await this.source.signOut()
         this.settle(() => {
-          this.signOutConfirm = false
-          this.signOutIdentity = undefined
+          this.closeSignOutConfirmation()
           this.busy = undefined
-          this.commitOperationView(view, serial)
+          this.commitOperationView(result, serial)
         })
       } catch (error) {
         this.settle(() => {
-          // A failed local removal does NOT resurrect a local credential state:
-          // the page keeps showing whatever the Host last reported.
+          // A failed/unknown ACK never authorizes a second sign-out attempt.
+          // The next manual step waits for a fresh Host state or watch view.
+          this.closeSignOutConfirmation()
+          this.stateRecheckRequired = true
           this.busy = undefined
-          this.notice = `sign-out failed: ${errorText(error)}`
+          this.notice = `sign-out failed: ${errorText(error)} — refreshing Host account state`
         })
+        this.refresh()
       }
     })
   }
@@ -534,8 +612,14 @@ export class AccountWorkspacePage implements Component {
     if (this.signOutConfirm) {
       content.push('', color.textStrong('Sign out confirmation'))
       content.push(color.warning(sanitizedPhysicalLine(`This removes the locally stored DeepSeek Account credential for ${this.signOutIdentity ?? 'the current account'}. API keys stay stored; the current model is not switched.`)))
-      if (this.runningTasks) {
+      if (this.taskCheck.kind === 'checking' || this.taskCheck.kind === 'idle') {
+        content.push(color.textDim('Checking running account tasks…'))
+      } else if (this.taskCheck.kind === 'known' && this.taskCheck.running) {
         content.push(color.error('A running agent is using a deepseek-account model. Signing out lets the Host cancel that matching account task.'))
+      } else if (this.taskCheck.kind === 'known') {
+        content.push(color.textDim('No running account task is using this account.'))
+      } else {
+        content.push(color.error('Could not verify whether running account tasks will be cancelled.'))
       }
       content.push(color.textDim('The provider revokes the grant in the background; a remote failure never restores the local credential.'))
     }
@@ -544,14 +628,21 @@ export class AccountWorkspacePage implements Component {
     if (this.busy !== undefined) content.push('', color.textMuted(`${this.busy} — the Host has not confirmed yet`))
     const actions: ActionLine[] = []
     if (this.signOutConfirm) {
-      const canSignOut = view?.status === 'credential-stored' && this.busy === undefined
-      actions.push({ id: 'account:signout-confirm', label: canSignOut ? 'Sign out' : 'Nothing to sign out', enabled: canSignOut })
+      const canSignOut = view?.status === 'credential-stored'
+        && this.taskCheck.kind === 'known'
+        && this.busy === undefined
+        && !this.stateRecheckRequired
+        && this.stateFailure === undefined
+      actions.push({ id: 'account:signout-confirm', label: 'Sign out', enabled: canSignOut })
+      if (this.taskCheck.kind === 'unavailable') {
+        actions.push({ id: 'account:signout-retry', label: 'Retry task check', enabled: this.busy === undefined })
+      }
       actions.push({ id: 'account:signout-cancel', label: 'Cancel', enabled: true })
     } else {
       if (view?.status !== 'credential-stored' && attempt === undefined) {
-        actions.push({ id: 'account:signin', label: 'Sign in', enabled: this.busy === undefined && this.source.callbackOrigin() !== undefined })
+        actions.push({ id: 'account:signin', label: 'Sign in', enabled: this.busy === undefined && !this.stateRecheckRequired && this.source.callbackOrigin() !== undefined })
       }
-      if (attempt !== undefined) actions.push({ id: 'account:cancel', label: 'Cancel current attempt', enabled: this.busy === undefined })
+      if (attempt !== undefined) actions.push({ id: 'account:cancel', label: 'Cancel current attempt', enabled: this.busy === undefined && !this.stateRecheckRequired })
       if (url !== undefined) {
         actions.push({ id: 'account:open', label: 'Open browser', enabled: true })
         actions.push({ id: 'account:copy-url', label: 'Copy link', enabled: true })
@@ -561,7 +652,13 @@ export class AccountWorkspacePage implements Component {
         actions.push({ id: 'account:usage', label: 'Usage ↗', enabled: true })
         actions.push({ id: 'account:topup', label: 'Top up ↗', enabled: true })
       }
-      if (view?.status === 'credential-stored') actions.push({ id: 'account:signout', label: 'Sign out…', enabled: this.busy === undefined })
+      if (view?.status === 'credential-stored') {
+        actions.push({
+          id: 'account:signout',
+          label: 'Sign out…',
+          enabled: this.busy === undefined && !this.stateRecheckRequired && this.stateFailure === undefined,
+        })
+      }
       actions.push({ id: 'account:refresh', label: 'Refresh', enabled: this.busy === undefined })
     }
     actions.push({ id: 'account:back', label: '← Settings', enabled: true })
@@ -649,8 +746,8 @@ export class AccountWorkspacePage implements Component {
         return 'handled'
       }
       if (this.signOutConfirm) {
-        this.signOutConfirm = false
-        this.cursor = 0
+        this.closeSignOutConfirmation()
+        this.revision += 1
         this.requestRender()
         return 'handled'
       }
@@ -719,7 +816,19 @@ export class AccountWorkspacePage implements Component {
       case 'account:cancel': this.cancelAttempt(); return 'handled'
       case 'account:signout': this.confirmSignOut(); return 'handled'
       case 'account:signout-confirm': this.signOut(); return 'handled'
-      case 'account:signout-cancel': this.signOutConfirm = false; this.cursor = 0; this.revision += 1; this.requestRender(); return 'handled'
+      case 'account:signout-retry': {
+        if (this.busy !== undefined || this.taskCheck.kind !== 'unavailable'
+          || this.view === undefined || this.view.status !== 'credential-stored') return 'handled'
+        this.checkRunningTaskFact(this.view)
+        this.revision += 1
+        this.requestRender()
+        return 'handled'
+      }
+      case 'account:signout-cancel':
+        this.closeSignOutConfirmation()
+        this.revision += 1
+        this.requestRender()
+        return 'handled'
       case 'account:open':
         if (attempt?.authorizeUrl !== undefined) this.openUrl(attempt.authorizeUrl)
         return 'handled'
@@ -829,7 +938,8 @@ export class AccountWorkspacePage implements Component {
   }
 }
 
-function queryStateOf<T>(outcome: AccountQueryOutcome<T>): QueryState<T> {
+function queryStateOf<T>(outcome: AccountQueryOutcome<T>): QueryState<T> | undefined {
+  if (outcome.status === 'superseded') return undefined
   if (outcome.status === 'ready') return { kind: 'ready', value: outcome.value }
   if (outcome.status === 'failed') return { kind: 'failed', reason: outcome.reason }
   return { kind: 'signed-out' }

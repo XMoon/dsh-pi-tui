@@ -56,6 +56,8 @@ export interface SplitRemoteApplicationRuntimeOptions {
   readonly domains: MountedRemoteClientDomains
   /** The SAME B1 authenticated Cookie fetch the archive adapter addresses. */
   readonly fetch: RemoteBackendFetch
+  /** The authenticated Host listener origin from the Client's verified identity. */
+  readonly trustedHostOrigin?: string
   /** The already-mounted Client UI subtree (identity source of the extension
    * service). */
   readonly clientUi: RemoteClientUiRuntime
@@ -94,6 +96,7 @@ export async function createRemoteApplicationRuntimeFromClient(
   const stage = await composeRemoteApplicationStage({
     client: options.domains,
     fetch: options.fetch,
+    ...(options.trustedHostOrigin === undefined ? {} : { trustedHostOrigin: options.trustedHostOrigin }),
     ...(options.promptSerializer === undefined ? {} : { promptSerializer: options.promptSerializer }),
     ...(options.delivery === undefined ? {} : { delivery: options.delivery }),
     ...(options.surfaceRevision === undefined ? {} : { surfaceRevision: options.surfaceRevision }),

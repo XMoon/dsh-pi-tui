@@ -820,7 +820,7 @@ function setup(options: HarnessOptions = {}): Harness {
         startSignIn: async () => { throw new Error('account unavailable') },
         cancelSignIn: async () => { throw new Error('account unavailable') },
         signOut: async () => { throw new Error('account unavailable') },
-        hasRunningAccountTasks: () => false,
+        hasRunningAccountTasks: async () => false,
       },
     },
     catalog: {

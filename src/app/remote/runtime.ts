@@ -28,8 +28,15 @@ import type { SplitClientInteractionDelivery } from '../../runtime/remote/intera
  *  official-contract gate). The M3-1 Client runtime AND the real split
  *  Client's Domain mount are the same structural source; the config-plane
  *  namespaces stay part of the ONE `remote` service, never a second object. */
-export function remoteConfigRuntimeSourceOf(runtime: RemoteM3ARuntimeSource): RemoteConfigRuntimeSource {
-  return runtime
+export function remoteConfigRuntimeSourceOf(
+  runtime: RemoteM3ARuntimeSource,
+  trustedHostOrigin?: string,
+): RemoteConfigRuntimeSource {
+  return {
+    remote: runtime.remote,
+    connection: runtime.connection,
+    ...(trustedHostOrigin === undefined ? {} : { trustedHostOrigin }),
+  }
 }
 
 /** The composition-owned unary Fetch face the archive adapter addresses:
@@ -56,6 +63,8 @@ export interface RemoteBackendRuntimeOptions {
   readonly promptSerializer?: RemotePromptSerializer
   /** The composition-owned fetch the archive adapter addresses. */
   readonly fetch: RemoteBackendFetch
+  /** The authenticated Host listener origin from the verified Client Host identity. */
+  readonly trustedHostOrigin?: string
   /** The composition-owned pre-dispatch dispatch admission (the surface-stop
    *  fence the Remote session writer consults immediately before dispatch).
    *  Absent = every pre-dispatch write is admissible (the pre-fence behavior). */
@@ -122,7 +131,7 @@ export async function createRemoteBackendRuntime(
       ...(options.onQualification === undefined ? {} : { onQualification: options.onQualification }),
     })
     unwind.push(() => semantics.dispose())
-    const config = new RemoteConfigPort(remoteConfigRuntimeSourceOf(options.runtime))
+    const config = new RemoteConfigPort(remoteConfigRuntimeSourceOf(options.runtime, options.trustedHostOrigin))
     unwind.push(() => config.dispose())
     const sessionArchive = new RemoteSessionArchive({ fetch: options.fetch })
     // S5-PR3: the official authenticated Markdown read over the SAME

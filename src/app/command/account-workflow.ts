@@ -20,6 +20,7 @@ import type {
   AccountWallet,
 } from '../../runtime/config-port.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
+import { SupersededReadError } from '../../runtime/read-error.ts'
 
 /** One independent profile/balance query outcome as the page paints it. A
  * port `null` is a signed-out / changed-grant answer, never an empty balance. */
@@ -27,6 +28,7 @@ export type AccountQueryOutcome<T> =
   | { readonly status: 'ready'; readonly value: T }
   | { readonly status: 'failed'; readonly reason: string }
   | { readonly status: 'signed-out' }
+  | { readonly status: 'superseded' }
 
 /** The page-facing source. All methods are intent-level; the Host objects and
  * DTO construction stay in the workflow. */
@@ -40,7 +42,7 @@ export interface AccountWorkspaceSource {
   startSignIn(): Promise<AccountView>
   cancelSignIn(id: string): Promise<AccountView>
   signOut(): Promise<AccountView>
-  hasRunningAccountTasks(): boolean
+  hasRunningAccountTasks(): Promise<boolean>
   /** Open one official AccountView link through the Client-local opener. */
   openUrl(url: string): void
   /** Copy a non-secret URL/instruction through the Client clipboard owner. */
@@ -102,6 +104,7 @@ export class AccountWorkflow implements AccountWorkspaceSource {
     try {
       outcome = await this.deps.account.getProfile(accountClientMetadata(this.deps.version))
     } catch (error) {
+      if (error instanceof SupersededReadError) return { status: 'superseded' }
       return { status: 'failed', reason: safeErrorMessage(error) }
     }
     if (outcome === null) return { status: 'signed-out' }
@@ -114,6 +117,7 @@ export class AccountWorkflow implements AccountWorkspaceSource {
     try {
       outcome = await this.deps.account.getBalance(accountClientMetadata(this.deps.version))
     } catch (error) {
+      if (error instanceof SupersededReadError) return { status: 'superseded' }
       return { status: 'failed', reason: safeErrorMessage(error) }
     }
     if (outcome === null) return { status: 'signed-out' }
@@ -133,7 +137,7 @@ export class AccountWorkflow implements AccountWorkspaceSource {
     return this.deps.account.signOut(accountClientMetadata(this.deps.version))
   }
 
-  hasRunningAccountTasks(): boolean {
+  hasRunningAccountTasks(): Promise<boolean> {
     return this.deps.account.hasRunningAccountTasks()
   }
 

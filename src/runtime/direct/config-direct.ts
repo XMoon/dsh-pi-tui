@@ -1368,13 +1368,12 @@ export class DirectAccountConfig implements AccountConfig {
     return accountViewOf(await account.signOut({ ...client }))
   }
 
-  hasRunningAccountTasks(): boolean {
+  async hasRunningAccountTasks(): Promise<boolean> {
     // Mirrors the official `isRunningAccountTask` predicate: a running Agent
-    // whose latest bound request used the account provider. The predicate is
-    // kept structural so this adapter never imports (or duplicates) a Host
-    // package; the Host's own signed-out listener owns the actual cancel.
-    const agents = this.ctx.get('agents') as { list?(): readonly unknown[] } | undefined
-    if (typeof agents?.list !== 'function') return false
+    // whose latest bound request used the account provider. The Host's own
+    // signed-out listener remains the cancellation owner.
+    const agents = this.ctx.get('agents') as { list(): readonly unknown[] } | undefined
+    if (agents === undefined) throw new Error('Host Agent service unavailable')
     return agents.list().some(candidate => {
       const agent = candidate as {
         readonly status?: unknown

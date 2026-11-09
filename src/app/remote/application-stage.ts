@@ -79,6 +79,7 @@ export function throwAggregated(errors: readonly unknown[], label: string): void
 export async function composeRemoteApplicationStage(input: {
   readonly client: RemotePresentationClientSource
   readonly fetch: RemoteBackendFetch
+  readonly trustedHostOrigin?: string
   readonly promptSerializer?: RemotePromptSerializer
   readonly delivery?: SplitClientInteractionDelivery
   readonly surfaceRevision?: number
@@ -99,6 +100,7 @@ export async function composeRemoteApplicationStage(input: {
     backendRuntime = await createRemoteBackendRuntime({
       runtime: input.client,
       fetch: input.fetch,
+      ...(input.trustedHostOrigin === undefined ? {} : { trustedHostOrigin: input.trustedHostOrigin }),
       isDispatchAllowed: () => dispatchAdmissionOpen,
       // Absent = the production serializer (see createRemoteBackendRuntime).
       ...(input.promptSerializer === undefined ? {} : { promptSerializer: input.promptSerializer }),
