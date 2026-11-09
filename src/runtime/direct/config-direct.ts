@@ -47,6 +47,12 @@ import {
   resolveUserLayerFooterMode,
 } from '../../domain/footer/command-trust.ts'
 import { parseFooterCustomItems, type FooterCustomItemsParseResult } from '../../domain/footer/custom-items.ts'
+import {
+  assertFetchProviderId,
+  assertSearchApiBaseURL,
+  assertSearchApiCount,
+  assertSearchProviderId,
+} from '../../domain/web-provider-settings.ts'
 import type {
   AccountBalanceOutcome,
   AccountClientMetadata,
@@ -1642,9 +1648,6 @@ const WEB_SEARCH_API_NS = 'web-deepseek-api'
 /** The credential reference the official DeepSeek web providers resolve
  *  (`apiKeyEnv`'s shipped default); the TUI never writes a literal key. */
 const WEB_API_KEY_REF = 'DEEPSEEK_API_KEY'
-/** Shipped range of the official `web-deepseek-api.count` schema. */
-const WEB_SEARCH_API_COUNT_MIN = 1
-const WEB_SEARCH_API_COUNT_MAX = 50
 
 /** The Direct Web provider config (`ctx.settings` + `ctx.credentials`): the
  *  official `web` / `web-deepseek-api` sections behind the semantic
@@ -1763,52 +1766,6 @@ function formValueOf(descriptor: SettingsDescriptorLike | undefined): Record<str
 /** A configured provider id, or `undefined` for an absent/empty selection. */
 function optionalId(value: unknown): string | undefined {
   return typeof value === 'string' && value !== '' ? value : undefined
-}
-
-/** The official candidate ids (the only values this UI ever writes). */
-function assertSearchProviderId(id: string): void {
-  if (id !== 'deepseek-official' && id !== 'deepseek-search-api') {
-    throw new Error(`unsupported web search provider id "${id}"`)
-  }
-}
-
-function assertFetchProviderId(id: string): void {
-  if (id !== 'http' && id !== 'deepseek-fetch-api') {
-    throw new Error(`unsupported web fetch provider id "${id}"`)
-  }
-}
-
-/** The official `count` rule, checked before the write (the Host validates
- *  again on the section boundary). */
-function assertSearchApiCount(count: number): void {
-  if (!Number.isInteger(count) || count < WEB_SEARCH_API_COUNT_MIN || count > WEB_SEARCH_API_COUNT_MAX) {
-    throw new Error(`the web search API count must be an integer from ${WEB_SEARCH_API_COUNT_MIN} through ${WEB_SEARCH_API_COUNT_MAX}`)
-  }
-}
-
-/**
- * The API base rule for the human write entry: an absolute `https:` URL with no
- * userinfo, query, fragment, or trailing `/search` / `/fetch` action name. The
- * official provider still owns runtime availability — this only keeps an
- * unusable or dangerous base out of the durable configuration.
- */
-function assertSearchApiBaseURL(url: string): void {
-  let parsed: URL
-  try {
-    parsed = new URL(url)
-  } catch {
-    throw new Error('the Search/Fetch API endpoint must be an absolute https:// URL')
-  }
-  if (parsed.protocol !== 'https:') throw new Error('the Search/Fetch API endpoint must use https://')
-  if (parsed.username !== '' || parsed.password !== '') {
-    throw new Error('the Search/Fetch API endpoint must not carry credentials in the URL')
-  }
-  if (parsed.search !== '' || parsed.hash !== '') {
-    throw new Error('the Search/Fetch API endpoint must not carry a query or fragment')
-  }
-  if (/\/(?:search|fetch)$/u.test(parsed.pathname)) {
-    throw new Error('the Search/Fetch API endpoint is the API base: drop the trailing /search or /fetch action')
-  }
 }
 
 /** The official profile entry id of the Host row that owns the built-in

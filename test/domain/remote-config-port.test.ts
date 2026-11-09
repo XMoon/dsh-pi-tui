@@ -18,6 +18,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { RemoteConfigPort } from '../../src/runtime/remote/config-remote.ts'
+import { DirectWebProviderConfig, type HostContextLike } from '../../src/runtime/direct/config-direct.ts'
 import type { ProviderCatalogEntry } from '../../src/domain/catalog/provider.ts'
 import { serializeTuiSettingsMutation, type ProviderProfileConfig, type TuiSettingsDoc } from '../../src/runtime/config-port.ts'
 import { createObservableGenerationHarness } from '../support/remote-generation.ts'
@@ -67,6 +68,17 @@ type EventListener = (...args: unknown[]) => void
 
 const TUI_NS = 'tui-app'
 const SUBAGENT_NS = 'subagent-model-selection-settings'
+const WEB_NS = 'web'
+const WEB_API_NS = 'web-deepseek-api'
+const WEB_DEFAULTS = {
+  searchProvider: 'deepseek-official',
+  fetchProvider: 'http',
+}
+const WEB_API_DEFAULTS = {
+  baseURL: 'https://api.deepseek.com/v1/tools',
+  count: 10,
+  sendOriginalQuestion: true,
+}
 
 /** The valid v1 custom layout both the Direct and Remote trust paths accept. */
 const VALID_LAYOUT = {
@@ -1613,4 +1625,159 @@ test('a stale webStartupPreference read stays last-known and the write is refuse
   const callsBefore = state.mutateCalls.length
   await assert.rejects(port.webStartupPreference.setAutoStart(true, 2), /settings\.describe failed: connection lost/u)
   assert.equal(state.mutateCalls.length, callsBefore, 'a stale mirror never dispatches the preference')
+})
+
+function seedWebNamespaces(state: FakeState, options: { readonly omit?: 'web' | 'api' } = {}): void {
+  if (options.omit !== 'web') {
+    state.namespaces.set(WEB_NS, { ns: WEB_NS, value: { ...WEB_DEFAULTS }, revision: 4 })
+  }
+  if (options.omit !== 'api') {
+    state.namespaces.set(WEB_API_NS, { ns: WEB_API_NS, value: { ...WEB_API_DEFAULTS }, revision: 8 })
+  }
+}
+
+test('the Remote Web adapter reads both Host sections and writes each exact field through the mirror', async () => {
+  const { port, state } = createBackend(current => {
+    seedWebNamespaces(current)
+    current.credentialStore.set('DEEPSEEK_API_KEY', { configured: true, source: 'file' })
+  })
+  assert.equal(port.web.available(), false, 'an undescribed mirror has not observed the Host sections')
+  await port.describe()
+  assert.equal(port.web.available(), true)
+  assert.deepEqual(await port.web.read(), {
+    searchProvider: 'deepseek-official',
+    fetchProvider: 'http',
+    api: WEB_API_DEFAULTS,
+    credential: { configured: true, source: 'file' },
+  })
+
+  await port.web.setSearchProvider('deepseek-search-api')
+  await port.web.setFetchProvider('deepseek-fetch-api')
+  await port.web.setSearchApiCount(20)
+  await port.web.setSendOriginalQuestion(false)
+  await port.web.setSearchApiBaseURL('https://gateway.example.test/v1/tools')
+  assert.deepEqual(state.mutateCalls.map(call => ({ ns: call.ns, ops: call.ops })), [
+    { ns: WEB_NS, ops: [{ op: 'set', path: ['searchProvider'], value: 'deepseek-search-api' }] },
+    { ns: WEB_NS, ops: [{ op: 'set', path: ['fetchProvider'], value: 'deepseek-fetch-api' }] },
+    { ns: WEB_API_NS, ops: [{ op: 'set', path: ['count'], value: 20 }] },
+    { ns: WEB_API_NS, ops: [{ op: 'set', path: ['sendOriginalQuestion'], value: false }] },
+    { ns: WEB_API_NS, ops: [{ op: 'set', path: ['baseURL'], value: 'https://gateway.example.test/v1/tools' }] },
+  ])
+  assert.deepEqual(await port.web.read(), {
+    searchProvider: 'deepseek-search-api',
+    fetchProvider: 'deepseek-fetch-api',
+    api: { baseURL: 'https://gateway.example.test/v1/tools', count: 20, sendOriginalQuestion: false },
+    credential: { configured: true, source: 'file' },
+  }, 'the values come from the authoritative post-write describe')
+})
+
+test('the Remote Web adapter preserves a valid Host count outside the UI presets', async () => {
+  const { port, state } = createBackend(current => {
+    seedWebNamespaces(current)
+    current.namespaces.get(WEB_API_NS)!.value.count = 7
+  })
+  await port.describe()
+  assert.equal((await port.web.read())?.api.count, 7)
+  assert.deepEqual(state.mutateCalls, [], 'reading the stored value never normalizes it to a preset')
+})
+
+test('missing Web settings sections stay unavailable and no defaults or writes are invented', async () => {
+  for (const missing of ['web', 'api'] as const) {
+    const { port, state } = createBackend(current => { seedWebNamespaces(current, { omit: missing }) })
+    assert.equal(port.web.available(), false)
+    await port.describe()
+    assert.equal(await port.web.read(), undefined)
+    const callsBefore = state.mutateCalls.length
+    await assert.rejects(port.web.setSearchApiCount(10), /sections are unavailable/u)
+    assert.equal(state.mutateCalls.length, callsBefore)
+  }
+})
+
+test('invalid Remote Web candidates match Direct validation and never read or mutate the Host', async () => {
+  const remote = createBackend()
+  const direct = new DirectWebProviderConfig({ get: (_name: string) => undefined } satisfies HostContextLike)
+  for (const count of [0, 51, 2.5, Number.NaN]) {
+    let remoteMessage = ''
+    let directMessage = ''
+    await assert.rejects(remote.port.web.setSearchApiCount(count), error => {
+      remoteMessage = (error as Error).message
+      return true
+    })
+    await assert.rejects(direct.setSearchApiCount(count), error => {
+      directMessage = (error as Error).message
+      return true
+    })
+    assert.equal(remoteMessage, directMessage)
+  }
+  for (const url of [
+    'http://api.example.test/tools',
+    'not-a-url',
+    'https://user:secret@api.example.test/tools',
+    'https://api.example.test/tools?key=x',
+    'https://api.example.test/tools#fragment',
+    'https://api.example.test/tools/search',
+    'https://api.example.test/tools/fetch',
+  ]) {
+    let remoteMessage = ''
+    let directMessage = ''
+    await assert.rejects(remote.port.web.setSearchApiBaseURL(url), error => {
+      remoteMessage = (error as Error).message
+      return true
+    })
+    await assert.rejects(direct.setSearchApiBaseURL(url), error => {
+      directMessage = (error as Error).message
+      return true
+    })
+    assert.equal(remoteMessage, directMessage)
+  }
+  assert.equal(remote.state.describeCalls, 0)
+  assert.deepEqual(remote.state.mutateCalls, [])
+})
+
+test('a custom Host provider id reads verbatim while a credential RPC failure stays an error', async () => {
+  const { port, state } = createBackend(current => {
+    seedWebNamespaces(current)
+    current.namespaces.get(WEB_NS)!.value.searchProvider = 'custom-search'
+  })
+  await port.describe()
+  assert.equal((await port.web.read())?.searchProvider, 'custom-search')
+  state.credentialFailure = { code: 'gateway/service-unavailable', message: 'credential authority unavailable' }
+  await assert.rejects(port.web.read(), /credentials\.describe\(DEEPSEEK_API_KEY\) failed: credential authority unavailable/u)
+  assert.equal(state.mutateCalls.length, 0)
+})
+
+test('a settings invalidation during credential describe discards the mixed-time Remote Web read', async () => {
+  const { port, state, emit } = createBackend(current => {
+    seedWebNamespaces(current)
+    current.credentialStore.set('DEEPSEEK_API_KEY', { configured: true, source: 'file' })
+  })
+  await port.describe()
+  let raced = false
+  state.credentialGate = () => {
+    if (raced) return
+    raced = true
+    state.credentialGate = undefined
+    const web = state.namespaces.get(WEB_NS)!
+    web.value.searchProvider = 'custom-after-invalidation'
+    web.revision += 1
+    emit('settings/document-updated')
+  }
+  const result = await port.web.read()
+  assert.equal(result?.searchProvider, 'custom-after-invalidation')
+  assert.deepEqual(result?.credential, { configured: true, source: 'file' })
+  assert.equal(raced, true)
+  assert.equal(port.configReadiness(), 'ready')
+})
+
+test('a Host revision change before Remote Web dispatch rejects the stale mutation and preserves the winner', async () => {
+  const { port, state } = createBackend(current => { seedWebNamespaces(current) })
+  await port.describe()
+  state.mutateGate = async () => {
+    const web = state.namespaces.get(WEB_NS)!
+    web.value.searchProvider = 'custom-concurrent-writer'
+    web.revision += 1
+  }
+  await assert.rejects(port.web.setSearchProvider('deepseek-search-api'), /revision 4 != 5/u)
+  assert.equal(state.namespaces.get(WEB_NS)?.value.searchProvider, 'custom-concurrent-writer')
+  assert.equal(port.configReadiness(), 'ready', 'the failure path refreshed the authoritative winner')
 })
