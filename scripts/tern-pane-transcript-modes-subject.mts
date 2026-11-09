@@ -55,10 +55,21 @@ const eventsPath = join(paneRoot, 'events.jsonl')
 const promptsPath = join(paneRoot, 'prompts.json')
 const casePath = join(paneRoot, 'case.json')
 const caseResultPath = join(paneRoot, 'case-result.json')
+let releaseReasoning!: () => void
+const heldReasoning = new Promise<void>(resolve => { releaseReasoning = resolve })
+let reasoningReleased = false
+let reasoningDeltaHeld = false
+
 const releaseToolArgumentsPath = join(paneRoot, 'release-tool-arguments.json')
 let releaseToolArguments!: () => void
 const heldToolArguments = new Promise<void>(resolve => { releaseToolArguments = resolve })
 let toolArgumentsReleased = false
+const onReleaseReasoning = (): void => {
+  if (reasoningReleased) return
+  reasoningReleased = true
+  releaseReasoning()
+  note({ kind: 'subject.reasoning.second-released' })
+}
 writeFileSync(releaseToolArgumentsPath, `${JSON.stringify({ release: false })}\n`)
 const onReleaseToolArguments = (): void => {
   if (!existsSync(releaseToolArgumentsPath)) return
@@ -211,12 +222,17 @@ const observeCommit = (args: readonly unknown[]): void => {
 process.once('exit', code => note({ kind: 'process.exit', code }))
 let resolveExit!: () => void
 const exitRequested = new Promise<void>(resolve => { resolveExit = resolve })
-process.once('SIGTERM', () => setImmediate(resolveExit))
-process.once('SIGINT', () => setImmediate(resolveExit))
+process.once('SIGTERM', () => { onReleaseReasoning(); setImmediate(resolveExit) })
+process.once('SIGINT', () => { onReleaseReasoning(); setImmediate(resolveExit) })
 let setupCleanup: (() => unknown) | undefined
 const life: import('../test/support/temp-lifecycle.ts').TestLifecycle = {
   tempDir: prefix => { throw new Error(`the external Tern subject requires an explicit workRoot, got ${prefix}`) },
-  defer: cleanup => { setupCleanup = cleanup },
+  defer: cleanup => {
+    setupCleanup = () => {
+      onReleaseReasoning()
+      return cleanup()
+    }
+  },
 }
 
 const { createDirectTspFixture } = await import('../test/support/direct-tsp-fixture.ts')
@@ -258,6 +274,17 @@ const handleOneBatch = async (): Promise<void> => {
   note({ kind: 'case.received', seq, command: kind })
   try {
     if (fixture === undefined) throw new Error('the Direct fixture is not ready')
+    if (kind === 'release-reasoning') {
+      if (scenario !== 'inner-disclosure' || !reasoningDeltaHeld) {
+        throw new Error('the real Direct Agent has not reached its second-reasoning gate')
+      }
+      onReleaseReasoning()
+      const payload = { seq, command: kind, status: 'ok' }
+      writeFileSync(`${caseResultPath}.tmp`, `${JSON.stringify(payload)}\n`)
+      renameSync(`${caseResultPath}.tmp`, caseResultPath)
+      note({ kind: 'case.finished', ...payload })
+      return
+    }
     if (kind === 'reproject') {
       const payload = { seq, command: kind, status: 'ok', ...reproject() }
       writeFileSync(`${caseResultPath}.tmp`, `${JSON.stringify(payload)}\n`)
@@ -346,12 +373,20 @@ try {
     ...(scenario === 'inner-disclosure' ? {
       scriptedToolCalls: [{ text: 'the production Agent is checking the jobs', toolCall: { callId: 'call-inner-jobs', name: 'job_list', arguments: '{}' } }],
       scriptedReasoningDeltas: ['checking the first row\n', 'latest reasoning line'],
+      holdScriptedReasoningDelta: async (step: number, deltaIndex: number) => {
+        if (scenario === 'inner-disclosure' && step === 0 && deltaIndex === 1) {
+          reasoningDeltaHeld = true
+          note({ kind: 'subject.reasoning.second-held', step, deltaIndex })
+          await heldReasoning
+        }
+      },
       holdScriptedToolCallArguments: async (step: number) => { if (step === 0) await heldToolArguments },
     } : {
       // ONE real registered Host tool, executed by the production Agent loop.
       scriptedToolCall: { callId: 'call-modes-jobs', name: 'job_list', arguments: '{}' },
     }),
     appExit: () => {
+      onReleaseReasoning()
       note({ kind: 'app.exit' })
       setImmediate(resolveExit)
     },

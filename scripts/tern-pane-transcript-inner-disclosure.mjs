@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { arch, cpus, platform, release as osRelease, type } from 'node:os'
 import { join } from 'node:path'
-import { rect, visibleSpan } from './tern-pane-geometry.mjs'
+import { fullyVisible, rect, visibleBox, visibleSpan } from './tern-pane-geometry.mjs'
 
 const PINNED_TERN = 'tern 0.9.13 (8c6dfbd)'
 const PINNED_TERN_SHA256 = 'ffa3c7c85cf557b5e0ee690cd62efc32e79dbc77044d475dce0edc3a4ac2cd99'
@@ -171,6 +171,65 @@ async function clickToggle(h, snapshot, node, targetId, expectedCollapsed, label
   return event
 }
 
+async function revealInnerHeader(h, label, findHeader) {
+  let snapshot
+  let header
+  let textNodes = []
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    snapshot = h.snapshot()
+    header = findHeader(snapshot)
+    if (header === undefined) return undefined
+    textNodes = snapshot.nodes.filter(node => snapshot.chains.get(node)?.includes(header)
+      && typeof node.text === 'string' && node.text !== '')
+    const dock = snapshot.nodes.find(node => String(node.class ?? '').split(/\s+/u).includes('tv-dock'))
+    const dockRect = rect(dock ?? {})
+    const bodyVisible = textNodes.length > 0 && textNodes.every(node => fullyVisible(snapshot.chains, node))
+    const textOverlapsDock = textNodes.some(node => {
+      const box = visibleBox(snapshot.chains, node)
+      return dock !== undefined
+        && box.start.x < dockRect[0] + dockRect[2] && box.start.x + box.span.x > dockRect[0]
+        && box.start.y < dockRect[1] + dockRect[3] && box.start.y + box.span.y > dockRect[1]
+    })
+    const headClickable = visibleSpan(snapshot.chains, header, 'x') >= 4
+      && visibleSpan(snapshot.chains, header, 'y') >= 4
+    if (bodyVisible && headClickable && !textOverlapsDock) return { snapshot, header, textNodes }
+
+    const main = snapshot.nodes.find(node => String(node.class ?? '').split(/\s+/u).includes('sf-main'))
+    if (main === undefined) return undefined
+    const mainRect = rect(main)
+    const headerRect = rect(header)
+    const clippedText = textNodes.find(node => !fullyVisible(snapshot.chains, node))
+    const clippedRect = clippedText === undefined ? headerRect : rect(clippedText)
+    const clippedBox = visibleBox(snapshot.chains, clippedText ?? header)
+    const clippedAtTop = clippedBox.start.y > clippedRect[1] + 0.5
+    const clippedAtBottom = clippedBox.start.y + clippedBox.span.y < clippedRect[1] + clippedRect[3] - 0.5
+    if (textOverlapsDock) {
+      const neededUp = Math.max(...textNodes.map(node => rect(node)[1] + rect(node)[3] - dockRect[1]))
+      const scrollPoint = { x: mainRect[0] + mainRect[2] / 2, y: mainRect[1] + mainRect[3] / 2 }
+      const amount = Math.min(180, Math.max(18, Math.ceil(neededUp + 6)))
+      h.send('move', scrollPoint.x, scrollPoint.y)
+      h.send('wheel', 0, amount)
+      h.measure(`${label} real Main scroll target`, JSON.stringify({ scrollPoint, direction: 'up', amount, main: mainRect, dock: dockRect, target: clippedRect }))
+    } else if (clippedAtTop || clippedAtBottom) {
+      const key = clippedAtTop ? 'PageUp' : 'PageDown'
+      await h.key(key, 250)
+      h.measure(`${label} client viewport scroll key`, JSON.stringify({ key, header: headerRect, clipped: clippedBox }))
+    } else {
+      const scrollPoint = { x: mainRect[0] + mainRect[2] / 2, y: mainRect[1] + mainRect[3] / 2 }
+      h.send('move', scrollPoint.x, scrollPoint.y)
+      h.send('wheel', 0, clippedRect[1] < mainRect[1] + mainRect[3] / 2 ? 160 : -160)
+      h.measure(`${label} real Main scroll target`, JSON.stringify({ scrollPoint, direction: 'nearest', main: mainRect, dock: dockRect, target: clippedRect }))
+    }
+    await h.sleep(120)
+  }
+  snapshot = h.snapshot()
+  header = findHeader(snapshot)
+  if (header === undefined) return undefined
+  textNodes = snapshot.nodes.filter(node => snapshot.chains.get(node)?.includes(header)
+    && typeof node.text === 'string' && node.text !== '')
+  return { snapshot, header, textNodes }
+}
+
 export default async function (h) {
   const preset = presetFromEnvironment()
   const gui = process.env.TERN_INNER_DISCLOSURE_GUI === '1'
@@ -262,14 +321,108 @@ export default async function (h) {
     finish(h, { ...extra, qualification: 'DIRECT_WRITE_NOT_SETTLED' })
     return
   }
+  let liveThinkingId
+  let liveWorkId
+  if (!await waitUntil(h, 'the real Direct Agent is holding its second reasoning delta', () =>
+    records(h).some(row => row.kind === 'subject.reasoning.second-held' && row.step === 0 && row.deltaIndex === 1))) {
+    finish(h, { ...extra, qualification: 'SECOND_REASONING_NOT_HELD' })
+    return
+  }
+  let live = foldLive(h)
+  if (preset === 'full' || preset === 'compact') {
+    live = foldLive(h)
+    if (preset === 'compact') {
+      const currentWork = [...live.values()].find(node => node.k === 'section' && String(node.p.key).includes('work-'))
+      h.check('Compact materializes its current Work before the live Thinking member', currentWork !== undefined,
+        JSON.stringify(currentWork ?? null))
+      if (currentWork === undefined) { finish(h, { ...extra, qualification: 'LIVE_WORK_NOT_MATERIALIZED' }); return }
+      liveWorkId = currentWork.id
+      if (currentWork.p.collapsed === true) {
+        const workSnapshot = h.snapshot()
+        const workHead = mainNodes(workSnapshot).find(node => String(node.class ?? '').split(/\s+/u).includes('sf-section-head')
+          && (h.descendantsText(node).includes('Activity') || h.descendantsText(node).includes('Thought')))
+        await clickToggle(h, workSnapshot, workHead, liveWorkId, false, 'live Compact Work')
+        if (!await waitUntil(h, 'the current Compact Work opens before its live Thinking row is targeted', () =>
+          foldLive(h).get(liveWorkId)?.p.collapsed === false)) {
+          finish(h, { ...extra, qualification: 'LIVE_WORK_NOT_OPEN' })
+          return
+        }
+      }
+      live = foldLive(h)
+    }
+    if (!await waitUntil(h, 'the first live reasoning prefix reaches the exact native Thinking Section', () =>
+      [...foldLive(h).values()].some(node => node.k === 'section'
+        && /^(?:s\d+-)?msg-\d+$/u.test(String(node.p.key))
+        && subtreeText(foldLive(h), node.id).includes('checking the first row')))) {
+      finish(h, { ...extra, qualification: 'FIRST_REASONING_NOT_MATERIALIZED' })
+      return
+    }
+    const liveThinking = [...live.values()].find(node => node.k === 'section'
+      && /^(?:s\d+-)?msg-\d+$/u.test(String(node.p.key))
+      && subtreeText(live, node.id).includes('checking the first row'))
+    h.check('the live reasoning prefix has an exact canonical Thinking row in the current pane', liveThinking !== undefined,
+      JSON.stringify(liveThinking ?? null))
+    if (liveThinking === undefined) { finish(h, { ...extra, qualification: 'LIVE_THINKING_NOT_MATERIALIZED' }); return }
+    liveThinkingId = liveThinking.id
+    h.check('the exact current Thinking owner starts independently collapsed',
+      liveThinking.p.collapsible === true && liveThinking.p.collapsed === true, JSON.stringify(liveThinking.p))
+    const liveThinkingSnapshot = h.snapshot()
+    const liveThinkingHead = mainNodes(liveThinkingSnapshot).find(node => String(node.class ?? '').split(/\s+/u).includes('sf-section-head')
+      && h.descendantsText(node).includes('checking the first row'))
+    await clickToggle(h, liveThinkingSnapshot, liveThinkingHead, liveThinkingId, false, 'live Thinking')
+    if (!await waitUntil(h, 'the exact Thinking body opens before the next official reasoning delta', () => {
+      const now = foldLive(h)
+      const body = now.get(`${liveThinkingId}.body`)
+      return now.get(liveThinkingId)?.p.collapsed === false
+        && typeof body?.p.text === 'string'
+        && body.p.text.includes('checking the first row')
+    })) {
+      finish(h, { ...extra, qualification: 'LIVE_THINKING_BODY_NOT_OPEN' })
+      return
+    }
+    const firstBody = foldLive(h).get(`${liveThinkingId}.body`)
+    h.check('the first live source chunk is visible in the open body while the second chunk is still held',
+      typeof firstBody?.p.text === 'string' && firstBody.p.text.includes('checking the first row')
+        && firstBody.p.stream === true,
+      JSON.stringify(firstBody ?? null))
+    h.check('no durable Tool node exists while only the reasoning prefix is live',
+      ![...foldLive(h).values()].some(node => node.k === 'tool'))
+    const releaseReasoning = await runCase(h, 'release-reasoning')
+    h.check('the real Direct Subject released the official second reasoning delta from its barrier',
+      releaseReasoning?.status === 'ok', JSON.stringify(releaseReasoning ?? null))
+    if (!await waitUntil(h, 'the same open real-client Thinking body advances to the second source chunk', () => {
+      const current = foldLive(h)
+      const body = current.get(`${liveThinkingId}.body`)
+      return current.get(liveThinkingId)?.p.collapsed === false
+        && typeof body?.p.text === 'string'
+        && body.p.text.includes('latest reasoning line')
+    })) {
+      finish(h, { ...extra, qualification: 'LIVE_THINKING_SECOND_DELTA_NOT_VISIBLE' })
+      return
+    }
+    live = foldLive(h)
+    const advancedBody = live.get(`${liveThinkingId}.body`)
+    h.check('the same real SDK Section id remains open and its body follows both live reasoning chunks',
+      live.get(liveThinkingId)?.p.collapsed === false
+        && typeof advancedBody?.p.text === 'string'
+        && advancedBody.p.text.includes('checking the first row\nlatest reasoning line')
+        && advancedBody.p.stream === true,
+      JSON.stringify({ id: liveThinkingId, section: live.get(liveThinkingId), body: advancedBody }))
+    h.capture(`${preset}-thinking-open-after-live-delta-1280x800-dark`,
+      'the native Tern body opened after the first real Direct reasoning chunk and advanced on the held second chunk')
+  } else {
+    const releaseReasoning = await runCase(h, 'release-reasoning')
+    h.check('the real Direct Subject released the Focus reasoning gate before Preparing',
+      releaseReasoning?.status === 'ok', JSON.stringify(releaseReasoning ?? null))
+  }
   if (!await waitUntil(h, 'the production Direct stream reached transient Preparing', () =>
     h.texts(h.snapshot()).some(text => text.includes('Preparing')))) {
     finish(h, { ...extra, qualification: 'PREPARING_NOT_VISIBLE' })
     return
   }
-  let live = foldLive(h)
+  live = foldLive(h)
   let rootId
-  let workId
+  let workId = liveWorkId
   if (preset === 'focus') {
     const root = [...live.values()].find(node => node.k === 'section' && String(node.p['key']).includes('focus-'))
     h.check('Focus has exactly one current canonical root', root !== undefined)
@@ -323,21 +476,36 @@ export default async function (h) {
     && visibleSpan(headSnapshot.chains, thinkHead, 'x') >= 4 && visibleSpan(headSnapshot.chains, thinkHead, 'y') >= 4,
   JSON.stringify(thinkHead === undefined ? null : { rect: rect(thinkHead), x: visibleSpan(headSnapshot.chains, thinkHead, 'x'), y: visibleSpan(headSnapshot.chains, thinkHead, 'y') }))
   const closedBodyId = `${reasoningId}.body`
-  h.check('collapsed Thinking has no body node in the official SDK wire tree', !rootBefore.has(closedBodyId))
+  const thinkingAlreadyOpenForLiveDelta = liveThinkingId === reasoningId
+  h.check(thinkingAlreadyOpenForLiveDelta
+    ? 'the real Tern already materialized this same Thinking body before the second live source chunk'
+    : 'collapsed Thinking has no body node in the official SDK wire tree',
+  thinkingAlreadyOpenForLiveDelta ? rootBefore.has(closedBodyId) : !rootBefore.has(closedBodyId))
 
   const currentThinking = live.get(reasoningId)
-  h.check('opening ancestors preserves the same Thinking SDK id', currentThinking !== undefined && currentThinking.k === 'section')
+  h.check('the already-authorized current Thinking has the exact canonical SDK id', currentThinking !== undefined && currentThinking.k === 'section')
   const currentThinkingHead = h.snapshot()
   const visibleThinkingHead = mainNodes(currentThinkingHead).find(node => String(node.class ?? '').split(/\s+/u).includes('sf-section-head')
     && h.descendantsText(node).includes('latest reasoning line'))
-  h.capture(`${preset}-thinking-closed-1280x800-dark`, 'the exact Thinking body remains absent before its native header opens')
-  await clickToggle(h, currentThinkingHead, visibleThinkingHead, reasoningId, false, 'Thinking')
-  if (!await waitUntil(h, 'the opened Thinking body is materialized', () => foldLive(h).has(`${reasoningId}.body`))) {
-    finish(h, { ...extra, qualification: 'THINKING_BODY_NOT_OPEN' })
-    return
+  if (thinkingAlreadyOpenForLiveDelta) {
+    h.check('same-source reasoning projection retained the live-open Section and body after the latest chunk',
+      currentThinking?.p.collapsed === false && rootBefore.get(closedBodyId)?.p.text?.includes('latest reasoning line') === true,
+      JSON.stringify({ section: currentThinking, body: rootBefore.get(closedBodyId) }))
+  } else {
+    h.check('the collapsed Thinking summary is physically visible before its body opens', visibleThinkingHead !== undefined
+      && visibleSpan(currentThinkingHead.chains, visibleThinkingHead, 'x') >= 4 && visibleSpan(currentThinkingHead.chains, visibleThinkingHead, 'y') >= 4,
+    JSON.stringify(visibleThinkingHead === undefined ? null : { rect: rect(visibleThinkingHead), x: visibleSpan(currentThinkingHead.chains, visibleThinkingHead, 'x'), y: visibleSpan(currentThinkingHead.chains, visibleThinkingHead, 'y') }))
+    h.capture(`${preset}-thinking-closed-1280x800-dark`, 'the exact Thinking body remains absent before its native header opens')
+    await clickToggle(h, currentThinkingHead, visibleThinkingHead, reasoningId, false, 'Thinking')
+    if (!await waitUntil(h, 'the opened Thinking body is materialized', () => foldLive(h).has(`${reasoningId}.body`))) {
+      finish(h, { ...extra, qualification: 'THINKING_BODY_NOT_OPEN' })
+      return
+    }
   }
-  writeLedger(h, 'thinking-toggle.json', { id: reasoningId, event: records(h).filter(row => row.kind === 'client.toggle').at(-1), body: foldLive(h).get(`${reasoningId}.body`) })
-  h.capture(`${preset}-thinking-open-1280x800-dark`, 'the same canonical Thinking Section opened through a real client pointer toggle')
+  writeLedger(h, 'thinking-toggle.json', { id: reasoningId,
+    event: records(h).filter(row => row.kind === 'client.toggle').findLast(row => row.id === reasoningId),
+    body: foldLive(h).get(`${reasoningId}.body`), liveOpenedBeforeSecondChunk: thinkingAlreadyOpenForLiveDelta })
+  h.capture(`${preset}-thinking-open-1280x800-dark`, 'the same canonical Thinking Section is open in the real Tern client')
 
   const contextResult = await runCase(h, 'append-context')
   h.check('two official same-turn snapshot Context events were appended for the open Direct turn', contextResult?.status === 'ok', JSON.stringify(contextResult ?? null))
@@ -540,8 +708,70 @@ export default async function (h) {
     const dock = snap.nodes.find(node => String(node.class ?? '').split(/\s+/u).includes('sf-dock'))
     h.check(`the Dock remains in the measured client tree at ${viewport.width}x${viewport.height}`, dock !== undefined && rect(dock)[3] > 0,
       JSON.stringify(dock === undefined ? null : rect(dock)))
+
+    const innerHeaders = [
+      {
+        name: 'thinking',
+        find: tree => mainNodes(tree).find(node => String(node.class ?? '').split(/\s+/u).includes('sf-section-head')
+          && h.descendantsText(node).includes('Thinking') && h.descendantsText(node).includes('latest reasoning line')),
+      },
+      {
+        name: 'tool',
+        find: tree => mainNodes(tree).find(node => String(node.class ?? '').split(/\s+/u).includes('sf-tool-head')
+          && h.descendantsText(node).includes('job_list')),
+      },
+    ]
+    const innerGeometry = {}
+    for (const target of innerHeaders) {
+      const witness = await revealInnerHeader(h, target.name, target.find)
+      const geometrySnapshot = witness?.snapshot
+      const header = witness?.header
+      const textNodes = witness?.textNodes ?? []
+      const textsFullyVisible = textNodes.length > 0
+        && textNodes.every(node => fullyVisible(geometrySnapshot.chains, node))
+      const clickableFragment = header !== undefined
+        && visibleSpan(geometrySnapshot.chains, header, 'x') >= 4
+        && visibleSpan(geometrySnapshot.chains, header, 'y') >= 4
+      const currentDock = geometrySnapshot?.nodes.find(node => String(node.class ?? '').split(/\s+/u).includes('sf-dock'))
+      const dockRect = rect(currentDock ?? {})
+      const overlap = textNodes.filter(node => {
+        const box = visibleBox(geometrySnapshot.chains, node)
+        return currentDock !== undefined
+          && box.start.x < dockRect[0] + dockRect[2] && box.start.x + box.span.x > dockRect[0]
+          && box.start.y < dockRect[1] + dockRect[3] && box.start.y + box.span.y > dockRect[1]
+      }).map(node => ({ text: node.text, rect: rect(node), visible: visibleBox(geometrySnapshot.chains, node) }))
+      const clearOfDock = currentDock !== undefined && overlap.length === 0
+      h.check(`${target.name} inner header text is fully visible and separate from Dock at ${viewport.width}x${viewport.height}`,
+        textsFullyVisible && clickableFragment && clearOfDock,
+        JSON.stringify({ header: header === undefined ? null : h.descendantsText(header),
+          headerRect: header === undefined ? null : rect(header),
+          textNodes: textNodes.map(node => ({ text: node.text, rect: rect(node), visible: visibleBox(geometrySnapshot.chains, node) })),
+          dock: currentDock === undefined ? null : dockRect, overlap }))
+      if (header !== undefined) {
+        h.capture(`${preset}-${viewport.width}x${viewport.height}-${target.name}-header`,
+          `fully visible native ${target.name} disclosure header, separated from the Dock and Composer`)
+      }
+      innerGeometry[target.name] = { fullyVisible: textsFullyVisible, clickable: clickableFragment, dockOverlapCount: overlap.length }
+    }
+
+    const dockSnapshot = h.snapshot()
+    const completeDock = dockSnapshot.nodes.find(node => String(node.class ?? '').split(/\s+/u).includes('sf-dock'))
+    const composer = dockSnapshot.nodes.find(node => node.role === 'textbox'
+      && String(node.class ?? '').split(/\s+/u).includes('sf-editor'))
+    const sendButton = dockSnapshot.nodes.find(node => node.tag === 'button'
+      && String(node.title ?? '').includes('Type a message to send'))
+    const dockComposerComplete = completeDock !== undefined && composer !== undefined && sendButton !== undefined
+      && fullyVisible(dockSnapshot.chains, completeDock)
+      && fullyVisible(dockSnapshot.chains, composer)
+      && fullyVisible(dockSnapshot.chains, sendButton)
+    h.check(`Dock, Composer and Send action are fully inside the viewport at ${viewport.width}x${viewport.height}`,
+      dockComposerComplete,
+      JSON.stringify({ dock: completeDock === undefined ? null : { rect: rect(completeDock), visible: visibleBox(dockSnapshot.chains, completeDock) },
+        composer: composer === undefined ? null : { rect: rect(composer), fullyVisible: fullyVisible(dockSnapshot.chains, composer) },
+        send: sendButton === undefined ? null : { rect: rect(sendButton), fullyVisible: fullyVisible(dockSnapshot.chains, sendButton) } }))
     const capture = h.capture(`${preset}-${viewport.width}x${viewport.height}-${viewport.appearance}`, 'open native Thinking, Tool and Context disclosures')
-    matrix.push({ requested: [viewport.width, viewport.height], actual: h.ctl('stats').viewport, theme, capture, sectionHeaders: fragments })
+    matrix.push({ requested: [viewport.width, viewport.height], actual: h.ctl('stats').viewport, theme, capture,
+      sectionHeaders: fragments, innerGeometry, dockComposerComplete })
   }
   writeLedger(h, 'viewport-matrix.json', matrix)
   writeLedger(h, 'inner-disclosure-evidence.json', {
