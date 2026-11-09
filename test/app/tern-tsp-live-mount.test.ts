@@ -1804,7 +1804,7 @@ async function awaitWireFact(predicate: () => boolean, label: string, timeoutMs 
 // ── B2-L6: the routed PTC subtree reaches the mounted production renderer ──
 
 test('a routed PTC child start/settle reaches the mounted renderer wire', async () => {
-  const harness = await mountTspHarness()
+  const harness = await mountTspHarness({ displayState: { preset: 'full' } })
   const codeArgs = { code: 'print(1)', description: 'Inspect project and run tests' }
   const readArgs = { file_path: 'src/a.ts' }
   /** Every node the SDK has ever ADDED to the real surface. */
@@ -1822,6 +1822,7 @@ test('a routed PTC child start/settle reaches the mounted renderer wire', async 
     return nodes
   }
   try {
+    harness.surface.bindRendererInput()
     // A genuine durable PTC sequence through the PRODUCTION route: the
     // SessionEvent goes through `routeSessionEvent` → the real folder/window →
     // `SurfaceRuntime.repaintTarget` → the mounted `mountTspRenderer` → the
@@ -1843,12 +1844,21 @@ test('a routed PTC child start/settle reaches the mounted renderer wire', async 
       name: 'read',
       arguments: readArgs,
     }, 3))
+    await awaitWireFact(() => mountedNodes(harness).some(node => node.k === 'tool'), 'the collapsed parent Tool header')
+    const parent = mountedNodes(harness).find(node => node.k === 'tool')!
+    assert.equal(parent.p['collapsible'], true)
+    assert.equal(parent.p['collapsed'], true, 'the PTC subtree starts hidden with its parent body')
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf: harness.tern.frames.at(-1)!.sf, id: parent.id, collapsed: false, raw: {} })
+    await settle()
+    const parentAfterToggle = mountedNodes(harness).find(node => node.id === parent.id)
+    assert.equal(parentAfterToggle?.p['collapsed'], false,
+      'the exact parent Tool toggle opens the current owner')
+    await awaitWireFact(() => mountedNodes(harness).some(node => node.id.endsWith('.sub-code-1:code:1')),
+      'the child header after the parent body opens')
     harness.route(toolResult(4, 'code-1', 'program output'))
     harness.surface.paintNow()
-    await awaitWireFact(
-      () => collectWireNodes().some(node => node.id.endsWith('.sub-code-1:code:1')),
-      'the routed PTC child to reach the mounted renderer wire',
-    )
+    await awaitWireFact(() => mountedNodes(harness).find(node => node.id === parent.id)?.p['status'] === 'done',
+      'the parent Tool result after its body is open')
 
     const initial = collectWireNodes()
     const child = initial.find(node => node.id.endsWith('.sub-code-1:code:1'))
@@ -1859,7 +1869,7 @@ test('a routed PTC child start/settle reaches the mounted renderer wire', async 
     assert.equal(child.p?.['frame'], 'inline', 'the routed child is a native inline tool')
     assert.equal(child.p?.['status'], 'running')
     assert.equal(initial.find(node => node.id === `${rootId}.child-head`)?.p?.['text'], 'Child calls · 1')
-    assert.equal(initial.find(node => node.id === rootId)?.p?.['status'], 'done',
+    assert.equal(mountedNodes(harness).find(node => node.id === rootId)?.p?.['status'], 'done',
       'the parent settled before the child settle')
     assert.equal(initial.filter(node => node.id === childId).length, 1,
       'the routed child node was added exactly once')
@@ -1881,13 +1891,21 @@ test('a routed PTC child start/settle reaches the mounted renderer wire', async 
       'the routed child settle to reach the mounted renderer wire',
     )
 
-    const last = harness.tern.frames[harness.tern.frames.length - 1]!
-    assert.ok(last.ops.some(op => op[0] === 'set' && op[1] === childId
+    const settleFrame = harness.tern.frames.at(-1)!
+    assert.ok(settleFrame.ops.some(op => op[0] === 'set' && op[1] === childId
       && (op[2] as { status?: string }).status === 'done'),
     'the routed settle updates the SAME child node on the real wire')
-    assert.equal(last.ops.filter(op => op[0] === 'del').length, 0, 'the routed settle deletes nothing')
-    assert.equal(last.ops.filter(op => op[0] === 'move').length, 0, 'the routed settle moves nothing')
-    const addedResult = last.ops
+    assert.equal(settleFrame.ops.filter(op => op[0] === 'del').length, 0, 'the routed settle deletes nothing')
+    assert.equal(settleFrame.ops.filter(op => op[0] === 'move').length, 0, 'the routed settle moves nothing')
+    assert.equal(collectWireNodes().some(node => node.id === `${childId}.result`), false,
+      'a settled child body remains hidden until its own Tool disclosure opens')
+    const settledChild = collectWireNodes().find(node => node.id === childId)!
+    assert.equal(settledChild.p?.['collapsed'], true)
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf: harness.tern.frames.at(-1)!.sf, id: childId, collapsed: false, raw: {} })
+    await awaitWireFact(() => collectWireNodes().some(node => node.id === `${childId}.result`),
+      'the child result after its independent disclosure opens')
+    const bodyFrame = harness.tern.frames[harness.tern.frames.length - 1]!
+    const addedResult = bodyFrame.ops
       .flatMap(op => op[0] === 'add' ? [op[4]] : [])
       .flatMap(node => {
         const out: WireNode[] = []
@@ -1899,12 +1917,12 @@ test('a routed PTC child start/settle reaches the mounted renderer wire', async 
         return out
       })
       .find(node => node.id === `${childId}.result`)
-    assert.equal(addedResult?.p?.['text'], 'file.txt', 'the complete child result reaches the real wire')
+    assert.equal(addedResult?.p?.['text'], 'file.txt', 'the complete child result reaches the real wire on open')
     assert.equal(addedResult?.p?.['wrap'], true)
-    assert.equal(last.ops.some(op => op[0] === 'set' && op[1] === rootId), false,
-      'the child settle never rewrites the root card')
+    assert.equal(bodyFrame.ops.some(op => op[0] === 'set' && op[1] === rootId), false,
+      'the child toggle never rewrites the root card')
     assert.equal(collectWireNodes().filter(node => node.id === childId).length, 1,
-      'the child node was never remounted across the routed settle')
+      'the child node was never remounted across settlement and disclosure')
   } finally {
     await harness.dispose()
     await harness.session.close()
@@ -2274,6 +2292,164 @@ const nodeText = (node: ModeWireNode): string => {
   return parts.join(' ')
 }
 
+test('inner Thinking, Context and Tool toggles use the exact current node owner and respect covered or retired seats', async () => {
+  const harness = await mountTspHarness({ displayState: { preset: 'full' }, nativeImages: true })
+  try {
+    harness.surface.bindRendererInput()
+    harness.route(ev('turn/start', { turn: 1 }, 0))
+    harness.route(userMessage(1, 'inspect all transcript details'))
+    harness.route(ev('assistant/message', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('inner-thinking'), role: 'assistant',
+        content: [{ type: 'reasoning', text: 'first reasoning line\nlatest reasoning line' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+        stream: [
+          { type: 'chunk', time: T0 + 2, chunk: { type: 'block-start', index: 0, blockType: 'reasoning' } },
+          { type: 'chunk', time: T0 + 3, chunk: { type: 'reasoning-delta', index: 0, text: 'first reasoning line\nlatest reasoning line' } },
+          { type: 'chunk', time: T0 + 4, chunk: { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'first reasoning line\nlatest reasoning line' } } },
+        ],
+      },
+    }, 2))
+    harness.route(toolCall(3, 'inner-read'))
+    harness.route(toolResult(4, 'inner-read', 'full tool result'))
+    harness.route(contextEvent(5, 'inner-snapshot-a', 'first hidden context', 'first label'))
+    harness.route(contextEvent(6, 'inner-snapshot-b', 'second hidden context', 'second label'))
+    harness.route(ev('turn/end', { turn: 1, reason: { kind: 'completed' } }, 7))
+    harness.surface.paintNow()
+    await awaitWireFact(() => mountedNodes(harness).some(node => String(node.p['text'] ?? '').includes('latest reasoning line')),
+      'the Full Thinking Section head')
+
+    const current = (): ModeWireNode[] => mountedNodes(harness)
+    const byKey = (needle: string): ModeWireNode | undefined => current().find(node => node.k === 'section' && String(node.p['key']).includes(needle))
+    const thinking = byKey('msg-')
+    assert.ok(thinking !== undefined && nodeText(thinking).includes('latest reasoning line'))
+    assert.equal(thinking.p['collapsed'], true)
+    assert.equal(current().some(node => node.id === `${thinking.id}.body`), false)
+    const tool = current().find(node => node.k === 'tool' && node.p['name'] === 'read')
+    assert.ok(tool !== undefined)
+    assert.equal(tool.p['collapsed'], true)
+    assert.equal(current().some(node => node.id === `${tool.id}.result`), false)
+    const cluster = byKey('ctx-')
+    assert.ok(cluster !== undefined)
+    assert.equal(cluster.p['collapsed'], true)
+    assert.equal(current().some(node => node.p['text'] === 'first hidden context'), false)
+
+    const sf = harness.tern.frames.at(-1)!.sf
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: thinking.id, collapsed: false, raw: {} })
+    await awaitWireFact(() => current().some(node => node.id === `${thinking.id}.body`), 'the Thinking body after exact toggle')
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf: harness.tern.frames.at(-1)!.sf, id: cluster.id, collapsed: false, raw: {} })
+    await awaitWireFact(() => current().some(node => node.p['text'] === 'first hidden context'), 'the exact canonical Context Cluster body')
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf: harness.tern.frames.at(-1)!.sf, id: tool.id, collapsed: false, raw: {} })
+    await awaitWireFact(() => current().some(node => node.id === `${tool.id}.result`), 'the exact Tool result body')
+
+    const stableIds = [thinking.id, cluster.id, tool.id]
+    harness.route(ev('user/message', { id: MessageId('inner-followup'), role: 'user', content: [{ type: 'text', text: 'same Source follow-up' }], source: { kind: 'user' } }, 8))
+    harness.surface.paintNow()
+    await awaitWireFact(() => current().some(node => nodeText(node).includes('same Source follow-up')), 'a later same-source projection')
+    for (const id of stableIds) assert.ok(current().some(node => node.id === id), `the streaming/formal commit keeps inner id ${id}`)
+    assert.equal(current().find(node => node.id === thinking.id)?.p['collapsed'], false, 'the opened Thinking stays open')
+    assert.equal(current().find(node => node.id === cluster.id)?.p['collapsed'], false, 'the opened Cluster stays open')
+    assert.equal(current().find(node => node.id === tool.id)?.p['collapsed'], false, 'the opened Tool stays open')
+
+    const pending = harness.renderer().interaction.askQuestions([{ id: 'inner-seat-q', question: 'Proceed?' }], undefined, undefined, false)
+    pending.catch(() => {})
+    await awaitWireFact(() => harness.tern.output.text().includes('Proceed?'), 'the current modal seat')
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: thinking.id, collapsed: true, raw: {} })
+    await settle()
+    const openedThinking = current().find(node => node.id === thinking.id)
+    assert.equal(openedThinking?.p['collapsed'], false,
+      'a covered toggle does not mutate the manual owner')
+    assert.equal(current().some(node => node.id === `${thinking.id}.body`), true,
+      'the covered close does not remove the Thinking body')
+    harness.renderer().interaction.withdrawPending()
+    await pending.catch(() => {})
+
+    const oldIds = [...stableIds]
+    harness.surface.display.beginSessionHydration()
+    await awaitWireFact(() => current().some(node => nodeText(node).includes('Loading session')), 'the source retirement frame')
+    const framesDuringHydration = harness.tern.frames.length
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: oldIds[0]!, collapsed: true, raw: {} })
+    await settle()
+    assert.equal(harness.tern.frames.length, framesDuringHydration, 'a retired exact node id is rejected during hydration')
+    harness.replaceMain()
+    harness.route(ev('turn/start', { turn: 1 }, 20))
+    harness.route(userMessage(21, 'incoming source'))
+    harness.route(ev('assistant/message', {
+      turn: 1, step: 0,
+      message: { id: MessageId('incoming-thinking'), role: 'assistant', content: [{ type: 'reasoning', text: 'incoming reasoning' }], source: { kind: 'model', provider: 'p', model: 'm' }, stream: [] },
+    }, 22))
+    harness.surface.paintNow()
+    await awaitWireFact(() => current().some(node => node.p['text'] === 'incoming source'), 'the replacement subject frame')
+    const incomingThinking = current().find(node => node.k === 'section' && nodeText(node).includes('incoming reasoning'))
+    assert.ok(incomingThinking !== undefined)
+    assert.equal(incomingThinking.p['collapsed'], true, 'the new Source starts with no inherited inner expansion')
+    const beforeLate = harness.tern.frames.length
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: oldIds[1]!, collapsed: true, raw: {} })
+    await settle()
+    assert.equal(harness.tern.frames.length, beforeLate, 'a retired Context cluster id cannot act on the new Source')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+/** One canonical surfaced Context event with its producer form/label. */
+function contextEvent(seq: number, id: string, text: string, label: string): SessionEvent {
+  return ev('user/message', {
+    id: MessageId(id), role: 'user', content: [{ type: 'text', text }],
+    source: { kind: 'plugin', form: 'snapshot', plugin: label },
+  }, seq)
+}
+
+test('Focus retains opened Context Row owners when the canonical Work also carries their Cluster', async () => {
+  const harness = await mountTspHarness({ displayState: { preset: 'focus' } })
+  try {
+    harness.surface.bindRendererInput()
+    harness.route(ev('turn/start', { turn: 1 }, 0))
+    harness.route(userMessage(1, 'inspect persistent Focus context'))
+    harness.route(assistantMessage(2, 'focus-context-narration', 'the Agent is checking the Context'))
+    harness.route(contextEvent(3, 'focus-context-a', 'first Focus context body', 'runtime-context'))
+    harness.route(contextEvent(4, 'focus-context-b', 'second Focus context body', 'runtime-context'))
+    harness.surface.paintNow()
+    await awaitWireFact(() => mountedSections(harness).some(node => String(node.p['key']).includes('focus-')),
+      'the canonical Focus root materializes')
+    const focusRoot = mountedSections(harness).find(node => String(node.p['key']).includes('focus-'))!
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf: harness.tern.frames.at(-1)!.sf, id: focusRoot.id, collapsed: false, raw: {} })
+    await awaitWireFact(() => mountedSections(harness).some(node => node.id === focusRoot.id && node.p['collapsed'] === false),
+      'the canonical Focus root opens before its Context Rows are queried')
+    const rows = mountedSections(harness).filter(node => node.p['head'] === 'runtime-context')
+    const ids = rows.map(row => row.id)
+    assert.equal(rows.length, 2, JSON.stringify({
+      sections: mountedSections(harness).map(node => ({ id: node.id, p: node.p, children: node.c })),
+    }))
+    assert.ok(rows.every(row => row.p['collapsed'] === true), 'each Context Row starts with its own detail closed')
+    for (const row of rows) {
+      harnessFreeInput(harness.tern, { ev: 'toggle', sf: harness.tern.frames.at(-1)!.sf, id: row.id, collapsed: false, raw: {} })
+      await awaitWireFact(() => mountedNodes(harness).some(node => node.id === `${row.id}.body`),
+        `the exact Focus Context Row ${row.id} opens`)
+    }
+    assert.ok(mountedNodes(harness).some(node => node.p['text'] === 'first Focus context body'))
+    assert.ok(mountedNodes(harness).some(node => node.p['text'] === 'second Focus context body'))
+
+    // A same-Source authoritative commit rebuilds canonical Work/Cluster
+    // membership while Focus continues to present the same rows independently.
+    harness.route(contextEvent(5, 'focus-context-c', 'third same-source Focus context', 'runtime-context'))
+    const beforeReprojection = harness.tern.frames.length
+    harness.surface.paintNow()
+    await awaitWireFact(() => harness.tern.frames.length > beforeReprojection
+      && mountedSections(harness).filter(node => node.p['head'] === 'runtime-context').length === 3, 'the same-source Focus context projection')
+    for (const id of ids) {
+      const row = mountedSections(harness).find(node => node.id === id)
+      assert.equal(row?.p['collapsed'], false, `Focus keeps the same Context Row owner open: ${id}`)
+      assert.ok(mountedNodes(harness).some(node => node.id === `${id}.body`), `the exact Context Row body remains mounted: ${id}`)
+    }
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
 test('the SAME live DisplayState drives Full, Compact and Focus while preserving same-source Turn choice', async () => {
   const displayState: { preset: 'focus' | 'compact' | 'full' } = { preset: 'full' }
   const harness = await mountTspHarness({ displayState })
@@ -2288,7 +2464,8 @@ test('the SAME live DisplayState drives Full, Compact and Focus while preserving
     harness.surface.bindRendererInput()
     routeTwoWorkTurn(harness)
     await awaitWireFact(() => mountedNodes(harness).some(node => nodeText(node).includes('the final answer')), 'the Full turn frame')
-    assert.equal(mountedSections(harness).length, 0, 'Full paints no Work/Activity container')
+    assert.equal(mountedSections(harness).filter(node => String(node.p['key']).includes('work-') || String(node.p['key']).includes('focus-')).length, 0,
+      'Full paints no Work/Activity or Focus root container')
     assert.ok(mountedNodes(harness).some(node => node.k === 'tool'), 'Full keeps the native Tool rows')
 
     // The authority is the SAME object the composition root owns: each mode
@@ -2312,7 +2489,9 @@ test('the SAME live DisplayState drives Full, Compact and Focus while preserving
 
     displayState.preset = 'full'
     appendAssistant(12, 'mode-full-again', 'a later Full commit')
-    await awaitWireFact(() => mountedSections(harness).length === 0, 'Full has no remaining disclosure roots')
+    await awaitWireFact(() => mountedSections(harness).every(node =>
+      !String(node.p['key']).includes('work-') && !String(node.p['key']).includes('focus-')),
+    'Full has no remaining Work or Focus disclosure roots')
     assert.ok(mountedNodes(harness).some(node => node.k === 'tool'), 'Full restores flat Tool rows')
 
     displayState.preset = 'focus'
@@ -2365,9 +2544,15 @@ test('a collapsed Compact Work image has no read/blob demand until expanded and 
     const sectionA = mountedSections(harness)[0]!
     const sfA = harness.tern.frames.at(-1)!.sf
     harnessFreeInput(harness.tern, { ev: 'toggle', sf: sfA, id: sectionA.id, collapsed: false, raw: {} })
-    await awaitWireFact(() => mountedNodes(harness).some(node => node.k === 'image'), 'the image node after expanding Work A')
+    await awaitWireFact(() => mountedNodes(harness).some(node => node.k === 'tool'), 'the Tool header after expanding Work A')
+    const toolA = mountedNodes(harness).find(node => node.k === 'tool')!
+    assert.equal(toolA.p['collapsed'], true, 'the Tool body has its own collapsed owner')
+    assert.equal(harness.imageReads.length, 0, 'opening Work alone starts no hidden result read')
+    const sfToolA = harness.tern.frames.at(-1)!.sf
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf: sfToolA, id: toolA.id, collapsed: false, raw: {} })
+    await awaitWireFact(() => mountedNodes(harness).some(node => node.k === 'image'), 'the Tool image after its own disclosure opens')
     assert.deepEqual(harness.imageReads.map(read => [read.attachmentId, read.scope]), [['att-compact-work', scopeA]],
-      'expansion starts exactly one read through the owning scope')
+      'opening the exact Tool starts one read through the owning scope')
     assert.equal(harness.tern.blobs.length, 1, 'the expanded Tool sends one image blob')
 
     // An ordinary repaint of the same source keeps the visible Activity and
@@ -2392,7 +2577,12 @@ test('a collapsed Compact Work image has no read/blob demand until expanded and 
     const sectionB = mountedSections(harness)[0]!
     const sfB = harness.tern.frames.at(-1)!.sf
     harnessFreeInput(harness.tern, { ev: 'toggle', sf: sfB, id: sectionB.id, collapsed: false, raw: {} })
-    await awaitWireFact(() => harness.imageReads.length === 2, 'the source B image read')
+    await awaitWireFact(() => mountedNodes(harness).some(node => node.k === 'tool'), 'the new Source Tool header')
+    const toolB = mountedNodes(harness).find(node => node.k === 'tool')!
+    assert.equal(toolB.p['collapsed'], true, 'Source B does not inherit Source A Tool expansion')
+    assert.equal(harness.imageReads.length, 1, 'opening only Source B Work starts no image read')
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf: harness.tern.frames.at(-1)!.sf, id: toolB.id, collapsed: false, raw: {} })
+    await awaitWireFact(() => harness.imageReads.length === 2, 'the source B Tool image read')
     assert.deepEqual(harness.imageReads.map(read => read.scope), [scopeA, scopeB], 'source B reads only under its own scope')
     await awaitWireFact(() => harness.tern.blobs.length === 2, 'the source B blob')
     await awaitWireFact(() => mountedNodes(harness).filter(node => node.k === 'image').length === 1, 'source B image frame')
@@ -2479,6 +2669,26 @@ test('Focus root and nested Work toggles keep one semantic owner and reset only 
       'Work A stays closed')
     assert.equal(mountedSections(harness).find(node => node.id === workB.id)?.p['collapsed'], false,
       'Work B has its own native disclosure owner')
+    const toolB = mountedNodes(harness).find(node => node.k === 'tool' && node.id.startsWith(`${workB.id}.`))!
+    const thinkingB = mountedSections(harness).find(node => node.id.startsWith(`${workB.id}.`) && nodeText(node).includes('Thinking'))!
+    assert.equal(toolB.p['collapsed'], true, 'the Tool detail starts independently collapsed')
+    assert.equal(thinkingB.p['collapsed'], true, 'Thinking starts independently collapsed')
+    let currentSf = harness.tern.frames.at(-1)!.sf
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf: currentSf, id: toolB.id, collapsed: false, raw: {} })
+    await awaitWireFact(() => mountedNodes(harness).some(node => node.id === `${toolB.id}.result`),
+      'the exact Tool result after its own disclosure opens')
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf: harness.tern.frames.at(-1)!.sf, id: thinkingB.id, collapsed: false, raw: {} })
+    await awaitWireFact(() => mountedNodes(harness).some(node => node.id === `${thinkingB.id}.body`),
+      'the exact Thinking body after its own disclosure opens')
+
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf: harness.tern.frames.at(-1)!.sf, id: workB.id, collapsed: true, raw: {} })
+    await awaitWireFact(() => mountedSections(harness).find(node => node.id === workB.id)?.p['collapsed'] === true,
+      'closing Work B physically removes its inner rows')
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf: harness.tern.frames.at(-1)!.sf, id: workB.id, collapsed: false, raw: {} })
+    await awaitWireFact(() => mountedSections(harness).find(node => node.id === thinkingB.id)?.p['collapsed'] === false,
+      'reopening Work B restores its manual Thinking choice')
+    assert.equal(mountedNodes(harness).find(node => node.id === toolB.id)?.p['collapsed'], false,
+      'reopening Work B restores its manual Tool choice')
 
     const beforeRepeated = harness.tern.frames.length
     harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: rootId, collapsed: false, raw: {} })
@@ -2497,6 +2707,14 @@ test('Focus root and nested Work toggles keep one semantic owner and reset only 
     assert.ok(reopenedWorks.every(node => node.p['collapsed'] === true),
       'closing the root reset only its nested Work expansions')
     assert.equal(mountedNodes(harness).filter(node => node.k === 'tool').length, 0)
+    const reopenedWorkB = reopenedWorks.find(node => node.id === workB.id)!
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf: harness.tern.frames.at(-1)!.sf, id: reopenedWorkB.id, collapsed: false, raw: {} })
+    await awaitWireFact(() => mountedNodes(harness).some(node => node.k === 'tool' && node.id === toolB.id),
+      'Work B rematerializes after its Root reopens')
+    assert.equal(mountedNodes(harness).find(node => node.id === toolB.id)?.p['collapsed'], true,
+      'Root close cleared the Tool body preference for its own Turn')
+    assert.equal(mountedSections(harness).find(node => node.id === thinkingB.id)?.p['collapsed'], true,
+      'Root close cleared the Thinking body preference for its own Turn')
   } finally {
     await harness.dispose()
     await harness.session.close()
@@ -2944,10 +3162,15 @@ test('a closed Focus root or Work starts no image read until its owning disclosu
 
     const work = mountedSections(harness).find(node => node.id.startsWith(`${root.id}.s1-work-`))!
     harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: work.id, collapsed: false, raw: {} })
-    await awaitWireFact(() => harness.imageReads.length === 1, 'the opened Work image read')
-    await awaitWireFact(() => harness.tern.blobs.length === 1, 'the opened Work image blob')
+    await awaitWireFact(() => mountedNodes(harness).some(node => node.k === 'tool'), 'the Work Tool header')
+    const tool = mountedNodes(harness).find(node => node.k === 'tool')!
+    assert.equal(tool.p['collapsed'], true, 'the Tool body is a separate disclosure')
+    assert.equal(harness.imageReads.length, 0, 'opening the Work alone still hides Tool result images')
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf: harness.tern.frames.at(-1)!.sf, id: tool.id, collapsed: false, raw: {} })
+    await awaitWireFact(() => harness.imageReads.length === 1, 'the opened Tool image read')
+    await awaitWireFact(() => harness.tern.blobs.length === 1, 'the opened Tool image blob')
     await awaitWireFact(() => mountedNodes(harness).some(node => node.k === 'image'),
-      'the opened member image frame')
+      'the opened Tool member image frame')
 
     harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: root.id, collapsed: true, raw: {} })
     await awaitWireFact(() => mountedNodes(harness).every(node => node.k !== 'image'), 'root close hides the image node')
