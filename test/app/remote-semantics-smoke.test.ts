@@ -2179,18 +2179,32 @@ test('the Remote Web page confirms each field, keeps credential values hidden, a
     await waitFor('the Remote Web page to read the Host', () =>
       page.view().includes('Web Search Provider') && !page.view().includes('Loading…'))
 
-    const listBar = '↑/↓ choose · Enter open · r refresh · Esc Tools'
+    type WebPageLevel = 'list' | 'detail' | 'endpoint'
+    let pageLevel: WebPageLevel = 'list'
+    const webListActionBars = [
+      '↑/↓ choose · Enter open · r refresh · Esc Tools',
+      '↑/↓ · Enter open · r refresh · Esc',
+      '↑/↓ · Enter · Esc',
+      'Esc',
+    ]
+    const isWebPage = (): boolean => page.view().includes('Settings · Tools · Web Search / Fetch')
+    const isWebList = (): boolean => isWebPage()
+      && page.view().split('\n').some(line => webListActionBars.includes(line.trim()))
     const returnToList = async (): Promise<void> => {
-      for (let attempt = 0; attempt < 3 && !page.view().includes(listBar); attempt += 1) {
+      assert.ok(isWebPage(), `the Web specialist page owns the frame before list navigation:\n${page.view()}`)
+      if (pageLevel !== 'list') {
         await page.key('\x1b')
+        pageLevel = 'list'
       }
-      assert.ok(page.view().includes(listBar), `the Web page returned to its list:\n${page.view()}`)
+      assert.ok(isWebPage(), `navigation stayed inside the Web specialist page:\n${page.view()}`)
+      assert.ok(isWebList(), `the complete or compact Web list Action Bar is painted:\n${page.view()}`)
     }
     const openRow = async (index: number): Promise<void> => {
       await returnToList()
       await page.key('\x1b[H')
       for (let step = 0; step < index; step += 1) await page.key('\x1b[B')
       await page.key('\r')
+      pageLevel = index === 4 ? 'endpoint' : 'detail'
     }
     const choose = async (index: number): Promise<void> => {
       await page.key('\x1b[H')
@@ -2247,6 +2261,7 @@ test('the Remote Web page confirms each field, keeps credential values hidden, a
     const apiRevisionBeforeCancel = forms.describe().find(entry => entry.ns === 'web-deepseek-api')?.revision
     const endpointBefore = forms.describe().find(entry => entry.ns === 'web-deepseek-api')?.value?.baseURL
     await page.key('\x1b')
+    pageLevel = 'list'
     assert.equal(forms.describe().find(entry => entry.ns === 'web-deepseek-api')?.revision, apiRevisionBeforeCancel,
       'cancelling the editor writes nothing')
     assert.equal(forms.describe().find(entry => entry.ns === 'web-deepseek-api')?.value?.baseURL, endpointBefore)
@@ -2262,6 +2277,7 @@ test('the Remote Web page confirms each field, keeps credential values hidden, a
       'the invalid endpoint is rejected before any Host write')
     assert.equal(forms.describe().find(entry => entry.ns === 'web-deepseek-api')?.value?.baseURL, endpointBefore)
     await page.key('\x1b')
+    pageLevel = 'list'
 
     await openRow(4)
     const confirmedEndpoint = `${String(endpointBefore)}/m6-f3-ui`
@@ -2271,6 +2287,7 @@ test('the Remote Web page confirms each field, keeps credential values hidden, a
       forms.describe().find(entry => entry.ns === 'web-deepseek-api')?.value?.baseURL === confirmedEndpoint)
     await waitFor('the verified endpoint editor closes on read-back', () =>
       !page.view().includes('Enter confirm · Esc cancel') && page.view().includes('m6-f3-ui'))
+    pageLevel = 'list'
     assert.equal((await config.web.read())?.api.baseURL, confirmedEndpoint)
 
     // The page's credential reference reader shows only presence/source and
@@ -2311,6 +2328,7 @@ test('the Remote Web page confirms each field, keeps credential values hidden, a
       await waitFor('the confirmed count write reaches the Host boundary', () => countMutationStarted)
       assert.match(page.view(), /Saving…/u)
       await page.key('\x1b')
+      pageLevel = 'list'
       await page.key('\x1b')
       assert.doesNotMatch(page.view(), /Web Search Provider/u, 'the specialist page is closed while the Host write remains pending')
       runtime.client.connection.reconnect()
