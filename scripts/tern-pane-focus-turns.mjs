@@ -587,12 +587,27 @@ export default async function (h) {
           }
         } else if (SCENARIO === 'image' && childTools.length === 1) {
           const imageTool = childTools[0]
+          h.check('the real durable Tool keeps image detail independently collapsed after Work opens',
+            imageTool[1].p.collapsible === true && imageTool[1].p.collapsed === true, JSON.stringify(imageTool[1].p))
+          h.check('opening Work alone still performs no AttachmentStore read or blob send',
+            !records(h).some(row => row.kind === 'attachment.read') && blobWrites(h).length === 0,
+            JSON.stringify({ reads: records(h).filter(row => row.kind === 'attachment.read'), blobs: blobWrites(h).length }))
           const saved = records(h).find(row => row.kind === 'attachment.saved')
           h.check('the registered Tool result contains the admitted durable image identity', typeof saved?.attachmentId === 'string', JSON.stringify(saved ?? null))
-          if (!await waitFor(h, 'opening the exact Work triggers one authorized image read and native blob', () => {
+          const toolSnap = h.snapshot()
+          const imageToolHead = mainNodes(toolSnap).find(node => String(node.class ?? '').split(/\s+/u).includes('sf-tool-head')
+            && h.descendantsText(node).includes('focus_read_image'))
+          h.check('the closed raster Tool has a visible native detail header after Work opens', imageToolHead !== undefined,
+            JSON.stringify(mainNodes(toolSnap).filter(node => String(node.class ?? '').includes('sf-tool')).map(node => ({ id: node.id, text: h.descendantsText(node), rect: rect(node) }))))
+          const beforeImageToolToggle = eventRows(h).length
+          h.check('the raster Tool header opens through its native real client pointer', imageToolHead !== undefined
+            && await h.click(toolSnap.chains, imageToolHead))
+          if (!await waitFor(h, 'the exact Tool detail toggle releases one authorized image read and native blob', () => {
+            const events = eventRows(h).slice(beforeImageToolToggle)
             const reads = records(h).filter(row => row.kind === 'attachment.read')
             const nodes = liveNodes(h)
-            return reads.length === 1
+            return events.some(row => row.id === imageTool[0] && row.collapsed === false)
+              && reads.length === 1
               && reads[0]?.attachmentId === saved?.attachmentId
               && blobWrites(h).length === 1
               && blobWrites(h)[0]?.params?.mime === 'image/png'
@@ -603,7 +618,7 @@ export default async function (h) {
           }
           const reads = records(h).filter(row => row.kind === 'attachment.read')
           live = liveNodes(h)
-          h.check('the exact stored attachment is read once only after Work opens',
+          h.check('the exact stored attachment is read once only after its Tool disclosure opens',
             reads.length === 1 && reads[0]?.attachmentId === saved?.attachmentId, JSON.stringify(reads))
           h.check('the real Tern pane receives one PNG blob and a native image node under the Tool',
             blobWrites(h).length === 1 && blobWrites(h)[0]?.params?.mime === 'image/png'
