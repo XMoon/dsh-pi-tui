@@ -1966,6 +1966,11 @@ test('the official Web settings Remotes and /settings page use the same Host aut
       await waitFor('Client A commits the Host document update', () => config.configReadiness() === 'ready')
       assert.equal((await config.web.read())?.searchProvider, 'custom-f3-event',
         'the new generated describe supplies the only current value')
+      const refreshedCustomRevision = forms.describe().find(entry => entry.ns === 'web')?.revision
+      await assert.rejects(config.web.setSearchProvider('deepseek-search-api'), /custom route/u,
+        'a stale provider intent entering the Remote setter after mirror refresh is still refused')
+      assert.equal(forms.describe().find(entry => entry.ns === 'web')?.revision, refreshedCustomRevision,
+        'the real generated Remote never dispatches a setter based on the refreshed custom route')
     } finally {
       offSettingsEvent()
     }
@@ -1993,10 +1998,20 @@ test('the official Web settings Remotes and /settings page use the same Host aut
     fixture.dispose()
     fixture = undefined
 
-    // Restore an official candidate before the successful Remote UI proof.
-    await config.web.setSearchProvider('deepseek-official')
+    // Restore an official candidate through the second Client's official
+    // Settings Remote: the WebProviderConfig rightly refuses to replace a
+    // custom route, even when the test is preparing the next UI scenario.
+    const restoreSnapshot = await secondClient.remote.settings.describe()
+    assert.equal(restoreSnapshot.ok, true)
+    const restoreWeb = restoreSnapshot.value.namespaces.find(entry => entry.ns === 'web')
+    assert.ok(restoreWeb?.revision !== undefined)
+    const restoreResult = await secondClient.remote.settings.mutate('web', [
+      { op: 'set', path: ['searchProvider'], value: 'deepseek-official' },
+    ], restoreWeb.revision)
+    assert.equal(restoreResult.ok, true)
+    await remoteConfig.describe()
     assert.equal((await config.web.read())?.searchProvider, 'deepseek-official',
-      'the official candidate is authoritative before the TUI starts')
+      'the Host changed from the custom route only after a separate explicit writer')
     fixture = await mountSettingsWorkspace(host.anchorDir, config, 'remote')
     await fixture.open()
     await fixture.selectCategory('Tools')
@@ -2164,7 +2179,7 @@ test('the Remote Web page confirms each field, keeps credential values hidden, a
     await waitFor('the Remote Web page to read the Host', () =>
       page.view().includes('Web Search Provider') && !page.view().includes('Loading…'))
 
-    const listBar = 'Enter open · r refresh · Esc Tools'
+    const listBar = '↑/↓ choose · Enter open · r refresh · Esc Tools'
     const returnToList = async (): Promise<void> => {
       for (let attempt = 0; attempt < 3 && !page.view().includes(listBar); attempt += 1) {
         await page.key('\x1b')

@@ -49,9 +49,11 @@ import {
 import { parseFooterCustomItems, type FooterCustomItemsParseResult } from '../../domain/footer/custom-items.ts'
 import {
   assertFetchProviderId,
+  assertFetchProviderReplaceable,
   assertSearchApiBaseURL,
   assertSearchApiCount,
   assertSearchProviderId,
+  assertSearchProviderReplaceable,
 } from '../../domain/web-provider-settings.ts'
 import type {
   AccountBalanceOutcome,
@@ -1717,12 +1719,20 @@ export class DirectWebProviderConfig implements WebProviderConfig {
 
   async setSearchProvider(id: 'deepseek-official' | 'deepseek-search-api'): Promise<void> {
     assertSearchProviderId(id)
-    await this.mutate('web', [{ op: 'set', path: ['searchProvider'], value: id }])
+    await this.mutate('web', [{ op: 'set', path: ['searchProvider'], value: id }], descriptor => {
+      const current = formValueOf(descriptor)
+      if (current === undefined) throw new Error('the official Host Web settings section is unreadable')
+      assertSearchProviderReplaceable(current.searchProvider)
+    })
   }
 
   async setFetchProvider(id: 'http' | 'deepseek-fetch-api'): Promise<void> {
     assertFetchProviderId(id)
-    await this.mutate('web', [{ op: 'set', path: ['fetchProvider'], value: id }])
+    await this.mutate('web', [{ op: 'set', path: ['fetchProvider'], value: id }], descriptor => {
+      const current = formValueOf(descriptor)
+      if (current === undefined) throw new Error('the official Host Web settings section is unreadable')
+      assertFetchProviderReplaceable(current.fetchProvider)
+    })
   }
 
   async setSearchApiCount(count: number): Promise<void> {
@@ -1745,13 +1755,18 @@ export class DirectWebProviderConfig implements WebProviderConfig {
   private async mutate(
     ns: typeof WEB_PROVIDER_NS | typeof WEB_SEARCH_API_NS,
     ops: readonly { op: 'set'; path: readonly string[]; value: unknown }[],
+    validate?: (descriptor: SettingsDescriptorLike) => void,
   ): Promise<void> {
     const settings = this.settings()
     if (settings === undefined) throw new Error('settings service unavailable')
-    if (readSettingsDescriptor(settings, ns) === undefined) {
+    const descriptor = readSettingsDescriptor(settings, ns)
+    if (descriptor === undefined) {
       throw new Error(`the official Host settings section "${ns}" is not mounted`)
     }
-    await mutateSettings(settings, ns, ops)
+    validate?.(descriptor)
+    // This descriptor both validates the provider choice and supplies the CAS
+    // token; never reread a newer revision after making that decision.
+    await settings.mutate(ns, ops, descriptor.revision)
   }
 }
 

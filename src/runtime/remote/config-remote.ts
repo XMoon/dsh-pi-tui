@@ -52,9 +52,11 @@ import {
 import { parseFooterCustomItems, type FooterCustomItemsParseResult } from '../../domain/footer/custom-items.ts'
 import {
   assertFetchProviderId,
+  assertFetchProviderReplaceable,
   assertSearchApiBaseURL,
   assertSearchApiCount,
   assertSearchProviderId,
+  assertSearchProviderReplaceable,
 } from '../../domain/web-provider-settings.ts'
 import type {
   AccountBalanceOutcome,
@@ -688,12 +690,17 @@ class RemoteConfigMirror {
    * committed write as committed, marks the snapshot non-current and records the
    * cause; the whole-document `replace` uses it so its consumer re-reads the
    * authority itself and reports accepted-but-unverified instead of a refusal.
+   *
+   * An optional synchronous `beforeDispatch` predicate runs inside this same
+   * write queue against the selected descriptor, and the exact descriptor
+   * revision it receives is the revision sent to the Host CAS.
    */
   async mutate(
     ns: string,
     ops: readonly RemoteSettingsPathOp[],
     baseRevision?: number,
     refreshFailure: 'reject' | 'record' = 'reject',
+    beforeDispatch?: (descriptor: RemoteSettingsNamespaceView, expectedRevision: number | undefined) => void,
   ): Promise<void> {
     // Accepted-work lifetime: registered SYNCHRONOUSLY by the caller's write
     // (before the serialized queue), released only when the enqueued write
@@ -731,7 +738,9 @@ class RemoteConfigMirror {
         if (descriptor === undefined) {
           throw new Error(`settings namespace "${ns}" is not available in this deployment`)
         }
-        const result = await settledResult(this.settings.mutate(ns, [...ops], baseRevision ?? descriptor.revision))
+        const expectedRevision = baseRevision ?? descriptor.revision
+        beforeDispatch?.(descriptor, expectedRevision)
+        const result = await settledResult(this.settings.mutate(ns, [...ops], expectedRevision))
         if (!result.ok) {
           // A failed write RPC does NOT prove the Host refused it: the official
           // controller applies the edit and then performs its OWN post-write describe,
@@ -1927,6 +1936,7 @@ class RemoteWebProviderConfig implements WebProviderConfig {
     ns: typeof WEB_PROVIDER_NS | typeof WEB_SEARCH_API_NS,
     field: string,
     value: unknown,
+    protectProvider?: 'searchProvider' | 'fetchProvider',
   ): Promise<void> {
     await this.mirror.ensureCurrent()
     if (this.mirror.readiness() !== 'ready'
@@ -1934,17 +1944,30 @@ class RemoteWebProviderConfig implements WebProviderConfig {
       || this.mirror.namespace(WEB_SEARCH_API_NS) === undefined) {
       throw new Error('the official Host Web settings sections are unavailable or non-current')
     }
-    await this.mirror.mutate(ns, [{ op: 'set', path: [field], value }])
+    await this.mirror.mutate(
+      ns,
+      [{ op: 'set', path: [field], value }],
+      undefined,
+      'reject',
+      protectProvider === undefined
+        ? undefined
+        : descriptor => {
+            const current = plainRecord(descriptor.value)
+            if (current === undefined) throw new Error('the official Host Web settings section is unreadable')
+            if (protectProvider === 'searchProvider') assertSearchProviderReplaceable(current.searchProvider)
+            else assertFetchProviderReplaceable(current.fetchProvider)
+          },
+    )
   }
 
   async setSearchProvider(id: 'deepseek-official' | 'deepseek-search-api'): Promise<void> {
     assertSearchProviderId(id)
-    await this.mutate(WEB_PROVIDER_NS, 'searchProvider', id)
+    await this.mutate(WEB_PROVIDER_NS, 'searchProvider', id, 'searchProvider')
   }
 
   async setFetchProvider(id: 'http' | 'deepseek-fetch-api'): Promise<void> {
     assertFetchProviderId(id)
-    await this.mutate(WEB_PROVIDER_NS, 'fetchProvider', id)
+    await this.mutate(WEB_PROVIDER_NS, 'fetchProvider', id, 'fetchProvider')
   }
 
   async setSearchApiCount(count: number): Promise<void> {

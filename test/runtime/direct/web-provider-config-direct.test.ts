@@ -182,6 +182,25 @@ test('a custom configured provider id is reported as-is and never silently repla
   assert.deepEqual(h.settings.recorded, [], 'a read never writes')
 })
 
+test('a custom provider refreshed before a stale Direct intent is never overwritten', async () => {
+  for (const item of [
+    { field: 'searchProvider', value: 'custom-search', write: (config: DirectWebProviderConfig) => config.setSearchProvider('deepseek-search-api') },
+    { field: 'fetchProvider', value: 'custom-fetch', write: (config: DirectWebProviderConfig) => config.setFetchProvider('deepseek-fetch-api') },
+  ] as const) {
+    const h = host()
+    const descriptor = h.settings.descriptors.get('web')!
+    const value = descriptor.value as Record<string, unknown>
+    value[item.field] = item.value
+    descriptor.revision = (descriptor.revision ?? 0) + 1
+    const config = new DirectWebProviderConfig(h.ctx)
+    assert.equal((await config.read())?.[item.field], item.value,
+      'the Direct adapter sees the external custom route before the old intent reaches its setter')
+    await assert.rejects(item.write(config), /custom route/u)
+    assert.equal(value[item.field], item.value)
+    assert.deepEqual(h.settings.recorded, [], 'the Direct adapter refuses before Host mutate')
+  }
+})
+
 test('invalid human input is refused BEFORE any Host write', async () => {
   const h = host()
   const config = new DirectWebProviderConfig(h.ctx)
