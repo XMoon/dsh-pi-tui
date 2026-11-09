@@ -253,8 +253,11 @@ async function selectListRow(vt: VirtualTerminal, name: string): Promise<void> {
 /**
  * The real user mutation path over the ALREADY-OPEN list: select the fixture
  * bundle, open its detail and activate the official Enable action, then wait
- * for the authoritative reread to repaint the enabled truth. Returns with the
- * panel in DETAIL mode.
+ * for the authoritative reread to repaint the enabled truth. The reread keeps
+ * the list `busy` until it commits (the controller clears `busyValue` only
+ * after the authoritative read returns), so the Detail `Disable` alone is NOT
+ * a settled frame: the list chip is waited for too. Returns with the panel in
+ * DETAIL mode.
  */
 async function enableFixtureBundleThroughPanel(fixture: Fixture, bundle: string): Promise<void> {
   await selectListRow(fixture.vt, bundle)
@@ -269,6 +272,8 @@ async function enableFixtureBundleThroughPanel(fixture: Fixture, bundle: string)
   fixture.vt.sendInput('\r')
   await waitFor('the panel repaints the enabled truth from the authoritative reread', () =>
     /\bDisable\b/.test(plain(fixture.vt.getViewport())), 20_000)
+  await waitFor('the authoritative reread paints the settled enabled chip', () =>
+    (bundleChipLine(fixture.vt.getViewport(), bundle) ?? '').includes('[enabled]'), 20_000)
 }
 
 test('the real Remote /plugins reads the real Host PluginManager through the generated Remote', async (t) => {
