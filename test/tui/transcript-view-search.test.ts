@@ -531,6 +531,98 @@ test('rendered View follows streaming Assistant rows through partial append and 
   }
 })
 
+test('rendered View follows raw Focus chronology when the mounted window has no TurnActivity', async () => {
+  const { vt, app } = startApp(100, 30, 'focus')
+  try {
+    const folder = new TranscriptFolder()
+    const callId = ToolCallId('view-no-activity-tool')
+    folder.apply([
+      event('turn/start', { turn: 0 }, 0),
+      event('user/message', {
+        id: MessageId('view-no-activity-user'),
+        role: 'user',
+        content: [{ type: 'text', text: 'partial window prompt' }],
+        source: { kind: 'user' },
+      }, 1),
+      event('tool/call', { turn: 0, step: 0, callId, name: 'read-no-activity-visible-needle', arguments: '{}' }, 2),
+      event('tool/result', {
+        turn: 0,
+        step: 0,
+        message: {
+          id: MessageId('view-no-activity-result'),
+          role: 'tool',
+          toolCallId: callId,
+          content: [{ type: 'text', text: 'no-activity-visible-needle' }],
+          source: { kind: 'tool', callId },
+        },
+      }, 3),
+    ])
+    const messages = folder.messages()
+    assert.equal(folder.turnActivities().has(0), true, 'the fixture fold has authoritative activity available')
+    app.setFullscreen(true)
+    app.setTranscript(messages)
+    await vt.waitForRender()
+    assert.ok(vt.getViewport().some(line => stripTerminalSequences(line).includes('read-no-activity-visible-needle')),
+      'the TuiApp window deliberately omits the activity authority and paints raw chronology')
+    assert.deepEqual(app.setRenderedViewSearchQuery('read-no-activity-visible-needle'), { currentIndex: 0, count: 1 },
+      'Focus View searches the painted Tool row when its authoritative TurnActivity is absent')
+    await vt.waitForRender()
+    assert.equal(strongOccurrences(vt, vt.getViewport(), 'read-no-activity-visible-needle').length, 1)
+  } finally {
+    app.clearRenderedViewSearch()
+  }
+})
+
+test('rendered View excludes a pending final Assistant until the incomplete turn commits', async () => {
+  const { vt, app } = startApp(100, 30, 'focus')
+  const folder = new TranscriptFolder()
+  try {
+    folder.apply([
+      event('turn/start', { turn: 0 }, 0),
+      event('user/message', {
+        id: MessageId('view-pending-final-user'),
+        role: 'user',
+        content: [{ type: 'text', text: 'pending answer prompt' }],
+        source: { kind: 'user' },
+      }, 1),
+      event('assistant/message', {
+        turn: 0,
+        step: 0,
+        message: {
+          id: MessageId('view-pending-final-answer'),
+          role: 'assistant',
+          content: [{ type: 'text', text: 'pending-final-visible-after-end needle' }],
+          source: { kind: 'model', provider: 'p', model: 'm' },
+        },
+        stream: [],
+      }, 2),
+    ])
+    const pendingActivity = folder.turnActivity(0)
+    assert.ok(pendingActivity !== undefined && !pendingActivity.completed,
+      'the Folder owns a settled Assistant inside an incomplete turn')
+    app.setFullscreen(true)
+    app.setTranscript(folder.messages(), folder.turnActivities())
+    await vt.waitForRender()
+    app.toggleFocusTurn(0)
+    await vt.waitForRender()
+    assert.ok(!vt.getViewport().some(line => stripTerminalSequences(line).includes('pending-final-visible-after-end')),
+      'the expanded Focus projection holds the latest settled Assistant out of painted rows')
+    assert.deepEqual(app.setRenderedViewSearchQuery('pending-final-visible-after-end'), { currentIndex: -1, count: 0 },
+      'a pending final is not searchable while the turn remains incomplete')
+
+    folder.apply([event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 3)])
+    app.setTranscript(folder.messages(), folder.turnActivities())
+    await vt.waitForRender()
+    assert.ok(vt.getViewport().some(line => stripTerminalSequences(line).includes('pending-final-visible-after-end')),
+      'the authoritative turn/end moves the final Assistant into the painted projection')
+    assert.deepEqual(app.renderedViewSearchStatus(), { currentIndex: 0, count: 1 },
+      'the active View query discovers that newly materialized final row')
+    assert.equal(strongOccurrences(vt, vt.getViewport(), 'pending-final-visible-after-end').length, 1)
+  } finally {
+    app.clearRenderedViewSearch()
+  }
+})
+
 test('rendered View reflows CJK, emoji and combining graphemes at supported transcript widths', async () => {
   const { vt, app } = startApp(120, 40)
   try {
