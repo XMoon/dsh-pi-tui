@@ -10,10 +10,13 @@ import {
   assertNoPresetCompatibilityFailures,
   assertOfficialPresetHeader,
   classifyDirectPromptStage,
+  classifyOfficialPresetStatus,
   composerContainsExactInput,
   directPromptAnswerVisible,
   directPromptTimeoutDiagnostic,
   officialPresetStatusCommand,
+  officialPresetStatusPainted,
+  officialPresetStatusResultMatches,
   officialPresetStatusVisible,
   presetDegradationLine,
   settingsSearchSnapshot,
@@ -26,6 +29,144 @@ test('the official preset matrix is independently callable and reports the live 
   assert.equal(officialPresetStatusCommand(), '/preset status')
   assert.equal(officialPresetStatusVisible('ptc', 'preset: ptc · default: ptc'), true)
   assert.equal(officialPresetStatusVisible('ptc', 'preset: standard · default: ptc'), false)
+})
+
+test('the Header Probe records command events only for its confirmed Session', async (t) => {
+  const life = testLifecycle(t)
+  const directory = life.tempDir('official-presets-command-probe-')
+  const headerPath = join(directory, 'header.json')
+  const inputPath = join(directory, 'input.jsonl')
+  const commandPath = join(directory, 'command.jsonl')
+  const probeDir = writeHeaderProbePackage(directory)
+  const envKeys = ['DSH_SMOKE_HEADER_EVIDENCE', 'DSH_SMOKE_INPUT_EVIDENCE', 'DSH_SMOKE_COMMAND_EVIDENCE']
+  const previousEnv = new Map(envKeys.map(key => [key, process.env[key]]))
+  process.env.DSH_SMOKE_HEADER_EVIDENCE = headerPath
+  process.env.DSH_SMOKE_INPUT_EVIDENCE = inputPath
+  process.env.DSH_SMOKE_COMMAND_EVIDENCE = commandPath
+  try {
+    const probe = await import(pathToFileURL(join(probeDir, 'index.mjs')).href)
+    const listeners = new Map()
+    const listenerOptions = new Map()
+    const session = { id: 'session-1', header: {} }
+    probe.apply({
+      get: name => name === 'sessionQuery' ? {
+        observeSession: async () => ({ header: { id: 'session-1', agentPreset: 'cordis' } }),
+      } : undefined,
+      on: (name, listener, options) => {
+        listeners.set(name, listener)
+        listenerOptions.set(name, options)
+      },
+    })
+    assert.deepEqual(listenerOptions.get('session/event'), { global: true })
+    assert.equal(listeners.has('command/run'), false)
+    assert.equal(listeners.has('command/done'), false)
+    const installed = readFileSync(commandPath, 'utf8').trim().split('\n').map(line => JSON.parse(line))
+    assert.equal(installed[0].recordType, 'probe-installed')
+    listeners.get('agent/created')({ agent: { session } })
+    await new Promise(resolve => setImmediate(resolve))
+    const eventListener = listeners.get('session/event')
+    eventListener(session, {
+      type: 'command/run', seq: 10,
+      data: { commandId: 'cmd-new', name: 'new', args: '', source: { kind: 'user' } },
+    })
+    eventListener(session, {
+      type: 'command/done', seq: 11,
+      data: { commandId: 'cmd-new', kind: 'success', text: 'started a fresh session' },
+    })
+    eventListener(session, {
+      type: 'command/run', seq: 12,
+      data: { commandId: 'cmd-status', name: 'preset', args: ' status', source: { kind: 'user' } },
+    })
+    eventListener(session, {
+      type: 'command/done', seq: 13,
+      data: { commandId: 'cmd-status', kind: 'success', text: 'preset: cordis · default: cordis' },
+    })
+    eventListener({ id: 'session-2' }, {
+      type: 'command/done', seq: 14,
+      data: { commandId: 'cmd-status', kind: 'success', text: 'foreign session' },
+    })
+    const records = readFileSync(commandPath, 'utf8').trim().split('\n').map(line => JSON.parse(line))
+    assert.deepEqual(records[1], {
+      recordType: 'session-observed',
+      sessionId: 'session-1',
+      agentPreset: 'cordis',
+      headerConfirmed: true,
+      observedAt: records[1].observedAt,
+    })
+    const events = records.filter(record => record.recordType === 'event')
+    assert.equal(events.length, 4)
+    assert.deepEqual(events.map(({ sessionId, seq, type, commandId }) => ({ sessionId, seq, type, commandId })), [
+      { sessionId: 'session-1', seq: 10, type: 'command/run', commandId: 'cmd-new' },
+      { sessionId: 'session-1', seq: 11, type: 'command/done', commandId: 'cmd-new' },
+      { sessionId: 'session-1', seq: 12, type: 'command/run', commandId: 'cmd-status' },
+      { sessionId: 'session-1', seq: 13, type: 'command/done', commandId: 'cmd-status' },
+    ])
+    assert.equal(events[2].args, ' status')
+    assert.equal(events[3].name, undefined, 'command/done has no command name')
+    assert.equal(events[3].pairedRun, true)
+    assert.equal(readFileSync(headerPath, 'utf8').includes('session-1'), true)
+  } finally {
+    for (const [key, value] of previousEnv) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  }
+})
+
+test('the preset status classifier requires a qualified Session and pairs by commandId', () => {
+  const sessionId = 'session-1'
+  const installed = { recordType: 'probe-installed', event: 'session/event', global: true, installed: true }
+  const observed = { recordType: 'session-observed', sessionId, headerConfirmed: true }
+  const run = {
+    recordType: 'event', sessionId, seq: 12, type: 'command/run', commandId: 'cmd-status',
+    name: 'preset', args: ' status', observedAt: 101, pairedRun: true,
+  }
+  const done = {
+    recordType: 'event', sessionId, seq: 13, type: 'command/done', commandId: 'cmd-status',
+    kind: 'success', text: 'preset: cordis · default: cordis', observedAt: 102, pairedRun: true,
+  }
+  const unrelatedRun = {
+    recordType: 'event', sessionId, seq: 14, type: 'command/run', commandId: 'cmd-help',
+    name: 'help', args: '', observedAt: 103, pairedRun: true,
+  }
+  const unrelatedDone = {
+    recordType: 'event', sessionId, seq: 15, type: 'command/done', commandId: 'cmd-help',
+    kind: 'success', observedAt: 104, pairedRun: true,
+  }
+  const foreignDone = { ...done, sessionId: 'session-2', seq: 99, observedAt: 105 }
+  const qualified = [installed, observed]
+  const classify = (events, painted = true, evidence = qualified, baselineSeq = -1) =>
+    classifyOfficialPresetStatus(sessionId, 'cordis', [...evidence, ...events], 100, painted, false, baselineSeq)
+
+  assert.equal(classify([done, unrelatedRun, unrelatedDone, foreignDone, run]).stage, undefined,
+    'a done record pairs by Session and Command ID, not array order')
+  const historyRun = { ...run, seq: 13, commandId: 'cmd-history', observedAt: 100 }
+  const historyDone = { ...done, seq: 14, commandId: 'cmd-history', observedAt: 100 }
+  const currentRun = { ...run, seq: 15, commandId: 'cmd-current', observedAt: 101 }
+  const currentDone = { ...done, seq: 16, commandId: 'cmd-current', observedAt: 102 }
+  assert.equal(classify([historyRun, historyDone, currentRun, currentDone], true, qualified, 14).stage, undefined)
+  assert.equal(classify([]).stage, 'PRESET_STATUS_NOT_DISPATCHED')
+  assert.equal(classify([run]).stage, 'PRESET_STATUS_NOT_SETTLED')
+  assert.equal(classify([run, { ...done, kind: 'error', text: 'failed' }]).stage, 'PRESET_STATUS_COMMAND_ERROR')
+  assert.equal(classify([run, { ...done, text: 'preset: standard · default: cordis' }]).stage, 'PRESET_STATUS_RESULT_MISMATCH')
+  assert.equal(classify([run, done], false).stage, 'PRESET_STATUS_NOT_PAINTED')
+  assert.equal(classify([run, done, { ...done, seq: 14, observedAt: 103 }]).stage, 'PRESET_STATUS_DUPLICATE')
+  assert.equal(classify([run, run, done]).stage, 'PRESET_STATUS_DUPLICATE')
+  assert.equal(classify([run], true, []).stage, 'PRESET_STATUS_PROBE_UNQUALIFIED')
+  assert.equal(classify([run], true, [installed]).stage, 'PRESET_STATUS_PROBE_UNQUALIFIED')
+  assert.equal(classify([{ ...run, args: undefined }]).stage, 'PRESET_STATUS_PROBE_UNQUALIFIED')
+  assert.equal(classify([run, { ...done, commandId: 'cmd-other' }]).stage, 'PRESET_STATUS_NOT_SETTLED')
+  assert.equal(classify([run, { ...done, pairedRun: false }]).stage, 'PRESET_STATUS_PROBE_UNQUALIFIED')
+  assert.equal(classify([run, done], true, [...qualified, { ...observed, sessionId: 'session-2' }]).stage, undefined)
+})
+
+test('the preset status painter requires a newly visible command result in the current pane', () => {
+  const before = '🎛 /new [ok]\n────────\n❯\n────────'
+  const after = `${before}\n🎛 /preset status [ok]\n  preset: cordis · default: cordis`
+  assert.equal(officialPresetStatusResultMatches('cordis', 'preset: cordis · default: cordis'), true)
+  assert.equal(officialPresetStatusResultMatches('cordis', 'preset: standard · default: cordis'), false)
+  assert.equal(officialPresetStatusPainted('cordis', before, after), true)
+  assert.equal(officialPresetStatusPainted('cordis', after, after), false)
 })
 
 test('Direct prompt diagnostics expose counts and stable model-request facts only', () => {
@@ -281,59 +422,104 @@ test('official preset failure evidence is private, bounded, redacted and allowli
   const life = testLifecycle(t)
   const directory = life.tempDir('official-presets-failure-evidence-')
   const evidencePath = join(directory, 'private', 'failure.json')
+  const sessionId = 'session-uuid-123'
+  const commandId = 'cmd-full-123'
   const sensitiveOutput = [
     'Authorization: Bearer bearer-token-value',
     'api_key=api-key-value',
     'password=password-value',
     'https://user:pass@host.invalid/path',
   ].join('\n')
+  const run = {
+    recordType: 'event', sessionId, seq: 12, type: 'command/run', commandId,
+    name: 'preset', args: ' status', observedAt: 1_700_000_000_100, pairedRun: true,
+  }
+  const done = {
+    recordType: 'event', sessionId, seq: 13, type: 'command/done', commandId,
+    kind: 'success', text: 'preset: cordis · default: cordis', observedAt: 1_700_000_000_120, pairedRun: true,
+  }
   writeOfficialPresetFailureEvidence(evidencePath, {
-    presetId: 'standard',
-    stage: 'ANSWER_NOT_PAINTED',
-    error: new CompatFailure('COMPAT_BOOT_FAILURE', 'FAKE_SECRET_123 full prompt'),
+    presetId: 'cordis',
+    stage: 'PRESET_STATUS_NOT_PAINTED',
+    error: new CompatFailure('PRESET_STATUS_NOT_PAINTED', 'terminal result not painted'),
     surfaceAlive: true,
     version: '0.2.2-rc.1',
     mode: 'npm',
     candidate: '/private/candidate/xmoon76-dsh-pi-tui-0.5.6.tgz',
-    header: { sessionId: 'FAKE_SECRET_123', agentPreset: 'standard' },
-    inputEvents: [{ event: 'inserted', sessionId: 'FAKE_SECRET_123', messageId: 'FAKE_SECRET_123' }],
+    header: { sessionId, agentPreset: 'cordis' },
+    inputEvents: [{ event: 'inserted', sessionId, messageId: 'message-1' }],
     records: [{
-      purpose: 'session-title',
-      markerCount: 0,
-      presentTool: false,
-      presentInstruction: false,
-      toolNames: ['FAKE_SECRET_123'],
-      prompt: 'FAKE_SECRET_123 auxiliary title request',
-    }, {
+      purpose: null,
       markerCount: 1,
       presentTool: true,
       presentInstruction: true,
-      purpose: null,
-      toolNames: ['FAKE_SECRET_123', '/private/home'],
       prompt: 'FAKE_SECRET_123 full prompt',
-      messages: [{ content: 'FAKE_SECRET_123 full model message' }],
     }],
     pane: `${sensitiveOutput}\npr-e direct standard prompt\n${'bounded diagnostic line\n'.repeat(60)}`,
-    tuiLog: sensitiveOutput,
+    scrollback: { text: `${'scrollback evidence line\n'.repeat(500)}`, totalHistoryLines: 350, truncated: true },
+    tuiLog: `${sensitiveOutput}\n\u001b[31mcommand evidence\u001b[0m\npr-e direct standard prompt`,
+    commandEvidence: [
+      { recordType: 'probe-installed', event: 'session/event', global: true, installed: true },
+      { recordType: 'session-observed', sessionId, headerConfirmed: true },
+      run,
+      done,
+      { ...done, sessionId: 'other-session', commandId: 'other-command', seq: 90 },
+    ],
+    commandStatus: {
+      stage: 'PRESET_STATUS_NOT_PAINTED',
+      qualification: { probeInstalled: true, sessionObserved: true, observedSessionId: sessionId, expectedSessionId: sessionId, probeWriteFailed: false },
+      run,
+      done,
+      resultMatches: true,
+      painted: false,
+    },
+    timeline: {
+      startedAt: 1_700_000_000_000,
+      composerVisibleAt: 1_700_000_000_010,
+      enterSendStartedAt: 1_700_000_000_020,
+      enterSentAt: 1_700_000_000_021,
+      commandRunAt: run.observedAt,
+      commandDoneAt: done.observedAt,
+      resultValidatedAt: 1_700_000_000_121,
+    },
   })
   const serialized = readFileSync(evidencePath, 'utf8')
   const report = JSON.parse(serialized)
   assert.deepEqual(Object.keys(report).sort(), [
-    'candidate', 'failureSummary', 'header', 'inputClaimed', 'inputInserted', 'mode',
-    'modelRequests', 'paneTail', 'phase', 'presetId', 'requestCount', 'auxiliaryTitleRequestCount',
-    'unexpectedRequestCount', 'stage',
-    'surfaceAlive', 'tuiLogTail', 'version',
+    'candidate', 'commandLifecycle', 'commandLifecycleTruncated', 'commandStatus', 'diagnosticErrors',
+    'failureSummary', 'header', 'inputClaimed', 'inputInserted', 'mode', 'modelRequests', 'paneTail',
+    'paneTailTotalChars', 'paneTailTruncated', 'phase', 'presetId', 'probeQualification', 'requestCount', 'auxiliaryTitleRequestCount',
+    'unexpectedRequestCount', 'scrollbackHistoryLines', 'scrollbackTail', 'scrollbackTotalChars',
+    'scrollbackTruncated', 'sessionId', 'stage', 'surfaceAlive', 'timingMs', 'timeline', 'tuiLogTail',
+    'tuiLogTailPlain', 'tuiLogTailPlainTotalChars', 'tuiLogTailPlainTruncated', 'tuiLogTailTotalChars',
+    'tuiLogTailTruncated', 'version',
   ].sort())
   assert.equal(report.candidate, 'xmoon76-dsh-pi-tui-0.5.6.tgz')
+  assert.equal(report.sessionId, sessionId)
+  assert.equal(report.header.sessionId, sessionId)
   assert.equal(report.requestCount, 1)
-  assert.equal(report.auxiliaryTitleRequestCount, 1)
-  assert.equal(report.unexpectedRequestCount, 0)
   assert.deepEqual(report.modelRequests, [{ markerCount: 1, presentTool: true, presentInstruction: true }])
-  assert.deepEqual(report.header, { present: true, agentPreset: 'standard' })
-  assert.doesNotMatch(serialized, /FAKE_SECRET_123|pr-e direct standard prompt|bearer-token-value|api-key-value|password-value|https:\/\/user:pass@|full model message|\/private\/home/u)
-  assert.match(serialized, /\[REDACTED\]/u)
+  assert.deepEqual(report.probeQualification, {
+    probeInstalled: true, sessionObserved: true, observedSessionId: sessionId, expectedSessionId: sessionId, probeWriteFailed: false,
+  })
+  assert.deepEqual(report.commandLifecycle.map(event => ({ sessionId: event.sessionId, seq: event.seq, type: event.type, commandId: event.commandId })), [
+    { sessionId, seq: 12, type: 'command/run', commandId },
+    { sessionId, seq: 13, type: 'command/done', commandId },
+  ])
+  assert.equal(report.commandLifecycle[0].args, ' status')
+  assert.equal(report.commandStatus.doneKind, 'success')
+  assert.equal(report.commandStatus.commandId, commandId)
+  assert.equal(report.scrollbackHistoryLines, 350)
+  assert.equal(report.scrollbackTruncated, true)
+  assert.ok(report.scrollbackTail.length <= 12_000)
+  assert.ok(report.tuiLogTail.length <= 12_000)
+  assert.ok(report.tuiLogTailPlain.length <= 12_000)
+  assert.doesNotMatch(report.tuiLogTailPlain, /\u001b/u)
   assert.ok(report.paneTail.split('\n').length <= 40)
   assert.ok(report.paneTail.length <= 4_000)
+  assert.match(serialized, /session-uuid-123|cmd-full-123|pr-e direct standard prompt/u)
+  assert.doesNotMatch(serialized, /bearer-token-value|api-key-value|password-value|https:\/\/user:pass@|other-session|FAKE_SECRET_123|full prompt/u)
+  assert.match(serialized, /\[REDACTED\]/u)
   assert.equal(statSync(evidencePath).mode & 0o777, 0o600)
   assert.equal(statSync(join(directory, 'private')).mode & 0o777, 0o700)
 
@@ -342,7 +528,95 @@ test('official preset failure evidence is private, bounded, redacted and allowli
     version: 'later', mode: 'source', candidate: 'later.tgz', header: undefined,
     inputEvents: [], records: [], pane: '', tuiLog: '',
   })
-  assert.equal(JSON.parse(readFileSync(evidencePath, 'utf8')).presetId, 'standard')
+  assert.equal(JSON.parse(readFileSync(evidencePath, 'utf8')).presetId, 'cordis')
+})
+
+test('a successful mocked preset matrix creates no failure artifact', async (t) => {
+  const life = testLifecycle(t)
+  const directory = life.tempDir('official-presets-success-evidence-')
+  const evidencePath = join(directory, 'failure.json')
+  const commandPath = join(directory, 'command.jsonl')
+  const headerPath = join(directory, 'header.json')
+  const env = {
+    HOME: join(directory, 'home'),
+    DSH_HOME: join(directory, 'dsh-home'),
+    DSH_SMOKE_EVIDENCE: join(directory, 'evidence.json'),
+    DSH_SMOKE_HEADER_EVIDENCE: headerPath,
+    DSH_SMOKE_COMMAND_EVIDENCE: commandPath,
+    npm_config_registry: 'https://registry.npmjs.org',
+    NPM_CONFIG_REGISTRY: 'https://registry.npmjs.org',
+    npm_config_minimum_release_age: '0',
+    pnpm_config_minimum_release_age: '0',
+    npm_config_userconfig: join(directory, 'npmrc'),
+    NPM_CONFIG_USERCONFIG: join(directory, 'npmrc'),
+    OFFICIAL_PRESETS_FAILURE_EVIDENCE: evidencePath,
+  }
+  const fakeTmuxFactory = (_socket, tmuxSession) => {
+    const presetId = tmuxSession.split('-').at(-1)
+    const sessionId = `test-${presetId}-session`
+    let alive = false
+    let line = ''
+    let searchVisible = false
+    let searchQuery = ''
+    let statusText
+    const pane = () => {
+      if (!alive) return ''
+      if (searchVisible) {
+        return [
+          '╭────────────────────────╮',
+          `│ > ${searchQuery.padEnd(18)} │`,
+          ...(presetId === 'minimal' && searchQuery === 'goal'
+            ? ['│ No matching settings   │']
+            : ['│ ❯ /goal                │']),
+          '│ Type to search · Enter/Space to change · Esc to cancel │',
+          '╰────────────────────────╯',
+        ].join('\n')
+      }
+      return [
+        '🎛 /new [ok]',
+        ...(statusText === undefined ? [] : [`🎛 /preset status [ok]`, `  ${statusText}`]),
+        '────────',
+        `❯ ${line}`,
+        '────────',
+      ].join('\n')
+    }
+    return {
+      tmux: () => { alive = true; return { status: 0, stdout: '', stderr: '' } },
+      hasSession: () => alive,
+      capturePane: pane,
+      sendLiteral: text => {
+        if (searchVisible) searchQuery += text
+        else line = text
+      },
+      sendKey: key => {
+        if (key === 'Escape') { searchVisible = false; return }
+        if (key !== 'Enter') return
+        const submitted = line
+        line = ''
+        if (submitted === '/new') {
+          writeFileSync(headerPath, JSON.stringify({ sessionId, agentPreset: presetId }))
+        } else if (submitted === '/preset status') {
+          const runAt = Date.now()
+          statusText = `preset: ${presetId} · default: ${presetId}`
+          writeFileSync(commandPath, [
+            { recordType: 'probe-installed', event: 'session/event', global: true, installed: true },
+            { recordType: 'session-observed', sessionId, headerConfirmed: true },
+            { recordType: 'event', sessionId, seq: 12, type: 'command/run', commandId: `cmd-${presetId}`, name: 'preset', args: ' status', observedAt: runAt, pairedRun: true },
+            { recordType: 'event', sessionId, seq: 13, type: 'command/done', commandId: `cmd-${presetId}`, kind: 'success', text: statusText, observedAt: runAt, pairedRun: true },
+          ].map(record => JSON.stringify(record)).join('\n') + '\n')
+        } else if (submitted === '/help') {
+          searchVisible = true
+          searchQuery = ''
+        } else if (submitted === '/exit') {
+          alive = false
+        }
+      },
+      stop: () => { alive = false },
+    }
+  }
+  await smokeOfficialPresetMounts([], directory, env, undefined,
+    { candidate: 'candidate.tgz', version: '0.2.2-rc.1', mode: 'npm' }, fakeTmuxFactory)
+  assert.equal(existsSync(evidencePath), false)
 })
 
 test('official preset failure evidence is written before tmux teardown without replacing the smoke error', async (t) => {
@@ -361,6 +635,7 @@ test('official preset failure evidence is written before tmux teardown without r
     DSH_HOME: join(directory, 'dsh-home'),
     DSH_SMOKE_EVIDENCE: join(directory, 'evidence.json'),
     DSH_SMOKE_HEADER_EVIDENCE: join(directory, 'header.json'),
+    DSH_SMOKE_COMMAND_EVIDENCE: join(directory, 'command.jsonl'),
     npm_config_registry: 'https://registry.npmjs.org',
     NPM_CONFIG_REGISTRY: 'https://registry.npmjs.org',
     npm_config_minimum_release_age: '0',
