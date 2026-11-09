@@ -619,7 +619,7 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
           break
         }
         case 'open-search': {
-          deps.surface.app.startTranscriptSearch()
+          deps.surface.app.startTranscriptSearch('full')
           break
         }
         case 'toggle-fullscreen': {

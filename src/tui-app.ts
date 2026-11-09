@@ -246,7 +246,12 @@ import {
   webCardLines,
   type ToolPresenter,
 } from './tui/transcript/tool-presentation.ts'
-import { TranscriptSearchComponent } from './tui/interaction/transcript-search.ts'
+import {
+  TranscriptSearchComponent,
+  type TranscriptSearchCoverage,
+  type TranscriptSearchScope,
+} from './tui/interaction/transcript-search.ts'
+export type { TranscriptSearchCoverage, TranscriptSearchScope } from './tui/interaction/transcript-search.ts'
 import { CompactTextPreview } from './tui/components/transcript/compact-text-preview.ts'
 import { ChartBody } from './tui/components/transcript/chart-body.ts'
 import { VisualAssistantBody, VisualAssistantDisposalFrame } from './tui/components/transcript/visual-assistant-body.ts'
@@ -390,6 +395,13 @@ import type { DisplaySubjectSnapshot, ExtensionView, MessagePresentationSnapshot
 /** How many most-recent turns Ctrl+O expands; mirrors pi's default. */
 export const EXPAND_RECENT_TURNS = 3
 
+/** Physical Job-local keys always outrank transcript Find bindings on this screen. */
+const JOB_LOCAL_FIND_RESERVED_KEYS: ReadonlySet<KeyId> = new Set([
+  'home',
+  'end',
+  JOB_LOCAL_KEYS.switchPage,
+])
+
 /** Semantic inspection actions that may cross a response modal boundary. */
 const MODAL_INSPECTION_ACTIONS: readonly AppKeybindingId[] = [
   'app.transcript.toggleExpand',
@@ -430,6 +442,19 @@ export type TranscriptViewportAnchorEdge = 'top' | 'bottom'
  * intent to distinguish an in-place dismiss from a latest reset or a physical
  * surface swap. */
 export type TranscriptSearchCloseReason = 'dismiss' | 'jump-latest' | 'surface-change'
+type TranscriptSearchAction = 'app.transcript.search' | 'app.transcript.search.view'
+
+interface TranscriptSearchOpening {
+  screen: TuiAltScreen | undefined
+  readonly component: TranscriptSearchComponent
+  readonly temporaryReader: boolean
+  admitted: boolean
+  openCallbackInFlight: boolean
+  mountInFlight: boolean
+  closeRequested: boolean
+  closeReason: TranscriptSearchCloseReason
+  closeNotified: boolean
+}
 
 /** One rendered transcript row used to restore a viewport after re-windowing.
  * Object identity is preferred for overlapping folder projections; row kind and
@@ -1184,11 +1209,12 @@ export interface TuiAppEventsBase {
    * write — the toggle action has no default key; Ctrl+F is transcript
    * search). Optional. */
   onFullscreenChange?: (fullscreen: boolean) => void
-  /** The transcript search overlay opened; the host may clear
-   * stale presentation before a match moves the view into history. */
-  onSearchOpen?: () => void
-  /** The transcript-search query changed (the search action opened it;
-   * the search keys are fixed overlay contracts). Optional. */
+  /** The transcript-search overlay opened; `false` refuses admission. Existing
+   * listeners returning void remain compatible. */
+  onSearchOpen?: (scope: TranscriptSearchScope) => boolean | void
+  /** The active search overlay requested a scope change. */
+  onSearchScope?: (scope: TranscriptSearchScope) => void
+  /** The transcript-search query changed (the search action opened it). Optional. */
   onSearchQuery?: (query: string) => void
   /** The search's next-match key (fixed overlay contract): jump to the next match. Optional. */
   onSearchNext?: () => void
@@ -2188,6 +2214,8 @@ export interface TuiAppOptions {
   statusStore?: StatusStore
   /** The shared canonical display authority. Standalone surfaces default to Full. */
   displayState?: DisplayState
+  /** Query coverage authority supplied by the mounted Direct/Remote composition. */
+  initialSearchCoverage?: TranscriptSearchCoverage
   /** M5: fired when the terminal WIDTH materially changed (the command
    * surface refreshes on width changes — the runner coalesces to its
    * interval). */
@@ -3628,6 +3656,11 @@ export class TuiApp {
   }
   /** Fullscreen (alt-screen) instance; absent in regular mode. */
   private fullscreen: TuiAltScreen | undefined
+  /** A temporary Fullscreen used only to make the Regular transcript navigable. */
+  private temporarySearchReaderReturnToRegular = false
+  /** One-shot authorization consumed by setFullscreen at the call boundary. */
+  private temporarySearchReaderTransitionPermit = false
+  private fullscreenTransitionDepth = 0
   /**
    * The ONE current Job workspace lease (Phase 3B / B1-A), or undefined. Its
    * `screen` is the physical owner while it is set: `activeScreen` derives the
@@ -3678,8 +3711,10 @@ export class TuiApp {
   private schemeDisposers: (() => void)[] = []
   /** The mounted transcript-search overlay, while one is open. */
   private searchOverlay: OverlayHandle | undefined
-  /** The search input component, while one is open (for match counts). */
+  /** The search input component, while one is open (for result/scope projection). */
   private searchComponent: TranscriptSearchComponent | undefined
+  private searchOpening: TranscriptSearchOpening | undefined
+  private transcriptSearchCoverage: TranscriptSearchCoverage = 'loaded-history'
   /** The temporary search presentation target: while set, its owner turn /
    * card is revealed and the query highlighted — presentation only, never
    * written into any user disclosure map. */
@@ -4496,6 +4531,7 @@ export class TuiApp {
     // iterm2:  no managed handle; a Direct terminal keeps the legacy path.
     // none:    no managed handle and every consumer paints text.
     this.imageProtocolPreference = imageProtocolPreference(process.env)
+    this.transcriptSearchCoverage = options.initialSearchCoverage ?? 'loaded-history'
     let graphics: ImageGraphics | undefined
     switch (this.imageProtocolPreference) {
       case 'none':
@@ -4715,7 +4751,8 @@ export class TuiApp {
         // so the global Transcript search handler is never entered (and no
         // fork search overlay is opened) — the leader completion is not a
         // "dispatch then repair" path.
-        if (action === 'app.transcript.search' && this.jobWorkspace !== undefined) {
+        if ((action === 'app.transcript.search' || action === 'app.transcript.search.view')
+          && this.jobWorkspace !== undefined) {
           this.jobWorkspace.panel.openFind()
           return true
         }
@@ -5532,12 +5569,14 @@ export class TuiApp {
    * keybindings — the slot is held until the FINAL dispose() (see
    * tui/process-slot.ts). */
   stop(): void {
+    this.temporarySearchReaderReturnToRegular = false
+    this.temporarySearchReaderTransitionPermit = false
+    this.workspaceLeaseFreezeDepth += 1
     // The stop is a terminal-ownership transition: NEW workspace leases are
     // refused for its whole duration, so a synchronous callback run by the
     // workspace close below cannot mint a screen that would outlive the stop. The
     // latch is cleared by the LAST step of the batch, so a throwing sibling can
     // never leave the surface permanently unable to lease.
-    this.workspaceLeaseFreezeDepth += 1
     // From here on this TuiApp no longer owns the terminal for presentation:
     // a status arriving while stopped must only fold the desired state.
     this.leaveTerminalPresentation()
@@ -5560,6 +5599,7 @@ export class TuiApp {
       // `leaveTerminalPresentation` closing step below releases again.
       () => this.jobWorkspace?.close(),
       () => this.workspaceLease?.close(),
+      () => this.closeTranscriptSearch('surface-change'),
       () => this.clearNotify(),
       // Issue #8: the exit-confirmation timer dies with the surface — a stopped
       // TUI must never fire a stale disarm into a dead footer.
@@ -5991,6 +6031,8 @@ export class TuiApp {
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
+    this.temporarySearchReaderReturnToRegular = false
+    this.temporarySearchReaderTransitionPermit = false
     this.pasteRanges.retireAll()
     this.pasteEditAnchor = undefined
     // M3-6 PR3: the final teardown is ONE ordered non-truncating batch. Every
@@ -6115,7 +6157,8 @@ export class TuiApp {
       // must not hang.
       ...brokerSettles.map(settle => () => settle()),
       () => { this.pendingBrokerSettles.clear() },
-      // FINAL teardown: physically unmount every still-tracked overlay
+      () => this.closeTranscriptSearch('surface-change'),
+       // FINAL teardown: physically unmount every still-tracked overlay
       // (disposeOnHide releases the panels — OutputViewer's refresh
       // interval, TaskBrowser's tick — exactly once) instead of merely
       // forgetting the handles. A caller that never invoked its closer must
@@ -6586,8 +6629,24 @@ export class TuiApp {
         const exitCompletion = leader.pending && !physicalEscape && leader.leaderBindings.some(
           binding => binding.action === 'app.exit.request' && matchesKey(data, binding.key),
         )
+        const reservedFindCompletion = leader.pending && !physicalEscape && leader.leaderBindings.some(
+          binding => (binding.action === 'app.transcript.search' || binding.action === 'app.transcript.search.view')
+            && JOB_LOCAL_FIND_RESERVED_KEYS.has(binding.key)
+            && matchesKey(data, binding.key),
+        )
+        if (reservedFindCompletion) {
+          // A Search leader may not take a Job-local physical key away from
+          // Home/End viewport control or Tab page switching. Cancel the prefix,
+          // then let the Job panel apply the key's fixed local meaning.
+          leader.cancel()
+          this.clearExitConfirmation()
+          this.jobWorkspace.panel.handleInput(data)
+          return { consume: true }
+        }
         const findCompletion = leader.pending && !physicalEscape && leader.leaderBindings.some(
-          binding => binding.action === 'app.transcript.search' && matchesKey(data, binding.key),
+          binding => (binding.action === 'app.transcript.search' || binding.action === 'app.transcript.search.view')
+            && !JOB_LOCAL_FIND_RESERVED_KEYS.has(binding.key)
+            && matchesKey(data, binding.key),
         )
         if (exitCompletion) {
           const outcome = leader.feed(data)
@@ -6715,6 +6774,11 @@ export class TuiApp {
     // the search TOGGLE (app.transcript.search) is user-configurable, so
     // a remap of the toggle must work while the overlay is open too —
     // matching the EFFECTIVE keys (review finding).
+    if (this.searchOpening !== undefined && this.searchOverlay === undefined) {
+      if (this.keybindings.matchesDefault(data, 'app.transcript.search.close')) this.closeTranscriptSearch()
+      this.clearExitConfirmation()
+      return { consume: true }
+    }
     if (this.searchOverlay !== undefined) {
       // The search overlay owns this input; it is a fresh interaction, never
       // the second half of a parent keyboard exit confirmation.
@@ -6735,10 +6799,18 @@ export class TuiApp {
         this.events.onSearchPrev?.()
         return { consume: true }
       }
-      if (this.keybindings.matches(data, 'app.transcript.search')) {
-        // Ctrl+F (or the remapped toggle) closes the overlay on a second
-        // press.
-        this.closeTranscriptSearch()
+      if (this.keybindings.matchesDefault(data, 'app.transcript.search.scope')) {
+        const current = this.searchComponent?.getScope()
+        if (current !== undefined) {
+          this.switchOpenTranscriptSearchScope(current === 'view' ? 'full' : 'view')
+        }
+        return { consume: true }
+      }
+      const action = this.transcriptSearchActionForInput(data)
+      if (action !== undefined) {
+        const scope = action === 'app.transcript.search.view' ? 'view' : 'full'
+        if (this.searchComponent?.getScope() === scope) this.closeTranscriptSearch()
+        else this.switchOpenTranscriptSearchScope(scope)
         return { consume: true }
       }
       return undefined
@@ -7343,8 +7415,12 @@ export class TuiApp {
       },
       interruptActivity: () => true,
       requestExit: () => true,
-      openTranscriptSearch: () => {
-        this.startTranscriptSearch()
+      openTranscriptViewSearch: () => {
+         this.startTranscriptSearch('view')
+         return true
+       },
+       openTranscriptSearch: () => {
+        this.startTranscriptSearch('full')
         return true
       },
       jumpLatest: () => {
@@ -7519,6 +7595,14 @@ export class TuiApp {
     }
   }
 
+  private transcriptSearchActionForInput(data: string): TranscriptSearchAction | undefined {
+    const resolution = this.keybindings.resolve(data, this.keybindingContext())
+    if (resolution?.owner !== 'host') return undefined
+    return resolution.action === 'app.transcript.search' || resolution.action === 'app.transcript.search.view'
+      ? resolution.action
+      : undefined
+  }
+
   /** The live keybinding context (plan §6): built in ONE place so the
    * resolver never reads TuiApp private fields. `editorEmpty` is LAZY —
    * the live editor is only read when a rule predicate actually needs it
@@ -7568,7 +7652,10 @@ export class TuiApp {
       // The router's physical-key seams (the read-only viewer fold
       // pass-through, the search overlay ownership) consult the EFFECTIVE
       // keymap, so a user remap stays authoritative (review finding).
-      matchesEffective: (action: string, data: string) => this.keybindings.matches(data, action as unknown as AppKeybindingId),
+      matchesEffective: (action: string, data: string) => {
+        const resolution = this.keybindings.resolve(data, this.keybindingContext())
+        return resolution?.owner === 'host' && resolution.action === action
+      },
       // The runtime reservation is ACTION-driven: a key is reserved for
       // the host ONLY while an active host action binds it. A remapped-
       // away old key (e.g. Ctrl+V after pasteMedia moved to Ctrl+P) is
@@ -8055,6 +8142,84 @@ export class TuiApp {
     return this.fullscreen !== undefined
   }
 
+  private transcriptSearchScreenIsEligible(
+    screen: TuiMainScreen | TuiAltScreen,
+    searchOverlay?: OverlayHandle,
+  ): boolean {
+    const overlayAdmission = searchOverlay === undefined
+      ? !this.overlayBroker.hasVisibleModalOverlay() && !this.overlayBroker.hasFocusedOverlay()
+      : this.overlayBroker.isOnlyVisibleModal(searchOverlay)
+        && this.overlayBroker.hasFocusedOverlay()
+        && searchOverlay.isFocused()
+    return !this.disposed
+      && this.fullscreenTransitionDepth === 0
+      && this.terminalPresentationActive
+      && this.activeScreen === screen
+      && overlayAdmission
+      && this.jobWorkspace === undefined
+      && this.workspaceLease === undefined
+      && this.activeQuestions === undefined
+      && !this.approvals.hasPending()
+      && this.activeSaveLocation === undefined
+      && this.viewerMode === undefined
+      && this.optionalSeat === undefined
+      && !this.taskQuick.focused
+  }
+
+  private beginTemporarySearchReaderIfRegular(): TuiAltScreen | undefined {
+    if (this.fullscreen !== undefined) {
+      return this.transcriptSearchScreenIsEligible(this.fullscreen) ? this.fullscreen : undefined
+    }
+    if (!this.transcriptSearchScreenIsEligible(this.tui)) return undefined
+
+    this.temporarySearchReaderReturnToRegular = true
+    this.temporarySearchReaderTransitionPermit = true
+    try {
+      this.setFullscreen(true, { persistPreference: false, onlyWhenIdle: true })
+    } finally {
+      this.temporarySearchReaderTransitionPermit = false
+    }
+
+    const screen = this.fullscreen
+    if (screen !== undefined && this.activeScreen === screen) return screen
+    this.temporarySearchReaderReturnToRegular = false
+    return undefined
+  }
+
+  private rollbackTemporarySearchReader(screen: TuiAltScreen): void {
+    if (!this.temporarySearchReaderReturnToRegular || this.disposed
+      || !this.transcriptSearchScreenIsEligible(screen)
+      || this.fullscreen !== screen || this.activeScreen !== screen
+      || this.jobWorkspace !== undefined || this.workspaceLease !== undefined
+      || this.searchOverlay !== undefined || this.searchOpening !== undefined) {
+      this.temporarySearchReaderReturnToRegular = false
+      return
+    }
+    this.temporarySearchReaderTransitionPermit = true
+    try {
+      this.setFullscreen(false, { persistPreference: false })
+    } finally {
+      this.temporarySearchReaderTransitionPermit = false
+      this.temporarySearchReaderReturnToRegular = false
+    }
+  }
+
+  private returnTemporarySearchReaderIfCurrent(screen: TuiAltScreen): void {
+    if (!this.temporarySearchReaderReturnToRegular) return
+    if (this.searchOverlay !== undefined || this.searchOpening !== undefined) return
+    if (!this.transcriptSearchScreenIsEligible(screen) || this.fullscreen !== screen) {
+      this.temporarySearchReaderReturnToRegular = false
+      return
+    }
+    this.temporarySearchReaderTransitionPermit = true
+    try {
+      this.setFullscreen(false, { persistPreference: false, onlyWhenIdle: true })
+    } finally {
+      this.temporarySearchReaderTransitionPermit = false
+      this.temporarySearchReaderReturnToRegular = false
+    }
+  }
+
   /** Set the fullscreen mouse-wheel step (transcript lines per wheel
    * event) for the NEXT alt-screen mount. Defensive normalize; never
    * reads Host settings — a pure Client runtime preference. The live
@@ -8099,6 +8264,21 @@ export class TuiApp {
    *   ordinary behavior.
    */
   setFullscreen(enabled: boolean, options?: { readonly persistPreference?: boolean; readonly onlyWhenIdle?: boolean }): void {
+    const temporarySearchReaderTransition = this.temporarySearchReaderTransitionPermit
+    this.temporarySearchReaderTransitionPermit = false
+    this.fullscreenTransitionDepth += 1
+    try {
+      this.setFullscreenTransition(enabled, options, temporarySearchReaderTransition)
+    } finally {
+      this.fullscreenTransitionDepth -= 1
+    }
+  }
+
+  private setFullscreenTransition(
+    enabled: boolean,
+    options: { readonly persistPreference?: boolean; readonly onlyWhenIdle?: boolean } | undefined,
+    temporarySearchReaderTransition: boolean,
+  ): void {
     if (this.disposed) return
     // A leased workspace (Job OR Settings) owns the physical screen: a
     // display-mode switch now would detach the PAUSED return surface (killing
@@ -8122,6 +8302,9 @@ export class TuiApp {
     this.keybindings.cancelLeader()
     const active = this.fullscreen !== undefined
     if (enabled === active) return
+    if (this.temporarySearchReaderReturnToRegular && !temporarySearchReaderTransition) {
+      this.temporarySearchReaderReturnToRegular = false
+    }
     this.clearRenderedViewSearch({ rebuild: false })
     // B4-B: the on-demand Task Quick is retired on ANY screen hand-off — the
     // accessory instance is shared by both roots and its `focused` flag would
@@ -8141,7 +8324,8 @@ export class TuiApp {
     // through such a regular surface (re-entry re-derives folded). The
     // temporary SEARCH reveal is separate state: the runner closes the search
     // overlay on a surface swap, which clears the target.
-    if (enabled && !this.userDisclosureAffordanceAvailable()) {
+    if (enabled && !this.userDisclosureAffordanceAvailable()
+      && !this.temporarySearchReaderReturnToRegular) {
       this.clearUserDisclosureOverrides()
     }
     this.clearFocusLiveHeightState()
@@ -8151,17 +8335,15 @@ export class TuiApp {
     // physical projections die with the old screen (detachPhysical). The
     // remount callbacks re-create them for the same logical nodes (including
     // the approval, whose logical node keeps its suppressed children hidden).
-    this.overlayBroker.detachPhysical()
-    // The ordinary search overlay is NOT remounted across the screen swap
-    // (only extension/advanced/unstable/history leases are): its raw
-    // handle died with the old screen — close it properly (the runner's
-    // onSearchClose resets the search state/anchor) so the next Ctrl+F
-    // reopens a FRESH search instead of focusing a stale dead handle.
-    if (this.searchOverlay !== undefined) {
-      this.searchOverlay = undefined
-      this.searchComponent = undefined
-      this.events.onSearchClose?.('surface-change')
+    // Search is not remounted across a user surface change. The temporary
+    // Reader entry is the exception: its opening intent was precommitted and
+    // the overlay is mounted only after this screen transaction completes.
+    const enteringTemporarySearchReader = temporarySearchReaderTransition && enabled && this.fullscreen === undefined
+    if (!enteringTemporarySearchReader
+      && (this.searchOverlay !== undefined || this.searchOpening !== undefined)) {
+      this.closeTranscriptSearch('surface-change')
     }
+    if (!enabled) this.overlayBroker.detachPhysical()
     if (enabled) {
       const openExternalUrl = this.openExternalUrl
       // The alt screen owns mouse handling (wheel scroll, drag selection,
@@ -8206,14 +8388,19 @@ export class TuiApp {
           if (this.keybindings.matches(data, 'app.transcript.jumpLatest')) {
             return this.events.onTranscriptJumpLatest?.() === true
           }
-          if (this.keybindings.matches(data, 'app.transcript.search')) {
+          const action = this.transcriptSearchActionForInput(data)
+          if (action !== undefined) {
             if (this.searchOverlay !== undefined) {
-              this.closeTranscriptSearch()
+              const scope = action === 'app.transcript.search.view' ? 'view' : 'full'
+              if (this.searchComponent?.getScope() === scope) this.closeTranscriptSearch()
+              else this.switchOpenTranscriptSearchScope(scope)
               return true
             }
-            return this.dispatchResolvedAction('app.transcript.search', data)
+            return this.dispatchResolvedAction(action, data)
           }
-          return getKeybindings().matches(data, 'tui.altScreen.search')
+          // The Host Full action owns Full-history search. The fork search is
+          // never a fallback: it would silently change both corpus and scope.
+          return getKeybindings().matches(data, 'tui.altScreen.search') ? true : false
         },
         onScrollBoundary: (direction, source) => direction < 0
           ? this.events.onTranscriptMoveOlder?.(source) === true
@@ -8345,39 +8532,71 @@ export class TuiApp {
       // viewport) — only the FINAL delivery to the focused component is
       // withheld while an optional seat tenant owns the keyboard.
       alt.addInputListener((data) => this.protocolSinkFence(data))
-      // The screen swap stops the terminal between the two starts: progress
-      // must not be written until the new screen owns it again (plan §7).
-      this.leaveTerminalPresentation()
-      this.tui.stop()
-      // The new alt's first paint is scheduled asynchronously: drop the
-      // PREVIOUS alt instance's last-painted snapshot (and any in-flight
-      // gesture) BEFORE start, so a press immediately after re-entry can
-      // never resolve against a frame the new surface never drew.
-      alt.start()
-      // Mode 2031 is per screen: the freshly started alt screen syncs the
-      // CURRENT tracking choice now that it owns the terminal (writing the mode
-      // before start() would land on the stopped screen and be lost).
-      alt.setTerminalColorSchemeNotifications(this.followingTerminalTheme)
-      // The main screen's stop cleared the physical progress indicator;
-      // re-assert the desired state on the new alt screen (plan §7).
-      this.enterTerminalPresentation()
-      // The alt screen starts with NO focused component: without this, every
-      // key after Ctrl+F is dropped (the app-level listener still sees
-      // shortcuts, but the editor never receives text or Enter). M9 + Phase
-      // 3A / PR-B: a screen swap is an active re-projection entry. Re-sync the
-      // SHARED seat mount with the LIVE owner first (a stale ACTIVE tenant is
-      // never left painted across the swap), then focus the live seat owner (a
-      // Question/Save frame, an ACTIVE tenant, else the latest host/plugin
-      // editor) on the screen that now owns the terminal. The stale record
-      // itself is retired AFTER the swap is committed (below), so a throwing
-      // caller cleanup can never leave a half-swapped surface.
-      this.projectSeatOccupant()
-      alt.setFocus(this.seatFallbackComponent() ?? this.seatEditor().component)
-      this.fullscreen = alt
-      // The alt screen owns the terminal now: re-register the scheme fan-out —
-      // which also re-binds the SIXEL readiness projection to THIS screen, so no
-      // pixel is painted with facts sampled for the previous one. (RFL-011.)
-      this.refreshSchemeRegistrations()
+      const returnFocus = this.tui.getFocusedComponent()
+      let mainStopAttempted = false
+      let altStartAttempted = false
+      try {
+        this.overlayBroker.detachPhysical()
+        // The screen swap stops the terminal between the two starts: progress
+        // must not be written until the new screen owns it again (plan §7).
+        this.leaveTerminalPresentation()
+        mainStopAttempted = true
+        this.tui.stop()
+        // The new alt's first paint is scheduled asynchronously: drop the
+        // PREVIOUS alt instance's last-painted snapshot (and any in-flight
+        // gesture) BEFORE start, so a press immediately after re-entry can
+        // never resolve against a frame the new surface never drew.
+        altStartAttempted = true
+        alt.start()
+        // Mode 2031 is per screen: the freshly started alt screen syncs the
+        // CURRENT tracking choice now that it owns the terminal (writing the mode
+        // before start() would land on the stopped screen and be lost).
+        alt.setTerminalColorSchemeNotifications(this.followingTerminalTheme)
+        // The main screen's stop cleared the physical progress indicator;
+        // re-assert the desired state on the new alt screen (plan §7).
+        this.enterTerminalPresentation()
+        // The alt screen starts with NO focused component: without this, every
+        // key after Ctrl+F is dropped (the app-level listener still sees
+        // shortcuts, but the editor never receives text or Enter). M9 + Phase
+        // 3A / PR-B: a screen swap is an active re-projection entry. Re-sync the
+        // SHARED seat mount with the LIVE owner first (a stale ACTIVE tenant is
+        // never left painted across the swap), then focus the live seat owner (a
+        // Question/Save frame, an ACTIVE tenant, else the latest host/plugin
+        // editor) on the screen that now owns the terminal. The stale record
+        // itself is retired AFTER the swap is committed (below), so a throwing
+        // caller cleanup can never leave a half-swapped surface.
+        this.projectSeatOccupant()
+        alt.setFocus(this.seatFallbackComponent() ?? this.seatEditor().component)
+        this.fullscreen = alt
+        // The alt screen owns the terminal now: re-register the scheme fan-out —
+        // which also re-binds the SIXEL readiness projection to THIS screen, so no
+        // pixel is painted with facts sampled for the previous one. (RFL-011.)
+        this.refreshSchemeRegistrations()
+      } catch (error) {
+        if (!temporarySearchReaderTransition) throw error
+        const stillOwnsFailedTransition = (): boolean => !this.disposed
+          && this.jobWorkspace === undefined
+          && this.workspaceLease === undefined
+          && (this.fullscreen === undefined || this.fullscreen === alt)
+        const remounts = this.overlayBroker.remountOrder()
+        runSyncDisposalStepsWithPrimary('fullscreen screen transition unwind', error, [
+          () => { if (altStartAttempted && stillOwnsFailedTransition()) alt.stop() },
+          () => {
+            if (!stillOwnsFailedTransition()) return
+            if (this.fullscreen === alt) this.fullscreen = undefined
+            this.fullscreenScroll = undefined
+          },
+          () => {
+            if (!stillOwnsFailedTransition()) return
+            if (mainStopAttempted) this.resumeReturnSurface(this.tui, returnFocus)
+            else this.enterTerminalPresentation()
+          },
+          ...remounts.map(handle => () => {
+            if (stillOwnsFailedTransition()) this.overlayRemounts.get(handle)?.()
+          }),
+          () => { if (stillOwnsFailedTransition()) this.overlayBroker.restoreFocusAfterSwap() },
+        ])
+      }
     } else {
       this.leaveTerminalPresentation()
       this.fullscreen?.stop()
@@ -8407,7 +8626,7 @@ export class TuiApp {
       // starts from the bulk preference again (plan §6.2's preferred cleanup
       // — the regular surface's only Thinking state is the bulk preference).
       // Search reveals are separate temporary state and write no override.
-      this.clearThinkingExpansionOverrides()
+      if (!this.temporarySearchReaderReturnToRegular) this.clearThinkingExpansionOverrides()
       // The alt screen's exit repaint starts at the hardware cursor row, so
       // rows above it (e.g. a dialog the alt screen composited) survive in
       // the terminal buffer. Force a full repaint so the regular surface
@@ -8493,39 +8712,210 @@ export class TuiApp {
    * focus its input. The search itself runs in the host against the folded
    * transcript; this surface only collects the query and reports navigation keys.
    */
-  startTranscriptSearch(): void {
+  startTranscriptSearch(scope: TranscriptSearchScope = 'full'): void {
     if (this.disposed) return
     if (this.searchOverlay !== undefined) {
-      this.searchOverlay.focus()
+      if (this.searchComponent?.getScope() !== scope) this.switchOpenTranscriptSearchScope(scope)
+      else this.searchOverlay.focus()
       return
     }
-    this.events.onSearchOpen?.()
-    const component = new TranscriptSearchComponent((query) => {
-      this.events.onSearchQuery?.(query)
+    if (this.searchOpening !== undefined) return
+
+    const temporaryReader = this.fullscreen === undefined || this.temporarySearchReaderReturnToRegular
+    const component = new TranscriptSearchComponent({
+      onQueryChange: query => this.events.onSearchQuery?.(query),
+      onScopeRequest: next => this.switchOpenTranscriptSearchScope(next),
+      readViewResult: () => this.renderedViewSearchStatus(),
+      readTemporaryReader: () => this.isTemporarySearchReader(),
+      readCoverage: () => this.transcriptSearchCoverage,
+      initialScope: scope,
     })
+    const opening: TranscriptSearchOpening = {
+      screen: this.fullscreen,
+      component,
+      temporaryReader,
+      admitted: false,
+      openCallbackInFlight: true,
+      mountInFlight: false,
+      closeRequested: false,
+      closeReason: 'dismiss',
+      closeNotified: false,
+    }
+    this.searchOpening = opening
     this.searchComponent = component
-    this.searchOverlay = this.showOverlayOnHost(component, {
-      anchor: 'top-right',
-      width: '40%',
-      minWidth: 24,
-      margin: 1,
-      // Fullscreen: the search box keeps keyboard focus, but the transcript
-      // viewport stays interactive (wheel/PageUp/PageDown/scrollbar/background
-      // selection) while the box itself did not handle the event
-      // (fork seam X058; inert on the main screen, where the terminal owns
-      // scrollback).
-      viewportPassthrough: true,
-    })
+
+    let screen: TuiAltScreen | undefined
+    try {
+      screen = this.beginTemporarySearchReaderIfRegular()
+    } catch (error) {
+      opening.openCallbackInFlight = false
+      opening.screen = this.fullscreen
+      runSyncDisposalStepsWithPrimary('transcript search reader open unwind', error, [
+        () => this.finishSearchOpening(opening),
+        () => {
+          if (this.searchOpening === undefined && this.searchOverlay === undefined && this.fullscreen === undefined) {
+            this.temporarySearchReaderReturnToRegular = false
+          }
+        },
+      ])
+    }
+    if (screen === undefined) {
+      opening.openCallbackInFlight = false
+      this.finishSearchOpening(opening)
+      return
+    }
+    opening.screen = screen
+    if (opening.closeRequested || !this.transcriptSearchScreenIsEligible(screen)) {
+      opening.openCallbackInFlight = false
+      opening.closeReason = 'surface-change'
+      this.finishSearchOpening(opening)
+      return
+    }
+
+    let admitted: boolean | void
+    try {
+      admitted = this.events.onSearchOpen?.(scope)
+    } catch (error) {
+      opening.openCallbackInFlight = false
+      opening.admitted = true
+      opening.closeRequested = true
+      opening.closeReason = 'surface-change'
+      runSyncDisposalStepsWithPrimary('transcript search admission unwind', error, [
+        () => this.finishSearchOpening(opening),
+        () => {
+          if (opening.temporaryReader && this.searchOpening === undefined
+            && this.searchOverlay === undefined && this.fullscreen === undefined) {
+            this.temporarySearchReaderReturnToRegular = false
+          }
+        },
+      ])
+    }
+    opening.openCallbackInFlight = false
+    opening.admitted = admitted !== false
+    if (!opening.admitted) {
+      this.finishSearchOpening(opening)
+      return
+    }
+    if (opening.closeRequested || this.searchOpening !== opening
+      || !this.transcriptSearchScreenIsEligible(screen)) {
+      if (!opening.closeRequested) {
+        opening.closeRequested = true
+        opening.closeReason = 'surface-change'
+      }
+      this.finishSearchOpening(opening)
+      return
+    }
+
+    opening.mountInFlight = true
+    let overlay: OverlayHandle
+    try {
+      overlay = this.showOverlayOnHost(component, {
+        anchor: 'top-right',
+        width: '40%',
+        minWidth: 24,
+        margin: 1,
+        viewportPassthrough: true,
+      })
+    } catch (error) {
+      opening.mountInFlight = false
+      opening.closeRequested = true
+      opening.closeReason = 'surface-change'
+      runSyncDisposalStepsWithPrimary('transcript search open unwind', error, [
+        () => this.finishSearchOpening(opening),
+      ])
+      return
+    }
+    opening.mountInFlight = false
+    if (opening.closeRequested || this.searchOpening !== opening
+      || this.fullscreen !== screen || this.activeScreen !== screen) {
+      if (!opening.closeRequested) {
+        opening.closeRequested = true
+        opening.closeReason = 'surface-change'
+      }
+      this.searchOverlay = overlay
+      this.searchComponent = component
+      this.closeTranscriptSearch(opening.closeReason)
+      return
+    }
+    this.searchOverlay = overlay
+    this.searchComponent = component
+    if (opening.closeRequested || this.searchOpening !== opening
+      || !this.transcriptSearchScreenIsEligible(screen, overlay)) {
+      opening.closeRequested = true
+      if (opening.closeReason === 'dismiss') opening.closeReason = 'surface-change'
+      this.closeTranscriptSearch(opening.closeReason)
+      return
+    }
+    this.searchOpening = undefined
   }
 
-  /** Close host/fullscreen transcript search and report whether either closed. */
+  private switchOpenTranscriptSearchScope(scope: TranscriptSearchScope): void {
+    if (this.searchOverlay === undefined || this.searchComponent === undefined) return
+    if (this.searchComponent.getScope() === scope) return
+    this.events.onSearchScope?.(scope)
+  }
+
+  private finishSearchOpening(opening: TranscriptSearchOpening): void {
+    if (opening.openCallbackInFlight || opening.mountInFlight) return
+    if (this.searchOpening === opening) this.searchOpening = undefined
+    if (this.searchComponent === opening.component && this.searchOverlay === undefined) {
+      this.searchComponent = undefined
+    }
+    if (!opening.admitted) {
+      if (opening.temporaryReader && opening.screen !== undefined) {
+        this.rollbackTemporarySearchReader(opening.screen)
+      }
+      return
+    }
+    if (!opening.closeRequested || opening.closeNotified) return
+    opening.closeNotified = true
+    runSyncDisposalSteps('transcript search opening close', [
+      () => this.events.onSearchClose?.(opening.closeReason),
+      () => {
+        if (!opening.temporaryReader || opening.screen === undefined) return
+        if (opening.closeReason === 'surface-change') this.rollbackTemporarySearchReader(opening.screen)
+        else this.returnTemporarySearchReaderIfCurrent(opening.screen)
+      },
+    ])
+  }
+
+  /** Close the managed Search overlay and report one lifecycle reason. */
   closeTranscriptSearch(reason: TranscriptSearchCloseReason = 'dismiss'): boolean {
     const closedFullscreen = this.fullscreen?.clearSearch() ?? false
-    if (this.searchOverlay === undefined) return closedFullscreen
-    this.searchOverlay.hide()
+    const opening = this.searchOpening
+    const overlay = this.searchOverlay
+    if (overlay === undefined) {
+      if (opening === undefined) return closedFullscreen
+      opening.closeRequested = true
+      opening.closeReason = reason
+      this.finishSearchOpening(opening)
+      return true
+    }
+
+    const screen = this.fullscreen
+    const temporaryReader = this.temporarySearchReaderReturnToRegular
+    const readerOwner = opening?.screen ?? screen
+    // Retire the old logical owner BEFORE hide() can synchronously run focus hooks.
     this.searchOverlay = undefined
     this.searchComponent = undefined
-    this.events.onSearchClose?.(reason)
+    if (opening !== undefined) {
+      opening.closeRequested = true
+      opening.closeReason = reason
+      opening.closeNotified = true
+      if (this.searchOpening === opening) this.searchOpening = undefined
+    }
+    let closeCurrentSearch = false
+    runSyncDisposalSteps('transcript search close', [
+      () => overlay.hide(),
+      () => {
+        closeCurrentSearch = this.searchOverlay === undefined && this.searchOpening?.admitted !== true
+        if (closeCurrentSearch) this.events.onSearchClose?.(reason)
+      },
+      () => {
+        if (!closeCurrentSearch || !temporaryReader || readerOwner === undefined) return
+        this.returnTemporarySearchReaderIfCurrent(readerOwner)
+      },
+    ])
     return true
   }
 
@@ -8743,6 +9133,26 @@ export class TuiApp {
   setSearchResult(index: number, count: number): void {
     this.searchComponent?.setResult(index, count)
     this.searchComponent?.invalidate()
+  }
+
+  setSearchScope(scope: TranscriptSearchScope): void {
+    this.searchComponent?.setScope(scope)
+    this.requestRender()
+  }
+
+  setTranscriptSearchCoverage(coverage: TranscriptSearchCoverage): void {
+    if (this.transcriptSearchCoverage === coverage) return
+    this.transcriptSearchCoverage = coverage
+    this.searchComponent?.invalidate()
+    this.requestRender()
+  }
+
+  isTemporarySearchReader(): boolean {
+    return this.temporarySearchReaderReturnToRegular
+  }
+
+  transcriptSearchCoverageForTest(): TranscriptSearchCoverage {
+    return this.transcriptSearchCoverage
   }
 
   /** Whether the transcript search is open. */
@@ -13418,7 +13828,7 @@ export class TuiApp {
         viewport: scroll?.viewportHeight ?? 0,
         scrollTop: scroll?.scrollTop ?? 0,
         preset: this.displayPreset(),
-        searchActive: this.searchOverlay !== undefined,
+        searchActive: this.searchOverlay !== undefined || this.searchOpening !== undefined,
       })
       this.scrollFramePending = false
     }
@@ -24965,7 +25375,7 @@ export class TuiApp {
       // `Ctrl+F` string and never the Transcript's search handler.
       isFindKey: (data) => {
         const resolution = this.keybindings.resolve(data, this.keybindingContext())
-        return resolution !== undefined && resolution.action === 'app.transcript.search'
+        return resolution !== undefined && (resolution.action === 'app.transcript.search' || resolution.action === 'app.transcript.search.view')
       },
       // One action advertises ONE key (design language §7.1): the keymap's primary
       // effective binding. The Job reserves the physical Home/End viewport keys
@@ -24975,11 +25385,17 @@ export class TuiApp {
       // takes its place. `/` stays the always-available Job-local alias, advertised
       // when nothing is left to name.
       findHint: () => {
-        const direct = this.keybindings.keysFor('app.transcript.search')
-          .filter(key => key !== 'home' && key !== 'end' && key !== JOB_LOCAL_KEYS.switchPage)
+        const direct = [
+           ...this.keybindings.keysFor('app.transcript.search.view'),
+           ...this.keybindings.keysFor('app.transcript.search'),
+         ]
+          .filter(key => !JOB_LOCAL_FIND_RESERVED_KEYS.has(key))
         const first = direct[0]
         if (first !== undefined) return formatKeyId(first)
-        const leader = this.keybindings.leaderKeysFor('app.transcript.search')[0]
+        const leader = [
+          ...this.keybindings.leaderKeysFor('app.transcript.search.view'),
+          ...this.keybindings.leaderKeysFor('app.transcript.search'),
+        ].find(key => !JOB_LOCAL_FIND_RESERVED_KEYS.has(key))
         return leader === undefined ? '' : formatLeaderSequence(leader)
       },
       focusComponent: (component) => screen.setFocus(component),

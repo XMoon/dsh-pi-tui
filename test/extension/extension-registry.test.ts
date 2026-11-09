@@ -17,7 +17,7 @@ import { CommandBridge } from '../../src/extension/internal/command-bridge.ts'
 import { ThemeRegistry } from '../../src/extension/internal/theme-registry.ts'
 import { SettingsRegistry } from '../../src/extension/internal/settings-registry.ts'
 import { AutocompleteRegistry } from '../../src/extension/internal/autocomplete-registry.ts'
-import { KeybindingRegistry } from '../../src/extension/internal/keybinding-registry.ts'
+import { KeybindingRegistry, TUI_ACTIONS } from '../../src/extension/internal/keybinding-registry.ts'
 import { HOST_COMMAND_CATALOG, LOCAL_COMMANDS, SESSIONLESS_COMMANDS, resolveSubmitDelivery } from '../../src/index.ts'
 
 /** A minimal valid structural autocomplete provider for tests. */
@@ -25,7 +25,12 @@ function provider(getSuggestions: () => Promise<import('../../src/extension/publ
   return { getSuggestions }
 }
 
-// ── CommandBridge ──────────────────────────────────────────────────────────
+test('rendered transcript View Find stays outside the Stable plugin action set', () => {
+  assert.equal(TUI_ACTIONS.has('open-search'), true, 'legacy Stable search continues to exist')
+  assert.equal(TUI_ACTIONS.has('app.transcript.search.view' as never), false,
+    'the Host-private View semantic action is not a plugin action')
+})
+
 
 test('CommandBridge: dynamic local commands join the effective-local set', () => {
   const bridge = new CommandBridge()

@@ -23,6 +23,7 @@ interface Harness {
   readonly vt: VirtualTerminal
   readonly app: TuiApp
   readonly queries: string[]
+  readonly scopes: Array<'view' | 'full'>
   readonly submits: string[]
   readonly copied: string[]
 }
@@ -30,12 +31,18 @@ interface Harness {
 function startSearchApp(width = 80, height = 24): Harness {
   const vt = new VirtualTerminal(width, height)
   const queries: string[] = []
+  const scopes: Array<'view' | 'full'> = []
   const submits: string[] = []
   const copied: string[] = []
-  const app = new TuiApp(vt, {
+  let app!: TuiApp
+  app = new TuiApp(vt, {
     onSubmit: (text) => { submits.push(text) },
     onExit: () => {},
     onSearchQuery: (query) => { queries.push(query) },
+    onSearchScope: scope => {
+      scopes.push(scope)
+      app.setSearchScope(scope)
+    },
   }, {
     copySelection: async (text) => { copied.push(text); return true },
   })
@@ -43,7 +50,7 @@ function startSearchApp(width = 80, height = 24): Harness {
   startedApps.add(app)
   app.setFullscreen(true)
   app.setTranscript(longTranscript())
-  return { vt, app, queries, submits, copied }
+  return { vt, app, queries, scopes, submits, copied }
 }
 
 function longTranscript(): TranscriptMessage[] {
@@ -243,45 +250,176 @@ test('interaction: boundary paging reaches the host while search is open', async
   app.stop()
 })
 
-test('interaction: the Host search shortcut opens the Host box and never the fork native search', async () => {
-  const { vt, app, queries } = startSearchApp()
+test('interaction: View/Full actions and Tab switch one search overlay without exposing fork search', async () => {
+  const { vt, app, queries, scopes } = startSearchApp()
   await vt.waitForRender()
 
-  // Ctrl+F (Host default) and Ctrl+Shift+F (the default shared with the fork's
-  // native tui.altScreen.search) must both resolve to the Host box: the Host
-  // query is the only search surface over the full folded transcript.
-  for (const key of ['\x06', '\x1b[102;6u']) {
-    vt.sendInput(key)
-    await vt.waitForRender()
-    assert.equal(app.isSearching(), true, `${JSON.stringify(key)} must open the Host search box`)
-    const painted = vt.getViewport().join('\n')
-    assert.ok(painted.includes('Find transcript'), 'the Host box must be painted')
-    assert.ok(!painted.includes('Find in transcript'), 'the fork native search must never be painted')
-    assert.ok(!painted.includes('Shift+Enter'), 'the fork native navigation row must never be painted')
-    vt.sendInput('needle')
-    await vt.waitForRender()
-    assert.equal(queries.at(-1), 'needle', 'the Host query must receive the typing')
-    app.closeTranscriptSearch()
-    await vt.waitForRender()
-    assert.equal(app.isSearching(), false, 'precondition: the box closes before the next key')
+  vt.sendInput('\x06') // Ctrl+F -> View
+  await vt.waitForRender()
+  assert.equal(app.isSearching(), true)
+  assert.ok(vt.getViewport().join('\n').includes('[View]'))
+  assert.ok(!vt.getViewport().join('\n').includes('Find in transcript'))
+  vt.sendInput('needle')
+  await vt.waitForRender()
+  assert.equal(queries.at(-1), 'needle')
+  const overlayHandles = app.overlayGraphState().handles
+  app.startTranscriptSearch() // Legacy/plugin entry is Full even when View already owns the overlay.
+  await vt.waitForRender()
+  assert.deepEqual(scopes, ['full'])
+  assert.equal(app.overlayGraphState().handles, overlayHandles, 'legacy Full changes scope in place')
+  assert.ok(vt.getViewport().join('\n').includes('needle'), 'the legacy action retains the shared query')
+
+  vt.sendInput('\t')
+  await vt.waitForRender()
+  assert.deepEqual(scopes, ['full', 'view'])
+  let painted = vt.getViewport().join('\n')
+  assert.ok(painted.includes('[View]'))
+  assert.ok(painted.includes('needle'), 'Tab retains the single search query')
+
+  vt.sendInput('\x1b[102;6u') // Ctrl+Shift+F switches the active View to Full.
+  await vt.waitForRender()
+  assert.deepEqual(scopes, ['full', 'view', 'full'])
+  assert.ok(vt.getViewport().join('\n').includes('[Full]'))
+
+  vt.sendInput('\x06') // Ctrl+F switches the active Full to View.
+  await vt.waitForRender()
+  assert.deepEqual(scopes, ['full', 'view', 'full', 'view'])
+  painted = vt.getViewport().join('\n')
+  assert.ok(painted.includes('[View]'))
+  assert.ok(painted.includes('needle'))
+
+  vt.sendInput('\t')
+  await vt.waitForRender()
+  assert.deepEqual(scopes, ['full', 'view', 'full', 'view', 'full'])
+  assert.ok(vt.getViewport().join('\n').includes('[Full]'))
+  assert.ok(!vt.getViewport().join('\n').includes('Find in transcript'), 'fork search never paints')
+
+  vt.sendInput('\x1b[102;6u') // same active action toggles close
+  await vt.waitForRender()
+  assert.equal(app.isSearching(), false)
+  app.stop()
+})
+
+test('interaction: legacy Full Ctrl+F override wins the View builtin and remapped-away Full never opens fork search', async () => {
+  const { vt, app, scopes } = startSearchApp()
+  await vt.waitForRender()
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.transcript.search': 'ctrl+f' }))
+  await vt.waitForRender()
+
+  vt.sendInput('\x06')
+  await vt.waitForRender()
+  assert.equal(app.isSearching(), true)
+  assert.equal(scopes.length, 0, 'the legacy Ctrl+F binding opens Full directly, not View')
+  let painted = vt.getViewport().join('\n')
+  assert.ok(painted.includes('[Full]'))
+  assert.ok(!painted.includes('Find in transcript'))
+  app.closeTranscriptSearch()
+  await vt.waitForRender()
+
+  vt.sendInput('\x1b[102;6u')
+  await vt.waitForRender()
+  assert.equal(app.isSearching(), false, 'the replaced Full default does not fall back to View or native search')
+  assert.ok(!vt.getViewport().join('\n').includes('Find in transcript'))
+
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
+    'app.transcript.search.view': 'ctrl+g',
+    'app.transcript.search': 'ctrl+y',
+  }))
+  vt.sendInput('\x07')
+  await vt.waitForRender()
+  assert.equal(app.isSearching(), true, 'Ctrl+G opens the remapped View action')
+  app.closeTranscriptSearch()
+  await vt.waitForRender()
+  vt.sendInput('\x19') // Ctrl+Y opens remapped Full.
+  await vt.waitForRender()
+  assert.equal(app.isSearching(), true)
+  assert.ok(vt.getViewport().join('\n').includes('[Full]'))
+  app.stop()
+})
+
+test('interaction: the fixed-width theme and glyph matrix keeps one active scope, count, and query focus', async (t) => {
+  const sizes = [[200, 50], [120, 40], [100, 40], [80, 24], [80, 10], [72, 24], [44, 20]] as const
+  for (const theme of ['dark', 'light'] as const) {
+    for (const iconStyle of ['symbols', 'minimal'] as const) {
+      for (const [width, height] of sizes) {
+        const vt = new VirtualTerminal(width, height)
+        let app!: TuiApp
+        app = new TuiApp(vt, {
+          onSubmit: () => {},
+          onExit: () => {},
+          onSearchQuery: query => { app.setRenderedViewSearchQuery(query) },
+        })
+        app.start()
+        startedApps.add(app)
+        app.setFullscreen(true)
+        app.applyTheme(theme)
+        app.setIconStyle(iconStyle)
+        app.setTranscript([{ kind: 'user', turn: 0, text: 'needle' }])
+        await vt.waitForRender()
+        vt.sendInput('\x06')
+        await vt.waitForRender()
+        vt.sendInput('needle')
+        await vt.waitForRender()
+
+        const lines = vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/gu, ''))
+        const title = lines.find(line => line.includes('View') || line.includes('[V]'))
+        const hint = lines.find(line => line.toLowerCase().includes('esc') || line.includes('↵'))
+        assert.ok(title !== undefined, `${theme}/${iconStyle}/${width}x${height}: scope title stays visible`)
+        assert.match(title, /1\/1/u, `${theme}/${iconStyle}/${width}x${height}: result count is preserved`)
+        const active = title.match(/\[(?:View|Full|V|F)\]/gu) ?? []
+        assert.equal(active.length, 1, `${theme}/${iconStyle}/${width}x${height}: exactly one scope is active`)
+        assert.ok(hint !== undefined, `${theme}/${iconStyle}/${width}x${height}: close/scope guidance survives`)
+        assert.ok(!hint.includes('…'), `${theme}/${iconStyle}/${width}x${height}: action hints are not partially truncated`)
+        assert.equal(app.focusSeatForTest(), 'overlay', `${theme}/${iconStyle}/${width}x${height}: the Input retains focus`)
+        assert.equal(app.isSearching(), true)
+        app.dispose()
+      }
+    }
+  }
+})
+test('interaction: clicking the painted scope title switches in place and a cross-scope release is inert', async () => {
+  const { vt, app, scopes } = startSearchApp()
+  await vt.waitForRender()
+  vt.sendInput('\x06')
+  await vt.waitForRender()
+  vt.sendInput('needle')
+  await vt.waitForRender()
+  const paintedTitle = (): { row: number; view: number; full: number } => {
+    const lines = vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/gu, ''))
+    const row = lines.findIndex(line => line.includes('[View]'))
+    assert.ok(row >= 0, `the scope title is painted:\n${lines.join('\n')}`)
+    const view = lines[row]!.indexOf('[View]')
+    const full = lines[row]!.indexOf('Full')
+    assert.ok(view >= 0 && full > view)
+    return { row, view, full }
+  }
+  const clickCell = (column: number, row: number): void => {
+    const x = column + 1
+    const y = row + 1
+    vt.sendInput(`\x1b[<0;${x};${y}M`)
+    vt.sendInput(`\x1b[<0;${x};${y}m`)
   }
 
-  // Negative control: with the Host action remapped, the old defaults stay
-  // suppressed — an old default must never silently re-enable the fork's
-  // rendered-line search, and must not reach the Host query either.
-  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.transcript.search': 'ctrl+g' }))
-  queries.length = 0
-  for (const key of ['\x06', '\x1b[102;6u']) {
-    vt.sendInput(key)
-    await vt.waitForRender()
-    assert.equal(app.isSearching(), false, `${JSON.stringify(key)} must open nothing once remapped`)
-    const painted = vt.getViewport().join('\n')
-    assert.ok(!painted.includes('Find in transcript'), 'the fork native search must stay suppressed after a remap')
-    assert.ok(!painted.includes('Shift+Enter'), 'the fork native navigation row must stay suppressed after a remap')
-    vt.sendInput('zzz')
-    await vt.waitForRender()
-  }
-  assert.deepEqual(queries, [], 'a suppressed key must never reach the Host query')
+  let title = paintedTitle()
+  clickCell(title.view + 1, title.row)
+  await vt.waitForRender()
+  assert.deepEqual(scopes, [], 'clicking the already active scope is a no-op')
+
+  title = paintedTitle()
+  const pressX = title.view + 1
+  const releaseX = title.full + 1
+  const y = title.row + 1
+  vt.sendInput(`\x1b[<0;${pressX};${y}M`)
+  vt.sendInput(`\x1b[<0;${releaseX};${y}m`)
+  await vt.waitForRender()
+  assert.deepEqual(scopes, [], 'pressing one scope and releasing on the other is not a click')
+
+  title = paintedTitle()
+  clickCell(title.full + 1, title.row)
+  await vt.waitForRender()
+  assert.deepEqual(scopes, ['full'])
+  assert.ok(vt.getViewport().join('\n').includes('[Full]'))
+  assert.ok(vt.getViewport().join('\n').includes('needle'), 'the single query survives pointer scope selection')
   app.stop()
 })
 

@@ -14,7 +14,7 @@ import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import { SESSION_FORMAT_VERSION, type SessionEvent } from '@deepseek-ai/dsh-session'
-import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
+import { getCapabilities, setCapabilities, stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import { sanitizeDisplayText } from '../../src/tui/presentation/terminal-text.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import { TranscriptFolder, type TranscriptMessage } from '../../src/transcript.ts'
@@ -102,6 +102,7 @@ async function mountSearchRunner(
   matchTurns: readonly number[],
   term = 'transcript needle',
   events?: readonly SessionEvent[],
+  fullscreen: 'on' | 'off' = 'on',
 ): Promise<RunnerFixture> {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-search-runner-')
@@ -125,7 +126,7 @@ async function mountSearchRunner(
     events: events === undefined ? searchSession(turns, matchTurns, term) : [...events],
   })
   const harness = makeHarness(home, session, { provider: 'p', model: 'm' })
-  const fiber = await mountRunner(context, home, harness, { sessionId: session.id }, { sessionId: session.id, fullscreen: 'on' })
+  const fiber = await mountRunner(context, home, harness, { sessionId: session.id }, { sessionId: session.id, fullscreen })
   life.defer(() => fiber.dispose())
   const app = probe.apps.at(-1)
   assert.ok(app, 'the production runner must create a TuiApp')
@@ -187,6 +188,106 @@ function columnOf(line: string, needle: string, occurrence = 0): number {
 }
 
 const STRONG_BG = 0xf5c542
+
+test('runner rolls back a Runtime scope committed before Search projection throws', async (t) => {
+  const fixture = await mountSearchRunner(t, 1, [], 'needle', undefined, 'off')
+  const { app } = fixture
+  assert.equal(app.isFullscreen(), false, 'the Direct runner starts in Regular')
+  const originalSetSearchScope = app.setSearchScope
+  const failure = new Error('Search scope projection failed')
+  app.setSearchScope = function (this: TuiApp, scope) {
+    originalSetSearchScope.call(this, scope)
+    throw failure
+  }
+
+  assert.throws(() => app.startTranscriptSearch('view'), error => error === failure,
+    'the original post-commit projection failure remains observable')
+  assert.equal(app.isSearching(), false, 'the failed admission never mounts Search')
+  assert.equal(app.isFullscreen(), false, 'the temporary Reader returns on Runtime admission failure')
+
+  app.setSearchScope = originalSetSearchScope
+  app.startTranscriptSearch('full')
+  await fixture.settleRender()
+  assert.equal(app.isSearching(), true, 'Runtime activeSearchScope was retired and a later Full open is admitted')
+  assert.equal(app.isFullscreen(), true)
+  app.closeTranscriptSearch()
+  await fixture.settleRender()
+  assert.equal(app.isFullscreen(), false)
+})
+
+test('runner search: Ctrl+F routes View hits and Tab switches the retained query to Full semantics', async (t) => {
+  const previousCapabilities = getCapabilities()
+  setCapabilities({ images: null, trueColor: true, hyperlinks: true })
+  t.after(() => setCapabilities(previousCapabilities))
+  const events: SessionEvent[] = [
+    event('turn/start', { turn: 0 }, 0),
+    event('user/message', {
+      id: MessageId('dual-search-user'),
+      role: 'user',
+      content: [{ type: 'text', text: 'needle in the prompt' }],
+      source: { kind: 'user' },
+    }, 1),
+    event('assistant/message', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('dual-search-assistant'),
+        role: 'assistant',
+        content: [{ type: 'text', text: '[label needle](https://example.invalid/needle) needle body' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+      stream: [],
+    }, 2),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 3),
+  ]
+  const fixture = await mountSearchRunner(t, 1, [], 'needle', events)
+  const originalSearch = TranscriptFolder.prototype.search
+  let fullSearchCalls = 0
+  TranscriptFolder.prototype.search = function (this: TranscriptFolder, query: string, options?: Parameters<TranscriptFolder['search']>[1]) {
+    fullSearchCalls += 1
+    return originalSearch.call(this, query, options)
+  }
+  t.after(() => { TranscriptFolder.prototype.search = originalSearch })
+
+  fixture.input('\x06')
+  await fixture.settleRender()
+  typeQuery(fixture, 'needle')
+  await fixture.settleRender()
+  const mountedRows = (fixture.app as unknown as {
+    mountedTranscriptBlocks: ReadonlyArray<{ rendered: readonly string[] }>
+  }).mountedTranscriptBlocks.flatMap(block => block.rendered).map(stripTerminalSequences)
+  assert.deepEqual(fixture.app.renderedViewSearchStatus(), { currentIndex: 0, count: 3 },
+    `View counts prompt, visible link label and body, not hidden href; mounted=${JSON.stringify(mountedRows)}; frame=${JSON.stringify(fixture.vt.getViewport().map(stripTerminalSequences))}`)
+  assert.equal(fullSearchCalls, 0, 'View input never calls the Full Folder authority')
+  let title = fixture.vt.getViewport().map(stripTerminalSequences).find(line => line.includes('[View]'))
+  assert.ok(title?.includes('1/3'), `View title reads its mounted occurrence status:\n${fixture.vt.getViewport().join('\n')}`)
+  assert.equal(fixture.app.transcriptSearchPresentationForTest(), undefined,
+    'View never installs a Full semantic target')
+
+  fixture.input('\t')
+  await fixture.settleRender()
+  assert.ok(fullSearchCalls > 0, 'Tab switches to the existing semantic Folder search')
+  assert.equal(fixture.app.transcriptSearchCoverageForTest(), 'entire-session',
+    'the Direct runner publishes complete Folder coverage only on its Direct composition')
+  title = fixture.vt.getViewport().map(stripTerminalSequences).find(line => line.includes('[Full]'))
+  assert.ok(title?.includes('1/4'), `Full retains the hidden-href semantic occurrence:\n${fixture.vt.getViewport().join('\n')}`)
+  assert.ok(fixture.vt.getViewport().map(stripTerminalSequences).some(line => line.includes('needle')),
+    'the scope switch retains the original query')
+  const fullTarget = fixture.app.transcriptSearchPresentationForTest()
+  assert.ok(fullTarget, 'Full query installs a current semantic target')
+  assert.equal(fullTarget?.message?.kind, 'user',
+    'Full current selection follows semantic source order, not a View ordinal')
+
+  fixture.input('\x06')
+  await fixture.settleRender()
+  assert.deepEqual(fixture.app.renderedViewSearchStatus(), { currentIndex: 0, count: 3 })
+  assert.equal(fixture.app.transcriptSearchPresentationForTest(), undefined,
+    'Full target and reveal are retired before mounted View results return')
+  const callsAfterSwitch = fullSearchCalls
+  fixture.input('\r')
+  await fixture.settleRender()
+  assert.deepEqual(fixture.app.renderedViewSearchStatus(), { currentIndex: 1, count: 3 })
+  assert.equal(fullSearchCalls, callsAfterSwitch, 'View Next never calls the Full Folder authority')
+})
 
 test('runner search: a same-window query re-windows zero times and rebuilds at most once', async (t) => {
   const fixture = await mountSearchRunner(t, 30, [25, 29])

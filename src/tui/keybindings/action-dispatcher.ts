@@ -36,6 +36,8 @@ export interface AppActionHost {
   requestExit(key: KeyId): boolean
   /** Open the transcript search overlay. */
   openTranscriptSearch(): boolean
+  /** Open the rendered-view transcript search overlay. */
+  openTranscriptViewSearch(): boolean
   /** Return the transcript presentation to the live tail. */
   jumpLatest(): boolean
   /** Close the transcript search overlay. */
@@ -107,6 +109,10 @@ export class AppActionDispatcher {
         return this.host.requestExit(key)
       case 'app.transcript.search':
         return this.host.openTranscriptSearch()
+      case 'app.transcript.search.view':
+        return this.host.openTranscriptViewSearch()
+      case 'app.transcript.search.scope':
+        return true
       case 'app.transcript.jumpLatest':
         return this.host.jumpLatest()
       case 'app.transcript.search.next':

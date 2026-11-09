@@ -51,7 +51,10 @@ function harness(options: {
   /** The hydrate outcome: undefined means the commit was fenced out. */
   coldHydrate(): Promise<unknown>
   /** S3-R0: the committed proof (or undefined when the read was superseded). */
-  rehydrate(options?: { readonly measure?: boolean }): Promise<unknown>
+  rehydrate(options?: { readonly measure?: boolean }): Promise<{
+     readonly proof: { readonly generation: unknown; readonly binding: unknown; readonly revision: number }
+     readonly hasMore: boolean
+   } | undefined>
   resetForGeneration(): void
   draftClears(): number
   /** The live presentation bridge (fold identity is the commit witness). */
@@ -68,6 +71,7 @@ function harness(options: {
   contextRefreshes(): readonly string[]
   /** Every status-fact commit (RFL-007 planMode witness). */
   statusFacts(): ReadonlyArray<Record<string, unknown>>
+  searchCoverage(): readonly string[]
 } {
   let window: PresentationReadSnapshot | undefined
   let generation = 0
@@ -91,6 +95,7 @@ function harness(options: {
   const contextRefreshes: string[] = []
   /** Every status-fact commit (planMode and friends). */
   const statusFacts: Array<Record<string, unknown>> = []
+  const searchCoverage: string[] = []
   const surface = {
     app,
     openingJournal: journal,
@@ -99,6 +104,7 @@ function harness(options: {
       commitStatusFacts: (facts: Record<string, unknown>) => { statusFacts.push(facts) },
     }),
     resetSearchPresentation: () => {}, resetTasks: () => {}, resetPendingPresentation: () => {},
+    setTranscriptSearchCoverage: (coverage: string) => { searchCoverage.push(coverage) },
     applyResumedCompaction: (id: string | undefined, active: boolean, phase?: string) => { resumedCompactions.push({ id, active, phase }) }, repaint: () => {}, refreshPendingInput: () => {},
     refreshTasks: () => {}, refreshAgents: () => {},
   }
@@ -174,9 +180,34 @@ function harness(options: {
     contextDirty: () => contextDirty,
     contextRefreshes: () => contextRefreshes,
     statusFacts: () => statusFacts,
+    searchCoverage: () => searchCoverage,
     presentation,
   }
 }
+
+test('Remote search coverage follows only the official current Reader snapshot', async () => {
+  const h = harness({ refoldProof: (_sessionId, revision) => ({ generation: 1, binding: {}, revision }) })
+  h.setWindow([], false, 1)
+  const cold = await h.coldHydrate() as { hasMore: boolean } | undefined
+  assert.equal(cold?.hasMore, false,
+    'the committed cold-hydrate outcome carries the official Reader hasMore=false fact')
+
+  h.setWindow([], true, 2)
+  const outcome = await h.rehydrate() as { proof: { revision: number }; hasMore: boolean } | undefined
+  assert.equal(outcome?.proof.revision, 2)
+  assert.equal(outcome?.hasMore, true,
+    'a fenced refold carries its own Reader hasMore=true fact')
+  h.resetForGeneration()
+  assert.deepEqual(h.searchCoverage().at(-1), 'loaded-history',
+    'a new Remote subject retires the old coverage fact before its Reader snapshot commits')
+
+  const stale = harness({ refoldProof: () => undefined })
+  stale.setWindow([], false, 3)
+  await stale.coldHydrate()
+  stale.setWindow([], true, 4)
+  assert.equal(await stale.rehydrate(), undefined,
+    'a Reader window whose read→commit proof is stale publishes no coverage outcome')
+})
 
 test('the read→commit fence refuses a superseded revision (nothing is replaced)', async () => {
   // The S3-R0 window re-fold is only valid while the official window STILL is

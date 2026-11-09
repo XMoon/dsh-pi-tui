@@ -1,8 +1,6 @@
 /**
- * The action definition table contract (plan §21): unique ids, valid
- * default keys, protected actions, and no accidental duplicate overlapping
- * defaults. This is the M0 gate — the defaults MUST match the
- * pre-migration behavior.
+ * The action definition table contract: unique ids, valid defaults,
+ * protected actions, and no accidental duplicate overlapping defaults.
  * @module @xmoon76/dsh-pi-tui/keybinding-definitions.test
  */
 
@@ -46,7 +44,7 @@ test('every definition carries description, category and scope', () => {
   }
 })
 
-test('the M0 gate: default keys match the pre-migration behavior', () => {
+test('unrelated host default keys remain stable', () => {
   const defaults = (id: AppKeybindingId): readonly string[] => APP_KEYBINDINGS[id].defaultKeys
   assert.deepEqual(defaults('app.input.submit'), ['enter'])
   assert.deepEqual(defaults('app.input.submitAccelerated'), ['ctrl+enter'])
@@ -58,7 +56,11 @@ test('the M0 gate: default keys match the pre-migration behavior', () => {
   assert.deepEqual(defaults('app.input.dequeue'), ['alt+up'])
   assert.deepEqual(defaults('app.agent.interrupt'), ['escape'])
   assert.deepEqual(defaults('app.exit.request'), ['ctrl+c', 'ctrl+d'])
-  assert.deepEqual(defaults('app.transcript.search'), ['ctrl+f', 'ctrl+shift+f'])
+  assert.deepEqual(defaults('app.transcript.search.view'), ['ctrl+f'])
+  assert.deepEqual(defaults('app.transcript.search'), ['ctrl+shift+f'])
+  assert.deepEqual(defaults('app.transcript.search.scope'), ['tab'])
+  assert.equal(APP_KEYBINDINGS['app.transcript.search.view'].configurable, true)
+  assert.equal(APP_KEYBINDINGS['app.transcript.search.scope'].configurable, false)
   assert.deepEqual(defaults('app.transcript.toggleExpand'), ['ctrl+o'])
   assert.deepEqual(defaults('app.transcript.toggleThinking'), ['alt+t'])
   assert.deepEqual(defaults('app.transcript.toggleFullscreen'), [])
@@ -119,6 +121,7 @@ test('viewer-blocked parent actions are all defined and configurable', () => {
   assert.ok(VIEWER_BLOCKED_PARENT_ACTIONS.has('app.input.dequeue'))
   assert.ok(VIEWER_BLOCKED_PARENT_ACTIONS.has('app.permission.cycle'))
   assert.ok(VIEWER_BLOCKED_PARENT_ACTIONS.has('app.transcript.search'))
+  assert.ok(VIEWER_BLOCKED_PARENT_ACTIONS.has('app.transcript.search.view'))
   assert.ok(VIEWER_BLOCKED_PARENT_ACTIONS.has('app.exit.request'))
   assert.ok(VIEWER_BLOCKED_PARENT_ACTIONS.has('app.editor.external'))
   assert.ok(VIEWER_BLOCKED_PARENT_ACTIONS.has('app.todo.toggle'))
