@@ -26,6 +26,8 @@ interface Harness {
   readonly scopes: Array<'view' | 'full'>
   readonly submits: string[]
   readonly copied: string[]
+  readonly searchSteps: Array<'next' | 'previous'>
+  readonly jumpLatest: number[]
 }
 
 function startSearchApp(width = 80, height = 24): Harness {
@@ -34,6 +36,8 @@ function startSearchApp(width = 80, height = 24): Harness {
   const scopes: Array<'view' | 'full'> = []
   const submits: string[] = []
   const copied: string[] = []
+  const searchSteps: Array<'next' | 'previous'> = []
+  const jumpLatest: number[] = []
   let app!: TuiApp
   app = new TuiApp(vt, {
     onSubmit: (text) => { submits.push(text) },
@@ -43,6 +47,9 @@ function startSearchApp(width = 80, height = 24): Harness {
       scopes.push(scope)
       app.setSearchScope(scope)
     },
+    onSearchNext: () => { searchSteps.push('next') },
+    onSearchPrev: () => { searchSteps.push('previous') },
+    onTranscriptJumpLatest: () => { jumpLatest.push(1); return true },
   }, {
     copySelection: async (text) => { copied.push(text); return true },
   })
@@ -50,7 +57,7 @@ function startSearchApp(width = 80, height = 24): Harness {
   startedApps.add(app)
   app.setFullscreen(true)
   app.setTranscript(longTranscript())
-  return { vt, app, queries, scopes, submits, copied }
+  return { vt, app, queries, scopes, submits, copied, searchSteps, jumpLatest }
 }
 
 function longTranscript(): TranscriptMessage[] {
@@ -300,6 +307,40 @@ test('interaction: View/Full actions and Tab switch one search overlay without e
   app.stop()
 })
 
+test('interaction: fixed Search scope/navigation/close keys outrank a Jump Latest remap', async () => {
+  const { vt, app, scopes, searchSteps, jumpLatest } = startSearchApp()
+  await vt.waitForRender()
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
+    'app.transcript.jumpLatest': ['tab', 'enter', 'shift+enter', 'ctrl+c'],
+  }))
+  await vt.waitForRender()
+  app.startTranscriptSearch('view')
+  await vt.waitForRender()
+
+  vt.sendInput('\t')
+  await vt.waitForRender()
+  assert.deepEqual(scopes, ['full'], 'fixed Tab changes View to Full before the colliding Jump Latest action')
+  assert.deepEqual(jumpLatest, [], 'Tab never dispatches Jump Latest while Search owns input')
+
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.deepEqual(searchSteps, ['next'], 'fixed Enter navigates the active Search scope before Jump Latest')
+  assert.deepEqual(jumpLatest, [], 'Enter never dispatches Jump Latest while Search owns input')
+  assert.equal(app.isSearching(), true, 'Search remains open after the fixed Next action')
+
+  vt.sendInput('\x1b[13;2u')
+  await vt.waitForRender()
+  assert.deepEqual(searchSteps, ['next', 'previous'], 'fixed Shift+Enter navigates previous before Jump Latest')
+  assert.deepEqual(jumpLatest, [], 'Shift+Enter never dispatches Jump Latest while Search owns input')
+  assert.equal(app.isSearching(), true, 'Search remains open after the fixed Previous action')
+
+  vt.sendInput('\x03')
+  await vt.waitForRender()
+  assert.equal(app.isSearching(), false, 'fixed Ctrl+C closes Search before Jump Latest')
+  assert.deepEqual(jumpLatest, [], 'Ctrl+C never dispatches Jump Latest while Search owns input')
+  app.stop()
+})
+
 test('interaction: legacy Full Ctrl+F override wins the View builtin and remapped-away Full never opens fork search', async () => {
   const { vt, app, scopes } = startSearchApp()
   await vt.waitForRender()
@@ -377,6 +418,34 @@ test('interaction: the fixed-width theme and glyph matrix keeps one active scope
     }
   }
 })
+test('interaction: a painted same-layout frame between scope press and release keeps the click', async () => {
+  const { vt, app, scopes } = startSearchApp()
+  await vt.waitForRender()
+  vt.sendInput('\x06')
+  await vt.waitForRender()
+  const lines = (): string[] => vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/gu, ''))
+  const titleRow = (): number => lines().findIndex(line => line.includes('[View]'))
+  const fullColumn = (): number => {
+    const row = lines()[titleRow()]!
+    const index = row.indexOf('Full')
+    assert.ok(index >= 0, `Full scope control is painted:\n${lines().join('\n')}`)
+    return index
+  }
+  const row = titleRow()
+  assert.ok(row >= 0, `View scope title is painted:\n${lines().join('\n')}`)
+  const column = fullColumn()
+
+  vt.sendInput(`\x1b[<0;${column + 1};${row + 1}M`)
+  app.requestRender()
+  await vt.waitForRender()
+  vt.sendInput(`\x1b[<0;${column + 1};${row + 1}m`)
+  await vt.waitForRender()
+
+  assert.deepEqual(scopes, ['full'], 'same-cell release after a same-layout painted frame switches in place')
+  assert.ok(lines().some(line => line.includes('[Full]')), 'the Full title becomes the actual painted scope')
+  app.stop()
+})
+
 test('interaction: clicking the painted scope title switches in place and a cross-scope release is inert', async () => {
   const { vt, app, scopes } = startSearchApp()
   await vt.waitForRender()

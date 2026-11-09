@@ -112,6 +112,30 @@ test('transcript search: coverage and temporary-reader labels remain explicit', 
   assert.ok(complete.render(240).map(stripTerminalSequences)[2]!.includes('Entire session'))
 })
 
+test('transcript search: a same-layout repaint preserves a scope click press', () => {
+  const scopes: TranscriptSearchScope[] = []
+  const search = component({ onScopeRequest: scope => scopes.push(scope) })
+  search.render(60)
+  const fullColumn = 26
+  search.handleMouse(mouse('press', fullColumn, 0))
+  search.render(60)
+  search.handleMouse(mouse('release', fullColumn, 0))
+  search.handleMouse(mouse('click', fullColumn, 0))
+  assert.deepEqual(scopes, ['full'], 'a repaint with the same painted scope geometry keeps the press live')
+})
+
+test('transcript search: a changed title layout invalidates a scope click press', () => {
+  const scopes: TranscriptSearchScope[] = []
+  const search = component({ onScopeRequest: scope => scopes.push(scope) })
+  search.render(60)
+  const fullColumn = 26
+  search.handleMouse(mouse('press', fullColumn, 0))
+  search.render(24)
+  search.handleMouse(mouse('release', fullColumn, 0, { width: 24 }))
+  search.handleMouse(mouse('click', fullColumn, 0, { width: 24 }))
+  assert.deepEqual(scopes, [], 'a press cannot activate stale scope geometry after the title moves')
+})
+
 test('transcript search: a title click changes scope only after a same-target click', () => {
   const scopes: TranscriptSearchScope[] = []
   const search = component({ onScopeRequest: scope => scopes.push(scope) })

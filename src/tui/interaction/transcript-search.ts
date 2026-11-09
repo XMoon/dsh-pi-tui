@@ -59,6 +59,7 @@ export class TranscriptSearchComponent implements Component, Focusable {
   private _focused = false
   private lastRenderWidth = 0
   private titleEpoch = 0
+  private titleLayoutKey = ''
   private scopeHits: ScopeHit[] = []
   private pressedScope: PressedScope | undefined
 
@@ -95,9 +96,6 @@ export class TranscriptSearchComponent implements Component, Focusable {
   setScope(scope: TranscriptSearchScope): void {
     if (this.scope === scope) return
     this.scope = scope
-    this.titleEpoch += 1
-    this.scopeHits = []
-    this.pressedScope = undefined
     this.input.invalidate()
   }
 
@@ -176,20 +174,21 @@ export class TranscriptSearchComponent implements Component, Focusable {
   }
 
   invalidate(): void {
-    this.titleEpoch += 1
-    this.scopeHits = []
-    this.pressedScope = undefined
     this.input.invalidate()
   }
 
   render(width: number): string[] {
     this.lastRenderWidth = width
-    this.titleEpoch += 1
-    this.scopeHits = []
     const safeWidth = Math.max(1, width)
     const query = this.input.getValue()
     const matchStatus = query === '' ? '' : this.matchStatus()
     const title = this.renderTitle(safeWidth, matchStatus)
+    const layoutKey = `${safeWidth}:${this.scopeHits.map(hit => `${hit.scope}:${hit.start}:${hit.end}`).join('|')}`
+    if (layoutKey !== this.titleLayoutKey) {
+      this.titleLayoutKey = layoutKey
+      this.titleEpoch += 1
+      this.pressedScope = undefined
+    }
     const hint = color.textDim(this.renderHint(safeWidth))
     return [title, ...this.input.render(safeWidth), hint]
   }
