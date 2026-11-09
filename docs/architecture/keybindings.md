@@ -65,12 +65,11 @@ non-capturing plugin keybindings
 ```
 
 **Fixed overlay-key precedence.** While a capturing overlay is open its
-NON-CONFIGURABLE keys (search close/next/previous, question/tasks flow
-keys) win by precedence — a configurable action (e.g. the search toggle)
-remapped to one of those keys is ECLIPSED inside the overlay (the
-binding still works outside it). The config parser warns on such a
-collision (`FIXED_OVERLAY_KEYS`); the overlay never resolves the
-configurable action first (§3.3).
+NON-CONFIGURABLE keys (search close/next/previous/scope, question/tasks flow
+keys) win by precedence — a configurable action remapped to one of those keys is
+ECLIPSED inside the overlay (the binding still works outside it). The config
+parser warns on such a collision (`FIXED_OVERLAY_KEYS`); the overlay never
+resolves the configurable action first (§3.3).
 
 ### The conditional task affordance vs the actual route
 
@@ -246,22 +245,34 @@ rebuild alone.
     sanctioned seams (read-only viewer guard, the Ctrl+C clear-draft
     semantic discriminator, approval dialog keys, replacement-editor Enter
     seams, the effective-submit Shift+Enter exclusion).
-12. **A fullscreen Job workspace re-scopes the EFFECTIVE Find binding to
-    its own Output.** While a Job workspace owns the physical screen, the
-    winning resolution of `app.transcript.search` is interpreted as
-    "find in the current retained Output": the key is consumed by the Job
-    panel, the global Transcript search handler is never entered and the
-    fork's built-in search overlay is never opened. This reuses the LIVE
-    winner (so a remap, a disable or a leader-only binding moves the Job
-    key too, and a disabled Find advertises nothing) without creating a
-    second configurable action id or a second keymap truth; `/` stays a
-    non-configurable Job-local alias, active only while the query is not
-    being edited. A leader completion is the same action's effective
-    completion: the Job input branch feeds exactly the exit-bound and
-    Find-bound completing keys to the shared machine and cancels every
-    other completion without dispatching it, and the leader activation
-    wiring intercepts Find for the Job BEFORE the host action dispatch —
-    never "open the Transcript search, then repair it".
+12. **Transcript Find has separate View and Full actions with one winner.**
+    `app.transcript.search.view` is the configurable global View action, default
+    Ctrl+F. `app.transcript.search` keeps its historical Full semantic and is the
+    configurable global Full action, default Ctrl+Shift+F. View reads only the
+    current mounted rendered transcript; Full reads the active semantic Folder.
+    Both actions open or switch the same Search overlay and preserve its one
+    query. While that overlay owns input, fixed close/next/previous and the
+    non-configurable `app.transcript.search.scope` Tab action run before the
+    effective View/Full winner; Tab outside Search remains owned by its original
+    editor/component.
+
+    An explicit stored binding for the historical Full action remains Full. If
+    the user binds Full to Ctrl+F, its priority-200 rule shadows the View
+    builtin, and the same winner is shown by the keybinding read model and used
+    by the real fullscreen input path. A remap or `false` replaces/disables the
+    selected action; no hidden builtin or second search mode is fabricated.
+    Same-priority user collisions deactivate both rules with the normal
+    diagnostic. The Host-private View action is not added to the Stable plugin
+    `TuiAction` set.
+
+    A fullscreen Job workspace re-scopes the winning resolution of EITHER Find
+    action to its own retained Output. The panel consumes the winner before the
+    global Transcript handler; direct and leader completions never open a
+    parent Search overlay. Its one hint prefers an available View direct key,
+    then Full direct, View leader and Full leader, excluding Job-reserved keys;
+    `/` remains the local alias. Job-local Find works through Ctrl+F,
+    Ctrl+Shift+F, a custom binding or a leader sequence.
+
 13. **A fullscreen Job workspace has fixed Job-local read-only verbs that
     are NOT configurable action ids.** `v` opens the shell Command page
     from the Output page and `C` (`shift+c`) copies the CURRENT reading

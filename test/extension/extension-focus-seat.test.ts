@@ -192,19 +192,18 @@ test('fullscreen closes the ordinary search overlay with its close callback', as
   await vt.waitForRender()
   attach(host)
   await settle()
+  app.setFullscreen(true)
 
   app.startTranscriptSearch()
   await settle()
   assert.equal(searchOpens, 1)
   assert.equal(searchCloses, 0)
 
-  // The screen swap does not remount the ordinary search overlay: it must
-  // be closed properly (the runner's onSearchClose resets the search
-  // state/anchor), so the next Ctrl+F reopens a FRESH search.
-  app.setFullscreen(true)
-  await vt.waitForRender()
+  // Search is already in Fullscreen above. Returning to the Main screen drops
+  // its non-remountable raw overlay and must close the runner-owned state.
+  app.setFullscreen(false)
   await settle()
-  assert.equal(searchCloses, 1, 'the fullscreen teardown closes the search with its callback')
+  assert.equal(searchCloses, 1, 'the screen transition closes the search with its callback')
 
   app.startTranscriptSearch()
   await settle()

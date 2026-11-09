@@ -19,11 +19,13 @@ The legacy `focusMode` field remains only as a migration input and is preserved
 during whole-document settings writes.
 
 There is no second transcript data model: Compact is a projection over the same
-`TranscriptFolder` rows, sharing one renderer, one measurement path, one
-search index, and one viewport owner. Manual disclosure owners (expanded Work
-spans, Context clusters, tool cards, Thinking) remain separate from preset
-defaults; changing a preset never invents a `lastNonFocusPreset` or transfers
-manual disclosure ownership.
+`TranscriptFolder` rows, sharing one renderer, one measurement path, the Full
+semantic search index, and one viewport owner. View Find has a separate
+short-lived occurrence cursor over the currently mounted components; it is not
+a second Session index or a durable transcript model. Manual disclosure owners
+(expanded Work spans, Context clusters, tool cards, Thinking) remain separate
+from preset defaults; changing a preset never invents a `lastNonFocusPreset` or
+transfers manual disclosure ownership.
 
 **Untrusted-text invariant.** Full, Compact and expanded Focus share ONE safe
 **display** projection: every externally sourced message/tool/context string is
@@ -119,7 +121,7 @@ projectTranscriptStructure()
   strictly "newly created after the turn completed" — NEVER "touched by a
   post-`turn/end` event": a `tool/result` that finds its own pending/running
   card still settles that card normally and leaves it fully legal evidence.
-  Such a row stays in the transcript (Full, expanded Focus, search,
+  Such a row stays in the transcript (Full preset, expanded Focus, Full search,
   diagnostic), but it is excluded from the settled turn's Process/Action
   aggregates at THREE shared consumers: the Action classifier, Work-span
   membership, and consecutive-read grouping (a synthesized group card would
@@ -881,6 +883,43 @@ every hidden node temporarily without writing manual state; an ordinary dismiss
 promotes every currently necessary node atomically; an explicit collapse revokes
 the temporary reveal so the owner cannot instantly reopen. A flat/fail-open
 container mints no reveal node.
+
+### Transcript Find scopes
+
+PiTui exposes two Find scopes through ONE three-row overlay and ONE query Input:
+
+- **View** searches only the current mounted, rendered transcript batch. Its
+  result count and current occurrence come from `TuiApp.renderedViewSearch`; the
+  reader uses the same mounted block identities, row geometry and viewport as
+  transcript painting. Hidden Markdown links, folded rows, off-window history,
+  and unmaterialized turns are not View results. View navigation steps only this
+  mounted occurrence set and cannot trigger Full semantic search or temporary
+  disclosure.
+- **Full** searches the active `TranscriptFolder` semantic corpus and retains
+  semantic occurrence identity, virtual-window navigation and its existing
+  presentation proof/reveal rules. Direct has a complete Session fold. Remote
+  search is limited to the official Reader snapshot already loaded for the
+  current subject: label it `Loaded history`, and when that same current snapshot
+  proves `hasMore`, say that earlier history was not searched. A missing or stale
+  snapshot is never interpreted as complete coverage. Full never adopts a View
+  occurrence ordinal or painted-row authority.
+- The active scope and single query belong to the mounted `SurfaceRuntime`
+  transaction. Scope changes keep the query, retire the old scope's selection
+  and reveal, then select the destination scope's first result from its own
+  authority. Leaving Full clears its temporary reveal before View measures the
+  mounted rows; a View dismiss never promotes a Full reveal, and Full dismiss in
+  a temporary Regular Reader does not persist a reveal into user disclosure.
+- Regular terminal scrollback has no application-owned row address. Opening
+  either scope from Regular therefore leases the existing TuiApp Fullscreen
+  transcript for this Search only; it creates no second TUI or Session owner and
+  writes no fullscreen preference. Closing the Search retires its overlay and
+  presentation before returning the still-current screen to Regular. Admission
+  refuses workspaces, blocking editor-seat owners, active viewers, and other
+  capturing overlays. A newer physical screen owner always wins a re-entrant
+  close/rollback.
+- These PiTui row/cell facts do not qualify native TSP View search. A renderer
+  without its own native View authority must retain its separate Full behavior
+  and must not present PiTui rendered results as TSP results.
 
 ### Source-cell proof of a rendered search hit
 

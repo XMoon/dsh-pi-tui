@@ -422,7 +422,26 @@ test('a Remote resumed session hydrates the real transcript and status through t
     session.append('step/end', { turn: 1, step: 1 })
     session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
   }
-  const fixture = await mountRemoteRunner(life, { presetId: hostPreset, resumeSessionId: mainId, host: seedHost })
+  let officialHasMore: boolean | undefined
+  const fixture = await mountRemoteRunner(life, {
+    presetId: hostPreset,
+    resumeSessionId: mainId,
+    host: seedHost,
+    beforeRunnerMount: presentation => {
+      // Keep the official Remote reader and its real event rows, while controlling
+      // the one authoritative page-boundary bit for this coverage qualification.
+      const reader = presentation.presentationReader as {
+        read(sessionId: string, signal?: AbortSignal): Promise<{ readonly hasMore: boolean; readonly coverage: string } | undefined>
+      }
+      const originalRead = reader.read
+      reader.read = async function controlledBoundary(sessionId: string, signal?: AbortSignal) {
+        const snapshot = await originalRead.call(reader, sessionId, signal)
+        if (snapshot === undefined) return undefined
+        officialHasMore = snapshot.hasMore
+        return { ...snapshot, hasMore: true, coverage: 'bounded' }
+      }
+    },
+  })
   await waitFor('transcript hydration', () => {
     const text = fixture.vt.getViewport().join('\n')
     return text.includes('hello remote') && text.includes('remote answer one')
@@ -432,6 +451,78 @@ test('a Remote resumed session hydrates the real transcript and status through t
   // duplicate identity (the local-echo ledger never ran: no submit happened).
   assert.equal(frame.includes('hello remote'), true, 'the resumed user row is rendered')
   assert.equal(frame.includes('remote answer one'), true, 'the resumed assistant row is rendered')
+  assert.equal(officialHasMore, false, 'the fixture captures the official Reader boundary before controlling the positive')
+  const app = fixture.runnerApp() as TuiApp
+  await waitFor('Remote search coverage commit', () => app.transcriptSearchCoverageForTest() === 'loaded-history-with-more', 5_000)
+  app.startTranscriptSearch('full')
+  await waitFor('honest Remote Full coverage label', () => fixture.vt.getViewport().join('\n').includes('Older not searched'), 5_000)
+  assert.ok(!fixture.vt.getViewport().join('\n').includes('Entire session'),
+    'Remote never describes the loaded query scope as a complete Session')
+})
+
+test('a Remote Full Find with the official complete window says only Loaded history', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm3-4-pr2-search-complete-window'
+  const hostPreset = 'm3-4-pr2-preset'
+  const host = await mountRemotePresentationHost(life, hostPreset)
+  await host.harness.create(SessionId(mainId), undefined, { cwd: host.anchorDir })
+  const session = host.ctx.sessions.get(SessionId(mainId)) as unknown as {
+    append(type: string, data: unknown, options?: { surfaceOp?: 'append' }): void
+  }
+  session.append('turn/start', { turn: 1 })
+  session.append('step/start', { turn: 1, step: 1 })
+  session.append('user/message', {
+    id: 'u-complete-search',
+    role: 'user',
+    content: [{ type: 'text', text: 'complete remote reader window' }],
+    source: { kind: 'user' },
+  }, { surfaceOp: 'append' })
+  session.append('assistant/message', {
+    turn: 1,
+    step: 1,
+    message: {
+      id: 'a-complete-search',
+      role: 'assistant',
+      content: [{ type: 'text', text: 'remote response' }],
+      source: { kind: 'model', provider: 'smoke', model: 'smoke' },
+    },
+    stream: [],
+    usage: { inputTokens: 4, outputTokens: 2 },
+  }, { surfaceOp: 'append' })
+  session.append('step/end', { turn: 1, step: 1 })
+  session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+
+  let officialHasMore: boolean | undefined
+  const fixture = await mountRemoteRunner(life, {
+    presetId: hostPreset,
+    resumeSessionId: mainId,
+    host,
+    beforeRunnerMount: presentation => {
+      // Observe and return the official Reader value unchanged: the test covers
+      // the production hasMore=false projection all the way to the Search hint.
+      const reader = presentation.presentationReader as {
+        read(sessionId: string, signal?: AbortSignal): Promise<{ readonly hasMore: boolean; readonly coverage: string } | undefined>
+      }
+      const originalRead = reader.read
+      reader.read = async function observedOfficialBoundary(sessionId: string, signal?: AbortSignal) {
+        const snapshot = await originalRead.call(reader, sessionId, signal)
+        if (snapshot !== undefined) officialHasMore = snapshot.hasMore
+        return snapshot
+      }
+    },
+  })
+  await waitFor('complete Remote hydration', () => fixture.vt.getViewport().join('\n').includes('complete remote reader window'), 20_000)
+  assert.equal(officialHasMore, false, 'the real official Reader snapshot proves this window is complete')
+  const app = fixture.runnerApp() as TuiApp
+  await waitFor('complete-window coverage commit', () => app.transcriptSearchCoverageForTest() === 'loaded-history', 5_000)
+  fixture.vt.resize(200, 30)
+  await fixture.vt.waitForRender()
+
+  app.startTranscriptSearch('full')
+  await waitFor('Remote loaded-history label', () => fixture.vt.getViewport().join('\n').includes('Loaded history'), 5_000)
+  const frame = fixture.vt.getViewport().join('\n')
+  assert.ok(!frame.includes('Entire session'), 'a bounded Remote Reader never claims a complete Session corpus')
+  assert.ok(!frame.includes('earlier history not searched'), 'hasMore=false adds no earlier-history suffix')
 })
 
 test('the resumed Remote startup keeps input accepted while its hydration read is held', async (t) => {

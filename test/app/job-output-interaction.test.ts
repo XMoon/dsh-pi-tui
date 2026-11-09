@@ -840,54 +840,53 @@ test('the first Esc leaves only the search (still PAUSED in the same Job) and th
 
 // ── B-08: remap / disable / leader ─────────────────────────────────────────
 
-test('the Job Find follows the EFFECTIVE Find binding: a remap, a disable and a leader completion are all honored', async () => {
-  // A wide frame so the LOWEST-priority Find hint is actually on screen and can
-  // be read as the user's sink (plan §6.2 degradation order).
+test('Job Find applies both effective Search actions, disabled scopes, Full remaps and leader completions', async () => {
+  // A wide frame makes the selected live Find binding visible in the action bar.
   const { vt, app } = startApp({}, {}, 200, 40)
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
   await openFirstJob(vt, harness)
   harness.observation.latest()!.emit({ text: 'needle' })
   await vt.waitForRender()
-  assert.match(view(vt), /Ctrl\+F find/, 'the default direct binding is advertised')
+  assert.match(view(vt), /Ctrl\+F find/, 'View direct is the default highest-priority hint')
 
-  // A disabled Find advertises nothing and Ctrl+F is inert.
   app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
-    bindings: { 'app.transcript.search': false },
+    'app.transcript.search.view': false,
+    'app.transcript.search': false,
   }))
   await vt.waitForRender()
-  assert.ok(!/Ctrl\+F/.test(view(vt)), 'a disabled Find never advertises Ctrl+F')
-  assert.match(view(vt), /\/ find/, 'the Job-local `/` alias still advertises the only live entry')
+  assert.ok(!/Ctrl\+F|Ctrl\+Shift\+F/.test(view(vt)), 'disabling both scopes advertises neither trigger')
+  assert.match(view(vt), /\/ find/, 'the Job-local alias remains available')
   vt.sendInput('\x06')
   await vt.waitForRender()
-  assert.ok(!/Find Output:/.test(view(vt)), 'a disabled binding does not open the Job Find')
-  // `/` remains the Job-local alias.
+  assert.ok(!/Find Output:/.test(view(vt)))
   vt.sendInput('/')
   await vt.waitForRender()
   assert.match(view(vt), /Find Output:/)
   vt.sendInput('\x1b')
   await vt.waitForRender()
 
-  // A remap is what the Job honors — both the hint and the real key.
   app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
-    bindings: { 'app.transcript.search': 'ctrl+y' },
+    'app.transcript.search.view': false,
+    'app.transcript.search': 'ctrl+y',
   }))
   await vt.waitForRender()
-  assert.match(view(vt), /Ctrl\+Y find/, 'the hint follows the effective remap')
+  assert.match(view(vt), /Ctrl\+Y find/, 'Full remap is the Job-local trigger when View is disabled')
   vt.sendInput('\x06')
   await vt.waitForRender()
-  assert.ok(!/Find Output:/.test(view(vt)), 'the old key is really inert')
+  assert.ok(!/Find Output:/.test(view(vt)), 'the replaced View default never returns through Full')
   vt.sendInput('\x19')
   await vt.waitForRender()
   assert.match(view(vt), /Find Output:/)
   vt.sendInput('\x1b')
   await vt.waitForRender()
 
-  // A leader-bound Find completes into the Job Find without dispatching the
-  // Transcript search.
   app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
     leader: 'ctrl+x',
-    bindings: { 'app.transcript.search': '<leader>s' },
+    bindings: {
+      'app.transcript.search.view': false,
+      'app.transcript.search': '<leader>s',
+    },
   }))
   const originalStart = app.startTranscriptSearch
   let transcriptSearches = 0
@@ -900,8 +899,37 @@ test('the Job Find follows the EFFECTIVE Find binding: a remap, a disable and a 
   await vt.waitForRender()
   vt.sendInput('s')
   await vt.waitForRender()
-  assert.match(view(vt), /Find Output:/, 'the leader completion opens the Job Find')
+  assert.match(view(vt), /Find Output:/, 'the Full leader completion opens only the Job Find')
   assert.equal(transcriptSearches, 0, 'the Transcript search handler is never dispatched')
+
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
+    leader: 'ctrl+x',
+    bindings: {
+      'app.transcript.search.view': ['<leader>tab', '<leader>v'],
+      'app.transcript.search': false,
+    },
+  }))
+  await vt.waitForRender()
+  assert.match(view(vt), /Leader V find/, 'the hint skips reserved Tab and names the next usable View leader')
+  assert.ok(!/Leader Tab find/.test(view(vt)), 'the reserved leader completion is never advertised as Find')
+
+  vt.sendInput('\x18')
+  await vt.waitForRender()
+  vt.sendInput('\t')
+  await vt.waitForRender()
+  assert.match(view(vt), /Esc output/, 'reserved leader+Tab still reaches the Job page toggle')
+  assert.ok(!/Find Output:/.test(view(vt)), 'reserved leader+Tab never opens Find')
+  assert.equal(transcriptSearches, 0)
+  vt.sendInput('\t')
+  await vt.waitForRender()
+  vt.sendInput('\x18')
+  await vt.waitForRender()
+  vt.sendInput('v')
+  await vt.waitForRender()
+  assert.match(view(vt), /Find Output:/, 'the next non-reserved View leader opens the Job-local Find')
+  assert.equal(transcriptSearches, 0, 'the View leader never enters parent Transcript Search')
   app.stop()
 })
 
@@ -924,7 +952,10 @@ test('a Find binding remapped onto the reserved physical End cannot shadow the o
   assert.match(bar(), /Ctrl\+F find/)
 
   app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
-    bindings: { 'app.transcript.search': 'end' },
+    bindings: {
+      'app.transcript.search.view': false,
+      'app.transcript.search': 'end',
+    },
   }))
   await vt.waitForRender()
   assert.match(bar(), /Follow paused · End resume/, 'End still really resumes follow')
@@ -1467,7 +1498,10 @@ test('a Find binding remapped onto the reserved Tab cannot shadow the page toggl
   assert.match(view(vt), /Ctrl\+F find/, 'the default direct binding is advertised')
 
   app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
-    bindings: { 'app.transcript.search': 'tab' },
+    bindings: {
+      'app.transcript.search.view': false,
+      'app.transcript.search': 'tab',
+    },
   }))
   await vt.waitForRender()
 

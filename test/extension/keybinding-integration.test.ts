@@ -705,7 +705,7 @@ test('app.input.submit disabled: Enter never submits (PR review)', async () => {
 
 test('leader key colliding with an active host key: disabled with a diagnostic (PR review)', () => {
   const manager = new HostKeybindingManager()
-  // leader: ctrl+f collides with app.transcript.search's default ctrl+f.
+  // leader: ctrl+f collides with app.transcript.search.view's default ctrl+f.
   manager.setUserConfiguration(parseUserKeybindings({ leader: 'ctrl+f', bindings: { 'app.tasks.open': '<leader>t' } }))
   assert.equal(manager.leaderMachine(), undefined, 'the colliding leader must be disabled')
   assert.ok(manager.diagnosticsList().some(message => message.includes('leader key') && message.includes('active host key')),
@@ -1062,7 +1062,7 @@ test('read-only viewer: a remapped interrupt key (Ctrl+X) is inert, never the pa
 test('a leader-prefix collision stops advertising the leader bindings (PR review P2)', () => {
   const manager = new HostKeybindingManager()
   manager.setUserConfiguration(parseUserKeybindings({
-    leader: 'ctrl+f', // collides with app.transcript.search's ctrl+f
+    leader: 'ctrl+f', // collides with app.transcript.search.view's ctrl+f
     bindings: { 'app.transcript.toggleFullscreen': '<leader>n' },
   }))
   assert.equal(manager.leaderMachine(), undefined, 'the colliding leader is disabled')
@@ -1125,7 +1125,7 @@ test('closing a viewer with Esc disarms the main-session double-Esc window (PR r
 
 test('a SHADOWED leader-only submit is inert — no fabricated Enter fallback (review round 37)', () => {
   const manager = new HostKeybindingManager()
-  // leader: ctrl+f collides with app.transcript.search — the leader is
+  // leader: ctrl+f collides with app.transcript.search.view — the leader is
   // shadowed, so the <leader>s submit sequence can never fire. The
   // leader-only declaration REPLACED the builtin Enter in the unified
   // model, so a dead leader leaves submit with NO trigger — the

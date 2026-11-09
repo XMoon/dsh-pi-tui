@@ -675,6 +675,7 @@ export function applyRunnerWithRuntime(
       // The internal selection seam passes `override` ONLY for the Remote
       // composition (the surface is created before `remoteSources` below).
       mainProgressAuthority: override === undefined ? 'local-events' : 'host-snapshot',
+      initialSearchCoverage: override === undefined ? 'entire-session' : 'loaded-history',
       // Split-Client only: the PiTUI forwarded-interaction admission narrows to
       // this application's ONE committed Session (the runner's authoritative
       // owner publication), never the unconditional Direct delegation.
@@ -1657,12 +1658,15 @@ export function applyRunnerWithRuntime(
             // in-flight recovery reconcile still keeps its no-measure decision).
             const measure = remoteRefoldRequest.measure
             remoteRefoldRequest = IDLE_REMOTE_REFOLD_REQUEST
-            const proof = await presentation.rehydrateFromWindow(sessionId, { measure })
+            const outcome = await presentation.rehydrateFromWindow(sessionId, { measure })
             if (cleanedUp || remoteIngressHandle !== handle) return
             // An uncommitted re-fold (fence-dropped read) leaves the handle
             // recovering: the next official revision / open transition wakes us.
-            if (proof === undefined) continue
-            if (handle.acknowledgeWindowRefold(proof)) return
+            if (outcome === undefined) continue
+            if (handle.acknowledgeWindowRefold(outcome.proof)) {
+              surface.setTranscriptSearchCoverage(outcome.hasMore ? 'loaded-history-with-more' : 'loaded-history')
+              return
+            }
           }
         } finally {
           remoteRefoldInFlight = false
@@ -1742,6 +1746,7 @@ export function applyRunnerWithRuntime(
       }
       // A committed init releases the attempt's retry budget.
       lastInitRetry = undefined
+      surface.setTranscriptSearchCoverage(hydrate.hasMore ? 'loaded-history-with-more' : 'loaded-history')
       // Seed the compaction working-fold cache from the PROVEN cold-hydrate
       // fold (no first-use gap: the first settle reads the authoritative
       // complete-window answer, never the bare running bit).

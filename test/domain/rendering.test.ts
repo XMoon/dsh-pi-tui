@@ -1985,56 +1985,56 @@ test('fullscreen scrollback search opens with ctrl+shift+f', async () => {
   assert.ok(view.includes('Find transcript'), `search bar missing:\n${view}`)
 })
 
-test('ctrl+f opens and closes the transcript search (no fullscreen toggle)', async () => {
+test('Ctrl+F opens View Find and a second Ctrl+F closes it without toggling fullscreen', async () => {
   const { vt, app } = startApp()
   app.setTranscript([{ kind: 'user', turn: 0, text: 'needle' }])
   await viewport(vt)
   assert.equal(app.isFullscreen(), false)
-  vt.sendInput('\x06') // ctrl+f → search, NOT fullscreen
+  vt.sendInput('\x06') // Ctrl+F -> View search, NOT fullscreen
   let view = await viewport(vt)
-  assert.ok(view.includes('Find transcript'), `search bar missing:\n${view}`)
-  assert.equal(app.isFullscreen(), false, 'ctrl+f must not toggle fullscreen')
-  vt.sendInput('\x06') // ctrl+f again closes the overlay
+  assert.ok(view.includes('[View]'), `View search bar missing:\n${view}`)
+  assert.equal(app.isFullscreen(), true, 'Regular Find leases the existing fullscreen transcript reader')
+  vt.sendInput('\x06') // same active scope action closes the overlay
   view = await viewport(vt)
   assert.ok(!view.includes('Find transcript'), `search bar still open:\n${view}`)
+  assert.equal(app.isFullscreen(), false, 'closing the temporary reader returns to Regular')
 })
 
-test('transcript search: Ctrl+C closes the overlay and the hint advertises next/prev/close', async () => {
+test('transcript search: Ctrl+C and Esc close Full and the hint stays honest at fixed width', async () => {
   const { vt, app } = startApp()
   app.setTranscript([{ kind: 'user', turn: 0, text: 'needle' }])
   await viewport(vt)
-  vt.sendInput('\x06') // ctrl+f opens search
+  vt.sendInput('\x1b[102;6u') // Ctrl+Shift+F opens Full from Regular.
   let view = await viewport(vt)
-  assert.ok(view.includes('Find transcript'), `search bar missing:\n${view}`)
-  // The next/prev/close hint rides under the input. Its labels are rendered
-  // from the (non-configurable) keymap definitions and compacted to this exact
-  // overlay line, so the assertion pins the WHOLE hint rather than recomputing
-  // it in the test.
-  assert.ok(view.includes('↵ next · ⇧↵ prev · esc/ctrl+c close'), `search hint must render the full next/prev/close line:\n${view}`)
-  // Ctrl+C closes search (the old behavior: the overlay's shared Input
-  // swallowed Ctrl+C as its generic cancel and search stayed open).
-  vt.sendInput('\x03') // ctrl+c
+  assert.ok(view.includes('[Full]'), `Full search bar missing:\n${view}`)
+  assert.ok(view.includes('Loaded ·') || view.includes('Loaded history'), `loaded coverage stays visible in a readable short form:\n${view}`)
+  assert.ok(!view.includes('Entire session'), `standalone TuiApp never claims complete Session coverage:\n${view}`)
+  assert.ok(view.includes('returns inline'), `temporary Reader has an explicit return action:\n${view}`)
+  // Ctrl+C closes Search (not its generic Input and never the parent action).
+  vt.sendInput('\x03')
   view = await viewport(vt)
   assert.ok(!view.includes('Find transcript'), `Ctrl+C must close search:\n${view}`)
-  // Esc still closes, Enter/Shift+Enter still navigate (semantic close
-  // keeps both routes — no regression).
-  vt.sendInput('\x06')
+  assert.equal(app.isFullscreen(), false, 'Ctrl+C returns the temporary reader')
+  vt.sendInput('\x1b[102;6u')
   await viewport(vt)
   vt.sendInput('\x1b')
   view = await viewport(vt)
-  assert.ok(!view.includes('Find transcript'), `Esc must still close search:\n${view}`)
+  assert.ok(!view.includes('Find transcript'), `Esc must close search:\n${view}`)
+  assert.equal(app.isFullscreen(), false, 'Esc returns the temporary reader')
 })
 
-test('transcript search hint stays on one line at min-width (no layout break)', async () => {
-  const { vt, app } = startApp(24, 24) // the overlay minWidth
+test('transcript search scope labels stay on one row at min width', async () => {
+  const { vt, app } = startApp(24, 24)
   app.setTranscript([{ kind: 'user', turn: 0, text: 'needle' }])
   await viewport(vt)
-  vt.sendInput('\x06')
+  vt.sendInput('\x06') // View opens the temporary Reader.
   const view = await viewport(vt)
-  assert.ok(view.includes('Find transcript'), `search bar missing at min width:\n${view}`)
-  const hintRow = view.split('\n').find(line => line.includes('next'))
-  assert.ok(hintRow !== undefined, `hint must render at min width:\n${view}`)
-  assert.ok((hintRow ?? '').length <= 24, `hint must not overflow the overlay width:\n${view}`)
+  assert.ok(view.includes('[View] | Full'), `the minimum-width title keeps both scope identities:\n${view}`)
+  const rows = view.split('\n')
+  assert.ok(!rows.some((row, index) => index > 0 && /\[V\]|\[F\]/.test(row)),
+    `the title must stay on one row at the overlay min width:\n${view}`)
+  assert.ok(view.includes('Esc'), `the close/return action stays recognizable:\n${view}`)
+  assert.ok(!view.includes('Find transcript'), `the low-priority long title label drops first:\n${view}`)
 })
 
 test('transcript search: Left/Right/Home/End edit the query inside the overlay', async () => {

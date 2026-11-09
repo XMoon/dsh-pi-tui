@@ -1483,9 +1483,9 @@ test('ordinary keys and host shortcuts are inert inside the workspace and never 
   // so "B1-B never enters the background search" is a real call count.
   const originalStartTranscriptSearch = app.startTranscriptSearch
   let transcriptSearches = 0
-  app.startTranscriptSearch = function (this: TuiApp): void {
+  app.startTranscriptSearch = function (this: TuiApp, scope): void {
     transcriptSearches += 1
-    originalStartTranscriptSearch.call(this)
+    originalStartTranscriptSearch.call(this, scope)
   }
 
   for (const chunk of ['x', '\r', '\x0f', '\x1b[B', '\x1b[A', '1']) {
