@@ -6783,10 +6783,6 @@ export class TuiApp {
       // The search overlay owns this input; it is a fresh interaction, never
       // the second half of a parent keyboard exit confirmation.
       this.clearExitConfirmation()
-      if (this.keybindings.matches(data, 'app.transcript.jumpLatest')) {
-        const consumed = this.dispatchResolvedAction('app.transcript.jumpLatest', data)
-        if (consumed) return { consume: true }
-      }
       if (this.keybindings.matchesDefault(data, 'app.transcript.search.close')) {
         this.closeTranscriptSearch()
         return { consume: true }
@@ -6812,6 +6808,10 @@ export class TuiApp {
         if (this.searchComponent?.getScope() === scope) this.closeTranscriptSearch()
         else this.switchOpenTranscriptSearchScope(scope)
         return { consume: true }
+      }
+      if (this.keybindings.matches(data, 'app.transcript.jumpLatest')) {
+        const consumed = this.dispatchResolvedAction('app.transcript.jumpLatest', data)
+        if (consumed) return { consume: true }
       }
       return undefined
     }
