@@ -1245,6 +1245,272 @@ test('a skills/change emitted after surface teardown performs no further catalog
     'a post-teardown skills/change must not read the catalog again (the disposed coordinator must stay untouched)')
 })
 
+/**
+ * REGRESSION (Direct opening-journal handoff): the child `/new` Session is
+ * published and its cold transcript hydration has already installed the live
+ * Main folder/window/stats, but the transition still has to settle its
+ * post-hydration catalog refresh before it clears the opening journal. A TUI
+ * command that the official executor runs in that window (`command/run` +
+ * `command/done`, exactly the shape `/preset status` produces) must reach the
+ * live transcript — buffering it in a journal nobody merges after the cut
+ * loses it forever.
+ *
+ * The gate is a REAL production await inside that window (the Direct catalog
+ * read awaits the live skill catalog snapshot), never a sleep.
+ */
+test('a command issued while /new is still settling reaches the Direct main transcript', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-new-command-handoff-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(100, 30)
+  life.defer(installVirtualProcessTerminal(vt))
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const resumed: FakeSession = fakeSession({
+    id: 'new-command-handoff-old',
+    header: { id: 'new-command-handoff-old', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('old answer'),
+  })
+  const harness = makeHarness(home, resumed)
+  context = new Context()
+  // The controllable post-hydration barrier: arm it right before `/new` so
+  // only the child's transition catalog refresh parks here.
+  let armed = false
+  let releaseCatalog!: () => void
+  const catalogGate = new Promise<void>(resolve => { releaseCatalog = resolve })
+  life.defer(() => releaseCatalog())
+  let catalogEntered!: () => void
+  const catalogEnteredPromise = new Promise<void>(resolve => { catalogEntered = resolve })
+  context.provide('skills', {
+    snapshot: async () => {
+      if (armed) {
+        armed = false
+        catalogEntered()
+        await catalogGate
+      }
+      return { skills: [], complete: true }
+    },
+  } as never)
+  fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id })
+  await settle()
+
+  const newHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('new')
+  assert.ok(newHandler, 'the real runner must register the /new transition command')
+  armed = true
+  const switchPromise = (newHandler as () => Promise<unknown>)()
+  // A bounded FAILURE bound, never an observation window: the gate itself is
+  // the authoritative signal that /new reached its post-hydration refresh.
+  let deadlineTimer: ReturnType<typeof setTimeout> | undefined
+  const entered = await Promise.race([
+    catalogEnteredPromise.then(() => true),
+    new Promise<false>(resolve => { deadlineTimer = setTimeout(() => resolve(false), 15_000) }),
+  ])
+  if (deadlineTimer !== undefined) clearTimeout(deadlineTimer)
+  assert.equal(entered, true, '/new must reach its post-hydration catalog refresh')
+
+  const child = harness.createdSessions[0]
+  assert.ok(child !== undefined, '/new must have created the child Session')
+  assert.equal(liveAgentOf(harness, child.id) !== undefined, true, 'the child Session must be live')
+  // The official executor's exact lifecycle: command/run before the handler and
+  // command/done after it settles, both on the SAME Session and commandId.
+  const emitSessionEvent = (appended: SessionEvent): void =>
+    (context as unknown as { emit(name: string, session: unknown, payload: unknown): void }).emit('session/event', child as never, appended)
+  const commandId = 'cmd-new-handoff-1'
+  emitSessionEvent(child.append!('command/run', {
+    commandId,
+    name: 'preset',
+    args: ' status',
+    source: { kind: 'user' },
+  }) as SessionEvent)
+  emitSessionEvent(child.append!('command/done', {
+    commandId,
+    kind: 'success',
+    text: 'preset: cordis · default: standard',
+  }) as SessionEvent)
+  await settle()
+
+  // The OFFICIAL log has the matched pair (the executor did its job)...
+  const commandEvents = child.snapshotEvents().filter(entry => {
+    const type = (entry as unknown as { type?: unknown }).type
+    return type === 'command/run' || type === 'command/done'
+  })
+  assert.equal(commandEvents.length, 2, 'the official Session log must hold command/run and command/done')
+  assert.equal(
+    (commandEvents[0] as unknown as { data: { commandId?: unknown } }).data.commandId,
+    (commandEvents[1] as unknown as { data: { commandId?: unknown } }).data.commandId,
+    'the official events must pair by commandId',
+  )
+  // ...and the LIVE Main transcript (the REAL folder → window → app path) holds
+  // it exactly once, on screen. The coalesced repaint is not synchronous.
+  const commandCards = (): number =>
+    (probe.capturedMessages ?? []).filter(message => message.kind === 'command').length
+  await new Promise(resolve => setTimeout(resolve, 70)) // the coalesced repaint flush
+  await vt.waitForRender()
+  assert.equal(commandCards(), 1,
+    'the command must reach the live Main transcript while /new is still settling')
+  const viewport = vt.getViewport().join('\n')
+  assert.ok(viewport.includes('/preset status'), 'the real terminal must paint the command row')
+  assert.ok(viewport.includes('preset: cordis · default: standard'), 'the real terminal must paint the settled outcome')
+
+  // Releasing the catalog refresh finishes /new (and its clearOpening tail).
+  // The already-presented card must neither disappear nor duplicate.
+  releaseCatalog()
+  await switchPromise
+  await settle()
+  await vt.waitForRender()
+  assert.equal(commandCards(), 1, 'settling /new must keep exactly the one command card')
+  assert.ok(vt.getViewport().join('\n').includes('/preset status'),
+    'the settled /new surface must still paint the command row')
+})
+
+/**
+ * REGRESSION (opening cut + Fold handoff): events recorded in the opening
+ * journal BEFORE the child is published are merged exactly once by the cold
+ * hydration, and events after the Fold install reach the same live folds
+ * incrementally. A switch is the sibling transition of `/new`, so the same
+ * `cut → fold-install → close` boundary owns both.
+ */
+test('an opening cut merges a pre-commit command before the switch hands off incrementally', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-opening-cut-command-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(100, 30)
+  life.defer(installVirtualProcessTerminal(vt))
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const sessionA: FakeSession = fakeSession({
+    id: 'opening-cut-command-a',
+    header: { id: 'opening-cut-command-a', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('A answer'),
+  })
+  const sessionB: FakeSession = fakeSession({
+    id: 'opening-cut-command-b',
+    header: { id: 'opening-cut-command-b', cwd: home, createdAt: 1_700_000_000_001, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('B history'),
+  })
+  let releaseResume!: () => void
+  const resumeGate = new Promise<void>(resolve => { releaseResume = resolve })
+  life.defer(() => releaseResume())
+  let resumeEntered!: () => void
+  const resumeEnteredPromise = new Promise<void>(resolve => { resumeEntered = resolve })
+  let releaseCatalog!: () => void
+  const catalogGate = new Promise<void>(resolve => { releaseCatalog = resolve })
+  life.defer(() => releaseCatalog())
+  let catalogEntered!: () => void
+  const catalogEnteredPromise = new Promise<void>(resolve => { catalogEntered = resolve })
+  let catalogHeld = false
+  context = new Context()
+  context.provide('skills', {
+    snapshot: async (options: { readonly scope?: { readonly session?: { readonly id?: unknown } } }) => {
+      // Gate ONLY the target Session's live catalog read: the startup read of
+      // A (and any other scope) answers immediately.
+      if (options?.scope?.session?.id === sessionB.id && !catalogHeld) {
+        catalogHeld = true
+        catalogEntered()
+        await catalogGate
+      }
+      return { skills: [], complete: true }
+    },
+  } as never)
+  const harness = makeHarness(
+    home,
+    [sessionA, sessionB],
+    { provider: 'p', model: 'm' },
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    async id => {
+      if (id !== sessionB.id) return
+      resumeEntered()
+      await resumeGate
+    },
+  )
+  fiber = await mountRunner(context, home, harness, { sessionId: sessionA.id }, { sessionId: sessionA.id })
+  await settle()
+
+  const resumeHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('resume')
+  assert.ok(resumeHandler, 'the real runner must register /resume')
+  const emitForB = (appended: SessionEvent): void =>
+    (context as unknown as { emit(name: string, session: unknown, payload: unknown): void }).emit('session/event', sessionB as never, appended)
+  const commandId = 'cmd-opening-cut-1'
+  const switchPromise = (resumeHandler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: sessionB.id })
+  let deadlineTimer: ReturnType<typeof setTimeout> | undefined
+  const resumeReached = await Promise.race([
+    resumeEnteredPromise.then(() => true),
+    new Promise<false>(resolve => { deadlineTimer = setTimeout(() => resolve(false), 15_000) }),
+  ])
+  if (deadlineTimer !== undefined) clearTimeout(deadlineTimer)
+  assert.equal(resumeReached, true, '/resume must reach the target Session open')
+  // PRE-COMMIT event for the opening target: only the journal can carry it to
+  // the cold hydration (the Session is not published yet).
+  emitForB(sessionB.append!('command/run', {
+    commandId,
+    name: 'preset',
+    args: ' status',
+    source: { kind: 'user' },
+  }) as SessionEvent)
+  await settle()
+
+  releaseResume()
+  let catalogTimer: ReturnType<typeof setTimeout> | undefined
+  const catalogReached = await Promise.race([
+    catalogEnteredPromise.then(() => true),
+    new Promise<false>(resolve => { catalogTimer = setTimeout(() => resolve(false), 15_000) }),
+  ])
+  if (catalogTimer !== undefined) clearTimeout(catalogTimer)
+  assert.equal(catalogReached, true, 'the switch must reach its post-hydration catalog refresh')
+  // The commit published B and the hydration merged the journal cut with the
+  // official snapshot (seq dedupe): exactly ONE running command row.
+  await new Promise(resolve => setTimeout(resolve, 70))
+  await vt.waitForRender()
+  const commandCards = (): number =>
+    (probe.capturedMessages ?? []).filter(message => message.kind === 'command').length
+  assert.equal(commandCards(), 1, 'the opening cut must hydrate the pre-commit command exactly once')
+  assert.ok(vt.getViewport().join('\n').includes('/preset status'),
+    'the merged opening command must be painted')
+
+  // POST-HYDRATION event, before the transition's clearOpening tail: it must
+  // route incrementally into the SAME settled row.
+  emitForB(sessionB.append!('command/done', {
+    commandId,
+    kind: 'success',
+    text: 'preset: cordis · default: standard',
+  }) as SessionEvent)
+  await settle()
+  await new Promise(resolve => setTimeout(resolve, 70))
+  await vt.waitForRender()
+  assert.equal(commandCards(), 1, 'settlement must reuse the single command row')
+  assert.ok(vt.getViewport().join('\n').includes('preset: cordis · default: standard'),
+    'the post-hydration command/done must settle the visible row')
+
+  releaseCatalog()
+  await switchPromise
+  await settle()
+  await vt.waitForRender()
+  assert.equal(commandCards(), 1, 'completing the switch must neither drop nor duplicate the command row')
+})
+
 test('the first-session Workspace intent ignores the qualification override outside the surface entry', () => {
   const launch = '/home/user/project'
   assert.deepEqual(initialWorkspaceIntentFromEnvironment(launch, {}),

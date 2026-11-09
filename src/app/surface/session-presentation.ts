@@ -500,6 +500,14 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
    * compaction) and commit/repaint. The CALLER owns the event-source
    * resolution (Direct: the full Agent log + its live baseline; Remote: the
    * bounded reader window + its live inputs) and the working/plan values.
+   *
+   * `onLiveFoldInstalled` is the ONE internal Fold-ready handoff seam: it runs
+   * SYNCHRONOUSLY, within this body, at the exact statement where the hydrated
+   * folder/window/stats become the live routing targets (before the first
+   * `await` — this body has none). The Direct caller closes the opening journal
+   * there; see `initLiveSession` for the lost-event window that placement
+   * closes. Remote passes nothing: its live ingress owns delivery and the
+   * composition root closes the journal after the subscription installs.
    */
   const hydratePresentation = async (input: {
     readonly sessionId: string
@@ -516,7 +524,7 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
      * Absent on Direct, whose `events` is the complete log.
      */
     readonly facts?: PresentationCurrentFacts
-  }): Promise<void> => {
+  }, onLiveFoldInstalled?: () => void): Promise<void> => {
     const events = input.events
     // This is the single cold-hydration path for a live session. Do not
     // pre-apply the same event log during runner wiring: a resumed session
@@ -529,6 +537,17 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     for (const liveInput of input.liveBaseline) {
       applyAssistantLiveInput(folder, statsFolder, mainStreamingToolPreviews, liveInput, deps.summaryKeys)
     }
+    // THE HANDOFF BOUNDARY (Direct): `folder`/`windowController`/`statsFolder`
+    // above are now the live routing targets, so a `session/event` delivered
+    // from this point on is applied incrementally by `routeSessionEvent`.
+    // Closing the opening journal HERE — still inside this synchronous body,
+    // never after `await hydratePresentation()` and never at the end of the
+    // `/new` transaction — makes cut → fold-install → close atomic: an event
+    // that arrives while the transition still settles its catalog/presentation
+    // tail is delivered once, in seq order, instead of being recorded into a
+    // journal whose cut was already consumed (and then discarded by
+    // `clearOpening`).
+    onLiveFoldInstalled?.()
     deps.diag.debug('session bootstrap scan', {
       scan: 'transcript',
       eventCount: events.length,
@@ -641,7 +660,13 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
       liveBaseline: deps.direct.assistantStreamBaselineFor(agent),
       planActive: deps.direct.planActive(agent),
       working: workingFromLog(events),
-    })
+      // The Direct opening journal stops RECORDING at the exact Fold-install
+      // boundary of this hydration: the rest of the transition (the awaited
+      // catalog refresh, the switch report) may legitimately produce Session
+      // events, and those must route into the freshly installed live folds
+      // instead of an already-consumed cut. `clearOpening(token)` keeps its
+      // final cleanup job (it drops the entry itself).
+    }, () => deps.surface.openingJournal.close(agent.session.id))
   }
 
   /**
