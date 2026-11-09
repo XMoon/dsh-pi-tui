@@ -191,14 +191,16 @@ export function formatTargetSummary(target: ScheduleTarget): string {
 
 /** The official execution activity of the reused target Session. Never a task status. */
 export function formatExecutionActivity(entry: ScheduleCatalogEntry): string {
-  return entry.executionActive === true ? 'in progress' : 'idle'
+  if (entry.executionActive === true) return 'In progress'
+  if (entry.executionActive === false) return 'Not running'
+  return 'Not reported for this target'
 }
 
 /** The official delivery floor, formatted locally. Never a task status. */
 export function formatDeliveryFloor(entry: ScheduleCatalogEntry): string | undefined {
   return entry.deliveryFloorEndsAt === undefined
     ? undefined
-    : `until ${formatLocalInstant(entry.deliveryFloorEndsAt)} UTC`
+    : `${formatLocalInstant(entry.deliveryFloorEndsAt)} UTC`
 }
 
 /** The official facts of one stored delivery receipt. */

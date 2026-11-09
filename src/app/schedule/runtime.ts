@@ -14,6 +14,8 @@
  */
 
 import type { CommandResult } from '@deepseek-ai/dsh-commands'
+import type { SessionScope } from '../session/scope.ts'
+import type { SessionSwitchOutcome } from '../session/runtime.ts'
 import type { SchedulePort } from '../../runtime/schedule-port.ts'
 import type { SessionReader } from '../../runtime/session-reader-port.ts'
 import type { TuiApp } from '../../tui-app.ts'
@@ -28,6 +30,19 @@ export interface ScheduleWorkspaceOpenDeps {
   readonly app: () => TuiApp | undefined
   /** The app-owned owned-task entry (its diagnostics stay attached). */
   readonly runOwned: ScheduleOwnedRunner
+  /** Capture the current Session scope synchronously before any roster read. */
+  readonly captureSessionSwitch: () => (sessionId: string) => Promise<SessionSwitchOutcome>
+}
+
+/** The one captured-scope switch closure used by the Schedule composition. */
+export function captureScheduleSessionSwitch(
+  captureScope: () => SessionScope,
+  switchSessionOutcome: (sessionId: string, expectedScope: SessionScope) => Promise<SessionSwitchOutcome>,
+): () => (sessionId: string) => Promise<SessionSwitchOutcome> {
+  return () => {
+    const scope = captureScope()
+    return sessionId => switchSessionOutcome(sessionId, scope)
+  }
 }
 
 /** The ONE statement of the renderer gap. */
@@ -41,13 +56,16 @@ const RENDERER_UNAVAILABLE = 'The schedule workspace is available in the Pi-TUI 
 export function openScheduleWorkspace(deps: ScheduleWorkspaceOpenDeps): CommandResult {
   const app = deps.app()
   if (app === undefined) return { kind: 'error', text: RENDERER_UNAVAILABLE }
+  let handle: ReturnType<TuiApp['openScheduleWorkspace']> | undefined
   const controller = new ScheduleWorkspaceController({
     port: deps.port,
     sessionReader: deps.sessionReader,
     runOwned: deps.runOwned,
+    captureSessionSwitch: deps.captureSessionSwitch,
+    closeWorkspace: () => { handle?.close() },
   })
   try {
-    const handle = app.openScheduleWorkspace({
+    const openedHandle = app.openScheduleWorkspace({
       snapshot: () => controller.snapshot(),
       dispatch: intent => controller.dispatch(intent),
       // The lease is gone for ANY reason (user Esc, blocking owner, session
@@ -55,9 +73,10 @@ export function openScheduleWorkspace(deps: ScheduleWorkspaceOpenDeps): CommandR
       // subscriptions. A dispatched Host write is never cancelled here.
       onClose: () => { controller.dispose() },
     })
+    handle = openedHandle
     // The subscription is owned by this open; `controller.dispose()` (from the
     // lease's onClose) clears every listener, so it cannot outlive the screen.
-    controller.subscribe(() => handle.update(controller.snapshot()))
+    controller.subscribe(() => openedHandle.update(controller.snapshot()))
   } catch (error) {
     // A refused lease (another workspace owns the terminal, a blocking modal is
     // open) is a real, displayable refusal: the panel never mounted.

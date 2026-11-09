@@ -36,6 +36,7 @@ import type {
   ScheduleIntent,
   ScheduleNotice,
   ScheduleSessionChoice,
+  ScheduleSessionRosterState,
   ScheduleTargetKind,
   ScheduleWorkspaceSnapshot,
   ScheduleWorkspaceStatus,
@@ -49,7 +50,8 @@ import {
   type ScheduleEditResult,
   type ScheduleViewResult,
 } from '../../runtime/schedule-port.ts'
-import type { SessionReader } from '../../runtime/session-reader-port.ts'
+import type { SessionSwitchOutcome } from '../session/runtime.ts'
+import type { SessionReader, SessionSummary } from '../../runtime/session-reader-port.ts'
 import {
   DEFAULT_TARGET_DRAFT,
   DEFAULT_TIMING_DRAFT,
@@ -84,6 +86,10 @@ export interface ScheduleWorkspaceControllerDeps {
   readonly sessionReader: SessionReader
   /** The app-owned task entry: one visible owner per Host mutation. */
   readonly runOwned: ScheduleOwnedRunner
+  /** Captures the current Session scope synchronously before the roster await. */
+  readonly captureSessionSwitch: () => (sessionId: string) => Promise<SessionSwitchOutcome>
+  /** Closes the current Schedule lease after a proven Session switch. */
+  readonly closeWorkspace: () => void
   /** Called when a Host change/invalidation must repaint the screen. */
   readonly onChange?: () => void
 }
@@ -98,6 +104,8 @@ export class ScheduleWorkspaceController {
   private readonly port: SchedulePort
   private readonly sessionReader: SessionReader
   private readonly runOwned: ScheduleOwnedRunner
+  private readonly captureSessionSwitch: ScheduleWorkspaceControllerDeps['captureSessionSwitch']
+  private readonly closeWorkspace: () => void
   private readonly onChange: () => void
   private readonly listeners = new Set<() => void>()
 
@@ -131,6 +139,12 @@ export class ScheduleWorkspaceController {
   private notice: ScheduleNotice | undefined
   private limits: { readonly newSessionIntervalSeconds: number } | undefined
   private sessions: readonly ScheduleSessionChoice[] = []
+  private sessionRosterState: ScheduleSessionRosterState = 'checking'
+  private availableSessionIds: readonly string[] = []
+  private rosterAbort: AbortController | undefined
+  private rosterEpoch = 0
+  private navigationEpoch = 0
+  private navigationPending = false
   private busy = false
 
   /** Page INSTANCE generation (snapshot `pageEpoch`): the interaction-ownership
@@ -165,6 +179,8 @@ export class ScheduleWorkspaceController {
     this.port = deps.port
     this.sessionReader = deps.sessionReader
     this.runOwned = deps.runOwned
+    this.captureSessionSwitch = deps.captureSessionSwitch
+    this.closeWorkspace = deps.closeWorkspace
     this.onChange = deps.onChange ?? (() => {})
   }
 
@@ -174,6 +190,7 @@ export class ScheduleWorkspaceController {
     this.openEpoch += 1
     this.unsubscribeChanged = this.port.onChanged(() => this.invalidate())
     this.own('schedule catalog read', () => this.read())
+    this.own('schedule Session roster read', async () => { await this.readSessionRoster() })
   }
 
   /** Drop every subscription and make late async results unpublishable. It
@@ -182,6 +199,9 @@ export class ScheduleWorkspaceController {
     if (this.disposed) return
     this.disposed = true
     this.openEpoch += 1
+    this.navigationEpoch += 1
+    this.rosterAbort?.abort()
+    this.rosterAbort = undefined
     this.unsubscribeChanged?.()
     this.unsubscribeChanged = undefined
     this.readAbort?.abort()
@@ -232,6 +252,9 @@ export class ScheduleWorkspaceController {
       ...(this.notice === undefined ? {} : { notice: this.notice }),
       ...(this.limits === undefined ? {} : { limits: this.limits }),
       sessions: this.sessions,
+      sessionRosterState: this.sessionRosterState,
+      availableSessionIds: this.availableSessionIds,
+      navigationPending: this.navigationPending,
       busy: this.busy,
       pageEpoch: this.pageEpoch,
     }
@@ -271,6 +294,15 @@ export class ScheduleWorkspaceController {
         return
       case 'history-more':
         this.moreHistory()
+        return
+      case 'refresh-session-roster':
+        this.own('schedule Session roster refresh', async () => { await this.readSessionRoster() })
+        return
+      case 'open-detail-conversation':
+        this.openDetailConversation()
+        return
+      case 'open-delivery-conversation':
+        this.openDeliveryConversation(intent.messageId)
         return
       case 'back':
         this.back()
@@ -590,6 +622,7 @@ export class ScheduleWorkspaceController {
         records: [...(before === undefined ? [] : previous?.records ?? []), ...result.records],
         earlierRecordsUnavailable: result.earlierRecordsUnavailable,
         earlierRecordsPruned: result.earlierRecordsPruned,
+        ...(result.retention === undefined ? {} : { retention: result.retention }),
         ...(result.nextBefore === undefined ? {} : { nextBefore: result.nextBefore }),
       }
       this.publish()
@@ -817,36 +850,164 @@ export class ScheduleWorkspaceController {
   }
 
   private loadSessionChoices(): void {
-    this.chooserAbort?.abort()
-    const controller = new AbortController()
-    this.chooserAbort = controller
-    const openEpoch = this.openEpoch
-    this.own('schedule session chooser read', () => this.readSessionChoices(openEpoch, controller))
+    this.own('schedule Session roster read', async () => { await this.readSessionRoster() })
   }
 
-  private async readSessionChoices(openEpoch: number, controller: AbortController): Promise<void> {
+  /** Read the single authorized roster and derive both chooser labels and link eligibility. */
+  private async readSessionRoster(): Promise<readonly string[] | undefined> {
+    this.rosterAbort?.abort()
+    const controller = new AbortController()
+    this.rosterAbort = controller
+    const epoch = ++this.rosterEpoch
+    const openEpoch = this.openEpoch
+    this.sessionRosterState = 'checking'
+    this.availableSessionIds = []
+    this.sessions = []
+    this.publish()
+    const isCurrent = (): boolean => !this.disposed
+      && !controller.signal.aborted
+      && this.rosterAbort === controller
+      && epoch === this.rosterEpoch
+      && openEpoch === this.openEpoch
+    try {
+      const rows = await this.sessionReader.list(undefined, controller.signal)
+      if (!isCurrent()) return undefined
+      if (rows === undefined) {
+        this.sessionRosterState = 'unavailable'
+        this.publish()
+        return undefined
+      }
+      const candidates = rows.filter(row => row.origin !== 'subagent')
+      this.availableSessionIds = candidates.map(row => row.id)
+      this.sessionRosterState = 'ready'
+      this.publish()
+      let projections = new Map<string, { readonly title?: string }>()
       try {
-        const rows = await this.sessionReader.list(undefined, controller.signal)
-        if (this.disposed || openEpoch !== this.openEpoch) return
-        const candidates = (rows ?? []).filter(row => row.origin !== 'subagent')
-        if (candidates.length === 0) {
-          this.sessions = []
+        projections = await this.sessionReader.projectionBatch(candidates, controller.signal)
+      } catch {
+        if (!isCurrent()) return undefined
+      }
+      if (!isCurrent()) return undefined
+      this.sessions = candidates.map(row => {
+        const title = projections.get(row.id)?.title
+        return { id: row.id, ...(title === undefined ? {} : { title }) }
+      })
+      this.publish()
+      return this.availableSessionIds
+    } catch {
+      if (!isCurrent()) return undefined
+      this.sessionRosterState = 'error'
+      this.availableSessionIds = []
+      this.sessions = []
+      this.publish()
+      return undefined
+    } finally {
+      if (this.rosterAbort === controller) this.rosterAbort = undefined
+    }
+  }
+
+  private openDetailConversation(): void {
+    const entry = this.selectedEntry()
+    if (entry === undefined) return
+    let targetSessionId: string | undefined
+    if (entry.lastDelivery !== undefined) targetSessionId = entry.lastDelivery.targetSessionId
+    else if (entry.target.kind === 'session') targetSessionId = entry.target.sessionId
+    else {
+      this.notice = infoNotice(entry.target.kind === 'new_once'
+        ? SCHEDULE_COPY.pendingFirstDelivery
+        : SCHEDULE_COPY.noDeliveryYet)
+      this.publish()
+      return
+    }
+    this.navigateToSession(targetSessionId, { kind: 'detail', selectedId: entry.id, sessionId: targetSessionId })
+  }
+
+  private openDeliveryConversation(messageId: string): void {
+    const record = this.historyView?.records.find(item => item.messageId === messageId)
+    if (record === undefined) return
+    this.navigateToSession(record.targetSessionId, {
+      kind: 'history',
+      selectedId: this.selectedId,
+      messageId,
+      sessionId: record.targetSessionId,
+    })
+  }
+
+  private navigateToSession(
+    sessionId: string,
+    owner: { readonly kind: 'detail'; readonly selectedId: string; readonly sessionId: string }
+      | { readonly kind: 'history'; readonly selectedId: string | undefined; readonly messageId: string; readonly sessionId: string },
+  ): void {
+    if (this.navigationPending || this.busy || this.confirm !== undefined) return
+    if (this.sessionRosterState !== 'ready' || !this.availableSessionIds.includes(sessionId)) {
+      this.notice = infoNotice(this.sessionAvailabilityMessage(sessionId))
+      this.publish()
+      return
+    }
+    const switchSession = this.captureSessionSwitch()
+    const epoch = ++this.navigationEpoch
+    const pageEpoch = this.pageEpoch
+    this.navigationPending = true
+    this.notice = infoNotice(SCHEDULE_COPY.openingConversation)
+    this.publish()
+    this.own('schedule conversation navigation', async () => {
+      try {
+        const fresh = await this.readSessionRoster()
+        if (!this.isCurrentNavigation(epoch, pageEpoch, owner)) return
+        if (fresh === undefined) {
+          this.notice = infoNotice(this.sessionAvailabilityMessage(sessionId))
           this.publish()
           return
         }
-        const projections = await this.sessionReader.projectionBatch(candidates, controller.signal)
-        if (this.disposed || openEpoch !== this.openEpoch) return
-        this.sessions = candidates.map(row => {
-          const title = projections.get(row.id)?.title
-          return { id: row.id, ...(title === undefined ? {} : { title }) }
-        })
+        if (!fresh.includes(sessionId)) {
+          this.notice = infoNotice(SCHEDULE_COPY.sessionNotListed)
+          this.publish()
+          return
+        }
+        const outcome = await switchSession(sessionId)
+        if (!this.isCurrentNavigation(epoch, pageEpoch, owner)) return
+        if (outcome.kind === 'committed' || outcome.kind === 'already-current') {
+          this.closeWorkspace()
+          return
+        }
+        this.notice = outcome.kind === 'cancelled'
+          ? infoNotice('Conversation was not opened.')
+          : infoNotice(outcome.message)
         this.publish()
-      } catch (error) {
-        if (this.disposed || openEpoch !== this.openEpoch || controller.signal.aborted) return
-        this.sessions = []
-        this.notice = errorNotice(this.describeFailure(error))
-        this.publish()
+      } finally {
+        if (this.navigationEpoch === epoch && !this.disposed) {
+          this.navigationPending = false
+          this.publish()
+        }
       }
+    })
+  }
+
+  private isCurrentNavigation(
+    epoch: number,
+    pageEpoch: number,
+    owner: { readonly kind: 'detail'; readonly selectedId: string; readonly sessionId: string }
+      | { readonly kind: 'history'; readonly selectedId: string | undefined; readonly messageId: string; readonly sessionId: string },
+  ): boolean {
+    if (this.disposed || epoch !== this.navigationEpoch || pageEpoch !== this.pageEpoch
+      || this.confirm !== undefined || this.busy) return false
+    if (owner.kind === 'detail') {
+      if (!this.surfaceIs('detail') || this.selectedId !== owner.selectedId) return false
+      const entry = this.selectedEntry()
+      return entry?.id === owner.selectedId
+        && (entry.lastDelivery?.targetSessionId ?? (entry.target.kind === 'session' ? entry.target.sessionId : undefined)) === owner.sessionId
+    }
+    const record = this.historyView?.records.find(item => item.messageId === owner.messageId)
+    return this.surfaceIs('history')
+      && this.selectedId === owner.selectedId
+      && record?.targetSessionId === owner.sessionId
+  }
+
+  private sessionAvailabilityMessage(sessionId: string): string {
+    if (this.sessionRosterState === 'checking') return SCHEDULE_COPY.sessionChecking
+    if (this.sessionRosterState === 'unavailable') return SCHEDULE_COPY.sessionRosterUnavailable
+    if (this.sessionRosterState === 'error') return SCHEDULE_COPY.sessionRosterError
+    return this.availableSessionIds.includes(sessionId) ? SCHEDULE_COPY.sessionChecking : SCHEDULE_COPY.sessionNotListed
   }
 
   /** The page identity a Host write must still own when it settles. */
@@ -879,6 +1040,7 @@ export class ScheduleWorkspaceController {
 
   /** The ONE controller-level mode admission table. */
   private admits(kind: ScheduleIntent['kind']): boolean {
+    if (this.navigationPending) return false
     // A pending EDITOR save freezes the whole editor surface, not only its text:
     // leaving, discarding or navigating to another task would race the receipt
     // and could create a stale Discard question. Detail/list writes keep
@@ -901,11 +1063,13 @@ export class ScheduleWorkspaceController {
     }
     if (kind === 'move') return this.mode === 'list' || this.mode === 'detail'
     if (kind === 'open-edit' || kind === 'open-history' || kind === 'toggle-active'
-      || kind === 'ask-run' || kind === 'ask-delete') {
+      || kind === 'ask-run' || kind === 'ask-delete' || kind === 'open-detail-conversation') {
       return this.mode === 'detail'
     }
+    if (kind === 'refresh-session-roster') return this.mode === 'detail' || this.mode === 'history'
+    if (kind === 'open-delivery-conversation') return this.mode === 'history'
     if (kind === 'ask-clear-ended') return this.mode === 'list' || this.mode === 'detail'
-    if (kind === 'history-more') return this.mode === 'history'
+    if (kind === 'history-more') return this.mode === 'history' && !this.busy
     return false
   }
 
@@ -1192,10 +1356,17 @@ export class ScheduleWorkspaceController {
     return this.catalog.find(row => row.id === this.selectedId)
   }
 
+  private executionBusy(entry: ScheduleCatalogEntry | undefined): boolean {
+    if (entry?.executionActive !== true) return false
+    this.notice = infoNotice(SCHEDULE_COPY.executionBusy)
+    this.publish()
+    return true
+  }
+
   private toggleActive(): void {
     if (this.busy) return
     const entry = this.selectedEntry()
-    if (entry === undefined) return
+    if (entry === undefined || this.executionBusy(entry)) return
     const active = entry.status !== 'active'
     this.startWrite('schedule pause/resume', async () => {
       const stamp = this.surfaceStamp()
@@ -1232,15 +1403,21 @@ export class ScheduleWorkspaceController {
 
   private askRun(): void {
     const entry = this.selectedEntry()
-    if (entry === undefined || this.busy) return
+    if (entry === undefined || this.busy || this.executionBusy(entry)) return
     this.bumpPage()
-    this.confirm = { kind: 'run', token: ++this.confirmToken, id: entry.id, title: entry.title }
+    this.confirm = {
+      kind: 'run',
+      token: ++this.confirmToken,
+      id: entry.id,
+      title: entry.title,
+      expectedUpdatedAt: entry.updatedAt ?? null,
+    }
     this.publish()
   }
 
   private askDelete(): void {
     const entry = this.selectedEntry()
-    if (entry === undefined || this.busy) return
+    if (entry === undefined || this.busy || this.executionBusy(entry)) return
     this.bumpPage()
     this.confirm = {
       kind: 'delete',
@@ -1292,12 +1469,28 @@ export class ScheduleWorkspaceController {
       case 'reload':
         this.own('schedule reload latest', () => this.performReload())
         return
-      case 'run':
+      case 'run': {
+        const entry = this.selectedEntry()
+        if (entry?.id !== confirm.id) {
+          this.notice = infoNotice('Task changed. Reopen the confirmation before continuing.')
+          this.publish()
+          return
+        }
+        if (this.executionBusy(entry)) return
+        if ((entry.updatedAt ?? null) !== confirm.expectedUpdatedAt) {
+          this.notice = infoNotice('Task changed. Reopen the confirmation before running it.')
+          this.publish()
+          return
+        }
         this.runNow(confirm.id)
         return
-      case 'delete':
+      }
+      case 'delete': {
+        const entry = this.selectedEntry()
+        if (entry?.id !== confirm.id || this.executionBusy(entry)) return
         this.deleteTask(confirm.id, confirm.expectedUpdatedAt)
         return
+      }
       case 'clear-ended':
         this.clearEnded()
         return
@@ -1318,7 +1511,7 @@ export class ScheduleWorkspaceController {
       try {
         const result = await this.port.run({ id: scheduleId(id) })
         if ('code' in result && result.code === 'schedule_execution_pending') {
-          this.notice = errorNotice(SCHEDULE_COPY.executionPending)
+          this.notice = infoNotice(SCHEDULE_COPY.runPendingInfo)
           this.publish()
           return
         }

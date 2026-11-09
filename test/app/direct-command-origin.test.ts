@@ -23,6 +23,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { apply as applyRunner, Config as TuiConfigSchema } from '../../src/index.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import { TUI_STARTUP_SERVICE } from '../../src/startup.ts'
+import type { ScheduleCatalogEntry, ScheduleDeliveryHistoryRequest, ScheduleDeliveryHistoryResult, ScheduleListRequest, ScheduleListResult, ScheduleViewRequest, ScheduleViewResult } from '../../src/runtime/schedule-port.ts'
 import { fakeAgentModel } from '../support/agent-model-double.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { installVirtualProcessTerminal } from '../support/runner-harness.ts'
@@ -264,6 +265,137 @@ test('a successful Host-registry compatibility mirror stays CLIENT_COMMAND — /
     TuiApp.prototype.start = originalStart
     restoreTerminal()
     await fiber.dispose().catch(() => {})
+    await ctx.fiber.dispose().catch(() => {})
+  }
+})
+
+test('the production Schedule composition captures scope and switches the receipt Session through sessionRuntime', async (t) => {
+  const home = testLifecycle(t).tempDir('schedule-session-composition-')
+  const harness = makeHarness(home)
+  let currentId = ''
+  const receiptId = 'ux3-composition-receiver'
+  const receiptSeed = await harness.agents.create({ sessionId: receiptId })
+  await receiptSeed.dispose()
+
+  const record: ScheduleCatalogEntry = {
+    id: 'ux3-composition-task' as never,
+    kind: 'daily',
+    title: 'Composition navigation task',
+    prompt: 'Current task prompt',
+    time: '09:00:00',
+    timeZone: 'UTC',
+    scheduledAt: '2026-06-01T09:00:00.000Z',
+    target: { kind: 'session', sessionId: currentId as never },
+    lastDelivery: {
+      scheduledAt: '2026-06-01T09:00:00.000Z',
+      deliveredAt: '2026-06-01T09:01:00.000Z',
+      messageId: 'ux3-composition-receipt' as never,
+      targetSessionId: receiptId as never,
+    },
+    involvedSessionIds: [],
+    status: 'active',
+    updatedAt: '2026-06-01T08:00:00.000Z',
+  }
+  const schedule = {
+    catalog: async () => [record],
+    remoteList: async (_request: ScheduleListRequest): Promise<ScheduleListResult> => ({
+      items: [record], shown: 1, total: 1, limit: 20, offset: 0,
+    }),
+    view: async (_request: ScheduleViewRequest): Promise<ScheduleViewResult> => record,
+    remoteHistory: async (_request: ScheduleDeliveryHistoryRequest): Promise<ScheduleDeliveryHistoryResult> => ({
+      id: record.id,
+      records: [{
+        scheduledAt: record.lastDelivery!.scheduledAt,
+        deliveredAt: record.lastDelivery!.deliveredAt,
+        messageId: record.lastDelivery!.messageId,
+        targetSessionId: record.lastDelivery!.targetSessionId,
+        prompt: 'Stored delivery instruction',
+      }],
+      earlierRecordsUnavailable: false,
+      earlierRecordsPruned: false,
+      retention: { days: 30, records: 200 },
+    }),
+    deliveryLimits: () => ({ newSessionIntervalSeconds: 60 }),
+    remoteCreate: async () => { throw new Error('not used') },
+    remoteEdit: async () => { throw new Error('not used') },
+    run: async () => { throw new Error('not used') },
+    deleteInactive: async () => ({ deleted: 0 }),
+  }
+  const ctx = new Context()
+  const vt = new VirtualTerminal(120, 40)
+  const restoreTerminal = installVirtualProcessTerminal(vt)
+  const apps: TuiApp[] = []
+  const originalStart = TuiApp.prototype.start
+  TuiApp.prototype.start = function patchedStart(this: TuiApp) {
+    apps.push(this)
+    return originalStart.apply(this)
+  }
+  ctx.provide('appExit', () => {})
+  ctx.provide(TUI_STARTUP_SERVICE, { shippedPresetRoot: home })
+  ctx.provide('sessionPersistence', harness.persistence as never)
+  ctx.provide('sessionQuery', harness.sessionQuery as never)
+  ctx.provide('agents', harness.agents as never)
+  provideFakeHostWorkspaceRegistry(ctx)
+  ctx.provide('sessions', harness.sessions as never)
+  ctx.provide('agentDefaultModel', harness.defaultModel as never)
+  ctx.provide('llm', harness.llm as never)
+  ctx.provide('commands', harness.commands as never)
+  ctx.provide('schedule', schedule as never)
+  ctx.provide('loader', { await: async () => {} } as never)
+  const runnerFiber = ctx.plugin(pluginCtx => applyRunner(
+    pluginCtx,
+    TuiConfigSchema({ fullscreen: 'off' } as never),
+  ))
+  try {
+    await runnerFiber
+    for (let attempt = 0; attempt < 80 && !vt.getViewport().join('').includes('dsh-pi-tui'); attempt += 1) {
+      await vt.waitForRender()
+    }
+    const app = apps.at(-1)
+    assert.ok(app !== undefined, `the production bootstrap mounted its TuiApp; frame=${vt.getViewport().join('\\n')}; commands=${JSON.stringify(harness.commands.list())}`)
+    assert.ok(vt.getViewport().join('\n').includes('dsh-pi-tui'), 'the production Direct surface painted')
+
+    const commandApp = app as unknown as { setDraft(text: string): void; submitDraft(): void }
+    commandApp.setDraft('warm up the actual Direct owner')
+    commandApp.submitDraft()
+    for (let attempt = 0; attempt < 100 && harness.live.size === 0; attempt += 1) {
+      await vt.waitForRender()
+    }
+    assert.equal(harness.live.size, 1, 'the actual Direct first-submit path published one live Session owner')
+    currentId = harness.live.keys().next().value as string
+    assert.notEqual(currentId, '', 'the production Session runtime created a current owner identity')
+
+    commandApp.setDraft('/schedule')
+    commandApp.submitDraft()
+    for (let attempt = 0; attempt < 80 && !vt.getViewport().join('\n').includes('Schedule · Tasks'); attempt += 1) {
+      await vt.waitForRender()
+    }
+    assert.ok(vt.getViewport().join('\n').includes('Schedule · Tasks'), 'the production /schedule command opened')
+    vt.sendInput('\r')
+    for (let attempt = 0; attempt < 80 && !vt.getViewport().join('\n').includes('Schedule · Details'); attempt += 1) {
+      await vt.waitForRender()
+    }
+    vt.sendInput('h')
+    for (let attempt = 0; attempt < 80 && !vt.getViewport().join('\n').includes('Stored delivery instruction'); attempt += 1) {
+      await vt.waitForRender()
+    }
+    assert.ok(vt.getViewport().join('\n').includes('Open conversation'), 'the actual receipt Session link is roster-authorized')
+
+    vt.sendInput('\r')
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      await vt.waitForRender()
+      if (harness.agents.get(receiptId) !== undefined && harness.agents.get(currentId) === undefined) break
+    }
+    assert.ok(harness.agents.get(receiptId) !== undefined,
+      'the production SessionRuntime opened the official receipt receiver')
+    assert.equal(harness.agents.get(currentId), undefined,
+      'the production SessionRuntime retired the previous owner')
+    assert.ok(!vt.getViewport().join('\n').includes('Schedule · History'),
+      'the committed production session switch closed the sole Schedule lease')
+  } finally {
+    TuiApp.prototype.start = originalStart
+    restoreTerminal()
+    await runnerFiber.dispose().catch(() => {})
     await ctx.fiber.dispose().catch(() => {})
   }
 })

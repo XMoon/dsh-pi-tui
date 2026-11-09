@@ -362,6 +362,8 @@ test('L5: the real DirectSchedulePort drives the controller end to end', async t
     port,
     sessionReader: CHOOSER_SESSIONS,
     runOwned: (_label, task) => { void task() },
+    captureSessionSwitch: () => async () => ({ kind: 'failed', message: 'unused' }),
+    closeWorkspace: () => {},
   })
   life.defer(() => controller.dispose())
   controller.open()

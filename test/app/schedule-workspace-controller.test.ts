@@ -40,6 +40,7 @@ import type {
 } from '../../src/runtime/session-reader-port.ts'
 import { SupersededReadError } from '../../src/runtime/read-error.ts'
 import { SCHEDULE_COPY } from '../../src/app/schedule/presentation.ts'
+import type { SessionSwitchOutcome } from '../../src/app/session/runtime.ts'
 
 function entry(overrides: Partial<ScheduleCatalogEntry> = {}): ScheduleCatalogEntry {
   const base: ScheduleCatalogEntry = {
@@ -170,9 +171,26 @@ class FakeSessionReader implements SessionReader {
     { id: 'session-child', updatedAt: 1, live: false, origin: 'subagent' },
   ]
   readonly projections = new Map<string, SessionProjectionSummary>([['session-a', { title: 'Alpha' }]])
+  readonly listCalls: Array<{ readonly currentSessionId: string | undefined; readonly signal: AbortSignal | undefined }> = []
+  trace: string[] | undefined
+  listResult: SessionSummary[] | undefined = this.rows
+  listError: unknown
+  listGate: ReturnType<typeof deferred<SessionSummary[] | undefined>> | undefined
 
-  async list(): Promise<SessionSummary[]> {
-    return this.rows
+  async list(currentSessionId: string | undefined, signal?: AbortSignal): Promise<SessionSummary[] | undefined> {
+    this.listCalls.push({ currentSessionId, signal })
+    this.trace?.push('roster-list')
+    if (this.listError !== undefined) {
+      const error = this.listError
+      this.listError = undefined
+      throw error
+    }
+    if (this.listGate !== undefined) {
+      const gate = this.listGate
+      this.listGate = undefined
+      return gate.promise
+    }
+    return this.listResult
   }
 
   async projectionBatch(rows: readonly SessionSummary[]): Promise<Map<string, SessionProjectionSummary>> {
@@ -196,14 +214,24 @@ interface Harness {
   readonly reader: FakeSessionReader
   readonly controller: ScheduleWorkspaceController
   readonly owned: Array<{ readonly label: string; readonly task: () => Promise<void> }>
+  readonly switchCalls: string[]
+  readonly trace: string[]
+  readonly captures: number
+  readonly closeCount: number
   readonly snapshots: number
 }
 
-function harness(options: { readonly autoRun?: boolean } = {}): Harness {
+function harness(options: {
+  readonly autoRun?: boolean
+  readonly switchOutcome?: SessionSwitchOutcome | (() => Promise<SessionSwitchOutcome>)
+} = {}): Harness {
   const port = new FakePort()
   const reader = new FakeSessionReader()
+  const trace: string[] = []
+  reader.trace = trace
   const owned: Array<{ label: string; task: () => Promise<void> }> = []
-  const state = { snapshots: 0 }
+  const switchCalls: string[] = []
+  const counters = { snapshots: 0, captures: 0, closeCount: 0 }
   const runOwned: ScheduleOwnedRunner = (label, task) => {
     owned.push({ label, task })
     // Production `runOwned` is detached; the fixture keeps the task runnable
@@ -215,14 +243,28 @@ function harness(options: { readonly autoRun?: boolean } = {}): Harness {
     port,
     sessionReader: reader,
     runOwned,
-    onChange: () => { state.snapshots += 1 },
+    captureSessionSwitch: () => {
+      counters.captures += 1
+      trace.push('capture-scope')
+      return async sessionId => {
+        switchCalls.push(sessionId)
+        const outcome = options.switchOutcome ?? { kind: 'failed', message: 'fixture refusal' }
+        return typeof outcome === 'function' ? outcome() : outcome
+      }
+    },
+    closeWorkspace: () => { counters.closeCount += 1 },
+    onChange: () => { counters.snapshots += 1 },
   })
   return {
     port,
     reader,
     controller,
     owned,
-    get snapshots() { return state.snapshots },
+    switchCalls,
+    trace,
+    get captures() { return counters.captures },
+    get closeCount() { return counters.closeCount },
+    get snapshots() { return counters.snapshots },
   }
 }
 
@@ -324,6 +366,8 @@ test('L6: a first failure is an explicit error, a later failure keeps rows as st
     port,
     sessionReader: new FakeSessionReader(),
     runOwned: async (_label, task) => { await task() },
+    captureSessionSwitch: () => async () => ({ kind: 'failed', message: 'unused' }),
+    closeWorkspace: () => {},
   })
   try {
     controller.open()
@@ -562,7 +606,8 @@ test('L6: run-now distinguishes a queued delivery from a pending execution', asy
     life.controller.dispatch({ kind: 'confirm' })
     await flush()
     await life.controller.whenIdle()
-    assert.equal(life.controller.snapshot().notice?.text, SCHEDULE_COPY.executionPending)
+    assert.equal(life.controller.snapshot().notice?.text, SCHEDULE_COPY.runPendingInfo)
+    assert.equal(life.controller.snapshot().notice?.kind, 'info')
     life.port.runResult = async () => entry({ lastDelivery: { scheduledAt: '2026-01-01T09:00:00.000Z', deliveredAt: '2026-01-01T09:00:00.100Z', messageId: 'm' as never, targetSessionId: 'session-1' as never } })
     life.controller.dispatch({ kind: 'ask-run' })
     life.controller.dispatch({ kind: 'confirm' })
@@ -603,6 +648,198 @@ test('L6: history pages only by the official nextBefore cursor and reports a van
     life.controller.dispatch({ kind: 'history-more' })
     await flush()
     assert.equal(life.port.calls.filter(call => call.method === 'history').length, 2, 'no cursor means no further page')
+  } finally {
+    life.controller.dispose()
+  }
+})
+
+test('a Detail conversation switch captures scope before fresh roster validation and follows the latest receipt receiver', async () => {
+  const life = harness({ switchOutcome: { kind: 'committed', sessionId: 'session-b' } })
+  try {
+    const task = entry({
+      target: { kind: 'session', sessionId: scheduleSessionId('session-a') },
+      lastDelivery: {
+        scheduledAt: '2026-01-01T09:00:00.000Z',
+        deliveredAt: '2026-01-01T09:01:00.000Z',
+        messageId: 'receipt-b' as never,
+        targetSessionId: 'session-b' as never,
+      },
+    })
+    life.port.entries = [task]
+    life.reader.rows.push({ id: 'session-b', updatedAt: 3, live: false })
+    life.reader.projections.set('session-b', { title: 'Beta' })
+    life.controller.open()
+    await flush()
+    life.controller.dispatch({ kind: 'open-detail', id: 'schedule-1' })
+    await flush()
+    life.trace.length = 0
+    const freshRoster = deferred<SessionSummary[] | undefined>()
+    life.reader.listGate = freshRoster
+
+    life.controller.dispatch({ kind: 'open-detail-conversation' })
+    assert.deepEqual(life.trace.slice(0, 2), ['capture-scope', 'roster-list'],
+      'the current owner is frozen in the same synchronous turn before the fresh roster await')
+    assert.equal(life.controller.snapshot().navigationPending, true)
+    assert.deepEqual(life.switchCalls, [], 'the Session lifecycle is not called before roster revalidation')
+
+    freshRoster.resolve(life.reader.rows)
+    await flush()
+    await flush()
+    assert.deepEqual(life.switchCalls, ['session-b'], 'the last delivery receiver wins over the task current target')
+    assert.equal(life.closeCount, 1, 'only a committed switch releases the Schedule lease')
+  } finally {
+    life.controller.dispose()
+  }
+})
+
+test('a selected History receipt navigates to its own receiver and preserves its recorded prompt', async () => {
+  const life = harness({ switchOutcome: { kind: 'already-current', message: 'already on this session' } })
+  try {
+    life.port.entries = [entry({ target: { kind: 'session', sessionId: scheduleSessionId('session-a') } })]
+    life.reader.rows.push({ id: 'session-b', updatedAt: 3, live: false })
+    life.port.historyResults.set('first', {
+      id: 'schedule-1' as never,
+      records: [{
+        scheduledAt: '2026-01-01T09:00:00.000Z',
+        deliveredAt: '2026-01-01T09:01:00.000Z',
+        messageId: 'receipt-b' as never,
+        targetSessionId: 'session-b' as never,
+        prompt: 'the saved instruction, not the current task prompt',
+      }],
+      earlierRecordsUnavailable: false,
+      earlierRecordsPruned: false,
+      retention: { days: 30, records: 200 },
+    })
+    life.controller.open()
+    await flush()
+    life.controller.dispatch({ kind: 'open-detail', id: 'schedule-1' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-history' })
+    await flush()
+    const history = life.controller.snapshot().history
+    assert.equal(history?.records[0]?.targetSessionId, 'session-b')
+    assert.equal(history?.records[0]?.prompt, 'the saved instruction, not the current task prompt')
+    assert.deepEqual(history?.retention, { days: 30, records: 200 })
+
+    life.controller.dispatch({ kind: 'open-delivery-conversation', messageId: 'receipt-b' })
+    await flush()
+    await flush()
+    assert.deepEqual(life.switchCalls, ['session-b'])
+    assert.equal(life.closeCount, 1, 'already-current is a successful settled navigation')
+  } finally {
+    life.controller.dispose()
+  }
+})
+
+test('an unavailable, failed, or unlisted fresh Session roster never dispatches a switch', async () => {
+  const cases = [
+    { label: 'undefined capability', setup: (reader: FakeSessionReader) => { reader.listResult = undefined }, copy: SCHEDULE_COPY.sessionRosterUnavailable },
+    { label: 'read failure', setup: (reader: FakeSessionReader) => { reader.listError = new Error('roster failed') }, copy: SCHEDULE_COPY.sessionRosterError },
+    { label: 'missing receiver', setup: (reader: FakeSessionReader) => { reader.listResult = [] }, copy: SCHEDULE_COPY.sessionNotListed },
+  ] as const
+  for (const scene of cases) {
+    const life = harness()
+    try {
+      life.port.entries = [entry({ target: { kind: 'session', sessionId: scheduleSessionId('session-a') } })]
+      life.controller.open()
+      await flush()
+      life.controller.dispatch({ kind: 'open-detail', id: 'schedule-1' })
+      await flush()
+      scene.setup(life.reader)
+      life.controller.dispatch({ kind: 'open-detail-conversation' })
+      await flush()
+      await flush()
+      assert.deepEqual(life.switchCalls, [], scene.label)
+      assert.equal(life.closeCount, 0, scene.label)
+      assert.equal(life.controller.snapshot().notice?.text, scene.copy, scene.label)
+      assert.equal(life.controller.snapshot().navigationPending, false, scene.label)
+    } finally {
+      life.controller.dispose()
+    }
+  }
+})
+
+test('an undelivered new_once reservation is not treated as an existing conversation', async () => {
+  const life = await opened()
+  try {
+    life.controller.dispatch({ kind: 'open-detail', id: 'schedule-1' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-detail-conversation' })
+    assert.equal(life.controller.snapshot().notice?.text, SCHEDULE_COPY.pendingFirstDelivery)
+    assert.equal(life.captures, 0)
+    assert.deepEqual(life.switchCalls, [])
+  } finally {
+    life.controller.dispose()
+  }
+})
+
+test('executionActive blocks Run, pause and delete without opening confirmation or writing', async () => {
+  const life = harness()
+  try {
+    life.port.entries = [entry({ executionActive: true })]
+    life.controller.open()
+    await flush()
+    life.controller.dispatch({ kind: 'open-detail', id: 'schedule-1' })
+    await flush()
+    for (const kind of ['ask-run', 'toggle-active', 'ask-delete'] as const) {
+      life.controller.dispatch({ kind })
+      assert.equal(life.controller.snapshot().confirm, undefined, `${kind} has no confirmation`)
+      assert.equal(life.controller.snapshot().notice?.text, SCHEDULE_COPY.executionBusy)
+    }
+    assert.equal(life.port.calls.some(call => call.method === 'run' || call.method === 'edit'), false)
+  } finally {
+    life.controller.dispose()
+  }
+})
+
+test('execution that starts while Run confirmation is open is refused before the Host write', async () => {
+  const life = await opened()
+  try {
+    life.controller.dispatch({ kind: 'open-detail', id: 'schedule-1' })
+    await flush()
+    life.controller.dispatch({ kind: 'ask-run' })
+    assert.equal(life.controller.snapshot().confirm?.kind, 'run')
+    life.port.entries = [entry({ executionActive: true, updatedAt: '2026-01-02T00:00:00.000Z' })]
+    life.port.viewResults.set('schedule-1', life.port.entries[0]!)
+    life.port.invalidate()
+    await flush()
+    life.controller.dispatch({ kind: 'confirm' })
+    assert.equal(life.port.calls.some(call => call.method === 'run'), false)
+    assert.equal(life.controller.snapshot().notice?.text, SCHEDULE_COPY.executionBusy)
+  } finally {
+    life.controller.dispose()
+  }
+})
+
+test('a Host floor never disables Run for paused/ended tasks and an archived refusal stays explicit', async () => {
+  const life = harness()
+  try {
+    life.port.entries = [
+      entry({ id: 'schedule-paused' as never, status: 'paused', deliveryFloorEndsAt: '2099-01-01T00:00:00.000Z' }),
+      entry({ id: 'schedule-ended' as never, status: 'ended', deliveryFloorEndsAt: '2099-01-01T00:00:00.000Z' }),
+    ]
+    life.controller.open()
+    await flush()
+    life.controller.dispatch({ kind: 'open-detail', id: 'schedule-paused' })
+    await flush()
+    life.port.runResult = async request => entry({ id: request.id, status: 'paused' })
+    life.controller.dispatch({ kind: 'ask-run' })
+    assert.equal(life.controller.snapshot().confirm?.kind, 'run', 'a delivery floor is display-only')
+    life.controller.dispatch({ kind: 'confirm' })
+    await flush()
+    await life.controller.whenIdle()
+    assert.equal((life.port.calls.find(call => call.method === 'run')?.args[0] as ScheduleRunRequest).id, 'schedule-paused')
+    assert.equal(life.controller.snapshot().notice?.text, SCHEDULE_COPY.deliveryQueued)
+
+    life.controller.dispatch({ kind: 'open-detail', id: 'schedule-ended' })
+    await flush()
+    life.port.runResult = async () => { throw Object.assign(new Error('target refusal'), { code: 'schedule/target-archived' }) }
+    life.controller.dispatch({ kind: 'ask-run' })
+    life.controller.dispatch({ kind: 'confirm' })
+    await flush()
+    await life.controller.whenIdle()
+    assert.equal(life.controller.snapshot().notice?.text, SCHEDULE_COPY.targetArchived)
+    assert.equal(life.controller.snapshot().notice?.kind, 'error')
   } finally {
     life.controller.dispose()
   }

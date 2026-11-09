@@ -1351,11 +1351,38 @@ The leased fullscreen workspace (see `overlay-focus.md` §10.6) is ONE
   on List; the other modes retain their own page title, body and keyboard owner.
 - **Detail** — the official `view` record: full prompt, official timing and
   time zone, target, task status, `executionActive` and `deliveryFloorEndsAt`
-  as SEPARATE facts (the delivery floor is never a task status), and the latest
-  delivery receipt.
+  as SEPARATE facts, and the latest delivery receipt. Execution is `In progress` for explicit `true`, `Not running` for explicit
+  `false`, and `Not reported for this target` when absent. The current Host
+  contract emits only `true` or omission; a missing field is never inferred as
+  idle. The Host floor is labelled `Host minimum interval ends` and
+  displays only the Host instant (or `No active floor reported`), never a
+  Client-clock countdown or a promised execution time. `o` opens the latest
+  receipt's `targetSessionId`; without a receipt, only an existing `session`
+  target can be opened. A `new_once` reservation is not an existing Session:
+  Detail says `Pending first delivery; conversation not created yet.`; an
+  undelivered `new` target says `No delivery yet.`. `r` refreshes the one
+  Session roster used for link availability.
 - **History** — newest-first delivery pages of 20, with paging only by the
-  official `nextBefore` cursor. `earlierRecordsUnavailable` and
-  `earlierRecordsPruned` are separate notes; a vanished cursor ends the page.
+  official `nextBefore` cursor. Each receipt keeps its own `targetSessionId` and
+  optional immutable sent `prompt`; the current task target/prompt never fills a
+  legacy receipt. `earlierRecordsUnavailable` and `earlierRecordsPruned` are
+  separate notes; the pruned note appears only on the final page, and a vanished
+  cursor ends the page. `↑/↓` or `j/k` selects a receipt by `messageId`; `Enter`
+  opens that receipt's receiver, `x` expands/collapses only its saved instruction,
+  `m` loads the next Host page, and `r` refreshes Session-link availability.
+  `PgUp/PgDn` scroll the page. `Delivered to conversation inbox; does not prove
+  Agent execution.` is the shared History/Detail receipt qualification.
+- **Conversation navigation** — a Session link is enabled only from the current
+  successful `SessionReader.list(undefined)` roster, excluding subagents. Every
+  navigation captures the current `SessionScope` synchronously, re-reads that
+  roster, and then delegates to the existing `switchSessionOutcome` transition
+  gate. Only `committed` and `already-current` close the Schedule lease. A
+  missing row is `Not in available Sessions (possibly removed or archived)`;
+  this is not proof of archive or deletion. An unavailable or failed roster
+  disables links and says that availability could not be verified. A failed,
+  superseded or indeterminate switch keeps the same Schedule page and selection.
+  Detail/History roster checks and navigation are Client-local presentation over
+  the Host-backed reader; the Schedule Host port and wire contract are unchanged.
 - **Editor** — one official timing out of seven (`after`, `at`, `every`, `daily`, `weekly`, `cron`, `rrule`) and one official target out of three (`session`, `new_once`, `new`). Its guided Repeat choices are Once · after delay, Once · at date/time, Every · minutes, Every · hours, Every · exact seconds (advanced), Daily, Weekly, Custom · Cron and Custom · RRULE. A new task starts at `after_seconds: 3600` with `new_once`; the delay begins only when the Host accepts creation, and no Client time zone is guessed. Quantity units and the composite Weekdays chooser edit the typed draft only; they do not add a Client schedule or alter the Host timing union. Time and target fields use the labels `Time zone`, `Existing conversation`, `Create and reuse conversation` and `New conversation each run`. Session candidates appear only in their chooser.
   `Ctrl+S` is the only Save: local structural refusals happen first, then one Host `create`/`edit`. An edit sends the minimal CAS patch with `expectedUpdatedAt`; an untouched timing or target is never re-sent. `Esc` with dirty fields asks to discard, never auto-saves. A `schedule_conflict` or an unknown edit outcome blocks Save until `Ctrl+G` reads the latest official record and rebases the four atomic groups (title, instruction, timing, target): locally changed groups stay in the draft, unchanged groups adopt the Host value, and overlapping groups are disclosed. Review is read-only; the next explicit Save uses the latest Host revision. `Ctrl+R` remains the distinct lossy reload and asks before discarding a dirty draft. A missing task blocks Save and can only be discarded. An unknown Create stays locked in that editor after the catalog refresh; leave it and inspect the task list before deciding whether to create a new task. Neither a catalog refresh nor a read result retries a dispatched write.
 
@@ -1365,10 +1392,16 @@ The leased fullscreen workspace (see `overlay-focus.md` §10.6) is ONE
 
 Copy semantics that must not be softened: a successful `run` proves a durable
 Session-inbox delivery (`Delivery queued`), never a completed model turn and
-never "executed exactly once"; `schedule_execution_pending` means
-`Run not started: another execution is pending.`; a CAS mismatch keeps the draft
-and says the task changed on the Host; an unproven mutation outcome says the
-outcome is unknown and requires a re-read before any retry.
+never "executed exactly once". `executionActive === true` disables Run now,
+pause/resume and Delete; `false` or an absent value is not a Client readiness
+verdict, so the Host still decides whether Run is admitted. A confirmed Run
+re-checks the frozen task identity/revision and execution state. The delivery
+floor is display-only; the Client never compares it to its clock. The official
+`schedule_execution_pending` refusal means Run did not start and is shown as the
+information notice `Run not started: another execution is pending.`; a CAS
+mismatch keeps the draft and says the task changed on the Host; an unproven
+mutation outcome says the outcome is unknown and requires a re-read before any
+retry.
 
 Renderer scope: the PiTui renderer owns this workspace. TSP does not admit
 `/schedule` (it receives the generic unsupported-capability refusal and the
@@ -1378,7 +1411,9 @@ scope. The official Web `ui-schedule` row stays the official browser UI and is
 independent of this workspace.
 
 Proof: `test/tui/schedule-workspace-panel.test.ts`,
+`test/tui/schedule-virtual-terminal.test.ts`,
 `test/app/schedule-workspace-controller.test.ts`,
+`test/app/schedule-session-navigation.test.ts`,
 `test/app/schedule-command.test.ts`.
 
 ## Attachments and input completion
