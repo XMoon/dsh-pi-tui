@@ -505,7 +505,8 @@ test('the selectable registry is the single source for listing, resolution and t
 
 test('selected dispatch fails closed on non-PASS Web and Account verdicts', () => {
   assert.equal(assertSelectedVerdict('account.official-composition', {
-    status: 'PASS', browser: 'PASS', verifiedCallback: true, pkce: true, missingHostBinding: true,
+    status: 'PASS', browser: 'PASS', verifiedCallback: true, pkce: true,
+    wrongCodeWithValidPkce: true, missingHostBinding: true,
   }), undefined)
   assert.throws(() => assertSelectedVerdict('account.official-composition', { status: 'PASS', browser: 'NOT_RUN' }),
     /selected account\.official-composition/u)

@@ -3,6 +3,7 @@ import { createServer } from 'node:http'
 import { existsSync, lstatSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { join } from 'node:path'
+import { setTimeout as sleep } from 'node:timers/promises'
 import { parse as parseYaml } from 'yaml'
 import {
   assertClientHostFacts,
@@ -49,6 +50,70 @@ async function waitForAccountFrame(client, needle, label, trace, timeoutMs = 60_
   }
 }
 
+async function submitOnRealEditor(client, line, label) {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const marker = `m6-f2-editor-ready-${String(attempt + 1)}`
+    client.send(marker)
+    try {
+      await client.waitForComposerDraft(marker, 8_000)
+    } catch {
+      client.send('\x15')
+      await sleep(300)
+      continue
+    }
+    client.send('\x15')
+    let cleared = false
+    for (let poll = 0; poll < 60; poll += 1) {
+      const current = await client.composerText()
+      if (current !== undefined && !current.includes(marker)) {
+        cleared = true
+        break
+      }
+      await sleep(100)
+    }
+    if (!cleared) continue
+    client.send(`${line}\r`)
+    return
+  }
+  const frame = redactWebQualificationText(await sanitizedFrame(client))
+  throw new SplitSmokeAssertionError(`${label}: the editor seat never accepted the submitted prompt: ${frame}`)
+}
+
+async function selectAccountAction(client, actionLabel, label) {
+  client.send('\x1b[H')
+  const selected = new RegExp(`>\\s*${escapeRegex(actionLabel)}`, 'u')
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    const frame = await sanitizedFrame(client)
+    if (selected.test(frame)) return
+    client.send('\x1b[B')
+    await sleep(100)
+  }
+  const frame = redactWebQualificationText(await sanitizedFrame(client))
+  throw new SplitSmokeAssertionError(`${label}: action was not selected in the painted frame: ${frame}`)
+}
+
+async function selectDeepseekAccountModel(client, label) {
+  await submitOnRealEditor(client, '/model', `${label} opens official model picker`)
+  await client.waitForScreen('Models', `${label} model picker opened`, 30_000)
+  client.send('deepseek-account')
+  await waitForCondition(async () => (await sanitizedFrame(client)).includes('DeepSeek Flash'),
+    `${label} filtered deepseek-account catalog row`, 30_000)
+  client.send('\r')
+  let frame = ''
+  try {
+    await waitForCondition(async () => {
+      frame = await sanitizedFrame(client)
+      return frame.includes('DeepSeek Flash') && frame.includes('←→ effort · Enter select · Esc back')
+    }, `${label} selected DeepSeek Flash entered its inline effort phase`, 15_000)
+  } catch (error) {
+    throw new SplitSmokeAssertionError(
+      `${label} model picker did not paint inline effort focus: ${redactWebQualificationText(frame)}`,
+      { cause: error },
+    )
+  }
+  client.send('\r')
+}
+
 function escapeRegex(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
 }
@@ -66,6 +131,7 @@ export async function runF2AccountComposition(context) {
     wrongCodeRejected: false,
     cancelValid: false,
     runningRequestEntered: false,
+    runningRequestModel: undefined,
     runningRequestClosed: false,
   }
   const requests = []
@@ -185,6 +251,7 @@ export async function runF2AccountComposition(context) {
         if (request.method === 'POST' && url.pathname === '/anthropic/v1/messages') {
           assert(request.headers['x-dsh-auth-token'] === 'm6-f2-mock-grant-token',
             'the Host model request did not use its committed mock grant')
+          auth.runningRequestModel = JSON.parse(bodyText).model
           auth.runningRequestEntered = true
           response.writeHead(200, {
             'content-type': 'text/event-stream',
@@ -240,7 +307,14 @@ export async function runF2AccountComposition(context) {
       'version: 1',
       'refs:',
       `  DEEPSEEK_API_KEY: ${apiKeySentinel}`,
-      'records: {}',
+      'records:',
+      '  deepseek-account-platform/default:',
+      '    kind: grant',
+      '    payload:',
+      '      version: 1',
+      '      token: m6-f2-mock-grant-token',
+      `      issuer: ${platformOrigin}`,
+      '',
       '',
     ].join('\n')
     writeFileSync(credentialsPath, credentialsText, { mode: 0o600 })
@@ -291,7 +365,14 @@ export async function runF2AccountComposition(context) {
       clients.push(client)
       const ready = await client.waitFor(record => record.m4a0 === 'ready', `${label} surface Client ready`, 180_000)
       assertClientHostFacts(ready.host, hostReady.localHost, `${label} Client authenticated Host`)
-      client.send('/login deepseek-account\r')
+      await submitOnRealEditor(client, '/new', `${label} first Host Session`)
+      await waitForSurfaceStatus(client,
+        record => record.sessionOpen === true && typeof record.openSessionId === 'string',
+        `${label} first Host Session opened`, 120_000)
+      return client
+    }
+    const openAccountPage = async (client, label) => {
+      await submitOnRealEditor(client, '/login deepseek-account', `${label} opens Account page`)
       await client.waitForScreen('DeepSeek Account', `${label} Account page opened`, 60_000)
       await waitForCondition(async () => {
         const frame = await sanitizedFrame(client)
@@ -303,70 +384,54 @@ export async function runF2AccountComposition(context) {
         credentialStored: initialFrame.includes('Signed in (stored credential)'),
         unavailable: /unavailable|watch stopped/iu.test(initialFrame),
       }
-      const diagnosticLines = initialFrame.split('\n')
-        .filter(line => /DeepSeek Account|unavailable|watch stopped|\bError\b|failed/iu.test(line))
-        .slice(0, 8)
-        .map(line => redactWebQualificationText(line))
-      trace('account.initial-watch-state', {
-        client: label,
-        ...initialFacts,
-        diagnosticLines,
-      })
-      assert(initialFacts.signedOut,
-        `${label} Account initial watch did not paint the authoritative signed-out state: ${JSON.stringify(initialFacts)}`)
-      await client.waitForScreen('Sign in', `${label} Sign-in action painted`, 60_000)
-      return client
+      trace('account.initial-watch-state', { client: label, ...initialFacts })
+      assert(initialFacts.credentialStored,
+        `${label} Account initial watch did not paint the official Host mock grant state: ${JSON.stringify(initialFacts)}`)
+      await waitForAccountFrame(client, 'M6 Account', `${label} initial Account profile query`, trace)
+      await client.waitForScreen('Sign out…', `${label} Sign-out action painted`, 30_000)
     }
 
     const clientA = await launchClient('F2 A')
     const clientB = await launchClient('F2 B')
-    clientA.send('\r')
-    await clientA.waitForScreen('waiting-browser', 'F2 official Account attempt reached the browser phase', 60_000)
-    await clientB.waitForScreen('waiting-browser', 'F2 second Client observed the shared Host attempt', 60_000)
+    await selectDeepseekAccountModel(clientA, 'F2 A')
+    await submitOnRealEditor(clientA, 'M6 account running-task authority proof',
+      'F2 Account UI running-task agent prompt')
+    await waitForCondition(() => auth.runningRequestEntered,
+      'F2 official deepseek-account Messages request entered the Host model owner', 60_000)
+    assert(auth.runningRequestModel === 'deepseek-flash',
+      `F2 Session did not route its live Agent through deepseek-account/deepseek-flash: ${String(auth.runningRequestModel)}`)
+    await openAccountPage(clientA, 'F2 A')
+    await openAccountPage(clientB, 'F2 B')
+    await selectAccountAction(clientB, 'Sign out…', 'F2 select Account Sign out')
+    clientB.send('\r')
+    await clientB.waitForScreen('Sign out confirmation', 'F2 Account sign-out confirmation', 30_000)
+    await waitForAccountFrame(clientB, 'A running agent is using a deepseek-account model',
+      'F2 live Host running-account-task warning', trace, 30_000)
+    clientB.send('\r')
+    await waitForAccountFrame(clientB, 'Signed out / no stored credential',
+      'F2 Host sign-out state after running-task warning', trace, 60_000)
+    await waitForCondition(() => auth.runningRequestClosed,
+      'F2 official signed-out listener cancelled the running account request', 30_000)
+    await waitForCondition(() => requests.includes('POST /auth-api/v0/users/logout'),
+      'F2 asynchronous Platform revocation request', 30_000)
+    await waitForAccountFrame(clientA, 'Signed out / no stored credential',
+      'F2 other Account page received the same Host sign-out', trace, 30_000)
+
+    await selectAccountAction(clientB, 'Sign in', 'F2 select first browser Sign-in')
+    clientB.send('\r')
+    await waitForAccountFrame(clientB, 'waiting-browser', 'F2 official Account attempt reached the browser phase', trace, 30_000)
+    await waitForAccountFrame(clientA, 'waiting-browser', 'F2 first Client observes the shared Host attempt', trace, 30_000)
     clientA.send('\x1b')
-    await clientA.waitForScreen('[Categories (9)]', 'F2 Account page yielded to Settings categories', 20_000)
+    await waitForAccountFrame(clientA, '[Categories (9)]', 'F2 Account page yielded to Settings categories', trace, 20_000)
     clientA.send('\x1b')
-    await clientA.waitForScreen('type a message to start a session',
-      'F2 Account page closed to the sessionless Host Editor', 20_000)
-    let editorReady = false
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      const marker = `m6-f2-account-reopen-ready-${String(attempt + 1)}`
-      clientA.send(marker)
-      try {
-        await clientA.waitForComposerDraft(marker, 5_000)
-      } catch {
-        clientA.send('\x15')
-        continue
-      }
-      clientA.send('\x15')
-      await waitForCondition(async () => {
-        const composer = await clientA.composerText()
-        return composer !== undefined && !composer.includes(marker)
-      }, 'F2 reopen readiness marker was cleared', 10_000)
-      editorReady = true
-      break
-    }
-    assert(editorReady, 'F2 Account page closed but the real editor never accepted its readiness marker')
-    clientA.send('/login deepseek-account\r')
-    await clientA.waitForScreen('waiting-browser',
-      'F2 reopened Account page re-read the Host attempt from its initial watch snapshot', 30_000)
-    const beforeReconnect = lastSurfaceStatus(clientA)
-    assert(beforeReconnect?.transport === 'connected' && typeof beforeReconnect.generationId === 'number',
-      'F2 Client A has no live Connection generation before the Account watch reconnect check')
-    clientA.signalBusiness('SIGUSR1')
-    const reconnected = await waitForSurfaceStatus(clientA,
-      record => record.transport === 'connected'
-        && typeof record.generationId === 'number'
-        && record.generationId !== beforeReconnect.generationId,
-      'F2 Account Client reconnected on a new official generation', 120_000)
-    await clientA.waitForScreen('waiting-browser',
-      'F2 the same generated Account watch delivered the current Host attempt after reconnect', 30_000)
-    assert(reconnected.generationId !== beforeReconnect.generationId,
-      'the Account watch recovery did not cross an actual Connection generation')
-    const painted = (await sanitizedFrame(clientA)).replace(/\s+/gu, '')
-    const authorizeUrl = new RegExp(`${escapeRegex(platformOrigin)}/dsh/authorize\\?state=[A-Za-z0-9_-]{43}`, 'u').exec(painted)?.[0]
-    assert(authorizeUrl !== undefined, 'the real Account page did not paint the mock Platform authorization link')
-    assert(!painted.includes('m6-f2-mock-grant-token'), 'the Account page exposed a grant token')
+    await waitForCondition(async () => !(await sanitizedFrame(clientA)).includes('DeepSeek Account'),
+      'F2 Client A closed its Account page and Settings lease', 20_000)
+    await clientB.waitForScreen('waiting-browser',
+      'F2 closing Client A Account page left the Host browser attempt alive', 20_000)
+    const authorizeFrame = (await sanitizedFrame(clientB)).replace(/\s+/gu, '')
+    const authorizeUrl = new RegExp(`${escapeRegex(platformOrigin)}/dsh/authorize\\?state=[A-Za-z0-9_-]{43}`, 'u').exec(authorizeFrame)?.[0]
+    assert(authorizeUrl !== undefined, 'the second real Client did not paint the shared Host authorization URL')
+    assert(!authorizeFrame.includes('m6-f2-mock-grant-token'), 'the Account page exposed a grant token')
 
     const callbackOrigin = hostReady.localHost?.origin
     assert(typeof callbackOrigin === 'string' && /^http:\/\/127\.0\.0\.1:\d+$/u.test(callbackOrigin),
@@ -420,38 +485,41 @@ export async function runF2AccountComposition(context) {
     assert(auth.pkceValid && auth.redirectValid, 'Platform auth_exchange did not verify the exact PKCE verifier and callback URI')
     assert(requests.includes('GET /auth-api/v0/users/current'), 'the Host did not query the independent official profile endpoint')
     assert(requests.includes('GET /api/v0/users/get_user_summary'), 'the Host did not query the independent official balance endpoint')
-    await waitForAccountFrame(clientA, 'Signed in (stored credential)', 'F2 Account page received Host grant state', trace)
-    await waitForAccountFrame(clientA, 'M6 Account', 'F2 Account page received detached Host profile', trace)
-    await waitForAccountFrame(clientB, 'Signed in (stored credential)', 'F2 second Client received the same Host grant state', trace)
-    await waitForAccountFrame(clientB, 'M6 Account', 'F2 second Client received detached Host profile', trace)
-    assert((await sanitizedFrame(clientA)).includes('12.50 CNY'),
+    await waitForAccountFrame(clientB, 'Signed in (stored credential)', 'F2 Host callback grant reached the live Client page', trace)
+    await waitForAccountFrame(clientB, 'M6 Account', 'F2 live Client received detached Host profile', trace)
+    assert((await sanitizedFrame(clientB)).includes('12.50 CNY'),
       'the Account page did not paint the independent Host wallet balance')
 
-    // Retire Client A's Account page and Settings lease through their real Esc
-    // owners, then submit one normal prompt through the official TUI editor.
-    clientA.send('\x1b')
-    await waitForCondition(async () => !(await sanitizedFrame(clientA)).includes('DeepSeek Account'),
-      'F2 Client A left its Account page', 15_000)
-    clientA.send('\x1b')
-    const editorMarker = 'm6-f2-account-agent-editor-ready'
-    clientA.send(editorMarker)
-    await clientA.waitForComposerDraft(editorMarker, 15_000)
-    clientA.send('\x15')
-    await waitForCondition(async () => !(await clientA.composerText())?.includes(editorMarker),
-      'F2 Client A cleared the editor readiness marker', 15_000)
-    clientA.send('M6 account running-task authority proof\r')
-    await waitForCondition(() => auth.runningRequestEntered,
-      'F2 official deepseek-account Messages request entered the Host model owner', 60_000)
+    await submitOnRealEditor(clientA, '/login deepseek-account',
+      'F2 reopening the closed Account page through the Host Session')
+    await waitForAccountFrame(clientA, 'Signed in (stored credential)',
+      'F2 reopened Account page re-read the Host grant via its initial watch snapshot', trace)
+    await waitForAccountFrame(clientA, 'M6 Account', 'F2 reopened Account page read the detached profile', trace)
 
-    // Client B asks the Host again only when the human opens Sign out. The live
-    // Agent must be visible as a risk warning; the confirmation is not based on
-    // Client A's local UI busy state.
-    clientB.send('\x1b[B\x1b[B\r')
-    await clientB.waitForScreen('Sign out confirmation', 'F2 Account sign-out confirmation', 30_000)
-    await clientB.waitForScreen('A running agent is using a deepseek-account model',
-      'F2 live Host running-account-task warning', 30_000)
+    const beforeReconnect = lastSurfaceStatus(clientB)
+    assert(beforeReconnect?.transport === 'connected' && typeof beforeReconnect.generationId === 'number',
+      'F2 Client B has no live Connection generation before the Account watch reconnect check')
+    clientB.signalBusiness('SIGUSR1')
+    const reconnected = await waitForSurfaceStatus(clientB,
+      record => record.transport === 'connected'
+        && typeof record.generationId === 'number'
+        && record.generationId !== beforeReconnect.generationId,
+      'F2 Account Client reconnected on a new official generation', 120_000)
+    await waitForAccountFrame(clientB, 'Signed in (stored credential)',
+      'F2 the same Account watch received the new Host initial baseline', trace, 30_000)
+    assert(reconnected.generationId !== beforeReconnect.generationId,
+      'the Account watch recovery did not cross an actual Connection generation')
+
+    // The first sign-out already cancelled the single real Account-backed Agent.
+    // After reconnect, a fresh Host check must therefore settle known-false before
+    // a second credential mutation opens the wrong-code/cancel qualification.
+    await selectAccountAction(clientB, 'Sign out…', 'F2 select Account Sign out after task cancellation')
     clientB.send('\r')
-    await clientB.waitForScreen('Signed out / no stored credential', 'F2 Host sign-out state', 60_000)
+    await clientB.waitForScreen('Sign out confirmation', 'F2 post-cancellation Account confirmation', 30_000)
+    await waitForAccountFrame(clientB, 'No running account task is using this account.',
+      'F2 cancelled Host task is no longer reported as running', trace, 30_000)
+    clientB.send('\r')
+    await clientB.waitForScreen('Signed out / no stored credential', 'F2 second Host sign-out state', 60_000)
     await waitForCondition(() => auth.runningRequestClosed,
       'F2 official signed-out listener cancelled the running account request', 30_000)
     await waitForCondition(
@@ -460,18 +528,37 @@ export async function runF2AccountComposition(context) {
       30_000,
     )
 
-    // A fresh browser attempt exercises the exact-attempt Cancel action through
-    // AccountWorkflow and the same generated Host namespace.
+    // A correct state and S256 verifier carrying the wrong Platform code must
+    // be rejected by the isolated endpoint; recovery requires a fresh explicit
+    // user Sign-in and is never initiated by reconnect/observation.
+    await selectAccountAction(clientB, 'Sign in', 'F2 select explicit fresh Sign in')
     clientB.send('\r')
     await clientB.waitForScreen('waiting-browser', 'F2 second Host browser attempt', 30_000)
     assert(auth.attempts.length === 2, 'the second explicit Sign-in did not reach official auth_init')
+    const wrongCodeAttempt = auth.attempts[1]
+    const wrongCodeCallback = new URL(`${callbackOrigin}/oauth/callback`)
+    wrongCodeCallback.searchParams.set('code', 'm6-f2-platform-rejected-code')
+    wrongCodeCallback.searchParams.set('state', wrongCodeAttempt.state)
+    const wrongCodeResponse = await fetch(wrongCodeCallback, { redirect: 'manual' })
+    assert(wrongCodeResponse.status === 200, 'the Host did not finish the browser callback after Platform rejected the code')
+    await waitForCondition(() => auth.wrongCodeRejected && wrongCodeAttempt.pkceValid && wrongCodeAttempt.redirectValid,
+      'F2 Platform rejected wrong code after validating the exact S256 verifier and callback URI', 30_000)
+    await waitForAccountFrame(clientB, 'Error code  network',
+      'F2 wrong-code Host failure projection', trace, 30_000)
+
+    // Retry only after an explicit new Sign-in. Its returned attempt id is the
+    // one the user cancels through the Account page.
     clientB.send('\r')
-    await clientB.waitForScreen('Last attempt cancelled', 'F2 exact Host attempt cancellation state', 30_000)
+    await clientB.waitForScreen('waiting-browser', 'F2 third explicit Host browser attempt', 30_000)
+    assert(auth.attempts.length === 3, 'the third explicit Sign-in did not reach official auth_init')
+    await selectAccountAction(clientB, 'Cancel current attempt', 'F2 select exact-attempt cancel')
+    clientB.send('\r')
+    await waitForAccountFrame(clientB, 'cancelled', 'F2 exact Host attempt cancellation state', trace, 30_000)
     await waitForCondition(() => auth.cancelValid,
       'F2 official auth_cancel matched the active attempt id and PKCE verifier', 30_000)
-    assert.deepEqual(mockFailures, [], 'the isolated Platform mock rejected an owned request assertion')
-    assert(requests.filter(path => path === 'POST /auth-api/v0/dsh/auth_init').length === 2,
-      'the two explicit Sign-in actions must each dispatch exactly once')
+    assert(mockFailures.length === 0, 'the isolated Platform mock rejected an owned request assertion')
+    assert(requests.filter(path => path === 'POST /auth-api/v0/dsh/auth_init').length === 3,
+      'the three explicit Sign-in actions must each dispatch exactly once; failed code is never replayed')
     assert(requests.filter(path => path === 'POST /auth-api/v0/dsh/auth_cancel').length === 1,
       'the exact active browser attempt is cancelled exactly once')
 
@@ -524,7 +611,8 @@ export async function runF2AccountComposition(context) {
         generationAfter: reconnected.generationId,
         attemptRetained: true,
       },
-      callbackStateNegative: 'rejected',
+      callbackStateNegative: 'rejected-before-exchange',
+      wrongCodeWithValidPkce: auth.wrongCodeRejected,
       browserCallback: 'PASS',
       pkceExchange: 'PASS',
       profile: 'ready',
@@ -546,6 +634,7 @@ export async function runF2AccountComposition(context) {
       generatedAccountClients: 2,
       verifiedCallback: true,
       pkce: true,
+      wrongCodeWithValidPkce: auth.wrongCodeRejected,
       profile: 'ready',
       balance: 'ready',
       runningTaskWarning: true,
