@@ -2285,8 +2285,7 @@ test('the Remote Web page confirms each field, keeps credential values hidden, a
     await page.key('\r')
     await waitFor('the HTTPS endpoint Confirm is authoritative on the Host', () =>
       forms.describe().find(entry => entry.ns === 'web-deepseek-api')?.value?.baseURL === confirmedEndpoint)
-    await waitFor('the verified endpoint editor closes on read-back', () =>
-      !page.view().includes('Enter confirm · Esc cancel') && page.view().includes('m6-f3-ui'))
+    await waitFor('the verified endpoint editor returns to the painted Web list after read-back', () => isWebList())
     pageLevel = 'list'
     assert.equal((await config.web.read())?.api.baseURL, confirmedEndpoint)
 
