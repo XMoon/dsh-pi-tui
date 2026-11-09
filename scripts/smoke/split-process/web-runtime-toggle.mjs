@@ -82,7 +82,7 @@ export async function runWebRuntimeToggle(context) {
   /** The durable Host owners whose fiber identity must never change. */
   const PROTECTED_OWNER_KEYS = [
     'connection', 'apiRemotes', 'typertGateway', 'workspaceRegistry', 'workspaceController',
-    'sessionController', 'fileUpload', 'settingsController', 'jobController', 'piTuiHostRuntime',
+    'sessionController', 'fileUpload', 'settingsController', 'accountController', 'jobController', 'piTuiHostRuntime',
   ]
   /** `id -> live Loader fiber UID` for EVERY row the Host status reports. */
   const rowUids = ready => Object.fromEntries((ready.entries ?? [])

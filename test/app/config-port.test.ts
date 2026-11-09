@@ -65,7 +65,7 @@ function workflowOver(providers: ProviderProfileConfig): CredentialWorkflow {
       startSignIn: async () => { throw new Error('unused') },
       cancelSignIn: async () => { throw new Error('unused') },
       signOut: async () => { throw new Error('unused') },
-      hasRunningAccountTasks: () => false,
+      hasRunningAccountTasks: async () => false,
     },
     catalog: { models: { available: () => false, discoverModels: async () => [] } },
     signal: new AbortController().signal,

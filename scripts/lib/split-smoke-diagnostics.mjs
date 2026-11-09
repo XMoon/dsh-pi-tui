@@ -503,16 +503,24 @@ function projectArtifacts(artifacts) {
  * copied.
  */
 /**
- * The ONE redaction policy for a caught error at a named lifecycle scope: only
- * a Web case can carry the real launch token/Cookie/Authorization, so only
- * that scope is passed through the concrete redactor. The lane's final stderr
- * and the structured report both call this, never their own copy.
+ * The ONE redaction policy for a caught error at a named lifecycle scope:
+ * Web cases can carry launch token/Cookie/Authorization and Account callback
+ * errors can carry state, code and PKCE query/body values. Both scoped classes
+ * use the concrete redactor; the lane's final stderr and structured report call
+ * this owner rather than maintaining their own copy.
  */
 export function redactErrorForStep(text, failedStep) {
   const value = String(text ?? '')
-  return typeof failedStep === 'string' && /(^|\/)case\/web\./u.test(failedStep)
-    ? redactWebQualificationText(value)
-    : value
+  if (typeof failedStep === 'string' && /(^|\/)case\/web\./u.test(failedStep)) {
+    return redactWebQualificationText(value)
+  }
+  if (typeof failedStep === 'string' && /(^|\/)case\/account\./u.test(failedStep)) {
+    return redactWebQualificationText(value)
+      .replace(/(^|[?&\s])((?:state|code|code_verifier|code_challenge|redirect_uri)=)[^&\s"']+/giu, '$1$2<redacted>')
+      .replace(/(["'])(state|code|code_verifier|code_challenge|redirect_uri)\1(\s*:\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')/giu,
+        '$1$2$1$3"<redacted>"')
+  }
+  return value
 }
 
 /** The raw caught-error facts a human needs, without inventing fields. */
@@ -646,6 +654,7 @@ const LANE_SOURCE_LIST = Object.freeze([
   'entry-admission.mjs',
   'runtime-artifact-recovery.mjs',
   'authenticated-lifecycle.mjs',
+  'account-composition.mjs',
   'pty-session-write-recovery.mjs',
   'c1-scene.mjs',
   'shared-session-interactions.mjs',

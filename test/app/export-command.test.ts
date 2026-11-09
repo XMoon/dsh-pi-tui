@@ -158,7 +158,7 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
         startSignIn: async () => { throw new Error('account unavailable') },
         cancelSignIn: async () => { throw new Error('account unavailable') },
         signOut: async () => { throw new Error('account unavailable') },
-        hasRunningAccountTasks: () => false,
+        hasRunningAccountTasks: async () => false,
       },
       credentials: {
         recordsSupported: () => true,

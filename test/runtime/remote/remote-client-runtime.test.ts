@@ -1202,23 +1202,29 @@ async function waitForWorkspaceUpsert(
   throw new Error(`the Workspace stream never upserted "${workspaceId}"`)
 }
 
-test('WS1-TABLE. the two frozen /remote tables agree and the Client plugin allowlist stays six', () => {
+test('WS1-TABLE. the frozen /remote tables agree by package identity and the Client plugin allowlist stays six', () => {
   assert.equal(OFFICIAL_CLIENT_BUNDLES.length, 6,
     'the official Client plugin allowlist must stay exactly six bundles')
-  assert.equal(REMOTE_CONTRIBUTIONS.length, 14, 'the explicit /remote table carries fourteen generated contributions')
   assert.equal(REMOTE_CONTRIBUTION_SPECIFIERS.length, REMOTE_CONTRIBUTIONS.length,
     'the statically imported and installed-anchor tables must have the same length')
+  const packages = REMOTE_CONTRIBUTIONS.map(contribution => contribution.package)
+  assert.equal(new Set(packages).size, packages.length,
+    'each official generated Remote package must be mounted once')
   assert.deepEqual(
-    REMOTE_CONTRIBUTIONS.map(contribution => contribution.package),
+    packages,
     REMOTE_CONTRIBUTION_SPECIFIERS.map(specifier => specifier.replace(/\/remote$/u, '')),
     'both tables must name the same packages in the same frozen order',
   )
-  assert.equal(REMOTE_CONTRIBUTION_SPECIFIERS[12], '@deepseek-ai/dsh-api-workspace-controller/remote',
-    'the Workspace namespace is the thirteenth generated contribution')
-  assert.equal(REMOTE_CONTRIBUTION_SPECIFIERS[13], '@deepseek-ai/dsh-schedule/remote',
-    'S5-PR4 adds the Schedule namespace as the fourteenth generated contribution')
-  assert.equal(OFFICIAL_CLIENT_BUNDLES.some(bundle => /workspace-controller/u.test(bundle.specifier)), false,
-    'the Workspace Controller is a /remote descriptor, never a seventh Client plugin')
+  const settingsIndex = packages.indexOf('@deepseek-ai/dsh-api-settings-controller')
+  const accountIndex = packages.indexOf('@deepseek-ai/dsh-api-account-controller')
+  assert.ok(settingsIndex >= 0 && accountIndex === settingsIndex + 1,
+    'the generated Account namespace follows Settings in the /remote contribution order')
+  const workspaceIndex = packages.indexOf('@deepseek-ai/dsh-api-workspace-controller')
+  const scheduleIndex = packages.indexOf('@deepseek-ai/dsh-schedule')
+  assert.ok(workspaceIndex >= 0 && scheduleIndex > workspaceIndex,
+    'the generated Workspace and Schedule capabilities keep their dependency order')
+  assert.equal(OFFICIAL_CLIENT_BUNDLES.some(bundle => /workspace-controller|account-controller/u.test(bundle.specifier)), false,
+    'Workspace and Account Controllers are /remote descriptors, never extra Client plugins')
 })
 
 test('WORKSPACE. the official workspace namespace creates and follows the Host Workspace registry', async (t) => {

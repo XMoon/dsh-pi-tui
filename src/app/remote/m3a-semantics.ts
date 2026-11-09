@@ -186,6 +186,7 @@ export interface RemoteM3ARuntimeSource {
      *  from this SAME source (no second Client Remote object). */
     readonly settings: RemoteConfigRuntimeSource['remote']['settings']
     readonly credentials: RemoteConfigRuntimeSource['remote']['credentials']
+    readonly account?: RemoteConfigRuntimeSource['remote']['account']
     readonly permissionPresets: RemoteConfigRuntimeSource['remote']['permissionPresets']
     /** The forwarded-event seat shared by every adapter: the intersection of
      *  the event declarations each one subscribes to (the real generated

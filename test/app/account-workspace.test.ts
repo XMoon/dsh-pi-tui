@@ -13,10 +13,14 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
+import { VirtualTerminal } from '../support/virtual-terminal.ts'
+import { currentPalette, setTheme } from '../../src/tui/theme/runtime.ts'
+import { darkColors, lightColors } from '../../src/domain/display/theme.ts'
 import { AccountWorkspacePage, type AccountInitialView } from '../../src/tui/panels/account-workspace-page.ts'
 import type { AccountWorkspaceSource } from '../../src/app/command/account-workflow.ts'
-import { accountClientMetadata } from '../../src/app/command/account-workflow.ts'
+import { accountClientMetadata, AccountWorkflow } from '../../src/app/command/account-workflow.ts'
 import type { AccountView } from '../../src/runtime/config-port.ts'
+import { SupersededReadError } from '../../src/runtime/read-error.ts'
 
 const LINKS = { usageUrl: 'https://platform.example/usage', topUpUrl: 'https://platform.example/topup' }
 
@@ -55,8 +59,8 @@ function makeSource(state: SourceState): AccountWorkspaceSource {
     callbackOrigin: () => 'http://127.0.0.1:43121',
     getState: async () => state.view,
     watch: async function* () {
-      // The official watch yields a complete initial state; the page also
-      // reads getState on open, so an empty stream is a valid test stand-in.
+      // The official watch yields a complete initial state; the page uses this
+      // frame as its first read and never races it with a separate getState.
       yield state.view
       await new Promise<void>(() => {})
     },
@@ -81,7 +85,7 @@ function makeSource(state: SourceState): AccountWorkspaceSource {
       state.view = signedOut()
       return state.view
     },
-    hasRunningAccountTasks: () => state.runningTasks,
+    hasRunningAccountTasks: async () => state.runningTasks,
     openUrl: url => { state.calls.push(`open:${url}`) },
     copy: text => { state.calls.push(`copy:${text}`) },
     run: (_label, task) => { void task() },
@@ -110,6 +114,42 @@ test('the account metadata samples the live timezone offset and the UI locale', 
   assert.equal(metadata.version, '0.5.3')
   assert.equal(metadata.timezoneOffsetSeconds, -new Date().getTimezoneOffset() * 60)
   assert.equal(metadata.locale.length > 0, true)
+})
+
+test('superseded Host profile and balance reads do not become current UI failures', async () => {
+  const stale = new SupersededReadError('remote Account generation changed')
+  const account = {
+    available: () => true,
+    getState: async () => stored(),
+    getProfile: async () => { throw stale },
+    getBalance: async () => { throw stale },
+    watch: async function* (signal: AbortSignal) {
+      yield stored()
+      await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true }))
+    },
+    getCallbackOrigin: () => 'http://127.0.0.1:43121',
+    startSignIn: async () => stored(),
+    cancelSignIn: async () => stored(),
+    signOut: async () => stored(),
+    hasRunningAccountTasks: async () => false,
+  }
+  const workflow = new AccountWorkflow({
+    account,
+    version: '0.5.6',
+    openUrl: () => {},
+    copy: () => {},
+    run: (_label, task) => { void task() },
+    diag: { warn: () => {} },
+  })
+  assert.deepEqual(await workflow.getProfile(), { status: 'superseded' })
+  assert.deepEqual(await workflow.getBalance(), { status: 'superseded' })
+  const page = new AccountWorkspacePage(workflow, () => {}, { view: 'page' })
+  page.setBodyHeight(26)
+  await flush()
+  const painted = text(page)
+  assert.match(painted, /Signed in \(stored credential\)/u)
+  assert.doesNotMatch(painted, /Profile\s+failed|Balance\s+failed/u)
+  page.dispose()
 })
 
 test('signed out: the page offers Sign in and the exact callback origin, never a token', async () => {
@@ -177,7 +217,7 @@ test('stored credential: profile and balance settle independently and keep the d
   assert.match(painted, /3\.00 CNY/u)
 })
 
-test('sign out requires confirmation, warns about running account tasks and never restores a local grant on failure', async () => {
+test('Sign out waits for the Host task fact and warns before cancelling a running account task', async () => {
   const { page, state } = open()
   await flush()
   state.view = stored()
@@ -201,6 +241,120 @@ test('sign out requires confirmation, warns about running account tasks and neve
   assert.match(text(page), /Signed out/u)
 })
 
+test('the sign-out task-check status keeps semantic ink and fits a real 80x24 VirtualTerminal frame', async t => {
+  const originalPalette = currentPalette
+  t.after(() => setTheme('custom', originalPalette))
+  const themes = [
+    { mode: 'dark' as const, palette: darkColors },
+    { mode: 'light' as const, palette: lightColors },
+    { mode: 'custom' as const, palette: { ...darkColors, error: '#12ab34', textDim: '#345678' } },
+  ]
+  const rgb = (value: string): number => Number.parseInt(value.replace(/^#/u, ''), 16)
+  for (const theme of themes) {
+    setTheme(theme.mode, theme.palette)
+    const state: SourceState = { view: stored(), profileFails: false, balanceFails: false, runningTasks: true, calls: [] }
+    let resolveTaskCheck!: (running: boolean) => void
+    const source = makeSource(state)
+    source.hasRunningAccountTasks = () => new Promise(resolve => { resolveTaskCheck = resolve })
+    const page = new AccountWorkspacePage(source, () => {}, { view: 'signout' })
+    page.setBodyHeight(24)
+    await flush()
+    const pendingRows = page.render(80)
+    const pendingText = pendingRows.map(stripTerminalSequences).join('\n')
+    assert.match(pendingText, /Checking running account tasks…/u)
+    const vt = new VirtualTerminal(80, 24)
+    vt.write(pendingRows.join('\r\n'))
+    const pendingFrame = await vt.flushAndGetViewport()
+    assert.equal(pendingFrame.length, 24)
+    assert.ok(pendingFrame.every(row => visibleWidth(row) <= 80), `${theme.mode} pending frame overflowed`)
+    const pendingLine = pendingFrame.findIndex(row => row.includes('Checking running account tasks'))
+    const pendingCol = pendingFrame[pendingLine]!.indexOf('Checking running account tasks')
+    assert.equal(vt.getCellFgRgb(pendingLine, pendingCol), rgb(theme.palette.textDim),
+      `${theme.mode} checking status must use the semantic dim token`)
+
+    resolveTaskCheck(true)
+    await flush()
+    const warningRows = page.render(80)
+    const warningText = warningRows.map(stripTerminalSequences).join('\n')
+    assert.match(warningText, /A running agent is using a deepseek-account model/u)
+    const warningVt = new VirtualTerminal(80, 24)
+    warningVt.write(warningRows.join('\r\n'))
+    const warningFrame = await warningVt.flushAndGetViewport()
+    assert.equal(warningFrame.length, 24)
+    assert.ok(warningFrame.every(row => visibleWidth(row) <= 80), `${theme.mode} warning frame overflowed`)
+    const warningLine = warningFrame.findIndex(row => row.includes('A running agent is using a deepseek-account model'))
+    const warningCol = warningFrame[warningLine]!.indexOf('A running agent is using a deepseek-account model')
+    assert.equal(warningVt.getCellFgRgb(warningLine, warningCol), rgb(theme.palette.error),
+      `${theme.mode} running-task warning must use the semantic error token`)
+    page.dispose()
+  }
+})
+
+test('a late false task check cannot replace the newer confirmed running-task fact', async () => {
+  const state: SourceState = { view: stored(), profileFails: false, balanceFails: false, runningTasks: false, calls: [] }
+  const source = makeSource(state)
+  const answers: Array<(running: boolean) => void> = []
+  source.hasRunningAccountTasks = () => new Promise(resolve => { answers.push(resolve) })
+  const page = new AccountWorkspacePage(source, () => {}, { view: 'page' })
+  page.setBodyHeight(30)
+  await flush()
+  assert.equal(answers.length, 1, 'the initial AccountView starts one Host task check')
+  text(page)
+  page.handleInput('\u001b[B')
+  page.handleInput('\u001b[B')
+  page.handleInput('\r')
+  await flush()
+  assert.equal(answers.length, 2, 'opening Sign out starts a fresh Host task check')
+  assert.match(text(page), /Checking running account tasks/u)
+  page.handleInput('\r')
+  assert.equal(state.calls.includes('signOut'), false, 'a pending Host fact must not dispatch signOut')
+
+  answers[1]!(true)
+  await flush()
+  assert.match(text(page), /running agent is using a deepseek-account model/u)
+  answers[0]!(false)
+  await flush()
+  assert.match(text(page), /running agent is using a deepseek-account model/u,
+    'the older false result must not replace the newer true fact')
+
+  page.handleInput('\r')
+  await flush()
+  assert.equal(state.calls.filter(call => call === 'signOut').length, 1)
+})
+
+test('an unavailable Host task check disables Sign out until Retry returns a known fact', async () => {
+  const state: SourceState = { view: stored(), profileFails: false, balanceFails: false, runningTasks: false, calls: [] }
+  const source = makeSource(state)
+  let taskReads = 0
+  source.hasRunningAccountTasks = async () => {
+    taskReads += 1
+    if (taskReads === 1) throw new Error('the Host is disconnected')
+    return false
+  }
+  const page = new AccountWorkspacePage(source, () => {}, { view: 'signout' })
+  page.setBodyHeight(30)
+  await flush()
+  let painted = text(page)
+  assert.match(painted, /Could not verify whether running account tasks will be cancelled/u)
+  assert.match(painted, /Retry task check/u)
+  page.handleInput('\r')
+  assert.equal(state.calls.includes('signOut'), false, 'unknown is not the safe false state')
+
+  page.handleInput('\u001b[B')
+  text(page)
+  page.handleInput('\r')
+  await flush()
+  assert.equal(taskReads, 2)
+  painted = text(page)
+  assert.match(painted, /No running account task is using this account/u)
+  assert.doesNotMatch(painted, /Could not verify whether running account tasks/u)
+  page.handleInput('\u001b[A')
+  text(page)
+  page.handleInput('\r')
+  await flush()
+  assert.equal(state.calls.filter(call => call === 'signOut').length, 1)
+})
+
 test('/logout deep link opens the Sign out confirmation directly', async () => {
   const { page, state } = open({ view: 'signout' })
   state.view = stored()
@@ -208,9 +362,14 @@ test('/logout deep link opens the Sign out confirmation directly', async () => {
   assert.match(text(page), /Sign out confirmation/u)
 })
 
-test('a failed sign-out keeps the Host-reported state and reports the failure', async () => {
+test('an unknown sign-out outcome refreshes Host state without replaying the mutation', async () => {
   const state: SourceState = { view: stored(), profileFails: false, balanceFails: false, runningTasks: false, calls: [] }
   const source = makeSource(state)
+  let stateReads = 0
+  source.getState = async () => {
+    stateReads += 1
+    return state.view
+  }
   source.signOut = async () => {
     state.calls.push('signOut')
     throw new Error('local credential removal failed')
@@ -224,6 +383,8 @@ test('a failed sign-out keeps the Host-reported state and reports the failure', 
   const painted = text(page)
   assert.match(painted, /sign-out failed: local credential removal failed/u)
   assert.match(painted, /Signed in \(stored credential\)/u)
+  assert.equal(stateReads, 1, 'an unknown sign-out result requires a Host state reread')
+  assert.equal(state.calls.filter(call => call === 'signOut').length, 1, 'the mutation is never replayed')
 })
 
 test('an older Account getState cannot overwrite a newer watch snapshot (RFL-002)', async () => {
@@ -243,8 +404,8 @@ test('an older Account getState cannot overwrite a newer watch snapshot (RFL-002
   page.setBodyHeight(26)
   await flush()
   page.render(100)
-  // The initial watch paint comes from the real getState? No: the held override
-  // starts on the manual refresh below; seed the initial state explicitly.
+  // The watch supplies the initial state. The held getState read begins only
+  // on the manual refresh below, then loses to the newer watch snapshot.
   page.handleInput('r') // starts the old read
   await flush()
   state.view = stored()
@@ -276,8 +437,11 @@ test('closing the page ends only its watcher; a fresh page rebuilds the complete
   assert.equal(state.calls.some(call => call.startsWith('cancel:')), false, 'closing the page does not cancel the browser attempt')
 })
 
-test('Account page fits 105/80/60/40/30 columns in signed-out, attempt and stored states (MA12)', async () => {
-  for (const [width, height] of [[105, 40], [80, 24], [60, 22], [40, 16], [30, 8]] as const) {
+test('the Account page fits signed-out, attempt and stored states across its frozen workspace size matrix', async () => {
+  for (const [width, height] of [
+    [200, 50], [120, 40], [100, 40], [80, 24], [80, 10], [72, 24], [44, 20],
+    [105, 40], [60, 22], [40, 16], [30, 8],
+  ] as const) {
     for (const view of [signedOut(), waitingAttempt(), stored()]) {
       const state: SourceState = { view, profileFails: false, balanceFails: false, runningTasks: false, calls: [] }
       const page = new AccountWorkspacePage(makeSource(state), () => {}, { view: 'page' })
@@ -418,6 +582,39 @@ test('a stale startSignIn snapshot cannot overwrite a newer watch state (P2)', a
   assert.match(painted, /Signed in \(stored credential\)/u)
   assert.doesNotMatch(painted, /waiting-browser/u)
   assert.equal(page.pendingMutation(), false)
+})
+
+test('an unknown SignIn acknowledgement waits for a Host reread before another attempt', async () => {
+  const state: SourceState = { view: signedOut(), profileFails: false, balanceFails: false, runningTasks: false, calls: [] }
+  const source = makeSource(state)
+  let starts = 0
+  let releaseState: ((view: AccountView) => void) | undefined
+  source.startSignIn = async () => {
+    starts += 1
+    state.calls.push('signIn')
+    if (starts === 1) throw new Error('the Host acknowledgement was lost')
+    state.view = waitingAttempt()
+    return state.view
+  }
+  source.getState = () => new Promise(resolve => { releaseState = resolve })
+  const page = new AccountWorkspacePage(source, () => {}, { view: 'page' })
+  page.setBodyHeight(30)
+  await flush()
+  text(page)
+  page.handleInput('\r')
+  await flush()
+  assert.equal(starts, 1)
+  assert.match(text(page), /refreshing Host account state/u)
+  page.handleInput('\r')
+  assert.equal(starts, 1, 'an unknown acknowledgement does not admit another SignIn dispatch')
+  state.view = signedOut()
+  releaseState?.(state.view)
+  await flush()
+  text(page)
+  page.handleInput('\r')
+  await flush()
+  assert.equal(starts, 2, 'one manual retry is admitted only after the Host reread')
+  assert.match(text(page), /waiting-browser/u)
 })
 
 test('refresh is refused while an Account operation is busy (RFL-012)', async () => {

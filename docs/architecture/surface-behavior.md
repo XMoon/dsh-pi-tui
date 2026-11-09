@@ -995,10 +995,19 @@ The page never infers a stored key from a route/profile.
   the SSH tunnel template for the current callback port. Cancel addresses the
   exact attempt id; a stale id cancels nothing.
 - Sign out is an explicit confirmation with the account identity and the
-  running-account-task risk. It calls the official `signOut`; the local grant is
-  removed and the remote revocation remains background. A failed revocation
-  never restores a local grant, and independent API keys stay stored. While the
-  sign-out is pending, user navigation and page exit are refused.
+  running-account-task risk. The page starts an asynchronous Host check; while it
+  is pending or unavailable, Sign out is disabled and the distinct status is
+  visible. An unavailable result offers `Retry task check`; only a current known
+  result enables the destructive action. The check's Host authority and
+  Direct/Remote semantics belong to [host-client.md](./host-client.md#provider-credentials-and-deepseek-account).
+- A dispatched SignOut whose acknowledgement is unknown closes the confirmation
+  and reads Host state again. The page does not replay the mutation or admit a
+  second confirmation until a fresh Host `AccountView` is committed. Older task
+  checks cannot authorize a newer Account view, confirmation, page or connection.
+- The official `signOut` removes the local grant and leaves remote revocation in
+  the background. A failed revocation never restores a local grant, and
+  independent API keys stay stored. While sign-out is pending, user navigation
+  and page exit are refused.
 - Closing the page ends only the watch subscription; an in-flight browser
   attempt keeps running on the Host, and reopening reads the Host state again.
 

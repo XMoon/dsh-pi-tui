@@ -797,6 +797,7 @@ async function startSurfaceLocalClient(
     revision.application = await createRemoteApplicationRuntimeFromClient({
       domains,
       fetch: authenticatedFetch,
+      trustedHostOrigin: host.origin,
       clientUi: revision.ui,
       delivery,
       surfaceRevision: revision.id,

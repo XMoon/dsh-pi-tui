@@ -79,7 +79,7 @@ const WEB_ONLY_ROWS_YAML = PI_TUI_WEB_ACCESS_ROWS.map(({ id, name }) => [
  * as their Dispose gate: reloading `tui-startup` must not dispose
  * already-accepted Host Session/Agent/Connection ownership. It disables only
  * the three surface rows that must not exist in a Host-only PID, then adds the
- * two B1 rows plus the official Session-serving rows and the ONE built-in
+ * two B1 rows plus the official Session-serving and Account Controller rows and the ONE built-in
  * PiTui Host Runtime row. The base Gateway, webserver, workspace-files,
  * workspace-controller, credentials, agents, sessions and jobs are reused,
  * never mounted twice.
@@ -164,6 +164,12 @@ export const HOST_ONLY_PATCH = `# M4-B1 Host-only profile overlay: production Ho
     - id: split-host-settings-controller
       name: '@deepseek-ai/dsh-api-settings-controller'
       inject: [typert]
+
+    # The official DeepSeek Account Remote owner is Host-only and remains live
+    # regardless of the optional Browser Web frontend roster.
+    - id: split-host-account-controller
+      name: '@deepseek-ai/dsh-api-account-controller'
+      inject: [deepseekAccount, agents]
 
     - id: split-host-session-log-download
       name: '@deepseek-ai/dsh-session-log-export'

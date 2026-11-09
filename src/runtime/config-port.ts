@@ -812,9 +812,10 @@ export interface AccountConfig {
   cancelSignIn(id: string): Promise<AccountView>
   signOut(client: AccountClientMetadata): Promise<AccountView>
   /** Whether a running Agent's latest bound request used the account provider
-   * (the official sign-out risk fact). Read-only: the Host's signed-out
-   * listener owns the actual cancellation. */
-  hasRunningAccountTasks(): boolean
+   * (the official sign-out risk fact). This is an asynchronous Host authority
+   * read; failures reject and must never be treated as `false`. The Host's
+   * signed-out listener owns the actual cancellation. */
+  hasRunningAccountTasks(): Promise<boolean>
 }
 
 /** The config assembly — one narrow sub-interface per config domain.

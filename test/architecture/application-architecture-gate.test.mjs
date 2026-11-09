@@ -713,6 +713,7 @@ test('the widened Remote composition specifier rule recognizes every Remote face
     '@deepseek-ai/dsh-agent-preset-registry/remote',
     '@deepseek-ai/dsh-plugin-manager/remote',
     '@deepseek-ai/dsh-api-settings-controller/remote',
+    '@deepseek-ai/dsh-api-account-controller/remote',
     '@deepseek-ai/dsh-permission-presets/remote',
     '@deepseek-ai/dsh-llm/remote',
     '@deepseek-ai/dsh-client-file-upload/remote',
