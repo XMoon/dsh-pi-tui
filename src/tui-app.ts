@@ -5585,11 +5585,7 @@ export class TuiApp {
       // throw cannot strand its siblings.
       ...schemeDisposers.map(dispose => () => dispose()),
       () => this.clearFocusLiveHeightState(),
-      () => {
-        const hadRenderedViewSearch = this.renderedViewSearch !== undefined
-        this.clearRenderedViewSearch()
-        if (hadRenderedViewSearch) this.fullscreen?.renderNow(true)
-      },
+      () => this.clearRenderedViewSearch(),
       () => this.resetScrollProfileFrame(),
       () => this.tui.stop(),
       () => this.fullscreen?.stop(),
