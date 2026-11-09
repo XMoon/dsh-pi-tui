@@ -1374,13 +1374,16 @@ test('a command issued while /new is still settling reaches the Direct main tran
 })
 
 /**
- * REGRESSION (opening cut + Fold handoff): events recorded in the opening
- * journal BEFORE the child is published are merged exactly once by the cold
- * hydration, and events after the Fold install reach the same live folds
- * incrementally. A switch is the sibling transition of `/new`, so the same
- * `cut → fold-install → close` boundary owns both.
+ * REGRESSION (switch handoff): a command appended BEFORE the target Session
+ * is published is part of that Session's official log, so the cold hydration
+ * must paint it after the switch; a command that the official executor appends
+ * DURING the post-hydration catalog-refresh window is the formerly-lost one —
+ * the journal was still open after its cut had been consumed, so it was
+ * recorded and then discarded by `clearOpening` instead of reaching the live
+ * folds. (The journal cut's own merge path is pinned by "a main Session opening
+ * cut preserves old-Agent bookkeeping and B transient state".)
  */
-test('an opening cut merges a pre-commit command before the switch hands off incrementally', async (t) => {
+test('a switch paints a pre-commit command and settles one issued after the fold install', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-opening-cut-command-')
   const previousHome = process.env.DSH_HOME
@@ -1462,8 +1465,9 @@ test('an opening cut merges a pre-commit command before the switch hands off inc
   ])
   if (deadlineTimer !== undefined) clearTimeout(deadlineTimer)
   assert.equal(resumeReached, true, '/resume must reach the target Session open')
-  // PRE-COMMIT event for the opening target: only the journal can carry it to
-  // the cold hydration (the Session is not published yet).
+  // PRE-COMMIT event for the target: it is already part of B's official log
+  // (the real Host append precedes the emit), so the cold hydration must paint
+  // it once B commits — and it must NOT paint on the still-current A first.
   emitForB(sessionB.append!('command/run', {
     commandId,
     name: 'preset',
@@ -1471,6 +1475,10 @@ test('an opening cut merges a pre-commit command before the switch hands off inc
     source: { kind: 'user' },
   }) as SessionEvent)
   await settle()
+  const commandCards = (): number =>
+    (probe.capturedMessages ?? []).filter(message => message.kind === 'command').length
+  assert.equal(commandCards(), 0,
+    "the opening target's command must not paint on the old Session before the commit")
 
   releaseResume()
   let catalogTimer: ReturnType<typeof setTimeout> | undefined
@@ -1480,15 +1488,13 @@ test('an opening cut merges a pre-commit command before the switch hands off inc
   ])
   if (catalogTimer !== undefined) clearTimeout(catalogTimer)
   assert.equal(catalogReached, true, 'the switch must reach its post-hydration catalog refresh')
-  // The commit published B and the hydration merged the journal cut with the
-  // official snapshot (seq dedupe): exactly ONE running command row.
+  // The commit published B and the cold hydration painted B's official log:
+  // exactly ONE running command row.
   await new Promise(resolve => setTimeout(resolve, 70))
   await vt.waitForRender()
-  const commandCards = (): number =>
-    (probe.capturedMessages ?? []).filter(message => message.kind === 'command').length
-  assert.equal(commandCards(), 1, 'the opening cut must hydrate the pre-commit command exactly once')
+  assert.equal(commandCards(), 1, 'the pre-commit command must hydrate exactly once after the switch')
   assert.ok(vt.getViewport().join('\n').includes('/preset status'),
-    'the merged opening command must be painted')
+    'the hydrated pre-commit command must be painted')
 
   // POST-HYDRATION event, before the transition's clearOpening tail: it must
   // route incrementally into the SAME settled row.
