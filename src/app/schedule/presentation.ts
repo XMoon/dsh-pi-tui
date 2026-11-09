@@ -17,6 +17,9 @@ import type {
 } from '../../runtime/schedule-port.ts'
 import type { ScheduleEditorDraft, ScheduleTargetKind, ScheduleTimingPreset } from '../../domain/schedule/form.ts'
 
+type ScheduleDeliveryHistoryPage = Extract<ScheduleDeliveryHistoryResult, { readonly records: readonly unknown[] }>
+type ScheduleHistoryReceipt = ScheduleDeliveryHistoryPage['records'][number]
+
 export type {
   ScheduleCatalogEntry,
   ScheduleDeliveryHistoryResult,
@@ -36,18 +39,17 @@ export type ScheduleFilter = 'all' | 'active' | 'paused' | 'ended'
  *  while the newest read failed; `error` has no successful snapshot at all. */
 export type ScheduleWorkspaceStatus = 'loading' | 'ready' | 'stale' | 'error'
 
+/** The current authorized Session roster read used by Schedule links. */
+export type ScheduleSessionRosterState = 'checking' | 'ready' | 'unavailable' | 'error'
+
 /** One newest-first page of saved deliveries, plus this workspace's read
  *  state for that page. */
 export interface ScheduleHistoryView {
   readonly status: 'loading' | 'ready' | 'error'
-  readonly records: readonly {
-    readonly scheduledAt: string
-    readonly deliveredAt: string
-    readonly messageId: string
-    readonly prompt?: string
-  }[]
+  readonly records: readonly ScheduleHistoryReceipt[]
   readonly earlierRecordsUnavailable: boolean
   readonly earlierRecordsPruned: boolean
+  readonly retention?: ScheduleDeliveryHistoryPage['retention']
   /** The cursor for the next page; present only while older records remain. */
   readonly nextBefore?: string
   /** The exact official miss code when the page cursor or the task vanished. */
@@ -76,7 +78,7 @@ export type ScheduleConfirm =
     readonly expectedUpdatedAt: string | null
   }
   | { readonly kind: 'clear-ended'; readonly token: number }
-  | { readonly kind: 'run'; readonly token: number; readonly id: string; readonly title: string }
+  | { readonly kind: 'run'; readonly token: number; readonly id: string; readonly title: string; readonly expectedUpdatedAt: string | null }
   | { readonly kind: 'discard'; readonly token: number }
 
 /** One non-modal outcome line the panel paints (never a Host fact store). */
@@ -128,6 +130,9 @@ export interface ScheduleWorkspaceSnapshot {
   readonly notice?: ScheduleNotice
   readonly limits?: { readonly newSessionIntervalSeconds: number }
   readonly sessions: readonly ScheduleSessionChoice[]
+  readonly sessionRosterState: ScheduleSessionRosterState
+  readonly availableSessionIds: readonly string[]
+  readonly navigationPending: boolean
   /** A Host mutation is in flight; the panel refuses a second one. */
   readonly busy: boolean
   /** Read-only PAGE INSTANCE generation: bumped only when a page RE-ENTERS
@@ -147,6 +152,9 @@ export type ScheduleIntent =
   | { readonly kind: 'open-detail'; readonly id?: string }
   | { readonly kind: 'open-history' }
   | { readonly kind: 'history-more' }
+  | { readonly kind: 'refresh-session-roster' }
+  | { readonly kind: 'open-detail-conversation' }
+  | { readonly kind: 'open-delivery-conversation'; readonly messageId: string }
   /** Esc: one layer back (help → confirm → editor → history → detail → list). */
   | { readonly kind: 'back' }
   | { readonly kind: 'refresh' }
@@ -183,7 +191,18 @@ export const SCHEDULE_COPY = {
   editorUnknown: 'Edit outcome unknown. Review the latest Host version before saving.',
   createUnknown: 'Creation outcome unknown. The Host catalog was re-read; inspect tasks before creating again.',
   missing: 'Task no longer exists. Your edits are kept; Save is blocked.',
-  executionPending: 'Run not started: another execution is pending.',
+  runPendingInfo: 'Run not started: another execution is pending.',
+  deliveryInboxNotCompleted: 'Delivered to conversation inbox; does not prove Agent execution.',
+  instructionNotRecorded: 'Instruction was not recorded for this delivery.',
+  sessionChecking: 'Checking conversation availability…',
+  sessionNotListed: 'Not in available Sessions (possibly removed or archived).',
+  sessionRosterUnavailable: 'Session list unavailable; cannot verify this link.',
+  sessionRosterError: 'Conversation availability could not be verified. Press r to retry.',
+  openingConversation: 'Opening conversation…',
+  pendingFirstDelivery: 'Pending first delivery; conversation not created yet.',
+  noDeliveryYet: 'No delivery yet.',
+  executionBusy: 'Delivery is queued or running in its conversation; manage it there.',
+  floorHint: 'Host minimum interval applies; Host decides admission.',
   historyChanged: 'Delivery history changed. Reopen history.',
   targetArchived: 'Target Session is archived. Choose another.',
   permissionDenied: 'Schedule permission denied.',

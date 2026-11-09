@@ -167,6 +167,7 @@ test('L6C: opening the workspace over the selected backend performs READS only',
     port,
     sessionReader,
     runOwned: (_label, task) => { void task() },
+    captureSessionSwitch: () => async () => ({ kind: 'failed', message: 'unused' }),
     app: () => ({
       openScheduleWorkspace: (bindings: import('../../src/tui-app.ts').ScheduleWorkspaceBindings) => {
         assert.equal(bindings.snapshot().status, 'loading', 'the panel is leased before the first Host read')
@@ -192,6 +193,7 @@ test('L6C: without a PiTui renderer the command answers a real error and leases 
     port,
     sessionReader,
     runOwned: () => {},
+    captureSessionSwitch: () => async () => ({ kind: 'failed', message: 'unused' }),
     app: () => undefined,
   })
   assert.equal(result.kind, 'error')

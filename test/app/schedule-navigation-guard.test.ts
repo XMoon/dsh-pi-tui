@@ -121,7 +121,13 @@ async function gestureLife(): Promise<Life> {
     edits.push(request)
     return port.entries.find(e => e.id === request.id) as never
   }
-  const controller = new ScheduleWorkspaceController({ port, sessionReader, runOwned: (_l, t) => { void t() } })
+  const controller = new ScheduleWorkspaceController({
+    port,
+    sessionReader,
+    runOwned: (_l, t) => { void t() },
+    captureSessionSwitch: () => async () => ({ kind: 'failed', message: 'unused' }),
+    closeWorkspace: () => {},
+  })
   const panel = new ScheduleWorkspacePanel({
     snapshot: () => controller.snapshot(),
     dispatch: intent => controller.dispatch(intent),
@@ -389,6 +395,8 @@ test('a real panel row click cannot discard a dirty editor without confirmation'
     port: new StubPort(),
     sessionReader,
     runOwned: (_label, task) => { void task() },
+    captureSessionSwitch: () => async () => ({ kind: 'failed', message: 'unused' }),
+    closeWorkspace: () => {},
   })
   const panel = new ScheduleWorkspacePanel({
     snapshot: () => controller.snapshot(),
@@ -464,6 +472,8 @@ test('a stale list-frame action cannot open a new editor over a dirty draft', as
     port: new StubPort(),
     sessionReader,
     runOwned: (_label, task) => { void task() },
+    captureSessionSwitch: () => async () => ({ kind: 'failed', message: 'unused' }),
+    closeWorkspace: () => {},
   })
   const panel = new ScheduleWorkspacePanel({
     snapshot: () => controller.snapshot(),
@@ -510,6 +520,8 @@ test('the panel does not edit its local buffer while a save is pending', async (
     port,
     sessionReader,
     runOwned: (_label, task) => { void task() },
+    captureSessionSwitch: () => async () => ({ kind: 'failed', message: 'unused' }),
+    closeWorkspace: () => {},
   })
   const panel = new ScheduleWorkspacePanel({
     snapshot: () => controller.snapshot(),
@@ -623,7 +635,7 @@ test('list Enter and history more are bound to the selection/cursor they were pr
       // Press the painted cursor's `more`, then page with the KEYBOARD so the
       // SECOND page (which still carries a THIRD-page cursor) repaints with a
       // `more` affordance: the stale release path is genuinely exercised.
-      const pressedPoint = at(life, 'Enter more')
+      const pressedPoint = at(life, 'm more')
       gesture(life, pressedPoint.column, pressedPoint.row, { pressOnly: true })
       life.port.historyResults.set('m2', {
         id: 'task-a' as never,
@@ -636,7 +648,7 @@ test('list Enter and history more are bound to the selection/cursor they were pr
       life.controller.dispatch({ kind: 'history-more' })
       await flush()
       const readsBefore = life.port.historyReads
-      const released = at(life, 'Enter more')
+      const released = at(life, 'm more')
       gesture(life, released.column, released.row, { releaseOnly: true })
       await flush()
       assert.equal(life.port.historyReads, readsBefore,

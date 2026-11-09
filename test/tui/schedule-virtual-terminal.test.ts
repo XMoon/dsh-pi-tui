@@ -87,6 +87,9 @@ function workspace(overrides: Partial<ScheduleWorkspaceSnapshot> = {}): Schedule
     statusCounts,
     mode: 'list',
     sessions: [],
+    sessionRosterState: 'unavailable',
+    availableSessionIds: [],
+    navigationPending: false,
     busy: false,
     pageEpoch: 0,
     ...overrides,
@@ -135,7 +138,8 @@ const HISTORY = workspace({
       {
         scheduledAt: '2026-06-01T09:00:00.000Z',
         deliveredAt: '2026-06-01T09:00:01.000Z',
-        messageId: 'message-delivered',
+        messageId: 'message-delivered' as never,
+        targetSessionId: 'session-target' as never,
         prompt: 'Prepare the morning report.',
       },
     ],
@@ -173,7 +177,7 @@ interface Page {
 const PAGES: readonly Page[] = [
   { name: 'List', snapshot: LIST, heading: 'Alpha report', hints: ['Esc close', 'Enter details'] },
   { name: 'Detail', snapshot: DETAIL, heading: 'Details', hints: ['Esc back'] },
-  { name: 'History', snapshot: HISTORY, heading: 'Delivery history', hints: ['Esc back', 'Enter more'] },
+  { name: 'History', snapshot: HISTORY, heading: 'Delivery history', hints: ['Esc back', 'Enter open'] },
   { name: 'Editor', snapshot: EDITOR, heading: 'Create task', hints: ['save', 'Esc back'] },
   { name: 'Confirm', snapshot: CONFIRM, heading: 'Confirm', hints: ['Confirm [Y]'] },
 ]
@@ -367,6 +371,8 @@ import type {
   ScheduleCreateRequest,
   ScheduleEditRequest,
   ScheduleEditResult,
+  ScheduleRunRequest,
+  ScheduleRunResult,
   SchedulePort,
 } from '../../src/runtime/schedule-port.ts'
 import type { SessionReader } from '../../src/runtime/session-reader-port.ts'
@@ -382,19 +388,28 @@ function createRecordingPort(
   edits: ScheduleEditRequest[]
   creates: ScheduleCreateRequest[]
   editReplies: ScheduleEditResult[]
+  runCalls: string[]
+  setRunReply(value: ScheduleRunResult): void
   views: string[]
   readonly catalogCalls: number
 } {
   const edits: ScheduleEditRequest[] = []
   const creates: ScheduleCreateRequest[] = []
   const editReplies: ScheduleEditResult[] = []
+  const runCalls: string[] = []
   const views: string[] = []
-  const state = { catalogCalls: 0, created: undefined as ScheduleCatalogEntry | undefined }
+  const state = {
+    catalogCalls: 0,
+    created: undefined as ScheduleCatalogEntry | undefined,
+    runReply: undefined as ScheduleRunResult | undefined,
+  }
   const listeners = new Set<() => void>()
   return {
     edits,
     creates,
     editReplies,
+    runCalls,
+    setRunReply: value => { state.runReply = value },
     views,
     get catalogCalls() { return state.catalogCalls },
     async catalog() {
@@ -405,7 +420,7 @@ function createRecordingPort(
     async view(request) {
       views.push(String(request.id))
       if (state.created?.id === request.id) return state.created
-      return rows.find(row => row.id === request.id) ?? { id: request.id, code: 'schedule_not_found' }
+      return rows.find(row => String(row.id) === String(request.id)) ?? { id: request.id, code: 'schedule_not_found' }
     },
     async history(request) { return { id: request.id, code: 'schedule_not_found' } },
     async deliveryLimits() { return { newSessionIntervalSeconds: 60 } },
@@ -418,9 +433,13 @@ function createRecordingPort(
       edits.push(request)
       const reply = editReplies.shift()
       if (reply !== undefined) return reply
-      return rows.find(row => row.id === request.id) ?? { id: request.id, code: 'schedule_not_found' }
+      return rows.find(row => String(row.id) === String(request.id)) ?? { id: request.id, code: 'schedule_not_found' }
     },
-    async run() { throw new Error('not used') },
+    async run(request: ScheduleRunRequest) {
+      runCalls.push(String(request.id))
+      if (state.runReply === undefined) throw new Error('the fixture never admits Run')
+      return state.runReply
+    },
     async deleteInactive() { return { deleted: 0 } },
     onChanged(listener) {
       listeners.add(listener)
@@ -430,6 +449,8 @@ function createRecordingPort(
     edits: ScheduleEditRequest[]
     creates: ScheduleCreateRequest[]
     editReplies: ScheduleEditResult[]
+    runCalls: string[]
+    setRunReply(value: ScheduleRunResult): void
     views: string[]
     readonly catalogCalls: number
   }
@@ -445,11 +466,98 @@ function createController(port: SchedulePort, openDetail = true): ScheduleWorksp
     turnOutline: () => undefined,
     sessionStatus: () => undefined,
   }
-  const controller = new ScheduleWorkspaceController({ port, sessionReader, runOwned: (_l, t) => { void t() } })
+  const controller = new ScheduleWorkspaceController({
+    port,
+    sessionReader,
+    runOwned: (_l, t) => { void t() },
+    captureSessionSwitch: () => async () => ({ kind: 'failed', message: 'unused' }),
+    closeWorkspace: () => {},
+  })
   controller.open()
   if (openDetail) controller.dispatch({ kind: 'open-detail', id: 'task-a' })
   return controller
 }
+
+async function waitForScheduleFrame(vt: VirtualTerminal, predicate: (frame: string) => boolean): Promise<string> {
+  for (let turn = 0; turn < 40; turn += 1) {
+    await new Promise<void>(resolve => setImmediate(resolve))
+    await vt.waitForRender()
+    const frame = vt.getViewport().map(stripTerminalSequences).join('\n')
+    if (predicate(frame)) return frame
+  }
+  assert.fail(`the expected Schedule frame did not settle:\n${vt.getViewport().join('\n')}`)
+}
+
+test('real VirtualTerminal Run input follows Host execution authority before one admitted delivery', async () => {
+  const running = { ...task({ id: 'task-a', title: 'Running task' }), executionActive: true } as unknown as ScheduleCatalogEntry
+  const blockedPort = createRecordingPort([running])
+  const blockedController = createController(blockedPort)
+  const blockedTerminal = new VirtualTerminal(100, 30)
+  const blockedApp = new TuiApp(blockedTerminal, { onSubmit: () => {}, onExit: () => {} })
+  blockedApp.start()
+  started.add(blockedApp)
+  const blockedHandle = blockedApp.openScheduleWorkspace({
+    snapshot: () => blockedController.snapshot(),
+    dispatch: intent => blockedController.dispatch(intent),
+    onClose: () => {},
+  })
+  const unsubscribeBlocked = blockedController.subscribe(() => blockedHandle.update(blockedController.snapshot()))
+  try {
+    const runningFrame = await waitForScheduleFrame(blockedTerminal, frame =>
+      frame.includes('Schedule · Details') && frame.includes('In progress'))
+    assert.ok(runningFrame.includes('In progress'))
+    assert.ok(runningFrame.includes('Delivery is queued or running in its'))
+    assert.ok(!runningFrame.includes('u run now'))
+    blockedTerminal.sendInput('u')
+    await blockedTerminal.waitForRender()
+    assert.equal(blockedController.snapshot().confirm, undefined)
+    assert.equal(blockedPort.runCalls.length, 0, 'the real key route reaches Controller admission and performs no run write')
+  } finally {
+    unsubscribeBlocked()
+    blockedApp.dispose()
+    blockedController.dispose()
+  }
+
+  const runnable = task({ id: 'task-a', title: 'Runnable task' })
+  const admittedPort = createRecordingPort([runnable])
+  admittedPort.setRunReply({
+    ...runnable,
+    lastDelivery: {
+      scheduledAt: runnable.scheduledAt,
+      deliveredAt: '2026-06-01T09:01:00.000Z',
+      messageId: 'run-receipt' as never,
+      targetSessionId: 'session-target' as never,
+    },
+  })
+  const admittedController = createController(admittedPort)
+  const admittedTerminal = new VirtualTerminal(100, 30)
+  const admittedApp = new TuiApp(admittedTerminal, { onSubmit: () => {}, onExit: () => {} })
+  admittedApp.start()
+  started.add(admittedApp)
+  const admittedHandle = admittedApp.openScheduleWorkspace({
+    snapshot: () => admittedController.snapshot(),
+    dispatch: intent => admittedController.dispatch(intent),
+    onClose: () => {},
+  })
+  const unsubscribeAdmitted = admittedController.subscribe(() => admittedHandle.update(admittedController.snapshot()))
+  try {
+    await waitForScheduleFrame(admittedTerminal, frame =>
+      frame.includes('Schedule · Details') && frame.includes('Runnable task'))
+    admittedTerminal.sendInput('u')
+    await admittedTerminal.waitForRender()
+    assert.ok(admittedTerminal.getViewport().join('\n').includes('Confirm'))
+    admittedTerminal.sendInput('y')
+    await admittedController.whenIdle()
+    await admittedTerminal.waitForRender()
+    assert.deepEqual(admittedPort.runCalls, ['task-a'])
+    assert.equal(admittedController.snapshot().notice?.text, SCHEDULE_COPY.deliveryQueued)
+    assert.ok(admittedTerminal.getViewport().join('\n').includes('Delivery queued'))
+  } finally {
+    unsubscribeAdmitted()
+    admittedApp.dispose()
+    admittedController.dispose()
+  }
+})
 
 test('real Ctrl+G input reviews a Host conflict before one latest-revision edit', async () => {
   const port = createRecordingPort()

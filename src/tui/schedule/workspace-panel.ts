@@ -27,13 +27,14 @@ import {
   wrapTextWithAnsi,
 } from '@xmoon76/pi-tui'
 import type { Component, Focusable, TuiMouseEvent, TuiMouseEventResult } from '@xmoon76/pi-tui'
-import type {
-  ScheduleCatalogEntry,
-  ScheduleConfirm,
-  ScheduleFilter,
-  ScheduleIntent,
-  ScheduleNotice,
-  ScheduleWorkspaceSnapshot,
+import {
+  SCHEDULE_COPY,
+  type ScheduleCatalogEntry,
+  type ScheduleConfirm,
+  type ScheduleFilter,
+  type ScheduleIntent,
+  type ScheduleNotice,
+  type ScheduleWorkspaceSnapshot,
 } from '../../app/schedule/presentation.ts'
 import {
   editorFields,
@@ -82,6 +83,8 @@ import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { color } from '../theme/runtime.ts'
 import { formatKeyId } from '../keybindings/hints.ts'
 
+type ScheduleHistoryMessageId = NonNullable<ScheduleWorkspaceSnapshot['history']>['records'][number]['messageId']
+
 /** The two-column layout boundary. */
 export const SCHEDULE_WIDE_COLUMNS = 120
 export const SCHEDULE_WIDE_ROWS = 30
@@ -91,7 +94,7 @@ const FILTER_CYCLE: readonly ScheduleFilter[] = ['active', 'paused', 'ended', 'a
 const FILTER_CYCLE_HINT = `${formatKeyId(Key.tab)}/${formatKeyId(Key.shift(Key.tab))}`
 
 /** The label column of a detail fact row. */
-const DETAIL_LABEL_WIDTH = 16
+const DETAIL_LABEL_WIDTH = 26
 
 /** The responsive shape of one Schedule frame. */
 export type ScheduleWorkspaceLayout = 'single' | 'wide'
@@ -144,6 +147,11 @@ type ScheduleAction =
   | 'close'
   | 'history-more'
   | 'detail-history'
+  | 'detail-open-conversation'
+  | 'detail-refresh-roster'
+  | 'history-refresh-roster'
+  | 'history-open'
+  | 'history-toggle-expand'
   | 'detail-edit'
   | 'detail-toggle'
   | 'detail-run'
@@ -156,6 +164,9 @@ type ScheduleAction =
 /** What one painted pointer region means. */
 type ScheduleHit =
   | { readonly kind: 'row'; readonly id: string }
+  | { readonly kind: 'history-record'; readonly messageId: string }
+  | { readonly kind: 'history-link'; readonly messageId: string }
+  | { readonly kind: 'detail-link' }
   | { readonly kind: 'filter'; readonly filter: ScheduleFilter }
   | { readonly kind: 'search' }
   | { readonly kind: 'action'; readonly action: ScheduleAction }
@@ -190,6 +201,10 @@ interface PaintedFrame {
   readonly listSelection: string | null
   /** The History cursor this frame painted (the `more` action pages it). */
   readonly historyCursor: string | null
+  readonly historySelection: ScheduleHistoryMessageId | null
+  readonly historyFacts: string
+  readonly rosterFacts: string
+  readonly navigationPending: boolean
   /** The PAGE INSTANCE generation this frame painted. Re-entering a page (an
    *  editor reopen, a History reopen, a Help reopen) bumps it, so a gesture
    *  pressed on a closed instance can never act on its reopen even when every
@@ -257,6 +272,8 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
   private listScrollPinned = false
   private detailScroll = 0
   private historyScroll = 0
+  private historySelectedMessageId: ScheduleHistoryMessageId | undefined
+  private readonly historyExpandedMessageIds = new Set<ScheduleHistoryMessageId>()
   private editorScroll = 0
   private helpScroll = 0
   private frame: PaintedFrame | undefined
@@ -270,6 +287,10 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     readonly subjectFacts: string
     readonly listSelection: string | null
     readonly historyCursor: string | null
+    readonly historySelection: ScheduleHistoryMessageId | null
+    readonly historyFacts: string
+    readonly rosterFacts: string
+    readonly navigationPending: boolean
     readonly pageEpoch: number
   } | undefined
   private readonly searchInput = new Input({ prompt: '' })
@@ -294,6 +315,7 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
   constructor(deps: ScheduleWorkspacePanelDeps) {
     this.deps = deps
     this.snapshot = deps.snapshot()
+    this.historySelectedMessageId = this.snapshot.history?.records[0]?.messageId
   }
 
   /** Publish a newer controller snapshot (the host calls this on every change). */
@@ -303,9 +325,31 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     this.snapshot = snapshot
     if (snapshot.mode !== previous.mode) {
       this.detailScroll = 0
-      this.historyScroll = 0
+      if (!(snapshot.mode === 'help' && previous.mode === 'history')
+        && !(snapshot.mode === 'history' && previous.mode === 'help')) {
+        this.historyScroll = 0
+      }
       this.editorScroll = 0
       this.helpScroll = 0
+    }
+    const historyContext = (value: ScheduleWorkspaceSnapshot): boolean =>
+      value.mode === 'history' || (value.mode === 'help' && value.history !== undefined)
+    const currentHistory = snapshot.history?.records ?? []
+    const previousHistory = previous.history?.records ?? []
+    if (!historyContext(snapshot) || !historyContext(previous)
+      || snapshot.selectedId !== previous.selectedId) {
+      this.historySelectedMessageId = currentHistory[0]?.messageId
+      this.historyExpandedMessageIds.clear()
+    } else {
+      const currentIds = new Set(currentHistory.map(record => record.messageId))
+      if (this.historySelectedMessageId !== undefined && !currentIds.has(this.historySelectedMessageId)) {
+        this.historySelectedMessageId = currentHistory[0]?.messageId
+      } else if (this.historySelectedMessageId === undefined && currentHistory.length > 0) {
+        this.historySelectedMessageId = currentHistory[0]?.messageId
+      }
+      for (const messageId of this.historyExpandedMessageIds) {
+        if (!currentIds.has(messageId)) this.historyExpandedMessageIds.delete(messageId)
+      }
     }
     if (snapshot.mode !== 'list'
       || previous.mode !== 'list'
@@ -353,6 +397,8 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     this.disposed = true
     this.frame = undefined
     this.pressed = undefined
+    this.historySelectedMessageId = undefined
+    this.historyExpandedMessageIds.clear()
     this.paintedConfirm = undefined
     this.chooser = undefined
     this.editorFieldId = undefined
@@ -502,6 +548,14 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
       this.deps.dispatch({ kind: 'open-history' })
       return
     }
+    if (this.matchesLetter(data, 'o')) {
+      this.deps.dispatch({ kind: 'open-detail-conversation' })
+      return
+    }
+    if (this.matchesLetter(data, 'r')) {
+      this.deps.dispatch({ kind: 'refresh-session-roster' })
+      return
+    }
     if (this.matchesLetter(data, 'e')) {
       this.deps.dispatch({ kind: 'open-edit' })
       return
@@ -532,9 +586,49 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
       this.pageBody(matchesKey(data, 'pageUp') ? -1 : 1)
       return
     }
-    if (matchesKey(data, 'enter') && this.snapshot.history?.nextBefore !== undefined) {
-      this.deps.dispatch({ kind: 'history-more' })
+    if (matchesKey(data, 'up') || this.matchesLetter(data, 'k')) {
+      this.moveHistorySelection(-1)
+      return
     }
+    if (matchesKey(data, 'down') || this.matchesLetter(data, 'j')) {
+      this.moveHistorySelection(1)
+      return
+    }
+    if (matchesKey(data, 'enter')) {
+      const messageId = this.historySelectedMessageId
+      if (messageId !== undefined) this.deps.dispatch({ kind: 'open-delivery-conversation', messageId })
+      return
+    }
+    if (this.matchesLetter(data, 'x')) {
+      this.toggleHistoryExpansion()
+      return
+    }
+    if (this.matchesLetter(data, 'm') && this.snapshot.history?.nextBefore !== undefined) {
+      this.deps.dispatch({ kind: 'history-more' })
+      return
+    }
+    if (this.matchesLetter(data, 'r')) {
+      this.deps.dispatch({ kind: 'refresh-session-roster' })
+    }
+  }
+
+  private moveHistorySelection(delta: -1 | 1): void {
+    const records = this.snapshot.history?.records ?? []
+    if (records.length === 0) return
+    const index = records.findIndex(record => record.messageId === this.historySelectedMessageId)
+    const next = Math.max(0, Math.min(records.length - 1, (index < 0 ? 0 : index) + delta))
+    const messageId = records[next]?.messageId
+    if (messageId === undefined || messageId === this.historySelectedMessageId) return
+    this.historySelectedMessageId = messageId
+    this.deps.requestRender()
+  }
+
+  private toggleHistoryExpansion(): void {
+    const record = this.snapshot.history?.records.find(item => item.messageId === this.historySelectedMessageId)
+    if (record?.prompt === undefined) return
+    if (this.historyExpandedMessageIds.has(record.messageId)) this.historyExpandedMessageIds.delete(record.messageId)
+    else this.historyExpandedMessageIds.add(record.messageId)
+    this.deps.requestRender()
   }
 
   private handleEditorInput(data: string): void {
@@ -876,7 +970,7 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     this.deps.requestRender()
   }
 
-  private matchesLetter(data: string, letter: 'a' | 'd' | 'e' | 'h' | 'j' | 'k' | 'l' | 'n' | 'p' | 'r' | 'u' | 'x' | 'y'): boolean {
+  private matchesLetter(data: string, letter: 'a' | 'd' | 'e' | 'h' | 'j' | 'k' | 'l' | 'm' | 'n' | 'o' | 'p' | 'r' | 'u' | 'x' | 'y'): boolean {
     return matchesKey(data, letter) || matchesKey(data, Key.shift(letter))
   }
 
@@ -972,6 +1066,10 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
         ? (snapshot.selectedId === undefined ? null : String(snapshot.selectedId))
         : null,
       historyCursor: snapshot.mode === 'history' ? (snapshot.history?.nextBefore ?? null) : null,
+      historySelection: snapshot.mode === 'history' ? (this.historySelectedMessageId ?? null) : null,
+      historyFacts: historyFrameFacts(snapshot, this.historyExpandedMessageIds),
+      rosterFacts: JSON.stringify([snapshot.sessionRosterState, snapshot.availableSessionIds, snapshot.sessions]),
+      navigationPending: snapshot.navigationPending,
       pageEpoch: snapshot.pageEpoch,
     }
     return lines.slice(0, rows)
@@ -1109,7 +1207,8 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
       }
       case 'history': {
         const content = this.historyBody(width)
-        this.paintSingleBody(lines, regions, width, bodyHeight, content, this.scrolled(this.historyScroll, content.length, bodyHeight))
+        this.historyScroll = this.revealHistorySelection(content, this.historyScroll, bodyHeight)
+        this.paintSingleBody(lines, regions, width, bodyHeight, content, this.historyScroll)
         return
       }
       case 'editor': {
@@ -1160,7 +1259,7 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
         this.detailScroll = rightScroll
         break
       case 'history':
-        rightScroll = this.scrolled(this.historyScroll, right.length, bodyHeight)
+        rightScroll = this.revealHistorySelection(right, this.historyScroll, bodyHeight)
         this.historyScroll = rightScroll
         break
       case 'editor':
@@ -1273,6 +1372,7 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
 
   private detailBody(entry: ScheduleCatalogEntry | undefined, width: number): readonly BodyLine[] {
     const out: BodyLine[] = [{ segments: [{ plain: 'Details', paint: color.textStrong }] }]
+    if (this.snapshot.notice !== undefined) out.push(...this.noticeBody(this.snapshot.notice, width))
     if (entry === undefined) {
       out.push({ segments: [{ plain: 'Loading task…', paint: color.textDim }] })
       return out
@@ -1284,27 +1384,45 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
         out.push({
           segments: [
             { plain: index === 0 ? fit(label, DETAIL_LABEL_WIDTH) : ' '.repeat(DETAIL_LABEL_WIDTH), paint: color.textDim },
+            { plain: ' ' },
             { plain: part, paint },
           ],
         })
       }
     }
     fact('Title', entry.title, color.textStrong)
-    // D14.3: the shared marker belongs to the standalone status group (the list
-    // column). An inline fact row shows the word only.
     fact('Status', scheduleStatusWord(entry.status), this.statusPaint(entry.status))
     fact('Execution', formatExecutionActivity(entry), entry.executionActive === true ? color.primary : color.textDim)
     const floor = formatDeliveryFloor(entry)
-    fact('Delivery floor', floor ?? 'none', floor === undefined ? color.textDim : color.text)
+    fact('Host minimum interval ends', floor ?? 'No active floor reported', floor === undefined ? color.textDim : color.text)
     fact('Official timing', formatRuleSummary(entry))
     fact('Time zone', officialTimeZone(entry), color.textDim)
     fact('Occurrence', formatOccurrence(entry))
     fact('Target', formatTargetSummary(entry.target), color.textDim)
+    const conversation = this.detailConversation(entry)
+    const conversationTarget = conversation.title === undefined || conversation.title === conversation.sessionId
+      ? conversation.sessionId
+      : `${conversation.title} · ${conversation.sessionId}`
+    const conversationLabel = conversation.available
+      ? `${conversation.action} · ${conversationTarget}`
+      : conversation.message
+    for (const [index, part] of wrapTextWithAnsi(sanitizedPhysicalLine(conversationLabel), valueWidth).entries()) {
+      out.push({
+        segments: [
+          { plain: index === 0 ? fit('Conversation', DETAIL_LABEL_WIDTH) : ' '.repeat(DETAIL_LABEL_WIDTH), paint: color.textDim },
+          {
+            plain: part,
+            paint: conversation.available ? color.primary : color.textMuted,
+            ...(conversation.available ? { hit: { kind: 'detail-link' } as const } : {}),
+          },
+        ],
+      })
+    }
+    if (entry.executionActive === true) fact('Actions', SCHEDULE_COPY.executionBusy, color.textMuted)
+    else if (entry.deliveryFloorEndsAt !== undefined) fact('Run hint', SCHEDULE_COPY.floorHint, color.textMuted)
     fact('Id', entry.id, color.textDim)
     out.push({ segments: [{ plain: '' }] })
     out.push({ segments: [{ plain: 'Prompt', paint: color.textDim }] })
-    // The stored prompt may be multi-line: every stored line is painted as its
-    // own block instead of flattening the instruction into one line.
     for (const stored of entry.prompt.split('\n')) {
       const wrapped = wrapTextWithAnsi(sanitizedPhysicalLine(stored), Math.max(1, width))
       for (const line of wrapped.length === 0 ? [''] : wrapped) {
@@ -1314,39 +1432,93 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     if (entry.lastDelivery !== undefined) {
       const receipt = deliveryFacts(entry.lastDelivery)
       out.push({ segments: [{ plain: '' }] })
-      out.push({ segments: [{ plain: 'Last delivery', paint: color.textDim }] })
+      for (const part of wrapTextWithAnsi(SCHEDULE_COPY.deliveryInboxNotCompleted, Math.max(1, width - 2))) {
+        out.push({ segments: [{ plain: part, paint: color.textMuted }] })
+      }
+      fact('Last delivery', receipt.messageId, color.textDim)
       fact('Scheduled', receipt.scheduledAt)
       fact('Delivered', receipt.deliveredAt)
-      fact('Message', receipt.messageId, color.textDim)
       fact('Target Session', receipt.targetSessionId, color.textDim)
     }
     return out
   }
 
+  private detailConversation(entry: ScheduleCatalogEntry): {
+    readonly available: boolean
+    readonly action: string
+    readonly title: string
+    readonly sessionId: string
+    readonly message: string
+  } {
+    let sessionId: string
+    let action: string
+    if (entry.lastDelivery !== undefined) {
+      sessionId = entry.lastDelivery.targetSessionId
+      action = 'Open latest delivery conversation'
+    } else if (entry.target.kind === 'session') {
+      sessionId = entry.target.sessionId
+      action = 'Open linked conversation'
+    } else {
+      return {
+        available: false,
+        action: '',
+        title: '',
+        sessionId: '',
+        message: entry.target.kind === 'new_once' ? SCHEDULE_COPY.pendingFirstDelivery : SCHEDULE_COPY.noDeliveryYet,
+      }
+    }
+    const title = this.snapshot.sessions.find(session => session.id === sessionId)?.title ?? sessionId
+    return {
+      available: this.snapshot.sessionRosterState === 'ready'
+        && this.snapshot.availableSessionIds.includes(sessionId)
+        && !this.snapshot.navigationPending,
+      action,
+      title,
+      sessionId,
+      message: this.sessionAvailabilityMessage(sessionId),
+    }
+  }
+
+  private sessionAvailabilityMessage(sessionId: string): string {
+    if (this.snapshot.sessionRosterState === 'checking') return SCHEDULE_COPY.sessionChecking
+    if (this.snapshot.sessionRosterState === 'unavailable') return SCHEDULE_COPY.sessionRosterUnavailable
+    if (this.snapshot.sessionRosterState === 'error') return SCHEDULE_COPY.sessionRosterError
+    return this.snapshot.availableSessionIds.includes(sessionId)
+      ? SCHEDULE_COPY.openingConversation
+      : SCHEDULE_COPY.sessionNotListed
+  }
+
   private historyBody(width: number): readonly BodyLine[] {
     const out: BodyLine[] = [{ segments: [{ plain: 'Delivery history', paint: color.textStrong }] }]
+    if (this.snapshot.notice !== undefined) out.push(...this.noticeBody(this.snapshot.notice, width))
+    for (const part of wrapTextWithAnsi(SCHEDULE_COPY.deliveryInboxNotCompleted, Math.max(1, width - 2))) {
+      out.push({ segments: [{ plain: part, paint: color.textMuted }] })
+    }
     const history = this.snapshot.history
     if (history === undefined) {
       out.push({ segments: [{ plain: 'Loading deliveries…', paint: color.textDim }] })
       return out
     }
-    if (history.status === 'loading') {
-      out.push({ segments: [{ plain: 'Loading deliveries…', paint: color.textDim }] })
-    }
+    if (history.status === 'loading') out.push({ segments: [{ plain: 'Loading deliveries…', paint: color.textDim }] })
     if (history.status === 'error') {
-      out.push({
-        segments: [{
-          plain: sanitizedPhysicalLine(history.message ?? 'Delivery history could not be read.'),
-          paint: color.error,
-        }],
-      })
+      out.push({ segments: [{ plain: sanitizedPhysicalLine(history.message ?? 'Delivery history could not be read.'), paint: color.error }] })
+      out.push({ segments: [{ plain: 'Esc back → h reopen History', paint: color.textMuted }] })
     }
     if (history.records.length === 0 && history.status === 'ready') {
       out.push({ segments: [{ plain: 'No saved deliveries.', paint: color.textDim }] })
     }
     const valueWidth = Math.max(1, width - DETAIL_LABEL_WIDTH - 1)
     for (const [index, record] of history.records.entries()) {
+      const selected = record.messageId === this.historySelectedMessageId
+      const rowId = record.messageId
       if (index > 0) out.push({ segments: [{ plain: '' }] })
+      out.push({
+        segments: [
+          { plain: selected ? '> ' : '  ', paint: selected ? color.primary : undefined },
+          { plain: `#${index + 1} Delivered ${formatLocalInstant(record.deliveredAt)} UTC`, paint: selected ? color.textStrong : color.text },
+        ],
+        rowId,
+      })
       const fact = (label: string, value: string): void => {
         for (const [partIndex, part] of wrapTextWithAnsi(sanitizedPhysicalLine(value), valueWidth).entries()) {
           out.push({
@@ -1354,25 +1526,53 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
               { plain: partIndex === 0 ? fit(label, DETAIL_LABEL_WIDTH) : ' '.repeat(DETAIL_LABEL_WIDTH), paint: color.textDim },
               { plain: part, paint: color.text },
             ],
+            rowId,
           })
         }
       }
-      fact('Scheduled', `${formatLocalInstant(record.scheduledAt)} UTC`)
-      fact('Delivered', `${formatLocalInstant(record.deliveredAt)} UTC`)
+      fact('Due', `${formatLocalInstant(record.scheduledAt)} UTC`)
       fact('Message', record.messageId)
-      if (record.prompt !== undefined) {
-        let first = true
-        for (const stored of record.prompt.split('\n')) {
+      const session = this.snapshot.sessions.find(item => item.id === record.targetSessionId)
+      const available = this.snapshot.sessionRosterState === 'ready'
+        && this.snapshot.availableSessionIds.includes(record.targetSessionId)
+        && !this.snapshot.navigationPending
+      const conversationTitle = session?.title
+      const sessionLabel = conversationTitle === undefined || conversationTitle === record.targetSessionId
+        ? record.targetSessionId
+        : `${conversationTitle} · ${record.targetSessionId}`
+      const sessionText = available
+        ? `Open conversation · ${sessionLabel}`
+        : `${this.sessionAvailabilityMessage(record.targetSessionId)} · ${record.targetSessionId}`
+      for (const [partIndex, part] of wrapTextWithAnsi(sanitizedPhysicalLine(sessionText), valueWidth).entries()) {
+        out.push({
+          segments: [
+            { plain: partIndex === 0 ? fit('Sent to', DETAIL_LABEL_WIDTH) : ' '.repeat(DETAIL_LABEL_WIDTH), paint: color.textDim },
+            {
+              plain: part,
+              paint: available ? color.primary : color.textMuted,
+              ...(available ? { hit: { kind: 'history-link', messageId: rowId } as const } : {}),
+            },
+          ],
+          rowId,
+        })
+      }
+      if (record.prompt === undefined) {
+        fact('Instruction', SCHEDULE_COPY.instructionNotRecorded)
+      } else {
+        const wrappedPrompt = record.prompt.split('\n').flatMap(stored => {
           const wrapped = wrapTextWithAnsi(sanitizedPhysicalLine(stored), valueWidth)
-          for (const part of wrapped.length === 0 ? [''] : wrapped) {
-            out.push({
-              segments: [
-                { plain: first ? fit('Prompt', DETAIL_LABEL_WIDTH) : ' '.repeat(DETAIL_LABEL_WIDTH), paint: color.textDim },
-                { plain: part, paint: color.text },
-              ],
-            })
-            first = false
-          }
+          return wrapped.length === 0 ? [''] : wrapped
+        })
+        const expanded = this.historyExpandedMessageIds.has(rowId)
+        const visiblePrompt = expanded ? wrappedPrompt : wrappedPrompt.slice(0, 2)
+        for (const [partIndex, part] of visiblePrompt.entries()) {
+          out.push({
+            segments: [
+              { plain: partIndex === 0 ? fit('Instruction', DETAIL_LABEL_WIDTH) : ' '.repeat(DETAIL_LABEL_WIDTH), paint: color.textDim },
+              { plain: !expanded && wrappedPrompt.length > 2 && partIndex === visiblePrompt.length - 1 ? `${truncateToWidth(part, Math.max(1, valueWidth - 1), '', false)}…` : part, paint: color.text },
+            ],
+            rowId,
+          })
         }
       }
     }
@@ -1384,8 +1584,11 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     if (history.earlierRecordsUnavailable) {
       out.push({ segments: [{ plain: 'Earlier deliveries may exist but are unavailable.', paint: color.textMuted }] })
     }
-    if (history.earlierRecordsPruned) {
-      out.push({ segments: [{ plain: 'Earlier deliveries were removed by the retention limit.', paint: color.textMuted }] })
+    if (history.earlierRecordsPruned && history.nextBefore === undefined) {
+      out.push({ segments: [{ plain: 'Earlier records were removed by retention.', paint: color.textMuted }] })
+    }
+    if (history.retention !== undefined) {
+      out.push({ segments: [{ plain: `Retention ${history.retention.days} days · ${history.retention.records} records`, paint: color.textMuted }] })
     }
     if (history.missCode !== undefined) {
       out.push({ segments: [{ plain: sanitizedPhysicalLine(`Miss  ${history.missCode}`), paint: color.warning }] })
@@ -1572,21 +1775,26 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
       ['R', 'Refresh the Host catalog'],
       ['/', 'Focus search; Esc returns to the list'],
       ['A / P / E / L', 'Filter Enabled / Paused / Ended / All'],
-      [`${formatKeyId(Key.tab)} / ${formatKeyId(Key.shift(Key.tab))} (list)`, 'Cycle Enabled, Paused, Ended, All filters'],
-      [`${formatKeyId(Key.tab)} / ${formatKeyId(Key.shift(Key.tab))} (search)`, 'Return to the task list without changing the filter'],
+      [`${formatKeyId(Key.tab)} / ${formatKeyId(Key.shift(Key.tab))}`, 'Cycle filters on List; return from Search without changing the filter'],
       ['X', 'Clear ended tasks'],
       ['?', 'This help page'],
       ['H (detail)', 'Delivery history'],
       ['E (detail)', 'Edit the task'],
       ['Space (detail)', 'Pause or resume the task'],
-      ['U (detail)', 'Run the task now'],
+      ['O (detail)', 'Open the linked conversation, or the latest delivery receiver'],
+      ['R (detail/history)', 'Refresh conversation availability'],
+      ['U (detail)', 'Run the task now; Host decides admission'],
       ['D (detail)', 'Delete the task'],
-      ['Enter (history)', 'Load the next page when More is shown'],
+      ['↑/↓, j/k (history)', 'Select a delivery receipt'],
+      ['Enter (history)', 'Open the selected receipt conversation'],
+      ['X (history)', 'Expand or collapse the saved instruction'],
+      ['M (history)', 'Load the next page when More is available'],
+      ['Delivered', SCHEDULE_COPY.deliveryInboxNotCompleted],
       ['PgUp / PgDn', 'Scroll detail, history or help'],
       [`${formatKeyId(Key.ctrl('s'))} (editor)`, 'Save the schedule'],
-      [`${formatKeyId(Key.ctrl('g'))} (conflict / unknown edit)`, 'Review the latest Host version with your edits; nothing is saved'],
+      [`${formatKeyId(Key.ctrl('g'))} (conflict)`, 'Review the latest Host version with your edits; nothing is saved'],
       [`${formatKeyId(Key.ctrl('r'))} (edit)`, 'Discard your edits and reload the latest Host version (asks first)'],
-      [`${formatKeyId(Key.tab)} / ${formatKeyId(Key.shift(Key.tab))} (editor)`, 'Move between logical fields'],
+      [`${formatKeyId(Key.tab)} / ${formatKeyId(Key.shift(Key.tab))}`, 'Move between logical fields in Editor'],
       ['Repeat (editor)', 'Once after delay, once at date/time, every minutes/hours/seconds, daily, weekly, Custom Cron or Custom RRULE'],
       ['Create default', 'One hour after Save · Create and reuse conversation'],
       ['Existing conversation', 'Deliver to the selected existing conversation'],
@@ -1599,10 +1807,11 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     ]
     const out: BodyLine[] = [{ segments: [{ plain: 'Schedule help', paint: color.textStrong }] }]
     for (const [key, description] of entries) {
-      for (const [index, part] of wrapTextWithAnsi(description, Math.max(1, width - EDITOR_LABEL_WIDTH)).entries()) {
+      for (const [index, part] of wrapTextWithAnsi(description, Math.max(1, width - EDITOR_LABEL_WIDTH - 1)).entries()) {
         out.push({
           segments: [
             { plain: index === 0 ? fit(key, EDITOR_LABEL_WIDTH) : ' '.repeat(EDITOR_LABEL_WIDTH), paint: color.primary },
+            { plain: ' ' },
             { plain: part, paint: color.text },
           ],
         })
@@ -1629,6 +1838,14 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
       ],
     })
     return out
+  }
+
+  private noticeBody(notice: ScheduleNotice, width: number): BodyLine[] {
+    const marker = notice.kind === 'error' ? '!' : 'i'
+    const paint = notice.kind === 'error' ? color.error : color.textMuted
+    return wrapTextWithAnsi(sanitizedPhysicalLine(notice.text), Math.max(1, width - 2)).map((part, index) => ({
+      segments: [{ plain: `${index === 0 ? `${marker} ` : '  '}${part}`, paint }],
+    }))
   }
 
   private noticeLine(notice: ScheduleNotice): BodyLine {
@@ -1688,7 +1905,14 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
       regions.push({ row, from: region.from, to: region.to, hit: region.hit })
     }
     if (bodyLine.rowId !== undefined) {
-      regions.push({ row, from: 0, to: width, hit: { kind: 'row', id: bodyLine.rowId } })
+      regions.push({
+        row,
+        from: 0,
+        to: width,
+        hit: this.snapshot.mode === 'history'
+          ? { kind: 'history-record', messageId: bodyLine.rowId }
+          : { kind: 'row', id: bodyLine.rowId },
+      })
     }
     if (bodyLine.fieldId !== undefined) {
       regions.push({ row, from: 0, to: width, hit: { kind: 'field', id: bodyLine.fieldId } })
@@ -1719,6 +1943,16 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     }
     for (const region of rightComposed.regions) {
       regions.push({ row, from: region.from + leftWidth + 2, to: region.to + leftWidth + 2, hit: region.hit })
+    }
+    if (right?.rowId !== undefined) {
+      regions.push({
+        row,
+        from: leftWidth + 2,
+        to: leftWidth + 2 + rightWidth,
+        hit: this.snapshot.mode === 'history'
+          ? { kind: 'history-record', messageId: right.rowId }
+          : { kind: 'row', id: right.rowId },
+      })
     }
     if (right?.fieldId !== undefined) {
       regions.push({
@@ -1799,16 +2033,42 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
           if (this.filterPresentation(width).actionBarHint) add('Tab filters', 1, undefined, 'Tab')
           add('Esc close', 10, 'close', 'Esc')
           break;
-        case 'detail':
-          add('h history', 6, 'detail-history')
-          add('e edit', 7, 'detail-edit')
-          add('Space pause/resume', 5, 'detail-toggle')
-          add('u run now', 4, 'detail-run')
-          add('d delete', 3, 'detail-delete')
+        case 'detail': {
+          if (this.snapshot.navigationPending) {
+            add(SCHEDULE_COPY.openingConversation, 9)
+            add('Esc wait', 10)
+            break
+          }
+          const entry = this.detailEntry()
+          if (entry !== undefined && this.detailConversation(entry).available) {
+            add('o conversation', 9, 'detail-open-conversation')
+          }
+          if (entry?.executionActive !== true && !this.snapshot.busy) add('u run now', 8, 'detail-run')
+          add('h history', 7, 'detail-history')
+          if (!this.snapshot.busy) add('e edit', 6, 'detail-edit')
+          if (entry?.executionActive !== true && !this.snapshot.busy) {
+            add('Space pause/resume', 5, 'detail-toggle')
+            add('d delete', 4, 'detail-delete')
+          }
+          add('? help', 3, 'help')
+          if (!this.snapshot.busy) add('r links', 2, 'detail-refresh-roster')
           add('Esc back', 10, 'back')
           break
+        }
         case 'history':
-          if (this.snapshot.history?.nextBefore !== undefined) add('Enter more', 6, 'history-more')
+          if (this.snapshot.navigationPending) {
+            add(SCHEDULE_COPY.openingConversation, 9)
+            add('Esc wait', 10)
+            break
+          }
+          if (this.snapshot.history?.nextBefore !== undefined) add('m more', 7, 'history-more')
+          if (this.historySelectedMessageId !== undefined
+            && this.snapshot.history?.records.some(record => record.messageId === this.historySelectedMessageId && record.prompt !== undefined)) {
+            add(this.historyExpandedMessageIds.has(this.historySelectedMessageId) ? 'x collapse' : 'x expand', 6, 'history-toggle-expand')
+          }
+          if (this.historySelectedMessageId !== undefined) add('Enter open', 8, 'history-open')
+          add('r links', 4, 'history-refresh-roster')
+          add('? help', 3, 'help')
           add('Esc back', 10, 'back')
           break
         case 'editor': {
@@ -1882,6 +2142,10 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
           subjectFacts: frame.subjectFacts,
           listSelection: frame.listSelection,
           historyCursor: frame.historyCursor,
+          historySelection: frame.historySelection,
+          historyFacts: frame.historyFacts,
+          rosterFacts: frame.rosterFacts,
+          navigationPending: frame.navigationPending,
           pageEpoch: frame.pageEpoch,
         }
   }
@@ -1908,6 +2172,10 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
       || pressed.subjectFacts !== frame.subjectFacts
       || pressed.listSelection !== frame.listSelection
       || pressed.historyCursor !== frame.historyCursor
+      || pressed.historySelection !== frame.historySelection
+      || pressed.historyFacts !== frame.historyFacts
+      || pressed.rosterFacts !== frame.rosterFacts
+      || pressed.navigationPending !== frame.navigationPending
       || pressed.pageEpoch !== frame.pageEpoch) {
       return
     }
@@ -1963,6 +2231,10 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
         ? (this.snapshot.selectedId === undefined ? null : String(this.snapshot.selectedId))
         : null)
       && frame.historyCursor === (this.snapshot.mode === 'history' ? (this.snapshot.history?.nextBefore ?? null) : null)
+      && frame.historySelection === (this.snapshot.mode === 'history' ? (this.historySelectedMessageId ?? null) : null)
+      && frame.historyFacts === historyFrameFacts(this.snapshot, this.historyExpandedMessageIds)
+      && frame.rosterFacts === JSON.stringify([this.snapshot.sessionRosterState, this.snapshot.availableSessionIds, this.snapshot.sessions])
+      && frame.navigationPending === this.snapshot.navigationPending
   }
 
   private activateHit(hit: ScheduleHit): void {
@@ -1971,6 +2243,25 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     if (this.snapshot.confirm !== undefined
       && (hit.kind !== 'action' || (hit.action !== 'confirm' && hit.action !== 'cancel'))) return
     switch (hit.kind) {
+      case 'history-record': {
+        if (this.snapshot.mode !== 'history'
+          || !this.snapshot.history?.records.some(record => record.messageId === hit.messageId)) return
+        this.historySelectedMessageId = hit.messageId as ScheduleHistoryMessageId
+        this.deps.requestRender()
+        return
+      }
+      case 'history-link':
+        if (this.snapshot.mode !== 'history'
+          || !this.snapshot.history?.records.some(record => record.messageId === hit.messageId)
+          || this.snapshot.navigationPending) return
+        this.historySelectedMessageId = hit.messageId as ScheduleHistoryMessageId
+        this.deps.dispatch({ kind: 'open-delivery-conversation', messageId: hit.messageId })
+        return
+      case 'detail-link':
+        if (this.snapshot.mode === 'detail' && !this.snapshot.navigationPending) {
+          this.deps.dispatch({ kind: 'open-detail-conversation' })
+        }
+        return
       case 'row':
         if (!this.snapshot.rows.some(row => row.id === hit.id)) return
         this.deps.dispatch({ kind: 'open-detail', id: hit.id })
@@ -2012,6 +2303,15 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
         if (this.snapshot.history?.nextBefore !== undefined) this.deps.dispatch({ kind: 'history-more' })
         return
       case 'detail-history': this.deps.dispatch({ kind: 'open-history' }); return
+      case 'detail-open-conversation': this.deps.dispatch({ kind: 'open-detail-conversation' }); return
+      case 'detail-refresh-roster':
+      case 'history-refresh-roster': this.deps.dispatch({ kind: 'refresh-session-roster' }); return
+      case 'history-open': {
+        const messageId = this.historySelectedMessageId
+        if (messageId !== undefined) this.deps.dispatch({ kind: 'open-delivery-conversation', messageId })
+        return
+      }
+      case 'history-toggle-expand': this.toggleHistoryExpansion(); return
       case 'detail-edit': this.deps.dispatch({ kind: 'open-edit' }); return
       case 'detail-toggle': this.deps.dispatch({ kind: 'toggle-active' }); return
       case 'detail-run': this.deps.dispatch({ kind: 'ask-run' }); return
@@ -2126,6 +2426,15 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     return this.scrolled(next, content.length, bodyHeight)
   }
 
+  private revealHistorySelection(content: readonly BodyLine[], scroll: number, bodyHeight: number): number {
+    const selected = content.findIndex(line => line.rowId === this.historySelectedMessageId)
+    if (bodyHeight <= 0 || selected < 0) return this.scrolled(scroll, content.length, bodyHeight)
+    let next = scroll
+    if (selected < next) next = selected
+    else if (selected >= next + bodyHeight) next = selected - bodyHeight + 1
+    return this.scrolled(next, content.length, bodyHeight)
+  }
+
   private revealChooser(content: readonly BodyLine[], scroll: number, bodyHeight: number): number {
     const selected = content.findIndex(line => line.chooserIndex === this.chooser?.index)
     const title = content.findIndex(line => line.chooserTitle === true)
@@ -2209,6 +2518,9 @@ function actionPartMatches(part: string, text: string): boolean {
 function hitKey(hit: ScheduleHit): string {
   switch (hit.kind) {
     case 'row': return `row:${hit.id}`
+    case 'history-record': return `history-record:${hit.messageId}`
+    case 'history-link': return `history-link:${hit.messageId}`
+    case 'detail-link': return 'detail-link'
     case 'filter': return `filter:${hit.filter}`
     case 'search': return 'search'
     case 'action': return `action:${hit.action}`
@@ -2225,7 +2537,34 @@ function frameSubjectFacts(snapshot: ScheduleWorkspaceSnapshot): string {
   const row = (snapshot.detail?.id === id ? snapshot.detail : undefined)
     ?? snapshot.rows.find(candidate => candidate.id === id)
   if (row === undefined) return ''
-  return `${row.status}@${row.updatedAt ?? ''}`
+  const delivery = row.lastDelivery
+  return JSON.stringify([
+    row.status,
+    row.updatedAt ?? '',
+    row.executionActive,
+    row.deliveryFloorEndsAt,
+    row.target.kind === 'session' ? row.target.sessionId : row.target.kind,
+    delivery?.messageId,
+    delivery?.targetSessionId,
+    delivery?.scheduledAt,
+    delivery?.deliveredAt,
+  ])
+}
+
+function historyFrameFacts(snapshot: ScheduleWorkspaceSnapshot, expanded: ReadonlySet<ScheduleHistoryMessageId>): string {
+  return JSON.stringify({
+    selectedId: snapshot.selectedId,
+    status: snapshot.history?.status,
+    nextBefore: snapshot.history?.nextBefore,
+    records: snapshot.history?.records.map(record => [
+      record.messageId,
+      record.targetSessionId,
+      record.scheduledAt,
+      record.deliveredAt,
+      record.prompt,
+    ]),
+    expanded: [...expanded].sort(),
+  })
 }
 
 /** Resolve the painted region at one cell of the LAST frame. */

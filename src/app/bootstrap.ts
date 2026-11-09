@@ -86,7 +86,7 @@ import { PI_TUI_EXTENSIONS_SERVICE, type PiTuiExtensionService } from '../extens
 import { type CommandRegistryLike, type TuiCommandRunner } from '../commands.ts'
 import { diagFromEnv, dshHome, type Diag } from '../runtime/process/diagnostics.ts'
 import { runDetached, runOwned } from '../runtime/process/tasks.ts'
-import { openScheduleWorkspace } from './schedule/runtime.ts'
+import { captureScheduleSessionSwitch, openScheduleWorkspace } from './schedule/runtime.ts'
 import { FileHistorySearchSource } from '../client/history/search.ts'
 import { safeErrorMessage } from '../runtime/process/errors.ts'
 import { DraftImageStore } from '../client/media/image/draft-store.ts'
@@ -2008,6 +2008,10 @@ export function applyRunnerWithRuntime(
           sessionReader: backend.sessionReader,
           app: () => surface.app,
           runOwned: (label, task) => { runOwned(label, task, { diag }) },
+          captureSessionSwitch: captureScheduleSessionSwitch(
+            () => sessionScope.capture(),
+            (sessionId, scope) => sessionRuntime.switchSessionOutcome(sessionId, scope),
+          ),
         }),
         // Image UX PR3-B: the LIVE composer of the mounted renderer. Command
         // registration runs AFTER the mount, so this getter (never an eagerly

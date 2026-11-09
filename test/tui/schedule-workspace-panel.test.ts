@@ -38,7 +38,7 @@ interface TaskOverrides {
   readonly prompt?: string
   readonly scheduledAt?: string
   readonly timeZone?: string
-  readonly executionActive?: true
+  readonly executionActive?: boolean
   readonly deliveryFloorEndsAt?: string
   readonly lastDelivery?: NonNullable<ScheduleCatalogEntry['lastDelivery']>
 }
@@ -70,6 +70,9 @@ function workspace(overrides: Partial<ScheduleWorkspaceSnapshot> = {}): Schedule
     statusCounts,
     mode: 'list',
     sessions: [],
+    sessionRosterState: 'unavailable',
+    availableSessionIds: [],
+    navigationPending: false,
     busy: false,
     pageEpoch: 0,
     ...overrides,
@@ -258,12 +261,12 @@ test('an ended task renders status, execution activity and the delivery floor as
   const lines = harness(snapshot, { columns: 100, rows: 30 }).plain()
   const statusLine = lines.find(line => line.includes('Status'))
   const executionLine = lines.find(line => line.includes('Execution'))
-  const floorLine = lines.find(line => line.includes('Delivery floor'))
+  const floorLine = lines.find(line => line.includes('Host minimum interval ends'))
   assert.ok(statusLine !== undefined && statusLine.includes('Ended'),
     'the Detail status fact uses the Title Case word (the marker belongs to the list status column)')
   assert.equal(statusLine.includes('‣'), false, 'D14.3: no repeated marker in an inline fact')
-  assert.ok(executionLine !== undefined && executionLine.includes('in progress'), 'execution activity is its own fact')
-  assert.ok(floorLine !== undefined && floorLine.includes('until '), 'the delivery floor is its own fact')
+  assert.ok(executionLine !== undefined && executionLine.includes('In progress'), 'execution activity is its own fact')
+  assert.ok(floorLine !== undefined && floorLine.includes('2026-06-02T12:00:00.000Z UTC'), 'the Host delivery floor is an official instant')
   assert.notEqual(statusLine, floorLine)
   assert.ok(!statusLine.includes('until '), 'the delivery floor is never painted as the task status')
   assert.ok(!floorLine.includes('Ended'), 'the delivery floor is never painted as a task status')
@@ -448,17 +451,21 @@ test('filter, refresh, create, clear, help, detail and root Esc dispatch their i
 
 // ── 5. detail / history / editor ─────────────────────────────────────────────
 
-test('detail keys dispatch history, edit, toggle, run and delete', () => {
+test('Detail keys dispatch conversation, history, roster, edit and task actions', () => {
   const selected = task({ id: 'task-alpha', title: 'Alpha report', status: 'active' })
   const detail = workspace({ mode: 'detail', detail: selected, rows: [selected], total: 1, selectedId: selected.id })
   const view = harness(detail, { columns: 100, rows: 30 })
   view.panel.handleInput('H')
+  view.panel.handleInput('O')
+  view.panel.handleInput('R')
   view.panel.handleInput('E')
   view.panel.handleInput(' ')
   view.panel.handleInput('U')
   view.panel.handleInput('D')
   assert.deepEqual(view.dispatches, [
     { kind: 'open-history' },
+    { kind: 'open-detail-conversation' },
+    { kind: 'refresh-session-roster' },
     { kind: 'open-edit' },
     { kind: 'toggle-active' },
     { kind: 'ask-run' },
@@ -481,7 +488,7 @@ test('history More is dispatched only while the Host reports a next cursor', () 
     },
   })
   const more = harness(withCursor, { columns: 100, rows: 30 })
-  more.panel.handleInput('\r')
+  more.panel.handleInput('m')
   assert.deepEqual(more.dispatches, [{ kind: 'history-more' }])
   more.resetDispatches()
   more.panel.handleInput('\x1b')
@@ -499,6 +506,194 @@ test('history More is dispatched only while the Host reports a next cursor', () 
   const lastPage = harness(exhausted, { columns: 100, rows: 30 })
   lastPage.panel.handleInput('\r')
   assert.deepEqual(lastPage.dispatches, [], 'no cursor means no More action')
+})
+
+test('history selection, expansion, paging and roster refresh use their frozen keys', () => {
+  const first = {
+    scheduledAt: '2026-06-01T09:00:00.000Z',
+    deliveredAt: '2026-06-01T09:01:00.000Z',
+    messageId: 'receipt-one' as never,
+    targetSessionId: 'session-one' as never,
+    prompt: 'first instruction line\nsecond instruction line\nthird instruction line',
+  }
+  const second = {
+    scheduledAt: '2026-06-02T09:00:00.000Z',
+    deliveredAt: '2026-06-02T09:01:00.000Z',
+    messageId: 'receipt-two' as never,
+    targetSessionId: 'session-removed' as never,
+  }
+  const view = harness(workspace({
+    mode: 'history',
+    selectedId: 'task-alpha',
+    history: {
+      status: 'ready',
+      records: [first, second],
+      earlierRecordsUnavailable: false,
+      earlierRecordsPruned: false,
+      nextBefore: 'cursor-two',
+      retention: { days: 30, records: 200 },
+    },
+    sessionRosterState: 'ready',
+    availableSessionIds: ['session-one', 'session-two'],
+    sessions: [{ id: 'session-one', title: 'Alpha conversation' }],
+  }), { columns: 100, rows: 30 })
+  let lines = view.plain()
+  assert.ok(lines.some(line => line.includes(SCHEDULE_COPY.deliveryInboxNotCompleted)))
+  assert.ok(lines.some(line => line.includes('Open conversation · Alpha conversation · session-one')))
+  assert.ok(lines.some(line => line.includes('Not in available Sessions (possibly removed or archived).')))
+  assert.ok(lines.some(line => line.includes('session-removed')))
+  assert.ok(lines.some(line => line.includes('Instruction was not recorded for this delivery.')))
+  assert.ok(!lines.some(line => line.includes('third instruction line')), 'collapsed prompt is capped at two physical rows')
+
+  view.panel.handleInput('j')
+  assert.deepEqual(view.dispatches, [], 'j changes only panel-local selection')
+  view.panel.handleInput('\r')
+  assert.deepEqual(view.dispatches, [{ kind: 'open-delivery-conversation', messageId: 'receipt-two' }])
+  view.resetDispatches()
+  view.panel.handleInput('k')
+  view.panel.handleInput('x')
+  lines = view.plain()
+  assert.ok(lines.some(line => line.includes('third instruction line')), 'x reveals the selected receipt instruction')
+  assert.deepEqual(view.dispatches, [], 'expand/collapse never reaches the Host')
+  view.panel.handleInput('x')
+  assert.ok(!view.plain().some(line => line.includes('third instruction line')), 'x collapses only that receipt')
+  view.panel.handleInput('m')
+  view.panel.handleInput('r')
+  assert.deepEqual(view.dispatches, [
+    { kind: 'history-more' },
+    { kind: 'refresh-session-roster' },
+  ])
+})
+
+test('a History mouse link opens only its exact painted receipt and rejects a changed receiver', () => {
+  const record = {
+    scheduledAt: '2026-06-01T09:00:00.000Z',
+    deliveredAt: '2026-06-01T09:01:00.000Z',
+    messageId: 'receipt-one' as never,
+    targetSessionId: 'session-one' as never,
+    prompt: 'stored prompt',
+  }
+  const initial = workspace({
+    mode: 'history',
+    selectedId: 'task-alpha',
+    history: { status: 'ready', records: [record], earlierRecordsUnavailable: false, earlierRecordsPruned: false },
+    sessionRosterState: 'ready',
+    availableSessionIds: ['session-one', 'session-two'],
+  })
+  const view = harness(initial, { columns: 100, rows: 30 })
+  let lines = view.plain()
+  const linkRow = lines.findIndex(line => line.includes('Open conversation'))
+  assert.ok(linkRow >= 0)
+  const linkColumn = lines[linkRow]!.indexOf('Open conversation') + 2
+  view.panel.onCellPress(linkColumn, linkRow)
+  view.panel.onCellClick(linkColumn, linkRow)
+  assert.deepEqual(view.dispatches, [{ kind: 'open-delivery-conversation', messageId: 'receipt-one' }])
+
+  view.resetDispatches()
+  view.render()
+  view.panel.onCellPress(linkColumn, linkRow)
+  view.setSnapshot({
+    ...initial,
+    history: { ...initial.history!, records: [{ ...record, targetSessionId: 'session-two' as never }] },
+  })
+  view.panel.onCellClick(linkColumn, linkRow)
+  assert.deepEqual(view.dispatches, [], 'a press cannot navigate after the receipt target changes')
+})
+
+test('the Detail conversation link click is roster-bound and carries no caller-supplied Session ID', () => {
+  const selected = task({ id: 'task-linked', title: 'Linked task' })
+  const initial = workspace({
+    mode: 'detail',
+    detail: selected,
+    rows: [selected],
+    total: 1,
+    selectedId: selected.id,
+    sessionRosterState: 'ready',
+    availableSessionIds: ['session-target'],
+  })
+  const view = harness(initial, { columns: 100, rows: 30 })
+  const lines = view.plain()
+  const linkRow = lines.findIndex(line => line.includes('Open linked conversation'))
+  assert.ok(linkRow >= 0)
+  const column = lines[linkRow]!.indexOf('Open linked conversation') + 2
+  view.click(column, linkRow)
+  assert.deepEqual(view.dispatches, [{ kind: 'open-detail-conversation' }])
+
+  view.resetDispatches()
+  view.render()
+  view.panel.onCellPress(column, linkRow)
+  view.setSnapshot({ ...initial, sessionRosterState: 'error', availableSessionIds: [] })
+  view.panel.onCellClick(column, linkRow)
+  assert.deepEqual(view.dispatches, [], 'a roster failure retires a press from an older authorized frame')
+})
+
+test('Detail and History action bars keep their priority actions and Esc across the frozen size ladder', () => {
+  const sizes: readonly FrameSize[] = [
+    { columns: 200, rows: 50 },
+    { columns: 120, rows: 40 },
+    { columns: 100, rows: 40 },
+    { columns: 80, rows: 24 },
+    { columns: 80, rows: 10 },
+    { columns: 72, rows: 24 },
+    { columns: 44, rows: 20 },
+  ]
+  const selected = task({ id: 'task-matrix-action', title: 'Matrix action task' })
+  const receipt = {
+    scheduledAt: '2026-06-01T09:00:00.000Z',
+    deliveredAt: '2026-06-01T09:01:00.000Z',
+    messageId: 'matrix-receipt' as never,
+    targetSessionId: 'session-target' as never,
+    prompt: 'Stored instruction',
+  }
+  for (const size of sizes) {
+    const detail = harness(workspace({
+      mode: 'detail', detail: selected, rows: [selected], total: 1, selectedId: selected.id,
+      sessionRosterState: 'ready', availableSessionIds: ['session-target'],
+    }), size).plain()
+    const detailBar = detail.at(-1) ?? ''
+    assert.ok(detailBar.includes('o conversation'), `${size.columns}×${size.rows} Detail open route: ${detailBar}`)
+    assert.ok(detailBar.includes('u run now'), `${size.columns}×${size.rows} Detail Run route: ${detailBar}`)
+    assert.ok(detailBar.trimEnd().endsWith('Esc back'), `${size.columns}×${size.rows} Detail Esc: ${detailBar}`)
+
+    const history = harness(workspace({
+      mode: 'history', selectedId: selected.id,
+      history: { status: 'ready', records: [receipt], earlierRecordsUnavailable: false, earlierRecordsPruned: false, nextBefore: 'next-receipt' },
+      sessionRosterState: 'ready', availableSessionIds: ['session-target'],
+    }), size).plain()
+    const historyBar = history.at(-1) ?? ''
+    assert.ok(history.slice(0, -1).join(' ').replace(/\s+/gu, ' ').includes(SCHEDULE_COPY.deliveryInboxNotCompleted),
+      `${size.columns}×${size.rows} History receipt qualification is readable:\n${history.join('\n')}`)
+    assert.ok(historyBar.includes('Enter open'), `${size.columns}×${size.rows} History open route: ${historyBar}`)
+    assert.ok(historyBar.includes('x expand'), `${size.columns}×${size.rows} History reveal route: ${historyBar}`)
+    assert.ok(historyBar.includes('m more'), `${size.columns}×${size.rows} History paging route: ${historyBar}`)
+    assert.ok(historyBar.trimEnd().endsWith('Esc back'), `${size.columns}×${size.rows} History Esc: ${historyBar}`)
+  }
+})
+
+test('the execution display is three-state and a running task paints no Run/Pause/Delete action', () => {
+  const active = task({ id: 'task-active', title: 'Running task', executionActive: true })
+  const activeView = harness(workspace({
+    mode: 'detail', detail: active, rows: [active], total: 1, selectedId: active.id,
+  }), { columns: 120, rows: 40 })
+  const activeLines = activeView.plain()
+  assert.ok(activeLines.some(line => line.includes('In progress')))
+  assert.ok(activeLines.some(line => line.includes('Delivery is queued or running in its')))
+  assert.ok(activeLines.some(line => line.includes('conversation; manage it there.')))
+  const activeBar = activeLines.at(-1) ?? ''
+  assert.ok(!activeBar.includes('u run now') && !activeBar.includes('Space pause/resume') && !activeBar.includes('d delete'))
+
+  const stopped = task({ id: 'task-stopped', title: 'Stopped task', executionActive: false })
+  const stoppedLines = harness(workspace({
+    mode: 'detail', detail: stopped, rows: [stopped], total: 1, selectedId: stopped.id,
+  }), { columns: 100, rows: 30 }).plain()
+  assert.ok(stoppedLines.some(line => line.includes('Not running')))
+
+  const unknown = task({ id: 'task-unknown', title: 'Unknown activity' })
+  const unknownLines = harness(workspace({
+    mode: 'detail', detail: unknown, rows: [unknown], total: 1, selectedId: unknown.id,
+  }), { columns: 100, rows: 30 }).plain()
+  assert.ok(unknownLines.some(line => line.includes('Not reported for this target')))
+  assert.ok(!unknownLines.some(line => line.includes('idle')))
 })
 
 test('editor Ctrl+S saves, Tab steps fields and Esc backs out', () => {
@@ -571,7 +766,7 @@ test('a stale y cannot confirm a newer painted confirmation identity', () => {
 })
 
 test('clicking the painted y/n confirmation acts on that painted question', () => {
-  const confirm = workspace({ confirm: { kind: 'run', token: 9, id: 'task-alpha', title: 'Alpha report' } })
+  const confirm = workspace({ confirm: { kind: 'run', token: 9, id: 'task-alpha', title: 'Alpha report', expectedUpdatedAt: null } })
   const view = harness(confirm, { columns: 100, rows: 30 })
   const lines = view.plain()
   const confirmRow = lines.findIndex(line => line.includes('Confirm [Y]'))
@@ -730,12 +925,16 @@ test('list-only chrome and mode-specific titles disappear outside the list root'
   }
 })
 
-test('Help describes list and search Tab behavior without the retired pane rotation', () => {
-  const help = harness(workspace({ mode: 'help' }), { columns: 120, rows: 40 }).plain().join('\n')
-  assert.ok(help.includes('Cycle Enabled, Paused, Ended, All filters'))
-  assert.ok(help.includes('Return to the task list without changing the filter'))
+test('Help describes List/Search navigation and Schedule conversation actions clearly', () => {
+  const lines = harness(workspace({ mode: 'help' }), { columns: 120, rows: 40 }).plain()
+  const help = lines.join('\n')
+  assert.ok(help.includes('Cycle filters on List'))
+  assert.ok(help.includes('return from Search without changing the filter'))
   assert.ok(help.includes('Filter Enabled / Paused / Ended / All'))
+  assert.ok(help.includes('R (detail/history) Refresh conversation availability'))
+  assert.ok(help.includes(SCHEDULE_COPY.deliveryInboxNotCompleted))
   assert.ok(!help.includes('Rotate focus'))
+  assert.ok(lines.every(line => visibleWidth(line) <= 120))
 })
 
 test('a pointer event outside the painted frame dispatches nothing', () => {
@@ -1260,7 +1459,7 @@ test('every page stays inside the design-language size matrix', () => {
         selectedId: selected.id,
         history: {
           status: 'ready',
-          records: [{ scheduledAt: '2026-06-01T09:00:00.000Z', deliveredAt: '2026-06-01T09:00:00.100Z', messageId: 'm1' }],
+          records: [{ scheduledAt: '2026-06-01T09:00:00.000Z', deliveredAt: '2026-06-01T09:00:00.100Z', messageId: 'm1' as never, targetSessionId: 'session-one' as never }],
           earlierRecordsUnavailable: false,
           earlierRecordsPruned: false,
         },
