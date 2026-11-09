@@ -600,6 +600,85 @@ test('a History mouse link opens only its exact painted receipt and rejects a ch
   assert.deepEqual(view.dispatches, [], 'a press cannot navigate after the receipt target changes')
 })
 
+test('History preserves explicit PgDn and wheel scrolling until the selected receipt changes', () => {
+  const longPrompt = Array.from({ length: 24 }, (_, index) => `Instruction line ${index + 1}`).join('\n')
+  const records = [
+    {
+      scheduledAt: '2026-06-01T09:00:00.000Z',
+      deliveredAt: '2026-06-01T09:01:00.000Z',
+      messageId: 'scroll-receipt-one' as never,
+      targetSessionId: 'session-one' as never,
+      prompt: longPrompt,
+    },
+    {
+      scheduledAt: '2026-06-02T09:00:00.000Z',
+      deliveredAt: '2026-06-02T09:01:00.000Z',
+      messageId: 'scroll-receipt-two' as never,
+      targetSessionId: 'session-two' as never,
+      prompt: 'Second receipt instruction',
+    },
+  ]
+  const sizes: readonly FrameSize[] = [
+    { columns: 100, rows: 14 },
+    { columns: 160, rows: 18 },
+  ]
+  for (const size of sizes) {
+    const makeHistory = (): ScheduleWorkspaceSnapshot => workspace({
+      mode: 'history',
+      selectedId: 'task-scroll',
+      history: { status: 'ready', records, earlierRecordsUnavailable: false, earlierRecordsPruned: false },
+      sessionRosterState: 'ready',
+      availableSessionIds: ['session-one', 'session-two'],
+    })
+
+    const paged = harness(makeHistory(), size)
+    paged.plain()
+    paged.panel.handleInput('x')
+    const expanded = paged.plain()
+    assert.ok(expanded.some(line => line.includes('Instruction line 1')))
+    paged.panel.handleInput('\x1b[6~')
+    const pageDown = paged.plain()
+    assert.ok(!pageDown.some(line => line.includes('> #1 Delivered')),
+      `${size.columns}x${size.rows} PgDn moves the selected receipt header out of view`)
+    assert.ok(pageDown.some(line => /Instruction line (?:[2-9]|1\d|2[0-4])/u.test(line)),
+      `${size.columns}x${size.rows} PgDn reveals later instruction content:\n${pageDown.join('\n')}`)
+    assert.deepEqual(paged.plain(), pageDown,
+      `${size.columns}x${size.rows} a repaint must not pull an explicitly paged viewport back`)
+    paged.panel.handleInput('j')
+    const nextSelection = paged.plain()
+    assert.ok(nextSelection.some(line => line.includes('> #2 Delivered')),
+      `${size.columns}x${size.rows} changing receipt restores automatic selection reveal`)
+
+    const wheeled = harness(makeHistory(), size)
+    wheeled.plain()
+    wheeled.panel.handleInput('x')
+    wheeled.plain()
+    for (let index = 0; index < 8; index += 1) {
+      wheeled.panel.handleMouse({
+        type: 'wheel',
+        button: 'none',
+        x: 1,
+        y: Math.max(0, size.rows - 3),
+        screenX: 1,
+        screenY: Math.max(0, size.rows - 3),
+        width: size.columns,
+        height: size.rows,
+        shift: false,
+        alt: false,
+        ctrl: false,
+        wheelDelta: 1,
+      })
+    }
+    const wheelDown = wheeled.plain()
+    assert.ok(!wheelDown.some(line => line.includes('> #1 Delivered')),
+      `${size.columns}x${size.rows} wheel scrolling moves the receipt header out of view`)
+    assert.ok(wheelDown.some(line => /Instruction line (?:[2-9]|1\d|2[0-4])/u.test(line)),
+      `${size.columns}x${size.rows} wheel scrolling reveals later instruction content:\n${wheelDown.join('\n')}`)
+    assert.deepEqual(wheeled.plain(), wheelDown,
+      `${size.columns}x${size.rows} a repaint must preserve the wheel viewport`)
+  }
+})
+
 test('the Detail conversation link click is roster-bound and carries no caller-supplied Session ID', () => {
   const selected = task({ id: 'task-linked', title: 'Linked task' })
   const initial = workspace({

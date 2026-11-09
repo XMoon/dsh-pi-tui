@@ -176,6 +176,7 @@ class FakeSessionReader implements SessionReader {
   listResult: SessionSummary[] | undefined = this.rows
   listError: unknown
   listGate: ReturnType<typeof deferred<SessionSummary[] | undefined>> | undefined
+  projectionGate: ReturnType<typeof deferred<Map<string, SessionProjectionSummary>>> | undefined
 
   async list(currentSessionId: string | undefined, signal?: AbortSignal): Promise<SessionSummary[] | undefined> {
     this.listCalls.push({ currentSessionId, signal })
@@ -194,6 +195,11 @@ class FakeSessionReader implements SessionReader {
   }
 
   async projectionBatch(rows: readonly SessionSummary[]): Promise<Map<string, SessionProjectionSummary>> {
+    if (this.projectionGate !== undefined) {
+      const gate = this.projectionGate
+      this.projectionGate = undefined
+      return gate.promise
+    }
     const out = new Map<string, SessionProjectionSummary>()
     for (const row of rows) {
       const value = this.projections.get(row.id)
@@ -726,6 +732,126 @@ test('a selected History receipt navigates to its own receiver and preserves its
     await flush()
     assert.deepEqual(life.switchCalls, ['session-b'])
     assert.equal(life.closeCount, 1, 'already-current is a successful settled navigation')
+  } finally {
+    life.controller.dispose()
+  }
+})
+
+test('a rejected Session switch publishes its failure and retains the History lease without retry', async () => {
+  const failure = new Error('Session switch exploded')
+  const life = harness({ switchOutcome: async () => { throw failure } })
+  try {
+    const task = entry({
+      target: { kind: 'session', sessionId: scheduleSessionId('session-a') },
+      lastDelivery: {
+        scheduledAt: '2026-01-01T09:00:00.000Z',
+        deliveredAt: '2026-01-01T09:01:00.000Z',
+        messageId: 'receipt-switch-reject' as never,
+        targetSessionId: 'session-a' as never,
+      },
+    })
+    life.port.entries = [task]
+    life.port.historyResults.set('first', {
+      id: task.id,
+      records: [{
+        scheduledAt: '2026-01-01T09:00:00.000Z',
+        deliveredAt: '2026-01-01T09:01:00.000Z',
+        messageId: 'receipt-switch-reject' as never,
+        targetSessionId: 'session-a' as never,
+        prompt: 'Saved receipt instruction',
+      }],
+      earlierRecordsUnavailable: false,
+      earlierRecordsPruned: false,
+      retention: { days: 30, records: 200 },
+    })
+    life.controller.open()
+    await flush()
+    life.controller.dispatch({ kind: 'open-detail', id: task.id })
+    await flush()
+    life.controller.dispatch({ kind: 'open-history' })
+    await flush()
+    const selectedId = life.controller.snapshot().selectedId
+
+    life.controller.dispatch({ kind: 'open-delivery-conversation', messageId: 'receipt-switch-reject' })
+    await flush()
+    await flush()
+    assert.deepEqual(life.switchCalls, ['session-a'], 'one rejected transition is never retried')
+    assert.equal(life.controller.snapshot().mode, 'history')
+    assert.equal(life.controller.snapshot().selectedId, selectedId)
+    assert.equal(life.controller.snapshot().notice?.kind, 'error')
+    assert.equal(life.controller.snapshot().notice?.text, 'Session switch exploded')
+    assert.equal(life.controller.snapshot().navigationPending, false)
+    assert.equal(life.closeCount, 0, 'a rejected switch retains the existing workspace lease')
+  } finally {
+    life.controller.dispose()
+  }
+})
+
+test('authorized Session navigation is not blocked by its optional title projection', async () => {
+  const life = harness({ switchOutcome: { kind: 'committed', sessionId: 'session-a' } })
+  try {
+    life.controller.open()
+    await flush()
+    life.port.entries = [entry({
+      target: { kind: 'session', sessionId: scheduleSessionId('session-a') },
+      lastDelivery: {
+        scheduledAt: '2026-01-01T09:00:00.000Z',
+        deliveredAt: '2026-01-01T09:01:00.000Z',
+        messageId: 'receipt-projection-pending' as never,
+        targetSessionId: 'session-a' as never,
+      },
+    })]
+    life.controller.dispatch({ kind: 'refresh' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-detail', id: 'schedule-1' })
+    await flush()
+    const delayedTitles = deferred<Map<string, SessionProjectionSummary>>()
+    life.reader.projectionGate = delayedTitles
+
+    life.controller.dispatch({ kind: 'open-detail-conversation' })
+    await flush()
+    await flush()
+    assert.equal(life.controller.snapshot().sessionRosterState, 'ready')
+    assert.ok(life.controller.snapshot().availableSessionIds.includes('session-a'))
+    assert.deepEqual(life.switchCalls, ['session-a'], 'the latest authorized roster reaches SessionRuntime before titles settle')
+    assert.equal(life.closeCount, 1, 'a successful switch is not held by title presentation work')
+
+    life.controller.dispose()
+    delayedTitles.resolve(new Map([['session-a', { title: 'late stale title' }]]))
+    await flush()
+    assert.notEqual(life.controller.snapshot().sessions.find(session => session.id === 'session-a')?.title, 'late stale title',
+      'after the successful close, a late projection cannot publish into the retired workspace')
+  } finally {
+    life.controller.dispose()
+  }
+})
+
+test('a late Session title projection cannot overwrite a newer roster', async () => {
+  const life = await opened()
+  try {
+    life.port.entries = [entry({ target: { kind: 'session', sessionId: scheduleSessionId('session-a') } })]
+    life.controller.dispatch({ kind: 'refresh' })
+    await flush()
+    life.controller.dispatch({ kind: 'open-detail', id: 'schedule-1' })
+    await flush()
+
+    const oldProjection = deferred<Map<string, SessionProjectionSummary>>()
+    life.reader.projections.set('session-a', { title: 'current roster title' })
+    life.reader.projectionGate = oldProjection
+    life.controller.dispatch({ kind: 'refresh-session-roster' })
+    await flush()
+    await flush()
+    assert.equal(life.controller.snapshot().sessionRosterState, 'ready',
+      'Session IDs authorize links before optional title projection settles')
+
+    life.controller.dispatch({ kind: 'refresh-session-roster' })
+    await flush()
+    await flush()
+    assert.equal(life.controller.snapshot().sessions.find(session => session.id === 'session-a')?.title, 'current roster title')
+    oldProjection.resolve(new Map([['session-a', { title: 'obsolete roster title' }]]))
+    await flush()
+    assert.equal(life.controller.snapshot().sessions.find(session => session.id === 'session-a')?.title, 'current roster title',
+      'a projection captured by the replaced roster can never overwrite the current title')
   } finally {
     life.controller.dispose()
   }
