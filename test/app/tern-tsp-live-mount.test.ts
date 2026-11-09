@@ -2403,8 +2403,9 @@ function contextEvent(seq: number, id: string, text: string, label: string): Ses
   }, seq)
 }
 
-test('Focus retains opened Context Row owners when the canonical Work also carries their Cluster', async () => {
-  const harness = await mountTspHarness({ displayState: { preset: 'focus' } })
+test('Focus Context Row preferences survive same-source updates and preset round trips', async () => {
+  const displayState: { preset: 'focus' | 'compact' | 'full' } = { preset: 'focus' }
+  const harness = await mountTspHarness({ displayState })
   try {
     harness.surface.bindRendererInput()
     harness.route(ev('turn/start', { turn: 1 }, 0))
@@ -2433,6 +2434,22 @@ test('Focus retains opened Context Row owners when the canonical Work also carri
     assert.ok(mountedNodes(harness).some(node => node.p['text'] === 'first Focus context body'))
     assert.ok(mountedNodes(harness).some(node => node.p['text'] === 'second Focus context body'))
 
+    for (const preset of ['full', 'compact'] as const) {
+      displayState.preset = preset
+      harness.surface.paintNow()
+      await awaitWireFact(() => mountedSections(harness).some(node => String(node.p['key']).includes('ctx-')),
+        `the ${preset} projection uses its canonical Cluster`)
+      displayState.preset = 'focus'
+      harness.surface.paintNow()
+      await awaitWireFact(() => ids.every(id => mountedSections(harness).some(node => node.id === id)),
+        'the same Focus Row occurrences return')
+      for (const id of ids) {
+        assert.equal(mountedSections(harness).find(node => node.id === id)?.p['collapsed'], false,
+          `the ${preset} round trip keeps the loaded Row preference`)
+        assert.ok(mountedNodes(harness).some(node => node.id === `${id}.body`))
+      }
+    }
+
     // A same-Source authoritative commit rebuilds canonical Work/Cluster
     // membership while Focus continues to present the same rows independently.
     harness.route(contextEvent(5, 'focus-context-c', 'third same-source Focus context', 'runtime-context'))
@@ -2445,6 +2462,79 @@ test('Focus retains opened Context Row owners when the canonical Work also carri
       assert.equal(row?.p['collapsed'], false, `Focus keeps the same Context Row owner open: ${id}`)
       assert.ok(mountedNodes(harness).some(node => node.id === `${id}.body`), `the exact Context Row body remains mounted: ${id}`)
     }
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('an open live Thinking Section keeps one id and follows later reasoning through status commits', async () => {
+  const harness = await mountTspHarness({ displayState: { preset: 'focus' } })
+  try {
+    harness.surface.bindRendererInput()
+    harness.route(ev('turn/start', { turn: 1 }, 0))
+    harness.route(userMessage(1, 'inspect the live reasoning stream'))
+    harness.route(ev('step/start', { turn: 1, step: 0 }, 2))
+    harness.surface.applyAssistantInput({
+      kind: 'chunk', sessionId: SESSION_ID, attemptId: 'live-thinking-owner', turn: 1, step: 0,
+      time: T0 + 3, chunk: { type: 'reasoning-delta', index: 0, text: 'checking the first row\n' },
+    } as never)
+    harness.surface.paintNow()
+    await awaitWireFact(() => mountedSections(harness).some(node => nodeText(node).includes('checking the first row')),
+      'the first live reasoning prefix reaches a native Thinking Section')
+    const root = mountedSections(harness).find(node => String(node.p['key']).includes('focus-'))!
+    assert.equal(root.p['collapsed'], true)
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf: harness.tern.frames.at(-1)!.sf, id: root.id, collapsed: false, raw: {} })
+    await awaitWireFact(() => mountedSections(harness).some(node => node.id === root.id && node.p['collapsed'] === false),
+      'the exact Focus Root opens before Work and Thinking are queried')
+    const work = mountedSections(harness).find(node => String(node.p['key']).includes('work-'))!
+    assert.equal(work.p['collapsed'], true)
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf: harness.tern.frames.at(-1)!.sf, id: work.id, collapsed: false, raw: {} })
+    await awaitWireFact(() => mountedSections(harness).some(node => node.id === work.id && node.p['collapsed'] === false),
+      'the exact canonical Work opens before selecting the transient Thinking row')
+    const firstThinking = mountedSections(harness).find(node => /^(?:s\d+-)?msg-\d+$/u.test(String(node.p['key']))
+      && nodeText(node).includes('checking the first row'))!
+    const thinkingId = firstThinking.id
+    assert.equal(firstThinking.p['collapsed'], true)
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf: harness.tern.frames.at(-1)!.sf, id: thinkingId, collapsed: false, raw: {} })
+    await awaitWireFact(() => mountedNodes(harness).some(node => node.id === `${thinkingId}.body`),
+      'the exact live Thinking body opens before the next chunk')
+    const firstBody = mountedNodes(harness).find(node => node.id === `${thinkingId}.body`)
+    assert.equal(firstBody?.p['text'], 'checking the first row\n')
+    assert.equal(firstBody?.p['stream'], true)
+
+    harness.surface.applyAssistantInput({
+      kind: 'chunk', sessionId: SESSION_ID, attemptId: 'live-thinking-owner', turn: 1, step: 0,
+      time: T0 + 4, chunk: { type: 'reasoning-delta', index: 0, text: 'latest reasoning line' },
+    } as never)
+    harness.surface.paintNow()
+    await awaitWireFact(() => mountedNodes(harness).some(node => node.id === `${thinkingId}.body`
+      && String(node.p['text']).includes('latest reasoning line')),
+    'the same open live body advances to the later reasoning delta')
+    const secondBody = mountedNodes(harness).find(node => node.id === `${thinkingId}.body`)
+    assert.equal(mountedSections(harness).find(node => node.id === thinkingId)?.p['collapsed'], false)
+    assert.equal(secondBody?.p['text'], 'checking the first row\nlatest reasoning line')
+    assert.equal(secondBody?.p['stream'], true)
+
+    const rootTitle = (): string => String(mountedNodes(harness).find(node => node.id === `${root.id}.head.title`)?.p['text'] ?? '')
+    const statusFrame = harness.tern.frames.length
+    harness.surface.commitStatus({
+      activity: { phase: 'waiting-question', busy: true, queuedCount: 0, taskCount: 0, childAgentCount: 0, todoCount: 0 },
+    } as never, {}, undefined)
+    await awaitWireFact(() => harness.tern.frames.length > statusFrame
+      && rootTitle().includes('Waiting for input')
+      && mountedSections(harness).some(node => node.id === thinkingId && node.p['collapsed'] === false),
+    'a formal status commit changes the Focus phase without replacing the opened Thinking owner')
+    assert.equal(mountedNodes(harness).find(node => node.id === `${thinkingId}.body`)?.p['text'],
+      'checking the first row\nlatest reasoning line')
+    const resumedFrame = harness.tern.frames.length
+    harness.surface.commitStatus({
+      activity: { phase: 'working', busy: true, queuedCount: 0, taskCount: 0, childAgentCount: 0, todoCount: 0 },
+    } as never, {}, undefined)
+    await awaitWireFact(() => harness.tern.frames.length > resumedFrame
+      && rootTitle().includes('Working')
+      && mountedSections(harness).some(node => node.id === thinkingId && node.p['collapsed'] === false),
+    'the resumed working status keeps the exact expanded Thinking row')
   } finally {
     await harness.dispose()
     await harness.session.close()
