@@ -349,17 +349,20 @@ test('watch supplies its initial snapshot and releases only its own stream once'
   assert.equal(harness.streams[0]?.disposeCalls, 1, 'port disposal does not release the same watch twice')
 })
 
-test('the same generated logical watch accepts the Host baseline after a Connection reconnect', async t => {
+test('a carrier failure on the current generation waits for and consumes the replacement Host baseline', async t => {
   const harness = makePort()
   t.after(() => harness.port.dispose())
   const controller = new AbortController()
   const iterator = harness.port.account.watch(controller.signal)[Symbol.asyncIterator]()
   assert.deepEqual((await iterator.next()).value, ACCOUNT_VIEW)
   const generationOne = harness.streams[0]!
-  harness.setGeneration(undefined)
+  const listenersBeforeFailure = harness.activeGenerationListeners
   const oldStreamNext = iterator.next()
+  await new Promise<void>(resolve => setImmediate(resolve))
   generationOne.carrierFailed()
   await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(harness.activeGenerationListeners, listenersBeforeFailure + 1,
+    'carrier failure on the still-current generation subscribes for its replacement')
   harness.setGeneration(undefined)
   harness.setGeneration({ id: 'generation-2' })
   const reopened = {
@@ -369,7 +372,7 @@ test('the same generated logical watch accepts the Host baseline after a Connect
   }
   harness.state.view = reopened
   assert.deepEqual((await oldStreamNext).value, reopened,
-    'the same page watch consumes the new Host initial snapshot after a carrier failure that preceded Connection replacement')
+    'the same page watch consumes the new Host initial snapshot')
   assert.equal(harness.streams.length, 2, 'one new generated handle opens after Connection replacement')
   assert.equal(harness.streams[0]?.disposeCalls, 1, 'the previous generation handle is retired exactly once')
   controller.abort()

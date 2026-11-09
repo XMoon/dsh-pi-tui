@@ -494,6 +494,9 @@ export function assertSelectedVerdict(caseId, result) {
       && result?.browser === 'PASS'
       && result?.verifiedCallback === true
       && result?.pkce === true
+      && result?.initialSignedOutWatch === true
+      && result?.accountRouteChangedFromStub === true
+      && result?.hostTaskKnownFalseObserved === true
       && result?.wrongCodeWithValidPkce === true
       && result?.missingHostBinding === true,
     `selected ${caseId}: the Host/Client Browser callback verdict ended as ${String(result?.browser ?? 'missing')}/${String(result?.status ?? 'missing')}`)

@@ -2275,7 +2275,7 @@ class RemoteAccountConfig implements AccountConfig {
             yield accountViewOf(value)
           }
         } catch (error) {
-          if (signal.aborted || owner.disposed) return
+          if (watchSignal.aborted || owner.disposed) return
           if (!Object.is(generation, owner.generation.getSnapshot())) {
             reconnect = true
           } else if (isRemoteStreamCarrierFailure(error)) {
@@ -2288,7 +2288,7 @@ class RemoteAccountConfig implements AccountConfig {
         } finally {
           owner.releaseStream(handle)
         }
-        if (signal.aborted || owner.disposed) return
+        if (watchSignal.aborted || owner.disposed) return
         const current = owner.generation.getSnapshot()
         if (current === undefined || !Object.is(generation, current)) {
           reconnect = true

@@ -219,18 +219,28 @@ test('REAL PlatformAccount + official WebServer callback: state, PKCE, grant, pr
     assert.equal(keptKey.configured, true, 'an independent API key survives the account sign-out')
 
     // Cancellation is bound to the exact attempt id: a stale id cancels nothing.
-    const second = await adapter.startSignIn(metadata)
+    const firstAttempt = await adapter.startSignIn(metadata)
+    const firstWaiting = await waitFor(async () => {
+      const view = await adapter.getState()
+      return view.attempt?.phase === 'waiting-browser' ? view : undefined
+    })
+    const firstAttemptId = firstWaiting.attempt!.id
+    const firstCancelled = await adapter.cancelSignIn(firstAttemptId)
+    assert.equal(firstCancelled.attempt?.phase, 'cancelled')
+
+    const secondAttempt = await adapter.startSignIn(metadata)
     const secondWaiting = await waitFor(async () => {
       const view = await adapter.getState()
       return view.attempt?.phase === 'waiting-browser' ? view : undefined
     })
-    const attemptId = secondWaiting.attempt!.id
-    const stale = await adapter.cancelSignIn('not-the-current-attempt')
-    assert.equal(stale.attempt?.id, attemptId)
+    const secondAttemptId = secondWaiting.attempt!.id
+    const stale = await adapter.cancelSignIn(firstAttemptId)
+    assert.equal(stale.attempt?.id, secondAttemptId)
     assert.equal(stale.attempt?.phase, 'waiting-browser')
-    const cancelled = await adapter.cancelSignIn(attemptId)
+    const cancelled = await adapter.cancelSignIn(secondAttemptId)
     assert.equal(cancelled.attempt?.phase, 'cancelled')
-    assert.notEqual(second.attempt?.id, undefined)
+    assert.notEqual(firstAttempt.attempt?.id, undefined)
+    assert.notEqual(secondAttempt.attempt?.id, undefined)
 
     // The webserver listener remains alive after sign-out and page closure.
     const after = await fetch(`${callbackOrigin}/oauth/callback?code=x&state=y`)

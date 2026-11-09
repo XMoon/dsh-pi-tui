@@ -95,6 +95,12 @@ async function selectAccountAction(client, actionLabel, label) {
 async function selectDeepseekAccountModel(client, label) {
   await submitOnRealEditor(client, '/model', `${label} opens official model picker`)
   await client.waitForScreen('Models', `${label} model picker opened`, 30_000)
+  let initialFrame = ''
+  await waitForCondition(async () => {
+    initialFrame = await sanitizedFrame(client)
+    const currentRow = initialFrame.split('\n').find(line => line.includes('[current]'))
+    return currentRow !== undefined && /\bstub\b/iu.test(currentRow)
+  }, `${label} live Session model picker resolved its isolated stub current route`, 30_000)
   client.send('deepseek-account')
   await waitForCondition(async () => (await sanitizedFrame(client)).includes('DeepSeek Flash'),
     `${label} filtered deepseek-account catalog row`, 30_000)
@@ -112,6 +118,37 @@ async function selectDeepseekAccountModel(client, label) {
     )
   }
   client.send('\r')
+}
+
+async function completeAuthorizationInChromium(authorizeUrl, playwrightRoot) {
+  const playwrightBrowsers = process.env.SPLIT_PROCESS_PLAYWRIGHT_BROWSERS ?? join(playwrightRoot, 'browsers')
+  const chromiumLibs = process.env.SPLIT_PROCESS_CHROMIUM_LIBS ?? join(playwrightRoot, 'libs', 'usr', 'lib', 'x86_64-linux-gnu')
+  const previousBrowserPath = process.env.PLAYWRIGHT_BROWSERS_PATH
+  const previousLdLibraryPath = process.env.LD_LIBRARY_PATH
+  process.env.PLAYWRIGHT_BROWSERS_PATH = playwrightBrowsers
+  process.env.LD_LIBRARY_PATH = `${chromiumLibs}${previousLdLibraryPath === undefined ? '' : `:${previousLdLibraryPath}`}`
+  let browser
+  let browserFailure
+  try {
+    const { chromium } = createRequire(join(playwrightRoot, 'package.json'))('playwright')
+    browser = await chromium.launch({ headless: true })
+    const page = await browser.newPage()
+    const finalResponse = await page.goto(authorizeUrl, { waitUntil: 'load', timeout: 60_000 })
+    assert(finalResponse?.status() === 200, 'the real Browser did not complete the Host callback redirect chain')
+    assert(new URL(page.url()).pathname === '/dsh/authorized',
+      'the real Browser did not reach the official Platform completion page')
+  } catch (error) {
+    browserFailure = error
+  } finally {
+    if (browser !== undefined) await browser.close()
+    if (previousBrowserPath === undefined) delete process.env.PLAYWRIGHT_BROWSERS_PATH
+    else process.env.PLAYWRIGHT_BROWSERS_PATH = previousBrowserPath
+    if (previousLdLibraryPath === undefined) delete process.env.LD_LIBRARY_PATH
+    else process.env.LD_LIBRARY_PATH = previousLdLibraryPath
+  }
+  if (browserFailure !== undefined) {
+    throw new SplitSmokeAssertionError(`the real Account authorization Browser failed: ${String(browserFailure?.name ?? 'Error')}`)
+  }
 }
 
 function escapeRegex(value) {
@@ -137,7 +174,6 @@ export async function runF2AccountComposition(context) {
   const requests = []
   const mockFailures = []
   let mockServer
-  let browser
   let host
   const clients = []
   const credentialsPath = join(dshHome, '.credentials.yaml')
@@ -307,14 +343,7 @@ export async function runF2AccountComposition(context) {
       'version: 1',
       'refs:',
       `  DEEPSEEK_API_KEY: ${apiKeySentinel}`,
-      'records:',
-      '  deepseek-account-platform/default:',
-      '    kind: grant',
-      '    payload:',
-      '      version: 1',
-      '      token: m6-f2-mock-grant-token',
-      `      issuer: ${platformOrigin}`,
-      '',
+      'records: {}',
       '',
     ].join('\n')
     writeFileSync(credentialsPath, credentialsText, { mode: 0o600 })
@@ -338,10 +367,6 @@ export async function runF2AccountComposition(context) {
       '  config:',
       `    baseURL: '${platformOrigin}/anthropic'`,
       '    modelsTimeoutMs: 3000',
-      '- id: agent-default-model',
-      '  config:',
-      '    provider: deepseek-account',
-      '    model: deepseek-flash',
       '',
     ].join('\n')
     writeFileSync(accountPatchPath, hostPatch, { mode: 0o600 })
@@ -371,13 +396,14 @@ export async function runF2AccountComposition(context) {
         `${label} first Host Session opened`, 120_000)
       return client
     }
-    const openAccountPage = async (client, label) => {
+    const openAccountPage = async (client, label, expectedStatus) => {
       await submitOnRealEditor(client, '/login deepseek-account', `${label} opens Account page`)
       await client.waitForScreen('DeepSeek Account', `${label} Account page opened`, 60_000)
-      await waitForCondition(async () => {
-        const frame = await sanitizedFrame(client)
-        return /Signed out \/ no stored credential|Signed in \(stored credential\)|unavailable|watch stopped|\bError\b/iu.test(frame)
-      }, `${label} Account initial Host state or explicit failure`, 60_000)
+      const expectedLine = expectedStatus === 'signed-out'
+        ? 'Signed out / no stored credential'
+        : 'Signed in (stored credential)'
+      await waitForAccountFrame(client, expectedLine,
+        `${label} Account initial Host watch snapshot`, trace, 60_000)
       const initialFrame = await sanitizedFrame(client)
       const initialFacts = {
         signedOut: initialFrame.includes('Signed out / no stored credential'),
@@ -385,24 +411,114 @@ export async function runF2AccountComposition(context) {
         unavailable: /unavailable|watch stopped/iu.test(initialFrame),
       }
       trace('account.initial-watch-state', { client: label, ...initialFacts })
-      assert(initialFacts.credentialStored,
-        `${label} Account initial watch did not paint the official Host mock grant state: ${JSON.stringify(initialFacts)}`)
-      await waitForAccountFrame(client, 'M6 Account', `${label} initial Account profile query`, trace)
-      await client.waitForScreen('Sign out…', `${label} Sign-out action painted`, 30_000)
+      assert(expectedStatus === 'signed-out' ? initialFacts.signedOut : initialFacts.credentialStored,
+        `${label} Account initial watch disagreed with the Host state expectation: ${JSON.stringify(initialFacts)}`)
+      if (expectedStatus === 'signed-out') {
+        await client.waitForScreen('Sign in', `${label} Sign-in action painted`, 30_000)
+      } else {
+        await waitForAccountFrame(client, 'M6 Account', `${label} initial Account profile query`, trace)
+        await client.waitForScreen('Sign out…', `${label} Sign-out action painted`, 30_000)
+      }
+    }
+
+    const closeAccountPage = async (client, label) => {
+      let frame = await sanitizedFrame(client)
+      if (frame.includes('DeepSeek Account')) {
+        client.send('\x1b')
+        await waitForAccountFrame(client, '[Categories (9)]', `${label} Account page yielded to Settings`, trace, 20_000)
+      }
+      frame = await sanitizedFrame(client)
+      if (frame.includes('[Categories (9)]')) client.send('\x1b')
+      await waitForCondition(async () => {
+        const current = await sanitizedFrame(client)
+        return !current.includes('[Categories (9)]') && !current.includes('DeepSeek Account')
+      }, `${label} Settings and Account surfaces closed`, 20_000)
+      await waitForSurfaceStatus(client,
+        record => record.sessionOpen === true && typeof record.openSessionId === 'string',
+        `${label} returned to its Host Session`, 20_000)
     }
 
     const clientA = await launchClient('F2 A')
     const clientB = await launchClient('F2 B')
+    await openAccountPage(clientA, 'F2 A', 'signed-out')
+    await openAccountPage(clientB, 'F2 B', 'signed-out')
+    await selectAccountAction(clientB, 'Sign in', 'F2 select first browser Sign-in')
+    clientB.send('\r')
+    await waitForAccountFrame(clientB, 'waiting-browser', 'F2 official Account attempt reached the browser phase', trace, 30_000)
+    await waitForAccountFrame(clientA, 'waiting-browser', 'F2 first Client observes the shared Host attempt', trace, 30_000)
+    await closeAccountPage(clientA, 'F2 A')
+    await waitForAccountFrame(clientB, 'waiting-browser',
+      'F2 closing Client A Account page left the Host browser attempt alive', trace, 20_000)
+    const authorizeFrame = (await sanitizedFrame(clientB)).replace(/\s+/gu, '')
+    const authorizeUrl = new RegExp(`${escapeRegex(platformOrigin)}/dsh/authorize\\?state=[A-Za-z0-9_-]{43}`, 'u').exec(authorizeFrame)?.[0]
+    assert(authorizeUrl !== undefined, 'Client B did not paint the shared Host authorization URL')
+    assert(!authorizeFrame.includes('m6-f2-mock-grant-token'), 'the Account page exposed a grant token')
+
+    const callbackOrigin = hostReady.localHost?.origin
+    assert(typeof callbackOrigin === 'string' && /^http:\/\/127\.0\.0\.1:\d+$/u.test(callbackOrigin),
+      'the authenticated Host identity did not carry its canonical loopback listener')
+    const wrongState = await fetch(
+      `${callbackOrigin}/oauth/callback?code=m6-f2-wrong-code&state=m6-f2-wrong-state`,
+      { redirect: 'manual' },
+    )
+    assert(wrongState.status === 400, 'the real Host callback did not reject a mismatched state')
+    assert(!requests.includes('POST /auth-api/v0/dsh/auth_exchange'),
+      'a wrong callback state reached the Platform code exchange')
+
+    const initialBeforeReconnect = lastSurfaceStatus(clientB)
+    assert(initialBeforeReconnect?.transport === 'connected' && typeof initialBeforeReconnect.generationId === 'number',
+      'F2 Client B has no live Connection generation before the active-attempt watch reconnect check')
+    clientB.signalBusiness('SIGUSR1')
+    const initialReconnected = await waitForSurfaceStatus(clientB,
+      record => record.transport === 'connected'
+        && typeof record.generationId === 'number'
+        && record.generationId !== initialBeforeReconnect.generationId,
+      'F2 active-attempt Account Client reconnected on a new official generation', 120_000)
+    await waitForAccountFrame(clientB, 'waiting-browser',
+      'F2 current-generation carrier failure retained the Host attempt on the same logical watch', trace, 30_000)
+    assert(initialReconnected.generationId !== initialBeforeReconnect.generationId,
+      'the Account watch recovery did not cross an actual Connection generation')
+
+    const playwrightRoot = process.env.SPLIT_PROCESS_PLAYWRIGHT_ROOT
+    assert(playwrightRoot !== undefined && playwrightRoot !== '',
+      'F2-T04 requires the preinstalled real Chromium Browser callback witness')
+    await completeAuthorizationInChromium(authorizeUrl, playwrightRoot)
+
+    assert(auth.initializeValid, 'Platform auth_init did not receive state, S256 PKCE and the Host callback origin')
+    assert(auth.init?.redirectUri === `${callbackOrigin}/oauth/callback`,
+      'the official Controller did not send the exact authenticated Host listener callback URI')
+    assert(auth.browserStateValid, 'the mock Browser authorization page did not use the exact initialized state')
+    assert(auth.pkceValid && auth.redirectValid, 'Platform auth_exchange did not verify the exact PKCE verifier and callback URI')
+    assert(requests.includes('GET /auth-api/v0/users/current'), 'the Host did not query the independent official profile endpoint')
+    assert(requests.includes('GET /api/v0/users/get_user_summary'), 'the Host did not query the independent official balance endpoint')
+    await waitForAccountFrame(clientB, 'M6 Account', 'F2 live Client received detached Host profile', trace)
+    assert((await sanitizedFrame(clientB)).includes('12.50 CNY'),
+      'the Account page did not paint the independent Host wallet balance')
+    await selectAccountAction(clientB, 'Sign out…', 'F2 select known-false Sign out check')
+    clientB.send('\r')
+    await clientB.waitForScreen('Sign out confirmation', 'F2 pre-agent Account confirmation', 30_000)
+    await waitForAccountFrame(clientB, 'No running account task is using this account.',
+      'F2 signed-in Host task predicate returns known-false before the route switch', trace, 30_000)
+    clientB.send('\x1b')
+    await waitForAccountFrame(clientB, 'Sign out…', 'F2 pre-agent confirmation cancelled', trace, 20_000)
+
+    await submitOnRealEditor(clientA, '/login deepseek-account',
+      'F2 reopening the closed Account page through the Host Session')
+    await waitForAccountFrame(clientA, 'Signed in (stored credential)',
+      'F2 reopened Account page re-read the Host grant via its initial watch snapshot', trace)
+    await waitForAccountFrame(clientA, 'M6 Account', 'F2 reopened Account page read the detached profile', trace)
+    await closeAccountPage(clientA, 'F2 A')
     await selectDeepseekAccountModel(clientA, 'F2 A')
     await submitOnRealEditor(clientA, 'M6 account running-task authority proof',
       'F2 Account UI running-task agent prompt')
     await waitForCondition(() => auth.runningRequestEntered,
       'F2 official deepseek-account Messages request entered the Host model owner', 60_000)
     assert(auth.runningRequestModel === 'deepseek-flash',
-      `F2 Session did not route its live Agent through deepseek-account/deepseek-flash: ${String(auth.runningRequestModel)}`)
-    await openAccountPage(clientA, 'F2 A')
-    await openAccountPage(clientB, 'F2 B')
-    await selectAccountAction(clientB, 'Sign out…', 'F2 select Account Sign out')
+      `F2 Session did not transition from stub to deepseek-account/deepseek-flash: ${String(auth.runningRequestModel)}`)
+    await openAccountPage(clientA, 'F2 A', 'credential-stored')
+    await waitForAccountFrame(clientB, 'Signed in (stored credential)',
+      'F2 live peer Account page retained the Host grant', trace)
+    await selectAccountAction(clientB, 'Sign out…', 'F2 select Account Sign out after Account-backed task started')
     clientB.send('\r')
     await clientB.waitForScreen('Sign out confirmation', 'F2 Account sign-out confirmation', 30_000)
     await waitForAccountFrame(clientB, 'A running agent is using a deepseek-account model',
@@ -417,125 +533,36 @@ export async function runF2AccountComposition(context) {
     await waitForAccountFrame(clientA, 'Signed out / no stored credential',
       'F2 other Account page received the same Host sign-out', trace, 30_000)
 
-    await selectAccountAction(clientB, 'Sign in', 'F2 select first browser Sign-in')
+    await selectAccountAction(clientB, 'Sign in', 'F2 select post-cancellation explicit Sign-in')
     clientB.send('\r')
-    await waitForAccountFrame(clientB, 'waiting-browser', 'F2 official Account attempt reached the browser phase', trace, 30_000)
-    await waitForAccountFrame(clientA, 'waiting-browser', 'F2 first Client observes the shared Host attempt', trace, 30_000)
-    clientA.send('\x1b')
-    await waitForAccountFrame(clientA, '[Categories (9)]', 'F2 Account page yielded to Settings categories', trace, 20_000)
-    clientA.send('\x1b')
-    await waitForCondition(async () => !(await sanitizedFrame(clientA)).includes('DeepSeek Account'),
-      'F2 Client A closed its Account page and Settings lease', 20_000)
-    await clientB.waitForScreen('waiting-browser',
-      'F2 closing Client A Account page left the Host browser attempt alive', 20_000)
-    const authorizeFrame = (await sanitizedFrame(clientB)).replace(/\s+/gu, '')
-    const authorizeUrl = new RegExp(`${escapeRegex(platformOrigin)}/dsh/authorize\\?state=[A-Za-z0-9_-]{43}`, 'u').exec(authorizeFrame)?.[0]
-    assert(authorizeUrl !== undefined, 'the second real Client did not paint the shared Host authorization URL')
-    assert(!authorizeFrame.includes('m6-f2-mock-grant-token'), 'the Account page exposed a grant token')
-
-    const callbackOrigin = hostReady.localHost?.origin
-    assert(typeof callbackOrigin === 'string' && /^http:\/\/127\.0\.0\.1:\d+$/u.test(callbackOrigin),
-      'the authenticated Host identity did not carry its canonical loopback listener')
-    const wrongState = await fetch(
-      `${callbackOrigin}/oauth/callback?code=m6-f2-wrong-code&state=m6-f2-wrong-state`,
-      { redirect: 'manual' },
-    )
-    assert(wrongState.status === 400, 'the real Host callback did not reject a mismatched state')
-    assert(!requests.includes('POST /auth-api/v0/dsh/auth_exchange'),
-      'a wrong callback state reached the Platform code exchange')
-
-    const playwrightRoot = process.env.SPLIT_PROCESS_PLAYWRIGHT_ROOT
-    assert(playwrightRoot !== undefined && playwrightRoot !== '',
-      'F2-T04 requires the preinstalled real Chromium Browser callback witness')
-    const playwrightBrowsers = process.env.SPLIT_PROCESS_PLAYWRIGHT_BROWSERS ?? join(playwrightRoot, 'browsers')
-    const chromiumLibs = process.env.SPLIT_PROCESS_CHROMIUM_LIBS ?? join(playwrightRoot, 'libs', 'usr', 'lib', 'x86_64-linux-gnu')
-    const previousBrowserPath = process.env.PLAYWRIGHT_BROWSERS_PATH
-    const previousLdLibraryPath = process.env.LD_LIBRARY_PATH
-    process.env.PLAYWRIGHT_BROWSERS_PATH = playwrightBrowsers
-    process.env.LD_LIBRARY_PATH = `${chromiumLibs}${previousLdLibraryPath === undefined ? '' : `:${previousLdLibraryPath}`}`
-    let browserFailure
-    try {
-      const { chromium } = createRequire(join(playwrightRoot, 'package.json'))('playwright')
-      browser = await chromium.launch({ headless: true })
-      const page = await browser.newPage()
-      const finalResponse = await page.goto(authorizeUrl, { waitUntil: 'load', timeout: 60_000 })
-      assert(finalResponse?.status() === 200, 'the real Browser did not complete the Host callback redirect chain')
-      assert(new URL(page.url()).pathname === '/dsh/authorized',
-        'the real Browser did not reach the official Platform completion page')
-    } catch (error) {
-      browserFailure = error
-    } finally {
-      if (browser !== undefined) {
-        await browser.close()
-        browser = undefined
-      }
-      if (previousBrowserPath === undefined) delete process.env.PLAYWRIGHT_BROWSERS_PATH
-      else process.env.PLAYWRIGHT_BROWSERS_PATH = previousBrowserPath
-      if (previousLdLibraryPath === undefined) delete process.env.LD_LIBRARY_PATH
-      else process.env.LD_LIBRARY_PATH = previousLdLibraryPath
-    }
-    if (browserFailure !== undefined) {
-      throw new SplitSmokeAssertionError(`the real Account authorization Browser failed: ${String(browserFailure?.name ?? 'Error')}`)
-    }
-
-    assert(auth.initializeValid, 'Platform auth_init did not receive state, S256 PKCE and the Host callback origin')
-    assert(auth.init?.redirectUri === `${callbackOrigin}/oauth/callback`,
-      'the official Controller did not send the exact authenticated Host listener callback URI')
-    assert(auth.browserStateValid, 'the mock Browser authorization page did not use the exact initialized state')
-    assert(auth.pkceValid && auth.redirectValid, 'Platform auth_exchange did not verify the exact PKCE verifier and callback URI')
-    assert(requests.includes('GET /auth-api/v0/users/current'), 'the Host did not query the independent official profile endpoint')
-    assert(requests.includes('GET /api/v0/users/get_user_summary'), 'the Host did not query the independent official balance endpoint')
-    await waitForAccountFrame(clientB, 'Signed in (stored credential)', 'F2 Host callback grant reached the live Client page', trace)
-    await waitForAccountFrame(clientB, 'M6 Account', 'F2 live Client received detached Host profile', trace)
-    assert((await sanitizedFrame(clientB)).includes('12.50 CNY'),
-      'the Account page did not paint the independent Host wallet balance')
-
-    await submitOnRealEditor(clientA, '/login deepseek-account',
-      'F2 reopening the closed Account page through the Host Session')
-    await waitForAccountFrame(clientA, 'Signed in (stored credential)',
-      'F2 reopened Account page re-read the Host grant via its initial watch snapshot', trace)
-    await waitForAccountFrame(clientA, 'M6 Account', 'F2 reopened Account page read the detached profile', trace)
-
-    const beforeReconnect = lastSurfaceStatus(clientB)
-    assert(beforeReconnect?.transport === 'connected' && typeof beforeReconnect.generationId === 'number',
-      'F2 Client B has no live Connection generation before the Account watch reconnect check')
-    clientB.signalBusiness('SIGUSR1')
-    const reconnected = await waitForSurfaceStatus(clientB,
-      record => record.transport === 'connected'
-        && typeof record.generationId === 'number'
-        && record.generationId !== beforeReconnect.generationId,
-      'F2 Account Client reconnected on a new official generation', 120_000)
+    await waitForAccountFrame(clientB, 'waiting-browser',
+      'F2 post-cancellation explicit Sign-in reached the Host attempt', trace, 30_000)
+    const postCancelFrame = (await sanitizedFrame(clientB)).replace(/\s+/gu, '')
+    const postCancelAuthorizeUrl = new RegExp(`${escapeRegex(platformOrigin)}/dsh/authorize\\?state=[A-Za-z0-9_-]{43}`, 'u').exec(postCancelFrame)?.[0]
+    assert(postCancelAuthorizeUrl !== undefined,
+      'post-cancellation Sign-in did not paint the Host Browser authorization link')
+    await completeAuthorizationInChromium(postCancelAuthorizeUrl, playwrightRoot)
     await waitForAccountFrame(clientB, 'Signed in (stored credential)',
-      'F2 the same Account watch received the new Host initial baseline', trace, 30_000)
-    assert(reconnected.generationId !== beforeReconnect.generationId,
-      'the Account watch recovery did not cross an actual Connection generation')
-
-    // The first sign-out already cancelled the single real Account-backed Agent.
-    // After reconnect, a fresh Host check must therefore settle known-false before
-    // a second credential mutation opens the wrong-code/cancel qualification.
-    await selectAccountAction(clientB, 'Sign out…', 'F2 select Account Sign out after task cancellation')
+      'F2 post-cancellation Sign-in committed its Host credential', trace)
+    await selectAccountAction(clientB, 'Sign out…', 'F2 select known-false post-cancellation task check')
     clientB.send('\r')
-    await clientB.waitForScreen('Sign out confirmation', 'F2 post-cancellation Account confirmation', 30_000)
+    await clientB.waitForScreen('Sign out confirmation', 'F2 post-cancellation task confirmation', 30_000)
     await waitForAccountFrame(clientB, 'No running account task is using this account.',
-      'F2 cancelled Host task is no longer reported as running', trace, 30_000)
+      'F2 Host predicate returns known-false after the running Agent was cancelled', trace, 30_000)
     clientB.send('\r')
-    await clientB.waitForScreen('Signed out / no stored credential', 'F2 second Host sign-out state', 60_000)
-    await waitForCondition(() => auth.runningRequestClosed,
-      'F2 official signed-out listener cancelled the running account request', 30_000)
-    await waitForCondition(
-      () => requests.includes('POST /auth-api/v0/users/logout'),
-      'F2 asynchronous Platform revocation request',
-      30_000,
-    )
+    await waitForAccountFrame(clientB, 'Signed out / no stored credential',
+      'F2 known-false Account sign-out result', trace, 60_000)
+    await waitForCondition(() => requests.filter(path => path === 'POST /auth-api/v0/users/logout').length === 2,
+      'F2 independent post-cancellation Platform revocation request', 30_000)
 
     // A correct state and S256 verifier carrying the wrong Platform code must
-    // be rejected by the isolated endpoint; recovery requires a fresh explicit
-    // user Sign-in and is never initiated by reconnect/observation.
+    // be rejected by the isolated endpoint; recovery requires fresh explicit
+    // Sign-in and is never initiated by reconnect or observation.
     await selectAccountAction(clientB, 'Sign in', 'F2 select explicit fresh Sign in')
     clientB.send('\r')
-    await clientB.waitForScreen('waiting-browser', 'F2 second Host browser attempt', 30_000)
-    assert(auth.attempts.length === 2, 'the second explicit Sign-in did not reach official auth_init')
-    const wrongCodeAttempt = auth.attempts[1]
+    await clientB.waitForScreen('waiting-browser', 'F2 third explicit Host browser attempt', 30_000)
+    assert(auth.attempts.length === 3, 'the third explicit Sign-in did not reach official auth_init')
+    const wrongCodeAttempt = auth.attempts[2]
     const wrongCodeCallback = new URL(`${callbackOrigin}/oauth/callback`)
     wrongCodeCallback.searchParams.set('code', 'm6-f2-platform-rejected-code')
     wrongCodeCallback.searchParams.set('state', wrongCodeAttempt.state)
@@ -549,16 +576,16 @@ export async function runF2AccountComposition(context) {
     // Retry only after an explicit new Sign-in. Its returned attempt id is the
     // one the user cancels through the Account page.
     clientB.send('\r')
-    await clientB.waitForScreen('waiting-browser', 'F2 third explicit Host browser attempt', 30_000)
-    assert(auth.attempts.length === 3, 'the third explicit Sign-in did not reach official auth_init')
+    await clientB.waitForScreen('waiting-browser', 'F2 fourth explicit Host browser attempt', 30_000)
+    assert(auth.attempts.length === 4, 'the fourth explicit Sign-in did not reach official auth_init')
     await selectAccountAction(clientB, 'Cancel current attempt', 'F2 select exact-attempt cancel')
     clientB.send('\r')
     await waitForAccountFrame(clientB, 'cancelled', 'F2 exact Host attempt cancellation state', trace, 30_000)
     await waitForCondition(() => auth.cancelValid,
       'F2 official auth_cancel matched the active attempt id and PKCE verifier', 30_000)
     assert(mockFailures.length === 0, 'the isolated Platform mock rejected an owned request assertion')
-    assert(requests.filter(path => path === 'POST /auth-api/v0/dsh/auth_init').length === 3,
-      'the three explicit Sign-in actions must each dispatch exactly once; failed code is never replayed')
+    assert(requests.filter(path => path === 'POST /auth-api/v0/dsh/auth_init').length === 4,
+      'the four explicit Sign-in actions must each dispatch once; failed code is never replayed')
     assert(requests.filter(path => path === 'POST /auth-api/v0/dsh/auth_cancel').length === 1,
       'the exact active browser attempt is cancelled exactly once')
 
@@ -571,7 +598,7 @@ export async function runF2AccountComposition(context) {
       'the temporary mock Platform grant remains in the isolated credential file after sign-out')
 
     const captured = JSON.stringify([...host.records, ...clientA.records, ...clientB.records])
-    for (const secret of [auth.attempts[0]?.state, 'm6-f2-one-time-code', 'm6-f2-mock-grant-token']) {
+    for (const secret of [...auth.attempts.map(attempt => attempt.state), 'm6-f2-one-time-code', 'm6-f2-mock-grant-token']) {
       assert(secret === undefined || !captured.includes(secret),
         'the Host or Client diagnostic records retained an authorization state, code, or grant')
     }
@@ -607,8 +634,8 @@ export async function runF2AccountComposition(context) {
       independentClients: 2,
       initialWatchSnapshots: 2,
       accountConnectionReconnect: {
-        generationBefore: beforeReconnect.generationId,
-        generationAfter: reconnected.generationId,
+        generationBefore: initialBeforeReconnect.generationId,
+        generationAfter: initialReconnected.generationId,
         attemptRetained: true,
       },
       callbackStateNegative: 'rejected-before-exchange',
@@ -635,6 +662,9 @@ export async function runF2AccountComposition(context) {
       verifiedCallback: true,
       pkce: true,
       wrongCodeWithValidPkce: auth.wrongCodeRejected,
+      initialSignedOutWatch: true,
+      accountRouteChangedFromStub: auth.runningRequestModel === 'deepseek-flash',
+      hostTaskKnownFalseObserved: true,
       profile: 'ready',
       balance: 'ready',
       runningTaskWarning: true,
@@ -644,7 +674,6 @@ export async function runF2AccountComposition(context) {
       apiKeyPreserved: true,
     }
   } finally {
-    if (browser !== undefined) await browser.close()
     for (const client of clients) await client.dispose()
     if (host !== undefined) {
       try { await host.shutdown() } catch { /* the runner's process backstop owns leftovers */ }
