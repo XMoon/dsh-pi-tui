@@ -37,6 +37,7 @@ import {
   readOptionalJson,
   readText,
   redact,
+  redactedJson,
   resultText,
   requireExactVersion,
   resolveTarball,
@@ -325,17 +326,67 @@ export function writeOfficialPresetFailureEvidence(path, {
   inputEvents,
   records,
   pane,
+  scrollback,
   tuiLog,
+  commandEvidence = [],
+  commandStatus,
+  probeWriteFailed = false,
+  timeline = {},
+  diagnosticErrors = [],
 }) {
   if (path === undefined) return
   try {
     if (existsSync(path)) return
     const requests = modelRequestFacts(records)
+    const sessionId = header?.sessionId
+      ?? commandEvidence.find(record => record?.recordType === 'session-observed')?.sessionId
+      ?? null
+    const sessionEvents = commandEvidence
+      .filter(record => record?.recordType === 'event' && record.sessionId === sessionId)
+    const maxEvents = 32
+    const commandLifecycle = sessionEvents.slice(-maxEvents).map(record => ({
+      ...record,
+      ...(typeof record.text === 'string' ? { text: redact(record.text) } : {}),
+    }))
+    const tuiLogRedacted = redact(tuiLog)
+    const plainLog = stripTerminalControl(tuiLogRedacted)
+    const scrollbackText = typeof scrollback === 'string'
+      ? scrollback
+      : typeof scrollback?.text === 'string' ? scrollback.text : ''
+    const boundedTail = (text, maxChars) => ({
+      text: text.slice(-maxChars),
+      truncated: text.length > maxChars,
+      totalChars: text.length,
+    })
+    const rawLogTail = boundedTail(tuiLogRedacted, 12_000)
+    const plainLogTail = boundedTail(plainLog, 12_000)
+    const scrollbackTail = boundedTail(redact(scrollbackText), 12_000)
+    const paneRedacted = redact(pane)
+    const paneTailSource = tail(paneRedacted, 40)
+    const paneTail = paneTailSource.slice(-4_000)
+    const elapsed = (start, end) => Number.isSafeInteger(start) && Number.isSafeInteger(end)
+      ? end - start
+      : null
+    const timingMs = {
+      inputToEnter: elapsed(timeline.composerVisibleAt, timeline.enterSentAt),
+      enterToRun: elapsed(timeline.enterSendStartedAt, timeline.commandRunAt),
+      runToDone: elapsed(timeline.commandRunAt, timeline.commandDoneAt),
+      doneToResultValidation: elapsed(timeline.commandDoneAt, timeline.resultValidatedAt),
+      doneToPaint: elapsed(timeline.commandDoneAt, timeline.terminalObservedAt),
+      enterToPaint: elapsed(timeline.enterSendStartedAt, timeline.terminalObservedAt),
+    }
     const report = {
       presetId,
       stage,
       phase: error instanceof CompatFailure ? error.phase : 'UNEXPECTED_FAILURE',
       failureSummary: ({
+        PRESET_STATUS_NOT_DISPATCHED: 'The qualified session/event probe observed no /preset status command/run after Enter.',
+        PRESET_STATUS_NOT_SETTLED: 'The /preset status command/run has no matching command/done.',
+        PRESET_STATUS_COMMAND_ERROR: 'The matching /preset status command/done settled with kind error.',
+        PRESET_STATUS_RESULT_MISMATCH: 'The successful /preset status result did not report the expected preset.',
+        PRESET_STATUS_NOT_PAINTED: 'The successful /preset status result was not newly visible in the current terminal pane.',
+        PRESET_STATUS_PROBE_UNQUALIFIED: 'The command lifecycle probe or its Session/event evidence was not qualified.',
+        PRESET_STATUS_DUPLICATE: 'The current /preset status lifecycle contained duplicate or ambiguous command events.',
         INPUT_NOT_ADMITTED: 'The standard user input did not reach the Agent Inbox.',
         INBOX_NOT_CLAIMED: 'The inserted standard user message was not claimed by the Agent Loop.',
         MODEL_STREAM_NOT_REACHED: 'The claimed standard user message did not reach the mock model stream.',
@@ -347,21 +398,56 @@ export function writeOfficialPresetFailureEvidence(path, {
       mode,
       version,
       candidate: basename(candidate ?? '(unknown)'),
+      sessionId,
       header: {
         present: typeof header?.sessionId === 'string' && header.sessionId.length > 0,
+        sessionId: header?.sessionId ?? null,
         agentPreset: typeof header?.agentPreset === 'string' ? header.agentPreset : null,
       },
+      probeQualification: commandStatus?.qualification ?? {
+        probeInstalled: commandEvidence.some(record => record?.recordType === 'probe-installed' && record.installed === true),
+        sessionObserved: commandEvidence.some(record => record?.recordType === 'session-observed' && record.headerConfirmed === true),
+        observedSessionId: commandEvidence.find(record => record?.recordType === 'session-observed')?.sessionId ?? null,
+        expectedSessionId: sessionId,
+        probeWriteFailed,
+      },
+      commandStatus: commandStatus === undefined ? null : {
+        stage: commandStatus.stage ?? 'completed',
+        commandId: commandStatus.run?.commandId ?? null,
+        runSeq: commandStatus.run?.seq ?? null,
+        doneSeq: commandStatus.done?.seq ?? null,
+        doneKind: commandStatus.done?.kind ?? null,
+        resultText: typeof commandStatus.done?.text === 'string' ? redact(commandStatus.done.text) : null,
+        resultMatches: commandStatus.resultMatches === true,
+        painted: commandStatus.painted === true,
+      },
+      commandLifecycle,
+      commandLifecycleTruncated: sessionEvents.length > maxEvents,
       inputInserted: inputEvents.filter(event => event.event === 'inserted').length,
       inputClaimed: inputEvents.filter(event => event.event === 'claimed').length,
       requestCount: requests.requestCount,
       auxiliaryTitleRequestCount: requests.auxiliaryTitleRequestCount,
       unexpectedRequestCount: requests.unexpectedRequestCount,
       modelRequests: modelRequestSummary(requests.agentRequests),
-      paneTail: tail(redact(pane).replaceAll(DIRECT_STANDARD_PROMPT, '[PROMPT]'), 40).slice(-4_000),
-      tuiLogTail: tail(redact(tuiLog).replaceAll(DIRECT_STANDARD_PROMPT, '[PROMPT]'), 40).slice(-4_000),
+      timeline,
+      timingMs,
+      paneTail,
+      paneTailTruncated: paneRedacted.split(/\r?\n/u).length > 40 || paneTailSource.length > 4_000,
+      paneTailTotalChars: paneRedacted.length,
+      scrollbackTail: scrollbackTail.text,
+      scrollbackTruncated: scrollbackTail.truncated || scrollback?.truncated === true,
+      scrollbackTotalChars: scrollbackTail.totalChars,
+      scrollbackHistoryLines: scrollback?.totalHistoryLines ?? null,
+      tuiLogTail: rawLogTail.text,
+      tuiLogTailTruncated: rawLogTail.truncated,
+      tuiLogTailTotalChars: rawLogTail.totalChars,
+      tuiLogTailPlain: plainLogTail.text,
+      tuiLogTailPlainTruncated: plainLogTail.truncated,
+      tuiLogTailPlainTotalChars: plainLogTail.totalChars,
+      diagnosticErrors: diagnosticErrors.map(message => redact(message)),
     }
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
-    writeFileSync(path, `${JSON.stringify(report, null, 2)}\n`, { encoding: 'utf8', flag: 'wx', mode: 0o600 })
+    writeFileSync(path, redactedJson(report), { encoding: 'utf8', flag: 'wx', mode: 0o600 })
   } catch {
     console.error('OFFICIAL_PRESETS_DIAGNOSTIC_WRITE_FAILURE')
   }
@@ -394,6 +480,96 @@ export function officialPresetStatusVisible(presetId, pane) {
   return pane.includes(`preset: ${presetId} ·`)
 }
 
+export function officialPresetStatusResultMatches(presetId, text) {
+  return typeof text === 'string'
+    && text.startsWith(`preset: ${presetId} · default: `)
+}
+
+function occurrenceCount(text, value) {
+  return text.split(value).length - 1
+}
+
+export function officialPresetStatusPainted(presetId, previousPane, pane) {
+  const previous = stripTerminalControl(previousPane)
+  const current = stripTerminalControl(pane)
+  const result = `preset: ${presetId} · default: `
+  const commandVisible = current.split(/\r?\n/u).some(line => /\/preset\s+status(?:\s|$)/u.test(line))
+  return commandVisible
+    && current.includes(result)
+    && occurrenceCount(current, result) > occurrenceCount(previous, result)
+}
+
+const TERMINAL_PRESET_STATUS_STAGES = new Set([
+  'PRESET_STATUS_PROBE_UNQUALIFIED',
+  'PRESET_STATUS_COMMAND_ERROR',
+  'PRESET_STATUS_RESULT_MISMATCH',
+  'PRESET_STATUS_DUPLICATE',
+])
+
+export function classifyOfficialPresetStatus(sessionId, presetId, evidence, enteredAt, painted, probeWriteFailed = false, baselineSeq = -1) {
+  const probeInstalled = evidence.some(record => record?.recordType === 'probe-installed'
+    && record.installed === true
+    && record.event === 'session/event'
+    && record.global === true)
+  const sessionObserved = evidence.some(record => record?.recordType === 'session-observed'
+    && record.headerConfirmed === true
+    && record.sessionId === sessionId)
+  const qualification = {
+    probeInstalled,
+    sessionObserved,
+    observedSessionId: evidence.find(record => record?.recordType === 'session-observed')?.sessionId ?? null,
+    expectedSessionId: sessionId,
+    probeWriteFailed,
+  }
+  if (!probeInstalled || !sessionObserved || probeWriteFailed || typeof sessionId !== 'string' || sessionId.length === 0) {
+    return { stage: 'PRESET_STATUS_PROBE_UNQUALIFIED', qualification }
+  }
+
+  const events = evidence.filter(record => record?.recordType === 'event' && record.sessionId === sessionId)
+  const malformed = events.some(record => !Number.isSafeInteger(record.seq)
+    || typeof record.commandId !== 'string'
+    || record.commandId.length === 0
+    || !Number.isSafeInteger(record.observedAt)
+    || (record.type === 'command/run' && typeof record.name !== 'string')
+    || (record.type === 'command/done' && !['success', 'error'].includes(record.kind))
+    || !['command/run', 'command/done'].includes(record.type))
+  if (malformed) return { stage: 'PRESET_STATUS_PROBE_UNQUALIFIED', qualification }
+
+  const enteredEvents = events.filter(record => record.observedAt >= enteredAt && record.seq > baselineSeq)
+  const runs = enteredEvents.filter(record => record.type === 'command/run' && record.name === 'preset')
+  if (runs.some(record => typeof record.args !== 'string')) {
+    return { stage: 'PRESET_STATUS_PROBE_UNQUALIFIED', qualification, runs }
+  }
+  const targetRuns = runs.filter(record => record.args === ' status')
+  if (enteredEvents.some(record => record.type === 'command/done' && record.pairedRun !== true)) {
+    return { stage: 'PRESET_STATUS_PROBE_UNQUALIFIED', qualification, runs }
+  }
+  if (runs.length > 1 || targetRuns.length > 1) {
+    return { stage: 'PRESET_STATUS_DUPLICATE', qualification, runs }
+  }
+  const run = targetRuns[0]
+  if (run === undefined) {
+    return { stage: 'PRESET_STATUS_NOT_DISPATCHED', qualification, runs }
+  }
+  if (enteredEvents.filter(record => record.type === 'command/run' && record.commandId === run.commandId).length !== 1) {
+    return { stage: 'PRESET_STATUS_DUPLICATE', qualification, run }
+  }
+
+  const completions = events.filter(record => record.type === 'command/done' && record.commandId === run.commandId)
+  if (completions.length > 1) return { stage: 'PRESET_STATUS_DUPLICATE', qualification, run, completions }
+  const done = completions[0]
+  if (done === undefined) return { stage: 'PRESET_STATUS_NOT_SETTLED', qualification, run }
+  if (done.pairedRun !== true || done.seq <= run.seq || done.observedAt < run.observedAt) {
+    return { stage: 'PRESET_STATUS_PROBE_UNQUALIFIED', qualification, run, done }
+  }
+  if (done.kind !== 'success') return { stage: 'PRESET_STATUS_COMMAND_ERROR', qualification, run, done }
+  if (!officialPresetStatusResultMatches(presetId, done.text)) {
+    return { stage: 'PRESET_STATUS_RESULT_MISMATCH', qualification, run, done }
+  }
+  if (!painted) return { stage: 'PRESET_STATUS_NOT_PAINTED', qualification, run, done, resultMatches: true }
+  return { stage: undefined, qualification, run, done, resultMatches: true, painted: true }
+}
+
 /**
  * Exercise every DSH-shipped preset in two stages. Stage 1 boots the requested
  * `--preset` sessionless surface. Stage 2 creates a real session without a
@@ -419,17 +595,34 @@ export async function smokeOfficialPresetMounts(
     let header
     let inputEvents = []
     let records = []
+    let commandEvidence = []
+    let commandStatus
+    let presetStatusTimeline = {}
+    let presetStatusPaneBefore = ''
+    let probeWriteFailed = false
+    let diagnosticErrors = []
     writeLauncher(launcher, invocation, env, presetId)
-    const sendComposerLine = async (text, label) => {
+    const sendComposerLine = async (text, label, timing) => {
+      if (timing !== undefined) timing.startedAt = Date.now()
       failureStage = `${label}-composer-visible`
       tmux.sendLiteral(text)
-      await waitUntil(`official preset ${presetId} ${label} composer line`, TIMEOUTS.command, () =>
-        tmux.hasSession() && composerContainsExactInput(tmux.capturePane(), text), 'COMPAT_INPUT_FAILURE')
+      await waitUntil(`official preset ${presetId} ${label} composer line`, TIMEOUTS.command, () => {
+        if (!tmux.hasSession()) return false
+        const visible = composerContainsExactInput(tmux.capturePane(), text)
+        if (visible && timing !== undefined) timing.composerVisibleAt = Date.now()
+        return visible
+      }, 'COMPAT_INPUT_FAILURE')
       failureStage = `${label}-enter`
+      if (timing !== undefined) timing.enterSendStartedAt = Date.now()
       tmux.sendKey('Enter')
+      if (timing !== undefined) timing.enterSentAt = Date.now()
     }
     try {
       rmSync(env.DSH_SMOKE_HEADER_EVIDENCE, { force: true })
+      if (typeof env.DSH_SMOKE_COMMAND_EVIDENCE === 'string') {
+        rmSync(env.DSH_SMOKE_COMMAND_EVIDENCE, { force: true })
+        writeFileSync(env.DSH_SMOKE_COMMAND_EVIDENCE, '', { encoding: 'utf8', mode: 0o600 })
+      }
       const started = tmux.tmux([
         'new-session', '-d', '-s', session, '-x', '80', '-y', '24',
         `script -qefc ${shellQuote(launcher)} ${shellQuote(tuiLog)}`,
@@ -467,14 +660,107 @@ export async function smokeOfficialPresetMounts(
       header = readOptionalJson(env.DSH_SMOKE_HEADER_EVIDENCE)
       assertOfficialPresetHeader(presetId, env.DSH_SMOKE_HEADER_EVIDENCE)
 
-      failureStage = 'preset-status'
-      await sendComposerLine(officialPresetStatusCommand(), 'preset-status')
-      await waitUntil(`official preset ${presetId} projection`, TIMEOUTS.command, () => {
-        if (!tmux.hasSession()) return false
-        return officialPresetStatusVisible(presetId, tmux.capturePane())
-      }, 'COMPAT_BOOT_FAILURE')
+      failureStage = 'preset-status-input'
+      presetStatusTimeline = {}
+      try {
+        commandEvidence = readJsonLines(env.DSH_SMOKE_COMMAND_EVIDENCE)
+      } catch (readError) {
+        probeWriteFailed = true
+        diagnosticErrors.push(`command evidence baseline could not be read: ${readError instanceof Error ? readError.message : String(readError)}`)
+      }
+      const priorSessionEvents = commandEvidence.filter(record => record?.recordType === 'event'
+        && record.sessionId === header.sessionId
+        && Number.isSafeInteger(record.seq))
+      presetStatusTimeline.previousCommandSeq = priorSessionEvents.reduce((max, record) => Math.max(max, record.seq), -1)
+      presetStatusPaneBefore = tmux.capturePane()
+      await sendComposerLine(officialPresetStatusCommand(), 'preset-status', presetStatusTimeline)
+      failureStage = 'preset-status-lifecycle'
+      const updateStatusTimeline = (diagnostic, painted) => {
+        if (diagnostic.run !== undefined) presetStatusTimeline.commandRunAt ??= diagnostic.run.observedAt
+        if (diagnostic.done !== undefined) presetStatusTimeline.commandDoneAt ??= diagnostic.done.observedAt
+        if (diagnostic.resultMatches === true) presetStatusTimeline.resultValidatedAt ??= Date.now()
+        if (painted) presetStatusTimeline.terminalObservedAt ??= Date.now()
+      }
+      try {
+        await waitUntil(`official preset ${presetId} command lifecycle and terminal result`, TIMEOUTS.command, () => {
+          if (!tmux.hasSession()) return false
+          try {
+            commandEvidence = readJsonLines(env.DSH_SMOKE_COMMAND_EVIDENCE)
+          } catch {
+            return false
+          }
+          const pane = tmux.capturePane()
+          const painted = officialPresetStatusPainted(presetId, presetStatusPaneBefore, pane)
+          commandStatus = classifyOfficialPresetStatus(
+            header.sessionId,
+            presetId,
+            commandEvidence,
+            presetStatusTimeline.enterSendStartedAt,
+            painted,
+            probeWriteFailed,
+            presetStatusTimeline.previousCommandSeq,
+          )
+          updateStatusTimeline(commandStatus, painted)
+          if (TERMINAL_PRESET_STATUS_STAGES.has(commandStatus.stage)) {
+            fail(commandStatus.stage, `official preset ${presetId} command lifecycle: ${redact(JSON.stringify(commandStatus))}`)
+          }
+          return commandStatus.stage === undefined
+        }, 'COMPAT_BOOT_FAILURE')
+      } catch (error) {
+        if (!(error instanceof CompatFailure)) throw error
+        try {
+          commandEvidence = readJsonLines(env.DSH_SMOKE_COMMAND_EVIDENCE)
+        } catch (readError) {
+          diagnosticErrors.push(`command evidence could not be read: ${readError instanceof Error ? readError.message : String(readError)}`)
+        }
+        let pane = ''
+        try {
+          pane = tmux.capturePane()
+        } catch (captureError) {
+          diagnosticErrors.push(`tmux pane could not be captured: ${captureError instanceof Error ? captureError.message : String(captureError)}`)
+        }
+        probeWriteFailed = readText(tuiLog).includes('OFFICIAL_PRESET_COMMAND_PROBE_WRITE_FAILURE')
+        commandStatus = classifyOfficialPresetStatus(
+          header.sessionId,
+          presetId,
+          commandEvidence,
+          presetStatusTimeline.enterSendStartedAt,
+          officialPresetStatusPainted(presetId, presetStatusPaneBefore, pane),
+          probeWriteFailed || diagnosticErrors.length > 0,
+          presetStatusTimeline.previousCommandSeq,
+        )
+        updateStatusTimeline(commandStatus, commandStatus.painted === true)
+        failureStage = commandStatus.stage ?? 'PRESET_STATUS_PROBE_UNQUALIFIED'
+        fail(failureStage, `${error.message}; lifecycle=${redact(JSON.stringify(commandStatus))}`)
+      }
       assertNoPresetCompatibilityFailures(tuiLog, tmux)
       assertOfficialPresetMounted(presetId, tuiLog, tmux)
+      console.log(`OFFICIAL_PRESET_COMMAND_EVIDENCE ${JSON.stringify({
+        presetId,
+        sessionId: header.sessionId,
+        commandId: commandStatus.run.commandId,
+        run: {
+          seq: commandStatus.run.seq,
+          type: commandStatus.run.type,
+          name: commandStatus.run.name,
+          args: commandStatus.run.args,
+        },
+        done: {
+          seq: commandStatus.done.seq,
+          type: commandStatus.done.type,
+          kind: commandStatus.done.kind,
+          text: redact(commandStatus.done.text),
+        },
+        probeQualification: commandStatus.qualification,
+        painted: commandStatus.painted === true,
+        timeline: presetStatusTimeline,
+        timingMs: {
+          inputToEnter: presetStatusTimeline.enterSentAt - presetStatusTimeline.composerVisibleAt,
+          enterToRun: commandStatus.run.observedAt - presetStatusTimeline.enterSendStartedAt,
+          runToDone: commandStatus.done.observedAt - commandStatus.run.observedAt,
+          doneToResultAndPaint: presetStatusTimeline.terminalObservedAt - commandStatus.done.observedAt,
+        },
+      })}`)
 
       if (presetId === 'standard' && promptEvidencePath !== undefined && env.DSH_SMOKE_INPUT_EVIDENCE !== undefined) {
         const directPrompt = DIRECT_STANDARD_PROMPT
@@ -559,27 +845,47 @@ export async function smokeOfficialPresetMounts(
       failureStage = 'shutdown'
       await waitUntil(`official preset ${presetId} shutdown`, TIMEOUTS.dispose, () => !tmux.hasSession(), 'COMPAT_DISPOSE_FAILURE')
     } catch (error) {
+      const latestHeader = header ?? readOptionalJson(env.DSH_SMOKE_HEADER_EVIDENCE)
+      let pane = ''
       try {
-        const latestHeader = header ?? readOptionalJson(env.DSH_SMOKE_HEADER_EVIDENCE)
-        const pane = tmux.capturePane()
-        const log = readText(tuiLog)
-        writeOfficialPresetFailureEvidence(env.OFFICIAL_PRESETS_FAILURE_EVIDENCE, {
-          presetId,
-          stage: failureStage,
-          error,
-          surfaceAlive: tmux.hasSession(),
-          version,
-          mode,
-          candidate,
-          header: latestHeader,
-          inputEvents,
-          records,
-          pane,
-          tuiLog: log,
-        })
-      } catch {
-        console.error('OFFICIAL_PRESETS_DIAGNOSTIC_CAPTURE_FAILURE')
+        pane = tmux.capturePane()
+      } catch (captureError) {
+        diagnosticErrors.push(`tmux pane could not be captured: ${captureError instanceof Error ? captureError.message : String(captureError)}`)
       }
+      let scrollback
+      try {
+        scrollback = tmux.captureScrollback(200)
+      } catch (captureError) {
+        diagnosticErrors.push(`tmux scrollback could not be captured: ${captureError instanceof Error ? captureError.message : String(captureError)}`)
+      }
+      let surfaceAlive = false
+      try {
+        surfaceAlive = tmux.hasSession()
+      } catch (captureError) {
+        diagnosticErrors.push(`tmux session status could not be read: ${captureError instanceof Error ? captureError.message : String(captureError)}`)
+      }
+      const log = readText(tuiLog)
+      probeWriteFailed ||= log.includes('OFFICIAL_PRESET_COMMAND_PROBE_WRITE_FAILURE')
+      writeOfficialPresetFailureEvidence(env.OFFICIAL_PRESETS_FAILURE_EVIDENCE, {
+        presetId,
+        stage: failureStage,
+        error,
+        surfaceAlive,
+        version,
+        mode,
+        candidate,
+        header: latestHeader,
+        inputEvents,
+        records,
+        pane,
+        scrollback,
+        tuiLog: log,
+        commandEvidence,
+        commandStatus,
+        probeWriteFailed,
+        timeline: presetStatusTimeline,
+        diagnosticErrors,
+      })
       throw error
     } finally {
       tmux.stop()

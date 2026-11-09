@@ -276,6 +276,7 @@ export function isolatedEnvironment(workDir, home, dshHome, evidencePath) {
     DSH_HOME: dshHome,
     DSH_SMOKE_EVIDENCE: evidencePath,
     DSH_SMOKE_HEADER_EVIDENCE: join(workDir, 'header-evidence.json'),
+    DSH_SMOKE_COMMAND_EVIDENCE: join(workDir, 'command-evidence.jsonl'),
     npm_config_registry: 'https://registry.npmjs.org',
     NPM_CONFIG_REGISTRY: 'https://registry.npmjs.org',
     npm_config_minimum_release_age: '0',
@@ -429,7 +430,12 @@ export function writeHeaderProbePackage(workDir) {
     '',
     'const evidencePath = process.env.DSH_SMOKE_HEADER_EVIDENCE',
     'const inputEvidencePath = process.env.DSH_SMOKE_INPUT_EVIDENCE',
+    'const commandEvidencePath = process.env.DSH_SMOKE_COMMAND_EVIDENCE',
     'let standardSessionId',
+    'let observedSessionId',
+    'let observedSession',
+    'const observedCommandIds = new Set()',
+    'let commandProbeWriteFailed = false',
     'function writeEvidence(value) {',
     "  if (typeof evidencePath !== 'string' || evidencePath.length === 0) return",
     "  writeFileSync(evidencePath, JSON.stringify(value, null, 2) + '\\n', { encoding: 'utf8', mode: 0o600 })",
@@ -442,6 +448,42 @@ export function writeHeaderProbePackage(workDir) {
     "  if (event === 'claimed') record.turn = turn",
     "  appendFileSync(inputEvidencePath, JSON.stringify(record) + '\\n', { encoding: 'utf8', mode: 0o600 })",
     '}',
+    'function recordCommandEvidence(record) {',
+    "  if (typeof commandEvidencePath !== 'string' || commandEvidencePath.length === 0) return",
+    '  try {',
+    "    appendFileSync(commandEvidencePath, JSON.stringify(record) + '\\n', { encoding: 'utf8', mode: 0o600 })",
+    '  } catch {',
+    '    if (!commandProbeWriteFailed) {',
+    '      commandProbeWriteFailed = true',
+    "      process.stderr.write('OFFICIAL_PRESET_COMMAND_PROBE_WRITE_FAILURE\\n')",
+    '    }',
+    '  }',
+    '}',
+    'function observeCommandEvent(session, event) {',
+    "  if (session !== observedSession || String(session?.id ?? '') !== observedSessionId) return",
+    "  if (event?.type !== 'command/run' && event?.type !== 'command/done') return",
+    '  const data = event.data',
+    "  const commandId = typeof data?.commandId === 'string' ? data.commandId : ''",
+    "  const pairedRun = event.type === 'command/run' || observedCommandIds.has(commandId)",
+    "  if (event.type === 'command/run' && commandId !== '') observedCommandIds.add(commandId)",
+    '  const record = {',
+    "    recordType: 'event',",
+    '    sessionId: observedSessionId,',
+    '    seq: event.seq,',
+    '    type: event.type,',
+    '    commandId,',
+    '    observedAt: Date.now(),',
+    '    pairedRun,',
+    '  }',
+    "  if (event.type === 'command/run') {",
+    '    record.name = data.name',
+    "    if (typeof data.args === 'string') record.args = data.args",
+    '  } else {',
+    '    record.kind = data.kind',
+    "    if (typeof data.text === 'string') record.text = data.text",
+    '  }',
+    '  recordCommandEvidence(record)',
+    '}',
     '',
     `export const name = '${packageName}'`,
     "export const inject = ['sessionQuery']",
@@ -452,6 +494,8 @@ export function writeHeaderProbePackage(workDir) {
     "    writeEvidence({ error: 'session query service unavailable' })",
     '    return',
     '  }',
+    "  ctx.on('session/event', observeCommandEvent, { global: true })",
+    "  recordCommandEvidence({ recordType: 'probe-installed', event: 'session/event', global: true, installed: true, observedAt: Date.now() })",
     "  ctx.on('agent/created', ({ agent }) => {",
     '    const session = agent?.session',
     "    if (session === undefined || session.header?.origin === 'subagent') return",
@@ -463,6 +507,17 @@ export function writeHeaderProbePackage(workDir) {
     "        const observation = await query.observeSession(session.id, { projectionMode: 'none' })",
     '        try {',
     '          const sessionId = String(observation.header.id)',
+    '          if (sessionId === String(session.id)) {',
+    '            observedSession = session',
+    '            observedSessionId = sessionId',
+    '            recordCommandEvidence({',
+    "              recordType: 'session-observed',",
+    '              sessionId,',
+    '              agentPreset: observation.header.agentPreset,',
+    '              headerConfirmed: true,',
+    '              observedAt: Date.now(),',
+    '            })',
+    '          }',
     "          if (observation.header.agentPreset === 'standard') standardSessionId = sessionId",
     '          writeEvidence({',
     '            sessionId,',
@@ -559,6 +614,7 @@ export function writeLauncher(path, invocation, env, presetId) {
     `export DSH_HOME=${shellQuote(env.DSH_HOME)}`,
     `export DSH_SMOKE_EVIDENCE=${shellQuote(env.DSH_SMOKE_EVIDENCE)}`,
     `export DSH_SMOKE_HEADER_EVIDENCE=${shellQuote(env.DSH_SMOKE_HEADER_EVIDENCE)}`,
+    `export DSH_SMOKE_COMMAND_EVIDENCE=${shellQuote(env.DSH_SMOKE_COMMAND_EVIDENCE)}`,
     ...(env.DSH_SMOKE_PROMPT_EVIDENCE === undefined ? [] : [`export DSH_SMOKE_PROMPT_EVIDENCE=${shellQuote(env.DSH_SMOKE_PROMPT_EVIDENCE)}`]),
     ...(env.DSH_SMOKE_INPUT_EVIDENCE === undefined ? [] : [`export DSH_SMOKE_INPUT_EVIDENCE=${shellQuote(env.DSH_SMOKE_INPUT_EVIDENCE)}`]),
     `export npm_config_registry=${shellQuote(env.npm_config_registry)}`,
@@ -589,6 +645,18 @@ export function tmuxRunner(socket, session, env, options = {}) {
     const result = tmux(['capture-pane', '-p', '-t', session], options)
     return result.status === 0 && typeof result.stdout === 'string' ? result.stdout : ''
   }
+  const captureScrollback = (maxLines) => {
+    const history = tmux(['display-message', '-p', '-t', session, '#{history_size}'])
+    if (history.status !== 0) throw new Error(`tmux history size could not be read: ${resultText(history)}`)
+    const result = tmux(['capture-pane', '-p', '-t', session, '-S', `-${maxLines}`])
+    if (result.status !== 0) throw new Error(`tmux scrollback could not be captured: ${resultText(result)}`)
+    const totalHistoryLines = Number(history.stdout.trim())
+    return {
+      text: result.stdout,
+      totalHistoryLines,
+      truncated: totalHistoryLines > maxLines,
+    }
+  }
   const hasSession = () => tmux(['has-session', '-t', session]).status === 0
   const sendLiteral = (text) => {
     const result = tmux(['send-keys', '-t', session, '-l', text])
@@ -606,7 +674,7 @@ export function tmuxRunner(socket, session, env, options = {}) {
     tmux(['kill-session', '-t', session], { ignoreGateDeadline: true })
     tmux(['kill-server'], { ignoreGateDeadline: true })
   }
-  return { tmux, capturePane, hasSession, sendLiteral, sendKey, resize, stop }
+  return { tmux, capturePane, captureScrollback, hasSession, sendLiteral, sendKey, resize, stop }
 }
 
 export async function waitUntil(label, timeoutMs, probe, phase) {
