@@ -760,6 +760,151 @@ test('rendered View query and navigation leave the Full semantic current and exa
   }
 })
 
+test('rendered View is retired by the passive setTranscript Full presentation entry', async () => {
+  const { vt, app } = startApp(120, 40)
+  try {
+    const folder = new TranscriptFolder()
+    folder.apply([
+      event('turn/start', { turn: 0 }, 0),
+      event('user/message', {
+        id: MessageId('view-passive-full-user'),
+        role: 'user',
+        content: [{ type: 'text', text: 'passive needle' }],
+        source: { kind: 'user' },
+      }, 1),
+      event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 2),
+    ])
+    const message = folder.messages()[0]!
+    app.setFullscreen(true)
+    app.setTranscript(folder.messages(), folder.turnActivities())
+    await vt.waitForRender()
+    assert.deepEqual(app.setRenderedViewSearchQuery('needle'), { currentIndex: 0, count: 1 })
+    await vt.waitForRender()
+    assert.equal(strongOccurrences(vt, vt.getViewport(), 'needle').length, 1)
+
+    const fullMatch = folder.search('needle')[0]!
+    app.setTranscript(folder.messages(), folder.turnActivities(), undefined, [], {
+      matchMessages: new Set([message]),
+      target: { query: 'needle', match: fullMatch, message },
+      grantReveal: true,
+    })
+    await vt.waitForRender()
+    assert.equal(app.renderedViewSearchStatus(), undefined,
+      'the passive setTranscript Full entry retires the View owner')
+    assert.equal(app.transcriptSearchPresentationForTest()?.sourceOccurrence, fullMatch.sourceOccurrence,
+      'the passive Full target owns the semantic source occurrence after the handoff')
+    assert.equal(strongOccurrences(vt, vt.getViewport(), 'needle').length, 1,
+      'the handoff paints one Full current occurrence instead of leaving the old View wrapper')
+  } finally {
+    app.clearRenderedViewSearch()
+  }
+})
+
+test('rendered View retirement forces a repaint when the Full presentation is semantically unchanged', async () => {
+  const { vt, app } = startApp(100, 30)
+  try {
+    const folder = assistantFolder([{ id: 'view-noop-full', text: 'noop needle' }])
+    app.setFullscreen(true)
+    app.setTranscript(folder.messages(), folder.turnActivities())
+    await vt.waitForRender()
+    assert.deepEqual(app.setRenderedViewSearchQuery('needle'), { currentIndex: 0, count: 1 })
+    await vt.waitForRender()
+    assert.equal(strongOccurrences(vt, vt.getViewport(), 'needle').length, 1)
+
+    app.resetSearchPresentationDiagnosticsForTest()
+    assert.equal(app.setTranscriptSearchPresentation({
+      matchMessages: app.searchMatchMessagesForTest(),
+      target: undefined,
+      grantReveal: false,
+    }), true, 'the View-only retirement is a visible presentation change')
+    await vt.waitForRender()
+    assert.equal(app.renderedViewSearchStatus(), undefined)
+    assert.equal(app.searchPresentationDiagnosticsForTest().rebuilds, 1,
+      'retiring View counts as a visible Full presentation rebuild even when Full state was already empty')
+    assert.equal(strongOccurrences(vt, vt.getViewport(), 'needle').length, 0,
+      'the no-op Full commit cannot leave the old View strong cell painted')
+  } finally {
+    app.clearRenderedViewSearch()
+  }
+})
+
+test('rendered View is retired across a normal stop/start screen lifecycle', async () => {
+  const { vt, app } = startApp(100, 30)
+  try {
+    const folder = assistantFolder([{ id: 'view-stop-start', text: 'stop needle' }])
+    app.setFullscreen(true)
+    app.setTranscript(folder.messages(), folder.turnActivities())
+    await vt.waitForRender()
+    assert.equal(strongOccurrences(vt, vt.getViewport(), 'needle').length, 0,
+      'the unsearched Fullscreen transcript starts without a current-search background')
+    assert.deepEqual(app.setRenderedViewSearchQuery('needle'), { currentIndex: 0, count: 1 })
+    await vt.waitForRender()
+    assert.equal(app.renderedViewSearchStatus()?.count, 1)
+
+    app.stop()
+    await vt.waitForRender()
+    assert.equal(app.renderedViewSearchStatus(), undefined,
+      'normal stop retires the View state at the terminal ownership boundary')
+    assert.equal((app as unknown as { fullscreenScroll?: unknown }).fullscreenScroll, undefined,
+      'normal stop drops the ScrollView whose fullscreen screen has been released')
+    app.start()
+    await vt.waitForRender()
+    assert.equal(app.renderedViewSearchStatus(), undefined,
+      'start does not resurrect a stopped View query')
+    assert.throws(() => app.setRenderedViewSearchQuery('needle'), /mounted fullscreen transcript/,
+      'regular start rejects View search until fullscreen is mounted again')
+    const restartedLines = vt.getViewport()
+    assert.equal(strongOccurrences(vt, restartedLines, 'needle').length, 0,
+      'the regular restarted screen has no stale View strong decoration')
+  } finally {
+    if (!app.isDisposed()) app.dispose()
+    startedApps.delete(app)
+  }
+})
+
+test('rendered View survives the preserve-screen external-editor suspend/resume path', async () => {
+  const vt = new VirtualTerminal(100, 30)
+  let calls = 0
+  let app!: TuiApp
+  app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    runOwned: () => {},
+    openExternalEditor: async (draft: string): Promise<string> => {
+      calls += 1
+      assert.deepEqual(app.renderedViewSearchStatus(), { currentIndex: 0, count: 1 },
+        'the View owner is retained while the external editor owns the terminal')
+      assert.notEqual((app as unknown as { fullscreenScroll?: unknown }).fullscreenScroll, undefined,
+        'the preserve-screen suspend keeps its ScrollView identity')
+      return draft
+    },
+  })
+  app.start()
+  startedApps.add(app)
+  try {
+    app.setFullscreen(true)
+    app.setTranscript([{ kind: 'assistant', turn: 0, text: 'editor round-trip needle' }])
+    await vt.waitForRender()
+    assert.deepEqual(app.setRenderedViewSearchQuery('needle'), { currentIndex: 0, count: 1 })
+    await vt.waitForRender()
+    const before = strongOccurrences(vt, vt.getViewport(), 'needle')
+    assert.equal(before.length, 1)
+
+    app.setDraft('draft')
+    await app.launchExternalEditor()
+    await vt.waitForRender()
+    assert.equal(calls, 1, 'the actual external-editor callback ran once')
+    assert.deepEqual(app.renderedViewSearchStatus(), { currentIndex: 0, count: 1 },
+      'a preserve-screen external-editor round-trip retains the mounted View current')
+    const after = strongOccurrences(vt, vt.getViewport(), 'needle')
+    assert.deepEqual(after, before, 'the resumed Fullscreen frame preserves the same current painted cell')
+  } finally {
+    app.clearRenderedViewSearch()
+    app.dispose()
+    startedApps.delete(app)
+  }
+})
+
 test('rendered View remeasures active occurrences across preset, icon and theme changes', async () => {
   const previousPalette = currentPalette
   const { vt, app } = startApp(120, 40, 'full')

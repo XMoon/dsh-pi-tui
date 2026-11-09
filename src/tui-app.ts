@@ -5364,6 +5364,9 @@ export class TuiApp {
     }
     try {
       this.tui.start()
+      // The stopped Fullscreen screen may have replaced terminal rows outside
+      // the main screen's differential cache; repaint the restarted main frame.
+      if (!firstStart) this.tui.requestRender(true)
     } catch (error) {
       // A throw must never leak the claimed slot (plan §11).
       if (firstStart && this.processTuiSlotClaimed) {
@@ -5582,10 +5585,16 @@ export class TuiApp {
       // throw cannot strand its siblings.
       ...schemeDisposers.map(dispose => () => dispose()),
       () => this.clearFocusLiveHeightState(),
+      () => {
+        const hadRenderedViewSearch = this.renderedViewSearch !== undefined
+        this.clearRenderedViewSearch()
+        if (hadRenderedViewSearch) this.fullscreen?.renderNow(true)
+      },
       () => this.resetScrollProfileFrame(),
       () => this.tui.stop(),
       () => this.fullscreen?.stop(),
       () => { this.fullscreen = undefined },
+      () => { this.fullscreenScroll = undefined },
       // Those stops RELEASED the OSC 11 observation the screen was running, and a later
       // start() restarts the SAME screen object, so the identity check in
       // completeScreenHandoff() cannot notice the loss (exactly like the external-editor
@@ -9151,7 +9160,7 @@ export class TuiApp {
       this.clearRenderedViewSearch()
       return { currentIndex: -1, count: 0 }
     }
-    if (this.fullscreenScroll === undefined) {
+    if (this.fullscreen === undefined || this.fullscreenScroll === undefined) {
       throw new Error('rendered View search requires the mounted fullscreen transcript')
     }
     if (this.searchTarget !== undefined || this.searchMatchMessages.size > 0) {
@@ -9243,7 +9252,6 @@ export class TuiApp {
    * S2 §5.1): a query change / Next / Prev reaches the message tree as ONE
    * rebuild. Returns whether anything actually changed. */
   setTranscriptSearchPresentation(presentation: TranscriptSearchPresentation): boolean {
-    this.clearRenderedViewSearch({ rebuild: false })
     if (!this.applySearchPresentation(presentation)) return false
     this.rebuildMessages('search-presentation')
     return true
@@ -9370,6 +9378,10 @@ export class TuiApp {
    * rebuild, so the target/reveal is in effect when the render blocks are
    * built. Returns whether anything changed. */
   private applySearchPresentation(presentation: TranscriptSearchPresentation): boolean {
+    // Every Full-owner commit, including the passive `setTranscript()` path,
+    // retires a mounted View projection before its semantic state is applied.
+    const retiredViewSearch = this.renderedViewSearch !== undefined
+    if (retiredViewSearch) this.clearRenderedViewSearch({ rebuild: false })
     let changed = false
     if (this.searchMatchMessages !== presentation.matchMessages) {
       this.searchMatchMessages = presentation.matchMessages
@@ -9416,7 +9428,7 @@ export class TuiApp {
       // keeps the existing grant/reveal flags — a user collapse stays revoked.
       changed = true
     }
-    if (!changed) return false
+    if (!changed) return retiredViewSearch
     this.searchPresentationRevision += 1
     this.clearFocusLiveHeightState()
     return true
@@ -11644,7 +11656,7 @@ export class TuiApp {
   ): void {
     const previous = this.renderedViewSearch
     if (previous === undefined) return
-    if (this.fullscreenScroll === undefined) {
+    if (this.fullscreen === undefined || this.fullscreenScroll === undefined) {
       throw new Error('rendered View search requires the mounted fullscreen transcript')
     }
 
