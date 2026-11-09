@@ -272,6 +272,7 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
   private listScrollPinned = false
   private detailScroll = 0
   private historyScroll = 0
+  private historyScrollPinned = false
   private historySelectedMessageId: ScheduleHistoryMessageId | undefined
   private readonly historyExpandedMessageIds = new Set<ScheduleHistoryMessageId>()
   private editorScroll = 0
@@ -328,6 +329,7 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
       if (!(snapshot.mode === 'help' && previous.mode === 'history')
         && !(snapshot.mode === 'history' && previous.mode === 'help')) {
         this.historyScroll = 0
+        this.historyScrollPinned = false
       }
       this.editorScroll = 0
       this.helpScroll = 0
@@ -336,6 +338,7 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
       value.mode === 'history' || (value.mode === 'help' && value.history !== undefined)
     const currentHistory = snapshot.history?.records ?? []
     const previousHistory = previous.history?.records ?? []
+    const previousHistorySelection = this.historySelectedMessageId
     if (!historyContext(snapshot) || !historyContext(previous)
       || snapshot.selectedId !== previous.selectedId) {
       this.historySelectedMessageId = currentHistory[0]?.messageId
@@ -350,6 +353,7 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
       for (const messageId of this.historyExpandedMessageIds) {
         if (!currentIds.has(messageId)) this.historyExpandedMessageIds.delete(messageId)
       }
+      if (previousHistorySelection !== this.historySelectedMessageId) this.historyScrollPinned = false
     }
     if (snapshot.mode !== 'list'
       || previous.mode !== 'list'
@@ -620,6 +624,7 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
     const messageId = records[next]?.messageId
     if (messageId === undefined || messageId === this.historySelectedMessageId) return
     this.historySelectedMessageId = messageId
+    this.historyScrollPinned = false
     this.deps.requestRender()
   }
 
@@ -965,7 +970,10 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
   private pageBody(direction: -1 | 1): void {
     const page = Math.max(1, Math.floor(this.deps.rows()) - 4)
     if (this.snapshot.mode === 'detail') this.detailScroll = Math.max(0, this.detailScroll + direction * page)
-    else if (this.snapshot.mode === 'history') this.historyScroll = Math.max(0, this.historyScroll + direction * page)
+    else if (this.snapshot.mode === 'history') {
+      this.historyScroll = Math.max(0, this.historyScroll + direction * page)
+      this.historyScrollPinned = true
+    }
     else if (this.snapshot.mode === 'help') this.helpScroll = Math.max(0, this.helpScroll + direction * page)
     this.deps.requestRender()
   }
@@ -2202,6 +2210,7 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
       this.detailScroll = Math.max(0, this.detailScroll + step)
     } else if (this.snapshot.mode === 'history') {
       this.historyScroll = Math.max(0, this.historyScroll + step)
+      this.historyScrollPinned = true
     } else if (this.snapshot.mode === 'editor') {
       this.editorScroll = Math.max(0, this.editorScroll + step)
     } else if (this.snapshot.mode === 'help') {
@@ -2247,6 +2256,7 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
         if (this.snapshot.mode !== 'history'
           || !this.snapshot.history?.records.some(record => record.messageId === hit.messageId)) return
         this.historySelectedMessageId = hit.messageId as ScheduleHistoryMessageId
+        this.historyScrollPinned = false
         this.deps.requestRender()
         return
       }
@@ -2427,6 +2437,7 @@ export class ScheduleWorkspacePanel implements Component, Focusable {
   }
 
   private revealHistorySelection(content: readonly BodyLine[], scroll: number, bodyHeight: number): number {
+    if (this.historyScrollPinned) return this.scrolled(scroll, content.length, bodyHeight)
     const selected = content.findIndex(line => line.rowId === this.historySelectedMessageId)
     if (bodyHeight <= 0 || selected < 0) return this.scrolled(scroll, content.length, bodyHeight)
     let next = scroll

@@ -853,7 +853,7 @@ export class ScheduleWorkspaceController {
     this.own('schedule Session roster read', async () => { await this.readSessionRoster() })
   }
 
-  /** Read the single authorized roster and derive both chooser labels and link eligibility. */
+  /** Read the single authorized roster and return once its Session identities are committed. */
   private async readSessionRoster(): Promise<readonly string[] | undefined> {
     this.rosterAbort?.abort()
     const controller = new AbortController()
@@ -869,38 +869,64 @@ export class ScheduleWorkspaceController {
       && this.rosterAbort === controller
       && epoch === this.rosterEpoch
       && openEpoch === this.openEpoch
+
+    let rows: readonly SessionSummary[] | undefined
     try {
-      const rows = await this.sessionReader.list(undefined, controller.signal)
-      if (!isCurrent()) return undefined
-      if (rows === undefined) {
-        this.sessionRosterState = 'unavailable'
-        this.publish()
-        return undefined
-      }
-      const candidates = rows.filter(row => row.origin !== 'subagent')
-      this.availableSessionIds = candidates.map(row => row.id)
-      this.sessionRosterState = 'ready'
-      this.publish()
-      let projections = new Map<string, { readonly title?: string }>()
-      try {
-        projections = await this.sessionReader.projectionBatch(candidates, controller.signal)
-      } catch {
-        if (!isCurrent()) return undefined
-      }
-      if (!isCurrent()) return undefined
-      this.sessions = candidates.map(row => {
-        const title = projections.get(row.id)?.title
-        return { id: row.id, ...(title === undefined ? {} : { title }) }
-      })
-      this.publish()
-      return this.availableSessionIds
+      rows = await this.sessionReader.list(undefined, controller.signal)
     } catch {
       if (!isCurrent()) return undefined
       this.sessionRosterState = 'error'
       this.availableSessionIds = []
       this.sessions = []
+      this.rosterAbort = undefined
       this.publish()
       return undefined
+    }
+    if (!isCurrent()) return undefined
+    if (rows === undefined) {
+      this.sessionRosterState = 'unavailable'
+      this.rosterAbort = undefined
+      this.publish()
+      return undefined
+    }
+
+    const candidates = rows.filter(row => row.origin !== 'subagent')
+    this.availableSessionIds = candidates.map(row => row.id)
+    this.sessions = candidates.map(row => ({ id: row.id }))
+    this.sessionRosterState = 'ready'
+    this.publish()
+    this.own('schedule Session title projection', async () => {
+      await this.readSessionTitles(candidates, epoch, openEpoch, controller)
+    })
+    return this.availableSessionIds
+  }
+
+  /** Optional display enrichment never delays or grants Session-link authorization. */
+  private async readSessionTitles(
+    candidates: readonly SessionSummary[],
+    epoch: number,
+    openEpoch: number,
+    controller: AbortController,
+  ): Promise<void> {
+    const isCurrent = (): boolean => !this.disposed
+      && !controller.signal.aborted
+      && this.rosterAbort === controller
+      && epoch === this.rosterEpoch
+      && openEpoch === this.openEpoch
+    try {
+      let projections: Map<string, { readonly title?: string }>
+      try {
+        projections = await this.sessionReader.projectionBatch(candidates, controller.signal)
+      } catch (error) {
+        if (!isCurrent()) return
+        throw error
+      }
+      if (!isCurrent()) return
+      this.sessions = candidates.map(row => {
+        const title = projections.get(row.id)?.title
+        return { id: row.id, ...(title === undefined ? {} : { title }) }
+      })
+      this.publish()
     } finally {
       if (this.rosterAbort === controller) this.rosterAbort = undefined
     }
@@ -973,6 +999,10 @@ export class ScheduleWorkspaceController {
         this.notice = outcome.kind === 'cancelled'
           ? infoNotice('Conversation was not opened.')
           : infoNotice(outcome.message)
+        this.publish()
+      } catch (error) {
+        if (!this.isCurrentNavigation(epoch, pageEpoch, owner)) return
+        this.notice = errorNotice(safeErrorMessage(error))
         this.publish()
       } finally {
         if (this.navigationEpoch === epoch && !this.disposed) {
