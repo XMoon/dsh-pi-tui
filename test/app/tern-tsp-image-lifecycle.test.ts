@@ -32,6 +32,7 @@ import type { TranscriptMessage, TurnActivity } from '../../src/domain/transcrip
 import type { SubmissionComposerPort } from '../../src/app/submission/composer-port.ts'
 import { createSurfaceDraftImageProjection } from '../../src/app/surface/runtime.ts'
 import { mountTspRenderer, type TspRenderer } from '../../src/tui/tsp/session.ts'
+import { projectTranscriptStructure } from '../../src/tui/transcript/structure.ts'
 
 const ENCODER = new TextEncoder()
 const DECODER = new TextDecoder()
@@ -402,6 +403,52 @@ function currentImageNodes(tern: ScriptedTern): { id: string; blob?: string }[] 
   }
   return images
 }
+
+
+test('a closed Context Cluster with an adjacent image Tool does not demand bytes until the exact Tool opens', async () => {
+  const harness = await mountHarness({ displayState: { preset: 'full' } })
+  const source = {}
+  const attachment = { ...ATTACHMENT, attachmentId: 'context-adjacent-image' }
+  const contextRows = [0, 1].map(index => ({
+    kind: 'system', turn: 1, text: `ambient context payload ${index}`, context: true,
+    contextPresentation: { role: 'inject', form: 'snapshot', sourceKind: 'plugin' },
+  } as unknown as TranscriptMessage))
+  const imageTool = toolRowWithImage(attachment)
+  const messages: TranscriptMessage[] = [{ kind: 'user', turn: 1, text: 'inspect context and image' }, imageTool, ...contextRows]
+  try {
+    harness.renderer.bindInput({
+      exit() {}, cancel() {}, submit() {}, steer() {}, pasteMedia() {}, pastedPath: () => {},
+      admitPastedPathDelivery: () => true, shouldRememberInput: () => true, noteUserInput() {},
+      listContinuedQuestions: () => [], reopenContinuedQuestion: () => false,
+      openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true,
+    })
+    const structure = projectTranscriptStructure(messages)
+    const work = structure.find(block => block.kind === 'work')
+    assert.ok(work?.kind === 'work' && work.span.parts.some(part => part.kind === 'context-cluster'),
+      'the adjacent image Tool and snapshot Context Cluster occupy one canonical Work Fold')
+    commit(harness.renderer, messages, source)
+    await until('the closed native Tool row', () => currentNodes(harness.tern).some(node => node.kind === 'tool'))
+    const cluster = currentNodes(harness.tern).find(node => node.kind === 'section' && String(node.props['key']).includes('ctx-'))
+    assert.ok(cluster !== undefined, 'the nested canonical Context Cluster is a native disclosure')
+    assert.equal(cluster.props['collapsed'], true)
+    const clusterFrame = harness.tern.frames().at(-1)!
+    harness.tern.input.type(`\u001b_tsp;e;${JSON.stringify({ ev: 'toggle', sf: clusterFrame.sf, id: cluster.id, collapsed: false, key: cluster.id.slice(cluster.id.lastIndexOf('.') + 1), raw: {} })}\u001b\\`)
+    await until('the exact Context Cluster to open', () => currentNodes(harness.tern).find(node => node.id === cluster.id)?.props['collapsed'] === false)
+    assert.deepEqual(harness.reads, [], 'opening Context membership does not authorize the separate Tool image body')
+    assert.deepEqual(harness.tern.blobIds(), [])
+    const tool = currentNodes(harness.tern).find(node => node.kind === 'tool')!
+    assert.equal(tool.props['collapsed'], true, 'the same-Work image Tool retains its independent closed owner')
+    const frame = harness.tern.frames().at(-1)!
+    harness.tern.input.type(`\u001b_tsp;e;${JSON.stringify({ ev: 'toggle', sf: frame.sf, id: tool.id, collapsed: false, raw: {} })}\u001b\\`)
+    await until('the exact adjacent image Tool read', () => harness.reads.length === 1)
+    await until('the exact adjacent image Tool blob', () => harness.tern.blobIds().length === 1)
+    const admittedRead = harness.reads as ReadCall[]
+    assert.equal(admittedRead[0]?.id, 'context-adjacent-image')
+    assert.equal(currentImageNodes(harness.tern).length, 1)
+  } finally {
+    await harness.dispose()
+  }
+})
 
 test('a PTC image child reads only after every exact parent-scoped Tool disclosure opens', async () => {
   const harness = await mountHarness({ displayState: { preset: 'full' } })

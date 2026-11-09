@@ -414,7 +414,7 @@ test('a merged read-group replacement changes that card\'s key while neighbours 
   assert.ok(!deleted.has(userNodeId) && !added.has(userNodeId), 'the untouched user card keeps its identity')
 })
 
-test('dynamic Context clustering also rebuilds a retained row\'s node id', () => {
+test('dynamic Context clustering reparents a retained native column member without changing its allocation key', () => {
   const folder = new TranscriptFolder()
   const keys = new TranscriptNodeKeys()
   folder.apply([ev('turn/start', { turn: 1 }, 0)])
@@ -448,7 +448,7 @@ test('dynamic Context clustering also rebuilds a retained row\'s node id', () =>
 
   const ops = before.ops(after, 's1')
   assert.ok(opIds(ops, 'del').has(`main.${firstKey}`), 'the standalone node is legitimately removed')
-  assert.equal(nodeOf(after, `main.ctx-${firstKey}.${firstKey}`).kind, 'card', 'and re-added under the cluster')
+  assert.equal(nodeOf(after, `main.ctx-${firstKey}.${firstKey}`).kind, 'col', 'and re-added under the native Context cluster column')
 })
 
 test('sibling Work spans sharing a turn, and repeated text, never collide', () => {

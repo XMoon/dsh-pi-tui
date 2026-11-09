@@ -19,6 +19,7 @@ import { mountRemotePresentationHost, mountRemoteRunner } from '../app/runner-re
 import { waitFor } from '../support/remote-application-fixture.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 import { readTspBlobMessages } from '../support/tsp-blob-wire.ts'
+import type { TspWireFrame } from '../support/tsp-terminal-fixture.ts'
 import type { ImageAttachmentRefLike } from '../../src/domain/media/types.ts'
 
 const SESSION_ID = 'prc-remote-image-session'
@@ -39,6 +40,27 @@ interface AttachmentStore {
 interface HostSession {
   append(type: string, data: unknown, options?: { surfaceOp?: 'append' }): void
   snapshotEvents(): readonly unknown[]
+}
+
+function currentToolIds(fixture: { readonly pane: { frames(): readonly TspWireFrame[] } }): string[] {
+  const ids = new Set<string>()
+  const visit = (node: { id?: string; k?: string; c?: readonly unknown[] } | undefined): void => {
+    if (node?.k === 'tool' && typeof node.id === 'string') ids.add(node.id)
+    for (const child of node?.c ?? []) visit(child as never)
+  }
+  for (const frame of fixture.pane.frames()) for (const op of frame.ops) {
+    if (op[0] === 'add') visit(op[4] as never)
+  }
+  return [...ids]
+}
+
+function expandToolCards(fixture: { readonly pane: { event(value: unknown): void; frames(): readonly TspWireFrame[] } }): void {
+  const frames = fixture.pane.frames()
+  const sf = frames.at(-1)?.sf
+  if (sf === undefined) throw new Error('the Remote pane has no frame to address the Tool disclosure')
+  for (const id of currentToolIds(fixture)) {
+    fixture.pane.event({ ev: 'toggle', sf, id, collapsed: false, key: id.slice(id.lastIndexOf('.') + 1), raw: {} })
+  }
 }
 
 function drewImage(wire: string, blobId: string): boolean {
@@ -79,6 +101,8 @@ test('a Remote lifetime that retires while the read is open refuses the bytes, a
     // The REAL retained binding's read is gated, so the lifetime can retire
     // WHILE the read is open. The gate is a test-side seam on the client's
     // read method: the read itself still traverses the real Host.
+    await waitFor('the Remote TSP inline surface handshake completes before appending its first turn', () =>
+      pane.probed() && pane.openSurfaces().some(surface => surface.mode === 'inline'), 30_000)
     const clientSessions = fixture.aggregate.wire.client.sessions as unknown as {
       binding(id: unknown): { session: { readAttachment(attachment: ImageAttachmentRefLike): Promise<unknown> } } | undefined
     }
@@ -124,9 +148,9 @@ test('a Remote lifetime that retires while the read is open refuses the bytes, a
         },
       }, { surfaceOp: 'append' })
 
+      await waitFor('the Remote image Tool row to materialize', () => currentToolIds({ pane }).length > 0, 30_000)
+      expandToolCards({ pane })
       await waitFor('the REAL attachment read to start', () => readStarted, 20_000)
-
-      // The REAL Connection generation rolls over while the read is open: the
       // presentation's transport lifetime is retired under the read.
       const connection = fixture.aggregate.wire.client.connection as unknown as {
         generation: { getSnapshot(): { readonly id: number } | undefined }
@@ -221,6 +245,10 @@ test('a Remote tool-result image is authorized by its retained Session and reach
       // The `b` write is not the end of the chain: the `f` that references the
       // blob leaves the SDK later (frame credit), so the wait observes the frame
       // the assertions below read.
+      await waitFor('the Remote Tool node to materialize before disclosure', () =>
+        fixture.pane!.frames().some(frame => frame.ops.some(op => op[0] === 'add' && JSON.stringify(op[4]).includes('"k":"tool"'))), 30_000)
+      const pane = fixture.pane!
+      expandToolCards({ pane })
       await waitFor('the SDK emitted the admitted image blob and the frame that references it', () => {
         const sent = fixture.pane!.output.text()
         return fixture.pane!.blobIds().includes(expectedBlobId) && drewImage(sent, expectedBlobId)

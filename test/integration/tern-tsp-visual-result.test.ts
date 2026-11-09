@@ -190,6 +190,9 @@ test('a chart result is painted as a native chart and exact text over the real w
     }
     const fact = chartFactFromArgs(args)
     await appendTool(fixture, 'call-chart-1', 'dsh_pi_tui_chart', args, chartContentBlocks(fact))
+    await waitFor('the Direct chart Tool node to materialize before disclosure', () =>
+      wireNodes(fixture.pane.frames()).some(node => node.k === 'tool'), 30_000)
+    expandToolCards(fixture)
     await waitFor('the wire carries the native chart node', () =>
       wireNodes(fixture.pane.frames()).some(node => node.k === 'chart'), 30_000)
     const nodes = wireNodes(fixture.pane.frames())
