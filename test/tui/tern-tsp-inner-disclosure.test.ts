@@ -243,6 +243,44 @@ test('two Work, Thinking and Cluster occurrences keep distinct bounded structura
   }
 })
 
+test('the structural source is scanned once for one and two Work/Thinking/Cluster occurrences', () => {
+  const makeMessages = (count: number): readonly TranscriptMessage[] => {
+    const events: SessionEvent[] = [ev('turn/start', { turn: 1 }, 0)]
+    for (let index = 0; index < count; index += 1) {
+      events.push(user(index * 10 + 1, `bound-user-${index}`, `bound-user-${index}`))
+      events.push(thinking(index * 10 + 2, index, `bound-thinking-${index}`))
+      events.push(toolCall(index * 10 + 3, `bound-tool-${index}`, 'read', '{}', index))
+      events.push(toolResult(index * 10 + 4, `bound-tool-${index}`, `bound-result-${index}`, index))
+      events.push(context(index * 10 + 5, `bound-context-${index}-a`, `bound-context-${index}-a`, { kind: 'plugin', form: 'snapshot', plugin: `bound-${index}` }))
+      events.push(context(index * 10 + 6, `bound-context-${index}-b`, `bound-context-${index}-b`, { kind: 'plugin', form: 'snapshot', plugin: `bound-${index}` }))
+      events.push(assistant(index * 10 + 7, index + 1, `bound-final-${index}`))
+    }
+    events.push(ev('turn/end', { turn: 1, reason: { kind: 'completed' } }, count * 10 + 9))
+    return folder(events).messages()
+  }
+  const countIterableReads = (messages: readonly TranscriptMessage[], reads: { iterations: number; items: number; lengths: number }): readonly TranscriptMessage[] =>
+    new Proxy(messages, {
+      get(target, property, receiver) {
+        if (property === Symbol.iterator) reads.iterations += 1
+        else if (property === 'length') reads.lengths += 1
+        else if (typeof property === 'string' && /^(?:0|[1-9]\d*)$/u.test(property)) reads.items += 1
+        return Reflect.get(target, property, receiver)
+      },
+    })
+  const oneReads = { iterations: 0, items: 0, lengths: 0 }
+  const twoReads = { iterations: 0, items: 0, lengths: 0 }
+  const one = countIterableReads(makeMessages(1), oneReads)
+  const two = countIterableReads(makeMessages(2), twoReads)
+  assert.equal(projectTranscriptStructure(one).length > 0, true)
+  assert.equal(projectTranscriptStructure(two).length > 0, true)
+  assert.equal(oneReads.iterations, 2, 'one projection performs one Context-clustering pass and one structure pass')
+  assert.equal(twoReads.iterations, oneReads.iterations, 'doubling Work/Thinking/Cluster owners does not add source passes')
+  assert.ok(twoReads.items <= oneReads.items * 2 + 4,
+    `indexed transcript source reads remain linear: one=${oneReads.items}, two=${twoReads.items}`)
+  assert.ok(twoReads.lengths <= oneReads.lengths * 2 + 2,
+    `source length reads remain linear: one=${oneReads.lengths}, two=${twoReads.lengths}`)
+})
+
 test('Thinking exposes only its bounded latest line until the stable native Section opens', () => {
   const messages = workFolder().messages()
   const thinkingRow = rowOf(messages, (row): row is Extract<TranscriptMessage, { kind: 'thinking' }> => row.kind === 'thinking')
