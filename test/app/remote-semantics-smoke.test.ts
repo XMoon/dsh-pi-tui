@@ -21,6 +21,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { once } from 'node:events'
+import { createRequire } from 'node:module'
 import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 import { join } from 'node:path'
@@ -45,7 +46,8 @@ import CommandRuntime from '@deepseek-ai/dsh-commands'
 import AgentPresetRegistry from '@deepseek-ai/dsh-agent-preset-registry'
 import TypertGatewayService from '@deepseek-ai/dsh-api-gateway'
 import JobController from '@deepseek-ai/dsh-api-job-controller'
-import { CredentialProvider } from '@deepseek-ai/dsh-credentials'
+import { CredentialProvider, credentialRef } from '@deepseek-ai/dsh-credentials'
+import LocalCredentials from '@deepseek-ai/dsh-credentials-local'
 import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
 import { mountWorkspaceFileService } from '../support/remote-application-fixture.ts'
 import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
@@ -80,16 +82,18 @@ import WorkingDirectory from '@deepseek-ai/dsh-working-directory'
 import * as piTuiHostRuntime from '../../src/app/host/pi-tui-host-runtime.ts'
 import * as performanceHost from '../../src/app/host/performance-host.ts'
 import { createExperimentalRemoteRuntime } from '../support/m3-inprocess/runtime.ts'
+import { createRemoteClientRuntime } from '../support/m3-inprocess/client-runtime.ts'
 import type { ExperimentalRemoteRuntime } from '../support/m3-inprocess/runtime.ts'
 import { createRemoteM3ASemantics, type RemoteM3ASemantics } from '../../src/app/remote/m3a-semantics.ts'
 import { createRemoteBackendRuntime } from '../../src/app/remote/runtime.ts'
 import { RemoteConfigPort } from '../../src/runtime/remote/config-remote.ts'
 import { acquireMainSurfaceReference, type MainSurfaceReference } from '../../src/runtime/remote/session-reference.ts'
 import { contextPressureOccupancy } from '../../src/runtime/session-reader-port.ts'
-import { DirectConfigPort } from '../../src/runtime/direct/config-direct.ts'
+import { DirectConfigPort, DirectWebProviderConfig } from '../../src/runtime/direct/config-direct.ts'
 import { DirectTuiSettings, type SettingsFormsLike, type TuiConfigRefs } from '../../src/runtime/direct/tui-settings-direct.ts'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
 
+const require = createRequire(import.meta.url)
 const PRESET = 'm3a-smoke-preset'
 const MAIN = 'm3a-main'
 const CHILD = 'm3a-child'
@@ -181,6 +185,9 @@ async function createHostFixture(
      *  (service `settings`). OPT-IN so the fail-closed "no settings service"
      *  deployment contract stays testable. */
     readonly configPlane?: boolean
+    /** Add the official Web rows to the same profile/Loader plane; the two
+     * negative forms omit exactly one required settings namespace. */
+    readonly webProviderPlane?: boolean | 'missing-web' | 'missing-api'
     /** Expose the mounted `tui-app` row plugin's RESOLVED Config (its live
      *  volatile references) on `globalThis.__m3aTuiRowConfig`, so a suite can build
      *  the REAL production `DirectTuiSettings` over the real Host settings plane. */
@@ -191,6 +198,9 @@ async function createHostFixture(
   } = {},
 ): Promise<HostFixture> {
   const workRoot = life.tempDir('dsh-m3a-')
+  if (options.webProviderPlane !== undefined && options.configPlane !== true) {
+    throw new Error('the official Web provider rows require the config plane')
+  }
   const anchorDir = join(workRoot, 'anchor')
   mkdirSync(anchorDir, { recursive: true })
   const ctx = new Context()
@@ -244,6 +254,9 @@ async function createHostFixture(
     // REUSE it, never mount a second one.
     await ctx.plugin(UserQuestionService)
     await ctx.plugin(Loader)
+    if (options.webProviderPlane !== undefined) {
+      await ctx.plugin(LocalCredentials, { path: join(workRoot, '.credentials.yaml'), watch: false })
+    }
     // The production config plane the base bundle mounts while a
     // `profileContext` exists: `ConfigEditor` (service `configEditor`, injecting
     // loader + profileContext) and the official `SettingsForms` (service
@@ -303,6 +316,53 @@ async function createHostFixture(
         `      name: ${JSON.stringify(rowModulePath)}`,
         '      config:',
         "        sessionId: ''",
+        ...options.webProviderPlane === true ? [
+          '    - id: web',
+          `      name: ${JSON.stringify(require.resolve('@deepseek-ai/dsh-web'))}`,
+          '      config:',
+          '        searchProvider: deepseek-official',
+          '        fetchProvider: http',
+          '    - id: web-search-deepseek',
+          `      name: ${JSON.stringify(require.resolve('@deepseek-ai/dsh-web-search-deepseek'))}`,
+          '      config:',
+          '        apiKeyEnv: DEEPSEEK_API_KEY',
+          '    - id: web-deepseek-api',
+          `      name: ${JSON.stringify(require.resolve('@deepseek-ai/dsh-web-deepseek-api'))}`,
+          '      config:',
+          '        apiKeyEnv: DEEPSEEK_API_KEY',
+          '    - id: web-fetch-http',
+          `      name: ${JSON.stringify(require.resolve('@deepseek-ai/dsh-web-fetch-http'))}`,
+          '    - id: tool-web',
+          `      name: ${JSON.stringify(require.resolve('@deepseek-ai/dsh-tool-web'))}`,
+          '      config:',
+          '        fetch: true',
+        ] : options.webProviderPlane === 'missing-web' ? [
+          // The official API plugin injects `web`; mount that real Host service
+          // under a test-only row id so it can run while the official `web`
+          // settings namespace is genuinely absent.
+          '    - id: f3-test-web-runtime',
+          `      name: ${JSON.stringify(require.resolve('@deepseek-ai/dsh-web'))}`,
+          '    - id: web-deepseek-api',
+          `      name: ${JSON.stringify(require.resolve('@deepseek-ai/dsh-web-deepseek-api'))}`,
+          '      config:',
+          '        apiKeyEnv: DEEPSEEK_API_KEY',
+        ] : options.webProviderPlane === 'missing-api' ? [
+          '    - id: web',
+          `      name: ${JSON.stringify(require.resolve('@deepseek-ai/dsh-web'))}`,
+          '      config:',
+          '        searchProvider: deepseek-official',
+          '        fetchProvider: http',
+          '    - id: web-search-deepseek',
+          `      name: ${JSON.stringify(require.resolve('@deepseek-ai/dsh-web-search-deepseek'))}`,
+          '      config:',
+          '        apiKeyEnv: DEEPSEEK_API_KEY',
+          '    - id: web-fetch-http',
+          `      name: ${JSON.stringify(require.resolve('@deepseek-ai/dsh-web-fetch-http'))}`,
+          '    - id: tool-web',
+          `      name: ${JSON.stringify(require.resolve('@deepseek-ai/dsh-tool-web'))}`,
+          '      config:',
+          '        fetch: true',
+        ] : [],
         '',
       ].join('\n'))
       // A profile resolves its bundles from its OWN node_modules, exactly what
@@ -381,9 +441,11 @@ async function createHostFixture(
     await ctx.plugin(StorageJson, { root: join(workRoot, 'storages') })
     await ctx.plugin(StorageDomain, { backend: 'json' })
     await ctx.plugin(WorkspaceRegistry)
-    await ctx.plugin(pluginCtx => {
-      Reflect.construct(CredentialProvider, [pluginCtx])
-    })
+    if (options.webProviderPlane === undefined) {
+      await ctx.plugin(pluginCtx => {
+        Reflect.construct(CredentialProvider, [pluginCtx])
+      })
+    }
     await ctx.plugin(LocalJobRegistry, {})
     await ctx.plugin(toolJobs)
     await ctx.plugin(JobController, {})
@@ -585,7 +647,11 @@ async function mountSettingsWorkspace(
       permissions: config.permissions,
       subagentModelSelection: config.subagentModelSelection,
       web: config.web,
-      credentials: config.credentials,
+      // Preserve the prototype-owned availability method: the settings-page
+      // fixture merges seams structurally, while production Remote credentials
+      // is a class instance. This is the only credential capability this case
+      // exercises through the /settings page.
+      credentials: { available: () => (config.credentials as { available(): boolean }).available() },
     }),
     extensions: undefined,
     createPluginManagerPage: () => undefined,
@@ -1662,6 +1728,615 @@ test('the REAL Host-owned Direct settings authority drives the /settings workspa
     assert.match(patch, /theme: light/, `the profile document really carries it:\n${patch}`)
   } finally {
     fixture.dispose()
+  }
+})
+
+test('the official Web settings Remotes and /settings page use the same Host authority', async (t) => {
+  // L5: one real Cordis Host with official SettingsForms/ConfigEditor/Web rows,
+  // two generated Client Contexts and the generated settings/credentials faces.
+  // PRODUCTION PREREQUISITES REPRODUCED: one profile manifest, its bundle patch,
+  // the official Loader/ConfigEditor/SettingsForms, LocalCredentials, SettingsController,
+  // and the generated Client settings/credentials namespaces.
+  // TEST STAND-INS: the outer HTTP fetch only; the carrier is the historical
+  // test-only in-process transport, not an OS split-process or packaged artifact.
+  // DELIBERATELY ABSENT: external credentials/network, a physical terminal and
+  // the user's real DSH_HOME/profile.
+  // L6 below adds the mounted TUI.
+  const life = testLifecycle(t)
+  const host = await createHostFixture(life, { configPlane: true, webProviderPlane: true })
+  const forms = host.ctx.get('settings') as {
+    describe(...args: never[]): readonly { ns: string; value?: Record<string, unknown>; revision?: number }[]
+    mutate(...args: never[]): Promise<unknown>
+  }
+  const initialSections = forms.describe()
+  for (const ns of ['web', 'web-deepseek-api']) {
+    const section = initialSections.find(entry => entry.ns === ns)
+    assert.ok(section !== undefined, `the official Loader profile mounted ${ns}`)
+    assert.equal(typeof section.revision, 'number', `${ns} carries the Host revision`)
+  }
+  const credentialHost = host.ctx.get('credentials') as {
+    set(ref: string, value: string): Promise<void>
+    unset(ref: string): Promise<void>
+  }
+  await credentialHost.set(credentialRef('DEEPSEEK_API_KEY'), 'f3-isolated-test-secret')
+
+  const runtime = await composeRuntime(host)
+  const assembled = await createRemoteBackendRuntime({
+    runtime: runtime.client,
+    promptSerializer: stubSerializer(),
+    fetch: runtime.host.carrier.fetch,
+  })
+  let secondClient: Awaited<ReturnType<typeof createRemoteClientRuntime>> | undefined
+  let secondAssembled: Awaited<ReturnType<typeof createRemoteBackendRuntime>> | undefined
+  let fixture: Awaited<ReturnType<typeof mountSettingsWorkspace>> | undefined
+  try {
+    const config = assembled.backend.config
+    const remoteConfig = config as RemoteConfigPort
+    assert.equal(config.configReadiness(), 'ready')
+    assert.equal(config.credentials.available(), true, 'the generated credential Remote is available on this generation')
+    assert.equal(config.web.available(), true)
+    assert.deepEqual(await config.web.read(), {
+      searchProvider: 'deepseek-official',
+      fetchProvider: 'http',
+      api: { baseURL: 'https://api.deepseek.com/v1/tools', count: 10, sendOriginalQuestion: true },
+      credential: { configured: true, source: 'file' },
+    })
+    const credentialProjection = JSON.stringify(await config.web.read())
+    assert.doesNotMatch(credentialProjection, /f3-isolated-test-secret/u,
+      'the generated credentials.describe result contains metadata only')
+    const credentialProvider = host.ctx.get('credentials') as {
+      describe(...args: never[]): Promise<unknown>
+    }
+    const originalCredentialDescribe = credentialProvider.describe
+    credentialProvider.describe = function (this: unknown): Promise<unknown> {
+      return Promise.reject(new Error('f3 credential authority unavailable'))
+    }
+    try {
+      await assert.rejects(config.web.read(), /credentials\.describe\(DEEPSEEK_API_KEY\).*f3 credential authority unavailable/u)
+    } finally {
+      credentialProvider.describe = originalCredentialDescribe
+    }
+
+    await config.web.setSearchProvider('deepseek-search-api')
+    await config.web.setFetchProvider('deepseek-fetch-api')
+    await config.web.setSearchApiCount(20)
+    await config.web.setSendOriginalQuestion(false)
+    await config.web.setSearchApiBaseURL('https://gateway.example.test/v1/tools')
+    assert.deepEqual(await config.web.read(), {
+      searchProvider: 'deepseek-search-api',
+      fetchProvider: 'deepseek-fetch-api',
+      api: { baseURL: 'https://gateway.example.test/v1/tools', count: 20, sendOriginalQuestion: false },
+      credential: { configured: true, source: 'file' },
+    }, 'all five generated settings mutations are authoritative on read-back')
+    const hostValues = forms.describe()
+    assert.equal(hostValues.find(entry => entry.ns === 'web')?.value?.searchProvider, 'deepseek-search-api')
+    assert.equal(hostValues.find(entry => entry.ns === 'web')?.value?.fetchProvider, 'deepseek-fetch-api')
+    assert.equal(hostValues.find(entry => entry.ns === 'web-deepseek-api')?.value?.count, 20)
+    assert.equal(hostValues.find(entry => entry.ns === 'web-deepseek-api')?.value?.sendOriginalQuestion, false)
+    assert.equal(hostValues.find(entry => entry.ns === 'web-deepseek-api')?.value?.baseURL,
+      'https://gateway.example.test/v1/tools')
+    const directWeb = new DirectWebProviderConfig(host.ctx as never)
+    assert.deepEqual(await directWeb.read(), await config.web.read(),
+      'Direct and Remote project the same five Host fields and credential metadata')
+
+    // The configured provider is the NEXT operation's actual Host authority.
+    // Replace only the outer HTTP transport, then call the real ctx.web
+    // consumer under its official Agent initiator scope.
+    const webAgent = await host.harness.create(SessionId('m6-f3-web-consumer'), undefined, { cwd: host.anchorDir })
+    const earlierQuestion = 'earlier private context that must not enter ori_question'
+    const triggeringQuestion = 'the current human question for the Web search'
+    webAgent.session.append('turn/start', { turn: 1 })
+    webAgent.session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: earlierQuestion }],
+      source: { kind: 'user' },
+    }), { surfaceOp: 'append' })
+    webAgent.session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: triggeringQuestion }],
+      source: { kind: 'user' },
+    }), { surfaceOp: 'append' })
+    webAgent.session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+    const requests: Array<{ url: string; authorization: string | undefined; body: Record<string, unknown> | undefined }> = []
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = (async (input: string | URL | { readonly url: string }, init?: RequestInit): Promise<Response> => {
+      const url = input instanceof URL ? input.href : typeof input === 'string' ? input : input.url
+      const headers = new Headers(init?.headers)
+      requests.push({
+        url,
+        authorization: headers.get('authorization') ?? undefined,
+        body: typeof init?.body === 'string' ? JSON.parse(init.body) as Record<string, unknown> : undefined,
+      })
+      return new Response(JSON.stringify({ results: [{ url: 'https://result.example.test/f3', title: 'F3 result', snippet: 'ok', date: null }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    }) as typeof fetch
+    try {
+      const agents = host.ctx.get('agents') as { withInitiator<T>(agent: unknown, operation: () => T): T }
+      const web = host.ctx.get('web') as {
+        search(request: { query: string }): Promise<{ sources: readonly { url: string }[] }>
+      }
+      const result = await agents.withInitiator(webAgent, () => web.search({ query: 'f3 route probe' }))
+      assert.deepEqual(result.sources.map(source => source.url), ['https://result.example.test/f3'])
+      assert.equal(requests.length, 1)
+      assert.equal(requests[0]?.url, 'https://gateway.example.test/v1/tools/search',
+        'the Remote-written provider and endpoint select the real Host HTTP route')
+      assert.equal(requests[0]?.authorization?.startsWith('Bearer '), true,
+        'the real Host credential provider supplies authentication')
+      assert.deepEqual(requests[0]?.body, { query: 'f3 route probe', count: 20, need_content: false },
+        'the Remote-written provider uses count 20 and omits ori_question when disabled')
+
+      await config.web.setSendOriginalQuestion(true)
+      const withOriginalQuestion = await agents.withInitiator(webAgent, () => web.search({ query: 'f3 question probe' }))
+      assert.deepEqual(withOriginalQuestion.sources.map(source => source.url), ['https://result.example.test/f3'])
+      assert.deepEqual(requests[1]?.body, {
+        query: 'f3 question probe',
+        count: 20,
+        need_content: false,
+        ori_question: triggeringQuestion,
+      }, 'the Remote-written true value sends only the latest triggering human question')
+      assert.doesNotMatch(JSON.stringify(requests[1]?.body), /earlier private context/u,
+        'the earlier turn history never enters the Web request')
+
+      await directWeb.setSearchApiCount(21)
+      assert.equal((await config.web.read())?.api.count, 21,
+        'Remote observes the same Host field written by Direct')
+      const directConsumer = await agents.withInitiator(webAgent, () => web.search({ query: 'direct parity probe' }))
+      assert.deepEqual(directConsumer.sources.map(source => source.url), ['https://result.example.test/f3'])
+      assert.deepEqual(requests[2]?.body, {
+        query: 'direct parity probe',
+        count: 21,
+        need_content: false,
+        ori_question: triggeringQuestion,
+      }, 'the same Host consumer applies the Direct-written value through the unchanged provider')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+
+    // The second generated Client is an independent Context attached to this
+    // same Host. Hold Client A's official Host mutation after its revision was
+    // selected, let Client B commit a custom route, then release A into CAS.
+    secondClient = await createRemoteClientRuntime({ carrier: runtime.host.carrier })
+    secondAssembled = await createRemoteBackendRuntime({
+      runtime: secondClient,
+      promptSerializer: stubSerializer(),
+      fetch: runtime.host.carrier.fetch,
+    })
+    const secondConfig = secondAssembled.backend.config
+    assert.equal(secondConfig.configReadiness(), 'ready')
+    assert.equal((await secondConfig.web.read())?.searchProvider, 'deepseek-search-api')
+    const originalMutate = forms.mutate
+    let releaseA!: () => void
+    let announceA!: () => void
+    const waitA = new Promise<void>(resolve => { announceA = resolve })
+    const release = new Promise<void>(resolve => { releaseA = resolve })
+    let held = false
+    forms.mutate = function (this: unknown, ...args: never[]): Promise<unknown> {
+      const [ns, ops] = args as unknown as [string, readonly { op: string; path: readonly string[]; value?: unknown }[]]
+      if (!held && ns === 'web' && ops.some(op => op.path[0] === 'searchProvider' && op.value === 'deepseek-official')) {
+        held = true
+        announceA()
+        return release.then(() => originalMutate.apply(this, args))
+      }
+      return originalMutate.apply(this, args)
+    }
+    const staleWrite = config.web.setSearchProvider('deepseek-official')
+    await waitA
+    try {
+      const secondSettings = await secondClient.remote.settings.describe()
+      assert.equal(secondSettings.ok, true)
+      const secondWeb = secondSettings.value.namespaces.find(entry => entry.ns === 'web')
+      assert.ok(secondWeb?.revision !== undefined)
+      const secondWrite = await secondClient.remote.settings.mutate('web', [
+        { op: 'set', path: ['searchProvider'], value: 'custom-f3-route' },
+      ], secondWeb.revision)
+      assert.equal(secondWrite.ok, true, 'Client B commits through the official generated Settings Remote')
+      releaseA()
+      await assert.rejects(staleWrite, /settings\.mutate\(web\).*revision|settings\.mutate\(web\).*conflict/u)
+    } finally {
+      releaseA()
+      forms.mutate = originalMutate
+    }
+    assert.equal(forms.describe().find(entry => entry.ns === 'web')?.value?.searchProvider, 'custom-f3-route',
+      'the stale Client A write never overwrote Client B')
+    await remoteConfig.describe()
+    assert.equal((await config.web.read())?.searchProvider, 'custom-f3-route',
+      'Client A refreshes the same Host winner')
+    assert.deepEqual(await directWeb.read(), await config.web.read(),
+      'custom provider ids and credential metadata remain identical in Direct and Remote')
+
+    // Prove that the official Host document-updated event makes Client A's
+    // previous mirror stale before its authoritative generated describe settles.
+    let eventObserved = false
+    let readinessAtEvent: 'ready' | 'stale' | 'unavailable' | undefined
+    const offSettingsEvent = runtime.client.remote.$on('settings/document-updated', () => {
+      eventObserved = true
+      readinessAtEvent = config.configReadiness()
+    })
+    try {
+      const eventBase = await secondClient.remote.settings.describe()
+      assert.equal(eventBase.ok, true)
+      const eventWeb = eventBase.value.namespaces.find(entry => entry.ns === 'web')
+      assert.ok(eventWeb?.revision !== undefined)
+      const eventWrite = await secondClient.remote.settings.mutate('web', [
+        { op: 'set', path: ['searchProvider'], value: 'custom-f3-event' },
+      ], eventWeb.revision)
+      assert.equal(eventWrite.ok, true)
+      await waitFor('Client A receives the official settings/document-updated event', () => eventObserved)
+      assert.equal(readinessAtEvent, 'stale', 'the event invalidates the old Host snapshot synchronously')
+      await waitFor('Client A commits the Host document update', () => config.configReadiness() === 'ready')
+      assert.equal((await config.web.read())?.searchProvider, 'custom-f3-event',
+        'the new generated describe supplies the only current value')
+    } finally {
+      offSettingsEvent()
+    }
+
+    // The real Remote UI must project an unknown Host provider verbatim and
+    // remove all confirmation candidates instead of normalizing it to a default.
+    fixture = await mountSettingsWorkspace(host.anchorDir, config, 'remote')
+    await fixture.open()
+    await fixture.selectCategory('Tools')
+    await fixture.key('\r')
+    await fixture.key('\x1b[B')
+    await fixture.key('\x1b[B')
+    await fixture.key('\r')
+    assert.match(fixture.view(), /custom-f3-event/u)
+    await fixture.key('\r')
+    const customDetail = fixture.view()
+    assert.match(customDetail, /Current: custom-f3-event/u)
+    assert.match(customDetail, /CUSTOM route/u)
+    assert.doesNotMatch(customDetail, /› /u, 'the custom route has no selectable candidate')
+    assert.doesNotMatch(customDetail, /Enter confirm/u, 'the Remote UI offers no write for the custom route')
+    const customRevision = forms.describe().find(entry => entry.ns === 'web')?.revision
+    await fixture.key('\r')
+    assert.equal(forms.describe().find(entry => entry.ns === 'web')?.revision, customRevision,
+      'Enter cannot normalize or replace the custom Host route')
+    fixture.dispose()
+    fixture = undefined
+
+    // Restore an official candidate before the successful Remote UI proof.
+    await config.web.setSearchProvider('deepseek-official')
+    assert.equal((await config.web.read())?.searchProvider, 'deepseek-official',
+      'the official candidate is authoritative before the TUI starts')
+    fixture = await mountSettingsWorkspace(host.anchorDir, config, 'remote')
+    await fixture.open()
+    await fixture.selectCategory('Tools')
+    await fixture.key('\r')
+    await fixture.key('\x1b[B')
+    await fixture.key('\x1b[B')
+    await fixture.key('\r')
+    assert.match(fixture.view(), /Web Search Provider/u, 'the existing specialist page is mounted')
+    await fixture.key('\r')
+    await fixture.key('\x1b[H')
+    await fixture.key('\x1b[B')
+    assert.match(fixture.view(), /› DeepSeek Search API/u, 'the intended candidate is highlighted before Confirm')
+    await fixture.key('\r')
+    await fixture.settleUntil(/Current: DeepSeek Search API/u, 'the Remote Web provider write from /settings')
+    assert.match(fixture.view(), /Verified/u)
+    assert.equal(forms.describe().find(entry => entry.ns === 'web')?.value?.searchProvider,
+      'deepseek-search-api', 'the UI-confirmed setting is stored by the official Host authority')
+
+    // Inject one official Host rejection; the existing command owner must keep
+    // its refusal taxonomy and show the still-authoritative value.
+    const formsMutate = forms.mutate
+    let failNextMutation = true
+    forms.mutate = function (this: unknown, ...args: never[]): Promise<unknown> {
+      const [ns] = args as unknown as [string]
+      if (failNextMutation && ns === 'web') {
+        failNextMutation = false
+        return Promise.reject(Object.assign(new Error('f3 injected settings refusal'), { code: 'settings/rejected' }))
+      }
+      return formsMutate.apply(this, args)
+    }
+    try {
+      await fixture.key('\x1b')
+      await fixture.key('\r')
+      await fixture.key('\x1b[A')
+      await fixture.key('\r')
+      await fixture.settleUntil(/Not saved/u, 'the refused Remote Web provider write')
+      assert.equal(forms.describe().find(entry => entry.ns === 'web')?.value?.searchProvider,
+        'deepseek-search-api', 'the refused write leaves the Host value unchanged')
+    } finally {
+      forms.mutate = formsMutate
+    }
+
+    // The next official write succeeds at the Host, but its Remote read-back
+    // is made unavailable. The command owner must report Outcome unknown, not
+    // Verified or Not saved, while the Host's actual committed value remains
+    // independently observable through the original unbound method.
+    const mutateBeforeReadback = forms.mutate
+    const originalDescribe = forms.describe
+    let failReadback = false
+    forms.mutate = function (this: unknown, ...args: never[]): Promise<unknown> {
+      const accepted = mutateBeforeReadback.apply(this, args)
+      void Promise.resolve(accepted).then(() => { failReadback = true })
+      return accepted
+    }
+    forms.describe = function (this: unknown, ...args: never[]): ReturnType<typeof originalDescribe> {
+      if (failReadback) throw new Error('f3 injected read-back failure')
+      return originalDescribe.apply(this, args)
+    }
+    try {
+      await fixture.key('\r')
+      await fixture.settleUntil(/Outcome unknown/u, 'the committed Remote Web write with unavailable read-back')
+      const authoritative = originalDescribe.call(forms).find(entry => entry.ns === 'web')
+      assert.equal(authoritative?.value?.searchProvider, 'deepseek-official',
+        'the official Host mutation committed despite the unreadable Remote read-back')
+      assert.doesNotMatch(fixture.view(), /Verified|Not saved/u,
+        'an unreadable post-write authority is neither success nor a proven refusal')
+    } finally {
+      failReadback = false
+      forms.describe = originalDescribe
+      forms.mutate = mutateBeforeReadback
+    }
+  } finally {
+    fixture?.dispose()
+    secondAssembled?.dispose()
+    await secondClient?.dispose()
+    assembled.dispose()
+    await runtime.dispose()
+    await credentialHost.unset(credentialRef('DEEPSEEK_API_KEY'))
+  }
+})
+
+test('an official Host missing either Web settings namespace keeps the generated Remote capability unavailable', async (t) => {
+  // L5 negative composition probes: each Host still has one real profile,
+  // SettingsForms, SettingsController and generated Client, but one exact Web
+  // settings row is absent from that Host's Loader patch.
+  const life = testLifecycle(t)
+  for (const omitted of ['missing-web', 'missing-api'] as const) {
+    const host = await createHostFixture(life, { configPlane: true, webProviderPlane: omitted })
+    const forms = host.ctx.get('settings') as {
+      describe(...args: never[]): readonly { ns: string; revision?: number }[]
+      mutate(...args: never[]): Promise<unknown>
+    }
+    const before = forms.describe()
+    assert.equal(before.some(entry => entry.ns === 'web'), omitted !== 'missing-web',
+      `${omitted}: observed sections ${before.map(entry => entry.ns).join(', ')}`)
+    assert.equal(before.some(entry => entry.ns === 'web-deepseek-api'), omitted !== 'missing-api',
+      `${omitted}: observed sections ${before.map(entry => entry.ns).join(', ')}`)
+    const runtime = await composeRuntime(host)
+    const assembled = await createRemoteBackendRuntime({
+      runtime: runtime.client,
+      promptSerializer: stubSerializer(),
+      fetch: runtime.host.carrier.fetch,
+    })
+    try {
+      const config = assembled.backend.config
+      assert.equal(config.configReadiness(), 'ready')
+      assert.equal(config.web.available(), false, `${omitted}: both namespaces are required for availability`)
+      assert.equal(await config.web.read(), undefined, `${omitted}: absent Host data is not replaced by defaults`)
+      let mutations = 0
+      const originalMutate = forms.mutate
+      forms.mutate = function (this: unknown, ...args: never[]): Promise<unknown> {
+        mutations += 1
+        return originalMutate.apply(this, args)
+      }
+      try {
+        await assert.rejects(config.web.setSearchApiCount(10), /sections are unavailable/u)
+        assert.equal(mutations, 0, `${omitted}: the Remote adapter refuses before any Host write`)
+      } finally {
+        forms.mutate = originalMutate
+      }
+    } finally {
+      assembled.dispose()
+      await runtime.dispose()
+    }
+  }
+})
+
+test('the Remote Web page confirms each field, keeps credential values hidden, and settles a closed-page write once', async (t) => {
+  // L6 surface qualification over the assembled Remote adapter and the same
+  // real Host profile rows used by the generated-Remote test above.
+  const life = testLifecycle(t)
+  const host = await createHostFixture(life, { configPlane: true, webProviderPlane: true })
+  const forms = host.ctx.get('settings') as {
+    describe(...args: never[]): readonly { ns: string; value?: Record<string, unknown>; revision?: number }[]
+    mutate(...args: never[]): Promise<unknown>
+  }
+  const credentialHost = host.ctx.get('credentials') as {
+    set(ref: string, value: string): Promise<void>
+    unset(ref: string): Promise<void>
+    describe(...args: never[]): Promise<unknown>
+  }
+  await credentialHost.set(credentialRef('DEEPSEEK_API_KEY'), 'f3-ui-isolated-secret')
+  const runtime = await composeRuntime(host)
+  const assembled = await createRemoteBackendRuntime({
+    runtime: runtime.client,
+    promptSerializer: stubSerializer(),
+    fetch: runtime.host.carrier.fetch,
+  })
+  let fixture: Awaited<ReturnType<typeof mountSettingsWorkspace>> | undefined
+  try {
+    const config = assembled.backend.config
+    const remoteConfig = config as RemoteConfigPort
+    assert.equal(config.configReadiness(), 'ready')
+    assert.equal(config.credentials.available(), true, 'credential availability follows the current Client generation')
+    await config.web.setSearchApiCount(7)
+    assert.equal((await config.web.read())?.api.count, 7)
+    fixture = await mountSettingsWorkspace(host.anchorDir, config, 'remote')
+    const page = fixture
+    await page.open()
+    await page.selectCategory('Tools')
+    await page.key('\r')
+    await page.key('\x1b[B')
+    await page.key('\x1b[B')
+    await page.key('\r')
+    await waitFor('the Remote Web page to read the Host', () =>
+      page.view().includes('Web Search Provider') && !page.view().includes('Loading…'))
+
+    const listBar = 'Enter open · r refresh · Esc Tools'
+    const returnToList = async (): Promise<void> => {
+      for (let attempt = 0; attempt < 3 && !page.view().includes(listBar); attempt += 1) {
+        await page.key('\x1b')
+      }
+      assert.ok(page.view().includes(listBar), `the Web page returned to its list:\n${page.view()}`)
+    }
+    const openRow = async (index: number): Promise<void> => {
+      await returnToList()
+      await page.key('\x1b[H')
+      for (let step = 0; step < index; step += 1) await page.key('\x1b[B')
+      await page.key('\r')
+    }
+    const choose = async (index: number): Promise<void> => {
+      await page.key('\x1b[H')
+      for (let step = 0; step < index; step += 1) await page.key('\x1b[B')
+    }
+
+    // Confirming the official auto-selection is a real Verified no-op.
+    await openRow(0)
+    const searchRevision = forms.describe().find(entry => entry.ns === 'web')?.revision
+    const originalMutate = forms.mutate
+    let noOpMutationCalls = 0
+    forms.mutate = function (this: unknown, ...args: never[]): Promise<unknown> {
+      noOpMutationCalls += 1
+      return originalMutate.apply(this, args)
+    }
+    try {
+      await page.key('\r')
+      await page.settleUntil(/Verified/u, 'the current default provider confirmation')
+      assert.equal(noOpMutationCalls, 0, 'confirming the official default dispatches no Host mutation')
+      assert.equal(forms.describe().find(entry => entry.ns === 'web')?.revision, searchRevision)
+    } finally {
+      forms.mutate = originalMutate
+    }
+
+    // A non-preset count remains visible while the human explicitly selects 20.
+    await openRow(2)
+    assert.match(page.view(), /Current: 7/u, "the Host's valid count outside the presets is shown verbatim")
+    await choose(2)
+    assert.match(page.view(), /› 20/u)
+    await page.key('\r')
+    await waitFor('the explicit Remote count confirmation reaches the Host', () =>
+      forms.describe().find(entry => entry.ns === 'web-deepseek-api')?.value?.count === 20)
+    await page.settleUntil(/Current: 20/u, 'the confirmed count read-back')
+    assert.match(page.view(), /Verified/u)
+
+    // Share Original Question is independently confirmed, and the displayed
+    // boolean agrees with the official Host form after read-back.
+    await openRow(3)
+    assert.match(page.view(), /Current: on/u)
+    await choose(1)
+    assert.match(page.view(), /› off/u)
+    await page.key('\r')
+    await waitFor('the original-question choice reaches the Host', () =>
+      forms.describe().find(entry => entry.ns === 'web-deepseek-api')?.value?.sendOriginalQuestion === false)
+    await page.settleUntil(/Current: off/u, 'the original-question read-back')
+    assert.match(page.view(), /Verified/u)
+
+    // The endpoint editor always paints the trusted-HTTPS disclosure. Esc
+    // cancels without a write; an explicit invalid HTTP Confirm is refused by
+    // the Remote adapter before Host mutate; a distinct HTTPS Confirm is saved.
+    await openRow(4)
+    assert.match(page.view(), /Only confirm a trusted https base: it receives the API key and the query/u)
+    assert.match(page.view(), /Enter confirm · Esc cancel/u)
+    const apiRevisionBeforeCancel = forms.describe().find(entry => entry.ns === 'web-deepseek-api')?.revision
+    const endpointBefore = forms.describe().find(entry => entry.ns === 'web-deepseek-api')?.value?.baseURL
+    await page.key('\x1b')
+    assert.equal(forms.describe().find(entry => entry.ns === 'web-deepseek-api')?.revision, apiRevisionBeforeCancel,
+      'cancelling the editor writes nothing')
+    assert.equal(forms.describe().find(entry => entry.ns === 'web-deepseek-api')?.value?.baseURL, endpointBefore)
+
+    await openRow(4)
+    await page.key('\x15')
+    const invalidEndpoint = 'http://invalid.example.test/v1/tools'
+    for (const character of invalidEndpoint) await page.key(character)
+    const apiRevisionBeforeInvalid = forms.describe().find(entry => entry.ns === 'web-deepseek-api')?.revision
+    await page.key('\r')
+    await page.settleUntil(/the Search\/Fetch API endpoint must use https:\/\//u, 'the rejected HTTP endpoint')
+    assert.equal(forms.describe().find(entry => entry.ns === 'web-deepseek-api')?.revision, apiRevisionBeforeInvalid,
+      'the invalid endpoint is rejected before any Host write')
+    assert.equal(forms.describe().find(entry => entry.ns === 'web-deepseek-api')?.value?.baseURL, endpointBefore)
+    await page.key('\x1b')
+
+    await openRow(4)
+    const confirmedEndpoint = `${String(endpointBefore)}/m6-f3-ui`
+    for (const character of '/m6-f3-ui') await page.key(character)
+    await page.key('\r')
+    await waitFor('the HTTPS endpoint Confirm is authoritative on the Host', () =>
+      forms.describe().find(entry => entry.ns === 'web-deepseek-api')?.value?.baseURL === confirmedEndpoint)
+    await waitFor('the verified endpoint editor closes on read-back', () =>
+      !page.view().includes('Enter confirm · Esc cancel') && page.view().includes('m6-f3-ui'))
+    assert.equal((await config.web.read())?.api.baseURL, confirmedEndpoint)
+
+    // The page's credential reference reader shows only presence/source and
+    // the Models hand-off; a provider failure paints Unavailable, not false.
+    await openRow(5)
+    await page.settleUntil(/State: Configured · source: file/u, 'the configured Remote credential reference')
+    assert.match(page.view(), /Reference: DEEPSEEK_API_KEY/u)
+    assert.match(page.view(), /Clear in Models…/u)
+    assert.doesNotMatch(page.view(), /f3-ui-isolated-secret/u)
+
+    // Hold one explicit count write after it reaches the official Host. Closing
+    // the page and reconnecting the Client cannot replay it; the command owner
+    // still settles the single dispatched mutation from Host authority.
+    await openRow(2)
+    await choose(3)
+    assert.match(page.view(), /› 50/u)
+    const originalHostMutate = forms.mutate
+    let countMutationCalls = 0
+    let countMutationStarted = false
+    let announceCountMutation!: () => void
+    let releaseCountMutation!: () => void
+    const countMutationStartedPromise = new Promise<void>(resolve => { announceCountMutation = resolve })
+    const countMutationGate = new Promise<void>(resolve => { releaseCountMutation = resolve })
+    forms.mutate = function (this: unknown, ...args: never[]): Promise<unknown> {
+      const [ns, ops] = args as unknown as [string, readonly { op: string; path: readonly string[]; value?: unknown }[]]
+      if (ns === 'web-deepseek-api' && ops.some(op => op.path[0] === 'count' && op.value === 50)) {
+        countMutationCalls += 1
+        countMutationStarted = true
+        announceCountMutation()
+        return countMutationGate.then(() => originalHostMutate.apply(this, args))
+      }
+      return originalHostMutate.apply(this, args)
+    }
+    const oldGeneration = runtime.client.connection.generation.getSnapshot()?.id
+    assert.notEqual(oldGeneration, undefined)
+    try {
+      await page.key('\r')
+      await waitFor('the confirmed count write reaches the Host boundary', () => countMutationStarted)
+      assert.match(page.view(), /Saving…/u)
+      await page.key('\x1b')
+      await page.key('\x1b')
+      assert.doesNotMatch(page.view(), /Web Search Provider/u, 'the specialist page is closed while the Host write remains pending')
+      runtime.client.connection.reconnect()
+      await waitFor('the Client installs a new Connection generation', () =>
+        runtime.client.connection.generation.getSnapshot()?.id !== oldGeneration)
+      releaseCountMutation()
+      await waitFor('the dispatched Host count write settles after page closure', () =>
+        forms.describe().find(entry => entry.ns === 'web-deepseek-api')?.value?.count === 50)
+      assert.equal(countMutationCalls, 1, 'disconnect and page disposal do not replay the dispatched mutation')
+      await waitFor('Remote configuration refreshes from the current generation', () =>
+        config.configReadiness() === 'ready')
+      assert.equal((await remoteConfig.web.read())?.api.count, 50)
+    } finally {
+      releaseCountMutation()
+      forms.mutate = originalHostMutate
+    }
+
+    // The page returned to its Tools row in the still-open Settings workspace;
+    // re-enter that same lease instead of creating a second screen owner.
+    await page.key('\r')
+    await waitFor('the Remote Web page remounts in the existing Settings lease', () =>
+      page.view().includes('Web Search Provider') && !page.view().includes('Loading…'))
+    await openRow(5)
+    await page.settleUntil(/State: Configured · source: file/u, 'the reopened credential reference')
+    const originalCredentialDescribe = credentialHost.describe
+    credentialHost.describe = function (this: unknown): Promise<unknown> {
+      return Promise.reject(new Error('f3 UI credential failure'))
+    }
+    try {
+      await page.key('r')
+      await page.settleUntil(/Unavailable/u, 'the failed Remote credential reference read')
+      assert.doesNotMatch(page.view(), /f3-ui-isolated-secret/u)
+      assert.doesNotMatch(page.view(), /State: Not configured/u)
+    } finally {
+      credentialHost.describe = originalCredentialDescribe
+    }
+  } finally {
+    fixture?.dispose()
+    assembled.dispose()
+    await runtime.dispose()
+    await credentialHost.unset(credentialRef('DEEPSEEK_API_KEY'))
   }
 })
 

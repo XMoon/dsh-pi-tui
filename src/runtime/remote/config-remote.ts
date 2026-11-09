@@ -50,6 +50,12 @@ import {
   resolveUserLayerFooterMode,
 } from '../../domain/footer/command-trust.ts'
 import { parseFooterCustomItems, type FooterCustomItemsParseResult } from '../../domain/footer/custom-items.ts'
+import {
+  assertFetchProviderId,
+  assertSearchApiBaseURL,
+  assertSearchApiCount,
+  assertSearchProviderId,
+} from '../../domain/web-provider-settings.ts'
 import type {
   AccountBalanceOutcome,
   AccountClientMetadata,
@@ -1742,6 +1748,10 @@ class RemoteWebStartupPreferenceConfig implements WebStartupPreferenceConfig {
   }
 }
 
+const WEB_PROVIDER_NS = 'web'
+const WEB_SEARCH_API_NS = 'web-deepseek-api'
+const WEB_API_KEY_REF = 'DEEPSEEK_API_KEY'
+
 /* ------------------------------------------------------------------------- *
  * The port.
  * ------------------------------------------------------------------------- */
@@ -1811,11 +1821,7 @@ export class RemoteConfigPort implements ConfigPort {
     this.subagentModelSelection = new RemoteSubagentModelSelectionConfig(this.mirror)
     this.visualTools = new RemoteVisualToolsConfig(this.mirror)
     this.webStartupPreference = new RemoteWebStartupPreferenceConfig(this.mirror)
-    // S2/PR-B §3.2: the Host web-provider setting stays DIRECT-only. The wire
-    // publishes no provider-selection read or write, so this backend reports a
-    // static unavailable and refuses every write — it never names a Host
-    // settings namespace and never claims a success.
-    this.web = new RemoteUnsupportedWebProviderConfig()
+    this.web = new RemoteWebProviderConfig(this.mirror, this.credentialConfig)
   }
 
   /** Commit one fresh mirror snapshot (or leave the last-known value). A
@@ -1867,46 +1873,92 @@ export class RemoteConfigPort implements ConfigPort {
   }
 }
 
-/**
- * The Remote backend's Web provider sub-domain: INTENTIONALLY unsupported in
- * S2. The wire carries no web-provider selection read (the `settings` mirror
- * exposes plugin forms for the CLIENT-owned surfaces only) and no write RPC for
- * a Host namespace, so the section is presented as unsupported on this backend
- * and every write fails closed instead of naming a Host settings namespace or
- * reporting a success it cannot observe. Remote web-provider support is owned
- * by a later stage (S3/S4) together with the Host generated-settings parity.
- */
-class RemoteUnsupportedWebProviderConfig implements WebProviderConfig {
+class RemoteWebProviderConfig implements WebProviderConfig {
+  private readonly mirror: RemoteConfigMirror
+  private readonly credentials: RemoteCredentialConfig
+
+  constructor(mirror: RemoteConfigMirror, credentials: RemoteCredentialConfig) {
+    this.mirror = mirror
+    this.credentials = credentials
+  }
+
   available(): boolean {
-    return false
+    return this.mirror.namespace(WEB_PROVIDER_NS) !== undefined
+      && this.mirror.namespace(WEB_SEARCH_API_NS) !== undefined
   }
 
   async read(): Promise<WebProviderSettings | undefined> {
-    return undefined
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await this.mirror.ensureCurrent()
+      if (this.mirror.readiness() !== 'ready') {
+        throw new SupersededReadError('the Remote Web settings have no current Host snapshot')
+      }
+      const web = this.mirror.namespace(WEB_PROVIDER_NS)
+      const api = this.mirror.namespace(WEB_SEARCH_API_NS)
+      if (web === undefined || api === undefined) return undefined
+      const webValue = plainRecord(web.value)
+      const apiValue = plainRecord(api.value)
+      if (webValue === undefined || apiValue === undefined) return undefined
+      const baseURL = apiValue.baseURL
+      const count = apiValue.count
+      const sendOriginalQuestion = apiValue.sendOriginalQuestion
+      if (typeof baseURL !== 'string' || baseURL === '') return undefined
+      if (typeof count !== 'number' || !Number.isInteger(count)) return undefined
+      if (typeof sendOriginalQuestion !== 'boolean') return undefined
+      const credential = await this.credentials.describeReference(WEB_API_KEY_REF)
+      if (this.mirror.readiness() !== 'ready'
+        || this.mirror.namespace(WEB_PROVIDER_NS) !== web
+        || this.mirror.namespace(WEB_SEARCH_API_NS) !== api) continue
+      return {
+        searchProvider: typeof webValue.searchProvider === 'string' && webValue.searchProvider !== ''
+          ? webValue.searchProvider
+          : undefined,
+        fetchProvider: typeof webValue.fetchProvider === 'string' && webValue.fetchProvider !== ''
+          ? webValue.fetchProvider
+          : undefined,
+        api: { baseURL, count, sendOriginalQuestion },
+        credential,
+      }
+    }
+    throw new SupersededReadError('the Remote Web settings read was repeatedly superseded')
   }
 
-  private refuse(): never {
-    throw new Error('web provider settings are not supported on this backend')
+  private async mutate(
+    ns: typeof WEB_PROVIDER_NS | typeof WEB_SEARCH_API_NS,
+    field: string,
+    value: unknown,
+  ): Promise<void> {
+    await this.mirror.ensureCurrent()
+    if (this.mirror.readiness() !== 'ready'
+      || this.mirror.namespace(WEB_PROVIDER_NS) === undefined
+      || this.mirror.namespace(WEB_SEARCH_API_NS) === undefined) {
+      throw new Error('the official Host Web settings sections are unavailable or non-current')
+    }
+    await this.mirror.mutate(ns, [{ op: 'set', path: [field], value }])
   }
 
-  async setSearchProvider(): Promise<void> {
-    this.refuse()
+  async setSearchProvider(id: 'deepseek-official' | 'deepseek-search-api'): Promise<void> {
+    assertSearchProviderId(id)
+    await this.mutate(WEB_PROVIDER_NS, 'searchProvider', id)
   }
 
-  async setFetchProvider(): Promise<void> {
-    this.refuse()
+  async setFetchProvider(id: 'http' | 'deepseek-fetch-api'): Promise<void> {
+    assertFetchProviderId(id)
+    await this.mutate(WEB_PROVIDER_NS, 'fetchProvider', id)
   }
 
-  async setSearchApiCount(): Promise<void> {
-    this.refuse()
+  async setSearchApiCount(count: number): Promise<void> {
+    assertSearchApiCount(count)
+    await this.mutate(WEB_SEARCH_API_NS, 'count', count)
   }
 
-  async setSendOriginalQuestion(): Promise<void> {
-    this.refuse()
+  async setSendOriginalQuestion(enabled: boolean): Promise<void> {
+    await this.mutate(WEB_SEARCH_API_NS, 'sendOriginalQuestion', enabled)
   }
 
-  async setSearchApiBaseURL(): Promise<void> {
-    this.refuse()
+  async setSearchApiBaseURL(url: string): Promise<void> {
+    assertSearchApiBaseURL(url)
+    await this.mutate(WEB_SEARCH_API_NS, 'baseURL', url)
   }
 }
 

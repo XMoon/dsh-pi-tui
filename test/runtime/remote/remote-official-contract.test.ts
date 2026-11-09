@@ -57,6 +57,8 @@ import type { ClientRemote } from '@deepseek-ai/dsh-api-gateway/client'
 // `./remote` face; this public assembly entry references them all, so the
 // `ClientRemote[...]` indexed accesses below resolve to the published contract.
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
+import type { RemoteClientRuntime } from '../../support/m3-inprocess/client-runtime.ts'
+import { RemoteConfigPort } from '../../../src/runtime/remote/config-remote.ts'
 import { RemoteSessionReader } from '../../../src/runtime/remote/session-reader-remote.ts'
 import { RemoteSessionWriter, type RemotePromptSerializer } from '../../../src/runtime/remote/session-writer-remote.ts'
 import { RemoteSessionLifecycle, type RemoteWorkspaceNamespaceLike } from '../../../src/runtime/remote/session-lifecycle-remote.ts'
@@ -313,6 +315,7 @@ test('every Remote adapter accepts the published DSH public Client/Remote face (
   // A compile-time proof only runs when the compiler keeps the function in the
   // program; this reference is that keep-alive.
   for (const proof of [
+    officialRemoteWebConfig,
     officialSessionReader,
     officialSessionWriter,
     officialSessionLifecycle,
@@ -388,6 +391,12 @@ function officialRemoteInteractionPort(
     remote: { userQuestions: remote.userQuestions, $on: remote.$on },
     connection: { generation },
   })
+}
+
+/** The published settings and credentials Remote faces satisfy the production
+ * Remote ConfigPort source without casts. */
+function officialRemoteWebConfig(runtime: RemoteClientRuntime): RemoteConfigPort {
+  return new RemoteConfigPort({ remote: runtime.remote, connection: runtime.connection })
 }
 
 /** The published settings Remote face the Remote ConfigPort maps (the mirror
