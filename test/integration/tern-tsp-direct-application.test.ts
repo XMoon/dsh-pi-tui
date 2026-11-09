@@ -538,7 +538,6 @@ test('real Direct reasoning and Tool settlement keep their TSP identities across
     } finally {
       releaseArguments()
       recorder.detach()
-      await fixture.settle()
     }
   }
 })
