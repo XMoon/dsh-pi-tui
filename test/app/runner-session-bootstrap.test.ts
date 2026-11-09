@@ -1465,6 +1465,12 @@ test('a switch paints a pre-commit command and settles one issued after the fold
   ])
   if (deadlineTimer !== undefined) clearTimeout(deadlineTimer)
   assert.equal(resumeReached, true, '/resume must reach the target Session open')
+  const commandCards = (): number =>
+    (probe.capturedMessages ?? []).filter(message => message.kind === 'command').length
+  // Precondition: A's own frame is the current transcript subject.
+  await vt.waitForRender()
+  assert.ok((probe.capturedMessages ?? []).some(message => message.text === 'A answer'),
+    'the old Session transcript must be the current frame before the opening event')
   // PRE-COMMIT event for the target: it is already part of B's official log
   // (the real Host append precedes the emit), so the cold hydration must paint
   // it once B commits — and it must NOT paint on the still-current A first.
@@ -1475,10 +1481,16 @@ test('a switch paints a pre-commit command and settles one issued after the fold
     source: { kind: 'user' },
   }) as SessionEvent)
   await settle()
-  const commandCards = (): number =>
-    (probe.capturedMessages ?? []).filter(message => message.kind === 'command').length
+  // The transcript repaint is COALESCED (50 ms), so the negative needs to
+  // outlive that flush while the resume barrier still holds: a wrongly routed
+  // B event would otherwise leave the probe unchanged here and be erased by
+  // B's hydration before its timer fires. 70 ms is the existing justified
+  // flush bound, not a simulated slow machine.
+  await new Promise(resolve => setTimeout(resolve, 70))
   assert.equal(commandCards(), 0,
     "the opening target's command must not paint on the old Session before the commit")
+  assert.equal(vt.getViewport().join('\n').includes('/preset status'), false,
+    "the old Session's real terminal frame must not show the opening command")
 
   releaseResume()
   let catalogTimer: ReturnType<typeof setTimeout> | undefined
