@@ -1302,7 +1302,7 @@ test('a command issued while /new is still settling reaches the Direct main tran
     },
   } as never)
   fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id })
-  await settle()
+  await settle() // reason: drain the runner's startup microtasks before /new
 
   const newHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('new')
   assert.ok(newHandler, 'the real runner must register the /new transition command')
@@ -1311,10 +1311,9 @@ test('a command issued while /new is still settling reaches the Direct main tran
   // A bounded FAILURE bound, never an observation window: the gate itself is
   // the authoritative signal that /new reached its post-hydration refresh.
   let deadlineTimer: ReturnType<typeof setTimeout> | undefined
-  const entered = await Promise.race([
-    catalogEnteredPromise.then(() => true),
-    new Promise<false>(resolve => { deadlineTimer = setTimeout(() => resolve(false), 15_000) }),
-  ])
+  // reason: bounded failure deadline; the promise gate is the authoritative signal
+  const deadline = new Promise<false>(resolve => { deadlineTimer = setTimeout(() => resolve(false), 15_000) })
+  const entered = await Promise.race([catalogEnteredPromise.then(() => true), deadline])
   if (deadlineTimer !== undefined) clearTimeout(deadlineTimer)
   assert.equal(entered, true, '/new must reach its post-hydration catalog refresh')
 
@@ -1337,7 +1336,7 @@ test('a command issued while /new is still settling reaches the Direct main tran
     kind: 'success',
     text: 'preset: cordis · default: standard',
   }) as SessionEvent)
-  await settle()
+  await settle() // reason: drain the routing's queued presentation microtasks
 
   // The OFFICIAL log has the matched pair (the executor did its job)...
   const commandEvents = child.snapshotEvents().filter(entry => {
@@ -1366,7 +1365,7 @@ test('a command issued while /new is still settling reaches the Direct main tran
   // The already-presented card must neither disappear nor duplicate.
   releaseCatalog()
   await switchPromise
-  await settle()
+  await settle() // reason: drain the transition's completion microtasks
   await vt.waitForRender()
   assert.equal(commandCards(), 1, 'settling /new must keep exactly the one command card')
   assert.ok(vt.getViewport().join('\n').includes('/preset status'),
@@ -1450,7 +1449,7 @@ test('a switch paints a pre-commit command and settles one issued after the fold
     },
   )
   fiber = await mountRunner(context, home, harness, { sessionId: sessionA.id }, { sessionId: sessionA.id })
-  await settle()
+  await settle() // reason: drain the runner's startup microtasks before /resume
 
   const resumeHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('resume')
   assert.ok(resumeHandler, 'the real runner must register /resume')
@@ -1459,10 +1458,9 @@ test('a switch paints a pre-commit command and settles one issued after the fold
   const commandId = 'cmd-opening-cut-1'
   const switchPromise = (resumeHandler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: sessionB.id })
   let deadlineTimer: ReturnType<typeof setTimeout> | undefined
-  const resumeReached = await Promise.race([
-    resumeEnteredPromise.then(() => true),
-    new Promise<false>(resolve => { deadlineTimer = setTimeout(() => resolve(false), 15_000) }),
-  ])
+  // reason: bounded failure deadline; the resume gate is the authoritative signal
+  const deadline = new Promise<false>(resolve => { deadlineTimer = setTimeout(() => resolve(false), 15_000) })
+  const resumeReached = await Promise.race([resumeEnteredPromise.then(() => true), deadline])
   if (deadlineTimer !== undefined) clearTimeout(deadlineTimer)
   assert.equal(resumeReached, true, '/resume must reach the target Session open')
   const commandCards = (): number =>
@@ -1480,7 +1478,7 @@ test('a switch paints a pre-commit command and settles one issued after the fold
     args: ' status',
     source: { kind: 'user' },
   }) as SessionEvent)
-  await settle()
+  await settle() // reason: drain the routing's queued presentation microtasks
   // The transcript repaint is COALESCED (50 ms), so the negative needs to
   // outlive that flush while the resume barrier still holds: a wrongly routed
   // B event would otherwise leave the probe unchanged here and be erased by
@@ -1494,10 +1492,9 @@ test('a switch paints a pre-commit command and settles one issued after the fold
 
   releaseResume()
   let catalogTimer: ReturnType<typeof setTimeout> | undefined
-  const catalogReached = await Promise.race([
-    catalogEnteredPromise.then(() => true),
-    new Promise<false>(resolve => { catalogTimer = setTimeout(() => resolve(false), 15_000) }),
-  ])
+  // reason: bounded failure deadline; the catalog gate is the authoritative signal
+  const catalogDeadline = new Promise<false>(resolve => { catalogTimer = setTimeout(() => resolve(false), 15_000) })
+  const catalogReached = await Promise.race([catalogEnteredPromise.then(() => true), catalogDeadline])
   if (catalogTimer !== undefined) clearTimeout(catalogTimer)
   assert.equal(catalogReached, true, 'the switch must reach its post-hydration catalog refresh')
   // The commit published B and the cold hydration painted B's official log:
@@ -1515,7 +1512,7 @@ test('a switch paints a pre-commit command and settles one issued after the fold
     kind: 'success',
     text: 'preset: cordis · default: standard',
   }) as SessionEvent)
-  await settle()
+  await settle() // reason: drain the routing's queued presentation microtasks
   await new Promise(resolve => setTimeout(resolve, 70))
   await vt.waitForRender()
   assert.equal(commandCards(), 1, 'settlement must reuse the single command row')
@@ -1524,7 +1521,7 @@ test('a switch paints a pre-commit command and settles one issued after the fold
 
   releaseCatalog()
   await switchPromise
-  await settle()
+  await settle() // reason: drain the transition's completion microtasks
   await vt.waitForRender()
   assert.equal(commandCards(), 1, 'completing the switch must neither drop nor duplicate the command row')
 })
