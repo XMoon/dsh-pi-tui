@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { arch, cpus, platform, release, type } from 'node:os'
 import { join } from 'node:path'
-import { rect, visibleSpan } from './tern-pane-geometry.mjs'
+import { rect, visibleBox, visibleSpan } from './tern-pane-geometry.mjs'
 
 const IS_GUI = process.env.TERN_FOCUS_GUI === '1'
 const SCENARIO = process.env.TERN_FOCUS_CASE ?? 'svg'
@@ -385,6 +385,26 @@ export default async function (h) {
       finish(h, extra)
       return
     }
+    const maskedSnapshot = h.snapshot()
+    const maskedRootHead = visibleSectionHead(maskedSnapshot, h, 'Waiting for input')
+    const dim = maskedSnapshot.nodes.find(node => String(node.class ?? '').split(/\s+/u).includes('sf-ov-dim'))
+    const rootBox = maskedRootHead === undefined ? [0, 0, 0, 0] : rect(maskedRootHead)
+    const dimBox = dim === undefined ? [0, 0, 0, 0] : rect(dim)
+    const headerPoint = [rootBox[0] + rootBox[2] / 2, rootBox[1] + rootBox[3] / 2]
+    const rootPointMaskedByModal = maskedRootHead !== undefined && dim !== undefined
+      && headerPoint[0] >= dimBox[0] && headerPoint[0] <= dimBox[0] + dimBox[2]
+      && headerPoint[1] >= dimBox[1] && headerPoint[1] <= dimBox[1] + dimBox[3]
+    h.check('the official Ask User dim layer covers the current Focus Root pointer target', rootPointMaskedByModal,
+      JSON.stringify({ root: rootBox, dim: dimBox, headerPoint }))
+    h.check('the underlying Focus Root remains closed before the masked pointer attempt', rootId !== undefined
+      && liveNodes(h).get(rootId)?.p.collapsed === true, JSON.stringify(rootId === undefined ? null : liveNodes(h).get(rootId)?.p))
+    const beforeMaskedRootClick = eventRows(h).length
+    h.check('a real client pointer can target the visible native Focus head behind the modal', maskedRootHead !== undefined
+      && await h.click(maskedSnapshot.chains, maskedRootHead),
+      JSON.stringify(maskedRootHead === undefined ? null : { text: h.descendantsText(maskedRootHead), rect: rect(maskedRootHead) }))
+    h.check('the masked pointer produces no Focus Root toggle event and leaves it closed', eventRows(h).length === beforeMaskedRootClick
+      && rootId !== undefined && liveNodes(h).get(rootId)?.p.collapsed === true,
+      JSON.stringify({ events: eventRows(h).slice(beforeMaskedRootClick), root: rootId === undefined ? undefined : liveNodes(h).get(rootId)?.p }))
     h.check('the Continue choice accepts a real pointer click', await h.click(questionSnapshot.chains, continueChoice),
       JSON.stringify({ text: h.descendantsText(continueChoice), rect: rect(continueChoice) }))
     const reviewSnapshot = h.snapshot()
@@ -432,6 +452,25 @@ export default async function (h) {
     h.check(`the client resolves ${viewport.appearance} at ${viewport.width}x${viewport.height}`, theme === viewport.appearance, String(theme))
     const snapshot = h.snapshot()
     const rootNode = visibleSectionHead(snapshot, h, 'Working')
+    const visibleHeaders = snapshot.nodes
+      .filter(node => String(node.class ?? '').split(/\s+/u).includes('sf-section-head'))
+      .map(node => ({ node, visible: visibleBox(snapshot.chains, node) }))
+      .filter(entry => entry.visible.span.x >= 4 && entry.visible.span.y >= 4)
+    const dock = snapshot.nodes.find(node => String(node.class ?? '').split(/\s+/u).includes('tv-dock'))
+    const dockRect = rect(dock ?? {})
+    const dockOverlaps = visibleHeaders.filter(({ visible }) => {
+      const left = visible.start.x
+      const top = visible.start.y
+      const right = left + visible.span.x
+      const bottom = top + visible.span.y
+      return dock !== undefined && left < dockRect[0] + dockRect[2] && right > dockRect[0]
+        && top < dockRect[1] + dockRect[3] && bottom > dockRect[1]
+    }).map(({ node, visible }) => ({ text: h.descendantsText(node), rect: visible.rect, start: visible.start, span: visible.span }))
+    h.check(`visible Focus and inner Section headers do not overlap Dock/Composer at ${viewport.width}x${viewport.height}`,
+      dock !== undefined && dockOverlaps.length === 0,
+      JSON.stringify({ dock: dockRect, headers: visibleHeaders.map(({ node, visible }) => ({
+        text: h.descendantsText(node), rect: visible.rect, start: visible.start, span: visible.span,
+      })), overlaps: dockOverlaps }))
     const capture = h.capture(`focus-${viewport.width}x${viewport.height}-${viewport.appearance}`, 'collapsed native Focus root in the real Tern pane')
     const span = rootNode === undefined ? { x: 0, y: 0 } : {
       x: visibleSpan(snapshot.chains, rootNode, 'x'),

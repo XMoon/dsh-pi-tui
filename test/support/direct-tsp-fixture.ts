@@ -143,6 +143,7 @@ class ScriptedToolStepSequenceAdapter extends ScriptedStreamingAdapter {
   private readonly holdBeforeStep: ((stepIndex: number, signal?: AbortSignal) => Promise<void>) | undefined
   private readonly holdToolArguments: ((stepIndex: number, signal?: AbortSignal) => Promise<void>) | undefined
   private readonly scriptedReasoningDeltas: readonly string[] | undefined
+  private readonly holdReasoningDelta: ((stepIndex: number, deltaIndex: number, signal?: AbortSignal) => Promise<void>) | undefined
   private stepIndex = 0
 
   constructor(
@@ -152,12 +153,14 @@ class ScriptedToolStepSequenceAdapter extends ScriptedStreamingAdapter {
     holdBeforeStep?: (stepIndex: number, signal?: AbortSignal) => Promise<void>,
     holdToolArguments?: (stepIndex: number, signal?: AbortSignal) => Promise<void>,
     scriptedReasoningDeltas?: readonly string[],
+    holdReasoningDelta?: (stepIndex: number, deltaIndex: number, signal?: AbortSignal) => Promise<void>,
   ) {
     super(deltas, hold)
     this.scriptedSteps = steps
     this.holdBeforeStep = holdBeforeStep
     this.holdToolArguments = holdToolArguments
     this.scriptedReasoningDeltas = scriptedReasoningDeltas
+    this.holdReasoningDelta = holdReasoningDelta
   }
 
   override async *stream(options: { readonly signal?: AbortSignal }): AsyncIterable<StreamChunk> {
@@ -176,7 +179,8 @@ class ScriptedToolStepSequenceAdapter extends ScriptedStreamingAdapter {
     const toolCallIndex = reasoning === undefined ? 1 : 2
     if (reasoning !== undefined) {
       yield { type: 'block-start', index: 0, blockType: 'reasoning' }
-      for (const delta of reasoning) {
+      for (const [deltaIndex, delta] of reasoning.entries()) {
+        await this.holdReasoningDelta?.(stepIndex, deltaIndex, options.signal)
         this.emittedReasoningChunks.push({ step: stepIndex, text: delta })
         yield { type: 'reasoning-delta', index: 0, text: delta }
       }
@@ -349,8 +353,10 @@ export interface DirectTspFixtureOptions {
    *  request's optional text becomes an official Assistant message between
    *  canonical Work spans. */
   readonly scriptedToolCalls?: readonly ScriptedModelStep[]
-   /** Optional reasoning stream shared by each scripted sequence step. */
-   readonly scriptedReasoningDeltas?: readonly string[]
+  /** Reasoning deltas emitted in-order for every configured sequence step. */
+  readonly scriptedReasoningDeltas?: readonly string[]
+  /** Hold one reasoning delta before delivery for a source-to-UI live witness. */
+  readonly holdScriptedReasoningDelta?: (stepIndex: number, deltaIndex: number, signal?: AbortSignal) => Promise<void>
   /** A narrow, test-only observation barrier before one sequence index; when
    *  supplied the callback owns the release/abort race for that model step. */
   readonly holdScriptedToolStep?: (stepIndex: number, signal?: AbortSignal) => Promise<void>
@@ -597,6 +603,7 @@ export async function createDirectTspFixture(
       options.holdScriptedToolStep,
       options.holdScriptedToolCallArguments,
       options.scriptedReasoningDeltas,
+      options.holdScriptedReasoningDelta,
     )
     : options.scriptedToolCall === undefined
       ? new ScriptedStreamingAdapter(options.deltas ?? ['B2', '-DIRECT', '-OK'], options.streamHold)

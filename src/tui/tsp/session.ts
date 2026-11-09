@@ -2990,10 +2990,8 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     const structure = projectTranscriptStructure(messages)
     const loadedMessages = new Set(messages)
     const liveClusters = new Set<TranscriptMessage>()
-    const clusteredMembers = new Set<TranscriptMessage>()
     const collectCluster = (cluster: { readonly owner: TranscriptMessage; readonly members: readonly TranscriptMessage[] }): void => {
       liveClusters.add(cluster.owner)
-      for (const member of cluster.members) clusteredMembers.add(member)
     }
     for (const block of structure) {
       if (block.kind === 'context-cluster') collectCluster(block.cluster)
@@ -3003,12 +3001,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     }
     for (const owner of expandedThinkingOwners) if (!loadedMessages.has(owner)) expandedThinkingOwners.delete(owner)
     for (const owner of expandedContextRowOwners) {
-      // Focus deliberately renders persistent Snapshot members as native row
-      // Sections even when the preset-neutral Folder also groups them into a
-      // canonical Cluster. The row owner remains live in that presenter.
-      if (!loadedMessages.has(owner) || options.displayState?.preset !== 'focus' && clusteredMembers.has(owner)) {
-        expandedContextRowOwners.delete(owner)
-      }
+      // A preset may present this loaded row through a Cluster temporarily.
+      // Its own preference is retained for the next independent occurrence.
+      if (!loadedMessages.has(owner)) expandedContextRowOwners.delete(owner)
     }
     for (const owner of expandedClusterOwners) if (!liveClusters.has(owner)) expandedClusterOwners.delete(owner)
 
