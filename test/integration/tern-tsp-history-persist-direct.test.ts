@@ -612,11 +612,23 @@ test('a real /new and /resume switch shows B’s own row in B and A’s own row 
     // publication is pinned in the dedicated boot-Enter case and the mount lane.
     await arrow(fixture, DOWN, { text: '', cursor: 0 })
 
+    const scopeBeforeNew = projectionScopeId(fixture.pane)
+    const framesBeforeNew = fixture.pane.frameCount()
     await submitLine(fixture, '/new')
     const afterNew = await waitForSessionHeaders(fixture, 2, 'the /new Session in the real store')
     const sessionB = afterNew.find(id => id !== sessionA)
     assert.ok(sessionB, '/new published a different real Session')
     await waitFor('B to own a live Agent', () => liveAgentIds(fixture).includes(sessionB), 30_000)
+    await waitFor('the new Session projection commit', () => {
+      const nodes = wireNodes(fixture.pane)
+      if (nodes.some(node => node.id === 'main.loading')) return false
+      if (fixture.pane.frameCount() <= framesBeforeNew) return false
+      const scope = projectionScopeId(fixture.pane)
+      if (scope !== undefined && scope !== scopeBeforeNew) return true
+      return nodes.some(node => node.id.startsWith('main.welcome-'))
+        && fixture.pane.frames().slice(framesBeforeNew).some(frame =>
+          frame.ops.some(op => op[0] === 'add' && op[1] === 'main.loading'))
+    }, 30_000)
     await composerReady(fixture)
     // B is a brand-new Session with no rows of its own: a real ↑ is a no-op,
     // never A's row and never a launch-cwd fallback.
@@ -632,9 +644,15 @@ test('a real /new and /resume switch shows B’s own row in B and A’s own row 
     await arrow(fixture, DOWN, { text: '', cursor: 0 })
     assert.equal(composerText(fixture), '', 'B’s browse never walks back A’s row')
 
+    const scopeBeforeResume = projectionScopeId(fixture.pane)
+    const framesBeforeResume = fixture.pane.frameCount()
     await submitLine(fixture, `/resume ${sessionA}`)
     await waitFor('A to own the live Agent again', () =>
       liveAgentIds(fixture).includes(sessionA) && !liveAgentIds(fixture).includes(sessionB), 30_000)
+    await waitFor('the resumed Session projection commit', () => {
+      const scope = projectionScopeId(fixture.pane)
+      return fixture.pane.frameCount() > framesBeforeResume && scope !== undefined && scope !== scopeBeforeResume
+    }, 30_000)
     await composerReady(fixture)
     await typeDraft(fixture, 'back in A')
     await arrow(fixture, UP, { text: 'back in A', cursor: 0 })
