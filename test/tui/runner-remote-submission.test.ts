@@ -588,6 +588,49 @@ test('generic file: the real /attach intake → official receipt → Host durabl
     fixture.vt.getViewport().join('').includes('client-only-report.bin'), 30_000)
 })
 
+test('a 1 KiB /attach file reaches Host storage with the same hash and paints', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm6-f4-remote-file-small'
+  const presetId = 'm3-4-pr3-preset'
+  const host = await mountHost(life, presetId)
+  await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+  const fixture = await mountPr3Runner(life, { presetId, resumeSessionId: mainId, host })
+  await waitFor('mount paint', () => fixture.vt.getViewport().join('').length > 0, 10_000)
+  const sourceDir = life.tempDir('dsh-f4-small-')
+  const path = join(sourceDir, 'small.bin')
+  const source = Buffer.from('F4_1KIB_BINARY_20261111')
+  writeFileSync(path, source)
+  const marker = 'F4_SMALL_FILE_20261111'
+  submitDraft(fixture, `/attach ${path}`)
+  const app = fixture.runnerApp() as unknown as { getDraft(): string; setDraft(text: string): void; submitDraft(): void }
+  await waitFor('the small file placeholder reaches the composer', () => app.getDraft().includes('[file #'), 15_000)
+  app.setDraft(`${app.getDraft()} ${marker}`)
+  app.submitDraft()
+  const session = host.ctx.sessions.get(SessionId(mainId)) as unknown as {
+    snapshotEvents(): Array<{ type: string; data: unknown }>
+  }
+  await waitFor('the 1 KiB file row is durable', () => session.snapshotEvents().some(event =>
+    event.type === 'user/message' && JSON.stringify(event.data).includes(marker)), 20_000)
+  const durable = session.snapshotEvents().find(event => event.type === 'user/message'
+    && JSON.stringify(event.data).includes(marker))!
+  const content = (durable.data as { content: Array<{ type: string; attachment?: { attachmentId?: string; bytes?: number } }> }).content
+  const fileBlock = content.find(block => block.type === 'file')
+  assert.ok(fileBlock?.attachment?.attachmentId !== undefined)
+  assert.equal(fileBlock!.attachment!.bytes, source.byteLength)
+  const attachments = host.ctx.get('attachments') as unknown as {
+    readFileStream(ref: unknown): AsyncIterable<Uint8Array>
+  }
+  const chunks: Uint8Array[] = []
+  for await (const chunk of attachments.readFileStream(fileBlock!.attachment!)) chunks.push(chunk)
+  assert.equal(
+    createHash('sha256').update(Buffer.concat(chunks.map(chunk => Buffer.from(chunk)))).digest('hex'),
+    createHash('sha256').update(source).digest('hex'),
+    'the 1 KiB Client source bytes are the Host-stored bytes',
+  )
+  await waitFor('the small file row is painted', () =>
+    fixture.vt.getViewport().join('').includes('small.bin'), 30_000)
+})
+
 test('generic file: a source changed after /attach is refused with no Host prompt', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm6-f4-remote-file-changed'

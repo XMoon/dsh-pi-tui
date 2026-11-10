@@ -440,6 +440,31 @@ test('a multi-file prompt whose later upload fails never registers an echo or di
   assert.equal(harness.calls.promptCalls.length, 0)
 })
 
+test('a file prompt whose connection generation is replaced after the upload dispatches no prompt', async () => {
+  const harness = writerHarness()
+  const lifetime = new AbortController()
+  const serializer: RemotePromptSerializer = {
+    preflight: () => ({ kind: 'ok', echo: { text: '', attachments: [] }, needsFileUploads: true }),
+    serialize: async (_prepared, signal) => {
+      assert.equal(signal, lifetime.signal)
+      // The upload completed; the connection generation is replaced before the
+      // writer's dispatch fence.
+      harness.generation.set({ id: 2 })
+      return {
+        kind: 'ok',
+        content: [{ type: 'file', receiptId: 'staged-receipt' }],
+        echo: { text: '', attachments: [{ type: 'file', value: { attachmentId: 'staged-file', name: 'x', bytes: 1 } }] },
+      }
+    },
+  }
+  const writer = new RemoteSessionWriter(harness.source, harness.generation.source, serializer, undefined, lifetime.signal)
+  const outcome = await writer.prompt('session-a', {}, 'queue')
+  assert.deepEqual(outcome, { kind: 'cancelled' },
+    'a reconnect during/after pre-prompt upload never dispatches the prompt')
+  assert.equal(harness.calls.beginInputs.length, 0, 'no echo is registered for a superseded upload')
+  assert.equal(harness.calls.promptCalls.length, 0)
+})
+
 test('an echo-registration failure is a pre-dispatch refusal, never indeterminate', async () => {
   const harness = writerHarness()
   harness.setBeginThrows(new Error('echo store closed'))
