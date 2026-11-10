@@ -2347,20 +2347,22 @@ test('a modal-covered or retired transcript Copy node performs no clipboard writ
     const pending = harness.renderer().interaction.askQuestions([{ id: 'copy-modal', question: 'Continue?' }], undefined, undefined, false)
     pending.catch(() => {})
     await awaitWireFact(() => harness.tern.output.text().includes('Continue?'), 'the real Question seat')
+    // Bounded negative observation: a covered Copy has no completion signal,
+    // so drain the event loop for a bounded window before observing the sink.
     harnessFreeInput(harness.tern, {
       ev: 'action', sf: harness.tern.frames.at(-1)!.sf, id: oldUser.id, act: 'dsh-transcript-copy', raw: {},
     })
-    await settle()
+    await settle() // bounded negative observation window: no observable completion event exists
     assert.equal(copied.length, 0, 'a Question modal blocks the underlying action')
     harness.renderer().interaction.withdrawPending()
     await pending.catch(() => {})
 
     harness.surface.display.beginSessionHydration()
-    await settle()
+    await settle() // bounded negative observation window: hydration emits no completion event for a rejected id
     harnessFreeInput(harness.tern, {
       ev: 'action', sf: harness.tern.frames.at(-1)!.sf, id: oldUser.id, act: 'dsh-transcript-copy', raw: {},
     })
-    await settle()
+    await settle() // bounded negative observation window: a retired frame id has no completion event
     assert.equal(copied.length, 0, 'hydration rejects the retired frame node')
 
     harness.replaceMain()
@@ -2373,7 +2375,7 @@ test('a modal-covered or retired transcript Copy node performs no clipboard writ
     harnessFreeInput(harness.tern, {
       ev: 'action', sf: harness.tern.frames.at(-1)!.sf, id: oldUser.id, act: 'dsh-transcript-copy', raw: {},
     })
-    await settle()
+    await settle() // bounded negative observation window: an old source id has no completion event
     assert.equal(copied.length, 0, 'an old source node id cannot copy subject B')
     harnessFreeInput(harness.tern, {
       ev: 'action', sf: harness.tern.frames.at(-1)!.sf, id: newUser.id, act: 'dsh-transcript-copy', raw: {},
