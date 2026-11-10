@@ -517,6 +517,7 @@ export async function runWebRuntimeToggle(context) {
           PR_A_PLAYWRIGHT_ROOT: playwrightRoot,
           PR_A_EXPECTED_ANSWER_PREFIX: 'long-turn answer',
           PR_A_ACCOUNT_UI_CHECK: '1',
+          PR_A_ACCOUNT_EXPECTED: 'signed-out',
           PLAYWRIGHT_BROWSERS_PATH: browsers,
           LD_LIBRARY_PATH: `${chromiumLibs}${process.env.LD_LIBRARY_PATH === undefined ? '' : `:${process.env.LD_LIBRARY_PATH}`}`,
         },
