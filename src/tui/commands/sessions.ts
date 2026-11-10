@@ -706,7 +706,7 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
    * PiTUI Host Editor `←←` gesture is the ONE caller that passes `'all'`
    * (its frozen initial scope); the typed and Welcome entries keep Current.
    */
-  const openSessionsBody = (
+  const openSessionsBody = async (
     invocation: { rawInput: string; commandId?: string },
     options: 'current' | 'all' | {
       readonly scope?: 'current' | 'all'
@@ -714,13 +714,19 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
       readonly initialDirectoryEntry?: boolean
       readonly initialDirectoryPath?: string
     } = 'current',
-  ): Promise<CommandResult> => openSessionPicker(invocation, {
-    header: 'sessions',
-    browseScope: typeof options === 'string' ? options : options.scope,
-    addDirectory: typeof options === 'string' ? false : options.addDirectory,
-    initialDirectoryEntry: typeof options === 'string' ? false : options.initialDirectoryEntry,
-    initialDirectoryPath: typeof options === 'string' ? undefined : options.initialDirectoryPath,
-  })
+  ): Promise<CommandResult> => {
+    // A sessionless Browser's subject may name the launch Workspace only after
+    // the mount preflight commits; open the ONE owner with that confirmed
+    // destination instead of a transient "no current Workspace" state.
+    if (runner.captureSessionScope().sessionId === undefined) await runner.awaitWorkspacePreflight?.()
+    return openSessionPicker(invocation, {
+      header: 'sessions',
+      browseScope: typeof options === 'string' ? options : options.scope,
+      addDirectory: typeof options === 'string' ? false : options.addDirectory,
+      initialDirectoryEntry: typeof options === 'string' ? false : options.initialDirectoryEntry,
+      initialDirectoryPath: typeof options === 'string' ? undefined : options.initialDirectoryPath,
+    })
+  }
 
   const registerSessions = (): void => {
     registerTuiCommand({
