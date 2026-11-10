@@ -680,6 +680,12 @@ test('navigation: a collapsed User target is honest Source-only with only a safe
     { line: 'C:\\reports\\needle.txt hidden path', safe: false },
     { line: 'see reports/needle.txt for details', safe: false },
     { line: 'visit example.com then needle', safe: false },
+    // A URL AUTHORITY has no separator at all: host:port and bare localhost are
+    // URL-shaped context too.
+    { line: 'localhost:3000 needle service', safe: false },
+    { line: 'connect to api:8443 then needle', safe: false },
+    { line: 'localhost needle service', safe: false },
+    { line: '[::1]:8080 needle service', safe: false },
   ] as const
   for (const { line, safe } of cases) {
     const text = [
