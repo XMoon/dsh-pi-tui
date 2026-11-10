@@ -262,7 +262,8 @@ test('Folder New session waits for the pending mount Workspace preflight', async
     await waitFor('the Folder action is offered', () => newSession() !== undefined && newSession()!.disabled === undefined, 25_000)
     sendAction(fixture.pane, String(newSession()!.id), undefined, browserId)
     // The mount preflight is still parked. With the ordering contract the
-    // Folder New must wait for it, so nothing can create a Session yet.
+    // Folder New must wait for it, so nothing can create a Session yet. Bounded
+    // observation window: the parked preflight cannot settle on its own.
     await directSettle(800)
     assert.deepEqual(await sessionHeaders(fixture), [], 'Folder New waits for the in-flight mount preflight')
     assert.ok(pickerNode(fixture.pane, BROWSER) !== undefined, 'the same Browser stays open while waiting')
@@ -273,6 +274,7 @@ test('Folder New session waits for the pending mount Workspace preflight', async
     assert.ok(!dockNotices(fixture).some(text => text.includes('fresh session creation failed')),
       'no spurious superseded refusal was produced')
   } finally {
+    // reason: the fixture's OWN teardown drain, not a wait for a fact
     await fixture.settle()
   }
 })
