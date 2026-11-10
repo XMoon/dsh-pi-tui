@@ -122,6 +122,7 @@ async function runQueuedSubmitAcrossOwnerChange(options: {
       captureSubject: () => core.subject(),
       transitionPending: () => false,
       awaitTransitionSettled: async () => {},
+      beginNavigationIntent: () => () => {},
     },
     scope: {
       captureLive: () => ({ sessionId: 'session-a', subject: {}, generation: core.generation() }),

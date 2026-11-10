@@ -120,11 +120,11 @@ test('whenSettled waits for the executing transition AND the ones queued behind 
     await block.promise
     order.push('running-end')
   })
-  await settle()
+  await settle() // reason: let the running transition start before observing
   const queued = gate.run(async () => { order.push('queued') })
   let settled = false
   const waiting = gate.whenSettled().then(() => { settled = true })
-  await settle()
+  await settle() // reason: drain the waiter's first check while both are pending
   assert.equal(settled, false, 'the waiter must not settle while a transition is executing/queued')
   block.resolve()
   await running
@@ -143,6 +143,30 @@ test('whenSettled resolves immediately on an idle gate and after a REJECTED tran
   await assert.rejects(rejected, /flush failed/)
   await waiting
   await gate.whenSettled()
+})
+
+test('a navigation intent keeps pending/whenSettled open WITHOUT occupying the FIFO', async () => {
+  const gate = new SessionTransitionGate()
+  const release = gate.beginIntent()
+  assert.equal(gate.pending, true, 'an accepted pre-gate navigation is pending')
+  assert.equal(gate.busy, false, 'an intent executes no transition')
+  let settled = false
+  const waiting = gate.whenSettled().then(() => { settled = true })
+  await settle() // reason: drain the waiter's first check
+  assert.equal(settled, false, 'whenSettled must wait for the pre-gate intent')
+  // A transition queued behind the intent still runs: the intent is an
+  // OBSERVATION window, never a FIFO slot.
+  const order: string[] = []
+  const transition = gate.run(async () => { order.push('transition') })
+  await transition
+  assert.deepEqual(order, ['transition'], 'the intent must not block the transition FIFO')
+  await settle() // reason: drain the waiter's post-transition re-check
+  assert.equal(settled, false, 'the intent itself still keeps whenSettled waiting')
+  release()
+  await waiting
+  assert.equal(settled, true)
+  assert.equal(gate.pending, false, 'releasing the last intent clears pending')
+  release() // idempotent by contract
 })
 
 // ── exit retirement: pending covers the queued-but-not-started window ──────

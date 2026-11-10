@@ -64,6 +64,7 @@ function mount(): { controller: ReturnType<typeof createSubmissionController>; c
       captureSubject: () => undefined,
       transitionPending: () => false,
       awaitTransitionSettled: async () => {},
+      beginNavigationIntent: () => () => {},
     },
     scope: {
       captureLive: () => undefined,

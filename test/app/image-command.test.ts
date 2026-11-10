@@ -994,6 +994,7 @@ function cardlessController(options: {
       captureSubject: () => core.subject(),
       transitionPending: () => false,
       awaitTransitionSettled: async () => {},
+      beginNavigationIntent: () => () => {},
     },
     scope: {
       captureLive: () => scopeAuthority.captureLive(),

@@ -530,14 +530,27 @@ attachment preparation cannot let a later gesture overtake an earlier one.
 A TUI-owned SESSIONLESS command (`/preset`, `/model`, `/settings`, ...) is
 routed by `liveAgent()`: with a live Agent it executes through the Session's
 command service, without one it executes locally and creates no Session. While
-a Session transition is in flight, `liveAgent() === undefined` is a TRANSIENT
-fact (a create's Host Session exists before the Direct owner is published), so
-the route is deferred until `SessionTransitionGate.whenSettled()` resolves and
-then decided against the settled surface. Running the line locally in that
-window would execute it against a surface the transition is replacing, and a
-pure read such as `/preset status` has no command card to render its text —
-the user's command would silently disappear. A failed create still settles to
-a genuinely sessionless surface, so the local route remains the fallback.
+an accepted navigation is unsettled, `liveAgent() === undefined` is a
+TRANSIENT fact, so the route is deferred until `SessionTransitionGate.whenSettled()`
+resolves and then decided against the settled surface. Running the line locally
+in that window would execute it against a surface the navigation is replacing,
+and a pure read such as `/preset status` has no command card to render its
+text — the user's command would silently disappear. A failed create still
+settles to a genuinely sessionless surface, so the local route remains the
+fallback.
+
+The observation window starts at the navigation's FIRST synchronous step, not
+at the gate: `/new` awaits its Workspace pre-selection before it may enter the
+FIFO (a refused Workspace must not stop the old owner). The submission
+controller therefore registers a navigation INTENT
+(`SessionTransitionGate.beginIntent`) around the executing navigation command
+and releases it at that command's terminal settlement. An intent is not a FIFO
+slot and never touches the barrier: queued transitions still run, the old owner
+stays untouched until the gate's own admission, and only `pending`/
+`whenSettled` widen to cover the pre-gate phase. The post-create publication
+gap (the Host Session exists before the Direct owner is published) is covered
+by the transition task's own gate occupancy.
+
 `SESSION_NAVIGATION_COMMANDS` (`/new`, the session browser and `/fork`/
 `/rewind`) is deliberately exempt: those commands ARE the navigation
 authority, their sessionless effect is visible without a command card, and a

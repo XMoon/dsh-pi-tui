@@ -187,6 +187,7 @@ function startHarness(options: { failSessionCreate?: boolean } = {}): Harness {
       captureSubject: () => core.subject(),
       transitionPending: () => false,
       awaitTransitionSettled: async () => {},
+      beginNavigationIntent: () => () => {},
     },
     scope: {
       captureLive: () => scopeAuthority.captureLive(),

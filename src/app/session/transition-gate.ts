@@ -39,6 +39,17 @@ export class SessionTransitionGate {
   private tail: Promise<unknown> = Promise.resolve()
   private active = false
   private queued = 0
+  /**
+   * Accepted navigation intents that have not entered the FIFO yet: a user
+   * navigation whose PRE-GATE preflight (the `/new` Workspace resolution) is
+   * still awaiting Host IO. They do not occupy a FIFO slot and do not freeze
+   * the barrier — a refused preflight must leave the old owner untouched —
+   * but they keep {@link pending} true (and {@link whenSettled} waiting) so a
+   * concurrent submission never decides the surface state from the
+   * not-yet-replaced owner. Released by the intent owner at its terminal
+   * settlement.
+   */
+  private readonly intents = new Set<Promise<void>>()
 
   /** Whether a transition task is currently executing (visible to every
    * caller — the AsyncLocalStorage context is task-internal only). */
@@ -46,13 +57,41 @@ export class SessionTransitionGate {
     return this.active
   }
 
-  /** Whether a transition task is QUEUED or executing. The exit retirement
+  /** Whether a transition task is QUEUED or executing, or an accepted
+   * navigation intent is still in its pre-gate preflight. The exit retirement
    * pre-cancel keys on this, not on `busy`: a queued-but-not-started
    * transition is about to quiesce the old agent, whose `whenIdle()` does
    * not observe the lifecycle signal — the pre-cancel must fire before the
-   * task starts, or the retirement queued behind it can never unblock it. */
+   * task starts, or the retirement queued behind it can never unblock it.
+   * An intent counts for the same reason: the navigation has been accepted
+   * and will either enter the FIFO or leave the surface untouched. */
   get pending(): boolean {
-    return this.queued > 0
+    return this.queued > 0 || this.intents.size > 0
+  }
+
+  /**
+   * Register one accepted navigation intent BEFORE its pre-gate preflight
+   * (the `/new` Workspace resolution) so `pending`/`whenSettled` cover the
+   * whole accepted navigation, not only the gated part. The returned release
+   * is idempotent and must be called at the intent owner's terminal
+   * settlement (success, refusal or failure).
+   *
+   * An intent deliberately does NOT occupy the FIFO and does NOT touch the
+   * barrier: the workspace pre-selection must be able to refuse without
+   * stopping the old owner, and a transition queued behind an intent still
+   * runs in order. It only widens the PENDING observation window.
+   */
+  beginIntent(): () => void {
+    let release!: () => void
+    const settled = new Promise<void>(resolve => { release = resolve })
+    this.intents.add(settled)
+    let released = false
+    return () => {
+      if (released) return
+      released = true
+      this.intents.delete(settled)
+      release()
+    }
   }
 
   /**
@@ -86,14 +125,16 @@ export class SessionTransitionGate {
   }
 
   /**
-   * Wait until the gate has no transition executing or queued.
+   * Wait until the gate has no transition executing or queued AND no accepted
+   * navigation intent is still in its pre-gate preflight.
    *
    * A reader that observed a TRANSIENT surface facts state (a create whose
-   * Host Session exists but whose owner is not published yet) uses this to
-   * make its decision against the settled surface instead. The wait is
-   * promise-based and re-checks the queue, so a transition queued while this
-   * call waits is included; a NEW transition queued after it settles is not
-   * (the same best-effort boundary as any observation).
+   * Host Session exists but whose owner is not published yet, or an accepted
+   * `/new` still resolving its Workspace) uses this to make its decision
+   * against the settled surface instead. The wait is promise-based and
+   * re-checks both sources, so a transition/intent added while this call waits
+   * is included; a NEW one added after it settles is not (the same
+   * best-effort boundary as any observation).
    *
    * Only callers OUTSIDE a transition task may await this: the task's own
    * `tail` has not settled, so waiting from inside would deadlock.
@@ -101,7 +142,10 @@ export class SessionTransitionGate {
   async whenSettled(): Promise<void> {
     // `queued` covers the executing task too (it is decremented only when
     // that task's tail continuation runs), and every queued task extends
-    // `tail` before the next iteration re-reads the field.
-    while (this.queued > 0) await this.tail
+    // `tail` before the next iteration re-reads the field. An intent releases
+    // its own promise, so awaiting the CURRENT set re-checks both sources.
+    while (this.queued > 0 || this.intents.size > 0) {
+      await Promise.allSettled([this.tail, ...this.intents])
+    }
   }
 }
