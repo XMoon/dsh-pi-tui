@@ -232,16 +232,21 @@ export function shellCommandIsOpen(lines: readonly string[]): boolean {
   let substitution = 0
   let brace = 0
   let backtick = false
-  let heredoc: PendingHeredoc | undefined
+  // Pending here-documents are consumed IN ORDER: a command may declare more
+  // than one (`cat <<A <<B`), each body ending at its own delimiter.
+  const heredocs: PendingHeredoc[] = []
   // A trailing backslash on the LAST previous line makes the cursor line a
   // CONTINUATION of that command, not a fresh command position. Inside earlier
   // lines the same backslash merely joins logical lines while scanning.
   let trailingContinuation = false
   for (const line of lines) {
     trailingContinuation = false
-    if (heredoc !== undefined) {
-      const candidate = heredoc.stripTabs ? line.replace(/^\t+/u, '') : line
-      if (candidate.trim() === heredoc.delimiter) heredoc = undefined
+    const active = heredocs[0]
+    if (active !== undefined) {
+      // Bash compares the delimiter line EXACTLY: `<<-` strips leading TABs
+      // only, and spaces (leading or trailing) never match.
+      const candidate = active.stripTabs ? line.replace(/^\t+/u, '') : line
+      if (candidate === active.delimiter) heredocs.shift()
       continue
     }
     let index = 0
@@ -298,7 +303,7 @@ export function shellCommandIsOpen(lines: readonly string[]): boolean {
       if (character === '<' && line[index + 1] === '<') {
         const parsed = heredocAt(line, index)
         if (parsed !== undefined) {
-          heredoc = parsed
+          heredocs.push(parsed)
           index += 2
           continue
         }
@@ -317,7 +322,7 @@ export function shellCommandIsOpen(lines: readonly string[]): boolean {
     }
   }
   return quote !== undefined || backtick || substitution > 0 || brace > 0
-    || heredoc !== undefined || trailingContinuation
+    || heredocs.length > 0 || trailingContinuation
 }
 
 /** The RAW range a WHOLE-WORD acceptance replaces: the raw word start, and the

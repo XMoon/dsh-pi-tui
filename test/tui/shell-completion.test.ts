@@ -950,6 +950,34 @@ test('a here-document body is text, and the line after its delimiter completes a
     'the line after the here-document delimiter is a fresh command again')
 })
 
+test('here-document delimiters match exactly, and multiple bodies are consumed in order', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  const port = fixedShellPort({ commands: ['zoom'] })
+  const provider = new MentionProvider([], root, null, modeSource('shell-context').source, undefined, undefined, undefined, [], port)
+  const offers = async (lines: string[], cursorLine: number) => {
+    const suggestions = await provider.getSuggestions(lines, cursorLine, lines[cursorLine]!.length, { signal: abort, force: true })
+    return suggestions !== null && suggestions.items.some(item => item.value === 'zoom')
+  }
+  // A near-match line (spaces around the word) is still BODY, not the end.
+  assert.equal(await offers(['cat <<EOF', 'zo', ' EOF ', 'zo'], 3), false,
+    'a whitespace near-match must not close the here-document')
+  assert.equal(await offers(['cat <<EOF', 'zo', 'EOF ', 'zo'], 3), false,
+    'a trailing space must not close the here-document')
+  // The exact delimiter line closes it; `<<-` accepts leading TABS only.
+  assert.equal(await offers(['cat <<EOF', 'zo', 'EOF', 'zo'], 3), true,
+    'the exact delimiter line restores the command position')
+  assert.equal(await offers(['cat <<-EOF', 'zo', '\tEOF', 'zo'], 3), true,
+    '<<- strips leading tabs for the delimiter line')
+  assert.equal(await offers(['cat <<-EOF', 'zo', ' EOF', 'zo'], 3), false,
+    '<<- never strips spaces')
+  // Two here-documents on one command are consumed in declaration order.
+  assert.equal(await offers(['cat <<A <<B', 'a', 'A', 'b', 'B', 'zo'], 5), true,
+    'the command position returns after the LAST pending body')
+  assert.equal(await offers(['cat <<A <<B', 'a', 'A', 'b', 'zz'], 4), false,
+    'the second body is still text even after the first delimiter')
+})
+
 test('Host path and variable candidates obey the same Session currentness fence', async (t) => {
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)
