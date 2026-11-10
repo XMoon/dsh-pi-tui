@@ -228,12 +228,14 @@ test('the mapper renders the projected blocks as native TSP nodes with real cont
   const user = rowOf(folder, message => message.kind === 'user')
   const assistant = rowOf(folder, message => message.kind === 'assistant')
   const userNode = nodeOf(view, `main.${keys.keyFor(user)}`)
-  assert.equal(userNode.kind, 'card')
+  assert.equal(userNode.kind, 'message')
+  assert.equal(userNode.props['role'], 'dsh.transcript.user')
   assert.equal(nodeOf(view, `${userNode.id}.body`).props['text'], 'Inspect the transcript projector boundary.')
 
   const assistantNode = nodeOf(view, `main.${keys.keyFor(assistant)}`)
-  assert.equal(assistantNode.kind, 'card')
-  assert.equal(assistantNode.props['head'], 'Assistant')
+  // The Assistant card/chrome is retired: it is now a frameless native column.
+  assert.equal(assistantNode.kind, 'col')
+  assert.equal(assistantNode.props['role'], 'dsh.transcript.assistant')
   assert.equal(
     nodeOf(view, `${assistantNode.id}.body`).props['text'],
     'The canonical structure is the only segmentation authority.',
@@ -284,7 +286,7 @@ test('a text/status update sends a small delta and preserves unaffected node ids
   assert.equal(ops.filter(op => op[0] === 'move').length, 0, 'no moves')
   for (const id of opIds(ops, 'add')) assert.ok(!retained.has(id!), `added node ${id} is genuinely new`)
   const touched = new Set([...opIds(ops, 'add'), ...opIds(ops, 'del'), ...opIds(ops, 'set'), ...opIds(ops, 'text')])
-  assert.ok(!touched.has(userNodeId), 'the untouched user card is never rewritten')
+  assert.ok(!touched.has(userNodeId), 'the untouched native user message is never rewritten')
   assert.ok(!touched.has(workId), 'the Work container itself is never rewritten')
 
   // Growing reasoning text is an SDK append on the retained text node.
@@ -411,7 +413,7 @@ test('a merged read-group replacement changes that card\'s key while neighbours 
   const added = opIds(ops, 'add')
   assert.ok(deleted.has(firstWorkId), 'the replaced carrier\'s Work container is legitimately removed')
   assert.ok(added.has(`main.work-${keys.keyFor(merged)}`), 'and re-added under its new key')
-  assert.ok(!deleted.has(userNodeId) && !added.has(userNodeId), 'the untouched user card keeps its identity')
+  assert.ok(!deleted.has(userNodeId) && !added.has(userNodeId), 'the untouched native user message keeps its identity')
 })
 
 test('dynamic Context clustering reparents a retained native column member without changing its allocation key', () => {
@@ -979,8 +981,8 @@ test('T-snapshot: a snapshot-only cluster renders as a native card inside the Wo
   const keys = new TranscriptNodeKeys()
   const before = flatten(viewOf(folder, keys))
   const beforeWork = before.find(node => node.kind === 'section')
-  const beforeUser = before.find(node => node.kind === 'card' && node.props['head'] === 'You')
-  assert.ok(beforeWork !== undefined && beforeUser !== undefined, 'fixture: Work section and user card exist')
+  const beforeUser = before.find(node => node.kind === 'message' && node.props['role'] === 'dsh.transcript.user')
+  assert.ok(beforeWork !== undefined && beforeUser !== undefined, 'fixture: Work section and native user message exist')
 
   folder.apply([
     snapshotEvent(4, 'snap-a', 'SNAPSHOT_TSP_A'),
@@ -997,8 +999,8 @@ test('T-snapshot: a snapshot-only cluster renders as a native card inside the Wo
   const work = nodes.find(node => node.kind === 'section')
   assert.ok(work !== undefined)
   assert.equal(work.id, beforeWork.id, 'the Work section keeps its stable native id')
-  assert.equal(nodes.find(node => node.kind === 'card' && node.props['head'] === 'You')?.id, beforeUser.id,
-    'an unrelated user card keeps its native id')
+  assert.equal(nodes.find(node => node.kind === 'message' && node.props['role'] === 'dsh.transcript.user')?.id, beforeUser.id,
+    'an unrelated native user message keeps its native id')
   const clusterCard = nodes.find(node => node.parent === work.id && node.kind === 'card')
   assert.ok(clusterCard !== undefined, `the nested cluster renders as a card inside the section:\n${JSON.stringify(nodes)}`)
   const first = rowOf(folder, message => message.kind === 'system' && message.text === 'SNAPSHOT_TSP_A')
@@ -1059,7 +1061,7 @@ test('T-snapshot ops: a standalone Snapshot cluster reparents into Work with loc
   // Only the migrated snapshot subtree changes: the unrelated user identity is
   // never remounted/rewritten.
   const touched = new Set([...opIds(ops, 'add'), ...opIds(ops, 'del'), ...opIds(ops, 'set'), ...opIds(ops, 'text')])
-  assert.ok(!touched.has(userNodeId), 'the untouched user card is never rewritten')
+  assert.ok(!touched.has(userNodeId), 'the untouched native user message is never rewritten')
   for (const id of deleted) {
     assert.ok(id !== undefined, 'a del op always carries a target id')
     assert.ok(id === standaloneClusterId || id.startsWith(`${standaloneClusterId}.`),
@@ -1070,7 +1072,7 @@ test('T-snapshot ops: a standalone Snapshot cluster reparents into Work with loc
     assert.ok(id === workId || id.startsWith(`${workId}.`),
       `unexpected addition outside the new Work subtree: ${id}`)
   }
-  assert.equal(nodeOf(after, userNodeId).kind, 'card', 'the user identity survives the migration')
+  assert.equal(nodeOf(after, userNodeId).kind, 'message', 'the native user message identity survives the migration')
 
   // A later final assistant is added standalone and never disturbs the Work.
   folder.apply([
