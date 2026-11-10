@@ -144,13 +144,14 @@ export class AccountWorkspacePage implements Component {
     this.start()
   }
 
-  private start(): void {
+  private start(): boolean {
+    if (this.disposed || this.watcherStarted) return false
     if (!this.source.available()) {
       this.stateFailure = 'the Host Account service is unavailable on this connection'
       this.initializing = false
-      return
+      return false
     }
-    if (this.watcherStarted) return
+    this.stateFailure = undefined
     this.watcherStarted = true
     // The official watch subscription yields a COMPLETE initial state. That
     // initial snapshot is the page's first read: a separate getState would be
@@ -162,13 +163,37 @@ export class AccountWorkspacePage implements Component {
         }
       } catch (error) {
         if (this.disposed || this.pageController.signal.aborted) return
-        this.settle(() => { this.stateFailure = `the account watch stopped: ${errorText(error)}` })
+        this.settle(() => {
+          this.watcherStarted = false
+          this.initializing = false
+          this.stateFailure = `the account watch stopped: ${errorText(error)}`
+        })
+        return
       }
+      if (this.disposed || this.pageController.signal.aborted) return
+      this.settle(() => {
+        this.watcherStarted = false
+        this.initializing = false
+        this.stateFailure = 'the account watch ended before the page stopped observing'
+      })
     })
+    return true
   }
 
   private refresh(): void {
     if (this.disposed || this.busy !== undefined) return
+    if (!this.watcherStarted) {
+      this.initializing = this.view === undefined
+      this.stateFailure = undefined
+      if (this.view !== undefined) {
+        this.stateRecheckRequired = true
+        this.notice = 'Refreshing Host account state…'
+      }
+      this.start()
+      this.revision += 1
+      this.requestRender()
+      return
+    }
     const serial = ++this.stateSerial
     this.revision += 1
     this.source.run('account state read', async () => {
@@ -262,8 +287,10 @@ export class AccountWorkspacePage implements Component {
     this.settle(() => {
       const previous = this.view?.status
       this.view = view
+      const rechecking = this.stateRecheckRequired
       this.stateRecheckRequired = false
       this.stateFailure = undefined
+      if (rechecking && this.notice === 'Refreshing Host account state…') this.notice = undefined
       this.initializing = false
       if (view.status === 'credential-stored') {
         // AccountView.status does not carry grant identity: a same-status watch
@@ -276,7 +303,18 @@ export class AccountWorkspacePage implements Component {
           this.readBalance()
         }
       } else {
-        if (previous !== undefined) this.invalidateSignOutConfirmation('the Host account changed — sign-out confirmation cleared')
+        if (this.signOutConfirm) {
+          const signingOut = this.busy === 'signout'
+          const accountChanged = previous === 'credential-stored'
+          this.closeSignOutConfirmation()
+          if (!signingOut) {
+            this.notice = accountChanged
+              ? 'the Host account changed — sign-out confirmation cleared'
+              : 'Nothing to sign out — no stored DeepSeek Account credential.'
+          }
+        } else if (previous !== undefined) {
+          this.invalidateSignOutConfirmation('the Host account changed — sign-out confirmation cleared')
+        }
         this.runningTaskCheckSerial += 1
         this.taskCheck = { kind: 'idle' }
         this.profileSerial += 1

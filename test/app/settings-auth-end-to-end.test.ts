@@ -262,7 +262,10 @@ function open(width = 120, height = 40, authorizationOverride?: unknown): Harnes
           calls.push('signOut')
           return accountState.view
         },
-        hasRunningAccountTasks: async () => false,
+        hasRunningAccountTasks: async () => {
+          calls.push('hasRunningAccountTasks')
+          return false
+        },
       },
     },
     catalog: { models: { available: () => true, discoverModels: async () => [{ id: 'acme-1' }] } },
@@ -490,13 +493,16 @@ test('/login bare opens the Models list; /login deepseek-account opens Account',
   h2.close()
 })
 
-test('/logout deepseek-account opens the Sign out confirmation directly', async () => {
+test('/logout deepseek-account with no stored credential reports signed out without a task check', async () => {
   const h = open()
   await h.vt.waitForRender()
   ;(h as unknown as { invoke(line: string): unknown }).invoke('/logout deepseek-account')
   await h.vt.waitForRender()
-  assert.match(h.view(), /Sign out confirmation/u)
+  assert.match(h.view(), /Signed out \/ no stored credential/u)
   assert.match(h.view(), /Nothing to sign out/u)
+  assert.match(h.view(), /Sign in/u)
+  assert.doesNotMatch(h.view(), /Sign out confirmation|Checking running account tasks|Could not verify/u)
+  assert.equal(h.calls.includes('hasRunningAccountTasks'), false)
   h.close()
 })
 
