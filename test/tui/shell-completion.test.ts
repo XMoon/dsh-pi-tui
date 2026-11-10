@@ -978,6 +978,24 @@ test('here-document delimiters match exactly, and multiple bodies are consumed i
     'the second body is still text even after the first delimiter')
 })
 
+test('a here-document body begins only after the logical command line ends', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  const port = fixedShellPort({ commands: ['zoom'] })
+  const provider = new MentionProvider([], root, null, modeSource('shell-context').source, undefined, undefined, undefined, [], port)
+  // `cat <<STOP \` + `STOP` is ONE command: the second STOP is the argument
+  // that continues it, not the body delimiter. The body therefore starts on
+  // the NEXT line and stays text until the real delimiter.
+  const inBody = ['cat <<STOP \\', 'STOP', 'not a command', 'zo', 'STOP']
+  assert.equal(await provider.getSuggestions(inBody, 3, 2, { signal: abort, force: true }), null,
+    'a continued command must not start its here-document body early')
+  // The real delimiter ends the body; the line after it completes again.
+  const afterBody = ['cat <<STOP \\', 'STOP', 'not a command', 'STOP', 'zo']
+  const suggestions = await provider.getSuggestions(afterBody, 4, 2, { signal: abort, force: true })
+  assert.ok(suggestions !== null && suggestions.items.some(item => item.value === 'zoom'),
+    'the command position returns after the real delimiter')
+})
+
 test('Host path and variable candidates obey the same Session currentness fence', async (t) => {
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)

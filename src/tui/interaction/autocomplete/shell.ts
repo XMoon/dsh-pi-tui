@@ -232,21 +232,25 @@ export function shellCommandIsOpen(lines: readonly string[]): boolean {
   let substitution = 0
   let brace = 0
   let backtick = false
-  // Pending here-documents are consumed IN ORDER: a command may declare more
-  // than one (`cat <<A <<B`), each body ending at its own delimiter.
-  const heredocs: PendingHeredoc[] = []
+  // A here-document body starts only after the LOGICAL command line ends (an
+  // unescaped physical newline). `cat <<STOP \` + `STOP` is still one command,
+  // so the second `STOP` is an argument, not the body delimiter.
+  const declared: PendingHeredoc[] = []
+  // Bodies are consumed IN ORDER: a command may declare more than one
+  // (`cat <<A <<B`), each body ending at its own exact delimiter.
+  const bodies: PendingHeredoc[] = []
   // A trailing backslash on the LAST previous line makes the cursor line a
   // CONTINUATION of that command, not a fresh command position. Inside earlier
   // lines the same backslash merely joins logical lines while scanning.
   let trailingContinuation = false
   for (const line of lines) {
     trailingContinuation = false
-    const active = heredocs[0]
+    const active = bodies[0]
     if (active !== undefined) {
       // Bash compares the delimiter line EXACTLY: `<<-` strips leading TABs
       // only, and spaces (leading or trailing) never match.
       const candidate = active.stripTabs ? line.replace(/^\t+/u, '') : line
-      if (candidate === active.delimiter) heredocs.shift()
+      if (candidate === active.delimiter) bodies.shift()
       continue
     }
     let index = 0
@@ -303,7 +307,7 @@ export function shellCommandIsOpen(lines: readonly string[]): boolean {
       if (character === '<' && line[index + 1] === '<') {
         const parsed = heredocAt(line, index)
         if (parsed !== undefined) {
-          heredocs.push(parsed)
+          declared.push(parsed)
           index += 2
           continue
         }
@@ -320,9 +324,13 @@ export function shellCommandIsOpen(lines: readonly string[]): boolean {
       }
       index += 1
     }
+    // The bodies begin only once this logical command line has ended.
+    if (!trailingContinuation && declared.length > 0) {
+      bodies.push(...declared.splice(0, declared.length))
+    }
   }
   return quote !== undefined || backtick || substitution > 0 || brace > 0
-    || heredocs.length > 0 || trailingContinuation
+    || declared.length > 0 || bodies.length > 0 || trailingContinuation
 }
 
 /** The RAW range a WHOLE-WORD acceptance replaces: the raw word start, and the
