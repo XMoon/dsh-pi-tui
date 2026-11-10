@@ -31,7 +31,7 @@ import { historyFilePath, loadHistoryRecords } from '../../src/client/history/st
 import { fakeAgentModel } from '../support/agent-model-double.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
-import { provideFakeHostWorkspaceRegistry } from '../support/workspace-registry.ts'
+import { createFakeHostWorkspaceRegistry, provideFakeHostWorkspaceRegistry, type FakeHostWorkspaceRegistry } from '../support/workspace-registry.ts'
 
 process.env.NO_COLOR = ''
 process.env.FORCE_COLOR = ''
@@ -544,6 +544,7 @@ function makeHarness(home: string, initial?: { id: string; events: SessionEvent[
   // WS-2: the official Host observation seam `/new` reads for a historical
   // Session without Workspace membership (its persisted immutable header cwd).
   const sessionQuery = {
+    listSessions: async () => [],
     observeSession: async (id: unknown) => {
       const session = persisted.get(String(id))
       if (session === undefined) throw new Error(`unknown test session ${String(id)}`)
@@ -624,7 +625,8 @@ async function mountRunner(
   harness: ReturnType<typeof makeHarness>,
   startup: { sessionId?: string },
   config: Record<string, unknown> = {},
-): Promise<{ dispose: () => Promise<void>; app: TuiApp; configRefs: Record<string, unknown> }> {
+  options: { readonly workspaceRegistry?: FakeHostWorkspaceRegistry } = {},
+): Promise<{ dispose: () => Promise<void>; app: TuiApp; configRefs: Record<string, unknown>; workspaceRegistry: FakeHostWorkspaceRegistry }> {
   ctx.provide('appExit', () => {})
   // The startup service is normally provided here; an extension-hosting
   // harness provides it earlier (the extension host's `inject` gate needs it
@@ -638,7 +640,7 @@ async function mountRunner(
   ctx.provide('sessionQuery', harness.sessionQuery as never)
   ctx.provide('agents', harness.agents as never)
   // WS-2: the official Host Workspace registry the Direct lifecycle pre-selects through.
-  provideFakeHostWorkspaceRegistry(ctx)
+  const workspaceRegistry = provideFakeHostWorkspaceRegistry(ctx, options.workspaceRegistry)
   ctx.provide('sessions', harness.sessions as never)
   ctx.provide('agentDefaultModel', harness.defaultModel as never)
   ctx.provide('commands', harness.commands as never)
@@ -670,6 +672,7 @@ async function mountRunner(
     dispose: () => Promise.resolve(),
     app: app as TuiApp,
     configRefs: boundConfigRefs as Record<string, unknown>,
+    workspaceRegistry,
   }
 }
 
@@ -5466,6 +5469,83 @@ test('a deferred start keeps its FIRST prompt in ↑ after the first-session hyd
   assert.equal(mounted.app.getDraft(), 'first prompt of a deferred start', '↑ recalls the first prompt')
 })
 
+test('a refused first Host path restores the draft before opening the same Browser in prefilled path mode', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-first-path-refusal-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(100, 24)
+  const restoreTerminal = installVirtualProcessTerminal(vt)
+  life.defer(restoreTerminal)
+  const context = new Context()
+  life.defer(() => disposeContext(context))
+  const harness = makeHarness(home)
+  // The sessionless mount preflight and the first submit both propose the same
+  // launch directory; the Host refuses it in BOTH cases.
+  const path = process.cwd()
+  const hostResolutions: string[] = []
+  const registry = createFakeHostWorkspaceRegistry().registry
+  registry.create = async (proposal) => {
+    hostResolutions.push(proposal)
+    throw new Error('controlled Host path refusal')
+  }
+  const mounted = await mountRunner(context, home, harness, {}, {}, { workspaceRegistry: registry })
+  await waitForRenderView(vt)
+  assert.ok(vt.getViewport().join('\n').includes('Host directory unavailable'),
+    `the mount preflight states the Host refusal on the Welcome:\n${vt.getViewport().join('\n')}`)
+
+  const opens: Array<{
+    readonly draft: string
+    readonly sessionCreates: number
+    readonly initialDirectoryChooser: boolean
+    readonly initialDirectoryEntry: boolean
+    readonly initialDirectoryPath: string | undefined
+    readonly currentSessionId: string | undefined
+  }> = []
+  const originalOpen = TuiApp.prototype.openSessionWorkspace
+  TuiApp.prototype.openSessionWorkspace = function (this: TuiApp, options) {
+    opens.push({
+      draft: this.getDraft(),
+      sessionCreates: harness.createdSessionIds.length,
+      initialDirectoryChooser: options.initialDirectoryChooser === true,
+      initialDirectoryEntry: options.initialDirectoryEntry === true,
+      initialDirectoryPath: options.initialDirectoryPath,
+      currentSessionId: options.subject.currentSessionId,
+    })
+    return originalOpen.call(this, options)
+  }
+  try {
+    mounted.app.setDraft('preserve this first prompt')
+    ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+    assert.equal(await drainUntil(() => opens.length === 1, 10_000), true,
+      'the refused first create opens its chooser after the submission owner settles')
+    await waitForRenderView(vt)
+  } finally {
+    TuiApp.prototype.openSessionWorkspace = originalOpen
+  }
+
+  assert.deepEqual(opens, [{
+    draft: 'preserve this first prompt',
+    sessionCreates: 0,
+    initialDirectoryChooser: true,
+    initialDirectoryEntry: true,
+    initialDirectoryPath: path,
+    currentSessionId: undefined,
+  }], 'the same Browser opens only after exact draft restoration and zero Session.create calls')
+  assert.deepEqual(hostResolutions, [path, path],
+    'the mount preflight and the refused first submit each dispatch ONE official Host path resolution, never concurrently')
+  assert.deepEqual(harness.createdSessionIds, [], 'Host path refusal happens before any Session create')
+  assert.equal(harness.host.followedUp.length + harness.host.steered.length, 0, 'the failed input is never replayed automatically')
+  assert.equal(mounted.app.getDraft(), 'preserve this first prompt')
+  assert.equal(mounted.app.isFullscreen(), true)
+  const frame = vt.getViewport().join('\n')
+  assert.ok(frame.includes('Add Host directory'), `the existing Browser starts in path mode:\n${frame}`)
+  assert.ok(frame.includes(path), `the refused Host proposal is prefilled for correction:\n${frame}`)
+})
 test('observational: the CWD-level skip spans Sessions while the recall window keeps every accepted input', async (t) => {
   // DEFERRED SEMANTICS (docs/architecture/input-history.md): the persistence dedupe anchor
   // (`lastHistoryContent`) is the CWD file's actual last row, NOT a per-Session

@@ -31,19 +31,43 @@ production default; TSP keeps the experimental opt-in described in
 
 ## Browse, search and details
 
-- Browse opens in the current workspace. Workspace membership uses lexical
-  `sameWorkspace(row.cwd, currentCwd)`; unknown roots match neither workspace.
-  `buildSessionTree()` derives a parent edge ONLY from a real
-  `origin: 'subagent'` row whose parent is listed; because the Browser lists
-  only main Sessions, no displayed row is a subagent child: every Browser row
-  is a root (depth 0). Legacy ordinary-fork `parentSession` metadata therefore
-  never fabricates a parent/child edge; orphans remain listed, and cycles
-  cannot loop.
-- Browse Tree groups only adjacent rows whose workspaces match; repeated
-  workspace headings are intentional. Grouping never reorders the browse
-  sequence or resets row depth (which stays at the tree depth the helper
-  derived); each contiguous run has its own PickerGroup ID. Search is global
-  Cards without workspace groups.
+- Browse uses the Host Workspace baseline from the shared `SessionBrowserReadOwner`.
+  Membership is keyed by official `workspaceId` and `sessionIds`; Client/Session
+  `cwd` strings never prove membership. A valid baseline is rendered as real
+  Picker Items (`workspace:<workspaceId>`) with Session children
+  (`session:<sessionId>`), in Host follow order. Static `PickerGroup` headers
+  are not Workspace identity or business targets. Folder item `open` reflects
+  the per-open expansion state; a collapsed Folder contributes no child or
+  Show more item at all, so a manual collapse also hides confirmed active rows.
+- The current Workspace starts expanded with eight ordinary rows; a
+  non-current Workspace with confirmed Needs/Working starts expanded with those
+  active rows and no ordinary history; an inactive non-current Workspace starts
+  as its Folder item only. Explicit expansion of a non-current Workspace starts
+  at five ordinary rows, and `Show more` adds five more until exhausted. A
+  sessionless, Host-confirmed next-create Workspace is ordered first, labelled
+  `Next`, and receives the same eight-row watermark without ever becoming
+  `Current`.
+- A missing or failed Workspace baseline keeps the listed roster usable as a
+  flat fallback and states the single unavailable membership annotation.
+  Ambiguous membership is not guessed into the current Workspace.
+- Workspace folder expansion is per Browser open. Search remains global and
+  ignores folder expansion; clearing the query restores the same typed
+  selection and expansion state.
+- A sessionless Welcome chooser opens this same Browser at its Workspace folder
+  list. A retained first-submit Host refusal opens it directly in `Add
+  directory` path-entry mode with the refused absolute path prefilled, after the
+  submission owner restores the draft. Path entry reuses the Picker's native
+  query/cursor field and exposes `Use directory` and `Cancel` actions. `Enter`
+  (or the Use directory action) dispatches at most one
+  command-owned `resolveWorkspace` until it settles. A rejection keeps the
+  field live and the previous confirmed intent intact; successful Host
+  registration commits the next-create intent and, for the chooser, returns to
+  the Welcome. An ordinary Browser Add returns to Browse and still requires the
+  explicit New session action.
+- A row's Workspace facts come only from the official membership baseline; a
+  row outside that baseline is never moved into a folder by `cwd`. Host content
+  search remains the sole content authority and search results are never
+  re-filtered by cwd.
 - A non-empty query is canonicalized once for metadata matching and Host search:
   remove NUL, trim, cap at 500 UTF-16 code units, and avoid a dangling high
   surrogate. Metadata matches only listed-row `id`, `title`, `cwd` and `preset`
@@ -56,7 +80,7 @@ production default; TSP keeps the experimental opt-in described in
   precedence over pending initial/direct-match intent, and canonical no-op edits
   do not restart Host search.
 - Query mode uses the same native Picker identity in global Cards layout and does
-  not inherit browse-scope membership. Metadata matches retain the official list
+  not inherit browse-folder membership. Metadata matches retain the official list
   order; Host-only results follow Host page order; overlap is deduplicated and
   carries the Host snippet. `hasMore` asks the user to refine; it does not start
   pagination.
@@ -76,8 +100,7 @@ production default; TSP keeps the experimental opt-in described in
   fact group, control or page exists. The label is a statement, never a veto: the
   normal Resume/open path stays, and the official Host `Session.open` owns any
   migration it performs.
-- Details is one read-only native Overlay Reader. Back or Esc returns to the same
-  Picker and retains query/scope/selection. Each reading owns a distinct Reader/
+- Details is one read-only native Overlay Reader. Back or Esc returns to the same Picker and retains query/selection. Each reading owns a distinct Reader/
   body/scroll identity; no Resume action is offered from Details.
 - Details presents the Identity, Activity, Lineage and Configuration groups in
   reading order. Where the pane negotiated the `kv` kind each of those groups is
@@ -102,8 +125,8 @@ production default; TSP keeps the experimental opt-in described in
 - The native capability gate requires `picker`, `row`, `overlay` and `text` kinds
   plus the `scroll` feature. A pane missing any requirement receives no Session
   Browser presentation, and the Presenter emits no unsupported scroll operation.
-- One native Picker key remains stable for a panel across query, scope,
-  projection and resize updates. A new open gets a new panel identity. Details
+- One native Picker key remains stable for a panel across query, folder
+  expansion, projection and resize updates. A new open gets a new panel identity. Details
   body and Back identities are scoped to one reading. Event admission uses the
   current surface, rendered target, panel/page identity and offered action or
   row; the SDK exposes no authoritative frame revision, and this code does not
@@ -112,9 +135,12 @@ production default; TSP keeps the experimental opt-in described in
   and retire one another; a modal suspends Browser input and restores the same
   read-only state when it closes. Hydration retires the Browser; shared renderer
   disposal clears the exposed Model/Preset/Browser presenters.
-- Pointer selection changes only the selected row. A valid non-current row
-  enables the primary Resume action; row Enter/activate uses the same guarded
-  switch as the Footer. Details stays read-only.
+- Pointer selection changes only the selected typed row. Folder activation/Enter
+  toggles only that Workspace; Left/Right collapse/expand it. `Show more` is a
+  selectable action row whose Enter/activate reveals the next five ordinary
+  history rows. None of those folder actions can fall through to Resume of a
+  previously selected Session. A valid non-current Session row enables the
+  primary Resume action; Details stays read-only.
 
 ## Commands and Resume
 
@@ -138,7 +164,9 @@ production default; TSP keeps the experimental opt-in described in
   and query precedence are the rule on every renderer; the PiTUI side owns only
   its physical screen and Client-local presentation, never a second Reader or
   query owner. This native TSP Presenter is unchanged.
-- Footer order is Close, Details, Resume. Resume keeps the `primary` action
+- Footer order is Close, Details, Use directory (sessionless Folder selection),
+  New session, Add directory, Resume; each unavailable action carries its own
+  reason and only enabled actions take keyboard focus. Resume keeps the `primary` action
   designation in every state; it is enabled only for a listed, non-current
   selection while no switch is pending. Loading, empty, unavailable, error, no
   selection, current-row and pending states keep it disabled with an explicit

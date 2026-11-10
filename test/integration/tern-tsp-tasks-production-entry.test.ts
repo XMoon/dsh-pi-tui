@@ -711,6 +711,21 @@ test('switching Session A→B through the real Browser leaves B with only B rows
     // different Session whose id merely contains B.
     const rowB = `session:${B}`
     const rowA = `session:${A}`
+    // The persisted blank Sessions carry no official Workspace membership, so
+    // they live in the explicit Unassigned Folder, which starts collapsed.
+    await waitForReadyPicker(fixture, 'the real Browser to list the official Folders', BROWSER, props =>
+      ((props.items ?? []) as Array<{ readonly id: string }>).some(item => item.id.startsWith('workspace:')))
+    const collapsed = ((pickerProps(fixture.pane, BROWSER).items ?? []) as Array<Record<string, unknown>>)
+      .filter(item => String(item.id).startsWith('workspace:') && item.open !== true)
+      .map(item => String(item.id))
+    for (const folderId of collapsed) {
+      fixture.pane.event({
+        ev: 'activate',
+        sf: fixture.pane.frames().at(-1)!.sf,
+        id: pickerNode(fixture.pane, BROWSER)!.id,
+        item: folderId,
+      })
+    }
     await waitForReadyPicker(fixture, 'the real Browser to list both persisted sessions', BROWSER, props => {
       const items = (props.items ?? []) as Array<{ readonly id: string }>
       return items.some(item => item.id === rowA) && items.some(item => item.id === rowB)

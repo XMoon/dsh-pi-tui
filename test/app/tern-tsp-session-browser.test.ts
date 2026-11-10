@@ -4,13 +4,14 @@ import test from 'node:test'
 import { connect, type PickerGroup } from '@stencil-hq/tern'
 import { mountTspRenderer } from '../../src/tui/tsp/session.ts'
 import { createSessionBrowserReadOwner } from '../../src/app/command/session-browser-read.ts'
-import type { SessionBrowserOpenOptions } from '../../src/app/command/session-browser-read.ts'
+import type { SessionBrowserOpenOptions, SessionBrowserReadOwnerOptions } from '../../src/app/command/session-browser-read.ts'
 import type { SessionContentSearchPage, SessionProjectionSummary, SessionReader, SessionSummary } from '../../src/runtime/session-reader-port.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 import { findSessionMatch, formatSessionAge } from '../../src/tui/pickers/sessions.ts'
 import { installTspPane, type TspPane } from '../support/tsp-terminal-fixture.ts'
 import { waitUntil } from '../support/tsp-runner-harness.ts'
 import type { SessionScope } from '../../src/app/session/scope.ts'
+import type { SessionWorkspaceFactsPort } from '../../src/runtime/session-workspace-facts-port.ts'
 import {
   layerNodes,
   pickerActionByBase,
@@ -134,6 +135,10 @@ async function mounted(t: { after(fn: () => unknown): void }, read: SessionReade
   // so `nativeKv` always arrives through the real handshake and is never a value the
   // test forced on the View.
   paneOptions: Parameters<typeof installTspPane>[0] = { sessionBrowser: true },
+  workspaceFacts?: SessionWorkspaceFactsPort,
+  ownerCallbacks: Pick<SessionBrowserReadOwnerOptions, 'onAddDirectory' | 'onUseDirectory'> = {},
+  currentSessionId: string | null = 'session-current',
+  nextCreateWorkspaceId?: string,
 ) {
   const pane = installTspPane(paneOptions)
   t.after(() => pane.restore())
@@ -160,6 +165,21 @@ async function mounted(t: { after(fn: () => unknown): void }, read: SessionReade
   })
   const browserPresentation = renderer.sessionBrowserPresentation
   assert.ok(browserPresentation, 'the pane advertises picker, row, overlay, text and scroll')
+  let presentedDirectoryEntry: boolean | undefined
+  let presentedInitialDirectoryEntry: boolean | undefined
+  let presentedInitialDirectoryPath: string | undefined
+  let presentedHandleDisposed: boolean | undefined
+  const readPresentation = {
+    open: (request: Parameters<typeof browserPresentation.open>[0]) => {
+      presentedDirectoryEntry = request.initialDirectoryChooser
+      presentedInitialDirectoryEntry = request.initialDirectoryEntry
+      presentedInitialDirectoryPath = request.initialDirectoryPath
+      const handle = browserPresentation.open(request)
+      presentedHandleDisposed = handle.isDisposed()
+      return handle
+    },
+    notify: browserPresentation.notify,
+  }
   const diag = createDiag({ stderrLevel: 'off' })
   t.after(() => diag.dispose())
   const resumeIntents: Array<{ sessionId: string; currentSessionId: string | undefined; source: string }> = []
@@ -167,22 +187,27 @@ async function mounted(t: { after(fn: () => unknown): void }, read: SessionReade
   let current = true
   const owner = createSessionBrowserReadOwner({
     reader: read,
-    presentation: browserPresentation,
+    presentation: readPresentation,
     captureSubject: () => ({
       subject: {
-        currentSessionId: 'session-current',
+        currentSessionId: currentSessionId ?? undefined,
         currentCwd: '/workspace/project',
+        ...(currentSessionId === null && nextCreateWorkspaceId !== undefined ? { currentWorkspaceId: nextCreateWorkspaceId } : {}),
         isCurrent: () => current,
       },
-      scope: { sessionId: 'session-current' } as SessionScope,
+      scope: { sessionId: currentSessionId ?? undefined } as SessionScope,
     }),
     diag,
-    sessionId: () => 'session-current',
+    sessionId: () => currentSessionId ?? undefined,
+    sessionWorkspaceFacts: workspaceFacts,
+    ...ownerCallbacks,
     onResumeIntent: (intent, _scope, settle) => { resumeIntents.push(intent); resumeSettlements.push(settle) },
   })
   t.after(() => owner.dispose())
   const readHandle = owner.open(openOptions)
-  await waitUntil(`the Session Browser picker is ${expectedState}`, () => props(pane).state === expectedState)
+  if (openOptions.initialDirectoryChooser !== true) {
+    await waitUntil(`the Session Browser picker is ${expectedState}`, () => props(pane).state === expectedState)
+  }
   if (waitForProjection) {
     await waitUntil('the first projection batch is visible', () => items(pane).some((entry) => entry.label === 'Needle current title'))
   }
@@ -194,6 +219,10 @@ async function mounted(t: { after(fn: () => unknown): void }, read: SessionReade
     resumeIntents,
     resumeSettlements,
     fatals,
+    presentedDirectoryEntry: () => presentedDirectoryEntry,
+    presentedInitialDirectoryEntry: () => presentedInitialDirectoryEntry,
+    presentedInitialDirectoryPath: () => presentedInitialDirectoryPath,
+    presentedHandleDisposed: () => presentedHandleDisposed,
     moveSubject: () => { current = false },
   }
 }
@@ -266,27 +295,258 @@ test('whitespace-only input while typed Resume loads suppresses the native direc
   assert.equal(m.fatals.length, 0)
 })
 
-test('native Browser is one workspace tree, then a global cards union with Host-owned excerpts', async (t) => {
+test('workspace-first TSP browse uses official Workspace ids and emits real folder items', async (t) => {
+  const facts: SessionWorkspaceFactsPort = {
+    readActivity: async () => [],
+    followWorkspaces: (signal) => ({
+      dispose() {},
+      async *[Symbol.asyncIterator]() {
+        yield {
+          type: 'baseline' as const,
+          items: [
+            { workspaceId: 'ws-project', path: '/srv/project', title: 'Project', sessionIds: ['session-current'] },
+            { workspaceId: 'ws-other', path: '/srv/other', title: 'Other', sessionIds: ['session-other'] },
+          ],
+        }
+        if (signal?.aborted === true) return
+        await new Promise<void>(resolve => signal?.addEventListener('abort', () => resolve(), { once: true }))
+      },
+    }),
+  }
+  const m = await mounted(t, reader({
+    list: async () => [row('session-current'), row('session-other', { cwd: '/unrelated' })],
+  }), false, 'ready', {}, { sessionBrowser: true }, facts)
+  await waitUntil('official Workspace folder item', () => items(m.pane).some(item => item.id === 'workspace:ws-project'))
+  assert.ok(items(m.pane).some(item => item.id === 'workspace:ws-other'))
+  assert.ok(items(m.pane).some(item => item.id === 'session:session-current'))
+  assert.ok(!order(m.pane).some(entry => typeof entry !== 'string'), 'Workspace identity is a real PickerItem, not a PickerGroup header')
+})
+test('keyboard Enter toggles the selected Folder and reveals selected Show more rows, never resuming a stale Session', async (t) => {
+  const sessionRows = [row('session-current', { live: true }), ...Array.from({ length: 10 }, (_, index) => row(`session-history-${index}`, { updatedAt: 900 - index }))]
+  const facts: SessionWorkspaceFactsPort = {
+    readActivity: async () => [],
+    followWorkspaces: (signal) => ({
+      dispose() {},
+      async *[Symbol.asyncIterator]() {
+        yield { type: 'baseline' as const, items: [{ workspaceId: 'ws-current', path: '/srv/project', title: 'Project', sessionIds: sessionRows.map(item => item.id) }] }
+        if (signal?.aborted === true) return
+        await new Promise<void>(resolve => signal?.addEventListener('abort', () => resolve(), { once: true }))
+      },
+    }),
+  }
+  const m = await mounted(t, reader({ list: async () => sessionRows }), false, 'ready', {}, { sessionBrowser: true }, facts)
+  const { pane } = m
+  await waitUntil('official folder and Show more rows are painted', () => items(pane).some(item => item.id === 'more:ws-current'))
+  sendSelect(pane, 'workspace:ws-current', picker(pane)!.id)
+  pane.key('\r')
+  await waitUntil('Enter collapses the selected folder', () => items(pane).some(item => item.id === 'workspace:ws-current' && item.open === false))
+  assert.deepEqual(m.resumeIntents, [], 'Folder Enter never resumes the previously selected current Session')
+  assert.ok(!items(pane).some(item => item.id === 'session:session-current'), 'manual collapse never pins an active or current Session row')
+  assert.ok(!items(pane).some(item => item.id === 'more:ws-current'), 'collapsed folders contain only the Folder item')
+  pane.key('\r')
+  await waitUntil('Enter explicitly reopens the Folder and its history watermark', () => items(pane).some(item => item.id === 'session:session-history-7'))
+  sendSelect(pane, 'more:ws-current', picker(pane)!.id)
+  await waitUntil('the Show more typed row is selected', () => props(pane).selected === 'more:ws-current')
+  pane.key('\r')
+  await waitUntil('Show more Enter exposes the previously hidden history row', () => items(pane).some(item => item.id === 'session:session-history-9'))
+  assert.deepEqual(m.resumeIntents, [], 'Show more Enter never resumes a stale Session')
+})
+
+test('expanding a non-current TSP folder reveals its first five history rows', async (t) => {
+  const history = Array.from({ length: 7 }, (_, index) => row(`session-tsp-history-${index}`, { updatedAt: 900 - index }))
+  const allRows = [row('session-current', { live: true }), ...history]
+  const facts: SessionWorkspaceFactsPort = {
+    readActivity: async () => [],
+    followWorkspaces: (signal) => ({
+      dispose() {},
+      async *[Symbol.asyncIterator]() {
+        yield { type: 'baseline' as const, items: [
+          { workspaceId: 'ws-current', path: '/srv/current', title: 'Current', sessionIds: ['session-current'] },
+          { workspaceId: 'ws-other', path: '/srv/other', title: 'Other', sessionIds: history.map(item => item.id) },
+        ] }
+        if (signal?.aborted === true) return
+        await new Promise<void>(resolve => signal?.addEventListener('abort', () => resolve(), { once: true }))
+      },
+    }),
+  }
+  const m = await mounted(t, reader({ list: async () => allRows }), false, 'ready', {}, { sessionBrowser: true }, facts)
+  const { pane } = m
+  await waitUntil('non-current folder begins collapsed', () => items(pane).some(item => item.id === 'workspace:ws-other'))
+  assert.ok(!items(pane).some(item => item.id === 'more:ws-other'))
+  assert.ok(!items(pane).some(item => item.id === 'session:session-tsp-history-0'))
+  sendSelect(pane, 'workspace:ws-other', picker(pane)!.id)
+  await waitUntil('Folder selection commits before Enter', () => props(pane).selected === 'workspace:ws-other')
+  pane.key('\r')
+  await waitUntil('explicit expansion reveals the first history batch', () => items(pane).some(item => item.id === 'session:session-tsp-history-4'))
+  assert.ok(items(pane).some(item => item.id === 'session:session-tsp-history-0'))
+  assert.ok(!items(pane).some(item => item.id === 'session:session-tsp-history-5'), 'first expansion exposes five rows, not all history')
+  assert.deepEqual(m.resumeIntents, [], 'folder expansion is never Resume')
+})
+test('sessionless TSP Browse prioritizes the Host-confirmed next-create Workspace without claiming Session membership', async (t) => {
+  const nextRows = Array.from({ length: 10 }, (_, index) => row(`session-next-${index}`, { updatedAt: 1000 - index }))
+  const facts: SessionWorkspaceFactsPort = {
+    readActivity: async () => [],
+    followWorkspaces: (signal) => ({
+      dispose() {},
+      async *[Symbol.asyncIterator]() {
+        yield { type: 'baseline' as const, items: [
+          { workspaceId: 'ws-other', path: '/other', title: 'Other', sessionIds: [] },
+          { workspaceId: 'ws-next', path: '/next', title: 'Next target', sessionIds: nextRows.map(item => item.id) },
+        ] }
+        if (signal?.aborted === true) return
+        await new Promise<void>(resolve => signal?.addEventListener('abort', () => resolve(), { once: true }))
+      },
+    }),
+  }
+  const m = await mounted(t, reader({ list: async () => nextRows }), false, 'ready', {}, { sessionBrowser: true }, facts, {}, null, 'ws-next')
+  const { pane } = m
+  await waitUntil('sessionless Workspace rows are ready', () => items(pane).some(item => item.id === 'workspace:ws-next'))
+  const rows = items(pane) as Array<{ readonly id: string; readonly label: string }>
+  assert.equal(rows[0]?.id, 'workspace:ws-next', 'the Host-confirmed destination is the first official folder')
+  assert.ok(rows[0]?.label.includes('Next'), 'the folder is marked as a next-create destination, not Current Session membership')
+  assert.equal(rows.filter(item => item.id.startsWith('session:session-next-')).length, 8, 'the next-create Workspace gets the current-directory history watermark')
+  assert.ok(rows.some(item => item.id === 'more:ws-next'), 'remaining history stays incrementally discoverable')
+  assert.equal(m.resumeIntents.length, 0, 'showing a next-create Workspace does not activate any Session')
+})
+test('Welcome chooser lists official folders and Add directory retains rejected paths before returning on success', async (t) => {
+  const submittedPaths: string[] = []
+  const settlements: Array<(outcome: import('../../src/app/command/session-browser-presentation.ts').SessionBrowserDirectorySettlement) => void> = []
+  let selectedWorkspace: { readonly id: string; readonly path: string } | undefined
+  const workspaceFacts: SessionWorkspaceFactsPort = {
+    readActivity: async () => [],
+    followWorkspaces: (signal) => ({
+      dispose() {},
+      async *[Symbol.asyncIterator]() {
+        yield { type: 'baseline' as const, items: [{ workspaceId: 'ws-existing', path: '/srv/existing', title: 'Existing', sessionIds: [] }] }
+        if (signal?.aborted === true) return
+        await new Promise<void>(resolve => signal?.addEventListener('abort', () => resolve(), { once: true }))
+      },
+    }),
+  }
+  const m = await mounted(t, reader({ list: async () => [] }), false, 'ready', {
+    initialDirectoryChooser: true,
+  }, { sessionBrowser: true }, workspaceFacts, {
+    onAddDirectory: (path, settle) => { submittedPaths.push(path); settlements.push(settle) },
+    onUseDirectory: (id, path) => { selectedWorkspace = { id, path } },
+  }, null)
+  const { pane } = m
+  assert.equal(m.presentedDirectoryEntry(), true, 'ReadOwner passes Welcome chooser mode to the same TSP presentation')
+  await waitUntil('Welcome chooser presents a real official Workspace Folder', () => items(pane).some(item => item.id === 'workspace:ws-existing'))
+  assert.equal(props(pane).title, 'Sessions', 'the chooser starts at the common Browser folder list')
+  sendSelect(pane, 'workspace:ws-existing', picker(pane)!.id)
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.ok(pickerActionByBase(pane, 'use-directory', BROWSER), `selected=${String(props(pane).selected)}; actions=${JSON.stringify(props(pane).actions)}; items=${JSON.stringify(items(pane).map(item => item.id))}`)
+  await waitUntil('the sessionless folder selection is committed before actions', () => {
+    const action = pickerActionByBase(pane, 'use-directory', BROWSER)
+    return action !== undefined && action.disabled === undefined
+  })
+  sendPickerAction(pane, 'add-directory', BROWSER)
+  await waitUntil('Add directory uses the same Picker path query', () => props(pane).title === 'Add directory')
+  pane.key('/client/proposed')
+  await waitUntil('absolute path edits reach the native Picker query', () => props(pane).query === '/client/proposed')
+  pane.key('\r')
+  await waitUntil('the Host path reaches the registered resolver owner', () => submittedPaths.length === 1)
+  settlements[0]!({ kind: 'failed', message: 'unavailable on Host' })
+  await waitUntil('a rejected Host path leaves the chooser input intact', () => props(pane).query === '/client/proposed')
+  assert.ok(sheetText(pane, 'dock').includes('unavailable on Host'), 'the path refusal remains visible in shared Dock notice')
+  pane.key('\r')
+  await waitUntil('retry submits the retained absolute path', () => submittedPaths.length === 2)
+  assert.deepEqual(submittedPaths, ['/client/proposed', '/client/proposed'])
+  settlements[1]!({ kind: 'registered', workspaceId: 'ws-new', path: '/host/canonical' })
+  await waitUntil('successful chooser registration returns to Welcome', () => picker(pane) === undefined)
+  assert.equal(m.fatals.length, 0)
+})
+
+test('a failed first-submit chooser opens the same TSP Browser prefilled in Host path mode and submits once per settlement', async (t) => {
+  const submittedPaths: string[] = []
+  const settlements: Array<(outcome: import('../../src/app/command/session-browser-presentation.ts').SessionBrowserDirectorySettlement) => void> = []
+  const m = await mounted(t, reader({ list: async () => [] }), false, 'ready', {
+    initialDirectoryChooser: true,
+    initialDirectoryEntry: true,
+    initialDirectoryPath: '/launch/failed',
+  }, { sessionBrowser: true }, undefined, {
+    onAddDirectory: (path, settle) => { submittedPaths.push(path); settlements.push(settle) },
+  }, null)
+  const { pane } = m
+  assert.equal(m.presentedDirectoryEntry(), true)
+  assert.equal(m.presentedInitialDirectoryEntry(), true)
+  assert.equal(m.presentedInitialDirectoryPath(), '/launch/failed')
+  await waitUntil('the same Browser opens directly in the retained Host path mode', () =>
+    props(pane).title === 'Add directory' && props(pane).query === '/launch/failed')
+  pane.key('\r')
+  await waitUntil('the failed launch path reaches Host resolution once', () => submittedPaths.length === 1)
+  pane.key('\r')
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.deepEqual(submittedPaths, ['/launch/failed'], 'the verification owner is single-flight until settlement')
+  settlements[0]!({ kind: 'failed', message: 'refused on Host' })
+  await waitUntil('failure retains the launch path in the same submode', () => props(pane).query === '/launch/failed')
+  assert.equal(props(pane).title, 'Add directory')
+  // Escape from the action-focused path submode cancels the PATH ENTRY, never
+  // the whole Browser: the retained path and the same Picker stay live.
+  pane.key('\t')
+  await waitUntil('Tab focuses the path actions', () => props(pane).focus !== 'list')
+  pane.key('\u001b')
+  await waitUntil('Escape in path mode cancels only the path entry', () => picker(pane) !== undefined && props(pane).title === 'Sessions')
+  sendPickerAction(pane, 'add-directory', BROWSER)
+  await waitUntil('the path editor reopens for the same Browser', () => props(pane).title === 'Add directory')
+  assert.equal(props(pane).query, '', 'a cancelled path entry starts empty')
+  pane.key('/launch/failed')
+  pane.key('\t')
+  pane.key('\r')
+  await waitUntil('the visible Use directory action retries the retained path', () => submittedPaths.length === 2)
+  settlements[1]!({ kind: 'registered', workspaceId: 'ws-launch', path: '/host/canonical' })
+  await waitUntil('Host success closes the existing chooser lease', () => picker(pane) === undefined)
+  assert.equal(m.fatals.length, 0)
+})
+test('Use directory selects a canonical official Workspace and closes the sessionless chooser', async (t) => {
+  let selectedWorkspace: { readonly id: string; readonly path: string } | undefined
+  const workspaceFacts: SessionWorkspaceFactsPort = {
+    readActivity: async () => [],
+    followWorkspaces: (signal) => ({
+      dispose() {},
+      async *[Symbol.asyncIterator]() {
+        yield { type: 'baseline' as const, items: [{ workspaceId: 'ws-existing', path: '/srv/canonical', title: 'Existing', sessionIds: [] }] }
+        if (signal?.aborted === true) return
+        await new Promise<void>(resolve => signal?.addEventListener('abort', () => resolve(), { once: true }))
+      },
+    }),
+  }
+  const m = await mounted(t, reader({ list: async () => [] }), false, 'ready', { initialDirectoryChooser: true },
+    { sessionBrowser: true }, workspaceFacts, {
+      onUseDirectory: (id, path) => { selectedWorkspace = { id, path } },
+    }, null)
+  await waitUntil('official chooser Folder is visible', () => items(m.pane).some(item => item.id === 'workspace:ws-existing'))
+  sendSelect(m.pane, 'workspace:ws-existing', picker(m.pane)!.id)
+  await waitUntil('Use directory is enabled for the selected sessionless folder', () => {
+    const action = pickerActionByBase(m.pane, 'use-directory', BROWSER)
+    return action !== undefined && action.disabled === undefined
+  })
+  sendPickerAction(m.pane, 'use-directory', BROWSER)
+  await waitUntil('Use directory returns from the same Browser', () => picker(m.pane) === undefined)
+  assert.deepEqual(selectedWorkspace, { id: 'ws-existing', path: '/srv/canonical' })
+})
+
+test('native Browser flat fallback keeps all listed Sessions, then a global cards union with Host-owned excerpts', async (t) => {
   const m = await mounted(t)
   const { pane } = m
   const initial = props(pane)
   assert.equal(initial.layout, 'tree')
   assert.equal(initial.size, 'lg')
-  assert.equal(initial.scope, 'workspace')
   assert.deepEqual(initial.current, ['session:session-current'])
   assert.equal(initial.selected, 'session:session-current')
-  assert.deepEqual((initial.scopes as Array<Record<string, unknown>>).map((scope) => scope.count), [3, 7])
+  assert.equal(initial.scopes, undefined)
   assert.deepEqual(items(pane).map((entry) => entry.id), [
-    'session:session-current', 'session:session-other', 'session:session-cross-child',
-  ])
-  assert.deepEqual(items(pane).map((entry) => entry.depth), [0, 0, 0],
-    'legacy ordinary-fork parentSession metadata stays flat in the Browser tree')
-  assert.deepEqual(order(pane), [
-    { group: 'workspace-run:0', label: 'workspace/project', count: 3 },
     'session:session-current',
     'session:session-other',
+    'session:session-content',
     'session:session-cross-child',
+    'session:session-orphan',
+    'session:session-cycle-a',
+    'session:session-cycle-b',
   ])
+  assert.deepEqual(items(pane).map((entry) => entry.depth), [0, 0, 0, 0, 0, 0, 0],
+    'missing official Workspace baseline paints one flat fallback, never cwd groups')
+  assert.deepEqual(order(pane), items(pane).map(entry => String(entry.id)))
   assert.equal(items(pane)[0]?.label, 'Needle current title', 'terminal sequences are removed from projected titles')
 
   const pickerId = picker(pane)!.id
@@ -358,9 +618,7 @@ test('footer keyboard focus visits only enabled actions', async (t) => {
     .map((action) => String(action.label))
 
   pane.key('\t')
-  await waitUntil('the first Tab enters workspace scopes', () => props(pane).focus === 'scopes')
-  pane.key('\t')
-  await waitUntil('Details receives the initial enabled footer focus', () => actionLabels().includes('Details [Enter]'))
+  await waitUntil('the first Tab focuses enabled Footer actions', () => props(pane).focus !== 'list' && actionLabels().includes('Details [Enter]'))
   assert.deepEqual(actionLabels().filter((label) => label.endsWith('[Enter]')), ['Details [Enter]'])
   assert.equal(pickerActionByBase(pane, 'resume', BROWSER)?.disabled, 'The current session is already active.')
 
@@ -379,9 +637,7 @@ test('empty Browser footer focus falls back to enabled Close', async (t) => {
     .map((action) => String(action.label))
 
   pane.key('\t')
-  await waitUntil('the first Tab enters workspace scopes', () => props(pane).focus === 'scopes')
-  pane.key('\t')
-  await waitUntil('empty footer focuses enabled Close, not disabled Details', () => actionLabels().includes('Close [Enter]'))
+  await waitUntil('the first Tab focuses enabled Close action', () => actionLabels().includes('Close [Enter]'))
   assert.deepEqual(actionLabels().filter((label) => label.endsWith('[Enter]')), ['Close [Enter]'])
   assert.equal(pickerActionByBase(pane, 'details', BROWSER)?.disabled, 'Select a session to read its details.')
   assert.equal(pickerActionByBase(pane, 'resume', BROWSER)?.disabled, 'Select a session to resume.')
@@ -480,9 +736,7 @@ test('55-row projection batches keep the native Picker identity and selected row
     },
   }), false)
   const { pane } = m
-  assert.equal(items(pane).length, 28, 'workspace scope filters membership without mutating the source rows')
-  sendAction(pane, 'scope', 'all', picker(pane)!.id)
-  await waitUntil('55-row all-workspaces tree', () => props(pane).scope === 'all' && items(pane).length === 55)
+  assert.equal(items(pane).length, 55, 'the missing Workspace baseline keeps the complete roster in flat fallback')
   pane.key('\u001b[F')
   await waitUntil('End selects the final main row', () => props(pane).selected === 'session:session-row-54')
   pane.key('\u001b[H')
@@ -582,46 +836,17 @@ test('projection failure remains secondary to loading and hasMore search status'
   assert.deepEqual(items(pane).map((item) => item.id), ['session:needle-session'])
 })
 
-test('All workspaces groups contiguous workspace runs without changing lineage, orphans, and cycle members', async (t) => {
+test('no Workspace baseline renders a flat fallback; official baseline has a dedicated folder-item proof above', async (t) => {
   const m = await mounted(t)
   const { pane } = m
-  sendAction(pane, 'scope', 'all', picker(pane)!.id)
-  await waitUntil('all-workspaces scope', () => props(pane).scope === 'all')
-  assert.deepEqual(items(pane).map((entry) => entry.id), [
-    'session:session-current',
-    'session:session-other',
-    'session:session-content',
-    'session:session-cross-child',
-    'session:session-orphan',
-    'session:session-cycle-a',
-    'session:session-cycle-b',
-  ])
-  assert.deepEqual(items(pane).map((entry) => entry.depth), [0, 0, 0, 0, 0, 0, 0],
-    'legacy parentSession metadata never nests; orphans and cycle members stay listed once')
-  const allOrder = order(pane)
-  const groups = allOrder.filter((entry): entry is PickerGroup => typeof entry !== 'string')
-  assert.deepEqual(allOrder, [
-    { group: 'workspace-run:0', label: 'workspace/project', count: 2 },
-    'session:session-current',
-    'session:session-other',
-    { group: 'workspace-run:1', label: 'workspace/other', count: 1 },
-    'session:session-content',
-    { group: 'workspace-run:2', label: 'workspace/project', count: 1 },
-    'session:session-cross-child',
-    { group: 'workspace-run:3', label: 'workspace/other', count: 3 },
-    'session:session-orphan',
-    'session:session-cycle-a',
-    'session:session-cycle-b',
-  ])
-  assert.equal(new Set(groups.map((group) => group.group)).size, groups.length, 'repeated workspace labels still have unique run identities')
-  assert.deepEqual(groups.map((group) => group.count), [2, 1, 1, 3], 'every listed row belongs to exactly one contiguous workspace run')
+  assert.equal(order(pane).length, items(pane).length)
+  assert.ok(order(pane).every(entry => typeof entry === 'string'))
+  assert.ok(items(pane).every(entry => !String(entry.id).startsWith('workspace:')))
 })
 
 test('Details preserves search state, scrolls its own body, and emits read-only Resume intents', async (t) => {
   const m = await mounted(t)
   const { pane } = m
-  sendAction(pane, 'scope', 'all', picker(pane)!.id)
-  await waitUntil('all-workspaces scope', () => props(pane).scope === 'all')
   pane.key('needle')
   await waitUntil('global cards search is ready', () => props(pane).layout === 'cards' && props(pane).state === 'ready')
   sendSelect(pane, 'session:session-content', picker(pane)!.id)
@@ -681,7 +906,6 @@ test('Details preserves search state, scrolls its own body, and emits read-only 
   pane.key('\u001b')
   await waitUntil('Esc returns to the same browse page', () => details(pane) === undefined && picker(pane) !== undefined)
   assert.equal(props(pane).query, 'needle')
-  assert.equal(props(pane).scope, undefined, 'global search hides the browse-only scope control')
   assert.equal(props(pane).selected, 'session:session-content')
   sendPickerAction(pane, 'details', BROWSER)
   await waitUntil('second Details reading opens', () => details(pane) !== undefined)
@@ -696,10 +920,9 @@ test('Details preserves search state, scrolls its own body, and emits read-only 
   pane.key('\u001b')
   await waitUntil('second Reader returns to the same browse state', () => details(pane) === undefined && picker(pane) !== undefined)
   assert.equal(props(pane).query, 'needle')
-  assert.equal(props(pane).scope, undefined)
   assert.equal(props(pane).selected, 'session:session-content')
   pane.key('\u001b')
-  await waitUntil('clearing search restores the all-workspaces browse scope', () => props(pane).layout === 'tree' && props(pane).scope === 'all')
+  await waitUntil('clearing search restores the Browse selection', () => props(pane).layout === 'tree' && props(pane).selected === 'session:session-current')
   assert.equal(props(pane).selected, 'session:session-current', 'clearing search restores the pre-search selection')
   sendSelect(pane, 'session:session-current', picker(pane)!.id)
   await waitUntil('Current is independently selected', () => props(pane).selected === 'session:session-current')
@@ -741,8 +964,6 @@ test('host migration-required state is read-only in row detail, content hits, an
     }),
   }), false)
   const { pane } = m
-  sendAction(pane, 'scope', 'all', picker(pane)!.id)
-  await waitUntil('all-workspaces scope', () => props(pane).scope === 'all')
   await waitUntil('the three rows are listed', () => items(pane).length === 3)
   const detailOf = (id: string): string => String(items(pane).find((entry) => entry.id === `session:${id}`)?.detail)
   const migrating = detailOf('session-other')

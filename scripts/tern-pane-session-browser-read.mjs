@@ -1,4 +1,13 @@
-/** Real Tern headless qualification for the production Session Browser Presenter and Resume affordance. */
+/**
+ * Real Tern headless qualification for the production Workspace-first Session
+ * Browser: official Folder items, incremental expansion, manual collapse,
+ * session selection, the Details Reader and the Host directory path chooser.
+ *
+ * Every premise is read from the CURRENT production contract: the picker frame
+ * carries no `scope`, Workspace facts arrive through the read owner's
+ * `sessionWorkspaceFacts`, and Folders are Picker ITEMS (`workspace:<id>`), not
+ * PickerGroups. Nothing here asserts the retired flat 54/56-row tree.
+ */
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { containedX, containedXY, rect } from './tern-pane-geometry.mjs'
@@ -8,25 +17,61 @@ const records = (h) => readFileSync(join(h.root, 'events.jsonl'), 'utf8')
 const frames = (h) => records(h).filter((entry) => entry.frame).map((entry) => entry.frame)
 const lastFrame = (h) => frames(h).at(-1)
 const caps = (h) => records(h).find((entry) => entry.caps)?.caps
+const notices = (h) => records(h).filter((entry) => entry.notice).map((entry) => entry.notice)
+const addDirectoryRecords = (h) => records(h).filter((entry) => entry.addDirectory).map((entry) => entry.addDirectory)
+const addSettlements = (h) => records(h).filter((entry) => entry.addDirectorySettlement).map((entry) => entry.addDirectorySettlement)
 const classTokens = (node) => String(node.class ?? '').split(/\s+/u).filter(Boolean)
 const hasClass = (node, token) => classTokens(node).includes(token)
 const nodesWith = (snap, token) => snap.nodes.filter((node) => hasClass(node, token))
+const findClass = (node, token) => {
+  if (node === undefined) return undefined
+  if (hasClass(node, token)) return node
+  for (const child of node.children ?? []) {
+    const found = findClass(child, token)
+    if (found !== undefined) return found
+  }
+  return undefined
+}
 const pickerNode = (snap) => nodesWith(snap, 'sf-picker')[0]
-const cardRows = (snap) => nodesWith(snap, 'pk-row').filter((node) => !hasClass(node, 'grp'))
+const allRows = (snap) => nodesWith(snap, 'pk-row')
+// The client draws an indent `pk-chev leaf` on every child row; only a Folder
+// row carries the real disclosure chevron (without `leaf`). Row KIND is therefore
+// read from that chevron, never from a flat index.
+const disclosureOf = (node) => {
+  const chevron = findClass(node, 'pk-chev')
+  return chevron !== undefined && !hasClass(chevron, 'leaf') ? chevron : undefined
+}
+const folderRows = (snap) => allRows(snap).filter((node) => String(node.id ?? '').startsWith('pk-workspace:'))
+const sessionRows = (snap) => allRows(snap).filter((node) => String(node.id ?? '').startsWith('pk-session:'))
 const overlayNode = (snap) => nodesWith(snap, 'sf-overlay')[0]
 const overlayBody = (snap) => nodesWith(snap, 'sf-ov-body')[0]
 const frameItems = (frame) => Array.isArray(frame?.items) ? frame.items : []
-const waitFrame = async (h, predicate, label, limit = 60) => {
+const itemById = (frame, id) => frameItems(frame).find((item) => item.id === id)
+const itemIds = (frame) => frameItems(frame).map((item) => item.id)
+const sessionIds = (frame) => itemIds(frame).filter((id) => id.startsWith('session:'))
+const waitFrame = async (h, predicate, label, limit = 80) => {
   for (let step = 0; step < limit; step += 1) {
     if (predicate(lastFrame(h))) return true
     await h.sleep(100)
   }
-  h.log(`WAIT-FAIL ${label} frame=${JSON.stringify(lastFrame(h))}`)
+  const frame = lastFrame(h)
+  h.log(`WAIT-FAIL ${label} frame=${JSON.stringify(frame)?.slice(0, 600)}`)
   return false
 }
 const keyText = async (h, text) => {
   for (const character of text) await h.key(character, 120)
 }
+const press = async (h, name, count = 1, settleMs = 220) => {
+  for (let step = 0; step < count; step += 1) await h.key(name, settleMs)
+}
+const buttonFor = (h, snap, label) => nodesWith(snap, 'pk-btn')
+  .find((node) => h.descendantsText(node).replace(' [Enter]', '') === label)
+const folderRow = (h, snap, label) => folderRows(snap)
+  .find((node) => h.descendantsText(node).includes(label))
+const disclosure = (row) => row === undefined ? undefined : findClass(row, 'pk-chev')
+const sessionRow = (h, snap, title) => sessionRows(snap)
+  .find((node) => h.descendantsText(node).includes(title))
+const detailBodyId = (frame) => String(frame?.readerBodyKey ?? '')
 const tailPosition = (h) => {
   const snap = h.snapshot()
   // Tern's tree view truncates long text values, while retaining the full laid-out rect.
@@ -49,7 +94,7 @@ export default async function (h) {
   await h.resize(1280, 800)
   const subject = join(h.repo, 'scripts', 'tern-pane-session-browser-read-subject.mts')
   const booted = await h.launch(subject, { ready: 'Sessions' })
-  h.check('the production Session Browser Presenter boots in the real Tern pane', booted, h.texts(h.snapshot()).join(' | '))
+  h.check('the production Workspace-first Session Browser boots in the real Tern pane', booted, h.texts(h.snapshot()).join(' | ').slice(0, 300))
   if (!booted) return
 
   h.measure('real client and negotiated Browser capabilities',
@@ -59,370 +104,558 @@ export default async function (h) {
     && (caps(h)?.features ?? []).includes('scroll'),
     JSON.stringify({ kinds: caps(h)?.kinds, features: caps(h)?.features }))
 
-  const initialReady = await waitFrame(h, (frame) => frame?.page === 'browse' && frame?.state === 'ready', 'initial list')
+  // ── 1. Boot: two official Folders, Current first, the other collapsed ─────
+  const initialReady = await waitFrame(h, (frame) => frame?.page === 'browse' && frame?.state === 'ready'
+    && itemById(frame, 'workspace:ws-current') !== undefined
+    && itemById(frame, 'workspace:ws-other') !== undefined, 'official Workspace folders')
   let frame = lastFrame(h)
-  h.check('the first page is the native workspace Tree with Current separate from selection',
-    initialReady && frame?.layout === 'tree' && frame?.scope === 'workspace'
-    && frame?.selected === 'session:session-current'
-    && JSON.stringify(frame?.current) === JSON.stringify(['session:session-current'])
-    && frameItems(frame).length === 54,
-    JSON.stringify({ layout: frame?.layout, scope: frame?.scope, selected: frame?.selected, current: frame?.current, count: frameItems(frame).length }))
-  const browserKey = frame?.pickerKey
-  h.check('the TSP surface exposes one native Picker and no extra page', pickerNode(h.snapshot()) !== undefined)
-  h.capture('session-browser-tree-1280x800', 'workspace Tree with 54 main rows and separate Current marker')
+  const bootIds = itemIds(frame)
+  const currentFolder = itemById(frame, 'workspace:ws-current')
+  const otherFolder = itemById(frame, 'workspace:ws-other')
+  const bootPickerKey = frame?.pickerKey
+  h.check('the first page is the native workspace Tree: Folder ITEMS, Current first, no retired scope property',
+    initialReady && frame?.layout === 'tree' && frame?.scope === undefined
+    && currentFolder?.open === true && currentFolder?.depth === 0
+    && otherFolder?.open === false && otherFolder?.depth === 0
+    && bootIds[0] === 'workspace:ws-current' && bootIds[1] === 'session:session-current',
+    JSON.stringify({ layout: frame?.layout, scope: frame?.scope, ids: bootIds, current: currentFolder, other: otherFolder }))
+  h.check('the Current Folder is labelled Current, owns eight expanded ordinary rows and a Show more row',
+    String(currentFolder?.label).startsWith('Current · Project')
+    && bootIds.filter((id) => id.startsWith('session:')).length === 8
+    && itemById(frame, 'more:ws-current') !== undefined,
+    JSON.stringify({ label: currentFolder?.label, sessions: sessionIds(frame), more: itemById(frame, 'more:ws-current') }))
+  h.check('the other official Workspace is collapsed with no child Session and no Show more row',
+    otherFolder !== undefined
+    && !bootIds.some((id) => id.startsWith('session:session-other-') || id === 'session:session-content' || id === 'more:ws-other'),
+    JSON.stringify({ ids: bootIds }))
+  h.check('the first page keeps the current Session selected and separately marked as current',
+    frame?.selected === 'session:session-current'
+    && JSON.stringify(frame?.current) === JSON.stringify(['session:session-current']),
+    JSON.stringify({ selected: frame?.selected, current: frame?.current }))
 
-  await h.key('Tab', 500)
-  await h.key('Return', 800)
-  const allScope = await waitFrame(h, (value) => value?.scope === 'all', 'All workspaces scope')
-  frame = lastFrame(h)
-  h.check('All workspaces restores all 56 listed main rows and preserves the Picker key',
-    allScope && frame?.layout === 'tree' && frameItems(frame).length === 56 && frame?.pickerKey === browserKey,
-    JSON.stringify({ scope: frame?.scope, count: frameItems(frame).length, pickerKey: frame?.pickerKey }))
-  // ── S3 PR-C: the Host-authoritative on-disk format state, painted ─────────
-  // A migration-required row is read-only text in the row detail, never a
-  // control and never a page of its own.
-  const migrationTreeDetail = frameItems(frame)
-    .find((item) => item.id === 'session:session-migration')?.detail
-  h.check('the real client paints the read-only migration state in the row detail',
-    String(migrationTreeDetail ?? '').includes('Migration required'),
-    JSON.stringify({ migrationTreeDetail }))
-  h.capture('session-browser-migration-row-1280x800', 'migration-required row detail at 1280x800')
-  const lineage = new Map(frameItems(frame).map((item) => [item.id, item.depth]))
-  h.check('the real all-workspaces tree keeps legacy ordinary-fork metadata as flat roots',
-    ['session:session-long', 'session:session-row-00', 'session:session-row-51', 'session:session-content']
-      .every((id) => lineage.get(id) === 0),
-    JSON.stringify([...lineage.entries()].filter(([id]) => ['session:session-long', 'session:session-row-00', 'session:session-row-51', 'session:session-content'].includes(id))))
-  const allIds = frameItems(frame).map((item) => item.id)
-  const projected = await waitFrame(h, (value) => frameItems(value).some((item) => item.id === 'session:session-long'
-    && String(item.label).startsWith('Needle long session title')), 'projected title appears')
-  // One snapshot supplies BOTH the node and the chains the oracle reads: the
-  // oracle indexes by node identity, so chains from another snapshot would
-  // silently drop every clipping ancestor.
-  const longRowSnap = h.snapshot()
-  const longRow = cardRows(longRowSnap).find((node) => h.descendantsText(node).startsWith('Needle long session title'))
-  const pointerSelected = longRow === undefined ? false : await h.click(longRowSnap.chains, longRow)
-  const pointerApplied = await waitFrame(h, (value) => value?.selected === 'session:session-long', 'real pointer selects long row')
-  h.check('the real client click on an unselected row changes selection only',
-    projected && pointerSelected && pointerApplied && lastFrame(h)?.current?.[0] === 'session:session-current'
-    && !records(h).some((entry) => entry.resumeIntent),
-    JSON.stringify({ projected, pointerSelected, pointerApplied, selected: lastFrame(h)?.selected, current: lastFrame(h)?.current, longRow: longRow === undefined ? 'missing' : h.descendantsText(longRow) }))
-  await h.key('Home', 500)
-  await waitFrame(h, (value) => value?.selected === allIds[0], 'restore first row after pointer selection')
-  await h.key('End', 500)
-  const endSelected = await waitFrame(h, (value) => value?.selected === allIds.at(-1), 'End selects final row')
-  const endCurrent = lastFrame(h)?.current?.[0]
-  await h.key('Home', 500)
-  const homeSelected = await waitFrame(h, (value) => value?.selected === allIds[0], 'Home selects first row')
-  h.check('native keyboard Home/End update selection while Current remains independently marked',
-    endSelected && homeSelected && endCurrent === 'session:session-current'
-    && lastFrame(h)?.current?.[0] === 'session:session-current',
-    JSON.stringify({ last: allIds.at(-1), endCurrent, frame: lastFrame(h)?.selected, current: lastFrame(h)?.current }))
-  h.capture('session-browser-tree-all-1280x800', 'All workspaces keeps legacy rows flat and keyboard row navigation')
+  // The client animates an entered list row (class `arr-a`): let the layout settle
+  // before a rect is used as a visibility/containment proof.
+  await h.sleep(600)
+  const bootSnap = h.snapshot()
+  const bootCurrentFolderRow = folderRow(h, bootSnap, 'Current · Project')
+  const bootOtherFolderRow = folderRow(h, bootSnap, 'Other')
+  h.check('the real client paints one native Picker with both Folder rows and their disclosure chevrons',
+    pickerNode(bootSnap) !== undefined
+    && nodesWith(bootSnap, 'sf-picker').length === 1
+    && bootCurrentFolderRow !== undefined && findClass(bootCurrentFolderRow, 'pk-chev') !== undefined
+    && bootOtherFolderRow !== undefined && findClass(bootOtherFolderRow, 'pk-chev') !== undefined
+    && sessionRows(bootSnap).length === 8,
+    JSON.stringify({
+      pickers: nodesWith(bootSnap, 'sf-picker').length,
+      folders: folderRows(bootSnap).map((node) => h.descendantsText(node)),
+      sessions: sessionRows(bootSnap).map((node) => h.descendantsText(node).slice(0, 60)),
+    }))
+  h.capture('session-browser-workspace-tree-current-1280x800',
+    'boot: Current Workspace Folder expanded first, the other official Folder collapsed')
 
-  const viewports = [
+  // The same tree at three pane sizes (Before the other Folder is expanded).
+  const TREE_SIZES = [
     { w: 900, h: 640, name: '900x640' },
     { w: 560, h: 640, name: '560x640' },
+    // The narrowest claimed pane: the enabled primary Resume action must stay
+    // inside the client's action bar after the Folder-only actions are dropped.
     { w: 400, h: 600, name: '400x600' },
   ]
-  const viewportEvidence = []
-  for (const size of viewports) {
+  for (const size of TREE_SIZES) {
     await h.resize(size.w, size.h)
-    const ready = await waitFrame(h, (value) => value?.page === 'browse' && value?.layout === 'tree', `${size.name} resize`)
-    frame = lastFrame(h)
+    const ready = await waitFrame(h, (value) => value?.page === 'browse' && value?.layout === 'tree'
+      && JSON.stringify(itemIds(value)) === JSON.stringify(bootIds), `${size.name} folder tree`)
     const snap = h.snapshot()
-    const picker = pickerNode(snap)
-    const rows = cardRows(snap)
-    viewportEvidence.push({ size: size.name, picker: picker !== undefined, rows: rows.length, key: frame?.pickerKey, scope: frame?.scope })
-    h.check(`${size.name}: the same native Tree, Picker identity and readable rows remain`,
-      ready && frame?.pickerKey === browserKey && frame?.layout === 'tree' && picker !== undefined && rows.length > 0,
-      JSON.stringify(viewportEvidence.at(-1)))
-    h.capture(`session-browser-tree-${size.name}`, `native Tree after resize to ${size.name}`)
+    const resumeButton = buttonFor(h, snap, 'Resume')
+    h.check(`${size.name}: one native Picker keeps the same Folder items and Current-first tree`,
+      ready && lastFrame(h)?.pickerKey === bootPickerKey && pickerNode(snap) !== undefined
+      && folderRow(h, snap, 'Current · Project') !== undefined && sessionRows(snap).length === 8,
+      JSON.stringify({ pickerKey: lastFrame(h)?.pickerKey, folder: folderRow(h, snap, 'Current · Project') !== undefined, rows: sessionRows(snap).length }))
+    h.check(`${size.name}: the primary Resume action is fully contained in the real action bar`,
+      resumeButton !== undefined && containedXY(snap.chains, resumeButton),
+      JSON.stringify({ resume: resumeButton === undefined ? 'missing' : rect(resumeButton),
+        picker: pickerNode(snap) === undefined ? 'missing' : rect(pickerNode(snap)) }))
+    h.capture(`session-browser-workspace-tree-current-${size.name}`, `official Folder tree at ${size.name}`)
   }
-  h.measure('ordinary viewport tree presence and stable Picker identity', JSON.stringify(viewportEvidence))
-  await h.key('Tab', 400)
-  await h.key('Tab', 400)
-  frame = lastFrame(h)
-  const currentResumeAction = frame?.actions?.find((action) => String(action.label).startsWith('Resume'))
-  const currentResumeButton = nodesWith(h.snapshot(), 'pk-btn').find((node) => h.descendantsText(node).replace(' [Enter]', '') === 'Resume')
-  h.check('Current keeps primary Resume disabled; expected reason is in action metadata',
-    frame?.selected === 'session:session-current'
-    && currentResumeAction?.primary === true
-    && currentResumeAction?.disabled === 'The current session is already active.'
-    && currentResumeButton !== undefined,
-    JSON.stringify({ selected: frame?.selected, action: currentResumeAction, buttonClass: currentResumeButton?.class }))
-  h.measure('Current Resume footer geometry in the real 400x600 client', JSON.stringify({
-    disabled: currentResumeAction?.disabled,
-    painted: currentResumeButton !== undefined,
-    buttonClass: currentResumeButton?.class,
-    buttonBox: currentResumeButton === undefined ? 'none' : rect(currentResumeButton),
-  }))
-  h.capture('session-browser-footer-current-disabled-400x600', 'Current Resume is disabled; reason is action metadata, not visible in capture')
+  await h.resize(1280, 800)
+  await waitFrame(h, (value) => value?.page === 'browse' && value?.layout === 'tree', 'back to 1280x800')
 
-  const resumeRowSnap = h.snapshot()
-  const resumeRow = cardRows(resumeRowSnap).find((node) => h.descendantsText(node).startsWith('Needle long session title'))
-  const resumeRowClicked = resumeRow !== undefined && await h.click(resumeRowSnap.chains, resumeRow)
-  const resumeRowSelected = await waitFrame(h, (value) => value?.selected === 'session:session-long', 'select non-current Resume target')
-  h.check('pointer selection of a listed non-current row does not dispatch Resume',
-    resumeRowClicked && resumeRowSelected && lastFrame(h)?.current?.[0] === 'session:session-current'
-    && !records(h).some((entry) => entry.resumeIntent),
-    JSON.stringify({ selected: lastFrame(h)?.selected, current: lastFrame(h)?.current, resumeRowClicked, resumeRowSelected }))
-  await h.key('Tab', 400)
-  await h.key('Tab', 400)
+  // ── 2. Keyboard: select the other Folder, Enter expands it, Show more ─────
+  await h.key('End', 500)
+  const otherSelected = await waitFrame(h, (value) => value?.selected === 'workspace:ws-other', 'End selects the last Folder item')
+  h.check('keyboard End selects the other official Folder without expanding it',
+    otherSelected && lastFrame(h)?.layout === 'tree'
+    && itemById(lastFrame(h), 'workspace:ws-other')?.open === false,
+    JSON.stringify({ selected: lastFrame(h)?.selected, other: itemById(lastFrame(h), 'workspace:ws-other') }))
+  h.capture('session-browser-workspace-folders-1280x800',
+    'After: keyboard selection reaches the other official Folder; both Folder items are visible')
+
+  await h.key('Return', 700)
+  const expanded = await waitFrame(h, (value) => itemById(value, 'workspace:ws-other')?.open === true
+    && itemById(value, 'session:session-other-00') !== undefined, 'Enter expands the other Folder')
   frame = lastFrame(h)
-  const enabledResumeAction = frame?.actions?.find((action) => String(action.label).startsWith('Resume'))
-  const resumeBtnSnap = h.snapshot()
-  const enabledResumeButton = nodesWith(resumeBtnSnap, 'pk-btn').find((node) => h.descendantsText(node).replace(' [Enter]', '') === 'Resume')
-  const resumeButtonContained = enabledResumeButton !== undefined && containedXY(resumeBtnSnap.chains, enabledResumeButton)
-  h.check('a listed non-current row enables the primary Resume footer inside the Picker',
-    frame?.selected === 'session:session-long'
-    && enabledResumeAction?.disabled === undefined
-    && enabledResumeAction?.primary === true
-    && resumeButtonContained,
-    JSON.stringify({ selected: frame?.selected, action: enabledResumeAction, button: enabledResumeButton === undefined ? undefined : rect(enabledResumeButton), contained: resumeButtonContained }))
-  h.measure('enabled primary Resume footer geometry in the real 400x600 client', JSON.stringify({
-    action: enabledResumeAction,
-    buttonClass: enabledResumeButton?.class,
-    buttonBox: enabledResumeButton === undefined ? 'none' : rect(enabledResumeButton),
-  }))
-  h.capture('session-browser-footer-resume-enabled-400x600', 'non-current Resume is enabled and primary')
-  const footerResumeClicked = enabledResumeButton !== undefined
-    && await h.click(resumeBtnSnap.chains, enabledResumeButton)
-  const footerIntentSeen = await waitFrame(h, () => records(h).some((entry) => entry.resumeIntent?.source === 'footer'), 'real footer Resume click')
-  const footerPending = await waitFrame(h, (value) => value?.actions?.some((action) =>
-    String(action.label).startsWith('Resume') && action.disabled === 'Switching sessions…') === true, 'Resume pending state')
-  h.check('real-client footer click emits one intent and does not fake a Session switch',
-    footerResumeClicked && footerIntentSeen && footerPending
-    && records(h).filter((entry) => entry.resumeIntent).length === 1
-    && lastFrame(h)?.current?.[0] === 'session:session-current'
+  const firstBatch = sessionIds(frame).filter((id) => id.startsWith('session:session-other-'))
+  h.check('Enter on the other Folder expands it to the first five ordinary history rows and one Show more row',
+    expanded && firstBatch.length === 5
+    && JSON.stringify(firstBatch) === JSON.stringify(['session:session-other-00', 'session:session-other-01', 'session:session-other-02', 'session:session-other-03', 'session:session-other-04'])
+    && itemById(frame, 'more:ws-other')?.detail.startsWith('8 remaining') === true
+    && itemById(frame, 'session:session-other-05') === undefined,
+    JSON.stringify({ firstBatch, more: itemById(frame, 'more:ws-other'), next: itemById(frame, 'session:session-other-05') }))
+  h.check('Folder and Show more expansion never emits a Resume intent',
+    !records(h).some((entry) => entry.resumeIntent), JSON.stringify(records(h).filter((entry) => entry.resumeIntent)))
+
+  await press(h, 'Down', 6)
+  const moreSelected = await waitFrame(h, (value) => value?.selected === 'more:ws-other', 'Show more is selected')
+  await h.key('Return', 700)
+  const revealed = await waitFrame(h, (value) => itemById(value, 'session:session-other-05') !== undefined, 'Show more reveals the next batch')
+  frame = lastFrame(h)
+  const secondBatch = sessionIds(frame).filter((id) => id.startsWith('session:session-other-'))
+  h.check('Enter on Show more reveals the next history batch and keeps the remaining watermark',
+    moreSelected && revealed && secondBatch.length === 10
+    && JSON.stringify(secondBatch.slice(5)) === JSON.stringify(['session:session-other-05', 'session:session-other-06', 'session:session-other-07', 'session:session-other-08', 'session:session-other-09'])
+    && itemById(frame, 'more:ws-other')?.detail.startsWith('3 remaining') === true
+    && itemById(frame, 'session:session-other-10') === undefined,
+    JSON.stringify({ secondBatch, more: itemById(frame, 'more:ws-other') }))
+  h.check('the Current Folder stays expanded and separately marked while the other Folder grows',
+    itemById(frame, 'workspace:ws-current')?.open === true
+    && itemById(frame, 'session:session-current') !== undefined
+    && JSON.stringify(frame?.current) === JSON.stringify(['session:session-current']),
+    JSON.stringify({ current: itemById(frame, 'workspace:ws-current'), marker: frame?.current }))
+  await press(h, 'Up', 6)
+  const otherRowSelected = await waitFrame(h, (value) => value?.selected === 'session:session-other-04', 'keyboard selects a revealed other-Workspace Session')
+  h.check('keyboard navigation selects a revealed Session row and enables Resume/Details',
+    otherRowSelected
+    && lastFrame(h)?.actions?.find((action) => String(action.label).startsWith('Resume'))?.disabled === undefined
+    && lastFrame(h)?.actions?.find((action) => String(action.label).startsWith('Details'))?.disabled === undefined,
+    JSON.stringify({ selected: lastFrame(h)?.selected, actions: lastFrame(h)?.actions }))
+  h.capture('session-browser-workspace-expanded-1280x800',
+    'After: the other official Folder expanded with its incremental history rows')
+
+  for (const size of TREE_SIZES) {
+    await h.resize(size.w, size.h)
+    const ready = await waitFrame(h, (value) => value?.page === 'browse' && itemById(value, 'workspace:ws-other')?.open === true
+      && itemById(value, 'session:session-other-09') !== undefined, `${size.name} expanded tree`)
+    const snap = h.snapshot()
+    h.check(`${size.name}: the expanded Folder keeps its ten visible rows and Show more item`,
+      ready && lastFrame(h)?.pickerKey === bootPickerKey && pickerNode(snap) !== undefined
+      && sessionIds(lastFrame(h)).filter((id) => id.startsWith('session:session-other-')).length === 10,
+      JSON.stringify({ pickerKey: lastFrame(h)?.pickerKey, rows: sessionRows(snap).length }))
+    h.capture(`session-browser-workspace-expanded-${size.name}`, `expanded other Folder at ${size.name}`)
+  }
+  await h.resize(1280, 800)
+  await waitFrame(h, (value) => itemById(value, 'workspace:ws-other')?.open === true, 'back to expanded 1280x800')
+
+  // ── 3. Pointer: the other Folder's disclosure collapses and re-expands ────
+  await press(h, 'Home', 1)
+  await press(h, 'Down', 10)
+  await waitFrame(h, (value) => value?.selected === 'workspace:ws-other', 'bring the other Folder row into view')
+  let collapseSnap = h.snapshot()
+  let collapseRow = folderRow(h, collapseSnap, 'Other')
+  const chevron = disclosure(collapseRow)
+  const collapseClicked = chevron !== undefined && await h.click(collapseSnap.chains, chevron)
+  const collapsed = await waitFrame(h, (value) => itemById(value, 'workspace:ws-other')?.open === false, 'real pointer collapses the Folder')
+  frame = lastFrame(h)
+  h.check('a real pointer click on the Folder disclosure collapses it and hides every child and Show more item',
+    collapseClicked && collapsed
+    && itemById(frame, 'workspace:ws-other')?.open === false
+    && !itemIds(frame).some((id) => id.startsWith('session:session-other-') || id === 'more:ws-other')
+    && sessionIds(frame).length === 8
+    && !h.classNodes(h.snapshot(), 'pk-row').some((node) => h.descendantsText(node).includes('other-0')),
+    JSON.stringify({ collapseClicked, ids: itemIds(frame) }))
+  h.capture('session-browser-workspace-collapsed-1280x800',
+    'After: the real pointer collapsed the other Folder; manual collapse hides its children')
+
+  const expandSnap = h.snapshot()
+  const expandRow = folderRow(h, expandSnap, 'Other')
+  const expandChevron = disclosure(expandRow)
+  const expandClicked = expandChevron !== undefined && await h.click(expandSnap.chains, expandChevron)
+  const reexpanded = await waitFrame(h, (value) => itemById(value, 'workspace:ws-other')?.open === true
+    && itemById(value, 'session:session-other-09') !== undefined, 'real pointer re-expands the Folder')
+  h.check('a second real pointer click re-expands the same Folder with its retained history watermark',
+    expandClicked && reexpanded
+    && sessionIds(lastFrame(h)).filter((id) => id.startsWith('session:session-other-')).length === 10
+    && itemById(lastFrame(h), 'more:ws-other') !== undefined,
+    JSON.stringify({ expandClicked, selected: lastFrame(h)?.selected, rows: sessionIds(lastFrame(h)).length }))
+
+  // ── 4. Current row disabled Resume; keyboard and pointer Session selection ─
+  await press(h, 'Home', 1)
+  await press(h, 'Down', 1)
+  const currentSelected = await waitFrame(h, (value) => value?.selected === 'session:session-current', 'select the Current Session row')
+  const currentResume = lastFrame(h)?.actions?.find((action) => String(action.label).startsWith('Resume'))
+  const currentResumeButton = buttonFor(h, h.snapshot(), 'Resume')
+  h.check('the Current Session row keeps the primary Resume disabled with the action-metadata reason',
+    currentSelected
+    && currentResume?.primary === true
+    && currentResume?.disabled === 'The current session is already active.'
+    && currentResumeButton !== undefined && hasClass(currentResumeButton, 'off'),
+    JSON.stringify({ selected: lastFrame(h)?.selected, action: currentResume, button: currentResumeButton?.class }))
+  h.capture('session-browser-footer-current-disabled-1280x800',
+    'Current Session row: Resume stays primary and disabled; the reason is action metadata')
+
+  await press(h, 'Down', 1)
+  const longSelected = await waitFrame(h, (value) => value?.selected === 'session:session-long', 'keyboard selects the long row')
+  const longResume = lastFrame(h)?.actions?.find((action) => String(action.label).startsWith('Resume'))
+  h.check('keyboard selection of a listed non-current Session enables the primary Resume and Details',
+    longSelected && longResume?.primary === true && longResume?.disabled === undefined
+    && lastFrame(h)?.actions?.find((action) => String(action.label).startsWith('Details'))?.disabled === undefined,
+    JSON.stringify({ selected: lastFrame(h)?.selected, actions: lastFrame(h)?.actions }))
+
+  // End reaches the last item (the other Folder's Show more row); five steps up
+  // lands on the row just above the pointer target.
+  await press(h, 'End', 1)
+  await press(h, 'Up', 6)
+  await waitFrame(h, (value) => value?.selected === 'session:session-other-04', 'keyboard brings the pointer target into view')
+  const pointerSnap = h.snapshot()
+  const pointerTarget = sessionRow(h, pointerSnap, 'other-05')
+  const pointerClicked = pointerTarget !== undefined && await h.click(pointerSnap.chains, pointerTarget)
+  const pointerSelected = await waitFrame(h, (value) => value?.selected === 'session:session-other-05', 'real pointer selects a Session row')
+  h.check('a real pointer click on a Session row changes selection only: no Resume intent, no switch',
+    pointerClicked && pointerSelected
+    && JSON.stringify(lastFrame(h)?.current) === JSON.stringify(['session:session-current'])
+    && !records(h).some((entry) => entry.resumeIntent)
     && !records(h).some((entry) => entry.switchSession || entry.apply),
-    JSON.stringify({ footerResumeClicked, footerIntentSeen, footerPending, current: lastFrame(h)?.current,
+    JSON.stringify({ pointerClicked, selected: lastFrame(h)?.selected, current: lastFrame(h)?.current,
       intents: records(h).filter((entry) => entry.resumeIntent) }))
-  h.capture('session-browser-footer-resume-pending-400x600', 'Resume intent is pending; this read harness does not perform business switching')
+  const pointerResume = lastFrame(h)?.actions?.find((action) => String(action.label).startsWith('Resume'))
+  h.check('the pointer-selected non-current Session enables Resume and Details in the real footer',
+    pointerResume?.primary === true && pointerResume?.disabled === undefined
+    && lastFrame(h)?.actions?.find((action) => String(action.label).startsWith('Details'))?.disabled === undefined,
+    JSON.stringify({ actions: lastFrame(h)?.actions }))
 
-  await keyText(h, 'needle')
-  const searched = await waitFrame(h, (value) => value?.layout === 'cards' && value?.query === 'needle'
-    && value?.state === 'ready' && frameItems(value).length === 2, 'global content search')
-  frame = lastFrame(h)
-  const ids = frameItems(frame).map((item) => item.id)
-  const longCard = frameItems(frame).find((item) => item.id === 'session:session-long')
-  const contentCard = frameItems(frame).find((item) => item.id === 'session:session-content')
-  h.check('non-empty query switches the same Picker to global Cards and keeps Host-only hits outside the workspace',
-    searched && frame?.pickerKey === browserKey && JSON.stringify(ids) === JSON.stringify(['session:session-long', 'session:session-content'])
-    && frame?.scope === undefined && frame?.total === 2,
-    JSON.stringify({ layout: frame?.layout, query: frame?.query, ids, scope: frame?.scope, total: frame?.total }))
-  h.check('metadata and Host results keep Reader order; the content-only excerpt is not client-filtered by query text',
-    longCard?.badges?.some((badge) => badge.text === 'Both') === true
-    && String(longCard?.detail).includes('Tail-bound evidence')
-    && contentCard?.badges?.some((badge) => badge.text === 'Content') === true
-    && String(contentCard?.detail).includes('Truncated Host excerpt')
-    && !String(contentCard?.detail).toLowerCase().includes('needle'),
-    JSON.stringify({ longCard, contentCard }))
-  const contentRowSnap = h.snapshot()
-  const clientContentRow = cardRows(contentRowSnap).find((node) => h.descendantsText(node).includes('A title without the search term'))
-  h.check('the real Tern client paints the content-only card whose snippet omits the literal query',
-    clientContentRow !== undefined && containedXY(contentRowSnap.chains, clientContentRow),
-    clientContentRow === undefined ? 'content-only card absent from client tree' : h.descendantsText(clientContentRow))
-  h.capture('session-browser-cards-400x600', 'global Cards include a Host-authoritative content-only hit')
-
-  await h.resize(400, 440)
-  await h.sleep(250)
+  // ── 5. Details via the real footer action; Esc returns to the same Browser ─
+  await press(h, 'Home', 1)
+  await press(h, 'Down', 2)
+  await waitFrame(h, (value) => value?.selected === 'session:session-long', 'select the long title Session for Details')
   await h.key('Tab', 500)
+  const footerFocused = await waitFrame(h, (value) => Array.isArray(value?.actions)
+    && value.actions.some((action) => String(action.label) === 'Details [Enter]'), 'Tab focuses the Details footer action')
   await h.key('Return', 900)
-  const detailsOpened = await waitFrame(h, (value) => value?.page === 'details' && value?.readerBodyKey !== undefined, 'Details Reader at 400x440')
+  const detailsOpened = await waitFrame(h, (value) => value?.page === 'details' && value?.readerBodyKey !== undefined, 'Details Reader')
   frame = lastFrame(h)
   let snap = h.snapshot()
-  const overlay = overlayNode(snap)
-  const body = overlayBody(snap)
-  h.check('400x440 Details replaces the Picker with one native scrolling Reader',
-    detailsOpened && frame?.layout === undefined && overlay !== undefined && body !== undefined
-    && frame?.readerBodyKey?.startsWith('session-browser-details-body-') === true,
-    JSON.stringify({ page: frame?.page, body: frame?.readerBodyKey, overlay: overlay !== undefined, bodyNode: body !== undefined }))
-  h.check('the long Reader contains the complete Host excerpt tail and the selected session identity',
-    (frame?.texts ?? []).some((entry) => String(entry.text).includes('session-long'))
-    && (frame?.texts ?? []).some((entry) => String(entry.text).includes('END-OF-DETAILS-TAIL')),
-    `textCount=${frame?.texts?.length}`)
-  // ---- the negotiated grid, on the REAL 400px client ----
-  // `frame.texts` now also reads a grid PAIR from the node the client drew (the
-  // subject's own observer), so a fact that lives inside a `kv` is evidence here
-  // instead of an absent text node the component never built.
-  const texts = frame?.texts ?? []
-  const gridEntries = texts.filter((entry) => String(entry.key ?? '').includes('session-browser-kv-'))
-  const groupOf = (entry) => {
-    const key = String(entry.key)
-    const at = key.indexOf('session-browser-kv-')
-    return key.slice(at + 'session-browser-kv-'.length, key.indexOf(':', at))
-  }
-  const negotiatedKv = (caps(h)?.kinds ?? []).includes('kv')
+  const readerOverlay = overlayNode(snap)
+  const readerBody = overlayBody(snap)
+  const longReaderText = (frame?.texts ?? []).map((entry) => String(entry.text))
+  h.check('the real footer Details action opens one native scrolling Reader for the selected Session',
+    footerFocused && detailsOpened && pickerNode(snap) === undefined
+    && readerOverlay !== undefined && readerBody !== undefined
+    && detailBodyId(frame).startsWith('session-browser-details-body-'),
+    JSON.stringify({ page: frame?.page, body: frame?.readerBodyKey, overlay: readerOverlay !== undefined, body: readerBody !== undefined }))
+  h.check('the Reader carries the complete long Host title as one grid value, not a truncated row',
+    longReaderText.some((text) => text.startsWith('Needle long session title') && text.includes('unicode 資料 🚀'))
+    && longReaderText.includes('session-long')
+    && longReaderText.includes('Persisted session'),
+    `textCount=${longReaderText.length}`)
+  // The grid really wraps: the long title value is taller than the client's own
+  // Back-row line height, and every grid keeps its full width inside the body.
+  const backRow = h.classNodes(snap, 'sf-t-accent').find((node) => h.descendantsText(node).includes('Back'))
+  const LINE = backRow === undefined ? 0 : rect(backRow)[3]
   const grids = h.classNodes(snap, 'sf-kv')
-  const boxish = (node) => (node === undefined ? 'none' : rect(node).map((v) => Math.round(v)).join(','))
   const subclassOf = (node, name) => {
     const out = []
     const walk = (entry) => {
-      if ((entry.class ?? '').split(' ').includes(name)) out.push(entry)
+      if (classTokens(entry).includes(name)) out.push(entry)
       for (const child of entry.children ?? []) walk(child)
     }
     if (node !== undefined) walk(node)
     return out
   }
-  // The client's own one-line height, read from the Back row this Reader really paints.
-  const backRow = h.classNodes(snap, 'sf-t-accent').find((node) => h.descendantsText(node).includes('Back'))
-  const LINE = rect(backRow)[3]
-  h.check('the pane negotiated kv and the real client painted exactly the four fact groups as grids',
-    negotiatedKv && grids.length === 4
-    && [...new Set(gridEntries.map(groupOf))].join(',') === 'identity,activity,relationship,configuration',
-    `negotiated=${negotiatedKv} painted sf-kv=${grids.length} wire=${JSON.stringify([...new Set(gridEntries.map(groupOf))])}`)
-  // A 440px-tall pane cannot CONTAIN a grid vertically: the Identity grid is 385px
-  // here because the long title wraps inside its own value column, and the whole page
-  // is far taller than the viewport. The honest claims are therefore (a) nothing is
-  // clipped HORIZONTALLY — the value column keeps its full width at 400px, which is
-  // exactly what the grid is for, and (b) a long value folds instead of being cut.
-  h.check('the grid labels and values are painted as aligned cells, not one concatenated line',
-    grids.every((grid) => {
-      const keys = subclassOf(grid, 'sf-kv-k')
-      const values = subclassOf(grid, 'sf-kv-v')
-      return keys.length > 0 && values.length === keys.length
-        && [...new Set(values.map((node) => Math.round(rect(node)[0])))].length === 1
-    }),
-    `cells=${grids.map((grid) => `${subclassOf(grid, 'sf-kv-k').length}/${subclassOf(grid, 'sf-kv-v').length}`).join(',')}`)
-  h.check('every grid keeps its full width without horizontal clipping in the 400px Reader',
-    grids.length === 4 && grids.every((node) => containedX(snap.chains, node) && rect(node)[2] > 0),
-    `grids=${grids.length} boxes=${grids.map(boxish).join(' | ')}`)
-  const bodyBox = rect(body)
-  h.check('all four groups share ONE grid column, no wider than the body that holds them',
-    grids.length === 4 && grids.every((node) => rect(node)[2] > 0 && rect(node)[2] <= bodyBox[2])
-    && [...new Set(grids.map((node) => Math.round(rect(node)[2])))].length === 1,
-    // The client owns its own content padding (measured 364px body vs 328px grid), so
-    // the claim is a SINGLE app-independent column width, not equality with the body.
-    `body=${Math.round(bodyBox[2])} grids=${grids.map((node) => Math.round(rect(node)[2])).join(',')}`)
-  const foldedValues = (grid) => subclassOf(grid, 'sf-kv-v').filter((node) => rect(node)[3] > 1.5 * LINE)
-  h.check('the long title and the unbroken session id FOLD inside the value column instead of being cut',
-    LINE > 0 && grids.slice(0, 1).every((grid) => foldedValues(grid).length >= 1)
-    && grids[0] !== undefined && rect(grids[0])[3] > 4 * LINE,
-    `line=${Math.round(LINE)} identity=${boxish(grids[0])} folded=${grids.map((grid) => foldedValues(grid).length).join(',')}`)
-  h.check('the excerpt is NOT a grid: its label and its full text stay separate text nodes',
-    !gridEntries.some((entry) => groupOf(entry) === 'excerpt')
-    && texts.some((entry) => String(entry.text) === 'Matching content'
-      && !String(entry.key ?? '').includes('session-browser-kv-'))
-    && texts.some((entry) => String(entry.text).includes('END-OF-DETAILS-TAIL')
-      && !String(entry.key ?? '').includes('session-browser-kv-')),
-    `excerpt=${JSON.stringify(texts.filter((entry) => String(entry.text).includes('Matching content')).map((entry) => entry.key))}`)
-  h.check('an unbroken session id and a full ISO stamp arrive COMPLETE inside their grid value',
-    gridEntries.some((entry) => String(entry.text) === 'session-long')
-    && gridEntries.some((entry) => /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(String(entry.text))),
-    `gridValues=${gridEntries.length}`)
-  h.capture('session-browser-details-top-400x440', 'long Details Reader before End-to-tail scroll')
+  const longValue = grids.flatMap((grid) => subclassOf(grid, 'sf-kv-v'))
+    .find((node) => h.descendantsText(node).startsWith('Needle long session title'))
+  h.check('the long title FOLDS inside its grid value column instead of being cut',
+    LINE > 0 && longValue !== undefined && rect(longValue)[3] > 1.5 * LINE
+    && containedX(snap.chains, longValue),
+    JSON.stringify({ line: LINE, value: longValue === undefined ? 'missing' : rect(longValue) }))
+  h.capture('session-browser-reader-long-title-1280x800',
+    'Details Reader: the complete long title folds inside its value column')
 
+  await h.key('Escape', 900)
+  const backToBrowser = await waitFrame(h, (value) => value?.page === 'browse' && value?.layout === 'tree', 'Esc returns to the Browser')
+  frame = lastFrame(h)
+  h.check('Esc from the Reader returns to the SAME Browser instance, selection and Folder expansion',
+    backToBrowser && frame?.pickerKey === bootPickerKey && frame?.selected === 'session:session-long'
+    && itemById(frame, 'workspace:ws-other')?.open === true
+    && sessionIds(frame).filter((id) => id.startsWith('session:session-other-')).length === 10,
+    JSON.stringify({ page: frame?.page, pickerKey: frame?.pickerKey, selected: frame?.selected, other: itemById(frame, 'workspace:ws-other') }))
+  const treeIdsBeforeSearch = itemIds(frame)
+  h.capture('session-browser-tree-after-reader-1280x800',
+    'After the Reader: the same Browser, selection and Folder expansion')
+
+  // ── 6. Search: global Cards, the Host-only content hit, then the same tree ─
+  await keyText(h, 'needle')
+  const searched = await waitFrame(h, (value) => value?.layout === 'cards' && value?.query === 'needle'
+    && value?.state === 'ready' && frameItems(value).length === 2, 'global Host content search')
+  frame = lastFrame(h)
+  const cardIds = itemIds(frame)
+  const longCard = itemById(frame, 'session:session-long')
+  const contentCard = itemById(frame, 'session:session-content')
+  h.check('a non-empty query switches the same Picker to global Cards and keeps the Host-only content hit listed',
+    searched && frame?.pickerKey === bootPickerKey && frame?.scope === undefined
+    && JSON.stringify(cardIds) === JSON.stringify(['session:session-long', 'session:session-content'])
+    && frame?.total === 2,
+    JSON.stringify({ layout: frame?.layout, query: frame?.query, ids: cardIds, scope: frame?.scope, total: frame?.total }))
+  h.check('metadata and Host content results keep Reader order; the Host-only snippet is not client-filtered by query text',
+    longCard?.badges?.some((badge) => badge.text === 'Both') === true
+    && String(longCard?.detail).includes('Tail-bound evidence')
+    && contentCard?.badges?.some((badge) => badge.text === 'Content') === true
+    && String(contentCard?.detail).includes('Truncated Host excerpt')
+    && !String(contentCard?.detail).toLowerCase().includes('needle')
+    && !String(contentCard?.label).toLowerCase().includes('needle'),
+    JSON.stringify({ longCard, contentCard }))
+  await h.sleep(700)
+  const cardSnap = h.snapshot()
+  const clientLongCard = sessionRow(h, cardSnap, 'Needle long session title')
+  const clientContentCard = sessionRow(h, cardSnap, 'A title without the search term')
+  h.check('the real Tern client paints both global Cards, including the content-only card whose metadata omits the literal query',
+    clientLongCard !== undefined && containedXY(cardSnap.chains, clientLongCard)
+    && clientContentCard !== undefined && containedXY(cardSnap.chains, clientContentCard)
+    && sessionRows(cardSnap).length === 2,
+    JSON.stringify({ rows: sessionRows(cardSnap).map((node) => h.descendantsText(node).slice(0, 80)) }))
+  h.capture('session-browser-workspace-search-1280x800',
+    'Global Cards: both the metadata+content card and the Host-only content hit are listed')
+
+  for (const size of TREE_SIZES) {
+    await h.resize(size.w, size.h)
+    const ready = await waitFrame(h, (value) => value?.layout === 'cards' && value?.query === 'needle'
+      && frameItems(value).length === 2, `${size.name} search cards`)
+    const sizeSnap = h.snapshot()
+    h.check(`${size.name}: the same global Cards and the Host-only hit remain listed`,
+      ready && lastFrame(h)?.pickerKey === bootPickerKey && sessionRows(sizeSnap).length === 2
+      && itemById(lastFrame(h), 'session:session-content') !== undefined,
+      JSON.stringify({ pickerKey: lastFrame(h)?.pickerKey, rows: sessionRows(sizeSnap).length }))
+    h.capture(`session-browser-workspace-search-${size.name}`, `global Cards at ${size.name}`)
+  }
+
+  // The Host excerpt + tail, on the negotiated Reader, at the short pane.
+  await h.resize(560, 640)
+  await waitFrame(h, (value) => value?.layout === 'cards' && value?.query === 'needle', 'short-pane Cards before Reader')
+  await h.key('Tab', 500)
+  await h.key('Return', 900)
+  const cardDetailsOpened = await waitFrame(h, (value) => value?.page === 'details' && value?.readerBodyKey !== undefined, 'Details from the long card')
+  frame = lastFrame(h)
+  snap = h.snapshot()
+  const cardGrids = h.classNodes(snap, 'sf-kv')
+  const excerptTexts = (frame?.texts ?? []).map((entry) => String(entry.text))
+  const negotiatedKv = (caps(h)?.kinds ?? []).includes('kv')
+  h.check('the Reader from the search card carries the complete Host excerpt tail as wrapped prose',
+    cardDetailsOpened && negotiatedKv && cardGrids.length === 4
+    && excerptTexts.some((text) => text.includes('END-OF-DETAILS-TAIL'))
+    && excerptTexts.some((text) => text === 'Matching content'),
+    JSON.stringify({ page: frame?.page, grids: cardGrids.length, excerpt: excerptTexts.filter((text) => text.includes('END-OF-DETAILS-TAIL')).length }))
+  await h.sleep(400)
   const beforeTail = tailPosition(h)
-  h.check('the Reader tail begins below the short viewport before scrolling',
+  h.check('the Host excerpt tail begins below the short 560x640 Reader viewport before scrolling',
     beforeTail !== undefined && beforeTail.tailBottom - beforeTail.bodyBottom > 200,
     JSON.stringify(beforeTail))
   let tail = beforeTail
   let attempts = 0
-  while (attempts < 5 && tail !== undefined && tail.tailBottom > tail.bodyBottom + 8) {
+  while (attempts < 6 && tail !== undefined && tail.tailBottom > tail.bodyBottom + 8) {
     await h.key('End', 650)
     await h.sleep(120)
     tail = tailPosition(h)
     attempts += 1
   }
   const scrollRecords = records(h).filter((entry) => entry.nativeScroll).map((entry) => entry.nativeScroll)
-  h.check('End scroll reaches the actual tail inside the 400x440 Reader body',
+  h.check('End scroll reaches the actual Host excerpt tail inside the 560x640 Reader body',
     tail !== undefined && tail.tailBottom <= tail.bodyBottom + 8 && attempts > 0,
     JSON.stringify({ attempts, beforeTail, afterTail: tail }))
-  h.check('the Reader scroll op targets this exact reading epoch/body',
+  h.check('the native Reader scroll op targets this exact reading epoch/body',
     scrollRecords.length > 0 && scrollRecords.at(-1).to === 'end'
-    && String(scrollRecords.at(-1).id).endsWith(String(frame?.readerBodyKey)),
+    && String(scrollRecords.at(-1).id).endsWith(detailBodyId(frame)),
     JSON.stringify({ body: frame?.readerBodyKey, scroll: scrollRecords.at(-1) }))
-  // The LAST group must be reachable at the tail: a grid that could not be scrolled
-  // to would be a reading regression, which is exactly what the short-pane lane is for.
-  const tailSnap = h.snapshot()
-  const tailGrids = h.classNodes(tailSnap, 'sf-kv')
-  h.check('the scroll to the tail keeps every grid laid out at full width (nothing collapses)',
-    tailGrids.length === 4 && tailGrids.every((node) => rect(node)[2] > 0),
-    `grids=${tailGrids.length} boxes=${tailGrids.map(boxish).join(' | ')}`)
-  h.capture('session-browser-details-tail-400x440', 'Details at the actual end tail in the short Reader viewport')
+  h.capture('session-browser-reader-excerpt-tail-560x640',
+    'Details at the actual Host excerpt tail in the short negotiated Reader')
 
   await h.key('Escape', 900)
-  const back = await waitFrame(h, (value) => value?.page === 'browse' && value?.layout === 'cards', 'Back from Details')
-  frame = lastFrame(h)
-  h.check('Esc at the Reader tail returns to the same global Cards, query and selected session',
-    back && frame?.query === 'needle' && frame?.selected === 'session:session-long' && frame?.pickerKey === browserKey,
-    JSON.stringify({ page: frame?.page, query: frame?.query, selected: frame?.selected, pickerKey: frame?.pickerKey }))
-  const footerResumeIntents = records(h).filter((entry) => entry.resumeIntent)
-  h.check('the real client emitted one eligible Footer Resume intent without claiming a business switch',
-    footerResumeIntents.length === 1
-    && footerResumeIntents[0]?.resumeIntent?.sessionId === 'session-long'
-    && footerResumeIntents[0]?.resumeIntent?.currentSessionId === 'session-current'
-    && footerResumeIntents[0]?.resumeIntent?.source === 'footer'
-    && !records(h).some((entry) => entry.apply || entry.switchSession),
-    JSON.stringify({ footerResumeIntents, businessSwitches: records(h).filter((entry) => entry.apply || entry.switchSession) }))
-  h.capture('session-browser-cards-after-reader-400x440', 'Browse state after returning from the Reader tail')
-
-  // ── S3 PR-C: the migration state through the search card and Details ──────
-  // (the Tree row detail was asserted right after the All-workspaces scope).
+  const backToCards = await waitFrame(h, (value) => value?.page === 'browse' && value?.layout === 'cards' && value?.query === 'needle', 'Esc returns to Cards')
+  h.check('Esc at the Reader tail returns to the same global Cards and selected Session',
+    backToCards && lastFrame(h)?.selected === 'session:session-long' && lastFrame(h)?.pickerKey === bootPickerKey,
+    JSON.stringify({ page: lastFrame(h)?.page, query: lastFrame(h)?.query, selected: lastFrame(h)?.selected }))
   await h.resize(1280, 800)
-  await h.sleep(250)
-  // The flow's last Escape returned from Details to Cards with `needle`; this
-  // one clears the query so the migration row can be found by its own title.
+  await waitFrame(h, (value) => value?.layout === 'cards' && value?.query === 'needle', 'cards back at 1280x800')
+
   await h.key('Escape', 700)
-  await keyText(h, 'Legacy')
-  await waitFrame(h, (value) => value?.layout === 'cards' && value?.state === 'ready', 'Legacy metadata card')
-  const legacyCard = frameItems(lastFrame(h)).find((item) => item.id === 'session:session-migration')
-  h.check('the metadata card for the migration-required row keeps the read-only state label',
-    legacyCard !== undefined && String(legacyCard.detail).includes('Migration required'),
-    JSON.stringify(legacyCard))
+  const cleared = await waitFrame(h, (value) => value?.layout === 'tree' && value?.query === '', 'Escape clears the query')
+  frame = lastFrame(h)
+  h.check('clearing the query returns to the workspace Tree with the SAME Folder expansion state',
+    cleared && frame?.pickerKey === bootPickerKey && frame?.selected === 'session:session-long'
+    && JSON.stringify(itemIds(frame)) === JSON.stringify(treeIdsBeforeSearch)
+    && itemById(frame, 'workspace:ws-other')?.open === true
+    && sessionIds(frame).filter((id) => id.startsWith('session:session-other-')).length === 10,
+    JSON.stringify({ ids: itemIds(frame), before: treeIdsBeforeSearch, other: itemById(frame, 'workspace:ws-other') }))
+  h.capture('session-browser-tree-restored-1280x800',
+    'After clearing the query: the same Tree, selection and retained Folder expansion')
+
+  // ── retained S3 PR-C coverage: the read-only migration row ────────────────
+  const migrationItem = itemById(frame, 'session:session-migration')
+  h.check('the real Tree row keeps the read-only migration state in its row detail',
+    migrationItem !== undefined && String(migrationItem.detail).includes('Migration required'),
+    JSON.stringify({ migrationItem }))
+  await press(h, 'Home', 1)
+  await press(h, 'Down', 3)
+  await waitFrame(h, (value) => value?.selected === 'session:session-migration', 'select the migration row')
   await h.key('Tab', 500)
   await h.key('Return', 900)
   const migrationDetails = await waitFrame(h, (value) => value?.page === 'details', 'migration row Details')
-  const migrationDetailsText = (lastFrame(h)?.texts ?? []).map((entry) => String(entry.text))
+  const migrationTexts = (lastFrame(h)?.texts ?? []).map((entry) => String(entry.text))
   h.check('the Details State paints the read-only migration state beside the persisted state',
-    migrationDetails && migrationDetailsText.some((text) => text.includes('Migration required')),
-    JSON.stringify(migrationDetailsText.filter((text) => text.includes('Migration') || text.includes('Persisted'))))
-  h.capture('session-browser-migration-details-1280x800', 'Details of the migration-required Session at 1280x800')
+    migrationDetails && migrationTexts.some((text) => text.includes('Migration required'))
+    && migrationTexts.some((text) => text.includes('Persisted session')),
+    JSON.stringify(migrationTexts.filter((text) => text.includes('Migration') || text.includes('Persisted'))))
+  h.capture('session-browser-migration-details-1280x800',
+    'Details of the migration-required Session: a read-only state label, no control')
+  await h.key('Escape', 900)
+  await waitFrame(h, (value) => value?.page === 'browse' && value?.layout === 'tree', 'migration Details back to Browser')
 
-  await h.resize(400, 600)
-  await h.sleep(250)
-  const narrowDetailsText = (lastFrame(h)?.texts ?? []).map((entry) => String(entry.text))
-  h.check('the migration state survives a 400x600 pane without being dropped',
-    narrowDetailsText.some((text) => text.includes('Migration required')),
-    JSON.stringify(narrowDetailsText.filter((text) => text.includes('Migration'))))
-  h.capture('session-browser-migration-details-400x600', 'Details of the migration-required Session at 400x600')
+  // ── 7. Add directory: the SAME native Picker in Host absolute-path mode ───
+  const beforePathSnap = h.snapshot()
+  const addDirectoryButton = buttonFor(h, beforePathSnap, 'Add directory')
+  const addDirectoryClicked = addDirectoryButton !== undefined && await h.click(beforePathSnap.chains, addDirectoryButton)
+  const pathOpened = await waitFrame(h, (value) => value?.page === 'browse' && value?.title === 'Add directory', 'Add directory path mode')
+  frame = lastFrame(h)
+  const pathActions = frame?.actions ?? []
+  h.check('the real footer Add directory action opens the SAME Picker in Host absolute-path mode',
+    addDirectoryClicked && pathOpened && frame?.layout === 'tree'
+    && frame?.title === 'Add directory' && frame?.query === ''
+    && frame?.focus === 'list' && frame?.state === 'ready'
+    && itemIds(frame).length === 0 && frame?.total === 0,
+    JSON.stringify({ title: frame?.title, query: frame?.query, layout: frame?.layout, items: itemIds(frame), total: frame?.total }))
+  h.check('the path mode footer is exactly Use directory (confirm-directory) plus the cancel action, and the picker key is unchanged',
+    pathActions.length === 2
+    && String(pathActions[0]?.id).startsWith('confirm-directory#') && pathActions[0]?.label === 'Use directory'
+    && pathActions[1]?.id === 'close' && pathActions[1]?.label === 'Cancel'
+    && frame?.pickerKey === bootPickerKey,
+    JSON.stringify({ actions: pathActions, pickerKey: frame?.pickerKey }))
+  h.measure('the TSP and PiTUI path modes use the same Cancel wording',
+    JSON.stringify({ label: pathActions[1]?.label, id: pathActions[1]?.id }))
+  const pathSnap = h.snapshot()
+  const useDirectoryButton = buttonFor(h, pathSnap, 'Use directory')
+  h.check('the real client paints the Add directory title and both path-mode buttons',
+    h.has(pathSnap, 'Add directory') && useDirectoryButton !== undefined && buttonFor(h, pathSnap, 'Cancel') !== undefined
+    && pathActions.some((action) => action.disabled === undefined),
+    JSON.stringify({ title: h.texts(pathSnap).filter((text) => text.includes('directory') || text.includes('Directory')), button: useDirectoryButton === undefined ? 'missing' : h.descendantsText(useDirectoryButton) }))
+  h.capture('session-browser-path-mode-1280x800', 'Add directory: the same Picker in Host absolute-path mode')
 
-  // ------------------------------------------- the pinned resolution x appearance grid
-  // The grid's readability is a PROPERTY OF THE PAINT, so the wire and the node rect
-  // are not enough: each plan resolution is captured in BOTH the client's resolved
-  // appearances, and each claim is made against what the client really laid out.
-  const APPEARANCES = ['light', 'dark']
-  const GRID_SIZES = [{ w: 1280, h: 800 }, { w: 900, h: 700 }, { w: 400, h: 600 }, { w: 900, h: 360 }]
-  for (const appearance of APPEARANCES) {
-    h.send('appearance', appearance)
-    const resolved = h.ctl('state').theme
-    h.check(`the client resolved the ${appearance} appearance for the Details grid`,
-      resolved === appearance, `state.theme=${resolved}`)
-    for (const size of GRID_SIZES) {
-      await h.resize(size.w, size.h)
-      await h.sleep(220)
-      const gridSnap = h.snapshot()
-      const painted = h.classNodes(gridSnap, 'sf-kv')
-      const cells = painted.map((grid) => subclassOf(grid, 'sf-kv-k').length)
-      h.check(`${appearance} ${size.w}x${size.h}: the four fact grids are laid out with their full cell count`,
-        painted.length === 4 && cells.join(',') === '4,2,1,1'
-        && painted.every((grid) => rect(grid)[2] > 0),
-        `grids=${painted.length} cells=${cells.join(',')} boxes=${painted.map(boxish).join(' | ')}`)
-      h.check(`${appearance} ${size.w}x${size.h}: no grid is clipped horizontally and the migration state value stays whole`,
-        painted.every((grid) => containedX(gridSnap.chains, grid))
-        && (lastFrame(h)?.texts ?? []).some((entry) => String(entry.text).includes('Migration required')
-          && String(entry.key ?? '').includes('session-browser-kv-identity')),
-        `boxes=${painted.map(boxish).join(' | ')}`)
-      h.capture(`session-browser-details-grid-${size.w}x${size.h}-${appearance}`,
-        `Session Details grids at ${size.w}x${size.h} in the ${appearance} appearance`)
-    }
+  for (const size of TREE_SIZES) {
+    await h.resize(size.w, size.h)
+    const ready = await waitFrame(h, (value) => value?.title === 'Add directory', `${size.name} path mode`)
+    h.check(`${size.name}: path mode keeps the same title, empty query and both actions`,
+      ready && lastFrame(h)?.pickerKey === bootPickerKey && lastFrame(h)?.query === ''
+      && (lastFrame(h)?.actions ?? []).length === 2,
+      JSON.stringify({ title: lastFrame(h)?.title, actions: lastFrame(h)?.actions }))
+    h.capture(`session-browser-path-mode-${size.name}`, `Host absolute-path mode at ${size.name}`)
   }
-  h.send('appearance', 'light')
+  await h.resize(1280, 800)
+  await waitFrame(h, (value) => value?.title === 'Add directory', 'path mode back at 1280x800')
+
+  await keyText(h, '/host/refused')
+  const typed = await waitFrame(h, (value) => value?.title === 'Add directory' && value?.query === '/host/refused', 'absolute path typed')
+  h.check('the typed absolute Host path becomes the same Picker query and the real client shows it',
+    typed && h.has(h.snapshot(), '/host/refused'),
+    JSON.stringify({ query: lastFrame(h)?.query, texts: h.texts(h.snapshot()).filter((text) => text.includes('/host')) }))
+  h.capture('session-browser-path-typed-1280x800', 'Add directory: retained absolute Host path before submit')
+
+  const submitsBefore = addDirectoryRecords(h).length
+  await h.key('Return', 120)
+  const submitting = await waitFrame(h, (value) => value?.title === 'Add directory'
+    && (value?.actions ?? []).some((action) => String(action.id).startsWith('confirm-directory#')
+      && action.disabled === 'Directory verification is in progress.'), 'Host directory verification in flight')
+  h.check('the first Enter submits exactly one Host verification and disables the visible Use directory action',
+    submitting && addDirectoryRecords(h).length === submitsBefore + 1
+    && addDirectoryRecords(h).at(-1)?.path === '/host/refused',
+    JSON.stringify({ records: addDirectoryRecords(h), actions: lastFrame(h)?.actions }))
+  // While submitting, the panel fences keys and events: two more Enters and a
+  // path edit must neither submit again nor change the retained path.
+  await h.key('Return', 60)
+  await h.key('Return', 60)
+  await h.key('x', 60)
+  await h.sleep(300)
+  const stillSubmitting = lastFrame(h)
+  h.check('Enter repeats and key edits while the Host verification is in flight are fenced (one submission, path intact)',
+    addDirectoryRecords(h).length === submitsBefore + 1
+    && stillSubmitting?.query === '/host/refused'
+    && stillSubmitting?.title === 'Add directory'
+    && (stillSubmitting?.actions ?? []).some((action) => action.disabled === 'Directory verification is in progress.'),
+    JSON.stringify({ submitted: addDirectoryRecords(h).length, query: stillSubmitting?.query, actions: stillSubmitting?.actions }))
+
+  const refusalSeen = await waitFrame(h, (value) => value?.query === '/host/refused'
+    && (value?.actions ?? []).some((action) => String(action.id).startsWith('confirm-directory#') && action.disabled === undefined), 'Host refusal settles')
+  frame = lastFrame(h)
+  h.check('a settled Host refusal keeps the path in the SAME path mode and re-enables Use directory',
+    refusalSeen && frame?.title === 'Add directory' && frame?.query === '/host/refused'
+    && frame?.layout === 'tree' && itemIds(frame).length === 0
+    && (frame?.actions ?? []).length === 2,
+    JSON.stringify({ title: frame?.title, query: frame?.query, actions: frame?.actions }))
+  h.check('the Host refusal is delivered as the real error notice, with the submitted path recorded',
+    notices(h).some((notice) => notice.kind === 'error' && String(notice.message).includes('Host refused the directory'))
+    && addSettlements(h).length === 1 && addSettlements(h)[0]?.outcome?.kind === 'failed'
+    && addDirectoryRecords(h).length === 1,
+    JSON.stringify({ notices: notices(h), settlements: addSettlements(h) }))
+  h.capture('session-browser-path-refused-1280x800',
+    'After: a Host refusal retains the absolute path in the same path mode')
+
+  const retrySnap = h.snapshot()
+  const retryButton = buttonFor(h, retrySnap, 'Use directory')
+  const retryClicked = retryButton !== undefined && await h.click(retrySnap.chains, retryButton)
+  const retried = await waitFrame(h, () => addDirectoryRecords(h).length === 2, 'Use directory retries the retained path')
+  h.check('a real click on the visible Use directory action retries the SAME retained Host path',
+    retryClicked && retried
+    && addDirectoryRecords(h)[1]?.path === '/host/refused',
+    JSON.stringify({ clicked: retryClicked, paths: addDirectoryRecords(h).map((entry) => entry.path) }))
+  const successSeen = await waitFrame(h, (value) => value?.title === 'Sessions' && value?.layout === 'tree', 'Host success returns to the Browser tree')
+  frame = lastFrame(h)
+  h.check('Host success closes the path chooser and restores the same Browser tree and Folder expansion',
+    successSeen && frame?.pickerKey === bootPickerKey && frame?.query === ''
+    && itemById(frame, 'workspace:ws-other')?.open === true
+    && sessionIds(frame).filter((id) => id.startsWith('session:session-other-')).length === 10
+    // No Folder is selected after the path round trip, so neither Folder-only
+    // action (Use directory / New session) is offered.
+    && (frame?.actions ?? []).length === 4
+    && !(frame?.actions ?? []).some((action) => String(action.id).startsWith('new-session#')),
+    JSON.stringify({ title: frame?.title, pickerKey: frame?.pickerKey, actions: frame?.actions, ids: itemIds(frame) }))
+  h.check('the registered canonical Host path is announced as the real info notice',
+    notices(h).some((notice) => notice.kind === 'info' && notice.message === 'Directory added: /host/canonical')
+    && addSettlements(h).length === 2 && addSettlements(h)[1]?.outcome?.kind === 'registered',
+    JSON.stringify({ notices: notices(h), settlements: addSettlements(h) }))
+  h.capture('session-browser-path-registered-1280x800',
+    'After: Host registration closes path mode and returns to the same workspace Tree')
+
+  // ── retained Resume coverage: one real footer intent, pending, no switch ──
+  const beforeResumeSnap = h.snapshot()
+  const resumeButton = buttonFor(h, beforeResumeSnap, 'Resume')
+  const resumeSelected = lastFrame(h)?.selected
+  const resumeClicked = resumeButton !== undefined && await h.click(beforeResumeSnap.chains, resumeButton)
+  const intentSeen = await waitFrame(h, () => records(h).some((entry) => entry.resumeIntent), 'real footer Resume intent')
+  const resumePending = await waitFrame(h, (value) => (value?.actions ?? []).some((action) =>
+    String(action.label).startsWith('Resume') && action.disabled === 'Switching sessions…'), 'Resume pending state')
+  const resumeIntents = records(h).filter((entry) => entry.resumeIntent)
+  h.check('the real footer Resume click emits exactly one eligible intent and never fakes a Session switch',
+    resumeClicked && intentSeen && resumePending
+    && resumeIntents.length === 1
+    && resumeIntents[0]?.resumeIntent?.sessionId === String(resumeSelected ?? '').replace(/^session:/u, '')
+    && resumeIntents[0]?.resumeIntent?.currentSessionId === 'session-current'
+    && resumeIntents[0]?.resumeIntent?.source === 'footer'
+    && !records(h).some((entry) => entry.apply || entry.switchSession),
+    JSON.stringify({ resumeClicked, selected: resumeSelected, intents: resumeIntents,
+      businessSwitches: records(h).filter((entry) => entry.apply || entry.switchSession) }))
+  const pendingSnap = h.snapshot()
+  const pendingResume = buttonFor(h, pendingSnap, 'Resume')
+  const pendingRepeat = pendingResume !== undefined && await h.click(pendingSnap.chains, pendingResume)
+  await h.sleep(400)
+  h.check('a second footer Resume click during the pending settlement dispatches no extra intent',
+    records(h).filter((entry) => entry.resumeIntent).length === 1
+    && lastFrame(h)?.current?.[0] === 'session:session-current',
+    JSON.stringify({ pendingRepeat, intents: records(h).filter((entry) => entry.resumeIntent).length,
+      disabled: (lastFrame(h)?.actions ?? []).find((action) => String(action.label).startsWith('Resume'))?.disabled }))
+  h.capture('session-browser-footer-resume-pending-1280x800',
+    'Resume intent is pending; this read harness never performs a business Session switch')
 
   h.measure('run totals', JSON.stringify({
     frames: frames(h).length,
     readCalls: records(h).filter((entry) => entry.read).map((entry) => entry.read.method),
+    resumes: records(h).filter((entry) => entry.resumeIntent).length,
+    submittedPaths: addDirectoryRecords(h).map((entry) => entry.path),
     nativeScrolls: scrollRecords,
-    contentOnlyCardPainted: clientContentRow !== undefined,
+    contentOnlyCardPainted: clientContentCard !== undefined,
   }))
 }

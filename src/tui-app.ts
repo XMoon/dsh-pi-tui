@@ -2013,11 +2013,18 @@ export interface SessionWorkspaceOpenOptions {
   readonly subject: SessionBrowserSubject
   readonly onQueryChange: (raw: string) => void
   readonly onResume: (sessionId: string) => void
+  readonly onUseDirectory?: (workspaceId: string, canonicalPath: string) => void
+  readonly onNewSession?: (workspaceId: string) => void
+  readonly onAddDirectory?: (path: string, settle: (outcome: import('./app/command/session-browser-presentation.ts').SessionBrowserDirectorySettlement) => void) => void
   /** The physical lease's ONE close notification (user Esc, blocking-owner
    *  pre-emption or surface teardown). An owner-origin `close()` suppresses it. */
   readonly onClose: () => void
   readonly initialMode: 'browse' | 'search'
   readonly initialBrowseScope: 'current' | 'all'
+  readonly initialDirectoryChooser?: boolean
+  readonly currentWorkspaceId?: string
+  readonly initialDirectoryEntry?: boolean
+  readonly initialDirectoryPath?: string
 }
 
 /** The returned control of ONE open Session Workspace, fenced by THIS lease
@@ -17207,6 +17214,10 @@ export class TuiApp {
     this.rebuildMessages()
   }
 
+  setWelcomeWorkspace(workspace: import('./app/surface/display-seam.ts').DisplayWelcomeWorkspace | undefined): void {
+    this.welcomeCard.setWorkspace(workspace)
+    this.rebuildMessages()
+  }
   /** The turn threshold at or above which collapsible PROCESS entries
    * (thinking/system/tool) expand under the Ctrl+O master. Memoized on the
    * window identity + master flag: the boundary is consulted per projected
@@ -26288,13 +26299,28 @@ export class TuiApp {
       onResume: (sessionId) => {
         if (this.workspaceLease === record) options.onResume(sessionId)
       },
+      onUseDirectory: (workspaceId, canonicalPath) => {
+        if (this.workspaceLease === record) options.onUseDirectory?.(workspaceId, canonicalPath)
+      },
+      onNewSession: (workspaceId) => {
+        if (this.workspaceLease === record) options.onNewSession?.(workspaceId)
+      },
+      onAddDirectory: (path, settle) => {
+        if (this.workspaceLease === record) options.onAddDirectory?.(path, settle)
+      },
       onClose: () => {
         record.close()
       },
     }, {
       initialMode: options.initialMode,
       initialBrowseScope: options.initialBrowseScope,
-      currentSessionId: options.subject.currentSessionId,
+      initialDirectoryChooser: options.initialDirectoryChooser,
+       currentWorkspaceId: options.currentWorkspaceId,
+       initialDirectoryEntry: options.initialDirectoryEntry,
+       initialDirectoryPath: options.initialDirectoryPath,
+       currentSessionId: options.subject.currentSessionId,
+
+
     })
     record = this.leaseWorkspaceScreen('sessions', panel, () => {
       if (!closingFromOwner) options.onClose()

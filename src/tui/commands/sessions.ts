@@ -18,6 +18,7 @@ import type {
   SessionBrowserPanelRequest,
   SessionBrowserPresentation,
   SessionBrowserReadSnapshot,
+  SessionBrowserDirectorySettlement,
 } from '../../app/command/session-browser-presentation.ts'
 import { TransitionInProgressError } from '../../app/session/operation-barrier.ts'
 import { SessionScopeSupersededError, type SessionScope } from '../../app/session/scope.ts'
@@ -25,14 +26,14 @@ import { SessionNavigationStopError, type NavigationIntent } from '../../app/ses
 import type { SessionSwitchOutcome } from '../../app/session/runtime.ts'
 import { cancellationError, isCancellation, runOwned } from '../../runtime/process/tasks.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
-import { LifecycleError, WorkspaceSelectionError, type ResolvedWorkspaceSelection } from '../../runtime/session-lifecycle-port.ts'
+import { createWorkspaceNextIntentOwner } from '../../app/session/workspace-next-intent.ts'
+import { LifecycleError, WorkspaceSelectionError, type ResolvedWorkspaceSelection, type WorkspaceSelectionIntent } from '../../runtime/session-lifecycle-port.ts'
 import {
   findSessionMatch,
   sanitizeTerminalText,
   sessionBrowserErrorNotice,
   type SessionPickerRow,
 } from '../pickers/sessions.ts'
-import type { SessionActivityFact, WorkspaceFactsHandle } from '../../runtime/session-workspace-facts-port.ts'
 import type {
   NewSessionId,
   RegisterOne,
@@ -70,6 +71,8 @@ type SessionCommandRunner = Pick<
   | 'transitionTo'
   | 'withSessionTransition'
   | 'withWriter'
+  | 'workspaceNextIntent'
+  | 'updateWelcomeCard'
 >
 
 export interface SessionCommandDeps {
@@ -120,7 +123,7 @@ export interface SessionCommandRegistrars {
    * keeps the Current default. The TSP native presentation ignores it — the
    * SDK owns that list's scope.
    */
-  openSessions(scope?: 'current' | 'all'): Promise<CommandResult>
+  openSessions(scope?: 'current' | 'all' | { readonly scope?: 'current' | 'all'; readonly addDirectory?: boolean }): Promise<CommandResult>
 }
 
 /** Shorten a session id for read-only display rows, capped at 28 characters. */
@@ -146,7 +149,8 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
     notifyTitleRefusal,
     notifyTitleSuccess,
   } = deps
-  const { cwd, signal } = runner
+  const { signal } = runner
+  const workspaceNextIntent = runner.workspaceNextIntent ?? createWorkspaceNextIntentOwner(runner.cwd ?? process.cwd())
 
   /** The tracked switch settlement used by `/resume` and by an interactive
    * Picker selection: `matched`/accepted is not success; only a committed
@@ -173,28 +177,12 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
   }
   let piTuiOpenIntent: PiTuiOpenIntent | undefined
 
-  /** One open PiTUI fullscreen Session Workspace: the app lease handle, this
-   *  open's ONE Workspace follow generation, the ONE Activity sample generation
-   *  and the per-open token. Every row, snippet and status still comes from the
-   *  shared read owner's snapshot. */
+  /** One open PiTui fullscreen lease whose listing and Host reads are owned by the shared SessionBrowserReadOwner. */
   interface PiTuiWorkspaceOpen {
     readonly request: SessionBrowserPanelRequest
     handle: SessionWorkspaceHandle | undefined
     readonly controller: AbortController
-    workspaces: WorkspaceFactsHandle | undefined
-    /** The ONE in-flight Activity sample; a newer accepted roster aborts it. */
-    activity: AbortController | undefined
-    /** The list revision whose Activity sample this open started last (never a
-     *  second read of the same batch). */
-    sampledRevision: number | undefined
-    /** The last PUBLISHED sample, republished when eligibility changes without
-     *  a new Host read. */
-    activityRevision: number | undefined
-    activityFacts: readonly SessionActivityFact[] | undefined
-    /** The latest Client-root eligibility snapshot; `undefined` means this
-     *  composition has no official forwarded-answer capability at all. */
-    answerEligibility: readonly SessionBrowserAnswerEligibility[] | undefined
-    eligibilitySubscription: (() => void) | undefined
+    workspaceRevision: number
     disposed: boolean
     /** Per-open dedupe of the one notice each snapshot fact may surface. */
     lastNotice: string | undefined
@@ -204,9 +192,7 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
    *  physical fullscreen lease through `app.openSessionWorkspace` and the ONE
    *  per-open official Workspace follow; it owns no list, projection, query
    *  generation or switch (those stay in the shared read owner). */
-  const createPiTuiSessionWorkspacePresentation = (
-    requestRosterRefresh: () => void,
-  ): SessionBrowserPresentation => {
+  const createPiTuiSessionWorkspacePresentation = (): SessionBrowserPresentation => {
     let active: PiTuiWorkspaceOpen | undefined
 
     /** Release this open ONCE: token first, then the follow generation, then
@@ -216,14 +202,14 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
       open.disposed = true
       if (active === open) active = undefined
       open.controller.abort()
-      open.activity?.abort()
-      open.activity = undefined
-      const unsubscribe = open.eligibilitySubscription
-      open.eligibilitySubscription = undefined
-      unsubscribe?.()
-      const workspaces = open.workspaces
-      open.workspaces = undefined
-      workspaces?.dispose()
+
+
+
+
+
+
+
+
       if (closeLease) open.handle?.close()
     }
 
@@ -231,105 +217,16 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
      *  frame re-proves this open's token and the captured subject; a failed
      *  stream degrades to All with one visible message and never closes the
      *  Session list/search. */
-    const startWorkspaceFollow = (open: PiTuiWorkspaceOpen, handle: SessionWorkspaceHandle): void => {
-      let facts: WorkspaceFactsHandle
-      try {
-        facts = runner.sessionWorkspaceFacts.followWorkspaces(open.controller.signal)
-      } catch {
-        handle.workspaceUnavailable('Workspace scope unavailable')
-        return
-      }
-      if (open.disposed) {
-        facts.dispose()
-        return
-      }
-      open.workspaces = facts
-      runOwned('session workspace follow', async () => {
-        for await (const frame of facts) {
-          if (open.disposed || open.controller.signal.aborted) return
-          if (!open.request.subject.isCurrent()) return
-          handle.updateWorkspaces(frame)
-        }
-      }, {
-        diag: runner.diag,
-        sessionId: () => open.request.subject.currentSessionId,
-        isCancellation: () => open.disposed || open.controller.signal.aborted,
-        // A stream can END normally after a proved baseline (the official
-        // Remote handle releases its subscription without throwing). The
-        // membership proof is then gone: do not keep the old Current scope or
-        // its filtered rows as if the follow were still live. The stale
-        // subject/token cases are silently left to the read-owner retirement.
-        onResult: () => {
-          if (open.disposed || open.controller.signal.aborted) return
-          if (!open.request.subject.isCurrent()) return
-          handle.workspaceUnavailable('Workspace scope unavailable')
-        },
-        onError: () => {
-          if (open.disposed || open.controller.signal.aborted) return
-          if (!open.request.subject.isCurrent()) return
-          handle.workspaceUnavailable('Workspace scope unavailable')
-        },
-      })
-    }
-
     /** The ONE Activity sample of ONE accepted roster revision. The roster is
      *  the read owner's ORIGINAL array (never a copy and never a re-listing),
      *  and the sample is fenced by this open's token, the captured Session
      *  subject, the accepted revision and its own AbortController. A sample the
      *  current frame did not ask for is inert. */
-    const startActivitySample = (open: PiTuiWorkspaceOpen, snapshot: SessionBrowserReadSnapshot): void => {
-      const revision = snapshot.listRevision
-      open.sampledRevision = revision
-      open.activity?.abort()
-      const controller = new AbortController()
-      open.activity = controller
-      const handle = open.handle
-      if (handle === undefined) return
-      runOwned('session workspace activity read', () => runner.sessionWorkspaceFacts.readActivity(snapshot.rows, controller.signal), {
-        diag: runner.diag,
-        sessionId: () => open.request.subject.currentSessionId,
-        isCancellation: () => open.disposed || open.controller.signal.aborted || controller.signal.aborted,
-        onResult: (facts) => {
-          if (open.disposed || controller.signal.aborted) return
-          if (!open.request.subject.isCurrent()) return
-          if (open.sampledRevision !== revision) return
-          open.activityFacts = facts
-          open.activityRevision = revision
-          handle.setActivityFacts({ listRevision: revision, facts, answerEligibility: open.answerEligibility })
-        },
-        onError: (error) => {
-          // A real sample failure (never a cancellation/superseded read) is ONE
-          // visible nonfatal fact: the roster and Peek stay usable, the Activity
-          // rows fall back to Unknown.
-          if (open.disposed || controller.signal.aborted) return
-          if (!open.request.subject.isCurrent()) return
-          if (open.sampledRevision !== revision) return
-          open.activityFacts = undefined
-          open.activityRevision = undefined
-          handle.activityUnavailable(sanitizeTerminalText(safeErrorMessage(error)))
-        },
-      })
-    }
-
     /** Reproject the SAME last sample against the newest Client-root
      *  eligibility (no Host read) and request ONE early roster refresh through
      *  the read owner's single generation, so the next sample's `attention` is
      *  fresh too. An official request that another Client settled must drop the
      *  Needs row NOW, not at the next refresh tick. */
-    const applyAnswerEligibility = (open: PiTuiWorkspaceOpen): void => {
-      const read = runner.forwardedAnswerEligibility
-      open.answerEligibility = read === undefined ? undefined : [...read()]
-      const handle = open.handle
-      if (handle !== undefined && open.activityFacts !== undefined && open.activityRevision !== undefined) {
-        handle.setActivityFacts({
-          listRevision: open.activityRevision,
-          facts: open.activityFacts,
-          answerEligibility: open.answerEligibility,
-        })
-      }
-      requestRosterRefresh()
-    }
-
     /** Surface this open's Host/search/projection facts as ONE deduped notice
      *  (Host result first, the secondary projection failure second). The panel
      *  ALSO paints the same status; the notice is the transient companion the
@@ -365,18 +262,13 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
       const intent = piTuiOpenIntent
       piTuiOpenIntent = undefined
       const subject = request.subject
-      const readEligibility = runner.forwardedAnswerEligibility
+      const closeAfterCommit = request.onClose
+
       const state: PiTuiWorkspaceOpen = {
         request,
         handle: undefined,
         controller: new AbortController(),
-        workspaces: undefined,
-        activity: undefined,
-        sampledRevision: undefined,
-        activityRevision: undefined,
-        activityFacts: undefined,
-        answerEligibility: readEligibility === undefined ? undefined : [...readEligibility()],
-        eligibilitySubscription: undefined,
+        workspaceRevision: -1,
         disposed: false,
         lastNotice: undefined,
       }
@@ -396,38 +288,45 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
             source: 'enter',
           })
         },
-        onClose: () => {
+                 onUseDirectory: (workspaceId, canonicalPath) => {
+            if (!state.disposed) request.onUseDirectory?.(workspaceId, canonicalPath)
+          },
+         onNewSession: (workspaceId) => {
+           // The shared ReadOwner owns ONE folder-New transaction for both
+           // renderers: it invokes the existing /new body and retires this
+           // lease only after the transition commits.
+           if (!state.disposed) request.onNewSession?.(workspaceId)
+         },
+         onAddDirectory: (path, settle) => {
+           if (!state.disposed) request.onAddDirectory?.(path, settle)
+         },
+         onClose: () => {
           if (state.disposed) return
           release(state, false)
-          request.onClose()
+          closeAfterCommit()
         },
         initialMode: intent?.searchRequested === true ? 'search' : 'browse',
         initialBrowseScope: intent?.scope === 'all' || subject.currentSessionId === undefined ? 'all' : 'current',
+       initialDirectoryChooser: request.initialDirectoryChooser,
+        currentWorkspaceId: subject.currentWorkspaceId,
+        initialDirectoryEntry: request.initialDirectoryEntry,
+        initialDirectoryPath: request.initialDirectoryPath,
       })
       state.handle = handle
       active = state
-      startWorkspaceFollow(state, handle)
-      const subscribeEligibility = runner.subscribeForwardedAnswerEligibility
-      if (subscribeEligibility !== undefined) {
-        state.eligibilitySubscription = subscribeEligibility(() => {
-          if (state.disposed) return
-          applyAnswerEligibility(state)
-        })
-      }
+
+
       return {
         isDisposed: () => state.disposed || handle.isDisposed(),
         setSnapshot: (snapshot, snapshotOptions) => {
           if (state.disposed) return
           handle.setSnapshot(snapshot, snapshotOptions?.initialQuery)
-          emitNotice(state, snapshot)
-          // ONE Activity sample per ACCEPTED roster revision: a projection
-          // batch, a search update or a repeated publish never re-reads the
-          // same batch.
-          if (snapshot.listRevision > 0
-            && snapshot.listRevision !== state.sampledRevision
-            && (snapshot.listState === 'ready' || snapshot.listState === 'empty')) {
-            startActivitySample(state, snapshot)
+          const workspace = snapshot.workspace
+          if (workspace?.state === 'unavailable' && workspace.revision !== state.workspaceRevision) {
+            state.workspaceRevision = workspace.revision
+            handle.workspaceUnavailable(workspace.error ?? 'Workspace membership unavailable')
           }
+          emitNotice(state, snapshot)
         },
         close: () => { release(state, true) },
       }
@@ -445,7 +344,7 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
   /** PiTUI-only roster refresh cadence. TSP keeps its historical single read. */
   const SESSION_WORKSPACE_REFRESH_MS = 20_000
 
-  const piTuiPresentation = createPiTuiSessionWorkspacePresentation(() => { nativeReadOwner?.refresh() })
+  const piTuiPresentation = createPiTuiSessionWorkspacePresentation()
 
   // The runner lifetime owns the ONE read owner: a quit/HMR aborts it so no
   // pending list, projection batch or debounced search outlives the surface.
@@ -469,19 +368,78 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
       ...(presentation === piTuiPresentation ? { autoRefreshMs: SESSION_WORKSPACE_REFRESH_MS } : {}),
       captureSubject: () => {
         const scope = runner.captureSessionScope()
+        const nextIntent = scope.sessionId === undefined ? workspaceNextIntent.snapshot() : undefined
         return {
           scope,
           subject: {
             currentSessionId: scope.sessionId,
             currentCwd: runner.sessionCwd(),
+            ...(nextIntent?.status === 'confirmed' && nextIntent.workspaceId !== undefined
+              ? { currentWorkspaceId: nextIntent.workspaceId }
+              : {}),
             isCurrent: () => !signal.aborted && runner.isSessionScopeCurrent(scope),
           },
         }
       },
       diag: runner.diag,
       sessionId: () => runner.currentSessionId,
-      onResumeIntent: (intent, scope, settle, isCurrent) => {
-        if (signal.aborted
+      sessionWorkspaceFacts: runner.sessionWorkspaceFacts,
+       forwardedAnswerEligibility: runner.forwardedAnswerEligibility,
+       subscribeForwardedAnswerEligibility: runner.subscribeForwardedAnswerEligibility,
+       onWorkspaceNewSession: (workspaceId, closeAfterCommit) => {
+         runOwned('workspace new session', () => startNewSession({ source: 'folder', workspaceIntent: { kind: 'workspace-id', workspaceId } }), {
+           diag: runner.diag,
+           sessionId: () => runner.currentSessionId,
+           isCancellation: () => runner.signal.aborted,
+           onResult: (result) => {
+             if (result.kind === 'error') {
+                const message = sanitizeTerminalText(result.text ?? 'fresh session creation failed')
+                if (nativePresentation !== undefined) nativePresentation.notify(message, 'error')
+                else app.notify(message, 'error')
+                return
+              }
+              closeAfterCommit()
+           },
+           onError: (error) => {
+              const message = sanitizeTerminalText(safeErrorMessage(error))
+              if (nativePresentation !== undefined) nativePresentation.notify(message, 'error')
+              else app.notify(message, 'error')
+            },
+         })
+       },
+       onUseDirectory: (workspaceId, canonicalPath) => {
+         workspaceNextIntent.setResolvedWorkspace(workspaceId, canonicalPath)
+         runner.updateWelcomeCard()
+       },
+       onAddDirectory: (path, settle) => {
+         const token = workspaceNextIntent.beginPathVerification(path)
+         let settled = false
+         const finish = (outcome: import('../../app/command/session-browser-presentation.ts').SessionBrowserDirectorySettlement): void => {
+           if (settled) return
+           settled = true
+           settle(outcome)
+         }
+         runOwned('workspace directory verification', () => runner.agents.resolveWorkspace(token.intent, runner.signal), {
+           diag: runner.diag,
+           sessionId: () => runner.currentSessionId,
+           isCancellation: () => runner.signal.aborted || !token.isCurrent(),
+           onResult: (resolved) => {
+             if (!token.isCurrent()) return
+             workspaceNextIntent.commitVerifiedPath(token, resolved.workspaceId, resolved.path)
+             runner.updateWelcomeCard()
+             finish({ kind: 'registered', workspaceId: resolved.workspaceId, path: resolved.path })
+           },
+           onCancel: () => finish({ kind: 'failed', message: 'Directory verification was superseded.' }),
+           onError: (error) => {
+             const message = safeErrorMessage(error)
+             workspaceNextIntent.rejectPathVerification(token, message)
+              runner.updateWelcomeCard()
+             finish({ kind: 'failed', message })
+           },
+         })
+       },
+       onResumeIntent: (intent, scope, settle, isCurrent) => {
+         if (signal.aborted
           || !runner.isSessionScopeCurrent(scope)
           || intent.currentSessionId !== scope.sessionId
           || intent.sessionId === scope.sessionId) {
@@ -549,10 +507,10 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
     /** The PiTUI Host Editor gesture asks for the All-workspaces initial
      * browse scope; every typed/pre-existing caller omits it (Current). */
     readonly browseScope?: 'current' | 'all'
-    /** `/resume <arg>`: after the ONE shared listing lands, resolve the
-     * argument as a direct id/prefix match — the first listed MAIN match closes
-     * the picker and switches; no match falls through to the filtered picker
-     * (the argument stays as the live search query). */
+    readonly addDirectory?: boolean
+    readonly initialDirectoryEntry?: boolean
+    readonly initialDirectoryPath?: string
+    /** `/resume <arg>` direct id/prefix lookup query. */
     readonly directMatchQuery?: string
     /** `/search` only: the query is required — an empty argument is
      * rejected BEFORE the overlay opens. */
@@ -578,6 +536,9 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
     const handle = nativeReadOwnerFor(presentation).open({
       ...(initialQuery === undefined ? {} : { initialQuery }),
       ...(directMatch === undefined ? {} : { directMatch }),
+      initialDirectoryChooser: options.addDirectory === true,
+      ...(options.initialDirectoryEntry ? { initialDirectoryEntry: true } : {}),
+      ...(options.initialDirectoryPath === undefined ? {} : { initialDirectoryPath: options.initialDirectoryPath }),
     })
     if (directMatch === undefined) return Promise.resolve({ kind: 'success' })
     return handle.settlement.then(async (result: SessionBrowserReadSettlement) => {
@@ -746,8 +707,19 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
    */
   const openSessionsBody = (
     invocation: { rawInput: string; commandId?: string },
-    scope: 'current' | 'all' = 'current',
-  ): Promise<CommandResult> => openSessionPicker(invocation, { header: 'sessions', browseScope: scope })
+    options: 'current' | 'all' | {
+      readonly scope?: 'current' | 'all'
+      readonly addDirectory?: boolean
+      readonly initialDirectoryEntry?: boolean
+      readonly initialDirectoryPath?: string
+    } = 'current',
+  ): Promise<CommandResult> => openSessionPicker(invocation, {
+    header: 'sessions',
+    browseScope: typeof options === 'string' ? options : options.scope,
+    addDirectory: typeof options === 'string' ? false : options.addDirectory,
+    initialDirectoryEntry: typeof options === 'string' ? false : options.initialDirectoryEntry,
+    initialDirectoryPath: typeof options === 'string' ? undefined : options.initialDirectoryPath,
+  })
 
   const registerSessions = (): void => {
     registerTuiCommand({
@@ -790,11 +762,10 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
    */
   let freshSessionInFlight = false
 
-  const registerNew = (): void => {
-    registerOne({
-      name: 'new',
-      description: 'Start a fresh session in this workspace',
-      handler: async () => {
+  const startNewSession = async (options: {
+    readonly workspaceIntent?: WorkspaceSelectionIntent
+    readonly source: 'command' | 'folder'
+  }): Promise<CommandResult> => {
         if (freshSessionInFlight) {
           return { kind: 'error', text: 'a fresh session is already starting' }
         }
@@ -827,9 +798,17 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
           // `source-session` asks for the captured Session's official Host
           // membership (never the Client launch/effective cwd); a sessionless
           // `/new` offers the Client launch directory as a Host path proposal.
-          const intent = navigation.scope.sessionId === undefined
-            ? { kind: 'host-path' as const, path: cwd }
-            : { kind: 'source-session' as const, sessionId: navigation.scope.sessionId }
+          let nextIntentCapture: ReturnType<typeof workspaceNextIntent.capture> | undefined
+          let intent: WorkspaceSelectionIntent
+          if (options.workspaceIntent !== undefined) {
+            if (navigation.scope.sessionId === undefined) nextIntentCapture = workspaceNextIntent.capture()
+            intent = options.workspaceIntent
+          } else if (navigation.scope.sessionId === undefined) {
+            nextIntentCapture = workspaceNextIntent.capture()
+            intent = nextIntentCapture.intent
+          } else {
+            intent = { kind: 'source-session', sessionId: navigation.scope.sessionId }
+          }
           let workspace: ResolvedWorkspaceSelection
           try {
             workspace = await runner.agents.resolveWorkspace(intent, signal)
@@ -841,6 +820,9 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
               return { kind: 'success' }
             }
             return { kind: 'error', text: `fresh session creation failed: ${safeErrorMessage(error)}` }
+          }
+          if (nextIntentCapture !== undefined && !nextIntentCapture.isCurrent()) {
+            return { kind: 'error', text: 'workspace selection changed before fresh session creation' }
           }
           if (!runner.isSessionScopeCurrent(navigation.scope)) return { kind: 'success' }
           return await runner.withSessionTransition(async () => {
@@ -890,6 +872,9 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
                 // have started between the first wait and here, and the Direct
                 // adapter activates the Agent from the persisted Host default.
                 await runner.awaitPendingDefaultWrite(signal)
+                if (nextIntentCapture !== undefined && !nextIntentCapture.isCurrent()) {
+                  throw new WorkspaceSelectionError('superseded', 'workspace selection changed before fresh session creation')
+                }
                 return runner.agents.create({
                   sessionId: String(sessionId),
                   // The official Host Workspace identity is the ONE directory
@@ -921,6 +906,9 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
               }
               return { kind: 'error', text: `${result.message}${stopNote()}` }
             }
+            if (nextIntentCapture !== undefined) {
+              workspaceNextIntent.consumeAfterCommittedCreate(nextIntentCapture)
+            }
             // The transaction COMMITTED: staged drafts are per-TUI-run UI state —
             // drop the unpinned ones now, never before (a failed create keeps
             // the current session and its drafts intact; in-flight submissions
@@ -947,7 +935,13 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
         } finally {
           freshSessionInFlight = false
         }
-      },
+  }
+
+  const registerNew = (): void => {
+    registerOne({
+      name: 'new',
+      description: 'Start a fresh session in this workspace',
+      handler: () => startNewSession({ source: 'command' }),
     })
   }
 
@@ -1017,6 +1011,11 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
     registerFork,
     registerRewind,
     // TSP-7 Welcome D: the argument-free UI entry over the SAME body.
-    openSessions: (scope) => openSessionsBody({ rawInput: '' }, scope),
+    openSessions: (scope: 'current' | 'all' | {
+      readonly scope?: 'current' | 'all'
+      readonly addDirectory?: boolean
+      readonly initialDirectoryEntry?: boolean
+      readonly initialDirectoryPath?: string
+    }) => openSessionsBody({ rawInput: '' }, scope),
   }
 }

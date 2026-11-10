@@ -1,7 +1,17 @@
 /** Internal read-only Session Browser contract shared by the app read owner and TSP presenter. */
 import type { SessionSummary } from '../../runtime/session-reader-port.ts'
+import type { SessionActivityFact, SessionWorkspaceFact } from '../../runtime/session-workspace-facts-port.ts'
 
-export type SessionBrowserRow = SessionSummary & { readonly title?: string }
+export interface SessionBrowserWorkspaceMetadata {
+  readonly workspaceId: string
+  readonly title: string
+  readonly path: string
+}
+
+export type SessionBrowserRow = SessionSummary & {
+  readonly title?: string
+  readonly workspace?: SessionBrowserWorkspaceMetadata
+}
 
 export type SessionBrowserListState = 'loading' | 'ready' | 'empty' | 'unavailable' | 'error'
 export type SessionBrowserSearchState = 'idle' | 'loading' | 'ready' | 'unavailable' | 'error'
@@ -24,6 +34,20 @@ export interface SessionBrowserAnswerEligibility {
   readonly live: true
 }
 
+/** The current accepted Workspace baseline and its ONE Activity sample for the open. */
+export interface SessionBrowserWorkspaceSnapshot {
+  readonly revision: number
+  readonly state: 'loading' | 'ready' | 'unavailable'
+  readonly facts: readonly SessionWorkspaceFact[]
+  readonly baselineProven: boolean
+  readonly activityRevision?: number
+  readonly activityRosterRevision?: number
+  readonly activity?: readonly SessionActivityFact[]
+  readonly answerEligibility: readonly SessionBrowserAnswerEligibility[] | undefined
+  readonly error?: string
+  readonly activityError?: string
+}
+
 /** Detached state produced only by SessionReader.list/projectionBatch/search. */
 export interface SessionBrowserReadSnapshot {
   readonly listState: SessionBrowserListState
@@ -38,6 +62,7 @@ export interface SessionBrowserReadSnapshot {
    *  batch, a search update or a repaint never does. The PiTUI Session
    *  Workspace keys its ONE Activity sample on this value. */
   readonly listRevision: number
+  readonly workspace?: SessionBrowserWorkspaceSnapshot
   readonly listError?: string
   readonly projectionError?: string
   readonly searchError?: string
@@ -57,14 +82,25 @@ export interface SessionBrowserResumeIntent {
 export interface SessionBrowserSubject {
   readonly currentSessionId: string | undefined
   readonly currentCwd: string
+  /** Host-verified next-create WorkspaceId for a truly sessionless open. */
+  readonly currentWorkspaceId?: string
   readonly isCurrent: () => boolean
 }
 
+export type SessionBrowserDirectorySettlement =
+  | { readonly kind: 'registered'; readonly workspaceId: string; readonly path: string }
+  | { readonly kind: 'failed'; readonly message: string }
+
 export interface SessionBrowserPanelRequest {
   readonly subject: SessionBrowserSubject
-  /** Called only when raw editor text changes; cursor movement stays in the Presenter. */
+  readonly initialDirectoryChooser?: boolean
+  readonly initialDirectoryEntry?: boolean
+  readonly initialDirectoryPath?: string
   readonly onQueryChange: (query: string) => void
   readonly onResumeIntent: (intent: SessionBrowserResumeIntent) => void
+  readonly onUseDirectory?: (workspaceId: string, canonicalPath: string) => void
+  readonly onNewSession?: (workspaceId: string) => void
+  readonly onAddDirectory?: (path: string, settle: (outcome: SessionBrowserDirectorySettlement) => void) => void
   readonly onClose: () => void
 }
 

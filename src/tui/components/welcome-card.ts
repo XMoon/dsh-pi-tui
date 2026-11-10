@@ -11,6 +11,8 @@
 import { visibleWidth, wrapTextWithAnsi } from '@xmoon76/pi-tui'
 import type { Component } from '@xmoon76/pi-tui'
 import { color } from '../theme/runtime.ts'
+import type { DisplayWelcomeWorkspace } from '../../app/surface/display-seam.ts'
+
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { pickWelcomeWhaleVariant, renderWelcomeWhaleLines, WELCOME_WHALE_WIDTH } from './welcome-whale.ts'
 
@@ -36,6 +38,7 @@ const WELCOME_FACT_LABEL_WIDTH = 9
  */
 export class WelcomeCard implements Component {
   private facts: { cwd: string; sessionId: string; model?: string; version: string; preset?: string } | undefined
+  private workspace: DisplayWelcomeWorkspace | undefined
   private idle = false
   /** M3-5 PR1: hidden while the display subject is a viewed child (the main
    *  session's head must never describe the parent session on a child
@@ -60,8 +63,11 @@ export class WelcomeCard implements Component {
     this.cached = []
   }
 
-  /**
-   * The pre-session state (deferred session creation): the card invites the
+  setWorkspace(workspace: DisplayWelcomeWorkspace | undefined): void {
+    this.workspace = workspace
+    this.cached = []
+  }
+  /** The pre-session state (deferred session creation): the card invites the
    * first message instead of naming a session that does not exist yet.
    */
   setIdle(idle: boolean): void {
@@ -131,9 +137,17 @@ export class WelcomeCard implements Component {
 
   private buildRows(layoutWidth: number, width: number): string[] {
     if (this.idle) {
-      const lines = width < WELCOME_STACKED_MIN_WIDTH
-        ? [color.textStrong('🐋 dsh-pi-tui'), color.textDim('type a message to start a session')]
-        : [color.textStrong('dsh-pi-tui'), color.textDim('type a message to start a session')]
+      const workspace = this.workspace
+      const directory = workspace === undefined
+        ? 'Working directory unavailable'
+        : `${workspace.status === 'confirmed' ? 'Host directory' : workspace.status === 'rejected' ? 'Host directory unavailable' : workspace.status === 'verifying' ? 'Checking Host directory' : 'Proposed directory'}: ${sanitizedPhysicalLine(workspace.path)}`
+      const lines = [
+        width < WELCOME_STACKED_MIN_WIDTH ? color.textStrong('🐋 dsh-pi-tui') : color.textStrong('dsh-pi-tui'),
+        color.textDim('Type a message to start a session'),
+        color.text(directory),
+        ...(workspace?.error === undefined ? [] : [color.error(sanitizedPhysicalLine(workspace.error))]),
+        color.textMuted('Choose directory · /sessions'),
+      ]
       return this.layout(layoutWidth, width, lines)
     }
     if (this.facts === undefined) return []

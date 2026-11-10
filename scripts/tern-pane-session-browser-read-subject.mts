@@ -5,12 +5,19 @@ import { createSessionBrowserReadOwner } from '../src/app/command/session-browse
 import type { SessionScope } from '../src/app/session/scope.ts'
 import { createDiag } from '../src/runtime/process/diagnostics.ts'
 import type {
+  SessionBrowserDirectorySettlement,
   SessionBrowserPanelHandle,
   SessionBrowserPanelRequest,
   SessionBrowserPresentation,
   SessionBrowserReadSnapshot,
 } from '../src/app/command/session-browser-presentation.ts'
 import type { SessionContentSearchPage, SessionProjectionSummary, SessionReader, SessionSummary } from '../src/runtime/session-reader-port.ts'
+import type {
+  SessionWorkspaceFact,
+  SessionWorkspaceFactsPort,
+  WorkspaceFactsFrame,
+  WorkspaceFactsHandle,
+} from '../src/runtime/session-workspace-facts-port.ts'
 import { TspSessionBrowser } from '../src/tui/tsp/session-browser.ts'
 
 const dir = process.env.TERN_PANE_DIR ?? '.'
@@ -22,11 +29,18 @@ const currentId = 'session-current'
 const longId = 'session-long'
 const contentId = 'session-content'
 const migrationId = 'session-migration'
+const currentWorkspaceId = 'ws-current'
+const otherWorkspaceId = 'ws-other'
+const padded = (index: number): string => String(index).padStart(2, '0')
+const currentHistoryIds = Array.from({ length: 8 }, (_, index) => `session-row-${padded(index)}`)
+const otherHistoryIds = Array.from({ length: 12 }, (_, index) => `session-other-${padded(index)}`)
 
-// The `parentSession` values below are HISTORICAL ordinary-fork metadata:
-// they carry no `origin: 'subagent'`, so the Browser must render every row as a
-// flat root (the real-fork contract after rc1). They are retained deliberately
-// to qualify the flat legacy shape, not a parent/child tree.
+// Two OFFICIAL Workspaces: the current Session lives in ws-current (so its
+// folder is the Current folder and starts expanded), the other Workspace owns
+// twelve ordinary history rows (so the non-current five-row watermark and the
+// incremental Show more batch are both real). The Host-only content hit lives
+// in ws-other but only Host content search finds it: no metadata field carries
+// the literal query.
 const mainRows: SessionSummary[] = [
   {
     id: currentId,
@@ -41,35 +55,42 @@ const mainRows: SessionSummary[] = [
     updatedAt: 9_900,
     createdAt: 900,
     cwd: '/workspace/project',
-    parentSession: currentId,
     live: false,
+    preset: 'reviewer',
   },
-  ...Array.from({ length: 52 }, (_, index): SessionSummary => ({
-    id: `session-row-${String(index).padStart(2, '0')}`,
-    updatedAt: 9_800 - index,
+  {
+    // The Host-authoritative on-disk format state the Browser renders read-only.
+    id: migrationId,
+    updatedAt: 9_850,
+    createdAt: 650,
+    cwd: '/workspace/project',
+    live: false,
+    formatStatus: 'migration-required',
+  },
+  ...currentHistoryIds.map((id, index): SessionSummary => ({
+    id,
+    updatedAt: 9_800 - index * 10,
     createdAt: 800 - index,
     cwd: '/workspace/project',
-    parentSession: index === 0 ? longId : `session-row-${String(index - 1).padStart(2, '0')}`,
+    live: false,
+  })),
+  ...otherHistoryIds.map((id, index): SessionSummary => ({
+    id,
+    updatedAt: 9_000 - index * 10,
+    createdAt: 500 - index,
+    cwd: '/workspace/other',
     live: false,
   })),
   {
+    // Only Host CONTENT search finds this Session: its title, id, workspace and
+    // preset carry no literal query, and it sorts below the tree watermark so the
+    // Folder tree never lists it. The global Cards view still must.
     id: contentId,
-    updatedAt: 8_000,
+    updatedAt: 7_000,
     createdAt: 700,
     cwd: '/workspace/other',
-    parentSession: longId,
     live: false,
-  },
-  {
-    // S3 PR-C: the Host-authoritative on-disk format state the Browser renders
-    // read-only. It lives in the OTHER workspace so the workspace-scope row set
-    // (and its counts) stays unchanged.
-    id: migrationId,
-    updatedAt: 7_900,
-    createdAt: 650,
-    cwd: '/workspace/other',
-    live: false,
-    formatStatus: 'migration-required',
+    preset: 'writer',
   },
 ]
 
@@ -79,6 +100,21 @@ const projections = new Map<string, SessionProjectionSummary>([
   [contentId, { title: 'A title without the search term', preset: 'writer' }],
   [migrationId, { title: 'Legacy record', preset: 'reviewer' }],
 ])
+
+const workspaceFacts: readonly SessionWorkspaceFact[] = [
+  {
+    workspaceId: currentWorkspaceId,
+    path: '/workspace/project',
+    title: 'Project',
+    sessionIds: [currentId, longId, migrationId, ...currentHistoryIds],
+  },
+  {
+    workspaceId: otherWorkspaceId,
+    path: '/workspace/other',
+    title: 'Other',
+    sessionIds: [...otherHistoryIds, contentId],
+  },
+]
 
 const read: SessionReader = {
   list: async (sessionId) => {
@@ -110,6 +146,20 @@ const read: SessionReader = {
   measureContext: () => undefined,
   turnOutline: () => undefined,
   sessionStatus: () => undefined,
+}
+
+const sessionWorkspaceFacts: SessionWorkspaceFactsPort = {
+  readActivity: async () => [],
+  followWorkspaces: (signal): WorkspaceFactsHandle => ({
+    dispose() {},
+    async *[Symbol.asyncIterator]() {
+      const baseline: WorkspaceFactsFrame = { type: 'baseline', items: workspaceFacts }
+      note({ workspace: { baseline: workspaceFacts } })
+      yield baseline
+      if (signal?.aborted === true) return
+      await new Promise<void>((resolve) => signal?.addEventListener('abort', () => resolve(), { once: true }))
+    },
+  }),
 }
 
 function findNode(root: Node | undefined, predicate: (node: Node) => boolean): Node | undefined {
@@ -150,10 +200,13 @@ function describe(layer: Node | undefined, snapshot: SessionBrowserReadSnapshot 
     page: overlay === undefined ? picker === undefined ? 'closed' : 'browse' : 'details',
     pickerKey: nodeKey(picker),
     readerBodyKey: nodeKey(body),
+    title: props['title'],
+    subtitle: props['subtitle'],
+    placeholder: props['placeholder'],
     layout: props['layout'],
     size: props['size'],
     query: props['query'],
-    scope: props['scope'],
+    cursor: props['cursor'],
     state: props['state'],
     message: props['message'],
     empty: props['empty'],
@@ -161,7 +214,6 @@ function describe(layer: Node | undefined, snapshot: SessionBrowserReadSnapshot 
     selected: props['selected'],
     current: props['current'],
     focus: props['focus'],
-    scopes: props['scopes'],
     actions: props['actions'],
     items: props['items'],
     texts: (() => {
@@ -251,6 +303,26 @@ const observedPresentation: SessionBrowserPresentation = {
   notify: (message, kind) => browser.presentation.notify(message, kind),
 }
 
+// The controlled Host directory-resolution owner: the FIRST submission is
+// refused after a settle delay (so the lane can prove single-flight fencing),
+// the retry succeeds with a canonical Host path. Every submitted path and every
+// settlement is recorded, so the lane reads the real wire, not a re-creation.
+const submittedPaths: string[] = []
+let addAttempt = 0
+const addDirectory = (path: string, settle: (outcome: SessionBrowserDirectorySettlement) => void): void => {
+  addAttempt += 1
+  const attempt = addAttempt
+  submittedPaths.push(path)
+  note({ addDirectory: { path, attempt } })
+  const outcome: SessionBrowserDirectorySettlement = attempt === 1
+    ? { kind: 'failed', message: 'Host refused the directory: no workspace at this path.' }
+    : { kind: 'registered', workspaceId: 'ws-added', path: '/host/canonical' }
+  setTimeout(() => {
+    note({ addDirectorySettlement: { path, attempt, outcome } })
+    settle(outcome)
+  }, 1_200)
+}
+
 const diag = createDiag({ stderrLevel: 'off' })
 // This controlled read fixture never switches sessions; Direct L6 is covered by
 // test/runtime/direct/tern-tsp-session-browser-commands.test.ts with the real runtime scope.
@@ -268,11 +340,13 @@ const owner = createSessionBrowserReadOwner({
   }),
   diag,
   sessionId: () => currentId,
+  sessionWorkspaceFacts,
+  onAddDirectory: addDirectory,
   onResumeIntent: (intent) => note({ resumeIntent: intent }),
 })
 
 const readHandle = owner.open()
-note({ ready: true })
+note({ ready: true, submittedPaths })
 console.error('session-browser read subject ready')
 
 try {
@@ -308,7 +382,7 @@ try {
     }
   }
 } finally {
-  note({ closed: true })
+  note({ closed: true, submittedPaths })
   readHandle.close()
   owner.dispose()
   browser.retire()

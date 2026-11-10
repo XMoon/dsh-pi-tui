@@ -27,6 +27,7 @@ import {
   type SessionLifecycle,
   type WorkspaceSelectionIntent,
 } from '../../runtime/session-lifecycle-port.ts'
+import { createWorkspaceNextIntentOwner, type WorkspaceNextIntentOwner } from './workspace-next-intent.ts'
 import { isRewindIdentityCurrent, type RewindNavigationIdentity } from './navigation-identity.ts'
 import { runFirstSessionCommit, runForkCommit, runOrdinaryCommit, runResumeCommit } from './commit-order.ts'
 import type {
@@ -141,12 +142,9 @@ export interface SessionRuntimeSurface {
   awaitPendingDefaultWrite(signal: AbortSignal): Promise<void>
   /** Generate the first session's id (the runner owns the Host id type). */
   newSessionId(): string
-  /** The CLIENT-LOCAL workspace intent the first-session create pre-selects
-   *  through the Host. The Client's launch directory is only a proposal: the
-   *  Host Workspace registry decides the durable Session directory. */
-  initialWorkspaceIntent(): WorkspaceSelectionIntent
   /** The current opening-journal token (opaque to the session layer). */
-  currentOpening(): unknown
+  initialWorkspaceIntent?(): WorkspaceSelectionIntent
+   currentOpening(): unknown
   /** Reset the whole opening journal (the first-session finally). */
   resetOpening(): void
 }
@@ -158,6 +156,10 @@ export interface SessionRuntimeDeps {
   readonly retirement: SessionOwnerRetirement
   /** The session lifecycle port (open/create/fork). */
   readonly lifecycle: SessionLifecycle
+  /** The Client-local intent for the next Session create. */
+  readonly workspaceNextIntent?: WorkspaceNextIntentOwner
+  /** Legacy structural caller input; production composition supplies workspaceNextIntent. */
+  initialWorkspaceIntent?(): WorkspaceSelectionIntent
   /** The runner lifecycle abort signal (the quiesces observe it). */
   readonly lifecycleSignal: AbortSignal
   readonly surface: SessionRuntimeSurface
@@ -328,6 +330,9 @@ export interface SessionRuntime {
   commitFirstSession(handle: SessionHandle): Promise<boolean>
   /** Create the first session lazily (deferred session creation). */
   ensureSession(): Promise<void>
+  /** One sessionless Host preflight of the next-create directory proposal.
+   *  Shared with the first create; never creates a Session. */
+  preflightWorkspace(): Promise<void>
   /** Publish the startup-resume owner synchronously (plan §4D: publish →
    *  completion → pre-mount quiesce). Returns the quiesce promise only when the
    *  runner's hook produced one, so a sessionless startup stays synchronous. */
@@ -1682,6 +1687,18 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
   }
 
   let creating: Promise<void> | undefined
+  // Production supplies the runner-lifetime owner. A legacy structural caller
+  // may still supply only `initialWorkspaceIntent`; its owner is created at the
+  // first create attempt, so a sessionless mount that never creates (and never
+  // provides the legacy intent) is still a valid composition.
+  let nextIntentOwner = deps.workspaceNextIntent
+  const intentOwner = (): WorkspaceNextIntentOwner => {
+    if (nextIntentOwner !== undefined) return nextIntentOwner
+    const intent = deps.initialWorkspaceIntent?.()
+    if (intent?.kind !== 'host-path') throw new Error('legacy session runtime requires a host-path workspace intent')
+    nextIntentOwner = createWorkspaceNextIntentOwner(intent.path)
+    return nextIntentOwner
+  }
 
   /**
    * Create the FIRST session lazily — the first user message triggers it
@@ -1690,6 +1707,36 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
    * session transition too, so it runs inside the single-writer gate and can
    * never interleave with an ordinary transition already in flight.
    */
+  let workspacePreflight: Promise<void> | undefined
+
+  /**
+   * Resolve the sessionless next-create proposal ONCE through the official Host
+   * Workspace lifecycle so the Welcome can state a Host-confirmed directory and
+   * the Browser can expand that destination. The first create awaits the same
+   * promise, so one mount never dispatches two Host `create`s concurrently.
+   */
+  const preflightWorkspace = (): Promise<void> => {
+    if (deps.workspaceNextIntent === undefined) return Promise.resolve()
+    if (creating !== undefined || core.owner() !== undefined) return Promise.resolve()
+    if (workspacePreflight !== undefined) return workspacePreflight
+    const owner = intentOwner()
+    if (owner.snapshot().status === 'confirmed' || owner.snapshot().intent.kind !== 'host-path') return Promise.resolve()
+    const token = owner.beginPathVerification()
+    workspacePreflight = (async () => {
+      try {
+        const resolved = await deps.lifecycle.resolveWorkspace(token.intent, deps.lifecycleSignal)
+        if (!token.isCurrent()) return
+        owner.commitVerifiedPath(token, resolved.workspaceId, resolved.path)
+      } catch (error) {
+        if (!token.isCurrent()) return
+        const message = safeErrorMessage(error)
+        owner.rejectPathVerification(token, message)
+        deps.diag.warn('first session workspace preflight failed', { error: message })
+      }
+    })().finally(() => { workspacePreflight = undefined })
+    return workspacePreflight
+  }
+
   const ensureSession = async (): Promise<void> => {
     if (core.owner() !== undefined) return
     if (creating !== undefined) return creating
@@ -1697,33 +1744,47 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
       // The Host Workspace pre-selection precedes every Session side-effect: a
       // refused/unavailable workspace leaves the surface sessionless without a
       // Session create, an opening journal entry or a consumed draft.
+      if (workspacePreflight !== undefined) await workspacePreflight
+      const workspaceIntent = intentOwner().capture()
       let workspace: ResolvedWorkspaceSelection
       try {
-        workspace = await deps.lifecycle.resolveWorkspace(deps.surface.initialWorkspaceIntent(), deps.lifecycleSignal)
+        workspace = await deps.lifecycle.resolveWorkspace(workspaceIntent.intent, deps.lifecycleSignal)
       } catch (error) {
-        if (deps.lifecycleSignal.aborted
-          || (error instanceof WorkspaceSelectionError && error.kind === 'superseded')) {
-          // A superseded/aborted pre-selection publishes nothing: no notice, no
-          // Session. The surface stays sessionless.
+        if (deps.lifecycleSignal.aborted) {
+          // Shutdown owns this cancellation; no submission can safely continue.
           deps.diag.warn('first session workspace selection superseded', {
-            settlement: error instanceof WorkspaceSelectionError ? error.kind : 'aborted',
-            code: error instanceof WorkspaceSelectionError ? error.code : undefined,
+            settlement: 'aborted',
           })
           return
+        }
+        if (error instanceof WorkspaceSelectionError && error.kind === 'superseded') {
+          deps.diag.warn('first session workspace selection superseded', {
+            settlement: error.kind,
+            code: error.code,
+          })
+          throw error
         }
         // A refused/unavailable workspace is a real first-session failure under
         // the existing sessionless contract (notice + retry on the next input);
         // NO Session was dispatched and nothing is retried automatically.
         const message = safeErrorMessage(error)
+        intentOwner().rejectCreateResolution(workspaceIntent, message)
         deps.surface.reportFirstSessionCreateFailure(message)
         throw error
       }
-      // The pre-selection awaited Host IO: re-check the two existing authorities
-      // before creating anything. A lifetime abort wins; a Session that appeared
-      // while the selection ran makes this attempt obsolete.
+      // The pre-selection awaited Host IO: re-check the intent and the two
+      // existing authorities before creating anything. A newer directory
+      // selection or a Session that appeared while it ran makes this attempt
+      // fail back to the submission owner, which restores its draft.
       deps.lifecycleSignal.throwIfAborted()
-      if (core.owner() !== undefined) return
+      if (!workspaceIntent.isCurrent() || core.owner() !== undefined) {
+        throw new WorkspaceSelectionError('superseded', 'workspace selection changed before first session creation')
+      }
       const launched = await deps.surface.launchComposition()
+      deps.lifecycleSignal.throwIfAborted()
+      if (!workspaceIntent.isCurrent() || core.owner() !== undefined) {
+        throw new WorkspaceSelectionError('superseded', 'workspace selection changed before first session creation')
+      }
       if (launched.failure !== undefined) deps.surface.setResumeFailure(launched.failure)
       // The first-session creation follows the same transaction shape as every
       // other transition: the id is pre-generated and the DSH create publishes
@@ -1740,6 +1801,9 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
         // fabricated choice.
         await deps.surface.awaitPendingDefaultWrite(deps.lifecycleSignal)
         deps.lifecycleSignal.throwIfAborted()
+        if (!workspaceIntent.isCurrent() || core.owner() !== undefined) {
+          throw new WorkspaceSelectionError('superseded', 'workspace selection changed before first session creation')
+        }
         created = requireCreated(await deps.lifecycle.create({
           sessionId,
           // The semantic `agentPreset` is the sole preset authority; the Direct
@@ -1751,6 +1815,10 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
           signal: deps.lifecycleSignal,
         }))
       } catch (error) {
+        if (error instanceof WorkspaceSelectionError && error.kind === 'superseded') {
+          deps.diag.warn('first session creation superseded', { settlement: error.kind })
+          throw error
+        }
         if (error instanceof LifecycleError && error.ownership === 'superseded') {
           // A superseded first-session create is UI-silent — no degradation
           // notice; the surface simply stays sessionless.
@@ -1778,6 +1846,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
         // initialization below.
         return
       }
+      intentOwner().consumeAfterCommittedCreate(workspaceIntent)
       if (opening !== undefined) deps.surface.clearOpening(opening)
       const owner = core.owner()
       if (owner === undefined) throw new Error('first-session commit published no owner')
@@ -1817,6 +1886,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     settleCommandSettlement,
     commitFirstSession,
     ensureSession,
+    preflightWorkspace,
     publishResumedOwner,
     retireOwnedSession,
     preCancelOwnedSession,

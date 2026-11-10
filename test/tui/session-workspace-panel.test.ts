@@ -68,9 +68,14 @@ interface Harness {
 function harness(options: {
   readonly columns?: number
   readonly rows?: number
-  readonly currentSessionId?: string
+  readonly currentSessionId?: string | null
   readonly initialMode?: 'browse' | 'search'
   readonly initialBrowseScope?: 'current' | 'all'
+  readonly initialDirectoryChooser?: boolean
+  readonly currentWorkspaceId?: string
+  readonly initialDirectoryEntry?: boolean
+  readonly initialDirectoryPath?: string
+  readonly onAddDirectory?: (path: string, settle: (outcome: import('../../src/app/command/session-browser-presentation.ts').SessionBrowserDirectorySettlement) => void) => void
   readonly isCurrent?: () => boolean
 } = {}): Harness {
   const columns = options.columns ?? 100
@@ -82,7 +87,7 @@ function harness(options: {
   const resumes: string[] = []
   const queries: string[] = []
   const state = { closes: 0 }
-  const currentSessionId = options.currentSessionId ?? CURRENT
+  const currentSessionId = options.currentSessionId === null ? undefined : options.currentSessionId ?? CURRENT
   const subject: SessionBrowserSubject = {
     currentSessionId,
     currentCwd: '/ws/project',
@@ -92,9 +97,14 @@ function harness(options: {
     subject,
     onQueryChange: (raw) => { queries.push(raw) },
     onResume: (sessionId) => { resumes.push(sessionId) },
+    ...(options.onAddDirectory === undefined ? {} : { onAddDirectory: options.onAddDirectory }),
     onClose: () => { state.closes += 1 },
     initialMode: options.initialMode ?? 'browse',
     initialBrowseScope: options.initialBrowseScope ?? 'all',
+    initialDirectoryChooser: options.initialDirectoryChooser,
+    currentWorkspaceId: options.currentWorkspaceId,
+    initialDirectoryEntry: options.initialDirectoryEntry,
+    initialDirectoryPath: options.initialDirectoryPath,
   })
   return {
     vt,
@@ -109,14 +119,124 @@ function harness(options: {
   }
 }
 
-test('the browse list paints the header, the current marker and the selected row, and only a listed non-current row resumes', async () => {
+test('the same PiTui Browser path mode preserves rejected input and returns on Host success', async () => {
+  const outcomes: Array<(outcome: import('../../src/app/command/session-browser-presentation.ts').SessionBrowserDirectorySettlement) => void> = []
+  const submitted: string[] = []
+  const h = harness({
+    currentSessionId: null,
+    initialBrowseScope: 'all',
+    initialDirectoryChooser: true,
+    onAddDirectory: (path, settle) => { submitted.push(path); outcomes.push(settle) },
+  })
+  h.handle.setSnapshot(snapshot({ workspace: {
+    revision: 1,
+    state: 'ready',
+    facts: [],
+    baselineProven: true,
+    answerEligibility: undefined,
+  } }))
+  await h.paint()
+  h.vt.sendInput('\t')
+  await h.paint()
+  // The sessionless chooser's initial visible row is the Unassigned Folder, so
+  // the action ring offers Use directory, New session, Add directory, Close.
+  h.vt.sendInput('\x1b[C')
+  await h.paint()
+  h.vt.sendInput('\x1b[C')
+  await h.paint()
+  h.vt.sendInput('\r')
+  await h.paint()
+  assert.ok(h.view().includes('Add Host directory'), `Chooser enters Add from the same action bar:\n${h.view()}`)
+  h.vt.sendInput('/client/proposed')
+  await h.paint()
+  h.vt.sendInput('\r')
+  await h.paint()
+  assert.deepEqual(submitted, ['/client/proposed'], 'the entered path reaches the Host resolver owner')
+  outcomes[0]!({ kind: 'failed', message: 'not available on Host' })
+  await h.paint()
+  assert.ok(h.view().includes('/client/proposed'), 'a rejected path remains in the same editor')
+  assert.ok(h.view().includes('not available on Host'))
+  h.vt.sendInput('\r')
+  await h.paint()
+  outcomes[1]!({ kind: 'registered', workspaceId: 'ws-canonical', path: '/host/canonical' })
+  await h.paint()
+  assert.equal(h.closes, 1, 'successful Welcome directory selection returns to Welcome')
+  assert.equal(h.app.isFullscreen(), false)
+})
+test('folder pointer collapses default-expanded active rows and Show more pointer expands five history rows', async () => {
+  const history = Array.from({ length: 6 }, (_, index) => row(`session-panel-history-${index}`, 900 - index, { title: `History ${index}` }))
+  const h = harness({ columns: 100, rows: 24 })
+  h.handle.setSnapshot(snapshot({ rows: [row(CURRENT, 3_000, { title: 'Current session' }), row('session-panel-active', 2_000, { title: 'Active row' }), ...history] }))
+  h.handle.updateWorkspaces({ type: 'baseline', items: [
+    { workspaceId: 'ws-current', path: '/ws', title: 'Current', sessionIds: [CURRENT] },
+    { workspaceId: 'ws-other', path: '/other', title: 'Other', sessionIds: ['session-panel-active', ...history.map(item => item.id)] },
+  ] })
+  h.handle.setActivityFacts({
+    listRevision: 1,
+    facts: [fact(CURRENT, { running: false, attention: 'none', attentionSourceState: 'known' }),
+      fact('session-panel-active', { running: true, attention: 'none', attentionSourceState: 'known' }),
+      ...history.map(item => fact(item.id, { running: false, attention: 'none', attentionSourceState: 'known' }))],
+    answerEligibility: [],
+  })
+  await h.paint()
+  assert.ok(h.view().includes('Active row'), 'the confirmed active non-current row is auto-expanded')
+  let frame = panelFrame(h)
+  let folderLine = lineIndexOf(frame, 'Other · 7')
+  await clickCell(h, 2, folderLine)
+  assert.ok(!h.view().includes('Active row'), 'one pointer click honors the effective default-expanded state and collapses it')
+  assert.ok(!h.view().includes('Show more sessions'), 'a manually collapsed Workspace contains only its folder header')
+  h.vt.sendInput('\r')
+  await h.paint()
+  const opened = h.view()
+  assert.ok(opened.includes('Active row'), `Enter explicitly reopens the collapsed Folder:\n${opened}`)
+  assert.ok(opened.includes('History 0') && opened.includes('History 4'), 'first explicit expansion shows five ordinary rows')
+  assert.ok(!opened.includes('History 5'), `first expansion is bounded to five ordinary rows:\n${opened}`)
+  frame = panelFrame(h)
+  const moreLine = lineIndexOf(frame, 'Show more sessions')
+  await clickCell(h, 3, moreLine)
+  const view = h.view()
+  assert.ok(view.includes('History 5'), `Show more advances the per-Workspace watermark by five:\n${view}`)
+  assert.ok(view.includes('Active row'), 'expanding the Workspace restores its confirmed active row')
+})
+
+test('a retained first-submit path enters Browser directly, submits once, and exposes clickable Use directory', async () => {
+  const outcomes: Array<(outcome: import('../../src/app/command/session-browser-presentation.ts').SessionBrowserDirectorySettlement) => void> = []
+  const submitted: string[] = []
+  const h = harness({
+    currentSessionId: null,
+    initialBrowseScope: 'all',
+    initialDirectoryChooser: true,
+    initialDirectoryEntry: true,
+    initialDirectoryPath: '/launch/failed',
+    onAddDirectory: (path, settle) => { submitted.push(path); outcomes.push(settle) },
+  })
+  await h.paint()
+  assert.ok(h.view().includes('Add Host directory'))
+  assert.ok(h.view().includes('/launch/failed'))
+  h.vt.sendInput('\r')
+  await h.paint()
+  h.vt.sendInput('\r')
+  await h.paint()
+  assert.deepEqual(submitted, ['/launch/failed'], 'the Host path request stays single-flight')
+  outcomes[0]!({ kind: 'failed', message: 'refused on Host' })
+  await h.paint()
+  assert.ok(h.view().includes('/launch/failed'), 'Host refusal leaves the attempted launch path editable')
+  assert.ok(h.view().includes('[Use directory]') && h.view().includes('[Cancel]'), 'the path mode paints its actual actions')
+  const actionLine = lineIndexOf(panelFrame(h), '[Use directory]')
+  await clickCell(h, 2, actionLine)
+  assert.deepEqual(submitted, ['/launch/failed', '/launch/failed'], 'clicking Use directory submits the same retained proposal')
+  outcomes[1]!({ kind: 'registered', workspaceId: 'ws-launch', path: '/host/canonical' })
+  await h.paint()
+  assert.equal(h.closes, 1, 'success returns through the existing chooser owner')
+})
+test('the browse list paints the header, current marker, selection and guarded Resume', async () => {
   const h = harness()
   h.handle.setSnapshot(snapshot())
   await h.paint()
   const view = h.view()
   assert.ok(view.includes('Sessions'), `the header names the workspace:\n${view}`)
   assert.ok(view.includes('Current: curren'), `the current Session is stated separately from the selection:\n${view}`)
-  assert.ok(view.includes('Workspace: All workspaces [w]'), `the browse scope is stated:\n${view}`)
+  assert.ok(view.includes('Workspace: Checking current workspace…'), `the current membership is unresolved until the Host baseline arrives:\n${view}`)
   assert.ok(view.includes('Sessions · 2'), `the roster count is stated:\n${view}`)
   assert.ok(view.includes('Current session') && view.includes('Other session'), `both titles paint:\n${view}`)
   const lines = view.split('\n')
@@ -162,7 +282,7 @@ test('the one-shot seed writes the editor once; a real edit wins and never overw
   // Results → editor → browse → close: each Esc removes exactly one level.
   h.vt.sendInput('\x1b')
   await h.paint()
-  assert.ok(h.view().includes('Workspace: All workspaces [w]'), 'the first Esc restores the browse list')
+  assert.ok(h.view().includes('Up/Down move'), 'the first Esc restores the browse list')
   h.vt.sendInput('\x1b')
   await h.paint()
   assert.equal(h.closes, 1, 'the root Esc notifies the owner exactly once')
@@ -208,17 +328,18 @@ test('Esc restores the pre-search selection and scope; the results list never wr
   h.vt.sendInput('\x1b')
   await h.paint()
   const restored = h.view()
-  assert.ok(restored.includes('Workspace: All workspaces [w]'))
+  assert.ok(restored.includes('Up/Down move'), 'the browse list is back')
+  assert.ok(restored.includes('Workspace:'))
   assert.ok(/^> .*Other session/m.test(restored), `the pre-search selection survives:\n${restored}`)
 })
 
-test('Current is proved only by the official workspace membership; a lost proof falls back to All once', async () => {
+test('Workspace-first browse lists every official Workspace without inferring membership from cwd', async () => {
   const h = harness({ initialBrowseScope: 'current' })
   h.handle.setSnapshot(snapshot())
   await h.paint()
-  assert.ok(h.view().includes('Checking current workspace…'),
-    'before the official baseline no membership judgment is painted')
-  assert.ok(h.view().includes('Other session'), 'the pending scope filters nothing')
+  assert.ok(h.view().includes('Workspace: Checking current workspace…'))
+  assert.ok(h.view().includes('Workspace: Checking current workspace…'))
+  assert.ok(h.view().includes('Other session'), 'without a Host baseline the ordinary roster stays flat and usable')
 
   h.handle.updateWorkspaces({
     type: 'baseline',
@@ -228,48 +349,35 @@ test('Current is proved only by the official workspace membership; a lost proof 
     ],
   })
   await h.paint()
-  const scoped = h.view()
-  assert.ok(scoped.includes('Workspace: Current workspace [w]'), `the official membership is applied:\n${scoped}`)
-  assert.ok(scoped.includes('Current session'))
-  assert.ok(!scoped.includes('Other session'), 'a Session outside the proved Workspace is hidden in Current')
+  const grouped = h.view()
+  assert.ok(grouped.includes('Workspace: Current workspace'))
+  assert.ok(grouped.includes('project') && grouped.includes('other'), `both official folders are visible:\n${grouped}`)
+  assert.ok(!grouped.includes('Current workspace unavailable'), 'membership is not a browse scope fallback')
 
-  // `order` never creates an unknown Workspace, and removing the proved one is
-  // ONE visible fallback to All — not an empty list and not a stale membership.
-  h.handle.updateWorkspaces({ type: 'order', workspaceIds: ['ghost'] })
-  await h.paint()
-  assert.ok(h.view().includes('Workspace: Current workspace [w]'), 'order never invents a membership')
   h.handle.updateWorkspaces({ type: 'remove', workspaceId: 'ws-a' })
   await h.paint()
-  const fallback = h.view()
-  assert.ok(fallback.includes('Workspace: All workspaces [w]'), 'the lost proof falls back to All')
-  assert.ok(fallback.includes('Other session'), 'All restores every listed row')
-  assert.ok(fallback.includes('Current workspace unavailable — showing all workspaces'),
-    'the fallback is stated once instead of a silent scope change')
+  const after = h.view()
+  assert.ok(after.includes('other'), `the remaining official Workspace stays browsable:\n${after}`)
+  assert.ok(after.includes('Current workspace unavailable — showing all workspaces'))
 
-  h.handle.workspaceUnavailable('Workspace scope unavailable')
+  h.handle.workspaceUnavailable('Workspace membership unavailable')
   await h.paint()
-  assert.ok(h.view().includes('Workspace scope unavailable'), 'a failed stream degrades to one visible status')
-  assert.ok(h.view().includes('Other session'), 'a failed workspace stream never hides the Session list')
+  assert.ok(h.view().includes('Workspace membership unavailable'))
+  assert.ok(h.view().includes('Other session'), 'a failed follow never hides the flat Session list')
 })
 
-test('a missing initial Current membership falls back to All with one explicit status', async () => {
+test('a missing current-session membership remains in the proved Unassigned folder', async () => {
   const h = harness({ initialBrowseScope: 'current' })
   h.handle.setSnapshot(snapshot())
+  h.handle.updateWorkspaces({ type: 'baseline', items: [{ workspaceId: 'ws-b', path: '/other', title: 'other', sessionIds: [OTHER] }] })
   await h.paint()
-  h.handle.updateWorkspaces({
-    type: 'baseline',
-    items: [{ workspaceId: 'ws-b', path: '/other', title: 'other', sessionIds: [OTHER] }],
-  })
-  await h.paint()
-  assert.ok(h.view().includes('Workspace: All workspaces [w]'), 'a missing membership falls back to All')
-  assert.ok(h.view().includes('Current workspace unavailable — showing all workspaces'),
-    'the fallback is not silent')
+  assert.ok(h.view().includes('Workspace: All workspaces'))
+  assert.ok(h.view().includes('Unassigned'), `the current Session is not guessed into a Workspace:\n${h.view()}`)
 })
 
-test('an ambiguous initial Current membership falls back to All with one explicit status', async () => {
+test('an ambiguous current-session membership stays out of official folders', async () => {
   const h = harness({ initialBrowseScope: 'current' })
   h.handle.setSnapshot(snapshot())
-  await h.paint()
   h.handle.updateWorkspaces({
     type: 'baseline',
     items: [
@@ -278,13 +386,12 @@ test('an ambiguous initial Current membership falls back to All with one explici
     ],
   })
   await h.paint()
-  assert.ok(h.view().includes('Workspace: All workspaces [w]'),
-    'two Workspaces containing the current Session are not a unique proof')
-  assert.ok(h.view().includes('Current workspace unavailable — showing all workspaces'),
-    'an ambiguous membership is stated once')
+  const view = h.view()
+  assert.ok(view.includes('Membership ambiguous'), `no first-match membership is guessed:\n${view}`)
+  assert.ok(view.includes('Current workspace unavailable — showing all workspaces'))
 })
 
-test('a missing-Current fallback status is cleared when a later replace proves Current', async () => {
+test('a later official replace proves the current Workspace folder without stale fallback text', async () => {
   const h = harness({ initialBrowseScope: 'current' })
   h.handle.setSnapshot(snapshot())
   await h.paint()
@@ -294,8 +401,6 @@ test('a missing-Current fallback status is cleared when a later replace proves C
   })
   await h.paint()
   assert.ok(h.view().includes('Current workspace unavailable — showing all workspaces'))
-  // A LATER `replace` proves the unique membership: the stale fallback line must
-  // not contradict the now-enabled Current scope.
   h.handle.updateWorkspaces({
     type: 'replace',
     items: [
@@ -305,39 +410,24 @@ test('a missing-Current fallback status is cleared when a later replace proves C
   })
   await h.paint()
   assert.ok(!h.view().includes('Current workspace unavailable'), 'the old fallback line is cleared')
-  h.vt.sendInput('w')
-  await h.paint()
-  assert.ok(h.view().includes('Workspace scope:') && !h.view().includes('Current workspace unavailable'),
-    'the Current option is enabled again without a contradictory status')
 })
 
-test('a lost-Current fallback status is cleared when a later upsert re-proves it', async () => {
+test('Workspace remove/upsert updates official folder rows without cwd inference', async () => {
   const h = harness()
   h.handle.setSnapshot(snapshot())
-  h.handle.updateWorkspaces({
-    type: 'baseline',
-    items: [{ workspaceId: 'ws-a', path: '/ws', title: 'a', sessionIds: [CURRENT] }],
-  })
+  h.handle.updateWorkspaces({ type: 'baseline', items: [{ workspaceId: 'ws-a', path: '/ws', title: 'a', sessionIds: [CURRENT] }] })
   await h.paint()
-  h.vt.sendInput('w')
-  await h.paint()
-  h.vt.sendInput('\x1b[B')
-  h.vt.sendInput('\r')
-  await h.paint()
-  assert.ok(h.view().includes('Workspace: Current workspace [w]'))
+  assert.ok(h.view().includes('a · 1'))
   h.handle.updateWorkspaces({ type: 'remove', workspaceId: 'ws-a' })
   await h.paint()
-  assert.ok(h.view().includes('Current workspace unavailable — showing all workspaces'))
-  h.handle.updateWorkspaces({
-    type: 'upsert',
-    workspace: { workspaceId: 'ws-a', path: '/ws', title: 'a', sessionIds: [CURRENT] },
-  })
+  assert.ok(!h.view().includes('a · 1'))
+  h.handle.updateWorkspaces({ type: 'upsert', workspace: { workspaceId: 'ws-a', path: '/ws', title: 'a', sessionIds: [CURRENT] } })
   await h.paint()
-  assert.ok(!h.view().includes('Current workspace unavailable'),
-    'a re-proved membership clears the lost-membership status')
+  assert.ok(h.view().includes('a · 1'))
+  assert.ok(h.view().includes('Workspace: Current workspace'), 'the restored membership proves Current again')
 })
 
-test('replace and upsert refold the official membership used by Current', async () => {
+test('replace and upsert refold the official Workspace folders', async () => {
   const h = harness()
   h.handle.setSnapshot(snapshot({
     rows: [row(CURRENT, 3_000, { title: 'Current session' }), row(OTHER, 2_000, { title: 'Other session' }), row(THIRD, 1_000, { title: 'Third session' })],
@@ -350,89 +440,49 @@ test('replace and upsert refold the official membership used by Current', async 
     ],
   })
   await h.paint()
-  h.vt.sendInput('w')
+  assert.ok(h.view().includes('a · 1') && h.view().includes('b · 1'))
+  h.handle.updateWorkspaces({ type: 'replace', items: [{ workspaceId: 'ws-a', path: '/ws', title: 'a', sessionIds: [CURRENT, OTHER] }] })
   await h.paint()
-  h.vt.sendInput('\x1b[B')
-  h.vt.sendInput('\r')
+  assert.ok(h.view().includes('Other session'), 'a replace membership change updates the official member row')
+  h.handle.updateWorkspaces({ type: 'upsert', workspace: { workspaceId: 'ws-c', path: '/third', title: 'c', sessionIds: [THIRD] } })
   await h.paint()
-  assert.ok(h.view().includes('Workspace: Current workspace [w]'))
-  assert.ok(!h.view().includes('Other session'))
-  // replace: the SAME Workspace gains a member.
-  h.handle.updateWorkspaces({
-    type: 'replace',
-    items: [
-      { workspaceId: 'ws-a', path: '/ws', title: 'a', sessionIds: [CURRENT, OTHER] },
-      { workspaceId: 'ws-b', path: '/other', title: 'b', sessionIds: [] },
-    ],
-  })
-  await h.paint()
-  assert.ok(h.view().includes('Other session'), 'a replace membership change is applied to Current')
-  // upsert adds a workspace that does not contain the current Session: Current
-  // stays anchored to the unique proven Workspace.
-  h.handle.updateWorkspaces({
-    type: 'upsert',
-    workspace: { workspaceId: 'ws-c', path: '/third', title: 'c', sessionIds: [THIRD] },
-  })
-  await h.paint()
-  assert.ok(h.view().includes('Workspace: Current workspace [w]'))
-  assert.ok(!h.view().includes('Third session'), 'an upsert never creates a Current member')
+  assert.ok(h.view().includes('c · 1'), 'an official upsert creates its own Folder row')
 })
 
-test('a scope/membership change re-anchors the selection and never resumes a hidden row', async () => {
-  const h = harness()
-  h.handle.setSnapshot(snapshot({
-    rows: [row(CURRENT, 3_000, { title: 'Current session' }), row(OTHER, 2_000, { title: 'Other session' })],
-  }))
-  h.handle.updateWorkspaces({
-    type: 'baseline',
-    items: [
-      { workspaceId: 'ws-a', path: '/ws', title: 'a', sessionIds: [CURRENT] },
-      { workspaceId: 'ws-b', path: '/other', title: 'b', sessionIds: [OTHER] },
-    ],
-  })
-  await h.paint()
-  h.vt.sendInput('\x1b[B') // select the other-workspace row in All
-  await h.paint()
-  h.vt.sendInput('w')
-  await h.paint()
-  h.vt.sendInput('\x1b[B') // the selector starts on All; move to Current
-  h.vt.sendInput('\r')
-  await h.paint()
-  const scoped = h.view()
-  assert.ok(scoped.includes('Workspace: Current workspace [w]'))
-  assert.ok(!scoped.includes('Other session'), 'the other-workspace row is hidden')
-  assert.ok(/^> .*Current session/m.test(scoped), 'the selection re-anchored inside the visible set')
-  h.vt.sendInput('\r')
-  await h.paint()
-  assert.deepEqual(h.resumes, [], 'the hidden row can never be resumed')
-
-  h.handle.updateWorkspaces({ type: 'remove', workspaceId: 'ws-a' })
-  await h.paint()
-  assert.ok(h.view().includes('Workspace: All workspaces [w]'), 'a lost proof falls back to All')
-  assert.ok(h.view().includes('Other session'), 'All restores every listed row')
-})
-
-test('the Workspace selector is in-place, lists every official option, and a disabled option never switches', async () => {
+test('w is ordinary global query text and no Workspace scope shortcut is painted', async () => {
   const h = harness()
   h.handle.setSnapshot(snapshot())
   await h.paint()
+  const header = panelFrame(h)[1]!
+  assert.ok(!header.includes('[w]'))
   h.vt.sendInput('w')
   await h.paint()
-  const open = h.view()
-  assert.ok(open.includes('Workspace scope:'), `the selector paints inside the header header row:\n${open}`)
-  assert.ok(open.includes('All workspaces'), 'the All option is stated')
-  assert.ok(open.includes('Current workspace unavailable'), 'an unproven Current is stated as unavailable')
-  // Move the selector cursor onto the DISABLED Current option and confirm it
-  // cannot switch: the cursor is not the scope authority and Enter is inert.
-  h.vt.sendInput('\x1b[B')
+  assert.ok(h.view().includes('Search all workspaces'))
+  assert.ok(h.view().includes('Search: w'))
+  assert.ok(!h.view().includes('Workspace scope:'))
+  assert.deepEqual(h.resumes, [])
+})
+
+test('a short frame scrolls the Workspace tree so the selected Session stays painted and openable', async () => {
+  const history = Array.from({ length: 8 }, (_, index) => row(`session-tree-scroll-${index}`, 8_000 - index, { title: `History ${index}` }))
+  const h = harness({ columns: 80, rows: 10 })
+  h.handle.setSnapshot(snapshot({ rows: [row(CURRENT, 9_000, { title: 'Current session' }), ...history] }))
+  h.handle.updateWorkspaces({ type: 'baseline', items: [
+    { workspaceId: 'ws-a', path: '/ws', title: 'Project', sessionIds: [CURRENT, ...history.map(item => item.id)] },
+  ] })
   await h.paint()
-  assert.ok(h.view().includes('Workspace scope:'), 'the selector stays open on the disabled option')
+  // Walk past the first painted page. The tree must scroll with the cursor:
+  // a selected row that is not painted can never be opened.
+  for (let step = 0; step < 5; step += 1) {
+    h.vt.sendInput('\x1b[B')
+    await h.paint()
+  }
+  const view = h.view()
+  assert.ok(view.includes('History 4'), `the selected row scrolls into the painted window:\n${view}`)
+  assert.ok(!view.includes('Current session'), `the window moved off the first page:\n${view}`)
   h.vt.sendInput('\r')
   await h.paint()
-  assert.ok(h.view().includes('Workspace scope:'), 'Enter on a disabled option is inert')
-  h.vt.sendInput('\x1b')
-  await h.paint()
-  assert.ok(h.view().includes('Workspace: All workspaces [w]'), 'Esc cancels without changing the scope')
+  assert.deepEqual(h.resumes, ['session-tree-scroll-4'], 'the scrolled-to row is a real painted activation target')
 })
 
 test('a row the current frame never painted can never be opened, and resizing re-validates it', async () => {
@@ -465,13 +515,13 @@ test('status rows that squeeze the whole list out also withhold activation', asy
     rows: [row(CURRENT, 3_000, { title: 'Current session' }), row(OTHER, 2_000, { title: 'Other session' })],
     projectionError: 'projection failed',
   }))
-  h.handle.workspaceUnavailable('Workspace scope unavailable')
+  h.handle.workspaceUnavailable('Workspace membership unavailable')
   await h.paint()
   const squeezed = h.view()
   assert.ok(squeezed.includes('Sessions · 2'))
-  assert.ok(squeezed.includes('Workspace scope unavailable'))
-  assert.ok(squeezed.includes('Session details unavailable'))
-  assert.ok(!squeezed.includes('Other session'), `status rows consumed the list budget:\n${squeezed}`)
+  assert.ok(squeezed.includes('Workspace: Information unavailable'))
+  assert.ok(squeezed.includes('Session details unavailable'), `the projection failure keeps its one status line:\n${squeezed}`)
+  assert.ok(!squeezed.includes('Other session'), `status lines consumed the list budget:\n${squeezed}`)
   h.vt.sendInput('\x1b[B')
   h.vt.sendInput('\r')
   await h.paint()
@@ -747,7 +797,36 @@ async function clickCell(h: Harness, x: number, y: number): Promise<void> {
   await h.paint()
 }
 
-test('the grouped list paints Needs attention → Working → Recent with plain status labels and counts', async () => {
+test('the per-open folder expansion and selection survive one global-search round trip', async () => {
+  const h = harness({ columns: 100, rows: 24 })
+  h.handle.setSnapshot(snapshot())
+  h.handle.updateWorkspaces({ type: 'baseline', items: [
+    { workspaceId: 'ws-a', path: '/ws', title: 'Alpha', sessionIds: [CURRENT] },
+    { workspaceId: 'ws-b', path: '/other', title: 'Beta', sessionIds: [OTHER] },
+  ] })
+  await h.paint()
+  assert.ok(!h.view().includes('Other session'), 'the inactive non-current Workspace starts collapsed')
+  h.vt.sendInput('\x1b[B')
+  await h.paint()
+  h.vt.sendInput('\r')
+  await h.paint()
+  assert.ok(h.view().includes('Other session'), 'Enter expands the selected Folder')
+  h.vt.sendInput('/')
+  await h.paint()
+  h.vt.sendInput('needle')
+  await h.paint()
+  assert.ok(h.view().includes('Search all workspaces'))
+  h.vt.sendInput('\x1b')
+  await h.paint()
+  const restored = h.view()
+  assert.ok(restored.includes('Other session'), `Esc restores the same expanded Folder:\n${restored}`)
+  assert.ok(/^> .*Current session/m.test(restored), 'and the same Session cursor anchor')
+  h.vt.sendInput('\r')
+  await h.paint()
+  assert.ok(!h.view().includes('Other session'), 'the selected Folder itself remains the target for Enter')
+})
+
+test('a folder keeps Needs, Working and Recent priority in its Session rows', async () => {
   const h = harness({ columns: 100, rows: 24 })
   h.handle.setSnapshot(snapshot({
     rows: [
@@ -757,6 +836,7 @@ test('the grouped list paints Needs attention → Working → Recent with plain 
       row('session-recent', 1_000, { title: 'Recent row' }),
     ],
   }))
+  h.handle.updateWorkspaces({ type: 'baseline', items: [{ workspaceId: 'ws-project', path: '/project', title: 'Project', sessionIds: ['session-needs', 'session-working', 'session-unverified', 'session-recent'] }] })
   h.handle.setActivityFacts({
     listRevision: 1,
     facts: [
@@ -769,16 +849,11 @@ test('the grouped list paints Needs attention → Working → Recent with plain 
   })
   await h.paint()
   const view = h.view()
-  assert.ok(view.includes('Needs attention · 1'), `the Needs group is stated with its count:\n${view}`)
-  assert.ok(view.includes('Working · 1'), `the Working group is stated:\n${view}`)
-  assert.ok(view.includes('Recent · 2'), `the unproved and idle rows stay in Recent:\n${view}`)
-  assert.ok(/Question · Working/.test(view), `a needs+running row carries the running sub-fact:\n${view}`)
-  assert.ok(view.includes('Pending unverified'),
-    `a pending candidate this Client cannot answer is never a Needs row:\n${view}`)
-  assert.ok(!view.includes('Running unknown'), 'a proved running fact never paints Running unknown')
-  // The group order is frozen: Needs first, Recent last.
-  assert.ok(view.indexOf('Needs attention · 1') < view.indexOf('Working · 1'))
-  assert.ok(view.indexOf('Working · 1') < view.indexOf('Recent · 2'))
+  assert.ok(view.includes('Project · 4'), `official Workspace membership is the outer group:\n${view}`)
+  assert.ok(view.includes('Needs row  Needs attention · Working'), `proved Needs stays in its folder and may also be Working:\n${view}`)
+  assert.ok(view.includes('Working row  Working'), `proved running row stays inside the Workspace:\n${view}`)
+  assert.ok(view.includes('Show more sessions · 2 remaining'), `ordinary history stays behind its per-folder watermark:\n${view}`)
+  assert.ok(!view.includes('Pending · not actionable here'), 'collapsed history does not inflate the activity list')
 })
 
 test('Space opens a read-only Peek: no Host write, Esc restores the browse selection, Enter resumes', async () => {
@@ -814,14 +889,14 @@ test('Space opens a read-only Peek: no Host write, Esc restores the browse selec
   h.vt.sendInput('\x1b')
   await h.paint()
   const restored = h.view()
-  assert.ok(restored.includes('Workspace: All workspaces [w]'), 'Esc returns to the browse list')
+  assert.ok(restored.includes('Up/Down move'), 'Esc returns to the browse list')
   assert.ok(/^> .*Other session/m.test(restored), `the Peek returns to the SAME selected row:\n${restored}`)
   h.vt.sendInput('\r')
   await h.paint()
   assert.deepEqual(h.resumes, [OTHER], 'Enter from Peek is the ONE re-proved resume intent')
 })
 
-test('the selector lists every official Workspace, filters by the official membership and keeps Unassigned proved-only', async () => {
+test('all official Workspace folders, including empty and Unassigned, stay in one browse tree', async () => {
   const h = harness({ columns: 100, rows: 24 })
   h.handle.setSnapshot(snapshot({
     rows: [row(CURRENT, 4_000, { title: 'Current session' }), row(OTHER, 3_000, { title: 'Other session' }), row(THIRD, 2_000, { title: 'Cold session' })],
@@ -835,36 +910,12 @@ test('the selector lists every official Workspace, filters by the official membe
     ],
   })
   await h.paint()
-  h.vt.sendInput('w')
-  await h.paint()
-  const open = h.view()
-  for (const label of ['All workspaces', 'Current workspace', 'Alpha', 'Beta', 'Empty', 'Unassigned']) {
-    assert.ok(open.includes(label), `the selector lists ${label}:\n${open}`)
+  const view = h.view()
+  for (const label of ['Current workspace', 'Alpha', 'Beta', 'Empty', 'Unassigned']) {
+    assert.ok(view.includes(label), `the same browse tree lists ${label}:\n${view}`)
   }
-  // all → current → Alpha → Beta → Empty → Unassigned: choose Beta.
-  h.vt.sendInput('\x1b[B')
-  h.vt.sendInput('\x1b[B')
-  h.vt.sendInput('\x1b[B')
-  h.vt.sendInput('\r')
-  await h.paint()
-  const scoped = h.view()
-  assert.ok(scoped.includes('Workspace: Beta'), `the official WorkspaceId scope is applied:\n${scoped}`)
-  assert.ok(scoped.includes('Other session'), 'the official member is listed')
-  assert.ok(!scoped.includes('Current session'), 'a non-member is filtered out')
-  // Unassigned lists only the Session no official Workspace contains.
-  h.vt.sendInput('w')
-  await h.paint()
-  h.vt.sendInput('\x1b[B')
-  h.vt.sendInput('\x1b[B')
-  h.vt.sendInput('\x1b[B')
-  h.vt.sendInput('\x1b[B')
-  h.vt.sendInput('\x1b[B')
-  h.vt.sendInput('\r')
-  await h.paint()
-  const unassigned = h.view()
-  assert.ok(unassigned.includes('Workspace: Unassigned'), `the Unassigned scope is applied:\n${unassigned}`)
-  assert.ok(unassigned.includes('Cold session'), 'a zero-membership Session is listed')
-  assert.ok(!unassigned.includes('Other session'), 'a proved member is never Unassigned')
+  assert.ok(view.indexOf('Alpha') < view.indexOf('Beta'), 'the current Workspace is first')
+  assert.ok(!view.includes('Workspace scope:'), 'there is no secondary scope selector')
 })
 
 test('duplicate Workspace titles are disambiguated by the official id, never guessed from a path', async () => {
@@ -878,12 +929,10 @@ test('duplicate Workspace titles are disambiguated by the official id, never gue
     ],
   })
   await h.paint()
-  h.vt.sendInput('w')
-  await h.paint()
   const view = h.view()
-  const options = view.split('\n').filter(line => line.includes('Same title'))
-  assert.equal(options.length, 2, `both same-title Workspaces are listed:\n${view}`)
-  assert.ok(options.some(line => line.includes('ws-duplicate')),
+  const folders = view.split('\n').filter(line => line.includes('Same title'))
+  assert.equal(folders.length, 2, `both same-title Workspaces are listed:\n${view}`)
+  assert.ok(folders.some(line => line.includes('ws-duplicate')),
     `a duplicated Host title carries the official id:\n${view}`)
 })
 
@@ -916,7 +965,7 @@ test('the wide layout paints the read-only preview beside the list; a narrow one
   assert.ok(frame[frame.length - 1]!.includes('Esc'), 'the Esc action stays the last physical row')
   h.vt.sendInput('\x1b')
   await h.paint()
-  assert.ok(h.view().includes('Workspace: All workspaces [w]'), 'Esc leaves Peek even at 80x10')
+  assert.ok(h.view().includes('Workspace:'), 'Esc leaves Peek even at 80x10')
   assert.deepEqual(h.resumes, [], 'no invisible row was activated while Peek was open')
 })
 
@@ -960,7 +1009,7 @@ test('a mouse click only SELECTS a painted row; a repaint between press and rele
   assert.deepEqual(h.resumes, [], 'the dropped gesture never resumes a Session')
 })
 
-test('the header affordances are real hit targets: w, / Search and the outside-attention line', async () => {
+test('the Workspace header exposes only Search while attention stays on its Session row', async () => {
   const h = harness({ columns: 120, rows: 24 })
   h.handle.setSnapshot(snapshot({
     rows: [row(CURRENT, 3_000, { title: 'Current session' }), row(OTHER, 2_000, { title: 'Other session' })],
@@ -978,30 +1027,12 @@ test('the header affordances are real hit targets: w, / Search and the outside-a
     answerEligibility: [eligibility(OTHER)],
   })
   await h.paint()
-  // Current scope proves the outside need; the header states it without a guess.
-  h.vt.sendInput('w')
-  await h.paint()
-  h.vt.sendInput('\x1b[B')
-  h.vt.sendInput('\r')
-  await h.paint()
-  const scoped = panelFrame(h)
-  assert.ok(scoped.join('\n').includes('1 other session needs attention'),
-    `the outside attention line states the proved count:\n${scoped.join('\n')}`)
-  const outsideLine = lineIndexOf(scoped, 'needs attention')
-  const attentionText = scoped[outsideLine]!
-  await clickCell(h, attentionText.indexOf('needs attention'), outsideLine)
-  assert.ok(h.view().includes('Workspace: All workspaces [w]'),
-    'clicking the outside-attention affordance returns to All')
-  // The `[w]` header hint opens the in-place selector.
-  const subHeader = panelFrame(h)[1]!
-  await clickCell(h, subHeader.indexOf('[w]') + 1, 1)
-  assert.ok(h.view().includes('Workspace scope:'), 'the [w] hint opens the selector')
-  h.vt.sendInput('\x1b')
-  await h.paint()
-  // The `/ Search` hint focuses the global editor.
-  const searchHeader = panelFrame(h)[1]!
-  await clickCell(h, searchHeader.indexOf('/ Search') + 1, 1)
-  assert.ok(h.view().includes('Search all workspaces'), 'the / Search hint enters the global search')
+  const frame = panelFrame(h)
+  assert.ok(frame.join('\n').includes('Needs attention'), `a proved outside Workspace need stays in its own visible row:\n${frame.join('\n')}`)
+  const header = frame[1]!
+  assert.ok(!header.includes('[w]'))
+  await clickCell(h, header.indexOf('/ Search') + 1, 1)
+  assert.ok(h.view().includes('Search all workspaces'), 'the / Search header target enters global search')
 })
 
 test('an Activity sample applies immediately, including a revocation, and never moves the cursor', async () => {
@@ -1034,7 +1065,7 @@ test('an Activity sample applies immediately, including a revocation, and never 
   })
   await h.paint()
   const proved = h.view()
-  assert.ok(proved.includes('Needs attention · 1'), `the proved need is painted at once:\n${proved}`)
+  assert.ok(proved.includes('Other session  Needs attention'), `the proved need is painted at once:\n${proved}`)
   assert.ok(/^> .*Other session/m.test(proved), 'the cursor never jumps on an activity update')
   // A revocation is the same class of fact: it disappears in the SAME frame,
   // never behind a delayed group order.
@@ -1049,8 +1080,8 @@ test('an Activity sample applies immediately, including a revocation, and never 
   await h.paint()
   const revoked = h.view()
   assert.ok(!revoked.includes('Needs attention'), `the revoked need never lingers:\n${revoked}`)
-  assert.ok(revoked.includes('Pending unknown · Working'),
-    `the row keeps its unproved pending state while working:\n${revoked}`)
+  assert.ok(revoked.includes('Working'), `compact rows retain the proved running state:\n${revoked}`)
+  assert.ok(!revoked.includes('Pending unknown · Working'))
 })
 
 test('a Peek is pinned to its own Session and exits when that Session leaves the roster', async () => {
@@ -1104,7 +1135,7 @@ test('a Peek opened from search results also exits when its target leaves the re
   assert.ok(h.view().includes('Search all workspaces'), 'the search editor owns the keyboard again')
 })
 
-test('a clipped [w] hint keeps no hit region: the painted / Search wins the click', async () => {
+test('the workspace header has no w hit target and Search retains its real hit target', async () => {
   const h = harness({ columns: 60, rows: 24 })
   h.handle.setSnapshot(snapshot())
   h.handle.updateWorkspaces({
@@ -1112,31 +1143,23 @@ test('a clipped [w] hint keeps no hit region: the painted / Search wins the clic
     items: [{
       workspaceId: 'ws-long',
       path: '/ws/long',
-      // 40 columns: the applied scope label plus ` [w]` is 55 cells, so the
-      // hint is clipped by the trailing reservation but still STARTS inside the
-      // painted row — the exact overlap a naive hit map would create.
+      // 60 columns: a long Workspace label competes with the trailing Search
+      // hint, so the hint starts inside the painted row while the header keeps
+      // its single current-membership annotation.
       title: 'Long workspace name pushing hint off row',
       sessionIds: [CURRENT],
     }],
   })
   await h.paint()
-  h.vt.sendInput('w')
-  await h.paint()
-  h.vt.sendInput('\x1b[B')
-  h.vt.sendInput('\x1b[B')
-  h.vt.sendInput('\r')
-  await h.paint()
   const subHeader = panelFrame(h)[1]!
-  assert.ok(subHeader.includes('Workspace: Long workspace'), 'the long official title is the applied scope label')
-  assert.ok(!subHeader.includes('[w]'), `the hint is really clipped at 60 columns:\n${subHeader}`)
-  assert.ok(subHeader.includes('/ Search'), `the painted trailing affordance:\n${subHeader}`)
+  assert.ok(subHeader.includes('Workspace:'))
+  assert.ok(!subHeader.includes('[w]'))
+  assert.ok(subHeader.includes('/ Search'))
   await clickCell(h, subHeader.indexOf('/ Search') + 1, 1)
-  const view = h.view()
-  assert.ok(view.includes('Search all workspaces'), `the painted / Search opens the search:\n${view}`)
-  assert.ok(!view.includes('Workspace scope:'), 'the clipped [w] never opens the selector')
+  assert.ok(h.view().includes('Search all workspaces'), 'the Search target enters global search')
 })
 
-test('a Working row keeps its unproved Pending state visible', async () => {
+test('compact Working rows omit unknown pending spam while Peek preserves the source state', async () => {
   const h = harness({ columns: 100, rows: 24 })
   h.handle.setSnapshot(snapshot({
     rows: [
@@ -1156,13 +1179,19 @@ test('a Working row keeps its unproved Pending state visible', async () => {
   })
   await h.paint()
   const view = h.view()
-  assert.ok(view.includes('Working · 3'), `all three running rows share the Working group:\n${view}`)
-  assert.ok(view.includes('Pending denied · Working'), `a denied pending state stays visible:\n${view}`)
-  assert.ok(view.includes('Pending unknown · Working'), `an unknown pending state stays visible:\n${view}`)
-  assert.ok(view.includes('Pending unavailable · Working'), `an unavailable pending state stays visible:\n${view}`)
+  assert.equal(view.split('Working · ').length - 1, 3, `all three running rows retain the Working summary:\n${view}`)
+  assert.ok(!view.includes('Pending denied') && !view.includes('Pending unknown') && !view.includes('Pending unavailable'),
+    `compact rows do not repeat unknown/unanswerable pending state:\n${view}`)
+  h.vt.sendInput('\x1b[B')
+  await h.paint()
+  h.vt.sendInput(' ')
+  await h.paint()
+  const peek = h.view()
+  assert.ok(peek.includes('Pending: Pending denied') || peek.includes('Pending: Pending unknown') || peek.includes('Pending: Pending unavailable'),
+    `read-only details preserve the authoritative pending source state:\n${peek}`)
 })
 
-test('the read-only Peek names the OFFICIAL Workspace id, not only its title', async () => {
+test('the read-only Peek names the official Workspace title for a unique folder', async () => {
   const h = harness({ columns: 120, rows: 24 })
   h.handle.setSnapshot(snapshot())
   h.handle.updateWorkspaces({
@@ -1173,17 +1202,23 @@ test('the read-only Peek names the OFFICIAL Workspace id, not only its title', a
     ],
   })
   await h.paint()
+  // Beta has no confirmed activity, so its Folder starts collapsed: expand it
+  // before selecting the Session row that Peek must describe.
+  h.vt.sendInput('\x1b[B')
+  await h.paint()
+  h.vt.sendInput('\r')
+  await h.paint()
   h.vt.sendInput('\x1b[B')
   await h.paint()
   h.vt.sendInput(' ')
   await h.paint()
   const peek = h.view()
-  assert.ok(peek.includes('Beta (ws-beta)'),
+  assert.ok(peek.includes('Workspace: Beta'),
     `the Peek keeps the official Workspace identity beside the Host title:\n${peek}`)
   assert.ok(peek.includes('Running: Unknown'), 'a missing Activity sample is stated, not guessed')
 })
 
-test('Host titles that sanitize to the same visible text are still distinguishable', async () => {
+test('Host titles that sanitize identically use distinct Host path-tail Folder labels', async () => {
   const h = harness({ columns: 120, rows: 24 })
   h.handle.setSnapshot(snapshot())
   h.handle.updateWorkspaces({
@@ -1196,15 +1231,13 @@ test('Host titles that sanitize to the same visible text are still distinguishab
     ],
   })
   await h.paint()
-  h.vt.sendInput('w')
-  await h.paint()
   const options = h.view().split('\n').filter(line => line.includes('Alpha'))
   assert.equal(options.length, 2, `both colliding Workspaces are listed:\n${h.view()}`)
-  assert.ok(options.every(line => line.includes('ws-collision')),
-    `a collision after sanitization still carries the official id:\n${options.join('\n')}`)
+  assert.ok(options.every(line => /Alpha \((1|2)\)/u.test(line)),
+    `a collision after sanitization carries a unique Host path tail:\n${options.join('\n')}`)
 })
 
-test('official Workspace ids that share a prefix stay distinguishable in the selector and Peek', async () => {
+test('same-title Workspaces use unique Host path tails in Folder rows and Peek', async () => {
   const h = harness({ columns: 160, rows: 30 })
   h.handle.setSnapshot(snapshot())
   h.handle.updateWorkspaces({
@@ -1215,21 +1248,16 @@ test('official Workspace ids that share a prefix stay distinguishable in the sel
     ],
   })
   await h.paint()
-  h.vt.sendInput('w')
-  await h.paint()
   const options = h.view().split('\n').filter(line => line.includes('Shared'))
   assert.equal(options.length, 2, `both same-title Workspaces are listed:\n${h.view()}`)
-  // A fixed-length truncation would render both labels identically; the labels
-  // must resolve to DIFFERENT official identities.
-  assert.ok(options.some(line => line.includes('workspace-abcdef-1')), options.join('\n'))
-  assert.ok(options.some(line => line.includes('workspace-abcdef-2')), options.join('\n'))
-  h.vt.sendInput('\x1b')
-  await h.paint()
-  h.vt.sendInput('\x1b[B')
-  await h.paint()
+  assert.ok(options.some(line => line.includes('Shared (1)')), options.join('\n'))
+  assert.ok(options.some(line => line.includes('Shared (2)')), options.join('\n'))
+  const folderLines = panelFrame(h).map((line, index) => ({ line, index })).filter(item => item.line.includes('Shared (2)'))
+  assert.equal(folderLines.length, 1)
+  await clickCell(h, folderLines[0]!.line.indexOf('Shared (2)') + 1, folderLines[0]!.index)
   h.vt.sendInput(' ')
   await h.paint()
   const peek = h.view()
-  assert.ok(peek.includes('(workspace-abcdef-2)'),
-    `the Peek carries the FULL official Workspace id:\n${peek}`)
+  assert.ok(peek.includes('Shared (2)'),
+    `the Peek retains the distinct official Workspace path tail:\n${peek}`)
 })

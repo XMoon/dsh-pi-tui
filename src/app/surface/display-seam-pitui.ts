@@ -81,6 +81,7 @@ export function pituiDisplaySeam(app: TuiApp): SurfaceDisplaySeam {
     },
     setWelcomeCard: facts => app.setWelcomeCard(facts),
     setWelcomeIdle: idle => app.setWelcomeIdle(idle),
+    setWelcomeWorkspace: workspace => app.setWelcomeWorkspace(workspace),
     setTerminalCwd: cwd => app.setTerminalCwd(cwd),
     setPendingInputPresentation: presentation => app.setPendingInputPresentation(presentation),
     getSessionTitle: () => app.getSessionTitle(),

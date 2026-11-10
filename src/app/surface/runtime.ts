@@ -436,7 +436,7 @@ export interface SurfaceInputBinding {
    * renderer-side listing, session id or switch of its own. PiTui supplies no
    * consumer.
    */
-  openSessionBrowser(): void
+  openSessionBrowser(request?: { readonly addDirectory?: boolean }): void
   /** Whether that `/sessions` UI entry is actually installed (registered, not
    *  Host-owned) — the business-entry fact the Welcome button paints. */
   sessionBrowserAvailable(): boolean
@@ -889,7 +889,7 @@ export interface SurfaceRuntimeOptions {
    * placeholder contract and same owned-promise rule as
    * {@link openModelQuick}; the command owns every read, switch and notice.
    */
-  readonly openSessionBrowser?: () => void
+  readonly openSessionBrowser?: (request?: { readonly addDirectory?: boolean }) => void
   /** TSP-7 Welcome D: whether that `/sessions` UI entry is actually installed
    *  (registered, not Host-owned) — the real business-entry fact the Welcome
    *  button paints, never the presence of a painted button. */

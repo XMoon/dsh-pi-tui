@@ -326,7 +326,10 @@ function workspaceFactOf(view: RemoteWorkspaceViewLike): SessionWorkspaceFact {
   return {
     workspaceId: view.workspaceId,
     path: view.path,
-    title: view.title,
+    // A Host Workspace can exist without a display title (a fresh create);
+    // the TUI fact carries display text, so an absent title is empty and the
+    // projection applies its own ONE fallback label.
+    title: view.title ?? '',
     sessionIds: view.sessionIds.map(String),
   }
 }

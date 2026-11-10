@@ -92,7 +92,14 @@ export interface DisplayActivityFacts {
   readonly failedTaskCount?: number
 }
 
-/** The welcome-card facts (see TuiApp.setWelcomeCard). */
+export interface DisplayWelcomeWorkspace {
+  readonly path: string
+  readonly status: 'proposed' | 'verifying' | 'confirmed' | 'rejected'
+  readonly workspaceId?: string
+  readonly error?: string
+}
+
+
 export interface DisplayWelcomeFacts {
   readonly cwd: string
   readonly sessionId: string
@@ -243,6 +250,7 @@ export interface SurfaceDisplaySeam {
   setWelcomeCard(facts: DisplayWelcomeFacts): void
   /** The welcome card's idle form (deferred start, no session yet). */
   setWelcomeIdle(idle: boolean): void
+  setWelcomeWorkspace?(workspace: DisplayWelcomeWorkspace | undefined): void
   /** The terminal-local cwd fact the renderer may publish (OSC 7 on PiTui;
    * the TSP pane owns its own cwd presentation). */
   setTerminalCwd(cwd: string | undefined): void

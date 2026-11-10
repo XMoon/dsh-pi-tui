@@ -17,6 +17,7 @@ import type { SessionBrowserAnswerEligibility, SessionBrowserRow } from '../../s
 import type { SessionActivityFact, SessionWorkspaceFact } from '../../src/runtime/session-workspace-facts-port.ts'
 import {
   buildSessionWorkspaceView,
+  visibleWorkspaceBrowserRows,
   currentWorkspaceOf,
   workspaceMembershipOf,
   type SessionWorkspaceScope,
@@ -87,6 +88,45 @@ function view(input: {
     ...(input.priorIdOrder === undefined ? {} : { priorIdOrder: input.priorIdOrder }),
   })
 }
+
+test("manual collapse hides active and current child rows instead of overriding the user's fold", () => {
+  const built = view({
+    rows: [row('active', 5_000), row('current', 4_000), row('history', 3_000)],
+    activity: [activity('active', { running: true, attention: 'none', attentionSourceState: 'known' })],
+    workspaces: [workspace('ws-current', ['active', 'current', 'history'])],
+    proven: true,
+    currentSessionId: 'current',
+  })
+  const rows = visibleWorkspaceBrowserRows(built, {
+    expanded: new Map([['ws-current', false]]),
+    historyLimit: new Map(),
+  }, 'active', 'current')
+  assert.deepEqual(rows.map(row => row.id), ['workspace:ws-current'])
+  assert.equal(rows[0]?.kind, 'folder')
+  if (rows[0]?.kind === 'folder') assert.deepEqual([rows[0].needs, rows[0].working, rows[0].total], [0, 1, 3])
+})
+
+
+test('official Workspace groups expose active sessions and keep ordinary history behind Show more', () => {
+  const built = view({
+    rows: [row('current-active', 5_000), row('current-old', 4_000), row('other-old', 3_000)],
+    activity: [
+      activity('current-active', { running: true, attention: 'none', attentionSourceState: 'known' }),
+      activity('current-old', { attention: 'none', attentionSourceState: 'known' }),
+      activity('other-old', { attention: 'none', attentionSourceState: 'known' }),
+    ],
+    workspaces: [workspace('ws-current', ['current-active', 'current-old']), workspace('ws-other', ['other-old'])],
+    proven: true,
+    currentSessionId: 'current-active',
+  })
+  const rows = visibleWorkspaceBrowserRows(built, { expanded: new Map(), historyLimit: new Map() }, 'current-active', 'current-active')
+  assert.deepEqual(rows.map(row => row.id), [
+    'workspace:ws-current', 'session:current-active', 'session:current-old', 'workspace:ws-other',
+  ])
+  assert.equal(rows[0]!.kind, 'folder')
+  assert.equal(rows[3]!.kind, 'folder')
+  if (rows[3]?.kind === 'folder') assert.equal(rows[3].expanded, false, 'an inactive non-current Workspace starts as a Folder header only')
+})
 
 test('Needs attention → Working → Recent: one row per Session, ordered by official updatedAt', () => {
   const built = view({

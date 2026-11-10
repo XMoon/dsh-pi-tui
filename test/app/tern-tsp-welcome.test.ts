@@ -275,7 +275,7 @@ test('W01: the formal sessionless commit shows ONE Welcome in Main and leaves th
   assert.equal(m.fatals.length, 0, 'the mount stayed healthy')
 })
 
-test('W01: the Welcome states the product name, the ONE action and the fixed tip', async (t) => {
+test('W01: the Welcome states the product name, its directory and Resume actions, and the fixed tip', async (t) => {
   const m = await mountWelcome()
   t.after(() => m.dispose())
   await idle(m)
@@ -287,12 +287,15 @@ test('W01: the Welcome states the product name, the ONE action and the fixed tip
     ...whaleRowsOnWire(m),
     'dsh-pi-tui',
     VERSION_LINE,
+    'Choose directory',
     'Resume session',
     '›',
     'Tip: Type / to browse commands.',
   ], 'the painted copy is exactly the D text, in order, with no extra line')
   assert.equal(m.nodes('main.').some(node => node.k === 'icon' && String(node.p.name) === 'history'), true,
-    'the action leads with the client icon vocabulary, not a hand-painted glyph')
+    'the Resume action leads with the client icon vocabulary, not a hand-painted glyph')
+  assert.ok(m.node('welcome-choose') !== undefined,
+    'the sessionless Choose directory action is a real styled button, not painted text')
 })
 
 test('W02: a blank-session commit shows the same Welcome and takes the version from the committed status snapshot', async (t) => {
