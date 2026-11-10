@@ -1762,6 +1762,7 @@ async function settlePresetThroughOuterOwner(
     commandSubmitAttachments: () => [],
     isTuiOwnedCommand: () => false,
     commandPlaneOwnsLine: () => false,
+    beginNavigationIntent: () => undefined,
     submittedHostClaim: () => undefined,
     commandSignal: () => new AbortController().signal,
     invokeCommandPlane: async () => {
@@ -2182,4 +2183,100 @@ test('a sessionless /preset stages the next preset without reading a policy rost
   assert.equal(t.pending.value, 'minimal')
   assert.equal(rosterReads, 0, 'the sessionless selection must not read a chooser-policy roster')
   t.app.stop()
+})
+
+test('the navigation intent starts only for the final TUI-owned route and never on an early refusal', async () => {
+  // A genuine Host-owned `/new` must not register a TUI navigation intent, and
+  // the late attachment refusal (a post-admission refusal before the executor
+  // runs) must return without ever registering one: a leaked intent would keep
+  // `SessionTransitionGate.pending` true forever.
+  const run = async (options: {
+    lateRefusal?: string
+    commandPlaneLine: boolean
+    tuiOwnedCommand: boolean
+  }): Promise<string[]> => {
+    const events: string[] = []
+    let acked!: () => void
+    const ack = new Promise<void>(resolve => { acked = resolve })
+    const deps = {
+      isDisposed: () => false,
+      notify: () => {},
+      loggerError: () => {},
+      readDraft: () => '',
+      mergeDraftIntoEditor: () => true,
+      restoreSubmissionDraft: () => {},
+      consumeDraftAttachments: () => {},
+      draftHasAttachments: () => options.lateRefusal !== undefined,
+      pinDraftAttachments: () => () => {},
+      settleLocalSubmission: () => {},
+      settleSubmitAck: () => { acked() },
+      notifySubmissionFailure: () => {},
+      isScopeCurrent: () => true,
+      refuseByTransitionFence: () => {},
+      lateAttachmentRefusal: () => options.lateRefusal,
+      commandSubmitAttachments: () => [],
+      commandPlaneOwnsLine: () => options.commandPlaneLine,
+      isTuiOwnedCommand: () => options.tuiOwnedCommand,
+      beginNavigationIntent: (name: string | undefined) => {
+        events.push(`begin:${String(name)}`)
+        return () => { events.push(`finish:${String(name)}`) }
+      },
+      submittedHostClaim: () => undefined,
+      commandSignal: () => new AbortController().signal,
+      invokeCommandPlane: async () => {
+        events.push('invoke')
+        return {
+          kind: 'committed' as const,
+          matched: true,
+          execution: { commandId: 'cmd-navigation-intent', result: { kind: 'success' } },
+        }
+      },
+      beginCommandSettlement: () => {},
+      abortCommandSettlement: () => {},
+      settleCommandSettlement: () => {},
+      trackSettlementWork: () => {},
+      captureCommandHealthRef: () => undefined,
+      clearCommandHealthError: () => {},
+      recordCommandHealthError: () => {},
+      readCommandDraftDisposition: () => undefined,
+      shouldConsumeAdvertisedMiss: () => false,
+      isIndeterminateSkillWrite: () => false,
+      startArtifactSave: () => {},
+      submitPrompt: async () => {},
+      commandSessionId: () => 's1',
+      markTurnTransferred: () => {},
+      diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
+    }
+    executeHostCommandSubmission(deps as unknown as HostCommandSubmissionDeps, {
+      text: '/new',
+      toggled: '/new',
+      scope: { sessionId: 's1' } as never,
+      submitRequestId: 'req-navigation-intent',
+      submitAckToken: 1,
+      generation: 0,
+      localEchoInstalled: false,
+      wasAdvertisedAtSubmit: false,
+      parsedName: 'new',
+      submitTurn: { wait: Promise.resolve(), release: () => {} },
+    })
+    await ack
+    await new Promise(resolve => setImmediate(resolve))
+    return events
+  }
+
+  assert.deepEqual(
+    await run({ lateRefusal: 'commands do not accept attachments', commandPlaneLine: true, tuiOwnedCommand: true }),
+    [],
+    'the late attachment refusal must return without registering an intent or invoking the plane',
+  )
+  assert.deepEqual(
+    await run({ commandPlaneLine: true, tuiOwnedCommand: false }),
+    ['invoke'],
+    'a genuine Host-owned /new must execute without a TUI navigation intent',
+  )
+  assert.deepEqual(
+    await run({ commandPlaneLine: true, tuiOwnedCommand: true }),
+    ['begin:new', 'invoke', 'finish:new'],
+    'the TUI-owned /new route registers one intent and finishes it at the terminal sink',
+  )
 })

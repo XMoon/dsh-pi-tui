@@ -1128,6 +1128,11 @@ export interface HostCommandSubmissionDeps {
   readonly commandSubmitAttachments: (text: string) => readonly unknown[]
   readonly isTuiOwnedCommand: () => boolean
   readonly commandPlaneOwnsLine: () => boolean
+  /** Begin the TUI navigation-intent section for ONE TUI-owned navigation
+   *  command execution, AFTER the early refusal windows and against the final
+   *  route facts. Returns the finish callback (settle owned recalls + release)
+   *  or undefined when the name is not a TUI navigation command. */
+  readonly beginNavigationIntent: (name: string | undefined) => (() => void) | undefined
   readonly submittedHostClaim: () => { readonly claimed: boolean; readonly attachments?: unknown } | undefined
   readonly commandSignal: () => AbortSignal
   /** The command-plane invocation (the runner wraps it in `withCommandDelivery`). */
@@ -1170,12 +1175,6 @@ export interface HostCommandSubmissionInput {
   /** PR3-B §7.3 (F2): the ownership subject pinned at the gesture's admission
    *  (the fallback prompt's stale-restore discriminator). */
   readonly staleSubject?: unknown
-  /** Terminal settlement of an accepted SESSION-NAVIGATION command: settles a
-   *  deferred queue recall it owns and releases the navigation intent. Called
-   *  exactly once by the single terminal sink (result, error or cancel),
-   *  AFTER the command settlement work (the deferred source retirement
-   *  included) has completed. */
-  readonly finishNavigationIntent?: () => void
 }
 
 /**
@@ -1212,6 +1211,9 @@ export function executeHostCommandSubmission(
   // the settlement sinks below.
   let commandHealthRef: unknown
   let planeAdvertised = false
+  // Finished by the ONE terminal sink (result, error or cancel), after the
+  // command's settlement work (the deferred `/fork` source retirement included).
+  let finishNavigationIntent: (() => void) | undefined
   runOwned('command execution', () => {
     commandHealthRef = deps.captureCommandHealthRef()
     const submittedClaim = deps.submittedHostClaim()
@@ -1221,6 +1223,14 @@ export function executeHostCommandSubmission(
     const commandPlaneLine = deps.commandPlaneOwnsLine()
     planeAdvertised = commandPlaneLine && input.wasAdvertisedAtSubmit
     const tuiOwnedCommand = deps.isTuiOwnedCommand()
+    // The navigation intent starts HERE: after every early refusal window and
+    // against the FINAL route facts, so a genuine Host-owned navigation name
+    // (a Host `/new` winning over the TUI mirror) or a line the plane does not
+    // own never registers a TUI navigation intent. A leaked intent would keep
+    // `gate.pending` true forever.
+    if (commandPlaneLine && tuiOwnedCommand) {
+      finishNavigationIntent = deps.beginNavigationIntent(input.parsedName)
+    }
     // The post-command-settlement window opens HERE.
     deps.beginCommandSettlement()
     let settled: Promise<HostCommandOutcome>
@@ -1247,7 +1257,7 @@ export function executeHostCommandSubmission(
     diag: deps.diag,
     sessionId: () => deps.commandSessionId(),
     onResult: (outcome) => {
-      input.finishNavigationIntent?.()
+      finishNavigationIntent?.()
       // PR5 (plan §3.8): the release/cleanup bookkeeping ALWAYS runs (leak
       // prevention), but a settlement whose ORIGINAL subject was replaced
       // makes no VISIBLE mutation — the Host may finish the old command and
@@ -1386,7 +1396,7 @@ export function executeHostCommandSubmission(
       }
     },
     onError: (error) => {
-      input.finishNavigationIntent?.()
+      finishNavigationIntent?.()
       fallbackPin()
       submitTurn.release()
       // PR5 (plan §3.8): cleanup above ALWAYS runs; a replaced subject's
@@ -1426,7 +1436,7 @@ export function executeHostCommandSubmission(
       deps.notify(message, 'error')
     },
     onCancel: () => {
-      input.finishNavigationIntent?.()
+      finishNavigationIntent?.()
       fallbackPin()
       submitTurn.release()
       // PR5 (plan §3.8): same rule as onError — no visible mutation on a
