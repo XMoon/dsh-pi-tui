@@ -13,8 +13,10 @@
  *   3. parse — every `.mjs` passes `node --check`; every `.d.mts` parses via
  *      the TypeScript compiler when available;
  *   4. install — the tarball installs with the exact declared DSH Host
- *      (`npm install --omit=dev` in a fresh temp project), public `exports`
- *      entries import, and
+ *      (`npm install --omit=dev` in a fresh temp project OUTSIDE this
+ *      checkout and with no ancestor `node_modules`, so neither a positive
+ *      import nor the self-contained check can borrow this workspace's
+ *      dependency tree), public `exports` entries import, and
  *      `@xmoon76/pi-tui` is NOT resolvable from the installed package.
  *
  * Usage: node scripts/tarball-smoke.mjs [path-to-tgz]
@@ -47,7 +49,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { basename, dirname, join, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
 import { parseArgs } from 'node:util'
@@ -245,14 +247,79 @@ function runSourceInstall(tarball, candidate, distribution, probeDir) {
   return { probePackage, required, installed: true }
 }
 
+/** `dir` is `root` itself or lives below it (both must be real paths).
+ *
+ * A child whose NAME starts with two dots (`/repo/..cache`) produces the
+ * relative path `..cache`, which is still INSIDE. Only the parent itself
+ * (`..`) or a real parent traversal (`../...`) is outside. */
+export function isInside(dir, root) {
+  const rel = relative(root, dir)
+  return !isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${sep}`)
+}
+
+/** The nearest directory at or above `dir` that holds a `node_modules`
+ * entry: Node resolves a bare specifier from `dir` by walking up to it. */
+function nearestAncestorNodeModules(dir) {
+  let current = dir
+  while (true) {
+    if (existsSync(join(current, 'node_modules'))) return current
+    const parent = dirname(current)
+    if (parent === current) return undefined
+    current = parent
+  }
+}
+
+/** The root the probe work dir is created under.
+ *
+ * The probe runs `npm install` and then resolves bare specifiers from it, and
+ * Node walks EVERY ancestor `node_modules`. A `TMPDIR` inside this checkout
+ * would therefore let the probe see the workspace links: the self-contained
+ * check would pass through pollution instead of proving the tarball, and a
+ * positive import could borrow a dependency the published package never
+ * declared. Use the first candidate outside the checkout with no ancestor
+ * `node_modules`; when none exists the run is an infrastructure failure,
+ * never a candidate failure. */
+function isolatedTempRoot(checkoutRoot) {
+  const systemTemp = process.platform === 'win32'
+    ? join(process.env.SystemRoot ?? 'C:\\Windows', 'Temp')
+    : '/tmp'
+  const rejected = []
+  for (const candidate of new Set([tmpdir(), systemTemp])) {
+    let real
+    try {
+      real = realpathSync(candidate)
+    } catch (error) {
+      rejected.push(`${candidate} (unavailable: ${error.code ?? error.message})`)
+      continue
+    }
+    if (isInside(real, checkoutRoot)) {
+      rejected.push(`${candidate} (inside the checkout)`)
+      continue
+    }
+    const polluted = nearestAncestorNodeModules(real)
+    if (polluted !== undefined) {
+      rejected.push(`${candidate} (ancestor node_modules: ${polluted})`)
+      continue
+    }
+    return real
+  }
+  throw new Error(`TARBALL_SMOKE_INFRA_FAILURE: no isolated temp root for the probe; tried ${rejected.join(', ')}. A work dir below this checkout's node_modules would make the self-contained check meaningless`)
+}
+
 function main() {
   const cli = parseCli()
   const tarball = resolveTarball(cli.tarball)
   const keep = process.env.TARBALL_SMOKE_KEEP === '1'
   const skipInstall = process.env.TARBALL_SMOKE_SKIP_INSTALL === '1'
-  const workDir = mkdtempSync(join(tmpdir(), 'tarball-smoke-'))
+  const checkoutRoot = realpathSync(PACKAGE_ROOT)
+  const workDir = mkdtempSync(join(isolatedTempRoot(checkoutRoot), 'tarball-smoke-'))
   const probeDir = join(workDir, 'probe')
   try {
+    const realWorkDir = realpathSync(workDir)
+    const polluted = nearestAncestorNodeModules(realWorkDir)
+    if (isInside(realWorkDir, checkoutRoot) || polluted !== undefined) {
+      throw new Error(`TARBALL_SMOKE_INFRA_FAILURE: probe work dir ${realWorkDir} is not isolated from this checkout${polluted === undefined ? '' : ` (ancestor node_modules: ${polluted})`}; the self-contained check could pass through workspace pollution`)
+    }
     check('tarball exists', existsSync(tarball), basename(tarball))
     const extracted = extract(tarball, workDir)
     const pkg = JSON.parse(readFileSync(join(extracted, 'package.json'), 'utf8'))
@@ -523,10 +590,18 @@ function main() {
         check('all exports entries import', importRun.status === 0 && importRun.stdout.includes('imports-ok'),
           importRun.status === 0 ? '' : importRun.stderr.slice(0, 200))
         const forkRun = run(process.execPath, ['--input-type=module', '-e',
-          "import('@xmoon76/pi-tui').then(() => process.exit(0)).catch(() => process.exit(3))",
+          // Resolve only: the module must not be installed at all. Any other
+          // failure (a broken package.json, a resolver error) is NOT the
+          // expected "not found" and must stay a real test failure.
+          "try { console.error('resolved ' + import.meta.resolve('@xmoon76/pi-tui')); process.exit(0) }"
+            + " catch (error) { if (error?.code === 'ERR_MODULE_NOT_FOUND') process.exit(3);"
+            + " console.error(String(error?.code ?? 'unknown') + ': ' + String(error?.message ?? error)); process.exit(1) }",
         ], { cwd: probeDir })
+        const forkDetail = forkRun.status === 3
+          ? ''
+          : `status=${forkRun.status} — ${forkRun.stderr.trim().split('\n')[0]}`
         check('@xmoon76/pi-tui is not resolvable from the installed package (self-contained)',
-          forkRun.status === 3, `status=${forkRun.status}`)
+          forkRun.status === 3, forkDetail)
       }
     }
   } finally {
@@ -542,9 +617,11 @@ function main() {
   console.log('\ntarball smoke passed')
 }
 
-try {
-  await main()
-} catch (error) {
-  console.error(`tarball-smoke: ${error instanceof Error ? error.message : String(error)}`)
-  process.exit(1)
+if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  try {
+    await main()
+  } catch (error) {
+    console.error(`tarball-smoke: ${error instanceof Error ? error.message : String(error)}`)
+    process.exit(1)
+  }
 }
