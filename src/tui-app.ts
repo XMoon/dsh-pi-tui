@@ -747,7 +747,7 @@ function searchSourceLabel(source: TranscriptSearchMatch['source'], message: Tra
  * and the display boundary outranks showing a snippet on every row. */
 const UNSAFE_SOURCE_SNIPPET = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/u
 const UNSAFE_SOURCE_SNIPPET_SHAPE =
-  /[\\/]|www\.|<[A-Za-z][^>]*>|\b[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{2,}\b|\b[A-Za-z][A-Za-z0-9.-]*:\d{1,5}\b|\blocalhost\b|\[[0-9A-Fa-f:]+\]/u
+  /[\\/]|www\.|<[A-Za-z][^>]*>|\b[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{2,}\b|\b[A-Za-z][A-Za-z0-9.-]*:\d{1,5}\b|\blocalhost\b|\[[0-9A-Fa-f:]+\]|\b\d{1,3}(?:\.\d{1,3}){3}\b|::/u
 
 function searchSourceSnippetTextIsSafe(text: string): boolean {
   if (text === '') return false
@@ -769,6 +769,23 @@ function snippetEndAfter(text: string, offset: number, count: number): number {
   const boundaries = [...getGraphemeSegmenter().segment(rest)].map(segment => segment.index)
   if (boundaries.length <= count) return text.length
   return offset + boundaries[count]!
+}
+
+/** The start of the whitespace-delimited token that owns `offset`. The
+ * DISPLAY stays a grapheme window, but the safety guard must see the complete
+ * token: a twelve-grapheme window can split an address/URL/path into a
+ * fragment (`127.0.0.1` -> `.0.0.1`) that no shape rule would recognize. */
+function snippetTokenStart(text: string, offset: number): number {
+  let start = offset
+  while (start > 0 && !/\s/u.test(text[start - 1]!)) start -= 1
+  return start
+}
+
+/** The end (exclusive) of the whitespace-delimited token that owns `offset`. */
+function snippetTokenEnd(text: string, offset: number): number {
+  let end = offset
+  while (end < text.length && !/\s/u.test(text[end]!)) end += 1
+  return end
 }
 
 /** Whether two search targets denote the SAME semantic navigation: the query,
@@ -12455,13 +12472,21 @@ export class TuiApp {
     if (message.text.toLowerCase().slice(range.start, range.end) !== normalizedQuery) return undefined
     const rawRange = rawSourceRangeForNormalizedMatch(message.text, range)
     if (rawRange === undefined) return undefined
-    const rawSnippet = message.text.slice(
-      snippetStartBefore(message.text, rawRange.start, 12),
-      snippetEndAfter(message.text, rawRange.end, 12),
+    const displayStart = snippetStartBefore(message.text, rawRange.start, 12)
+    const displayEnd = snippetEndAfter(message.text, rawRange.end, 12)
+    // The guard is the displayed window EXPANDED to whole whitespace-delimited
+    // tokens: a twelve-grapheme window can split an address/URL/path into a
+    // fragment the classifier would miss, so the classifier must see the whole
+    // token that overlaps the displayed context.
+    const guard = message.text.slice(
+      snippetTokenStart(message.text, displayStart),
+      snippetTokenEnd(message.text, displayEnd),
     )
-    // BOTH the raw and the projected context must be safe: the raw one proves
-    // there is no escape/control span hiding in what would be displayed, the
-    // projected one proves the single display row itself has no URL/path shape.
+    if (!searchSourceSnippetTextIsSafe(guard)) return undefined
+    const rawSnippet = message.text.slice(displayStart, displayEnd)
+    // BOTH the raw display window and the projected single row must be safe:
+    // the raw one proves there is no escape/control span hiding in what would
+    // be displayed, the projected one proves the display row itself.
     if (!searchSourceSnippetTextIsSafe(rawSnippet)) return undefined
     const line = sanitizedPhysicalLine(rawSnippet)
     if (!searchSourceSnippetTextIsSafe(line)) return undefined

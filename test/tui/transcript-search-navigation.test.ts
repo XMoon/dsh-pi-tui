@@ -630,6 +630,68 @@ test('navigation: a session replacement retires the notice and its pending occlu
   app.stop()
 })
 
+test('navigation: an IP-literal context never reaches the painted Source-only row at a wide terminal', async () => {
+  // The displayed context is a 12-grapheme window, which can SPLIT an address
+  // (`127.0.0.1` -> `.0.0.1`), so the safety classifier must see the complete
+  // whitespace-delimited token. 200 columns keep the snippet inside the real
+  // painted notice row (a 100-column box would drop it by width and hide the
+  // leak).
+  const cases = [
+    { line: 'connect 127.0.0.1 then needle service', safe: false },
+    { line: 'connect 10.0.0.1 then needle service', safe: false },
+    { line: 'connect 127.0.0.1:8000 then needle service', safe: false },
+    { line: 'connect 192.168.1.1 then needle service', safe: false },
+    { line: 'connect 8.8.8.8 then needle service', safe: false },
+    { line: 'connect ::1 then needle service', safe: false },
+    { line: 'connect fe80::1 then needle service', safe: false },
+    { line: 'needle compacted middle', safe: true },
+  ] as const
+  for (const { line, safe } of cases) {
+    const text = [
+      ...Array.from({ length: 12 }, (_, index) => `before ${index}`),
+      line,
+      ...Array.from({ length: 8 }, (_, index) => `after ${index}`),
+    ].join('\n')
+    const { folder, message } = userMessageFolder(text)
+    const match = folder.search('needle')[0]
+    assert.ok(match !== undefined, 'fixture: the User occurrence exists')
+    const { vt, app } = startApp(200, 30)
+    try {
+      app.setFullscreen(true)
+      app.setTranscript([message], folder.turnActivities())
+      await viewport(vt)
+      app.startTranscriptSearch('full')
+      await viewport(vt)
+      app.setTranscriptSearchPresentation({
+        matchMessages: new Set([message]),
+        target: { query: 'needle', match, message },
+        grantReveal: false,
+      })
+      const lines = await viewport(vt)
+      const notice = app.currentFullSearchNotice()
+      assert.equal(notice?.kind, 'unproven', 'the collapsed User hit is honestly non-exact')
+      const noticeRow = lines.map(candidate => stripTerminalSequences(candidate))
+        .find(candidate => candidate.includes('Source-only'))
+      assert.ok(noticeRow !== undefined, `the Source-only row is painted:\n${lines.join('\n')}`)
+      if (safe) {
+        assert.ok((notice?.snippet ?? '').includes('needle compacted'),
+          `a safe context still reaches the notice (${JSON.stringify(notice)})`)
+        assert.ok(noticeRow.includes('needle compacted'),
+          `the safe snippet is really painted in the four-row box:\n${noticeRow}`)
+      } else {
+        assert.equal(notice?.snippet, undefined,
+          `no IP/path/URL context may become a snippet (${line})`)
+        assert.ok(!noticeRow.includes('User text · '),
+          `the painted notice row carries no snippet after the source label:\n${noticeRow}`)
+        assert.ok(!/\d+\.\d+|::|[\\/]/u.test(noticeRow),
+          `no IP/URL/path fragment is painted in the notice row:\n${noticeRow}`)
+      }
+    } finally {
+      app.dispose()
+    }
+  }
+})
+
 test('navigation: a collapsed Host Thinking target is label-only until its body is revealed', async () => {
   const text = [
     ...Array.from({ length: 12 }, (_, index) => `before ${index}`),
