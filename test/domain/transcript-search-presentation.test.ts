@@ -746,6 +746,54 @@ test('proof: any probe/render divergence fails closed', () => {
     'an empty expectation is never a proof')
 })
 
+test('proof: a weak occurrence never widens the proven strong range', () => {
+  // The semantic corpus lowercases (U+017F stays U+017F), so `ss` is a hit at
+  // source [1,3); the rendered matcher is Unicode ignore-case (U+017F folds to
+  // `s`), so it reports the OVERLAPPING `ſs` at [0,2). The strong block must stay
+  // exactly the proven cells, and the weak occurrence may only keep the cells
+  // the proof did not claim.
+  const lines = ['ſss']
+  const matches = findAltScreenSearchMatches(lines, 'ss')
+  assert.deepEqual(matches.map(match => match.segments), [[{ row: 0, startCol: 0, endCol: 2 }]],
+    'fixture: the rendered matcher sees the overlapping long-s occurrence')
+  const decorated = highlightSearchLines(lines, {
+    matches,
+    selectedIndex: -1,
+    selectedRow: 0,
+    exact: true,
+    exactPaintedSegments: [{ row: 0, startCol: 1, endCol: 3 }],
+  })
+  assert.equal(stripTerminalSequences(decorated[0]!), 'ſss', 'the painted text is unchanged')
+  assert.equal(visibleWidth(decorated[0]!), 3, 'the painted width is unchanged')
+  assert.ok(decorated[0]!.includes(strong('ss')), 'only the two proven cells are strong')
+  assert.ok(!decorated[0]!.includes(strong('ſ')), 'the overlapping weak cell is never upgraded')
+  assert.ok(decorated[0]!.includes('\x1b[4mſ\x1b[24m'), 'the weak occurrence keeps its uncovered cell')
+
+  // A weak occurrence fully covered by the proof disappears instead of
+  // duplicating the strong style.
+  const covered = highlightSearchLines(lines, {
+    matches,
+    selectedIndex: -1,
+    selectedRow: 0,
+    exact: true,
+    exactPaintedSegments: [{ row: 0, startCol: 0, endCol: 2 }],
+  })
+  assert.ok(covered[0]!.includes(strong('ſs')), 'the proven cells stay strong')
+  assert.ok(!covered[0]!.includes('\x1b[4m'), 'a fully covered weak range paints nothing')
+
+  // The same rule on the other side: the proof starts first and the weak range
+  // only keeps its tail.
+  const tail = highlightSearchLines(['xssy'], {
+    matches: findAltScreenSearchMatches(['xssy'], 'ss'),
+    selectedIndex: -1,
+    selectedRow: 0,
+    exact: true,
+    exactPaintedSegments: [{ row: 0, startCol: 1, endCol: 2 }],
+  })
+  assert.ok(tail[0]!.includes(strong('s')), 'the proven cell is strong')
+  assert.ok(tail[0]!.includes('\x1b[4ms\x1b[24m'), 'the unproven weak cell stays weak')
+})
+
 test('proof: exactPaintedSegments paints only the proven cell and never anchor-washes', () => {
   const lines = ['alpha needle beta needle']
   const matches = findAltScreenSearchMatches(lines, 'needle')

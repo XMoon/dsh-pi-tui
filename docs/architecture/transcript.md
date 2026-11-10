@@ -974,8 +974,11 @@ wrappers — stay on the source anchor; a hidden href, markup-only delimiter,
 pending math, rewritten glyph or non-additive projection keeps its semantic
 result without borrowing a visible homonym. Only the current hit is proved: a
 static frame, a scroll-only frame and every other card never trigger a proof.
-Full N/M identity, View's mounted-occurrence authority, reveal ownership and
-viewport ownership are unchanged.
+A proven range is exact in the painter as well: an overlapping weak rendered
+occurrence keeps only the cells the proof did not claim, so a case-folding
+difference between the semantic corpus and the rendered matcher can never widen
+the strong block. Full N/M identity, View's mounted-occurrence authority,
+reveal ownership and viewport ownership are unchanged.
 
 ## Hardening guarantees
 

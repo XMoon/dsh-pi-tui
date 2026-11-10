@@ -2478,3 +2478,76 @@ test('navigation: a lowercasing expansion interior stays anchor-only; a stripped
   assert.equal(strongText(lines, vt), 'needle', 'a range after a stripped control sequence still names real cells')
   app.stop()
 })
+
+test('navigation: a case-folding rendered overlap never widens the proven cells', async () => {
+  // `ſ` (U+017F long s) lowercases to itself, so `TranscriptFolder.search('ss')`
+  // reports the two real `s` cells at source [1,3). The rendered matcher is
+  // Unicode ignore-case (U+017F folds to `s`), so it reports the OVERLAPPING
+  // `ſs` at [0,2). The shared painter must keep the strong block equal to the
+  // proven cells and leave the long-s cell weak — for every source-proven
+  // owner, not just Assistant.
+  const previousCapabilities = getCapabilities()
+  setCapabilities({ images: null, trueColor: true, hyperlinks: true })
+  try {
+    const assistant = assistantSearchFolder('ſss', 'f2-long-s-assistant')
+    const user = userMessageFolder('ſss')
+    const thinking = thinkingMessageFolder('ſss')
+    const cases: Array<{
+      label: string
+      folder: TranscriptFolder
+      message: TranscriptMessage
+      expand?: true
+    }> = [
+      { label: 'assistant', folder: assistant.folder, message: assistant.message },
+      { label: 'user', folder: user.folder, message: user.message },
+      { label: 'thinking', folder: thinking.folder, message: thinking.message, expand: true },
+    ]
+
+    const { vt, app } = startApp(80, 20)
+    app.setFullscreen(true)
+    app.setIconStyle('symbols')
+    for (const testCase of cases) {
+      app.setTranscriptSearchTarget(undefined)
+      app.setTranscript(testCase.folder.messages(), testCase.folder.turnActivities())
+      if (testCase.expand === true) {
+        const overrides = (app as unknown as { expandedOverride: Map<object, boolean> }).expandedOverride
+        overrides.set(testCase.message, true)
+        app.setTranscript(testCase.folder.messages(), testCase.folder.turnActivities())
+      }
+      await viewport(vt)
+      const matches = testCase.folder.search('ss')
+      assert.equal(matches.length, 1, `${testCase.label}: exactly one semantic hit`)
+      assert.deepEqual(matches[0]!.normalizedSourceRange, { start: 1, end: 3 },
+        `${testCase.label}: the lowercase corpus hit is the two real s cells, not the long s`)
+      app.setTranscriptSearchPresentation({
+        matchMessages: new Set([testCase.message]),
+        target: { query: 'ss', match: matches[0]!, message: testCase.message },
+        grantReveal: true,
+      })
+      app.scrollToSearchTarget()
+      const lines = await viewport(vt)
+      const row = lines.findIndex(line => stripTerminalSequences(line).includes('ſss'))
+      assert.ok(row >= 0, `${testCase.label}: the long-s row is painted:\n${lines.join('\n')}`)
+      assert.deepEqual(strongRows(lines, vt).map(entry => entry.text), ['ss'],
+        `${testCase.label}: the strong block is exactly the proven cells`)
+      const selection = mountedSelectionFor(app, testCase.message)
+      assert.equal(selection?.exact, true, `${testCase.label}: the source cells are proven`)
+      assert.equal(selection?.exactPaintedSegments?.length, 1)
+      let longSColumn = -1
+      for (let column = 0; column < vt.columns; column += 1) {
+        if (vt.getCellText(row, column) === 'ſ') {
+          longSColumn = column
+          break
+        }
+      }
+      assert.ok(longSColumn >= 0, `${testCase.label}: the long-s cell is painted`)
+      assert.notEqual(vt.getCellBgRgb(row, longSColumn), strongBg(),
+        `${testCase.label}: the overlapping long-s cell is never upgraded to strong`)
+      assert.equal(vt.getCellUnderline(row, longSColumn), true,
+        `${testCase.label}: the weak occurrence keeps only the uncovered cell`)
+    }
+    app.stop()
+  } finally {
+    setCapabilities(previousCapabilities)
+  }
+})
