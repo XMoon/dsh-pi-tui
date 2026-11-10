@@ -675,6 +675,11 @@ test('navigation: a collapsed User target is honest Source-only with only a safe
   const cases = [
     { line: 'needle compacted middle', safe: true },
     { line: '\x1b]52;c;Zm9v\x07\x1b[31mneedle\x1b[0m control middle', safe: false },
+    // Path/URL shaped context must never be copied into the Source-only row:
+    // Windows drive + backslashes, a plain relative path, and a bare host.
+    { line: 'C:\\reports\\needle.txt hidden path', safe: false },
+    { line: 'see reports/needle.txt for details', safe: false },
+    { line: 'visit example.com then needle', safe: false },
   ] as const
   for (const { line, safe } of cases) {
     const text = [
@@ -730,10 +735,12 @@ test('navigation: a collapsed User target is honest Source-only with only a safe
         'control/escape context is never shown, not even sanitized')
     }
     const frame = lines.map(candidate => stripTerminalSequences(candidate))
-    assert.ok(frame.some(candidate => candidate.includes('Source-only') && candidate.includes('unverified')),
+    const noticeRow = frame.find(candidate => candidate.includes('Source-only'))
+    assert.ok(noticeRow !== undefined && noticeRow.includes('unverified'),
       `the overlay paints the honest Source-only row:\n${frame.join('\n')}`)
     assert.ok(!frame.some(candidate => candidate.includes(']52;') || candidate.includes('[31m')),
       'no raw control sequence reaches the painted notice')
+    assert.ok(!/[\\/]|example\.com/u.test(noticeRow), 'no path or URL fragment reaches the painted notice')
     app.dispose()
   }
 })
