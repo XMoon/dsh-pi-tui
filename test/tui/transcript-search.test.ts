@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
-import { stripTerminalSequences } from '@xmoon76/pi-tui'
+import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import test from 'node:test'
-import { TranscriptSearchComponent } from '../../src/tui/interaction/transcript-search.ts'
+import { TranscriptSearchComponent, formatCompactSourceNotice } from '../../src/tui/interaction/transcript-search.ts'
 import type { FullSearchSourceNotice, TranscriptSearchScope } from '../../src/tui/interaction/transcript-search.ts'
 import type { TuiMouseEvent } from '@xmoon76/pi-tui'
 
@@ -190,4 +190,72 @@ test('transcript search: title and hint rows outside a scope target stay inert',
   search.render(60)
   assert.equal(search.handleMouse(mouse('press', 2, 0)), undefined, 'the label is not a scope control')
   assert.equal(search.handleMouse(mouse('press', 2, 2)), undefined, 'the hint row is inert')
+})
+
+test('transcript search: the compact Source-only row keeps whole required segments at the real box width', () => {
+  // The plan's documented 24-column floor example: loaded history + Esc.
+  assert.equal(formatCompactSourceNotice({
+    kind: 'unproven',
+    coverage: 'loaded-history',
+    closeKey: 'Esc',
+    width: 24,
+  }), 'Source-only Loaded Esc')
+  // "Older not searched" collapses to the real "Loaded" truth before the
+  // close key is ever touched.
+  assert.equal(formatCompactSourceNotice({
+    kind: 'unproven',
+    coverage: 'loaded-history-with-more',
+    closeKey: 'Esc',
+    width: 24,
+  }), 'Source-only Loaded Esc')
+  // A wider compact box keeps the status word and the separators.
+  assert.equal(formatCompactSourceNotice({
+    kind: 'not-painted',
+    coverage: 'loaded-history',
+    closeKey: 'Esc',
+    width: 40,
+  }), 'Source-only · No cell · Loaded · Esc')
+  // A long effective close binding: the layout budgets the REAL key width and
+  // drops the coverage instead of truncating `Source-only` or the key.
+  const longKey = formatCompactSourceNotice({
+    kind: 'unproven',
+    coverage: 'loaded-history',
+    closeKey: 'Ctrl+Shift+E',
+    width: 24,
+  })
+  assert.equal(longKey, 'Source-only Ctrl+Shift+E')
+  assert.equal(visibleWidth(longKey), 24)
+  // At 32 columns the same key still fits beside the loaded-history truth.
+  assert.equal(formatCompactSourceNotice({
+    kind: 'unproven',
+    coverage: 'loaded-history',
+    closeKey: 'Ctrl+Shift+E',
+    width: 32,
+  }), 'Source-only Loaded Ctrl+Shift+E')
+  // `Entire` is the only permitted omission for the entire-session scope.
+  assert.equal(formatCompactSourceNotice({
+    kind: 'unproven',
+    coverage: 'entire-session',
+    closeKey: 'Esc',
+    width: 22,
+  }), 'Source-only Entire Esc')
+  assert.equal(formatCompactSourceNotice({
+    kind: 'unproven',
+    coverage: 'entire-session',
+    closeKey: 'Esc',
+    width: 18,
+  }), 'Source-only Esc')
+  // A key that cannot share the box with even the required facts is returned
+  // WHOLE: the component never emits a partial close key or `Source-only`.
+  const impossible = formatCompactSourceNotice({
+    kind: 'unproven',
+    coverage: 'loaded-history',
+    closeKey: 'Ctrl+Shift+Alt+Escape',
+    width: 24,
+  })
+  assert.equal(impossible, 'Source-only Ctrl+Shift+Alt+Escape')
+  for (const row of [longKey, impossible]) {
+    assert.ok(row.startsWith('Source-only'), 'the Source-only fact is never dropped')
+    assert.ok(!row.includes('…'), 'required segments are never partially truncated')
+  }
 })

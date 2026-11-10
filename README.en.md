@@ -563,8 +563,9 @@ count; hidden links, folded rows and off-window history are not View hits), and
 independent `N/M`). A Full hit may live in a hidden link destination, a consumed
 Visual marker or a position the current renderer cannot prove: the fourth row then
 says `Source-only · no visible cell` or `Source-only · position unverified`, and a
-safe snippet is only attached for Host-owned single-text User/Thinking source. A
-target hidden behind the top-right Find box is moved out from under it; an
+safe snippet is only attached for a Host-owned single-text User message or an
+**expanded** Thinking body. A target hidden behind the top-right Find box is
+moved out from under it; an
 already-visible hit is never needlessly re-centred. Opening Find from Regular mode
 borrows the fullscreen Transcript for the search and returns afterwards.
 

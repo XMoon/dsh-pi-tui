@@ -16,8 +16,8 @@ export interface FullSearchSourceNotice {
   readonly kind: 'not-painted' | 'unproven'
   /** The semantic source kind of the target, never a user string. */
   readonly sourceLabel: string
-  /** Optional display-safe context around the source hit. Only a Host-owned,
-   * single-text, non-URL User/Thinking source may provide one. */
+  /** Optional display-safe context around the source hit. Only a Host-owned
+   * single-text User message or an EXPANDED Host Thinking body may provide one. */
   readonly snippet?: string
 }
 
@@ -45,6 +45,41 @@ interface ScopeHit {
 
 interface PressedScope extends ScopeHit {
   readonly epoch: number
+}
+
+/** The ONE compact Source-only row for a terminal that keeps three rows:
+ * `Source-only · <status> · <coverage> · <close key>`, shrinking by WHOLE
+ * segments only. The `Source-only` fact and the effective close key are never
+ * partially truncated; the real coverage truth is kept while any layout can
+ * hold it, and `Entire` is the one segment a narrow box may omit. When a long
+ * close binding makes the full trio physically impossible, the coverage yields
+ * so the close key (the action a cramped terminal needs) stays whole. */
+export function formatCompactSourceNotice(input: {
+  readonly kind: 'not-painted' | 'unproven'
+  readonly coverage: TranscriptSearchCoverage
+  readonly closeKey: string
+  readonly width: number
+}): string {
+  const status = input.kind === 'not-painted' ? 'No cell' : 'Unverified'
+  const coverageText = input.coverage === 'entire-session'
+    ? 'Entire'
+    : input.coverage === 'loaded-history' ? 'Loaded' : 'Older not searched'
+  const assemble = (statusText: string | undefined, separator: string, coverageValue: string | undefined): string =>
+    ['Source-only', statusText, coverageValue, input.closeKey]
+      .filter(part => part !== undefined && part !== '')
+      .join(separator)
+  const candidates = [
+    assemble(status, ' · ', coverageText),
+    assemble(undefined, ' · ', coverageText),
+    assemble(undefined, ' ', coverageText),
+    assemble(undefined, ' ', input.coverage === 'entire-session' ? undefined : 'Loaded'),
+    assemble(undefined, ' ', undefined),
+  ]
+  const safeWidth = Math.max(1, input.width)
+  for (const candidate of candidates) {
+    if (visibleWidth(candidate) <= safeWidth) return candidate
+  }
+  return candidates[candidates.length - 1]!
 }
 
 const compactKeyHint = (action: SearchHintAction): string => {
@@ -240,29 +275,15 @@ export class TranscriptSearchComponent implements Component, Focusable {
     return truncateToWidth(text, Math.max(1, width), '')
   }
 
-  /** Full inexact target, short terminal: `Source-only · <status> · <coverage>
-   * · <effective close key>`, degrading to whole-segment drops only. The
-   * Source-only fact, the real loaded-history truth and the close key are
-   * never dropped. */
+  /** Full inexact target, short terminal: the shared compact layout with the
+   * real effective close key and coverage. */
   private renderCompactSourceNotice(width: number, notice: FullSearchSourceNotice): string {
-    const status = notice.kind === 'not-painted' ? 'No cell' : 'Unverified'
-    const coverage = this.readCoverage()
-    const closeKey = formatKeyId(componentKeymap.keysFor('app.transcript.search.close')[0]!)
-    const coverageText = coverage === 'entire-session'
-      ? 'Entire'
-      : coverage === 'loaded-history' ? 'Loaded' : 'Older not searched'
-    const assemble = (statusText: string | undefined, separator: string, coverageValue: string | undefined): string =>
-      ['Source-only', statusText, coverageValue, closeKey]
-        .filter(part => part !== undefined && part !== '')
-        .join(separator)
-    const safeWidth = Math.max(1, width)
-    let text = assemble(status, ' · ', coverageText)
-    if (visibleWidth(text) > safeWidth) text = assemble(undefined, ' · ', coverageText)
-    if (visibleWidth(text) > safeWidth) text = assemble(undefined, ' ', coverageText)
-    if (visibleWidth(text) > safeWidth) {
-      text = assemble(undefined, ' ', coverage === 'entire-session' ? undefined : 'Loaded')
-    }
-    return truncateToWidth(text, safeWidth, '')
+    return formatCompactSourceNotice({
+      kind: notice.kind,
+      coverage: this.readCoverage(),
+      closeKey: formatKeyId(componentKeymap.keysFor('app.transcript.search.close')[0]!),
+      width,
+    })
   }
 
   private matchStatus(): string {

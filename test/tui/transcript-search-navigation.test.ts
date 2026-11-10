@@ -582,6 +582,95 @@ test('navigation: a proven target under the Search box moves below it, while a l
   }
 })
 
+test('navigation: a session replacement retires the notice and its pending occlusion correction', async () => {
+  const { vt, app } = startApp(100, 30)
+  app.setFullscreen(true)
+  const tool: TranscriptMessage = {
+    kind: 'tool',
+    turn: 0,
+    name: 'bash',
+    args: '{}',
+    result: 'needle tool output',
+    status: 'ok',
+  }
+  app.setTranscript([tool])
+  await viewport(vt)
+  app.startTranscriptSearch('full')
+  await viewport(vt)
+  const scroll = scrollViewInternals(app)
+  const before = scroll.scrollTop
+  app.setTranscriptSearchPresentation({
+    matchMessages: new Set([tool]),
+    target: {
+      query: 'needle',
+      match: {
+        id: -1,
+        turn: 0,
+        occurrence: 0,
+        source: { kind: 'tool-field', field: 'result' },
+        sourceOccurrence: 0,
+        normalizedSourceRange: { start: 0, end: 6 },
+      },
+      message: tool,
+    },
+    grantReveal: true,
+  })
+  app.scrollToSearchTarget()
+  assert.equal(app.currentFullSearchNotice()?.kind, 'unproven', 'precondition: the notice is current')
+  // A session/subject hydration seam replaces the transcript BEFORE the next
+  // painted frame; the registered correction must never move the new screen.
+  app.clearSessionOverrides()
+  await viewport(vt)
+  await viewport(vt)
+  assert.equal(app.currentFullSearchNotice(), undefined,
+    'a session replacement retires the old Source-only notice')
+  assert.equal(app.searchPresentationDiagnosticsForTest().occlusionCorrections, 0,
+    'the retired screen never applies the previous session\'s correction')
+  assert.equal(scroll.scrollTop, before, 'the new session keeps its own viewport')
+  app.stop()
+})
+
+test('navigation: a collapsed Host Thinking target is label-only until its body is revealed', async () => {
+  const text = [
+    ...Array.from({ length: 12 }, (_, index) => `before ${index}`),
+    'needle in the hidden reasoning body',
+    ...Array.from({ length: 8 }, (_, index) => `after ${index}`),
+  ].join('\n')
+  const { folder, message } = thinkingMessageFolder(text)
+  const match = folder.search('needle')[0]
+  assert.ok(match !== undefined, 'fixture: the Thinking occurrence exists')
+  const { vt, app } = startApp(100, 30)
+  app.setFullscreen(true)
+  app.setTranscript([message], folder.turnActivities())
+  await viewport(vt)
+  app.startTranscriptSearch('full')
+  await viewport(vt)
+
+  // Passive rebind: the temporary reveal is NOT granted, so the compact card
+  // paints only its preview. The raw reasoning body is hidden transcript text
+  // and may never become a Source-only snippet.
+  app.setTranscriptSearchPresentation({
+    matchMessages: new Set([message]),
+    target: { query: 'needle', match, message },
+    grantReveal: false,
+  })
+  await viewport(vt)
+  assert.equal(mountedSelectionFor(app, message)?.exact, false, 'a collapsed Thinking body has no cell proof')
+  assert.equal(mountedSelectionFor(app, message)?.sourceDisposition, 'unproven')
+  assert.deepEqual(app.currentFullSearchNotice(), { kind: 'unproven', sourceLabel: 'Thinking text' },
+    'a collapsed Host Thinking notice is label-only: no hidden-body snippet')
+
+  // Explicit navigation reveals (expands) the Host Thinking body, which then
+  // proves its own painted cells instead of falling back to Source-only.
+  app.setTranscriptSearchTarget({ query: 'needle', match, message })
+  await viewport(vt)
+  const revealed = mountedSelectionFor(app, message)
+  assert.equal(revealed?.exact, true, 'the expanded Host Thinking body proves the current cell')
+  assert.equal(revealed?.sourceDisposition, undefined)
+  assert.equal(app.currentFullSearchNotice(), undefined, 'an exact Thinking target shows no notice')
+  app.stop()
+})
+
 test('navigation: a collapsed User target is honest Source-only with only a safe sanitized context', async () => {
   const cases = [
     { line: 'needle compacted middle', safe: true },
