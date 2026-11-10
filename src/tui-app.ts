@@ -793,20 +793,41 @@ function snippetEndAfter(text: string, offset: number, count: number): number {
   }
 }
 
-/** The start of the whitespace-delimited token that owns `offset`. The
+/** The safety guard's token expansion is bounded: a longer unbroken token is
+ * not a readable destination fragment, so the snippet is omitted instead of
+ * slicing/regex-testing a message-length token. */
+const SNIPPET_GUARD_TOKEN_MAX = 512
+
+/** A snippet is a display nicety, never a reason to walk a huge source: above
+ * this source length the notice stays label-only. */
+const SNIPPET_MAX_SOURCE_LENGTH = 200_000
+
+/** The start of the whitespace-delimited token that owns `offset`, or
+ * `undefined` when the token exceeds {@link SNIPPET_GUARD_TOKEN_MAX}. The
  * DISPLAY stays a grapheme window, but the safety guard must see the complete
  * token: a twelve-grapheme window can split an address/URL/path into a
  * fragment (`127.0.0.1` -> `.0.0.1`) that no shape rule would recognize. */
-function snippetTokenStart(text: string, offset: number): number {
+function snippetTokenStart(text: string, offset: number): number | undefined {
   let start = offset
-  while (start > 0 && !/\s/u.test(text[start - 1]!)) start -= 1
+  let walked = 0
+  while (start > 0 && !/\s/u.test(text[start - 1]!)) {
+    start -= 1
+    walked += 1
+    if (walked > SNIPPET_GUARD_TOKEN_MAX) return undefined
+  }
   return start
 }
 
-/** The end (exclusive) of the whitespace-delimited token that owns `offset`. */
-function snippetTokenEnd(text: string, offset: number): number {
+/** The end (exclusive) of the whitespace-delimited token that owns `offset`,
+ * or `undefined` when it exceeds {@link SNIPPET_GUARD_TOKEN_MAX}. */
+function snippetTokenEnd(text: string, offset: number): number | undefined {
   let end = offset
-  while (end < text.length && !/\s/u.test(text[end]!)) end += 1
+  let walked = 0
+  while (end < text.length && !/\s/u.test(text[end]!)) {
+    end += 1
+    walked += 1
+    if (walked > SNIPPET_GUARD_TOKEN_MAX) return undefined
+  }
   return end
 }
 
@@ -12489,6 +12510,7 @@ export class TuiApp {
   ): string | undefined {
     const range = target.match.normalizedSourceRange
     if (range === undefined) return undefined
+    if (message.text.length > SNIPPET_MAX_SOURCE_LENGTH) return undefined
     const normalizedQuery = target.query.trim().toLowerCase()
     if (normalizedQuery === '') return undefined
     if (message.text.toLowerCase().slice(range.start, range.end) !== normalizedQuery) return undefined
@@ -12500,11 +12522,10 @@ export class TuiApp {
     // tokens: a twelve-grapheme window can split an address/URL/path into a
     // fragment the classifier would miss, so the classifier must see the whole
     // token that overlaps the displayed context.
-    const guard = message.text.slice(
-      snippetTokenStart(message.text, displayStart),
-      snippetTokenEnd(message.text, displayEnd),
-    )
-    if (!searchSourceSnippetTextIsSafe(guard)) return undefined
+    const guardStart = snippetTokenStart(message.text, displayStart)
+    const guardEnd = snippetTokenEnd(message.text, displayEnd)
+    if (guardStart === undefined || guardEnd === undefined) return undefined
+    if (!searchSourceSnippetTextIsSafe(message.text.slice(guardStart, guardEnd))) return undefined
     const rawSnippet = message.text.slice(displayStart, displayEnd)
     // BOTH the raw display window and the projected single row must be safe:
     // the raw one proves there is no escape/control span hiding in what would

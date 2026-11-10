@@ -658,16 +658,59 @@ function countGraphemeSegments(run: () => void): number {
   }
 }
 
-test('navigation: a Source-only snippet on a very long message reads only its own context', async () => {
-  // A message far beyond any render budget: the 12-grapheme context must come
-  // from a bounded window, never from expanding the whole prefix/suffix.
-  const prefix = `${'a'.repeat(1_000_000)}汉e\u0301👨‍👩‍👧‍👦`
-  const text = `${prefix} needle 组合字符👩‍💻 suffix ${'b'.repeat(100_000)}`
+test('navigation: a Source-only snippet never scans a message-length source or token', async () => {
+  // A snippet is a display nicety: a huge source is label-only, and a
+  // pathological unbroken token is omitted instead of sliced/regex-tested.
+  const cases = [
+    // 1e6-char source with 1e5-char suffix: the source-length cap applies
+    // before any normalized->raw mapping or token expansion.
+    { label: 'huge source', text: `${'a'.repeat(1_000_000)} needle 组合 ${'b'.repeat(100_000)}` },
+    // 1e5-char source inside the source cap whose token before the hit is
+    // still 1e5 chars: the guard-token cap applies.
+    { label: 'huge token', text: `${'a'.repeat(100_000)} needle tail` },
+  ] as const
+  for (const { label, text } of cases) {
+    const { folder, message } = userMessageFolder(text)
+    const match = folder.search('needle')[0]
+    assert.ok(match !== undefined, 'fixture: the occurrence exists')
+    const { vt, app } = startApp(240, 30)
+    try {
+      app.setFullscreen(true)
+      app.setTranscript([message], folder.turnActivities())
+      await viewport(vt)
+      app.startTranscriptSearch('full')
+      await viewport(vt)
+      const segments = countGraphemeSegments(() => {
+        app.setTranscriptSearchPresentation({
+          matchMessages: new Set([message]),
+          target: { query: 'needle', match, message },
+          grantReveal: false,
+        })
+      })
+      const lines = await viewport(vt)
+      const notice = app.currentFullSearchNotice()
+      assert.equal(notice?.kind, 'unproven', `${label}: the collapsed User hit is non-exact`)
+      assert.equal(notice?.snippet, undefined, `${label}: an over-budget snippet is omitted, never truncated`)
+      assert.ok(segments < 5_000,
+        `${label}: the presentation path must not segment the whole message (${segments} segments)`)
+      const noticeRows = lines.map(line => stripTerminalSequences(line)).filter(line => line.includes('Source-only'))
+      assert.equal(noticeRows.length, 1, `${label}: the notice still occupies exactly one physical row`)
+      assert.ok(!noticeRows[0]!.includes('User text · '), `${label}: the painted row is label-only`)
+    } finally {
+      app.dispose()
+    }
+  }
+})
+
+test('navigation: a bounded snippet keeps CJK, combining and ZWJ clusters whole on one physical row', async () => {
+  const text = [
+    ...Array.from({ length: 12 }, (_, index) => `before ${index}`),
+    '汉e\u0301👨‍👩‍👧‍👦 needle 组合字符👩‍💻 suffix',
+    ...Array.from({ length: 8 }, (_, index) => `after ${index}`),
+  ].join('\n')
   const { folder, message } = userMessageFolder(text)
   const match = folder.search('needle')[0]
   assert.ok(match !== undefined, 'fixture: the occurrence exists')
-  // 240 columns keep the box (96) wide enough that the 12-grapheme context is
-  // really PAINTED, not dropped by the width budget.
   const { vt, app } = startApp(240, 30)
   try {
     app.setFullscreen(true)
@@ -675,26 +718,20 @@ test('navigation: a Source-only snippet on a very long message reads only its ow
     await viewport(vt)
     app.startTranscriptSearch('full')
     await viewport(vt)
-    const segments = countGraphemeSegments(() => {
-      app.setTranscriptSearchPresentation({
-        matchMessages: new Set([message]),
-        target: { query: 'needle', match, message },
-        grantReveal: false,
-      })
+    app.setTranscriptSearchPresentation({
+      matchMessages: new Set([message]),
+      target: { query: 'needle', match, message },
+      grantReveal: false,
     })
     const lines = await viewport(vt)
-    const notice = app.currentFullSearchNotice()
-    assert.equal(notice?.kind, 'unproven', 'the collapsed long User hit is non-exact')
-    const snippet = notice?.snippet ?? ''
-    assert.ok(snippet.includes('needle'), `the context contains the hit (${JSON.stringify(snippet)})`)
+    const snippet = app.currentFullSearchNotice()?.snippet ?? ''
     assert.ok(snippet.includes('👨‍👩‍👧‍👦'), 'the leading ZWJ cluster is kept whole')
     assert.ok(snippet.includes('e\u0301'), 'the combining sequence is kept whole')
     assert.ok(snippet.includes('👩‍💻'), 'the trailing ZWJ cluster is kept whole')
+    assert.ok(snippet.includes('汉'), 'CJK context is kept')
     assert.ok(!/[\r\n]/u.test(snippet), 'the snippet is one physical line')
-    assert.ok(segments < 5_000,
-      `a 1e6-character message must not be segmented as a whole (${segments} segments)`)
     const noticeRows = lines.map(line => stripTerminalSequences(line)).filter(line => line.includes('Source-only'))
-    assert.equal(noticeRows.length, 1, 'the notice still occupies exactly one physical row')
+    assert.equal(noticeRows.length, 1, 'the notice occupies exactly one physical row')
     assert.ok(noticeRows[0]!.includes('needle'), `the bounded context is really painted:\n${noticeRows[0]}`)
   } finally {
     app.dispose()
