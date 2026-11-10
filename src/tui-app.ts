@@ -740,14 +740,15 @@ function searchSourceLabel(source: TranscriptSearchMatch['source'], message: Tra
 /** A snippet may leak nothing the card did not paint. Control/escape bytes
  * (other than the whitespace a single display row folds) disqualify the whole
  * snippet, and so does URL/path shaped context: ANY path separator (POSIX `/`,
- * Windows `\`, UNC), a URL authority (host:port, `localhost`, a dotted host,
- * IPv4/IPv6), `www.`, a dotted file/domain-like token or HTML-ish markup.
+ * Windows `\`, UNC or a `C:relative` drive-qualified path), a URL authority
+ * (host:port, `localhost`, a dotted host, IPv4/IPv6), `www.`, a dotted
+ * file/domain-like token or HTML-ish markup.
  * Deliberately conservative — a twelve-grapheme window can split a
  * destination, so a partial match is never evidence that the rest is safe —
  * and the display boundary outranks showing a snippet on every row. */
 const UNSAFE_SOURCE_SNIPPET = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/u
 const UNSAFE_SOURCE_SNIPPET_SHAPE =
-  /[\\/]|www\.|<[A-Za-z][^>]*>|\b[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{2,}\b|\b[A-Za-z][A-Za-z0-9.-]*:\d{1,5}\b|\blocalhost\b|\[[0-9A-Fa-f:]+\]|\b\d{1,3}(?:\.\d{1,3}){3}\b|::/u
+  /[\\/]|www\.|<[A-Za-z][^>]*>|\b[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{2,}\b|\b[A-Za-z][A-Za-z0-9.-]*:\d{1,5}\b|\blocalhost\b|\[[0-9A-Fa-f:]+\]|\b\d{1,3}(?:\.\d{1,3}){3}\b|::|\b[A-Za-z]:(?=[^\s])/u
 
 function searchSourceSnippetTextIsSafe(text: string): boolean {
   if (text === '') return false
