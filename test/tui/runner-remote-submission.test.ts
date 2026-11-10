@@ -127,6 +127,20 @@ async function mountHost(life: TestLifecycle, presetId: string, options: { reado
   } as never)
   const goalUnit = await import('@deepseek-ai/dsh-goal')
   await base.ctx.plugin(goalUnit.default as never, { defaultMaxGoalRounds: 5 } as never)
+  // One REAL human-invocable skill in the Host composition: the official
+  // skill registry is mounted once (unless the base already provides it) and a
+  // runtime skill is registered before any agent/catalog read.
+  if (base.ctx.get('skills') === undefined) {
+    const SkillRegistry = (await import('@deepseek-ai/dsh-skill')).default
+    await base.ctx.plugin(SkillRegistry, {})
+  }
+  base.ctx.get('skills')!.register({
+    name: 'f4-l6-skill',
+    description: 'F4 L6 qualification skill',
+    content: 'F4_L6_SKILL_BODY_20261111',
+    source: 'runtime',
+    invocation: { modelInvocable: true, userInvocable: true },
+  })
   return base
 }
 
@@ -697,6 +711,68 @@ test('mixed file/image prompt: both file receipts and the image keep their sourc
   }
   assert.equal(content[2]?.attachment?.width, 1, 'the image block keeps its real dimensions')
   assert.equal(content[2]?.attachment?.height, 1)
+})
+
+test('a human-invocable skill prompt carries its file through the same official writer', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm6-f4-remote-skill-file'
+  const presetId = 'm3-4-pr3-preset'
+  const host = await mountHost(life, presetId)
+  await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+  const fixture = await mountPr3Runner(life, { presetId, resumeSessionId: mainId, host })
+  await waitFor('mount paint', () => fixture.vt.getViewport().join('').length > 0, 10_000)
+  const app = fixture.runnerApp() as unknown as {
+    getDraft(): string
+    setDraft(text: string): void
+    submitDraft(): void
+    draftFileStoreForTest?: import('../../src/client/media/attachment/file-draft.ts').DraftFileStore
+  }
+  assert.ok(app.draftFileStoreForTest !== undefined, 'the mounted app exposes its live file draft store')
+  const sourceDir = life.tempDir('dsh-f4-skill-l6-')
+  const path = join(sourceDir, 'skill-file.bin')
+  const source = Buffer.alloc(72 * 1024)
+  for (let index = 0; index < source.length; index += 1) source[index] = (index + 13) % 233
+  writeFileSync(path, source)
+  const probe = await probeAttachment(path, sourceDir)
+  assert.equal(probe.kind, 'file')
+  if (probe.kind !== 'file') return
+  const draft = app.draftFileStoreForTest!.add({
+    name: probe.name,
+    byteLength: probe.byteLength,
+    source: { type: 'path', path: probe.path, fingerprint: probe.fingerprint },
+  })
+  const marker = 'F4_SKILL_FILE_L6_20261111'
+  app.setDraft(`/skill f4-l6-skill ${draft.placeholder} ${marker}`)
+  app.submitDraft()
+  const session = host.ctx.sessions.get(SessionId(mainId)) as unknown as {
+    snapshotEvents(): Array<{ type: string; data: unknown }>
+  }
+  await waitFor('the skill file row is durable', () => session.snapshotEvents().some(event => {
+    if (event.type !== 'user/message') return false
+    const content = (event.data as { content?: Array<{ type: string; text?: string }> }).content ?? []
+    return content.some(block => block.type === 'file') && JSON.stringify(event.data).includes(marker)
+  }), 30_000)
+  const durable = session.snapshotEvents().find(event => event.type === 'user/message'
+    && JSON.stringify(event.data).includes(marker))!
+  const content = (durable.data as { content: Array<{ type: string; text?: string; attachment?: { attachmentId?: string; bytes?: number } }> }).content
+  const text = content.filter(block => block.type === 'text').map(block => block.text ?? '').join('')
+  assert.match(text, /\/f4-l6-skill\b/u,
+    `the durable row is the agent-facing skill line, not a raw /skill wrapper: ${JSON.stringify(text)}`)
+  assert.ok(text.includes(marker), 'the user arguments survive the normalized skill line')
+  const fileBlock = content.find(block => block.type === 'file')
+  assert.ok(fileBlock?.attachment?.attachmentId !== undefined,
+    'the skill prompt carries the Host-issued file attachment')
+  assert.equal(fileBlock!.attachment!.bytes, source.byteLength)
+  const attachments = host.ctx.get('attachments') as unknown as {
+    readFileStream(ref: unknown): AsyncIterable<Uint8Array>
+  }
+  const chunks: Uint8Array[] = []
+  for await (const chunk of attachments.readFileStream(fileBlock!.attachment!)) chunks.push(chunk)
+  assert.equal(
+    createHash('sha256').update(Buffer.concat(chunks.map(chunk => Buffer.from(chunk)))).digest('hex'),
+    createHash('sha256').update(source).digest('hex'),
+    'the skill file bytes are the Client source bytes',
+  )
 })
 
 test('surface stop after the file upload but before dispatch makes zero prompt and restores the draft', async (t) => {

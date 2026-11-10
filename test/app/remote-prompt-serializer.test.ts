@@ -156,6 +156,82 @@ test('mixed text/file/image ordering and whitespace survive two file receipts in
     'file placeholders are never part of the model-facing text')
 })
 
+test('a repeated file placeholder uploads once per occurrence, in order', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-f4-repeat-')
+  const path = join(root, 'repeat.bin')
+  writeFileSync(path, Buffer.from([9, 8, 7]))
+  const probe = await probeAttachment(path, root)
+  assert.equal(probe.kind, 'file')
+  if (probe.kind !== 'file') return
+  const files = new DraftFileStore()
+  const draft = files.add({
+    name: probe.name,
+    byteLength: probe.byteLength,
+    source: { type: 'path', path: probe.path, fingerprint: probe.fingerprint },
+  })
+  const receipts: string[] = []
+  const serializer = new RemotePromptSerializerProduction(undefined, {
+    async upload(_sessionId, prepared) {
+      receipts.push(prepared.name)
+      const id = `receipt-${receipts.length}`
+      return { receiptId: id, file: { attachmentId: `file-${receipts.length}`, name: prepared.name, bytes: 3 } }
+    },
+  })
+  const prompt = preparePrompt('session-a', `${draft.placeholder} and ${draft.placeholder}`, {
+    images: storeOf([]),
+    files,
+  })
+  const serialized = await serializer.serialize(prompt, abort)
+  assert.ok(serialized.kind === 'ok')
+  assert.deepEqual(receipts, ['repeat.bin', 'repeat.bin'], 'each occurrence uploads its own receipt')
+  assert.deepEqual(serialized.content.map(part => part.type), ['file', 'text', 'file'])
+  assert.equal((serialized.content[0] as { receiptId: string }).receiptId, 'receipt-1')
+  assert.equal((serialized.content[2] as { receiptId: string }).receiptId, 'receipt-2')
+})
+
+test('an attachment-only file prompt has no model-facing text but keeps its receipt part', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-f4-only-')
+  const path = join(root, 'only.bin')
+  writeFileSync(path, Buffer.from([1]))
+  const probe = await probeAttachment(path, root)
+  assert.equal(probe.kind, 'file')
+  if (probe.kind !== 'file') return
+  const files = new DraftFileStore()
+  const draft = files.add({
+    name: probe.name,
+    byteLength: probe.byteLength,
+    source: { type: 'path', path: probe.path, fingerprint: probe.fingerprint },
+  })
+  const serializer = new RemotePromptSerializerProduction(undefined, {
+    async upload() {
+      return { receiptId: 'only-receipt', file: { attachmentId: 'only-file', name: 'only.bin', bytes: 1 } }
+    },
+  })
+  const prompt = preparePrompt('session-a', draft.placeholder, { images: storeOf([]), files })
+  const serialized = await serializer.serialize(prompt, abort)
+  assert.ok(serialized.kind === 'ok')
+  assert.deepEqual(serialized.content, [{ type: 'file', receiptId: 'only-receipt' }],
+    'the attachment-only prompt is exactly one file part')
+  assert.equal(serialized.echo.text, '', 'no placeholder text is fabricated into the model-facing text')
+})
+
+test('a text-only prompt never touches the file upload boundary', async () => {
+  let uploads = 0
+  const serializer = new RemotePromptSerializerProduction(undefined, {
+    async upload() {
+      uploads += 1
+      throw new Error('a text-only prompt must not upload')
+    },
+  })
+  const prompt = preparePrompt('session-a', 'plain only', { images: storeOf([]) })
+  const serialized = await serializer.serialize(prompt, abort)
+  assert.ok(serialized.kind === 'ok')
+  assert.deepEqual(serialized.content, [{ type: 'text', text: 'plain only' }])
+  assert.equal(uploads, 0)
+})
+
 test('a fresh generic file uploads its exact Client bytes and maps the Host receipt into ordered prompt parts', async (t) => {
   const life = testLifecycle(t)
   const root = life.tempDir('dsh-f4-serializer-')
