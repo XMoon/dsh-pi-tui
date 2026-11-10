@@ -927,10 +927,17 @@ The `ConfigPort` keeps the three credential planes distinct:
   watch, start/cancel sign-in, sign-out and the running-account-task risk read.
 
 The account DTOs are detached (`AccountView`, `AccountProfile`, wallet decimal
-strings, safe attempt ids/phases/error codes). A token, grant payload, PKCE
-value, `PlatformSession` or generic Host service object never crosses the port.
-`AccountClientMetadata` (`version`, `locale`, `timezoneOffsetSeconds`) is
-sampled per Platform request; the offset is never cached across a DST change.
+strings, safe attempt ids/phases/error codes). An `AccountView` is last-known
+unless paired with a local opaque `AccountObservationLease` issued by its adapter;
+Direct validates the installed Host Account service identity and observation epoch,
+while Remote validates the lease against the actual Connection generation and
+Account watch epoch. The lease never crosses the generated Remote payload or
+persisted state. Carrier failure, Connection generation loss/replacement, or
+watch invalidation immediately revokes the affected observation; invalidation is
+not a `signed-out` fact. A token, grant payload, PKCE value, `PlatformSession` or
+generic Host service object never crosses the port. `AccountClientMetadata`
+(`version`, `locale`, `timezoneOffsetSeconds`) is sampled per Platform request;
+the offset is never cached across a DST change.
 
 The base profile mounts the official `@deepseek-ai/dsh-host-webserver` row with
 stable id `webserver`, `host: 127.0.0.1`, and `port: 0`; the Direct runner injects
@@ -973,13 +980,15 @@ that authenticated identity. The official Controller forwards its argument and
 does not independently compare it to its listener; this contract establishes
 the trusted source used by this Client adapter, not a new upstream Host policy.
 
-`watch(signal)` yields a complete initial state and later snapshots. Ending the
-signal, disposing the generated stream, closing a page, or retiring a Client
-surface stops observation only; it never cancels the Host browser attempt.
-Cancellation addresses the exact `SignInAttemptId`. Each dispatched start,
-cancel, and sign-out operation is sent once; an unknown acknowledgement is
-reconciled from current Host state/watch and is never replayed automatically.
-A result from a replaced Connection generation cannot become current.
+`watch(signal)` yields a complete initial current observation and later snapshots;
+an invalidation revokes its affected observations and is distinct from signed-out.
+Ending the signal, disposing the generated stream, closing a page, or retiring a
+Client surface stops observation only; it never cancels the Host browser attempt.
+Cancellation addresses the exact `SignInAttemptId`. A known operation ACK may
+reconcile from its returned observation. An unknown ACK is reconciled only by a
+successful `getState` readback initiated after that ACK; no Watch frame satisfies
+that readback, and no dispatched operation is replayed automatically. A result
+from a replaced Connection generation cannot become current.
 
 `hasRunningAccountTasks()` is an asynchronous Host fact in Direct and Remote.
 The official controller evaluates the current `agents.list()` with the official

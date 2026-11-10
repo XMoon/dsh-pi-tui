@@ -19,7 +19,7 @@ import {
   genericAuthorizationTargets,
   ACCOUNT_AUTHORIZATION_KEY,
 } from '../../src/app/command/credential-workflow.ts'
-import type { CredentialProviderOption, AuthorizationFlowTarget } from '../../src/runtime/config-port.ts'
+import type { AccountObservation, AccountObservationLease, AccountView, CredentialProviderOption, AuthorizationFlowTarget } from '../../src/runtime/config-port.ts'
 
 const PROVIDERS: readonly CredentialProviderOption[] = [
   { route: 'deepseek-official', label: 'deepseek official', ref: 'DEEPSEEK_API_KEY', configured: true, declared: false, namesCredential: true, group: 'configured', canProvisionProfile: false },
@@ -31,6 +31,10 @@ const FLOWS: readonly AuthorizationFlowTarget[] = [
   { kind: 'authorization', key: ACCOUNT_AUTHORIZATION_KEY, label: 'DeepSeek', methods: [{ id: 'browser', label: 'DeepSeek' }], inFlight: false },
   { kind: 'authorization', route: 'anthropic', key: 'llm-pi-ai/anthropic', label: 'Anthropic', methods: [{ id: 'oauth', label: 'OAuth' }], inFlight: false },
 ]
+
+function accountObservation(view: AccountView): AccountObservation {
+  return { view, lease: {} as AccountObservationLease }
+}
 
 function flush(times = 8): Promise<void> {
   return (async () => {
@@ -370,7 +374,7 @@ test('CredentialWorkflow.createProvider reports a profile write and a separate k
       onChanged: () => () => {},
     },
     authorization: { available: () => false, listTargets: () => [], begin: async () => ({ kind: 'unavailable' }), onEvent: () => () => {}, respond: async () => {}, cancel: async () => {} },
-    account: { available: () => false, getState: async () => { throw new Error('x') }, getProfile: async () => null, getBalance: async () => null, watch: async function* () {}, getCallbackOrigin: () => undefined, startSignIn: async () => { throw new Error('x') }, cancelSignIn: async () => { throw new Error('x') }, signOut: async () => { throw new Error('x') }, hasRunningAccountTasks: async () => false },
+    account: { available: () => false, isObservationCurrent: () => false, getState: async () => { throw new Error('x') }, getProfile: async () => null, getBalance: async () => null, watch: async function* () {}, getCallbackOrigin: () => undefined, startSignIn: async () => { throw new Error('x') }, cancelSignIn: async () => { throw new Error('x') }, signOut: async () => { throw new Error('x') }, hasRunningAccountTasks: async () => false },
     catalog: { models: { available: () => true, discoverModels: async () => [] } },
     signal: new AbortController().signal,
     diag: { error: () => {}, warn: () => {} },
@@ -471,7 +475,7 @@ test('the stored-credential list excludes the DeepSeek Account grant (MA14)', as
       onChanged: () => () => {},
     },
     authorization: { available: () => true, listTargets: () => FLOWS, begin: async () => ({ kind: 'unavailable' }), onEvent: () => () => {}, respond: async () => {}, cancel: async () => {} },
-    account: { available: () => true, getState: async () => ({ status: 'credential-stored', links: { usageUrl: '', topUpUrl: '' }, attempt: null }), getProfile: async () => null, getBalance: async () => null, watch: async function* () {}, getCallbackOrigin: () => undefined, startSignIn: async () => { throw new Error('x') }, cancelSignIn: async () => { throw new Error('x') }, signOut: async () => { throw new Error('x') }, hasRunningAccountTasks: async () => false },
+    account: { available: () => true, isObservationCurrent: (_lease: AccountObservationLease) => true, getState: async () => accountObservation({ status: 'credential-stored', links: { usageUrl: '', topUpUrl: '' }, attempt: null }), getProfile: async () => null, getBalance: async () => null, watch: async function* () {}, getCallbackOrigin: () => undefined, startSignIn: async () => { throw new Error('x') }, cancelSignIn: async () => { throw new Error('x') }, signOut: async () => { throw new Error('x') }, hasRunningAccountTasks: async () => false },
     catalog: { models: { available: () => false, discoverModels: async () => [] } },
     signal: new AbortController().signal,
     diag: { error: () => {}, warn: () => {} },
@@ -2079,7 +2083,8 @@ test('a failed authoritative read cannot authorize a write', async () => {
     authorization: { available: () => true, listTargets: () => [], begin: async () => ({ kind: 'unavailable' as const }), onEvent: () => () => {}, respond: async () => {}, cancel: async () => {} },
     account: {
       available: () => false,
-      getState: async () => ({ status: 'signed-out', links: { usageUrl: '', topUpUrl: '' }, attempt: null }),
+      isObservationCurrent: () => false,
+      getState: async () => accountObservation({ status: 'signed-out', links: { usageUrl: '', topUpUrl: '' }, attempt: null }),
       getProfile: async () => null,
       getBalance: async () => null,
       watch: async function* () {},
@@ -2130,7 +2135,8 @@ test('a stale catalog authorizes neither the keyless profile write nor the creat
     authorization: { available: () => true, listTargets: () => [], begin: async () => ({ kind: 'unavailable' as const }), onEvent: () => () => {}, respond: async () => {}, cancel: async () => {} },
     account: {
       available: () => false,
-      getState: async () => ({ status: 'signed-out', links: { usageUrl: '', topUpUrl: '' }, attempt: null }),
+      isObservationCurrent: () => false,
+      getState: async () => accountObservation({ status: 'signed-out', links: { usageUrl: '', topUpUrl: '' }, attempt: null }),
       getProfile: async () => null,
       getBalance: async () => null,
       watch: async function* () {},

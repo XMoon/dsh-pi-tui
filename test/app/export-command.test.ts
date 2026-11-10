@@ -150,6 +150,7 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
       },
       account: {
         available: () => false,
+        isObservationCurrent: () => false,
         getState: async () => { throw new Error('account unavailable') },
         getProfile: async () => null,
         getBalance: async () => null,

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { RemoteConfigPort, type RemoteAccountRemotes, type RemoteAccountStreamHandle } from '../../../src/runtime/remote/config-remote.ts'
 import type { RemoteConfigRuntimeSource } from '../../../src/runtime/remote/config-remote.ts'
+import type { AccountObservationLease, AccountWatchEvent } from '../../../src/runtime/config-port.ts'
 import type { RemoteConnectionGeneration } from '../../../src/runtime/remote/session-reader-remote.ts'
 import type { RemoteResultLike } from '../../../src/runtime/remote/session-writer-remote.ts'
 
@@ -210,20 +211,21 @@ const metadata = { version: '0.5.6', locale: 'zh-HK', timezoneOffsetSeconds: 28_
 test('the Remote Account adapter detaches only safe state, profile, and balance facts', async t => {
   const harness = makePort()
   t.after(() => harness.port.dispose())
-  const view = await harness.port.account.getState()
-  assert.deepEqual(view, ACCOUNT_VIEW)
-  assert.notEqual(view, harness.state.view)
-  assert.equal('grantPayload' in view, false)
-  assert.equal('privateField' in view.links, false)
+  const observation = await harness.port.account.getState()
+  assert.deepEqual(observation.view, ACCOUNT_VIEW)
+  assert.notEqual(observation.view, harness.state.view)
+  assert.equal(harness.port.account.isObservationCurrent(observation.lease), true)
+  assert.equal('grantPayload' in observation.view, false)
+  assert.equal('privateField' in observation.view.links, false)
 
-  const profile = await harness.port.account.getProfile(metadata)
+  const profile = await harness.port.account.getProfile(metadata, observation.lease)
   assert.deepEqual(profile, {
     status: 'ready',
     value: { id: 'account-id', name: 'Account Name', contact: 'm***@example.com', avatarUrl: null },
   })
   const originalProfile = (harness.state.profile as { readonly value: unknown }).value
   assert.notEqual(profile?.status === 'ready' ? profile.value : undefined, originalProfile)
-  const balance = await harness.port.account.getBalance(metadata)
+  const balance = await harness.port.account.getBalance(metadata, observation.lease)
   assert.deepEqual(balance, {
     status: 'ready',
     value: [{ currency: 'CNY', balance: '12.5000' }],
@@ -241,6 +243,7 @@ test('null, failed, and RPC error account query outcomes remain distinct', async
   t.after(() => harness.port.dispose())
   let profileCalls = 0
   let balanceCalls = 0
+  const observation = await harness.port.account.getState()
   harness.account.getProfile = async () => {
     profileCalls += 1
     return { ok: true, value: null }
@@ -249,8 +252,8 @@ test('null, failed, and RPC error account query outcomes remain distinct', async
     balanceCalls += 1
     return { ok: true, value: { status: 'failed' } }
   }
-  assert.equal(await harness.port.account.getProfile(metadata), null)
-  assert.deepEqual(await harness.port.account.getBalance(metadata), { status: 'failed' })
+  assert.equal(await harness.port.account.getProfile(metadata, observation.lease), null)
+  assert.deepEqual(await harness.port.account.getBalance(metadata, observation.lease), { status: 'failed' })
   harness.account.getState = async () => ({ ok: false, error: { code: 'account/read-denied', message: 'the Host refused the read' } })
   await assert.rejects(harness.port.account.getState(), /the Host refused the read/u)
   assert.equal(profileCalls, 1)
@@ -262,9 +265,10 @@ test('callback origin is the canonical verified Host listener and SignIn fixes t
   t.after(() => harness.port.dispose())
   assert.equal(harness.port.account.available(), true)
   assert.equal(harness.port.account.getCallbackOrigin(), HOST_ORIGIN)
+  const current = await harness.port.account.getState()
   const before = harness.calls.length
-  const started = await harness.port.account.startSignIn(metadata)
-  assert.deepEqual(started, ACCOUNT_VIEW)
+  const started = await harness.port.account.startSignIn(metadata, current.lease)
+  assert.deepEqual(started.view, ACCOUNT_VIEW)
   assert.deepEqual(harness.calls.at(-1), {
     method: 'startSignIn',
     args: [metadata, HOST_ORIGIN, 'web'],
@@ -283,7 +287,8 @@ test('callback origin is the canonical verified Host listener and SignIn fixes t
     try {
       assert.equal(invalid.port.account.available(), true, 'read-only account availability does not depend on callback capability')
       assert.equal(invalid.port.account.getCallbackOrigin(), undefined)
-      await assert.rejects(invalid.port.account.startSignIn(metadata), /callback listener is unavailable/u)
+      const observation = await invalid.port.account.getState()
+      await assert.rejects(invalid.port.account.startSignIn(metadata, observation.lease), /callback listener is unavailable/u)
       assert.equal(invalid.calls.some(call => call.method === 'startSignIn'), false,
         `non-canonical origin ${String(origin)} must be refused before dispatch`)
     } finally {
@@ -301,7 +306,8 @@ test('an Account result from an older Connection generation cannot commit', asyn
     rpcCalls += 1
     return await new Promise(resolve => { release = resolve })
   }
-  const read = harness.port.account.getProfile(metadata)
+  const current = await harness.port.account.getState()
+  const read = harness.port.account.getProfile(metadata, current.lease)
   await new Promise<void>(resolve => setImmediate(resolve))
   harness.setGeneration({ id: 'generation-2' })
   release({ ok: true, value: { status: 'ready', value: { id: 'old-host', name: 'Old', contact: null } } })
@@ -309,18 +315,39 @@ test('an Account result from an older Connection generation cannot commit', asyn
   assert.equal(rpcCalls, 1, 'the stale generated RPC is not replayed')
 })
 
+test('a captured Remote Account observation is stale immediately when its Connection generation changes', async t => {
+  const harness = makePort()
+  t.after(() => harness.port.dispose())
+  const old = await harness.port.account.getState()
+  assert.equal(harness.port.account.isObservationCurrent(old.lease), true)
+  harness.setGeneration(undefined)
+  assert.equal(harness.port.account.isObservationCurrent(old.lease), false,
+    'disconnect invalidates the old observation before an Account watch frame can arrive')
+  const beforeStaleCancel = harness.calls.filter(call => call.method === 'cancelSignIn').length
+  await assert.rejects(harness.port.account.cancelSignIn('attempt-exact', old.lease), /no current Host observation/u)
+  assert.equal(harness.calls.filter(call => call.method === 'cancelSignIn').length, beforeStaleCancel,
+    'the stale exact-attempt Cancel never reaches the generated namespace')
+  harness.setGeneration({ id: 'generation-2' })
+  assert.equal(harness.port.account.isObservationCurrent(old.lease), false,
+    'a new authenticated generation never revives an old Account lease')
+  const fresh = await harness.port.account.getState()
+  assert.equal(harness.port.account.isObservationCurrent(fresh.lease), true)
+  assert.equal(harness.port.account.isObservationCurrent(old.lease), false)
+})
+
 test('cancel, sign-out, and running-task reads use one official Account namespace call', async t => {
   const harness = makePort()
   t.after(() => harness.port.dispose())
   harness.state.running = true
-  assert.equal(await harness.port.account.hasRunningAccountTasks(), true)
-  assert.deepEqual(await harness.port.account.cancelSignIn('attempt-exact'), ACCOUNT_VIEW)
-  assert.deepEqual(await harness.port.account.signOut(metadata), ACCOUNT_VIEW)
+  const observation = await harness.port.account.getState()
+  assert.equal(await harness.port.account.hasRunningAccountTasks(observation.lease), true)
+  assert.deepEqual((await harness.port.account.cancelSignIn('attempt-exact', observation.lease)).view, ACCOUNT_VIEW)
+  assert.deepEqual((await harness.port.account.signOut(metadata, observation.lease)).view, ACCOUNT_VIEW)
   assert.deepEqual(harness.calls.map(call => call.method), [
-    'hasRunningAccountTasks', 'cancelSignIn', 'signOut',
+    'getState', 'hasRunningAccountTasks', 'cancelSignIn', 'signOut',
   ])
-  assert.deepEqual(harness.calls[1]?.args, ['attempt-exact'], 'attempt identity is passed byte-for-byte')
-  assert.notEqual(harness.calls[2]?.args[0], metadata)
+  assert.deepEqual(harness.calls[2]?.args, ['attempt-exact'], 'attempt identity is passed byte-for-byte')
+  assert.notEqual(harness.calls[3]?.args[0], metadata)
 
   let failedTaskCalls = 0
   harness.account.hasRunningAccountTasks = async () => {
@@ -330,7 +357,7 @@ test('cancel, sign-out, and running-task reads use one official Account namespac
       error: { code: 'gateway/internal', message: 'Host task query failed' },
     }
   }
-  await assert.rejects(harness.port.account.hasRunningAccountTasks(), /Host task query failed/u)
+  await assert.rejects(harness.port.account.hasRunningAccountTasks(observation.lease), /Host task query failed/u)
   assert.equal(failedTaskCalls, 1, 'the error is rejected rather than converted to false or retried')
 })
 
@@ -340,11 +367,16 @@ test('watch supplies its initial snapshot and releases only its own stream once'
   const controller = new AbortController()
   const iterator = harness.port.account.watch(controller.signal)[Symbol.asyncIterator]()
   const first = await iterator.next()
-  assert.deepEqual(first.value, ACCOUNT_VIEW)
   assert.equal(first.done, false)
+  assert.equal(first.value?.kind, 'current')
+  if (first.value?.kind !== 'current') assert.fail('the official initial watch result must be a current Account observation')
+  assert.deepEqual(first.value.observation.view, ACCOUNT_VIEW)
+  assert.equal(harness.port.account.isObservationCurrent(first.value.observation.lease), true)
+  const lease = first.value.observation.lease
   controller.abort()
   const ended = await iterator.next()
   assert.equal(ended.done, true)
+  assert.equal(harness.port.account.isObservationCurrent(lease), false)
   assert.equal(harness.streams[0]?.disposeCalls, 1)
   harness.port.dispose()
   assert.equal(harness.streams[0]?.disposeCalls, 1, 'port disposal does not release the same watch twice')
@@ -355,13 +387,20 @@ test('a carrier failure on the current generation waits for and consumes the rep
   t.after(() => harness.port.dispose())
   const controller = new AbortController()
   const iterator = harness.port.account.watch(controller.signal)[Symbol.asyncIterator]()
-  assert.deepEqual((await iterator.next()).value, ACCOUNT_VIEW)
+  const initial = await iterator.next()
+  if (initial.value?.kind !== 'current') assert.fail('the official initial watch result must be current')
+  const oldLease = initial.value.observation.lease
   const generationOne = harness.streams[0]!
   assert.equal(harness.currentGeneration?.id, 'generation-1')
   const listenersBeforeFailure = harness.activeGenerationListeners
   const oldStreamNext = iterator.next()
   await new Promise<void>(resolve => setImmediate(resolve))
   generationOne.carrierFailed()
+  const invalidated = await oldStreamNext
+  assert.deepEqual(invalidated.value, { kind: 'invalidated', reason: 'watch-failed' })
+  assert.equal(harness.port.account.isObservationCurrent(oldLease), false,
+    'carrier failure invalidates same-generation Account observations immediately')
+  const replacementBaseline = iterator.next()
   await new Promise<void>(resolve => setImmediate(resolve))
   assert.equal(harness.activeGenerationListeners, listenersBeforeFailure + 1,
     'carrier failure on the still-current generation subscribes for its replacement')
@@ -373,8 +412,11 @@ test('a carrier failure on the current generation waits for and consumes the rep
     attempt: null,
   }
   harness.state.view = reopened
-  assert.deepEqual((await oldStreamNext).value, reopened,
+  const replacement = await replacementBaseline
+  if (replacement.value?.kind !== 'current') assert.fail('replacement generation must provide a complete current baseline')
+  assert.deepEqual(replacement.value.observation.view, reopened,
     'the same page watch consumes the new Host initial snapshot')
+  assert.equal(harness.port.account.isObservationCurrent(replacement.value.observation.lease), true)
   assert.equal(harness.streams.length, 2, 'one new generated handle opens after Connection replacement')
   assert.equal(harness.streams[0]?.disposeCalls, 1, 'the previous generation handle is retired exactly once')
   controller.abort()
@@ -382,15 +424,51 @@ test('a carrier failure on the current generation waits for and consumes the rep
   assert.equal(harness.streams[1]?.disposeCalls, 1, 'page close disposes the replacement handle exactly once')
 })
 
+test('Remote watch invalidates immediately on Connection generation change before any carrier frame', async t => {
+  const harness = makePort()
+  t.after(() => harness.port.dispose())
+  const controller = new AbortController()
+  const iterator = harness.port.account.watch(controller.signal)[Symbol.asyncIterator]()
+  const initial = await iterator.next()
+  if (initial.value?.kind !== 'current') assert.fail('Remote watch must begin with a complete current Host snapshot')
+  const oldLease = initial.value.observation.lease
+  assert.equal(harness.port.account.isObservationCurrent(oldLease), true)
+
+  const invalidationRead = iterator.next()
+  harness.setGeneration(undefined)
+  const invalidated = await invalidationRead
+  assert.deepEqual(invalidated.value, { kind: 'invalidated', reason: 'connection-changed' },
+    'generation loss alone wakes the logical Account watch without waiting for RemoteStreamCarrierError')
+  assert.equal(harness.port.account.isObservationCurrent(oldLease), false,
+    'the old generation lease is revoked before the replacement generation exists')
+  const replacementBaseline = iterator.next()
+  assert.equal(harness.streams[0]?.disposeCalls, 1, 'the old generation StreamHandle is retired exactly once')
+  harness.setGeneration({ id: 'generation-2' })
+  const reopened = { status: 'signed-out', links: ACCOUNT_VIEW.links, attempt: null }
+  harness.state.view = reopened
+  const replacement = await replacementBaseline
+  if (replacement.value?.kind !== 'current') assert.fail('the replacement Connection must publish a complete Host baseline')
+  assert.deepEqual(replacement.value.observation.view, reopened)
+  assert.equal(harness.port.account.isObservationCurrent(replacement.value.observation.lease), true)
+  const ended = iterator.next()
+  controller.abort()
+  assert.equal((await ended).done, true)
+})
+
 test('ConfigPort disposal cancels a logical Account watch waiting for a replacement generation', async t => {
   const harness = makePort()
   const controller = new AbortController()
   const iterator = harness.port.account.watch(controller.signal)[Symbol.asyncIterator]()
-  assert.deepEqual((await iterator.next()).value, ACCOUNT_VIEW)
+  const initial = await iterator.next()
+  if (initial.value?.kind !== 'current') assert.fail('the official initial watch result must be current')
+  const oldLease = initial.value.observation.lease
   const oldHandle = harness.streams[0]!
   harness.setGeneration(undefined)
-  const pending = iterator.next()
+  const invalidated = iterator.next()
   oldHandle.carrierFailed()
+  assert.deepEqual((await invalidated).value, { kind: 'invalidated', reason: 'connection-changed' })
+  assert.equal(harness.port.account.isObservationCurrent(oldLease), false)
+  const pending = iterator.next()
   await new Promise<void>(resolve => setImmediate(resolve))
   assert.ok(harness.activeGenerationListeners > 0, 'the live logical watch owns a reconnect listener')
   harness.port.dispose()

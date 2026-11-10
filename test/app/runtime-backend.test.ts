@@ -124,6 +124,7 @@ test('the Direct backend is the current production surface and serves EXACTLY th
     },
     account: {
       available: () => false,
+      isObservationCurrent: () => false,
       getState: async () => { throw new Error('account unavailable') },
       getProfile: async () => null,
       getBalance: async () => null,

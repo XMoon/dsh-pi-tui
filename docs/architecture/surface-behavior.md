@@ -984,9 +984,15 @@ The page never infers a stored key from a route/profile.
 ### Account page
 
 - Host `AccountView` phases drive the display (`succeeded` is presented as
-  Authorized). `credential-stored` is a storage fact, not a server-validated
-  identity; profile and balance are independent queries with independent
-  pending/failed/ready states, and an unavailable balance is never shown as 0.
+  Authorized). A detached view is current only while paired with its adapter-
+  issued local observation lease; without a valid lease it is last-known, not
+  signed-out. Invalidation never implies a credential change. `credential-stored`
+  is a storage fact, not a server-validated identity; profile and balance are
+  independent queries with independent pending/failed/ready states, and an
+  unavailable balance is never shown as 0. The page binds profile/balance reads,
+  every Account mutation and the running-task risk read to the same current
+  observation. Stale profile/balance facts are marked last-known, and a stale
+  authorization URL is not presented as current.
 - Wallet decimal strings are forwarded verbatim. `Usage` and `Top up` use the
   client-local HTTP(S) opener with the official `AccountView.links`; the page
   never receives a token or grant payload.
@@ -1000,10 +1006,13 @@ The page never infers a stored key from a route/profile.
   visible. An unavailable result offers `Retry task check`; only a current known
   result enables the destructive action. The check's Host authority and
   Direct/Remote semantics belong to [host-client.md](./host-client.md#provider-credentials-and-deepseek-account).
-- A dispatched SignOut whose acknowledgement is unknown closes the confirmation
-  and reads Host state again. The page does not replay the mutation or admit a
-  second confirmation until a fresh Host `AccountView` is committed. Older task
-  checks cannot authorize a newer Account view, confirmation, page or connection.
+- A known operation ACK may reconcile from its returned observation. An unknown
+  ACK for a dispatched Account mutation keeps mutation admission fenced until a
+  successful `getState` readback initiated after that ACK; no Watch frame, even a
+  newer one, satisfies the barrier, and the operation is never replayed
+  automatically. A failed/unknown SignOut ACK closes the confirmation; the page
+  admits no second confirmation until that readback succeeds. Older task checks
+  cannot authorize a newer Account view, confirmation, page or connection.
 - The official `signOut` removes the local grant and leaves remote revocation in
   the background. A failed revocation never restores a local grant, and
   independent API keys stay stored. While sign-out is pending, user navigation

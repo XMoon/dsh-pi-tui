@@ -27,7 +27,7 @@ import {
 import { renderActionBarRow, type ActionBarSegment } from '../presentation/action-bar.ts'
 import { color } from '../theme/runtime.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
-import type { AccountView, AccountWallet } from '../../runtime/config-port.ts'
+import type { AccountObservation, AccountObservationLease, AccountProfile, AccountView, AccountWallet, AccountWatchInvalidationReason } from '../../runtime/config-port.ts'
 import type { AccountQueryOutcome, AccountWorkspaceSource } from '../../app/command/account-workflow.ts'
 
 /** How the page was opened by a command deep link. */
@@ -95,11 +95,15 @@ export class AccountWorkspacePage implements Component {
   private readonly source: AccountWorkspaceSource
   private requestRender: () => void
   private view: AccountView | undefined
+  private observationLease: AccountObservationLease | undefined
   private stateFailure: string | undefined
   private profile: QueryState<import('../../runtime/config-port.ts').AccountProfile> = { kind: 'idle' }
   private balance: QueryState<{ readonly value: readonly AccountWallet[]; readonly bonusWallets: readonly AccountWallet[] }> = { kind: 'idle' }
   private signOutConfirm = false
   private stateRecheckRequired = false
+  private reconciliationSerial = 0
+  private reconciliationReadInFlight: { readonly token: number; readonly lease: AccountObservationLease; readonly id: number } | undefined
+  private reconciliationReadSerial = 0
   private signOutIdentity: string | undefined
   private taskCheck: SignOutTaskCheck = { kind: 'idle' }
   private signOutConfirmationSerial = 0
@@ -125,6 +129,7 @@ export class AccountWorkspacePage implements Component {
   private fallbackActive = false
   private initializing = true
   private watcherStarted = false
+  private watchController: AbortController | undefined
   /** Latest-read serials: an older profile/balance read can never overwrite a
    *  newer one (and a signed-out view invalidates both). */
   private profileSerial = 0
@@ -144,89 +149,200 @@ export class AccountWorkspacePage implements Component {
     this.start()
   }
 
+  private currentObservationLease(): AccountObservationLease | undefined {
+    const lease = this.observationLease
+    return lease !== undefined && this.watcherStarted && this.source.isObservationCurrent(lease)
+      ? lease
+      : undefined
+  }
+
+  private hasCurrentObservation(): boolean {
+    return this.currentObservationLease() !== undefined
+  }
+
+  private stopWatch(): void {
+    const controller = this.watchController
+    if (controller === undefined) return
+    this.watchController = undefined
+    this.watcherStarted = false
+    this.observationLease = undefined
+    this.stateSerial += 1
+    this.profileSerial += 1
+    this.balanceSerial += 1
+    this.runningTaskCheckSerial += 1
+    this.taskCheck = { kind: 'idle' }
+    controller.abort()
+  }
+
   private start(): boolean {
     if (this.disposed || this.watcherStarted) return false
     if (!this.source.available()) {
+      this.observationLease = undefined
       this.stateFailure = 'the Host Account service is unavailable on this connection'
       this.initializing = false
       return false
     }
     this.stateFailure = undefined
+    this.initializing = this.view === undefined
+    const controller = new AbortController()
+    const signal = AbortSignal.any([this.pageController.signal, controller.signal])
+    this.watchController = controller
     this.watcherStarted = true
-    // The official watch subscription yields a COMPLETE initial state. That
-    // initial snapshot is the page's first read: a separate getState would be
-    // a second, unordered snapshot that could land after a newer watch event.
     this.source.run('account watch', async () => {
       try {
-        for await (const view of this.source.watch(this.pageController.signal)) {
-          this.commitView(view)
+        for await (const event of this.source.watch(signal)) {
+          if (signal.aborted || this.disposed || this.watchController !== controller) return
+          if (event.kind === 'invalidated') {
+            this.invalidateObservation(event.reason)
+            continue
+          }
+          this.commitObservation(event.observation, 'watch')
         }
-      } catch (error) {
-        if (this.disposed || this.pageController.signal.aborted) return
-        this.settle(() => {
+      } catch {
+        if (!signal.aborted && !this.disposed && this.watchController === controller) {
+          this.invalidateObservation('watch-failed')
+        }
+      } finally {
+        if (this.watchController === controller) {
+          this.watchController = undefined
           this.watcherStarted = false
-          this.initializing = false
-          this.stateFailure = `the account watch stopped: ${errorText(error)}`
-        })
-        return
+        }
       }
-      if (this.disposed || this.pageController.signal.aborted) return
-      this.settle(() => {
-        this.watcherStarted = false
-        this.initializing = false
-        this.stateFailure = 'the account watch ended before the page stopped observing'
-      })
     })
     return true
   }
 
+  private invalidateObservation(reason: AccountWatchInvalidationReason): void {
+    this.observationLease = undefined
+    this.stateSerial += 1
+    this.profileSerial += 1
+    this.balanceSerial += 1
+    this.runningTaskCheckSerial += 1
+    this.taskCheck = { kind: 'idle' }
+    if (this.signOutConfirm) {
+      this.closeSignOutConfirmation()
+      this.notice = 'the Host Account observation changed — sign-out confirmation cleared'
+    }
+    const stateFailure = reason === 'service-unavailable'
+      ? 'the Host Account service is unavailable on this connection'
+      : reason === 'service-changed'
+        ? 'the Host Account service changed; Refresh to read current state'
+        : reason === 'connection-changed'
+          ? 'the Host Account connection changed; Refresh to read current state'
+          : reason === 'watch-failed'
+            ? 'the Host Account watch stopped; Refresh to read current state'
+            : 'the Host Account watch ended; Refresh to read current state'
+    this.settle(() => {
+      this.stateFailure = stateFailure
+      this.initializing = false
+    })
+  }
+
   private refresh(): void {
     if (this.disposed || this.busy !== undefined) return
-    if (!this.watcherStarted) {
-      this.initializing = this.view === undefined
+    const current = this.hasCurrentObservation()
+    if (!current) {
+      this.stopWatch()
       this.stateFailure = undefined
-      if (this.view !== undefined) {
-        this.stateRecheckRequired = true
-        this.notice = 'Refreshing Host account state…'
-      }
+      this.initializing = this.view === undefined
+      if (this.view !== undefined) this.notice = 'Refreshing Host account state…'
       this.start()
       this.revision += 1
       this.requestRender()
       return
     }
+    const lease = this.currentObservationLease()
+    if (lease === undefined) return
+    this.readHostState(lease, this.stateRecheckRequired ? this.reconciliationSerial : undefined)
+  }
+
+  private requireReconciliationReadback(): void {
+    this.stateRecheckRequired = true
+    this.reconciliationSerial += 1
+  }
+
+  private readHostState(lease: AccountObservationLease, reconciliation?: number): void {
+    if (reconciliation !== undefined) {
+      const inFlight = this.reconciliationReadInFlight
+      if (inFlight?.token === reconciliation && inFlight.lease === lease) return
+    }
+    const readId = reconciliation === undefined ? undefined : ++this.reconciliationReadSerial
+    if (reconciliation !== undefined) {
+      this.reconciliationReadInFlight = { token: reconciliation, lease, id: readId! }
+    }
     const serial = ++this.stateSerial
     this.revision += 1
     this.source.run('account state read', async () => {
-      let view: AccountView
+      let retryAfterNewerWatch = false
       try {
-        view = await this.source.getState()
-      } catch (error) {
-        this.settle(() => {
-          if (serial !== this.stateSerial) return
-          this.stateFailure = errorText(error)
-          this.initializing = false
-        })
-        return
-      }
-      if (this.disposed || serial !== this.stateSerial) return
-      this.applyView(view, false)
-      if (view.status === 'credential-stored') {
-        this.readProfile()
-        this.readBalance()
+        let observation: AccountObservation
+        try {
+          observation = await this.source.getState()
+        } catch (error) {
+          if (this.disposed) return
+          if (serial !== this.stateSerial) {
+            retryAfterNewerWatch = reconciliation !== undefined
+              && this.stateRecheckRequired
+              && reconciliation === this.reconciliationSerial
+              && this.hasCurrentObservation()
+            return
+          }
+          if (this.observationLease !== lease || !this.source.isObservationCurrent(lease)) {
+            this.invalidateObservation('connection-changed')
+            return
+          }
+          this.settle(() => {
+            this.stateFailure = errorText(error)
+            this.initializing = false
+          })
+          return
+        }
+        if (this.disposed) return
+        if (serial !== this.stateSerial) {
+          const sameObservationOwner = this.source.isObservationCurrent(lease)
+            && this.source.isObservationCurrent(observation.lease)
+          if (sameObservationOwner && this.stateRecheckRequired) {
+            this.commitObservation(observation, 'readback')
+          } else {
+            retryAfterNewerWatch = reconciliation !== undefined
+              && this.stateRecheckRequired
+              && reconciliation === this.reconciliationSerial
+              && this.hasCurrentObservation()
+          }
+          return
+        }
+        if (this.observationLease !== lease || !this.source.isObservationCurrent(lease)) {
+          this.invalidateObservation('connection-changed')
+          return
+        }
+        if (!this.commitObservation(observation, 'readback', serial)) return
+        if (observation.view.status === 'credential-stored') {
+          this.readProfile(observation.lease)
+          this.readBalance(observation.lease)
+        }
+      } finally {
+        if (reconciliation !== undefined
+          && this.reconciliationReadInFlight?.id === readId) {
+          this.reconciliationReadInFlight = undefined
+        }
+        if (retryAfterNewerWatch && reconciliation === this.reconciliationSerial) {
+          const current = this.currentObservationLease()
+          if (current !== undefined) this.readHostState(current, reconciliation)
+        }
       }
     })
   }
 
-  /** Commit one Host-observed view and invalidate older in-flight reads. */
-  private commitView(view: AccountView): void {
+  private commitObservation(observation: AccountObservation, origin: 'watch' | 'readback' | 'ack', serial?: number): boolean {
+    if (!this.source.isObservationCurrent(observation.lease)) return false
+    if (serial !== undefined && serial !== this.stateSerial) return false
     this.stateSerial += 1
-    this.applyView(view)
-  }
-
-  /** Adopt a mutation's returned snapshot only when no newer watch/refresh
-   *  snapshot has been committed since the operation started. */
-  private commitOperationView(view: AccountView, serial: number): void {
-    if (serial === this.stateSerial) this.commitView(view)
+    this.observationLease = observation.lease
+    this.applyView(observation.view, observation.lease, origin)
+    if (origin === 'watch' && this.stateRecheckRequired) {
+      this.readHostState(observation.lease, this.reconciliationSerial)
+    }
+    return true
   }
 
   private closeSignOutConfirmation(): void {
@@ -250,17 +366,26 @@ export class AccountWorkspacePage implements Component {
     stateSerial: number,
     confirmationSerial: number,
     view: AccountView,
+    lease: AccountObservationLease,
   ): boolean {
     return !this.disposed
       && serial === this.runningTaskCheckSerial
       && stateSerial === this.stateSerial
       && confirmationSerial === this.signOutConfirmationSerial
+      && this.observationLease === lease
+      && this.source.isObservationCurrent(lease)
       && this.view === view
       && view.status === 'credential-stored'
   }
 
-  /** Read the live Host risk fact; a late read cannot authorize another view. */
-  private checkRunningTaskFact(view: AccountView): void {
+  private expireObservationIfStale(lease: AccountObservationLease): boolean {
+    if (this.observationLease !== lease || this.source.isObservationCurrent(lease)) return false
+    this.invalidateObservation('connection-changed')
+    return true
+  }
+
+  /** Read the Host risk fact for one exact current Account observation. */
+  private checkRunningTaskFact(view: AccountView, lease: AccountObservationLease): void {
     const serial = ++this.runningTaskCheckSerial
     const stateSerial = this.stateSerial
     const confirmationSerial = this.signOutConfirmationSerial
@@ -268,39 +393,50 @@ export class AccountWorkspacePage implements Component {
     this.source.run('account running-task check', async () => {
       let running: boolean
       try {
-        running = await this.source.hasRunningAccountTasks()
+        running = await this.source.hasRunningAccountTasks(lease)
       } catch (error) {
-        if (!this.runningTaskCheckIsCurrent(serial, stateSerial, confirmationSerial, view)) return
+        if (!this.runningTaskCheckIsCurrent(serial, stateSerial, confirmationSerial, view, lease)) {
+          this.expireObservationIfStale(lease)
+          return
+        }
         this.settle(() => {
           this.taskCheck = { kind: 'unavailable', reason: errorText(error) }
         })
         return
       }
-      if (!this.runningTaskCheckIsCurrent(serial, stateSerial, confirmationSerial, view)) return
+      if (!this.runningTaskCheckIsCurrent(serial, stateSerial, confirmationSerial, view, lease)) {
+        this.expireObservationIfStale(lease)
+        return
+      }
       this.settle(() => { this.taskCheck = { kind: 'known', running } })
     })
   }
 
-  /** Apply one Host AccountView. A credential transition starts independent
-   * profile, balance and running-task reads; signed-out state clears them. */
-  private applyView(view: AccountView, readDetails = true): void {
+  /** Apply a detached Host view while preserving the distinct mutation-ACK barrier. */
+  private applyView(
+    view: AccountView,
+    lease: AccountObservationLease,
+    origin: 'watch' | 'readback' | 'ack',
+    readDetails = true,
+  ): void {
     this.settle(() => {
+      if (!this.source.isObservationCurrent(lease)) return
       const previous = this.view?.status
       this.view = view
-      const rechecking = this.stateRecheckRequired
-      this.stateRecheckRequired = false
+      this.observationLease = lease
+      if (origin !== 'watch') this.stateRecheckRequired = false
+      if (this.notice === 'Refreshing Host account state…'
+        && (origin !== 'watch' || !this.stateRecheckRequired)) this.notice = undefined
       this.stateFailure = undefined
-      if (rechecking && this.notice === 'Refreshing Host account state…') this.notice = undefined
       this.initializing = false
       if (view.status === 'credential-stored') {
-        // AccountView.status does not carry grant identity: a same-status watch
-        // update can mean account A was replaced by account B. Any confirmation
-        // and its outstanding task read lose authority before the new reads.
-        if (previous !== undefined) this.invalidateSignOutConfirmation('the Host account changed — confirm sign-out again')
-        this.checkRunningTaskFact(view)
+        if (previous !== undefined && this.signOutConfirm) {
+          this.invalidateSignOutConfirmation('the Host account changed — confirm sign-out again')
+        }
+        this.checkRunningTaskFact(view, lease)
         if (readDetails) {
-          this.readProfile()
-          this.readBalance()
+          this.readProfile(lease)
+          this.readBalance(lease)
         }
       } else {
         if (this.signOutConfirm) {
@@ -325,14 +461,33 @@ export class AccountWorkspacePage implements Component {
     })
   }
 
-  private readProfile(): void {
+  private readProfile(lease: AccountObservationLease): void {
     if (this.disposed) return
     const serial = ++this.profileSerial
     this.profile = { kind: 'pending' }
     this.source.run('account profile read', async () => {
-      const outcome = await this.source.getProfile()
+      let outcome: AccountQueryOutcome<AccountProfile>
+      try {
+        outcome = await this.source.getProfile(lease)
+      } catch (error) {
+        if (this.observationLease !== lease) return
+        if (!this.source.isObservationCurrent(lease)) {
+          this.invalidateObservation('connection-changed')
+          return
+        }
+        this.settle(() => {
+          if (serial !== this.profileSerial || this.observationLease !== lease) return
+          this.profile = { kind: 'failed', reason: errorText(error) }
+        })
+        return
+      }
+      if (this.observationLease !== lease) return
+      if (!this.source.isObservationCurrent(lease)) {
+        this.invalidateObservation('connection-changed')
+        return
+      }
       this.settle(() => {
-        if (serial !== this.profileSerial) return
+        if (serial !== this.profileSerial || this.observationLease !== lease) return
         const state = queryStateOf(outcome)
         if (state === undefined) return
         this.profile = state
@@ -340,14 +495,33 @@ export class AccountWorkspacePage implements Component {
     })
   }
 
-  private readBalance(): void {
+  private readBalance(lease: AccountObservationLease): void {
     if (this.disposed) return
     const serial = ++this.balanceSerial
     this.balance = { kind: 'pending' }
     this.source.run('account balance read', async () => {
-      const outcome = await this.source.getBalance()
+      let outcome: AccountQueryOutcome<{ readonly value: readonly AccountWallet[]; readonly bonusWallets: readonly AccountWallet[] }>
+      try {
+        outcome = await this.source.getBalance(lease)
+      } catch (error) {
+        if (this.observationLease !== lease) return
+        if (!this.source.isObservationCurrent(lease)) {
+          this.invalidateObservation('connection-changed')
+          return
+        }
+        this.settle(() => {
+          if (serial !== this.balanceSerial || this.observationLease !== lease) return
+          this.balance = { kind: 'failed', reason: errorText(error) }
+        })
+        return
+      }
+      if (this.observationLease !== lease) return
+      if (!this.source.isObservationCurrent(lease)) {
+        this.invalidateObservation('connection-changed')
+        return
+      }
       this.settle(() => {
-        if (serial !== this.balanceSerial) return
+        if (serial !== this.balanceSerial || this.observationLease !== lease) return
         const state = queryStateOf(outcome)
         if (state === undefined) return
         this.balance = state
@@ -363,32 +537,59 @@ export class AccountWorkspacePage implements Component {
   }
 
   private activeAttempt(): NonNullable<AccountView['attempt']> | undefined {
+    if (!this.hasCurrentObservation()) return undefined
     const attempt = this.view?.attempt
     return attempt !== null && attempt !== undefined && ACTIVE_PHASES.has(attempt.phase) ? attempt : undefined
   }
 
+  private canStartSignIn(): boolean {
+    return !this.disposed
+      && this.busy === undefined
+      && !this.stateRecheckRequired
+      && this.stateFailure === undefined
+      && this.currentObservationLease() !== undefined
+      && this.view?.status === 'signed-out'
+      && this.activeAttempt() === undefined
+      && this.source.callbackOrigin() !== undefined
+  }
+
+  private canCancelAttempt(): boolean {
+    return !this.disposed
+      && this.busy === undefined
+      && !this.stateRecheckRequired
+      && this.stateFailure === undefined
+      && this.currentObservationLease() !== undefined
+      && this.activeAttempt() !== undefined
+  }
+
+  private canBeginSignOut(): boolean {
+    return !this.disposed
+      && this.busy === undefined
+      && !this.stateRecheckRequired
+      && this.stateFailure === undefined
+      && this.currentObservationLease() !== undefined
+      && this.view?.status === 'credential-stored'
+  }
+
   private signIn(): void {
-    if (this.busy !== undefined || this.stateRecheckRequired) return
+    if (!this.canStartSignIn()) return
+    const lease = this.currentObservationLease()
+    if (lease === undefined) return
     const serial = ++this.stateSerial
-    if (this.source.callbackOrigin() === undefined) {
-      this.notice = 'the Host browser callback listener is unavailable — browser sign-in cannot complete'
-      this.requestRender()
-      return
-    }
     this.busy = 'signin'
     this.notice = undefined
     this.revision += 1
     this.requestRender()
     this.source.run('account sign in', async () => {
       try {
-        const view = await this.source.startSignIn()
+        const observation = await this.source.startSignIn(lease)
         this.settle(() => {
-          this.commitOperationView(view, serial)
+          this.commitObservation(observation, 'ack', serial)
           this.busy = undefined
         })
       } catch (error) {
         this.settle(() => {
-          this.stateRecheckRequired = true
+          this.requireReconciliationReadback()
           this.busy = undefined
           this.notice = `sign-in could not start: ${errorText(error)} — refreshing Host account state`
         })
@@ -399,21 +600,23 @@ export class AccountWorkspacePage implements Component {
 
   private cancelAttempt(): void {
     const attempt = this.activeAttempt()
-    if (attempt === undefined || this.busy !== undefined || this.stateRecheckRequired) return
+    if (attempt === undefined || !this.canCancelAttempt()) return
+    const lease = this.currentObservationLease()
+    if (lease === undefined) return
     const serial = ++this.stateSerial
     this.busy = 'cancel'
     this.revision += 1
     this.requestRender()
     this.source.run('account cancel sign in', async () => {
       try {
-        const view = await this.source.cancelSignIn(attempt.id)
+        const observation = await this.source.cancelSignIn(attempt.id, lease)
         this.settle(() => {
-          this.commitOperationView(view, serial)
+          this.commitObservation(observation, 'ack', serial)
           this.busy = undefined
         })
       } catch (error) {
         this.settle(() => {
-          this.stateRecheckRequired = true
+          this.requireReconciliationReadback()
           this.busy = undefined
           this.notice = `cancel failed: ${errorText(error)} — refreshing Host account state`
         })
@@ -423,9 +626,9 @@ export class AccountWorkspacePage implements Component {
   }
 
   private confirmSignOut(): void {
-    if (this.busy !== undefined || this.stateRecheckRequired || this.stateFailure !== undefined) return
-    const view = this.view
-    if (view === undefined || view.status !== 'credential-stored') return
+    if (!this.canBeginSignOut()) return
+    const view = this.view!
+    const lease = this.currentObservationLease()!
     this.signOutConfirm = true
     this.signOutConfirmationSerial += 1
     this.taskCheck = { kind: 'checking' }
@@ -435,41 +638,50 @@ export class AccountWorkspacePage implements Component {
       : 'the stored DeepSeek Account'
     this.cursor = 0
     this.requestRender()
-    this.checkRunningTaskFact(view)
+    this.checkRunningTaskFact(view, lease)
+  }
+
+  private canCommitSignOut(): boolean {
+    return this.canBeginSignOut()
+      && this.signOutConfirm
+      && this.taskCheck.kind === 'known'
+  }
+
+  private canRetryTaskCheck(): boolean {
+    return this.canBeginSignOut()
+      && this.signOutConfirm
+      && this.taskCheck.kind === 'unavailable'
   }
 
   private signOut(): void {
     const view = this.view
+    const lease = this.currentObservationLease()
     const confirmationSerial = this.signOutConfirmationSerial
     const taskCheckSerial = this.runningTaskCheckSerial
-    if (this.busy !== undefined
-      || !this.signOutConfirm
-      || this.stateRecheckRequired
-      || this.stateFailure !== undefined
-      || view === undefined
-      || view.status !== 'credential-stored'
-      || this.taskCheck.kind !== 'known') return
-    if (this.view !== view
+    if (view === undefined || lease === undefined || !this.canCommitSignOut()) return
+    if (this.observationLease !== lease
+      || this.view !== view
       || this.signOutConfirmationSerial !== confirmationSerial
-      || this.runningTaskCheckSerial !== taskCheckSerial) return
+      || this.runningTaskCheckSerial !== taskCheckSerial
+      || !this.source.isObservationCurrent(lease)) return
     const serial = ++this.stateSerial
     this.busy = 'signout'
     this.revision += 1
     this.requestRender()
     this.source.run('account sign out', async () => {
       try {
-        const result = await this.source.signOut()
+        const result = await this.source.signOut(lease)
         this.settle(() => {
           this.closeSignOutConfirmation()
           this.busy = undefined
-          this.commitOperationView(result, serial)
+          this.commitObservation(result, 'ack', serial)
         })
       } catch (error) {
         this.settle(() => {
           // A failed/unknown ACK never authorizes a second sign-out attempt.
           // The next manual step waits for a fresh Host state or watch view.
           this.closeSignOutConfirmation()
-          this.stateRecheckRequired = true
+          this.requireReconciliationReadback()
           this.busy = undefined
           this.notice = `sign-out failed: ${errorText(error)} — refreshing Host account state`
         })
@@ -613,10 +825,22 @@ export class AccountWorkspacePage implements Component {
       }
     }
     const view = this.view
-    const content: string[] = [color.textStrong('DeepSeek Account'), '']
-    const status = view === undefined
-      ? this.initializing ? 'Reading Host account state…' : 'Unavailable'
-      : view.status === 'credential-stored' ? 'Signed in (stored credential)' : 'Signed out / no stored credential'
+    const compactStatus = width <= 30 || this.bodyHeight <= 8
+    const content: string[] = compactStatus
+      ? [color.textStrong('DeepSeek Account')]
+      : [color.textStrong('DeepSeek Account'), '']
+    const observationCurrent = this.hasCurrentObservation()
+    const status = compactStatus
+      ? view === undefined
+        ? this.initializing ? 'reading Host state' : 'unavailable'
+        : observationCurrent
+          ? view.status === 'credential-stored' ? 'credential stored' : 'signed out'
+          : view.status === 'credential-stored' ? 'stale: signed in' : 'stale: signed out'
+      : view === undefined
+        ? this.initializing ? 'Reading Host account state…' : 'Unavailable'
+        : observationCurrent
+          ? view.status === 'credential-stored' ? 'Signed in (stored credential)' : 'Signed out / no stored credential'
+          : view.status === 'credential-stored' ? 'Last known: signed in · Host state not current' : 'Last known: signed out · Host state not current'
     content.push(...this.fact('Status', status, width))
     if (this.stateFailure !== undefined) content.push(...this.fact('Error', this.stateFailure, width))
     const attempt = this.activeAttempt()
@@ -628,10 +852,13 @@ export class AccountWorkspacePage implements Component {
       content.push(...this.fact('Last attempt', phaseLabel(view.attempt.phase), width))
       if (view.attempt.errorCode !== undefined) content.push(...this.fact('Error code', view.attempt.errorCode, width))
     }
-    content.push(...this.fact('Profile', this.profileText(), width))
-    content.push(...this.fact('Balance', this.balanceText(), width))
-    content.push(...this.fact('Callback', this.source.callbackOrigin() ?? 'unavailable — the Host listener is not bound', width))
-    const url = attempt?.authorizeUrl
+    const profileText = this.profileText()
+    const balanceText = this.balanceText()
+    content.push(...this.fact('Profile', observationCurrent ? profileText : `last known · not current · ${profileText}`, width))
+    content.push(...this.fact('Balance', observationCurrent ? balanceText : `last known · not current · ${balanceText}`, width))
+    const callbackOrigin = observationCurrent ? this.source.callbackOrigin() : undefined
+    content.push(...this.fact('Callback', callbackOrigin ?? 'unavailable — the Host account observation is not current', width))
+    const url = observationCurrent ? attempt?.authorizeUrl : undefined
     if (url !== undefined) {
       content.push('', color.textStrong('Browser authorization'))
       content.push(...this.wrapText(url, width))
@@ -650,7 +877,9 @@ export class AccountWorkspacePage implements Component {
     if (this.signOutConfirm) {
       content.push('', color.textStrong('Sign out confirmation'))
       content.push(color.warning(sanitizedPhysicalLine(`This removes the locally stored DeepSeek Account credential for ${this.signOutIdentity ?? 'the current account'}. API keys stay stored; the current model is not switched.`)))
-      if (this.taskCheck.kind === 'checking' || this.taskCheck.kind === 'idle') {
+      if (!observationCurrent) {
+        content.push(color.error('The Host Account state is not current. Refresh before signing out.'))
+      } else if (this.taskCheck.kind === 'checking' || this.taskCheck.kind === 'idle') {
         content.push(color.textDim('Checking running account tasks…'))
       } else if (this.taskCheck.kind === 'known' && this.taskCheck.running) {
         content.push(color.error('A running agent is using a deepseek-account model. Signing out lets the Host cancel that matching account task.'))
@@ -666,21 +895,16 @@ export class AccountWorkspacePage implements Component {
     if (this.busy !== undefined) content.push('', color.textMuted(`${this.busy} — the Host has not confirmed yet`))
     const actions: ActionLine[] = []
     if (this.signOutConfirm) {
-      const canSignOut = view?.status === 'credential-stored'
-        && this.taskCheck.kind === 'known'
-        && this.busy === undefined
-        && !this.stateRecheckRequired
-        && this.stateFailure === undefined
-      actions.push({ id: 'account:signout-confirm', label: 'Sign out', enabled: canSignOut })
+      actions.push({ id: 'account:signout-confirm', label: 'Sign out', enabled: this.canCommitSignOut() })
       if (this.taskCheck.kind === 'unavailable') {
-        actions.push({ id: 'account:signout-retry', label: 'Retry task check', enabled: this.busy === undefined })
+        actions.push({ id: 'account:signout-retry', label: 'Retry task check', enabled: this.canRetryTaskCheck() })
       }
       actions.push({ id: 'account:signout-cancel', label: 'Cancel', enabled: true })
     } else {
       if (view?.status !== 'credential-stored' && attempt === undefined) {
-        actions.push({ id: 'account:signin', label: 'Sign in', enabled: this.busy === undefined && !this.stateRecheckRequired && this.source.callbackOrigin() !== undefined })
+        actions.push({ id: 'account:signin', label: 'Sign in', enabled: this.canStartSignIn() })
       }
-      if (attempt !== undefined) actions.push({ id: 'account:cancel', label: 'Cancel current attempt', enabled: this.busy === undefined && !this.stateRecheckRequired })
+      if (attempt !== undefined) actions.push({ id: 'account:cancel', label: 'Cancel current attempt', enabled: this.canCancelAttempt() })
       if (url !== undefined) {
         actions.push({ id: 'account:open', label: 'Open browser', enabled: true })
         actions.push({ id: 'account:copy-url', label: 'Copy link', enabled: true })
@@ -694,7 +918,7 @@ export class AccountWorkspacePage implements Component {
         actions.push({
           id: 'account:signout',
           label: 'Sign out…',
-          enabled: this.busy === undefined && !this.stateRecheckRequired && this.stateFailure === undefined,
+          enabled: this.canBeginSignOut(),
         })
       }
       actions.push({ id: 'account:refresh', label: 'Refresh', enabled: this.busy === undefined })
@@ -855,9 +1079,9 @@ export class AccountWorkspacePage implements Component {
       case 'account:signout': this.confirmSignOut(); return 'handled'
       case 'account:signout-confirm': this.signOut(); return 'handled'
       case 'account:signout-retry': {
-        if (this.busy !== undefined || this.taskCheck.kind !== 'unavailable'
-          || this.view === undefined || this.view.status !== 'credential-stored') return 'handled'
-        this.checkRunningTaskFact(this.view)
+        const lease = this.currentObservationLease()
+        if (lease === undefined || !this.canRetryTaskCheck() || this.view === undefined) return 'handled'
+        this.checkRunningTaskFact(this.view, lease)
         this.revision += 1
         this.requestRender()
         return 'handled'

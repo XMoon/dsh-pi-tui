@@ -39,6 +39,7 @@ import {
   providerProfileProjectionOf,
 } from '../../domain/catalog/provider.ts'
 import { cancellationError } from '../process/tasks.ts'
+import { SupersededReadError } from '../read-error.ts'
 import { safeErrorMessage } from '../process/errors.ts'
 import {
   resolveTrustedFooterCommand,
@@ -59,6 +60,9 @@ import type {
   AccountBalanceOutcome,
   AccountClientMetadata,
   AccountConfig,
+  AccountObservation,
+  AccountObservationLease,
+  AccountWatchEvent,
   AccountProfile,
   AccountProfileOutcome,
   AccountView,
@@ -1257,9 +1261,17 @@ export interface WebServerServiceLike {
  * root — a Client never supplies one. */
 export class DirectAccountConfig implements AccountConfig {
   private readonly ctx: HostContextLike
+  private readonly observationLeases = new WeakMap<object, { epoch: number; active: boolean }>()
+  private readonly serviceInvalidationListeners = new Set<() => void>()
+  private observationEpoch = 0
 
   constructor(ctx: HostContextLike) {
     this.ctx = ctx
+    ctx.on?.('internal/service', name => {
+      if (name !== 'deepseekAccount') return
+      this.invalidateObservations()
+      for (const listener of [...this.serviceInvalidationListeners]) listener()
+    })
   }
 
   private account(): DeepSeekAccountServiceLike | undefined {
@@ -1270,26 +1282,56 @@ export class DirectAccountConfig implements AccountConfig {
     return this.account() !== undefined
   }
 
-  async getState(): Promise<AccountView> {
-    const account = this.account()
-    if (account === undefined) throw new Error('DeepSeek Account service unavailable')
-    return accountViewOf(await account.getState())
+  private observe(view: AccountView, lease: object = {}): AccountObservation {
+    this.observationLeases.set(lease, { epoch: this.observationEpoch, active: true })
+    return { view, lease: lease as AccountObservationLease }
   }
 
-  async getProfile(client: AccountClientMetadata): Promise<AccountProfileOutcome> {
+  private invalidateObservations(): void {
+    this.observationEpoch += 1
+  }
+
+  private assertObservation(lease: AccountObservationLease, method: string): void {
+    const record = this.observationLeases.get(lease)
+    if (record === undefined || !record.active || record.epoch !== this.observationEpoch || !this.available()) {
+      throw new SupersededReadError(`Direct account.${method} does not have a current Host observation`)
+    }
+  }
+
+  isObservationCurrent(lease: AccountObservationLease): boolean {
+    const record = this.observationLeases.get(lease)
+    return record !== undefined && record.active && record.epoch === this.observationEpoch && this.available()
+  }
+
+  async getState(): Promise<AccountObservation> {
+    const account = this.account()
+    if (account === undefined) throw new Error('DeepSeek Account service unavailable')
+    const epoch = this.observationEpoch
+    const view = accountViewOf(await account.getState())
+    if (epoch !== this.observationEpoch || !this.available()) {
+      throw new SupersededReadError('Direct account.getState was superseded by Host observation invalidation')
+    }
+    return this.observe(view)
+  }
+
+  async getProfile(client: AccountClientMetadata, lease: AccountObservationLease): Promise<AccountProfileOutcome> {
+    this.assertObservation(lease, 'getProfile')
     const account = this.account()
     if (account === undefined) throw new Error('DeepSeek Account service unavailable')
     const outcome = await account.getProfile({ ...client })
+    this.assertObservation(lease, 'getProfile')
     if (outcome === null) return null
     const value = outcome as { status?: unknown; value?: unknown }
     if (value.status !== 'ready') return { status: 'failed' }
     return { status: 'ready', value: accountProfileOf(value.value) }
   }
 
-  async getBalance(client: AccountClientMetadata): Promise<AccountBalanceOutcome> {
+  async getBalance(client: AccountClientMetadata, lease: AccountObservationLease): Promise<AccountBalanceOutcome> {
+    this.assertObservation(lease, 'getBalance')
     const account = this.account()
     if (account === undefined) throw new Error('DeepSeek Account service unavailable')
     const outcome = await account.getBalance({ ...client })
+    this.assertObservation(lease, 'getBalance')
     if (outcome === null) return null
     const value = outcome as { status?: unknown; value?: unknown; bonusWallets?: unknown }
     if (value.status !== 'ready') return { status: 'failed' }
@@ -1300,25 +1342,73 @@ export class DirectAccountConfig implements AccountConfig {
     }
   }
 
-  watch(signal: AbortSignal): AsyncIterable<AccountView> {
-    const account = this.account()
-    if (account === undefined) {
-      // No service: an EMPTY subscription rather than a fabricated state.
-      return (async function* empty(): AsyncGenerator<AccountView> {})()
-    }
-    const source = account.watch(signal)
-    return (async function* projected(): AsyncGenerator<AccountView> {
-      const iterator = source[Symbol.asyncIterator]()
+  watch(signal: AbortSignal): AsyncIterable<AccountWatchEvent> {
+    const owner = this
+    return (async function* directAccountWatch(): AsyncGenerator<AccountWatchEvent> {
+      const lease = {}
+      const watchEpoch = owner.observationEpoch
+      const account = owner.account()
+      if (account === undefined) {
+        owner.invalidateObservations()
+        yield { kind: 'invalidated', reason: 'service-unavailable' }
+        return
+      }
+      const revokeWatchLease = (): void => {
+        const record = owner.observationLeases.get(lease)
+        if (record !== undefined) record.active = false
+      }
+      const invalidateOwner = (): void => {
+        owner.invalidateObservations()
+        revokeWatchLease()
+      }
+      let resolveServiceChanged!: () => void
+      const serviceChanged = new Promise<void>(resolve => { resolveServiceChanged = resolve })
+      const onServiceChanged = (): void => { resolveServiceChanged() }
+      owner.serviceInvalidationListeners.add(onServiceChanged)
+      if (owner.observationEpoch !== watchEpoch) resolveServiceChanged()
       try {
-        for (;;) {
-          const next = await iterator.next()
-          if (next.done === true) return
-          yield accountViewOf(next.value)
+        const source = account.watch(signal)
+        const iterator = source[Symbol.asyncIterator]()
+        try {
+          while (!signal.aborted) {
+            const nextResult = iterator.next().then(
+              result => ({ kind: 'next' as const, result }),
+              error => ({ kind: 'error' as const, error }),
+            )
+            const winner = await Promise.race([
+              nextResult,
+              serviceChanged.then(() => ({ kind: 'service-changed' as const })),
+            ])
+            if (winner.kind === 'service-changed') {
+              revokeWatchLease()
+              yield { kind: 'invalidated', reason: 'service-changed' }
+              return
+            }
+            if (winner.kind === 'error') throw winner.error
+            if (owner.observationEpoch !== watchEpoch) {
+              revokeWatchLease()
+              yield { kind: 'invalidated', reason: 'service-changed' }
+              return
+            }
+            if (winner.result.done === true) {
+              invalidateOwner()
+              if (!signal.aborted) yield { kind: 'invalidated', reason: 'watch-ended' }
+              return
+            }
+            if (signal.aborted) return
+            yield { kind: 'current', observation: owner.observe(accountViewOf(winner.result.value), lease) }
+          }
+        } finally {
+          await iterator.return?.(undefined)
+        }
+      } catch {
+        if (!signal.aborted) {
+          invalidateOwner()
+          yield { kind: 'invalidated', reason: 'watch-failed' }
         }
       } finally {
-        // Ending the signal is the only cancellation (never cancelSignIn):
-        // the official iterator owns its own listener release.
-        await iterator.return?.(undefined)
+        owner.serviceInvalidationListeners.delete(onServiceChanged)
+        revokeWatchLease()
       }
     })()
   }
@@ -1347,28 +1437,38 @@ export class DirectAccountConfig implements AccountConfig {
     return url.origin
   }
 
-  async startSignIn(client: AccountClientMetadata): Promise<AccountView> {
+  async startSignIn(client: AccountClientMetadata, lease: AccountObservationLease): Promise<AccountObservation> {
+    this.assertObservation(lease, 'startSignIn')
     const account = this.account()
     if (account === undefined) throw new Error('DeepSeek Account service unavailable')
     const callbackOrigin = this.getCallbackOrigin()
     if (callbackOrigin === undefined) throw new Error('the Host browser callback listener is unavailable')
     // `web` is the only login source a TUI may present (never Desktop).
-    return accountViewOf(await account.startSignIn({ ...client }, callbackOrigin, 'web'))
+    const view = accountViewOf(await account.startSignIn({ ...client }, callbackOrigin, 'web'))
+    this.assertObservation(lease, 'startSignIn')
+    return { view, lease }
   }
 
-  async cancelSignIn(id: string): Promise<AccountView> {
+  async cancelSignIn(id: string, lease: AccountObservationLease): Promise<AccountObservation> {
+    this.assertObservation(lease, 'cancelSignIn')
     const account = this.account()
     if (account === undefined) throw new Error('DeepSeek Account service unavailable')
-    return accountViewOf(await account.cancelSignIn(id))
+    const view = accountViewOf(await account.cancelSignIn(id))
+    this.assertObservation(lease, 'cancelSignIn')
+    return { view, lease }
   }
 
-  async signOut(client: AccountClientMetadata): Promise<AccountView> {
+  async signOut(client: AccountClientMetadata, lease: AccountObservationLease): Promise<AccountObservation> {
+    this.assertObservation(lease, 'signOut')
     const account = this.account()
     if (account === undefined) throw new Error('DeepSeek Account service unavailable')
-    return accountViewOf(await account.signOut({ ...client }))
+    const view = accountViewOf(await account.signOut({ ...client }))
+    this.assertObservation(lease, 'signOut')
+    return { view, lease }
   }
 
-  async hasRunningAccountTasks(): Promise<boolean> {
+  async hasRunningAccountTasks(lease: AccountObservationLease): Promise<boolean> {
+    this.assertObservation(lease, 'hasRunningAccountTasks')
     // Mirrors the official `isRunningAccountTask` predicate: a running Agent
     // whose latest bound request used the account provider. The Host's own
     // signed-out listener remains the cancellation owner.
