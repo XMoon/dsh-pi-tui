@@ -1,20 +1,55 @@
 import { createHash } from 'node:crypto'
+import { spawnSync } from 'node:child_process'
 import { createServer } from 'node:http'
-import { existsSync, lstatSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import { join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { parse as parseYaml } from 'yaml'
 import {
   assertClientHostFacts,
+  hostStatus,
   lastSurfaceStatus,
   waitForCondition,
   waitForSurfaceStatus,
 } from '../../lib/split-smoke-processes.mjs'
 import { SplitSmokeAssertionError, redactWebQualificationText } from '../../lib/split-smoke-diagnostics.mjs'
+import { PR_A_WELCOME_NOTICE_VERSION } from './web-helpers.mjs'
+
+const FIXTURE_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'fixtures')
 
 function assert(condition, message) {
   if (!condition) throw new SplitSmokeAssertionError(message)
+}
+
+/** Open the official Web Account menu and return its credential state. */
+function readWebAccountMenu(dshHome, workDir, playwrightRoot) {
+  const coordination = join(workDir, 'f2-t11-web-account')
+  mkdirSync(coordination, { recursive: true, mode: 0o700 })
+  const playwrightBrowsers = process.env.SPLIT_PROCESS_PLAYWRIGHT_BROWSERS ?? join(playwrightRoot, 'browsers')
+  const chromiumLibs = process.env.SPLIT_PROCESS_CHROMIUM_LIBS ?? join(playwrightRoot, 'libs', 'usr', 'lib', 'x86_64-linux-gnu')
+  const child = spawnSync(process.execPath, [join(FIXTURE_DIR, 'pr-a-web-browser.mjs'), coordination, 'account-check'], {
+    cwd: workDir,
+    env: {
+      ...process.env,
+      PR_A_DSH_HOME: dshHome,
+      PR_A_PLAYWRIGHT_ROOT: playwrightRoot,
+      PR_A_ACCOUNT_UI_CHECK: '1',
+      PR_A_ACCOUNT_EXPECTED: 'credential-stored',
+      PR_A_ACCOUNT_ONLY: '1',
+      PLAYWRIGHT_BROWSERS_PATH: playwrightBrowsers,
+      LD_LIBRARY_PATH: `${chromiumLibs}${process.env.LD_LIBRARY_PATH === undefined ? '' : `:${process.env.LD_LIBRARY_PATH}`}`,
+    },
+    timeout: 180_000,
+    encoding: 'utf8',
+  })
+  assert(child.status === 0, `F2-T11 the official Web Account Browser failed: ${redactWebQualificationText(`${child.stderr} ${child.stdout}`).trim().slice(-600)}`)
+  const report = JSON.parse(readFileSync(join(coordination, 'browser-result.json'), 'utf8'))
+  assert(report.error === undefined, `F2-T11 the official Web Account Browser reported ${String(report.error)}`)
+  assert(report.accountOnly === true && report.accountSignedIn === true,
+    `F2-T11 the official Web Account menu did not observe credential-stored: ${JSON.stringify({ accountOnly: report.accountOnly, accountSignedIn: report.accountSignedIn, accountSignedOut: report.accountSignedOut })}`)
+  return report
 }
 
 function reply(response, bizData) {
@@ -199,6 +234,7 @@ export async function runF2AccountComposition(context) {
   const mockFailures = []
   let mockServer
   let host
+  let peer
   let suspendedHostPid
   const clients = []
   const credentialsPath = join(dshHome, '.credentials.yaml')
@@ -392,6 +428,9 @@ export async function runF2AccountComposition(context) {
       '  config:',
       `    baseURL: '${platformOrigin}/anthropic'`,
       '    modelsTimeoutMs: 3000',
+      '- id: ui-settings-general',
+      '  config:',
+      `    welcomeNoticeVersion: '${PR_A_WELCOME_NOTICE_VERSION}'`,
       '',
     ].join('\n')
     writeFileSync(accountPatchPath, hostPatch, { mode: 0o600 })
@@ -677,6 +716,74 @@ export async function runF2AccountComposition(context) {
     await openAccountPage(clientA, 'F2 A', 'credential-stored')
     await waitForAccountFrame(clientB, 'Signed in (stored credential)',
       'F2 live peer Account page retained the Host grant', trace)
+    // F2-T11: enabling Web must not clear the already committed Host grant.
+    const webLogoutCalls = requests.filter(path => path === 'POST /auth-api/v0/users/logout').length
+    await waitForAccountFrame(clientB, 'Signed in (stored credential)',
+      'F2-T11 stored credential before Web enable', trace, 30_000)
+    const accountOwnerUid = status => ({
+      owner: status.ownerEntries?.accountController?.[0],
+      fiberUid: status.entries?.find(entry => entry.id === 'split-host-account-controller')?.fiberUid,
+    })
+    const ownerBeforeWeb = accountOwnerUid(await hostStatus(host))
+    assert(ownerBeforeWeb.owner === 'split-host-account-controller' && Number.isInteger(ownerBeforeWeb.fiberUid),
+      `F2-T11 the Host has no unique live Account Controller owner: ${JSON.stringify(ownerBeforeWeb)}`)
+
+    peer = new EntryProcess('peer', entries.client, {
+      ...base,
+      env: { ...base.env, SPLIT_PROCESS_CLIENT_MODE: 'peer' },
+    })
+    await peer.waitFor(record => record.m4a0 === 'ready', 'F2-T11 Web access peer ready', 180_000)
+    let webRequest = 0
+    const setWeb = async value => {
+      const requestId = `f2-t11-web-${++webRequest}`
+      peer.send({ op: 'qualification-web-access', requestId, webAccessEnabled: value })
+      return peer.waitFor(entry => entry.op === 'web-access' && entry.requestId === requestId,
+        `F2-T11 Web access ${value ? 'enable' : 'disable'}`, 300_000)
+    }
+
+    const enabledRecord = await setWeb(true)
+    assert(enabledRecord.ok === true && enabledRecord.status?.state === 'enabled',
+      `F2-T11 the Host did not enable Web: ${JSON.stringify(enabledRecord.status ?? enabledRecord.errorCode ?? null)}`)
+    const enabledWeb = await hostStatus(host)
+    assert(enabledWeb.entries?.find(entry => entry.id === 'ui-settings-account')?.state === 'active',
+      'F2-T11 the official Web Account UI row did not activate with Web')
+    const ownerWhileWeb = accountOwnerUid(enabledWeb)
+    assert(ownerWhileWeb.owner === ownerBeforeWeb.owner && ownerWhileWeb.fiberUid === ownerBeforeWeb.fiberUid,
+      `F2-T11 the Web enable remounted the Account Controller: ${JSON.stringify({ before: ownerBeforeWeb, after: ownerWhileWeb })}`)
+    await waitForAccountFrame(clientB, 'Signed in (stored credential)',
+      'F2-T11 TUI keeps the stored grant while Web is enabled', trace, 30_000)
+    const webMenu = readWebAccountMenu(dshHome, workDir, playwrightRoot)
+    assert(parseYaml(readFileSync(credentialsPath, 'utf8')).records?.['deepseek-account-platform/default'] !== undefined,
+      'F2-T11 enabling Web cleared the stored Host grant')
+    assert(requests.filter(path => path === 'POST /auth-api/v0/users/logout').length === webLogoutCalls,
+      'F2-T11 enabling Web triggered a Host sign-out')
+
+    const disabledRecord = await setWeb(false)
+    assert(disabledRecord.ok === true && disabledRecord.status?.state === 'disabled',
+      `F2-T11 the Host did not disable Web: ${JSON.stringify(disabledRecord.status ?? disabledRecord.errorCode ?? null)}`)
+    const disabledWeb = await hostStatus(host)
+    const ownerAfterWeb = accountOwnerUid(disabledWeb)
+    assert(ownerAfterWeb.owner === ownerBeforeWeb.owner && ownerAfterWeb.fiberUid === ownerBeforeWeb.fiberUid,
+      `F2-T11 the Web disable remounted the Account Controller: ${JSON.stringify({ before: ownerBeforeWeb, after: ownerAfterWeb })}`)
+    await waitForAccountFrame(clientB, 'Signed in (stored credential)',
+      'F2-T11 TUI keeps the stored grant after Web is disabled', trace, 30_000)
+    assert(parseYaml(readFileSync(credentialsPath, 'utf8')).records?.['deepseek-account-platform/default'] !== undefined,
+      'F2-T11 disabling Web cleared the stored Host grant')
+    assert(requests.filter(path => path === 'POST /auth-api/v0/users/logout').length === webLogoutCalls,
+      'F2-T11 disabling Web triggered a Host sign-out')
+    trace('account.web-coexistence', {
+      accountControllerOwner: ownerBeforeWeb.owner,
+      accountControllerFiberUid: ownerBeforeWeb.fiberUid,
+      fiberUnchanged: true,
+      webAccountUi: 'active',
+      webAccountMenu: 'credential-stored',
+      tuiBefore: 'credential-stored',
+      tuiWhileWeb: 'credential-stored',
+      tuiAfterWeb: 'credential-stored',
+      grantRetained: true,
+      logoutCalls: webLogoutCalls,
+    })
+
     await confirmCurrentSignOut(clientB, 'F2 Account sign-out confirmation')
     await waitForAccountFrame(clientB, 'A running agent is using a deepseek-account model',
       'F2 live Host running-account-task warning', trace, 30_000)
@@ -785,7 +892,8 @@ export async function runF2AccountComposition(context) {
       hostControllerOwners: hostReady.ownerEntries.accountController.length,
       hostTypertBinding: hostReady.services.accountController,
       missingHostBinding: 'FAIL_CLOSED',
-      webAccountUi: 'inactive',
+      webAccountUi: 'inactive-initially',
+      webAccountCoexistence: 'credential-stored',
       independentClients: 2,
       initialWatchSnapshots: 2,
       initialSignedOutWatch: true,
@@ -817,6 +925,7 @@ export async function runF2AccountComposition(context) {
       hostAccountController: 'PASS',
       missingHostBinding: true,
       generatedAccountClients: 2,
+      webAccountCoexistence: 'PASS',
       verifiedCallback: true,
       pkce: true,
       wrongCodeWithValidPkce: auth.wrongCodeRejected,
@@ -837,6 +946,9 @@ export async function runF2AccountComposition(context) {
       suspendedHostPid = undefined
     }
     for (const client of clients) await client.dispose()
+    if (peer !== undefined && !peer.exited) {
+      try { await peer.shutdown() } catch { /* the runner's process backstop owns leftovers */ }
+    }
     if (host !== undefined) {
       try { await host.shutdown() } catch { /* the runner's process backstop owns leftovers */ }
     }
