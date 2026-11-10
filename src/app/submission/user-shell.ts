@@ -19,13 +19,7 @@
  * @module @xmoon76/dsh-pi-tui/app/submission/user-shell
  */
 
-import { randomUUID } from 'node:crypto'
-import { rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import { createBoundedOutput, createFileCapture, SHELL_OUTPUT_DISK_CAP_BYTES } from '../../client/shell/output-capture.ts'
-import { formatBytes } from '../../domain/media/format.ts'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
 import { runOwned } from '../../runtime/process/tasks.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
@@ -33,18 +27,16 @@ import type { InterruptAgentLike } from '../session/interrupt.ts'
 import type { TuiSettingsDoc } from '../../runtime/config-port.ts'
 import {
   HostUserShellOutcomeUnknownError,
+  type HostUserShellOutput,
+  type HostUserShellPolicy,
   type HostUserShellPort,
+  type HostUserShellResult,
 } from '../../runtime/host-user-shell-port.ts'
 import type { SessionWriter, WriteOutcome } from '../../runtime/session-writer-port.ts'
 import { localShellSandboxPreferenceOf, shellCommandOf, shellModeOf } from './shell-context.ts'
 import { submitShell } from '../submission/runtime.ts'
 import type { LiveSessionScope } from '../session/scope.ts'
 import type { TuiApp } from '../../tui-app.ts'
-
-/** Throttle for re-chaining a RUNNING user-shell card's result to the bounded
- * tail (plan §5.1): the running preview refreshes at most this often, so a
- * high-throughput log cannot rebuild the view per chunk. */
-const USER_SHELL_TAIL_FLUSH_MS = 200
 
 /** The narrow capabilities the user shell consumes. */
 export interface UserShellDeps<ExactAgent extends InterruptAgentLike> {
@@ -118,33 +110,68 @@ export interface UserShellOwner {
   interrupt(): void
   /** Abort the active Host Shell run only; false means no cancellable run exists. */
   cancelRun(): boolean
-  /** Abort the run and remove every retained full-output temp file. */
+  /** Abort the active Host Shell run. */
   dispose(): void
 }
 
 /**
- * The truncation report line. Reports ACTUAL retained values (measured
- * from the tail), never the configured caps, and states each total in its
- * own unit: retained display bytes / retained lines, decoded display total,
- * and wire-received total.
+ * The short, terminal truncation marker for one settled stream. It deliberately
+ * carries no byte count and no spill path: the card keeps this line at the very
+ * end of its visible tail, where long raw output and long Host paths cannot
+ * push a required marker out of view.
  */
-function formatTruncation(bounded: {
-  tail: string
-  totalBytes: number
-  totalWireBytes: number
-  totalLines: number
-}): string {
-  const retainedDisplay = Buffer.byteLength(bounded.tail, 'utf8')
-  const retainedLines = bounded.tail === '' ? 0 : bounded.tail.split('\n').length
-  return `… output truncated: retained ${formatBytes(retainedDisplay)} display / ${retainedLines} lines; decoded ${formatBytes(bounded.totalBytes)} display from ${formatBytes(bounded.totalWireBytes)} received (${bounded.totalLines} lines total)`
+function formatTruncation(stream: 'stdout' | 'stderr'): string {
+  return `${stream} truncated`
 }
 
-/** Format the settled Host run for the card: the drained bounded tail plus
- * the authoritative exit marker (the bounded tail is authoritative at settle
- * time — the drain was joined before this runs). */
-function formatSettledOutput(bounded: { readonly tail: string }, exit: string): string {
-  const text = bounded.tail.trim()
-  return text === '' ? exit : `${text}\n[${exit}]`
+/**
+ * The optional Host-local spill detail for one truncated stream. It is a
+ * separate line placed BEFORE the short marker so the marker remains the last
+ * truncation fact even when the path is long or clipped.
+ */
+function formatSpill(stream: 'stdout' | 'stderr', output: HostUserShellOutput): string | undefined {
+  if (!output.truncated || output.spillPath === undefined) return undefined
+  return `${stream} spill (Host-local): ${output.spillPath}`
+}
+
+/** Format the settled one-shot Host run for the card: the two bounded streams,
+ * their truthful truncation lines and the authoritative exit marker.
+ *
+ * Official bounded-tail diagnostic semantics: a sandbox nonzero exit with
+ * truncated stderr always has an unknown failure reason. A denial or higher-
+ * priority runner-fatal signature may have been dropped, even if the retained
+ * tail appears to match one. The card preserves the exit and truncation facts,
+ * but never claims a definite denial or runner failure from incomplete stderr.
+ * A positive runner-failure classification on complete diagnostics is returned
+ * before this formatter. */
+export function formatHostUserShellResult(result: HostUserShellResult, policy: HostUserShellPolicy): string {
+  const lines: string[] = []
+  // A nonzero sandbox exit with truncated stderr cannot prove whether a
+  // higher-priority runner-fatal line was dropped. That is a reason-unknown
+  // settlement: never claim a definite denial or an ordinary command failure.
+  const failureReasonUnknown = policy === 'sandbox'
+    && result.exit.kind === 'exit'
+    && result.exit.code !== 0
+    && result.stderr.truncated
+  if (result.sandboxDenied && !failureReasonUnknown) lines.push('sandbox denied')
+  const stdout = result.stdout.text.trim()
+  if (stdout !== '') lines.push(stdout)
+  const stderr = result.stderr.text.trim()
+  if (stderr !== '') lines.push(`[stderr]\n${stderr}`)
+  const stdoutSpill = formatSpill('stdout', result.stdout)
+  if (stdoutSpill !== undefined) lines.push(stdoutSpill)
+  const stderrSpill = formatSpill('stderr', result.stderr)
+  if (stderrSpill !== undefined) lines.push(stderrSpill)
+  // Short markers stay AFTER the raw tails and the optional long spill paths,
+  // so row/width compaction can never hide the explicit truncation fact.
+  if (result.stdout.truncated) lines.push(formatTruncation('stdout'))
+  if (result.stderr.truncated) lines.push(formatTruncation('stderr'))
+  if (failureReasonUnknown) {
+    lines.push('stderr truncated; failure reason cannot be determined, command may have executed; do not retry automatically')
+  }
+  if (result.timedOut) lines.push('[timed out]')
+  lines.push(result.exit.kind === 'exit' ? `[exit ${result.exit.code}]` : `[signal ${result.exit.signal}]`)
+  return lines.join('\n')
 }
 
 /** Create the user-shell owner (plan §A5b-4 + the shell amendment). */
@@ -192,10 +219,6 @@ export function createUserShell<ExactAgent extends InterruptAgentLike>(
     })
   }
 
-  // 0600 temp files holding FULL user-shell output (for truncated runs);
-  // removed at TUI exit (default), never on their own.
-  const shellTempFiles = new Set<string>()
-
   /**
    * Run a `!` / `!!` shell command. `!` (context mode) runs the command on
    * the Host and then submits the completed command+output to the session as
@@ -241,10 +264,8 @@ export function createUserShell<ExactAgent extends InterruptAgentLike>(
     const localSignal = shellController.signal
     // The card reference this run owns: settling by identity keeps a
     // settled old run from overwriting a newer run's card (updateLastLocal
-    // Message would hit whatever card is newest at settle time). The
-    // reference is RE-CHAINED on every in-flight tail update (the array
-    // element is replaced, so the old reference would no longer index).
-    let card = deps.app().pushLocalMessage({
+    // Message would hit whatever card is newest at settle time).
+    const card = deps.app().pushLocalMessage({
       kind: 'tool',
       turn: Number.POSITIVE_INFINITY,
       name: 'shell',
@@ -325,157 +346,54 @@ export function createUserShell<ExactAgent extends InterruptAgentLike>(
     // INSIDE the port with a visible message — nothing is executed and the
     // card settles as a failed run.
     const policy = localShellSandboxPreferenceOf(deps.tuiSettings?.get())
-    // An owned workflow: the RESULT settles the UI card, so the settle
-    // logic stays in onResult and the cancellation/failure semantics stay
-    // per-task (runOwned — AGENTS.md). The admission is async because the
-    // port owns the Host-side execution start.
+    // An owned workflow: one Host one-shot result settles the UI card, so
+    // the settle logic stays in onResult and the cancellation/failure
+    // semantics stay per-task (runOwned — AGENTS.md).
     runOwned('user shell', async () => {
-      const admission = await deps.shell.execute({
+      const outcome = await deps.shell.execute({
         sessionId: scope.sessionId,
         cwd: deps.status.sessionCwd(),
         command,
         policy,
         signal: localSignal,
       })
-      if (admission.kind === 'unavailable') {
+      if (outcome.kind === 'unavailable') {
         releaseController()
         // Fail closed: NOTHING executed. The card settles as a failed run
         // with the port's truthful message; no Session write happens. This
         // exit is TERMINAL for the gesture's ack row in BOTH modes (nothing
         // downstream — no submitResult — will settle it), so it settles here.
-        settle(admission.reason.message, 'error', false)
+        settle(outcome.reason.message, 'error', false)
         shellTerminalAck('host user-shell unavailable')
         return
       }
-      if (admission.kind === 'indeterminate') {
+      if (outcome.kind === 'indeterminate') {
         releaseController()
-        settle(admission.message, 'error', false)
+        settle(outcome.message, 'error', false)
         shellTerminalAck('host user-shell outcome is indeterminate')
         return
       }
-      const execution = admission.execution
-      // Bounded capture: the card keeps only the TAIL (byte- and line-
-      // capped, unterminated output included); the FULL output is streamed
-      // to a 0600 temp file (disk-capped) so a truncated run still leaves
-      // the complete transcript available. Untruncated runs delete the
-      // file on settle; the files that remain are removed at TUI exit.
-      const bounded = createBoundedOutput()
-      const fullPath = join(tmpdir(), `dsh-pi-tui-shell-${process.pid}-${randomUUID()}.log`)
-      const full = createFileCapture(fullPath, SHELL_OUTPUT_DISK_CAP_BYTES)
-      if (full.active) shellTempFiles.add(fullPath)
-      // In-flight tail refresh (plan §5.1): the running card's result is
-      // re-chained to the bounded TAIL on a throttle, so a streaming log
-      // previews its newest rows instead of an empty body.
-      let tailTimer: NodeJS.Timeout | undefined
-      const clearTailTimer = (): void => {
-        if (tailTimer !== undefined) {
-          clearTimeout(tailTimer)
-          tailTimer = undefined
-        }
-      }
-      const scheduleTailFlush = (): void => {
-        if (deps.isCleanedUp() || tailTimer !== undefined) return
-        tailTimer = setTimeout(() => {
-          tailTimer = undefined
-          if (deps.isCleanedUp()) return
-          card = deps.app().updateLocalMessage(card, {
-            kind: 'tool',
-            turn: Number.POSITIVE_INFINITY,
-            name: 'shell',
-            args: command,
-            result: bounded.tail,
-            status: 'running',
-          })
-        }, USER_SHELL_TAIL_FLUSH_MS)
-      }
-      // Live output: each chunk feeds the bounded tail AND the full-output
-      // capture; the adapter owns the stream, this owner owns the
-      // presentation policy only. The DRAIN IS JOINED (§31 quiescence):
-      // `output()` is the single output authority — the card settles only
-      // after the stream has fully ended, so the bounded tail/disk capture is
-      // authoritative at settle time and a lagging delivery cannot be cut
-      // off by an early `result()` resolution.
-      const outputIterator = execution.output()[Symbol.asyncIterator]()
-      const drained = (async (): Promise<void> => {
-        for (;;) {
-          const next = await outputIterator.next()
-          if (next.done === true) return
-          const chunk = next.value
-          if (deps.isCleanedUp()) continue
-          bounded.append(chunk.text, chunk.bytes)
-          full.append(Buffer.from(chunk.text, 'utf8'))
-          scheduleTailFlush()
-        }
-      })()
-      let result: Awaited<ReturnType<typeof execution.result>>
-      try {
-        result = await execution.result()
-        await drained
-      } catch (error) {
-        let drainFailure: unknown
-        try {
-          await outputIterator.return?.()
-        } catch (cleanupError) {
-          drainFailure = cleanupError
-        }
-        try {
-          await drained
-        } catch (errorWhileDraining) {
-          drainFailure ??= errorWhileDraining
-        }
-        clearTailTimer()
-        full.dispose()
-        shellTempFiles.delete(fullPath)
-        if (drainFailure !== undefined && drainFailure !== error) {
-          throw new AggregateError([error, drainFailure], 'Host user-shell result and output drain both failed')
-        }
-        throw error
-      }
       releaseController()
-      clearTailTimer()
-      if (deps.isCleanedUp()) {
-        full.dispose()
-        shellTempFiles.delete(fullPath)
-        return
-      }
-      if (result.aborted) {
-        // The run was cancelled: the partial capture is noise, delete it.
-        full.dispose()
-        shellTempFiles.delete(fullPath)
-        settle('aborted', 'error')
-        return
-      }
-      if (bounded.truncated) {
-        // Keep the full-output file for a truncated run — but only when
-        // the capture is actually alive (creation/write failures are
-        // never advertised, and a disk-capped file says so).
-        if (full.exists) {
-          full.close()
-        } else {
-          full.dispose()
-          shellTempFiles.delete(fullPath)
+      if (deps.isCleanedUp()) return
+      if (outcome.result.aborted) {
+        if (localSignal.aborted) {
+          // The CALLER cancelled (Esc): the bounded partial output is transient.
+          settle('aborted', 'error')
+          return
         }
-        const output = bounded.tail.trim()
-        const lines: string[] = []
-        if (output !== '') lines.push(output)
-        lines.push(formatTruncation(bounded))
-        if (full.exists) {
-          lines.push(full.truncated
-            ? `full output (disk capture truncated at ${formatBytes(SHELL_OUTPUT_DISK_CAP_BYTES)}): ${fullPath}`
-            : `full output: ${fullPath}`)
-        }
-        const exit = result.exit.kind === 'exit' ? `exit ${result.exit.code}` : `signal ${result.exit.signal}`
-        lines.push(`[${exit}]`)
-        settle(lines.join('\n'), result.exit.kind === 'exit' && result.exit.code === 0 ? 'ok' : 'error')
+        // The Host terminated the managed range because the transport went
+        // away, NOT because the caller cancelled. The run was started and its
+        // terminal fact is lost, so this is a transport-level UNKNOWN outcome:
+        // say the command may have executed, write no Session result, and end
+        // the gesture's ack row here (nothing downstream settles it).
+        settle('The command may have executed — do not retry automatically', 'error', false)
+        shellTerminalAck('host user-shell transport abort')
         return
       }
-      // Untruncated output: no reason to keep a user-invisible temp file
-      // around until TUI exit.
-      full.dispose()
-      shellTempFiles.delete(fullPath)
-      const exit = result.exit.kind === 'exit' ? `exit ${result.exit.code}` : `signal ${result.exit.signal}`
-      const denialNotice = result.sandboxDenied === true ? 'sandbox denied\n' : ''
-      settle(`${denialNotice}${formatSettledOutput(bounded, exit)}`, result.exit.kind === 'exit' && result.exit.code === 0 ? 'ok' : 'error')
+      settle(
+        formatHostUserShellResult(outcome.result, policy),
+        outcome.result.exit.kind === 'exit' && outcome.result.exit.code === 0 ? 'ok' : 'error',
+      )
     }, {
       diag: deps.diag,
       sessionId: () => scope.sessionId,
@@ -506,14 +424,6 @@ export function createUserShell<ExactAgent extends InterruptAgentLike>(
 
   const dispose = (): void => {
     shellController?.abort()
-    for (const file of shellTempFiles) {
-      try {
-        rmSync(file, { force: true })
-      } catch {
-        // Best effort.
-      }
-    }
-    shellTempFiles.clear()
   }
 
   return {

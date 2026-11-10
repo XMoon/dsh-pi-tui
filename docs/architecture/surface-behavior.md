@@ -1872,9 +1872,11 @@ Authority: `src/runtime/direct/file-completion/host-discovery.ts`,
   path) serializes and resets to prompt BEFORE dispatch. History stays
   serialized and decodes on recall. Handoffs carry the wire form.
 - The prompt glyph is `❯ `, `! ` or `!!` in prompt/shell-mode inks.
-- `!` is context-bearing (result enters the Session/model); `!!` is
-  session-excluded (no session write, no model visibility). Both execute in the
-  Host environment.
+- `!` is context-bearing: its completed result is written exactly once to the
+  Session that submitted it, by the application's Session-write owner. `!!` is
+  session-excluded: it writes no Session event and is never visible to the
+  model. Both execute in the Host environment; the execution adapter itself
+  never writes Session state.
 - `bypass`/`sandbox` are Host execution policies, not machine locality.
   `localShellSandbox` defaults to `bypass`. Direct persists it in the `tui-app`
   settings document; in split-process mode the Host-only profile disables
@@ -1884,20 +1886,66 @@ Authority: `src/runtime/direct/file-completion/host-discovery.ts`,
   live setting before preparation and again before spawn; a stale or mismatched
   request fails closed. Sandbox mode requires Host enforcement `full` and never
   falls back to bypass.
-- Remote Shell carries raw stdout/stderr bytes in one sequence over an eight-frame cumulative ACK window. Gateway receipt is not consumption: the Host waits for the single `output()` consumer to process and acknowledge each frame before continuing. If the started stream is lost before a terminal fact, the card warns that the command may have executed; it is never replayed and its unknown result is never written to the Session.
+- One run is a Host-owned ONE-SHOT execution on Direct and Remote alike: both
+  policies spawn the raw `['bash', '-c', command]` through the official
+  `ctx.subprocess.spawn` seam in the Host workspace/environment and settle once
+  with the process's real exit code or terminating signal. `sandbox` first
+  resolves the exact live Session's policy, calls the official
+  `ctx.sandbox.confine` exactly ONCE before the spawn, requires
+  `enforcement: 'full'`, and spawns the EXACT argv that one call returned; a
+  composition without the required official capabilities refuses before any
+  spawn instead of degrading to bypass. The Client never spawns the command or
+  supplies Host environment facts; on the Remote path, the Owner-only Host
+  admission requires the exact live Session named by the request, and an unknown
+  or mismatched Session fails closed before execution. Direct remains the
+  production default and serves this contract in-process; Remote is the
+  split-process transport of the same contract.
+- Output is collected through the subprocess provider's per-stream collect/spill
+  dispositions: each stream keeps a bounded in-memory tail and reports its own
+  truncation instead of claiming lossless bytes, and the Host-local spill file —
+  when one exists — holds the complete stream (a stream larger than the spill cap
+  has no spill file). The managed range is joined before the collected readers
+  are read once; there is no incremental stream, acknowledgement window or
+  second output owner.
+- A sandbox run that exits nonzero with truncated collected stderr is a
+  reason-UNKNOWN settlement, regardless of what the retained tail matches: a
+  higher-priority runner-fatal line or a denial signature may itself have been
+  dropped. The card preserves the real exit and the stderr truncation, asserts
+  no definite `sandbox denied` or runner-failure fact, and states that the
+  failure reason cannot be determined, the command may have executed and it must
+  not be retried automatically. This reason-unknown is distinct from the
+  transport-level UNKNOWN of a lost terminal result. Only a complete stderr may
+  confirm a denial or a runner failure from the collected diagnostic; a
+  pre-spawn runner failure remains its own failed outcome. A zero exit, a signal
+  kill and a bypass run are outside this rule.
+- Cancellation aborts the run; the subprocess provider terminates the managed
+  process range and the Host joins that range before returning the settled
+  result. A run whose terminal result is lost is a transport-level UNKNOWN
+  outcome, distinct from the sandbox reason-unknown above: the card states that
+  the command may have executed, the run is never replayed, and an unknown
+  result is never written to the Session.
 - Completion uses one shell grammar over the selected semantic port. Direct keeps its existing `bash -lc` compgen and fork path provider. Remote queries command names, variables, git subcommands and paths on the Host using the live Session's effective cwd and Host environment. A Host refusal never falls back to Client PATH or filesystem; stale connection generations never apply suggestions.
-- The user-shell card: a running card collapses to the newest five source
-  lines; a settled card to at most twenty visual rows with an honest hidden
-  marker. Ctrl+O expands to the retained buffer except fullscreen Focus.
-  Alt+K dismisses settled cards only; it never cancels the process (Esc owns
-  that) and never deletes session events.
+- The user-shell card is one-shot: while the Host run is in flight it shows the
+  running state without a live byte preview; at settle it paints the two bounded
+  streams with their own truncation lines (each naming the Host-local spill file
+  when one exists), a definite `sandbox denied` fact only when no
+  reason-unknown applies, the reason-unknown notice (`stderr truncated; failure
+  reason cannot be determined, command may have executed; do not retry
+  automatically`) for a nonzero sandbox run with truncated stderr, the
+  `[timed out]` fact when present, and the real `[exit N]` / `[signal NAME]`
+  marker, at most twenty visual rows with an honest hidden marker. Ctrl+O
+  expands the retained bounded text (never the spill file or a second stream)
+  except fullscreen Focus. Alt+K dismisses settled cards only; it never cancels
+  the process (Esc owns that) and never deletes session events.
 
 Authority: `src/tui/interaction/editor-input-mode.ts`
 (`shellPrefixForMode`, `serializeEditorInput`, `editorModeFromHistoryEntry`),
 `src/tui/interaction/tui-editor.ts`, `src/client/shell/compgen.ts`,
 `src/app/submission/user-shell.ts`, `src/app/config/schema.ts`,
 `src/app/host/pi-tui-host-runtime.ts`, `src/runtime/remote/config-remote.ts`,
-`src/runtime/host-user-shell-port.ts`, `src/runtime/host-shell-completion-port.ts`,
+`src/runtime/host-user-shell-port.ts`,
+`src/runtime/host-user-shell-execution.ts`,
+`src/runtime/host-shell-completion-port.ts`,
 `src/runtime/direct/host-user-shell-direct.ts`,
 `src/runtime/direct/host-shell-completion-direct.ts`,
 `src/runtime/remote/host-user-shell-remote.ts`,
@@ -1906,8 +1954,13 @@ Authority: `src/tui/interaction/editor-input-mode.ts`
 `src/app/host/features/host-user-shell.ts`.
 
 Must-not: put the prefix in the buffer/cursor math, route a shell line through
-slash commands, downgrade sandbox to bypass, cache a failed compgen run, or let
-a mode-less plugin seat inject `prompt` into a Host `!` submit.
+slash commands, downgrade sandbox to bypass, call `ctx.sandbox.confine` more than
+once, spawn an argv other than the one it returned, skip the official
+`ctx.subprocess.spawn` seam, replace the one-shot bounded collect with an
+arbitrary-length byte-perfect stream or a custom ACK/backpressure/mux/relay, add
+a second file channel, a second process owner, polling/jobs or a public API for
+this path, cache a failed compgen run, or let a mode-less plugin seat inject
+`prompt` into a Host `!` submit.
 
 ## Question, Goal, cards and the todo dock
 

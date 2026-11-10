@@ -22,7 +22,7 @@ import {
   type AutocompleteSuggestions,
   type SlashCommand,
 } from '@xmoon76/pi-tui'
-import { shellCompletionContext, suggestShellCompletion } from './shell.ts'
+import { shellCompletionContext, shellWordSuffix, suggestShellCompletion } from './shell.ts'
 import type { HostShellCompletionPort } from '../../../runtime/host-shell-completion-port.ts'
 import { shellPrefixForMode, type EditorInputMode } from '../editor-input-mode.ts'
 import { applyInlineSkillReference, extractInlineSkillPrefix } from './skill-reference.ts'
@@ -744,6 +744,21 @@ export class MentionProvider implements AutocompleteProvider {
       return { lines, cursorLine, cursorCol }
     }
     const shellContext = shellCompletionContext(shellLine.line, shellLine.cursorCol)
+    if (shellContext?.kind === 'paths' && this.hostShellCompletion?.pathAuthority === 'host') {
+      // Bash-style whole-word replacement: the cursor can sit mid-token, so
+      // the already-typed suffix of THIS word is part of the accepted range.
+      // Following words/whitespace and the command prefix stay untouched.
+      const suffix = shellWordSuffix(shellLine.line, shellLine.cursorCol, shellContext.word?.quote)
+      const before = currentLine.slice(0, start)
+      const after = currentLine.slice(cursorCol + suffix.length)
+      const newLines = [...lines]
+      newLines[cursorLine] = `${before}${item.value}${after}`
+      return {
+        lines: newLines,
+        cursorLine,
+        cursorCol: start + item.value.length,
+      }
+    }
     if (shellContext?.kind === 'paths') {
       const wireLines = wire === null
         ? lines
@@ -761,6 +776,24 @@ export class MentionProvider implements AutocompleteProvider {
         lines: resultLines,
         cursorLine: applied.cursorLine,
         cursorCol: Math.max(0, applied.cursorCol - (wire?.prefixLength ?? 0)),
+      }
+    }
+    if (shellContext?.kind === 'variable') {
+      // A `$VAR` word is one WORD whichever quote it lives in: replace its
+      // whole range (the semantic name starts after the opening quote) and
+      // append the separator space only OUTSIDE a quote — a space appended
+      // inside the still-open quote would become part of the value.
+      const quote = shellContext.word?.quote
+      const suffix = shellWordSuffix(shellLine.line, shellLine.cursorCol, quote)
+      const before = currentLine.slice(0, start)
+      const after = currentLine.slice(cursorCol + suffix.length)
+      const append = quote === undefined ? ' ' : ''
+      const newLines = [...lines]
+      newLines[cursorLine] = `${before}${item.value}${append}${after}`
+      return {
+        lines: newLines,
+        cursorLine,
+        cursorCol: start + item.value.length + append.length,
       }
     }
     // Shell words use one current-word replacement; path positions above stay

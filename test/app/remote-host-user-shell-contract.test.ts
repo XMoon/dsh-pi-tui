@@ -1,87 +1,115 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
-  HostUserShellFrameSequence,
-  MAX_HOST_USER_SHELL_FRAME_BYTES,
+  MAX_HOST_USER_SHELL_MESSAGE_BYTES,
+  MAX_HOST_USER_SHELL_SPILL_PATH_BYTES,
+  PI_TUI_HOST_USER_SHELL_RUN,
   parseHostShellCompletionOutcome,
-  parseHostUserShellAck,
+  parseHostUserShellRunOutcome,
 } from '../../src/runtime/remote/pi-tui-host-user-shell-contract.ts'
-import { HostUserShellOutcomeUnknownError } from '../../src/runtime/host-user-shell-port.ts'
+import { MAX_HOST_USER_SHELL_STREAM_BYTES, HostUserShellOutcomeUnknownError } from '../../src/runtime/host-user-shell-port.ts'
 
-const request = {
-  requestId: '550e8400-e29b-41d4-a716-446655440000',
-  sessionId: 'session-a',
-  expectedCwd: '/workspace',
-  command: 'echo ok',
-  policy: 'sandbox' as const,
-}
+const settled = {
+  kind: 'settled',
+  result: {
+    exit: { kind: 'exit', code: 7 },
+    stdout: { text: 'out', truncated: false },
+    stderr: { text: '', truncated: true, spillPath: '/host/tmp/spill' },
+    sandboxDenied: false,
+    aborted: false,
+    timedOut: false,
+  },
+} as const
 
-test('a started stream preserves raw bytes, shared sequence order, and one terminal fact', () => {
-  const sequence = new HostUserShellFrameSequence(request)
-  assert.deepEqual(sequence.accept({ kind: 'started', requestId: request.requestId, sessionId: request.sessionId, policy: request.policy }), { kind: 'started', requestId: request.requestId, sessionId: request.sessionId, policy: request.policy })
-  const bytes = Buffer.from([0xff, 0xc3, 0x28])
-  const output = sequence.accept({
-    kind: 'output', requestId: request.requestId, seq: 0, stream: 'stderr', base64: bytes.toString('base64'),
-  })
-  assert.equal(output.kind, 'output')
-  if (output.kind === 'output') assert.deepEqual(Buffer.from(output.base64, 'base64'), bytes)
-  sequence.accept({ kind: 'settled', requestId: request.requestId, exit: { kind: 'exit', code: 7 }, aborted: false, sandboxDenied: false })
-  sequence.finish()
+test('the one-shot run descriptor is unary with cancellation and a strict result codec', () => {
+  assert.equal(PI_TUI_HOST_USER_SHELL_RUN.mode, undefined)
+  assert.equal(PI_TUI_HOST_USER_SHELL_RUN.uplink, undefined)
+  assert.deepEqual(PI_TUI_HOST_USER_SHELL_RUN.cancellation, { parameter: 'signal' })
+  assert.deepEqual(PI_TUI_HOST_USER_SHELL_RUN.parameters.map(parameter => parameter.name), [
+    'sessionId', 'expectedCwd', 'command', 'policy',
+  ])
 })
 
-test('a refused request is terminal without a started frame', () => {
-  const sequence = new HostUserShellFrameSequence(request)
-  sequence.accept({ kind: 'refused', requestId: request.requestId, reason: 'scope-unavailable', message: 'unavailable' })
-  sequence.finish()
+test('a settled one-shot outcome carries both bounded streams, truncation and real exit facts', () => {
+  const parsed = parseHostUserShellRunOutcome(settled)
+  assert.deepEqual(parsed, settled)
 })
 
-test('an output frame without a sequence number is rejected', () => {
-  const sequence = new HostUserShellFrameSequence(request)
-  sequence.accept({ kind: 'started', requestId: request.requestId, sessionId: request.sessionId, policy: request.policy })
-  assert.throws(() => sequence.accept({
-    kind: 'output', requestId: request.requestId, stream: 'stdout', base64: 'eA==',
-  }), /seq/)
+test('a refused outcome is the only way to prove nothing executed', () => {
+  assert.deepEqual(parseHostUserShellRunOutcome({
+    kind: 'refused', reason: 'policy-unavailable', message: 'nothing ran',
+  }), { kind: 'refused', reason: 'policy-unavailable', message: 'nothing ran' })
+  assert.throws(() => parseHostUserShellRunOutcome({ kind: 'refused', reason: 'other', message: 'x' }), /reason/)
 })
 
-test('duplicate output sequence numbers and a second terminal frame are rejected', () => {
-  const sequence = new HostUserShellFrameSequence(request)
-  sequence.accept({ kind: 'started', requestId: request.requestId, sessionId: request.sessionId, policy: request.policy })
-  const output = { kind: 'output', requestId: request.requestId, seq: 0, stream: 'stdout', base64: 'eA==' }
-  sequence.accept(output)
-  assert.throws(() => sequence.accept(output), /sequence/)
-  sequence.accept({ kind: 'settled', requestId: request.requestId, exit: { kind: 'exit', code: 0 }, aborted: false, sandboxDenied: false })
-  assert.throws(() => sequence.accept({ kind: 'settled', requestId: request.requestId, exit: { kind: 'exit', code: 0 }, aborted: false, sandboxDenied: false }), /terminal/)
+test('a failed outcome keeps the sandbox-runner and infrastructure phases distinct', () => {
+  assert.deepEqual(parseHostUserShellRunOutcome({
+    kind: 'failed', phase: 'sandbox-runner', message: 'runner failed',
+  }), { kind: 'failed', phase: 'sandbox-runner', message: 'runner failed' })
+  assert.deepEqual(parseHostUserShellRunOutcome({
+    kind: 'failed', phase: 'infrastructure', message: 'lost',
+  }), { kind: 'failed', phase: 'infrastructure', message: 'lost' })
+  assert.throws(() => parseHostUserShellRunOutcome({ kind: 'failed', phase: 'other', message: 'x' }), /phase/)
 })
 
-test('frames for a different request and output before started are rejected', () => {
-  const sequence = new HostUserShellFrameSequence(request)
-  assert.throws(() => sequence.accept({ kind: 'started', requestId: '550e8400-e29b-41d4-a716-446655440001', sessionId: request.sessionId, policy: request.policy }), /requestId/)
-  assert.throws(() => sequence.accept({
-    kind: 'output', requestId: request.requestId, seq: 0, stream: 'stdout', base64: 'eA==',
-  }), /started/)
+test('settled results reject extra/missing fields, invalid exits and non-boolean flags', () => {
+  const withResult = (result: object): object => ({ kind: 'settled', result })
+  assert.throws(() => parseHostUserShellRunOutcome(withResult({ ...settled.result, extra: true })), /unexpected field/)
+  assert.throws(() => parseHostUserShellRunOutcome(withResult({ ...settled.result, sandboxDenied: 'no' })), /boolean/)
+  assert.throws(() => parseHostUserShellRunOutcome(withResult({ ...settled.result, exit: { kind: 'exit', code: 1.5 } })), /exit code/)
+  assert.throws(() => parseHostUserShellRunOutcome(withResult({ ...settled.result, exit: { kind: 'exit', code: 256 } })), /exit code/)
+  assert.throws(() => parseHostUserShellRunOutcome(withResult({ ...settled.result, exit: { kind: 'signal', signal: 'SIG_NOPE' } })), /signal is invalid/)
+  assert.throws(() => parseHostUserShellRunOutcome({ kind: 'settled' }), /missing field/)
 })
 
-test('malformed and oversized base64 output is rejected at the wire boundary', () => {
-  const sequence = new HostUserShellFrameSequence(request)
-  sequence.accept({ kind: 'started', requestId: request.requestId, sessionId: request.sessionId, policy: request.policy })
-  assert.throws(() => sequence.accept({
-    kind: 'output', requestId: request.requestId, seq: 0, stream: 'stdout', base64: 'abc*',
-  }), /base64/)
-  const oversized = Buffer.alloc(MAX_HOST_USER_SHELL_FRAME_BYTES + 1).toString('base64')
-  assert.throws(() => sequence.accept({
-    kind: 'output', requestId: request.requestId, seq: 0, stream: 'stdout', base64: oversized,
-  }), /32 KiB/)
+test('stream text is bounded by the shared semantic tail bound and output shapes are strict', () => {
+  const withResult = (result: object): object => ({ kind: 'settled', result })
+  assert.throws(() => parseHostUserShellRunOutcome(withResult({
+    ...settled.result,
+    stdout: { text: 'x'.repeat(MAX_HOST_USER_SHELL_STREAM_BYTES + 1), truncated: false },
+  })), /exceeds 65536 bytes/)
+  assert.throws(() => parseHostUserShellRunOutcome(withResult({
+    ...settled.result,
+    stdout: { text: 'x', truncated: false, extra: true },
+  })), /unexpected field/)
+  assert.throws(() => parseHostUserShellRunOutcome(withResult({
+    ...settled.result,
+    stdout: { text: 'x' },
+  })), /missing field "truncated"/)
 })
 
-test('EOF without a refusal or terminal fact and invalid exit facts are rejected', () => {
-  const open = new HostUserShellFrameSequence(request)
-  open.accept({ kind: 'started', requestId: request.requestId, sessionId: request.sessionId, policy: request.policy })
-  assert.throws(() => open.finish(), /terminal/)
-  const invalid = new HostUserShellFrameSequence(request)
-  invalid.accept({ kind: 'started', requestId: request.requestId, sessionId: request.sessionId, policy: request.policy })
-  assert.throws(() => invalid.accept({
-    kind: 'settled', requestId: request.requestId, exit: { kind: 'exit', code: 1.5 }, aborted: false, sandboxDenied: false,
-  }), /exit code/)
+test('the combined stdout+stderr text is bounded across both streams', () => {
+  assert.throws(() => parseHostUserShellRunOutcome({
+    kind: 'settled',
+    result: {
+      ...settled.result,
+      stdout: { text: 'a'.repeat(MAX_HOST_USER_SHELL_STREAM_BYTES), truncated: false },
+      stderr: { text: 'b'.repeat(MAX_HOST_USER_SHELL_STREAM_BYTES), truncated: false },
+    },
+  }), /combined stdout\+stderr bound/)
+})
+
+test('the Host-local spill path is bounded and cannot smuggle NUL', () => {
+  assert.throws(() => parseHostUserShellRunOutcome({
+    kind: 'settled',
+    result: {
+      ...settled.result,
+      stdout: { text: 'x', truncated: true, spillPath: 'p'.repeat(MAX_HOST_USER_SHELL_SPILL_PATH_BYTES + 1) },
+    },
+  }), /spillPath: exceeds 4096 bytes/)
+  assert.throws(() => parseHostUserShellRunOutcome({
+    kind: 'settled',
+    result: {
+      ...settled.result,
+      stdout: { text: 'x', truncated: true, spillPath: '/tmp/\0spill' },
+    },
+  }), /NUL/)
+})
+
+test('refusal and failure messages are bounded', () => {
+  assert.throws(() => parseHostUserShellRunOutcome({
+    kind: 'refused', reason: 'scope-unavailable', message: 'x'.repeat(MAX_HOST_USER_SHELL_MESSAGE_BYTES + 1),
+  }), /exceeds 2048 bytes/)
 })
 
 test('completion result parsing enforces item and byte bounds', () => {
@@ -93,16 +121,8 @@ test('completion result parsing enforces item and byte bounds', () => {
   assert.throws(() => parseHostShellCompletionOutcome({ kind: 'ok', candidates: ['git'], extra: true }), /unexpected/)
 })
 
-test('uplink ACK frames have an exact request identity and safe sequence', () => {
-  assert.deepEqual(parseHostUserShellAck({ kind: 'ack', requestId: '550e8400-e29b-41d4-a716-446655440000', seq: 0 }), {
-    kind: 'ack', requestId: '550e8400-e29b-41d4-a716-446655440000', seq: 0,
-  })
-  assert.throws(() => parseHostUserShellAck({ kind: 'ack', requestId: '550e8400-e29b-41d4-a716-446655440000', seq: Number.MAX_SAFE_INTEGER + 1 }), /safe integer/)
-  assert.throws(() => parseHostUserShellAck({ kind: 'ack', requestId: '550e8400-e29b-41d4-a716-446655440000', seq: -1 }), />= 0/)
-})
-
-test('a started transport loss has a distinct unknown-outcome error', () => {
-  const error = new HostUserShellOutcomeUnknownError('started stream disconnected')
+test('a lost started outcome has a distinct unknown-outcome error', () => {
+  const error = new HostUserShellOutcomeUnknownError('one-shot result was lost')
   assert.equal(error.name, 'HostUserShellOutcomeUnknownError')
-  assert.match(error.message, /disconnected/)
+  assert.match(error.message, /lost/)
 })

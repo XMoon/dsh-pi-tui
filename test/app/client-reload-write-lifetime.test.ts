@@ -36,7 +36,8 @@ import { createSessionOwnershipCore } from '../../src/app/session/ownership-core
 import { createSessionScopeAuthority } from '../../src/app/session/scope.ts'
 import { DraftFileStore } from '../../src/client/media/attachment/file-draft.ts'
 import { DraftImageStore } from '../../src/client/media/image/draft-store.ts'
-import type { HostUserShellAdmission, HostUserShellResult } from '../../src/runtime/host-user-shell-port.ts'
+import { HostUserShellOutcomeUnknownError } from '../../src/runtime/host-user-shell-port.ts'
+import type { HostUserShellOutcome, HostUserShellResult } from '../../src/runtime/host-user-shell-port.ts'
 import type { WriteOutcome } from '../../src/runtime/session-writer-port.ts'
 
 const DIAG = { debug: () => {}, info: () => {}, warn: () => {}, error: () => {}, dispose: () => {} }
@@ -283,7 +284,20 @@ interface ShellHarness {
   readonly writes: { readonly sessionId: string; readonly message: unknown }[]
   finishWrite(outcome: WriteOutcome): void
   finishShell(result: HostUserShellResult): void
+  failShell(error: unknown): void
+  readonly card: () => { readonly result?: string; readonly status?: string } | undefined
   readonly executions: number
+}
+
+function shellOk(): HostUserShellResult {
+  return {
+    exit: { kind: 'exit', code: 0 },
+    stdout: { text: '', truncated: false },
+    stderr: { text: '', truncated: false },
+    sandboxDenied: false,
+    aborted: false,
+    timedOut: false,
+  }
 }
 
 function startShellHarness(): ShellHarness {
@@ -292,6 +306,8 @@ function startShellHarness(): ShellHarness {
   const writes: { sessionId: string; message: unknown }[] = []
   const writeResolvers: ((outcome: WriteOutcome) => void)[] = []
   const shellResolvers: ((result: HostUserShellResult) => void)[] = []
+  const shellFailures: ((error: unknown) => void)[] = []
+  let lastCard: { result?: string; status?: string } | undefined
   let executions = 0
   const composer = {
     getDraft: () => draft,
@@ -301,8 +317,14 @@ function startShellHarness(): ShellHarness {
     notify: (message: string) => { notices.push(message) },
     setSubmitPending: () => {},
     clearSettledLocalMessages: () => {},
-    pushLocalMessage: (message: unknown) => message,
-    updateLocalMessage: (message: unknown) => message,
+    pushLocalMessage: (message: unknown) => {
+      lastCard = message as { result?: string; status?: string }
+      return message
+    },
+    updateLocalMessage: (_current: unknown, message: unknown) => {
+      lastCard = message as { result?: string; status?: string }
+      return message
+    },
   }
   const agent: AgentLike = { status: 'idle', session: { id: 'session-a' }, options: {}, cancel: () => {} }
   const core = createSessionOwnershipCore({ isSurfaceDisposed: () => false, resetForGeneration: () => {} })
@@ -379,15 +401,12 @@ function startShellHarness(): ShellHarness {
     tuiSettings: undefined,
     shell: {
       availability: () => ({ supported: true, policies: ['bypass'] }),
-      execute: async (): Promise<HostUserShellAdmission> => {
+      execute: async (): Promise<HostUserShellOutcome> => {
         executions += 1
-        return {
-          kind: 'executing',
-          execution: {
-            result: () => new Promise<HostUserShellResult>(resolve => { shellResolvers.push(resolve) }),
-            output: async function* () { /* no output */ },
-          },
-        }
+        return await new Promise<HostUserShellOutcome>((resolve, reject) => {
+          shellResolvers.push(result => resolve({ kind: 'settled', result }))
+          shellFailures.push(reject)
+        })
       },
     } as never,
     submission: {
@@ -490,6 +509,12 @@ function startShellHarness(): ShellHarness {
       assert.ok(resolve !== undefined, 'no Host shell execution is pending')
       resolve(result)
     },
+    failShell: (error) => {
+      const reject = shellFailures.shift()
+      assert.ok(reject !== undefined, 'no Host shell execution is pending')
+      reject(error)
+    },
+    card: () => lastCard,
     get executions() { return executions },
   }
 }
@@ -505,10 +530,12 @@ test('the ! context-mode output write keeps the lifetime until the REAL Session 
 
   // The Host shell execution settles (the card result is now known), which
   // starts the context-mode `!` output write through the REAL Session writer.
-  harness.finishShell({ exit: { kind: 'exit', code: 0 }, aborted: false })
+  harness.finishShell(shellOk())
   await drainMicrotasks()
   assert.equal(harness.writes.length, 1,
     'the settled ! result reached the Session writer (the card already settled)')
+  assert.equal(harness.writes[0]!.sessionId, 'session-a',
+    'the ! result is written to the EXACT captured Session scope once')
   assert.equal(harness.controller.hasUnsettledClientWrite(), true,
     'the lifetime stays open while the REAL context-mode output write is in flight')
 
@@ -524,7 +551,7 @@ test('the ! context-mode output write keeps the lifetime until the REAL Session 
   await drainMicrotasks()
   assert.equal(harness.executions, 2)
   assert.equal(harness.controller.hasUnsettledClientWrite(), true)
-  harness.finishShell({ exit: { kind: 'exit', code: 0 }, aborted: false })
+  harness.finishShell(shellOk())
   await drainMicrotasks()
   assert.equal(harness.writes.length, 2)
   assert.equal(harness.controller.hasUnsettledClientWrite(), true)
@@ -533,17 +560,38 @@ test('the ! context-mode output write keeps the lifetime until the REAL Session 
   assert.equal(harness.controller.hasUnsettledClientWrite(), false)
 })
 
-test('a !! shell keeps the lifetime until the real user-shell owner settles', async () => {
+test('!! paints its bounded output on the card and never writes the Session', async () => {
   const harness = startShellHarness()
   harness.controller.submit('!! echo hi')
   await drainMicrotasks()
   assert.equal(harness.executions, 1, 'the Host execution was admitted')
   assert.equal(harness.controller.hasUnsettledClientWrite(), true, 'a running !! shell keeps the reload blocked')
-  harness.finishShell({ exit: { kind: 'exit', code: 0 }, aborted: false })
+  harness.finishShell({
+    ...shellOk(),
+    stdout: { text: 'card-only-output\n', truncated: false },
+  })
   await drainMicrotasks()
   assert.equal(harness.writes.length, 0, '!! never writes to the Session')
+  assert.match(harness.card()?.result ?? '', /card-only-output/u,
+    '!! keeps the completed output on its card')
+  assert.match(harness.card()?.result ?? '', /\[exit 0\]/u, '!! keeps the real exit fact on its card')
   assert.equal(harness.controller.hasUnsettledClientWrite(), false,
     "the !! card's settlement is the terminal path")
+})
+
+test('an unknown ! outcome writes no Session result and is never replayed', async () => {
+  const harness = startShellHarness()
+  harness.controller.submit('! echo lost')
+  await drainMicrotasks()
+  assert.equal(harness.executions, 1, 'the ! gesture made exactly one Host execution request')
+  harness.failShell(new HostUserShellOutcomeUnknownError('Host shell execution could not be verified'))
+  await drainMicrotasks()
+  assert.equal(harness.writes.length, 0, 'an unknown Host outcome is never written to the Session')
+  assert.match(harness.card()?.result ?? '', /Host shell execution could not be verified/u)
+  assert.match(harness.card()?.result ?? '', /may have executed/u)
+  assert.match(harness.card()?.result ?? '', /do not retry automatically/u)
+  assert.equal(harness.controller.hasUnsettledClientWrite(), false,
+    'the unknown ! outcome still settles the gesture lifetime')
 })
 
 test('an Alt+Up queue mutation keeps the write lifetime until its queue write settles', async () => {

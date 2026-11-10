@@ -70,13 +70,7 @@ test('a started Host Shell transport loss leaves a visible no-retry card and no 
       availability: { supported: true, policies: ['bypass', 'sandbox'] },
       async execute() {
         shellCalls += 1
-        return {
-          kind: 'executing' as const,
-          execution: {
-            result: async () => { throw new HostUserShellOutcomeUnknownError('Host shell stream ended without a verified outcome') },
-            output: async function* () {},
-          },
-        }
+        throw new HostUserShellOutcomeUnknownError('Host shell result was lost after start')
       },
     },
     submission: { settleAck: () => {}, markDispatch: () => {} },
@@ -86,7 +80,7 @@ test('a started Host Shell transport loss leaves a visible no-retry card and no 
   await Promise.all([cardSettled, finished])
   assert.equal(shellCalls, 1, 'the user gesture made exactly one Host execution request')
   assert.equal(card.status, 'error')
-  assert.match(card.result, /Host shell stream ended without a verified outcome/u)
+  assert.match(card.result, /Host shell result was lost after start/u)
   assert.match(card.result, /command may have executed/u)
   assert.match(card.result, /do not retry automatically/u)
   assert.equal(promptCalls, 0, 'an unknown Host process outcome writes no Session result')

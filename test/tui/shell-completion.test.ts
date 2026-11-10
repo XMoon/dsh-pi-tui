@@ -13,12 +13,18 @@ import { writeFileSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { MentionProvider } from '../../src/tui/interaction/autocomplete/provider.ts'
-import { shellCompletionContext, suggestShellCompletion } from '../../src/tui/interaction/autocomplete/shell.ts'
+import { shellCompletionContext, shellWordSuffix, suggestShellCompletion } from '../../src/tui/interaction/autocomplete/shell.ts'
 import type { HostShellCompletionPort, HostShellCompletionRequest } from '../../src/runtime/host-shell-completion-port.ts'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
 
 const abort = new AbortController().signal
 const cwd = tmpdir()
+const pathContext = (prefix: string, priorWords: readonly string[]) => ({
+  kind: 'paths' as const,
+  prefix,
+  priorWords,
+  word: { valuePrefix: prefix, quote: undefined, closingQuoteAfterCursor: false },
+})
 
 // --- shellCompletionContext: cursor parsing ---
 
@@ -30,15 +36,225 @@ test('shellCompletionContext parses command, subcommand, variable and path posit
   // A later word of a known listable command: subcommand.
   assert.deepEqual(shellCompletionContext('!git che', 8), { kind: 'subcommand', prefix: 'che', priorWords: ['git'] })
   // A `$VAR` word anywhere after the first word.
-  assert.deepEqual(shellCompletionContext('!echo $HO', 10), { kind: 'variable', prefix: '$HO', priorWords: ['echo'] })
-  assert.deepEqual(shellCompletionContext('!ls /u', 6), { kind: 'paths', prefix: '/u', priorWords: ['ls'] })
-  assert.deepEqual(shellCompletionContext('!cat src/de', 11), { kind: 'paths', prefix: 'src/de', priorWords: ['cat'] })
-  assert.deepEqual(shellCompletionContext('!./run.sh', 9), { kind: 'paths', prefix: './run.sh', priorWords: [] })
-  assert.deepEqual(shellCompletionContext('!~/bin', 6), { kind: 'paths', prefix: '~/bin', priorWords: [] })
-  assert.deepEqual(shellCompletionContext('!unknowncmd foo', 15), { kind: 'paths', prefix: 'foo', priorWords: ['unknowncmd'] })
+  assert.deepEqual(shellCompletionContext('!echo $HO', 10), {
+    kind: 'variable', prefix: '$HO', priorWords: ['echo'],
+    word: { valuePrefix: '$HO', quote: undefined, closingQuoteAfterCursor: false },
+  })
+  assert.deepEqual(shellCompletionContext('!ls /u', 6), pathContext('/u', ['ls']))
+  assert.deepEqual(shellCompletionContext('!cat src/de', 11), pathContext('src/de', ['cat']))
+  assert.deepEqual(shellCompletionContext('!./run.sh', 9), pathContext('./run.sh', []))
+  assert.deepEqual(shellCompletionContext('!~/bin', 6), pathContext('~/bin', []))
+  assert.deepEqual(shellCompletionContext('!unknowncmd foo', 15), pathContext('foo', ['unknowncmd']))
   // Non-shell lines never produce a context.
   assert.equal(shellCompletionContext('plain text', 10), undefined)
   assert.equal(shellCompletionContext('/cmd', 4), undefined)
+})
+
+test('Shell path context preserves quote state and decodes only the Host lookup prefix', () => {
+  const doubleLine = '!cat "./my file'
+  const double = shellCompletionContext(doubleLine, doubleLine.length)
+  assert.deepEqual(double, {
+    kind: 'paths', prefix: '"./my file', priorWords: ['cat'],
+    word: { valuePrefix: './my file', quote: '"', closingQuoteAfterCursor: false },
+  })
+
+  const singleLine = "!cat './my file' tail"
+  const closing = singleLine.indexOf("' tail")
+  assert.deepEqual(shellCompletionContext(singleLine, closing), {
+    kind: 'paths', prefix: "'./my file", priorWords: ['cat'],
+    word: { valuePrefix: './my file', quote: "'", closingQuoteAfterCursor: true },
+  })
+
+  const escapedLine = '!cat ./my\\ file'
+  assert.deepEqual(shellCompletionContext(escapedLine, escapedLine.length), {
+    kind: 'paths', prefix: './my\\ file', priorWords: ['cat'],
+    word: { valuePrefix: './my file', quote: undefined, closingQuoteAfterCursor: false },
+  })
+  assert.equal(shellCompletionContext(escapedLine, escapedLine.length)?.word?.valuePrefix, './my file')
+})
+
+test('Shell path context keeps a word-leading literal space or quote in the semantic prefix', () => {
+  // The decoded Host token STARTS with the literal byte: the user quoted (or
+  // escaped) the first character, so the bridge must receive it intact.
+  const spaceLine = "!cat ' spacey"
+  assert.deepEqual(shellCompletionContext(spaceLine, spaceLine.length), {
+    kind: 'paths', prefix: "' spacey", priorWords: ['cat'],
+    word: { valuePrefix: ' spacey', quote: "'", closingQuoteAfterCursor: false },
+  })
+  const quoteLine = '!cat \\"quoted'
+  assert.deepEqual(shellCompletionContext(quoteLine, quoteLine.length), {
+    kind: 'paths', prefix: '\\"quoted', priorWords: ['cat'],
+    word: { valuePrefix: '"quoted', quote: undefined, closingQuoteAfterCursor: false },
+  })
+})
+
+test('shellWordSuffix replaces exactly the current Shell word tail', () => {
+  const tail = (line: string, prefix: string): string => {
+    const col = line.indexOf(prefix) + prefix.length
+    const context = shellCompletionContext(line, col)
+    assert.ok(context?.kind === 'paths' && context.word !== undefined, `${line} is a path position`)
+    return shellWordSuffix(line, col, context.word.quote)
+  }
+  // A following separate word is never part of the replaced range.
+  assert.equal(tail('!cat ./f1-mid-suffix tail', './f1-mid-'), 'suffix')
+  // A quoted word keeps the closing quote for the accepted literal to use.
+  assert.equal(tail('!cat "./f1-mid-suffix" tail', './f1-mid-'), 'suffix')
+  // Spaces inside Shell quote-equivalent regions stay inside the word.
+  assert.equal(tail('!cat ./f1-mid-$(touch x).txt tail', './f1-mid-'), '$(touch x).txt')
+  assert.equal(tail('!cat ./f1-mid-${NAME:-a b}.txt tail', './f1-mid-'), '${NAME:-a b}.txt')
+  assert.equal(tail('!cat ./f1-mid-`touch x`.txt tail', './f1-mid-'), '`touch x`.txt')
+  // An unquoted operator ends the word.
+  assert.equal(tail('!cat ./f1-mid-suffix;echo after', './f1-mid-'), 'suffix')
+})
+
+test('a quoted $VAR word is queried and filtered by its semantic name', async () => {
+  const line = '!echo "$HO'
+  const context = shellCompletionContext(line, line.length)
+  assert.deepEqual(context, {
+    kind: 'variable', prefix: '$HO', priorWords: ['echo'],
+    word: { valuePrefix: '$HO', quote: '"', closingQuoteAfterCursor: false },
+  })
+  const requests: HostShellCompletionRequest[] = []
+  const port: HostShellCompletionPort = {
+    pathAuthority: 'host',
+    async complete({ request }) {
+      requests.push(request)
+      return request.kind === 'variables'
+        ? { kind: 'ok', candidates: ['HOME', 'HOSTNAME'] }
+        : { kind: 'ok', candidates: [] }
+    },
+  }
+  assert.ok(context !== undefined)
+  const suggestions = await suggestShellCompletion(context, port, 'session-a', { signal: abort, force: true })
+  assert.deepEqual(suggestions, {
+    items: [{ value: '$HOME', label: '$HOME' }, { value: '$HOSTNAME', label: '$HOSTNAME' }],
+    prefix: '$HO',
+  }, 'the semantic name queries, filters and prefixes the quoted variable')
+  assert.deepEqual(requests, [{ kind: 'variables', prefix: 'HO' }],
+    'the Host query receives the decoded variable name, not the raw quoted word')
+})
+
+test('the word start scanner and the word tail scanner share one delimiter rule', () => {
+  for (const line of [
+    '!cat file;./src/de',
+    '!cat file&&./src/de',
+    '!cat file|./src/de',
+    '!cat (./src/de',
+    '!cat file>./src/de',
+  ]) {
+    const context = shellCompletionContext(line, line.length)
+    assert.ok(context?.kind === 'paths', `${line} is a path position`)
+    assert.equal(context.prefix, './src/de', `${line} completes the word after the operator`)
+    assert.equal(context.word?.valuePrefix, './src/de')
+  }
+  // Quoted/escaped operators are word bytes, never delimiters.
+  const quoted = '!cat "a;b'
+  assert.equal(shellCompletionContext(quoted, quoted.length)?.word?.valuePrefix, 'a;b')
+  const escaped = '!cat a\\;b'
+  assert.equal(shellCompletionContext(escaped, escaped.length)?.word?.valuePrefix, 'a;b')
+})
+
+test('a control separator starts a new command word; a path there stays a path', async () => {
+  for (const line of ['!echo hi;ec', '!echo hi && ec', '!echo hi || ec', '!echo hi|ec', '!echo hi;(ec']) {
+    const context = shellCompletionContext(line, line.length)
+    assert.equal(context?.kind, 'command', `${line} is a command position`)
+    assert.equal(context?.prefix, 'ec', line)
+  }
+  assert.equal(shellCompletionContext('!echo hi;', 10)?.kind, 'command',
+    'a trailing separator leaves the NEXT word at a command position')
+  // A redirection target ends the word WITHOUT opening a command position.
+  const redirect = '!echo hi>out'
+  assert.equal(shellCompletionContext(redirect, redirect.length)?.kind, 'paths')
+
+  const requests: HostShellCompletionRequest[] = []
+  const port: HostShellCompletionPort = {
+    pathAuthority: 'host',
+    async complete({ request }) {
+      requests.push(request)
+      return request.kind === 'commands'
+        ? { kind: 'ok', candidates: ['echo'] }
+        : { kind: 'ok', candidates: ['./path'] }
+    },
+  }
+  const commandLine = '!echo hi;ec'
+  const commandContext = shellCompletionContext(commandLine, commandLine.length)
+  assert.ok(commandContext !== undefined)
+  await suggestShellCompletion(commandContext, port, 'session-a', { signal: abort, force: true })
+  const pathLine = '!cmd && ./path'
+  const pathContext = shellCompletionContext(pathLine, pathLine.length)
+  assert.ok(pathContext !== undefined)
+  await suggestShellCompletion(pathContext, port, 'session-a', { signal: abort, force: true })
+  assert.deepEqual(requests, [
+    { kind: 'commands', prefix: 'ec' },
+    { kind: 'paths', prefix: './path' },
+  ], 'the Host port sees a COMMAND after `;` and a PATH after `&&`')
+})
+
+test('a cursor before an opening quote completes the empty word and replaces the quoted tail', () => {
+  const line = '!cat "'
+  assert.deepEqual(shellCompletionContext(line, 5), {
+    kind: 'paths', prefix: '', priorWords: ['cat'],
+    word: { valuePrefix: '', quote: undefined, closingQuoteAfterCursor: false },
+  })
+  // The dangling/complete quoted tail after the cursor belongs to the word
+  // the acceptance replaces; the opening quote never survives twice.
+  assert.equal(shellWordSuffix(line, 5, undefined), '"')
+  assert.equal(shellWordSuffix('!cat "my file" tail', 5, undefined), '"my file"')
+})
+
+test('Host path candidates are encoded as literal Shell words for each quote mode', async () => {
+  const requestPrefixes: string[] = []
+  const port: HostShellCompletionPort = {
+    pathAuthority: 'host',
+    async complete({ request }) {
+      if (request.kind !== 'paths') return { kind: 'ok', candidates: [] }
+      requestPrefixes.push(request.prefix)
+      return { kind: 'ok', candidates: ['./file$(touch /tmp/f1-shell-escape).txt'] }
+    },
+  }
+  const cases = [
+    { line: '!cat ./file', expected: "'./file$(touch /tmp/f1-shell-escape).txt'" },
+    { line: '!cat "./file', expected: '"./file\\$(touch /tmp/f1-shell-escape).txt"' },
+    { line: "!cat './file", expected: "'./file$(touch /tmp/f1-shell-escape).txt'" },
+  ]
+  for (const { line, expected } of cases) {
+    const context = shellCompletionContext(line, line.length)
+    assert.ok(context?.kind === 'paths' && context.word !== undefined)
+    const suggestions = await suggestShellCompletion(context, port, 'session-a', { signal: abort, force: true })
+    assert.deepEqual(suggestions?.items.map(item => item.value), [expected])
+    assert.deepEqual(suggestions?.items.map(item => item.label), ['./file$(touch /tmp/f1-shell-escape).txt'])
+  }
+  assert.deepEqual(requestPrefixes, ['./file', './file', './file'], 'Host discovery receives decoded path prefixes')
+})
+
+test('Host path candidates preserve quoted and literal tilde semantics', async () => {
+  const requests: string[] = []
+  const port: HostShellCompletionPort = {
+    pathAuthority: 'host',
+    async complete({ request }) {
+      if (request.kind !== 'paths') return { kind: 'ok', candidates: [] }
+      requests.push(request.prefix)
+      const candidate = request.prefix.startsWith('./~/')
+        ? './~/f1-literal-$(touch sentinel).txt'
+        : request.prefix.startsWith('~/')
+          ? '~/f1-home-$(touch sentinel).txt'
+          : '~user-file$(touch sentinel).txt'
+      return { kind: 'ok', candidates: [candidate] }
+    },
+  }
+  const cases = [
+    { line: '!cat "~/f1-literal-', request: './~/f1-literal-', expected: '"./~/f1-literal-\\$(touch sentinel).txt"' },
+    { line: "!cat '~/f1-literal-", request: './~/f1-literal-', expected: "'./~/f1-literal-$(touch sentinel).txt'" },
+    { line: '!cat ~/f1-home-', request: '~/f1-home-', expected: "~/'f1-home-$(touch sentinel).txt'" },
+    { line: '!cat ~user-file', request: '~user-file', expected: "'~user-file$(touch sentinel).txt'" },
+  ]
+  for (const item of cases) {
+    const context = shellCompletionContext(item.line, item.line.length)
+    assert.ok(context?.kind === 'paths' && context.word !== undefined)
+    const suggestions = await suggestShellCompletion(context, port, 'session-a', { signal: abort, force: true })
+    assert.equal(suggestions?.items[0]?.value, item.expected)
+  }
+  assert.deepEqual(requests, cases.map(item => item.request))
 })
 
 // --- suggestShellCompletion: real bash ---
@@ -146,6 +362,14 @@ test('MentionProvider applies a shell item as a plain word replacement', async (
   assert.deepEqual(applied, { lines: ['!git '], cursorLine: 0, cursorCol: 5 })
   const appliedVar = provider.applyCompletion(['!echo $HO'], 0, 9, { value: '$HOME', label: '$HOME' }, '$HO')
   assert.deepEqual(appliedVar, { lines: ['!echo $HOME '], cursorLine: 0, cursorCol: 12 })
+  // A quoted variable keeps its quote and NEVER appends the space inside it.
+  const quotedVar = provider.applyCompletion(['!echo "$HO'], 0, 10, { value: '$HOME', label: '$HOME' }, '$HO')
+  assert.deepEqual(quotedVar, { lines: ['!echo "$HOME'], cursorLine: 0, cursorCol: 12 })
+  const closedQuotedVar = provider.applyCompletion(['!echo "$HO"'], 0, 10, { value: '$HOME', label: '$HOME' }, '$HO')
+  assert.deepEqual(closedQuotedVar, { lines: ['!echo "$HOME"'], cursorLine: 0, cursorCol: 12 })
+  // A mid-word unquoted variable is one WORD too: the tail is replaced.
+  const midVar = provider.applyCompletion(['!echo $HOme'], 0, 9, { value: '$HOME', label: '$HOME' }, '$HO')
+  assert.deepEqual(midVar, { lines: ['!echo $HOME '], cursorLine: 0, cursorCol: 12 })
 })
 
 // --- shell-editor-mode virtual prefix (the editor buffer no longer holds
@@ -375,7 +599,7 @@ test('Remote shell commands and paths use only Host candidates and fail closed o
   assert.ok(commandSuggestions?.items.some(item => item.value === 'host-only-command'))
   const pathLine = '!cat src/de'
   const pathSuggestions = await provider.getSuggestions([pathLine], 0, pathLine.length, { signal: abort, force: true })
-  assert.deepEqual(pathSuggestions?.items.map(item => item.value), ['src/de-host-only.ts'])
+  assert.deepEqual(pathSuggestions?.items.map(item => item.value), ["'src/de-host-only.ts'"])
   assert.deepEqual(requests.map(request => request.kind), ['commands', 'paths'])
 
   const unavailableHost: HostShellCompletionPort = {

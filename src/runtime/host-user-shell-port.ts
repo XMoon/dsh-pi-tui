@@ -10,11 +10,16 @@
  * exit status and process cancellation. This port exposes exactly that
  * execution authority and nothing else: no `ctx.shell`, no
  * `child_process.ChildProcess`, no PTY screen parser, no raw Host Context and
- * no generated Remote object ever crosses it. Remote output is acknowledged
- * only after the semantic output consumer advances its single iterator.
+ * no generated Remote object ever crosses it.
+ *
+ * One run is a single foreground ONE-SHOT execution: it settles once with the
+ * bounded per-stream output and the real exit/signal facts. There is no
+ * incremental chunk stream, no consumption acknowledgement and no second
+ * output owner; `execute()` resolves the semantic result (or a truthful
+ * unavailable/indeterminate admission).
  *
  * Full contract: docs/architecture/host-client.md (user shell section) +
- * docs/architecture/host-client.md (user shell ownership).
+ * docs/architecture/surface-behavior.md (user shell behavior).
  * @module @xmoon76/dsh-pi-tui/runtime/host-user-shell-port
  */
 
@@ -23,15 +28,16 @@
  * execution policy. Neither is a locality choice. */
 export type HostUserShellPolicy = 'bypass' | 'sandbox'
 
-/** One authoritative chunk of execution output, in arrival order. */
-export interface HostUserShellOutputChunk {
-  /** Decoded text bytes of this chunk (stream-split multi-byte sequences
-   * already assembled by the owning adapter). */
+/**
+ * The retained bounded text of one settled stream. `text` is the TAIL of the
+ * stream when `truncated` is true. `spillPath` — when an executor provided
+ * one — names a full-stream file on the HOST that produced the run; it is a
+ * Host-local fact and is never presented as Client-readable.
+ */
+export interface HostUserShellOutput {
   readonly text: string
-  /** Wire byte count of this chunk as received from the process. */
-  readonly bytes: number
-  /** Which stream this chunk came from. */
-  readonly stream: 'stdout' | 'stderr'
+  readonly truncated: boolean
+  readonly spillPath?: string
 }
 
 /** How one Host user-shell run settled. */
@@ -39,17 +45,18 @@ export type HostUserShellExit =
   | { readonly kind: 'exit'; readonly code: number }
   | { readonly kind: 'signal'; readonly signal: string }
 
-/** The final settled result of one Host user-shell run. OUTPUT AUTHORITY:
- * `output()` is the one authority for the run's bytes — `result()` carries
- * ONLY the exit/settlement facts. The application must drain `output()`
- * (which ends at settle) before treating its own bounded capture as
- * complete; the adapter retains no unbounded copy of the stream. */
+/** The final settled result of one one-shot Host user-shell run. Both streams
+ * are already bounded and report their own truncation truthfully. */
 export interface HostUserShellResult {
   readonly exit: HostUserShellExit
-  readonly sandboxDenied?: boolean
+  readonly stdout: HostUserShellOutput
+  readonly stderr: HostUserShellOutput
+  readonly sandboxDenied: boolean
   /** Whether the run was ended by the caller's abort rather than its own
-   * exit. An aborted run is a settled run; its partial output is real. */
+   * exit. An aborted run is a settled run; its bounded output is real. */
   readonly aborted: boolean
+  /** Whether an executor deadline (never a caller abort) cut the run short. */
+  readonly timedOut: boolean
 }
 
 /** Why a Host user-shell execution is unavailable. */
@@ -60,54 +67,9 @@ export interface HostUserShellUnavailable {
   readonly message: string
 }
 
-/**
- * One in-flight Host user-shell execution, owned by the adapter. The handle
- * settles EXACTLY once: `result()` resolves with the authoritative exit and
- * the complete output, never rejects for a command-level failure (a nonzero
- * exit, a kill by the caller's abort, or an executor timeout is a RESULT);
- * it rejects only for infrastructure failures proven before start. After a
- * started Remote stream is lost it rejects with
- * HostUserShellOutcomeUnknownError instead of claiming nothing executed.
- */
-export interface HostUserShellExecution {
-  /**
-   * The authoritative settled exit/settlement facts; resolves exactly once.
-   * Resolving does NOT imply the caller drained `output()` — the two settle
-   * independently; `output()` ends at run settle and the application joins
-   * the drain before using its own capture.
-   */
-  result(): Promise<HostUserShellResult>
-  /**
-   * THE output authority: every decoded chunk in arrival order, exactly
-   * once, with ZERO silent loss — the iteration ENDS when the run settles
-   * (the adapter delivers any buffered tail chunks first). SINGLE
-   * CONSUMER + UPSTREAM BACKPRESSURE: the adapter pauses the Host output
-   * streams while its buffer is full and resumes as the consumer drains,
-   * so bounded adapter memory never costs authoritative bytes (the
-   * application's bounded tail / disk artifact stays a PRESENTATION
-   * policy, never a transport loss). Taking a second consumer from one
-   * execution is a contract violation.
-   */
-  output(): AsyncIterable<HostUserShellOutputChunk>
-}
-
-/** The semantic request for one Host user-shell run. */
-export interface HostUserShellRequest {
-  /** The Session whose Host workspace the run executes in. */
-  readonly sessionId: string
-  /** The Host workspace path for the run (Session cwd). */
-  readonly cwd: string
-  /** The command line exactly as the user typed it (no `!` prefix). */
-  readonly command: string
-  /** The Host execution policy selected by the user's persisted preference. */
-  readonly policy: HostUserShellPolicy
-  /** Caller-owned cancellation; the adapter forwards it to the Host process. */
-  readonly signal: AbortSignal
-}
-
 /** The outcome of one Host user-shell admission. */
-export type HostUserShellAdmission =
-  | { readonly kind: 'executing'; readonly execution: HostUserShellExecution }
+export type HostUserShellOutcome =
+  | { readonly kind: 'settled'; readonly result: HostUserShellResult }
   | { readonly kind: 'unavailable'; readonly reason: HostUserShellUnavailable }
   | { readonly kind: 'indeterminate'; readonly message: string }
 
@@ -119,7 +81,7 @@ export class HostUserShellOutcomeUnknownError extends Error {
   }
 }
 
-/** The Host proves the sandbox runner failed before the user command began. */
+/** The Host proved the sandbox runner/enforcement failed for this run. */
 export class HostUserShellSandboxRunnerError extends Error {
   constructor(message: string) {
     super(message)
@@ -135,14 +97,97 @@ export interface HostUserShellAvailability {
   readonly policies: readonly HostUserShellPolicy[]
 }
 
-/**
- * The Host user-shell execution domain port. Direct is served by the
- * in-process Host adapter; Remote serves the authenticated Host one-shot stream
- * and fails admission truthfully when its Host connection is unavailable.
- */
+/** The semantic request for one Host user-shell run. */
+export interface HostUserShellRequest {
+  /** The Session whose Host workspace the run executes in. */
+  readonly sessionId: string
+  /** The Host workspace path for the run (Session cwd). */
+  readonly cwd: string
+  /** The command line exactly as the user typed it (no `!` prefix). */
+  readonly command: string
+  /** The Host execution policy selected by the user's persisted preference. */
+  readonly policy: HostUserShellPolicy
+  /** Caller-owned cancellation; the adapter forwards it to the Host executor. */
+  readonly signal: AbortSignal
+}
+
+/** The Host user-shell execution domain port. Direct is served by the
+ * in-process Host adapter; Remote serves the authenticated Host one-shot
+ * invocation and fails admission truthfully when its Host connection is
+ * unavailable. */
 export interface HostUserShellPort {
   /** The static availability read (no side effects). */
   readonly availability: HostUserShellAvailability
-  /** Admit one user-shell run; never throws for a capability gap. */
-  execute(request: HostUserShellRequest): Promise<HostUserShellAdmission>
+  /** Run one user-shell command to settlement; never throws for a
+   * command-level failure. A started Remote run whose terminal fact is lost
+   * rejects with {@link HostUserShellOutcomeUnknownError} instead of claiming
+   * nothing executed. */
+  execute(request: HostUserShellRequest): Promise<HostUserShellOutcome>
+}
+
+/** The retained-tail bound of one settled stream. It is the semantic result
+ * bound shared by the Host mapping, the private wire decoder and the
+ * application's Session text. */
+export const MAX_HOST_USER_SHELL_STREAM_BYTES = 64 * 1024
+/** Bound on one refusal/failure message carried back to the Client. */
+export const MAX_HOST_USER_SHELL_MESSAGE_BYTES = 2 * 1024
+/** Bound on a Host-local spill path carried as a semantic fact. */
+export const MAX_HOST_USER_SHELL_SPILL_PATH_BYTES = 4 * 1024
+/** Total output budget of one settled result across BOTH streams. One stream
+ * may use the full per-stream cap; the other is then tail-clamped to the
+ * remainder, so the Session text can never grow with two independent caps. */
+export const MAX_HOST_USER_SHELL_RESULT_BYTES = 96 * 1024
+
+function tailOnCodePoint(bytes: Buffer, maxBytes: number): { readonly text: string; readonly truncated: boolean } {
+  if (bytes.length <= maxBytes) return { text: bytes.toString('utf8'), truncated: false }
+  let start = bytes.length - maxBytes
+  // Never start inside a UTF-8 continuation byte: advancing to the next lead
+  // byte keeps the retained tail decodable without a replacement character.
+  while (start < bytes.length && (bytes[start]! & 0xc0) === 0x80) start += 1
+  return { text: bytes.subarray(start).toString('utf8'), truncated: true }
+}
+
+/**
+ * Map one executor-collected stream to the bounded semantic output. The
+ * executor's own truncation fact is preserved; a stream larger than the
+ * semantic bound is clamped to its tail and marked truncated here.
+ * @param output - the executor's collected output for one stream.
+ * @param maxBytes - retained-tail bound (defaults to the per-stream cap).
+ * @returns the bounded semantic output.
+ */
+export function boundedHostUserShellOutput(
+  output: {
+    readonly text: string
+    readonly truncated: boolean
+    readonly spillPath?: string
+  },
+  maxBytes = MAX_HOST_USER_SHELL_STREAM_BYTES,
+): HostUserShellOutput {
+  const bounded = tailOnCodePoint(Buffer.from(output.text, 'utf8'), maxBytes)
+  return {
+    text: bounded.text,
+    truncated: output.truncated || bounded.truncated,
+    ...(output.spillPath === undefined ? {} : { spillPath: output.spillPath }),
+  }
+}
+
+/**
+ * Apply the TOTAL result budget across both streams. The per-stream caps are
+ * independent; when both are large the second stream (stderr) is tail-clamped
+ * to the remaining total budget and marked truncated, so one Session row can
+ * never carry two full per-stream caps.
+ * @param stdout - already per-stream bounded stdout.
+ * @param stderr - already per-stream bounded stderr.
+ * @returns the pair that satisfies the total result bound.
+ */
+export function boundedHostUserShellResultStreams(
+  stdout: HostUserShellOutput,
+  stderr: HostUserShellOutput,
+): { readonly stdout: HostUserShellOutput; readonly stderr: HostUserShellOutput } {
+  const stdoutBytes = Buffer.byteLength(stdout.text, 'utf8')
+  if (stdoutBytes + Buffer.byteLength(stderr.text, 'utf8') <= MAX_HOST_USER_SHELL_RESULT_BYTES) {
+    return { stdout, stderr }
+  }
+  const remaining = Math.max(0, MAX_HOST_USER_SHELL_RESULT_BYTES - stdoutBytes)
+  return { stdout, stderr: boundedHostUserShellOutput(stderr, remaining) }
 }

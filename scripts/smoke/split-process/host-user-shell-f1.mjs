@@ -21,7 +21,10 @@ async function runShell(client, mode, command, marker, terminal, label) {
   client.send(mode)
   client.send(command)
   client.send('\r')
-  await client.waitForScreen(marker, `${label} output`, 60_000)
+  // The marker also rides the painted COMMAND ROW, so a plain viewport wait
+  // returns before the command's real output exists. Only output painted
+  // OUTSIDE the composer proves the run produced it.
+  await waitForScreenOutsideComposer(client, marker, `${label} output`, 60_000)
   try {
     await client.waitForScreen(terminal, `${label} terminal fact`, 60_000)
   } catch (error) {
@@ -29,40 +32,164 @@ async function runShell(client, mode, command, marker, terminal, label) {
   }
 }
 
-async function waitForComposerMode(client, mode, label) {
-  const expected = mode === 'prompt' ? '❯' : '!'
-  for (let attempt = 0; attempt < 600; attempt += 1) {
-    const composer = await client.composerText()
-    const rows = composer?.split('\n')
-      .map(line => line.replace(/[│┌┐└┘─]/gu, ' ').trim())
-      .filter(Boolean) ?? []
-    if (rows.length === 1 && rows[0] === expected) return
-    if (mode === 'prompt') client.send('\x1b')
+/** The composer rows with box chrome and padding normalized away. */
+function composerRows(composer) {
+  return composer?.split('\n')
+    .map(line => line.replace(/[│┌┐└┘─]/gu, ' ').trim())
+    .filter(Boolean) ?? []
+}
+
+/**
+ * Wait for the AUTHORITATIVE empty composer of `mode`. This never types an
+ * Escape: every transition before the wait is a product-owned input action,
+ * so a timeout is a real state failure and no stray ESC is left queued for
+ * the next completion's literal `!`.
+ */
+async function waitForComposerMode(client, mode, label, timeoutMs = 30_000) {
+  const expected = mode === 'prompt' ? '❯' : mode
+  const started = Date.now()
+  while (Date.now() - started < timeoutMs) {
+    const rows = composerRows(await client.composerText())
+    // The empty draft may paint a dim PLACEHOLDER hint after the prompt glyph
+    // (observed as '❯ ………'). It is presentation-only, not draft text, so the
+    // empty-mode witness strips trailing ellipsis/dot padding instead of
+    // demanding a literally bare glyph row.
+    const head = (rows[0] ?? '').replace(/[\s.…·]+$/u, '')
+    // A connection banner / diagnostic overlay may share the composer box
+    // after a transport drop; it is not draft text. The MODE witness is the
+    // leading prompt glyph (with '!!' never satisfying '!').
+    const modeShown = head === expected
+      || (head.startsWith(expected) && !(expected === '!' && head.startsWith('!!')))
+    if (rows.length > 0 && modeShown) return
     await new Promise(resolve => setTimeout(resolve, 50))
   }
   throw new SplitSmokeAssertionError(`${label} did not reach the empty ${mode} composer: ${JSON.stringify(await client.composerText())}`)
+}
+
+/** Wait until the CURRENT composer draft holds `text` (never the transcript). */
+async function waitForComposerText(client, text, label, timeoutMs = 30_000) {
+  const started = Date.now()
+  while (Date.now() - started < timeoutMs) {
+    if ((await client.composerText() ?? '').includes(text)) return
+    await new Promise(resolve => setTimeout(resolve, 50))
+  }
+  throw new SplitSmokeAssertionError(`${label} did not reach the composer: ${JSON.stringify(await client.composerText())}`)
+}
+
+/**
+ * Rows painted BELOW the composer box (after its bottom rule). The transcript
+ * is above the box, so a candidate found here belongs ONLY to the completion
+ * dropdown painted by the current Tab — never to old transcript text. The
+ * footer shares this region but never carries a completion candidate.
+ */
+function belowComposerRows(viewport) {
+  let bottom = -1
+  for (let index = 0; index < viewport.length; index += 1) {
+    if (/^─+$/u.test(viewport[index].trim())) bottom = index
+  }
+  return bottom === -1 ? [] : viewport.slice(bottom + 1)
+}
+
+/**
+ * Wait for a marker that must appear OUTSIDE the composer. A marker string is
+ * also part of the painted COMMAND ROW before submission, so a plain
+ * waitForScreen() can match the draft instead of the command's real output.
+ */
+async function waitForScreenOutsideComposer(client, needle, label, timeoutMs = 30_000) {
+  const started = Date.now()
+  while (Date.now() - started < timeoutMs) {
+    const viewport = await client.viewport()
+    const composer = (await client.composerText()) ?? ''
+    if (viewport.join('\n').includes(needle) && !composer.includes(needle)) return
+    await new Promise(resolve => setTimeout(resolve, 50))
+  }
+  throw new SplitSmokeAssertionError(`${label}: ${needle} never appeared outside the composer: ${JSON.stringify(await client.composerText())}`)
 }
 
 async function completeFromTui(client, input, candidate, forbidden, label) {
   const mode = input.startsWith('!!') ? '!!' : '!'
   const body = input.slice(mode.length)
   await waitForComposerMode(client, 'prompt', `${label} prompt preparation`)
+  // `!` is editor STATE, not text: send it alone and wait for the painted
+  // shell prompt before the body, so a coalesced chunk can never insert the
+  // prefix as literal draft text.
   client.send(mode)
-  await waitForComposerMode(client, 'shell-context', `${label} shell-mode activation`)
+  await waitForComposerMode(client, mode, `${label} shell-mode activation`)
   client.send(body)
+  // The body must be the CURRENT draft before Tab: this both proves the text
+  // landed and guarantees the Tab is a separate input event.
+  await waitForComposerText(client, body, `${label} draft body`)
+  // Baseline the pre-Tab frame. A candidate already present above the box
+  // (the transcript already holds earlier Host command names/results) must
+  // never be mistaken for this Tab's suggestion.
+  const beforeFrame = await client.viewport()
+  const beforeComposer = (await client.composerText()) ?? ''
+  assert(!beforeComposer.includes(candidate), `${label} candidate was already in the draft before Tab`)
+  assert(!belowComposerRows(beforeFrame).join('\n').includes(candidate),
+    `${label} candidate was already below the composer before Tab`)
   client.send('\t')
-  try {
-    await client.waitForScreen(candidate, `${label} Host suggestion`, 30_000)
-  } catch (error) {
-    const frameTail = (await client.viewport()).slice(-12).join('\\n')
-    throw new SplitSmokeAssertionError(`${label} did not show ${candidate}: ${String(error)}; frameTail=${frameTail}; composer=${JSON.stringify(await client.composerText())}`)
+  // Tab has exactly two user-visible outcomes:
+  //   applied -> a single candidate is applied in place: the draft gains the
+  //              candidate plus the shell completion's trailing space;
+  //   menu    -> several candidates open a dropdown painted BELOW the box.
+  // Only those two CURRENT-frame facts count; a transcript match does not.
+  const deadline = Date.now() + 30_000
+  let offered
+  let offeredDraft = ''
+  while (Date.now() < deadline) {
+    const viewport = await client.viewport()
+    const draft = client.composerOf(viewport) ?? ''
+    if (draft.includes(candidate)) {
+      offered = 'applied'
+      offeredDraft = draft
+      break
+    }
+    if (belowComposerRows(viewport).join('\n').includes(candidate)) {
+      offered = 'menu'
+      offeredDraft = draft
+      break
+    }
+    await new Promise(resolve => setTimeout(resolve, 50))
   }
-  const frame = (await client.viewport()).join('\n')
-  assert(!frame.includes(forbidden), `${label} leaked a Client-only suggestion:\n${frame}`)
-  const lastWhitespace = Math.max(body.lastIndexOf(' '), body.lastIndexOf('\t'))
-  const acceptedBody = body.slice(0, lastWhitespace + 1) + candidate
-  client.send('\x1b')
-  await client.clearComposerDraft(acceptedBody)
+  if (offered === undefined) {
+    throw new SplitSmokeAssertionError(`${label} did not produce ${candidate} in the current completion UI: frameTail=${(await client.viewport()).slice(-12).join('\\n')}; composer=${JSON.stringify(await client.composerText())}`)
+  }
+  // The same CURRENT completion surface must never offer the Client candidate.
+  const offeredBelow = belowComposerRows(await client.viewport()).join('\n')
+  assert(!offeredDraft.includes(forbidden) && !offeredBelow.includes(forbidden),
+    `${label} leaked a Client-only suggestion into the current completion UI: composer=${JSON.stringify(offeredDraft)}; below=${JSON.stringify(offeredBelow)}`)
+  if (offered === 'menu') {
+    // The dropdown needs a SECOND Tab: the fork applies the SELECTED row and
+    // closes the dropdown in the same painted state. Require BOTH the draft
+    // to change and the candidate row to disappear; a fenced/rejected apply
+    // leaves the old menu painted and must fail, never "succeed" from it.
+    const draftBeforeAccept = offeredDraft
+    client.send('\t')
+    const acceptDeadline = Date.now() + 30_000
+    let accepted = false
+    while (Date.now() < acceptDeadline) {
+      const viewport = await client.viewport()
+      const draft = client.composerOf(viewport) ?? ''
+      const stillOffered = belowComposerRows(viewport).join('\n').includes(candidate)
+      if (draft !== draftBeforeAccept && !stillOffered) {
+        accepted = true
+        break
+      }
+      await new Promise(resolve => setTimeout(resolve, 50))
+    }
+    assert(accepted, `${label} dropdown acceptance did not commit a new draft and close the menu: composer=${JSON.stringify(await client.composerText())}`)
+    const acceptedDraft = (await client.composerText()) ?? ''
+    assert(!acceptedDraft.includes(forbidden), `${label} accepted draft leaked a Client-only suggestion: ${JSON.stringify(acceptedDraft)}`)
+  }
+  // Reset the shell draft through the editor's OWN action
+  // (tui.editor.deleteToLineStart / Ctrl+U). No backspace length arithmetic
+  // and no replayed Escape: a shell completion's trailing space or a quoted
+  // path can never desync the cleanup.
+  client.send('\x15')
+  await waitForComposerMode(client, mode, `${label} draft reset`)
+  // ONE consumed Escape on the empty shell body steps the mode back to the
+  // prompt. The empty-composer wait above proves the body was gone, and the
+  // prompt wait below proves the Escape was consumed before any later `!`.
   client.send('\x1b')
   await waitForComposerMode(client, 'prompt', `${label} return to prompt mode`)
 }
@@ -200,6 +327,45 @@ export async function runHostUserShellF1(context) {
       'F1 nonzero Host result Session write')
     await clientA.waitForScreen('f1-shell answer', 'F1 nonzero Host result follow-up', 30_000)
 
+    // Raw Bash semantics: the official one-shot executor runs
+    // `bash -c <command>` verbatim, so `$!`, `wait`, background exit status
+    // and stdout/stderr FDs behave exactly as in Bash. A stderr-rewriting
+    // wrapper would change them.
+    const rawMarker = 'F1_RAW_BASH_20261110'
+    const rawCommand = [
+      `printf '${rawMarker}\\n'`,
+      'sleep 0.05 & p=$!',
+      'wait "$p"',
+      `printf 'F1_WAIT_STATUS=%s\\n' "$?"`,
+      'case $p in ""|*[!0-9]*) printf "F1_WAIT_PID=invalid\\n" ;; *) printf "F1_WAIT_PID=numeric\\n" ;; esac',
+      '(exit 7) & q=$!',
+      'wait "$q"',
+      `printf 'F1_WAIT_BG=%s\\n' "$?"`,
+      '(sleep 5) & k=$!',
+      'kill -TERM "$k"',
+      'wait "$k"',
+      `printf 'F1_WAIT_SIG=%s\\n' "$?"`,
+      `printf 'F1_STREAM_OUT_20261110\\n'`,
+      `printf 'F1_STREAM_ERR_20261110\\n' >&2`,
+    ].join('; ')
+    await runShell(clientA, '!!', rawCommand, rawMarker, 'exit 0', 'F1 raw Bash $!/wait/FD semantics')
+    // The LAST fact printed by the command is the settle witness: waiting for
+    // it (not for the command-row marker) proves every earlier fact rendered.
+    await waitForCondition(async () => (await clientA.viewport()).join('\\n').includes('F1_STREAM_ERR_20261110'),
+      'F1 raw Bash last stream fact', 30_000)
+    const rawFrame = (await clientA.viewport()).join('\\n')
+    for (const fact of [
+      'F1_WAIT_STATUS=0',
+      'F1_WAIT_PID=numeric',
+      'F1_WAIT_BG=7',
+      'F1_WAIT_SIG=143',
+      'F1_STREAM_OUT_20261110',
+      'F1_STREAM_ERR_20261110',
+    ]) {
+      assert(rawFrame.includes(fact), `F1 raw Bash fact ${fact} is missing: ${rawFrame}`)
+    }
+
+
     const { client: clientB } = await scene.startC1Client('f1-shell-client-b', {
       SPLIT_PROCESS_CLIENT_SESSION: sessionId,
       HOME: clientHomeB,
@@ -231,23 +397,41 @@ export async function runHostUserShellF1(context) {
     const disconnectGeneration = clientA.records.filter(record => record.m4b2s === 'surface-status')
       .at(-1)?.generationId
     assert(typeof disconnectGeneration === 'number', 'F1 Client A must report its live Gateway generation')
+    // Submit through the SAME observable composer transitions the completion
+    // cases use: a bare mode key, then the body, then Enter. Back-to-back
+    // writes can fuse keys on the PTY decoder, so each step is proven by the
+    // painted composer before the next byte is sent.
+    await waitForComposerMode(clientA, 'prompt', 'F1 disconnect prompt preparation')
     clientA.send('!!')
-    clientA.send(`printf x >> ${shellQuote(disconnectCounter)}; printf '%s\\n' "$BASHPID" > ${shellQuote(disconnectPidPath)}; printf '${disconnectMarker}\\n'; sleep 30; printf finished > ${shellQuote(disconnectFinish)}`)
+    await waitForComposerMode(clientA, '!!', 'F1 disconnect shell-local activation')
+    const disconnectCommand = `printf x >> ${shellQuote(disconnectCounter)}; printf '%s\\n' "$BASHPID" > ${shellQuote(disconnectPidPath)}; printf '${disconnectMarker}\\n'; sleep 30; printf finished > ${shellQuote(disconnectFinish)}`
+    clientA.send(disconnectCommand)
+    await waitForComposerText(clientA, 'printf x', 'F1 disconnect command draft')
     clientA.send('\r')
-    await clientA.waitForScreen(disconnectMarker, 'F1 Client A command reached the Host before disconnect', 30_000)
+    // The marker string also rides the painted COMMAND ROW (and can wrap, so a
+    // literal viewport scan is not reliable evidence). The pid file the command
+    // writes BEFORE its marker is the authoritative "the Host command really
+    // started" fact; wait for it before reading.
+    await waitForCondition(() => existsSync(disconnectPidPath) && readFileSync(disconnectPidPath, 'utf8').trim() !== '',
+      'F1 disconnect probe recorded its Host pid', 30_000)
     const shellPid = Number(readFileSync(disconnectPidPath, 'utf8').trim())
     assert(Number.isInteger(shellPid) && shellPid > 0, 'F1 disconnect probe recorded the Host Bash pid')
     clientA.signalBusiness('SIGUSR1')
-    try {
-      await clientA.waitForScreen('do not retry automatically', 'F1 started-stream unknown-outcome warning', 30_000)
-    } catch (error) {
-      throw new SplitSmokeAssertionError(`F1 started-stream disconnect had no visible no-retry outcome: ${String(error)}; frameTail=${(await clientA.viewport()).slice(-18).join('\\n')}; latestStatus=${JSON.stringify(clientA.records.filter(record => record.m4b2s === 'surface-status').at(-1) ?? null)}`)
-    }
+    // The reconnected surface first has to be AUTHENTICATED: the status line
+    // legitimately shows `connection lost, retry #N` (and a transitional
+    // aborted card) while the transport is still re-establishing. Only after
+    // the new generation is live can the run's indeterminate outcome be
+    // presented, so that fact is awaited FIRST and the warning second.
     await clientA.waitFor(record => record.m4b2s === 'surface-status'
       && record.generationId !== disconnectGeneration
       && record.sessionOpen === true
       && record.openSessionId === sessionId,
     'F1 Client A authenticated reconnect generation', 120_000)
+    try {
+      await clientA.waitForScreen('do not retry automatically', 'F1 one-shot unknown-outcome warning', 30_000)
+    } catch (error) {
+      throw new SplitSmokeAssertionError(`F1 started-stream disconnect had no visible no-retry outcome: ${String(error)}; frameTail=${(await clientA.viewport()).slice(-18).join('\\n')}; latestStatus=${JSON.stringify(clientA.records.filter(record => record.m4b2s === 'surface-status').at(-1) ?? null)}`)
+    }
     for (let attempt = 0; attempt < 200 && alive(shellPid); attempt += 1) {
       await new Promise(resolve => setTimeout(resolve, 50))
     }
@@ -262,18 +446,24 @@ export async function runHostUserShellF1(context) {
     const childMarker = 'F1_CANCELLED_CHILD_DONE_20261109'
     const cancelFile = join(hostDir, 'cancelled-child-finished.txt')
     const beforeClientBRuns = hostSessionEvents(dshHome, sessionId) ?? []
+    await waitForComposerMode(clientA, 'prompt', 'F1 cancel prompt preparation')
     clientA.send('!')
+    await waitForComposerMode(clientA, '!', 'F1 cancel shell-mode activation')
     clientA.send(`printf 'F1_CLIENT_A_RUNNING_20261109\\n'; sleep 30; touch ${shellQuote(cancelFile)}; printf '${childMarker}\\n'`)
+    await waitForComposerText(clientA, 'F1_CLIENT_A_RUNNING_20261109', 'F1 cancel command draft')
     clientA.send('\r')
-    await clientA.waitForScreen('F1_CLIENT_A_RUNNING_20261109', 'F1 Client A active Host run', 30_000)
+    await waitForScreenOutsideComposer(clientA, 'F1_CLIENT_A_RUNNING_20261109', 'F1 Client A active Host run')
+    await waitForComposerMode(clientB, 'prompt', 'F1 independent Client B prompt preparation')
     clientB.send('!')
+    await waitForComposerMode(clientB, '!', 'F1 independent Client B shell-mode activation')
     clientB.send("printf 'F1_CLIENT_B_RUNNING_20261109\\n' >&2; sleep 2; printf 'F1_CLIENT_B_SURVIVED_20261109\\n'; printf 'F1_CLIENT_B_STDERR_20261109\\n' >&2")
+    await waitForComposerText(clientB, 'F1_CLIENT_B_RUNNING_20261109', 'F1 independent Client B command draft')
     clientB.send('\r')
-    await clientB.waitForScreen('F1_CLIENT_B_RUNNING_20261109', 'F1 Client B independent Host run', 30_000)
+    await waitForScreenOutsideComposer(clientB, 'F1_CLIENT_B_RUNNING_20261109', 'F1 Client B independent Host run')
     clientA.send('\x1b')
     await clientA.waitForScreen('aborted', 'F1 Client A Host run cancellation', 30_000)
     await clientB.waitForScreen('F1_CLIENT_B_SURVIVED_20261109', 'F1 Client B remains unaffected', 30_000)
-    await clientB.waitForScreen('F1_CLIENT_B_STDERR_20261109', 'F1 Client B stderr survives the Host relay', 30_000)
+    await clientB.waitForScreen('F1_CLIENT_B_STDERR_20261109', 'F1 Client B stderr is captured by the official collector', 30_000)
     await clientB.waitForScreen('exit 0', 'F1 Client B Host run terminal fact', 30_000)
     await waitForHostSessionEventAfter(dshHome, sessionId, beforeClientBRuns.length,
       event => event.type === 'user/message' && JSON.stringify(event).includes('F1_CLIENT_B_SURVIVED_20261109'),
@@ -294,10 +484,24 @@ export async function runHostUserShellF1(context) {
     let scopeReleaseWritten = false
     let scopeShellPid
     try {
+      // A gesture accepted while the previous turn is still submitting is
+      // QUEUED, so its command would not start before the release barrier.
+      // Wait for the product's own pending rows to clear first.
+      await waitForCondition(async () => {
+        const frame = (await clientA.viewport()).join('\n')
+        return !frame.includes('Submitting…') && !frame.includes('Queued…')
+      }, 'F1 scope-switch Client A idle for submission', 60_000)
+      await waitForComposerMode(clientA, 'prompt', 'F1 scope-switch prompt preparation')
       clientA.send('!')
-      clientA.send(`printf '%s\\n' "$BASHPID" > ${shellQuote(scopePidFile)}; touch ${shellQuote(scopeStartFile)}; printf '${scopeStartedMarker}\\n'; while [ ! -f ${shellQuote(scopeReleaseFile)} ]; do sleep 0.05; done; printf '${scopeFinishedMarker}\\n'; touch ${shellQuote(scopeFinishFile)}`)
+      await waitForComposerMode(clientA, '!', 'F1 scope-switch shell-mode activation')
+      clientA.send(`printf '%s\\n' "${'$'}BASHPID" > ${shellQuote(scopePidFile)}; touch ${shellQuote(scopeStartFile)}; printf '${scopeStartedMarker}\\n'; while [ ! -f ${shellQuote(scopeReleaseFile)} ]; do sleep 0.05; done; printf '${scopeFinishedMarker}\\n'; touch ${shellQuote(scopeFinishFile)}`)
+      // The command's own pid file (awaited below) is the authoritative start
+      // fact; the composer seat can be scrolled out of the captured viewport,
+      // so its draft text is not a reliable witness here.
       clientA.send('\r')
       await clientA.waitForScreen(scopeStartedMarker, 'F1 Shell captured Session A and started on Host', 30_000)
+      await waitForCondition(() => existsSync(scopePidFile) && readFileSync(scopePidFile, 'utf8').trim() !== '',
+        'F1 scope-switch probe recorded its Host pid', 30_000)
       scopeShellPid = Number(readFileSync(scopePidFile, 'utf8').trim())
       assert(Number.isInteger(scopeShellPid) && scopeShellPid > 0, 'F1 scope-switch probe recorded its Host Bash pid')
       assert(existsSync(scopeStartFile), 'the Host Session A Shell is running before the navigation')
@@ -332,6 +536,58 @@ export async function runHostUserShellF1(context) {
       'the stale Shell result is not written back to its original Session after the scope changes')
     assert(afterScopeB.length === beforeScopeB.length && !afterScopeB.some(text => text.includes(scopeFinishedMarker)),
       'the stale Shell result is never retargeted into the newly selected Session')
+
+    // Bounded one-shot output: both streams exceed the executor's in-memory
+    // cap, so the Host must keep explicit tails, mark truncation truthfully,
+    // name the Host-local spill files, and write only that bounded text to
+    // the exact Session.
+    const truncBegin = 'F1_TRUNC_BEGIN_20261110'
+    const truncTail = 'F1_TRUNC_TAIL_20261110'
+    const truncStderrTail = 'F1_TRUNC_STDERR_TAIL_20261110'
+    const truncCommand = [
+      "printf 'F1_TRUNC_%s\\n' BEGIN_20261110",
+      "for ((i=0;i<512;i++)); do printf '%200s\\n' ''; done",
+      "for ((i=0;i<400;i++)); do printf '%200s\\n' '' >&2; done",
+      `printf '${truncTail}\\n'`,
+      `printf '${truncStderrTail}\\n' >&2`,
+    ].join('; ')
+    const beforeTrunc = hostSessionEvents(dshHome, sessionId) ?? []
+    // Do NOT use the generic runShell() terminal wait here: it waits for
+    // `exit 0`, which every earlier `!`/`!!` card in this transcript already
+    // paints. That wait can return on a STALE row, so the frame read next may
+    // belong to a transitional or previous card. This run's unique truncation
+    // text and its Session write are the only authority that the card settled.
+    clientB.send('!')
+    clientB.send(truncCommand)
+    clientB.send('\r')
+    await clientB.waitForScreen(truncStderrTail, 'F1 bounded truncated output', 60_000)
+    await waitForHostSessionEventAfter(dshHome, sessionId, beforeTrunc.length,
+      event => event.type === 'user/message' && JSON.stringify(event).includes(truncTail),
+      'F1 bounded truncated result Session write')
+    await waitForCondition(async () => {
+      const frame = (await clientB.viewport()).join('\\n')
+      return frame.includes('stdout truncated') && frame.includes('stderr truncated')
+    }, 'F1 settled truncated card markers', 30_000)
+    const truncFrame = (await clientB.viewport()).join('\\n')
+    assert(truncFrame.includes('stdout truncated') && truncFrame.includes('stderr truncated'),
+      `the settled card must mark both truncated streams truthfully: ${truncFrame}`)
+    const truncExitIndex = truncFrame.lastIndexOf('[exit 0]')
+    assert(truncExitIndex > truncFrame.indexOf('stdout truncated')
+      && truncExitIndex > truncFrame.indexOf('stderr truncated'),
+      `the truncation markers must precede the card's exit marker: ${truncFrame}`)
+    const truncWrites = hostUserTexts(hostSessionEvents(dshHome, sessionId) ?? [])
+      .filter(text => text.includes(truncTail))
+    assert(truncWrites.length === 1, '! writes the bounded truncated result exactly once')
+    const truncText = truncWrites[0] ?? ''
+    assert(truncText.includes('stdout truncated') && truncText.includes('stderr truncated'),
+      'the Session text explicitly represents both stream truncations')
+    assert(truncText.includes('Host-local'), 'the Session text names the spill file as a Host-local fact')
+    assert(!truncText.includes(truncBegin),
+      'the bounded Session text keeps the tail, not the untruncated beginning')
+    assert(Buffer.byteLength(truncText, 'utf8') < 200 * 1024,
+      `the Session text stays bounded (got ${Buffer.byteLength(truncText, 'utf8')} bytes)`)
+    await clientB.waitForScreen('f1-shell answer', 'F1 bounded truncated result follow-up', 30_000)
+    assert(existsSync(join(hostDir, 'host-only.txt')), 'the F1 Host workspace survived the bounded run')
 
     await scene.exitC1Client(clientA, 'F1 bypass Host Client A')
     await scene.exitC1Client(clientB, 'F1 bypass Host Client B')
@@ -393,7 +649,7 @@ export async function runHostUserShellF1(context) {
     const beforeSandboxDeny = hostUserTexts(hostSessionEvents(dshHome, sandboxSessionId) ?? [])
     const sandboxDeny = 'F1_SANDBOX_DENY_ATTEMPT_20261109'
     assert(!existsSync(deniedPath), 'the sandbox confinement target remains absent before the denied write')
-    await runShell(sandboxClient, '!!', `printf '${sandboxDeny}\\n'; touch ${shellQuote(deniedPath)} 2>&1`,
+    await runShell(sandboxClient, '!!', `printf '${sandboxDeny}\\n'; touch ${shellQuote(deniedPath)}`,
       sandboxDeny, 'exit 1', 'F1 sandbox outside-workspace denial')
     const denialFrame = (await sandboxClient.viewport()).join('\\n')
     assert(denialFrame.includes(sandboxDeny) && denialFrame.includes('sandbox denied') && denialFrame.includes('exit 1'),
@@ -407,14 +663,14 @@ export async function runHostUserShellF1(context) {
       ...hostUserTexts(finalEvents),
       ...hostUserTexts(hostSessionEvents(dshHome, sandboxSessionId) ?? []),
     ]
-    const expectedShellResults = [hostMarker, bypassMarker, nonzeroMarker, sandboxAllow, 'F1_CLIENT_B_SURVIVED_20261109']
+    const expectedShellResults = [hostMarker, bypassMarker, nonzeroMarker, sandboxAllow, 'F1_CLIENT_B_SURVIVED_20261109', truncTail]
     for (const marker of expectedShellResults) {
       assert(finalUserMessages.filter(text => text.includes(marker)).length === 1,
         `! writes its captured result to the exact Session once for ${marker}`)
     }
     assert(!finalUserMessages.some(text => text.includes(sandboxDeny)), 'sandbox denial uses !! and adds no model context')
     assert(!finalUserMessages.some(text => text.includes(signalMarker)), '!! signal outcomes add no model context')
-    assert(!finalUserMessages.some(text => text.includes(disconnectMarker)), 'indeterminate started output is never replayed into the Session')
+    assert(!finalUserMessages.some(text => text.includes(disconnectMarker)), 'an indeterminate one-shot outcome is never replayed into the Session')
     assert(!finalUserMessages.some(text => text.includes(localMarker)), '!! has no durable Shell result')
     assert(!finalUserMessages.some(text => text.includes(childMarker)), 'cancelled Client A has no durable partial result')
     trace('m6-f1-host-user-shell', {
@@ -443,6 +699,14 @@ export async function runHostUserShellF1(context) {
       independentClients: { clientA: 'cancelled', clientB: 'settled' },
       shellResultWrites: expectedShellResults.length,
       bangBangWrites: afterBangBangEvents.length - beforeBangBang,
+      oneShot: {
+        boundedSessionTextBytes: Buffer.byteLength(truncText, 'utf8'),
+        stdoutTruncated: truncText.includes('stdout truncated'),
+        stderrTruncated: truncText.includes('stderr truncated'),
+        tailRetained: truncText.includes(truncTail),
+        beginningDropped: !truncText.includes(truncBegin),
+        rawBash: { wait: true, backgroundExit: true, signalWait: true, fdSplit: true },
+      },
       result: 'PASS',
     })
     return { status: 'PASS', sessionId }

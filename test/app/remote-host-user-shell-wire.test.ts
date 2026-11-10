@@ -1,12 +1,22 @@
 import assert from 'node:assert/strict'
-import { createHash } from 'node:crypto'
+import { readFileSync, existsSync } from 'node:fs'
+import { join } from 'node:path'
 import test from 'node:test'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import type { RemoteStreamHandle } from '@deepseek-ai/dsh-typert-protocol'
-import { HostUserShellOutputMux } from '../../src/app/host/features/host-user-shell-stream.ts'
+import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
 import { RemoteHostShellCompletionPort } from '../../src/runtime/remote/host-shell-completion-remote.ts'
 import { RemoteHostUserShellPort } from '../../src/runtime/remote/host-user-shell-remote.ts'
-import type { HostUserShellAck, HostUserShellFrame, PiTuiHostUserShellNamespace } from '../../src/runtime/remote/pi-tui-host-user-shell-contract.ts'
+import type { RemoteConnectionGenerationSource } from '../../src/runtime/remote/session-reader-remote.ts'
+import type {
+  HostUserShellRunOutcome,
+  PiTuiHostUserShellNamespace,
+} from '../../src/runtime/remote/pi-tui-host-user-shell-contract.ts'
+import {
+  HostUserShellOutcomeUnknownError,
+  HostUserShellSandboxRunnerError,
+  MAX_HOST_USER_SHELL_STREAM_BYTES,
+  type HostUserShellOutcome,
+} from '../../src/runtime/host-user-shell-port.ts'
 import { createRemoteClientRuntime, type RemoteClientRuntime } from '../support/m3-inprocess/client-runtime.ts'
 import { createRemoteHostRuntime, type RemoteHostRuntime } from '../support/m3-inprocess/host-runtime.ts'
 import { createRemoteApplicationHostFixture, waitFor } from '../support/remote-application-fixture.ts'
@@ -18,47 +28,17 @@ interface Wire {
   readonly client: RemoteClientRuntime
   readonly shell: RemoteHostUserShellPort
   readonly completion: RemoteHostShellCompletionPort
-  readonly downlinkFrames: HostUserShellFrame[]
-  readonly acknowledgements: HostUserShellAck[]
-  readonly ownerPeer: import('@deepseek-ai/dsh-client-connection').PeerScope
   dispose(): Promise<void>
 }
 
 async function mountWire(life: ReturnType<typeof testLifecycle>, preset: string): Promise<Wire> {
   const host = await createRemoteApplicationHostFixture(life, preset)
   const hostRuntime = await createRemoteHostRuntime(host.ctx)
-  const ownerPeer = host.ctx.connection.browserPeer
   const client = await createRemoteClientRuntime({ carrier: hostRuntime.carrier })
-  const downlinkFrames: HostUserShellFrame[] = []
-  const acknowledgements: HostUserShellAck[] = []
   const remote = client.remote.piTuiHostUserShell
   const namespace: PiTuiHostUserShellNamespace = {
     complete: (...args) => remote.complete(...args),
-    run: (...args) => {
-      const handle = remote.run(...args)
-      const iterator = handle[Symbol.asyncIterator]()
-      const tapped: RemoteStreamHandle<HostUserShellFrame, HostUserShellAck> = {
-        [Symbol.asyncIterator]() {
-          return {
-            async next() {
-              const next = await iterator.next()
-              if (!next.done) downlinkFrames.push(next.value)
-              return next
-            },
-            async return() {
-              return await iterator.return?.() ?? { done: true, value: undefined }
-            },
-          }
-        },
-        send(item) {
-          acknowledgements.push(item)
-          handle.send(item)
-        },
-        end() { handle.end() },
-        dispose() { handle.dispose() },
-      }
-      return tapped
-    },
+    run: (...args) => remote.run(...args),
   }
   const shell = new RemoteHostUserShellPort(namespace, client.connection.generation)
   const completion = new RemoteHostShellCompletionPort(namespace, client.connection.generation)
@@ -69,9 +49,6 @@ async function mountWire(life: ReturnType<typeof testLifecycle>, preset: string)
     client,
     shell,
     completion,
-    downlinkFrames,
-    acknowledgements,
-    ownerPeer,
     async dispose() {
       if (disposed) return
       disposed = true
@@ -82,94 +59,128 @@ async function mountWire(life: ReturnType<typeof testLifecycle>, preset: string)
   }
 }
 
-async function waitForFrames(frames: readonly HostUserShellFrame[], count: number): Promise<void> {
-  await waitFor(`Host shell downlink frames ${count}`, () => frames.filter(frame => frame.kind === 'output').length >= count, 10_000)
+async function createSession(wire: Wire, sessionId: string): Promise<string> {
+  const hostAgent = await wire.host.harness.create(SessionId(sessionId), { provider: 'smoke', model: 'smoke' }, { cwd: wire.host.anchorDir })
+  assert.strictEqual(wire.host.ctx.agents.get(SessionId(sessionId)), hostAgent)
+  assert.strictEqual(wire.host.ctx.sessions.get(SessionId(sessionId)), hostAgent.session)
+  return wire.host.ctx.workingDirectory.get(hostAgent.session)
 }
 
-test('one authenticated Gateway stream carries 32 MiB Host stdout and 2 MiB stderr with consumed-output ACKs', async t => {
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`
+}
+
+test('one authenticated one-shot Gateway invocation returns bounded output and the real exit fact', async t => {
   const life = testLifecycle(t)
   const wire = await mountWire(life, 'm6-f1-real-gateway-shell')
-  assert.equal(wire.ownerPeer.principal.kind, 'owner', 'the Gateway call speaks for the real Host browser Owner Peer')
-  const hostMuxBytes = { stdout: 0, stderr: 0 }
-  const originalMuxNext = HostUserShellOutputMux.prototype.next
-  HostUserShellOutputMux.prototype.next = async function (signal) {
-    const chunk = await originalMuxNext.call(this, signal)
-    if (chunk !== undefined) hostMuxBytes[chunk.stream] += chunk.bytes.length
-    return chunk
-  }
-  const sessionId = 'm6-f1-real-gateway-shell-session'
   try {
-    const hostAgent = await wire.host.harness.create(SessionId(sessionId), { provider: 'smoke', model: 'smoke' }, { cwd: wire.host.anchorDir })
-    assert.strictEqual(wire.host.ctx.agents.get(SessionId(sessionId)), hostAgent)
-    assert.strictEqual(wire.host.ctx.sessions.get(SessionId(sessionId)), hostAgent.session)
+    const sessionId = 'm6-f1-real-gateway-shell-session'
+    const hostCwd = await createSession(wire, sessionId)
     const retained = wire.client.sessions.retain(SessionId(sessionId), { source: 'tuiMainView' })
     await retained.ready
     try {
-      const hostCwd = wire.host.ctx.workingDirectory.get(hostAgent.session)
-      const admission = await wire.shell.execute({
+      const outcome = await wire.shell.execute({
         sessionId,
         cwd: hostCwd,
-        command: `for ((i=0;i<64;i++)); do printf '%32768s' '' >&2; done; for ((i=0;i<1024;i++)); do printf '%32768s' ''; done; printf '\\377' >&2`,
+        command: "for ((i=0;i<512;i++)); do printf '%200s\\n' ''; done; printf 'BOUNDED_TAIL_20261110\\n'; exit 7",
         policy: 'bypass',
         signal: new AbortController().signal,
       })
-      if (admission.kind !== 'executing') {
-        const refusal = admission.kind === 'unavailable' ? admission.reason.message : admission.message
-        throw new Error(`the authenticated Gateway Owner run was ${admission.kind}: ${refusal}`)
-      }
-
-      // The application has not called output() yet: the full eight-frame
-      // consumer window may reach the real Client StreamInbox, but no ninth
-      // Host frame may be sent until the business iterator consumes an item.
-      await waitForFrames(wire.downlinkFrames, 8)
-      // This bounded negative observation lets an eager Host pump expose a ninth frame.
-      await new Promise(resolve => setTimeout(resolve, 100))
-      assert.equal(wire.downlinkFrames.filter(frame => frame.kind === 'output').length, 8,
-        'Host stops producing at the eight unconsumed-frame window')
-      assert.equal(wire.acknowledgements.length, 0, 'Gateway reception alone is not a consumer ACK')
-
-      const consumedBytes = { stdout: 0, stderr: 0 }
-      let replacementCharacters = 0
-      const drain = (async (): Promise<void> => {
-        for await (const chunk of admission.execution.output()) {
-          consumedBytes[chunk.stream] += chunk.bytes
-          replacementCharacters += [...chunk.text].filter(character => character === '\ufffd').length
-          await new Promise(resolve => setTimeout(resolve, 1))
-        }
-      })()
-      const result = await admission.execution.result()
-      await drain
-      const outputFrames = wire.downlinkFrames.filter((frame): frame is Extract<HostUserShellFrame, { kind: 'output' }> => frame.kind === 'output')
-      const wireBytes = { stdout: 0, stderr: 0 }
-      const stderrChunks: Buffer[] = []
-      for (const frame of outputFrames) {
-        const bytes = Buffer.from(frame.base64, 'base64')
-        wireBytes[frame.stream] += bytes.length
-        if (frame.stream === 'stderr') stderrChunks.push(bytes)
-      }
-      const stderrWire = Buffer.concat(stderrChunks)
-      assert.deepEqual(hostMuxBytes, wireBytes, `Host mux ${JSON.stringify(hostMuxBytes)} diverged from Gateway wire ${JSON.stringify(wireBytes)}`)
-      assert.deepEqual(consumedBytes, { stdout: 32 * 1024 * 1024, stderr: 2 * 1024 * 1024 + 1 },
-        `consumed bytes ${JSON.stringify(consumedBytes)} did not match wire bytes ${JSON.stringify(wireBytes)} across ${outputFrames.length} frames; result ${JSON.stringify(result.exit)}; stderr tail hex ${stderrWire.subarray(-128).toString('hex')}`)
-      assert.equal(replacementCharacters, 1, 'invalid UTF-8 reaches the existing Client decoder as one replacement without changing raw byte accounting')
-      assert.deepEqual(result.exit, { kind: 'exit', code: 0 })
-      assert.equal(result.aborted, false)
-
-      assert.ok(outputFrames.length >= 1025, 'the 34 MiB real output traversed many bounded wire frames')
-      assert.equal(wire.acknowledgements.length, outputFrames.length,
-        'every output frame is acknowledged once by output() consumption, never on receipt')
-      assert.deepEqual(wire.acknowledgements.map(ack => ack.seq), outputFrames.map(frame => frame.seq))
-      const wireHashes = { stdout: createHash('sha256'), stderr: createHash('sha256') }
-      for (const frame of outputFrames) wireHashes[frame.stream].update(Buffer.from(frame.base64, 'base64'))
-      assert.equal(wireHashes.stdout.digest('hex'), createHash('sha256').update(Buffer.alloc(32 * 1024 * 1024, 0x20)).digest('hex'))
-      assert.equal(wireHashes.stderr.digest('hex'), createHash('sha256').update(Buffer.concat([Buffer.alloc(2 * 1024 * 1024, 0x20), Buffer.from([0xff])])).digest('hex'))
-      assert.equal(wire.downlinkFrames.filter(frame => frame.kind === 'started').length, 1)
-      assert.equal(wire.downlinkFrames.filter(frame => frame.kind === 'settled').length, 1)
+      assert.equal(outcome.kind, 'settled', JSON.stringify(outcome))
+      if (outcome.kind !== 'settled') throw new Error('expected a settled one-shot result')
+      assert.deepEqual(outcome.result.exit, { kind: 'exit', code: 7 })
+      assert.equal(outcome.result.stdout.truncated, true)
+      assert.equal(outcome.result.stdout.text.endsWith('BOUNDED_TAIL_20261110\n'), true)
+      assert.ok(Buffer.byteLength(outcome.result.stdout.text, 'utf8') <= MAX_HOST_USER_SHELL_STREAM_BYTES)
+      assert.equal(typeof outcome.result.stdout.spillPath, 'string',
+        'the official collect/spill disposition names a Host-local full-output file')
+      assert.deepEqual(outcome.result.stderr, { text: '', truncated: false })
+      assert.equal(outcome.result.sandboxDenied, false)
     } finally {
       retained.release()
     }
   } finally {
-    HostUserShellOutputMux.prototype.next = originalMuxNext
+    await wire.dispose()
+  }
+})
+
+test('raw Bash `$!`/`wait` and separate stdout/stderr FDs cross the Remote one-shot result', async t => {
+  const life = testLifecycle(t)
+  const wire = await mountWire(life, 'm6-f1-real-gateway-shell-wait')
+  try {
+    const sessionId = 'm6-f1-real-gateway-shell-wait-session'
+    const hostCwd = await createSession(wire, sessionId)
+    const retained = wire.client.sessions.retain(SessionId(sessionId), { source: 'tuiMainView' })
+    await retained.ready
+    try {
+      const outcome = await wire.shell.execute({
+        sessionId,
+        cwd: hostCwd,
+        command: "sleep 0.05 & p=$!; wait \"$p\"; printf 'WAIT=%s PID=%s\\n' \"$?\" \"$p\"; printf 'FD_OUT\\n'; printf 'FD_ERR\\n' >&2",
+        policy: 'bypass',
+        signal: new AbortController().signal,
+      })
+      assert.equal(outcome.kind, 'settled', JSON.stringify(outcome))
+      if (outcome.kind !== 'settled') throw new Error('expected a settled run')
+      assert.deepEqual(outcome.result.exit, { kind: 'exit', code: 0 })
+      assert.match(outcome.result.stdout.text, /WAIT=0 PID=\d+/u)
+      assert.ok(outcome.result.stdout.text.includes('FD_OUT'))
+      assert.ok(!outcome.result.stdout.text.includes('FD_ERR'), 'stderr is not relayed into stdout')
+      assert.equal(outcome.result.stderr.text, 'FD_ERR\n')
+    } finally {
+      retained.release()
+    }
+  } finally {
+    await wire.dispose()
+  }
+})
+
+test('a cancellation aborts the one-shot Host run and cleans up the managed range once', async t => {
+  const life = testLifecycle(t)
+  const wire = await mountWire(life, 'm6-f1-real-gateway-shell-cancel')
+  const scratch = life.tempDir('f1-wire-cancel-')
+  const counter = join(scratch, 'invocations.txt')
+  const childPidFile = join(scratch, 'child.pid')
+  const isAlive = (pid: number): boolean => {
+    try {
+      process.kill(pid, 0)
+      return true
+    } catch {
+      return false
+    }
+  }
+  try {
+    const sessionId = 'm6-f1-real-gateway-shell-cancel-session'
+    const hostCwd = await createSession(wire, sessionId)
+    const retained = wire.client.sessions.retain(SessionId(sessionId), { source: 'tuiMainView' })
+    await retained.ready
+    try {
+      const controller = new AbortController()
+      const pending = wire.shell.execute({
+        sessionId,
+        cwd: hostCwd,
+        command: `printf x >> ${shellQuote(counter)}; sleep 30 & child=$!; printf '%s\\n' "$child" > ${shellQuote(childPidFile)}; wait "$child"`,
+        policy: 'bypass',
+        signal: controller.signal,
+      })
+      for (let attempt = 0; attempt < 200 && !existsSync(childPidFile); attempt += 1) {
+        await new Promise(resolve => setTimeout(resolve, 25))
+      }
+      assert.equal(existsSync(counter), true, 'the Host command really started once')
+      const childPid = Number(readFileSync(childPidFile, 'utf8').trim())
+      assert.ok(Number.isInteger(childPid) && childPid > 0, 'the background child pid was published')
+      assert.equal(isAlive(childPid), true, 'the managed background child is alive before cancellation')
+      controller.abort()
+      await assert.rejects(pending, (error: unknown) => error instanceof Error && error.name === 'AbortError')
+      for (let attempt = 0; attempt < 400 && isAlive(childPid); attempt += 1) {
+        await new Promise(resolve => setTimeout(resolve, 25))
+      }
+      assert.equal(isAlive(childPid), false, 'the managed range (including the background child) was cleaned up')
+      assert.equal(readFileSync(counter, 'utf8'), 'x', 'the cancelled Host command is never replayed')
+    } finally {
+      retained.release()
+    }
+  } finally {
     await wire.dispose()
   }
 })
@@ -185,7 +196,6 @@ test('the official Gateway denies a real non-owner Peer before Host dispatch', a
     const payload = {
       args: {
         sessionId: 'not-a-live-session',
-        requestId: '550e8400-e29b-41d4-a716-446655440001',
         expectedCwd: process.cwd(),
         command: 'touch should-never-exist',
         policy: 'bypass',
@@ -193,19 +203,20 @@ test('the official Gateway denies a real non-owner Peer before Host dispatch', a
     }
     let refusal: unknown
     try {
-      await wire.host.ctx.typertGateway.wireStream.open(
+      const items = await wire.host.ctx.typertGateway.wireStream.open(
         endpoint,
         payload,
         (async function* () {})(),
         peer,
         signal,
       )
+      for await (const _item of items) { /* a denial must never yield */ }
     } catch (error) {
       refusal = error
     }
-    assert.ok(refusal instanceof Error, 'the real non-owner call is refused before a stream opens')
+    assert.ok(refusal instanceof Error, 'the real non-owner call is refused before Host dispatch')
     assert.equal((refusal as Error & { code?: string }).code, 'remote-access/denied')
-    assert.match((refusal as Error).message, /piTuiHostUserShell\/run: access denied \(no-allow\)/)
+    assert.match((refusal as Error).message, /piTuiHostUserShell\/run: access denied \(no-allow\)/u)
   } finally {
     await peer.dispose()
     await wire.dispose()
@@ -217,7 +228,7 @@ test('the same authenticated Host namespace answers read-only Host completion', 
   const wire = await mountWire(life, 'm6-f1-real-gateway-completion')
   const sessionId = 'm6-f1-real-gateway-completion-session'
   try {
-    const hostAgent = await wire.host.harness.create(SessionId(sessionId), { provider: 'smoke', model: 'smoke' }, { cwd: wire.host.anchorDir })
+    await createSession(wire, sessionId)
     const retained = wire.client.sessions.retain(SessionId(sessionId), { source: 'tuiMainView' })
     await retained.ready
     try {
@@ -237,11 +248,109 @@ test('the same authenticated Host namespace answers read-only Host completion', 
       assert.equal(git.kind, 'ok')
       if (git.kind !== 'ok') throw new Error('Host Git subcommand completion was unavailable')
       assert.ok(git.candidates.includes('checkout'), `the real Host Git command list was ${JSON.stringify(git.candidates)}`)
-      assert.equal(hostAgent.session.id, sessionId)
     } finally {
       retained.release()
     }
   } finally {
     await wire.dispose()
   }
+})
+
+// ── Remote adapter mapping (unary outcomes, not a transport stream) ─────────
+
+function fakeNamespace(run: PiTuiHostUserShellNamespace['run']): PiTuiHostUserShellNamespace {
+  return {
+    run,
+    complete: async () => ({ ok: true, value: { kind: 'ok', candidates: [] } }),
+  }
+}
+
+function generationOf(): RemoteConnectionGenerationSource {
+  const snapshot = {}
+  return { getSnapshot: () => snapshot as never, subscribe: () => () => {} }
+}
+
+function requestOf(overrides: Partial<Parameters<RemoteHostUserShellPort['execute']>[0]> = {}) {
+  return {
+    sessionId: 'session-a',
+    cwd: '/workspace',
+    command: 'true',
+    policy: 'bypass' as const,
+    signal: new AbortController().signal,
+    ...overrides,
+  }
+}
+
+const settledOutcome: HostUserShellRunOutcome = {
+  kind: 'settled',
+  result: {
+    exit: { kind: 'exit', code: 0 },
+    stdout: { text: 'ok\n', truncated: false },
+    stderr: { text: '', truncated: false },
+    sandboxDenied: false,
+    aborted: false,
+    timedOut: false,
+  },
+}
+
+test('the Remote adapter maps a refusal to unavailable and keeps the Host message', async () => {
+  const port = new RemoteHostUserShellPort(fakeNamespace(async () => ({
+    ok: true,
+    value: { kind: 'refused', reason: 'policy-unavailable', message: 'nothing executed' },
+  })), generationOf())
+  const outcome: HostUserShellOutcome = await port.execute(requestOf())
+  assert.deepEqual(outcome, { kind: 'unavailable', reason: { reason: 'policy-unavailable', message: 'nothing executed' } })
+})
+
+test('a lost one-shot response is an unknown outcome, never a replay', async () => {
+  const port = new RemoteHostUserShellPort(fakeNamespace(async () => { throw new Error('carrier lost') }), generationOf())
+  await assert.rejects(() => port.execute(requestOf()), HostUserShellOutcomeUnknownError)
+  const gatewayFailure = new RemoteHostUserShellPort(fakeNamespace(async () => ({
+    ok: false,
+    error: { code: 'gateway/invocation-unavailable', message: 'unavailable' },
+  }) as unknown as RemoteResult<HostUserShellRunOutcome>), generationOf())
+  await assert.rejects(() => gatewayFailure.execute(requestOf()), HostUserShellOutcomeUnknownError)
+})
+
+test('a Host sandbox-runner/execution failure keeps its truthful error class', async () => {
+  const runner = new RemoteHostUserShellPort(fakeNamespace(async () => ({
+    ok: true,
+    value: { kind: 'failed', phase: 'sandbox-runner', message: 'runner failed' },
+  })), generationOf())
+  await assert.rejects(() => runner.execute(requestOf()), HostUserShellSandboxRunnerError)
+  const infrastructure = new RemoteHostUserShellPort(fakeNamespace(async () => ({
+    ok: true,
+    value: { kind: 'failed', phase: 'infrastructure', message: 'lost after start' },
+  })), generationOf())
+  await assert.rejects(() => infrastructure.execute(requestOf()), HostUserShellOutcomeUnknownError)
+})
+
+test('a settled reply that lands after the Connection generation changed is UNKNOWN, never a stale result', async () => {
+  const snapshot = {}
+  let current: unknown = snapshot
+  const generation: RemoteConnectionGenerationSource = {
+    getSnapshot: () => current as never,
+    subscribe: () => () => {},
+  }
+  const port = new RemoteHostUserShellPort(fakeNamespace(async () => {
+    // The mux drops and reconnects while the unary call is in flight; the
+    // reply then lands against a REPLACED generation. The terminal fact is
+    // lost, so even a settled reply must not be accepted as authoritative.
+    current = {}
+    return { ok: true, value: settledOutcome }
+  }), generation)
+  await assert.rejects(() => port.execute(requestOf()), HostUserShellOutcomeUnknownError)
+})
+
+test('a settled one-shot result crosses the adapter unchanged and a disconnected Host is unavailable', async () => {
+  const port = new RemoteHostUserShellPort(fakeNamespace(async () => ({ ok: true, value: settledOutcome })), generationOf())
+  assert.deepEqual(await port.execute(requestOf()), { kind: 'settled', result: settledOutcome.result })
+  const disconnected = new RemoteHostUserShellPort(
+    fakeNamespace(async () => ({ ok: true, value: settledOutcome })),
+    { getSnapshot: () => undefined, subscribe: () => () => {} },
+  )
+  const outcome = await disconnected.execute(requestOf())
+  assert.equal(outcome.kind, 'unavailable')
+  if (outcome.kind !== 'unavailable') throw new Error('expected an unavailable disconnected Host')
+  assert.equal(outcome.reason.reason, 'carrier-gap')
 })

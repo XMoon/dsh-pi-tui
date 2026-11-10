@@ -12,6 +12,7 @@ import {
   reattachDisplayBase,
   resolvePathQuery,
   separatorOfRaw,
+  type PathQueryEnvironment,
 } from '../../domain/file-completion/query.ts'
 import { rankPathCandidates } from '../../domain/file-completion/ranking.ts'
 import type { HostShellCompletionOutcome } from '../host-shell-completion-port.ts'
@@ -31,27 +32,27 @@ function isReadableDirectory(path: string): boolean {
   }
 }
 
-function displayValue(path: string, kind: 'file' | 'directory', rawPrefix: string, separator: '/' | '\\'): string {
-  const value = kind === 'directory' ? `${path}${separator}` : path
-  const quote = rawPrefix.startsWith('"') ? '"' : rawPrefix.startsWith("'") ? "'" : undefined
-  const quoted = quote !== undefined || value.includes(' ')
-  if (!quoted) return value
-  const delimiter = quote ?? '"'
-  return kind === 'directory' ? `${delimiter}${value}` : `${delimiter}${value}${delimiter}`
+function displayValue(path: string, kind: 'file' | 'directory', separator: '/' | '\\'): string {
+  return kind === 'directory' ? `${path}${separator}` : path
 }
 
 /** Host filesystem adapter for the shared path query/ranking policy. */
 export function createHostShellPathCompletionBridge(options: {
   readonly driver?: LocalDiscoveryDriver
+  readonly environment?: PathQueryEnvironment
 } = {}): HostShellPathCompletionBridge {
   const driver = options.driver ?? new DirectHostDiscoveryDriver()
-  const environment = hostPathQueryEnvironment()
+  const environment = options.environment ?? hostPathQueryEnvironment()
   return {
     async complete(cwd, prefix, signal) {
       signal.throwIfAborted()
-      const raw = prefix.replace(/^[ \t]+/u, '')
-      const token = raw.startsWith('"') || raw.startsWith("'") ? raw.slice(1) : raw
-      const query = resolvePathQuery(token, cwd, environment)
+      if (environment.windowsHost) {
+        return { kind: 'unavailable', reason: 'Host Bash path completion is unsupported on Windows in this version' }
+      }
+      // The Client already decoded the shell token: `prefix` IS the semantic
+      // filename bytes, so leading whitespace or a leading quote is part of
+      // the queried path and must not be re-parsed here.
+      const query = resolvePathQuery(prefix, cwd, environment)
       if (!isReadableDirectory(query.searchBase)) {
         return { kind: 'unavailable', reason: 'the Host path scope is unavailable' }
       }
@@ -62,9 +63,9 @@ export function createHostShellPathCompletionBridge(options: {
           discovered.map(candidate => reattachDisplayBase(candidate, query)),
           query.searchTerm,
         )
-        const separator = separatorOfRaw(token, query.winAbsolute || token.includes('\\'))
+        const separator = separatorOfRaw(prefix, query.winAbsolute || prefix.includes('\\'))
         const candidates = ranked.slice(0, MAX_SHELL_CANDIDATES)
-          .map(candidate => displayValue(candidate.path, candidate.kind, raw, separator))
+          .map(candidate => displayValue(candidate.path, candidate.kind, separator))
         return { kind: 'ok', candidates }
       } catch (error) {
         signal.throwIfAborted()

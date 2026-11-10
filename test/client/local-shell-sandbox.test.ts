@@ -1,17 +1,19 @@
-/** Sandbox-opt-in local-shell coverage: the DSH 0.1.7 rc.1
- * `shell.resolve → execute → result()` foreground contract behind the TUI's
- * `!` / `!!` cards, plus the unavailable-fallback and default-bypass split.
- *
- * The default local `!`/`!!` path stays the plain Node spawn (covered by
- * submit-hot-path / local-shell-card suites); these tests pin ONLY the
- * sandbox-opt-in seam through the real runner surface. */
+/** Direct local-shell coverage: both policies run the raw
+ * `['bash', '-c', command]` argv through the official `ctx.subprocess`
+ * provider behind the TUI's `!` / `!!` cards. `sandbox` additionally resolves
+ * the exact Session policy and confines the raw argv exactly once with the
+ * official `ctx.sandbox` provider; a composition without those capabilities
+ * fails closed. These tests pin the runner surface and the user-visible card
+ * semantics (bounded output, truncation, exit/signal facts, cancellation). */
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
+import type { ConfinedArgv } from '@deepseek-ai/dsh-sandbox'
+import type { SubprocessHandle, SubprocessOutcome, SubprocessSpawnSpec } from '@deepseek-ai/dsh-subprocess'
+import type { SandboxPolicyServiceLike, SandboxServiceLike } from '../../src/runtime/host-user-shell-execution.ts'
 import { TuiApp } from '../../src/tui-app.ts'
-import { SHELL_OUTPUT_CAP_LINES } from '../../src/client/shell/output-capture.ts'
 import {
   disposeContext,
   fakeSession,
@@ -19,7 +21,11 @@ import {
   makeHarness,
   mountRunner,
   sessionEvents,
-  settle,
+  // The harness's settle drains microtasks and waits for the painted frame; it
+  // is imported under a name that cannot collide with the fixed-wait helper
+  // `settle(ms)` in tsp-runner-harness, which the policy scan classifies by
+  // name alone.
+  settle as drainMicrotasks,
   type FakeSession,
 } from '../support/runner-harness.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
@@ -31,7 +37,7 @@ process.env.FORCE_COLOR = ''
 process.env.CI = ''
 
 /** The minimal official CollectedOutput the runner consumes. */
-function stream(text: string): { text: string; truncated: boolean } {
+function stream(text: string): { text: string; truncated: boolean; spillPath?: string } {
   return { text, truncated: false }
 }
 
@@ -49,8 +55,8 @@ function runResult(overrides: Partial<{
   timedOut: boolean
   aborted: boolean
   timeoutMs: number
-  stdout: { text: string; truncated: boolean }
-  stderr: { text: string; truncated: boolean }
+  stdout: { text: string; truncated: boolean; spillPath?: string }
+  stderr: { text: string; truncated: boolean; spillPath?: string }
 } {
   return {
     exitCode: overrides.exitCode !== undefined ? overrides.exitCode : 0,
@@ -63,38 +69,91 @@ function runResult(overrides: Partial<{
   }
 }
 
-/**
- * A structural ShellExecutor fake over the rc.1 execute/result contract.
- * `resolve` records the request and returns an opaque spec; `execute`
- * returns one prepared execution whose `result()` settles with the
- * scripted outcome. Call recordings feed the contract assertions.
- */
-function makeShellFake(options: {
-  result: () => Promise<ReturnType<typeof runResult>>
-  executeError?: () => Error
-  resolveError?: Error
-  /** Optional full execute() override (e.g. gated or abort-shaped rejections). */
-  executeImpl?: (spec: unknown) => Promise<{ result(): Promise<ReturnType<typeof runResult>> }>
-}) {
-  const requests: unknown[] = []
-  const specs: unknown[] = []
-  let executeCount = 0
+/** The official Host capabilities the Direct adapter executes through. */
+interface HostFake {
+  readonly subprocess?: {
+    spawn(spec: SubprocessSpawnSpec): SubprocessHandle
+    readonly spawns: SubprocessSpawnSpec[]
+  }
+  readonly sandbox: SandboxServiceLike
+  readonly sandboxPolicy: SandboxPolicyServiceLike
+  readonly confineCalls: { readonly argv: readonly string[]; readonly policy: unknown }[]
+  readonly policyResolves: { readonly session: { readonly id: string } }[]
+  spawnCount(): number
+}
+
+/** One official Subprocess/Sandbox stand-in for the Direct adapter. By default
+ *  the composition uses the REAL local subprocess provider (so bypass commands
+ *  genuinely execute); `fakeSubprocess` records the exact spawn spec and
+ *  settles with the scripted result instead. */
+function makeHostFake(options: {
+  readonly fakeSubprocess?: boolean
+  readonly result?: () => Promise<ReturnType<typeof runResult>>
+  readonly confineArgv?: readonly string[]
+  readonly resolveError?: Error
+  readonly confineError?: Error
+  readonly prepareGate?: () => Promise<void>
+} = {}): HostFake {
+  const confineCalls: { readonly argv: readonly string[]; readonly policy: unknown }[] = []
+  const policyResolves: { readonly session: { readonly id: string } }[] = []
+  const spawns: SubprocessSpawnSpec[] = []
+  let spawnCount = 0
+  const spawn = (spec: SubprocessSpawnSpec): SubprocessHandle => {
+    spawnCount += 1
+    spawns.push(spec)
+    const resultPromise = (options.result ?? (async () => runResult({})))()
+    let settled: ReturnType<typeof runResult> | undefined
+    const read = (which: 'stdout' | 'stderr') => {
+      const output = settled?.[which] ?? stream('')
+      return {
+        text: output.text,
+        nextOffset: Buffer.byteLength(output.text, 'utf8'),
+        lossy: output.truncated,
+        ...(output.spillPath === undefined ? {} : { spillPath: output.spillPath }),
+      }
+    }
+    return {
+      stdin: undefined,
+      stdout: undefined,
+      stderr: undefined,
+      control: undefined,
+      collected: {
+        stdout: { readFrom: () => read('stdout') },
+        stderr: { readFrom: () => read('stderr') },
+      },
+      done: resultPromise.then(outcome => {
+        settled = outcome
+        return { exitCode: outcome.exitCode, signal: outcome.signal as NodeJS.Signals | null } satisfies SubprocessOutcome
+      }),
+      terminate: () => {},
+      waitForExit: async () => true,
+    }
+  }
   return {
-    requests,
-    specs,
-    executeCount: (): number => executeCount,
-    resolve: (request: unknown): { readonly __spec: true; readonly request: unknown } => {
-      if (options.resolveError !== undefined) throw options.resolveError
-      requests.push(request)
-      return { __spec: true as const, request }
+    ...(options.fakeSubprocess === true ? { subprocess: { spawn, spawns } } : {}),
+    sandbox: {
+      async confine(argv, policy) {
+        if (options.confineError !== undefined) throw options.confineError
+        confineCalls.push({ argv, policy })
+        return {
+          argv: [...(options.confineArgv ?? argv)],
+          enforcement: 'full',
+          denialSignatures: [],
+          runnerFailureRules: [],
+        }
+      },
     },
-    async execute(spec: unknown): Promise<{ result(): Promise<ReturnType<typeof runResult>> }> {
-      executeCount += 1
-      specs.push(spec)
-      if (options.executeImpl !== undefined) return options.executeImpl(spec)
-      if (options.executeError !== undefined) throw options.executeError()
-      return { result: options.result }
+    sandboxPolicy: {
+      async resolve(input) {
+        policyResolves.push({ session: input.session })
+        if (options.prepareGate !== undefined) await options.prepareGate()
+        if (options.resolveError !== undefined) throw options.resolveError
+        return { mode: 'workspace-write', workspaceRoot: process.cwd() }
+      },
     },
+    confineCalls,
+    policyResolves,
+    spawnCount: () => spawnCount,
   }
 }
 
@@ -102,7 +161,7 @@ interface MountedSandbox {
   readonly view: () => string
   readonly notices: readonly string[]
   readonly submit: (draft: string) => void
-  readonly settle: () => Promise<void>
+  readonly settleSurface: () => Promise<void>
   /** The live surface the runner created. */
   readonly app: () => TuiApp
   /** Write the persisted policy through the SAME volatile reference the
@@ -121,7 +180,7 @@ interface MountedSandbox {
 /** Mount the real runner with the given localShellSandbox document value. */
 async function mountSandboxRunner(
   t: test.TestContext,
-  shell: unknown | undefined,
+  host: HostFake | undefined,
   sandbox: 'sandbox' | 'bypass' = 'sandbox',
 ): Promise<MountedSandbox> {
   const life = testLifecycle(t)
@@ -161,9 +220,13 @@ async function mountSandboxRunner(
     events: sessionEvents('parent answer'),
   })
   const harness = makeHarness(home, [parent], { provider: 'p', model: 'm' })
-  if (shell !== undefined) harness.shell = shell
   const context = new Context()
   life.defer(() => disposeContext(context))
+  if (host !== undefined) {
+    context.provide('sandbox', host.sandbox as never)
+    context.provide('sandboxPolicy', host.sandboxPolicy as never)
+    if (host.subprocess !== undefined) harness.subprocess = host.subprocess
+  }
   // The ONE controlled stand-in of this composition: the Host `SettingsForms`
   // surface. Its `mutate` commits the requested ops into the SAME volatile
   // references the Loader/presentation plane hands the runner — so the Settings
@@ -233,8 +296,8 @@ async function mountSandboxRunner(
     vt: () => vt,
     notices,
     submit,
-    settle: async () => {
-      await settle()
+    settleSurface: async () => {
+      await drainMicrotasks()
       await vt.waitForRender()
     },
     app: () => apps.at(-1)!,
@@ -264,238 +327,142 @@ async function mountSandboxRunner(
  * owned async workflow; settlement lands after microtask drains). */
 async function waitForView(mounted: MountedSandbox, needle: string, label: string): Promise<string> {
   for (let round = 0; round < 50; round += 1) {
-    await mounted.settle()
+    await mounted.settleSurface()
     const view = mounted.view()
     if (view.includes(needle)) return view
   }
   throw new Error(`timed out waiting for ${label}:\n${mounted.view()}`)
 }
 
-test('sandbox `!` success resolves through execute/result with the command and exit 0', async (t) => {
-  const shell = makeShellFake({
-    result: async () => runResult({ exitCode: 0, stdout: 'sandbox ok', stderr: 'warn line' }),
+test('sandbox `!` spawns the raw argv once and settles the official result', async (t) => {
+  const host = makeHostFake({
+    fakeSubprocess: true,
+    result: async () => runResult({ exitCode: 0, stdout: 'sandbox ok\n', stderr: 'warn line\n' }),
   })
-  const mounted = await mountSandboxRunner(t, shell)
+  const mounted = await mountSandboxRunner(t, host)
   mounted.submit('!make check')
   const view = await waitForView(mounted, 'exit 0', 'the settled success card')
   assert.ok(view.includes('sandbox ok'), `stdout must reach the card:\n${view}`)
-  assert.ok(view.includes('exit 0'), `the exit marker must settle the card:\n${view}`)
-  // The rc.1 contract: resolve() is the request boundary, execute() takes
-  // the resolved spec, and result() is the foreground projection.
-  assert.equal(shell.executeCount(), 1, 'execute must run exactly once per `!` command')
-  assert.ok((shell.requests[0] as { command?: string } | undefined)?.command === 'make check',
-    `resolve must receive the command request:\n${JSON.stringify(shell.requests[0])}`)
-  assert.ok((shell.specs[0] as { __spec?: boolean } | undefined)?.__spec === true,
-    'execute must receive the spec object returned by resolve')
+  assert.ok(view.includes('warn line'), `stderr must reach the card:\n${view}`)
+  assert.ok(view.includes('[exit 0]'), `the exit marker must settle the card:\n${view}`)
+  assert.equal(host.spawnCount(), 1, 'the official Subprocess spawned exactly once')
+  assert.deepEqual(host.subprocess!.spawns[0]!.argv, ['bash', '-c', 'make check'])
+  assert.ok(host.policyResolves.length >= 1, 'the exact Session policy was resolved')
+  assert.ok(host.policyResolves.every(entry => entry.session.id === 'shell-sandbox-parent'),
+    'every policy resolution named the exact live Session')
 })
 
-test('a truncated sandbox run settles with the production retention report (canonical byte units)', async (t) => {
-  // More lines than the retained-tail cap: the settle must report the ACTUAL
-  // retained values (the cap), the real received total, and byte totals
-  // through the canonical `domain/media/format` formatter.
-  const stdout = `${Array.from({ length: SHELL_OUTPUT_CAP_LINES + 1000 }, (_, index) => `line ${index}`).join('\n')}\n`
-  const shell = makeShellFake({ result: async () => runResult({ exitCode: 0, stdout }) })
-  const mounted = await mountSandboxRunner(t, shell)
+test('a truncated sandbox run paints the bounded tail and an explicit truncation line', async (t) => {
+  const stdout = `${Array.from({ length: 900 }, (_, index) => `line ${index} ${'x'.repeat(120)}`).join('\n')}\nTAIL_20261110\n`
+  const host = makeHostFake({
+    fakeSubprocess: true,
+    result: async () => runResult({ exitCode: 0, stdout }),
+  })
+  const mounted = await mountSandboxRunner(t, host)
   mounted.submit('!make loud')
-  const view = await waitForView(mounted, 'output truncated: retained', 'the truncated settle')
-  assert.match(
-    view,
-    new RegExp(`output truncated: retained \\d+\\.\\d (KiB|MiB) display / ${SHELL_OUTPUT_CAP_LINES} lines`),
-    `the ACTUAL retained values in canonical display units:\n${view}`,
-  )
-  assert.ok(view.includes(`(${SHELL_OUTPUT_CAP_LINES + 1000} lines total)`), `the real received total:\n${view}`)
-  assert.ok(view.includes('exit 0'), `the exit marker still settles the card:\n${view}`)
+  const view = await waitForView(mounted, 'stdout truncated', 'the truncated settle')
+  assert.ok(view.includes('TAIL_20261110'), `the retained tail must be painted:\n${view}`)
+  assert.ok(view.includes('[exit 0]'), `the exit marker still settles the card:\n${view}`)
+  assert.ok(!view.includes('output truncated: retained'), 'the retired streaming retention report is gone')
 })
 
 test('a nonzero sandbox exit resolves (never rejects) into an error card', async (t) => {
-  const shell = makeShellFake({
-    result: async () => runResult({ exitCode: 3, stdout: '', stderr: 'boom' }),
-  })
-  const mounted = await mountSandboxRunner(t, shell)
+  const host = makeHostFake({ fakeSubprocess: true, result: async () => runResult({ exitCode: 3, stderr: 'boom\n' }) })
+  const mounted = await mountSandboxRunner(t, host)
   mounted.submit('!make fail')
   const view = await waitForView(mounted, 'exit 3', 'the nonzero exit card')
   assert.ok(view.includes('boom'), `stderr must reach the card:\n${view}`)
 })
 
 test('a signal-terminated sandbox run reports the signal, not an exit code', async (t) => {
-  const shell = makeShellFake({
-    result: async () => runResult({ exitCode: null, signal: 'SIGKILL', stdout: '' }),
-  })
-  const mounted = await mountSandboxRunner(t, shell)
+  const host = makeHostFake({ fakeSubprocess: true, result: async () => runResult({ exitCode: null, signal: 'SIGKILL' }) })
+  const mounted = await mountSandboxRunner(t, host)
   mounted.submit('!make killed')
   await waitForView(mounted, 'signal SIGKILL', 'the signal card')
 })
 
-test('a timeout kill resolves as a descriptive result, not an infrastructure rejection', async (t) => {
-  const shell = makeShellFake({
-    result: async () => runResult({ exitCode: null, signal: 'SIGTERM', timedOut: true }),
-  })
-  const mounted = await mountSandboxRunner(t, shell)
-  mounted.submit('!make slow')
-  const view = await waitForView(mounted, 'signal SIGTERM', 'the timeout-kill card')
-  assert.ok(!view.includes('failed:'), `a timeout kill must not render as a failure exception:\n${view}`)
-})
-
-test('a caller abort while the process runs resolves aborted and settles the card', async (t) => {
-  let releaseAbort!: () => void
-  const abortedResult = new Promise<ReturnType<typeof runResult>>(resolve => {
-    releaseAbort = () => resolve(runResult({ exitCode: null, signal: 'SIGTERM', aborted: true }))
-  })
-  const shell = makeShellFake({ result: () => abortedResult })
-  const mounted = await mountSandboxRunner(t, shell)
-  mounted.submit('!make long')
-  await mounted.settle()
-  // A second `!` command aborts the first run's controller FIRST; the
-  // first execution's result() then RESOLVES with aborted: true (rc.1:
-  // abort kills resolve, they do not reject).
-  mounted.submit('!echo next')
-  releaseAbort()
-  await waitForView(mounted, 'aborted', 'the aborted card')
-})
-
-test('a caller abort while execute itself is pending routes the cancellation rejection to the aborted card', async (t) => {
-  // §5.6 special-attention path: the caller aborts BEFORE execute settles.
-  // rc.1 execute() throws on caller cancellation before process publication;
-  // runOwned's task-local classifier must route that rejection to onCancel
-  // (settle 'aborted'), never to a false ERROR card.
-  let releaseExecute!: () => void
-  const executeGate = new Promise<void>(resolve => { releaseExecute = resolve })
-  let gated = true
-  const shell = makeShellFake({
-    result: async () => runResult({ stdout: 'next ok', exitCode: 0 }),
-    executeImpl: async () => {
-      // Only the FIRST execution takes the gated cancellation path; the
-      // aborting second `!` command must run its own execution normally.
-      if (!gated) return { result: async () => runResult({ stdout: 'next ok', exitCode: 0 }) }
-      gated = false
-      await executeGate
-      throw new Error('execution cancelled before publication')
-    },
-  })
-  const mounted = await mountSandboxRunner(t, shell)
-  mounted.submit('!make gated')
-  await mounted.settle()
-  // The second `!` aborts the first controller while its execute() is still
-  // pending; only then does execute reject with the cancellation.
-  mounted.submit('!echo next')
-  releaseExecute()
+test('a caller abort while the command runs settles aborted and terminates the range', async (t) => {
+  const host = makeHostFake()
+  const mounted = await mountSandboxRunner(t, host)
+  mounted.submit('!sleep 30')
+  await mounted.settleSurface()
+  // A second `!` aborts the first run's controller; the official provider
+  // terminates the managed range and the killed run settles aborted.
+  mounted.submit('!printf next')
   const view = await waitForView(mounted, 'aborted', 'the aborted card')
-  assert.ok(!view.includes('failed:'), `an execute-time cancellation must not render as an infrastructure failure:\n${view}`)
+  assert.ok(!view.includes('failed:'), `a caller abort must not render as an infrastructure failure:\n${view}`)
+  assert.ok(host.confineCalls.some(call => call.argv.some(argument => argument.includes('sleep 30'))),
+    'the aborted run prepared its own sandbox confinement')
 })
 
-test('an execute() preparation failure rejects into the failed card (infrastructure)', async (t) => {
-  const shell = makeShellFake({
-    result: async () => runResult({}),
-    executeError: () => new Error('spawn preparation refused'),
-  })
-  const mounted = await mountSandboxRunner(t, shell)
-  mounted.submit('!make refused')
-  const view = await waitForView(mounted, 'failed:', 'the failed card')
-  assert.ok(view.includes('spawn preparation refused'), `the infrastructure reason must surface:\n${view}`)
-})
-
-test('a result() infrastructure rejection renders failed and never becomes an exception card', async (t) => {
-  const shell = makeShellFake({
-    result: async () => {
-      throw new Error('sandbox stream broke')
+test('a caller abort during sandbox preparation routes the cancellation to the aborted card', async (t) => {
+  let releasePreparation!: () => void
+  const gate = new Promise<void>(resolve => { releasePreparation = resolve })
+  let gated = true
+  const host = makeHostFake({
+    prepareGate: async () => {
+      if (!gated) return
+      gated = false
+      await gate
     },
   })
-  const mounted = await mountSandboxRunner(t, shell)
-  mounted.submit('!make broken')
-  const view = await waitForView(mounted, 'failed:', 'the rejected-result card')
-  assert.ok(view.includes('sandbox stream broke'), `the rejection reason must surface:\n${view}`)
+  const mounted = await mountSandboxRunner(t, host)
+  mounted.submit('!make gated')
+  for (let round = 0; round < 200 && host.policyResolves.length === 0; round += 1) await mounted.settleSurface()
+  assert.equal(host.policyResolves.length, 1, 'the first run reached policy preparation')
+  // The second `!` aborts the first controller while its preparation is still
+  // pending; the released preparation then observes the abort and settles
+  // through runOwned's cancellation path.
+  mounted.submit('!printf next')
+  releasePreparation()
+  const view = await waitForView(mounted, 'aborted', 'the aborted preparation card')
+  assert.ok(!view.includes('failed:'), `a preparation cancellation must not render as a failure:\n${view}`)
 })
 
-test('a synchronous resolve() throw settles the card like a failed run', async (t) => {
-  const shell = makeShellFake({
-    result: async () => runResult({}),
-    resolveError: new Error('request refused by policy'),
-  })
-  const mounted = await mountSandboxRunner(t, shell)
+test('a sandbox preparation failure settles the truthful unavailable card and never spawns', async (t) => {
+  const host = makeHostFake({ confineError: new Error('request refused by policy') })
+  const mounted = await mountSandboxRunner(t, host)
   mounted.submit('!make refused-resolve')
-  const view = await waitForView(mounted, 'failed:', 'the resolve-failure card')
-  assert.ok(view.includes('request refused by policy'), `the resolve reason must surface:\n${view}`)
-  assert.equal(shell.executeCount(), 0, 'a refused resolve must never reach execute')
+  const view = await waitForView(mounted, 'request refused by policy', 'the preparation-failure card')
+  assert.equal(host.spawnCount(), 0, 'a refused confinement preparation must never spawn')
 })
 
-test('the sandbox preference without a composition shell capability fails closed and executes nothing (shell amendment)', async (t) => {
+test('a post-start provider failure renders failed and never becomes an exception card', async (t) => {
+  const host = makeHostFake({
+    fakeSubprocess: true,
+    result: async () => { throw new Error('provider vanished') },
+  })
+  const mounted = await mountSandboxRunner(t, host)
+  mounted.submit('!make broken')
+  const view = await waitForView(mounted, 'failed:', 'the failed card')
+  assert.ok(view.includes('provider vanished'), `the failure reason must surface:\n${view}`)
+})
+
+test('the sandbox preference without a composition sandbox capability fails closed and executes nothing', async (t) => {
   const mounted = await mountSandboxRunner(t, undefined)
   mounted.submit('!echo fallback-ok')
   const view = await waitForView(mounted, 'sandbox policy is unavailable', 'the fail-closed card')
-  // CARRIER/POLICY fail-closed (M3-4 PR3): the run must NOT degrade to the
-  // bypass spawn — the card carries the unavailable message and NEVER the
-  // command's own output or an exit marker. (The command name itself appears
-  // in the echoed `$ command` header; that is the card's args, not output.)
-  assert.ok(!view.includes('exit 0'), `an unavailable sandbox policy must not execute the command:\n${view}`)
-  assert.ok(!view.includes('exit 1'), `an unavailable sandbox policy must not execute the command:\n${view}`)
+  assert.ok(!view.includes('[exit 0]'), `an unavailable sandbox policy must not execute the command:\n${view}`)
 })
 
-test('the default bypass preference never touches the composition shell capability', async (t) => {
-  const life = testLifecycle(t)
-  const home = life.tempDir('dsh-pi-tui-shell-bypass-')
-  const previousHome = process.env.DSH_HOME
-  process.env.DSH_HOME = home
-  life.defer(() => {
-    if (previousHome === undefined) delete process.env.DSH_HOME
-    else process.env.DSH_HOME = previousHome
-  })
-  const vt = new VirtualTerminal(100, 24)
-  life.defer(installVirtualProcessTerminal(vt))
-  const apps: TuiApp[] = []
-  const originalStart = TuiApp.prototype.start
-  TuiApp.prototype.start = function () {
-    apps.push(this)
-    return originalStart.call(this)
-  }
-  life.defer(() => { TuiApp.prototype.start = originalStart })
-
-  const parent: FakeSession = fakeSession({
-    id: 'shell-bypass-parent',
-    header: { id: 'shell-bypass-parent', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
-    events: sessionEvents('parent answer'),
-  })
-  const harness = makeHarness(home, [parent], { provider: 'p', model: 'm' })
-  const shell = makeShellFake({ result: async () => runResult({ stdout: 'must-not-appear' }) })
-  harness.shell = shell
-
-  const context = new Context()
-  life.defer(() => disposeContext(context))
-  const fiber = await mountRunner(
-    context,
-    home,
-    harness,
-    { sessionId: parent.id },
-    { localShellSandbox: 'bypass' },
-  )
-  life.defer(() => fiber.dispose())
-  assert.ok(apps.at(-1), 'the production runner must create a TuiApp')
-
-  const target = apps.at(-1) as unknown as { setDraft(text: string): void; submitDraft(): void }
-  target.setDraft('!echo bypass-local')
-  target.submitDraft()
-  let view = ''
-  for (let round = 0; round < 50; round += 1) {
-    await settle()
-    await vt.waitForRender()
-    view = vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/g, '')).join('\n')
-    if (view.includes('bypass-local')) break
-  }
-  assert.ok(view.includes('bypass-local'), `the default path must run the plain local spawn:\n${view}`)
-  assert.ok(!view.includes('must-not-appear'), `the sandbox executor must stay untouched:\n${view}`)
-  assert.equal(shell.executeCount(), 0, 'the default bypass must never call the dsh shell capability')
+test('the default bypass preference runs raw Bash through Subprocess and never confines', async (t) => {
+  const host = makeHostFake()
+  const mounted = await mountSandboxRunner(t, host, 'bypass')
+  mounted.submit("!printf 'bypass-local\\n'")
+  const view = await waitForView(mounted, 'bypass-local', 'the bypass card')
+  assert.ok(view.includes('bypass-local'), `the default path must run the raw Bash command:\n${view}`)
+  assert.equal(host.confineCalls.length, 0, 'bypass must never confine')
 })
-
-// ── C2-R3: the persisted policy really selects the NEXT `!` execution path ──
 
 test('a REAL Settings Confirm of the shell policy is what the next `!` executes under', async (t) => {
-  const shell = makeShellFake({ result: async () => runResult({ exitCode: 0, stdout: 'sandboxed-by-settings' }) })
-  const mounted = await mountSandboxRunner(t, shell, 'bypass')
+  const host = makeHostFake({ confineArgv: ['bash', '-c', "printf 'sandboxed-by-settings\\n'"] })
+  const mounted = await mountSandboxRunner(t, host, 'bypass')
   assert.equal(mounted.policy(), 'bypass', 'the document starts at bypass')
 
-  // CONTROL: the plain local spawn runs, the Host shell capability is untouched.
-  mounted.submit('!echo local-control')
+  // CONTROL: the raw Bash bypass runs; no sandbox preparation happens.
+  mounted.submit("!printf 'local-control\\n'")
   const control = await waitForView(mounted, 'local-control', 'the local control card')
-  assert.equal(shell.executeCount(), 0, 'bypass never calls the dsh shell capability')
+  assert.equal(host.confineCalls.length, 0, 'bypass never confines')
   assert.ok(control.includes('local-control'))
 
   // THE REAL UI PATH: open /settings → Agent → the shell policy row and Confirm
@@ -503,26 +470,18 @@ test('a REAL Settings Confirm of the shell policy is what the next `!` executes 
   await mounted.runSettings()
   const open = mounted.view()
   assert.match(open, /Settings · Categories/u, `the /settings workspace really opened:\n${open}`)
-  // Every step waits for the AUTHORITATIVE frame it produces (the painted
-  // breadcrumb / choice / status), never for a wall-clock window.
   const pressUntil = async (key: string, settled: () => boolean, label: string, limit: number): Promise<void> => {
     for (let attempt = 0; attempt < limit; attempt += 1) {
       if (settled()) return
       mounted.vt().sendInput(key)
-      // The key's owned task drains through microtasks and the workspace
-      // repaints; bounded settle, no timer window.
-      await mounted.settle()
+      await mounted.settleSurface()
     }
     assert.ok(settled(), label)
   }
-  // Rail: About → Models → Account → Agent. The SELECTED rail row is the one
-  // whose cursor sits in the categories column.
   const railSelects = (label: string): boolean => mounted.view().split('\n')
     .some(line => line.trimStart().startsWith(`> ${label}`))
   await pressUntil('\x1b[B', () => railSelects('Agent'), 'the rail selects Agent', 6)
   await pressUntil('\r', () => /Settings · Agent · Rows/u.test(mounted.view()), 'Enter enters the Agent rows', 1)
-  // The Rows pane's cursor is the ONLY `> ` in that column; the Details column
-  // starts after it, so the check reads the same cells the user does.
   const selectedRow = (): string => {
     for (const line of mounted.view().split('\n')) {
       const marker = line.indexOf('> ')
@@ -540,34 +499,26 @@ test('a REAL Settings Confirm of the shell policy is what the next `!` executes 
   await waitForFrame(
     () => mounted.view(),
     frame => /Status\s+Verified/u.test(frame),
-    // Bounded settle: the owned settings write settles, then the frame repaints.
-    () => mounted.settle(),
+    () => mounted.settleSurface(),
     'the real Settings Confirm must settle as Verified',
   )
-
-  // The write really went through the Host settings surface, and the document
-  // the consumer reads now carries the new policy.
   const writes = mounted.settingsWrites().filter(write => write.ns === 'tui-app')
   assert.ok(writes.some(write => write.ops.some(op => op.path[0] === 'localShellSandbox' && op.value === 'sandbox')),
     `the confirm really mutated localShellSandbox:\n${JSON.stringify(writes)}`)
   assert.equal(mounted.policy(), 'sandbox', 'the persisted document really changed')
-  // Leave the workspace by walking the real Esc gradient until its chrome is
-  // gone (the frame itself is the settlement signal).
   for (let step = 0; step < 6 && /Settings · /u.test(mounted.view()); step += 1) {
     mounted.vt().sendInput('\x1b')
-    // Bounded settle: the Esc gradient repaints before the next predicate read.
-    await mounted.settle()
+    await mounted.settleSurface()
   }
   assert.doesNotMatch(mounted.view(), /Settings · /u, `the workspace closed:\n${mounted.view()}`)
 
-  // SOURCE -> SINK: the NEXT `!` takes the sandbox executor.
+  // SOURCE -> SINK: the NEXT `!` takes the sandbox confinement.
   mounted.submit('!make check')
   const sandboxed = await waitForView(mounted, 'sandboxed-by-settings', 'the sandboxed card')
-  assert.equal(shell.executeCount(), 1, 'the next `!` really entered the dsh shell capability')
+  assert.equal(host.confineCalls.length, 1, 'the next `!` really entered the sandbox path')
   assert.ok(sandboxed.includes('sandboxed-by-settings'))
 
-  // THE REVERSE TRIP, also through the real UI: reopen /settings, Confirm
-  // `bypass` again, and the FOLLOWING `!` must return to the plain local spawn.
+  // THE REVERSE TRIP, also through the real UI.
   await mounted.runSettings()
   await pressUntil('\x1b[B', () => railSelects('Agent'), 'the rail selects Agent again', 6)
   await pressUntil('\r', () => /Settings · Agent · Rows/u.test(mounted.view()), 'Enter enters the Agent rows', 1)
@@ -579,52 +530,42 @@ test('a REAL Settings Confirm of the shell policy is what the next `!` executes 
   await waitForFrame(
     () => mounted.view(),
     frame => /Status\s+Verified/u.test(frame) && /Next ! \/ !! uses bypass/u.test(frame),
-    // Bounded settle: the owned settings write drains, then the frame repaints.
-    () => mounted.settle(),
+    () => mounted.settleSurface(),
     'the reverse Confirm must settle as Verified with the bypass effect',
   )
   assert.equal(mounted.policy(), 'bypass', 'the persisted document really flipped back')
   for (let step = 0; step < 6 && /Settings · /u.test(mounted.view()); step += 1) {
     mounted.vt().sendInput('\x1b')
-    // Bounded settle: each Esc step repaints before the next predicate read.
-    await mounted.settle()
+    await mounted.settleSurface()
   }
   assert.doesNotMatch(mounted.view(), /Settings · /u, `the workspace closed again:\n${mounted.view()}`)
 
-  // SOURCE -> SINK, reversed: the plain local spawn runs again and the Host shell
-  // capability stays at ONE execution.
-  mounted.submit('!echo back-to-local')
-  const backToLocal = await waitForView(mounted, 'back-to-local', 'the restored local card')
-  assert.equal(shell.executeCount(), 1, 'the bypass run after the UI reverse never re-entered the sandbox')
+  mounted.submit("!printf 'back-to-local\\n'")
+  const backToLocal = await waitForView(mounted, 'back-to-local', 'the restored bypass card')
+  assert.equal(host.confineCalls.length, 1, 'the bypass run after the UI reverse never re-entered the sandbox')
   assert.ok(backToLocal.includes('back-to-local'))
 })
 
-test('a policy change on the live settings document routes the NEXT `!` through the other executor', async (t) => {
-  const shell = makeShellFake({ result: async () => runResult({ exitCode: 0, stdout: 'sandboxed' }) })
-  // The document starts at the DEFAULT bypass, exactly like a fresh profile.
-  const mounted = await mountSandboxRunner(t, shell, 'bypass')
+test('a policy change on the live settings document routes the NEXT `!` through the other path', async (t) => {
+  const host = makeHostFake({ confineArgv: ['bash', '-c', "printf 'sandboxed\\n'"] })
+  const mounted = await mountSandboxRunner(t, host, 'bypass')
   assert.equal(mounted.policy(), 'bypass', 'the harness serves the real persisted value')
 
-  // 1) bypass: the plain local spawn runs, the dsh shell capability is untouched.
-  mounted.submit('!echo bypass-run')
+  mounted.submit("!printf 'bypass-run\\n'")
   const bypassView = await waitForView(mounted, 'bypass-run', 'the bypass card')
-  assert.equal(shell.executeCount(), 0, 'bypass never calls the dsh shell capability')
+  assert.equal(host.confineCalls.length, 0, 'bypass never confines')
   assert.ok(bypassView.includes('bypass-run'))
 
-  // 2) the Settings writer stores `sandbox` on the SAME document the consumer reads.
   mounted.setPolicy('sandbox')
   assert.equal(mounted.policy(), 'sandbox', 'the persisted policy really changed')
-
-  // 3) the NEXT `!` takes the sandbox executor — the real Host policy path.
   mounted.submit('!make check')
   const sandboxView = await waitForView(mounted, 'sandboxed', 'the sandboxed card')
-  assert.equal(shell.executeCount(), 1, 'the sandboxed `!` really entered the dsh shell capability')
-  assert.ok(sandboxView.includes('sandboxed'), `the sandbox executor produced the card:\n${sandboxView}`)
+  assert.equal(host.confineCalls.length, 1, 'the sandboxed `!` really entered the sandbox path')
+  assert.ok(sandboxView.includes('sandboxed'))
 
-  // 4) switching back routes the following `!` to bypass again.
   mounted.setPolicy('bypass')
-  mounted.submit('!echo back-to-bypass')
+  mounted.submit("!printf 'back-to-bypass\\n'")
   const backView = await waitForView(mounted, 'back-to-bypass', 'the restored bypass card')
-  assert.equal(shell.executeCount(), 1, 'the bypass run after the switch never re-entered the sandbox')
+  assert.equal(host.confineCalls.length, 1, 'the bypass run after the switch never re-entered the sandbox')
   assert.ok(backView.includes('back-to-bypass'))
 })

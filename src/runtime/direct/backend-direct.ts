@@ -39,7 +39,7 @@ import { DirectSessionMarkdown } from './session-markdown-direct.ts'
 import { DirectHostCommandPort } from './host-command-direct.ts'
 import { DirectPluginManagerPort } from './plugin-manager-direct.ts'
 import { DirectJobObservationPort } from './job-observation-direct.ts'
-import { DirectHostUserShellPort, type DirectShellCapability } from './host-user-shell-direct.ts'
+import { DirectHostUserShellPort } from './host-user-shell-direct.ts'
 import { DirectHostShellCompletionPort, type DirectShellCandidateReader } from './host-shell-completion-direct.ts'
 import { DirectDeliveredFileReadPort } from './deliverables-direct.ts'
 import { DirectSessionWorkspaceFacts } from './session-workspace-facts-direct.ts'
@@ -135,15 +135,16 @@ export function createDirectRuntimeBackend(deps: DirectBackendDeps): Backend {
     new DirectHostCommandPort(deps.ctx, deps.agentFor),
     new DirectPluginManagerPort(deps.ctx),
     new DirectJobObservationPort(deps.ctx, deps.diag),
-    // The Direct Host user-shell adapter (M3-4 PR3): spawn lives behind
-    // adapter ownership; the sandbox policy runs the dsh shell executor and
-    // fails closed when absent. The `shell` capability resolver stays here as
-    // the one Direct-only seam this assembly hands the adapter (resolved
-    // lazily per call inside adapter ownership).
-    new DirectHostUserShellPort(
-      deps.ctx,
-      () => deps.ctx.get('shell') as unknown as DirectShellCapability | undefined,
-    ),
+    // The Direct Host user-shell adapter (M3-4 PR3): both policies run the
+    // official one-shot subprocess core; sandbox additionally needs the
+    // official sandbox policy/provider. The resolvers stay here as the one
+    // Direct-only assembly seam (resolved lazily per run inside the adapter).
+    new DirectHostUserShellPort({
+      subprocess: () => deps.ctx.get('subprocess') as never,
+      sandbox: () => deps.ctx.get('sandbox') as never,
+      sandboxPolicy: () => deps.ctx.get('sandboxPolicy') as never,
+      sessionFor: sessionId => deps.agentFor(sessionId)?.session,
+    }),
     new DirectHostShellCompletionPort(deps.sessionCwd, deps.agentFor, deps.shellCandidates),
     // Delivered files PR2: the official Host file service read in-process,
     // under the same Session-derived scope the official Remote lookup uses.
