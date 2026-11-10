@@ -109,7 +109,7 @@ export function writeC1WorkFixture(profileDir, workDir, options = {}) {
     '- insert:',
     '    - id: split-process-host-work',
     `      name: '${pathToFileURL(fixturePath).href}'`,
-    `      inject: [llm, tools, jobs, subagents, agents, typertGateway, connection${options.shellPolicyPatches === true ? ', settings' : ''}]`,
+    `      inject: [llm, tools, jobs, subagents, agents, typertGateway, connection${options.shellPolicyPatches === true ? ', settings' : ''}${options.fileProbe === true ? ', attachments' : ''}]`,
     '- id: agent-default-model',
     '  config:',
     '    provider: c1-qualification',

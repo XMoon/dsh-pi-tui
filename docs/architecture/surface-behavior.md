@@ -1517,10 +1517,28 @@ Attachment completion and intake are Client-local:
   swallow every real success) and never after a refused commit (a rolled-back
   item announces nothing).
 - `/attach <path>` is the canonical Client intake. Images go through the image
-  pipeline; other regular files stage as metadata-only drafts and are streamed
-  through `ctx.attachments.saveFileStream()` only when an agent-bound submission
-  is admitted. `/image` stays image-only compatibility. Neither reads the file
-  eagerly or routes through the Host filesystem.
+  pipeline; other regular files stage as metadata-only drafts. On the Direct
+  backend a submission streams the draft through the in-process
+  `ctx.attachments.saveFileStream()`; on the Remote backend the same Client-local
+  stream is uploaded through the official authenticated raw file route, whose
+  Host `FileUploads` authority stores the bytes and returns a Session-scoped
+  receipt. The Remote prompt carries that receipt, and the pending-submission
+  echo uses the Host-issued file metadata — never a local name/size guess. The
+  Client-local path never becomes a Host file reference in either backend.
+  `/image` stays image-only compatibility. Neither reads the file eagerly or
+  routes through the Host filesystem.
+- A generic-file submission is bound to the attach-time local source identity:
+  the file is streamed at submit time, and a source that was deleted, replaced
+  (including a FIFO), or changed (size/mtime/inode) is refused before any Host
+  prompt. A Remote upload that completed does not by itself mean the Host
+  accepted the prompt; only Host prompt acceptance, its durable history or an
+  Inbox row carrying the same request carries that fact. A failure before the
+  prompt is dispatched restores the same draft and never retries or reuses a
+  staged receipt. A durable generic file recalled from the Host queue
+  (`Alt+Up`) has no official Client carrier to re-bind a receipt: Remote
+  refuses that recall before removing any queue occurrence and keeps the queue
+  and editor unchanged; Direct keeps its existing referenced-file reuse. This
+  is a real Remote capability boundary, not a claim of full file parity.
 - The attachment intake and the Ctrl+V paste intent share ONE active composer
   and the existing draft stores; there is no second draft copy. `/attach` and
   `/image` read the current draft and insert the canonical placeholder through

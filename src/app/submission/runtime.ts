@@ -434,6 +434,8 @@ export interface PullBackQueueDeps {
   readonly currentAgent: () => { readonly session: { readonly id: string } } | undefined
   /** Capture the owner subject token synchronously (identity fence). */
   readonly captureOwnerToken: () => unknown
+  /** Whether this backend can rebind an already durable generic file. */
+  readonly canPullBackRecalledFiles: boolean
   /** Whether a captured owner token is still the current owner. */
   readonly isOwnerTokenCurrent: (token: unknown) => boolean
   /** Capture the live session scope for the writer admission (throws if absent). */
@@ -491,6 +493,14 @@ export function pullBackQueue(deps: PullBackQueueDeps): void {
   const queuedScope = deps.requireLiveScope()
   const queued = deps.readPullableQueue(queuedAgent.session.id)
   if (queued === undefined || queued.length === 0) return
+  if (!deps.canPullBackRecalledFiles
+    && queued.some(message => message.content.some(raw => (raw as PullableQueueBlock).type === 'file'))) {
+    deps.notify(
+      'This queue includes a stored file. The official Client cannot rebind its upload receipt, so the queue was not modified.',
+      'error',
+    )
+    return
+  }
   // Multimodal queued messages (durable attachments) ARE pullable: each block
   // becomes a RECALLED draft. The queue is spliced ONLY after the drafts are
   // staged (a failure keeps the queue intact).

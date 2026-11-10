@@ -22,7 +22,8 @@
  *   C1_NON_ANSWERING_PEER_PROBE = absolute barrier path for the negative control
  */
 
-import { appendFileSync, chmodSync, existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { isAbsolute, join } from 'node:path'
 import { LlmAdapter } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
@@ -51,6 +52,9 @@ const SCENARIOS = new Set([
   // real file intent and a real working-tree change.
   'web-workspace-changes',
   'f1-shell',
+  // M6 F4: one Host-seeded Session for the real Client /attach -> official
+  // receipt -> durable file proof.
+  'f4-file',
 ])
 
 /** Quote one token for the Host shell used by the harmless fixture commands. */
@@ -163,10 +167,10 @@ class C1Model extends LlmAdapter {
     const afterTool = Array.isArray(options.messages) && options.messages.at(-1)?.role === 'tool'
     const token = `${this.scenario}-${sessionId}`
 
-    if (this.scenario === 'f1-shell') {
+    if (this.scenario === 'f1-shell' || this.scenario === 'f4-file') {
       yield { type: 'block-start', index: 0, blockType: 'text' }
-      yield { type: 'text-delta', index: 0, text: `f1-shell answer ${token}` }
-      yield { type: 'block-end', index: 0, block: { type: 'text', text: `f1-shell answer ${token}` } }
+      yield { type: 'text-delta', index: 0, text: `${this.scenario} answer ${token}` }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: `${this.scenario} answer ${token}` } }
       yield { type: 'finish', reason: { kind: 'stop' } }
       return
     }
@@ -471,6 +475,106 @@ export async function apply(ctx) {
         sessionId: String(otherHandle.agent.id),
         cwd: ctx.workingDirectory.get(otherHandle.agent.session),
       })
+    }
+  }
+
+  if (scenario === 'f4-file') {
+    const sessionId = process.env.C1_F4_SESSION_ID
+    const cwd = process.env.C1_F4_SESSION_CWD
+    if (sessionId === undefined || sessionId === '' || cwd === undefined || cwd === '') {
+      throw new Error('m4-c1-host-work: f4-file requires its isolated Session id and Host cwd')
+    }
+    const handle = await ctx.agents.create({
+      sessionId: SessionId(sessionId),
+      meta: { cwd },
+      agentOptions: { provider: 'c1-qualification', model: 'c1' },
+    })
+    ctx.effect(() => () => handle.dispose())
+    record('f4-host-session-created', {
+      sessionId: String(handle.agent.id),
+      cwd: ctx.workingDirectory.get(handle.agent.session),
+    })
+    // Test-only Host attachment probe. The smoke writes `{sessionId, marker}`
+    // into its private C1 work root; this fixture resolves the EXACT Agent and
+    // durable `user/message`, then reads the stored bytes through the official
+    // Host `ctx.attachments.readFileStream` authority. It never accepts a path
+    // or raw bytes from the smoke.
+    const probeDir = process.env.C1_F4_PROBE_DIR
+    if (probeDir !== undefined && probeDir !== '') {
+      const seen = new Set()
+      const fileBlockOf = content => Array.isArray(content)
+        ? content.find(block => block?.type === 'file' && block.attachment?.attachmentId !== undefined)
+        : undefined
+      const textOfContent = content => Array.isArray(content)
+        ? content.map(block => block?.type === 'text' && typeof block.text === 'string' ? block.text : '').join('')
+        : ''
+      const runProbe = async request => {
+        const marker = typeof request.marker === 'string' ? request.marker : undefined
+        const requestedSession = typeof request.sessionId === 'string' ? request.sessionId : undefined
+        if (marker === undefined || requestedSession === undefined) {
+          record('f4-file-probe', { error: 'request-shape' })
+          return
+        }
+        const agent = ctx.agents.get(SessionId(requestedSession))
+        if (agent === undefined) {
+          record('f4-file-probe', { marker, sessionId: requestedSession, error: 'no-exact-agent' })
+          return
+        }
+        if (String(agent.id) !== requestedSession) {
+          record('f4-file-probe', { marker, sessionId: requestedSession, error: 'agent-identity-mismatch', agentId: String(agent.id) })
+          return
+        }
+        const event = agent.session.snapshotEvents().find(candidate => candidate.type === 'user/message'
+          && textOfContent(candidate.data?.content).includes(marker)
+          && fileBlockOf(candidate.data?.content) !== undefined)
+        const ref = event === undefined ? undefined : fileBlockOf(event.data.content)?.attachment
+        if (ref === undefined) {
+          record('f4-file-probe', { marker, sessionId: requestedSession, error: 'no-durable-file-message' })
+          return
+        }
+        const attachments = ctx.get('attachments')
+        const digest = createHash('sha256')
+        let bytes = 0
+        let chunks = 0
+        for await (const chunk of attachments.readFileStream(ref)) {
+          bytes += chunk.byteLength
+          chunks += 1
+          digest.update(chunk)
+        }
+        record('f4-file-probe', {
+          marker,
+          sessionId: requestedSession,
+          attachmentId: ref.attachmentId,
+          name: ref.name,
+          refBytes: ref.bytes,
+          bytes,
+          chunks,
+          sha256: digest.digest('hex'),
+        })
+      }
+      const timer = setInterval(() => {
+        let names
+        try {
+          names = readdirSync(probeDir)
+        } catch {
+          return
+        }
+        for (const name of names) {
+          if (!name.endsWith('.json') || seen.has(name)) continue
+          seen.add(name)
+          let request
+          try {
+            request = JSON.parse(readFileSync(join(probeDir, name), 'utf8'))
+          } catch (error) {
+            record('f4-file-probe', { request: name, error: error instanceof Error ? error.message : String(error) })
+            continue
+          }
+          runProbe(request).catch(error => {
+            record('f4-file-probe', { marker: request?.marker, error: error instanceof Error ? error.message : String(error) })
+          })
+        }
+      }, 20)
+      ctx.effect(() => () => clearInterval(timer))
     }
   }
 

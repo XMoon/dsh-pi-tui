@@ -32,6 +32,7 @@
 
 import { safeErrorMessage } from '../process/errors.ts'
 import type { QueueAction, SessionWriter, WriteOutcome } from '../session-writer-port.ts'
+import { RemoteFileUploadError } from './file-upload-remote.ts'
 import type {
   RemoteConnectionGenerationSource,
 } from './session-reader-remote.ts'
@@ -122,8 +123,7 @@ interface RemoteResolvedWrite {
   release(): void
 }
 
-/** Cheap preflight of one prepared submission, BEFORE any Host mutation:
- * decides D2.2 support and extracts the official local-echo presentation. */
+/** Cheap preflight of one prepared submission, BEFORE any Host mutation. */
 export type RemotePreflightResult =
   | {
     readonly kind: 'ok'
@@ -132,12 +132,21 @@ export type RemotePreflightResult =
       readonly text: string
       readonly attachments: readonly RemotePendingAttachment[]
     }
+    /** Derived from the frozen segments; never stored as parallel prompt state. */
+    readonly needsFileUploads: boolean
   }
   | { readonly kind: 'unsupported'; readonly reason: string }
 
-/** Expensive prompt serialization, run AFTER the official echo is registered. */
+/** Expensive prompt serialization and any required Host receipt preparation. */
 export type RemoteSerializeResult =
-  | { readonly kind: 'ok'; readonly content: readonly RemotePromptContentPart[] }
+  | {
+    readonly kind: 'ok'
+    readonly content: readonly RemotePromptContentPart[]
+    readonly echo: {
+      readonly text: string
+      readonly attachments: readonly RemotePendingAttachment[]
+    }
+  }
   | { readonly kind: 'unsupported'; readonly reason: string }
 
 /**
@@ -190,17 +199,20 @@ export class RemoteSessionWriter implements SessionWriter {
   private readonly generation: RemoteConnectionGenerationSource
   private readonly serializer: RemotePromptSerializer
   private readonly admission: RemoteWriterDispatchAdmission | undefined
+  private readonly lifetimeSignal: AbortSignal | undefined
 
   constructor(
     sessions: RemoteWriteSessionsSource,
     generation: RemoteConnectionGenerationSource,
     serializer: RemotePromptSerializer,
     admission?: RemoteWriterDispatchAdmission,
+    lifetimeSignal?: AbortSignal,
   ) {
     this.sessions = sessions
     this.generation = generation
     this.serializer = serializer
     this.admission = admission
+    this.lifetimeSignal = lifetimeSignal
   }
 
   /**
@@ -234,14 +246,10 @@ export class RemoteSessionWriter implements SessionWriter {
     if ('kind' in resolved) return resolved
     const { binding, captured, release } = resolved
     try {
-      // 1. Cheap preflight BEFORE any Host mutation: decide D2.2 support and
-      //    extract the echo presentation. An unsupported payload never creates an
-      //    official echo.
       let preflight: RemotePreflightResult
       try {
         preflight = this.serializer.preflight(message)
       } catch (error) {
-        // No dispatch happened, so this is a known local refusal.
         return preDispatchFailure('session/prompt-preflight-failed', error)
       }
       if (preflight.kind === 'unsupported') {
@@ -249,67 +257,86 @@ export class RemoteSessionWriter implements SessionWriter {
       }
       if (generationChanged(this.generation, captured)) return remoteNotDispatched()
 
-      // 2. Register the official submission identity synchronously, BEFORE the
-      //    potentially expensive serialization (the official Client contract:
-      //    beginSubmission precedes serialization). Registration reserves the
-      //    requestId LOCALLY and mints no visible echo: the official snapshot
-      //    publishes the submission only after Host acceptance (the prompt
-      //    receipt or an Inbox row carrying the same requestId), so there is no
-      //    Client-local optimistic store here.
       let handle: RemoteSubmissionHandle
-      try {
-        handle = binding.session.beginSubmission({
-          mode,
-          text: preflight.echo.text,
-          attachments: preflight.echo.attachments,
-        })
-      } catch (error) {
-        // Local registration is still BEFORE the prompt dispatch, so the Host
-        // was never called: a known refusal, never indeterminate.
-        return preDispatchFailure('session/prompt-echo-failed', error)
+      let serialized: RemoteSerializeResult
+      if (preflight.needsFileUploads) {
+        // File bytes are Client-local. Prove the exact pinned Session and live
+        // surface immediately before the first Host upload attempt.
+        if (this.lifetimeSignal?.aborted
+          || generationChanged(this.generation, captured)
+          || !Object.is(binding, this.sessions.binding(sessionId))
+          || this.admission?.isDispatchAllowed() === false) {
+          return remoteNotDispatched()
+        }
+        try {
+          serialized = await this.serializer.serialize(message, this.lifetimeSignal)
+        } catch (error) {
+          if (this.lifetimeSignal?.aborted) return remoteNotDispatched()
+          return preDispatchFailure(
+            error instanceof RemoteFileUploadError ? error.code : 'session/prompt-serialize-failed',
+            error,
+          )
+        }
+        if (serialized.kind === 'unsupported') {
+          return { kind: 'unsupported', reason: serialized.reason }
+        }
+        if (this.lifetimeSignal?.aborted
+          || generationChanged(this.generation, captured)
+          || !Object.is(binding, this.sessions.binding(sessionId))
+          || this.admission?.isDispatchAllowed() === false) {
+          return remoteNotDispatched()
+        }
+        try {
+          handle = binding.session.beginSubmission({
+            mode,
+            text: serialized.echo.text,
+            attachments: serialized.echo.attachments,
+          })
+        } catch (error) {
+          return preDispatchFailure('session/prompt-echo-failed', error)
+        }
+      } else {
+        // Keep the established no-file order: register the official identity
+        // before potentially expensive image serialization.
+        try {
+          handle = binding.session.beginSubmission({
+            mode,
+            text: preflight.echo.text,
+            attachments: preflight.echo.attachments,
+          })
+        } catch (error) {
+          return preDispatchFailure('session/prompt-echo-failed', error)
+        }
+        try {
+          serialized = await this.serializer.serialize(message)
+        } catch (error) {
+          handle.abandon()
+          return preDispatchFailure('session/prompt-serialize-failed', error)
+        }
+        if (serialized.kind === 'unsupported') {
+          handle.abandon()
+          return { kind: 'unsupported', reason: serialized.reason }
+        }
       }
 
-      // 3. Serialize. This runs AFTER the echo exists, so a failure here is a
-      //    genuine pre-prompt failure: abandon the official echo and restore the
-      //    caller's draft.
-      let serialized: RemoteSerializeResult
-      try {
-        serialized = await this.serializer.serialize(message)
-      } catch (error) {
+      if (preflight.needsFileUploads && this.lifetimeSignal?.aborted) {
         handle.abandon()
-        return preDispatchFailure('session/prompt-serialize-failed', error)
+        return remoteNotDispatched()
       }
-      if (serialized.kind === 'unsupported') {
-        handle.abandon()
-        return { kind: 'unsupported', reason: serialized.reason }
-      }
-      // The pin keeps THIS exact generation alive across the serialization, so
-      // a same-id release/re-retain cannot substitute a different binding; only
-      // a Connection replacement can still invalidate the dispatch. The
-      // identity re-check is the same fence stated explicitly: binding()
-      // PRESENCE must never authorize a write, only binding IDENTITY.
+      // The pin keeps THIS exact generation alive across serialization and
+      // file upload, so a same-id release/re-retain cannot substitute a new
+      // binding. Connection generation and surface admission remain the final
+      // authority immediately before prompt dispatch.
       if (generationChanged(this.generation, captured)
         || !Object.is(binding, this.sessions.binding(sessionId))) {
         handle.abandon()
         return remoteNotDispatched()
       }
-      // The surface/lifetime admission is the LAST gate before dispatch: a
-      // write parked across the surface-stop boundary must be refused here —
-      // the human message must never be admitted silently after the surface the
-      // user was looking at has stopped. The echo is abandoned and the caller
-      // restores the draft exactly once; an already-dispatched write is never
-      // reinterpreted by this fence (it is consulted once, before dispatch).
       if (this.admission?.isDispatchAllowed() === false) {
         handle.abandon()
         return remoteNotDispatched()
       }
 
-      // 4. Dispatch. The generated Remote resolves to `RemoteResult` — carrier
-      //    failures arrive in the error branch, and only an assembly/programming
-      //    defect rejects. A rejection here is therefore NOT an ambiguous write
-      //    and must propagate instead of being disguised as `indeterminate`; the
-      //    identified echo is never abandoned (the official Client retires it on
-      //    an identified prompt failure).
       const result = await binding.session.prompt(serialized.content, mode, undefined, handle.requestId)
       if (result.ok) return { kind: 'committed', value: undefined }
       return classifyRemoteWriteFailure(result.error)

@@ -29,13 +29,12 @@
  *
  * DELIBERATELY ABSENT
  * - PR4 command plane (slash-command catalog/claim) — plain prompts only
- * - generic-file upload receipts (D4): the fail-closed path is proven at L1
- *   (remote-prompt-serializer.test.ts)
  *
  * @module @xmoon76/dsh-pi-tui/runner-remote-submission.test
  */
 
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import test from 'node:test'
 import { closeSync, ftruncateSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
@@ -476,6 +475,141 @@ test('image: known staged bytes → PromptContentPart → Host durable attachmen
   }
 })
 
+test('generic file: the real /attach intake → official receipt → Host durable file block with byte equality', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm6-f4-remote-file'
+  const presetId = 'm3-4-pr3-preset'
+  const host = await mountHost(life, presetId)
+  await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+  const fixture = await mountPr3Runner(life, { presetId, resumeSessionId: mainId, host })
+  await waitFor('mount paint', () => fixture.vt.getViewport().join('').length > 0, 10_000)
+
+  // The durable Host proof is the Session event; the official Host attachment
+  // read is the byte authority. The Client-local source lives in a directory
+  // the Host workspace does NOT contain.
+  const sourceDir = life.tempDir('dsh-f4-client-source-')
+  const path = join(sourceDir, 'client-only-report.bin')
+  const source = Buffer.alloc(8 * 1024 * 1024)
+  for (let index = 0; index < source.length; index += 1) source[index] = index % 251
+  writeFileSync(path, source)
+  const sourceSha256 = createHash('sha256').update(source).digest('hex')
+
+  // Record the official beginSubmission echo input on the production Session
+  // instance: the pending FILE metadata must be the Host-issued ref, never a
+  // local name/size guess.
+  const binding = fixture.aggregate.wire.client.sessions.binding(SessionId(mainId) as never)
+  assert.ok(binding !== undefined, 'the mounted Client retains the current Session binding')
+  const sessionFace = binding.session as unknown as {
+    beginSubmission(input: unknown): unknown
+    prompt(...args: unknown[]): unknown
+  }
+  const sessionPrototype = Object.getPrototypeOf(sessionFace) as {
+    beginSubmission: (this: unknown, input: unknown) => unknown
+  }
+  const originalBegin = sessionPrototype.beginSubmission
+  const begins: unknown[] = []
+  sessionPrototype.beginSubmission = function patchedBegin(this: unknown, input: unknown) {
+    begins.push(input)
+    return originalBegin.call(this, input)
+  }
+  life.defer(() => { sessionPrototype.beginSubmission = originalBegin })
+
+  // REAL TUI intake: the /attach command stages the metadata draft and inserts
+  // the canonical placeholder into the live composer.
+  submitDraft(fixture, `/attach ${path}`)
+  const app = fixture.runnerApp() as unknown as { getDraft(): string; submitDraft(): void }
+  await waitFor('the /attach placeholder reaches the composer', () => app.getDraft().includes('[file #'), 15_000)
+  app.submitDraft()
+
+  const fileEventOf = (): { data: { content?: Array<{ type: string; attachment?: { attachmentId: string; name: string; bytes: number } }> } } | undefined => {
+    const session = fixture.host.ctx.sessions.get(SessionId(mainId)) as unknown as {
+      snapshotEvents(): Array<{ type: string; data: unknown }>
+    }
+    return session.snapshotEvents().find(event => event.type === 'user/message'
+      && JSON.stringify(event.data).includes('client-only-report.bin')) as
+      { data: { content?: Array<{ type: string; attachment?: { attachmentId: string; name: string; bytes: number } }> } } | undefined
+  }
+  await waitFor('the Host durable user/message row carries the file block', () => fileEventOf() !== undefined, 60_000)
+  const blocks = fileEventOf()!.data.content ?? []
+  const fileBlock = blocks.find(block => block.type === 'file')
+  assert.ok(fileBlock?.attachment?.attachmentId !== undefined,
+    'the durable row carries a Host attachment id (the uploaded file became durable)')
+  const ref = fileBlock!.attachment!
+  assert.equal(ref.name, 'client-only-report.bin')
+  assert.equal(ref.bytes, source.byteLength, 'the Host metadata describes the actual uploaded byte count')
+
+  // G: the official echo registered the SAME Host-issued file metadata.
+  const fileBegin = begins.map(input => input as {
+    attachments?: Array<{ type: string; value?: { attachmentId?: string; name?: string; bytes?: number } }>
+  }).find(input => input.attachments?.some(attachment => attachment.type === 'file'))
+  assert.ok(fileBegin !== undefined, 'a file-bearing beginSubmission was registered')
+  const echoFile = fileBegin!.attachments!.find(attachment => attachment.type === 'file')!
+  assert.equal(echoFile.value?.attachmentId, ref.attachmentId,
+    'the pending FILE metadata is the Host-issued attachmentId, not a local guess')
+  assert.equal(echoFile.value?.name, ref.name)
+  assert.equal(echoFile.value?.bytes, ref.bytes)
+
+  // The Host's OWN attachment authority reads the stored bytes: SHA256 and
+  // length must equal the Client source exactly.
+  const attachments = host.ctx.get('attachments') as unknown as {
+    readFileStream(ref: unknown, signal?: AbortSignal): AsyncIterable<Uint8Array>
+  }
+  const stored: Uint8Array[] = []
+  let sawOversizedChunk = false
+  for await (const chunk of attachments.readFileStream(ref)) {
+    if (chunk.byteLength > 64 * 1024) sawOversizedChunk = true
+    stored.push(chunk)
+  }
+  const storedBytes = Buffer.concat(stored.map(chunk => Buffer.from(chunk)))
+  assert.equal(sawOversizedChunk, false, 'the source stream is consumed in bounded Client chunks')
+  assert.equal(storedBytes.byteLength, source.byteLength)
+  assert.equal(createHash('sha256').update(storedBytes).digest('hex'), sourceSha256,
+    'Host stored bytes === Client source bytes (SHA256)')
+
+  // The TUI paints the accepted file row (the durable event is the source).
+  await waitFor('the file placeholder is painted in the transcript', () =>
+    fixture.vt.getViewport().join('').includes('client-only-report.bin'), 30_000)
+})
+
+test('generic file: a source changed after /attach is refused with no Host prompt', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm6-f4-remote-file-changed'
+  const presetId = 'm3-4-pr3-preset'
+  const host = await mountHost(life, presetId)
+  await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+  const fixture = await mountPr3Runner(life, { presetId, resumeSessionId: mainId, host })
+  const notices = recordNotices(life, fixture)
+  await waitFor('mount paint', () => fixture.vt.getViewport().join('').length > 0, 10_000)
+
+  const sourceDir = life.tempDir('dsh-f4-client-changed-')
+  const path = join(sourceDir, 'changed-report.bin')
+  writeFileSync(path, Buffer.alloc(256 * 1024, 3))
+  submitDraft(fixture, `/attach ${path}`)
+  const app = fixture.runnerApp() as unknown as { getDraft(): string; setDraft(text: string): void; submitDraft(): void }
+  await waitFor('the /attach placeholder reaches the composer', () => app.getDraft().includes('[file #'), 15_000)
+  app.setDraft(`${app.getDraft()} F4_CHANGED_SOURCE_PROMPT`)
+  // The source changes AFTER the immutable prepared snapshot's attach-time
+  // fingerprint was recorded, so the submit-time read must refuse.
+  writeFileSync(path, Buffer.alloc(3, 9))
+  const durableBefore = (() => {
+    const session = host.ctx.sessions.get(SessionId(mainId)) as unknown as { snapshotEvents(): Array<{ type: string }> }
+    return session.snapshotEvents().filter(event => event.type === 'user/message').length
+  })()
+  app.submitDraft()
+
+  await waitFor('the changed source is visibly refused', () =>
+    notices.some(notice => notice.includes('changed since it was attached')), 20_000)
+  const durableAfter = (() => {
+    const session = host.ctx.sessions.get(SessionId(mainId)) as unknown as { snapshotEvents(): Array<{ type: string; data: unknown }> }
+    return session.snapshotEvents().filter(event => event.type === 'user/message'
+      && JSON.stringify(event.data).includes('F4_CHANGED_SOURCE_PROMPT')).length
+  })()
+  assert.equal(durableAfter, 0, 'a changed source never produces a durable Host prompt')
+  assert.equal(app.getDraft().includes('F4_CHANGED_SOURCE_PROMPT'), true,
+    'the refused draft is restored for the user')
+  assert.equal(durableBefore, 0)
+})
+
 test('queue/steer: a busy queue prompt lands as an official queued occurrence; a steer lands as steering', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr3-busy'
@@ -748,6 +882,105 @@ test('busy steer: a steer gesture while running lands as next-step with its own 
   await waitFor('steer marker durable', () => {
     return hostUserRows(fixture, mainId).some(row => row.includes('steer while busy iota'))
   }, 20_000)
+})
+
+test('busy steer with a file: the steered occurrence carries the Host file block into next-step and the durable row', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm6-f4-busy-file-steer'
+  const presetId = 'm3-4-pr3-preset'
+  const llm = new StubStreamingLlmAdapter()
+  const release = llm.hold()
+  life.defer(release)
+  const host = await mountHost(life, presetId, { llmAdapter: llm })
+  await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+  const fixture = await mountPr3Runner(life, { presetId, resumeSessionId: mainId, host })
+  await waitFor('mount paint', () => fixture.vt.getViewport().join('').length > 0, 10_000)
+  submitDraft(fixture, 'file steer opener')
+  await waitFor('turn is running', () =>
+    fixture.aggregate.presentation.sessionFacts.running(mainId) === true, 20_000)
+
+  const sourceDir = life.tempDir('dsh-f4-busy-file-')
+  const path = join(sourceDir, 'steer-file.bin')
+  const source = Buffer.alloc(96 * 1024)
+  for (let index = 0; index < source.length; index += 1) source[index] = index % 241
+  writeFileSync(path, source)
+  const app = fixture.runnerApp() as unknown as { getDraft(): string; setDraft(text: string): void; submitDraft(request?: string): void }
+  submitDraft(fixture, `/attach ${path}`)
+  await waitFor('the /attach placeholder reaches the composer', () => app.getDraft().includes('[file #'), 15_000)
+  const marker = 'F4_BUSY_STEER_FILE_20261111'
+  app.setDraft(`${app.getDraft()} ${marker}`)
+  app.submitDraft('accelerated')
+
+  const sessionOf = (): { snapshotEvents(): Array<{ type: string; data: unknown }> } =>
+    host.ctx.sessions.get(SessionId(mainId)) as unknown as { snapshotEvents(): Array<{ type: string; data: unknown }> }
+  const spliceOf = (needle: string): { target: string; file: boolean } | undefined => {
+    for (const event of sessionOf().snapshotEvents()) {
+      if (event.type !== 'agent/inbox/spliced') continue
+      if (!JSON.stringify(event.data).includes(needle)) continue
+      const parsed = event.data as { target: string; inserted?: Array<{ content?: Array<{ type: string }> }> }
+      return {
+        target: parsed.target,
+        file: parsed.inserted?.[0]?.content?.some(block => block.type === 'file') === true,
+      }
+    }
+    return undefined
+  }
+  await waitFor('the steered file occurrence is spliced', () => spliceOf(marker)?.file === true, 20_000)
+  assert.equal(spliceOf(marker)!.target, 'next-step',
+    'a file-bearing steer targets the RUNNING turn, exactly like its text-only sibling')
+  // Alt+Up on a queue holding a durable FILE: Remote refuses BEFORE any
+  // recalled draft or queue removal, and the running turn keeps its queue.
+  const queuePath = join(sourceDir, 'queued-file.bin')
+  writeFileSync(queuePath, Buffer.alloc(48 * 1024, 7))
+  const queueMarker = 'F4_BUSY_QUEUED_FILE_20261111'
+  submitDraft(fixture, `/attach ${queuePath}`)
+  await waitFor('the queued /attach placeholder reaches the composer', () => app.getDraft().includes('[file #'), 15_000)
+  app.setDraft(`${app.getDraft()} ${queueMarker}`)
+  app.submitDraft('explicit-queue')
+  await waitFor('the queued file occurrence is spliced', () => spliceOf(queueMarker)?.file === true, 20_000)
+  assert.equal(spliceOf(queueMarker)!.target, 'next-turn',
+    'the explicit-queue file gesture appends a next-turn occurrence')
+  fixture.vt.sendInput('\x1b[1;3A')
+  await waitFor('the file queue pull-back is refused visibly', () =>
+    fixture.vt.getViewport().join('').includes('cannot rebind its upload receipt'), 20_000)
+  assert.equal(app.getDraft(), '', 'the refused recall never injects a recalled draft')
+  assert.equal(spliceOf(queueMarker)?.file, true, 'the Host queue keeps its file occurrence')
+
+  release()
+  await waitFor('turn settles', () =>
+    fixture.aggregate.presentation.sessionFacts.running(mainId) === false, 20_000)
+  await waitFor('the steered file row is durable', () =>
+    hostUserRows(fixture, mainId).some(row => row.includes(marker)), 20_000)
+  const durable = sessionOf().snapshotEvents().find(event => event.type === 'user/message'
+    && JSON.stringify(event.data).includes(marker)) as unknown as {
+      data: { content: Array<{ type: string; attachment?: { attachmentId: string; name: string; bytes: number } }> }
+    }
+  const fileBlock = durable.data.content.find(block => block.type === 'file')
+  assert.ok(fileBlock?.attachment?.attachmentId !== undefined,
+    'the steered durable row carries the Host-issued file attachment')
+  assert.equal(fileBlock!.attachment!.bytes, source.byteLength)
+  const attachments = host.ctx.get('attachments') as unknown as {
+    readFileStream(ref: unknown): AsyncIterable<Uint8Array>
+  }
+  const stored: Uint8Array[] = []
+  for await (const chunk of attachments.readFileStream(fileBlock!.attachment!)) stored.push(chunk)
+  assert.equal(
+    createHash('sha256').update(Buffer.concat(stored.map(chunk => Buffer.from(chunk)))).digest('hex'),
+    createHash('sha256').update(source).digest('hex'),
+    'the steered file bytes are the Client source bytes',
+  )
+  // The preserved queue occurrence is delivered AFTER the running turn and
+  // carries its own Host file attachment.
+  await waitFor('the queued file row is durable', () =>
+    hostUserRows(fixture, mainId).some(row => row.includes(queueMarker)), 30_000)
+  const queuedDurable = sessionOf().snapshotEvents().find(event => event.type === 'user/message'
+    && JSON.stringify(event.data).includes(queueMarker)) as unknown as {
+      data: { content: Array<{ type: string; attachment?: { attachmentId: string; bytes: number } }> }
+    }
+  const queuedFileBlock = queuedDurable.data.content.find(block => block.type === 'file')
+  assert.ok(queuedFileBlock?.attachment?.attachmentId !== undefined,
+    'the preserved queued file occurrence reaches the Host durable row')
+  assert.equal(queuedFileBlock!.attachment!.bytes, 48 * 1024)
 })
 
 test('remote cancel: a real cancel gesture stops the running official turn and PRESERVES the queued next-turn work', async (t) => {

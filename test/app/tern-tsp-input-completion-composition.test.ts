@@ -1682,12 +1682,11 @@ test('a shell line, an absolute or ordinary path, prose, an email, a version and
   await waitUntil('the application submit entry recorded the literal reference', () => h.submits.length === 1)
   assert.deepEqual(h.submits.map(entry => entry.text), ['请看 @src/deep.ts '])
   await waitUntil('the real controller wrote the literal prompt', () => h.writes.length === 1)
-  const written = h.writes[0] as { sessionId: string; message: { text: string; segments: readonly { type: string }[]; hasFiles: boolean } }
+  const written = h.writes[0] as { sessionId: string; message: { text: string; segments: readonly { type: string }[] } }
   assert.equal(written.sessionId, SESSION_ID, 'the write carried this composition\'s session')
   assert.equal(written.message.text, '请看 @src/deep.ts ', 'the submitted draft travelled verbatim into the real prompt')
   assert.deepEqual(written.message.segments.map(segment => segment.type), ['text'],
     'a Host @ reference is ordinary text — never a staged attachment')
-  assert.equal(written.message.hasFiles, false, 'no generic file rode that prompt')
   assert.equal(h.host.resolveCalls(), 0, 'the send path never probed the reference for existence')
   assert.equal(h.host.canonicalizeCalls(), 0, 'the send path never canonicalized the reference')
 })
@@ -1900,7 +1899,6 @@ test('the command registration installs the ONE inline stager on the current mou
     sessionId: string
     message: {
       text: string
-      hasFiles: boolean
       segments: readonly { type: string; text?: string; image?: { name?: string; mediaType: string; bytes: Uint8Array } }[]
     }
   }
@@ -1913,7 +1911,6 @@ test('the command registration installs the ONE inline stager on the current mou
   assert.equal(imageSegment.image?.name, 'shot.png', 'the prompt carries the accepted file\'s own name')
   assert.equal(imageSegment.image?.mediaType, 'image/png', 'the prompt carries the sniffed media type')
   assert.equal(imageSegment.image?.bytes.byteLength, 33, 'the prompt carries the real bytes')
-  assert.equal(written.message.hasFiles, false, 'no generic file rode that prompt')
 })
 
 // ── L. A forged attachment marker buys no read (matrix D14) ──────────────────

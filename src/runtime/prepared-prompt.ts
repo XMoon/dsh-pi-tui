@@ -37,9 +37,19 @@ export interface PreparedImage {
 export type PreparedSegment =
   | { readonly type: 'text'; readonly text: string }
   | { readonly type: 'image'; readonly image: PreparedImage }
-  /** A generic-file placeholder: Remote has no receipt transaction, so its
-   * PRESENCE alone makes the submission fail closed before dispatch. */
-  | { readonly type: 'file' }
+  | { readonly type: 'file'; readonly file: PreparedFile }
+
+/** One submit-time Client file snapshot. Its source reader stays process-local. */
+export interface PreparedFile {
+  readonly name: string
+  readonly byteLength: number
+  readonly source:
+    | {
+        readonly kind: 'client-stream'
+        readonly open: (signal: AbortSignal) => AsyncIterable<Uint8Array>
+      }
+    | { readonly kind: 'recalled-unsupported' }
+}
 
 /** The immutable application-owned prepared prompt. */
 export interface PreparedPrompt {
@@ -52,8 +62,6 @@ export interface PreparedPrompt {
   readonly text: string
   /** Ordered content segments (text/image/file interleaving preserved). */
   readonly segments: readonly PreparedSegment[]
-  /** Whether any generic-file placeholder is present (fail-closed marker). */
-  readonly hasFiles: boolean
   /** The optional request identity (the local-echo correlation id). */
   readonly requestId?: string
 }

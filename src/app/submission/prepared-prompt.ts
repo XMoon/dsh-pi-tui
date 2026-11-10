@@ -10,9 +10,9 @@
  *         │  pin + snapshot (prepare time, inside the writer admission)
  *         ▼
  * PreparedPrompt  (canonical ordered text + staged image bytes + names +
- *                  generic-file markers)
- *         └── Remote  -> preflight -> beginSubmission -> image
- *                        PromptContentPart -> Session.prompt
+ *                  generic-file snapshots)
+ *         └── Remote  -> preflight -> (file receipts) -> beginSubmission
+ *                        -> PromptContentPart -> Session.prompt
  * ```
  *
  * Direct does NOT consume PreparedPrompt today. It keeps its SEPARATE Direct
@@ -31,13 +31,15 @@
  */
 
 import { expandAttachmentPlaceholders } from '../../client/media/attachment/placeholder.ts'
+import { streamDraftFile } from '../../client/media/attachment/file-stream.ts'
+import type { DraftFile } from '../../client/media/attachment/file-draft.ts'
 import type { ImageAttachmentRefLike, ImageMediaType } from '../../domain/media/types.ts'
-import type { PreparedPrompt, PreparedSegment } from '../../runtime/prepared-prompt.ts'
+import type { PreparedFile, PreparedPrompt, PreparedSegment } from '../../runtime/prepared-prompt.ts'
 
 /** The draft-store faces the snapshot reads (structural; one pass). */
 export interface PreparedPromptStores {
   readonly images: { values(): readonly PreparedImageSource[] }
-  readonly files?: { values(): readonly unknown[] } | undefined
+  readonly files?: { values(): readonly DraftFile[] } | undefined
 }
 
 /** The image-draft fields the snapshot copies (a superset check of
@@ -59,8 +61,9 @@ export interface PreparedImageSource {
  * this is the snapshot the Remote transport preparation path forks from.
  */
 export function preparePrompt(sessionId: string, text: string, stores: PreparedPromptStores, requestId?: string): PreparedPrompt {
-  // Generic-file placeholders only need PRESENCE for the fail-closed
-  // decision, so the file store is read through the same strict expansion.
+  // Generic-file placeholders expand through the same strict store pass. Each
+  // referenced draft is copied as an immutable Client-local source snapshot so
+  // the serializer can stream the exact attach-time version later.
   const expanded = expandAttachmentPlaceholders(
     text,
     stores.images as never,
@@ -68,7 +71,44 @@ export function preparePrompt(sessionId: string, text: string, stores: PreparedP
   )
   const segments: PreparedSegment[] = expanded.map(segment => {
     if (segment.type === 'text') return { type: 'text' as const, text: segment.text }
-    if (segment.type === 'file') return { type: 'file' as const }
+    if (segment.type === 'file') {
+      const draft = segment.file
+      const source = draft.source
+      let preparedSource: PreparedFile['source']
+      if (source.type === 'recalled') {
+        preparedSource = { kind: 'recalled-unsupported' }
+      } else {
+        const captured: DraftFile = {
+          id: draft.id,
+          kind: 'file',
+          name: draft.name,
+          byteLength: draft.byteLength,
+          placeholder: draft.placeholder,
+          source: Object.freeze({
+            type: 'path',
+            path: source.path,
+            fingerprint: Object.freeze({
+              dev: source.fingerprint.dev,
+              ino: source.fingerprint.ino,
+              size: source.fingerprint.size,
+              mtimeNs: source.fingerprint.mtimeNs,
+            }),
+          }),
+        }
+        preparedSource = {
+          kind: 'client-stream',
+          open: signal => streamDraftFile(captured, signal),
+        }
+      }
+      return {
+        type: 'file' as const,
+        file: Object.freeze({
+          name: draft.name,
+          byteLength: draft.byteLength,
+          source: Object.freeze(preparedSource),
+        }),
+      }
+    }
     const image = segment.image as PreparedImageSource
     return {
       type: 'image' as const,
@@ -87,7 +127,6 @@ export function preparePrompt(sessionId: string, text: string, stores: PreparedP
     sessionId,
     text,
     segments: Object.freeze(segments),
-    hasFiles: segments.some(segment => segment.type === 'file'),
     ...(requestId !== undefined ? { requestId } : {}),
   })
 }

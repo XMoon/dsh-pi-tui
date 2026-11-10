@@ -68,9 +68,9 @@ export function expandAttachmentPlaceholders(
   return merged
 }
 
-/** Whether text contains a currently live GENERIC-FILE placeholder (a
- * command invocation cannot carry one: the host expects an upload receipt
- * this client has no seam to produce). */
+/** Whether text contains a currently live GENERIC-FILE placeholder (a Host
+ * command invocation cannot carry one: the command plane expects a receipt
+ * this Client does not pass to command execution). */
 export function draftHasFiles(
   text: string,
   imageStore: DraftImageStoreLike,

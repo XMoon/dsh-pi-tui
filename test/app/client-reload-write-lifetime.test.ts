@@ -610,6 +610,7 @@ test('an Alt+Up queue mutation keeps the write lifetime until its queue write se
     isViewing: () => false,
     currentAgent: () => ({ session: { id: 'session-a' } }),
     captureOwnerToken: () => ({}),
+    canPullBackRecalledFiles: true,
     isOwnerTokenCurrent: () => true,
     requireLiveScope: () => ({ sessionId: 'session-a' } as never),
     readPullableQueue: () => [{ id: 'message-1', content: [{ type: 'text', text: 'queued text' }] }],

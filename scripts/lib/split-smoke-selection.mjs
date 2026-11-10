@@ -29,6 +29,7 @@ import { runPtySessionWriteRecovery } from '../smoke/split-process/pty-session-w
 import { runSharedSessionInteractions } from '../smoke/split-process/shared-session-interactions.mjs'
 import { runHostRuntimeDisabled } from '../smoke/split-process/host-runtime-disabled.mjs'
 import { runHostUserShellF1 } from '../smoke/split-process/host-user-shell-f1.mjs'
+import { runGenericFileUploadF4 } from '../smoke/split-process/generic-file-upload-f4.mjs'
 import { runRuntimeArtifactRecovery } from '../smoke/split-process/runtime-artifact-recovery.mjs'
 import { runUnknownWriteHostDeath } from '../smoke/split-process/unknown-write-host-death.mjs'
 import { runWebProductQualification } from '../smoke/split-process/web-product.mjs'
@@ -84,6 +85,12 @@ const CASE_REGISTRY = Object.freeze([
     id: 'surface.host-user-shell-f1',
     title: 'real installed Host Shell and Host completion use Host environment, bound output and exact Session writes',
     run: runHostUserShellF1,
+  }),
+  Object.freeze({
+    suite: 'surface',
+    id: 'surface.generic-file-upload-f4',
+    title: 'a real Client /attach uploads its own file bytes through the official Host receipt into the exact Session',
+    run: runGenericFileUploadF4,
   }),
   Object.freeze({
     suite: 'surface',
