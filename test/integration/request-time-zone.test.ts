@@ -280,7 +280,18 @@ test('the rendered surface keeps Queue/transcript/composer behaviour while the d
         assert.equal(state.some(line => line.includes('parity busy follow-up') && line.includes('steering')), false,
           'a queued submission never renders as a steering row, in any frame')
       }
-       const renderedDuringBusy = renderedLines(fixture)
+      const context = wireNodes(fixture.pane).find(node => node.k === 'section'
+        && node.p.collapsible === true && String(node.p.head).includes('time-context'))
+      assert.ok(context !== undefined, 'the official time-context Context Section is present on the real TSP wire')
+      const frame = fixture.pane.frames().at(-1)
+      assert.ok(frame !== undefined)
+      fixture.pane.event({
+        ev: 'toggle', sf: frame.sf, id: context.id, collapsed: false,
+        key: context.id.slice(context.id.lastIndexOf('.') + 1), raw: {},
+      })
+      await waitFor('the exact time-context Section body to become visible while the turn is busy', () =>
+        renderedLines(fixture).some(line => line.includes('Browser time zone for this request: Asia/Shanghai.')), 25_000)
+      const renderedDuringBusy = renderedLines(fixture)
       assert.ok(renderedDuringBusy.some(line => line.includes('queued (followup): parity busy follow-up')),
         `the busy submission must render as the ordinary queue row:\n${renderedDuringBusy.join('\n')}`)
       assert.equal(renderedDuringBusy.some(line => line.includes('parity busy follow-up') && line.includes('steering')),
@@ -298,6 +309,8 @@ test('the rendered surface keeps Queue/transcript/composer behaviour while the d
           && lines.some(line => line === 'parity busy follow-up')
       }, 25_000)
        const rendered = renderedLines(fixture)
+       assert.ok(rendered.some(line => line.includes('Browser time zone for this request: Asia/Shanghai.')),
+         'the exact time-context body remains visible after the turn settles')
       assert.ok(rendered.some(line => line === 'parity question'), 'the first user row stays in the transcript')
       assert.ok(rendered.some(line => line === 'parity busy follow-up'), 'the queued row becomes a transcript row')
       assert.ok(rendered.some(line => line.includes('zone parity reply')), 'the scripted reply renders')

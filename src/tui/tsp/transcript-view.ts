@@ -868,8 +868,12 @@ function shownToolResult(message: Extract<TranscriptMessage, { kind: 'tool' }>, 
  * the complete child output, wrapped; a child with no header summary shows its
  * raw args instead of a headless empty card.
  */
-function toolErrorNote(message: TranscriptToolMessage, options: TranscriptViewOptions): string | undefined {
-  if (message.status !== 'error') return undefined
+function toolErrorNote(
+  message: TranscriptToolMessage,
+  options: TranscriptViewOptions,
+  displayStatus: TranscriptToolMessage['status'],
+): string | undefined {
+  if (displayStatus !== 'error') return undefined
   const reason = shownToolResult(message, options).trim()
   if (reason === '') return undefined
   const line = sanitizedPhysicalLine(reason)
@@ -881,6 +885,7 @@ function childToolNode(child: TranscriptToolMessage, options: TranscriptViewOpti
   const header = toolCardHeader(child.name, child.args, options.cwd)
   const childKey = `sub-${child.subCallId!}`
   const childDisclosure = `${parentDisclosure}/${childKey}`
+  const displayStatus = subCallDisplayStatus(child)
   const svgState = child.name === SVG_TOOL_NAME && child.status === 'ok'
     ? options.toolSvgStates?.get(child)
     : undefined
@@ -902,14 +907,14 @@ function childToolNode(child: TranscriptToolMessage, options: TranscriptViewOpti
     body.push(...toolChildNodes(child, options, childDisclosure))
     body.push(...toolResultNodes(child, options, true, child.result, false))
   }
-  const note = toolErrorNote(child, options)
+  const note = toolErrorNote(child, options, displayStatus)
   return ui.tool(
     {
       key: childKey,
       frame: 'inline',
       name: sanitizedPhysicalLine(child.name),
       title: sanitizedPhysicalLine(header.title),
-      status: toolStatus(subCallDisplayStatus(child)),
+      status: toolStatus(displayStatus),
       ...(collapsible ? { collapsible: true, collapsed } : {}),
       ...(note === undefined ? {} : { note }),
       ...(header.summary === '' ? {} : {
@@ -965,7 +970,7 @@ function toolNode(message: Extract<TranscriptMessage, { kind: 'tool' }>, key: st
     ? { args: [], result: [] }
     : toolBodyParts(message, options, hasChildren, false)
   const children = collapsed ? [] : toolChildNodes(message, options, disclosure)
-  const note = toolErrorNote(message, options)
+  const note = toolErrorNote(message, options, message.status)
   return ui.tool(
     {
       key,
