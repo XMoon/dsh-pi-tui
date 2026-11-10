@@ -428,8 +428,10 @@ export default async function (h) {
     if (spec.width <= 420 && MODE !== 'baseline') {
       // RFL-001: the Copy section leaves the transcript at the tail, so at the
       // narrow viewports the User turn is scrolled out. Bring its body beginning
-      // genuinely into the visible Main band BEFORE the matrix capture, instead of
-      // asserting on a message that is not on screen.
+      // genuinely into the visible Main band AND above the sibling Dock/tv-back
+      // ceiling BEFORE the matrix capture. `visibleBox` alone only proves ancestor
+      // clipping, not that the body is readable above the composer overlay, so the
+      // body is wheel-lifted above copyCeiling exactly like the User Copy icon.
       let ns = h.snapshot()
       const markerBody = s => {
         const m = currentMessage(s, 'TSP-QUESTION-MIXED')
@@ -438,10 +440,25 @@ export default async function (h) {
       let ups = 0
       for (; ups < 8; ups += 1) {
         const b = markerBody(ns)
-        const pt = b === undefined ? undefined : visiblePoint(ns.chains, b)
-        const ceiling = copyCeiling(ns)
-        if (pt !== undefined && (ceiling === undefined || pt.y < ceiling - 2)) break
+        if (b !== undefined && visiblePoint(ns.chains, b) !== undefined) break
         await h.key('PageUp', 300)
+        ns = h.snapshot()
+      }
+      let bodyLifts = 0
+      for (; bodyLifts < 8; bodyLifts += 1) {
+        const b = markerBody(ns)
+        if (b === undefined) break
+        const pt = visiblePoint(ns.chains, b)
+        const ceiling = copyCeiling(ns)
+        const br = rect(b)
+        if (pt === undefined || ceiling === undefined || br[1] + br[3] < ceiling - 4) break
+        const m = region(ns, 'sf-main')
+        if (m === undefined) break
+        const mr = rect(m)
+        const amount = Math.min(240, Math.max(24, Math.ceil(br[1] + br[3] - ceiling + 12)))
+        h.send('move', mr[0] + mr[2] / 2, ceiling - 40)
+        h.send('wheel', 0, amount)
+        await h.sleep(250)
         ns = h.snapshot()
       }
     }
@@ -464,9 +481,13 @@ export default async function (h) {
       const narrowBody = narrowUser === undefined ? undefined
         : descendants(narrowUser).find(n => String(n.text ?? '').includes('TSP-QUESTION-MIXED'))
       const narrowBodyBox = narrowBody === undefined ? undefined : visibleBox(snap.chains, narrowBody)
-      h.check(`${spec.id} shows the real User body beginning on screen (non-vacuous narrow visibility)`,
-        narrowBody !== undefined && narrowBodyBox !== undefined && narrowBodyBox.span.x >= 4 && narrowBodyBox.span.y >= 4,
-        JSON.stringify({ bodyRect: narrowBody === undefined ? undefined : rect(narrowBody), bodyVisible: narrowBodyBox, evidenceUser: evidence.user }))
+      const narrowBodyRect = narrowBody === undefined ? undefined : rect(narrowBody)
+      const narrowBodyCeiling = copyCeiling(snap)
+      const bodyAboveCeiling = narrowBodyRect !== undefined
+        && (narrowBodyCeiling === undefined || narrowBodyRect[1] + narrowBodyRect[3] < narrowBodyCeiling - 4)
+      h.check(`${spec.id} shows the real User body beginning readable above the Dock/tv-back (non-vacuous)`,
+        narrowBody !== undefined && narrowBodyBox !== undefined && narrowBodyBox.span.x >= 4 && narrowBodyBox.span.y >= 4 && bodyAboveCeiling,
+        JSON.stringify({ bodyRect: narrowBodyRect, bodyVisible: narrowBodyBox, ceiling: narrowBodyCeiling, bodyAboveCeiling, evidenceUser: evidence.user }))
       h.check(`${spec.id} keeps the User bubble within the narrow Main width (no horizontal overflow)`,
         narrowUser !== undefined && containedX(snap.chains, narrowUser),
         JSON.stringify({ userRect: narrowUser === undefined ? undefined : rect(narrowUser), main: safeRect(main) }))
