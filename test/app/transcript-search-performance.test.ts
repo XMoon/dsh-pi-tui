@@ -326,3 +326,166 @@ test('perf: the search profiler is a no-op unless enabled and emits the plan sta
   enabled.end()
   assert.deepEqual(lines, [], 'stages/end outside a window are dropped')
 })
+
+// ── F2: the Assistant Markdown proof stays out of frames and history cards ───
+
+function assistantMessage(turn: number, text: string): Extract<TranscriptMessage, { kind: 'assistant' }> {
+  return { kind: 'assistant', turn, text }
+}
+
+interface AssistantProofSelection {
+  readonly exact: boolean
+  readonly selectedIndex: number
+  readonly selectedRow?: number
+  readonly exactPaintedSegments?: ReadonlyArray<{ readonly row: number; readonly startCol: number; readonly endCol: number }>
+}
+
+function assistantProofSelection(app: TuiApp, message: TranscriptMessage): AssistantProofSelection | undefined {
+  const mounted = (app as unknown as {
+    mountedTranscriptBlocks: ReadonlyArray<{ block: { message?: TranscriptMessage }; searchSelection?: AssistantProofSelection }>
+  }).mountedTranscriptBlocks
+  return mounted.find(entry => entry.block.message === message)?.searchSelection
+}
+
+test('perf: one Assistant Markdown proof per current presentation, never per history card or frame', async () => {
+  const { vt, app } = startApp()
+  const current = assistantMessage(0, 'needle one')
+  const history = Array.from({ length: 8 }, (_, index) => assistantMessage(index + 1, `needle history ${index}`))
+  app.setFullscreen(true)
+  app.setTranscript([current, ...history])
+  await vt.waitForRender()
+
+  app.resetSearchPresentationDiagnosticsForTest()
+  app.setTranscriptSearchTarget(target(current, 'needle', 0, { start: 0, end: 6 }))
+  let diagnostics = app.searchPresentationDiagnosticsForTest()
+  assert.equal(diagnostics.markdownProofs, 1,
+    'exactly ONE F1 proof for the current target — never one per history card')
+  assert.ok(diagnostics.markdownProofs <= diagnostics.rebuilds + diagnostics.remeasures,
+    'every presentation pass proves the current card at most once')
+  const selection = assistantProofSelection(app, current)
+  assert.equal(selection?.exact, true)
+  assert.equal(selection?.selectedIndex, -1)
+  assert.deepEqual(selection?.exactPaintedSegments, [{ row: 0, startCol: 4, endCol: 10 }],
+    'the emoji bullet indent is part of the card-relative cell geometry')
+
+  for (let frame = 0; frame < 2; frame += 1) {
+    await vt.waitForRender()
+    app.resetSearchPresentationDiagnosticsForTest()
+    await vt.waitForRender()
+    assert.equal(app.searchPresentationDiagnosticsForTest().markdownProofs, 0,
+      'settled repaints never re-run the proof')
+  }
+  app.resetSearchPresentationDiagnosticsForTest()
+  app.scrollToSearchTarget()
+  await vt.waitForRender()
+  assert.equal(app.searchPresentationDiagnosticsForTest().markdownProofs, 0,
+    'a scroll-only frame never re-runs the proof')
+
+  app.resetSearchPresentationDiagnosticsForTest()
+  app.setTranscriptSearchTarget(target(history[0]!, 'needle', 0, { start: 0, end: 6 }))
+  assert.equal(app.searchPresentationDiagnosticsForTest().markdownProofs, 1,
+    'switching the current target proves only the new current card once')
+  assert.equal(assistantProofSelection(app, history[0]!)?.exact, true)
+  const exactCards = (app as unknown as {
+    mountedTranscriptBlocks: ReadonlyArray<{ searchSelection?: { exact: boolean } }>
+  }).mountedTranscriptBlocks.filter(entry => entry.searchSelection?.exact === true)
+  assert.equal(exactCards.length, 1, 'only the current card carries a proven source-cell selection')
+  app.stop()
+})
+
+test('perf: an unchanged Assistant presentation and a stale range never re-prove', async () => {
+  const { vt, app } = startApp()
+  const message = assistantMessage(0, 'needle one')
+  app.setFullscreen(true)
+  app.setTranscript([message])
+  await vt.waitForRender()
+  const representatives = new Set([message])
+  app.setTranscriptSearchPresentation({
+    matchMessages: representatives,
+    target: target(message, 'needle', 0, { start: 0, end: 6 }),
+    grantReveal: true,
+  })
+  await vt.waitForRender()
+  assert.equal(assistantProofSelection(app, message)?.exact, true, 'precondition: the current cell is proven')
+
+  app.resetSearchPresentationDiagnosticsForTest()
+  app.setTranscriptSearchPresentation({
+    matchMessages: representatives,
+    target: target(message, 'needle', 0, { start: 0, end: 6 }),
+    grantReveal: false,
+  })
+  let diagnostics = app.searchPresentationDiagnosticsForTest()
+  assert.equal(diagnostics.rebuilds, 0, 'an unchanged semantic presentation commit is a no-op')
+  assert.equal(diagnostics.markdownProofs, 0, 'a no-op commit never re-runs the proof')
+
+  // A changed source keeps the OLD target: the projection is rejected BEFORE
+  // the F1 call, so no stale proven segment can survive.
+  message.text = 'omega after'
+  app.setTranscript([message])
+  diagnostics = app.searchPresentationDiagnosticsForTest()
+  assert.equal(diagnostics.markdownProofs, 0, 'a stale normalized range never reaches the F1 proof')
+  assert.equal(assistantProofSelection(app, message)?.exact, false)
+  assert.equal(assistantProofSelection(app, message)?.exactPaintedSegments, undefined)
+
+  // The same stable identity with a moved source re-locates the painted cell.
+  message.text = 'prefix needle after'
+  app.setTranscript([message])
+  await vt.waitForRender()
+  app.resetSearchPresentationDiagnosticsForTest()
+  app.setTranscriptSearchTarget(target(message, 'needle', 0, { start: 7, end: 13 }))
+  assert.equal(app.searchPresentationDiagnosticsForTest().markdownProofs, 1)
+  const moved = assistantProofSelection(app, message)
+  assert.equal(moved?.exact, true, 'the moved source occurrence is re-proven')
+  assert.deepEqual(moved?.exactPaintedSegments, [{ row: 0, startCol: 11, endCol: 17 }],
+    'the proven cell moves with the inserted prefix instead of reusing the old column')
+  app.stop()
+})
+
+test('perf: a geometric remeasure re-proves the current Assistant rows at the new width', async () => {
+  const { vt, app } = startApp(100, 30)
+  const message = assistantMessage(0, `${'prefix '.repeat(12)}needle tail`)
+  app.setFullscreen(true)
+  app.setTranscript([message])
+  await vt.waitForRender()
+  app.setTranscriptSearchTarget(target(message, 'needle', 0, { start: 84, end: 90 }))
+  await vt.waitForRender()
+  const before = assistantProofSelection(app, message)
+  assert.equal(before?.exact, true, 'precondition: the wide geometry is proven')
+
+  app.resetSearchPresentationDiagnosticsForTest()
+  vt.resize(40, 30)
+  await vt.waitForRender()
+  app.scrollToSearchTarget()
+  await vt.waitForRender()
+  const diagnostics = app.searchPresentationDiagnosticsForTest()
+  assert.ok(diagnostics.remeasures >= 1, 'the resize remeasures the mounted rows')
+  assert.ok(diagnostics.markdownProofs >= 1, 'the remeasure re-proves instead of reusing the old width')
+  const after = assistantProofSelection(app, message)
+  assert.equal(after?.exact, true, 'the narrowed geometry is proven against the CURRENT rows')
+  assert.notDeepEqual(after?.exactPaintedSegments, before?.exactPaintedSegments,
+    'the old proven columns are not reused across the width change')
+  app.stop()
+})
+
+test('perf: a theme change re-proves the Assistant cell instead of reusing the old proof', async () => {
+  const { vt, app } = startApp()
+  const message = assistantMessage(0, 'needle one')
+  app.setFullscreen(true)
+  app.setTranscript([message])
+  await vt.waitForRender()
+  app.setTranscriptSearchTarget(target(message, 'needle', 0, { start: 0, end: 6 }))
+  await vt.waitForRender()
+  const before = assistantProofSelection(app, message)?.exactPaintedSegments
+  assert.deepEqual(before, [{ row: 0, startCol: 4, endCol: 10 }])
+
+  app.resetSearchPresentationDiagnosticsForTest()
+  app.applyTheme('light')
+  await vt.waitForRender()
+  assert.ok(app.searchPresentationDiagnosticsForTest().markdownProofs >= 1,
+    'the rebuilt theme component is proven again')
+  const after = assistantProofSelection(app, message)
+  assert.equal(after?.exact, true, 'the theme rebuild still proves the same source cell')
+  assert.deepEqual(after?.exactPaintedSegments, before, 'the same source range keeps the same painted columns')
+  app.applyTheme('dark')
+  app.stop()
+})

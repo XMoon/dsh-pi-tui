@@ -123,8 +123,9 @@ export interface RenderedSearchSelection {
   readonly selectedRow: number | undefined
   readonly exact: boolean
   /** Current source-proven cells independent of any rendered regex ordinal.
-   * Present only for a freshly verified plain-text proof; it expires with the
-   * selection and is never persisted or used as match identity. */
+   * Present only for a freshly verified source-cell proof (Host plain text or a
+   * Host Assistant Markdown card); it expires with the selection and is never
+   * persisted or used as match identity. */
   readonly exactPaintedSegments?: readonly AltScreenSearchSegment[]
   /** Best-effort viewport geometry; never semantic occurrence proof. */
   readonly scrollRange?: RenderedSearchScrollRange
@@ -332,8 +333,9 @@ export function selectRenderedSearchScrollRange(
 ): RenderedSearchScrollRange | undefined {
   if (selector.weakOnly === true) return undefined
 
-  // The plain-text source proof owns REAL painted cells, so its first/last row
-  // is the exact destination regardless of the rendered matcher's ordinal.
+  // A source-cell proof (plain text or Markdown) owns REAL painted cells, so
+  // its first/last row is the exact destination regardless of the rendered
+  // matcher's ordinal.
   const painted = selection.exactPaintedSegments
   if (painted !== undefined && painted.length > 0) {
     return {
