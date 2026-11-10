@@ -60,6 +60,7 @@ const result = {
   sessionId: null,
   attached: false,
   answerSeen: false,
+  accountSignedOut: false,
   consoleErrors: [],
   failedResponses: [],
   requestPaths: [],
@@ -187,6 +188,60 @@ async function controlCentre(match) {
   }, match)
 }
 
+/** Click one visible element by exact text/aria (menu items are not all
+ *  <button> elements). The smallest matching box wins. */
+async function clickVisibleText(text) {
+  const point = await page.evaluate(value => {
+    const matches = []
+    for (const node of document.querySelectorAll('button,[role=menuitem],[role=tab],a,span')) {
+      const aria = (node.getAttribute('aria-label') ?? '').trim()
+      const content = (node.textContent ?? '').replace(/\s+/gu, ' ').trim()
+      if (aria !== value && content !== value) continue
+      const style = getComputedStyle(node)
+      const rect = node.getBoundingClientRect()
+      if (style.visibility === 'hidden' || style.display === 'none' || rect.width <= 0 || rect.height < 12) continue
+      matches.push({ area: rect.width * rect.height, x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 })
+    }
+    matches.sort((left, right) => left.area - right.area)
+    return matches[0] ?? null
+  }, text)
+  if (point === null) throw new Error(`the Web UI has no visible "${text}" control`)
+  await clickCentre(point)
+}
+
+/** Bounded wait for one visible exact text/aria element. */
+async function waitVisibleText(text, timeoutMs) {
+  const started = Date.now()
+  while (Date.now() - started < timeoutMs) {
+    const present = await page.evaluate(value => [...document.querySelectorAll('button,[role=menuitem],[role=tab],a,span')]
+      .some(node => {
+        const aria = (node.getAttribute('aria-label') ?? '').trim()
+        const content = (node.textContent ?? '').replace(/\s+/gu, ' ').trim()
+        const style = getComputedStyle(node)
+        const rect = node.getBoundingClientRect()
+        return (aria === value || content === value) && style.visibility !== 'hidden'
+          && style.display !== 'none' && rect.width > 0 && rect.height >= 12
+      }), text)
+    if (present) return
+    await page.waitForTimeout(250)
+  }
+  throw new Error(`browser timed out waiting for the visible "${text}" control`)
+}
+
+/** Read the official Web Account menu and assert the shared Host is signed out. */
+async function assertWebAccountSignedOut() {
+  const menu = await controlCentre({ aria: 'Account menu' }) ?? await controlCentre({ text: 'More' })
+  if (menu === null) throw new Error('the Web shell has no Account menu control')
+  await clickCentre(menu)
+  await waitVisibleText('Sign in', 30_000)
+  if (await controlCentre({ text: 'Sign out' }) !== null) {
+    throw new Error('the Web Account menu painted Sign out while the shared Host is signed out')
+  }
+  result.accountSignedOut = true
+  await page.keyboard.press('Escape')
+  await waitComposer(30_000)
+}
+
 /** Bounded wait for one control of the shell. */
 async function waitControl(match, timeoutMs) {
   const started = Date.now()
@@ -264,6 +319,7 @@ try {
   result.indexStatus = response?.status() ?? null
   await waitControl({ aria: 'New session' }, 120_000)
   await waitComposer(120_000)
+  if (process.env.PR_A_ACCOUNT_UI_CHECK === '1') await assertWebAccountSignedOut()
   // The official first-run preview notice covers the shell until its
   // acknowledgement is persisted. The isolated qualification writes that
   // acknowledgement as the row config, so a notice here means the fixture is
@@ -315,6 +371,7 @@ if (result.error !== undefined) {
     sessionId: result.sessionId,
     indexStatus: result.indexStatus,
     answerSeen: result.answerSeen,
+    accountSignedOut: result.accountSignedOut,
     screenshot: result.screenshot,
     consoleErrors: result.consoleErrors.length,
   }))
