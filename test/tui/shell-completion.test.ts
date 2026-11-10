@@ -373,6 +373,98 @@ test('MentionProvider applies a shell item as a plain word replacement', async (
   assert.deepEqual(midVar, { lines: ['!echo $HOME '], cursorLine: 0, cursorCol: 12 })
 })
 
+/** A port whose candidate sets are fixed per request kind (no real shell). */
+function fixedShellPort(candidates: {
+  readonly commands?: readonly string[]
+  readonly subcommands?: readonly string[]
+}): HostShellCompletionPort {
+  return {
+    pathAuthority: 'client',
+    async complete({ request }) {
+      if (request.kind === 'commands') return { kind: 'ok', candidates: candidates.commands ?? [] }
+      if (request.kind === 'subcommands') return { kind: 'ok', candidates: candidates.subcommands ?? [] }
+      return { kind: 'ok', candidates: [] }
+    },
+  }
+}
+
+test('command and subcommand acceptance replaces the whole RAW word, not the decoded prefix length', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-shell-word-range-')
+  const port = fixedShellPort({ commands: ['zoom', 'zo space'], subcommands: ['checkout'] })
+  const provider = new MentionProvider([], root, null, undefined, undefined, undefined, undefined, [], port)
+  // Suggest first, then apply exactly what the dropdown offered: the query
+  // prefix for these kinds is the DECODED word, so the applied range must come
+  // from the raw line instead.
+  const accept = async (line: string, col: number, label: string) => {
+    const suggestions = await provider.getSuggestions([line], 0, col, { signal: abort, force: true })
+    assert.ok(suggestions !== null, `${JSON.stringify(line)} must produce shell suggestions`)
+    const item = suggestions.items.find(candidate => candidate.label === label)
+    assert.ok(item !== undefined, `${label} missing for ${JSON.stringify(line)}: ${JSON.stringify(suggestions.items)}`)
+    return provider.applyCompletion([line], 0, col, item, suggestions.prefix)
+  }
+  const cases = [
+    { line: '!zo', col: 3, label: 'zoom', lines: ['!zoom '], cursorCol: 6 },
+    // The `!!` (shell-local) wire prefix is the scanner boundary too: it is
+    // never part of the replaced word.
+    { line: '!!zo', col: 4, label: 'zoom', lines: ['!!zoom '], cursorCol: 7 },
+    // A backslash-escaped word: the decoded query is `zo s`, while the raw
+    // range is `zo\ s` — applying by decoded length would replace the wrong
+    // bytes.
+    { line: '!zo\\ s', col: 6, label: 'zo space', lines: ['!zo\\ space '], cursorCol: 11 },
+    // A cursor MID-WORD: the already-typed raw suffix belongs to the range.
+    { line: '!zoombox', col: 4, label: 'zoom', lines: ['!zoom '], cursorCol: 6 },
+    { line: '!git check', col: 8, label: 'checkout', lines: ['!git checkout '], cursorCol: 14 },
+    { line: '!echo a && zo', col: 14, label: 'zoom', lines: ['!echo a && zoom '], cursorCol: 16 },
+    // A half-typed quote is replaced, never left unbalanced; a closing quote
+    // after the cursor is part of the replaced range too.
+    { line: '!"zo', col: 3, label: 'zoom', lines: ['!zoom '], cursorCol: 6 },
+    { line: '!"zo"', col: 3, label: 'zoom', lines: ['!zoom '], cursorCol: 6 },
+    // Following text is kept byte-for-byte; the inserted separator space lands
+    // before the preserved one, so a single existing space becomes two.
+    { line: '!zo arg', col: 3, label: 'zoom', lines: ['!zoom  arg'], cursorCol: 6 },
+  ]
+  for (const item of cases) {
+    await t.test(`${item.line}| @${item.col} -> ${item.lines[0]}`, async () => {
+      assert.deepEqual(await accept(item.line, item.col, item.label), {
+        lines: item.lines,
+        cursorLine: 0,
+        cursorCol: item.cursorCol,
+      })
+    })
+  }
+})
+
+test('the accepted escaped command word executes as the intended command under real bash', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-shell-word-exec-')
+  const bin = life.tempDir('dsh-shell-word-bin-')
+  const run = life.tempDir('dsh-shell-word-run-')
+  const name = 'zo space'
+  writeFileSync(join(bin, name), "#!/bin/sh\nprintf '%s' 'f1-word-range-executed'\n")
+  chmodSync(join(bin, name), 0o755)
+  const provider = new MentionProvider(
+    [], root, null, undefined, undefined, undefined, undefined, [], fixedShellPort({ commands: [name] }),
+  )
+  const line = '!zo\\ s'
+  const suggestions = await provider.getSuggestions([line], 0, line.length, { signal: abort, force: true })
+  assert.ok(suggestions !== null)
+  const item = suggestions.items.find(candidate => candidate.label === name)
+  assert.ok(item !== undefined, `zo space missing from ${JSON.stringify(suggestions.items)}`)
+  const applied = provider.applyCompletion([line], 0, line.length, item, suggestions.prefix)
+  assert.deepEqual(applied.lines, ['!zo\\ space '],
+    'the accepted word is ONE Bash-safe literal, so the half-typed raw word is replaced whole')
+  // The edited line, minus the `!` wire prefix, is the exact shell source the
+  // acceptance produces: it must run the intended command, nothing else.
+  const executed = spawnSync('bash', ['-c', applied.lines[0]!.slice(1)], {
+    cwd: run,
+    encoding: 'utf8',
+    env: { ...process.env, PATH: `${bin}${delimiter}${process.env.PATH ?? ''}` },
+  })
+  assert.equal(executed.status, 0, executed.stderr)
+  assert.equal(executed.stdout, 'f1-word-range-executed')
+})
+
 // --- shell-editor-mode virtual prefix (the editor buffer no longer holds
 // the `!` / `!!` prefix; the provider synthesizes it at the boundary) ---
 

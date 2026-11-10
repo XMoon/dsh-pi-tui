@@ -22,7 +22,7 @@ import {
   type AutocompleteSuggestions,
   type SlashCommand,
 } from '@xmoon76/pi-tui'
-import { shellCompletionContext, shellWordSuffix, suggestShellCompletion } from './shell.ts'
+import { shellCompletionContext, shellWordRange, shellWordSuffix, suggestShellCompletion } from './shell.ts'
 import type { HostShellCompletionPort } from '../../../runtime/host-shell-completion-port.ts'
 import { shellPrefixForMode, type EditorInputMode } from '../editor-input-mode.ts'
 import { applyInlineSkillReference, extractInlineSkillPrefix } from './skill-reference.ts'
@@ -739,11 +739,45 @@ export class MentionProvider implements AutocompleteProvider {
       && !this.requestMatchesSnapshot(lines, cursorLine, cursorCol)) {
       return { lines, cursorLine, cursorCol }
     }
+    // The shell context is derived BEFORE the prefix fence: a command/subcommand
+    // query prefix is the DECODED word (`zo\ s` → `zo s`), so its length says
+    // nothing about the RAW range the accepted Bash-safe word must replace.
+    // Those two kinds apply as WHOLE-WORD replacements below; every other kind
+    // keeps the prefix fence.
+    const shellContext = shellCompletionContext(shellLine.line, shellLine.cursorCol)
+    const wholeWordShell = shellContext?.kind === 'command' || shellContext?.kind === 'subcommand'
     const start = cursorCol - bodyPrefix.length
-    if (start < 0 || currentLine.slice(start, cursorCol) !== bodyPrefix) {
+    if (!wholeWordShell && (start < 0 || currentLine.slice(start, cursorCol) !== bodyPrefix)) {
       return { lines, cursorLine, cursorCol }
     }
-    const shellContext = shellCompletionContext(shellLine.line, shellLine.cursorCol)
+    if (wholeWordShell) {
+      // A shell-MODE continuation line is not the serialized line the scanner
+      // read (the synthetic `!`/`!!` prefix is synthesized on line 0 only), so
+      // this single-line range cannot be trusted there: leave the document
+      // untouched instead of guessing a boundary.
+      if (wire === null && this.inputModeSource() !== 'prompt') {
+        return { lines, cursorLine, cursorCol }
+      }
+      // The scanner starts after the shell wire prefix: the SYNTHETIC one in a
+      // shell mode, or the literal `!`/`!!` a prompt-mode line carries (the same
+      // boundary `shellCompletionContext` uses). The range then maps back into
+      // currentLine coordinates by the serialized-line offset (0 when wire is
+      // null); everything after the word — other arguments, operators and
+      // trailing text — stays untouched.
+      const scanPrefixLength = wire === null
+        ? (currentLine.startsWith('!!') ? 2 : 1)
+        : wire.prefixLength
+      const range = shellWordRange(shellLine.line, scanPrefixLength, shellLine.cursorCol)
+      const rawStart = range.start - shellLine.prefixLength
+      const rawEnd = range.end - shellLine.prefixLength
+      const newLines = [...lines]
+      newLines[cursorLine] = `${currentLine.slice(0, rawStart)}${item.value} ${currentLine.slice(rawEnd)}`
+      return {
+        lines: newLines,
+        cursorLine,
+        cursorCol: rawStart + item.value.length + 1,
+      }
+    }
     if (shellContext?.kind === 'paths' && this.hostShellCompletion?.pathAuthority === 'host') {
       // Bash-style whole-word replacement: the cursor can sit mid-token, so
       // the already-typed suffix of THIS word is part of the accepted range.
@@ -794,20 +828,6 @@ export class MentionProvider implements AutocompleteProvider {
         lines: newLines,
         cursorLine,
         cursorCol: start + item.value.length + append.length,
-      }
-    }
-    // Shell words use one current-word replacement; path positions above stay
-    // on the fork's directory/quote apply behavior.
-    if (shellContext !== undefined) {
-      const before = currentLine.slice(0, cursorCol - bodyPrefix.length)
-      const after = currentLine.slice(cursorCol)
-      const newLine = `${before}${item.value} ${after}`
-      const newLines = [...lines]
-      newLines[cursorLine] = newLine
-      return {
-        lines: newLines,
-        cursorLine,
-        cursorCol: before.length + item.value.length + 1,
       }
     }
     // SYMMETRIC SHELL-SEMANTIC adapter (shell mode): the classification ran
