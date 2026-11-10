@@ -140,6 +140,7 @@ async function runQueuedSubmitAcrossOwnerChange(options: {
       withWriter: async (_scope: unknown, task: () => Promise<unknown>) => task(),
       submitPrompt: async () => {},
       deferQueueRecall: () => {},
+      settleQueueRecalls: () => {},
     },
     command: deepInert,
     commandPlane: { available: () => false, execute: async () => undefined },
@@ -397,6 +398,7 @@ async function runClientCommandErrorAcrossOwnerChange(options: {
       withWriter: async (_scope: unknown, task: () => Promise<unknown>) => task(),
       submitPrompt: async () => {},
       deferQueueRecall: () => {},
+      settleQueueRecalls: () => {},
     },
     command: {
       wasAdvertisedClaim: () => false,

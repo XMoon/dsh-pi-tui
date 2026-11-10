@@ -174,6 +174,9 @@ export interface SubmissionControllerDeps<ExactAgent extends SubmissionAgentLike
     withWriter<T>(scope: LiveSessionScope, task: () => Promise<T> | T): Promise<T>
     submitPrompt(submission: PromptSubmission): Promise<void>
     deferQueueRecall(recall: PendingQueueRecall): void
+    /** Settle every parked queue recall (commit keeps the removal, abort
+     *  restores the draft). */
+    settleQueueRecalls(committed: boolean): void
     /** M4 PR4: the runtime's OWN accepted-write lifetime read (a write that
      *  bypasses this controller's FIFO still counts). */
     hasUnsettledClientWrite(): boolean
@@ -1319,12 +1322,12 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
                   }))
                 })()
               } catch (error) {
-                endNavigationIntent?.()
+                settleNavigationIntent(endNavigationIntent)
                 throw error
               }
               return endNavigationIntent === undefined
                 ? settlement
-                : settlement.finally(endNavigationIntent)
+                : settlement.finally(() => settleNavigationIntent(endNavigationIntent))
             }),
           beginCommandSettlement: () => deps.session.beginCommandSettlement(),
           abortCommandSettlement: () => deps.session.abortCommandSettlement(),
@@ -1415,6 +1418,22 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
    * dispatch, which reports unknown commands as messages.
    */
   
+  /**
+   * End one navigation-intent section: a queue pull-back that settled while
+   * the intent was pending deferred its draft restore to the transition. A
+   * navigation whose PRE-GATE preflight refuses never enters
+   * `withSessionTransition`, so its own settlement never runs; abort the
+   * parked recalls HERE (the transition's commit/finally already emptied the
+   * list on every gated path) or the recalled text and refs would stay
+   * trapped while the queued occurrence is already gone. The recall restore
+   * runs BEFORE the intent release so a submission waiting on the settled
+   * surface observes the restored draft, never a half-settled one.
+   */
+  const settleNavigationIntent = (release: (() => void) | undefined): void => {
+    deps.submissionRuntime.settleQueueRecalls(false)
+    release?.()
+  }
+
   const runLocalCommand = (
     parsed: { name: string; rawInput: string },
     text: string,
@@ -1498,7 +1517,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       diag: deps.diag,
       sessionId: () => deps.liveAgent()?.session.id,
       onResult: (result) => {
-        endNavigationIntent?.()
+        settleNavigationIntent(endNavigationIntent)
         endLocalWrite?.()
         if (deps.isCleanedUp()) return
         if (result !== undefined && result.kind === 'error') {
@@ -1514,7 +1533,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
         }
       },
       onError: (error) => {
-        endNavigationIntent?.()
+        settleNavigationIntent(endNavigationIntent)
         endLocalWrite?.()
         if (deps.isCleanedUp()) return
         if (bridgeCommandRef !== undefined) deps.extensions.recordError(bridgeCommandRef, error)
@@ -1527,7 +1546,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
         deps.app().notify(message, 'error')
       },
       onCancel: () => {
-        endNavigationIntent?.()
+        settleNavigationIntent(endNavigationIntent)
         endLocalWrite?.()
       },
     })
