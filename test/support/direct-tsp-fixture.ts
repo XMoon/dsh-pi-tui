@@ -487,6 +487,8 @@ export interface DirectTspFixtureOptions {
    * `/logout` truthfully instead of reporting success).
    */
   readonly withoutCredentials?: boolean
+  /** Mount the official PTC tool executor with the supplied qualification runtime. */
+  readonly ptcMode?: { readonly runtime: unknown }
   /**
    * Mount the official `@deepseek-ai/dsh-working-directory` Session directory
    * owner (the same row the shipped base layer provides) through the testkit's
@@ -591,8 +593,12 @@ export async function createDirectTspFixture(
   ctx = new Context()
   ownCleanup(() => ctx.fiber.dispose())
 
+  if (options.ptcMode !== undefined) ctx.provide('ptcRuntime', options.ptcMode.runtime as never)
   await ctx.plugin(TypertRegistry)
-  await mountAgentLoopTestDependencies(ctx, options.workingDirectory === true ? { workingDirectory: true } : {})
+  await mountAgentLoopTestDependencies(ctx, {
+    ...(options.workingDirectory === true || options.ptcMode !== undefined ? { workingDirectory: true } : {}),
+    ...(options.ptcMode !== undefined ? { tools: { mode: 'ptc' as const } } : {}),
+  })
   persistenceFiber = await ctx.plugin(JsonlSessionPersistence, { root: join(workRoot, 'persistence') })
   await mountAgentLoopTestHarness(ctx)
   llmAdapter = options.scriptedToolCalls !== undefined

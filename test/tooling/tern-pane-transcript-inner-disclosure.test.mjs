@@ -6,6 +6,7 @@ import {
   isTargetToggle,
   presetFromEnvironment,
   qualificationFromResults,
+  scenarioFromEnvironment,
 } from '../../scripts/tern-pane-transcript-inner-disclosure.mjs'
 
 test('inner disclosure Flow defaults to Full and accepts only the three canonical presets', () => {
@@ -14,6 +15,13 @@ test('inner disclosure Flow defaults to Full and accepts only the three canonica
   for (const preset of ['', 'FOCUS', 'inner-disclosure', 't1c']) {
     assert.throws(() => presetFromEnvironment(preset), /must be full, compact or focus/u)
   }
+})
+
+test('inner disclosure Flow defaults to its existing scenario and allows only the PTC note evidence branch', () => {
+  assert.equal(scenarioFromEnvironment(undefined), 'inner-disclosure')
+  assert.equal(scenarioFromEnvironment('inner-disclosure'), 'inner-disclosure')
+  assert.equal(scenarioFromEnvironment('ptc-error-note'), 'ptc-error-note')
+  assert.throws(() => scenarioFromEnvironment('ptc'), /must be inner-disclosure or ptc-error-note/u)
 })
 
 test('inner disclosure Flow requires the exact plan-pinned Tern version and binary hash', () => {

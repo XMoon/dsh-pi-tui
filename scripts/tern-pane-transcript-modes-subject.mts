@@ -46,7 +46,7 @@ const scenario = modeConfig.scenario ?? 'modes'
 if (mode !== 'full' && mode !== 'compact' && mode !== 'focus') {
   throw new Error('the flow must select exactly full, compact or focus')
 }
-if (scenario !== 'modes' && scenario !== 'inner-disclosure') {
+if (scenario !== 'modes' && scenario !== 'inner-disclosure' && scenario !== 'ptc-error-note') {
   throw new Error(`unknown transcript Tern scenario ${scenario}`)
 }
 const workRoot = join(paneRoot, 'dsh-home')
@@ -90,17 +90,51 @@ const note = (event: Record<string, unknown>): void => {
   appendFileSync(eventsPath, `${JSON.stringify(event)}\n`)
 }
 
-// ── Fixed, isolated, deterministic test input (the ONLY prompt definition) ──
-const PROMPT = scenario === 'inner-disclosure'
-  ? `INNER-${mode.toUpperCase()} Inspect the live reasoning, tool details and context disclosures.`
-  : 'MODES-01 Please list the background jobs and then answer with one short plain note '
-    + 'about the canonical transcript reading flow, mixing English with 中文混排 so the real client wraps it.'
+const ptcFailureSessionId = 'inner-ptc-note-session'
+const ptcFailureOutput = `PTC_BUILD_OUTPUT_${'x'.repeat(260)}`
+const ptcFailureCommand = 'false'
+const ptcFailureProgram = `await tools.bash(${JSON.stringify({
+  command: ptcFailureCommand,
+  description: 'Check PTC exit status',
+})})`
+const ptcFailureStep = {
+  text: 'The shell command failed and its result should remain visible.',
+  toolCall: {
+    callId: 'call-inner-ptc-failure',
+    name: 'run_code',
+    arguments: JSON.stringify({ code: ptcFailureProgram, description: 'Qualify a long PTC shell error note' }),
+  },
+}
+const ptcFailureRuntime = {
+  language: 'typescript',
+  isolation: 'controlled-shell-binding',
+  resolve: (request: Record<string, unknown>) => ({
+    ...request, cwd: typeof request.cwd === 'string' ? request.cwd : process.cwd(),
+    timeoutMs: typeof request.timeoutMs === 'number' ? request.timeoutMs : 10_000,
+  }),
+  run: async (spec: { readonly program: string; readonly bindings: readonly { global: string; functions: Record<string, (args: unknown) => Promise<unknown>> }[] }) => {
+    if (!spec.program.includes('tools.bash')) throw new Error('the scripted PTC program does not call the official bash binding')
+    const tools = spec.bindings.find(binding => binding.global === 'tools')
+    const callBash = tools?.functions['bash']
+    if (callBash === undefined) throw new Error('the official PTC bindings omit tools.bash')
+    return { logs: [], value: await callBash({ command: ptcFailureCommand, description: 'Check long PTC error output' }) as never }
+  },
+}
+
+const PROMPT = scenario === 'ptc-error-note'
+  ? `PTC-NOTE-${mode.toUpperCase()} Generate the real PTC shell error note scenario.`
+  : scenario === 'inner-disclosure'
+    ? `INNER-${mode.toUpperCase()} Inspect the live reasoning, tool details and context disclosures.`
+    : 'MODES-01 Please list the background jobs and then answer with one short plain note '
+      + 'about the canonical transcript reading flow, mixing English with 中文混排 so the real client wraps it.'
 writeFileSync(promptsPath, `${JSON.stringify({
   mode,
   scenario,
-  assistantMarker: scenario === 'inner-disclosure' ? `INNER-${mode.toUpperCase()}-ANSWER` : 'MODES-DIRECT-ANSWER',
-  toolName: 'job_list',
-  prompts: [{ ordinal: 1, marker: scenario === 'inner-disclosure' ? `INNER-${mode.toUpperCase()}` : 'MODES-01', text: PROMPT }],
+  assistantMarker: scenario === 'ptc-error-note' ? `PTC-NOTE-${mode.toUpperCase()}-ANSWER`
+    : scenario === 'inner-disclosure' ? `INNER-${mode.toUpperCase()}-ANSWER` : 'MODES-DIRECT-ANSWER',
+  toolName: scenario === 'ptc-error-note' ? 'run_code' : 'job_list',
+  prompts: [{ ordinal: 1, marker: scenario === 'ptc-error-note' ? `PTC-NOTE-${mode.toUpperCase()}`
+    : scenario === 'inner-disclosure' ? `INNER-${mode.toUpperCase()}` : 'MODES-01', text: PROMPT }],
 }, null, 1)}\n`)
 
 // ── ONE-TO-ONE recorder around the production mount (append-only) ──
@@ -310,6 +344,38 @@ const handleOneBatch = async (): Promise<void> => {
       note({ kind: 'case.finished', ...payload })
       return
     }
+    if (kind === 'observe-ptc-failure') {
+      if (mainSessionId === undefined) throw new Error('no production Direct writer has selected the main Session')
+      const agent = fixture.ctx.agents.get(mainSessionId as never)
+      if (agent === undefined) throw new Error('the Direct Session agent is not available')
+      const sessionEvents = agent.session.snapshotEvents() as Array<{ type: string; data?: Record<string, unknown> }>
+      const rootCall = sessionEvents.find(event => event.type === 'tool/call' && event.data?.name === 'run_code')
+      const rootCallId = rootCall?.data?.callId
+      const childStart = sessionEvents.find(event => event.type === 'tool/ptc-dispatch-start'
+        && String(event.data?.rootCallId) === String(rootCallId) && event.data?.name === 'bash')
+      const childId = childStart?.data?.subCallId
+      const childSettle = sessionEvents.find(event => event.type === 'tool/ptc-dispatch'
+        && String(event.data?.subCallId) === String(childId))
+      const result = childSettle?.data?.content
+      const output = Array.isArray(result)
+        ? result.filter((block): block is { type: string; text: string } => typeof block === 'object'
+          && block !== null && (block as { type?: unknown }).type === 'text'
+          && typeof (block as { text?: unknown }).text === 'string')
+          .map(block => block.text).join('')
+        : ''
+      const parentResult = sessionEvents.find(event => event.type === 'tool/result'
+        && String((event.data?.message as { toolCallId?: unknown } | undefined)?.toolCallId) === String(rootCallId))
+      const facts = { rootCall: rootCall?.data ?? null, childStart: childStart?.data ?? null,
+        childSettle: childSettle?.data ?? null, output, parentResult: parentResult?.data ?? null }
+      const status = rootCall !== undefined && childStart !== undefined && childSettle !== undefined
+        && childSettle.data?.isError === false && output.endsWith('\n[exit code: 2]')
+        && parentResult !== undefined ? 'ok' : 'error'
+      const payload = { seq, command: kind, status, facts }
+      writeFileSync(`${caseResultPath}.tmp`, `${JSON.stringify(payload)}\n`)
+      renameSync(`${caseResultPath}.tmp`, caseResultPath)
+      note({ kind: 'case.finished', ...payload })
+      return
+    }
     if (kind === 'release-tool-arguments') {
       writeFileSync(releaseToolArgumentsPath, `${JSON.stringify({ release: true })}\n`)
       onReleaseToolArguments()
@@ -366,10 +432,16 @@ try {
   fixture = await createDirectTspFixture(life, {
     externalTern: true,
     workRoot,
+    ...(scenario === 'ptc-error-note' ? {
+      ptcMode: { runtime: ptcFailureRuntime },
+      startup: { sessionId: ptcFailureSessionId },
+      persistedBlankSession: { id: ptcFailureSessionId },
+    } : {}),
     // The ONE production mode authority: the real Runner volatile config that
     // `resolveDisplayPreset` reads. No renderer-local preset is set anywhere.
     tuiConfig: { displayPreset: mode },
-    deltas: scenario === 'inner-disclosure' ? [`INNER-${mode.toUpperCase()}-`, 'ANSWER'] : ['MODES-', 'DIRECT-', 'ANSWER'],
+    deltas: scenario === 'ptc-error-note' ? ['PTC-NOTE-ANSWER']
+      : scenario === 'inner-disclosure' ? [`INNER-${mode.toUpperCase()}-`, 'ANSWER'] : ['MODES-', 'DIRECT-', 'ANSWER'],
     ...(scenario === 'inner-disclosure' ? {
       scriptedToolCalls: [{ text: 'the production Agent is checking the jobs', toolCall: { callId: 'call-inner-jobs', name: 'job_list', arguments: '{}' } }],
       scriptedReasoningDeltas: ['checking the first row\n', 'latest reasoning line'],
@@ -381,6 +453,8 @@ try {
         }
       },
       holdScriptedToolCallArguments: async (step: number) => { if (step === 0) await heldToolArguments },
+    } : scenario === 'ptc-error-note' ? {
+      scriptedToolCalls: [ptcFailureStep],
     } : {
       // ONE real registered Host tool, executed by the production Agent loop.
       scriptedToolCall: { callId: 'call-modes-jobs', name: 'job_list', arguments: '{}' },
@@ -391,6 +465,29 @@ try {
       setImmediate(resolveExit)
     },
   }) as Fixture
+  if (scenario === 'ptc-error-note') {
+    fixture.ctx.provide('shell', {
+      sandboxMode: undefined,
+      resolve: (request: Record<string, unknown>) => ({
+        ...request,
+        workdir: request.workdir ?? workRoot,
+        timeoutMs: request.timeoutMs ?? 10_000,
+      }),
+      execute: async (spec: { readonly timeoutMs: number }) => ({
+        result: async () => ({
+          exitCode: 2, signal: null, timedOut: false, aborted: false, timeoutMs: spec.timeoutMs,
+          stdout: { text: ptcFailureOutput, truncated: false },
+          stderr: { text: '', truncated: false },
+        }),
+      }),
+    } as never)
+    const shellEnv = await import('@deepseek-ai/dsh-shell-env')
+    await fixture.ctx.plugin(shellEnv as never, { dshHome: workRoot } as never)
+    const bash = await import('@deepseek-ai/dsh-tool-bash')
+    await fixture.ctx.plugin(bash as never, { enableRunInBackground: false } as never)
+    note({ kind: 'ptc-fixture.ready', sessionId: ptcFailureSessionId, runtime: 'controlled-shell-binding', shellExitCode: 2,
+      stdoutLength: ptcFailureOutput.length })
+  }
   fixture.recordPrompts(call => {
     promptsSeen += 1
     mainSessionId = call.sessionId
@@ -408,6 +505,9 @@ try {
     productionComposition: 'createDirectTspFixture(externalTern=true, tuiConfig.displayPreset) -> resolveDisplayPreset -> productionTspConnector -> mountTspRenderer over the shipped SDK connect()',
     standIns: [
       'the official Direct fixture scripted streaming LLM adapter (the model endpoint only)',
+      ...(scenario === 'ptc-error-note' ? [
+        'the test-owned PTC runtime invokes the official tools.bash binding; the shell provider returns deterministic stdout and exit code 2 (no real process is spawned)',
+      ] : []),
       'the fixed prompt written to prompts.json (isolated deterministic test input)',
       'case.json reproject: TEST-ONLY re-commit of the SAME already-committed message objects',
       'GUI / PHYSICAL_OS / IME / wheel / OS clipboard: NOT_VERIFIED (tern ctl injects control input)',

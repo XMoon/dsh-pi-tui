@@ -28,7 +28,7 @@ import type { SettledQuestionAnswersLookup } from '../../app/surface/interaction
 import type { StreamingToolPreview } from '../../app/surface/streaming-tool-preparing.ts'
 import { contextFormOf } from '../../domain/transcript/context-semantics.ts'
 import { displayFailureText } from '../../domain/transcript/failure.ts'
-import { subCallDisplayStatus } from '../../domain/transcript/folder.ts'
+import { subCallDisplay, type SubCallTerminalFailure } from '../../domain/transcript/folder.ts'
 import { formatBytes } from '../../domain/media/format.ts'
 import type { ImageAttachmentRefLike } from '../../domain/media/types.ts'
 import type { RunPhase } from '../../domain/status/types.ts'
@@ -868,24 +868,51 @@ function shownToolResult(message: Extract<TranscriptMessage, { kind: 'tool' }>, 
  * the complete child output, wrapped; a child with no header summary shows its
  * raw args instead of a headless empty card.
  */
+const TOOL_ERROR_NOTE_LIMIT = 180
+const PTC_TERMINAL_NOTE_LIMIT = 96
+const TOOL_ERROR_MARKER_LIMIT = 48
+
+function boundedPhysicalPrefix(source: string, budget: number): string {
+  const rawPrefix = source.slice(0, budget)
+  const characters = Array.from(sanitizedPhysicalLine(rawPrefix).trim())
+  const truncated = source.length > rawPrefix.length || characters.length > budget
+  const visibleBudget = Math.max(0, budget - (truncated ? 1 : 0))
+  return `${characters.slice(0, visibleBudget).join('')}${truncated ? '…' : ''}`
+}
+
+function terminalFailureMarker(failure: SubCallTerminalFailure): string {
+  const raw = failure.kind === 'exit-code'
+    ? `[exit code: ${failure.exitCode}]`
+    : `[killed by signal: ${failure.signal}]`
+  const rawPrefix = raw.slice(0, TOOL_ERROR_MARKER_LIMIT)
+  const characters = Array.from(sanitizedPhysicalLine(rawPrefix))
+  const truncated = raw.length > rawPrefix.length || characters.length > TOOL_ERROR_MARKER_LIMIT
+  const visibleBudget = Math.max(0, TOOL_ERROR_MARKER_LIMIT - (truncated ? 1 : 0))
+  return `${characters.slice(0, visibleBudget).join('')}${truncated ? '…' : ''}`
+}
+
 function toolErrorNote(
   message: TranscriptToolMessage,
   options: TranscriptViewOptions,
   displayStatus: TranscriptToolMessage['status'],
+  terminalFailure?: SubCallTerminalFailure,
 ): string | undefined {
   if (displayStatus !== 'error') return undefined
-  const reason = shownToolResult(message, options).trim()
-  if (reason === '') return undefined
-  const line = sanitizedPhysicalLine(reason)
-  const characters = Array.from(line)
-  return characters.length <= 180 ? line : `${characters.slice(0, 179).join('')}…`
+  const reason = terminalFailure?.body ?? shownToolResult(message, options)
+  const marker = terminalFailure === undefined ? '' : terminalFailureMarker(terminalFailure)
+  const markerLength = Array.from(marker).length
+  const noteLimit = terminalFailure === undefined ? TOOL_ERROR_NOTE_LIMIT : PTC_TERMINAL_NOTE_LIMIT
+  const summaryBudget = Math.max(0, noteLimit - markerLength - (marker === '' ? 0 : 1))
+  const summary = boundedPhysicalPrefix(reason, summaryBudget)
+  const note = summary === '' ? marker : marker === '' ? summary : `${summary} ${marker}`
+  return note === '' ? undefined : note
 }
 
 function childToolNode(child: TranscriptToolMessage, options: TranscriptViewOptions, parentDisclosure: string): Node {
   const header = toolCardHeader(child.name, child.args, options.cwd)
   const childKey = `sub-${child.subCallId!}`
   const childDisclosure = `${parentDisclosure}/${childKey}`
-  const displayStatus = subCallDisplayStatus(child)
+  const display = subCallDisplay(child)
   const svgState = child.name === SVG_TOOL_NAME && child.status === 'ok'
     ? options.toolSvgStates?.get(child)
     : undefined
@@ -907,14 +934,14 @@ function childToolNode(child: TranscriptToolMessage, options: TranscriptViewOpti
     body.push(...toolChildNodes(child, options, childDisclosure))
     body.push(...toolResultNodes(child, options, true, child.result, false))
   }
-  const note = toolErrorNote(child, options, displayStatus)
+  const note = toolErrorNote(child, options, display.status, display.terminalFailure)
   return ui.tool(
     {
       key: childKey,
       frame: 'inline',
       name: sanitizedPhysicalLine(child.name),
       title: sanitizedPhysicalLine(header.title),
-      status: toolStatus(displayStatus),
+      status: toolStatus(display.status),
       ...(collapsible ? { collapsible: true, collapsed } : {}),
       ...(note === undefined ? {} : { note }),
       ...(header.summary === '' ? {} : {
