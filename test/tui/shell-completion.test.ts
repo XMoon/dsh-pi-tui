@@ -9,9 +9,10 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { writeFileSync, mkdirSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { writeFileSync, mkdirSync, chmodSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, delimiter } from 'node:path'
 import { MentionProvider } from '../../src/tui/interaction/autocomplete/provider.ts'
 import { shellCompletionContext, shellWordSuffix, suggestShellCompletion } from '../../src/tui/interaction/autocomplete/shell.ts'
 import type { HostShellCompletionPort, HostShellCompletionRequest } from '../../src/runtime/host-shell-completion-port.ts'
@@ -609,4 +610,65 @@ test('Remote shell commands and paths use only Host candidates and fail closed o
   const closed = new MentionProvider([], root, null, undefined, scope, null, root, [], unavailableHost)
   assert.equal(await closed.getSuggestions([pathLine], 0, pathLine.length, { signal: abort, force: true }), null,
     'Remote must not fall back to the Client filesystem when Host paths are unavailable')
+})
+
+test('command-name candidates are applied as ONE Bash-safe word, never as shell source', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-shell-command-escape-')
+  const bin = life.tempDir('dsh-shell-command-bin-')
+  const run = life.tempDir('dsh-shell-command-run-')
+  const cases = [
+    { raw: 'zo$(touch WITNESS_625)', escaped: 'zo\\$\\(touch\\ WITNESS_625\\)', marker: 'substitution-name' },
+    { raw: 'zo space', escaped: 'zo\\ space', marker: 'space-name' },
+    { raw: 'zo;semicolon', escaped: 'zo\\;semicolon', marker: 'semicolon-name' },
+  ]
+  for (const item of cases) {
+    const file = join(bin, item.raw)
+    writeFileSync(file, `#!/bin/sh\nprintf '%s' '${item.marker}'\n`)
+    chmodSync(file, 0o755)
+  }
+  const savedPath = process.env.PATH
+  const savedBashEnv = process.env.BASH_ENV
+  try {
+    process.env.PATH = `${bin}${delimiter}${savedPath ?? ''}`
+    // `bash -lc` re-runs the login profile, which may reset PATH; BASH_ENV
+    // re-asserts the fixture directory first for the compgen shell itself.
+    const pathScript = join(root, 'path.sh')
+    writeFileSync(pathScript, `PATH=${JSON.stringify(bin)}:"$PATH"\nexport PATH\n`)
+    process.env.BASH_ENV = pathScript
+    const suggestions = await suggestShellCompletion(
+      { kind: 'command', prefix: 'zo', priorWords: [] },
+      directShellPort(root),
+      undefined,
+      { signal: abort },
+    )
+    assert.ok(suggestions !== null, 'the fixture commands must be discovered through PATH')
+    const byLabel = new Map(suggestions.items.map(item => [item.label, item]))
+    const { source } = modeSource('shell-context')
+    const provider = new MentionProvider([], root, null, source)
+    for (const item of cases) {
+      const suggestion = byLabel.get(item.raw)
+      assert.ok(suggestion !== undefined,
+        `${JSON.stringify(item.raw)} missing from ${JSON.stringify([...byLabel.keys()].slice(0, 8))}`)
+      assert.equal(suggestion.label, item.raw, 'the label stays the raw displayed name')
+      assert.equal(suggestion.value, item.escaped)
+      assert.equal(suggestion.value.replace(/\\([\s\S])/gu, '$1'), item.raw,
+        'the accepted value differs from the raw name only by escaping')
+      assert.notEqual(suggestion.value, item.raw)
+      const applied = provider.applyCompletion(['zo'], 0, 2, suggestion, 'zo')
+      assert.deepEqual(applied.lines, [`${item.escaped} `], 'the accepted line is exactly one word plus the separator')
+      const executed = spawnSync('bash', ['-c', applied.lines[0]!], { cwd: run, encoding: 'utf8' })
+      assert.equal(executed.status, 0, `${item.raw} did not execute: ${executed.stderr}`)
+      assert.equal(executed.stdout, item.marker,
+        `${item.raw} must resolve to the command itself, not to a command prefix`)
+      assert.equal(existsSync(join(run, 'WITNESS_625')), false,
+        `${item.raw} must never run its own name as shell source`)
+    }
+  } finally {
+    if (savedPath === undefined) delete process.env.PATH
+    else process.env.PATH = savedPath
+    if (savedBashEnv === undefined) delete process.env.BASH_ENV
+    else process.env.BASH_ENV = savedBashEnv
+    resetCommandCacheForTest()
+  }
 })

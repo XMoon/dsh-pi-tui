@@ -491,12 +491,13 @@ test('runner-failure rules and denial signatures classify the collected STDERR o
   }
 })
 
-test('a truncated nonzero sandbox diagnostic is reason-unknown even when the retained tail matches runner-fatal or denial', async () => {
+test('a truncated nonzero sandbox diagnostic is reason-unknown unless the retained tail matches a runner-fatal rule', async () => {
   const cases: readonly {
     readonly label: string
     readonly confined: ConfinedArgv
     readonly exitCode: number
     readonly stderr: string
+    readonly expect: 'runner-failure' | 'reason-unknown'
   }[] = [
     {
       label: 'runner fatal in the retained tail',
@@ -505,6 +506,7 @@ test('a truncated nonzero sandbox diagnostic is reason-unknown even when the ret
       }),
       exitCode: 125,
       stderr: 'runner: fatal\n',
+      expect: 'runner-failure',
     },
     {
       label: 'denial signature in the retained tail',
@@ -513,6 +515,7 @@ test('a truncated nonzero sandbox diagnostic is reason-unknown even when the ret
       }),
       exitCode: 1,
       stderr: 'permission denied\n',
+      expect: 'reason-unknown',
     },
   ]
   for (const entry of cases) {
@@ -530,6 +533,14 @@ test('a truncated nonzero sandbox diagnostic is reason-unknown even when the ret
     const { service, ctx } = await mount(deps, ownerInvocation())
     try {
       const outcome = await run(service, { policy: 'sandbox' })
+      assert.equal(subprocess.spawns.length, 1)
+      if (entry.expect === 'runner-failure') {
+        assert.equal(outcome.kind, 'failed', `${entry.label}: a retained runner-fatal line outranks truncation`)
+        if (outcome.kind !== 'failed') throw new Error('expected a runner failure')
+        assert.equal(outcome.phase, 'sandbox-runner', entry.label)
+        assert.match(outcome.message, /sandbox runner failed before the user command executed \(runner: fatal\)/u, entry.label)
+        continue
+      }
       assert.equal(outcome.kind, 'settled', `${entry.label}: the reason is uncertain, not a claimed runner failure`)
       if (outcome.kind !== 'settled') throw new Error('expected a reason-unknown settlement')
       assert.deepEqual(outcome.result.exit, { kind: 'exit', code: entry.exitCode })
@@ -542,7 +553,6 @@ test('a truncated nonzero sandbox diagnostic is reason-unknown even when the ret
       assert.ok(card.includes(`[exit ${String(entry.exitCode)}]`), `${entry.label}: the real exit fact is shown`)
       assert.doesNotMatch(card, /sandbox denied/u, `${entry.label}: no definite denial on truncated diagnostics`)
       assert.doesNotMatch(card, /failed:/u, `${entry.label}: the card is not an ordinary failure card`)
-      assert.equal(subprocess.spawns.length, 1)
     } finally {
       await ctx.fiber.dispose()
     }

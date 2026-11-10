@@ -137,13 +137,12 @@ function formatSpill(stream: 'stdout' | 'stderr', output: HostUserShellOutput): 
 /** Format the settled one-shot Host run for the card: the two bounded streams,
  * their truthful truncation lines and the authoritative exit marker.
  *
- * Official bounded-tail diagnostic semantics: a sandbox nonzero exit with
- * truncated stderr always has an unknown failure reason. A denial or higher-
- * priority runner-fatal signature may have been dropped, even if the retained
- * tail appears to match one. The card preserves the exit and truncation facts,
- * but never claims a definite denial or runner failure from incomplete stderr.
- * A positive runner-failure classification on complete diagnostics is returned
- * before this formatter. */
+ * Official bounded-tail diagnostic semantics: an OBSERVED runner-fatal match
+ * is classified before this formatter and never reaches it. Once no
+ * runner-fatal is observed, a sandbox nonzero exit with truncated stderr has
+ * an unknown failure reason: a denial or a higher-priority runner-fatal line
+ * may still have been dropped. The card preserves the exit and truncation
+ * facts but never claims a definite denial from incomplete stderr. */
 export function formatHostUserShellResult(result: HostUserShellResult, policy: HostUserShellPolicy): string {
   const lines: string[] = []
   // A nonzero sandbox exit with truncated stderr cannot prove whether a
