@@ -2258,6 +2258,10 @@ export interface TuiAppOptions {
    * store, exposed so a mounted test can stage REAL draft bytes through the
    * production intake surface. Never read by production code paths. */
   draftImageStoreForTest?: import('./client/media/image/draft-store.ts').DraftImageStore
+  /** Headless-test seam: the runner's live generic-file draft store, exposed
+   * so a mounted test can stage REAL file drafts through the production
+   * submission surface. Never read by production code paths. */
+  draftFileStoreForTest?: import('./client/media/attachment/file-draft.ts').DraftFileStore
   /**
    * The READ-ONLY composer draft-image projection (image UX plan PR1). The
    * runner supplies the live store's staged values; the preview never
@@ -4240,6 +4244,8 @@ export class TuiApp {
   private readonly svgRasterLoader: SvgRasterLoader | undefined
   /** @see TuiAppOptions.draftImageStoreForTest — headless-test seam only. */
   readonly draftImageStoreForTest: import('./client/media/image/draft-store.ts').DraftImageStore | undefined
+  /** @see TuiAppOptions.draftFileStoreForTest — headless-test seam only. */
+  readonly draftFileStoreForTest: import('./client/media/attachment/file-draft.ts').DraftFileStore | undefined
   /** @see TuiAppOptions.draftImagePreviewSource — the production preview source. */
   private readonly draftImagePreviewSource: import('./client/media/image/types.ts').DraftImagePreviewSource | undefined
   /** @see TuiAppOptions.draftImagePreviewLiveDraft — live-draft reader. */
@@ -5265,6 +5271,7 @@ export class TuiApp {
     this.imageLoader = options.imageLoader
     this.imageScope = options.imageScope
     this.draftImageStoreForTest = options.draftImageStoreForTest
+    this.draftFileStoreForTest = options.draftFileStoreForTest
     this.draftImagePreviewSource = options.draftImagePreviewSource
     this.draftImagePreviewLiveDraft = options.draftImagePreviewLiveDraft
     this.draftImagePreviewReserve = options.draftImagePreviewReserve
