@@ -50,20 +50,18 @@ async function prepareSource(
   }
   const iterator = file.source.open(signal)[Symbol.asyncIterator]()
   const first = await iterator.next()
-  let closed = false
-  let closeError: unknown
-  const close = async (): Promise<void> => {
-    if (closed) {
-      if (closeError !== undefined) throw closeError
-      return
-    }
-    closed = true
-    try {
+  /**
+   * The ONE release of this source. Every caller (the upload's failure path
+   * and a concurrent carrier cancel) shares the SAME promise, so none of them
+   * reports completion before the iterator's `finally` has actually run; a
+   * rejection is observed identically by all of them.
+   */
+  let closePromise: Promise<void> | undefined
+  const close = (): Promise<void> => {
+    closePromise ??= (async (): Promise<void> => {
       await iterator.return?.()
-    } catch (error) {
-      closeError = error
-      throw error
-    }
+    })()
+    return closePromise
   }
   const body = new ReadableStream<Uint8Array>({
     start(controller) {
@@ -71,7 +69,7 @@ async function prepareSource(
       else controller.enqueue(first.value)
     },
     async pull(controller) {
-      if (closed) {
+      if (closePromise !== undefined) {
         controller.close()
         return
       }
@@ -79,7 +77,7 @@ async function prepareSource(
       const next = await iterator.next()
       // A close raced this pull (early carrier refusal / abort): the stream is
       // already canceled, so no controller action is legal or needed.
-      if (closed) return
+      if (closePromise !== undefined) return
       signal.throwIfAborted()
       if (next.done) controller.close()
       else controller.enqueue(next.value)

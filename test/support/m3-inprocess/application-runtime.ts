@@ -34,6 +34,10 @@ export interface RemoteApplicationRuntimeOptions {
   readonly signal?: AbortSignal
   /** Explicit serializer injection (composition-test stub). */
   readonly promptSerializer?: RemotePromptSerializer
+  /** Build a serializer over the joined wire (qualification wrappers that must
+   * observe/decorate the PRODUCTION serializer, e.g. a hold between upload and
+   * dispatch). Takes precedence only when `promptSerializer` is absent. */
+  readonly buildPromptSerializer?: (wire: ExperimentalRemoteRuntime) => RemotePromptSerializer
   /** The Client-local UI startup facts. */
   readonly clientUiStartup: ClientUiStartupFacts
 }
@@ -63,11 +67,13 @@ export async function createRemoteApplicationRuntime(
   })
 
   let stage: Awaited<ReturnType<typeof composeRemoteApplicationStage>>
+  const promptSerializer = options.promptSerializer
+    ?? options.buildPromptSerializer?.(wire)
   try {
     stage = await composeRemoteApplicationStage({
       client: wire.client,
       fetch: wire.host.carrier.fetch,
-      ...(options.promptSerializer === undefined ? {} : { promptSerializer: options.promptSerializer }),
+      ...(promptSerializer === undefined ? {} : { promptSerializer }),
     })
   } catch (error) {
     const disposeErrors = await collectDisposeErrors(() => wire.dispose())
