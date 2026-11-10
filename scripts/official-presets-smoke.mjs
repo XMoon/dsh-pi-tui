@@ -332,6 +332,7 @@ export function writeOfficialPresetFailureEvidence(path, {
   commandStatus,
   probeWriteFailed = false,
   timeline = {},
+  entry,
   diagnosticErrors = [],
 }) {
   if (path === undefined) return
@@ -355,6 +356,11 @@ export function writeOfficialPresetFailureEvidence(path, {
       : typeof scrollback?.text === 'string' ? scrollback.text : ''
     const boundedTail = (text, maxChars) => ({
       text: text.slice(-maxChars),
+      truncated: text.length > maxChars,
+      totalChars: text.length,
+    })
+    const boundedHead = (text, maxChars) => ({
+      text: text.slice(0, maxChars),
       truncated: text.length > maxChars,
       totalChars: text.length,
     })
@@ -387,6 +393,7 @@ export function writeOfficialPresetFailureEvidence(path, {
         PRESET_STATUS_NOT_PAINTED: 'The successful /preset status result was not newly visible in the current terminal pane.',
         PRESET_STATUS_PROBE_UNQUALIFIED: 'The command lifecycle probe or its Session/event evidence was not qualified.',
         PRESET_STATUS_DUPLICATE: 'The current /preset status lifecycle contained duplicate or ambiguous command events.',
+        'session-surface': 'The TUI never painted the new Session head after /new created it.',
         INPUT_NOT_ADMITTED: 'The standard user input did not reach the Agent Inbox.',
         INBOX_NOT_CLAIMED: 'The inserted standard user message was not claimed by the Agent Loop.',
         MODEL_STREAM_NOT_REACHED: 'The claimed standard user message did not reach the mock model stream.',
@@ -431,6 +438,22 @@ export function writeOfficialPresetFailureEvidence(path, {
       modelRequests: modelRequestSummary(requests.agentRequests),
       timeline,
       timingMs,
+      // The facts observed at the moment the submitter pressed Enter: the
+      // composer/session head, the probe's Session scope, and the lifecycle
+      // baseline the classifier used. A future timeout then shows whether the
+      // TUI surface was live before the command was submitted instead of only
+      // `runs: []`.
+      entryDiagnostics: entry === undefined ? null : {
+        headerBeforeEnter: entry.headerBeforeEnter === undefined ? null : {
+          present: typeof entry.headerBeforeEnter?.sessionId === 'string' && entry.headerBeforeEnter.sessionId.length > 0,
+          sessionId: entry.headerBeforeEnter?.sessionId ?? null,
+          agentPreset: typeof entry.headerBeforeEnter?.agentPreset === 'string' ? entry.headerBeforeEnter.agentPreset : null,
+        },
+        commandEventsBeforeEnter: Number.isSafeInteger(entry.commandEventsBeforeEnter)
+          ? entry.commandEventsBeforeEnter
+          : null,
+        paneBeforeEnter: boundedHead(redact(typeof entry.paneBeforeEnter === 'string' ? entry.paneBeforeEnter : ''), 4_000),
+      },
       paneTail,
       paneTailTruncated: paneRedacted.split(/\r?\n/u).length > 40 || paneTailSource.length > 4_000,
       paneTailTotalChars: paneRedacted.length,
@@ -599,17 +622,30 @@ export async function smokeOfficialPresetMounts(
     let commandStatus
     let presetStatusTimeline = {}
     let presetStatusPaneBefore = ''
+    const presetStatusEntry = {}
     let probeWriteFailed = false
     let diagnosticErrors = []
     writeLauncher(launcher, invocation, env, presetId)
-    const sendComposerLine = async (text, label, timing) => {
+    const sendComposerLine = async (text, label, timing, entry) => {
       if (timing !== undefined) timing.startedAt = Date.now()
       failureStage = `${label}-composer-visible`
       tmux.sendLiteral(text)
       await waitUntil(`official preset ${presetId} ${label} composer line`, TIMEOUTS.command, () => {
         if (!tmux.hasSession()) return false
-        const visible = composerContainsExactInput(tmux.capturePane(), text)
-        if (visible && timing !== undefined) timing.composerVisibleAt = Date.now()
+        const pane = tmux.capturePane()
+        const visible = composerContainsExactInput(pane, text)
+        if (visible) {
+          if (timing !== undefined) timing.composerVisibleAt = Date.now()
+          if (entry !== undefined) {
+            // The Enter-time facts a later timeout must show: the composer
+            // line, the Session scope the probe has confirmed, and whether
+            // the TUI had already painted the live Session head.
+            entry.paneBeforeEnter = pane
+            entry.headerBeforeEnter = readOptionalJson(env.DSH_SMOKE_HEADER_EVIDENCE)
+            entry.commandEventsBeforeEnter = commandEvidence
+              .filter(record => record?.recordType === 'event').length
+          }
+        }
         return visible
       }, 'COMPAT_INPUT_FAILURE')
       failureStage = `${label}-enter`
@@ -659,6 +695,19 @@ export async function smokeOfficialPresetMounts(
       }, 'COMPAT_BOOT_FAILURE')
       header = readOptionalJson(env.DSH_SMOKE_HEADER_EVIDENCE)
       assertOfficialPresetHeader(presetId, env.DSH_SMOKE_HEADER_EVIDENCE)
+      // The durable header proves the HOST created the Session; it is NOT
+      // input readiness. The Direct lifecycle publishes the owner and hydrates
+      // the TUI surface AFTER that create (and after the Workspace membership
+      // write), so a submission in this gap used to be routed against the
+      // still-sessionless surface and silently disappear. Wait for the LIVE
+      // SESSION HEAD instead: the welcome card's session row is rendered from
+      // `liveAgent()`, so seeing this Session's id in the pane is the positive
+      // proof that the TUI has published it. No fixed delay, no timeout change.
+      failureStage = 'session-surface'
+      await waitUntil(`official preset ${presetId} live session surface`, TIMEOUTS.command, () => {
+        if (!tmux.hasSession()) return false
+        return tmux.capturePane().includes(header.sessionId)
+      }, 'COMPAT_BOOT_FAILURE')
 
       failureStage = 'preset-status-input'
       presetStatusTimeline = {}
@@ -673,7 +722,7 @@ export async function smokeOfficialPresetMounts(
         && Number.isSafeInteger(record.seq))
       presetStatusTimeline.previousCommandSeq = priorSessionEvents.reduce((max, record) => Math.max(max, record.seq), -1)
       presetStatusPaneBefore = tmux.capturePane()
-      await sendComposerLine(officialPresetStatusCommand(), 'preset-status', presetStatusTimeline)
+      await sendComposerLine(officialPresetStatusCommand(), 'preset-status', presetStatusTimeline, presetStatusEntry)
       failureStage = 'preset-status-lifecycle'
       const updateStatusTimeline = (diagnostic, painted) => {
         if (diagnostic.run !== undefined) presetStatusTimeline.commandRunAt ??= diagnostic.run.observedAt
@@ -884,6 +933,7 @@ export async function smokeOfficialPresetMounts(
         commandStatus,
         probeWriteFailed,
         timeline: presetStatusTimeline,
+        entry: presetStatusEntry,
         diagnosticErrors,
       })
       throw error

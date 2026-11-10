@@ -2747,6 +2747,7 @@ export function applyRunnerWithRuntime(
         generation: () => ownership.generation(),
         captureSubject: () => ownership.captureSubject(),
         transitionPending: () => ownership.gate.pending || ownership.barrier.inTransition,
+        awaitTransitionSettled: () => ownership.gate.whenSettled(),
       },
       scope: {
         captureLive: () => sessionScope.captureLive(),

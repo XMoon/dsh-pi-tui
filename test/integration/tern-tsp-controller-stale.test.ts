@@ -121,6 +121,7 @@ async function runQueuedSubmitAcrossOwnerChange(options: {
       generation: () => core.generation(),
       captureSubject: () => core.subject(),
       transitionPending: () => false,
+      awaitTransitionSettled: async () => {},
     },
     scope: {
       captureLive: () => ({ sessionId: 'session-a', subject: {}, generation: core.generation() }),
@@ -377,6 +378,7 @@ async function runClientCommandErrorAcrossOwnerChange(options: {
       generation: () => core.generation(),
       captureSubject: () => core.subject(),
       transitionPending: () => false,
+      awaitTransitionSettled: async () => {},
     },
     scope: {
       captureLive: () => ({ sessionId: 'session-a', subject: {}, generation: core.generation() }),

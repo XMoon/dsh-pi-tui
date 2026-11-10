@@ -482,12 +482,17 @@ test('official preset failure evidence is private, bounded, redacted and allowli
       commandDoneAt: done.observedAt,
       resultValidatedAt: 1_700_000_000_121,
     },
+    entry: {
+      headerBeforeEnter: { sessionId, agentPreset: 'cordis' },
+      commandEventsBeforeEnter: 0,
+      paneBeforeEnter: `❯ /preset status\n${sensitiveOutput}\n${'entry pane line\n'.repeat(400)}`,
+    },
   })
   const serialized = readFileSync(evidencePath, 'utf8')
   const report = JSON.parse(serialized)
   assert.deepEqual(Object.keys(report).sort(), [
     'candidate', 'commandLifecycle', 'commandLifecycleTruncated', 'commandStatus', 'diagnosticErrors',
-    'failureSummary', 'header', 'inputClaimed', 'inputInserted', 'mode', 'modelRequests', 'paneTail',
+    'entryDiagnostics', 'failureSummary', 'header', 'inputClaimed', 'inputInserted', 'mode', 'modelRequests', 'paneTail',
     'paneTailTotalChars', 'paneTailTruncated', 'phase', 'presetId', 'probeQualification', 'requestCount', 'auxiliaryTitleRequestCount',
     'unexpectedRequestCount', 'scrollbackHistoryLines', 'scrollbackTail', 'scrollbackTotalChars',
     'scrollbackTruncated', 'sessionId', 'stage', 'surfaceAlive', 'timingMs', 'timeline', 'tuiLogTail',
@@ -507,6 +512,14 @@ test('official preset failure evidence is private, bounded, redacted and allowli
     { sessionId, seq: 13, type: 'command/done', commandId },
   ])
   assert.equal(report.commandLifecycle[0].args, ' status')
+  assert.deepEqual(report.entryDiagnostics.headerBeforeEnter, {
+    present: true, sessionId, agentPreset: 'cordis',
+  })
+  assert.equal(report.entryDiagnostics.commandEventsBeforeEnter, 0)
+  assert.match(report.entryDiagnostics.paneBeforeEnter.text, /❯ \/preset status/u)
+  assert.ok(report.entryDiagnostics.paneBeforeEnter.text.length <= 4_000)
+  assert.equal(report.entryDiagnostics.paneBeforeEnter.truncated, true)
+  assert.doesNotMatch(report.entryDiagnostics.paneBeforeEnter.text, /bearer-token-value|api-key-value|password-value/u)
   assert.equal(report.commandStatus.doneKind, 'success')
   assert.equal(report.commandStatus.commandId, commandId)
   assert.equal(report.scrollbackHistoryLines, 350)
@@ -558,6 +571,7 @@ test('a successful mocked preset matrix creates no failure artifact', async (t) 
     let line = ''
     let searchVisible = false
     let searchQuery = ''
+    let sessionLive = false
     let statusText
     const pane = () => {
       if (!alive) return ''
@@ -573,6 +587,7 @@ test('a successful mocked preset matrix creates no failure artifact', async (t) 
         ].join('\n')
       }
       return [
+        ...(sessionLive ? [`session  ${sessionId}`] : []),
         '🎛 /new [ok]',
         ...(statusText === undefined ? [] : [`🎛 /preset status [ok]`, `  ${statusText}`]),
         '────────',
@@ -595,6 +610,10 @@ test('a successful mocked preset matrix creates no failure artifact', async (t) 
         line = ''
         if (submitted === '/new') {
           writeFileSync(headerPath, JSON.stringify({ sessionId, agentPreset: presetId }))
+          // The production welcome card paints the LIVE session head only
+          // after the TUI publishes the owner; the fake pane mirrors that
+          // readiness fact instead of reporting it at the durable write.
+          sessionLive = true
         } else if (submitted === '/preset status') {
           const runAt = Date.now()
           statusText = `preset: ${presetId} · default: ${presetId}`

@@ -865,6 +865,7 @@ async function mountChain(
       generation: () => core.generation(),
       captureSubject: () => core.subject(),
       transitionPending: () => false,
+      awaitTransitionSettled: async () => {},
     },
     scope: {
       captureLive: () => ({ sessionId: SESSION_ID, subject: core.captureSubject()! } as never),

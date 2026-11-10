@@ -111,6 +111,40 @@ test('a transition in flight is visible to concurrent submissions (write fence)'
   assert.equal(gate.busy, false, 'the fence lifts once the transition settles')
 })
 
+test('whenSettled waits for the executing transition AND the ones queued behind it', async () => {
+  const gate = new SessionTransitionGate()
+  const block = deferred<void>()
+  const order: string[] = []
+  const running = gate.run(async () => {
+    order.push('running-start')
+    await block.promise
+    order.push('running-end')
+  })
+  await settle()
+  const queued = gate.run(async () => { order.push('queued') })
+  let settled = false
+  const waiting = gate.whenSettled().then(() => { settled = true })
+  await settle()
+  assert.equal(settled, false, 'the waiter must not settle while a transition is executing/queued')
+  block.resolve()
+  await running
+  await queued
+  await waiting
+  assert.deepEqual(order, ['running-start', 'running-end', 'queued'],
+    'the waiter resolves only after the whole FIFO drained')
+  assert.equal(settled, true)
+})
+
+test('whenSettled resolves immediately on an idle gate and after a REJECTED transition', async () => {
+  const gate = new SessionTransitionGate()
+  await gate.whenSettled()
+  const rejected = gate.run(async () => { throw new Error('flush failed') })
+  const waiting = gate.whenSettled()
+  await assert.rejects(rejected, /flush failed/)
+  await waiting
+  await gate.whenSettled()
+})
+
 // ── exit retirement: pending covers the queued-but-not-started window ──────
 
 test('pending reports a QUEUED transition before it starts (the exit pre-cancel window)', async () => {

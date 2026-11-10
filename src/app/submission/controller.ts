@@ -34,7 +34,7 @@ import { consumeDraftAttachments, draftHasAttachments, draftHasImages, pinDraftA
 import { prepareUserMessage, type DirectPrepareInputDeps } from './direct-message-preparation.ts'
 import { expandImagePlaceholders } from '../../client/media/image/placeholder.ts'
 import { clientTimeZone } from '../../client/time-zone.ts'
-import { classifyCommandLine, isBareCommandLine, isLocalCommandLine, isPlainExitPrompt, localCommandMayWrite, LOCAL_COMMANDS, SESSIONLESS_COMMANDS, shouldConsumeAdvertisedMiss, type CommandLineClassification } from '../../domain/command/policy.ts'
+import { classifyCommandLine, isBareCommandLine, isLocalCommandLine, isPlainExitPrompt, localCommandMayWrite, LOCAL_COMMANDS, SESSIONLESS_COMMANDS, SESSION_NAVIGATION_COMMANDS, shouldConsumeAdvertisedMiss, type CommandLineClassification } from '../../domain/command/policy.ts'
 import { resolveSubmitDelivery } from './command-policy.ts'
 import { isIndeterminateSkillWrite, type HostCommandClaim, type SubmitDelivery } from '../../commands.ts'
 import type { ClientCommandRegistry } from '../command/client-command-registry.ts'
@@ -148,6 +148,8 @@ export interface SubmissionControllerDeps<ExactAgent extends SubmissionAgentLike
     captureSubject(): SessionSubject | undefined
     /** A transition is queued or already holds the barrier (pull-back gate). */
     transitionPending(): boolean
+    /** Resolve when no session transition is executing or queued. */
+    awaitTransitionSettled(): Promise<void>
   }
   /** The session-scope authority (live-scope capture + currentness fence). */
   readonly scope: {
@@ -2032,11 +2034,39 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // sessionless name set). Its delivery stays `queue`, so falling through can
     // never steer it.
     if (parsed !== undefined && isSessionless) {
-      if (deps.liveAgent() === undefined) {
-        runLocalCommand(parsed, text, persistHistory, delivery, undefined)
-      } else {
-        dispatchViaSession(text, () => persistHistory(undefined), delivery)
+      const routeSessionless = (): void => {
+        if (deps.liveAgent() === undefined) {
+          runLocalCommand(parsed, text, persistHistory, delivery, undefined)
+        } else {
+          dispatchViaSession(text, () => persistHistory(undefined), delivery)
+        }
       }
+      // A transition in flight makes `liveAgent() === undefined` a TRANSIENT
+      // fact, not a sessionless surface: `/new` (and every create/open
+      // navigation) publishes its owner only AFTER the Host create and the
+      // Workspace membership await, while the composer is already live. The
+      // sessionless decision must then be made against the SETTLED surface:
+      // running the line locally there would execute it against a session the
+      // transition is replacing, and a pure read such as `/preset status`
+      // returns text with no command card to render it — the command would
+      // silently disappear. The wait is the gate's own FIFO settlement (the
+      // same ordering an ordinary prompt gets through `ensureSession`), never
+      // a delay: a failed create leaves the surface genuinely sessionless and
+      // the local route still runs.
+      if (deps.liveAgent() === undefined
+        && deps.ownership.transitionPending()
+        && !SESSION_NAVIGATION_COMMANDS.has(parsed.name)) {
+        runOwned('transition-fenced sessionless command', async () => {
+          await deps.ownership.awaitTransitionSettled()
+          if (deps.isCleanedUp()) return
+          routeSessionless()
+        }, {
+          diag: deps.diag,
+          sessionId: () => deps.liveAgent()?.session.id,
+        })
+        return
+      }
+      routeSessionless()
       return
     }
     // Busy-Enter policy (web parity): agent-facing input steers into the

@@ -557,6 +557,9 @@ export async function mountRunner(
    *  without a Settings service uses this to reach the same reference the
    *  consumer reads, instead of asserting on a copied value. */
   onResolvedConfig?: (config: unknown) => void,
+  /** The Workspace registry stand-in, when a test must control the real
+   *  pre-publication await (the Direct Workspace `attachSession`). */
+  workspaceRegistry?: Parameters<typeof provideFakeHostWorkspaceRegistry>[1],
 ) {
   ctx.provide('appExit', appExit)
   ctx.provide(TUI_STARTUP_SERVICE, { ...startup, shippedPresetRoot: home })
@@ -564,7 +567,7 @@ export async function mountRunner(
   ctx.provide('sessionQuery', harness.sessionQuery as never)
   // WS-2: the official Host Workspace registry stand-in (the ONE authority the
   // Direct lifecycle resolves before an ordinary create).
-  provideFakeHostWorkspaceRegistry(ctx)
+  provideFakeHostWorkspaceRegistry(ctx, workspaceRegistry)
   ctx.provide('agents', harness.agents as never)
   ctx.provide('sessions', harness.sessions as never)
   ctx.provide('agentDefaultModel', harness.defaultModel as never)

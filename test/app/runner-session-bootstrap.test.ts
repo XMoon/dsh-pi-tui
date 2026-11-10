@@ -1526,6 +1526,133 @@ test('a switch paints a pre-commit command and settles one issued after the fold
   assert.equal(commandCards(), 1, 'completing the switch must neither drop nor duplicate the command row')
 })
 
+/**
+ * REGRESSION (the first command after `/new`): the Host `agent/created`
+ * announcement completes BEFORE the Direct lifecycle awaits the Workspace
+ * membership write and the TUI publishes the owner. A user (and the official
+ * preset smoke) can submit the next line in that window: the composer is
+ * live, but `liveAgent()` still reads `undefined`. Deciding the SESSIONLESS
+ * local route there executes the line against a surface that is about to be
+ * replaced — and a pure read such as `/preset status` returns its text with
+ * no command card to render it, so the command silently disappears.
+ *
+ * The gate is the REAL production await (the Direct Workspace `attachSession`
+ * between `agents.create()` and the synchronous owner publication), never a
+ * sleep: it parks the transition with the Host Session already created and no
+ * published owner, which is exactly the reported window.
+ */
+test('a command submitted while /new is creating runs on the new Session, never the sessionless surface', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-new-command-fence-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(100, 30)
+  life.defer(installVirtualProcessTerminal(vt))
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const harness = makeHarness(home)
+  // Park the production create AFTER the Host agent exists and BEFORE the
+  // owner publication: `attachSession` is the Direct lifecycle await that
+  // sits between them.
+  let releaseAttach!: () => void
+  let attachEntered!: () => void
+  const attachGate = new Promise<void>(resolve => { releaseAttach = resolve })
+  const attachReached = new Promise<void>(resolve => { attachEntered = resolve })
+  // A failing assertion before the release must not leave the transition
+  // parked (the lifecycle cleanup would wait on it forever).
+  life.defer(() => releaseAttach())
+  const workspace = {
+    id: 'workspace-new-command-fence',
+    path: home,
+    sessionIds: [] as string[],
+    attachSession: async (sessionId: unknown) => {
+      attachEntered()
+      await attachGate
+      workspace.sessionIds.push(String(sessionId))
+    },
+  }
+  const workspaceRegistry = {
+    create: async () => workspace,
+    get: (id: string) => id === workspace.id ? workspace : undefined,
+    list: () => [workspace],
+  }
+  context = new Context()
+  // `/preset status` needs a preset roster to answer; the read itself is not
+  // what this test proves, only that the line reaches the new Session's
+  // official command plane.
+  let presetDefaultReads = 0
+  context.provide('agentPresets', {
+    remoteExportList: async () => ({ presets: [{ id: 'standard', isDefault: true }, { id: 'ptc' }] }),
+    resolve: async (id?: string) => ({ id: id ?? 'standard' }),
+    mount: async () => {},
+    // The status read resolves the displayed default through this property
+    // (`config.presetDefault.get()`): counting the read is the witness that
+    // the handler ran.
+    get defaultId() { presetDefaultReads += 1; return 'standard' },
+    composedPreset: () => undefined,
+  } as never)
+  fiber = await mountRunner(context, home, harness, {}, {}, () => {}, undefined, undefined, workspaceRegistry)
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+
+  const newHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('new')
+  assert.ok(newHandler, 'the real runner must register the /new transition command')
+  const switching = (newHandler as () => Promise<unknown>)()
+  let attachTimer: ReturnType<typeof setTimeout> | undefined
+  const attachDeadline = new Promise<false>(resolve => { attachTimer = setTimeout(() => resolve(false), 15_000) })
+  const attachSettled = await Promise.race([attachReached.then(() => true), attachDeadline])
+  if (attachTimer !== undefined) clearTimeout(attachTimer)
+  assert.equal(attachSettled, true, '/new must reach the post-create Workspace attach')
+  assert.equal(harness.createdSessions.length, 1, '/new must have created the Host Session')
+  const child = harness.createdSessions[0]!
+
+  // The next command through the REAL composer, in the publication gap.
+  const readsAtSubmit = presetDefaultReads
+  app.setDraft('/preset status')
+  ;(app as unknown as { submitDraft(): void }).submitDraft()
+  await settle()
+  assert.equal(presetDefaultReads, readsAtSubmit,
+    'the handler must not run against the still-sessionless surface while /new is unsettled')
+  // A SESSION-NAVIGATION entry is the navigation authority itself and stays
+  // immediate: the second /new must keep the documented single-flight refusal
+  // instead of being deferred into a second create after the first settles.
+  app.setDraft('/new')
+  ;(app as unknown as { submitDraft(): void }).submitDraft()
+  await settle()
+  assert.equal(harness.createdSessions.length, 1, 'a second /new during the create must not create a Session')
+  assert.ok(probe.notices.some(notice => /already starting/u.test(notice)),
+    `the second /new must surface its single-flight refusal: ${JSON.stringify(probe.notices)}`)
+
+  releaseAttach()
+  await switching
+  // The deferred gesture runs after the transition settles; drain its
+  // command execution and the coalesced repaint.
+  const commandDone = async (): Promise<readonly unknown[]> =>
+    child.snapshotEvents().filter(entry => (entry as { type?: unknown }).type === 'command/done')
+  for (let attempt = 0; attempt < 400 && (await commandDone()).length === 0; attempt += 1) {
+    await new Promise(resolve => setImmediate(resolve))
+  }
+  const runs = child.snapshotEvents().filter(entry => (entry as { type?: unknown }).type === 'command/run')
+  const dones = await commandDone()
+  assert.equal(runs.length, 1, 'the command must be dispatched exactly once on the new Session')
+  assert.equal(dones.length, 1, 'the command must settle on the new Session')
+  const runData = (runs[0] as unknown as { data: { name: string } }).data
+  assert.equal(runData.name, 'preset')
+  const doneData = (dones[0] as unknown as { data: { kind: string } }).data
+  assert.equal(doneData.kind, 'success')
+  assert.ok(presetDefaultReads > readsAtSubmit,
+    'the status handler must run after the transition settled, against the new Session')
+})
+
 test('the first-session Workspace intent ignores the qualification override outside the surface entry', () => {
   const launch = '/home/user/project'
   assert.deepEqual(initialWorkspaceIntentFromEnvironment(launch, {}),

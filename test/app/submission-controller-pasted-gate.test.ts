@@ -63,6 +63,7 @@ function mount(): { controller: ReturnType<typeof createSubmissionController>; c
       generation: () => 1,
       captureSubject: () => undefined,
       transitionPending: () => false,
+      awaitTransitionSettled: async () => {},
     },
     scope: {
       captureLive: () => undefined,
