@@ -543,20 +543,14 @@ export class TuiEditor extends Editor {
         return
       }
     }
-    // Tab on a leading `/` in a shell mode is a PATH, never a slash
-    // command: the fork's handleTabCompletion routes a space-free
-    // leading-`/` line to slash-command completion, which would list
-    // commands for `/usr/lo`. Force the file-completion path instead
-    // (the provider's virtual prefix keeps the shell grammar intact).
-    // An open dropdown keeps Tab as accept — only a closed one routes.
+    // A closed-dropdown Tab in shell mode is always a shell-completion
+    // request: command names, variables, Git subcommands and path arguments
+    // share the selected Host/Direct port. Letting other shell words fall
+    // through to Bash's intrinsic editor completion would bypass Host locality
+    // and make results depend on the Client's interactive shell state.
     if (matchesKey(data, 'tab') && !this.isShowingAutocomplete() && this.inputMode !== 'prompt') {
-      const { line, col } = this.getCursor()
-      const beforeCursor = this.getLines()[line]?.slice(0, col) ?? ''
-      const trimmed = beforeCursor.trimStart()
-      if (trimmed.startsWith('/') && !trimmed.includes(' ')) {
-        this.requestAutocomplete({ force: true, explicitTab: true })
-        return
-      }
+      this.requestAutocomplete({ force: true, explicitTab: true })
+      return
     }
     // Bracketed paste: captured at the RAW layer BEFORE the base editor
     // sees it. The prefix normalization therefore happens PRE-INSERT —

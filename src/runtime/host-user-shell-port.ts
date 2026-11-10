@@ -10,7 +10,8 @@
  * exit status and process cancellation. This port exposes exactly that
  * execution authority and nothing else: no `ctx.shell`, no
  * `child_process.ChildProcess`, no PTY screen parser, no raw Host Context and
- * no generated Remote object ever crosses it.
+ * no generated Remote object ever crosses it. Remote output is acknowledged
+ * only after the semantic output consumer advances its single iterator.
  *
  * Full contract: docs/architecture/host-client.md (user shell section) +
  * docs/architecture/host-client.md (user shell ownership).
@@ -45,6 +46,7 @@ export type HostUserShellExit =
  * complete; the adapter retains no unbounded copy of the stream. */
 export interface HostUserShellResult {
   readonly exit: HostUserShellExit
+  readonly sandboxDenied?: boolean
   /** Whether the run was ended by the caller's abort rather than its own
    * exit. An aborted run is a settled run; its partial output is real. */
   readonly aborted: boolean
@@ -63,8 +65,9 @@ export interface HostUserShellUnavailable {
  * settles EXACTLY once: `result()` resolves with the authoritative exit and
  * the complete output, never rejects for a command-level failure (a nonzero
  * exit, a kill by the caller's abort, or an executor timeout is a RESULT);
- * it rejects only for infrastructure failures (an unusable working directory,
- * a missing shell) — the caller then knows nothing executed.
+ * it rejects only for infrastructure failures proven before start. After a
+ * started Remote stream is lost it rejects with
+ * HostUserShellOutcomeUnknownError instead of claiming nothing executed.
  */
 export interface HostUserShellExecution {
   /**
@@ -106,6 +109,23 @@ export interface HostUserShellRequest {
 export type HostUserShellAdmission =
   | { readonly kind: 'executing'; readonly execution: HostUserShellExecution }
   | { readonly kind: 'unavailable'; readonly reason: HostUserShellUnavailable }
+  | { readonly kind: 'indeterminate'; readonly message: string }
+
+/** A started Remote run lost its terminal fact; automatic replay is forbidden. */
+export class HostUserShellOutcomeUnknownError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'HostUserShellOutcomeUnknownError'
+  }
+}
+
+/** The Host proves the sandbox runner failed before the user command began. */
+export class HostUserShellSandboxRunnerError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'HostUserShellSandboxRunnerError'
+  }
+}
 
 /** The truthfulness state of the port itself, read before any admission. */
 export interface HostUserShellAvailability {
@@ -117,8 +137,8 @@ export interface HostUserShellAvailability {
 
 /**
  * The Host user-shell execution domain port. Direct is served by the
- * in-process Host adapter; the Remote adapter reports the truthful
- * unavailable state (CARRIER_GAP at rc.2) and executes NOTHING.
+ * in-process Host adapter; Remote serves the authenticated Host one-shot stream
+ * and fails admission truthfully when its Host connection is unavailable.
  */
 export interface HostUserShellPort {
   /** The static availability read (no side effects). */

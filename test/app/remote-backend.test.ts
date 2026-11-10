@@ -31,6 +31,7 @@ test('the Remote backend advertises exactly its implemented capabilities', () =>
     pluginManager: {} as RemoteBackendParts['pluginManager'],
     jobObservation: {} as RemoteBackendParts['jobObservation'],
     hostUserShell: {} as RemoteBackendParts['hostUserShell'],
+    hostShellCompletion: {} as RemoteBackendParts['hostShellCompletion'],
     deliveredFileRead: {} as RemoteBackendParts['deliveredFileRead'],
     webAccess: {} as RemoteBackendParts['webAccess'],
     sessionWorkspaceFacts: {} as RemoteBackendParts['sessionWorkspaceFacts'],

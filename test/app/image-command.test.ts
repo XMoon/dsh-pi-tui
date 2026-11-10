@@ -123,7 +123,7 @@ function setup(options: { cwd?: string; sessionCwd?: string; signal?: AbortSigna
     commandRegistry: ctx.get('commands') as import('../../src/commands.ts').CommandRegistryLike | undefined,
     clientCommands: createClientCommandRegistry(parseCommand),
     hostFile: new DirectHostFilePort(() => undefined),
-    hostShellCompletion: true,
+    hostShellCompletion: { pathAuthority: 'client' as const, complete: async () => ({ kind: 'ok' as const, candidates: [] }) },
     interaction: {
       questions: {
         onRequest: () => true,
@@ -558,7 +558,7 @@ function mountedHarness(options: {
     commandRegistry: ctx.get('commands') as import('../../src/commands.ts').CommandRegistryLike | undefined,
     clientCommands: createClientCommandRegistry(parseCommand),
     hostFile: new DirectHostFilePort(() => undefined),
-    hostShellCompletion: false,
+    hostShellCompletion: { pathAuthority: 'host' as const, complete: async () => ({ kind: 'unavailable' as const, reason: 'test Host unavailable' }) },
     interaction: {
       questions: {
         onRequest: () => true,
@@ -1038,7 +1038,7 @@ function cardlessController(options: {
       clearError: () => {},
     },
     artifacts: { start: () => {} },
-    shell: { run: () => {}, interrupt: () => {} },
+    shell: { run: () => {}, interrupt: () => {}, cancelRun: () => false },
     supportsLocalShellCards: false,
     // The TSP renderer: no PiTui builtin UI.
     supportsTuiBuiltinUi: false,

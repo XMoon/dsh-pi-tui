@@ -1876,18 +1876,16 @@ Authority: `src/runtime/direct/file-completion/host-discovery.ts`,
   session-excluded (no session write, no model visibility). Both execute in the
   Host environment.
 - `bypass`/`sandbox` are Host execution policies, not machine locality.
-  `localShellSandbox` persists in the TUI settings document, default `bypass`.
-  `sandbox` uses the DSH shell executor; `bypass` uses the plain spawn path. A
-  policy the composition cannot serve fails closed with a visible error and
-  never downgrades.
-- Completion inside a shell line: the first word uses `compgen -A command`;
-  a `$` prefix uses `compgen -A variable`; later words use path completion plus
-  a small subcommand table. One `bash -lc` spawn per request (never `-ic`),
-  abortable, hard-capped, latest-only commit. Failure/timeout degrades to no
-  suggestions. Command-name results cache per cwd+PATH for 30 s (success only);
-  subcommand/variable results are never cached. Items are name-only; applying a
-  command item replaces the first word after the prefix, which is never
-  touched.
+  `localShellSandbox` defaults to `bypass`. Direct persists it in the `tui-app`
+  settings document; in split-process mode the Host-only profile disables
+  `tui-app`, so the `pi-tui-host-runtime` Loader row uses the same Config
+  schema as the settings owner and the Remote ConfigPort reads and writes that
+  Host descriptor. The Host validates the Client's requested policy against its
+  live setting before preparation and again before spawn; a stale or mismatched
+  request fails closed. Sandbox mode requires Host enforcement `full` and never
+  falls back to bypass.
+- Remote Shell carries raw stdout/stderr bytes in one sequence over an eight-frame cumulative ACK window. Gateway receipt is not consumption: the Host waits for the single `output()` consumer to process and acknowledge each frame before continuing. If the started stream is lost before a terminal fact, the card warns that the command may have executed; it is never replayed and its unknown result is never written to the Session.
+- Completion uses one shell grammar over the selected semantic port. Direct keeps its existing `bash -lc` compgen and fork path provider. Remote queries command names, variables, git subcommands and paths on the Host using the live Session's effective cwd and Host environment. A Host refusal never falls back to Client PATH or filesystem; stale connection generations never apply suggestions.
 - The user-shell card: a running card collapses to the newest five source
   lines; a settled card to at most twenty visual rows with an honest hidden
   marker. Ctrl+O expands to the retained buffer except fullscreen Focus.
@@ -1898,7 +1896,14 @@ Authority: `src/tui/interaction/editor-input-mode.ts`
 (`shellPrefixForMode`, `serializeEditorInput`, `editorModeFromHistoryEntry`),
 `src/tui/interaction/tui-editor.ts`, `src/client/shell/compgen.ts`,
 `src/app/submission/user-shell.ts`, `src/app/config/schema.ts`,
-`src/runtime/direct/host-user-shell-direct.ts`.
+`src/app/host/pi-tui-host-runtime.ts`, `src/runtime/remote/config-remote.ts`,
+`src/runtime/host-user-shell-port.ts`, `src/runtime/host-shell-completion-port.ts`,
+`src/runtime/direct/host-user-shell-direct.ts`,
+`src/runtime/direct/host-shell-completion-direct.ts`,
+`src/runtime/remote/host-user-shell-remote.ts`,
+`src/runtime/remote/host-shell-completion-remote.ts`,
+`src/runtime/remote/pi-tui-host-user-shell-host-bridge.ts` and
+`src/app/host/features/host-user-shell.ts`.
 
 Must-not: put the prefix in the buffer/cursor math, route a shell line through
 slash commands, downgrade sandbox to bypass, cache a failed compgen run, or let

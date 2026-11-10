@@ -82,6 +82,7 @@ import type { SkillDefinitionResult } from './runtime/catalog-port.ts'
 import type { ConfigPort } from './runtime/config-port.ts'
 import type { HostFilePort, HostFileScope } from './runtime/host-file-port.ts'
 import type { WebAccessPort } from './runtime/web-access-port.ts'
+import type { HostShellCompletionPort } from './runtime/host-shell-completion-port.ts'
 import type { CatalogRefreshOutcome, CatalogRefreshSource } from './app/command/catalog-refresh.ts'
 import type { ClientCommandRegistry } from './app/command/client-command-registry.ts'
 import {
@@ -469,12 +470,8 @@ export interface TuiCommandRunner {  ctx: Context
    * mutates the Host's official Web frontend through this ONE semantic surface
    * and never reaches a Host service, Connection or Gateway directly. */
   readonly webAccess: WebAccessPort
-  /** Whether Host-shell completion facts are reachable on this backend
-   * (shell amendment M3-4 PR3): true on Direct (the process IS the Host, so
-   * the compgen bridge reads Host state); false on Remote — no shell carrier
-   * means NO shell-specific suggestions, never Client PATH/filesystem
-   * guesses. Absent defaults to false (no shell completion). */
-  readonly hostShellCompletion: boolean
+  /** Host-owned/direct/remote shell completion capability, never a Client PATH guess. */
+  readonly hostShellCompletion: HostShellCompletionPort
   /** The minimal commands registry for the TUI's OWN registrations
    * (migration M1.11) — a runner assembly dependency, not a Host
    * capability. On the Remote branch (PR4 §D2) this is `undefined` and the
@@ -1557,7 +1554,7 @@ export function registerTuiCommands(
       scope: completionScope,
       localCwd: completionLocalCwd,
       skillReferences,
-      hostShellCompletion,
+      hostShellCompletion: undefined,
       // The ONE signal that distinguishes "this source failed" from "this
       // catalog is legitimately empty", so the renderer can refuse a plugin
       // fallback instead of painting a menu for a command source that was

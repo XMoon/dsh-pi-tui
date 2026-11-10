@@ -1304,6 +1304,9 @@ export interface TuiAppEventsBase {
    * absent means the draft text is the only emptiness authority.
    */
   isImageDraft?: () => boolean
+  /** Single Escape while the Host user-shell run is active; aborts only that
+   * managed run and never enters the Agent Turn interrupt/rewind path. */
+  cancelLocalShellIfRunning?: () => boolean
   /** The user asked to quit after the TUI's same-key keyboard exit
    * confirmation; Ctrl+C additionally clears the draft on its first press. */
   onExit: () => void
@@ -7479,6 +7482,13 @@ export class TuiApp {
       // replacement already received the event and it must not be delivered
       // a second time by TuiBase's focused-component dispatch.
       if (!includeInterrupt) return { consume: true }
+    }
+    // A running user Shell is an independent Host subprocess activity, not a
+    // busy Agent Turn. Give it the promised single-Esc run cancellation before
+    // arming the idle double-Esc rewind/cancel state machine.
+    if (this.events.cancelLocalShellIfRunning?.() === true) {
+      this.lastEscapeAt = undefined
+      return { consume: true }
     }
     // Shell-mode exit: the host editor in a shell mode with an EMPTY
     // body owns Esc — it cancels the shell mode (the double-Esc cancel
@@ -24560,7 +24570,7 @@ export class TuiApp {
       | (() => import('./runtime/host-file-port.ts').HostFileScope) = { kind: 'workspace', cwd },
      localCwd: string | (() => string) = cwd,
     skillReferences: readonly import('./domain/catalog/skill.ts').HumanSkillSummary[] = [],
-    hostShellCompletion: boolean = true,
+    hostShellCompletion: import('./runtime/host-shell-completion-port.ts').HostShellCompletionPort | undefined = undefined,
   ): void {
     // TSP I-C: the composition moved VERBATIM into the shared installed-provider
     // factory so the TSP renderer composes the same completion authority from the

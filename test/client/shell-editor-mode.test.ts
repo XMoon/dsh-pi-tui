@@ -20,9 +20,11 @@ import { Text } from '@xmoon76/pi-tui'
 import type { EditorHost, ExtensionEditor } from '../../src/extension/public-types.ts'
 import { runOwned, type OwnedTaskOptions } from '../../src/runtime/process/tasks.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
-import { resetCommandCacheForTest, setCompgenRunnerForTest } from '../../src/client/shell/compgen.ts'
+import { resetCommandCacheForTest, requestShellCandidates, setCompgenRunnerForTest } from '../../src/client/shell/compgen.ts'
+import type { HostShellCompletionPort, HostShellCompletionRequest } from '../../src/runtime/host-shell-completion-port.ts'
 import { MentionProvider } from '../../src/tui/interaction/autocomplete/provider.ts'
 import { DirectHostFilePort } from '../../src/runtime/direct/host-file-direct.ts'
+import { EMPTY_DIRECT_SHELL_COMPLETION } from '../support/host-shell-completion.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
 
@@ -45,6 +47,23 @@ const owned = <T>(label: string, task: () => T | Promise<T>, options: Omit<Owned
 
 /** A never-aborted signal for direct provider calls. */
 const abort = new AbortController().signal
+
+const directShellCompletion: HostShellCompletionPort = {
+  pathAuthority: 'client',
+  async complete({ request, signal }) {
+    if (request.kind === 'paths') return { kind: 'ok', candidates: [] }
+    const query: Exclude<HostShellCompletionRequest, { kind: 'paths' }> = request
+    const candidateRequest = query.kind === 'commands'
+      ? { kind: 'commands' as const }
+      : query.kind === 'variables'
+        ? { kind: 'variables' as const, prefix: query.prefix }
+        : { kind: 'subcommands' as const, command: query.command }
+    return {
+      kind: 'ok',
+      candidates: await requestShellCandidates(candidateRequest, process.cwd(), signal),
+    }
+  },
+}
 
 /** A throwaway workspace (completion fixtures live under the cwd). */
 function fixtureWorkspace(life: TestLifecycle): string {
@@ -89,7 +108,16 @@ function startApp(
     onExit: () => {},
     onCancel: () => { cancels += 1 },
   })
-  app.setCommandCompletions(options.commands ?? [], cwd, options.fileReferences ?? null)
+  app.setCommandCompletions(
+    options.commands ?? [],
+    cwd,
+    options.fileReferences ?? null,
+    undefined,
+    undefined,
+    undefined,
+    [],
+    directShellCompletion,
+  )
   app.start()
   startedApps.add(app)
   return { vt, app, submitted, accelerated, get cancels() { return cancels } }
@@ -693,7 +721,7 @@ test('a shell-mode draft round-trips through a plugin editor handoff with its mo
   const vt = new VirtualTerminal(100, 24)
   const submitted: string[] = []
   const app = new TuiApp(vt, { onSubmit: (text) => submitted.push(text), onExit: () => {} }, { editorRegistry: registry })
-  app.setCommandCompletions([], fixtureWorkspace(life), null)
+  app.setCommandCompletions([], fixtureWorkspace(life), null, undefined, undefined, undefined, [], directShellCompletion)
   app.start()
   startedApps.add(app)
   life.defer(() => app.stop())
@@ -733,7 +761,7 @@ test('a plugin draft without a shell prefix restores in PROMPT mode (no stale !)
   const vt = new VirtualTerminal(100, 24)
   const submitted: string[] = []
   const app = new TuiApp(vt, { onSubmit: (text) => submitted.push(text), onExit: () => {} }, { editorRegistry: registry })
-  app.setCommandCompletions([], fixtureWorkspace(life), null)
+  app.setCommandCompletions([], fixtureWorkspace(life), null, undefined, undefined, undefined, [], directShellCompletion)
   app.start()
   startedApps.add(app)
   life.defer(() => app.stop())
@@ -782,7 +810,7 @@ test('task-browser routing and the footer hint follow the VISIBLE seat editor, n
     if (entered) opened += 1
     return entered
   }
-  app.setCommandCompletions([], fixtureWorkspace(life), null)
+  app.setCommandCompletions([], fixtureWorkspace(life), null, undefined, undefined, undefined, [], directShellCompletion)
   app.start()
   startedApps.add(app)
   life.defer(() => app.stop())
@@ -851,7 +879,7 @@ test('the ↓ hint is gated on the ROUTING gate, not host-editor emptiness (the 
     if (entered) opened += 1
     return entered
   }
-  app.setCommandCompletions([], fixtureWorkspace(life), null)
+  app.setCommandCompletions([], fixtureWorkspace(life), null, undefined, undefined, undefined, [], directShellCompletion)
   app.start()
   startedApps.add(app)
   life.defer(() => app.stop())
@@ -917,7 +945,7 @@ test('the plugin action sink steers the wire form and clears the editor', async 
     onExit: () => {},
     onSteer: (text) => steered.push(text),
   }, { editorRegistry: registry })
-  app.setCommandCompletions([], fixtureWorkspace(life), null)
+  app.setCommandCompletions([], fixtureWorkspace(life), null, undefined, undefined, undefined, [], directShellCompletion)
   app.start()
   startedApps.add(app)
   life.defer(() => app.stop())
@@ -997,7 +1025,7 @@ test('a busy Esc cancels BEFORE a consuming plugin editor sees it', async (t) =>
     onExit: () => {},
     onCancel: () => { cancels += 1 },
   }, { editorRegistry: registry })
-  app.setCommandCompletions([], fixtureWorkspace(life), null)
+  app.setCommandCompletions([], fixtureWorkspace(life), null, undefined, undefined, undefined, [], directShellCompletion)
   app.start()
   startedApps.add(app)
   life.defer(() => app.stop())
@@ -1161,7 +1189,7 @@ test('a plugin editor that DECLINES Esc still arms the host double-Esc cancel', 
     onExit: () => {},
     onCancel: () => { cancels += 1 },
   }, { editorRegistry: registry })
-  app.setCommandCompletions([], fixtureWorkspace(life), null)
+  app.setCommandCompletions([], fixtureWorkspace(life), null, undefined, undefined, undefined, [], directShellCompletion)
   app.start()
   startedApps.add(app)
   life.defer(() => app.stop())
@@ -1209,7 +1237,7 @@ test('a consumed plugin Esc disarms a window armed by a prior declined Esc', asy
     onExit: () => {},
     onCancel: () => { cancels += 1 },
   }, { editorRegistry: registry })
-  app.setCommandCompletions([], fixtureWorkspace(life), null)
+  app.setCommandCompletions([], fixtureWorkspace(life), null, undefined, undefined, undefined, [], directShellCompletion)
   app.start()
   startedApps.add(app)
   life.defer(() => app.stop())
@@ -1260,7 +1288,7 @@ test('a consumed onSingleEscape disarms the pending double-Esc window', async (t
     // that opened between the presses).
     onSingleEscape: () => { escCount += 1; return escCount === 2 },
   })
-  app.setCommandCompletions([], fixtureWorkspace(life), null)
+  app.setCommandCompletions([], fixtureWorkspace(life), null, undefined, undefined, undefined, [], directShellCompletion)
   app.start()
   startedApps.add(app)
   life.defer(() => app.stop())
@@ -1287,7 +1315,7 @@ test('the external editor round-trips the WIRE form (shell modes switchable in $
     openExternalEditor: async (draft) => { seenDraft = draft; return '!!pwd' },
     runOwned: owned,
   })
-  app.setCommandCompletions([], fixtureWorkspace(life), null)
+  app.setCommandCompletions([], fixtureWorkspace(life), null, undefined, undefined, undefined, [], directShellCompletion)
   app.start()
   startedApps.add(app)
   life.defer(() => app.stop())
@@ -1315,7 +1343,7 @@ test('a prompt-mode draft edited into a shell line in $EDITOR comes back as shel
     openExternalEditor: async () => '!pwd',
     runOwned: owned,
   })
-  app.setCommandCompletions([], fixtureWorkspace(life), null)
+  app.setCommandCompletions([], fixtureWorkspace(life), null, undefined, undefined, undefined, [], directShellCompletion)
   app.start()
   startedApps.add(app)
   life.defer(() => app.stop())
@@ -1407,6 +1435,7 @@ test('a shell-mode dropdown closes when Backspace returns to the prompt', async 
     ok: true,
     lines: expression.includes('compgen -A command') ? ['git', 'gist', 'grep'] : [],
   }))
+  resetCommandCacheForTest()
   try {
     vt.sendInput('!')
     await vt.waitForRender()
@@ -1453,7 +1482,7 @@ test('the Stable autocomplete extension query keeps the WIRE document in shell m
   app.setCommandCompletions([], fixtureWorkspace(life), null, async (query) => {
     queries.push({ lines: [...query.lines], cursorCol: query.cursorCol })
     return null
-  })
+  }, undefined, undefined, [], directShellCompletion)
   app.start()
   startedApps.add(app)
   life.defer(() => app.stop())
@@ -1630,7 +1659,7 @@ test('the Stable autocomplete extension query keeps the wire document on MULTILI
   app.setCommandCompletions([], fixtureWorkspace(life), null, async (query) => {
     queries.push({ lines: [...query.lines], cursorLine: query.cursorLine, cursorCol: query.cursorCol })
     return null
-  })
+  }, undefined, undefined, [], directShellCompletion)
   app.start()
   startedApps.add(app)
   life.defer(() => app.stop())
@@ -1661,7 +1690,7 @@ test('MentionProvider completes a multiline shell draft with the wire line-0 pre
   const root = fixtureWorkspace(life)
   let mode: 'prompt' | 'shell-context' | 'shell-local' = 'shell-context'
   const source = (): 'prompt' | 'shell-context' | 'shell-local' => mode
-  const provider = new MentionProvider([], root, null, source, undefined, undefined, undefined, [], true)
+  const provider = new MentionProvider([], root, null, source, undefined, undefined, undefined, [], directShellCompletion)
   // Cursor on line 0: the virtual prefix applies.
   const first = await provider.getSuggestions(['gi', 'more'], 0, 2, { signal: abort })
   assert.ok(first !== null && first.items.some(item => item.value === 'git'), 'line 0 completes as a shell command')
@@ -1700,7 +1729,7 @@ test('Ctrl+C on a BARE ! (empty body, shell mode) clears the mode and arms the e
     onSubmit: () => {},
     onExit: () => { exits += 1 },
   })
-  app.setCommandCompletions([], fixtureWorkspace(life), null)
+  app.setCommandCompletions([], fixtureWorkspace(life), null, undefined, undefined, undefined, [], directShellCompletion)
   app.start()
   startedApps.add(app)
   life.defer(() => app.stop())
@@ -1724,7 +1753,7 @@ test('a plugin DECLINED ! round-trips through the host shell mode into the wire 
   const registry = new EditorRegistry()
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
-  app.setCommandCompletions([], fixtureWorkspace(life), null)
+  app.setCommandCompletions([], fixtureWorkspace(life), null, undefined, undefined, undefined, [], directShellCompletion)
   app.start()
   startedApps.add(app)
   life.defer(() => app.stop())
@@ -1812,7 +1841,7 @@ test('a Stable extension suggestion applies through the wire adapter symmetrical
       ],
       prefix: '/zzz-no-such',
     }
-  })
+  }, undefined, undefined, [], directShellCompletion)
   app.start()
   startedApps.add(app)
   life.defer(() => app.stop())
@@ -1916,7 +1945,7 @@ test('a Stable extension prefix computed on the WIRE line applies without corrup
     // legitimately includes the synthetic `!`.
     items: [{ value: 'checkout', label: 'checkout' }],
     prefix: '!ch',
-  }))
+  }), undefined, undefined, [], directShellCompletion)
   app.start()
   startedApps.add(app)
   life.defer(() => app.stop())
@@ -1925,6 +1954,7 @@ test('a Stable extension prefix computed on the WIRE line applies without corrup
   // plugin chain is consulted. ONE item is auto-applied by the fork on
   // the first forced Tab — the exact path that must not corrupt.
   setCompgenRunnerForTest(() => Promise.resolve({ ok: false, lines: [] }))
+  resetCommandCacheForTest()
   try {
     vt.sendInput('!')
     vt.sendInput('ch')
@@ -1950,7 +1980,7 @@ test('a mid-body ! completion token (echo !ch) keeps its literal !', async (t) =
     // the extension prefix includes it and it must survive the apply.
     items: [{ value: '!checkout', label: '!checkout' }],
     prefix: '!ch',
-  }))
+  }), undefined, undefined, [], directShellCompletion)
   app.start()
   startedApps.add(app)
   life.defer(() => app.stop())
@@ -2036,7 +2066,7 @@ test('a continuation-line /u in shell-local is a PATH (no slash commands, no dou
 test('provider-level: a continuation-line /u applies as a path on any shell line', async (t) => {
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)
-  const provider = new MentionProvider([], root, null, () => 'shell-context' as const, undefined, undefined, undefined, [], true)
+  const provider = new MentionProvider([], root, null, () => 'shell-context' as const, undefined, undefined, undefined, [], EMPTY_DIRECT_SHELL_COMPLETION)
   const applied = provider.applyCompletion(['git status', '/u'], 1, 2, { value: '/usr/', label: 'usr' }, '/u')
   assert.deepEqual(applied, { lines: ['git status', '/usr/'], cursorLine: 1, cursorCol: 5 },
     'the synthetic prefix never enters a continuation line and the slash is never doubled')
@@ -2063,7 +2093,7 @@ test('the extension chain is NOT consulted on a continuation-line natural / trig
       ],
       prefix: '/zzz-no-such',
     }
-  })
+  }, undefined, undefined, [], directShellCompletion)
   app.start()
   startedApps.add(app)
   life.defer(() => app.stop())
@@ -2147,7 +2177,7 @@ test('completion uses the VISIBLE seat mode — a hidden host shell mode never l
   app.setCommandCompletions([], fixtureWorkspace(life), null, async (query) => {
     queries.push({ lines: [...query.lines] })
     return null
-  })
+  }, undefined, undefined, [], directShellCompletion)
   app.start()
   startedApps.add(app)
   life.defer(() => app.stop())
@@ -2229,7 +2259,7 @@ test('a replacement editor submit keeps the shell wire form through the host fal
   const vt = new VirtualTerminal(100, 24)
   const submitted: string[] = []
   const app = new TuiApp(vt, { onSubmit: (text) => submitted.push(text), onExit: () => {} }, { editorRegistry: registry })
-  app.setCommandCompletions([], fixtureWorkspace(life), null)
+  app.setCommandCompletions([], fixtureWorkspace(life), null, undefined, undefined, undefined, [], directShellCompletion)
   app.start()
   startedApps.add(app)
   life.defer(() => app.stop())
@@ -2285,7 +2315,7 @@ test('a replacement plugin Tab runs the shell completion grammar of the wire doc
   app.setCommandCompletions([], fixtureWorkspace(life), null, async (query) => {
     queries.push({ lines: [...query.lines], cursorCol: query.cursorCol })
     return null
-  })
+  }, undefined, undefined, [], directShellCompletion)
   app.start()
   startedApps.add(app)
   life.defer(() => app.stop())
@@ -2357,7 +2387,7 @@ test('a text change after a declined Tab cancels the stale dropdown (no stale ac
   const registry = new EditorRegistry()
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
-  app.setCommandCompletions([], fixtureWorkspace(life), null)
+  app.setCommandCompletions([], fixtureWorkspace(life), null, undefined, undefined, undefined, [], directShellCompletion)
   app.start()
   startedApps.add(app)
   life.defer(() => app.stop())
@@ -2408,10 +2438,10 @@ test('a text change after a declined Tab cancels the stale dropdown (no stale ac
     assert.equal(plugin.getText(), '!echo $gs', 'a stale dropdown must never accept into the edited document')
     // The pending refresh resolves with the FRESH candidates; the next Tab
     // accepts through the NEW dropdown into the plugin wire document.
-    resolveRefresh!({ ok: true, lines: ['gist', 'gist'] })
+    resolveRefresh!({ ok: true, lines: ['gsomething', 'gsomething'] })
     await vt.waitForRender()
     vt.sendInput('\t')
-    await pollUntil(() => plugin.getText() === '!echo $gist ',
+    await pollUntil(() => plugin.getText() === '!echo $gsomething ',
       'the fresh completion applies into the plugin wire document')
   } finally {
     setCompgenRunnerForTest(undefined)
@@ -2426,7 +2456,7 @@ test('a declined pageUp/pageDown keeps the open dropdown alive (fork parity)', a
   const registry = new EditorRegistry()
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
-  app.setCommandCompletions([], fixtureWorkspace(life), null)
+  app.setCommandCompletions([], fixtureWorkspace(life), null, undefined, undefined, undefined, [], directShellCompletion)
   app.start()
   startedApps.add(app)
   life.defer(() => app.stop())
@@ -2503,7 +2533,7 @@ test('a synchronous rejection restore survives the fallback sync-back', async (t
     },
     onExit: () => {},
   }, { editorRegistry: registry })
-  app.setCommandCompletions([], fixtureWorkspace(life), null)
+  app.setCommandCompletions([], fixtureWorkspace(life), null, undefined, undefined, undefined, [], directShellCompletion)
   app.start()
   startedApps.add(app)
   life.defer(() => app.stop())

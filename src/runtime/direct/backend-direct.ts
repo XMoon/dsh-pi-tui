@@ -40,6 +40,7 @@ import { DirectHostCommandPort } from './host-command-direct.ts'
 import { DirectPluginManagerPort } from './plugin-manager-direct.ts'
 import { DirectJobObservationPort } from './job-observation-direct.ts'
 import { DirectHostUserShellPort, type DirectShellCapability } from './host-user-shell-direct.ts'
+import { DirectHostShellCompletionPort, type DirectShellCandidateReader } from './host-shell-completion-direct.ts'
 import { DirectDeliveredFileReadPort } from './deliverables-direct.ts'
 import { DirectSessionWorkspaceFacts } from './session-workspace-facts-direct.ts'
 import { DirectSchedulePort } from './schedule-direct.ts'
@@ -74,12 +75,16 @@ export interface DirectBackendDeps {
   readonly modelSelections: SessionModelSelectionOwnerLike & DurableModelSelectionReader
   /** The Direct Session ownership pool (lifecycle retirement/claim). */
   readonly ownerPool: DirectOwnerPoolLike
+  /** The current Direct Host Session working directory supplied by the status owner. */
+  readonly sessionCwd: () => string
   /** Resolve one preset composition (the runner's compose). */
   readonly compose: (presetId?: string) => Promise<CompositionLike>
   /** The exact live Agent of one Session, or undefined when not mounted. */
   readonly agentFor: (sessionId: string) => DirectLiveAgentLike | undefined
   /** The live Agent plus the interactive continuable child currently viewed. */
   readonly queueAgentFor: (sessionId: string) => DirectLiveAgentLike | undefined
+  /** The existing Direct compgen implementation, injected across the composition boundary. */
+  readonly shellCandidates: DirectShellCandidateReader
   /** The Host Session/Agent accessors the Direct session reader projects. */
   readonly liveResolvers: DirectSessionLiveResolvers
 }
@@ -139,6 +144,7 @@ export function createDirectRuntimeBackend(deps: DirectBackendDeps): Backend {
       deps.ctx,
       () => deps.ctx.get('shell') as unknown as DirectShellCapability | undefined,
     ),
+    new DirectHostShellCompletionPort(deps.sessionCwd, deps.agentFor, deps.shellCandidates),
     // Delivered files PR2: the official Host file service read in-process,
     // under the same Session-derived scope the official Remote lookup uses.
     new DirectDeliveredFileReadPort(deps.ctx),

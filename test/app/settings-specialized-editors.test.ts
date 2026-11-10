@@ -178,7 +178,7 @@ function makeRunner(
       }
     },
     backendKind: 'direct' as const,
-    hostShellCompletion: true,
+    hostShellCompletion: { pathAuthority: 'client', complete: async () => ({ kind: 'ok', candidates: [] }) },
     forceContextMeasurementResult: () => ({ value: undefined, observation: 'unavailable' as const }),
     subscribeSessionScopeInvalidation: () => () => {},
     listScopedCommands: () => [],

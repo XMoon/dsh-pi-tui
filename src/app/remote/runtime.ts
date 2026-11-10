@@ -18,6 +18,7 @@ import { RemoteSessionMarkdown } from '../../runtime/remote/session-markdown-rem
 import { createRemoteBackend } from '../../runtime/remote/backend-remote.ts'
 import { RemotePromptSerializerProduction } from '../../runtime/remote/prompt-serializer-remote.ts'
 import { RemoteHostUserShellPort } from '../../runtime/remote/host-user-shell-remote.ts'
+import { RemoteHostShellCompletionPort } from '../../runtime/remote/host-shell-completion-remote.ts'
 import { RemoteWebAccessPort } from '../../runtime/remote/web-access-remote.ts'
 import { mergeCause } from './dispose-cause.ts'
 import { createRemoteM3ASemantics, remoteM3ARuntimeSourceOf, type RemoteM3ARuntimeSource, type RemoteM3ASemantics } from './m3a-semantics.ts'
@@ -167,10 +168,14 @@ export async function createRemoteBackendRuntime(
         config,
         sessionArchive,
         sessionMarkdown,
-        // M3-4 PR3: the Remote Host user-shell adapter (truthful
-        // unavailable; CARRIER_GAP) — served by the backend, so the
-        // composition root holds no static Remote edge.
-        hostUserShell: new RemoteHostUserShellPort(),
+        hostUserShell: new RemoteHostUserShellPort(
+          options.runtime.remote.piTuiHostUserShell,
+          options.runtime.connection.generation,
+        ),
+        hostShellCompletion: new RemoteHostShellCompletionPort(
+          options.runtime.remote.piTuiHostUserShell,
+          options.runtime.connection.generation,
+        ),
         // M5-W PR-C: the Split Client's Web frontend control over the package's
         // ONE private `piTuiWebAccess` namespace and the SAME Connection
         // generation source every other adapter fences on.

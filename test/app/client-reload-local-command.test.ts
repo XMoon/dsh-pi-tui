@@ -258,7 +258,7 @@ function startHarness(): Harness {
       clearError: () => {},
     },
     artifacts: { start: () => {} },
-    shell: { run: () => {}, interrupt: () => {} },
+    shell: { run: () => {}, interrupt: () => {}, cancelRun: () => false },
     supportsLocalShellCards: true,
     supportsTuiBuiltinUi: true,
     retainsStaleDraftRestore: true,

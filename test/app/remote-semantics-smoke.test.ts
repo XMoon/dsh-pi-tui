@@ -58,6 +58,8 @@ import * as StorageJson from '@deepseek-ai/dsh-storage-json'
 import * as StorageDomain from '@deepseek-ai/dsh-storage-domain'
 import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
 import WebServer from '@deepseek-ai/dsh-host-webserver'
+import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
+import LocalSandboxProvider from '@deepseek-ai/dsh-sandbox-local'
 import { apply as applyConnection, inject as connectionInject } from '@deepseek-ai/dsh-client-connection'
 import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import WebSocket, { type RawData } from 'ws'
@@ -433,9 +435,11 @@ async function createHostFixture(
     // without it the `skills/list` Remote never registers. The official base
     // layer mounts this same row once.
     await ctx.plugin(WorkingDirectory)
-    // M4-B2-HF: the built-in PiTui Host Runtime owns the package contribution
-    // and both private Host services exactly once; Performance stays its own row.
-    await ctx.plugin(piTuiHostRuntime)
+    await ctx.plugin(LocalSandboxProvider)
+    await ctx.plugin(LocalSubprocessRuntime)
+    // M6-1 F1: the built-in Host Runtime owns user-shell execution, sandbox
+    // enforcement and the private file/completion services exactly once.
+    await ctx.plugin(piTuiHostRuntime, { sessionId: '' } as never)
     await ctx.plugin(performanceHost)
     await ctx.plugin(Storage)
     await ctx.plugin(StorageJson, { root: join(workRoot, 'storages') })

@@ -915,7 +915,7 @@ async function mountChain(
       clearError: () => {},
     },
     artifacts: { start: () => {} },
-    shell: { run: () => {}, interrupt: () => {} },
+    shell: { run: () => {}, interrupt: () => {}, cancelRun: () => false },
     supportsLocalShellCards: false,
     supportsTuiBuiltinUi: true,
     retainsStaleDraftRestore: true,
@@ -956,7 +956,7 @@ async function mountChain(
     signal: new AbortController().signal,
     commandRegistry: registry as never,
     clientCommands: createClientCommandRegistry(parseCommand),
-    hostShellCompletion: false,
+    hostShellCompletion: undefined,
     imageStore: images,
     fileStore: files,
     copyToClipboard: async () => true,
@@ -2297,7 +2297,7 @@ test('a Client-local read still in flight when the seat moves commits nothing ->
     scope: () => ({ kind: 'workspace', cwd: home }),
     localCwd: () => home,
     skillReferences: [],
-    hostShellCompletion: false,
+    hostShellCompletion: undefined,
   })
   assert.equal(h.mountPorts.stagers.length, 1, 'the late stager install reached no mount')
   assert.equal(h.mountPorts.catalogInstalls.length, catalogsBefore, 'the late catalog install reached no mount')

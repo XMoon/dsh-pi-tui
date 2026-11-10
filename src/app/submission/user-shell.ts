@@ -31,7 +31,10 @@ import { runOwned } from '../../runtime/process/tasks.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import type { InterruptAgentLike } from '../session/interrupt.ts'
 import type { TuiSettingsDoc } from '../../runtime/config-port.ts'
-import type { HostUserShellPort } from '../../runtime/host-user-shell-port.ts'
+import {
+  HostUserShellOutcomeUnknownError,
+  type HostUserShellPort,
+} from '../../runtime/host-user-shell-port.ts'
 import type { SessionWriter, WriteOutcome } from '../../runtime/session-writer-port.ts'
 import { localShellSandboxPreferenceOf, shellCommandOf, shellModeOf } from './shell-context.ts'
 import { submitShell } from '../submission/runtime.ts'
@@ -77,13 +80,16 @@ export interface UserShellDeps<ExactAgent extends InterruptAgentLike> {
   }
   /** The synchronous live-scope capture (throws when no live owner). */
   readonly requireLiveScope: () => LiveSessionScope
-  /** The optional live-scope capture (undefined when no live owner) — the
-   * turn-cancel gate: without an owner the gesture is a committed no-op. */
+  /** The optional live-scope capture (undefined when no live owner) — without
+   * a live owner the turn-cancel gesture is a committed no-op. */
   readonly captureLiveScope: () => LiveSessionScope | undefined
+  readonly isLiveScopeCurrent: (scope: LiveSessionScope) => boolean
   /** The scope-bound writer section (the context-mode shell submit). */
-  readonly writerSection: <T>(task: () => Promise<T>) => Promise<T>
+  readonly writerSection: <T>(scope: LiveSessionScope, task: () => Promise<T>) => Promise<T>
   /** The semantic session writer (the interrupt cancel + prompt write). */
   readonly writer: SessionWriter
+  /** Remote-only immutable prompt snapshot builder; Direct keeps createUserMessage. */
+  readonly prepareTransportMessage?: (sessionId: string, text: string) => Promise<unknown>
   /** The status owner seam (the shell working directory). */
   readonly status: { sessionCwd(): string }
   /** The TUI-settings facade (the Host user-shell policy), read live. */
@@ -110,6 +116,8 @@ export interface UserShellOwner {
   run(text: string, ackToken: number | undefined, endWrite: () => void): void
   /** Abort the running Host user-shell run and interrupt the live Agent (Esc / cancel). */
   interrupt(): void
+  /** Abort the active Host Shell run only; false means no cancellable run exists. */
+  cancelRun(): boolean
   /** Abort the run and remove every retained full-output temp file. */
   dispose(): void
 }
@@ -146,27 +154,18 @@ export function createUserShell<ExactAgent extends InterruptAgentLike>(
   // Abort handle for the currently running Host user-shell run.
   let shellController: AbortController | undefined
 
-  /**
-   * The Esc/cancel-activity gesture. Two DISTINCT semantic operations
-   * (M3-4 PR3 §23/§27):
-   *
-   * 1. the Host user-shell PROCESS cancel — the branch-local abort
-   *    controller, forwarded to the Host process by the adapter;
-   * 2. the Session TURN cancel — `SessionRuntime.interrupt`, the ONE
-   *    scope-bound CONTROL admission. It is accepted while a navigation
-   *    transition holds the ordinary-writer barrier, addresses the EXACT
-   *    captured owner (never a session-id re-resolution), and keeps the
-   *    Host pending inbox. A stale capture or an exiting runner settles as
-   *    `cancelled` (the request provably never left the TUI), so a normal
-   *    supersede is never reported as an `agent interrupt` error.
-   */
+  /** Cancel only an active Host Shell process; idle Escape uses this path. */
+  const cancelRun = (): boolean => {
+    const controller = shellController
+    if (controller === undefined) return false
+    controller.abort()
+    return true
+  }
+
+  /** The busy Agent-turn/cancel-activity gesture: stop Shell work and the exact live Session turn. */
   const interrupt = (): void => {
     if (deps.isCleanedUp()) return
-    shellController?.abort()
-    // The TURN cancel is scoped: without a live session owner (an idle or
-    // sessionless surface) there is no turn to cancel — the gesture is a
-    // committed no-op (the historical interruptAgent(undefined, …) parity),
-    // never an error.
+    cancelRun()
     const scope = deps.captureLiveScope()
     if (scope === undefined) return
     const generation = deps.ownership.generation()
@@ -175,7 +174,7 @@ export function createUserShell<ExactAgent extends InterruptAgentLike>(
     // here: the outcome/notice gates below belong to this gesture.
     runOwned('agent interrupt', () => deps.session.interrupt(scope), {
       diag: deps.diag,
-      sessionId: () => deps.liveAgent()?.session.id,
+      sessionId: () => scope.sessionId,
       onResult: (outcome) => {
         if (deps.isCleanedUp() || deps.ownership.generation() !== generation) return
         if (outcome.kind === 'committed' || outcome.kind === 'cancelled') return
@@ -226,19 +225,17 @@ export function createUserShell<ExactAgent extends InterruptAgentLike>(
       settleWrite()
       return
     }
-    // NOTE: the context-mode submit ack is armed AT THE GESTURE in
-    // dispatchUserInput (before ensureSession) — NEVER here, or the T0
-    // baseline would rebase after the session create. `ackToken` scopes
-    // every terminal settle below to THIS gesture: a newer submission
-    // (bumped epoch) makes them no-ops.
     const shellTerminalAck = (reason: string): void => {
       if (ackToken === undefined) return
       deps.submission.settleAck(reason, { token: ackToken, terminal: true })
     }
-    // The generation the run STARTED under: a session switch while the
-    // command runs must not post the output into the new session (the
-    // switch already cleared the card; the notify explains what happened).
-    const generationAtRun = deps.ownership.generation()
+    const scope = deps.captureLiveScope()
+    if (scope === undefined) {
+      deps.notify('user shell requires a live Session', 'error')
+      shellTerminalAck('host user shell refused without a live Session')
+      settleWrite()
+      return
+    }
     shellController?.abort()
     shellController = new AbortController()
     const localSignal = shellController.signal
@@ -266,15 +263,14 @@ export function createUserShell<ExactAgent extends InterruptAgentLike>(
      * the ordered write, its outcome settlement and the card dismissal; the
      * runner supplies the narrow TUI hooks.
      */
+    const prepareTransportMessage = deps.prepareTransportMessage
     const submitResult = (result: string): void => {
       submitShell({
         command,
         result,
-        generationAtRun,
+        scope,
         isDisposed: () => deps.isCleanedUp(),
-        currentGeneration: () => deps.ownership.generation(),
-        currentSessionId: () => deps.liveAgent()?.session.id,
-        currentAgent: () => deps.liveAgent(),
+        isScopeCurrent: captured => deps.isLiveScopeCurrent(captured),
         terminalAck: shellTerminalAck,
         clearSettledLocalMessages: () => deps.app().clearSettledLocalMessages(),
         notify: (message, kind) => {
@@ -284,6 +280,9 @@ export function createUserShell<ExactAgent extends InterruptAgentLike>(
         markDispatch: (sessionId) => deps.submission.markDispatch(sessionId),
         writerSection: deps.writerSection,
         writer: deps.writer,
+        ...(prepareTransportMessage === undefined ? {} : {
+          prepareMessage: (captured, messageText) => prepareTransportMessage(captured.sessionId, messageText),
+        }),
         createMessage: (messageText) => createUserMessage({
           content: [{ type: 'text', text: messageText }],
           source: { kind: 'user' },
@@ -295,7 +294,7 @@ export function createUserShell<ExactAgent extends InterruptAgentLike>(
     // A settled latch: the card must settle EXACTLY once — the first
     // authoritative event wins.
     let settled = false
-    const settle = (result: string, status: 'ok' | 'error'): void => {
+    const settle = (result: string, status: 'ok' | 'error', submitContext = true): void => {
       if (deps.isCleanedUp() || settled) return
       settled = true
       deps.app().updateLocalMessage(card, {
@@ -318,7 +317,7 @@ export function createUserShell<ExactAgent extends InterruptAgentLike>(
         shellTerminalAck('shell run aborted')
         settleWrite()
       }
-      if (includeInContext && !localSignal.aborted) submitResult(result)
+      if (includeInContext && submitContext && !localSignal.aborted) submitResult(result)
       else settleWrite()
     }
     // The Host execution policy from the persisted preference (a policy
@@ -332,7 +331,7 @@ export function createUserShell<ExactAgent extends InterruptAgentLike>(
     // port owns the Host-side execution start.
     runOwned('user shell', async () => {
       const admission = await deps.shell.execute({
-        sessionId: deps.liveAgent()?.session.id ?? '',
+        sessionId: scope.sessionId,
         cwd: deps.status.sessionCwd(),
         command,
         policy,
@@ -344,8 +343,14 @@ export function createUserShell<ExactAgent extends InterruptAgentLike>(
         // with the port's truthful message; no Session write happens. This
         // exit is TERMINAL for the gesture's ack row in BOTH modes (nothing
         // downstream — no submitResult — will settle it), so it settles here.
-        settle(admission.reason.message, 'error')
+        settle(admission.reason.message, 'error', false)
         shellTerminalAck('host user-shell unavailable')
+        return
+      }
+      if (admission.kind === 'indeterminate') {
+        releaseController()
+        settle(admission.message, 'error', false)
+        shellTerminalAck('host user-shell outcome is indeterminate')
         return
       }
       const execution = admission.execution
@@ -390,19 +395,42 @@ export function createUserShell<ExactAgent extends InterruptAgentLike>(
       // after the stream has fully ended, so the bounded tail/disk capture is
       // authoritative at settle time and a lagging delivery cannot be cut
       // off by an early `result()` resolution.
+      const outputIterator = execution.output()[Symbol.asyncIterator]()
       const drained = (async (): Promise<void> => {
-        for await (const chunk of execution.output()) {
-          if (deps.isCleanedUp()) continue // TEARDOWN QUISCENCE: keep draining
-          // (discard) — the only consumer must release the backpressured
-          // producer or the Host process can never reach close and the
-          // result() join below deadlocks during dispose.
+        for (;;) {
+          const next = await outputIterator.next()
+          if (next.done === true) return
+          const chunk = next.value
+          if (deps.isCleanedUp()) continue
           bounded.append(chunk.text, chunk.bytes)
           full.append(Buffer.from(chunk.text, 'utf8'))
           scheduleTailFlush()
         }
       })()
-      const result = await execution.result()
-      await drained
+      let result: Awaited<ReturnType<typeof execution.result>>
+      try {
+        result = await execution.result()
+        await drained
+      } catch (error) {
+        let drainFailure: unknown
+        try {
+          await outputIterator.return?.()
+        } catch (cleanupError) {
+          drainFailure = cleanupError
+        }
+        try {
+          await drained
+        } catch (errorWhileDraining) {
+          drainFailure ??= errorWhileDraining
+        }
+        clearTailTimer()
+        full.dispose()
+        shellTempFiles.delete(fullPath)
+        if (drainFailure !== undefined && drainFailure !== error) {
+          throw new AggregateError([error, drainFailure], 'Host user-shell result and output drain both failed')
+        }
+        throw error
+      }
       releaseController()
       clearTailTimer()
       if (deps.isCleanedUp()) {
@@ -446,10 +474,11 @@ export function createUserShell<ExactAgent extends InterruptAgentLike>(
       full.dispose()
       shellTempFiles.delete(fullPath)
       const exit = result.exit.kind === 'exit' ? `exit ${result.exit.code}` : `signal ${result.exit.signal}`
-      settle(formatSettledOutput(bounded, exit), result.exit.kind === 'exit' && result.exit.code === 0 ? 'ok' : 'error')
+      const denialNotice = result.sandboxDenied === true ? 'sandbox denied\n' : ''
+      settle(`${denialNotice}${formatSettledOutput(bounded, exit)}`, result.exit.kind === 'exit' && result.exit.code === 0 ? 'ok' : 'error')
     }, {
       diag: deps.diag,
-      sessionId: () => deps.liveAgent()?.session.id,
+      sessionId: () => scope.sessionId,
       isCancellation: () => localSignal.aborted,
       onCancel: () => {
         // A cancellation-shaped rejection before the admission settled:
@@ -463,15 +492,14 @@ export function createUserShell<ExactAgent extends InterruptAgentLike>(
       },
       onError: (error) => {
         releaseController()
-        // An infrastructure failure (nothing executed — e.g. an unusable
-        // cwd or a spawn failure): settle the card like a failed run. A
-        // failure here does NOT run submitResult (only the settled
-        // committed path does), so this exit is terminal for the ack row.
-        const message = safeErrorMessage(error)
-        settle(`failed: ${message}`, 'error')
-        if (!localSignal.aborted) {
-          shellTerminalAck('shell run failed')
+        if (error instanceof HostUserShellOutcomeUnknownError) {
+          settle(`${error.message}\nThe command may have executed — do not retry automatically`, 'error', false)
+          if (!localSignal.aborted) shellTerminalAck('host user-shell outcome unknown — do not retry automatically')
+          return
         }
+        const message = safeErrorMessage(error)
+        settle(`failed: ${message}`, 'error', false)
+        if (!localSignal.aborted) shellTerminalAck('shell run failed')
       },
     })
   }
@@ -491,6 +519,7 @@ export function createUserShell<ExactAgent extends InterruptAgentLike>(
   return {
     run: runUserShell,
     interrupt,
+    cancelRun,
     dispose,
   }
 }

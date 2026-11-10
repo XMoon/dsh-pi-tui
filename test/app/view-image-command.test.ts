@@ -114,7 +114,7 @@ function setup(options: {
     commandRegistry: undefined,
     clientCommands: createClientCommandRegistry(parseCommand),
     hostFile: new DirectHostFilePort(() => undefined),
-    hostShellCompletion: true,
+    hostShellCompletion: { pathAuthority: 'client', complete: async () => ({ kind: 'ok', candidates: [] }) },
     interaction: {
       questions: {
         onRequest: () => true,
@@ -524,6 +524,7 @@ test('a user Enter on /view-image routes through the REAL controller into the pi
       // model prompt above; `/view-image` must reach neither.
       run: (text) => { shellRuns.push(text) },
       interrupt: () => {},
+      cancelRun: () => false,
     },
     supportsLocalShellCards: true,
     supportsTuiBuiltinUi: true,
@@ -576,7 +577,7 @@ test('a user Enter on /view-image routes through the REAL controller into the pi
     commandRegistry: undefined,
     clientCommands,
     hostFile: new DirectHostFilePort(() => undefined),
-    hostShellCompletion: true,
+    hostShellCompletion: { pathAuthority: 'client', complete: async () => ({ kind: 'ok', candidates: [] }) },
     interaction: {
       questions: { onRequest: () => true, subscribe: () => undefined, snapshot: () => undefined, claimTimedWait: async () => undefined, answerContinued: async () => 'not-continued' as const },
       onApprovalRequest: () => {},

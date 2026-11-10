@@ -62,7 +62,7 @@ import { createModelSelectionOwner } from './command/model-selection.ts'
 import { createCommandSurface, type CommandSurface } from './command/surface.ts'
 import { createClientReloadCommandRequest } from './command/client-reload.ts'
 import { createArtifactSaveOwner } from './command/artifacts.ts'
-import { createUserShell } from './submission/user-shell.ts'
+import { createUserShell, type UserShellOwner } from './submission/user-shell.ts'
 import { preparePrompt } from './submission/prepared-prompt.ts'
 import { createSubmissionController, type LocalCommandHandler } from './submission/controller.ts'
 import { createViewerRuntime, type ViewerChildSource, type ViewerRuntime } from './surface/viewer-runtime.ts'
@@ -778,6 +778,7 @@ export function applyRunnerWithRuntime(
         ctx,
         diag,
         tuiSettings,
+        sessionCwd: () => status.sessionCwd(),
         // The Direct owner pool is built and owned inside the Direct runtime; it
         // reads the ONE ownership-core release ledger through these two seams.
         waitForRelease: ownership.waitForOwnerRelease,
@@ -2075,10 +2076,9 @@ export function applyRunnerWithRuntime(
         hostFile: backend.hostFile,
         // M5-W PR-C: the Split-Client Web frontend control (`/web`).
         webAccess: backend.webAccess,
-        // Shell amendment (M3-4 PR3): Host-shell completion facts exist only
-        // where the TUI process IS the Host (Direct). Remote has no qualified
-        // shell carrier, so it must show no shell-specific suggestions.
-        hostShellCompletion: selectedRuntime.kind === 'direct',
+        // The selected backend's live semantic completion authority. Direct
+        // compgen stays on the in-process compatibility path; Remote calls Host.
+        hostShellCompletion: backend.hostShellCompletion,
       },
       session: {
         workspaceNextIntent,
@@ -2521,20 +2521,11 @@ export function applyRunnerWithRuntime(
       create: async (options) => requireCreated(await backend.sessionLifecycle.create({ ...options, signal })),
       open: async (options) => requireOpened(await backend.sessionLifecycle.open({ ...options, signal })),
     }
-    // A5b-4 + shell amendment (M3-4 PR3): the user-shell owner (`!` / `!!` +
-    // the shared live-Agent interrupt). Execution is Host-owned behind the
-    // branch-selected Host adapter: Direct runs in-process (spawn behind
-    // adapter ownership; the sandbox policy runs the dsh shell executor and
-    // fails closed when absent); Remote is the truthful-unavailable adapter
-    // (CARRIER_GAP at rc.2 — zero Client spawn, zero ctx.shell escape).
-    // Constructed BEFORE the surface cleanup closure can run; its submission
-    // acknowledgement seams are late-bound (the controller is built below).
-    // Both Host user-shell adapters are served by the selected BACKEND
-    // (Direct in-process / Remote truthful-unavailable) — the composition
-    // root holds neither a static Remote edge nor direct spawn ownership
-    // (M3-4 PR3 shell amendment; the frozen selection-boundary contract).
+    // Host execution stays behind the selected backend. Direct uses its
+    // in-process adapter; Remote uses the authenticated one-shot Host stream.
+    // Busy turn cancellation uses the shared exact-scope SessionRuntime port.
     const userShellPort = backend.hostUserShell
-    const localShell = createUserShell<Agent>({
+    const localShell: UserShellOwner = createUserShell<Agent>({
       app: () => app as TuiApp,
       // PR3-B §B0-7: failure/interrupt notices are renderer-neutral. The Esc
       // interrupt path can run under a non-PiTui renderer (the turn cancel is
@@ -2555,10 +2546,17 @@ export function applyRunnerWithRuntime(
       },
       requireLiveScope,
       captureLiveScope: () => sessionScope.captureLive(),
-      writerSection: (task) => submission.withWriterSection(task),
+      isLiveScopeCurrent: scope => sessionScope.isCurrent(scope),
+      writerSection: (scope, task) => submission.withShellWriterSection(scope, task),
       writer: backend.sessionWriter,
+      ...(remoteSources === undefined ? {} : {
+        prepareTransportMessage: async (sessionId: string, text: string) => preparePrompt(sessionId, text, {
+          images: { values: () => [] },
+          files: { values: () => [] },
+        }),
+      }),
       status: { sessionCwd: () => status.sessionCwd() },
-      tuiSettings,
+      tuiSettings: backend.config.tuiSettings ?? tuiSettings,
       shell: userShellPort,
       submission: {
         settleAck: (reason, options) => submission.settleLocalSubmitAck(reason, options),
@@ -2836,6 +2834,7 @@ export function applyRunnerWithRuntime(
       shell: {
         run: (text, ackToken, endWrite) => localShell.run(text, ackToken, endWrite),
         interrupt: () => localShell.interrupt(),
+        cancelRun: () => localShell.cancelRun(),
       },
       // PR3-B B2-5: the TSP renderer has no local-shell cards; the
       // SubmissionController refuses `!`/`!!` at its ORIGINAL shell-branch

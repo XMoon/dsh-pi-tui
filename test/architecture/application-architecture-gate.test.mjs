@@ -1832,7 +1832,7 @@ test('roots: a recreated file or a dangling old-path import is rejected', () => 
   ]), [])
 })
 
-test('a Remote adapter cannot import the Direct implementation (two HF1 edges excepted)', () => {
+test('a Remote adapter cannot import the Direct implementation (three Host bridge edges excepted)', () => {
   // `direct-import-outside-composition` treats the whole runtime/** layer as
   // Direct composition, so runtime/remote was silently exempt; this check is
   // the actual assertion, and its exception is scoped to the reviewed
@@ -1847,19 +1847,22 @@ test('a Remote adapter cannot import the Direct implementation (two HF1 edges ex
   assert.equal(findRemoteToDirectViolations([
     entry('runtime/remote/example.ts', "const load = () => import('../direct/example.ts')\n"),
   ]).length, 1)
-  // The reviewed HF1 Host-side construction bridge keeps EXACTLY its two
-  // reviewed Direct helpers — a new target from the same file must fail.
+  // The reviewed Host-side construction bridges keep EXACTLY their three
+  // reviewed Direct helpers; a new target from either file must fail.
+  const shellBridge = 'runtime/remote/pi-tui-host-user-shell-host-bridge.ts'
   assert.deepEqual([...REMOTE_TO_DIRECT_APPROVED_EDGES].sort(), [
     `${bridge} -> runtime/direct/file-completion/host-discovery.ts`,
     `${bridge} -> runtime/direct/host-file-augmentation-direct.ts`,
-  ], 'the exception set must stay exactly the two documented HF1 edges')
+    `${shellBridge} -> runtime/direct/file-completion/host-discovery.ts`,
+  ], 'the exception set contains exactly the reviewed Host-side bridge edges')
   assert.deepEqual(findRemoteToDirectViolations([
     entry(bridge, "import { x } from '../direct/file-completion/host-discovery.ts'\n"),
     entry(bridge, "export type { Y } from '../direct/host-file-augmentation-direct.ts'\n"),
-  ]), [], 'the two reviewed edges stay legal (imports and the type re-export)')
+    entry(shellBridge, "import { x } from '../direct/file-completion/host-discovery.ts'\n"),
+  ]), [], 'the reviewed edges stay legal')
   assert.equal(findRemoteToDirectViolations([
-    entry(bridge, "import { x } from '../direct/session-direct.ts'\n"),
-  ]).length, 1, 'the approved bridge importing a THIRD Direct module must fail')
+    entry(shellBridge, "import { x } from '../direct/session-direct.ts'\n"),
+  ]).length, 1, 'the Host user-shell bridge importing another Direct module must fail')
   // The exception is per-edge: another Remote adapter may not use an approved
   // target either.
   assert.equal(findRemoteToDirectViolations([

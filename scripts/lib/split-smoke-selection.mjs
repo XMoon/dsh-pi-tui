@@ -28,6 +28,7 @@ import { runOfficialWebComposition } from '../smoke/split-process/official-web-c
 import { runPtySessionWriteRecovery } from '../smoke/split-process/pty-session-write-recovery.mjs'
 import { runSharedSessionInteractions } from '../smoke/split-process/shared-session-interactions.mjs'
 import { runHostRuntimeDisabled } from '../smoke/split-process/host-runtime-disabled.mjs'
+import { runHostUserShellF1 } from '../smoke/split-process/host-user-shell-f1.mjs'
 import { runRuntimeArtifactRecovery } from '../smoke/split-process/runtime-artifact-recovery.mjs'
 import { runUnknownWriteHostDeath } from '../smoke/split-process/unknown-write-host-death.mjs'
 import { runWebProductQualification } from '../smoke/split-process/web-product.mjs'
@@ -77,6 +78,12 @@ const CASE_REGISTRY = Object.freeze([
     id: 'transport.authenticated-lifecycle',
     title: 'concurrent Host launches elect one authenticated owner whose Client lifecycle survives exits and signals',
     run: runAuthenticatedLifecycle,
+  }),
+  Object.freeze({
+    suite: 'surface',
+    id: 'surface.host-user-shell-f1',
+    title: 'real installed Host Shell and Host completion use Host environment, bound output and exact Session writes',
+    run: runHostUserShellF1,
   }),
   Object.freeze({
     suite: 'surface',

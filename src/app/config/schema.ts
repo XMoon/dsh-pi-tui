@@ -1,13 +1,10 @@
 /**
  * The TUI plugin's Cordis config contract (plan §28): the resumed session id
  * plus the DSH 0.1.7 profile-owned live TUI preferences. Every preference
- * field is a schemastery `.volatile()` reference (PR A): the `tui-app`
- * plugin's Config is the ONE runtime authority, Loader commits live updates
- * into the references without remounting, and the Settings service projects
- * these fields into editable forms keyed by the `tui-app` profile entry.
- *
- * The package entry re-exports `Config` unchanged, so the published root
- * surface is preserved while the composition root consumes the same contract.
+ * field is a schemastery `.volatile()` reference (PR A). Direct's `tui-app`
+ * row and the split Host's `pi-tui-host-runtime` row reuse this exact schema
+ * as the ONE active settings authority for their process; the Host-only profile
+ * disables `tui-app`, so Remote settings mirror the Host Runtime descriptor.
  * @module @xmoon76/dsh-pi-tui/app/config/schema
  */
 

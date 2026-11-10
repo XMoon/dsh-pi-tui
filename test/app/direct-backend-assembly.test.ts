@@ -28,6 +28,7 @@ function makeDeps(): DirectBackendDeps {
     ctx: { get: () => undefined, on: () => () => false },
     diag,
     tuiSettings: undefined,
+    sessionCwd: () => process.cwd(),
     modelSelections: {
       current: () => undefined,
       select: () => {},
@@ -38,6 +39,7 @@ function makeDeps(): DirectBackendDeps {
     compose: async () => ({ setup: () => {} }),
     agentFor: () => undefined,
     queueAgentFor: () => undefined,
+    shellCandidates: async () => [],
     liveResolvers: { sessionOf: () => undefined, agentOf: () => undefined },
   }
 }

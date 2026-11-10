@@ -263,7 +263,7 @@ test('the Direct backend is the current production surface and serves EXACTLY th
   // Session Markdown read, the UI-neutral read-authority facts and the Host
   // Schedule management surface. All stay wired and asserted below; none
   // replaces another.
-  const backend = createDirectBackend(subagent, sessionReader, pendingInputReader, sessionWriter, sessionLifecycle, interaction, catalog, config, hostFile, sessionArchive, sessionMarkdown, hostCommand, pluginManager, jobObservation, hostUserShell, deliveredFileRead, webAccess, sessionWorkspaceFacts, schedule)
+  const backend = createDirectBackend(subagent, sessionReader, pendingInputReader, sessionWriter, sessionLifecycle, interaction, catalog, config, hostFile, sessionArchive, sessionMarkdown, hostCommand, pluginManager, jobObservation, hostUserShell, { pathAuthority: 'client', complete: async () => ({ kind: 'ok', candidates: [] }) }, deliveredFileRead, webAccess, sessionWorkspaceFacts, schedule)
   assert.equal(backend.kind, 'direct')
   assert.equal(backend.subagent, subagent)
   assert.equal(backend.sessionReader, sessionReader)

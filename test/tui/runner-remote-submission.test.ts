@@ -23,12 +23,14 @@
  * - deterministic image bytes and Host-only/Client-only path markers where a
  *   wrong-machine discriminator is required
  *
+ * INTEGRATION SINKS
+ * - one authenticated Host-owned shell stream through the real Gateway, with
+ *   `!!` card-only settlement and `!` result submission to the same Host Session
+ *
  * DELIBERATELY ABSENT
  * - PR4 command plane (slash-command catalog/claim) — plain prompts only
  * - generic-file upload receipts (D4): the fail-closed path is proven at L1
  *   (remote-prompt-serializer.test.ts)
- * - a qualified Remote user-shell carrier (CARRIER_GAP): the Remote shell
- *   proofs here are the FAIL-CLOSED proofs
  *
  * @module @xmoon76/dsh-pi-tui/runner-remote-submission.test
  */
@@ -355,33 +357,34 @@ test('prompt: a sessionless first prompt creates the Session, then reaches the H
   }
 })
 
-test('shell (Remote, CARRIER_GAP): `!` and `!!` BOTH fail closed — zero Client spawn, zero Session write, visible unavailable', async (t) => {
+test('shell (Remote): `!!` settles on its card and `!` writes the drained Host result once', async (t) => {
   const life = testLifecycle(t)
-  const mainId = 'm3-4-pr3-shellgap'
+  const mainId = 'm6-f1-remote-shell-writer'
   const presetId = 'm3-4-pr3-preset'
   const host = await mountHost(life, presetId)
   await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
   const fixture = await mountPr3Runner(life, { presetId, resumeSessionId: mainId, host })
+  const notices = recordNotices(life, fixture)
   await waitFor('mount paint', () => fixture.vt.getViewport().join('').length > 0, 10_000)
   const durableBefore = hostUserRows(fixture, mainId).length
-  submitDraft(fixture, '!!echo client-poison-marker')
-  await waitFor('unavailable notice', () => {
-    return fixture.vt.getViewport().join('').includes('Host user-shell execution is unavailable')
-  }, 15_000)
-  submitDraft(fixture, '!echo context-poison-marker')
-  await waitFor('second unavailable notice', () => {
+
+  submitDraft(fixture, '!!echo remote-shell-local-marker')
+  await waitFor('Remote `!!` output card', () => {
     const view = fixture.vt.getViewport().join('')
-    return view.includes('context-poison-marker') && view.includes('unavailable')
-  }, 15_000)
-  // ZERO execution: neither command's OUTPUT ever appears; ZERO Session write:
-  // the durable user rows are unchanged (a `!` result submit never ran).
-  const view = fixture.vt.getViewport().join('')
-  assert.equal(view.includes('client-poison-marker\n'), false, 'the command never executed (no output body)')
-  const durableAfter = hostUserRows(fixture, mainId)
-  assert.equal(durableAfter.length, durableBefore,
-    `zero durable user rows added by the failed-closed shell gestures (before ${durableBefore}, after ${durableAfter.length})`)
-  assert.equal(durableAfter.some(row => row.includes('poison')), false,
-    'no shell command or output reached the Session/model context')
+    return view.includes('remote-shell-local-marker') && view.includes('exit 0')
+  }, 20_000)
+  assert.equal(hostUserRows(fixture, mainId).length, durableBefore,
+    '!! executes on the Host but adds no Session/model message')
+
+  submitDraft(fixture, '!echo remote-shell-context-marker')
+  await waitFor('Remote `!` Host result is serialized and accepted', () =>
+    hostUserRows(fixture, mainId).some(row => row.includes('remote-shell-context-marker')) || notices.length > 0, 20_000)
+  const resultRows = hostUserRows(fixture, mainId).filter(row => row.includes('remote-shell-context-marker'))
+  assert.equal(resultRows.length, 1,
+    `! adds exactly one Host result Session message: ${JSON.stringify(resultRows)}; notices=${JSON.stringify(notices)}`)
+  assert.ok(resultRows[0]?.includes('$ echo remote-shell-context-marker'),
+    `the Host writer preserves the command/result context: ${JSON.stringify(resultRows[0])}`)
+  assert.deepEqual(notices, [], `Remote shell completion must not report writer/transport errors: ${JSON.stringify(notices)}`)
 })
 
 test('image: known staged bytes → PromptContentPart → Host durable attachment → official readAttachment byte equality', async (t) => {

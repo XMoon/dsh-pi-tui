@@ -322,7 +322,7 @@ async function mountSlashPane(
       scope: () => ({ kind: 'workspace', cwd: '/work' }),
       localCwd: () => localCwd,
       skillReferences: options.skillReferences ?? [],
-      hostShellCompletion: false,
+      hostShellCompletion: undefined,
       ...(options.extensionSuggest === undefined ? {} : { extensionSuggest: options.extensionSuggest }),
       ...overrides,
     })
@@ -2012,7 +2012,7 @@ test('a disposed mount cannot be painted or written by a late catalog or a late 
     scope: () => ({ kind: 'workspace', cwd: '/work' }),
     localCwd: () => '/work',
     skillReferences: [],
-    hostShellCompletion: false,
+    hostShellCompletion: undefined,
   })
   await new Promise(resolve => setTimeout(resolve, ABSENCE_WINDOW_MS))
   assert.deepEqual(m.editor(), draft, 'the wire stopped moving with the mount')

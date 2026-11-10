@@ -425,7 +425,7 @@ async function mountChain(
       clearError: () => {},
     },
     artifacts: { start: () => {} },
-    shell: { run: () => {}, interrupt: () => {} },
+    shell: { run: () => {}, interrupt: () => {}, cancelRun: () => false },
     supportsLocalShellCards: false,
     supportsTuiBuiltinUi: true,
     retainsStaleDraftRestore: true,

@@ -459,6 +459,7 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
     // The image-only submit gate (plan §11.1): an empty-text draft with staged
     // images is a real submission.
     isImageDraft: () => draftHasImages(deps.surface.composer.getDraft(), deps.drafts.images),
+    cancelLocalShellIfRunning: () => deps.submission.cancelLocalShellIfRunning(),
     // The in-process EDITOR history must never recall a multimodal line after
     // its drafts were consumed — the placeholders would re-send as plain text
     // (the persisted JSONL history has the same guard; review finding: the
