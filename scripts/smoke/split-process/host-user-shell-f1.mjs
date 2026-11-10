@@ -54,13 +54,16 @@ async function waitForComposerMode(client, mode, label, timeoutMs = 30_000) {
     // (observed as '❯ ………'). It is presentation-only, not draft text, so the
     // empty-mode witness strips trailing ellipsis/dot padding instead of
     // demanding a literally bare glyph row.
-    const head = (rows[0] ?? '').replace(/[\s.…·]+$/u, '')
-    // A connection banner / diagnostic overlay may share the composer box
-    // after a transport drop; it is not draft text. The MODE witness is the
-    // leading prompt glyph (with '!!' never satisfying '!').
-    const modeShown = head === expected
-      || (head.startsWith(expected) && !(expected === '!' && head.startsWith('!!')))
-    if (rows.length > 0 && modeShown) return
+    // EMPTY-EDITOR witness: the mode glyph must be followed by NO draft text.
+    // A connection banner / diagnostic line may share the composer box after a
+    // transport drop; that presentation-only hint is the sole tolerated body.
+    const first = rows[0] ?? ''
+    const shellLocalIsNotContext = expected === '!' && first.startsWith('!!')
+    if (!shellLocalIsNotContext && first.startsWith(expected)) {
+      const body = first.slice(expected.length).replace(/[\s.…·]+$/u, '').trim()
+      const hintOnly = body === '' || body.startsWith('[connection]') || body.startsWith('…')
+      if (hintOnly) return
+    }
     await new Promise(resolve => setTimeout(resolve, 50))
   }
   throw new SplitSmokeAssertionError(`${label} did not reach the empty ${mode} composer: ${JSON.stringify(await client.composerText())}`)

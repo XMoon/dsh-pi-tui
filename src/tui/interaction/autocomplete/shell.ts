@@ -235,11 +235,29 @@ function hostPathLiteral(value: string, word: ShellWordLexicalState, directory: 
   return `"${escaped}${close ? '"' : ''}`
 }
 
-function matchesFor(prefix: string, candidates: readonly string[]): AutocompleteSuggestions | null {
+/** The unquoted characters a Bash command word can carry without escaping:
+ * everything else is backslash-escaped so a command NAME is inserted as one
+ * word instead of being re-parsed as shell source. */
+const SAFE_COMMAND_WORD_CHARACTER = /^[A-Za-z0-9_@%+=:,./-]$/u
+
+/** Encode one `compgen -A command` name as ONE Bash-safe executable word. */
+function commandWordLiteral(name: string): string {
+  let word = ''
+  for (const character of name) {
+    word += SAFE_COMMAND_WORD_CHARACTER.test(character) ? character : `\\${character}`
+  }
+  return word
+}
+
+function matchesFor(
+  prefix: string,
+  candidates: readonly string[],
+  encode: (candidate: string) => string = candidate => candidate,
+): AutocompleteSuggestions | null {
   const matched = (prefix === '' ? candidates : candidates.filter(candidate => candidate.startsWith(prefix)))
     .slice(0, MAX_SHELL_CANDIDATES)
   return matched.length === 0 ? null : {
-    items: matched.map(value => ({ value, label: value })),
+    items: matched.map(candidate => ({ value: encode(candidate), label: candidate })),
     prefix,
   }
 }
@@ -289,5 +307,7 @@ export async function suggestShellCompletion(
       .map(name => ({ value: `$${name}`, label: `$${name}` }))
     return matched.length === 0 ? null : { items: matched, prefix: context.prefix }
   }
-  return matchesFor(context.prefix, outcome.candidates)
+  return context.kind === 'command'
+    ? matchesFor(context.prefix, outcome.candidates, commandWordLiteral)
+    : matchesFor(context.prefix, outcome.candidates)
 }

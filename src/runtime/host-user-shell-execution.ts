@@ -228,23 +228,25 @@ export async function executeHostShellOnce(request: HostShellExecutionRequest): 
     return failed('infrastructure', `the Host process output could not be read (${hostShellDiagnostic(error)})`)
   }
 
-  // Official bounded-tail diagnostic semantics: a truncated stderr may have
-  // dropped a higher-priority runner-fatal line that would outrank a denial.
-  // A nonzero sandbox exit with truncated diagnostics is therefore a
-  // reason-UNKNOWN settlement, not a confirmed runner failure or denial, even
-  // when the retained tail happens to match either signature set.
-  const stderrTruncated = stderr.truncated
-  const exitNonzero = outcome.exitCode !== null && outcome.exitCode !== 0
-  const failureReasonUnknown = confined !== undefined && exitNonzero && stderrTruncated
-  if (confined !== undefined && !failureReasonUnknown) {
+  // Runner-fatal classification is decided FIRST from the diagnostics actually
+  // observed, before the truncation gate: a retained tail that positively
+  // matches a runner-fatal rule is a runner failure even when the stream is
+  // truncated, and it is never downgraded to a denial or a settled shell result.
+  if (confined !== undefined) {
     const runnerFailure = classifyRunnerFailure(outcome.exitCode, stderr.text, confined.runnerFailureRules)
     if (runnerFailure !== undefined) {
       return failed('sandbox-runner', `the Host sandbox runner failed before the user command executed (${runnerFailure.detail})`)
     }
   }
-  // A definite denial requires the absence of the higher-priority uncertainty:
-  // with truncated diagnostics a runner fatal may have been dropped even when
-  // the retained tail matches a denial signature.
+  // Only when no observed runner-fatal matched: a truncated nonzero sandbox
+  // diagnostic may have dropped a higher-priority runner-fatal line, so the
+  // reason stays UNKNOWN.
+  const stderrTruncated = stderr.truncated
+  const exitNonzero = outcome.exitCode !== null && outcome.exitCode !== 0
+  const failureReasonUnknown = confined !== undefined && exitNonzero && stderrTruncated
+  // A definite denial requires the absence of that uncertainty: with truncated
+  // diagnostics a runner fatal may have been dropped even when the retained
+  // tail matches a denial signature.
   const denied = confined !== undefined
     && !failureReasonUnknown
     && matchesSignature(outcome.exitCode, stderr.text, confined.denialSignatures)

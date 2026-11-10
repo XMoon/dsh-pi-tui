@@ -366,54 +366,49 @@ test('complete diagnostics keep confirmed denial and ordinary-failure semantics'
 
 // ── Direct adapter result path → the shared reason-unknown card ─────────────
 
-test('the Direct sandbox adapter forwards a truncated nonzero diagnostic as reason-unknown', async () => {
-  const cases: readonly {
-    readonly label: string
-    readonly exitCode: number
-    readonly stderr: string
-    readonly confined: ConfinedArgv
-  }[] = [
-    {
-      label: 'retained runner fatal',
-      exitCode: 125,
-      stderr: 'runner: fatal\n',
-      confined: fullConfined(['/runner', 'bash', '-c', 'make check'], {
-        runnerFailureRules: [{ allowedExitCodes: [125], fatalSignatures: ['runner: fatal'], informationalLines: [] }],
-      }),
-    },
-    {
-      label: 'retained denial signature',
-      exitCode: 1,
+test('the Direct sandbox adapter forwards a truncated nonzero denial diagnostic as reason-unknown', async () => {
+  const fixture = makeFixture({
+    sandbox: () => ({ confine: async () => fullConfined(['/runner', 'bash', '-c', 'make check'], {
+      denialSignatures: ['permission denied'],
+      runnerFailureRules: [{ allowedExitCodes: [125], fatalSignatures: ['runner: fatal'], informationalLines: [] }],
+    }) }),
+    handle: () => fakeHandle({
+      outcome: { exitCode: 1, signal: null },
       stderr: 'permission denied\n',
-      confined: fullConfined(['/runner', 'bash', '-c', 'make check'], {
-        denialSignatures: ['permission denied'],
-        runnerFailureRules: [{ allowedExitCodes: [125], fatalSignatures: ['runner: fatal'], informationalLines: [] }],
-      }),
-    },
-  ]
-  for (const entry of cases) {
-    const fixture = makeFixture({
-      sandbox: () => ({ confine: async () => entry.confined }),
-      handle: () => fakeHandle({
-        outcome: { exitCode: entry.exitCode, signal: null },
-        stderr: entry.stderr,
-        stderrTruncated: true,
-      }),
-    })
-    const outcome = await port(fixture).execute(request({ policy: 'sandbox', command: 'make check' }))
-    assert.equal(outcome.kind, 'settled', `${entry.label}: the Direct adapter must not claim a runner failure from a truncated tail`)
-    if (outcome.kind !== 'settled') throw new Error('expected a settled reason-unknown Direct result')
-    assert.deepEqual(outcome.result.exit, { kind: 'exit', code: entry.exitCode })
-    assert.equal(outcome.result.stderr.truncated, true)
-    assert.equal(outcome.result.sandboxDenied, false, `${entry.label}: truncated diagnostics never serialize a definite denial`)
-    const card = formatHostUserShellResult(outcome.result, 'sandbox')
-    assert.ok(card.includes('stderr truncated; failure reason cannot be determined, command may have executed; do not retry automatically'),
-      `${entry.label}: the Direct card renders the same reason-unknown notice`)
-    assert.ok(card.includes(`[exit ${String(entry.exitCode)}]`), `${entry.label}: the real exit fact is shown`)
-    assert.ok(card.includes('stderr truncated'), `${entry.label}: truncation is stated`)
-    assert.doesNotMatch(card, /sandbox denied/u, `${entry.label}: no definite denial from a truncated tail`)
-    assert.doesNotMatch(card, /failed:/u, `${entry.label}: not an ordinary failure card`)
-  }
+      stderrTruncated: true,
+    }),
+  })
+  const outcome = await port(fixture).execute(request({ policy: 'sandbox', command: 'make check' }))
+  assert.equal(outcome.kind, 'settled', 'the retained tail matches no runner-fatal rule, so the reason stays unknown')
+  if (outcome.kind !== 'settled') throw new Error('expected a settled reason-unknown Direct result')
+  assert.deepEqual(outcome.result.exit, { kind: 'exit', code: 1 })
+  assert.equal(outcome.result.stderr.truncated, true)
+  assert.equal(outcome.result.sandboxDenied, false, 'truncated diagnostics never serialize a definite denial')
+  const card = formatHostUserShellResult(outcome.result, 'sandbox')
+  assert.ok(card.includes('stderr truncated; failure reason cannot be determined, command may have executed; do not retry automatically'),
+    'the Direct card renders the shared reason-unknown notice')
+  assert.ok(card.includes('[exit 1]'), 'the real exit fact is shown')
+  assert.ok(card.includes('stderr truncated'), 'truncation is stated')
+  assert.doesNotMatch(card, /sandbox denied/u, 'no definite denial from a truncated tail')
+  assert.doesNotMatch(card, /failed:/u, 'not an ordinary failure card')
+})
+
+test('the Direct sandbox adapter fails a truncated retained runner-fatal tail as sandbox-runner', async () => {
+  const fixture = makeFixture({
+    sandbox: () => ({ confine: async () => fullConfined(['/runner', 'bash', '-c', 'make check'], {
+      runnerFailureRules: [{ allowedExitCodes: [125], fatalSignatures: ['runner: fatal'], informationalLines: [] }],
+    }) }),
+    handle: () => fakeHandle({
+      outcome: { exitCode: 125, signal: null },
+      stderr: 'runner: fatal\n',
+      stderrTruncated: true,
+    }),
+  })
+  await assert.rejects(
+    () => port(fixture).execute(request({ policy: 'sandbox', command: 'make check' })),
+    /sandbox runner failed before the user command executed \(runner: fatal\)/u,
+  )
+  assert.equal(fixture.subprocess.spawns.length, 1, 'the retained runner fatal is classified after the real spawn')
 })
 
 test('the Direct sandbox adapter still fails on positive non-truncated runner evidence', async () => {
