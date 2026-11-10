@@ -16,6 +16,8 @@ import { join, delimiter } from 'node:path'
 import { MentionProvider } from '../../src/tui/interaction/autocomplete/provider.ts'
 import { shellCompletionContext, shellWordSuffix, suggestShellCompletion } from '../../src/tui/interaction/autocomplete/shell.ts'
 import type { HostShellCompletionPort, HostShellCompletionRequest } from '../../src/runtime/host-shell-completion-port.ts'
+import type { HostFileScope } from '../../src/runtime/host-file-port.ts'
+import { SessionId } from '@deepseek-ai/dsh-session'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
 
 const abort = new AbortController().signal
@@ -359,7 +361,13 @@ test('MentionProvider applies a shell item as a plain word replacement', async (
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)
   const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, null), undefined, undefined, undefined, undefined, [], directShellPort(root))
-  const applied = provider.applyCompletion(['!gi'], 0, 3, { value: 'git', label: 'git' }, 'gi')
+  // A Shell item is accepted only when it came from the CURRENT request: the
+  // suggestion set for this exact document/cursor supplies it.
+  const commandSuggestions = await provider.getSuggestions(['!gi'], 0, 3, { signal: abort, force: true })
+  assert.ok(commandSuggestions !== null)
+  const gitItem = commandSuggestions.items.find(item => item.label === 'git')
+  assert.ok(gitItem !== undefined)
+  const applied = provider.applyCompletion(['!gi'], 0, 3, gitItem, commandSuggestions.prefix)
   assert.deepEqual(applied, { lines: ['!git '], cursorLine: 0, cursorCol: 5 })
   const appliedVar = provider.applyCompletion(['!echo $HO'], 0, 9, { value: '$HOME', label: '$HOME' }, '$HO')
   assert.deepEqual(appliedVar, { lines: ['!echo $HOME '], cursorLine: 0, cursorCol: 12 })
@@ -377,12 +385,17 @@ test('MentionProvider applies a shell item as a plain word replacement', async (
 function fixedShellPort(candidates: {
   readonly commands?: readonly string[]
   readonly subcommands?: readonly string[]
+  readonly variables?: readonly string[]
+  readonly paths?: readonly string[]
+  readonly authority?: 'client' | 'host'
 }): HostShellCompletionPort {
   return {
-    pathAuthority: 'client',
+    pathAuthority: candidates.authority ?? 'client',
     async complete({ request }) {
       if (request.kind === 'commands') return { kind: 'ok', candidates: candidates.commands ?? [] }
       if (request.kind === 'subcommands') return { kind: 'ok', candidates: candidates.subcommands ?? [] }
+      if (request.kind === 'variables') return { kind: 'ok', candidates: candidates.variables ?? [] }
+      if (request.kind === 'paths') return { kind: 'ok', candidates: candidates.paths ?? [] }
       return { kind: 'ok', candidates: [] }
     },
   }
@@ -494,7 +507,11 @@ test('MentionProvider applies a shell item without ever writing the synthetic pr
   const root = fixtureWorkspace(life)
   const { source } = modeSource('shell-local')
   const provider = new MentionProvider([], root, null, source, undefined, undefined, undefined, [], directShellPort(root))
-  const applied = provider.applyCompletion(['git che'], 0, 7, { value: 'checkout', label: 'checkout' }, 'che')
+  const suggestions = await provider.getSuggestions(['git che'], 0, 7, { signal: abort, force: true })
+  assert.ok(suggestions !== null)
+  const checkout = suggestions.items.find(item => item.label === 'checkout')
+  assert.ok(checkout !== undefined)
+  const applied = provider.applyCompletion(['git che'], 0, 7, checkout, suggestions.prefix)
   assert.deepEqual(applied, { lines: ['git checkout '], cursorLine: 0, cursorCol: 13 },
     'the applied line must be the bare body — the !! prefix never enters the buffer')
 })
@@ -728,16 +745,13 @@ test('command-name candidates are applied as ONE Bash-safe word, never as shell 
     const pathScript = join(root, 'path.sh')
     writeFileSync(pathScript, `PATH=${JSON.stringify(bin)}:"$PATH"\nexport PATH\n`)
     process.env.BASH_ENV = pathScript
-    const suggestions = await suggestShellCompletion(
-      { kind: 'command', prefix: 'zo', priorWords: [] },
-      directShellPort(root),
-      undefined,
-      { signal: abort },
-    )
+    const { source } = modeSource('shell-context')
+    const provider = new MentionProvider([], root, null, source, undefined, undefined, undefined, [], directShellPort(root))
+    // The accepted item must be the one the provider offered for this exact
+    // document/cursor, so the suggestion set is taken through the provider.
+    const suggestions = await provider.getSuggestions(['zo'], 0, 2, { signal: abort, force: true })
     assert.ok(suggestions !== null, 'the fixture commands must be discovered through PATH')
     const byLabel = new Map(suggestions.items.map(item => [item.label, item]))
-    const { source } = modeSource('shell-context')
-    const provider = new MentionProvider([], root, null, source)
     for (const item of cases) {
       const suggestion = byLabel.get(item.raw)
       assert.ok(suggestion !== undefined,
@@ -747,7 +761,7 @@ test('command-name candidates are applied as ONE Bash-safe word, never as shell 
       assert.equal(suggestion.value.replace(/\\([\s\S])/gu, '$1'), item.raw,
         'the accepted value differs from the raw name only by escaping')
       assert.notEqual(suggestion.value, item.raw)
-      const applied = provider.applyCompletion(['zo'], 0, 2, suggestion, 'zo')
+      const applied = provider.applyCompletion(['zo'], 0, 2, suggestion, suggestions.prefix)
       assert.deepEqual(applied.lines, [`${item.escaped} `], 'the accepted line is exactly one word plus the separator')
       const executed = spawnSync('bash', ['-c', applied.lines[0]!], { cwd: run, encoding: 'utf8' })
       assert.equal(executed.status, 0, `${item.raw} did not execute: ${executed.stderr}`)
@@ -798,4 +812,79 @@ test('a subcommand candidate is inserted as ONE Bash-safe word and runs as the i
     'the subcommand resolves as ONE argument, not as a command substitution')
   assert.equal(existsSync(join(run, 'WITNESS_SUB')), false,
     'the subcommand name must never be evaluated as shell source')
+})
+
+test('every command line of a multiline shell draft completes with Host candidates and a correct raw range', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  const port = fixedShellPort({
+    commands: ['zoom'],
+    subcommands: ['checkout'],
+    variables: ['F1_HOST_VARIABLE_20261109'],
+    paths: ['src/deep-nested.ts'],
+    authority: 'host',
+  })
+  const accept = async (mode: 'shell-context' | 'shell-local', lines: string[], cursorLine: number, cursorCol: number, value: string) => {
+    const provider = new MentionProvider([], root, null, modeSource(mode).source, undefined, undefined, undefined, [], port)
+    const suggestions = await provider.getSuggestions(lines, cursorLine, cursorCol, { signal: abort, force: true })
+    assert.ok(suggestions !== null, `${mode} line ${String(cursorLine)} must produce suggestions: ${JSON.stringify(lines)}`)
+    const item = suggestions.items.find(candidate => candidate.label === value)
+    assert.ok(item !== undefined, `${value} missing for ${JSON.stringify(lines)}: ${JSON.stringify(suggestions.items)}`)
+    return provider.applyCompletion(lines, cursorLine, cursorCol, item, suggestions.prefix)
+  }
+  // 2nd line command name.
+  assert.deepEqual(await accept('shell-context', ['git status', 'zo'], 1, 2, 'zoom'),
+    { lines: ['git status', 'zoom '], cursorLine: 1, cursorCol: 5 })
+  // 3rd line git subcommand.
+  assert.deepEqual(await accept('shell-context', ['a', 'b', 'git che'], 2, 7, 'checkout'),
+    { lines: ['a', 'b', 'git checkout '], cursorLine: 2, cursorCol: 13 })
+  // 2nd line variable (quote kept, no space inside it).
+  assert.deepEqual(await accept('shell-context', ['x', 'echo "$F1_HOST_'], 1, 15, '$F1_HOST_VARIABLE_20261109'),
+    { lines: ['x', 'echo "$F1_HOST_VARIABLE_20261109'], cursorLine: 1, cursorCol: 32 })
+  // 2nd line HOST path (never a Client candidate).
+  const pathApplied = await accept('shell-context', ['x', 'cat src/de'], 1, 10, 'src/deep-nested.ts')
+  assert.deepEqual(pathApplied.lines, ['x', "cat 'src/deep-nested.ts'"])
+  assert.ok(!pathApplied.lines.join('\n').includes('client'), 'Host path completion never leaks Client candidates')
+  // `!!` mode: the second line completes too and the synthetic prefix is absent.
+  const localApplied = await accept('shell-local', ['x', 'zo'], 1, 2, 'zoom')
+  assert.deepEqual(localApplied, { lines: ['x', 'zoom '], cursorLine: 1, cursorCol: 5 })
+  assert.ok(!localApplied.lines.join('\n').includes('!'), 'the synthetic !! prefix never enters the buffer')
+})
+
+test('an untrusted cross-line structure never produces or rewrites a shell word', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  const port = fixedShellPort({ commands: ['zoom'], subcommands: ['checkout'], authority: 'host' })
+  const provider = new MentionProvider([], root, null, modeSource('shell-context').source, undefined, undefined, undefined, [], port)
+  for (const lines of [['echo "open', 'zo'], ["echo 'open", 'zo'], ['echo a \\', 'zo'], ['echo $(x', 'zo']]) {
+    const suggestions = await provider.getSuggestions(lines, 1, 2, { signal: abort, force: true })
+    assert.ok(suggestions === null || !suggestions.items.some(item => item.value === 'zoom'),
+      `an untrusted continuation must not offer a shell command: ${JSON.stringify(lines)}`)
+  }
+})
+
+test('a stale multiline shell result is never applied after the edit, scope or request changes', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  const port = fixedShellPort({ commands: ['zoom'] })
+  let scope: HostFileScope = { kind: 'workspace', cwd: root }
+  const provider = new MentionProvider([], root, null, modeSource('shell-context').source, () => scope, undefined, undefined, [], port)
+  const lines = ['git status', 'zo']
+  const first = await provider.getSuggestions(lines, 1, 2, { signal: abort, force: true })
+  assert.ok(first !== null)
+  const item = first.items.find(candidate => candidate.value === 'zoom')
+  assert.ok(item !== undefined)
+  // A newer request replaces the current suggestion identity.
+  const newer = await provider.getSuggestions(['git status', 'zoo'], 1, 3, { signal: abort, force: true })
+  assert.ok(newer !== null)
+  assert.deepEqual(provider.applyCompletion(lines, 1, 2, item, first.prefix),
+    { lines, cursorLine: 1, cursorCol: 2 }, 'an older request result must not apply')
+  // A Session/scope change invalidates the current identity too.
+  const current = await provider.getSuggestions(lines, 1, 2, { signal: abort, force: true })
+  assert.ok(current !== null)
+  const currentItem = current.items.find(candidate => candidate.value === 'zoom')
+  assert.ok(currentItem !== undefined)
+  scope = { kind: 'session', sessionId: SessionId('other-session') }
+  assert.deepEqual(provider.applyCompletion(lines, 1, 2, currentItem, current.prefix),
+    { lines, cursorLine: 1, cursorCol: 2 }, 'a Session change must refuse the stale candidate')
 })

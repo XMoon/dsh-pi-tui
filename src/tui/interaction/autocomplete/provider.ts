@@ -22,7 +22,7 @@ import {
   type AutocompleteSuggestions,
   type SlashCommand,
 } from '@xmoon76/pi-tui'
-import { shellCompletionContext, shellWordRange, shellWordSuffix, suggestShellCompletion } from './shell.ts'
+import { shellCommandIsOpen, shellCompletionContext, shellWordRange, shellWordSuffix, suggestShellCompletion } from './shell.ts'
 import type { HostShellCompletionPort } from '../../../runtime/host-shell-completion-port.ts'
 import { shellPrefixForMode, type EditorInputMode } from '../editor-input-mode.ts'
 import { applyInlineSkillReference, extractInlineSkillPrefix } from './skill-reference.ts'
@@ -147,6 +147,18 @@ export class MentionProvider implements AutocompleteProvider {
    * (a provider that ignores AbortSignal) can never overwrite a NEWER
    * request's snapshot, so the next legitimate accept is not wrongly
    * fenced. */
+  /** The Shell result offered for THIS document/cursor/scope: the apply path
+   * accepts only a member of this exact set, so a stale first-line result can
+   * never be applied to another line or another edit. */
+  private shellResultIdentity: {
+    readonly items: readonly AutocompleteItem[]
+    readonly lines: readonly string[]
+    readonly cursorLine: number
+    readonly cursorCol: number
+    readonly mode: EditorInputMode
+    readonly scope: HostFileScope
+  } | null = null
+
   private requestGeneration = 0
 
   constructor(
@@ -195,12 +207,18 @@ export class MentionProvider implements AutocompleteProvider {
   /** The virtual serialized line for a shell-mode editor position on the
    * FIRST document line. */
   private virtualShellLine(
-    line: string,
+    lines: readonly string[],
+    cursorLine: number,
     cursorCol: number,
   ): { line: string; cursorCol: number; prefixLength: number } | null {
     const mode = this.inputModeSource()
     if (mode === 'prompt') return null
+    // A previous physical line that leaves the command OPEN (unfinished quote,
+    // backtick, substitution or a trailing backslash) means this cursor line
+    // is not a fresh command: no trustworthy single-line shell boundary.
+    if (cursorLine > 0 && shellCommandIsOpen(lines.slice(0, cursorLine))) return null
     const prefix = shellPrefixForMode(mode)
+    const line = lines[cursorLine] ?? ''
     return { line: prefix + line, cursorCol: cursorCol + prefix.length, prefixLength: prefix.length }
   }
 
@@ -210,8 +228,10 @@ export class MentionProvider implements AutocompleteProvider {
     cursorLine: number,
     cursorCol: number,
   ): { line: string; cursorCol: number; prefixLength: number } | null {
-    if (cursorLine !== 0) return null
-    return this.virtualShellLine(lines[0] ?? '', cursorCol)
+    // The synthetic `!`/`!!` prefix belongs to EVERY shell-mode command line,
+    // not only the first one: a new physical line starts a new command unless
+    // the previous lines leave it open.
+    return this.virtualShellLine(lines, cursorLine, cursorCol)
   }
 
   /** The SHELL SEMANTIC context: EVERY line of a shell-mode document is
@@ -220,7 +240,7 @@ export class MentionProvider implements AutocompleteProvider {
     currentLine: string,
     cursorCol: number,
   ): { line: string; cursorCol: number; prefixLength: number } | null {
-    return this.virtualShellLine(currentLine, cursorCol)
+    return this.virtualShellLine([currentLine], 0, cursorCol)
   }
 
   async getSuggestions(
@@ -250,6 +270,7 @@ export class MentionProvider implements AutocompleteProvider {
     cursorCol: number,
     options: { signal: AbortSignal; force?: boolean },
   ): Promise<AutocompleteSuggestions | null> {
+    this.shellResultIdentity = null
     const currentLine = lines[cursorLine] ?? ''
     const textBeforeCursor = currentLine.slice(0, cursorCol)
     // The REQUEST scope, captured at entry (never re-read after an await:
@@ -271,6 +292,16 @@ export class MentionProvider implements AutocompleteProvider {
         const sessionId = requestScope.kind === 'session' ? requestScope.sessionId : undefined
         const suggestions = await suggestShellCompletion(shellContext, port, sessionId, options)
         if (suggestions !== null) {
+          if (generation === this.requestGeneration) {
+            this.shellResultIdentity = {
+              items: suggestions.items,
+              lines: [...lines],
+              cursorLine,
+              cursorCol,
+              mode: requestMode,
+              scope: requestScope,
+            }
+          }
           return this.withRequestSnapshot(generation, requestScope, requestMode, requestLocalCwd, lines, cursorLine, cursorCol, suggestions, false)
         }
         if (generation === this.requestGeneration) this.requestSnapshot = null
@@ -750,14 +781,27 @@ export class MentionProvider implements AutocompleteProvider {
     if (!wholeWordShell && (start < 0 || currentLine.slice(start, cursorCol) !== bodyPrefix)) {
       return { lines, cursorLine, cursorCol }
     }
-    if (wholeWordShell) {
-      // A shell-MODE continuation line is not the serialized line the scanner
-      // read (the synthetic `!`/`!!` prefix is synthesized on line 0 only), so
-      // this single-line range cannot be trusted there: leave the document
-      // untouched instead of guessing a boundary.
-      if (wire === null && this.inputModeSource() !== 'prompt') {
-        return { lines, cursorLine, cursorCol }
-      }
+    // The accepted Shell item MUST come from the result set produced for this
+    // exact document, cursor, mode and Session scope. A stale first-line
+    // result (or a late async result from an older request) is never applied
+    // to a different line or edit. A STRICT (file/extension) result keeps its
+    // own snapshot fence below, so it is not classified as a Shell result.
+    const shellIdentity = wholeWordShell ? this.shellResultIdentity : null
+    const fromCurrentShellResult = wholeWordShell
+      && shellIdentity !== null
+      && shellIdentity.items.includes(item)
+      && shellIdentity.cursorLine === cursorLine
+      && shellIdentity.cursorCol === cursorCol
+      && shellIdentity.mode === this.inputModeSource()
+      && shellIdentity.lines.length === lines.length
+      && shellIdentity.lines.every((line, index) => line === lines[index])
+      && sameHostFileScope(shellIdentity.scope, this.scopeOf())
+    if (wholeWordShell && !fromCurrentShellResult && this.requestSnapshot?.strict !== true) {
+      return { lines, cursorLine, cursorCol }
+    }
+    if (wholeWordShell && (fromCurrentShellResult || this.requestSnapshot?.strict === true)) {
+      // A strict extension/file result at a command-word position is a command
+      // word too: replace the whole raw range and keep the separator space.
       // The scanner starts after the shell wire prefix: the SYNTHETIC one in a
       // shell mode, or the literal `!`/`!!` a prompt-mode line carries (the same
       // boundary `shellCompletionContext` uses). The range then maps back into
@@ -794,9 +838,11 @@ export class MentionProvider implements AutocompleteProvider {
       }
     }
     if (shellContext?.kind === 'paths') {
+      // The synthetic wire prefix belongs to the CURSOR'S command line, which
+      // may be any physical line of a multi-line shell document.
       const wireLines = wire === null
         ? lines
-        : lines.map((line, index) => index === 0 ? wire.line : line)
+        : lines.map((line, index) => index === cursorLine ? wire.line : line)
       const applied = this.inner.applyCompletion(
         wireLines,
         cursorLine,
