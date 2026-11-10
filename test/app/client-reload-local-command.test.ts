@@ -31,7 +31,7 @@ import { bindSubmissionRuntime, type SubmissionRuntimeSurface } from '../../src/
 import { preparePrompt } from '../../src/app/submission/prepared-prompt.ts'
 import { mergeDraft } from '../../src/app/submission/steer.ts'
 import { createModelCommands } from '../../src/tui/commands/models.ts'
-import { CLIENT_RELOAD_REFUSAL_NOTICES, registerReloadClientCommand } from '../../src/tui/commands/utility.ts'
+import { CLIENT_RELOAD_REFUSAL_NOTICES, registerExitCommand, registerReloadClientCommand } from '../../src/tui/commands/utility.ts'
 import {
   localCommandMayWrite,
   READ_ONLY_LOCAL_COMMANDS,
@@ -59,9 +59,18 @@ interface Harness {
   resolveEntered: Promise<void>
   releaseResolve(): void
   drain(): Promise<void>
+  exitRequests: number
+  /** Flip the simulated pending-navigation fact (the reload safety facts read it live). */
+  setTransitionPending(pending: boolean): void
+  /** Release the fence's `awaitTransitionSettled()` so a deferred command resumes. */
+  releaseSettled(): void
 }
 
-function startHarness(): Harness {
+function startHarness(options: { pendingTransition?: boolean } = {}): Harness {
+  let transitionPending = options.pendingTransition === true
+  let releaseSettled!: () => void
+  const settledGate = new Promise<void>((resolve) => { releaseSettled = resolve })
+  let exitRequests = 0
   let draft = ''
   const notices: string[] = []
   const configWrites: string[] = []
@@ -166,7 +175,7 @@ function startHarness(): Harness {
       // covered by its own suite).
       hasUnsettledUserWrite: () => controller!.hasUnsettledClientWrite(),
       hasUnsettledInteraction: () => false,
-      hasUnsettledTransition: () => false,
+      hasUnsettledTransition: () => transitionPending,
     },
     request: () => {
       requests += 1
@@ -179,6 +188,15 @@ function startHarness(): Harness {
       registry.register({ name: spec.name, description: spec.description, handler: spec.handler })
     },
     recordCommandDraftDisposition: () => {},
+  })
+  registerExitCommand({
+    runner: { requestExit: () => { exitRequests += 1 } },
+    registerTuiCommand: (spec) => {
+      registry.register({ name: spec.name, description: spec.description, handler: spec.handler })
+      for (const alias of spec.aliases ?? []) {
+        registry.register({ name: alias, description: spec.description, handler: spec.handler })
+      }
+    },
   })
 
   const composer = {
@@ -213,8 +231,8 @@ function startHarness(): Harness {
     ownership: {
       generation: () => core.generation(),
       captureSubject: () => core.subject(),
-      transitionPending: () => false,
-      awaitTransitionSettled: async () => {},
+      transitionPending: () => transitionPending,
+      awaitTransitionSettled: () => transitionPending ? settledGate : Promise.resolve(),
       beginNavigationIntent: () => () => {},
       soleNavigationIntentPending: () => false,
     },
@@ -287,6 +305,9 @@ function startHarness(): Harness {
     resolveEntered,
     releaseResolve: () => { releaseResolve() },
     drain,
+    get exitRequests() { return exitRequests },
+    setTransitionPending: (pending: boolean) => { transitionPending = pending },
+    releaseSettled: () => { releaseSettled() },
   }
 }
 
@@ -329,4 +350,41 @@ test('the read-only local command set stays explicit and never includes a writer
   }
   assert.equal(localCommandMayWrite('a-future-local-writer'), true,
     'an undeclared local command is treated as a potential writer (fail-safe)')
+})
+
+test('a pending navigation never defers /exit, /quit or /reload-client', async () => {
+  const harness = startHarness({ pendingTransition: true })
+
+  // /exit and /quit are IMMEDIATE lifecycle controls: the user's quit must not
+  // wait for the Workspace pre-selection (a stuck Host IO would hang it).
+  harness.controller.submit('/exit')
+  await harness.drain()
+  assert.equal(harness.exitRequests, 1, '/exit must request the exit immediately while the navigation is pending')
+  harness.controller.submit('/quit')
+  await harness.drain()
+  assert.equal(harness.exitRequests, 2, '/quit (the exit alias) must too')
+
+  // /reload-client must judge its safety facts NOW: the pending transition is
+  // a final refusal, not a command queued behind the transition.
+  harness.controller.submit('/reload-client')
+  await harness.drain()
+  assert.equal(harness.requests, 0, 'the process request must never be reached while the transition is pending')
+  assert.equal(harness.notices.includes(CLIENT_RELOAD_REFUSAL_NOTICES.transition), true,
+    'the user sees the transition refusal at request time')
+  harness.setTransitionPending(false)
+  await harness.drain()
+  assert.equal(harness.requests, 0, 'an immediate refusal must never be replayed after the transition settles')
+
+  // Control: an ordinary sessionless command still waits for the settled
+  // surface, then runs.
+  const waiting = startHarness({ pendingTransition: true })
+  let presetEntered = false
+  void waiting.resolveEntered.then(() => { presetEntered = true })
+  waiting.controller.submit('/preset default code')
+  await waiting.drain()
+  assert.equal(presetEntered, false, 'a non-control sessionless command must wait for the settled surface')
+  waiting.setTransitionPending(false)
+  waiting.releaseSettled()
+  for (let attempt = 0; attempt < 200 && !presetEntered; attempt += 1) await waiting.drain()
+  assert.equal(presetEntered, true, 'the deferred command resumes after the navigation settles')
 })

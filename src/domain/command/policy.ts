@@ -68,6 +68,22 @@ export const SESSIONLESS_COMMANDS = new Set([
 ])
 
 /**
+ * Sessionless commands that are IMMEDIATE controls: they do not depend on the
+ * Session identity a pending navigation will publish.
+ *
+ * - `/exit` / `/quit`: the user's quit must not wait for a navigation; a
+ *   stuck Workspace pre-selection would otherwise hang the slash exit.
+ * - `/reload-client`: its safety decision reads the live facts synchronously
+ *   and must be made at request time. Deferring it past the transition would
+ *   re-judge the request after `pending` cleared and reload a Client the
+ *   in-flight-transition policy was refusing.
+ *
+ * The submission transition fence must never defer these behind an unsettled
+ * navigation (it would change the control's decision point).
+ */
+export const IMMEDIATE_SESSIONLESS_COMMANDS = new Set(['exit', 'quit', 'reload-client'])
+
+/**
  * Session-navigation entries whose SESSIONLESS local route is their OWN
  * admission: `/new`'s single-flight marker, the session-browser picker
  * (`/sessions`, `/resume`, `/search`) and the `/fork`/`/rewind` entries.
