@@ -2749,6 +2749,8 @@ export function applyRunnerWithRuntime(
         transitionPending: () => ownership.gate.pending || ownership.barrier.inTransition,
         awaitTransitionSettled: () => ownership.gate.whenSettled(),
         beginNavigationIntent: () => ownership.gate.beginIntent(),
+        soleNavigationIntentPending: () => ownership.gate.canSettleIntentRecalls()
+          && !ownership.barrier.inTransition,
       },
       scope: {
         captureLive: () => sessionScope.captureLive(),

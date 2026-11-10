@@ -1357,6 +1357,9 @@ async function bootCommandHarness(
     /** Provide a recording fake `ctx.attachments` (image admission
      * observability: `imageSaves` records each `saveImages` batch). */
     attachments?: boolean
+    /** The official Host Workspace registry stand-in, when a test must
+     *  control the REAL pre-gate `resolveWorkspace` await. */
+    workspaceRegistry?: Parameters<typeof provideFakeHostWorkspaceRegistry>[1]
     /** Extension command contributions to mount (owner metadata + the
      * plugin's own commands-service registration, like a real plugin). */
     extensionCommands?: readonly {
@@ -1594,7 +1597,8 @@ async function bootCommandHarness(
   if (restoreTerminal !== undefined) t.after(() => { restoreTerminal() })
   const mounted = await mountRunner(context, home, harness,
     options.deferredStart === true ? {} : { sessionId: 'command-session' },
-    { busyEnter: options.busyEnter })
+    { busyEnter: options.busyEnter },
+    { workspaceRegistry: options.workspaceRegistry })
   bindLiveConfig(mounted.configRefs)
   harness.host.status = options.status
   return {
@@ -1741,6 +1745,78 @@ test('a transition-fenced explicit /skill result does not restore the wrapper tw
     harness.releaseCreateGate()
     if (transition !== undefined) await transition
   }
+})
+
+test('a sessionless extension command cannot settle the queue recall owned by a /new pre-gate intent', async (t) => {
+  // RFL-002 ownership: a queue recall deferred for the navigation INTENT may
+  // be aborted only by that intent's own terminal settlement. A different,
+  // non-navigation local command (the extension sessionless route runs
+  // WITHOUT the submit FIFO) settling while the intent is pending must never
+  // drain the list: the recall belongs to the accepted navigation.
+  let releaseCreate!: () => void
+  let createEntered!: () => void
+  const createGate = new Promise<void>(resolve => { releaseCreate = resolve })
+  const createReached = new Promise<void>(resolve => { createEntered = resolve })
+  t.after(() => releaseCreate())
+  let reachedPreGate = false
+  void createReached.then(() => { reachedPreGate = true })
+  const home = process.env.DSH_HOME ?? ''
+  const workspace = {
+    id: 'workspace-intent-recall',
+    path: home,
+    sessionIds: [] as string[],
+    attachSession: async (sessionId: unknown) => { workspace.sessionIds.push(String(sessionId)) },
+  }
+  const workspaceRegistry = {
+    create: async () => {
+      createEntered()
+      await createGate
+      return workspace
+    },
+    get: (id: string) => id === workspace.id ? workspace : undefined,
+    list: () => [workspace],
+  }
+  let extensionRuns = 0
+  const { harness, mounted } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    workspaceRegistry,
+    extensionCommands: [{
+      id: 'ext-sessionless-recall',
+      name: 'sessionlessext',
+      description: 'a sessionless extension command',
+      sessionless: true,
+      bridgeHandler: () => {
+        extensionRuns += 1
+        return { kind: 'success' }
+      },
+    }],
+  })
+  harness.host.nextTurn.push(queuedText('queued-recall', 'queued recall text'))
+  mounted.app.setDraft('/new')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  assert.equal(await drainUntil(() => reachedPreGate, 5_000), true,
+    '/new must reach its pre-gate Workspace resolution')
+
+  ;(mounted.app as unknown as {
+    actionDispatcher: { dispatch: (action: string) => boolean }
+  }).actionDispatcher.dispatch('app.input.dequeue')
+  assert.equal(await drainUntil(() => harness.host.nextTurn.length === 0, 5_000), true,
+    'the real pull-back must remove the queued occurrence')
+  assert.doesNotMatch(mounted.app.getDraft(), /queued recall text/u,
+    'the recall must be deferred while the /new intent is pending')
+
+  mounted.app.setDraft('/sessionlessext')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  assert.equal(await drainUntil(() => extensionRuns === 1, 5_000), true,
+    'the sessionless extension command must run while the intent is pending')
+  for (let round = 0; round < 50; round += 1) await Promise.resolve()
+  assert.doesNotMatch(mounted.app.getDraft(), /queued recall text/u,
+    'a non-navigation command must never settle the pending intent-owned recall')
+
+  releaseCreate()
+  assert.equal(await drainUntil(() => harness.createdSessionIds.length === 1, 5_000), true,
+    'releasing the pre-gate await must let /new create its Session')
 })
 
 test('Alt+Up refuses during a session transition without recalling stale queue rows', async (t) => {

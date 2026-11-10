@@ -476,6 +476,7 @@ test('a user Enter on /view-image routes through the REAL controller into the pi
       transitionPending: () => false,
       awaitTransitionSettled: async () => {},
       beginNavigationIntent: () => () => {},
+      soleNavigationIntentPending: () => false,
     },
     scope: {
       captureLive: () => scopeAuthority.captureLive(),
