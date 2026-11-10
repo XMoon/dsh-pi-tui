@@ -987,8 +987,9 @@ Client surface stops observation only; it never cancels the Host browser attempt
 Cancellation addresses the exact `SignInAttemptId`. A known operation ACK may
 reconcile from its returned observation. An unknown ACK is reconciled only by a
 successful `getState` readback initiated after that ACK; no Watch frame satisfies
-that readback, and no dispatched operation is replayed automatically. A result
-from a replaced Connection generation cannot become current.
+that readback, no prior view-derived Account fact becomes current during the barrier,
+and no dispatched operation is replayed automatically. A result from a replaced
+Connection generation cannot become current.
 
 `hasRunningAccountTasks()` is an asynchronous Host fact in Direct and Remote.
 The official controller evaluates the current `agents.list()` with the official
