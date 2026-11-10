@@ -15,6 +15,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { preparePrompt } from '../../../src/app/submission/prepared-prompt.ts'
 import { DraftFileStore } from '../../../src/client/media/attachment/file-draft.ts'
+import { FILE_STREAM_CHUNK_BYTES } from '../../../src/client/media/attachment/file-stream.ts'
 import { probeAttachment } from '../../../src/client/media/attachment/intake.ts'
 import {
   createRemoteFileReceiptUploader,
@@ -239,6 +240,52 @@ test('a recalled file source is refused before any network request', async () =>
       && error.code === 'session/prompt-file-unsupported',
   )
   assert.equal(requests, 0)
+})
+
+test('the request body is the real Client streamer in bounded source chunks', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-f4-stream-chunks-')
+  const path = join(root, 'chunked.bin')
+  const source = Buffer.alloc(FILE_STREAM_CHUNK_BYTES * 2 + 17)
+  for (let index = 0; index < source.length; index += 1) source[index] = (index + 17) % 251
+  writeFileSync(path, source)
+  const probe = await probeAttachment(path, root)
+  assert.equal(probe.kind, 'file')
+  if (probe.kind !== 'file') return
+  const files = new DraftFileStore()
+  const draft = files.add({
+    name: probe.name,
+    byteLength: probe.byteLength,
+    source: { type: 'path', path: probe.path, fingerprint: probe.fingerprint },
+  })
+  const prepared = preparePrompt('session-a', `x ${draft.placeholder}`, {
+    images: { values: () => [] },
+    files,
+  })
+  const fileSegment = prepared.segments.find(segment => segment.type === 'file')
+  assert.ok(fileSegment !== undefined && fileSegment.type === 'file')
+  const chunkSizes: number[] = []
+  const uploader = createRemoteFileReceiptUploader(async (_input, init = {}) => {
+    const reader = (init.body as ReadableStream<Uint8Array>).getReader()
+    const chunks: Buffer[] = []
+    for (;;) {
+      const next = await reader.read()
+      if (next.done) break
+      chunkSizes.push(next.value.byteLength)
+      chunks.push(Buffer.from(next.value))
+    }
+    const body = Buffer.concat(chunks)
+    assert.deepEqual(body, source, 'the wire body is the exact Client source bytes')
+    return jsonResponse({
+      ok: true,
+      value: { receiptId: 'chunked-receipt', file: { attachmentId: 'chunked-file', name: 'chunked.bin', bytes: body.byteLength } },
+    })
+  })
+  const uploaded = await uploader.upload('session-a', fileSegment!.file, new AbortController().signal)
+  assert.equal(uploaded.file.bytes, source.byteLength)
+  assert.ok(chunkSizes.length >= 3, `the stream crosses several source chunks: ${chunkSizes.join(',')}`)
+  assert.ok(chunkSizes.every(size => size <= FILE_STREAM_CHUNK_BYTES),
+    `every Client source chunk is bounded by FILE_STREAM_CHUNK_BYTES: ${chunkSizes.join(',')}`)
 })
 
 test('a source changed after /attach fails locally before the Host upload request', async (t) => {
