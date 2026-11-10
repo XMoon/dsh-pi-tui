@@ -1688,23 +1688,36 @@ test('the Stable autocomplete extension query keeps the wire document on MULTILI
   }
 })
 
-test('MentionProvider completes a multiline shell draft with the wire line-0 prefix only', async (t) => {
+test('MentionProvider completes every independently complete command line of a multiline shell draft', async (t) => {
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)
   let mode: 'prompt' | 'shell-context' | 'shell-local' = 'shell-context'
   const source = (): 'prompt' | 'shell-context' | 'shell-local' => mode
-  const provider = new MentionProvider([], root, null, source, undefined, undefined, undefined, [], directShellCompletion)
-  // Cursor on line 0: the virtual prefix applies.
-  const first = await provider.getSuggestions(['gi', 'more'], 0, 2, { signal: abort })
-  assert.ok(first !== null && first.items.some(item => item.value === 'git'), 'line 0 completes as a shell command')
-  // Cursor on line 1: the wire document has NO prefix there — plain path
-  // completion semantics (a non-`!` line is not a shell line).
-  const second = await provider.getSuggestions(['git', 'more'], 1, 4, { signal: abort, force: true })
-  assert.equal(second, null, 'a later body line never gets a synthetic prefix')
-  // applyCompletion on a later line must not strip anything either: the
-  // inner provider's plain word replacement (no shell trailing space).
-  const applied = provider.applyCompletion(['git', 'more'], 1, 4, { value: 'x', label: 'x' }, 'more')
-  assert.deepEqual(applied, { lines: ['git', 'x'], cursorLine: 1, cursorCol: 1 })
+  const port = {
+    pathAuthority: 'client' as const,
+    async complete({ request }: { request: { kind: string } }) {
+      if (request.kind === 'commands') return { kind: 'ok' as const, candidates: ['zoom'] }
+      if (request.kind === 'subcommands') return { kind: 'ok' as const, candidates: ['checkout'] }
+      return { kind: 'ok' as const, candidates: [] }
+    },
+  }
+  const provider = new MentionProvider([], root, null, source, undefined, undefined, undefined, [], port as never)
+  // Line 0: the virtual `!` prefix applies as before.
+  const first = await provider.getSuggestions(['zo', 'git che'], 0, 2, { signal: abort, force: true })
+  assert.ok(first !== null && first.items.some(item => item.value === 'zoom'), 'line 0 completes a command')
+  // Line 1 is a NEW, independently complete command: it is Shell too, and the
+  // synthetic prefix belongs to the CURSOR line — it is never written.
+  const second = await provider.getSuggestions(['git status', 'git che'], 1, 7, { signal: abort, force: true })
+  assert.ok(second !== null && second.items.some(item => item.value === 'checkout'), 'line 1 completes a git subcommand')
+  const item = second.items.find(candidate => candidate.value === 'checkout')
+  assert.ok(item !== undefined)
+  assert.deepEqual(provider.applyCompletion(['git status', 'git che'], 1, 7, item, second.prefix),
+    { lines: ['git status', 'git checkout '], cursorLine: 1, cursorCol: 13 })
+  // An OPEN previous command (unfinished quote) is not a fresh command: no
+  // Shell command candidate is guessed for that line.
+  const unsafe = await provider.getSuggestions(['echo "open', 'zo'], 1, 2, { signal: abort, force: true })
+  assert.ok(unsafe === null || !unsafe.items.some(candidate => candidate.value === 'zoom'),
+    'an untrusted continuation must never produce a shell command candidate')
 })
 
 // ── review round: Ctrl+C clears the shell mode with the body ──────────────

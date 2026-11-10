@@ -183,6 +183,72 @@ export function shellWordSuffix(line: string, col: number, quote: "'" | '"' | un
   return line.slice(col, index)
 }
 
+/**
+ * Whether the command opened by the lines BEFORE the cursor is still open:
+ * an unterminated quote, backtick, `$(`/`${`, or a trailing backslash
+ * continuation. A new physical line is a new command ONLY when the previous
+ * lines are complete; when this returns true the lightweight scanner cannot
+ * trust the cursor line as a fresh command, so a caller must not guess a
+ * shell edit range (and must not substitute Client candidates for Host ones).
+ */
+export function shellCommandIsOpen(lines: readonly string[]): boolean {
+  let quote: "'" | '"' | undefined
+  let substitution = 0
+  let brace = 0
+  let backtick = false
+  for (const line of lines) {
+    for (let index = 0; index < line.length; index += 1) {
+      const character = line[index]!
+      if (backtick) {
+        if (character === '`') backtick = false
+        continue
+      }
+      if (quote === "'") {
+        if (character === "'") quote = undefined
+        continue
+      }
+      if (quote === '"') {
+        if (character === '\\') index += 1
+        else if (character === '"') quote = undefined
+        continue
+      }
+      if (character === '\\') {
+        if (index === line.length - 1) return true
+        index += 1
+        continue
+      }
+      if (character === "'" || character === '"') {
+        quote = character
+        continue
+      }
+      if (character === '`') {
+        backtick = true
+        continue
+      }
+      if (character === '$' && line[index + 1] === '(') {
+        substitution += 1
+        index += 1
+        continue
+      }
+      if (character === '$' && line[index + 1] === '{') {
+        brace += 1
+        index += 1
+        continue
+      }
+      if (substitution > 0) {
+        if (character === '(') substitution += 1
+        else if (character === ')') substitution -= 1
+        continue
+      }
+      if (brace > 0) {
+        if (character === '{') brace += 1
+        else if (character === '}') brace -= 1
+      }
+    }
+  }
+  return quote !== undefined || backtick || substitution > 0 || brace > 0
+}
+
 /** The RAW range a WHOLE-WORD acceptance replaces: the raw word start, and the
  * raw word end. A closing quote the cursor is inside is part of the range (the
  * accepted literal stops before it, so keeping it would leave `""`); otherwise

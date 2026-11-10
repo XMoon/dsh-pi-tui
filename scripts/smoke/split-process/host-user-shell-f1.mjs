@@ -97,6 +97,36 @@ function belowComposerRows(viewport) {
   return bottom === -1 ? [] : viewport.slice(bottom + 1)
 }
 
+
+/**
+ * Complete a word on a MULTILINE shell draft. `!`/`!!` are editor MODES, not
+ * single-line commands: every independently complete command line is Shell.
+ * The lines are inserted through bracketed paste because Enter SUBMITS a shell
+ * draft. Cleanup is Ctrl+C, which clears the body and the mode together.
+ */
+async function completeMultilineFromTui(client, mode, bodyLines, candidate, forbidden, label) {
+  await waitForComposerMode(client, 'prompt', `${label} prompt preparation`)
+  client.send(mode)
+  await waitForComposerMode(client, mode, `${label} shell-mode activation`)
+  client.send(`\x1b[200~${bodyLines.join('\n')}\x1b[201~`)
+  await waitForComposerText(client, bodyLines.at(-1), `${label} multiline draft`)
+  const before = (await client.viewport()).join('\n')
+  assert(!before.includes(candidate), `${label} candidate was already painted before Tab`)
+  client.send('\t')
+  // The offer may be auto-applied OR a dropdown (git has several `che…`
+  // subcommands); both are accepted through the shared step.
+  await acceptOfferedCompletion(client, candidate, forbidden, label)
+  const composer = (await client.composerText()) ?? ''
+  assert(composer.includes(bodyLines[0]), `${label} must keep the earlier draft line: ${JSON.stringify(composer)}`)
+  // The first painted row carries the mode glyph; no LATER row may repeat it,
+  // which would mean the synthetic prefix had leaked into the body text.
+  const bodyRows = composer.split('\n').slice(1)
+  assert(bodyRows.every(row => !row.trimStart().startsWith(mode)),
+    `${label} must never write the synthetic prefix into the body: ${JSON.stringify(composer)}`)
+  client.send('\x03')
+  await waitForComposerMode(client, 'prompt', `${label} return to prompt mode`)
+}
+
 /**
  * Wait for a marker that must appear OUTSIDE the composer. A marker string is
  * also part of the painted COMMAND ROW before submission, so a plain
@@ -111,6 +141,61 @@ async function waitForScreenOutsideComposer(client, needle, label, timeoutMs = 3
     await new Promise(resolve => setTimeout(resolve, 50))
   }
   throw new SplitSmokeAssertionError(`${label}: ${needle} never appeared outside the composer: ${JSON.stringify(await client.composerText())}`)
+}
+
+
+/**
+ * Accept the CURRENT completion offer after a Tab. Tab has exactly two
+ * user-visible outcomes: a single candidate is applied in place, or several
+ * candidates open a dropdown painted BELOW the composer. Both are accepted
+ * here (the dropdown needs a second Tab); a client-only candidate anywhere in
+ * the current completion surface fails the case.
+ */
+async function acceptOfferedCompletion(client, candidate, forbidden, label) {
+  const deadline = Date.now() + 30_000
+  let offered
+  let offeredDraft = ''
+  while (Date.now() < deadline) {
+    const viewport = await client.viewport()
+    const draft = client.composerOf(viewport) ?? ''
+    if (draft.includes(candidate)) {
+      offered = 'applied'
+      offeredDraft = draft
+      break
+    }
+    if (belowComposerRows(viewport).join('\n').includes(candidate)) {
+      offered = 'menu'
+      offeredDraft = draft
+      break
+    }
+    await new Promise(resolve => setTimeout(resolve, 50))
+  }
+  if (offered === undefined) {
+    throw new SplitSmokeAssertionError(`${label} did not produce ${candidate} in the current completion UI: frameTail=${(await client.viewport()).slice(-12).join('\\n')}; composer=${JSON.stringify(await client.composerText())}`)
+  }
+  const offeredBelow = belowComposerRows(await client.viewport()).join('\n')
+  assert(!offeredDraft.includes(forbidden) && !offeredBelow.includes(forbidden),
+    `${label} leaked a Client-only suggestion into the current completion UI: composer=${JSON.stringify(offeredDraft)}; below=${JSON.stringify(offeredBelow)}`)
+  if (offered === 'menu') {
+    const draftBeforeAccept = offeredDraft
+    client.send('\t')
+    const acceptDeadline = Date.now() + 30_000
+    let accepted = false
+    while (Date.now() < acceptDeadline) {
+      const viewport = await client.viewport()
+      const draft = client.composerOf(viewport) ?? ''
+      const stillOffered = belowComposerRows(viewport).join('\n').includes(candidate)
+      if (draft !== draftBeforeAccept && !stillOffered) {
+        accepted = true
+        break
+      }
+      await new Promise(resolve => setTimeout(resolve, 50))
+    }
+    assert(accepted, `${label} dropdown acceptance did not commit a new draft and close the menu: composer=${JSON.stringify(await client.composerText())}`)
+    const acceptedDraft = (await client.composerText()) ?? ''
+    assert(!acceptedDraft.includes(forbidden), `${label} accepted draft leaked a Client-only suggestion: ${JSON.stringify(acceptedDraft)}`)
+  }
+  return offered
 }
 
 async function completeFromTui(client, input, candidate, forbidden, label) {
@@ -135,59 +220,7 @@ async function completeFromTui(client, input, candidate, forbidden, label) {
   assert(!belowComposerRows(beforeFrame).join('\n').includes(candidate),
     `${label} candidate was already below the composer before Tab`)
   client.send('\t')
-  // Tab has exactly two user-visible outcomes:
-  //   applied -> a single candidate is applied in place: the draft gains the
-  //              candidate plus the shell completion's trailing space;
-  //   menu    -> several candidates open a dropdown painted BELOW the box.
-  // Only those two CURRENT-frame facts count; a transcript match does not.
-  const deadline = Date.now() + 30_000
-  let offered
-  let offeredDraft = ''
-  while (Date.now() < deadline) {
-    const viewport = await client.viewport()
-    const draft = client.composerOf(viewport) ?? ''
-    if (draft.includes(candidate)) {
-      offered = 'applied'
-      offeredDraft = draft
-      break
-    }
-    if (belowComposerRows(viewport).join('\n').includes(candidate)) {
-      offered = 'menu'
-      offeredDraft = draft
-      break
-    }
-    await new Promise(resolve => setTimeout(resolve, 50))
-  }
-  if (offered === undefined) {
-    throw new SplitSmokeAssertionError(`${label} did not produce ${candidate} in the current completion UI: frameTail=${(await client.viewport()).slice(-12).join('\\n')}; composer=${JSON.stringify(await client.composerText())}`)
-  }
-  // The same CURRENT completion surface must never offer the Client candidate.
-  const offeredBelow = belowComposerRows(await client.viewport()).join('\n')
-  assert(!offeredDraft.includes(forbidden) && !offeredBelow.includes(forbidden),
-    `${label} leaked a Client-only suggestion into the current completion UI: composer=${JSON.stringify(offeredDraft)}; below=${JSON.stringify(offeredBelow)}`)
-  if (offered === 'menu') {
-    // The dropdown needs a SECOND Tab: the fork applies the SELECTED row and
-    // closes the dropdown in the same painted state. Require BOTH the draft
-    // to change and the candidate row to disappear; a fenced/rejected apply
-    // leaves the old menu painted and must fail, never "succeed" from it.
-    const draftBeforeAccept = offeredDraft
-    client.send('\t')
-    const acceptDeadline = Date.now() + 30_000
-    let accepted = false
-    while (Date.now() < acceptDeadline) {
-      const viewport = await client.viewport()
-      const draft = client.composerOf(viewport) ?? ''
-      const stillOffered = belowComposerRows(viewport).join('\n').includes(candidate)
-      if (draft !== draftBeforeAccept && !stillOffered) {
-        accepted = true
-        break
-      }
-      await new Promise(resolve => setTimeout(resolve, 50))
-    }
-    assert(accepted, `${label} dropdown acceptance did not commit a new draft and close the menu: composer=${JSON.stringify(await client.composerText())}`)
-    const acceptedDraft = (await client.composerText()) ?? ''
-    assert(!acceptedDraft.includes(forbidden), `${label} accepted draft leaked a Client-only suggestion: ${JSON.stringify(acceptedDraft)}`)
-  }
+  await acceptOfferedCompletion(client, candidate, forbidden, label)
   // Reset the shell draft through the editor's OWN action
   // (tui.editor.deleteToLineStart / Ctrl+U). No backspace length arithmetic
   // and no replayed Escape: a shell completion's trailing space or a quoted
@@ -392,6 +425,16 @@ export async function runHostUserShellF1(context) {
     await completeFromTui(clientB, '!echo $F1_HOST_VAR', '$F1_HOST_VARIABLE_20261109', '$F1_CLIENT_VARIABLE_20261109', 'F1 Host variable completion')
     await completeFromTui(clientB, '!git che', 'checkout', 'client-only.txt', 'F1 Host git subcommand completion')
     await completeFromTui(clientB, '!cat host-path-', 'host-path-only.txt', 'client-only.txt', 'F1 Host path completion')
+    // MULTILINE Shell: `!`/`!!` are editor modes, so a later command line is
+    // Shell too and must complete from the SAME Host authority.
+    await completeMultilineFromTui(clientB, '!', ['echo first', 'echo second', 'git che'],
+      'checkout', 'client-only.txt', 'F1 multiline third-line git subcommand')
+    await completeMultilineFromTui(clientB, '!!', ['echo first', 'f1-host-'],
+      'f1-host-command', 'f1-client-command', 'F1 multiline second-line Host command')
+    await completeMultilineFromTui(clientB, '!', ['echo first', 'echo $F1_HOST_VAR'],
+      '$F1_HOST_VARIABLE_20261109', '$F1_CLIENT_VARIABLE_20261109', 'F1 multiline second-line Host variable')
+    await completeMultilineFromTui(clientB, '!', ['echo first', 'cat host-path-'],
+      'host-path-only.txt', 'client-only.txt', 'F1 multiline second-line Host path')
 
     const scopeStartFile = join(hostDir, 'f1-scope-run-started.txt')
     const scopePidFile = join(hostDir, 'f1-scope-run-bash-pid.txt')
