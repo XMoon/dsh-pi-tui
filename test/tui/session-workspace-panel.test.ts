@@ -397,6 +397,15 @@ test('Workspace-first browse lists every official Workspace without inferring me
   assert.ok(h.view().includes('Other session'), 'a failed follow never hides the flat Session list')
 })
 
+test('the Editor gesture All scope is stated even while a Current Workspace is proved', async () => {
+  const h = harness({ initialBrowseScope: 'all' })
+  h.handle.setSnapshot(snapshot())
+  h.handle.updateWorkspaces({ type: 'baseline', items: [{ workspaceId: 'ws-a', path: '/ws', title: 'a', sessionIds: [CURRENT] }] })
+  await h.paint()
+  assert.ok(h.view().includes('Workspace: All workspaces'),
+    `the requested All scope is stated, not rewritten to Current:\n${h.view()}`)
+})
+
 test('a missing current-session membership remains in the proved Unassigned folder', async () => {
   const h = harness({ initialBrowseScope: 'current' })
   h.handle.setSnapshot(snapshot())
@@ -444,7 +453,7 @@ test('a later official replace proves the current Workspace folder without stale
 })
 
 test('Workspace remove/upsert updates official folder rows without cwd inference', async () => {
-  const h = harness()
+  const h = harness({ initialBrowseScope: 'current' })
   h.handle.setSnapshot(snapshot())
   h.handle.updateWorkspaces({ type: 'baseline', items: [{ workspaceId: 'ws-a', path: '/ws', title: 'a', sessionIds: [CURRENT] }] })
   await h.paint()
@@ -928,7 +937,7 @@ test('Space opens a read-only Peek: no Host write, Esc restores the browse selec
 })
 
 test('all official Workspace folders, including empty and Unassigned, stay in one browse tree', async () => {
-  const h = harness({ columns: 100, rows: 24 })
+  const h = harness({ columns: 100, rows: 24, initialBrowseScope: 'current' })
   h.handle.setSnapshot(snapshot({
     rows: [row(CURRENT, 4_000, { title: 'Current session' }), row(OTHER, 3_000, { title: 'Other session' }), row(THIRD, 2_000, { title: 'Cold session' })],
   }))
