@@ -869,7 +869,6 @@ function shownToolResult(message: Extract<TranscriptMessage, { kind: 'tool' }>, 
  * raw args instead of a headless empty card.
  */
 const TOOL_ERROR_NOTE_LIMIT = 180
-const PTC_TERMINAL_NOTE_LIMIT = 96
 const TOOL_ERROR_MARKER_LIMIT = 48
 
 function boundedPhysicalPrefix(source: string, budget: number): string {
@@ -898,14 +897,10 @@ function toolErrorNote(
   terminalFailure?: SubCallTerminalFailure,
 ): string | undefined {
   if (displayStatus !== 'error') return undefined
-  const reason = terminalFailure?.body ?? shownToolResult(message, options)
   const marker = terminalFailure === undefined ? '' : terminalFailureMarker(terminalFailure)
-  const markerLength = Array.from(marker).length
-  const noteLimit = terminalFailure === undefined ? TOOL_ERROR_NOTE_LIMIT : PTC_TERMINAL_NOTE_LIMIT
-  const summaryBudget = Math.max(0, noteLimit - markerLength - (marker === '' ? 0 : 1))
-  const summary = boundedPhysicalPrefix(reason, summaryBudget)
-  const note = summary === '' ? marker : marker === '' ? summary : `${summary} ${marker}`
-  return note === '' ? undefined : note
+  if (terminalFailure !== undefined) return marker
+  const summary = boundedPhysicalPrefix(shownToolResult(message, options), TOOL_ERROR_NOTE_LIMIT)
+  return summary === '' ? undefined : summary
 }
 
 function childToolNode(child: TranscriptToolMessage, options: TranscriptViewOptions, parentDisclosure: string): Node {

@@ -354,8 +354,12 @@ test('PTC error notes stay bounded while retaining long-output exit and signal r
     assert.ok(note.includes(scenario.marker), `${scenario.name} reason survives in the closed header: ${note}`)
     const noteLimit = scenario.name === 'ordinary' ? 180 : 96
     assert.ok(note.length <= noteLimit, `${scenario.name} header note fits its bounded client width: ${note.length}`)
-    if (scenario.name === 'ordinary') assert.equal(note, scenario.result, 'ordinary short failures retain their readable summary')
-    else assert.ok(note.startsWith('compiler output'), 'long shell output keeps a readable prefix')
+    if (scenario.name === 'ordinary') {
+      assert.equal(note, scenario.result, 'ordinary short failures retain their readable summary')
+    } else {
+      assert.equal(note, scenario.marker, 'the official terminal reason owns the compact note')
+      assert.ok(note.length <= 48, `${scenario.name} terminal reason stays width-bounded: ${note.length}`)
+    }
   }
 })
 

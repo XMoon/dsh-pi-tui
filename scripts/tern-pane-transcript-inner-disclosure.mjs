@@ -385,8 +385,8 @@ export default async function (h) {
      if (child === undefined) { finish(h, { ...extra, qualification: 'PTC_CHILD_NOT_FOUND' }); return }
      h.check('the bash child is independently collapsed and displays the derived error',
        child.p.collapsible === true && child.p.collapsed === true && child.p.status === 'error', JSON.stringify(child.p))
-     h.check('the collapsed PTC note preserves exit code 2 within its 96-character header budget',
-       typeof child.p.note === 'string' && child.p.note.includes('[exit code: 2]') && child.p.note.length <= 96,
+     h.check('the collapsed PTC note preserves exit code 2 in a 48-character marker budget',
+       typeof child.p.note === 'string' && child.p.note.includes('[exit code: 2]') && child.p.note.length <= 48,
        JSON.stringify({ id: child.id, status: child.p.status, note: child.p.note, length: child.p.note?.length }))
      h.check('the complete child result is not materialized while its disclosure remains closed', !live.has(`${child.id}.result`))
      const childHeaderCandidates = snapshot => mainNodes(snapshot)
@@ -418,6 +418,44 @@ export default async function (h) {
       displayStatus: child.p.status, note: child.p.note,
       bodyAbsent: !live.has(`${child.id}.result`), sessionFacts: facts, noteTree,
     })
+    const ptcViewportEvidence = [{ width: 1280, height: 800, appearance: 'dark', header: childHeadWitness.header, note: noteTextNode }]
+    for (const viewport of [
+      { width: 900, height: 360, appearance: 'light' },
+      { width: 400, height: 600, appearance: 'dark' },
+    ]) {
+      await h.resize(viewport.width, viewport.height)
+      if (!gui) h.send('appearance', viewport.appearance)
+      h.check(`the PTC note client uses ${viewport.width}x${viewport.height} ${viewport.appearance}`,
+        JSON.stringify(h.ctl('stats').viewport?.slice(0, 2)) === JSON.stringify([viewport.width, viewport.height])
+          && (gui || h.ctl('state').theme === viewport.appearance),
+        JSON.stringify({ viewport: h.ctl('stats').viewport, theme: h.ctl('state').theme }))
+      const witness = await revealInnerHeader(h, `${viewport.width}x${viewport.height} collapsed PTC bash error`, snapshot =>
+        snapshot.nodes.find(node => String(node.class ?? '').split(/\s+/u).includes('sf-tool-head')
+          && h.descendantsText(node).includes('Bash') && h.descendantsText(node).includes('[exit code: 2]')))
+      const noteNode = witness?.textNodes.find(node => String(node.text).includes('[exit code: 2]'))
+      const currentChild = foldLive(h).get(child.id)
+      h.check(`the PTC exit note is completely visible and the full body remains closed at ${viewport.width}x${viewport.height}`,
+        witness !== undefined && witness.header !== undefined && noteNode !== undefined
+          && currentChild?.p.status === 'error' && currentChild.p.collapsed === true
+          && !foldLive(h).has(`${child.id}.result`)
+          && witness.textNodes.every(node => fullyVisible(witness.snapshot.chains, node))
+          && visibleSpan(witness.snapshot.chains, witness.header, 'x') >= 4
+          && visibleSpan(witness.snapshot.chains, witness.header, 'y') >= 4,
+        JSON.stringify({ child: currentChild,
+          header: witness?.header === undefined ? null : { text: h.descendantsText(witness.header), rect: rect(witness.header) },
+          note: noteNode === undefined ? null : { text: noteNode.text, rect: rect(noteNode), visible: visibleBox(witness.snapshot.chains, noteNode) } }))
+      if (witness === undefined || witness.header === undefined || noteNode === undefined) {
+        finish(h, { ...extra, qualification: `PTC_NOTE_NOT_VISIBLE_${viewport.width}x${viewport.height}` }); return
+      }
+      const captureName = `${preset}-ptc-error-note-closed-${viewport.width}x${viewport.height}-${viewport.appearance}`
+      h.capture(captureName, `the official PTC bash child error marker is visible in the collapsed Tern header at ${viewport.width}x${viewport.height} ${viewport.appearance}`)
+      ptcViewportEvidence.push({ width: viewport.width, height: viewport.height, appearance: viewport.appearance,
+        header: witness.header, note: noteNode })
+    }
+    writeLedger(h, 'ptc-error-note-viewport-matrix.json', ptcViewportEvidence.map(entry => ({
+      width: entry.width, height: entry.height, appearance: entry.appearance,
+      header: entry.header, note: entry.note,
+    })))
     writeLedger(h, 'ptc-error-note-evidence.json', {
       sourceSnapshot: head, preset, viewport: h.ctl('stats').viewport, theme: h.ctl('state').theme,
       sdk: { pin: '0.2.0', integrity: sdkIntegrity }, dsh: { mode: dshMode, pin: dshPin },
@@ -425,8 +463,14 @@ export default async function (h) {
       qualificationStandIns: ['the model stream uses a deterministic scripted tool call', 'the PTC runtime test adapter invokes the official tools.bash binding without interpreting source code', 'the shell provider returns deterministic long stdout and exit code 2; no OS process is spawned'],
       rootId: root.id, childId: child.id, displayStatus: child.p.status,
       note: child.p.note, sourceOutput: facts.output, isError: facts.childSettle.isError,
-      bodyAbsent: !live.has(`${child.id}.result`), evidenceTier: innerDisclosureEvidenceTier(gui),
-      notVerified: ['900x360 PTC note placement', 'OS physical keyboard/IME/wheel', 'G8 Owner visual signature'],
+      bodyAbsent: !live.has(`${child.id}.result`),
+      viewportMatrix: [
+        { width: 1280, height: 800, appearance: 'dark' },
+        { width: 900, height: 360, appearance: 'light' },
+        { width: 400, height: 600, appearance: 'dark' },
+      ],
+      evidenceTier: innerDisclosureEvidenceTier(gui),
+      notVerified: ['OS physical keyboard/IME/wheel', 'G8 Owner visual signature'],
     })
     finish(h, { ...extra, qualification: qualificationFromResults(h.results) })
     return
