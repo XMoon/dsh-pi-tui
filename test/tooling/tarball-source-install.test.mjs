@@ -52,7 +52,7 @@ function candidateFiles() {
     'dist/performance-host.mjs': "export const name = 'pi-tui-performance-host'\n",
     // M4-B2-HF: the ONE built-in PiTui Host Runtime Loader entry.
     'dist/host-runtime.mjs': "export const name = 'pi-tui-host-runtime'\n"
-      + "export const inject = ['typert', 'agents', 'fileReferences', 'workingDirectory']\n"
+      + "export const inject = ['typert', 'agents', 'fileReferences', 'workingDirectory', 'sessions', 'sandboxPolicy', 'sandbox', 'subprocess']\n"
       + "export async function apply() {}\n",
     // The REAL published row surface, including the two tool names it has
     // exported since it shipped (the tarball smoke asserts them).

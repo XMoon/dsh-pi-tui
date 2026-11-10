@@ -1,4 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
+import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { MessageId } from '@deepseek-ai/dsh-llm'
 import { SESSION_FORMAT_VERSION, SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
@@ -135,9 +136,10 @@ export interface RunnerHarness {
   readonly subagents?: unknown
   /** An optional jobs registry service (the Task Center's jobs half). */
   jobs?: unknown
-  /** An optional shell executor service (the sandbox-policy user-shell
-   * path; absent models "sandbox unavailable in this composition"). */
+  /** An optional shell executor service (legacy sandbox-policy consumers). */
   shell?: unknown
+  /** An optional official subprocess provider; absent mounts the real local one. */
+  subprocess?: unknown
   /** PR3-B B2: flip `.value` to true to make the Direct writer COMMIT a prompt
    *  (default false keeps the historical `session/agent-busy` degradation every
    *  existing suite was written against). */
@@ -571,6 +573,8 @@ export async function mountRunner(
   if (harness.subagents !== undefined) ctx.provide('subagents', harness.subagents as never)
   if (harness.jobs !== undefined) ctx.provide('jobs', harness.jobs as never)
   if (harness.shell !== undefined) ctx.provide('shell', harness.shell as never)
+  if (harness.subprocess !== undefined) ctx.provide('subprocess', harness.subprocess as never)
+  else await ctx.plugin(LocalSubprocessRuntime)
   ctx.provide('loader', loader as never)
   const resolved = TuiConfigSchema({ fullscreen: 'off', ...config } as never)
   onResolvedConfig?.(resolved)

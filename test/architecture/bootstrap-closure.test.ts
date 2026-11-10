@@ -651,7 +651,7 @@ const EXTRACTED_DECLARATIONS: ReadonlyArray<readonly [string, readonly string[]]
   ],
   [
     'src/app/submission/user-shell.ts',
-    ['shellController', 'interrupt', 'shellTempFiles', 'runUserShell'],
+    ['shellController', 'interrupt', 'runUserShell'],
   ],
   [
     'src/app/surface/application-events.ts',

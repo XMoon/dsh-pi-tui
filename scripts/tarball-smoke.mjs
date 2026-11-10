@@ -513,7 +513,7 @@ function main() {
             + "if (!Array.isArray(m[7].inject)) throw new Error('visual-tools inject');"
             + "if (m[8].name !== 'pi-tui-host-runtime') throw new Error('host-runtime row');"
             + "if (typeof m[8].apply !== 'function') throw new Error('host-runtime apply');"
-            + "if (!Array.isArray(m[8].inject) || m[8].inject.join(',') !== 'typert,agents,fileReferences,workingDirectory') throw new Error('host-runtime inject');"
+            + "if (!Array.isArray(m[8].inject) || m[8].inject.join(',') !== 'typert,agents,fileReferences,workingDirectory,sessions,sandboxPolicy,sandbox,subprocess') throw new Error('host-runtime inject');"
             + "if (m[9].name !== 'pi-tui-web-preferences') throw new Error('web-preferences row');"
             + "if (typeof m[9].Config !== 'function' && typeof m[9].Config !== 'object') throw new Error('web-preferences Config');"
             + "if (typeof m[9].apply !== 'function') throw new Error('web-preferences apply');"

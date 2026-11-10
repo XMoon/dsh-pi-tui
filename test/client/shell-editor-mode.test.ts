@@ -8,11 +8,12 @@
  * @module @xmoon76/dsh-pi-tui/shell-editor-mode.test
  */
 
+import { spawnSync } from 'node:child_process'
 import assert from 'node:assert/strict'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { afterEach, test } from 'node:test'
-import { mkdirSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { chmodSync, mkdirSync, existsSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { TuiApp, type SubagentViewerTarget } from '../../src/tui-app.ts'
 import { EditorRegistry } from '../../src/extension/internal/editor-registry.ts'
 import { EditorSeatHolder } from '../../src/tui/interaction/editor-seat-holder.ts'
@@ -21,9 +22,11 @@ import type { EditorHost, ExtensionEditor } from '../../src/extension/public-typ
 import { runOwned, type OwnedTaskOptions } from '../../src/runtime/process/tasks.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 import { resetCommandCacheForTest, requestShellCandidates, setCompgenRunnerForTest } from '../../src/client/shell/compgen.ts'
+import { parseShellWords } from '../../src/client/shell/words.ts'
 import type { HostShellCompletionPort, HostShellCompletionRequest } from '../../src/runtime/host-shell-completion-port.ts'
 import { MentionProvider } from '../../src/tui/interaction/autocomplete/provider.ts'
 import { DirectHostFilePort } from '../../src/runtime/direct/host-file-direct.ts'
+import { createHostShellPathCompletionBridge } from '../../src/runtime/remote/pi-tui-host-user-shell-host-bridge.ts'
 import { EMPTY_DIRECT_SHELL_COMPLETION } from '../support/host-shell-completion.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
@@ -1823,6 +1826,395 @@ test('accepting an absolute-path completion in a shell mode never doubles the sl
   vt.sendInput('\t')
   await vt.waitForRender()
   assert.equal(app.seatTextForTest(), '/usr/', 'shell-local accepts the absolute path without a doubled slash')
+})
+
+test('Host path completion inserts literal Shell words before real command execution', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-host-shell-injection-')
+  const sentinelName = 'unexpected-command-executed'
+  const sentinel = join(root, sentinelName)
+  const marker = 'F1_LITERAL_PATH_CONTENT'
+  const backtick = String.fromCharCode(96)
+  const cases: readonly {
+    prefix: string
+    name: string
+    quote: string
+    command: string
+    directory: boolean
+    expectedPath?: string
+    /** A decoy file that the OLD trimmed/unquoted Host query would rank ahead
+     * of the literal filename; it must never be the accepted value. */
+    decoy?: string
+  }[] = [
+    { prefix: '~f1-literal-tilde-', name: '~f1-literal-tilde-$(touch unexpected-command-executed).txt', quote: '', command: 'cat', directory: false },
+    { prefix: '~/f1-quoted-tilde-', name: '~/f1-quoted-tilde-$(touch unexpected-command-executed).txt', quote: '"', command: 'cat', directory: false },
+    { prefix: './f1-dollar-', name: `f1-dollar-$(touch ${sentinelName}).txt`, quote: '', command: 'cat', directory: false },
+    { prefix: './f1-backtick-', name: `f1-backtick-${backtick}touch ${sentinelName}${backtick}.txt`, quote: '', command: 'cat', directory: false },
+    { prefix: './f1-semicolon-', name: `f1-semicolon-;touch ${sentinelName};#.txt`, quote: '', command: 'cat', directory: false },
+    { prefix: './f1-space-', name: `f1-space-$(touch ${sentinelName}) part.txt`, quote: '"', command: 'cat', directory: false },
+    { prefix: './f1-single-', name: `f1-single-';touch ${sentinelName};#.txt`, quote: "'", command: 'cat', directory: false },
+    { prefix: './f1-double-', name: `f1-double-"$(touch ${sentinelName}).txt`, quote: '"', command: 'cat', directory: false },
+    { prefix: './f1-backslash-', name: 'f1-backslash-\\name.txt', quote: '', command: 'cat', directory: false },
+    { prefix: './f1-newline-', name: `f1-newline-\ntouch ${sentinelName}\n.txt`, quote: '', command: 'cat', directory: false },
+    // A basename whose FIRST byte is a literal space: the semantic token keeps
+    // the leading space (the user opens a double quote before it), and the
+    // accepted Host path must stay one literal argument with the `$(` inside
+    // the double quotes escaped, never a command substitution.
+    { prefix: './ f1-leading-space-', name: ` f1-leading-space-$(touch ${sentinelName}).txt`, quote: '"', command: 'cat', directory: false },
+    // A basename whose FIRST byte is a literal double quote: the user types the
+    // quote UNQUOTED and backslash-escaped (`./\"`), so the semantic token is
+    // the real filename byte; the accepted value is single-quoted and the
+    // `$(` stays literal.
+    { prefix: './\\"f1-leading-double-quote-', name: `"f1-leading-double-quote-$(touch ${sentinelName}).txt`, quote: '', command: 'cat', directory: false },
+    // The SAME two literal bytes at the START of the shell WORD, typed with a
+    // backslash escape: the Host bridge receives an already-decoded semantic
+    // prefix, so the leading space/quote byte is filename data, never Shell
+    // syntax to strip. Each decoy has the trimmed/unquoted name, so a second
+    // parse would rank (and accept) the decoy instead.
+    { prefix: '\\ f1-root-space-', name: ` f1-root-space-$(touch ${sentinelName}).txt`, quote: '', command: 'cat', directory: false, expectedPath: ` f1-root-space-$(touch ${sentinelName}).txt`, decoy: 'f1-root-space-decoy.txt' },
+    { prefix: '\\"f1-root-quote-', name: `"f1-root-quote-$(touch ${sentinelName}).txt`, quote: '', command: 'cat', directory: false, expectedPath: `"f1-root-quote-$(touch ${sentinelName}).txt`, decoy: 'f1-root-quote-decoy.txt' },
+    { prefix: './f1-directory-', name: `f1-directory-$(touch ${sentinelName})`, quote: '', command: 'cd', directory: true },
+  ]
+  const bridge = createHostShellPathCompletionBridge()
+  const hostShell: HostShellCompletionPort = {
+    pathAuthority: 'host',
+    async complete({ request, signal }) {
+      if (request.kind !== 'paths') return { kind: 'ok', candidates: [] }
+      return await bridge.complete(root, request.prefix, signal)
+    },
+  }
+  const submissions: string[] = []
+  const vt = new VirtualTerminal(120, 32)
+  const app = new TuiApp(vt, {
+    onSubmit: text => { submissions.push(text) },
+    onExit: () => {},
+  })
+  app.setCommandCompletions([], root, null, undefined, undefined, undefined, [], hostShell)
+  app.start()
+  startedApps.add(app)
+  life.defer(() => app.stop())
+  await vt.waitForRender()
+
+  for (const item of cases) {
+    assert.equal(existsSync(sentinel), false, `side-effect sentinel starts absent for ${item.prefix}`)
+    const actualName = item.name
+    const actualPath = join(root, actualName)
+    mkdirSync(dirname(actualPath), { recursive: true })
+    if (item.directory) {
+      mkdirSync(actualPath)
+    } else {
+      writeFileSync(actualPath, marker)
+    }
+    if (item.decoy !== undefined) writeFileSync(join(root, item.decoy), 'DECOY')
+    app.setEditorText('')
+    await vt.waitForRender()
+    vt.sendInput('!')
+    vt.sendInput(`${item.command} ${item.quote}${item.prefix}`)
+    vt.sendInput('\t')
+    await vt.waitForRender()
+    if (app.isShowingAutocompleteForTest()) {
+      vt.sendInput('\t')
+      await vt.waitForRender()
+    }
+    const body = app.seatTextForTest()
+    const expectedPath = item.expectedPath
+      ?? (item.name.startsWith('~') && !item.name.startsWith('~/')
+        ? item.name
+        : `./${item.name}${item.directory ? '/' : ''}`)
+    assert.deepEqual(parseShellWords(body), [item.command, expectedPath],
+      `TUI completion maps the chosen file to one literal Shell argument for ${item.prefix}: ${JSON.stringify(body)}`)
+    if (item.directory) vt.sendInput(' && pwd')
+    vt.sendInput('\r')
+    await vt.waitForRender()
+    const submitted = submissions.pop()
+    assert.equal(submitted, `!${body}${item.directory ? ' && pwd' : ''}`)
+    const executed = spawnSync('bash', ['-c', submitted.slice(1)], { cwd: root, encoding: 'utf8' })
+    assert.equal(executed.status, 0, `the accepted Host path remains one valid Shell argument: ${executed.stderr}`)
+    if (item.directory) assert.equal(executed.stdout, `${actualPath}\n`)
+    else assert.equal(executed.stdout, marker)
+    assert.equal(existsSync(sentinel), false, `completion of ${item.prefix} did not execute a second command`)
+  }
+})
+
+test('Host path completion inserts literal Shell words at a cursor mid-token', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-host-shell-cursor-mid-')
+  const marker = 'F1_CURSOR_MID_TOKEN_CONTENT'
+  const sentinelName = 'unexpected-command-executed'
+  const sentinel = join(root, sentinelName)
+  const suffix = `suffix-$(touch ${sentinelName}).txt`
+  const name = `f1-mid-${suffix}`
+  writeFileSync(join(root, name), marker)
+  const bridge = createHostShellPathCompletionBridge()
+  const hostShell: HostShellCompletionPort = {
+    pathAuthority: 'host',
+    async complete({ request, signal }) {
+      if (request.kind !== 'paths') return { kind: 'ok', candidates: [] }
+      return await bridge.complete(root, request.prefix, signal)
+    },
+  }
+  const submissions: string[] = []
+  const vt = new VirtualTerminal(120, 32)
+  const app = new TuiApp(vt, {
+    onSubmit: text => { submissions.push(text) },
+    onExit: () => {},
+  })
+  app.setCommandCompletions([], root, null, undefined, undefined, undefined, [], hostShell)
+  app.start()
+  startedApps.add(app)
+  life.defer(() => app.stop())
+  await vt.waitForRender()
+  vt.sendInput('!')
+  vt.sendInput(`cat ./f1-mid-${suffix}`)
+  await vt.waitForRender()
+  // Cursor sits BETWEEN the typed prefix `./f1-mid-` and the suffix
+  // `suffix-$(touch sentinel).txt`. The Host candidate is the FULL matching
+  // filename, so accepting it must replace the whole word — never leave the
+  // already-typed suffix behind (`./f1-mid-suffix-…txtsuffix-…txt`).
+  for (let index = 0; index < suffix.length; index += 1) vt.sendInput('\x1b[D')
+  await vt.waitForRender()
+  vt.sendInput('\t')
+  await vt.waitForRender()
+  if (app.isShowingAutocompleteForTest()) {
+    vt.sendInput('\t')
+    await vt.waitForRender()
+  }
+  const body = app.seatTextForTest()
+  assert.equal(existsSync(sentinel), false, 'completion itself must never execute the suffix command substitution')
+  assert.deepEqual(parseShellWords(body), ['cat', `./${name}`],
+    `a mid-token completion must replace the whole word, not append the suffix: ${JSON.stringify(body)}`)
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  const submitted = submissions.pop()
+  assert.equal(submitted, `!${body}`, 'the mid-token completion submits the same body it left in the editor')
+  const executed = spawnSync('bash', ['-c', submitted.slice(1)], { cwd: root, encoding: 'utf8' })
+  assert.equal(executed.status, 0, `the mid-token Host path remains one valid Shell argument: ${executed.stderr}`)
+  assert.equal(executed.stdout, marker, 'the accepted Host path resolves the exact existing file')
+  assert.equal(existsSync(sentinel), false, 'the accepted Host path must not execute the suffix command substitution')
+})
+
+test('Host mid-token path completion preserves the following separate words', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-host-shell-cursor-mid-words-')
+  const marker = 'F1_CURSOR_MID_WORDS_CONTENT'
+  const name = 'f1-words-suffix.txt'
+  writeFileSync(join(root, name), marker)
+  const bridge = createHostShellPathCompletionBridge()
+  const hostShell: HostShellCompletionPort = {
+    pathAuthority: 'host',
+    async complete({ request, signal }) {
+      if (request.kind !== 'paths') return { kind: 'ok', candidates: [] }
+      return await bridge.complete(root, request.prefix, signal)
+    },
+  }
+  const submissions: string[] = []
+  const vt = new VirtualTerminal(120, 32)
+  const app = new TuiApp(vt, {
+    onSubmit: text => { submissions.push(text) },
+    onExit: () => {},
+  })
+  app.setCommandCompletions([], root, null, undefined, undefined, undefined, [], hostShell)
+  app.start()
+  startedApps.add(app)
+  life.defer(() => app.stop())
+  await vt.waitForRender()
+  vt.sendInput('!')
+  const tail = 'suffix.txt && echo preserved'
+  vt.sendInput(`cat ./f1-words-${tail}`)
+  await vt.waitForRender()
+  // The cursor splits ONE Shell word (`./f1-words-|suffix.txt`); the words
+  // after the separating whitespace are NOT part of the replaced range.
+  for (let index = 0; index < tail.length; index += 1) vt.sendInput('\x1b[D')
+  await vt.waitForRender()
+  vt.sendInput('\t')
+  await vt.waitForRender()
+  if (app.isShowingAutocompleteForTest()) {
+    vt.sendInput('\t')
+    await vt.waitForRender()
+  }
+  const body = app.seatTextForTest()
+  assert.deepEqual(parseShellWords(body), ['cat', `./${name}`, '&&', 'echo', 'preserved'],
+    `only the cursor's own word is replaced: ${JSON.stringify(body)}`)
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  const submitted = submissions.pop()
+  assert.equal(submitted, `!${body}`, 'the following words survive submission')
+  const executed = spawnSync('bash', ['-c', submitted.slice(1)], { cwd: root, encoding: 'utf8' })
+  assert.equal(executed.status, 0, `the completed word remains one valid Shell argument: ${executed.stderr}`)
+  assert.equal(executed.stdout, `${marker}preserved\n`)
+})
+
+test('a quoted $VAR completion keeps its quote and never appends a quoted space', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  setCompgenRunnerForTest(() => Promise.resolve({ ok: true, lines: ['HOME'] }))
+  try {
+    const vt = new VirtualTerminal(120, 32)
+    const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+    app.setCommandCompletions([], root, null, undefined, undefined, undefined, [], directShellCompletion)
+    app.start()
+    startedApps.add(app)
+    life.defer(() => app.stop())
+    await vt.waitForRender()
+    vt.sendInput('!')
+    vt.sendInput('echo "$HO')
+    await vt.waitForRender()
+    vt.sendInput('\t')
+    await vt.waitForRender()
+    if (app.isShowingAutocompleteForTest()) {
+      vt.sendInput('\t')
+      await vt.waitForRender()
+    }
+    assert.equal(app.seatTextForTest(), 'echo "$HOME',
+      'the quoted variable keeps its opening quote and adds no space inside it')
+  } finally {
+    setCompgenRunnerForTest(undefined)
+    resetCommandCacheForTest()
+  }
+})
+
+test('Host path completion starts a new word after an unquoted control operator', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-host-shell-operator-word-')
+  const name = 'f1-semi-target.sh'
+  writeFileSync(join(root, name), '#!/bin/sh\necho semicolon-target\n')
+  chmodSync(join(root, name), 0o755)
+  const bridge = createHostShellPathCompletionBridge()
+  const hostShell: HostShellCompletionPort = {
+    pathAuthority: 'host',
+    async complete({ request, signal }) {
+      if (request.kind !== 'paths') return { kind: 'ok', candidates: [] }
+      return await bridge.complete(root, request.prefix, signal)
+    },
+  }
+  const submissions: string[] = []
+  const vt = new VirtualTerminal(120, 32)
+  const app = new TuiApp(vt, {
+    onSubmit: text => { submissions.push(text) },
+    onExit: () => {},
+  })
+  app.setCommandCompletions([], root, null, undefined, undefined, undefined, [], hostShell)
+  app.start()
+  startedApps.add(app)
+  life.defer(() => app.stop())
+  await vt.waitForRender()
+  vt.sendInput('!')
+  // NO blank after `;`: the path word STARTS at the operator, so a
+  // whitespace-only word start would query the whole `true;./f1-semi-` text.
+  vt.sendInput('true;./f1-semi-')
+  await vt.waitForRender()
+  vt.sendInput('\t')
+  await vt.waitForRender()
+  if (app.isShowingAutocompleteForTest()) {
+    vt.sendInput('\t')
+    await vt.waitForRender()
+  }
+  const body = app.seatTextForTest()
+  assert.equal(body, `true;'./${name}'`,
+    `only the word after the operator is replaced: ${JSON.stringify(body)}`)
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  const submitted = submissions.pop()
+  assert.equal(submitted, `!${body}`)
+  const executed = spawnSync('bash', ['-c', submitted.slice(1)], { cwd: root, encoding: 'utf8' })
+  assert.equal(executed.status, 0, `the completed word is a valid command after the operator: ${executed.stderr}`)
+  assert.equal(executed.stdout, 'semicolon-target\n')
+})
+
+test('Host command completion starts a new word after an unquoted control operator', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  const requests: HostShellCompletionRequest[] = []
+  const hostShell: HostShellCompletionPort = {
+    pathAuthority: 'host',
+    async complete({ request }) {
+      requests.push(request)
+      return request.kind === 'commands'
+        ? { kind: 'ok', candidates: ['echo'] }
+        : { kind: 'ok', candidates: [] }
+    },
+  }
+  const submissions: string[] = []
+  const vt = new VirtualTerminal(120, 32)
+  const app = new TuiApp(vt, {
+    onSubmit: text => { submissions.push(text) },
+    onExit: () => {},
+  })
+  app.setCommandCompletions([], root, null, undefined, undefined, undefined, [], hostShell)
+  app.start()
+  startedApps.add(app)
+  life.defer(() => app.stop())
+  await vt.waitForRender()
+  vt.sendInput('!')
+  // NO blank after `;`: the second line is a COMMAND word, not an argument.
+  vt.sendInput('echo hi;ec')
+  await vt.waitForRender()
+  vt.sendInput('\t')
+  await vt.waitForRender()
+  if (app.isShowingAutocompleteForTest()) {
+    vt.sendInput('\t')
+    await vt.waitForRender()
+  }
+  const body = app.seatTextForTest()
+  assert.equal(body, 'echo hi;echo ',
+    `only the command word after the separator is replaced: ${JSON.stringify(body)}`)
+  assert.deepEqual(requests.at(-1), { kind: 'commands', prefix: 'ec' })
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  // The shell submission drops the completion's trailing separator space.
+  assert.equal(submissions.pop(), `!${body.trimEnd()}`)
+  assert.equal(spawnSync('bash', ['-n', '-c', body], { encoding: 'utf8' }).status, 0,
+    'the command line after the separator stays syntactically valid')
+})
+
+test('Host path completion at a cursor before an opening quote replaces the quoted tail', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-host-shell-cursor-before-quote-')
+  const marker = 'F1_CURSOR_BEFORE_QUOTE_CONTENT'
+  const name = 'f1-empty-quote.txt'
+  writeFileSync(join(root, name), marker)
+  const bridge = createHostShellPathCompletionBridge()
+  const hostShell: HostShellCompletionPort = {
+    pathAuthority: 'host',
+    async complete({ request, signal }) {
+      if (request.kind !== 'paths') return { kind: 'ok', candidates: [] }
+      return await bridge.complete(root, request.prefix, signal)
+    },
+  }
+  const submissions: string[] = []
+  const vt = new VirtualTerminal(120, 32)
+  const app = new TuiApp(vt, {
+    onSubmit: text => { submissions.push(text) },
+    onExit: () => {},
+  })
+  app.setCommandCompletions([], root, null, undefined, undefined, undefined, [], hostShell)
+  app.start()
+  startedApps.add(app)
+  life.defer(() => app.stop())
+  await vt.waitForRender()
+  vt.sendInput('!')
+  vt.sendInput('cat "')
+  await vt.waitForRender()
+  // The cursor sits BEFORE the opening quote: the empty word is completed and
+  // the dangling quoted tail belongs to the range the acceptance replaces.
+  vt.sendInput('\x1b[D')
+  await vt.waitForRender()
+  vt.sendInput('\t')
+  await vt.waitForRender()
+  if (app.isShowingAutocompleteForTest()) {
+    vt.sendInput('\t')
+    await vt.waitForRender()
+  }
+  const body = app.seatTextForTest()
+  assert.equal(body, `cat '${name}'`,
+    `the dangling quote is replaced exactly once: ${JSON.stringify(body)}`)
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  const submitted = submissions.pop()
+  assert.equal(submitted, `!${body}`)
+  const executed = spawnSync('bash', ['-c', submitted.slice(1)], { cwd: root, encoding: 'utf8' })
+  assert.equal(executed.status, 0, `the quoted completion is one valid argument: ${executed.stderr}`)
+  assert.equal(executed.stdout, marker)
 })
 
 test('a Stable extension suggestion applies through the wire adapter symmetrically', async (t) => {

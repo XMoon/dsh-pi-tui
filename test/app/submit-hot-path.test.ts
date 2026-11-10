@@ -32,6 +32,7 @@ import { fakeAgentModel } from '../support/agent-model-double.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { createFakeHostWorkspaceRegistry, provideFakeHostWorkspaceRegistry, type FakeHostWorkspaceRegistry } from '../support/workspace-registry.ts'
+import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 
 process.env.NO_COLOR = ''
 process.env.FORCE_COLOR = ''
@@ -645,6 +646,9 @@ async function mountRunner(
   ctx.provide('agentDefaultModel', harness.defaultModel as never)
   ctx.provide('commands', harness.commands as never)
   ctx.provide('loader', { await: async () => {} } as never)
+  // The Direct shell adapter executes through the same official Subprocess
+  // provider the production Host composition mounts.
+  await ctx.plugin(LocalSubprocessRuntime)
   let app: TuiApp | undefined
   let boundConfigRefs: Record<string, unknown> | undefined
   const originalStart = TuiApp.prototype.start
