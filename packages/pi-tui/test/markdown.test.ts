@@ -2299,6 +2299,21 @@ describe("Source-cell proof (proveSourceSpan)", () => {
 		expectPainted(markdown, source, "needle", 44);
 	});
 
+	it("keeps reference-definition destinations hidden or ambiguous instead of claiming cells", () => {
+		const source = "[label][id]\n\n[id]: https://x/needle";
+		capabilities(true);
+		const hidden = new Markdown(source, 0, 0, defaultMarkdownTheme);
+		assert.deepStrictEqual(hidden.proveSourceSpan(rangeOf(source, "needle"), 44), {
+			kind: "NOT_PAINTED",
+			reason: "HIDDEN_LINK_TARGET",
+		});
+		capabilities(false);
+		// Two using links print the same destination; the visible owner is ambiguous, so the proof must fail closed.
+		const shared = "[one][id] and [two][id]\n\n[id]: https://x/needle";
+		const ambiguous = new Markdown(shared, 0, 0, defaultMarkdownTheme);
+		assert.notStrictEqual(ambiguous.proveSourceSpan(rangeOf(shared, "needle"), 44).kind, "PROVEN");
+	});
+
 	it("proves fenced code text and refuses a highlighter that rewrites the glyphs", () => {
 		capabilities(false);
 		const source = "```js\nneedle one\nconst needle = 2;\n```";

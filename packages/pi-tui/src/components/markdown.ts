@@ -262,8 +262,6 @@ interface ProofState {
 	hrefCandidates: { readonly start: number; readonly end: number }[];
 	hrefTarget: ProofHrefTarget | undefined;
 	wrappedLeaves: number;
-	/** The frozen normal rows of this proof epoch; non-intersecting tokens reuse them verbatim. */
-	normalRows: readonly string[] | undefined;
 	/** Suppresses sentinel wrapping while a renderer measures text it will discard. */
 	suppressWrapping: boolean;
 }
@@ -641,10 +639,6 @@ export class Markdown implements Component {
 	private cachedText?: string;
 	private cachedWidth?: number;
 	private cachedLines?: string[];
-	// Content-row range of every top-level block of the cached render, as
-	// [start, end) pairs. A proof reuses these rows for the blocks it does not touch, which keeps its cost to the
-	// intersecting block even for texts whose reference links disable the normal block cache.
-	private cachedBlockRanges?: number[];
 	// Hyperlink capability the cached lines were rendered with. The render cache key never included capabilities, so a
 	// proof refuses a cached render from a different capability epoch instead of pretending it is current.
 	private cachedCapabilities?: boolean;
@@ -694,7 +688,6 @@ export class Markdown implements Component {
 		this.cachedText = undefined;
 		this.cachedWidth = undefined;
 		this.cachedLines = undefined;
-		this.cachedBlockRanges = undefined;
 		this.cachedCapabilities = undefined;
 	}
 
@@ -759,7 +752,6 @@ export class Markdown implements Component {
 			hrefCandidates: [],
 			hrefTarget: undefined,
 			wrappedLeaves: 0,
-			normalRows,
 			suppressWrapping: false,
 		};
 		this.proofState = state;
@@ -863,42 +855,22 @@ export class Markdown implements Component {
 		const blocks = new Map<string, RenderedBlock>();
 		if (!proofMode) this.blocks = new WeakRef(blocks);
 		const contentLines: string[] = [];
-		const blockRanges: number[] = [];
-		const proofState = this.proofState;
-		const normalRows = proofMode ? proofState?.normalRows : undefined;
-		const cachedRanges = proofMode ? this.cachedBlockRanges : undefined;
-		const reuseNormalRows =
-			normalRows !== undefined && cachedRanges !== undefined && cachedRanges.length === tokens.length * 2;
 		for (let i = 0; i < tokens.length; i++) {
 			const token = tokens[i];
 			const nextTokenType = tokens[i + 1]?.type;
-			const blockStart = contentLines.length;
-			// Proof mode reuses the cached NORMAL rows of every token that does not carry the requested range and
-			// re-renders only the intersecting token. Its local block map is never stored.
+			// Proof mode reuses the cached NORMAL block for every token that does not carry the requested range (its
+			// lines contain no sentinel) and re-renders only the intersecting token. The local map is never stored.
 			const proofTarget = proofMode && (this.proofIntersects(token) || this.proofNeedsHrefFallback(token));
-			if (reuseNormalRows && !proofTarget) {
-				const start = cachedRanges![i * 2]!;
-				const end = cachedRanges![i * 2 + 1]!;
-				const padding = this.paddingY;
-				for (let row = start; row < end; row++) {
-					contentLines.push(normalRows![padding + row]!);
-				}
-			} else {
-				const key = proofTarget ? `${token.raw}\0proof` : token.raw;
-				const reused = reuseBlocks && !proofTarget ? (blocks.get(key) ?? previousBlocks?.get(key)) : undefined;
-				const block = reused ?? { width: -1, nextTokenType, lines: [], highlightedCode: new Map() };
-				if (block.width !== width || block.nextTokenType !== nextTokenType) {
-					this.renderBlock(block, token, nextTokenType, width, contentWidth);
-				}
-				if (reuseBlocks) blocks.set(key, block);
-				for (const line of block.lines) {
-					contentLines.push(line);
-				}
+			const key = proofTarget ? `${token.raw}\0proof` : token.raw;
+			const reused = reuseBlocks && !proofTarget ? (blocks.get(key) ?? previousBlocks?.get(key)) : undefined;
+			const block = reused ?? { width: -1, nextTokenType, lines: [], highlightedCode: new Map() };
+			if (block.width !== width || block.nextTokenType !== nextTokenType) {
+				this.renderBlock(block, token, nextTokenType, width, contentWidth);
 			}
-			blockRanges.push(blockStart, contentLines.length);
-		}
-		if (!proofMode) {
-			this.cachedBlockRanges = blockRanges;
+			if (reuseBlocks) blocks.set(key, block);
+			for (const line of block.lines) {
+				contentLines.push(line);
+			}
 		}
 
 		// Add top/bottom padding (empty lines)
