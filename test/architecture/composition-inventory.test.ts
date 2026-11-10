@@ -418,6 +418,9 @@ const OTHER_HOST_SUBSCRIPTIONS: ReadonlyArray<readonly [string, string]> = [
   // Workspace registry after each committed Workspace domain write (it never
   // derives an increment from the event payload and keeps no second table).
   ['domain/changed', 'src/runtime/direct/session-workspace-facts-direct.ts'],
+  // The Direct Account adapter invalidates local observations immediately when
+  // Cordis replaces the official Host binding; this is not a business Account event.
+  ['internal/service', 'src/runtime/direct/config-direct.ts'],
   // S5-PR4: the Direct Schedule adapter's ONE invalidation subscription. The
   // event carries no content, so the listener only re-reads the authoritative
   // catalog through the one controller.

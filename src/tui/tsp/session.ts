@@ -125,6 +125,18 @@ import {
   type SelectedVisualState,
 } from './assistant-visual.ts'
 import type { ToolImageState } from './transcript-view.ts'
+import { TRANSCRIPT_COPY_ACTION, transcriptCopyPayload } from './transcript-copy.ts'
+
+type InnerDisclosurePathTarget =
+  | { readonly kind: 'thinking'; readonly owner: Extract<TranscriptMessage, { kind: 'thinking' }> }
+  | { readonly kind: 'context-row'; readonly owner: Extract<TranscriptMessage, { kind: 'system' }> }
+  | { readonly kind: 'context-cluster'; readonly owner: Extract<TranscriptMessage, { kind: 'system' }> }
+
+type FocusInnerDisclosureOwners = {
+  readonly thinking: ReadonlySet<TranscriptMessage>
+  readonly contextRows: ReadonlySet<TranscriptMessage>
+  readonly clusters: ReadonlySet<TranscriptMessage>
+}
 
 /**
  * The renderer-local dock state (notices + the mount-scoped footer notices).
@@ -175,6 +187,16 @@ interface VisualFrameIndex {
   readonly targets: ReadonlyMap<string, VisualCopyTarget>
   /** Copy targets by the actual Copy button node id (the pointer path). */
   readonly copyButtons: ReadonlyMap<string, VisualCopyTarget>
+  /** User and Assistant transcript Copy targets by current node id. */
+  readonly transcriptCopyButtons: ReadonlyMap<string, TranscriptCopyTarget>
+}
+
+interface TranscriptCopyTarget {
+  readonly message: Extract<TranscriptMessage, { kind: 'user' | 'assistant' }>
+  readonly payload: string
+  readonly source: object
+  readonly scopePrefix: string
+  readonly nodeId: string
 }
 
 /** How many transient notices the dock keeps (oldest evicted). */
@@ -1270,6 +1292,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   let focusWorkTurnByOwner: ReadonlyMap<TranscriptMessage, number> = new Map()
   let focusWorkOwnersByTurn: ReadonlyMap<number, ReadonlySet<TranscriptMessage>> = new Map()
   let focusToolKeysByTurn: ReadonlyMap<number, ReadonlySet<string>> = new Map()
+  let focusInnerOwnersByTurn: ReadonlyMap<number, FocusInnerDisclosureOwners> = new Map()
   /** The ONE renderer-local Compact Work disclosure owner set, keyed by the
    *  canonical span owner OBJECT identity. Never merged with expandedToolKeys
    *  (which owns SVG blob demand). Retired with the source/hydration/dispose. */
@@ -1381,6 +1404,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   const svgAdmissions = new Map<string, SvgAdmission>()
   /** PR-D: admitted SVG digests → the ONE sender's blob id (content-addressed). */
   const svgBlobIds = new Map<string, string>()
+  const expandedThinkingOwners = new Set<TranscriptMessage>()
+  const expandedContextRowOwners = new Set<TranscriptMessage>()
+  const expandedClusterOwners = new Set<TranscriptMessage>()
+  const innerDisclosureByPath = new Map<string, InnerDisclosurePathTarget>()
   /**
    * PR-D RFL-016: the tool-card keys the user EXPANDED via the Tern `toggle`
    * event. A ready SVG card starts collapsed; only the user's expansion
@@ -1401,10 +1428,15 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     focusWorkTurnByOwner = new Map()
     focusWorkOwnersByTurn = new Map()
     focusToolKeysByTurn = new Map()
+    focusInnerOwnersByTurn = new Map()
     expandedWorkOwners.clear()
     workDisclosureByPath.clear()
     expandedToolKeys.clear()
     toolDisclosureByPath.clear()
+    expandedThinkingOwners.clear()
+    expandedContextRowOwners.clear()
+    expandedClusterOwners.clear()
+    innerDisclosureByPath.clear()
   }
   /**
    * PR3: the CURRENT committed frame's Assistant figures — the published refs
@@ -1417,6 +1449,8 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   let figureNodeIds: ReadonlyMap<string, string> = new Map()
   let visualTargets: ReadonlyMap<string, VisualCopyTarget> = new Map()
   let visualCopyButtons: ReadonlyMap<string, VisualCopyTarget> = new Map()
+  /** Copy actions admitted only by the exact current main-frame node id. */
+  let transcriptCopyButtons: ReadonlyMap<string, TranscriptCopyTarget> = new Map()
   /**
    * PR3: the selected figure of the CURRENT subject. It stores the ref plus
    * the 1-based position/count painted in the last committed frame; the next
@@ -1972,7 +2006,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       }
       if (message.kind !== 'tool') return
       for (const block of toolRowImageBlocks(message)) push(block.attachment)
-      for (const child of message.subCalls ?? []) visit(child)
+      for (const child of message.subCalls ?? []) {
+        if (visibleMembers.has(child)) visit(child)
+      }
     }
     for (const message of lastMessages) {
       // The demand follows the CURRENT projection: a member the view does not
@@ -1998,16 +2034,21 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    * disagree. A mount with no display authority (the historical standalone
    * layout) materializes every member, so its demand stays the whole window.
    */
-  const currentVisibleMembers = (messages: readonly TranscriptMessage[]): ReadonlySet<TranscriptMessage> => {
+  const currentVisibleMembers = (
+    messages: readonly TranscriptMessage[],
+    keys: TranscriptNodeKeys,
+  ): ReadonlySet<TranscriptMessage> => {
     const displayState = options.displayState
-    if (displayState === undefined) return new Set(messages)
+    if (displayState === undefined) return visibleTranscriptMembers(messages, { preset: 'full' }, keys)
     return visibleTranscriptMembers(messages, {
       preset: displayState.preset,
       expandedWorkOwners,
       expandedFocusTurns,
+      expandedToolKeys,
+      innerDisclosure: { expandedThinkingOwners, expandedContextRowOwners, expandedClusterOwners },
       turnActivities: lastTurnActivities,
       ...(lastWindowState === undefined ? {} : { window: lastWindowState }),
-    })
+    }, keys)
   }
 
   /**
@@ -2367,15 +2408,25 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   const indexVisualFrame = (
     root: Node,
     sources: ReadonlyMap<string, { readonly message: AssistantTranscriptRow; readonly publication: PublishedVisual }>,
+    transcriptCopyPayloads: ReadonlyMap<TranscriptMessage, string>,
   ): VisualFrameIndex => {
     const order: string[] = []
     const nodeIds = new Map<string, string>()
     const targets = new Map<string, VisualCopyTarget>()
     const copyButtons = new Map<string, VisualCopyTarget>()
+    const transcriptCopyButtons = new Map<string, TranscriptCopyTarget>()
     const source = projectionScope
-    if (source === undefined) return { order, nodeIds, targets, copyButtons }
-    const visit = (tree: Tree, figure: VisualCopyTarget | undefined): void => {
-      const key = (tree.props as { readonly key?: unknown }).key
+    if (source === undefined) return { order, nodeIds, targets, copyButtons, transcriptCopyButtons }
+    const messagesByKey = new Map<string, TranscriptMessage>()
+    for (const message of lastMessages) {
+      if (message.kind !== 'user' && message.kind !== 'assistant') continue
+      const key = scopeKeys.keyFor(message)
+      messagesByKey.set(key, message)
+      messagesByKey.set(`${scopePrefix}${key}`, message)
+    }
+    const visit = (tree: Tree, figure: VisualCopyTarget | undefined, assistant: AssistantTranscriptRow | undefined): void => {
+      const props = tree.props as Record<string, unknown>
+      const key = props['key']
       const entry = typeof key === 'string' ? sources.get(key) : undefined
       let current = figure
       if (entry !== undefined) {
@@ -2390,12 +2441,43 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         targets.set(entry.publication.ref, current)
       }
       if (current !== undefined && key === VISUAL_COPY_KEY) copyButtons.set(tree.id, current)
-      for (const child of tree.children) visit(child, current)
+
+      let currentAssistant = assistant
+      if (props['role'] === 'dsh.transcript.assistant' && typeof key === 'string') {
+        const message = messagesByKey.get(key)
+        currentAssistant = message?.kind === 'assistant' ? message : undefined
+      }
+      if (tree.kind === 'message' && props['role'] === 'dsh.transcript.user' && typeof key === 'string') {
+        const message = messagesByKey.get(key)
+        if (message?.kind === 'user') {
+          const payload = transcriptCopyPayloads.get(message)
+          const actions = props['actions']
+          if (payload !== undefined && Array.isArray(actions)
+            && actions.some(action => action !== null && typeof action === 'object'
+              && (action as { readonly act?: unknown }).act === TRANSCRIPT_COPY_ACTION)) {
+            transcriptCopyButtons.set(tree.id, { message, payload, source, scopePrefix, nodeId: tree.id })
+          }
+        }
+      } else if (tree.kind === 'button' && props['role'] === 'dsh.transcript.copy'
+        && key === 'copy' && currentAssistant !== undefined) {
+        const actions = props['actions'] as { readonly click?: unknown } | undefined
+        const payload = transcriptCopyPayloads.get(currentAssistant)
+        if (actions?.click === TRANSCRIPT_COPY_ACTION && payload !== undefined) {
+          transcriptCopyButtons.set(tree.id, {
+            message: currentAssistant,
+            payload,
+            source,
+            scopePrefix,
+            nodeId: tree.id,
+          })
+        }
+      }
+      for (const child of tree.children) visit(child, current, currentAssistant)
     }
     for (const region of View.from({ main: root }).regions) {
-      if (region !== undefined) visit(region, undefined)
+      if (region !== undefined) visit(region, undefined, undefined)
     }
-    return { order, nodeIds, targets, copyButtons }
+    return { order, nodeIds, targets, copyButtons, transcriptCopyButtons }
   }
 
   /** Reconcile the previous selection with a frame's REAL figure order: a
@@ -2423,6 +2505,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     figureNodeIds = new Map()
     visualTargets = new Map()
     visualCopyButtons = new Map()
+    transcriptCopyButtons = new Map()
     selectedVisual = undefined
   }
 
@@ -2456,7 +2539,8 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // Image demand is a projection fact, not a transcript-commit fact: a live
     // DisplayState preset change and a Work disclosure toggle can change which
     // members exist in the current frame without a new setTranscript call.
-    visibleMembers = currentVisibleMembers(lastMessages)
+    for (const message of lastMessages) scopeKeys.keyFor(message)
+    visibleMembers = currentVisibleMembers(lastMessages, scopeKeys)
     syncImageSubscriptions()
     const imageStates = prepareImageStates()
     // PR-C: a fatal blob failure ABORTED this projection: the last committed
@@ -2481,10 +2565,47 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // The current Focus disclosure indexes and local reset targets come from
     // the exact Focus blocks that the mapper consumes, never from node-key text.
     const focusRootTurnsBySectionKey = new Map<string, number>()
+    const focusRootTurnByOwner = new Map<TranscriptMessage, number>()
     const focusWorkBySectionKey = new Map<string, { readonly owner: TranscriptMessage; readonly turn: number }>()
     const focusWorkTurn = new Map<TranscriptMessage, number>()
     const focusWorksByTurn = new Map<number, Set<TranscriptMessage>>()
     const focusToolsByTurn = new Map<number, Set<string>>()
+    const focusInner = new Map<number, {
+      readonly thinking: Set<TranscriptMessage>
+      readonly contextRows: Set<TranscriptMessage>
+      readonly clusters: Set<TranscriptMessage>
+    }>()
+    const innerForTurn = (turn: number): {
+      readonly thinking: Set<TranscriptMessage>
+      readonly contextRows: Set<TranscriptMessage>
+      readonly clusters: Set<TranscriptMessage>
+    } => {
+      let owners = focusInner.get(turn)
+      if (owners === undefined) {
+        owners = { thinking: new Set(), contextRows: new Set(), clusters: new Set() }
+        focusInner.set(turn, owners)
+      }
+      return owners
+    }
+    const toolKeysForTurn = (turn: number): Set<string> => {
+      let keys = focusToolsByTurn.get(turn)
+      if (keys === undefined) {
+        keys = new Set()
+        focusToolsByTurn.set(turn, keys)
+      }
+      return keys
+    }
+    const collectFocusTool = (message: TranscriptMessage, turn: number, parent?: string): void => {
+      if (message.kind !== 'tool') return
+      const path = parent === undefined ? scopeKeys.keyFor(message) : `${parent}/sub-${message.subCallId!}`
+      toolKeysForTurn(turn).add(path)
+      for (const child of message.subCalls ?? []) collectFocusTool(child, turn, path)
+    }
+    const collectFocusInnerMessage = (message: TranscriptMessage, turn: number): void => {
+      if (message.kind === 'thinking') innerForTurn(turn).thinking.add(message)
+      else if (message.kind === 'system' && message.context === true) innerForTurn(turn).contextRows.add(message)
+      else if (message.kind === 'tool') collectFocusTool(message, turn)
+    }
     const turnActivities = lastTurnActivities ?? new Map<number, TurnActivity>()
     const focusBlocks = displayState?.preset === 'focus'
       ? projectFocus(lastMessages, turnActivities, expandedFocusTurns, true)
@@ -2492,21 +2613,25 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     for (const block of focusBlocks) {
       if (block.kind === 'activity') {
         focusRootTurnsBySectionKey.set(`${scopePrefix}focus-${scopeKeys.keyFor(block.owner)}`, block.activity.turn)
+        focusRootTurnByOwner.set(block.owner, block.activity.turn)
         continue
       }
-      if (block.kind !== 'work') continue
+      if (block.kind === 'message') {
+        const rootOwner = block.focusPresentationOwner
+        const turn = rootOwner === undefined ? undefined : focusRootTurnByOwner.get(rootOwner)
+        if (turn !== undefined) collectFocusInnerMessage(block.message, turn)
+        continue
+      }
       const key = `${scopePrefix}work-${scopeKeys.keyFor(block.span.owner)}`
       focusWorkBySectionKey.set(key, { owner: block.span.owner, turn: block.focusOwnerTurn })
       focusWorkTurn.set(block.span.owner, block.focusOwnerTurn)
       const owners = focusWorksByTurn.get(block.focusOwnerTurn) ?? new Set<TranscriptMessage>()
       owners.add(block.span.owner)
       focusWorksByTurn.set(block.focusOwnerTurn, owners)
-      const toolKeys = focusToolsByTurn.get(block.focusOwnerTurn) ?? new Set<string>()
       for (const part of block.span.parts) {
-        if (part.kind !== 'message' || part.message.kind !== 'tool') continue
-        toolKeys.add(scopeKeys.keyFor(part.message))
+        if (part.kind === 'message') collectFocusInnerMessage(part.message, block.focusOwnerTurn)
+        else innerForTurn(block.focusOwnerTurn).clusters.add(part.cluster.owner)
       }
-      focusToolsByTurn.set(block.focusOwnerTurn, toolKeys)
     }
     const focusPhase = displayState?.preset === 'focus' ? presentedStatus?.activity.phase : undefined
     let focusElapsedMs: ReadonlyMap<TurnActivity, number> | undefined
@@ -2519,6 +2644,12 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       }
       focusElapsedMs = elapsed
     }
+    const transcriptCopyPayloads = new Map<TranscriptMessage, string>()
+    for (const message of lastMessages) {
+      if ((message.kind !== 'user' && message.kind !== 'assistant') || !visibleMembers.has(message)) continue
+      const payload = transcriptCopyPayload(message)
+      if (payload !== undefined) transcriptCopyPayloads.set(message, payload)
+    }
     const build = (selection: SelectedVisualState | undefined): Node => {
       const viewOptions = {
         ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
@@ -2526,9 +2657,14 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         ...(settledQuestionAnswers === undefined ? {} : { settledQuestionAnswersLookup: settledQuestionAnswers }),
         ...(options.toolPresenter === undefined ? {} : { toolPresenter: options.toolPresenter }),
         preparingPreviews: lastStreamingToolPreviews,
+        transcriptCopy: { action: TRANSCRIPT_COPY_ACTION } as const,
+        transcriptCopyPayloads,
         chartKindsSupported: session.caps.kinds.includes('chart'),
         ...(svgStates === undefined ? {} : { toolSvgStates: svgStates }),
         expandedToolKeys,
+        ...(displayState === undefined ? {} : {
+          innerDisclosure: { expandedThinkingOwners, expandedContextRowOwners, expandedClusterOwners },
+        }),
         imageStates,
         nativeImagesSupported: nativeImagesSupported(),
         requestPublishedSvgBlob,
@@ -2547,53 +2683,75 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         ...(focusElapsedMs === undefined ? {} : { focusElapsedMs }),
       })
     }
-    // The painted selection follows the frame's REAL order: a transcript
-    // change can add, remove or reorder figures while a selection exists. The
-    // first build is the normal path; only a changed selection fact triggers
-    // ONE bounded rebuild (the badge text is the only difference).
     let selection = selectedVisual
-    lastMain = build(selection)
-    let frame = indexVisualFrame(lastMain, figureSources)
+    let nextMain = build(selection)
+    let frame = indexVisualFrame(nextMain, figureSources, transcriptCopyPayloads)
     const reconciled = reconcileVisualSelection(selection, frame)
     if (!sameSelectedVisual(selection, reconciled)) {
       selection = reconciled
-      lastMain = build(selection)
-      frame = indexVisualFrame(lastMain, figureSources)
+      nextMain = build(selection)
+      frame = indexVisualFrame(nextMain, figureSources, transcriptCopyPayloads)
     }
-    selectedVisual = reconciled
-    visualOrder = frame.order
-    figureNodeIds = frame.nodeIds
-    visualTargets = frame.targets
-    visualCopyButtons = frame.copyButtons
-    // Record the CURRENT projection's actual tool-node id → disclosure path.
-    // The walk uses the real parent/child key chain, so a dotted subCallId is
-    // never split and an absent ToggleEvent.key never needs a fallback.
-    toolDisclosureByPath.clear()
-    workDisclosureByPath.clear()
-    focusDisclosureByPath.clear()
+
+    const nextToolDisclosureByPath = new Map<string, string>()
+    const nextWorkDisclosureByPath = new Map<string, TranscriptMessage>()
+    const nextFocusDisclosureByPath = new Map<string, number>()
+    const nextInnerDisclosureByPath = new Map<string, InnerDisclosurePathTarget>()
+    const innerOwnersByNodeKey = new Map<string, InnerDisclosurePathTarget>()
+    const addInnerKey = (key: string, target: InnerDisclosurePathTarget): void => {
+      innerOwnersByNodeKey.set(key, target)
+    }
+    if (displayState !== undefined) {
+      for (const message of lastMessages) {
+        const key = scopeKeys.keyFor(message)
+        if (message.kind === 'thinking') {
+          const target: InnerDisclosurePathTarget = { kind: 'thinking', owner: message }
+          addInnerKey(key, target)
+          addInnerKey(`${scopePrefix}${key}`, target)
+        } else if (message.kind === 'system' && message.context === true) {
+          const target: InnerDisclosurePathTarget = { kind: 'context-row', owner: message }
+          addInnerKey(key, target)
+          addInnerKey(`${scopePrefix}${key}`, target)
+        }
+      }
+      for (const block of projectTranscriptStructure(lastMessages)) {
+        if (block.kind === 'context-cluster') {
+          addInnerKey(`${scopePrefix}ctx-${scopeKeys.keyFor(block.cluster.owner)}`, {
+            kind: 'context-cluster', owner: block.cluster.owner as Extract<TranscriptMessage, { kind: 'system' }>,
+          })
+        } else if (block.kind === 'work') {
+          for (const part of block.span.parts) {
+            if (part.kind !== 'context-cluster') continue
+            addInnerKey(`${scopePrefix}ctx-${scopeKeys.keyFor(part.cluster.owner)}`, {
+              kind: 'context-cluster', owner: part.cluster.owner as Extract<TranscriptMessage, { kind: 'system' }>,
+            })
+          }
+        }
+      }
+    }
     const compactWork = displayState !== undefined && displayState.preset === 'compact'
     const focus = displayState !== undefined && displayState.preset === 'focus'
     const recordDisclosures = (node: Node, path: string, parentTool: string | undefined): void => {
       const nodeKey = (node.props as { key?: string }).key
       let tool = parentTool
-      if (node.kind === 'tool' && nodeKey !== undefined) {
+      if (node.kind === 'tool' && (node.props as { collapsible?: boolean }).collapsible === true && nodeKey !== undefined) {
         const own = nodeKey.startsWith(`${scopePrefix}msg-`)
           ? nodeKey.slice(scopePrefix.length)
           : nodeKey.startsWith('msg-') ? nodeKey : undefined
         tool = own ?? (parentTool !== undefined ? `${parentTool}/${nodeKey}` : undefined)
-        if (tool !== undefined) toolDisclosureByPath.set(path, tool)
+        if (tool !== undefined) nextToolDisclosureByPath.set(path, tool)
       }
       if (node.kind === 'section' && (node.props as { collapsible?: boolean }).collapsible === true && nodeKey !== undefined) {
+        const inner = innerOwnersByNodeKey.get(nodeKey)
+        if (inner !== undefined) nextInnerDisclosureByPath.set(path, inner)
         if (focus) {
           const turn = focusRootTurnsBySectionKey.get(nodeKey)
-          if (turn !== undefined) focusDisclosureByPath.set(path, turn)
+          if (turn !== undefined) nextFocusDisclosureByPath.set(path, turn)
           const work = focusWorkBySectionKey.get(nodeKey)
-          if (work !== undefined) workDisclosureByPath.set(path, work.owner)
+          if (work !== undefined) nextWorkDisclosureByPath.set(path, work.owner)
         } else if (compactWork) {
-          // Compact Activity identity resolves from the same canonical Work
-          // structure (object identity), never from the node key string.
           const owner = workOwnersBySectionKey.get(nodeKey)
-          if (owner !== undefined) workDisclosureByPath.set(path, owner)
+          if (owner !== undefined) nextWorkDisclosureByPath.set(path, owner)
         }
       }
       for (const [index, child] of node.children.entries()) {
@@ -2601,11 +2759,28 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         recordDisclosures(child, path === '' ? (childKey ?? String(index)) : `${path}.${childKey ?? String(index)}`, tool)
       }
     }
-    recordDisclosures(lastMain, '', undefined)
+    recordDisclosures(nextMain, '', undefined)
+    if (visualProjectionAborted) return false
+
+    lastMain = nextMain
+    selectedVisual = reconciled
+    visualOrder = frame.order
+    figureNodeIds = frame.nodeIds
+    visualTargets = frame.targets
+    visualCopyButtons = frame.copyButtons
+    transcriptCopyButtons = frame.transcriptCopyButtons
+    toolDisclosureByPath.clear()
+    for (const [path, owner] of nextToolDisclosureByPath) toolDisclosureByPath.set(path, owner)
+    workDisclosureByPath.clear()
+    for (const [path, owner] of nextWorkDisclosureByPath) workDisclosureByPath.set(path, owner)
+    focusDisclosureByPath.clear()
+    for (const [path, turn] of nextFocusDisclosureByPath) focusDisclosureByPath.set(path, turn)
+    innerDisclosureByPath.clear()
+    for (const [path, owner] of nextInnerDisclosureByPath) innerDisclosureByPath.set(path, owner)
     focusWorkTurnByOwner = focusWorkTurn
     focusWorkOwnersByTurn = focusWorksByTurn
     focusToolKeysByTurn = focusToolsByTurn
-    if (visualProjectionAborted) return false
+    focusInnerOwnersByTurn = focusInner
     return true
   }
 
@@ -2881,11 +3056,43 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       const visibleTurns = new Set(focusBlocks.flatMap(block => block.kind === 'activity' ? [block.activity.turn] : []))
       for (const turn of expandedFocusTurns) if (!visibleTurns.has(turn)) expandedFocusTurns.delete(turn)
     }
+    const structure = projectTranscriptStructure(messages)
+    const loadedMessages = new Set(messages)
+    const liveClusters = new Set<TranscriptMessage>()
+    const collectCluster = (cluster: { readonly owner: TranscriptMessage; readonly members: readonly TranscriptMessage[] }): void => {
+      liveClusters.add(cluster.owner)
+    }
+    for (const block of structure) {
+      if (block.kind === 'context-cluster') collectCluster(block.cluster)
+      else if (block.kind === 'work') {
+        for (const part of block.span.parts) if (part.kind === 'context-cluster') collectCluster(part.cluster)
+      }
+    }
+    for (const owner of expandedThinkingOwners) if (!loadedMessages.has(owner)) expandedThinkingOwners.delete(owner)
+    for (const owner of expandedContextRowOwners) {
+      // A preset may present this loaded row through a Cluster temporarily.
+      // Its own preference is retained for the next independent occurrence.
+      if (!loadedMessages.has(owner)) expandedContextRowOwners.delete(owner)
+    }
+    for (const owner of expandedClusterOwners) if (!liveClusters.has(owner)) expandedClusterOwners.delete(owner)
+
+    const liveToolDisclosures = new Set<string>()
+    const collectTools = (message: TranscriptMessage, parentPath?: string): void => {
+      if (message.kind !== 'tool') return
+      const path = parentPath === undefined
+        ? scopeKeys.keyFor(message)
+        : `${parentPath}/sub-${message.subCallId!}`
+      liveToolDisclosures.add(path)
+      for (const child of message.subCalls ?? []) collectTools(child, path)
+    }
+    for (const message of messages) collectTools(message)
+    for (const owner of expandedToolKeys) if (!liveToolDisclosures.has(owner)) expandedToolKeys.delete(owner)
+
     // A manual Work owner survives ordinary same-source deltas only while the
     // SAME source message is still in the loaded window. Prune by canonical
     // owner identity so a long session never retains retired message objects.
     if (expandedWorkOwners.size > 0) {
-      const loaded = new Set(projectTranscriptStructure(messages).flatMap(block => block.kind === 'work' ? [block.span.owner] : []))
+      const loaded = new Set(structure.flatMap(block => block.kind === 'work' ? [block.span.owner] : []))
       for (const owner of expandedWorkOwners) if (!loaded.has(owner)) expandedWorkOwners.delete(owner)
     }
     if (presentedStatus !== undefined && activities !== undefined) {
@@ -3240,6 +3447,14 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       || presetPicker?.isOpen() === true || modelPicker?.isOpen() === true) return false
     return true
   }
+
+  const transcriptCopyAdmitted = (): boolean => visualActionsAdmitted()
+    && webPicker?.isOpen() !== true
+    && modelQuick?.isOpen() !== true
+    && historySearch?.isOpen() !== true
+    && !historyHoldsComposerSeat()
+    && !permissionMenuOpen
+    && !completion.isOpen()
 
   // ── TSP-7 PR-C/PR-E: the ONE Quiet Composer (editor + controls) ──
   //
@@ -3905,6 +4120,40 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     )
   }
 
+  const issueTranscriptCopy = (target: TranscriptCopyTarget): void => {
+    if (!transcriptCopyAdmitted()) return
+    const isStillCurrent = (): boolean => {
+      if (disposed || hydrating || target.source !== projectionScope || target.scopePrefix !== scopePrefix) return false
+      if (!lastMessages.includes(target.message)) return false
+      const current = transcriptCopyButtons.get(target.nodeId)
+      return current?.message === target.message
+        && current.payload === target.payload
+        && current.source === target.source
+        && current.scopePrefix === target.scopePrefix
+    }
+    let task: Promise<boolean>
+    try {
+      task = options.copyVisual(target.payload)
+    } catch (error) {
+      options.logError?.('tsp renderer: transcript copy failed', { error: errorText(error) })
+      if (isStillCurrent()) {
+        try { display.notify('Failed to copy message', 'error') } catch (failure) { routeFatal(failure) }
+      }
+      return
+    }
+    task.then(
+      copied => {
+        if (!isStillCurrent()) return
+        try { display.notify(copied ? 'Copied message' : 'Failed to copy message', copied ? 'info' : 'error') } catch (error) { routeFatal(error) }
+      },
+      (error: unknown) => {
+        options.logError?.('tsp renderer: transcript copy failed', { error: errorText(error) })
+        if (!isStillCurrent()) return
+        try { display.notify('Failed to copy message', 'error') } catch (failure) { routeFatal(failure) }
+      },
+    )
+  }
+
   /**
    * PR3 Alt+V: select the next figure of the CURRENT committed frame (wrap to
    * the first), repaint the selection badge, then reveal the figure through the
@@ -4247,6 +4496,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
               } else {
                 expandedFocusTurns.delete(turn)
                 for (const owner of focusWorkOwnersByTurn.get(turn) ?? []) expandedWorkOwners.delete(owner)
+                const innerOwners = focusInnerOwnersByTurn.get(turn)
+                for (const owner of innerOwners?.thinking ?? []) expandedThinkingOwners.delete(owner)
+                for (const owner of innerOwners?.contextRows ?? []) expandedContextRowOwners.delete(owner)
+                for (const owner of innerOwners?.clusters ?? []) expandedClusterOwners.delete(owner)
                 const toolKeys = focusToolKeysByTurn.get(turn)
                 if (toolKeys !== undefined) {
                   for (const expandedKey of expandedToolKeys) {
@@ -4279,23 +4532,36 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
             return false
           }
         }
-        // The SDK node id still carries the B2 child key (`sub-...`); the
-        // disclosure identity is the parent-scoped path from the last tool-card
-        // key (`msg-N`) through that child key. The mapper builds exactly the
-        // same `msg-N/sub-...` path, so two parents with the same subCallId do
-        // not share expansion while node ids stay untouched.
-        let disclosure: string | undefined
-        let matched = -1
-        for (const [path, value] of toolDisclosureByPath) {
-          if (path.length > matched && (input.event.id === path || input.event.id.endsWith(`.${path}`))) {
-            disclosure = value
-            matched = path.length
+        const framePath = input.event.id.startsWith('main.')
+          ? input.event.id.slice('main.'.length)
+          : input.event.id
+        const innerTarget = innerDisclosureByPath.get(input.event.id) ?? innerDisclosureByPath.get(framePath)
+        if (innerTarget !== undefined) {
+          const set = innerTarget.kind === 'thinking'
+            ? expandedThinkingOwners
+            : innerTarget.kind === 'context-row' ? expandedContextRowOwners : expandedClusterOwners
+          const wasExpanded = set.has(innerTarget.owner)
+          const targetExpanded = input.event.collapsed !== true
+          if (wasExpanded !== targetExpanded) {
+            if (targetExpanded) set.add(innerTarget.owner)
+            else set.delete(innerTarget.owner)
+            if (rebuildLastMain()) render()
           }
+          return false
         }
+
+        // Tool IDs are admitted only as the exact current path or its one fixed
+        // `main.` region prefix. Suffix matching would let a stale or foreign
+        // parent path claim a dotted PTC child identity.
+        const disclosure = toolDisclosureByPath.get(input.event.id) ?? toolDisclosureByPath.get(framePath)
         if (disclosure !== undefined) {
-          if (input.event.collapsed) expandedToolKeys.delete(disclosure)
-          else expandedToolKeys.add(disclosure)
-          if (rebuildLastMain()) render()
+          const wasExpanded = expandedToolKeys.has(disclosure)
+          const targetExpanded = input.event.collapsed !== true
+          if (wasExpanded !== targetExpanded) {
+            if (targetExpanded) expandedToolKeys.add(disclosure)
+            else expandedToolKeys.delete(disclosure)
+            if (rebuildLastMain()) render()
+          }
         }
         return false
       }
@@ -4323,6 +4589,13 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         if (webPicker?.handleEvent(input.event)) return false
         if (presetPicker?.handleEvent(input.event)) return false
         if (modelPicker?.handleEvent(input.event)) return false
+        if (input.event.ev === 'action' && input.event.act === TRANSCRIPT_COPY_ACTION) {
+          if (transcriptCopyAdmitted()) {
+            const target = transcriptCopyButtons.get(input.event.id)
+            if (target !== undefined) issueTranscriptCopy(target)
+          }
+          return false
+        }
         // PR3: a figure Copy action is admitted ONLY through the exact Copy
         // button node id of the CURRENT committed frame, re-checked against the
         // live sidecar; an old-frame button, a ref substring or any other action

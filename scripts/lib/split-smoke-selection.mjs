@@ -33,6 +33,7 @@ import { runUnknownWriteHostDeath } from '../smoke/split-process/unknown-write-h
 import { runWebProductQualification } from '../smoke/split-process/web-product.mjs'
 import { runWebRuntimeToggle } from '../smoke/split-process/web-runtime-toggle.mjs'
 import { runWebStartupPreference } from '../smoke/split-process/web-startup-preference.mjs'
+import { runF2AccountComposition } from '../smoke/split-process/account-composition.mjs'
 import { SplitSmokeInputError } from './split-smoke-diagnostics.mjs'
 
 /** The evidence scope every selected result declares. */
@@ -48,7 +49,7 @@ const SELECTABLE_SCOPE = 'SELECTABLE_ONLY'
  * authenticated-link chain; `surface`, `multi-client` and `navigation` own the
  * real-surface, shared-Session and non-destructive Client scenes; `recovery`
  * owns the detached-interaction, HMR/signal and unknown-write Host-death
- * continuity evidence; `web` owns the official Web composition, the live
+ * continuity evidence; `account` owns the official Account Controller, verified callback and PKCE proof; `web` owns the official Web composition, the live
  * runtime toggle, the profile startup preference and the product Browser/TUI
  * matrix.
  */
@@ -136,6 +137,12 @@ const CASE_REGISTRY = Object.freeze([
     id: 'recovery.unknown-write-host-death',
     title: 'an ACK-dropped write survives Host death as one durable write and no fabricated answer',
     run: runUnknownWriteHostDeath,
+  }),
+  Object.freeze({
+    suite: 'account',
+    id: 'account.official-composition',
+    title: 'the official Host Account Controller serves one authenticated Client through a verified callback and PKCE exchange',
+    run: runF2AccountComposition,
   }),
   Object.freeze({
     suite: 'web',

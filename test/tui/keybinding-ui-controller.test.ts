@@ -145,21 +145,21 @@ test('adding to an untouched action does not resurrect a shadowed builtin shortc
   }
 })
 
-test('adding to a partially shadowed multi-default keeps only surviving defaults', async () => {
+test('adding to a shadowed View default adds a user trigger without restoring its default', async () => {
   const fixture = settingsFixture({ 'app.todo.toggle': 'ctrl+f' })
   const { controller, manager } = controllerFor(fixture)
   try {
-    assert.deepEqual(manager.keysFor('app.transcript.search'), ['ctrl+shift+f'])
+    assert.deepEqual(manager.keysFor('app.transcript.search.view'), [])
     const result = await controller.mutate({
       kind: 'add',
-      action: 'app.transcript.search',
+      action: 'app.transcript.search.view',
       binding: { kind: 'direct', key: 'ctrl+y' },
     })
     assert.equal(result.kind, 'applied')
-    assert.deepEqual(manager.keysFor('app.transcript.search'), ['ctrl+shift+f', 'ctrl+y'])
+    assert.deepEqual(manager.keysFor('app.transcript.search.view'), ['ctrl+y'])
     assert.deepEqual((fixture.latest() as TuiSettingsDoc).keybindings, {
       'app.todo.toggle': 'ctrl+f',
-      'app.transcript.search': ['ctrl+shift+f', 'ctrl+y'],
+      'app.transcript.search.view': 'ctrl+y',
     })
   } finally {
     manager.dispose()
@@ -184,33 +184,13 @@ test('adding to the conditional task affordance never materializes Down', async 
   }
 })
 
-test('adding to an untouched action retains every builtin shortcut', async () => {
+test('adding to Full search retains its sole builtin shortcut', async () => {
   const fixture = settingsFixture(undefined)
   const { controller, manager } = controllerFor(fixture)
   try {
     const result = await controller.mutate({
       kind: 'add',
       action: 'app.transcript.search',
-      binding: { kind: 'direct', key: 'ctrl+y' },
-    })
-    assert.equal(result.kind, 'applied')
-    assert.deepEqual(manager.keysFor('app.transcript.search'), ['ctrl+f', 'ctrl+shift+f', 'ctrl+y'])
-    assert.deepEqual((fixture.latest() as TuiSettingsDoc).keybindings, {
-      'app.transcript.search': ['ctrl+f', 'ctrl+shift+f', 'ctrl+y'],
-    })
-  } finally {
-    manager.dispose()
-  }
-})
-
-test('replacing one untouched builtin shortcut preserves its siblings', async () => {
-  const fixture = settingsFixture(undefined)
-  const { controller, manager } = controllerFor(fixture)
-  try {
-    const result = await controller.mutate({
-      kind: 'replace',
-      action: 'app.transcript.search',
-      previous: { kind: 'direct', key: 'ctrl+f' },
       binding: { kind: 'direct', key: 'ctrl+y' },
     })
     assert.equal(result.kind, 'applied')
@@ -223,19 +203,39 @@ test('replacing one untouched builtin shortcut preserves its siblings', async ()
   }
 })
 
-test('removing one untouched builtin shortcut preserves its siblings', async () => {
+test('replacing the View builtin binds Ctrl+F to the selected custom key', async () => {
+  const fixture = settingsFixture(undefined)
+  const { controller, manager } = controllerFor(fixture)
+  try {
+    const result = await controller.mutate({
+      kind: 'replace',
+      action: 'app.transcript.search.view',
+      previous: { kind: 'direct', key: 'ctrl+f' },
+      binding: { kind: 'direct', key: 'ctrl+y' },
+    })
+    assert.equal(result.kind, 'applied')
+    assert.deepEqual(manager.keysFor('app.transcript.search.view'), ['ctrl+y'])
+    assert.deepEqual((fixture.latest() as TuiSettingsDoc).keybindings, {
+      'app.transcript.search.view': 'ctrl+y',
+    })
+  } finally {
+    manager.dispose()
+  }
+})
+
+test('removing the View builtin restores its default unless the action is explicitly disabled', async () => {
   const fixture = settingsFixture(undefined)
   const { controller, manager } = controllerFor(fixture)
   try {
     const result = await controller.mutate({
       kind: 'remove',
-      action: 'app.transcript.search',
+      action: 'app.transcript.search.view',
       binding: { kind: 'direct', key: 'ctrl+f' },
     })
     assert.equal(result.kind, 'applied')
-    assert.deepEqual(manager.keysFor('app.transcript.search'), ['ctrl+shift+f'])
+    assert.deepEqual(manager.keysFor('app.transcript.search.view'), ['ctrl+f'])
     assert.deepEqual((fixture.latest() as TuiSettingsDoc).keybindings, {
-      'app.transcript.search': 'ctrl+shift+f',
+      'app.transcript.search.view': [],
     })
   } finally {
     manager.dispose()

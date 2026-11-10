@@ -3,13 +3,18 @@ import { createHash } from 'node:crypto'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { arch, cpus, platform, release, type } from 'node:os'
 import { join } from 'node:path'
-import { rect, visibleSpan } from './tern-pane-geometry.mjs'
+import { rect, visibleBox, visibleSpan } from './tern-pane-geometry.mjs'
 
 const IS_GUI = process.env.TERN_FOCUS_GUI === '1'
 const SCENARIO = process.env.TERN_FOCUS_CASE ?? 'svg'
+const PINNED_TERN = 'tern 0.9.13 (8c6dfbd)'
+const PINNED_TERN_SHA256 = 'ffa3c7c85cf557b5e0ee690cd62efc32e79dbc77044d475dce0edc3a4ac2cd99'
 if (SCENARIO !== 'svg' && SCENARIO !== 'image' && SCENARIO !== 'question') throw new Error(`unknown Focus Tern case ${SCENARIO}`)
 export function focusEvidenceTier(isGui) {
   return `${isGui ? 'REAL_TERN_GUI' : 'REAL_TERN_HEADLESS'} + CONTROL_INJECTED_INPUT + official Direct application`
+}
+export function isPinnedFocusClient(version, sha256) {
+  return version === PINNED_TERN && sha256 === PINNED_TERN_SHA256
 }
 const VIEWPORTS = [
   { width: 1280, height: 800, appearance: 'dark' },
@@ -132,12 +137,14 @@ export default async function (h) {
     dshPin === '0.2.2-rc.1' && dshSessionPin === dshPin && dshMode === 'npm',
     JSON.stringify({ dshPin, dshSessionPin, dshMode }))
   h.check('the lockfile carries the pinned Tern SDK integrity', sdkIntegrity !== undefined, String(sdkIntegrity))
-  if (!ternVersion.includes('0.9.12 (e498b49)')) {
-    h.check('the requested Tern client build is exactly 0.9.12 (e498b49)', false, ternVersion)
+  if (!isPinnedFocusClient(ternVersion, ternSha256)) {
+    h.check('the requested Tern client binary is exactly 0.9.13 (8c6dfbd) with the plan-pinned SHA-256', false,
+      JSON.stringify({ expectedVersion: PINNED_TERN, actualVersion: ternVersion, expectedSha256: PINNED_TERN_SHA256, actualSha256: ternSha256 }))
     finish(h, extra)
     return
   }
-  h.check('the requested Tern client build is exactly 0.9.12 (e498b49)', true, ternVersion)
+  h.check('the requested Tern client binary is exactly 0.9.13 (8c6dfbd) with the plan-pinned SHA-256', true,
+    JSON.stringify({ version: ternVersion, sha256: ternSha256 }))
 
   if (IS_GUI) {
     const system = h.ctl('system')
@@ -178,7 +185,7 @@ export default async function (h) {
     notVerified: ['physical GUI/OS input/IME/wheel', 'Owner G8 visual signature'],
   }
   writeLedger(h, 'environment.json', manifest)
-  h.check('the real client negotiated the expected protocol version', hello?.body?.ver === '0.9.12', JSON.stringify(hello?.body ?? null))
+  h.check('the real client negotiated the expected protocol version', hello?.body?.ver === '0.9.13', JSON.stringify(hello?.body ?? null))
   h.check(`the subject configured the canonical Focus preset for ${SCENARIO}`, records(h).some(row => row.kind === 'fixture.ready' && row.modeAuthority?.includes('displayPreset=focus')),
     JSON.stringify(records(h).find(row => row.kind === 'fixture.ready')))
   h.check('exactly one official inline Surface opened', wire(h).filter(row => row.dir === 'out' && row.verb === 'o').length === 1)
@@ -378,6 +385,26 @@ export default async function (h) {
       finish(h, extra)
       return
     }
+    const maskedSnapshot = h.snapshot()
+    const maskedRootHead = visibleSectionHead(maskedSnapshot, h, 'Waiting for input')
+    const dim = maskedSnapshot.nodes.find(node => String(node.class ?? '').split(/\s+/u).includes('sf-ov-dim'))
+    const rootBox = maskedRootHead === undefined ? [0, 0, 0, 0] : rect(maskedRootHead)
+    const dimBox = dim === undefined ? [0, 0, 0, 0] : rect(dim)
+    const headerPoint = [rootBox[0] + rootBox[2] / 2, rootBox[1] + rootBox[3] / 2]
+    const rootPointMaskedByModal = maskedRootHead !== undefined && dim !== undefined
+      && headerPoint[0] >= dimBox[0] && headerPoint[0] <= dimBox[0] + dimBox[2]
+      && headerPoint[1] >= dimBox[1] && headerPoint[1] <= dimBox[1] + dimBox[3]
+    h.check('the official Ask User dim layer covers the current Focus Root pointer target', rootPointMaskedByModal,
+      JSON.stringify({ root: rootBox, dim: dimBox, headerPoint }))
+    h.check('the underlying Focus Root remains closed before the masked pointer attempt', rootId !== undefined
+      && liveNodes(h).get(rootId)?.p.collapsed === true, JSON.stringify(rootId === undefined ? null : liveNodes(h).get(rootId)?.p))
+    const beforeMaskedRootClick = eventRows(h).length
+    h.check('a real client pointer can target the visible native Focus head behind the modal', maskedRootHead !== undefined
+      && await h.click(maskedSnapshot.chains, maskedRootHead),
+      JSON.stringify(maskedRootHead === undefined ? null : { text: h.descendantsText(maskedRootHead), rect: rect(maskedRootHead) }))
+    h.check('the masked pointer produces no Focus Root toggle event and leaves it closed', eventRows(h).length === beforeMaskedRootClick
+      && rootId !== undefined && liveNodes(h).get(rootId)?.p.collapsed === true,
+      JSON.stringify({ events: eventRows(h).slice(beforeMaskedRootClick), root: rootId === undefined ? undefined : liveNodes(h).get(rootId)?.p }))
     h.check('the Continue choice accepts a real pointer click', await h.click(questionSnapshot.chains, continueChoice),
       JSON.stringify({ text: h.descendantsText(continueChoice), rect: rect(continueChoice) }))
     const reviewSnapshot = h.snapshot()
@@ -425,6 +452,25 @@ export default async function (h) {
     h.check(`the client resolves ${viewport.appearance} at ${viewport.width}x${viewport.height}`, theme === viewport.appearance, String(theme))
     const snapshot = h.snapshot()
     const rootNode = visibleSectionHead(snapshot, h, 'Working')
+    const visibleHeaders = snapshot.nodes
+      .filter(node => String(node.class ?? '').split(/\s+/u).includes('sf-section-head'))
+      .map(node => ({ node, visible: visibleBox(snapshot.chains, node) }))
+      .filter(entry => entry.visible.span.x >= 4 && entry.visible.span.y >= 4)
+    const dock = snapshot.nodes.find(node => String(node.class ?? '').split(/\s+/u).includes('tv-dock'))
+    const dockRect = rect(dock ?? {})
+    const dockOverlaps = visibleHeaders.filter(({ visible }) => {
+      const left = visible.start.x
+      const top = visible.start.y
+      const right = left + visible.span.x
+      const bottom = top + visible.span.y
+      return dock !== undefined && left < dockRect[0] + dockRect[2] && right > dockRect[0]
+        && top < dockRect[1] + dockRect[3] && bottom > dockRect[1]
+    }).map(({ node, visible }) => ({ text: h.descendantsText(node), rect: visible.rect, start: visible.start, span: visible.span }))
+    h.check(`visible Focus and inner Section headers do not overlap Dock/Composer at ${viewport.width}x${viewport.height}`,
+      dock !== undefined && dockOverlaps.length === 0,
+      JSON.stringify({ dock: dockRect, headers: visibleHeaders.map(({ node, visible }) => ({
+        text: h.descendantsText(node), rect: visible.rect, start: visible.start, span: visible.span,
+      })), overlaps: dockOverlaps }))
     const capture = h.capture(`focus-${viewport.width}x${viewport.height}-${viewport.appearance}`, 'collapsed native Focus root in the real Tern pane')
     const span = rootNode === undefined ? { x: 0, y: 0 } : {
       x: visibleSpan(snapshot.chains, rootNode, 'x'),
@@ -580,12 +626,27 @@ export default async function (h) {
           }
         } else if (SCENARIO === 'image' && childTools.length === 1) {
           const imageTool = childTools[0]
+          h.check('the real durable Tool keeps image detail independently collapsed after Work opens',
+            imageTool[1].p.collapsible === true && imageTool[1].p.collapsed === true, JSON.stringify(imageTool[1].p))
+          h.check('opening Work alone still performs no AttachmentStore read or blob send',
+            !records(h).some(row => row.kind === 'attachment.read') && blobWrites(h).length === 0,
+            JSON.stringify({ reads: records(h).filter(row => row.kind === 'attachment.read'), blobs: blobWrites(h).length }))
           const saved = records(h).find(row => row.kind === 'attachment.saved')
           h.check('the registered Tool result contains the admitted durable image identity', typeof saved?.attachmentId === 'string', JSON.stringify(saved ?? null))
-          if (!await waitFor(h, 'opening the exact Work triggers one authorized image read and native blob', () => {
+          const toolSnap = h.snapshot()
+          const imageToolHead = mainNodes(toolSnap).find(node => String(node.class ?? '').split(/\s+/u).includes('sf-tool-head')
+            && h.descendantsText(node).includes('focus_read_image'))
+          h.check('the closed raster Tool has a visible native detail header after Work opens', imageToolHead !== undefined,
+            JSON.stringify(mainNodes(toolSnap).filter(node => String(node.class ?? '').includes('sf-tool')).map(node => ({ id: node.id, text: h.descendantsText(node), rect: rect(node) }))))
+          const beforeImageToolToggle = eventRows(h).length
+          h.check('the raster Tool header opens through its native real client pointer', imageToolHead !== undefined
+            && await h.click(toolSnap.chains, imageToolHead))
+          if (!await waitFor(h, 'the exact Tool detail toggle releases one authorized image read and native blob', () => {
+            const events = eventRows(h).slice(beforeImageToolToggle)
             const reads = records(h).filter(row => row.kind === 'attachment.read')
             const nodes = liveNodes(h)
-            return reads.length === 1
+            return events.some(row => row.id === imageTool[0] && row.collapsed === false)
+              && reads.length === 1
               && reads[0]?.attachmentId === saved?.attachmentId
               && blobWrites(h).length === 1
               && blobWrites(h)[0]?.params?.mime === 'image/png'
@@ -596,7 +657,7 @@ export default async function (h) {
           }
           const reads = records(h).filter(row => row.kind === 'attachment.read')
           live = liveNodes(h)
-          h.check('the exact stored attachment is read once only after Work opens',
+          h.check('the exact stored attachment is read once only after its Tool disclosure opens',
             reads.length === 1 && reads[0]?.attachmentId === saved?.attachmentId, JSON.stringify(reads))
           h.check('the real Tern pane receives one PNG blob and a native image node under the Tool',
             blobWrites(h).length === 1 && blobWrites(h)[0]?.params?.mime === 'image/png'

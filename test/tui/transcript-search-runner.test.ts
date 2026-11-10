@@ -14,7 +14,7 @@ import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import { SESSION_FORMAT_VERSION, type SessionEvent } from '@deepseek-ai/dsh-session'
-import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
+import { getCapabilities, setCapabilities, stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import { sanitizeDisplayText } from '../../src/tui/presentation/terminal-text.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import { TranscriptFolder, type TranscriptMessage } from '../../src/transcript.ts'
@@ -102,6 +102,7 @@ async function mountSearchRunner(
   matchTurns: readonly number[],
   term = 'transcript needle',
   events?: readonly SessionEvent[],
+  fullscreen: 'on' | 'off' = 'on',
 ): Promise<RunnerFixture> {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-search-runner-')
@@ -125,7 +126,7 @@ async function mountSearchRunner(
     events: events === undefined ? searchSession(turns, matchTurns, term) : [...events],
   })
   const harness = makeHarness(home, session, { provider: 'p', model: 'm' })
-  const fiber = await mountRunner(context, home, harness, { sessionId: session.id }, { sessionId: session.id, fullscreen: 'on' })
+  const fiber = await mountRunner(context, home, harness, { sessionId: session.id }, { sessionId: session.id, fullscreen })
   life.defer(() => fiber.dispose())
   const app = probe.apps.at(-1)
   assert.ok(app, 'the production runner must create a TuiApp')
@@ -162,6 +163,7 @@ interface RunnerSearchSelection {
   readonly selectedIndex: number
   readonly selectedRow?: number
   readonly exact: boolean
+  readonly sourceDisposition?: 'not-painted' | 'unproven'
   readonly exactPaintedSegments?: ReadonlyArray<{ readonly row: number; readonly startCol: number; readonly endCol: number }>
   readonly matches?: ReadonlyArray<{ readonly segments: ReadonlyArray<{ readonly row: number }> }>
 }
@@ -187,6 +189,106 @@ function columnOf(line: string, needle: string, occurrence = 0): number {
 }
 
 const STRONG_BG = 0xf5c542
+
+test('runner rolls back a Runtime scope committed before Search projection throws', async (t) => {
+  const fixture = await mountSearchRunner(t, 1, [], 'needle', undefined, 'off')
+  const { app } = fixture
+  assert.equal(app.isFullscreen(), false, 'the Direct runner starts in Regular')
+  const originalSetSearchScope = app.setSearchScope
+  const failure = new Error('Search scope projection failed')
+  app.setSearchScope = function (this: TuiApp, scope) {
+    originalSetSearchScope.call(this, scope)
+    throw failure
+  }
+
+  assert.throws(() => app.startTranscriptSearch('view'), error => error === failure,
+    'the original post-commit projection failure remains observable')
+  assert.equal(app.isSearching(), false, 'the failed admission never mounts Search')
+  assert.equal(app.isFullscreen(), false, 'the temporary Reader returns on Runtime admission failure')
+
+  app.setSearchScope = originalSetSearchScope
+  app.startTranscriptSearch('full')
+  await fixture.settleRender()
+  assert.equal(app.isSearching(), true, 'Runtime activeSearchScope was retired and a later Full open is admitted')
+  assert.equal(app.isFullscreen(), true)
+  app.closeTranscriptSearch()
+  await fixture.settleRender()
+  assert.equal(app.isFullscreen(), false)
+})
+
+test('runner search: Ctrl+F routes View hits and Tab switches the retained query to Full semantics', async (t) => {
+  const previousCapabilities = getCapabilities()
+  setCapabilities({ images: null, trueColor: true, hyperlinks: true })
+  t.after(() => setCapabilities(previousCapabilities))
+  const events: SessionEvent[] = [
+    event('turn/start', { turn: 0 }, 0),
+    event('user/message', {
+      id: MessageId('dual-search-user'),
+      role: 'user',
+      content: [{ type: 'text', text: 'needle in the prompt' }],
+      source: { kind: 'user' },
+    }, 1),
+    event('assistant/message', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('dual-search-assistant'),
+        role: 'assistant',
+        content: [{ type: 'text', text: '[label needle](https://example.invalid/needle) needle body' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+      stream: [],
+    }, 2),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 3),
+  ]
+  const fixture = await mountSearchRunner(t, 1, [], 'needle', events)
+  const originalSearch = TranscriptFolder.prototype.search
+  let fullSearchCalls = 0
+  TranscriptFolder.prototype.search = function (this: TranscriptFolder, query: string, options?: Parameters<TranscriptFolder['search']>[1]) {
+    fullSearchCalls += 1
+    return originalSearch.call(this, query, options)
+  }
+  t.after(() => { TranscriptFolder.prototype.search = originalSearch })
+
+  fixture.input('\x06')
+  await fixture.settleRender()
+  typeQuery(fixture, 'needle')
+  await fixture.settleRender()
+  const mountedRows = (fixture.app as unknown as {
+    mountedTranscriptBlocks: ReadonlyArray<{ rendered: readonly string[] }>
+  }).mountedTranscriptBlocks.flatMap(block => block.rendered).map(stripTerminalSequences)
+  assert.deepEqual(fixture.app.renderedViewSearchStatus(), { currentIndex: 0, count: 3 },
+    `View counts prompt, visible link label and body, not hidden href; mounted=${JSON.stringify(mountedRows)}; frame=${JSON.stringify(fixture.vt.getViewport().map(stripTerminalSequences))}`)
+  assert.equal(fullSearchCalls, 0, 'View input never calls the Full Folder authority')
+  let title = fixture.vt.getViewport().map(stripTerminalSequences).find(line => line.includes('[View]'))
+  assert.ok(title?.includes('1/3'), `View title reads its mounted occurrence status:\n${fixture.vt.getViewport().join('\n')}`)
+  assert.equal(fixture.app.transcriptSearchPresentationForTest(), undefined,
+    'View never installs a Full semantic target')
+
+  fixture.input('\t')
+  await fixture.settleRender()
+  assert.ok(fullSearchCalls > 0, 'Tab switches to the existing semantic Folder search')
+  assert.equal(fixture.app.transcriptSearchCoverageForTest(), 'entire-session',
+    'the Direct runner publishes complete Folder coverage only on its Direct composition')
+  title = fixture.vt.getViewport().map(stripTerminalSequences).find(line => line.includes('[Full]'))
+  assert.ok(title?.includes('1/4'), `Full retains the hidden-href semantic occurrence:\n${fixture.vt.getViewport().join('\n')}`)
+  assert.ok(fixture.vt.getViewport().map(stripTerminalSequences).some(line => line.includes('needle')),
+    'the scope switch retains the original query')
+  const fullTarget = fixture.app.transcriptSearchPresentationForTest()
+  assert.ok(fullTarget, 'Full query installs a current semantic target')
+  assert.equal(fullTarget?.message?.kind, 'user',
+    'Full current selection follows semantic source order, not a View ordinal')
+
+  fixture.input('\x06')
+  await fixture.settleRender()
+  assert.deepEqual(fixture.app.renderedViewSearchStatus(), { currentIndex: 0, count: 3 })
+  assert.equal(fixture.app.transcriptSearchPresentationForTest(), undefined,
+    'Full target and reveal are retired before mounted View results return')
+  const callsAfterSwitch = fullSearchCalls
+  fixture.input('\r')
+  await fixture.settleRender()
+  assert.deepEqual(fixture.app.renderedViewSearchStatus(), { currentIndex: 1, count: 3 })
+  assert.equal(fullSearchCalls, callsAfterSwitch, 'View Next never calls the Full Folder authority')
+})
 
 test('runner search: a same-window query re-windows zero times and rebuilds at most once', async (t) => {
   const fixture = await mountSearchRunner(t, 30, [25, 29])
@@ -702,10 +804,12 @@ test('runner search: a real User hit proves both occurrences at their painted ce
   lines = vt.getViewport()
   row = lines.findIndex(line => line.includes('needle second hit'))
   assert.ok(row >= 0, `the second painted target is visible:\n${lines.join('\n')}`)
-  assert.ok(!lines.some(line => line.includes('needle first hit')),
-    'the first occurrence is not the second destination')
-  assert.notEqual(app.fullscreenScrollForTest()?.scrollTop ?? 0, firstScrollTop,
-    'Next moves the viewport to the second proven row')
+  // The second proven row is already readable and uncovered, so Next must not
+  // jitter the viewport: the sibling occurrence above legitimately stays
+  // visible (the old "first is gone" expectation encoded a re-centering jump,
+  // never a product requirement).
+  assert.equal(app.fullscreenScrollForTest()?.scrollTop ?? 0, firstScrollTop,
+    'an already-readable next occurrence keeps the viewport')
   assert.equal(vt.getCellBgRgb(row, columnOf(lines[row]!, 'needle')), STRONG_BG,
     'the second occurrence owns its real painted cell')
 
@@ -1085,4 +1189,186 @@ test('runner search: a Folder Workflow name range reaches its exact VirtualTermi
   const column = stripTerminalSequences(lines[row]!).indexOf('needle')
   assert.equal(fixture.vt.getCellBgRgb(row, column), 0xf5c542,
     `the real semantic match range reaches the exact painted cell:\n${lines[row]}`)
+  // A direct-field Workflow region is exact WITHOUT the dedicated
+  // User/Thinking/Assistant proof channel, so the Source-only notice must be
+  // decided by the FINAL selection exactness, never by one proof channel.
+  const selection = mountedSearchSelection(fixture.app, target!.message!)
+  assert.equal(selection?.exact, true, 'the Workflow name hit is a proven source range')
+  assert.equal(selection?.sourceDisposition, undefined, 'an exact Workflow selection carries no Source-only state')
+  assert.equal(fixture.app.currentFullSearchNotice(), undefined,
+    'an exact Workflow hit never shows the Source-only row')
+  assert.ok(!fixture.vt.getViewport().map(stripTerminalSequences).some(line => line.includes('Source-only')),
+    'the Search box keeps its three-row form for the exact Workflow hit')
+})
+
+// ── F2: Full proves the current Assistant Markdown source onto real cells ─────
+
+/** The terminal cell column of one visible occurrence on one viewport row,
+ * measured from the terminal's OWN cells (never a JS string index, so a wide
+ * glyph in the card prefix shifts exactly as the terminal sees it). */
+function cellColumnOf(vt: VirtualTerminal, row: number, needle: string, occurrence = 0): number {
+  let plain = ''
+  const cellOfCharacter: number[] = []
+  for (let column = 0; column < vt.columns; column += 1) {
+    const text = vt.getCellText(row, column) ?? ''
+    for (let index = 0; index < text.length; index += 1) cellOfCharacter.push(column)
+    plain += text
+  }
+  let index = -1
+  let from = 0
+  for (let current = 0; current <= occurrence; current += 1) {
+    index = plain.indexOf(needle, from)
+    assert.ok(index >= 0, `occurrence ${current} of ${JSON.stringify(needle)} is painted on the terminal row`)
+    from = index + needle.length
+  }
+  return cellOfCharacter[index]!
+}
+
+/** The STRONG exact-match background of the production dark palette. */
+const F2_STRONG_BG = 0xf5c542
+
+function strongRuns(vt: VirtualTerminal): Array<{ row: number; startCol: number; endCol: number; text: string }> {
+  return vt.getRgbBackgroundRuns(F2_STRONG_BG)
+}
+
+function strongText(vt: VirtualTerminal): string {
+  return strongRuns(vt).map(run => run.text).join('')
+}
+
+/** Whether any mounted block claims a PROVEN source-cell selection. */
+function anyExactSelection(app: TuiApp): boolean {
+  const mounted = (app as unknown as {
+    mountedTranscriptBlocks: ReadonlyArray<{ searchSelection?: { exact: boolean } }>
+  }).mountedTranscriptBlocks
+  return mounted.some(entry => entry.searchSelection?.exact === true)
+}
+
+test('runner search: Full proves visible Assistant Markdown cells and keeps a hidden href honest', async (t) => {
+  const previousCapabilities = getCapabilities()
+  setCapabilities({ images: null, trueColor: true, hyperlinks: true })
+  t.after(() => setCapabilities(previousCapabilities))
+  const events: SessionEvent[] = []
+  let seq = 0
+  const answer = (turn: number, text: string): void => {
+    events.push(event('turn/start', { turn }, seq++))
+    events.push(event('assistant/message', {
+      turn, step: 0,
+      message: {
+        id: MessageId(`f2-runner-assistant-${turn}`),
+        role: 'assistant',
+        content: [{ type: 'text', text }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+      stream: [],
+    }, seq++))
+    events.push(event('turn/end', { turn, reason: { kind: 'completed' } }, seq++))
+  }
+  answer(0, '[needle](https://example.invalid/needle) needle body')
+  for (let turn = 1; turn < 24; turn += 1) answer(turn, `ordinary answer ${turn}`)
+  answer(24, 'second card ordinary needle body')
+  const fixture = await mountSearchRunner(t, 25, [], 'needle', events)
+  const { app, vt } = fixture
+
+  // View: only the mounted rendered occurrences of the newest window count.
+  fixture.input('\x06')
+  await fixture.settleRender()
+  typeQuery(fixture, 'needle')
+  await fixture.settleRender()
+  assert.deepEqual(app.renderedViewSearchStatus(), { currentIndex: 0, count: 1 },
+    'View counts the mounted rendered occurrence only')
+  assert.equal(anyExactSelection(app), false, 'View never claims a Full source-cell proof')
+
+  // Full: the semantic corpus owns hidden-href occurrence 1, and the first
+  // semantic hit lives in an OFF-WINDOW turn, so this is a real Folder result.
+  fixture.input('\t')
+  await fixture.settleRender()
+  let title = vt.getViewport().map(stripTerminalSequences).find(line => line.includes('[Full]'))
+  assert.ok(title?.includes('1/4'), `Full keeps the hidden-href semantic occurrence:\n${vt.getViewport().join('\n')}`)
+  let target = app.transcriptSearchPresentationForTest()
+  assert.equal(target?.matchTurn, 0, 'Full selection starts at the earliest semantic source (off-window jump)')
+  assert.equal(target?.message?.kind, 'assistant')
+  const firstCard = target!.message!
+  assert.equal(app.transcriptSearchCoverageForTest(), 'entire-session', 'Direct Full covers the entire session')
+  let lines = vt.getViewport()
+  let row = lines.findIndex(line => stripTerminalSequences(line).includes('needle needle body'))
+  assert.ok(row >= 0, `the off-window Assistant card is painted after the jump:\n${lines.join('\n')}`)
+  assert.deepEqual(strongRuns(vt).map(run => run.text), ['needle'], 'the link label is the proven current cell')
+  assert.equal(strongRuns(vt)[0]!.startCol, cellColumnOf(vt, row, 'needle', 0), 'the LABEL occurrence is strong')
+  let selection = mountedSearchSelection(app, firstCard)
+  assert.equal(selection?.exact, true, 'the label hit is proven from the semantic source range')
+  assert.equal(selection?.selectedIndex, -1)
+
+  // Enter -> the hidden href: no painted homonym may become the current cell.
+  fixture.projections.reset()
+  fixture.input('\r')
+  await fixture.settleRender()
+  target = app.transcriptSearchPresentationForTest()
+  assert.equal(target?.sourceOccurrence, 1, 'the hidden href is the second visible-source occurrence')
+  assert.deepEqual(strongRuns(vt), [], 'a hidden href never strong-highlights a visible homonym')
+  selection = mountedSearchSelection(app, target!.message!)
+  assert.equal(selection?.exact, false)
+  assert.equal(selection?.exactPaintedSegments, undefined)
+  assert.equal(selection?.sourceDisposition, 'not-painted', 'F1 NOT_PAINTED owns the source disposition')
+  const hiddenNotice = app.currentFullSearchNotice()
+  assert.deepEqual(hiddenNotice, { kind: 'not-painted', sourceLabel: 'Assistant text' },
+    'a hidden link target is honest Source-only metadata, never a visible homonym')
+  const frameAfterHidden = vt.getViewport().map(stripTerminalSequences)
+  assert.ok(frameAfterHidden.some(line => line.includes('Source-only') && line.includes('no visible cell')),
+    `the Search box paints the not-painted Source-only row:\n${frameAfterHidden.join('\n')}`)
+  assert.ok(!frameAfterHidden.some(line => line.includes('https://example.invalid')),
+    'the hidden href never leaks into the notice')
+
+  // Enter -> the visible body occurrence.
+  fixture.input('\r')
+  await fixture.settleRender()
+  target = app.transcriptSearchPresentationForTest()
+  lines = vt.getViewport()
+  row = lines.findIndex(line => stripTerminalSequences(line).includes('needle needle body'))
+  assert.ok(row >= 0, `the body row is visible:\n${lines.join('\n')}`)
+  assert.deepEqual(strongRuns(vt).map(run => run.text), ['needle'], 'the body occurrence is proven')
+  assert.equal(strongRuns(vt)[0]!.startCol, cellColumnOf(vt, row, 'needle', 1), 'the BODY occurrence is strong')
+  selection = mountedSearchSelection(app, target!.message!)
+  assert.equal(selection?.exact, true)
+  assert.ok((selection?.exactPaintedSegments?.length ?? 0) > 0)
+  assert.equal(selection?.sourceDisposition, undefined, 'an exact selection carries no Source-only state')
+  assert.equal(app.currentFullSearchNotice(), undefined, 'an exact hit never shows the Source-only row')
+  assert.ok(!vt.getViewport().map(stripTerminalSequences).some(line => line.includes('Source-only')),
+    'the Search box returns to its three-row form for an exact target')
+  assert.equal(fixture.projections.count(), 0, 'same-card Full Next never re-windows the transcript')
+
+  // Enter -> the cross-card result (a second off-window jump forward).
+  fixture.projections.reset()
+  fixture.input('\r')
+  await fixture.settleRender()
+  target = app.transcriptSearchPresentationForTest()
+  assert.equal(target?.matchTurn, 24, 'Next crosses cards to the later semantic result')
+  lines = vt.getViewport()
+  assert.ok(lines.some(line => stripTerminalSequences(line).includes('second card ordinary needle body')),
+    `the second card is the viewport destination:\n${lines.join('\n')}`)
+  assert.deepEqual(strongRuns(vt).map(run => run.text), ['needle'], 'the later card proves its own cells')
+  assert.equal(mountedSearchSelection(app, target!.message!)?.exact, true)
+  assert.equal(fixture.projections.count(), 1, 'the cross-card off-window jump projects the transcript exactly once')
+
+  // Shift+Enter returns to the previous card and re-proves it.
+  fixture.input('\x1b[13;2u')
+  await fixture.settleRender()
+  target = app.transcriptSearchPresentationForTest()
+  assert.equal(target?.matchTurn, 0)
+  lines = vt.getViewport()
+  row = lines.findIndex(line => stripTerminalSequences(line).includes('needle needle body'))
+  assert.ok(row >= 0, `the previous card is the viewport destination:\n${lines.join('\n')}`)
+  assert.deepEqual(strongRuns(vt).map(run => run.text), ['needle'])
+  assert.equal(strongRuns(vt)[0]!.startCol, cellColumnOf(vt, row, 'needle', 1), 'the body cell is re-proven')
+
+  // Back to View: the Full source proof and its reveal are retired; View counts
+  // only the mounted rendered occurrences again.
+  fixture.input('\x06')
+  await fixture.settleRender()
+  assert.equal(app.transcriptSearchPresentationForTest(), undefined, 'the Full target is retired before View returns')
+  assert.equal(anyExactSelection(app), false, 'the old Full source-cell proof never survives the scope switch')
+  assert.equal(app.currentFullSearchNotice(), undefined, 'the View scope retires the Full Source-only notice')
+  assert.ok(!vt.getViewport().map(stripTerminalSequences).some(line => line.includes('Source-only')),
+    'the previous scope never leaves its Source-only row painted')
+  assert.ok((app.renderedViewSearchStatus()?.count ?? 0) >= 1,
+    'View returns to its own mounted rendered occurrence authority')
 })

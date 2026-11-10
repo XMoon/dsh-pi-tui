@@ -1,9 +1,19 @@
 import { Marked, type Token, Tokenizer, type TokenizerExtension, type Tokens, type TokensList } from "marked";
 import markedCjkFriendly from "marked-cjk-friendly";
+import type { AltScreenSearchSegment } from "../alt-screen-search.ts";
 import { renderLatex } from "../latex.ts";
 import { getCapabilities, hyperlink, isImageLine } from "../terminal-image.ts";
 import type { Component } from "../tui.ts";
-import { applyBackgroundToLine, cjkPunctuationRegex, flattenLines, visibleWidth, wrapTextWithAnsi } from "../utils.ts";
+import {
+	applyBackgroundToLine,
+	cjkPunctuationRegex,
+	extractAnsiCode,
+	flattenLines,
+	getGraphemeSegmenter,
+	stripTerminalSequences,
+	visibleWidth,
+	wrapTextWithAnsi,
+} from "../utils.ts";
 
 const STRICT_STRIKETHROUGH_REGEX = /^(~~)(?=[^\s~])((?:\\.|[^\\])*?(?:\\.|[^\s~\\]))\1(?=[^~]|$)/;
 
@@ -197,6 +207,346 @@ function trimPartialClosingFences(tokens: readonly Token[]): void {
 	token.text = token.text.slice(0, -lastLine.length).replace(/\n$/, "");
 }
 
+/** Proof-mode zero-width boundary sentinels. They exist only in the disposable
+ * rows of one `proveSourceSpan()` call and are always stripped before the proof
+ * output is compared with the normal render. */
+const PROOF_OPEN = "\u200B";
+const PROOF_CLOSE = "\u200C";
+
+/** The result of proving one component-local source range against the painted
+ * cells of `Markdown.render(width)` for this component's own current source. */
+export type MarkdownSourceCellProof =
+	| { readonly kind: "PROVEN"; readonly segments: readonly AltScreenSearchSegment[] }
+	| { readonly kind: "NOT_PAINTED"; readonly reason: "HIDDEN_LINK_TARGET" | "MARKUP_ONLY" }
+	| {
+			readonly kind: "UNPROVEN";
+			readonly reason:
+				| "SOURCE_PROJECTION"
+				| "TOKEN_ORIGIN"
+				| "REFLOW"
+				| "RENDER_EQUIVALENCE"
+				| "STALE_RENDER"
+				| "COMPOSITE_OWNER";
+	  };
+
+/** Where one token's raw text lives in the current component source. */
+interface TokenOrigin {
+	readonly start: number;
+	readonly end: number;
+	/** Absolute offset of every raw line of the token (the first line's start is `start`). */
+	readonly lineStarts: readonly number[];
+	/** Offset of every raw line inside the token's own raw text. */
+	readonly rawLineStarts: readonly number[];
+}
+
+interface LocatedToken {
+	readonly token: Token;
+	readonly origin: TokenOrigin;
+}
+
+interface ProofHrefTarget {
+	readonly href: string;
+	readonly start: number;
+	readonly end: number;
+}
+
+/** The short-lived state of ONE proof render. Never survives the call. */
+interface ProofState {
+	/** The requested range projected onto the TAB-normalized source the parser saw. */
+	readonly request: { readonly start: number; readonly end: number };
+	origin: WeakMap<Token, TokenOrigin> | undefined;
+	located: LocatedToken[];
+	mappingFailure: string | undefined;
+	/** The parsed source is not the component's own source (transform/tab change). */
+	sourceProjectionFailure: boolean;
+	hrefCandidates: { readonly start: number; readonly end: number }[];
+	hrefTarget: ProofHrefTarget | undefined;
+	wrappedLeaves: number;
+	/** Suppresses sentinel wrapping while a renderer measures text it will discard. */
+	suppressWrapping: boolean;
+}
+
+const proofSegmenter = getGraphemeSegmenter();
+
+function isGraphemeBoundary(text: string, index: number): boolean {
+	if (index <= 0 || index >= text.length) {
+		return true;
+	}
+	for (const segment of proofSegmenter.segment(text)) {
+		if (segment.index === index) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/** Project a component-source offset onto the TAB-normalized source the parser sees. */
+function projectTabOffset(text: string, index: number): number {
+	let projected = index;
+	for (let position = 0; position < index; position++) {
+		if (text.charCodeAt(position) === 9) {
+			projected += 2;
+		}
+	}
+	return projected;
+}
+
+/** Remove the zero-width proof sentinels from one row without changing columns. */
+function stripProofSentinels(line: string): string {
+	if (!line.includes(PROOF_OPEN) && !line.includes(PROOF_CLOSE)) {
+		return line;
+	}
+	return line.split(PROOF_OPEN).join("").split(PROOF_CLOSE).join("");
+}
+
+/**
+ * Build a view of `content` against the raw text a block tokenizer produced it from. `content` lines are
+ * prefixes-removed suffixes of the raw lines (blockquote markers, list indentation, code fences), so every line
+ * must line up exactly; anything else is refused instead of guessed.
+ * `offsets[viewIndex]` is the offset inside `raw` of the content character at `viewIndex`.
+ */
+function buildLineView(
+	raw: string,
+	content: string,
+): { readonly text: string; readonly offsets: readonly number[] } | undefined {
+	if (raw === content) {
+		const offsets = new Array<number>(content.length);
+		for (let index = 0; index < content.length; index++) {
+			offsets[index] = index;
+		}
+		return { text: content, offsets };
+	}
+	const rawLines = raw.split("\n");
+	const contentLines = content.split("\n");
+	if (contentLines.length > rawLines.length) {
+		return undefined;
+	}
+	const offsets = new Array<number>(content.length);
+	let viewIndex = 0;
+	let rawLineStart = 0;
+	for (let line = 0; line < contentLines.length; line++) {
+		const rawLine = rawLines[line];
+		const contentLine = contentLines[line];
+		if (rawLine === undefined || !rawLine.endsWith(contentLine)) {
+			return undefined;
+		}
+		const prefix = rawLine.length - contentLine.length;
+		for (let index = 0; index < contentLine.length; index++) {
+			offsets[viewIndex] = rawLineStart + prefix + index;
+			viewIndex += 1;
+		}
+		if (line < contentLines.length - 1) {
+			offsets[viewIndex] = rawLineStart + rawLine.length;
+			viewIndex += 1;
+		}
+		rawLineStart += rawLine.length + 1;
+	}
+	return viewIndex === content.length ? { text: content, offsets } : undefined;
+}
+
+/** Absolute offset of a raw-relative offset, using the token's per-line mapping. */
+function absoluteFromRawOffset(origin: TokenOrigin, raw: readonly string[], rawOffset: number): number | undefined {
+	for (let line = 0; line < raw.length; line++) {
+		const lineStart = origin.rawLineStarts[line];
+		const lineEnd = lineStart + raw[line].length;
+		if (rawOffset >= lineStart && rawOffset <= lineEnd) {
+			return origin.lineStarts[line] + (rawOffset - lineStart);
+		}
+	}
+	return undefined;
+}
+
+/** Slice the visible columns `[startCol, endCol)` of an ANSI-stripped string. */
+function visibleColumnSlice(visible: string, startCol: number, endCol: number): string | undefined {
+	if (startCol < 0 || endCol < startCol) {
+		return undefined;
+	}
+	let column = 0;
+	let startIndex = -1;
+	let endIndex = -1;
+	for (const { segment, index } of proofSegmenter.segment(visible)) {
+		if (column === startCol && startIndex < 0) {
+			startIndex = index;
+		}
+		if (column === endCol) {
+			endIndex = index;
+			break;
+		}
+		column += visibleWidth(segment);
+		if (column > endCol) {
+			return undefined;
+		}
+	}
+	if (startIndex < 0 && column === startCol) {
+		startIndex = visible.length;
+	}
+	if (endIndex < 0 && column === endCol) {
+		endIndex = visible.length;
+	}
+	if (startIndex < 0 || endIndex < 0) {
+		return undefined;
+	}
+	return visible.slice(startIndex, endIndex);
+}
+
+/** Every grapheme-boundary column of an ANSI-stripped visible string. */
+function visibleColumnBoundaries(visible: string): number[] {
+	const boundaries = [0];
+	let column = 0;
+	for (const { segment } of proofSegmenter.segment(visible)) {
+		column += visibleWidth(segment);
+		boundaries.push(column);
+	}
+	return boundaries;
+}
+
+/** The direct child tokens of one token, in rendering order. */
+function childTokensOf(token: Token): Token[] {
+	if (token.type === "list") {
+		return (token as Tokens.List).items;
+	}
+	if (token.type === "table") {
+		const table = token as Tokens.Table;
+		const children: Token[] = [];
+		for (const cell of [...table.header, ...table.rows.flat()]) {
+			children.push(...(cell.tokens ?? []));
+		}
+		return children;
+	}
+	const generic = token as Token & { tokens?: readonly Token[] };
+	return generic.tokens === undefined ? [] : [...generic.tokens];
+}
+
+/** Visible content of one proof row: sentinels and terminal sequences removed, trailing padding dropped. */
+function proofRowContent(line: string): string {
+	return stripTerminalSequences(stripProofSentinels(line)).trimEnd();
+}
+
+type ProofRecovery =
+	| { readonly segments: readonly AltScreenSearchSegment[]; readonly collected: string }
+	| { readonly failure: "REFLOW" | "RENDER_EQUIVALENCE" };
+
+/**
+ * Recover the ONE sentinel-wrapped painted range from a proof render. A range may span several wrapped rows: the
+ * first row contributes its tail, every further row contributes its content after the layout prefix, and the last
+ * row ends exactly at the closing sentinel. The prefix width of continuation rows is not assumed: it is the one
+ * boundary width that reconstructs `expected` exactly, and an ambiguous reconstruction is refused.
+ */
+function recoverProofSegments(rows: readonly string[], expected: string): ProofRecovery {
+	let openRow = -1;
+	let openIndex = -1;
+	let closeRow = -1;
+	let closeIndex = -1;
+	for (let row = 0; row < rows.length; row++) {
+		const line = rows[row];
+		let cursor = 0;
+		while (cursor <= line.length) {
+			const open = line.indexOf(PROOF_OPEN, cursor);
+			const close = line.indexOf(PROOF_CLOSE, cursor);
+			if (open < 0 && close < 0) {
+				break;
+			}
+			if (open >= 0 && (close < 0 || open < close)) {
+				if (openRow >= 0) {
+					return { failure: "REFLOW" };
+				}
+				openRow = row;
+				openIndex = open;
+				cursor = open + PROOF_OPEN.length;
+				continue;
+			}
+			if (closeRow >= 0 || openRow < 0) {
+				return { failure: "REFLOW" };
+			}
+			closeRow = row;
+			closeIndex = close;
+			cursor = close + PROOF_CLOSE.length;
+		}
+	}
+	if (openRow < 0 || closeRow < 0) {
+		return { failure: "REFLOW" };
+	}
+	const openCol = visibleWidth(rows[openRow].slice(0, openIndex));
+	const closeCol = visibleWidth(rows[closeRow].slice(0, closeIndex));
+
+	if (openRow === closeRow) {
+		const visible = proofRowContent(rows[openRow]);
+		const chunk = visibleColumnSlice(visible, openCol, closeCol);
+		if (chunk === undefined) {
+			return { failure: "REFLOW" };
+		}
+		if (chunk.length === 0 || chunk !== expected) {
+			return { failure: "RENDER_EQUIVALENCE" };
+		}
+		return { segments: [{ row: openRow, startCol: openCol, endCol: openCol + visibleWidth(chunk) }], collected: chunk };
+	}
+
+	const startVisible = proofRowContent(rows[openRow]);
+	if (visibleWidth(startVisible) <= openCol) {
+		return { failure: "REFLOW" };
+	}
+	const continuationTexts: string[] = [];
+	for (let row = openRow + 1; row <= closeRow; row++) {
+		continuationTexts.push(proofRowContent(rows[row]));
+	}
+	const closeVisible = continuationTexts[continuationTexts.length - 1];
+	// The first/intermediate rows may end with layout paint after the range (a table cell's padded border); the
+	// continuation prefix and the row content end are searched as boundaries instead of being assumed.
+	const contentEnds = visibleColumnBoundaries(startVisible).filter((column) => column > openCol);
+	const prefixWidths = visibleColumnBoundaries(closeVisible).filter((column) => column < closeCol);
+	const candidates: AltScreenSearchSegment[][] = [];
+	const seen = new Set<string>();
+	for (const prefixWidth of prefixWidths) {
+		for (const contentEnd of contentEnds) {
+			if (contentEnd <= prefixWidth) {
+				continue;
+			}
+			const startChunk = visibleColumnSlice(startVisible, openCol, contentEnd);
+			if (startChunk === undefined || !expected.startsWith(startChunk)) {
+				continue;
+			}
+			let left = expected.slice(startChunk.length);
+			let valid = true;
+			const segments: AltScreenSearchSegment[] = [];
+			if (visibleWidth(startChunk) > 0) {
+				segments.push({ row: openRow, startCol: openCol, endCol: openCol + visibleWidth(startChunk) });
+			}
+			for (let index = 0; index < continuationTexts.length - 1; index++) {
+				const visible = continuationTexts[index];
+				if (visibleWidth(visible) < contentEnd) {
+					valid = false;
+					break;
+				}
+				const chunk = visibleColumnSlice(visible, prefixWidth, contentEnd);
+				if (chunk === undefined || chunk.length === 0 || !left.startsWith(chunk)) {
+					valid = false;
+					break;
+				}
+				left = left.slice(chunk.length);
+				segments.push({ row: openRow + 1 + index, startCol: prefixWidth, endCol: prefixWidth + visibleWidth(chunk) });
+			}
+			if (!valid) {
+				continue;
+			}
+			const closeChunk = visibleColumnSlice(closeVisible, prefixWidth, closeCol);
+			if (closeChunk === undefined || closeChunk.length === 0 || closeChunk !== left) {
+				continue;
+			}
+			segments.push({ row: closeRow, startCol: prefixWidth, endCol: closeCol });
+			const signature = segments.map((segment) => `${segment.row}:${segment.startCol}-${segment.endCol}`).join(",");
+			if (seen.has(signature)) {
+				continue;
+			}
+			seen.add(signature);
+			candidates.push(segments);
+		}
+	}
+	if (candidates.length !== 1) {
+		return { failure: "REFLOW" };
+	}
+	return { segments: candidates[0]!, collected: expected };
+}
+
 const markdownParser = new Marked();
 markdownParser.setOptions({
 	tokenizer: new MarkdownTokenizer(),
@@ -289,6 +639,9 @@ export class Markdown implements Component {
 	private cachedText?: string;
 	private cachedWidth?: number;
 	private cachedLines?: string[];
+	// Hyperlink capability the cached lines were rendered with. The render cache key never included capabilities, so a
+	// proof refuses a cached render from a different capability epoch instead of pretending it is current.
+	private cachedCapabilities?: boolean;
 	// Parsed tokens depend only on the source, so they survive theme and width invalidation. Held weakly: a token tree is
 	// about ten times the size of its source, and every message of a long transcript keeps a Markdown component. The
 	// tokens survive a burst of re-renders, such as a theme preview, and are collected afterwards.
@@ -300,6 +653,11 @@ export class Markdown implements Component {
 	private blocks?: WeakRef<Map<string, RenderedBlock>>;
 	// Highlighted code of the block being rendered, only set while renderBlock runs.
 	private blockHighlightedCode?: Map<string, string[]>;
+	// Non-undefined ONLY during a proveSourceSpan() proof render.
+	private proofState: ProofState | undefined;
+	// Set ONLY by a proof-triggered normal render so it also fills the normal block cache; ordinary renders leave it
+	// false and keep the fork's own reuse rule.
+	private primingProofBlocks = false;
 
 	constructor(
 		text: string,
@@ -333,6 +691,7 @@ export class Markdown implements Component {
 		this.cachedText = undefined;
 		this.cachedWidth = undefined;
 		this.cachedLines = undefined;
+		this.cachedCapabilities = undefined;
 	}
 
 	render(width: number): string[] {
@@ -341,19 +700,156 @@ export class Markdown implements Component {
 			return this.cachedLines;
 		}
 
+		const result = this.renderLines(width, false);
+		this.cachedText = this.text;
+		this.cachedWidth = width;
+		this.cachedLines = result;
+		this.cachedCapabilities = getCapabilities().hyperlinks;
+		return result;
+	}
+
+	/**
+	 * Prove ONE source-local UTF-16 range against THIS component's own current source and the painted cells of
+	 * `render(width)`. The proof render runs the same parser and renderer and injects zero-width sentinels only into
+	 * the emitted text of the target token; it is accepted only when the proof rows, with the sentinels removed, are
+	 * byte-identical to the normal render. The normal render and block caches are never written by a proof.
+	 */
+	proveSourceSpan(
+		range: { readonly start: number; readonly end: number },
+		width: number,
+	): MarkdownSourceCellProof {
+		if (
+			!Number.isInteger(range.start) ||
+			!Number.isInteger(range.end) ||
+			range.start < 0 ||
+			range.end <= range.start ||
+			range.end > this.text.length
+		) {
+			return { kind: "UNPROVEN", reason: "SOURCE_PROJECTION" };
+		}
+		// A source that already contains the private sentinels cannot be proven unambiguously.
+		if (this.text.includes(PROOF_OPEN) || this.text.includes(PROOF_CLOSE)) {
+			return { kind: "UNPROVEN", reason: "SOURCE_PROJECTION" };
+		}
+		const hyperlinks = getCapabilities().hyperlinks;
+		if (
+			this.cachedLines !== undefined &&
+			this.cachedText === this.text &&
+			this.cachedWidth === width &&
+			this.cachedCapabilities !== undefined &&
+			this.cachedCapabilities !== hyperlinks
+		) {
+			return { kind: "UNPROVEN", reason: "STALE_RENDER" };
+		}
+		// Freeze the normal rows first: the proof is valid for THIS render epoch only. A normal render performed on
+		// behalf of a proof may also fill the normal block cache so the proof render can reuse every non-intersecting
+		// block; ordinary renders never take this path and the proof render itself writes no cache.
+		const cacheWasWarm =
+			this.cachedLines !== undefined && this.cachedText === this.text && this.cachedWidth === width;
+		this.primingProofBlocks = true;
+		let normalRows: string[];
+		try {
+			normalRows = this.render(width);
+		} finally {
+			this.primingProofBlocks = false;
+		}
+		const cachedBlocks = this.blocks?.deref();
+		if (cacheWasWarm && (cachedBlocks === undefined || cachedBlocks.size === 0)) {
+			this.primeProofBlocks(width);
+		}
+		const state: ProofState = {
+			request: {
+				start: projectTabOffset(this.text, range.start),
+				end: projectTabOffset(this.text, range.end),
+			},
+			origin: undefined,
+			located: [],
+			mappingFailure: undefined,
+			sourceProjectionFailure: false,
+			hrefCandidates: [],
+			hrefTarget: undefined,
+			wrappedLeaves: 0,
+			suppressWrapping: false,
+		};
+		this.proofState = state;
+		let proofRows: string[];
+		try {
+			proofRows = this.renderLines(width, true);
+		} finally {
+			this.proofState = undefined;
+		}
+		if (state.sourceProjectionFailure) {
+			return { kind: "UNPROVEN", reason: "SOURCE_PROJECTION" };
+		}
+		if (state.mappingFailure !== undefined) {
+			return { kind: "UNPROVEN", reason: "TOKEN_ORIGIN" };
+		}
+		if (proofRows.length !== normalRows.length) {
+			return { kind: "UNPROVEN", reason: "RENDER_EQUIVALENCE" };
+		}
+		let sentinelRows = 0;
+		for (let row = 0; row < proofRows.length; row++) {
+			const proofRow = proofRows[row];
+			if (proofRow.includes(PROOF_OPEN) || proofRow.includes(PROOF_CLOSE)) {
+				sentinelRows += 1;
+			}
+			if (stripProofSentinels(proofRow) !== normalRows[row]) {
+				return { kind: "UNPROVEN", reason: "RENDER_EQUIVALENCE" };
+			}
+		}
+		if (sentinelRows === 0) {
+			const request = state.request;
+			if (state.hrefCandidates.some((candidate) => request.start >= candidate.start && request.end <= candidate.end)) {
+				return { kind: "NOT_PAINTED", reason: "HIDDEN_LINK_TARGET" };
+			}
+			if (this.isMarkupOnlyRange(state)) {
+				return { kind: "NOT_PAINTED", reason: "MARKUP_ONLY" };
+			}
+			return { kind: "UNPROVEN", reason: "TOKEN_ORIGIN" };
+		}
+		if (state.wrappedLeaves !== 1) {
+			return { kind: "UNPROVEN", reason: "TOKEN_ORIGIN" };
+		}
+		const expected = this.text.slice(range.start, range.end);
+		if (expected.includes("\n")) {
+			return { kind: "UNPROVEN", reason: "REFLOW" };
+		}
+		const recovered = recoverProofSegments(proofRows, expected);
+		if ("failure" in recovered) {
+			return { kind: "UNPROVEN", reason: recovered.failure };
+		}
+		if (recovered.segments.length === 0) {
+			return { kind: "UNPROVEN", reason: "SOURCE_PROJECTION" };
+		}
+		for (const segment of recovered.segments) {
+			const normalRow = normalRows[segment.row];
+			if (normalRow === undefined) {
+				return { kind: "UNPROVEN", reason: "RENDER_EQUIVALENCE" };
+			}
+			if (segment.startCol < 0 || segment.endCol <= segment.startCol) {
+				return { kind: "UNPROVEN", reason: "REFLOW" };
+			}
+			if (segment.endCol > visibleWidth(normalRow)) {
+				return { kind: "UNPROVEN", reason: "RENDER_EQUIVALENCE" };
+			}
+		}
+		return { kind: "PROVEN", segments: recovered.segments };
+	}
+
+	private renderLines(width: number, proofMode: boolean): string[] {
 		// Calculate available width for content (subtract horizontal padding)
 		const contentWidth = Math.max(1, width - this.paddingX * 2);
 		const text = this.options.transform?.(this.text, contentWidth) ?? this.text;
+		if (proofMode && text !== this.text) {
+			// The parsed source is not the component's own source, so a component-local range has no meaning here.
+			const state = this.proofState;
+			if (state !== undefined) state.sourceProjectionFailure = true;
+		}
 
 		// Don't render anything if there's no actual text
 		if (!text || text.trim() === "") {
-			this.blocks = undefined;
-			const result: string[] = [];
-			// Update cache
-			this.cachedText = this.text;
-			this.cachedWidth = width;
-			this.cachedLines = result;
-			return result;
+			if (!proofMode) this.blocks = undefined;
+			return [];
 		}
 
 		// Replace tabs with 3 spaces for consistent rendering
@@ -365,25 +861,37 @@ export class Markdown implements Component {
 		if (!tokens) {
 			tokens = markdownParser.lexer(normalizedText);
 			trimPartialClosingFences(tokens);
-			this.cachedTokens = new WeakRef({ source: normalizedText, tokens });
+			if (!proofMode) this.cachedTokens = new WeakRef({ source: normalizedText, tokens });
 		}
+		if (proofMode) this.prepareProof(normalizedText, tokens);
 
 		// A reference link resolves through a definition anywhere in the text, so blocks with the same source can render
 		// differently; such texts are rare in practice and render without reusing blocks.
 		const reuseBlocks = Object.keys(tokens.links).length === 0;
 		const previousBlocks = this.blocks?.deref();
 		const blocks = new Map<string, RenderedBlock>();
-		this.blocks = new WeakRef(blocks);
+		if (!proofMode) this.blocks = new WeakRef(blocks);
 		const contentLines: string[] = [];
 		for (let i = 0; i < tokens.length; i++) {
 			const token = tokens[i];
 			const nextTokenType = tokens[i + 1]?.type;
-			const reused = reuseBlocks ? (blocks.get(token.raw) ?? previousBlocks?.get(token.raw)) : undefined;
+			// Proof mode reuses the cached NORMAL block for every token that does not carry the requested range (its
+			// lines contain no sentinel) and re-renders only the intersecting token. The local map is never stored.
+			const proofTarget = proofMode && (this.proofIntersects(token) || this.proofNeedsHrefFallback(token));
+			const key = proofTarget ? `${token.raw}\0proof` : token.raw;
+			// A proof render reuses every cached NORMAL block that does not carry the requested range. Ordinary renders
+			// keep the fork's own rule: reference-link texts disable previous-block reuse because their definitions can
+			// change between renders; a proof-triggered priming render fills the cache from the current token tree, so
+			// its blocks are safe to reuse for this epoch. The priming flag itself only widens what a render STORES:
+			// a proof-triggered render of a text that normally caches blocks must keep reusing its unchanged blocks
+			// (including their highlighted-code cache) exactly like an ordinary render.
+			const readPrevious = proofMode || reuseBlocks;
+			const reused = readPrevious && !proofTarget ? (blocks.get(key) ?? previousBlocks?.get(key)) : undefined;
 			const block = reused ?? { width: -1, nextTokenType, lines: [], highlightedCode: new Map() };
 			if (block.width !== width || block.nextTokenType !== nextTokenType) {
 				this.renderBlock(block, token, nextTokenType, width, contentWidth);
 			}
-			if (reuseBlocks) blocks.set(token.raw, block);
+			if (reuseBlocks || this.primingProofBlocks) blocks.set(key, block);
 			for (const line of block.lines) {
 				contentLines.push(line);
 			}
@@ -402,12 +910,475 @@ export class Markdown implements Component {
 		// Combine top padding, content, and bottom padding
 		const result = emptyLines.concat(contentLines, emptyLines);
 
-		// Update cache
-		this.cachedText = this.text;
-		this.cachedWidth = width;
-		this.cachedLines = result;
-
 		return result.length > 0 ? result : [""];
+	}
+
+	/**
+	 * Fill the normal block cache for this exact source/width with a normal-mode render, without touching the cached
+	 * normal rows. Only a proof calls this; the cached blocks are ordinary normal blocks (no sentinel).
+	 */
+	private primeProofBlocks(width: number): void {
+		const previous = this.primingProofBlocks;
+		this.primingProofBlocks = true;
+		try {
+			this.renderLines(width, false);
+		} finally {
+			this.primingProofBlocks = previous;
+		}
+	}
+
+	/** Whether this token owns a link that prints the fallback destination the request targets. */
+	private proofNeedsHrefFallback(token: Token): boolean {
+		const state = this.proofState;
+		if (state === undefined || state.hrefTarget === undefined) {
+			return false;
+		}
+		const href = state.hrefTarget.href;
+		const pending = [token];
+		while (pending.length > 0) {
+			const current = pending.pop()!;
+			if (current.type === "link" && (current as Token & { href?: unknown }).href === href) {
+				return true;
+			}
+			pending.push(...childTokensOf(current));
+		}
+		return false;
+	}
+
+	/** Whether the requested range intersects one token's own source span. */
+	private proofIntersects(token: Token): boolean {
+		const state = this.proofState;
+		if (state === undefined) {
+			return false;
+		}
+		const origin = state.origin?.get(token);
+		if (origin === undefined) {
+			return false;
+		}
+		return state.request.start < origin.end && state.request.end > origin.start;
+	}
+
+	private proofFail(reason: string): void {
+		const state = this.proofState;
+		if (state !== undefined) {
+			state.mappingFailure ??= reason;
+		}
+	}
+
+	/**
+	 * Map every token of the ACTUAL token tree to its absolute source span. Structural `indexOf` is only a candidate
+	 * locator: child spans must stay ordered inside their parent and every stripped block view must line up line by
+	 * line, or the mapping fails closed.
+	 */
+	private prepareProof(normalizedText: string, tokens: TokensList): void {
+		const state = this.proofState;
+		if (state === undefined || state.sourceProjectionFailure) {
+			return;
+		}
+		const origin = new WeakMap<Token, TokenOrigin>();
+		const located: LocatedToken[] = [];
+		state.origin = origin;
+		state.located = located;
+
+		const register = (
+			token: Token,
+			raw: string,
+			coordToAbsolute: (coordinate: number) => number | undefined,
+			startCoordinate: number,
+		): void => {
+			const rawLines = raw.split("\n");
+			const rawLineStarts: number[] = [];
+			const lineStarts: number[] = [];
+			let rawOffset = 0;
+			for (const rawLine of rawLines) {
+				rawLineStarts.push(rawOffset);
+				const absolute = coordToAbsolute(startCoordinate + rawOffset);
+				if (absolute === undefined) {
+					state.mappingFailure ??= "token-line-unmapped";
+					return;
+				}
+				lineStarts.push(absolute);
+				rawOffset += rawLine.length + 1;
+			}
+			const lastLine = rawLines[rawLines.length - 1] ?? "";
+			const entry: TokenOrigin = {
+				start: lineStarts[0] ?? 0,
+				end: (lineStarts[lineStarts.length - 1] ?? 0) + lastLine.length,
+				lineStarts,
+				rawLineStarts,
+			};
+			origin.set(token, entry);
+			located.push({ token, origin: entry });
+			locateChildren(token, raw, coordToAbsolute, startCoordinate);
+		};
+
+		const locateChildren = (
+			token: Token,
+			raw: string,
+			coordToAbsolute: (coordinate: number) => number | undefined,
+			startCoordinate: number,
+		): void => {
+			const children = childTokensOf(token);
+			if (children.length === 0) {
+				return;
+			}
+			const stripped = token.type === "blockquote" || token.type === "list_item";
+			let view: { readonly text: string; readonly offsets: readonly number[] } | undefined;
+			if (stripped) {
+				const content = (token as Token & { text?: unknown }).text;
+				if (typeof content !== "string") {
+					state.mappingFailure ??= "stripped-block-content";
+					return;
+				}
+				view = buildLineView(raw, content);
+				if (view === undefined) {
+					state.mappingFailure ??= "stripped-block-view";
+					return;
+				}
+			}
+			// A child of a stripped block is located in the token's stripped view; its raw text is contiguous in THAT
+			// coordinate space, so the absolute offset of any child coordinate must run through the view's raw mapping.
+			const childToAbsolute = (coordinate: number): number | undefined => {
+				if (view === undefined) {
+					return coordToAbsolute(startCoordinate + coordinate);
+				}
+				const rawOffset = view.offsets[coordinate];
+				return rawOffset === undefined ? undefined : coordToAbsolute(startCoordinate + rawOffset);
+			};
+			const childText = view === undefined ? raw : view.text;
+			let cursor = 0;
+			for (const child of children) {
+				const childRaw = typeof child.raw === "string" ? child.raw : "";
+				if (childRaw === "") {
+					continue;
+				}
+				const index = childText.indexOf(childRaw, cursor);
+				if (index < 0) {
+					state.mappingFailure ??= "child-raw-lookup";
+					continue;
+				}
+				cursor = index + childRaw.length;
+				register(child, childRaw, childToAbsolute, index);
+			}
+		};
+
+		let topCursor = 0;
+		for (const token of tokens) {
+			const raw = typeof token.raw === "string" ? token.raw : "";
+			if (raw === "") {
+				continue;
+			}
+			const index = normalizedText.indexOf(raw, topCursor);
+			if (index < 0) {
+				state.mappingFailure ??= "top-token-raw-lookup";
+				continue;
+			}
+			topCursor = index + raw.length;
+			register(token, raw, (coordinate) => coordinate, index);
+		}
+
+		// A link/definition destination is the one non-painted source region F1 can classify: the painted label of a
+		// link is a child leaf, while the destination itself is only ever hidden (OSC 8) or printed as the fallback.
+		const request = state.request;
+		const hyperlinks = getCapabilities().hyperlinks;
+		for (const locatedToken of located) {
+			const token = locatedToken.token;
+			if (token.type !== "link" && token.type !== "def") {
+				continue;
+			}
+			const href = (token as Token & { href?: unknown }).href;
+			if (typeof href !== "string" || href.length === 0) {
+				continue;
+			}
+			const rawLines = token.raw.split("\n");
+			let index = token.raw.indexOf(href);
+			while (index >= 0) {
+				const absolute = absoluteFromRawOffset(locatedToken.origin, rawLines, index);
+				const absoluteEnd = absoluteFromRawOffset(locatedToken.origin, rawLines, index + href.length);
+				if (absolute !== undefined && absoluteEnd === absolute + href.length) {
+					if (request.start >= absolute && request.end <= absoluteEnd) {
+						if (hyperlinks) {
+							state.hrefCandidates.push({ start: absolute, end: absoluteEnd });
+						} else {
+							const start = request.start - absolute;
+							const end = request.end - absolute;
+							if (isGraphemeBoundary(href, start) && isGraphemeBoundary(href, end)) {
+								state.hrefTarget = { href, start, end };
+							} else {
+								state.mappingFailure ??= "href-grapheme-split";
+							}
+						}
+						break;
+					}
+				}
+				index = token.raw.indexOf(href, index + 1);
+			}
+		}
+	}
+
+	/**
+	 * Wrap the emitted text of ONE leaf whose raw-to-emitted identity covers the request. `rawOffset` is where the
+	 * emitted text starts inside the token raw (codespans and escapes print a sub-range of their raw). Anything that
+	 * does not line up with a single source line fails closed; a request in the markup part of the leaf is left alone.
+	 */
+	private proofWrap(token: Token, emitted: string, rawOffset = 0): string {
+		const state = this.proofState;
+		if (state === undefined || state.suppressWrapping) {
+			return emitted;
+		}
+		const origin = state.origin?.get(token);
+		if (origin === undefined) {
+			return emitted;
+		}
+		const request = state.request;
+		if (request.end <= origin.start || request.start >= origin.end) {
+			return emitted;
+		}
+		const raw = token.raw;
+		if (raw.slice(rawOffset, rawOffset + emitted.length) !== emitted) {
+			state.mappingFailure ??= "leaf-raw-text-mismatch";
+			return emitted;
+		}
+		const rawLines = raw.split("\n");
+		let line = -1;
+		for (let index = 0; index < rawLines.length; index++) {
+			const lineStart = origin.lineStarts[index] ?? origin.start;
+			const lineEnd = lineStart + rawLines[index].length;
+			if (request.start >= lineEnd || request.end <= lineStart) {
+				continue;
+			}
+			if (request.start >= lineStart && request.end <= lineEnd) {
+				line = index;
+				break;
+			}
+			state.mappingFailure ??= "request-crosses-line";
+			return emitted;
+		}
+		if (line < 0) {
+			// The request sits in a stripped layout gap (blockquote marker or list indentation): nothing is painted.
+			return emitted;
+		}
+		const lineStart = origin.lineStarts[line] ?? origin.start;
+		const emittedStart = origin.rawLineStarts[line]! + (request.start - lineStart) - rawOffset;
+		const emittedEnd = emittedStart + (request.end - request.start);
+		if (emittedEnd <= 0 || emittedStart >= emitted.length) {
+			return emitted;
+		}
+		if (emittedStart < 0 || emittedEnd > emitted.length) {
+			state.mappingFailure ??= "request-crosses-leaf";
+			return emitted;
+		}
+		if (!isGraphemeBoundary(emitted, emittedStart) || !isGraphemeBoundary(emitted, emittedEnd)) {
+			state.mappingFailure ??= "grapheme-split";
+			return emitted;
+		}
+		state.wrappedLeaves += 1;
+		if (state.wrappedLeaves > 1) {
+			state.mappingFailure ??= "request-spans-multiple-leaves";
+		}
+		return (
+			emitted.slice(0, emittedStart) +
+			PROOF_OPEN +
+			emitted.slice(emittedStart, emittedEnd) +
+			PROOF_CLOSE +
+			emitted.slice(emittedEnd)
+		);
+	}
+
+	/**
+	 * Print a link's fallback destination. When the request targets this exact destination, the printed fallback IS
+	 * the painted form of that source range, so it receives the proof sentinels.
+	 */
+	private printedHref(token: Token & { href: string }): string {
+		const state = this.proofState;
+		const href = token.href;
+		if (state === undefined || state.suppressWrapping || state.hrefTarget === undefined) {
+			return href;
+		}
+		const target = state.hrefTarget;
+		if (target.href !== href) {
+			return href;
+		}
+		state.wrappedLeaves += 1;
+		if (state.wrappedLeaves > 1) {
+			state.mappingFailure ??= "request-spans-multiple-leaves";
+		}
+		return href.slice(0, target.start) + PROOF_OPEN + href.slice(target.start, target.end) + PROOF_CLOSE + href.slice(target.end);
+	}
+
+	/** Wrap a rendered (possibly transformed) leaf only when its output is a direct source sub-range. */
+	private proofWrapRendered(token: Token, emitted: string, pending: boolean): string {
+		const state = this.proofState;
+		if (state === undefined || state.suppressWrapping) {
+			return emitted;
+		}
+		const origin = state.origin?.get(token);
+		if (origin === undefined) {
+			return emitted;
+		}
+		const request = state.request;
+		if (request.end <= origin.start || request.start >= origin.end) {
+			return emitted;
+		}
+		if (pending) {
+			state.mappingFailure ??= "pending-math";
+			return emitted;
+		}
+		const index = token.raw.indexOf(emitted);
+		if (index < 0 || token.raw.indexOf(emitted, index + 1) >= 0) {
+			state.mappingFailure ??= "rendered-text-not-in-source";
+			return emitted;
+		}
+		return this.proofWrap(token, emitted, index);
+	}
+
+	/** Resolve the single source line/piece a code-block request maps to, inside the fence content only. */
+	private proofCodeTrace(
+		token: Token,
+	): { readonly lineIndex: number; readonly start: number; readonly end: number } | undefined {
+		const state = this.proofState;
+		if (state === undefined) {
+			return undefined;
+		}
+		const origin = state.origin?.get(token);
+		if (origin === undefined) {
+			return undefined;
+		}
+		const request = state.request;
+		if (request.end <= origin.start || request.start >= origin.end) {
+			return undefined;
+		}
+		const raw = token.raw;
+		const firstNewline = raw.indexOf("\n");
+		if (firstNewline < 0) {
+			state.mappingFailure ??= "code-without-content";
+			return undefined;
+		}
+		const contentBase = absoluteFromRawOffset(origin, raw.split("\n"), firstNewline + 1);
+		if (contentBase === undefined) {
+			state.mappingFailure ??= "code-source-offset";
+			return undefined;
+		}
+		const codeText = (token as Tokens.Code).text;
+		const view = buildLineView(raw.slice(firstNewline + 1), codeText);
+		if (view === undefined) {
+			state.mappingFailure ??= "code-source-mismatch";
+			return undefined;
+		}
+		const codeLines = codeText.split("\n");
+		let lineIndex = 0;
+		for (let line = 0; line < codeLines.length; line++) {
+			const absolute = contentBase + (view.offsets[lineIndex] ?? view.text.length);
+			const lineEnd = absolute + codeLines[line].length;
+			if (request.start >= lineEnd || request.end <= absolute) {
+				lineIndex += codeLines[line].length + 1;
+				continue;
+			}
+			if (request.start < absolute || request.end > lineEnd) {
+				state.mappingFailure ??= "code-request-crosses-line";
+				return undefined;
+			}
+			return { lineIndex: line, start: request.start - absolute, end: request.end - absolute };
+		}
+		state.mappingFailure ??= "code-fence-or-gap";
+		return undefined;
+	}
+
+	/** Insert the proof sentinels into an already styled line whose visible text IS the source line. */
+	private insertProofRange(styled: string, sourceLine: string, start: number, end: number, mismatchReason: string): string {
+		if (stripTerminalSequences(styled) !== sourceLine || start < 0 || end > sourceLine.length || start >= end) {
+			this.proofFail(mismatchReason);
+			return styled;
+		}
+		if (!isGraphemeBoundary(sourceLine, start) || !isGraphemeBoundary(sourceLine, end)) {
+			this.proofFail("grapheme-split");
+			return styled;
+		}
+		let result = "";
+		let plainIndex = 0;
+		let index = 0;
+		while (index < styled.length) {
+			const ansi = extractAnsiCode(styled, index);
+			if (ansi !== null) {
+				result += ansi.code;
+				index += ansi.length;
+				continue;
+			}
+			if (plainIndex === start) {
+				result += PROOF_OPEN;
+			}
+			if (plainIndex === end) {
+				result += PROOF_CLOSE;
+			}
+			result += styled[index];
+			plainIndex += 1;
+			index += 1;
+		}
+		if (plainIndex !== sourceLine.length) {
+			this.proofFail(mismatchReason);
+			return styled;
+		}
+		if (plainIndex === end) {
+			result += PROOF_CLOSE;
+		}
+		const state = this.proofState;
+		if (state !== undefined) {
+			state.wrappedLeaves += 1;
+			if (state.wrappedLeaves > 1) {
+				state.mappingFailure ??= "request-spans-multiple-leaves";
+			}
+		}
+		return result;
+	}
+
+	/** Mark a non-inline block leaf the proof seam never traces as an explicit failure. */
+	private proofUnsupported(token: Token): void {
+		if (token.type === "def" || token.type === "space") {
+			return;
+		}
+		const state = this.proofState;
+		if (state === undefined) {
+			return;
+		}
+		const origin = state.origin?.get(token);
+		if (origin === undefined) {
+			return;
+		}
+		const request = state.request;
+		if (request.start < origin.end && request.end > origin.start) {
+			state.mappingFailure ??= "unsupported-block-leaf";
+		}
+	}
+
+	/** A request fully inside the markup delimiters of an inline wrapper is parser-proven markup only. */
+	private isMarkupOnlyRange(state: ProofState): boolean {
+		const wrappers = new Set(["strong", "em", "del", "link", "codespan"]);
+		const request = state.request;
+		for (const { token, origin } of state.located) {
+			if (!wrappers.has(token.type)) {
+				continue;
+			}
+			if (request.start < origin.start || request.end > origin.end) {
+				continue;
+			}
+			let painted = false;
+			for (const other of state.located) {
+				if (other.token === token) {
+					continue;
+				}
+				if (other.origin.start < origin.start || other.origin.end > origin.end) {
+					continue;
+				}
+				if (other.origin.start <= request.start && other.origin.end >= request.end) {
+					painted = true;
+					break;
+				}
+			}
+			if (!painted) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/** Render one top-level block to output lines: wrapped, with margins, and padded or backgrounded to the width. */
@@ -590,7 +1561,8 @@ export class Markdown implements Component {
 				if (rendered === undefined || rendered.split("\n").some((line) => visibleWidth(line) > width)) {
 					rendered = latexToken.raw.trim();
 				}
-				for (const line of rendered.split("\n")) {
+				const tracedRendered = this.proofWrapRendered(token, rendered, latexToken.pending === true);
+				for (const line of tracedRendered.split("\n")) {
 					lines.push(this.applyDefaultStyle(line));
 				}
 				if (nextTokenType && nextTokenType !== "space") {
@@ -601,7 +1573,9 @@ export class Markdown implements Component {
 
 			case "code": {
 				const indent = this.theme.codeBlockIndent ?? "  ";
+				const trace = this.proofCodeTrace(token);
 				lines.push(this.theme.codeBlockBorder(`\`\`\`${token.lang || ""}`));
+				const codeLines = token.text.split("\n");
 				if (this.theme.highlightCode) {
 					const key = `${token.lang ?? ""}\0${token.text}`;
 					let highlighted = this.blockHighlightedCode?.get(key);
@@ -609,14 +1583,24 @@ export class Markdown implements Component {
 						highlighted = this.theme.highlightCode(token.text, token.lang);
 						this.blockHighlightedCode?.set(key, highlighted);
 					}
-					for (const hlLine of highlighted) {
+					if (trace !== undefined && highlighted.length !== codeLines.length) {
+						this.proofFail("code-highlight-line-count");
+					}
+					for (let index = 0; index < highlighted.length; index++) {
+						let hlLine = highlighted[index]!;
+						if (trace !== undefined && highlighted.length === codeLines.length && trace.lineIndex === index) {
+							hlLine = this.insertProofRange(hlLine, codeLines[index]!, trace.start, trace.end, "code-highlight-mismatch");
+						}
 						lines.push(`${indent}${hlLine}`);
 					}
 				} else {
 					// Split code by newlines and style each line
-					const codeLines = token.text.split("\n");
-					for (const codeLine of codeLines) {
-						lines.push(`${indent}${this.theme.codeBlock(codeLine)}`);
+					for (let index = 0; index < codeLines.length; index++) {
+						let codeLine = this.theme.codeBlock(codeLines[index]!);
+						if (trace !== undefined && trace.lineIndex === index) {
+							codeLine = this.insertProofRange(codeLine, codeLines[index]!, trace.start, trace.end, "code-style-mismatch");
+						}
+						lines.push(`${indent}${codeLine}`);
 					}
 				}
 				lines.push(this.theme.codeBlockBorder("```"));
@@ -716,6 +1700,7 @@ export class Markdown implements Component {
 
 			case "html":
 				// Render HTML as plain text (escaped for terminal)
+				this.proofUnsupported(token);
 				if ("raw" in token && typeof token.raw === "string") {
 					lines.push(this.applyDefaultStyle(token.raw.trim()));
 				}
@@ -728,6 +1713,7 @@ export class Markdown implements Component {
 
 			default:
 				// Handle any other token types as plain text
+				this.proofUnsupported(token);
 				if ("text" in token && typeof token.text === "string") {
 					lines.push(token.text);
 				}
@@ -753,20 +1739,24 @@ export class Markdown implements Component {
 						!latexToken.pending && this.options.renderLatex !== false
 							? (renderLatex(latexToken.text) ?? latexToken.raw)
 							: latexToken.raw;
-					result += applyTextWithNewlines(rendered);
+					result += applyTextWithNewlines(
+						this.proofWrapRendered(token, rendered, latexToken.pending === true),
+					);
 					break;
 				}
 
-				case "escape":
-					result += applyTextWithNewlines(this.options.preserveBackslashEscapes ? token.raw : token.text);
+				case "escape": {
+					const escaped = this.options.preserveBackslashEscapes ? token.raw : token.text;
+					result += applyTextWithNewlines(this.proofWrap(token, escaped, Math.max(0, token.raw.indexOf(escaped))));
 					break;
+				}
 
 				case "text":
 					// Text tokens in list items can have nested tokens for inline formatting
 					if (token.tokens && token.tokens.length > 0) {
 						result += this.renderInlineTokens(token.tokens, resolvedStyleContext);
 					} else {
-						result += applyTextWithNewlines(token.text);
+						result += applyTextWithNewlines(this.proofWrap(token, token.text));
 					}
 					break;
 
@@ -788,7 +1778,9 @@ export class Markdown implements Component {
 				}
 
 				case "codespan":
-					result += this.theme.code(token.text) + stylePrefix;
+					result +=
+						this.theme.code(this.proofWrap(token, token.text, Math.max(0, token.raw.indexOf(token.text)))) +
+						stylePrefix;
 					break;
 
 				case "link": {
@@ -807,7 +1799,7 @@ export class Markdown implements Component {
 						if (token.text === token.href || token.text === hrefForComparison) {
 							result += styledLink + stylePrefix;
 						} else {
-							result += styledLink + this.theme.linkUrl(` (${token.href})`) + stylePrefix;
+							result += styledLink + this.theme.linkUrl(` (${this.printedHref(token as Tokens.Link)})`) + stylePrefix;
 						}
 					}
 					break;
@@ -826,14 +1818,14 @@ export class Markdown implements Component {
 				case "html":
 					// Render inline HTML as plain text
 					if ("raw" in token && typeof token.raw === "string") {
-						result += applyTextWithNewlines(token.raw);
+						result += applyTextWithNewlines(this.proofWrap(token, token.raw));
 					}
 					break;
 
 				default:
 					// Handle any other inline token types as plain text
 					if ("text" in token && typeof token.text === "string") {
-						result += applyTextWithNewlines(token.text);
+						result += applyTextWithNewlines(this.proofWrap(token, token.text));
 					}
 			}
 		}
@@ -972,22 +1964,33 @@ export class Markdown implements Component {
 
 		const maxUnbrokenWordWidth = 30;
 
-		// Calculate natural column widths (what each column needs without constraints)
+		// Calculate natural column widths (what each column needs without constraints). These renders only measure text
+		// that is thrown away, so a proof must not trace them: the real cell render below owns the single trace.
 		const naturalWidths: number[] = [];
 		const minWordWidths: number[] = [];
-		for (let i = 0; i < numCols; i++) {
-			const headerText = this.renderInlineTokens(token.header[i].tokens || [], styleContext);
-			naturalWidths[i] = visibleWidth(headerText);
-			minWordWidths[i] = Math.max(1, this.getLongestWordWidth(headerText, maxUnbrokenWordWidth));
+		const proofState = this.proofState;
+		if (proofState !== undefined) {
+			proofState.suppressWrapping = true;
 		}
-		for (const row of token.rows) {
-			for (let i = 0; i < row.length; i++) {
-				const cellText = this.renderInlineTokens(row[i].tokens || [], styleContext);
-				naturalWidths[i] = Math.max(naturalWidths[i] || 0, visibleWidth(cellText));
-				minWordWidths[i] = Math.max(
-					minWordWidths[i] || 1,
-					this.getLongestWordWidth(cellText, maxUnbrokenWordWidth),
-				);
+		try {
+			for (let i = 0; i < numCols; i++) {
+				const headerText = this.renderInlineTokens(token.header[i].tokens || [], styleContext);
+				naturalWidths[i] = visibleWidth(headerText);
+				minWordWidths[i] = Math.max(1, this.getLongestWordWidth(headerText, maxUnbrokenWordWidth));
+			}
+			for (const row of token.rows) {
+				for (let i = 0; i < row.length; i++) {
+					const cellText = this.renderInlineTokens(row[i].tokens || [], styleContext);
+					naturalWidths[i] = Math.max(naturalWidths[i] || 0, visibleWidth(cellText));
+					minWordWidths[i] = Math.max(
+						minWordWidths[i] || 1,
+						this.getLongestWordWidth(cellText, maxUnbrokenWordWidth),
+					);
+				}
+			}
+		} finally {
+			if (proofState !== undefined) {
+				proofState.suppressWrapping = false;
 			}
 		}
 

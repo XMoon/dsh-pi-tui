@@ -755,6 +755,31 @@ export interface AccountView {
   readonly attempt: AccountSignInAttempt | null
 }
 
+declare const accountObservationLeaseBrand: unique symbol
+
+/** Opaque, process-local provenance for one Account snapshot. It is never part
+ *  of the generated Remote payload or persisted state. Direct validates it
+ *  against the installed Host Account service identity/epoch; Remote validates
+ *  it against the authenticated Connection generation/watch epoch. */
+export interface AccountObservationLease {
+  readonly [accountObservationLeaseBrand]: never
+}
+
+/** One detached Host AccountView plus the local authority that proves which
+ *  Host observation/generation produced it. */
+export interface AccountObservation {
+  readonly view: AccountView
+  readonly lease: AccountObservationLease
+}
+
+export type AccountWatchInvalidationReason = 'service-unavailable' | 'service-changed' | 'connection-changed' | 'watch-failed' | 'watch-ended'
+
+/** The logical Account watch's state transitions. A terminal invalidation
+ *  makes the previous snapshot last-known only; it is never a signed-out fact. */
+export type AccountWatchEvent =
+  | { readonly kind: 'current'; readonly observation: AccountObservation }
+  | { readonly kind: 'invalidated'; readonly reason: AccountWatchInvalidationReason }
+
 /** The Platform profile projection (contacts already masked by Platform). */
 export interface AccountProfile {
   readonly id: string | null
@@ -791,30 +816,31 @@ export type AccountBalanceOutcome =
  * exposes a token, grant payload, PKCE value, Platform session or generic
  * account service object; every DTO is detached, and the callback origin is
  * the Host webserver's own bound loopback root (never a Client-supplied URL).
- *
- * `available()` is the account SERVICE fact. `getCallbackOrigin()` is the
- * separate browser-callback capability: `undefined` means the Host listener is
- * missing or not bound, and the UI must state that instead of starting a flow
- * that cannot complete.
+ * `available()` answers only whether the Account namespace/service exists;
+ * `isObservationCurrent()` validates the exact opaque local provenance carried
+ * with one complete Host snapshot. A known AccountView without a current lease
+ * is last-known presentation data, never authority for a mutation or risk read.
+ * `getCallbackOrigin()` is the separate browser-callback capability: undefined
+ * means the listener is missing or not bound.
  */
 export interface AccountConfig {
   available(): boolean
-  getState(): Promise<AccountView>
-  getProfile(client: AccountClientMetadata): Promise<AccountProfileOutcome>
-  getBalance(client: AccountClientMetadata): Promise<AccountBalanceOutcome>
-  /** Subscribe with a COMPLETE initial state; ending the signal never cancels
-   * an in-flight browser attempt. */
-  watch(signal: AbortSignal): AsyncIterable<AccountView>
+  isObservationCurrent(lease: AccountObservationLease): boolean
+  getState(): Promise<AccountObservation>
+  getProfile(client: AccountClientMetadata, lease: AccountObservationLease): Promise<AccountProfileOutcome>
+  getBalance(client: AccountClientMetadata, lease: AccountObservationLease): Promise<AccountBalanceOutcome>
+  /** Subscribe with a complete current initial state; invalidation is distinct
+   *  from signed-out and never cancels an in-flight browser attempt. */
+  watch(signal: AbortSignal): AsyncIterable<AccountWatchEvent>
   getCallbackOrigin(): string | undefined
   /** Start (or join) a browser attempt against the Host's own callback origin
-   * and the fixed `web` login source. */
-  startSignIn(client: AccountClientMetadata): Promise<AccountView>
-  cancelSignIn(id: string): Promise<AccountView>
-  signOut(client: AccountClientMetadata): Promise<AccountView>
+   *  and fixed `web` source, only for the exact current observation. */
+  startSignIn(client: AccountClientMetadata, lease: AccountObservationLease): Promise<AccountObservation>
+  cancelSignIn(id: string, lease: AccountObservationLease): Promise<AccountObservation>
+  signOut(client: AccountClientMetadata, lease: AccountObservationLease): Promise<AccountObservation>
   /** Whether a running Agent's latest bound request used the account provider
-   * (the official sign-out risk fact). Read-only: the Host's signed-out
-   * listener owns the actual cancellation. */
-  hasRunningAccountTasks(): boolean
+   *  for the exact Host observation (an asynchronous Host authority read). */
+  hasRunningAccountTasks(lease: AccountObservationLease): Promise<boolean>
 }
 
 /** The config assembly — one narrow sub-interface per config domain.

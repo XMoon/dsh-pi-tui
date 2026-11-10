@@ -150,6 +150,7 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
       },
       account: {
         available: () => false,
+        isObservationCurrent: () => false,
         getState: async () => { throw new Error('account unavailable') },
         getProfile: async () => null,
         getBalance: async () => null,
@@ -158,7 +159,7 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
         startSignIn: async () => { throw new Error('account unavailable') },
         cancelSignIn: async () => { throw new Error('account unavailable') },
         signOut: async () => { throw new Error('account unavailable') },
-        hasRunningAccountTasks: () => false,
+        hasRunningAccountTasks: async () => false,
       },
       credentials: {
         recordsSupported: () => true,

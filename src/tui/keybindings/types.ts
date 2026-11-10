@@ -54,6 +54,8 @@ export type AppKeybindingId =
   | 'app.exit.request'
   // Transcript
   | 'app.transcript.search'
+  | 'app.transcript.search.view'
+  | 'app.transcript.search.scope'
   | 'app.transcript.jumpLatest'
   | 'app.transcript.search.next'
   | 'app.transcript.search.previous'

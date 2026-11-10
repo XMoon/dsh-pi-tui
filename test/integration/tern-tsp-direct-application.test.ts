@@ -325,6 +325,13 @@ function liveNodes(wire: string): Array<{ id: string; k: string; p: Record<strin
       else if (op[0] === 'set' && typeof op[1] === 'string') {
         const node = nodes.get(op[1])
         if (node !== undefined) node.p = { ...node.p, ...(op[2] as Record<string, unknown>) }
+      } else if (op[0] === 'text' && typeof op[1] === 'string') {
+        const node = nodes.get(op[1])
+        if (node !== undefined) {
+          node.p['text'] = op[2] === 'append'
+            ? `${String(node.p['text'] ?? '')}${String(op[3] ?? '')}`
+            : String(op[3] ?? '')
+        }
       }
     }
   }
@@ -401,9 +408,11 @@ for (const preset of ['compact', 'full', 'focus'] as const) {
         assert.equal(roots.length, 1, 'the configured Focus preset produced one native Turn root')
         assert.equal(roots[0]!.p['collapsed'], true, 'the Focus root defaults collapsed')
         assert.equal(tools.length, 0, 'a collapsed Focus root builds no hidden Tool node')
-        const finalCards = nodes.filter(node => node.k === 'card' && nodeText(node).includes('MODE-DIRECT-OK'))
-        assert.equal(finalCards.length, 1, 'the official final appears exactly once as an independent Assistant card')
-        assert.ok(!finalCards[0]!.id.startsWith(`${roots[0]!.id}.`), 'the official final remains outside the Focus root')
+        const finalLeaves = nodes.filter(node => node.k === 'col'
+          && node.p['role'] === 'dsh.transcript.assistant'
+          && nodeText(node).includes('MODE-DIRECT-OK'))
+        assert.equal(finalLeaves.length, 1, 'the official final appears exactly once as an independent plain Assistant leaf')
+        assert.ok(!finalLeaves[0]!.id.startsWith(`${roots[0]!.id}.`), 'the official final remains outside the Focus root')
       } else {
         assert.equal(activities.length, 0, 'the configured Full preset paints no Work/Activity container')
         assert.ok(tools.length >= 1, 'Full keeps the real Tool row flat in the reading flow')
@@ -416,6 +425,177 @@ for (const preset of ['compact', 'full', 'focus'] as const) {
     }
   })
 }
+
+test('real Direct reasoning and Tool settlement keep Full and Compact TSP identities across live chunks', async (t) => {
+  const { testLifecycle } = await import('../support/temp-lifecycle.ts')
+  const life = testLifecycle(t)
+  for (const preset of ['full', 'compact'] as const) {
+    let releaseArguments!: () => void
+    const heldArguments = new Promise<void>(resolve => { releaseArguments = resolve })
+    let releaseLatestReasoning!: () => void
+    const heldLatestReasoning = new Promise<void>(resolve => { releaseLatestReasoning = resolve })
+    let latestReasoningReached = false
+    const fixture = await createDirectTspFixture(life, {
+      tuiConfig: { displayPreset: preset },
+      deltas: [`DIRECT-${preset.toUpperCase()}-`, 'FINAL'],
+      scriptedToolCalls: [{
+        text: `DIRECT-${preset.toUpperCase()}-REASONING-STEP`,
+        toolCall: { callId: `reasoned-${preset}`, name: 'job_list', arguments: '{}' },
+      }],
+      scriptedReasoningDeltas: ['checking the first row\n', 'latest reasoning line'],
+      holdScriptedReasoningDelta: async (step, deltaIndex) => {
+        if (step === 0 && deltaIndex === 1) {
+          latestReasoningReached = true
+          await heldLatestReasoning
+        }
+      },
+      holdScriptedToolCallArguments: async step => { if (step === 0) await heldArguments },
+    })
+    life.defer(() => {
+      releaseLatestReasoning()
+      releaseArguments()
+    })
+    const promptRecords: Array<{
+      readonly sessionId: string
+      readonly sessionEvents: () => readonly { readonly type: string; readonly data?: unknown }[]
+    }> = []
+    const recorder = fixture.recordPrompts(call => {
+      promptRecords.push({ sessionId: call.sessionId, sessionEvents: call.sessionEvents })
+    })
+    try {
+      await waitForInputDelivery(fixture.pane)
+      const wire = (): string => fixture.pane.output.text()
+      const nodes = (): ReturnType<typeof liveNodes> => liveNodes(wire())
+      const submit = async (text: string, ordinal: number): Promise<void> => {
+        fixture.pane.input.type(text)
+        await waitFor(`the production Composer holds prompt ${ordinal}`, () => latestComposerText(wire()) === text, 25_000)
+        assert.equal(recorder.calls(), ordinal - 1, `prompt ${ordinal} has not been written before its Enter`)
+        fixture.pane.input.type('\r')
+        await waitFor(`the real Direct Session writer settles prompt ${ordinal}`, () => recorder.calls() === ordinal, 30_000)
+      }
+      await submit(`inspect Direct transcript in ${preset}`, 1)
+      await waitFor('the production Direct Agent enters its scripted step', () => fixture.modelCalls() === 1, 30_000)
+      await waitFor('the official Direct sequence is holding its second reasoning delta', () => latestReasoningReached, 10_000)
+      assert.deepEqual(fixture.reasoningChunks().filter(chunk => chunk.step === 0).map(chunk => chunk.text),
+        ['checking the first row\n'], 'the second reasoning source chunk remains behind its test-owned stream gate')
+      assert.equal(promptRecords[0]!.sessionEvents().some(event => event.type === 'assistant/message'
+        || event.type === 'tool/call'), false,
+      'partial reasoning and tool-call deltas have not yet become durable Assistant or Tool events')
+      await waitFor('the first real reasoning prefix materializes in the current SDK Main tree', () =>
+        [...nodes().values()].some(node => node.k === 'section' && nodeText(node).includes('checking the first row')), 10_000)
+      assert.equal(nodes().some(node => node.k === 'tool'), false,
+        'a partial tool-call delta has no durable native Tool before official tool/call')
+
+      const toggleCurrent = (id: string, collapsed: boolean): void => {
+        const frame = JSON.parse([...wire().matchAll(/\u001b_tsp;f;([\s\S]*?)\u001b\\/g)].at(-1)![1]!) as { sf: string }
+        fixture.pane.input.type(`\u001b_tsp;e;${JSON.stringify({ ev: 'toggle', sf: frame.sf, id, collapsed, raw: {} })}\u001b\\`)
+      }
+      let sections = nodes().filter(node => node.k === 'section')
+      if (preset !== 'full') {
+        const works = nodes().filter(node => node.k === 'section' && String(node.p['key']).includes('work-'))
+        assert.ok(works.length > 0, `${preset} exposes its canonical Work for the live reasoning row`)
+        for (const work of works) {
+          if (work.p['collapsed'] === true) {
+            toggleCurrent(work.id, false)
+            await waitFor('the exact Compact/Focus Activity opens during live reasoning', () => nodes().some(node => node.id === work.id && node.p['collapsed'] === false))
+          }
+        }
+      }
+
+      sections = nodes().filter(node => node.k === 'section')
+      const thought = sections.find(node => /^(?:s\d+-)?msg-\d+$/u.test(String(node.p['key']))
+        && nodeText(node).includes('checking the first row'))
+      assert.ok(thought !== undefined, `${preset} exposes its current Thinking prefix: ${JSON.stringify(sections.map(node => ({ id: node.id, key: node.p['key'], text: nodeText(node) })))}`)
+      const stableThoughtId = thought.id
+      assert.equal(thought.p['collapsed'], true,
+        `the exact transient Thinking Section starts independently closed: ${JSON.stringify(thought)}`)
+      toggleCurrent(stableThoughtId, false)
+      await waitFor('the exact Thinking Section opens while the real Direct reasoning stream is still held', () =>
+        nodes().some(node => node.id === stableThoughtId && node.p['collapsed'] === false))
+      await waitFor('Thinking body materializes while the real Direct reasoning stream is still held', () =>
+        nodes().some(node => node.id === `${stableThoughtId}.body`))
+      let liveThinkingTree = nodes()
+      let liveThinkingBody = liveThinkingTree.find(node => node.id === `${stableThoughtId}.body`)
+      assert.ok(liveThinkingBody !== undefined && String(liveThinkingBody.p['text']).includes('checking the first row'))
+      assert.equal(liveThinkingBody.p['stream'], true, 'the open exact Section owns the current transient reasoning prefix')
+      assert.equal(liveThinkingTree.find(node => node.id === stableThoughtId)?.p['collapsed'], false)
+      assert.equal(promptRecords[0]!.sessionEvents().some(event => event.type === 'assistant/message'
+        || event.type === 'tool/call'), false,
+      'the live partial reasoning has not become a durable Session Assistant or Tool event')
+
+      releaseLatestReasoning()
+      await waitFor('the Direct adapter emitted the released second reasoning source chunk', () =>
+        fixture.reasoningChunks().filter(chunk => chunk.step === 0).length === 2, 10_000)
+      assert.deepEqual(fixture.reasoningChunks().filter(chunk => chunk.step === 0).map(chunk => chunk.text),
+        ['checking the first row\n', 'latest reasoning line'], 'the released official stream delivered its second source chunk')
+      await waitFor('the same exact Section body advances to the second official reasoning delta', () => {
+        const current = nodes()
+        const body = current.find(node => node.id === `${stableThoughtId}.body`)
+        return current.find(node => node.id === stableThoughtId)?.p['collapsed'] === false
+          && typeof body?.p['text'] === 'string'
+          && String(body.p['text']).includes('latest reasoning line')
+      }, 10_000).catch(error => {
+        const current = nodes()
+        const frames = [...wire().matchAll(/\u001b_tsp;f;([\s\S]*?)\u001b\\/g)]
+          .map(match => JSON.parse(match[1]!) as { s?: number; ops?: unknown[][] })
+          .map(frame => ({ s: frame.s, ops: frame.ops?.filter(op => String(op[1]).startsWith(stableThoughtId)) }))
+          .filter(frame => (frame.ops?.length ?? 0) > 0)
+        throw new Error(`${error.message}; source=${JSON.stringify(fixture.reasoningChunks())}; thought=${JSON.stringify(current.find(node => node.id === stableThoughtId))}; body=${JSON.stringify(current.find(node => node.id === `${stableThoughtId}.body`))}; thinkingFrames=${JSON.stringify(frames)}`)
+      })
+      liveThinkingTree = nodes()
+      liveThinkingBody = liveThinkingTree.find(node => node.id === `${stableThoughtId}.body`)
+      assert.equal(liveThinkingTree.find(node => node.id === stableThoughtId)?.id, stableThoughtId,
+        'both streamed reasoning chunks update the same stable SDK Section id')
+      assert.ok(String(liveThinkingBody?.p['text']).includes('checking the first row\nlatest reasoning line'))
+      assert.equal(liveThinkingBody?.p['stream'], true, 'the same open detail body remains live before official tool/final settlement')
+      assert.equal(promptRecords[0]!.sessionEvents().some(event => event.type === 'assistant/message'
+        || event.type === 'tool/call'), false,
+      'the two reasoning chunks remain transient until the real tool-call block settles')
+
+      releaseArguments()
+      await waitFor('the official Direct Session commits reasoning and Tool call/result', () => {
+        const events = promptRecords[0]!.sessionEvents()
+        const serial = JSON.stringify(events)
+        return events.some(event => event.type === 'assistant/message' && serial.includes('latest reasoning line'))
+          && events.some(event => event.type === 'tool/call' && serial.includes(`reasoned-${preset}`))
+          && events.some(event => event.type === 'tool/result' && serial.includes(`reasoned-${preset}`))
+      }, 30_000)
+      await waitFor('the Agent finishes its official Tool and final turn', () =>
+        wire().includes(`DIRECT-${preset.toUpperCase()}-FINAL`), 30_000)
+      if (preset !== 'full') {
+        const currentWorks = nodes().filter(node => node.k === 'section' && String(node.p['key']).includes('work-'))
+        assert.ok(currentWorks.length > 0, `${preset} keeps the current canonical Work visible after settlement`)
+        for (const work of currentWorks) {
+          if (work.p['collapsed'] === true) {
+            toggleCurrent(work.id, false)
+            await waitFor('the exact settled Work opens before its durable Tool is queried', () =>
+              nodes().some(node => node.id === work.id && node.p['collapsed'] === false))
+          }
+        }
+      }
+      const settledTree = nodes()
+      const settledThinkingBody = settledTree.find(node => node.id === `${stableThoughtId}.body`)
+      assert.equal(settledTree.find(node => node.id === stableThoughtId)?.p['collapsed'], false,
+        'the user-open Thinking preference survives the authoritative settlement')
+      assert.ok(typeof settledThinkingBody?.p['text'] === 'string'
+        && settledThinkingBody.p['text'].includes('latest reasoning line'))
+      assert.notEqual(settledThinkingBody?.p['stream'], true, 'the official Assistant event settles the same open body')
+      const tools = settledTree.filter(node => node.k === 'tool' && node.p['name'] === 'job_list')
+      assert.equal(tools.length, 1, `the completed ${preset} model call has one durable Tool after its ancestors are open: ${JSON.stringify(settledTree.filter(node => node.k === 'tool'))}`)
+      const tool = tools[0]!
+      assert.equal(tool.p['status'], 'done')
+      assert.equal(tool.p['collapsed'], true, 'ordinary Tool details keep their independent closed owner')
+
+      const toolFrame = JSON.parse([...wire().matchAll(/\u001b_tsp;f;([\s\S]*?)\u001b\\/g)].at(-1)![1]!) as { sf: string }
+      fixture.pane.input.type(`\u001b_tsp;e;${JSON.stringify({ ev: 'toggle', sf: toolFrame.sf, id: tool.id, collapsed: false, raw: {} })}\u001b\\`)
+      await waitFor('the Tool body appears after its exact toggle', () => nodes().some(node => node.id === `${tool.id}.result`))
+      assert.ok(promptRecords[0]!.sessionId.length > 0, 'the real Direct writer records the controlling session')
+    } finally {
+      releaseArguments()
+      recorder.detach()
+    }
+  }
+})
 
 test('the real Direct Focus stream holds its final outside the Thought until turn/end', async (t) => {
   const { testLifecycle } = await import('../support/temp-lifecycle.ts')
@@ -452,9 +632,11 @@ test('the real Direct Focus stream holds its final outside the Thought until tur
       fixture.pane.output.text().includes('FOCUS-DIRECT-FINAL'), 30_000)
     const settledNodes = liveNodes(fixture.pane.output.text())
     const roots = settledNodes.filter(node => node.k === 'section' && node.id.includes('-focus-'))
-    const finals = settledNodes.filter(node => node.k === 'card' && nodeText(node).includes('FOCUS-DIRECT-FINAL'))
+    const finals = settledNodes.filter(node => node.k === 'col'
+      && node.p['role'] === 'dsh.transcript.assistant'
+      && nodeText(node).includes('FOCUS-DIRECT-FINAL'))
     assert.equal(roots.length, 1, 'the same Direct turn keeps one Focus root occurrence')
-    assert.equal(finals.length, 1, 'the authoritative final appears exactly once')
+    assert.equal(finals.length, 1, 'the authoritative plain Assistant final appears exactly once')
     assert.ok(!finals[0]!.id.startsWith(`${roots[0]!.id}.`), 'the final remains outside the Thought')
   } finally {
     releaseStream()

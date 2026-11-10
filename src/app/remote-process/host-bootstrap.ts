@@ -124,22 +124,18 @@ const OFFICIAL_TYPERT_BINDINGS = [
   { serviceKey: 'sessionController', namespace: 'session' },
   { serviceKey: 'fileUploads', namespace: 'fileUploads' },
   { serviceKey: 'settingsController', namespace: 'settings' },
+  { serviceKey: 'accountController', namespace: 'account' },
   // The Host Workspace Remote owner the bundle mounts: `workspace/create` and
   // `follow` reach the registry only through this binding, so a readable
   // service object without it is not a working Workspace API.
   { serviceKey: 'workspaceController', namespace: 'workspace' },
 ] as const
 
-/**
- * The two official Workspace owners, identified by their PACKAGE as well as
- * their row id. A same-namespace competitor registered under a different Loader
- * id would keep the `exactly one <id> row` check green while owning the service
- * or the `workspace` namespace a second time, so uniqueness is proven on the
- * package identity the Host actually imported.
- */
-const WORKSPACE_OWNER_PACKAGES = [
+/** The official Loader owners whose package identity must be unique. */
+const OFFICIAL_LOADER_OWNER_PACKAGES = [
   { owner: 'workspaceRegistry', id: 'workspace', name: '@deepseek-ai/dsh-workspace' },
   { owner: 'workspaceController', id: 'workspace-controller', name: '@deepseek-ai/dsh-api-workspace-controller' },
+  { owner: 'accountController', id: 'split-host-account-controller', name: '@deepseek-ai/dsh-api-account-controller' },
 ] as const
 
 /** The package's three private endpoint bindings. */
@@ -217,6 +213,7 @@ export function collectHostEntryStatus(
     'sessionController',
     'fileUploads',
     'settingsController',
+    'accountController',
     // The Workspace Remote owner this overlay ENABLES is evidence too: `ready`
     // must not be published while `ctx.remote.workspace` has no Host owner.
     'workspaceController',
@@ -252,6 +249,7 @@ export function collectHostEntryStatus(
     turnOutline: activeIds('split-host-turn-outline'),
     sessionController: activeIds('split-host-session-controller'),
     settingsController: activeIds('split-host-settings-controller'),
+    accountController: activeIds('split-host-account-controller'),
     sessionLogExport: activeIds('split-host-session-log-download'),
     piTuiHostRuntime: activeIds('split-host-pi-tui-runtime'),
     // The pre-existing bundle rows must remain the sole owners: Performance
@@ -273,7 +271,7 @@ export function collectHostEntryStatus(
       )
     }
   }
-  for (const { owner, id, name } of WORKSPACE_OWNER_PACKAGES) {
+  for (const { owner, id, name } of OFFICIAL_LOADER_OWNER_PACKAGES) {
     const active = entries.filter(entry => entry.fiber?.state === FIBER_ACTIVE && entry.options.name === name)
     if (active.length !== 1 || active[0].options.id !== id) {
       const visible = active.length === 0

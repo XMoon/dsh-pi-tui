@@ -57,6 +57,7 @@ function workflowOver(providers: ProviderProfileConfig): CredentialWorkflow {
     authorization: { available: () => false, listTargets: () => [], begin: async () => ({ kind: 'unavailable' as const }), onEvent: () => () => {}, respond: async () => {}, cancel: async () => {} },
     account: {
       available: () => false,
+      isObservationCurrent: () => false,
       getState: async () => { throw new Error('unused') },
       getProfile: async () => null,
       getBalance: async () => null,
@@ -65,7 +66,7 @@ function workflowOver(providers: ProviderProfileConfig): CredentialWorkflow {
       startSignIn: async () => { throw new Error('unused') },
       cancelSignIn: async () => { throw new Error('unused') },
       signOut: async () => { throw new Error('unused') },
-      hasRunningAccountTasks: () => false,
+      hasRunningAccountTasks: async () => false,
     },
     catalog: { models: { available: () => false, discoverModels: async () => [] } },
     signal: new AbortController().signal,

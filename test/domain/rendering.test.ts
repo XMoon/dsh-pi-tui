@@ -27,10 +27,12 @@ import { darkColors, lightColors } from '../../src/domain/display/theme.ts'
 import { color, currentPalette, setTheme } from '../../src/tui/theme/runtime.ts'
 import { iconFor } from '../../src/tui/icons.ts'
 import { TuiApp, BulletedComponent, TRANSCRIPT_RIGHT_GUTTER, transcriptContentWidth, TranscriptGutterComponent, type TranscriptViewportAnchor } from '../../src/tui-app.ts'
+import { AssistantMarkdownComponent } from '../../src/tui/components/transcript/assistant-markdown-source-proof.ts'
+import { HOST_MARKDOWN_OPTIONS, markdownTheme } from '../../src/tui/theme/runtime.ts'
 import { WorkingIndicator, workingFramesFor } from '../../src/tui/components/working-indicator.ts'
 import { TranscriptFolder, type TranscriptMessage, type TurnActivity, type WorkflowRunId } from '../../src/transcript.ts'
 import { TranscriptWindowController } from '../../src/domain/transcript/window.ts'
-import { resetCapabilitiesCache, setCapabilities, Text, visibleWidth, wrapTextWithAnsi, stripTerminalSequences, type Terminal } from '@xmoon76/pi-tui'
+import { getCapabilities, Markdown, resetCapabilitiesCache, setCapabilities, sliceByColumn, Text, visibleWidth, wrapTextWithAnsi, stripTerminalSequences, type Terminal } from '@xmoon76/pi-tui'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { mountEmbeddedPage } from '../support/embedded-page-harness.ts'
 import { hasFocusHeader } from '../support/focus-header.ts'
@@ -1985,56 +1987,56 @@ test('fullscreen scrollback search opens with ctrl+shift+f', async () => {
   assert.ok(view.includes('Find transcript'), `search bar missing:\n${view}`)
 })
 
-test('ctrl+f opens and closes the transcript search (no fullscreen toggle)', async () => {
+test('Ctrl+F opens View Find and a second Ctrl+F closes it without toggling fullscreen', async () => {
   const { vt, app } = startApp()
   app.setTranscript([{ kind: 'user', turn: 0, text: 'needle' }])
   await viewport(vt)
   assert.equal(app.isFullscreen(), false)
-  vt.sendInput('\x06') // ctrl+f → search, NOT fullscreen
+  vt.sendInput('\x06') // Ctrl+F -> View search, NOT fullscreen
   let view = await viewport(vt)
-  assert.ok(view.includes('Find transcript'), `search bar missing:\n${view}`)
-  assert.equal(app.isFullscreen(), false, 'ctrl+f must not toggle fullscreen')
-  vt.sendInput('\x06') // ctrl+f again closes the overlay
+  assert.ok(view.includes('[View]'), `View search bar missing:\n${view}`)
+  assert.equal(app.isFullscreen(), true, 'Regular Find leases the existing fullscreen transcript reader')
+  vt.sendInput('\x06') // same active scope action closes the overlay
   view = await viewport(vt)
   assert.ok(!view.includes('Find transcript'), `search bar still open:\n${view}`)
+  assert.equal(app.isFullscreen(), false, 'closing the temporary reader returns to Regular')
 })
 
-test('transcript search: Ctrl+C closes the overlay and the hint advertises next/prev/close', async () => {
+test('transcript search: Ctrl+C and Esc close Full and the hint stays honest at fixed width', async () => {
   const { vt, app } = startApp()
   app.setTranscript([{ kind: 'user', turn: 0, text: 'needle' }])
   await viewport(vt)
-  vt.sendInput('\x06') // ctrl+f opens search
+  vt.sendInput('\x1b[102;6u') // Ctrl+Shift+F opens Full from Regular.
   let view = await viewport(vt)
-  assert.ok(view.includes('Find transcript'), `search bar missing:\n${view}`)
-  // The next/prev/close hint rides under the input. Its labels are rendered
-  // from the (non-configurable) keymap definitions and compacted to this exact
-  // overlay line, so the assertion pins the WHOLE hint rather than recomputing
-  // it in the test.
-  assert.ok(view.includes('↵ next · ⇧↵ prev · esc/ctrl+c close'), `search hint must render the full next/prev/close line:\n${view}`)
-  // Ctrl+C closes search (the old behavior: the overlay's shared Input
-  // swallowed Ctrl+C as its generic cancel and search stayed open).
-  vt.sendInput('\x03') // ctrl+c
+  assert.ok(view.includes('[Full]'), `Full search bar missing:\n${view}`)
+  assert.ok(view.includes('Loaded ·') || view.includes('Loaded history'), `loaded coverage stays visible in a readable short form:\n${view}`)
+  assert.ok(!view.includes('Entire session'), `standalone TuiApp never claims complete Session coverage:\n${view}`)
+  assert.ok(view.includes('returns inline'), `temporary Reader has an explicit return action:\n${view}`)
+  // Ctrl+C closes Search (not its generic Input and never the parent action).
+  vt.sendInput('\x03')
   view = await viewport(vt)
   assert.ok(!view.includes('Find transcript'), `Ctrl+C must close search:\n${view}`)
-  // Esc still closes, Enter/Shift+Enter still navigate (semantic close
-  // keeps both routes — no regression).
-  vt.sendInput('\x06')
+  assert.equal(app.isFullscreen(), false, 'Ctrl+C returns the temporary reader')
+  vt.sendInput('\x1b[102;6u')
   await viewport(vt)
   vt.sendInput('\x1b')
   view = await viewport(vt)
-  assert.ok(!view.includes('Find transcript'), `Esc must still close search:\n${view}`)
+  assert.ok(!view.includes('Find transcript'), `Esc must close search:\n${view}`)
+  assert.equal(app.isFullscreen(), false, 'Esc returns the temporary reader')
 })
 
-test('transcript search hint stays on one line at min-width (no layout break)', async () => {
-  const { vt, app } = startApp(24, 24) // the overlay minWidth
+test('transcript search scope labels stay on one row at min width', async () => {
+  const { vt, app } = startApp(24, 24)
   app.setTranscript([{ kind: 'user', turn: 0, text: 'needle' }])
   await viewport(vt)
-  vt.sendInput('\x06')
+  vt.sendInput('\x06') // View opens the temporary Reader.
   const view = await viewport(vt)
-  assert.ok(view.includes('Find transcript'), `search bar missing at min width:\n${view}`)
-  const hintRow = view.split('\n').find(line => line.includes('next'))
-  assert.ok(hintRow !== undefined, `hint must render at min width:\n${view}`)
-  assert.ok((hintRow ?? '').length <= 24, `hint must not overflow the overlay width:\n${view}`)
+  assert.ok(view.includes('[View] | Full'), `the minimum-width title keeps both scope identities:\n${view}`)
+  const rows = view.split('\n')
+  assert.ok(!rows.some((row, index) => index > 0 && /\[V\]|\[F\]/.test(row)),
+    `the title must stay on one row at the overlay min width:\n${view}`)
+  assert.ok(view.includes('Esc'), `the close/return action stays recognizable:\n${view}`)
+  assert.ok(!view.includes('Find transcript'), `the low-priority long title label drops first:\n${view}`)
 })
 
 test('transcript search: Left/Right/Home/End edit the query inside the overlay', async () => {
@@ -3988,6 +3990,170 @@ test('BulletedComponent keeps the bullet on an empty first row but empties conti
   const lines = blanks.render(20)
   assert.equal(lines[1], '', 'a continuation blank row stays exactly empty for the crop scan')
   assert.equal(lines[2]!.trimEnd(), '  tail', 'the text after the blank still indents')
+})
+
+test('AssistantMarkdownComponent renders exactly like the bulleted live Markdown it wraps', () => {
+  const previousCapabilities = getCapabilities()
+  setCapabilities({ images: null, trueColor: true, hyperlinks: true })
+  try {
+    const sources = [
+      'plain needle text',
+      '## heading needle\n\ntext',
+      '- first\n  - nested needle\n\n> quote needle',
+      '前缀**匹配词**后缀 家庭 👨‍👩‍👧 needle',
+      '[label](https://example.invalid/needle) needle',
+      '```js\nconst needle = 1\n```',
+      '$$\nneedle\n$$',
+    ]
+    const bullets = ['∙  ', '🐋  ', '']
+    for (const source of sources) {
+      for (const width of [11, 44, 80]) {
+        for (const bullet of bullets) {
+          const expected = new BulletedComponent(
+            new Markdown(source, 0, 0, markdownTheme, undefined, HOST_MARKDOWN_OPTIONS),
+            bullet,
+          )
+          const actual = new AssistantMarkdownComponent(
+            new Markdown(source, 0, 0, markdownTheme, undefined, HOST_MARKDOWN_OPTIONS),
+            bullet,
+          )
+          const expectedRows = expected.render(width)
+          const actualRows = actual.render(width)
+          assert.deepEqual(actualRows, expectedRows,
+            `${JSON.stringify(source)} at ${width} with bullet ${JSON.stringify(bullet)}: the subclass must not change a single byte`)
+          assert.equal(actual.render(width), actualRows,
+            'same child array + same width must return the SAME array (the inherited reference-stable cache)')
+          assert.deepEqual(actual.render(width + 7), expected.render(width + 7),
+            'a width change re-wraps the live child identically')
+        }
+      }
+    }
+  } finally {
+    setCapabilities(previousCapabilities)
+    resetCapabilitiesCache()
+  }
+})
+
+test('AssistantMarkdownComponent maps a proven source range by exactly the bullet width', () => {
+  const previousCapabilities = getCapabilities()
+  setCapabilities({ images: null, trueColor: true, hyperlinks: true })
+  try {
+    const rangeOf = (source: string, target: string, nth = 0): { start: number; end: number } => {
+      let index = -1
+      for (let occurrence = 0; occurrence <= nth; occurrence += 1) index = source.indexOf(target, index + 1)
+      assert.ok(index >= 0, `target ${JSON.stringify(target)} is not in the source`)
+      return { start: index, end: index + target.length }
+    }
+    const provenCases: Array<{ source: string; targets: Array<{ target: string; innerWidths: readonly number[]; nth?: number }> }> = [
+      {
+        source: 'needle alpha needle beta',
+        targets: [{ target: 'needle', innerWidths: [11, 44] }, { target: 'alpha needle', innerWidths: [44] }],
+      },
+      { source: '# needle heading', targets: [{ target: 'needle heading', innerWidths: [44] }] },
+      {
+        source: '前缀**匹配词**后缀 needle',
+        targets: [{ target: '匹配词', innerWidths: [11, 44] }, { target: 'needle', innerWidths: [44] }],
+      },
+      {
+        source: '[label](https://example.invalid/needle) needle',
+        targets: [{ target: 'label', innerWidths: [11, 44] }, { target: 'needle', innerWidths: [44], nth: 1 }],
+      },
+      { source: '| h |\n|---|\n| needle |', targets: [{ target: 'needle', innerWidths: [44] }] },
+      {
+        source: 'cafe\u0301 needle',
+        targets: [{ target: 'e\u0301', innerWidths: [11, 44] }, { target: 'needle', innerWidths: [44] }],
+      },
+    ]
+    for (const bullet of ['∙  ', '🐋  ']) {
+      const bulletWidth = visibleWidth(bullet)
+      for (const testCase of provenCases) {
+        for (const { target, innerWidths, nth = 0 } of testCase.targets) {
+          for (const innerWidth of innerWidths) {
+            const range = rangeOf(testCase.source, target, nth)
+            const rawProof = new Markdown(testCase.source, 0, 0, markdownTheme, undefined, HOST_MARKDOWN_OPTIONS)
+              .proveSourceSpan(range, innerWidth)
+            assert.equal(rawProof.kind, 'PROVEN',
+              `${JSON.stringify(target)} must be a provable Markdown leaf: ${JSON.stringify(rawProof)}`)
+            const cardWidth = innerWidth + bulletWidth
+            const component = new AssistantMarkdownComponent(
+              new Markdown(testCase.source, 0, 0, markdownTheme, undefined, HOST_MARKDOWN_OPTIONS),
+              bullet,
+            )
+            const cardRows = component.render(cardWidth)
+            const cardProof = component.proveSourceSpan(range, cardWidth)
+            assert.equal(cardProof.kind, 'PROVEN')
+            assert.deepEqual(cardProof.segments, rawProof.kind === 'PROVEN'
+              ? rawProof.segments.map(segment => ({
+                  row: segment.row,
+                  startCol: segment.startCol + bulletWidth,
+                  endCol: segment.endCol + bulletWidth,
+                }))
+              : [], 'the card proof is the component proof shifted by exactly the bullet width')
+            assert.equal(component.render(cardWidth), cardRows,
+              'a proof must not write the mounted render output or its cache')
+            for (const segment of cardProof.segments) {
+              assert.ok(segment.startCol >= bulletWidth,
+                'a proven segment can never cover the bullet/continuation indent band')
+              assert.equal(
+                stripTerminalSequences(sliceByColumn(cardRows[segment.row]!, segment.startCol, segment.endCol - segment.startCol, true)),
+                target,
+                'the shifted segment reads back the exact source text from the bulleted rows',
+              )
+            }
+          }
+        }
+      }
+    }
+
+    // A NOT_PAINTED / UNPROVEN answer is returned verbatim (no shift, no
+    // downgrade to the wrong kind), so the Host keeps its honest anchor.
+    const refusals: Array<{ source: string; target: string }> = [
+      { source: '[label](https://example.invalid/hiddenneedle) body', target: 'hiddenneedle' },
+      { source: 'before **needle** after', target: '**' },
+      { source: '\\(needle and more', target: 'needle' },
+      { source: '**ab** cd', target: 'ab** cd' },
+    ]
+    for (const refusal of refusals) {
+      const range = rangeOf(refusal.source, refusal.target)
+      const rawProof = new Markdown(refusal.source, 0, 0, markdownTheme, undefined, HOST_MARKDOWN_OPTIONS)
+        .proveSourceSpan(range, 44)
+      assert.notEqual(rawProof.kind, 'PROVEN', `fixture: ${JSON.stringify(refusal.target)} must be refused`)
+      const component = new AssistantMarkdownComponent(
+        new Markdown(refusal.source, 0, 0, markdownTheme, undefined, HOST_MARKDOWN_OPTIONS),
+        '∙  ',
+      )
+      assert.deepEqual(component.proveSourceSpan(range, 44 + visibleWidth('∙  ')), rawProof,
+        'a refused range is returned unchanged, never shifted or reclassified')
+    }
+
+    // The card width below the indent still clamps to the same inner width 1
+    // the inherited render uses.
+    const clampedSource = 'needle'
+    const clamped = new AssistantMarkdownComponent(
+      new Markdown(clampedSource, 0, 0, markdownTheme, undefined, HOST_MARKDOWN_OPTIONS),
+      '🐋  ',
+    )
+    const rawClamped = new Markdown(clampedSource, 0, 0, markdownTheme, undefined, HOST_MARKDOWN_OPTIONS)
+      .proveSourceSpan({ start: 0, end: 6 }, 1)
+    assert.equal(rawClamped.kind, 'PROVEN')
+    assert.deepEqual(
+      clamped.proveSourceSpan({ start: 0, end: 6 }, 2),
+      rawClamped.kind === 'PROVEN'
+        ? {
+            kind: 'PROVEN',
+            segments: rawClamped.segments.map(segment => ({
+              row: segment.row,
+              startCol: segment.startCol + visibleWidth('🐋  '),
+              endCol: segment.endCol + visibleWidth('🐋  '),
+            })),
+          }
+        : rawClamped,
+      'a card narrower than its bullet proves the same clamped inner width the render used',
+    )
+  } finally {
+    setCapabilities(previousCapabilities)
+    resetCapabilitiesCache()
+  }
 })
 
 test('assistant markdown tables reflow on terminal resize', async () => {

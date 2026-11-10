@@ -1012,9 +1012,19 @@ The page never infers a stored key from a route/profile.
 ### Account page
 
 - Host `AccountView` phases drive the display (`succeeded` is presented as
-  Authorized). `credential-stored` is a storage fact, not a server-validated
-  identity; profile and balance are independent queries with independent
-  pending/failed/ready states, and an unavailable balance is never shown as 0.
+  Authorized). A detached view is current only while paired with its adapter-
+  issued local observation lease; without a valid lease it is last-known, not
+  signed-out. Invalidation never implies a credential change. `credential-stored`
+  is a storage fact, not a server-validated identity; profile and balance are
+  independent queries with independent pending/failed/ready states, and an
+  unavailable balance is never shown as 0. The page binds profile/balance reads,
+  every Account mutation and the running-task risk read to the same current
+  observation. A stale lease keeps profile/balance/links and authorization URLs
+  last-known; already-started profile/balance results cannot commit across the
+  account state serial. The official Watch is the only writer of the page's
+  AccountView; Refresh releases the current subscription and waits for its complete
+  initial snapshot. Stale Profile/Balance facts are marked last-known, and a stale
+  authorization URL is not presented as current.
 - Wallet decimal strings are forwarded verbatim. `Usage` and `Top up` use the
   client-local HTTP(S) opener with the official `AccountView.links`; the page
   never receives a token or grant payload.
@@ -1023,10 +1033,23 @@ The page never infers a stored key from a route/profile.
   the SSH tunnel template for the current callback port. Cancel addresses the
   exact attempt id; a stale id cancels nothing.
 - Sign out is an explicit confirmation with the account identity and the
-  running-account-task risk. It calls the official `signOut`; the local grant is
-  removed and the remote revocation remains background. A failed revocation
-  never restores a local grant, and independent API keys stay stored. While the
-  sign-out is pending, user navigation and page exit are refused.
+  running-account-task risk. The page starts an asynchronous Host check; while it
+  is pending or unavailable, Sign out is disabled and the distinct status is
+  visible. An unavailable result offers `Retry task check`; only a current known
+  result enables the destructive action. The check's Host authority and
+  Direct/Remote semantics belong to [host-client.md](./host-client.md#provider-credentials-and-deepseek-account).
+- The Watch subscription is the only writer of the page's AccountView. A successful
+  SignIn/Cancel/SignOut call ends local `busy`; until the next complete Watch
+  snapshot arrives, the prior view and its details are last-known and cannot
+  authorize another mutation. A failed or unconfirmed mutation shows an explicit
+  result notice, is never replayed automatically, and closes any SignOut
+  confirmation. Explicit Refresh releases the old subscription and reopens the
+  official Watch. Older task checks cannot authorize a newer Account view,
+  confirmation, page or connection.
+- The official `signOut` removes the local grant and leaves remote revocation in
+  the background. A failed revocation never restores a local grant, and
+  independent API keys stay stored. While sign-out is pending, user navigation
+  and page exit are refused.
 - Closing the page ends only the watch subscription; an in-flight browser
   attempt keeps running on the Host, and reopening reads the Host state again.
 

@@ -93,6 +93,12 @@ export interface RemoteHydrationOutcome {
   readonly working: boolean
   readonly proven: boolean
   readonly transportToken: unknown
+  readonly hasMore: boolean
+}
+
+export interface RemoteWindowRehydrateOutcome {
+  readonly proof: PresentationWindowRefoldProof
+  readonly hasMore: boolean
 }
 
 /** The presentation event shape: exactly the event the transcript fold accepts,
@@ -295,7 +301,7 @@ export interface SessionPresentation<Event extends SessionPresentationEvent> {
   rehydrateFromWindow(
     sessionId: string,
     options?: { readonly measure?: boolean },
-  ): Promise<PresentationWindowRefoldProof | undefined>
+  ): Promise<RemoteWindowRehydrateOutcome | undefined>
   /** Record a measure boundary the LIVE routing handled, so a later window
    *  reconcile keeps an already-measured boundary measurement-free. */
   noteLiveMeasureEvent(sessionId: string, event: { readonly type: unknown; readonly data?: unknown }): void
@@ -435,6 +441,9 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     // pending calls from the old session would consume viewer match slots,
     // and dead callId→child maps would silently disable the auto-pop.
     deps.viewer.resetAutoPop()
+    // Remote current coverage is subject-owned: never carry another Session's
+    // `hasMore` fact across a generation while the new Reader hydrates.
+    if (deps.remote !== undefined) deps.surface.setTranscriptSearchCoverage('loaded-history')
     // A4-8: the search presentation state is surface-owned.
     deps.surface.resetSearchPresentation()
     windowController.latest()
@@ -739,13 +748,19 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
       planActive: planActiveRemote(sessionId),
       working,
     })
+    // The reader fence above is the visible-fold commit boundary. A transport
+    // rollover after that point does not relabel or erase this committed
+    // snapshot: the returned token stays the captured (possibly now stale)
+    // identity, so the working-fold cache correctly misses on its next read.
+    // The official Reader coverage describes the rows just committed to the
+    // display and follows the same owner-generation fence as the caller.
     // The committed window revision: the caller feeds it to the live ingress
     // so the hydrate→subscribe gap is detected and recovered (never lost).
     // The proven fold rides along so the caller seeds its compaction cache on
     // the FIRST hydrate (no first-use running window) — stamped with the
     // SAME transport token this read was fenced under, so a later caller can
     // never label an old window's fold with a newer transport identity.
-    return { revision: snapshot.revision, working, proven: foldProven, transportToken: fenceTransport }
+    return { revision: snapshot.revision, working, proven: foldProven, transportToken: fenceTransport, hasMore: snapshot.hasMore }
   }
 
   /** The Remote-branch plan fact: the official `plan` projection read is
@@ -770,7 +785,7 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
   const rehydrateFromWindow = async (
     sessionId: string,
     options?: { readonly measure?: boolean },
-  ): Promise<PresentationWindowRefoldProof | undefined> => {
+  ): Promise<RemoteWindowRehydrateOutcome | undefined> => {
     if (deps.isCleanedUp()) return undefined
     if (deps.remote === undefined) return undefined
     const fenceGeneration = deps.remote.captureGeneration?.()
@@ -870,11 +885,12 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
       fold: working,
       proven: foldProven,
     })
+    const outcome = { proof, hasMore: snapshot.hasMore }
     deps.refreshStatusCheap()
     deps.surface.repaint()
     // The committed proof: the caller acknowledges the ingress with it, so
     // incremental delivery resumes exactly at the revision the fold now holds.
-    return proof
+    return outcome
   }
 
   const mainFolder = (): TranscriptFolder => folder

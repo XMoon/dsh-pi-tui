@@ -179,7 +179,7 @@ test('short action details keep the selected binding in the viewport', () => {
   const parsed = parseUserKeybindings(undefined)
   manager.setUserConfiguration(parsed)
   const model = buildKeybindingEditorModel(manager, parsed)
-  const row = model.rows.find(candidate => candidate.id === 'app.transcript.search')!
+  const row = model.rows.find(candidate => candidate.id === 'app.transcript.search.view')!
   const editor = new ActionEditorPanel({
     model,
     action: row,

@@ -62,8 +62,13 @@ import type {
   AccountBalanceOutcome,
   AccountClientMetadata,
   AccountConfig,
+  AccountObservation,
+  AccountObservationLease,
+  AccountWatchEvent,
+  AccountProfile,
   AccountProfileOutcome,
   AccountView,
+  AccountWallet,
   AuthorizationConfig,
   AuthorizationFlowEvent,
   AuthorizationFlowTarget,
@@ -154,6 +159,23 @@ export interface RemoteCredentialsRemotes {
   unset(ref: string): Promise<RemoteResultLike<void>>
 }
 
+/** The generated Account stream handle: its disposal closes observation only. */
+export interface RemoteAccountStreamHandle<Value> extends AsyncIterable<Value> {
+  dispose(): void
+}
+
+/** The official generated Account namespace subset mapped by ConfigPort. */
+export interface RemoteAccountRemotes {
+  getState(): Promise<RemoteResultLike<unknown>>
+  getProfile(client: AccountClientMetadata): Promise<RemoteResultLike<unknown>>
+  getBalance(client: AccountClientMetadata): Promise<RemoteResultLike<unknown>>
+  startSignIn(client: AccountClientMetadata, callbackOrigin: string, loginSource: 'web'): Promise<RemoteResultLike<unknown>>
+  cancelSignIn(attemptId: string): Promise<RemoteResultLike<unknown>>
+  signOut(client: AccountClientMetadata): Promise<RemoteResultLike<unknown>>
+  hasRunningAccountTasks(): Promise<RemoteResultLike<unknown>>
+  watch(signal?: AbortSignal): RemoteAccountStreamHandle<unknown>
+}
+
 /** One selectable permission preset (`PresetOption`). */
 export interface RemotePermissionPresetOption {
   readonly value: string
@@ -202,12 +224,15 @@ export interface RemoteConfigRuntimeSource {
   readonly remote: {
     readonly settings: RemoteSettingsRemotes
     readonly credentials: RemoteCredentialsRemotes
+    readonly account?: RemoteAccountRemotes
     readonly commands: RemoteCommandsSource
     readonly permissionPresets: RemotePermissionPresetRemotes
     readonly agentPresets: RemotePresetRemotes
     readonly llm: RemoteLlmRemotes & RemoteLlmDirectoryRemotes
     readonly $on: RemoteConfigEventsSource['$on']
   }
+  /** Origin from the authenticated Host identity; never derived from Client input. */
+  readonly trustedHostOrigin?: string
   readonly connection: { readonly generation: RemoteConnectionGenerationSource }
 }
 
@@ -1775,6 +1800,7 @@ export class RemoteConfigPort implements ConfigPort {
   private readonly mirror: RemoteConfigMirror
   private readonly tuiSettingsWrapper: RemoteTuiSettingsConfig
   private readonly credentialConfig: RemoteCredentialConfig
+  private readonly accountConfig: RemoteAccountConfig
   /** The ONE accepted-write lifetime of this port (settings + credentials). */
   private readonly writes = new RemoteConfigWriteLifetime()
 
@@ -1803,8 +1829,8 @@ export class RemoteConfigPort implements ConfigPort {
     // NEVER rebuild `remote` with a spread: the official Client remote exposes
     // its namespaces through prototype accessors, so an own-property copy keeps
     // only its bookkeeping fields (`connection`, `ctx`, `events`, ...) and every
-    // namespace (`settings`, `credentials`, `llm`, `permissionPresets`, ...)
-    // silently becomes `undefined` — which only a real-wire test can catch.
+    // namespace (`settings`, `credentials`, `account`, `llm`, ...) silently becomes
+    // `undefined` — which only a real-wire test can catch.
     // The original object is passed through and the bound seat travels beside
     // it.
     const bound: RemoteConfigRuntimeSource = {
@@ -1824,7 +1850,12 @@ export class RemoteConfigPort implements ConfigPort {
     )
     this.credentials = this.credentialConfig
     this.authorization = new RemoteAuthorizationConfig()
-    this.account = new RemoteUnsupportedAccountConfig()
+    this.accountConfig = new RemoteAccountConfig(
+      source.remote.account,
+      source.trustedHostOrigin,
+      source.connection.generation,
+    )
+    this.account = this.accountConfig
     this.permissions = new RemotePermissionConfig(this.mirror, source.remote.commands)
     this.presetDefault = new RemotePresetDefaultConfig(this.mirror)
     this.subagentModelSelection = new RemoteSubagentModelSelectionConfig(this.mirror)
@@ -1879,6 +1910,7 @@ export class RemoteConfigPort implements ConfigPort {
   dispose(): void {
     this.mirror.dispose()
     this.credentialConfig.dispose()
+    this.accountConfig.dispose()
   }
 }
 
@@ -2012,56 +2044,410 @@ function remoteProviderFactsOf(route: string, fallbackLabel: string, profile: un
   }
 }
 
-/**
- * The Remote backend's DeepSeek Account sub-domain: INTENTIONALLY unsupported
- * for this stage. The rc.2 wire publishes no account state/attempt/profile/
- * balance/sign-out RPC, and the browser callback origin is a Host listener
- * fact that must never be synthesized by a Client. Every operation fails
- * closed; the Account page states the backend limitation instead of faking a
- * sign-in or a signed-out state.
- */
-class RemoteUnsupportedAccountConfig implements AccountConfig {
+function canonicalAccountCallbackOrigin(origin: string | undefined): origin is string {
+  if (origin === undefined) return false
+  const match = /^http:\/\/127\.0\.0\.1:([1-9]\d{0,4})$/u.exec(origin)
+  if (match === null) return false
+  const port = Number(match[1])
+  return port <= 65_535 && String(port) === match[1]
+}
+
+function accountViewOf(value: unknown): AccountView {
+  const view = value as AccountView
+  const attempt = view.attempt
+  return {
+    status: view.status,
+    links: { usageUrl: view.links.usageUrl, topUpUrl: view.links.topUpUrl },
+    attempt: attempt === null
+      ? null
+      : {
+          id: attempt.id,
+          phase: attempt.phase,
+          ...(attempt.authorizeUrl === undefined ? {} : { authorizeUrl: attempt.authorizeUrl }),
+          ...(attempt.expiresAt === undefined ? {} : { expiresAt: attempt.expiresAt }),
+          ...(attempt.errorCode === undefined ? {} : { errorCode: attempt.errorCode }),
+        },
+  }
+}
+
+function accountProfileOf(value: unknown): AccountProfile {
+  const profile = value as AccountProfile
+  return {
+    id: profile.id,
+    name: profile.name,
+    contact: profile.contact,
+    ...(profile.avatarUrl === undefined ? {} : { avatarUrl: profile.avatarUrl }),
+  }
+}
+
+function accountProfileOutcomeOf(value: unknown): AccountProfileOutcome {
+  if (value === null) return null
+  if (typeof value !== 'object' || value === null) {
+    throw new Error('remote account.getProfile returned an invalid outcome')
+  }
+  const outcome = value as { readonly status?: unknown; readonly value?: unknown }
+  if (outcome.status === 'failed') return { status: 'failed' }
+  if (outcome.status !== 'ready') throw new Error('remote account.getProfile returned an invalid status')
+  return { status: 'ready', value: accountProfileOf(outcome.value) }
+}
+
+function accountWalletsOf(value: unknown): readonly AccountWallet[] {
+  if (!Array.isArray(value)) throw new Error('remote account returned an invalid wallet list')
+  return value.map(entry => {
+    const wallet = entry as AccountWallet
+    return { currency: wallet.currency, balance: wallet.balance }
+  })
+}
+
+function accountBalanceOutcomeOf(value: unknown): AccountBalanceOutcome {
+  if (value === null) return null
+  if (typeof value !== 'object' || value === null) {
+    throw new Error('remote account.getBalance returned an invalid outcome')
+  }
+  const outcome = value as {
+    readonly status?: unknown
+    readonly value?: unknown
+    readonly bonusWallets?: unknown
+  }
+  if (outcome.status === 'failed') return { status: 'failed' }
+  if (outcome.status !== 'ready') throw new Error('remote account.getBalance returned an invalid status')
+  return {
+    status: 'ready',
+    value: accountWalletsOf(outcome.value),
+    bonusWallets: accountWalletsOf(outcome.bonusWallets),
+  }
+}
+
+function isRemoteStreamCarrierFailure(error: unknown): error is Error {
+  return error instanceof Error && error.name === 'RemoteStreamCarrierError'
+}
+
+/** Remote Account is the same Host authority as Direct, addressed through the
+ * authenticated generated namespace on the current Connection generation. */
+class RemoteAccountConfig implements AccountConfig {
+  private readonly remote: RemoteAccountRemotes | undefined
+  private readonly trustedHostOrigin: string | undefined
+  private readonly generation: RemoteConnectionGenerationSource
+  private readonly lifetime = new AbortController()
+  private readonly streams = new Map<RemoteAccountStreamHandle<unknown>, () => void>()
+  private readonly observations = new WeakMap<object, {
+    readonly generation: RemoteConnectionGeneration
+    readonly epoch: number
+    active: boolean
+  }>()
+  private observationEpoch = 0
+  private disposed = false
+
+  constructor(
+    remote: RemoteAccountRemotes | undefined,
+    trustedHostOrigin: string | undefined,
+    generation: RemoteConnectionGenerationSource,
+  ) {
+    this.remote = remote
+    this.trustedHostOrigin = trustedHostOrigin
+    this.generation = generation
+  }
+
+  private observe(view: AccountView, generation: RemoteConnectionGeneration, lease?: AccountObservationLease): AccountObservation {
+    const authority = lease ?? ({} as AccountObservationLease)
+    this.observations.set(authority, { generation, epoch: this.observationEpoch, active: true })
+    return { view, lease: authority }
+  }
+
+  private invalidateObservations(): void {
+    this.observationEpoch += 1
+  }
+
+  private invalidateObservation(lease: AccountObservationLease): void {
+    const record = this.observations.get(lease)
+    if (record !== undefined) record.active = false
+  }
+
+  private assertObservation(lease: AccountObservationLease, method: string): RemoteConnectionGeneration {
+    const record = this.observations.get(lease)
+    if (this.disposed || record === undefined || !record.active || record.epoch !== this.observationEpoch
+      || !Object.is(record.generation, this.generation.getSnapshot())) {
+      throw new SupersededReadError(`remote account.${method} has no current Host observation`)
+    }
+    return record.generation
+  }
+
+  isObservationCurrent(lease: AccountObservationLease): boolean {
+    const record = this.observations.get(lease)
+    return !this.disposed && record !== undefined && record.active && record.epoch === this.observationEpoch
+      && Object.is(record.generation, this.generation.getSnapshot())
+  }
+
   available(): boolean {
-    return false
+    return !this.disposed
+      && this.remote !== undefined
+      && this.generation.getSnapshot() !== undefined
   }
 
-  private refuse(): never {
-    throw new Error('DeepSeek Account is not supported on this backend')
+  private requireRemote(method: string): RemoteAccountRemotes {
+    if (this.disposed) throw new Error('remote Account adapter is disposed')
+    if (this.remote === undefined) throw new Error(`remote account.${method} namespace is unavailable`)
+    return this.remote
   }
 
-  async getState(): Promise<AccountView> {
-    this.refuse()
+  private captureGeneration(method: string) {
+    const generation = this.generation.getSnapshot()
+    if (generation === undefined) throw new Error(`remote account.${method} is unavailable while disconnected`)
+    return generation
   }
 
-  async getProfile(_client: AccountClientMetadata): Promise<AccountProfileOutcome> {
-    this.refuse()
+  private assertCurrent(generation: ReturnType<RemoteConnectionGenerationSource['getSnapshot']>, method: string): void {
+    if (generation === undefined || !Object.is(generation, this.generation.getSnapshot())) {
+      throw new SupersededReadError(`remote account.${method} belongs to a superseded Host generation`)
+    }
   }
 
-  async getBalance(_client: AccountClientMetadata): Promise<AccountBalanceOutcome> {
-    this.refuse()
+  private async callAt<T>(
+    method: string,
+    generation: ReturnType<RemoteConnectionGenerationSource['getSnapshot']>,
+    operation: (remote: RemoteAccountRemotes) => Promise<RemoteResultLike<T>>,
+  ): Promise<T> {
+    const result = await operation(this.requireRemote(method))
+    this.assertCurrent(generation, method)
+    if (!result.ok) throw new Error(`remote account.${method} failed: ${remoteFailureMessage(result.error)}`)
+    return result.value
   }
 
-  watch(_signal: AbortSignal): AsyncIterable<AccountView> {
-    return (async function* empty(): AsyncGenerator<AccountView> {})()
+  private async callForObservation<T>(
+    method: string,
+    lease: AccountObservationLease,
+    operation: (remote: RemoteAccountRemotes) => Promise<RemoteResultLike<T>>,
+  ): Promise<T> {
+    const epoch = this.observationEpoch
+    const generation = this.assertObservation(lease, method)
+    const value = await this.callAt(method, generation, operation)
+    this.assertObservation(lease, method)
+    if (epoch !== this.observationEpoch) throw new SupersededReadError(`remote account.${method} was superseded by Account observation invalidation`)
+    return value
+  }
+
+  async getState(): Promise<AccountObservation> {
+    const generation = this.captureGeneration('getState')
+    const epoch = this.observationEpoch
+    const value = await this.callAt('getState', generation, remote => remote.getState())
+    if (epoch !== this.observationEpoch) throw new SupersededReadError('remote account.getState was superseded by Account observation invalidation')
+    return this.observe(accountViewOf(value), generation)
+  }
+
+  async getProfile(client: AccountClientMetadata, lease: AccountObservationLease): Promise<AccountProfileOutcome> {
+    return accountProfileOutcomeOf(await this.callForObservation(
+      'getProfile',
+      lease,
+      remote => remote.getProfile({ ...client }),
+    ))
+  }
+
+  async getBalance(client: AccountClientMetadata, lease: AccountObservationLease): Promise<AccountBalanceOutcome> {
+    return accountBalanceOutcomeOf(await this.callForObservation(
+      'getBalance',
+      lease,
+      remote => remote.getBalance({ ...client }),
+    ))
+  }
+
+  private assertWatchCurrent(): void {
+    if (this.disposed || this.generation.getSnapshot() === undefined) {
+      throw new SupersededReadError('remote account.watch has no current authenticated Host generation')
+    }
+  }
+
+  private waitForGeneration(previous: RemoteConnectionGeneration, signal: AbortSignal): Promise<boolean> {
+    if (signal.aborted) return Promise.resolve(false)
+    return new Promise(resolve => {
+      let settled = false
+      let unsubscribe = (): void => {}
+      const finish = (reconnected: boolean): void => {
+        if (settled) return
+        settled = true
+        unsubscribe()
+        signal.removeEventListener('abort', aborted)
+        resolve(reconnected)
+      }
+      const inspect = (): void => {
+        const current = this.generation.getSnapshot()
+        if (current !== undefined && !Object.is(current, previous)) finish(true)
+      }
+      const aborted = (): void => { finish(false) }
+      unsubscribe = this.generation.subscribe(inspect)
+      if (settled) {
+        unsubscribe()
+        return
+      }
+      signal.addEventListener('abort', aborted, { once: true })
+      inspect()
+      if (signal.aborted) aborted()
+    })
+  }
+
+  /**
+   * The official generated ClientStreamHandle represents one carrier generation,
+   * unlike the Gateway's separately reconnecting internal RemoteStream owner.
+   * Retire only that per-generation handle after a Connection rollover, wait for
+   * the new authenticated Host generation, and open a fresh official account
+   * watch. The Host's watch starts with its complete current AccountView, so no
+   * client-side state/cache is needed for recovery.
+   */
+  watch(signal: AbortSignal): AsyncIterable<AccountWatchEvent> {
+    this.captureGeneration('watch')
+    if (signal.aborted || this.lifetime.signal.aborted) {
+      throw new SupersededReadError('remote account.watch was aborted before dispatch')
+    }
+    const watchSignal = AbortSignal.any([signal, this.lifetime.signal])
+    const owner = this
+    return (async function* accountWatch(): AsyncGenerator<AccountWatchEvent> {
+      let previous = owner.captureGeneration('watch')
+      while (!watchSignal.aborted && !owner.disposed) {
+        let generation = owner.generation.getSnapshot()
+        if (generation === undefined || !Object.is(generation, previous)) {
+          const reconnected = await owner.waitForGeneration(previous, watchSignal)
+          if (!reconnected || watchSignal.aborted || owner.disposed) return
+          generation = owner.generation.getSnapshot()
+          if (generation === undefined) continue
+          previous = generation
+        }
+        owner.assertWatchCurrent()
+        const lease = {} as AccountObservationLease
+        owner.observations.set(lease, { generation, epoch: owner.observationEpoch, active: true })
+        const handle = owner.requireRemote('watch').watch(watchSignal)
+        const abort = (): void => { owner.releaseStream(handle) }
+        owner.streams.set(handle, () => watchSignal.removeEventListener('abort', abort))
+        watchSignal.addEventListener('abort', abort, { once: true })
+        let reconnect = false
+        let resolveGenerationChanged!: () => void
+        const generationChanged = new Promise<void>(resolve => { resolveGenerationChanged = resolve })
+        const unsubscribeGeneration = owner.generation.subscribe(() => {
+          if (Object.is(generation, owner.generation.getSnapshot())) return
+          owner.invalidateObservations()
+          resolveGenerationChanged()
+        })
+        const iterator = handle[Symbol.asyncIterator]()
+        try {
+          while (!watchSignal.aborted && !owner.disposed) {
+            const nextResult = iterator.next().then(
+              result => ({ kind: 'next' as const, result }),
+              error => ({ kind: 'error' as const, error }),
+            )
+            const winner = await Promise.race([
+              nextResult,
+              generationChanged.then(() => ({ kind: 'generation-changed' as const })),
+            ])
+            if (winner.kind === 'generation-changed') {
+              reconnect = true
+              yield { kind: 'invalidated', reason: 'connection-changed' }
+              break
+            }
+            if (winner.kind === 'error') throw winner.error
+            if (!Object.is(generation, owner.generation.getSnapshot())) {
+              reconnect = true
+              yield { kind: 'invalidated', reason: 'connection-changed' }
+              break
+            }
+            if (winner.result.done === true) break
+            if (watchSignal.aborted || owner.disposed) return
+            yield { kind: 'current', observation: { view: accountViewOf(winner.result.value), lease } }
+          }
+        } catch (error) {
+          if (watchSignal.aborted || owner.disposed) return
+          owner.invalidateObservations()
+          if (!Object.is(generation, owner.generation.getSnapshot())) {
+            reconnect = true
+            yield { kind: 'invalidated', reason: 'connection-changed' }
+          } else if (isRemoteStreamCarrierFailure(error)) {
+            yield { kind: 'invalidated', reason: 'watch-failed' }
+            const reconnected = await owner.waitForGeneration(generation, watchSignal)
+            if (!reconnected || watchSignal.aborted || owner.disposed) return
+            reconnect = true
+          } else {
+            throw error
+          }
+        } finally {
+          unsubscribeGeneration()
+          owner.invalidateObservation(lease)
+          owner.releaseStream(handle)
+        }
+        if (watchSignal.aborted || owner.disposed) return
+        const current = owner.generation.getSnapshot()
+        if (current === undefined || !Object.is(generation, current)) {
+          reconnect = true
+          previous = generation
+          if (current === undefined) {
+            const reconnected = await owner.waitForGeneration(generation, watchSignal)
+            if (!reconnected || watchSignal.aborted || owner.disposed) return
+            const replacement = owner.generation.getSnapshot()
+            if (replacement === undefined) continue
+            previous = replacement
+          } else {
+            previous = current
+          }
+          continue
+        }
+        if (reconnect) throw new Error('remote account.watch ended while its Host generation remained current')
+        owner.invalidateObservations()
+        yield { kind: 'invalidated', reason: 'watch-ended' }
+        return
+      }
+    })()
   }
 
   getCallbackOrigin(): string | undefined {
-    return undefined
+    if (!this.available() || !canonicalAccountCallbackOrigin(this.trustedHostOrigin)) return undefined
+    return this.trustedHostOrigin
   }
 
-  async startSignIn(_client: AccountClientMetadata): Promise<AccountView> {
-    this.refuse()
+  async startSignIn(client: AccountClientMetadata, lease: AccountObservationLease): Promise<AccountObservation> {
+    const generation = this.assertObservation(lease, 'startSignIn')
+    const origin = this.trustedHostOrigin
+    if (!canonicalAccountCallbackOrigin(origin)) {
+      throw new Error('the authenticated Host browser callback listener is unavailable')
+    }
+    const result = await this.callForObservation(
+      'startSignIn',
+      lease,
+      remote => remote.startSignIn({ ...client }, origin, 'web'),
+    )
+    if (!Object.is(generation, this.generation.getSnapshot())) {
+      throw new SupersededReadError('remote account.startSignIn result belongs to a replaced Host generation')
+    }
+    return { view: accountViewOf(result), lease }
   }
 
-  async cancelSignIn(_id: string): Promise<AccountView> {
-    this.refuse()
+  async cancelSignIn(id: string, lease: AccountObservationLease): Promise<AccountObservation> {
+    const result = await this.callForObservation('cancelSignIn', lease, remote => remote.cancelSignIn(id))
+    return { view: accountViewOf(result), lease }
   }
 
-  async signOut(_client: AccountClientMetadata): Promise<AccountView> {
-    this.refuse()
+  async signOut(client: AccountClientMetadata, lease: AccountObservationLease): Promise<AccountObservation> {
+    const result = await this.callForObservation('signOut', lease, remote => remote.signOut({ ...client }))
+    return { view: accountViewOf(result), lease }
   }
 
-  hasRunningAccountTasks(): boolean {
-    return false
+  async hasRunningAccountTasks(lease: AccountObservationLease): Promise<boolean> {
+    const running = await this.callForObservation(
+      'hasRunningAccountTasks',
+      lease,
+      remote => remote.hasRunningAccountTasks(),
+    )
+    if (typeof running !== 'boolean') throw new Error('remote account.hasRunningAccountTasks returned an invalid result')
+    return running
+  }
+
+  private releaseStream(handle: RemoteAccountStreamHandle<unknown>): void {
+    const cleanup = this.streams.get(handle)
+    if (cleanup === undefined) return
+    this.streams.delete(handle)
+    cleanup()
+    handle.dispose()
+  }
+
+  dispose(): void {
+    if (this.disposed) return
+    this.disposed = true
+    this.lifetime.abort(new SupersededReadError('remote Account adapter was disposed'))
+    for (const handle of this.streams.keys()) this.releaseStream(handle)
   }
 }

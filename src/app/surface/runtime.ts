@@ -103,6 +103,8 @@ import {
   type HistoryOpenScope,
   type StatusData,
   type TranscriptSearchCloseReason,
+  type TranscriptSearchCoverage,
+  type TranscriptSearchScope,
   type TranscriptSearchPresentation,
   type TranscriptSearchPresentationTarget,
   type TuiApp,
@@ -795,6 +797,8 @@ export interface SurfaceRuntimeOptions {
    * (STOP-DOUBLE).
    */
   readonly mainProgressAuthority: MainProgressAuthority
+  /** Direct owns a complete log; Remote starts conservatively at loaded history. */
+  readonly initialSearchCoverage?: TranscriptSearchCoverage
   /**
    * Split-Client only: the application's ONE committed-Session authority. When
    * supplied, the PiTUI branch's forwarded Question/Approval admission is
@@ -1268,6 +1272,8 @@ export interface SurfaceRuntime<Event extends RoutedSessionEvent> {
   repaint(): void
   /** A4-8: clear the search presentation at a session-generation bump. */
   resetSearchPresentation(): void
+  /** Commit a coverage fact from the current official Reader snapshot. */
+  setTranscriptSearchCoverage(coverage: TranscriptSearchCoverage): void
   /**
    * M3-4 PR4 §6.4: clear the SUBJECT-OWNED status sections (access,
    * composition, collaboration) at a session-generation bump. This is the
@@ -2365,6 +2371,8 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
   // supplies them through the routing source.
   let searchMatches: TranscriptSearchMatch[] = []
   let searchCurrent = -1
+  let activeSearchScope: TranscriptSearchScope | undefined
+  let activeSearchQuery = ''
   // Opt-in local wall-clock profiling of the Ctrl+F hot path (perf plan S1
   // §4.2). A no-op unless DSH_TUI_SEARCH_PROFILE=1.
   const searchProfiler: SearchProfile = createSearchProfiler(searchProfilingEnabled())
@@ -2460,7 +2468,15 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     })
   }
 
-  const resetSearchPresentation = (options: { preserveCurrentReveal?: boolean; rebuild?: boolean } = {}): void => {
+  const resetSearchPresentation = (options: {
+    preserveCurrentReveal?: boolean
+    rebuild?: boolean
+    keepActiveScopeQuery?: boolean
+  } = {}): void => {
+    if (options.keepActiveScopeQuery !== true) {
+      activeSearchScope = undefined
+      activeSearchQuery = ''
+    }
     app?.clearRenderedViewSearch({ rebuild: false })
     // Only a runner that actually holds search state needs to publish the
     // atomic clear: an unconditional empty commit would force a pointless
@@ -2492,6 +2508,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     // same-window fast path against the projection the user is looking at.
     const folder = activeFolder()
     searchBoundRevision = folder.searchRevision()
+    if (activeSearchScope === 'view') return undefined
     if (lastSearchQuery === '' || lastSearchFolder === undefined || folder !== lastSearchFolder) return undefined
     // A PASSIVE commit (a settlement, a read-group split) can replace the card a
     // stored match was resolved against: the old representative then no longer
@@ -2691,12 +2708,55 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
   // (lightweight indexed projection — never a full materialization); each jump
   // re-windows the view so the matched turn is visible (older turns collapse
   // above it into the summary entry).
-  const openSearch = (): void => {
-    // A stale search presentation from a previous session must never
-    // leak its reveal/highlight into the fresh overlay.
-    mounted().setTranscriptSearchTarget(undefined)
+  const openSearch = (scope: TranscriptSearchScope): boolean => {
+    if (app === undefined || disposed || activeSearchScope !== undefined) return false
+    resetSearchPresentation({ preserveCurrentReveal: false, rebuild: false })
+    activeSearchScope = scope
+    activeSearchQuery = ''
+    displaySeam().setSearchResult(0, 0)
+    app.setSearchScope(scope)
+    return true
+  }
+  const switchSearchScope = (scope: TranscriptSearchScope): void => {
+    if (activeSearchScope === undefined || activeSearchScope === scope) return
+    const query = activeSearchQuery
+    activeSearchScope = scope
+    resetSearchPresentation({ preserveCurrentReveal: false, rebuild: false, keepActiveScopeQuery: true })
+    activeSearchScope = scope
+    activeSearchQuery = query
+    mounted().setSearchScope(scope)
+    mounted().requestRender()
+    displaySeam().setSearchResult(0, 0)
+    if (scope === 'view') {
+      if (query === '') {
+        mounted().clearRenderedViewSearch({ rebuild: false })
+        mounted().requestRender()
+        return
+      }
+      const result = mounted().setRenderedViewSearchQuery(query)
+      if (result.currentIndex < 0 || result.count === 0) displaySeam().setSearchResult(0, 0)
+      return
+    }
+    if (query !== '') runSearchQuery(query)
+    else mounted().requestRender()
+  }
+  const changeSearchQuery = (query: string): void => {
+    if (activeSearchScope === undefined) return
+    activeSearchQuery = query
+    if (activeSearchScope === 'view') {
+      if (query === '') {
+        mounted().clearRenderedViewSearch({ rebuild: false })
+        mounted().requestRender()
+        return
+      }
+      mounted().setRenderedViewSearchQuery(query)
+      return
+    }
+    runSearchQuery(query)
   }
   const runSearchQuery = (query: string): void => {
+    if (activeSearchScope !== 'full') return
+    activeSearchQuery = query
     searchProfiler.start()
     const folder = activeFolder()
     // Prefix refinement reuses the previous candidate set only when the
@@ -2719,6 +2779,11 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     searchProfiler.end()
   }
   const searchNext = (): void => {
+    if (activeSearchScope === 'view') {
+      mounted().stepRenderedViewSearch(1)
+      return
+    }
+    if (activeSearchScope !== 'full') return
     searchProfiler.start()
     // PR D1 P1: refresh BEFORE stepping — an empty candidate list
     // still refreshes (a match that arrived while the overlay stayed
@@ -2742,6 +2807,11 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     searchProfiler.end()
   }
   const searchPrev = (): void => {
+    if (activeSearchScope === 'view') {
+      mounted().stepRenderedViewSearch(-1)
+      return
+    }
+    if (activeSearchScope !== 'full') return
     searchProfiler.start()
     const folder = activeFolder()
     const stepped = steppedSearchOverlayState(
@@ -2759,9 +2829,14 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
   }
   const closeSearch = (reason: TranscriptSearchCloseReason): void => {
     const live = mounted()
+    const scope = activeSearchScope
+    const preserveFullReveal = reason === 'dismiss'
+      && scope === 'full'
+      && !live.isTemporarySearchReader()
     if (reason === 'dismiss') {
-      const anchor = live.captureTranscriptViewportAnchor()
-      resetSearchPresentation({ preserveCurrentReveal: true })
+      const anchor = preserveFullReveal ? live.captureTranscriptViewportAnchor() : undefined
+      resetSearchPresentation({ preserveCurrentReveal: preserveFullReveal })
+      displaySeam().setSearchResult(0, 0)
       if (anchor !== undefined) live.restoreTranscriptViewportAnchor(anchor, 'top')
       return
     }
@@ -2804,6 +2879,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     // document; runtime switches go through app.setIconStyle (the /settings
     // write path) — never a deep settings read per render.
     iconStyle: deps.iconStyle,
+     initialSearchCoverage: options.initialSearchCoverage,
     extensionHost: extension.host(),
     // M0: the unified status projection store (the app projects its own
     // surface state into it; the runner derives the DSH-owned sections).
@@ -3087,7 +3163,14 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     schedulePaint,
     paintNow,
     repaint: () => repaintActive(),
-    resetSearchPresentation,
+    resetSearchPresentation() {
+      if (activeSearchScope !== undefined && app?.isSearching() === true) {
+        app.closeTranscriptSearch('surface-change')
+        return
+      }
+      resetSearchPresentation()
+    },
+    setTranscriptSearchCoverage: coverage => app?.setTranscriptSearchCoverage(coverage),
 
     resetSubjectStatus,
     disposeJobEvents() {
@@ -3268,8 +3351,9 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
         onTranscriptTurnNewer: () => transcriptTurnNewer(),
         onTranscriptMoveNewer: () => transcriptMoveNewer(),
         onTranscriptJumpLatest: () => transcriptJumpLatest(),
-        onSearchOpen: () => openSearch(),
-        onSearchQuery: query => runSearchQuery(query),
+        onSearchOpen: scope => openSearch(scope),
+        onSearchScope: scope => switchSearchScope(scope),
+        onSearchQuery: query => changeSearchQuery(query),
         onSearchNext: () => searchNext(),
         onSearchPrev: () => searchPrev(),
         onSearchClose: reason => closeSearch(reason),

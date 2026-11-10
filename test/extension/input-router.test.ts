@@ -234,6 +234,9 @@ test('InputRouter: search overlay owns its keys', () => {
   assert.equal(r.route('\x1b', search, noBindings()).kind, 'consumed', 'Esc closes search')
   assert.equal(r.route('\x03', search, noBindings()).kind, 'consumed', 'Ctrl+C closes search (the overlay Input would swallow it otherwise)')
   assert.equal(r.route('\r', search, noBindings()).kind, 'consumed', 'Enter jumps next')
+  assert.equal(r.route('\t', search, noBindings()).kind, 'consumed', 'Tab switches the active search scope')
+  assert.equal(r.route('\x06', search, noBindings()).kind, 'consumed', 'Ctrl+F switches or toggles View')
+  assert.equal(r.route('\x1b[102;6u', search, noBindings()).kind, 'consumed', 'Ctrl+Shift+F switches or toggles Full')
 })
 
 test('InputRouter: normalize() returns the public key identity (never raw)', () => {

@@ -350,6 +350,9 @@ async function main(explicitPath) {
       webProductStatus,
       webProductBrowserSubset: webProductResult?.browserSubset,
       webProductWc: webProductResult?.wc,
+      f2Account: statusOf('account.official-composition') === 'PASS'
+        ? 'PASS_OFFICIAL_HOST_REMOTE_CALLBACK_PKCE_TWO_TUI'
+        : 'NOT_RUN',
       m4c1: statusOf('bootstrap.host-runtime-disabled') === 'PASS' ? 'PASS_REAL_SPLIT_PROCESS' : 'NOT_RUN',
       m5b: statusOf('multi-client.shared-session-interactions') === 'PASS'
         ? 'pass (two REAL surface Clients retained ONE Session X; shared pending inbox + official Ctrl+S steer of the other Client\'s occurrence; two independent same-text submits stayed two; A -> Y navigation kept B writing X; B-only exit kept A/Host)'
@@ -486,6 +489,19 @@ function printSelectableCases() {
  * installing a profile.
  */
 export function assertSelectedVerdict(caseId, result) {
+  if (caseId === 'account.official-composition') {
+    assert(result?.status === 'PASS'
+      && result?.browser === 'PASS'
+      && result?.verifiedCallback === true
+      && result?.pkce === true
+      && result?.initialSignedOutWatch === true
+      && result?.accountRouteChangedFromStub === true
+      && result?.hostTaskKnownFalseObserved === true
+      && result?.wrongCodeWithValidPkce === true
+      && result?.missingHostBinding === true,
+    `selected ${caseId}: the Host/Client Browser callback verdict ended as ${String(result?.browser ?? 'missing')}/${String(result?.status ?? 'missing')}`)
+    return
+  }
   if (caseId === 'web.startup-preference') {
     assert(result?.verified === true, `selected ${caseId}: the settings/cold-Host verdict was not verified`)
     return

@@ -158,15 +158,16 @@ test('REAL PlatformAccount + official WebServer callback: state, PKCE, grant, pr
     assert.equal(adapter.getCallbackOrigin(), callbackOrigin)
     const metadata = { version: '0.5.3', locale: 'en-US', timezoneOffsetSeconds: 0 }
     const initial = await adapter.getState()
-    assert.equal(initial.status, 'signed-out')
+    assert.equal(initial.view.status, 'signed-out')
+    assert.equal(adapter.isObservationCurrent(initial.lease), true)
 
-    const started = await adapter.startSignIn(metadata)
-    assert.notEqual(started.attempt, null)
+    const started = await adapter.startSignIn(metadata, initial.lease)
+    assert.notEqual(started.view.attempt, null)
     const waiting = await waitFor(async () => {
-      const view = await adapter.getState()
-      return view.attempt?.phase === 'waiting-browser' ? view : undefined
+      const observation = await adapter.getState()
+      return observation.view.attempt?.phase === 'waiting-browser' ? observation : undefined
     })
-    const attempt = waiting.attempt
+    const attempt = waiting.view.attempt
     assert.ok(attempt !== null && attempt !== undefined)
     assert.match(attempt.authorizeUrl ?? '', /\/dsh\/authorize/u)
     assert.equal(platform.state.value !== undefined, true)
@@ -180,22 +181,22 @@ test('REAL PlatformAccount + official WebServer callback: state, PKCE, grant, pr
     const callback = await fetch(`${callbackOrigin}/oauth/callback?code=code-1&state=${encodeURIComponent(platform.state.value!)}`, { redirect: 'manual' })
     assert.equal(callback.status, 302)
     const stored = await waitFor(async () => {
-      const view = await adapter.getState()
-      return view.status === 'credential-stored' ? view : undefined
+      const observation = await adapter.getState()
+      return observation.view.status === 'credential-stored' ? observation : undefined
     })
-    assert.equal(stored.attempt?.phase, 'succeeded')
+    assert.equal(stored.view.attempt?.phase, 'succeeded')
     assert.equal(platform.requests.includes('POST /auth-api/v0/dsh/auth_exchange'), true)
 
     const credentials = ctx.get('credentials') as { listRecords(): Promise<readonly { key: string; kind?: string }[]> }
     const records = await credentials.listRecords()
     assert.ok(records.some(record => record.key === 'deepseek-account-platform/default' && record.kind === 'grant'))
 
-    const profile = await adapter.getProfile(metadata)
+    const profile = await adapter.getProfile(metadata, stored.lease)
     assert.deepEqual(profile, {
       status: 'ready',
       value: { id: 'user-1', name: 'Moon', contact: 'moon@example.com', avatarUrl: null },
     })
-    const balance = await adapter.getBalance(metadata)
+    const balance = await adapter.getBalance(metadata, stored.lease)
     assert.deepEqual(balance, {
       status: 'ready',
       value: [{ currency: 'CNY', balance: '12.50' }],
@@ -207,30 +208,41 @@ test('REAL PlatformAccount + official WebServer callback: state, PKCE, grant, pr
       describe(ref: string): Promise<{ configured: boolean; source?: string }>
     }
     await credentialsForRef.set('DEEPSEEK_API_KEY', 'sk-keep')
-    const signedOut = await adapter.signOut(metadata)
-    assert.equal(signedOut.status, 'signed-out')
+    const signedOut = await adapter.signOut(metadata, stored.lease)
+    assert.equal(signedOut.view.status, 'signed-out')
     const remaining = await credentials.listRecords()
     assert.equal(remaining.some(record => record.key === 'deepseek-account-platform/default'), false)
     // The remote revocation is a background Host request that must never
     // restore the already-removed local grant.
     await waitFor(async () => platform.requests.includes('POST /auth-api/v0/users/logout') ? true : undefined)
-    assert.equal((await adapter.getState()).status, 'signed-out')
+    const signedOutObservation = await adapter.getState()
+    assert.equal(signedOutObservation.view.status, 'signed-out')
     const keptKey = await credentialsForRef.describe('DEEPSEEK_API_KEY')
     assert.equal(keptKey.configured, true, 'an independent API key survives the account sign-out')
 
     // Cancellation is bound to the exact attempt id: a stale id cancels nothing.
-    const second = await adapter.startSignIn(metadata)
-    const secondWaiting = await waitFor(async () => {
-      const view = await adapter.getState()
-      return view.attempt?.phase === 'waiting-browser' ? view : undefined
+    const firstAttempt = await adapter.startSignIn(metadata, signedOutObservation.lease)
+    const firstWaiting = await waitFor(async () => {
+      const observation = await adapter.getState()
+      return observation.view.attempt?.phase === 'waiting-browser' ? observation : undefined
     })
-    const attemptId = secondWaiting.attempt!.id
-    const stale = await adapter.cancelSignIn('not-the-current-attempt')
-    assert.equal(stale.attempt?.id, attemptId)
-    assert.equal(stale.attempt?.phase, 'waiting-browser')
-    const cancelled = await adapter.cancelSignIn(attemptId)
-    assert.equal(cancelled.attempt?.phase, 'cancelled')
-    assert.notEqual(second.attempt?.id, undefined)
+    const firstAttemptId = firstWaiting.view.attempt!.id
+    const firstCancelled = await adapter.cancelSignIn(firstAttemptId, firstWaiting.lease)
+    assert.equal(firstCancelled.view.attempt?.phase, 'cancelled')
+
+    const secondAttempt = await adapter.startSignIn(metadata, firstCancelled.lease)
+    const secondWaiting = await waitFor(async () => {
+      const observation = await adapter.getState()
+      return observation.view.attempt?.phase === 'waiting-browser' ? observation : undefined
+    })
+    const secondAttemptId = secondWaiting.view.attempt!.id
+    const stale = await adapter.cancelSignIn(firstAttemptId, secondWaiting.lease)
+    assert.equal(stale.view.attempt?.id, secondAttemptId)
+    assert.equal(stale.view.attempt?.phase, 'waiting-browser')
+    const cancelled = await adapter.cancelSignIn(secondAttemptId, secondWaiting.lease)
+    assert.equal(cancelled.view.attempt?.phase, 'cancelled')
+    assert.notEqual(firstAttempt.view.attempt?.id, undefined)
+    assert.notEqual(secondAttempt.view.attempt?.id, undefined)
 
     // The webserver listener remains alive after sign-out and page closure.
     const after = await fetch(`${callbackOrigin}/oauth/callback?code=x&state=y`)

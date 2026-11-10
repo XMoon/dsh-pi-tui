@@ -32,11 +32,14 @@ import {
   TuiMainScreen,
   VStack,
   Input,
+  getGraphemeSegmenter,
   getKeybindings,
   isKeyRelease,
   isKeyRepeat,
   matchesKey,
   parseKey,
+  sliceByColumn,
+  stripTerminalSequences,
   truncateToWidth,
   visibleWidth,
   wrapTextWithAnsi,
@@ -246,7 +249,13 @@ import {
   webCardLines,
   type ToolPresenter,
 } from './tui/transcript/tool-presentation.ts'
-import { TranscriptSearchComponent } from './tui/interaction/transcript-search.ts'
+import {
+  TranscriptSearchComponent,
+  type FullSearchSourceNotice,
+  type TranscriptSearchCoverage,
+  type TranscriptSearchScope,
+} from './tui/interaction/transcript-search.ts'
+export type { TranscriptSearchCoverage, TranscriptSearchScope } from './tui/interaction/transcript-search.ts'
 import { CompactTextPreview } from './tui/components/transcript/compact-text-preview.ts'
 import { ChartBody } from './tui/components/transcript/chart-body.ts'
 import { VisualAssistantBody, VisualAssistantDisposalFrame } from './tui/components/transcript/visual-assistant-body.ts'
@@ -303,6 +312,12 @@ import {
   preparePlainTextSourceProbe,
   provePlainTextPaintedSegments,
 } from './tui/components/transcript/plain-text-source-proof.ts'
+import { AssistantMarkdownComponent } from './tui/components/transcript/assistant-markdown-source-proof.ts'
+import {
+  chooseSearchViewportTop,
+  type PaintedTargetSegment,
+  type PhysicalRect,
+} from './tui/components/transcript/search-viewport.ts'
 import {
   workflowCountsText,
   workflowPhasePresentations,
@@ -314,6 +329,7 @@ import {
 } from './tui/transcript/workflow-presentation.ts'
 import { finalizedBlockFallbackText, openOpaqueBlockFallbackText } from './domain/transcript/content-blocks.ts'
 import { latestLine } from './domain/transcript/text.ts'
+import { rawSourceRangeForNormalizedMatch } from './domain/transcript/search.ts'
 import { fileAttachmentSummary } from './domain/media/file-summary.ts'
 import type { TranscriptWindowState } from './domain/transcript/window.ts'
 import { createTranscriptRenderProfiler } from './tui/diagnostics/transcript-render-profile.ts'
@@ -390,6 +406,13 @@ import type { DisplaySubjectSnapshot, ExtensionView, MessagePresentationSnapshot
 /** How many most-recent turns Ctrl+O expands; mirrors pi's default. */
 export const EXPAND_RECENT_TURNS = 3
 
+/** Physical Job-local keys always outrank transcript Find bindings on this screen. */
+const JOB_LOCAL_FIND_RESERVED_KEYS: ReadonlySet<KeyId> = new Set([
+  'home',
+  'end',
+  JOB_LOCAL_KEYS.switchPage,
+])
+
 /** Semantic inspection actions that may cross a response modal boundary. */
 const MODAL_INSPECTION_ACTIONS: readonly AppKeybindingId[] = [
   'app.transcript.toggleExpand',
@@ -430,6 +453,19 @@ export type TranscriptViewportAnchorEdge = 'top' | 'bottom'
  * intent to distinguish an in-place dismiss from a latest reset or a physical
  * surface swap. */
 export type TranscriptSearchCloseReason = 'dismiss' | 'jump-latest' | 'surface-change'
+type TranscriptSearchAction = 'app.transcript.search' | 'app.transcript.search.view'
+
+interface TranscriptSearchOpening {
+  screen: TuiAltScreen | undefined
+  readonly component: TranscriptSearchComponent
+  readonly temporaryReader: boolean
+  admitted: boolean
+  openCallbackInFlight: boolean
+  mountInFlight: boolean
+  closeRequested: boolean
+  closeReason: TranscriptSearchCloseReason
+  closeNotified: boolean
+}
 
 /** One rendered transcript row used to restore a viewport after re-windowing.
  * Object identity is preferred for overlapping folder projections; row kind and
@@ -636,6 +672,13 @@ export interface TranscriptSearchPresentationDiagnostics {
   /** Disposable source-cell probe renders for the current plain-text target.
    * A static frame and every non-current card must contribute zero. */
   plainTextProofs: number
+  /** Calls to the F1 Markdown cell proof for the current Assistant target.
+   * Every non-current card and every View/scroll frame must contribute zero. */
+  markdownProofs: number
+  /** Real `scrollTo` mutations made by the one-shot post-paint occlusion
+   * correction. A passive/scroll-only frame must contribute zero, and one
+   * explicit navigation at most one. */
+  occlusionCorrections: number
 }
 
 /** Test-only counters for transcript presentation invalidation. These counters
@@ -667,6 +710,126 @@ type TranscriptRebuildReason =
   | 'context-identity'
   | 'local-card'
   | 'other'
+
+/** The static Source-only source-kind label of one semantic target. Never a
+ * user string: the label only names the source vocabulary the match came
+ * from. */
+function searchSourceLabel(source: TranscriptSearchMatch['source'], message: TranscriptMessage): string {
+  switch (source.kind) {
+    case 'message':
+      switch (message.kind) {
+        case 'assistant': return 'Assistant text'
+        case 'user': return 'User text'
+        case 'thinking': return 'Thinking text'
+        default: return 'Message source'
+      }
+    case 'tool-field':
+      return source.field === 'name' ? 'Tool name' : source.field === 'args' ? 'Tool arguments' : 'Tool result'
+    case 'command-field':
+      return source.field === 'name' ? 'Command name' : source.field === 'args' ? 'Command arguments' : 'Command outcome'
+    case 'subcall-field':
+      return source.field === 'name' ? 'Subcall name' : source.field === 'args' ? 'Subcall arguments' : 'Subcall result'
+    case 'workflow-run': return 'Workflow run'
+    case 'workflow-phase': return 'Workflow phase'
+    case 'workflow-member': return 'Workflow member'
+    case 'assistant-deliverable':
+      return source.field === 'path' ? 'Delivered file path' : 'Delivered file description'
+  }
+}
+
+/** A snippet may leak nothing the card did not paint. Control/escape bytes
+ * (other than the whitespace a single display row folds) disqualify the whole
+ * snippet, and so does URL/path shaped context: ANY path separator (POSIX `/`,
+ * Windows `\`, UNC or a `C:relative` drive-qualified path), a URL authority
+ * (host:port, `localhost`, a dotted host, IPv4/IPv6), `www.`, a dotted
+ * file/domain-like token or HTML-ish markup.
+ * Deliberately conservative — a twelve-grapheme window can split a
+ * destination, so a partial match is never evidence that the rest is safe —
+ * and the display boundary outranks showing a snippet on every row. */
+const UNSAFE_SOURCE_SNIPPET = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/u
+const UNSAFE_SOURCE_SNIPPET_SHAPE =
+  /[\\/]|www\.|<[A-Za-z][^>]*>|\b[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{2,}\b|\b[A-Za-z][A-Za-z0-9.-]*:\d{1,5}\b|\blocalhost\b|\[[0-9A-Fa-f:]+\]|\b\d{1,3}(?:\.\d{1,3}){3}\b|::|\b[A-Za-z]:(?=[^\s])/u
+
+function searchSourceSnippetTextIsSafe(text: string): boolean {
+  if (text === '') return false
+  if (UNSAFE_SOURCE_SNIPPET.test(text)) return false
+  return !UNSAFE_SOURCE_SNIPPET_SHAPE.test(text)
+}
+
+/** Code-unit window used to locate the snippet's grapheme boundaries. The
+ * context is at most `count` clusters, so a bounded window keeps the whole
+ * message prefix/suffix out of memory; the loop only widens for pathological
+ * giant clusters. */
+const SNIPPET_CONTEXT_WINDOW = 256
+
+/** Up to `count` grapheme clusters immediately before `offset`, so a snippet
+ * never starts inside a combining/ZWJ cluster. */
+function snippetStartBefore(text: string, offset: number, count: number): number {
+  let window = SNIPPET_CONTEXT_WINDOW
+  while (true) {
+    const from = Math.max(0, offset - window)
+    const starts: number[] = []
+    for (const segment of getGraphemeSegmenter().segment(text.slice(from, offset))) starts.push(from + segment.index)
+    if (starts.length >= count + 1) return starts[starts.length - count]!
+    // A window cut can split the FIRST cluster, so a short window is not
+    // trusted; the document start is the only exact fallback.
+    if (from === 0) return 0
+    window *= 2
+  }
+}
+
+/** Up to `count` grapheme clusters immediately after `offset`. */
+function snippetEndAfter(text: string, offset: number, count: number): number {
+  let window = SNIPPET_CONTEXT_WINDOW
+  while (true) {
+    const to = Math.min(text.length, offset + window)
+    const starts: number[] = []
+    for (const segment of getGraphemeSegmenter().segment(text.slice(offset, to))) starts.push(offset + segment.index)
+    // A window cut can only truncate the LAST cluster's end; its start stays
+    // exact, so `starts[count]` is a real boundary whenever it exists.
+    if (starts.length >= count + 1) return starts[count]!
+    if (to === text.length) return text.length
+    window *= 2
+  }
+}
+
+/** The safety guard's token expansion is bounded: a longer unbroken token is
+ * not a readable destination fragment, so the snippet is omitted instead of
+ * slicing/regex-testing a message-length token. */
+const SNIPPET_GUARD_TOKEN_MAX = 512
+
+/** A snippet is a display nicety, never a reason to walk a huge source: above
+ * this source length the notice stays label-only. */
+const SNIPPET_MAX_SOURCE_LENGTH = 200_000
+
+/** The start of the whitespace-delimited token that owns `offset`, or
+ * `undefined` when the token exceeds {@link SNIPPET_GUARD_TOKEN_MAX}. The
+ * DISPLAY stays a grapheme window, but the safety guard must see the complete
+ * token: a twelve-grapheme window can split an address/URL/path into a
+ * fragment (`127.0.0.1` -> `.0.0.1`) that no shape rule would recognize. */
+function snippetTokenStart(text: string, offset: number): number | undefined {
+  let start = offset
+  let walked = 0
+  while (start > 0 && !/\s/u.test(text[start - 1]!)) {
+    start -= 1
+    walked += 1
+    if (walked > SNIPPET_GUARD_TOKEN_MAX) return undefined
+  }
+  return start
+}
+
+/** The end (exclusive) of the whitespace-delimited token that owns `offset`,
+ * or `undefined` when it exceeds {@link SNIPPET_GUARD_TOKEN_MAX}. */
+function snippetTokenEnd(text: string, offset: number): number | undefined {
+  let end = offset
+  let walked = 0
+  while (end < text.length && !/\s/u.test(text[end]!)) {
+    end += 1
+    walked += 1
+    if (walked > SNIPPET_GUARD_TOKEN_MAX) return undefined
+  }
+  return end
+}
 
 /** Whether two search targets denote the SAME semantic navigation: the query,
  * the stable match identity (id + ordinals + source key) and the resolved card
@@ -1184,11 +1347,12 @@ export interface TuiAppEventsBase {
    * write — the toggle action has no default key; Ctrl+F is transcript
    * search). Optional. */
   onFullscreenChange?: (fullscreen: boolean) => void
-  /** The transcript search overlay opened; the host may clear
-   * stale presentation before a match moves the view into history. */
-  onSearchOpen?: () => void
-  /** The transcript-search query changed (the search action opened it;
-   * the search keys are fixed overlay contracts). Optional. */
+  /** The transcript-search overlay opened; `false` refuses admission. Existing
+   * listeners returning void remain compatible. */
+  onSearchOpen?: (scope: TranscriptSearchScope) => boolean | void
+  /** The active search overlay requested a scope change. */
+  onSearchScope?: (scope: TranscriptSearchScope) => void
+  /** The transcript-search query changed (the search action opened it). Optional. */
   onSearchQuery?: (query: string) => void
   /** The search's next-match key (fixed overlay contract): jump to the next match. Optional. */
   onSearchNext?: () => void
@@ -2195,6 +2359,8 @@ export interface TuiAppOptions {
   statusStore?: StatusStore
   /** The shared canonical display authority. Standalone surfaces default to Full. */
   displayState?: DisplayState
+  /** Query coverage authority supplied by the mounted Direct/Remote composition. */
+  initialSearchCoverage?: TranscriptSearchCoverage
   /** M5: fired when the terminal WIDTH materially changed (the command
    * surface refreshes on width changes — the runner coalesces to its
    * interval). */
@@ -3011,6 +3177,27 @@ type RenderedViewSearchState = {
   readonly width: number
 }
 
+/** The single-call outcome of the current Assistant Markdown source proof:
+ * proven cells, or the honest reason they are absent. */
+type AssistantMarkdownSourceProof =
+  | { readonly kind: 'proven'; readonly segments: readonly AltScreenSearchSegment[] }
+  | { readonly kind: 'not-painted' | 'unproven' }
+
+/** One-shot eligibility for the post-paint occlusion correction: the frame
+ * that just painted is the one whose REAL boxes decide the target's
+ * readability. Every field identifies the current search epoch; any mismatch
+ * retires the eligibility without scrolling. */
+type SearchOcclusionCorrection = {
+  readonly screen: TuiAltScreen
+  readonly overlay: OverlayHandle
+  readonly scope: TranscriptSearchScope
+  readonly query: string
+  readonly presentationRevision: number
+  readonly viewIndex: number
+  readonly columns: number
+  readonly termRows: number
+}
+
 /** One transcript block rendered once for the current Focus projection. The
  * shared result keeps the painted component tree and the fullscreen hit map
  * on the same measured rows without a second live render. */
@@ -3635,6 +3822,11 @@ export class TuiApp {
   }
   /** Fullscreen (alt-screen) instance; absent in regular mode. */
   private fullscreen: TuiAltScreen | undefined
+  /** A temporary Fullscreen used only to make the Regular transcript navigable. */
+  private temporarySearchReaderReturnToRegular = false
+  /** One-shot authorization consumed by setFullscreen at the call boundary. */
+  private temporarySearchReaderTransitionPermit = false
+  private fullscreenTransitionDepth = 0
   /**
    * The ONE current Job workspace lease (Phase 3B / B1-A), or undefined. Its
    * `screen` is the physical owner while it is set: `activeScreen` derives the
@@ -3685,8 +3877,10 @@ export class TuiApp {
   private schemeDisposers: (() => void)[] = []
   /** The mounted transcript-search overlay, while one is open. */
   private searchOverlay: OverlayHandle | undefined
-  /** The search input component, while one is open (for match counts). */
+  /** The search input component, while one is open (for result/scope projection). */
   private searchComponent: TranscriptSearchComponent | undefined
+  private searchOpening: TranscriptSearchOpening | undefined
+  private transcriptSearchCoverage: TranscriptSearchCoverage = 'loaded-history'
   /** The temporary search presentation target: while set, its owner turn /
    * card is revealed and the query highlighted — presentation only, never
    * written into any user disclosure map. */
@@ -3720,6 +3914,27 @@ export class TuiApp {
   /** The block-relative transcript range of the current search selection
    * (welcome card excluded), recomputed on every rebuild/remeasure. */
   private currentSearchTranscriptRange: RenderedSearchScrollRange | undefined
+  /** The CURRENT render epoch's proven target cells in transcript DOCUMENT
+   * rows (welcome included). Absent for an anchor-only target: the occlusion
+   * solver then uses the conservative full-width target rows instead of
+   * guessing columns. Never persisted, never reused across a width/proof
+   * epoch. */
+  private currentSearchPaintedSegments: readonly PaintedTargetSegment[] | undefined
+  /** The CURRENT render epoch's Source-only notice for a Full target without a
+   * proven cell. `revision`/`query` bind it to the epoch that produced it. */
+  private searchSourceNotice: (FullSearchSourceNotice & { readonly query: string; readonly revision: number }) | undefined
+  /** One-shot occlusion correction eligibility, registered by an explicit
+   * navigation (or a resize) and consumed by the next painted-frame commit. */
+  private pendingSearchOcclusionCorrection: SearchOcclusionCorrection | undefined
+  /** One-entry memo for the CURRENT target's snippet: a passive rebuild of the
+   * same settled source must not re-project its raw grapheme context. */
+  private searchSourceSnippetMemo: {
+    readonly revision: number
+    readonly query: string
+    readonly message: TranscriptMessage
+    readonly text: string
+    readonly snippet: string | undefined
+  } | undefined
   /** The transcript content height (welcome card + rows + hint/notify) measured
    * by the LAST rebuild/remeasure. `scrollToSearchTarget` reads it instead of
    * re-rendering the whole mounted view for every ordinary search jump. */
@@ -3737,6 +3952,8 @@ export class TuiApp {
     fullRenders: 0,
     transcriptSets: 0,
     plainTextProofs: 0,
+    markdownProofs: 0,
+    occlusionCorrections: 0,
   }
   /** Test-only structural/content invalidation counters. */
   private readonly transcriptPresentationDiagnostics: TranscriptPresentationDiagnostics = {
@@ -4503,6 +4720,7 @@ export class TuiApp {
     // iterm2:  no managed handle; a Direct terminal keeps the legacy path.
     // none:    no managed handle and every consumer paints text.
     this.imageProtocolPreference = imageProtocolPreference(process.env)
+    this.transcriptSearchCoverage = options.initialSearchCoverage ?? 'loaded-history'
     let graphics: ImageGraphics | undefined
     switch (this.imageProtocolPreference) {
       case 'none':
@@ -4722,7 +4940,8 @@ export class TuiApp {
         // so the global Transcript search handler is never entered (and no
         // fork search overlay is opened) — the leader completion is not a
         // "dispatch then repair" path.
-        if (action === 'app.transcript.search' && this.jobWorkspace !== undefined) {
+        if ((action === 'app.transcript.search' || action === 'app.transcript.search.view')
+          && this.jobWorkspace !== undefined) {
           this.jobWorkspace.panel.openFind()
           return true
         }
@@ -5539,12 +5758,14 @@ export class TuiApp {
    * keybindings — the slot is held until the FINAL dispose() (see
    * tui/process-slot.ts). */
   stop(): void {
+    this.temporarySearchReaderReturnToRegular = false
+    this.temporarySearchReaderTransitionPermit = false
+    this.workspaceLeaseFreezeDepth += 1
     // The stop is a terminal-ownership transition: NEW workspace leases are
     // refused for its whole duration, so a synchronous callback run by the
     // workspace close below cannot mint a screen that would outlive the stop. The
     // latch is cleared by the LAST step of the batch, so a throwing sibling can
     // never leave the surface permanently unable to lease.
-    this.workspaceLeaseFreezeDepth += 1
     // From here on this TuiApp no longer owns the terminal for presentation:
     // a status arriving while stopped must only fold the desired state.
     this.leaveTerminalPresentation()
@@ -5567,6 +5788,7 @@ export class TuiApp {
       // `leaveTerminalPresentation` closing step below releases again.
       () => this.jobWorkspace?.close(),
       () => this.workspaceLease?.close(),
+      () => this.closeTranscriptSearch('surface-change'),
       () => this.clearNotify(),
       // Issue #8: the exit-confirmation timer dies with the surface — a stopped
       // TUI must never fire a stale disarm into a dead footer.
@@ -5998,6 +6220,8 @@ export class TuiApp {
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
+    this.temporarySearchReaderReturnToRegular = false
+    this.temporarySearchReaderTransitionPermit = false
     this.pasteRanges.retireAll()
     this.pasteEditAnchor = undefined
     // M3-6 PR3: the final teardown is ONE ordered non-truncating batch. Every
@@ -6122,7 +6346,8 @@ export class TuiApp {
       // must not hang.
       ...brokerSettles.map(settle => () => settle()),
       () => { this.pendingBrokerSettles.clear() },
-      // FINAL teardown: physically unmount every still-tracked overlay
+      () => this.closeTranscriptSearch('surface-change'),
+       // FINAL teardown: physically unmount every still-tracked overlay
       // (disposeOnHide releases the panels — OutputViewer's refresh
       // interval, TaskBrowser's tick — exactly once) instead of merely
       // forgetting the handles. A caller that never invoked its closer must
@@ -6593,8 +6818,24 @@ export class TuiApp {
         const exitCompletion = leader.pending && !physicalEscape && leader.leaderBindings.some(
           binding => binding.action === 'app.exit.request' && matchesKey(data, binding.key),
         )
+        const reservedFindCompletion = leader.pending && !physicalEscape && leader.leaderBindings.some(
+          binding => (binding.action === 'app.transcript.search' || binding.action === 'app.transcript.search.view')
+            && JOB_LOCAL_FIND_RESERVED_KEYS.has(binding.key)
+            && matchesKey(data, binding.key),
+        )
+        if (reservedFindCompletion) {
+          // A Search leader may not take a Job-local physical key away from
+          // Home/End viewport control or Tab page switching. Cancel the prefix,
+          // then let the Job panel apply the key's fixed local meaning.
+          leader.cancel()
+          this.clearExitConfirmation()
+          this.jobWorkspace.panel.handleInput(data)
+          return { consume: true }
+        }
         const findCompletion = leader.pending && !physicalEscape && leader.leaderBindings.some(
-          binding => binding.action === 'app.transcript.search' && matchesKey(data, binding.key),
+          binding => (binding.action === 'app.transcript.search' || binding.action === 'app.transcript.search.view')
+            && !JOB_LOCAL_FIND_RESERVED_KEYS.has(binding.key)
+            && matchesKey(data, binding.key),
         )
         if (exitCompletion) {
           const outcome = leader.feed(data)
@@ -6722,14 +6963,15 @@ export class TuiApp {
     // the search TOGGLE (app.transcript.search) is user-configurable, so
     // a remap of the toggle must work while the overlay is open too —
     // matching the EFFECTIVE keys (review finding).
+    if (this.searchOpening !== undefined && this.searchOverlay === undefined) {
+      if (this.keybindings.matchesDefault(data, 'app.transcript.search.close')) this.closeTranscriptSearch()
+      this.clearExitConfirmation()
+      return { consume: true }
+    }
     if (this.searchOverlay !== undefined) {
       // The search overlay owns this input; it is a fresh interaction, never
       // the second half of a parent keyboard exit confirmation.
       this.clearExitConfirmation()
-      if (this.keybindings.matches(data, 'app.transcript.jumpLatest')) {
-        const consumed = this.dispatchResolvedAction('app.transcript.jumpLatest', data)
-        if (consumed) return { consume: true }
-      }
       if (this.keybindings.matchesDefault(data, 'app.transcript.search.close')) {
         this.closeTranscriptSearch()
         return { consume: true }
@@ -6742,11 +6984,23 @@ export class TuiApp {
         this.events.onSearchPrev?.()
         return { consume: true }
       }
-      if (this.keybindings.matches(data, 'app.transcript.search')) {
-        // Ctrl+F (or the remapped toggle) closes the overlay on a second
-        // press.
-        this.closeTranscriptSearch()
+      if (this.keybindings.matchesDefault(data, 'app.transcript.search.scope')) {
+        const current = this.searchComponent?.getScope()
+        if (current !== undefined) {
+          this.switchOpenTranscriptSearchScope(current === 'view' ? 'full' : 'view')
+        }
         return { consume: true }
+      }
+      const action = this.transcriptSearchActionForInput(data)
+      if (action !== undefined) {
+        const scope = action === 'app.transcript.search.view' ? 'view' : 'full'
+        if (this.searchComponent?.getScope() === scope) this.closeTranscriptSearch()
+        else this.switchOpenTranscriptSearchScope(scope)
+        return { consume: true }
+      }
+      if (this.keybindings.matches(data, 'app.transcript.jumpLatest')) {
+        const consumed = this.dispatchResolvedAction('app.transcript.jumpLatest', data)
+        if (consumed) return { consume: true }
       }
       return undefined
     }
@@ -7350,8 +7604,12 @@ export class TuiApp {
       },
       interruptActivity: () => true,
       requestExit: () => true,
-      openTranscriptSearch: () => {
-        this.startTranscriptSearch()
+      openTranscriptViewSearch: () => {
+         this.startTranscriptSearch('view')
+         return true
+       },
+       openTranscriptSearch: () => {
+        this.startTranscriptSearch('full')
         return true
       },
       jumpLatest: () => {
@@ -7526,6 +7784,14 @@ export class TuiApp {
     }
   }
 
+  private transcriptSearchActionForInput(data: string): TranscriptSearchAction | undefined {
+    const resolution = this.keybindings.resolve(data, this.keybindingContext())
+    if (resolution?.owner !== 'host') return undefined
+    return resolution.action === 'app.transcript.search' || resolution.action === 'app.transcript.search.view'
+      ? resolution.action
+      : undefined
+  }
+
   /** The live keybinding context (plan §6): built in ONE place so the
    * resolver never reads TuiApp private fields. `editorEmpty` is LAZY —
    * the live editor is only read when a rule predicate actually needs it
@@ -7575,7 +7841,10 @@ export class TuiApp {
       // The router's physical-key seams (the read-only viewer fold
       // pass-through, the search overlay ownership) consult the EFFECTIVE
       // keymap, so a user remap stays authoritative (review finding).
-      matchesEffective: (action: string, data: string) => this.keybindings.matches(data, action as unknown as AppKeybindingId),
+      matchesEffective: (action: string, data: string) => {
+        const resolution = this.keybindings.resolve(data, this.keybindingContext())
+        return resolution?.owner === 'host' && resolution.action === action
+      },
       // The runtime reservation is ACTION-driven: a key is reserved for
       // the host ONLY while an active host action binds it. A remapped-
       // away old key (e.g. Ctrl+V after pasteMedia moved to Ctrl+P) is
@@ -8062,6 +8331,84 @@ export class TuiApp {
     return this.fullscreen !== undefined
   }
 
+  private transcriptSearchScreenIsEligible(
+    screen: TuiMainScreen | TuiAltScreen,
+    searchOverlay?: OverlayHandle,
+  ): boolean {
+    const overlayAdmission = searchOverlay === undefined
+      ? !this.overlayBroker.hasVisibleModalOverlay() && !this.overlayBroker.hasFocusedOverlay()
+      : this.overlayBroker.isOnlyVisibleModal(searchOverlay)
+        && this.overlayBroker.hasFocusedOverlay()
+        && searchOverlay.isFocused()
+    return !this.disposed
+      && this.fullscreenTransitionDepth === 0
+      && this.terminalPresentationActive
+      && this.activeScreen === screen
+      && overlayAdmission
+      && this.jobWorkspace === undefined
+      && this.workspaceLease === undefined
+      && this.activeQuestions === undefined
+      && !this.approvals.hasPending()
+      && this.activeSaveLocation === undefined
+      && this.viewerMode === undefined
+      && this.optionalSeat === undefined
+      && !this.taskQuick.focused
+  }
+
+  private beginTemporarySearchReaderIfRegular(): TuiAltScreen | undefined {
+    if (this.fullscreen !== undefined) {
+      return this.transcriptSearchScreenIsEligible(this.fullscreen) ? this.fullscreen : undefined
+    }
+    if (!this.transcriptSearchScreenIsEligible(this.tui)) return undefined
+
+    this.temporarySearchReaderReturnToRegular = true
+    this.temporarySearchReaderTransitionPermit = true
+    try {
+      this.setFullscreen(true, { persistPreference: false, onlyWhenIdle: true })
+    } finally {
+      this.temporarySearchReaderTransitionPermit = false
+    }
+
+    const screen = this.fullscreen
+    if (screen !== undefined && this.activeScreen === screen) return screen
+    this.temporarySearchReaderReturnToRegular = false
+    return undefined
+  }
+
+  private rollbackTemporarySearchReader(screen: TuiAltScreen): void {
+    if (!this.temporarySearchReaderReturnToRegular || this.disposed
+      || !this.transcriptSearchScreenIsEligible(screen)
+      || this.fullscreen !== screen || this.activeScreen !== screen
+      || this.jobWorkspace !== undefined || this.workspaceLease !== undefined
+      || this.searchOverlay !== undefined || this.searchOpening !== undefined) {
+      this.temporarySearchReaderReturnToRegular = false
+      return
+    }
+    this.temporarySearchReaderTransitionPermit = true
+    try {
+      this.setFullscreen(false, { persistPreference: false })
+    } finally {
+      this.temporarySearchReaderTransitionPermit = false
+      this.temporarySearchReaderReturnToRegular = false
+    }
+  }
+
+  private returnTemporarySearchReaderIfCurrent(screen: TuiAltScreen): void {
+    if (!this.temporarySearchReaderReturnToRegular) return
+    if (this.searchOverlay !== undefined || this.searchOpening !== undefined) return
+    if (!this.transcriptSearchScreenIsEligible(screen) || this.fullscreen !== screen) {
+      this.temporarySearchReaderReturnToRegular = false
+      return
+    }
+    this.temporarySearchReaderTransitionPermit = true
+    try {
+      this.setFullscreen(false, { persistPreference: false, onlyWhenIdle: true })
+    } finally {
+      this.temporarySearchReaderTransitionPermit = false
+      this.temporarySearchReaderReturnToRegular = false
+    }
+  }
+
   /** Set the fullscreen mouse-wheel step (transcript lines per wheel
    * event) for the NEXT alt-screen mount. Defensive normalize; never
    * reads Host settings — a pure Client runtime preference. The live
@@ -8106,6 +8453,21 @@ export class TuiApp {
    *   ordinary behavior.
    */
   setFullscreen(enabled: boolean, options?: { readonly persistPreference?: boolean; readonly onlyWhenIdle?: boolean }): void {
+    const temporarySearchReaderTransition = this.temporarySearchReaderTransitionPermit
+    this.temporarySearchReaderTransitionPermit = false
+    this.fullscreenTransitionDepth += 1
+    try {
+      this.setFullscreenTransition(enabled, options, temporarySearchReaderTransition)
+    } finally {
+      this.fullscreenTransitionDepth -= 1
+    }
+  }
+
+  private setFullscreenTransition(
+    enabled: boolean,
+    options: { readonly persistPreference?: boolean; readonly onlyWhenIdle?: boolean } | undefined,
+    temporarySearchReaderTransition: boolean,
+  ): void {
     if (this.disposed) return
     // A leased workspace (Job OR Settings) owns the physical screen: a
     // display-mode switch now would detach the PAUSED return surface (killing
@@ -8129,6 +8491,9 @@ export class TuiApp {
     this.keybindings.cancelLeader()
     const active = this.fullscreen !== undefined
     if (enabled === active) return
+    if (this.temporarySearchReaderReturnToRegular && !temporarySearchReaderTransition) {
+      this.temporarySearchReaderReturnToRegular = false
+    }
     this.clearRenderedViewSearch({ rebuild: false })
     // B4-B: the on-demand Task Quick is retired on ANY screen hand-off — the
     // accessory instance is shared by both roots and its `focused` flag would
@@ -8148,7 +8513,8 @@ export class TuiApp {
     // through such a regular surface (re-entry re-derives folded). The
     // temporary SEARCH reveal is separate state: the runner closes the search
     // overlay on a surface swap, which clears the target.
-    if (enabled && !this.userDisclosureAffordanceAvailable()) {
+    if (enabled && !this.userDisclosureAffordanceAvailable()
+      && !this.temporarySearchReaderReturnToRegular) {
       this.clearUserDisclosureOverrides()
     }
     this.clearFocusLiveHeightState()
@@ -8158,17 +8524,15 @@ export class TuiApp {
     // physical projections die with the old screen (detachPhysical). The
     // remount callbacks re-create them for the same logical nodes (including
     // the approval, whose logical node keeps its suppressed children hidden).
-    this.overlayBroker.detachPhysical()
-    // The ordinary search overlay is NOT remounted across the screen swap
-    // (only extension/advanced/unstable/history leases are): its raw
-    // handle died with the old screen — close it properly (the runner's
-    // onSearchClose resets the search state/anchor) so the next Ctrl+F
-    // reopens a FRESH search instead of focusing a stale dead handle.
-    if (this.searchOverlay !== undefined) {
-      this.searchOverlay = undefined
-      this.searchComponent = undefined
-      this.events.onSearchClose?.('surface-change')
+    // Search is not remounted across a user surface change. The temporary
+    // Reader entry is the exception: its opening intent was precommitted and
+    // the overlay is mounted only after this screen transaction completes.
+    const enteringTemporarySearchReader = temporarySearchReaderTransition && enabled && this.fullscreen === undefined
+    if (!enteringTemporarySearchReader
+      && (this.searchOverlay !== undefined || this.searchOpening !== undefined)) {
+      this.closeTranscriptSearch('surface-change')
     }
+    if (!enabled) this.overlayBroker.detachPhysical()
     if (enabled) {
       const openExternalUrl = this.openExternalUrl
       // The alt screen owns mouse handling (wheel scroll, drag selection,
@@ -8213,14 +8577,19 @@ export class TuiApp {
           if (this.keybindings.matches(data, 'app.transcript.jumpLatest')) {
             return this.events.onTranscriptJumpLatest?.() === true
           }
-          if (this.keybindings.matches(data, 'app.transcript.search')) {
+          const action = this.transcriptSearchActionForInput(data)
+          if (action !== undefined) {
             if (this.searchOverlay !== undefined) {
-              this.closeTranscriptSearch()
+              const scope = action === 'app.transcript.search.view' ? 'view' : 'full'
+              if (this.searchComponent?.getScope() === scope) this.closeTranscriptSearch()
+              else this.switchOpenTranscriptSearchScope(scope)
               return true
             }
-            return this.dispatchResolvedAction('app.transcript.search', data)
+            return this.dispatchResolvedAction(action, data)
           }
-          return getKeybindings().matches(data, 'tui.altScreen.search')
+          // The Host Full action owns Full-history search. The fork search is
+          // never a fallback: it would silently change both corpus and scope.
+          return getKeybindings().matches(data, 'tui.altScreen.search') ? true : false
         },
         onScrollBoundary: (direction, source) => direction < 0
           ? this.events.onTranscriptMoveOlder?.(source) === true
@@ -8352,39 +8721,71 @@ export class TuiApp {
       // viewport) — only the FINAL delivery to the focused component is
       // withheld while an optional seat tenant owns the keyboard.
       alt.addInputListener((data) => this.protocolSinkFence(data))
-      // The screen swap stops the terminal between the two starts: progress
-      // must not be written until the new screen owns it again (plan §7).
-      this.leaveTerminalPresentation()
-      this.tui.stop()
-      // The new alt's first paint is scheduled asynchronously: drop the
-      // PREVIOUS alt instance's last-painted snapshot (and any in-flight
-      // gesture) BEFORE start, so a press immediately after re-entry can
-      // never resolve against a frame the new surface never drew.
-      alt.start()
-      // Mode 2031 is per screen: the freshly started alt screen syncs the
-      // CURRENT tracking choice now that it owns the terminal (writing the mode
-      // before start() would land on the stopped screen and be lost).
-      alt.setTerminalColorSchemeNotifications(this.followingTerminalTheme)
-      // The main screen's stop cleared the physical progress indicator;
-      // re-assert the desired state on the new alt screen (plan §7).
-      this.enterTerminalPresentation()
-      // The alt screen starts with NO focused component: without this, every
-      // key after Ctrl+F is dropped (the app-level listener still sees
-      // shortcuts, but the editor never receives text or Enter). M9 + Phase
-      // 3A / PR-B: a screen swap is an active re-projection entry. Re-sync the
-      // SHARED seat mount with the LIVE owner first (a stale ACTIVE tenant is
-      // never left painted across the swap), then focus the live seat owner (a
-      // Question/Save frame, an ACTIVE tenant, else the latest host/plugin
-      // editor) on the screen that now owns the terminal. The stale record
-      // itself is retired AFTER the swap is committed (below), so a throwing
-      // caller cleanup can never leave a half-swapped surface.
-      this.projectSeatOccupant()
-      alt.setFocus(this.seatFallbackComponent() ?? this.seatEditor().component)
-      this.fullscreen = alt
-      // The alt screen owns the terminal now: re-register the scheme fan-out —
-      // which also re-binds the SIXEL readiness projection to THIS screen, so no
-      // pixel is painted with facts sampled for the previous one. (RFL-011.)
-      this.refreshSchemeRegistrations()
+      const returnFocus = this.tui.getFocusedComponent()
+      let mainStopAttempted = false
+      let altStartAttempted = false
+      try {
+        this.overlayBroker.detachPhysical()
+        // The screen swap stops the terminal between the two starts: progress
+        // must not be written until the new screen owns it again (plan §7).
+        this.leaveTerminalPresentation()
+        mainStopAttempted = true
+        this.tui.stop()
+        // The new alt's first paint is scheduled asynchronously: drop the
+        // PREVIOUS alt instance's last-painted snapshot (and any in-flight
+        // gesture) BEFORE start, so a press immediately after re-entry can
+        // never resolve against a frame the new surface never drew.
+        altStartAttempted = true
+        alt.start()
+        // Mode 2031 is per screen: the freshly started alt screen syncs the
+        // CURRENT tracking choice now that it owns the terminal (writing the mode
+        // before start() would land on the stopped screen and be lost).
+        alt.setTerminalColorSchemeNotifications(this.followingTerminalTheme)
+        // The main screen's stop cleared the physical progress indicator;
+        // re-assert the desired state on the new alt screen (plan §7).
+        this.enterTerminalPresentation()
+        // The alt screen starts with NO focused component: without this, every
+        // key after Ctrl+F is dropped (the app-level listener still sees
+        // shortcuts, but the editor never receives text or Enter). M9 + Phase
+        // 3A / PR-B: a screen swap is an active re-projection entry. Re-sync the
+        // SHARED seat mount with the LIVE owner first (a stale ACTIVE tenant is
+        // never left painted across the swap), then focus the live seat owner (a
+        // Question/Save frame, an ACTIVE tenant, else the latest host/plugin
+        // editor) on the screen that now owns the terminal. The stale record
+        // itself is retired AFTER the swap is committed (below), so a throwing
+        // caller cleanup can never leave a half-swapped surface.
+        this.projectSeatOccupant()
+        alt.setFocus(this.seatFallbackComponent() ?? this.seatEditor().component)
+        this.fullscreen = alt
+        // The alt screen owns the terminal now: re-register the scheme fan-out —
+        // which also re-binds the SIXEL readiness projection to THIS screen, so no
+        // pixel is painted with facts sampled for the previous one. (RFL-011.)
+        this.refreshSchemeRegistrations()
+      } catch (error) {
+        if (!temporarySearchReaderTransition) throw error
+        const stillOwnsFailedTransition = (): boolean => !this.disposed
+          && this.jobWorkspace === undefined
+          && this.workspaceLease === undefined
+          && (this.fullscreen === undefined || this.fullscreen === alt)
+        const remounts = this.overlayBroker.remountOrder()
+        runSyncDisposalStepsWithPrimary('fullscreen screen transition unwind', error, [
+          () => { if (altStartAttempted && stillOwnsFailedTransition()) alt.stop() },
+          () => {
+            if (!stillOwnsFailedTransition()) return
+            if (this.fullscreen === alt) this.fullscreen = undefined
+            this.fullscreenScroll = undefined
+          },
+          () => {
+            if (!stillOwnsFailedTransition()) return
+            if (mainStopAttempted) this.resumeReturnSurface(this.tui, returnFocus)
+            else this.enterTerminalPresentation()
+          },
+          ...remounts.map(handle => () => {
+            if (stillOwnsFailedTransition()) this.overlayRemounts.get(handle)?.()
+          }),
+          () => { if (stillOwnsFailedTransition()) this.overlayBroker.restoreFocusAfterSwap() },
+        ])
+      }
     } else {
       this.leaveTerminalPresentation()
       this.fullscreen?.stop()
@@ -8414,7 +8815,7 @@ export class TuiApp {
       // starts from the bulk preference again (plan §6.2's preferred cleanup
       // — the regular surface's only Thinking state is the bulk preference).
       // Search reveals are separate temporary state and write no override.
-      this.clearThinkingExpansionOverrides()
+      if (!this.temporarySearchReaderReturnToRegular) this.clearThinkingExpansionOverrides()
       // The alt screen's exit repaint starts at the hardware cursor row, so
       // rows above it (e.g. a dialog the alt screen composited) survive in
       // the terminal buffer. Force a full repaint so the regular surface
@@ -8500,39 +8901,214 @@ export class TuiApp {
    * focus its input. The search itself runs in the host against the folded
    * transcript; this surface only collects the query and reports navigation keys.
    */
-  startTranscriptSearch(): void {
+  startTranscriptSearch(scope: TranscriptSearchScope = 'full'): void {
     if (this.disposed) return
     if (this.searchOverlay !== undefined) {
-      this.searchOverlay.focus()
+      if (this.searchComponent?.getScope() !== scope) this.switchOpenTranscriptSearchScope(scope)
+      else this.searchOverlay.focus()
       return
     }
-    this.events.onSearchOpen?.()
-    const component = new TranscriptSearchComponent((query) => {
-      this.events.onSearchQuery?.(query)
+    if (this.searchOpening !== undefined) return
+
+    const temporaryReader = this.fullscreen === undefined || this.temporarySearchReaderReturnToRegular
+    const component = new TranscriptSearchComponent({
+      onQueryChange: query => this.events.onSearchQuery?.(query),
+      onScopeRequest: next => this.switchOpenTranscriptSearchScope(next),
+      readViewResult: () => this.renderedViewSearchStatus(),
+      readTemporaryReader: () => this.isTemporarySearchReader(),
+      readCoverage: () => this.transcriptSearchCoverage,
+      readSourceNotice: () => this.currentFullSearchNotice(),
+      readTerminalRows: () => this.terminal.rows,
+      initialScope: scope,
     })
+    const opening: TranscriptSearchOpening = {
+      screen: this.fullscreen,
+      component,
+      temporaryReader,
+      admitted: false,
+      openCallbackInFlight: true,
+      mountInFlight: false,
+      closeRequested: false,
+      closeReason: 'dismiss',
+      closeNotified: false,
+    }
+    this.searchOpening = opening
     this.searchComponent = component
-    this.searchOverlay = this.showOverlayOnHost(component, {
-      anchor: 'top-right',
-      width: '40%',
-      minWidth: 24,
-      margin: 1,
-      // Fullscreen: the search box keeps keyboard focus, but the transcript
-      // viewport stays interactive (wheel/PageUp/PageDown/scrollbar/background
-      // selection) while the box itself did not handle the event
-      // (fork seam X058; inert on the main screen, where the terminal owns
-      // scrollback).
-      viewportPassthrough: true,
-    })
+
+    let screen: TuiAltScreen | undefined
+    try {
+      screen = this.beginTemporarySearchReaderIfRegular()
+    } catch (error) {
+      opening.openCallbackInFlight = false
+      opening.screen = this.fullscreen
+      runSyncDisposalStepsWithPrimary('transcript search reader open unwind', error, [
+        () => this.finishSearchOpening(opening),
+        () => {
+          if (this.searchOpening === undefined && this.searchOverlay === undefined && this.fullscreen === undefined) {
+            this.temporarySearchReaderReturnToRegular = false
+          }
+        },
+      ])
+    }
+    if (screen === undefined) {
+      opening.openCallbackInFlight = false
+      this.finishSearchOpening(opening)
+      return
+    }
+    opening.screen = screen
+    if (opening.closeRequested || !this.transcriptSearchScreenIsEligible(screen)) {
+      opening.openCallbackInFlight = false
+      opening.closeReason = 'surface-change'
+      this.finishSearchOpening(opening)
+      return
+    }
+
+    let admitted: boolean | void
+    try {
+      admitted = this.events.onSearchOpen?.(scope)
+    } catch (error) {
+      opening.openCallbackInFlight = false
+      opening.admitted = true
+      opening.closeRequested = true
+      opening.closeReason = 'surface-change'
+      runSyncDisposalStepsWithPrimary('transcript search admission unwind', error, [
+        () => this.finishSearchOpening(opening),
+        () => {
+          if (opening.temporaryReader && this.searchOpening === undefined
+            && this.searchOverlay === undefined && this.fullscreen === undefined) {
+            this.temporarySearchReaderReturnToRegular = false
+          }
+        },
+      ])
+    }
+    opening.openCallbackInFlight = false
+    opening.admitted = admitted !== false
+    if (!opening.admitted) {
+      this.finishSearchOpening(opening)
+      return
+    }
+    if (opening.closeRequested || this.searchOpening !== opening
+      || !this.transcriptSearchScreenIsEligible(screen)) {
+      if (!opening.closeRequested) {
+        opening.closeRequested = true
+        opening.closeReason = 'surface-change'
+      }
+      this.finishSearchOpening(opening)
+      return
+    }
+
+    opening.mountInFlight = true
+    let overlay: OverlayHandle
+    try {
+      overlay = this.showOverlayOnHost(component, {
+        anchor: 'top-right',
+        width: '40%',
+        minWidth: 24,
+        margin: 1,
+        viewportPassthrough: true,
+      })
+    } catch (error) {
+      opening.mountInFlight = false
+      opening.closeRequested = true
+      opening.closeReason = 'surface-change'
+      runSyncDisposalStepsWithPrimary('transcript search open unwind', error, [
+        () => this.finishSearchOpening(opening),
+      ])
+      return
+    }
+    opening.mountInFlight = false
+    if (opening.closeRequested || this.searchOpening !== opening
+      || this.fullscreen !== screen || this.activeScreen !== screen) {
+      if (!opening.closeRequested) {
+        opening.closeRequested = true
+        opening.closeReason = 'surface-change'
+      }
+      this.searchOverlay = overlay
+      this.searchComponent = component
+      this.closeTranscriptSearch(opening.closeReason)
+      return
+    }
+    this.searchOverlay = overlay
+    this.searchComponent = component
+    if (opening.closeRequested || this.searchOpening !== opening
+      || !this.transcriptSearchScreenIsEligible(screen, overlay)) {
+      opening.closeRequested = true
+      if (opening.closeReason === 'dismiss') opening.closeReason = 'surface-change'
+      this.closeTranscriptSearch(opening.closeReason)
+      return
+    }
+    this.searchOpening = undefined
   }
 
-  /** Close host/fullscreen transcript search and report whether either closed. */
+  private switchOpenTranscriptSearchScope(scope: TranscriptSearchScope): void {
+    if (this.searchOverlay === undefined || this.searchComponent === undefined) return
+    if (this.searchComponent.getScope() === scope) return
+    this.events.onSearchScope?.(scope)
+  }
+
+  private finishSearchOpening(opening: TranscriptSearchOpening): void {
+    if (opening.openCallbackInFlight || opening.mountInFlight) return
+    if (this.searchOpening === opening) this.searchOpening = undefined
+    if (this.searchComponent === opening.component && this.searchOverlay === undefined) {
+      this.searchComponent = undefined
+    }
+    if (!opening.admitted) {
+      if (opening.temporaryReader && opening.screen !== undefined) {
+        this.rollbackTemporarySearchReader(opening.screen)
+      }
+      return
+    }
+    if (!opening.closeRequested || opening.closeNotified) return
+    opening.closeNotified = true
+    runSyncDisposalSteps('transcript search opening close', [
+      () => this.events.onSearchClose?.(opening.closeReason),
+      () => {
+        if (!opening.temporaryReader || opening.screen === undefined) return
+        if (opening.closeReason === 'surface-change') this.rollbackTemporarySearchReader(opening.screen)
+        else this.returnTemporarySearchReaderIfCurrent(opening.screen)
+      },
+    ])
+  }
+
+  /** Close the managed Search overlay and report one lifecycle reason. */
   closeTranscriptSearch(reason: TranscriptSearchCloseReason = 'dismiss'): boolean {
     const closedFullscreen = this.fullscreen?.clearSearch() ?? false
-    if (this.searchOverlay === undefined) return closedFullscreen
-    this.searchOverlay.hide()
+    const opening = this.searchOpening
+    const overlay = this.searchOverlay
+    if (overlay === undefined) {
+      if (opening === undefined) return closedFullscreen
+      opening.closeRequested = true
+      opening.closeReason = reason
+      this.finishSearchOpening(opening)
+      return true
+    }
+
+    const screen = this.fullscreen
+    const temporaryReader = this.temporarySearchReaderReturnToRegular
+    const readerOwner = opening?.screen ?? screen
+    // Retire the old logical owner BEFORE hide() can synchronously run focus hooks.
     this.searchOverlay = undefined
     this.searchComponent = undefined
-    this.events.onSearchClose?.(reason)
+    this.pendingSearchOcclusionCorrection = undefined
+    this.clearCurrentSearchTargetGeometry()
+    if (opening !== undefined) {
+      opening.closeRequested = true
+      opening.closeReason = reason
+      opening.closeNotified = true
+      if (this.searchOpening === opening) this.searchOpening = undefined
+    }
+    let closeCurrentSearch = false
+    runSyncDisposalSteps('transcript search close', [
+      () => overlay.hide(),
+      () => {
+        closeCurrentSearch = this.searchOverlay === undefined && this.searchOpening?.admitted !== true
+        if (closeCurrentSearch) this.events.onSearchClose?.(reason)
+      },
+      () => {
+        if (!closeCurrentSearch || !temporaryReader || readerOwner === undefined) return
+        this.returnTemporarySearchReaderIfCurrent(readerOwner)
+      },
+    ])
     return true
   }
 
@@ -8750,6 +9326,26 @@ export class TuiApp {
   setSearchResult(index: number, count: number): void {
     this.searchComponent?.setResult(index, count)
     this.searchComponent?.invalidate()
+  }
+
+  setSearchScope(scope: TranscriptSearchScope): void {
+    this.searchComponent?.setScope(scope)
+    this.requestRender()
+  }
+
+  setTranscriptSearchCoverage(coverage: TranscriptSearchCoverage): void {
+    if (this.transcriptSearchCoverage === coverage) return
+    this.transcriptSearchCoverage = coverage
+    this.searchComponent?.invalidate()
+    this.requestRender()
+  }
+
+  isTemporarySearchReader(): boolean {
+    return this.temporarySearchReaderReturnToRegular
+  }
+
+  transcriptSearchCoverageForTest(): TranscriptSearchCoverage {
+    return this.transcriptSearchCoverage
   }
 
   /** Whether the transcript search is open. */
@@ -9215,6 +9811,15 @@ export class TuiApp {
       startRow: nextHit.firstTranscriptRow,
       endRow: nextHit.lastTranscriptRow,
     }
+    // The selected rendered occurrence's OWN segments are the current epoch's
+    // painted cells; a hit without segments keeps the conservative anchor.
+    const nextEntry = this.mountedTranscriptBlocks[nextHit.blockIndex]
+    const nextSelection = nextEntry?.searchSelection
+    const selectionStart = nextSelection?.scrollRange?.startRow
+    this.currentSearchPaintedSegments = nextSelection === undefined || selectionStart === undefined
+      ? undefined
+      : this.paintedSegmentsForSelection(nextSelection, nextHit.firstTranscriptRow - selectionStart)
+        ?.map(segment => ({ ...segment, documentRow: this.transcriptWelcomeHeight + segment.documentRow }))
     this.scrollToSearchTarget()
     this.requestRender()
     return { currentIndex, count }
@@ -9224,7 +9829,7 @@ export class TuiApp {
   clearRenderedViewSearch(options: { rebuild?: boolean } = {}): void {
     if (this.renderedViewSearch === undefined) return
     this.renderedViewSearch = undefined
-    this.currentSearchTranscriptRange = undefined
+    this.clearCurrentSearchTargetGeometry()
     for (const entry of this.mountedTranscriptBlocks) {
       if (entry.mountedComponent instanceof SearchHighlightComponent) entry.mountedComponent.clear()
       entry.searchSelection = undefined
@@ -9478,6 +10083,8 @@ export class TuiApp {
     this.searchPresentationDiagnostics.fullRenders = 0
     this.searchPresentationDiagnostics.transcriptSets = 0
     this.searchPresentationDiagnostics.plainTextProofs = 0
+    this.searchPresentationDiagnostics.markdownProofs = 0
+    this.searchPresentationDiagnostics.occlusionCorrections = 0
   }
 
   /** Test-only transcript presentation counters. */
@@ -11577,7 +12184,7 @@ export class TuiApp {
       let mountedComponent: Component | undefined
       let searchSelection: RenderedSearchSelection | undefined
       let searchSelector: RenderedSearchSelector | undefined
-      const presentation = this.blockSearchPresentation(block, rendered, width, subCallRegions, deliverableRegions)
+      const presentation = this.blockSearchPresentation(block, component, rendered, width, subCallRegions, deliverableRegions)
       if (presentation.selector !== undefined && presentation.selection !== undefined) {
         searchSelection = presentation.selection
         searchSelector = presentation.selector
@@ -11823,12 +12430,126 @@ export class TuiApp {
     return !normalize(residual).includes(normalize(query))
   }
 
+  /** Publish (or clear) the CURRENT render epoch's Source-only notice. The
+   * notice is presentation metadata for one epoch: it never feeds matching,
+   * span proof or a cache key, and the query/revision guard makes a stale pass
+   * unable to speak for a newer target. */
+  private recordSearchSourceNotice(
+    target: TranscriptSearchPresentationTarget,
+    disposition: 'not-painted' | 'unproven' | undefined,
+  ): void {
+    if (disposition === undefined) {
+      this.searchSourceNotice = undefined
+      return
+    }
+    const snippet = this.fullSearchSourceSnippet(target)
+    this.searchSourceNotice = {
+      kind: disposition,
+      sourceLabel: searchSourceLabel(target.match.source, target.message),
+      ...(snippet === undefined ? {} : { snippet }),
+      query: target.query,
+      revision: this.searchPresentationRevision,
+    }
+  }
+
+  /**
+   * The Source-only notice for the CURRENT Full target, or `undefined`.
+   *
+   * Reads only current state: another scope, an exact cell proof, no current
+   * target, a missing/hidden/superseded Search overlay, or a notice from an
+   * older presentation epoch all return `undefined` instead of a stale fact.
+   */
+  currentFullSearchNotice(): FullSearchSourceNotice | undefined {
+    const target = this.searchTarget
+    const overlay = this.searchOverlay
+    if (target === undefined || overlay === undefined || overlay.isHidden()) return undefined
+    if (this.searchComponent?.getScope() !== 'full') return undefined
+    if (!this.overlayBroker.isOnlyVisibleModal(overlay)) return undefined
+    const notice = this.searchSourceNotice
+    if (notice === undefined) return undefined
+    if (notice.query !== target.query || notice.revision !== this.searchPresentationRevision) return undefined
+    return {
+      kind: notice.kind,
+      sourceLabel: notice.sourceLabel,
+      ...(notice.snippet === undefined ? {} : { snippet: notice.snippet }),
+    }
+  }
+
+  /**
+   * The optional Source-only context: ONLY a Host-owned single-text User
+   * message or an EXPANDED Host Thinking body may contribute one. Every
+   * Assistant Markdown (including a hidden href), Tool/Command/Workflow,
+   * Plugin, Visual and Delivered source is label-only, and a collapsed or
+   * mixed-content body has no raw span to project.
+   */
+  private fullSearchSourceSnippet(target: TranscriptSearchPresentationTarget): string | undefined {
+    const source = target.match.source
+    if (source.kind !== 'message') return undefined
+    const message = target.message
+    if (message.kind !== 'user' && message.kind !== 'thinking') return undefined
+    const entry = this.messageComponents.get(message)
+    if (entry === undefined || entry.rendererId !== undefined) return undefined
+    // A COLLAPSED Host Thinking card paints only its compact preview: its raw
+    // body is hidden transcript text, so it is never a snippet source. The
+    // search reveal expands a Thinking target; only an explicit user collapse
+    // reaches this state, and then the notice stays label-only.
+    if (message.kind === 'thinking' && entry.expanded !== true) return undefined
+    if (message.kind === 'user' && message.content?.some(part => part.type !== 'text') === true) return undefined
+    const memo = this.searchSourceSnippetMemo
+    if (memo !== undefined && memo.revision === this.searchPresentationRevision
+      && memo.query === target.query && memo.message === message && memo.text === message.text) {
+      return memo.snippet
+    }
+    const snippet = this.projectFullSearchSourceSnippet(target, message)
+    this.searchSourceSnippetMemo = {
+      revision: this.searchPresentationRevision,
+      query: target.query,
+      message,
+      text: message.text,
+      snippet,
+    }
+    return snippet
+  }
+
+  private projectFullSearchSourceSnippet(
+    target: TranscriptSearchPresentationTarget,
+    message: Extract<TranscriptMessage, { kind: 'user' | 'thinking' }>,
+  ): string | undefined {
+    const range = target.match.normalizedSourceRange
+    if (range === undefined) return undefined
+    if (message.text.length > SNIPPET_MAX_SOURCE_LENGTH) return undefined
+    const normalizedQuery = target.query.trim().toLowerCase()
+    if (normalizedQuery === '') return undefined
+    if (message.text.toLowerCase().slice(range.start, range.end) !== normalizedQuery) return undefined
+    const rawRange = rawSourceRangeForNormalizedMatch(message.text, range)
+    if (rawRange === undefined) return undefined
+    const displayStart = snippetStartBefore(message.text, rawRange.start, 12)
+    const displayEnd = snippetEndAfter(message.text, rawRange.end, 12)
+    // The guard is the displayed window EXPANDED to whole whitespace-delimited
+    // tokens: a twelve-grapheme window can split an address/URL/path into a
+    // fragment the classifier would miss, so the classifier must see the whole
+    // token that overlaps the displayed context.
+    const guardStart = snippetTokenStart(message.text, displayStart)
+    const guardEnd = snippetTokenEnd(message.text, displayEnd)
+    if (guardStart === undefined || guardEnd === undefined) return undefined
+    if (!searchSourceSnippetTextIsSafe(message.text.slice(guardStart, guardEnd))) return undefined
+    const rawSnippet = message.text.slice(displayStart, displayEnd)
+    // BOTH the raw display window and the projected single row must be safe:
+    // the raw one proves there is no escape/control span hiding in what would
+    // be displayed, the projected one proves the display row itself.
+    if (!searchSourceSnippetTextIsSafe(rawSnippet)) return undefined
+    const line = sanitizedPhysicalLine(rawSnippet)
+    if (!searchSourceSnippetTextIsSafe(line)) return undefined
+    return line
+  }
+
   /** The rendered search presentation of ONE block while a search is active.
    * The current target builds PROVEN source geometry from the renderer-declared
    * regions; every other VISIBLE message block that is a semantic match card is
    * decorated WEAKLY (approximate visual hint, never semantic identity). */
   private blockSearchPresentation(
     block: TranscriptRenderBlock,
+    component: Component,
     rendered: readonly string[],
     renderWidth: number,
     subCallRegions: ReadonlyArray<SearchSourceRegion> | undefined,
@@ -11870,6 +12591,10 @@ export class TuiApp {
       // collapsed but is a fully legitimate anchor target; never suppress it.
       && target.match.source.kind === 'message'
       && this.searchTargetRendersNoOccurrence(block.message, target.query)) {
+      // The source text IS consumed by the card's own Visual rendering: this is
+      // the ONE non-Assistant NOT_PAINTED evidence, and the notice must reach it
+      // even though the block owns no selection (no fabricated visual row).
+      this.recordSearchSourceNotice(target, 'not-painted')
       return { current: false }
     }
     if (current) {
@@ -11896,6 +12621,22 @@ export class TuiApp {
             && hostThinkingBodyRange !== undefined
             && hostThinkingBodyRange.rowStart < hostThinkingBodyRange.rowEnd
             && messageEntry.component instanceof Text)
+      // A single Host-native Assistant Markdown card can prove its own painted
+      // source cells through the SAME live renderer. The final component
+      // identity decides ownership: a plugin renderer, a composite card
+      // (multi-block / open-opaque / visual / delivered / interrupted) or a
+      // stale cached instance keeps the honest source anchor and is never
+      // scanned for a homonym inside one of its private children.
+      const assistantProofHost = block.message.kind === 'assistant'
+        && messageEntry !== undefined
+        && messageEntry.rendererId === undefined
+        && messageEntry.component === component
+        && component instanceof AssistantMarkdownComponent
+        && block.message.content === undefined
+        && block.message.displayBlocks === undefined
+        && block.message.interrupted !== true
+        && (block.message.deliverables?.length ?? 0) === 0
+        && (assistantVisualPresentation(block.message)?.publications.length ?? 0) === 0
       const selector: RenderedSearchSelector = {
         query: target.query,
         sourceOccurrence: target.match.sourceOccurrence,
@@ -11904,6 +12645,7 @@ export class TuiApp {
         ...(geometry === undefined ? {} : { geometry }),
       }
       let painted: readonly AltScreenSearchSegment[] | undefined
+      let disposition: 'not-painted' | 'unproven' | undefined
       if (plainTextProofHost && messageEntry !== undefined
         && (block.message.kind === 'user' || block.message.kind === 'thinking')
         && target.match.source.kind === 'message' && target.match.normalizedSourceRange !== undefined) {
@@ -11928,7 +12670,24 @@ export class TuiApp {
             )
           }
         }
+      } else if (assistantProofHost && block.message.kind === 'assistant'
+        && component instanceof AssistantMarkdownComponent
+        && target.match.source.kind === 'message' && target.match.normalizedSourceRange !== undefined) {
+        const proof = this.proveAssistantMarkdownSourceCells(
+          block.message.text,
+          target.match.normalizedSourceRange,
+          target.query,
+          component,
+          rendered,
+          renderWidth,
+        )
+        if (proof.kind === 'proven') painted = proof.segments
+        else disposition = proof.kind
       }
+      // Everything the current renderer cannot prove (tool/command/workflow/
+      // plugin/composite/collapsed bodies, an ineligible source kind) is
+      // honestly `unproven`, never "no visible cell".
+      disposition ??= painted === undefined ? 'unproven' : undefined
       let selection = selectRenderedSearchMatch(matches, selector)
       if (painted !== undefined) {
         selection = {
@@ -11939,15 +12698,27 @@ export class TuiApp {
           selectedRow: painted[0]!.row,
         }
       }
+      // The Source-only notice belongs to the FINAL selection, not to one proof
+      // channel: a direct-field region (Workflow run/phase/member, Tool,
+      // Command, deliverable) can be exact through `buildSourceGeometry()` even
+      // though the dedicated User/Thinking/Assistant channel produced nothing.
+      // Record it only when the committed selection is genuinely non-exact.
+      this.recordSearchSourceNotice(target, selection.exact ? undefined : disposition)
       const scrollRange = selectRenderedSearchScrollRange(matches, selection, selector, regions)
-      const committedSelection = scrollRange === undefined
+      const committedSelection: RenderedSearchSelection = scrollRange === undefined
         ? selection
         : {
             ...selection,
             ...(selection.exact ? {} : { selectedRow: scrollRange.startRow }),
             scrollRange,
           }
-      return { selector, selection: committedSelection, current }
+      return {
+        selector,
+        selection: selection.exact || disposition === undefined
+          ? committedSelection
+          : { ...committedSelection, sourceDisposition: disposition },
+        current,
+      }
     }
     const selector: RenderedSearchSelector = {
       query: target.query,
@@ -11956,6 +12727,84 @@ export class TuiApp {
       ...(hostThinkingBodyRange === undefined ? {} : { suppressMatchesOnStaleGeometry: true }),
     }
     return { selector, selection: selectRenderedSearchMatch(matches, selector), current }
+  }
+
+  /**
+   * Prove ONE current Assistant Markdown semantic range against the cells the
+   * CURRENT Host card really painted. A failed proof is classified, not
+   * discarded: `not-painted` is F1's own evidence that the source has no
+   * visible cell, every other rejection is `unproven`.
+   *
+   * The semantic source range is normalized/lowercase; the card paints
+   * `sanitizeDisplayText(message.text)`. The projection is accepted only when
+   * the raw range survives lowercasing, the query still describes THIS range,
+   * and the per-part sanitized projection is additive over the whole source
+   * (so a control sequence or sanitized-away codepoint is never guessed onto a
+   * visible homonym). The F1 proof then answers for the card's own Markdown,
+   * and its card-relative segments are re-read from the current `rendered`
+   * rows: only cells that reproduce exactly `safeHit` in order are accepted.
+   */
+  private proveAssistantMarkdownSourceCells(
+    messageText: string,
+    normalizedSourceRange: { readonly start: number; readonly end: number },
+    query: string,
+    component: AssistantMarkdownComponent,
+    rendered: readonly string[],
+    renderWidth: number,
+  ): AssistantMarkdownSourceProof {
+    const normalizedQuery = query.trim().toLowerCase()
+    if (normalizedQuery === '') return { kind: 'unproven' }
+    const rawRange = rawSourceRangeForNormalizedMatch(messageText, normalizedSourceRange)
+    if (rawRange === undefined) return { kind: 'unproven' }
+    // The range must still describe the CURRENT query over the CURRENT source:
+    // an offset from an older query is not evidence for this one.
+    if (messageText.toLowerCase().slice(normalizedSourceRange.start, normalizedSourceRange.end) !== normalizedQuery) {
+      return { kind: 'unproven' }
+    }
+    const rawBefore = messageText.slice(0, rawRange.start)
+    const rawHit = messageText.slice(rawRange.start, rawRange.end)
+    const rawAfter = messageText.slice(rawRange.end)
+    const safeBefore = sanitizeDisplayText(rawBefore)
+    const safeHit = sanitizeDisplayText(rawHit)
+    const safeAfter = sanitizeDisplayText(rawAfter)
+    // A per-part projection that does not reassemble the whole painted source
+    // (raw control sequences, CRLF/Tab state, removed escape spans) is not a
+    // local range in the sanitized component source.
+    if (safeHit === '' || safeBefore + safeHit + safeAfter !== sanitizeDisplayText(messageText)) {
+      return { kind: 'unproven' }
+    }
+    this.searchPresentationDiagnostics.markdownProofs += 1
+    const proof = component.proveSourceSpan(
+      { start: safeBefore.length, end: safeBefore.length + safeHit.length },
+      renderWidth,
+    )
+    // NOT_PAINTED (a hidden link destination / markup delimiter) is real
+    // evidence that the source HAS no visible cell; UNPROVEN (reflow, rewritten
+    // glyph, ambiguous token origin) is only an absent position proof. Both
+    // keep the source anchor.
+    if (proof.kind === 'NOT_PAINTED') return { kind: 'not-painted' }
+    if (proof.kind !== 'PROVEN') return { kind: 'unproven' }
+    // The proof speaks for the render epoch it measured; the mounted rows are
+    // that same epoch. Every segment must sit inside a real row, stay ordered
+    // and reproduce the projected source text from the ACTUAL cells. The
+    // component's bullet/indent offset means a segment can never begin in the
+    // bullet band, and a wrongly shifted one would not recover `safeHit`.
+    let previousRow = -1
+    let previousEndCol = -1
+    const collected: string[] = []
+    for (const segment of proof.segments) {
+      const line = rendered[segment.row]
+      if (line === undefined) return { kind: 'unproven' }
+      const lineWidth = visibleWidth(line)
+      if (segment.row < previousRow) return { kind: 'unproven' }
+      if (segment.row === previousRow && segment.startCol < previousEndCol) return { kind: 'unproven' }
+      if (segment.startCol < 0 || segment.endCol <= segment.startCol || segment.endCol > lineWidth) return { kind: 'unproven' }
+      collected.push(stripTerminalSequences(sliceByColumn(line, segment.startCol, segment.endCol - segment.startCol, true)))
+      previousRow = segment.row
+      previousEndCol = segment.endCol
+    }
+    if (collected.join('') !== safeHit) return { kind: 'unproven' }
+    return { kind: 'proven', segments: proof.segments }
   }
 
   /** The proven source regions of one rendered card: renderer-recorded absolute
@@ -12151,7 +13000,7 @@ export class TuiApp {
       const workflowHits = workflowInfo === undefined
         ? undefined
         : workflowInfo.hits.map(hit => ({ ...hit, top: hit.top + rendered.length - workflowInfo.total }))
-      const searchPresentation = this.blockSearchPresentation(entry.block, rendered, width, subCallRegions, deliverableRegions)
+      const searchPresentation = this.blockSearchPresentation(entry.block, entry.component, rendered, width, subCallRegions, deliverableRegions)
       const searchSelection = searchPresentation.selection
       return {
         ...entry,
@@ -12313,17 +13162,23 @@ export class TuiApp {
   ): void {
     const paddingRows = this.focusLivePaddingFor(renderedBlocks, projectionExpanded, width)
     this.currentSearchTranscriptRange = undefined
+    this.currentSearchPaintedSegments = undefined
     this.updateRenderedViewSearchGeometry(renderedBlocks, width, paddingRows)
     const rows: FullscreenRowEntry[] = []
     let transcriptRow = 0
+    let searchRange: RenderedSearchScrollRange | undefined
+    let searchSegments: readonly PaintedTargetSegment[] | undefined
     renderedBlocks.forEach((entry, index) => {
       const height = this.normalTranscriptBlockHeight(entry, index, renderedBlocks.length)
       const scrollRange = entry.searchSelection?.scrollRange
       if (scrollRange !== undefined) {
-        this.currentSearchTranscriptRange = {
+        searchRange = {
           startRow: transcriptRow + scrollRange.startRow,
           endRow: transcriptRow + scrollRange.endRow,
         }
+        searchSegments = entry.searchSelection === undefined
+          ? undefined
+          : this.paintedSegmentsForSelection(entry.searchSelection, transcriptRow)
       }
       if (height === 0) {
         rows.push(this.fullscreenRowEntry(entry, 0, false))
@@ -12381,7 +13236,12 @@ export class TuiApp {
       }
     }
     this.transcriptChromeHeight = chromeHeight
-    if (mount) this.transcriptWelcomeHeight = this.welcomeCard.render(this.terminal.columns).length
+    this.transcriptWelcomeHeight = this.welcomeCard.render(this.terminal.columns).length
+    this.currentSearchTranscriptRange = searchRange
+    this.currentSearchPaintedSegments = searchSegments?.map(segment => ({
+      ...segment,
+      documentRow: this.transcriptWelcomeHeight + segment.documentRow,
+    }))
     this.transcriptContentHeight = this.transcriptWelcomeHeight + transcriptRow + chromeHeight
     this.messageRows = rows
     this.fullscreenRowsDirty = true
@@ -12517,6 +13377,10 @@ export class TuiApp {
   ): void {
     void reason
     this.searchPresentationDiagnostics.rebuilds += 1
+    // The rebuild re-derives the current target's cells and Source-only state
+    // below; an older epoch's notice must not survive a pass that finds no
+    // current block.
+    this.searchSourceNotice = undefined
     // Every rebuild path prunes the cache to the live set first. The caller
     // supplies the already-derived projection blocks when setTranscript() has
     // classified the commit, so the semantic epoch is projected once.
@@ -12663,6 +13527,9 @@ export class TuiApp {
     // dispose the mounted live-assistant component and a paint rendered it as
     // zero rows (fullscreen Focus transient collapse).
     const projectionExpanded = this.focusProjectionExpandedTurns()
+    // This pass re-derives the current target's cells and Source-only state; an
+    // older epoch's notice must not survive it when the target block is absent.
+    this.searchSourceNotice = undefined
     const remeasureStart = this.scrollProfiler.enabled ? performance.now() : 0
     const renderedBlocks = this.remeasureTranscriptBlocks(this.mountedTranscriptBlocks, width)
     if (this.scrollProfiler.enabled) this.scrollFrameRemeasureMs += performance.now() - remeasureStart
@@ -12687,18 +13554,24 @@ export class TuiApp {
     this.mountedTranscriptBlocks = renderedBlocks
     const paddingRows = this.focusLivePaddingFor(renderedBlocks, projectionExpanded, width)
     this.currentSearchTranscriptRange = undefined
+    this.currentSearchPaintedSegments = undefined
     this.updateRenderedViewSearchGeometry(renderedBlocks, width, paddingRows)
     const rows: FullscreenRowEntry[] = []
     let transcriptRow = 0
+    let searchRange: RenderedSearchScrollRange | undefined
+    let searchSegments: readonly PaintedTargetSegment[] | undefined
     for (let index = 0; index < renderedBlocks.length; index += 1) {
       const entry = renderedBlocks[index]!
       const height = this.normalTranscriptBlockHeight(entry, index, renderedBlocks.length)
       const scrollRange = entry.searchSelection?.scrollRange
       if (scrollRange !== undefined) {
-        this.currentSearchTranscriptRange = {
+        searchRange = {
           startRow: transcriptRow + scrollRange.startRow,
           endRow: transcriptRow + scrollRange.endRow,
         }
+        searchSegments = entry.searchSelection === undefined
+          ? undefined
+          : this.paintedSegmentsForSelection(entry.searchSelection, transcriptRow)
       }
       rows.push(this.fullscreenRowEntry(entry, height, height > 0 && index < renderedBlocks.length - 1))
       const padding = paddingRows.get(index) ?? 0
@@ -12706,17 +13579,64 @@ export class TuiApp {
       transcriptRow += height + padding
     }
     this.transcriptWelcomeHeight = this.welcomeCard.render(this.terminal.columns).length
+    this.currentSearchTranscriptRange = searchRange
+    this.currentSearchPaintedSegments = searchSegments?.map(segment => ({
+      ...segment,
+      documentRow: this.transcriptWelcomeHeight + segment.documentRow,
+    }))
     this.transcriptContentHeight = this.transcriptWelcomeHeight + transcriptRow + this.transcriptChromeHeight
     this.messageRows = rows
     this.fullscreenRowsDirty = true
   }
 
-  /** Reveal the fullscreen transcript viewport on the current search range
-   * (plan S7 §12): reuse the geometry the last rebuild/remeasure already
-   * measured (perf plan S2 §5.6 — an ordinary search jump must NOT re-render
-   * the whole mounted view). An already-visible range is left in place; an
-   * outside range is positioned about one third down the viewport. Regular mode
-   * has no app-owned ScrollView — its materialized window is the contract. */
+  /** Retire the current-epoch search target geometry (range, proven cells and
+   * Source-only notice) as ONE fact: every seam that loses the target must use
+   * this so a stale cell/notice can never scroll or paint for a newer state. */
+  private clearCurrentSearchTargetGeometry(): void {
+    this.currentSearchTranscriptRange = undefined
+    this.currentSearchPaintedSegments = undefined
+    this.searchSourceNotice = undefined
+    this.searchSourceSnippetMemo = undefined
+  }
+
+  /** The proven cells of one current search selection, in block-relative
+   * DOCUMENT rows (the welcome offset is added by the caller). A selection with
+   * no proven cells returns `undefined`, which makes the occlusion solver fall
+   * back to the conservative full-width anchor rows — never to guessed columns. */
+  private paintedSegmentsForSelection(
+    selection: RenderedSearchSelection,
+    blockContentRow: number,
+  ): readonly PaintedTargetSegment[] | undefined {
+    const segments = (selection.exactPaintedSegments?.length ?? 0) > 0
+      ? selection.exactPaintedSegments
+      : selection.selectedIndex >= 0 ? selection.matches[selection.selectedIndex]?.segments : undefined
+    if (segments === undefined) return undefined
+    return segments.map(segment => ({
+      documentRow: blockContentRow + segment.row,
+      startCol: segment.startCol,
+      endCol: segment.endCol,
+    }))
+  }
+
+  /** The real overlay rectangle in the SAME 0-based screen units as
+   * `TuiAltScreen.getPaintedBox`. Undefined while the box is hidden or was
+   * never painted. */
+  private searchOverlayRect(): PhysicalRect | undefined {
+    const overlay = this.searchOverlay
+    if (overlay === undefined || overlay.isHidden()) return undefined
+    const bounds = overlay.getBounds()
+    if (bounds === undefined || bounds.width <= 0 || bounds.height <= 0) return undefined
+    return { x: bounds.col, y: bounds.row, width: bounds.width, height: bounds.height }
+  }
+
+  /** Reveal the fullscreen transcript viewport on the current search range.
+   * Reuses the geometry the last rebuild/remeasure already measured (an
+   * ordinary search jump must NOT re-render the whole mounted view). When the
+   * Search overlay and the ScrollView have both really painted, the jump is
+   * solved against those TWO rectangles so a target behind the box is moved out
+   * from under it; otherwise the historical "already visible or one third down"
+   * placement stays in force. Regular mode has no app-owned ScrollView — its
+   * materialized window is the contract. */
   scrollToSearchTarget(): void {
     const scroll = this.fullscreenScroll
     const searchRange = this.currentSearchTranscriptRange
@@ -12726,13 +13646,94 @@ export class TuiApp {
     if (viewportHeight <= 0) return
 
     const before = scroll.scrollTop
-    const targetStart = this.transcriptWelcomeHeight + searchRange.startRow
-    const targetEnd = this.transcriptWelcomeHeight + searchRange.endRow
-    const visibleBottom = before + viewportHeight - 1
-    if (targetStart >= before && targetEnd <= visibleBottom) return
+    const welcomeHeight = this.transcriptWelcomeHeight
+    const viewport = this.fullscreen?.getPaintedBox(scroll)
+    const overlay = this.searchOverlayRect()
+    if (viewport !== undefined && overlay !== undefined) {
+      const choice = chooseSearchViewportTop({
+        viewport,
+        overlay,
+        currentScrollTop: before,
+        maxScrollTop: Math.max(0, this.transcriptContentHeight - viewportHeight),
+        targetRows: { start: welcomeHeight + searchRange.startRow, end: welcomeHeight + searchRange.endRow },
+        segments: this.currentSearchPaintedSegments ?? [],
+      })
+      if (choice.scrollTop !== before) scroll.scrollTo(choice.scrollTop, { disableFollow: true })
+    } else {
+      const targetStart = welcomeHeight + searchRange.startRow
+      const targetEnd = welcomeHeight + searchRange.endRow
+      const visibleBottom = before + viewportHeight - 1
+      if (!(targetStart >= before && targetEnd <= visibleBottom)) {
+        scroll.scrollTo(Math.max(0, targetStart - Math.floor(viewportHeight / 3)), { disableFollow: true })
+      }
+    }
+    // The box that painted this jump may have been a frame old (the Source-only
+    // notice can change the box height), so one correction is allowed on the
+    // next REAL frame; it re-solves with those boxes and never recurses.
+    this.registerSearchOcclusionCorrection()
+  }
 
-    const desiredTop = Math.max(0, targetStart - Math.floor(viewportHeight / 3))
-    scroll.scrollTo(desiredTop, { disableFollow: true })
+  /** Record the ONE post-paint correction allowed for the current navigation.
+   * Only an explicit navigation (or a resize) reaches here; a passive
+   * projection/stream/scroll repaint never does. */
+  private registerSearchOcclusionCorrection(): void {
+    const overlay = this.searchOverlay
+    const screen = this.fullscreen
+    const component = this.searchComponent
+    if (overlay === undefined || screen === undefined || component === undefined) return
+    const scope = component.getScope()
+    const query = scope === 'full' ? this.searchTarget?.query : this.renderedViewSearch?.query
+    if (query === undefined) return
+    this.pendingSearchOcclusionCorrection = {
+      screen,
+      overlay,
+      scope,
+      query,
+      presentationRevision: this.searchPresentationRevision,
+      viewIndex: this.renderedViewSearch?.currentIndex ?? -1,
+      columns: this.terminal.columns,
+      termRows: this.terminal.rows,
+    }
+  }
+
+  /** Consume the pending correction against the frame that just painted: only
+   * the same screen/overlay/scope/query/selection epoch may move the viewport,
+   * and at most once. A mismatch only retires the eligibility. */
+  private applyPendingSearchOcclusionCorrection(): boolean {
+    const pending = this.pendingSearchOcclusionCorrection
+    if (pending === undefined) return false
+    this.pendingSearchOcclusionCorrection = undefined
+    if (this.fullscreen !== pending.screen
+      || this.searchOverlay !== pending.overlay
+      || this.searchComponent?.getScope() !== pending.scope
+      || pending.overlay.isHidden()
+      || this.terminal.columns !== pending.columns
+      || this.terminal.rows !== pending.termRows
+      || !this.overlayBroker.isOnlyVisibleModal(pending.overlay)
+      || this.searchPresentationRevision !== pending.presentationRevision
+      || (this.renderedViewSearch?.currentIndex ?? -1) !== pending.viewIndex) return false
+    const query = pending.scope === 'full' ? this.searchTarget?.query : this.renderedViewSearch?.query
+    if (query !== pending.query) return false
+    const scroll = this.fullscreenScroll
+    const searchRange = this.currentSearchTranscriptRange
+    const viewport = scroll === undefined ? undefined : pending.screen.getPaintedBox(scroll)
+    const overlay = this.searchOverlayRect()
+    if (scroll === undefined || searchRange === undefined || viewport === undefined || overlay === undefined) return false
+    if (scroll.viewportHeight <= 0) return false
+    const before = scroll.scrollTop
+    const welcomeHeight = this.transcriptWelcomeHeight
+    const choice = chooseSearchViewportTop({
+      viewport,
+      overlay,
+      currentScrollTop: before,
+      maxScrollTop: Math.max(0, this.transcriptContentHeight - scroll.viewportHeight),
+      targetRows: { start: welcomeHeight + searchRange.startRow, end: welcomeHeight + searchRange.endRow },
+      segments: this.currentSearchPaintedSegments ?? [],
+    })
+    if (choice.scrollTop === before) return false
+    this.searchPresentationDiagnostics.occlusionCorrections += 1
+    scroll.scrollTo(choice.scrollTop, { disableFollow: true })
+    return true
   }
 
   /** Discard any open scroll-profiler frame window WITHOUT emitting. Called
@@ -13409,6 +14410,13 @@ export class TuiApp {
       viewerBack: this.paintedViewerBack(paintedHeight(this.header), paintedHeight(this.viewerSubjectBar)),
     }
     if (effectiveImageProtocol(this.graphics, this.imageProtocolPreference) === 'sixel') this.refreshCommittedPixelHitRows()
+    // A resize re-wraps the transcript and may move the overlay: the current
+    // target gets ONE re-solve against the new real boxes, and only while a
+    // Search target still exists. No target, no scroll.
+    if (resized && this.searchOverlay !== undefined && this.currentSearchTranscriptRange !== undefined) {
+      this.registerSearchOcclusionCorrection()
+    }
+    if (this.applyPendingSearchOcclusionCorrection()) this.requestRender()
     if (this.scrollProfiler.enabled && this.scrollFramePending) {
       const now = performance.now()
       this.scrollProfiler.emit({
@@ -13425,7 +14433,7 @@ export class TuiApp {
         viewport: scroll?.viewportHeight ?? 0,
         scrollTop: scroll?.scrollTop ?? 0,
         preset: this.displayPreset(),
-        searchActive: this.searchOverlay !== undefined,
+        searchActive: this.searchOverlay !== undefined || this.searchOpening !== undefined,
       })
       this.scrollFramePending = false
     }
@@ -15392,7 +16400,8 @@ export class TuiApp {
       this.searchRevealGranted = false
       this.searchRevealHostOwned = false
       this.searchPresentationRevision += 1
-      this.currentSearchTranscriptRange = undefined
+      this.clearCurrentSearchTargetGeometry()
+      this.pendingSearchOcclusionCorrection = undefined
     }
     this.searchSuppressedSubCalls.clear()
     this.searchMatchMessages = new Set()
@@ -19430,8 +20439,12 @@ export class TuiApp {
       // re-renders it at the new width, so tables reflow instead of
       // re-wrapping a frozen render (the 5a76526 regression).
       const bullet = color.primary(iconPrefix('assistant-bullet', this.iconStyle))
+      // The card is the SAME bulleted live Markdown; the subclass only makes
+      // that Markdown's own source-cell proof reachable for the search
+      // presentation (F2). Every other build (plugin, composite, visual,
+      // delivered/interrupted wrapper) is unchanged.
       const makeAssistantText = (text: string): Component =>
-        new BulletedComponent(new Markdown(sanitizeDisplayText(text), 0, 0, markdownTheme, undefined, HOST_MARKDOWN_OPTIONS), bullet)
+        new AssistantMarkdownComponent(new Markdown(sanitizeDisplayText(text), 0, 0, markdownTheme, undefined, HOST_MARKDOWN_OPTIONS), bullet)
       // ONLY the exact final Assistant row carries a sidecar (the runtime
       // derives it from the complete Direct Session log). Every other answer
       // keeps the original path byte for byte.
@@ -24976,7 +25989,7 @@ export class TuiApp {
       // `Ctrl+F` string and never the Transcript's search handler.
       isFindKey: (data) => {
         const resolution = this.keybindings.resolve(data, this.keybindingContext())
-        return resolution !== undefined && resolution.action === 'app.transcript.search'
+        return resolution !== undefined && (resolution.action === 'app.transcript.search' || resolution.action === 'app.transcript.search.view')
       },
       // One action advertises ONE key (design language §7.1): the keymap's primary
       // effective binding. The Job reserves the physical Home/End viewport keys
@@ -24986,11 +25999,17 @@ export class TuiApp {
       // takes its place. `/` stays the always-available Job-local alias, advertised
       // when nothing is left to name.
       findHint: () => {
-        const direct = this.keybindings.keysFor('app.transcript.search')
-          .filter(key => key !== 'home' && key !== 'end' && key !== JOB_LOCAL_KEYS.switchPage)
+        const direct = [
+           ...this.keybindings.keysFor('app.transcript.search.view'),
+           ...this.keybindings.keysFor('app.transcript.search'),
+         ]
+          .filter(key => !JOB_LOCAL_FIND_RESERVED_KEYS.has(key))
         const first = direct[0]
         if (first !== undefined) return formatKeyId(first)
-        const leader = this.keybindings.leaderKeysFor('app.transcript.search')[0]
+        const leader = [
+          ...this.keybindings.leaderKeysFor('app.transcript.search.view'),
+          ...this.keybindings.leaderKeysFor('app.transcript.search'),
+        ].find(key => !JOB_LOCAL_FIND_RESERVED_KEYS.has(key))
         return leader === undefined ? '' : formatLeaderSequence(leader)
       },
       focusComponent: (component) => screen.setFocus(component),

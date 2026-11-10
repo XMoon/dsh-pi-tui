@@ -89,6 +89,7 @@ export class ScriptedStreamingAdapter extends LlmAdapter {
   /** Every model request that observed its caller's ABORT (the authoritative
    *  fact that an existing cancellation path reached the live request). */
   readonly aborts: string[] = []
+  readonly emittedReasoningChunks: Array<{ readonly step: number; readonly text: string }> = []
   /** How many model requests were issued (the skill path issues one too). */
   calls = 0
   constructor(deltas: readonly string[], hold?: () => Promise<void>) {
@@ -141,6 +142,8 @@ class ScriptedToolStepSequenceAdapter extends ScriptedStreamingAdapter {
   private readonly scriptedSteps: readonly ScriptedModelStep[]
   private readonly holdBeforeStep: ((stepIndex: number, signal?: AbortSignal) => Promise<void>) | undefined
   private readonly holdToolArguments: ((stepIndex: number, signal?: AbortSignal) => Promise<void>) | undefined
+  private readonly scriptedReasoningDeltas: readonly string[] | undefined
+  private readonly holdReasoningDelta: ((stepIndex: number, deltaIndex: number, signal?: AbortSignal) => Promise<void>) | undefined
   private stepIndex = 0
 
   constructor(
@@ -149,11 +152,15 @@ class ScriptedToolStepSequenceAdapter extends ScriptedStreamingAdapter {
     hold?: () => Promise<void>,
     holdBeforeStep?: (stepIndex: number, signal?: AbortSignal) => Promise<void>,
     holdToolArguments?: (stepIndex: number, signal?: AbortSignal) => Promise<void>,
+    scriptedReasoningDeltas?: readonly string[],
+    holdReasoningDelta?: (stepIndex: number, deltaIndex: number, signal?: AbortSignal) => Promise<void>,
   ) {
     super(deltas, hold)
     this.scriptedSteps = steps
     this.holdBeforeStep = holdBeforeStep
     this.holdToolArguments = holdToolArguments
+    this.scriptedReasoningDeltas = scriptedReasoningDeltas
+    this.holdReasoningDelta = holdReasoningDelta
   }
 
   override async *stream(options: { readonly signal?: AbortSignal }): AsyncIterable<StreamChunk> {
@@ -167,17 +174,29 @@ class ScriptedToolStepSequenceAdapter extends ScriptedStreamingAdapter {
     await this.holdBeforeStep?.(stepIndex, options.signal)
     this.stepIndex += 1
     const { text, toolCall } = scripted
-    yield { type: 'block-start', index: 0, blockType: 'text' }
-    yield { type: 'text-delta', index: 0, text }
-    yield { type: 'block-end', index: 0, block: { type: 'text', text } }
+    const reasoning = this.scriptedReasoningDeltas
+    const textIndex = reasoning === undefined ? 0 : 1
+    const toolCallIndex = reasoning === undefined ? 1 : 2
+    if (reasoning !== undefined) {
+      yield { type: 'block-start', index: 0, blockType: 'reasoning' }
+      for (const [deltaIndex, delta] of reasoning.entries()) {
+        await this.holdReasoningDelta?.(stepIndex, deltaIndex, options.signal)
+        this.emittedReasoningChunks.push({ step: stepIndex, text: delta })
+        yield { type: 'reasoning-delta', index: 0, text: delta }
+      }
+      yield { type: 'block-end', index: 0, block: { type: 'reasoning', text: reasoning.join('') } }
+    }
+    yield { type: 'block-start', index: textIndex, blockType: 'text' }
+    yield { type: 'text-delta', index: textIndex, text }
+    yield { type: 'block-end', index: textIndex, block: { type: 'text', text } }
     if (toolCall === undefined) {
       yield { type: 'finish', reason: { kind: 'stop' } }
       return
     }
-    yield { type: 'block-start', index: 1, blockType: 'tool-call' }
+    yield { type: 'block-start', index: toolCallIndex, blockType: 'tool-call' }
     yield {
       type: 'tool-call-delta',
-      index: 1,
+      index: toolCallIndex,
       id: ToolCallId(toolCall.callId),
       name: toolCall.name,
       argumentsDelta: toolCall.arguments,
@@ -185,7 +204,7 @@ class ScriptedToolStepSequenceAdapter extends ScriptedStreamingAdapter {
     await this.holdToolArguments?.(stepIndex, options.signal)
     yield {
       type: 'block-end',
-      index: 1,
+      index: toolCallIndex,
       block: { type: 'tool-call', id: ToolCallId(toolCall.callId), name: toolCall.name, arguments: toolCall.arguments },
     }
     yield { type: 'finish', reason: { kind: 'tool-calls' } }
@@ -243,6 +262,8 @@ export interface DirectTspFixture {
   cancellations(): number
   /** How many model requests the scripted adapter served. */
   modelCalls(): number
+  /** Actual reasoning-delta chunks emitted by configured sequence steps. */
+  reasoningChunks(): readonly { readonly step: number; readonly text: string }[]
   /**
    * Attach a ONE-TO-ONE recorder to the PRODUCTION-CREATED Direct session
    * writer's `prompt` (the review's exact-once qualification). The patch
@@ -270,6 +291,7 @@ export interface DirectTspFixture {
     readonly message: unknown
     readonly agentStatus: string
     readonly outcome: WriteOutcome
+    readonly sessionEvents: () => readonly { readonly type: string; readonly data?: unknown }[]
   }) => void): { readonly calls: () => number; readonly detach: () => void }
   settle(): Promise<void>
   /** Release the parked mount Workspace preflight (only with
@@ -334,6 +356,10 @@ export interface DirectTspFixtureOptions {
    *  request's optional text becomes an official Assistant message between
    *  canonical Work spans. */
   readonly scriptedToolCalls?: readonly ScriptedModelStep[]
+  /** Reasoning deltas emitted in-order for every configured sequence step. */
+  readonly scriptedReasoningDeltas?: readonly string[]
+  /** Hold one reasoning delta before delivery for a source-to-UI live witness. */
+  readonly holdScriptedReasoningDelta?: (stepIndex: number, deltaIndex: number, signal?: AbortSignal) => Promise<void>
   /** A narrow, test-only observation barrier before one sequence index; when
    *  supplied the callback owns the release/abort race for that model step. */
   readonly holdScriptedToolStep?: (stepIndex: number, signal?: AbortSignal) => Promise<void>
@@ -468,6 +494,8 @@ export interface DirectTspFixtureOptions {
    * `/logout` truthfully instead of reporting success).
    */
   readonly withoutCredentials?: boolean
+  /** Mount the official PTC tool executor with the supplied qualification runtime. */
+  readonly ptcMode?: { readonly runtime: unknown }
   /**
    * Mount the official `@deepseek-ai/dsh-working-directory` Session directory
    * owner (the same row the shipped base layer provides) through the testkit's
@@ -573,8 +601,12 @@ export async function createDirectTspFixture(
   ctx = new Context()
   ownCleanup(() => ctx.fiber.dispose())
 
+  if (options.ptcMode !== undefined) ctx.provide('ptcRuntime', options.ptcMode.runtime as never)
   await ctx.plugin(TypertRegistry)
-  await mountAgentLoopTestDependencies(ctx, options.workingDirectory === true ? { workingDirectory: true } : {})
+  await mountAgentLoopTestDependencies(ctx, {
+    ...(options.workingDirectory === true || options.ptcMode !== undefined ? { workingDirectory: true } : {}),
+    ...(options.ptcMode !== undefined ? { tools: { mode: 'ptc' as const } } : {}),
+  })
   persistenceFiber = await ctx.plugin(JsonlSessionPersistence, { root: join(workRoot, 'persistence') })
   await mountAgentLoopTestHarness(ctx)
   llmAdapter = options.scriptedToolCalls !== undefined
@@ -584,6 +616,8 @@ export async function createDirectTspFixture(
       options.streamHold,
       options.holdScriptedToolStep,
       options.holdScriptedToolCallArguments,
+      options.scriptedReasoningDeltas,
+      options.holdScriptedReasoningDelta,
     )
     : options.scriptedToolCall === undefined
       ? new ScriptedStreamingAdapter(options.deltas ?? ['B2', '-DIRECT', '-OK'], options.streamHold)
@@ -842,6 +876,7 @@ export async function createDirectTspFixture(
     readonly message: unknown
     readonly agentStatus: string
     readonly outcome: WriteOutcome
+    readonly sessionEvents: () => readonly { readonly type: string; readonly data?: unknown }[]
   }) => void): { readonly calls: () => number; readonly detach: () => void } => {
     const prototype = DirectSessionWriter.prototype as unknown as {
       prompt(this: DirectSessionWriter, sessionId: string, message: unknown, mode: 'queue' | 'steer'): Promise<WriteOutcome>
@@ -856,8 +891,14 @@ export async function createDirectTspFixture(
       // matched the warm-up's committed record while the real second write
       // was still pending and later rejected).
       settled.push(undefined)
-      const agent = (this as unknown as { agentFor(id: string): { session: { id: string }; status: string } | undefined }).agentFor(sessionId)
-      record({ sessionId, mode, message, agentStatus: agent?.status ?? 'unresolved', outcome })
+      const agent = (this as unknown as {
+        agentFor(id: string): {
+          session: { readonly id: string; snapshotEvents(): readonly { readonly type: string; readonly data?: unknown }[] }
+          status: string
+        } | undefined
+      }).agentFor(sessionId)
+      const sessionEvents = (): readonly { readonly type: string; readonly data?: unknown }[] => agent?.session.snapshotEvents() ?? []
+      record({ sessionId, mode, message, agentStatus: agent?.status ?? 'unresolved', outcome, sessionEvents })
       return outcome
     }
     return {
@@ -872,6 +913,7 @@ export async function createDirectTspFixture(
     hostCommandDisposers,
     cancellations: () => llmAdapter.aborts.length,
     modelCalls: () => llmAdapter.calls,
+    reasoningChunks: () => [...llmAdapter.emittedReasoningChunks],
     recordPrompts,
     settle,
     ...(releaseWorkspacePreflight === undefined ? {} : { releaseWorkspacePreflight }),

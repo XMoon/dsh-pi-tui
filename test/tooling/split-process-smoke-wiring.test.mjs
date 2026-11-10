@@ -8,8 +8,8 @@
  * — that skip is NOT the full smoke
  * passing: split-process development work runs `pnpm smoke:split-process`
  * manually under its own task plan. This tooling test is a lightweight
- * wiring/selector/CI/utility guard: it does NOT prove the full registered
- * case set (currently 18), Host/Client behaviour, Browser qualification or a
+ * wiring/selector/CI/utility guard: it does NOT prove the complete
+ * case registry, Host/Client behaviour, Browser qualification or a
  * Full PASS. Those claims are owned by the real lane runs and the shared
  * diagnostics tests.
  *
@@ -26,7 +26,7 @@ import { parse as parseYaml } from 'yaml'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 import { assertSelectedVerdict, runSelectedCase, waitForCondition } from '../../scripts/split-process-smoke.mjs'
 import { PR_A_WEB_ROWS, raceWithAbortableDeadline, redactWebQualificationText } from '../../scripts/smoke/split-process/web-helpers.mjs'
-import { createSmokeDiagnostics } from '../../scripts/lib/split-smoke-diagnostics.mjs'
+import { createSmokeDiagnostics, redactErrorForStep } from '../../scripts/lib/split-smoke-diagnostics.mjs'
 import { statusMatches } from '../../scripts/lib/split-smoke-processes.mjs'
 import {
   listSelectableCases,
@@ -165,6 +165,7 @@ test('the extracted split-smoke modules import without starting a lane', (t) => 
     'scripts/lib/split-smoke-profile.mjs',
     'scripts/lib/split-smoke-selection.mjs',
     'scripts/smoke/split-process/host-runtime-disabled.mjs',
+    'scripts/smoke/split-process/account-composition.mjs',
     'scripts/split-process-smoke.mjs',
     'scripts/split-process-upgrade-smoke.mjs',
   ].map(relative => JSON.stringify(pathToFileURL(join(ROOT, relative)).href))
@@ -297,6 +298,28 @@ test('the frozen Web roster matches the Host-only overlay exactly and stays defa
   assert.deepEqual(declared.map(row => row.name), PR_A_WEB_ROWS.map(row => row.name),
     'the overlay Web packages drifted from the frozen roster')
   assert.ok(declared.every(row => row.disabled === true), 'every Web row stays disabled by default')
+})
+
+test('account callback failures redact state, code, PKCE and cookie from reports', () => {
+  const raw = [
+    'navigation failed at http://127.0.0.1:43121/oauth/callback?code=one-time&state=private-state',
+    'code_verifier=private-verifier code_challenge=private-challenge redirect_uri=http://127.0.0.1:43121/oauth/callback',
+    'Set-Cookie: session=private-cookie',
+  ].join('\n')
+  const redacted = redactErrorForStep(raw, 'case/account.official-composition')
+  for (const secret of ['one-time', 'private-state', 'private-verifier', 'private-challenge', 'private-cookie']) {
+    assert.equal(redacted.includes(secret), false, `${secret} must not survive the account failure report`)
+  }
+  const jsonSecrets = JSON.stringify({ state: 'json-state-secret', code: 'json-code-secret', code_verifier: 'json-verifier-secret' })
+  const jsonRedacted = redactErrorForStep(jsonSecrets, 'case/account.official-composition')
+  for (const secret of ['json-state-secret', 'json-code-secret', 'json-verifier-secret']) {
+    assert.equal(jsonRedacted.includes(secret), false, `JSON field ${secret} must not survive the account failure report`)
+  }
+  assert.match(jsonRedacted, /"code_verifier":"<redacted>"/u)
+  assert.match(redacted, /state=<redacted>/u)
+  assert.match(redacted, /code=<redacted>/u)
+  assert.match(redacted, /http:\/\/127\.0\.0\.1:<port>/u)
+  assert.match(redacted, /set-cookie: <redacted>/iu)
 })
 
 test('the Web qualification redactor removes every credential shape from retained text', () => {
@@ -480,7 +503,14 @@ test('the selectable registry is the single source for listing, resolution and t
   }
 })
 
-test('selected dispatch fails closed on non-PASS Web verdicts', () => {
+test('selected dispatch fails closed on non-PASS Web and Account verdicts', () => {
+  assert.equal(assertSelectedVerdict('account.official-composition', {
+    status: 'PASS', browser: 'PASS', verifiedCallback: true, pkce: true,
+    initialSignedOutWatch: true, accountRouteChangedFromStub: true,
+    hostTaskKnownFalseObserved: true, wrongCodeWithValidPkce: true, missingHostBinding: true,
+  }), undefined)
+  assert.throws(() => assertSelectedVerdict('account.official-composition', { status: 'PASS', browser: 'NOT_RUN' }),
+    /selected account\.official-composition/u)
   assert.equal(assertSelectedVerdict('web.official-composition', { status: 'PASS', browser: 'PASS' }), undefined)
   assert.equal(assertSelectedVerdict('web.runtime-toggle', { status: 'PASS', browser: 'PASS' }), undefined)
   assert.equal(assertSelectedVerdict('web.startup-preference', { verified: true }), undefined)

@@ -47,7 +47,7 @@ export const SETTINGS_DIRECT_PAGE_STUBS = {
     startSignIn: async () => { throw new Error('account unavailable') },
     cancelSignIn: async () => { throw new Error('account unavailable') },
     signOut: async () => { throw new Error('account unavailable') },
-    hasRunningAccountTasks: () => false,
+    hasRunningAccountTasks: async () => false,
   },
   /** The shipped profile-wide visual-tools default: both tools registered and
    *  no USER override. The `/settings` snapshot reads it on every open. */

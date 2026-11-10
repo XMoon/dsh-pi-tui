@@ -927,48 +927,104 @@ The `ConfigPort` keeps the three credential planes distinct:
   watch, start/cancel sign-in, sign-out and the running-account-task risk read.
 
 The account DTOs are detached (`AccountView`, `AccountProfile`, wallet decimal
-strings, safe attempt ids/phases/error codes). A token, grant payload, PKCE
-value, `PlatformSession` or generic Host service object never crosses the port.
-`AccountClientMetadata` (`version`, `locale`, `timezoneOffsetSeconds`) is
-sampled per Platform request; the offset is never cached across a DST change.
+strings, safe attempt ids/phases/error codes). An `AccountView` is last-known
+unless paired with a local opaque `AccountObservationLease` issued by its adapter;
+Direct validates the installed Host Account service identity and observation epoch,
+while Remote validates the lease against the actual Connection generation and
+Account watch epoch. The lease never crosses the generated Remote payload or
+persisted state. Carrier failure, Connection generation loss/replacement, or
+watch invalidation immediately revokes the affected observation; invalidation is
+not a `signed-out` fact. A token, grant payload, PKCE value, `PlatformSession` or
+generic Host service object never crosses the port. `AccountClientMetadata`
+(`version`, `locale`, `timezoneOffsetSeconds`) is sampled per Platform request;
+the offset is never cached across a DST change.
 
-The bundle patch mounts the official `@deepseek-ai/dsh-host-webserver` row with
-the stable id `webserver`, `host: 127.0.0.1`, `port: 0` and the `tuiStartup`
-gate, and the TUI runner injects both `deepseekAccount` and `webServer`. The
-official PlatformAccount registers `/oauth/callback` on that Host listener
-while an attempt waits for the browser; the Direct adapter obtains the callback
-origin from `webServer.getOrigin()` (loopback HTTP only) and calls
-`startSignIn(client, origin, 'web')`. The Client never supplies a callback URL,
+The base profile mounts the official `@deepseek-ai/dsh-host-webserver` row with
+stable id `webserver`, `host: 127.0.0.1`, and `port: 0`; the Direct runner injects
+both `deepseekAccount` and `webServer`. The official PlatformAccount registers
+`/oauth/callback` on that Host listener while an attempt waits for the browser.
+Direct obtains the origin from `webServer.getOrigin()` and calls
+`startSignIn(client, origin, 'web')`; a Client never supplies a callback URL,
 opens a second HTTP server, or parses the browser callback. `--help` mounts no
 listener. A bind failure fails the Host row instead of falling back to a public
 interface.
 
-`watch(signal)` yields the complete initial state and later snapshots; ending
-the signal only stops observation and never cancels the attempt. Cancellation
-addresses the exact `SignInAttemptId`. `signOut` removes the local grant and
-leaves remote revocation in the background; a remote failure never restores the
-local grant, and independent API keys stay stored. The running-account-task read
-is a risk hint only: the Direct adapter reads `ctx.agents` (the declared
-`runtime/direct/config-direct.ts` baseline entry) to project that hint, while
-the official `deepseek-account/signed-out` listener owns the actual cancellation
-of matching account tasks.
+The internal Split Host mounts the official
+`@deepseek-ai/dsh-api-account-controller` exactly once on its Host-only Loader,
+with `deepseekAccount` and `agents` injections. This Host owner remains active
+whether the optional Browser Web roster is enabled or disabled. Host readiness
+requires the `accountController/account` Typert binding and exactly one active
+Loader row for the official package identity; a Web UI row is not that service.
+The Client mounts the package's generated `account` Remote contribution on the
+same authenticated `remote` object and Connection as its other generated
+contributions. It does not mount another Host controller, create an Account
+store, copy the generated namespace, or introduce a feature-specific carrier.
 
-Remote has no qualified account wire for this stage: its `account` sub-domain is
-an explicit `available: false` that rejects operations and yields no state. The
-local grant is never read from the credential document by the TUI.
+The semantic Account port carries only detached `AccountView`, profile and
+wallet DTOs, safe attempt ids/phases/error codes, and per-operation
+`AccountClientMetadata`. Token, grant payload, PKCE material, Platform session,
+Cookie, and Host service objects never cross it. Account profile and balance are
+independent reads; `null`, a returned `failed` outcome, and a Remote failure
+remain distinct.
 
-Authority: `src/runtime/config-port.ts` (`ProviderProfileConfig`,
-`CredentialConfig`, `AuthorizationConfig`, `AccountConfig`),
-`src/runtime/direct/config-direct.ts` (`DirectAccountConfig` and the provider/
-credential/authorization adapters), `src/app/command/credential-workflow.ts`,
-`src/app/command/account-workflow.ts`, root `cordis.patch.yml`. Surface behavior
-is owned by [surface-behavior.md](./surface-behavior.md#models-page) and the
-command destinations by [surface-catalog.md](./surface-catalog.md).
+For a Split Client, the browser callback origin comes only from the `origin` of
+the Host identity authenticated by the `/connect` Cookie and Host identity echo.
+The Client composition passes that provenance unchanged to the Remote Account
+adapter. Immediately before `startSignIn`, the adapter requires the current
+Connection generation and the exact canonical `http://127.0.0.1:<port>` shape;
+it then calls the official generated method with that origin and the fixed
+`loginSource='web'`. Missing provenance or a disconnected generation fails
+closed. Registry hints, Client environment, arbitrary user input, `localhost`,
+other loopback spellings, and another legal listener are not substitutes for
+that authenticated identity. The official Controller forwards its argument and
+does not independently compare it to its listener; this contract establishes
+the trusted source used by this Client adapter, not a new upstream Host policy.
 
-Must-not: expose a token/grant/PKCE value, start Account sign-in outside
-`deepseekAccount`, clear the Account grant through `deleteRecord`, infer a
-credential from a route/profile, mount a second webserver identity, or widen the
-callback listener beyond loopback in the shipped profile.
+`watch(signal)` yields a complete initial current observation and later snapshots;
+an invalidation revokes its affected observations and is distinct from signed-out.
+Ending the signal, disposing the generated stream, closing a page, or retiring a
+Client surface stops observation only; it never cancels the Host browser attempt.
+Cancellation addresses the exact `SignInAttemptId`. The Watch subscription is the
+single writer of the page's AccountView; a mutation response is never treated as a
+second AccountView snapshot. Once a mutation settles, the prior page snapshot is
+last-known and cannot authorize another mutation until the next complete Watch
+snapshot or explicit Refresh. An unknown mutation outcome is reported as
+unconfirmed and is never replayed automatically; explicit Refresh releases the
+current Watch and reopens the official watch for a complete initial snapshot. A
+result from a replaced Connection generation cannot become current.
+
+`hasRunningAccountTasks()` is an asynchronous Host fact in Direct and Remote.
+The official controller evaluates the current `agents.list()` with the official
+running-account-task predicate; the TUI does not substitute its own busy state
+or a cached Boolean. A failed or unavailable Remote read rejects instead of
+claiming `false`. Sign-out confirmation represents `checking`, `known`, and
+`unavailable` explicitly: pending or unknown disables the destructive action,
+and a failed check has an explicit retry. A failed or unconfirmed sign-out
+acknowledgement closes the confirmation and is never replayed automatically;
+explicit Refresh reopens the official Watch. The official
+`deepseek-account/signed-out` listener remains the sole owner of cancelling
+matching account tasks.
+
+`signOut` removes the local grant before background Platform revocation; a
+remote failure never restores the grant, and independent API-key references stay
+stored. The local grant is never read from the credential document by the TUI.
+
+Authority: `src/runtime/config-port.ts` (`AccountConfig`),
+`src/runtime/direct/config-direct.ts` (`DirectAccountConfig`),
+`src/runtime/remote/config-remote.ts` (`RemoteAccountConfig`),
+`src/app/remote-process/local-host-entry.ts` and
+`src/app/remote-process/host-bootstrap.ts` (Split Host composition/readiness),
+`src/app/remote/client-runtime.ts` (generated Client contribution),
+`src/app/command/account-workflow.ts`, and
+`src/tui/panels/account-workspace-page.ts`. Surface navigation is owned by
+[surface-behavior.md](./surface-behavior.md#settings-workspace).
+
+Must-not: expose a token/grant/PKCE value; start Account sign-in outside the
+official Host Account authority; clear the Account grant through
+`deleteRecord`; infer a credential or callback origin from a route/profile;
+mount a second Host listener or Account Controller; let Web enablement own the
+Host Account Controller lifetime; interpret an unavailable running-task read as
+`false`; or widen the shipped callback listener beyond loopback.
 
 ## Plugin Manager
 

@@ -123,9 +123,18 @@ export interface RenderedSearchSelection {
   readonly selectedRow: number | undefined
   readonly exact: boolean
   /** Current source-proven cells independent of any rendered regex ordinal.
-   * Present only for a freshly verified plain-text proof; it expires with the
-   * selection and is never persisted or used as match identity. */
+   * Present only for a freshly verified source-cell proof (Host plain text or a
+   * Host Assistant Markdown card); it expires with the selection and is never
+   * persisted or used as match identity. */
   readonly exactPaintedSegments?: readonly AltScreenSearchSegment[]
+  /** Why the CURRENT Full target has no exact cells, when it has none:
+   * `not-painted` means the source text itself has no visible cell here (a
+   * hidden link destination, a consumed Visual marker); `unproven` means the
+   * current renderer cannot prove the position (transformed glyphs, composite
+   * or plugin owner, collapsed body, reflow). Disposable presentation metadata
+   * for one render epoch: never an input to matching, span proof or a cache
+   * key, and always absent on an `exact` selection. */
+  readonly sourceDisposition?: 'not-painted' | 'unproven'
   /** Best-effort viewport geometry; never semantic occurrence proof. */
   readonly scrollRange?: RenderedSearchScrollRange
 }
@@ -332,8 +341,9 @@ export function selectRenderedSearchScrollRange(
 ): RenderedSearchScrollRange | undefined {
   if (selector.weakOnly === true) return undefined
 
-  // The plain-text source proof owns REAL painted cells, so its first/last row
-  // is the exact destination regardless of the rendered matcher's ordinal.
+  // A source-cell proof (plain text or Markdown) owns REAL painted cells, so
+  // its first/last row is the exact destination regardless of the rendered
+  // matcher's ordinal.
   const painted = selection.exactPaintedSegments
   if (painted !== undefined && painted.length > 0) {
     return {
@@ -420,62 +430,88 @@ export function highlightColumnRanges(
   return result
 }
 
+/** Merge overlapping/adjacent same-style column ranges on one row, ascending. */
+function mergeColumnRanges(ranges: readonly RenderedColumnRange[]): RenderedColumnRange[] {
+  const sorted = [...ranges].sort((left, right) => left.startCol - right.startCol || left.endCol - right.endCol)
+  const merged: RenderedColumnRange[] = []
+  for (const range of sorted) {
+    const previous = merged.at(-1)
+    if (previous !== undefined && range.startCol <= previous.endCol) {
+      merged[merged.length - 1] = { startCol: previous.startCol, endCol: Math.max(previous.endCol, range.endCol) }
+    } else {
+      merged.push({ startCol: range.startCol, endCol: range.endCol })
+    }
+  }
+  return merged
+}
+
+/** Remove the `cuts` cells from `ranges`, returning the uncovered pieces.
+ * Both inputs are non-overlapping and ascending (merged first). */
+function subtractColumnRanges(
+  ranges: readonly RenderedColumnRange[],
+  cuts: readonly RenderedColumnRange[],
+): RenderedColumnRange[] {
+  const result: RenderedColumnRange[] = []
+  for (const range of ranges) {
+    let cursor = range.startCol
+    for (const cut of cuts) {
+      if (cut.endCol <= cursor) continue
+      if (cut.startCol >= range.endCol) break
+      if (cut.startCol > cursor) result.push({ startCol: cursor, endCol: Math.min(cut.startCol, range.endCol) })
+      cursor = Math.max(cursor, cut.endCol)
+      if (cursor >= range.endCol) break
+    }
+    if (cursor < range.endCol) result.push({ startCol: cursor, endCol: range.endCol })
+  }
+  return result
+}
+
 /** Decorate every visible occurrence of `selection.matches` without changing
  * row count or visible width. `selectedIndex >= 0` marks that occurrence
  * strong; `-1` with matches present decorates all of them weak (the other
  * visible cards while the current card owns the strong occurrence). Source-
- * proven `exactPaintedSegments` are appended as strong cells: the shared
- * overlap merge lets them win over a weak occurrence on the same cells. An
- * anchor-only current also washes `selectedRow` — but never when a proof
- * channel owns the selection. */
+ * proven `exactPaintedSegments` are STRONG cells with exact priority: a
+ * rendered occurrence that merely overlaps the proof keeps only the cells the
+ * proof did not claim. The rendered matcher is Unicode ignore-case while the
+ * semantic corpus lowercases, so the two occurrence sets can differ; never
+ * letting the weak range upgrade a merged interval keeps the strong block
+ * equal to the proven cells. An anchor-only current also washes `selectedRow`
+ * — but never when a proof channel owns the selection. */
 export function highlightSearchLines(
   lines: readonly string[],
   selection: RenderedSearchSelection,
 ): string[] {
   let result = [...lines]
   if (selection.matches.length > 0 || (selection.exactPaintedSegments?.length ?? 0) > 0) {
-    const candidatesByRow = new Map<number, Array<{ range: RenderedColumnRange; current: boolean }>>()
+    // Strong cells first (proof segments AND the selected rendered ordinal),
+    // weak occurrences only fill what is left. The two sets can overlap with
+    // different boundaries (Unicode ignore-case vs lowercase), so they are
+    // merged per class and then subtracted rather than unioned into one run.
+    const strongByRow = new Map<number, RenderedColumnRange[]>()
+    const weakByRow = new Map<number, RenderedColumnRange[]>()
+    const pushRange = (target: Map<number, RenderedColumnRange[]>, row: number, range: RenderedColumnRange): void => {
+      const ranges = target.get(row) ?? []
+      ranges.push(range)
+      target.set(row, ranges)
+    }
     selection.matches.forEach((match, matchIndex) => {
+      const target = matchIndex === selection.selectedIndex ? strongByRow : weakByRow
       for (const segment of match.segments) {
-        const candidates = candidatesByRow.get(segment.row) ?? []
-        candidates.push({
-          range: { startCol: segment.startCol, endCol: segment.endCol },
-          current: matchIndex === selection.selectedIndex,
-        })
-        candidatesByRow.set(segment.row, candidates)
+        pushRange(target, segment.row, { startCol: segment.startCol, endCol: segment.endCol })
       }
     })
     for (const segment of selection.exactPaintedSegments ?? []) {
-      const candidates = candidatesByRow.get(segment.row) ?? []
-      candidates.push({
-        range: { startCol: segment.startCol, endCol: segment.endCol },
-        current: true,
-      })
-      candidatesByRow.set(segment.row, candidates)
+      pushRange(strongByRow, segment.row, { startCol: segment.startCol, endCol: segment.endCol })
     }
 
     const rangesByRow = new Map<number, RenderedColumnHighlight[]>()
-    for (const [row, candidates] of candidatesByRow) {
-      candidates.sort((left, right) => left.range.startCol - right.range.startCol || right.range.endCol - left.range.endCol)
-      const merged: Array<{ range: RenderedColumnRange; current: boolean }> = []
-      for (const candidate of candidates) {
-        const previous = merged.at(-1)
-        if (previous !== undefined && candidate.range.startCol < previous.range.endCol) {
-          merged[merged.length - 1] = {
-            range: {
-              startCol: previous.range.startCol,
-              endCol: Math.max(previous.range.endCol, candidate.range.endCol),
-            },
-            current: previous.current || candidate.current,
-          }
-        } else {
-          merged.push(candidate)
-        }
-      }
-      rangesByRow.set(row, merged.map(item => ({
-        range: item.range,
-        style: item.current ? SEARCH_CURRENT_MATCH_STYLE : SEARCH_MATCH_STYLE,
-      })))
+    for (const row of new Set([...strongByRow.keys(), ...weakByRow.keys()])) {
+      const strongRanges = mergeColumnRanges(strongByRow.get(row) ?? [])
+      const weakRanges = subtractColumnRanges(mergeColumnRanges(weakByRow.get(row) ?? []), strongRanges)
+      rangesByRow.set(row, [
+        ...strongRanges.map(range => ({ range, style: SEARCH_CURRENT_MATCH_STYLE })),
+        ...weakRanges.map(range => ({ range, style: SEARCH_MATCH_STYLE })),
+      ])
     }
     result = highlightColumnRanges(result, rangesByRow)
   }

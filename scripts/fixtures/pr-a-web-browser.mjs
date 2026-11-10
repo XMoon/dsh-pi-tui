@@ -60,6 +60,8 @@ const result = {
   sessionId: null,
   attached: false,
   answerSeen: false,
+  accountSignedOut: false,
+  accountSignedIn: false,
   consoleErrors: [],
   failedResponses: [],
   requestPaths: [],
@@ -187,6 +189,33 @@ async function controlCentre(match) {
   }, match)
 }
 
+/** Read the official Web Account menu and assert the shared Host state. */
+async function assertWebAccountState() {
+  const expected = process.env.PR_A_ACCOUNT_EXPECTED ?? 'signed-out'
+  const menu = await controlCentre({ aria: 'Account menu' }) ?? await controlCentre({ text: 'More' })
+  if (menu === null) throw new Error('the Web shell has no Account menu control')
+  await clickCentre(menu)
+  await page.waitForTimeout(500)
+  result.accountMenuText = redacted(await bodyText()).slice(0, 800)
+  if (expected === 'credential-stored') {
+    await waitBody('Sign out', 30_000, 'the Web Account menu Sign out action')
+    const body = await bodyText()
+    result.accountMenuText = redacted(body).slice(0, 500)
+    if (body.includes('Sign in')) throw new Error('the Web Account menu painted Sign in while the shared Host is credential-stored')
+    result.accountSignedIn = true
+  } else if (expected === 'signed-out') {
+    await waitBody('Sign in', 30_000, 'the Web Account menu Sign in action')
+    const body = await bodyText()
+    result.accountMenuText = redacted(body).slice(0, 500)
+    if (body.includes('Sign out')) throw new Error('the Web Account menu painted Sign out while the shared Host is signed out')
+    result.accountSignedOut = true
+  } else {
+    throw new Error(`unknown PR_A_ACCOUNT_EXPECTED ${JSON.stringify(expected)}`)
+  }
+  await page.keyboard.press('Escape')
+  await waitComposer(30_000)
+}
+
 /** Bounded wait for one control of the shell. */
 async function waitControl(match, timeoutMs) {
   const started = Date.now()
@@ -264,6 +293,9 @@ try {
   result.indexStatus = response?.status() ?? null
   await waitControl({ aria: 'New session' }, 120_000)
   await waitComposer(120_000)
+  if (process.env.PR_A_ACCOUNT_UI_CHECK === '1') await assertWebAccountState()
+  result.accountOnly = process.env.PR_A_ACCOUNT_ONLY === '1'
+  if (!result.accountOnly) {
   // The official first-run preview notice covers the shell until its
   // acknowledgement is persisted. The isolated qualification writes that
   // acknowledgement as the row config, so a notice here means the fixture is
@@ -298,6 +330,7 @@ try {
   const shot = join(coordinationDir, 'pr-a-browser-composed.png')
   await page.screenshot({ path: shot, fullPage: false })
   result.screenshot = 'pr-a-browser-composed.png'
+  }
 } catch (error) {
   // Only a REDACTED, first-line category travels: a navigation/interaction
   // error message can embed the authenticated page URL (with its token).
@@ -315,6 +348,9 @@ if (result.error !== undefined) {
     sessionId: result.sessionId,
     indexStatus: result.indexStatus,
     answerSeen: result.answerSeen,
+    accountSignedOut: result.accountSignedOut,
+    accountSignedIn: result.accountSignedIn,
+    accountOnly: result.accountOnly,
     screenshot: result.screenshot,
     consoleErrors: result.consoleErrors.length,
   }))

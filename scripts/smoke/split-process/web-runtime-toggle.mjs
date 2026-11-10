@@ -82,7 +82,7 @@ export async function runWebRuntimeToggle(context) {
   /** The durable Host owners whose fiber identity must never change. */
   const PROTECTED_OWNER_KEYS = [
     'connection', 'apiRemotes', 'typertGateway', 'workspaceRegistry', 'workspaceController',
-    'sessionController', 'fileUpload', 'settingsController', 'jobController', 'piTuiHostRuntime',
+    'sessionController', 'fileUpload', 'settingsController', 'accountController', 'jobController', 'piTuiHostRuntime',
   ]
   /** `id -> live Loader fiber UID` for EVERY row the Host status reports. */
   const rowUids = ready => Object.fromEntries((ready.entries ?? [])
@@ -100,6 +100,8 @@ export async function runWebRuntimeToggle(context) {
     }
     assert(ready.webServer?.host === '127.0.0.1' && typeof ready.webServer?.port === 'number' && ready.webServer.port > 0,
       `${label}: the ONE loopback listener is not a bound 127.0.0.1 port (${JSON.stringify(ready.webServer)})`)
+    assert(ready.ownerEntries?.accountController?.[0] === 'split-host-account-controller',
+      `${label}: the official Account Controller owner row is ${JSON.stringify(ready.ownerEntries?.accountController)}`)
     assert(ready.services?.piTuiWebAccess === true,
       `${label}: the private Web access service is not part of the Host readiness record`)
   }
@@ -291,6 +293,21 @@ export async function runWebRuntimeToggle(context) {
     assertClientHostFacts(tuiReady.host, ready.localHost, 'PB-01 TUI vs Host')
     assert(tuiReady.surfaceMounted === true && tuiReady.transport === 'connected',
       'PB-01 the default-off Host does not serve a real TUI surface')
+    /** The real TUI reads the SAME Host Account state while Web is on/off. */
+    const assertTuiAccountSignedOut = async label => {
+      tui.send('/login deepseek-account\r')
+      await tui.waitForScreen('DeepSeek Account', `${label} TUI Account page`, 60_000)
+      await tui.waitForScreen('Signed out / no stored credential', `${label} TUI Host Account state`, 30_000)
+      tui.send('\x1b')
+      await waitForCondition(async () => (await tui.viewport()).join('\n').includes('[Categories (9)]'),
+        `${label} TUI Account page yielded to Settings`, 20_000)
+      tui.send('\x1b')
+      await waitForCondition(async () => {
+        const frame = (await tui.viewport()).join('\n')
+        return !frame.includes('DeepSeek Account') && !frame.includes('[Categories (9)]')
+      }, `${label} TUI returned to its Session`, 20_000)
+      trace('t73-account-tui-state', { label, account: 'signed-out', hostCredential: 'absent', webToggle: label.startsWith('PB-10') ? 'off' : 'on' })
+    }
     // The first real Turn is HELD and stays held across BOTH toggles: the
     // default-off HTTP surface, the Web enable and the Web disable are all
     // asserted while the Host is genuinely mid-Turn, and the barrier is
@@ -347,7 +364,7 @@ export async function runWebRuntimeToggle(context) {
     // rows and nothing else.
     const enabledUids = rowUids(enabledStatus)
     for (const id of ['agent', 'session', 'job-controller', 'typert-gateway', 'split-host-connection',
-      'split-host-api-remotes', 'split-host-session-controller', 'split-host-pi-tui-runtime']) {
+      'split-host-api-remotes', 'split-host-session-controller', 'split-host-account-controller', 'split-host-pi-tui-runtime']) {
       assert(enabledUids[id] === protectedUids[id], `PB-05 the "${id}" Host owner was re-mounted by the Web enable`)
     }
     const serving = await assertWebServing(origin, launch, 'PB-03')
@@ -363,8 +380,12 @@ export async function runWebRuntimeToggle(context) {
       unknownPluginStatus: serving.unknownPlugin,
       uiDeliverables: enabledStates.get('ui-deliverables'),
       workspaceChanges: enabledStates.get('workspace-changes'),
+      accountControllerOwner: enabledStatus.ownerEntries?.accountController?.[0],
+      accountControllerFiberUid: enabledUids['split-host-account-controller'],
+      accountControllerFiberUnchanged: enabledUids['split-host-account-controller'] === protectedUids['split-host-account-controller'],
       hostOwnersRemounted: false,
     })
+    await assertTuiAccountSignedOut('PB-03')
 
     // ── C. Disable while a real TUI holds an accepted Turn (PB-04/PB-05/PB-06) ──
     const tuiGeneration = lastSurfaceStatus(tui)?.generationId
@@ -388,7 +409,7 @@ export async function runWebRuntimeToggle(context) {
     assertIdentityFields(disabledStatus.localHost, ready.localHost, 'PB-04 Host identity')
     const disabledUids = rowUids(disabledStatus)
     for (const id of ['agent', 'session', 'job-controller', 'typert-gateway', 'split-host-connection',
-      'split-host-api-remotes', 'split-host-session-controller', 'split-host-pi-tui-runtime']) {
+      'split-host-api-remotes', 'split-host-session-controller', 'split-host-account-controller', 'split-host-pi-tui-runtime']) {
       assert(disabledUids[id] === protectedUids[id], `PB-05 the "${id}" Host owner changed identity across the disable`)
     }
     const offAfterDisable = await assertWebOffHttp(origin, 'PB-04')
@@ -447,6 +468,9 @@ export async function runWebRuntimeToggle(context) {
       tuiGenerationUnchanged: true,
       acceptedTurnSettled: true,
       postDisablePrompt: 'answered',
+      accountControllerOwner: disabledStatus.ownerEntries?.accountController?.[0],
+      accountControllerFiberUid: disabledUids['split-host-account-controller'],
+      accountControllerFiberUnchanged: disabledUids['split-host-account-controller'] === protectedUids['split-host-account-controller'],
       hostOwnersRemounted: false,
     })
 
@@ -462,7 +486,7 @@ export async function runWebRuntimeToggle(context) {
     assertIdentityFields(reenabledStatus.localHost, ready.localHost, 'PB-07 Host identity')
     const reenabledUids = rowUids(reenabledStatus)
     for (const id of ['agent', 'session', 'job-controller', 'typert-gateway', 'split-host-connection',
-      'split-host-api-remotes', 'split-host-session-controller', 'split-host-pi-tui-runtime']) {
+      'split-host-api-remotes', 'split-host-session-controller', 'split-host-account-controller', 'split-host-pi-tui-runtime']) {
       assert(reenabledUids[id] === protectedUids[id], `PB-07 the "${id}" Host owner changed identity across the re-enable`)
     }
     const servingAgain = await assertWebServing(origin, launch, 'PB-07')
@@ -492,6 +516,8 @@ export async function runWebRuntimeToggle(context) {
           PR_A_DSH_HOME: dshHome,
           PR_A_PLAYWRIGHT_ROOT: playwrightRoot,
           PR_A_EXPECTED_ANSWER_PREFIX: 'long-turn answer',
+          PR_A_ACCOUNT_UI_CHECK: '1',
+          PR_A_ACCOUNT_EXPECTED: 'signed-out',
           PLAYWRIGHT_BROWSERS_PATH: browsers,
           LD_LIBRARY_PATH: `${chromiumLibs}${process.env.LD_LIBRARY_PATH === undefined ? '' : `:${process.env.LD_LIBRARY_PATH}`}`,
         },
@@ -560,10 +586,13 @@ export async function runWebRuntimeToggle(context) {
           `PB-07 the real Browser loaded no authenticated index (${browserReport.indexStatus})`)
         assert(browserReport.sessionId === browserSession, 'PB-07 the Browser reported a different Session')
         assert(browserReport.answerSeen === true, 'PB-07 the Browser never painted the Host answer')
+        assert(browserReport.accountSignedOut === true,
+          'PB-07 the official Web Account UI did not read the shared signed-out Host Account state')
         browserCase = 'PASS'
         verdict.browser = {
           indexStatus: browserReport.indexStatus,
           sessionId: browserSession,
+          accountSignedOut: browserReport.accountSignedOut,
           tuiPainted: [marker, browserAnswer(browserEvents)],
           hostTurn: 'complete',
           consoleErrors: browserReport.consoleErrors.length,
@@ -613,6 +642,10 @@ export async function runWebRuntimeToggle(context) {
       : profilePatchAfter !== undefined && profilePatchAfter.equals(profilePatchBefore),
     'PB-10 the Web toggle wrote the profile patch')
     // The TUI is still usable after the second disable.
+    const finalUids = rowUids(finalOff)
+    assert(finalUids['split-host-account-controller'] === protectedUids['split-host-account-controller'],
+      'PB-10 the official Account Controller owner changed identity across the final Web disable')
+    await assertTuiAccountSignedOut('PB-10')
     tui.send('/exit\r')
     const tuiExit = await tui.waitForExit(60_000)
     assert(tuiExit.code === 0 && tuiExit.signal === null, `PB-10 TUI exit was ${JSON.stringify(tuiExit)}`)
@@ -625,6 +658,9 @@ export async function runWebRuntimeToggle(context) {
       apiStatus: finalOffHttp.api,
       connectStatus: finalOffHttp.connect,
       tuiUsable: true,
+      accountControllerOwner: finalOff.ownerEntries?.accountController?.[0],
+      accountControllerFiberUid: finalUids['split-host-account-controller'],
+      accountControllerFiberUnchanged: finalUids['split-host-account-controller'] === protectedUids['split-host-account-controller'],
       profilePatchUnchanged: true,
       hostShutdownExit: hostShutdown.code,
     })

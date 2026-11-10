@@ -124,6 +124,7 @@ test('the Direct backend is the current production surface and serves EXACTLY th
     },
     account: {
       available: () => false,
+      isObservationCurrent: () => false,
       getState: async () => { throw new Error('account unavailable') },
       getProfile: async () => null,
       getBalance: async () => null,
@@ -132,7 +133,7 @@ test('the Direct backend is the current production surface and serves EXACTLY th
       startSignIn: async () => { throw new Error('account unavailable') },
       cancelSignIn: async () => { throw new Error('account unavailable') },
       signOut: async () => { throw new Error('account unavailable') },
-      hasRunningAccountTasks: () => false,
+      hasRunningAccountTasks: async () => false,
     },
     credentials: {
       recordsSupported: () => true,

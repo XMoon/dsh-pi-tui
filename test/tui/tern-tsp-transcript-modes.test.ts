@@ -169,7 +169,7 @@ test('Full flattens the canonical Work members in raw order and paints no Work c
   // Every raw row is a top-level node, in the SAME order as the raw window.
   const rows = nodes.filter(node => node.parent === 'main' && node.id !== 'main')
   assert.equal(rows.length, folder.messages().length, 'one top-level node per raw row')
-  assert.deepEqual(rows.map(node => node.kind), ['card', 'card', 'tool', 'card', 'card', 'tool', 'card'])
+  assert.deepEqual(rows.map(node => node.kind), ['message', 'card', 'tool', 'col', 'card', 'tool', 'col'])
   assert.ok(topLevel.some(id => id === 'main.s1-msg-1'), 'the first row keeps its scoped key')
   assert.ok(descendantText(nodes, 'main.s1-msg-4').includes('intermediate narration'), 'the intermediate Assistant keeps its own position')
   assert.ok(descendantText(nodes, 'main.s1-msg-7').includes('the final answer'), 'the final Assistant keeps its own position')
@@ -511,15 +511,16 @@ test('Focus image demand follows the materialized root and Work members', () => 
     turnActivities: folder.turnActivities(),
     window: LATEST_WINDOW,
   }
-  const collapsed = visibleTranscriptMembers(messages, base)
+  const nodeKeys = new TranscriptNodeKeys()
+  const collapsed = visibleTranscriptMembers(messages, base, nodeKeys)
   assert.ok(!collapsed.has(toolRow), 'a collapsed Focus root reads no hidden Work image')
-  const rootExpanded = visibleTranscriptMembers(messages, { ...base, expandedFocusTurns: new Set([1]) })
+  const rootExpanded = visibleTranscriptMembers(messages, { ...base, expandedFocusTurns: new Set([1]) }, nodeKeys)
   assert.ok(!rootExpanded.has(toolRow), 'an open root with closed Work still reads no Work image')
   const workExpanded = visibleTranscriptMembers(messages, {
     ...base,
     expandedFocusTurns: new Set([1]),
     expandedWorkOwners: new Set([work.span.owner]),
-  })
+  }, nodeKeys)
   assert.ok(workExpanded.has(toolRow), 'opening the owning Work makes its real member visible')
 })
 

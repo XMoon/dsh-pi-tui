@@ -20,7 +20,7 @@ import { createClientCommandRegistry } from '../../src/app/command/client-comman
 import { registerTuiCommands, type TuiCommandRunner } from '../../src/commands.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 import { TuiApp, type OwnedRunner, type TuiAppEvents } from '../../src/tui-app.ts'
-import type { AccountView, AuthorizationFlowTarget, CredentialProviderOption } from '../../src/runtime/config-port.ts'
+import type { AccountObservation, AccountObservationLease, AccountView, AuthorizationFlowTarget, CredentialProviderOption } from '../../src/runtime/config-port.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
 import { waitForFrame } from '../support/frame-wait.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
@@ -100,6 +100,11 @@ function open(width = 120, height = 40, authorizationOverride?: unknown): Harnes
   ctx.provide('commands', commands as never)
   ctx.provide('skills', { list: async () => [], get: async () => undefined, find: () => undefined, execute: async () => undefined } as never)
   const accountState: { view: AccountView } = { view: SIGNED_OUT }
+  const currentAccountLeases = new Set<AccountObservationLease>()
+  const accountObservation = (view = accountState.view, lease = {} as AccountObservationLease): AccountObservation => {
+    currentAccountLeases.add(lease)
+    return { view, lease }
+  }
   const calls: string[] = []
   /** The references the fake official store really reports as configured. */
   const configuredRefs = new Set(['DEEPSEEK_API_KEY', 'ACME_API_KEY', 'ANTHROPIC_API_KEY'])
@@ -243,26 +248,39 @@ function open(width = 120, height = 40, authorizationOverride?: unknown): Harnes
       },
       account: {
         available: () => true,
-        getState: async () => accountState.view,
+        isObservationCurrent: (lease: AccountObservationLease) => currentAccountLeases.has(lease),
+        getState: async () => accountObservation(),
         // The Account watch subscription count: a category the user only
         // browsed must never start one.
-        watch: async function* () { calls.push('account:watch'); yield accountState.view; await new Promise<void>(() => {}) },
-        getProfile: async () => null,
-        getBalance: async () => null,
+        watch: async function* (signal: AbortSignal) {
+          calls.push('account:watch')
+          const lease = {} as AccountObservationLease
+          try {
+            yield { kind: 'current' as const, observation: accountObservation(accountState.view, lease) }
+            await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true }))
+          } finally {
+            currentAccountLeases.delete(lease)
+          }
+        },
+        getProfile: async (_lease: AccountObservationLease) => null,
+        getBalance: async (_lease: AccountObservationLease) => null,
         getCallbackOrigin: () => 'http://127.0.0.1:43121',
-        startSignIn: async () => {
+        startSignIn: async (_client: unknown, lease: AccountObservationLease) => {
           calls.push('startSignIn')
           const gate = signInGate
           signInGate = undefined
           await gate
-          return accountState.view
+          return accountObservation(accountState.view, lease)
         },
-        cancelSignIn: async () => accountState.view,
-        signOut: async () => {
+        cancelSignIn: async (_id: string, lease: AccountObservationLease) => accountObservation(accountState.view, lease),
+        signOut: async (_client: unknown, lease: AccountObservationLease) => {
           calls.push('signOut')
-          return accountState.view
+          return accountObservation(accountState.view, lease)
         },
-        hasRunningAccountTasks: () => false,
+        hasRunningAccountTasks: async (_lease: AccountObservationLease) => {
+          calls.push('hasRunningAccountTasks')
+          return false
+        },
       },
     },
     catalog: { models: { available: () => true, discoverModels: async () => [{ id: 'acme-1' }] } },
@@ -490,13 +508,16 @@ test('/login bare opens the Models list; /login deepseek-account opens Account',
   h2.close()
 })
 
-test('/logout deepseek-account opens the Sign out confirmation directly', async () => {
+test('/logout deepseek-account with no stored credential reports signed out without a task check', async () => {
   const h = open()
   await h.vt.waitForRender()
   ;(h as unknown as { invoke(line: string): unknown }).invoke('/logout deepseek-account')
   await h.vt.waitForRender()
-  assert.match(h.view(), /Sign out confirmation/u)
+  assert.match(h.view(), /Signed out \/ no stored credential/u)
   assert.match(h.view(), /Nothing to sign out/u)
+  assert.match(h.view(), /Sign in/u)
+  assert.doesNotMatch(h.view(), /Sign out confirmation|Checking running account tasks|Could not verify/u)
+  assert.equal(h.calls.includes('hasRunningAccountTasks'), false)
   h.close()
 })
 
@@ -521,7 +542,7 @@ test('mouse: a painted provider row opens its detail, the category rail switches
   await h.vt.waitForRender()
   assert.match(h.view(), /Provider · Acme Gateway/u)
 
-  const accountRow = rowOf(h, 'Account')
+  const accountRow = railEntryRow(h, 'Account')
   press(h, accountRow, 1)
   release(h, accountRow, 1)
   await h.vt.waitForRender()
@@ -531,7 +552,7 @@ test('mouse: a painted provider row opens its detail, the category rail switches
   assert.match(h.view(), /^> Account/mu, 'the rail selects the Account category')
   assert.match(h.view(), /DeepSeek Account/u, 'the right column shows the real Account page')
 
-      const modelsRow = rowOf(h, 'Models')
+  const modelsRow = railEntryRow(h, 'Models')
   press(h, modelsRow, 1)
   release(h, modelsRow, 1)
   await h.vt.waitForRender()
@@ -557,16 +578,24 @@ test('a cross-owner mouse drag never reuses the other owner press (RFL-004)', as
   const h = open()
   await h.vt.waitForRender()
   ;(h as unknown as { invoke(line: string): unknown }).invoke('/login acme')
-  await h.vt.waitForRender()
+  // The Models page reads its provider catalog AFTER its first frame: the
+  // Configure action is only painted once the read settles, and the mouse
+  // gesture must resolve against that painted row, never the Loading frame.
+  await waitForFrame(
+    h.view,
+    frame => frame.includes('Provider · Acme Gateway') && frame.includes('> Configure API Key…'),
+    () => h.vt.waitForRender(),
+    'the Acme provider action must be painted before the cross-owner drag',
+  )
   const providerRow = rowOf(h, 'Configure API Key')
-  const railModels = rowOf(h, 'Models')
+  const railModels = railEntryRow(h, 'Models')
   press(h, providerRow, colOf(h, providerRow, 'Configure API Key'))
   release(h, railModels, 1)
   await h.vt.waitForRender()
   assert.match(h.view(), /Provider · Acme Gateway/u, 'the auth-page press did not fire after a rail release')
   assert.doesNotMatch(h.view(), /API Key Reference/u)
 
-  const railAppearance = rowOf(h, 'Appearance')
+  const railAppearance = railEntryRow(h, 'Appearance')
   press(h, railAppearance, 1)
   release(h, providerRow, colOf(h, providerRow, 'Configure API Key'))
   await h.vt.waitForRender()
@@ -790,8 +819,6 @@ test('real Settings 30x8 hides a clipped select prompt and refuses Enter (F7)', 
 // once; Enter/Right hands the keyboard to that page. These cases drive the
 // REAL command coordinator, the REAL workspace lease and the REAL pages.
 
-const railRow = (h: Harness, label: string): number => rowOf(h, label)
-
 /**
  * The physical row of one CATEGORY RAIL entry. The rail owns the first 22
  * cells of the frame, so a rail entry is found by its own cell — a plain
@@ -875,7 +902,7 @@ test('a rail selection is refused while the page owns a pending Host mutation', 
   try {
     await submitHeldOfficialKey(h)
 
-    const accountRow = railRow(h, 'Account')
+    const accountRow = railEntryRow(h, 'Account')
     await click(h, accountRow, 1)
     assert.match(h.rows()[0]!, /Settings · Models/u, 'the pending mutation owns the page')
     assert.doesNotMatch(h.view(), /Settings · Account/u, 'the rail refused the category change')
@@ -898,7 +925,7 @@ test('a cross-owner gesture does nothing: a rail press released in the content c
     () => h.vt.waitForRender(),
     'the Models provider row must be painted before the cross-owner gesture',
   )
-  const railModels = rowOf(h, 'Models')
+  const railModels = railEntryRow(h, 'Models')
   const providerRow = rowOf(h, 'Acme Gateway')
   // A press on the RAIL, released in the CONTENT column: neither owner may
   // act. The rail press must not select a category and the content release
@@ -908,6 +935,19 @@ test('a cross-owner gesture does nothing: a rail press released in the content c
   await h.vt.waitForRender()
   assert.match(h.view(), /Models & Credentials/u, 'the content release did not open a provider')
   assert.match(h.view(), /^> Models/mu, 'the rail press did not select a category')
+  // The rail press must not even take the KEYBOARD: re-selecting the already
+  // selected category would leave the rail as the focus owner while the same
+  // Models content stays painted, so the header is the witness that no rail
+  // action ran at all.
+  assert.match(h.rows()[0]!, /Settings · Models/u, 'the rail press did not take the keyboard from the content')
+
+  // Control: the SAME content cell is a real target. A matching press and
+  // release opens the provider detail, so the refusal above is a real
+  // cross-owner refusal, not an inert coordinate.
+  press(h, providerRow, colOf(h, providerRow, 'Acme Gateway'))
+  release(h, providerRow, colOf(h, providerRow, 'Acme Gateway'))
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Provider · Acme Gateway/u, 'the content cell is a real provider target')
   h.close()
 })
 
@@ -946,10 +986,10 @@ test('the Account page keeps its Host browser attempt when the rail leaves and r
   assert.match(h.view(), /waiting-browser/u, 'the running Host attempt is on screen')
   assert.match(h.view(), /platform\.example/u, 'the authorize URL is on screen')
 
-  const aboutRow = railRow(h, 'About')
+  const aboutRow = railEntryRow(h, 'About')
   await click(h, aboutRow, 1)
   assert.match(h.view(), /dsh-pi-tui/u, 'the About page is painted after the category change')
-  const accountRow = railRow(h, 'Account')
+  const accountRow = railEntryRow(h, 'Account')
   await click(h, accountRow, 1)
   assert.match(h.view(), /waiting-browser/u, 'the returned page re-reads the Host attempt')
   assert.equal(h.calls.some(call => call.includes('cancelSignIn')), false,
@@ -964,7 +1004,7 @@ test('a Host callback that settles after a category change never repaints the ne
   await h.vt.waitForRender()
   const before = h.view()
   // Switch to the About home WHILE the Account watch is still settling.
-  const aboutRow = railRow(h, 'About')
+  const aboutRow = railEntryRow(h, 'About')
   await click(h, aboutRow, 1)
   for (let index = 0; index < 20; index += 1) await new Promise<void>(resolve => setImmediate(resolve))
   assert.match(h.view(), /dsh-pi-tui/u, 'the About page is still painted after the settlement')
@@ -1023,7 +1063,7 @@ test('a content press released on the rail does not select the category', async 
   await h.vt.waitForRender()
   ;(h as unknown as { invoke(line: string): unknown }).invoke('/settings')
   await h.vt.waitForRender()
-  const accountRow = railRow(h, 'Account')
+  const accountRow = railEntryRow(h, 'Account')
   await key(h, '\u001b[B')
   await key(h, '\u001b[B')
   const contentRow = rowOf(h, 'Status')

@@ -7737,6 +7737,125 @@
     ],
     "notes": "Confirmed against the pinned v1.1.0 tree that submitValue() has no pre-clear veto and that onBeforeSubmitClear cannot cancel the gesture. The hook was authorized as the one necessary fork exception for the refused-while-attaching UX; all host-side delivery gates use the same read-only predicate."
    }
+  },
+  "X076": {
+   "title": "One-shot Markdown source-to-painted-cell proof seam",
+   "status": "ACTIVE",
+   "category": [
+    "PUBLIC_COMPONENT_CONTRACT"
+   ],
+   "risk": "HIGH",
+   "files": [
+    "src/components/markdown.ts"
+   ],
+   "why": "Transcript search must map a semantic source range to the exact terminal cells an Assistant Markdown card painted. The host-neutral OSC 8 witness cannot prove that generally: Markdown's backslash-escape and LaTeX lexers consume a sentinel control-string terminator inside emphasis and math tokens, token-shape rewrites change the painted text, and composite cards (shared definitions, bullets, visual/plugin owners) sanitize or split their inputs before any witness could survive. Only the Markdown renderer itself knows which leaf token, wrap row and layout prefix produced each painted cell, so the proof has to be renderer-internal and one-shot over the component's own source.",
+   "changedSurface": [
+    "`public proveSourceSpan(range: { start: number; end: number }, width: number): MarkdownSourceCellProof` — component-local UTF-16, half-open range over the component's own sanitized source. It runs the SAME parser and renderer with zero-width sentinels around the single emitted piece of the target leaf, accepts the render only when the sentinel-stripped rows are byte-identical to the normal `render(width)`, and recovers one or more `{ row, startCol, endCol }` painted runs, including a range that wraps across painted rows.",
+    "`export type MarkdownSourceCellProof` — `PROVEN` (segments), `NOT_PAINTED` (`HIDDEN_LINK_TARGET` when hyperlinks are on, `MARKUP_ONLY` for parser-proven delimiters) or `UNPROVEN` with one of `SOURCE_PROJECTION`, `TOKEN_ORIGIN`, `REFLOW`, `RENDER_EQUIVALENCE`, `STALE_RENDER`, `COMPOSITE_OWNER`.",
+    "`render(width)` is split into cache read/write plus `renderLines(width, proofMode)`; the normal path stays byte- and lifecycle-identical, while a proof render may reuse cached normal blocks for non-intersecting top-level tokens and never writes `cachedLines`, `blocks` or the highlighted-code cache."
+   ],
+   "dependencies": {
+    "vendorInternal": {
+     "audited": true,
+     "items": [
+      "The origin map is built over the ACTUAL cached token tree, one ordered cursor per parent: list items, table cells and inline children are consumed in source order, and blockquote/list-item content is located through its stripped block view so multi-line children keep their real absolute offsets.",
+      "Sentinels are injected only into the emitted text of the one intersecting leaf (text/escape/codespan/inline html/literal LaTeX), into the printed link fallback that paints a destination, and into the exact styled line of a fenced code block whose ANSI-stripped text equals the source line.",
+      "Proof mode never stores rendered blocks and never consumes the block cache as proof output; a proof render reuses a cached normal block only when its token does not intersect the request.",
+      "`tokens`, `blocks` and the proof state stay weak/short-lived: no persistent source map, no second Marked instance, no second AST and no Session-owned state."
+     ],
+     "notes": "The trace lives entirely inside one synchronous call and is cleared in a finally block."
+    },
+    "inheritanceStructural": {
+     "audited": true,
+     "items": [
+      "`Markdown` keeps its constructor, public render contract and cache fields; it gains one short-lived proof-state field and one hyperlink-capability epoch stamp used only to refuse a stale proof.",
+      "The render body is split into `render()` (cache read/write only) and private `renderLines()`; the normal branch keeps the same block reuse, padding, flattening and cache assignments.",
+      "No new subclass or override point is introduced."
+     ],
+     "notes": "Additive private surface; the normal render path is unchanged."
+    },
+    "host": {
+     "audited": true,
+     "items": [
+      "No host wiring is added in this change: the root Host still renders Assistant Markdown unchanged.",
+      "Declared consumers are the later Host card composition step, which must convert Markdown component rows/columns to card-relative offsets and keep composite/plugin owner decisions outside Markdown.",
+      "Markdown never returns `COMPOSITE_OWNER`: a composite card's ownership decision belongs to that card's owner, and a request that no single Markdown leaf emitted stays `UNPROVEN`."
+     ],
+     "notes": "F1 proves only the fork component capability; the Host Full-search product behavior is owned by the follow-up Host work."
+    },
+    "publicExtension": {
+     "audited": true,
+     "items": [
+      "Only `type MarkdownSourceCellProof` is re-exported from the fork index; the parser, token tree, origin map and sentinel state stay private.",
+      "No extension entry point, plugin API or terminal-facing surface changes."
+     ],
+     "notes": "No public token-position API and no mutable tracing state."
+    },
+    "behavioral": {
+     "audited": true,
+     "items": [
+      "With no proof call, render output bytes, SGR/OSC 8 sequences, hyperlink targets, wrapping, block-cache identity and highlighted-code caching are unchanged.",
+      "A proof is accepted only when sentinel-stripped proof rows equal the cached normal rows element-wise and exactly one leaf emitted the requested range; the recovered painted text must equal the source slice.",
+      "A hidden link/definition destination with hyperlinks enabled is `NOT_PAINTED`; with hyperlinks disabled the printed fallback destination is traced and the business href is never rewritten.",
+      "Escapes, entities, literal `renderLatex:false` math and glyph-preserving code highlighting prove; unclosed math, transformed LaTeX, glyph-rewriting highlighters, block HTML, composite ranges, grapheme splits and stale capability epochs do not.",
+      "A request may span several wrapped rows; the continuation prefix/content end are inferred from boundary columns and an ambiguous reconstruction is refused."
+     ],
+     "notes": "Everything that cannot be tied to one emitted leaf fails closed instead of guessing the closest visible occurrence."
+    }
+   },
+   "tests": [
+    "packages/pi-tui/test/markdown.test.ts: 'proves exactly the requested occurrence of a plain paragraph'",
+    "packages/pi-tui/test/markdown.test.ts: 'proves heading, strong, em and strikethrough text'",
+    "packages/pi-tui/test/markdown.test.ts: 'proves nested list items and quoted text, including continuation lines'",
+    "packages/pi-tui/test/markdown.test.ts: 'proves a link label and keeps the hidden destination unclaimed'",
+    "packages/pi-tui/test/markdown.test.ts: 'proves the printed destination when hyperlinks are disabled'",
+    "packages/pi-tui/test/markdown.test.ts: 'proves a reference definition target printed by its using link'",
+    "packages/pi-tui/test/markdown.test.ts: 'proves fenced code text and refuses a highlighter that rewrites the glyphs'",
+    "packages/pi-tui/test/markdown.test.ts: 'proves renderLatex:false inline and display math source text'",
+    "packages/pi-tui/test/markdown.test.ts: 'returns every painted row when one occurrence spans a soft wrap'",
+    "packages/pi-tui/test/markdown.test.ts: 're-proves the same component after width changes'",
+    "packages/pi-tui/test/markdown.test.ts: 'proves CJK, ZWJ and wide grapheme text without splitting a cluster'",
+    "packages/pi-tui/test/markdown.test.ts: 'proves table cell text, including a wrapped cell, and refuses a table fallback'",
+    "packages/pi-tui/test/markdown.test.ts: 'reports markup-only delimiter ranges as not painted'",
+    "packages/pi-tui/test/markdown.test.ts: 'refuses ranges that are not one painted leaf'",
+    "packages/pi-tui/test/markdown.test.ts: 'refuses invalid, shifted and grapheme-splitting ranges'",
+    "packages/pi-tui/test/markdown.test.ts: 'keeps the normal render byte-identical and cached across a proof'",
+    "packages/pi-tui/test/markdown.test.ts: 'drops stale proofs after setText and invalidate without stale ranges'",
+    "packages/pi-tui/test/markdown.test.ts: 'returns STALE_RENDER across a capability change until invalidate()'"
+   ],
+   "upstream": {
+    "equivalence": "NO",
+    "checkedAgainst": {
+     "repo": "earendil-works/pi",
+     "baselineRef": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+     "referenceRef": "f9a26365568127461c47a07a37dcb42c140a3ac5"
+    },
+    "relevantFiles": [
+     "src/components/markdown.ts"
+    ],
+    "relevantIssues": [],
+    "semanticDelta": "Upstream Markdown renders source to styled terminal rows with no source-to-cell proof surface and no one-shot tracing state. The fork adds only a private proof-mode branch plus the public `proveSourceSpan` method and its result type; the normal render path, caches, tokenizer and hyperlink output are semantically equivalent."
+   },
+   "retirement": {
+    "conditions": [
+     "Retire when upstream Markdown exposes an equivalent component-local source-to-painted-cell proof (or the renderer is replaced by one that does).",
+     "Retirement must re-run the 'Source-cell proof (proveSourceSpan)' group in packages/pi-tui/test/markdown.test.ts and re-qualify every Host consumer on the new renderer."
+    ],
+    "replacementMapping": [],
+    "evidence": []
+   },
+   "audit": {
+    "lastAuditedAt": "2026-11-10",
+    "scope": [
+     "vendor-internal",
+     "inheritance-structural",
+     "host",
+     "public-extension",
+     "behavioral",
+     "tests"
+    ],
+    "notes": "First audit at introduction. Normal-render equivalence is guarded by the proof tests' cached-array/byte assertions; the ledger gate, fork typecheck, fork suite, pi-surface-compat and pi-vendor-diff gates are run in the same state."
+   }
   }
  }
 }

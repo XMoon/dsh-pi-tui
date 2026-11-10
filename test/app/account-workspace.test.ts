@@ -13,10 +13,14 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
+import { VirtualTerminal } from '../support/virtual-terminal.ts'
+import { currentPalette, setTheme } from '../../src/tui/theme/runtime.ts'
+import { darkColors, lightColors } from '../../src/domain/display/theme.ts'
 import { AccountWorkspacePage, type AccountInitialView } from '../../src/tui/panels/account-workspace-page.ts'
-import type { AccountWorkspaceSource } from '../../src/app/command/account-workflow.ts'
-import { accountClientMetadata } from '../../src/app/command/account-workflow.ts'
-import type { AccountView } from '../../src/runtime/config-port.ts'
+import type { AccountWorkspaceSource, AccountQueryOutcome } from '../../src/app/command/account-workflow.ts'
+import { accountClientMetadata, AccountWorkflow } from '../../src/app/command/account-workflow.ts'
+import type { AccountObservation, AccountObservationLease, AccountProfile, AccountView, AccountWallet, AccountWatchEvent } from '../../src/runtime/config-port.ts'
+import { SupersededReadError } from '../../src/runtime/read-error.ts'
 
 const LINKS = { usageUrl: 'https://platform.example/usage', topUpUrl: 'https://platform.example/topup' }
 
@@ -47,41 +51,94 @@ interface SourceState {
   balanceFails: boolean
   runningTasks: boolean
   readonly calls: string[]
+  available?: boolean
+  taskCheckCalls?: number
+  watchStarts?: number
+  watchActive?: number
+  watchListeners?: Set<() => void>
+  watchFailures?: Set<(error: Error) => void>
+  currentLeases?: Set<AccountObservationLease>
+}
+
+function issueObservation(state: SourceState, view = state.view, lease = {} as AccountObservationLease): AccountObservation {
+  state.currentLeases!.add(lease)
+  return { view, lease }
+}
+
+function watchEvent(state: SourceState, view = state.view, lease = {} as AccountObservationLease): AccountWatchEvent {
+  return { kind: 'current', observation: issueObservation(state, view, lease) }
 }
 
 function makeSource(state: SourceState): AccountWorkspaceSource {
+  state.watchListeners ??= new Set()
+  state.watchFailures ??= new Set()
+  state.currentLeases ??= new Set()
+  state.watchStarts ??= 0
+  state.watchActive ??= 0
   return {
-    available: () => true,
+    available: () => state.available ?? true,
     callbackOrigin: () => 'http://127.0.0.1:43121',
-    getState: async () => state.view,
-    watch: async function* () {
-      // The official watch yields a complete initial state; the page also
-      // reads getState on open, so an empty stream is a valid test stand-in.
-      yield state.view
-      await new Promise<void>(() => {})
+    isObservationCurrent: lease => state.currentLeases!.has(lease),
+    watch: async function* (signal) {
+      const lease = {} as AccountObservationLease
+      state.watchStarts = (state.watchStarts ?? 0) + 1
+      state.watchActive = (state.watchActive ?? 0) + 1
+      try {
+        yield watchEvent(state, state.view, lease)
+        while (true) {
+          const next = await new Promise<AccountView | undefined>((resolve, reject) => {
+            const listeners = state.watchListeners!
+            const failures = state.watchFailures!
+            const cleanup = (): void => {
+              listeners.delete(changed)
+              failures.delete(failed)
+              signal.removeEventListener('abort', aborted)
+            }
+            const changed = (): void => { cleanup(); resolve(state.view) }
+            const failed = (error: Error): void => {
+              cleanup()
+              state.currentLeases!.delete(lease)
+              reject(error)
+            }
+            const aborted = (): void => { cleanup(); resolve(undefined) }
+            listeners.add(changed)
+            failures.add(failed)
+            signal.addEventListener('abort', aborted, { once: true })
+            if (signal.aborted) aborted()
+          })
+          if (next === undefined) return
+          yield watchEvent(state, next, lease)
+        }
+      } finally {
+        state.currentLeases!.delete(lease)
+        state.watchActive = (state.watchActive ?? 1) - 1
+      }
     },
-    getProfile: async () => state.profileFails
+    getProfile: async (_lease) => state.profileFails
       ? { status: 'failed', reason: 'profile endpoint unavailable' }
       : { status: 'ready', value: { id: 'acct-1', name: 'Moon', contact: 'm***@example.com' } },
-    getBalance: async () => state.balanceFails
+    getBalance: async (_lease) => state.balanceFails
       ? { status: 'failed', reason: 'balance endpoint unavailable' }
       : { status: 'ready', value: { value: [{ currency: 'CNY', balance: '12.50' }], bonusWallets: [{ currency: 'CNY', balance: '3.00' }] } },
-    startSignIn: async () => {
+    startSignIn: async lease => {
       state.calls.push('signIn')
       state.view = waitingAttempt()
-      return state.view
+      return issueObservation(state, state.view, lease)
     },
-    cancelSignIn: async id => {
+    cancelSignIn: async (id, lease) => {
       state.calls.push(`cancel:${id}`)
       state.view = signedOut()
-      return state.view
+      return issueObservation(state, state.view, lease)
     },
-    signOut: async () => {
+    signOut: async lease => {
       state.calls.push('signOut')
       state.view = signedOut()
-      return state.view
+      return issueObservation(state, state.view, lease)
     },
-    hasRunningAccountTasks: () => state.runningTasks,
+    hasRunningAccountTasks: async () => {
+      state.taskCheckCalls = (state.taskCheckCalls ?? 0) + 1
+      return state.runningTasks
+    },
     openUrl: url => { state.calls.push(`open:${url}`) },
     copy: text => { state.calls.push(`copy:${text}`) },
     run: (_label, task) => { void task() },
@@ -98,6 +155,23 @@ function text(page: AccountWorkspacePage, width = 100): string {
   return page.render(width).map(stripTerminalSequences).join('\n')
 }
 
+function focusAction(page: AccountWorkspacePage, label: string, width = 100): void {
+  for (let index = 0; index < 40; index += 1) {
+    const painted = text(page, width)
+    if (painted.split('\n').some(line => line.includes(`> ${label}`))) return
+    page.handleInput('\u001b[B')
+  }
+  assert.fail(`the painted Account page did not select ${JSON.stringify(label)}:\n${text(page, width)}`)
+}
+
+function clickPaintedAction(page: AccountWorkspacePage, label: string, width = 100): void {
+  const lines = text(page, width).split('\n')
+  const row = lines.findIndex(line => line.trim() === label || line.trim() === `> ${label}`)
+  assert.ok(row >= 0, `the Account page did not paint ${JSON.stringify(label)}:\n${lines.join('\n')}`)
+  page.onCellPress(2, row)
+  page.onCellClick(2, row)
+}
+
 function open(initial: AccountInitialView = { view: 'page' }): { page: AccountWorkspacePage; state: SourceState } {
   const state: SourceState = { view: signedOut(), profileFails: false, balanceFails: false, runningTasks: false, calls: [] }
   const page = new AccountWorkspacePage(makeSource(state), () => {}, initial)
@@ -110,6 +184,45 @@ test('the account metadata samples the live timezone offset and the UI locale', 
   assert.equal(metadata.version, '0.5.3')
   assert.equal(metadata.timezoneOffsetSeconds, -new Date().getTimezoneOffset() * 60)
   assert.equal(metadata.locale.length > 0, true)
+})
+
+test('superseded Host profile and balance reads do not become current UI failures', async () => {
+  const stale = new SupersededReadError('remote Account generation changed')
+  const lease = {} as AccountObservationLease
+  const observation: AccountObservation = { view: stored(), lease }
+  const account = {
+    available: () => true,
+    isObservationCurrent: (_lease: AccountObservationLease) => true,
+    getState: async () => observation,
+    getProfile: async (_client: unknown, _lease: AccountObservationLease) => { throw stale },
+    getBalance: async (_client: unknown, _lease: AccountObservationLease) => { throw stale },
+    watch: async function* (signal: AbortSignal) {
+      yield { kind: 'current' as const, observation }
+      await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true }))
+    },
+    getCallbackOrigin: () => 'http://127.0.0.1:43121',
+    startSignIn: async (_client: unknown, _lease: AccountObservationLease) => observation,
+    cancelSignIn: async (_id: string, _lease: AccountObservationLease) => observation,
+    signOut: async (_client: unknown, _lease: AccountObservationLease) => observation,
+    hasRunningAccountTasks: async (_lease: AccountObservationLease) => false,
+  }
+  const workflow = new AccountWorkflow({
+    account,
+    version: '0.5.6',
+    openUrl: () => {},
+    copy: () => {},
+    run: (_label, task) => { void task() },
+    diag: { warn: () => {} },
+  })
+  assert.deepEqual(await workflow.getProfile(lease), { status: 'superseded' })
+  assert.deepEqual(await workflow.getBalance(lease), { status: 'superseded' })
+  const page = new AccountWorkspacePage(workflow, () => {}, { view: 'page' })
+  page.setBodyHeight(26)
+  await flush()
+  const painted = text(page)
+  assert.match(painted, /Signed in \(stored credential\)/u)
+  assert.doesNotMatch(painted, /Profile\s+failed|Balance\s+failed/u)
+  page.dispose()
 })
 
 test('signed out: the page offers Sign in and the exact callback origin, never a token', async () => {
@@ -129,6 +242,14 @@ test('Sign in starts the Host attempt and paints the authorize URL; Cancel uses 
   text(page) // paint the initial actions
   page.handleInput('\r') // Sign in
   await flush()
+  assert.match(text(page), /Last known: signed out · Host state not current/u,
+    'the ACK retires the old view until the next Watch snapshot')
+  page.handleInput('\r')
+  await flush()
+  assert.equal(state.calls.filter(call => call === 'signIn').length, 1,
+    'the retired old view cannot dispatch a second SignIn')
+  for (const publish of [...state.watchListeners!]) publish()
+  await flush()
   let painted = text(page)
   assert.ok(state.calls.includes('signIn'), state.calls.join(','))
   assert.match(painted, /waiting-browser/u)
@@ -139,6 +260,14 @@ test('Sign in starts the Host attempt and paints the authorize URL; Cancel uses 
   page.handleInput('\r')
   await flush()
   assert.ok(state.calls.includes('cancel:attempt-1'), state.calls.join(','))
+  assert.match(text(page), /Last known: signed out · Host state not current/u,
+    'Cancel ACK retires the old Attempt view until the next Watch snapshot')
+  page.handleInput('\r')
+  await flush()
+  assert.equal(state.calls.filter(call => call.startsWith('cancel:')).length, 1,
+    'the retired old Attempt cannot be cancelled again')
+  for (const publish of [...state.watchListeners!]) publish()
+  await flush()
   painted = text(page)
   assert.match(painted, /Signed out/u)
 })
@@ -148,6 +277,8 @@ test('pressing o / c opens and copies the current attempt URL through the Client
   await flush()
   text(page)
   page.handleInput('\r')
+  await flush()
+  for (const publish of [...state.watchListeners!]) publish()
   await flush()
   text(page)
   page.handleInput('o')
@@ -177,7 +308,7 @@ test('stored credential: profile and balance settle independently and keep the d
   assert.match(painted, /3\.00 CNY/u)
 })
 
-test('sign out requires confirmation, warns about running account tasks and never restores a local grant on failure', async () => {
+test('Sign out waits for the Host task fact and warns before cancelling a running account task', async () => {
   const { page, state } = open()
   await flush()
   state.view = stored()
@@ -198,62 +329,512 @@ test('sign out requires confirmation, warns about running account tasks and neve
   page.handleInput('\r')
   await flush()
   assert.ok(state.calls.includes('signOut'), state.calls.join(','))
+  for (const publish of [...state.watchListeners!]) publish()
+  await flush()
   assert.match(text(page), /Signed out/u)
 })
 
-test('/logout deep link opens the Sign out confirmation directly', async () => {
-  const { page, state } = open({ view: 'signout' })
-  state.view = stored()
-  await flush()
-  assert.match(text(page), /Sign out confirmation/u)
+test('the sign-out task-check status keeps semantic ink and fits a real 80x24 VirtualTerminal frame', async t => {
+  const originalPalette = currentPalette
+  t.after(() => setTheme('custom', originalPalette))
+  const themes = [
+    { mode: 'dark' as const, palette: darkColors },
+    { mode: 'light' as const, palette: lightColors },
+    { mode: 'custom' as const, palette: { ...darkColors, error: '#12ab34', textDim: '#345678' } },
+  ]
+  const rgb = (value: string): number => Number.parseInt(value.replace(/^#/u, ''), 16)
+  for (const theme of themes) {
+    setTheme(theme.mode, theme.palette)
+    const state: SourceState = { view: stored(), profileFails: false, balanceFails: false, runningTasks: true, calls: [] }
+    let resolveTaskCheck!: (running: boolean) => void
+    const source = makeSource(state)
+    source.hasRunningAccountTasks = () => new Promise(resolve => { resolveTaskCheck = resolve })
+    const page = new AccountWorkspacePage(source, () => {}, { view: 'signout' })
+    page.setBodyHeight(24)
+    await flush()
+    const pendingRows = page.render(80)
+    const pendingText = pendingRows.map(stripTerminalSequences).join('\n')
+    assert.match(pendingText, /Checking running account tasks…/u)
+    const vt = new VirtualTerminal(80, 24)
+    vt.write(pendingRows.join('\r\n'))
+    const pendingFrame = await vt.flushAndGetViewport()
+    assert.equal(pendingFrame.length, 24)
+    assert.ok(pendingFrame.every(row => visibleWidth(row) <= 80), `${theme.mode} pending frame overflowed`)
+    const pendingLine = pendingFrame.findIndex(row => row.includes('Checking running account tasks'))
+    const pendingCol = pendingFrame[pendingLine]!.indexOf('Checking running account tasks')
+    assert.equal(vt.getCellFgRgb(pendingLine, pendingCol), rgb(theme.palette.textDim),
+      `${theme.mode} checking status must use the semantic dim token`)
+
+    resolveTaskCheck(true)
+    await flush()
+    const warningRows = page.render(80)
+    const warningText = warningRows.map(stripTerminalSequences).join('\n')
+    assert.match(warningText, /A running agent is using a deepseek-account model/u)
+    const warningVt = new VirtualTerminal(80, 24)
+    warningVt.write(warningRows.join('\r\n'))
+    const warningFrame = await warningVt.flushAndGetViewport()
+    assert.equal(warningFrame.length, 24)
+    assert.ok(warningFrame.every(row => visibleWidth(row) <= 80), `${theme.mode} warning frame overflowed`)
+    const warningLine = warningFrame.findIndex(row => row.includes('A running agent is using a deepseek-account model'))
+    const warningCol = warningFrame[warningLine]!.indexOf('A running agent is using a deepseek-account model')
+    const staleFailure = [...state.watchFailures!][0]
+    staleFailure!(new Error('the Account observation ended'))
+    await flush()
+    const staleRows = page.render(80)
+    const staleText = staleRows.map(stripTerminalSequences).join('\n')
+    assert.match(staleText, /Last known: signed in · Host state not current/u)
+    assert.doesNotMatch(staleText, /Sign out confirmation/u,
+      'a watch invalidation closes a previously opened SignOut confirmation')
+    const staleVt = new VirtualTerminal(80, 24)
+    staleVt.write(staleRows.join('\r\n'))
+    const staleFrame = await staleVt.flushAndGetViewport()
+    assert.equal(staleFrame.length, 24)
+    assert.ok(staleFrame.every(row => visibleWidth(row) <= 80), `${theme.mode} stale Account frame overflowed`)
+    page.dispose()
+  }
 })
 
-test('a failed sign-out keeps the Host-reported state and reports the failure', async () => {
+test('a late false task check cannot replace the newer confirmed running-task fact', async () => {
   const state: SourceState = { view: stored(), profileFails: false, balanceFails: false, runningTasks: false, calls: [] }
   const source = makeSource(state)
-  source.signOut = async () => {
+  const answers: Array<(running: boolean) => void> = []
+  source.hasRunningAccountTasks = () => new Promise(resolve => { answers.push(resolve) })
+  const page = new AccountWorkspacePage(source, () => {}, { view: 'page' })
+  page.setBodyHeight(30)
+  await flush()
+  assert.equal(answers.length, 1, 'the initial AccountView starts one Host task check')
+  text(page)
+  page.handleInput('\u001b[B')
+  page.handleInput('\u001b[B')
+  page.handleInput('\r')
+  await flush()
+  assert.equal(answers.length, 2, 'opening Sign out starts a fresh Host task check')
+  assert.match(text(page), /Checking running account tasks/u)
+  page.handleInput('\r')
+  assert.equal(state.calls.includes('signOut'), false, 'a pending Host fact must not dispatch signOut')
+
+  answers[1]!(true)
+  await flush()
+  assert.match(text(page), /running agent is using a deepseek-account model/u)
+  answers[0]!(false)
+  await flush()
+  assert.match(text(page), /running agent is using a deepseek-account model/u,
+    'the older false result must not replace the newer true fact')
+
+  page.handleInput('\r')
+  await flush()
+  assert.equal(state.calls.filter(call => call === 'signOut').length, 1)
+})
+
+test('/logout deep link with no stored credential reports signed out without checking running tasks', async () => {
+  const { page, state } = open({ view: 'signout' })
+  await flush()
+  const painted = text(page)
+  assert.match(painted, /Signed out \/ no stored credential/u)
+  assert.match(painted, /Nothing to sign out/u)
+  assert.match(painted, /Sign in/u)
+  assert.doesNotMatch(painted, /Sign out confirmation|Checking running account tasks|Could not verify/u)
+  assert.equal(state.taskCheckCalls ?? 0, 0, 'the Host task predicate is irrelevant without a stored credential')
+  assert.equal(state.calls.includes('signOut'), false)
+  page.dispose()
+})
+
+test('an unavailable Host task check disables Sign out until Retry returns a known fact', async () => {
+  const state: SourceState = { view: stored(), profileFails: false, balanceFails: false, runningTasks: false, calls: [] }
+  const source = makeSource(state)
+  let taskReads = 0
+  source.hasRunningAccountTasks = async () => {
+    taskReads += 1
+    if (taskReads === 1) throw new Error('the Host is disconnected')
+    return false
+  }
+  const page = new AccountWorkspacePage(source, () => {}, { view: 'signout' })
+  page.setBodyHeight(30)
+  await flush()
+  let painted = text(page)
+  assert.match(painted, /Could not verify whether running account tasks will be cancelled/u)
+  assert.match(painted, /Retry task check/u)
+  page.handleInput('\r')
+  assert.equal(state.calls.includes('signOut'), false, 'unknown is not the safe false state')
+
+  page.handleInput('\u001b[B')
+  text(page)
+  page.handleInput('\r')
+  await flush()
+  assert.equal(taskReads, 2)
+  painted = text(page)
+  assert.match(painted, /No running account task is using this account/u)
+  assert.doesNotMatch(painted, /Could not verify whether running account tasks/u)
+  page.handleInput('\u001b[A')
+  text(page)
+  page.handleInput('\r')
+  await flush()
+  assert.equal(state.calls.filter(call => call === 'signOut').length, 1)
+})
+
+test('/logout deep link with a stored credential opens the asynchronous task check', async () => {
+  const state: SourceState = { view: stored(), profileFails: false, balanceFails: false, runningTasks: false, calls: [] }
+  const page = new AccountWorkspacePage(makeSource(state), () => {}, { view: 'signout' })
+  page.setBodyHeight(30)
+  await flush()
+  const painted = text(page)
+  assert.match(painted, /Sign out confirmation/u)
+  assert.match(painted, /No running account task is using this account/u)
+  assert.equal(state.taskCheckCalls, 1)
+  page.dispose()
+})
+
+test('a failed SignOut ACK is reported without replay or automatic recovery', async () => {
+  const state: SourceState = { view: stored(), profileFails: false, balanceFails: false, runningTasks: false, calls: [] }
+  const source = makeSource(state)
+  source.signOut = async (_lease) => {
     state.calls.push('signOut')
     throw new Error('local credential removal failed')
   }
   const page = new AccountWorkspacePage(source, () => {}, { view: 'signout' })
-  page.setBodyHeight(24)
+  page.setBodyHeight(30)
   await flush()
   text(page)
+  focusAction(page, 'Sign out')
   page.handleInput('\r')
   await flush()
-  const painted = text(page)
-  assert.match(painted, /sign-out failed: local credential removal failed/u)
-  assert.match(painted, /Signed in \(stored credential\)/u)
+  assert.match(text(page), /sign-out result not confirmed: local credential removal failed/u)
+  assert.match(text(page), /Last known: signed in · Host state not current/u,
+    'the old stored view is last-known until a new Watch snapshot')
+  assert.deepEqual(state.calls, ['signOut'], 'the unknown mutation is never replayed automatically')
+  assert.equal(state.watchStarts, 1, 'a failed mutation does not start an automatic Host reread')
+  clickPaintedAction(page, 'Sign out…')
+  await flush()
+  assert.deepEqual(state.calls, ['signOut'], 'the retired old view cannot reopen a second SignOut')
+
+  page.handleInput('r')
+  await flush()
+  assert.equal(state.watchStarts, 2, 'explicit Refresh rebuilds the one official Watch subscription')
+  assert.doesNotMatch(text(page), /sign-out result not confirmed/u,
+    'the fresh initial Watch snapshot clears the unconfirmed result notice')
+  assert.deepEqual(state.calls, ['signOut'], 'recovery never replays the mutation')
+  page.dispose()
 })
 
-test('an older Account getState cannot overwrite a newer watch snapshot (RFL-002)', async () => {
-  const state: SourceState = { view: signedOut(), profileFails: false, balanceFails: false, runningTasks: false, calls: [] }
-  let pushWatch: ((view: AccountView) => void) | undefined
-  let held: ((view: AccountView) => void) | undefined
-  const source = makeSource(state)
-  source.watch = async function* () {
-    yield state.view
-    for (;;) {
-      const next = await new Promise<AccountView>(resolve => { pushWatch = resolve })
-      yield next
-    }
+test('offline Account refresh and an ended watch each restore one live subscription', async () => {
+  const state: SourceState = {
+    view: signedOut(), profileFails: false, balanceFails: false, runningTasks: false, calls: [], available: false,
   }
-  source.getState = () => new Promise<AccountView>(resolve => { held = resolve })
-  const page = new AccountWorkspacePage(source, () => {}, { view: 'page' })
+  const page = new AccountWorkspacePage(makeSource(state), () => {}, { view: 'page' })
   page.setBodyHeight(26)
   await flush()
-  page.render(100)
-  // The initial watch paint comes from the real getState? No: the held override
-  // starts on the manual refresh below; seed the initial state explicitly.
-  page.handleInput('r') // starts the old read
+  assert.match(text(page), /Host Account service is unavailable/u)
+  assert.equal(state.watchStarts, 0, 'offline page cannot create a live Host watch')
+
+  state.available = true
+  page.handleInput('r')
   await flush()
+  assert.match(text(page), /Signed out \/ no stored credential/u)
+  assert.equal(state.watchStarts, 1, 'Refresh starts one complete Host watch after reconnection')
+  assert.equal(state.watchActive, 1)
+
+  const fail = [...state.watchFailures!][0]
+  fail!(new Error('transport closed'))
+  await flush()
+  assert.match(text(page), /Host Account watch stopped; Refresh to read current state/u)
+  assert.equal(state.watchActive, 0, 'the failed stream releases its old subscription')
+
+  page.handleInput('r')
+  await flush()
+  assert.equal(state.watchStarts, 2, 'manual refresh restarts the failed watch exactly once')
+  assert.equal(state.watchActive, 1, 'only the replacement watch remains live')
   state.view = stored()
-  pushWatch?.(state.view)
+  for (const publish of [...state.watchListeners!]) publish()
+  await flush()
+  assert.match(text(page), /Signed in \(stored credential\)/u,
+    'a later Host update from the replacement stream reaches the still-open page')
+  page.dispose()
+  await flush()
+  assert.equal(state.watchActive, 0, 'page disposal retires the one replacement stream')
+})
+
+test('a watch retry keeps a last-known credential fail-closed until its initial Host frame arrives', async () => {
+  const state: SourceState = { view: stored(), profileFails: false, balanceFails: false, runningTasks: false, calls: [] }
+  const source = makeSource(state)
+  let watchStarts = 0
+  let releaseReplacement!: (view: AccountView) => void
+  source.watch = async function* (signal) {
+    watchStarts += 1
+    state.watchStarts = watchStarts
+    state.watchActive = (state.watchActive ?? 0) + 1
+    const lease = {} as AccountObservationLease
+    try {
+      if (watchStarts === 1) {
+        yield watchEvent(state, state.view, lease)
+        await new Promise<void>((_resolve, reject) => {
+          const failed = (error: Error): void => {
+            state.watchFailures!.delete(failed)
+            state.currentLeases!.delete(lease)
+            signal.removeEventListener('abort', aborted)
+            reject(error)
+          }
+          const aborted = (): void => {
+            state.watchFailures!.delete(failed)
+            reject(signal.reason)
+          }
+          state.watchFailures!.add(failed)
+          signal.addEventListener('abort', aborted, { once: true })
+        })
+      }
+      const snapshot = await new Promise<AccountView>(resolve => { releaseReplacement = resolve })
+      yield watchEvent(state, snapshot, lease)
+      await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true }))
+    } finally {
+      state.watchActive = (state.watchActive ?? 1) - 1
+    }
+  }
+  const page = new AccountWorkspacePage(source, () => {}, { view: 'page' })
+  page.setBodyHeight(30)
+  await flush()
+  assert.equal(watchStarts, 1)
+  assert.match(text(page), /Signed in \(stored credential\)/u)
+  focusAction(page, 'Sign out…')
+  const firstFailure = [...state.watchFailures!][0]
+  firstFailure!(new Error('carrier ended'))
+  await flush()
+  assert.match(text(page), /Host Account watch stopped; Refresh to read current state/u)
+  assert.equal(state.watchActive, 0)
+  page.handleInput('\r')
+  await flush()
+  assert.doesNotMatch(text(page), /Sign out confirmation/u,
+    'a stale stored AccountView cannot start the SignOut confirmation/task-risk query')
+  assert.equal(state.calls.includes('signOut'), false)
+
+  page.handleInput('r')
+  await flush()
+  assert.equal(state.watchStarts, 2)
+  assert.equal(state.watchActive, 1)
+  assert.match(text(page), /Refreshing Host account state/u)
+  assert.match(text(page), /Last known: signed in · Host state not current/u, 'the old snapshot remains explicitly last-known')
+  page.render(100)
+  for (let index = 0; index < 7; index += 1) page.handleInput('\u001b[B')
+  page.render(100)
+  page.handleInput('\r')
+  assert.equal(state.calls.includes('signOut'), false, 'a stale last-known view cannot authorize SignOut during watch restart')
+
+  state.view = signedOut()
+  releaseReplacement(state.view)
+  await flush()
+  assert.match(text(page), /Signed out \/ no stored credential/u)
+  assert.doesNotMatch(text(page), /Refreshing Host account state/u)
+  page.dispose()
+  await flush()
+  assert.equal(state.watchActive, 0)
+})
+
+test('SignIn is unavailable until the initial Host watch snapshot confirms signed-out', async () => {
+  const state: SourceState = { view: signedOut(), profileFails: false, balanceFails: false, runningTasks: false, calls: [] }
+  const source = makeSource(state)
+  let releaseInitial!: (view: AccountView) => void
+  let pushWatch: ((view: AccountView) => void) | undefined
+  source.watch = async function* (signal) {
+    state.watchStarts = (state.watchStarts ?? 0) + 1
+    state.watchActive = (state.watchActive ?? 0) + 1
+    const lease = {} as AccountObservationLease
+    try {
+      const first = await new Promise<AccountView>(resolve => { releaseInitial = resolve })
+      yield watchEvent(state, first, lease)
+      while (true) {
+        const next = await new Promise<AccountView | undefined>(resolve => {
+          pushWatch = resolve
+          signal.addEventListener('abort', () => resolve(undefined), { once: true })
+        })
+        if (next === undefined) return
+        yield watchEvent(state, next, lease)
+      }
+    } finally {
+      state.watchActive = (state.watchActive ?? 1) - 1
+    }
+  }
+  const page = new AccountWorkspacePage(source, () => {}, { view: 'page' })
+  page.setBodyHeight(30)
+  await flush()
+  assert.match(text(page), /Reading Host account state/u)
+  assert.equal(state.watchStarts, 1)
+  clickPaintedAction(page, 'Sign in')
+  await flush()
+  assert.equal(state.calls.includes('signIn'), false,
+    'the painted SignIn action cannot dispatch while no trusted AccountView exists')
+
+  releaseInitial(signedOut())
+  await flush()
+  focusAction(page, 'Sign in')
+  page.handleInput('\r')
+  await flush()
+  assert.deepEqual(state.calls, ['signIn'], 'a fresh signed-out Host snapshot admits the explicit SignIn')
+  state.view = waitingAttempt()
+  pushWatch?.(waitingAttempt())
+  await flush()
+  assert.match(text(page), /waiting-browser/u, 'the Watch, not the mutation ACK, paints the Host attempt')
+  page.dispose()
+  await flush()
+})
+
+test('a current signed-out Host view with a terminal attempt still admits a fresh SignIn', async () => {
+  const terminal: AccountView = {
+    ...signedOut(),
+    attempt: { id: 'attempt-previous', phase: 'cancelled' },
+  }
+  const state: SourceState = { view: terminal, profileFails: false, balanceFails: false, runningTasks: false, calls: [] }
+  const page = new AccountWorkspacePage(makeSource(state), () => {}, { view: 'page' })
+  page.setBodyHeight(30)
+  await flush()
+  assert.match(text(page), /Last attemptcancelled/u)
+  focusAction(page, 'Sign in')
+  page.handleInput('\r')
+  await flush()
+  assert.deepEqual(state.calls, ['signIn'])
+  for (const publish of [...state.watchListeners!]) publish()
+  await flush()
+  assert.match(text(page), /waiting-browser/u)
+  page.dispose()
+})
+
+test('SignOut deep link waits for its first current Host observation', async () => {
+  const state: SourceState = { view: stored(), profileFails: false, balanceFails: false, runningTasks: false, calls: [] }
+  const source = makeSource(state)
+  let releaseInitial!: (view: AccountView) => void
+  source.watch = async function* (signal) {
+    const lease = {} as AccountObservationLease
+    const first = await new Promise<AccountView>(resolve => { releaseInitial = resolve })
+    yield watchEvent(state, first, lease)
+    await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true }))
+  }
+  const page = new AccountWorkspacePage(source, () => {}, { view: 'signout' })
+  page.setBodyHeight(30)
+  await flush()
+  assert.match(text(page), /Reading Host account state/u)
+  assert.equal(state.taskCheckCalls ?? 0, 0, 'no task-risk read is authorized before the first Host frame')
+  page.handleInput('\r')
+  await flush()
+  assert.equal(state.calls.includes('signOut'), false,
+    'the /logout confirmation cannot dispatch from an absent Account observation')
+
+  releaseInitial(signedOut())
+  await flush()
+  assert.match(text(page), /Nothing to sign out/u)
+  assert.equal(state.calls.includes('signOut'), false)
+  page.dispose()
+})
+
+test('a stored Account view loses mutation authority immediately when its adapter lease expires', async () => {
+  const state: SourceState = { view: stored(), profileFails: false, balanceFails: false, runningTasks: false, calls: [] }
+  const source = makeSource(state)
+  const page = new AccountWorkspacePage(source, () => {}, { view: 'page' })
+  page.setBodyHeight(30)
   await flush()
   assert.match(text(page), /Signed in \(stored credential\)/u)
-  held?.(signedOut())
+  assert.equal(state.taskCheckCalls, 1)
+  focusAction(page, 'Sign out…')
+
+  state.currentLeases!.clear()
+  assert.equal(source.available(), true, 'the Account service can remain present while its old observation is stale')
+  assert.match(text(page), /Last known: signed in · Host state not current/u)
+  assert.match(text(page), /last known · not current/u)
+  page.handleInput('\r')
   await flush()
-  assert.match(text(page), /Signed in \(stored credential\)/u, 'the older read must be dropped')
+  assert.doesNotMatch(text(page), /Sign out confirmation/u)
+  assert.equal(state.taskCheckCalls, 1, 'the stale Host view cannot start a new task-risk read')
+  assert.equal(state.calls.includes('signOut'), false, 'the stale Host grant cannot dispatch SignOut')
+  page.dispose()
+})
+
+test('late Profile and Balance results from an invalidated Account lease cannot paint for its replacement', async () => {
+  const state: SourceState = { view: stored(), profileFails: false, balanceFails: false, runningTasks: false, calls: [] }
+  const source = makeSource(state)
+  const profileReads: Array<(value: Awaited<ReturnType<AccountWorkspaceSource['getProfile']>>) => void> = []
+  const balanceReads: Array<(value: Awaited<ReturnType<AccountWorkspaceSource['getBalance']>>) => void> = []
+  source.getProfile = () => new Promise(resolve => { profileReads.push(resolve) })
+  source.getBalance = () => new Promise(resolve => { balanceReads.push(resolve) })
+  const page = new AccountWorkspacePage(source, () => {}, { view: 'page' })
+  page.setBodyHeight(30)
+  await flush()
+  assert.equal(profileReads.length, 1)
+  assert.equal(balanceReads.length, 1)
+
+  const fail = [...state.watchFailures!][0]
+  fail!(new Error('Host generation replaced'))
+  await flush()
+  state.view = stored()
+  page.handleInput('r')
+  await flush()
+  assert.equal(state.watchStarts, 2)
+  assert.equal(profileReads.length, 2)
+  assert.equal(balanceReads.length, 2)
+
+  const oldProfile: AccountProfile = { id: 'old-account', name: 'Old Account', contact: null }
+  profileReads[0]!({ status: 'ready', value: oldProfile })
+  balanceReads[0]!({ status: 'ready', value: { value: [{ currency: 'CNY', balance: '1.00' }], bonusWallets: [] } })
+  await flush()
+  assert.doesNotMatch(text(page), /Old Account|1\.00 CNY/u,
+    'the old generation detail responses cannot repaint beside the replacement Host state')
+
+  profileReads[1]!({ status: 'ready', value: { id: 'new-account', name: 'New Account', contact: null } })
+  balanceReads[1]!({ status: 'ready', value: { value: [{ currency: 'CNY', balance: '2.00' }], bonusWallets: [] } })
+  await flush()
+  assert.match(text(page), /New Account/u)
+  assert.match(text(page), /2\.00 CNY/u)
+  page.dispose()
+})
+
+test('a terminal signed-out watch failure blocks SignIn until Refresh restores its Host snapshot', async () => {
+  const state: SourceState = { view: signedOut(), profileFails: false, balanceFails: false, runningTasks: false, calls: [] }
+  const page = new AccountWorkspacePage(makeSource(state), () => {}, { view: 'page' })
+  page.setBodyHeight(30)
+  await flush()
+  await flush()
+  focusAction(page, 'Sign in')
+  const fail = [...state.watchFailures!][0]
+  fail!(new Error('Host watch unavailable'))
+  await flush()
+  assert.match(text(page), /Host Account watch stopped; Refresh to read current state/u)
+  page.handleInput('\r')
+  await flush()
+  assert.equal(state.calls.includes('signIn'), false,
+    'Enter after a terminal watch failure cannot dispatch from the previously painted enabled SignIn')
+  assert.equal(state.watchActive, 0)
+
+  page.handleInput('r')
+  await flush()
+  assert.equal(state.watchStarts, 2)
+  assert.match(text(page), /Signed out \/ no stored credential/u)
+  focusAction(page, 'Sign in')
+  page.handleInput('\r')
+  await flush()
+  assert.equal(state.calls.filter(call => call === 'signIn').length, 1,
+    'Refresh restores a trusted signed-out frame before admitting a new SignIn')
+  for (const publish of [...state.watchListeners!]) publish()
+  await flush()
+  assert.match(text(page), /waiting-browser/u)
+  page.dispose()
+})
+
+test('a terminal Account watch failure disables Cancel and hides its stale authorization URL', async () => {
+  const state: SourceState = { view: waitingAttempt(), profileFails: false, balanceFails: false, runningTasks: false, calls: [] }
+  const page = new AccountWorkspacePage(makeSource(state), () => {}, { view: 'page' })
+  page.setBodyHeight(30)
+  await flush()
+  assert.match(text(page), /waiting-browser/u)
+  focusAction(page, 'Cancel current attempt')
+  const fail = [...state.watchFailures!][0]
+  fail!(new Error('Host watch unavailable'))
+  await flush()
+  assert.match(text(page), /Host Account watch stopped; Refresh to read current state/u)
+  assert.match(text(page), /Last known: signed out · Host state not current/u)
+  assert.doesNotMatch(text(page), /https:\/\/platform\.example\/dsh\/authorize/u,
+    'a stale authorize URL is not presented after its Host observation is invalidated')
+  assert.doesNotMatch(text(page), /Open browser/u)
+  page.handleInput('\r')
+  await flush()
+  assert.equal(state.calls.some(call => call.startsWith('cancel:')), false,
+    'Enter after a terminal watch failure cannot dispatch using its last-known attempt ID')
+  assert.equal(state.watchActive, 0)
+  page.dispose()
 })
 
 test('closing the page ends only its watcher; a fresh page rebuilds the completed Host state (MA10)', async () => {
@@ -276,8 +857,11 @@ test('closing the page ends only its watcher; a fresh page rebuilds the complete
   assert.equal(state.calls.some(call => call.startsWith('cancel:')), false, 'closing the page does not cancel the browser attempt')
 })
 
-test('Account page fits 105/80/60/40/30 columns in signed-out, attempt and stored states (MA12)', async () => {
-  for (const [width, height] of [[105, 40], [80, 24], [60, 22], [40, 16], [30, 8]] as const) {
+test('the Account page fits signed-out, attempt and stored states across its frozen workspace size matrix', async () => {
+  for (const [width, height] of [
+    [200, 50], [120, 40], [100, 40], [80, 24], [80, 10], [72, 24], [44, 20],
+    [105, 40], [60, 22], [40, 16], [30, 8],
+  ] as const) {
     for (const view of [signedOut(), waitingAttempt(), stored()]) {
       const state: SourceState = { view, profileFails: false, balanceFails: false, runningTasks: false, calls: [] }
       const page = new AccountWorkspacePage(makeSource(state), () => {}, { view: 'page' })
@@ -292,12 +876,57 @@ test('Account page fits 105/80/60/40/30 columns in signed-out, attempt and store
   }
 })
 
+test('stale Account currentness remains readable across frozen sizes and dark/light/custom themes', async t => {
+  const originalPalette = currentPalette
+  t.after(() => setTheme('custom', originalPalette))
+  const themes = [
+    { mode: 'dark' as const, palette: darkColors },
+    { mode: 'light' as const, palette: lightColors },
+    { mode: 'custom' as const, palette: { ...darkColors, text: '#345678', textDim: '#456789' } },
+  ]
+  const rgb = (value: string): number => Number.parseInt(value.replace(/^#/u, ''), 16)
+  for (const theme of themes) {
+    setTheme(theme.mode, theme.palette)
+    for (const [width, height] of [[100, 40], [80, 24], [44, 20], [30, 8]] as const) {
+      const state: SourceState = { view: stored(), profileFails: false, balanceFails: false, runningTasks: false, calls: [] }
+      const page = new AccountWorkspacePage(makeSource(state), () => {}, { view: 'page' })
+      page.setBodyHeight(height)
+      await flush()
+      state.currentLeases!.clear()
+      const rows = page.render(width)
+      const frame = rows.map(stripTerminalSequences).join('\n')
+      if (width <= 30 || height <= 8) {
+        assert.match(frame, /stale: signed in/u, `${theme.mode} ${width}x${height} must keep the compact stale Account state visible`)
+      } else {
+        assert.match(frame, /Last known: signed in/u, `${theme.mode} ${width}x${height} must distinguish stale from current stored state`)
+        assert.match(frame, /state not current/u, `${theme.mode} ${width}x${height} must name the missing currentness fact`)
+      }
+      assert.equal(rows.length, height)
+      assert.ok(rows.every(row => visibleWidth(row) <= width), `${theme.mode} ${width}x${height} stale frame must remain inside its viewport`)
+      if (width === 30 && height === 8) {
+        const terminal = new VirtualTerminal(width, height)
+        terminal.write(rows.join('\r\n'))
+        const physical = await terminal.flushAndGetViewport()
+        assert.match(physical.join('\n'), /stale: signed in/u,
+          `${theme.mode} real renderer frame keeps the stale distinction on-screen at 30x8`)
+        const statusRow = physical.findIndex(row => row.includes('stale: signed in'))
+        const statusCol = physical[statusRow]!.indexOf('stale: signed in')
+        assert.equal(terminal.getCellFgRgb(statusRow, statusCol), rgb(theme.palette.text),
+          `${theme.mode} stale Status uses the normal-text semantic token`)
+        assert.ok(physical.every(row => visibleWidth(row) <= width))
+      }
+      page.dispose()
+    }
+  }
+})
+
 test('disposing the Account page aborts its Host watch subscription (MA13 watcher closure)', async () => {
   const state: SourceState = { view: signedOut(), profileFails: false, balanceFails: false, runningTasks: false, calls: [] }
   let aborted = false
   const source = makeSource(state)
   source.watch = async function* (signal) {
-    yield state.view
+    const lease = {} as AccountObservationLease
+    yield watchEvent(state, state.view, lease)
     await new Promise<void>(resolve => {
       signal.addEventListener('abort', () => { aborted = true; resolve() }, { once: true })
     })
@@ -315,9 +944,9 @@ test('a pending sign-out owns the page: pendingMutation is true and Esc cannot e
   const state: SourceState = { view: stored(), profileFails: false, balanceFails: false, runningTasks: false, calls: [] }
   let release: (() => void) | undefined
   const source = makeSource(state)
-  source.signOut = () => new Promise<AccountView>(resolve => {
+  source.signOut = (lease) => new Promise<AccountObservation>(resolve => {
     state.calls.push('signOut')
-    release = () => { state.view = signedOut(); resolve(state.view) }
+    release = () => { state.view = signedOut(); resolve(issueObservation(state, state.view, lease)) }
   })
   const page = new AccountWorkspacePage(source, () => {}, { view: 'signout' })
   page.setBodyHeight(26)
@@ -339,10 +968,10 @@ test('an IPv6 loopback callback origin produces a matching SSH tunnel template (
   const state: SourceState = { view: waitingAttempt(), profileFails: false, balanceFails: false, runningTasks: false, calls: [] }
   const source = makeSource(state)
   source.callbackOrigin = () => 'http://[::1]:43121'
-  source.startSignIn = async () => {
+  source.startSignIn = async lease => {
     state.calls.push('signIn')
     state.view = waitingAttempt()
-    return state.view
+    return issueObservation(state, state.view, lease)
   }
   const page = new AccountWorkspacePage(source, () => {}, { view: 'page' })
   page.setBodyHeight(30)
@@ -358,13 +987,14 @@ test('a same-status Host grant replacement invalidates the open sign-out confirm
   const source = makeSource(state)
   let pushWatch: ((view: AccountView) => void) | undefined
   source.watch = async function* () {
-    yield state.view
+    const lease = {} as AccountObservationLease
+    yield watchEvent(state, state.view, lease)
     while (true) {
       const next = await new Promise<AccountView>(resolve => { pushWatch = resolve })
-      yield next
+      yield watchEvent(state, next, lease)
     }
   }
-  source.getProfile = async () => ({ status: 'ready', value: { id: identity, name: identity, contact: 'm***@example.com' } })
+  source.getProfile = async (_lease) => ({ status: 'ready', value: { id: identity, name: identity, contact: 'm***@example.com' } })
   const page = new AccountWorkspacePage(source, () => {}, { view: 'page' })
   page.setBodyHeight(30)
   await flush()
@@ -391,16 +1021,17 @@ test('a stale startSignIn snapshot cannot overwrite a newer watch state (P2)', a
   const state: SourceState = { view: signedOut(), profileFails: false, balanceFails: false, runningTasks: false, calls: [] }
   const source = makeSource(state)
   let resolveStart: ((view: AccountView) => void) | undefined
-  source.startSignIn = () => new Promise<AccountView>(resolve => {
+  source.startSignIn = lease => new Promise<AccountObservation>(resolve => {
     state.calls.push('signIn')
-    resolveStart = resolve
+    resolveStart = view => resolve(issueObservation(state, view, lease))
   })
   let pushWatch: ((view: AccountView) => void) | undefined
   source.watch = async function* () {
-    yield state.view
+    const lease = {} as AccountObservationLease
+    yield watchEvent(state, state.view, lease)
     while (true) {
       const next = await new Promise<AccountView>(resolve => { pushWatch = resolve })
-      yield next
+      yield watchEvent(state, next, lease)
     }
   }
   const page = new AccountWorkspacePage(source, () => {}, { view: 'page' })
@@ -420,19 +1051,48 @@ test('a stale startSignIn snapshot cannot overwrite a newer watch state (P2)', a
   assert.equal(page.pendingMutation(), false)
 })
 
+test('a failed SignIn ACK is reported once and the next Watch restores current state', async () => {
+  const state: SourceState = { view: signedOut(), profileFails: false, balanceFails: false, runningTasks: false, calls: [] }
+  const source = makeSource(state)
+  let starts = 0
+  source.startSignIn = async (_lease) => {
+    starts += 1
+    state.calls.push('signIn')
+    throw new Error('the Host acknowledgement was lost')
+  }
+  const page = new AccountWorkspacePage(source, () => {}, { view: 'page' })
+  page.setBodyHeight(30)
+  await flush()
+  text(page)
+  page.handleInput('\r')
+  await flush()
+  assert.equal(starts, 1)
+  assert.match(text(page), /sign-in result not confirmed: the Host acknowledgement was lost/u)
+  assert.match(text(page), /Last known: signed out · Host state not current/u,
+    'the old signed-out view is last-known until a new Watch snapshot')
+  assert.equal(state.watchStarts, 1, 'a failed mutation does not start an automatic Host reread')
+  clickPaintedAction(page, 'Sign in')
+  await flush()
+  assert.equal(starts, 1, 'the retired old view cannot dispatch a second SignIn')
+
+  state.view = waitingAttempt()
+  for (const publish of [...state.watchListeners!]) publish()
+  await flush()
+  assert.match(text(page), /waiting-browser/u,
+    'the next complete Watch snapshot restores current decisions')
+  assert.doesNotMatch(text(page), /Last known/u)
+  assert.equal(starts, 1, 'the recovery does not replay the mutation')
+  page.dispose()
+})
+
 test('refresh is refused while an Account operation is busy (RFL-012)', async () => {
   const state: SourceState = { view: signedOut(), profileFails: false, balanceFails: false, runningTasks: false, calls: [] }
   const source = makeSource(state)
   let resolveStart: ((view: AccountView) => void) | undefined
-  let stateReads = 0
-  source.startSignIn = () => new Promise<AccountView>(resolve => {
+  source.startSignIn = lease => new Promise<AccountObservation>(resolve => {
     state.calls.push('signIn')
-    resolveStart = resolve
+    resolveStart = view => resolve(issueObservation(state, view, lease))
   })
-  source.getState = async () => {
-    stateReads += 1
-    throw new Error('refresh must not run while busy')
-  }
   const page = new AccountWorkspacePage(source, () => {}, { view: 'page' })
   page.setBodyHeight(30)
   await flush()
@@ -441,11 +1101,20 @@ test('refresh is refused while an Account operation is busy (RFL-012)', async ()
   await flush()
   page.handleInput('r') // advertised refresh shortcut during busy
   await flush()
-  assert.equal(stateReads, 0, 'refresh must not advance the generation or read state while busy')
+  assert.equal(state.watchStarts, 1, 'refresh must not replace the watch while a mutation is busy')
   resolveStart?.(waitingAttempt())
   await flush()
-  assert.match(text(page), /waiting-browser/u)
+  assert.match(text(page), /Last known: signed out · Host state not current/u,
+    'a mutation ACK is not a second AccountView writer; the old view is last-known until Watch')
+  page.handleInput('\r')
+  await flush()
+  assert.equal(state.calls.filter(call => call === 'signIn').length, 1,
+    'the retired old view cannot authorize a second SignIn before the next Watch snapshot')
   assert.equal(page.pendingMutation(), false)
+  state.view = waitingAttempt()
+  for (const publish of [...state.watchListeners!]) publish()
+  await flush()
+  assert.match(text(page), /waiting-browser/u, 'the Watch update paints the Host attempt after the ACK')
 })
 
 // ── Phase 3C / C2-A: the Left the Settings root may claim ─────────────────
@@ -462,8 +1131,9 @@ test('a plain Account page may yield the focus to the Settings category rail', a
 })
 
 test('the sign-out confirmation keeps the Left inside the Account page', async () => {
-  const { page, state } = open({ view: 'signout' })
-  state.view = stored()
+  const state: SourceState = { view: stored(), profileFails: false, balanceFails: false, runningTasks: false, calls: [] }
+  const page = new AccountWorkspacePage(makeSource(state), () => {}, { view: 'signout' })
+  page.setBodyHeight(30)
   await flush()
   assert.match(text(page), /Sign out confirmation/u)
   assert.equal(page.canYieldFocusToNavigation(), false,
@@ -474,9 +1144,9 @@ test('a pending Account operation keeps the Left inside the Account page', async
   const state: SourceState = { view: stored(), profileFails: false, balanceFails: false, runningTasks: false, calls: [] }
   let release: (() => void) | undefined
   const source = makeSource(state)
-  source.signOut = () => new Promise<AccountView>(resolve => {
+  source.signOut = (lease) => new Promise<AccountObservation>(resolve => {
     state.calls.push('signOut')
-    release = () => { state.view = signedOut(); resolve(state.view) }
+    release = () => { state.view = signedOut(); resolve(issueObservation(state, state.view, lease)) }
   })
   const page = new AccountWorkspacePage(source, () => {}, { view: 'signout' })
   page.setBodyHeight(26)
@@ -512,8 +1182,9 @@ test('the page-actions fallback keeps the truthful Esc bar on the physical last 
 
 
 test('the zero-body fallback names the real Esc cancel of the open sign-out confirmation', async () => {
-  const { page, state } = open({ view: 'signout' })
-  state.view = stored()
+  const state: SourceState = { view: stored(), profileFails: false, balanceFails: false, runningTasks: false, calls: [] }
+  const page = new AccountWorkspacePage(makeSource(state), () => {}, { view: 'signout' })
+  page.setBodyHeight(30)
   await flush()
   text(page) // paint the confirmation and its real action rows
   page.setBodyHeight(2)

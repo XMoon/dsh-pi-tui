@@ -19,11 +19,13 @@ The legacy `focusMode` field remains only as a migration input and is preserved
 during whole-document settings writes.
 
 There is no second transcript data model: Compact is a projection over the same
-`TranscriptFolder` rows, sharing one renderer, one measurement path, one
-search index, and one viewport owner. Manual disclosure owners (expanded Work
-spans, Context clusters, tool cards, Thinking) remain separate from preset
-defaults; changing a preset never invents a `lastNonFocusPreset` or transfers
-manual disclosure ownership.
+`TranscriptFolder` rows, sharing one renderer, one measurement path, the Full
+semantic search index, and one viewport owner. View Find has a separate
+short-lived occurrence cursor over the currently mounted components; it is not
+a second Session index or a durable transcript model. Manual disclosure owners
+(expanded Work spans, Context clusters, tool cards, Thinking) remain separate
+from preset defaults; changing a preset never invents a `lastNonFocusPreset` or
+transfers manual disclosure ownership.
 
 **Untrusted-text invariant.** Full, Compact and expanded Focus share ONE safe
 **display** projection: every externally sourced message/tool/context string is
@@ -119,7 +121,7 @@ projectTranscriptStructure()
   strictly "newly created after the turn completed" — NEVER "touched by a
   post-`turn/end` event": a `tool/result` that finds its own pending/running
   card still settles that card normally and leaves it fully legal evidence.
-  Such a row stays in the transcript (Full, expanded Focus, search,
+  Such a row stays in the transcript (Full preset, expanded Focus, Full search,
   diagnostic), but it is excluded from the settled turn's Process/Action
   aggregates at THREE shared consumers: the Action classifier, Work-span
   membership, and consecutive-read grouping (a synthesized group card would
@@ -882,6 +884,108 @@ promotes every currently necessary node atomically; an explicit collapse revokes
 the temporary reveal so the owner cannot instantly reopen. A flat/fail-open
 container mints no reveal node.
 
+### Transcript Find scopes
+
+PiTui exposes two Find scopes through ONE Search overlay and ONE query Input. The
+overlay paints three rows (title, Input, hint) and adds a fourth `Source-only`
+row only while the current Full target has no proven cell (see below); a
+terminal with at most ten rows folds that status into the third row instead of
+taking a transcript row away:
+
+- **View** searches only the current mounted, rendered transcript batch. Its
+  result count and current occurrence come from `TuiApp.renderedViewSearch`; the
+  reader uses the same mounted block identities, row geometry and viewport as
+  transcript painting. Hidden Markdown links, folded rows, off-window history,
+  and unmaterialized turns are not View results. View navigation steps only this
+  mounted occurrence set and cannot trigger Full semantic search or temporary
+  disclosure.
+- **Full** searches the active `TranscriptFolder` semantic corpus and retains
+  semantic occurrence identity, virtual-window navigation and its existing
+  presentation proof/reveal rules. Direct has a complete Session fold. Remote
+  search is limited to the official Reader snapshot already loaded for the
+  current subject: label it `Loaded history`, and when that same current snapshot
+  proves `hasMore`, say that earlier history was not searched. A missing or stale
+  snapshot is never interpreted as complete coverage. Full never adopts a View
+  occurrence ordinal or painted-row authority.
+- The active scope and single query belong to the mounted `SurfaceRuntime`
+  transaction. Scope changes keep the query, retire the old scope's selection
+  and reveal, then select the destination scope's first result from its own
+  authority. Leaving Full clears its temporary reveal before View measures the
+  mounted rows; a View dismiss never promotes a Full reveal, and Full dismiss in
+  a temporary Regular Reader does not persist a reveal into user disclosure.
+- Regular terminal scrollback has no application-owned row address. Opening
+  either scope from Regular therefore leases the existing TuiApp Fullscreen
+  transcript for this Search only; it creates no second TUI or Session owner and
+  writes no fullscreen preference. Closing the Search retires its overlay and
+  presentation before returning the still-current screen to Regular. Admission
+  refuses workspaces, blocking editor-seat owners, active viewers, and other
+  capturing overlays. A newer physical screen owner always wins a re-entrant
+  close/rollback.
+- These PiTui row/cell facts do not qualify native TSP View search. A renderer
+  without its own native View authority must retain its separate Full behavior
+  and must not present PiTui rendered results as TSP results.
+
+### Source-only status of a Full hit
+
+A Full hit's painted cells are either proven (`exact`), provably absent
+(`not-painted`), or not provable in the current render (`unproven`). The status
+is disposable presentation metadata for ONE render epoch: it never feeds the
+match corpus, `N/M`, the span proof or a stored match/geometry map, and an
+`exact` selection must carry none.
+
+`not-painted` is allowed only from real evidence that the matched source text
+has no visible cell: the vendored Markdown proof reporting `NOT_PAINTED` for a
+hidden link destination or markup-only range, or the Host's own consumed Visual
+marker classification. `unproven` covers every other rejection (collapsed or
+transformed body, composite/plugin owner, reflow, unclosed math, a source kind
+with no cell channel). An `unproven` hit must never be described as absent, and
+a visible homonym elsewhere in the card never upgrades either status.
+
+While the current Full target is non-exact, the overlay shows exactly one
+Source-only row: `Source-only · no visible cell · <label>` or
+`Source-only · position unverified · <label>`. The label comes from the static
+source-kind vocabulary (message kind, tool/command/subcall field, workflow
+run/phase/member, deliverable field), never from user content. A snippet is
+attached only for a Host-owned, single-text, non-URL User message or expanded
+Host Thinking whose normalized range projects back to a real raw span: at most
+twelve graphemes of context on each side, projected through the one display
+sanitizer onto a single safe physical row, and omitted entirely when the raw or
+projected context contains control/escape bytes, URL/path-shaped text or markup
+risk. Assistant Markdown (including a hidden href), Tool/Command/Workflow,
+Plugin, Visual, Delivered and composite sources stay label-only. The row shrinks
+by whole segments: the Source-only fact and the close key are never dropped, the
+real loaded-history coverage survives, and a wider layout drops the snippet
+first. The notice is not a permission or secrecy proof; it only describes what
+the current renderer can show.
+
+### Occlusion-aware search navigation
+
+One Search jump is solved against the TWO rectangles the frame really painted:
+the fullscreen `ScrollView` box and the managed Search overlay's
+`getBounds()` rectangle (plus its real row count, so a three-row and a four-row
+box place the target differently). A target cell is readable only when it lies
+inside the painted viewport AND does not horizontally overlap the overlay on the
+same physical row — row overlap alone is never occlusion. The solver is a pure
+function with a fixed, bounded candidate set; it keeps the current scroll
+position when the whole target is already readable, otherwise prefers the most
+readable candidate, then the nearest one, and never claims full readability for
+a partially covered target. A target without proven cells contributes its
+conservative full-width anchor rows, never guessed columns. Missing geometry
+keeps the existing viewport-only placement.
+
+The jump is committed from the current epoch's geometry, and one post-paint
+correction is allowed because the box that painted the jump may have been a
+frame old (the Source-only row can change the box height). That correction is
+bound to the same screen, overlay handle, scope, query, presentation revision,
+selected occurrence and terminal size and applies at most once; a passive
+projection, stream settle, wheel drag or ordinary repaint never re-aims an old
+target, and a resize only re-solves while the target still belongs to the
+current Search overlay. Retiring the overlay, leaving the scope, switching
+session/subject or replacing the screen discards the pending correction with the
+current target geometry. Search navigation never re-centres an already visible
+target, never re-windows for the same target and never adds a second viewport or
+reader owner.
+
 ### Source-cell proof of a rendered search hit
 
 Transcript search exactness is a per-render proof, never a stored position map:
@@ -897,6 +1001,49 @@ changes the search corpus, N/M identity, reveal ownership or viewport ownership;
 source-local offsets are ephemeral and never stable match identity. Any width,
 source text or layout epoch change re-proves from scratch, and a proven
 selection must not re-enable a reveal the user collapsed.
+
+Markdown cards have exactly ONE source-to-painted-cell authority: the vendored
+`Markdown` component's one-shot `proveSourceSpan(range, width)`. The range is
+component-local UTF-16 over that component's OWN sanitized source (never Session
+raw), and its segments are relative to `Markdown.render(width)`. The component
+re-runs its own parser and renderer with disposable zero-width sentinels around
+the single emitted piece of the target leaf and accepts the proof only when the
+sentinel-stripped rows are byte-identical to the normal render for the same
+source, width, theme and capabilities AND exactly one leaf emitted the requested
+range. It proves ordinary inline text (emphasis, headings, lists, quotes and one
+occurrence that wraps across painted rows), link labels, the printed fallback
+destination when OSC 8 hyperlinks are unavailable, literal `renderLatex:false`
+math, and fenced code whose painted line still equals the source line. A hidden
+link/definition destination is reported as not painted; transformed glyphs,
+unclosed math, block HTML, composite/split owners, grapheme splits and stale
+capability epochs stay explicitly unproven instead of falling back to a visible
+homonym. The proof keeps no stored source map and never changes normal render
+bytes, caches or link targets: its state exists only inside one synchronous
+call, so a text, width, theme or capability change requires a fresh proof. Host
+Card composition (bullet/indent/preceding-segment offsets), composite/plugin
+owner decisions and Full-search selection remain Host responsibilities; a
+component-local proof is embeddable evidence, not a claim that a composite card
+has a single source.
+
+PiTui Full consumes that proof for the CURRENT hit when the whole card is one
+Host-native Assistant Markdown body (the same live `Markdown` instance the
+bullet card renders). The semantic range is projected from normalized source
+coordinates back to raw UTF-16 and through the SAME display sanitizer the card
+paints; only an additive, boundary-aligned projection reaches the proof. The
+bullet/continuation indent is added to the component-local segments and every
+segment is re-read from the CURRENT rendered rows, so a proven strong cell and
+its scroll row always belong to this render epoch. Cards whose whole source is
+not that one native Markdown body — plugin renderers, `VisualAssistantBody`,
+multi-ContentBlock sequences, open-opaque streams, delivered-file/interrupted
+wrappers — stay on the source anchor; a hidden href, markup-only delimiter,
+pending math, rewritten glyph or non-additive projection keeps its semantic
+result without borrowing a visible homonym. Only the current hit is proved: a
+static frame, a scroll-only frame and every other card never trigger a proof.
+A proven range is exact in the painter as well: an overlapping weak rendered
+occurrence keeps only the cells the proof did not claim, so a case-folding
+difference between the semantic corpus and the rendered matcher can never widen
+the strong block. Full N/M identity, View's mounted-occurrence authority,
+reveal ownership and viewport ownership are unchanged.
 
 ## Hardening guarantees
 
