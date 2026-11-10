@@ -112,6 +112,19 @@ test('transcript search: coverage and temporary-reader labels remain explicit', 
   assert.ok(complete.render(240).map(stripTerminalSequences)[2]!.includes('Entire session'))
 })
 
+test('transcript search: changing scope cancels an in-flight title click before repaint', () => {
+  const scopes: TranscriptSearchScope[] = []
+  const search = component({ onScopeRequest: scope => scopes.push(scope) })
+  search.render(60)
+  search.handleMouse(mouse('press', 18, 0))
+
+  search.setScope('full')
+  search.handleMouse(mouse('release', 18, 0))
+  search.handleMouse(mouse('click', 18, 0))
+
+  assert.deepEqual(scopes, [], 'the stale View press cannot request a View switch after Full was committed')
+})
+
 test('transcript search: a same-layout repaint preserves a scope click press', () => {
   const scopes: TranscriptSearchScope[] = []
   const search = component({ onScopeRequest: scope => scopes.push(scope) })

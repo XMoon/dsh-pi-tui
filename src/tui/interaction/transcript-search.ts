@@ -96,6 +96,7 @@ export class TranscriptSearchComponent implements Component, Focusable {
   setScope(scope: TranscriptSearchScope): void {
     if (this.scope === scope) return
     this.scope = scope
+    this.pressedScope = undefined
     this.input.invalidate()
   }
 
