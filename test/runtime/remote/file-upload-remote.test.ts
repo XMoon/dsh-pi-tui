@@ -120,6 +120,28 @@ test('the raw upload addresses the official route with the authenticated streami
   assert.equal(request.url.includes('base64'), false)
 })
 
+test('a unicode display name travels as the official query value, never as a path', async () => {
+  const seen: SeenRequest[] = []
+  const uploader = createRemoteFileReceiptUploader(fetchOf(seen, () => jsonResponse({
+    ok: true,
+    value: { receiptId: 'r-u', file: { attachmentId: 'f-u', name: '报告 final.bin', bytes: 3 } },
+  })))
+  const uploaded = await uploader.upload('session-a', {
+    name: '报告 final.bin',
+    byteLength: 3,
+    source: {
+      kind: 'client-stream',
+      async *open() { yield new Uint8Array([1, 2, 3]) },
+    },
+  }, new AbortController().signal)
+  assert.equal(uploaded.file.name, '报告 final.bin')
+  const url = new URL(seen[0]!.url, 'http://dsh.invalid/')
+  assert.equal(url.searchParams.get('name'), '报告 final.bin')
+  assert.equal(url.searchParams.get('sessionId'), 'session-a')
+  assert.equal(seen[0]!.url.includes('/report'), false)
+  assert.equal(seen[0]!.url.includes('base64'), false)
+})
+
 test('a non-2xx carrier response fails with the HTTP status and never claims a receipt', async () => {
   const seen: SeenRequest[] = []
   const uploader = createRemoteFileReceiptUploader(fetchOf(seen, () => new Response('unauthorized', { status: 401 })))
