@@ -563,6 +563,11 @@ export class SessionWorkspacePanel implements Component {
 
   private scopeLabel(): string {
     if (!this.workspaces.proven) return this.workspaceError === undefined ? 'Checking current workspace…' : 'Information unavailable'
+    // The ENTRY's requested scope is the label: the Editor gesture explicitly
+    // asks All even while the committed Session still proves a Current
+    // Workspace. A Current entry falls back to All only when no Current
+    // Workspace can be resolved.
+    if (this.options.initialBrowseScope === 'all') return 'All workspaces'
     return currentWorkspaceOf(this.workspaceFacts(), this.options.currentSessionId) === undefined
       ? 'All workspaces'
       : 'Current workspace'
