@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A command submitted while a new Session is being created is no longer lost.** Commands such as `/preset status` typed while `/new` is still creating the Session now run in that Session once it is ready instead of silently disappearing.
+
 ## [0.5.6] - 2026-11-08
 
 ### Installation and version pairing

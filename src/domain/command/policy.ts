@@ -68,6 +68,24 @@ export const SESSIONLESS_COMMANDS = new Set([
 ])
 
 /**
+ * Session-navigation entries whose SESSIONLESS local route is their OWN
+ * admission: `/new`'s single-flight marker, the session-browser picker
+ * (`/sessions`, `/resume`, `/search`) and the `/fork`/`/rewind` entries.
+ *
+ * The submission transition fence defers a sessionless-capable command until a
+ * pending Session transition settles, so the route decision sees the settled
+ * surface. These names are the navigation authority themselves and must run
+ * IMMEDIATELY: their own guard answers the pending transition (a deferred
+ * `/new` would no longer be the documented "already starting" refusal — it
+ * would create a SECOND Session after the first settled), and their
+ * sessionless effects (a picker, an explicit refusal) are visible without a
+ * command card.
+ */
+export const SESSION_NAVIGATION_COMMANDS = new Set([
+  'new', 'sessions', 'resume', 'search', 'fork', 'rewind',
+])
+
+/**
  * The LOCAL-execute command set (PR5 v2 §1C-6 narrows its semantic role):
  * TUI-owned UI/control names AND core control names the TUI dispatches but
  * does not register (/kill). It remains the STATIC policy surface —

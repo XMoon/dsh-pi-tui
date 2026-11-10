@@ -993,6 +993,7 @@ function cardlessController(options: {
       generation: () => core.generation(),
       captureSubject: () => core.subject(),
       transitionPending: () => false,
+      awaitTransitionSettled: async () => {},
     },
     scope: {
       captureLive: () => scopeAuthority.captureLive(),

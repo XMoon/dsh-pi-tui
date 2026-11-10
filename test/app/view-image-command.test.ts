@@ -474,6 +474,7 @@ test('a user Enter on /view-image routes through the REAL controller into the pi
       generation: () => core.generation(),
       captureSubject: () => core.subject(),
       transitionPending: () => false,
+      awaitTransitionSettled: async () => {},
     },
     scope: {
       captureLive: () => scopeAuthority.captureLive(),

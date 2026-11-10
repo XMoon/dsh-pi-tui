@@ -84,4 +84,24 @@ export class SessionTransitionGate {
     )
     return start
   }
+
+  /**
+   * Wait until the gate has no transition executing or queued.
+   *
+   * A reader that observed a TRANSIENT surface facts state (a create whose
+   * Host Session exists but whose owner is not published yet) uses this to
+   * make its decision against the settled surface instead. The wait is
+   * promise-based and re-checks the queue, so a transition queued while this
+   * call waits is included; a NEW transition queued after it settles is not
+   * (the same best-effort boundary as any observation).
+   *
+   * Only callers OUTSIDE a transition task may await this: the task's own
+   * `tail` has not settled, so waiting from inside would deadlock.
+   */
+  async whenSettled(): Promise<void> {
+    // `queued` covers the executing task too (it is decremented only when
+    // that task's tail continuation runs), and every queued task extends
+    // `tail` before the next iteration re-reads the field.
+    while (this.queued > 0) await this.tail
+  }
 }
