@@ -598,7 +598,9 @@ test('a 1 KiB /attach file reaches Host storage with the same hash and paints', 
   await waitFor('mount paint', () => fixture.vt.getViewport().join('').length > 0, 10_000)
   const sourceDir = life.tempDir('dsh-f4-small-')
   const path = join(sourceDir, 'small.bin')
-  const source = Buffer.from('F4_1KIB_BINARY_20261111')
+  const source = Buffer.alloc(1024)
+  for (let index = 0; index < source.length; index += 1) source[index] = (index * 7 + 19) % 251
+  assert.equal(source.byteLength, 1024, 'the fixture is a deterministic 1 KiB binary')
   writeFileSync(path, source)
   const marker = 'F4_SMALL_FILE_20261111'
   submitDraft(fixture, `/attach ${path}`)
