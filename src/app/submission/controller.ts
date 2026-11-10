@@ -1198,16 +1198,6 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
         // The HostCommandPort submission + the agent-facing fallback live in
         // the submission runtime; the runner supplies the command-plane and
         // TUI hooks.
-        // A SESSION-NAVIGATION command owns its whole pre-gate workflow: the
-        // intent starts before the executor runs and is released by the
-        // command's terminal sink (after its settlement work, e.g. a deferred
-        // `/fork` source retirement), so the submission fence observes the
-        // accepted navigation from its first execution step without adding a
-        // promise hop to the command settlement chain.
-        const endNavigationIntent = parsedAtSubmit !== undefined
-          && SESSION_NAVIGATION_COMMANDS.has(parsedAtSubmit.name)
-          ? deps.ownership.beginNavigationIntent()
-          : undefined
         executeHostCommandSubmission({
           isDisposed: () => deps.isCleanedUp(),
           notify: (message, kind) => {
@@ -1285,6 +1275,11 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
           commandSubmitAttachments: (value) => commandSubmitAttachments(value),
           isTuiOwnedCommand: isTuiOwnedCommandLine,
           commandPlaneOwnsLine,
+          beginNavigationIntent: (name) => {
+            if (name === undefined || !SESSION_NAVIGATION_COMMANDS.has(name)) return undefined
+            const release = deps.ownership.beginNavigationIntent()
+            return () => settleNavigationIntent(release)
+          },
           submittedHostClaim: () => parsedAtSubmit === undefined ? undefined : deps.command.hostOriginClaimOf(parsedAtSubmit),
           commandSignal: () => deps.signal,
           invokeCommandPlane: ({ toggled: commandLine, commandPlaneLine, tuiOwnedCommand, submittedAttachments, signal: commandSignal }) =>
@@ -1380,9 +1375,6 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
           wasAdvertisedAtSubmit,
           parsedName: parsedAtSubmit?.name,
           submitTurn,
-          finishNavigationIntent: endNavigationIntent === undefined
-            ? undefined
-            : () => settleNavigationIntent(endNavigationIntent),
           // PR3-B §7.3 (F2): the subject pinned at the gesture's admission —
           // the fallback prompt's stale-restore discriminator.
           staleSubject: submittedSubject,
