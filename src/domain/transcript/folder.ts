@@ -207,28 +207,49 @@ export function textOf(blocks: readonly ContentBlock[]): string {
  * NOT a failure — the status is never invented from text. */
 
 
-export function terminalFailureFromResult(result: string): boolean {
+export type SubCallTerminalFailure =
+  | { readonly kind: 'exit-code'; readonly exitCode: number; readonly body: string }
+  | { readonly kind: 'signal'; readonly signal: string; readonly body: string }
+
+function subCallTerminalFailure(result: string): SubCallTerminalFailure | undefined {
   const parsed = parseExitStatus(result)
-  if ('signal' in parsed) return true
-  if ('exitCode' in parsed) return parsed.exitCode !== 0
-  return false
+  if ('signal' in parsed) return { kind: 'signal', signal: parsed.signal, body: parsed.body }
+  if (parsed.exitCode !== 0) return { kind: 'exit-code', exitCode: parsed.exitCode, body: parsed.body }
+  return undefined
 }
 
-/** The DISPLAY status of one PTC sub-call: the durable lifecycle status
- * (`isError` only) PLUS the alpha.2 terminal contract for bash/pwsh — a
- * trailing `[exit code: N]` / `[killed by signal: ...]` marker (parsed by
- * the official `parseExitStatus`; a preceding truncation notice does not
- * affect it) renders the child failed even when the tool call settled
- * normally. Spilled/generic content without a marker never invents a
- * status. */
+export function terminalFailureFromResult(result: string): boolean {
+  return subCallTerminalFailure(result) !== undefined
+}
+
+/** One authoritative PTC display projection: lifecycle status plus the official
+ * shell marker interpretation. The terminal detail is transient presentation
+ * data; the TranscriptToolMessage lifecycle status is never rewritten. */
+export function subCallDisplay(child: {
+  name: string
+  status: 'ok' | 'error' | 'running'
+  result: string
+}): {
+  readonly status: 'ok' | 'error' | 'running'
+  readonly terminalFailure?: SubCallTerminalFailure
+} {
+  if (child.status === 'running') return { status: 'running' }
+  const terminalFailure = child.name === 'bash' || child.name === 'pwsh'
+    ? subCallTerminalFailure(child.result)
+    : undefined
+  return {
+    status: child.status === 'error' || terminalFailure !== undefined ? 'error' : 'ok',
+    ...(terminalFailure === undefined ? {} : { terminalFailure }),
+  }
+}
+
+/** The DISPLAY status of one PTC sub-call. */
 export function subCallDisplayStatus(child: {
   name: string
   status: 'ok' | 'error' | 'running'
   result: string
 }): 'ok' | 'error' | 'running' {
-  if (child.status !== 'ok') return child.status
-  if ((child.name === 'bash' || child.name === 'pwsh') && terminalFailureFromResult(child.result)) return 'error'
-  return 'ok'
+  return subCallDisplay(child).status
 }
 
 /**

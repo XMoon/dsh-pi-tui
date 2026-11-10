@@ -311,36 +311,52 @@ test('Thinking exposes only its bounded latest line until the stable native Sect
     'the standalone mapper keeps every ownerless Section fail-open')
 })
 
-test('a PTC terminal nonzero exit keeps its derived failure note visible while collapsed', () => {
-  const ptc = folder([
-    ev('turn/start', { turn: 1 }, 0), user(1, 'run a shell child'),
-    toolCall(2, 'root-shell', 'run_code', '{}'),
-    ev('tool/ptc-dispatch-start', {
-      rootCallId: ToolCallId('root-shell'), parentCallId: ToolCallId('root-shell'), subCallId: 'shell-child',
-      name: 'bash', arguments: '{"command":"exit 1"}',
-    }, 3),
-    toolResult(4, 'root-shell', 'program complete'),
-    ev('tool/ptc-dispatch', {
-      rootCallId: ToolCallId('root-shell'), parentCallId: ToolCallId('root-shell'), subCallId: 'shell-child',
-      name: 'bash', arguments: '{"command":"exit 1"}', isError: false,
-      content: [{ type: 'text', text: 'command failed\n[exit code: 1]' }],
-    }, 5),
-    ev('turn/end', { turn: 1, reason: { kind: 'completed' } }, 6),
-  ]).messages()
-  const parent = toolRows(ptc)[0]!
-  const child = parent.subCalls?.[0]
-  assert.ok(child !== undefined)
-  assert.equal(child.status, 'ok', 'the official dispatch settlement remains successful lifecycle state')
-  const keys = new TranscriptNodeKeys()
-  const closed = flatten(ptc, 'full', keys, { expandedToolKeys: new Set([keys.keyFor(parent)]) })
-  const childNode = closed.find(node => node.kind === 'tool' && node.props['name'] === 'bash')
-  assert.ok(childNode !== undefined)
-  assert.equal(childNode.props['status'], 'error', 'the terminal exit marker supplies the derived display failure')
-  assert.match(String(childNode.props['note']), /command failed|exit code: 1/u,
-    'the collapsed child keeps a readable explanation in its header note')
-  assert.equal(childNode.props['collapsed'], true, 'the full child body remains independently collapsed')
-  assert.equal(closed.some(node => node.id === `${childNode.id}.result`), false,
-    'the full output remains lazy until the child disclosure opens')
+test('PTC error notes stay bounded while retaining long-output exit and signal reasons', () => {
+  const longOutput = 'compiler output '.repeat(32)
+  const cases = [
+    { name: 'exit', isError: false, result: `${longOutput}\n[exit code: 2]`, marker: '[exit code: 2]', lifecycle: 'ok' },
+    { name: 'signal', isError: false, result: `${longOutput}\n[killed by signal: SIGTERM]`, marker: '[killed by signal: SIGTERM]', lifecycle: 'ok' },
+    { name: 'ordinary', isError: true, result: 'filesystem permission denied', marker: 'filesystem permission denied', lifecycle: 'error' },
+  ] as const
+
+  for (const scenario of cases) {
+    const rootCallId = `root-${scenario.name}`
+    const subCallId = `child-${scenario.name}`
+    const args = { command: 'run deterministic failure', description: 'Exercise the PTC error note' }
+    const messages = folder([
+      ev('turn/start', { turn: 1 }, 0), user(1, 'run a shell child'),
+      toolCall(2, rootCallId, 'run_code', '{}'),
+      ev('tool/ptc-dispatch-start', {
+        rootCallId: ToolCallId(rootCallId), parentCallId: ToolCallId(rootCallId), subCallId,
+        name: 'bash', arguments: args,
+      }, 3),
+      toolResult(4, rootCallId, 'program complete'),
+      ev('tool/ptc-dispatch', {
+        rootCallId: ToolCallId(rootCallId), parentCallId: ToolCallId(rootCallId), subCallId,
+        name: 'bash', arguments: args, isError: scenario.isError,
+        content: [{ type: 'text', text: scenario.result }],
+      }, 5),
+      ev('turn/end', { turn: 1, reason: { kind: 'completed' } }, 6),
+    ]).messages()
+    const parent = toolRows(messages)[0]!
+    const child = parent.subCalls?.[0]
+    assert.ok(child !== undefined)
+    assert.equal(child.status, scenario.lifecycle, 'the durable PTC settlement remains unchanged')
+    const keys = new TranscriptNodeKeys()
+    const closed = flatten(messages, 'full', keys, { expandedToolKeys: new Set([keys.keyFor(parent)]) })
+    const childNode = closed.find(node => node.kind === 'tool' && node.props['name'] === 'bash')
+    assert.ok(childNode !== undefined)
+    assert.equal(childNode.props['status'], 'error', `${scenario.name} is a failed display status`)
+    assert.equal(childNode.props['collapsed'], true, 'the full child body remains independently collapsed')
+    assert.equal(closed.some(node => node.id === `${childNode.id}.result`), false,
+      'the full child output is not materialized in the collapsed card')
+    const note = String(childNode.props['note'] ?? '')
+    assert.ok(note.includes(scenario.marker), `${scenario.name} reason survives in the closed header: ${note}`)
+    const noteLimit = scenario.name === 'ordinary' ? 180 : 96
+    assert.ok(note.length <= noteLimit, `${scenario.name} header note fits its bounded client width: ${note.length}`)
+    if (scenario.name === 'ordinary') assert.equal(note, scenario.result, 'ordinary short failures retain their readable summary')
+    else assert.ok(note.startsWith('compiler output'), 'long shell output keeps a readable prefix')
+  }
 })
 
 test('ordinary Tools and PTC children hide detail until their own exact disclosure opens', () => {

@@ -21,6 +21,14 @@ export function presetFromEnvironment(value = process.env.TERN_TRANSCRIPT_DETAIL
   return preset
 }
 
+export function scenarioFromEnvironment(value = process.env.TERN_TRANSCRIPT_DETAIL_SCENARIO) {
+  const scenario = value ?? 'inner-disclosure'
+  if (scenario !== 'inner-disclosure' && scenario !== 'ptc-error-note') {
+    throw new Error(`TERN_TRANSCRIPT_DETAIL_SCENARIO must be inner-disclosure or ptc-error-note; got ${scenario}`)
+  }
+  return scenario
+}
+
 export function isPinnedTernBuild(version, sha256) {
   return version === PINNED_TERN && sha256 === PINNED_TERN_SHA256
 }
@@ -232,6 +240,7 @@ async function revealInnerHeader(h, label, findHeader) {
 
 export default async function (h) {
   const preset = presetFromEnvironment()
+  const scenario = scenarioFromEnvironment()
   const gui = process.env.TERN_INNER_DISCLOSURE_GUI === '1'
   const ternBin = process.env.TERN_BIN
   if (ternBin === undefined || ternBin === '' || !existsSync(ternBin)) {
@@ -246,8 +255,9 @@ export default async function (h) {
   const dshPin = manifest.devDependencies?.['@deepseek-ai/dsh-agent']
   const dshSessionPin = manifest.devDependencies?.['@deepseek-ai/dsh-session']
   const sdkIntegrity = lock.match(/'@stencil-hq\/tern@0\.2\.0':\s*\n\s*resolution: \{integrity: ([^}]+)\}/u)?.[1]
-  const extra = { preset, tern: ternVersion, sdk: '0.2.0', dsh: dshPin }
+  const extra = { preset, scenario, tern: ternVersion, sdk: '0.2.0', dsh: dshPin }
   const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim()
+  const subject = join(repo, 'scripts', 'tern-pane-transcript-modes-subject.mts')
   writeLedger(h, 'environment.json', {
     tern: { path: ternBin, version: ternVersion, sha256: ternSha256 },
     sdk: { pin: '0.2.0', integrity: sdkIntegrity },
@@ -255,6 +265,7 @@ export default async function (h) {
     host: { node: process.version, os: `${type()} ${osRelease()}`, platform: platform(), arch: arch(), cpu: cpus()[0]?.model ?? 'unknown' },
     display: process.env.DISPLAY ?? null,
     preset,
+    scenario,
     evidenceTier: innerDisclosureEvidenceTier(gui),
     sourceSnapshot: head,
   })
@@ -291,8 +302,137 @@ export default async function (h) {
   } else h.send('appearance', 'dark')
   h.check('the client resolved the dark appearance', h.ctl('state').theme === 'dark', String(h.ctl('state').theme))
 
-  writeFileSync(join(h.root, 'mode.json'), `${JSON.stringify({ mode: preset, scenario: 'inner-disclosure' })}\n`)
-  const subject = join(repo, 'scripts', 'tern-pane-transcript-modes-subject.mts')
+  if (scenario === 'ptc-error-note') {
+    writeFileSync(join(h.root, 'mode.json'), `${JSON.stringify({ mode: preset, scenario })}\n`)
+    const subjectStarted = await h.launch(subject)
+    if (!subjectStarted || !await waitUntil(h, 'the official Direct PTC error-note Subject is ready', () => records(h).some(row =>
+      row.kind === 'subject.ready' && row.scenario === scenario && row.mode === preset))) {
+      finish(h, { ...extra, qualification: 'PTC_SUBJECT_NOT_READY' })
+      return
+    }
+    if (!await waitUntil(h, 'one inline production Surface and renderer are mounted', () =>
+      records(h).some(row => row.kind === 'surface.inline.opened')
+        && records(h).some(row => row.kind === 'renderer.observed')
+        && wire(h).some(row => row.dir === 'in' && row.verb === 'r' && row.body?.r === 'hello'))) {
+      finish(h, { ...extra, qualification: 'PTC_MOUNT_NOT_READY' })
+      return
+    }
+    const hello = wire(h).find(row => row.dir === 'in' && row.verb === 'r' && row.body?.r === 'hello')?.body
+    h.check('the pinned client negotiated native Tool nodes', hello?.kinds?.includes('tool'), JSON.stringify(hello?.kinds))
+    const prompts = JSON.parse(readFileSync(join(h.root, 'prompts.json'), 'utf8'))
+    const prompt = prompts.prompts[0]
+    h.check('the PTC qualification marker is absent before the submit gesture', !h.texts(h.snapshot()).some(text => text.includes(prompt.marker)))
+    h.send('type', JSON.stringify(prompt.text))
+    await h.key('Return', 600)
+    if (!await waitUntil(h, 'the actual Direct PTC root call and bash dispatch settle', () => {
+      const observed = records(h).some(row => row.kind === 'producer.writer.settled')
+      const live = foldLive(h)
+      return observed && [...live.values()].some(node => node.k === 'tool' && node.p.name === 'run_code')
+    }, 480)) {
+      finish(h, { ...extra, qualification: 'PTC_FAILURE_NOT_RENDERED' })
+      return
+    }
+    const observation = await runCase(h, 'observe-ptc-failure')
+    h.check('the real Direct Folder recorded one successful-lifecycle PTC settle with nonzero exit', observation?.status === 'ok', JSON.stringify(observation?.facts ?? null))
+    if (observation?.status !== 'ok') { finish(h, { ...extra, qualification: 'PTC_EVENTS_NOT_QUALIFIED' }); return }
+    const facts = observation.facts
+    const rootCallId = facts.rootCall.callId
+    const subCallId = facts.childStart.subCallId
+    h.check('the real PTC output has long ordinary text and an official exit-code-2 tail',
+      facts.output.startsWith('PTC_BUILD_OUTPUT_') && facts.output.endsWith('\n[exit code: 2]')
+        && facts.childSettle.isError === false,
+      JSON.stringify({ outputStart: facts.output.slice(0, 36), outputLength: facts.output.length,
+        outputEnd: facts.output.slice(-32), isError: facts.childSettle.isError }))
+    let live = foldLive(h)
+    const root = [...live.values()].find(node => node.k === 'tool' && node.p.name === 'run_code')
+    h.check('the current SDK tree contains the one production PTC parent Tool', root !== undefined, JSON.stringify(root ?? null))
+    if (root === undefined) { finish(h, { ...extra, qualification: 'PTC_PARENT_NOT_FOUND' }); return }
+    h.check('the production PTC parent starts collapsed and does not materialize its bash child',
+      root.p.collapsible === true && root.p.collapsed === true
+        && ![...live.values()].some(node => node.k === 'tool' && node.p.name === 'bash'),
+      JSON.stringify(root.p))
+    h.measure('current Tern nodes under the PTC parent before its disclosure opens', JSON.stringify(h.snapshot().nodes
+      .filter(node => typeof node.id === 'string' && (node.id === root.id || node.id.startsWith(`${root.id}.`)))
+      .map(node => ({ id: node.id, class: node.class, text: node.text, rect: node.rect }))))
+    h.capture(`${preset}-ptc-parent-closed-before-scroll-1280x800-dark`,
+      'current client tree around the real collapsed run_code parent before attempting to reveal its header')
+    const parentWitness = await revealInnerHeader(h, 'PTC parent Tool', snapshot => snapshot.nodes.find(node =>
+      String(node.class ?? '').split(/\s+/u).includes('sf-tool-head')
+        && h.descendantsText(node).includes('Qualify a long PTC shell error note')))
+    h.check('the current PTC parent Tool header is revealed and fully visible', parentWitness !== undefined
+      && parentWitness.header !== undefined
+      && parentWitness.textNodes.length > 0
+      && parentWitness.textNodes.every(node => fullyVisible(parentWitness.snapshot.chains, node)),
+      JSON.stringify(parentWitness?.header === undefined ? null : {
+        text: h.descendantsText(parentWitness.header), rect: rect(parentWitness.header),
+        textNodes: parentWitness.textNodes.map(node => ({ text: node.text, visible: visibleBox(parentWitness.snapshot.chains, node) })),
+      }))
+    if (parentWitness === undefined || parentWitness.header === undefined) {
+      finish(h, { ...extra, qualification: 'PTC_PARENT_HEADER_NOT_VISIBLE' }); return
+    }
+    h.capture(`${preset}-ptc-parent-closed-1280x800-dark`, 'the real run_code parent is visibly closed before its nested bash child is admitted')
+    await clickToggle(h, parentWitness.snapshot, parentWitness.header, root.id, false, 'PTC parent Tool')
+    if (!await waitUntil(h, 'opening the exact PTC parent materializes its bash child', () =>
+      foldLive(h).get(root.id)?.p.collapsed === false
+        && [...foldLive(h).values()].some(node => node.k === 'tool' && node.p.name === 'bash'
+          && typeof node.id === 'string' && node.id.endsWith(`.sub-${subCallId}`)))) {
+      finish(h, { ...extra, qualification: 'PTC_CHILD_NOT_MATERIALIZED' }); return
+    }
+     live = foldLive(h)
+     const child = [...live.values()].find(node => node.k === 'tool' && node.p.name === 'bash'
+       && typeof node.id === 'string' && node.id.endsWith(`.sub-${subCallId}`))
+     h.check('the exact current SDK tree contains the production PTC bash child', child !== undefined, JSON.stringify(child ?? null))
+     if (child === undefined) { finish(h, { ...extra, qualification: 'PTC_CHILD_NOT_FOUND' }); return }
+     h.check('the bash child is independently collapsed and displays the derived error',
+       child.p.collapsible === true && child.p.collapsed === true && child.p.status === 'error', JSON.stringify(child.p))
+     h.check('the collapsed PTC note preserves exit code 2 within its 96-character header budget',
+       typeof child.p.note === 'string' && child.p.note.includes('[exit code: 2]') && child.p.note.length <= 96,
+       JSON.stringify({ id: child.id, status: child.p.status, note: child.p.note, length: child.p.note?.length }))
+     h.check('the complete child result is not materialized while its disclosure remains closed', !live.has(`${child.id}.result`))
+     const childHeaderCandidates = snapshot => mainNodes(snapshot)
+       .filter(node => String(node.class ?? '').split(/\s+/u).includes('sf-tool-head'))
+       .map(node => ({ text: h.descendantsText(node), rect: rect(node) }))
+     h.measure('current client Tool headers after the exact parent opens', JSON.stringify(childHeaderCandidates(h.snapshot())))
+     const childHeadWitness = await revealInnerHeader(h, 'collapsed PTC bash error', snapshot => snapshot.nodes.find(node =>
+       String(node.class ?? '').split(/\s+/u).includes('sf-tool-head')
+         && h.descendantsText(node).includes('Bash')
+         && h.descendantsText(node).includes('[exit code: 2]')))
+    const childSnapshot = childHeadWitness?.snapshot
+    const childHead = childHeadWitness?.header
+    const noteTextNode = childHeadWitness?.textNodes.find(node => String(node.text).includes('[exit code: 2]'))
+    h.check('the failed PTC child header is revealed and its complete note is client-visible', childSnapshot !== undefined
+      && childHead !== undefined && noteTextNode !== undefined
+      && fullyVisible(childSnapshot.chains, noteTextNode)
+      && visibleSpan(childSnapshot.chains, childHead, 'x') >= 4
+      && visibleSpan(childSnapshot.chains, childHead, 'y') >= 4,
+      JSON.stringify({ childHead: childHead === undefined ? null : { text: h.descendantsText(childHead), rect: rect(childHead) },
+        note: noteTextNode === undefined ? null : { text: noteTextNode.text, rect: rect(noteTextNode), visible: visibleBox(childSnapshot.chains, noteTextNode) } }))
+    if (childSnapshot === undefined || childHead === undefined || noteTextNode === undefined) {
+      finish(h, { ...extra, qualification: 'PTC_CHILD_NOTE_NOT_VISIBLE' }); return
+    }
+    h.capture(`${preset}-ptc-error-note-closed-1280x800-dark`,
+      'the real Folder PTC bash child is failed and independently collapsed; its bounded exit-code note is painted while its result body is absent')
+    const noteTree = childSnapshot.nodes.map(node => ({ text: node.text, class: node.class, rect: node.rect }))
+    writeLedger(h, 'ptc-error-note-client-tree.json', {
+      sourceSnapshot: head, preset, rootId: root.id, childId: child.id,
+      displayStatus: child.p.status, note: child.p.note,
+      bodyAbsent: !live.has(`${child.id}.result`), sessionFacts: facts, noteTree,
+    })
+    writeLedger(h, 'ptc-error-note-evidence.json', {
+      sourceSnapshot: head, preset, viewport: h.ctl('stats').viewport, theme: h.ctl('state').theme,
+      sdk: { pin: '0.2.0', integrity: sdkIntegrity }, dsh: { mode: dshMode, pin: dshPin },
+      provenance: 'real Direct writer -> real run_code Agent tool call -> official PTC executor -> official bash tool binding -> test-controlled shell result -> durable tool/ptc-dispatch-start + tool/ptc-dispatch -> TranscriptFolder/subCallDisplay -> TSP ui.tool -> pinned Tern tree and PNG',
+      qualificationStandIns: ['the model stream uses a deterministic scripted tool call', 'the PTC runtime test adapter invokes the official tools.bash binding without interpreting source code', 'the shell provider returns deterministic long stdout and exit code 2; no OS process is spawned'],
+      rootId: root.id, childId: child.id, displayStatus: child.p.status,
+      note: child.p.note, sourceOutput: facts.output, isError: facts.childSettle.isError,
+      bodyAbsent: !live.has(`${child.id}.result`), evidenceTier: innerDisclosureEvidenceTier(gui),
+      notVerified: ['900x360 PTC note placement', 'OS physical keyboard/IME/wheel', 'G8 Owner visual signature'],
+    })
+    finish(h, { ...extra, qualification: qualificationFromResults(h.results) })
+    return
+  }
+
+  writeFileSync(join(h.root, 'mode.json'), `${JSON.stringify({ mode: preset, scenario })}\n`)
   const subjectStarted = await h.launch(subject)
   if (!subjectStarted || !await waitUntil(h, 'the official Direct inner-disclosure Subject is ready', () => records(h).some(row =>
     row.kind === 'subject.ready' && row.scenario === 'inner-disclosure' && row.mode === preset))) {
