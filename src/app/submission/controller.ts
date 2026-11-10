@@ -34,7 +34,7 @@ import { consumeDraftAttachments, draftHasAttachments, draftHasImages, pinDraftA
 import { prepareUserMessage, type DirectPrepareInputDeps } from './direct-message-preparation.ts'
 import { expandImagePlaceholders } from '../../client/media/image/placeholder.ts'
 import { clientTimeZone } from '../../client/time-zone.ts'
-import { classifyCommandLine, isBareCommandLine, isLocalCommandLine, isPlainExitPrompt, localCommandMayWrite, LOCAL_COMMANDS, SESSIONLESS_COMMANDS, SESSION_NAVIGATION_COMMANDS, shouldConsumeAdvertisedMiss, type CommandLineClassification } from '../../domain/command/policy.ts'
+import { classifyCommandLine, IMMEDIATE_SESSIONLESS_COMMANDS, isBareCommandLine, isLocalCommandLine, isPlainExitPrompt, localCommandMayWrite, LOCAL_COMMANDS, SESSIONLESS_COMMANDS, SESSION_NAVIGATION_COMMANDS, shouldConsumeAdvertisedMiss, type CommandLineClassification } from '../../domain/command/policy.ts'
 import { resolveSubmitDelivery } from './command-policy.ts'
 import { isIndeterminateSkillWrite, type HostCommandClaim, type SubmitDelivery } from '../../commands.ts'
 import type { ClientCommandRegistry } from '../command/client-command-registry.ts'
@@ -2105,6 +2105,12 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       // the local route still runs.
       if (deps.liveAgent() === undefined
         && deps.ownership.transitionPending()
+        // Immediate controls keep their decision point: /exit and /quit must
+        // never wait for a navigation (a stuck Workspace pre-selection would
+        // hang the slash exit), and /reload-client must judge its live safety
+        // facts at request time — a deferred pass after the transition
+        // settled would reload a Client the in-flight policy refused.
+        && !IMMEDIATE_SESSIONLESS_COMMANDS.has(parsed.name)
         && !SESSION_NAVIGATION_COMMANDS.has(parsed.name)) {
         runOwned('transition-fenced sessionless command', async () => {
           await deps.ownership.awaitTransitionSettled()

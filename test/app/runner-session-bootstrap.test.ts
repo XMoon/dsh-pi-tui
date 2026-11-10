@@ -1698,6 +1698,77 @@ test('commands submitted before /new publishes its Session run on the new Sessio
  * the Workspace registry create), never a sleep; the pull-back is the real
  * Alt+Up gesture against the real pending-input reader.
  */
+/**
+ * REGRESSION (external review P2): `/exit` and `/quit` are immediate lifecycle
+ * controls. While `/new` is parked in its pre-gate Workspace resolution, the
+ * sessionless input fence must NOT queue the quit behind the navigation: a
+ * stuck Host Workspace IO would otherwise hang the slash exit.
+ */
+test('/exit is not deferred behind a pending /new pre-gate Workspace resolution', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-exit-pregate-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(100, 30)
+  life.defer(installVirtualProcessTerminal(vt))
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const harness = makeHarness(home)
+  let releaseCreate!: () => void
+  let createEntered!: () => void
+  const createGate = new Promise<void>(resolve => { releaseCreate = resolve })
+  const createReached = new Promise<void>(resolve => { createEntered = resolve })
+  life.defer(() => releaseCreate())
+  const workspace = {
+    id: 'workspace-exit-fence',
+    path: home,
+    sessionIds: [] as string[],
+    attachSession: async (sessionId: unknown) => { workspace.sessionIds.push(String(sessionId)) },
+  }
+  const workspaceRegistry = {
+    create: async () => {
+      createEntered()
+      await createGate
+      return workspace
+    },
+    get: (id: string) => id === workspace.id ? workspace : undefined,
+    list: () => [workspace],
+  }
+  context = new Context()
+  context.provide('agentPresets', {
+    remoteExportList: async () => ({ presets: [{ id: 'standard', isDefault: true }] }),
+    resolve: async (id?: string) => ({ id: id ?? 'standard' }),
+    mount: async () => {},
+    defaultId: 'standard',
+    composedPreset: () => undefined,
+  } as never)
+  let exits = 0
+  fiber = await mountRunner(context, home, harness, {}, {}, () => { exits += 1 }, undefined, undefined, workspaceRegistry)
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  let reachedPreGate = false
+  void createReached.then(() => { reachedPreGate = true })
+  app.setDraft('/new')
+  ;(app as unknown as { submitDraft(): void }).submitDraft()
+  for (let round = 0; round < 2000 && !reachedPreGate; round += 1) await new Promise(resolve => setImmediate(resolve))
+  assert.equal(reachedPreGate, true, '/new must reach its pre-gate Workspace resolution')
+
+  app.setDraft('/exit')
+  ;(app as unknown as { submitDraft(): void }).submitDraft()
+  for (let round = 0; round < 2000 && exits === 0; round += 1) await new Promise(resolve => setImmediate(resolve))
+  assert.equal(exits, 1, '/exit must request the exit immediately, not wait for the pending navigation')
+  releaseCreate()
+})
+
 test('a refused /new Workspace pre-selection restores a deferred queue pull-back', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-new-pullback-fence-')
