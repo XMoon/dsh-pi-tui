@@ -125,6 +125,7 @@ import {
   type SelectedVisualState,
 } from './assistant-visual.ts'
 import type { ToolImageState } from './transcript-view.ts'
+import { TRANSCRIPT_COPY_ACTION, transcriptCopyPayload } from './transcript-copy.ts'
 
 type InnerDisclosurePathTarget =
   | { readonly kind: 'thinking'; readonly owner: Extract<TranscriptMessage, { kind: 'thinking' }> }
@@ -186,6 +187,16 @@ interface VisualFrameIndex {
   readonly targets: ReadonlyMap<string, VisualCopyTarget>
   /** Copy targets by the actual Copy button node id (the pointer path). */
   readonly copyButtons: ReadonlyMap<string, VisualCopyTarget>
+  /** User and Assistant transcript Copy targets by current node id. */
+  readonly transcriptCopyButtons: ReadonlyMap<string, TranscriptCopyTarget>
+}
+
+interface TranscriptCopyTarget {
+  readonly message: Extract<TranscriptMessage, { kind: 'user' | 'assistant' }>
+  readonly payload: string
+  readonly source: object
+  readonly scopePrefix: string
+  readonly nodeId: string
 }
 
 /** How many transient notices the dock keeps (oldest evicted). */
@@ -1437,6 +1448,8 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   let figureNodeIds: ReadonlyMap<string, string> = new Map()
   let visualTargets: ReadonlyMap<string, VisualCopyTarget> = new Map()
   let visualCopyButtons: ReadonlyMap<string, VisualCopyTarget> = new Map()
+  /** Copy actions admitted only by the exact current main-frame node id. */
+  let transcriptCopyButtons: ReadonlyMap<string, TranscriptCopyTarget> = new Map()
   /**
    * PR3: the selected figure of the CURRENT subject. It stores the ref plus
    * the 1-based position/count painted in the last committed frame; the next
@@ -2390,15 +2403,25 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   const indexVisualFrame = (
     root: Node,
     sources: ReadonlyMap<string, { readonly message: AssistantTranscriptRow; readonly publication: PublishedVisual }>,
+    transcriptCopyPayloads: ReadonlyMap<TranscriptMessage, string>,
   ): VisualFrameIndex => {
     const order: string[] = []
     const nodeIds = new Map<string, string>()
     const targets = new Map<string, VisualCopyTarget>()
     const copyButtons = new Map<string, VisualCopyTarget>()
+    const transcriptCopyButtons = new Map<string, TranscriptCopyTarget>()
     const source = projectionScope
-    if (source === undefined) return { order, nodeIds, targets, copyButtons }
-    const visit = (tree: Tree, figure: VisualCopyTarget | undefined): void => {
-      const key = (tree.props as { readonly key?: unknown }).key
+    if (source === undefined) return { order, nodeIds, targets, copyButtons, transcriptCopyButtons }
+    const messagesByKey = new Map<string, TranscriptMessage>()
+    for (const message of lastMessages) {
+      if (message.kind !== 'user' && message.kind !== 'assistant') continue
+      const key = scopeKeys.keyFor(message)
+      messagesByKey.set(key, message)
+      messagesByKey.set(`${scopePrefix}${key}`, message)
+    }
+    const visit = (tree: Tree, figure: VisualCopyTarget | undefined, assistant: AssistantTranscriptRow | undefined): void => {
+      const props = tree.props as Record<string, unknown>
+      const key = props['key']
       const entry = typeof key === 'string' ? sources.get(key) : undefined
       let current = figure
       if (entry !== undefined) {
@@ -2413,12 +2436,43 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         targets.set(entry.publication.ref, current)
       }
       if (current !== undefined && key === VISUAL_COPY_KEY) copyButtons.set(tree.id, current)
-      for (const child of tree.children) visit(child, current)
+
+      let currentAssistant = assistant
+      if (props['role'] === 'dsh.transcript.assistant' && typeof key === 'string') {
+        const message = messagesByKey.get(key)
+        currentAssistant = message?.kind === 'assistant' ? message : undefined
+      }
+      if (tree.kind === 'message' && props['role'] === 'dsh.transcript.user' && typeof key === 'string') {
+        const message = messagesByKey.get(key)
+        if (message?.kind === 'user') {
+          const payload = transcriptCopyPayloads.get(message)
+          const actions = props['actions']
+          if (payload !== undefined && Array.isArray(actions)
+            && actions.some(action => action !== null && typeof action === 'object'
+              && (action as { readonly act?: unknown }).act === TRANSCRIPT_COPY_ACTION)) {
+            transcriptCopyButtons.set(tree.id, { message, payload, source, scopePrefix, nodeId: tree.id })
+          }
+        }
+      } else if (tree.kind === 'button' && props['role'] === 'dsh.transcript.copy'
+        && key === 'copy' && currentAssistant !== undefined) {
+        const actions = props['actions'] as { readonly click?: unknown } | undefined
+        const payload = transcriptCopyPayloads.get(currentAssistant)
+        if (actions?.click === TRANSCRIPT_COPY_ACTION && payload !== undefined) {
+          transcriptCopyButtons.set(tree.id, {
+            message: currentAssistant,
+            payload,
+            source,
+            scopePrefix,
+            nodeId: tree.id,
+          })
+        }
+      }
+      for (const child of tree.children) visit(child, current, currentAssistant)
     }
     for (const region of View.from({ main: root }).regions) {
-      if (region !== undefined) visit(region, undefined)
+      if (region !== undefined) visit(region, undefined, undefined)
     }
-    return { order, nodeIds, targets, copyButtons }
+    return { order, nodeIds, targets, copyButtons, transcriptCopyButtons }
   }
 
   /** Reconcile the previous selection with a frame's REAL figure order: a
@@ -2446,6 +2500,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     figureNodeIds = new Map()
     visualTargets = new Map()
     visualCopyButtons = new Map()
+    transcriptCopyButtons = new Map()
     selectedVisual = undefined
   }
 
@@ -2584,6 +2639,12 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       }
       focusElapsedMs = elapsed
     }
+    const transcriptCopyPayloads = new Map<TranscriptMessage, string>()
+    for (const message of lastMessages) {
+      if ((message.kind !== 'user' && message.kind !== 'assistant') || !visibleMembers.has(message)) continue
+      const payload = transcriptCopyPayload(message)
+      if (payload !== undefined) transcriptCopyPayloads.set(message, payload)
+    }
     const build = (selection: SelectedVisualState | undefined): Node => {
       const viewOptions = {
         ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
@@ -2591,6 +2652,8 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         ...(settledQuestionAnswers === undefined ? {} : { settledQuestionAnswersLookup: settledQuestionAnswers }),
         ...(options.toolPresenter === undefined ? {} : { toolPresenter: options.toolPresenter }),
         preparingPreviews: lastStreamingToolPreviews,
+        transcriptCopy: { action: TRANSCRIPT_COPY_ACTION } as const,
+        transcriptCopyPayloads,
         chartKindsSupported: session.caps.kinds.includes('chart'),
         ...(svgStates === undefined ? {} : { toolSvgStates: svgStates }),
         expandedToolKeys,
@@ -2617,12 +2680,12 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     }
     let selection = selectedVisual
     let nextMain = build(selection)
-    let frame = indexVisualFrame(nextMain, figureSources)
+    let frame = indexVisualFrame(nextMain, figureSources, transcriptCopyPayloads)
     const reconciled = reconcileVisualSelection(selection, frame)
     if (!sameSelectedVisual(selection, reconciled)) {
       selection = reconciled
       nextMain = build(selection)
-      frame = indexVisualFrame(nextMain, figureSources)
+      frame = indexVisualFrame(nextMain, figureSources, transcriptCopyPayloads)
     }
 
     const nextToolDisclosureByPath = new Map<string, string>()
@@ -2700,6 +2763,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     figureNodeIds = frame.nodeIds
     visualTargets = frame.targets
     visualCopyButtons = frame.copyButtons
+    transcriptCopyButtons = frame.transcriptCopyButtons
     toolDisclosureByPath.clear()
     for (const [path, owner] of nextToolDisclosureByPath) toolDisclosureByPath.set(path, owner)
     workDisclosureByPath.clear()
@@ -3374,6 +3438,14 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     return true
   }
 
+  const transcriptCopyAdmitted = (): boolean => visualActionsAdmitted()
+    && webPicker?.isOpen() !== true
+    && modelQuick?.isOpen() !== true
+    && historySearch?.isOpen() !== true
+    && !historyHoldsComposerSeat()
+    && !permissionMenuOpen
+    && !completion.isOpen()
+
   // ── TSP-7 PR-C/PR-E: the ONE Quiet Composer (editor + controls) ──
   //
   // The shell exists ONLY where the pane negotiated BOTH `el` and `styles`
@@ -4027,6 +4099,40 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     )
   }
 
+  const issueTranscriptCopy = (target: TranscriptCopyTarget): void => {
+    if (!transcriptCopyAdmitted()) return
+    const isStillCurrent = (): boolean => {
+      if (disposed || hydrating || target.source !== projectionScope || target.scopePrefix !== scopePrefix) return false
+      if (!lastMessages.includes(target.message)) return false
+      const current = transcriptCopyButtons.get(target.nodeId)
+      return current?.message === target.message
+        && current.payload === target.payload
+        && current.source === target.source
+        && current.scopePrefix === target.scopePrefix
+    }
+    let task: Promise<boolean>
+    try {
+      task = options.copyVisual(target.payload)
+    } catch (error) {
+      options.logError?.('tsp renderer: transcript copy failed', { error: errorText(error) })
+      if (isStillCurrent()) {
+        try { display.notify('Failed to copy message', 'error') } catch (failure) { routeFatal(failure) }
+      }
+      return
+    }
+    task.then(
+      copied => {
+        if (!isStillCurrent()) return
+        try { display.notify(copied ? 'Copied message' : 'Failed to copy message', copied ? 'info' : 'error') } catch (error) { routeFatal(error) }
+      },
+      (error: unknown) => {
+        options.logError?.('tsp renderer: transcript copy failed', { error: errorText(error) })
+        if (!isStillCurrent()) return
+        try { display.notify('Failed to copy message', 'error') } catch (failure) { routeFatal(failure) }
+      },
+    )
+  }
+
   /**
    * PR3 Alt+V: select the next figure of the CURRENT committed frame (wrap to
    * the first), repaint the selection badge, then reveal the figure through the
@@ -4462,6 +4568,13 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         if (webPicker?.handleEvent(input.event)) return false
         if (presetPicker?.handleEvent(input.event)) return false
         if (modelPicker?.handleEvent(input.event)) return false
+        if (input.event.ev === 'action' && input.event.act === TRANSCRIPT_COPY_ACTION) {
+          if (transcriptCopyAdmitted()) {
+            const target = transcriptCopyButtons.get(input.event.id)
+            if (target !== undefined) issueTranscriptCopy(target)
+          }
+          return false
+        }
         // PR3: a figure Copy action is admitted ONLY through the exact Copy
         // button node id of the CURRENT committed frame, re-checked against the
         // live sidecar; an old-frame button, a ref substring or any other action

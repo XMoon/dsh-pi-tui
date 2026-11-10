@@ -408,9 +408,11 @@ for (const preset of ['compact', 'full', 'focus'] as const) {
         assert.equal(roots.length, 1, 'the configured Focus preset produced one native Turn root')
         assert.equal(roots[0]!.p['collapsed'], true, 'the Focus root defaults collapsed')
         assert.equal(tools.length, 0, 'a collapsed Focus root builds no hidden Tool node')
-        const finalCards = nodes.filter(node => node.k === 'card' && nodeText(node).includes('MODE-DIRECT-OK'))
-        assert.equal(finalCards.length, 1, 'the official final appears exactly once as an independent Assistant card')
-        assert.ok(!finalCards[0]!.id.startsWith(`${roots[0]!.id}.`), 'the official final remains outside the Focus root')
+        const finalLeaves = nodes.filter(node => node.k === 'col'
+          && node.p['role'] === 'dsh.transcript.assistant'
+          && nodeText(node).includes('MODE-DIRECT-OK'))
+        assert.equal(finalLeaves.length, 1, 'the official final appears exactly once as an independent plain Assistant leaf')
+        assert.ok(!finalLeaves[0]!.id.startsWith(`${roots[0]!.id}.`), 'the official final remains outside the Focus root')
       } else {
         assert.equal(activities.length, 0, 'the configured Full preset paints no Work/Activity container')
         assert.ok(tools.length >= 1, 'Full keeps the real Tool row flat in the reading flow')
@@ -630,9 +632,11 @@ test('the real Direct Focus stream holds its final outside the Thought until tur
       fixture.pane.output.text().includes('FOCUS-DIRECT-FINAL'), 30_000)
     const settledNodes = liveNodes(fixture.pane.output.text())
     const roots = settledNodes.filter(node => node.k === 'section' && node.id.includes('-focus-'))
-    const finals = settledNodes.filter(node => node.k === 'card' && nodeText(node).includes('FOCUS-DIRECT-FINAL'))
+    const finals = settledNodes.filter(node => node.k === 'col'
+      && node.p['role'] === 'dsh.transcript.assistant'
+      && nodeText(node).includes('FOCUS-DIRECT-FINAL'))
     assert.equal(roots.length, 1, 'the same Direct turn keeps one Focus root occurrence')
-    assert.equal(finals.length, 1, 'the authoritative final appears exactly once')
+    assert.equal(finals.length, 1, 'the authoritative plain Assistant final appears exactly once')
     assert.ok(!finals[0]!.id.startsWith(`${roots[0]!.id}.`), 'the final remains outside the Thought')
   } finally {
     releaseStream()
