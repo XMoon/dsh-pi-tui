@@ -277,6 +277,15 @@ export class MentionProvider implements AutocompleteProvider {
     // a session/workspace switch mid-request must not bake the NEW scope
     // into this request's snapshot — the apply fence compares it).
     const requestScope = this.scopeOf()
+    // An OPEN shell continuation (the previous physical line leaves a quote,
+    // backtick, substitution or trailing backslash unfinished) has no
+    // trustworthy single-line boundary. Offer NOTHING for it: no guessed shell
+    // candidate, no Client path fallback and no stale dropdown.
+    if (this.inputModeSource() !== 'prompt' && cursorLine > 0
+      && shellCommandIsOpen(lines.slice(0, cursorLine))) {
+      if (generation === this.requestGeneration) this.requestSnapshot = null
+      return null
+    }
     // 1. The shell grammar runs before file/attachment completion. Direct keeps
     // the existing fork path provider; Remote routes every shell word/path only
     // through the authenticated Host port.
@@ -743,6 +752,26 @@ export class MentionProvider implements AutocompleteProvider {
     return true
   }
 
+  /** Whether `item` belongs to the Shell result set produced for THIS exact
+   * document, cursor, mode and Session scope. Every Host-derived shell kind
+   * (command, subcommand, variable, path) uses the same fence. */
+  private shellResultIsCurrent(
+    item: AutocompleteItem,
+    lines: readonly string[],
+    cursorLine: number,
+    cursorCol: number,
+  ): boolean {
+    const identity = this.shellResultIdentity
+    return identity !== null
+      && identity.items.includes(item)
+      && identity.cursorLine === cursorLine
+      && identity.cursorCol === cursorCol
+      && identity.mode === this.inputModeSource()
+      && identity.lines.length === lines.length
+      && identity.lines.every((line, index) => line === lines[index])
+      && sameHostFileScope(identity.scope, this.scopeOf())
+  }
+
   applyCompletion(
     lines: string[],
     cursorLine: number,
@@ -751,6 +780,12 @@ export class MentionProvider implements AutocompleteProvider {
     prefix: string,
   ): { lines: string[]; cursorLine: number; cursorCol: number } {
     const currentLine = lines[cursorLine] ?? ''
+    // An OPEN continuation has no trustworthy boundary: never rewrite it, even
+    // for a stale shell item or a same-prefix file result.
+    if (this.inputModeSource() !== 'prompt' && cursorLine > 0
+      && shellCommandIsOpen(lines.slice(0, cursorLine))) {
+      return { lines, cursorLine, cursorCol }
+    }
     const wire = this.virtualWireShellContext(lines, cursorLine, cursorCol)
     const shellLine = wire ?? { line: currentLine, cursorCol, prefixLength: 0 }
     const modePrefix = wire === null ? '' : shellPrefixForMode(this.inputModeSource())
@@ -786,16 +821,8 @@ export class MentionProvider implements AutocompleteProvider {
     // result (or a late async result from an older request) is never applied
     // to a different line or edit. A STRICT (file/extension) result keeps its
     // own snapshot fence below, so it is not classified as a Shell result.
-    const shellIdentity = wholeWordShell ? this.shellResultIdentity : null
     const fromCurrentShellResult = wholeWordShell
-      && shellIdentity !== null
-      && shellIdentity.items.includes(item)
-      && shellIdentity.cursorLine === cursorLine
-      && shellIdentity.cursorCol === cursorCol
-      && shellIdentity.mode === this.inputModeSource()
-      && shellIdentity.lines.length === lines.length
-      && shellIdentity.lines.every((line, index) => line === lines[index])
-      && sameHostFileScope(shellIdentity.scope, this.scopeOf())
+      && this.shellResultIsCurrent(item, lines, cursorLine, cursorCol)
     if (wholeWordShell && !fromCurrentShellResult && this.requestSnapshot?.strict !== true) {
       return { lines, cursorLine, cursorCol }
     }
@@ -823,6 +850,11 @@ export class MentionProvider implements AutocompleteProvider {
       }
     }
     if (shellContext?.kind === 'paths' && this.hostShellCompletion?.pathAuthority === 'host') {
+      // Host-derived path candidates are Session facts too: a result produced
+      // for another document/cursor/mode/Session must never be written here.
+      if (!this.shellResultIsCurrent(item, lines, cursorLine, cursorCol)) {
+        return { lines, cursorLine, cursorCol }
+      }
       // Bash-style whole-word replacement: the cursor can sit mid-token, so
       // the already-typed suffix of THIS word is part of the accepted range.
       // Following words/whitespace and the command prefix stay untouched.
@@ -859,6 +891,10 @@ export class MentionProvider implements AutocompleteProvider {
       }
     }
     if (shellContext?.kind === 'variable') {
+      // Variable candidates are Host-derived facts: same currentness fence.
+      if (!this.shellResultIsCurrent(item, lines, cursorLine, cursorCol)) {
+        return { lines, cursorLine, cursorCol }
+      }
       // A `$VAR` word is one WORD whichever quote it lives in: replace its
       // whole range (the semantic name starts after the opening quote) and
       // append the separator space only OUTSIDE a quote — a space appended
