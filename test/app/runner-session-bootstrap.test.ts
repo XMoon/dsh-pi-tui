@@ -1684,6 +1684,118 @@ test('commands submitted before /new publishes its Session run on the new Sessio
     'the status handlers must run after the transition settled, against the new Session')
 })
 
+/**
+ * REGRESSION (RFL-002): the navigation intent widens `gate.pending` from the
+ * navigation's FIRST step, so a queue pull-back that settles during the
+ * PRE-GATE Workspace resolution correctly defers its local draft restore to
+ * the transition. A refused pre-selection never enters
+ * `withSessionTransition`, so the transition's own settlement never runs: the
+ * intent's terminal release MUST settle the parked recall, or the confirmed
+ * queue removal has no local representation left (the recalled text/refs stay
+ * trapped and the draft never gets them back).
+ *
+ * The gate is the REAL pre-gate production await (`agents.resolveWorkspace` →
+ * the Workspace registry create), never a sleep; the pull-back is the real
+ * Alt+Up gesture against the real pending-input reader.
+ */
+test('a refused /new Workspace pre-selection restores a deferred queue pull-back', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-new-pullback-fence-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(100, 30)
+  life.defer(installVirtualProcessTerminal(vt))
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const resumed: FakeSession = fakeSession({
+    id: 'new-pullback-session',
+    header: { id: 'new-pullback-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('resumed answer'),
+  })
+  const harness = makeHarness(home, resumed)
+  // The real Direct Workspace pre-selection await, parked and then refused.
+  let releaseCreate!: () => void
+  let createEntered!: () => void
+  const createGate = new Promise<void>(resolve => { releaseCreate = resolve })
+  const createReached = new Promise<void>(resolve => { createEntered = resolve })
+  // A failing assertion before the release must not leave /new parked.
+  life.defer(() => releaseCreate())
+  const workspaceRegistry = {
+    create: async () => {
+      createEntered()
+      await createGate
+      throw new Error('workspace refused by the Host')
+    },
+    get: () => undefined,
+    list: () => [],
+  }
+  context = new Context()
+  context.provide('agentPresets', {
+    remoteExportList: async () => ({ presets: [{ id: 'standard', isDefault: true }] }),
+    resolve: async (id?: string) => ({ id: id ?? 'standard' }),
+    mount: async () => {},
+    defaultId: 'standard',
+    composedPreset: () => undefined,
+  } as never)
+  fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id }, () => {}, undefined, undefined, workspaceRegistry)
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  const agent = liveAgentOf(harness, resumed.id) as unknown as {
+    inbox: {
+      nextTurn: { id: string; content: unknown[]; source: unknown }[]
+      remove?: (id: string) => boolean
+    }
+  }
+  assert.ok(agent, 'the resumed Session must own a live Agent')
+  agent.inbox.nextTurn.push({
+    id: 'queued-recall',
+    content: [{ type: 'text', text: 'queued recall text' }],
+    source: { kind: 'user' },
+  })
+  const removed: string[] = []
+  agent.inbox.remove = (id: string): boolean => {
+    const index = agent.inbox.nextTurn.findIndex(item => item.id === id)
+    if (index < 0) return false
+    removed.push(agent.inbox.nextTurn.splice(index, 1)[0]!.id)
+    return true
+  }
+
+  app.setDraft('/new')
+  ;(app as unknown as { submitDraft(): void }).submitDraft()
+  let gateTimer: ReturnType<typeof setTimeout> | undefined
+  // reason: bounded failure deadline; the Workspace create is the authoritative signal
+  const deadline = new Promise<false>(resolve => { gateTimer = setTimeout(() => resolve(false), 15_000) })
+  const reached = await Promise.race([createReached.then(() => true), deadline])
+  if (gateTimer !== undefined) clearTimeout(gateTimer)
+  assert.equal(reached, true, '/new must reach its pre-gate Workspace resolution')
+
+  ;(app as unknown as {
+    actionDispatcher: { dispatch: (action: string) => boolean }
+  }).actionDispatcher.dispatch('app.input.dequeue')
+  for (let round = 0; round < 2000 && (removed.length === 0 || app.getDraft() !== ''); round += 1) {
+    await new Promise(resolve => setImmediate(resolve))
+  }
+  assert.deepEqual(removed, ['queued-recall'], 'the real pull-back must remove the queued occurrence')
+  assert.equal(app.getDraft(), '', 'the recall must be deferred while the navigation intent is pending')
+
+  releaseCreate()
+  for (let round = 0; round < 2000 && !app.getDraft().includes('queued recall text'); round += 1) {
+    await new Promise(resolve => setImmediate(resolve))
+  }
+  assert.match(app.getDraft(), /queued recall text/u,
+    'a refused pre-selection must restore the deferred recall into the draft')
+  assert.equal(removed.length, 1, 'the queued occurrence stays removed (the pull-back committed its removal)')
+})
+
 test('the first-session Workspace intent ignores the qualification override outside the surface entry', () => {
   const launch = '/home/user/project'
   assert.deepEqual(initialWorkspaceIntentFromEnvironment(launch, {}),

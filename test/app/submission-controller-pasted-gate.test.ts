@@ -82,6 +82,7 @@ function mount(): { controller: ReturnType<typeof createSubmissionController>; c
       withWriter: async (_scope: unknown, task: () => Promise<unknown>) => task(),
       submitPrompt: async () => { counters.submitPrompt += 1 },
       deferQueueRecall: () => {},
+      settleQueueRecalls: () => {},
       hasUnsettledClientWrite: () => false,
     },
     command: deepInert,

@@ -2766,6 +2766,7 @@ export function applyRunnerWithRuntime(
         withWriter: (scope, task) => submissionRuntime.withWriter(scope, task),
         submitPrompt: (promptSubmission) => submissionRuntime.submitPrompt(promptSubmission),
         deferQueueRecall: (recall) => submissionRuntime.deferQueueRecall(recall),
+        settleQueueRecalls: (committed) => submissionRuntime.settleQueueRecalls(committed),
         // M4 PR4: the runtime's OWN accepted-write read (a write that bypasses
         // the controller's FIFO still counts). Read at gesture time only.
         hasUnsettledClientWrite: () => submissionRuntime.hasUnsettledClientWrite(),
