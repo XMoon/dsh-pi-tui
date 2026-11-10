@@ -10,6 +10,7 @@
 
 import assert from 'node:assert/strict'
 import { writeFileSync } from 'node:fs'
+import { createServer, type Server } from 'node:http'
 import { join } from 'node:path'
 import test from 'node:test'
 import { preparePrompt } from '../../../src/app/submission/prepared-prompt.ts'
@@ -249,4 +250,134 @@ test('a source changed after /attach fails locally before the Host upload reques
     (error: unknown) => error instanceof Error && error.message.includes('changed since it was attached'),
   )
   assert.equal(requests, 0, 'the Host never receives an upload request for an invalidated source')
+})
+
+// ── Real-carrier teardown: the request body must be released on early exits ──
+
+async function listenOnLoopback(server: Server): Promise<number> {
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+  const address = server.address()
+  assert.ok(address !== null && typeof address === 'object')
+  return address.port
+}
+
+function closeLoopback(server: Server): Promise<void> {
+  return new Promise(resolve => {
+    server.closeAllConnections()
+    server.close(() => resolve())
+  })
+}
+
+/** One Client source that records its generator finalizer and pulled chunks. */
+function trackedSource(chunks: number, onChunk?: () => void, gate?: (signal: AbortSignal) => Promise<void>): {
+  readonly file: PreparedFile
+  closed(): number
+  pulled(): number
+} {
+  let closed = 0
+  let pulled = 0
+  return {
+    file: {
+      name: 'tracked.bin',
+      byteLength: chunks * 64 * 1024,
+      source: {
+        kind: 'client-stream',
+        async *open(signal) {
+          try {
+            for (let index = 0; index < chunks; index += 1) {
+              signal.throwIfAborted()
+              pulled += 1
+              onChunk?.()
+              yield new Uint8Array(64 * 1024).fill(index)
+            }
+            await gate?.(signal)
+          } finally {
+            closed += 1
+          }
+        },
+      },
+    },
+    closed: () => closed,
+    pulled: () => pulled,
+  }
+}
+
+test('a real early HTTP refusal closes the Client source iterator and its finalizer', async (t) => {
+  const server = createServer((_request, response) => {
+    response.writeHead(401)
+    response.end('unauthorized')
+  })
+  t.after(() => closeLoopback(server))
+  const port = await listenOnLoopback(server)
+  const source = trackedSource(8)
+  const uploader = createRemoteFileReceiptUploader((input, init) =>
+    fetch(new URL(String(input), `http://127.0.0.1:${port}`), init))
+
+  await assert.rejects(
+    uploader.upload('session-a', source.file, new AbortController().signal),
+    (error: unknown) => error instanceof RemoteFileUploadError && error.code === 'session/prompt-upload-http-failed',
+  )
+  assert.equal(source.closed(), 1,
+    'the streamer finalizer (file-descriptor close) runs even when the carrier refuses the upload')
+  assert.ok(source.pulled() >= 1, 'the source really reached the carrier before the refusal')
+})
+
+test('a carrier that returns a refusal without consuming or canceling the body still closes the Client source', async () => {
+  // Deterministic early-exit carrier: it reads ONE chunk, then returns 401 and
+  // never touches the body again. Before the explicit close boundary the
+  // generator stayed suspended at its yield (its finally, and the file
+  // descriptor, leaked); the Client must own that release.
+  const source = trackedSource(8)
+  let requests = 0
+  const uploader = createRemoteFileReceiptUploader(async (_input, init = {}) => {
+    requests += 1
+    const reader = (init.body as ReadableStream<Uint8Array>).getReader()
+    const first = await reader.read()
+    assert.equal(first.done, false)
+    return new Response('unauthorized', { status: 401 })
+  })
+
+  await assert.rejects(
+    uploader.upload('session-a', source.file, new AbortController().signal),
+    (error: unknown) => error instanceof RemoteFileUploadError && error.code === 'session/prompt-upload-http-failed',
+  )
+  assert.equal(requests, 1)
+  assert.equal(source.closed(), 1,
+    'the Client closes the source iterator even though the carrier never canceled the request body')
+  assert.ok(source.pulled() < 8, 'the carrier abandoned the body before EOF')
+})
+
+test('a real carrier that drops the connection still closes the Client source', async (t) => {
+  const server = createServer(request => {
+    request.socket.destroy()
+  })
+  t.after(() => closeLoopback(server))
+  const port = await listenOnLoopback(server)
+  const source = trackedSource(8)
+  const uploader = createRemoteFileReceiptUploader((input, init) =>
+    fetch(new URL(String(input), `http://127.0.0.1:${port}`), init))
+
+  await assert.rejects(uploader.upload('session-a', source.file, new AbortController().signal))
+  assert.equal(source.closed(), 1, 'a carrier failure before EOF still releases the Client source')
+})
+
+test('a real abort of a parked carrier closes the Client source', async (t) => {
+  const server = createServer(() => {
+    // Keep the request open: the body is consumed slowly and no response ever
+    // arrives, so only the caller abort can end the carrier.
+  })
+  t.after(() => closeLoopback(server))
+  const port = await listenOnLoopback(server)
+  const source = trackedSource(1, undefined, signal => new Promise<void>(resolve => {
+    if (signal.aborted) resolve()
+    else signal.addEventListener('abort', () => resolve(), { once: true })
+  }))
+  const controller = new AbortController()
+  const uploader = createRemoteFileReceiptUploader((input, init) =>
+    fetch(new URL(String(input), `http://127.0.0.1:${port}`), init))
+
+  const pending = uploader.upload('session-a', source.file, controller.signal)
+  setTimeout(() => controller.abort(), 50)
+  await assert.rejects(pending)
+  assert.equal(source.closed(), 1, 'the abort path releases the Client source through the same close boundary')
 })

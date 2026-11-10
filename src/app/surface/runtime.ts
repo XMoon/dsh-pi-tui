@@ -740,6 +740,10 @@ export interface SurfaceMountDeps {
    * store, forwarded to TuiAppOptions.draftImageStoreForTest. Production
    * paths never read it. */
   readonly draftImageStoreForTest?: import('../../client/media/image/draft-store.ts').DraftImageStore
+  /** Headless-test seam: the runner's live generic-file draft store,
+   * forwarded to TuiAppOptions.draftFileStoreForTest. Production paths never
+   * read it. */
+  readonly draftFileStoreForTest?: import('../../client/media/attachment/file-draft.ts').DraftFileStore
   /** The READ-ONLY composer preview projection (image UX PR1): the live
    *  draft store's staged values. The TUI never stages or reorders through
    *  it; absent means no preview band. */
@@ -2895,6 +2899,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     deliveredFilePreview: deps.deliveredFilePreview,
     onDeliveredFileDiagnostic: deps.reportDeliveredFileFailure,
     draftImageStoreForTest: deps.draftImageStoreForTest,
+    draftFileStoreForTest: deps.draftFileStoreForTest,
     draftImagePreviewSource: deps.draftImagePreviewSource,
     draftImagePreviewLiveDraft: deps.draftImagePreviewLiveDraft,
     draftImagePreviewReserve: deps.draftImagePreviewReserve,

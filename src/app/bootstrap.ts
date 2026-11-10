@@ -3330,6 +3330,7 @@ export function applyRunnerWithRuntime(
       // Headless-test seam (M3-4 PR3 image L6): the live image draft store.
       // Production paths never read it.
       draftImageStoreForTest: draftImages,
+      draftFileStoreForTest: draftFiles,
       // Image UX PR1: the composer preview reads the SAME store through a
       // READ-ONLY projection. The Store owns the bytes and the bounded
       // undo-retention budget; the host fork Editor owns the real Undo

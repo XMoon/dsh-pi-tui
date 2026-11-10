@@ -42,6 +42,7 @@ import { createRequire } from 'node:module'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { Config as TuiConfigSchema } from '../../src/index.ts'
 import { TuiApp } from '../../src/tui-app.ts'
+import { probeAttachment } from '../../src/client/media/attachment/intake.ts'
 import { applyRunnerWithRuntime } from '../../src/app/bootstrap.ts'
 import { TRANSITION_FENCE_NOTICE } from '../../src/app/submission/steer.ts'
 import type { RemoteApplicationOverride } from '../../src/app/application-runtime.ts'
@@ -608,6 +609,171 @@ test('generic file: a source changed after /attach is refused with no Host promp
   assert.equal(app.getDraft().includes('F4_CHANGED_SOURCE_PROMPT'), true,
     'the refused draft is restored for the user')
   assert.equal(durableBefore, 0)
+})
+
+test('mixed file/image prompt: both file receipts and the image keep their source order in the Host row', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm6-f4-remote-file-mixed'
+  const presetId = 'm3-4-pr3-preset'
+  const host = await mountHost(life, presetId)
+  await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+  const fixture = await mountPr3Runner(life, { presetId, resumeSessionId: mainId, host })
+  await waitFor('mount paint', () => fixture.vt.getViewport().join('').length > 0, 10_000)
+  const app = fixture.runnerApp() as unknown as {
+    getDraft(): string
+    setDraft(text: string): void
+    submitDraft(): void
+    draftImageStoreForTest?: import('../../src/client/media/image/draft-store.ts').DraftImageStore
+    draftFileStoreForTest?: import('../../src/client/media/attachment/file-draft.ts').DraftFileStore
+  }
+  assert.ok(app.draftFileStoreForTest !== undefined, 'the mounted app exposes its live file draft store')
+  assert.ok(app.draftImageStoreForTest !== undefined, 'the mounted app exposes its live image draft store')
+  const fileStore = app.draftFileStoreForTest!
+  const imageStore = app.draftImageStoreForTest!
+  const sourceDir = life.tempDir('dsh-f4-mixed-l6-')
+
+  const stagedFiles: { placeholder: string; bytes: Buffer }[] = []
+  for (const [name, seed] of [['mix-a.bin', 3], ['mix-b.bin', 5]] as const) {
+    const path = join(sourceDir, name)
+    const bytes = Buffer.alloc(80 * 1024)
+    for (let index = 0; index < bytes.length; index += 1) bytes[index] = (index + seed) % 239
+    writeFileSync(path, bytes)
+    const probe = await probeAttachment(path, sourceDir)
+    assert.equal(probe.kind, 'file')
+    if (probe.kind !== 'file') return
+    const draft = fileStore.add({
+      name: probe.name,
+      byteLength: probe.byteLength,
+      source: { type: 'path', path: probe.path, fingerprint: probe.fingerprint },
+    })
+    stagedFiles.push({ placeholder: draft.placeholder, bytes })
+  }
+  const pngBytes = await d12PngBytes()
+  const stagedImage = imageStore.add({
+    bytes: pngBytes,
+    mediaType: 'image/png',
+    width: 1,
+    height: 1,
+    name: 'mixed-image.png',
+  })
+
+  const marker = 'F4_MIXED_FILE_IMAGE_20261111'
+  app.setDraft(`${stagedFiles[0]!.placeholder} middle ${stagedImage.placeholder} ${stagedFiles[1]!.placeholder} tail ${marker}`)
+  app.submitDraft()
+
+  const session = host.ctx.sessions.get(SessionId(mainId)) as unknown as {
+    snapshotEvents(): Array<{ type: string; data: unknown }>
+  }
+  await waitFor('the mixed row is durable', () => session.snapshotEvents().some(event =>
+    event.type === 'user/message' && JSON.stringify(event.data).includes(marker)), 30_000)
+  const durable = session.snapshotEvents().find(event =>
+    event.type === 'user/message' && JSON.stringify(event.data).includes(marker))!
+  const content = (durable.data as { content: Array<{ type: string; text?: string; attachment?: { attachmentId?: string; width?: number; height?: number } }> }).content
+  assert.deepEqual(content.map(block => block.type),
+    ['file', 'text', 'image', 'text', 'file', 'text'],
+    'the source order (file → text → image → text → file → text) reaches the Host unchanged')
+  assert.equal(content[1]?.text, ' middle ')
+  assert.equal(content[5]?.text, ` tail ${marker}`)
+  const attachments = host.ctx.get('attachments') as unknown as {
+    readFileStream(ref: unknown): AsyncIterable<Uint8Array>
+  }
+  for (const [blockIndex, source] of [[0, stagedFiles[0]!.bytes], [4, stagedFiles[1]!.bytes]] as const) {
+    const ref = content[blockIndex]!.attachment
+    assert.ok(ref?.attachmentId !== undefined, 'each file block carries its Host attachment')
+    const chunks: Uint8Array[] = []
+    for await (const chunk of attachments.readFileStream(ref)) chunks.push(chunk)
+    assert.deepEqual(
+      Buffer.from(Buffer.concat(chunks.map(chunk => Buffer.from(chunk)))),
+      source,
+      'each file keeps its own uploaded bytes in the mixed prompt',
+    )
+  }
+  assert.equal(content[2]?.attachment?.width, 1, 'the image block keeps its real dimensions')
+  assert.equal(content[2]?.attachment?.height, 1)
+})
+
+test('surface stop before dispatch: a file prompt makes zero Host prompt and restores the draft', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm6-f4-remote-file-stop'
+  const presetId = 'm3-4-pr3-preset'
+  const host = await mountHost(life, presetId)
+  await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+  const fixture = await mountPr3Runner(life, { presetId, resumeSessionId: mainId, host })
+  await waitFor('mount paint', () => fixture.vt.getViewport().join('').length > 0, 10_000)
+  const app = fixture.runnerApp() as unknown as { getDraft(): string; setDraft(text: string): void; submitDraft(): void }
+  const sourceDir = life.tempDir('dsh-f4-stop-')
+  const path = join(sourceDir, 'stop.bin')
+  writeFileSync(path, Buffer.alloc(32 * 1024, 4))
+  submitDraft(fixture, `/attach ${path}`)
+  await waitFor('the /attach placeholder reaches the composer', () => app.getDraft().includes('[file #'), 15_000)
+  const marker = 'F4_SURFACE_STOP_20261111'
+  app.setDraft(`${app.getDraft()} ${marker}`)
+  const session = host.ctx.sessions.get(SessionId(mainId)) as unknown as {
+    snapshotEvents(): Array<{ type: string; data: unknown }>
+  }
+  // Close the ONE synchronous surface admission BEFORE the gesture: the write
+  // must be refused before any file upload or prompt dispatch.
+  const stopSurfaceAdmission = fixture.aggregate.selected.stopSurfaceAdmission
+  assert.ok(stopSurfaceAdmission !== undefined, 'the Remote selection exposes the surface-stop admission')
+  stopSurfaceAdmission()
+  app.submitDraft()
+  await waitFor('the stopped-surface draft is restored', () => app.getDraft().includes(marker), 20_000)
+  assert.equal(session.snapshotEvents().filter(event => event.type === 'user/message'
+    && JSON.stringify(event.data).includes(marker)).length, 0,
+  'a stopped surface never dispatches the file prompt')
+})
+
+test('multi-file submission: a later source failure sends no prompt and restores both placeholders', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm6-f4-remote-file-partial'
+  const presetId = 'm3-4-pr3-preset'
+  const host = await mountHost(life, presetId)
+  await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+  const fixture = await mountPr3Runner(life, { presetId, resumeSessionId: mainId, host })
+  const notices = recordNotices(life, fixture)
+  await waitFor('mount paint', () => fixture.vt.getViewport().join('').length > 0, 10_000)
+  const app = fixture.runnerApp() as unknown as {
+    getDraft(): string
+    setDraft(text: string): void
+    submitDraft(): void
+    draftFileStoreForTest?: import('../../src/client/media/attachment/file-draft.ts').DraftFileStore
+  }
+  assert.ok(app.draftFileStoreForTest !== undefined, 'the mounted app exposes its live file draft store')
+  const fileStore = app.draftFileStoreForTest!
+  const sourceDir = life.tempDir('dsh-f4-partial-l6-')
+  const placeholders: string[] = []
+  const paths: string[] = []
+  for (const name of ['partial-a.bin', 'partial-b.bin']) {
+    const path = join(sourceDir, name)
+    writeFileSync(path, Buffer.alloc(64 * 1024, 6))
+    paths.push(path)
+    const probe = await probeAttachment(path, sourceDir)
+    assert.equal(probe.kind, 'file')
+    if (probe.kind !== 'file') return
+    const draft = fileStore.add({
+      name: probe.name,
+      byteLength: probe.byteLength,
+      source: { type: 'path', path: probe.path, fingerprint: probe.fingerprint },
+    })
+    placeholders.push(draft.placeholder)
+  }
+  const marker = 'F4_PARTIAL_MULTI_FILE_20261111'
+  app.setDraft(`${placeholders[0]!} ${placeholders[1]!} ${marker}`)
+  // The SECOND file changes: the first upload may already be staged on the
+  // Host, but the Prompt must never be sent and both placeholders must return.
+  writeFileSync(paths[1]!, Buffer.alloc(3, 9))
+  const session = host.ctx.sessions.get(SessionId(mainId)) as unknown as {
+    snapshotEvents(): Array<{ type: string; data: unknown }>
+  }
+  app.submitDraft()
+  await waitFor('the partial multi-file failure is visible', () =>
+    notices.some(notice => notice.includes('changed since it was attached')), 20_000)
+  assert.equal(session.snapshotEvents().filter(event => event.type === 'user/message'
+    && JSON.stringify(event.data).includes(marker)).length, 0,
+  'no partial multi-file prompt is dispatched')
+  const restored = app.getDraft()
+  assert.ok(restored.includes(placeholders[0]!) && restored.includes(placeholders[1]!)
+    && restored.includes(marker), `both placeholders and the text are restored: ${JSON.stringify(restored)}`)
 })
 
 test('queue/steer: a busy queue prompt lands as an official queued occurrence; a steer lands as steering', async (t) => {
