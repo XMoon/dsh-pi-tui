@@ -150,6 +150,10 @@ export interface SubmissionControllerDeps<ExactAgent extends SubmissionAgentLike
     transitionPending(): boolean
     /** Resolve when no session transition is executing or queued. */
     awaitTransitionSettled(): Promise<void>
+    /** Register an accepted navigation intent that is still in its pre-gate
+     *  preflight (see `SessionTransitionGate.beginIntent`). The returned
+     *  release is idempotent and runs at the command's terminal settlement. */
+    beginNavigationIntent(): () => void
   }
   /** The session-scope authority (live-scope capture + currentness fence). */
   readonly scope: {
@@ -1244,59 +1248,83 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
           commandSignal: () => deps.signal,
           invokeCommandPlane: ({ toggled: commandLine, commandPlaneLine, tuiOwnedCommand, submittedAttachments, signal: commandSignal }) =>
             deps.command.withCommandDelivery(delivery, () => {
-              if (!commandPlaneLine || parsedAtSubmit === undefined) {
-                return Promise.resolve({ kind: 'committed', matched: false } as HostCommandOutcome)
-              }
-              if (tuiOwnedCommand) {
-                // PR4 §1.3 — the explicit TUI_BUILTIN/SKILL_WRAPPER route.
-                // A REAL Direct Agent (the branch where the in-process
-                // command service owns the dispatch surface) keeps the
-                // existing executor path unchanged; the Remote structural
-                // projection executes through the CLIENT registry — the
-                // projected agent must never reach `ctx.commands.execute`.
-                if (directAgent !== undefined) {
-                  return deps.commandPlane.execute(directAgent, commandLine, submittedAttachments, commandSignal).then((execution: HostCommandExecution | undefined) => {
-                    return execution === undefined
-                      ? { kind: 'committed', matched: false } as const
-                      : { kind: 'committed', matched: true, execution } as const
-                  })
-                }
-                // F1/F4: THIS branch is the card-less route. The Client command
-                // registry appends no `command/run` row, so nothing renders the
-                // handler's `CommandResult.text` — publish a returned error once,
-                // HERE, where the route is already decided. The owner is never
-                // re-derived at settlement (the Host-origin catalog is live and
-                // may have changed mid-flight). Scope: the B2-A notice set, so
-                // sibling TUI commands keep their own refusal notices.
-                return deps.command.clientCommands.execute({ line: commandLine, signal: commandSignal }).then((execution) => {
-                  // F5: the Client execution can outlive the Session it was
-                  // admitted against (an async /resume can publish the
-                  // replacement while the handler is still running), so the
-                  // notice is fenced by the SAME captured scope the settlement
-                  // uses — a replaced owner must not receive the old result.
-                  if (execution !== undefined
-                    && execution.result.kind === 'error'
-                    && execution.result.text !== ''
-                    && !deps.isCleanedUp()
-                    && deps.scope.isCurrent(scope)
-                    && parsedAtSubmit !== undefined
-                    && TSP_B2A_RESULT_NOTICE_COMMANDS.has(parsedAtSubmit.name)) {
-                    deps.app().notify(execution.result.text, 'error')
+              // A SESSION-NAVIGATION command owns its whole pre-gate workflow
+              // here: the command execution IS the navigation lifetime (the
+              // `/new` handler awaits its workspace pre-selection and the
+              // transition before resolving). Registering the intent before
+              // the executor runs makes the submission fence observe the
+              // accepted navigation from its first synchronous step, so a
+              // command submitted while `/new` is still resolving its
+              // Workspace waits for the settled surface instead of running
+              // sessionless and silently discarding its result.
+              const endNavigationIntent = parsedAtSubmit !== undefined
+                && SESSION_NAVIGATION_COMMANDS.has(parsedAtSubmit.name)
+                ? deps.ownership.beginNavigationIntent()
+                : undefined
+              let settlement: Promise<HostCommandOutcome>
+              try {
+                settlement = (() => {
+                  if (!commandPlaneLine || parsedAtSubmit === undefined) {
+                    return Promise.resolve({ kind: 'committed', matched: false } as HostCommandOutcome)
                   }
-                  return execution === undefined
-                    ? { kind: 'committed', matched: false } as const
-                    : { kind: 'committed', matched: true, execution } as const
-                })
+                  if (tuiOwnedCommand) {
+                    // PR4 §1.3 — the explicit TUI_BUILTIN/SKILL_WRAPPER route.
+                    // A REAL Direct Agent (the branch where the in-process
+                    // command service owns the dispatch surface) keeps the
+                    // existing executor path unchanged; the Remote structural
+                    // projection executes through the CLIENT registry — the
+                    // projected agent must never reach `ctx.commands.execute`.
+                    if (directAgent !== undefined) {
+                      return deps.commandPlane.execute(directAgent, commandLine, submittedAttachments, commandSignal).then((execution: HostCommandExecution | undefined) => {
+                        return execution === undefined
+                          ? { kind: 'committed', matched: false } as const
+                          : { kind: 'committed', matched: true, execution } as const
+                      })
+                    }
+                    // F1/F4: THIS branch is the card-less route. The Client command
+                    // registry appends no `command/run` row, so nothing renders the
+                    // handler's `CommandResult.text` — publish a returned error once,
+                    // HERE, where the route is already decided. The owner is never
+                    // re-derived at settlement (the Host-origin catalog is live and
+                    // may have changed mid-flight). Scope: the B2-A notice set, so
+                    // sibling TUI commands keep their own refusal notices.
+                    return deps.command.clientCommands.execute({ line: commandLine, signal: commandSignal }).then((execution) => {
+                      // F5: the Client execution can outlive the Session it was
+                      // admitted against (an async /resume can publish the
+                      // replacement while the handler is still running), so the
+                      // notice is fenced by the SAME captured scope the settlement
+                      // uses — a replaced owner must not receive the old result.
+                      if (execution !== undefined
+                        && execution.result.kind === 'error'
+                        && execution.result.text !== ''
+                        && !deps.isCleanedUp()
+                        && deps.scope.isCurrent(scope)
+                        && parsedAtSubmit !== undefined
+                        && TSP_B2A_RESULT_NOTICE_COMMANDS.has(parsedAtSubmit.name)) {
+                        deps.app().notify(execution.result.text, 'error')
+                      }
+                      return execution === undefined
+                        ? { kind: 'committed', matched: false } as const
+                        : { kind: 'committed', matched: true, execution } as const
+                    })
+                  }
+                  // The HOST route: the HostCommandPort submission enters the
+                  // barrier through the submission runtime (the M3 insertion
+                  // point).
+                  return deps.submissionRuntime.withWriter(scope, () => deps.backend.hostCommand.execute({
+                    sessionId: agent.session.id,
+                    line: commandLine,
+                    attachments: submittedAttachments,
+                    signal: commandSignal,
+                  }))
+                })()
+              } catch (error) {
+                endNavigationIntent?.()
+                throw error
               }
-              // The HOST route: the HostCommandPort submission enters the
-              // barrier through the submission runtime (the M3 insertion
-              // point).
-              return deps.submissionRuntime.withWriter(scope, () => deps.backend.hostCommand.execute({
-                sessionId: agent.session.id,
-                line: commandLine,
-                attachments: submittedAttachments,
-                signal: commandSignal,
-              }))
+              return endNavigationIntent === undefined
+                ? settlement
+                : settlement.finally(endNavigationIntent)
             }),
           beginCommandSettlement: () => deps.session.beginCommandSettlement(),
           abortCommandSettlement: () => deps.session.abortCommandSettlement(),
@@ -1459,10 +1487,18 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // blocks the reload and the reload never blocks itself. The lifetime is
     // released at the same terminal callbacks that already settle the command.
     const endLocalWrite = localCommandMayWrite(parsed.name) ? beginUnsettledClientWrite() : undefined
+    // The sessionless route of a navigation command (`/new` before any live
+    // Session) is the navigation's own pre-gate workflow: hold the intent for
+    // the handler's whole lifetime so the submission fence covers the
+    // Workspace pre-selection that precedes the transition gate.
+    const endNavigationIntent = SESSION_NAVIGATION_COMMANDS.has(parsed.name)
+      ? deps.ownership.beginNavigationIntent()
+      : undefined
     runOwned('local command', () => handler(invocation), {
       diag: deps.diag,
       sessionId: () => deps.liveAgent()?.session.id,
       onResult: (result) => {
+        endNavigationIntent?.()
         endLocalWrite?.()
         if (deps.isCleanedUp()) return
         if (result !== undefined && result.kind === 'error') {
@@ -1478,6 +1514,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
         }
       },
       onError: (error) => {
+        endNavigationIntent?.()
         endLocalWrite?.()
         if (deps.isCleanedUp()) return
         if (bridgeCommandRef !== undefined) deps.extensions.recordError(bridgeCommandRef, error)
@@ -1490,6 +1527,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
         deps.app().notify(message, 'error')
       },
       onCancel: () => {
+        endNavigationIntent?.()
         endLocalWrite?.()
       },
     })

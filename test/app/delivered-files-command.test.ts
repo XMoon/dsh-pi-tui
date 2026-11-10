@@ -676,6 +676,7 @@ test('a typed /deliverables reaches the panel through the REAL submission contro
       captureSubject: () => core.subject(),
       transitionPending: () => false,
       awaitTransitionSettled: async () => {},
+      beginNavigationIntent: () => () => {},
     },
     scope: {
       captureLive: () => scopeAuthority.captureLive(),

@@ -373,6 +373,7 @@ async function mountChain(
       captureSubject: () => core.subject(),
       transitionPending: () => false,
       awaitTransitionSettled: async () => {},
+      beginNavigationIntent: () => () => {},
     },
     scope: {
       captureLive: () => ({ sessionId: SESSION_ID, subject: core.captureSubject()! } as never),

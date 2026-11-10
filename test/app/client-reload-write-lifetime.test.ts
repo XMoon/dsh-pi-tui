@@ -148,6 +148,7 @@ function startHarness(): Harness {
       captureSubject: () => core.subject(),
       transitionPending: () => false,
       awaitTransitionSettled: async () => {},
+      beginNavigationIntent: () => () => {},
     },
     scope: {
       captureLive: () => scopeAuthority.captureLive(),
@@ -439,6 +440,7 @@ function startShellHarness(): ShellHarness {
       captureSubject: () => core.subject(),
       transitionPending: () => false,
       awaitTransitionSettled: async () => {},
+      beginNavigationIntent: () => () => {},
     },
     scope: {
       captureLive: () => scopeAuthority.captureLive(),

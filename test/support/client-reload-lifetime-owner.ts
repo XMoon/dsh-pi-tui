@@ -121,6 +121,7 @@ export function createClientReloadLifetimeOwner(): ClientReloadLifetimeOwner {
       captureSubject: () => core.subject(),
       transitionPending: () => false,
       awaitTransitionSettled: async () => {},
+      beginNavigationIntent: () => () => {},
     },
     scope: {
       captureLive: () => scopeAuthority.captureLive(),
