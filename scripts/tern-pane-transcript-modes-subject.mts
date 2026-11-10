@@ -93,7 +93,7 @@ const note = (event: Record<string, unknown>): void => {
 const ptcFailureSessionId = 'inner-ptc-note-session'
 const ptcFailureOutput = `PTC_BUILD_OUTPUT_${'x'.repeat(260)}`
 const ptcFailureCommand = 'false'
-const ptcFailureProgram = `await tools.bash(${JSON.stringify({ command: ptcFailureCommand, description: 'run' })}); return 'PTC complete'`
+const ptcFailureProgram = `await tools.bash({command:'false',description:'run'});return 1`
 const ptcFailureStep = {
   text: '',
   toolCall: {
@@ -114,16 +114,16 @@ const ptcFailureRuntime = {
     const tools = spec.bindings.find(binding => binding.global === 'tools')
     const callBash = tools?.functions['bash']
     if (callBash === undefined) throw new Error('the official PTC bindings omit tools.bash')
-    if (!spec.program.includes("return 'PTC complete'")) {
-      throw new Error('the scripted PTC program does not curate its parent result')
+    if (!spec.program.includes('return 1')) {
+      throw new Error('the scripted PTC program does not return a concise parent result')
     }
     await callBash({ command: ptcFailureCommand, description: 'run' })
-    return { logs: [], value: 'PTC complete' }
+    return { logs: [], value: 1 }
   },
 }
 
 const PROMPT = scenario === 'ptc-error-note'
-  ? `PTC-NOTE-${mode.toUpperCase()} Generate the real PTC shell error note scenario.`
+  ? 'PTC-NOTE'
   : scenario === 'inner-disclosure'
     ? `INNER-${mode.toUpperCase()} Inspect the live reasoning, tool details and context disclosures.`
     : 'MODES-01 Please list the background jobs and then answer with one short plain note '
