@@ -27,8 +27,9 @@ import type { DisplayPreset } from '../../domain/display/preset.ts'
 import type { SettledQuestionAnswersLookup } from '../../app/surface/interaction-presenter.ts'
 import type { StreamingToolPreview } from '../../app/surface/streaming-tool-preparing.ts'
 import { contextFormOf } from '../../domain/transcript/context-semantics.ts'
+import { eligibleFinalAssistant } from '../../domain/transcript/final-assistant.ts'
 import { displayFailureText } from '../../domain/transcript/failure.ts'
-import { subCallDisplay, type SubCallTerminalFailure } from '../../domain/transcript/folder.ts'
+import { subCallDisplay, transcriptTimingOf, type SubCallTerminalFailure } from '../../domain/transcript/folder.ts'
 import { formatBytes } from '../../domain/media/format.ts'
 import type { ImageAttachmentRefLike } from '../../domain/media/types.ts'
 import type { RunPhase } from '../../domain/status/types.ts'
@@ -63,6 +64,7 @@ import {
   assistantPublishedVisualNodes,
   type SelectedVisualState,
 } from './assistant-visual.ts'
+import { TRANSCRIPT_COPY_ACTION, transcriptCopyPayload } from './transcript-copy.ts'
 
 /**
  * One replay-local allocator of presentation keys, scoped to a single
@@ -192,6 +194,12 @@ export interface TranscriptViewOptions {
    * painted only on the matching published figure.
    */
   readonly selectedVisual?: SelectedVisualState
+  /** Native transcript Copy is opt-in for the production mount. */
+  readonly transcriptCopy?: { readonly action: 'dsh-transcript-copy' }
+  /** The same frame-local raw payloads indexed by the Session event owner. */
+  readonly transcriptCopyPayloads?: ReadonlyMap<TranscriptMessage, string>
+  /** Settled final-Assistant metadata derived once from the current turn snapshot. */
+  readonly transcriptStats?: ReadonlyMap<Extract<TranscriptMessage, { kind: 'assistant' }>, readonly string[]>
 }
 
 /** Explicit inputs for the typed Full/Compact entry. It keeps the old
@@ -1148,66 +1156,112 @@ function workflowNode(message: Extract<TranscriptMessage, { kind: 'workflow' }>,
   )
 }
 
+function userTimeUtc(message: TranscriptMessage): string | undefined {
+  if (message.kind !== 'user') return undefined
+  const at = transcriptTimingOf(message)?.startedAt
+  if (at === undefined || !Number.isFinite(at)) return undefined
+  const date = new Date(at)
+  if (!Number.isFinite(date.getTime())) return undefined
+  return `${date.toISOString().slice(11, 16)} UTC`
+}
+
+function userMessageNode(message: Extract<TranscriptMessage, { kind: 'user' }>, key: string, options: TranscriptViewOptions): Node {
+  const copyable = options.transcriptCopy !== undefined
+    && (options.transcriptCopyPayloads === undefined
+      ? transcriptCopyPayload(message) !== undefined
+      : options.transcriptCopyPayloads.has(message))
+  const time = userTimeUtc(message)
+  const body = message.content !== undefined && bodyHasImage(message.content)
+    ? bodyContentNodes(message.content, options)
+    : [ui.md({ key: 'body', text: sanitizeDisplayText(message.text) })]
+  return ui.message({
+    key,
+    role: 'dsh.transcript.user',
+    variant: 'auto',
+    side: 'end',
+    ...(time === undefined ? {} : { time }),
+    ...(copyable ? {
+      actions: [{ act: TRANSCRIPT_COPY_ACTION, icon: 'copy', title: 'Copy user message' }],
+      reveal: 'always' as const,
+    } : {}),
+  }, ...body)
+}
+
+function assistantMessageNode(
+  message: Extract<TranscriptMessage, { kind: 'assistant' }>,
+  key: string,
+  options: TranscriptViewOptions,
+  body: readonly Node[],
+): Node {
+  const payload = options.transcriptCopy === undefined
+    ? undefined
+    : options.transcriptCopyPayloads === undefined
+      ? transcriptCopyPayload(message)
+      : options.transcriptCopyPayloads.get(message)
+  const stats = options.transcriptStats?.get(message) ?? []
+  const footer: Node[] = []
+  if (payload !== undefined) footer.push(ui.button({
+    key: 'copy',
+    role: 'dsh.transcript.copy',
+    variant: 'quiet',
+    size: 'sm',
+    text: 'Copy',
+    actions: { click: TRANSCRIPT_COPY_ACTION },
+  }))
+  stats.forEach((text, index) => {
+    if (footer.length > 0) footer.push(ui.text({ key: `separator-${index}`, text: ' · ', tone: 'muted' }))
+    footer.push(ui.text({ key: `stat-${index}`, text, tone: 'muted' }))
+  })
+  return ui.col(
+    { key, role: 'dsh.transcript.assistant', gap: 'xs' },
+    ...body,
+    ...(footer.length === 0 ? [] : [ui.row({ key: 'message-actions', wrap: true, gap: 'xs' }, ...footer)]),
+  )
+}
+
 /** One native node for one non-structural transcript row. */
 function messageNode(message: TranscriptMessage, key: string, options: TranscriptViewOptions, truncated = false): Node {
   switch (message.kind) {
     case 'user':
-      // PR4: only a body that really carries non-text content switches to the
-      // ordered block render; a text-only message keeps the exact legacy card
-      // and its stable `body` key.
-      if (message.content !== undefined && bodyHasImage(message.content)) {
-        return ui.card({ key, head: 'You' }, ...bodyContentNodes(message.content, options))
-      }
-      return ui.card({ key, head: 'You' }, ui.md({ key: 'body', text: sanitizeDisplayText(message.text) }))
+      return userMessageNode(message, key, options)
     case 'assistant': {
       const truncatedNote = truncated
         ? [ui.text({ key: 'truncated', text: 'Output truncated (max tokens)' })]
         : []
-      // PR4: `displayBlocks` OUTRANKS the settled `content` — the folder only
-      // publishes it while an opaque block is OPEN, so its presence IS the
-      // "live presentation evidence" fact and the ONE reason an `open-opaque`
-      // row must still say what is pending. Choosing it can never double the
-      // body: the settled `content` it outranks is the same stream.
+      // `displayBlocks` outrank settled content while an opaque block is open.
       const display = message.displayBlocks
       if (display !== undefined) {
-        return ui.card({ key, head: 'Assistant' }, ...assistantDisplayNodes(display, options), ...truncatedNote)
+        return assistantMessageNode(message, key, options, [...assistantDisplayNodes(display, options), ...truncatedNote])
       }
-      // PR3: the published-visual sidecar is the ONLY source of an Assistant
-      // figure. `displayBlocks` outranks it above (an open opaque block is not
-      // a settled final body); a row without a sidecar publication keeps its
-      // previous image/flat body exactly.
       const presentation = assistantVisualPresentation(message)
       if (presentation !== undefined && presentation.publications.length > 0) {
-        return ui.card(
-          { key, head: 'Assistant' },
-          ...assistantPublishedVisualNodes(
-            {
-              text: message.text,
-              ...(message.content === undefined ? {} : { content: message.content }),
-            },
-            presentation.publications,
-            {
-              chartKindsSupported: options.chartKindsSupported === true,
-              nativeImagesSupported: options.nativeImagesSupported === true,
-              ...(options.selectedVisual === undefined ? {} : { selected: options.selectedVisual }),
-              ...(options.requestPublishedSvgBlob === undefined ? {} : { requestPublishedSvgBlob: options.requestPublishedSvgBlob }),
-              // A reasoning/tool-call block has no Assistant body and must not
-              // interrupt the Markdown run; every other non-text block keeps the
-              // mapper's existing block renderer (image/file/opaque fallback).
-              nonText: (block, blockIndex) => block.type === 'text'
-                || block.type === 'reasoning'
-                || block.type === 'tool-call'
-                ? undefined
-                : bodyBlockNodes(block, blockIndex, options),
-            },
-          ),
-          ...truncatedNote,
+        const body = assistantPublishedVisualNodes(
+          {
+            text: message.text,
+            ...(message.content === undefined ? {} : { content: message.content }),
+          },
+          presentation.publications,
+          {
+            chartKindsSupported: options.chartKindsSupported === true,
+            nativeImagesSupported: options.nativeImagesSupported === true,
+            ...(options.selectedVisual === undefined ? {} : { selected: options.selectedVisual }),
+            ...(options.requestPublishedSvgBlob === undefined ? {} : { requestPublishedSvgBlob: options.requestPublishedSvgBlob }),
+            nonText: (block, blockIndex) => block.type === 'text'
+              || block.type === 'reasoning'
+              || block.type === 'tool-call'
+              ? undefined
+              : bodyBlockNodes(block, blockIndex, options),
+          },
         )
+        return assistantMessageNode(message, key, options, [...body, ...truncatedNote])
       }
       if (message.content !== undefined && bodyHasImage(message.content)) {
-        return ui.card({ key, head: 'Assistant' }, ...bodyContentNodes(message.content, options), ...truncatedNote)
+        return assistantMessageNode(message, key, options, [...bodyContentNodes(message.content, options), ...truncatedNote])
       }
-      return ui.card({ key, head: 'Assistant' }, ui.md({ key: 'body', text: sanitizeDisplayText(message.text) }), ...truncatedNote)
+      return assistantMessageNode(message, key, options, [
+        ui.md({ key: 'body', text: sanitizeDisplayText(message.text) }),
+        ...truncatedNote,
+      ])
     }
     case 'thinking':
       return thinkingNode(message, key, options)
@@ -1434,7 +1488,7 @@ function fullView(
     }
     if (block === trailing) for (const preview of adopted) rows.push(preparingRow(preview, options.cwd, prefix))
   }
-  return ui.col({ key: 'transcript' }, ...rows, ...standalone)
+  return ui.col({ key: 'transcript', gap: 'none' }, ...rows, ...standalone)
 }
 
 /** The Work owner of one projected member, from its canonical containerPath
@@ -1652,7 +1706,7 @@ function focusView(
     )
   })
   return ui.col(
-    { key: 'transcript' },
+    { key: 'transcript', gap: 'none' },
     ...materialized,
     ...standalonePreparing.map(preview => preparingRow(preview, options.cwd, prefix)),
   )
@@ -1891,7 +1945,7 @@ function compactView(
     slot.members.push(messageNode(block.message, keys.keyFor(block.message), options))
   }
   return ui.col(
-    { key: 'transcript' },
+    { key: 'transcript', gap: 'none' },
     ...rows.map(row => 'key' in row
       ? ui.section({ key: row.key, head: row.head, collapsible: true, collapsed: !row.expanded }, ...row.members, ...row.preparing)
       : row),
@@ -1937,7 +1991,7 @@ export function transcriptView(
     for (const preview of group) standalone.push(preparingRow(preview, options.cwd, prefix))
   }
   return ui.col(
-    { key: 'transcript' },
+    { key: 'transcript', gap: 'none' },
     ...structure.map(block => {
       switch (block.kind) {
         case 'message':
@@ -1950,6 +2004,39 @@ export function transcriptView(
     }),
     ...standalone,
   )
+}
+
+function settledFinalAssistantStats(
+  messages: readonly TranscriptMessage[],
+  activities: ReadonlyMap<number, TurnActivity> | undefined,
+): ReadonlyMap<Extract<TranscriptMessage, { kind: 'assistant' }>, readonly string[]> {
+  if (activities === undefined) return EMPTY_ASSISTANT_STATS
+  const rowsByTurn = new Map<number, TranscriptMessage[]>()
+  for (const message of messages) {
+    if (!('turn' in message)) continue
+    const rows = rowsByTurn.get(message.turn)
+    if (rows === undefined) rowsByTurn.set(message.turn, [message])
+    else rows.push(message)
+  }
+
+  const result = new Map<Extract<TranscriptMessage, { kind: 'assistant' }>, readonly string[]>()
+  for (const [turn, rows] of rowsByTurn) {
+    const activity = activities.get(turn)
+    const eligible = eligibleFinalAssistant(activity, rows)
+    if (activity === undefined || eligible === undefined) continue
+    const parts: string[] = []
+    if (Number.isFinite(activity.startedAt) && Number.isFinite(activity.endedAt)
+      && activity.startedAt !== undefined && activity.endedAt !== undefined
+      && activity.endedAt >= activity.startedAt) {
+      const duration = formatCompactDuration(activity.endedAt - activity.startedAt)
+      if (duration !== undefined) parts.push(`Took ${duration === '0s' ? '<1s' : duration}`)
+    }
+    if (activity.usage !== undefined && activity.totalTokens !== undefined) {
+      parts.push(`${formatTokens(activity.totalTokens)} tok`)
+    }
+    if (parts.length > 0) result.set(eligible.message, parts)
+  }
+  return result
 }
 
 /**
@@ -1971,6 +2058,10 @@ export function transcriptViewForPreset(
   for (const message of messages) keys.keyFor(message)
   const structure = projectTranscriptStructure(messages)
   const prefix = options.scopePrefix ?? ''
+  const transcriptStats = options.preset === 'focus'
+    ? EMPTY_ASSISTANT_STATS
+    : settledFinalAssistantStats(messages, options.turnActivities)
+  const renderOptions: TranscriptPresetViewOptions = { ...options, transcriptStats }
   const groups = groupPreparingPreviews(options.preparingPreviews ?? [])
   const trailing = structure.length === 0 ? undefined : structure[structure.length - 1]
   const openTurn = trailing?.kind === 'work' ? trailing.span.turn : undefined
@@ -1983,7 +2074,7 @@ export function transcriptViewForPreset(
     }
     for (const preview of group) standalone.push(preparingRow(preview, options.cwd, prefix))
   }
-  if (options.preset === 'full') return fullView(structure, keys, options, prefix, trailing, adopted, standalone)
+  if (options.preset === 'full') return fullView(structure, keys, renderOptions, prefix, trailing, adopted, standalone)
   if (options.preset === 'compact') {
     const blocks = projectCompact(messages, {
       expandedWorkOwners: options.expandedWorkOwners ?? EMPTY_MESSAGE_SET,
@@ -2001,7 +2092,7 @@ export function transcriptViewForPreset(
     // other turn already failed open as standalone rows above. The adopted rows
     // belong to the projected TAIL Work alone — a turn key is not an owner.
     return compactView(
-      blocks, keys, options, prefix,
+      blocks, keys, renderOptions, prefix,
       tailWork?.span.owner,
       adopted, workLifetimes, standalone,
     )
@@ -2018,7 +2109,7 @@ export function transcriptViewForPreset(
     return focusView(
       focusBlocks,
       keys,
-      options,
+      renderOptions,
       prefix,
       preparing.byRootOwner,
       preparing.byWorkOwner,
@@ -2026,7 +2117,7 @@ export function transcriptViewForPreset(
       workLifetimes,
     )
   }
-  return transcriptView(structure, keys, options)
+  return transcriptView(structure, keys, renderOptions)
 }
 
 /** A read-only empty disclosure set for this projection call (no search reveal
@@ -2034,3 +2125,4 @@ export function transcriptViewForPreset(
 const EMPTY_MESSAGE_SET: ReadonlySet<TranscriptMessage> = new Set<TranscriptMessage>()
 const EMPTY_TURN_SET: ReadonlySet<number> = new Set<number>()
 const EMPTY_TURN_ACTIVITIES: ReadonlyMap<number, TurnActivity> = new Map<number, TurnActivity>()
+const EMPTY_ASSISTANT_STATS: ReadonlyMap<Extract<TranscriptMessage, { kind: 'assistant' }>, readonly string[]> = new Map()

@@ -104,7 +104,7 @@ const HELLO = {
   v: 1,
   term: 'tern',
   ver: '0.6.2',
-  kinds: ['col', 'card', 'section', 'md', 'code', 'badge', 'tool'],
+  kinds: ['col', 'card', 'section', 'md', 'code', 'badge', 'tool', 'message', 'button'],
   features: ['flow', 'styles'],
   apc: 65536,
   credits: 2,
@@ -267,6 +267,8 @@ async function mountTspHarness(options: {
   openModelPicker?: (entry: 'models' | 'effort') => void
   /** PR-E (TSP-7): the composition's late-bound Permission UI seam. */
   permissionUi?: { options(): readonly string[]; select(id: string): void }
+  /** Observe the same injected Client-local copy capability used by the renderer. */
+  copyVisual?: (text: string) => Promise<boolean>
   /** TSP I-A: the ONE application submit entry the real `pendingInputBinding`
    *  forwards to (default: inert, exactly what every existing case assumes). */
   onSubmit?: (text: string, request: ComposerSubmitRequest, scopeToken?: number) => void
@@ -378,9 +380,10 @@ async function mountTspHarness(options: {
   // PR-C (TSP-7): the handlers `bindRendererInput` delivered, so a case can
   // drive the renderer's own input contract (the button click path's handler).
   let boundHandlers: Parameters<TspRenderer['bindInput']>[0] | undefined
+  const copyVisual = options.copyVisual ?? (async () => false)
   const renderer: SurfaceRendererMount = {
     mount: (binding, statusReader) => {
-      mountedRenderer = mountTspRenderer(session, { copyVisual: async () => false,
+      mountedRenderer = mountTspRenderer(session, { copyVisual,
         requestExit: () => {
           exitCount += 1
           options.requestExit?.()
@@ -436,7 +439,7 @@ async function mountTspHarness(options: {
     sessionCwd: () => '/tmp',
     captureHistoryScope: () => ({ sessionId: SESSION_ID, isCurrent: () => true }),
     onTerminalResize: () => {},
-    copySelection: async () => false,
+    copySelection: copyVisual,
     deliveredFiles: { snapshot: () => undefined, isCurrent: () => false },
     openExternalUrl: () => {},
     readClipboardText: async () => undefined,
@@ -2290,6 +2293,99 @@ const nodeText = (node: ModeWireNode): string => {
   return parts.join(' ')
 }
 
+test('current User and Assistant native Copy actions use the same injected clipboard sink once each', async () => {
+  const copied: string[] = []
+  const harness = await mountTspHarness({
+    displayState: { preset: 'full' },
+    copyVisual: async text => { copied.push(text); return true },
+  })
+  try {
+    harness.surface.bindRendererInput()
+    harness.route(ev('turn/start', { turn: 1 }, 0))
+    harness.route(userMessage(1, 'question  with raw spacing\n'))
+    harness.route(assistantMessage(2, 'answer-1', 'answer  bytes\n'))
+    harness.route(ev('turn/end', { turn: 1, reason: { kind: 'completed' } }, 3))
+    harness.surface.paintNow()
+    await awaitWireFact(() => mountedNodes(harness).some(node => node.k === 'message'), 'the native User message')
+
+    const user = mountedNodes(harness).find(node => node.k === 'message' && node.p['role'] === 'dsh.transcript.user')
+    const userAction = (user?.p['actions'] as Array<{ readonly act?: string }> | undefined)?.find(action => action.act === 'dsh-transcript-copy')
+    assert.ok(user && userAction, 'the actual wire message carries the custom action')
+    const sf = harness.tern.frames.at(-1)!.sf
+    harnessFreeInput(harness.tern, { ev: 'action', sf, id: user.id, act: userAction.act, raw: {} })
+    await awaitWireFact(() => copied.length === 1, 'the User Copy sink call')
+    assert.equal(copied[0], 'question  with raw spacing\n')
+
+    const button = mountedNodes(harness).find(node => node.k === 'button' && node.p['role'] === 'dsh.transcript.copy')
+    assert.ok(button, 'the Assistant footer has a real native button node')
+    assert.deepEqual(button.p['actions'], { click: 'dsh-transcript-copy' })
+    harnessFreeInput(harness.tern, {
+      ev: 'action', sf: harness.tern.frames.at(-1)!.sf, id: button.id, act: 'dsh-transcript-copy', raw: {},
+    })
+    await awaitWireFact(() => copied.length === 2, 'the Assistant Copy sink call')
+    assert.equal(copied[1], 'answer  bytes\n')
+    assert.equal(copied.length, 2, 'one real SDK action invokes exactly one injected clipboard callback')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('a modal-covered or retired transcript Copy node performs no clipboard write', async () => {
+  const copied: string[] = []
+  const harness = await mountTspHarness({
+    displayState: { preset: 'full' },
+    copyVisual: async text => { copied.push(text); return true },
+  })
+  try {
+    harness.surface.bindRendererInput()
+    harness.route(ev('turn/start', { turn: 1 }, 0))
+    harness.route(userMessage(1, 'subject A prompt'))
+    harness.surface.paintNow()
+    await awaitWireFact(() => mountedNodes(harness).some(node => node.p['role'] === 'dsh.transcript.user'), 'subject A Copy node')
+    const oldUser = mountedNodes(harness).find(node => node.p['role'] === 'dsh.transcript.user')!
+    const pending = harness.renderer().interaction.askQuestions([{ id: 'copy-modal', question: 'Continue?' }], undefined, undefined, false)
+    pending.catch(() => {})
+    await awaitWireFact(() => harness.tern.output.text().includes('Continue?'), 'the real Question seat')
+    harnessFreeInput(harness.tern, {
+      ev: 'action', sf: harness.tern.frames.at(-1)!.sf, id: oldUser.id, act: 'dsh-transcript-copy', raw: {},
+    })
+    await settle()
+    assert.equal(copied.length, 0, 'a Question modal blocks the underlying action')
+    harness.renderer().interaction.withdrawPending()
+    await pending.catch(() => {})
+
+    harness.surface.display.beginSessionHydration()
+    await settle()
+    harnessFreeInput(harness.tern, {
+      ev: 'action', sf: harness.tern.frames.at(-1)!.sf, id: oldUser.id, act: 'dsh-transcript-copy', raw: {},
+    })
+    await settle()
+    assert.equal(copied.length, 0, 'hydration rejects the retired frame node')
+
+    harness.replaceMain()
+    harness.route(ev('turn/start', { turn: 1 }, 0))
+    harness.route(userMessage(1, 'subject B prompt'))
+    harness.surface.paintNow()
+    await awaitWireFact(() => mountedNodes(harness).some(node => nodeText(node).includes('subject B prompt')), 'subject B frame')
+    const newUser = mountedNodes(harness).find(node => node.p['role'] === 'dsh.transcript.user')!
+    assert.notEqual(newUser.id, oldUser.id, 'a new source receives a distinct node namespace')
+    harnessFreeInput(harness.tern, {
+      ev: 'action', sf: harness.tern.frames.at(-1)!.sf, id: oldUser.id, act: 'dsh-transcript-copy', raw: {},
+    })
+    await settle()
+    assert.equal(copied.length, 0, 'an old source node id cannot copy subject B')
+    harnessFreeInput(harness.tern, {
+      ev: 'action', sf: harness.tern.frames.at(-1)!.sf, id: newUser.id, act: 'dsh-transcript-copy', raw: {},
+    })
+    await awaitWireFact(() => copied.length === 1, 'subject B current Copy action')
+    assert.equal(copied[0], 'subject B prompt')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
 test('inner Thinking, Context and Tool toggles use the exact current node owner and respect covered or retired seats', async () => {
   const harness = await mountTspHarness({ displayState: { preset: 'full' }, nativeImages: true })
   try {
@@ -3203,8 +3299,10 @@ test('an unsettled streamed Assistant remains visible inside an expanded Focus r
     const root = mountedSections(harness).find(node => node.id.includes('focus-'))!
     const sf = harness.tern.frames.at(-1)!.sf
     harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: root.id, collapsed: false, raw: {} })
-    await awaitWireFact(() => mountedNodes(harness).some(node => node.k === 'card' && nodeText(node).includes('LIVE-ANSWER-CHUNK')),
-      'the unsettled Assistant candidate is painted as live process content inside the expanded Root')
+    await awaitWireFact(() => mountedNodes(harness).some(node => node.k === 'col'
+      && node.p['role'] === 'dsh.transcript.assistant'
+      && nodeText(node).includes('LIVE-ANSWER-CHUNK')),
+    'the unsettled Assistant candidate is painted as native content inside the expanded Root')
     assert.ok(mountedSections(harness).find(node => node.id === root.id)?.p['collapsed'] === false,
       'the same Focus root owns the live candidate')
   } finally {
