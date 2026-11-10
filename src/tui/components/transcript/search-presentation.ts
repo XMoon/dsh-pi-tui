@@ -127,6 +127,14 @@ export interface RenderedSearchSelection {
    * Host Assistant Markdown card); it expires with the selection and is never
    * persisted or used as match identity. */
   readonly exactPaintedSegments?: readonly AltScreenSearchSegment[]
+  /** Why the CURRENT Full target has no exact cells, when it has none:
+   * `not-painted` means the source text itself has no visible cell here (a
+   * hidden link destination, a consumed Visual marker); `unproven` means the
+   * current renderer cannot prove the position (transformed glyphs, composite
+   * or plugin owner, collapsed body, reflow). Disposable presentation metadata
+   * for one render epoch: never an input to matching, span proof or a cache
+   * key, and always absent on an `exact` selection. */
+  readonly sourceDisposition?: 'not-painted' | 'unproven'
   /** Best-effort viewport geometry; never semantic occurrence proof. */
   readonly scrollRange?: RenderedSearchScrollRange
 }

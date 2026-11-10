@@ -141,6 +141,85 @@ test('rendered View indexes the currently painted User, Thinking, Tool and Conte
   }
 })
 
+test('rendered View: an occurrence under the Search box moves out, while a left-side one stays', async () => {
+  const fillerMessages = (count: number, from: number): TranscriptMessage[] =>
+    Array.from({ length: count }, (_, index) => ({
+      kind: 'user' as const,
+      turn: from + index,
+      text: `alpha ${from + index}\nbeta ${from + index}`,
+    }))
+  const internals = (app: TuiApp): {
+    searchOverlay?: { getBounds(): { row: number; col: number; width: number; height: number } | undefined }
+    fullscreen?: { getPaintedBox(component: unknown): { x: number; y: number; width: number; height: number } | undefined }
+    fullscreenScroll?: { scrollTop: number; scrollTo(top: number, options?: object): void }
+  } => app as unknown as never
+
+  for (const [line, scrolls] of [
+    [`${'x'.repeat(60)} needle target`, true],
+    ['needle left of the box', false],
+  ] as const) {
+    const { vt, app } = startApp(80, 24)
+    try {
+      app.setFullscreen(true)
+      // Multiple SHORT messages (a long single message would be compacted and
+      // its hidden rows would never be View candidates).
+      app.setTranscript([
+        ...fillerMessages(20, 0),
+        { kind: 'user', turn: 20, text: line },
+        ...fillerMessages(20, 21),
+      ])
+      await vt.waitForRender()
+      app.startTranscriptSearch('view')
+      await vt.waitForRender()
+      assert.deepEqual(app.setRenderedViewSearchQuery('needle'), { currentIndex: 0, count: 1 },
+        'the mounted rendered occurrence is the View authority')
+      await vt.waitForRender()
+      const bounds = internals(app).searchOverlay?.getBounds()
+      assert.ok(bounds !== undefined, 'the View Search overlay is painted')
+      const viewport = internals(app).fullscreen?.getPaintedBox(internals(app).fullscreenScroll)
+      assert.ok(viewport !== undefined, 'the transcript ScrollView is painted')
+      const scroll = internals(app).fullscreenScroll
+      assert.ok(scroll !== undefined)
+
+      const beforeCell = strongOccurrences(vt, vt.getViewport(), 'needle')
+      assert.equal(beforeCell.length, 1, 'exactly one current View occurrence is strong')
+      const boxRow = Math.min(bounds.row + 1, bounds.row + bounds.height - 1)
+      scroll.scrollTo(scroll.scrollTop + beforeCell[0]!.row - boxRow, { disableFollow: true })
+      await vt.waitForRender()
+      const before = scroll.scrollTop
+      if (scrolls) {
+        // The box covers the cell, so the covered frame cannot paint it.
+        assert.equal(strongOccurrences(vt, vt.getViewport(), 'needle').length, 0,
+          'precondition: the box hides the covered View occurrence')
+      } else {
+        const leftCells = strongOccurrences(vt, vt.getViewport(), 'needle')
+        assert.equal(leftCells.length, 1, 'precondition: the left-side View occurrence stays visible')
+        assert.equal(leftCells[0]!.row, boxRow)
+        assert.ok(leftCells[0]!.column < bounds.col, 'precondition: the cell is painted left of the box')
+      }
+      app.scrollToSearchTarget()
+      await vt.waitForRender()
+      if (scrolls) {
+        assert.notEqual(scroll.scrollTop, before, 'a covered View occurrence moves the viewport')
+        const moved = strongOccurrences(vt, vt.getViewport(), 'needle')
+        assert.equal(moved.length, 1, 'the moved View occurrence is painted after the jump')
+        assert.equal(moved[0]!.row, bounds.row + bounds.height, 'it lands just below the box')
+        assert.ok(!(moved[0]!.row >= bounds.row && moved[0]!.row < bounds.row + bounds.height
+          && moved[0]!.column >= bounds.col && moved[0]!.column < bounds.col + bounds.width),
+        'the moved View cell no longer intersects the box')
+        assert.ok(moved[0]!.row >= viewport.y && moved[0]!.row < viewport.y + viewport.height,
+          'the moved View cell is inside the painted viewport')
+      } else {
+        assert.equal(scroll.scrollTop, before, 'a readable left-side View occurrence never jitters')
+        assert.equal(strongOccurrences(vt, vt.getViewport(), 'needle')[0]!.row, boxRow)
+      }
+    } finally {
+      app.dispose()
+      startedApps.delete(app)
+    }
+  }
+})
+
 test('rendered View searches text emitted by the mounted plugin renderer', async () => {
   const { RendererRegistry } = await import('../../src/extension/internal/renderer-registry.ts')
   const registry = new RendererRegistry()

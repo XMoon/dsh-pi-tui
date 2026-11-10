@@ -541,7 +541,9 @@ Settings and Plugins pages that TSP cannot host are refused explicitly.
 | `Ctrl+S`      | Steer queued messages and the draft into the running turn |
 | `Ctrl+T`      | Toggle the todo panel                               |
 | `Ctrl+R`      | Search input history                                |
-| `Ctrl+F`      | Search Transcript                                   |
+| `Ctrl+F`      | Find in the **mounted rendered** Transcript (View)  |
+| `Ctrl+Shift+F` | Find in the whole Session (Full, includes invisible source, reports `Source-only`) |
+| `Tab` in Find | Switch View / Full and keep the same query           |
 | `Ctrl+End`    | Jump to the latest Transcript output in fullscreen; a clickable `↓ Latest` appears after leaving the live tail |
 | `Ctrl+O`      | Expand / collapse Tool and System details and long user prompts in regular/fullscreen-non-Focus; in fullscreen Focus, bulk-toggle the Thought roots (expand long user prompts by clicking the marker) |
 | `Alt+T`       | Expand / collapse Thinking                          |
@@ -554,6 +556,17 @@ Settings and Plugins pages that TSP cannot host are refused explicitly.
 | `@`           | File completion                                     |
 | `!`           | Enter Shell mode                                    |
 | `!!`          | Enter Session-excluded Shell mode                   |
+
+There is ONE Find box: `Ctrl+F` opens View (only the currently mounted rendered rows
+count; hidden links, folded rows and off-window history are not View hits), and
+`Ctrl+Shift+F` opens Full (semantic search over the current Session, with its own
+independent `N/M`). A Full hit may live in a hidden link destination, a consumed
+Visual marker or a position the current renderer cannot prove: the fourth row then
+says `Source-only · no visible cell` or `Source-only · position unverified`, and a
+safe snippet is only attached for Host-owned single-text User/Thinking source. A
+target hidden behind the top-right Find box is moved out from under it; an
+already-visible hit is never needlessly re-centred. Opening Find from Regular mode
+borrows the fullscreen Transcript for the search and returns afterwards.
 
 Use `/help` inside the TUI for the current command and keybinding list. The table above shows the defaults; after customization, `/help` and `/keybindings` show the effective keys.
 

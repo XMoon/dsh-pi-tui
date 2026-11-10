@@ -163,6 +163,7 @@ interface RunnerSearchSelection {
   readonly selectedIndex: number
   readonly selectedRow?: number
   readonly exact: boolean
+  readonly sourceDisposition?: 'not-painted' | 'unproven'
   readonly exactPaintedSegments?: ReadonlyArray<{ readonly row: number; readonly startCol: number; readonly endCol: number }>
   readonly matches?: ReadonlyArray<{ readonly segments: ReadonlyArray<{ readonly row: number }> }>
 }
@@ -803,10 +804,12 @@ test('runner search: a real User hit proves both occurrences at their painted ce
   lines = vt.getViewport()
   row = lines.findIndex(line => line.includes('needle second hit'))
   assert.ok(row >= 0, `the second painted target is visible:\n${lines.join('\n')}`)
-  assert.ok(!lines.some(line => line.includes('needle first hit')),
-    'the first occurrence is not the second destination')
-  assert.notEqual(app.fullscreenScrollForTest()?.scrollTop ?? 0, firstScrollTop,
-    'Next moves the viewport to the second proven row')
+  // The second proven row is already readable and uncovered, so Next must not
+  // jitter the viewport: the sibling occurrence above legitimately stays
+  // visible (the old "first is gone" expectation encoded a re-centering jump,
+  // never a product requirement).
+  assert.equal(app.fullscreenScrollForTest()?.scrollTop ?? 0, firstScrollTop,
+    'an already-readable next occurrence keeps the viewport')
   assert.equal(vt.getCellBgRgb(row, columnOf(lines[row]!, 'needle')), STRONG_BG,
     'the second occurrence owns its real painted cell')
 
@@ -1295,6 +1298,15 @@ test('runner search: Full proves visible Assistant Markdown cells and keeps a hi
   selection = mountedSearchSelection(app, target!.message!)
   assert.equal(selection?.exact, false)
   assert.equal(selection?.exactPaintedSegments, undefined)
+  assert.equal(selection?.sourceDisposition, 'not-painted', 'F1 NOT_PAINTED owns the source disposition')
+  const hiddenNotice = app.currentFullSearchNotice()
+  assert.deepEqual(hiddenNotice, { kind: 'not-painted', sourceLabel: 'Assistant text' },
+    'a hidden link target is honest Source-only metadata, never a visible homonym')
+  const frameAfterHidden = vt.getViewport().map(stripTerminalSequences)
+  assert.ok(frameAfterHidden.some(line => line.includes('Source-only') && line.includes('no visible cell')),
+    `the Search box paints the not-painted Source-only row:\n${frameAfterHidden.join('\n')}`)
+  assert.ok(!frameAfterHidden.some(line => line.includes('https://example.invalid')),
+    'the hidden href never leaks into the notice')
 
   // Enter -> the visible body occurrence.
   fixture.input('\r')
@@ -1308,6 +1320,10 @@ test('runner search: Full proves visible Assistant Markdown cells and keeps a hi
   selection = mountedSearchSelection(app, target!.message!)
   assert.equal(selection?.exact, true)
   assert.ok((selection?.exactPaintedSegments?.length ?? 0) > 0)
+  assert.equal(selection?.sourceDisposition, undefined, 'an exact selection carries no Source-only state')
+  assert.equal(app.currentFullSearchNotice(), undefined, 'an exact hit never shows the Source-only row')
+  assert.ok(!vt.getViewport().map(stripTerminalSequences).some(line => line.includes('Source-only')),
+    'the Search box returns to its three-row form for an exact target')
   assert.equal(fixture.projections.count(), 0, 'same-card Full Next never re-windows the transcript')
 
   // Enter -> the cross-card result (a second off-window jump forward).
@@ -1340,6 +1356,9 @@ test('runner search: Full proves visible Assistant Markdown cells and keeps a hi
   await fixture.settleRender()
   assert.equal(app.transcriptSearchPresentationForTest(), undefined, 'the Full target is retired before View returns')
   assert.equal(anyExactSelection(app), false, 'the old Full source-cell proof never survives the scope switch')
+  assert.equal(app.currentFullSearchNotice(), undefined, 'the View scope retires the Full Source-only notice')
+  assert.ok(!vt.getViewport().map(stripTerminalSequences).some(line => line.includes('Source-only')),
+    'the previous scope never leaves its Source-only row painted')
   assert.ok((app.renderedViewSearchStatus()?.count ?? 0) >= 1,
     'View returns to its own mounted rendered occurrence authority')
 })

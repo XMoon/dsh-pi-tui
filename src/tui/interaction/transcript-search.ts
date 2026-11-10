@@ -1,4 +1,4 @@
-import { Input, dispatchMouseEvent, visibleWidth } from '@xmoon76/pi-tui'
+import { Input, dispatchMouseEvent, truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
 import type { Component, Focusable, TuiMouseDispatchResult, TuiMouseEvent } from '@xmoon76/pi-tui'
 import { color } from '../../tui/theme/runtime.ts'
 
@@ -6,6 +6,20 @@ import { componentKeymap } from '../keybindings/component-keymap.ts'
 import { formatKeyId } from '../keybindings/hints.ts'
 
 export type TranscriptSearchScope = 'view' | 'full'
+
+/** The honest status of the CURRENT Full target when its exact painted cells
+ * cannot be shown. `not-painted` means the matched source text has no visible
+ * cell (a hidden link destination, a consumed Visual marker); `unproven` means
+ * the current renderer cannot prove where the match is painted. The two are
+ * never interchangeable: only `not-painted` may say the cell is absent. */
+export interface FullSearchSourceNotice {
+  readonly kind: 'not-painted' | 'unproven'
+  /** The semantic source kind of the target, never a user string. */
+  readonly sourceLabel: string
+  /** Optional display-safe context around the source hit. Only a Host-owned,
+   * single-text, non-URL User/Thinking source may provide one. */
+  readonly snippet?: string
+}
 
 export type TranscriptSearchCoverage =
   | 'entire-session'
@@ -52,6 +66,8 @@ export class TranscriptSearchComponent implements Component, Focusable {
   private readonly readViewResult: () => ViewSearchResult | undefined
   private readonly readTemporaryReader: () => boolean
   private readonly readCoverage: () => TranscriptSearchCoverage
+  private readonly readSourceNotice: () => FullSearchSourceNotice | undefined
+  private readonly readTerminalRows: () => number
   private resultCount = 0
   /** Full results arrive 1-based; 0/0 means no current result. */
   private resultIndex = 0
@@ -69,6 +85,8 @@ export class TranscriptSearchComponent implements Component, Focusable {
     readonly readViewResult: () => ViewSearchResult | undefined
     readonly readTemporaryReader: () => boolean
     readonly readCoverage: () => TranscriptSearchCoverage
+    readonly readSourceNotice: () => FullSearchSourceNotice | undefined
+    readonly readTerminalRows: () => number
     readonly initialScope: TranscriptSearchScope
   }) {
     this.onQueryChange = options.onQueryChange
@@ -76,6 +94,8 @@ export class TranscriptSearchComponent implements Component, Focusable {
     this.readViewResult = options.readViewResult
     this.readTemporaryReader = options.readTemporaryReader
     this.readCoverage = options.readCoverage
+    this.readSourceNotice = options.readSourceNotice
+    this.readTerminalRows = options.readTerminalRows
     this.scope = options.initialScope
   }
 
@@ -191,7 +211,58 @@ export class TranscriptSearchComponent implements Component, Focusable {
       this.pressedScope = undefined
     }
     const hint = color.textDim(this.renderHint(safeWidth))
-    return [title, ...this.input.render(safeWidth), hint]
+    const notice = this.scope === 'full' ? this.readSourceNotice() : undefined
+    if (notice === undefined) return [title, ...this.input.render(safeWidth), hint]
+    // A short terminal keeps the ORIGINAL three rows: the Source-only fact then
+    // replaces the hint row instead of costing the transcript one more row.
+    if (this.readTerminalRows() <= 10) {
+      return [title, ...this.input.render(safeWidth), color.textMuted(this.renderCompactSourceNotice(safeWidth, notice))]
+    }
+    return [title, ...this.input.render(safeWidth), hint, color.textMuted(this.renderSourceNotice(safeWidth, notice))]
+  }
+
+  /** Full inexact target, four-row layout: `Source-only · <status> · <label>`
+   * plus an optional display-safe snippet. Wider information is dropped first,
+   * never partially truncated. */
+  private renderSourceNotice(width: number, notice: FullSearchSourceNotice): string {
+    const long = notice.kind === 'not-painted' ? 'no visible cell' : 'position unverified'
+    const short = notice.kind === 'not-painted' ? 'not painted' : 'unverified'
+    const assemble = (status: string, withLabel: boolean, withSnippet: boolean): string => {
+      const parts = ['Source-only', status]
+      if (withLabel) parts.push(notice.sourceLabel)
+      if (withSnippet && notice.snippet !== undefined) parts.push(notice.snippet)
+      return parts.join(' · ')
+    }
+    let text = assemble(long, true, true)
+    if (visibleWidth(text) > width) text = assemble(long, true, false)
+    if (visibleWidth(text) > width) text = assemble(long, false, false)
+    if (visibleWidth(text) > width) text = assemble(short, false, false)
+    return truncateToWidth(text, Math.max(1, width), '')
+  }
+
+  /** Full inexact target, short terminal: `Source-only · <status> · <coverage>
+   * · <effective close key>`, degrading to whole-segment drops only. The
+   * Source-only fact, the real loaded-history truth and the close key are
+   * never dropped. */
+  private renderCompactSourceNotice(width: number, notice: FullSearchSourceNotice): string {
+    const status = notice.kind === 'not-painted' ? 'No cell' : 'Unverified'
+    const coverage = this.readCoverage()
+    const closeKey = formatKeyId(componentKeymap.keysFor('app.transcript.search.close')[0]!)
+    const coverageText = coverage === 'entire-session'
+      ? 'Entire'
+      : coverage === 'loaded-history' ? 'Loaded' : 'Older not searched'
+    const assemble = (statusText: string | undefined, separator: string, coverageValue: string | undefined): string =>
+      ['Source-only', statusText, coverageValue, closeKey]
+        .filter(part => part !== undefined && part !== '')
+        .join(separator)
+    const safeWidth = Math.max(1, width)
+    let text = assemble(status, ' · ', coverageText)
+    if (visibleWidth(text) > safeWidth) text = assemble(undefined, ' · ', coverageText)
+    if (visibleWidth(text) > safeWidth) text = assemble(undefined, ' ', coverageText)
+    if (visibleWidth(text) > safeWidth) {
+      text = assemble(undefined, ' ', coverage === 'entire-session' ? undefined : 'Loaded')
+    }
+    return truncateToWidth(text, safeWidth, '')
   }
 
   private matchStatus(): string {

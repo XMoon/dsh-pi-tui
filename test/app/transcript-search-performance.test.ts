@@ -208,6 +208,46 @@ test('perf: indexed search reuses the entry across query changes and invalidates
   app.stop()
 })
 
+test('perf: the occlusion correction is one-shot and never runs on a passive frame', async () => {
+  const { vt, app } = startApp()
+  const messages = Array.from({ length: 8 }, (_, index) => userMessage(index, `turn ${index} needle ${'x'.repeat(40)}`))
+  app.setFullscreen(true)
+  app.setTranscript(messages)
+  await vt.waitForRender()
+  app.startTranscriptSearch('full')
+  await vt.waitForRender()
+
+  app.resetSearchPresentationDiagnosticsForTest()
+  app.setTranscriptSearchPresentation({
+    matchMessages: new Set(messages),
+    target: target(messages[3]!, 'needle', 0, { start: 0, end: 6 }),
+    grantReveal: true,
+  })
+  app.scrollToSearchTarget()
+  await vt.waitForRender()
+  await vt.waitForRender()
+  assert.ok(app.searchPresentationDiagnosticsForTest().occlusionCorrections <= 1,
+    'one explicit navigation performs at most one post-paint correction')
+
+  const scroll = (app as unknown as { fullscreenScroll?: { scrollTop: number; scrollTo(top: number, options?: object): void } }).fullscreenScroll
+  assert.ok(scroll !== undefined)
+  app.resetSearchPresentationDiagnosticsForTest()
+  app.requestRender()
+  await vt.waitForRender()
+  scroll.scrollTo(Math.max(0, scroll.scrollTop - 1), { disableFollow: true })
+  await vt.waitForRender()
+  scroll.scrollTo(Math.min(scroll.scrollTop + 2, 100), { disableFollow: true })
+  await vt.waitForRender()
+  app.requestRender()
+  await vt.waitForRender()
+  const passive = app.searchPresentationDiagnosticsForTest()
+  assert.equal(passive.occlusionCorrections, 0, 'a passive repaint/scroll never re-aims the old target')
+  assert.equal(passive.plainTextProofs, 0, 'a scroll-only frame repeats no source-cell probe')
+  assert.equal(passive.markdownProofs, 0, 'a scroll-only frame repeats no Markdown proof')
+  assert.equal(passive.rebuilds, 0, 'a scroll-only frame rebuilds nothing')
+  app.stop()
+})
+
 test('perf: the plain-text proof runs once for the current target, never per frame or per history card', async () => {
   const { vt, app } = startApp()
   const longText = `${'filler '.repeat(1400)}needle ${'tail '.repeat(1000)}`
