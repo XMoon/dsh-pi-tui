@@ -347,6 +347,51 @@ test('a carrier that returns a refusal without consuming or canceling the body s
   assert.ok(source.pulled() < 8, 'the carrier abandoned the body before EOF')
 })
 
+test('a carrier cancel racing the upload failure shares one close completion before the refusal settles', async () => {
+  let closed = 0
+  let releaseGate!: () => void
+  const gate = new Promise<void>(resolve => { releaseGate = resolve })
+  const file: PreparedFile = {
+    name: 'racing.bin',
+    byteLength: 64 * 1024,
+    source: {
+      kind: 'client-stream',
+      async *open() {
+        try {
+          yield new Uint8Array(64 * 1024)
+          await gate
+        } finally {
+          closed += 1
+        }
+      },
+    },
+  }
+  let cancelStarted: Promise<void> | undefined
+  const uploader = createRemoteFileReceiptUploader(async (_input, init = {}) => {
+    const reader = (init.body as ReadableStream<Uint8Array>).getReader()
+    const first = await reader.read()
+    assert.equal(first.done, false)
+    // Deliberately NOT awaited: the carrier's cancel runs concurrently with
+    // the upload's own failure-path close.
+    cancelStarted = reader.cancel('early-refusal')
+    return new Response('unauthorized', { status: 401 })
+  })
+  let settled = false
+  const pending = uploader.upload('session-a', file, new AbortController().signal)
+    .finally(() => { settled = true })
+  for (let round = 0; round < 50 && cancelStarted === undefined; round += 1) {
+    await new Promise(resolve => setTimeout(resolve, 2))
+  }
+  assert.ok(cancelStarted !== undefined, 'the carrier really started its own cancel')
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.equal(settled, false,
+    'the refusal must not settle while the in-flight source close is still parked')
+  releaseGate()
+  await assert.rejects(pending)
+  await cancelStarted
+  assert.equal(closed, 1, 'both callers observed the SAME completed close')
+})
+
 test('a real carrier that drops the connection still closes the Client source', async (t) => {
   const server = createServer(request => {
     request.socket.destroy()

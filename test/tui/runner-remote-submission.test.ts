@@ -47,6 +47,10 @@ import { applyRunnerWithRuntime } from '../../src/app/bootstrap.ts'
 import { TRANSITION_FENCE_NOTICE } from '../../src/app/submission/steer.ts'
 import type { RemoteApplicationOverride } from '../../src/app/application-runtime.ts'
 import type { ImageAttachmentRefLike } from '../../src/domain/media/types.ts'
+import type { RemotePromptSerializer } from '../../src/runtime/remote/session-writer-remote.ts'
+import { RemotePromptSerializerProduction } from '../../src/runtime/remote/prompt-serializer-remote.ts'
+import { createRemoteFileReceiptUploader } from '../../src/runtime/remote/file-upload-remote.ts'
+import type { ExperimentalRemoteRuntime } from '../support/m3-inprocess/runtime.ts'
 import { createRemoteApplicationRuntime } from '../support/m3-inprocess/application-runtime.ts'
 import { waitFor } from '../support/remote-application-fixture.ts'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
@@ -144,6 +148,7 @@ async function mountPr3Runner(
     readonly presetId?: string
     readonly resumeSessionId?: string
     readonly host?: HostFixture
+    readonly buildPromptSerializer?: (wire: ExperimentalRemoteRuntime) => RemotePromptSerializer
   } = {},
 ): Promise<Pr3Fixture> {
   const presetId = options.presetId ?? 'm3-4-pr3-preset'
@@ -153,6 +158,8 @@ async function mountPr3Runner(
     hostContext: host.ctx,
     waitForHostPrerequisites: async () => {},
     // NO promptSerializer: the PRODUCTION serializer composes by default.
+    // A qualification wrapper may still decorate that production serializer.
+    ...(options.buildPromptSerializer === undefined ? {} : { buildPromptSerializer: options.buildPromptSerializer }),
     // The runner receives the same startup facts (M3-6 PR1).
     clientUiStartup: {
       ...(options.resumeSessionId === undefined ? {} : { sessionId: options.resumeSessionId }),
@@ -692,35 +699,97 @@ test('mixed file/image prompt: both file receipts and the image keep their sourc
   assert.equal(content[2]?.attachment?.height, 1)
 })
 
-test('surface stop before dispatch: a file prompt makes zero Host prompt and restores the draft', async (t) => {
+test('surface stop after the file upload but before dispatch makes zero prompt and restores the draft', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm6-f4-remote-file-stop'
   const presetId = 'm3-4-pr3-preset'
   const host = await mountHost(life, presetId)
   await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
-  const fixture = await mountPr3Runner(life, { presetId, resumeSessionId: mainId, host })
+  // The qualification wrapper holds the PRODUCTION serializer right AFTER the
+  // official upload returned a receipt and BEFORE the writer's dispatch fence.
+  let uploaded = false
+  let releaseDispatch!: () => void
+  const dispatchGate = new Promise<void>(resolve => { releaseDispatch = resolve })
+  life.defer(releaseDispatch)
+  const fixture = await mountPr3Runner(life, {
+    presetId,
+    resumeSessionId: mainId,
+    host,
+    buildPromptSerializer: (wire: ExperimentalRemoteRuntime): RemotePromptSerializer => {
+      const production = RemotePromptSerializerProduction.overSessions(
+        wire.client.sessions,
+        createRemoteFileReceiptUploader(wire.host.carrier.fetch),
+      )
+      return {
+        preflight: prepared => production.preflight(prepared),
+        async serialize(prepared, signal) {
+          const serialized = await production.serialize(prepared, signal)
+          if (serialized.kind === 'ok') {
+            uploaded = true
+            await dispatchGate
+          }
+          return serialized
+        },
+      }
+    },
+  })
   await waitFor('mount paint', () => fixture.vt.getViewport().join('').length > 0, 10_000)
-  const app = fixture.runnerApp() as unknown as { getDraft(): string; setDraft(text: string): void; submitDraft(): void }
+  const app = fixture.runnerApp() as unknown as {
+    getDraft(): string
+    setDraft(text: string): void
+    submitDraft(): void
+    draftFileStoreForTest?: import('../../src/client/media/attachment/file-draft.ts').DraftFileStore
+  }
+  assert.ok(app.draftFileStoreForTest !== undefined, 'the mounted app exposes its live file draft store')
   const sourceDir = life.tempDir('dsh-f4-stop-')
   const path = join(sourceDir, 'stop.bin')
   writeFileSync(path, Buffer.alloc(32 * 1024, 4))
-  submitDraft(fixture, `/attach ${path}`)
-  await waitFor('the /attach placeholder reaches the composer', () => app.getDraft().includes('[file #'), 15_000)
+  const probe = await probeAttachment(path, sourceDir)
+  assert.equal(probe.kind, 'file')
+  if (probe.kind !== 'file') return
+  const draft = app.draftFileStoreForTest!.add({
+    name: probe.name,
+    byteLength: probe.byteLength,
+    source: { type: 'path', path: probe.path, fingerprint: probe.fingerprint },
+  })
   const marker = 'F4_SURFACE_STOP_20261111'
-  app.setDraft(`${app.getDraft()} ${marker}`)
+  app.setDraft(`${draft.placeholder} ${marker}`)
+  // Count the official SessionFace.prompt on the production Client binding.
+  const binding = fixture.aggregate.wire.client.sessions.binding(SessionId(mainId) as never)
+  assert.ok(binding !== undefined)
+  const prototype = Object.getPrototypeOf(binding.session) as {
+    prompt(...args: unknown[]): unknown
+  }
+  const originalPrompt = prototype.prompt
+  let promptCalls = 0
+  prototype.prompt = function patchedPrompt(this: unknown, ...args: unknown[]) {
+    promptCalls += 1
+    return originalPrompt.apply(this, args)
+  }
+  life.defer(() => { prototype.prompt = originalPrompt })
   const session = host.ctx.sessions.get(SessionId(mainId)) as unknown as {
     snapshotEvents(): Array<{ type: string; data: unknown }>
   }
-  // Close the ONE synchronous surface admission BEFORE the gesture: the write
-  // must be refused before any file upload or prompt dispatch.
+  app.submitDraft()
+  // Handshake: the official Host upload completed and the serializer is parked
+  // before dispatch. Any prompt from here would violate the surface fence.
+  await waitFor('the Host file upload completed before dispatch', () => uploaded, 20_000)
+  assert.equal(promptCalls, 0, 'the prompt is still held after the upload and before dispatch')
+  assert.equal(session.snapshotEvents().filter(event => event.type === 'user/message'
+    && JSON.stringify(event.data).includes(marker)).length, 0,
+  'an uploaded-but-undispatched file is not a Host prompt yet')
   const stopSurfaceAdmission = fixture.aggregate.selected.stopSurfaceAdmission
   assert.ok(stopSurfaceAdmission !== undefined, 'the Remote selection exposes the surface-stop admission')
   stopSurfaceAdmission()
-  app.submitDraft()
-  await waitFor('the stopped-surface draft is restored', () => app.getDraft().includes(marker), 20_000)
+  releaseDispatch()
+  // The submission settles through the writer's post-serialize fence: the
+  // draft returns and the official prompt is never called.
+  await waitFor('the stopped submission restores the draft', () => app.getDraft().includes(marker), 20_000)
+  for (let round = 0; round < 50; round += 1) await Promise.resolve()
+  assert.equal(promptCalls, 0, 'a surface stop after upload dispatches zero prompts')
   assert.equal(session.snapshotEvents().filter(event => event.type === 'user/message'
     && JSON.stringify(event.data).includes(marker)).length, 0,
-  'a stopped surface never dispatches the file prompt')
+  'the stopped surface leaves no durable prompt')
 })
 
 test('multi-file submission: a later source failure sends no prompt and restores both placeholders', async (t) => {
