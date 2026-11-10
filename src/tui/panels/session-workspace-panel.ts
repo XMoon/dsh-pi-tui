@@ -1396,6 +1396,14 @@ export class SessionWorkspacePanel implements Component {
         }
       }
       if (this.statusMessage !== undefined) lines.push(color.textMuted(fit(this.statusMessage, width)))
+      // The app-owned failure notice that led here (a refused first session)
+      // must stay visible INSIDE the path submode; otherwise auto-opening the
+      // chooser would hide the only explanation the user gets.
+      const notice = this.host.notice()
+      if (notice !== undefined && notice.text !== sanitizedPhysicalLine(this.statusMessage ?? '')) {
+        const painted = notice.kind === 'error' ? color.error : color.textMuted
+        lines.push(painted(fit(notice.text, width)))
+      }
       return { lines: lines.slice(0, budget), regions }
     }
     if (!this.workspaces.proven) {

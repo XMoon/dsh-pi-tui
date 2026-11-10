@@ -272,6 +272,9 @@ export interface DirectTspFixture {
     readonly outcome: WriteOutcome
   }) => void): { readonly calls: () => number; readonly detach: () => void }
   settle(): Promise<void>
+  /** Release the parked mount Workspace preflight (only with
+   *  `holdWorkspacePreflight`). */
+  readonly releaseWorkspacePreflight?: () => void
 }
 
 /** Wait a fixed slice so the renderer/application frames can settle. */
@@ -334,6 +337,10 @@ export interface DirectTspFixtureOptions {
   /** A narrow, test-only observation barrier before one sequence index; when
    *  supplied the callback owns the release/abort race for that model step. */
   readonly holdScriptedToolStep?: (stepIndex: number, signal?: AbortSignal) => Promise<void>
+  /** TEST-ONLY race hook: register one official Workspace at `anchorDir`
+   *  before the TUI mounts, then park the NEXT `workspace.create` until the
+   *  caller releases it (the sessionless mount preflight). */
+  readonly holdWorkspacePreflight?: boolean
   /** Hold one native tool-call argument stream before its authoritative block end. */
   readonly holdScriptedToolCallArguments?: (stepIndex: number, signal?: AbortSignal) => Promise<void>
   /** Extra TUI plugin config (e.g. `{ busyEnter: 'steer' }`) — the SAME
@@ -544,6 +551,7 @@ export async function createDirectTspFixture(
   /** Disposers of the pre-boot genuine Host commands (see the interface). */
   const hostCommandDisposers: Array<() => void> = []
   let persistenceFiber: Fiber | undefined
+  let releaseWorkspacePreflight: (() => void) | undefined
   let settlement: Promise<void> | undefined
   const settle = (): Promise<void> => {
     settlement ??= (async () => {
@@ -640,6 +648,24 @@ export async function createDirectTspFixture(
   await ctx.plugin(StorageJson, { root: join(workRoot, 'storages') })
   await ctx.plugin(StorageDomain, { backend: 'json' })
   await ctx.plugin(WorkspaceRegistry)
+  if (options.holdWorkspacePreflight === true) {
+    const registry = ctx.get('workspaceRegistry') as unknown as { create(path: string): Promise<unknown> }
+    // The official Folder exists BEFORE the gate so the Browser has something
+    // to select while the mount preflight is still parked.
+    await registry.create(anchorDir)
+    let release!: () => void
+    const parked = new Promise<void>(resolve => { release = resolve })
+    const originalCreate = registry.create.bind(registry)
+    let held = false
+    registry.create = async (path: string) => {
+      if (!held) {
+        held = true
+        await parked
+      }
+      return originalCreate(path)
+    }
+    releaseWorkspacePreflight = release
+  }
   if (options.withoutCredentials !== true) {
     await ctx.plugin(LocalCredentials, { path: join(workRoot, '.credentials.yaml'), watch: false })
   }
@@ -848,6 +874,7 @@ export async function createDirectTspFixture(
     modelCalls: () => llmAdapter.calls,
     recordPrompts,
     settle,
+    ...(releaseWorkspacePreflight === undefined ? {} : { releaseWorkspacePreflight }),
   }
   return pane === undefined ? fixture : { ...fixture, pane }
 }

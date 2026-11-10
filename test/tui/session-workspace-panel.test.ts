@@ -246,6 +246,12 @@ test('a retained first-submit path enters Browser directly, submits once, and ex
   outcomes[0]!({ kind: 'failed', message: 'refused on Host' })
   await h.paint()
   assert.ok(h.view().includes('/launch/failed'), 'Host refusal leaves the attempted launch path editable')
+  // The auto-open handoff must not hide the failure that led here: the app
+  // notice (the submission owner's refusal) stays painted in the path submode.
+  h.app.notify('could not start a session: the Host refused the proposed workspace directory', 'error')
+  await h.paint()
+  assert.ok(h.view().includes('could not start a session: the Host refused'),
+    `the path submode keeps the originating failure notice:\n${h.view()}`)
   assert.ok(h.view().includes('[Use directory]') && h.view().includes('[Cancel]'), 'the path mode paints its actual actions')
   const actionLine = lineIndexOf(panelFrame(h), '[Use directory]')
   await clickCell(h, 2, actionLine)

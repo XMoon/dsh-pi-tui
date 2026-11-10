@@ -804,7 +804,10 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
           // The sessionless mount may still be verifying the launch directory:
           // wait for that ONE request before capturing, so its committed
           // revision is the one this create revalidates (never a stale token).
-          if (options.workspaceIntent === undefined && navigation.scope.sessionId === undefined) {
+          if (navigation.scope.sessionId === undefined) {
+            // EVERY sessionless start (including an explicit Folder
+            // workspace-id) consumes the next-intent capture, so all of them
+            // must wait for the mount preflight's committed revision.
             await runner.awaitWorkspacePreflight?.()
           }
           if (options.workspaceIntent !== undefined) {

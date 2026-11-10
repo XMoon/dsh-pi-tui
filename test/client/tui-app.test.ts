@@ -3120,13 +3120,13 @@ test('the pre-session welcome invites the first message and clears on facts', as
   app.setWelcomeIdle(true)
   await vt.waitForRender()
   let view = vt.getViewport().join('\n')
-  assert.ok(view.includes('Type a message to start a session'), `idle invitation missing:\n${view}`)
+  assert.ok(view.includes('type a message to start a session'), `idle invitation missing:\n${view}`)
   // Real facts replace the invitation.
   app.setWelcomeCard({ cwd: '/ws', sessionId: 'session-1', model: 'p/m', version: '0.1.0' })
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
   assert.ok(view.includes('session-1'), `welcome card missing:\n${view}`)
-  assert.ok(!view.includes('Type a message to start'), `invitation survived:\n${view}`)
+  assert.ok(!view.includes('type a message to start'), `invitation survived:\n${view}`)
   // No preset was provided: the preset row is omitted entirely.
   assert.ok(!view.includes('preset'), `preset row must be omitted when undefined:\n${view}`)
 })
@@ -3144,7 +3144,7 @@ test('the idle welcome adapts to stacked and compact widths', async () => {
   stackedApp.setWelcomeIdle(true)
   await stackedVt.waitForRender()
   let view = stackedVt.getViewport().join('\n')
-  assert.ok(view.includes('Type a message to start a session'), `stacked idle invitation missing:\n${view}`)
+  assert.ok(view.includes('type a message to start a session'), `stacked idle invitation missing:\n${view}`)
   assert.ok(hasWhale(view), `stacked idle whale missing:\n${view}`)
   assert.ok(!view.includes('🐋 dsh-pi-tui'), `stacked idle must not use the compact emoji title:\n${view}`)
   // Dispose releases the process-global TuiApp slot before the next app.
@@ -3164,7 +3164,7 @@ test('the idle welcome adapts to stacked and compact widths', async () => {
     .join(' ')
     .replace(/\s+/g, ' ')
   assert.ok(joined.includes('🐋 dsh-pi-tui'), `compact idle emoji title missing:\n${view}`)
-  assert.ok(joined.includes('Type a message to start a session'), `compact idle invitation missing:\n${view}`)
+  assert.ok(joined.includes('type a message to start a session'), `compact idle invitation missing:\n${view}`)
   assert.ok(!hasWhale(joined), `compact idle must not show the full whale:\n${view}`)
   compactApp.dispose()
 })
