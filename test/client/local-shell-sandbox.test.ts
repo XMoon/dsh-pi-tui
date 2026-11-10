@@ -227,6 +227,12 @@ async function mountSandboxRunner(
     context.provide('sandboxPolicy', host.sandboxPolicy as never)
     if (host.subprocess !== undefined) harness.subprocess = host.subprocess
   }
+  // The official Session working-directory owner: the Direct adapter checks the
+  // request cwd against THIS live authority (the production root mounts the real
+  // `@deepseek-ai/dsh-working-directory` service).
+  context.provide('workingDirectory', {
+    get: (session: FakeSession) => session.header.cwd ?? home,
+  })
   // The ONE controlled stand-in of this composition: the Host `SettingsForms`
   // surface. Its `mutate` commits the requested ops into the SAME volatile
   // references the Loader/presentation plane hands the runner — so the Settings

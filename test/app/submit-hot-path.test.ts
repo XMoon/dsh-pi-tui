@@ -646,6 +646,16 @@ async function mountRunner(
   ctx.provide('agentDefaultModel', harness.defaultModel as never)
   ctx.provide('commands', harness.commands as never)
   ctx.provide('loader', { await: async () => {} } as never)
+  // The official Session working-directory owner the Direct shell adapter
+  // checks a `!`/`!!` request cwd against; the production root mounts the real
+  // `@deepseek-ai/dsh-working-directory` service. The fixture answers each
+  // Session's own committed header directory — the same value the harness's
+  // status fallback already returns.
+  if (ctx.get('workingDirectory') === undefined) {
+    ctx.provide('workingDirectory', {
+      get: (session: { readonly header: { readonly cwd?: string } }) => session.header.cwd ?? home,
+    })
+  }
   // The Direct shell adapter executes through the same official Subprocess
   // provider the production Host composition mounts.
   await ctx.plugin(LocalSubprocessRuntime)
