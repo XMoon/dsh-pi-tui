@@ -26,6 +26,7 @@ import {
 import {
   HostUserShellSandboxRunnerError,
   type HostUserShellOutcome,
+  type HostUserShellPolicy,
   type HostUserShellPort,
   type HostUserShellRequest,
 } from '../host-user-shell-port.ts'
@@ -37,6 +38,14 @@ export interface DirectHostUserShellDeps {
   readonly sandboxPolicy: () => SandboxPolicyServiceLike | undefined
   /** The exact live Session for one id, or undefined when not mounted. */
   readonly sessionFor: (sessionId: string) => HostSessionLike | undefined
+  /**
+   * The official effective working directory of one exact live Session, read
+   * live on every call. `undefined` means the composition has no authoritative
+   * value — the run fails closed instead of trusting the request's cwd.
+   */
+  readonly effectiveCwdFor: (session: HostSessionLike) => string | undefined
+  /** The current Direct user-shell policy, read live on every call. */
+  readonly shellPolicy: () => HostUserShellPolicy
 }
 
 /**
@@ -71,6 +80,16 @@ export class DirectHostUserShellPort implements HostUserShellPort {
       && (this.deps.sandbox() === undefined || this.deps.sandboxPolicy() === undefined)) {
       return unavailable('user shell sandbox policy is unavailable in this composition — nothing was executed')
     }
+    // The request's cwd/policy are EXPECTED values, not authorities. Confirm
+    // them against the live official working directory and the live TUI policy
+    // BEFORE any asynchronous sandbox preparation, so a stale request can never
+    // spawn — not even after preparation consulted services for it.
+    if (this.deps.effectiveCwdFor(session) !== request.cwd) {
+      return unavailable('the Host working directory changed or is unavailable — nothing was executed')
+    }
+    if (this.deps.shellPolicy() !== request.policy) {
+      return unavailable('the user shell policy changed — refresh settings and retry; nothing was executed')
+    }
 
     let outcome
     try {
@@ -84,12 +103,20 @@ export class DirectHostUserShellPort implements HostUserShellPort {
         sandboxPolicy: this.deps.sandboxPolicy(),
         sandbox: this.deps.sandbox(),
         beforeSpawn: () => {
-          // The final Direct gate: the caller signal and the exact live
-          // Session identity are rechecked synchronously after preparation and
-          // immediately before the one spawn.
+          // The final Direct gate: the caller signal, the exact live Session
+          // identity and the SAME cwd/policy currentness checks are rechecked
+          // synchronously after preparation and immediately before the one
+          // spawn. A request whose authorities moved never spawns with either
+          // the request's stale values or the newest ones.
           request.signal.throwIfAborted()
           if (this.deps.sessionFor(request.sessionId) !== session) {
             throw new HostShellExecutionVeto('scope-unavailable', 'the live Host Session changed during shell preparation')
+          }
+          if (this.deps.effectiveCwdFor(session) !== request.cwd) {
+            throw new HostShellExecutionVeto('scope-unavailable', 'the Host working directory changed during shell preparation')
+          }
+          if (this.deps.shellPolicy() !== request.policy) {
+            throw new HostShellExecutionVeto('policy-unavailable', 'the user shell policy changed during shell preparation')
           }
         },
       })

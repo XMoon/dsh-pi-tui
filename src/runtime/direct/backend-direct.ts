@@ -41,6 +41,7 @@ import { DirectPluginManagerPort } from './plugin-manager-direct.ts'
 import { DirectJobObservationPort } from './job-observation-direct.ts'
 import { DirectHostUserShellPort } from './host-user-shell-direct.ts'
 import { DirectHostShellCompletionPort, type DirectShellCandidateReader } from './host-shell-completion-direct.ts'
+import type { WorkingDirectoryServiceLike } from './working-directory-direct.ts'
 import { DirectDeliveredFileReadPort } from './deliverables-direct.ts'
 import { DirectSessionWorkspaceFacts } from './session-workspace-facts-direct.ts'
 import { DirectSchedulePort } from './schedule-direct.ts'
@@ -144,6 +145,17 @@ export function createDirectRuntimeBackend(deps: DirectBackendDeps): Backend {
       sandbox: () => deps.ctx.get('sandbox') as never,
       sandboxPolicy: () => deps.ctx.get('sandboxPolicy') as never,
       sessionFor: sessionId => deps.agentFor(sessionId)?.session,
+      // The request's cwd/policy are EXPECTED values. Both readers answer from
+      // the LIVE authorities on every call — the official Session directory
+      // owner and the persisted TUI preference the submission owner read —
+      // never from a cached snapshot; missing authorities fail closed.
+      effectiveCwdFor: (session) => {
+        const workingDirectory = deps.ctx.get('workingDirectory') as WorkingDirectoryServiceLike | undefined
+        if (workingDirectory === undefined) return undefined
+        const cwd = workingDirectory.get(session)
+        return typeof cwd === 'string' && cwd !== '' ? cwd : undefined
+      },
+      shellPolicy: () => deps.tuiSettings?.get().localShellSandbox === 'sandbox' ? 'sandbox' : 'bypass',
     }),
     new DirectHostShellCompletionPort(deps.sessionCwd, deps.agentFor, deps.shellCandidates),
     // Delivered files PR2: the official Host file service read in-process,

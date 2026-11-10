@@ -115,6 +115,8 @@ function makeFixture(options: {
   readonly sandbox?: DirectHostUserShellDeps['sandbox']
   readonly handle?: (spec: SubprocessSpawnSpec) => SubprocessHandle
   readonly sessionFor?: DirectHostUserShellDeps['sessionFor']
+  readonly effectiveCwdFor?: DirectHostUserShellDeps['effectiveCwdFor']
+  readonly shellPolicy?: DirectHostUserShellDeps['shellPolicy']
 } = {}): Fixture {
   const subprocess = fakeSubprocess(options.handle)
   const confineCalls: { readonly argv: readonly string[]; readonly policy: unknown }[] = []
@@ -131,6 +133,8 @@ function makeFixture(options: {
       } })),
       sandboxPolicy: options.sandboxPolicy ?? (() => ({ resolve: async () => ({ mode: 'workspace-write', workspaceRoot: process.cwd() }) })),
       sessionFor: sessions,
+      effectiveCwdFor: options.effectiveCwdFor ?? (() => process.cwd()),
+      shellPolicy: options.shellPolicy ?? (() => 'bypass'),
     },
   }
 }
@@ -152,6 +156,8 @@ function port(fixture: Fixture | undefined): DirectHostUserShellPort {
     sandbox: () => undefined,
     sandboxPolicy: () => undefined,
     sessionFor: () => session,
+    effectiveCwdFor: () => process.cwd(),
+    shellPolicy: () => 'bypass',
   })
 }
 
@@ -186,6 +192,7 @@ test('bypass spawns the raw bash argv exactly once through the official Subproce
 
 test('sandbox confines the exact Session policy once and spawns the EXACT returned argv', async () => {
   const fixture = makeFixture({
+    shellPolicy: () => 'sandbox',
     handle: () => fakeHandle({ outcome: { exitCode: 13, signal: null }, stderr: 'policy-denied\n' }),
   })
   const direct = port(fixture)
@@ -200,7 +207,7 @@ test('sandbox confines the exact Session policy once and spawns the EXACT return
 
 test('sandbox spawns the exact argv object returned by the one confine call', async () => {
   const confined = fullConfined(['bash', '-c', 'printf confined'], { denialSignatures: ['permission denied'] })
-  const fixture = makeFixture({ sandbox: () => ({ confine: async () => confined }) })
+  const fixture = makeFixture({ shellPolicy: () => 'sandbox', sandbox: () => ({ confine: async () => confined }) })
   const direct = port(fixture)
   const outcome = await direct.execute(request({ policy: 'sandbox', command: 'printf confined' }))
   assert.equal(outcome.kind, 'settled')
@@ -210,6 +217,7 @@ test('sandbox spawns the exact argv object returned by the one confine call', as
 
 test('sandbox partial enforcement fails closed BEFORE spawn (zero spawn)', async () => {
   const fixture = makeFixture({
+    shellPolicy: () => 'sandbox',
     sandbox: () => ({ confine: async argv => fullConfined(argv, { enforcement: 'partial' }) }),
   })
   const outcome = await port(fixture).execute(request({ policy: 'sandbox' }))
@@ -221,13 +229,14 @@ test('sandbox partial enforcement fails closed BEFORE spawn (zero spawn)', async
 
 test('sandbox danger-full-access and missing sandbox capabilities fail closed before spawn', async () => {
   const danger = makeFixture({
+    shellPolicy: () => 'sandbox',
     sandboxPolicy: () => ({ resolve: async () => ({ mode: 'danger-full-access', workspaceRoot: process.cwd() }) }),
   })
   const dangerOutcome = await port(danger).execute(request({ policy: 'sandbox' }))
   assert.equal(dangerOutcome.kind, 'unavailable')
   assert.equal(danger.subprocess.spawns.length, 0)
 
-  const missing = makeFixture({ sandbox: () => undefined })
+  const missing = makeFixture({ shellPolicy: () => 'sandbox', sandbox: () => undefined })
   const missingOutcome = await port(missing).execute(request({ policy: 'sandbox' }))
   assert.equal(missingOutcome.kind, 'unavailable')
   assert.match(missingOutcome.kind === 'unavailable' ? missingOutcome.reason.message : '', /sandbox policy is unavailable/u)
@@ -246,6 +255,7 @@ test('a missing live Session fails closed without a fabricated identity', async 
 test('a Session identity that changes during sandbox preparation vetoes the spawn', async () => {
   let current = session
   const fixture = makeFixture({
+    shellPolicy: () => 'sandbox',
     sessionFor: () => current,
     sandboxPolicy: () => ({ resolve: async () => {
       current = { id: 's' }
@@ -257,6 +267,89 @@ test('a Session identity that changes during sandbox preparation vetoes the spaw
   if (outcome.kind !== 'unavailable') throw new Error('expected a session-change refusal')
   assert.match(outcome.reason.message, /live Host Session changed/u)
   assert.equal(fixture.subprocess.spawns.length, 0, 'the stale Session never spawns')
+})
+
+
+// ── Live cwd/policy currentness: the request values are EXPECTED, not authority ──
+
+test('a matching live cwd and policy spawn exactly once in the official effective cwd', async () => {
+  const liveCwd = '/live/workspace-a'
+  const fixture = makeFixture({
+    effectiveCwdFor: () => liveCwd,
+    shellPolicy: () => 'sandbox',
+  })
+  const outcome = await port(fixture).execute(request({ cwd: liveCwd, policy: 'sandbox', command: 'pwd' }))
+  assert.equal(outcome.kind, 'settled')
+  assert.equal(fixture.confineCalls.length, 1, 'the official confine ran exactly once')
+  assert.equal(fixture.subprocess.spawns.length, 1)
+  assert.equal(fixture.subprocess.spawns[0]!.cwd, liveCwd, 'the run uses the checked effective cwd')
+})
+
+test('an entry-time cwd mismatch fails closed before any preparation or spawn', async () => {
+  const fixture = makeFixture({ effectiveCwdFor: () => '/live/workspace-b' })
+  const outcome = await port(fixture).execute(request({ cwd: '/live/workspace-a' }))
+  assert.equal(outcome.kind, 'unavailable')
+  if (outcome.kind !== 'unavailable') throw new Error('expected a cwd-currentness refusal')
+  assert.match(outcome.reason.message, /Host working directory changed or is unavailable/u)
+  assert.equal(fixture.confineCalls.length, 0, 'the stale request is refused before sandbox preparation')
+  assert.equal(fixture.subprocess.spawns.length, 0)
+})
+
+test('a composition without an authoritative Session cwd fails closed', async () => {
+  const fixture = makeFixture({ effectiveCwdFor: () => undefined })
+  const outcome = await port(fixture).execute(request())
+  assert.equal(outcome.kind, 'unavailable')
+  if (outcome.kind !== 'unavailable') throw new Error('expected a cwd-authority refusal')
+  assert.match(outcome.reason.message, /Host working directory changed or is unavailable/u)
+  assert.equal(fixture.subprocess.spawns.length, 0)
+})
+
+test('an entry-time policy mismatch fails closed in both directions', async () => {
+  for (const [requested, live] of [['sandbox', 'bypass'], ['bypass', 'sandbox']] as const) {
+    const fixture = makeFixture({ shellPolicy: () => live })
+    const outcome = await port(fixture).execute(request({ policy: requested }))
+    assert.equal(outcome.kind, 'unavailable', `${requested} request against a live ${live} setting`)
+    if (outcome.kind !== 'unavailable') throw new Error('expected a policy-currentness refusal')
+    assert.match(outcome.reason.message, /user shell policy changed/u)
+    assert.equal(fixture.confineCalls.length, 0, 'nothing is prepared for a stale policy request')
+    assert.equal(fixture.subprocess.spawns.length, 0)
+  }
+})
+
+test('a working-directory change during sandbox preparation vetoes the spawn', async () => {
+  let liveCwd = process.cwd()
+  const fixture = makeFixture({
+    shellPolicy: () => 'sandbox',
+    effectiveCwdFor: () => liveCwd,
+    sandboxPolicy: () => ({ resolve: async () => {
+      // The SAME Session object moves; its identity never changes.
+      liveCwd = '/live/workspace-b'
+      return { mode: 'workspace-write', workspaceRoot: process.cwd() }
+    } }),
+  })
+  const outcome = await port(fixture).execute(request({ policy: 'sandbox' }))
+  assert.equal(outcome.kind, 'unavailable')
+  if (outcome.kind !== 'unavailable') throw new Error('expected a cwd-change refusal')
+  assert.match(outcome.reason.message, /Host working directory changed during shell preparation/u)
+  assert.equal(fixture.confineCalls.length, 1, 'preparation already ran, but the final gate still vetoes the spawn')
+  assert.equal(fixture.subprocess.spawns.length, 0, 'the stale request never spawns')
+})
+
+test('a shell-policy change during preparation vetoes the spawn and never switches policy', async () => {
+  let livePolicy: 'bypass' | 'sandbox' = 'sandbox'
+  const fixture = makeFixture({
+    shellPolicy: () => livePolicy,
+    sandboxPolicy: () => ({ resolve: async () => {
+      livePolicy = 'bypass'
+      return { mode: 'workspace-write', workspaceRoot: process.cwd() }
+    } }),
+  })
+  const outcome = await port(fixture).execute(request({ policy: 'sandbox' }))
+  assert.equal(outcome.kind, 'unavailable')
+  if (outcome.kind !== 'unavailable') throw new Error('expected a policy-change refusal')
+  assert.match(outcome.reason.message, /user shell policy changed during shell preparation/u)
+  assert.equal(fixture.confineCalls.length, 1)
+  assert.equal(fixture.subprocess.spawns.length, 0, 'the changed preference never runs the request under another policy')
 })
 
 test('spawn failure is a pre-start refusal; post-start provider failure is a real failure', async () => {
@@ -368,6 +461,7 @@ test('complete diagnostics keep confirmed denial and ordinary-failure semantics'
 
 test('the Direct sandbox adapter forwards a truncated nonzero denial diagnostic as reason-unknown', async () => {
   const fixture = makeFixture({
+    shellPolicy: () => 'sandbox',
     sandbox: () => ({ confine: async () => fullConfined(['/runner', 'bash', '-c', 'make check'], {
       denialSignatures: ['permission denied'],
       runnerFailureRules: [{ allowedExitCodes: [125], fatalSignatures: ['runner: fatal'], informationalLines: [] }],
@@ -395,6 +489,7 @@ test('the Direct sandbox adapter forwards a truncated nonzero denial diagnostic 
 
 test('the Direct sandbox adapter fails a truncated retained runner-fatal tail as sandbox-runner', async () => {
   const fixture = makeFixture({
+    shellPolicy: () => 'sandbox',
     sandbox: () => ({ confine: async () => fullConfined(['/runner', 'bash', '-c', 'make check'], {
       runnerFailureRules: [{ allowedExitCodes: [125], fatalSignatures: ['runner: fatal'], informationalLines: [] }],
     }) }),
@@ -413,6 +508,7 @@ test('the Direct sandbox adapter fails a truncated retained runner-fatal tail as
 
 test('the Direct sandbox adapter still fails on positive non-truncated runner evidence', async () => {
   const fixture = makeFixture({
+    shellPolicy: () => 'sandbox',
     sandbox: () => ({ confine: async argv => fullConfined(argv, {
       runnerFailureRules: [{ allowedExitCodes: [125], fatalSignatures: ['runner: fatal'], informationalLines: [] }],
     }) }),
@@ -446,6 +542,7 @@ test('the Direct adapter treats whole-stream signatures evicted into the truncat
       denialSignatures: ['permission denied'],
     })
     const fixture = makeFixture({
+      shellPolicy: () => 'sandbox',
       sandbox: () => ({ confine: async () => confined }),
       handle: () => fakeHandle({
         outcome: { exitCode, signal: null },
