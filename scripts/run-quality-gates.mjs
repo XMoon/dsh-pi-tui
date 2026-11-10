@@ -68,6 +68,20 @@ export function localPreflightGates() {
   return QUALITY_GATES.filter(gate => gate.classification === 'local-preflight')
 }
 
+/**
+ * The ONLY gate the release path may skip: its exact test file is rerun by
+ * `pack:release`'s product suite. No other gate is release-skippable.
+ */
+const RELEASE_SKIPPABLE_GATE_IDS = new Set(['gate:pi-surface-compat'])
+
+function assertReleaseSkippable(id) {
+  if (!RELEASE_SKIPPABLE_GATE_IDS.has(id)) throw new Error(`gate ${id} is not release-skippable`)
+  const gate = QUALITY_GATES.find(candidate => candidate.id === id)
+  if (gate === undefined || gate.classification !== 'local-preflight') {
+    throw new Error(`release-skippable gate ${id} is not a registered local-preflight gate`)
+  }
+}
+
 /** The argv a gate's existing entry point needs. */
 function gateArgv(gate) {
   const executable = gate.runner === 'pnpm' ? pnpmExecutable() : process.execPath
@@ -82,6 +96,7 @@ function gateArgv(gate) {
  * without executing real gates.
  */
 export function runQualityGates({ gates = localPreflightGates(), skip = new Set(), spawn = spawnSync, log = console.log } = {}) {
+  for (const id of skip) assertReleaseSkippable(id)
   const selected = gates.filter(gate => !skip.has(gate.id))
   for (const gate of gates) {
     if (skip.has(gate.id)) log(`quality-gates: skipped ${gate.id}`)
@@ -120,7 +135,7 @@ function parseSkip(rawArgs) {
     if (args[index] !== '--skip') throw new Error(`unknown argument ${args[index]}`)
     const id = args[index + 1]
     if (id === undefined) throw new Error('--skip requires a gate id')
-    if (!QUALITY_GATES.some(gate => gate.id === id)) throw new Error(`unknown gate ${id}`)
+    assertReleaseSkippable(id)
     skip.add(id)
     index += 1
   }
