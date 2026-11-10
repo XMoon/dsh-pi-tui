@@ -655,6 +655,9 @@ export class Markdown implements Component {
 	private blockHighlightedCode?: Map<string, string[]>;
 	// Non-undefined ONLY during a proveSourceSpan() proof render.
 	private proofState: ProofState | undefined;
+	// Set ONLY by a proof-triggered normal render so it also fills the normal block cache; ordinary renders leave it
+	// false and keep the fork's own reuse rule.
+	private primingProofBlocks = false;
 
 	constructor(
 		text: string,
@@ -738,8 +741,22 @@ export class Markdown implements Component {
 		) {
 			return { kind: "UNPROVEN", reason: "STALE_RENDER" };
 		}
-		// Freeze the normal rows first: the proof is valid for THIS render epoch only.
-		const normalRows = this.render(width);
+		// Freeze the normal rows first: the proof is valid for THIS render epoch only. A normal render performed on
+		// behalf of a proof may also fill the normal block cache so the proof render can reuse every non-intersecting
+		// block; ordinary renders never take this path and the proof render itself writes no cache.
+		const cacheWasWarm =
+			this.cachedLines !== undefined && this.cachedText === this.text && this.cachedWidth === width;
+		this.primingProofBlocks = true;
+		let normalRows: string[];
+		try {
+			normalRows = this.render(width);
+		} finally {
+			this.primingProofBlocks = false;
+		}
+		const cachedBlocks = this.blocks?.deref();
+		if (cacheWasWarm && (cachedBlocks === undefined || cachedBlocks.size === 0)) {
+			this.primeProofBlocks(width);
+		}
 		const state: ProofState = {
 			request: {
 				start: projectTabOffset(this.text, range.start),
@@ -862,12 +879,17 @@ export class Markdown implements Component {
 			// lines contain no sentinel) and re-renders only the intersecting token. The local map is never stored.
 			const proofTarget = proofMode && (this.proofIntersects(token) || this.proofNeedsHrefFallback(token));
 			const key = proofTarget ? `${token.raw}\0proof` : token.raw;
-			const reused = reuseBlocks && !proofTarget ? (blocks.get(key) ?? previousBlocks?.get(key)) : undefined;
+			// A proof render reuses every cached NORMAL block that does not carry the requested range. Ordinary renders
+			// keep the fork's own rule: reference-link texts disable previous-block reuse because their definitions can
+			// change between renders; a proof-triggered priming render fills the cache from the current token tree, so
+			// its blocks are safe to reuse for this epoch.
+			const readPrevious = proofMode || (reuseBlocks && !this.primingProofBlocks);
+			const reused = readPrevious && !proofTarget ? (blocks.get(key) ?? previousBlocks?.get(key)) : undefined;
 			const block = reused ?? { width: -1, nextTokenType, lines: [], highlightedCode: new Map() };
 			if (block.width !== width || block.nextTokenType !== nextTokenType) {
 				this.renderBlock(block, token, nextTokenType, width, contentWidth);
 			}
-			if (reuseBlocks) blocks.set(key, block);
+			if (reuseBlocks || this.primingProofBlocks) blocks.set(key, block);
 			for (const line of block.lines) {
 				contentLines.push(line);
 			}
@@ -887,6 +909,20 @@ export class Markdown implements Component {
 		const result = emptyLines.concat(contentLines, emptyLines);
 
 		return result.length > 0 ? result : [""];
+	}
+
+	/**
+	 * Fill the normal block cache for this exact source/width with a normal-mode render, without touching the cached
+	 * normal rows. Only a proof calls this; the cached blocks are ordinary normal blocks (no sentinel).
+	 */
+	private primeProofBlocks(width: number): void {
+		const previous = this.primingProofBlocks;
+		this.primingProofBlocks = true;
+		try {
+			this.renderLines(width, false);
+		} finally {
+			this.primingProofBlocks = previous;
+		}
 	}
 
 	/** Whether this token owns a link that prints the fallback destination the request targets. */

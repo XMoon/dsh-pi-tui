@@ -2299,6 +2299,27 @@ describe("Source-cell proof (proveSourceSpan)", () => {
 		expectPainted(markdown, source, "needle", 44);
 	});
 
+	it("reuses cached normal blocks for non-intersecting blocks in a reference-definition document", () => {
+		capabilities(false);
+		const highlights: string[] = [];
+		const theme: MarkdownTheme = {
+			...defaultMarkdownTheme,
+			highlightCode: (code) => {
+				highlights.push(code);
+				return code.split("\n").map((line) => chalk.green(line));
+			},
+		};
+		const source = "[label][id]\n\n[id]: https://x/needle\n\n```js\nconst other = 1;\n```";
+		const markdown = new Markdown(source, 0, 0, theme);
+		markdown.render(44);
+		assert.strictEqual(highlights.length, 1, "the ordinary reference-link render has no block cache");
+		expectPainted(markdown, source, "label", 44);
+		const afterFirstProof = highlights.length;
+		assert.strictEqual(afterFirstProof, 2, "the proof primes the normal block cache once");
+		expectPainted(markdown, source, "label", 44);
+		assert.strictEqual(highlights.length, afterFirstProof, "the next proof reuses the cached non-intersecting block");
+	});
+
 	it("keeps reference-definition destinations hidden or ambiguous instead of claiming cells", () => {
 		const source = "[label][id]\n\n[id]: https://x/needle";
 		capabilities(true);
@@ -2311,7 +2332,11 @@ describe("Source-cell proof (proveSourceSpan)", () => {
 		// Two using links print the same destination; the visible owner is ambiguous, so the proof must fail closed.
 		const shared = "[one][id] and [two][id]\n\n[id]: https://x/needle";
 		const ambiguous = new Markdown(shared, 0, 0, defaultMarkdownTheme);
-		assert.notStrictEqual(ambiguous.proveSourceSpan(rangeOf(shared, "needle"), 44).kind, "PROVEN");
+		// Two printed owners: the visible ownership is ambiguous, so the range is UNPROVEN, never NOT_PAINTED.
+		assert.deepStrictEqual(ambiguous.proveSourceSpan(rangeOf(shared, "needle"), 44), {
+			kind: "UNPROVEN",
+			reason: "TOKEN_ORIGIN",
+		});
 	});
 
 	it("proves fenced code text and refuses a highlighter that rewrites the glyphs", () => {
