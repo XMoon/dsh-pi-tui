@@ -1170,6 +1170,12 @@ export interface HostCommandSubmissionInput {
   /** PR3-B §7.3 (F2): the ownership subject pinned at the gesture's admission
    *  (the fallback prompt's stale-restore discriminator). */
   readonly staleSubject?: unknown
+  /** Terminal settlement of an accepted SESSION-NAVIGATION command: settles a
+   *  deferred queue recall it owns and releases the navigation intent. Called
+   *  exactly once by the single terminal sink (result, error or cancel),
+   *  AFTER the command settlement work (the deferred source retirement
+   *  included) has completed. */
+  readonly finishNavigationIntent?: () => void
 }
 
 /**
@@ -1241,6 +1247,7 @@ export function executeHostCommandSubmission(
     diag: deps.diag,
     sessionId: () => deps.commandSessionId(),
     onResult: (outcome) => {
+      input.finishNavigationIntent?.()
       // PR5 (plan §3.8): the release/cleanup bookkeeping ALWAYS runs (leak
       // prevention), but a settlement whose ORIGINAL subject was replaced
       // makes no VISIBLE mutation — the Host may finish the old command and
@@ -1379,6 +1386,7 @@ export function executeHostCommandSubmission(
       }
     },
     onError: (error) => {
+      input.finishNavigationIntent?.()
       fallbackPin()
       submitTurn.release()
       // PR5 (plan §3.8): cleanup above ALWAYS runs; a replaced subject's
@@ -1418,6 +1426,7 @@ export function executeHostCommandSubmission(
       deps.notify(message, 'error')
     },
     onCancel: () => {
+      input.finishNavigationIntent?.()
       fallbackPin()
       submitTurn.release()
       // PR5 (plan §3.8): same rule as onError — no visible mutation on a
