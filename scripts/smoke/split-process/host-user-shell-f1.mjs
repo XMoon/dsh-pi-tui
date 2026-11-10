@@ -61,7 +61,11 @@ async function waitForComposerMode(client, mode, label, timeoutMs = 30_000) {
     const shellLocalIsNotContext = expected === '!' && first.startsWith('!!')
     if (!shellLocalIsNotContext && first.startsWith(expected)) {
       const body = first.slice(expected.length).replace(/[\s.…·]+$/u, '').trim()
-      const hintOnly = body === '' || body.startsWith('[connection]') || body.startsWith('…')
+      // Presentation-only hints: an empty body, a pure placeholder, or a
+      // connection banner whose remaining text is still the banner itself.
+      const hintOnly = body === ''
+        || /^[…·]+$/u.test(body)
+        || (/^\[connection\]/u.test(body) && /(?:connection lost|reconnect|retry)/iu.test(body))
       if (hintOnly) return
     }
     await new Promise(resolve => setTimeout(resolve, 50))
