@@ -183,6 +183,25 @@ export function shellWordSuffix(line: string, col: number, quote: "'" | '"' | un
   return line.slice(col, index)
 }
 
+/** The RAW range a WHOLE-WORD acceptance replaces: the raw word start, and the
+ * raw word end. A closing quote the cursor is inside is part of the range (the
+ * accepted literal stops before it, so keeping it would leave `""`); otherwise
+ * the range ends where the word's tail ends. The command/subcommand query is
+ * the DECODED word, whose length can differ from this raw range (`zo\ s`), so
+ * the query prefix alone can never locate the replaced bytes. */
+export function shellWordRange(
+  line: string,
+  prefixLength: number,
+  col: number,
+): { readonly start: number; readonly end: number } {
+  const token = wordAtCursor(line, prefixLength, col)
+  if (token.quote !== undefined) {
+    const closing = closingQuoteIndex(line, col, token.quote)
+    if (closing !== -1) return { start: token.start, end: closing + 1 }
+  }
+  return { start: token.start, end: col + shellWordSuffix(line, col, token.quote).length }
+}
+
 /** Parse the editor line at the cursor for one shell-specific candidate source. */
 export function shellCompletionContext(line: string, col: number): ShellCompletionContext | undefined {
   if (!line.startsWith('!')) return undefined
