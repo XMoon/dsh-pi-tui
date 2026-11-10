@@ -756,20 +756,41 @@ function searchSourceSnippetTextIsSafe(text: string): boolean {
   return !UNSAFE_SOURCE_SNIPPET_SHAPE.test(text)
 }
 
+/** Code-unit window used to locate the snippet's grapheme boundaries. The
+ * context is at most `count` clusters, so a bounded window keeps the whole
+ * message prefix/suffix out of memory; the loop only widens for pathological
+ * giant clusters. */
+const SNIPPET_CONTEXT_WINDOW = 256
+
 /** Up to `count` grapheme clusters immediately before `offset`, so a snippet
  * never starts inside a combining/ZWJ cluster. */
 function snippetStartBefore(text: string, offset: number, count: number): number {
-  const boundaries = [...getGraphemeSegmenter().segment(text.slice(0, offset))].map(segment => segment.index)
-  if (boundaries.length <= count) return 0
-  return boundaries[boundaries.length - count]!
+  let window = SNIPPET_CONTEXT_WINDOW
+  while (true) {
+    const from = Math.max(0, offset - window)
+    const starts: number[] = []
+    for (const segment of getGraphemeSegmenter().segment(text.slice(from, offset))) starts.push(from + segment.index)
+    if (starts.length >= count + 1) return starts[starts.length - count]!
+    // A window cut can split the FIRST cluster, so a short window is not
+    // trusted; the document start is the only exact fallback.
+    if (from === 0) return 0
+    window *= 2
+  }
 }
 
 /** Up to `count` grapheme clusters immediately after `offset`. */
 function snippetEndAfter(text: string, offset: number, count: number): number {
-  const rest = text.slice(offset)
-  const boundaries = [...getGraphemeSegmenter().segment(rest)].map(segment => segment.index)
-  if (boundaries.length <= count) return text.length
-  return offset + boundaries[count]!
+  let window = SNIPPET_CONTEXT_WINDOW
+  while (true) {
+    const to = Math.min(text.length, offset + window)
+    const starts: number[] = []
+    for (const segment of getGraphemeSegmenter().segment(text.slice(offset, to))) starts.push(offset + segment.index)
+    // A window cut can only truncate the LAST cluster's end; its start stays
+    // exact, so `starts[count]` is a real boundary whenever it exists.
+    if (starts.length >= count + 1) return starts[count]!
+    if (to === text.length) return text.length
+    window *= 2
+  }
 }
 
 /** The start of the whitespace-delimited token that owns `offset`. The

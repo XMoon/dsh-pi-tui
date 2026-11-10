@@ -630,6 +630,77 @@ test('navigation: a session replacement retires the notice and its pending occlu
   app.stop()
 })
 
+/** Count the grapheme segments the production code iterates inside `run`.
+ * A whole-message expansion yields one segment per code unit; a bounded
+ * context window yields a few hundred at most. */
+function countGraphemeSegments(run: () => void): number {
+  const prototype = Intl.Segmenter.prototype as unknown as {
+    segment(input: string): Iterable<Intl.SegmentData>
+  }
+  const original = prototype.segment
+  let yields = 0
+  prototype.segment = function (this: Intl.Segmenter, input: string): Iterable<Intl.SegmentData> {
+    const result = original.call(this, input)
+    return {
+      [Symbol.iterator]: function* () {
+        for (const item of result) {
+          yields += 1
+          yield item
+        }
+      },
+    }
+  }
+  try {
+    run()
+    return yields
+  } finally {
+    prototype.segment = original
+  }
+}
+
+test('navigation: a Source-only snippet on a very long message reads only its own context', async () => {
+  // A message far beyond any render budget: the 12-grapheme context must come
+  // from a bounded window, never from expanding the whole prefix/suffix.
+  const prefix = `${'a'.repeat(1_000_000)}汉e\u0301👨‍👩‍👧‍👦`
+  const text = `${prefix} needle 组合字符👩‍💻 suffix ${'b'.repeat(100_000)}`
+  const { folder, message } = userMessageFolder(text)
+  const match = folder.search('needle')[0]
+  assert.ok(match !== undefined, 'fixture: the occurrence exists')
+  // 240 columns keep the box (96) wide enough that the 12-grapheme context is
+  // really PAINTED, not dropped by the width budget.
+  const { vt, app } = startApp(240, 30)
+  try {
+    app.setFullscreen(true)
+    app.setTranscript([message], folder.turnActivities())
+    await viewport(vt)
+    app.startTranscriptSearch('full')
+    await viewport(vt)
+    const segments = countGraphemeSegments(() => {
+      app.setTranscriptSearchPresentation({
+        matchMessages: new Set([message]),
+        target: { query: 'needle', match, message },
+        grantReveal: false,
+      })
+    })
+    const lines = await viewport(vt)
+    const notice = app.currentFullSearchNotice()
+    assert.equal(notice?.kind, 'unproven', 'the collapsed long User hit is non-exact')
+    const snippet = notice?.snippet ?? ''
+    assert.ok(snippet.includes('needle'), `the context contains the hit (${JSON.stringify(snippet)})`)
+    assert.ok(snippet.includes('👨‍👩‍👧‍👦'), 'the leading ZWJ cluster is kept whole')
+    assert.ok(snippet.includes('e\u0301'), 'the combining sequence is kept whole')
+    assert.ok(snippet.includes('👩‍💻'), 'the trailing ZWJ cluster is kept whole')
+    assert.ok(!/[\r\n]/u.test(snippet), 'the snippet is one physical line')
+    assert.ok(segments < 5_000,
+      `a 1e6-character message must not be segmented as a whole (${segments} segments)`)
+    const noticeRows = lines.map(line => stripTerminalSequences(line)).filter(line => line.includes('Source-only'))
+    assert.equal(noticeRows.length, 1, 'the notice still occupies exactly one physical row')
+    assert.ok(noticeRows[0]!.includes('needle'), `the bounded context is really painted:\n${noticeRows[0]}`)
+  } finally {
+    app.dispose()
+  }
+})
+
 test('navigation: an IP-literal context never reaches the painted Source-only row at a wide terminal', async () => {
   // The displayed context is a 12-grapheme window, which can SPLIT an address
   // (`127.0.0.1` -> `.0.0.1`), so the safety classifier must see the complete
