@@ -984,12 +984,14 @@ the trusted source used by this Client adapter, not a new upstream Host policy.
 an invalidation revokes its affected observations and is distinct from signed-out.
 Ending the signal, disposing the generated stream, closing a page, or retiring a
 Client surface stops observation only; it never cancels the Host browser attempt.
-Cancellation addresses the exact `SignInAttemptId`. A known operation ACK may
-reconcile from its returned observation. An unknown ACK is reconciled only by a
-successful `getState` readback initiated after that ACK; no Watch frame satisfies
-that readback, no prior view-derived Account fact becomes current during the barrier,
-and no dispatched operation is replayed automatically. A result from a replaced
-Connection generation cannot become current.
+Cancellation addresses the exact `SignInAttemptId`. The Watch subscription is the
+single writer of the page's AccountView; a mutation response is never treated as a
+second AccountView snapshot. Once a mutation settles, the prior page snapshot is
+last-known and cannot authorize another mutation until the next complete Watch
+snapshot or explicit Refresh. An unknown mutation outcome is reported as
+unconfirmed and is never replayed automatically; explicit Refresh releases the
+current Watch and reopens the official watch for a complete initial snapshot. A
+result from a replaced Connection generation cannot become current.
 
 `hasRunningAccountTasks()` is an asynchronous Host fact in Direct and Remote.
 The official controller evaluates the current `agents.list()` with the official
@@ -997,8 +999,9 @@ running-account-task predicate; the TUI does not substitute its own busy state
 or a cached Boolean. A failed or unavailable Remote read rejects instead of
 claiming `false`. Sign-out confirmation represents `checking`, `known`, and
 `unavailable` explicitly: pending or unknown disables the destructive action,
-and a failed check has an explicit retry. A failed sign-out acknowledgement is
-re-read before another manual attempt is admitted. The official
+and a failed check has an explicit retry. A failed or unconfirmed sign-out
+acknowledgement closes the confirmation and is never replayed automatically;
+explicit Refresh reopens the official Watch. The official
 `deepseek-account/signed-out` listener remains the sole owner of cancelling
 matching account tasks.
 
