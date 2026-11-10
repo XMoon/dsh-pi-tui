@@ -521,7 +521,7 @@ test('mouse: a painted provider row opens its detail, the category rail switches
   await h.vt.waitForRender()
   assert.match(h.view(), /Provider · Acme Gateway/u)
 
-  const accountRow = rowOf(h, 'Account')
+  const accountRow = railEntryRow(h, 'Account')
   press(h, accountRow, 1)
   release(h, accountRow, 1)
   await h.vt.waitForRender()
@@ -531,7 +531,7 @@ test('mouse: a painted provider row opens its detail, the category rail switches
   assert.match(h.view(), /^> Account/mu, 'the rail selects the Account category')
   assert.match(h.view(), /DeepSeek Account/u, 'the right column shows the real Account page')
 
-      const modelsRow = rowOf(h, 'Models')
+  const modelsRow = railEntryRow(h, 'Models')
   press(h, modelsRow, 1)
   release(h, modelsRow, 1)
   await h.vt.waitForRender()
@@ -557,16 +557,24 @@ test('a cross-owner mouse drag never reuses the other owner press (RFL-004)', as
   const h = open()
   await h.vt.waitForRender()
   ;(h as unknown as { invoke(line: string): unknown }).invoke('/login acme')
-  await h.vt.waitForRender()
+  // The Models page reads its provider catalog AFTER its first frame: the
+  // Configure action is only painted once the read settles, and the mouse
+  // gesture must resolve against that painted row, never the Loading frame.
+  await waitForFrame(
+    h.view,
+    frame => frame.includes('Provider · Acme Gateway') && frame.includes('> Configure API Key…'),
+    () => h.vt.waitForRender(),
+    'the Acme provider action must be painted before the cross-owner drag',
+  )
   const providerRow = rowOf(h, 'Configure API Key')
-  const railModels = rowOf(h, 'Models')
+  const railModels = railEntryRow(h, 'Models')
   press(h, providerRow, colOf(h, providerRow, 'Configure API Key'))
   release(h, railModels, 1)
   await h.vt.waitForRender()
   assert.match(h.view(), /Provider · Acme Gateway/u, 'the auth-page press did not fire after a rail release')
   assert.doesNotMatch(h.view(), /API Key Reference/u)
 
-  const railAppearance = rowOf(h, 'Appearance')
+  const railAppearance = railEntryRow(h, 'Appearance')
   press(h, railAppearance, 1)
   release(h, providerRow, colOf(h, providerRow, 'Configure API Key'))
   await h.vt.waitForRender()
@@ -790,8 +798,6 @@ test('real Settings 30x8 hides a clipped select prompt and refuses Enter (F7)', 
 // once; Enter/Right hands the keyboard to that page. These cases drive the
 // REAL command coordinator, the REAL workspace lease and the REAL pages.
 
-const railRow = (h: Harness, label: string): number => rowOf(h, label)
-
 /**
  * The physical row of one CATEGORY RAIL entry. The rail owns the first 22
  * cells of the frame, so a rail entry is found by its own cell — a plain
@@ -875,7 +881,7 @@ test('a rail selection is refused while the page owns a pending Host mutation', 
   try {
     await submitHeldOfficialKey(h)
 
-    const accountRow = railRow(h, 'Account')
+    const accountRow = railEntryRow(h, 'Account')
     await click(h, accountRow, 1)
     assert.match(h.rows()[0]!, /Settings · Models/u, 'the pending mutation owns the page')
     assert.doesNotMatch(h.view(), /Settings · Account/u, 'the rail refused the category change')
@@ -898,7 +904,7 @@ test('a cross-owner gesture does nothing: a rail press released in the content c
     () => h.vt.waitForRender(),
     'the Models provider row must be painted before the cross-owner gesture',
   )
-  const railModels = rowOf(h, 'Models')
+  const railModels = railEntryRow(h, 'Models')
   const providerRow = rowOf(h, 'Acme Gateway')
   // A press on the RAIL, released in the CONTENT column: neither owner may
   // act. The rail press must not select a category and the content release
@@ -946,10 +952,10 @@ test('the Account page keeps its Host browser attempt when the rail leaves and r
   assert.match(h.view(), /waiting-browser/u, 'the running Host attempt is on screen')
   assert.match(h.view(), /platform\.example/u, 'the authorize URL is on screen')
 
-  const aboutRow = railRow(h, 'About')
+  const aboutRow = railEntryRow(h, 'About')
   await click(h, aboutRow, 1)
   assert.match(h.view(), /dsh-pi-tui/u, 'the About page is painted after the category change')
-  const accountRow = railRow(h, 'Account')
+  const accountRow = railEntryRow(h, 'Account')
   await click(h, accountRow, 1)
   assert.match(h.view(), /waiting-browser/u, 'the returned page re-reads the Host attempt')
   assert.equal(h.calls.some(call => call.includes('cancelSignIn')), false,
@@ -964,7 +970,7 @@ test('a Host callback that settles after a category change never repaints the ne
   await h.vt.waitForRender()
   const before = h.view()
   // Switch to the About home WHILE the Account watch is still settling.
-  const aboutRow = railRow(h, 'About')
+  const aboutRow = railEntryRow(h, 'About')
   await click(h, aboutRow, 1)
   for (let index = 0; index < 20; index += 1) await new Promise<void>(resolve => setImmediate(resolve))
   assert.match(h.view(), /dsh-pi-tui/u, 'the About page is still painted after the settlement')
@@ -1023,7 +1029,7 @@ test('a content press released on the rail does not select the category', async 
   await h.vt.waitForRender()
   ;(h as unknown as { invoke(line: string): unknown }).invoke('/settings')
   await h.vt.waitForRender()
-  const accountRow = railRow(h, 'Account')
+  const accountRow = railEntryRow(h, 'Account')
   await key(h, '\u001b[B')
   await key(h, '\u001b[B')
   const contentRow = rowOf(h, 'Status')
