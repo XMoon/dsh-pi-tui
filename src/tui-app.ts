@@ -12613,7 +12613,6 @@ export class TuiApp {
       // plugin/composite/collapsed bodies, an ineligible source kind) is
       // honestly `unproven`, never "no visible cell".
       disposition ??= painted === undefined ? 'unproven' : undefined
-      this.recordSearchSourceNotice(target, disposition)
       let selection = selectRenderedSearchMatch(matches, selector)
       if (painted !== undefined) {
         selection = {
@@ -12624,6 +12623,12 @@ export class TuiApp {
           selectedRow: painted[0]!.row,
         }
       }
+      // The Source-only notice belongs to the FINAL selection, not to one proof
+      // channel: a direct-field region (Workflow run/phase/member, Tool,
+      // Command, deliverable) can be exact through `buildSourceGeometry()` even
+      // though the dedicated User/Thinking/Assistant channel produced nothing.
+      // Record it only when the committed selection is genuinely non-exact.
+      this.recordSearchSourceNotice(target, selection.exact ? undefined : disposition)
       const scrollRange = selectRenderedSearchScrollRange(matches, selection, selector, regions)
       const committedSelection: RenderedSearchSelection = scrollRange === undefined
         ? selection

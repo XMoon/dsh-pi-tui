@@ -542,7 +542,7 @@ Settings and Plugins pages that TSP cannot host are refused explicitly.
 | `Ctrl+T`      | Toggle the todo panel                               |
 | `Ctrl+R`      | Search input history                                |
 | `Ctrl+F`      | Find in the **mounted rendered** Transcript (View)  |
-| `Ctrl+Shift+F` | Find in the whole Session (Full, includes invisible source, reports `Source-only`) |
+| `Ctrl+Shift+F` | Find in the available Session semantic history (Full, includes invisible source, reports `Source-only`; the Remote scope follows the Find box's Loaded/Entire hint) |
 | `Tab` in Find | Switch View / Full and keep the same query           |
 | `Ctrl+End`    | Jump to the latest Transcript output in fullscreen; a clickable `↓ Latest` appears after leaving the live tail |
 | `Ctrl+O`      | Expand / collapse Tool and System details and long user prompts in regular/fullscreen-non-Focus; in fullscreen Focus, bulk-toggle the Thought roots (expand long user prompts by clicking the marker) |
@@ -559,8 +559,9 @@ Settings and Plugins pages that TSP cannot host are refused explicitly.
 
 There is ONE Find box: `Ctrl+F` opens View (only the currently mounted rendered rows
 count; hidden links, folded rows and off-window history are not View hits), and
-`Ctrl+Shift+F` opens Full (semantic search over the current Session, with its own
-independent `N/M`). A Full hit may live in a hidden link destination, a consumed
+`Ctrl+Shift+F` opens Full (semantic search over the available Session semantic
+history; Remote covers the loaded snapshot only, exactly as the Find box's
+`Loaded`/`Entire` hint says) with its own independent `N/M`. A Full hit may live in a hidden link destination, a consumed
 Visual marker or a position the current renderer cannot prove: the fourth row then
 says `Source-only · no visible cell` or `Source-only · position unverified`, and a
 safe snippet is only attached for a Host-owned single-text User message or an
