@@ -119,6 +119,7 @@ export interface RemoteM3ASemantics {
 export interface RemoteM3ASemanticsOptions {
   readonly promptSerializer: RemotePromptSerializer
   readonly isDispatchAllowed?: () => boolean
+  readonly signal?: AbortSignal
   /** Split-Client only: borrow the root delivery instead of per-revision `$on`. */
   readonly delivery?: SplitClientInteractionDelivery
   /** Split-Client only: the surface revision token attached to `delivery`. */
@@ -248,6 +249,7 @@ export function createRemoteM3ASemantics(
       generation,
       options.promptSerializer,
       options.isDispatchAllowed === undefined ? undefined : { isDispatchAllowed: options.isDispatchAllowed },
+      options.signal,
     ),
     // The ONE Client Remote's official `session` namespace also carries the
     // fail-closed Session-list read the historical header fallback needs.

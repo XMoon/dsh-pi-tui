@@ -17,6 +17,7 @@ import { RemoteSessionArchive } from '../../runtime/remote/session-archive-remot
 import { RemoteSessionMarkdown } from '../../runtime/remote/session-markdown-remote.ts'
 import { createRemoteBackend } from '../../runtime/remote/backend-remote.ts'
 import { RemotePromptSerializerProduction } from '../../runtime/remote/prompt-serializer-remote.ts'
+import { createRemoteFileReceiptUploader } from '../../runtime/remote/file-upload-remote.ts'
 import { RemoteHostUserShellPort } from '../../runtime/remote/host-user-shell-remote.ts'
 import { RemoteHostShellCompletionPort } from '../../runtime/remote/host-shell-completion-remote.ts'
 import { RemoteWebAccessPort } from '../../runtime/remote/web-access-remote.ts'
@@ -66,6 +67,8 @@ export interface RemoteBackendRuntimeOptions {
   readonly fetch: RemoteBackendFetch
   /** The authenticated Host listener origin from the verified Client Host identity. */
   readonly trustedHostOrigin?: string
+  /** The composition-owned surface/process lifetime for pre-prompt preparation. */
+  readonly signal?: AbortSignal
   /** The composition-owned pre-dispatch dispatch admission (the surface-stop
    *  fence the Remote session writer consults immediately before dispatch).
    *  Absent = every pre-dispatch write is admissible (the pre-fence behavior). */
@@ -125,8 +128,12 @@ export async function createRemoteBackendRuntime(
       // the official binding-scoped attachment read. An explicit injection
       // (composition tests) still wins.
       promptSerializer: options.promptSerializer
-        ?? RemotePromptSerializerProduction.overSessions(options.runtime.sessions),
+        ?? RemotePromptSerializerProduction.overSessions(
+          options.runtime.sessions,
+          createRemoteFileReceiptUploader(options.fetch),
+        ),
       ...(options.isDispatchAllowed === undefined ? {} : { isDispatchAllowed: options.isDispatchAllowed }),
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
       ...(options.delivery === undefined ? {} : { delivery: options.delivery }),
       ...(options.surfaceRevision === undefined ? {} : { surfaceRevision: options.surfaceRevision }),
       ...(options.onQualification === undefined ? {} : { onQualification: options.onQualification }),

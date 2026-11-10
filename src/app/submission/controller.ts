@@ -2171,6 +2171,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
         isViewing: () => deps.viewer.isViewing(),
         currentAgent: () => deps.liveAgent(),
         captureOwnerToken: () => deps.ownership.captureSubject(),
+        canPullBackRecalledFiles: deps.prepareTransport === undefined,
         isOwnerTokenCurrent: (token) => deps.captureMatches(token as SessionSubject | undefined),
         requireLiveScope: deps.scope.requireLive,
         readPullableQueue: (sessionId) => {

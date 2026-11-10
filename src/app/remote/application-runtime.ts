@@ -98,6 +98,7 @@ export async function createRemoteApplicationRuntimeFromClient(
     fetch: options.fetch,
     ...(options.trustedHostOrigin === undefined ? {} : { trustedHostOrigin: options.trustedHostOrigin }),
     ...(options.promptSerializer === undefined ? {} : { promptSerializer: options.promptSerializer }),
+    ...(options.signal === undefined ? {} : { signal: options.signal }),
     ...(options.delivery === undefined ? {} : { delivery: options.delivery }),
     ...(options.surfaceRevision === undefined ? {} : { surfaceRevision: options.surfaceRevision }),
     ...(options.onQualification === undefined ? {} : { onQualification: options.onQualification }),

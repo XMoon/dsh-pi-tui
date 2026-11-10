@@ -6,20 +6,29 @@
  */
 
 import assert from 'node:assert/strict'
+import { writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import test from 'node:test'
 import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
 import type { ISession, ISessions } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { ConnectionGenerationState } from '@deepseek-ai/dsh-client-connection/client'
+import { preparePrompt } from '../../../src/app/submission/prepared-prompt.ts'
+import { DraftFileStore } from '../../../src/client/media/attachment/file-draft.ts'
+import { probeAttachment } from '../../../src/client/media/attachment/intake.ts'
+import { RemotePromptSerializerProduction } from '../../../src/runtime/remote/prompt-serializer-remote.ts'
 import {
   RemoteSessionWriter,
   type RemotePromptSerializer,
+  type RemoteSerializeResult,
   type RemoteWriteBinding,
   type RemoteWriteSessionFace,
   type RemoteWriteSessionsSource,
 } from '../../../src/runtime/remote/session-writer-remote.ts'
+import { RemoteFileUploadError } from '../../../src/runtime/remote/file-upload-remote.ts'
 import { classifyRemoteWriteFailure, SESSION_WRITER_HELD_GUIDANCE } from '../../../src/runtime/remote/write-failure.ts'
 import { retainableSource, type RetainableSource } from '../../support/remote-reference-source.ts'
 import { createObservableGenerationHarness, type GenerationHarness } from '../../support/remote-generation.ts'
+import { testLifecycle } from '../../support/temp-lifecycle.ts'
 
 interface SessionCalls {
   beginInputs: unknown[]
@@ -148,14 +157,18 @@ function okSerializer(overrides: {
   return {
     preflight: () => overrides.preflightUnsupported !== undefined
       ? { kind: 'unsupported', reason: overrides.preflightUnsupported }
-      : { kind: 'ok', echo: { text: overrides.text ?? 'hello', attachments: [] } },
+      : { kind: 'ok', echo: { text: overrides.text ?? 'hello', attachments: [] }, needsFileUploads: false },
     serialize: async () => {
       overrides.onSerialize?.()
       if (overrides.serializeThrows !== undefined) throw overrides.serializeThrows
       if (overrides.serializeUnsupported !== undefined) {
         return { kind: 'unsupported', reason: overrides.serializeUnsupported }
       }
-      return { kind: 'ok', content: [{ type: 'text' as const, text: overrides.text ?? 'hello' }] }
+      return {
+        kind: 'ok',
+        content: [{ type: 'text' as const, text: overrides.text ?? 'hello' }],
+        echo: { text: overrides.text ?? 'hello', attachments: [] },
+      }
     },
   }
 }
@@ -208,9 +221,9 @@ test('steer prompt preserves the official steer mode', async () => {
 
 test('an unsupported preflight is refused before any official echo or Host mutation', async () => {
   const harness = writerHarness()
-  const writer = new RemoteSessionWriter(harness.source, harness.generation.source, okSerializer({ preflightUnsupported: 'file upload requires D4' }))
+  const writer = new RemoteSessionWriter(harness.source, harness.generation.source, okSerializer({ preflightUnsupported: 'staged image encoding is unsupported' }))
   const outcome = await writer.prompt('session-a', {}, 'queue')
-  assert.deepEqual(outcome, { kind: 'unsupported', reason: 'file upload requires D4' })
+  assert.deepEqual(outcome, { kind: 'unsupported', reason: 'staged image encoding is unsupported' })
   assert.equal(harness.calls.beginInputs.length, 0)
   assert.equal(harness.calls.promptCalls.length, 0)
 })
@@ -266,11 +279,15 @@ test('the official echo is registered after preflight and before serialization',
   const serializer: RemotePromptSerializer = {
     preflight: () => {
       order.push('preflight')
-      return { kind: 'ok', echo: { text: 'ordered', attachments: [] } }
+      return { kind: 'ok', echo: { text: 'ordered', attachments: [] }, needsFileUploads: false }
     },
     serialize: async () => {
       order.push('serialize')
-      return { kind: 'ok', content: [{ type: 'text', text: 'ordered' }] }
+      return {
+        kind: 'ok',
+        content: [{ type: 'text', text: 'ordered' }],
+        echo: { text: 'ordered', attachments: [] },
+      }
     },
   }
   const writer = new RemoteSessionWriter(harness.source, harness.generation.source, serializer)
@@ -279,6 +296,148 @@ test('the official echo is registered after preflight and before serialization',
   // pins the official ordering (it would fail if begin ran after serialize).
   assert.deepEqual(order, ['preflight', 'begin', 'serialize', 'prompt'])
   assert.equal(harness.calls.beginInputs.length, 1)
+})
+
+test('file prompt uploads before beginSubmission and registers Host-issued attachment metadata', async () => {
+  const harness = writerHarness()
+  const lifetime = new AbortController()
+  let uploadPrepared = false
+  const serializer: RemotePromptSerializer = {
+    preflight: () => ({
+      kind: 'ok',
+      echo: { text: 'file placeholder', attachments: [] },
+      needsFileUploads: true,
+    }),
+    serialize: async (_prepared, signal) => {
+      assert.equal(signal, lifetime.signal)
+      uploadPrepared = true
+      return {
+        kind: 'ok',
+        content: [
+          { type: 'text', text: 'before ' },
+          { type: 'file', receiptId: 'host-receipt-a' },
+          { type: 'text', text: ' after' },
+        ],
+        echo: {
+          text: 'before  after',
+          attachments: [{ type: 'file', value: { attachmentId: 'host-file-a', name: 'report.bin', bytes: 4 } }],
+        },
+      }
+    },
+  }
+  harness.setBeginHook(() => { assert.equal(uploadPrepared, true, 'the raw upload completed before the official echo registration') })
+  const writer = new RemoteSessionWriter(harness.source, harness.generation.source, serializer, undefined, lifetime.signal)
+
+  assert.deepEqual(await writer.prompt('session-a', {}, 'queue'), { kind: 'committed', value: undefined })
+  assert.deepEqual(harness.calls.beginInputs[0], {
+    mode: 'queue',
+    text: 'before  after',
+    attachments: [{ type: 'file', value: { attachmentId: 'host-file-a', name: 'report.bin', bytes: 4 } }],
+  })
+  assert.deepEqual(harness.calls.promptCalls[0]?.content, [
+    { type: 'text', text: 'before ' },
+    { type: 'file', receiptId: 'host-receipt-a' },
+    { type: 'text', text: ' after' },
+  ])
+  assert.equal(harness.calls.promptCalls.length, 1)
+})
+
+test('a surface stop after file upload refuses before beginSubmission and prompt', async () => {
+  const harness = writerHarness()
+  const lifetime = new AbortController()
+  let finishSerialize!: (value: RemoteSerializeResult) => void
+  let enterSerialize!: () => void
+  const serializeEntered = new Promise<void>(resolve => { enterSerialize = resolve })
+  const serialized = new Promise<RemoteSerializeResult>(resolve => { finishSerialize = resolve })
+  let dispatchAllowed = true
+  const serializer: RemotePromptSerializer = {
+    preflight: () => ({ kind: 'ok', echo: { text: 'file', attachments: [] }, needsFileUploads: true }),
+    serialize: async (_prepared, signal) => {
+      assert.equal(signal, lifetime.signal)
+      enterSerialize()
+      return await serialized
+    },
+  }
+  const writer = new RemoteSessionWriter(harness.source, harness.generation.source, serializer, {
+    isDispatchAllowed: () => dispatchAllowed,
+  }, lifetime.signal)
+  const outcome = writer.prompt('session-a', {}, 'queue')
+  await serializeEntered
+  dispatchAllowed = false
+  lifetime.abort()
+  finishSerialize({
+    kind: 'ok',
+    content: [{ type: 'file', receiptId: 'staged-receipt' }],
+    echo: { text: '', attachments: [{ type: 'file', value: { attachmentId: 'staged-file', name: 'report.bin', bytes: 4 } }] },
+  })
+
+  assert.deepEqual(await outcome, { kind: 'cancelled' })
+  assert.equal(harness.calls.beginInputs.length, 0)
+  assert.equal(harness.calls.promptCalls.length, 0)
+})
+
+test('an official file-upload business refusal keeps its code and dispatches no prompt', async () => {
+  const harness = writerHarness()
+  const lifetime = new AbortController()
+  const serializer: RemotePromptSerializer = {
+    preflight: () => ({ kind: 'ok', echo: { text: 'file', attachments: [] }, needsFileUploads: true }),
+    serialize: async () => { throw new RemoteFileUploadError('session/not-found', 'session not found') },
+  }
+  const writer = new RemoteSessionWriter(harness.source, harness.generation.source, serializer, undefined, lifetime.signal)
+
+  const outcome = await writer.prompt('session-a', {}, 'queue')
+  assert.equal(outcome.kind, 'rejected')
+  if (outcome.kind !== 'rejected') throw new Error('unreachable')
+  assert.equal(outcome.error.code, 'session/not-found')
+  assert.equal(outcome.error.message, 'session not found')
+  assert.equal(harness.calls.beginInputs.length, 0)
+  assert.equal(harness.calls.promptCalls.length, 0)
+})
+
+
+test('a multi-file prompt whose later upload fails never registers an echo or dispatches', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-f4-partial-')
+  const files = new DraftFileStore()
+  const drafts: ReturnType<DraftFileStore['add']>[] = []
+  for (const name of ['a.bin', 'b.bin']) {
+    const path = join(root, name)
+    writeFileSync(path, Buffer.from([1, 2, 3]))
+    const probe = await probeAttachment(path, root)
+    assert.equal(probe.kind, 'file')
+    if (probe.kind !== 'file') return
+    drafts.push(files.add({
+      name: probe.name,
+      byteLength: probe.byteLength,
+      source: { type: 'path', path: probe.path, fingerprint: probe.fingerprint },
+    }))
+  }
+  const prepared = preparePrompt('session-a', `${drafts[0]!.placeholder} ${drafts[1]!.placeholder}`, {
+    images: { values: () => [] },
+    files,
+  })
+  const uploads: string[] = []
+  const uploader = {
+    async upload(_sessionId: string, file: { readonly name: string }) {
+      uploads.push(file.name)
+      if (file.name === 'b.bin') throw new RemoteFileUploadError('session/attachment-invalid', 'the Host rejected the second file')
+      return { receiptId: 'receipt-a', file: { attachmentId: 'file-a', name: file.name, bytes: 3 } }
+    },
+  }
+  const serializer = RemotePromptSerializerProduction.overSessions({
+    binding: () => undefined,
+  }, uploader)
+  const harness = writerHarness()
+  const lifetime = new AbortController()
+  const writer = new RemoteSessionWriter(harness.source, harness.generation.source, serializer, undefined, lifetime.signal)
+
+  const outcome = await writer.prompt('session-a', prepared, 'queue')
+  assert.equal(outcome.kind, 'rejected')
+  if (outcome.kind !== 'rejected') throw new Error('unreachable')
+  assert.equal(outcome.error.code, 'session/attachment-invalid')
+  assert.deepEqual(uploads, ['a.bin', 'b.bin'], 'the first file may already be staged on the Host, but the prompt is never sent')
+  assert.equal(harness.calls.beginInputs.length, 0, 'no official echo is registered for a partial multi-file submission')
+  assert.equal(harness.calls.promptCalls.length, 0)
 })
 
 test('an echo-registration failure is a pre-dispatch refusal, never indeterminate', async () => {
@@ -432,9 +591,13 @@ test('a generation replaced by preflight cancels before any official echo', asyn
   const serializer: RemotePromptSerializer = {
     preflight: () => {
       harness.generation.set({ id: 2 })
-      return { kind: 'ok', echo: { text: 'late', attachments: [] } }
+      return { kind: 'ok', echo: { text: 'late', attachments: [] }, needsFileUploads: false }
     },
-    serialize: async () => ({ kind: 'ok', content: [{ type: 'text', text: 'late' }] }),
+    serialize: async () => ({
+      kind: 'ok',
+      content: [{ type: 'text', text: 'late' }],
+      echo: { text: 'late', attachments: [] },
+    }),
   }
   const writer = new RemoteSessionWriter(harness.source, harness.generation.source, serializer)
   assert.deepEqual(await writer.prompt('session-a', {}, 'queue'), { kind: 'cancelled' })

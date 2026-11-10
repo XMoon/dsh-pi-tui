@@ -81,6 +81,7 @@ export async function composeRemoteApplicationStage(input: {
   readonly fetch: RemoteBackendFetch
   readonly trustedHostOrigin?: string
   readonly promptSerializer?: RemotePromptSerializer
+  readonly signal?: AbortSignal
   readonly delivery?: SplitClientInteractionDelivery
   readonly surfaceRevision?: number
   readonly onQualification?: (record: Record<string, unknown>) => void
@@ -88,6 +89,15 @@ export async function composeRemoteApplicationStage(input: {
   let backendRuntime: RemoteBackendRuntime | undefined
   let ownerServices: ReturnType<typeof createRemoteSessionOwnerServices> | undefined
   let presentation: RemoteApplicationSource | undefined
+  let dispatchAdmissionOpen = true
+  const surfaceController = new AbortController()
+  const lifetimeSignal = input.signal === undefined
+    ? surfaceController.signal
+    : AbortSignal.any([input.signal, surfaceController.signal])
+  const stopSurfaceAdmission = (): void => {
+    dispatchAdmissionOpen = false
+    surfaceController.abort()
+  }
   /**
    * The composition-owned pre-dispatch write admission: OPEN for the whole live
    * surface, closed ONCE and synchronously by the application's surface-stop
@@ -95,13 +105,13 @@ export async function composeRemoteApplicationStage(input: {
    * parked before dispatch when the surface stops is then refused before any
    * Host dispatch instead of being admitted silently.
    */
-  let dispatchAdmissionOpen = true
   try {
     backendRuntime = await createRemoteBackendRuntime({
       runtime: input.client,
       fetch: input.fetch,
       ...(input.trustedHostOrigin === undefined ? {} : { trustedHostOrigin: input.trustedHostOrigin }),
       isDispatchAllowed: () => dispatchAdmissionOpen,
+      signal: lifetimeSignal,
       // Absent = the production serializer (see createRemoteBackendRuntime).
       ...(input.promptSerializer === undefined ? {} : { promptSerializer: input.promptSerializer }),
       ...(input.delivery === undefined ? {} : { delivery: input.delivery }),
@@ -139,10 +149,11 @@ export async function composeRemoteApplicationStage(input: {
     owners: composed.ownerServices.owners,
     retirement: composed.ownerServices.retirement,
     presentation: composed.presentation,
-    stopSurfaceAdmission: (): void => { dispatchAdmissionOpen = false },
+    stopSurfaceAdmission,
     async disposeAdapters(): Promise<void> {
       if (adaptersDisposed) return
       adaptersDisposed = true
+      stopSurfaceAdmission()
       // The presentation task drops its retained roster watch and invalidates
       // every in-flight Task read; the backend runtime then drops its adapter
       // caches/subscriptions. Both run even when the first throws; the first

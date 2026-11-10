@@ -1,23 +1,49 @@
 /**
- * Production Remote prompt serializer coverage (M3-4 PR3 Step 7, L1):
+ * Production Remote prompt serializer coverage (M3-4 PR3 Step 7 + M6 F4, L1):
  * the PreparedPrompt → official PromptContentPart mapping, the two-phase
- * preflight/serialize contract, the generic-file fail-closed gate, the
- * official imageLimits recheck, and the recalled-durable-image authorized
- * byte read.
+ * preflight/serialize contract, the official file receipt path, the official
+ * imageLimits recheck, and the recalled-durable-image authorized byte read.
  *
  * @module @xmoon76/dsh-pi-tui/remote-prompt-serializer.test
  */
 
 import assert from 'node:assert/strict'
+import { writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import test from 'node:test'
 import { preparePrompt, type PreparedImageSource } from '../../src/app/submission/prepared-prompt.ts'
+import { DraftFileStore } from '../../src/client/media/attachment/file-draft.ts'
+import { probeAttachment } from '../../src/client/media/attachment/intake.ts'
+import type { RemoteFileReceiptUploader, UploadedPromptFile } from '../../src/runtime/remote/file-upload-remote.ts'
 import {
   detachedImageLimits,
   RemotePromptSerializerProduction,
   type RemoteSerializerSessionsSource,
 } from '../../src/runtime/remote/prompt-serializer-remote.ts'
+import { testLifecycle } from '../support/temp-lifecycle.ts'
 
 const abort = new AbortController().signal
+
+/** A stage-two uploader double that reads the SAME Client-local stream. */
+function streamUploader(onUpload: (bytes: Uint8Array) => void, metadata: {
+  readonly receiptId: string
+  readonly attachmentId: string
+  readonly name: string
+}): RemoteFileReceiptUploader {
+  return {
+    async upload(_sessionId, prepared, signal): Promise<UploadedPromptFile> {
+      if (prepared.source.kind !== 'client-stream') throw new Error('recalled files must never reach the uploader')
+      const chunks: Uint8Array[] = []
+      for await (const chunk of prepared.source.open(signal)) chunks.push(chunk)
+      const bytes = Buffer.concat(chunks.map(chunk => Buffer.from(chunk)))
+      onUpload(new Uint8Array(bytes))
+      return {
+        receiptId: metadata.receiptId,
+        file: { attachmentId: metadata.attachmentId, name: metadata.name, bytes: bytes.byteLength },
+      }
+    },
+  }
+}
 
 /** A minimal staged-image source for the snapshot builder. */
 function stagedImage(overrides: Partial<PreparedImageSource> = {}): PreparedImageSource {
@@ -49,10 +75,11 @@ test('plain text preflights supported with the canonical text and zero attachmen
   assert.ok(preflight.kind === 'ok')
   assert.equal(preflight.echo.text, 'plain hello')
   assert.deepEqual(preflight.echo.attachments, [])
+  assert.equal(preflight.needsFileUploads, false, 'a text-only prompt takes the established no-upload path')
   const serialized = await serializer.serialize(prompt, abort)
   assert.ok(serialized.kind === 'ok')
-  assert.ok(serialized.kind === 'ok')
   assert.deepEqual(serialized.content, [{ type: 'text', text: 'plain hello' }])
+  assert.deepEqual(serialized.echo, { text: 'plain hello', attachments: [] })
   assert.equal(textOf(serialized.content).includes('req-1'), false,
     'the wire content never carries the local echo correlation id')
 })
@@ -79,18 +106,122 @@ test('a fresh staged image serializes its OWN bytes as an official image part', 
   assert.equal(imagePart.data, Buffer.from(new Uint8Array([10, 20, 30, 40])).toString('base64'))
 })
 
-test('a generic-file placeholder fails closed in preflight: zero beginSubmission, zero prompt parts', async () => {
-  const serializer = new RemotePromptSerializerProduction()
-  const prompt = preparePrompt('session-a', 'doc [file #1]', {
-    images: storeOf([]),
-    files: { values: () => [{ id: 1, kind: 'file', name: 'doc', byteLength: 5, placeholder: '[file #1]' }] as never },
+test('mixed text/file/image ordering and whitespace survive two file receipts in place', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-f4-mixed-')
+  const files = new DraftFileStore()
+  const drafts = [] as ReturnType<DraftFileStore['add']>[]
+  for (const [name, seed] of [['a.bin', 1], ['b.bin', 2]] as const) {
+    const path = join(root, name)
+    writeFileSync(path, Buffer.from([seed, seed + 1, seed + 2]))
+    const probe = await probeAttachment(path, root)
+    assert.equal(probe.kind, 'file')
+    if (probe.kind !== 'file') return
+    drafts.push(files.add({
+      name: probe.name,
+      byteLength: probe.byteLength,
+      source: { type: 'path', path: probe.path, fingerprint: probe.fingerprint },
+    }))
+  }
+  const receipts: string[] = []
+  const serializer = new RemotePromptSerializerProduction(undefined, {
+    async upload(_sessionId, prepared) {
+      receipts.push(prepared.name)
+      return {
+        receiptId: `receipt-${prepared.name}`,
+        file: { attachmentId: `file-${prepared.name}`, name: prepared.name, bytes: prepared.byteLength },
+      }
+    },
   })
+  const text = ` lead ${drafts[0]!.placeholder} mid [image #1 (2×2)] ${drafts[1]!.placeholder} tail `
+  const prompt = preparePrompt('session-a', text, {
+    images: storeOf([stagedImage({ name: 'inline.png' })]),
+    files,
+  })
+  const serialized = await serializer.serialize(prompt, abort)
+  assert.ok(serialized.kind === 'ok', JSON.stringify(serialized))
+  assert.deepEqual(serialized.content.map(part => part.type),
+    ['text', 'file', 'text', 'image', 'text', 'file', 'text'],
+    'the frozen segment order is preserved across two uploads and one image')
+  assert.deepEqual(receipts, ['a.bin', 'b.bin'], 'each file occurrence uploads in prompt order')
+  assert.equal((serialized.content[0] as { text: string }).text, ' lead ')
+  assert.equal((serialized.content[2] as { text: string }).text, ' mid ')
+  assert.equal((serialized.content[4] as { text: string }).text, ' ')
+  assert.equal((serialized.content[6] as { text: string }).text, ' tail ')
+  assert.equal((serialized.content[1] as { receiptId: string }).receiptId, 'receipt-a.bin')
+  assert.equal((serialized.content[5] as { receiptId: string }).receiptId, 'receipt-b.bin')
+  assert.deepEqual(serialized.echo.attachments.map(attachment => attachment.type), ['file', 'image', 'file'],
+    'echo attachments follow the source attachment order, using Host-issued file metadata')
+  assert.equal(serialized.echo.text, ' lead  mid   tail ',
+    'file placeholders are never part of the model-facing text')
+})
+
+test('a fresh generic file uploads its exact Client bytes and maps the Host receipt into ordered prompt parts', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-f4-serializer-')
+  const path = join(root, 'report.bin')
+  const source = Buffer.from('F4_SERIALIZER_BYTES_20261111')
+  writeFileSync(path, source)
+  const probe = await probeAttachment(path, root)
+  assert.equal(probe.kind, 'file')
+  if (probe.kind !== 'file') return
+  const files = new DraftFileStore()
+  const draft = files.add({
+    name: probe.name,
+    byteLength: probe.byteLength,
+    source: { type: 'path', path: probe.path, fingerprint: probe.fingerprint },
+  })
+  const uploaded: Uint8Array[] = []
+  const serializer = new RemotePromptSerializerProduction(undefined, streamUploader(
+    bytes => uploaded.push(bytes),
+    { receiptId: 'host-receipt-f4', attachmentId: 'host-file-f4', name: 'report.bin' },
+  ))
+  const prompt = preparePrompt('session-a', `before ${draft.placeholder} after`, {
+    images: storeOf([]),
+    files,
+  })
+  const preflight = serializer.preflight(prompt)
+  assert.ok(preflight.kind === 'ok', JSON.stringify(preflight))
+  assert.equal(preflight.needsFileUploads, true, 'the presence of a file derives the upload branch')
+  const serialized = await serializer.serialize(prompt, abort)
+  assert.ok(serialized.kind === 'ok', JSON.stringify(serialized))
+  assert.deepEqual(serialized.content, [
+    { type: 'text', text: 'before ' },
+    { type: 'file', receiptId: 'host-receipt-f4' },
+    { type: 'text', text: ' after' },
+  ], 'text whitespace and the original segment order survive the file receipt mapping')
+  assert.deepEqual(Buffer.from(uploaded[0]!).toString('hex'), source.toString('hex'),
+    'the uploaded stream is the fixed Client-local file version')
+  assert.deepEqual(serialized.echo, {
+    text: 'before  after',
+    attachments: [{ type: 'file', value: { attachmentId: 'host-file-f4', name: 'report.bin', bytes: source.byteLength } }],
+  }, 'the echo cites only the Host-issued metadata, never a local name/size guess')
+  assert.equal(JSON.stringify(serialized.content).includes(path), false,
+    'the Client-local path never reaches the wire content')
+})
+
+test('a recalled durable generic file is refused before any upload or echo', async () => {
+  let uploads = 0
+  const serializer = new RemotePromptSerializerProduction(undefined, {
+    async upload() {
+      uploads += 1
+      throw new Error('a recalled file must never be uploaded')
+    },
+  })
+  const files = new DraftFileStore()
+  const recalled = files.add({
+    name: 'old.bin',
+    byteLength: 3,
+    source: { type: 'recalled', ref: { attachmentId: 'sha256:old', name: 'old.bin', bytes: 3 } },
+  })
+  const prompt = preparePrompt('session-a', `resend ${recalled.placeholder}`, { images: storeOf([]), files })
   const preflight = serializer.preflight(prompt)
   assert.equal(preflight.kind, 'unsupported')
   assert.ok(preflight.kind === 'unsupported')
-  assert.match(preflight.reason, /generic file/i)
+  assert.match(preflight.reason, /stored files cannot be re-uploaded/i)
   const serialized = await serializer.serialize(prompt, abort)
   assert.equal(serialized.kind, 'unsupported')
+  assert.equal(uploads, 0, 'no Host upload is attempted for a recalled file')
 })
 
 test('the official imageLimits projection is re-applied at preflight (count and aggregate)', () => {

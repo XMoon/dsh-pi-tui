@@ -7,6 +7,8 @@ import { promisify } from 'node:util'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 import { DraftFileStore } from '../../src/client/media/attachment/file-draft.ts'
 import { admitDraftFiles } from '../../src/app/submission/direct-file-admission.ts'
+import { preparePrompt } from '../../src/app/submission/prepared-prompt.ts'
+import { RemotePromptSerializerProduction } from '../../src/runtime/remote/prompt-serializer-remote.ts'
 import { FILE_STREAM_CHUNK_BYTES } from '../../src/client/media/attachment/file-stream.ts'
 import { FileInputError } from '../../src/domain/media/errors.ts'
 import { probeAttachment } from '../../src/client/media/attachment/intake.ts'
@@ -122,6 +124,41 @@ test('generic admission streams bounded chunks and reuses recalled refs', async 
   })
   assert.equal(saves, 0)
   assert.deepEqual(recalledRefs[0], { attachmentId: 'sha256:old', name: 'old.bin', bytes: 3 })
+})
+
+test('a file changed after /attach never becomes an uploadable prepared prompt', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-attachment-')
+  const path = join(root, 'remote-mutable.bin')
+  const original = Buffer.alloc(FILE_STREAM_CHUNK_BYTES * 2, 5)
+  await writeFile(path, original)
+  const probe = await probeAttachment(path, root)
+  assert.equal(probe.kind, 'file')
+  if (probe.kind !== 'file') return
+  const files = new DraftFileStore()
+  const draft = files.add({
+    name: probe.name,
+    byteLength: probe.byteLength,
+    source: { type: 'path', path: probe.path, fingerprint: probe.fingerprint },
+  })
+  const prepared = preparePrompt('session-a', `remote ${draft.placeholder}`, { images: new DraftImageStore(), files })
+  // The source is replaced AFTER the immutable snapshot was prepared: the
+  // Remote upload must refuse the new bytes and produce no receipt.
+  await writeFile(path, Buffer.alloc(3, 9))
+  let receipts = 0
+  const serializer = new RemotePromptSerializerProduction(undefined, {
+    async upload(_sessionId, prepared, signal) {
+      if (prepared.source.kind !== 'client-stream') throw new Error('unexpected recalled source')
+      for await (const _chunk of prepared.source.open(signal)) { /* consume */ }
+      receipts += 1
+      return { receiptId: 'unexpected', file: { attachmentId: 'unexpected', name: prepared.name, bytes: 3 } }
+    },
+  })
+  await assert.rejects(
+    serializer.serialize(prepared, new AbortController().signal),
+    (error: unknown) => error instanceof FileInputError && error.message.includes('changed since it was attached'),
+  )
+  assert.equal(receipts, 0, 'the Remote path never obtains a Host receipt for changed bytes')
 })
 
 test('file mutation before or during streaming rejects and never completes admission', async (t) => {

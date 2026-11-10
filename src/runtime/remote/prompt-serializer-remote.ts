@@ -6,17 +6,18 @@
  * Two-phase, mirroring the official Client contract consumed by
  * `RemoteSessionWriter`:
  *
- * - `preflight` is CHEAP and runs BEFORE `beginSubmission` (an unsupported
- *   payload never creates an official echo): plain text is always supported;
- *   staged images are supported when their metadata is representable; a
- *   generic-file placeholder is UNSUPPORTED (no D4 receipt transaction) —
- *   zero beginSubmission, zero Host prompt.
- * - `serialize` runs AFTER the echo is registered (image encoding may be
- *   expensive): text parts pass through verbatim, fresh image drafts become
- *   official image parts carrying their OWN bytes, and a RECALLED image
- *   (no local bytes; already durable) first reads its authorized bytes
- *   through the official `session/attachment` — never by citing the
- *   Host-private reference.
+ * - `preflight` is CHEAP and runs BEFORE any Host mutation: plain text is always
+ *   supported; staged images are supported when their metadata is representable;
+ *   a fresh generic file is supported when the official raw upload capability is
+ *   composed, while a RECALLED durable generic file is reported unsupported
+ *   (no official Client carrier re-binds a new receipt) — zero
+ *   `beginSubmission`, zero Host prompt.
+ * - `serialize` may upload each fresh generic file through the official
+ *   authenticated raw route and maps the returned receipt; text parts pass
+ *   through verbatim and fresh image drafts become official image parts
+ *   carrying their OWN bytes. A RECALLED image (no local bytes; already
+ *   durable) first reads its authorized bytes through the official
+ *   `session/attachment` — never by citing the Host-private reference.
  *
  * The serializer never re-queries the mutable DraftImageStore: it consumes
  * the gesture's immutable PreparedPrompt snapshot only.
@@ -26,6 +27,7 @@
 
 import type { PreparedPrompt } from '../prepared-prompt.ts'
 import type { ImageAttachmentRefLike } from '../../domain/media/types.ts'
+import type { RemoteFileReceiptUploader, UploadedPromptFile } from './file-upload-remote.ts'
 import type {
   RemotePendingAttachment,
   RemotePromptContentPart,
@@ -101,16 +103,21 @@ export function detachedImageLimits(value: unknown): RemoteImageLimits | undefin
 /** The production Remote prompt serializer. */
 export class RemotePromptSerializerProduction implements RemotePromptSerializer {
   private readonly attachments: RemoteAttachmentBytesSource | undefined
+  private readonly uploader: RemoteFileReceiptUploader | undefined
   private sessions: RemoteSerializerSessionsSource | undefined
 
-  constructor(attachments?: RemoteAttachmentBytesSource) {
+  constructor(attachments?: RemoteAttachmentBytesSource, uploader?: RemoteFileReceiptUploader) {
     this.attachments = attachments
+    this.uploader = uploader
   }
 
   /** Build the production serializer over the official Client sessions face:
    * recalled durable images read their authorized bytes through the exact
    * retained binding, addressed by the PreparedPrompt's own session id. */
-  static overSessions(sessions: RemoteSerializerSessionsSource): RemotePromptSerializerProduction {
+  static overSessions(
+    sessions: RemoteSerializerSessionsSource,
+    uploader?: RemoteFileReceiptUploader,
+  ): RemotePromptSerializerProduction {
     const serializer = new RemotePromptSerializerProduction({
       async readAttachment(sessionId, attachment) {
         const binding = sessions.binding(sessionId)
@@ -121,7 +128,7 @@ export class RemotePromptSerializerProduction implements RemotePromptSerializer 
         if (result.ok) return { ok: true, data: result.value.data }
         return { ok: false, error: (result as { readonly error: unknown }).error }
       },
-    })
+    }, uploader)
     serializer.sessions = sessions
     return serializer
   }
@@ -131,10 +138,13 @@ export class RemotePromptSerializerProduction implements RemotePromptSerializer 
     if (prompt === undefined || prompt === null || typeof prompt !== 'object' || !Array.isArray(prompt.segments)) {
       return { kind: 'unsupported', reason: 'the submission carries no prepared prompt snapshot' }
     }
-    // Generic files have no receipt transaction at this cut (D4): fail
-    // closed BEFORE any official echo exists.
-    if (prompt.hasFiles) {
-      return { kind: 'unsupported', reason: 'generic file attachments require an upload receipt this Remote composition does not provide' }
+    const fileSegments = prompt.segments
+      .filter((segment): segment is Extract<typeof segment, { type: 'file' }> => segment.type === 'file')
+    if (fileSegments.some(segment => segment.file.source.kind === 'recalled-unsupported')) {
+      return { kind: 'unsupported', reason: 'stored files cannot be re-uploaded by this Client' }
+    }
+    if (fileSegments.length > 0 && this.uploader === undefined) {
+      return { kind: 'unsupported', reason: 'the official file upload capability is unavailable in this composition' }
     }
     // Every image must be representable: a fresh draft carries its own
     // bytes; a recalled draft needs the official attachment read.
@@ -176,6 +186,7 @@ export class RemotePromptSerializerProduction implements RemotePromptSerializer 
       .join('')
     return {
       kind: 'ok',
+      needsFileUploads: fileSegments.length > 0,
       echo: {
         text: echoText,
         attachments: prompt.segments
@@ -190,10 +201,9 @@ export class RemotePromptSerializerProduction implements RemotePromptSerializer 
     if (prompt === undefined || prompt === null || typeof prompt !== 'object' || !Array.isArray(prompt.segments)) {
       return { kind: 'unsupported', reason: 'the submission carries no prepared prompt snapshot' }
     }
-    if (prompt.hasFiles) {
-      return { kind: 'unsupported', reason: 'generic file attachments require an upload receipt this Remote composition does not provide' }
-    }
+    const hasFiles = prompt.segments.some(segment => segment.type === 'file')
     const parts: RemotePromptContentPart[] = []
+    const echoAttachments: RemotePendingAttachment[] = []
     for (const segment of prompt.segments) {
       signal?.throwIfAborted()
       if (segment.type === 'text') {
@@ -202,32 +212,52 @@ export class RemotePromptSerializerProduction implements RemotePromptSerializer 
       }
       if (segment.type === 'image') {
         const image = segment.image
+        let bytes = image.bytes
         if (image.recalledRef !== undefined) {
-          // A recalled image is already durable: read the authorized bytes
-          // through the official attachment read, then submit ordinary
-          // official image data (never cite the Host-private reference).
+          // Recalled images use the exact retained Session's authorized read;
+          // generic recalled files have no matching official Client carrier.
           const source = this.attachments!
           const read = await source.readAttachment(prompt.sessionId, image.recalledRef)
           signal?.throwIfAborted()
           if (!read.ok) {
             return { kind: 'unsupported', reason: `the durable image bytes could not be read for re-send (${String(read.error)})` }
           }
-          parts.push({
-            type: 'image',
-            mediaType: image.mediaType,
-            data: base64Of(read.data),
-            ...(image.name !== undefined ? { name: image.name } : {}),
-          })
-          continue
+          bytes = read.data
         }
         parts.push({
           type: 'image',
           mediaType: image.mediaType,
-          data: base64Of(image.bytes),
+          data: base64Of(bytes),
           ...(image.name !== undefined ? { name: image.name } : {}),
         })
+        echoAttachments.push(previewOf(image))
+        continue
       }
+      const file = segment.file
+      if (file.source.kind === 'recalled-unsupported') {
+        return { kind: 'unsupported', reason: 'stored files cannot be re-uploaded by this Client' }
+      }
+      if (this.uploader === undefined) {
+        return { kind: 'unsupported', reason: 'the official file upload capability is unavailable in this composition' }
+      }
+      if (signal === undefined) {
+        return { kind: 'unsupported', reason: 'file upload requires a live Client surface signal' }
+      }
+      const uploaded: UploadedPromptFile = await this.uploader.upload(prompt.sessionId, file, signal)
+      signal.throwIfAborted()
+      parts.push({ type: 'file', receiptId: uploaded.receiptId })
+      echoAttachments.push({ type: 'file', value: uploaded.file })
     }
-    return { kind: 'ok', content: Object.freeze(parts) }
+    const echoText = hasFiles
+      ? prompt.segments.filter((segment): segment is Extract<typeof segment, { type: 'text' }> => segment.type === 'text')
+        .map(segment => segment.text).join('')
+      : prompt.segments
+        .map(segment => segment.type === 'text' ? segment.text : segment.type === 'image' ? '[image]' : '[file]')
+        .join('')
+    return {
+      kind: 'ok',
+      content: Object.freeze(parts),
+      echo: { text: echoText, attachments: Object.freeze(echoAttachments) },
+    }
   }
 }
