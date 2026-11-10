@@ -26,7 +26,9 @@ import { runOwned } from '../../runtime/process/tasks.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import { ImageInputError } from '../../domain/media/errors.ts'
 import type { FileAttachmentRefLike, ImageAttachmentRefLike } from '../../domain/media/types.ts'
+import { WorkspaceSelectionError } from '../../runtime/session-lifecycle-port.ts'
 import { runReservedSubmit } from './submit-flow.ts'
+
 import type { DraftImageStore } from '../../client/media/image/draft-store.ts'
 import { consumeDraftAttachments, draftHasAttachments, draftHasImages, pinDraftAttachments } from '../../client/media/draft-attachments.ts'
 import { prepareUserMessage, type DirectPrepareInputDeps } from './direct-message-preparation.ts'
@@ -208,7 +210,11 @@ export interface SubmissionControllerDeps<ExactAgent extends SubmissionAgentLike
   /** The status owner seam (the history cwd read). */
   readonly status: { sessionCwd(): string }
   /** The mounted-surface pending-input refresh. */
-  readonly surface: { refreshPendingInput(): void }
+  readonly surface: {
+    refreshPendingInput(): void
+    /** Open the same Browser only after the submission flow has restored a rejected first-session draft. */
+    openWorkspaceChooserAfterRestore?(): void
+  }
   /** The input-history owner seams (the owner's write policy + the
    *  deferred-start ordering gate). */
   readonly history: {
@@ -1342,6 +1348,9 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
         settleLocalSubmission(submitRequestId)
         settleLocalSubmitAck('failure', { token: submitAckToken, terminal: true })
         notifySubmissionFailure(error)
+        if (error instanceof WorkspaceSelectionError && error.kind !== 'superseded') {
+          deps.surface.openWorkspaceChooserAfterRestore?.()
+        }
       },
       // runOwned routes cancellations EXCLUSIVELY to onCancel: a
       // cancelled deferred create / image admission / barrier write

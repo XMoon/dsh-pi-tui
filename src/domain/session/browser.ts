@@ -21,12 +21,15 @@ export function sessionRowMatchesQuery(row: {
   readonly title?: string
   readonly cwd?: string
   readonly preset?: string
+  readonly workspace?: { readonly title: string; readonly path: string }
 }, query: string): boolean {
   const needle = query.toLowerCase()
   return row.id.toLowerCase().includes(needle)
     || (row.title ?? '').toLowerCase().includes(needle)
     || (row.cwd ?? '').toLowerCase().includes(needle)
     || (row.preset ?? '').toLowerCase().includes(needle)
+    || (row.workspace?.title ?? '').toLowerCase().includes(needle)
+    || (row.workspace?.path ?? '').toLowerCase().includes(needle)
 }
 
 /** Lexical workspace equality; absent and empty roots match nothing. */

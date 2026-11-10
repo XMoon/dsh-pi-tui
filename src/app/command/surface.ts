@@ -312,6 +312,8 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
   }
   /** The bound session runtime entries the runner drives. */
   readonly session: {
+    readonly workspaceNextIntent?: TuiCommandRunner['workspaceNextIntent']
+    readonly cwd?: string
     ensureSession(): Promise<void>
     withWriter: CommandSessionRuntime['withWriter']
     switchSession(sessionId: string, expectedScope?: SessionScope): Promise<string | undefined>
@@ -479,7 +481,12 @@ export interface CommandSurface<Selection extends ModelSelectionValue, ExactAgen
    * browse scope (`'all'`); the Welcome and every pre-existing caller omit it
    * and keep the Current default.
    */
-  openSessionBrowser(scope?: 'current' | 'all'): void
+  openSessionBrowser(scope?: 'current' | 'all' | {
+    readonly scope?: 'current' | 'all'
+    readonly addDirectory?: boolean
+    readonly initialDirectoryEntry?: boolean
+    readonly initialDirectoryPath?: string
+  }): void
   /** Whether that `/sessions` UI entry is actually installed (registered AND
    *  presentable on this mount) — the business-entry fact the Welcome button
    *  paints, never the presence of a painted button. */
@@ -629,7 +636,12 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
    * Browser of its own.
    */
   let sessionBrowserOpener:
-    ((scope?: 'current' | 'all') => Promise<import('@deepseek-ai/dsh-commands').CommandResult>) | undefined
+    ((scope?: 'current' | 'all' | {
+      readonly scope?: 'current' | 'all'
+      readonly addDirectory?: boolean
+      readonly initialDirectoryEntry?: boolean
+      readonly initialDirectoryPath?: string
+    }) => Promise<import('@deepseek-ai/dsh-commands').CommandResult>) | undefined
 
   /** Consume TUI-local command draft dispositions after DSH normalizes the
    * public CommandResult. A missing id is used only for a thrown command
@@ -910,7 +922,12 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
    * session list and switches nothing: every settlement, notice, cancel and
    * stale check stays with the `/sessions` command and its Browser owner.
    */
-  const openSessionBrowser = (scope?: 'current' | 'all'): void => {
+  const openSessionBrowser = (scope?: 'current' | 'all' | {
+    readonly scope?: 'current' | 'all'
+    readonly addDirectory?: boolean
+    readonly initialDirectoryEntry?: boolean
+    readonly initialDirectoryPath?: string
+  }): void => {
     if (!commandsRegistered || sessionBrowserOpener === undefined) {
       deps.notify('session resume is unavailable in this session (the /sessions command is not registered)', 'error')
       return
@@ -1236,6 +1253,7 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       currentNotificationMode: () => deps.surface.currentNotificationMode(),
       currentNotificationMethod: () => deps.surface.currentNotificationMethod(),
       setTerminalProgressMode: (mode) => deps.surface.setTerminalProgressMode(mode),
+      workspaceNextIntent: deps.session.workspaceNextIntent,
       ensureSession: () => deps.session.ensureSession(),
       get selected() { return deps.model.selected },
       // Legacy/display facade: the newest SESSIONLESS `/model` intent (pending

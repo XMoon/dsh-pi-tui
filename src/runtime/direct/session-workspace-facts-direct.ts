@@ -50,7 +50,10 @@ function workspaceFactOf(entity: WorkspaceFactEntityLike): SessionWorkspaceFact 
   return {
     workspaceId: String(entity.id),
     path: entity.path,
-    title: entity.title,
+    // A Host Workspace can exist without a display title (a fresh create);
+    // the TUI fact carries display text, so an absent title is empty and the
+    // projection applies its own ONE fallback label.
+    title: entity.title ?? '',
     sessionIds: entity.sessionIds.map(String),
   }
 }

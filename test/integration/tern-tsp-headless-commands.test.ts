@@ -1058,7 +1058,14 @@ test('a /copy success that outlives its Session is not announced on the replacem
     await submitInput(fixture, '/sessions')
     await waitFor('the Session Browser is ready', () => pickerNode(fixture.pane, 'session-browser-') !== undefined, 25_000)
     const browserId = pickerNode(fixture.pane, 'session-browser-')!.id
-    sendAction(fixture.pane, 'scope', 'all', browserId)
+    // The persisted target Session can live in a non-current Workspace Folder,
+    // which starts collapsed: expand every collapsed official Folder instead of
+    // the retired cross-workspace scope switch.
+    const collapsedFolders = (): string[] => {
+      const items = (pickerProps(fixture.pane, 'session-browser-').items ?? []) as Array<Record<string, unknown>>
+      return items.filter(item => String(item.id).startsWith('workspace:') && item.open !== true).map(item => String(item.id))
+    }
+    for (const folderId of collapsedFolders()) sendActivate(fixture.pane, folderId, browserId)
     await waitFor('the target row is listed', () => {
       const items = (pickerProps(fixture.pane, 'session-browser-').items ?? []) as Array<{ id?: unknown }>
       return items.some(item => String(item.id).includes('f5-target-b'))

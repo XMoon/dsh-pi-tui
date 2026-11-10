@@ -164,9 +164,10 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
 
 - **The Host Editor `←←` entry is contextual, never a global binding.** Two
   independent, unmodified `Left` presses within 600 ms from the empty PiTUI Host
-  main Editor open the SAME fullscreen Workspace with the frozen
-  `All workspaces` initial scope, while bare `/sessions`, bare `/resume` and the
-  Welcome entry keep `Current`. The gesture requires the Host editor to be the
+  main Editor open the SAME fullscreen Workspace with the All browse intent,
+  while bare `/sessions`, bare `/resume` and the Welcome entry carry the Current
+  intent (only that intent still decides the one-time missing-Current notice;
+  every entry browses the complete official Workspace tree). The gesture requires the Host editor to be the
   real physical keyboard owner on the main surface, prompt mode and a strictly
   empty draft: any text (whitespace included), a staged attachment, an
   in-flight bracketed paste, an open autocomplete and every higher-priority
@@ -179,24 +180,62 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   restores the same Session, draft, editor focus and screen; the gesture never
   switches, stops or writes by itself. TSP has no PiTUI TuiApp, installs no such
   entry and keeps its native Browser.
-- **ONE list, one row per Session.** The browse list paints `Needs attention` →
-  `Working` → `Recent`, omitting an empty group. A Session belongs to exactly
-  one group and appears once; inside a group the official `updatedAt` orders
-  rows newest first and the roster order breaks ties. A `Needs attention` row
-  that is also running stays ONE row and reports the running sub-fact instead of
-  a second row. There are no Type tabs, no `Completed` group and no second list.
-- **Activity is sampled, never inferred.** One accepted roster revision (the
-  read owner's `listRevision`) produces ONE sample from the existing
-  `SessionWorkspaceFactsPort.readActivity(rows, signal)` over the read owner's
-  own roster array. A projection batch, a search page, a repaint or a repeated
-  snapshot never re-reads the same batch; a newer revision aborts the older
-  sample, and a sample the current open no longer owns is inert. `running`,
-  `pending` and `attentionSourceState` keep their own provenance: `running:
-  undefined` is `Running unknown`, never idle, and `unknown`/`unavailable`/
-  `denied` are distinct visible states, never `No pending`. A `Working` row
-  keeps its unproved pending state visible beside the running fact
-  (`Pending unknown · Working`, `Pending denied · Working`), never a bare
-  `Working`.
+- **Workspace-first list, one row per Session.** The browse list paints official
+  Workspace folders in Host follow order. Each folder contains one row per listed
+  Session; within it, active priorities are Needs, Working, then ordinary
+  history, each ordered by official `updatedAt` with the previous order as the
+  tie-break. Only ordinary history is watermarked, and the watermark is
+  RENDERER-LOCAL to one Browser open. The current Workspace starts expanded with
+  eight ordinary rows; a non-current Workspace with confirmed Needs/Working
+  starts expanded with those active rows and zero ordinary history; every other
+  Workspace starts as its Folder row only. Explicit manual collapse hides EVERY
+  child row, active and current ones included, and leaves the Folder row with
+  its trustworthy counts; `Enter`/`Right` restores the automatic view, `Left`
+  collapses again. An expanded non-current Workspace starts at five ordinary
+  rows (the current or a Host-confirmed next-create destination at eight), and
+  `Show more` adds five more; the operation disappears when history is
+  exhausted. Folder, Session and Show more are separate typed targets, not
+  PickerGroup headers.
+- **A sessionless destination is not a Current Session.** A Host-verified
+  next-create Workspace is ordered first and painted `Next` with the same
+  eight-row history watermark; it never renders as `Current`, because Current
+  means the opened Session's unique official membership.
+- **Choose/add a directory returns through the same Browser lifecycle.** The
+  sessionless Welcome's Choose directory opens the same `/sessions` Browser at
+  its full Workspace folder tree; a Folder row's `Use directory` (sessionless
+  only) commits that official Workspace as the next-create intent and returns.
+  A first submit refused by the Host Workspace preflight opens the same Browser
+  only AFTER the submission owner has restored the draft, directly in its Host
+  absolute-path submode with the refused path prefilled for correction. The
+  path submode paints `Use directory` and `Cancel`, accepts only an absolute
+  Host path, and dispatches at most one Host resolution until it settles; a
+  rejection keeps the text and the previously confirmed intent, while a
+  success commits the next-create intent. That chooser returns to the Welcome
+  only after success; ordinary Browser Add returns to Browse. `New session` on
+  a Folder reuses the existing `/new` transaction with that `workspaceId`, keeps
+  the old Session until the commit, reports a refusal, and retires the Browser
+  only after a committed switch.
+- **A sessionless mount verifies its launch directory once.** The sessionless
+  mount resolves the launch `host-path` proposal through the official Host
+  Workspace lifecycle, so the Welcome states a Host-confirmed canonical
+  directory before the first message and the Browser can expand that confirmed
+  destination. The first create awaits the SAME in-flight resolution and then
+  revalidates the committed `workspaceId`; a failed preflight marks the
+  Welcome rejected once and never creates a Session or replays a message.
+- **The next-create intent is Client-local and runner-scoped.** One
+  `WorkspaceNextIntentOwner` carries the proposal, its verification generation
+  and the last confirmed Workspace id. Directory selection or verification
+  changes only that intent; a committed create consumes the captured intent, a
+  stale intent fails before any Host `create`, and a failed preflight marks the
+  Welcome status rejected without replacing the confirmed target.
+- **Activity is sampled, never inferred.** One accepted roster revision produces
+  one sample from `SessionWorkspaceFactsPort.readActivity` over the read owner's
+  roster. Activity generation and eligibility updates are separate from
+  Workspace membership revision, and stale roster results are inert. `running`,
+  `pending` and `attentionSourceState` retain provenance. Unknown/unavailable/
+  denied facts remain complete in Peek/Details; compact rows hide them rather
+  than printing them once per Session. A Working row paints `Working`, while
+  only confirmed answerability paints `Needs attention`.
 - **Answerability is a gate, not a classification.** Only a pending candidate
   this Client can really answer may enter `Needs attention`: a live forwarded
   Question/Approval invocation held by the Client-root delivery owner
@@ -210,19 +249,12 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   Activity sample and every eligibility change applies in the SAME frame: a
   revoked answerability immediately leaves `Needs attention` and its count,
   because a classification is a fact and not a deferred animation.
-- **One Workspace scope union.** `All workspaces`, `Current workspace`, every
-  official Workspace in `follow` order and `Unassigned` are the only options,
-  chosen in place from the header (no second screen). `Current` is proved only
-  by a unique official `sessionIds` membership; an ambiguous, missing, denied or
-  lost membership falls back to `All workspaces` with one explicit status and a
-  cwd never proves membership. `Unassigned` requires a valid baseline and never
-  claims a Session with one or more memberships. A failed or ended follow
-  invalidates the membership proof instead of keeping stale members.
-- **Outside attention is truthful or it is unknown.** Under a narrowed scope the
-  header reports the count of proved Needs rows outside it only when every other
-  listed row's pending fact is proved; otherwise it says
-  `Outside attention unknown` and paints no number, and "0 outside" is stated
-  only when it is proved.
+- **Workspace baseline is the membership authority.** Browse folders use official
+  `workspaceId`/`sessionIds` in follow order. A missing, denied, failed or ended
+  follow invalidates membership and keeps the roster usable as a flat fallback;
+  cwd never proves membership. Ambiguous and unassigned rows are explicit only
+  after a valid baseline. There is no `w` key that changes a scope selector.
+- **Attention stays inside its Workspace.** Needs/Working are row priorities inside each official Workspace folder, never a cross-folder section or a reason to filter out sibling folders. Browse scope is not narrowed, so the header paints no outside-attention count.
 - **Search stays global.** The panel never re-filters the Host's bounded search
   page by the browse scope; only a real editor text change reaches the read
   owner's one debounced Host search generation. `Enter` in the editor only moves
@@ -232,30 +264,26 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   painted row (identity, official Workspace membership, cwd, preset, updated,
   running, pending, source) and nothing else: no Agent, no Question/Approval
   form, no Session `open`/`retain`, no writer and no Host call. `Esc` returns to
-  the previous focus with the same selection, scope, query and scroll; `Enter`
+  the previous focus with the same selection, query and scroll; `Enter`
   opens the PINNED Session and still has to pass the read owner's
   eligibility/currentness before any switch. The Peek is pinned to ITS Session
   id: if a roster/search refresh no longer lists that Session, the Peek exits to
   its previous focus and the list re-anchors on a listed row — it never silently
   shows, or switches to, a different Session.
-- **Focus ring and layout.** `Tab`/`Shift+Tab` cycle list → Workspace selector →
-  search editor → list without submitting or consuming a literal `/`. From
+- **Focus ring and layout.** `Tab`/`Shift+Tab` cycle the Folder/Session list,
+  global search editor and action bar without consuming a literal `/`. From
   `112x12` the frame is two columns: the list keeps at least 44 cells, a
   two-cell gap, and the rest is the read-only preview/Peek; below that it is one
   column. Frame-level facts (search editor, status and Host error lines, help)
   span the full width; the Esc action bar is always the last physical row, and a
   short frame withholds activation instead of opening a row it did not paint.
 - **Mouse is the last painted hit-map.** One render commits a frame revision and
-  the REAL painted cell ranges of list rows, search results, selector options,
-  the `w`/`/ Search` header hints, the Peek back affordance and the
-  outside-attention line. A click acts only on the SAME frame revision and the
-  SAME target range as its press; any scroll, resize, scope, search, Activity or
-  content change between press and release drops the gesture. A hit region uses
-  the SAME cell budget as the paint, so a header hint the frame clipped (for
-  example `[w]` behind a long Workspace label) has no region and can never take
-  a click from the affordance that is really painted. A plain row click
-  only selects — `Enter` stays the only Resume verb — and an item the frame did
-  not paint has no hit region at all.
+  the REAL painted cell ranges of Folder, Session, Show more, search results,
+  Peek back targets. A click acts only on the SAME frame
+  revision and SAME target range as its press; any scroll, resize, search,
+  Activity or content change between press and release drops the gesture. A
+  plain Session click only selects; Folder and Show more clicks are local
+  presentation actions; Resume stays the guarded Enter verb.
 - **One lifecycle.** Each open keeps exactly one Workspace follow, one roster
   read owner, one Activity sample generation and one fullscreen lease. The close
   path aborts list/search/Activity, disposes the follow once, stops the screen

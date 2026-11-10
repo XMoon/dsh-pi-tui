@@ -173,6 +173,7 @@ export interface StatusRuntimeDeps {
   readonly diag: Diag
   /** The resolved CLIENT working directory (a composition prerequisite). */
   readonly clientCwd: string
+  readonly nextWorkspaceIntent?: () => import('../session/workspace-next-intent.ts').WorkspaceNextIntentSnapshot
   /**
    * The permission-cycle authority (M3-4 PR4 §6.2/§6.3): the current value
    * is the SESSION STATUS PROJECTION's permission field (projection-
@@ -360,6 +361,13 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
       const facts = deps.remote === undefined ? undefined : mainSessionStatus()
       if (facts === undefined) {
         deps.surface.display.setWelcomeIdle(true)
+        const next = deps.nextWorkspaceIntent?.()
+        deps.surface.display.setWelcomeWorkspace?.(next === undefined ? { path: deps.clientCwd, status: 'proposed' } : {
+          path: next.displayPath ?? deps.clientCwd,
+          status: next.status,
+          ...(next.workspaceId === undefined ? {} : { workspaceId: next.workspaceId }),
+          ...(next.error === undefined ? {} : { error: next.error }),
+        })
         return
       }
       deps.surface.display.setWelcomeCard({

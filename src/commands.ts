@@ -39,6 +39,7 @@ import type { CommandInvocation, CommandResult, CommandDescriptor, CommandDefini
 import { CommandDefinitionId } from '@deepseek-ai/dsh-commands'
 import { TransitionInProgressError } from './app/session/operation-barrier.ts'
 import { SessionScopeSupersededError, type LiveSessionScope, type SessionScope } from './app/session/scope.ts'
+import type { WorkspaceNextIntentOwner } from './app/session/workspace-next-intent.ts'
 import type { SessionSwitchOutcome } from './app/session/runtime.ts'
 import type { NavigationIntent } from './app/session/transition.ts'
 import type { ClientReloadProcessRefusal } from './app/application-runtime.ts'
@@ -398,6 +399,8 @@ export interface TuiCommandRunner {  ctx: Context
   setModelSelectionPending(selection: ModelSelection | undefined, token?: number, status?: 'pending' | 'unresolved'): void
   /** The TUI settings document, when the settings service is present. */
   readonly tuiSettings: TuiSettingsLike | undefined
+  /** The Client-local next-create intent and its generation-fenced display projection. */
+  readonly workspaceNextIntent?: WorkspaceNextIntentOwner
   /** The session lifecycle port (D2.1): /new and /fork create/open sessions
    * through semantic requests (the Direct adapter resolves the preset
    * composition internally). */
@@ -1077,7 +1080,7 @@ export function registerTuiCommands(
    * The optional scope is the PiTUI Host Editor gesture's initial browse
    * scope (`'all'`); the Welcome calls it without one and keeps Current.
    */
-  openSessionBrowser?(scope?: 'current' | 'all'): Promise<CommandResult>
+  openSessionBrowser?(scope?: 'current' | 'all' | { readonly scope?: 'current' | 'all'; readonly addDirectory?: boolean }): Promise<CommandResult>
 } {
   const { ctx, app } = runner
   // PR3-A: `app` is undefined while a non-PiTui renderer owns the terminal

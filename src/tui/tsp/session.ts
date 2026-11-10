@@ -323,7 +323,7 @@ export interface TspInputHandlers {
    * owns no listing, no Session id and no switch: it re-checks its own seat
    * admission and forwards.
    */
-  openSessionBrowser(): void
+  openSessionBrowser(options?: { readonly addDirectory?: boolean }): void
   /** Whether that `/sessions` business entry is actually installed (registered
    *  AND presentable on this mount). The Welcome paints its real state. */
   sessionBrowserAvailable(): boolean
@@ -748,6 +748,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    * selection. No Session facts, no id, no history and no second cache.
    */
   let welcomeEligibility: DisplayWelcomeEligibility = 'hidden'
+  let welcomeWorkspace: import('../../app/surface/display-seam.ts').DisplayWelcomeWorkspace | undefined
   /**
    * TSP-7 Welcome D: the whale pick of THIS mount, drawn ONCE and never
    * re-drawn: a repaint, a resize, a status refresh or a Browser cancel keeps
@@ -1862,6 +1863,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
           // that never advertised it must not be sent an icon node.
           nativeIcon: session.caps.kinds.includes('icon'),
           scopeKey: scopePrefix,
+          workspacePath: welcomeWorkspace?.path,
+          workspaceStatus: welcomeWorkspace?.status,
+          workspaceError: welcomeWorkspace?.error,
+          onChooseDirectory: welcomeChooseDirectoryClicked,
           onResume: welcomeResumeClicked,
         })
       : lastMain
@@ -3151,6 +3156,11 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // Main empty state is decided ONLY by the idle commit and the live
       // subject's transcript commit.
     },
+    setWelcomeWorkspace(workspace) {
+      if (disposed) return
+      welcomeWorkspace = workspace
+      render()
+    },
     setWelcomeIdle(idle) {
       if (disposed) return
       // The application's OWN formal sessionless commit — the one source of
@@ -3338,6 +3348,17 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    * PR3-B §3.4 before-callback ordering). No business-level filtering lives
    * here: the submission controller owns admission, rollback and the queue.
    */
+  function welcomeChooseDirectoryClicked(): void {
+    if (!visualActionsAdmitted() || !welcomeMainPresented()) return
+    const handlers = boundHandlers
+    if (handlers === undefined || !handlers.sessionBrowserAvailable()) return
+    try {
+      handlers.openSessionBrowser({ addDirectory: true })
+    } catch (error) {
+      display.notify('Directory selection is unavailable in this session.', 'error')
+      options.logError?.('tsp renderer: welcome directory chooser refused', { error: errorText(error) })
+    }
+  }
   const submitComposerDraft = (handlers: TspInputHandlers, gesture: 'enter' | 'accelerated'): void => {
     handlers.noteUserInput()
     const serializedDraft = composer.getDraft()

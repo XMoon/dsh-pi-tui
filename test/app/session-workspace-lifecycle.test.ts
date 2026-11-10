@@ -520,7 +520,7 @@ function harness(options: {
 
 const baseline = (...items: readonly SessionWorkspaceFact[]): WorkspaceFactsFrame => ({ type: 'baseline', items })
 
-test('/sessions opens the ONE fullscreen lease and proves Current only from official Workspace membership', async () => {
+test('/sessions opens the ONE fullscreen lease and lists sibling official Workspace folders', async () => {
   let resolveList!: (rows: SessionSummary[]) => void
   const h = harness({
     currentSessionId: CURRENT,
@@ -543,23 +543,19 @@ test('/sessions opens the ONE fullscreen lease and proves Current only from offi
   await waitUntil(() => h.view().includes('Current workspace'), 'the official baseline resolves the scope')
   const scoped = h.view()
   assert.ok(scoped.includes('Current: curren'), `Current is the captured Session:\n${scoped}`)
-  assert.ok(scoped.includes('Current session'), 'the proved member row paints')
-  assert.ok(!scoped.includes('Other session') && !scoped.includes('Third session'),
-    'a same-cwd Session in ANOTHER WorkspaceId never joins Current')
+  assert.ok(scoped.includes('Current session'), 'the current Workspace member paints')
+  assert.ok(scoped.includes('project-b · 2'), `a sibling Workspace Folder remains available:\n${scoped}`)
+  assert.ok(!scoped.includes('Other session') && !scoped.includes('Third session'), 'non-current ordinary history remains behind its Show more watermark')
 
   // All restores every listed row; the App current Session and the switch route
   // are untouched by a UI scope change.
   h.vt.sendInput('w')
   await h.vt.waitForRender()
-  h.vt.sendInput('\x1b[A')
-  h.vt.sendInput('\r')
-  await h.vt.waitForRender()
-  assert.ok(h.view().includes('Workspace: All workspaces [w]'))
-  assert.ok(h.view().includes('Other session') && h.view().includes('Third session'))
-  assert.deepEqual(h.switchCalls, [], 'a browse scope change never switches a Session')
+  assert.ok(h.view().includes('Search: w'), 'w is ordinary global query text, not a Workspace selector')
+  assert.deepEqual(h.switchCalls, [], 'typing a query never changes Workspace or Session')
 })
 
-test('the global search ignores the browse scope and Host-only hits still paint', async () => {
+test('global search remains a flat union and Host-only hits still paint', async () => {
   const h = harness({
     currentSessionId: CURRENT,
     search: async () => ({ items: [{ sessionId: OTHER, snippet: 'host excerpt without the literal term' }], hasMore: false }),
@@ -577,7 +573,7 @@ test('the global search ignores the browse scope and Host-only hits still paint'
   await waitUntil(() => h.view().includes('host excerpt without the literal term'), 'the global Host hit paints')
   const view = h.view()
   assert.ok(view.includes('Search all workspaces'))
-  assert.ok(view.includes('Other session'), 'a Session outside the browse scope is still a global search hit')
+  assert.ok(view.includes('Other session'), 'a Host-only result from another Workspace paints')
   assert.ok(!view.includes('· needle'), 'the query is never appended to the Host result')
 })
 
@@ -674,7 +670,7 @@ test('a blocking Question pre-empts the workspace, and a refused lease leaves no
   assert.ok(!h.view().includes('Sessions'), 'the refused workspace never resurrects')
 })
 
-test('a normally ended official Workspace stream drops the proved Current scope', async () => {
+test('a normally ended official Workspace stream drops the membership annotation', async () => {
   const h = harness({ currentSessionId: CURRENT })
   await h.runSessions('')
   await h.vt.waitForRender()
@@ -686,44 +682,38 @@ test('a normally ended official Workspace stream drops the proved Current scope'
   // The official Remote handle may end iterating after a valid baseline without
   // throwing; the proof is still gone.
   h.facts.handles[0]!.finish()
-  await waitUntil(() => h.view().includes('Workspace scope unavailable'), 'the ended stream is visible')
+  await waitUntil(() => h.view().includes('Workspace membership unavailable'), 'the ended stream is visible')
   const after = h.view()
-  assert.ok(after.includes('Workspace: All workspaces [w]'), 'an ended stream falls back to All')
+  assert.ok(after.includes('Workspace: Information unavailable'), 'an ended stream paints the ONE unavailable membership annotation')
+  assert.ok(!after.includes('project'), 'the ended stream paints no folder claim')
   assert.ok(after.includes('Other session'), 'All restores every listed row')
 })
 
-test('a missing-Current fallback followed by a stream end paints ONE scope state', async () => {
+test('missing Current membership does not filter the Workspace-first browser and stream end replaces its annotation', async () => {
   const h = harness({ currentSessionId: CURRENT })
   await h.runSessions('')
   await h.vt.waitForRender()
-  // The initial current intent cannot be proved by this baseline: the one-time
-  // fallback line is painted. The stream then ends without a proof.
   h.facts.handles[0]!.push(baseline({ workspaceId: 'ws-b', path: '/other', title: 'b', sessionIds: [OTHER] }))
-  await waitUntil(() => h.view().includes('Current workspace unavailable'), 'the missing-Current fallback is painted')
+  await waitUntil(() => h.view().includes('Current workspace unavailable — showing all workspaces'), 'unproven Current membership is stated once')
+  assert.ok(h.view().includes('b · 1'), `the official other Workspace Folder stays in the same browser:\n${h.view()}`)
   h.facts.handles[0]!.finish()
-  await waitUntil(() => h.view().includes('Workspace scope unavailable'), 'the ended stream is visible')
+  await waitUntil(() => h.view().includes('Workspace membership unavailable'), 'the ended stream is visible')
   const after = h.view()
-  assert.equal(
-    after.split('\n').filter(line => line.includes('Current workspace unavailable')).length,
-    0,
-    `the superseded fallback must not survive beside the stream failure:\n${after}`,
-  )
-  assert.equal(
-    after.split('\n').filter(line => line.includes('Workspace scope unavailable')).length,
-    1,
-    `the current scope fact is painted once:\n${after}`,
-  )
+  assert.ok(after.includes('Workspace: Information unavailable'))
+  assert.equal(after.split('\n').filter(line => line.includes('Current workspace unavailable')).length, 0)
+  assert.equal(after.split('\n').filter(line => line.includes('Workspace membership unavailable')).length, 1)
 })
 
-test('a failed official Workspace stream drops the proved Current scope', async () => {
+test('a failed official Workspace stream keeps the roster usable without membership claims', async () => {
   const h = harness({ currentSessionId: CURRENT })
   await h.runSessions('')
   await h.vt.waitForRender()
   h.facts.handles[0]!.push(baseline({ workspaceId: 'ws-a', path: '/ws', title: 'a', sessionIds: [CURRENT] }))
   await waitUntil(() => h.view().includes('Current workspace'), 'Current is proved')
   h.facts.handles[0]!.fail(new Error('workspace generation superseded'))
-  await waitUntil(() => h.view().includes('Workspace scope unavailable'), 'the failed stream is visible')
-  assert.ok(h.view().includes('Workspace: All workspaces [w]'), 'a failed stream falls back to All')
+  await waitUntil(() => h.view().includes('Workspace membership unavailable'), 'the failed stream is visible')
+  assert.ok(h.view().includes('Workspace: Information unavailable'), 'a failed stream removes the folder authority')
+  assert.ok(h.view().includes('Current session'), 'the retained flat session roster remains navigable')
 })
 
 test('an active close owns the stream end and paints no stale scope failure', async () => {
@@ -738,7 +728,7 @@ test('an active close owns the stream end and paints no stale scope failure', as
   h.facts.handles[0]!.finish() // a late normal end after the close
   await h.vt.waitForRender()
   assert.equal(
-    h.notices.some(notice => notice.text.includes('Workspace scope unavailable')),
+    h.notices.some(notice => notice.text.includes('Workspace information unavailable')),
     false,
     'an active close never paints a stale scope failure',
   )
@@ -754,7 +744,7 @@ test('stop/dispose closes the lease and the Workspace stream exactly once', asyn
   assert.equal(h.facts.handles[0]!.disposed, 1, 'stopping the surface disposes the follow exactly once')
 })
 
-test('the native TSP presenter branch never subscribes to the PiTUI Workspace facts', async () => {
+test('the native TSP presenter consumes the shared Browser Workspace facts once', async () => {
   const opens: SessionBrowserReadSnapshot[] = []
   const presentation: SessionBrowserPresentation = {
     open: (request) => {
@@ -770,8 +760,8 @@ test('the native TSP presenter branch never subscribes to the PiTUI Workspace fa
   const h = harness({ currentSessionId: CURRENT, nativePresentation: presentation })
   await h.runSessions('')
   await h.vt.waitForRender()
-  assert.equal(h.facts.followCalls, 0, 'the native TSP branch must not subscribe to the PiTUI seam')
-  assert.equal(h.facts.reads.length, 0, 'the native TSP branch never samples the PiTUI Activity seam')
+  assert.equal(h.facts.followCalls, 1, 'the shared Browser read owner opens exactly one Workspace follow')
+  assert.equal(h.facts.reads.length, 1, 'the shared Browser read owner samples Activity once')
   assert.equal(h.pickerCalls, 0)
 })
 
@@ -1054,10 +1044,11 @@ test('E-L2: the second Left within the window opens the ONE All-scope workspace;
   h.facts.handles[0]!.push(baseline(
     { workspaceId: 'ws-a', path: '/ws', title: 'project-a', sessionIds: [CURRENT, OTHER] },
   ))
-  await waitUntil(() => h.view().includes('Workspace: All workspaces [w]'), 'the gesture asks for All workspaces')
+  await waitUntil(() => h.view().includes('project-a · 2'), 'the gesture opens the full Workspace tree')
   const all = h.view()
-  assert.ok(all.includes('Other session'), `All lists every Workspace row:\n${all}`)
-  assert.ok(all.includes('Recent · '), `the grouped main list paints:\n${all}`)
+  assert.ok(all.includes('project-a · 2'), `the official current Workspace folder remains first:\n${all}`)
+  assert.ok(all.includes('other'), `the same Browse keeps the sibling Workspace folder available:\n${all}`)
+  assert.ok(!all.includes('Workspace information unavailable'), 'the official baseline remains usable')
   assert.deepEqual(h.switchCalls, [], 'the gesture itself never switches a Session')
 
   // Esc: the SAME main screen, draft, Session and editor focus — no stop/submit.
@@ -1508,7 +1499,7 @@ test('E-L10: a PiTUI mount without the installed control keeps both Lefts native
   h.close()
 })
 
-test('E-L11: typed /sessions and /resume keep their Current/direct semantics; only the gesture asks All', async () => {
+test('E-L11: every entry browses the full Workspace tree; typed entries keep the Current intent, only the gesture asks All', async () => {
   const h = harness({ currentSessionId: CURRENT })
   const typed = h.runSessions('')
   await h.vt.waitForRender()
@@ -1516,36 +1507,46 @@ test('E-L11: typed /sessions and /resume keep their Current/direct semantics; on
     { workspaceId: 'ws-a', path: '/ws', title: 'project-a', sessionIds: [CURRENT] },
     { workspaceId: 'ws-b', path: '/other', title: 'project-b', sessionIds: [OTHER] },
   ))
-  await waitUntil(() => h.view().includes('Workspace: Current workspace'), 'the typed command keeps Current')
-  assert.ok(!h.view().includes('Other session'), 'the typed command never widens to All')
+  await waitUntil(() => h.view().includes('Workspace: Current workspace'), 'a proved membership is stated')
+  assert.ok(h.view().includes('project-a') && h.view().includes('project-b'),
+    `the typed command lists the complete official tree, not one scope:\n${h.view()}`)
   h.vt.sendInput('\x1b')
   await h.vt.waitForRender()
   await typed
 
-  // The argument-free UI entry (the Welcome's only action) also keeps Current.
+  // The argument-free UI entry is the SAME Browser body.
   const welcome = h.openSessionBrowser()
   await h.vt.waitForRender()
   h.facts.handles.at(-1)!.push(baseline(
     { workspaceId: 'ws-a', path: '/ws', title: 'project-a', sessionIds: [CURRENT] },
     { workspaceId: 'ws-b', path: '/other', title: 'project-b', sessionIds: [OTHER] },
   ))
-  await waitUntil(() => h.view().includes('Workspace: Current workspace'), 'the argument-free entry keeps Current')
-  assert.ok(!h.view().includes('Other session'))
+  await waitUntil(() => h.view().includes('project-b'), 'the argument-free entry lists the same tree')
   h.vt.sendInput('\x1b')
   await h.vt.waitForRender()
   await welcome
 
-  // ONLY the Host Editor gesture asks for All.
+  // ONLY the Host Editor gesture carries the All browse intent: with a baseline
+  // that does not prove the current Session's membership it never announces a
+  // Current fallback (that is the typed/Current entry's one-time notice).
   h.pressLeft()
   h.pressLeft()
-  await waitUntil(() => h.view().includes('Workspace: All workspaces [w]'), 'the gesture asks All')
-  h.facts.handles.at(-1)!.push(baseline(
-    { workspaceId: 'ws-a', path: '/ws', title: 'project-a', sessionIds: [CURRENT] },
-    { workspaceId: 'ws-b', path: '/other', title: 'project-b', sessionIds: [OTHER] },
-  ))
-  await waitUntil(() => h.view().includes('Other session'), 'All lists the other Workspace row')
+  await h.vt.waitForRender()
+  h.facts.handles.at(-1)!.push(baseline({ workspaceId: 'ws-b', path: '/other', title: 'project-b', sessionIds: [OTHER] }))
+  await waitUntil(() => h.view().includes('project-b'), 'All opens the official sibling folder')
+  assert.ok(!h.view().includes('Current workspace unavailable'), 'an All open never announces a Current fallback')
   h.vt.sendInput('\x1b')
   await h.vt.waitForRender()
+
+  const typedMissing = h.runSessions('')
+  await h.vt.waitForRender()
+  h.facts.handles.at(-1)!.push(baseline({ workspaceId: 'ws-b', path: '/other', title: 'project-b', sessionIds: [OTHER] }))
+  await waitUntil(() => h.view().includes('Current workspace unavailable — showing all workspaces'),
+    'the typed Current intent states the one fallback notice')
+  assert.ok(h.view().includes('project-b'), 'the typed entry still lists every official folder')
+  h.vt.sendInput('\x1b')
+  await h.vt.waitForRender()
+  await typedMissing
 
   // `/sessions <query>` / `/search <query>` keep the GLOBAL content search.
   const query = h.runSessions('needle')

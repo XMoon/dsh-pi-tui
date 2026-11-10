@@ -417,6 +417,12 @@ test('W12: resuming another Session from the Welcome Browser follows the real sw
     clickNode(fixture.pane, resumeNode(fixture)!)
     await waitFor('the Browser opens from the Welcome', () => pickerNode(fixture.pane, BROWSER) !== undefined, 25_000)
     const picker = pickerNode(fixture.pane, BROWSER)!.id
+    // These legacy persisted Sessions carry no official Workspace membership,
+    // so they live in the explicit Unassigned Folder, which starts collapsed.
+    sendActivate(fixture.pane, 'workspace:unassigned', picker)
+    await waitFor('the Unassigned Folder expands to its listed Sessions', () =>
+      (pickerProps(fixture.pane, BROWSER).items as Array<Record<string, unknown>> | undefined)
+        ?.some(item => item.id === 'session:welcome-target-b') === true, 25_000)
     sendSelect(fixture.pane, 'session:welcome-target-b', picker)
     await waitFor('the Browser selects B', () => pickerProps(fixture.pane, BROWSER).selected === 'session:welcome-target-b', 25_000)
     const opensBefore = lifecycleTrace.length

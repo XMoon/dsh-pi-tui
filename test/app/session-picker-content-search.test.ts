@@ -751,7 +751,7 @@ test('`/` enters the search editor; Esc restores the browse list', async (t) => 
   t.after(() => h.app.stop())
   await h.runSessions('')
   await waitUntil(() => h.view().includes('alpha'))
-  assert.ok(h.view().includes('Workspace: All workspaces [w]'), 'the workspace opens in browse state')
+  assert.ok(h.view().includes('Up/Down move'), 'the workspace opens in browse state')
   h.vt.sendInput('/')
   await h.vt.waitForRender()
   h.vt.sendInput('alpha')
@@ -762,32 +762,8 @@ test('`/` enters the search editor; Esc restores the browse list', async (t) => 
   // the user did not open.
   h.vt.sendInput('\x1b')
   await h.vt.waitForRender()
-  assert.ok(h.view().includes('Workspace: All workspaces [w]'), 'Esc must restore the browse list')
+  assert.ok(h.view().includes('Up/Down move'), 'Esc must restore the browse list')
   assert.ok(h.view().includes('alpha'))
-})
-
-test('the browse scope survives one round trip through the global search', async (t) => {
-  const h = harness({ rows: rows() })
-  t.after(() => h.app.stop())
-  await h.runSessions('')
-  await waitUntil(() => h.view().includes('alpha'))
-  // Tab opens the in-place Workspace selector; Enter applies All.
-  h.vt.sendInput('\t')
-  await h.vt.waitForRender()
-  assert.ok(h.view().includes('Workspace scope:'), 'Tab must open the in-place scope selector')
-  h.vt.sendInput('\r')
-  await h.vt.waitForRender()
-  assert.ok(h.view().includes('Workspace: All workspaces [w]'))
-  // A global search is independent of the browse scope; returning restores the
-  // SAME scope and the SAME selection anchor.
-  h.vt.sendInput('/')
-  await h.vt.waitForRender()
-  h.vt.sendInput('alpha')
-  await h.vt.waitForRender()
-  assert.ok(h.view().includes('Search all workspaces'))
-  h.vt.sendInput('\x1b')
-  await h.vt.waitForRender()
-  assert.ok(h.view().includes('Workspace: All workspaces [w]'), 'Esc must restore the pre-search scope')
 })
 
 test('a Host hit displays even when its snippet lacks the query literal (review P1)', async (t) => {
@@ -966,7 +942,7 @@ test('the fullscreen search frame keeps the action bar on the last physical row'
   const h = harness({ rows: many, search: async () => ({ items: [], hasMore: false }) })
   t.after(() => h.app.stop())
   await h.runSessions('')
-  await waitUntil(() => h.view().includes('Workspace: All workspaces [w]'))
+  await waitUntil(() => h.view().includes('Sessions · 30'))
   h.vt.sendInput('/')
   await h.vt.waitForRender()
   h.vt.sendInput('session')
@@ -1018,7 +994,7 @@ test('opening /sessions, filtering, closing and /search never switch the Session
   // cancellation): still no Session change.
   h.vt.sendInput('\x1b')
   await h.vt.waitForRender()
-  assert.ok(h.view().includes('Workspace: All workspaces [w]'))
+  assert.ok(h.view().includes('Up/Down move'))
   h.vt.sendInput('\x1b')
   await h.vt.waitForRender()
   assert.deepEqual(h.switched, [], 'closing the browser must never switch')

@@ -93,7 +93,7 @@ test('REAL_DIRECT_HEADLESS: persisted main Session → DirectSessionReader → p
     assert.equal(pickerNode(browserPane, BROWSER)?.p.selected, 'session:blank-live-1')
     assert.deepEqual(pickerNode(browserPane, BROWSER)?.p.current, [], 'the read-only sessionless Browser does not invent a Current marker')
     assert.equal(props(browserPane).layout, 'tree')
-    assert.equal(props(browserPane).scope, 'workspace')
+    assert.equal(props(browserPane).scopes, undefined, 'the retired scope selector is not rendered')
   } finally {
     owner?.dispose()
     diag.dispose()
@@ -208,10 +208,8 @@ test('REAL_DIRECT_HEADLESS: legacy persisted Fork headers stay flat roots across
     await waitFor('the Direct parent reaches the TSP Picker', () =>
       (props(browserPane).items as Array<{ readonly id?: string }> | undefined)
         ?.some((item) => item.id === 'session:blank-live-1') === true)
-    sendAction(browserPane, 'scope', 'all', pickerNode(browserPane, BROWSER)!.id)
-    await waitFor('All workspaces includes the cross-workspace Fork child', () =>
-      props(browserPane).scope === 'all'
-      && (props(browserPane).items as Array<{ readonly id?: string }> | undefined)
+    await waitFor('the flat fallback lists the cross-workspace Fork child without widening a scope', () =>
+      (props(browserPane).items as Array<{ readonly id?: string }> | undefined)
         ?.some((item) => item.id === 'session:lineage-return-child') === true)
 
     const items = props(browserPane).items as Array<Record<string, unknown>>
@@ -222,13 +220,7 @@ test('REAL_DIRECT_HEADLESS: legacy persisted Fork headers stay flat roots across
     assert.deepEqual(positions.map((index) => items[index]?.depth), [0, 0, 0],
       'legacy ordinary-fork parentSession metadata does not fabricate a tree edge')
     const order = props(browserPane).order as Array<string | PickerGroup>
-    const groups = order.filter((entry): entry is PickerGroup => typeof entry !== 'string')
-    assert.deepEqual(order.filter((entry): entry is string => typeof entry === 'string'), ids)
-    assert.deepEqual(groups.map((group) => [group.label, group.count]), [
-      [workspaceKey(fixture.workRoot), 2],
-      [workspaceKey(otherWorkspace), 1],
-    ])
-    assert.equal(new Set(groups.map((group) => group.group)).size, groups.length, 'each contiguous workspace run has a distinct PickerGroup identity')
+    assert.deepEqual(order, ids, 'the flat fallback has no PickerGroup headers and no scope filter')
   } finally {
     owner?.dispose()
     diag.dispose()

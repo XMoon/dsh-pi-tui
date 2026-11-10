@@ -9,21 +9,29 @@ import type {
   SessionBrowserRow,
   SessionBrowserSearchResult,
 } from '../../app/command/session-browser-presentation.ts'
-import { buildSessionTree, sameWorkspace, sanitizeSessionSearchInput } from '../../domain/session/browser.ts'
+import { sanitizeSessionSearchInput } from '../../domain/session/browser.ts'
+import { buildSessionWorkspaceView, visibleWorkspaceBrowserRows, type WorkspaceBrowserRow } from '../presentation/session-workspace-view.ts'
 import { formatSessionAge, sanitizeTerminalText, shortSessionId, workspaceKey } from '../pickers/sessions.ts'
 
 const DETAILS_BODY_KEY_PREFIX = 'session-browser-details-body-'
-const BROWSE_ACTIONS = ['close', 'details', 'resume'] as const
+const BROWSE_ACTIONS = ['close', 'details', 'use-directory', 'new-session', 'add-directory', 'resume'] as const
 
-type BrowseAction = typeof BROWSE_ACTIONS[number]
-type BrowseScope = 'workspace' | 'all'
+type BrowseAction = typeof BROWSE_ACTIONS[number] | 'confirm-directory'
 type BrowserPage = 'browse' | 'details'
-type BrowserZone = 'list' | 'scopes' | 'actions'
+type BrowserZone = 'list' | 'actions'
 type BrowserIntent =
+  | { readonly kind: 'directory-edit'; readonly text: string; readonly cursor: number }
+  | { readonly kind: 'directory-submit' }
+  | { readonly kind: 'directory-cancel' }
   | { readonly kind: 'close' }
-  | { readonly kind: 'scope'; readonly scope: BrowseScope }
+  | { readonly kind: 'browse-workspace'; readonly workspaceId: string; readonly toggle: boolean }
+  | { readonly kind: 'browse-more'; readonly workspaceId: string; readonly reveal: boolean }
+  | { readonly kind: 'workspace-toggle'; readonly workspaceId: string }
   | { readonly kind: 'browse-row'; readonly sessionId: string }
   | { readonly kind: 'resume'; readonly sessionId: string; readonly source: 'enter' | 'activate' | 'footer' }
+  | { readonly kind: 'use-directory'; readonly workspaceId: string }
+  | { readonly kind: 'new-session' }
+  | { readonly kind: 'add-directory' }
   | { readonly kind: 'details' }
   | { readonly kind: 'back' }
   | { readonly kind: 'reader-scroll'; readonly step: ScrollTo }
@@ -35,12 +43,13 @@ type BrowserIntent =
 interface SessionBrowserPanel {
   readonly serial: number
   readonly request: SessionBrowserPanelRequest
+  nextCreateWorkspaceId: string | undefined
   revision: number
   disposed: boolean
   page: BrowserPage
   zone: BrowserZone
-  scope: BrowseScope
   selected: string | undefined
+  selectedItem: string | undefined
   actionFocus: BrowseAction
   query: string
   cursor: number
@@ -48,8 +57,13 @@ interface SessionBrowserPanel {
   initialQueryApplied: boolean
   readerEpoch: number
   snapshot: SessionBrowserReadSnapshot
-  previousBrowse: { readonly scope: BrowseScope; readonly selected: string | undefined } | undefined
-}
+  previousBrowse: { readonly selected: string | undefined; readonly selectedItem: string | undefined } | undefined
+  directoryEntry: boolean
+  directoryPath: string
+  directoryCursor: number
+  directorySubmitting: boolean
+  readonly expandedWorkspaces: Map<string, boolean>
+  readonly historyLimits: Map<string, number>}
 
 type TargetKind = 'picker' | 'back' | 'other'
 interface EventTarget {
@@ -108,11 +122,72 @@ function queryMode(panel: SessionBrowserPanel): boolean {
   return panel.snapshot.query !== ''
 }
 
+function workspaceModel(panel: SessionBrowserPanel) {
+  const snapshot = panel.snapshot.workspace
+  if (snapshot === undefined) return undefined
+  return buildSessionWorkspaceView({
+    rows: panel.snapshot.rows,
+    activity: snapshot.activity,
+    answerEligibility: snapshot.answerEligibility,
+    workspaces: snapshot.facts,
+    workspaceBaselineProven: snapshot.baselineProven,
+    scope: { kind: 'all' },
+    currentSessionId: panel.request.subject.currentSessionId,
+    ...(panel.request.subject.currentSessionId === undefined && panel.nextCreateWorkspaceId !== undefined
+      ? { nextCreateWorkspaceId: panel.nextCreateWorkspaceId }
+      : {}),
+  })
+}
+
+function priorityWorkspaceId(panel: SessionBrowserPanel): string | undefined {
+  const model = workspaceModel(panel)
+  return model?.nextCreateWorkspaceId ?? model?.currentWorkspaceId
+}
+
 function browseRows(panel: SessionBrowserPanel): readonly { readonly row: SessionBrowserRow; readonly depth: number }[] {
-  const scoped = panel.scope === 'all'
-    ? panel.snapshot.rows
-    : panel.snapshot.rows.filter((row) => sameWorkspace(row.cwd, panel.request.subject.currentCwd))
-  return buildSessionTree(scoped)
+  if (panel.snapshot.workspace === undefined) {
+    return panel.snapshot.rows.map(row => ({ row, depth: 0 }))
+  }
+  const model = workspaceModel(panel)
+  if (model === undefined || !model.workspaceBaselineProven) {
+    return panel.snapshot.rows.map(row => ({ row, depth: 0 }))
+  }
+  const visible = visibleWorkspaceBrowserRows(model, {
+    expanded: panel.expandedWorkspaces,
+    historyLimit: panel.historyLimits,
+  }, panel.selected, panel.request.subject.currentSessionId)
+  return visible.flatMap(item => item.kind !== 'session' ? [] : (() => {
+    const row = panel.snapshot.rows.find(candidate => candidate.id === item.sessionId)
+    return row === undefined ? [] : [{ row, depth: 1 }]
+  })())
+}
+
+function workspaceGroups(panel: SessionBrowserPanel): readonly {
+  readonly id: string
+  readonly workspaceId: string
+  readonly title: string
+  readonly path: string
+  readonly rows: readonly SessionBrowserRow[]
+  readonly needs: number
+  readonly working: number
+}[] {
+  const model = workspaceModel(panel)
+  if (model === undefined || !model.workspaceBaselineProven) return []
+  return model.groups.map(group => {
+    const rows = group.ids.flatMap(id => {
+      const row = panel.snapshot.rows.find(candidate => candidate.id === id)
+      return row === undefined ? [] : [row]
+    })
+    return {
+      id: `workspace:${group.workspaceId}`,
+      workspaceId: group.workspaceId,
+      title: group.title,
+      path: group.path,
+      rows,
+      needs: group.ids.filter(id => model.rowsById.get(id)?.priority === 'needs').length,
+      working: group.ids.filter(id => model.rowsById.get(id)?.priority === 'working').length,
+    }
+  })
 }
 
 function visibleSearchResults(panel: SessionBrowserPanel): readonly SessionBrowserSearchResult[] {
@@ -136,6 +211,22 @@ function firstBrowseId(panel: SessionBrowserPanel): string | undefined {
 }
 
 function actionDisabledReason(panel: SessionBrowserPanel, base: BrowseAction): string | undefined {
+  if (base === 'confirm-directory') {
+    if (panel.directorySubmitting) return 'Directory verification is in progress.'
+    if (panel.request.onAddDirectory === undefined) return 'Directory verification is unavailable.'
+    if (!panel.directoryPath.trim().startsWith('/')) return 'Enter an absolute Host path.'
+    return undefined
+  }
+  if (base === 'close' && panel.directoryEntry && panel.directorySubmitting) return 'Wait for directory verification to finish.'
+  if (base === 'use-directory') {
+    return panel.request.subject.currentSessionId === undefined && panel.selectedItem?.startsWith('workspace:')
+      ? undefined
+      : 'Select a Workspace while sessionless.'
+  }
+  if (base === 'new-session') {
+    return panel.selectedItem?.startsWith('workspace:') ? undefined : 'Select a Workspace folder first.'
+  }
+  if (base === 'add-directory') return panel.request.onAddDirectory === undefined ? 'Directory entry is unavailable.' : undefined
   if (base === 'details' && rowFor(panel, panel.selected) === undefined) return 'Select a session to read its details.'
   if (base === 'resume') {
     if (panel.snapshot.resumePending) return 'Switching sessions…'
@@ -146,8 +237,15 @@ function actionDisabledReason(panel: SessionBrowserPanel, base: BrowseAction): s
   return undefined
 }
 
+function browseActions(panel: SessionBrowserPanel): readonly BrowseAction[] {
+  if (panel.directoryEntry) return ['confirm-directory', 'close']
+  // Add directory is a directory operation that never needs a Workspace
+  // baseline; every unavailable action carries its own disabled reason.
+  return BROWSE_ACTIONS
+}
+
 function enabledActions(panel: SessionBrowserPanel): BrowseAction[] {
-  return BROWSE_ACTIONS.filter((base) => actionDisabledReason(panel, base) === undefined)
+  return browseActions(panel).filter((base) => actionDisabledReason(panel, base) === undefined)
 }
 
 function focusedAction(panel: SessionBrowserPanel): BrowseAction {
@@ -157,13 +255,12 @@ function focusedAction(panel: SessionBrowserPanel): BrowseAction {
 
 function stepActionFocus(panel: SessionBrowserPanel, delta: -1 | 1): BrowseAction {
   const enabled = enabledActions(panel)
+  if (enabled.length === 0) return panel.actionFocus
   const at = enabled.indexOf(focusedAction(panel))
   return enabled[(at + delta + enabled.length) % enabled.length]!
 }
 
 function normalize(panel: SessionBrowserPanel): void {
-  if (queryMode(panel)) panel.scope = 'all'
-  if (panel.zone === 'scopes' && queryMode(panel)) panel.zone = 'list'
   if (panel.page === 'details') {
     if (rowFor(panel, panel.selected) === undefined) {
       panel.page = 'browse'
@@ -185,17 +282,33 @@ function actionId(panel: SessionBrowserPanel, action: BrowseAction): string {
 }
 
 function actionLabel(action: BrowseAction): string {
-  return action === 'close' ? 'Close' : action === 'details' ? 'Details' : 'Resume'
+  switch (action) {
+    case 'close': return 'Close'
+    case 'details': return 'Details'
+    case 'use-directory': return 'Use directory'
+    case 'new-session': return 'New session'
+    case 'add-directory': return 'Add directory'
+    case 'confirm-directory': return 'Use directory'
+    case 'resume': return 'Resume'
+  }
 }
 
 function actionList(panel: SessionBrowserPanel): PickerAction[] {
   const focus = panel.zone === 'actions' ? focusedAction(panel) : undefined
-  return BROWSE_ACTIONS.map((base) => {
+  const folderSelected = panel.selectedItem?.startsWith('workspace:') === true
+  // A Folder-only action is offered only while a Folder is selected: the
+  // native bar has no whole-segment drop of its own, and an inapplicable
+  // button is what pushes the enabled primary action out of a narrow pane.
+  return browseActions(panel).filter((base) => {
+    if (base === 'use-directory') return panel.request.subject.currentSessionId === undefined && folderSelected
+    if (base === 'new-session') return folderSelected
+    return true
+  }).map((base) => {
     const disabled = actionDisabledReason(panel, base)
     const focused = base === focus
     return {
       id: base === 'close' ? base : actionId(panel, base),
-      label: `${actionLabel(base)}${focused ? ' [Enter]' : ''}`,
+      label: `${panel.directoryEntry && base === 'close' ? 'Cancel' : actionLabel(base)}${focused ? ' [Enter]' : ''}`,
       ...(base === 'resume' ? { primary: true } : {}),
       ...(disabled === undefined ? {} : { disabled }),
     }
@@ -211,8 +324,11 @@ function rowItem(
   // Host-authoritative on-disk format state: a read-only label with no new
   // control. `current` and absent add nothing.
   const migration = row.formatStatus === 'migration-required' ? 'Migration required' : undefined
+  const workspaceText = row.workspace === undefined
+    ? workspaceKey(row.cwd)
+    : `${row.workspace.title} · ${row.workspace.path}`
   const detail = [
-    workspaceKey(row.cwd),
+    workspaceText,
     `Updated ${formatSessionAge(row.updatedAt)}`,
     migration,
     row.preset === undefined ? undefined : `Preset ${row.preset}`,
@@ -233,7 +349,7 @@ function rowItem(
     detail: result?.snippet === undefined
       ? detail
       : [
-          workspaceKey(row.cwd),
+          `${row.workspace?.title ?? workspaceKey(row.cwd)} · ${row.workspace?.path ?? ''}`,
           `Updated ${formatSessionAge(row.updatedAt)}`,
           migration,
           sanitizeTerminalText(result.snippet),
@@ -267,7 +383,7 @@ function emptyText(panel: SessionBrowserPanel): string {
   if (snapshot.listState === 'loading') return 'Loading persisted sessions…'
   if (snapshot.listState === 'unavailable') return 'No session listing capability is available.'
   if (snapshot.listState === 'error') return 'The session list could not be loaded.'
-  if (!queryMode(panel)) return snapshot.listState === 'empty' ? 'No persisted sessions are available.' : 'No sessions are available in this scope.'
+  if (!queryMode(panel)) return snapshot.listState === 'empty' ? 'No persisted sessions are available.' : 'No sessions are available.'
   if (snapshot.searchState === 'loading') return 'Searching…'
   if (snapshot.searchState === 'unavailable') return 'No metadata matches; content search is unavailable.'
   if (snapshot.searchState === 'error') return 'No metadata matches; content search failed.'
@@ -279,76 +395,107 @@ function pickerSubtitle(panel: SessionBrowserPanel): string {
   const current = currentId === undefined ? 'No current session' : `Current ${sanitizeTerminalText(shortSessionId(currentId))}`
   return queryMode(panel)
     ? `${panel.snapshot.searchResults.length} global matches · ${current}`
-    : `${panel.scope === 'workspace' ? 'This workspace' : 'All workspaces'} · ${current}`
+    : `All workspaces · ${current}`
+}
+
+function workspaceItem(group: {
+  readonly id: string
+  readonly workspaceId: string
+  readonly title: string
+  readonly path: string
+  readonly rows: readonly SessionBrowserRow[]
+  readonly total?: number
+  readonly needs?: number
+  readonly working?: number
+  readonly expanded: boolean
+  readonly current?: boolean
+  readonly next?: boolean
+}): PickerItem {
+  const activity = (group.needs ?? 0) + (group.working ?? 0) > 0
+    ? ` · ${group.needs ?? 0} Needs · ${group.working ?? 0} Working`
+    : ''
+  return {
+    id: group.id,
+    label: `${group.current ? 'Current · ' : group.next ? 'Next · ' : ''}${sanitizeTerminalText(group.title)}`,
+    detail: `${group.total ?? group.rows.length} sessions${activity} · ${sanitizeTerminalText(group.path)}`,
+    title: sanitizeTerminalText(group.workspaceId),
+    depth: 0,
+    open: group.expanded,
+  }
+}
+function showMoreItem(group: { readonly workspaceId: string; readonly remaining: number }): PickerItem {
+  return {
+    id: `more:${group.workspaceId}`,
+    label: 'Show more sessions',
+    detail: `${group.remaining} remaining`,
+    title: `more:${group.workspaceId}`,
+    depth: 1,
+  }
+}
+
+function visibleBrowseItems(panel: SessionBrowserPanel): PickerItem[] {
+  const model = workspaceModel(panel)
+  if (model === undefined || !model.workspaceBaselineProven) return panel.snapshot.rows.map(row => rowItem(row, 0))
+  const display = {
+    expanded: new Map([...panel.expandedWorkspaces].map(([id, value]) => [id, value] as const)),
+    historyLimit: panel.historyLimits,
+  }
+  const projected = visibleWorkspaceBrowserRows(model, display, panel.selected, panel.request.subject.currentSessionId)
+  return projected.flatMap((row): PickerItem[] => {
+    if (row.kind === 'folder') return [workspaceItem({ id: row.id, workspaceId: row.workspaceId, title: row.title, path: row.path, rows: [], total: row.total, needs: row.needs, working: row.working, expanded: row.expanded, current: row.current, next: row.next })]
+    if (row.kind === 'showMore') return [showMoreItem({ workspaceId: row.workspaceId, remaining: row.remaining })]
+    if (row.kind === 'session') {
+      const session = panel.snapshot.rows.find(candidate => candidate.id === row.sessionId)
+      return session === undefined ? [] : [rowItem(session, 1)]
+    }
+    return []
+  })
+}
+function pickerLayerItems(panel: SessionBrowserPanel): readonly PickerItem[] {
+  if (panel.snapshot.workspace?.baselineProven === true) return visibleBrowseItems(panel)
+  return panel.snapshot.rows.map(row => rowItem(row, 0))
 }
 
 function pickerLayer(panel: SessionBrowserPanel): Node {
-  const searching = queryMode(panel)
-  const tree = searching ? [] : browseRows(panel)
+  const pathEntry = panel.directoryEntry
+  const searching = !pathEntry && queryMode(panel)
   const searchResults = searching ? visibleSearchResults(panel) : []
-  const rows = searching ? searchResults.map((result) => rowItem(result.row, undefined, result))
-    : tree.map(({ row, depth }) => rowItem(row, depth))
-  const selected = panel.selected === undefined ? undefined : `session:${panel.selected}`
+  const rows: readonly PickerItem[] = pathEntry ? [] : searching
+    ? searchResults.map((result) => rowItem(result.row, undefined, result))
+    : pickerLayerItems(panel)
+  const selected = pathEntry ? undefined : panel.selectedItem ?? (panel.selected === undefined ? undefined : `session:${panel.selected}`)
   const currentId = panel.request.subject.currentSessionId
   const currentItem = currentId === undefined ? undefined : `session:${currentId}`
   const current = currentItem !== undefined && rows.some((item) => item.id === currentItem) ? [currentItem] : []
-  const workspaceRows = panel.snapshot.rows.filter((row) => sameWorkspace(row.cwd, panel.request.subject.currentCwd))
-  const scopes = searching ? [] : [
-    { id: 'workspace', label: 'This workspace', count: workspaceRows.length },
-    { id: 'all', label: 'All workspaces', count: panel.snapshot.rows.length },
-  ] satisfies NonNullable<PickerProps['scopes']>
-  const order: Array<string | PickerGroup> = []
-  if (searching) {
-    order.push(...rows.map((item) => item.id))
-  } else {
-    let start = 0
-    let run = 0
-    while (start < tree.length) {
-      const first = tree[start]!
-      let end = start + 1
-      while (end < tree.length && sameWorkspace(first.row.cwd, tree[end]!.row.cwd)) end += 1
-      order.push({
-        group: `workspace-run:${run}`,
-        label: workspaceKey(first.row.cwd),
-        count: end - start,
-      })
-      for (let index = start; index < end; index += 1) {
-        order.push(`session:${tree[index]!.row.id}`)
-      }
-      start = end
-      run += 1
-    }
-  }
+  const order: Array<string | PickerGroup> = rows.map(item => item.id)
   const pickerKey = `session-browser-picker-${panel.serial}`
   const actions = actionList(panel)
   const props: PickerProps & { readonly key: string } = {
     key: pickerKey,
-    title: 'Sessions',
-    subtitle: pickerSubtitle(panel),
+    title: pathEntry ? 'Add directory' : 'Sessions',
+    subtitle: pathEntry ? 'Host absolute path · Enter validate · Esc cancel' : pickerSubtitle(panel),
     layout: searching ? 'cards' : 'tree',
     size: 'lg',
     preview: 'none',
-    query: panel.query,
-    cursor: panel.cursor,
-    placeholder: 'Search sessions and messages…',
+    query: pathEntry ? panel.directoryPath : panel.query,
+    cursor: pathEntry ? panel.directoryCursor : panel.cursor,
+    placeholder: pathEntry ? '/path/to/project' : 'Search sessions and messages…',
     noun: 'sessions',
-    focus: panel.zone === 'scopes' ? 'scopes' : panel.zone === 'list' ? 'list' : undefined,
-    state: panel.snapshot.listState === 'error' || panel.snapshot.listState === 'unavailable'
+    focus: pathEntry ? panel.zone === 'actions' ? undefined : 'list' : panel.zone === 'list' ? 'list' : undefined,
+    state: pathEntry ? 'ready' : panel.snapshot.listState === 'error' || panel.snapshot.listState === 'unavailable'
       ? 'error'
       : panel.snapshot.listState === 'loading' || (searching && panel.snapshot.searchState === 'loading')
         ? 'loading'
         : searching && (panel.snapshot.searchState === 'error' || panel.snapshot.searchState === 'unavailable')
           ? 'error'
           : 'ready',
-    ...(statusText(panel) === undefined ? {} : { message: statusText(panel) }),
-    empty: emptyText(panel),
+    ...(pathEntry ? { message: 'Enter an absolute Host path to add a directory.' } : statusText(panel) === undefined ? {} : { message: statusText(panel) }),
+    empty: pathEntry ? 'Enter the Host absolute path, then press Enter.' : emptyText(panel),
     total: rows.length,
     items: rows,
     order,
     ...(selected === undefined || !rows.some((item) => item.id === selected) ? {} : { selected }),
     current,
-    scopes,
-    ...(searching ? {} : { scope: panel.scope }),
     actions,
   }
   return ui.col({ key: `session-browser-layer-${panel.serial}` }, ui.picker(props))
@@ -529,12 +676,17 @@ export class TspSessionBrowser {
     const panel: SessionBrowserPanel = {
       serial: ++this.serial,
       request,
+      nextCreateWorkspaceId: request.subject.currentWorkspaceId,
       revision: 0,
       disposed: false,
       page: 'browse',
       zone: 'list',
-      scope: 'workspace',
       selected: undefined,
+      selectedItem: undefined,
+      directoryEntry: request.initialDirectoryEntry === true,
+      directoryPath: request.initialDirectoryPath ?? '',
+      directoryCursor: request.initialDirectoryPath?.length ?? 0,
+      directorySubmitting: false,
       actionFocus: 'details',
       query: '',
       cursor: 0,
@@ -543,6 +695,8 @@ export class TspSessionBrowser {
       readerEpoch: 0,
       snapshot: EMPTY_SNAPSHOT,
       previousBrowse: undefined,
+       expandedWorkspaces: new Map(),
+       historyLimits: new Map(),
     }
     this.panel = panel
     this.change(panel)
@@ -618,12 +772,11 @@ export class TspSessionBrowser {
     const wasSearching = queryMode(panel)
     const willSearch = sanitizeSessionSearchInput(query) !== ''
     if (!wasSearching && willSearch) {
-      panel.previousBrowse = { scope: panel.scope, selected: panel.selected }
-      panel.scope = 'all'
+      panel.previousBrowse = { selected: panel.selected, selectedItem: panel.selectedItem }
     } else if (wasSearching && !willSearch) {
       const previous = panel.previousBrowse
-      panel.scope = previous?.scope ?? 'workspace'
       panel.selected = previous?.selected
+      panel.selectedItem = previous?.selectedItem
       panel.previousBrowse = undefined
     }
     panel.query = query
@@ -638,17 +791,17 @@ export class TspSessionBrowser {
     if (panel.revision === revision) this.change(panel)
   }
 
-  private changeScope(panel: SessionBrowserPanel, scope: BrowseScope): void {
-    if (queryMode(panel) || panel.scope === scope) return
-    panel.scope = scope
-    if (rowFor(panel, panel.selected) === undefined) panel.selected = firstBrowseId(panel)
-    panel.zone = 'list'
-    this.change(panel)
-  }
-
   private visibleActionIntent(panel: SessionBrowserPanel, base: string): BrowserIntent | undefined {
     if (panel.page !== 'browse') return undefined
-    if (base === 'close') return { kind: 'close' }
+    if (base === 'close') return panel.directoryEntry
+      ? panel.directorySubmitting ? undefined : { kind: 'directory-cancel' }
+      : { kind: 'close' }
+    if (base === 'confirm-directory' && actionDisabledReason(panel, base) === undefined) return { kind: 'directory-submit' }
+    if (base === 'add-directory' && actionDisabledReason(panel, base) === undefined) return { kind: 'add-directory' }
+    if (base === 'use-directory' && actionDisabledReason(panel, base) === undefined && panel.selectedItem?.startsWith('workspace:')) {
+      return { kind: 'use-directory', workspaceId: panel.selectedItem.slice('workspace:'.length) }
+    }
+    if (base === 'new-session' && actionDisabledReason(panel, base) === undefined) return { kind: 'new-session' }
     if (base === 'details' && rowFor(panel, panel.selected) !== undefined) return { kind: 'details' }
     if (base === 'resume' && actionDisabledReason(panel, 'resume') === undefined && panel.selected !== undefined) {
       return { kind: 'resume', sessionId: panel.selected, source: 'footer' }
@@ -673,12 +826,110 @@ export class TspSessionBrowser {
       return
     }
     switch (intent.kind) {
-      case 'scope':
-        this.changeScope(panel, intent.scope)
+      case 'browse-workspace':
+        panel.selectedItem = `workspace:${intent.workspaceId}`
+        if (intent.toggle) {
+          const expanded = panel.expandedWorkspaces.get(intent.workspaceId)
+            ?? (intent.workspaceId === priorityWorkspaceId(panel) || (workspaceGroups(panel).find(group => group.workspaceId === intent.workspaceId)?.needs ?? 0) > 0 || (workspaceGroups(panel).find(group => group.workspaceId === intent.workspaceId)?.working ?? 0) > 0)
+          if (!expanded) {
+            if (!panel.historyLimits.has(intent.workspaceId)) {
+              panel.historyLimits.set(intent.workspaceId, intent.workspaceId === priorityWorkspaceId(panel) ? 8 : 5)
+            }
+            panel.expandedWorkspaces.set(intent.workspaceId, true)
+          } else {
+            panel.expandedWorkspaces.set(intent.workspaceId, false)
+          }
+        }
+        this.change(panel)
         return
+      case 'browse-more':
+        panel.selectedItem = `more:${intent.workspaceId}`
+        if (intent.reveal) {
+          const expanded = panel.expandedWorkspaces.get(intent.workspaceId)
+            ?? (intent.workspaceId === priorityWorkspaceId(panel) || (workspaceGroups(panel).find(group => group.workspaceId === intent.workspaceId)?.needs ?? 0) > 0 || (workspaceGroups(panel).find(group => group.workspaceId === intent.workspaceId)?.working ?? 0) > 0)
+          if (expanded) {
+            const current = panel.historyLimits.get(intent.workspaceId)
+              ?? (intent.workspaceId === priorityWorkspaceId(panel) ? 8 : 0)
+            panel.historyLimits.set(intent.workspaceId, current + 5)
+          } else {
+            panel.historyLimits.set(intent.workspaceId, 5)
+          }
+          panel.expandedWorkspaces.set(intent.workspaceId, true)
+        }
+        this.change(panel)
+        return
+      case 'use-directory': {
+        const workspace = panel.snapshot.workspace?.facts.find(fact => fact.workspaceId === intent.workspaceId)
+        if (workspace === undefined) return
+        panel.request.onUseDirectory?.(intent.workspaceId, workspace.path)
+        this.close(panel, true)
+        return
+      }
+      case 'directory-edit':
+        panel.directoryPath = intent.text
+        panel.directoryCursor = intent.cursor
+        this.change(panel)
+        return
+      case 'directory-cancel':
+        if (panel.directorySubmitting) return
+        panel.directoryEntry = false
+        panel.directoryPath = ''
+        panel.directoryCursor = 0
+        panel.zone = 'list'
+        this.change(panel)
+        return
+      case 'directory-submit': {
+        if (panel.directorySubmitting) return
+        const path = panel.directoryPath.trim()
+        if (!path.startsWith('/')) {
+          this.notify('Enter an absolute Host path beginning with /.', 'error')
+          return
+        }
+        panel.directorySubmitting = true
+        this.change(panel)
+        panel.request.onAddDirectory?.(path, outcome => {
+          if (this.current() !== panel) return
+          panel.directorySubmitting = false
+          if (outcome.kind === 'registered') {
+            panel.nextCreateWorkspaceId = outcome.workspaceId
+            if (panel.request.initialDirectoryChooser === true) {
+              this.close(panel, true)
+              return
+            }
+            panel.directoryEntry = false
+            panel.snapshot = { ...panel.snapshot, refreshError: undefined }
+            this.notify(`Directory added: ${outcome.path}`, 'info')
+          } else {
+            this.notify(outcome.message, 'error')
+          }
+          this.change(panel)
+        })
+        return
+      }
+      case 'new-session': {
+        const item = panel.selectedItem
+        if (item?.startsWith('workspace:')) panel.request.onNewSession?.(item.slice('workspace:'.length))
+        return
+      }
+      case 'add-directory':
+        panel.directoryEntry = true
+        panel.directoryPath = ''
+        panel.directoryCursor = 0
+        this.change(panel)
+        return
+      case 'workspace-toggle': {
+        const workspaceId = intent.workspaceId.slice('workspace:'.length)
+        const group = workspaceGroups(panel).find(candidate => candidate.workspaceId === workspaceId)
+        const expanded = panel.expandedWorkspaces.get(workspaceId)
+          ?? (workspaceId === priorityWorkspaceId(panel) || (group?.needs ?? 0) > 0 || (group?.working ?? 0) > 0)
+        panel.expandedWorkspaces.set(workspaceId, !expanded)
+        this.change(panel)
+        return
+      }
       case 'browse-row':
         if (!visibleRows(panel).some((row) => row.id === intent.sessionId)) return
         panel.selected = intent.sessionId
+        panel.selectedItem = `session:${intent.sessionId}`
         panel.zone = 'list'
         this.change(panel)
         return
@@ -717,17 +968,61 @@ export class TspSessionBrowser {
         panel.actionFocus = stepActionFocus(panel, intent.delta)
         this.change(panel)
         return
-      case 'activate-action': {
-        const next = this.visibleActionIntent(panel, panel.actionFocus)
-        if (next !== undefined) this.act(panel, panel.revision, next)
-        return
-      }
+       case 'activate-action': {
+         if (panel.actionFocus === 'use-directory') {
+          this.act(panel, panel.revision, { kind: 'use-directory', workspaceId: panel.selectedItem!.slice('workspace:'.length) })
+          return
+        }
+        if (panel.actionFocus === 'new-session') {
+           if (panel.selectedItem?.startsWith('workspace:')) this.act(panel, panel.revision, { kind: 'new-session' })
+           return
+         }
+         if (panel.actionFocus === 'add-directory') {
+           this.act(panel, panel.revision, { kind: 'add-directory' })
+           return
+         }
+         const next = this.visibleActionIntent(panel, panel.actionFocus)
+         if (next !== undefined) this.act(panel, panel.revision, next)
+         return
+       }
       default:
         return
     }
   }
 
+  private directoryKeyIntent(panel: SessionBrowserPanel, key: Key): BrowserIntent | undefined {
+    if (!panel.directoryEntry || panel.directorySubmitting) return undefined
+    if (key.name === 'escape') return { kind: 'directory-cancel' }
+    if (key.name === 'enter' || key.name === 'return') return { kind: 'directory-submit' }
+    if (key.name === 'backspace') {
+      const next = panel.directoryPath.slice(0, Math.max(0, panel.directoryCursor - 1)) + panel.directoryPath.slice(panel.directoryCursor)
+      return { kind: 'directory-edit', text: next, cursor: Math.max(0, panel.directoryCursor - 1) }
+    }
+    if (key.name === 'left') return { kind: 'directory-edit', text: panel.directoryPath, cursor: Math.max(0, panel.directoryCursor - 1) }
+    if (key.name === 'right') return { kind: 'directory-edit', text: panel.directoryPath, cursor: Math.min(panel.directoryPath.length, panel.directoryCursor + 1) }
+    if (key.text !== undefined && !key.ctrl && !key.alt && !key.meta) {
+      const text = panel.directoryPath.slice(0, panel.directoryCursor) + key.text + panel.directoryPath.slice(panel.directoryCursor)
+      return { kind: 'directory-edit', text, cursor: panel.directoryCursor + key.text.length }
+    }
+    return undefined
+  }
   private keyIntent(panel: SessionBrowserPanel, key: Key): BrowserIntent | undefined {
+    if (panel.directoryEntry) {
+      // The Host path submode owns its keys: Cancel always leaves the submode
+      // (never the whole Browser), Tab moves between its editor and its
+      // Use directory/Cancel actions, and verification fences every key.
+      if (panel.directorySubmitting) return undefined
+      if (key.name === 'escape') return { kind: 'directory-cancel' }
+      if (key.name === 'tab') return { kind: 'zone', zone: panel.zone === 'actions' ? 'list' : 'actions' }
+      if (panel.zone === 'actions') {
+        if (key.name === 'left' || key.name === 'right' || key.name === 'up' || key.name === 'down') {
+          return { kind: 'action-focus', delta: key.name === 'left' || key.name === 'up' ? -1 : 1 }
+        }
+        if (key.name === 'enter' || key.name === 'return') return { kind: 'activate-action' }
+        return undefined
+      }
+      return this.directoryKeyIntent(panel, key)
+    }
     if (key.ctrl === true && key.name === 'c') return undefined
     if (panel.page === 'details') {
       if (key.name === 'escape' || key.name === 'enter') return { kind: 'back' }
@@ -746,7 +1041,7 @@ export class TspSessionBrowser {
     }
     if (key.name === 'tab') {
       const searching = queryMode(panel)
-      const ring: readonly BrowserZone[] = searching ? ['list', 'actions'] : ['list', 'scopes', 'actions']
+      const ring: readonly BrowserZone[] = ['list', 'actions']
       const at = Math.max(ring.indexOf(panel.zone), 0)
       return { kind: 'zone', zone: ring[(at + (key.shift === true ? -1 : 1) + ring.length) % ring.length]! }
     }
@@ -758,27 +1053,36 @@ export class TspSessionBrowser {
       const edited = editQuery(panel, key)
       return edited === undefined ? undefined : { kind: 'query', ...edited }
     }
-    if (panel.zone === 'scopes' && !queryMode(panel)) {
-      if (key.name === 'enter' || key.name === 'up' || key.name === 'down') {
-        return { kind: 'scope', scope: panel.scope === 'workspace' ? 'all' : 'workspace' }
-      }
-      const edited = editQuery(panel, key)
-      return edited === undefined ? undefined : { kind: 'query', ...edited }
+    const selectedId = panel.selectedItem ?? (panel.selected === undefined ? undefined : `session:${panel.selected}`)
+    if (selectedId?.startsWith('workspace:') && (key.name === 'left' || key.name === 'right')) {
+      const workspaceId = selectedId.slice('workspace:'.length)
+      const group = workspaceGroups(panel).find(candidate => candidate.workspaceId === workspaceId)
+      const expanded = panel.expandedWorkspaces.get(workspaceId)
+        ?? (workspaceId === priorityWorkspaceId(panel) || (group?.needs ?? 0) > 0 || (group?.working ?? 0) > 0)
+      if (key.name === 'right' && !expanded) return { kind: 'browse-workspace', workspaceId, toggle: true }
+      if (key.name === 'left' && expanded) return { kind: 'browse-workspace', workspaceId, toggle: true }
     }
     if (key.name === 'enter') {
+      if (selectedId?.startsWith('workspace:')) return { kind: 'browse-workspace', workspaceId: selectedId.slice('workspace:'.length), toggle: true }
+      if (selectedId?.startsWith('more:')) return { kind: 'browse-more', workspaceId: selectedId.slice('more:'.length), reveal: true }
       return panel.selected === undefined ? undefined : { kind: 'resume', sessionId: panel.selected, source: 'enter' }
     }
-    const rows = visibleRows(panel)
-    const index = rows.findIndex((row) => row.id === panel.selected)
+    const items = pickerLayerItems(panel)
+    const index = Math.max(0, items.findIndex(item => item.id === selectedId))
     const targetIndex = key.name === 'home' ? 0
-      : key.name === 'end' ? rows.length - 1
+      : key.name === 'end' ? items.length - 1
         : key.name === 'up' ? Math.max(0, index - 1)
-          : key.name === 'down' ? Math.min(rows.length - 1, Math.max(0, index) + 1)
+          : key.name === 'down' ? Math.min(items.length - 1, index + 1)
             : key.name === 'page_up' ? Math.max(0, index - 5)
-              : key.name === 'page_down' ? Math.min(rows.length - 1, Math.max(0, index) + 5)
+              : key.name === 'page_down' ? Math.min(items.length - 1, index + 5)
                 : undefined
-    const target = targetIndex === undefined ? undefined : rows[targetIndex]
-    if (target !== undefined && target.id !== panel.selected) return { kind: 'browse-row', sessionId: target.id }
+    const target = targetIndex === undefined ? undefined : items[targetIndex]
+    if (target !== undefined && target.id !== selectedId) {
+      if (target.id.startsWith('workspace:')) return { kind: 'browse-workspace', workspaceId: target.id.slice('workspace:'.length), toggle: false }
+      if (target.id.startsWith('more:')) return { kind: 'browse-more', workspaceId: target.id.slice('more:'.length), reveal: false }
+      if (target.id.startsWith('session:')) return { kind: 'browse-row', sessionId: target.id.slice('session:'.length) }
+    }
+
     const edited = editQuery(panel, key)
     return edited === undefined ? undefined : { kind: 'query', ...edited }
   }
@@ -794,16 +1098,35 @@ export class TspSessionBrowser {
   }
 
   private rowIntent(panel: SessionBrowserPanel, item: string, kind: 'select' | 'activate'): BrowserIntent | undefined {
+    if (item.startsWith('workspace:')) return kind === 'select'
+      ? { kind: 'browse-workspace', workspaceId: item.slice('workspace:'.length), toggle: false }
+      : { kind: 'browse-workspace', workspaceId: item.slice('workspace:'.length), toggle: true }
+    if (item.startsWith('more:')) return kind === 'select'
+      ? { kind: 'browse-more', workspaceId: item.slice('more:'.length), reveal: false }
+      : { kind: 'browse-more', workspaceId: item.slice('more:'.length), reveal: true }
     const id = item.startsWith('session:') ? item.slice('session:'.length) : undefined
-    if (id === undefined || !visibleRows(panel).some((row) => row.id === id)) return undefined
+    if (id === undefined) return undefined
     return kind === 'select'
       ? { kind: 'browse-row', sessionId: id }
       : { kind: 'resume', sessionId: id, source: 'activate' }
   }
 
   private eventIntent(panel: SessionBrowserPanel, event: TspEvent, target: EventTarget): BrowserIntent | undefined {
+    if (panel.directorySubmitting) return undefined
+    if (event.ev === 'edit') {
+      if (target.kind !== 'picker' || !panel.directoryEntry) return undefined
+      const text = panel.directoryPath.slice(0, event.from) + event.text + panel.directoryPath.slice(event.to)
+      return { kind: 'directory-edit', text, cursor: event.cursor }
+    }
+    if (event.ev === 'toggle') {
+      if (target.kind !== 'picker' || event.item === undefined || !event.item.startsWith('workspace:')) return undefined
+      return { kind: 'workspace-toggle', workspaceId: event.item }
+    }
     if (event.ev === 'select' || event.ev === 'activate') {
       if (target.kind !== 'picker' || event.item === undefined) return undefined
+      if (event.item.startsWith('workspace:') || event.item.startsWith('more:')) {
+        return this.rowIntent(panel, event.item, event.ev)
+      }
       return this.rowIntent(panel, event.item, event.ev)
     }
     if (event.ev !== 'action') return undefined
@@ -812,18 +1135,14 @@ export class TspSessionBrowser {
       return undefined
     }
     if (target.kind !== 'picker' || panel.page !== 'browse') return undefined
-    if (event.act === 'scope') {
-      if (queryMode(panel) || (event.value !== 'workspace' && event.value !== 'all')) return undefined
-      return { kind: 'scope', scope: event.value }
-    }
-    if (event.act === 'close') return { kind: 'close' }
-    const match = /^(details|resume)#(\d+)$/u.exec(event.act)
+    if (event.act === 'close') return panel.directoryEntry ? { kind: 'directory-cancel' } : { kind: 'close' }
+    const match = /^(details|resume|use-directory|new-session|add-directory|confirm-directory)#(\d+)$/u.exec(event.act)
     if (match === null || Number(match[2]) !== panel.revision) return undefined
     return this.visibleActionIntent(panel, match[1]!)
   }
 
   handleEvent(event: TspEvent): boolean {
-    if (event.ev !== 'select' && event.ev !== 'activate' && event.ev !== 'action') return false
+    if (event.ev !== 'select' && event.ev !== 'activate' && event.ev !== 'toggle' && event.ev !== 'edit' && event.ev !== 'action') return false
     if (!('sf' in event) || event.sf !== this.surfaceId || !('id' in event) || typeof event.id !== 'string') return false
     const target = this.targets.get(event.id)
     if (target === undefined) return false

@@ -124,6 +124,7 @@ import { createFatalLifecycle, createSurfaceLifecycle } from './bootstrap/lifecy
 import { createSessionStartupHelpers, quiesceResumedOwner } from './bootstrap/session-startup.ts'
 import { createSessionOwnershipCore } from '../app/session/ownership-core.ts'
 import { bindSessionRuntime } from '../app/session/runtime.ts'
+import { createWorkspaceNextIntentOwner } from '../app/session/workspace-next-intent.ts'
 import { createSessionScopeAuthority, type LiveSessionScope } from '../app/session/scope.ts'
 import type { NavigationIntent } from '../app/session/transition.ts'
 import { bindSubmissionRuntime, type SubmissionRuntime } from '../app/submission/runtime.ts'
@@ -262,12 +263,16 @@ export function applyRunnerWithRuntime(
   // startup service (no `!!js` expression, so loader hot-reloads cannot race
   // the service's availability while evaluating the row).
   const sessionId = config.sessionId !== undefined && config.sessionId !== '' ? config.sessionId : startup.sessionId
+  const launchWorkspaceIntent = initialWorkspaceIntentFromEnvironment(process.cwd())
+  if (launchWorkspaceIntent.kind !== 'host-path') throw new Error('the launch workspace intent must be a Host path')
+  const workspaceNextIntent = createWorkspaceNextIntentOwner(launchWorkspaceIntent.path)
   // Lifecycle cancellation: ONE controller owned by the runner fiber. It is
   // aborted by user exit, by the ctx.effect cleanup (loader hot-reload
   // unloads the row), and by startup failure. Every long-running load shares
   // its signal; per-action cancellation rides child controllers (the local
   // shell) or generation checks (menu latches).
   const lifecycleController = new AbortController()
+  lifecycleController.signal.addEventListener('abort', () => workspaceNextIntent.dispose(), { once: true })
   // Register cancellation before entering the fire-and-forget startup root:
   // loader/HMR disposal can happen before the full TUI cleanup effect exists.
   // This disposer owns the runner lifetime signal ONLY — diag stays open so
@@ -658,7 +663,7 @@ export function applyRunnerWithRuntime(
      * registered command owns every listing, switch, notice and settlement;
      * this slot only opens it.
      */
-    let openRegisteredSessionBrowser: ((scope?: 'current' | 'all') => void) | undefined
+    let openRegisteredSessionBrowser: ((scope?: 'current' | 'all' | { readonly scope?: 'current' | 'all'; readonly addDirectory?: boolean }) => void) | undefined
     /** TSP-7 Welcome D: the real `/sessions` business-entry availability,
      *  late-bound with the opener above. */
     let sessionBrowserAvailableOwner: (() => boolean) | undefined
@@ -726,9 +731,9 @@ export function applyRunnerWithRuntime(
       // TSP-7 Welcome D: the `/sessions` UI entry the Welcome's Resume action
       // calls. Before the arming below the slot is empty, so a click reaches
       // the loud placeholder and never a fabricated Browser request.
-      openSessionBrowser: () => {
+      openSessionBrowser: (request) => {
         if (openRegisteredSessionBrowser === undefined) throw new Error('session browser command not registered')
-        openRegisteredSessionBrowser()
+        openRegisteredSessionBrowser(request)
       },
       sessionBrowserAvailable: () => sessionBrowserAvailableOwner?.() ?? false,
     })
@@ -930,6 +935,7 @@ export function applyRunnerWithRuntime(
       retirement: selectedRuntime.retirement,
       lifecycle: selectedRuntime.backend.sessionLifecycle,
       lifecycleSignal: lifecycleController.signal,
+      workspaceNextIntent,
       surface: {
         warnRetirement: (report) => {
           // The SEMANTIC outcome decides the wording; the backend's phase labels
@@ -1064,7 +1070,7 @@ export function applyRunnerWithRuntime(
           diag.warn('first session creation failed', { error: message })
           resumeFailure = `could not create the first session: ${message}`
         },
-        notifyResumeFailure: () => {
+         notifyResumeFailure: () => {
           if (resumeFailure !== undefined) {
             surface.display.notify(resumeFailure, 'error')
             resumeFailure = undefined
@@ -1072,11 +1078,6 @@ export function applyRunnerWithRuntime(
         },
         awaitPendingDefaultWrite: (signal) => model.awaitPendingDefaultWrite(signal),
         newSessionId: () => String(SessionId(`session-${randomUUID()}`)),
-        // The local launch directory is a PROPOSAL only: the Host Workspace
-        // registry realpaths and validates it, and the resulting official
-        // WorkspaceId (never this path) is what the create names. Client-local
-        // cwd consumers are untouched.
-        initialWorkspaceIntent: () => initialWorkspaceIntentFromEnvironment(process.cwd()),
         currentOpening: () => surface.openingJournal.current(),
         resetOpening: () => {
           // The whole journal is dropped (the first-session finally): the SAME
@@ -2075,6 +2076,7 @@ export function applyRunnerWithRuntime(
         hostShellCompletion: selectedRuntime.kind === 'direct',
       },
       session: {
+        workspaceNextIntent,
         ensureSession: () => sessionRuntime.ensureSession(),
         withWriter: (scope, task) => sessionRuntime.withWriter(scope, task),
         switchSession: (sessionId, expectedScope) => sessionRuntime.switchSession(sessionId, expectedScope),
@@ -2341,7 +2343,8 @@ export function applyRunnerWithRuntime(
       },
       viewer: { read: () => viewerRef?.read() },
       clientCwd: cwd,
-      // M3-4 PR2: the Remote-ONLY official Session facts (the plan wire view).
+      nextWorkspaceIntent: () => workspaceNextIntent.snapshot(),
+       // M3-4 PR2: the Remote-ONLY official Session facts (the plan wire view).
       // The SessionStatus read is the shared `sessionStatus` capability above.
       ...(remoteSources === undefined ? {} : {
         remote: {
@@ -2799,7 +2802,17 @@ export function applyRunnerWithRuntime(
       // pre-clear admission is the normal one; this catches a bypass).
       pendingPastedPath: (text) => pastedImageIntake.blocksDelivery(text),
       status: { sessionCwd: () => status.sessionCwd() },
-      surface: { refreshPendingInput: () => surface.refreshPendingInput() },
+      surface: {
+         refreshPendingInput: () => surface.refreshPendingInput(),
+         openWorkspaceChooserAfterRestore: () => {
+            status.updateWelcomeCard()
+            return command.openSessionBrowser?.({
+              addDirectory: true,
+              initialDirectoryEntry: true,
+              initialDirectoryPath: workspaceNextIntent.snapshot().displayPath,
+            })
+          },
+       },
       history: {
         persist: (record) => history.persist(record),
         persistAfterSession: (resolveSession, persist) => history.persistAfterSession(resolveSession, persist),
@@ -3871,6 +3884,10 @@ export function applyRunnerWithRuntime(
         status.refresh()
         status.refreshTerminalTitle()
         status.refreshTerminalCwd()
+        runDetached('first workspace preflight', async () => {
+          await sessionRuntime.preflightWorkspace()
+          status.updateWelcomeCard()
+        }, { diag, sessionId: () => ownership.currentSessionId() })
       }
     } else if (startupAgent !== undefined) {
       // The initial owner's catalog was prefetched before mount: no
@@ -3881,6 +3898,10 @@ export function applyRunnerWithRuntime(
       status.refresh()
       status.refreshTerminalTitle()
       status.refreshTerminalCwd()
+      runDetached('first workspace preflight', async () => {
+        await sessionRuntime.preflightWorkspace()
+        status.updateWelcomeCard()
+      }, { diag, sessionId: () => ownership.currentSessionId() })
     }
     // Command registration is sessionless: it must run on BOTH startup
     // surfaces (resume path registers inside initLiveSession; the deferred
@@ -3914,8 +3935,8 @@ export function applyRunnerWithRuntime(
     // arming window (before `bindRendererInput()` can deliver the first bound
     // click). The command owns the listing, the switch and every notice; this
     // entry only opens it.
-    openRegisteredSessionBrowser = (scope) => {
-      runOwned('welcome session browser UI entry', () => command.openSessionBrowser(scope), {
+    openRegisteredSessionBrowser = (request) => {
+      runOwned('welcome session browser UI entry', () => command.openSessionBrowser(request), {
         diag,
         sessionId: () => ownership.currentSessionId(),
       })

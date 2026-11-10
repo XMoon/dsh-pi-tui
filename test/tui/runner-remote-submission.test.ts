@@ -596,7 +596,13 @@ test('a submit inside a session transition is refused, keeps the draft and dispa
   fixture.vt.sendInput('/')
   await fixture.vt.waitForRender()
   fixture.vt.sendInput('pr3-transition-b')
-  await waitFor('the target row is filtered', () => fixture.vt.getViewport().join('\n').includes('pr3-transition-b'), 15_000)
+  // The editor echoes the raw query immediately; the metadata RESULT row is
+  // the fact this step needs (the safe two-Enter contract only advances once
+  // the read owner has accepted a matching row).
+  await waitFor('the target row is filtered', () => {
+    const view = fixture.vt.getViewport().join('\n')
+    return view.includes('pr3-transition-b') && view.includes('metadata')
+  }, 15_000)
   fixture.vt.sendInput('\r')
   await fixture.vt.waitForRender()
   fixture.vt.sendInput('\r')

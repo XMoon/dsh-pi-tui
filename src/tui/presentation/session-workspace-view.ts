@@ -25,6 +25,7 @@ import type {
   SessionBrowserAnswerEligibility,
   SessionBrowserRow,
 } from '../../app/command/session-browser-presentation.ts'
+import { sanitizedPhysicalLine } from './lines.ts'
 import type {
   FactState,
   SessionActivityFact,
@@ -40,8 +41,9 @@ export type SessionWorkspaceScope =
   | { readonly kind: 'workspace'; readonly workspaceId: string }
   | { readonly kind: 'unassigned' }
 
-/** The ONE list group a Session can belong to. */
-export type SessionWorkspaceGroup = 'needs' | 'working' | 'recent'
+/** Priority inside one official Workspace group; never a global group axis. */
+export type SessionWorkspacePriority = 'needs' | 'working' | 'recent'
+export type SessionWorkspaceGroup = SessionWorkspacePriority
 
 /** One row's truthful pending fact.
  *
@@ -74,6 +76,8 @@ export type SessionWorkspaceMembership =
 /** One classified roster row. */
 export interface SessionWorkspaceRowFact {
   readonly sessionId: string
+  readonly priority: SessionWorkspacePriority
+  /** Compatibility projection for the pre-Workspace baseline renderer. */
   readonly group: SessionWorkspaceGroup
   readonly pending: SessionWorkspacePending
   /** The official Host running fact; `undefined` is "not proven", never idle. */
@@ -87,8 +91,55 @@ export interface SessionWorkspaceRowFact {
 
 /** One painted group and its ordered Session ids. Empty groups are omitted. */
 export interface SessionWorkspaceGroupView {
-  readonly kind: SessionWorkspaceGroup
+  readonly kind?: SessionWorkspaceGroup
+  readonly workspaceId: string
+  readonly title: string
+  readonly path: string
   readonly ids: readonly string[]
+}
+
+/** Display title collisions by the shortest unique Host path tail. The ID is a
+ * final fallback only when Host paths themselves remain indistinguishable. */
+export function workspaceDisplayLabels(
+  workspaces: readonly Pick<SessionWorkspaceFact, 'workspaceId' | 'title' | 'path'>[],
+): ReadonlyMap<string, string> {
+  const facts = workspaces.map(workspace => ({
+    workspaceId: sanitizedPhysicalLine(workspace.workspaceId),
+    key: workspace.workspaceId,
+    title: sanitizedPhysicalLine(workspace.title),
+    segments: sanitizedPhysicalLine(workspace.path).split('/').filter(Boolean),
+  }))
+  const groups = new Map<string, typeof facts>()
+  for (const fact of facts) {
+    const title = fact.title || 'Workspace'
+    const group = groups.get(title) ?? []
+    group.push(fact)
+    groups.set(title, group)
+  }
+  const labels = new Map<string, string>()
+  for (const [title, group] of groups) {
+    for (const fact of group) {
+      if (group.length === 1) {
+        labels.set(fact.key, title)
+        continue
+      }
+      let suffix: string | undefined
+      for (let count = 1; count <= Math.max(...group.map(item => item.segments.length)); count += 1) {
+        const candidate = fact.segments.slice(-count).join('/')
+        if (candidate !== '' && group.filter(item => item !== fact).every(item => item.segments.slice(-count).join('/') !== candidate)) {
+          suffix = candidate
+          break
+        }
+      }
+      if (suffix !== undefined) {
+        labels.set(fact.key, `${title} (${suffix})`)
+        continue
+      }
+      const prefix = [...fact.workspaceId].findIndex((_, index) => group.every(item => item === fact || item.workspaceId[index] !== fact.workspaceId[index]))
+      labels.set(fact.key, `${title} (${prefix < 0 ? fact.workspaceId : fact.workspaceId.slice(0, prefix + 1)})`)
+    }
+  }
+  return labels
 }
 
 /** What the header may claim about Sessions OUTSIDE the current scope.
@@ -99,15 +150,17 @@ export type SessionWorkspaceOutsideAttention =
   | { readonly kind: 'unknown' }
 
 export interface SessionWorkspaceView {
-  /** Only groups with members, in the fixed Needs → Working → Recent order. */
+  /** Official Workspace groups in Host follow order; absent proof uses flat rows. */
   readonly groups: readonly SessionWorkspaceGroupView[]
-  /** The exact list order the panel paints and activates. */
+  /** Flat fallback for a missing Workspace baseline. */
   readonly listIds: readonly string[]
   readonly rowsById: ReadonlyMap<string, SessionWorkspaceRowFact>
   readonly outsideAttention: SessionWorkspaceOutsideAttention
   /** The ONE Workspace whose official membership proves `current`; undefined
    *  when sessionless, absent or ambiguous. */
   readonly currentWorkspaceId: string | undefined
+  readonly nextCreateWorkspaceId: string | undefined
+  readonly workspaceBaselineProven: boolean
 }
 
 export interface SessionWorkspaceViewInput {
@@ -125,6 +178,8 @@ export interface SessionWorkspaceViewInput {
   readonly workspaceBaselineProven: boolean
   readonly scope: SessionWorkspaceScope
   readonly currentSessionId: string | undefined
+  readonly nextCreateWorkspaceId?: string
+  readonly legacyGroupMode?: boolean
   /** The previous list order: the deterministic tie-break after `updatedAt`. */
   readonly priorIdOrder?: readonly string[]
 }
@@ -144,6 +199,75 @@ export function currentWorkspaceOf(
     found = workspace.workspaceId
   }
   return found
+}
+
+export interface WorkspaceBrowserDisplayState {
+  readonly expanded: ReadonlyMap<string, boolean>
+  readonly historyLimit: ReadonlyMap<string, number>
+}
+
+export type WorkspaceBrowserRow =
+  | { readonly kind: 'folder'; readonly id: string; readonly workspaceId: string; readonly title: string; readonly path: string; readonly total: number; readonly needs: number; readonly working: number; readonly expanded: boolean; readonly current: boolean; readonly next: boolean }
+  | { readonly kind: 'session'; readonly id: string; readonly workspaceId: string; readonly sessionId: string }
+  | { readonly kind: 'showMore'; readonly id: string; readonly workspaceId: string; readonly remaining: number }
+
+/** Project the complete authority model into one renderer-local visible row list. */
+export function visibleWorkspaceBrowserRows(
+  model: SessionWorkspaceView,
+  display: WorkspaceBrowserDisplayState,
+  selectedSessionId?: string,
+  currentSessionId?: string,
+): readonly WorkspaceBrowserRow[] {
+  if (!model.workspaceBaselineProven) {
+    return model.listIds.map(sessionId => ({ kind: 'session' as const, id: `session:${sessionId}`, workspaceId: 'unavailable', sessionId }))
+  }
+  const rows: WorkspaceBrowserRow[] = []
+  const labels = workspaceDisplayLabels(model.groups)
+  for (const group of model.groups) {
+    const facts = group.ids.map(id => model.rowsById.get(id)!)
+    const needs = facts.filter(fact => fact.priority === 'needs').length
+    const working = facts.filter(fact => fact.priority === 'working').length
+    const current = group.workspaceId === model.currentWorkspaceId
+    const next = group.workspaceId === model.nextCreateWorkspaceId
+    const defaultExpanded = current || next || needs + working > 0
+    const expanded = display.expanded.get(group.workspaceId) ?? defaultExpanded
+    const groupRows: WorkspaceBrowserRow[] = []
+    rows.push({
+      kind: 'folder',
+      id: `workspace:${group.workspaceId}`,
+      workspaceId: group.workspaceId,
+      title: labels.get(group.workspaceId) ?? group.title,
+      path: group.path,
+      total: group.ids.length,
+      needs,
+      working,
+      expanded,
+      current,
+      next,
+    })
+    if (!expanded) continue
+    const activeIds = facts.filter(fact => fact.priority !== 'recent').map(fact => fact.sessionId)
+    const recentIds = facts.filter(fact => fact.priority === 'recent').map(fact => fact.sessionId)
+    const defaultLimit = group.workspaceId === model.currentWorkspaceId || group.workspaceId === model.nextCreateWorkspaceId ? 8 : 0
+    const limit = display.historyLimit.get(group.workspaceId) ?? defaultLimit
+    const visibleRecent = recentIds.slice(0, limit)
+    const visible = new Set([...activeIds, ...visibleRecent])
+    if (selectedSessionId !== undefined && group.ids.includes(selectedSessionId)) visible.add(selectedSessionId)
+    if (currentSessionId !== undefined && group.ids.includes(currentSessionId)) visible.add(currentSessionId)
+    for (const sessionId of group.ids) {
+      if (!visible.has(sessionId)) continue
+      groupRows.push({ kind: 'session', id: `session:${sessionId}`, workspaceId: group.workspaceId, sessionId })
+    }
+    rows.push(...groupRows)
+    const remaining = recentIds.length - visibleRecent.length
+    if (remaining > 0) rows.push({
+      kind: 'showMore',
+      id: `more:${group.workspaceId}`,
+      workspaceId: group.workspaceId,
+      remaining,
+    })
+  }
+  return rows
 }
 
 /** The official membership of one listed Session. Without a valid baseline the
@@ -244,6 +368,7 @@ export function buildSessionWorkspaceView(input: SessionWorkspaceViewInput): Ses
     const { pending, answerable } = classifyPending(activity, input.answerEligibility)
     const fact: SessionWorkspaceRowFact = {
       sessionId: row.id,
+      priority: answerable ? 'needs' : activity?.running === true ? 'working' : 'recent',
       group: answerable ? 'needs' : activity?.running === true ? 'working' : 'recent',
       pending,
       running: activity?.running,
@@ -257,6 +382,9 @@ export function buildSessionWorkspaceView(input: SessionWorkspaceViewInput): Ses
 
   const updatedAt = new Map(roster.map(row => [row.id, row.updatedAt] as const))
   const orderOf = (left: SessionWorkspaceRowFact, right: SessionWorkspaceRowFact): number => {
+    const priority = ['needs', 'working', 'recent'] as const
+    const byPriority = priority.indexOf(left.priority) - priority.indexOf(right.priority)
+    if (byPriority !== 0) return byPriority
     const byTime = updatedAt.get(right.sessionId)! - updatedAt.get(left.sessionId)!
     if (byTime !== 0) return byTime
     const priorLeft = priorIndex.get(left.sessionId) ?? Number.MAX_SAFE_INTEGER
@@ -265,17 +393,58 @@ export function buildSessionWorkspaceView(input: SessionWorkspaceViewInput): Ses
     return rosterIndex.get(left.sessionId)! - rosterIndex.get(right.sessionId)!
   }
 
-  const scoped = classified.filter(fact =>
-    inScope(fact, input.scope, currentWorkspaceId, input.workspaceBaselineProven))
-  const groups: SessionWorkspaceGroupView[] = []
-  const listIds: string[] = []
-  for (const kind of ['needs', 'working', 'recent'] as const) {
-    const ids = scoped.filter(fact => fact.group === kind).sort(orderOf).map(fact => fact.sessionId)
-    if (ids.length === 0) continue
-    groups.push({ kind, ids })
-    listIds.push(...ids)
+  if (input.legacyGroupMode) {
+    const scoped = classified.filter(fact => inScope(fact, input.scope, currentWorkspaceId, input.workspaceBaselineProven))
+    const groups: SessionWorkspaceGroupView[] = []
+    const listIds: string[] = []
+    for (const kind of ['needs', 'working', 'recent'] as const) {
+      const ids = scoped.filter(fact => fact.priority === kind).sort(orderOf).map(fact => fact.sessionId)
+      if (ids.length === 0) continue
+      groups.push({ kind, workspaceId: kind, title: kind === 'needs' ? 'Needs attention' : kind === 'working' ? 'Working' : 'Recent', path: '', ids })
+      listIds.push(...ids)
+    }
+    return { groups, listIds, rowsById, outsideAttention: { kind: 'none' }, currentWorkspaceId, nextCreateWorkspaceId: input.nextCreateWorkspaceId, workspaceBaselineProven: input.workspaceBaselineProven }
   }
 
+  if (!input.workspaceBaselineProven) {
+    const scoped = classified.filter(fact => inScope(fact, input.scope, currentWorkspaceId, false))
+    const legacyGroups: SessionWorkspaceGroupView[] = []
+    const legacyListIds: string[] = []
+    for (const kind of ['needs', 'working', 'recent'] as const) {
+      const ids = scoped.filter(fact => fact.priority === kind).sort(orderOf).map(fact => fact.sessionId)
+      if (ids.length === 0) continue
+      legacyGroups.push({ kind, workspaceId: kind, title: kind === 'needs' ? 'Needs attention' : kind === 'working' ? 'Working' : 'Recent', path: '', ids })
+      legacyListIds.push(...ids)
+    }
+    return { groups: legacyGroups, listIds: legacyListIds, rowsById, outsideAttention: { kind: 'none' }, currentWorkspaceId, nextCreateWorkspaceId: input.nextCreateWorkspaceId, workspaceBaselineProven: false }
+  }
+
+
+  const listIds = classified
+    .filter(fact => inScope(fact, input.scope, currentWorkspaceId, input.workspaceBaselineProven))
+    .sort(orderOf)
+    .map(fact => fact.sessionId)
+
+
+  const groups: SessionWorkspaceGroupView[] = []
+  if (input.workspaceBaselineProven) {
+    for (const workspace of input.workspaces) {
+      const ids = classified
+        .filter(fact => fact.membership.kind === 'assigned' && fact.membership.workspaceIds[0] === workspace.workspaceId)
+        .sort(orderOf)
+        .map(fact => fact.sessionId)
+      groups.push({ workspaceId: workspace.workspaceId, title: workspace.title, path: workspace.path, ids })
+    }
+    const ambiguous = classified.filter(fact => fact.membership.kind === 'ambiguous').sort(orderOf).map(fact => fact.sessionId)
+    const unassigned = classified.filter(fact => fact.membership.kind === 'unassigned').sort(orderOf).map(fact => fact.sessionId)
+    if (ambiguous.length > 0) groups.push({ workspaceId: 'ambiguous', title: 'Membership ambiguous', path: '', ids: ambiguous })
+    if (unassigned.length > 0) groups.push({ workspaceId: 'unassigned', title: 'Unassigned', path: '', ids: unassigned })
+  const priorityWorkspaceId = currentWorkspaceId ?? input.nextCreateWorkspaceId
+  if (priorityWorkspaceId !== undefined) {
+    const priorityIndex = groups.findIndex(group => group.workspaceId === priorityWorkspaceId)
+    if (priorityIndex > 0) groups.unshift(...groups.splice(priorityIndex, 1))
+  }
+  }
   let outsideAttention: SessionWorkspaceOutsideAttention = { kind: 'none' }
   if (input.scope.kind !== 'all' && input.scope.kind !== 'pending') {
     let count = 0
@@ -286,12 +455,10 @@ export function buildSessionWorkspaceView(input: SessionWorkspaceViewInput): Ses
         count += 1
         continue
       }
-      // Anything outside the scope that is not a PROVED non-pending row leaves
-      // "0 outside needs attention" unproved: no number may be painted.
       if (fact.pending !== 'none') unknown = true
     }
     outsideAttention = unknown ? { kind: 'unknown' } : { kind: 'count', count }
   }
 
-  return { groups, listIds, rowsById, outsideAttention, currentWorkspaceId }
+  return { groups, listIds, rowsById, outsideAttention, currentWorkspaceId, nextCreateWorkspaceId: input.nextCreateWorkspaceId, workspaceBaselineProven: input.workspaceBaselineProven }
 }

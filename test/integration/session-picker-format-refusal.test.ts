@@ -98,13 +98,25 @@ for (const [columns, rows] of [[120, 40], [80, 10], [44, 20]] as const) test(`th
   }
   assert.match(view(), /Sessions · 2/u, `the workspace lists the stored Sessions:\n${view()}`)
   if (columns >= 120) {
+    // The legacy rows are inside the collapsed Unassigned Folder until opened.
+    assert.match(view(), /Unassigned · 2/u)
+  }
+
+  // Both stored Sessions are legacy rows without official Workspace
+  // membership, so they live in the explicit Unassigned Folder. The cursor is
+  // anchored on that visible Folder row; Enter expands it, Down selects the
+  // newer (refused) child, and the second Enter is the guarded resume.
+  const resumesBefore = harness.resumeSessionIds.length
+  vt.sendInput('\r')
+  await settle()
+  await vt.waitForRender()
+  vt.sendInput('\u001b[B')
+  await settle()
+  await vt.waitForRender()
+  if (columns >= 120) {
     assert.match(view(), /format-n/u)
     assert.match(view(), /format-c/u)
   }
-
-  // The boot resumed the initial Session; record that count so the assertion
-  // below covers only the resume THIS Enter triggered.
-  const resumesBefore = harness.resumeSessionIds.length
   vt.sendInput('\r')
   await settle()
   await vt.waitForRender()
