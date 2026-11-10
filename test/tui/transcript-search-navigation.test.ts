@@ -2181,7 +2181,7 @@ test('navigation: a query longer than the card width proves every wrapped row', 
 })
 
 test('navigation: Unicode source cells re-prove across width, theme and bullet geometry', async () => {
-  const text = '前缀**匹配词**后缀 needle 家庭 👨‍👩‍👧 tail'
+  const text = '前缀**匹配词**后缀 cafe\u0301 needle 家庭 👨‍👩‍👧 tail'
   const { folder, message } = assistantSearchFolder(text, 'assistant-unicode')
   const matches = folder.search('needle')
   assert.equal(matches.length, 1)
@@ -2211,6 +2211,25 @@ test('navigation: Unicode source cells re-prove across width, theme and bullet g
           assert.equal(selection?.selectedRow, selection?.exactPaintedSegments?.[0]?.row)
         }
       }
+    }
+
+    // CJK, ZWJ and combining source cells prove too: the terminal cell walk
+    // keeps a wide glyph on its own cells and a combining mark inside its base
+    // cell, so the strong run must reassemble the exact query text.
+    vt.resize(80, 30)
+    for (const query of ['匹配词', '👨‍👩‍👧', 'e\u0301']) {
+      const queryMatches = folder.search(query)
+      assert.equal(queryMatches.length, 1, `fixture: ${JSON.stringify(query)} is searchable once`)
+      app.setTranscriptSearchPresentation({
+        matchMessages: new Set([message]),
+        target: { query, match: queryMatches[0]!, message },
+        grantReveal: true,
+      })
+      app.scrollToSearchTarget()
+      const queryLines = await viewport(vt)
+      assert.equal(strongText(queryLines, vt), query,
+        `${JSON.stringify(query)} proves its own painted cells`)
+      assert.equal(mountedSelectionFor(app, message)?.exact, true, `${JSON.stringify(query)} is exact`)
     }
 
     // A geometry change without a re-measure must never keep the old columns:
