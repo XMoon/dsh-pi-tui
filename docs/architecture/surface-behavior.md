@@ -1928,7 +1928,7 @@ Authority: `src/runtime/direct/file-completion/host-discovery.ts`,
   outcome, distinct from the sandbox reason-unknown above: the card states that
   the command may have executed, the run is never replayed, and an unknown
   result is never written to the Session.
-- Completion uses one shell grammar over the selected semantic port. Direct keeps its existing `bash -lc` compgen and fork path provider. Remote queries command names, variables, git subcommands and paths on the Host using the live Session's effective cwd and Host environment. A Host refusal never falls back to Client PATH or filesystem; stale connection generations never apply suggestions.
+- Completion uses one shell grammar over the selected semantic port. Direct keeps its existing `bash -lc` compgen and fork path provider. Remote queries command names, variables, git subcommands and paths on the Host using the live Session's effective cwd and Host environment. A Host refusal never falls back to Client PATH or filesystem. A completion RESULT may not cross a Connection generation: a candidate reply that arrives (or is applied as an asynchronous result) after the Connection generation changed is refused, matching the official Client lifecycle (request abort, menu generation, editor document currentness, plus Host re-validation at execution). Accepting an already-displayed candidate that only edits the user's draft is NOT itself a Connection-generation check; execution admission remains the authority for whether a command runs.
 - The user-shell card is one-shot: while the Host run is in flight it shows the
   running state without a live byte preview; at settle it paints the two bounded
   streams with their own truncation lines (each naming the Host-local spill file
