@@ -259,6 +259,17 @@ export class AccountWorkspacePage implements Component {
     this.reconciliationSerial += 1
   }
 
+  /** Whether a failed/superseded readback may be reissued for the SAME unknown
+   *  ACK. The reconciliation barrier must not suppress the read it waits for,
+   *  so this uses the live observation lease rather than hasCurrentObservation. */
+  private canScheduleReconciliationReadback(reconciliation: number | undefined): boolean {
+    return !this.disposed
+      && reconciliation !== undefined
+      && this.stateRecheckRequired
+      && reconciliation === this.reconciliationSerial
+      && this.currentObservationLease() !== undefined
+  }
+
   private readHostState(lease: AccountObservationLease, reconciliation?: number): void {
     if (reconciliation !== undefined) {
       const inFlight = this.reconciliationReadInFlight
@@ -279,10 +290,7 @@ export class AccountWorkspacePage implements Component {
         } catch (error) {
           if (this.disposed) return
           if (serial !== this.stateSerial) {
-            retryAfterNewerWatch = reconciliation !== undefined
-              && this.stateRecheckRequired
-              && reconciliation === this.reconciliationSerial
-              && this.hasCurrentObservation()
+            retryAfterNewerWatch = this.canScheduleReconciliationReadback(reconciliation)
             return
           }
           if (this.observationLease !== lease || !this.source.isObservationCurrent(lease)) {
@@ -302,10 +310,7 @@ export class AccountWorkspacePage implements Component {
           if (sameObservationOwner && this.stateRecheckRequired) {
             this.commitObservation(observation, 'readback')
           } else {
-            retryAfterNewerWatch = reconciliation !== undefined
-              && this.stateRecheckRequired
-              && reconciliation === this.reconciliationSerial
-              && this.hasCurrentObservation()
+            retryAfterNewerWatch = this.canScheduleReconciliationReadback(reconciliation)
           }
           return
         }

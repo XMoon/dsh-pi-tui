@@ -1153,6 +1153,112 @@ test('an unknown mutation ACK cannot be reconciled by a Watch frame ahead of get
   page.dispose()
 })
 
+test('a superseded unknown-ACK readback that fails restarts the Host readback before admission', async () => {
+  const state: SourceState = { view: signedOut(), profileFails: false, balanceFails: false, runningTasks: false, calls: [] }
+  const source = makeSource(state)
+  let starts = 0
+  const readbacks: Array<{ resolve(view: AccountView): void; reject(error: Error): void }> = []
+  source.startSignIn = async lease => {
+    starts += 1
+    state.calls.push('signIn')
+    if (starts === 1) throw new Error('the Host acknowledgement was lost')
+    state.view = waitingAttempt()
+    return issueObservation(state, state.view, lease)
+  }
+  source.getState = () => new Promise<AccountObservation>((resolve, reject) => {
+    readbacks.push({
+      resolve: view => resolve(issueObservation(state, view)),
+      reject,
+    })
+  })
+  const page = new AccountWorkspacePage(source, () => {}, { view: 'page' })
+  page.setBodyHeight(30)
+  await flush()
+  text(page)
+  page.handleInput('\r')
+  await flush()
+  assert.equal(starts, 1)
+  assert.equal(readbacks.length, 1, 'the unknown ACK starts one causal Host readback')
+
+  state.view = signedOut()
+  for (const publish of [...state.watchListeners!]) publish()
+  await flush()
+  assert.equal(readbacks.length, 1, 'the newer Watch frame cannot duplicate the in-flight readback')
+
+  readbacks[0]!.reject(new Error('transient Host read failure'))
+  await flush()
+  assert.equal(readbacks.length, 2,
+    'a readback superseded by a newer Watch frame retries against that current observation')
+  assert.match(text(page), /Last known: signed out · Host state not current/u)
+  page.handleInput('\r')
+  assert.equal(starts, 1, 'the automatic readback retry never replays the mutation')
+
+  readbacks[1]!.resolve(signedOut())
+  await flush()
+  assert.match(text(page), /Signed out \/ no stored credential/u)
+  focusAction(page, 'Sign in')
+  page.handleInput('\r')
+  await flush()
+  assert.equal(starts, 2, 'only the successful causal readback restores explicit SignIn admission')
+  assert.match(text(page), /waiting-browser/u)
+  page.dispose()
+})
+
+test('a current unknown-ACK readback failure stays fenced and only explicit Refresh retries', async () => {
+  const state: SourceState = { view: signedOut(), profileFails: false, balanceFails: false, runningTasks: false, calls: [] }
+  const source = makeSource(state)
+  let starts = 0
+  const readbacks: Array<{ resolve(view: AccountView): void; reject(error: Error): void }> = []
+  source.startSignIn = async lease => {
+    starts += 1
+    state.calls.push('signIn')
+    if (starts === 1) throw new Error('the Host acknowledgement was lost')
+    state.view = waitingAttempt()
+    return issueObservation(state, state.view, lease)
+  }
+  source.getState = () => new Promise<AccountObservation>((resolve, reject) => {
+    readbacks.push({
+      resolve: view => resolve(issueObservation(state, view)),
+      reject,
+    })
+  })
+  const page = new AccountWorkspacePage(source, () => {}, { view: 'page' })
+  page.setBodyHeight(30)
+  await flush()
+  text(page)
+  page.handleInput('\r')
+  await flush()
+  assert.equal(readbacks.length, 1)
+
+  state.view = signedOut()
+  for (const publish of [...state.watchListeners!]) publish()
+  await flush()
+  readbacks[0]!.reject(new Error('transient Host read failure'))
+  await flush()
+  assert.equal(readbacks.length, 2, 'the superseded readback restarts once against the newer Watch frame')
+
+  readbacks[1]!.reject(new Error('another transient Host read failure'))
+  await flush()
+  assert.equal(readbacks.length, 2, 'a current readback failure never starts an unbounded automatic retry loop')
+  assert.match(text(page), /another transient Host read failure/u)
+  assert.match(text(page), /Last known: signed out · Host state not current/u)
+  page.handleInput('\r')
+  await flush()
+  assert.equal(starts, 1, 'the mutation barrier remains closed after the failed causal readback')
+
+  page.handleInput('r')
+  await flush()
+  assert.equal(readbacks.length, 3, 'explicit Refresh makes exactly one fresh causal readback')
+  readbacks[2]!.resolve(signedOut())
+  await flush()
+  assert.match(text(page), /Signed out \/ no stored credential/u)
+  focusAction(page, 'Sign in')
+  page.handleInput('\r')
+  await flush()
+  assert.equal(starts, 2, 'successful explicit recovery restores SignIn admission')
+  page.dispose()
+})
+
 test('an unknown Cancel acknowledgement stays fenced through Watch and out-of-order readback frames', async () => {
   const state: SourceState = { view: waitingAttempt(), profileFails: false, balanceFails: false, runningTasks: false, calls: [] }
   const source = makeSource(state)
