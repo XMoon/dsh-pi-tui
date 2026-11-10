@@ -337,7 +337,7 @@ Runs the command in the Host environment as well; its output stays out of model 
 
 `!` / `!!` are editor modes rather than plain text prefixes. The prompt and completion behavior switch together with the active mode.
 
-Shell cards show a bounded output preview by default. `Ctrl+O` expands the retained output — except in fullscreen Focus, where Ctrl+O owns the Thought roots and the shell cards keep their folded state.
+Shell cards fold to at most three rows by default: the header/status, the command, and one settled outcome row; a running card shows no output preview. `Ctrl+O` expands the retained output — except in fullscreen Focus, where Ctrl+O owns the Thought roots and the shell cards keep their folded state. A settled `!!` card stays at its accepted conversation position; later submissions, Ctrl+S, or new `!`/`!!` runs do not clear it. A Session switch, TUI restart, or Alt+K dismisses it. A committed `!` removes only its own local card.
 
 ### Git commit attribution (optional)
 

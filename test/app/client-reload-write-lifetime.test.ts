@@ -23,6 +23,8 @@
 
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
+import { TuiApp } from '../../src/tui-app.ts'
+import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { createSubmissionController, type SubmissionController, type SubmissionControllerDeps } from '../../src/app/submission/controller.ts'
 import {
   bindSubmissionRuntime,
@@ -202,7 +204,7 @@ function startHarness(): Harness {
       clearError: () => {},
     },
     artifacts: { start: () => {} },
-    shell: { run: () => {}, interrupt: () => {}, cancelRun: () => false },
+    shell: { capturePlacement: () => ({ anchor: undefined, turn: undefined, target: 'beginning' as const, acceptedOrder: 0 }), run: () => {}, interrupt: () => {}, cancelRun: () => false },
     supportsLocalShellCards: true,
     supportsTuiBuiltinUi: true,
     retainsStaleDraftRestore: true,
@@ -288,14 +290,24 @@ interface ShellHarness {
   finishWrite(outcome: WriteOutcome): void
   finishShell(result: HostUserShellResult): void
   failShell(error: unknown): void
+  readonly agent: AgentLike
   readonly card: () => { readonly result?: string; readonly status?: string } | undefined
+  /** Every currently owned local card (identity-targeted removal witness). */
+  readonly cards: () => { readonly args?: string; readonly result?: string; readonly status?: string }[]
+  /** Queue the placement values a subsequent capture returns. */
+  queuePlacements(values: readonly unknown[]): void
+  readonly captureCalls: () => number
+  readonly pushedPlacement: () => unknown
+  /** Hold the next ensureSession() until released. */
+  armEnsureGate(): void
+  releaseEnsureGate(): void
   readonly executions: number
 }
 
-function shellOk(): HostUserShellResult {
+function shellOk(stdout = ''): HostUserShellResult {
   return {
     exit: { kind: 'exit', code: 0 },
-    stdout: { text: '', truncated: false },
+    stdout: { text: stdout, truncated: false },
     stderr: { text: '', truncated: false },
     sandboxDenied: false,
     aborted: false,
@@ -303,16 +315,22 @@ function shellOk(): HostUserShellResult {
   }
 }
 
-function startShellHarness(): ShellHarness {
+function startShellHarness(composerOverride?: unknown): ShellHarness {
   let draft = ''
   const notices: string[] = []
   const writes: { sessionId: string; message: unknown }[] = []
   const writeResolvers: ((outcome: WriteOutcome) => void)[] = []
   const shellResolvers: ((result: HostUserShellResult) => void)[] = []
   const shellFailures: ((error: unknown) => void)[] = []
-  let lastCard: { result?: string; status?: string } | undefined
+  let lastCard: { args?: string; result?: string; status?: string } | undefined
+  let cards: { args?: string; result?: string; status?: string }[] = []
   let executions = 0
-  const composer = {
+  let captureCalls = 0
+  let queuedPlacements: unknown[] = []
+  let lastPlacement: unknown
+  let ensureGate: Promise<void> | undefined
+  let releaseEnsure: (() => void) | undefined
+  const composer: any = composerOverride ?? {
     getDraft: () => draft,
     setDraft: (text: string) => { draft = text },
     setEditorText: (text: string) => { draft = text },
@@ -320,13 +338,28 @@ function startShellHarness(): ShellHarness {
     notify: (message: string) => { notices.push(message) },
     setSubmitPending: () => {},
     clearSettledLocalMessages: () => {},
-    pushLocalMessage: (message: unknown) => {
-      lastCard = message as { result?: string; status?: string }
+    captureLocalShellPlacement: () => {
+      captureCalls += 1
+      return (queuedPlacements.shift() ?? { anchor: undefined, turn: undefined, target: 'beginning' as const, acceptedOrder: 0 }) as never
+    },
+    pushLocalMessage: (message: unknown, placement: unknown) => {
+      lastPlacement = placement
+      lastCard = message as { args?: string; result?: string; status?: string }
+      cards.push(lastCard)
       return message
     },
-    updateLocalMessage: (_current: unknown, message: unknown) => {
-      lastCard = message as { result?: string; status?: string }
+    updateLocalMessage: (current: unknown, message: unknown) => {
+      lastCard = message as { args?: string; result?: string; status?: string }
+      const index = cards.indexOf(current as { args?: string })
+      if (index !== -1) cards[index] = lastCard
       return message
+    },
+    removeLocalMessage: (message: unknown) => {
+      const index = cards.indexOf(message as { args?: string })
+      if (index === -1) return false
+      cards = cards.filter((_card, cardIndex) => cardIndex !== index)
+      if (lastCard === message) lastCard = cards.at(-1)
+      return true
     },
   }
   const agent: AgentLike = { status: 'idle', session: { id: 'session-a' }, options: {}, cancel: () => {} }
@@ -454,7 +487,7 @@ function startShellHarness(): ShellHarness {
       },
     },
     session: {
-      ensureSession: async () => {},
+      ensureSession: () => ensureGate ?? Promise.resolve(),
       beginCommandSettlement: () => {},
       abortCommandSettlement: () => {},
       settleCommandSettlement: () => {},
@@ -487,7 +520,7 @@ function startShellHarness(): ShellHarness {
       clearError: () => {},
     },
     artifacts: { start: () => {} },
-    shell: { run: (text, ackToken, endWrite) => shell.run(text, ackToken, endWrite), interrupt: () => shell.interrupt(), cancelRun: () => shell.cancelRun() },
+    shell: { capturePlacement: () => shell.capturePlacement(), run: (text, ackToken, endWrite, placement) => shell.run(text, ackToken, endWrite, placement), interrupt: () => shell.interrupt(), cancelRun: () => shell.cancelRun() },
     supportsLocalShellCards: true,
     supportsTuiBuiltinUi: true,
     retainsStaleDraftRestore: true,
@@ -513,14 +546,31 @@ function startShellHarness(): ShellHarness {
     finishShell: (result) => {
       const resolve = shellResolvers.shift()
       assert.ok(resolve !== undefined, 'no Host shell execution is pending')
+      // Each execution pushed BOTH a resolver and a rejecter; consume the
+      // sibling so the next failShell settles the NEXT execution.
+      shellFailures.shift()
       resolve(result)
     },
     failShell: (error) => {
       const reject = shellFailures.shift()
       assert.ok(reject !== undefined, 'no Host shell execution is pending')
+      shellResolvers.shift()
       reject(error)
     },
+    agent,
     card: () => lastCard,
+    cards: () => cards,
+    queuePlacements: values => { queuedPlacements = [...values] },
+    captureCalls: () => captureCalls,
+    pushedPlacement: () => lastPlacement,
+    armEnsureGate: () => {
+      ensureGate = new Promise<void>(resolve => { releaseEnsure = resolve })
+    },
+    releaseEnsureGate: () => {
+      releaseEnsure?.()
+      releaseEnsure = undefined
+      ensureGate = undefined
+    },
     get executions() { return executions },
   }
 }
@@ -645,4 +695,126 @@ test('an Alt+Up queue mutation keeps the write lifetime until its queue write se
   finishRemoval({ kind: 'committed', value: undefined })
   await drainMicrotasks()
   assert.equal(ended, 1, 'the queue mutation releases at its terminal settlement')
+})
+
+test('a committed ! removes only its own card, while !! and sibling submits keep theirs', async () => {
+  const harness = startShellHarness()
+  harness.controller.submit('!! echo A')
+  await drainMicrotasks()
+  harness.finishShell(shellOk('A-OUT'))
+  await drainMicrotasks()
+  assert.equal(harness.writes.length, 0, '!! never writes the Session')
+  assert.deepEqual(harness.cards().map(card => card.args), ['echo A'])
+
+  harness.controller.submit('! echo B')
+  await drainMicrotasks()
+  harness.finishShell(shellOk('B-OUT'))
+  await drainMicrotasks()
+  assert.equal(harness.writes.length, 1, 'the ! result started its context write')
+  harness.finishWrite({ kind: 'committed', value: undefined })
+  await drainMicrotasks()
+  const remaining = harness.cards()
+  assert.deepEqual(remaining.map(card => card.args), ['echo A'], 'only the committed ! card is removed')
+  assert.equal(remaining[0]!.status, 'ok', 'the settled !! card stays visible')
+
+  // A normal prompt and a Ctrl+S steer never dismiss the retained !! card.
+  harness.controller.submit('hello')
+  await drainMicrotasks()
+  harness.finishWrite({ kind: 'committed', value: undefined })
+  await drainMicrotasks()
+  assert.deepEqual(harness.cards().map(card => card.args), ['echo A'], 'an ordinary prompt keeps !!')
+  harness.agent.status = 'running'
+  harness.controller.steer('more context')
+  await drainMicrotasks()
+  harness.finishWrite({ kind: 'committed', value: undefined })
+  await drainMicrotasks()
+  assert.deepEqual(harness.cards().map(card => card.args), ['echo A'], 'a steer keeps !!')
+})
+
+test('a rejected or indeterminate ! write keeps its own card and every other !!', async () => {
+  const harness = startShellHarness()
+  harness.controller.submit('!! echo A')
+  await drainMicrotasks()
+  harness.finishShell(shellOk('A-OUT'))
+  await drainMicrotasks()
+
+  harness.controller.submit('! echo B')
+  await drainMicrotasks()
+  harness.finishShell(shellOk('B-OUT'))
+  await drainMicrotasks()
+  harness.finishWrite({ kind: 'rejected', error: { code: 'busy', message: 'writer refused' } })
+  await drainMicrotasks()
+  assert.deepEqual(harness.cards().map(card => card.args), ['echo A', 'echo B'],
+    'a rejected ! write keeps its diagnostic card beside the settled !!')
+
+  harness.controller.submit('! echo C')
+  await drainMicrotasks()
+  harness.finishShell(shellOk('C-OUT'))
+  await drainMicrotasks()
+  harness.finishWrite({ kind: 'indeterminate', error: { code: 'transport/unknown', message: 'unknown' } })
+  await drainMicrotasks()
+  assert.deepEqual(harness.cards().map(card => card.args), ['echo A', 'echo B', 'echo C'],
+    'an indeterminate ! write never removes the card')
+
+  harness.controller.submit('!! echo D')
+  await drainMicrotasks()
+  harness.failShell(new HostUserShellOutcomeUnknownError('Host shell result was lost'))
+  await drainMicrotasks()
+  const cards = harness.cards()
+  assert.deepEqual(cards.map(card => card.args), ['echo A', 'echo B', 'echo C', 'echo D'])
+  assert.equal(cards.at(-1)!.status, 'error', 'the UNKNOWN Host outcome stays as a diagnostic card')
+  assert.equal(harness.writes.length, 2, 'no UNKNOWN outcome was written to the Session')
+  assert.match(cards.at(-1)!.result ?? '', /do not retry automatically/u)
+})
+
+test('the shell placement is captured synchronously at submit and reaches push after the async session create', async () => {
+  const harness = startShellHarness()
+  const first = { anchor: { kind: 'assistant', turn: 1, text: 'anchor-A' }, turn: 1, target: 'anchored', acceptedOrder: 1 }
+  const second = { anchor: { kind: 'assistant', turn: 2, text: 'anchor-B' }, turn: 2, target: 'anchored', acceptedOrder: 2 }
+  harness.queuePlacements([first, second])
+  harness.controller.submit('!! echo A')
+  assert.equal(harness.captureCalls(), 1, 'the accepted gesture captures its placement synchronously')
+  await drainMicrotasks()
+  harness.finishShell(shellOk('A-OUT'))
+  await drainMicrotasks()
+  assert.strictEqual(harness.pushedPlacement(), first,
+    'the card receives the gesture-time placement, never a later re-capture')
+})
+
+test('a real TuiApp + controller shell gesture keeps its gesture-time transcript anchor across a gated ensure', async () => {
+  const vt = new VirtualTerminal(80, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  try {
+    const harness = startShellHarness(app)
+    const anchor = { kind: 'assistant' as const, turn: 0, text: 'ANCHOR_MESSAGE' }
+    const later = { kind: 'assistant' as const, turn: 1, text: 'LATER_MESSAGE' }
+    app.setTranscript([anchor])
+    await vt.waitForRender()
+
+    harness.armEnsureGate()
+    harness.controller.submit("!!printf 'SHELL_E2E\\n'")
+    // The accepted gesture must have captured ANCHOR (the current tail) NOW,
+    // before ensureSession resolves. Simulate later Agent content arriving
+    // while the session create is still gated.
+    app.setTranscript([anchor, later])
+    await vt.waitForRender()
+    harness.releaseEnsureGate()
+    await drainMicrotasks()
+    assert.equal(harness.executions, 1, 'the gated ensure eventually admitted the Host execution')
+    harness.finishShell(shellOk('SHELL_E2E'))
+    await drainMicrotasks()
+    await vt.waitForRender()
+
+    const view = vt.getViewport().join('\n')
+    const anchorRow = view.split('\n').findIndex(line => line.includes('ANCHOR_MESSAGE'))
+    const shellRow = view.split('\n').findIndex(line => line.includes("Shell printf 'SHELL_E2E"))
+    const laterRow = view.split('\n').findIndex(line => line.includes('LATER_MESSAGE'))
+    assert.ok(anchorRow >= 0 && shellRow >= 0 && laterRow >= 0, `rendered rows missing:\n${view}`)
+    assert.ok(anchorRow < shellRow && shellRow < laterRow,
+      `the shell must stay at its gesture-time anchor, before later content:\n${view}`)
+    assert.equal(harness.writes.length, 0, '!! never writes the Session')
+  } finally {
+    app.dispose()
+  }
 })

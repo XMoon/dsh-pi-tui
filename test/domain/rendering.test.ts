@@ -5139,7 +5139,10 @@ test('folded tool / system / compaction rows respect the transcript gutter', asy
   // The editor border (a full-width rule) is chrome, not a transcript
   // row: only check the rows above it.
   const border = lines.findIndex(line => /^[─═]+$/.test(line.trim()))
-  const rows = lines.slice(0, border === -1 ? lines.length : border).filter(line => line.trim() !== '')
+  const rows = lines.slice(0, border === -1 ? lines.length : border)
+    // The welcome card is surface chrome, not a transcript block: the compact
+    // shell card keeps the frame short enough that it can stay in view here.
+    .filter(line => line.trim() !== '' && !line.includes('dsh-pi-tui'))
   for (const line of rows) {
     assert.ok(visibleWidth(line) <= transcriptContentWidth(40),
       `a folded card row exceeds the 38-col content width: ${JSON.stringify(line)}`)

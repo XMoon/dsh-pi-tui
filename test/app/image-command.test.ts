@@ -458,7 +458,6 @@ function mountedComposer(initial = ''): SubmissionComposerPort & {
     },
     notify: (message, kind) => { notices.push({ text: message, kind }) },
     setSubmitPending: () => {},
-    clearSettledLocalMessages: () => {},
     caretAt: (index) => { caret = index },
   }
 }
@@ -1041,7 +1040,7 @@ function cardlessController(options: {
       clearError: () => {},
     },
     artifacts: { start: () => {} },
-    shell: { run: () => {}, interrupt: () => {}, cancelRun: () => false },
+    shell: { capturePlacement: () => ({ anchor: undefined, turn: undefined, target: 'beginning' as const, acceptedOrder: 0 }), run: () => {}, interrupt: () => {}, cancelRun: () => false },
     supportsLocalShellCards: false,
     // The TSP renderer: no PiTui builtin UI.
     supportsTuiBuiltinUi: false,

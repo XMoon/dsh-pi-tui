@@ -47,6 +47,7 @@ import type { HostFilePort } from '../../runtime/host-file-port.ts'
 import type { PendingInputReader } from '../../runtime/pending-input-reader-port.ts'
 import type { SessionWriter } from '../../runtime/session-writer-port.ts'
 import { shellCommandOf } from './shell-context.ts'
+import type { UserShellPresentationPlacement } from './user-shell.ts'
 import type { TuiSettingsDoc } from '../../runtime/config-port.ts'
 import { freshSubmitAckState, acceptSubmitAck, settleSubmitAck, type SubmitAckState, type SubmitPendingDetail } from './ack.ts'
 import { SubmitLatencyTracker, type SubmitLatencyPhase } from './latency.ts'
@@ -246,7 +247,8 @@ export interface SubmissionControllerDeps<ExactAgent extends SubmissionAgentLike
    *  gesture's accepted business-write lifetime at the shell owner's terminal
    *  settlement (M4 PR4). */
   readonly shell: {
-    run(text: string, ackToken: number | undefined, endWrite: () => void): void
+    capturePlacement(): UserShellPresentationPlacement
+    run(text: string, ackToken: number | undefined, endWrite: () => void, placement: UserShellPresentationPlacement): void
     interrupt(): void
     cancelRun(): boolean
   }
@@ -1579,7 +1581,6 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       readPendingInput: (sessionId) => deps.backend.pendingInputReader.snapshot(sessionId),
       draftHasAttachments: (value) => draftHasAttachments(value, deps.drafts.images, deps.drafts.files),
       draftHasImages: (value) => draftHasImages(value, deps.drafts.images),
-      clearSettledLocalMessages: () => deps.app().clearSettledLocalMessages(),
       mergeDraftIntoEditor: (value) => {
         const merged = mergeDraft(deps.app().getDraft(), value)
         deps.app().setEditorText(merged)
@@ -1701,11 +1702,9 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       deps.app().notify('viewing a subagent — Esc returns before submitting', 'info')
       return
     }
-    // A fresh submission dismisses settled local cards (completed `!`/`!!`
-    // runs): the card is a live view, not a record — the transcript row
-    // (context runs) or the next input takes over. Running cards survive
-    // so a live stream is never dismissed by a concurrent submit.
-    deps.app().clearSettledLocalMessages()
+    // A fresh submission does NOT dismiss settled shell cards: a `!!` card is
+    // the Session-excluded record and stays in its transcript position. Only a
+    // real Session switch/hydrate or Alt+K retires it.
     // Persist the submitted line to the LIVE session's cwd input-history
     // file (kimi-style JSONL under $DSH_HOME/user-history — never the
     // settings document). Consecutive repeats are skipped like shell
@@ -1791,6 +1790,10 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       // settlement (the context-mode `!` Session write included). A Client
       // reload must not retire underneath an unsubmitted shell result.
       const endShellWrite = beginUnsettledClientWrite()
+      // The display placement is captured at THIS accepted gesture, before the
+      // asynchronous session creation: a later Host admission or settle must
+      // never move the card to the transcript tail.
+      const shellPlacement = deps.shell.capturePlacement()
       // An owned workflow: the session creation failure restores the draft
       // (failSubmission) — runOwned (AGENTS.md), never a bare void. The
       // history row is written AFTER the session exists (the
@@ -1798,7 +1801,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       // carries its id.
       runOwned('user shell', () => deps.session.ensureSession().then(() => {
         persistHistory(deps.liveAgent()?.session.id)
-        deps.shell.run(text, shellAckToken, endShellWrite)
+        deps.shell.run(text, shellAckToken, endShellWrite, shellPlacement)
       }), {
         diag: deps.diag,
         sessionId: () => deps.liveAgent()?.session.id,

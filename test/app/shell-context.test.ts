@@ -186,7 +186,7 @@ test('submitShell: a stale run scope skips the result submit entirely', async ()
     isDisposed: () => false,
     isScopeCurrent: () => false,
     terminalAck: reason => { ackReasons.push(reason) },
-    clearSettledLocalMessages: () => { throw new Error('the card must not be dismissed') },
+    removeCommittedShellCard: () => { throw new Error('the card must not be dismissed') },
     notify: (message, kind) => notices.push({ message, kind }),
     markDispatch: () => {},
     writerSection: async (_scope, task) => task(),

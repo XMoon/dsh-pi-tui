@@ -726,7 +726,6 @@ export function createViewerRuntime<Event extends SessionPresentationEvent>(
     // Dispose the child ingress BEFORE releasing the child handle: a
     // synchronous teardown effect must not repaint the dead viewer.
     releaseViewHandle()
-    deps.surface.app.clearLocalMessages()
     deps.surface.app.clearNotify() // a viewer notify (if any) is stale now
     deps.surface.app.setViewerMode(undefined)
     // M3-5 PR1 §9.7: the display subject returns to MAIN. StatusRuntime

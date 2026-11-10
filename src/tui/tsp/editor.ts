@@ -594,12 +594,6 @@ export function createTspComposer(sinks: TspComposerSinks, recall: TspComposerRe
     },
     notify: (message, kind) => sinks.notify(message, kind),
     setSubmitPending: detail => sinks.setSubmitPending(detail),
-    clearSettledLocalMessages() {
-      // B1: the TSP renderer has no local-card set yet. The dock's transient
-      // notices are a DIFFERENT state (the B0 external-review P3-1 ruling),
-      // so this is a deliberate no-op rather than clearing them; the real
-      // settled-card semantics arrive with the B1+/PR4 local-card surface.
-    },
     applyKey(key) {
       // ── The fixed §3.4 editor-local reducer order ──
       // (The caller owns the higher precedence: disposal and modal ownership
@@ -785,7 +779,6 @@ export interface TspComposer {
   ): boolean
   notify(message: string, kind?: 'info' | 'error'): void
   setSubmitPending(detail: SubmitPendingDetail | undefined): void
-  clearSettledLocalMessages(): void
   /**
    * PR3-B §7.3 (B2 F1, publication atomicity): clear the draft's STATE
    * without rendering. The session-lifecycle authority calls this INSIDE

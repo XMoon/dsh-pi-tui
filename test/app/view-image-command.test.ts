@@ -525,6 +525,7 @@ test('a user Enter on /view-image routes through the REAL controller into the pi
     shell: {
       // The user-shell sink (a `!`/`!!` line). A different route from the
       // model prompt above; `/view-image` must reach neither.
+      capturePlacement: () => ({ anchor: undefined, turn: undefined, target: 'beginning' as const, acceptedOrder: 0 }),
       run: (text) => { shellRuns.push(text) },
       interrupt: () => {},
       cancelRun: () => false,

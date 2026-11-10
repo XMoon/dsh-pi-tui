@@ -1947,19 +1947,37 @@ Authority: `src/runtime/direct/file-completion/host-discovery.ts`,
   the command may have executed, the run is never replayed, and an unknown
   result is never written to the Session.
 - Completion uses one shell grammar over the selected semantic port. Direct keeps its existing `bash -lc` compgen and fork path provider. Remote queries command names, variables, git subcommands and paths on the Host using the live Session's effective cwd and Host environment. A Host refusal never falls back to Client PATH or filesystem. A completion RESULT may not cross a Connection generation: a candidate reply that arrives (or is applied as an asynchronous result) after the Connection generation changed is refused, matching the official Client lifecycle (request abort, menu generation, editor document currentness, plus Host re-validation at execution). Accepting an already-displayed candidate that only edits the user's draft is NOT itself a Connection-generation check; execution admission remains the authority for whether a command runs.
-- The user-shell card is one-shot: while the Host run is in flight it shows the
-  running state without a live byte preview; at settle it paints the two bounded
-  streams with their own truncation lines (each naming the Host-local spill file
+- The user-shell card is one-shot. Every `!`/`!!` gesture freezes a
+  Client-local display placement captured synchronously at acceptance; the card
+  is a standalone transcript block and is never appended to the live tail by
+  later Agent/Tool events. In the folded default it paints at most three
+  physical rows: the header/status, the single `$ command` row, and — settled
+  only — one authoritative outcome row (an exit/signal/timeout/truncation or
+  error fact). A running card paints no output preview. The retained bounded
+  streams, their own truncation lines (each naming the Host-local spill file
   when one exists), a definite `sandbox denied` fact only when no
   reason-unknown applies, the reason-unknown notice (`stderr truncated; failure
   reason cannot be determined, command may have executed; do not retry
   automatically`) for a nonzero sandbox run with truncated stderr when no
-  runner-fatal was observed, the
-  `[timed out]` fact when present, and the real `[exit N]` / `[signal NAME]`
-  marker, at most twenty visual rows with an honest hidden marker. Ctrl+O
-  expands the retained bounded text (never the spill file or a second stream)
-  except fullscreen Focus. Alt+K dismisses settled cards only; it never cancels
-  the process (Esc owns that) and never deletes session events.
+  runner-fatal was observed, and the real `[exit N]` / `[signal NAME]` /
+  `[timed out]` markers stay reachable through the existing card expansion
+  (never by reading the spill file). The retained body is bounded; at most 32
+  settled cards are kept per mount, evicting the oldest settled card first
+  while every running card stays owned by its run. A settled `!!` is a
+  Client-local display record: it survives later Enter / Ctrl+S submissions
+  and a later `!`; only a real Session switch/hydrate, a TUI remount or Alt+K
+  retires it. Alt+K drops settled cards only, never cancels the process (Esc
+  owns that) and never deletes Session events. A committed `!` removes exactly
+  ITS OWN local card after `SessionWriter` reports committed, leaving every
+  other shell card in place; rejected, indeterminate, cancelled or unknown
+  outcomes keep their diagnostic card. The Child Viewer never renders the
+  main Session's shell cards; they stay owned by the hidden main view and
+  return with it, while a real Session replacement clears them.
+- The card's placement belongs to the Client-local display policy, not to the
+  Session event order: if its source row leaves the current window the card is
+  not materialized there, and a card accepted while browsing history is
+  anchored once when the latest window first returns — never to the global
+  tail and never as a fake Session turn.
 
 Authority: `src/tui/interaction/editor-input-mode.ts`
 (`shellPrefixForMode`, `serializeEditorInput`, `editorModeFromHistoryEntry`),

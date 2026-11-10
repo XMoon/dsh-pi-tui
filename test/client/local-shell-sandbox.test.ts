@@ -329,6 +329,13 @@ async function mountSandboxRunner(
   }
 }
 
+/** Expand the settled shell card to inspect its retained bounded body. */
+async function expandSettledCard(mounted: MountedSandbox): Promise<string> {
+  mounted.app().setTranscriptDetailExpanded(true)
+  await mounted.settleSurface()
+  return mounted.view()
+}
+
 /** Poll a view predicate with bounded settle rounds (the shell task is an
  * owned async workflow; settlement lands after microtask drains). */
 async function waitForView(mounted: MountedSandbox, needle: string, label: string): Promise<string> {
@@ -347,10 +354,11 @@ test('sandbox `!` spawns the raw argv once and settles the official result', asy
   })
   const mounted = await mountSandboxRunner(t, host)
   mounted.submit('!make check')
-  const view = await waitForView(mounted, 'exit 0', 'the settled success card')
-  assert.ok(view.includes('sandbox ok'), `stdout must reach the card:\n${view}`)
-  assert.ok(view.includes('warn line'), `stderr must reach the card:\n${view}`)
-  assert.ok(view.includes('[exit 0]'), `the exit marker must settle the card:\n${view}`)
+  const view = await waitForView(mounted, '[exit 0]', 'the settled success card')
+  const expanded = await expandSettledCard(mounted)
+  assert.ok(expanded.includes('sandbox ok'), `stdout must reach the expanded card:\n${expanded}`)
+  assert.ok(expanded.includes('warn line'), `stderr must reach the expanded card:\n${expanded}`)
+  assert.ok(view.includes('[exit 0]'), `the exit marker must settle the folded card:\n${view}`)
   assert.equal(host.spawnCount(), 1, 'the official Subprocess spawned exactly once')
   assert.deepEqual(host.subprocess!.spawns[0]!.argv, ['bash', '-c', 'make check'])
   assert.ok(host.policyResolves.length >= 1, 'the exact Session policy was resolved')
@@ -366,9 +374,11 @@ test('a truncated sandbox run paints the bounded tail and an explicit truncation
   })
   const mounted = await mountSandboxRunner(t, host)
   mounted.submit('!make loud')
-  const view = await waitForView(mounted, 'stdout truncated', 'the truncated settle')
-  assert.ok(view.includes('TAIL_20261110'), `the retained tail must be painted:\n${view}`)
-  assert.ok(view.includes('[exit 0]'), `the exit marker still settles the card:\n${view}`)
+  const view = await waitForView(mounted, '[exit 0]', 'the truncated settle')
+  const expanded = await expandSettledCard(mounted)
+  assert.ok(expanded.includes('stdout truncated'), `the truncation fact must reach the expanded card:\n${expanded}`)
+  assert.ok(expanded.includes('TAIL_20261110'), `the retained tail must be painted when expanded:\n${expanded}`)
+  assert.ok(view.includes('[exit 0]'), `the exit marker still settles the folded card:\n${view}`)
   assert.ok(!view.includes('output truncated: retained'), 'the retired streaming retention report is gone')
 })
 
@@ -376,8 +386,9 @@ test('a nonzero sandbox exit resolves (never rejects) into an error card', async
   const host = makeHostFake({ fakeSubprocess: true, result: async () => runResult({ exitCode: 3, stderr: 'boom\n' }) })
   const mounted = await mountSandboxRunner(t, host)
   mounted.submit('!make fail')
-  const view = await waitForView(mounted, 'exit 3', 'the nonzero exit card')
-  assert.ok(view.includes('boom'), `stderr must reach the card:\n${view}`)
+  await waitForView(mounted, '[exit 3]', 'the nonzero exit card')
+  const expanded = await expandSettledCard(mounted)
+  assert.ok(expanded.includes('boom'), `stderr must reach the expanded card:\n${expanded}`)
 })
 
 test('a signal-terminated sandbox run reports the signal, not an exit code', async (t) => {
@@ -455,7 +466,8 @@ test('the default bypass preference runs raw Bash through Subprocess and never c
   const host = makeHostFake()
   const mounted = await mountSandboxRunner(t, host, 'bypass')
   mounted.submit("!printf 'bypass-local\\n'")
-  const view = await waitForView(mounted, 'bypass-local', 'the bypass card')
+  await waitForView(mounted, '[exit 0]', 'the bypass card')
+  const view = await expandSettledCard(mounted)
   assert.ok(view.includes('bypass-local'), `the default path must run the raw Bash command:\n${view}`)
   assert.equal(host.confineCalls.length, 0, 'bypass must never confine')
 })
@@ -467,7 +479,8 @@ test('a REAL Settings Confirm of the shell policy is what the next `!` executes 
 
   // CONTROL: the raw Bash bypass runs; no sandbox preparation happens.
   mounted.submit("!printf 'local-control\\n'")
-  const control = await waitForView(mounted, 'local-control', 'the local control card')
+  await waitForView(mounted, "Shell printf 'local-control", 'the local control card to settle')
+  const control = await expandSettledCard(mounted)
   assert.equal(host.confineCalls.length, 0, 'bypass never confines')
   assert.ok(control.includes('local-control'))
 
@@ -520,9 +533,10 @@ test('a REAL Settings Confirm of the shell policy is what the next `!` executes 
 
   // SOURCE -> SINK: the NEXT `!` takes the sandbox confinement.
   mounted.submit('!make check')
-  const sandboxed = await waitForView(mounted, 'sandboxed-by-settings', 'the sandboxed card')
+  await waitForView(mounted, 'Shell make check [ok]', 'the sandboxed card to settle')
+  const sandboxed = await expandSettledCard(mounted)
   assert.equal(host.confineCalls.length, 1, 'the next `!` really entered the sandbox path')
-  assert.ok(sandboxed.includes('sandboxed-by-settings'))
+  assert.ok(sandboxed.includes('sandboxed-by-settings'), `the sanctioned sandbox output must be visible:\n${sandboxed}`)
 
   // THE REVERSE TRIP, also through the real UI.
   await mounted.runSettings()
@@ -547,7 +561,8 @@ test('a REAL Settings Confirm of the shell policy is what the next `!` executes 
   assert.doesNotMatch(mounted.view(), /Settings · /u, `the workspace closed again:\n${mounted.view()}`)
 
   mounted.submit("!printf 'back-to-local\\n'")
-  const backToLocal = await waitForView(mounted, 'back-to-local', 'the restored bypass card')
+  await waitForView(mounted, "Shell printf 'back-to-local", 'the restored bypass card to settle')
+  const backToLocal = await expandSettledCard(mounted)
   assert.equal(host.confineCalls.length, 1, 'the bypass run after the UI reverse never re-entered the sandbox')
   assert.ok(backToLocal.includes('back-to-local'))
 })
@@ -558,20 +573,23 @@ test('a policy change on the live settings document routes the NEXT `!` through 
   assert.equal(mounted.policy(), 'bypass', 'the harness serves the real persisted value')
 
   mounted.submit("!printf 'bypass-run\\n'")
-  const bypassView = await waitForView(mounted, 'bypass-run', 'the bypass card')
+  await waitForView(mounted, "Shell printf 'bypass-run", 'the bypass card to settle')
+  const bypassView = await expandSettledCard(mounted)
   assert.equal(host.confineCalls.length, 0, 'bypass never confines')
   assert.ok(bypassView.includes('bypass-run'))
 
   mounted.setPolicy('sandbox')
   assert.equal(mounted.policy(), 'sandbox', 'the persisted policy really changed')
   mounted.submit('!make check')
-  const sandboxView = await waitForView(mounted, 'sandboxed', 'the sandboxed card')
+  await waitForView(mounted, 'Shell make check [ok]', 'the sandboxed card to settle')
+  const sandboxView = await expandSettledCard(mounted)
   assert.equal(host.confineCalls.length, 1, 'the sandboxed `!` really entered the sandbox path')
-  assert.ok(sandboxView.includes('sandboxed'))
+  assert.ok(sandboxView.includes('sandboxed'), `the sanctioned sandbox output must be visible:\n${sandboxView}`)
 
   mounted.setPolicy('bypass')
   mounted.submit("!printf 'back-to-bypass\\n'")
-  const backView = await waitForView(mounted, 'back-to-bypass', 'the restored bypass card')
+  await waitForView(mounted, "Shell printf 'back-to-bypass", 'the restored bypass card to settle')
+  const backView = await expandSettledCard(mounted)
   assert.equal(host.confineCalls.length, 1, 'the bypass run after the switch never re-entered the sandbox')
   assert.ok(backView.includes('back-to-bypass'))
 })

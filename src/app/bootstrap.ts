@@ -2837,7 +2837,8 @@ export function applyRunnerWithRuntime(
       },
       artifacts: { start: (name, agent) => artifacts.start(name, agent) },
       shell: {
-        run: (text, ackToken, endWrite) => localShell.run(text, ackToken, endWrite),
+        capturePlacement: () => localShell.capturePlacement(),
+        run: (text, ackToken, endWrite, placement) => localShell.run(text, ackToken, endWrite, placement),
         interrupt: () => localShell.interrupt(),
         cancelRun: () => localShell.cancelRun(),
       },

@@ -37,6 +37,4 @@ export interface SubmissionComposerPort {
   notify(message: string, kind?: 'info' | 'error'): void
   /** Show/clear the local submit-ack row (`TuiApp.setSubmitPending`). */
   setSubmitPending(detail: SubmitPendingDetail | undefined): void
-  /** Drop every client-local settled card (`TuiApp.clearSettledLocalMessages`). */
-  clearSettledLocalMessages(): void
 }

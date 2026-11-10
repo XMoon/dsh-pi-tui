@@ -136,7 +136,7 @@ export interface SurfaceDisplaySeam {
   setTranscript(
     messages: readonly TranscriptMessage[],
     activities?: ReadonlyMap<number, TurnActivity>,
-    window?: TranscriptWindowState & { firstTurn?: number; lastTurn?: number; hasNewer?: boolean },
+    window?: TranscriptWindowState & { firstTurn?: number; lastTurn?: number; hasOlder?: boolean; hasNewer?: boolean },
     streamingToolPreviews?: readonly StreamingToolPreview[],
     searchPresentation?: TranscriptSearchPresentation,
     /**

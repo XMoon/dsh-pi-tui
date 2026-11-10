@@ -346,7 +346,8 @@ export interface ShellSubmitDeps {
   readonly isDisposed: () => boolean
   readonly isScopeCurrent: (scope: LiveSessionScope) => boolean
   readonly terminalAck: (reason: string) => void
-  readonly clearSettledLocalMessages: () => void
+  /** Remove ONLY this run's local card after the Session write committed. */
+  readonly removeCommittedShellCard: () => void
   readonly notify: (message: string, kind: 'info' | 'error') => void
   readonly markDispatch: (sessionId: string) => void
   readonly writerSection: <T>(scope: LiveSessionScope, task: () => Promise<T>) => Promise<T>
@@ -386,7 +387,7 @@ export function submitShell(deps: ShellSubmitDeps): void {
     createMessage: text => deps.createMessage(text),
     onSubmitted: () => {
       if (deps.isDisposed()) return
-      deps.clearSettledLocalMessages()
+      deps.removeCommittedShellCard()
     },
   }, submitted), {
     diag: deps.diag,
@@ -764,7 +765,6 @@ export interface SteerSubmissionDeps {
   readonly readPendingInput: (sessionId: string) => PendingInputSnapshot | undefined
   readonly draftHasAttachments: (text: string) => boolean
   readonly draftHasImages: (text: string) => boolean
-  readonly clearSettledLocalMessages: () => void
   /** Merge the draft into the editor; returns whether it came back VERBATIM. */
   readonly mergeDraftIntoEditor: (text: string) => boolean
   /**
@@ -843,9 +843,6 @@ function steerSubmission(deps: SteerSubmissionDeps, input: SteerSubmissionInput)
     deps.notify('viewing a subagent — Esc returns before steering', 'info')
     return
   }
-  // Same dismissal rule as submissions: settled local cards are a live view,
-  // not a record (completed `!`/`!!` runs).
-  deps.clearSettledLocalMessages()
   // The payload verdict is computed ONCE here on the SERIALIZED wire form and
   // passed to steerAll (app/submission/steer.ts never guesses shell/image semantics): `!` /
   // `!!` shell modes make a bare prefix a payload, attachment placeholders
