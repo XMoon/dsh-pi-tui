@@ -1189,6 +1189,16 @@ test('runner search: a Folder Workflow name range reaches its exact VirtualTermi
   const column = stripTerminalSequences(lines[row]!).indexOf('needle')
   assert.equal(fixture.vt.getCellBgRgb(row, column), 0xf5c542,
     `the real semantic match range reaches the exact painted cell:\n${lines[row]}`)
+  // A direct-field Workflow region is exact WITHOUT the dedicated
+  // User/Thinking/Assistant proof channel, so the Source-only notice must be
+  // decided by the FINAL selection exactness, never by one proof channel.
+  const selection = mountedSearchSelection(fixture.app, target!.message!)
+  assert.equal(selection?.exact, true, 'the Workflow name hit is a proven source range')
+  assert.equal(selection?.sourceDisposition, undefined, 'an exact Workflow selection carries no Source-only state')
+  assert.equal(fixture.app.currentFullSearchNotice(), undefined,
+    'an exact Workflow hit never shows the Source-only row')
+  assert.ok(!fixture.vt.getViewport().map(stripTerminalSequences).some(line => line.includes('Source-only')),
+    'the Search box keeps its three-row form for the exact Workflow hit')
 })
 
 // ── F2: Full proves the current Assistant Markdown source onto real cells ─────
