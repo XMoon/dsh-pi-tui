@@ -195,6 +195,7 @@ function makePort(options: {
     calls,
     state,
     streams,
+    get currentGeneration() { return snapshot },
     get accountGetterCalls() { return accountGetterCalls },
     get activeGenerationListeners() { return generationListeners.size },
     setGeneration(value: RemoteConnectionGeneration | undefined) {
@@ -356,6 +357,7 @@ test('a carrier failure on the current generation waits for and consumes the rep
   const iterator = harness.port.account.watch(controller.signal)[Symbol.asyncIterator]()
   assert.deepEqual((await iterator.next()).value, ACCOUNT_VIEW)
   const generationOne = harness.streams[0]!
+  assert.equal(harness.currentGeneration?.id, 'generation-1')
   const listenersBeforeFailure = harness.activeGenerationListeners
   const oldStreamNext = iterator.next()
   await new Promise<void>(resolve => setImmediate(resolve))

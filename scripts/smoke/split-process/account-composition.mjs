@@ -175,6 +175,7 @@ export async function runF2AccountComposition(context) {
   const mockFailures = []
   let mockServer
   let host
+  let suspendedHostPid
   const clients = []
   const credentialsPath = join(dshHome, '.credentials.yaml')
   const apiKeySentinel = 'm6-f2-isolated-api-key'
@@ -441,11 +442,61 @@ export async function runF2AccountComposition(context) {
     const clientA = await launchClient('F2 A')
     const clientB = await launchClient('F2 B')
     await openAccountPage(clientA, 'F2 A', 'signed-out')
-    await openAccountPage(clientB, 'F2 B', 'signed-out')
-    await selectAccountAction(clientB, 'Sign in', 'F2 select first browser Sign-in')
+
+    const offlineGeneration = lastSurfaceStatus(clientB)
+    assert(offlineGeneration?.transport === 'connected' && typeof offlineGeneration.generationId === 'number',
+      'F2 Client B has no authenticated generation before the offline Account-page case')
+    const offlineHostPid = hostReady.pid
+    assert(Number.isInteger(offlineHostPid), 'F2 cannot identify the isolated Host business PID')
+    process.kill(offlineHostPid, 'SIGSTOP')
+    suspendedHostPid = offlineHostPid
+    clientB.signalBusiness('SIGUSR1')
+    await waitForSurfaceStatus(clientB,
+      record => record.transport !== 'connected',
+      'F2 Client B reached an unavailable Connection generation', 30_000)
+    await submitOnRealEditor(clientB, '/settings',
+      'F2 opens Settings while its Host Connection is unavailable')
+    await clientB.waitForScreen('Settings · Categories', 'F2 offline Settings category rail opened', 30_000)
+    clientB.send('\x1b[B\x1b[B')
+    await clientB.waitForScreen('DeepSeek Account', 'F2 Settings Account page opened while offline', 30_000)
+    await waitForAccountFrame(clientB, 'unavailable', 'F2 offline Account did not invent signed-out state', trace, 20_000)
+    assert(!(await sanitizedFrame(clientB)).includes('Signed out / no stored credential'),
+      'F2 a disconnected first watch was represented as signed-out')
+    process.kill(offlineHostPid, 'SIGCONT')
+    suspendedHostPid = undefined
+
+    const offlineRecovery = await waitForSurfaceStatus(clientB,
+      record => record.transport === 'connected'
+        && typeof record.generationId === 'number'
+        && record.generationId !== offlineGeneration.generationId,
+      'F2 offline Account Client recovered a new authenticated generation', 120_000)
+    assert(offlineRecovery.generationId !== offlineGeneration.generationId,
+      'F2 offline page recovery did not observe a new Connection identity')
     clientB.send('\r')
-    await waitForAccountFrame(clientB, 'waiting-browser', 'F2 official Account attempt reached the browser phase', trace, 30_000)
-    await waitForAccountFrame(clientA, 'waiting-browser', 'F2 first Client observes the shared Host attempt', trace, 30_000)
+    await clientB.waitForScreen('Settings · Account', 'F2 offline Account content received keyboard focus', 20_000)
+    clientB.send('r')
+    await waitForCondition(async () => {
+      const frame = await sanitizedFrame(clientB)
+      return frame.includes('Signed out / no stored credential') || /Host Account service is unavailable|account watch stopped/iu.test(frame)
+    }, 'F2 explicit refresh reached an Account state or an explicit retryable failure', 20_000)
+    let refreshedFrame = await sanitizedFrame(clientB)
+    if (!refreshedFrame.includes('Signed out / no stored credential')) {
+      assert(/Host Account service is unavailable|account watch stopped/iu.test(refreshedFrame),
+        'F2 Account Refresh must show either the signed-out Host fact or an explicit retryable failure')
+      clientB.send('r')
+      await waitForAccountFrame(clientB, 'Signed out / no stored credential',
+        'F2 a new explicit Refresh re-established the Account watch initial snapshot', trace, 30_000)
+      refreshedFrame = await sanitizedFrame(clientB)
+    }
+    assert(refreshedFrame.includes('Signed out / no stored credential'),
+      'F2 the recovered Account watch did not commit its first Host snapshot')
+    await clientB.waitForScreen('Sign in', 'F2 recovered Account page restored Sign in action', 20_000)
+
+    await selectAccountAction(clientA, 'Sign in', 'F2 peer Client A selects first browser Sign-in')
+    clientA.send('\r')
+    await waitForAccountFrame(clientA, 'waiting-browser', 'F2 official Account attempt reached the browser phase', trace, 30_000)
+    await waitForAccountFrame(clientB, 'waiting-browser',
+      'F2 offline-recovered Client B observed Client A Host attempt', trace, 30_000)
     await closeAccountPage(clientA, 'F2 A')
     await waitForAccountFrame(clientB, 'waiting-browser',
       'F2 closing Client A Account page left the Host browser attempt alive', trace, 20_000)
@@ -677,6 +728,10 @@ export async function runF2AccountComposition(context) {
       apiKeyPreserved: true,
     }
   } finally {
+    if (suspendedHostPid !== undefined) {
+      try { process.kill(suspendedHostPid, 'SIGCONT') } catch { /* the Host may already have exited */ }
+      suspendedHostPid = undefined
+    }
     for (const client of clients) await client.dispose()
     if (host !== undefined) {
       try { await host.shutdown() } catch { /* the runner's process backstop owns leftovers */ }

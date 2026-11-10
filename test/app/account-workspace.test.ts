@@ -51,18 +51,51 @@ interface SourceState {
   balanceFails: boolean
   runningTasks: boolean
   readonly calls: string[]
+  available?: boolean
+  taskCheckCalls?: number
+  watchStarts?: number
+  watchActive?: number
+  watchListeners?: Set<() => void>
+  watchFailures?: Set<(error: Error) => void>
 }
 
 function makeSource(state: SourceState): AccountWorkspaceSource {
+  state.watchListeners ??= new Set()
+  state.watchFailures ??= new Set()
+  state.watchStarts ??= 0
+  state.watchActive ??= 0
   return {
-    available: () => true,
+    available: () => state.available ?? true,
     callbackOrigin: () => 'http://127.0.0.1:43121',
     getState: async () => state.view,
-    watch: async function* () {
-      // The official watch yields a complete initial state; the page uses this
-      // frame as its first read and never races it with a separate getState.
-      yield state.view
-      await new Promise<void>(() => {})
+    watch: async function* (signal) {
+      state.watchStarts = (state.watchStarts ?? 0) + 1
+      state.watchActive = (state.watchActive ?? 0) + 1
+      try {
+        yield state.view
+        while (true) {
+          const next = await new Promise<AccountView | undefined>((resolve, reject) => {
+            const listeners = state.watchListeners!
+            const failures = state.watchFailures!
+            const cleanup = (): void => {
+              listeners.delete(changed)
+              failures.delete(failed)
+              signal.removeEventListener('abort', aborted)
+            }
+            const changed = (): void => { cleanup(); resolve(state.view) }
+            const failed = (error: Error): void => { cleanup(); reject(error) }
+            const aborted = (): void => { cleanup(); resolve(undefined) }
+            listeners.add(changed)
+            failures.add(failed)
+            signal.addEventListener('abort', aborted, { once: true })
+            if (signal.aborted) aborted()
+          })
+          if (next === undefined) return
+          yield next
+        }
+      } finally {
+        state.watchActive = (state.watchActive ?? 1) - 1
+      }
     },
     getProfile: async () => state.profileFails
       ? { status: 'failed', reason: 'profile endpoint unavailable' }
@@ -85,7 +118,10 @@ function makeSource(state: SourceState): AccountWorkspaceSource {
       state.view = signedOut()
       return state.view
     },
-    hasRunningAccountTasks: async () => state.runningTasks,
+    hasRunningAccountTasks: async () => {
+      state.taskCheckCalls = (state.taskCheckCalls ?? 0) + 1
+      return state.runningTasks
+    },
     openUrl: url => { state.calls.push(`open:${url}`) },
     copy: text => { state.calls.push(`copy:${text}`) },
     run: (_label, task) => { void task() },
@@ -322,6 +358,19 @@ test('a late false task check cannot replace the newer confirmed running-task fa
   assert.equal(state.calls.filter(call => call === 'signOut').length, 1)
 })
 
+test('/logout deep link with no stored credential reports signed out without checking running tasks', async () => {
+  const { page, state } = open({ view: 'signout' })
+  await flush()
+  const painted = text(page)
+  assert.match(painted, /Signed out \/ no stored credential/u)
+  assert.match(painted, /Nothing to sign out/u)
+  assert.match(painted, /Sign in/u)
+  assert.doesNotMatch(painted, /Sign out confirmation|Checking running account tasks|Could not verify/u)
+  assert.equal(state.taskCheckCalls ?? 0, 0, 'the Host task predicate is irrelevant without a stored credential')
+  assert.equal(state.calls.includes('signOut'), false)
+  page.dispose()
+})
+
 test('an unavailable Host task check disables Sign out until Retry returns a known fact', async () => {
   const state: SourceState = { view: stored(), profileFails: false, balanceFails: false, runningTasks: false, calls: [] }
   const source = makeSource(state)
@@ -355,11 +404,16 @@ test('an unavailable Host task check disables Sign out until Retry returns a kno
   assert.equal(state.calls.filter(call => call === 'signOut').length, 1)
 })
 
-test('/logout deep link opens the Sign out confirmation directly', async () => {
-  const { page, state } = open({ view: 'signout' })
-  state.view = stored()
+test('/logout deep link with a stored credential opens the asynchronous task check', async () => {
+  const state: SourceState = { view: stored(), profileFails: false, balanceFails: false, runningTasks: false, calls: [] }
+  const page = new AccountWorkspacePage(makeSource(state), () => {}, { view: 'signout' })
+  page.setBodyHeight(30)
   await flush()
-  assert.match(text(page), /Sign out confirmation/u)
+  const painted = text(page)
+  assert.match(painted, /Sign out confirmation/u)
+  assert.match(painted, /No running account task is using this account/u)
+  assert.equal(state.taskCheckCalls, 1)
+  page.dispose()
 })
 
 test('an unknown sign-out outcome refreshes Host state without replaying the mutation', async () => {
@@ -415,6 +469,108 @@ test('an older Account getState cannot overwrite a newer watch snapshot (RFL-002
   held?.(signedOut())
   await flush()
   assert.match(text(page), /Signed in \(stored credential\)/u, 'the older read must be dropped')
+})
+
+test('offline Account refresh and an ended watch each restore one live subscription', async () => {
+  const state: SourceState = {
+    view: signedOut(), profileFails: false, balanceFails: false, runningTasks: false, calls: [], available: false,
+  }
+  const page = new AccountWorkspacePage(makeSource(state), () => {}, { view: 'page' })
+  page.setBodyHeight(26)
+  await flush()
+  assert.match(text(page), /Host Account service is unavailable/u)
+  assert.equal(state.watchStarts, 0, 'offline page cannot create a live Host watch')
+
+  state.available = true
+  page.handleInput('r')
+  await flush()
+  assert.match(text(page), /Signed out \/ no stored credential/u)
+  assert.equal(state.watchStarts, 1, 'Refresh starts one complete Host watch after reconnection')
+  assert.equal(state.watchActive, 1)
+
+  const fail = [...state.watchFailures!][0]
+  fail!(new Error('transport closed'))
+  await flush()
+  assert.match(text(page), /account watch stopped: transport closed/u)
+  assert.equal(state.watchActive, 0, 'the failed stream releases its old subscription')
+
+  page.handleInput('r')
+  await flush()
+  assert.equal(state.watchStarts, 2, 'manual refresh restarts the failed watch exactly once')
+  assert.equal(state.watchActive, 1, 'only the replacement watch remains live')
+  state.view = stored()
+  for (const publish of [...state.watchListeners!]) publish()
+  await flush()
+  assert.match(text(page), /Signed in \(stored credential\)/u,
+    'a later Host update from the replacement stream reaches the still-open page')
+  page.dispose()
+  await flush()
+  assert.equal(state.watchActive, 0, 'page disposal retires the one replacement stream')
+})
+
+test('a watch retry keeps a last-known credential fail-closed until its initial Host frame arrives', async () => {
+  const state: SourceState = { view: stored(), profileFails: false, balanceFails: false, runningTasks: false, calls: [] }
+  const source = makeSource(state)
+  let watchStarts = 0
+  let releaseReplacement!: (view: AccountView) => void
+  source.watch = async function* (signal) {
+    watchStarts += 1
+    state.watchStarts = watchStarts
+    state.watchActive = (state.watchActive ?? 0) + 1
+    try {
+      if (watchStarts === 1) {
+        yield state.view
+        await new Promise<void>((_resolve, reject) => {
+          const failed = (error: Error): void => {
+            state.watchFailures!.delete(failed)
+            signal.removeEventListener('abort', aborted)
+            reject(error)
+          }
+          const aborted = (): void => {
+            state.watchFailures!.delete(failed)
+            reject(signal.reason)
+          }
+          state.watchFailures!.add(failed)
+          signal.addEventListener('abort', aborted, { once: true })
+        })
+      }
+      const snapshot = await new Promise<AccountView>(resolve => { releaseReplacement = resolve })
+      yield snapshot
+      await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true }))
+    } finally {
+      state.watchActive = (state.watchActive ?? 1) - 1
+    }
+  }
+  const page = new AccountWorkspacePage(source, () => {}, { view: 'page' })
+  page.setBodyHeight(30)
+  await flush()
+  assert.equal(watchStarts, 1)
+  const firstFailure = [...state.watchFailures!][0]
+  firstFailure!(new Error('carrier ended'))
+  await flush()
+  assert.match(text(page), /account watch stopped: carrier ended/u)
+  assert.equal(state.watchActive, 0)
+
+  page.handleInput('r')
+  await flush()
+  assert.equal(state.watchStarts, 2)
+  assert.equal(state.watchActive, 1)
+  assert.match(text(page), /Refreshing Host account state/u)
+  assert.match(text(page), /Signed in \(stored credential\)/u, 'the old snapshot remains explicitly last-known')
+  page.render(100)
+  for (let index = 0; index < 7; index += 1) page.handleInput('\u001b[B')
+  page.render(100)
+  page.handleInput('\r')
+  assert.equal(state.calls.includes('signOut'), false, 'a stale last-known view cannot authorize SignOut during watch restart')
+
+  state.view = signedOut()
+  releaseReplacement(state.view)
+  await flush()
+  assert.match(text(page), /Signed out \/ no stored credential/u)
+  assert.doesNotMatch(text(page), /Refreshing Host account state/u)
+  page.dispose()
+  await flush()
+  assert.equal(state.watchActive, 0)
 })
 
 test('closing the page ends only its watcher; a fresh page rebuilds the completed Host state (MA10)', async () => {
@@ -659,8 +815,9 @@ test('a plain Account page may yield the focus to the Settings category rail', a
 })
 
 test('the sign-out confirmation keeps the Left inside the Account page', async () => {
-  const { page, state } = open({ view: 'signout' })
-  state.view = stored()
+  const state: SourceState = { view: stored(), profileFails: false, balanceFails: false, runningTasks: false, calls: [] }
+  const page = new AccountWorkspacePage(makeSource(state), () => {}, { view: 'signout' })
+  page.setBodyHeight(30)
   await flush()
   assert.match(text(page), /Sign out confirmation/u)
   assert.equal(page.canYieldFocusToNavigation(), false,
@@ -709,8 +866,9 @@ test('the page-actions fallback keeps the truthful Esc bar on the physical last 
 
 
 test('the zero-body fallback names the real Esc cancel of the open sign-out confirmation', async () => {
-  const { page, state } = open({ view: 'signout' })
-  state.view = stored()
+  const state: SourceState = { view: stored(), profileFails: false, balanceFails: false, runningTasks: false, calls: [] }
+  const page = new AccountWorkspacePage(makeSource(state), () => {}, { view: 'signout' })
+  page.setBodyHeight(30)
   await flush()
   text(page) // paint the confirmation and its real action rows
   page.setBodyHeight(2)
