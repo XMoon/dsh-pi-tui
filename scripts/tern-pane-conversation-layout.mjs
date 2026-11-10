@@ -6,7 +6,7 @@ import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { join } from 'node:path'
-import { containedXY, rect, visibleBox, visiblePoint, visibleSpan } from './tern-pane-geometry.mjs'
+import { containedX, containedXY, rect, visibleBox, visiblePoint, visibleSpan } from './tern-pane-geometry.mjs'
 
 const PRESET = process.env.TSP_CONVERSATION_PRESET ?? 'full'
 const MODE = process.env.TSP_CONVERSATION_MODE ?? 'headless'
@@ -80,6 +80,18 @@ function region(snapshot, name) {
 }
 function safeRect(node) {
   return node === undefined ? undefined : rect(node)
+}
+// The Dock AND the client's floating "back to live" button (tv-back) are sibling
+// overlays, not clipping ancestors: when the transcript is scrolled away from the
+// tail, tv-back paints over the bottom-right corner — exactly where the
+// right-aligned User action icon sits. A click target must be lifted fully above
+// BOTH (the same Main wheel-scroll path the inner-disclosure lane uses).
+function copyCeiling(snapshot) {
+  const dock = region(snapshot, 'sf-dock')
+  const back = snapshot.nodes.find(node => String(node.class ?? '').split(/\s+/u).includes('tv-back'))
+  const tops = [dock === undefined ? undefined : rect(dock)[1], back === undefined ? undefined : rect(back)[1]]
+    .filter(value => typeof value === 'number')
+  return tops.length === 0 ? undefined : Math.min(...tops)
 }
 function recordViewport(h, spec, resized, captureId) {
   const snapshot = h.snapshot()
@@ -263,18 +275,6 @@ export default async function (h) {
     userSnapshot = h.snapshot()
     currentUserCopy = actionButtonForUser(userSnapshot, currentMessage(userSnapshot, 'TSP-QUESTION-MIXED'))
   }
-  // The Dock AND the client's floating "back to live" button (tv-back) are sibling
-  // overlays, not clipping ancestors: when the transcript is scrolled away from the
-  // tail, tv-back paints over the bottom-right corner — exactly where the
-  // right-aligned User action icon sits. Lift the icon fully above BOTH with the
-  // client's own Main wheel scroll (the same path the inner-disclosure lane uses).
-  const copyCeiling = snapshot => {
-    const dock = region(snapshot, 'sf-dock')
-    const back = snapshot.nodes.find(node => String(node.class ?? '').split(/\s+/u).includes('tv-back'))
-    const tops = [dock === undefined ? undefined : rect(dock)[1], back === undefined ? undefined : rect(back)[1]]
-      .filter(value => typeof value === 'number')
-    return tops.length === 0 ? undefined : Math.min(...tops)
-  }
   let wheelLifts = 0
   for (; currentUserCopy !== undefined && wheelLifts < 8; wheelLifts += 1) {
     const point = visiblePoint(userSnapshot.chains, currentUserCopy)
@@ -425,6 +425,26 @@ export default async function (h) {
       h.send('appearance', spec.appearance)
     }
     h.check(`${spec.id} client appearance resolved`, h.ctl('state').theme === spec.appearance, String(h.ctl('state').theme))
+    if (spec.width <= 420 && MODE !== 'baseline') {
+      // RFL-001: the Copy section leaves the transcript at the tail, so at the
+      // narrow viewports the User turn is scrolled out. Bring its body beginning
+      // genuinely into the visible Main band BEFORE the matrix capture, instead of
+      // asserting on a message that is not on screen.
+      let ns = h.snapshot()
+      const markerBody = s => {
+        const m = currentMessage(s, 'TSP-QUESTION-MIXED')
+        return m === undefined ? undefined : descendants(m).find(n => String(n.text ?? '').includes('TSP-QUESTION-MIXED'))
+      }
+      let ups = 0
+      for (; ups < 8; ups += 1) {
+        const b = markerBody(ns)
+        const pt = b === undefined ? undefined : visiblePoint(ns.chains, b)
+        const ceiling = copyCeiling(ns)
+        if (pt !== undefined && (ceiling === undefined || pt.y < ceiling - 2)) break
+        await h.key('PageUp', 300)
+        ns = h.snapshot()
+      }
+    }
     const snap = h.snapshot()
     const captureId = h.capture(`${PRESET}-${spec.id}-${spec.width}x${spec.height}-${spec.appearance}`,
       `${MODE} Direct transcript ${PRESET} at ${spec.width}x${spec.height}`)
@@ -439,11 +459,70 @@ export default async function (h) {
     h.check(`${spec.id} paints at least one real transcript message`,
       visibleText.includes('TSP-QUESTION-MIXED') || visibleText.includes('TSP-ANSWER-FINAL'),
       visibleText.slice(-800))
-    if (spec.width <= 420) {
-      const visibleUser = currentMessage(snap, 'TSP-QUESTION-MIXED')
-      h.check(`${spec.id} preserves the beginning of the long CJK User body when it is in view`,
-        visibleUser === undefined || textOf(visibleUser).includes('TSP-QUESTION-MIXED'),
-        JSON.stringify(evidence.user))
+    if (spec.width <= 420 && MODE !== 'baseline') {
+      const narrowUser = currentMessage(snap, 'TSP-QUESTION-MIXED')
+      const narrowBody = narrowUser === undefined ? undefined
+        : descendants(narrowUser).find(n => String(n.text ?? '').includes('TSP-QUESTION-MIXED'))
+      const narrowBodyBox = narrowBody === undefined ? undefined : visibleBox(snap.chains, narrowBody)
+      h.check(`${spec.id} shows the real User body beginning on screen (non-vacuous narrow visibility)`,
+        narrowBody !== undefined && narrowBodyBox !== undefined && narrowBodyBox.span.x >= 4 && narrowBodyBox.span.y >= 4,
+        JSON.stringify({ bodyRect: narrowBody === undefined ? undefined : rect(narrowBody), bodyVisible: narrowBodyBox, evidenceUser: evidence.user }))
+      h.check(`${spec.id} keeps the User bubble within the narrow Main width (no horizontal overflow)`,
+        narrowUser !== undefined && containedX(snap.chains, narrowUser),
+        JSON.stringify({ userRect: narrowUser === undefined ? undefined : rect(narrowUser), main: safeRect(main) }))
+      h.check(`${spec.id} preserves the CJK/long-word body beginning (not lost to right alignment)`,
+        narrowBody !== undefined && String(narrowBody.text ?? '').startsWith('TSP-QUESTION-MIXED'),
+        JSON.stringify({ head: narrowBody === undefined ? undefined : String(narrowBody.text ?? '').slice(0, 48) }))
+
+      // M4 (narrowest): the User Copy must still be visible. Scroll the footer icon
+      // above the Dock/tv-back ceiling and prove it is on screen, then capture it.
+      let cs = h.snapshot()
+      let cu = currentMessage(cs, 'TSP-QUESTION-MIXED')
+      let cc = cu === undefined ? undefined : actionButtonForUser(cs, cu)
+      let downs = 0
+      for (; cc !== undefined && visiblePoint(cs.chains, cc) === undefined && downs < 8; downs += 1) {
+        await h.key('PageDown', 300)
+        cs = h.snapshot()
+        cu = currentMessage(cs, 'TSP-QUESTION-MIXED')
+        cc = cu === undefined ? undefined : actionButtonForUser(cs, cu)
+      }
+      let lifts = 0
+      for (; cc !== undefined && lifts < 8; lifts += 1) {
+        const pt = visiblePoint(cs.chains, cc)
+        const ceiling = copyCeiling(cs)
+        const box = rect(cc)
+        if (pt === undefined || ceiling === undefined || box[1] + box[3] < ceiling - 4) break
+        const m = region(cs, 'sf-main')
+        if (m === undefined) break
+        const mr = rect(m)
+        const amount = Math.min(240, Math.max(24, Math.ceil(box[1] + box[3] - ceiling + 12)))
+        h.send('move', mr[0] + mr[2] / 2, ceiling - 40)
+        h.send('wheel', 0, amount)
+        await h.sleep(250)
+        cs = h.snapshot()
+        cu = currentMessage(cs, 'TSP-QUESTION-MIXED')
+        cc = cu === undefined ? undefined : actionButtonForUser(cs, cu)
+      }
+      const narrowCopyBox = cc === undefined ? undefined : rect(cc)
+      const narrowCopyPoint = cc === undefined ? undefined : visiblePoint(cs.chains, cc)
+      const narrowCopyCeiling = copyCeiling(cs)
+      h.check(`${spec.id} exposes a visible User Copy icon at the narrow width (above Dock/tv-back)`,
+        narrowCopyPoint !== undefined && narrowCopyBox !== undefined
+          && (narrowCopyCeiling === undefined || narrowCopyBox[1] + narrowCopyBox[3] < narrowCopyCeiling - 4),
+        JSON.stringify({ copyRect: narrowCopyBox, copyPoint: narrowCopyPoint, ceiling: narrowCopyCeiling, downs, lifts }))
+      h.capture(`${PRESET}-${spec.id}-user-copy-narrow-${spec.width}x${spec.height}-${spec.appearance}`,
+        `${MODE} narrow User Copy icon scrolled into view at ${spec.width}x${spec.height}`)
+      // The narrow Copy scroll leaves the transcript away from the tail; restore the
+      // tail anchor so the following viewport (M5 short-window geometry) starts from
+      // the same settled state it had before this qualification scroll. `End` alone
+      // does not re-anchor after a wheel scroll, so page down until the client's
+      // "back to live" button (only present when scrolled away) disappears.
+      for (let backStep = 0; backStep < 8; backStep += 1) {
+        const backSnap = h.snapshot()
+        const back = backSnap.nodes.find(node => String(node.class ?? '').split(/\s+/u).includes('tv-back'))
+        if (back === undefined) break
+        await h.key('PageDown', 300)
+      }
     }
     if (spec.height <= 360) {
       const mainBox = main === undefined ? undefined : visibleBox(snap.chains, main)
