@@ -338,6 +338,9 @@ export default async function (h) {
     const facts = observation.facts
     const rootCallId = facts.rootCall.callId
     const subCallId = facts.childStart.subCallId
+    h.check('the production run_code parent returns a concise curated result separate from the long Bash dispatch',
+      typeof facts.parentOutput === 'string' && facts.parentOutput.length < 256
+        && !facts.parentOutput.includes('PTC_BUILD_OUTPUT_'), JSON.stringify(facts.parentOutput))
     h.check('the real PTC output has long ordinary text and an official exit-code-2 tail',
       facts.output.startsWith('PTC_BUILD_OUTPUT_') && facts.output.endsWith('\n[exit code: 2]')
         && facts.childSettle.isError === false,
@@ -358,7 +361,7 @@ export default async function (h) {
       'current client tree around the real collapsed run_code parent before attempting to reveal its header')
     const parentWitness = await revealInnerHeader(h, 'PTC parent Tool', snapshot => snapshot.nodes.find(node =>
       String(node.class ?? '').split(/\s+/u).includes('sf-tool-head')
-        && h.descendantsText(node).includes('Qualify a long PTC shell error note')))
+        && h.descendantsText(node).includes('Qualify PTC note')))
     h.check('the current PTC parent Tool header is revealed and fully visible', parentWitness !== undefined
       && parentWitness.header !== undefined
       && parentWitness.textNodes.length > 0

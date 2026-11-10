@@ -93,16 +93,13 @@ const note = (event: Record<string, unknown>): void => {
 const ptcFailureSessionId = 'inner-ptc-note-session'
 const ptcFailureOutput = `PTC_BUILD_OUTPUT_${'x'.repeat(260)}`
 const ptcFailureCommand = 'false'
-const ptcFailureProgram = `await tools.bash(${JSON.stringify({
-  command: ptcFailureCommand,
-  description: 'Check PTC exit status',
-})})`
+const ptcFailureProgram = `await tools.bash(${JSON.stringify({ command: ptcFailureCommand, description: 'run' })}); return 'PTC complete'`
 const ptcFailureStep = {
-  text: 'The shell command failed and its result should remain visible.',
+  text: '',
   toolCall: {
     callId: 'call-inner-ptc-failure',
     name: 'run_code',
-    arguments: JSON.stringify({ code: ptcFailureProgram, description: 'Qualify a long PTC shell error note' }),
+    arguments: JSON.stringify({ code: ptcFailureProgram, description: 'Qualify PTC note' }),
   },
 }
 const ptcFailureRuntime = {
@@ -117,7 +114,11 @@ const ptcFailureRuntime = {
     const tools = spec.bindings.find(binding => binding.global === 'tools')
     const callBash = tools?.functions['bash']
     if (callBash === undefined) throw new Error('the official PTC bindings omit tools.bash')
-    return { logs: [], value: await callBash({ command: ptcFailureCommand, description: 'Check long PTC error output' }) as never }
+    if (!spec.program.includes("return 'PTC complete'")) {
+      throw new Error('the scripted PTC program does not curate its parent result')
+    }
+    await callBash({ command: ptcFailureCommand, description: 'run' })
+    return { logs: [], value: 'PTC complete' }
   },
 }
 
@@ -365,11 +366,19 @@ const handleOneBatch = async (): Promise<void> => {
         : ''
       const parentResult = sessionEvents.find(event => event.type === 'tool/result'
         && String((event.data?.message as { toolCallId?: unknown } | undefined)?.toolCallId) === String(rootCallId))
-      const facts = { rootCall: rootCall?.data ?? null, childStart: childStart?.data ?? null,
-        childSettle: childSettle?.data ?? null, output, parentResult: parentResult?.data ?? null }
+      const parentContent = (parentResult?.data?.message as { content?: unknown } | undefined)?.content
+      const parentOutput = Array.isArray(parentContent)
+        ? parentContent.filter((block): block is { type: string; text: string } => typeof block === 'object'
+          && block !== null && (block as { type?: unknown }).type === 'text'
+          && typeof (block as { text?: unknown }).text === 'string')
+          .map(block => block.text).join('')
+        : ''
       const status = rootCall !== undefined && childStart !== undefined && childSettle !== undefined
         && childSettle.data?.isError === false && output.endsWith('\n[exit code: 2]')
-        && parentResult !== undefined ? 'ok' : 'error'
+        && parentResult !== undefined && !parentOutput.includes('PTC_BUILD_OUTPUT_') && parentOutput.length < 256
+        ? 'ok' : 'error'
+      const facts = { rootCall: rootCall?.data ?? null, childStart: childStart?.data ?? null,
+        childSettle: childSettle?.data ?? null, output, parentOutput, parentResult: parentResult?.data ?? null }
       const payload = { seq, command: kind, status, facts }
       writeFileSync(`${caseResultPath}.tmp`, `${JSON.stringify(payload)}\n`)
       renameSync(`${caseResultPath}.tmp`, caseResultPath)
@@ -440,7 +449,7 @@ try {
     // The ONE production mode authority: the real Runner volatile config that
     // `resolveDisplayPreset` reads. No renderer-local preset is set anywhere.
     tuiConfig: { displayPreset: mode },
-    deltas: scenario === 'ptc-error-note' ? ['PTC-NOTE-ANSWER']
+    deltas: scenario === 'ptc-error-note' ? []
       : scenario === 'inner-disclosure' ? [`INNER-${mode.toUpperCase()}-`, 'ANSWER'] : ['MODES-', 'DIRECT-', 'ANSWER'],
     ...(scenario === 'inner-disclosure' ? {
       scriptedToolCalls: [{ text: 'the production Agent is checking the jobs', toolCall: { callId: 'call-inner-jobs', name: 'job_list', arguments: '{}' } }],
