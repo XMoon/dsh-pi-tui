@@ -315,6 +315,7 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
     readonly workspaceNextIntent?: TuiCommandRunner['workspaceNextIntent']
     readonly cwd?: string
     ensureSession(): Promise<void>
+    awaitWorkspacePreflight?(): Promise<void>
     withWriter: CommandSessionRuntime['withWriter']
     switchSession(sessionId: string, expectedScope?: SessionScope): Promise<string | undefined>
     switchSessionOutcome?(sessionId: string, expectedScope?: SessionScope): Promise<import('../session/runtime.ts').SessionSwitchOutcome>
@@ -1255,6 +1256,9 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       setTerminalProgressMode: (mode) => deps.surface.setTerminalProgressMode(mode),
       workspaceNextIntent: deps.session.workspaceNextIntent,
       ensureSession: () => deps.session.ensureSession(),
+      awaitWorkspacePreflight: deps.session.awaitWorkspacePreflight === undefined
+        ? undefined
+        : () => deps.session.awaitWorkspacePreflight!(),
       get selected() { return deps.model.selected },
       // Legacy/display facade: the newest SESSIONLESS `/model` intent (pending
       // or unresolved) falling back to the persisted global default. A fresh

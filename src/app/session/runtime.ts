@@ -333,6 +333,8 @@ export interface SessionRuntime {
   /** One sessionless Host preflight of the next-create directory proposal.
    *  Shared with the first create; never creates a Session. */
   preflightWorkspace(): Promise<void>
+  /** Await an in-flight sessionless Host preflight without starting one. */
+  awaitWorkspacePreflight(): Promise<void>
   /** Publish the startup-resume owner synchronously (plan §4D: publish →
    *  completion → pre-mount quiesce). Returns the quiesce promise only when the
    *  runner's hook produced one, so a sessionless startup stays synchronous. */
@@ -1737,6 +1739,8 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     return workspacePreflight
   }
 
+  const awaitWorkspacePreflight = (): Promise<void> => workspacePreflight ?? Promise.resolve()
+
   const ensureSession = async (): Promise<void> => {
     if (core.owner() !== undefined) return
     if (creating !== undefined) return creating
@@ -1887,6 +1891,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     commitFirstSession,
     ensureSession,
     preflightWorkspace,
+    awaitWorkspacePreflight,
     publishResumedOwner,
     retireOwnedSession,
     preCancelOwnedSession,

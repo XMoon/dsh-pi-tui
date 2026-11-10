@@ -52,7 +52,10 @@ import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import {
   buildSessionWorkspaceView,
   currentWorkspaceOf,
+  SESSION_PENDING_LABEL,
+  SESSION_SOURCE_LABEL,
   visibleWorkspaceBrowserRows,
+  workspaceRowStatusLabel,
   type WorkspaceBrowserRow,
   type SessionWorkspacePriority,
   type SessionWorkspaceGroupView,
@@ -132,23 +135,6 @@ const GROUP_LABEL: Record<SessionWorkspacePriority, string> = {
   needs: 'Needs attention',
   working: 'Working',
   recent: 'Recent',
-}
-const PENDING_LABEL: Record<SessionWorkspaceRowFact['pending'], string> = {
-  question: 'Question',
-  approval: 'Approval',
-  'plan-review': 'Plan review',
-  none: 'No pending',
-  unknown: 'Pending unknown',
-  unavailable: 'Pending unavailable',
-  denied: 'Pending denied',
-  unverified: 'Pending unverified',
-}
-
-const SOURCE_LABEL: Record<SessionWorkspaceRowFact['source'], string> = {
-  known: 'known',
-  unknown: 'unknown',
-  unavailable: 'unavailable',
-  denied: 'denied',
 }
 
 /** Truncate one rendered line to the pane width and pad it with plain spaces. */
@@ -785,7 +771,10 @@ export class SessionWorkspacePanel implements Component {
   }
 
   private workspaceActions(): SessionWorkspaceAction[] {
-    const hasFolder = this.selectedWorkspaceId !== undefined
+    // Synthetic projection groups (Unassigned / Membership ambiguous) are
+    // browsable, not official Host Workspaces: they never authorize Use
+    // directory or a Session create.
+    const hasFolder = this.selectedWorkspaceId !== undefined && this.workspaces.byId.has(this.selectedWorkspaceId)
     if (this.options.currentSessionId === undefined) {
       return hasFolder ? ['use', 'new', 'add', 'close'] : ['add', 'close']
     }
@@ -1623,8 +1612,8 @@ export class SessionWorkspacePanel implements Component {
     lines.push(line('Preset', row.preset === undefined ? 'Unknown' : sanitizedPhysicalLine(row.preset)))
     lines.push(line('Updated', formatSessionAge(row.updatedAt), 'dim'))
     lines.push(line('Running', fact?.running === true ? 'Yes' : fact?.running === false ? 'No' : 'Unknown'))
-    lines.push(line('Pending', fact === undefined ? 'Unknown' : PENDING_LABEL[fact.pending]))
-    lines.push(line('Source', fact === undefined ? 'unknown' : SOURCE_LABEL[fact.source], 'dim'))
+    lines.push(line('Pending', fact === undefined ? 'Unknown' : SESSION_PENDING_LABEL[fact.pending]))
+    lines.push(line('Source', fact === undefined ? 'unknown' : SESSION_SOURCE_LABEL[fact.source], 'dim'))
     const snippet = this.searchMode
       ? this.snapshot.searchResults.find(result => result.row.id === row.id)?.snippet
       : undefined
@@ -1644,10 +1633,7 @@ export class SessionWorkspacePanel implements Component {
 
   /** The ONE truthful status text of one classified row. */
   private statusLabel(fact: SessionWorkspaceRowFact): string {
-    if (fact.priority === 'needs') return fact.running === true ? 'Needs attention · Working' : 'Needs attention'
-    if (fact.priority === 'working') return 'Working'
-    if (fact.pending === 'unverified') return 'Pending · not actionable here'
-    return ''
+    return workspaceRowStatusLabel(fact)
   }
 
   private membershipLabel(fact: SessionWorkspaceRowFact | undefined): string {

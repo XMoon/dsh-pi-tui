@@ -334,6 +334,9 @@ export interface TuiCommandRunner {  ctx: Context
   requireLiveSessionScope(): Promise<LiveSessionScope>
   /** Create the first session lazily when none exists (deferred start). */
   ensureSession(): Promise<void>
+  /** Await the sessionless mount's in-flight Host Workspace preflight so a
+   *  user create captures its committed intent instead of racing it. */
+  awaitWorkspacePreflight?(): Promise<void>
   /**
    * TUI-facing live selection facade (footer + /model). It follows the
    * current Agent; with deferred start it holds only the sessionless

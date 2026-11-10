@@ -136,7 +136,7 @@ async function mounted(t: { after(fn: () => unknown): void }, read: SessionReade
   // test forced on the View.
   paneOptions: Parameters<typeof installTspPane>[0] = { sessionBrowser: true },
   workspaceFacts?: SessionWorkspaceFactsPort,
-  ownerCallbacks: Pick<SessionBrowserReadOwnerOptions, 'onAddDirectory' | 'onUseDirectory'> = {},
+  ownerCallbacks: Pick<SessionBrowserReadOwnerOptions, 'onAddDirectory' | 'onUseDirectory' | 'onWorkspaceNewSession'> = {},
   currentSessionId: string | null = 'session-current',
   nextCreateWorkspaceId?: string,
 ) {
@@ -455,6 +455,168 @@ test('Welcome chooser lists official folders and Add directory retains rejected 
   settlements[1]!({ kind: 'registered', workspaceId: 'ws-new', path: '/host/canonical' })
   await waitUntil('successful chooser registration returns to Welcome', () => picker(pane) === undefined)
   assert.equal(m.fatals.length, 0)
+})
+
+test('a Folder or Show more selection never inherits the previous Session actions', async (t) => {
+  const history = Array.from({ length: 12 }, (_, index) => row(`session-history-${index}`, { updatedAt: 80 - index }))
+  const facts: SessionWorkspaceFactsPort = {
+    readActivity: async () => [],
+    followWorkspaces: (signal) => ({
+      dispose() {},
+      async *[Symbol.asyncIterator]() {
+        yield { type: 'baseline' as const, items: [
+          { workspaceId: 'ws-folder', path: '/srv/folder', title: 'Folder', sessionIds: ['session-current', 'session-other', ...history.map(item => item.id)] },
+        ] }
+        if (signal?.aborted === true) return
+        await new Promise<void>(resolve => signal?.addEventListener('abort', () => resolve(), { once: true }))
+      },
+    }),
+  }
+  const m = await mounted(t, reader({
+    list: async () => [row('session-current'), row('session-other', { updatedAt: 90 }), ...history],
+  }), false, 'ready', {}, { sessionBrowser: true }, facts)
+  const { pane } = m
+  await waitUntil('the Folder and its children are listed', () => items(pane).some(item => item.id === 'workspace:ws-folder'))
+  sendSelect(pane, 'workspace:ws-folder', picker(pane)!.id)
+  await waitUntil('the Folder is the typed selection', () => props(pane).selected === 'workspace:ws-folder')
+  assert.equal(pickerActionByBase(pane, 'resume', BROWSER)?.disabled, 'Select a session to resume.',
+    'Resume never targets the Session selected before the Folder')
+  assert.equal(pickerActionByBase(pane, 'details', BROWSER)?.disabled, 'Select a session to read its details.')
+  sendPickerAction(pane, 'resume', BROWSER)
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.deepEqual(m.resumeIntents, [], 'a disabled Folder-era Resume dispatches nothing')
+  // A real re-expanded Folder exposes Show more; selecting it has the same rule.
+  pane.key('\r')
+  await waitUntil('Enter collapses the currently expanded Folder', () =>
+    items(pane).some(item => item.id === 'workspace:ws-folder' && item.open === false))
+  pane.key('\r')
+  await waitUntil('Enter expands the Folder and reveals Show more', () => items(pane).some(item => item.id === 'more:ws-folder'))
+  sendSelect(pane, 'more:ws-folder', picker(pane)!.id)
+  await waitUntil('Show more is the typed selection', () => props(pane).selected === 'more:ws-folder')
+  assert.equal(pickerActionByBase(pane, 'resume', BROWSER)?.disabled, 'Select a session to resume.')
+  sendSelect(pane, 'session:session-other', picker(pane)!.id)
+  await waitUntil('a Session row is selected again', () => props(pane).selected === 'session:session-other')
+  await waitUntil('Resume is enabled for that Session', () => pickerActionByBase(pane, 'resume', BROWSER)?.disabled === undefined)
+})
+
+test('synthetic Unassigned/ambiguous groups never authorize a Host create or directory adoption', async (t) => {
+  const facts: SessionWorkspaceFactsPort = {
+    readActivity: async () => [],
+    followWorkspaces: (signal) => ({
+      dispose() {},
+      async *[Symbol.asyncIterator]() {
+        yield { type: 'baseline' as const, items: [
+          { workspaceId: 'ws-empty', path: '/srv/empty', title: 'Empty', sessionIds: [] },
+        ] }
+        if (signal?.aborted === true) return
+        await new Promise<void>(resolve => signal?.addEventListener('abort', () => resolve(), { once: true }))
+      },
+    }),
+  }
+  const m = await mounted(t, reader({
+    list: async () => [row('session-unassigned')],
+  }), false, 'ready', {}, { sessionBrowser: true }, facts, {
+    onUseDirectory: () => { throw new Error('synthetic groups must never adopt a directory') },
+    onWorkspaceNewSession: () => { throw new Error('synthetic groups must never create a Session') },
+  }, null)
+  const { pane } = m
+  await waitUntil('the synthetic Unassigned group is listed', () => items(pane).some(item => item.id === 'workspace:unassigned'))
+  sendSelect(pane, 'workspace:unassigned', picker(pane)!.id)
+  await waitUntil('the synthetic group is selected', () => props(pane).selected === 'workspace:unassigned')
+  assert.equal(pickerActionByBase(pane, 'new-session', BROWSER)?.disabled, 'Select an official Workspace folder first.')
+  assert.equal(pickerActionByBase(pane, 'use-directory', BROWSER)?.disabled, 'Select an official Workspace while sessionless.')
+  sendPickerAction(pane, 'new-session', BROWSER)
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(m.fatals.length, 0, 'no Host create or adoption was attempted for the synthetic group')
+})
+
+test('the same Activity facts paint the compact row status and the complete Details facts', async (t) => {
+  const activity = [
+    {
+      sessionId: 'session-current',
+      running: true,
+      pendingKinds: [] as const,
+      continuedQuestionCallIds: [] as const,
+      attention: 'none' as const,
+      attentionSourceState: 'known' as const,
+    },
+  ]
+  const facts: SessionWorkspaceFactsPort = {
+    readActivity: async () => activity,
+    followWorkspaces: (signal) => ({
+      dispose() {},
+      async *[Symbol.asyncIterator]() {
+        yield { type: 'baseline' as const, items: [
+          { workspaceId: 'ws-folder', path: '/srv/folder', title: 'Folder', sessionIds: ['session-current', 'session-other'] },
+        ] }
+        if (signal?.aborted === true) return
+        await new Promise<void>(resolve => signal?.addEventListener('abort', () => resolve(), { once: true }))
+      },
+    }),
+  }
+  const m = await mounted(t, reader({
+    list: async () => [row('session-current'), row('session-other', { updatedAt: 90 })],
+  }), false, 'ready', {}, { sessionBrowser: true }, facts)
+  const { pane } = m
+  // Wait for the accepted Activity sample to be painted: the row detail is the
+  // authoritative observation, and it also settles the frame revision before
+  // the Details action is dispatched.
+  await waitUntil('the working row paints its positive status', () => String(
+    items(pane).find(item => item.id === 'session:session-current')?.detail ?? '',
+  ).includes('Working'))
+  const currentItem = items(pane).find(item => item.id === 'session:session-current')!
+  assert.match(String(currentItem.detail), /Working/u, 'the compact row carries the positive working fact')
+  sendSelect(pane, 'session:session-current', picker(pane)!.id)
+  await waitUntil('the current row is selected', () => props(pane).selected === 'session:session-current')
+  // Use the Footer keyboard route (Tab focuses the FIRST enabled action, Enter
+  // activates it). Unlike a raw `action` event id, this carries no revision, so
+  // the just-published Activity frame cannot invalidate it.
+  pane.key('\t')
+  await waitUntil('the Footer focuses Details', () =>
+    ((pickerProps(pane, BROWSER).actions ?? []) as Array<{ readonly label?: unknown }>).some(action => String(action.label).includes('Details [Enter]')))
+  pane.key('\r')
+  await waitUntil('Details opens', () => details(pane) !== undefined)
+  const grids = detailGroups(pane)
+  assert.deepEqual(grids.get('activity')?.filter(([label]) => ['Running', 'Pending', 'Source'].includes(label)), [
+    ['Running', 'Yes'],
+    ['Pending', 'No pending'],
+    ['Source', 'known'],
+  ], `Details keeps the complete activity truth: ${JSON.stringify(grids.get('activity'))}`)
+})
+
+test('the Folder New session action delegates its exact Workspace and retires only on the commit continuation', async (t) => {
+  const requests: Array<{ readonly workspaceId: string; readonly close: () => void }> = []
+  const facts: SessionWorkspaceFactsPort = {
+    readActivity: async () => [],
+    followWorkspaces: (signal) => ({
+      dispose() {},
+      async *[Symbol.asyncIterator]() {
+        yield { type: 'baseline' as const, items: [
+          { workspaceId: 'ws-folder', path: '/srv/folder', title: 'Folder', sessionIds: ['session-current', 'session-other'] },
+        ] }
+        if (signal?.aborted === true) return
+        await new Promise<void>(resolve => signal?.addEventListener('abort', () => resolve(), { once: true }))
+      },
+    }),
+  }
+  const m = await mounted(t, reader({
+    list: async () => [row('session-current'), row('session-other', { updatedAt: 90 })],
+  }), false, 'ready', {}, { sessionBrowser: true }, facts, {
+    onWorkspaceNewSession: (workspaceId, closeAfterCommit) => { requests.push({ workspaceId, close: closeAfterCommit }) },
+  })
+  const { pane } = m
+  await waitUntil('the official folder is listed', () => items(pane).some(item => item.id === 'workspace:ws-folder'))
+  sendSelect(pane, 'workspace:ws-folder', picker(pane)!.id)
+  await waitUntil('the Folder is selected before its action', () => props(pane).selected === 'workspace:ws-folder')
+  const action = pickerActionByBase(pane, 'new-session', BROWSER)
+  assert.ok(action !== undefined && action.disabled === undefined, 'New session is offered for the selected Folder')
+  sendPickerAction(pane, 'new-session', BROWSER)
+  await waitUntil('the action reaches the shared command owner', () => requests.length === 1)
+  assert.equal(requests[0]!.workspaceId, 'ws-folder', 'the existing /new transaction receives the official WorkspaceId')
+  assert.ok(picker(pane) !== undefined, 'a refusal (no commit continuation) keeps the same Browser open')
+  assert.deepEqual(m.resumeIntents, [], 'Folder New session never becomes a Resume intent')
+  requests[0]!.close()
+  await waitUntil('the committed transaction continuation retires the Browser', () => picker(pane) === undefined)
 })
 
 test('a failed first-submit chooser opens the same TSP Browser prefilled in Host path mode and submits once per settlement', async (t) => {
@@ -875,7 +1037,10 @@ test('Details preserves search state, scrolls its own body, and emits read-only 
   assert.deepEqual(grids.get('activity'), [
     ['Created', new Date(10).toISOString()],
     ['Updated', new Date(100).toISOString()],
-  ], 'Activity is the ISO stamps the row really has')
+    ['Running', 'Unknown'],
+    ['Pending', 'Unknown'],
+    ['Source', 'unknown'],
+  ], 'Activity is the ISO stamps plus the complete, unproven-by-default activity facts')
   assert.deepEqual(grids.get('relationship'), [['Parent session', 'session-other']],
     'Lineage is the projection\'s own parent')
   assert.deepEqual(grids.get('configuration'), [['Agent preset', 'reviewer']],
@@ -1012,6 +1177,9 @@ test('Details reports Unknown rather than inferring an absent createdAt', async 
   assert.deepEqual(grids.get('activity'), [
     ['Created', 'Unknown'],
     ['Updated', new Date(3_000).toISOString()],
+    ['Running', 'Unknown'],
+    ['Pending', 'Unknown'],
+    ['Source', 'unknown'],
   ], `the absent stamp stays Unknown while the real one keeps its full ISO value: ${JSON.stringify([...grids])}`)
 })
 
@@ -1135,7 +1303,13 @@ test('native Session: a pane WITHOUT the kv kind still opens the complete text D
   const { pane } = m
   assert.ok(m.renderer.sessionBrowserPresentation, 'the missing `kv` kind refuses no business entry')
   await waitUntil('the row is listed', () => items(pane).some((item) => item.id === 'session:session-current'))
-  sendPickerAction(pane, 'details', BROWSER)
+  // Use the Footer keyboard route (Tab focuses the FIRST enabled action, Enter
+  // activates it). Unlike a raw `action` event id, this carries no revision, so
+  // the just-published Activity frame cannot invalidate it.
+  pane.key('\t')
+  await waitUntil('the Footer focuses Details', () =>
+    ((pickerProps(pane, BROWSER).actions ?? []) as Array<{ readonly label?: unknown }>).some(action => String(action.label).includes('Details [Enter]')))
+  pane.key('\r')
   await waitUntil('Details opens', () => details(pane) !== undefined)
   assert.equal(kvNodes(pane).length, 0, 'not one `kv` node reached a pane that cannot draw one')
   assert.equal(detailGroups(pane).size, 0, 'and no grid is read as the fact source')
@@ -1170,7 +1344,13 @@ test('native Session: a KV re-render and a resize never remount the Reader body'
   await waitUntil('the rows are listed', () => items(pane).length > 0)
   sendSelect(pane, 'session:session-other', picker(pane)!.id)
   await waitUntil('the row is selected', () => props(pane).selected === 'session:session-other')
-  sendPickerAction(pane, 'details', BROWSER)
+  // Use the Footer keyboard route (Tab focuses the FIRST enabled action, Enter
+  // activates it). Unlike a raw `action` event id, this carries no revision, so
+  // the just-published Activity frame cannot invalidate it.
+  pane.key('\t')
+  await waitUntil('the Footer focuses Details', () =>
+    ((pickerProps(pane, BROWSER).actions ?? []) as Array<{ readonly label?: unknown }>).some(action => String(action.label).includes('Details [Enter]')))
+  pane.key('\r')
   await waitUntil('Details opens', () => details(pane) !== undefined)
   assert.equal(kvNodes(pane).length, 4, 'each of the four fact groups is one grid')
   const bodyId = detailBody(pane)!.id
