@@ -251,6 +251,10 @@ It runs the fork typecheck/tests, the benchmark typecheck, the tmux and
 tooling suites, the installation-doc / pi-divergence / naming /
 session-event / boundary / architecture / production-reads / keybinding
 gates, the production dependency audit, and finally `pnpm pack:release`.
+The pi component compatibility contract runs inside the release product
+suite (`test/extension/pi-component-compat.test.ts`), so the release path
+skips that one gate in `check:gates` instead of executing the same test
+twice.
 
 `pack:release` is an explicit local ORCHESTRATOR, not a lifecycle hook:
 `clean` -> `clean:fork` -> `build` -> `typecheck:bundle` -> `test:product`
@@ -259,6 +263,15 @@ pack entry and is strictly `pnpm pack --config.ignore-scripts=true`: it
 never builds, tests or runs smokes. `smoke:release` runs the eight
 packed-artifact smokes against that exact tarball. Do not treat source tests
 alone as sufficient.
+
+For everyday pre-push work, run `mise run check` instead. It builds the
+vendored fork, runs the typechecks and tooling suite, and executes the shared
+`pnpm check:gates` preflight; the single gate registry, with each gate
+classified `local-preflight` / `ci-only` / `on-demand`, lives in
+`scripts/run-quality-gates.mjs` and is also what CI Source checks and
+`verify:release` run. It is a preflight, not a release claim: a green `check`
+does not authorize skipping `verify:release`, the packed-artifact smokes, or
+the CI qualification before tagging.
 
 Git push has no automatic local hook. Run `verify:release` explicitly before
 tagging; the `nofork` shortcut no longer exists.

@@ -376,6 +376,8 @@
     "pack:artifact": "rm -f xmoon76-dsh-pi-tui-*.tgz && pnpm pack --config.ignore-scripts=true --pack-destination .",
     "smoke:release": "node scripts/qualify-tarball.mjs",
     "pack:release": "pnpm clean && pnpm clean:fork && pnpm build && pnpm typecheck:bundle && pnpm test:product && pnpm pack:artifact && pnpm smoke:release",
-    "verify:release": "pnpm typecheck:fork && pnpm typecheck:bench && pnpm test:fork && pnpm test:tmux && pnpm test:tooling && pnpm gate:installation-doc && pnpm gate:pi-divergence-ledger && pnpm gate:pi-vendor-diff --strict && node scripts/naming-gate.mjs && node scripts/check-no-session-events.mjs && pnpm gate:boundary && pnpm gate:architecture && pnpm gate:production-reads && pnpm gate:keybindings && pnpm audit --prod --audit-level high && pnpm pack:release"
+    "check:gates": "node scripts/run-quality-gates.mjs",
+    "check": "pnpm build:fork && pnpm typecheck && pnpm test:tooling && pnpm check:gates",
+    "verify:release": "pnpm typecheck:fork && pnpm typecheck:bench && pnpm test:fork && pnpm test:tmux && pnpm test:tooling && pnpm check:gates -- --skip gate:pi-surface-compat && pnpm audit --prod --audit-level high && pnpm pack:release"
   }
 }

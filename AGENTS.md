@@ -11,6 +11,7 @@ before editing. Read subsystem docs only when the task touches that subsystem.
 - **Do not fix unrelated pre-existing failures.** Distinguish them from
   regressions caused by the current work and report them separately.
 - **Do not hide contradictions.** Prefer fast failure over silent defaults, broad catches, speculative fallbacks, or validation for states guaranteed by internal contracts. Validate at real system boundaries.
+- **Run the local pre-push gate.** Before requesting a push or opening a PR, run `mise run check` after the relevant targeted tests. Fix failing gates before reporting the change as ready. If a check cannot run because of an environment dependency, report it as `NOT_VERIFIED` with the concrete blocker. `mise run check` does not replace release qualification or subsystem-specific integration tests.
 - **Never push or force-push without explicit user approval.** Local commits are allowed when appropriate; remote changes are not.
 
 ## Repository documentation policy (hard gate)
@@ -265,9 +266,12 @@ objective discovery guards.
 
 A stage-final validation must not run the same suite twice. `pnpm verify:release`
 is the repository's full pipeline: `typecheck:fork` + `typecheck:bench`,
-`test:fork`, `test:tmux`, `test:tooling`, the architecture / boundary /
-keybinding / naming / session-event / installation-doc / pi-divergence /
-pi-vendor gates, `pnpm audit`, and finally `pnpm pack:release`. `pack:release`
+`test:fork`, `test:tmux`, `test:tooling`, the shared `check:gates` preflight
+(architecture / boundary / keybinding / naming / session-event /
+installation-doc / pi-divergence / pi-vendor gates; the pi component
+compatibility test is skipped there because `pack:release`'s product suite
+runs the same test file), `pnpm audit`, and finally `pnpm pack:release`.
+`pack:release`
 is the explicit local orchestrator: `clean` + `clean:fork` + `build` +
 `typecheck:bundle` + `test:product` + `pack:artifact` + `smoke:release`
 (the eight packed-artifact smokes: tarball, extension fixture, advanced,
@@ -309,9 +313,13 @@ twice.
 reproduce: `Source checks` runs `build:fork`, `typecheck:fork`,
 `typecheck:bench`, `test:fork`, the `smoke:remote-*` parity/closure lanes (five
 of them only when the resolved DSH mode is `source`), `test:tmux`,
-`gate:installation-doc`, `test:tooling`, `gate:pi-surface-compat`,
-`generate:pi-divergences` with a `git diff --exit-code` on `DIVERGENCES.md`,
-`gate:pi-divergence-ledger`, `gate:pi-vendor-diff --strict` and the naming gate;
+`test:tooling`, `generate:pi-divergences` with a `git diff --exit-code` on
+`DIVERGENCES.md`, and the shared `pnpm check:gates` preflight. The gate registry
+in `scripts/run-quality-gates.mjs` is the single list: `mise run check`, CI and
+`verify:release` all use that entry, and `ci-only` gates keep independent CI
+steps. Keep the rule in CI: add a new gate to the registry, run
+local-preflight gates only through `pnpm check:gates`, and keep the exact
+packed-candidate source-leak command as the only direct gate step.
 `Build and pack` runs the root `build`, `typecheck:bundle` and `test:product`
 in separate jobs, then a lifecycle-free `pack:artifact` candidate qualified by
 the eight packed-artifact smokes through `smoke:release`; the qualification job
@@ -329,8 +337,7 @@ recovery subscene) with UTC time and duration, and its default failure output
 includes the real error stack; `SPLIT_PROCESS_SMOKE_KEEP=1` only preserves the
 temporary scene. The lanes CI does NOT run — therefore the only ones a stage-final pass
 must run locally — are
-`compat:dsh:npm`, `gate:keybindings`, `gate:boundary`, `gate:architecture`,
-`scripts/check-no-session-events.mjs`, `gate:dsh-preset-parity`,
+`compat:dsh:npm`, `gate:dsh-preset-parity`,
 `smoke:remote-fork-rewind-parity` and `smoke:remote-session-lifecycle-parity`; a mode-gated
 CI step that was skipped counts as not covered.
 

@@ -337,6 +337,43 @@ pnpm build
 Building only the root can embed a stale fork `dist`. Never test a stale fork
 dist and never share/symlink a whole `node_modules` between worktrees.
 
+## Local pre-push checks
+
+After the targeted tests for your change pass, run the pre-push gate from a
+prepared worktree:
+
+```bash
+mise run check
+```
+
+`mise run check` forwards to `pnpm check`, which builds the vendored fork, runs
+every typecheck, runs the tooling test lane, and then runs the shared gate
+preflight `pnpm check:gates`. The gate list and its execution live in ONE place,
+`scripts/run-quality-gates.mjs`; do not copy the list into a task or workflow.
+Every gate is classified as `local-preflight` (routine preflight), `ci-only`
+(needs a packed candidate or a CI-runner facility) or `on-demand` (a targeted
+diagnostic outside the routine preflight). The registry is the single source
+of truth; each entry declares its classification. Keep it that way: add new
+gates there, run local-preflight gates through `pnpm check:gates`, and keep
+the exact packed-candidate source-leak command as CI's only direct gate step.
+
+The workspace must already be materialized: npm mode after `mise run setup` (or
+an equivalent frozen install), Source Mode after `mise run source:bootstrap`
+with `mise run source:doctor` reporting `READY`. The check never switches the
+tracked mode, reinstalls dependencies, rewrites the lockfile, or prepares a
+source distribution.
+
+`check` is a pre-push signal, not a release qualification. It does not replace
+targeted subsystem tests, dedicated runtime/wire/UI smokes, the full product
+suite, or `pnpm verify:release` (which reuses the same gate preflight for its
+static-gate portion — skipping the one gate whose exact test the release
+product suite runs again — but still runs the release-specific tests, audit and
+packed artifacts). Source Mode's exact-SHA remote closure smokes remain explicit
+smoke/CI work, and `ci-only` gates remain CI's responsibility. Treat a failed
+gate as a real defect: fix it, or report it as `NOT_VERIFIED` with the concrete
+environment blocker, and never ignore it. CI keeps its independent jobs, steps
+and diagnostics; the local check does not change the CI verdict.
+
 ## Diagnosing unpublished/local DSH targets
 
 Generic failure classification:
