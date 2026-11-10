@@ -400,23 +400,11 @@ jobs:
       - name: Test tmux terminal tooling
         run: pnpm test:tmux
 
-      - name: Validate installation documentation
-        run: pnpm gate:installation-doc
-
       # Development-tooling suite: dev-environment fixtures, DSH distribution
       # gates. Kept OUT of the packed artifact path so the artifact never
       # depends on the developer git/CI environment.
       - name: Test development tooling
         run: pnpm test:tooling
-
-      - name: Pi component compatibility contract
-        run: pnpm gate:pi-surface-compat
-
-      # Every production file a test reads by path must EXIST: a renamed or
-      # moved production module would otherwise leave a source lock
-      # silently pointing at a DIFFERENT file.
-      - name: Verify the production reads of the test tree
-        run: pnpm gate:production-reads
 
       # The JSON ledger is authoritative; this step proves the checked-in
       # human report is deterministic and has not been hand-edited.
@@ -426,17 +414,14 @@ jobs:
           git diff --exit-code -- packages/pi-tui/DIVERGENCES.md
           git diff --check -- packages/pi-tui/DIVERGENCES.md
 
-      - name: Validate vendored divergence ledger
-        run: pnpm gate:pi-divergence-ledger
-
-      # Vendored-fork divergence gate: every local src change must be
-      # covered by vendor-divergences.json against the pinned upstream
-      # blobs (resolved via the codeload tarball fallback on CI).
-      - name: Vendored fork divergence gate
-        run: pnpm gate:pi-vendor-diff --strict
-
-      - name: Verify naming and packaging contracts
-        run: node scripts/naming-gate.mjs
+      # The single local-preflight gate list and its execution live in
+      # scripts/run-quality-gates.mjs. This is the same entry that
+      # `mise run check` and `pnpm verify:release` use. Each gate is
+      # classified local-preflight / ci-only / on-demand; ci-only gates
+      # (for example the packed-candidate source-leak gate) keep their own
+      # independent steps.
+      - name: Run the shared local-preflight gates
+        run: pnpm check:gates
 
   # ---------------------------------------------------------------------------
   # Build and run the Remote Session read gates against the exact DSH version

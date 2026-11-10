@@ -97,11 +97,6 @@ test('Source Mode parity smokes build the vendored pi-tui dist first', () => {
   const firstSmoke = workflow.indexOf('- name: Remote Session read fixture smoke')
   assert.ok(build >= 0, 'Source checks must build the private pi-tui export before importing projections')
   assert.ok(firstSmoke > build, 'the vendored pi-tui build must precede every Remote smoke')
-  assert.match(
-    workflow,
-    /^      - name: Pi component compatibility contract\n        run: pnpm gate:pi-surface-compat$/mu,
-    'the compatibility contract must remain a top-level Source checks step',
-  )
 })
 
 test('task, presentation, and closure smokes are Source Mode gates', () => {
