@@ -12403,9 +12403,9 @@ export class TuiApp {
   }
 
   /**
-   * The optional Source-only context: ONLY a Host-owned single-text,
-   * non-URL User message or expanded-safe Thinking source may contribute one.
-   * Every Assistant Markdown (including a hidden href), Tool/Command/Workflow,
+   * The optional Source-only context: ONLY a Host-owned single-text User
+   * message or an EXPANDED Host Thinking body may contribute one. Every
+   * Assistant Markdown (including a hidden href), Tool/Command/Workflow,
    * Plugin, Visual and Delivered source is label-only, and a collapsed or
    * mixed-content body has no raw span to project.
    */
@@ -12414,6 +12414,14 @@ export class TuiApp {
     if (source.kind !== 'message') return undefined
     const message = target.message
     if (message.kind !== 'user' && message.kind !== 'thinking') return undefined
+    const entry = this.messageComponents.get(message)
+    if (entry === undefined || entry.rendererId !== undefined) return undefined
+    // A COLLAPSED Host Thinking card paints only its compact preview: its raw
+    // body is hidden transcript text, so it is never a snippet source. The
+    // search reveal expands a Thinking target; only an explicit user collapse
+    // reaches this state, and then the notice stays label-only.
+    if (message.kind === 'thinking' && entry.expanded !== true) return undefined
+    if (message.kind === 'user' && message.content?.some(part => part.type !== 'text') === true) return undefined
     const memo = this.searchSourceSnippetMemo
     if (memo !== undefined && memo.revision === this.searchPresentationRevision
       && memo.query === target.query && memo.message === message && memo.text === message.text) {
@@ -12434,9 +12442,6 @@ export class TuiApp {
     target: TranscriptSearchPresentationTarget,
     message: Extract<TranscriptMessage, { kind: 'user' | 'thinking' }>,
   ): string | undefined {
-    const entry = this.messageComponents.get(message)
-    if (entry === undefined || entry.rendererId !== undefined) return undefined
-    if (message.kind === 'user' && message.content?.some(part => part.type !== 'text') === true) return undefined
     const range = target.match.normalizedSourceRange
     if (range === undefined) return undefined
     const normalizedQuery = target.query.trim().toLowerCase()

@@ -9,6 +9,7 @@
 import assert from 'node:assert/strict'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { afterEach, test } from 'node:test'
+import { stripTerminalSequences } from '@xmoon76/pi-tui'
 import { TuiApp } from '../../src/tui-app.ts'
 import { parseUserKeybindings } from '../../src/tui/keybindings/config.ts'
 import type { TranscriptMessage, TranscriptSearchMatch } from '../../src/transcript.ts'
@@ -355,6 +356,51 @@ test('interaction: a higher modal suppresses the Source-only row and restores it
   await vt.waitForRender()
   assert.equal(app.currentFullSearchNotice()?.kind, 'unproven', 'closing the modal restores the honest notice')
   app.stop()
+})
+
+test('interaction: the Source-only row keeps the frozen size, theme and icon matrix', async () => {
+  const sizes = [[200, 50], [120, 40], [100, 40], [80, 24], [80, 10], [72, 24], [44, 20], [80, 8]] as const
+  for (const theme of ['dark', 'light'] as const) {
+    for (const iconStyle of ['symbols', 'minimal'] as const) {
+      for (const [width, height] of sizes) {
+        const vt = new VirtualTerminal(width, height)
+        const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+        app.start()
+        startedApps.add(app)
+        app.setFullscreen(true)
+        app.applyTheme(theme)
+        app.setIconStyle(iconStyle)
+        const tool = unprovenToolTarget()
+        app.setTranscript([tool.message])
+        await vt.waitForRender()
+        app.startTranscriptSearch('full')
+        await vt.waitForRender()
+        app.setTranscriptSearchPresentation({
+          matchMessages: new Set([tool.message]),
+          target: { query: 'needle', match: tool.match, message: tool.message },
+          grantReveal: true,
+        })
+        await vt.waitForRender()
+        const label = `${theme}/${iconStyle}/${width}x${height}`
+        const compact = height <= 10
+        assert.equal(overlayBounds(app).height, compact ? 3 : 4, `${label}: the box keeps its real row budget`)
+        const lines = vt.getViewport().map(line => stripTerminalSequences(line))
+        const notice = lines.find(line => line.includes('Source-only'))
+        assert.ok(notice !== undefined, `${label}: the Source-only fact is painted:\n${lines.join('\n')}`)
+        assert.ok(!notice.includes('…'), `${label}: required segments are never partially truncated`)
+        if (compact) {
+          assert.ok(notice.includes('Esc'), `${label}: the compact row keeps the effective close key`)
+          assert.ok(notice.includes('Loaded') || notice.includes('Entire'), `${label}: the real coverage truth survives`)
+        } else {
+          assert.ok(!notice.includes('Loaded'), `${label}: the four-row form keeps the close key on the hint row`)
+        }
+        assert.ok(lines.some(line => line.includes('[Full]')), `${label}: the scope title survives`)
+        assert.ok(lines[overlayBounds(app).row + 1]?.includes('>'), `${label}: the Input row is painted inside the box`)
+        assert.equal(app.focusSeatForTest(), 'overlay', `${label}: the Input keeps the seat`)
+        app.dispose()
+      }
+    }
+  }
 })
 
 test('interaction: an ordinary modal blocks the transcript viewport while search is open', async () => {

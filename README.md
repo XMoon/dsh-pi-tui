@@ -471,7 +471,7 @@ Settings / Plugins 页面会明确拒绝。
 查找框只有一个:`Ctrl+F` 打开 View（只统计当前已挂载的渲染行,隐藏链接、折叠行与窗口外历史不算命中）,
 `Ctrl+Shift+F` 打开 Full（按当前 Session 的语义文本搜索,`N/M` 与 View 各自独立）。全窗口的命中可能落在
 隐藏链接、被消费的图片标记或当前渲染无法确证的位置:此时第 4 行显示 `Source-only · no visible cell`
-或 `Source-only · position unverified`,并只对 Host 原生的单段 User/Thinking 文本附带安全片段。
+或 `Source-only · position unverified`,并只对 Host 原生的单段 User 文本或**展开的** Thinking 正文附带安全片段。
 目标被右上角查找框遮住时会自动移出框外；已在框外可见的命中不会被无谓重居中。普通模式下打开查找会
 临时借用全屏 Transcript,关闭后返回原来的普通视图。
 
