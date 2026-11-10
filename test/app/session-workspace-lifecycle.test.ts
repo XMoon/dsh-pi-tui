@@ -540,7 +540,7 @@ test('/sessions opens the ONE fullscreen lease and lists sibling official Worksp
     { workspaceId: 'ws-b', path: '/ws', title: 'project-b', sessionIds: [OTHER, THIRD] },
   ))
   resolveList([row(CURRENT, 3_000), row(OTHER, 2_000), row(THIRD, 1_000)])
-  await waitUntil(() => h.view().includes('Current workspace'), 'the official baseline resolves the scope')
+  await waitUntil(() => !h.view().includes('Checking current workspace…'), 'the official baseline resolves the tree')
   const scoped = h.view()
   assert.ok(scoped.includes('Current: curren'), `Current is the captured Session:\n${scoped}`)
   assert.ok(scoped.includes('Current session'), 'the current Workspace member paints')
@@ -566,7 +566,7 @@ test('global search remains a flat union and Host-only hits still paint', async 
     { workspaceId: 'ws-a', path: '/ws', title: 'project-a', sessionIds: [CURRENT] },
     { workspaceId: 'ws-b', path: '/other', title: 'project-b', sessionIds: [OTHER] },
   ))
-  await waitUntil(() => h.view().includes('Current workspace'), 'Current is proved')
+  await waitUntil(() => !h.view().includes('Checking current workspace…'), 'the official baseline is proved')
   h.vt.sendInput('/')
   await h.vt.waitForRender()
   h.vt.sendInput('needle')
@@ -584,7 +584,7 @@ test('an interactive resume is successful only on the runtime committed outcome 
   h.facts.handles[0]!.push(baseline(
     { workspaceId: 'ws-a', path: '/ws', title: 'project-a', sessionIds: [CURRENT, OTHER] },
   ))
-  await waitUntil(() => h.view().includes('Current workspace'), 'Current is proved')
+  await waitUntil(() => !h.view().includes('Checking current workspace…'), 'the official baseline is proved')
   h.vt.sendInput('\x1b[B')
   await h.vt.waitForRender()
   h.vt.sendInput('\r')
@@ -611,7 +611,7 @@ test('a failed interactive resume keeps the workspace and never reports success 
   h.facts.handles[0]!.push(baseline(
     { workspaceId: 'ws-a', path: '/ws', title: 'project-a', sessionIds: [CURRENT, OTHER] },
   ))
-  await waitUntil(() => h.view().includes('Current workspace'), 'Current is proved')
+  await waitUntil(() => !h.view().includes('Checking current workspace…'), 'the official baseline is proved')
   h.vt.sendInput('\x1b[B')
   await h.vt.waitForRender()
   h.vt.sendInput('\r')
@@ -634,7 +634,7 @@ test('an indeterminate interactive resume is visible, stays open and never retri
   h.facts.handles[0]!.push(baseline(
     { workspaceId: 'ws-a', path: '/ws', title: 'project-a', sessionIds: [CURRENT, OTHER] },
   ))
-  await waitUntil(() => h.view().includes('Current workspace'), 'Current is proved')
+  await waitUntil(() => !h.view().includes('Checking current workspace…'), 'the official baseline is proved')
   h.vt.sendInput('\x1b[B')
   await h.vt.waitForRender()
   h.vt.sendInput('\r')
@@ -678,7 +678,7 @@ test('a normally ended official Workspace stream drops the membership annotation
     { workspaceId: 'ws-a', path: '/ws', title: 'a', sessionIds: [CURRENT] },
     { workspaceId: 'ws-b', path: '/other', title: 'b', sessionIds: [OTHER] },
   ))
-  await waitUntil(() => h.view().includes('Current workspace'), 'Current is proved')
+  await waitUntil(() => !h.view().includes('Checking current workspace…'), 'the official baseline is proved')
   // The official Remote handle may end iterating after a valid baseline without
   // throwing; the proof is still gone.
   h.facts.handles[0]!.finish()
@@ -709,7 +709,7 @@ test('a failed official Workspace stream keeps the roster usable without members
   await h.runSessions('')
   await h.vt.waitForRender()
   h.facts.handles[0]!.push(baseline({ workspaceId: 'ws-a', path: '/ws', title: 'a', sessionIds: [CURRENT] }))
-  await waitUntil(() => h.view().includes('Current workspace'), 'Current is proved')
+  await waitUntil(() => !h.view().includes('Checking current workspace…'), 'the official baseline is proved')
   h.facts.handles[0]!.fail(new Error('workspace generation superseded'))
   await waitUntil(() => h.view().includes('Workspace membership unavailable'), 'the failed stream is visible')
   assert.ok(h.view().includes('Workspace: Information unavailable'), 'a failed stream removes the folder authority')
@@ -721,7 +721,7 @@ test('an active close owns the stream end and paints no stale scope failure', as
   await h.runSessions('')
   await h.vt.waitForRender()
   h.facts.handles[0]!.push(baseline({ workspaceId: 'ws-a', path: '/ws', title: 'a', sessionIds: [CURRENT] }))
-  await waitUntil(() => h.view().includes('Current workspace'), 'Current is proved')
+  await waitUntil(() => !h.view().includes('Checking current workspace…'), 'the official baseline is proved')
   h.vt.sendInput('\x1b') // the user closes the workspace
   await h.vt.waitForRender()
   assert.equal(h.facts.handles[0]!.disposed, 1, 'the active close disposes the follow exactly once')
@@ -1486,7 +1486,7 @@ test('E-L10: a PiTUI mount without the installed control keeps both Lefts native
   assert.ok(!h.view().includes('Sessions'), 'no control means no gesture')
   assert.equal(h.listCalls, 0)
 
-  // The registered UI body with no scope (the Welcome/TSP caller) asks Current.
+  // The registered UI body with no scope still browses the ONE global tree.
   h.openSessionBrowser()
   await h.vt.waitForRender()
   assert.ok(h.view().includes('Sessions'), 'the registered UI entry still opens the ONE workspace')
@@ -1494,7 +1494,7 @@ test('E-L10: a PiTUI mount without the installed control keeps both Lefts native
     { workspaceId: 'ws-a', path: '/ws', title: 'project-a', sessionIds: [CURRENT] },
     { workspaceId: 'ws-b', path: '/other', title: 'project-b', sessionIds: [OTHER] },
   ))
-  await waitUntil(() => h.view().includes('Workspace: Current workspace'), 'the default scope is Current')
+  await waitUntil(() => h.view().includes('Workspace: All workspaces'), 'the argument-free entry states the global tree')
   assert.ok(!h.view().includes('Other session'), 'Current never lists an unproved Workspace row')
   h.close()
 })
@@ -1507,7 +1507,7 @@ test('E-L11: every entry browses the full Workspace tree; typed entries keep the
     { workspaceId: 'ws-a', path: '/ws', title: 'project-a', sessionIds: [CURRENT] },
     { workspaceId: 'ws-b', path: '/other', title: 'project-b', sessionIds: [OTHER] },
   ))
-  await waitUntil(() => h.view().includes('Workspace: Current workspace'), 'a proved membership is stated')
+  await waitUntil(() => h.view().includes('Workspace: All workspaces'), 'the global tree is stated')
   assert.ok(h.view().includes('project-a') && h.view().includes('project-b'),
     `the typed command lists the complete official tree, not one scope:\n${h.view()}`)
   h.vt.sendInput('\x1b')
