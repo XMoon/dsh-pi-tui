@@ -957,8 +957,25 @@ bytes, caches or link targets: its state exists only inside one synchronous
 call, so a text, width, theme or capability change requires a fresh proof. Host
 Card composition (bullet/indent/preceding-segment offsets), composite/plugin
 owner decisions and Full-search selection remain Host responsibilities; a
-component-local proof is embeddable evidence, not a claim that Assistant Full
-Exact is complete.
+component-local proof is embeddable evidence, not a claim that a composite card
+has a single source.
+
+PiTui Full consumes that proof for the CURRENT hit when the whole card is one
+Host-native Assistant Markdown body (the same live `Markdown` instance the
+bullet card renders). The semantic range is projected from normalized source
+coordinates back to raw UTF-16 and through the SAME display sanitizer the card
+paints; only an additive, boundary-aligned projection reaches the proof. The
+bullet/continuation indent is added to the component-local segments and every
+segment is re-read from the CURRENT rendered rows, so a proven strong cell and
+its scroll row always belong to this render epoch. Cards whose whole source is
+not that one native Markdown body — plugin renderers, `VisualAssistantBody`,
+multi-ContentBlock sequences, open-opaque streams, delivered-file/interrupted
+wrappers — stay on the source anchor; a hidden href, markup-only delimiter,
+pending math, rewritten glyph or non-additive projection keeps its semantic
+result without borrowing a visible homonym. Only the current hit is proved: a
+static frame, a scroll-only frame and every other card never trigger a proof.
+Full N/M identity, View's mounted-occurrence authority, reveal ownership and
+viewport ownership are unchanged.
 
 ## Hardening guarantees
 

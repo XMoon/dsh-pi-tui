@@ -14,7 +14,7 @@ import { getCapabilities, setCapabilities, stripTerminalSequences, visibleWidth 
 import { TuiApp } from '../../src/tui-app.ts'
 import { darkColors, lightColors } from '../../src/domain/display/theme.ts'
 import { currentPalette } from '../../src/tui/theme/runtime.ts'
-import { TranscriptFolder, workflowPhaseKey, type TranscriptMessage, type TranscriptToolMessage } from '../../src/transcript.ts'
+import { TranscriptFolder, workflowPhaseKey, type TranscriptMessage, type TranscriptSearchMatch, type TranscriptToolMessage } from '../../src/transcript.ts'
 import { deliveredFilesCapabilityStub } from '../support/delivered-files.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { assistantVisualPresentation, setAssistantVisualPresentation } from '../../src/domain/visual/presentation.ts'
@@ -1914,4 +1914,548 @@ test('a hidden Markdown href between two visible homonyms never selects either t
   } finally {
     setCapabilities(previousCapabilities)
   }
+})
+
+// ── F2: a Host-native Assistant Markdown card proves its painted source cells ──
+
+/** The CURRENT theme's exact-block background (the strong style is palette
+ * driven, so the light theme uses a different RGB than dark). */
+function strongBg(): number {
+  return Number.parseInt((currentPalette.searchCurrentBg ?? '#F5C542').replace('#', ''), 16)
+}
+
+/** The STRONG current block's characters on one viewport row, read from the
+ * terminal's OWN cells: the environment's width model (not the renderer's
+ * `visibleWidth`) decides which cell holds which glyph, so an emoji bullet can
+ * never shift the expectation. */
+function strongCellText(vt: VirtualTerminal, row: number): string {
+  return vt.getRgbBackgroundRuns(strongBg()).filter(run => run.row === row).map(run => run.text).join('')
+}
+
+/** Every viewport row that paints part of the STRONG current block. */
+function strongRows(_lines: readonly string[], vt: VirtualTerminal): { row: number; text: string }[] {
+  const rows = new Map<number, string>()
+  for (const run of vt.getRgbBackgroundRuns(strongBg())) {
+    rows.set(run.row, (rows.get(run.row) ?? '') + run.text)
+  }
+  return [...rows].map(([row, text]) => ({ row, text }))
+}
+
+/** The whole STRONG block text in row-major order (a wrapped hit owns several
+ * rows and reassembles to the query). */
+function strongText(lines: readonly string[], vt: VirtualTerminal): string {
+  return strongRows(lines, vt).map(entry => entry.text).join('')
+}
+
+/** Mount one real folded Assistant answer, then prove one real Folder match
+ * against the measured row map (the same order the interactive surface uses:
+ * the card is painted before a search presentation is committed). */
+async function mountAssistantAnswer(
+  folder: TranscriptFolder,
+  message: TranscriptMessage,
+  query: string,
+  match: TranscriptSearchMatch,
+  width = 100,
+  height = 30,
+): Promise<{ vt: VirtualTerminal; app: TuiApp }> {
+  const { vt, app } = startApp(width, height)
+  app.setFullscreen(true)
+  app.setIconStyle('symbols')
+  app.setTranscript([message], folder.turnActivities())
+  await viewport(vt)
+  app.setTranscriptSearchPresentation({
+    matchMessages: new Set([message]),
+    target: { query, match, message },
+    grantReveal: true,
+  })
+  app.scrollToSearchTarget()
+  return { vt, app }
+}
+
+test('navigation: an Assistant Markdown card proves each same-card occurrence and scrolls to it', async () => {
+  const text = [
+    'needle first answer',
+    ...Array.from({ length: 16 }, (_, index) => `filler line ${index}`),
+    'needle second answer',
+  ].join('\n')
+  const { folder, message } = assistantSearchFolder(text, 'assistant-two-hits')
+  const matches = folder.search('needle')
+  assert.equal(matches.length, 2, 'the authoritative corpus owns exactly two occurrences')
+  const { vt, app } = await mountAssistantAnswer(folder, message, 'needle', matches[0]!, 100, 12)
+
+  let lines = await viewport(vt)
+  assert.deepEqual(strongRows(lines, vt).map(entry => entry.text), ['needle'],
+    'the first occurrence is the only strong block in the frame')
+  const firstRow = lines.findIndex(line => stripTerminalSequences(line).includes('needle first answer'))
+  assert.ok(firstRow >= 0, `the first answer row is painted:\n${lines.join('\n')}`)
+  assert.equal(strongCellText(vt, firstRow), 'needle')
+  let selection = mountedSelectionFor(app, message)
+  assert.equal(selection?.exact, true, 'the Host Markdown source range is proven against real cells')
+  assert.equal(selection?.selectedIndex, -1, 'the Markdown proof never uses a rendered ordinal')
+  assert.equal(selection?.selectedRow, selection?.exactPaintedSegments?.[0]?.row)
+  const firstScrollTop = app.fullscreenScrollForTest()!.scrollTop
+
+  app.setTranscriptSearchPresentation({
+    matchMessages: new Set([message]),
+    target: { query: 'needle', match: matches[1]!, message },
+    grantReveal: true,
+  })
+  app.scrollToSearchTarget()
+  lines = await viewport(vt)
+  assert.ok(lines.some(line => stripTerminalSequences(line).includes('needle second answer')),
+    `the viewport scrolls to the second source-proven row:\n${lines.join('\n')}`)
+  assert.ok(!lines.some(line => stripTerminalSequences(line).includes('needle first answer')),
+    'the first occurrence is no longer the viewport destination')
+  assert.notEqual(app.fullscreenScrollForTest()!.scrollTop, firstScrollTop, 'Next moves the viewport')
+  assert.deepEqual(strongRows(lines, vt).map(entry => entry.text), ['needle'])
+  selection = mountedSelectionFor(app, message)
+  assert.equal(selection?.exact, true)
+  assert.equal(selection?.exactPaintedSegments?.[0]?.row, selection?.selectedRow)
+  assert.equal(folder.search('needle').length, 2, 'the semantic N/M corpus is unchanged')
+  app.stop()
+})
+
+test('navigation: headings, emphasis, quotes and lists prove the exact source cells', async () => {
+  const cases: Array<{ text: string; count: number }> = [
+    { text: '## needle heading', count: 1 },
+    { text: 'before **needle** *needle* ~~needle~~', count: 3 },
+    { text: '> quote needle', count: 1 },
+    { text: '- first\n  - nested needle', count: 1 },
+    { text: '1. one\n2. needle ordered', count: 1 },
+  ]
+  const { vt, app } = startApp(100, 30)
+  app.setFullscreen(true)
+  app.setIconStyle('symbols')
+  for (const testCase of cases) {
+    for (const width of [44, 100]) {
+      vt.resize(width, 30)
+      const { folder, message } = assistantSearchFolder(testCase.text, `assistant-md-${testCase.count}-${width}-${testCase.text.length}`)
+      const matches = folder.search('needle')
+      assert.equal(matches.length, testCase.count, `${testCase.text}: one semantic hit per occurrence`)
+      app.setTranscript([message], folder.turnActivities())
+      for (let occurrence = 0; occurrence < matches.length; occurrence += 1) {
+        app.setTranscriptSearchPresentation({
+          matchMessages: new Set([message]),
+          target: { query: 'needle', match: matches[occurrence]!, message },
+          grantReveal: true,
+        })
+        const lines = await viewport(vt)
+        assert.deepEqual(strongRows(lines, vt).map(entry => entry.text), ['needle'],
+          `${JSON.stringify(testCase.text)} occurrence ${occurrence} at width ${width}: the exact leaf cells are strong`)
+        const selection = mountedSelectionFor(app, message)
+        assert.equal(selection?.exact, true, `${JSON.stringify(testCase.text)}: a single-leaf hit is PROVEN`)
+        assert.equal(selection?.selectedIndex, -1)
+      }
+    }
+  }
+  app.stop()
+})
+
+test('navigation: link labels prove, a hidden href stays anchor-only, a printed href proves', async () => {
+  const previousCapabilities = getCapabilities()
+  setCapabilities({ images: null, trueColor: true, hyperlinks: true })
+  try {
+    const { folder, message } = assistantSearchFolder('[needle](https://example.invalid/needle) needle', 'assistant-link-visible')
+    const matches = folder.search('needle')
+    assert.equal(matches.length, 3, 'label, hidden href and body are three semantic occurrences')
+    const { vt, app } = await mountAssistantAnswer(folder, message, 'needle', matches[0]!, 90, 20)
+    assert.deepEqual(strongRows(await viewport(vt), vt).map(entry => entry.text), ['needle'],
+      'the link label is a proven painted cell')
+    assert.equal(mountedSelectionFor(app, message)?.exact, true)
+
+    app.setTranscriptSearchPresentation({
+      matchMessages: new Set([message]),
+      target: { query: 'needle', match: matches[1]!, message },
+      grantReveal: true,
+    })
+    const hiddenLines = await viewport(vt)
+    assert.deepEqual(strongRows(hiddenLines, vt), [], 'a hidden href never paints a visible homonym')
+    const hiddenSelection = mountedSelectionFor(app, message)
+    assert.equal(hiddenSelection?.exact, false)
+    assert.equal(hiddenSelection?.exactPaintedSegments, undefined)
+    assert.equal(hiddenLines.filter(line => visibleColumnsOf(line, 'needle').length > 0).length, 1,
+      'both visible homonyms stay painted but neither becomes the href cell')
+
+    app.setTranscriptSearchPresentation({
+      matchMessages: new Set([message]),
+      target: { query: 'needle', match: matches[2]!, message },
+      grantReveal: true,
+    })
+    const bodyLines = await viewport(vt)
+    assert.deepEqual(strongRows(bodyLines, vt).map(entry => entry.text), ['needle'],
+      'the visible body occurrence is proven')
+    const bodySelection = mountedSelectionFor(app, message)
+    assert.equal(bodySelection?.exact, true)
+    assert.ok((bodySelection?.exactPaintedSegments?.length ?? 0) > 0,
+      'the body proof publishes card-relative segments')
+    assert.equal(folder.search('needle').length, 3, 'the hidden href keeps its semantic occurrence')
+    app.stop()
+  } finally {
+    setCapabilities(previousCapabilities)
+  }
+})
+
+test('navigation: a printed link destination is a proven source cell when hyperlinks are off', async () => {
+  const previousCapabilities = getCapabilities()
+  setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+  try {
+    const { folder, message } = assistantSearchFolder('[label](https://example.invalid/needle)', 'assistant-link-printed')
+    const matches = folder.search('needle')
+    assert.equal(matches.length, 1, 'the printed destination is the only semantic occurrence')
+    const { vt, app } = await mountAssistantAnswer(folder, message, 'needle', matches[0]!, 90, 20)
+    const lines = await viewport(vt)
+    assert.ok(lines.some(line => stripTerminalSequences(line).includes('example.invalid/needle')),
+      `the destination is printed by the card:\n${lines.join('\n')}`)
+    assert.deepEqual(strongRows(lines, vt).map(entry => entry.text), ['needle'],
+      'the printed destination is the honest painted cell')
+    const selection = mountedSelectionFor(app, message)
+    assert.equal(selection?.exact, true)
+    assert.equal(selection?.selectedIndex, -1)
+    app.stop()
+  } finally {
+    setCapabilities(previousCapabilities)
+  }
+})
+
+test('navigation: inline code, fenced code and literal LaTeX prove; a fence tag does not', async () => {
+  const cases: Array<{ text: string; count: number }> = [
+    { text: '`needle` inline code', count: 1 },
+    { text: '```js\nconst needle = 1\n```', count: 1 },
+    { text: '$needle$ and \\(needle\\)', count: 2 },
+    { text: '$$\nneedle\n$$', count: 1 },
+    { text: '\\[\nneedle\n\\]', count: 1 },
+  ]
+  const { vt, app } = startApp(90, 30)
+  app.setFullscreen(true)
+  app.setIconStyle('symbols')
+  for (const testCase of cases) {
+    const { folder, message } = assistantSearchFolder(testCase.text, `assistant-code-${testCase.text.length}-${testCase.count}`)
+    const matches = folder.search('needle')
+    assert.equal(matches.length, testCase.count, `${JSON.stringify(testCase.text)}: one hit per literal occurrence`)
+    app.setTranscript([message], folder.turnActivities())
+    for (const match of matches) {
+      app.setTranscriptSearchPresentation({
+        matchMessages: new Set([message]),
+        target: { query: 'needle', match, message },
+        grantReveal: true,
+      })
+      const lines = await viewport(vt)
+      assert.deepEqual(strongRows(lines, vt).map(entry => entry.text), ['needle'],
+        `${JSON.stringify(testCase.text)}: the literal source cell is strong`)
+      assert.equal(mountedSelectionFor(app, message)?.exact, true)
+    }
+  }
+
+  // The code-fence TAG is markup, not a painted source cell.
+  const fenced = assistantSearchFolder('```js\nconst needle = 1\n```', 'assistant-fence-tag')
+  const tagMatch = fenced.folder.search('js')[0]
+  assert.ok(tagMatch !== undefined, 'fixture: the fence tag is in the semantic corpus')
+  app.setTranscript([fenced.message], fenced.folder.turnActivities())
+  app.setTranscriptSearchPresentation({
+    matchMessages: new Set([fenced.message]),
+    target: { query: 'js', match: tagMatch, message: fenced.message },
+    grantReveal: true,
+  })
+  const tagLines = await viewport(vt)
+  assert.deepEqual(strongRows(tagLines, vt), [], 'a code fence tag never becomes an exact cell')
+  assert.equal(mountedSelectionFor(app, fenced.message)?.exact, false)
+  app.stop()
+})
+
+test('navigation: a query longer than the card width proves every wrapped row', async () => {
+  const word = 'supercalifragilisticexpialidocious'
+  const { folder, message } = assistantSearchFolder(`${word} tail`, 'assistant-wrapped-query')
+  const matches = folder.search(word)
+  assert.equal(matches.length, 1)
+  const { vt, app } = await mountAssistantAnswer(folder, message, word, matches[0]!, 11, 30)
+  const lines = await viewport(vt)
+  const selection = mountedSelectionFor(app, message)
+  assert.equal(selection?.exact, true, 'the wrapped occurrence is proven')
+  assert.ok((selection?.exactPaintedSegments?.length ?? 0) >= 2,
+    'the occurrence owns one segment per painted row')
+  assert.equal(strongText(lines, vt), word, 'every wrapped row reassembles the query')
+  assert.equal(strongRows(lines, vt).length, selection?.exactPaintedSegments?.length,
+    'exactly the proven rows are strong')
+  assert.equal(folder.search(word).length, 1)
+  app.stop()
+})
+
+test('navigation: Unicode source cells re-prove across width, theme and bullet geometry', async () => {
+  const text = '前缀**匹配词**后缀 needle 家庭 👨‍👩‍👧 tail'
+  const { folder, message } = assistantSearchFolder(text, 'assistant-unicode')
+  const matches = folder.search('needle')
+  assert.equal(matches.length, 1)
+  const { vt, app } = startApp(100, 30)
+  app.setFullscreen(true)
+  try {
+    for (const iconStyle of ['emoji', 'minimal'] as const) {
+      for (const theme of ['dark', 'light'] as const) {
+        app.setIconStyle(iconStyle)
+        app.applyTheme(theme)
+        for (const width of [12, 44, 80, 120]) {
+          vt.resize(width, 30)
+          app.setTranscript([message], folder.turnActivities())
+          await viewport(vt)
+          app.setTranscriptSearchPresentation({
+            matchMessages: new Set([message]),
+            target: { query: 'needle', match: matches[0]!, message },
+            grantReveal: true,
+          })
+          app.scrollToSearchTarget()
+          const lines = await viewport(vt)
+          assert.equal(strongText(lines, vt), 'needle',
+            `width ${width}, ${theme}, ${iconStyle}: the re-painted cell stays exact`)
+          const selection = mountedSelectionFor(app, message)
+          assert.equal(selection?.exact, true, `width ${width}, ${theme}, ${iconStyle}: exact`)
+          assert.ok((selection?.exactPaintedSegments?.length ?? 0) > 0)
+          assert.equal(selection?.selectedRow, selection?.exactPaintedSegments?.[0]?.row)
+        }
+      }
+    }
+
+    // A geometry change without a re-measure must never keep the old columns:
+    // the remeasure pass re-proves the CURRENT rows for the new width.
+    vt.resize(44, 30)
+    app.setTranscript([message], folder.turnActivities())
+    await viewport(vt)
+    app.setTranscriptSearchPresentation({
+      matchMessages: new Set([message]),
+      target: { query: 'needle', match: matches[0]!, message },
+      grantReveal: true,
+    })
+    app.scrollToSearchTarget()
+    await viewport(vt)
+    const beforeResize = mountedSelectionFor(app, message)?.exactPaintedSegments
+    assert.ok(beforeResize !== undefined)
+    app.resetSearchPresentationDiagnosticsForTest()
+    vt.resize(20, 30)
+    await viewport(vt)
+    app.scrollToSearchTarget()
+    await viewport(vt)
+    const afterResize = mountedSelectionFor(app, message)?.exactPaintedSegments
+    assert.ok(afterResize !== undefined, 'the narrower geometry is re-proven')
+    assert.notDeepEqual(afterResize, beforeResize, 'the old proven columns are not reused')
+    assert.equal(strongText(await viewport(vt), vt), 'needle', 'the re-proven rows still spell the source text')
+    const resizeDiagnostics = app.searchPresentationDiagnosticsForTest()
+    assert.ok(resizeDiagnostics.markdownProofs >= 1,
+      'the resize re-proves instead of reusing the old proven columns')
+    assert.ok(resizeDiagnostics.markdownProofs <= resizeDiagnostics.rebuilds + resizeDiagnostics.remeasures,
+      'every presentation pass proves the current card at most once')
+  } finally {
+    app.stop()
+  }
+})
+
+test('navigation: a live Assistant stream proves its current text and drops a stale range', async () => {
+  const folder = new TranscriptFolder()
+  folder.apply([sessionEvent('turn/start', { turn: 0 }, 0)])
+  folder.applyLiveInput({
+    kind: 'chunk',
+    sessionId: 'search-stream',
+    attemptId: 'attempt-stream',
+    turn: 0,
+    step: 0,
+    time: 1_700_000_000_001,
+    chunk: { type: 'text-delta', index: 0, text: 'prefix needle' },
+  })
+  const live = folder.messages().find(
+    (candidate): candidate is Extract<TranscriptMessage, { kind: 'assistant' }> => candidate.kind === 'assistant',
+  )
+  assert.ok(live !== undefined, 'fixture: the live Assistant row exists')
+  assert.equal(live.displayBlocks, undefined, 'fixture: a text-only stream carries no opaque projection')
+  const matches = folder.search('needle')
+  assert.equal(matches.length, 1)
+  const { vt, app } = await mountAssistantAnswer(folder, live, 'needle', matches[0]!, 70, 20)
+
+  let lines = await viewport(vt)
+  assert.equal(strongText(lines, vt), 'needle', 'the live current source range is proven')
+  assert.equal(mountedSelectionFor(app, live)?.exact, true)
+
+  // An unclosed math span is not a painted literal leaf yet.
+  folder.applyLiveInput({
+    kind: 'chunk',
+    sessionId: 'search-stream',
+    attemptId: 'attempt-stream',
+    turn: 0,
+    step: 0,
+    time: 1_700_000_000_002,
+    chunk: { type: 'text-delta', index: 0, text: ' \\(needle' },
+  })
+  const unclosed = folder.search('needle').at(-1)!
+  app.setTranscript(folder.messages(), folder.turnActivities())
+  await viewport(vt)
+  app.setTranscriptSearchPresentation({
+    matchMessages: new Set([live]),
+    target: { query: 'needle', match: unclosed, message: live },
+    grantReveal: true,
+  })
+  lines = await viewport(vt)
+  assert.deepEqual(strongRows(lines, vt), [], 'a pending math source keeps the honest anchor')
+  assert.equal(mountedSelectionFor(app, live)?.exact, false)
+
+  // Closing the math span re-proves the literal source text.
+  folder.applyLiveInput({
+    kind: 'chunk',
+    sessionId: 'search-stream',
+    attemptId: 'attempt-stream',
+    turn: 0,
+    step: 0,
+    time: 1_700_000_000_003,
+    chunk: { type: 'text-delta', index: 0, text: '\\)' },
+  })
+  const closed = folder.search('needle').at(-1)!
+  app.setTranscript(folder.messages(), folder.turnActivities())
+  await viewport(vt)
+  app.setTranscriptSearchPresentation({
+    matchMessages: new Set([live]),
+    target: { query: 'needle', match: closed, message: live },
+    grantReveal: true,
+  })
+  lines = await viewport(vt)
+  assert.equal(strongText(lines, vt), 'needle', 'the closed math literal is proven')
+
+  // A SETTLED text that no longer contains the target at the old offset must
+  // not reuse the previous proven cells.
+  const settled = assistantSearchFolder('x needle settled', 'assistant-settled-mismatch')
+  app.setTranscript([settled.message], settled.folder.turnActivities())
+  await viewport(vt)
+  app.setTranscriptSearchPresentation({
+    matchMessages: new Set([settled.message]),
+    target: { query: 'needle', match: matches[0]!, message: settled.message },
+    grantReveal: true,
+  })
+  lines = await viewport(vt)
+  assert.deepEqual(strongRows(lines, vt), [], 'a stale normalized range never paints a visible cell')
+  assert.equal(mountedSelectionFor(app, settled.message)?.exact, false)
+  app.stop()
+})
+
+test('navigation: composite and foreign Assistant owners stay anchor-only', async () => {
+  const { RendererRegistry } = await import('../../src/extension/internal/renderer-registry.ts')
+  const registry = new RendererRegistry()
+  registry.registerMessageRenderer({
+    id: 'plugin-assistant-proof', kind: 'assistant',
+    render: snapshot => ({ kind: 'text', spans: [{ text: `plugin ${snapshot.text ?? ''}` }] }),
+  }, 'plugin')
+
+  const { folder, message } = assistantSearchFolder('needle body', 'assistant-plugin-owned')
+  const match = folder.search('needle')[0]!
+  const vt = new VirtualTerminal(90, 20)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    renderers: registry,
+    deliveredFiles: deliveredFilesCapabilityStub,
+  })
+  app.start()
+  startedApps.add(app)
+  app.setFullscreen(true)
+  app.setIconStyle('symbols')
+  app.setTranscript([message], folder.turnActivities())
+  app.setTranscriptSearchPresentation({
+    matchMessages: new Set([message]),
+    target: { query: 'needle', match, message },
+    grantReveal: true,
+  })
+  let lines = await viewport(vt)
+  assert.ok(lines.some(line => stripTerminalSequences(line).includes('plugin needle body')),
+    `the plugin renderer owns the card:\n${lines.join('\n')}`)
+  assert.deepEqual(strongRows(lines, vt), [], 'a plugin-owned Assistant card never claims Host proof')
+  let selection = mountedSelectionFor(app, message)
+  assert.equal(selection?.exact, false)
+  assert.equal(selection?.exactPaintedSegments, undefined)
+  app.dispose()
+
+  // Multi-ContentBlock (text + image), open-opaque, interrupted and delivered
+  // cards are composite owners: one text child is never the whole card source.
+  const compositeCases: Array<Extract<TranscriptMessage, { kind: 'assistant' }>> = [
+    {
+      kind: 'assistant', turn: 0, text: 'needle body',
+      content: [
+        { type: 'text', text: 'needle ' },
+        { type: 'image', attachment: { type: 'image', ref: 'img-1' } } as never,
+        { type: 'text', text: 'body' },
+      ],
+    },
+    { kind: 'assistant', turn: 0, text: 'needle body', displayBlocks: [{ kind: 'open-opaque', blockType: 'tool-call' }] },
+    { kind: 'assistant', turn: 0, text: 'needle body', interrupted: true },
+    { kind: 'assistant', turn: 0, text: 'needle body', deliverables: [{ path: 'report.md' }] },
+  ]
+  for (const candidate of compositeCases) {
+    const compositeVt = new VirtualTerminal(90, 24)
+    const compositeApp = new TuiApp(compositeVt, { onSubmit: () => {}, onExit: () => {} }, {
+      deliveredFiles: deliveredFilesCapabilityStub,
+    })
+    compositeApp.start()
+    startedApps.add(compositeApp)
+    compositeApp.setFullscreen(true)
+    compositeApp.setIconStyle('symbols')
+    compositeApp.setTranscript([candidate])
+    compositeApp.setTranscriptSearchPresentation({
+      matchMessages: new Set([candidate]),
+      target: {
+        query: 'needle',
+        match: {
+          id: 0, turn: 0, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0,
+          normalizedSourceRange: { start: 0, end: 6 },
+        },
+        message: candidate,
+      },
+      grantReveal: true,
+    })
+    lines = await viewport(compositeVt)
+    assert.deepEqual(strongRows(lines, compositeVt), [],
+      `${JSON.stringify(Object.keys(candidate))}: a composite Assistant owner stays anchor-only`)
+    selection = mountedSelectionFor(compositeApp, candidate)
+    assert.equal(selection?.exact, false)
+    assert.equal(selection?.exactPaintedSegments, undefined)
+    compositeApp.dispose()
+  }
+
+  // A narrow table falls back to plain rows the proof cannot own.
+  const table = assistantSearchFolder('| h |\n|---|\n| needle |', 'assistant-table-fallback')
+  const tableMatch = table.folder.search('needle')[0]!
+  const tableVt = new VirtualTerminal(8, 20)
+  const tableApp = new TuiApp(tableVt, { onSubmit: () => {}, onExit: () => {} }, {
+    deliveredFiles: deliveredFilesCapabilityStub,
+  })
+  tableApp.start()
+  startedApps.add(tableApp)
+  tableApp.setFullscreen(true)
+  tableApp.setIconStyle('symbols')
+  tableApp.setTranscript([table.message], table.folder.turnActivities())
+  tableApp.setTranscriptSearchPresentation({
+    matchMessages: new Set([table.message]),
+    target: { query: 'needle', match: tableMatch, message: table.message },
+    grantReveal: true,
+  })
+  lines = await viewport(tableVt)
+  assert.deepEqual(strongRows(lines, tableVt), [], 'the narrow table fallback never invents an exact cell')
+  assert.equal(mountedSelectionFor(tableApp, table.message)?.exact, false)
+  tableApp.dispose()
+})
+
+test('navigation: a lowercasing expansion interior stays anchor-only; a stripped control neighbour still proves', async () => {
+  // `İ` lowercases to two normalized codepoints; a query that starts inside the
+  // expansion has no raw boundary, so no cell can be claimed.
+  const expansion = assistantSearchFolder('İneedle', 'assistant-lowercase-interior')
+  const expansionMatch = expansion.folder.search('i')[0]
+  assert.ok(expansionMatch !== undefined, 'fixture: the expansion interior is searchable')
+  const { vt, app } = await mountAssistantAnswer(expansion.folder, expansion.message, 'i', expansionMatch, 70, 20)
+  let lines = await viewport(vt)
+  assert.deepEqual(strongRows(lines, vt), [], 'the expansion interior is not a painted source cell')
+  assert.equal(mountedSelectionFor(app, expansion.message)?.exact, false)
+
+  // A range that crosses a raw control sequence is not locally projectable.
+  const crossed = assistantSearchFolder('before \x1b[31mneedle red', 'assistant-crossed-control')
+  const crossedMatch = crossed.folder.search('needle')[0]!
+  app.setTranscript([crossed.message], crossed.folder.turnActivities())
+  app.setTranscriptSearchPresentation({
+    matchMessages: new Set([crossed.message]),
+    target: { query: 'needle', match: crossedMatch, message: crossed.message },
+    grantReveal: true,
+  })
+  lines = await viewport(vt)
+  // The sanitized source keeps the visible needle: this one IS the painted
+  // text, so it must be proven rather than rejected as a homonym.
+  assert.equal(strongText(lines, vt), 'needle', 'a range after a stripped control sequence still names real cells')
+  app.stop()
 })

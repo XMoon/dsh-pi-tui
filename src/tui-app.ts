@@ -37,6 +37,8 @@ import {
   isKeyRepeat,
   matchesKey,
   parseKey,
+  sliceByColumn,
+  stripTerminalSequences,
   truncateToWidth,
   visibleWidth,
   wrapTextWithAnsi,
@@ -308,6 +310,7 @@ import {
   preparePlainTextSourceProbe,
   provePlainTextPaintedSegments,
 } from './tui/components/transcript/plain-text-source-proof.ts'
+import { AssistantMarkdownComponent } from './tui/components/transcript/assistant-markdown-source-proof.ts'
 import {
   workflowCountsText,
   workflowPhasePresentations,
@@ -319,6 +322,7 @@ import {
 } from './tui/transcript/workflow-presentation.ts'
 import { finalizedBlockFallbackText, openOpaqueBlockFallbackText } from './domain/transcript/content-blocks.ts'
 import { latestLine } from './domain/transcript/text.ts'
+import { rawSourceRangeForNormalizedMatch } from './domain/transcript/search.ts'
 import { fileAttachmentSummary } from './domain/media/file-summary.ts'
 import type { TranscriptWindowState } from './domain/transcript/window.ts'
 import { createTranscriptRenderProfiler } from './tui/diagnostics/transcript-render-profile.ts'
@@ -661,6 +665,9 @@ export interface TranscriptSearchPresentationDiagnostics {
   /** Disposable source-cell probe renders for the current plain-text target.
    * A static frame and every non-current card must contribute zero. */
   plainTextProofs: number
+  /** Calls to the F1 Markdown cell proof for the current Assistant target.
+   * Every non-current card and every View/scroll frame must contribute zero. */
+  markdownProofs: number
 }
 
 /** Test-only counters for transcript presentation invalidation. These counters
@@ -3765,6 +3772,7 @@ export class TuiApp {
     fullRenders: 0,
     transcriptSets: 0,
     plainTextProofs: 0,
+    markdownProofs: 0,
   }
   /** Test-only structural/content invalidation counters. */
   private readonly transcriptPresentationDiagnostics: TranscriptPresentationDiagnostics = {
@@ -9881,6 +9889,7 @@ export class TuiApp {
     this.searchPresentationDiagnostics.fullRenders = 0
     this.searchPresentationDiagnostics.transcriptSets = 0
     this.searchPresentationDiagnostics.plainTextProofs = 0
+    this.searchPresentationDiagnostics.markdownProofs = 0
   }
 
   /** Test-only transcript presentation counters. */
@@ -11980,7 +11989,7 @@ export class TuiApp {
       let mountedComponent: Component | undefined
       let searchSelection: RenderedSearchSelection | undefined
       let searchSelector: RenderedSearchSelector | undefined
-      const presentation = this.blockSearchPresentation(block, rendered, width, subCallRegions, deliverableRegions)
+      const presentation = this.blockSearchPresentation(block, component, rendered, width, subCallRegions, deliverableRegions)
       if (presentation.selector !== undefined && presentation.selection !== undefined) {
         searchSelection = presentation.selection
         searchSelector = presentation.selector
@@ -12232,6 +12241,7 @@ export class TuiApp {
    * decorated WEAKLY (approximate visual hint, never semantic identity). */
   private blockSearchPresentation(
     block: TranscriptRenderBlock,
+    component: Component,
     rendered: readonly string[],
     renderWidth: number,
     subCallRegions: ReadonlyArray<SearchSourceRegion> | undefined,
@@ -12299,6 +12309,22 @@ export class TuiApp {
             && hostThinkingBodyRange !== undefined
             && hostThinkingBodyRange.rowStart < hostThinkingBodyRange.rowEnd
             && messageEntry.component instanceof Text)
+      // A single Host-native Assistant Markdown card can prove its own painted
+      // source cells through the SAME live renderer. The final component
+      // identity decides ownership: a plugin renderer, a composite card
+      // (multi-block / open-opaque / visual / delivered / interrupted) or a
+      // stale cached instance keeps the honest source anchor and is never
+      // scanned for a homonym inside one of its private children.
+      const assistantProofHost = block.message.kind === 'assistant'
+        && messageEntry !== undefined
+        && messageEntry.rendererId === undefined
+        && messageEntry.component === component
+        && component instanceof AssistantMarkdownComponent
+        && block.message.content === undefined
+        && block.message.displayBlocks === undefined
+        && block.message.interrupted !== true
+        && (block.message.deliverables?.length ?? 0) === 0
+        && (assistantVisualPresentation(block.message)?.publications.length ?? 0) === 0
       const selector: RenderedSearchSelector = {
         query: target.query,
         sourceOccurrence: target.match.sourceOccurrence,
@@ -12331,6 +12357,17 @@ export class TuiApp {
             )
           }
         }
+      } else if (assistantProofHost && block.message.kind === 'assistant'
+        && component instanceof AssistantMarkdownComponent
+        && target.match.source.kind === 'message' && target.match.normalizedSourceRange !== undefined) {
+        painted = this.proveAssistantMarkdownSourceCells(
+          block.message.text,
+          target.match.normalizedSourceRange,
+          target.query,
+          component,
+          rendered,
+          renderWidth,
+        )
       }
       let selection = selectRenderedSearchMatch(matches, selector)
       if (painted !== undefined) {
@@ -12359,6 +12396,76 @@ export class TuiApp {
       ...(hostThinkingBodyRange === undefined ? {} : { suppressMatchesOnStaleGeometry: true }),
     }
     return { selector, selection: selectRenderedSearchMatch(matches, selector), current }
+  }
+
+  /**
+   * Prove ONE current Assistant Markdown semantic range against the cells the
+   * CURRENT Host card really painted, or return `undefined` and keep the
+   * existing anchor-only presentation.
+   *
+   * The semantic source range is normalized/lowercase; the card paints
+   * `sanitizeDisplayText(message.text)`. The projection is accepted only when
+   * the raw range survives lowercasing, the query still describes THIS range,
+   * and the per-part sanitized projection is additive over the whole source
+   * (so a control sequence or sanitized-away codepoint is never guessed onto a
+   * visible homonym). The F1 proof then answers for the card's own Markdown,
+   * and its card-relative segments are re-read from the current `rendered`
+   * rows: only cells that reproduce exactly `safeHit` in order are accepted.
+   */
+  private proveAssistantMarkdownSourceCells(
+    messageText: string,
+    normalizedSourceRange: { readonly start: number; readonly end: number },
+    query: string,
+    component: AssistantMarkdownComponent,
+    rendered: readonly string[],
+    renderWidth: number,
+  ): readonly AltScreenSearchSegment[] | undefined {
+    const normalizedQuery = query.trim().toLowerCase()
+    if (normalizedQuery === '') return undefined
+    const rawRange = rawSourceRangeForNormalizedMatch(messageText, normalizedSourceRange)
+    if (rawRange === undefined) return undefined
+    // The range must still describe the CURRENT query over the CURRENT source:
+    // an offset from an older query is not evidence for this one.
+    if (messageText.toLowerCase().slice(normalizedSourceRange.start, normalizedSourceRange.end) !== normalizedQuery) return undefined
+    const rawBefore = messageText.slice(0, rawRange.start)
+    const rawHit = messageText.slice(rawRange.start, rawRange.end)
+    const rawAfter = messageText.slice(rawRange.end)
+    const safeBefore = sanitizeDisplayText(rawBefore)
+    const safeHit = sanitizeDisplayText(rawHit)
+    const safeAfter = sanitizeDisplayText(rawAfter)
+    // A per-part projection that does not reassemble the whole painted source
+    // (raw control sequences, CRLF/Tab state, removed escape spans) is not a
+    // local range in the sanitized component source.
+    if (safeHit === '' || safeBefore + safeHit + safeAfter !== sanitizeDisplayText(messageText)) return undefined
+    this.searchPresentationDiagnostics.markdownProofs += 1
+    const proof = component.proveSourceSpan(
+      { start: safeBefore.length, end: safeBefore.length + safeHit.length },
+      renderWidth,
+    )
+    // NOT_PAINTED (a hidden link destination / markup delimiter) and UNPROVEN
+    // (reflow, rewritten glyph, ambiguous token origin) keep the source anchor.
+    if (proof.kind !== 'PROVEN') return undefined
+    // The proof speaks for the render epoch it measured; the mounted rows are
+    // that same epoch. Every segment must sit inside a real row, stay ordered
+    // and reproduce the projected source text from the ACTUAL cells. The
+    // component's bullet/indent offset means a segment can never begin in the
+    // bullet band, and a wrongly shifted one would not recover `safeHit`.
+    let previousRow = -1
+    let previousEndCol = -1
+    const collected: string[] = []
+    for (const segment of proof.segments) {
+      const line = rendered[segment.row]
+      if (line === undefined) return undefined
+      const lineWidth = visibleWidth(line)
+      if (segment.row < previousRow) return undefined
+      if (segment.row === previousRow && segment.startCol < previousEndCol) return undefined
+      if (segment.startCol < 0 || segment.endCol <= segment.startCol || segment.endCol > lineWidth) return undefined
+      collected.push(stripTerminalSequences(sliceByColumn(line, segment.startCol, segment.endCol - segment.startCol, true)))
+      previousRow = segment.row
+      previousEndCol = segment.endCol
+    }
+    if (collected.join('') !== safeHit) return undefined
+    return proof.segments
   }
 
   /** The proven source regions of one rendered card: renderer-recorded absolute
@@ -12554,7 +12661,7 @@ export class TuiApp {
       const workflowHits = workflowInfo === undefined
         ? undefined
         : workflowInfo.hits.map(hit => ({ ...hit, top: hit.top + rendered.length - workflowInfo.total }))
-      const searchPresentation = this.blockSearchPresentation(entry.block, rendered, width, subCallRegions, deliverableRegions)
+      const searchPresentation = this.blockSearchPresentation(entry.block, entry.component, rendered, width, subCallRegions, deliverableRegions)
       const searchSelection = searchPresentation.selection
       return {
         ...entry,
@@ -19829,8 +19936,12 @@ export class TuiApp {
       // re-renders it at the new width, so tables reflow instead of
       // re-wrapping a frozen render (the 5a76526 regression).
       const bullet = color.primary(iconPrefix('assistant-bullet', this.iconStyle))
+      // The card is the SAME bulleted live Markdown; the subclass only makes
+      // that Markdown's own source-cell proof reachable for the search
+      // presentation (F2). Every other build (plugin, composite, visual,
+      // delivered/interrupted wrapper) is unchanged.
       const makeAssistantText = (text: string): Component =>
-        new BulletedComponent(new Markdown(sanitizeDisplayText(text), 0, 0, markdownTheme, undefined, HOST_MARKDOWN_OPTIONS), bullet)
+        new AssistantMarkdownComponent(new Markdown(sanitizeDisplayText(text), 0, 0, markdownTheme, undefined, HOST_MARKDOWN_OPTIONS), bullet)
       // ONLY the exact final Assistant row carries a sidecar (the runtime
       // derives it from the complete Direct Session log). Every other answer
       // keeps the original path byte for byte.

@@ -1187,3 +1187,159 @@ test('runner search: a Folder Workflow name range reaches its exact VirtualTermi
   assert.equal(fixture.vt.getCellBgRgb(row, column), 0xf5c542,
     `the real semantic match range reaches the exact painted cell:\n${lines[row]}`)
 })
+
+// ── F2: Full proves the current Assistant Markdown source onto real cells ─────
+
+/** The terminal cell column of one visible occurrence on one viewport row,
+ * measured from the terminal's OWN cells (never a JS string index, so a wide
+ * glyph in the card prefix shifts exactly as the terminal sees it). */
+function cellColumnOf(vt: VirtualTerminal, row: number, needle: string, occurrence = 0): number {
+  let plain = ''
+  const cellOfCharacter: number[] = []
+  for (let column = 0; column < vt.columns; column += 1) {
+    const text = vt.getCellText(row, column) ?? ''
+    for (let index = 0; index < text.length; index += 1) cellOfCharacter.push(column)
+    plain += text
+  }
+  let index = -1
+  let from = 0
+  for (let current = 0; current <= occurrence; current += 1) {
+    index = plain.indexOf(needle, from)
+    assert.ok(index >= 0, `occurrence ${current} of ${JSON.stringify(needle)} is painted on the terminal row`)
+    from = index + needle.length
+  }
+  return cellOfCharacter[index]!
+}
+
+/** The STRONG exact-match background of the production dark palette. */
+const F2_STRONG_BG = 0xf5c542
+
+function strongRuns(vt: VirtualTerminal): Array<{ row: number; startCol: number; endCol: number; text: string }> {
+  return vt.getRgbBackgroundRuns(F2_STRONG_BG)
+}
+
+function strongText(vt: VirtualTerminal): string {
+  return strongRuns(vt).map(run => run.text).join('')
+}
+
+/** Whether any mounted block claims a PROVEN source-cell selection. */
+function anyExactSelection(app: TuiApp): boolean {
+  const mounted = (app as unknown as {
+    mountedTranscriptBlocks: ReadonlyArray<{ searchSelection?: { exact: boolean } }>
+  }).mountedTranscriptBlocks
+  return mounted.some(entry => entry.searchSelection?.exact === true)
+}
+
+test('runner search: Full proves visible Assistant Markdown cells and keeps a hidden href honest', async (t) => {
+  const previousCapabilities = getCapabilities()
+  setCapabilities({ images: null, trueColor: true, hyperlinks: true })
+  t.after(() => setCapabilities(previousCapabilities))
+  const events: SessionEvent[] = []
+  let seq = 0
+  const answer = (turn: number, text: string): void => {
+    events.push(event('turn/start', { turn }, seq++))
+    events.push(event('assistant/message', {
+      turn, step: 0,
+      message: {
+        id: MessageId(`f2-runner-assistant-${turn}`),
+        role: 'assistant',
+        content: [{ type: 'text', text }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+      stream: [],
+    }, seq++))
+    events.push(event('turn/end', { turn, reason: { kind: 'completed' } }, seq++))
+  }
+  answer(0, '[needle](https://example.invalid/needle) needle body')
+  for (let turn = 1; turn < 24; turn += 1) answer(turn, `ordinary answer ${turn}`)
+  answer(24, 'second card ordinary needle body')
+  const fixture = await mountSearchRunner(t, 25, [], 'needle', events)
+  const { app, vt } = fixture
+
+  // View: only the mounted rendered occurrences of the newest window count.
+  fixture.input('\x06')
+  await fixture.settleRender()
+  typeQuery(fixture, 'needle')
+  await fixture.settleRender()
+  assert.deepEqual(app.renderedViewSearchStatus(), { currentIndex: 0, count: 1 },
+    'View counts the mounted rendered occurrence only')
+  assert.equal(anyExactSelection(app), false, 'View never claims a Full source-cell proof')
+
+  // Full: the semantic corpus owns hidden-href occurrence 1, and the first
+  // semantic hit lives in an OFF-WINDOW turn, so this is a real Folder result.
+  fixture.input('\t')
+  await fixture.settleRender()
+  let title = vt.getViewport().map(stripTerminalSequences).find(line => line.includes('[Full]'))
+  assert.ok(title?.includes('1/4'), `Full keeps the hidden-href semantic occurrence:\n${vt.getViewport().join('\n')}`)
+  let target = app.transcriptSearchPresentationForTest()
+  assert.equal(target?.matchTurn, 0, 'Full selection starts at the earliest semantic source (off-window jump)')
+  assert.equal(target?.message?.kind, 'assistant')
+  const firstCard = target!.message!
+  assert.equal(app.transcriptSearchCoverageForTest(), 'entire-session', 'Direct Full covers the entire session')
+  let lines = vt.getViewport()
+  let row = lines.findIndex(line => stripTerminalSequences(line).includes('needle needle body'))
+  assert.ok(row >= 0, `the off-window Assistant card is painted after the jump:\n${lines.join('\n')}`)
+  assert.deepEqual(strongRuns(vt).map(run => run.text), ['needle'], 'the link label is the proven current cell')
+  assert.equal(strongRuns(vt)[0]!.startCol, cellColumnOf(vt, row, 'needle', 0), 'the LABEL occurrence is strong')
+  let selection = mountedSearchSelection(app, firstCard)
+  assert.equal(selection?.exact, true, 'the label hit is proven from the semantic source range')
+  assert.equal(selection?.selectedIndex, -1)
+
+  // Enter -> the hidden href: no painted homonym may become the current cell.
+  fixture.projections.reset()
+  fixture.input('\r')
+  await fixture.settleRender()
+  target = app.transcriptSearchPresentationForTest()
+  assert.equal(target?.sourceOccurrence, 1, 'the hidden href is the second visible-source occurrence')
+  assert.deepEqual(strongRuns(vt), [], 'a hidden href never strong-highlights a visible homonym')
+  selection = mountedSearchSelection(app, target!.message!)
+  assert.equal(selection?.exact, false)
+  assert.equal(selection?.exactPaintedSegments, undefined)
+
+  // Enter -> the visible body occurrence.
+  fixture.input('\r')
+  await fixture.settleRender()
+  target = app.transcriptSearchPresentationForTest()
+  lines = vt.getViewport()
+  row = lines.findIndex(line => stripTerminalSequences(line).includes('needle needle body'))
+  assert.ok(row >= 0, `the body row is visible:\n${lines.join('\n')}`)
+  assert.deepEqual(strongRuns(vt).map(run => run.text), ['needle'], 'the body occurrence is proven')
+  assert.equal(strongRuns(vt)[0]!.startCol, cellColumnOf(vt, row, 'needle', 1), 'the BODY occurrence is strong')
+  selection = mountedSearchSelection(app, target!.message!)
+  assert.equal(selection?.exact, true)
+  assert.ok((selection?.exactPaintedSegments?.length ?? 0) > 0)
+  assert.equal(fixture.projections.count(), 0, 'same-card Full Next never re-windows the transcript')
+
+  // Enter -> the cross-card result (a second off-window jump forward).
+  fixture.projections.reset()
+  fixture.input('\r')
+  await fixture.settleRender()
+  target = app.transcriptSearchPresentationForTest()
+  assert.equal(target?.matchTurn, 24, 'Next crosses cards to the later semantic result')
+  lines = vt.getViewport()
+  assert.ok(lines.some(line => stripTerminalSequences(line).includes('second card ordinary needle body')),
+    `the second card is the viewport destination:\n${lines.join('\n')}`)
+  assert.deepEqual(strongRuns(vt).map(run => run.text), ['needle'], 'the later card proves its own cells')
+  assert.equal(mountedSearchSelection(app, target!.message!)?.exact, true)
+  assert.equal(fixture.projections.count(), 1, 'the cross-card off-window jump projects the transcript exactly once')
+
+  // Shift+Enter returns to the previous card and re-proves it.
+  fixture.input('\x1b[13;2u')
+  await fixture.settleRender()
+  target = app.transcriptSearchPresentationForTest()
+  assert.equal(target?.matchTurn, 0)
+  lines = vt.getViewport()
+  row = lines.findIndex(line => stripTerminalSequences(line).includes('needle needle body'))
+  assert.ok(row >= 0, `the previous card is the viewport destination:\n${lines.join('\n')}`)
+  assert.deepEqual(strongRuns(vt).map(run => run.text), ['needle'])
+  assert.equal(strongRuns(vt)[0]!.startCol, cellColumnOf(vt, row, 'needle', 1), 'the body cell is re-proven')
+
+  // Back to View: the Full source proof and its reveal are retired; View counts
+  // only the mounted rendered occurrences again.
+  fixture.input('\x06')
+  await fixture.settleRender()
+  assert.equal(app.transcriptSearchPresentationForTest(), undefined, 'the Full target is retired before View returns')
+  assert.equal(anyExactSelection(app), false, 'the old Full source-cell proof never survives the scope switch')
+  assert.ok((app.renderedViewSearchStatus()?.count ?? 0) >= 1,
+    'View returns to its own mounted rendered occurrence authority')
+})

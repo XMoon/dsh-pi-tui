@@ -248,6 +248,54 @@ export class VirtualTerminal implements Terminal {
 	}
 
 	/**
+	 * Get the painted character(s) of one viewport cell. A wide glyph owns its
+	 * lead cell; the environment's own width model is authoritative here, so
+	 * tests never have to assume the renderer's `visibleWidth` table and the
+	 * terminal's agree (an emoji bullet may occupy a different number of cells
+	 * than the string-width model reports).
+	 */
+	getCellText(row: number, col: number): string | undefined {
+		const buffer = this.xterm.buffer.active;
+		const line = buffer.getLine(buffer.viewportY + row);
+		return line?.getCell(col)?.getChars();
+	}
+
+	/**
+	 * Every contiguous run of viewport cells painted with one truecolor RGB
+	 * background, as `{ row, startCol, endCol, text }` in row/cell order. The
+	 * text is read from the terminal's OWN cells, so a test never has to assume
+	 * the renderer's `visibleWidth` table and the terminal's agree.
+	 */
+	getRgbBackgroundRuns(rgb: number): Array<{ row: number; startCol: number; endCol: number; text: string }> {
+		const buffer = this.xterm.buffer.active;
+		const runs: Array<{ row: number; startCol: number; endCol: number; text: string }> = [];
+		for (let row = 0; row < this._rows; row++) {
+			const line = buffer.getLine(buffer.viewportY + row);
+			if (line === undefined) continue;
+			let run: { row: number; startCol: number; endCol: number; text: string } | undefined;
+			for (let col = 0; col < this._columns; col++) {
+				const cell = line.getCell(col);
+				const painted = cell !== undefined && cell.isBgRGB() && cell.getBgColor() === rgb;
+				if (painted) {
+					const text = cell.getChars();
+					if (run === undefined) run = { row, startCol: col, endCol: col + 1, text };
+					else {
+						run.endCol = col + 1;
+						run.text += text;
+					}
+					continue;
+				}
+				if (run !== undefined) {
+					runs.push(run);
+					run = undefined;
+				}
+			}
+			if (run !== undefined) runs.push(run);
+		}
+		return runs;
+	}
+
+	/**
 	 * Get the entire scroll buffer
 	 */
 	getScrollBuffer(): string[] {
