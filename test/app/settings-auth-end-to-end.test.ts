@@ -914,6 +914,19 @@ test('a cross-owner gesture does nothing: a rail press released in the content c
   await h.vt.waitForRender()
   assert.match(h.view(), /Models & Credentials/u, 'the content release did not open a provider')
   assert.match(h.view(), /^> Models/mu, 'the rail press did not select a category')
+  // The rail press must not even take the KEYBOARD: re-selecting the already
+  // selected category would leave the rail as the focus owner while the same
+  // Models content stays painted, so the header is the witness that no rail
+  // action ran at all.
+  assert.match(h.rows()[0]!, /Settings · Models/u, 'the rail press did not take the keyboard from the content')
+
+  // Control: the SAME content cell is a real target. A matching press and
+  // release opens the provider detail, so the refusal above is a real
+  // cross-owner refusal, not an inert coordinate.
+  press(h, providerRow, colOf(h, providerRow, 'Acme Gateway'))
+  release(h, providerRow, colOf(h, providerRow, 'Acme Gateway'))
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Provider · Acme Gateway/u, 'the content cell is a real provider target')
   h.close()
 })
 
