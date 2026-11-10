@@ -67,9 +67,11 @@ export async function createRemoteApplicationRuntime(
   })
 
   let stage: Awaited<ReturnType<typeof composeRemoteApplicationStage>>
-  const promptSerializer = options.promptSerializer
-    ?? options.buildPromptSerializer?.(wire)
   try {
+    // Read the caller's serializer input INSIDE the post-wire unwind window:
+    // an injected getter that throws must still unwind the constructed wire.
+    const promptSerializer = options.promptSerializer
+      ?? options.buildPromptSerializer?.(wire)
     stage = await composeRemoteApplicationStage({
       client: wire.client,
       fetch: wire.host.carrier.fetch,
