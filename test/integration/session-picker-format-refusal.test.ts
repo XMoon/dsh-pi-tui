@@ -108,10 +108,8 @@ for (const [columns, rows] of [[120, 40], [80, 10], [44, 20]] as const) test(`th
   // newer (refused) child, and the second Enter is the guarded resume.
   const resumesBefore = harness.resumeSessionIds.length
   vt.sendInput('\r')
-  await settle()
   await vt.waitForRender()
   vt.sendInput('\u001b[B')
-  await settle()
   await vt.waitForRender()
   if (columns >= 120) {
     assert.match(view(), /format-n/u)

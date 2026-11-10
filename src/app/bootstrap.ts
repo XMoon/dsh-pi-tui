@@ -2083,6 +2083,7 @@ export function applyRunnerWithRuntime(
       session: {
         workspaceNextIntent,
         ensureSession: () => sessionRuntime.ensureSession(),
+        awaitWorkspacePreflight: () => sessionRuntime.awaitWorkspacePreflight(),
         withWriter: (scope, task) => sessionRuntime.withWriter(scope, task),
         switchSession: (sessionId, expectedScope) => sessionRuntime.switchSession(sessionId, expectedScope),
         switchSessionOutcome: (sessionId, expectedScope) => sessionRuntime.switchSessionOutcome(sessionId, expectedScope),

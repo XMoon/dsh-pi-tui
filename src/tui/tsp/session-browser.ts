@@ -10,7 +10,15 @@ import type {
   SessionBrowserSearchResult,
 } from '../../app/command/session-browser-presentation.ts'
 import { sanitizeSessionSearchInput } from '../../domain/session/browser.ts'
-import { buildSessionWorkspaceView, visibleWorkspaceBrowserRows, type WorkspaceBrowserRow } from '../presentation/session-workspace-view.ts'
+import {
+  buildSessionWorkspaceView,
+  SESSION_PENDING_LABEL,
+  SESSION_SOURCE_LABEL,
+  visibleWorkspaceBrowserRows,
+  workspaceRowStatusLabel,
+  type SessionWorkspaceRowFact,
+  type WorkspaceBrowserRow,
+} from '../presentation/session-workspace-view.ts'
 import { formatSessionAge, sanitizeTerminalText, shortSessionId, workspaceKey } from '../pickers/sessions.ts'
 
 const DETAILS_BODY_KEY_PREFIX = 'session-browser-details-body-'
@@ -210,6 +218,25 @@ function firstBrowseId(panel: SessionBrowserPanel): string | undefined {
   return rows.some((row) => row.id === current) ? current : rows[0]?.id
 }
 
+/** The selected Folder is an OFFICIAL Host Workspace, not the synthetic
+ *  Unassigned/Membership-ambiguous projection group. */
+function officialWorkspaceSelected(panel: SessionBrowserPanel): boolean {
+  const item = panel.selectedItem
+  if (item === undefined || !item.startsWith('workspace:')) return false
+  const workspaceId = item.slice('workspace:'.length)
+  return panel.snapshot.workspace?.facts.some(fact => fact.workspaceId === workspaceId) === true
+}
+
+/** The typed selection is EXACTLY one Session row: a Folder/Show-more item may
+ *  keep a browse cursor anchor, but it never owns a Session action. */
+function selectedSessionRow(panel: SessionBrowserPanel): SessionBrowserRow | undefined {
+  if (panel.selected === undefined) return undefined
+  // Flat fallback has no typed item identity; the selected row itself is the
+  // target. A Folder/Show-more item is never a Session action target.
+  if (panel.selectedItem !== undefined && panel.selectedItem !== `session:${panel.selected}`) return undefined
+  return rowFor(panel, panel.selected)
+}
+
 function actionDisabledReason(panel: SessionBrowserPanel, base: BrowseAction): string | undefined {
   if (base === 'confirm-directory') {
     if (panel.directorySubmitting) return 'Directory verification is in progress.'
@@ -219,18 +246,18 @@ function actionDisabledReason(panel: SessionBrowserPanel, base: BrowseAction): s
   }
   if (base === 'close' && panel.directoryEntry && panel.directorySubmitting) return 'Wait for directory verification to finish.'
   if (base === 'use-directory') {
-    return panel.request.subject.currentSessionId === undefined && panel.selectedItem?.startsWith('workspace:')
+    return panel.request.subject.currentSessionId === undefined && officialWorkspaceSelected(panel)
       ? undefined
-      : 'Select a Workspace while sessionless.'
+      : 'Select an official Workspace while sessionless.'
   }
   if (base === 'new-session') {
-    return panel.selectedItem?.startsWith('workspace:') ? undefined : 'Select a Workspace folder first.'
+    return officialWorkspaceSelected(panel) ? undefined : 'Select an official Workspace folder first.'
   }
   if (base === 'add-directory') return panel.request.onAddDirectory === undefined ? 'Directory entry is unavailable.' : undefined
-  if (base === 'details' && rowFor(panel, panel.selected) === undefined) return 'Select a session to read its details.'
+  if (base === 'details' && selectedSessionRow(panel) === undefined) return 'Select a session to read its details.'
   if (base === 'resume') {
     if (panel.snapshot.resumePending) return 'Switching sessions…'
-    const row = rowFor(panel, panel.selected)
+    const row = selectedSessionRow(panel)
     if (row === undefined) return panel.snapshot.listState === 'loading' ? 'Sessions are still loading.' : 'Select a session to resume.'
     if (row.id === panel.request.subject.currentSessionId) return 'The current session is already active.'
   }
@@ -271,7 +298,10 @@ function normalize(panel: SessionBrowserPanel): void {
       return
     }
   }
-  if (panel.selected === undefined || rowFor(panel, panel.selected) === undefined) {
+  const folderOrMore = panel.selectedItem?.startsWith('workspace:') === true || panel.selectedItem?.startsWith('more:') === true
+  if (folderOrMore) {
+    panel.selected = undefined
+  } else if (panel.selected === undefined || rowFor(panel, panel.selected) === undefined) {
     panel.selected = firstBrowseId(panel)
   }
   if (panel.zone === 'actions') panel.actionFocus = focusedAction(panel)
@@ -319,6 +349,7 @@ function rowItem(
   row: SessionBrowserRow,
   depth: number | undefined,
   result?: SessionBrowserSearchResult,
+  fact?: SessionWorkspaceRowFact,
 ): PickerItem {
   const title = row.title === undefined || row.title.trim() === '' ? shortSessionId(row.id) : row.title
   // Host-authoritative on-disk format state: a read-only label with no new
@@ -327,8 +358,10 @@ function rowItem(
   const workspaceText = row.workspace === undefined
     ? workspaceKey(row.cwd)
     : `${row.workspace.title} · ${row.workspace.path}`
+  const status = fact === undefined ? undefined : workspaceRowStatusLabel(fact)
   const detail = [
     workspaceText,
+    status,
     `Updated ${formatSessionAge(row.updatedAt)}`,
     migration,
     row.preset === undefined ? undefined : `Preset ${row.preset}`,
@@ -362,20 +395,26 @@ function rowItem(
 
 function statusText(panel: SessionBrowserPanel): string | undefined {
   const snapshot = panel.snapshot
+  const workspaceMessage = snapshot.workspace?.state === 'unavailable'
+    ? `Workspace information unavailable${snapshot.workspace.error === undefined ? '' : `: ${sanitizeTerminalText(snapshot.workspace.error)}`}`
+    : undefined
   if (snapshot.listState === 'loading') return 'Loading persisted sessions…'
   if (snapshot.listState === 'unavailable') return 'Session listing is unavailable.'
   if (snapshot.listState === 'error') return `Session listing failed: ${sanitizeTerminalText(snapshot.listError ?? 'unknown error')}`
   const projectionMessage = snapshot.projectionError === undefined
     ? undefined
     : `Some session details are unavailable: ${sanitizeTerminalText(snapshot.projectionError)}`
-  if (!queryMode(panel)) return projectionMessage
+  if (!queryMode(panel)) {
+    return [workspaceMessage, projectionMessage].filter((part): part is string => part !== undefined).join(' ') || undefined
+  }
   const searchMessage = snapshot.searchState === 'loading' ? 'Searching session content…'
     : snapshot.searchState === 'unavailable' ? 'Content search is unavailable; metadata matches remain visible.'
       : snapshot.searchState === 'error'
         ? `Content search failed: ${sanitizeTerminalText(snapshot.searchError ?? 'unknown error')}; metadata matches remain visible.`
         : snapshot.hasMore ? 'More matches are available; refine the query.' : undefined
-  if (searchMessage === undefined) return projectionMessage
-  return projectionMessage === undefined ? searchMessage : `${searchMessage} ${projectionMessage}`
+  const browseMessage = [workspaceMessage, projectionMessage].filter((part): part is string => part !== undefined).join(' ')
+  if (searchMessage === undefined) return browseMessage === '' ? undefined : browseMessage
+  return browseMessage === '' ? searchMessage : `${searchMessage} ${browseMessage}`
 }
 
 function emptyText(panel: SessionBrowserPanel): string {
@@ -446,7 +485,7 @@ function visibleBrowseItems(panel: SessionBrowserPanel): PickerItem[] {
     if (row.kind === 'showMore') return [showMoreItem({ workspaceId: row.workspaceId, remaining: row.remaining })]
     if (row.kind === 'session') {
       const session = panel.snapshot.rows.find(candidate => candidate.id === row.sessionId)
-      return session === undefined ? [] : [rowItem(session, 1)]
+      return session === undefined ? [] : [rowItem(session, 1, undefined, model.rowsById.get(row.sessionId))]
     }
     return []
   })
@@ -544,6 +583,7 @@ function detailReader(
   const bodyKey = `${DETAILS_BODY_KEY_PREFIX}${scope}`
   const title = row?.title === undefined || row.title.trim() === '' ? row === undefined ? 'Session details' : shortSessionId(row.id) : row.title
   const result = row === undefined ? undefined : detailResult(panel, row)
+  const activity = row === undefined ? undefined : workspaceModel(panel)?.rowsById.get(row.id)
   const groups = row === undefined ? [] : [
     {
       id: 'identity',
@@ -561,6 +601,9 @@ function detailReader(
       facts: [
         ['Created', row.createdAt === undefined ? 'Unknown' : new Date(row.createdAt).toISOString()],
         ['Updated', new Date(row.updatedAt).toISOString()],
+        ['Running', activity?.running === true ? 'Yes' : activity?.running === false ? 'No' : 'Unknown'],
+        ['Pending', activity === undefined ? 'Unknown' : SESSION_PENDING_LABEL[activity.pending]],
+        ['Source', activity === undefined ? 'unknown' : SESSION_SOURCE_LABEL[activity.source]],
       ],
     },
     {
@@ -828,6 +871,7 @@ export class TspSessionBrowser {
     switch (intent.kind) {
       case 'browse-workspace':
         panel.selectedItem = `workspace:${intent.workspaceId}`
+        panel.selected = undefined
         if (intent.toggle) {
           const expanded = panel.expandedWorkspaces.get(intent.workspaceId)
             ?? (intent.workspaceId === priorityWorkspaceId(panel) || (workspaceGroups(panel).find(group => group.workspaceId === intent.workspaceId)?.needs ?? 0) > 0 || (workspaceGroups(panel).find(group => group.workspaceId === intent.workspaceId)?.working ?? 0) > 0)
@@ -844,6 +888,7 @@ export class TspSessionBrowser {
         return
       case 'browse-more':
         panel.selectedItem = `more:${intent.workspaceId}`
+        panel.selected = undefined
         if (intent.reveal) {
           const expanded = panel.expandedWorkspaces.get(intent.workspaceId)
             ?? (intent.workspaceId === priorityWorkspaceId(panel) || (workspaceGroups(panel).find(group => group.workspaceId === intent.workspaceId)?.needs ?? 0) > 0 || (workspaceGroups(panel).find(group => group.workspaceId === intent.workspaceId)?.working ?? 0) > 0)

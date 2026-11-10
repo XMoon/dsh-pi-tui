@@ -89,6 +89,34 @@ export interface SessionWorkspaceRowFact {
   readonly membership: SessionWorkspaceMembership
 }
 
+/** The ONE verbose pending wording shared by Peek/Details. */
+export const SESSION_PENDING_LABEL: Readonly<Record<SessionWorkspacePending, string>> = {
+  question: 'Question',
+  approval: 'Approval',
+  'plan-review': 'Plan review',
+  none: 'No pending',
+  unknown: 'Pending unknown',
+  unavailable: 'Pending unavailable',
+  denied: 'Pending denied',
+  unverified: 'Pending unverified',
+}
+
+/** The ONE verbose source wording shared by Peek/Details. */
+export const SESSION_SOURCE_LABEL: Readonly<Record<FactState, string>> = {
+  known: 'known',
+  unknown: 'unknown',
+  unavailable: 'unavailable',
+  denied: 'denied',
+}
+
+/** The ONE compact row status: only positive, action-relevant facts. */
+export function workspaceRowStatusLabel(fact: SessionWorkspaceRowFact): string {
+  if (fact.priority === 'needs') return fact.running === true ? 'Needs attention · Working' : 'Needs attention'
+  if (fact.priority === 'working') return 'Working'
+  if (fact.pending === 'unverified') return 'Pending · not actionable here'
+  return ''
+}
+
 /** One painted group and its ordered Session ids. Empty groups are omitted. */
 export interface SessionWorkspaceGroupView {
   readonly kind?: SessionWorkspaceGroup

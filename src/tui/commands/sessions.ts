@@ -46,6 +46,7 @@ type SessionCommandRunner = Pick<
   TuiCommandRunner,
   | 'agents'
   | 'awaitPendingDefaultWrite'
+  | 'awaitWorkspacePreflight'
   | 'captureSessionScope'
   | 'catalog'
   | 'currentSessionId'
@@ -800,6 +801,12 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
           // `/new` offers the Client launch directory as a Host path proposal.
           let nextIntentCapture: ReturnType<typeof workspaceNextIntent.capture> | undefined
           let intent: WorkspaceSelectionIntent
+          // The sessionless mount may still be verifying the launch directory:
+          // wait for that ONE request before capturing, so its committed
+          // revision is the one this create revalidates (never a stale token).
+          if (options.workspaceIntent === undefined && navigation.scope.sessionId === undefined) {
+            await runner.awaitWorkspacePreflight?.()
+          }
           if (options.workspaceIntent !== undefined) {
             if (navigation.scope.sessionId === undefined) nextIntentCapture = workspaceNextIntent.capture()
             intent = options.workspaceIntent

@@ -76,6 +76,7 @@ function harness(options: {
   readonly initialDirectoryEntry?: boolean
   readonly initialDirectoryPath?: string
   readonly onAddDirectory?: (path: string, settle: (outcome: import('../../src/app/command/session-browser-presentation.ts').SessionBrowserDirectorySettlement) => void) => void
+  readonly onNewSession?: (workspaceId: string) => void
   readonly isCurrent?: () => boolean
 } = {}): Harness {
   const columns = options.columns ?? 100
@@ -98,6 +99,7 @@ function harness(options: {
     onQueryChange: (raw) => { queries.push(raw) },
     onResume: (sessionId) => { resumes.push(sessionId) },
     ...(options.onAddDirectory === undefined ? {} : { onAddDirectory: options.onAddDirectory }),
+    ...(options.onNewSession === undefined ? {} : { onNewSession: options.onNewSession }),
     onClose: () => { state.closes += 1 },
     initialMode: options.initialMode ?? 'browse',
     initialBrowseScope: options.initialBrowseScope ?? 'all',
@@ -138,12 +140,8 @@ test('the same PiTui Browser path mode preserves rejected input and returns on H
   await h.paint()
   h.vt.sendInput('\t')
   await h.paint()
-  // The sessionless chooser's initial visible row is the Unassigned Folder, so
-  // the action ring offers Use directory, New session, Add directory, Close.
-  h.vt.sendInput('\x1b[C')
-  await h.paint()
-  h.vt.sendInput('\x1b[C')
-  await h.paint()
+  // Without an official Workspace baseline the chooser is the flat roster, so
+  // the action ring is Add directory then Close; Tab focuses Add.
   h.vt.sendInput('\r')
   await h.paint()
   assert.ok(h.view().includes('Add Host directory'), `Chooser enters Add from the same action bar:\n${h.view()}`)
@@ -197,6 +195,33 @@ test('folder pointer collapses default-expanded active rows and Show more pointe
   const view = h.view()
   assert.ok(view.includes('History 5'), `Show more advances the per-Workspace watermark by five:\n${view}`)
   assert.ok(view.includes('Active row'), 'expanding the Workspace restores its confirmed active row')
+})
+
+test('the sessionless Folder New session action uses the shared command callback', async () => {
+  const requested: string[] = []
+  const h = harness({
+    currentSessionId: null,
+    currentWorkspaceId: 'ws-other',
+    onNewSession: (workspaceId) => { requested.push(workspaceId) },
+  })
+  h.handle.setSnapshot(snapshot())
+  h.handle.updateWorkspaces({ type: 'baseline', items: [
+    { workspaceId: 'ws-current', path: '/ws', title: 'Current', sessionIds: [] },
+    { workspaceId: 'ws-other', path: '/other', title: 'Other', sessionIds: [CURRENT, OTHER] },
+  ] })
+  await h.paint()
+  // The next-create destination starts expanded with its Session rows; move the
+  // cursor onto that Folder so its New session action is offered.
+  h.vt.sendInput('\x1b[A')
+  await h.paint()
+  h.vt.sendInput('\t')
+  await h.paint()
+  h.vt.sendInput('\x1b[C')
+  await h.paint()
+  h.vt.sendInput('\r')
+  await h.paint()
+  assert.deepEqual(requested, ['ws-other'], 'the Folder action delegates one official WorkspaceId')
+  assert.equal(h.closes, 0, 'the presentation never closes the Browser by itself; the commit continuation owns it')
 })
 
 test('a retained first-submit path enters Browser directly, submits once, and exposes clickable Use directory', async () => {
