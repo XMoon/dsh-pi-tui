@@ -563,14 +563,11 @@ export class SessionWorkspacePanel implements Component {
 
   private scopeLabel(): string {
     if (!this.workspaces.proven) return this.workspaceError === undefined ? 'Checking current workspace…' : 'Information unavailable'
-    // The ENTRY's requested scope is the label: the Editor gesture explicitly
-    // asks All even while the committed Session still proves a Current
-    // Workspace. A Current entry falls back to All only when no Current
-    // Workspace can be resolved.
-    if (this.options.initialBrowseScope === 'all') return 'All workspaces'
-    return currentWorkspaceOf(this.workspaceFacts(), this.options.currentSessionId) === undefined
-      ? 'All workspaces'
-      : 'Current workspace'
+    // F5-A froze the Browser as ONE global Host Workspace tree: every entry
+    // (typed `/sessions`, the Welcome chooser and the Editor gesture) shows all
+    // official folders, so the header must not borrow the retired scope-filter
+    // wording. Currentness is painted on the folder row itself.
+    return 'All workspaces'
   }
 
   /** Re-derive the ONE Current Workspace annotation after each official frame. */

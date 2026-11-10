@@ -381,7 +381,7 @@ test('Workspace-first browse lists every official Workspace without inferring me
   })
   await h.paint()
   const grouped = h.view()
-  assert.ok(grouped.includes('Workspace: Current workspace'))
+  assert.ok(grouped.includes('Workspace: All workspaces'))
   assert.ok(grouped.includes('project') && grouped.includes('other'), `both official folders are visible:\n${grouped}`)
   assert.ok(!grouped.includes('Current workspace unavailable'), 'membership is not a browse scope fallback')
 
@@ -397,13 +397,17 @@ test('Workspace-first browse lists every official Workspace without inferring me
   assert.ok(h.view().includes('Other session'), 'a failed follow never hides the flat Session list')
 })
 
-test('the Editor gesture All scope is stated even while a Current Workspace is proved', async () => {
-  const h = harness({ initialBrowseScope: 'all' })
-  h.handle.setSnapshot(snapshot())
-  h.handle.updateWorkspaces({ type: 'baseline', items: [{ workspaceId: 'ws-a', path: '/ws', title: 'a', sessionIds: [CURRENT] }] })
-  await h.paint()
-  assert.ok(h.view().includes('Workspace: All workspaces'),
-    `the requested All scope is stated, not rewritten to Current:\n${h.view()}`)
+test('every Browser entry states the ONE global Workspace tree', async () => {
+  for (const initialBrowseScope of ['current', 'all'] as const) {
+    const h = harness({ initialBrowseScope })
+    h.handle.setSnapshot(snapshot())
+    h.handle.updateWorkspaces({ type: 'baseline', items: [{ workspaceId: 'ws-a', path: '/ws', title: 'a', sessionIds: [CURRENT] }] })
+    await h.paint()
+    assert.ok(h.view().includes('Workspace: All workspaces'),
+      `the ${initialBrowseScope} entry states the global tree:\n${h.view()}`)
+    h.app.dispose()
+    started.delete(h.app)
+  }
 })
 
 test('a missing current-session membership remains in the proved Unassigned folder', async () => {
@@ -464,7 +468,7 @@ test('Workspace remove/upsert updates official folder rows without cwd inference
   h.handle.updateWorkspaces({ type: 'upsert', workspace: { workspaceId: 'ws-a', path: '/ws', title: 'a', sessionIds: [CURRENT] } })
   await h.paint()
   assert.ok(h.view().includes('a · 1'))
-  assert.ok(h.view().includes('Workspace: Current workspace'), 'the restored membership proves Current again')
+  assert.ok(h.view().includes('Workspace: All workspaces'), 'the restored membership stays in the global tree')
 })
 
 test('replace and upsert refold the official Workspace folders', async () => {
@@ -951,7 +955,7 @@ test('all official Workspace folders, including empty and Unassigned, stay in on
   })
   await h.paint()
   const view = h.view()
-  for (const label of ['Current workspace', 'Alpha', 'Beta', 'Empty', 'Unassigned']) {
+  for (const label of ['All workspaces', 'Alpha', 'Beta', 'Empty', 'Unassigned']) {
     assert.ok(view.includes(label), `the same browse tree lists ${label}:\n${view}`)
   }
   assert.ok(view.indexOf('Alpha') < view.indexOf('Beta'), 'the current Workspace is first')
