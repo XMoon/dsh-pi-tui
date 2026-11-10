@@ -2220,6 +2220,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       ...controller.state(),
       firstTurn: projection.firstTurn,
       lastTurn: projection.lastTurn,
+      hasOlder: projection.hasOlder,
       hasNewer: projection.hasNewer,
     }, streamingToolPreviews, (searchPresentation ?? searchBindingForRepaint)?.(), projectionTokenFor(folder), welcomeEligibility)
     if (target === undefined) return

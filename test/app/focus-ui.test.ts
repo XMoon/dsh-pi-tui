@@ -25,7 +25,7 @@ import type { DisplayState } from '../../src/domain/display/preset.ts'
 import type { ToolPresenter } from '../../src/tui/transcript/tool-presentation.ts'
 import { parseUserKeybindings } from '../../src/tui/keybindings/config.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
-import { countFocusHeaders, findFocusHeaderRow, hasFocusHeader } from '../support/focus-header.ts'
+import { countFocusHeaders, findFocusHeaderRow, hasFocusHeader, isFocusHeader } from '../support/focus-header.ts'
 import { setAssistantVisualPresentation } from '../../src/domain/visual/presentation.ts'
 import type { PublishedVisual } from '../../src/domain/visual/publication.ts'
 
@@ -4281,5 +4281,128 @@ test('the real Ctrl+O key folds a process-bearing visual answer and keeps one in
   assert.equal(app.focusExpandedTurnsForTest().size, 0, 'a second Ctrl+O collapsed the Thought')
   assert.ok(hasFocusHeader(collapsedAgain, false), `collapsed header restored:\n${collapsedAgain}`)
   assert.equal(collapsedAgain.split('Focus latency').length - 1, 1, `the inline chart is not duplicated on collapse:\n${collapsedAgain}`)
+  app.stop()
+})
+
+test('a settled !! card keeps its accepted transcript position and never joins Work/Thought counts', async () => {
+  // The real fold: Tool A settles, the user accepts `!!`, then Tool B and the
+  // final answer arrive. The card must stay between Tool A and Tool B in
+  // Full, and stay visible outside a collapsed Work/Thought — while the
+  // canonical action counts never see it.
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('user/message', {
+      id: MessageId('u-order'), role: 'user',
+      content: [{ type: 'text', text: 'run the flow' }],
+      source: { kind: 'user' },
+    }, T0 + 1, 1),
+    eventAt('tool/call', {
+      turn: 1, step: 0, callId: ToolCallId('order-first'),
+      name: 'bash', arguments: JSON.stringify({ command: 'first-tool' }),
+    }, T0 + 2, 2),
+    eventAt('tool/result', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('order-first-result'), role: 'tool',
+        toolCallId: ToolCallId('order-first'),
+        content: [{ type: 'text', text: 'FIRST_OUTPUT' }],
+        source: { kind: 'tool', callId: ToolCallId('order-first') },
+      },
+    }, T0 + 3, 3),
+  ])
+  const vt = new VirtualTerminal(100, 40)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { displayState: { preset: 'full' } })
+  app.start()
+  startedApps.add(app)
+  show(app, folder)
+  await vt.waitForRender()
+  const placement = app.captureLocalShellPlacement()
+  const card = app.pushLocalMessage({
+    kind: 'tool', turn: Number.POSITIVE_INFINITY, name: 'shell',
+    args: 'echo SHELL_MARKER', result: '[exit 0]', status: 'ok',
+  }, placement)
+  applyMixed(folder, [
+    eventAt('tool/call', {
+      turn: 1, step: 0, callId: ToolCallId('order-second'),
+      name: 'bash', arguments: JSON.stringify({ command: 'second-tool' }),
+    }, T0 + 4, 4),
+    eventAt('tool/result', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('order-second-result'), role: 'tool',
+        toolCallId: ToolCallId('order-second'),
+        content: [{ type: 'text', text: 'SECOND_OUTPUT' }],
+        source: { kind: 'tool', callId: ToolCallId('order-second') },
+      },
+    }, T0 + 5, 5),
+  ])
+  show(app, folder)
+  await vt.waitForRender()
+  // The SECOND shell is accepted at the later source row, but its anchor is
+  // folded into the SAME Work/Thought carrier as the first shell.
+  const secondPlacement = app.captureLocalShellPlacement()
+  const secondCard = app.pushLocalMessage({
+    kind: 'tool', turn: Number.POSITIVE_INFINITY, name: 'shell',
+    args: 'echo SHELL_MARKER_B', result: '[exit 0]', status: 'ok',
+  }, secondPlacement)
+  applyMixed(folder, [
+    eventAt('assistant/message', {
+      turn: 1, step: 1,
+      message: {
+        id: MessageId('order-final'), role: 'assistant',
+        content: [{ type: 'text', text: 'FINAL_ANSWER' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+    }, T0 + 6, 6),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 7, 7),
+  ])
+  show(app, folder)
+  await vt.waitForRender()
+
+  for (const preset of ['full', 'compact', 'focus'] as const) {
+    app.setDisplayPreset(preset)
+    await vt.waitForRender()
+    const view = vt.getViewport()
+    const joined = view.join('\n')
+    const shellRow = view.findIndex(line => line.includes('SHELL_MARKER') && !line.includes('SHELL_MARKER_B'))
+    const shellBRow = view.findIndex(line => line.includes('SHELL_MARKER_B'))
+    assert.ok(shellRow >= 0 && shellBRow >= 0, `${preset}: both !! cards must stay visible:\n${joined}`)
+    if (preset === 'full') {
+      const firstRow = view.findIndex(line => line.includes('first-tool'))
+      const secondRow = view.findIndex(line => line.includes('second-tool'))
+      const finalRow = view.findIndex(line => line.includes('FINAL_ANSWER'))
+      assert.ok(firstRow >= 0 && secondRow >= 0 && finalRow >= 0, `full rows missing:\n${joined}`)
+      assert.ok(firstRow < shellRow && shellRow < secondRow && secondRow < shellBRow && shellBRow < finalRow,
+        `full chronology must be Tool A → shell A → Tool B → shell B → final:\n${joined}`)
+    } else {
+      assert.ok(shellRow < shellBRow,
+        `${preset}: different anchors in the same folded group must keep acceptance order:\n${joined}`)
+    }
+    // Collapsing Work/Focus never hides or duplicates the standalone cards.
+    assert.equal(joined.split('Shell echo SHELL_MARKER [ok]').length - 1, 1, `${preset}: exactly one card A instance:\n${joined}`)
+    assert.equal(joined.split('Shell echo SHELL_MARKER_B').length - 1, 1, `${preset}: exactly one card B instance:\n${joined}`)
+    // The shell card is not an Action input: removing it leaves every
+    // Work/Thought header untouched. Full has no aggregate header at all.
+    if (preset !== 'full') {
+      const headers = (): string[] => vt.getViewport().filter(line => /\d+ actions?/u.test(line) || isFocusHeader(line) || line.includes('Activity'))
+      const withCard = headers()
+      assert.ok(withCard.length > 0, `${preset}: a Work/Thought header must exist:\n${joined}`)
+      app.removeLocalMessage(card)
+      await vt.waitForRender()
+      assert.deepEqual(headers(), withCard, `${preset}: removing the local card must not change Work/Thought counts`)
+      app.pushLocalMessage(card, placement)
+      await vt.waitForRender()
+      // Expanding the surrounding Work/Thought must neither hide nor duplicate
+      // the standalone shell card.
+      vt.sendInput('\x0f')
+      await vt.waitForRender()
+      const expanded = vt.getViewport().join('\n')
+      assert.equal(expanded.split('Shell echo SHELL_MARKER [ok]').length - 1, 1,
+        `${preset}: expanding the aggregate must keep exactly one shell card A:\n${expanded}`)
+      assert.equal(expanded.split('Shell echo SHELL_MARKER_B').length - 1, 1,
+        `${preset}: expanding the aggregate must keep exactly one shell card B:\n${expanded}`)
+    }
+  }
   app.stop()
 })

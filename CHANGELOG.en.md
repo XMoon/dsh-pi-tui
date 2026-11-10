@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Shell cards stay at their submitted conversation position and `!!` history is retained.** `!`/`!!` cards are no longer appended to the conversation tail; they stay at the conversation position where the user submitted them, fold to at most three rows, show no output while running, and expand the retained output with `Ctrl+O`. A settled `!!` card survives until a Session switch, TUI restart, or Alt+K; a committed `!` removes only its own local card instead of clearing other shell history.
+
 ### Fixed
 
 - **A command submitted while a new Session is being created is no longer lost.** Commands such as `/preset status` typed while `/new` is still creating the Session now run in that Session once it is ready instead of silently disappearing.

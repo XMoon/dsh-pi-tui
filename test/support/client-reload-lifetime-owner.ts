@@ -107,7 +107,6 @@ export function createClientReloadLifetimeOwner(): ClientReloadLifetimeOwner {
     insertIntoEditor: (text: string) => { draft += text },
     notify: (message: string) => { notices.push(message) },
     setSubmitPending: () => {},
-    clearSettledLocalMessages: () => {},
   }
   const deps: SubmissionControllerDeps<AgentLike> = {
     app: () => composer,
@@ -167,7 +166,7 @@ export function createClientReloadLifetimeOwner(): ClientReloadLifetimeOwner {
       clearError: () => {},
     },
     artifacts: { start: () => {} },
-    shell: { run: () => {}, interrupt: () => {}, cancelRun: () => false },
+    shell: { capturePlacement: () => ({ anchor: undefined, turn: undefined, target: 'beginning' as const, acceptedOrder: 0 }), run: () => {}, interrupt: () => {}, cancelRun: () => false },
     supportsLocalShellCards: true,
     supportsTuiBuiltinUi: true,
     retainsStaleDraftRestore: true,

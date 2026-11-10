@@ -55,7 +55,6 @@ function recordingComposer(initial = ''): RecordingComposer {
     },
     notify: (message, kind) => { notices.push({ text: message, kind }) },
     setSubmitPending: () => {},
-    clearSettledLocalMessages: () => {},
     caretAt: (index) => { caret = index },
   }
 }

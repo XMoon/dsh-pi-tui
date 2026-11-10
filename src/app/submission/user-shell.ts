@@ -33,10 +33,19 @@ import {
   type HostUserShellResult,
 } from '../../runtime/host-user-shell-port.ts'
 import type { SessionWriter, WriteOutcome } from '../../runtime/session-writer-port.ts'
+import type { TranscriptMessage } from '../../domain/transcript/types.ts'
 import { localShellSandboxPreferenceOf, shellCommandOf, shellModeOf } from './shell-context.ts'
 import { submitShell } from '../submission/runtime.ts'
 import type { LiveSessionScope } from '../session/scope.ts'
 import type { TuiApp } from '../../tui-app.ts'
+
+/** Client-local display placement captured at the accepted submit gesture. */
+export interface UserShellPresentationPlacement {
+  readonly anchor: TranscriptMessage | undefined
+  readonly turn: number | undefined
+  readonly target: 'anchored' | 'deferred-to-latest' | 'beginning'
+  readonly acceptedOrder: number
+}
 
 /** The narrow capabilities the user shell consumes. */
 export interface UserShellDeps<ExactAgent extends InterruptAgentLike> {
@@ -99,13 +108,15 @@ export interface UserShellDeps<ExactAgent extends InterruptAgentLike> {
 
 /** The user-shell owner as the rest of the application consumes it. */
 export interface UserShellOwner {
+  /** Capture the current main-session transcript position synchronously. */
+  capturePlacement(): UserShellPresentationPlacement
   /**
    * Run one `!` / `!!` command.
    * `endWrite` releases the gesture's accepted business-write lifetime; it is
    * called EXACTLY once at this run's terminal settlement (including the
    * context-mode `!` Session write), never on a timer.
    */
-  run(text: string, ackToken: number | undefined, endWrite: () => void): void
+  run(text: string, ackToken: number | undefined, endWrite: () => void, placement: UserShellPresentationPlacement): void
   /** Abort the running Host user-shell run and interrupt the live Agent (Esc / cancel). */
   interrupt(): void
   /** Abort the active Host Shell run only; false means no cancellable run exists. */
@@ -228,7 +239,12 @@ export function createUserShell<ExactAgent extends InterruptAgentLike>(
    * excluded-from-context escape hatch): zero SessionWriter.prompt, zero
    * context message, zero model visibility.
    */
-  const runUserShell = (text: string, ackToken: number | undefined, endWrite: () => void): void => {
+  const runUserShell = (
+    text: string,
+    ackToken: number | undefined,
+    endWrite: () => void,
+    placement: UserShellPresentationPlacement,
+  ): void => {
     // The gesture's accepted business-write lifetime: exactly one release at
     // this run's terminal settlement (M4 PR4 `/reload-client` safety).
     let writeSettled = false
@@ -264,14 +280,14 @@ export function createUserShell<ExactAgent extends InterruptAgentLike>(
     // The card reference this run owns: settling by identity keeps a
     // settled old run from overwriting a newer run's card (updateLastLocal
     // Message would hit whatever card is newest at settle time).
-    const card = deps.app().pushLocalMessage({
+    let card = deps.app().pushLocalMessage({
       kind: 'tool',
       turn: Number.POSITIVE_INFINITY,
       name: 'shell',
       args: command,
       result: '',
       status: 'running',
-    })
+    }, placement)
     /** Release the controller only when it still guards THIS run. */
     const releaseController = (): void => {
       if (shellController?.signal === localSignal) shellController = undefined
@@ -292,7 +308,7 @@ export function createUserShell<ExactAgent extends InterruptAgentLike>(
         isDisposed: () => deps.isCleanedUp(),
         isScopeCurrent: captured => deps.isLiveScopeCurrent(captured),
         terminalAck: shellTerminalAck,
-        clearSettledLocalMessages: () => deps.app().clearSettledLocalMessages(),
+        removeCommittedShellCard: () => { deps.app().removeLocalMessage(card) },
         notify: (message, kind) => {
           if (deps.isCleanedUp()) return
           deps.notify(message, kind)
@@ -317,7 +333,7 @@ export function createUserShell<ExactAgent extends InterruptAgentLike>(
     const settle = (result: string, status: 'ok' | 'error', submitContext = true): void => {
       if (deps.isCleanedUp() || settled) return
       settled = true
-      deps.app().updateLocalMessage(card, {
+      card = deps.app().updateLocalMessage(card, {
         kind: 'tool',
         turn: Number.POSITIVE_INFINITY,
         name: 'shell',
@@ -426,6 +442,7 @@ export function createUserShell<ExactAgent extends InterruptAgentLike>(
   }
 
   return {
+    capturePlacement: () => deps.app().captureLocalShellPlacement(),
     run: runUserShell,
     interrupt,
     cancelRun,

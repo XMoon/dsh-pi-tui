@@ -296,6 +296,8 @@ export type { QuestionFlowDraft } from './tui/interaction/question.ts'
 export type { SaveLocationResult } from './tui/interaction/save-location.ts'
 import { createInstalledAutocompleteProvider } from './tui/interaction/autocomplete/installed-provider.ts'
 import { assistantPresentationRevision, PTC_MAX_DEPTH, recentTurnThreshold, textWithAttachmentMarkers, transcriptSearchSourceKey, type AssistantDisplayBlock, subCallDisplayStatus, type PresentedFilePresentation, type TranscriptMessage, type TranscriptSearchMatch, type TurnActivity, type WorkflowMemberView, type WorkflowRunStatus, workflowPhaseKey, workflowReadablePhase } from './transcript.ts'
+import type { UserShellPresentationPlacement } from './app/submission/user-shell.ts'
+import { eligibleFinalAssistant } from './domain/transcript/final-assistant.ts'
 import { classifyTranscriptMessage, isSurfacedInteractionTool, isSurfacedContext } from './domain/transcript/semantics.ts'
 import {
   SearchHighlightComponent,
@@ -380,13 +382,7 @@ import type { LeaderStateMachine } from './tui/keybindings/leader.ts'
 import { applyHomeEndKeyMode, homeEndKeysModeOf } from './tui/keybindings/home-end-mode.ts'
 import { HostKeybindingManager, normalizedKeyToKeyId } from './tui/keybindings/manager.ts'
 import type { AppKeybindingId, KeybindingContext, KeybindingSource, UserKeybindingsConfig } from './tui/keybindings/types.ts'
-import {
-  isLocalShellCard,
-  localShellHiddenMarker,
-  localShellPreview,
-  RUNNING_PREVIEW_LINES,
-  SETTLED_PREVIEW_VISUAL_ROWS,
-} from './tui/components/transcript/local-shell-card.ts'
+import { isLocalShellCard } from './tui/components/transcript/local-shell-card.ts'
 import { formatBytes } from './domain/media/format.ts'
 import type { RendererRegistry } from './extension/internal/renderer-registry.ts'
 import { OverlayBroker } from './tui/interaction/overlay-broker.ts'
@@ -405,6 +401,9 @@ import type { DisplaySubjectSnapshot, ExtensionView, MessagePresentationSnapshot
 
 /** How many most-recent turns Ctrl+O expands; mirrors pi's default. */
 export const EXPAND_RECENT_TURNS = 3
+
+/** Settled local shell cards kept in the current TUI mount. */
+const MAX_SETTLED_LOCAL_SHELL_CARDS = 32
 
 /** Physical Job-local keys always outrank transcript Find bindings on this screen. */
 const JOB_LOCAL_FIND_RESERVED_KEYS: ReadonlySet<KeyId> = new Set([
@@ -2617,6 +2616,14 @@ type TranscriptRenderBlock = FocusProjectedBlock | TranscriptWorkBlock | Transcr
   item: PendingTailRow
 }
 
+type LocalShellPlacement = Omit<UserShellPresentationPlacement, 'acceptedOrder'>
+
+interface LocalShellEntry {
+  message: TranscriptMessage
+  placement: LocalShellPlacement
+  acceptedOrder: number
+}
+
 /** Canonical Work/cluster membership for one `messages` window, memoized on
  * the array identity (one linear projection per window). The Work lifetimes are
  * derived in the SAME bounded scan so no card re-walks the transcript at render
@@ -3693,8 +3700,10 @@ export class TuiApp {
    * Focus activity state. The runner replaces this snapshot on each coalesced
    * transcript repaint. */
   private streamingToolPreviews: readonly StreamingToolPreview[] = []
-  /** Local (non-session) cards — e.g. `!` shell runs — rendered after the transcript. */
-  private readonly localMessages: TranscriptMessage[] = []
+  /** Client-local cards with frozen transcript placement, never Session rows. */
+  private readonly localMessages: LocalShellEntry[] = []
+  /** Monotonic display order captured at the accepted Shell gesture. */
+  private localShellAcceptedOrder = 0
   /**
    * The ONE Client-local input-recall kernel of this mount (TSP I-A): the
    * recall projection, the OPEN scope's occurrences, the write owner's
@@ -4106,7 +4115,7 @@ export class TuiApp {
    *  can never pass an equality-only fence (ABA). */
   private editorEditEpoch = 0
   /** The latest window metadata, retained so remapped key hints stay live. */
-  private transcriptWindow: (TranscriptWindowState & { firstTurn?: number; lastTurn?: number; hasNewer?: boolean }) | undefined
+  private transcriptWindow: (TranscriptWindowState & { firstTurn?: number; lastTurn?: number; hasOlder?: boolean; hasNewer?: boolean }) | undefined
   /** Styling of the current notify line: info (default) is dim with a ℹ,
    * errors are red with a ✗. */
   private notifyKind: 'error' | 'info' = 'info'
@@ -8230,86 +8239,136 @@ export class TuiApp {
     return this.historyRecall.scopeFactCountForTest()
   }
 
-  /**
-   * Append a local card rendered after the session transcript (e.g. `!`
-   * shell runs). The card is always expanded (its turn is unbounded).
-   * @param message - the local card to show.
-   * @returns the stored card reference, for {@link updateLocalMessage}.
-   */
-  pushLocalMessage(message: TranscriptMessage): TranscriptMessage {
-    this.localMessages.push(message)
-    this.clearFocusLiveHeightState()
-    this.rebuildMessages('local-card')
+  /** Capture the source row and accepted display order at the submit gesture. */
+  captureLocalShellPlacement(): UserShellPresentationPlacement {
+    const acceptedOrder = ++this.localShellAcceptedOrder
+    if (this.transcriptWindow?.mode === 'history' || this.transcriptWindow?.hasNewer === true) {
+      return { anchor: undefined, turn: undefined, target: 'deferred-to-latest', acceptedOrder }
+    }
+    let anchor: TranscriptMessage | undefined
+    for (let index = this.messages.length - 1; index >= 0; index -= 1) {
+      const candidate = this.messages[index]!
+      if (candidate.kind === 'summary') continue
+      anchor = candidate
+      break
+    }
+    if (anchor === undefined) return { anchor: undefined, turn: undefined, target: 'beginning', acceptedOrder }
+    return {
+      anchor,
+      turn: 'turn' in anchor ? anchor.turn : undefined,
+      target: 'anchored',
+      acceptedOrder,
+    }
+  }
+
+  /** Append one Client-local card with its already-captured placement. */
+  pushLocalMessage(
+    message: TranscriptMessage,
+    placement = this.captureLocalShellPlacement(),
+  ): TranscriptMessage {
+    const { acceptedOrder, ...snapshot } = placement
+    this.mutateTranscriptDisclosure(() => {
+      this.localMessages.push({ message, placement: snapshot, acceptedOrder })
+      this.pruneLocalShellRetention()
+    })
     return message
   }
 
-  /**
-   * Replace one local card by reference. Settling a card by its own identity
-   * (not "the last one") keeps concurrent cards independent: a card settled
-   * after a newer one was pushed must not overwrite the newer card.
-   * @param message - the card reference {@link pushLocalMessage} returned.
-   * @param next - the settled replacement.
-   * @returns the stored replacement (`next`), so a caller that keeps the
-   *   card reference (e.g. a streaming tail refresher) can chain updates —
-   *   the array element is replaced, so the OLD reference no longer indexes.
-   */
+  /** Replace one local card by reference, preserving its placement/order. */
   updateLocalMessage(message: TranscriptMessage, next: TranscriptMessage): TranscriptMessage {
-    const index = this.localMessages.indexOf(message)
+    const index = this.localMessages.findIndex(entry => entry.message === message)
     if (index === -1) return next
-    // A click-expanded local card keeps its override across the running →
-    // settled replacement: the message identity changes, the presentation
-    // state must not (plan §5.2 — never key expansion on the object alone).
-    const override = this.expandedOverride.get(message)
-    if (override !== undefined) {
-      this.expandedOverride.delete(message)
-      this.expandedOverride.set(next, override)
-    }
-    // The press-time identity token follows the logical card across the
-    // running → settled object replacement: a press on the running card
-    // must still match the settled card at release (mouse parity).
-    const token = this.identityTokens.get(message)
-    if (token !== undefined) this.identityTokens.set(next, token)
-    this.localMessages[index] = next
-    this.clearFocusLiveHeightState()
-    this.rebuildMessages('local-card')
+    this.mutateTranscriptDisclosure(() => {
+      const entry = this.localMessages[index]!
+      const override = this.expandedOverride.get(message)
+      if (override !== undefined) {
+        this.expandedOverride.delete(message)
+        this.expandedOverride.set(next, override)
+      }
+      const token = this.identityTokens.get(message)
+      if (token !== undefined) {
+        this.identityTokens.delete(message)
+        this.identityTokens.set(next, token)
+      }
+      this.localMessages[index] = { ...entry, message: next }
+      this.pruneLocalShellRetention()
+    })
     return next
   }
 
   /** Replace the most recent local card (running → settled). */
   updateLastLocalMessage(message: TranscriptMessage): void {
-    const index = this.localMessages.length - 1
-    if (index < 0) return
-    // The press-time identity token follows the logical card across the
-    // running → settled object replacement (mouse parity).
-    const token = this.identityTokens.get(this.localMessages[index]!)
-    if (token !== undefined) this.identityTokens.set(message, token)
-    this.localMessages[index] = message
-    this.clearFocusLiveHeightState()
-    this.rebuildMessages('local-card')
+    if (this.localMessages.length === 0) return
+    this.mutateTranscriptDisclosure(() => {
+      const index = this.localMessages.length - 1
+      const entry = this.localMessages[index]!
+      const token = this.identityTokens.get(entry.message)
+      if (token !== undefined) {
+        this.identityTokens.delete(entry.message)
+        this.identityTokens.set(message, token)
+      }
+      const override = this.expandedOverride.get(entry.message)
+      if (override !== undefined) {
+        this.expandedOverride.delete(entry.message)
+        this.expandedOverride.set(message, override)
+      }
+      this.localMessages[index] = { ...entry, message }
+      this.pruneLocalShellRetention()
+    })
   }
 
-  /** Drop all local cards (session switch). */
+  /** Remove one local card only when its exact current object is still owned. */
+  removeLocalMessage(message: TranscriptMessage): boolean {
+    const index = this.localMessages.findIndex(entry => entry.message === message)
+    if (index === -1) return false
+    this.mutateTranscriptDisclosure(() => {
+      this.localMessages.splice(index, 1)
+      this.forgetLocalShellPresentation(message)
+    })
+    return true
+  }
+
+  /** Drop all local cards on a real Session replacement or hydration. */
   clearLocalMessages(): void {
     if (this.localMessages.length === 0) return
-    this.localMessages.length = 0
-    this.clearFocusLiveHeightState()
-    this.rebuildMessages('local-card')
+    this.mutateTranscriptDisclosure(() => {
+      for (const entry of this.localMessages) this.forgetLocalShellPresentation(entry.message)
+      this.localMessages.length = 0
+    })
   }
 
-  /**
-   * Drop SETTLED local cards (completed `!`/`!!` shell runs); running cards
-   * survive so a live stream is never dismissed by a concurrent submit.
-   * Local cards are a live view, not a record: context runs clear on submit
-   * success (the transcript's user row takes over), local-only runs on the
-   * next user submission (dispatchUserInput / steerNow).
-   */
+  /** Alt+K drops settled local cards; running cards remain owned by their run. */
   clearSettledLocalMessages(): void {
-    const running = this.localMessages.filter(message => message.kind === 'tool' && message.status === 'running')
+    const running = this.localMessages.filter(entry => entry.message.kind === 'tool' && entry.message.status === 'running')
     if (running.length === this.localMessages.length) return
-    this.localMessages.length = 0
-    this.localMessages.push(...running)
-    this.clearFocusLiveHeightState()
-    this.rebuildMessages('local-card')
+    this.mutateTranscriptDisclosure(() => {
+      for (const entry of this.localMessages) {
+        if (!(entry.message.kind === 'tool' && entry.message.status === 'running')) {
+          this.forgetLocalShellPresentation(entry.message)
+        }
+      }
+      this.localMessages.splice(0, this.localMessages.length, ...running)
+    })
+  }
+
+  private forgetLocalShellPresentation(message: TranscriptMessage): void {
+    this.expandedOverride.delete(message)
+    this.identityTokens.delete(message)
+    this.subCallHitsByMessage.delete(message)
+    this.workflowHitsByMessage.delete(message)
+    this.searchSourceRegionsByMessage.delete(message)
+  }
+
+  private pruneLocalShellRetention(): void {
+    const settled = this.localMessages
+      .filter(entry => entry.message.kind === 'tool' && isLocalShellCard(entry.message) && entry.message.status !== 'running')
+      .sort((left, right) => left.acceptedOrder - right.acceptedOrder)
+    for (const entry of settled.slice(0, Math.max(0, settled.length - MAX_SETTLED_LOCAL_SHELL_CARDS))) {
+      const index = this.localMessages.indexOf(entry)
+      if (index === -1) continue
+      this.localMessages.splice(index, 1)
+      this.forgetLocalShellPresentation(entry.message)
+    }
   }
 
   /**
@@ -9406,7 +9465,7 @@ export class TuiApp {
   setTranscript(
     messages: readonly TranscriptMessage[],
     activities?: ReadonlyMap<number, TurnActivity>,
-    window?: TranscriptWindowState & { firstTurn?: number; lastTurn?: number; hasNewer?: boolean },
+    window?: TranscriptWindowState & { firstTurn?: number; lastTurn?: number; hasOlder?: boolean; hasNewer?: boolean },
     streamingToolPreviews?: readonly StreamingToolPreview[],
     searchPresentation?: TranscriptSearchPresentation,
   ): void {
@@ -10504,6 +10563,14 @@ export class TuiApp {
     return this.canonicalStructureIndex().clusterByMember.has(owner)
   }
 
+  private localShellEntryInCurrentWindow(entry: LocalShellEntry): boolean {
+    if (this.viewerMode !== undefined || entry.placement.target === 'deferred-to-latest') return false
+    if (entry.placement.target === 'beginning') return this.transcriptWindow?.hasOlder !== true
+    if (entry.placement.anchor !== undefined && this.messages.includes(entry.placement.anchor)) return true
+    return entry.placement.turn !== undefined
+      && this.messages.some(message => 'turn' in message && message.turn === entry.placement.turn)
+  }
+
   /** Whether one per-card override row is MATERIALIZED on the current
    * projection: a current-window top-level row, an OPEN Work member, or a row
    * the Focus projection actually emits (compaction always; a Focus secondary
@@ -10511,11 +10578,8 @@ export class TuiApp {
    * expanded Thought root — an unqualified mid-turn notice renders as a
    * post-Thought row, never hidden). */
   private messageRowMaterialized(message: TranscriptMessage, projectionExpanded: ReadonlySet<number>): boolean {
-    // A local (non-session) card — e.g. a `!`/`!!` shell card — is always
-    // appended to the rendered transcript and participates in NO canonical
-    // Work/cluster/Focus ancestry, so it is always materialized. It is NOT in
-    // `this.messages` (it lives in `localMessages`).
-    if (this.localMessages.includes(message)) return true
+    const localEntry = this.localMessages.find(entry => entry.message === message)
+    if (localEntry !== undefined) return this.localShellEntryInCurrentWindow(localEntry)
     if (!this.messages.includes(message)) return false
     const index = this.canonicalStructureIndex()
     const policy = displayPolicyFor(this.displayState.preset)
@@ -11165,7 +11229,10 @@ export class TuiApp {
     }
     if (this.messageComponents.size === 0) return
     const live = new Set<TranscriptMessage>(this.messages)
-    for (const message of this.localMessages) live.add(message)
+    for (const block of blocks) {
+      if (block.kind !== 'message') continue
+      if (this.localMessages.some(entry => entry.message === block.message)) live.add(block.message)
+    }
     for (const [message, entry] of this.messageComponents) {
       if (live.has(message)) continue
       this.messageComponents.delete(message)
@@ -11642,6 +11709,118 @@ export class TuiApp {
     return trailingTurn === undefined || trailingTurn === turn ? blocks.length : lastTurnIndex + 1
   }
 
+  /** Interleave Client-local cards only after canonical Work/Focus projection. */
+  private interleaveLocalShellCards(blocks: TranscriptRenderBlock[]): void {
+    if (this.viewerMode !== undefined) return
+    const entries = [...this.localMessages].sort((left, right) => left.acceptedOrder - right.acceptedOrder)
+    const latestSource = (): TranscriptMessage | undefined => {
+      for (let index = this.messages.length - 1; index >= 0; index -= 1) {
+        const candidate = this.messages[index]!
+        if (candidate.kind !== 'summary') return candidate
+      }
+      return undefined
+    }
+    const blockTurn = (block: TranscriptRenderBlock): number | undefined => {
+      if (block.kind === 'message') return 'turn' in block.message ? block.message.turn : undefined
+      if (block.kind === 'activity') return block.activity.turn
+      if (block.kind === 'work') return block.span.turn
+      if (block.kind === 'context-cluster') return block.cluster.turn
+      if (block.kind === 'streaming-tool-previews') return block.turn
+      return undefined
+    }
+    const finalAssistant = (turn: number): TranscriptMessage | undefined => {
+      const group = this.messages.filter(message => 'turn' in message && message.turn === turn)
+      return eligibleFinalAssistant(this.turnActivities.get(turn), group)?.message
+    }
+    const insertAfterExistingCards = (index: number, entry: LocalShellEntry): number => {
+      let next = index
+      // The same insertion boundary can be shared by several cards whose
+      // captured anchors were folded into ONE Work/Thought carrier. Accepted
+      // order is the only tie-break: a later card always inserts after every
+      // earlier local card already present at this boundary.
+      while (next < blocks.length) {
+        const block = blocks[next]!
+        if (block.kind !== 'message') break
+        const previous = entries.find(candidate => candidate.message === block.message)
+        if (previous === undefined || previous.acceptedOrder >= entry.acceptedOrder) break
+        next += 1
+      }
+      return next
+    }
+
+    for (const entry of entries) {
+      if (entry.placement.target === 'deferred-to-latest') {
+        if (this.transcriptWindow?.mode === 'history') continue
+        const anchor = latestSource()
+        entry.placement = {
+          anchor,
+          turn: anchor !== undefined && 'turn' in anchor ? anchor.turn : undefined,
+          target: anchor === undefined ? 'beginning' : 'anchored',
+        }
+      }
+
+      const { anchor, turn } = entry.placement
+      let insertionIndex: number | undefined
+      if (anchor !== undefined) {
+        const exact = blocks.findIndex(block => block.kind === 'message' && block.message === anchor)
+        if (exact >= 0) {
+          insertionIndex = exact + 1
+        } else {
+          const carrier = blocks.findIndex(block =>
+            block.kind === 'work' && block.span.members.includes(anchor)
+            || block.kind === 'context-cluster' && block.cluster.members.includes(anchor),
+          )
+          if (carrier >= 0) insertionIndex = carrier + 1
+        }
+      }
+
+      let finalIndex = -1
+      if (turn !== undefined) {
+        const final = finalAssistant(turn)
+        if (final !== undefined) finalIndex = blocks.findIndex(block => block.kind === 'message' && block.message === final)
+      }
+      if (turn !== undefined && isFocusDisplayPreset(this.displayState.preset)) {
+        if (insertionIndex === undefined) {
+          const anchorIndex = anchor === undefined ? -1 : this.messages.indexOf(anchor)
+          let activityIndex = -1
+          for (let index = 0; index < blocks.length; index += 1) {
+            const block = blocks[index]!
+            if (block.kind !== 'activity' || block.activity.turn !== turn) continue
+            const ownerIndex = this.messages.indexOf(block.owner)
+            if (anchorIndex < 0 || ownerIndex <= anchorIndex) activityIndex = index
+          }
+          if (activityIndex >= 0) insertionIndex = activityIndex + 1
+          else if (finalIndex >= 0) insertionIndex = finalIndex
+        }
+      }
+
+      if (insertionIndex === undefined && turn !== undefined) {
+        if (!this.messages.some(message => 'turn' in message && message.turn === turn)) continue
+        let lastTurnBlock = -1
+        for (let index = 0; index < blocks.length; index += 1) {
+          if (blockTurn(blocks[index]!) !== turn) continue
+          if (finalIndex >= 0 && index >= finalIndex) continue
+          lastTurnBlock = index
+        }
+        if (lastTurnBlock >= 0) insertionIndex = lastTurnBlock + 1
+        else if (finalIndex >= 0) insertionIndex = finalIndex
+      }
+
+      if (insertionIndex === undefined && entry.placement.target === 'beginning') {
+        // A `beginning` card is bound to the window that actually starts at
+        // the Session's first turn. A mid/old history page or a later latest
+        // window may still have older turns outside it, so the card must not
+        // drift to the top of every page.
+        if (this.transcriptWindow?.hasOlder === true) continue
+        const summaryIndex = blocks.findIndex(block => block.kind === 'message' && block.message.kind === 'summary')
+        insertionIndex = summaryIndex === 0 ? 1 : 0
+      }
+      if (insertionIndex === undefined) continue
+      insertionIndex = insertAfterExistingCards(insertionIndex, entry)
+      blocks.splice(insertionIndex, 0, { kind: 'message', message: entry.message })
+    }
+  }
+
   /** Build the rendered transcript blocks in visual order. Focus keeps the
    * ephemeral Preparing state outside the durable projection: collapsed rows
    * are summarized by their Thought header, while expanded rows are inserted
@@ -11664,7 +11843,7 @@ export class TuiApp {
       // Thought's live process is summarised by its header and skipped.
       this.applyWorkPreparing(blocks, projectionExpanded)
     }
-    blocks.push(...this.localMessages.map(message => ({ kind: 'message', message }) as FocusProjectedBlock))
+    this.interleaveLocalShellCards(blocks)
     // The ONE ordered ephemeral pending tail sits at the LIVE conversation
     // tail, after durable content and local cards: user steering rows and
     // non-user context occurrences in the join's projection order. It is
@@ -16861,23 +17040,23 @@ export class TuiApp {
       // workspace/usage (the review's P2).
       return
     }
-    if (this.viewerMode === undefined) {
+    const currentViewer = this.viewerMode
+    const enteringViewer = currentViewer === undefined
+    if (currentViewer === undefined) {
       // Preserve the main draft in its SERIALIZED wire form, so a
       // shell-mode draft round-trips through the viewer with its mode.
       this.mainDraftBeforeViewer = this.expandedSeatWireDraft()
-      // The viewer renders ONLY the child transcript: the main session's
-      // local cards (`!` shell runs) and its ephemeral pending tail must
-      // never leak into it. The runner repaints the child folder right after,
-      // so the cleared lists are rebuilt from the child content.
-      this.localMessages.length = 0
+      // Main-session local cards stay owned here but transcriptBlocks omits
+      // them while the child viewer is active. Pending tail rows are subject-
+      // scoped and are cleared before the child projection arrives.
       this.pendingTailRows = []
-      this.rebuildMessages()
-    } else if (isViewerAccessInteractive(resolveViewerAccess(this.viewerMode.mode, this.viewerMode.access))) {
+    } else if (isViewerAccessInteractive(resolveViewerAccess(currentViewer.mode, currentViewer.access))) {
       // Switching child: park the outgoing child's draft first.
-      this.parkSubagentDraft(this.viewerMode.childSessionId)
+      this.parkSubagentDraft(currentViewer.childSessionId)
     }
     this.viewerMode = mode
     this.viewerGeneration += 1
+    if (enteringViewer) this.rebuildMessages()
     // M3-5 PR1: the display subject follows the viewer — StatusRuntime
     // resolves the child and commits the view section together with the
     // child's Session-owned sections in ONE atomic `commitDisplaySubject`
@@ -20846,7 +21025,7 @@ export class TuiApp {
     const singleLineHead = statsPart === '' || statsBudget === 0
       ? headWithoutStats
       : `${headWithoutStats}${truncateToWidth(statsPart, statsBudget, '…')}`
-    const expandedHead = message.name === 'edit' ? singleLineHead : head
+    const expandedHead = message.name === 'edit' || isLocalShellCard(message) ? singleLineHead : head
     // LOCAL `!`/`!!` shell cards read the master expand switch (plan §5.3),
     // never the unbounded turn marker: collapsed by default so a long log
     // cannot fill the TUI, expanded only while the expand switch is on.
@@ -20885,12 +21064,11 @@ export class TuiApp {
       // expanding), then the result preview. Read cards keep the envelope
       // summary (`— N lines`), never a dump of the raw XML. Every row
       // truncates to the terminal width, so a folded block never wraps.
-      // LOCAL `!`/`!!` shell cards get their OWN folded layout (plan §5.1):
-      // the command row plus the newest 5 (running) / 20 visual (settled)
-      // rows of output with a hidden-count marker — a long log previews
-      // instead of filling the TUI.
+      // LOCAL `!`/`!!` shell cards get their OWN folded layout: the header,
+      // the single command row and one settled outcome row. The retained
+      // bounded output is reachable through the existing card expansion.
       if (localShell) {
-        this.renderLocalShellFolded(card, message, head, width)
+        this.renderLocalShellFolded(card, message, singleLineHead, width)
         return card
       }
       const rows: string[] = []
@@ -21286,11 +21464,11 @@ export class TuiApp {
   }
 
   /**
-   * The folded (collapsed) layout of a LOCAL `!`/`!!` shell card (plan
-   * §5.1): the card head, the `$ command` row, the newest preview rows
-   * (5 source lines while running, up to 20 visual rows once settled),
-   * and the hidden-count marker when content was cut. The capture layer
-   * (client/shell/output-capture caps) is untouched — this is display policy only.
+   * The folded (collapsed) layout of a LOCAL `!`/`!!` shell card: at most
+   * three physical rows — the card head, the `$ command` row, and (settled
+   * only) one authoritative outcome row. A running card never paints a fake
+   * live output; the retained bounded streams stay in the expanded body.
+   * The capture layer is untouched — this is display policy only.
    * @param card - the card container to fill.
    * @param message - the local shell tool message (name 'shell', unbounded
    *   turn — see {@link isLocalShellCard}).
@@ -21305,21 +21483,55 @@ export class TuiApp {
     const running = message.status === 'running'
     const indent = '  '
     const contentWidth = Math.max(1, width - visibleWidth(indent) - 2)
-    const budget = running ? RUNNING_PREVIEW_LINES : SETTLED_PREVIEW_VISUAL_ROWS
-    const mode = running ? 'lines' : 'visual'
-    const preview = localShellPreview(sanitizeDisplayLog(message.result), contentWidth, budget, mode)
     const rows = [truncateToWidth(head, width, '…')]
     // The command row (kimi ShellExecution layout): the local shell card's
     // `args` IS the raw command string (never JSON).
     const prompt = color.shellMode('$ ')
     rows.push(`${indent}${prompt}${truncateToWidth(color.textDim(sanitizedPhysicalLine(message.args)), contentWidth, '…')}`)
-    for (const line of preview.rows) {
-      rows.push(`${indent}${truncateToWidth(color.textDim(line), contentWidth, '…')}`)
+    if (running) {
+      card.addChild(new Text(rows.join('\n'), 0, 0))
+      return
     }
-    if (preview.hidden > 0) {
-      rows.push(color.textDim(`${indent}${localShellHiddenMarker(preview.hidden, running, preview.partial, this.expandHint('fold'))}`))
-    }
+    const body = sanitizeDisplayLog(message.result)
+    const summary = this.localShellOutcomeSummary(body, message.status)
+    const hint = this.localShellExpandHint()
+    const wantsHint = hint !== '' && summary !== '' && this.localShellHasHiddenBody(body, summary)
+    const suffixText = wantsHint ? ` (${hint} to expand)` : ''
+    const suffixWidth = suffixText === '' ? 0 : visibleWidth(suffixText)
+    // The hint and the summary share ONE physical row budget. Appending the
+    // hint after a contentWidth-truncated summary would push the row past the
+    // card width, and Text would wrap it into a fourth line.
+    const showHint = suffixText !== '' && suffixWidth + 8 <= contentWidth
+    const summaryBudget = Math.max(1, contentWidth - (showHint ? suffixWidth : 0))
+    const suffix = showHint ? color.textDim(suffixText) : ''
+    if (summary !== '') rows.push(`${indent}${truncateToWidth(color.textDim(summary), summaryBudget, '…')}${suffix}`)
     card.addChild(new Text(rows.join('\n'), 0, 0))
+  }
+
+  /** The ONE settled fact the folded shell card paints: an authoritative
+   * terminal marker when present, otherwise the first diagnostic line. */
+  private localShellOutcomeSummary(body: string, status: 'running' | 'ok' | 'error'): string {
+    const lines = body.split('\n').map(line => line.trim()).filter(line => line !== '')
+    const marker = [...lines].reverse().find(line => /^\[(?:exit \d+|signal [A-Z0-9_]+|timed out)\]$/u.test(line)
+      || line === 'sandbox denied'
+      || line === 'stdout truncated'
+      || line === 'stderr truncated')
+    if (marker !== undefined) return marker
+    if (status === 'error') return lines[0] ?? ''
+    return lines.at(-1) ?? ''
+  }
+
+  /** Whether the expanded body carries more than the single summary fact. */
+  private localShellHasHiddenBody(body: string, summary: string): boolean {
+    const meaningful = body.split('\n').map(line => line.trim()).filter(line => line !== '')
+    return meaningful.length > 1 || meaningful.some(line => line !== summary)
+  }
+
+  /** The shell card's operable expand verb for the CURRENT surface; empty
+   * when no owner can really open it (fail open, no dead hint). */
+  private localShellExpandHint(): string {
+    if (this.fullscreen !== undefined) return this.expandHint('click')
+    return this.keybindings.keyHint('app.transcript.toggleExpand') === '' ? '' : this.expandHint('fold')
   }
 
   private toolResultView(

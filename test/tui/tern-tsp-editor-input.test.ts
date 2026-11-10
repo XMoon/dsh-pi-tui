@@ -206,7 +206,7 @@ test('unknown control keys are ignored, never literal escape text', () => {
   assert.deepEqual(composer.state(), { text: '', cursor: 0, focused: false })
 })
 
-test('the port members — draft clamp, pending sink, settled no-op', () => {
+test('the port members — draft clamp and pending sink', () => {
   const { composer, pending, notices } = composerWithSinks()
   composer.setDraft('hello')
   assert.equal(composer.getDraft(), 'hello')
@@ -217,9 +217,6 @@ test('the port members — draft clamp, pending sink, settled no-op', () => {
   composer.setSubmitPending(undefined)
   assert.deepEqual(pending, ['submit', undefined])
   composer.notify('a notice')
-  assert.deepEqual(notices, ['a notice'])
-  // The B1 no-op (deliberate; the B0 P3-1 ruling): must not clear notices.
-  composer.clearSettledLocalMessages()
   assert.deepEqual(notices, ['a notice'])
 })
 

@@ -113,6 +113,16 @@ projectTranscriptStructure()
   materialize as their original Context row/cluster when a hard boundary or the
   window end arrives first. The buffer is never long-lived state and never
   creates a Process-free Work span.
+- **A Client-local Shell card is a display-only standalone boundary.** The
+  `!`/`!!` shell card is owned by the TUI mount, not by a Session message: it
+  never enters `this.messages`, `projectCompact`, `projectFocus`,
+  `projectTranscriptStructure` or a `TranscriptFolder`, and therefore never
+  contributes a Work/Activity member, Action count, timing stat, Context
+  cluster or search-corpus hit. It is materialized only by the final
+  projection layer as a standalone `kind:'message'` block at its captured
+  acceptance placement; Work/Thought folding cannot hide it and expanding that
+  folding cannot duplicate it. Its UX, retention and lifecycle contract lives
+  in [surface-behavior.md](./surface-behavior.md).
 - **Post-turn replay evidence is transcript evidence, never aggregation
   evidence.** The fold is the ONLY authority that can know a row
   MATERIALIZED after its owning turn's authoritative `turn/end` (the row's

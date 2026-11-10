@@ -238,7 +238,7 @@ function startHarness(options: { failSessionCreate?: boolean } = {}): Harness {
       clearError: () => {},
     },
     artifacts: { start: () => {} },
-    shell: { run: () => {}, interrupt: () => {}, cancelRun: () => false },
+    shell: { capturePlacement: () => ({ anchor: undefined, turn: undefined, target: 'beginning' as const, acceptedOrder: 0 }), run: () => {}, interrupt: () => {}, cancelRun: () => false },
     supportsLocalShellCards: false,
     supportsTuiBuiltinUi: false,
     retainsStaleDraftRestore: true,

@@ -76,7 +76,7 @@ test('a started Host Shell transport loss leaves a visible no-retry card and no 
     submission: { settleAck: () => {}, markDispatch: () => {} },
   })
 
-  shell.run('!!printf disconnect', undefined, finish)
+  shell.run('!!printf disconnect', undefined, finish, { anchor: undefined, turn: undefined, target: 'beginning', acceptedOrder: 0 })
   await Promise.all([cardSettled, finished])
   assert.equal(shellCalls, 1, 'the user gesture made exactly one Host execution request')
   assert.equal(card.status, 'error')
