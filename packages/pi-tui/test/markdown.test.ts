@@ -2299,6 +2299,32 @@ describe("Source-cell proof (proveSourceSpan)", () => {
 		expectPainted(markdown, source, "needle", 44);
 	});
 
+	it("keeps the ordinary block/highlight cache lifecycle across a proof after setText and a resize", () => {
+		capabilities(false);
+		const highlights: string[] = [];
+		const theme: MarkdownTheme = {
+			...defaultMarkdownTheme,
+			highlightCode: (code) => {
+				highlights.push(code);
+				return code.split("\n").map((line) => chalk.green(line));
+			},
+		};
+		const stableCode = "```js\nconst stable = 1;\n```";
+		const changed = `second paragraph needle\n\n${stableCode}`;
+		const markdown = new Markdown(`first paragraph\n\n${stableCode}`, 0, 0, theme);
+		markdown.render(80);
+		assert.strictEqual(highlights.length, 1);
+		markdown.setText(changed);
+		// No render() before the proof: proveSourceSpan performs the first post-setText normal render itself.
+		const proof = markdown.proveSourceSpan(rangeOf(changed, "needle"), 80);
+		assert.strictEqual(proof.kind, "PROVEN", JSON.stringify(proof));
+		assert.strictEqual(highlights.length, 1, "the proof-triggered render reuses the unchanged highlighted block");
+		const resized = markdown.proveSourceSpan(rangeOf(changed, "needle"), 44);
+		assert.strictEqual(resized.kind, "PROVEN", JSON.stringify(resized));
+		assert.strictEqual(highlights.length, 1, "a resize proof also reuses the unchanged highlighted block");
+	});
+
+
 	it("reuses cached normal blocks for non-intersecting blocks in a reference-definition document", () => {
 		capabilities(false);
 		const highlights: string[] = [];

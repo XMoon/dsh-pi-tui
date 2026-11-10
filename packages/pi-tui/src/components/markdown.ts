@@ -882,8 +882,10 @@ export class Markdown implements Component {
 			// A proof render reuses every cached NORMAL block that does not carry the requested range. Ordinary renders
 			// keep the fork's own rule: reference-link texts disable previous-block reuse because their definitions can
 			// change between renders; a proof-triggered priming render fills the cache from the current token tree, so
-			// its blocks are safe to reuse for this epoch.
-			const readPrevious = proofMode || (reuseBlocks && !this.primingProofBlocks);
+			// its blocks are safe to reuse for this epoch. The priming flag itself only widens what a render STORES:
+			// a proof-triggered render of a text that normally caches blocks must keep reusing its unchanged blocks
+			// (including their highlighted-code cache) exactly like an ordinary render.
+			const readPrevious = proofMode || reuseBlocks;
 			const reused = readPrevious && !proofTarget ? (blocks.get(key) ?? previousBlocks?.get(key)) : undefined;
 			const block = reused ?? { width: -1, nextTokenType, lines: [], highlightedCode: new Map() };
 			if (block.width !== width || block.nextTokenType !== nextTokenType) {
