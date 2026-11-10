@@ -20,7 +20,7 @@ import { createClientCommandRegistry } from '../../src/app/command/client-comman
 import { registerTuiCommands, type TuiCommandRunner } from '../../src/commands.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 import { TuiApp, type OwnedRunner, type TuiAppEvents } from '../../src/tui-app.ts'
-import type { AccountView, AuthorizationFlowTarget, CredentialProviderOption } from '../../src/runtime/config-port.ts'
+import type { AccountObservation, AccountObservationLease, AccountView, AuthorizationFlowTarget, CredentialProviderOption } from '../../src/runtime/config-port.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
 import { waitForFrame } from '../support/frame-wait.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
@@ -100,6 +100,11 @@ function open(width = 120, height = 40, authorizationOverride?: unknown): Harnes
   ctx.provide('commands', commands as never)
   ctx.provide('skills', { list: async () => [], get: async () => undefined, find: () => undefined, execute: async () => undefined } as never)
   const accountState: { view: AccountView } = { view: SIGNED_OUT }
+  const currentAccountLeases = new Set<AccountObservationLease>()
+  const accountObservation = (view = accountState.view, lease = {} as AccountObservationLease): AccountObservation => {
+    currentAccountLeases.add(lease)
+    return { view, lease }
+  }
   const calls: string[] = []
   /** The references the fake official store really reports as configured. */
   const configuredRefs = new Set(['DEEPSEEK_API_KEY', 'ACME_API_KEY', 'ANTHROPIC_API_KEY'])
@@ -243,26 +248,36 @@ function open(width = 120, height = 40, authorizationOverride?: unknown): Harnes
       },
       account: {
         available: () => true,
-        getState: async () => accountState.view,
+        isObservationCurrent: (lease: AccountObservationLease) => currentAccountLeases.has(lease),
+        getState: async () => accountObservation(),
         // The Account watch subscription count: a category the user only
         // browsed must never start one.
-        watch: async function* () { calls.push('account:watch'); yield accountState.view; await new Promise<void>(() => {}) },
-        getProfile: async () => null,
-        getBalance: async () => null,
+        watch: async function* (signal: AbortSignal) {
+          calls.push('account:watch')
+          const lease = {} as AccountObservationLease
+          try {
+            yield { kind: 'current' as const, observation: accountObservation(accountState.view, lease) }
+            await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true }))
+          } finally {
+            currentAccountLeases.delete(lease)
+          }
+        },
+        getProfile: async (_lease: AccountObservationLease) => null,
+        getBalance: async (_lease: AccountObservationLease) => null,
         getCallbackOrigin: () => 'http://127.0.0.1:43121',
-        startSignIn: async () => {
+        startSignIn: async (_client: unknown, lease: AccountObservationLease) => {
           calls.push('startSignIn')
           const gate = signInGate
           signInGate = undefined
           await gate
-          return accountState.view
+          return accountObservation(accountState.view, lease)
         },
-        cancelSignIn: async () => accountState.view,
-        signOut: async () => {
+        cancelSignIn: async (_id: string, lease: AccountObservationLease) => accountObservation(accountState.view, lease),
+        signOut: async (_client: unknown, lease: AccountObservationLease) => {
           calls.push('signOut')
-          return accountState.view
+          return accountObservation(accountState.view, lease)
         },
-        hasRunningAccountTasks: async () => {
+        hasRunningAccountTasks: async (_lease: AccountObservationLease) => {
           calls.push('hasRunningAccountTasks')
           return false
         },

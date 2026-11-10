@@ -92,6 +92,30 @@ async function selectAccountAction(client, actionLabel, label) {
   throw new SplitSmokeAssertionError(`${label}: action was not selected in the painted frame: ${frame}`)
 }
 
+async function confirmCurrentSignOut(client, label) {
+  let lastFrame = ''
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    await selectAccountAction(client, 'Sign out…', `${label} selects the current stored Account action`)
+    client.send('\r')
+    try {
+      await waitForCondition(async () => {
+        lastFrame = await sanitizedFrame(client)
+        return lastFrame.includes('Sign out confirmation')
+      }, `${label} current observation confirmation painted`, 4_000)
+      return
+    } catch (error) {
+      lastFrame = await sanitizedFrame(client)
+      if (!lastFrame.includes('Sign out…')) {
+        throw new SplitSmokeAssertionError(
+          `${label}: Account did not return to the explicit Sign out action after confirmation was invalidated: ${redactWebQualificationText(lastFrame)}`,
+          { cause: error },
+        )
+      }
+    }
+  }
+  throw new SplitSmokeAssertionError(`${label}: repeated current Host observations kept invalidating the confirmation: ${redactWebQualificationText(lastFrame)}`)
+}
+
 async function selectDeepseekAccountModel(client, label) {
   await submitOnRealEditor(client, '/model', `${label} opens official model picker`)
   await client.waitForScreen('Models', `${label} model picker opened`, 30_000)
@@ -477,11 +501,11 @@ export async function runF2AccountComposition(context) {
     clientB.send('r')
     await waitForCondition(async () => {
       const frame = await sanitizedFrame(clientB)
-      return frame.includes('Signed out / no stored credential') || /Host Account service is unavailable|account watch stopped/iu.test(frame)
+      return frame.includes('Signed out / no stored credential') || /Host Account (?:service is unavailable|service changed|connection changed|watch stopped|watch ended)/iu.test(frame)
     }, 'F2 explicit refresh reached an Account state or an explicit retryable failure', 20_000)
     let refreshedFrame = await sanitizedFrame(clientB)
     if (!refreshedFrame.includes('Signed out / no stored credential')) {
-      assert(/Host Account service is unavailable|account watch stopped/iu.test(refreshedFrame),
+      assert(/Host Account (?:service is unavailable|service changed|connection changed|watch stopped|watch ended)/iu.test(refreshedFrame),
         'F2 Account Refresh must show either the signed-out Host fact or an explicit retryable failure')
       clientB.send('r')
       await waitForAccountFrame(clientB, 'Signed out / no stored credential',
@@ -497,6 +521,47 @@ export async function runF2AccountComposition(context) {
     await waitForAccountFrame(clientA, 'waiting-browser', 'F2 official Account attempt reached the browser phase', trace, 30_000)
     await waitForAccountFrame(clientB, 'waiting-browser',
       'F2 offline-recovered Client B observed Client A Host attempt', trace, 30_000)
+
+    const attemptGeneration = lastSurfaceStatus(clientB)
+    assert(attemptGeneration?.transport === 'connected' && typeof attemptGeneration.generationId === 'number',
+      'F2 Client B has no live generation before the connected-to-disconnected Account attempt case')
+    await selectAccountAction(clientB, 'Cancel current attempt',
+      'F2 paint the current exact-attempt Cancel action before Connection invalidation')
+    const cancelCallsBeforeDisconnect = requests.filter(path => path === 'POST /auth-api/v0/dsh/auth_cancel').length
+    const attemptHostPid = hostReady.pid
+    process.kill(attemptHostPid, 'SIGSTOP')
+    suspendedHostPid = attemptHostPid
+    clientB.signalBusiness('SIGUSR1')
+    const disconnectedAttempt = await waitForSurfaceStatus(clientB,
+      record => record.transport !== 'connected',
+      'F2 existing Account attempt lost its authenticated Connection generation', 30_000)
+    clientB.send('\r')
+    await waitForAccountFrame(clientB, 'Host state not current',
+      'F2 current Account attempt became visibly last-known during the generation gap', trace, 20_000)
+    assert(!(await sanitizedFrame(clientB)).includes('/dsh/authorize'),
+      'F2 stale generation must not keep painting its old Host authorization URL')
+    assert(requests.filter(path => path === 'POST /auth-api/v0/dsh/auth_cancel').length === cancelCallsBeforeDisconnect,
+      'F2 Enter on the previously painted Cancel action dispatched no Host mutation while disconnected')
+    trace('account.connected-attempt-invalidated', {
+      previousGeneration: attemptGeneration.generationId,
+      transport: disconnectedAttempt.transport,
+      authCancelCalls: cancelCallsBeforeDisconnect,
+      staleAuthorizeUrlHidden: true,
+    })
+    process.kill(attemptHostPid, 'SIGCONT')
+    suspendedHostPid = undefined
+    const attemptRecovery = await waitForSurfaceStatus(clientB,
+      record => record.transport === 'connected'
+        && typeof record.generationId === 'number'
+        && record.generationId !== attemptGeneration.generationId,
+      'F2 existing Account attempt recovered a different authenticated generation', 120_000)
+    await waitForAccountFrame(clientB, 'waiting-browser',
+      'F2 replacement generation initial Host snapshot retained the same live attempt', trace, 60_000)
+    assert(attemptRecovery.generationId !== attemptGeneration.generationId,
+      'F2 Account attempt recovery reused an old Connection generation')
+    assert(requests.filter(path => path === 'POST /auth-api/v0/dsh/auth_cancel').length === cancelCallsBeforeDisconnect,
+      'F2 reconnect did not replay the stale Cancel mutation')
+
     await closeAccountPage(clientA, 'F2 A')
     await waitForAccountFrame(clientB, 'waiting-browser',
       'F2 closing Client A Account page left the Host browser attempt alive', trace, 20_000)
@@ -545,9 +610,52 @@ export async function runF2AccountComposition(context) {
     await waitForAccountFrame(clientB, 'M6 Account', 'F2 live Client received detached Host profile', trace)
     assert((await sanitizedFrame(clientB)).includes('12.50 CNY'),
       'the Account page did not paint the independent Host wallet balance')
-    await selectAccountAction(clientB, 'Sign out…', 'F2 select known-false Sign out check')
+
+    const storedGeneration = lastSurfaceStatus(clientB)
+    assert(storedGeneration?.transport === 'connected' && typeof storedGeneration.generationId === 'number',
+      'F2 Client B has no live generation before the stored-credential SignOut gap case')
+    await selectAccountAction(clientB, 'Sign out…', 'F2 paint the current stored-credential SignOut action')
+    const logoutCallsBeforeGap = requests.filter(path => path === 'POST /auth-api/v0/users/logout').length
+    const grantBeforeGap = parseYaml(readFileSync(credentialsPath, 'utf8')).records?.['deepseek-account-platform/default']
+    assert(grantBeforeGap !== undefined, 'F2 expected the confirmed Host grant before the stale SignOut attempt')
+    const storedHostPid = hostReady.pid
+    process.kill(storedHostPid, 'SIGSTOP')
+    suspendedHostPid = storedHostPid
+    clientB.signalBusiness('SIGUSR1')
+    const disconnectedStored = await waitForSurfaceStatus(clientB,
+      record => record.transport !== 'connected',
+      'F2 stored Account observation lost its authenticated Connection generation', 30_000)
     clientB.send('\r')
-    await clientB.waitForScreen('Sign out confirmation', 'F2 pre-agent Account confirmation', 30_000)
+    await waitForAccountFrame(clientB, 'Host state not current',
+      'F2 stored Account is marked last-known before a destructive action', trace, 20_000)
+    assert(!(await sanitizedFrame(clientB)).includes('Sign out confirmation'),
+      'F2 stale stored Account opened a SignOut confirmation without a current Host observation')
+    assert(requests.filter(path => path === 'POST /auth-api/v0/users/logout').length === logoutCallsBeforeGap,
+      'F2 stale SignOut sent no Platform revocation request')
+    process.kill(storedHostPid, 'SIGCONT')
+    suspendedHostPid = undefined
+    const storedRecovery = await waitForSurfaceStatus(clientB,
+      record => record.transport === 'connected'
+        && typeof record.generationId === 'number'
+        && record.generationId !== storedGeneration.generationId,
+      'F2 stored Account recovered on a different authenticated generation', 120_000)
+    await waitForAccountFrame(clientB, 'Signed in (stored credential)',
+      'F2 replacement Host baseline restored the stored grant without replaying SignOut', trace, 60_000)
+    assert(storedRecovery.generationId !== storedGeneration.generationId,
+      'F2 stored Account recovery reused the old Connection generation')
+    assert(parseYaml(readFileSync(credentialsPath, 'utf8')).records?.['deepseek-account-platform/default'] !== undefined,
+      'F2 stale SignOut removed the local Host grant before a current observation')
+    assert(requests.filter(path => path === 'POST /auth-api/v0/users/logout').length === logoutCallsBeforeGap,
+      'F2 reconnect automatically replayed a stale SignOut')
+    trace('account.connected-stored-invalidated', {
+      previousGeneration: storedGeneration.generationId,
+      disconnectedTransport: disconnectedStored.transport,
+      replacementGeneration: storedRecovery.generationId,
+      grantRetained: true,
+      logoutCalls: logoutCallsBeforeGap,
+    })
+
+    await confirmCurrentSignOut(clientB, 'F2 pre-agent Account confirmation')
     await waitForAccountFrame(clientB, 'No running account task is using this account.',
       'F2 signed-in Host task predicate returns known-false before the route switch', trace, 30_000)
     clientB.send('\x1b')
@@ -569,9 +677,7 @@ export async function runF2AccountComposition(context) {
     await openAccountPage(clientA, 'F2 A', 'credential-stored')
     await waitForAccountFrame(clientB, 'Signed in (stored credential)',
       'F2 live peer Account page retained the Host grant', trace)
-    await selectAccountAction(clientB, 'Sign out…', 'F2 select Account Sign out after Account-backed task started')
-    clientB.send('\r')
-    await clientB.waitForScreen('Sign out confirmation', 'F2 Account sign-out confirmation', 30_000)
+    await confirmCurrentSignOut(clientB, 'F2 Account sign-out confirmation')
     await waitForAccountFrame(clientB, 'A running agent is using a deepseek-account model',
       'F2 live Host running-account-task warning', trace, 30_000)
     clientB.send('\r')
@@ -595,9 +701,7 @@ export async function runF2AccountComposition(context) {
     await completeAuthorizationInChromium(postCancelAuthorizeUrl, playwrightRoot)
     await waitForAccountFrame(clientB, 'Signed in (stored credential)',
       'F2 post-cancellation Sign-in committed its Host credential', trace)
-    await selectAccountAction(clientB, 'Sign out…', 'F2 select known-false post-cancellation task check')
-    clientB.send('\r')
-    await clientB.waitForScreen('Sign out confirmation', 'F2 post-cancellation task confirmation', 30_000)
+    await confirmCurrentSignOut(clientB, 'F2 post-cancellation task confirmation')
     await waitForAccountFrame(clientB, 'No running account task is using this account.',
       'F2 Host predicate returns known-false after the running Agent was cancelled', trace, 30_000)
     clientB.send('\r')

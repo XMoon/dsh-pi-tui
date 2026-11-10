@@ -475,8 +475,9 @@ export class CredentialWorkflow {
     const account = this.deps.account
     if (!account.available()) return { available: false }
     try {
-      const view = await account.getState()
-      return { available: true, status: view.status }
+      const observation = await account.getState()
+      if (!account.isObservationCurrent(observation.lease)) return { available: true, failure: 'the Host Account observation is not current' }
+      return { available: true, status: observation.view.status }
     } catch (error) {
       return { available: true, failure: safeErrorMessage(error) }
     }

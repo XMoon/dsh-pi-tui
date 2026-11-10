@@ -14,9 +14,11 @@ import type {
   AccountBalanceOutcome,
   AccountClientMetadata,
   AccountConfig,
+  AccountObservation,
+  AccountObservationLease,
   AccountProfile,
   AccountProfileOutcome,
-  AccountView,
+  AccountWatchEvent,
   AccountWallet,
 } from '../../runtime/config-port.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
@@ -35,14 +37,15 @@ export type AccountQueryOutcome<T> =
 export interface AccountWorkspaceSource {
   available(): boolean
   callbackOrigin(): string | undefined
-  getState(): Promise<AccountView>
-  watch(signal: AbortSignal): AsyncIterable<AccountView>
-  getProfile(): Promise<AccountQueryOutcome<AccountProfile>>
-  getBalance(): Promise<AccountQueryOutcome<{ readonly value: readonly AccountWallet[]; readonly bonusWallets: readonly AccountWallet[] }>>
-  startSignIn(): Promise<AccountView>
-  cancelSignIn(id: string): Promise<AccountView>
-  signOut(): Promise<AccountView>
-  hasRunningAccountTasks(): Promise<boolean>
+  isObservationCurrent(lease: AccountObservationLease): boolean
+  getState(): Promise<AccountObservation>
+  watch(signal: AbortSignal): AsyncIterable<AccountWatchEvent>
+  getProfile(lease: AccountObservationLease): Promise<AccountQueryOutcome<AccountProfile>>
+  getBalance(lease: AccountObservationLease): Promise<AccountQueryOutcome<{ readonly value: readonly AccountWallet[]; readonly bonusWallets: readonly AccountWallet[] }>>
+  startSignIn(lease: AccountObservationLease): Promise<AccountObservation>
+  cancelSignIn(id: string, lease: AccountObservationLease): Promise<AccountObservation>
+  signOut(lease: AccountObservationLease): Promise<AccountObservation>
+  hasRunningAccountTasks(lease: AccountObservationLease): Promise<boolean>
   /** Open one official AccountView link through the Client-local opener. */
   openUrl(url: string): void
   /** Copy a non-secret URL/instruction through the Client clipboard owner. */
@@ -91,18 +94,22 @@ export class AccountWorkflow implements AccountWorkspaceSource {
     return this.deps.account.getCallbackOrigin()
   }
 
-  getState(): Promise<AccountView> {
+  isObservationCurrent(lease: AccountObservationLease): boolean {
+    return this.deps.account.isObservationCurrent(lease)
+  }
+
+  getState(): Promise<AccountObservation> {
     return this.deps.account.getState()
   }
 
-  watch(signal: AbortSignal): AsyncIterable<AccountView> {
+  watch(signal: AbortSignal): AsyncIterable<AccountWatchEvent> {
     return this.deps.account.watch(signal)
   }
 
-  async getProfile(): Promise<AccountQueryOutcome<AccountProfile>> {
+  async getProfile(lease: AccountObservationLease): Promise<AccountQueryOutcome<AccountProfile>> {
     let outcome: AccountProfileOutcome
     try {
-      outcome = await this.deps.account.getProfile(accountClientMetadata(this.deps.version))
+      outcome = await this.deps.account.getProfile(accountClientMetadata(this.deps.version), lease)
     } catch (error) {
       if (error instanceof SupersededReadError) return { status: 'superseded' }
       return { status: 'failed', reason: safeErrorMessage(error) }
@@ -112,10 +119,10 @@ export class AccountWorkflow implements AccountWorkspaceSource {
     return { status: 'ready', value: outcome.value }
   }
 
-  async getBalance(): Promise<AccountQueryOutcome<{ readonly value: readonly AccountWallet[]; readonly bonusWallets: readonly AccountWallet[] }>> {
+  async getBalance(lease: AccountObservationLease): Promise<AccountQueryOutcome<{ readonly value: readonly AccountWallet[]; readonly bonusWallets: readonly AccountWallet[] }>> {
     let outcome: AccountBalanceOutcome
     try {
-      outcome = await this.deps.account.getBalance(accountClientMetadata(this.deps.version))
+      outcome = await this.deps.account.getBalance(accountClientMetadata(this.deps.version), lease)
     } catch (error) {
       if (error instanceof SupersededReadError) return { status: 'superseded' }
       return { status: 'failed', reason: safeErrorMessage(error) }
@@ -125,20 +132,20 @@ export class AccountWorkflow implements AccountWorkspaceSource {
     return { status: 'ready', value: { value: outcome.value, bonusWallets: outcome.bonusWallets } }
   }
 
-  startSignIn(): Promise<AccountView> {
-    return this.deps.account.startSignIn(accountClientMetadata(this.deps.version))
+  startSignIn(lease: AccountObservationLease): Promise<AccountObservation> {
+    return this.deps.account.startSignIn(accountClientMetadata(this.deps.version), lease)
   }
 
-  cancelSignIn(id: string): Promise<AccountView> {
-    return this.deps.account.cancelSignIn(id)
+  cancelSignIn(id: string, lease: AccountObservationLease): Promise<AccountObservation> {
+    return this.deps.account.cancelSignIn(id, lease)
   }
 
-  signOut(): Promise<AccountView> {
-    return this.deps.account.signOut(accountClientMetadata(this.deps.version))
+  signOut(lease: AccountObservationLease): Promise<AccountObservation> {
+    return this.deps.account.signOut(accountClientMetadata(this.deps.version), lease)
   }
 
-  hasRunningAccountTasks(): Promise<boolean> {
-    return this.deps.account.hasRunningAccountTasks()
+  hasRunningAccountTasks(lease: AccountObservationLease): Promise<boolean> {
+    return this.deps.account.hasRunningAccountTasks(lease)
   }
 
   openUrl(url: string): void {

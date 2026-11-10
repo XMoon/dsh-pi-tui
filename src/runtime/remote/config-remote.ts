@@ -62,6 +62,9 @@ import type {
   AccountBalanceOutcome,
   AccountClientMetadata,
   AccountConfig,
+  AccountObservation,
+  AccountObservationLease,
+  AccountWatchEvent,
   AccountProfile,
   AccountProfileOutcome,
   AccountView,
@@ -2127,6 +2130,12 @@ class RemoteAccountConfig implements AccountConfig {
   private readonly generation: RemoteConnectionGenerationSource
   private readonly lifetime = new AbortController()
   private readonly streams = new Map<RemoteAccountStreamHandle<unknown>, () => void>()
+  private readonly observations = new WeakMap<object, {
+    readonly generation: RemoteConnectionGeneration
+    readonly epoch: number
+    active: boolean
+  }>()
+  private observationEpoch = 0
   private disposed = false
 
   constructor(
@@ -2137,6 +2146,36 @@ class RemoteAccountConfig implements AccountConfig {
     this.remote = remote
     this.trustedHostOrigin = trustedHostOrigin
     this.generation = generation
+  }
+
+  private observe(view: AccountView, generation: RemoteConnectionGeneration, lease?: AccountObservationLease): AccountObservation {
+    const authority = lease ?? ({} as AccountObservationLease)
+    this.observations.set(authority, { generation, epoch: this.observationEpoch, active: true })
+    return { view, lease: authority }
+  }
+
+  private invalidateObservations(): void {
+    this.observationEpoch += 1
+  }
+
+  private invalidateObservation(lease: AccountObservationLease): void {
+    const record = this.observations.get(lease)
+    if (record !== undefined) record.active = false
+  }
+
+  private assertObservation(lease: AccountObservationLease, method: string): RemoteConnectionGeneration {
+    const record = this.observations.get(lease)
+    if (this.disposed || record === undefined || !record.active || record.epoch !== this.observationEpoch
+      || !Object.is(record.generation, this.generation.getSnapshot())) {
+      throw new SupersededReadError(`remote account.${method} has no current Host observation`)
+    }
+    return record.generation
+  }
+
+  isObservationCurrent(lease: AccountObservationLease): boolean {
+    const record = this.observations.get(lease)
+    return !this.disposed && record !== undefined && record.active && record.epoch === this.observationEpoch
+      && Object.is(record.generation, this.generation.getSnapshot())
   }
 
   available(): boolean {
@@ -2174,27 +2213,39 @@ class RemoteAccountConfig implements AccountConfig {
     return result.value
   }
 
-  private call<T>(
+  private async callForObservation<T>(
     method: string,
+    lease: AccountObservationLease,
     operation: (remote: RemoteAccountRemotes) => Promise<RemoteResultLike<T>>,
   ): Promise<T> {
-    return this.callAt(method, this.captureGeneration(method), operation)
+    const epoch = this.observationEpoch
+    const generation = this.assertObservation(lease, method)
+    const value = await this.callAt(method, generation, operation)
+    this.assertObservation(lease, method)
+    if (epoch !== this.observationEpoch) throw new SupersededReadError(`remote account.${method} was superseded by Account observation invalidation`)
+    return value
   }
 
-  async getState(): Promise<AccountView> {
-    return accountViewOf(await this.call('getState', remote => remote.getState()))
+  async getState(): Promise<AccountObservation> {
+    const generation = this.captureGeneration('getState')
+    const epoch = this.observationEpoch
+    const value = await this.callAt('getState', generation, remote => remote.getState())
+    if (epoch !== this.observationEpoch) throw new SupersededReadError('remote account.getState was superseded by Account observation invalidation')
+    return this.observe(accountViewOf(value), generation)
   }
 
-  async getProfile(client: AccountClientMetadata): Promise<AccountProfileOutcome> {
-    return accountProfileOutcomeOf(await this.call(
+  async getProfile(client: AccountClientMetadata, lease: AccountObservationLease): Promise<AccountProfileOutcome> {
+    return accountProfileOutcomeOf(await this.callForObservation(
       'getProfile',
+      lease,
       remote => remote.getProfile({ ...client }),
     ))
   }
 
-  async getBalance(client: AccountClientMetadata): Promise<AccountBalanceOutcome> {
-    return accountBalanceOutcomeOf(await this.call(
+  async getBalance(client: AccountClientMetadata, lease: AccountObservationLease): Promise<AccountBalanceOutcome> {
+    return accountBalanceOutcomeOf(await this.callForObservation(
       'getBalance',
+      lease,
       remote => remote.getBalance({ ...client }),
     ))
   }
@@ -2241,14 +2292,14 @@ class RemoteAccountConfig implements AccountConfig {
    * watch. The Host's watch starts with its complete current AccountView, so no
    * client-side state/cache is needed for recovery.
    */
-  watch(signal: AbortSignal): AsyncIterable<AccountView> {
+  watch(signal: AbortSignal): AsyncIterable<AccountWatchEvent> {
     this.captureGeneration('watch')
     if (signal.aborted || this.lifetime.signal.aborted) {
       throw new SupersededReadError('remote account.watch was aborted before dispatch')
     }
     const watchSignal = AbortSignal.any([signal, this.lifetime.signal])
     const owner = this
-    return (async function* accountWatch(): AsyncGenerator<AccountView> {
+    return (async function* accountWatch(): AsyncGenerator<AccountWatchEvent> {
       let previous = owner.captureGeneration('watch')
       while (!watchSignal.aborted && !owner.disposed) {
         let generation = owner.generation.getSnapshot()
@@ -2260,25 +2311,54 @@ class RemoteAccountConfig implements AccountConfig {
           previous = generation
         }
         owner.assertWatchCurrent()
+        const lease = {} as AccountObservationLease
+        owner.observations.set(lease, { generation, epoch: owner.observationEpoch, active: true })
         const handle = owner.requireRemote('watch').watch(watchSignal)
         const abort = (): void => { owner.releaseStream(handle) }
         owner.streams.set(handle, () => watchSignal.removeEventListener('abort', abort))
         watchSignal.addEventListener('abort', abort, { once: true })
         let reconnect = false
+        let resolveGenerationChanged!: () => void
+        const generationChanged = new Promise<void>(resolve => { resolveGenerationChanged = resolve })
+        const unsubscribeGeneration = owner.generation.subscribe(() => {
+          if (Object.is(generation, owner.generation.getSnapshot())) return
+          owner.invalidateObservations()
+          resolveGenerationChanged()
+        })
+        const iterator = handle[Symbol.asyncIterator]()
         try {
-          for await (const value of handle) {
-            if (watchSignal.aborted || owner.disposed) return
-            if (!Object.is(generation, owner.generation.getSnapshot())) {
+          while (!watchSignal.aborted && !owner.disposed) {
+            const nextResult = iterator.next().then(
+              result => ({ kind: 'next' as const, result }),
+              error => ({ kind: 'error' as const, error }),
+            )
+            const winner = await Promise.race([
+              nextResult,
+              generationChanged.then(() => ({ kind: 'generation-changed' as const })),
+            ])
+            if (winner.kind === 'generation-changed') {
               reconnect = true
+              yield { kind: 'invalidated', reason: 'connection-changed' }
               break
             }
-            yield accountViewOf(value)
+            if (winner.kind === 'error') throw winner.error
+            if (!Object.is(generation, owner.generation.getSnapshot())) {
+              reconnect = true
+              yield { kind: 'invalidated', reason: 'connection-changed' }
+              break
+            }
+            if (winner.result.done === true) break
+            if (watchSignal.aborted || owner.disposed) return
+            yield { kind: 'current', observation: { view: accountViewOf(winner.result.value), lease } }
           }
         } catch (error) {
           if (watchSignal.aborted || owner.disposed) return
+          owner.invalidateObservations()
           if (!Object.is(generation, owner.generation.getSnapshot())) {
             reconnect = true
+            yield { kind: 'invalidated', reason: 'connection-changed' }
           } else if (isRemoteStreamCarrierFailure(error)) {
+            yield { kind: 'invalidated', reason: 'watch-failed' }
             const reconnected = await owner.waitForGeneration(generation, watchSignal)
             if (!reconnected || watchSignal.aborted || owner.disposed) return
             reconnect = true
@@ -2286,6 +2366,8 @@ class RemoteAccountConfig implements AccountConfig {
             throw error
           }
         } finally {
+          unsubscribeGeneration()
+          owner.invalidateObservation(lease)
           owner.releaseStream(handle)
         }
         if (watchSignal.aborted || owner.disposed) return
@@ -2305,7 +2387,9 @@ class RemoteAccountConfig implements AccountConfig {
           continue
         }
         if (reconnect) throw new Error('remote account.watch ended while its Host generation remained current')
-        throw new Error('remote account.watch ended before the page stopped observing')
+        owner.invalidateObservations()
+        yield { kind: 'invalidated', reason: 'watch-ended' }
+        return
       }
     })()
   }
@@ -2315,30 +2399,39 @@ class RemoteAccountConfig implements AccountConfig {
     return this.trustedHostOrigin
   }
 
-  async startSignIn(client: AccountClientMetadata): Promise<AccountView> {
-    const generation = this.captureGeneration('startSignIn')
+  async startSignIn(client: AccountClientMetadata, lease: AccountObservationLease): Promise<AccountObservation> {
+    const generation = this.assertObservation(lease, 'startSignIn')
     const origin = this.trustedHostOrigin
     if (!canonicalAccountCallbackOrigin(origin)) {
       throw new Error('the authenticated Host browser callback listener is unavailable')
     }
-    const result = await this.callAt(
+    const result = await this.callForObservation(
       'startSignIn',
-      generation,
+      lease,
       remote => remote.startSignIn({ ...client }, origin, 'web'),
     )
-    return accountViewOf(result)
+    if (!Object.is(generation, this.generation.getSnapshot())) {
+      throw new SupersededReadError('remote account.startSignIn result belongs to a replaced Host generation')
+    }
+    return { view: accountViewOf(result), lease }
   }
 
-  async cancelSignIn(id: string): Promise<AccountView> {
-    return accountViewOf(await this.call('cancelSignIn', remote => remote.cancelSignIn(id)))
+  async cancelSignIn(id: string, lease: AccountObservationLease): Promise<AccountObservation> {
+    const result = await this.callForObservation('cancelSignIn', lease, remote => remote.cancelSignIn(id))
+    return { view: accountViewOf(result), lease }
   }
 
-  async signOut(client: AccountClientMetadata): Promise<AccountView> {
-    return accountViewOf(await this.call('signOut', remote => remote.signOut({ ...client })))
+  async signOut(client: AccountClientMetadata, lease: AccountObservationLease): Promise<AccountObservation> {
+    const result = await this.callForObservation('signOut', lease, remote => remote.signOut({ ...client }))
+    return { view: accountViewOf(result), lease }
   }
 
-  async hasRunningAccountTasks(): Promise<boolean> {
-    const running = await this.call('hasRunningAccountTasks', remote => remote.hasRunningAccountTasks())
+  async hasRunningAccountTasks(lease: AccountObservationLease): Promise<boolean> {
+    const running = await this.callForObservation(
+      'hasRunningAccountTasks',
+      lease,
+      remote => remote.hasRunningAccountTasks(),
+    )
     if (typeof running !== 'boolean') throw new Error('remote account.hasRunningAccountTasks returned an invalid result')
     return running
   }

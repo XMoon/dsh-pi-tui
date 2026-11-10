@@ -342,6 +342,7 @@ function workflowOver(providers: ProviderProfileConfig): CredentialWorkflow {
     authorization: { available: () => false, listTargets: () => [], begin: async () => ({ kind: 'unavailable' as const }), onEvent: () => () => {}, respond: async () => {}, cancel: async () => {} },
     account: {
       available: () => false,
+      isObservationCurrent: () => false,
       getState: async () => { throw new Error('unused') },
       getProfile: async () => null,
       getBalance: async () => null,
