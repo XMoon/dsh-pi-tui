@@ -742,8 +742,13 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
       // lands. No match leaves the filtered picker with the argument as the
       // live search query (content search included). Never a second listing.
       aliasHandlers: {
-        resume: (invocation) => {
+        resume: async (invocation) => {
           const raw = invocation.rawInput.trim()
+          // The ARGUMENT-FREE `/resume` is the same sessionless Browser entry
+          // as `/sessions`: it must not capture a transient no-Current subject
+          // before the mount preflight commits. An explicit argument keeps its
+          // direct match path.
+          if (raw === '' && runner.captureSessionScope().sessionId === undefined) await runner.awaitWorkspacePreflight?.()
           return openSessionPicker(invocation, {
             header: 'resume',
             directMatchQuery: raw === '' ? undefined : raw,

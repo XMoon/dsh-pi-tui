@@ -242,41 +242,43 @@ async function createSessionViaNew(fixture: DirectTspFixture): Promise<string> {
 }
 
 test('the sessionless Browser open and Folder New wait for the pending mount preflight', async (t) => {
-  const life = (await import('../support/temp-lifecycle.ts')).testLifecycle(t)
-  const fixture = await createDirectTspFixture(life, { sessionBrowser: true, holdWorkspacePreflight: true })
-  try {
-    await waitForInputDelivery(fixture.pane)
-    await waitFor('the sessionless Welcome owns Main', () => welcomeMainPresented(fixture), 25_000)
-    await submitInput(fixture, '/sessions')
-    // The mount preflight is still parked. The sessionless open must wait for
-    // it instead of opening a transient no-Current tree. Bounded observation
-    // window: the parked preflight cannot settle on its own.
-    await directSettle(800)
-    assert.equal(pickerNode(fixture.pane, 'session-browser-'), undefined,
-      'the Browser open waits for the in-flight mount preflight')
-    assert.deepEqual(await sessionHeaders(fixture), [], 'no Session is created while the preflight is parked')
-    fixture.releaseWorkspacePreflight!()
-    const BROWSER = 'session-browser-'
-    await waitFor('the Browser opens after the preflight settles', () => pickerNode(fixture.pane, BROWSER) !== undefined, 25_000)
-    const browserId = pickerNode(fixture.pane, BROWSER)!.id
-    const folderId = (): string | undefined => ((pickerProps(fixture.pane, BROWSER).items ?? []) as Array<{ readonly id?: unknown }>)
-      .map(item => String(item.id)).find(id => id.startsWith('workspace:'))
-    await waitFor('the confirmed official Folder is listed', () => folderId() !== undefined, 25_000)
-    sendSelect(fixture.pane, folderId()!, browserId)
-    await waitFor('the Folder is selected', () => pickerProps(fixture.pane, BROWSER).selected === folderId(), 25_000)
-    const newSession = (): { readonly id?: unknown; readonly disabled?: unknown } | undefined =>
-      ((pickerProps(fixture.pane, BROWSER).actions ?? []) as Array<{ readonly id?: unknown; readonly disabled?: unknown }>)
-        .find(action => String(action.id).startsWith('new-session'))
-    await waitFor('the Folder action is offered', () => newSession() !== undefined && newSession()!.disabled === undefined, 25_000)
-    sendAction(fixture.pane, String(newSession()!.id), undefined, browserId)
-    const fresh = await waitForNewSessionHeaders(fixture, 'the Folder New Session after the preflight settles', [])
-    assert.equal(fresh.length, 1, 'the Folder New commit creates exactly ONE Session')
-    await waitFor('the committed Folder New retires the Browser', () => pickerNode(fixture.pane, BROWSER) === undefined, 25_000)
-    assert.ok(!dockNotices(fixture).some(text => text.includes('fresh session creation failed')),
-      'no spurious superseded refusal was produced')
-  } finally {
-    // reason: the fixture's OWN teardown drain, not a wait for a fact
-    await fixture.settle()
+  for (const entry of ['/sessions', '/resume'] as const) {
+    const life = (await import('../support/temp-lifecycle.ts')).testLifecycle(t)
+    const fixture = await createDirectTspFixture(life, { sessionBrowser: true, holdWorkspacePreflight: true })
+    try {
+      await waitForInputDelivery(fixture.pane)
+      await waitFor('the sessionless Welcome owns Main', () => welcomeMainPresented(fixture), 25_000)
+      await submitInput(fixture, entry)
+      // The mount preflight is still parked. The sessionless open must wait for
+      // it instead of opening a transient no-Current tree. Bounded observation
+      // window: the parked preflight cannot settle on its own.
+      await directSettle(800)
+      assert.equal(pickerNode(fixture.pane, 'session-browser-'), undefined,
+        `${entry} waits for the in-flight mount preflight before opening the Browser`)
+      assert.deepEqual(await sessionHeaders(fixture), [], `no Session is created while ${entry}'s preflight is parked`)
+      fixture.releaseWorkspacePreflight!()
+      const BROWSER = 'session-browser-'
+      await waitFor('the Browser opens after the preflight settles', () => pickerNode(fixture.pane, BROWSER) !== undefined, 25_000)
+      const browserId = pickerNode(fixture.pane, BROWSER)!.id
+      const folderId = (): string | undefined => ((pickerProps(fixture.pane, BROWSER).items ?? []) as Array<{ readonly id?: unknown }>)
+        .map(item => String(item.id)).find(id => id.startsWith('workspace:'))
+      await waitFor('the confirmed official Folder is listed', () => folderId() !== undefined, 25_000)
+      sendSelect(fixture.pane, folderId()!, browserId)
+      await waitFor('the Folder is selected', () => pickerProps(fixture.pane, BROWSER).selected === folderId(), 25_000)
+      const newSession = (): { readonly id?: unknown; readonly disabled?: unknown } | undefined =>
+        ((pickerProps(fixture.pane, BROWSER).actions ?? []) as Array<{ readonly id?: unknown; readonly disabled?: unknown }>)
+          .find(action => String(action.id).startsWith('new-session'))
+      await waitFor('the Folder action is offered', () => newSession() !== undefined && newSession()!.disabled === undefined, 25_000)
+      sendAction(fixture.pane, String(newSession()!.id), undefined, browserId)
+      const fresh = await waitForNewSessionHeaders(fixture, `${entry} Folder New Session after the preflight settles`, [])
+      assert.equal(fresh.length, 1, 'the Folder New commit creates exactly ONE Session')
+      await waitFor('the committed Folder New retires the Browser', () => pickerNode(fixture.pane, BROWSER) === undefined, 25_000)
+      assert.ok(!dockNotices(fixture).some(text => text.includes('fresh session creation failed')),
+        'no spurious superseded refusal was produced')
+    } finally {
+      // reason: the fixture's OWN teardown drain, not a wait for a fact
+      await fixture.settle()
+    }
   }
 })
 
