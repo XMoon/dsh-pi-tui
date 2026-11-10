@@ -386,6 +386,81 @@ export async function runHostUserShellF1(context) {
     await completeFromTui(clientB, '!git che', 'checkout', 'client-only.txt', 'F1 Host git subcommand completion')
     await completeFromTui(clientB, '!cat host-path-', 'host-path-only.txt', 'client-only.txt', 'F1 Host path completion')
 
+    const scopeStartFile = join(hostDir, 'f1-scope-run-started.txt')
+    const scopePidFile = join(hostDir, 'f1-scope-run-bash-pid.txt')
+    const scopeReleaseFile = join(hostDir, 'f1-scope-run-release.txt')
+    const scopeFinishFile = join(hostDir, 'f1-scope-run-finished.txt')
+    const scopeStartedMarker = 'F1_SCOPE_A_STARTED_20261109'
+    const scopeFinishedMarker = 'F1_SCOPE_A_FINISHED_20261109'
+    assert(!existsSync(scopeStartFile) && !existsSync(scopeReleaseFile) && !existsSync(scopeFinishFile),
+      'F1 scope-switch barrier files start absent')
+    const beforeScopeA = hostUserTexts(hostSessionEvents(dshHome, sessionId) ?? [])
+    const beforeScopeB = hostUserTexts(hostSessionEvents(dshHome, otherSessionId) ?? [])
+    let scopeReleaseWritten = false
+    let scopeShellPid
+    try {
+      await waitForComposerMode(clientA, 'prompt', 'F1 scope-switch prompt preparation')
+      clientA.send('!')
+      await waitForComposerMode(clientA, '!', 'F1 scope-switch shell-mode activation')
+      clientA.send(`printf '%s\\n' "${'$'}BASHPID" > ${shellQuote(scopePidFile)}; touch ${shellQuote(scopeStartFile)}; printf '${scopeStartedMarker}\\n'; while [ ! -f ${shellQuote(scopeReleaseFile)} ]; do sleep 0.05; done; printf '${scopeFinishedMarker}\\n'; touch ${shellQuote(scopeFinishFile)}`)
+      // The command's own pid file (awaited below) is the authoritative start
+      // fact; the composer seat can be scrolled out of the captured viewport,
+      // so its draft text is not a reliable witness here.
+      clientA.send('\r')
+      // The run's own barrier files are the authoritative start fact. The
+      // captured viewport can no longer show the marker on a long transcript.
+      await waitForCondition(() => existsSync(scopeStartFile) && existsSync(scopePidFile)
+        && readFileSync(scopePidFile, 'utf8').trim() !== '',
+      'F1 Shell captured Session A and started on Host', 30_000)
+      scopeShellPid = Number(readFileSync(scopePidFile, 'utf8').trim())
+      assert(Number.isInteger(scopeShellPid) && scopeShellPid > 0, 'F1 scope-switch probe recorded its Host Bash pid')
+      assert(existsSync(scopeStartFile), 'the Host Session A Shell is running before the navigation')
+      clientA.send(`/resume ${otherSessionId}\r`)
+      const switched = await clientA.waitFor(
+        record => record.m4b2s === 'surface-status' && record.sessionOpen === true && record.openSessionId === otherSessionId,
+        'F1 Client A commits Session B while its Shell is still running',
+        60_000,
+      )
+      assert(switched.openSessionId === otherSessionId, 'the live Client selection changed from Session A to Session B')
+      writeFileSync(scopeReleaseFile, 'release\\n', { mode: 0o600 })
+      scopeReleaseWritten = true
+      await waitForCondition(() => existsSync(scopeFinishFile),
+        'F1 Host Session A Shell crosses its release barrier and terminates', 30_000)
+      try {
+        await clientA.waitForScreen('the session changed while the command ran — the output was not submitted',
+          'F1 stale Shell result is refused after the Session switch', 30_000)
+      } catch (error) {
+        throw new SplitSmokeAssertionError(`F1 captured-A shell produced no visible stale-result refusal: ${String(error)}; frameTail=${(await clientA.viewport()).slice(-16).join('\\n')}`)
+      }
+    } finally {
+      if (!scopeReleaseWritten) writeFileSync(scopeReleaseFile, 'release\\n', { mode: 0o600 })
+    }
+    for (let attempt = 0; attempt < 200 && alive(scopeShellPid); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 50))
+    }
+    assert(!alive(scopeShellPid), "the scope-switch Shell's official process range is quiescent")
+    assert(existsSync(scopeFinishFile), 'the Host Shell crossed the explicit release barrier and completed')
+    const afterScopeA = hostUserTexts(hostSessionEvents(dshHome, sessionId) ?? [])
+    const afterScopeB = hostUserTexts(hostSessionEvents(dshHome, otherSessionId) ?? [])
+    assert(afterScopeA.length === beforeScopeA.length && !afterScopeA.some(text => text.includes(scopeFinishedMarker)),
+      'the stale Shell result is not written back to its original Session after the scope changes')
+    assert(afterScopeB.length === beforeScopeB.length && !afterScopeB.some(text => text.includes(scopeFinishedMarker)),
+      'the stale Shell result is never retargeted into the newly selected Session')
+
+    // The remaining probes act on Session A, so return Client A to it.
+    clientA.send(`/resume ${sessionId}\r`)
+    await clientA.waitFor(
+      record => record.m4b2s === 'surface-status' && record.sessionOpen === true && record.openSessionId === sessionId,
+      'F1 Client A returns to Session A after the scope switch',
+      60_000,
+    )
+    // A session commit repaints the seat; prove the editor accepts input again
+    // with a harmless round trip instead of assuming the painted glyph is live.
+    clientA.send('x')
+    await waitForComposerText(clientA, 'x', 'F1 Client A editor accepts input after the resume')
+    clientA.send('\x7f')
+    await waitForComposerMode(clientA, 'prompt', 'F1 Client A prompt restored after the resume')
+
     // Start a confirmed Remote user-shell command, then drop only Client A's
     // real Gateway mux socket after its first output reaches the PTY. The
     // process writes a one-byte Host side-effect before sleep and a second
@@ -402,7 +477,11 @@ export async function runHostUserShellF1(context) {
     // writes can fuse keys on the PTY decoder, so each step is proven by the
     // painted composer before the next byte is sent.
     await waitForComposerMode(clientA, 'prompt', 'F1 disconnect prompt preparation')
-    clientA.send('!!')
+    // Two SEPARATE `!` writes, each proven by its painted mode: a fused `!!`
+    // write can be lost/dropped right after a session commit settles.
+    clientA.send('!')
+    await waitForComposerMode(clientA, '!', 'F1 disconnect shell-context activation')
+    clientA.send('!')
     await waitForComposerMode(clientA, '!!', 'F1 disconnect shell-local activation')
     const disconnectCommand = `printf x >> ${shellQuote(disconnectCounter)}; printf '%s\\n' "$BASHPID" > ${shellQuote(disconnectPidPath)}; printf '${disconnectMarker}\\n'; sleep 30; printf finished > ${shellQuote(disconnectFinish)}`
     clientA.send(disconnectCommand)
@@ -471,71 +550,6 @@ export async function runHostUserShellF1(context) {
     await clientB.waitForScreen('f1-shell answer', 'F1 Client B Host result follow-up', 30_000)
     assert(!existsSync(cancelFile), 'cancelling Client A must terminate its command tree before the side effect')
 
-    const scopeStartFile = join(hostDir, 'f1-scope-run-started.txt')
-    const scopePidFile = join(hostDir, 'f1-scope-run-bash-pid.txt')
-    const scopeReleaseFile = join(hostDir, 'f1-scope-run-release.txt')
-    const scopeFinishFile = join(hostDir, 'f1-scope-run-finished.txt')
-    const scopeStartedMarker = 'F1_SCOPE_A_STARTED_20261109'
-    const scopeFinishedMarker = 'F1_SCOPE_A_FINISHED_20261109'
-    assert(!existsSync(scopeStartFile) && !existsSync(scopeReleaseFile) && !existsSync(scopeFinishFile),
-      'F1 scope-switch barrier files start absent')
-    const beforeScopeA = hostUserTexts(hostSessionEvents(dshHome, sessionId) ?? [])
-    const beforeScopeB = hostUserTexts(hostSessionEvents(dshHome, otherSessionId) ?? [])
-    let scopeReleaseWritten = false
-    let scopeShellPid
-    try {
-      // A gesture accepted while the previous turn is still submitting is
-      // QUEUED, so its command would not start before the release barrier.
-      // Wait for the product's own pending rows to clear first.
-      await waitForCondition(async () => {
-        const frame = (await clientA.viewport()).join('\n')
-        return !frame.includes('Submitting…') && !frame.includes('Queued…')
-      }, 'F1 scope-switch Client A idle for submission', 60_000)
-      await waitForComposerMode(clientA, 'prompt', 'F1 scope-switch prompt preparation')
-      clientA.send('!')
-      await waitForComposerMode(clientA, '!', 'F1 scope-switch shell-mode activation')
-      clientA.send(`printf '%s\\n' "${'$'}BASHPID" > ${shellQuote(scopePidFile)}; touch ${shellQuote(scopeStartFile)}; printf '${scopeStartedMarker}\\n'; while [ ! -f ${shellQuote(scopeReleaseFile)} ]; do sleep 0.05; done; printf '${scopeFinishedMarker}\\n'; touch ${shellQuote(scopeFinishFile)}`)
-      // The command's own pid file (awaited below) is the authoritative start
-      // fact; the composer seat can be scrolled out of the captured viewport,
-      // so its draft text is not a reliable witness here.
-      clientA.send('\r')
-      await clientA.waitForScreen(scopeStartedMarker, 'F1 Shell captured Session A and started on Host', 30_000)
-      await waitForCondition(() => existsSync(scopePidFile) && readFileSync(scopePidFile, 'utf8').trim() !== '',
-        'F1 scope-switch probe recorded its Host pid', 30_000)
-      scopeShellPid = Number(readFileSync(scopePidFile, 'utf8').trim())
-      assert(Number.isInteger(scopeShellPid) && scopeShellPid > 0, 'F1 scope-switch probe recorded its Host Bash pid')
-      assert(existsSync(scopeStartFile), 'the Host Session A Shell is running before the navigation')
-      clientA.send(`/resume ${otherSessionId}\r`)
-      const switched = await clientA.waitFor(
-        record => record.m4b2s === 'surface-status' && record.sessionOpen === true && record.openSessionId === otherSessionId,
-        'F1 Client A commits Session B while its Shell is still running',
-        60_000,
-      )
-      assert(switched.openSessionId === otherSessionId, 'the live Client selection changed from Session A to Session B')
-      writeFileSync(scopeReleaseFile, 'release\\n', { mode: 0o600 })
-      scopeReleaseWritten = true
-      await waitForCondition(() => existsSync(scopeFinishFile),
-        'F1 Host Session A Shell crosses its release barrier and terminates', 30_000)
-      try {
-        await clientA.waitForScreen('the session changed while the command ran — the output was not submitted',
-          'F1 stale Shell result is refused after the Session switch', 30_000)
-      } catch (error) {
-        throw new SplitSmokeAssertionError(`F1 captured-A shell produced no visible stale-result refusal: ${String(error)}; frameTail=${(await clientA.viewport()).slice(-16).join('\\n')}`)
-      }
-    } finally {
-      if (!scopeReleaseWritten) writeFileSync(scopeReleaseFile, 'release\\n', { mode: 0o600 })
-    }
-    for (let attempt = 0; attempt < 200 && alive(scopeShellPid); attempt += 1) {
-      await new Promise(resolve => setTimeout(resolve, 50))
-    }
-    assert(!alive(scopeShellPid), "the scope-switch Shell's official process range is quiescent")
-    assert(existsSync(scopeFinishFile), 'the Host Shell crossed the explicit release barrier and completed')
-    const afterScopeA = hostUserTexts(hostSessionEvents(dshHome, sessionId) ?? [])
-    const afterScopeB = hostUserTexts(hostSessionEvents(dshHome, otherSessionId) ?? [])
-    assert(afterScopeA.length === beforeScopeA.length && !afterScopeA.some(text => text.includes(scopeFinishedMarker)),
-      'the stale Shell result is not written back to its original Session after the scope changes')
-    assert(afterScopeB.length === beforeScopeB.length && !afterScopeB.some(text => text.includes(scopeFinishedMarker)),
-      'the stale Shell result is never retargeted into the newly selected Session')
 
     // Bounded one-shot output: both streams exceed the executor's in-memory
     // cap, so the Host must keep explicit tails, mark truncation truthfully,
