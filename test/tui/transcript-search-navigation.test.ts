@@ -644,6 +644,11 @@ test('navigation: an IP-literal context never reaches the painted Source-only ro
     { line: 'connect 8.8.8.8 then needle service', safe: false },
     { line: 'connect ::1 then needle service', safe: false },
     { line: 'connect fe80::1 then needle service', safe: false },
+    // Windows DRIVE-RELATIVE paths have no separator at all: `C:needle` is a
+    // path on drive C's current directory, not prose.
+    { line: 'open C:needle service', safe: false },
+    { line: 'open C:needle', safe: false },
+    { line: 'open c:needle', safe: false },
     { line: 'needle compacted middle', safe: true },
   ] as const
   for (const { line, safe } of cases) {
