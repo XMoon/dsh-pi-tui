@@ -937,6 +937,29 @@ source-local offsets are ephemeral and never stable match identity. Any width,
 source text or layout epoch change re-proves from scratch, and a proven
 selection must not re-enable a reveal the user collapsed.
 
+Markdown cards have exactly ONE source-to-painted-cell authority: the vendored
+`Markdown` component's one-shot `proveSourceSpan(range, width)`. The range is
+component-local UTF-16 over that component's OWN sanitized source (never Session
+raw), and its segments are relative to `Markdown.render(width)`. The component
+re-runs its own parser and renderer with disposable zero-width sentinels around
+the single emitted piece of the target leaf and accepts the proof only when the
+sentinel-stripped rows are byte-identical to the normal render for the same
+source, width, theme and capabilities AND exactly one leaf emitted the requested
+range. It proves ordinary inline text (emphasis, headings, lists, quotes and one
+occurrence that wraps across painted rows), link labels, the printed fallback
+destination when OSC 8 hyperlinks are unavailable, literal `renderLatex:false`
+math, and fenced code whose painted line still equals the source line. A hidden
+link/definition destination is reported as not painted; transformed glyphs,
+unclosed math, block HTML, composite/split owners, grapheme splits and stale
+capability epochs stay explicitly unproven instead of falling back to a visible
+homonym. The proof keeps no stored source map and never changes normal render
+bytes, caches or link targets: its state exists only inside one synchronous
+call, so a text, width, theme or capability change requires a fresh proof. Host
+Card composition (bullet/indent/preceding-segment offsets), composite/plugin
+owner decisions and Full-search selection remain Host responsibilities; a
+component-local proof is embeddable evidence, not a claim that Assistant Full
+Exact is complete.
+
 ## Hardening guarantees
 
 These guarantees hold under bad input, long sessions and rapid live updates:

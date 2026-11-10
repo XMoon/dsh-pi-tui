@@ -4,9 +4,10 @@ import { setFlagsFromString } from "node:v8";
 import { runInNewContext } from "node:vm";
 import type { Terminal as XtermTerminalType } from "@xterm/headless";
 import { Chalk } from "chalk";
-import { Markdown, type MarkdownTheme } from "../src/components/markdown.ts";
+import { Markdown, type MarkdownSourceCellProof, type MarkdownTheme } from "../src/components/markdown.ts";
 import { resetCapabilitiesCache, setCapabilities } from "../src/terminal-image.ts";
 import type { Component, TUI } from "../src/tui.ts";
+import { sliceByColumn, stripTerminalSequences } from "../src/utils.ts";
 import { TuiMainScreen } from "../src/tui-main-screen.ts";
 import { defaultMarkdownTheme } from "./test-themes.ts";
 import { VirtualTerminal } from "./virtual-terminal.ts";
@@ -2156,5 +2157,324 @@ describe("CJK punctuation after bare URLs (upstream URL policy)", () => {
 			.join("");
 		assert.ok(plain.includes("（说明）"), "the following parenthetical stays visible and unlinked");
 		assert.strictEqual(plain.trimEnd(), source);
+	});
+});
+
+describe("Source-cell proof (proveSourceSpan)", () => {
+	afterEach(() => resetCapabilitiesCache());
+
+	type ProvenProof = Extract<MarkdownSourceCellProof, { kind: "PROVEN" }>;
+
+	const capabilities = (hyperlinks: boolean): void => {
+		setCapabilities({ images: null, trueColor: false, hyperlinks });
+	};
+
+	const rangeOf = (source: string, target: string, nth = 0): { start: number; end: number } => {
+		let index = -1;
+		for (let occurrence = 0; occurrence <= nth; occurrence++) {
+			index = source.indexOf(target, index + 1);
+		}
+		assert.ok(index >= 0, `target ${JSON.stringify(target)} is not in the source`);
+		return { start: index, end: index + target.length };
+	};
+
+	const painted = (rows: readonly string[], segments: ProvenProof["segments"]): string =>
+		segments
+			.map((segment) =>
+				stripTerminalSequences(sliceByColumn(rows[segment.row]!, segment.startCol, segment.endCol - segment.startCol)),
+			)
+			.join("");
+
+	const proven = (
+		markdown: Markdown,
+		source: string,
+		range: { start: number; end: number },
+		width: number,
+	): { proof: ProvenProof; rows: string[] } => {
+		const rows = markdown.render(width);
+		const before = rows.slice();
+		const proof = markdown.proveSourceSpan(range, width);
+		assert.strictEqual(
+			proof.kind,
+			"PROVEN",
+			`expected PROVEN for ${JSON.stringify(source.slice(range.start, range.end))}, got ${JSON.stringify(proof)}`,
+		);
+		assert.strictEqual(markdown.render(width), rows, "a proof must keep the normal render cache identity");
+		assert.deepStrictEqual(rows, before);
+		return { proof: proof as ProvenProof, rows };
+	};
+
+	const expectPainted = (
+		markdown: Markdown,
+		source: string,
+		target: string,
+		width: number,
+		nth = 0,
+	): { proof: ProvenProof; rows: string[]; range: { start: number; end: number } } => {
+		const range = rangeOf(source, target, nth);
+		const result = proven(markdown, source, range, width);
+		assert.strictEqual(painted(result.rows, result.proof.segments), target, "painted cells must be the source range");
+		return { ...result, range };
+	};
+
+	const expectUnproven = (
+		markdown: Markdown,
+		source: string,
+		target: string,
+		width: number,
+		nth = 0,
+	): MarkdownSourceCellProof => {
+		const range = rangeOf(source, target, nth);
+		const proof = markdown.proveSourceSpan(range, width);
+		assert.notStrictEqual(
+			proof.kind,
+			"PROVEN",
+			`${JSON.stringify(target)} must not be proven as painted cells`,
+		);
+		return proof;
+	};
+
+	it("proves exactly the requested occurrence of a plain paragraph", () => {
+		capabilities(false);
+		const source = "needle one and needle two";
+		const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme);
+		const first = expectPainted(markdown, source, "needle", 44, 0);
+		const second = expectPainted(markdown, source, "needle", 44, 1);
+		assert.deepStrictEqual(first.proof.segments, [{ row: 0, startCol: 0, endCol: 6 }]);
+		assert.deepStrictEqual(second.proof.segments, [{ row: 0, startCol: 15, endCol: 21 }]);
+	});
+
+	it("proves heading, strong, em and strikethrough text", () => {
+		capabilities(false);
+		const cases: Array<[string, string]> = [
+			["## heading needle", "needle"],
+			["**bold needle** after", "bold needle"],
+			["*em needle* after", "em needle"],
+			["~~del needle~~ after", "del needle"],
+		];
+		for (const [source, target] of cases) {
+			const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme);
+			expectPainted(markdown, source, target, 44);
+		}
+	});
+
+	it("proves nested list items and quoted text, including continuation lines", () => {
+		capabilities(false);
+		const source = "- parent\n  - nested needle text\n\n> quoted needle line\n> second needle line";
+		const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme);
+		expectPainted(markdown, source, "nested needle", 44);
+		expectPainted(markdown, source, "quoted needle", 44);
+		expectPainted(markdown, source, "needle", 44, 1);
+		expectPainted(markdown, source, "second needle", 44);
+	});
+
+	it("proves a link label and keeps the hidden destination unclaimed", () => {
+		capabilities(true);
+		const source = "needle [label](https://x/needle)";
+		const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme);
+		const label = expectPainted(markdown, source, "label", 44);
+		assert.ok(
+			label.rows.join("").includes("\x1b]8;;https://x/needle\x1b\\"),
+			"the business OSC 8 target is unchanged",
+		);
+		const hidden = markdown.proveSourceSpan(rangeOf(source, "needle", 1), 44);
+		assert.deepStrictEqual(hidden, { kind: "NOT_PAINTED", reason: "HIDDEN_LINK_TARGET" });
+		// The visible homonym before the link is never highlighted by a hidden-destination request.
+		assert.strictEqual(painted(label.rows, label.proof.segments), "label");
+	});
+
+	it("proves the printed destination when hyperlinks are disabled", () => {
+		capabilities(false);
+		const source = "[label](https://x/needle)";
+		const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme);
+		const { proof, rows } = expectPainted(markdown, source, "needle", 44);
+		assert.ok(proof.segments[0]!.startCol > 0, "the destination is printed after the label");
+		assert.ok(rows.join("").includes("(https://x/needle)"), "the printed href is unchanged");
+	});
+
+	it("proves a reference definition target printed by its using link", () => {
+		capabilities(false);
+		const source = "[label][id]\n\n[id]: https://x/needle";
+		const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme);
+		expectPainted(markdown, source, "needle", 44);
+	});
+
+	it("proves fenced code text and refuses a highlighter that rewrites the glyphs", () => {
+		capabilities(false);
+		const source = "```js\nneedle one\nconst needle = 2;\n```";
+		const plain = new Markdown(source, 0, 0, defaultMarkdownTheme);
+		const second = expectPainted(plain, source, "needle", 44, 1);
+		assert.ok(
+			stripTerminalSequences(second.rows[second.proof.segments[0]!.row]!).includes("const needle = 2;"),
+			"the second occurrence is proven inside the second code line",
+		);
+
+		const coloredTheme: MarkdownTheme = {
+			...defaultMarkdownTheme,
+			highlightCode: (code) => code.split("\n").map((line) => chalk.green(line)),
+		};
+		const colored = new Markdown(source, 0, 0, coloredTheme);
+		expectPainted(colored, source, "needle", 44, 1);
+
+		const rewrittenTheme: MarkdownTheme = {
+			...defaultMarkdownTheme,
+			highlightCode: (code) => code.split("\n").map((line) => line.toUpperCase()),
+		};
+		const rewritten = new Markdown(source, 0, 0, rewrittenTheme);
+		expectUnproven(rewritten, source, "needle", 44, 1);
+
+		const fence = new Markdown(source, 0, 0, defaultMarkdownTheme);
+		expectUnproven(fence, source, "js", 44);
+	});
+
+	it("proves renderLatex:false inline and display math source text", () => {
+		capabilities(false);
+		const source = "$needle$ and \\(needle\\)\n\n$$\nneedle\n$$\n\n\\[\nneedle\n\\]";
+		const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme, undefined, { renderLatex: false });
+		for (let occurrence = 0; occurrence < 4; occurrence++) {
+			expectPainted(markdown, source, "needle", 44, occurrence);
+		}
+		expectUnproven(
+			new Markdown("\\(needle and more", 0, 0, defaultMarkdownTheme, undefined, { renderLatex: false }),
+			"\\(needle and more",
+			"needle",
+			44,
+		);
+	});
+
+	it("returns every painted row when one occurrence spans a soft wrap", () => {
+		capabilities(false);
+		const source = "needleword";
+		const markdown = new Markdown(source, 2, 0, defaultMarkdownTheme);
+		const { proof } = expectPainted(markdown, source, "needleword", 12);
+		assert.ok(proof.segments.length >= 2, "a wrapped occurrence returns one segment per painted row");
+		const rows = proof.segments.map((segment) => segment.row);
+		assert.deepStrictEqual(rows, [...new Set(rows)].sort((left, right) => left - right));
+		assert.ok(rows.every((row, index) => index === 0 || row > rows[index - 1]!), "segments run row by row");
+	});
+
+	it("re-proves the same component after width changes", () => {
+		capabilities(false);
+		const source = "alpha beta needle gamma delta epsilon zeta";
+		const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme);
+		for (const width of [12, 44, 80, 120, 44]) {
+			expectPainted(markdown, source, "needle", width);
+		}
+	});
+
+	it("proves CJK, ZWJ and wide grapheme text without splitting a cluster", () => {
+		capabilities(false);
+		const source = "前缀**匹配词**后缀 家庭 👨‍👩‍👧 needle";
+		const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme);
+		for (const width of [12, 44, 80]) {
+			expectPainted(markdown, source, "匹配词", width);
+			expectPainted(markdown, source, "👨‍👩‍👧", width);
+			expectPainted(markdown, source, "needle", width);
+		}
+	});
+
+	it("proves table cell text, including a wrapped cell, and refuses a table fallback", () => {
+		capabilities(false);
+		const source = "| h |\n|---|\n| needlewordandsomeextralongtext |";
+		const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme);
+		expectPainted(markdown, source, "needlewordandsomeextralongtext", 12);
+		expectUnproven(new Markdown(source, 0, 0, defaultMarkdownTheme), source, "needleword", 4);
+	});
+
+	it("reports markup-only delimiter ranges as not painted", () => {
+		capabilities(false);
+		const source = "before **needle** after";
+		const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme);
+		assert.deepStrictEqual(markdown.proveSourceSpan(rangeOf(source, "**"), 44), {
+			kind: "NOT_PAINTED",
+			reason: "MARKUP_ONLY",
+		});
+	});
+
+	it("refuses ranges that are not one painted leaf", () => {
+		capabilities(false);
+		const image = "a ![alt text](x.png) b";
+		expectUnproven(new Markdown(image, 0, 0, defaultMarkdownTheme), image, "alt text", 44);
+
+		const html = "<div>needle</div>";
+		expectUnproven(new Markdown(html, 0, 0, defaultMarkdownTheme), html, "needle", 44);
+
+		const crossLeaf = "**ab** cd";
+		expectUnproven(new Markdown(crossLeaf, 0, 0, defaultMarkdownTheme), crossLeaf, "ab** cd", 44);
+
+		const escapes = "a \\*needle\\* b";
+		expectUnproven(new Markdown(escapes, 0, 0, defaultMarkdownTheme), escapes, "\\*needle\\*", 44);
+
+		const composite = "first needle\n\nsecond needle";
+		const spanning = new Markdown(composite, 0, 0, defaultMarkdownTheme);
+		const proof = expectUnproven(spanning, composite, "needle\n\nsecond", 44);
+		assert.ok(
+			proof.kind !== "UNPROVEN" || proof.reason !== "COMPOSITE_OWNER",
+			"Markdown itself never claims composite-card authority",
+		);
+	});
+
+	it("refuses invalid, shifted and grapheme-splitting ranges", () => {
+		capabilities(false);
+		const source = "a 😀 needle";
+		const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme);
+		assert.deepStrictEqual(markdown.proveSourceSpan({ start: 4, end: 4 }, 44), {
+			kind: "UNPROVEN",
+			reason: "SOURCE_PROJECTION",
+		});
+		assert.deepStrictEqual(markdown.proveSourceSpan({ start: -1, end: 2 }, 44), {
+			kind: "UNPROVEN",
+			reason: "SOURCE_PROJECTION",
+		});
+		assert.deepStrictEqual(markdown.proveSourceSpan({ start: 0, end: source.length + 1 }, 44), {
+			kind: "UNPROVEN",
+			reason: "SOURCE_PROJECTION",
+		});
+		const split = markdown.proveSourceSpan({ start: 3, end: 4 }, 44);
+		assert.notStrictEqual(split.kind, "PROVEN");
+	});
+
+	it("keeps the normal render byte-identical and cached across a proof", () => {
+		capabilities(false);
+		const source = "before **needle** after\n\n- list\n\n```js\nconst x = 1;\n```";
+		const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme);
+		const rows = markdown.render(44);
+		const snapshot = JSON.stringify(rows);
+		assert.strictEqual(markdown.render(44), rows);
+		expectPainted(markdown, source, "needle", 44);
+		assert.strictEqual(markdown.render(44), rows, "the cached array is reused");
+		assert.strictEqual(JSON.stringify(markdown.render(44)), snapshot, "the normal bytes are unchanged");
+		assert.deepStrictEqual(rows, new Markdown(source, 0, 0, defaultMarkdownTheme).render(44));
+		for (const row of rows) {
+			assert.ok(!row.includes("\u200B") && !row.includes("\u200C"), "no proof sentinel reaches a normal row");
+		}
+	});
+
+	it("drops stale proofs after setText and invalidate without stale ranges", () => {
+		capabilities(false);
+		const first = "needle one";
+		const markdown = new Markdown(first, 0, 0, defaultMarkdownTheme);
+		expectPainted(markdown, first, "needle", 80);
+		markdown.setText("pre\nneedle");
+		const stale = markdown.proveSourceSpan({ start: 0, end: 6 }, 80);
+		assert.notStrictEqual(stale.kind, "PROVEN");
+		expectPainted(markdown, "pre\nneedle", "needle", 80);
+		markdown.invalidate();
+		expectPainted(markdown, "pre\nneedle", "needle", 80);
+	});
+
+	it("returns STALE_RENDER across a capability change until invalidate()", () => {
+		capabilities(false);
+		const source = "[needle](https://x/y)";
+		const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme);
+		markdown.render(44);
+		expectPainted(markdown, source, "needle", 44);
+		capabilities(true);
+		assert.deepStrictEqual(markdown.proveSourceSpan(rangeOf(source, "needle"), 44), {
+			kind: "UNPROVEN",
+			reason: "STALE_RENDER",
+		});
+		markdown.invalidate();
+		expectPainted(markdown, source, "needle", 44);
 	});
 });
