@@ -9,7 +9,8 @@
  * view state; every Host operation is an intent on {@link AccountWorkspaceSource}
  * (the app/command workflow over the `AccountConfig` port). Closing the page
  * only ends the watch subscription — an in-flight BROWSER attempt keeps running
- * on the Host and is rebuilt from `getState` when the page is reopened.
+ * on the Host and is rebuilt from the Watch's initial snapshot when the page is
+ * reopened.
  *
  * @module @xmoon76/dsh-pi-tui/tui/panels/account-workspace-page
  */
@@ -100,10 +101,6 @@ export class AccountWorkspacePage implements Component {
   private profile: QueryState<import('../../runtime/config-port.ts').AccountProfile> = { kind: 'idle' }
   private balance: QueryState<{ readonly value: readonly AccountWallet[]; readonly bonusWallets: readonly AccountWallet[] }> = { kind: 'idle' }
   private signOutConfirm = false
-  private stateRecheckRequired = false
-  private reconciliationSerial = 0
-  private reconciliationReadInFlight: { readonly token: number; readonly lease: AccountObservationLease; readonly id: number } | undefined
-  private reconciliationReadSerial = 0
   private signOutIdentity: string | undefined
   private taskCheck: SignOutTaskCheck = { kind: 'idle' }
   private signOutConfirmationSerial = 0
@@ -134,8 +131,8 @@ export class AccountWorkspacePage implements Component {
    *  newer one (and a signed-out view invalidates both). */
   private profileSerial = 0
   private balanceSerial = 0
-  /** Latest AccountView read/operation identity: an older getState must never
-   *  overwrite a newer watch snapshot. */
+  /** Latest AccountView identity: an older derived read must never overwrite a
+   *  newer committed Watch snapshot. */
   private stateSerial = 0
 
   constructor(
@@ -157,7 +154,7 @@ export class AccountWorkspacePage implements Component {
   }
 
   private hasCurrentObservation(): boolean {
-    return !this.stateRecheckRequired && this.currentObservationLease() !== undefined
+    return this.currentObservationLease() !== undefined
   }
 
   private stopWatch(): void {
@@ -196,7 +193,7 @@ export class AccountWorkspacePage implements Component {
             this.invalidateObservation(event.reason)
             continue
           }
-          this.commitObservation(event.observation, 'watch')
+          this.commitObservation(event.observation)
         }
       } catch {
         if (!signal.aborted && !this.disposed && this.watchController === controller) {
@@ -240,108 +237,33 @@ export class AccountWorkspacePage implements Component {
 
   private refresh(): void {
     if (this.disposed || this.busy !== undefined) return
-    const lease = this.currentObservationLease()
-    if (lease === undefined) {
-      this.stopWatch()
-      this.stateFailure = undefined
-      this.initializing = this.view === undefined
-      if (this.view !== undefined) this.notice = 'Refreshing Host account state…'
-      this.start()
-      this.revision += 1
-      this.requestRender()
-      return
-    }
-    this.readHostState(lease, this.stateRecheckRequired ? this.reconciliationSerial : undefined)
-  }
-
-  private requireReconciliationReadback(): void {
-    this.stateRecheckRequired = true
-    this.reconciliationSerial += 1
-  }
-
-  /** Whether a failed/superseded readback may be reissued for the SAME unknown
-   *  ACK. The reconciliation barrier must not suppress the read it waits for,
-   *  so this uses the live observation lease rather than hasCurrentObservation. */
-  private canScheduleReconciliationReadback(reconciliation: number | undefined): boolean {
-    return !this.disposed
-      && reconciliation !== undefined
-      && this.stateRecheckRequired
-      && reconciliation === this.reconciliationSerial
-      && this.currentObservationLease() !== undefined
-  }
-
-  private readHostState(lease: AccountObservationLease, reconciliation?: number): void {
-    if (reconciliation !== undefined) {
-      const inFlight = this.reconciliationReadInFlight
-      if (inFlight?.token === reconciliation && inFlight.lease === lease) return
-    }
-    const readId = reconciliation === undefined ? undefined : ++this.reconciliationReadSerial
-    if (reconciliation !== undefined) {
-      this.reconciliationReadInFlight = { token: reconciliation, lease, id: readId! }
-    }
-    const serial = ++this.stateSerial
+    this.stopWatch()
+    this.stateFailure = undefined
+    this.initializing = this.view === undefined
+    if (this.view !== undefined) this.notice = 'Refreshing Host account state…'
+    if (!this.start()) this.notice = undefined
     this.revision += 1
-    this.source.run('account state read', async () => {
-      let retryAfterNewerWatch = false
-      try {
-        let observation: AccountObservation
-        try {
-          observation = await this.source.getState()
-        } catch (error) {
-          if (this.disposed) return
-          if (serial !== this.stateSerial) {
-            retryAfterNewerWatch = this.canScheduleReconciliationReadback(reconciliation)
-            return
-          }
-          if (this.observationLease !== lease || !this.source.isObservationCurrent(lease)) {
-            this.invalidateObservation('connection-changed')
-            return
-          }
-          this.settle(() => {
-            this.stateFailure = errorText(error)
-            this.initializing = false
-          })
-          return
-        }
-        if (this.disposed) return
-        if (serial !== this.stateSerial) {
-          const sameObservationOwner = this.source.isObservationCurrent(lease)
-            && this.source.isObservationCurrent(observation.lease)
-          if (sameObservationOwner && this.stateRecheckRequired) {
-            this.commitObservation(observation, 'readback')
-          } else {
-            retryAfterNewerWatch = this.canScheduleReconciliationReadback(reconciliation)
-          }
-          return
-        }
-        if (this.observationLease !== lease || !this.source.isObservationCurrent(lease)) {
-          this.invalidateObservation('connection-changed')
-          return
-        }
-        if (!this.commitObservation(observation, 'readback', serial)) return
-      } finally {
-        if (reconciliation !== undefined
-          && this.reconciliationReadInFlight?.id === readId) {
-          this.reconciliationReadInFlight = undefined
-        }
-        if (retryAfterNewerWatch && reconciliation === this.reconciliationSerial) {
-          const current = this.currentObservationLease()
-          if (current !== undefined) this.readHostState(current, reconciliation)
-        }
-      }
-    })
+    this.requestRender()
   }
 
-  private commitObservation(observation: AccountObservation, origin: 'watch' | 'readback' | 'ack', serial?: number): boolean {
-    if (!this.source.isObservationCurrent(observation.lease)) return false
-    if (serial !== undefined && serial !== this.stateSerial) return false
+  /** One committed Watch snapshot is the page's only AccountView write. */
+  private commitObservation(observation: AccountObservation): void {
+    if (!this.source.isObservationCurrent(observation.lease)) return
     this.stateSerial += 1
     this.observationLease = observation.lease
-    this.applyView(observation.view, observation.lease, origin)
-    if (origin === 'watch' && this.stateRecheckRequired) {
-      this.readHostState(observation.lease, this.reconciliationSerial)
-    }
-    return true
+    this.applyView(observation.view, observation.lease)
+  }
+
+  /** A settled mutation makes the prior Watch projection last-known. The next
+   *  complete Watch snapshot (or explicit Refresh) restores current decisions. */
+  private retireViewAfterMutation(): void {
+    this.observationLease = undefined
+    this.stateSerial += 1
+    this.profileSerial += 1
+    this.balanceSerial += 1
+    this.runningTaskCheckSerial += 1
+    this.taskCheck = { kind: 'idle' }
+    this.initializing = false
   }
 
   private closeSignOutConfirmation(): void {
@@ -411,11 +333,11 @@ export class AccountWorkspacePage implements Component {
     })
   }
 
-  /** Apply a detached Host view while preserving the distinct mutation-ACK barrier. */
+  /** Apply one committed Watch AccountView. The Host owns credential/attempt
+   *  semantics; the page only projects this snapshot and its derived reads. */
   private applyView(
     view: AccountView,
     lease: AccountObservationLease,
-    origin: 'watch' | 'readback' | 'ack',
     readDetails = true,
   ): void {
     this.settle(() => {
@@ -423,17 +345,15 @@ export class AccountWorkspacePage implements Component {
       const previous = this.view?.status
       this.view = view
       this.observationLease = lease
-      if (origin !== 'watch') this.stateRecheckRequired = false
-      if (this.notice === 'Refreshing Host account state…'
-        && (origin !== 'watch' || !this.stateRecheckRequired)) this.notice = undefined
+      if (this.notice === 'Refreshing Host account state…') this.notice = undefined
       this.stateFailure = undefined
       this.initializing = false
       if (view.status === 'credential-stored') {
         if (previous !== undefined && this.signOutConfirm) {
           this.invalidateSignOutConfirmation('the Host account changed — confirm sign-out again')
         }
-        if (!this.stateRecheckRequired) this.checkRunningTaskFact(view, lease)
-        if (readDetails && !this.stateRecheckRequired) {
+        this.checkRunningTaskFact(view, lease)
+        if (readDetails) {
           this.readProfile(lease)
           this.readBalance(lease)
         }
@@ -463,7 +383,6 @@ export class AccountWorkspacePage implements Component {
   private canCommitAccountDetails(lease: AccountObservationLease, detailSerial: number, stateSerial: number, domain: 'profile' | 'balance'): boolean {
     const currentDomainSerial = domain === 'profile' ? this.profileSerial : this.balanceSerial
     return !this.disposed
-      && !this.stateRecheckRequired
       && this.stateSerial === stateSerial
       && currentDomainSerial === detailSerial
       && this.observationLease === lease
@@ -556,7 +475,6 @@ export class AccountWorkspacePage implements Component {
   private canStartSignIn(): boolean {
     return !this.disposed
       && this.busy === undefined
-      && !this.stateRecheckRequired
       && this.stateFailure === undefined
       && this.currentObservationLease() !== undefined
       && this.view?.status === 'signed-out'
@@ -567,7 +485,6 @@ export class AccountWorkspacePage implements Component {
   private canCancelAttempt(): boolean {
     return !this.disposed
       && this.busy === undefined
-      && !this.stateRecheckRequired
       && this.stateFailure === undefined
       && this.currentObservationLease() !== undefined
       && this.activeAttempt() !== undefined
@@ -576,7 +493,6 @@ export class AccountWorkspacePage implements Component {
   private canBeginSignOut(): boolean {
     return !this.disposed
       && this.busy === undefined
-      && !this.stateRecheckRequired
       && this.stateFailure === undefined
       && this.currentObservationLease() !== undefined
       && this.view?.status === 'credential-stored'
@@ -586,25 +502,25 @@ export class AccountWorkspacePage implements Component {
     if (!this.canStartSignIn()) return
     const lease = this.currentObservationLease()
     if (lease === undefined) return
-    const serial = ++this.stateSerial
+    this.stateSerial += 1
+    const mutationSerial = this.stateSerial
     this.busy = 'signin'
     this.notice = undefined
     this.revision += 1
     this.requestRender()
     this.source.run('account sign in', async () => {
       try {
-        const observation = await this.source.startSignIn(lease)
+        await this.source.startSignIn(lease)
         this.settle(() => {
-          this.commitObservation(observation, 'ack', serial)
           this.busy = undefined
+          if (this.stateSerial === mutationSerial) this.retireViewAfterMutation()
         })
       } catch (error) {
         this.settle(() => {
-          this.requireReconciliationReadback()
           this.busy = undefined
-          this.notice = `sign-in could not start: ${errorText(error)} — refreshing Host account state`
+          this.notice = `sign-in result not confirmed: ${errorText(error)} — Refresh to re-read Host state`
+          if (this.stateSerial === mutationSerial) this.retireViewAfterMutation()
         })
-        this.refresh()
       }
     })
   }
@@ -614,24 +530,25 @@ export class AccountWorkspacePage implements Component {
     if (attempt === undefined || !this.canCancelAttempt()) return
     const lease = this.currentObservationLease()
     if (lease === undefined) return
-    const serial = ++this.stateSerial
+    this.stateSerial += 1
+    const mutationSerial = this.stateSerial
     this.busy = 'cancel'
+    this.notice = undefined
     this.revision += 1
     this.requestRender()
     this.source.run('account cancel sign in', async () => {
       try {
-        const observation = await this.source.cancelSignIn(attempt.id, lease)
+        await this.source.cancelSignIn(attempt.id, lease)
         this.settle(() => {
-          this.commitObservation(observation, 'ack', serial)
           this.busy = undefined
+          if (this.stateSerial === mutationSerial) this.retireViewAfterMutation()
         })
       } catch (error) {
         this.settle(() => {
-          this.requireReconciliationReadback()
           this.busy = undefined
-          this.notice = `cancel failed: ${errorText(error)} — refreshing Host account state`
+          this.notice = `cancel result not confirmed: ${errorText(error)} — Refresh to re-read Host state`
+          if (this.stateSerial === mutationSerial) this.retireViewAfterMutation()
         })
-        this.refresh()
       }
     })
   }
@@ -675,28 +592,28 @@ export class AccountWorkspacePage implements Component {
       || this.signOutConfirmationSerial !== confirmationSerial
       || this.runningTaskCheckSerial !== taskCheckSerial
       || !this.source.isObservationCurrent(lease)) return
-    const serial = ++this.stateSerial
+    this.stateSerial += 1
+    const mutationSerial = this.stateSerial
     this.busy = 'signout'
+    this.notice = undefined
     this.revision += 1
     this.requestRender()
     this.source.run('account sign out', async () => {
       try {
-        const result = await this.source.signOut(lease)
+        await this.source.signOut(lease)
         this.settle(() => {
           this.closeSignOutConfirmation()
           this.busy = undefined
-          this.commitObservation(result, 'ack', serial)
+          if (this.stateSerial === mutationSerial) this.retireViewAfterMutation()
         })
       } catch (error) {
         this.settle(() => {
-          // A failed/unknown ACK never authorizes a second sign-out attempt.
-          // The next manual step waits for a fresh Host state or watch view.
+          // The Host owns the outcome; never replay the destructive mutation.
           this.closeSignOutConfirmation()
-          this.requireReconciliationReadback()
           this.busy = undefined
-          this.notice = `sign-out failed: ${errorText(error)} — refreshing Host account state`
+          this.notice = `sign-out result not confirmed: ${errorText(error)} — Refresh to re-read Host state`
+          if (this.stateSerial === mutationSerial) this.retireViewAfterMutation()
         })
-        this.refresh()
       }
     })
   }
@@ -936,7 +853,7 @@ export class AccountWorkspacePage implements Component {
       actions.push({ id: 'account:refresh', label: 'Refresh', enabled: this.busy === undefined })
     }
     actions.push({ id: 'account:back', label: '← Settings', enabled: true })
-    this.copyValue = observationCurrent && !this.stateRecheckRequired ? url ?? view?.links.usageUrl : undefined
+    this.copyValue = observationCurrent ? url ?? view?.links.usageUrl : undefined
     return { content, actions }
   }
 
@@ -1040,11 +957,11 @@ export class AccountWorkspacePage implements Component {
     }
     if (matchesKey(data, 'c') || matchesKey(data, Key.shift('c'))) {
       if (this.paintedCopy && this.copyValue !== undefined
-        && this.hasCurrentObservation() && !this.stateRecheckRequired) this.copy(this.copyValue)
+        && this.hasCurrentObservation()) this.copy(this.copyValue)
       return 'handled'
     }
     if (data === 'o' || data === 'O') {
-      if (this.hasCurrentObservation() && !this.stateRecheckRequired) {
+      if (this.hasCurrentObservation()) {
         const url = this.activeAttempt()?.authorizeUrl
         if (url !== undefined) this.openUrl(url)
       }
@@ -1107,22 +1024,22 @@ export class AccountWorkspacePage implements Component {
         this.requestRender()
         return 'handled'
       case 'account:open':
-        if (this.hasCurrentObservation() && !this.stateRecheckRequired && attempt?.authorizeUrl !== undefined) this.openUrl(attempt.authorizeUrl)
+        if (this.hasCurrentObservation() && attempt?.authorizeUrl !== undefined) this.openUrl(attempt.authorizeUrl)
         return 'handled'
       case 'account:copy-url':
-        if (this.hasCurrentObservation() && !this.stateRecheckRequired && attempt?.authorizeUrl !== undefined) this.copy(attempt.authorizeUrl)
+        if (this.hasCurrentObservation() && attempt?.authorizeUrl !== undefined) this.copy(attempt.authorizeUrl)
         return 'handled'
       case 'account:copy-ssh': {
-        if (!this.hasCurrentObservation() || this.stateRecheckRequired) return 'handled'
+        if (!this.hasCurrentObservation()) return 'handled'
         const template = this.sshTemplate()
         if (template !== undefined) this.copy(template)
         return 'handled'
       }
       case 'account:usage':
-        if (this.hasCurrentObservation() && !this.stateRecheckRequired && view !== undefined) this.openUrl(view.links.usageUrl)
+        if (this.hasCurrentObservation() && view !== undefined) this.openUrl(view.links.usageUrl)
         return 'handled'
       case 'account:topup':
-        if (this.hasCurrentObservation() && !this.stateRecheckRequired && view !== undefined) this.openUrl(view.links.topUpUrl)
+        if (this.hasCurrentObservation() && view !== undefined) this.openUrl(view.links.topUpUrl)
         return 'handled'
       case 'account:refresh':
         this.refresh()

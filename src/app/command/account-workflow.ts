@@ -38,7 +38,6 @@ export interface AccountWorkspaceSource {
   available(): boolean
   callbackOrigin(): string | undefined
   isObservationCurrent(lease: AccountObservationLease): boolean
-  getState(): Promise<AccountObservation>
   watch(signal: AbortSignal): AsyncIterable<AccountWatchEvent>
   getProfile(lease: AccountObservationLease): Promise<AccountQueryOutcome<AccountProfile>>
   getBalance(lease: AccountObservationLease): Promise<AccountQueryOutcome<{ readonly value: readonly AccountWallet[]; readonly bonusWallets: readonly AccountWallet[] }>>
@@ -96,10 +95,6 @@ export class AccountWorkflow implements AccountWorkspaceSource {
 
   isObservationCurrent(lease: AccountObservationLease): boolean {
     return this.deps.account.isObservationCurrent(lease)
-  }
-
-  getState(): Promise<AccountObservation> {
-    return this.deps.account.getState()
   }
 
   watch(signal: AbortSignal): AsyncIterable<AccountWatchEvent> {

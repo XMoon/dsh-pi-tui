@@ -991,13 +991,12 @@ The page never infers a stored key from a route/profile.
   independent queries with independent pending/failed/ready states, and an
   unavailable balance is never shown as 0. The page binds profile/balance reads,
   every Account mutation and the running-task risk read to the same current
-  observation. A pending unknown-mutation readback also makes its prior view-derived
-  facts non-current while the adapter lease remains valid: profile/balance/links and
-  authorization URLs stay last-known, Open/Copy plus their key shortcuts refuse the
-  old facts, and already-started profile/balance results cannot commit across the
-  mutation/readback state serial. A successful causal Host readback starts fresh
-  detail reads under its returned observation. Stale Profile/Balance facts are marked
-  last-known, and a stale authorization URL is not presented as current.
+  observation. A stale lease keeps profile/balance/links and authorization URLs
+  last-known; already-started profile/balance results cannot commit across the
+  account state serial. The official Watch is the only writer of the page's
+  AccountView; Refresh releases the current subscription and waits for its complete
+  initial snapshot. Stale Profile/Balance facts are marked last-known, and a stale
+  authorization URL is not presented as current.
 - Wallet decimal strings are forwarded verbatim. `Usage` and `Top up` use the
   client-local HTTP(S) opener with the official `AccountView.links`; the page
   never receives a token or grant payload.
@@ -1011,13 +1010,14 @@ The page never infers a stored key from a route/profile.
   visible. An unavailable result offers `Retry task check`; only a current known
   result enables the destructive action. The check's Host authority and
   Direct/Remote semantics belong to [host-client.md](./host-client.md#provider-credentials-and-deepseek-account).
-- A known operation ACK may reconcile from its returned observation. An unknown
-  ACK for a dispatched Account mutation keeps mutation admission fenced until a
-  successful `getState` readback initiated after that ACK; no Watch frame, even a
-  newer one, satisfies the barrier, and the operation is never replayed
-  automatically. A failed/unknown SignOut ACK closes the confirmation; the page
-  admits no second confirmation until that readback succeeds. Older task checks
-  cannot authorize a newer Account view, confirmation, page or connection.
+- The Watch subscription is the only writer of the page's AccountView. A successful
+  SignIn/Cancel/SignOut call ends local `busy`; until the next complete Watch
+  snapshot arrives, the prior view and its details are last-known and cannot
+  authorize another mutation. A failed or unconfirmed mutation shows an explicit
+  result notice, is never replayed automatically, and closes any SignOut
+  confirmation. Explicit Refresh releases the old subscription and reopens the
+  official Watch. Older task checks cannot authorize a newer Account view,
+  confirmation, page or connection.
 - The official `signOut` removes the local grant and leaves remote revocation in
   the background. A failed revocation never restores a local grant, and
   independent API keys stay stored. While sign-out is pending, user navigation
