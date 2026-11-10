@@ -183,70 +183,141 @@ export function shellWordSuffix(line: string, col: number, quote: "'" | '"' | un
   return line.slice(col, index)
 }
 
+/** One pending here-document: its delimiter and whether `<<-` strips tabs. */
+interface PendingHeredoc {
+  readonly delimiter: string
+  readonly stripTabs: boolean
+}
+
+/** Parse a `<<`/`<<-` delimiter at `from`, or undefined when this is not a
+ *  here-document (a `<<<` here-string, or an unparsable delimiter). */
+function heredocAt(line: string, from: number): PendingHeredoc | undefined {
+  if (line[from] !== '<' || line[from + 1] !== '<') return undefined
+  if (line[from + 2] === '<') return undefined
+  let index = from + 2
+  let stripTabs = false
+  if (line[index] === '-') {
+    stripTabs = true
+    index += 1
+  }
+  while (line[index] === ' ' || line[index] === '\t') index += 1
+  const quote = line[index]
+  if (quote === "'" || quote === '"') {
+    const closing = line.indexOf(quote, index + 1)
+    if (closing === -1) return undefined
+    const delimiter = line.slice(index + 1, closing)
+    return delimiter === '' ? undefined : { delimiter, stripTabs }
+  }
+  const wordStart = index
+  while (index < line.length && !isShellWordDelimiter(line[index]!)) index += 1
+  const delimiter = line.slice(wordStart, index)
+  return delimiter === '' ? undefined : { delimiter, stripTabs }
+}
+
 /**
- * Whether the command opened by the lines BEFORE the cursor is still open:
- * an unterminated quote, backtick, `$(`/`${`, or a trailing backslash
- * continuation. A new physical line is a new command ONLY when the previous
- * lines are complete; when this returns true the lightweight scanner cannot
- * trust the cursor line as a fresh command, so a caller must not guess a
- * shell edit range (and must not substitute Client candidates for Host ones).
+ * Whether the command opened by the lines BEFORE the cursor is still open.
+ *
+ * This is a deliberately small Bash-aware state machine, not a parser:
+ * - a trailing backslash CONTINUES the same logical line into the next one; it
+ *   does not open a command by itself, so `printf a \` + `  b` is complete
+ *   and the next physical line is a fresh command;
+ * - a `#` comment (unquoted, at a word start) ends the line and its quotes
+ *   never affect the state;
+ * - a here-document body (until its delimiter line) is TEXT, not commands, so
+ *   the cursor inside it is not a fresh command position;
+ * - an unfinished quote, backtick, `$(` or `${` stays open across lines.
  */
 export function shellCommandIsOpen(lines: readonly string[]): boolean {
   let quote: "'" | '"' | undefined
   let substitution = 0
   let brace = 0
   let backtick = false
+  let heredoc: PendingHeredoc | undefined
+  // A trailing backslash on the LAST previous line makes the cursor line a
+  // CONTINUATION of that command, not a fresh command position. Inside earlier
+  // lines the same backslash merely joins logical lines while scanning.
+  let trailingContinuation = false
   for (const line of lines) {
-    for (let index = 0; index < line.length; index += 1) {
+    trailingContinuation = false
+    if (heredoc !== undefined) {
+      const candidate = heredoc.stripTabs ? line.replace(/^\t+/u, '') : line
+      if (candidate.trim() === heredoc.delimiter) heredoc = undefined
+      continue
+    }
+    let index = 0
+    while (index < line.length) {
       const character = line[index]!
       if (backtick) {
         if (character === '`') backtick = false
+        index += 1
         continue
       }
       if (quote === "'") {
         if (character === "'") quote = undefined
-        continue
-      }
-      if (quote === '"') {
-        if (character === '\\') index += 1
-        else if (character === '"') quote = undefined
-        continue
-      }
-      if (character === '\\') {
-        if (index === line.length - 1) return true
         index += 1
         continue
       }
+      if (quote === '"') {
+        if (character === '\\') index += 2
+        else {
+          if (character === '"') quote = undefined
+          index += 1
+        }
+        continue
+      }
+      if (character === '\\') {
+        // A trailing backslash joins the NEXT physical line to this command.
+        if (index === line.length - 1) {
+          trailingContinuation = true
+          break
+        }
+        index += 2
+        continue
+      }
+      if (character === '#' && (index === 0 || /[\s;|&()<>]/u.test(line[index - 1]!))) break
       if (character === "'" || character === '"') {
         quote = character
+        index += 1
         continue
       }
       if (character === '`') {
         backtick = true
+        index += 1
         continue
       }
       if (character === '$' && line[index + 1] === '(') {
         substitution += 1
-        index += 1
+        index += 2
         continue
       }
       if (character === '$' && line[index + 1] === '{') {
         brace += 1
-        index += 1
+        index += 2
         continue
+      }
+      if (character === '<' && line[index + 1] === '<') {
+        const parsed = heredocAt(line, index)
+        if (parsed !== undefined) {
+          heredoc = parsed
+          index += 2
+          continue
+        }
       }
       if (substitution > 0) {
         if (character === '(') substitution += 1
         else if (character === ')') substitution -= 1
+        index += 1
         continue
       }
       if (brace > 0) {
         if (character === '{') brace += 1
         else if (character === '}') brace -= 1
       }
+      index += 1
     }
   }
   return quote !== undefined || backtick || substitution > 0 || brace > 0
+    || heredoc !== undefined || trailingContinuation
 }
 
 /** The RAW range a WHOLE-WORD acceptance replaces: the raw word start, and the

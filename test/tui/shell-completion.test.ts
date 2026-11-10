@@ -369,15 +369,24 @@ test('MentionProvider applies a shell item as a plain word replacement', async (
   assert.ok(gitItem !== undefined)
   const applied = provider.applyCompletion(['!gi'], 0, 3, gitItem, commandSuggestions.prefix)
   assert.deepEqual(applied, { lines: ['!git '], cursorLine: 0, cursorCol: 5 })
-  const appliedVar = provider.applyCompletion(['!echo $HO'], 0, 9, { value: '$HOME', label: '$HOME' }, '$HO')
+  // Host variable candidates carry the same currentness fence: each case uses
+  // the item the CURRENT request offered for that exact document/cursor.
+  const acceptVariable = async (line: string, col: number) => {
+    const suggestions = await provider.getSuggestions([line], 0, col, { signal: abort, force: true })
+    assert.ok(suggestions !== null, `${line} must produce variable suggestions`)
+    const item = suggestions.items.find(candidate => candidate.value === '$HOME')
+    assert.ok(item !== undefined, `$HOME missing for ${line}: ${JSON.stringify(suggestions.items)}`)
+    return provider.applyCompletion([line], 0, col, item, suggestions.prefix)
+  }
+  const appliedVar = await acceptVariable('!echo $HO', 9)
   assert.deepEqual(appliedVar, { lines: ['!echo $HOME '], cursorLine: 0, cursorCol: 12 })
   // A quoted variable keeps its quote and NEVER appends the space inside it.
-  const quotedVar = provider.applyCompletion(['!echo "$HO'], 0, 10, { value: '$HOME', label: '$HOME' }, '$HO')
+  const quotedVar = await acceptVariable('!echo "$HO', 10)
   assert.deepEqual(quotedVar, { lines: ['!echo "$HOME'], cursorLine: 0, cursorCol: 12 })
-  const closedQuotedVar = provider.applyCompletion(['!echo "$HO"'], 0, 10, { value: '$HOME', label: '$HOME' }, '$HO')
+  const closedQuotedVar = await acceptVariable('!echo "$HO"', 10)
   assert.deepEqual(closedQuotedVar, { lines: ['!echo "$HOME"'], cursorLine: 0, cursorCol: 12 })
   // A mid-word unquoted variable is one WORD too: the tail is replaced.
-  const midVar = provider.applyCompletion(['!echo $HOme'], 0, 9, { value: '$HOME', label: '$HOME' }, '$HO')
+  const midVar = await acceptVariable('!echo $HOme', 9)
   assert.deepEqual(midVar, { lines: ['!echo $HOME '], cursorLine: 0, cursorCol: 12 })
 })
 
@@ -887,4 +896,80 @@ test('a stale multiline shell result is never applied after the edit, scope or r
   scope = { kind: 'session', sessionId: SessionId('other-session') }
   assert.deepEqual(provider.applyCompletion(lines, 1, 2, currentItem, current.prefix),
     { lines, cursorLine: 1, cursorCol: 2 }, 'a Session change must refuse the stale candidate')
+})
+
+test('an open shell continuation offers nothing — not even a Client path — and refuses stale applies', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  // Direct authority: without the open-continuation gate this branch would
+  // reach the fork path provider and offer CLIENT filesystem candidates.
+  const port = fixedShellPort({ commands: ['zoom'], paths: ['client-only.txt'], authority: 'client' })
+  const provider = new MentionProvider([], root, null, modeSource('shell-context').source, undefined, undefined, undefined, [], port)
+  for (const lines of [['echo "open', '/u'], ["echo 'open", '/u'], ['echo a \\', '/u'], ['echo $(x', '/u']]) {
+    assert.equal(await provider.getSuggestions(lines, 1, 2, { signal: abort, force: true }), null,
+      `an open continuation must offer no suggestion: ${JSON.stringify(lines)}`)
+  }
+  // A stale command item produced for an earlier, complete line must not
+  // rewrite the open continuation.
+  const first = await provider.getSuggestions(['zo'], 0, 2, { signal: abort, force: true })
+  assert.ok(first !== null)
+  const stale = first.items.find(candidate => candidate.value === 'zoom')
+  assert.ok(stale !== undefined)
+  assert.deepEqual(provider.applyCompletion(['echo "open', 'zo'], 1, 2, stale, first.prefix),
+    { lines: ['echo "open', 'zo'], cursorLine: 1, cursorCol: 2 })
+})
+
+test('a finished backslash continuation and a comment do not block later command lines', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  const port = fixedShellPort({ commands: ['zoom'], subcommands: ['checkout'] })
+  const provider = new MentionProvider([], root, null, modeSource('shell-context').source, undefined, undefined, undefined, [], port)
+  // `printf a \` + `  b` is ONE finished command; the third line is a new one.
+  const continued = ['printf %s hello \\', '  world', 'zo']
+  const suggestions = await provider.getSuggestions(continued, 2, 2, { signal: abort, force: true })
+  assert.ok(suggestions !== null && suggestions.items.some(item => item.value === 'zoom'),
+    'the command line AFTER a completed continuation must complete again')
+  // A comment's quote is not an unfinished quote.
+  const commented = ['# example "unfinished', 'git che']
+  const sub = await provider.getSuggestions(commented, 1, 7, { signal: abort, force: true })
+  assert.ok(sub !== null && sub.items.some(item => item.value === 'checkout'),
+    'a quote inside a comment must not poison the next line')
+})
+
+test('a here-document body is text, and the line after its delimiter completes again', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  const port = fixedShellPort({ commands: ['zoom'] })
+  const provider = new MentionProvider([], root, null, modeSource('shell-context').source, undefined, undefined, undefined, [], port)
+  const body = ['cat <<EOF', 'zo']
+  assert.equal(await provider.getSuggestions(body, 1, 2, { signal: abort, force: true }), null,
+    'the here-document body is text, never a command position')
+  const after = ['cat <<EOF', 'zo', 'EOF', 'zo']
+  const suggestions = await provider.getSuggestions(after, 3, 2, { signal: abort, force: true })
+  assert.ok(suggestions !== null && suggestions.items.some(item => item.value === 'zoom'),
+    'the line after the here-document delimiter is a fresh command again')
+})
+
+test('Host path and variable candidates obey the same Session currentness fence', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  const port = fixedShellPort({ variables: ['HOME'], paths: ['src/deep-nested.ts'], authority: 'host' })
+  let scope: HostFileScope = { kind: 'workspace', cwd: root }
+  const provider = new MentionProvider([], root, null, modeSource('shell-context').source, () => scope, undefined, undefined, [], port)
+  const variableLine = ['echo "$HO']
+  const pathLine = ['cat src/de']
+  const variable = await provider.getSuggestions(variableLine, 0, 10, { signal: abort, force: true })
+  assert.ok(variable !== null)
+  const variableItem = variable.items.find(candidate => candidate.value === '$HOME')
+  assert.ok(variableItem !== undefined)
+  const path = await provider.getSuggestions(pathLine, 0, 10, { signal: abort, force: true })
+  assert.ok(path !== null)
+  const pathItem = path.items[0]
+  assert.ok(pathItem !== undefined)
+  // Same document, but the Session scope changed: neither Host fact applies.
+  scope = { kind: 'session', sessionId: SessionId('other-session') }
+  assert.deepEqual(provider.applyCompletion(variableLine, 0, 10, variableItem, variable.prefix),
+    { lines: variableLine, cursorLine: 0, cursorCol: 10 })
+  assert.deepEqual(provider.applyCompletion(pathLine, 0, 10, pathItem, path.prefix),
+    { lines: pathLine, cursorLine: 0, cursorCol: 10 })
 })
