@@ -764,3 +764,38 @@ test('command-name candidates are applied as ONE Bash-safe word, never as shell 
     resetCommandCacheForTest()
   }
 })
+
+test('a subcommand candidate is inserted as ONE Bash-safe word and runs as the intended argument', async (t) => {
+  // A git subcommand name is SUBPROCESS-produced text (`git --list-cmds`), so
+  // it is as untrusted as a compgen command name: it must be inserted as one
+  // literal word, never as shell source.
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-shell-subcommand-')
+  const bin = life.tempDir('dsh-shell-subcommand-bin-')
+  const run = life.tempDir('dsh-shell-subcommand-run-')
+  writeFileSync(join(bin, 'git'), "#!/bin/sh\nprintf '%s' \"git-stub:$1\"\n")
+  chmodSync(join(bin, 'git'), 0o755)
+  const raw = 'che$(touch WITNESS_SUB)'
+  const escaped = 'che\\$\\(touch\\ WITNESS_SUB\\)'
+  const provider = new MentionProvider(
+    [], root, null, undefined, undefined, undefined, undefined, [], fixedShellPort({ subcommands: [raw] }),
+  )
+  const line = '!git che'
+  const suggestions = await provider.getSuggestions([line], 0, line.length, { signal: abort, force: true })
+  assert.ok(suggestions !== null, 'the git subcommand position must produce suggestions')
+  const item = suggestions.items.find(candidate => candidate.label === raw)
+  assert.ok(item !== undefined, `${raw} missing from ${JSON.stringify(suggestions.items)}`)
+  assert.equal(item.value, escaped, 'the inserted subcommand is one Bash-safe literal')
+  const applied = provider.applyCompletion([line], 0, line.length, item, suggestions.prefix)
+  assert.deepEqual(applied.lines, [`!git ${escaped} `])
+  const executed = spawnSync('bash', ['-c', applied.lines[0]!.slice(1)], {
+    cwd: run,
+    encoding: 'utf8',
+    env: { ...process.env, PATH: `${bin}${delimiter}${process.env.PATH ?? ''}` },
+  })
+  assert.equal(executed.status, 0, executed.stderr)
+  assert.equal(executed.stdout, `git-stub:${raw}`,
+    'the subcommand resolves as ONE argument, not as a command substitution')
+  assert.equal(existsSync(join(run, 'WITNESS_SUB')), false,
+    'the subcommand name must never be evaluated as shell source')
+})

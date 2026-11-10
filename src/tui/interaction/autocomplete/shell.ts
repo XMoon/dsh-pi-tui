@@ -326,7 +326,10 @@ export async function suggestShellCompletion(
       .map(name => ({ value: `$${name}`, label: `$${name}` }))
     return matched.length === 0 ? null : { items: matched, prefix: context.prefix }
   }
-  return context.kind === 'command'
+  // A command NAME and a git SUBCOMMAND are both inserted at a command-word
+  // position: a produced name (compgen / `git --list-cmds`) is untrusted text
+  // and must become one Bash-safe word exactly like a command name.
+  return context.kind === 'command' || context.kind === 'subcommand'
     ? matchesFor(context.prefix, outcome.candidates, commandWordLiteral)
     : matchesFor(context.prefix, outcome.candidates)
 }
