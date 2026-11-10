@@ -8,10 +8,12 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
+import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 
 import { COMPAT_MATRIX } from '../../scripts/lib/dsh-compat.mjs'
+import { isInside } from '../../scripts/tarball-smoke.mjs'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
@@ -203,8 +205,8 @@ function runSourceSmoke(fixture, { cliDistribution = fixture.distribution, envDi
   })
 }
 
-function runNpmSmoke(fixture) {
-  const env = smokeEnvironment(fixture)
+function runNpmSmoke(fixture, environment = {}) {
+  const env = { ...smokeEnvironment(fixture), ...environment }
   delete env.TARBALL_SMOKE_SKIP_INSTALL
   const cwd = join(fixture.root, 'clean-cwd')
   mkdirSync(cwd, { recursive: true })
@@ -359,4 +361,38 @@ test('npm mode without a distribution keeps the existing fresh npm install path'
   assert.equal(result.status, 0, output)
   assert.match(output, /tarball installs standalone \(npm install --omit=dev\)/)
   assert.match(output, /all exports entries import/)
+})
+
+test('npm mode keeps the probe isolated when TMPDIR is inside the checkout', (t) => {
+  const life = testLifecycle(t)
+  const fixture = makeFixture(life, { candidatePeers: {} })
+  // A lane runner may put its own temp root inside the checkout (or the
+  // caller sets TMPDIR there). The smoke must still create its install probe
+  // where Node cannot resolve this workspace's node_modules; otherwise the
+  // self-contained row reads the workspace fork and fails as if the tarball
+  // leaked it. The `temp/` roots still go through the lifecycle owner so the
+  // temp-hygiene gate sees one owner for every test fixture dir. Creating this
+  // shared ignored scratch parent is accepted; only the fixture is lifecycle-
+  // owned and removed.
+  mkdirSync(join(ROOT, 'temp'), { recursive: true })
+  const inCheckout = life.tempDir('tarball-smoke-inrepo-', join(ROOT, 'temp'))
+  const result = runNpmSmoke(fixture, { TMPDIR: inCheckout, TMP: inCheckout, TEMP: inCheckout })
+  const output = outputOf(result)
+  assert.equal(result.status, 0, output)
+  assert.match(output, /ok\s+@xmoon76\/pi-tui is not resolvable from the installed package \(self-contained\)/)
+})
+
+test('checkout containment keeps a ..-prefixed child path inside', () => {
+  const parent = join(tmpdir(), 'tarball-smoke-containment')
+  assert.equal(isInside(parent, parent), true)
+  // The regression this guards: `relative(parent, parent/..cache)` is
+  // `..cache`, which a `startsWith('..')` test would misclassify as outside.
+  assert.equal(isInside(join(parent, '..cache'), parent), true,
+    'a child whose NAME starts with two dots is still inside the checkout')
+  assert.equal(isInside(join(parent, '..cache', 'probe'), parent), true)
+  assert.equal(isInside(join(parent, '..', 'outside'), parent), false)
+  assert.equal(isInside(parent, join(parent, '..cache')), false)
+  if (process.platform === 'win32') {
+    assert.equal(isInside('D:\\repo', 'C:\\repo'), false, 'a different drive is outside')
+  }
 })
