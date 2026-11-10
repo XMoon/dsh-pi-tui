@@ -26,6 +26,7 @@ import type { HostCommandPort } from './host-command-port.ts'
 import type { PluginManagerPort } from './plugin-manager-port.ts'
 import type { JobObservationPort } from './job-observation-port.ts'
 import type { HostUserShellPort } from './host-user-shell-port.ts'
+import type { HostShellCompletionPort } from './host-shell-completion-port.ts'
 import type { DeliveredFileReadPort } from './deliverables-port.ts'
 import type { WebAccessPort } from './web-access-port.ts'
 import type { SessionWorkspaceFactsPort } from './session-workspace-facts-port.ts'
@@ -76,10 +77,11 @@ export interface Backend {
   /** The selected-Job observation domain port (P1-B): one non-consuming
    * observation stream for the Job the user opened. */
   readonly jobObservation: JobObservationPort
-  /** The Host user-shell execution port (M3-4 PR3 shell amendment): the
-   * backend's execution authority — Direct serves the in-process Host
-   * adapter; Remote serves the truthful-unavailable adapter (CARRIER_GAP). */
+  /** The shared Host user-shell execution authority: Direct runs in-process;
+   * Remote uses the authenticated one-shot Host stream. */
   readonly hostUserShell: HostUserShellPort
+  /** Read-only command/variable/git/path completion facts from the selected Host. */
+  readonly hostShellCompletion: HostShellCompletionPort
   /** The delivered-file READ port (Delivered files PR2): bounded Host
    * `stat`/`read` for one declared file, under the Session-derived workspace
    * scope. Direct reads the official Host service in-process; Remote calls the
@@ -119,6 +121,7 @@ export function createDirectBackend(
   pluginManager: PluginManagerPort,
   jobObservation: JobObservationPort,
   hostUserShell: HostUserShellPort,
+  hostShellCompletion: HostShellCompletionPort,
   deliveredFileRead: DeliveredFileReadPort,
   webAccess: WebAccessPort,
   sessionWorkspaceFacts: SessionWorkspaceFactsPort,
@@ -142,6 +145,7 @@ export function createDirectBackend(
     pluginManager,
     jobObservation,
     hostUserShell,
+    hostShellCompletion,
     deliveredFileRead,
     webAccess,
     sessionWorkspaceFacts,

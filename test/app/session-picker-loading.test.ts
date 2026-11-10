@@ -147,7 +147,7 @@ function harness(
     commandRegistry: ctx.get('commands') as never,
     clientCommands: createClientCommandRegistry(parseCommand),
     hostFile: new DirectHostFilePort(() => undefined),
-    hostShellCompletion: true,
+    hostShellCompletion: { pathAuthority: 'client', complete: async () => ({ kind: 'ok', candidates: [] }) },
     requestExit: () => {},
     cwd: '/ws',
     sessionCwd: () => '/ws',

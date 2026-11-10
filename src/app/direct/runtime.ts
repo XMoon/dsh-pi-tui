@@ -47,6 +47,7 @@ import { createDirectOwnerRegistry, type DirectOwnerRegistry } from './owner-reg
 import { createDirectOwnerRetirement } from './owner-retirement.ts'
 import type { SessionOwnerRef } from '../session/subject.ts'
 import type { SessionOwnerRetirement } from '../session/owner-access.ts'
+import { requestShellCandidates } from '../../client/shell/compgen.ts'
 
 /** The interactive continuable child currently mounted by a viewer. */
 export interface DirectViewedQueueAgent {
@@ -87,6 +88,7 @@ export interface DirectApplicationRuntimeDeps {
   readonly diag: Diag
   /** The persisted TUI-settings facade (absent without the Settings service). */
   readonly tuiSettings: TuiSettingsConfig | undefined
+  readonly sessionCwd: () => string
   /**
    * The ownership core's owner-release seam. The Direct owner pool is built and
    * owned HERE; it reads the ONE ledger through this callback.
@@ -275,11 +277,13 @@ export function createDirectApplicationRuntime(deps: DirectApplicationRuntimeDep
     ctx: deps.ctx,
     diag: deps.diag,
     tuiSettings: deps.tuiSettings,
+    sessionCwd: deps.sessionCwd,
     modelSelections,
     ownerPool,
     compose: (presetId) => compose(presetId),
     agentFor,
     queueAgentFor,
+    shellCandidates: requestShellCandidates,
     liveResolvers,
   })
 

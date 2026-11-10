@@ -198,7 +198,7 @@ function startHarness(): Harness {
       clearError: () => {},
     },
     artifacts: { start: () => {} },
-    shell: { run: () => {}, interrupt: () => {} },
+    shell: { run: () => {}, interrupt: () => {}, cancelRun: () => false },
     supportsLocalShellCards: true,
     supportsTuiBuiltinUi: true,
     retainsStaleDraftRestore: true,
@@ -368,11 +368,11 @@ function startShellHarness(): ShellHarness {
       return live
     },
     captureLiveScope: () => scopeAuthority.captureLive(),
-    // The REAL controller writer section: the accepted shell gesture's own
-    // writer admission owner.
-    writerSection: async (task) => {
+    isLiveScopeCurrent: scope => scopeAuthority.isCurrent(scope),
+    // The REAL SessionRuntime writer admission for the captured shell scope.
+    writerSection: async (scope, task) => {
       if (controller === undefined) throw new Error('fixture: the controller is not built')
-      return await controller.withWriterSection(task)
+      return await controller.withShellWriterSection(scope, task)
     },
     writer: sessionWriter as never,
     status: { sessionCwd: () => '/tmp' },
@@ -462,7 +462,7 @@ function startShellHarness(): ShellHarness {
       clearError: () => {},
     },
     artifacts: { start: () => {} },
-    shell: { run: (text, ackToken, endWrite) => shell.run(text, ackToken, endWrite), interrupt: () => shell.interrupt() },
+    shell: { run: (text, ackToken, endWrite) => shell.run(text, ackToken, endWrite), interrupt: () => shell.interrupt(), cancelRun: () => shell.cancelRun() },
     supportsLocalShellCards: true,
     supportsTuiBuiltinUi: true,
     retainsStaleDraftRestore: true,

@@ -20,8 +20,8 @@
  * so a drift between the descriptors the Host registers and the Client mounts
  * remains impossible by construction.
  *
- * The three features here are the file-reference query, the terminal-progress
- * stream and the official Web frontend availability toggle.
+ * The four features here are file references, terminal progress, the official
+ * Web frontend availability toggle and Host one-shot Shell/completion.
  *
  * @module @xmoon76/dsh-pi-tui/runtime/remote/pi-tui-remote-contribution
  */
@@ -29,6 +29,10 @@
 import type { TypertContribution } from '@deepseek-ai/dsh-typert-registry'
 import type { TypertRemoteContribution } from '@deepseek-ai/dsh-typert-protocol'
 import { PI_TUI_FILE_REFERENCES_LIST } from './pi-tui-file-reference-contract.ts'
+import {
+  PI_TUI_HOST_USER_SHELL_COMPLETE,
+  PI_TUI_HOST_USER_SHELL_RUN,
+} from './pi-tui-host-user-shell-contract.ts'
 import { PI_TUI_TERMINAL_PROGRESS_WATCH } from './pi-tui-terminal-progress-contract.ts'
 import {
   PI_TUI_WEB_ACCESS_GET_AUTHENTICATED_URL,
@@ -48,6 +52,8 @@ export const PI_TUI_HOST_CONTRIBUTION: TypertContribution = {
   model: { services: [], events: [], objects: [] },
   invocations: [
     PI_TUI_FILE_REFERENCES_LIST,
+    PI_TUI_HOST_USER_SHELL_RUN,
+    PI_TUI_HOST_USER_SHELL_COMPLETE,
     PI_TUI_TERMINAL_PROGRESS_WATCH,
     PI_TUI_WEB_ACCESS_GET_STATUS,
     PI_TUI_WEB_ACCESS_SET_ENABLED,
@@ -60,6 +66,8 @@ export const PI_TUI_CLIENT_CONTRIBUTION: TypertRemoteContribution = {
   package: PI_TUI_REMOTE_PACKAGE,
   descriptors: [
     PI_TUI_FILE_REFERENCES_LIST,
+    PI_TUI_HOST_USER_SHELL_RUN,
+    PI_TUI_HOST_USER_SHELL_COMPLETE,
     PI_TUI_TERMINAL_PROGRESS_WATCH,
     PI_TUI_WEB_ACCESS_GET_STATUS,
     PI_TUI_WEB_ACCESS_SET_ENABLED,

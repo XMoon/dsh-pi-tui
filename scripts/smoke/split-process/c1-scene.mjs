@@ -62,10 +62,10 @@ const PROTECTED_HOST_ROWS = [
  * The caller owns `dispose()` in a `finally`; the runner still owns the work
  * root, the process backstop and the abort cleanup.
  */
-export function createC1Scene(context) {
+export function createC1Scene(context, options = {}) {
   const { EntryProcess, SurfaceEntryProcess, entries, base, workDir, installation } = context
   const { profileDir } = installation
-  const c1Work = writeC1WorkFixture(profileDir, workDir)
+  const c1Work = writeC1WorkFixture(profileDir, workDir, options)
   const c1Hosts = []
   const c1Clients = []
   /** This scene's full 64-character scope id, learned from its first Ready. */

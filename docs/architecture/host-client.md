@@ -25,7 +25,7 @@ Every Host-touching feature declares exactly one locality before implementation:
 | Locality | Examples |
 |---|---|
 | Client-local | terminal rendering, editor/keybindings, clipboard/OSC 52, input history, search/filter/picker/overlay/fullscreen/theme/draft state, the current draft external editor, Client draft file/image intake, Client artifact output, local media/URL opening |
-| Host-owned | Agent, Session, subagent, jobs, tools, LLM/provider/model catalog, skills, agent presets, persistence, session search, approval/question authority, Host workspace/filesystem references, Host shell/tool execution, credentials, settings |
+| Host-owned | Agent, Session, subagent, jobs, tools, LLM/provider/model catalog, skills, agent presets, persistence, session search, approval/question authority, Host workspace/filesystem references, Host shell/tool execution and Host shell completion, credentials, settings |
 | Split | `!`/`!!`, `@file`, `/open`, `/image`, `/export`, working directory |
 
 The Client process cwd/filesystem is never the Host workspace. `@` means the
@@ -48,9 +48,15 @@ Consequences that are part of the contract:
 - A Remote consumer never reads a Host `workingDirectory` to drive a
   Client-local gesture, and the Host never writes terminal bytes.
 - On the Remote branch, `!`/`!!` execute in the Host environment through
-  `HostUserShellPort`; until a qualified one-shot Host carrier exists they fail
-  closed (`{ kind: 'unavailable', reason: 'carrier-gap' }`) and execute nothing,
-  for both policies. The draft external editor stays Client-local; a future
+  `HostUserShellPort`; the Client never spawns the command or supplies Host
+  environment facts. The single authenticated Owner-only Host endpoint requires
+  a live Agent and the identical live Session object (`agent.session ===
+  sessions.get(sessionId)`) before preparation and again immediately before spawn.
+  Gateway `remoteAccess` resource decisions run only for non-Owner peers in the
+  pinned DSH contract, so they are not an authorization fact for Owner calls.
+  Host shell completion uses the same Host cwd/PATH/filesystem authority and
+  fails closed when that Host source is unavailable; it never falls back to the
+  Client machine. The draft external editor stays Client-local; a future
   Host-filesystem editor/open is a separate capability.
 
 ## Semantic ports and composition
@@ -59,7 +65,7 @@ Consequences that are part of the contract:
 `pendingInputReader`, `sessionWriter`, `sessionLifecycle`, `interaction`,
 `catalog`, `config`, `hostFile`, `sessionArchive`, `sessionMarkdown`,
 `hostCommand`, `pluginManager`, `jobObservation`, `hostUserShell`,
-`deliveredFileRead`, `webAccess`, `sessionWorkspaceFacts`, `schedule`), never a
+`hostShellCompletion`, `deliveredFileRead`, `webAccess`, `sessionWorkspaceFacts`, `schedule`), never a
 `TuiBackend` god object. A port exposes detached semantic facts, opaque identities/request ids,
 event surfaces (for example authorization: begin → attemptId → notice/prompt →
 respond/cancel) and semantic operations. It owns no Host database, state machine
@@ -74,8 +80,9 @@ Host service resolution belongs to:
 `src/app/host/**` is the bundle's permanent Host plane: it registers with
 explicit `inject` and `ctx.reflect.get`, and consumers read only semantic DTOs or
 port values. `src/app/host/pi-tui-host-runtime.ts` is the ONE built-in Host
-Runtime Loader row; `src/app/host/features/**` are its three internal business
-modules, not independent plugins.
+Runtime Loader row; `src/app/host/features/**` are its private business
+modules, not independent plugins. The row publishes readiness only after the
+shared private contribution and every required service binding are live.
 
 Three real OS processes compose this package. Exactly TWO of them are roots of
 the `app/bootstrap.ts` facade; the third enters through the official profile

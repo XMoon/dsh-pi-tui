@@ -307,8 +307,8 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
     /** M5-W PR-C: the Split-Client Web frontend control (`/web`). */
     readonly webAccess: TuiCommandRunner['webAccess']
     /** Shell amendment (M3-4 PR3): whether Host-shell completion facts are
-     * reachable on the selected backend (Direct true / Remote false). */
-    readonly hostShellCompletion: boolean
+     * reachable on the selected backend. */
+    readonly hostShellCompletion: import('../../runtime/host-shell-completion-port.ts').HostShellCompletionPort
   }
   /** The bound session runtime entries the runner drives. */
   readonly session: {

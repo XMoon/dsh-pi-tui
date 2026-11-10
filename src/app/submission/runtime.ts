@@ -32,11 +32,7 @@ import type { Diag } from '../../runtime/process/diagnostics.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import { runReservedSubmit } from './submit-flow.ts'
 import { TransitionInProgressError } from '../session/operation-barrier.ts'
-import {
-  formatShellSubmitText,
-  submitShellResult,
-  type ShellSubmitAgentLike,
-} from './shell-context.ts'
+import { formatShellSubmitText, submitShellResult } from './shell-context.ts'
 import type { PreparedMessage, SessionWriter, WriteOutcome } from '../../runtime/session-writer-port.ts'
 import type { PendingInputReader, PendingInputSnapshot } from '../../runtime/pending-input-reader-port.ts'
 import type { HostCommandOutcome } from '../../runtime/host-command-port.ts'
@@ -346,93 +342,67 @@ export function bindSubmissionRuntime(deps: SubmissionRuntimeDeps): SubmissionRu
 export interface ShellSubmitDeps {
   readonly command: string
   readonly result: string
-  /** The generation the run STARTED under (a later switch skips the submit). */
-  readonly generationAtRun: number
+  readonly scope: LiveSessionScope
   readonly isDisposed: () => boolean
-  readonly currentGeneration: () => number
-  /** The live session id for the dispatch mark (undefined before a session). */
-  readonly currentSessionId: () => string | undefined
-  /** The live agent for the helper's own re-validation. */
-  readonly currentAgent: () => ShellSubmitAgentLike | undefined
-  /** Finish the terminal ack row armed at the gesture. */
+  readonly isScopeCurrent: (scope: LiveSessionScope) => boolean
   readonly terminalAck: (reason: string) => void
   readonly clearSettledLocalMessages: () => void
   readonly notify: (message: string, kind: 'info' | 'error') => void
-  readonly markDispatch: (sessionId: string | undefined) => void
-  /** The scope-bound writer section (captures a fresh live scope). */
-  readonly writerSection: <T>(task: () => Promise<T>) => Promise<T>
+  readonly markDispatch: (sessionId: string) => void
+  readonly writerSection: <T>(scope: LiveSessionScope, task: () => Promise<T>) => Promise<T>
   readonly writer: { prompt(sessionId: string, message: unknown, mode?: 'queue' | 'steer'): Promise<WriteOutcome> }
+  readonly prepareMessage?: (scope: LiveSessionScope, text: string) => Promise<unknown>
   readonly createMessage: (text: string) => unknown
   readonly diag: Diag
-  /**
-   * M4 PR4: the `!` gesture's accepted business-write lifetime release. It runs
-   * at this submit's EXISTING terminal settlement (or at the early gates where
-   * no write can happen), so the Client reload safety gate keeps refusing until
-   * the shell output's Session write has really settled.
-   */
   readonly onSettled: () => void
 }
 
-/**
- * Submit one completed `!` shell run to the session: a session switch while the
- * command ran skips the submit; otherwise the helper's re-validate → followup
- * runs and its outcome settles the ack row and the settled card.
- */
 export function submitShell(deps: ShellSubmitDeps): void {
   if (deps.isDisposed()) {
     deps.onSettled()
     return
   }
-  if (deps.currentGeneration() !== deps.generationAtRun) {
+  if (!deps.isScopeCurrent(deps.scope)) {
     deps.terminalAck('shell submit skipped after a session switch')
     deps.notify('the session changed while the command ran — the output was not submitted', 'error')
     deps.onSettled()
     return
   }
   const submitted = formatShellSubmitText(deps.command, deps.result)
-  // T1 BEFORE the dispatch: same ordering rule as the Enter path.
-  deps.markDispatch(deps.currentSessionId())
+  deps.markDispatch(deps.scope.sessionId)
   runOwned('shell submit', () => submitShellResult({
-    currentAgent: () => deps.currentAgent(),
-    currentGeneration: () => deps.currentGeneration(),
+    scope: deps.scope,
+    isScopeCurrent: deps.isScopeCurrent,
     notify: (message, kind) => {
       if (deps.isDisposed()) return
       deps.notify(message, kind)
     },
     staleNotice: () => 'the session changed while the submission was being checked — the output was not submitted',
-    // The shell submit is admitted through `writerSection`: a transition that
-    // arrives after admission WAITS for the whole write, so the fence carries
-    // only the surface lifetime (never the session gate).
     fence: () => deps.isDisposed(),
     writerSection: deps.writerSection,
     fenceNotice: () => 'a session transition is in progress — the output stays on the card; re-run ! after it settles',
     writer: deps.writer,
-    createMessage: (text) => deps.createMessage(text),
+    ...(deps.prepareMessage === undefined ? {} : { prepareMessage: deps.prepareMessage }),
+    createMessage: text => deps.createMessage(text),
     onSubmitted: () => {
       if (deps.isDisposed()) return
-      // The write was accepted. The ACK ROW STAYS until the first
-      // authoritative event (the inbox insert) settles it.
       deps.clearSettledLocalMessages()
     },
   }, submitted), {
     diag: deps.diag,
-    sessionId: () => deps.currentAgent()?.session.id,
-    onResult: (outcome) => {
+    sessionId: () => deps.scope.sessionId,
+    onResult: outcome => {
       deps.onSettled()
       if (deps.isDisposed()) return
       if (outcome !== 'ok') deps.terminalAck(`shell submit ${outcome}`)
-      else if (deps.currentAgent() === undefined) deps.terminalAck('shell submit without an agent')
     },
     onCancel: () => {
       deps.onSettled()
-      if (deps.isDisposed()) return
-      deps.terminalAck('shell submit cancelled')
+      if (!deps.isDisposed()) deps.terminalAck('shell submit cancelled')
     },
-    onError: (error) => {
+    onError: error => {
       deps.onSettled()
       if (deps.isDisposed()) return
-      // The submission failed before the write ran: keep the card (the output
-      // is not lost) and surface the reason.
       deps.terminalAck('shell submit failure')
       deps.notify(`shell submit failed: ${safeErrorMessage(error)}`, 'error')
     },

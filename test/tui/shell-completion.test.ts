@@ -14,6 +14,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { MentionProvider } from '../../src/tui/interaction/autocomplete/provider.ts'
 import { shellCompletionContext, suggestShellCompletion } from '../../src/tui/interaction/autocomplete/shell.ts'
+import type { HostShellCompletionPort, HostShellCompletionRequest } from '../../src/runtime/host-shell-completion-port.ts'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
 
 const abort = new AbortController().signal
@@ -30,13 +31,11 @@ test('shellCompletionContext parses command, subcommand, variable and path posit
   assert.deepEqual(shellCompletionContext('!git che', 8), { kind: 'subcommand', prefix: 'che', priorWords: ['git'] })
   // A `$VAR` word anywhere after the first word.
   assert.deepEqual(shellCompletionContext('!echo $HO', 10), { kind: 'variable', prefix: '$HO', priorWords: ['echo'] })
-  // Path positions are NOT the bridge's job.
-  assert.equal(shellCompletionContext('!ls /u', 6), undefined)
-  assert.equal(shellCompletionContext('!cat src/de', 11), undefined)
-  assert.equal(shellCompletionContext('!./run.sh', 9), undefined)
-  assert.equal(shellCompletionContext('!~/bin', 6), undefined)
-  // A later word of an unknown command is a path position too.
-  assert.equal(shellCompletionContext('!unknowncmd foo', 15), undefined)
+  assert.deepEqual(shellCompletionContext('!ls /u', 6), { kind: 'paths', prefix: '/u', priorWords: ['ls'] })
+  assert.deepEqual(shellCompletionContext('!cat src/de', 11), { kind: 'paths', prefix: 'src/de', priorWords: ['cat'] })
+  assert.deepEqual(shellCompletionContext('!./run.sh', 9), { kind: 'paths', prefix: './run.sh', priorWords: [] })
+  assert.deepEqual(shellCompletionContext('!~/bin', 6), { kind: 'paths', prefix: '~/bin', priorWords: [] })
+  assert.deepEqual(shellCompletionContext('!unknowncmd foo', 15), { kind: 'paths', prefix: 'foo', priorWords: ['unknowncmd'] })
   // Non-shell lines never produce a context.
   assert.equal(shellCompletionContext('plain text', 10), undefined)
   assert.equal(shellCompletionContext('/cmd', 4), undefined)
@@ -45,7 +44,7 @@ test('shellCompletionContext parses command, subcommand, variable and path posit
 // --- suggestShellCompletion: real bash ---
 
 test('command-name completion returns cached PATH commands matching the prefix', async () => {
-  const suggestions = await suggestShellCompletion({ kind: 'command', prefix: 'gi', priorWords: [] }, cwd, { signal: abort })
+  const suggestions = await suggestShellCompletion({ kind: 'command', prefix: 'gi', priorWords: [] }, directShellPort(cwd), undefined, { signal: abort })
   assert.ok(suggestions !== null, 'git must be on PATH in the test environment')
   assert.ok(suggestions.items.some(item => item.value === 'git'), `git missing from ${JSON.stringify(suggestions.items.slice(0, 5))}`)
   assert.equal(suggestions.prefix, 'gi')
@@ -53,35 +52,35 @@ test('command-name completion returns cached PATH commands matching the prefix',
 
 test('an empty command prefix stays quiet on natural triggers and lists on Tab', async () => {
   const context = { kind: 'command' as const, prefix: '', priorWords: [] as readonly string[] }
-  const natural = await suggestShellCompletion(context, cwd, { signal: abort, force: false })
+  const natural = await suggestShellCompletion(context, directShellPort(cwd), undefined, { signal: abort, force: false })
   assert.equal(natural, null, 'a natural trigger with an empty prefix must not flash the list')
-  const forced = await suggestShellCompletion(context, cwd, { signal: abort, force: true })
+  const forced = await suggestShellCompletion(context, directShellPort(cwd), undefined, { signal: abort, force: true })
   assert.ok(forced !== null && forced.items.length > 0, 'explicit Tab with an empty prefix lists commands')
 })
 
 test('variable completion returns $VAR names for the word after the dollar', async () => {
-  const suggestions = await suggestShellCompletion({ kind: 'variable', prefix: '$HO', priorWords: ['echo'] }, cwd, { signal: abort })
+  const suggestions = await suggestShellCompletion({ kind: 'variable', prefix: '$HO', priorWords: ['echo'] }, directShellPort(cwd), undefined, { signal: abort })
   assert.ok(suggestions !== null, 'HOME must be a variable')
   assert.ok(suggestions.items.some(item => item.value === '$HOME'), `$HOME missing from ${JSON.stringify(suggestions.items.slice(0, 5))}`)
   assert.equal(suggestions.prefix, '$HO')
 })
 
 test('git subcommand completion lists git subcommands', async () => {
-  const suggestions = await suggestShellCompletion({ kind: 'subcommand', prefix: 'che', priorWords: ['git'] }, cwd, { signal: abort })
+  const suggestions = await suggestShellCompletion({ kind: 'subcommand', prefix: 'che', priorWords: ['git'] }, directShellPort(cwd), undefined, { signal: abort })
   assert.ok(suggestions !== null, 'git --list-cmds must produce subcommands')
   assert.ok(suggestions.items.some(item => item.value === 'checkout'), `checkout missing from ${JSON.stringify(suggestions.items.slice(0, 8))}`)
   assert.equal(suggestions.prefix, 'che')
 })
 
 test('no matches yield null, never an error', async () => {
-  const suggestions = await suggestShellCompletion({ kind: 'command', prefix: 'zzz-no-such-command-xyz', priorWords: [] }, cwd, { signal: abort })
+  const suggestions = await suggestShellCompletion({ kind: 'command', prefix: 'zzz-no-such-command-xyz', priorWords: [] }, directShellPort(cwd), undefined, { signal: abort })
   assert.equal(suggestions, null)
 })
 
 test('an aborted request never spawns a shell', async () => {
   const controller = new AbortController()
   controller.abort()
-  const suggestions = await suggestShellCompletion({ kind: 'command', prefix: 'gi', priorWords: [] }, cwd, { signal: controller.signal })
+  const suggestions = await suggestShellCompletion({ kind: 'command', prefix: 'gi', priorWords: [] }, directShellPort(cwd), undefined, { signal: controller.signal })
   assert.equal(suggestions, null)
 })
 
@@ -89,7 +88,7 @@ test('a PATH without bash degrades to null (missing shell)', async () => {
   const saved = process.env.PATH
   try {
     process.env.PATH = join(tmpdir(), 'dsh-no-bash')
-    const suggestions = await suggestShellCompletion({ kind: 'command', prefix: 'gi', priorWords: [] }, cwd, { signal: abort })
+    const suggestions = await suggestShellCompletion({ kind: 'command', prefix: 'gi', priorWords: [] }, directShellPort(cwd), undefined, { signal: abort })
     assert.equal(suggestions, null, 'a missing bash must yield no suggestions, never a throw')
   } finally {
     if (saved === undefined) delete process.env.PATH
@@ -110,7 +109,7 @@ function fixtureWorkspace(life: TestLifecycle): string {
 test('MentionProvider completes shell command words on ! lines', async (t) => {
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)
-  const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, null))
+  const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, null), undefined, undefined, undefined, undefined, [], directShellPort(root))
   const suggestions = await provider.getSuggestions(['!gi'], 0, 3, { signal: abort })
   assert.ok(suggestions !== null, 'command-name completion must run through the provider')
   assert.ok(suggestions.items.some(item => item.value === 'git'), 'git must be suggested')
@@ -119,7 +118,7 @@ test('MentionProvider completes shell command words on ! lines', async (t) => {
 test('MentionProvider still completes paths on ! lines (path positions reach the fork)', async (t) => {
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)
-  const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, null))
+  const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, null), undefined, undefined, undefined, undefined, [], directShellPort(root))
   const suggestions = await provider.getSuggestions(['!cat src/de'], 0, 11, { signal: abort })
   assert.ok(suggestions !== null, 'a path position on a ! line must reach the fork provider')
   assert.ok(suggestions.items.some(item => item.value.includes('deep-nested.ts')), `deep-nested.ts missing from ${JSON.stringify(suggestions.items.slice(0, 5))}`)
@@ -130,7 +129,7 @@ test('a backend without Host shell facts (Remote) shows NO shell suggestions at 
   const root = fixtureWorkspace(life)
   // hostShellCompletion=false models the Remote backend: no compgen AND no
   // fd-backed Client-filesystem path completion may answer a shell line.
-  const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, null), undefined, undefined, undefined, undefined, [], false)
+  const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, null))
   const commandSeat = await provider.getSuggestions(['!gi'], 0, 3, { signal: abort, force: true })
   assert.equal(commandSeat, null, 'command-name completion must stay silent without Host shell facts')
   const pathSeat = await provider.getSuggestions(['!cat src/de'], 0, 11, { signal: abort, force: true })
@@ -142,7 +141,7 @@ test('a backend without Host shell facts (Remote) shows NO shell suggestions at 
 test('MentionProvider applies a shell item as a plain word replacement', async (t) => {
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)
-  const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, null))
+  const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, null), undefined, undefined, undefined, undefined, [], directShellPort(root))
   const applied = provider.applyCompletion(['!gi'], 0, 3, { value: 'git', label: 'git' }, 'gi')
   assert.deepEqual(applied, { lines: ['!git '], cursorLine: 0, cursorCol: 5 })
   const appliedVar = provider.applyCompletion(['!echo $HO'], 0, 9, { value: '$HOME', label: '$HOME' }, '$HO')
@@ -165,7 +164,7 @@ test('MentionProvider completes shell words on the bare body via the virtual pre
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)
   const { source } = modeSource('shell-context')
-  const provider = new MentionProvider([], root, null, source)
+  const provider = new MentionProvider([], root, null, source, undefined, undefined, undefined, [], directShellPort(root))
   // The buffer holds `gi` (no `!`); the provider synthesizes `!gi`.
   const suggestions = await provider.getSuggestions(['gi'], 0, 2, { signal: abort })
   assert.ok(suggestions !== null, 'command completion must run through the virtual prefix')
@@ -177,7 +176,7 @@ test('MentionProvider applies a shell item without ever writing the synthetic pr
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)
   const { source } = modeSource('shell-local')
-  const provider = new MentionProvider([], root, null, source)
+  const provider = new MentionProvider([], root, null, source, undefined, undefined, undefined, [], directShellPort(root))
   const applied = provider.applyCompletion(['git che'], 0, 7, { value: 'checkout', label: 'checkout' }, 'che')
   assert.deepEqual(applied, { lines: ['git checkout '], cursorLine: 0, cursorCol: 13 },
     'the applied line must be the bare body — the !! prefix never enters the buffer')
@@ -187,7 +186,7 @@ test('MentionProvider still completes paths on a shell-mode body (path positions
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)
   const { source } = modeSource('shell-context')
-  const provider = new MentionProvider([], root, null, source)
+  const provider = new MentionProvider([], root, null, source, undefined, undefined, undefined, [], directShellPort(root))
   const suggestions = await provider.getSuggestions(['cat src/de'], 0, 10, { signal: abort })
   assert.ok(suggestions !== null, 'a path position on a shell-mode body must reach the fork provider')
   assert.ok(suggestions.items.some(item => item.value.includes('deep-nested.ts')), `deep-nested.ts missing from ${JSON.stringify(suggestions.items.slice(0, 5))}`)
@@ -197,7 +196,7 @@ test('a natural trigger on a leading / in a shell mode stays quiet (never slash 
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)
   const { source } = modeSource('shell-context')
-  const provider = new MentionProvider([{ name: 'image', description: 'Attach an image file' }], root, null, source)
+  const provider = new MentionProvider([{ name: 'image', description: 'Attach an image file' }], root, null, source, undefined, undefined, undefined, [], directShellPort(root))
   // The fork's slash-command branch would list `image` for a natural
   // trigger on `/`; the shell-mode routing must suppress it (a path, not
   // a command). Tab (force) still completes the path.
@@ -211,7 +210,7 @@ test('shouldTriggerFileCompletion allows Tab on a leading / in a shell mode', as
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)
   const { source } = modeSource('shell-context')
-  const provider = new MentionProvider([], root, null, source)
+  const provider = new MentionProvider([], root, null, source, undefined, undefined, undefined, [], directShellPort(root))
   // The fork's bare-slash-command block would return false for `/usr/lo`
   // (no space); the virtual prefix keeps the fork's judgment on the
   // serialized line, where `/usr/lo` is a path.
@@ -231,8 +230,23 @@ test('shouldTriggerFileCompletion allows Tab on a leading / in a shell mode', as
 // --- injected-runner determinism (review finding 4/5: failed runs must not
 // be cached, and the spawn/cache must be testable without real bash) ---
 
-import { resetCommandCacheForTest, setCompgenRunnerForTest, type CompgenRun } from '../../src/client/shell/compgen.ts'
+import { resetCommandCacheForTest, requestShellCandidates, setCompgenRunnerForTest, type CompgenRun } from '../../src/client/shell/compgen.ts'
 import { DirectHostFilePort } from '../../src/runtime/direct/host-file-direct.ts'
+
+function directShellPort(root: string): HostShellCompletionPort {
+  return {
+    pathAuthority: 'client',
+    async complete({ request, signal }) {
+      if (request.kind === 'paths') return { kind: 'ok', candidates: [] }
+      const candidateRequest = request.kind === 'commands'
+        ? { kind: 'commands' as const }
+        : request.kind === 'variables'
+          ? { kind: 'variables' as const, prefix: request.prefix }
+          : { kind: 'subcommands' as const, command: request.command }
+      return { kind: 'ok', candidates: await requestShellCandidates(candidateRequest, root, signal) }
+    },
+  }
+}
 
 function fakeRunner(script: (expression: string, prefix: string) => CompgenRun): {
   calls: { expression: string; prefix: string }[]
@@ -249,11 +263,11 @@ test('successful command lists are cached; failed runs are never cached', async 
   resetCommandCacheForTest()
   try {
     const runner = fakeRunner(() => ({ ok: true, lines: ['git', 'gist'] }))
-    const first = await suggestShellCompletion({ kind: 'command', prefix: 'gi', priorWords: [] }, cwd, { signal: abort })
+    const first = await suggestShellCompletion({ kind: 'command', prefix: 'gi', priorWords: [] }, directShellPort(cwd), undefined, { signal: abort })
     assert.ok(first !== null && first.items.some(item => item.value === 'git'))
     assert.equal(runner.calls.length, 1, 'the first request spawns once')
     // Cache hit: a second request must not spawn again.
-    const second = await suggestShellCompletion({ kind: 'command', prefix: 'gi', priorWords: [] }, cwd, { signal: abort })
+    const second = await suggestShellCompletion({ kind: 'command', prefix: 'gi', priorWords: [] }, directShellPort(cwd), undefined, { signal: abort })
     assert.ok(second !== null)
     assert.equal(runner.calls.length, 1, 'a cache hit must not re-run compgen')
     // A FAILED run (timeout/abort/spawn error) must not create a cache
@@ -261,10 +275,10 @@ test('successful command lists are cached; failed runs are never cached', async 
     // command set for the whole TTL.
     resetCommandCacheForTest()
     const failedRunner = fakeRunner(() => ({ ok: false, lines: [] }))
-    const failed = await suggestShellCompletion({ kind: 'command', prefix: 'gi', priorWords: [] }, cwd, { signal: abort })
+    const failed = await suggestShellCompletion({ kind: 'command', prefix: 'gi', priorWords: [] }, directShellPort(cwd), undefined, { signal: abort })
     assert.equal(failed, null)
     assert.equal(failedRunner.calls.length, 1, 'the failed run happened once')
-    const retried = await suggestShellCompletion({ kind: 'command', prefix: 'gi', priorWords: [] }, cwd, { signal: abort })
+    const retried = await suggestShellCompletion({ kind: 'command', prefix: 'gi', priorWords: [] }, directShellPort(cwd), undefined, { signal: abort })
     assert.equal(retried, null)
     assert.equal(failedRunner.calls.length, 2, 'a failed run must NOT be cached — the retry must spawn again')
   } finally {
@@ -283,15 +297,15 @@ test('an aborted request never spawns and variable/subcommand failures degrade',
       return Promise.resolve({ ok: false, lines: [] })
     })
     controller.abort()
-    const aborted = await suggestShellCompletion({ kind: 'command', prefix: 'gi', priorWords: [] }, cwd, { signal: controller.signal })
+    const aborted = await suggestShellCompletion({ kind: 'command', prefix: 'gi', priorWords: [] }, directShellPort(cwd), undefined, { signal: controller.signal })
     assert.equal(aborted, null)
     assert.equal(calls.length, 0, 'an already-aborted request must not spawn')
     // Variable failure: null, no cache side effects.
-    const vars = await suggestShellCompletion({ kind: 'variable', prefix: '$HO', priorWords: ['echo'] }, cwd, { signal: abort })
+    const vars = await suggestShellCompletion({ kind: 'variable', prefix: '$HO', priorWords: ['echo'] }, directShellPort(cwd), undefined, { signal: abort })
     assert.equal(vars, null)
     // Subcommand lister failure: the static fallback wins (never treated as
     // a valid empty list).
-    const subs = await suggestShellCompletion({ kind: 'subcommand', prefix: 'che', priorWords: ['git'] }, cwd, { signal: abort })
+    const subs = await suggestShellCompletion({ kind: 'subcommand', prefix: 'che', priorWords: ['git'] }, directShellPort(cwd), undefined, { signal: abort })
     assert.ok(subs !== null && subs.items.some(item => item.value === 'checkout'),
       'a failed lister must fall back to the static subcommand table')
   } finally {
@@ -303,11 +317,11 @@ test('an aborted request never spawns and variable/subcommand failures degrade',
 test('a shell word that LOOKS like /image <path> is never an attachment seat', async (t) => {
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)
-  // A declared file-argument command must be installed in the catalog, so the
+  // A declared attachment command must be installed in the catalog, so the
   // ONLY thing that can keep the attachment plane closed is the shell fact.
   const commands = [{ name: 'image', description: 'Attach an image file', getArgumentCompletions: () => [] }]
   const { source } = modeSource('shell-context')
-  const provider = new MentionProvider(commands, root, null, source)
+  const provider = new MentionProvider(commands, root, null, source, undefined, undefined, undefined, [], directShellPort(root))
 
   // `!echo /image sh` — the `/image` here is a shell WORD. It must not be
   // classified as the attachment path argument, and no Client-local
@@ -337,4 +351,38 @@ test('a shell word that LOOKS like /image <path> is never an attachment seat', a
   assert.ok(promptSuggestions.items.some(item => item.value.includes('top.txt')),
     `the same text must complete in prompt mode: ${JSON.stringify(promptSuggestions.items.slice(0, 5))}`)
   assert.equal(promptSuggestions.prefix, '', 'the inline seat binds no leading-command prefix')
+})
+
+test('Remote shell commands and paths use only Host candidates and fail closed on unavailable paths', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  const requests: HostShellCompletionRequest[] = []
+  const hostPort: HostShellCompletionPort = {
+    pathAuthority: 'host',
+    async complete({ request }) {
+      requests.push(request)
+      return request.kind === 'paths'
+        ? { kind: 'ok', candidates: ['src/de-host-only.ts'] }
+        : request.kind === 'commands'
+          ? { kind: 'ok', candidates: ['host-only-command'] }
+          : { kind: 'ok', candidates: [] }
+    },
+  }
+  const scope = () => ({ kind: 'session' as const, sessionId: 'session-a' })
+  const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, null), undefined, scope, null, root, [], hostPort)
+  const commandLine = '!host'
+  const commandSuggestions = await provider.getSuggestions([commandLine], 0, commandLine.length, { signal: abort, force: true })
+  assert.ok(commandSuggestions?.items.some(item => item.value === 'host-only-command'))
+  const pathLine = '!cat src/de'
+  const pathSuggestions = await provider.getSuggestions([pathLine], 0, pathLine.length, { signal: abort, force: true })
+  assert.deepEqual(pathSuggestions?.items.map(item => item.value), ['src/de-host-only.ts'])
+  assert.deepEqual(requests.map(request => request.kind), ['commands', 'paths'])
+
+  const unavailableHost: HostShellCompletionPort = {
+    pathAuthority: 'host',
+    async complete() { return { kind: 'unavailable', reason: 'Host shell unavailable' } },
+  }
+  const closed = new MentionProvider([], root, null, undefined, scope, null, root, [], unavailableHost)
+  assert.equal(await closed.getSuggestions([pathLine], 0, pathLine.length, { signal: abort, force: true }), null,
+    'Remote must not fall back to the Client filesystem when Host paths are unavailable')
 })

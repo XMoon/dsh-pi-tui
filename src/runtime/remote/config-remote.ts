@@ -244,6 +244,7 @@ export type RemoteConfigReadiness = 'ready' | 'stale' | 'unavailable'
  * ------------------------------------------------------------------------- */
 
 const TUI_SETTINGS_NS = 'tui-app'
+const HOST_RUNTIME_TUI_SETTINGS_NS = 'split-host-pi-tui-runtime'
 const PROVIDER_SETTINGS_NS = 'llm-pi-ai'
 const PERMISSION_SETTINGS_NS = 'permission'
 const PRESET_REGISTRY_NS = 'agent-preset-registry'
@@ -991,21 +992,33 @@ class RemoteTuiSettingsConfig implements TuiSettingsConfig {
     this.mutationQueueKey = mirror
   }
 
+  private settingsNamespace(): string | undefined {
+    if (this.mirror.namespace(TUI_SETTINGS_NS) !== undefined) return TUI_SETTINGS_NS
+    if (this.mirror.namespace(HOST_RUNTIME_TUI_SETTINGS_NS) !== undefined) return HOST_RUNTIME_TUI_SETTINGS_NS
+    return undefined
+  }
+
+  hasNamespace(): boolean {
+    return this.settingsNamespace() !== undefined
+  }
+
   get(): TuiSettingsDoc {
-    return tuiSettingsDocOf(this.mirror.namespace(TUI_SETTINGS_NS)?.value)
+    const namespace = this.settingsNamespace()
+    return tuiSettingsDocOf(namespace === undefined ? undefined : this.mirror.namespace(namespace)?.value)
   }
 
   async replace(doc: TuiSettingsDoc): Promise<void> {
-    const descriptor = this.mirror.namespace(TUI_SETTINGS_NS)
-    if (descriptor === undefined) {
-      throw new Error('settings entry "tui-app" is unavailable on this connection')
+    const namespace = this.settingsNamespace()
+    if (namespace === undefined) {
+      throw new Error('the Host has no TUI settings namespace on this connection')
     }
+    const descriptor = this.mirror.namespace(namespace)!
     if (descriptor.value === undefined) {
       // An entry with volatile fields always projects a populated object; an
       // absent projection is unrepresentable — fail loud rather than diffing
       // every defaulted field against undefined and pinning the whole
       // document into the USER layer.
-      throw new Error('settings entry "tui-app" exposes no form projection')
+      throw new Error(`settings entry "${namespace}" exposes no form projection`)
     }
     // The ops are reconciled against THIS descriptor, so ITS revision is the
     // fence the official mutate must check: the queued write may refresh the
@@ -1015,7 +1028,7 @@ class RemoteTuiSettingsConfig implements TuiSettingsConfig {
     // `record`: this port's consumer re-reads the authority itself and classifies a
     // commit it cannot confirm as unverified, so a failed post-settlement refresh
     // must not be reported as a refusal.
-    await this.mirror.mutate(TUI_SETTINGS_NS, ops, descriptor.revision, 'record')
+    await this.mirror.mutate(namespace, ops, descriptor.revision, 'record')
   }
 }
 
@@ -1820,7 +1833,7 @@ export class RemoteConfigPort implements ConfigPort {
   /** `undefined` while the `tui-app` namespace is absent from the mirror
    *  (the port's documented absence contract). */
   get tuiSettings(): TuiSettingsConfig | undefined {
-    return this.mirror.namespace(TUI_SETTINGS_NS) === undefined ? undefined : this.tuiSettingsWrapper
+    return this.tuiSettingsWrapper.hasNamespace() ? this.tuiSettingsWrapper : undefined
   }
 
   constructor(source: RemoteConfigRuntimeSource) {

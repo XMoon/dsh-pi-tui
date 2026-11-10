@@ -14,12 +14,86 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createUserShell } from '../../src/app/submission/user-shell.ts'
+import { HostUserShellOutcomeUnknownError } from '../../src/runtime/host-user-shell-port.ts'
 import { SessionOperationBarrier } from '../../src/app/session/operation-barrier.ts'
 import type { InterruptAgentLike } from '../../src/app/session/interrupt.ts'
 import type { LiveSessionScope } from '../../src/app/session/scope.ts'
 import type { TuiApp } from '../../src/tui-app.ts'
 
-test('Busy Esc uses the control admission while a frozen transition drains a writer, without an agent interrupt ERROR', async () => {
+test('a started Host Shell transport loss leaves a visible no-retry card and no Session write', async () => {
+  const scope = { sessionId: 'session-a' } as unknown as LiveSessionScope
+  const card = { kind: 'tool', turn: 0, name: 'shell', args: '', result: '', status: 'running' }
+  let finish!: () => void
+  const finished = new Promise<void>(resolve => { finish = resolve })
+  let settled!: () => void
+  const cardSettled = new Promise<void>(resolve => { settled = resolve })
+  let promptCalls = 0
+  let shellCalls = 0
+  const shell = createUserShell<InterruptAgentLike>({
+    app: () => ({
+      pushLocalMessage: (message: Parameters<TuiApp['pushLocalMessage']>[0]) => Object.assign(card, message),
+      updateLocalMessage: (_current: Parameters<TuiApp['updateLocalMessage']>[0], message: Parameters<TuiApp['updateLocalMessage']>[1]) => {
+        Object.assign(card, message)
+        if (message.kind === 'tool' && message.status === 'error') settled()
+        return card
+      },
+    }) as unknown as TuiApp,
+    notify: () => {},
+    diag: {
+      debug: () => {},
+      info: () => {},
+      warn: () => {},
+      error: () => {},
+      dispose: () => {},
+    },
+    isCleanedUp: () => false,
+    liveAgent: () => undefined,
+    ownership: { generation: () => 1 },
+    session: {
+      withWriter: async (_captured, task) => task(),
+      interrupt: async () => ({ kind: 'committed' as const, value: undefined }),
+    },
+    requireLiveScope: () => scope,
+    captureLiveScope: () => scope,
+    isLiveScopeCurrent: () => true,
+    writerSection: async (_captured, task) => task(),
+    writer: {
+      prompt: async () => { promptCalls += 1; return { kind: 'committed' as const, value: undefined } },
+      updateQueue: async () => ({ kind: 'committed' as const, value: undefined }),
+      cancel: async () => ({ kind: 'committed' as const, value: undefined }),
+      rename: async (_sessionId, title) => ({ kind: 'committed' as const, value: { title } }),
+      refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }),
+    },
+    status: { sessionCwd: () => '/host/session-a' },
+    tuiSettings: undefined,
+    shell: {
+      availability: { supported: true, policies: ['bypass', 'sandbox'] },
+      async execute() {
+        shellCalls += 1
+        return {
+          kind: 'executing' as const,
+          execution: {
+            result: async () => { throw new HostUserShellOutcomeUnknownError('Host shell stream ended without a verified outcome') },
+            output: async function* () {},
+          },
+        }
+      },
+    },
+    submission: { settleAck: () => {}, markDispatch: () => {} },
+  })
+
+  shell.run('!!printf disconnect', undefined, finish)
+  await Promise.all([cardSettled, finished])
+  assert.equal(shellCalls, 1, 'the user gesture made exactly one Host execution request')
+  assert.equal(card.status, 'error')
+  assert.match(card.result, /Host shell stream ended without a verified outcome/u)
+  assert.match(card.result, /command may have executed/u)
+  assert.match(card.result, /do not retry automatically/u)
+  assert.equal(promptCalls, 0, 'an unknown Host process outcome writes no Session result')
+  shell.dispose()
+})
+
+ test('Busy Esc uses the control admission while a frozen transition drains a writer, without an agent interrupt ERROR', async () => {
   const barrier = new SessionOperationBarrier()
   const scope = { sessionId: 'session-a' } as unknown as LiveSessionScope
   const notices: string[] = []
@@ -59,7 +133,8 @@ test('Busy Esc uses the control admission while a frozen transition drains a wri
     },
     requireLiveScope: () => scope,
     captureLiveScope: () => scope,
-    writerSection: (task) => task(),
+    isLiveScopeCurrent: () => true,
+    writerSection: (_scope, task) => task(),
     writer: {
       prompt: async () => ({ kind: 'committed' as const, value: undefined }),
       updateQueue: async () => ({ kind: 'committed' as const, value: undefined }),

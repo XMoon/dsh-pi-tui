@@ -717,7 +717,7 @@ test('a typed /deliverables reaches the panel through the REAL submission contro
       clearError: () => {},
     },
     artifacts: { start: () => {} },
-    shell: { run: (text: string) => { modelPrompts.push(`shell:${text}`) }, interrupt: () => {} },
+    shell: { run: (text: string) => { modelPrompts.push(`shell:${text}`) }, interrupt: () => {}, cancelRun: () => false },
     supportsLocalShellCards: true,
     supportsTuiBuiltinUi: true,
     retainsStaleDraftRestore: true,

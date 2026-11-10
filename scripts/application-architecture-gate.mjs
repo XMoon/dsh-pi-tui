@@ -702,17 +702,17 @@ export const ARCHITECTURE_RULES = [
 
 /**
  * The reviewed `runtime/remote/**` -> `runtime/direct/**` EDGES (plan §11.4
- * assertion 7), keyed by `source -> resolved target`. Exactly the two Direct
- * helpers the HF1 Host-side construction bridge already used
- * (`docs/architecture/host-client.md`), so the exception is scoped to the
- * reviewed dependency EDGE and never to a whole file: the same bridge
- * importing any other Direct module — or any other Remote adapter importing
- * one of these two — is a violation. The gate tests assert this set stays
- * exactly these two pairs.
+ * assertion 7), keyed by `source -> resolved target`. Exactly the three Direct
+ * helpers the existing Host-side construction bridge and M6-1 F1 Host path
+ * bridge use, so the exception is scoped to the reviewed dependency EDGE and
+ * never to a whole file: a bridge importing any other Direct module — or any
+ * other Remote adapter importing one of these three — is a violation. The gate
+ * tests assert this set stays exactly these three pairs.
  */
 export const REMOTE_TO_DIRECT_APPROVED_EDGES = new Set([
   'runtime/remote/pi-tui-file-reference-host-bridge.ts -> runtime/direct/file-completion/host-discovery.ts',
   'runtime/remote/pi-tui-file-reference-host-bridge.ts -> runtime/direct/host-file-augmentation-direct.ts',
+  'runtime/remote/pi-tui-host-user-shell-host-bridge.ts -> runtime/direct/file-completion/host-discovery.ts',
 ])
 
 /**
@@ -740,7 +740,7 @@ export function findRemoteToDirectViolations(entries = collectSourceEntries()) {
       if (!target.startsWith('runtime/direct/')) continue
       if (REMOTE_TO_DIRECT_APPROVED_EDGES.has(`${rel} -> ${target}`)) continue
       violations.push(`src/${rel}:${line} imports the Direct implementation ${target} — a Remote CLIENT adapter must `
-        + 'reach Direct behaviour behind a semantic port; the only reviewed edges are the two HF1 Host-side bridge '
+        + 'reach Direct behaviour behind a semantic port; the only reviewed edges are the three Host-side bridge '
         + 'targets in REMOTE_TO_DIRECT_APPROVED_EDGES (plan §11.4 assertion 7)')
     }
   }

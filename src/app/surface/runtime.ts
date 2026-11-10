@@ -269,7 +269,7 @@ export interface TspCommandCompletionInstallation {
   /** The Client-local base, kept independent from the Host session cwd. */
   readonly localCwd: () => string
   readonly skillReferences: readonly import('../../domain/catalog/skill.ts').HumanSkillSummary[]
-  readonly hostShellCompletion: boolean
+  readonly hostShellCompletion: import('../../runtime/host-shell-completion-port.ts').HostShellCompletionPort | undefined
   /**
    * The command source FAILED (a contribution/host name collision withdrew every
    * displayed candidate while the Host claims stayed live). A renderer's

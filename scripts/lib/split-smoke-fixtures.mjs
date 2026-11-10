@@ -100,7 +100,7 @@ export function apply(ctx) { ctx.llm.registerAdapter(['stub'], new StubLlmAdapte
  * LLM row above. One row registers the scripted adapter; `agent-default-model`
  * routes the Agent to it.
  */
-export function writeC1WorkFixture(profileDir, workDir) {
+export function writeC1WorkFixture(profileDir, workDir, options = {}) {
   const source = join(SCRIPT_DIR, '..', 'fixtures', 'split-process-host-work.mjs')
   const fixturePath = join(profileDir, 'split-process-host-work.mjs')
   writeFileSync(fixturePath, readFileSync(source), { mode: 0o600 })
@@ -109,7 +109,7 @@ export function writeC1WorkFixture(profileDir, workDir) {
     '- insert:',
     '    - id: split-process-host-work',
     `      name: '${pathToFileURL(fixturePath).href}'`,
-    '      inject: [llm, tools, jobs, subagents, agents, typertGateway, connection]',
+    `      inject: [llm, tools, jobs, subagents, agents, typertGateway, connection${options.shellPolicyPatches === true ? ', settings' : ''}]`,
     '- id: agent-default-model',
     '  config:',
     '    provider: c1-qualification',
@@ -119,6 +119,26 @@ export function writeC1WorkFixture(profileDir, workDir) {
   const patchPath = join(workDir, 'm4-c1-work.patch.yml')
   writeFileSync(patchPath, rows.join('\n'), { mode: 0o600 })
   chmodSync(patchPath, 0o600)
+  const policyPatchPath = policy => {
+    const path = join(workDir, `m6-f1-host-${policy}.patch.yml`)
+    const policyRows = [...rows]
+    policyRows.splice(-1, 0,
+      '- id: split-host-pi-tui-runtime',
+      '  config:',
+      `    localShellSandbox: ${policy}`,
+    )
+    policyRows.splice(-1, 0,
+      '- id: split-process-host-work',
+      '  config:',
+      '    f1SettingsNamespace: split-host-pi-tui-runtime',
+    )
+    writeFileSync(path, policyRows.join('\n'), { mode: 0o600 })
+    chmodSync(path, 0o600)
+    return path
+  }
+  const policyPatches = options.shellPolicyPatches === true
+    ? { bypassPatchPath: policyPatchPath('bypass'), sandboxPatchPath: policyPatchPath('sandbox') }
+    : {}
   // T52: a profile-scoped override of the REAL `standard` preset. The
   // generated preset patch is the canonical plugin list; only the
   // `tool-ask-user` row switches to its official timed mode (1s foreground
@@ -137,8 +157,12 @@ export function writeC1WorkFixture(profileDir, workDir) {
     { id: 'preset-standard', config: { ...presetRow.config, plugins } },
   ], null, 2), { mode: 0o600 })
   chmodSync(timedPatchPath, 0o600)
-  return { fixturePath, patchPath, timedPatchPath }
-
+  return {
+    fixturePath,
+    patchPath,
+    timedPatchPath,
+    ...policyPatches,
+  }
 }
 
 /** Read every host-workload fixture proof line (an absent file is simply empty). */

@@ -250,7 +250,7 @@ function fakeRunnerDeps(options: {
     commandRegistry: undefined,
     clientCommands: createClientCommandRegistry(parseCommand),
     hostFile: new DirectHostFilePort(() => undefined),
-    hostShellCompletion: false,
+    hostShellCompletion: { pathAuthority: 'host' as const, complete: async () => ({ kind: 'unavailable' as const, reason: 'test Host unavailable' }) },
     interaction: {
       questions: {
         onRequest: () => true, subscribe: () => undefined, snapshot: () => undefined,
@@ -383,7 +383,7 @@ function fakeRunnerDeps(options: {
       config: runner.config,
       hostFile: runner.hostFile,
       webAccess: runner.webAccess,
-      hostShellCompletion: false,
+      hostShellCompletion: { pathAuthority: 'host' as const, complete: async () => ({ kind: 'unavailable' as const, reason: 'test Host unavailable' }) },
     },
     session: {
       ensureSession: () => runner.ensureSession(),

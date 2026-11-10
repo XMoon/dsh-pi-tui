@@ -233,6 +233,7 @@ export interface SubmissionControllerDeps<ExactAgent extends SubmissionAgentLike
   readonly shell: {
     run(text: string, ackToken: number | undefined, endWrite: () => void): void
     interrupt(): void
+    cancelRun(): boolean
   }
   /**
    * PR3-B B2 (§4 B2-5): whether this renderer presents the PiTui local-shell
@@ -326,6 +327,8 @@ export interface SubmissionController {
   dequeue(): void
   /** Abort the local shell and interrupt the live Agent (Esc / cancel). */
   abortLocalShell(): void
+  /** Cancel only the active user Shell run; false preserves idle Esc semantics. */
+  cancelLocalShellIfRunning(): boolean
   /**
    * The owner's writer SECTION for an external owner that already knows its
    * exact owner (the local shell / the subagent-delivery adapter): capture the
@@ -333,6 +336,8 @@ export interface SubmissionController {
    * submission runtime's writer, so the operation barrier keeps exactly ONE
    * admission owner. A stale capture refuses with `SessionScopeSupersededError`.
    */
+  /** Exact SessionScope-bound writer admission used by Host `!` result submission. */
+  withShellWriterSection<T>(scope: LiveSessionScope, task: () => Promise<T>): Promise<T>
   withWriterSection<T>(task: () => Promise<T>): Promise<T>
   /** Settle the local submit-ack row (token-scoped when given). */
   settleLocalSubmitAck(reason: string, options?: { token?: number; terminal?: boolean }): void
@@ -399,6 +404,8 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
    * admission owner and a stale capture refuses with
    * `SessionScopeSupersededError`.
    */
+  const withShellWriterSection = <T>(scope: LiveSessionScope, task: () => Promise<T>): Promise<T> =>
+    deps.submissionRuntime.withWriter(scope, task)
   const withWriterSection = <T>(task: () => Promise<T>): Promise<T> => {
     const scope = deps.scope.captureLive()
     if (scope === undefined) return Promise.reject(new SessionScopeSupersededError())
@@ -2154,6 +2161,8 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
   }
   /** Abort the local shell + interrupt the live Agent (Esc / cancel-activity). */
   const abortLocalShell = (): void => deps.shell.interrupt()
+  /** A single idle Escape is consumed only when a real user-shell run can be cancelled. */
+  const cancelLocalShellIfRunning = (): boolean => deps.shell.cancelRun()
   /** Prepare one outgoing message through the shared image/draft pipeline.
    *  The Direct branch samples the Client-local request zone HERE, once per
    *  human submit at the send point (never cached, never the Host's zone): it
@@ -2172,6 +2181,8 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     steer: steerDraft,
     dequeue,
     abortLocalShell,
+    cancelLocalShellIfRunning,
+    withShellWriterSection,
     withWriterSection,
     settleLocalSubmitAck: (reason, options) => settleLocalSubmitAck(reason, options),
     resetSubmitLatency: () => submitLatencyTracker.reset(),

@@ -25,6 +25,7 @@ import { MentionProvider } from './provider.ts'
 import type { InlineAttachmentAcceptance } from './inline-attachment.ts'
 import { shellPrefixForMode, type EditorInputMode } from '../editor-input-mode.ts'
 import type { HostFilePort, HostFileScope } from '../../../runtime/host-file-port.ts'
+import type { HostShellCompletionPort } from '../../../runtime/host-shell-completion-port.ts'
 import type { HumanSkillSummary } from '../../../domain/catalog/skill.ts'
 
 /** The plugin autocomplete chain's query shape (the M5 `AutocompleteRegistry`
@@ -60,8 +61,8 @@ export interface InstalledAutocompleteOptions {
   /** The detached human skill catalog for INLINE skill reference completion —
    *  a read-only presentation cache, never a command claim. */
   readonly skillReferences: readonly HumanSkillSummary[]
-  /** Whether Host-shell completion facts are reachable on this backend. */
-  readonly hostShellCompletion: boolean
+  /** The selected backend's Host/Direct shell completion authority. */
+  readonly hostShellCompletion: HostShellCompletionPort | undefined
   /** The LIVE editor input mode — the authoritative completion mode. */
   readonly inputMode: () => EditorInputMode
   /** The `fd` finder pin for the Client-local path discovery: `undefined`
@@ -94,7 +95,7 @@ export interface TspCommandCompletionInstallation {
   readonly scope: () => HostFileScope
   readonly localCwd: () => string
   readonly skillReferences: readonly HumanSkillSummary[]
-  readonly hostShellCompletion: boolean
+  readonly hostShellCompletion: HostShellCompletionPort | undefined
 }
 
 /** Compose the installed provider exactly as the PiTui surface composed it:

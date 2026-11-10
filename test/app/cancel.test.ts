@@ -527,6 +527,40 @@ test('a SINGLE Esc while busy cancels immediately (pi parity)', async () => {
   assert.equal(surface.cancels, 2)
 })
 
+test('a single Esc cancels an active user Shell run without interrupting an Agent Turn', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  let shellRunning = true
+  let shellCancels = 0
+  let agentCancels = 0
+  let rewinds = 0
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onCancel: () => { agentCancels += 1 },
+    onRewind: () => { rewinds += 1 },
+    cancelLocalShellIfRunning: () => {
+      if (!shellRunning) return false
+      shellRunning = false
+      shellCancels += 1
+      return true
+    },
+  })
+  app.start()
+  startedApps.add(app)
+  await vt.waitForRender()
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.equal(shellCancels, 1, 'the active Host Shell run is cancelled on the first Esc')
+  assert.equal(agentCancels, 0, 'the Agent Turn interrupt remains untouched')
+  assert.equal(rewinds, 0, 'the user gesture is not interpreted as rewind')
+  vt.sendInput('\x1b')
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.equal(shellCancels, 1, 'later idle Esc does not re-cancel the finished Shell')
+  assert.equal(agentCancels, 0)
+  assert.equal(rewinds, 1, 'ordinary idle double-Esc rewind is preserved after Shell settlement')
+})
+
 test('a single Esc while IDLE only arms the double-Esc window', async () => {
   const surface = startApp()
   await surface.vt.waitForRender()

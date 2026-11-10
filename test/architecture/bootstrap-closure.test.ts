@@ -1058,8 +1058,10 @@ test('the submission writer section is controller-owned and read late-bound', ()
     /const withWriterSection = <T>\(task: \(\) => Promise<T>\): Promise<T> => \{\n\s*const scope = deps\.scope\.captureLive\(\)\n\s*if \(scope === undefined\) return Promise\.reject\(new SessionScopeSupersededError\(\)\)\n\s*return deps\.submissionRuntime\.withWriter\(scope, task\)\n\s*\}/u,
     'the owner must keep the exact captureLive → reject → withWriter semantics',
   )
-  assert.equal(root.split('submission.withWriterSection(task)').length - 1, 2,
-    'the local shell and the subagent-delivery adapter must both reach the owner')
+  assert.equal(root.split('submission.withWriterSection(task)').length - 1, 1,
+    'the Subagent delivery adapter keeps its existing scope-capturing owner wrapper')
+  assert.equal(root.split('submission.withShellWriterSection(scope, task)').length - 1, 1,
+    'the Host shell result write must use its exact gesture-captured scope')
   assert.doesNotMatch(root, /writerSection: submission\.withWriterSection\b/u,
     'the consumers must read the owner at call time, never capture the method by value')
 })

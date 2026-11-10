@@ -56,6 +56,11 @@ export const REMOTE_HOST_PREREQUISITE_SERVICES = [
   // without it cannot serve the preview at all, so this is a composition error
   // rather than a degradable state.
   'workspaceFiles',
+  // F1 Host-owned user shell: these are official Host capabilities, mounted
+  // once by dsh-base and reused by the package's one Host Runtime service.
+  'sandboxPolicy',
+  'sandbox',
+  'subprocess',
 ] as const
 
 /**

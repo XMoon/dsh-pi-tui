@@ -15,7 +15,7 @@
  * Scenario protocol (frozen):
  *   C1_SCENARIO = long-turn | foreground-tool | job | child | question |
  *                 approval-allow | approval-reject | goal-armed | goal-round |
- *                 maintenance | schedule | unowned-job | web-workspace-changes
+ *                 maintenance | schedule | unowned-job | web-workspace-changes | f1-shell
  *   C1_WORK_ROOT = private 0700 directory under the isolated work dir
  *   C1_HOLD_<NAME> = absolute barrier file path the smoke releases
  *   C1_HAS_LIVE_CLIENT_PROBE = set to sample Gateway.hasLiveClient() transitions
@@ -25,10 +25,11 @@
 import { appendFileSync, chmodSync, existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
 import { LlmAdapter } from '@deepseek-ai/dsh-llm'
+import { SessionId } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
 export const name = 'm4-c1-host-work'
-export const inject = ['llm', 'tools', 'jobs', 'subagents', 'agents', 'typertGateway', 'connection']
+export const inject = ['llm', 'tools', 'jobs', 'subagents', 'agents', 'workingDirectory', 'typertGateway', 'connection']
 
 const SCENARIOS = new Set([
   'long-turn',
@@ -49,6 +50,7 @@ const SCENARIOS = new Set([
   // standard preset, so the official `workspace-changes` recorder observes a
   // real file intent and a real working-tree change.
   'web-workspace-changes',
+  'f1-shell',
 ])
 
 /** Quote one token for the Host shell used by the harmless fixture commands. */
@@ -160,6 +162,14 @@ class C1Model extends LlmAdapter {
     const userText = allUserText(options.messages ?? [])
     const afterTool = Array.isArray(options.messages) && options.messages.at(-1)?.role === 'tool'
     const token = `${this.scenario}-${sessionId}`
+
+    if (this.scenario === 'f1-shell') {
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: `f1-shell answer ${token}` }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: `f1-shell answer ${token}` } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+      return
+    }
 
     if (this.scenario === 'long-turn') {
       if (afterTool) {
@@ -418,7 +428,7 @@ class C1Model extends LlmAdapter {
  * `C1_SCENARIO` keeps this row inert: the ordinary B1/B2-S lanes share the
  * same installed profile and must not gain a second model route.
  */
-export function apply(ctx) {
+export async function apply(ctx) {
   const scenario = process.env.C1_SCENARIO
   if (scenario === undefined || scenario === '') return
   if (!SCENARIOS.has(scenario)) throw new Error(`m4-c1-host-work: unsupported C1_SCENARIO ${JSON.stringify(scenario)}`)
@@ -433,14 +443,59 @@ export function apply(ctx) {
 
   ctx.effect(() => ctx.llm.registerAdapter(['c1-qualification'], model))
 
+  if (scenario === 'f1-shell') {
+    const sessionId = process.env.C1_F1_SESSION_ID
+    const cwd = process.env.C1_F1_SESSION_CWD
+    const otherSessionId = process.env.C1_F1_OTHER_SESSION_ID
+    if (sessionId === undefined || cwd === undefined) {
+      throw new Error('m4-c1-host-work: f1-shell requires its isolated Session id and Host cwd')
+    }
+    const handle = await ctx.agents.create({
+      sessionId: SessionId(sessionId),
+      meta: { cwd },
+      agentOptions: { provider: 'c1-qualification', model: 'c1' },
+    })
+    ctx.effect(() => () => handle.dispose())
+    record('f1-host-session-created', {
+      sessionId: String(handle.agent.id),
+      cwd: ctx.workingDirectory.get(handle.agent.session),
+    })
+    if (otherSessionId !== undefined) {
+      const otherHandle = await ctx.agents.create({
+        sessionId: SessionId(otherSessionId),
+        meta: { cwd },
+        agentOptions: { provider: 'c1-qualification', model: 'c1' },
+      })
+      ctx.effect(() => () => otherHandle.dispose())
+      record('f1-host-other-session-created', {
+        sessionId: String(otherHandle.agent.id),
+        cwd: ctx.workingDirectory.get(otherHandle.agent.session),
+      })
+    }
+  }
+
   // Real Agent status transitions are Host facts, not a boolean this fixture
   // invents. `agent/status` is the official runtime event; the durable
   // Session events remain the smoke's final authority.
   ctx.on('agent/status', payload => {
-    record('agent-status', {
+    const statusFields = {
       agentId: payload?.agent?.id === undefined ? undefined : String(payload.agent.id),
       agentStatus: payload?.status,
-    })
+    }
+    if (scenario === 'f1-shell') {
+      const descriptors = ctx.settings.describe()
+      const settingsNamespace = process.env.C1_F1_SETTINGS_NAMESPACE ?? 'tui-app'
+      const tui = descriptors.find(descriptor => descriptor.ns === settingsNamespace)
+      const value = tui?.value !== null && typeof tui?.value === 'object'
+        ? tui.value.localShellSandbox
+        : undefined
+      record('f1-host-effective-shell-policy', {
+        ...statusFields,
+        settingsNamespaces: descriptors.map(descriptor => descriptor.ns),
+        localShellSandbox: value,
+      })
+    }
+    record('agent-status', statusFields)
   })
 
   // Job registry lifecycle facts. The proof carries the official job id,

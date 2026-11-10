@@ -72,6 +72,8 @@ import JobController from '@deepseek-ai/dsh-api-job-controller'
 import LocalCredentials from '@deepseek-ai/dsh-credentials-local'
 import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
 import WorkingDirectory from '@deepseek-ai/dsh-working-directory'
+import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
+import LocalSandboxProvider from '@deepseek-ai/dsh-sandbox-local'
 import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import { SqliteSessionQueryEngine } from '@deepseek-ai/dsh-session-query-sqlite'
 import Storage from '@deepseek-ai/dsh-storage'
@@ -453,10 +455,10 @@ export async function createRemoteApplicationHostFixture(
     // `@`-file reference provider injects the directory owner: both require
     // the real `workingDirectory` service (the same row dsh-base mounts once).
     await ctx.plugin(WorkingDirectory)
-    // M4-B2-HF: the built-in PiTui Host Runtime owns the package contribution
-    // and both private Host services exactly once; Performance remains its own
-    // independent row. `createRemoteHostRuntime()` only verifies their gates.
-    await ctx.plugin(piTuiHostRuntime)
+    await ctx.plugin(LocalSandboxProvider)
+    await ctx.plugin(LocalSubprocessRuntime)
+    // M6-1 F1: the same Host Runtime row owns one-shot shell and completion;
+    await ctx.plugin(piTuiHostRuntime, { sessionId: '' } as never)
     await ctx.plugin(performanceHost)
     await ctx.plugin(Storage)
     await ctx.plugin(StorageJson, { root: join(workRoot, 'storages') })

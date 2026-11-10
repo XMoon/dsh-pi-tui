@@ -4,13 +4,14 @@
  *
  * This is a HOST-plane Cordis plugin, not a TUI module and not a
  * user-configurable business plugin. A real Host Profile mounts it exactly
- * once to own the three private business modules that belong to this package:
+ * once to own the private business modules that belong to this package:
  *
  * ```text
  * the package's ONE private Typert contribution (all private descriptors)
  * the private `piTuiFileReferences` Host service
  * the private `piTuiTerminalProgress` Host service
  * the private `piTuiWebAccess` Host service (official Web frontend toggle)
+ * the private `piTuiHostUserShell` Host service (one-shot Shell and completion)
  * ```
  *
  * The row publishes the data-free `piTuiHostReady` gate only after the
@@ -24,10 +25,13 @@
  */
 
 import type { Context, Fiber } from '@deepseek-ai/cordis'
+import { Config as TuiConfig, type Config as TuiConfigValue } from '../config/schema.ts'
 import { PI_TUI_HOST_CONTRIBUTION } from '../../runtime/remote/pi-tui-remote-contribution.ts'
 import { PI_TUI_FILE_REFERENCES_NAMESPACE } from '../../runtime/remote/pi-tui-file-reference-contract.ts'
 import { PI_TUI_TERMINAL_PROGRESS_NAMESPACE } from '../../runtime/remote/pi-tui-terminal-progress-contract.ts'
 import { PI_TUI_WEB_ACCESS_NAMESPACE } from '../../runtime/remote/pi-tui-web-access-contract.ts'
+import { PI_TUI_HOST_USER_SHELL_NAMESPACE } from '../../runtime/remote/pi-tui-host-user-shell-contract.ts'
+import { createHostShellPathCompletionBridge } from '../../runtime/remote/pi-tui-host-user-shell-host-bridge.ts'
 import { mergeCause } from '../remote/dispose-cause.ts'
 import {
   PiTuiFileReferenceHostService,
@@ -39,9 +43,13 @@ import {
   type LiveAgentLike as TerminalProgressLiveAgentLike,
 } from './features/terminal-progress.ts'
 import { PiTuiWebAccessHostService } from './features/web-access.ts'
+import { PiTuiHostUserShellService } from './features/host-user-shell.ts'
 
 /** Stable Cordis plugin name (the Loader row id in the Host-only overlay). */
 export const name = 'pi-tui-host-runtime'
+
+/** The Host-only row reuses the same TUI settings schema as the Direct row. */
+export const Config = TuiConfig
 
 /**
  * Explicit Host dependencies: the private Typert registry plus the two live
@@ -51,7 +59,7 @@ export const name = 'pi-tui-host-runtime'
  * published row contract does not change: this row IS a Loader row, and a Host
  * without a Loader fails closed (`unavailable`) instead of pending forever.
  */
-export const inject = ['typert', 'agents', 'fileReferences', 'workingDirectory']
+export const inject = ['typert', 'agents', 'fileReferences', 'workingDirectory', 'sessions', 'sandboxPolicy', 'sandbox', 'subprocess']
 
 /** Data-free readiness gate published after the whole built-in runtime is live. */
 export const PI_TUI_HOST_READY_SERVICE = 'piTuiHostReady'
@@ -109,7 +117,7 @@ function assertPrivateBinding(ctx: Context, serviceKey: string, namespace: strin
  * keeping the original error primary and attaching cleanup failures to its
  * cause chain.
  */
-export async function apply(ctx: Context): Promise<void> {
+export async function apply(ctx: Context, config: TuiConfigValue): Promise<void> {
   const fibers: Fiber[] = []
   let disposeContribution: (() => Promise<void>) | undefined
   try {
@@ -140,9 +148,24 @@ export async function apply(ctx: Context): Promise<void> {
     })
     fibers.push(webAccessFiber)
     await webAccessFiber
+    const hostUserShellFiber = ctx.inject(PiTuiHostUserShellService.inject, pluginCtx => {
+      new PiTuiHostUserShellService(pluginCtx, {
+        agentFor: sessionId => agentFor(ctx, sessionId) as import('./features/host-user-shell.ts').HostAgentLike | undefined,
+        sessionFor: sessionId => (ctx.reflect.get('sessions') as AgentRegistryLike | undefined)?.get(sessionId) as import('./features/host-user-shell.ts').HostSessionLike | undefined,
+        workingDirectory: () => ctx.reflect.get('workingDirectory') as import('./features/host-user-shell.ts').WorkingDirectoryLike | undefined,
+        sandboxPolicy: () => ctx.reflect.get('sandboxPolicy') as import('./features/host-user-shell.ts').SandboxPolicyServiceLike | undefined,
+        sandbox: () => ctx.reflect.get('sandbox') as import('./features/host-user-shell.ts').SandboxServiceLike | undefined,
+        subprocess: () => ctx.reflect.get('subprocess') as import('./features/host-user-shell.ts').SubprocessServiceLike | undefined,
+        pathCompletion: createHostShellPathCompletionBridge(),
+        shellPolicy: () => config.localShellSandbox.get() === 'sandbox' ? 'sandbox' : 'bypass',
+      })
+    })
+    fibers.push(hostUserShellFiber)
+    await hostUserShellFiber
     assertPrivateBinding(ctx, 'piTuiFileReferences', PI_TUI_FILE_REFERENCES_NAMESPACE)
     assertPrivateBinding(ctx, 'piTuiTerminalProgress', PI_TUI_TERMINAL_PROGRESS_NAMESPACE)
     assertPrivateBinding(ctx, 'piTuiWebAccess', PI_TUI_WEB_ACCESS_NAMESPACE)
+    assertPrivateBinding(ctx, 'piTuiHostUserShell', PI_TUI_HOST_USER_SHELL_NAMESPACE)
     ctx.provide(PI_TUI_HOST_READY_SERVICE, {})
   } catch (error) {
     const cleanupErrors: unknown[] = []

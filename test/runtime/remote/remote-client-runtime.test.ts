@@ -29,6 +29,7 @@ import { mountAgentLoopTestDependencies, mountAgentLoopTestHarness } from '@deep
 import CommandRuntime from '@deepseek-ai/dsh-commands'
 import AgentPresetRegistry from '@deepseek-ai/dsh-agent-preset-registry'
 import TypertGatewayService from '@deepseek-ai/dsh-api-gateway'
+import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
 import { RemoteAccessService } from '@deepseek-ai/dsh-api-remote-access'
 import JobController from '@deepseek-ai/dsh-api-job-controller'
 import { CredentialProvider } from '@deepseek-ai/dsh-credentials'
@@ -44,7 +45,8 @@ import { SqliteSessionQueryEngine } from '@deepseek-ai/dsh-session-query-sqlite'
 import Storage from '@deepseek-ai/dsh-storage'
 import * as StorageJson from '@deepseek-ai/dsh-storage-json'
 import * as StorageDomain from '@deepseek-ai/dsh-storage-domain'
-import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
+import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
+import LocalSandboxProvider from '@deepseek-ai/dsh-sandbox-local'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
 import WorkspaceController from '@deepseek-ai/dsh-api-workspace-controller'
 import WorkspaceRegistry from '@deepseek-ai/dsh-workspace'
@@ -215,9 +217,10 @@ async function createHostFixture(
     // `@`-file reference provider injects the directory owner: both require
     // the real `workingDirectory` service (the same row dsh-base mounts once).
     await ctx.plugin(WorkingDirectory)
-    // M4-B2-HF: the built-in PiTui Host Runtime owns the package contribution
-    // and both private Host services exactly once; Performance stays its own row.
-    await ctx.plugin(piTuiHostRuntime)
+    await ctx.plugin(LocalSandboxProvider)
+    await ctx.plugin(LocalSubprocessRuntime)
+    // M6-1 F1: the built-in Host Runtime reuses these official Host capabilities.
+    await ctx.plugin(piTuiHostRuntime, { sessionId: '' } as never)
     await ctx.plugin(performanceHost)
     await ctx.plugin(Storage)
     await ctx.plugin(StorageJson, { root: join(workRoot, 'storages') })

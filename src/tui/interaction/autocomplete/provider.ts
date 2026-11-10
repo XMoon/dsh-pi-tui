@@ -23,6 +23,7 @@ import {
   type SlashCommand,
 } from '@xmoon76/pi-tui'
 import { shellCompletionContext, suggestShellCompletion } from './shell.ts'
+import type { HostShellCompletionPort } from '../../../runtime/host-shell-completion-port.ts'
 import { shellPrefixForMode, type EditorInputMode } from '../editor-input-mode.ts'
 import { applyInlineSkillReference, extractInlineSkillPrefix } from './skill-reference.ts'
 import {
@@ -113,12 +114,8 @@ export class MentionProvider implements AutocompleteProvider {
    * a command advertisement (the per-skill command wrappers keep their own
    * completion/claim path). */
   private readonly skillReferences: readonly HumanSkillSummary[]
-  /** Whether Host-shell completion facts are reachable (shell amendment
-   * M3-4 PR3): true on Direct (the compgen bridge reads the Host process's
-   * own state); false on Remote — the compgen/path bridge then stays SILENT
-   * (no Client `process.env.PATH`, no Client filesystem guessing for Host
-   * shell state). */
-  private readonly hostShellCompletion: boolean
+  /** The selected backend's Host/Direct shell completion authority. */
+  private readonly hostShellCompletion: HostShellCompletionPort | undefined
   /** The REQUEST SNAPSHOT (plan §9.2): the exact document lines + cursor
    * + mode + SCOPE of the most recent getSuggestions call that produced a
    * suggestion list. Strict file/extension results may apply ONLY when the
@@ -161,7 +158,7 @@ export class MentionProvider implements AutocompleteProvider {
     localFdPath: string | null | undefined = undefined,
     localCwd: string | (() => string) = workDir,
     skillReferences: readonly HumanSkillSummary[] = [],
-    hostShellCompletion: boolean = true,
+    hostShellCompletion: HostShellCompletionPort | undefined = undefined,
   ) {
     this.workDir = workDir
     this.fileReferences = fileReferences ?? NO_HOST_REFERENCES
@@ -259,18 +256,27 @@ export class MentionProvider implements AutocompleteProvider {
     // a session/workspace switch mid-request must not bake the NEW scope
     // into this request's snapshot — the apply fence compares it).
     const requestScope = this.scopeOf()
-    // 1. The SHELL-BRIDGE grammar first (a `!` line's first word is a
-    // command name; a path position falls through). The bridge never
-    // competes with file completion.
+    // 1. The shell grammar runs before file/attachment completion. Direct keeps
+    // the existing fork path provider; Remote routes every shell word/path only
+    // through the authenticated Host port.
     const wire = this.virtualWireShellContext(lines, cursorLine, cursorCol)
     const shellLine = wire ?? { line: currentLine, cursorCol, prefixLength: 0 }
-    const shellContext = this.hostShellCompletion
-      ? shellCompletionContext(shellLine.line, shellLine.cursorCol)
-      : undefined
+    const shellContext = this.hostShellCompletion === undefined
+      ? undefined
+      : shellCompletionContext(shellLine.line, shellLine.cursorCol)
     if (shellContext !== undefined) {
-      const suggestions = await suggestShellCompletion(shellContext, this.workDir, options)
-      if (suggestions !== null) {
-        return this.withRequestSnapshot(generation, requestScope, requestMode, requestLocalCwd, lines, cursorLine, cursorCol, suggestions, false)
+      const port = this.hostShellCompletion!
+      const directPath = shellContext.kind === 'paths' && port.pathAuthority === 'client'
+      if (!directPath) {
+        const sessionId = requestScope.kind === 'session' ? requestScope.sessionId : undefined
+        const suggestions = await suggestShellCompletion(shellContext, port, sessionId, options)
+        if (suggestions !== null) {
+          return this.withRequestSnapshot(generation, requestScope, requestMode, requestLocalCwd, lines, cursorLine, cursorCol, suggestions, false)
+        }
+        if (generation === this.requestGeneration) this.requestSnapshot = null
+        if (shellContext.kind === 'paths' && port.pathAuthority === 'host') {
+          return this.withRequestSnapshot(generation, requestScope, requestMode, requestLocalCwd, lines, cursorLine, cursorCol, null, false)
+        }
       }
     }
 
@@ -359,7 +365,10 @@ export class MentionProvider implements AutocompleteProvider {
     // workspace.
     const literalShellLine = textBeforeCursor.trimStart().startsWith('!')
     if (semantic !== null || literalShellLine) {
-      if (!this.hostShellCompletion) return null
+      const port = this.hostShellCompletion
+      if (port === undefined || port.pathAuthority === 'host') {
+        return this.withRequestSnapshot(generation, requestScope, requestMode, requestLocalCwd, lines, cursorLine, cursorCol, null, false)
+      }
       try {
         const result = await this.inner.getSuggestions(lines, cursorLine, cursorCol, options)
         return this.withRequestSnapshot(generation, requestScope, requestMode, requestLocalCwd, lines, cursorLine, cursorCol, result, false)
@@ -412,7 +421,7 @@ export class MentionProvider implements AutocompleteProvider {
     // 6. PROMPT MODE leading command name (the FIRST logical line's
     // command seat only — a later line's leading `/name` is an inline
     // skill seat, never a command).
-    if (options.force === true) return null
+    if (options.force === true && shellContext === undefined) return null
     if (cursorLine === 0 && textBeforeCursor.trimStart().startsWith('/') && !textBeforeCursor.trimStart().includes(' ')) {
       try {
         const result = await this.getSlashCommandSuggestions(lines, cursorLine, cursorCol, options)
@@ -711,6 +720,15 @@ export class MentionProvider implements AutocompleteProvider {
     prefix: string,
   ): { lines: string[]; cursorLine: number; cursorCol: number } {
     const currentLine = lines[cursorLine] ?? ''
+    const wire = this.virtualWireShellContext(lines, cursorLine, cursorCol)
+    const shellLine = wire ?? { line: currentLine, cursorCol, prefixLength: 0 }
+    const modePrefix = wire === null ? '' : shellPrefixForMode(this.inputModeSource())
+    const beforeCursor = currentLine.slice(0, cursorCol)
+    const bodyPrefix = modePrefix !== '' && prefix.startsWith(modePrefix)
+      && !beforeCursor.endsWith(prefix)
+      && beforeCursor.endsWith(prefix.slice(modePrefix.length))
+      ? prefix.slice(modePrefix.length)
+      : prefix
     // THE STALE FENCE (plan §9.1 minimum + §9.2 full snapshot): file and
     // extension results carry the EXACT document lines + cursor + mode + scope
     // of the request that produced them. An extension result at an ordinary
@@ -721,16 +739,34 @@ export class MentionProvider implements AutocompleteProvider {
       && !this.requestMatchesSnapshot(lines, cursorLine, cursorCol)) {
       return { lines, cursorLine, cursorCol }
     }
-    const start = cursorCol - prefix.length
-    if (start < 0 || currentLine.slice(start, cursorCol) !== prefix) {
+    const start = cursorCol - bodyPrefix.length
+    if (start < 0 || currentLine.slice(start, cursorCol) !== bodyPrefix) {
       return { lines, cursorLine, cursorCol }
     }
-    // Shell-bridge apply: replace only the current word (the `!` prefix and
-    // everything before stay untouched).
-    const wire = this.virtualWireShellContext(lines, cursorLine, cursorCol)
-    const shellLine = wire ?? { line: currentLine, cursorCol, prefixLength: 0 }
-    if (shellCompletionContext(shellLine.line, shellLine.cursorCol) !== undefined) {
-      const before = currentLine.slice(0, cursorCol - prefix.length)
+    const shellContext = shellCompletionContext(shellLine.line, shellLine.cursorCol)
+    if (shellContext?.kind === 'paths') {
+      const wireLines = wire === null
+        ? lines
+        : lines.map((line, index) => index === 0 ? wire.line : line)
+      const applied = this.inner.applyCompletion(
+        wireLines,
+        cursorLine,
+        wire?.cursorCol ?? cursorCol,
+        item,
+        bodyPrefix,
+      )
+      const resultLines = [...applied.lines]
+      if (wire !== null) resultLines[cursorLine] = resultLines[cursorLine]!.slice(wire.prefixLength)
+      return {
+        lines: resultLines,
+        cursorLine: applied.cursorLine,
+        cursorCol: Math.max(0, applied.cursorCol - (wire?.prefixLength ?? 0)),
+      }
+    }
+    // Shell words use one current-word replacement; path positions above stay
+    // on the fork's directory/quote apply behavior.
+    if (shellContext !== undefined) {
+      const before = currentLine.slice(0, cursorCol - bodyPrefix.length)
       const after = currentLine.slice(cursorCol)
       const newLine = `${before}${item.value} ${after}`
       const newLines = [...lines]
@@ -746,7 +782,7 @@ export class MentionProvider implements AutocompleteProvider {
     const semantic = this.virtualShellSemanticContext(currentLine, cursorCol)
     if (semantic !== null) {
       const wireLines = lines.map((line, index) => index === cursorLine ? semantic.line : line)
-      const applied = this.inner.applyCompletion(wireLines, cursorLine, semantic.cursorCol, item, prefix)
+      const applied = this.inner.applyCompletion(wireLines, cursorLine, semantic.cursorCol, item, bodyPrefix)
       const resultLines = [...applied.lines]
       resultLines[cursorLine] = resultLines[cursorLine]!.slice(semantic.prefixLength)
       return {
@@ -876,10 +912,9 @@ export class MentionProvider implements AutocompleteProvider {
     // `/usr/lo` reads as a PATH, never a bare slash command — the
     // pre-plan shell-mode parity the plan keeps as a non-goal).
     if (semantic !== null || textBeforeCursor.trimStart().startsWith('!')) {
-      // Shell amendment (M3-4 PR3): without Host shell facts (Remote) a
-      // shell line triggers NOTHING — the request itself would fall through
-      // to the Client-filesystem path provider.
-      if (!this.hostShellCompletion) return false
+      const port = this.hostShellCompletion
+      if (port === undefined) return false
+      if (port.pathAuthority === 'host') return true
       if (semantic !== null) {
         const virtualLines = lines.map((line, index) => index === cursorLine ? semantic.line : line)
         return this.inner.shouldTriggerFileCompletion?.(virtualLines, cursorLine, semantic.cursorCol) ?? true
