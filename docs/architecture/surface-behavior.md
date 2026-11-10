@@ -1907,17 +1907,21 @@ Authority: `src/runtime/direct/file-completion/host-discovery.ts`,
   has no spill file). The managed range is joined before the collected readers
   are read once; there is no incremental stream, acknowledgement window or
   second output owner.
-- A sandbox run that exits nonzero with truncated collected stderr is a
-  reason-UNKNOWN settlement, regardless of what the retained tail matches: a
-  higher-priority runner-fatal line or a denial signature may itself have been
-  dropped. The card preserves the real exit and the stderr truncation, asserts
-  no definite `sandbox denied` or runner-failure fact, and states that the
-  failure reason cannot be determined, the command may have executed and it must
-  not be retried automatically. This reason-unknown is distinct from the
-  transport-level UNKNOWN of a lost terminal result. Only a complete stderr may
-  confirm a denial or a runner failure from the collected diagnostic; a
-  pre-spawn runner failure remains its own failed outcome. A zero exit, a signal
-  kill and a bypass run are outside this rule.
+- Sandbox diagnostics follow the official bash-sandbox order: classify an
+  OBSERVED runner-fatal from the collected stderr FIRST, even when that stream
+  is truncated — a retained tail that positively matches a runner-fatal rule is
+  a runner failure, never a denial and never a settled shell result, so it is
+  not written to the Session. Only when no runner-fatal is observed does
+  truncation decide the remainder: a nonzero exit with truncated stderr is a
+  reason-UNKNOWN settlement (a higher-priority runner-fatal line may have been
+  dropped), the card preserves the real exit and truncation, asserts no definite
+  `sandbox denied`, and states that the failure reason cannot be determined, the
+  command may have executed and it must not be retried automatically. A denial
+  signature is never asserted while stderr is truncated; only a complete stderr
+  may confirm a denial. This reason-unknown is distinct from the transport-level
+  UNKNOWN of a lost terminal result. A pre-spawn runner failure remains its own
+  failed outcome. A zero exit, a signal kill and a bypass run are outside this
+  rule.
 - Cancellation aborts the run; the subprocess provider terminates the managed
   process range and the Host joins that range before returning the settled
   result. A run whose terminal result is lost is a transport-level UNKNOWN
@@ -1931,7 +1935,8 @@ Authority: `src/runtime/direct/file-completion/host-discovery.ts`,
   when one exists), a definite `sandbox denied` fact only when no
   reason-unknown applies, the reason-unknown notice (`stderr truncated; failure
   reason cannot be determined, command may have executed; do not retry
-  automatically`) for a nonzero sandbox run with truncated stderr, the
+  automatically`) for a nonzero sandbox run with truncated stderr when no
+  runner-fatal was observed, the
   `[timed out]` fact when present, and the real `[exit N]` / `[signal NAME]`
   marker, at most twenty visual rows with an honest hidden marker. Ctrl+O
   expands the retained bounded text (never the spill file or a second stream)
