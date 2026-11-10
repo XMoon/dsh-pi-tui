@@ -157,7 +157,7 @@ export class AccountWorkspacePage implements Component {
   }
 
   private hasCurrentObservation(): boolean {
-    return this.currentObservationLease() !== undefined
+    return !this.stateRecheckRequired && this.currentObservationLease() !== undefined
   }
 
   private stopWatch(): void {
@@ -240,8 +240,8 @@ export class AccountWorkspacePage implements Component {
 
   private refresh(): void {
     if (this.disposed || this.busy !== undefined) return
-    const current = this.hasCurrentObservation()
-    if (!current) {
+    const lease = this.currentObservationLease()
+    if (lease === undefined) {
       this.stopWatch()
       this.stateFailure = undefined
       this.initializing = this.view === undefined
@@ -251,8 +251,6 @@ export class AccountWorkspacePage implements Component {
       this.requestRender()
       return
     }
-    const lease = this.currentObservationLease()
-    if (lease === undefined) return
     this.readHostState(lease, this.stateRecheckRequired ? this.reconciliationSerial : undefined)
   }
 
@@ -316,10 +314,6 @@ export class AccountWorkspacePage implements Component {
           return
         }
         if (!this.commitObservation(observation, 'readback', serial)) return
-        if (observation.view.status === 'credential-stored') {
-          this.readProfile(observation.lease)
-          this.readBalance(observation.lease)
-        }
       } finally {
         if (reconciliation !== undefined
           && this.reconciliationReadInFlight?.id === readId) {
@@ -433,8 +427,8 @@ export class AccountWorkspacePage implements Component {
         if (previous !== undefined && this.signOutConfirm) {
           this.invalidateSignOutConfirmation('the Host account changed — confirm sign-out again')
         }
-        this.checkRunningTaskFact(view, lease)
-        if (readDetails) {
+        if (!this.stateRecheckRequired) this.checkRunningTaskFact(view, lease)
+        if (readDetails && !this.stateRecheckRequired) {
           this.readProfile(lease)
           this.readBalance(lease)
         }
@@ -461,9 +455,20 @@ export class AccountWorkspacePage implements Component {
     })
   }
 
+  private canCommitAccountDetails(lease: AccountObservationLease, detailSerial: number, stateSerial: number, domain: 'profile' | 'balance'): boolean {
+    const currentDomainSerial = domain === 'profile' ? this.profileSerial : this.balanceSerial
+    return !this.disposed
+      && !this.stateRecheckRequired
+      && this.stateSerial === stateSerial
+      && currentDomainSerial === detailSerial
+      && this.observationLease === lease
+      && this.currentObservationLease() === lease
+  }
+
   private readProfile(lease: AccountObservationLease): void {
     if (this.disposed) return
     const serial = ++this.profileSerial
+    const stateSerial = this.stateSerial
     this.profile = { kind: 'pending' }
     this.source.run('account profile read', async () => {
       let outcome: AccountQueryOutcome<AccountProfile>
@@ -475,19 +480,19 @@ export class AccountWorkspacePage implements Component {
           this.invalidateObservation('connection-changed')
           return
         }
+        if (!this.canCommitAccountDetails(lease, serial, stateSerial, 'profile')) return
         this.settle(() => {
-          if (serial !== this.profileSerial || this.observationLease !== lease) return
+          if (!this.canCommitAccountDetails(lease, serial, stateSerial, 'profile')) return
           this.profile = { kind: 'failed', reason: errorText(error) }
         })
         return
       }
-      if (this.observationLease !== lease) return
-      if (!this.source.isObservationCurrent(lease)) {
-        this.invalidateObservation('connection-changed')
+      if (!this.canCommitAccountDetails(lease, serial, stateSerial, 'profile')) {
+        if (this.observationLease === lease && !this.source.isObservationCurrent(lease)) this.invalidateObservation('connection-changed')
         return
       }
       this.settle(() => {
-        if (serial !== this.profileSerial || this.observationLease !== lease) return
+        if (!this.canCommitAccountDetails(lease, serial, stateSerial, 'profile')) return
         const state = queryStateOf(outcome)
         if (state === undefined) return
         this.profile = state
@@ -498,6 +503,7 @@ export class AccountWorkspacePage implements Component {
   private readBalance(lease: AccountObservationLease): void {
     if (this.disposed) return
     const serial = ++this.balanceSerial
+    const stateSerial = this.stateSerial
     this.balance = { kind: 'pending' }
     this.source.run('account balance read', async () => {
       let outcome: AccountQueryOutcome<{ readonly value: readonly AccountWallet[]; readonly bonusWallets: readonly AccountWallet[] }>
@@ -509,19 +515,19 @@ export class AccountWorkspacePage implements Component {
           this.invalidateObservation('connection-changed')
           return
         }
+        if (!this.canCommitAccountDetails(lease, serial, stateSerial, 'balance')) return
         this.settle(() => {
-          if (serial !== this.balanceSerial || this.observationLease !== lease) return
+          if (!this.canCommitAccountDetails(lease, serial, stateSerial, 'balance')) return
           this.balance = { kind: 'failed', reason: errorText(error) }
         })
         return
       }
-      if (this.observationLease !== lease) return
-      if (!this.source.isObservationCurrent(lease)) {
-        this.invalidateObservation('connection-changed')
+      if (!this.canCommitAccountDetails(lease, serial, stateSerial, 'balance')) {
+        if (this.observationLease === lease && !this.source.isObservationCurrent(lease)) this.invalidateObservation('connection-changed')
         return
       }
       this.settle(() => {
-        if (serial !== this.balanceSerial || this.observationLease !== lease) return
+        if (!this.canCommitAccountDetails(lease, serial, stateSerial, 'balance')) return
         const state = queryStateOf(outcome)
         if (state === undefined) return
         this.balance = state
@@ -852,18 +858,19 @@ export class AccountWorkspacePage implements Component {
       content.push(...this.fact('Last attempt', phaseLabel(view.attempt.phase), width))
       if (view.attempt.errorCode !== undefined) content.push(...this.fact('Error code', view.attempt.errorCode, width))
     }
+    const viewDerivedActionsCurrent = observationCurrent
     const profileText = this.profileText()
     const balanceText = this.balanceText()
-    content.push(...this.fact('Profile', observationCurrent ? profileText : `last known · not current · ${profileText}`, width))
-    content.push(...this.fact('Balance', observationCurrent ? balanceText : `last known · not current · ${balanceText}`, width))
-    const callbackOrigin = observationCurrent ? this.source.callbackOrigin() : undefined
+    content.push(...this.fact('Profile', viewDerivedActionsCurrent ? profileText : `last known · not current · ${profileText}`, width))
+    content.push(...this.fact('Balance', viewDerivedActionsCurrent ? balanceText : `last known · not current · ${balanceText}`, width))
+    const callbackOrigin = viewDerivedActionsCurrent ? this.source.callbackOrigin() : undefined
     content.push(...this.fact('Callback', callbackOrigin ?? 'unavailable — the Host account observation is not current', width))
-    const url = observationCurrent ? attempt?.authorizeUrl : undefined
+    const url = viewDerivedActionsCurrent ? attempt?.authorizeUrl : undefined
     if (url !== undefined) {
       content.push('', color.textStrong('Browser authorization'))
       content.push(...this.wrapText(url, width))
-      const host = this.callbackHost()
-      const port = this.callbackPort()
+      const host = viewDerivedActionsCurrent ? this.callbackHost() : undefined
+      const port = viewDerivedActionsCurrent ? this.callbackPort() : undefined
       if (host !== undefined && port !== undefined) {
         const target = host.includes(':') && !host.startsWith('[') ? `[${host}]` : host
         content.push('', color.textDim(`Remote/SSH: the callback listener is bound to ${target}:${port} on the Host.`))
@@ -908,11 +915,11 @@ export class AccountWorkspacePage implements Component {
       if (url !== undefined) {
         actions.push({ id: 'account:open', label: 'Open browser', enabled: true })
         actions.push({ id: 'account:copy-url', label: 'Copy link', enabled: true })
-        if (this.callbackPort() !== undefined) actions.push({ id: 'account:copy-ssh', label: 'Copy SSH template', enabled: true })
+        if (viewDerivedActionsCurrent && this.callbackPort() !== undefined) actions.push({ id: 'account:copy-ssh', label: 'Copy SSH template', enabled: true })
       }
       if (view !== undefined) {
-        actions.push({ id: 'account:usage', label: 'Usage ↗', enabled: true })
-        actions.push({ id: 'account:topup', label: 'Top up ↗', enabled: true })
+        actions.push({ id: 'account:usage', label: 'Usage ↗', enabled: viewDerivedActionsCurrent })
+        actions.push({ id: 'account:topup', label: 'Top up ↗', enabled: viewDerivedActionsCurrent })
       }
       if (view?.status === 'credential-stored') {
         actions.push({
@@ -924,7 +931,7 @@ export class AccountWorkspacePage implements Component {
       actions.push({ id: 'account:refresh', label: 'Refresh', enabled: this.busy === undefined })
     }
     actions.push({ id: 'account:back', label: '← Settings', enabled: true })
-    this.copyValue = url ?? view?.links.usageUrl
+    this.copyValue = observationCurrent && !this.stateRecheckRequired ? url ?? view?.links.usageUrl : undefined
     return { content, actions }
   }
 
@@ -1027,12 +1034,15 @@ export class AccountWorkspacePage implements Component {
       return 'handled'
     }
     if (matchesKey(data, 'c') || matchesKey(data, Key.shift('c'))) {
-      if (this.paintedCopy && this.copyValue !== undefined) this.copy(this.copyValue)
+      if (this.paintedCopy && this.copyValue !== undefined
+        && this.hasCurrentObservation() && !this.stateRecheckRequired) this.copy(this.copyValue)
       return 'handled'
     }
     if (data === 'o' || data === 'O') {
-      const url = this.activeAttempt()?.authorizeUrl
-      if (url !== undefined) this.openUrl(url)
+      if (this.hasCurrentObservation() && !this.stateRecheckRequired) {
+        const url = this.activeAttempt()?.authorizeUrl
+        if (url !== undefined) this.openUrl(url)
+      }
       return 'handled'
     }
     return 'handled'
@@ -1092,21 +1102,22 @@ export class AccountWorkspacePage implements Component {
         this.requestRender()
         return 'handled'
       case 'account:open':
-        if (attempt?.authorizeUrl !== undefined) this.openUrl(attempt.authorizeUrl)
+        if (this.hasCurrentObservation() && !this.stateRecheckRequired && attempt?.authorizeUrl !== undefined) this.openUrl(attempt.authorizeUrl)
         return 'handled'
       case 'account:copy-url':
-        if (attempt?.authorizeUrl !== undefined) this.copy(attempt.authorizeUrl)
+        if (this.hasCurrentObservation() && !this.stateRecheckRequired && attempt?.authorizeUrl !== undefined) this.copy(attempt.authorizeUrl)
         return 'handled'
       case 'account:copy-ssh': {
+        if (!this.hasCurrentObservation() || this.stateRecheckRequired) return 'handled'
         const template = this.sshTemplate()
         if (template !== undefined) this.copy(template)
         return 'handled'
       }
       case 'account:usage':
-        if (view !== undefined) this.openUrl(view.links.usageUrl)
+        if (this.hasCurrentObservation() && !this.stateRecheckRequired && view !== undefined) this.openUrl(view.links.usageUrl)
         return 'handled'
       case 'account:topup':
-        if (view !== undefined) this.openUrl(view.links.topUpUrl)
+        if (this.hasCurrentObservation() && !this.stateRecheckRequired && view !== undefined) this.openUrl(view.links.topUpUrl)
         return 'handled'
       case 'account:refresh':
         this.refresh()

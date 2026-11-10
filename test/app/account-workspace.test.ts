@@ -17,7 +17,7 @@ import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { currentPalette, setTheme } from '../../src/tui/theme/runtime.ts'
 import { darkColors, lightColors } from '../../src/domain/display/theme.ts'
 import { AccountWorkspacePage, type AccountInitialView } from '../../src/tui/panels/account-workspace-page.ts'
-import type { AccountWorkspaceSource } from '../../src/app/command/account-workflow.ts'
+import type { AccountWorkspaceSource, AccountQueryOutcome } from '../../src/app/command/account-workflow.ts'
 import { accountClientMetadata, AccountWorkflow } from '../../src/app/command/account-workflow.ts'
 import type { AccountObservation, AccountObservationLease, AccountProfile, AccountView, AccountWallet, AccountWatchEvent } from '../../src/runtime/config-port.ts'
 import { SupersededReadError } from '../../src/runtime/read-error.ts'
@@ -465,10 +465,14 @@ test('/logout deep link with a stored credential opens the asynchronous task che
   page.dispose()
 })
 
-test('an unknown sign-out outcome refreshes Host state without replaying the mutation', async () => {
+test('an unknown SignOut ACK fences already-running Profile and Balance results until Host readback', async () => {
   const state: SourceState = { view: stored(), profileFails: false, balanceFails: false, runningTasks: false, calls: [] }
   const source = makeSource(state)
+  const profileReads: Array<(outcome: AccountQueryOutcome<AccountProfile>) => void> = []
+  const balanceReads: Array<(outcome: AccountQueryOutcome<{ readonly value: readonly AccountWallet[]; readonly bonusWallets: readonly AccountWallet[] }>) => void> = []
   const readbacks: Array<(view: AccountView) => void> = []
+  source.getProfile = () => new Promise(resolve => { profileReads.push(resolve) })
+  source.getBalance = () => new Promise(resolve => { balanceReads.push(resolve) })
   source.getState = () => new Promise<AccountObservation>(resolve => {
     readbacks.push(view => resolve(issueObservation(state, view)))
   })
@@ -477,34 +481,36 @@ test('an unknown sign-out outcome refreshes Host state without replaying the mut
     throw new Error('local credential removal failed')
   }
   const page = new AccountWorkspacePage(source, () => {}, { view: 'signout' })
-  page.setBodyHeight(24)
+  page.setBodyHeight(30)
   await flush()
-  text(page)
+  assert.equal(profileReads.length, 1)
+  assert.equal(balanceReads.length, 1)
+  focusAction(page, 'Sign out')
   page.handleInput('\r')
   await flush()
   assert.match(text(page), /sign-out failed: local credential removal failed/u)
   assert.equal(readbacks.length, 1)
 
+  profileReads[0]!({ status: 'ready', value: { id: 'old-account', name: 'Old Account', contact: null } })
+  balanceReads[0]!({ status: 'ready', value: { value: [{ currency: 'CNY', balance: '1.11' }], bonusWallets: [] } })
+  await flush()
+  const unresolved = text(page)
+  assert.doesNotMatch(unresolved, /Old Account|old-account|1\.11 CNY/u,
+    'the pre-mutation Profile/Balance responses cannot commit as current while ACK reconciliation is pending')
+  assert.match(unresolved, /last known · not current/u)
+
   state.view = stored()
-  for (const publish of [...state.watchListeners!]) publish()
-  await flush()
-  page.handleInput('\r')
-  assert.equal(state.calls.filter(call => call === 'signOut').length, 1,
-    'a Watch frame cannot start another SignOut confirmation after an unknown ACK')
   readbacks[0]!(stored())
   await flush()
-  assert.equal(readbacks.length, 1, 'the Watch frame does not replace or duplicate the in-flight Host readback')
-  page.handleInput('\r')
-  assert.equal(state.calls.filter(call => call === 'signOut').length, 1,
-    'the pending Host readback still fences another SignOut confirmation')
-  readbacks[0]!(stored())
+  assert.equal(profileReads.length, 2, 'successful Host readback starts a fresh current-account Profile read')
+  assert.equal(balanceReads.length, 2, 'successful Host readback starts a fresh current-account Balance read')
+  profileReads[1]!({ status: 'ready', value: { id: 'new-account', name: 'New Account', contact: null } })
+  balanceReads[1]!({ status: 'ready', value: { value: [{ currency: 'CNY', balance: '2.22' }], bonusWallets: [] } })
   await flush()
-  assert.match(text(page), /Signed in \(stored credential\)/u)
-  focusAction(page, 'Sign out…')
-  page.handleInput('\r')
-  await flush()
-  assert.equal(state.calls.filter(call => call === 'signOut').length, 1)
-  assert.match(text(page), /Sign out confirmation/u)
+  assert.match(text(page), /New Account/u)
+  assert.match(text(page), /2\.22 CNY/u)
+  assert.doesNotMatch(text(page), /Old Account|old-account|1\.11 CNY/u)
+  assert.equal(state.calls.filter(call => call === 'signOut').length, 1, 'the unknown mutation is never replayed')
   page.dispose()
 })
 
@@ -886,32 +892,47 @@ test('the Account page fits signed-out, attempt and stored states across its fro
   }
 })
 
-test('stale Account currentness remains readable across wide, medium and narrow workspace frames', async () => {
-  for (const [width, height] of [[100, 40], [80, 24], [44, 20], [30, 8]] as const) {
-    const state: SourceState = { view: stored(), profileFails: false, balanceFails: false, runningTasks: false, calls: [] }
-    const page = new AccountWorkspacePage(makeSource(state), () => {}, { view: 'page' })
-    page.setBodyHeight(height)
-    await flush()
-    state.currentLeases!.clear()
-    const rows = page.render(width)
-    const frame = rows.map(stripTerminalSequences).join('\n')
-    if (width <= 30 || height <= 8) {
-      assert.match(frame, /stale: signed in/u, `${width}x${height} must keep the compact stale Account state visible`)
-    } else {
-      assert.match(frame, /Last known: signed in/u, `${width}x${height} must distinguish stale from current stored state`)
-      assert.match(frame, /state not current/u, `${width}x${height} must name the missing currentness fact`)
+test('stale Account currentness remains readable across frozen sizes and dark/light/custom themes', async t => {
+  const originalPalette = currentPalette
+  t.after(() => setTheme('custom', originalPalette))
+  const themes = [
+    { mode: 'dark' as const, palette: darkColors },
+    { mode: 'light' as const, palette: lightColors },
+    { mode: 'custom' as const, palette: { ...darkColors, text: '#345678', textDim: '#456789' } },
+  ]
+  const rgb = (value: string): number => Number.parseInt(value.replace(/^#/u, ''), 16)
+  for (const theme of themes) {
+    setTheme(theme.mode, theme.palette)
+    for (const [width, height] of [[100, 40], [80, 24], [44, 20], [30, 8]] as const) {
+      const state: SourceState = { view: stored(), profileFails: false, balanceFails: false, runningTasks: false, calls: [] }
+      const page = new AccountWorkspacePage(makeSource(state), () => {}, { view: 'page' })
+      page.setBodyHeight(height)
+      await flush()
+      state.currentLeases!.clear()
+      const rows = page.render(width)
+      const frame = rows.map(stripTerminalSequences).join('\n')
+      if (width <= 30 || height <= 8) {
+        assert.match(frame, /stale: signed in/u, `${theme.mode} ${width}x${height} must keep the compact stale Account state visible`)
+      } else {
+        assert.match(frame, /Last known: signed in/u, `${theme.mode} ${width}x${height} must distinguish stale from current stored state`)
+        assert.match(frame, /state not current/u, `${theme.mode} ${width}x${height} must name the missing currentness fact`)
+      }
+      assert.equal(rows.length, height)
+      assert.ok(rows.every(row => visibleWidth(row) <= width), `${theme.mode} ${width}x${height} stale frame must remain inside its viewport`)
+      if (width === 30 && height === 8) {
+        const terminal = new VirtualTerminal(width, height)
+        terminal.write(rows.join('\r\n'))
+        const physical = await terminal.flushAndGetViewport()
+        assert.match(physical.join('\n'), /stale: signed in/u,
+          `${theme.mode} real renderer frame keeps the stale distinction on-screen at 30x8`)
+        const statusRow = physical.findIndex(row => row.includes('stale: signed in'))
+        const statusCol = physical[statusRow]!.indexOf('stale: signed in')
+        assert.equal(terminal.getCellFgRgb(statusRow, statusCol), rgb(theme.palette.text),
+          `${theme.mode} stale Status uses the normal-text semantic token`)
+        assert.ok(physical.every(row => visibleWidth(row) <= width))
+      }
+      page.dispose()
     }
-    assert.equal(rows.length, height)
-    assert.ok(rows.every(row => visibleWidth(row) <= width), `${width}x${height} stale frame must remain inside its viewport`)
-    if (width === 30 && height === 8) {
-      const terminal = new VirtualTerminal(width, height)
-      terminal.write(rows.join('\r\n'))
-      const physical = await terminal.flushAndGetViewport()
-      assert.match(physical.join('\n'), /stale: signed in/u,
-        'the real renderer frame keeps the stale-state distinction on-screen at 30x8')
-      assert.ok(physical.every(row => visibleWidth(row) <= width))
-    }
-    page.dispose()
   }
 })
 
@@ -1068,7 +1089,7 @@ test('an unknown SignIn acknowledgement waits for a Host reread before another a
   page.handleInput('\r')
   await flush()
   assert.equal(starts, 1)
-  assert.match(text(page), /refreshing Host account state/u)
+  assert.match(text(page), /sign-in could not start: the Host acknowledgement was lost/u)
   page.handleInput('\r')
   assert.equal(starts, 1, 'an unknown acknowledgement does not admit another SignIn dispatch')
   state.view = stored()
@@ -1113,8 +1134,8 @@ test('an unknown mutation ACK cannot be reconciled by a Watch frame ahead of get
   state.view = signedOut()
   for (const publish of [...state.watchListeners!]) publish()
   await flush()
-  assert.match(text(page), /Signed out \/ no stored credential/u,
-    'the queued Watch frame updates display state while leaving the mutation barrier in place')
+  assert.match(text(page), /Last known: signed out · Host state not current/u,
+    'the Watch fact is shown as last-known during reconciliation')
   assert.equal(starts, 1,
     'a Watch frame concurrent with the pending readback cannot reopen mutation admission')
   state.view = stored()
@@ -1155,6 +1176,20 @@ test('an unknown Cancel acknowledgement stays fenced through Watch and out-of-or
   await flush()
   assert.deepEqual(state.calls, ['cancel:attempt-1'])
   assert.equal(readbacks.length, 1)
+  const oldAuthorizeUrl = waitingAttempt().attempt!.authorizeUrl!
+  const whileReconciling = text(page)
+  assert.equal(whileReconciling.includes(oldAuthorizeUrl), false,
+    'unknown Cancel ACK makes its old authorization URL non-current before readback')
+  assert.doesNotMatch(whileReconciling, /Open browser|Copy link|Copy SSH template/u,
+    'attempt URL actions are absent while the mutation result is unknown')
+  assert.doesNotMatch(whileReconciling, />\s*(Usage ↗|Top up ↗)/u,
+    'stored Account destinations are disabled while the mutation result is unknown')
+  page.handleInput('o')
+  page.handleInput('c')
+  assert.equal(state.calls.some(call => call.startsWith('open:')), false,
+    'the o shortcut cannot open the pre-Cancel authorization URL during reconciliation')
+  assert.equal(state.calls.some(call => call.startsWith('copy:')), false,
+    'the c shortcut cannot copy the cached pre-Cancel URL or account link during reconciliation')
 
   state.view = waitingAttempt()
   for (const publish of [...state.watchListeners!]) publish()

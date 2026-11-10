@@ -991,8 +991,13 @@ The page never infers a stored key from a route/profile.
   independent queries with independent pending/failed/ready states, and an
   unavailable balance is never shown as 0. The page binds profile/balance reads,
   every Account mutation and the running-task risk read to the same current
-  observation. Stale profile/balance facts are marked last-known, and a stale
-  authorization URL is not presented as current.
+  observation. A pending unknown-mutation readback also makes its prior view-derived
+  facts non-current while the adapter lease remains valid: profile/balance/links and
+  authorization URLs stay last-known, Open/Copy plus their key shortcuts refuse the
+  old facts, and already-started profile/balance results cannot commit across the
+  mutation/readback state serial. A successful causal Host readback starts fresh
+  detail reads under its returned observation. Stale Profile/Balance facts are marked
+  last-known, and a stale authorization URL is not presented as current.
 - Wallet decimal strings are forwarded verbatim. `Usage` and `Top up` use the
   client-local HTTP(S) opener with the official `AccountView.links`; the page
   never receives a token or grant payload.
