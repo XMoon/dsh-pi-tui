@@ -69,6 +69,31 @@ export class SessionTransitionGate {
     return this.queued > 0 || this.intents.size > 0
   }
 
+  /** Whether a transition TASK is executing or queued (intents excluded).
+   *  Used by the intent owner to prove it is the LAST pending pre-gate owner
+   *  before settling recalls that may belong to a gated transition. */
+  get taskPending(): boolean {
+    return this.queued > 0
+  }
+
+  /** How many accepted navigation intents are still in their pre-gate
+   *  preflight. */
+  get intentCount(): number {
+    return this.intents.size
+  }
+
+  /**
+   * Whether the ONE ending pre-gate intent may settle the shared queue-recall
+   * list. It must be the ONLY live intent and no transition TASK may be
+   * executing or queued: a task (or a second intent) still OWNS whatever is
+   * parked and must settle it itself at its own terminal point. The barrier
+   * transition runs inside a task, so `queued === 0` also proves no barrier
+   * transition is in progress.
+   */
+  canSettleIntentRecalls(): boolean {
+    return this.intents.size === 1 && this.queued === 0
+  }
+
   /**
    * Register one accepted navigation intent BEFORE its pre-gate preflight
    * (the `/new` Workspace resolution) so `pending`/`whenSettled` cover the

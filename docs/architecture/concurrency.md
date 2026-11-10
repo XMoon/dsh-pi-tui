@@ -551,6 +551,15 @@ stays untouched until the gate's own admission, and only `pending`/
 gap (the Host Session exists before the Direct owner is published) is covered
 by the transition task's own gate occupancy.
 
+A queue pull-back that settles while the intent is pending defers its local
+draft restore to the pending navigation. The intent's terminal settlement may
+abort those recalls ONLY when it is the last pending pre-gate owner
+(`canSettleIntentRecalls`: one live intent and no executing/queued transition
+task); an executing/queued transition or a second intent still owns the list
+and its own commit/finally settles it. Non-navigation commands never settle
+the list, so a refused pre-selection restores the recall while a gated
+navigation keeps deciding it.
+
 `SESSION_NAVIGATION_COMMANDS` (`/new`, the session browser and `/fork`/
 `/rewind`) is deliberately exempt: those commands ARE the navigation
 authority, their sessionless effect is visible without a command card, and a

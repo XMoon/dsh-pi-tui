@@ -150,6 +150,9 @@ test('a navigation intent keeps pending/whenSettled open WITHOUT occupying the F
   const release = gate.beginIntent()
   assert.equal(gate.pending, true, 'an accepted pre-gate navigation is pending')
   assert.equal(gate.busy, false, 'an intent executes no transition')
+  assert.equal(gate.intentCount, 1)
+  assert.equal(gate.taskPending, false)
+  assert.equal(gate.canSettleIntentRecalls(), true, 'the lone intent may settle its recalls')
   let settled = false
   const waiting = gate.whenSettled().then(() => { settled = true })
   await settle() // reason: drain the waiter's first check
@@ -158,7 +161,9 @@ test('a navigation intent keeps pending/whenSettled open WITHOUT occupying the F
   // OBSERVATION window, never a FIFO slot.
   const order: string[] = []
   const transition = gate.run(async () => { order.push('transition') })
+  assert.equal(gate.canSettleIntentRecalls(), false, 'a queued transition task owns the recalls')
   await transition
+  assert.equal(gate.canSettleIntentRecalls(), true, 'back to the lone intent after the task settles')
   assert.deepEqual(order, ['transition'], 'the intent must not block the transition FIFO')
   await settle() // reason: drain the waiter's post-transition re-check
   assert.equal(settled, false, 'the intent itself still keeps whenSettled waiting')
@@ -167,6 +172,24 @@ test('a navigation intent keeps pending/whenSettled open WITHOUT occupying the F
   assert.equal(settled, true)
   assert.equal(gate.pending, false, 'releasing the last intent clears pending')
   release() // idempotent by contract
+  assert.equal(gate.canSettleIntentRecalls(), false, 'no intent is left to settle anything')
+})
+
+test('canSettleIntentRecalls requires ONE intent and NO transition task', async () => {
+  const gate = new SessionTransitionGate()
+  assert.equal(gate.canSettleIntentRecalls(), false, 'no intent: nothing to settle')
+  const releaseA = gate.beginIntent()
+  assert.equal(gate.canSettleIntentRecalls(), true)
+  const releaseB = gate.beginIntent()
+  assert.equal(gate.canSettleIntentRecalls(), false, 'a second intent still owns its recalls')
+  assert.equal(gate.intentCount, 2)
+  const queued = gate.run(async () => {})
+  assert.equal(gate.canSettleIntentRecalls(), false, 'a queued transition task owns the recalls')
+  await queued
+  releaseB()
+  assert.equal(gate.canSettleIntentRecalls(), true, 'the last lone intent regains the authority')
+  releaseA()
+  assert.equal(gate.canSettleIntentRecalls(), false)
 })
 
 // ── exit retirement: pending covers the queued-but-not-started window ──────

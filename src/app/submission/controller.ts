@@ -154,6 +154,12 @@ export interface SubmissionControllerDeps<ExactAgent extends SubmissionAgentLike
      *  preflight (see `SessionTransitionGate.beginIntent`). The returned
      *  release is idempotent and runs at the command's terminal settlement. */
     beginNavigationIntent(): () => void
+    /** Whether the ending intent is the ONLY pending pre-gate owner: one live
+     *  intent, no executing/queued transition TASK and no barrier transition.
+     *  Only then may its terminal settlement abort the shared recall list —
+     *  otherwise a gated transition (or another intent) still owns it and its
+     *  own settlement decides. */
+    soleNavigationIntentPending(): boolean
   }
   /** The session-scope authority (live-scope capture + currentness fence). */
   readonly scope: {
@@ -1430,8 +1436,14 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
    * surface observes the restored draft, never a half-settled one.
    */
   const settleNavigationIntent = (release: (() => void) | undefined): void => {
-    deps.submissionRuntime.settleQueueRecalls(false)
-    release?.()
+    // Only an ACTUAL intent may settle, and only when it is the LAST pending
+    // pre-gate owner. Non-navigation commands (release undefined) and an
+    // intent ending beside a gated transition/another intent must never drain
+    // that owner's deferred recalls: the gated transition's commit/finally (or
+    // the other intent's own terminal release) is the settlement authority.
+    if (release === undefined) return
+    if (deps.ownership.soleNavigationIntentPending()) deps.submissionRuntime.settleQueueRecalls(false)
+    release()
   }
 
   const runLocalCommand = (

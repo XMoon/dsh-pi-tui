@@ -216,6 +216,7 @@ function startHarness(): Harness {
       transitionPending: () => false,
       awaitTransitionSettled: async () => {},
       beginNavigationIntent: () => () => {},
+      soleNavigationIntentPending: () => false,
     },
     scope: {
       captureLive: () => scopeAuthority.captureLive(),
