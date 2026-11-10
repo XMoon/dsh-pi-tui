@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { stripTerminalSequences } from '@xmoon76/pi-tui'
 import test from 'node:test'
 import { TranscriptSearchComponent } from '../../src/tui/interaction/transcript-search.ts'
-import type { TranscriptSearchScope } from '../../src/tui/interaction/transcript-search.ts'
+import type { FullSearchSourceNotice, TranscriptSearchScope } from '../../src/tui/interaction/transcript-search.ts'
 import type { TuiMouseEvent } from '@xmoon76/pi-tui'
 
 function mouse(
@@ -32,6 +32,9 @@ function component(options: {
   readViewResult?: () => { currentIndex: number; count: number } | undefined
   readTemporaryReader?: () => boolean
   readCoverage?: () => 'entire-session' | 'loaded-history' | 'loaded-history-with-more'
+  readSourceNotice?: () => FullSearchSourceNotice | undefined
+  readTerminalRows?: () => number
+  initialScope?: TranscriptSearchScope
 } = {}): TranscriptSearchComponent {
   return new TranscriptSearchComponent({
     onQueryChange: () => {},
@@ -39,7 +42,9 @@ function component(options: {
     readViewResult: options.readViewResult ?? (() => undefined),
     readTemporaryReader: options.readTemporaryReader ?? (() => false),
     readCoverage: options.readCoverage ?? (() => 'entire-session'),
-    initialScope: 'view',
+    readSourceNotice: options.readSourceNotice ?? (() => undefined),
+    readTerminalRows: options.readTerminalRows ?? (() => 24),
+    initialScope: options.initialScope ?? 'view',
   })
 }
 
@@ -51,6 +56,8 @@ test('transcript search: clicking the query row positions the private Input curs
     readViewResult: () => ({ currentIndex: -1, count: 0 }),
     readTemporaryReader: () => false,
     readCoverage: () => 'entire-session',
+    readSourceNotice: () => undefined,
+    readTerminalRows: () => 24,
     initialScope: 'view',
   })
   search.handleInput('a')

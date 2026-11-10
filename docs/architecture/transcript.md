@@ -886,7 +886,11 @@ container mints no reveal node.
 
 ### Transcript Find scopes
 
-PiTui exposes two Find scopes through ONE three-row overlay and ONE query Input:
+PiTui exposes two Find scopes through ONE Search overlay and ONE query Input. The
+overlay paints three rows (title, Input, hint) and adds a fourth `Source-only`
+row only while the current Full target has no proven cell (see below); a
+terminal with at most ten rows folds that status into the third row instead of
+taking a transcript row away:
 
 - **View** searches only the current mounted, rendered transcript batch. Its
   result count and current occurrence come from `TuiApp.renderedViewSearch`; the
@@ -920,6 +924,67 @@ PiTui exposes two Find scopes through ONE three-row overlay and ONE query Input:
 - These PiTui row/cell facts do not qualify native TSP View search. A renderer
   without its own native View authority must retain its separate Full behavior
   and must not present PiTui rendered results as TSP results.
+
+### Source-only status of a Full hit
+
+A Full hit's painted cells are either proven (`exact`), provably absent
+(`not-painted`), or not provable in the current render (`unproven`). The status
+is disposable presentation metadata for ONE render epoch: it never feeds the
+match corpus, `N/M`, the span proof or a stored match/geometry map, and an
+`exact` selection must carry none.
+
+`not-painted` is allowed only from real evidence that the matched source text
+has no visible cell: the vendored Markdown proof reporting `NOT_PAINTED` for a
+hidden link destination or markup-only range, or the Host's own consumed Visual
+marker classification. `unproven` covers every other rejection (collapsed or
+transformed body, composite/plugin owner, reflow, unclosed math, a source kind
+with no cell channel). An `unproven` hit must never be described as absent, and
+a visible homonym elsewhere in the card never upgrades either status.
+
+While the current Full target is non-exact, the overlay shows exactly one
+Source-only row: `Source-only · no visible cell · <label>` or
+`Source-only · position unverified · <label>`. The label comes from the static
+source-kind vocabulary (message kind, tool/command/subcall field, workflow
+run/phase/member, deliverable field), never from user content. A snippet is
+attached only for a Host-owned, single-text, non-URL User message or expanded
+Host Thinking whose normalized range projects back to a real raw span: at most
+twelve graphemes of context on each side, projected through the one display
+sanitizer onto a single safe physical row, and omitted entirely when the raw or
+projected context contains control/escape bytes, URL/path-shaped text or markup
+risk. Assistant Markdown (including a hidden href), Tool/Command/Workflow,
+Plugin, Visual, Delivered and composite sources stay label-only. The row shrinks
+by whole segments: the Source-only fact and the close key are never dropped, the
+real loaded-history coverage survives, and a wider layout drops the snippet
+first. The notice is not a permission or secrecy proof; it only describes what
+the current renderer can show.
+
+### Occlusion-aware search navigation
+
+One Search jump is solved against the TWO rectangles the frame really painted:
+the fullscreen `ScrollView` box and the managed Search overlay's
+`getBounds()` rectangle (plus its real row count, so a three-row and a four-row
+box place the target differently). A target cell is readable only when it lies
+inside the painted viewport AND does not horizontally overlap the overlay on the
+same physical row — row overlap alone is never occlusion. The solver is a pure
+function with a fixed, bounded candidate set; it keeps the current scroll
+position when the whole target is already readable, otherwise prefers the most
+readable candidate, then the nearest one, and never claims full readability for
+a partially covered target. A target without proven cells contributes its
+conservative full-width anchor rows, never guessed columns. Missing geometry
+keeps the existing viewport-only placement.
+
+The jump is committed from the current epoch's geometry, and one post-paint
+correction is allowed because the box that painted the jump may have been a
+frame old (the Source-only row can change the box height). That correction is
+bound to the same screen, overlay handle, scope, query, presentation revision,
+selected occurrence and terminal size and applies at most once; a passive
+projection, stream settle, wheel drag or ordinary repaint never re-aims an old
+target, and a resize only re-solves while the target still belongs to the
+current Search overlay. Retiring the overlay, leaving the scope, switching
+session/subject or replacing the screen discards the pending correction with the
+current target geometry. Search navigation never re-centres an already visible
+target, never re-windows for the same target and never adds a second viewport or
+reader owner.
 
 ### Source-cell proof of a rendered search hit
 

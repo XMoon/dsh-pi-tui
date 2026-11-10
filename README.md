@@ -452,7 +452,9 @@ Settings / Plugins 页面会明确拒绝。
 | `Ctrl+S`      | Steer:把队列消息和草稿一起发送到正在运行的回合 |
 | `Ctrl+T`      | 切换 Todo 面板              |
 | `Ctrl+R`      | 搜索输入历史                 |
-| `Ctrl+F`      | 搜索 Transcript          |
+| `Ctrl+F`      | 在**已挂载渲染文本**中查找 Transcript（View） |
+| `Ctrl+Shift+F` | 在整个 Session 中查找 Transcript（Full，包含不可见源码，带 `Source-only` 提示） |
+| Search 内 `Tab` | 在 View / Full 之间切换，保留同一 query |
 | `Ctrl+End`    | 全屏时跳到最新 Transcript 输出；离开 live tail 时底部显示可点击的 `↓ Latest` |
 | `Ctrl+O`      | 展开 / 折叠工具和系统详情；普通与全屏非 Focus 下展开/收起超长用户 Prompt；全屏 Focus 下整体切换 Thought root（超长用户 Prompt 用点击/搜索展开） |
 | `Alt+T`       | 展开 / 折叠 Thinking       |
@@ -465,6 +467,13 @@ Settings / Plugins 页面会明确拒绝。
 | `@`           | 文件补全                   |
 | `!`           | 进入 Shell 模式（结果进 Session） |
 | `!!`          | 进入 Session 排除的 Shell 模式     |
+
+查找框只有一个:`Ctrl+F` 打开 View（只统计当前已挂载的渲染行,隐藏链接、折叠行与窗口外历史不算命中）,
+`Ctrl+Shift+F` 打开 Full（按当前 Session 的语义文本搜索,`N/M` 与 View 各自独立）。全窗口的命中可能落在
+隐藏链接、被消费的图片标记或当前渲染无法确证的位置:此时第 4 行显示 `Source-only · no visible cell`
+或 `Source-only · position unverified`,并只对 Host 原生的单段 User/Thinking 文本附带安全片段。
+目标被右上角查找框遮住时会自动移出框外；已在框外可见的命中不会被无谓重居中。普通模式下打开查找会
+临时借用全屏 Transcript,关闭后返回原来的普通视图。
 
 完整按键和命令以 TUI 中的 `/help` 为准。表中的快捷键是默认值;用户自定义后,以 `/help` 和 `/keybindings` 显示的生效键位为准。
 

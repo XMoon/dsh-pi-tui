@@ -118,6 +118,7 @@ interface MountedSearchSelectionForTest {
   readonly selectedRow?: number
   readonly exact: boolean
   readonly exactPaintedSegments?: ReadonlyArray<{ readonly row: number; readonly startCol: number; readonly endCol: number }>
+  readonly sourceDisposition?: 'not-painted' | 'unproven'
 }
 
 function mountedSelectionFor(app: TuiApp, message: TranscriptMessage): MountedSearchSelectionForTest | undefined {
@@ -431,6 +432,221 @@ test('navigation: an already-visible proven range does not jitter the viewport',
   app.scrollToSearchTarget()
   assert.equal(app.fullscreenScrollForTest()!.scrollTop, before, 'an already-visible proven range must not be re-centered')
   app.stop()
+})
+
+interface SearchPaintedRects {
+  readonly overlay: { readonly row: number; readonly col: number; readonly width: number; readonly height: number }
+  readonly viewport: { readonly x: number; readonly y: number; readonly width: number; readonly height: number }
+}
+
+/** The REAL painted rectangles of the current frame: the managed Search
+ * overlay handle and the fullscreen ScrollView component. Tests must read the
+ * production geometry, never re-derive the overlay's width/margin formula. */
+function searchPaintedRects(app: TuiApp): SearchPaintedRects {
+  const internals = app as unknown as {
+    searchOverlay?: { getBounds(): { row: number; col: number; width: number; height: number } | undefined }
+    fullscreen?: { getPaintedBox(component: unknown): { x: number; y: number; width: number; height: number } | undefined }
+    fullscreenScroll?: unknown
+  }
+  const overlay = internals.searchOverlay?.getBounds()
+  assert.ok(overlay !== undefined, 'the Search overlay is painted in this frame')
+  const viewport = internals.fullscreen?.getPaintedBox(internals.fullscreenScroll)
+  assert.ok(viewport !== undefined, 'the transcript ScrollView is painted in this frame')
+  return { overlay, viewport }
+}
+
+function scrollViewInternals(app: TuiApp): { scrollTop: number; scrollTo(top: number, options?: object): void } {
+  const scroll = (app as unknown as { fullscreenScroll?: { scrollTop: number; scrollTo(top: number, options?: object): void } }).fullscreenScroll
+  assert.ok(scroll !== undefined, 'the fullscreen transcript owns its scroll view')
+  return scroll
+}
+
+/** The first viewport cell of the current STRONG transcript-search
+ * occurrence (the themed current-match block is unique to the proven cells). */
+function findStrongSearchCell(vt: VirtualTerminal): { row: number; col: number } | undefined {
+  const lines = vt.getViewport()
+  for (let row = 0; row < lines.length; row += 1) {
+    for (let col = 0; col < visibleWidth(lines[row]!); col += 1) {
+      if (vt.getCellBgRgb(row, col) === STRONG_BG) return { row, col }
+    }
+  }
+  return undefined
+}
+
+function strongSearchCell(vt: VirtualTerminal): { row: number; col: number } {
+  const cell = findStrongSearchCell(vt)
+  assert.ok(cell !== undefined, `no strong search cell is painted:\n${vt.getViewport().join('\n')}`)
+  return cell
+}
+
+/** Whether one painted cell rect intersects the real overlay rectangle. */
+function cellUnderOverlay(row: number, col: number, overlay: SearchPaintedRects['overlay']): boolean {
+  return row >= overlay.row && row < overlay.row + overlay.height
+    && col >= overlay.col && col < overlay.col + overlay.width
+}
+
+test('navigation: a proven target under the Search box moves below it, while a left-side hit never moves', async () => {
+  for (const [width, height] of [[80, 24], [100, 30]] as const) {
+    const filler = (prefix: string, count: number): string[] =>
+      Array.from({ length: count }, (_, index) => `${prefix} ${index}`)
+
+    // A hit whose painted COLUMNS sit under the box (a long line before it).
+    const rightText = [
+      ...filler('head', 40),
+      `${'x'.repeat(60)} needle occluded target`,
+      ...filler('tail', 40),
+    ].join('\n')
+    const right = userMessageFolder(rightText)
+    const rightMatch = right.folder.search('needle')[0]
+    assert.ok(rightMatch !== undefined, 'fixture: the right-side occurrence exists')
+    const rightStart = startApp(width, height)
+    rightStart.app.setFullscreen(true)
+    rightStart.app.setTranscript([right.message], right.folder.turnActivities())
+    await viewport(rightStart.vt)
+    rightStart.app.startTranscriptSearch('full')
+    await viewport(rightStart.vt)
+    rightStart.app.setTranscriptSearchPresentation({
+      matchMessages: new Set([right.message]),
+      target: { query: 'needle', match: rightMatch, message: right.message },
+      grantReveal: true,
+    })
+    rightStart.app.scrollToSearchTarget()
+    await viewport(rightStart.vt)
+    const rects = searchPaintedRects(rightStart.app)
+    const scroll = scrollViewInternals(rightStart.app)
+    const placed = strongSearchCell(rightStart.vt)
+    assert.ok(!cellUnderOverlay(placed.row, placed.col, rects.overlay),
+      `${width}x${height}: the first placement puts the proven cell outside the box`)
+    // The user scrolls the target under the box's own row band.
+    const boxRow = Math.min(rects.overlay.row + 1, rects.overlay.row + rects.overlay.height - 1)
+    scroll.scrollTo(scroll.scrollTop + placed.row - boxRow, { disableFollow: true })
+    await viewport(rightStart.vt)
+    const before = scroll.scrollTop
+    // The box paints OVER the covered cell, so the visible-frame witness is the
+    // strong cell disappearing together with the needle text.
+    assert.equal(findStrongSearchCell(rightStart.vt), undefined,
+      `${width}x${height}: precondition: the box hides the covered current cell`)
+    assert.ok(!rightStart.vt.getViewport().some(line => line.includes('needle')),
+      `${width}x${height}: precondition: the covered target text is not on screen`)
+
+    rightStart.app.scrollToSearchTarget()
+    await viewport(rightStart.vt)
+    assert.notEqual(scroll.scrollTop, before, `${width}x${height}: a covered jump moves the viewport`)
+    const moved = strongSearchCell(rightStart.vt)
+    assert.equal(moved.row, rects.overlay.row + rects.overlay.height,
+      `${width}x${height}: the target lands on the row just below the box`)
+    assert.ok(!cellUnderOverlay(moved.row, moved.col, rects.overlay), 'the moved cell is not occluded')
+    assert.ok(moved.row >= rects.viewport.y && moved.row < rects.viewport.y + rects.viewport.height,
+      'the moved cell is inside the painted viewport')
+    rightStart.app.dispose()
+
+    // The SAME row band, but painted LEFT of the box: readable, no scroll.
+    const leftText = [
+      ...filler('head', 40),
+      'needle left of the box',
+      ...filler('tail', 40),
+    ].join('\n')
+    const left = userMessageFolder(leftText)
+    const leftMatch = left.folder.search('needle')[0]
+    assert.ok(leftMatch !== undefined, 'fixture: the left-side occurrence exists')
+    const leftStart = startApp(width, height)
+    leftStart.app.setFullscreen(true)
+    leftStart.app.setTranscript([left.message], left.folder.turnActivities())
+    await viewport(leftStart.vt)
+    leftStart.app.startTranscriptSearch('full')
+    await viewport(leftStart.vt)
+    leftStart.app.setTranscriptSearchPresentation({
+      matchMessages: new Set([left.message]),
+      target: { query: 'needle', match: leftMatch, message: left.message },
+      grantReveal: true,
+    })
+    leftStart.app.scrollToSearchTarget()
+    await viewport(leftStart.vt)
+    const leftRects = searchPaintedRects(leftStart.app)
+    const leftScroll = scrollViewInternals(leftStart.app)
+    const leftPlaced = strongSearchCell(leftStart.vt)
+    const leftBoxRow = Math.min(leftRects.overlay.row + 1, leftRects.overlay.row + leftRects.overlay.height - 1)
+    leftScroll.scrollTo(leftScroll.scrollTop + leftPlaced.row - leftBoxRow, { disableFollow: true })
+    await viewport(leftStart.vt)
+    const leftBefore = leftScroll.scrollTop
+    const leftCell = strongSearchCell(leftStart.vt)
+    assert.equal(leftCell.row, leftBoxRow)
+    assert.equal(cellUnderOverlay(leftCell.row, leftCell.col, leftRects.overlay), false,
+      `${width}x${height}: precondition: the same row is painted left of the box`)
+    leftStart.app.scrollToSearchTarget()
+    await viewport(leftStart.vt)
+    assert.equal(leftScroll.scrollTop, leftBefore,
+      `${width}x${height}: a readable left-side hit on the box row never jitters`)
+    assert.equal(strongSearchCell(leftStart.vt).row, leftBoxRow)
+    leftStart.app.dispose()
+  }
+})
+
+test('navigation: a collapsed User target is honest Source-only with only a safe sanitized context', async () => {
+  const cases = [
+    { line: 'needle compacted middle', safe: true },
+    { line: '\x1b]52;c;Zm9v\x07\x1b[31mneedle\x1b[0m control middle', safe: false },
+  ] as const
+  for (const { line, safe } of cases) {
+    const text = [
+      ...Array.from({ length: 12 }, (_, index) => `before ${index}`),
+      line,
+      ...Array.from({ length: 8 }, (_, index) => `after ${index}`),
+    ].join('\n')
+    const { folder, message } = userMessageFolder(text)
+    const match = folder.search('needle')[0]
+    assert.ok(match !== undefined, 'fixture: the long-User occurrence exists')
+    const { vt, app } = startApp(100, 30)
+    app.setFullscreen(true)
+    app.setTranscript([message], folder.turnActivities())
+    await viewport(vt)
+    app.setTranscriptSearchPresentation({
+      matchMessages: new Set([message]),
+      target: { query: 'needle', match, message },
+      grantReveal: true,
+    })
+    app.scrollToSearchTarget()
+    let lines = await viewport(vt)
+    assert.equal(mountedSelectionFor(app, message)?.exact, true, 'precondition: the reveal proves the body cell')
+    const bodyRow = lines.findIndex(candidate => candidate.includes('needle'))
+    assert.ok(bodyRow >= 0, `precondition: the revealed body is visible:\n${lines.join('\n')}`)
+
+    // Explicit collapse revokes the temporary reveal; the semantic target stays
+    // current but no source cell can be proven any more.
+    click(vt, 10, bodyRow)
+    lines = await viewport(vt)
+    assert.ok(lines.some(candidate => candidate.includes('rows compacted')),
+      `precondition: the bubble collapsed again:\n${lines.join('\n')}`)
+    app.setTranscriptSearchPresentation({
+      matchMessages: new Set([message]),
+      target: { query: 'needle', match, message },
+      grantReveal: false,
+    })
+    await viewport(vt)
+    assert.equal(mountedSelectionFor(app, message)?.exact, false, 'a collapsed body has no cell proof')
+    assert.equal(mountedSelectionFor(app, message)?.sourceDisposition, 'unproven',
+      'a collapsed Host body is unproven, never "no visible cell"')
+
+    app.startTranscriptSearch('full')
+    lines = await viewport(vt)
+    const notice = app.currentFullSearchNotice()
+    assert.equal(notice?.kind, 'unproven')
+    assert.equal(notice?.sourceLabel, 'User text')
+    if (safe) {
+      assert.ok((notice?.snippet ?? '').includes('needle'),
+        `a Host-owned single-text User source may show a sanitized context (got ${JSON.stringify(notice)})`)
+      assert.ok((notice?.snippet ?? '').includes('compacted'), 'the context keeps surrounding graphemes')
+    } else {
+      assert.equal(notice?.snippet, undefined,
+        'control/escape context is never shown, not even sanitized')
+    }
+    const frame = lines.map(candidate => stripTerminalSequences(candidate))
+    assert.ok(frame.some(candidate => candidate.includes('Source-only') && candidate.includes('unverified')),
+      `the overlay paints the honest Source-only row:\n${frame.join('\n')}`)
+    assert.ok(!frame.some(candidate => candidate.includes(']52;') || candidate.includes('[31m')),
+      'no raw control sequence reaches the painted notice')
+    app.dispose()
+  }
 })
 
 test('navigation: a passive transcript repaint does not snap back to the search range', async () => {
@@ -1268,6 +1484,35 @@ test('a search that only matches a consumed marker line paints no false anchor',
   app.stop()
 })
 
+
+test('navigation: a consumed Visual marker is Source-only no-visible-cell, never a homonym', async () => {
+  const ref = `sv2_${'f'.repeat(20)}`
+  const marker = `[dsh-visual-${ref}]: <#>`
+  const { folder, assistant } = visualAnswerFolder(ref, `Before figure.\n\n${marker}\n\nAfter body.`)
+  const { vt, app } = startApp(100, 30)
+  app.setFullscreen(true)
+  app.setTranscript([assistant], folder.turnActivities())
+  await viewport(vt)
+  app.startTranscriptSearch('full')
+  await viewport(vt)
+  app.setTranscriptSearchTarget({
+    query: `dsh-visual-${ref}`,
+    match: { id: 0, turn: 0, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message: assistant,
+  })
+  const lines = await viewport(vt)
+  const row = lines.findIndex(line => line.includes('Before figure.'))
+  assert.ok(row >= 0, `the answer remains visible:\n${lines.join('\n')}`)
+  assert.equal(mountedSelectionFor(app, assistant), undefined,
+    'the consumed marker owns no search selection and no fabricated visual row')
+  assert.deepEqual(app.currentFullSearchNotice(), { kind: 'not-painted', sourceLabel: 'Assistant text' },
+    'the consumed marker is real evidence of "no visible cell", not a same-named text match')
+  const frame = lines.map(line => stripTerminalSequences(line))
+  assert.ok(frame.some(line => line.includes('Source-only') && line.includes('no visible cell')),
+    `the honest Source-only row is painted:\n${frame.join('\n')}`)
+  assert.ok(!frame.some(line => line.includes(`dsh-visual-${ref}`)), 'the raw marker never leaks')
+  app.stop()
+})
 
 test('a visual Assistant keeps the search anchor for a folded delivered-file target', async () => {
   const ref = `sv2_${'f'.repeat(20)}`

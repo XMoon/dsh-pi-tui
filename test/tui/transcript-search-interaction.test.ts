@@ -11,7 +11,7 @@ import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { afterEach, test } from 'node:test'
 import { TuiApp } from '../../src/tui-app.ts'
 import { parseUserKeybindings } from '../../src/tui/keybindings/config.ts'
-import type { TranscriptMessage } from '../../src/transcript.ts'
+import type { TranscriptMessage, TranscriptSearchMatch } from '../../src/transcript.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 
 const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
@@ -168,6 +168,192 @@ test('interaction: the search box keeps pointer ownership inside its rectangle',
   await vt.waitForRender()
   assert.equal(app.isSearching(), true, 'an in-box wheel never closes the box')
   assert.equal(queries.at(-1), 'aXbc', 'an in-box wheel never edits the query')
+  app.stop()
+})
+
+function unprovenToolTarget(): { message: TranscriptMessage; match: TranscriptSearchMatch } {
+  const message: TranscriptMessage = {
+    kind: 'tool',
+    turn: 0,
+    name: 'bash',
+    args: '{}',
+    result: 'needle tool output',
+    status: 'ok',
+  }
+  const match: TranscriptSearchMatch = {
+    id: -1,
+    turn: 0,
+    occurrence: 0,
+    source: { kind: 'tool-field', field: 'result' },
+    sourceOccurrence: 0,
+    normalizedSourceRange: { start: 0, end: 'needle'.length },
+  }
+  return { message, match }
+}
+
+function overlayBounds(app: TuiApp): { row: number; col: number; width: number; height: number } {
+  const overlay = (app as unknown as {
+    searchOverlay?: { getBounds(): { row: number; col: number; width: number; height: number } | undefined }
+  }).searchOverlay?.getBounds()
+  assert.ok(overlay !== undefined, 'the Search overlay must be painted')
+  return overlay
+}
+
+test('interaction: a non-exact Full target adds one Source-only row and an exact one removes it', async () => {
+  const { vt, app } = startSearchApp(120, 30)
+  await vt.waitForRender()
+  app.startTranscriptSearch('full')
+  await vt.waitForRender()
+  const handles = app.overlayGraphState().handles
+  const tool = unprovenToolTarget()
+  const exact: TranscriptMessage = { kind: 'user', turn: 1, text: 'needle exact body' }
+  app.setTranscript([tool.message, exact])
+  await vt.waitForRender()
+  assert.equal(app.currentFullSearchNotice(), undefined, 'no current target means no notice')
+  assert.equal(overlayBounds(app).height, 3, 'an empty Full query keeps the three-row form')
+
+  app.setTranscriptSearchPresentation({
+    matchMessages: new Set([tool.message]),
+    target: { query: 'needle', match: tool.match, message: tool.message },
+    grantReveal: true,
+  })
+  await vt.waitForRender()
+  assert.deepEqual(app.currentFullSearchNotice(), { kind: 'unproven', sourceLabel: 'Tool result' },
+    'a Tool result has no source-cell proof: label-only, never a visible-cell claim')
+  assert.equal(overlayBounds(app).height, 4, 'the honest Source-only row really grows the ONE overlay')
+  assert.equal(app.overlayGraphState().handles, handles, 'the notice never mints a second overlay')
+  const unprovenFrame = vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/gu, ''))
+  assert.ok(unprovenFrame.some(line => line.includes('Source-only') && line.includes('position unverified')
+    && line.includes('Tool result')),
+  `the fourth row names the source kind and the honest position:\n${unprovenFrame.join('\n')}`)
+  assert.ok(!unprovenFrame.some(line => line.includes('no visible cell')),
+    'an unproven target never claims the cell is absent')
+  assert.equal(app.focusSeatForTest(), 'overlay', 'the notice keeps the search Input focused')
+
+  const userMatch: TranscriptSearchMatch = {
+    id: -1,
+    turn: 1,
+    occurrence: 0,
+    source: { kind: 'message' },
+    sourceOccurrence: 0,
+    normalizedSourceRange: { start: 0, end: 'needle'.length },
+  }
+  app.setTranscriptSearchPresentation({
+    matchMessages: new Set([exact]),
+    target: { query: 'needle', match: userMatch, message: exact },
+    grantReveal: true,
+  })
+  await vt.waitForRender()
+  assert.equal(app.currentFullSearchNotice(), undefined, 'an exact current cell needs no notice')
+  assert.equal(overlayBounds(app).height, 3, 'the overlay returns to its three-row form')
+  assert.ok(!vt.getViewport().some(line => line.includes('Source-only')))
+  app.stop()
+})
+
+test('interaction: a short terminal keeps three rows and folds the Source-only fact into the hint row', async () => {
+  const { vt, app } = startSearchApp(80, 10)
+  await vt.waitForRender()
+  app.startTranscriptSearch('full')
+  await vt.waitForRender()
+  const tool = unprovenToolTarget()
+  app.setTranscript([tool.message])
+  await vt.waitForRender()
+  app.setTranscriptSearchPresentation({
+    matchMessages: new Set([tool.message]),
+    target: { query: 'needle', match: tool.match, message: tool.message },
+    grantReveal: true,
+  })
+  await vt.waitForRender()
+  assert.equal(overlayBounds(app).height, 3, 'a <=10-row terminal never spends a fourth row')
+  const lines = vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/gu, ''))
+  const noticeRow = lines.find(line => line.includes('Source-only'))
+  assert.ok(noticeRow !== undefined, `the compact Source-only row is painted:\n${lines.join('\n')}`)
+  assert.match(noticeRow, /Source-only.*Loaded/u, 'the real loaded-history coverage truth survives')
+  assert.match(noticeRow, /Esc/u, 'the effective close key survives the compact layout')
+  assert.ok(lines.some(line => line.includes('[Full]')), 'the scope title survives the compact layout')
+  assert.ok(lines.some(line => line.includes('>')), 'the query Input row survives the compact layout')
+  assert.equal(app.focusSeatForTest(), 'overlay')
+  app.stop()
+})
+
+test('interaction: resize and scope changes reflow one Source-only notice without a second owner', async () => {
+  const { vt, app } = startSearchApp(120, 30)
+  await vt.waitForRender()
+  app.startTranscriptSearch('full')
+  await vt.waitForRender()
+  const handles = app.overlayGraphState().handles
+  const tool = unprovenToolTarget()
+  app.setTranscript([tool.message])
+  await vt.waitForRender()
+  app.setTranscriptSearchPresentation({
+    matchMessages: new Set([tool.message]),
+    target: { query: 'needle', match: tool.match, message: tool.message },
+    grantReveal: true,
+  })
+  await vt.waitForRender()
+  assert.equal(overlayBounds(app).height, 4)
+
+  vt.resize(80, 10)
+  await vt.waitForRender()
+  assert.equal(overlayBounds(app).height, 3, 'a short terminal returns to the three-row form')
+  assert.ok(vt.getViewport().some(line => line.includes('Source-only')), 'the compact fact stays painted')
+
+  vt.resize(44, 20)
+  await vt.waitForRender()
+  assert.equal(overlayBounds(app).height, 4, 'a 44-column terminal keeps the fourth row')
+  const narrow = vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/gu, ''))
+  const narrowNotice = narrow.find(line => line.includes('Source-only'))
+  assert.ok(narrowNotice !== undefined, `a narrow box still names the source-only fact:\n${narrow.join('\n')}`)
+  assert.ok(narrowNotice.includes('unverified') || narrowNotice.includes('not painted'),
+    'the narrow layout keeps the short honest status word')
+  assert.ok(!narrowNotice.includes('position unverified'), 'the long status yields to the 24-column box')
+
+  vt.resize(120, 30)
+  await vt.waitForRender()
+  assert.equal(overlayBounds(app).height, 4, 'growing again restores the fourth row')
+  assert.equal(app.overlayGraphState().handles, handles, 'no resize mints another overlay')
+  assert.equal(app.currentFullSearchNotice()?.kind, 'unproven', 'the notice still belongs to the current target')
+
+  app.setSearchScope('view')
+  await vt.waitForRender()
+  assert.equal(app.currentFullSearchNotice(), undefined, 'the View scope never speaks for a Full source')
+  assert.ok(!vt.getViewport().some(line => line.includes('Source-only')), 'the View scope drops the fourth row')
+  assert.equal(overlayBounds(app).height, 3)
+
+  app.setSearchScope('full')
+  await vt.waitForRender()
+  assert.equal(app.currentFullSearchNotice()?.kind, 'unproven', 'the retained Full target restores its notice')
+  assert.equal(overlayBounds(app).height, 4)
+
+  app.closeTranscriptSearch()
+  await vt.waitForRender()
+  assert.equal(app.currentFullSearchNotice(), undefined, 'closing retires the notice with its overlay')
+  app.stop()
+})
+
+test('interaction: a higher modal suppresses the Source-only row and restores it on close', async () => {
+  const { vt, app } = startSearchApp(120, 30)
+  await vt.waitForRender()
+  app.startTranscriptSearch('full')
+  await vt.waitForRender()
+  const tool = unprovenToolTarget()
+  app.setTranscript([tool.message])
+  await vt.waitForRender()
+  app.setTranscriptSearchPresentation({
+    matchMessages: new Set([tool.message]),
+    target: { query: 'needle', match: tool.match, message: tool.message },
+    grantReveal: true,
+  })
+  await vt.waitForRender()
+  assert.equal(app.currentFullSearchNotice()?.kind, 'unproven')
+
+  const picker = app.openPicker([{ value: 'opt', label: 'option' }], () => {}, () => {}, { width: 20, maxHeight: 3 })
+  await vt.waitForRender()
+  assert.equal(app.currentFullSearchNotice(), undefined,
+    'another visible modal owns the frame: the Search notice is not current')
+  picker.close()
+  await vt.waitForRender()
+  assert.equal(app.currentFullSearchNotice()?.kind, 'unproven', 'closing the modal restores the honest notice')
   app.stop()
 })
 
