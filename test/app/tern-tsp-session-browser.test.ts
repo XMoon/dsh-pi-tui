@@ -457,6 +457,44 @@ test('Welcome chooser lists official folders and Add directory retains rejected 
   assert.equal(m.fatals.length, 0)
 })
 
+test('a failed Activity sample is ONE low-noise diagnostic and never fabricates idle facts', async (t) => {
+  const facts: SessionWorkspaceFactsPort = {
+    readActivity: async () => { throw new Error('activity sample refused') },
+    followWorkspaces: (signal) => ({
+      dispose() {},
+      async *[Symbol.asyncIterator]() {
+        yield { type: 'baseline' as const, items: [
+          { workspaceId: 'ws-folder', path: '/srv/folder', title: 'Folder', sessionIds: ['session-current', 'session-other'] },
+        ] }
+        if (signal?.aborted === true) return
+        await new Promise<void>(resolve => signal?.addEventListener('abort', () => resolve(), { once: true }))
+      },
+    }),
+  }
+  const m = await mounted(t, reader({
+    list: async () => [row('session-current'), row('session-other', { updatedAt: 90 })],
+  }), false, 'ready', {}, { sessionBrowser: true }, facts)
+  const { pane } = m
+  await waitUntil('the failed Activity sample is diagnosed', () =>
+    String(props(pane).message ?? '').includes('Activity unavailable: activity sample refused'))
+  const currentItem = items(pane).find(item => item.id === 'session:session-current')
+  assert.ok(currentItem !== undefined, 'the roster stays usable after a failed Activity read')
+  assert.doesNotMatch(String(currentItem?.detail), /Working|Needs attention/u, 'no idle/working fact is fabricated')
+  sendSelect(pane, 'session:session-current', picker(pane)!.id)
+  await waitUntil('the row is selected', () => props(pane).selected === 'session:session-current')
+  pane.key('\t')
+  await waitUntil('the Footer focuses Details', () =>
+    ((pickerProps(pane, BROWSER).actions ?? []) as Array<{ readonly label?: unknown }>).some(action => String(action.label).includes('Details [Enter]')))
+  pane.key('\r')
+  await waitUntil('Details opens', () => details(pane) !== undefined)
+  const grids = detailGroups(pane)
+  assert.deepEqual(grids.get('activity')?.filter(([label]) => ['Running', 'Pending', 'Source'].includes(label)), [
+    ['Running', 'Unknown'],
+    ['Pending', 'Pending unknown'],
+    ['Source', 'unknown'],
+  ], 'a failed sample stays Unknown, never idle/none')
+})
+
 test('a Folder or Show more selection never inherits the previous Session actions', async (t) => {
   const history = Array.from({ length: 12 }, (_, index) => row(`session-history-${index}`, { updatedAt: 80 - index }))
   const facts: SessionWorkspaceFactsPort = {
@@ -582,6 +620,40 @@ test('the same Activity facts paint the compact row status and the complete Deta
     ['Pending', 'No pending'],
     ['Source', 'known'],
   ], `Details keeps the complete activity truth: ${JSON.stringify(grids.get('activity'))}`)
+})
+
+test('global Cards search never keeps a Folder-only Footer action target', async (t) => {
+  const facts: SessionWorkspaceFactsPort = {
+    readActivity: async () => [],
+    followWorkspaces: (signal) => ({
+      dispose() {},
+      async *[Symbol.asyncIterator]() {
+        yield { type: 'baseline' as const, items: [
+          { workspaceId: 'ws-folder', path: '/srv/folder', title: 'Folder', sessionIds: ['session-current', 'session-other'] },
+        ] }
+        if (signal?.aborted === true) return
+        await new Promise<void>(resolve => signal?.addEventListener('abort', () => resolve(), { once: true }))
+      },
+    }),
+  }
+  const m = await mounted(t, reader({
+    list: async () => [row('session-current'), row('session-other', { updatedAt: 90 })],
+  }), false, 'ready', {}, { sessionBrowser: true }, facts)
+  const { pane } = m
+  await waitUntil('the Folder is listed', () => items(pane).some(item => item.id === 'workspace:ws-folder'))
+  sendSelect(pane, 'workspace:ws-folder', picker(pane)!.id)
+  await waitUntil('the Folder is selected with its action', () => props(pane).selected === 'workspace:ws-folder'
+    && pickerActionByBase(pane, 'new-session', BROWSER)?.disabled === undefined)
+  pane.key('needle')
+  await waitUntil('typing enters the global Cards search', () => props(pane).layout === 'cards')
+  assert.equal(pickerActionByBase(pane, 'new-session', BROWSER), undefined,
+    'Cards never offer a Folder-only New session with an invisible prior target')
+  assert.equal(pickerActionByBase(pane, 'use-directory', BROWSER), undefined)
+  pane.key('\x1b')
+  await waitUntil('clearing the query restores the browse Folder selection', () =>
+    props(pane).layout === 'tree' && props(pane).selected === 'workspace:ws-folder')
+  await waitUntil('the Folder action is restored with the visible Folder', () =>
+    pickerActionByBase(pane, 'new-session', BROWSER)?.disabled === undefined)
 })
 
 test('the Folder New session action delegates its exact Workspace and retires only on the commit continuation', async (t) => {

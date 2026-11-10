@@ -221,6 +221,7 @@ function firstBrowseId(panel: SessionBrowserPanel): string | undefined {
 /** The selected Folder is an OFFICIAL Host Workspace, not the synthetic
  *  Unassigned/Membership-ambiguous projection group. */
 function officialWorkspaceSelected(panel: SessionBrowserPanel): boolean {
+  if (queryMode(panel)) return false
   const item = panel.selectedItem
   if (item === undefined || !item.startsWith('workspace:')) return false
   const workspaceId = item.slice('workspace:'.length)
@@ -325,7 +326,7 @@ function actionLabel(action: BrowseAction): string {
 
 function actionList(panel: SessionBrowserPanel): PickerAction[] {
   const focus = panel.zone === 'actions' ? focusedAction(panel) : undefined
-  const folderSelected = panel.selectedItem?.startsWith('workspace:') === true
+  const folderSelected = !queryMode(panel) && panel.selectedItem?.startsWith('workspace:') === true
   // A Folder-only action is offered only while a Folder is selected: the
   // native bar has no whole-segment drop of its own, and an inapplicable
   // button is what pushes the enabled primary action out of a narrow pane.
@@ -398,6 +399,11 @@ function statusText(panel: SessionBrowserPanel): string | undefined {
   const workspaceMessage = snapshot.workspace?.state === 'unavailable'
     ? `Workspace information unavailable${snapshot.workspace.error === undefined ? '' : `: ${sanitizeTerminalText(snapshot.workspace.error)}`}`
     : undefined
+  // A failed Activity sample is ONE low-noise fact; the empty/Unknown facts in
+  // Details stay truthful rather than being read as idle.
+  const activityMessage = snapshot.workspace?.activityError === undefined
+    ? undefined
+    : `Activity unavailable: ${sanitizeTerminalText(snapshot.workspace.activityError)}`
   if (snapshot.listState === 'loading') return 'Loading persisted sessions…'
   if (snapshot.listState === 'unavailable') return 'Session listing is unavailable.'
   if (snapshot.listState === 'error') return `Session listing failed: ${sanitizeTerminalText(snapshot.listError ?? 'unknown error')}`
@@ -405,14 +411,16 @@ function statusText(panel: SessionBrowserPanel): string | undefined {
     ? undefined
     : `Some session details are unavailable: ${sanitizeTerminalText(snapshot.projectionError)}`
   if (!queryMode(panel)) {
-    return [workspaceMessage, projectionMessage].filter((part): part is string => part !== undefined).join(' ') || undefined
+    return [workspaceMessage, activityMessage, projectionMessage]
+      .filter((part): part is string => part !== undefined).join(' ') || undefined
   }
   const searchMessage = snapshot.searchState === 'loading' ? 'Searching session content…'
     : snapshot.searchState === 'unavailable' ? 'Content search is unavailable; metadata matches remain visible.'
       : snapshot.searchState === 'error'
         ? `Content search failed: ${sanitizeTerminalText(snapshot.searchError ?? 'unknown error')}; metadata matches remain visible.`
         : snapshot.hasMore ? 'More matches are available; refine the query.' : undefined
-  const browseMessage = [workspaceMessage, projectionMessage].filter((part): part is string => part !== undefined).join(' ')
+  const browseMessage = [workspaceMessage, activityMessage, projectionMessage]
+    .filter((part): part is string => part !== undefined).join(' ')
   if (searchMessage === undefined) return browseMessage === '' ? undefined : browseMessage
   return browseMessage === '' ? searchMessage : `${searchMessage} ${browseMessage}`
 }
@@ -816,6 +824,11 @@ export class TspSessionBrowser {
     const willSearch = sanitizeSessionSearchInput(query) !== ''
     if (!wasSearching && willSearch) {
       panel.previousBrowse = { selected: panel.selected, selectedItem: panel.selectedItem }
+      // Cards contain no Folder row: the prior typed Folder must not survive as
+      // an invisible target for Folder-only Footer actions. The restored browse
+      // selection lives in `previousBrowse`.
+      panel.selected = undefined
+      panel.selectedItem = undefined
     } else if (wasSearching && !willSearch) {
       const previous = panel.previousBrowse
       panel.selected = previous?.selected
@@ -845,7 +858,7 @@ export class TspSessionBrowser {
       return { kind: 'use-directory', workspaceId: panel.selectedItem.slice('workspace:'.length) }
     }
     if (base === 'new-session' && actionDisabledReason(panel, base) === undefined) return { kind: 'new-session' }
-    if (base === 'details' && rowFor(panel, panel.selected) !== undefined) return { kind: 'details' }
+    if (base === 'details' && selectedSessionRow(panel) !== undefined) return { kind: 'details' }
     if (base === 'resume' && actionDisabledReason(panel, 'resume') === undefined && panel.selected !== undefined) {
       return { kind: 'resume', sessionId: panel.selected, source: 'footer' }
     }
@@ -996,7 +1009,7 @@ export class TspSessionBrowser {
         return
       }
       case 'details':
-        if (rowFor(panel, panel.selected) === undefined) return
+        if (selectedSessionRow(panel) === undefined) return
         panel.page = 'details'
         panel.readerEpoch++
         panel.zone = 'list'
