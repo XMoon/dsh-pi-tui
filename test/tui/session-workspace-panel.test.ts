@@ -2382,3 +2382,56 @@ test('Preview and Peek state the same pending admission as the Footer', async ()
   await create.paint()
   assert.ok(create.view().includes('Enter New session'), 'the New Preview verb returns after settlement')
 })
+
+test('the pending path verification blocks mouse tree actions and inert editor verbs', async () => {
+  const requested: string[] = []
+  const submitted: string[] = []
+  const outcomes: Array<(outcome: import('../../src/app/command/session-browser-presentation.ts').SessionBrowserDirectorySettlement) => void> = []
+  const h = harness({
+    columns: 120,
+    rows: 30,
+    onNewSession: (workspaceId) => { requested.push(workspaceId) },
+    onAddDirectory: (path, settle) => { submitted.push(path); outcomes.push(settle) },
+  })
+  h.handle.setSnapshot(snapshot())
+  h.handle.updateWorkspaces({
+    type: 'baseline',
+    items: [
+      { workspaceId: 'ws-a', path: '/ws/a', title: 'Alpha', sessionIds: [CURRENT] },
+      { workspaceId: 'ws-b', path: '/ws/b', title: 'Beta', sessionIds: [OTHER] },
+    ],
+  })
+  await h.paint()
+  h.vt.sendInput('\x1b[H')
+  await h.paint()
+  h.vt.sendInput('\r')
+  await h.paint()
+  h.vt.sendInput('/host/pending')
+  await h.paint()
+  h.vt.sendInput('\r')
+  await h.paint()
+  assert.deepEqual(submitted, ['/host/pending'], 'the pending Host verification started once')
+  let view = h.view()
+  assert.ok(view.includes('Verifying directory…'), 'the pending verification is visible')
+  assert.ok(!view.includes('Enter Verify directory') && !view.includes('Esc Cancel'),
+    `no inert editor verb is advertised while verifying:\n${view}`)
+  assert.ok(!panelFrame(h)[panelFrame(h).length - 1]!.includes('Enter Verify directory'),
+    'the Footer advertises only the verifying state')
+  // A REAL painted New row is still visible under the editor; clicking it must
+  // not start a second operation while the Host verification pends.
+  const newLine = lineIndexOf(panelFrame(h), '+ New session')
+  await clickCell(h, 6, newLine)
+  assert.deepEqual(requested, [], 'a mouse New activation is ignored while the path verification pends')
+  // A Folder label click must not steal the selection/Preview from the editor.
+  const folderLine = folderLineIndexOf(panelFrame(h), 'Beta')
+  await clickCell(h, 20, folderLine)
+  view = h.view()
+  assert.ok(/^> Add directory/m.test(view), `the path editor keeps the cursor:\n${view}`)
+  assert.ok(view.includes('Host directory: /host/pending'), 'the editor keeps its path')
+  assert.ok(view.includes('Verifying directory…'), 'the pending verification is still the Preview fact')
+  outcomes[0]!({ kind: 'failed', message: 'not a directory on Host' })
+  await h.paint()
+  view = h.view()
+  assert.ok(view.includes('Enter Verify directory · Esc Cancel'), 'the editor verbs return after the refusal')
+  assert.deepEqual(requested, [], 'no tree action ran during or after the pending verification')
+})

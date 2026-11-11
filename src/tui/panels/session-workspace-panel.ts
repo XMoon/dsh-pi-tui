@@ -1263,6 +1263,13 @@ export class SessionWorkspacePanel implements Component {
   }
 
   private activateRegion(region: HitRegion): void {
+    // The inline path editor owns the WHOLE interaction while it is open:
+    // a mouse press on a tree row must not start a second operation (New,
+    // Add, More, Folder) behind it. Only its own confirm/cancel targets reach
+    // their handlers (and those are inert while the Host verification pends).
+    if (this.directoryEntryActive
+      && region.kind !== 'directory-confirm'
+      && region.kind !== 'directory-cancel') return
     switch (region.kind) {
       case 'directory-confirm':
         this.handleDirectorySubmit()
@@ -1679,11 +1686,12 @@ export class SessionWorkspacePanel implements Component {
         lines.push(color.textStrong('Add directory'))
         lines.push(color.textMuted(truncateToWidth('Register an existing directory on the Host', width, '…', false)))
         if (this.directoryEntryActive) {
-          lines.push(color.textMuted(truncateToWidth(
-            this.directorySubmitting ? 'Verifying directory…' : 'Editing the Host path',
-            width, '…', false,
-          )))
-          lines.push(color.textMuted(truncateToWidth('Enter Verify directory · Esc Cancel', width, '…', false)))
+          if (this.directorySubmitting) {
+            lines.push(color.textMuted(truncateToWidth('Verifying directory…', width, '…', false)))
+          } else {
+            lines.push(color.textMuted(truncateToWidth('Editing the Host path', width, '…', false)))
+            lines.push(color.textMuted(truncateToWidth('Enter Verify directory · Esc Cancel', width, '…', false)))
+          }
         } else {
           lines.push(color.textMuted(truncateToWidth('No directory has been verified yet', width, '…', false)))
           lines.push(color.textMuted(truncateToWidth('Enter Add directory', width, '…', false)))
