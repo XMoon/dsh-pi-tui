@@ -55,6 +55,7 @@ import { JobId, type JobHandle } from '@deepseek-ai/dsh-jobs'
 import * as toolJobs from '@deepseek-ai/dsh-tool-jobs'
 import { LlmAdapter } from '@deepseek-ai/dsh-llm'
 import * as piTuiHostRuntime from '../../../src/app/host/pi-tui-host-runtime.ts'
+import SkillRegistry from '@deepseek-ai/dsh-skill'
 import * as performanceHost from '../../../src/app/host/performance-host.ts'
 import { createExperimentalRemoteRuntime } from '../../support/m3-inprocess/runtime.ts'
 import { RemoteJobObservationPort } from '../../../src/runtime/remote/job-observation-remote.ts'
@@ -219,13 +220,15 @@ async function createHostFixture(
     await ctx.plugin(WorkingDirectory)
     await ctx.plugin(LocalSandboxProvider)
     await ctx.plugin(LocalSubprocessRuntime)
-    // M6-1 F1: the built-in Host Runtime reuses these official Host capabilities.
-    await ctx.plugin(piTuiHostRuntime, { sessionId: '' } as never)
-    await ctx.plugin(performanceHost)
+    // M6-1 F1/F6: the built-in Host Runtime injects the official Workspace,
+    // Skills and preset authorities, so they mount BEFORE the runtime row.
     await ctx.plugin(Storage)
     await ctx.plugin(StorageJson, { root: join(workRoot, 'storages') })
     await ctx.plugin(StorageDomain, { backend: 'json' })
     await ctx.plugin(WorkspaceRegistry)
+    await ctx.plugin(SkillRegistry)
+    await ctx.plugin(piTuiHostRuntime, { sessionId: '' } as never)
+    await ctx.plugin(performanceHost)
     // The rc.2 credentials service ships one concrete provider whose
     // declaration is `abstract`; construct it inside the plugin fiber the way
     // the dsh base layer mounts it.
