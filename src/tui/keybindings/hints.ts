@@ -83,7 +83,6 @@ export const DELIVERED_FILES_CHORDS = {
 } as const
 
 /**
-/**
  * The PiTui Queue manager overlay's FIXED local chords (PR-Q).
  *
  * The panel is a per-surface COMPONENT contract, not a Host command: inside it
@@ -115,6 +114,7 @@ export type QueueChordId = keyof typeof QUEUE_CHORDS
 export const SESSION_WORKSPACE_CHORDS = {
   folderCycle: { keys: ['tab', 'shift+tab'], label: 'Tab/Shift+Tab' },
 } as const
+
 /** The display name of a bare (unmodified) key id. */
 const BASE_KEY_LABELS: Record<string, string> = {
   enter: 'Enter',
