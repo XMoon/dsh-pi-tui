@@ -277,10 +277,17 @@ test('the Workspace descriptor is the package ONE shared descriptor with strict 
   assert.equal(PI_TUI_CLIENT_CONTRIBUTION.descriptors[1], PI_TUI_FILE_REFERENCES_LIST_WORKSPACE,
     'the Client contribution mounts the SAME sessionless descriptor object')
   // The strict decoders reject a malformed wire result at the boundary.
-  const decode = PI_TUI_FILE_REFERENCES_LIST_WORKSPACE.result.create().parse
+  const decode = PI_TUI_FILE_REFERENCES_LIST_WORKSPACE.result.create().parse as (value: unknown) => unknown
   assert.throws(() => decode({ kind: 'ok', items: [{ path: 1 }] }), /candidate/u)
   assert.throws(() => decode({ kind: 'unavailable' }), /reason/u)
   assert.throws(() => decode({ kind: 'ok', items: 'nope' }), /ok\(items\)/u)
+  // The workspaceId parameter rejects an EMPTY id at the WIRE boundary (plan
+  // §4.2) — never a fabricated id reaching the Host business layer.
+  const parameter = PI_TUI_FILE_REFERENCES_LIST_WORKSPACE.parameters[0]!
+  const workspaceId = (parameter.codec as { create: () => { parse: (value: unknown) => string } }).create().parse
+  assert.throws(() => workspaceId(''), /non-empty Workspace id/u)
+  assert.throws(() => workspaceId(42 as unknown), /must be a string/u)
+  assert.equal(workspaceId('workspace-9'), 'workspace-9')
 })
 
 test('listWorkspace refuses without an Owner invocation BEFORE any registry read', async (t) => {

@@ -132,3 +132,34 @@ test('the shared official parser reads a real /proc/<pid>/stat and rejects a fab
   assert.equal(readProcessStarttimeAt(process.pid), readProcessStarttime(process.pid))
   assert.equal(readProcessStarttimeAt(999_999_999), undefined)
 })
+
+test('revalidate fails closed when the Host identity changes INSIDE its observation window', (t) => {
+  const life: TestLifecycle = testLifecycle(t)
+  const root = life.tempDir('dsh-f5b-equivalence-')
+  const identity = selfIdentity()
+  const launchCwd = realpathSync(root)
+  // The injected reader replays the exact race: classify's two reads match,
+  // revalidate's first read matches, then the Host PID restarts (a different
+  // starttime) BETWEEN revalidate's first check and its final check.
+  const matching = identity.hostStarttime
+  let reads = 0
+  const verdict = classifyLaunchWorkspace(identity, launchCwd, {
+    readStarttime: () => {
+      reads += 1
+      // classify: 2 reads (initial + final); revalidate: reads 3 (first check)
+      // and 5 (final check). Read 4 is the post-stats observation: CHANGED.
+      return reads === 4 ? '99999999' : matching
+    },
+  })
+  assert.equal(verdict.kind, 'verified')
+  assert.equal(verdict.kind === 'verified' ? verdict.revalidate() : true, false,
+    'a Host restart inside the revalidation window revokes the proof')
+})
+
+test('revalidate still proves unchanged identity across its full window', (t) => {
+  const life: TestLifecycle = testLifecycle(t)
+  const root = life.tempDir('dsh-f5b-equivalence-')
+  const verdict = classifyLaunchWorkspace(selfIdentity(), realpathSync(root))
+  assert.equal(verdict.kind, 'verified')
+  assert.equal(verdict.kind === 'verified' ? verdict.revalidate() : false, true)
+})
