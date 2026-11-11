@@ -722,7 +722,7 @@ test('the embedded keybindings page keeps its query/detail and its ONE last-row 
   try {
     await vt.waitForRender()
     let lines = vt.getViewport().map(strip)
-    assert.match(lines[lines.length - 1]!, /Esc close/, 'the page bar must be the physical last row')
+    assert.match(lines[lines.length - 1]!, /Back \[Esc\]/, 'the page bar must be the physical last row')
     assert.ok(!lines.some(line => line.includes('╭') || line.includes('╰')), 'the page paints no overlay Frame')
     assert.ok(panel.render(84).length <= app.keybindingEditorMaxRows(), 'the standalone cap still bounds the page')
     // Search/navigation still works end to end.

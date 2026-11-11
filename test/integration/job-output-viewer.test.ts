@@ -47,6 +47,102 @@ test('the viewer repaints the latest local observation snapshot, never a Host re
   }
 })
 
+test('the fullscreen viewer bar runs Stop and Close through same-cell clicks with the LIVE capability', async () => {
+  const { vt, app } = startApp(process.cwd())
+  try {
+    app.setFullscreen(true)
+    await vt.waitForRender()
+    const stopped: string[] = []
+    let closed = 0
+    let canStop = true
+    app.openOutputViewer({
+      title: 'bash · job-4',
+      initial: 'running',
+      refresh: () => 'running',
+      onStop: () => { stopped.push('stop') },
+      canStop: () => canStop,
+      closeHint: 'back',
+      onClose: () => { closed += 1 },
+      intervalMs: 10,
+    })
+    await vt.waitForRender()
+    const rows = (): string[] => vt.getViewport().map(strip)
+    const barRow = (): number => rows().findIndex(line => line.includes('Back [Esc]'))
+    const cellOf = (label: string): { row: number; col: number } => {
+      const row = barRow()
+      assert.ok(row >= 0, `the viewer bar is painted:\n${rows().join('\n')}`)
+      const col = rows()[row]!.indexOf(label)
+      assert.ok(col >= 0, `the ${label} affordance is painted:\n${rows().join('\n')}`)
+      return { row, col }
+    }
+    const press = (label: string): { row: number; col: number } => {
+      const cell = cellOf(label)
+      vt.sendInput(`\x1b[<0;${cell.col + 1};${cell.row + 1}M`)
+      return cell
+    }
+    const release = (cell: { row: number; col: number }): void => {
+      vt.sendInput(`\x1b[<0;${cell.col + 1};${cell.row + 1}m`)
+    }
+
+    assert.match(rows().join('\n'), /Stop \[S\] · Back \[Esc\]/, 'the fullscreen bar is the clickable affordance row')
+
+    // A Stop capability that is REVOKED between press and release refuses the
+    // action: the release re-proves the live capability, never a cached bool.
+    const revoked = press('Stop')
+    canStop = false
+    await new Promise(resolve => setTimeout(resolve, 40))
+    await vt.waitForRender()
+    release(revoked)
+    await vt.waitForRender()
+    assert.equal(stopped.length, 0, 'a revoke between press and release must refuse the Stop')
+    assert.match(rows().join('\n'), /Back \[Esc\]/, 'the settled viewer still offers its close')
+    assert.ok(!rows().join('\n').includes('Stop ['), 'the disabled Stop segment disappeared')
+
+    // A same-cell Stop click runs the ORIGINAL tasks.stop sink exactly once.
+    canStop = true
+    await new Promise(resolve => setTimeout(resolve, 40))
+    await vt.waitForRender()
+    const stop = press('Stop')
+    release(stop)
+    await vt.waitForRender()
+    assert.deepEqual(stopped, ['stop'], 'the fullscreen click ran the existing stop intent once')
+
+    // The close verb runs the ONE requestClose/finalize path exactly once.
+    const close = press('Back')
+    release(close)
+    await vt.waitForRender()
+    assert.equal(closed, 1, 'the click closed the viewer through the single close path')
+
+    // The Regular/Main surface keeps the historical keyboard-only hint and no
+    // application mouse route.
+    app.setFullscreen(false)
+    await vt.waitForRender()
+    let regularClosed = 0
+    app.openOutputViewer({
+      title: 'bash · job-5',
+      initial: 'running',
+      refresh: () => 'running',
+      onStop: () => { stopped.push('regular-stop') },
+      canStop: () => true,
+      closeHint: 'back',
+      onClose: () => { regularClosed += 1 },
+      intervalMs: 10,
+    })
+    await vt.waitForRender()
+    const regularRows = rows()
+    const legacyRow = regularRows.findIndex(line => line.includes('S stop · Esc back'))
+    assert.ok(legacyRow >= 0, `the Regular surface keeps its historical hint:\n${regularRows.join('\n')}`)
+    const legacyCol = regularRows[legacyRow]!.indexOf('S stop')
+    vt.sendInput(`\x1b[<0;${legacyCol + 1};${legacyRow + 1}M`)
+    vt.sendInput(`\x1b[<0;${legacyCol + 1};${legacyRow + 1}m`)
+    await vt.waitForRender()
+    assert.equal(regularClosed, 0, 'a Regular/Main viewer never gains an application mouse route')
+    assert.ok(!stopped.includes('regular-stop'), 'the Regular surface never runs Stop through a click')
+  } finally {
+    app.dispose()
+  }
+})
+
 test('Esc closes the viewer through the single close path', async () => {
   const { vt, app } = startApp(process.cwd())
   try {

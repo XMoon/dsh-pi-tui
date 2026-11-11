@@ -272,7 +272,7 @@ test('selecting Plugins previews the page in place; Enter only moves the keys', 
   const preview = plain(vt.getViewport())
   assert.match(preview, /PLUGIN PAGE/, 'the right column paints the real list preview')
   assert.match(preview, /Settings · Categories/, 'the rail keeps the keyboard (its header owns the trail)')
-  assert.match(plain([vt.getViewport().at(-1)!]), /Esc close/, 'the rail owns the physical last row')
+  assert.match(plain([vt.getViewport().at(-1)!]), /Close \[Esc\]/, 'the rail owns the physical last row')
   assert.equal(pages[0]!.focused, false, 'the preview does not own the input focus')
   assert.equal(counts.disposed, 0)
 
@@ -289,7 +289,7 @@ test('selecting Plugins previews the page in place; Enter only moves the keys', 
   assert.equal(counts.page, 1)
   assert.equal(counts.disposed, 0, 'a yield never disposes the page')
   assert.equal(pages[0]!.focused, false)
-  assert.match(plain([vt.getViewport().at(-1)!]), /Esc close/)
+  assert.match(plain([vt.getViewport().at(-1)!]), /Close \[Esc\]/)
   // A second Esc closes the Settings lease and notifies the page once.
   vt.sendInput('\x1b')
   await vt.waitForRender()
@@ -409,7 +409,7 @@ test('narrow 44×20 mounts the page only on Enter and restores the rail with Plu
   assert.doesNotMatch(view, /PLUGIN PAGE/, 'a narrow rail selection paints no plugin content')
   assert.equal(counts.page, 0, 'a narrow rail selection mounts nothing')
   assert.match(view, /> Plugins/)
-  assert.match(view, /Esc close/)
+  assert.match(view, /Close \[Esc\]/)
   vt.sendInput('\r')
   await vt.waitForRender()
   assert.equal(counts.page, 1, 'Enter mounts the page once')

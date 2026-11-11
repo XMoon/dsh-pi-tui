@@ -529,6 +529,16 @@ has exactly ONE per-open finalizer, and every close route funnels through it:
   hide and the finalizer as INDEPENDENT steps (`runSyncDisposalSteps`), so a
   throwing hide cannot strand the owner notification and a throwing notification
   cannot leave the overlay mounted. A repeated call is a no-op.
+- **The output viewer's fullscreen bar is pointer-capable ONLY while the
+  overlay's own mount screen is the CURRENT active fullscreen screen.** The
+  route is gated on that screen identity (never on the user's display mode
+  flag), so a Regular/Main viewer keeps its historical keyboard-only hint and
+  gains no application pointer path, and a viewer whose mount screen is no
+  longer active fails closed. Only the complete painted Stop/Close segments are
+  targets; Stop re-reads the LIVE capability at the release and then calls the
+  existing stop sink, Close calls the ONE `requestClose`. Both the key and the
+  click funnel through those same sinks — the pointer route never creates a
+  second close/stop path.
 - **A physical disposal that never calls the closer** (`TuiApp.dispose`, a
   fullscreen screen swap, a broker detach): the owning
   `ResponsiveOverlayFrame.dispose()` fires its FOURTH constructor argument

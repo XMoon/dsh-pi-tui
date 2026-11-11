@@ -377,7 +377,7 @@ test('the real Job screen follows the tail, PgUp/Home/arrows really scroll the O
   assert.match(painted, /line 199/, 'the tail is visible on open')
   assert.match(painted, /Follow on/)
   assert.match(painted, /Job · job-a · bash.*‣ Running/)
-  assert.match(painted, /Esc back/)
+  assert.match(painted, /Back \[Esc\]/)
   assert.equal(bodyTop(vt), 'line 165', 'the 35-row Output viewport starts at the retained tail')
 
   // PgUp is an active browse: pause and move the body.
@@ -388,7 +388,7 @@ test('the real Job screen follows the tail, PgUp/Home/arrows really scroll the O
   assert.ok(!/line 199/.test(painted), 'the tail leaves the viewport')
   assert.equal(bodyTop(vt), 'line 134')
   assert.match(painted, /Job · job-a · bash.*‣ Running/, 'the Header stays pinned')
-  assert.match(painted, /Esc back/, 'the Action Bar stays the last row')
+  assert.match(painted, /Back \[Esc\]/, 'the Action Bar stays the last row')
 
   // Home goes to the top of THIS retained preview and stays PAUSED.
   vt.sendInput('\x1b[H')
@@ -580,6 +580,68 @@ test('the effective Find opens the JOB Find over the retained body and never ent
   await vt.waitForRender()
   assert.match(view(vt), /0\/0 · No matches/, 'Header/command text is not searchable Output')
   assert.equal(transcriptSearches, 0)
+  app.stop()
+})
+
+// ── PR2: the fullscreen Job bar's ONE Esc affordance ───────────────────────
+
+test('the Job bar Esc affordance closes once and leaves a Find instead of closing it', async () => {
+  const { vt, app } = startApp({}, {}, 80, 24)
+  const harness = attachTasks(app, { jobIds: ['job-a'] })
+  await flush()
+  await openFirstJob(vt, harness)
+  harness.observation.latest()!.emit({ text: numberedLines(0, 9) })
+  await vt.waitForRender()
+
+  const bar = (): string => rawView(vt).at(-1) ?? ''
+  /** One real SGR press+release on the bar cell whose label starts at `label`. */
+  const clickBar = (label: string): void => {
+    const row = rawView(vt).length
+    const col = bar().indexOf(label)
+    assert.ok(col >= 0, `the ${label} affordance is painted on the physical last row:\n${view(vt)}`)
+    vt.sendInput(`\x1b[<0;${col + 1};${row}M`)
+    vt.sendInput(`\x1b[<0;${col + 1};${row}m`)
+  }
+
+  assert.match(bar(), /Back \[Esc\]/, 'the Output page advertises its real Esc outcome')
+  // A Find owns the Esc: the SAME affordance leaves the Search and NEVER closes
+  // the workspace, so the lower business row can never be reached by one click.
+  vt.sendInput('\x06')
+  await vt.waitForRender()
+  assert.match(view(vt), /Find Output:/)
+  assert.match(bar(), /Leave find \[Esc\]/, 'the bar names the CURRENT Esc outcome while a Find is open')
+  clickBar('Leave find')
+  await vt.waitForRender()
+  assert.ok(!/Find Output:/.test(view(vt)), 'the click left the Find')
+  assert.match(view(vt), /Job · job-a · bash/, 'leaving the Find never closed the Job workspace')
+  assert.match(bar(), /Back \[Esc\]/)
+
+  // The real Back closes the workspace exactly once.
+  clickBar('Back')
+  await vt.waitForRender()
+  assert.ok(!rawView(vt).some(line => line.includes('Job · job-a')), 'one click closed the Job workspace')
+  app.stop()
+})
+
+test('a stale Job bar release is inert after a press that the frame invalidated', async () => {
+  const { vt, app } = startApp({}, {}, 80, 24)
+  const harness = attachTasks(app, { jobIds: ['job-a'] })
+  await flush()
+  await openFirstJob(vt, harness)
+  harness.observation.latest()!.emit({ text: numberedLines(0, 9) })
+  await vt.waitForRender()
+  const row = rawView(vt).length
+  const col = (rawView(vt).at(-1) ?? '').indexOf('Back')
+  assert.ok(col >= 0)
+  // PRESS Esc, then open a Find with the keyboard (a different Esc semantic),
+  // and only then RELEASE: the press-time identity must not fire the OLD back.
+  vt.sendInput(`\x1b[<0;${col + 1};${row}M`)
+  vt.sendInput('\x06')
+  await vt.waitForRender()
+  vt.sendInput(`\x1b[<0;${col + 1};${row}m`)
+  await vt.waitForRender()
+  assert.match(view(vt), /Job · job-a · bash/, 'the stale release never closed the Job')
+  assert.match(view(vt), /Find Output:/, 'the keyboard Find is untouched by the stale release')
   app.stop()
 })
 
@@ -919,7 +981,7 @@ test('Job Find applies both effective Search actions, disabled scopes, Full rema
   await vt.waitForRender()
   vt.sendInput('\t')
   await vt.waitForRender()
-  assert.match(view(vt), /Esc output/, 'reserved leader+Tab still reaches the Job page toggle')
+  assert.match(view(vt), /Output \[Esc\]/, 'reserved leader+Tab still reaches the Job page toggle')
   assert.ok(!/Find Output:/.test(view(vt)), 'reserved leader+Tab never opens Find')
   assert.equal(transcriptSearches, 0)
   vt.sendInput('\t')
@@ -1383,7 +1445,7 @@ test('short frames keep one Output row, the Action Bar last, and a Find only whe
   await vt.waitForRender()
   let rows = rawView(vt)
   assert.equal(rows.length, 4)
-  assert.match(rows[3]!, /Esc back/, 'the Action Bar is the last row')
+  assert.match(rows[3]!, /Back \[Esc\]/, 'the Action Bar is the last row')
   assert.match(rows[0]!, /Running/, 'the status row survives')
   assert.ok(rows.slice(0, 3).some(row => /line 00/.test(row)), 'at least one Output row stays readable')
 
@@ -1393,7 +1455,7 @@ test('short frames keep one Output row, the Action Bar last, and a Find only whe
   rows = rawView(vt)
   assert.equal(rows.length, 4)
   assert.match(rows[1]!, /Find Output:/, 'the SearchRow is inside the 4-row budget')
-  assert.match(rows[3]!, /Esc back/)
+  assert.match(rows[3]!, /Leave find \[Esc\]/, 'the bar names the CURRENT Esc outcome (leave the Find, not the Job)')
   vt.sendInput('\x1b')
   await vt.waitForRender()
 
@@ -1405,7 +1467,7 @@ test('short frames keep one Output row, the Action Bar last, and a Find only whe
   await vt.waitForRender()
   const tiny = view(vt)
   assert.ok(!/Find Output:/.test(tiny), 'a frame with no SearchRow leaves the search')
-  assert.match(tiny, /Esc back/, 'the Action Bar survives the shrink')
+  assert.match(tiny, /Back \[Esc\]/, 'the Action Bar survives the shrink')
   assert.match(tiny, /job-a/, 'the Job is still the owner')
 
   // Growing again does not silently reopen a hidden editor.
@@ -1512,10 +1574,10 @@ test('a Find binding remapped onto the reserved Tab cannot shadow the page toggl
   // …and it cannot shadow the toggle: `Tab` really switches the page, BOTH ways.
   vt.sendInput('\t')
   await vt.waitForRender()
-  assert.match(view(vt), /Esc output/, 'Tab opened the Command page')
+  assert.match(view(vt), /Output \[Esc\]/, 'Tab opened the Command page')
   vt.sendInput('\t')
   await vt.waitForRender()
-  assert.match(view(vt), /Esc back/, 'Tab returned to the Output page')
+  assert.match(view(vt), /Back \[Esc\]/, 'Tab returned to the Output page')
 
   // The search stays reachable through the Job-local alias.
   vt.sendInput('/')
@@ -1537,8 +1599,8 @@ test('a Find binding remapped onto the reserved Tab cannot shadow the page toggl
 
   vt.sendInput('\t')
   await vt.waitForRender()
-  assert.match(bar(), /Esc back/, 'Tab did NOT switch the page out of a NAVIGATE Find')
-  assert.ok(!/Esc output/.test(view(vt)), 'the Command page was never entered')
+  assert.match(bar(), /Leave find \[Esc\]/, 'Tab did NOT switch the page out of a NAVIGATE Find')
+  assert.ok(!/Output \[Esc\]/.test(view(vt)), 'the Command page was never entered')
   assert.match(bar(), /Follow paused · End resume/, 'Tab did NOT re-enter EDIT')
   vt.sendInput('z')
   await vt.waitForRender()
@@ -1547,10 +1609,10 @@ test('a Find binding remapped onto the reserved Tab cannot shadow the page toggl
   // The same from the Command page's own Find.
   vt.sendInput('\x1b') // ONE Esc leaves the NAVIGATE search; a second would close the workspace
   await vt.waitForRender()
-  assert.match(bar(), /Esc back/, 'one Esc left only the search, the workspace is still up')
+  assert.match(bar(), /Back \[Esc\]/, 'one Esc left only the search, the workspace is still up')
   vt.sendInput('\t') // now inactive: the reserved toggle switches the page
   await vt.waitForRender()
-  assert.match(view(vt), /Esc output/, 'Tab switched to the Command page')
+  assert.match(view(vt), /Output \[Esc\]/, 'Tab switched to the Command page')
   vt.sendInput('/')
   await vt.waitForRender()
   assert.match(view(vt), /Find Command:/, 'the Job-local `/` opens the Command Find')
@@ -1563,7 +1625,7 @@ test('a Find binding remapped onto the reserved Tab cannot shadow the page toggl
   assert.ok(commandNavigateRow !== '', 'the Command search row is painted in NAVIGATE')
   vt.sendInput('\t')
   await vt.waitForRender()
-  assert.match(view(vt), /Esc output/, 'Tab did NOT switch the page out of the Command NAVIGATE Find')
+  assert.match(view(vt), /Leave find \[Esc\]/, 'Tab did NOT switch the page out of the Command NAVIGATE Find')
   vt.sendInput('z')
   await vt.waitForRender()
   assert.equal(commandRow(), commandNavigateRow, 'the Command Find is still NAVIGATE, not EDIT')

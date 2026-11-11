@@ -40,7 +40,8 @@ import {
   type TuiMouseEventResult,
 } from '@xmoon76/pi-tui'
 import { formatKeyId } from '../keybindings/hints.ts'
-import { renderActionBarRow, type ActionBarSegment } from '../presentation/action-bar.ts'
+import { ACTION_BAR_SEPARATOR, layoutActionBarRow, renderActionBarRow, type ActionBarSegment } from '../presentation/action-bar.ts'
+import { paintActionSpan } from '../presentation/action-ink.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { color } from '../theme/runtime.ts'
 import { pickWelcomeWhaleVariant, renderWelcomeWhaleLines, WELCOME_WHALE_WIDTH } from '../components/welcome-whale.ts'
@@ -572,6 +573,11 @@ export interface SettingsAuthPage extends Component {
   onCellClick?(x: number, y: number): 'handled' | 'exit' | 'open-account' | void
   /** Revoke one in-flight press when another owner claims the gesture. */
   cancelPointer?(): void
+  /** The complete visible Esc affordance span of the LAST rendered frame, in
+   *  this page's own content columns (undefined when it painted none). The
+   *  Settings root owns the ONE physical last row and registers the pointer
+   *  target from THIS span; the page never registers a second last-row owner. */
+  paintedEscapeSpan?(): { readonly startCol: number; readonly endCol: number } | undefined
   /** True while a Host mutation must settle on this page: the workspace root
    *  must not dispose it from USER navigation (category rail / Back / deep
    *  link). Blocking-owner teardown still bypasses this guard. */
@@ -618,6 +624,11 @@ export interface EmbeddedSpecialistPage extends Component {
    *  resize or a sub-view transition). The root forwards only the real Esc
    *  until that frame paints; pointer gestures are refused outright. */
   grantAwaitingPaint?(): boolean
+  /** The complete visible Esc affordance span of the LAST rendered frame, in
+   *  this page's own content columns (undefined when it painted none). The
+   *  Settings root owns the ONE physical last row and registers the pointer
+   *  target from THIS span. */
+  paintedEscapeSpan?(): { readonly startCol: number; readonly endCol: number } | undefined
 }
 
 /** One pane the current frame actually paints: its level and absolute geometry.
@@ -629,7 +640,7 @@ interface PaneLayout {
 }
 
 interface HitTarget {
-  readonly kind: 'category' | 'row' | 'pane' | 'change' | 'retry' | 'manage' | 'option' | 'confirm' | 'cancel' | 'about-action'
+  readonly kind: 'category' | 'row' | 'pane' | 'change' | 'retry' | 'manage' | 'option' | 'confirm' | 'cancel' | 'about-action' | 'bar-escape'
   /** The stable identity: a category id, a row id, the pane name, a candidate
    *  value or the button verb. */
   readonly id: string
@@ -638,6 +649,18 @@ interface HitTarget {
   readonly startCol: number
   readonly endCol: number
 }
+
+/** The ONE physical last-row Action Bar a render produced: its painted line and,
+ *  when the Esc affordance was FULLY visible, its unpainted cell span (the ONE
+ *  pointer geometry — never re-derived from the painted ANSI string). */
+interface PaintedBarLine {
+  readonly line: string
+  readonly span?: { readonly startCol: number; readonly endCol: number }
+}
+
+/** The id every painted Esc affordance carries: it names the ONE semantic this
+ *  root accepts (replay the current Esc ladder). */
+const BAR_ESCAPE_ID = 'escape'
 
 /** One painted Detail action. A button publishes a hit target ONLY when the
  *  frame really painted it inside the pane width. */
@@ -772,7 +795,7 @@ const SETTINGS_REGION_LABELS = {
   backward: formatKeyId(Key.shift(Key.tab)),
 } as const
 const CHOICE_CONFIRM_HINT: ActionBarSegment = { text: 'Enter confirm', priority: 7 }
-const CHOICE_BACK_HINT: ActionBarSegment = { text: 'Esc back', short: 'Esc', priority: 8 }
+const CHOICE_BACK_HINT: ActionBarSegment = { text: 'Back [Esc]', short: 'Back', priority: 8 }
 
 /** The minimum column count of the two-column (medium) projection. */
 export const SETTINGS_WORKSPACE_MEDIUM_MIN_COLUMNS = 76
@@ -1680,7 +1703,11 @@ export class SettingsWorkspacePanel implements Component {
     if (plan.noticeRows === 1) lines.push(this.renderNotice(plan))
     if (plan.bodyRows > 0) lines.push(...this.renderBody(plan, chromeGeometry(plan).bodyTop, targets, panes))
     this.paintedPanes = panes
-    if (plan.actionRows === 1) lines.push(this.renderActionBar(plan))
+    if (plan.actionRows === 1) {
+      const bar = this.renderActionBar(plan)
+      lines.push(bar.line)
+      if (bar.span !== undefined) targets.push(this.barEscapeTarget(lines.length - 1, bar.span))
+    }
     this.paintedTargets = targets
     this.paintedPanes = panes
     this.paintedRevision = this.revision
@@ -1753,13 +1780,13 @@ export class SettingsWorkspacePanel implements Component {
     // the frame's physical last row instead of letting the child own it.
     const childHeight = contentRows + plan.actionRows
     const contentColumn = this.renderContentColumn(contentWidth, childHeight)
-    const semanticBar = contentColumn[childHeight - 1] ?? ''
+    const semanticBar = contentColumn.lines[childHeight - 1] ?? ''
     // C3: the About page's own painted targets (field Copy / Copy All /
     // Refresh rows), collected during the content render in COLUMN coordinates.
     const aboutTargets = this.takePaintedAboutTargets()
     const visible = narrow ? [] : this.visibleCategories(contentRows)
     for (let index = 0; index < contentRows; index += 1) {
-      const content = fit(contentColumn[index] ?? '', contentWidth)
+      const content = fit(contentColumn.lines[index] ?? '', contentWidth)
       if (narrow) {
         lines.push(content)
       } else {
@@ -1790,8 +1817,20 @@ export class SettingsWorkspacePanel implements Component {
     // owns the keyboard, else the semantic hint the child page generated. It
     // starts at X=0 and spans the whole frame; the child chose its segments
     // against the content width it really paints.
-    const bar = this.focus === 'categories' ? this.renderNavigationActionBar(plan.width) : semanticBar
-    lines.push(fit(bar, plan.width))
+    const navigation = this.focus === 'categories' ? this.renderNavigationActionBar(plan.width) : undefined
+    lines.push(fit(navigation?.line ?? semanticBar, plan.width))
+    // The ONE physical last-row Esc target: the rail's own Esc while the rail
+    // owns the keyboard, otherwise the span the content page itself painted (a
+    // child that painted none leaves NO target — never a full-row guess).
+    const barSpan = navigation?.span
+      ?? this.authPage?.paintedEscapeSpan?.()
+      ?? contentColumn.aboutBarSpan
+    if (barSpan !== undefined) {
+      // The physical bar starts at X=0 and spans the whole frame (the child
+      // chose its segments against the content width, but the root paints the
+      // row from column 0), so the page-local span is already in panel columns.
+      targets.push(this.barEscapeTarget(lines.length - 1, barSpan))
+    }
     this.paintedContentBox = { x: contentX, top: contentTop, width: contentWidth, rows: contentRows }
     const categories = this.currentCategoryOrder()
     this.paintedPanes = {
@@ -1824,16 +1863,16 @@ export class SettingsWorkspacePanel implements Component {
    * read-only projection with the root's own semantic bar. The root moves that
    * last line to the physical last row and paints only the body here.
    */
-  private renderContentColumn(width: number, rows: number): string[] {
+  private renderContentColumn(width: number, rows: number): { readonly lines: string[]; readonly aboutBarSpan?: { readonly startCol: number; readonly endCol: number } } {
     const page = this.authPage
     if (page !== undefined) {
       page.setBodyHeight(rows)
       const column = page.render(width).slice(0, rows)
       while (column.length < rows) column.push(fit('', width))
       if (this.focus === 'categories') {
-        column[rows - 1] = fit(this.renderNavigationActionBar(width), width)
+        column[rows - 1] = fit(this.renderNavigationActionBar(width).line, width)
       }
-      return column
+      return { lines: column }
     }
     const aboutRows = Math.max(0, rows - 1)
     // The About projection belongs to the About category alone: a direct page
@@ -1846,7 +1885,10 @@ export class SettingsWorkspacePanel implements Component {
       : this.renderAboutActionBar(width)
     const padded = [...about]
     while (padded.length < aboutRows) padded.push(fit('', width))
-    return [...padded.slice(0, aboutRows), fit(bar, width)]
+    return {
+      lines: [...padded.slice(0, aboutRows), fit(bar.line, width)],
+      ...(this.focus === 'categories' ? {} : { aboutBarSpan: bar.span }),
+    }
   }
 
   /**
@@ -2299,9 +2341,39 @@ export class SettingsWorkspacePanel implements Component {
    * body floor every navigation target is invisible, so only the Esc
    * semantics survive.
    */
-  private renderNavigationActionBar(width: number): string {
-    if (this.bodyFloor() < 1) return color.textMuted('Esc close')
-    return color.textMuted(renderActionBarRow(this.navigationActionBarSegments(), width))
+  private renderNavigationActionBar(width: number): PaintedBarLine {
+    if (this.bodyFloor() < 1) return this.paintBar([{ text: 'Close [Esc]', priority: 8 }], width)
+    return this.paintBar(this.navigationActionBarSegments(), width)
+  }
+
+  /** Paint the shared Settings row: the LAST (Esc) segment carries the scoped
+   *  Fullscreen secondary-verb ink while every other hint and the separator stay
+   *  `textMuted` (design language §7.1). The unpainted complete span of the Esc
+   *  segment is the ONE pointer geometry this frame may publish; a truncated or
+   *  dropped segment publishes none. */
+  private paintBar(segments: readonly ActionBarSegment[], width: number): PaintedBarLine {
+    const layout = layoutActionBarRow(segments, width)
+    if (layout.truncated || layout.spans.length === 0) return { line: color.textMuted(layout.text) }
+    const escapeIndex = segments.length - 1
+    let span: { startCol: number; endCol: number } | undefined
+    const painted = layout.spans.map(candidate => {
+      if (candidate.inputIndex !== escapeIndex) return color.textMuted(candidate.text)
+      span = { startCol: candidate.startCol, endCol: candidate.endCol }
+      return paintActionSpan(candidate.text, 'secondary')
+    })
+    const segmentWidth = layout.spans.reduce((sum, candidate) => sum + visibleWidth(candidate.text), 0)
+      + Math.max(0, layout.spans.length - 1) * visibleWidth(ACTION_BAR_SEPARATOR)
+    const padding = Math.max(0, visibleWidth(layout.text) - segmentWidth)
+    return {
+      line: painted.join(color.textMuted(ACTION_BAR_SEPARATOR)) + ' '.repeat(padding),
+      span,
+    }
+  }
+
+  /** The painted Esc target of the ONE physical last row: the row, the cells and
+   *  the stable action id. The caller pushes it into the frame's hit map. */
+  private barEscapeTarget(row: number, span: { readonly startCol: number; readonly endCol: number }): HitTarget {
+    return { kind: 'bar-escape', id: BAR_ESCAPE_ID, row, startCol: span.startCol, endCol: span.endCol }
   }
 
   /** The About page's own action bar: it scrolls and it returns to the
@@ -2310,21 +2382,21 @@ export class SettingsWorkspacePanel implements Component {
    *  only for a selected fact that is on screen, `C copy all` only while the
    *  painted About view is still the controller's current snapshot. Below the
    *  body floor every navigation target is invisible, so only Esc survives. */
-  private renderAboutActionBar(width: number): string {
-    if (this.bodyFloor() < 1) return color.textMuted('Esc back')
+  private renderAboutActionBar(width: number): PaintedBarLine {
+    if (this.bodyFloor() < 1) return this.paintBar([{ text: 'Back [Esc]', priority: 8 }], width)
     const about = this.categoryId === 'about' && this.paintedAboutController() !== undefined
     const factCopyable = about
       && !this.aboutActionSelected
       && this.aboutSelectedFactId !== undefined
       && this.paintedAboutVisibleFactIds.has(this.aboutSelectedFactId)
-    return color.textMuted(renderActionBarRow([
+    return this.paintBar([
       ...(this.aboutScrollExtent > 0 ? [{ text: 'Up/Down scroll', priority: 4 }] : []),
       ...(factCopyable ? [{ text: `${SETTINGS_LOCAL_KEYS.copy} copy fact`, priority: 3 }] : []),
       ...(about ? [{ text: `${SETTINGS_LOCAL_KEYS.copy.toUpperCase()} copy all`, priority: 2 }] : []),
       ...(this.aboutSelected() ? [{ text: `${SETTINGS_LOCAL_KEYS.refresh} refresh`, priority: 5 }] : []),
       ...this.regionActionBarHints('focus', true),
-      { text: 'Esc back', priority: 8 },
-    ], width))
+      { text: 'Back [Esc]', priority: 8 },
+    ], width)
   }
 
   /**
@@ -2377,7 +2449,7 @@ export class SettingsWorkspacePanel implements Component {
         { text: 'Up/Down navigate', priority: 4 },
         { text: 'Enter/Right focus', priority: 6 },
         ...(regionKeyUsable ? this.regionActionBarHints('focus', false) : []),
-        { text: 'Esc close', priority: 8 },
+        { text: 'Close [Esc]', priority: 8 },
       ]
     }
     return [
@@ -2385,7 +2457,7 @@ export class SettingsWorkspacePanel implements Component {
       { text: 'Right open', priority: 6 },
       { text: 'Enter open', priority: 5 },
       ...(regionKeyUsable && this.currentRows().length > 0 ? this.regionActionBarHints('panes', false) : []),
-      { text: 'Esc close', priority: 8 },
+      { text: 'Close [Esc]', priority: 8 },
     ]
   }
 
@@ -3247,10 +3319,10 @@ export class SettingsWorkspacePanel implements Component {
    *  first and `Esc` LAST, while `Esc` keeps the highest drop priority. Whole
    *  segments are dropped by priority through the shared row layout, so a hint
    *  is never cut mid-word. */
-  private renderActionBar(plan: SettingsChromePlan): string {
+  private renderActionBar(plan: SettingsChromePlan): PaintedBarLine {
     const row = this.selectedRow()
-    const back = this.focus === 'categories' ? 'Esc close' : 'Esc back'
-    if (this.bodyFloor() < 1) return fit(color.textMuted(back), plan.width)
+    const back = this.focus === 'categories' ? 'Close [Esc]' : 'Back [Esc]'
+    if (this.bodyFloor() < 1) return this.paintBar([{ text: back, priority: 8 }], plan.width)
     let segments: ActionBarSegment[]
     let choiceFactScrollAvailable = false
     if (this.choiceField() !== undefined) {
@@ -3324,12 +3396,12 @@ export class SettingsWorkspacePanel implements Component {
     // Role 13: hints are the WEAKEST readable ink (`textMuted`), one step below
     // the diagnostic line, so the bar never competes with content. The shared
     // row layout already padded/truncated to the pane width.
-    const rendered = renderActionBarRow(segments, plan.width)
+    const rendered = this.paintBar(segments, plan.width)
     const choosing = this.choiceField() !== undefined
-    this.paintedChoiceNavigation = choosing && rendered.includes('Up/Down')
+    this.paintedChoiceNavigation = choosing && rendered.line.includes('Up/Down')
     this.paintedChoiceFactScroll = choosing && choiceFactScrollAvailable
-    this.paintedEnterConfirm = choosing && rendered.includes(CHOICE_CONFIRM_HINT.text)
-    return color.textMuted(rendered)
+    this.paintedEnterConfirm = choosing && rendered.line.includes(CHOICE_CONFIRM_HINT.text)
+    return rendered
   }
 
   // ── state helpers ────────────────────────────────────────────────────────
@@ -3762,7 +3834,13 @@ export class SettingsWorkspacePanel implements Component {
     this.paintedSpecialistBox = page === undefined
       ? undefined
       : { x: 0, top: geometry.contentTop, width: plan.width, rows: contentRows }
-    this.paintedTargets = []
+    // The SINGLE last-row pointer target is the child's own painted Esc span;
+    // the specialised body hit maps stay exactly as the page painted them (the
+    // root never adds a second owner to the same release).
+    const barSpan = page?.paintedEscapeSpan?.()
+    this.paintedTargets = barSpan === undefined
+      ? []
+      : [this.barEscapeTarget(lines.length - 1, barSpan)]
     this.paintedPanes = {}
     this.paintedContentBox = undefined
     this.paintedRevision = this.revision
@@ -3928,8 +4006,14 @@ export class SettingsWorkspacePanel implements Component {
       for (let index = 0; index < geometry.contentRows; index += 1) {
         lines.push(fit(index === 0 ? color.textDim('The Plugin Manager is unavailable in this composition.') : '', plan.width))
       }
-      lines.push(fit(this.focus === 'categories' ? this.renderNavigationActionBar(plan.width) : color.textMuted('Esc back'), plan.width))
-      this.paintedTargets = []
+      const navigation = this.focus === 'categories' ? this.renderNavigationActionBar(plan.width) : undefined
+      const fallback = navigation ?? this.paintBar([{ text: 'Back [Esc]', priority: 8 }], plan.width)
+      lines.push(fit(fallback.line, plan.width))
+      this.paintedTargets = fallback.span === undefined
+        ? []
+        : [this.barEscapeTarget(lines.length - 1, navigation === undefined
+          ? fallback.span
+          : { startCol: fallback.span.startCol, endCol: fallback.span.endCol })]
       this.paintedPanes = {}
       this.paintedContentBox = undefined
       this.paintedRevision = this.revision
@@ -3961,8 +4045,14 @@ export class SettingsWorkspacePanel implements Component {
     }
     // The page's semantic bar is its LOCAL last row; while the rail owns the
     // keyboard the root's navigation bar takes the physical last row instead.
-    const bar = this.focus === 'categories' ? this.renderNavigationActionBar(plan.width) : (child[childRows - 1] ?? '')
-    lines.push(fit(bar, plan.width))
+    const navigation = this.focus === 'categories' ? this.renderNavigationActionBar(plan.width) : undefined
+    lines.push(fit(navigation?.line ?? (child[childRows - 1] ?? ''), plan.width))
+    const barSpan = navigation?.span ?? page.paintedEscapeSpan?.()
+    if (barSpan !== undefined) {
+      // Same ONE physical row: painted from column 0, so the page-local span is
+      // already in panel columns (never shifted by the content-column origin).
+      targets.push(this.barEscapeTarget(lines.length - 1, barSpan))
+    }
     this.paintedContentBox = { x: projection.contentX, top: contentTop, width: projection.contentWidth, rows: contentRows }
     const categories = this.currentCategoryOrder()
     this.paintedPanes = projection.showCategories
@@ -5090,6 +5180,14 @@ export class SettingsWorkspacePanel implements Component {
     // A new press always supersedes the other owner's press state.
     this.pressedGesture = undefined
     this.contentPressed = undefined
+    // The ONE physical last-row Esc affordance belongs to the ROOT's gesture
+    // path: it is recorded with the same owning identity and never reaches a
+    // child content/body owner (no second owner for one release).
+    const barTarget = this.barEscapeTargetAt(x, y)
+    if (barTarget !== undefined) {
+      this.recordGesture(barTarget)
+      return
+    }
     if (this.specialistPage !== undefined) {
       const box = this.paintedSpecialistBox
       this.specialistPressed = undefined
@@ -5225,6 +5323,13 @@ export class SettingsWorkspacePanel implements Component {
       this.intents.requestRender()
       return
     }
+    // A recorded last-row Esc gesture resolves against the ROOT's painted hit
+    // map only (the child content owner is never consulted for it).
+    if (this.pressedGesture?.target.kind === 'bar-escape') {
+      const target = this.takeGesture(x, y)
+      if (target !== undefined) this.activate(target)
+      return
+    }
     if (this.specialistPage !== undefined) {
       const pressed = this.specialistPressed
       this.specialistPressed = undefined
@@ -5298,26 +5403,8 @@ export class SettingsWorkspacePanel implements Component {
       }
       this.contentPressed = undefined
       page?.cancelPointer()
-      const pressed = this.pressedGesture
-      this.pressedGesture = undefined
-      const target = this.targetAt(x, y)
-      if (pressed === undefined || target === undefined) return
-      if (
-        this.revision !== pressed.revision
-        || this.focus !== pressed.focus
-        || this.categoryId !== pressed.categoryId
-        || this.intents.columns() !== pressed.columns
-        || this.intents.rows() !== pressed.rows
-        || this.childGestureIdentity() !== pressed.childIdentity
-        || target.kind !== pressed.target.kind
-        || target.id !== pressed.target.id
-        || target.row !== pressed.target.row
-        || target.startCol !== pressed.target.startCol
-        || target.endCol !== pressed.target.endCol
-      ) {
-        return
-      }
-      this.activate(target)
+      const target = this.takeGesture(x, y)
+      if (target !== undefined) this.activate(target)
       return
     }
     if (this.authPage !== undefined) {
@@ -5356,35 +5443,22 @@ export class SettingsWorkspacePanel implements Component {
       this.contentPressed = undefined
       this.authPage.cancelPointer?.()
     }
-    const pressed = this.pressedGesture
-    this.pressedGesture = undefined
-    const target = this.targetAt(x, y)
-    if (pressed === undefined || target === undefined) return
-    // The gesture must still resolve to the SAME painted target AND the same
-    // state version/level/category/terminal geometry: a refresh, a selection
-    // change, a page switch, a category change OR a resize — including one whose
-    // repaint has not run yet — refuses the click rather than acting on the
-    // newer state.
-    if (
-      this.revision !== pressed.revision ||
-      this.focus !== pressed.focus ||
-      this.categoryId !== pressed.categoryId ||
-      this.intents.columns() !== pressed.columns ||
-      this.intents.rows() !== pressed.rows ||
-      this.childGestureIdentity() !== pressed.childIdentity ||
-      target.kind !== pressed.target.kind ||
-      target.id !== pressed.target.id ||
-      target.row !== pressed.target.row ||
-      target.startCol !== pressed.target.startCol ||
-      target.endCol !== pressed.target.endCol
-    ) {
-      return
-    }
-    this.activate(target)
+    const target = this.takeGesture(x, y)
+    if (target !== undefined) this.activate(target)
   }
 
   private activate(target: HitTarget): void {
     switch (target.kind) {
+      case 'bar-escape': {
+        // The ONE painted Esc affordance replays the CURRENT state's legitimate
+        // return through the EXISTING keyboard priority ladder: an embedded
+        // specialist page's own Esc, a direct page's return handling, or the
+        // root's goBack/close (which still records the user exit and honours
+        // every pending/dirty refusal). It is never a second visible-layer
+        // `if (focus === ...)` navigation ladder.
+        this.handleInput('\x1b')
+        return
+      }
       case 'category': {
         if (!isCategoryId(target.id)) return
         // `isCategoryId` only proves the id is a category at all; the painted
@@ -5524,6 +5598,50 @@ export class SettingsWorkspacePanel implements Component {
 
   private targetAt(x: number, y: number): HitTarget | undefined {
     return this.paintedTargets.find(target => target.row === y && x >= target.startCol && x < target.endCol)
+  }
+
+  /** The ONE physical last-row Esc affordance at a cell, or undefined. */
+  private barEscapeTargetAt(x: number, y: number): HitTarget | undefined {
+    return this.paintedTargets.find(target =>
+      target.kind === 'bar-escape' && target.row === y && x >= target.startCol && x < target.endCol)
+  }
+
+  /** Record the ONE press-time target with the complete owning identity the
+   *  release must still match (revision, focus, category, terminal geometry and
+   *  the hosted child's own currentness). */
+  private recordGesture(target: HitTarget): void {
+    this.pressedGesture = {
+      target,
+      revision: this.revision,
+      focus: this.focus,
+      categoryId: this.categoryId,
+      columns: this.intents.columns(),
+      rows: this.intents.rows(),
+      childIdentity: this.childGestureIdentity(),
+    }
+  }
+
+  /** Resolve the recorded gesture against the CURRENT painted hit map: the same
+   *  target AND the same owning state/geometry must still hold. A refresh, a
+   *  selection change, a page switch, a category change or a resize — including
+   *  one whose repaint has not run yet — refuses the click. */
+  private takeGesture(x: number, y: number): HitTarget | undefined {
+    const pressed = this.pressedGesture
+    this.pressedGesture = undefined
+    const target = this.targetAt(x, y)
+    if (pressed === undefined || target === undefined) return undefined
+    if (this.revision !== pressed.revision
+      || this.focus !== pressed.focus
+      || this.categoryId !== pressed.categoryId
+      || this.intents.columns() !== pressed.columns
+      || this.intents.rows() !== pressed.rows
+      || this.childGestureIdentity() !== pressed.childIdentity
+      || target.kind !== pressed.target.kind
+      || target.id !== pressed.target.id
+      || target.row !== pressed.target.row
+      || target.startCol !== pressed.target.startCol
+      || target.endCol !== pressed.target.endCol) return undefined
+    return target
   }
 
   /** Translate one panel-global mouse event into the page-local coordinates its

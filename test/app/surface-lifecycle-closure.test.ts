@@ -1736,17 +1736,17 @@ test('closing a workspace hands the terminal over without flushing its own docum
   assert.equal(jobScreenOpen(app), true, 'the Job workspace owns the surface')
   // The marker must be CONTIGUOUS in the write stream (the terminal receives
   // per-span diffs, so text split across two chalk spans is not a substring) and
-  // UNIQUE to the departing Job document. The workspace's own action-bar verb
-  // `Esc back` (D13) qualifies on both counts: it is a single span, it is painted
-  // at EVERY width (Esc is never dropped), and no other surface in this
-  // transition paints it — the restored Task Browser paints `Esc close`.
+  // UNIQUE to the departing Job document. The Output bar's `Follow on` state
+  // fact qualifies on both counts: it is ONE span, it is painted on the wide
+  // Output bar, and no other surface in this transition paints it.
   //
   // It is deliberately NOT the shared status group `‣ Running` any more: since
   // B4-A the RESUMED regular surface paints the passive Task Quick window, whose
   // rows carry that same shared `‣` group by design (design language D5+D7), so
   // its presence could no longer tell "the Job document was flushed" apart from
-  // "the restored surface legitimately painted a task row".
-  const jobMark = 'Esc back'
+  // "the restored surface legitimately painted a task row". It is also not the
+  // Esc affordance: PR2 paints the verb and its `[Esc]` keycap as TWO spans.
+  const jobMark = 'Follow on'
   assert.ok(captured().includes(jobMark), 'control: the live Job document is what writes the mark')
   writes.length = 0
   vt.sendInput('\x1b')

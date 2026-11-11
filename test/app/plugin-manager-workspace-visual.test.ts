@@ -51,7 +51,7 @@ test('the embedded page keeps ONE Settings skeleton and a reachable last-row Act
     assert.match(plain([view[0]!]), /Settings · Plugins/u, `${columns}x${rows} header`)
     assert.match(plain([view[1]!]), /Scope: Host plugins & TUI extensions/u, `${columns}x${rows} metadata`)
     assert.match(plain([view[2]!]), /^─+$/u, `${columns}x${rows} one top rule`)
-    assert.match(plain([view.at(-1)!]), /Esc back/u, `${columns}x${rows} keeps the plugin Esc on the last row`)
+    assert.match(plain([view.at(-1)!]), /Back \[Esc\]/u, `${columns}x${rows} keeps the plugin Esc on the last row`)
     for (const [index, line] of view.entries()) {
       assert.ok(visibleWidth(line) <= columns, `${columns}x${rows} line ${index} exceeds the width: ${JSON.stringify(line)}`)
     }
@@ -202,7 +202,7 @@ test('reader exemption warnings are visible on the page', async () => {
   const harness = await open({ columns: 120, rows: 30, exemptionWarnings: ['unreadable exemption record'] })
   assert.match(harness.view(), /version exemptions: unreadable exemption record/,
     'the model reader warning reaches the plugin notice row')
-  assert.match(plain([harness.viewport().at(-1)!]), /Esc back/u, 'the warning never displaces the last-row Action Bar')
+  assert.match(plain([harness.viewport().at(-1)!]), /Back \[Esc\]/u, 'the warning never displaces the last-row Action Bar')
 })
 
 test('mouse selection is not an action; a second click enters Details and actions dispatch', async () => {
@@ -461,7 +461,7 @@ test('risk confirmation keeps the frozen warning readable with Cancel default at
       // entire consequence remains readable, and the pinned choices stay.
       harness.vt.sendInput('\x1b[6~')
       await harness.waitForFrame()
-      assert.match(plain([harness.viewport().at(-1)!]), /Esc cancel/)
+      assert.match(plain([harness.viewport().at(-1)!]), /Cancel \[Esc\]/)
     }
     assert.match(confirmFrame, /Disable Auto Review/)
     started.delete(harness)

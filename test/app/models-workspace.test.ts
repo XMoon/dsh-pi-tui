@@ -1283,7 +1283,7 @@ test('the login-method picker reserves heading and action-bar rows on a short sc
   page.handleInput('\r') // open the method picker
   const lines = page.render(100).map(stripTerminalSequences)
   assert.equal(lines.length, 8)
-  assert.match(lines.at(-1) ?? '', /Esc cancel/u)
+  assert.match(lines.at(-1) ?? '', /Cancel \[Esc\]/u)
   assert.ok(lines.some(line => line.includes('Method 0')), lines.join('\n'))
 })
 
@@ -2583,7 +2583,7 @@ test('Tab works exactly when the body and action regions fit, on every Tab encod
   const warningLines = warning.split('\n')
   assert.match(warning, /Resize the terminal to show the page actions/u)
   assert.equal(warningLines.length, 3, 'the page paints exactly its granted rows')
-  assert.match(warningLines.at(-1)!, /Esc back/u, 'the resize fallback pins the truthful Esc bar last')
+  assert.match(warningLines.at(-1)!, /Back \[Esc\]/u, 'the resize fallback pins the truthful Esc bar last')
   page.handleInput('\t')
   assert.equal(viewText(page), warning, 'the resize warning never grants an invisible selection')
 
@@ -2591,7 +2591,7 @@ test('Tab works exactly when the body and action regions fit, on every Tab encod
   page.setBodyHeight(1)
   const one = viewText(page).split('\n')
   assert.equal(one.length, 1)
-  assert.match(one[0]!, /^Esc back/u)
+  assert.match(one[0]!, /^Back \[Esc\]/u)
   assert.doesNotMatch(one[0]!, /Resize|Enter/u, 'a one-row page advertises only the real Esc action')
 })
 
@@ -2607,9 +2607,9 @@ test('an active picker, QuestionFlow or model picker keeps its own Tab', async (
   assert.match(picker, /Wire protocol/u)
   page.handleInput('\t')
   assert.equal(viewText(page), picker, 'Tab does not move the page cursor under a picker')
-  assert.match(picker, /Esc cancel/u, 'the picker keeps its own action bar')
+  assert.match(picker, /Cancel \[Esc\]/u, 'the picker keeps its own action bar')
   page.handleInput('\u001b')
-  assert.doesNotMatch(viewText(page), /Esc cancel/u, 'Esc closes the picker')
+  assert.doesNotMatch(viewText(page), /Cancel \[Esc\]/u, 'Esc closes the picker')
   assert.match(viewText(page), /Tab sections/u, 'the form action bar is back')
 
   // The embedded QuestionFlow (Route field).
@@ -2675,7 +2675,7 @@ test('Tab revokes a straddling Models row press and the action bar advertises it
   assert.match(viewText(page), /Tab sections/u)
   const narrow = viewText(page, 40)
   assert.doesNotMatch(narrow, /Tab sections/u)
-  assert.match(narrow, /Esc back/u)
+  assert.match(narrow, /Back \[Esc\]/u)
 })
 
 test('the Models region hint never crowds the HOME refresh or catalog filter hints', async () => {
@@ -2688,7 +2688,7 @@ test('the Models region hint never crowds the HOME refresh or catalog filter hin
     assert.match(bar, /r refresh/u, `the HOME refresh hint stays visible at ${width}`)
     assert.match(bar, /Up\/Down select/u, `the row navigation hint stays visible at ${width}`)
     assert.doesNotMatch(bar, /Tab sections/u, `the region hint is the first segment dropped at ${width}`)
-    assert.match(bar, /Esc back/u, `Esc stays visible at ${width}`)
+    assert.match(bar, /Back \[Esc\]/u, `Esc stays visible at ${width}`)
   }
 
   // Add catalog: `type to filter` outranks the region hint.
@@ -2704,7 +2704,7 @@ test('the Models region hint never crowds the HOME refresh or catalog filter hin
     const bar = viewText(catalog, width).split('\n').at(-1)!
     assert.match(bar, /type to filter/u, `the catalog filter hint stays visible at ${width}`)
     assert.doesNotMatch(bar, /Tab sections/u, `the region hint is the first segment dropped at ${width}`)
-    assert.match(bar, /Esc back/u, `Esc stays visible at ${width}`)
+    assert.match(bar, /Back \[Esc\]/u, `Esc stays visible at ${width}`)
   }
 
   // A roomy bar still advertises the region key.
@@ -2724,11 +2724,11 @@ test('short picker, QuestionFlow and model-picker frames keep their bar on the p
   page.setBodyHeight(3)
   const picker = viewText(page).split('\n')
   assert.equal(picker.length, 3)
-  assert.match(picker.at(-1)!, /Esc cancel/u, 'the picker bar is the last physical row')
+  assert.match(picker.at(-1)!, /Cancel \[Esc\]/u, 'the picker bar is the last physical row')
   page.setBodyHeight(1)
   const pickerOne = viewText(page).split('\n')
   assert.equal(pickerOne.length, 1)
-  assert.match(pickerOne[0]!, /^Esc cancel/u, 'one row paints only the real Esc action')
+  assert.match(pickerOne[0]!, /^Cancel \[Esc\]/u, 'one row paints only the real Esc action')
   page.setBodyHeight(30)
   page.handleInput('\u001b') // close the picker before driving the form below
 
@@ -2740,12 +2740,12 @@ test('short picker, QuestionFlow and model-picker frames keep their bar on the p
   page.setBodyHeight(6)
   const question = viewText(page).split('\n')
   assert.equal(question.length, 6)
-  assert.match(question.at(-1)!, /Esc cancel/u, 'the only real question key stays on the last row')
+  assert.match(question.at(-1)!, /Cancel \[Esc\]/u, 'the only real question key stays on the last row')
   assert.ok(question.some(line => line.includes('Resize the terminal: the full form')), 'the warning keeps a body row')
   page.setBodyHeight(1)
   const questionOne = viewText(page).split('\n')
   assert.equal(questionOne.length, 1)
-  assert.match(questionOne[0]!, /Esc cancel/u, 'a one-row question advertises no hidden submit')
+  assert.match(questionOne[0]!, /Cancel \[Esc\]/u, 'a one-row question advertises no hidden submit')
 
   // The endpoint-discovered model multi-select picker.
   const discovery = fakeSource()
@@ -2777,11 +2777,11 @@ test('short picker, QuestionFlow and model-picker frames keep their bar on the p
   pickerPage.setBodyHeight(4)
   const modelPicker = viewText(pickerPage).split('\n')
   assert.equal(modelPicker.length, 4)
-  assert.match(modelPicker.at(-1)!, /Esc cancel/u, 'the model picker bar is the last physical row')
+  assert.match(modelPicker.at(-1)!, /Cancel \[Esc\]/u, 'the model picker bar is the last physical row')
   pickerPage.setBodyHeight(1)
   const modelPickerOne = viewText(pickerPage).split('\n')
   assert.equal(modelPickerOne.length, 1)
-  assert.match(modelPickerOne[0]!, /^Esc cancel/u)
+  assert.match(modelPickerOne[0]!, /^Cancel \[Esc\]/u)
 })
 
 
@@ -2804,7 +2804,7 @@ test('a pending reference write names Esc wait on the clipped fallback', async (
   page.setBodyHeight(2)
   const rows = viewText(page).split('\n')
   assert.equal(rows.length, 2)
-  assert.match(rows.at(-1)!, /Esc wait/u, 'the fallback names the pending write before the page can leave')
+  assert.match(rows.at(-1)!, /Wait \[Esc\]/u, 'the fallback names the pending write before the page can leave')
   page.handleInput('\u001b')
   assert.match(viewText(page), /API Key Reference/u, 'Esc did not leave the page under the pending write')
   resolveWrite?.()
@@ -2833,7 +2833,7 @@ test('a pending clear names Esc wait on the clipped fallback', async () => {
   page.setBodyHeight(2)
   const rows = viewText(page).split('\n')
   assert.equal(rows.length, 2)
-  assert.match(rows.at(-1)!, /Esc wait/u, 'the fallback names the pending clear before the page can leave')
+  assert.match(rows.at(-1)!, /Wait \[Esc\]/u, 'the fallback names the pending clear before the page can leave')
   page.handleInput('\u001b')
   assert.match(viewText(page), /Clear stored credential/u, 'Esc did not leave the page under the pending clear')
   configured = false

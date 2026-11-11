@@ -8,6 +8,8 @@ import { Input } from '@xmoon76/pi-tui'
 import { dispatchMouseEvent } from '@xmoon76/pi-tui'
 import type { TuiMouseEvent, TuiMouseEventResult } from '@xmoon76/pi-tui'
 import { color } from '../../theme/runtime.ts'
+import { ACTION_BAR_SEPARATOR } from '../../presentation/action-bar.ts'
+import { paintActionSpan } from '../../presentation/action-ink.ts'
 import { formatKeyId } from '../hints.ts'
 import type { KeyId } from '@xmoon76/pi-tui'
 import {
@@ -67,6 +69,53 @@ function trimToGrant(rows: readonly BudgetRow[], limit: number): BudgetRow[] {
     kept.splice(index, 1)
   }
   return kept.length > limit ? kept.slice(kept.length - limit) : kept
+}
+
+/** One whole Action Bar wording and, when its LAST segment is the real
+ *  `Verb [Esc]` affordance, the UNPAINTED geometry of exactly that segment. The
+ *  painted prefix is kept beside the token, so painting never re-derives
+ *  columns from a coloured string. */
+interface BarWording {
+  readonly text: string
+  readonly escape?: {
+    readonly startCol: number
+    readonly endCol: number
+    /** The painted prefix, INCLUDING the trailing ` · ` separator. */
+    readonly lead: string
+    readonly token: string
+  }
+}
+
+/** Build one wording whose LAST segment is `Verb [Esc]` (design §7.1). */
+function escapeWording(lead: string, verb: string): BarWording {
+  const token = `${verb} [Esc]`
+  if (lead === '') return { text: token, escape: { startCol: 0, endCol: visibleWidth(token), lead: '', token } }
+  const prefix = lead + ACTION_BAR_SEPARATOR
+  const startCol = visibleWidth(prefix)
+  return {
+    text: prefix + token,
+    escape: { startCol, endCol: startCol + visibleWidth(token), lead: prefix, token },
+  }
+}
+
+/** A wording with no Esc affordance (a pending leader write freezes input). */
+function plainWording(text: string): BarWording {
+  return { text }
+}
+
+/** The FIRST whole wording that fits `width`; below the shortest wording the
+ *  historical hint is kept and carries NO span (a half token is never
+ *  clickable). */
+function pickWording(words: readonly BarWording[], width: number, fallback: string): BarWording {
+  return words.find(word => visibleWidth(word.text) <= width) ?? { text: fallback }
+}
+
+/** Paint one chosen wording: the row stays muted, and only the real Esc
+ *  affordance carries the secondary ink (its `[Esc]` cap is muted). */
+function paintBarWording(wording: BarWording): string {
+  const escape = wording.escape
+  if (escape === undefined) return color.textDim(wording.text)
+  return `${color.textDim(escape.lead)}${paintActionSpan(escape.token, 'secondary')}`
 }
 
 function commandKey(data: string, key: string): boolean {
@@ -206,6 +255,11 @@ export class KeybindingEditorPanel implements Component, Focusable {
   private settlementAwaitingPaint = false
   /** The width the hit map was painted at; a stale-width event is rejected. */
   private lastRenderWidth = 0
+  /** The complete Esc affordance of the LAST painted bar, in this page's
+   *  own content columns. Cleared by a grant change or an owned sub-view
+   *  (the detail/recorder bars belong to their own modules), so no stale
+   *  geometry ever survives. */
+  private paintedEscapeSpanValue: { readonly startCol: number; readonly endCol: number } | undefined
 
   constructor(options: KeybindingEditorPanelOptions) {
     this.model = options.model
@@ -228,6 +282,7 @@ export class KeybindingEditorPanel implements Component, Focusable {
     const next = Number.isFinite(rows) ? Math.max(1, Math.floor(rows)) : undefined
     if (next === this.parentContentRows) return
     this.parentContentRows = next
+    this.paintedEscapeSpanValue = undefined
     this.requestRender()
   }
 
@@ -266,57 +321,70 @@ export class KeybindingEditorPanel implements Component, Focusable {
     this.paintedView = this.viewKey()
     // This frame is about to carry whatever the mounted detail settled with.
     this.settlementAwaitingPaint = false
-    if (this.actionEditor !== undefined) return this.actionEditor.render(safeWidth)
+    this.paintedEscapeSpanValue = undefined
+    if (this.actionEditor !== undefined) {
+      // The detail page owns its bar; this page renders it at full width (no
+      // rail/inset), so the child's page-local span is already the physical one.
+      const lines = this.actionEditor.render(safeWidth)
+      this.paintedEscapeSpanValue = this.actionEditor.paintedEscapeSpan()
+      return lines
+    }
     if (this.leaderEditing) return this.renderLeaderEditor(safeWidth)
 
     const limit = Math.max(1, this.maxRows())
     const searchRow = this.searchRow(safeWidth)
-    // The Esc verb follows the two-stage lifecycle: a non-empty query
-    // clears first, an empty query closes the panel.
-    const escVerb = this.query === '' ? 'close' : 'clear'
-    // Whole-segment fallbacks: the Esc verb is the LAST thing to yield, so a
-    // narrow frame never truncates the only way back out of the page. `← Back`
+    // The Esc verb follows the two-stage lifecycle: a non-empty query clears
+    // first, an empty query returns to Settings. The sub-10-column fallback
+    // keeps the historical hint and carries NO geometry: a half token is never
+    // clickable.
+    const escVerb = this.query === '' ? 'Back' : 'Clear'
+    const plainEscVerb = this.query === '' ? 'close' : 'clear'
+    // Whole-segment fallbacks: the Esc affordance is the LAST thing to yield, so
+    // a narrow frame never truncates the only way back out of the page. `← Back`
     // is advertised ONLY where it is accepted: an empty query means the search
     // Input does not own `←`; a non-empty one never claims the back verb.
     const back = this.query === '' ? ' · ← Back' : ''
-    const hintText = [
-      `Enter details · type search · ←→ edit · ↑↓ move${back} · Esc ${escVerb}`,
-      `Enter details · type search · ←→ edit${back} · Esc ${escVerb}`,
-      `Enter details · type search${back} · Esc ${escVerb}`,
-      `Enter details${back} · Esc ${escVerb}`,
-      `Enter details · Esc ${escVerb}`,
-      `Esc ${escVerb}`,
-    ].find(text => visibleWidth(text) <= safeWidth) ?? `Esc ${escVerb}`
+    const hintWording = pickWording([
+      escapeWording(`Enter details · type search · ←→ edit · ↑↓ move${back}`, escVerb),
+      escapeWording(`Enter details · type search · ←→ edit${back}`, escVerb),
+      escapeWording(`Enter details · type search${back}`, escVerb),
+      escapeWording(`Enter details${back}`, escVerb),
+      escapeWording('Enter details', escVerb),
+      escapeWording('', escVerb),
+    ], safeWidth, `Esc ${plainEscVerb}`)
     // The 2/3-row grants still paint the search row, so `type search` is
     // admitted there; the 1-row grant paints ONLY the bar and admits only its
     // own back verbs, so it must never advertise the search it refuses.
-    const passiveHintText = [
-      `type search${back} · Esc ${escVerb}`,
-      ...(this.query === '' ? [`← Back · Esc ${escVerb}`] : []),
-      `Esc ${escVerb}`,
-    ].find(text => visibleWidth(text) <= safeWidth) ?? `Esc ${escVerb}`
-    const barOnlyHintText = [
-      ...(this.query === '' ? [`← Back · Esc ${escVerb}`] : []),
-      `Esc ${escVerb}`,
-    ].find(text => visibleWidth(text) <= safeWidth) ?? `Esc ${escVerb}`
-    const hint = color.textDim(hintText)
+    const passiveWording = pickWording([
+      escapeWording(`type search${back}`, escVerb),
+      ...(this.query === '' ? [escapeWording('← Back', escVerb)] : []),
+      escapeWording('', escVerb),
+    ], safeWidth, `Esc ${plainEscVerb}`)
+    const barOnlyWording = pickWording([
+      ...(this.query === '' ? [escapeWording('← Back', escVerb)] : []),
+      escapeWording('', escVerb),
+    ], safeWidth, `Esc ${plainEscVerb}`)
+    const hint = paintBarWording(hintWording)
     // Degenerate grants: the bottom operation hint is the non-negotiable
     // tail. Below four rows the search row takes what fits, and the panel is
     // already identified by the shared pane header.
     if (limit === 1) {
       this.hitMap = [{ kind: 'inert' }]
       this.paintedSelectableIds = new Set()
-      return [color.textDim(barOnlyHintText)]
+      this.paintedEscapeSpanValue = barOnlyWording.escape
+      return [paintBarWording(barOnlyWording)]
     }
     if (limit === 2) {
       this.hitMap = [{ kind: 'search' }, { kind: 'inert' }]
       this.paintedSelectableIds = new Set()
-      return [searchRow, color.textDim(passiveHintText)]
+      this.paintedEscapeSpanValue = passiveWording.escape
+      return [searchRow, paintBarWording(passiveWording)]
     }
     if (limit === 3) {
       this.hitMap = [{ kind: 'search' }, { kind: 'inert' }, { kind: 'inert' }]
       this.paintedSelectableIds = new Set()
-      return [searchRow, color.textDim(truncateToWidth(`Keymap: ${this.model.summary}`, safeWidth)), color.textDim(passiveHintText)]
+      this.paintedEscapeSpanValue = passiveWording.escape
+      return [searchRow, color.textDim(truncateToWidth(`Keymap: ${this.model.summary}`, safeWidth)), paintBarWording(passiveWording)]
     }
 
     const entries = this.displayEntries()
@@ -388,10 +456,12 @@ export class KeybindingEditorPanel implements Component, Focusable {
     this.hitMap = kept.map(row => row.hit)
     this.paintedSelectableIds = new Set(kept.flatMap(row =>
       row.hit.kind === 'select' ? [row.hit.id] : []))
+    this.paintedEscapeSpanValue = hintWording.escape
     // With no selectable row painted, Enter is not an available action: the
     // mandatory last-row bar states the keys the frame really accepts.
     if (this.paintedSelectableIds.size === 0 && kept.length > 0) {
-      kept[kept.length - 1] = { text: color.textDim(passiveHintText), hit: { kind: 'inert' } }
+      kept[kept.length - 1] = { text: paintBarWording(passiveWording), hit: { kind: 'inert' } }
+      this.paintedEscapeSpanValue = passiveWording.escape
     }
     return kept.map(row => row.text)
   }
@@ -590,9 +660,17 @@ export class KeybindingEditorPanel implements Component, Focusable {
     this.searchInput.invalidate()
   }
 
+  /** The complete visible Esc affordance span of the LAST PAINTED frame, in
+   *  this page's own content-column coordinates; undefined when the frame
+   *  painted none (a detail/recorder bar, a saving leader, a truncated row). */
+  paintedEscapeSpan(): { readonly startCol: number; readonly endCol: number } | undefined {
+    return this.paintedEscapeSpanValue
+  }
+
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
+    this.paintedEscapeSpanValue = undefined
     this.settlementAwaitingPaint = false
     this.mutationGeneration += 1
     this.actionEditor?.dispose?.()
@@ -692,7 +770,14 @@ export class KeybindingEditorPanel implements Component, Focusable {
   }
 
   private renderLeaderEditor(width: number): string[] {
-    if (this.leaderRecorder !== undefined) return this.leaderRecorder.render(width)
+    this.paintedEscapeSpanValue = undefined
+    if (this.leaderRecorder !== undefined) {
+      // The recorder paints its OWN bar; it publishes geometry only for the
+      // ordinary cancel affordance (never the interrupt raw-input window).
+      const lines = this.leaderRecorder.render(width)
+      this.paintedEscapeSpanValue = this.leaderRecorder.paintedEscapeSpan()
+      return lines
+    }
     const safeMode = this.model.leader.safeMode
     const ignored = safeMode && this.model.leader.customized
     const current = ignored
@@ -707,13 +792,18 @@ export class KeybindingEditorPanel implements Component, Focusable {
     // The bar states what THIS grant can really do: a bar-only frame has no
     // leader control to act on, so it advertises (and admits) only the Esc.
     const bar = this.leaderPending
-      ? 'Saving… · one write at a time'
+      // A pending write freezes input: the row advertises facts only and has no
+      // Esc affordance to click.
+      ? plainWording('Saving… · one write at a time')
       : this.maxRows() < 2
-        ? 'Esc back'
+        ? escapeWording('', 'Back')
         : safeMode
-          ? 'Esc back'
-          : ['Enter record · r reset leader · Esc back', 'Enter record · Esc back', 'Esc back']
-            .find(text => visibleWidth(text) <= width) ?? 'Esc back'
+          ? escapeWording('', 'Back')
+          : pickWording([
+            escapeWording('Enter record · r reset leader', 'Back'),
+            escapeWording('Enter record', 'Back'),
+            escapeWording('', 'Back'),
+          ], width, 'Esc back')
     const rows: BudgetRow[] = [
       { text: color.textStrong('Leader key'), hit: { kind: 'inert' }, drop: 15 },
       { text: '', hit: { kind: 'inert' }, drop: 10 },
@@ -732,9 +822,12 @@ export class KeybindingEditorPanel implements Component, Focusable {
         ? [{ text: color.error(truncateToWidth(this.message, width)), hit: { kind: 'inert' } as KeybindingMouseHit, drop: 40 }]
         : []),
       { text: '', hit: { kind: 'inert' }, drop: 5 },
-      { text: color.textDim(bar), hit: { kind: 'inert' } },
+      { text: paintBarWording(bar), hit: { kind: 'inert' } },
     ]
-    return trimToGrant(rows, Math.max(1, this.maxRows())).map(row => row.text)
+    const kept = trimToGrant(rows, Math.max(1, this.maxRows()))
+    // The bar row is mandatory and tail-most, so it survives every grant.
+    this.paintedEscapeSpanValue = bar.escape
+    return kept.map(row => row.text)
   }
 
   private handleLeaderInput(data: string): void {

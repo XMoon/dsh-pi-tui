@@ -386,7 +386,7 @@ test('the panel header keeps status/gap/error visible and its Action Bar is the 
     // The pinned chrome never exceeds the granted row budget: the Action Bar is
     // the LAST rendered row and the layout always has room for it.
     assert.ok(lines.length <= Math.max(1, budget.rows - 1), 'the pinned chrome must leave a body row')
-    assert.match(lines.at(-1)!, /Esc back/, `the Action Bar is the last rendered row at ${budget.width}x${budget.rows}`)
+    assert.match(stripTerminalSequences(lines.at(-1)!), /Back \[Esc\]/, `the Action Bar is the last rendered row at ${budget.width}x${budget.rows}`)
     if (budget.width >= 80) {
       // The bounded preview is disclosed at every standard budget — by the
       // DEDICATED reading-facts row where the frame grants it, and by the pinned
@@ -431,11 +431,11 @@ test('the Action Bar drops the Stop verb (never Esc back) when the capability di
     paintedBox: () => undefined,
     setNativeCopyOnSelect: () => {},
   })
-  assert.match(panel.render(100).at(-1)!, /stop/)
-  assert.match(panel.render(100).at(-1)!, /Esc back/)
+  assert.match(stripTerminalSequences(panel.render(100).at(-1)!), /stop/)
+  assert.match(stripTerminalSequences(panel.render(100).at(-1)!), /Back \[Esc\]/)
   live = false
-  const settled = panel.render(100).at(-1)!
-  assert.match(settled, /Esc back/)
+  const settled = stripTerminalSequences(panel.render(100).at(-1)!)
+  assert.match(settled, /Back \[Esc\]/)
   assert.ok(!/stop/.test(settled), 'a settled Job must not advertise Stop')
   // The panel's only intents are Esc (close) and the gated stop action.
   panel.handleInput('s')
@@ -512,7 +512,7 @@ test('the ONE chrome plan keeps the Action Bar on screen at every height, notice
   // marker survives on the status row, and the Action Bar is the last row.
   const compact = panelAt(8, false).render(44)
   assert.equal(compact.length, 4, 'a compact header (status, summary, tabs) plus the pinned Action Bar (1)')
-  assert.match(compact.at(-1)!, /Esc back/)
+  assert.match(stripTerminalSequences(compact.at(-1)!), /Back \[Esc\]/)
   assert.match(compact.join('\n'), /\[GAP\]/)
   assert.match(compact.join('\n'), /\[ERROR\]/)
   assert.match(compact.join('\n'), /\[SETTLED\]/)
@@ -523,7 +523,7 @@ test('the ONE chrome plan keeps the Action Bar on screen at every height, notice
   // because taking a row would leave the Output with nothing.
   const tight = panelAt(4, true).render(44)
   assert.equal(tight.length, 2, 'only the status row and the pinned Action Bar fit a 4-row grant')
-  assert.match(tight.at(-1)!, /Esc back/)
+  assert.match(stripTerminalSequences(tight.at(-1)!), /Back \[Esc\]/)
   assert.ok(!/could not stop/.test(tight.join('\n')), 'no notice row on a 4-row grant')
 
   // A 5-row grant is still too few for the notice (plan B1-D §3.2 grants it only
@@ -533,13 +533,13 @@ test('the ONE chrome plan keeps the Action Bar on screen at every height, notice
     'a 5-row grant still has no notice row')
   const withNotice = panelAt(6, true).render(44)
   assert.equal(withNotice.length, 5, 'the notice is inside the height budget, never below the bar')
-  assert.match(withNotice.at(-1)!, /Esc back/)
+  assert.match(stripTerminalSequences(withNotice.at(-1)!), /Back \[Esc\]/)
   assert.match(withNotice.join('\n'), /✗ could not stop job job-a: refused/)
 
   // 80×2 with a live notice: the notice YIELDS to the header and the Action Bar.
   const tiny = panelAt(2, true).render(80)
   assert.equal(tiny.length, 2, 'only the status row and the pinned Action Bar')
-  assert.match(tiny.at(-1)!, /Esc back/)
+  assert.match(stripTerminalSequences(tiny.at(-1)!), /Back \[Esc\]/)
   assert.match(tiny[0]!, /Failed/)
   assert.match(tiny.join('\n'), /\[GAP\]/)
   assert.ok(!/could not stop/.test(tiny.join('\n')), 'the notice yields on a 2-row terminal')
@@ -548,7 +548,7 @@ test('the ONE chrome plan keeps the Action Bar on screen at every height, notice
   // 80×1 with a live notice: the Action Bar ALONE — it is never budgeted away.
   const one = panelAt(1, true).render(80)
   assert.equal(one.length, 1)
-  assert.match(one[0]!, /Esc back/)
+  assert.match(stripTerminalSequences(one[0]!), /Back \[Esc\]/)
 })
 
 // ── A-02: the real Task Browser → Job workspace → same browser ─────────────
@@ -762,15 +762,15 @@ test('a Stop settlement failure is visible INSIDE the workspace (its own notice 
   assert.match(second, /Job · job-a · bash.*‣ Running/, 'still no optimistic state change')
   assert.deepEqual(harness.observation.stops, ['job-a', 'job-a'], 'each press dispatches exactly one port Stop')
   // The pinned Action Bar stays the last row even with the notice row present.
-  const barRow = rawView(vt).findIndex(line => /Esc back/.test(line))
+  const barRow = rawView(vt).findIndex(line => /Back \[Esc\]/.test(line))
   assert.equal(barRow, 23, 'the Action Bar stays pinned to the physical bottom')
-  assert.equal(headerBefore.includes('Esc back'), true)
+  assert.equal(headerBefore.includes('Back [Esc]'), true)
   // The same notice on an extremely short REAL terminal: the pins hold.
   vt.resize(80, 2)
   await vt.waitForRender()
   const tiny = rawView(vt)
   assert.equal(tiny.length, 2)
-  assert.match(tiny[1]!, /Esc back/, `the Action Bar must survive an 80x2 grant with a live notice:\n${tiny.join('\n')}`)
+  assert.match(tiny[1]!, /Back \[Esc\]/, `the Action Bar must survive an 80x2 grant with a live notice:\n${tiny.join('\n')}`)
   assert.ok(!/could not stop/.test(tiny.join('\n')), 'the notice yields to the pinned chrome')
 
   // 44×4: the notice still yields — the Output keeps its row.
@@ -778,7 +778,7 @@ test('a Stop settlement failure is visible INSIDE the workspace (its own notice 
   await vt.waitForRender()
   const tight = rawView(vt)
   assert.equal(tight.length, 4)
-  assert.match(tight[3]!, /Esc back/, `the Action Bar stays last at 44x4:\n${tight.join('\n')}`)
+  assert.match(tight[3]!, /Back \[Esc\]/, `the Action Bar stays last at 44x4:\n${tight.join('\n')}`)
   assert.ok(!/could not stop/.test(tight.join('\n')), 'a notice never squeezes the last output row away')
   assert.match(tight.join('\n'), /retained job-a/, `the Output keeps its row at 44x4:\n${tight.join('\n')}`)
 
@@ -788,7 +788,7 @@ test('a Stop settlement failure is visible INSIDE the workspace (its own notice 
   await vt.waitForRender()
   const five = rawView(vt)
   assert.equal(five.length, 5)
-  assert.match(five[4]!, /Esc back/, 'the Action Bar stays the last row')
+  assert.match(five[4]!, /Back \[Esc\]/, 'the Action Bar stays the last row')
   assert.ok(!/could not stop/.test(five.join('\n')),
     `a notice still yields at 44x5:\n${five.join('\n')}`)
   assert.match(five.join('\n'), /retained job-a/, `the Output keeps its row at 44x5:\n${five.join('\n')}`)
@@ -799,7 +799,7 @@ test('a Stop settlement failure is visible INSIDE the workspace (its own notice 
   await vt.waitForRender()
   const six = rawView(vt)
   assert.equal(six.length, 6)
-  assert.match(six[5]!, /Esc back/, 'the Action Bar stays the last row at 44x6')
+  assert.match(six[5]!, /Back \[Esc\]/, 'the Action Bar stays the last row at 44x6')
   assert.match(six.join('\n'), /could not stop job job-a/, `the notice shows once an output row is still guaranteed:\n${six.join('\n')}`)
   assert.match(six.join('\n'), /retained job-a/, `the Output keeps its row at 44x6:\n${six.join('\n')}`)
 
@@ -849,10 +849,10 @@ test('the workspace re-budgets with the LIVE terminal: tail and Action Bar stay 
     const lines = rawView(vt)
     assert.equal(app.focusedComponentForTest() instanceof JobInspectorPanel, true)
     assert.match(lines.join('\n'), /Job · job-a · bash.*‣ Running/, `the header must survive ${width}x${height}`)
-    const barRow = lines.findIndex(line => /Esc back/.test(line))
+    const barRow = lines.findIndex(line => /Back \[Esc\]/.test(line))
     assert.notEqual(barRow, -1, `the Action Bar must be painted at ${width}x${height}`)
     assert.ok(barRow < height, `the Action Bar must be inside the screen at ${width}x${height}`)
-    assert.ok(lines[barRow]!.includes('Retained preview') || lines[barRow]!.includes('Esc back'))
+    assert.ok(lines[barRow]!.includes('Retained preview') || lines[barRow]!.includes('Back [Esc]'))
     assert.match(lines.join('\n'), /LATEST TAIL LINE/, `the latest retained line must be visible at ${width}x${height}`)
     for (const line of lines) {
       assert.ok(visibleWidth(line) <= width, `no physical line may exceed ${width} columns at ${height} rows`)

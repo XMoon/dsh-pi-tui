@@ -323,8 +323,21 @@ class FakeEmbeddedPluginPage implements EmbeddedPluginPage {
         lines.push((index === 0 ? 'PLUGIN PAGE' : '').padEnd(Math.max(1, width)))
       }
     }
-    lines.push(color.textMuted('PLUGIN BAR'.padEnd(Math.max(1, viewport.width))))
+    // PR2: the page's local last row carries its ONE real Esc affordance and
+    // publishes the COMPLETE span for the Settings root's physical hit.
+    const barText = 'PLUGIN BAR · Back [Esc]'
+    if (viewport.width >= barText.length) {
+      this.escapeSpan = { startCol: 'PLUGIN BAR · '.length, endCol: barText.length }
+    } else {
+      this.escapeSpan = undefined
+    }
+    lines.push(color.textMuted(barText.slice(0, viewport.width).padEnd(Math.max(1, viewport.width))))
     return lines
+  }
+  private escapeSpan: { readonly startCol: number; readonly endCol: number } | undefined
+  /** The complete visible Esc affordance span of the LAST rendered row. */
+  paintedEscapeSpan(): { readonly startCol: number; readonly endCol: number } | undefined {
+    return this.escapeSpan
   }
   invalidate(): void {}
   handleInput(data: string): void {
@@ -1006,7 +1019,7 @@ test('/settings enters a dedicated fullscreen workspace: Settings chrome owns th
   assert.ok(rows[0]?.startsWith('Settings'), `the Settings header owns row 0:\n${h.view()}`)
   assert.match(rows[0]!, /Settings · Categories/, 'every width opens on the L0 categories level')
   assert.ok(!h.view().includes('❯'), `no editor/transcript row may render behind the workspace:\n${h.view()}`)
-  assert.match(rows.at(-1) ?? '', /Right open · Enter open · Tab panes · Esc close/, 'the Settings Action Bar is pinned to the physical last row')
+  assert.match(rows.at(-1) ?? '', /Right open · Enter open · Tab panes · Close \[Esc\]/, 'the Settings Action Bar is pinned to the physical last row')
   assert.match(h.view(), /Rows \(4\)/, 'the row list column is part of the workspace body')
   h.dispose()
 })
@@ -1084,7 +1097,7 @@ test('a short inline choice exposes only Esc when the pane title consumes the bo
     assert.ok(h.view().includes('> dark'), `the selected candidate remains painted at 200x${rows}:\n${h.view()}`)
     assert.ok(!h.view().includes('Enter confirm'), `confirmation is withheld without enough body rows at 200x${rows}:\n${h.view()}`)
     const actionBar = h.rowsPlain().at(-1) ?? ''
-    assert.match(actionBar, /^Esc back/, `only the safe back action is advertised at 200x${rows}`)
+    assert.match(actionBar, /^Back \[Esc\]/, `only the safe back action is advertised at 200x${rows}`)
     for (const hiddenHint of ['Up/Down', 'PgUp/PgDn', 'Enter confirm', 'c copy']) {
       assert.ok(!actionBar.includes(hiddenHint), `${hiddenHint} is not advertised at 200x${rows}: ${actionBar}`)
     }
@@ -1125,7 +1138,7 @@ test('a resize before repaint revokes the previous choice-navigation grant', asy
   h.vt.resize(200, 3)
   h.vt.sendInput('\x1b[B') // Down is no longer advertised at the live height.
   await h.vt.waitForRender()
-  assert.match(h.rowsPlain().at(-1) ?? '', /^Esc back/)
+  assert.match(h.rowsPlain().at(-1) ?? '', /^Back \[Esc\]/)
   h.vt.resize(200, 24)
   await h.vt.waitForRender()
   assert.ok(h.view().includes('> dark'), `the stale Down did not change the candidate:\n${h.view()}`)
@@ -1158,7 +1171,7 @@ test('44x8 shows the old value, current candidate identity and explicit confirm'
   const longTheme = 'file:a-very-long-custom-theme-name-that-must-wrap-across-cells'
   const h = setup({ columns: 44, rows: 8, doc: { theme: longTheme } })
   await h.open()
-  assert.match(h.rowsPlain().at(-1) ?? '', /Enter open · Esc close/, 'the Action Bar is the physical last row')
+  assert.match(h.rowsPlain().at(-1) ?? '', /Enter open · Close \[Esc\]/, 'the Action Bar is the physical last row')
   await key(h, '\r') // categories -> rows (Appearance)
   await key(h, '\r') // L1 -> inline choice
   assert.match(h.rowsPlain()[0]!, /Appearance · Configure/)
@@ -1182,7 +1195,7 @@ test('every height keeps the pinned bar last, grants a real body from 3 rows, an
     await h.open()
     const painted = h.rowsPlain()
     assert.equal(painted.length, rows, `the frame must paint exactly ${rows} rows`)
-    assert.match(painted.at(-1) ?? '', /Esc close/, `the Action Bar is pinned at rows=${rows}`)
+    assert.match(painted.at(-1) ?? '', /Close \[Esc\]/, `the Action Bar is pinned at rows=${rows}`)
     if (rows >= 3) {
       assert.ok(painted.some(line => line.includes('Appearance')), `at least one real body row at rows=${rows}:\n${h.view()}`)
     }
@@ -1459,7 +1472,10 @@ test('a copy key never edits a Legacy document at any level', async () => {
 })
 
 test('mouse Confirm requires the painted Enter hint at the minimum Action Bar width', async () => {
-  for (const [columns, canConfirm] of [[18, false], [19, true], [23, true]] as const) {
+  // PR2's clickable `Back [Esc]` affordance is two cells wider than the old
+  // `Esc back` hint, and its compact form is `Back` (4) instead of `Esc` (3), so
+  // the minimum width where `Enter confirm` survives moved from 19 to 20.
+  for (const [columns, canConfirm] of [[19, false], [20, true], [23, true]] as const) {
     const h = setup({ columns, rows: 24, doc: { theme: 'dark' }, themes: pluginThemes() })
     await openSelectedRow(h, 'theme')
     await key(h, '\r') // Detail -> choosing
@@ -2452,7 +2468,7 @@ test('the wide geometry is exact and a 300-char value never squeezes the Action 
   for (const [index, line] of h.vt.getViewport().entries()) {
     assert.ok(visibleWidth(line) <= 200, `row ${index} must fit the terminal`)
   }
-  assert.match(h.rowsPlain().at(-1) ?? '', /Right open · Enter open · Tab panes · Esc close/, 'the Action Bar stays the last physical row')
+  assert.match(h.rowsPlain().at(-1) ?? '', /Right open · Enter open · Tab panes · Close \[Esc\]/, 'the Action Bar stays the last physical row')
   await key(h, '\r') // L0 -> L1 (the row list owns the keyboard)
   await key(h, '\r') // L1 -> inline choice
   assert.ok(h.view().includes('Full value'), 'the complete long value starts in the facts region')
@@ -2561,7 +2577,7 @@ test('below the body floor the Action Bar advertises only the Esc semantics', as
     // alone and starts at X=0 in every projection. A narrow terminal opens on
     // the About CONTENT (Esc back to the rail); 76+ opens on the rail (Esc
     // close).
-    const back = columns < 76 ? 'Esc back' : 'Esc close'
+    const back = columns < 76 ? 'Back [Esc]' : 'Close [Esc]'
     assert.ok(bar.includes(back), `the bar keeps its ${back} semantics at ${columns}x${rows}: ${bar}`)
     for (const forbidden of ['Up/Down', 'Left', 'Right', 'Enter', 'Tab', 'r refresh', 'c copy', 'PgDn', 'PgUp']) {
       assert.ok(!bar.includes(forbidden), `${columns}x${rows} must not advertise the inert ${forbidden}: ${bar}`)
@@ -2755,7 +2771,7 @@ test('the decorative rules yield before readable content on short screens', asyn
   await short.open()
   const painted = short.rowsPlain()
   assert.equal(painted.length, 5)
-  assert.match(painted.at(-1)!, /Right open · Enter open · Esc close/)
+  assert.match(painted.at(-1)!, /Right open · Enter open · Close \[Esc\]/)
   assert.equal(painted.filter(line => /^─+$/.test(line)).length, 0, 'the decorative rules yield at 5 rows')
   for (const label of ['Account', 'Agent', 'Appearance']) {
     assert.ok(painted.some(line => line.includes(label)), `the body keeps the real ${label} row:\n${short.view()}`)
@@ -2777,7 +2793,7 @@ test('the decorative rules yield before readable content on short screens', asyn
     await live.vt.waitForRender()
     const frame = live.rowsPlain()
     assert.equal(frame.length, rows)
-    assert.match(frame.at(-1)!, /Esc back/)
+    assert.match(frame.at(-1)!, /Back \[Esc\]/)
     assert.ok(frame.some(line => line.includes('Copy sent')), `the notice is still granted and painted at ${rows} rows:\n${live.view()}`)
     assert.equal(frame.filter(line => /^─+$/.test(line)).length, 0, `the decorative rules yield at ${rows} rows:\n${live.view()}`)
     if (rows === 8) {
@@ -2789,10 +2805,112 @@ test('the decorative rules yield before readable content on short screens', asyn
       assert.ok(frame.some(line => line.includes('TUI')), `a real About fact remains in the body:\n${live.view()}`)
       // The header row names the pane the frame really paints and the frame
       // keeps exactly one physical bar.
-      assert.equal(frame.filter(line => /Esc (?:back|close)/u.test(line)).length, 1, 'one truthful bar')
+      assert.equal(frame.filter(line => /Back \[Esc\]|Close \[Esc\]/u.test(line)).length, 1, 'one truthful bar')
     }
   }
   live.dispose()
+})
+
+// ── PR2: the ONE physical last-row Esc affordance is clickable ─────────────
+
+test('Settings rail, Rows, Detail and About Esc affordances move exactly one level per click', async () => {
+  const h = setup({ columns: 100, rows: 30, doc: { theme: 'dark' } })
+  await h.openHome()
+  const affordance = (label: string): { row: number; col: number } => {
+    const rows = h.rowsPlain()
+    const row = rows.length - 1
+    const col = rows[row]!.indexOf(label)
+    assert.ok(col >= 0, `the ${label} affordance is painted on the physical last row:\n${h.view()}`)
+    return { row, col }
+  }
+  const click = async (label: string): Promise<void> => {
+    const cell = affordance(label)
+    press(h, cell.row, cell.col)
+    release(h, cell.row, cell.col)
+    await settle(h)
+  }
+
+  // L0 rail: Close leaves the ONE Settings lease through the user-exit path.
+  assert.match(h.rowsPlain().at(-1)!, /Close \[Esc\]/, 'the rail bar names its real Esc outcome')
+  await click('Close [Esc]')
+  assert.doesNotMatch(h.view(), /Settings · /, 'the rail Close left the Settings workspace')
+
+  // A legacy category: L0 -> L1 -> L2 -> L1 -> L0 stays one click per level.
+  await h.open('Appearance')
+  await key(h, '\r')
+  assert.match(h.rowsPlain()[0]!, /· Rows/)
+  assert.match(h.rowsPlain().at(-1)!, /Back \[Esc\]/, 'the Rows bar names Back')
+  await key(h, '\r')
+  assert.match(h.rowsPlain()[0]!, /· Configured theme|· Rows/, 'the Detail level is painted')
+  const detailHeader = h.rowsPlain()[0]!
+  assert.match(detailHeader, /· Configured theme/, 'the click test is at L2')
+  await click('Back [Esc]')
+  assert.match(h.rowsPlain()[0]!, /· Rows/, 'one click returned to the Rows level')
+  await click('Back [Esc]')
+  assert.match(h.rowsPlain()[0]!, /Settings · Categories/, 'the second click returned to the rail')
+  await click('Close [Esc]')
+  assert.doesNotMatch(h.view(), /Settings · /, 'the rail Close left the workspace again')
+
+  // The About content's Back returns to the rail, never out of the workspace.
+  await h.openHome()
+  await key(h, '\t')
+  assert.match(h.view(), /Settings · About/, 'Tab focused the About content')
+  await click('Back [Esc]')
+  assert.match(h.rowsPlain()[0]!, /Settings · Categories/, 'the About Back returned to the rail')
+  assert.match(h.rowsPlain().at(-1)!, /Close \[Esc\]/, 'the rail owns the bar again')
+  await click('Close [Esc]')
+  assert.doesNotMatch(h.view(), /Settings · /, 'the outer Close left the workspace')
+  h.dispose()
+})
+
+test('a Settings bar press is refused when a keyboard transition or resize re-paints the frame', async () => {
+  const h = setup({ columns: 100, rows: 30, doc: { theme: 'dark' } })
+  await h.open('Appearance')
+  await key(h, '\r') // L1: the bar's Back would return to the rail
+  const rows = h.rowsPlain()
+  const row = rows.length - 1
+  const col = rows[row]!.indexOf('Back [Esc]')
+  assert.ok(col >= 0, `the Rows Back affordance is painted:\n${h.view()}`)
+  // PRESS, then let the KEYBOARD move to L2 (the bar still says Back, but the
+  // frame identity moved), and only then RELEASE: the stale press is inert.
+  press(h, row, col)
+  await key(h, '\r')
+  assert.match(h.rowsPlain()[0]!, /· Configured theme/, 'the keyboard really moved to L2')
+  release(h, row, col)
+  await settle(h)
+  assert.match(h.rowsPlain()[0]!, /· Configured theme/, 'the stale release never navigated')
+
+  // Same for a resize between the two halves.
+  const rows2 = h.rowsPlain()
+  const row2 = rows2.length - 1
+  const col2 = rows2[row2]!.indexOf('Back [Esc]')
+  press(h, row2, col2)
+  h.vt.resize(100, 24)
+  await h.vt.waitForRender()
+  release(h, row2, col2)
+  await settle(h)
+  assert.match(h.rowsPlain()[0]!, /· Configured theme/, 'a release after a resize is inert')
+  h.dispose()
+})
+
+test('the embedded plugin page publishes its Esc span and the root runs its own handler on a click', async () => {
+  const h = setup({ columns: 120, rows: 40, pluginPage: true })
+  await h.open('Plugins')
+  await key(h, '\r') // rail -> plugin content
+  const page = h.pluginPageInstances()[0]!
+  assert.equal(h.pluginPageInstances().length, 1)
+  const rows = h.rowsPlain()
+  const row = rows.length - 1
+  assert.match(rows[row]!, /PLUGIN BAR · Back \[Esc\]/, 'the page bar is the physical last row')
+  const col = rows[row]!.indexOf('Back [Esc]')
+  press(h, row, col)
+  release(h, row, col)
+  await settle(h)
+  // The root replays the child's OWN Esc handler (the List yields), never a
+  // second visible-layer navigation ladder.
+  assert.equal(h.pluginPageInstances()[0], page, 'the page instance survived the click')
+  assert.match(h.rowsPlain().at(-1)!, /Close \[Esc\]/, 'the rail owns the physical last row again')
+  h.dispose()
 })
 
 // ── External UI review round 2 (PR #295): the narrow drill-down contract ───
@@ -3016,7 +3134,7 @@ test('a one-row choice cannot confirm invisibly and the first Enter only reveals
 
   h.vt.resize(100, 3)
   await h.vt.waitForRender()
-  assert.match(h.rowsPlain().at(-1) ?? '', /^Esc back/, 'one granted choice row advertises only its safe back action')
+  assert.match(h.rowsPlain().at(-1) ?? '', /^Back \[Esc\]/, 'one granted choice row advertises only its safe back action')
   assert.ok(!h.rowsPlain().at(-1)!.includes('Enter confirm'))
   assert.ok(h.view().includes('> dark'), 'the one candidate row is still identity-bearing')
   await key(h, '\r')
@@ -3025,7 +3143,7 @@ test('a one-row choice cannot confirm invisibly and the first Enter only reveals
 
   h.vt.resize(100, 2)
   await h.vt.waitForRender()
-  assert.match(h.rowsPlain().at(-1) ?? '', /^Esc back/, 'with zero body rows only Esc remains')
+  assert.match(h.rowsPlain().at(-1) ?? '', /^Back \[Esc\]/, 'with zero body rows only Esc remains')
   await key(h, '\r')
   assert.equal(h.replacements(), 0, 'the below-floor Enter stays inert')
   h.dispose()
@@ -3651,7 +3769,7 @@ test('the Input & Terminal handoff keeps its facts readable and gains no edit ch
   assert.match(page, /Settings · Input & Terminal · Keyboard shortcuts/u,
     `the Settings lease is still the ONE physical owner:\n${page}`)
   assert.match(page, /Search: /, 'the page body owns the keyboard search input')
-  assert.match(page, /Esc close/, 'the page ends on its ONE Action Bar')
+  assert.match(page, /Back \[Esc\]/, 'the page ends on its ONE Action Bar (Esc returns to Settings)')
   assert.doesNotMatch(page, /Type to search/, 'the legacy editor never mounts behind it')
   assert.equal(h.replacements(), 0, 'opening the page writes nothing')
   h.dispose()
@@ -4835,10 +4953,10 @@ test('the frozen §11.2 matrix keeps the §8 ladder-derived chrome at every size
       // its selection cursor `> <item>` (settings-workspace-panel.ts:813-820), so a
       // regression that blanks the body while leaving the chrome in place fails.
       const categoryBar = columns < 60
-        ? 'Right open · Enter open · Esc close'
+        ? 'Right open · Enter open · Close [Esc]'
         : columns < 76
-          ? 'Up/Down select · Right open · Enter open · Esc close'
-          : 'Up/Down select · Right open · Enter open · Tab panes · Esc close'
+          ? 'Up/Down select · Right open · Enter open · Close [Esc]'
+          : 'Up/Down select · Right open · Enter open · Tab panes · Close [Esc]'
       assertBarIsLastRow(painted, frame.readColor, categoryBar)
       const bodyTop = ladder.headerRows + ladder.metaRows + ladder.ruleRows + ladder.noticeRows
       const contentTop = bodyTop + ladder.paneHeaderRows
@@ -4929,7 +5047,7 @@ test('selecting Plugins previews the live plugin list inside ONE Settings chrome
     }
     assert.match(frame[3]!, /\[Categories \(9\)\]/, 'the rail keeps the ONE active device')
     assert.doesNotMatch(frame[3]!, /\[Plugins\]/, 'an unfocused preview is never the active device')
-    assertBarIsLastRow(frame, (row, col) => h.vt.getCellFgRgb(row, col), 'Esc close')
+    assertBarIsLastRow(frame, (row, col) => h.vt.getCellFgRgb(row, col), 'Close [Esc]')
     assert.match(frame[frame.length - 1]!, /Tab focus/, 'the rail advertises the real Tab focus key')
     h.dispose()
   }
@@ -4941,7 +5059,7 @@ test('80×10 keeps the visible plugin preview and Enter moves the keys without a
   await toPlugins(h)
   assert.equal(h.pluginPages(), 1, 'the visible preview built the ONE page')
   assert.match(h.view(), /PLUGIN PAGE/, 'the short screen still paints the list preview')
-  assertBarIsLastRow(h.rowsPlain(), (row, col) => h.vt.getCellFgRgb(row, col), 'Esc close')
+  assertBarIsLastRow(h.rowsPlain(), (row, col) => h.vt.getCellFgRgb(row, col), 'Close [Esc]')
   await key(h, '\r')
   assert.equal(h.pluginPages(), 1, 'Enter only moves the focus: no second page')
   // The plugin content now owns the keys, so ITS semantic bar is the last row.
@@ -4956,7 +5074,7 @@ test('44×20 keeps the single category list until Enter, then mounts the page on
   assert.doesNotMatch(h.view(), /PLUGIN PAGE/, 'no invisible plugin page is painted')
   assert.equal(h.pluginPages(), 0, 'a narrow rail selection alone never mounts the page')
   assert.match(h.view(), /> Plugins/, 'Plugins stays selected in the single column')
-  assertBarIsLastRow(h.rowsPlain(), (row, col) => h.vt.getCellFgRgb(row, col), 'Esc close')
+  assertBarIsLastRow(h.rowsPlain(), (row, col) => h.vt.getCellFgRgb(row, col), 'Close [Esc]')
   await key(h, '\r')
   assert.equal(h.pluginPages(), 1, 'Enter mounts the page once from the narrow list')
   assert.match(h.view(), /PLUGIN PAGE/)
@@ -5063,7 +5181,7 @@ test('the direct pages paint exactly the category rail and the content column', 
     assertBarIsLastRow(
       painted,
       (row, col) => h.vt.getCellFgRgb(row, col),
-      'Up/Down navigate · Enter/Right focus · Tab focus · Esc close',
+      'Up/Down navigate · Enter/Right focus · Tab focus · Close [Esc]',
     )
     h.dispose()
   }
@@ -5150,10 +5268,10 @@ test('Tab/Shift+Tab hand the keyboard to the About content and back at wide/medi
     const h = setup({ columns, rows })
     await h.openHome()
     assert.match(h.rowsPlain()[0]!, /Settings · Categories/u)
-    assert.match(h.rowsPlain().at(-1) ?? '', /Tab focus · Esc close/u, `the rail advertises Tab focus at ${columns}x${rows}`)
+    assert.match(h.rowsPlain().at(-1) ?? '', /Tab focus · Close \[Esc\]/u, `the rail advertises Tab focus at ${columns}x${rows}`)
     await key(h, '\t')
     assert.match(h.rowsPlain()[0]!, /Settings · About/u, `Tab focuses the About content at ${columns}x${rows}`)
-    if (columns >= 100) {
+    if (columns >= 108) {
       assert.match(h.view(), /Tab focus · Shift\+Tab back/u, 'the About bar advertises both region keys')
     } else {
       // At 90 the lowest-priority region hint is the first segment dropped;
@@ -5193,10 +5311,10 @@ test('Tab/Shift+Tab cycle the legacy panes in a real frame without opening a cho
   for (const [columns, rows] of [[200, 50], [120, 40]] as const) {
     const h = setup({ columns, rows, doc: { theme: 'dark' } })
     await h.open()
-    assert.match(h.rowsPlain().at(-1) ?? '', /Tab panes · Esc close/u)
+    assert.match(h.rowsPlain().at(-1) ?? '', /Tab panes · Close \[Esc\]/u)
     await key(h, '\t')
     assert.match(h.rowsPlain()[0]!, /· Rows/u)
-    assert.match(h.rowsPlain().at(-1) ?? '', /Tab panes · Shift\+Tab back · Esc back/u)
+    assert.match(h.rowsPlain().at(-1) ?? '', /Tab panes · Shift\+Tab back · Back \[Esc\]/u)
     await key(h, '\t')
     assert.match(h.rowsPlain()[0]!, /Configured theme/u)
     assert.ok(!h.view().includes('Choose value'), 'Tab focusing Detail never opens the choice')
@@ -5262,7 +5380,7 @@ test('the 90-column Settings split keeps the Models refresh hint over the region
   const bar = h.rowsPlain().at(-1)!
   assert.match(bar, /r refresh/u, 'the existing refresh hint survives the 66-cell content bar')
   assert.doesNotMatch(bar, /Tab sections/u, 'the region hint is the first segment dropped')
-  assert.match(bar, /Esc back/u, 'Esc remains the last-row hint')
+  assert.match(bar, /Back \[Esc\]/u, 'Esc remains the last-row hint')
   h.dispose()
 })
 
@@ -5273,7 +5391,7 @@ test('the Tab hints are whole segments and the action bar keeps the last physica
   const narrow = setup({ columns: 80, rows: 10 })
   await narrow.openHome()
   const bar80 = narrow.rowsPlain().at(-1) ?? ''
-  assert.match(bar80, /Up\/Down navigate · Enter\/Right focus · Tab focus · Esc close/u)
+  assert.match(bar80, /Up\/Down navigate · Enter\/Right focus · Tab focus · Close \[Esc\]/u)
   assert.doesNotMatch(bar80, /…/u, 'the bar never truncates a segment mid-word')
   assertNoHalfSegmentInBar(narrow.rowsPlain(), narrow.rowsPlain().length - 1, ' · ')
   narrow.dispose()
@@ -5281,7 +5399,7 @@ test('the Tab hints are whole segments and the action bar keeps the last physica
   // 90x24 keeps the whole segment visible at medium width.
   const medium = setup({ columns: 90, rows: 24 })
   await medium.openHome()
-  assert.match(medium.rowsPlain().at(-1) ?? '', /Tab focus · Esc close/u)
+  assert.match(medium.rowsPlain().at(-1) ?? '', /Tab focus · Close \[Esc\]/u)
   assertNoHalfSegmentInBar(medium.rowsPlain(), medium.rowsPlain().length - 1, ' · ')
   medium.dispose()
 
@@ -5642,7 +5760,7 @@ test('direct and legacy settings categories share the pane-header, first-body an
       assert.match(directHead, /\[Categories \(9\)\]/u, `the rail is the active device:\n${directHead}`)
       assert.match(directHead, new RegExp(`\\b${directCategory}\\b`, 'u'), `the right label names the page:\n${directHead}`)
       assert.doesNotMatch(directHead, /Rows \(|Details/u, 'the direct header fakes no legacy panes')
-      assert.match(direct.rowsPlain().at(-1) ?? '', /Esc close/u, 'the last row is the rail action bar')
+      assert.match(direct.rowsPlain().at(-1) ?? '', /Close \[Esc\]/u, 'the last row is the rail action bar')
       direct.dispose()
 
       const legacy = setup({ columns, rows: 24 })
@@ -5670,7 +5788,7 @@ test('120x24 and 120x40 paint header, metadata, rule, pane header, body and bar 
     assert.match(frame[3]!, /^\[Categories \(9\)\].*About/u)
     assert.doesNotMatch(frame[3]!, /Rows \(|Details/u, 'the direct projection paints exactly two labels')
     assert.match(frame[4]!, /^> About/u, 'the first real content row follows the pane header')
-    assert.match(frame.at(-1) ?? '', /Esc close/u)
+    assert.match(frame.at(-1) ?? '', /Close \[Esc\]/u)
     direct.dispose()
 
     const legacy = setup({ columns: 120, rows })
@@ -5683,7 +5801,7 @@ test('120x24 and 120x40 paint header, metadata, rule, pane header, body and bar 
     assert.match(legacyFrame[3]!, /^\[Categories \(9\)\].*Rows \(4\).*Details/u,
       'the wide legacy frame keeps all three pane headers')
     assert.match(legacyFrame[4]!, /^ {2}About/u)
-    assert.match(legacyFrame.at(-1) ?? '', /Esc close/u)
+    assert.match(legacyFrame.at(-1) ?? '', /Close \[Esc\]/u)
     legacy.dispose()
   }
 })
@@ -5766,7 +5884,7 @@ test('an app notice sits after the top rule and before the pane header at every 
   assert.equal(frame.findIndex(line => line.includes('[About]')), 4, 'the pane header follows the notice')
   assert.ok(frame.slice(5).some(line => line.includes(`TUI  ${bundleVersion()}`)),
     `a real About fact follows the pane header (the whale art may take the first rows):\n${h.view()}`)
-  assert.match(frame.at(-1) ?? '', /Esc back/u)
+  assert.match(frame.at(-1) ?? '', /Back \[Esc\]/u)
   assert.equal(frame.filter(line => line.includes('Copy sent')).length, 1, 'exactly one app-level notice')
 
   h.vt.resize(100, 6)
@@ -5774,7 +5892,7 @@ test('an app notice sits after the top rule and before the pane header at every 
   frame = h.rowsPlain()
   assert.equal(frame[1]!.includes('Copy sent'), true, `the notice follows the header at 6 rows:\n${h.view()}`)
   assert.equal(frame[2]!.includes('[About]'), true, `the pane header follows the notice at 6 rows:\n${h.view()}`)
-  assert.match(frame.at(-1) ?? '', /Esc back/u)
+  assert.match(frame.at(-1) ?? '', /Back \[Esc\]/u)
   assert.equal(frame.filter(line => line.includes('Copy sent')).length, 1, 'still one notice')
 
   h.vt.resize(100, 8)
@@ -5782,7 +5900,7 @@ test('an app notice sits after the top rule and before the pane header at every 
   frame = h.rowsPlain()
   assert.equal(frame[2]!.includes('Copy sent'), true, `the notice follows the diagnostic line at 8 rows:\n${h.view()}`)
   assert.equal(frame[3]!.includes('[About]'), true, `the pane header follows the notice at 8 rows:\n${h.view()}`)
-  assert.match(frame.at(-1) ?? '', /Esc back/u)
+  assert.match(frame.at(-1) ?? '', /Back \[Esc\]/u)
   h.dispose()
 })
 
@@ -5810,7 +5928,7 @@ test('tiny heights grant only the allowed chrome and keep hidden actions inert',
     assert.equal(painted.filter(line => /^─+$/.test(line)).length, grant.rule ? 1 : 0, 'the one rule keeps its floor')
     assert.equal(painted.some(line => line.includes('Categories (9)')), grant.pane, 'the pane header keeps one content row')
     if (grant.pane) assert.notEqual((painted[contentY] ?? '').trim(), '', 'a granted pane header leaves real content below it')
-    assert.match(painted.at(-1) ?? '', /Esc close/u, 'the bar is the physical last row')
+    assert.match(painted.at(-1) ?? '', /Close \[Esc\]/u, 'the bar is the physical last row')
     assert.equal(contentY + grant.content, height - 1, 'the granted body ends directly above the bar')
 
     if (grant.content === 0) {
@@ -5837,7 +5955,7 @@ test('tiny heights grant only the allowed chrome and keep hidden actions inert',
     const ruleRows = height >= 8 ? 1 : 0
     const bodyTop = headerRows + metaRows + ruleRows
     assert.notEqual((painted[bodyTop] ?? '').trim(), '', 'the narrow body starts at the shared top')
-    assert.match(painted.at(-1) ?? '', /Esc back/u)
+    assert.match(painted.at(-1) ?? '', /Back \[Esc\]/u)
     h.dispose()
   }
 })
@@ -5845,7 +5963,7 @@ test('tiny heights grant only the allowed chrome and keep hidden actions inert',
 test('each frame paints one last-row action bar naming the live keyboard owner', async () => {
   const assertOneBar = (h: Harness, expected: RegExp, absent: RegExp): void => {
     const rows = h.rowsPlain()
-    const bars = rows.filter(line => /Esc (?:close|back)/u.test(line))
+    const bars = rows.filter(line => /Close \[Esc\]|Back \[Esc\]/u.test(line))
     assert.equal(bars.length, 1, `exactly one action bar row:\n${h.view()}`)
     const bar = rows.at(-1)!
     assert.match(bar, expected)
@@ -5855,30 +5973,30 @@ test('each frame paints one last-row action bar naming the live keyboard owner',
 
   const about = setup({ columns: 120, rows: 24 })
   await about.openHome()
-  assertOneBar(about, /Enter\/Right focus · Tab focus · Esc close/u, /Esc back/u)
+  assertOneBar(about, /Enter\/Right focus · Tab focus · Close \[Esc\]/u, /Back \[Esc\]/u)
   await key(about, '\t') // rail -> the About content
-  assertOneBar(about, /Esc back/u, /Esc close/u)
+  assertOneBar(about, /Back \[Esc\]/u, /Close \[Esc\]/u)
   about.dispose()
 
   const models = setup({ columns: 120, rows: 24, providerOptions: SETTINGS_PROVIDERS })
   await models.open('Models')
   await key(models, '\t')
-  assertOneBar(models, /r refresh · .*Esc back/u, /Esc close/u)
+  assertOneBar(models, /r refresh · .*Back \[Esc\]/u, /Close \[Esc\]/u)
   models.dispose()
 
   const account = setup({ columns: 120, rows: 24 })
   await account.open('Account')
   await key(account, '\t')
-  assertOneBar(account, /Esc back/u, /Esc close/u)
+  assertOneBar(account, /Back \[Esc\]/u, /Close \[Esc\]/u)
   account.dispose()
 
   const legacy = setup({ columns: 120, rows: 24 })
   await legacy.open('Appearance')
-  assertOneBar(legacy, /Right open · Enter open · Tab panes · Esc close/u, /Esc back/u)
+  assertOneBar(legacy, /Right open · Enter open · Tab panes · Close \[Esc\]/u, /Back \[Esc\]/u)
   await key(legacy, '\r')
-  assertOneBar(legacy, /Enter choose · .*Esc back/u, /Esc close/u)
+  assertOneBar(legacy, /Enter choose · .*Back \[Esc\]/u, /Close \[Esc\]/u)
   await key(legacy, '\x1b[C') // the inline choice (Details holds the keyboard)
-  assertOneBar(legacy, /Enter confirm · .*Esc back/u, /Esc close/u)
+  assertOneBar(legacy, /Enter confirm · .*Back \[Esc\]/u, /Close \[Esc\]/u)
   legacy.dispose()
 })
 
@@ -6085,7 +6203,7 @@ test('a content page below the body floor runs no hidden refresh and keeps its E
   await key(models, '\t') // rail -> Models content
   models.vt.resize(120, 2)
   await models.vt.waitForRender()
-  assert.match(models.rowsPlain().at(-1) ?? '', /Esc back/u)
+  assert.match(models.rowsPlain().at(-1) ?? '', /Back \[Esc\]/u)
   const modelReads = models.hostReads()
   await key(models, 'r')
   await key(models, 'c')
@@ -6098,7 +6216,7 @@ test('a content page below the body floor runs no hidden refresh and keeps its E
   models.vt.resize(120, 3)
   models.vt.sendInput('r') // before the resize frame: the old action grant is stale
   await models.vt.waitForRender()
-  assert.match(models.rowsPlain().at(-1) ?? '', /Esc back/u)
+  assert.match(models.rowsPlain().at(-1) ?? '', /Back \[Esc\]/u)
   assert.equal(models.hostReads(), shortModelReads, 'the shrink-before-repaint r ran no Host read')
   await key(models, 'r')
   assert.equal(models.hostReads(), shortModelReads, 'the painted short fallback r ran no Host read')
@@ -6111,7 +6229,7 @@ test('a content page below the body floor runs no hidden refresh and keeps its E
   await key(account, '\t') // rail -> Account content
   account.vt.resize(120, 2)
   await account.vt.waitForRender()
-  assert.match(account.rowsPlain().at(-1) ?? '', /Esc back/u)
+  assert.match(account.rowsPlain().at(-1) ?? '', /Back \[Esc\]/u)
   const accountReads = account.hostReads()
   await key(account, 'r')
   await key(account, '\r')
@@ -6121,7 +6239,7 @@ test('a content page below the body floor runs no hidden refresh and keeps its E
   account.vt.resize(120, 3)
   account.vt.sendInput('r') // before the resize frame: the old action grant is stale
   await account.vt.waitForRender()
-  assert.match(account.rowsPlain().at(-1) ?? '', /Esc back/u)
+  assert.match(account.rowsPlain().at(-1) ?? '', /Back \[Esc\]/u)
   assert.equal(account.hostReads(), shortAccountReads, 'the shrink-before-repaint Account r ran no Host read')
   await key(account, 'r')
   assert.equal(account.hostReads(), shortAccountReads, 'the painted short Account fallback r ran no Host read')
@@ -6144,7 +6262,7 @@ test('a content page below the body floor runs no hidden refresh and keeps its E
   assert.match(catalog.view(), /Filter: acme/u, 'the visible filter holds the typed query')
   catalog.vt.resize(120, 2)
   await catalog.vt.waitForRender()
-  assert.match(catalog.rowsPlain().at(-1) ?? '', /Esc clear filter/u,
+  assert.match(catalog.rowsPlain().at(-1) ?? '', /Clear filter \[Esc\]/u,
     'the zero-body hint names the real Esc effect while the filter is non-empty')
   await key(catalog, '\u007f')
   catalog.vt.resize(120, 24)
@@ -6156,9 +6274,9 @@ test('a content page below the body floor runs no hidden refresh and keeps its E
   // clears the non-empty filter, then the same frame names the real back.
   catalog.vt.resize(120, 2)
   await catalog.vt.waitForRender()
-  assert.match(catalog.rowsPlain().at(-1) ?? '', /Esc clear filter/u)
+  assert.match(catalog.rowsPlain().at(-1) ?? '', /Clear filter \[Esc\]/u)
   await key(catalog, '\u001b')
-  assert.match(catalog.rowsPlain().at(-1) ?? '', /Esc back/u,
+  assert.match(catalog.rowsPlain().at(-1) ?? '', /Back \[Esc\]/u,
     'after the clear, the zero-body hint is the real back')
   catalog.vt.resize(120, 24)
   await catalog.vt.waitForRender()
@@ -6168,7 +6286,7 @@ test('a content page below the body floor runs no hidden refresh and keeps its E
   // With an empty filter the zero-body Esc is a real back to the Models list.
   catalog.vt.resize(120, 2)
   await catalog.vt.waitForRender()
-  assert.match(catalog.rowsPlain().at(-1) ?? '', /Esc back/u)
+  assert.match(catalog.rowsPlain().at(-1) ?? '', /Back \[Esc\]/u)
   await key(catalog, '\u001b')
   catalog.vt.resize(120, 24)
   await catalog.vt.waitForRender()
@@ -6646,7 +6764,7 @@ test('the grouped Extensions page keeps its group position and ONE action bar at
       `the ${columns}x${rows} header states the group position:\n${h.view()}`)
     assert.equal(first.length, rows, `the ${columns}x${rows} frame keeps its physical budget`)
     assert.equal(
-      first.filter(line => /Esc (?:back|close)/u.test(line)).length,
+      first.filter(line => /Back \[Esc\]|Close \[Esc\]/u.test(line)).length,
       1,
       `exactly ONE physical Action Bar at ${columns}x${rows}:\n${h.view()}`,
     )
@@ -6674,7 +6792,7 @@ test('the grouped Extensions page keeps its group position and ONE action bar at
     if (columns === 44) {
       const bar = h.rowsPlain().at(-1)!
       assert.match(bar, /Tab group/u, 'the 44-column bar compacts the group hint')
-      assert.match(bar, /Esc back/u, 'the highest-priority hint is still painted')
+      assert.match(bar, /Back \[Esc\]/u, 'the highest-priority hint is still painted')
     }
     assertRowWidths(h, columns)
     h.dispose()

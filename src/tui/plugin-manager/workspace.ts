@@ -33,7 +33,8 @@ import {
   type TuiMouseEvent,
   type TuiMouseEventResult,
 } from '@xmoon76/pi-tui'
-import { renderActionBarRow, type ActionBarSegment } from '../presentation/action-bar.ts'
+import { ACTION_BAR_SEPARATOR, layoutActionBarRow, type ActionBarSegment } from '../presentation/action-bar.ts'
+import { paintActionSpan } from '../presentation/action-ink.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { color } from '../theme/runtime.ts'
 import type { PluginInstallView, PluginManagerController, PluginUpdateView } from '../../app/plugin-manager/controller.ts'
@@ -217,6 +218,13 @@ export interface EmbeddedPluginPage extends Component {
    * drift from the columns the page really painted.
    */
   contentLayout(): { readonly dual: boolean; readonly leftWidth: number; readonly rightWidth: number }
+  /**
+   * The complete visible Esc affordance span of the LAST PAINTED frame, in this
+   * page's own content columns (`undefined` when it painted none). Read-only
+   * geometry: the Settings root owns the ONE physical last-row hit and only
+   * translates this span, never a second owner.
+   */
+  paintedEscapeSpan?(): { readonly startCol: number; readonly endCol: number } | undefined
 }
 
 /** One painted hit target of the LAST frame (never a screen-index authority). */
@@ -381,6 +389,10 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   private paintedTargets: readonly HitTarget[] = []
   private paintedRevision = -1
   private paintedChrome: ChromePlan | undefined
+  /** The complete Esc affordance of the LAST painted bar, in this page's own
+   *  content columns. Cleared by `setViewport`/`dispose`, so a grant change
+   *  never leaves the previous frame's geometry clickable. */
+  private paintedEscapeSpanValue: { readonly startCol: number; readonly endCol: number } | undefined
   /** Whether the selected Detail action was inside the last painted viewport. */
   private paintedDetailSelectionVisible = false
   /** The action values actually painted in the last install/confirm frame. */
@@ -460,6 +472,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     // resize round trip restores the SAME action the user was on.
     this.revokePaintedGrants()
     this.pressedGesture = undefined
+    this.paintedEscapeSpanValue = undefined
     this.grantAwaitingPaintArmed = true
     this.bumpRevision(); this.bumpSemantic()
   }
@@ -504,6 +517,13 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     return { dual: plan.dual, leftWidth: plan.leftWidth, rightWidth: plan.rightWidth }
   }
 
+  /** The complete visible Esc affordance span of the LAST PAINTED frame, in
+   *  this page's own content-column coordinates; undefined when the frame
+   *  painted no complete Esc affordance. */
+  paintedEscapeSpan(): { readonly startCol: number; readonly endCol: number } | undefined {
+    return this.paintedEscapeSpanValue
+  }
+
   invalidate(): void {
     this.searchInput.invalidate()
     this.specInput.invalidate()
@@ -513,6 +533,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
+    this.paintedEscapeSpanValue = undefined
     this.searchInput.focused = false
     this.specInput.focused = false
     this.registryInput.focused = false
@@ -2527,8 +2548,23 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   }
 
   private renderActionBar(plan: ChromePlan): string {
-    const segments = this.actionBarSegments(plan)
-    return color.textMuted(renderActionBarRow(segments, plan.width))
+    const layout = layoutActionBarRow(this.actionBarSegments(plan), plan.width)
+    this.paintedEscapeSpanValue = undefined
+    // `truncated` means the last surviving segment itself was cut: no complete
+    // segment is visible, so no affordance may be clicked.
+    if (layout.truncated) return color.textMuted(layout.text)
+    const separator = color.textMuted(ACTION_BAR_SEPARATOR)
+    let painted = ''
+    for (const [index, span] of layout.spans.entries()) {
+      if (index > 0) painted += separator
+      if (isEscapeSegment(span.text)) {
+        painted += paintActionSpan(span.text, 'secondary')
+        this.paintedEscapeSpanValue = { startCol: span.startCol, endCol: span.endCol }
+      } else {
+        painted += color.textMuted(span.text)
+      }
+    }
+    return painted
   }
 
   private actionBarSegments(plan: ChromePlan): ActionBarSegment[] {
@@ -2538,46 +2574,46 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     // the input gate admits — so the bar can never promise an invisible action
     // (a hidden Enter/search/filter/refresh must not look executable).
     return plan.bodyRows <= 0
-      ? segments.filter(segment => segment.text.startsWith('Esc '))
+      ? segments.filter(segment => isEscapeSegment(segment.text))
       : segments
   }
 
   private frameActionBarSegments(): ActionBarSegment[] {
     // The page is ALWAYS embedded in the Settings lease: Esc at the list root
     // yields to the Categories rail and never closes the screen.
-    const back = 'Esc back'
+    const back = 'Back [Esc]'
     if (this.searchEditing) {
       return [
         { text: 'Enter apply', priority: 80 },
-        { text: 'Esc clear search', priority: 100 },
+        { text: 'Clear [Esc]', priority: 100 },
       ]
     }
     if (this.view === 'install') {
       const install = this.controller.installView()
-      if (install === undefined) return [{ text: 'Esc back', priority: 100 }]
+      if (install === undefined) return [{ text: 'Back [Esc]', priority: 100 }]
       if (install.phase === 'editing') {
         return [
           { text: 'Tab switch field', priority: 80 },
           { text: 'Enter inspect', priority: 70 },
           // Esc returns to the LIST, never closes the page: the hint must name
           // that real destination on both entry hosts.
-          { text: 'Esc back', priority: 100 },
+          { text: 'Back [Esc]', priority: 100 },
         ]
       }
       if (install.phase === 'inspecting') {
-        return [{ text: 'Esc back', priority: 100 }]
+        return [{ text: 'Back [Esc]', priority: 100 }]
       }
       if (install.phase === 'confirm') {
         return install.inspection?.status === 'accepted'
-          ? [{ text: 'Enter install', priority: 90 }, { text: 'Esc edit', priority: 100 }]
-          : [{ text: 'Esc edit', priority: 100 }]
+          ? [{ text: 'Enter install', priority: 90 }, { text: 'Edit [Esc]', priority: 100 }]
+          : [{ text: 'Edit [Esc]', priority: 100 }]
       }
       if (install.phase === 'starting' || install.phase === 'installing' || install.phase === 'applying' || install.phase === 'cancelling') {
         return [
           ...(install.cancellable ? [{ text: 's stop', priority: 90 }] : []),
           { text: 'l logs', priority: 70 },
           { text: 'c copy', priority: 60 },
-          { text: 'Esc hide', priority: 100 },
+          { text: 'Hide [Esc]', priority: 100 },
         ]
       }
       return [
@@ -2585,7 +2621,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
         ...(install.phase === 'unknown' ? [] : [{ text: 'n new', priority: 55 }]),
         { text: 'l logs', priority: 70 },
         { text: 'c copy', priority: 60 },
-        { text: 'Esc back', priority: 100 },
+        { text: 'Back [Esc]', priority: 100 },
       ]
     }
     if (this.view === 'confirm') {
@@ -2593,53 +2629,53 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       return [
         { text: hasPrimary ? 'Enter confirm' : 'Enter cancel', priority: 90 },
         ...(this.paintedConfirmScrollMax > 0 ? [{ text: 'PgUp/PgDn details', priority: 80 }] : []),
-        { text: 'Esc cancel', priority: 100 },
+        { text: 'Cancel [Esc]', priority: 100 },
       ]
     }
     if (this.view === 'update') {
       const update = this.controller.updateView()
-      if (update === undefined) return [{ text: 'Esc back', priority: 100 }]
-      if (update.phase === 'checking') return [{ text: 'Esc hide', priority: 100 }]
+      if (update === undefined) return [{ text: 'Back [Esc]', priority: 100 }]
+      if (update.phase === 'checking') return [{ text: 'Hide [Esc]', priority: 100 }]
       if (update.phase === 'selecting') {
         return [
           { text: 'Enter choose', priority: 90 },
           ...(this.paintedUpdateLineCount > this.paintedUpdateViewport ? [{ text: 'PgUp/PgDn page', priority: 80 }] : []),
           { text: `${WORKSPACE_KEYS.refresh} retry`, priority: 70 },
-          { text: 'Esc back', priority: 100 },
+          { text: 'Back [Esc]', priority: 100 },
         ]
       }
       if (update.phase === 'confirm') {
         return [
           { text: this.paintedUpdateActions.has(UPDATE_ACTION.execute) ? 'Enter confirm' : 'Enter cancel', priority: 90 },
           ...(this.paintedUpdateConfirmScrollMax > 0 ? [{ text: 'PgUp/PgDn details', priority: 80 }] : []),
-          { text: 'Esc back', priority: 100 },
+          { text: 'Back [Esc]', priority: 100 },
         ]
       }
       if (update.phase === 'running') {
         return [
           ...(update.canStopTargetInstall ? [{ text: `${WORKSPACE_KEYS.stop} stop target install`, priority: 90 }] : []),
           { text: `${WORKSPACE_KEYS.copy} copy`, priority: 60 },
-          { text: 'Esc hide', priority: 100 },
+          { text: 'Hide [Esc]', priority: 100 },
         ]
       }
       if (update.phase === 'done') {
         return [
           { text: `${WORKSPACE_KEYS.copy} copy`, priority: 60 },
-          { text: 'Esc back', priority: 100 },
+          { text: 'Back [Esc]', priority: 100 },
         ]
       }
       return [
         { text: 'Enter action', priority: 80 },
         { text: `${WORKSPACE_KEYS.refresh} reread`, priority: 70 },
         { text: `${WORKSPACE_KEYS.copy} copy`, priority: 60 },
-        { text: 'Esc hide', priority: 100 },
+        { text: 'Hide [Esc]', priority: 100 },
       ]
     }
     if (this.view === 'diagnostics') {
       if (this.diagnosticsSnapshot === undefined) {
         return [
           { text: `${WORKSPACE_KEYS.refresh} reread`, priority: 60 },
-          { text: 'Esc back', priority: 100 },
+          { text: 'Back [Esc]', priority: 100 },
         ]
       }
       return [
@@ -2648,7 +2684,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
         ...(this.diagnosticsSelectionVisible ? [{ text: `${WORKSPACE_KEYS.copy} copy`, priority: 70 }] : []),
         { text: `${WORKSPACE_KEYS.copyAll} copy all`, priority: 65 },
         { text: `${WORKSPACE_KEYS.refresh} reread`, priority: 60 },
-        { text: 'Esc back', priority: 100 },
+        { text: 'Back [Esc]', priority: 100 },
       ]
     }
     // `i` never replaces a terminal attempt; name what it will actually open.
@@ -2660,7 +2696,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
         { text: installHint, priority: 60 },
         { text: 'c copy', priority: 50 },
         { text: 'r refresh', priority: 40 },
-        { text: 'Esc back', priority: 100 },
+        { text: 'Back [Esc]', priority: 100 },
       ]
     }
     return [
@@ -3972,6 +4008,11 @@ export function createPluginManagerWorkspacePanel(
  * The adjacent List|Details pair additionally requires a dual-allowing root
  * grant, 76 local columns AND six real business body rows.
  */
+/** The Esc affordance is the ONE segment painted as `Verb [Esc]`. */
+function isEscapeSegment(text: string): boolean {
+  return text.endsWith(' [Esc]')
+}
+
 function planChrome(viewport: PluginContentViewport, view: PluginWorkspaceView, noticeLive: boolean): ChromePlan {
   const width = Math.max(1, Math.floor(viewport.width))
   const rows = Math.max(1, Math.floor(viewport.rows))

@@ -346,7 +346,7 @@ test('the opening row is never a Command source: only the observed label opens C
   live.panel.handleInput('\t')
   const command = paint(live, 120).join('\n')
   assert.match(command, /Copy All \[C\]/)
-  assert.match(command, /Esc output/)
+  assert.match(stripTerminalSequences(command), /Output \[Esc\]/)
   live.panel.handleInput('c')
   assert.deepEqual(live.copies, [{ source: 'command-all', text: 'pnpm build --watch' }])
   live.panel.dispose()
@@ -362,7 +362,7 @@ test('C-05/C-06 the Command page owns one body and its own viewport at every bud
       assert.ok(stripTerminalSequences(line).length <= budget.width * 2, `no over-wide row at ${budget.width}x${budget.rows}`)
     }
     const painted = lines.join('\n')
-    assert.match(painted, /Esc output/, `the Command bar is pinned at ${budget.width}x${budget.rows}`)
+    assert.match(stripTerminalSequences(painted), /Output \[Esc\]/, `the Command bar is pinned at ${budget.width}x${budget.rows}`)
     // The page toggle is SYMMETRIC: the same `Tab` switches back, so it is
     // advertised on the Command page too. Like every other segment it obeys the
     // ONE drop order, so a tight row (44 columns) may yield it before the
@@ -376,9 +376,9 @@ test('C-05/C-06 the Command page owns one body and its own viewport at every bud
     assert.ok(!/Follow on|Follow paused/.test(painted), 'the Command page never claims a Follow state')
     assert.ok(!/Retained preview/.test(painted), 'the Command page never claims a retained preview')
     assert.match(painted, /Full command/)
-    assert.match(lines.at(-1)!, /Esc output/, 'the Action Bar is the last row')
+    assert.match(stripTerminalSequences(lines.at(-1)!), /Output \[Esc\]/, 'the Action Bar is the last row')
     harness.panel.handleInput('\x1b')
-    assert.match(paint(harness, budget.width).join('\n'), /Esc back/, 'Esc returns to Output')
+    assert.match(stripTerminalSequences(paint(harness, budget.width).join('\n')), /Back \[Esc\]/, 'Esc returns to Output')
     harness.panel.dispose()
   }
 })
@@ -517,14 +517,14 @@ test('the header click must re-prove the same painted target; a narrowed button 
   assert.ok(commandRow >= 0)
   // Press on the summary, repaint with ANOTHER label, release on the same cell:
   // the document key changed, so the click must not open the old Command page.
-  harness.panel.onHeaderPress(2, commandRow)
+  harness.panel.onChromePress(2, commandRow)
   harness.panel.update(observedState({ label: 'echo two' }))
   paint(harness)
-  harness.panel.onHeaderClick(2, commandRow)
+  harness.panel.onChromeClick(2, commandRow)
   assert.ok(!/Copy All \[C\]/.test(paint(harness).join('\n')), 'a ghost click must not open a Command page')
   // Press + release on the SAME painted target DOES open it.
-  harness.panel.onHeaderPress(2, commandRow)
-  harness.panel.onHeaderClick(2, commandRow)
+  harness.panel.onChromePress(2, commandRow)
+  harness.panel.onChromeClick(2, commandRow)
   const command = paint(harness).join('\n')
   assert.match(command, /Copy All \[C\]/)
   harness.panel.dispose()
@@ -538,8 +538,8 @@ test('the header click must re-prove the same painted target; a narrowed button 
   narrow.panel.handleInput('\t')
   const narrowLines = paint(narrow, 80).join('\n')
   assert.ok(!/Copy All \[C\]/.test(narrowLines), 'the button is not painted without its row')
-  narrow.panel.onHeaderPress(1, 1)
-  narrow.panel.onHeaderClick(1, 1)
+  narrow.panel.onChromePress(1, 1)
+  narrow.panel.onChromeClick(1, 1)
   assert.equal(narrow.copies.length, 0, 'an unpainted button has no click target')
   narrow.panel.handleInput('c')
   assert.deepEqual(narrow.copies, [{ source: 'command-all', text: 'echo one' }], '`C` remains the reachable path')
@@ -553,8 +553,8 @@ test('the header click must re-prove the same painted target; a narrowed button 
   assert.ok(!/Copy All \[C\]/.test(clippedLines.join('\n')), 'the button is not painted at 12 columns')
   const titleRow = clippedLines.findIndex(line => /Full command/.test(line))
   assert.ok(titleRow >= 0, 'the title row is still granted')
-  clipped.panel.onHeaderPress(5, titleRow)
-  clipped.panel.onHeaderClick(5, titleRow)
+  clipped.panel.onChromePress(5, titleRow)
+  clipped.panel.onChromeClick(5, titleRow)
   assert.deepEqual(clipped.copies, [], 'the clipped affordance leaves no click target')
   clipped.panel.handleInput('c')
   assert.deepEqual(clipped.copies, [{ source: 'command-all', text: 'echo one' }], '`C` stays reachable')
@@ -1076,8 +1076,8 @@ test('a real SGR press→drag→release copies the exact original half-open rang
   // A drag that ends BELOW the body (on the Action Bar row) is clamped to the
   // body's own last visible row and stays inside the Command body.
   press(harness.vt, first, 0)
-  drag(harness.vt, bodyRow(harness.vt, 'Esc output'), 10)
-  release(harness.vt, bodyRow(harness.vt, 'Esc output'), 10)
+  drag(harness.vt, bodyRow(harness.vt, 'Output [Esc]'), 10)
+  release(harness.vt, bodyRow(harness.vt, 'Output [Esc]'), 10)
   await flush(4)
   assert.deepEqual(harness.copied, [label], 'the captured gesture stays inside the Command body')
 })
@@ -1116,7 +1116,7 @@ test('edge auto-scroll follows the fork gesture: drag to the visible edge row, s
   await harness.vt.waitForRender()
   await flush(2)
   await openCommand(harness)
-  const barRow = bodyRow(harness.vt, 'Esc output')
+  const barRow = bodyRow(harness.vt, 'Output [Esc]')
   const topRow = bodyRow(harness.vt, 'cmd-000')
   assert.equal(lastRowMatching(harness.vt, /^cmd-\d{3}/), 'cmd-019',
     'the initially visible bottom row was located (the B1-D chrome leaves 20 body rows)')
@@ -1426,17 +1426,17 @@ test('the header hit map covers ONLY painted text: blank padding has no click ta
   const readerRow = commandLines.findIndex(line => line.includes('Copy All [C]'))
   assert.ok(readerRow >= 0)
   const buttonCol = cellIndexOf(stripTerminalSequences(commandLines[readerRow]!), 'Copy All [C]')
-  harness.panel.onHeaderPress(buttonCol + 2, readerRow)
-  harness.panel.onHeaderClick(buttonCol + 2, readerRow)
+  harness.panel.onChromePress(buttonCol + 2, readerRow)
+  harness.panel.onChromeClick(buttonCol + 2, readerRow)
   assert.deepEqual(harness.copies, [{ source: 'command-all', text: 'echo one' }], 'the button itself copies')
   harness.copies.length = 0
   // The `Full command` title is painted but is NOT the button.
-  harness.panel.onHeaderPress(2, readerRow)
-  harness.panel.onHeaderClick(2, readerRow)
+  harness.panel.onChromePress(2, readerRow)
+  harness.panel.onChromeClick(2, readerRow)
   assert.deepEqual(harness.copies, [], 'the Full command title is inert')
   // The padding between the title and the right-aligned button is inert too.
-  harness.panel.onHeaderPress(40, readerRow)
-  harness.panel.onHeaderClick(40, readerRow)
+  harness.panel.onChromePress(40, readerRow)
+  harness.panel.onChromeClick(40, readerRow)
   assert.deepEqual(harness.copies, [], 'the blank space left of the button is inert')
   harness.panel.dispose()
 
@@ -1446,19 +1446,19 @@ test('the header hit map covers ONLY painted text: blank padding has no click ta
   const outputLines = paint(output, 80)
   const summaryRow = outputLines.findIndex(line => line.includes('Command  echo one'))
   assert.ok(summaryRow >= 0)
-  output.panel.onHeaderPress(40, summaryRow)
-  output.panel.onHeaderClick(40, summaryRow)
+  output.panel.onChromePress(40, summaryRow)
+  output.panel.onChromeClick(40, summaryRow)
   assert.ok(!/Copy All \[C\]/.test(paint(output, 80).join('\n')), 'the header padding never opens the page')
-  output.panel.onHeaderPress(5, summaryRow)
-  output.panel.onHeaderClick(5, summaryRow)
+  output.panel.onChromePress(5, summaryRow)
+  output.panel.onChromeClick(5, summaryRow)
   assert.match(paint(output, 80).join('\n'), /Copy All \[C\]/, 'the summary text does open it')
   // The painted `↗ Command` entry carries the SAME intent.
   output.panel.handleInput('\x1b')
   assert.ok(!/Copy All \[C\]/.test(paint(output, 80).join('\n')), 'Esc returns to Output')
   const entryCol = cellIndexOf(stripTerminalSequences(outputLines[summaryRow]!), '↗ Command')
   assert.ok(entryCol > 0, 'the entry is painted on the summary row')
-  output.panel.onHeaderPress(entryCol + 1, summaryRow)
-  output.panel.onHeaderClick(entryCol + 1, summaryRow)
+  output.panel.onChromePress(entryCol + 1, summaryRow)
+  output.panel.onChromeClick(entryCol + 1, summaryRow)
   assert.match(paint(output, 80).join('\n'), /Copy All \[C\]/, 'the painted entry opens the page too')
   output.panel.dispose()
 })
@@ -1578,7 +1578,7 @@ test('a >10,000-character / 1,200-line Command scrolls locally and keeps ONE obs
   // one throttled frame (~16ms) later. Wait for that committed frame instead of
   // asserting inside the window a single waitForRender() does not cover.
   const converged = await paintedWhen(harness.vt, painted => /rows 1-\d+\/1200/.test(painted))
-  const barRow = bodyRow(harness.vt, 'Esc output')
+  const barRow = bodyRow(harness.vt, 'Output [Esc]')
   assert.match(
     rawView(harness.vt)[barRow]!,
     /rows 1-\d+\/1200/,
@@ -1655,20 +1655,20 @@ test('the compact header keeps the fact markers and the summary padding non-inte
   // the summary row is the only clickable one.
   const statusRow = lines.findIndex(line => line.includes('[GAP]'))
   assert.ok(statusRow >= 0, `the status row carries the fact marker:\n${lines.join('\n')}`)
-  harness.panel.onHeaderPress(2, statusRow)
-  harness.panel.onHeaderClick(2, statusRow)
+  harness.panel.onChromePress(2, statusRow)
+  harness.panel.onChromeClick(2, statusRow)
   assert.ok(!/Copy All \[C\]/.test(paint(harness, 44).join('\n')),
     'clicking the status row never opens the Command page')
   const summaryRow = lines.findIndex(line => line.includes('Command  ls'))
   assert.ok(summaryRow >= 0, `the summary row is painted:\n${lines.join('\n')}`)
   // The padding between the summary and the right-aligned `↗ Command` is inert.
-  harness.panel.onHeaderPress(25, summaryRow)
-  harness.panel.onHeaderClick(25, summaryRow)
+  harness.panel.onChromePress(25, summaryRow)
+  harness.panel.onChromeClick(25, summaryRow)
   assert.ok(!/Copy All \[C\]/.test(paint(harness, 44).join('\n')),
     'the summary padding never opens the Command page')
   const summaryCol = cellIndexOf(stripTerminalSequences(lines[summaryRow]!), 'Command  ls')
-  harness.panel.onHeaderPress(summaryCol + 1, summaryRow)
-  harness.panel.onHeaderClick(summaryCol + 1, summaryRow)
+  harness.panel.onChromePress(summaryCol + 1, summaryRow)
+  harness.panel.onChromeClick(summaryCol + 1, summaryRow)
   assert.match(paint(harness, 44).join('\n'), /Copy All \[C\]/,
     'the Command summary itself still opens it')
   harness.panel.dispose()

@@ -279,7 +279,7 @@ test('120x40 paints status → metadata → summary → tabs → body → facts 
   const tabs = bodyRow(harness.vt, '[Output]  Command')
   const firstBody = tabs + 1
   const facts = bodyRow(harness.vt, 'Retained preview · not full history')
-  const bar = bodyRow(harness.vt, 'Esc back')
+  const bar = bodyRow(harness.vt, 'Back [Esc]')
 
   assert.equal(status, 0, 'the status title owns the FIRST physical row')
   assert.equal(metadata, 1, 'the metadata row follows the status title')
@@ -302,7 +302,7 @@ test('120x40 paints status → metadata → summary → tabs → body → facts 
   assert.match(plainRows(harness.vt)[facts]!, /rows 7-40\/40/, 'the position is the REAL preview viewport')
   // Action Bar: Esc + Follow + the browsing hint, and it never repeats the disclosure.
   const barText = plainRows(harness.vt)[bar]!
-  assert.match(barText, /Esc back/)
+  assert.match(barText, /Back \[Esc\]/)
   assert.match(barText, /Follow on/)
   assert.match(barText, /PgUp\/PgDn/)
   assert.ok(!/Retained preview/.test(barText), 'the Action Bar never repeats the dedicated facts row')
@@ -478,7 +478,7 @@ test('GAP + ERROR + SETTLED stay independently visible without squeezing the bod
   assert.match(view(harness.vt), /Error: stream reset/, 'the follow-stream reason is readable')
   // The facts never displace the body or the pinned bar.
   assert.ok(bodyRow(harness.vt, 'line 039') > status, 'the body survives below the chrome')
-  assert.match(plainRows(harness.vt).at(-1)!, /Esc back/, 'the Action Bar stays last')
+  assert.match(plainRows(harness.vt).at(-1)!, /Back \[Esc\]/, 'the Action Bar stays last')
   assert.ok(!/stop/.test(plainRows(harness.vt).at(-1)!), 'a settled Job never advertises Stop')
 })
 
@@ -551,7 +551,7 @@ test('44x8 compact paints `[Out]  Cmd` on one row and keeps the body readable wi
   const tabs = bodyRow(harness.vt, '[Out]  Cmd')
   assert.match(plainRows(harness.vt)[tabs]!, /^\[Out\] {2}Cmd ─+$/, 'the compact labels stay on ONE row')
   assert.ok(bodyRow(harness.vt, 'line 039') > tabs, 'the body keeps at least one readable row')
-  assert.match(plainRows(harness.vt).at(-1)!, /Esc back/, 'the Action Bar stays last')
+  assert.match(plainRows(harness.vt).at(-1)!, /Back \[Esc\]/, 'the Action Bar stays last')
   assertRowWidths(harness.vt, 44)
 })
 
@@ -569,7 +569,7 @@ test('44x5 with a live Find keeps the SearchRow and one body row, and the tabs y
   assert.match(rows[1]!, /Command {2}echo one/, 'the summary keeps its row')
   assert.match(rows[2]!, /Find Output:/, 'the SearchRow is physically visible, directly under the summary')
   assert.ok(/needle alpha|other/.test(rows[3]!), 'the body keeps at least one readable row')
-  assert.match(rows[4]!, /Esc back/, 'the Action Bar stays last')
+  assert.match(rows[4]!, /Leave find \[Esc\]/, 'the Action Bar names the CURRENT Esc outcome while the Find is open')
   assert.ok(!/\[Out\]/.test(rows.join('\n')), 'the tabs yield to the SearchRow at this height')
   assert.equal(harness.app.focusedComponentForTest()?.constructor.name, 'JobOutputSearchRow',
     'the physical focus really sits on the visible SearchRow')
@@ -590,7 +590,7 @@ test('44x4 keeps status + SearchRow + body + Action Bar, and a live notice yield
   assert.match(rows[0]!, /Job · job-a · bash/)
   assert.match(rows[1]!, /Find Output:/)
   assert.ok(/needle alpha|other/.test(rows[2]!), 'the body keeps its one row')
-  assert.match(rows[3]!, /Esc back/)
+  assert.match(rows[3]!, /Leave find \[Esc\]/, 'the bar names the CURRENT Esc outcome while the Find is open')
   harness.vt.sendInput('\x1b')
   await settle(harness.vt)
 
@@ -600,7 +600,7 @@ test('44x4 keeps status + SearchRow + body + Action Bar, and a live notice yield
   rows = plainRows(harness.vt)
   assert.equal(rows.length, 4)
   assert.ok(!/could not stop/.test(rows.join('\n')), 'the notice yields at four rows')
-  assert.match(rows[3]!, /Esc back/)
+  assert.match(rows[3]!, /Back \[Esc\]/)
   assert.ok(rows.slice(0, 3).some(row => /needle alpha|other/.test(row)), 'the body row survives')
 })
 
@@ -612,13 +612,13 @@ test('80x2 keeps the status + Action Bar, 80x1 keeps the Action Bar alone, and E
   let rows = plainRows(harness.vt)
   assert.equal(rows.length, 2, 'two physical rows')
   assert.match(rows[0]!, /Job · job-a · bash/)
-  assert.match(rows[1]!, /Esc back/)
+  assert.match(rows[1]!, /Back \[Esc\]/)
 
   harness.vt.resize(80, 1)
   await settle(harness.vt)
   rows = plainRows(harness.vt)
   assert.equal(rows.length, 1, 'ONE physical row')
-  assert.match(rows[0]!, /Esc back/, 'the Action Bar is never budgeted away')
+  assert.match(rows[0]!, /Back \[Esc\]/, 'the Action Bar is never budgeted away')
 
   // The escape hatch really works at the floor: the workspace closes and the
   // observation is released exactly once.
@@ -1003,7 +1003,7 @@ test('the bounded-preview disclosure is advertised EXACTLY once per frame', asyn
   const standardRows = plainRows(standard.vt)
   assert.equal(standardRows.filter(row => /Retained preview · not full history/.test(row)).length, 1,
     'one disclosure on a standard frame')
-  assert.match(standardRows.at(-1)!, /Esc back/)
+  assert.match(standardRows.at(-1)!, /Back \[Esc\]/)
   assert.ok(!/Retained preview/.test(standardRows.at(-1)!), 'the bar does not repeat the facts row')
   disposeHarness(standard)
 
@@ -1124,7 +1124,7 @@ test('Tab switches Output <-> Command in BOTH directions and v is inert', async 
   harness.vt.sendInput('\t')
   await settle(harness.vt)
   assert.match(view(harness.vt), /^Output {2}\[Command\] ─+$/m, 'the Command tab is the focused one')
-  assert.match(plainRows(harness.vt).at(-1)!, /Esc output/, 'the Command bar advertises `Esc output`')
+  assert.match(plainRows(harness.vt).at(-1)!, /Output \[Esc\]/, 'the Command bar advertises `Output [Esc]`')
   assert.match(view(harness.vt), /Full command/, 'the Full command summary row is painted')
   assert.ok(!/line \d{3}/.test(view(harness.vt)), 'the Output body is not painted on the Command page')
 
@@ -1133,7 +1133,7 @@ test('Tab switches Output <-> Command in BOTH directions and v is inert', async 
   harness.vt.sendInput('\t')
   await settle(harness.vt)
   assert.match(view(harness.vt), /^\[Output\] {2}Command ─+$/m, 'the Output tab is focused again')
-  assert.match(plainRows(harness.vt).at(-1)!, /Esc back/, 'the Output bar advertises `Esc back`')
+  assert.match(plainRows(harness.vt).at(-1)!, /Back \[Esc\]/, 'the Output bar advertises `Back [Esc]`')
   const tabsAfter = bodyRow(harness.vt, '[Output]  Command')
   const factsAfter = bodyRow(harness.vt, 'Retained preview · not full history')
   assert.deepEqual(plainRows(harness.vt).slice(tabsAfter + 1, factsAfter), outputBody,
@@ -1143,8 +1143,8 @@ test('Tab switches Output <-> Command in BOTH directions and v is inert', async 
   harness.vt.sendInput('v')
   await settle(harness.vt)
   assert.match(view(harness.vt), /^\[Output\] {2}Command ─+$/m, '`v` did not leave the Output page')
-  assert.match(plainRows(harness.vt).at(-1)!, /Esc back/, 'the Output bar is still the painted one')
-  assert.ok(!/Esc output/.test(view(harness.vt)), 'the Command page was never entered by `v`')
+  assert.match(plainRows(harness.vt).at(-1)!, /Back \[Esc\]/, 'the Output bar is still the painted one')
+  assert.ok(!/Output \[Esc\]/.test(view(harness.vt)), 'the Command page was never entered by `v`')
 })
 
 // ── B-18: BOTH metadata groups drop a fact WHOLE before truncating ─────────
@@ -1259,7 +1259,7 @@ test('the frozen §11.2 matrix keeps the §8 ladder-derived chrome at every size
       // rows (from the ladder, not from the painted text) must carry the Job's OWN
       // retained text (`line NNN` from the fixture), so a blanked body cannot pass on
       // plausible indexes alone.
-      assertBarIsLastRow(painted, frame.readColor, 'Esc back')
+      assertBarIsLastRow(painted, frame.readColor, 'Back [Esc]')
       assertNoHalfSegmentInBar(painted, painted.length - 1, ' · ')
       assertRowWidths(harness.vt, width)
       const tabsRow = 1 + ladder.metadataRows + ladder.summaryRows

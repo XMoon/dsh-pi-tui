@@ -282,7 +282,7 @@ test('/footer deeplinks into the same lease, edits and saves through the one Foo
   assert.match(h.view(), /Settings · Appearance · Configure footer layout…/u, 'the Footer page is the Appearance child')
   assert.match(h.view(), /Footer layout · Select row/u, 'the shared pane header names the page')
   assert.match(h.view(), /Select row to edit/u, 'the row selector is painted')
-  assert.match(lastLine(h), /Esc Close/u, 'the ONE Action Bar is the physical last row')
+  assert.match(lastLine(h), /Close \[Esc\]/u, 'the ONE Action Bar is the physical last row')
 
   // Enter the row, remove the first item, walk back and save explicitly.
   await press(h.vt, '\r')
@@ -646,7 +646,7 @@ test('bare /keybindings deeplinks into the same lease; recording writes the USER
   assertOneSettingsChrome(h)
   assert.match(h.view(), /Settings · Input & Terminal · Keyboard shortcuts…/u)
   assert.match(h.view(), /Search: type to filter/u)
-  assert.match(lastLine(h), /Esc close/u)
+  assert.match(lastLine(h), /Back \[Esc\]/u)
 
   await press(h.vt, 'submit')
   await press(h.vt, '\r') // action detail
@@ -725,7 +725,7 @@ test('low viewports keep ONE physical Action Bar and never paint an oversized pa
     await h.invoke('footer')
     await frames(h.vt)
     assertOneSettingsChrome(h)
-    assert.match(lastLine(h), /Esc (?:Close|Back)/u, `the bar is the last row at ${columns}x${rows}`)
+    assert.match(lastLine(h), /(?:Close|Back) \[Esc\]/u, `the bar is the last row at ${columns}x${rows}`)
     assert.match(h.view(), /Select row to edit|Row 1/u, `the selector body is painted at ${columns}x${rows}`)
     const footerRoot = (h.app as unknown as {
       workspaceLease?: { panel: { render(width: number): string[] } }
@@ -746,7 +746,7 @@ test('low viewports keep ONE physical Action Bar and never paint an oversized pa
     await k.invoke('keybindings')
     await frames(k.vt)
     assertOneSettingsChrome(k)
-    assert.match(lastLine(k), /Esc (?:close|clear)/u, `the keyboard bar is the last row at ${columns}x${rows}`)
+    assert.match(lastLine(k), /(?:Back|Clear) \[Esc\]/u, `the keyboard bar is the last row at ${columns}x${rows}`)
     assert.match(k.view(), /Search:/u, `the keyboard search/body is painted at ${columns}x${rows}`)
     const keyboardRoot = (k.app as unknown as {
       workspaceLease?: { panel: { render(width: number): string[] } }

@@ -660,7 +660,7 @@ test('a 30x8 Settings workspace disables Enter for a clipped masked form; 40x16 
   assert.equal(h.calls.some(call => call.startsWith('set:')), false, 'the input-path geometry guard blocks the race')
   assert.match(h.view(), /Resize the terminal/u)
   assert.doesNotMatch(h.view(), /Enter continue/u, 'a clipped form never advertises a hidden submit')
-  assert.match(h.view(), /Esc cancel/u, 'the only real key of the clipped question is its cancel')
+  assert.match(h.view(), /Cancel \[Esc\]/u, 'the only real key of the clipped question is its cancel')
   assert.doesNotMatch(h.view(), /type to edit/u, 'the frame does not advertise editing it refuses')
   await key(h, 'a')
   await key(h, '\r')
@@ -752,7 +752,7 @@ test('a pending Account operation keeps the keyboard: the painted Back action do
   // Host, it neither leaves nor cancels the in-flight operation.
   h.vt.resize(120, 2)
   await h.vt.waitForRender()
-  assert.match(h.rows().at(-1) ?? '', /Esc wait/u, 'the zero-body fallback states that Esc waits')
+  assert.match(h.rows().at(-1) ?? '', /Wait \[Esc\]/u, 'the zero-body fallback states that Esc waits')
   await key(h, '\u001b')
   assert.match(h.rows()[0]!, /Settings · Account/u, 'the pending operation still owns the content')
 
@@ -1217,7 +1217,7 @@ test('a shrink before repaint revokes a selected sign-out action; the short fall
   for (let index = 0; index < 10; index += 1) await new Promise<void>(resolve => setImmediate(resolve))
   assert.equal(h.calls.filter(call => call === 'signOut').length, 0,
     'the stale Enter after a shrink never dispatches the old sign-out grant')
-  assert.match(h.rows().at(-1) ?? '', /Esc cancel/u, 'the short fallback names the real Esc cancel')
+  assert.match(h.rows().at(-1) ?? '', /Cancel \[Esc\]/u, 'the short fallback names the real Esc cancel')
 
   // Even after the fallback paints, Enter and the hidden refresh stay inert.
   await key(h, '\r')
@@ -1359,4 +1359,32 @@ test('the Web page Clear deeplink cancel writes nothing', async () => {
   assert.deepEqual(h.calls.filter(call => call.startsWith('unset:')), [],
     'a cancelled clear performs ZERO credential writes')
   h.close()
+})
+
+test('a Models/Account physical bar click replays the page own Esc exactly like the keyboard', async () => {
+  const normalize = (text: string): string => text.replace(/Refreshed \d\d:\d\d/u, 'Refreshed --:--')
+  for (const command of ['/login acme', '/login deepseek-account']) {
+    // ONE live TuiApp per process: run the click path first, capture the frame
+    // after EACH of the two Esc steps, close it, then drive the keyboard path
+    // the same way and compare every step.
+    const viaClick = open()
+    await viaClick.vt.waitForRender()
+    ;(viaClick as unknown as { invoke(line: string): unknown }).invoke(command)
+    await viaClick.vt.waitForRender()
+    const barRow = viaClick.rows().length - 1
+    assert.match(viaClick.rows()[barRow]!, /Back \[Esc\]/u, `${command}: the direct page names its real Esc outcome`)
+    await click(viaClick, barRow, colOf(viaClick, barRow, 'Back [Esc]'))
+    const clicked = normalize(viaClick.view())
+    viaClick.close()
+
+    const viaKey = open()
+    await viaKey.vt.waitForRender()
+    ;(viaKey as unknown as { invoke(line: string): unknown }).invoke(command)
+    await viaKey.vt.waitForRender()
+    await key(viaKey, '\x1b')
+    const keyed = normalize(viaKey.view())
+    viaKey.close()
+
+    assert.equal(clicked, keyed, `${command}: the click runs the SAME Esc ladder step as the keyboard`)
+  }
 })

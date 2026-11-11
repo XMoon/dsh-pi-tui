@@ -164,7 +164,7 @@ test('at 30x8 a long CJK Host error starts at its identity and is fully reachabl
     assert.match(start, /\[failed\]/)
     // Reachability is the contract (the bar drops whole segments on a 30-cell
     // row); the paging hint is advertised from 80 columns up.
-    assert.match(start, /Esc back/u, 'the real Esc destination is always advertised')
+    assert.match(start, /Back \[Esc\]/u, 'the real Esc destination is always advertised')
     // Page to the END of the block: the unique tail marker proves the last
     // physical error row is reachable by keyboard (overlapping page frames
     // make a naive concatenation non-contiguous).

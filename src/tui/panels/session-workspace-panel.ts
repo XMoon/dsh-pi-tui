@@ -50,7 +50,13 @@ import type {
   SessionWorkspaceFact,
   WorkspaceFactsFrame,
 } from '../../runtime/session-workspace-facts-port.ts'
-import { renderActionBarRow } from '../presentation/action-bar.ts'
+import {
+  ACTION_BAR_SEPARATOR,
+  layoutActionBarRow,
+  renderActionBarRow,
+  type ActionBarSegment,
+} from '../presentation/action-bar.ts'
+import { paintActionSpan, type ActionInkRole } from '../presentation/action-ink.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import {
   buildSessionWorkspaceView,
@@ -351,11 +357,16 @@ function foldWorkspaceFrame(projection: WorkspaceProjection, frame: WorkspaceFac
   }
 }
 
+/** One clickable Action Bar verb of the LAST painted frame. Every id maps onto
+ *  an EXISTING panel method; the bar never grows a second navigation state. */
+type SessionBarAction = 'close' | 'open' | 'peek' | 'results' | 'verify' | 'cancel' | 'activate-row'
+
 /** One painted mouse target of the LAST frame. `xEnd` is inclusive and every
  *  range is the REAL painted cell range: a truncated/omitted target has none. */
 interface HitRegion {
-  readonly kind: 'tree-row' | 'folder-toggle' | 'result' | 'search' | 'search-hint' | 'peek-back' | 'directory-confirm' | 'directory-cancel' | 'directory-input' | 'directory-suggestion'
+  readonly kind: 'tree-row' | 'folder-toggle' | 'result' | 'search' | 'search-hint' | 'bar-action' | 'directory-input' | 'directory-suggestion'
   readonly id?: string
+  readonly action?: SessionBarAction
   readonly xStart: number
   readonly xEnd: number
   readonly line: number
@@ -366,6 +377,14 @@ interface PaneRender {
   readonly lines: string[]
   readonly regions: readonly HitRegion[]
 }
+
+/** One physical Action Bar segment. A segment that carries an `action` is a
+ *  clickable `Verb [Key]`; an action-less segment is an inert hint/fact that
+ *  paints muted and never registers a hit region. */
+type SessionBarSegment = ActionBarSegment & (
+  | { readonly action: SessionBarAction; readonly ink: ActionInkRole }
+  | { readonly action?: undefined; readonly ink?: undefined }
+)
 
 export class SessionWorkspacePanel implements Component {
   private readonly host: SessionWorkspacePanelHost
@@ -458,9 +477,11 @@ export class SessionWorkspacePanel implements Component {
     | {
       readonly revision: number
       readonly kind: HitRegion['kind']
+      readonly action: SessionBarAction | undefined
       readonly id: string | undefined
       readonly xStart: number
       readonly xEnd: number
+      readonly line: number
     }
     | undefined
   /** The last frame this panel really painted, in panel-relative coordinates. */
@@ -1415,9 +1436,11 @@ export class SessionWorkspacePanel implements Component {
       : {
         revision: this.hitFrame.revision,
         kind: region.kind,
+        action: region.action,
         id: region.id,
         xStart: region.xStart,
         xEnd: region.xEnd,
+        line: region.line,
       }
     // Click-to-position on the input this frame really painted. The panel
     // stays the keyboard owner; only the private Input's cursor moves.
@@ -1452,51 +1475,63 @@ export class SessionWorkspacePanel implements Component {
     const region = this.regionAt(x, y)
     if (region === undefined
       || region.kind !== pressed.kind
+      || region.action !== pressed.action
       || region.id !== pressed.id
       || region.xStart !== pressed.xStart
-      || region.xEnd !== pressed.xEnd) return
+      || region.xEnd !== pressed.xEnd
+      || region.line !== pressed.line) return
     this.activateRegion(region)
   }
 
   private activateRegion(region: HitRegion): void {
     // The inline path editor owns the WHOLE interaction while it is open:
     // a mouse press on a tree row must not start a second operation (New,
-    // Add, More, Folder) behind it. Only its own targets reach their handlers
-    // (and those are inert while the Host verification pends).
-    if (this.directoryEntryActive
-      && region.kind !== 'directory-confirm'
-      && region.kind !== 'directory-cancel'
-      && region.kind !== 'directory-input'
-      && region.kind !== 'directory-suggestion') return
-    switch (region.kind) {
-      case 'directory-confirm':
-        this.handleDirectorySubmit()
-        return
-      case 'directory-cancel':
-        if (this.directorySubmitting) return
-        // The painted Escape verb is the SAME ladder the key follows: hide a
-        // visible suggestion block first, otherwise leave the editor.
-        if (this.paintedDirectorySuggestionPaths.length > 0) {
-          this.directoryChooser?.hideSuggestions()
+    // Add, More, Folder) behind it. While the editor owns the interaction only
+    // its OWN input/suggestion targets and the ONE bar's verify/cancel verbs
+    // reach their handlers; the verbs stay inert while the Host verification
+    // pends.
+    if (this.directoryEntryActive) {
+      if (this.directorySubmitting) return
+      switch (region.kind) {
+        case 'directory-input':
+          // Cursor positioning already happened on the press half.
+          return
+        case 'directory-suggestion': {
+          if (region.id === undefined) return
+          const chooser = this.directoryChooser
+          if (chooser === undefined) return
+          // Only the candidate this frame really painted may act; its identity
+          // is the official full Host path, never a display name/row index.
+          if (!this.paintedDirectorySuggestionPaths.includes(region.id)) return
+          this.statusMessage = undefined
+          this.directoryStatusError = false
+          chooser.acceptPaintedCandidate(region.id)
           this.host.requestRender()
           return
         }
-        this.closeDirectoryChooser()
-        return
-      case 'directory-input':
-        // Cursor positioning already happened on the press half.
-        return
-      case 'directory-suggestion': {
-        if (this.directorySubmitting || region.id === undefined) return
-        const chooser = this.directoryChooser
-        if (chooser === undefined) return
-        // Only the candidate this frame really painted may act; its identity
-        // is the official full Host path, never a display name/row index.
-        if (!this.paintedDirectorySuggestionPaths.includes(region.id)) return
-        this.statusMessage = undefined
-        this.directoryStatusError = false
-        chooser.acceptPaintedCandidate(region.id)
-        this.host.requestRender()
+        case 'bar-action':
+          // The painted Esc verb is the SAME two-layer ladder the key follows:
+          // hide a visible suggestion block first, otherwise leave the editor.
+          if (region.action === 'verify') this.handleDirectorySubmit()
+          else if (region.action === 'cancel') this.handleDirectoryInput('\x1b')
+          return
+        default:
+          return
+      }
+    }
+    switch (region.kind) {
+      case 'bar-action': {
+        // The bar only re-enters the EXISTING keyboard/currentness path; it
+        // never calls a Host intent or writes navigation state directly.
+        switch (region.action) {
+          case 'close': return this.handleEscape()
+          case 'open': return this.resumeSelected()
+          case 'peek': return this.openPeek()
+          case 'results': return this.handleSearchInput('\r') // the keyboard Enter byte, same entry
+          case 'verify': return this.handleDirectorySubmit()
+          case 'cancel': return this.closeDirectoryChooser()
+          case 'activate-row': return this.activateSelectedBrowseRow()
+        }
         return
       }
       case 'folder-toggle': {
@@ -1542,10 +1577,6 @@ export class SessionWorkspacePanel implements Component {
         this.enterSearch('search')
         return
       }
-      case 'peek-back': {
-        this.closePeek()
-        return
-      }
     }
     this.host.requestRender()
   }
@@ -1574,8 +1605,14 @@ export class SessionWorkspacePanel implements Component {
     if (height === 1) return this.publishFrame([header.line], header.regions)
     if (height === 2) {
       // No body row exists: the action bar is built from the EMPTY painted set,
-      // so it can never advertise an unpainted activation.
-      return this.publishFrame([header.line, this.renderActionBar(width)], header.regions)
+      // so it can never advertise an unpainted activation. It still owns the
+      // physical second row, and only the segments really painted there get a
+      // hit region.
+      const actionBar = this.renderActionBar(width)
+      return this.publishFrame(
+        [header.line, actionBar.line],
+        [...header.regions, ...actionBar.regions.map(region => ({ ...region, line: 1 }))],
+      )
     }
     if (height === 3) {
       const body = this.renderBody(width, 1)
@@ -1586,8 +1623,10 @@ export class SessionWorkspacePanel implements Component {
       const regions = body.regions
         .filter(region => region.line === 0)
         .map(region => ({ ...region, line: 1 }))
+      // Header 0, body 1, the ONE physical Action Bar 2.
+      regions.push(...actionBar.regions.map(region => ({ ...region, line: 2 })))
       this.paintView = undefined
-      return this.publishFrame([header.line, bodyLine, actionBar], regions)
+      return this.publishFrame([header.line, bodyLine, actionBar.line], regions)
     }
     const lines: string[] = [header.line]
     const regions: HitRegion[] = [...header.regions]
@@ -1610,7 +1649,10 @@ export class SessionWorkspacePanel implements Component {
       regions.push({ ...region, line: region.line + bodyTop })
     }
     if (height >= 6) lines.push(color.border('─'.repeat(Math.max(1, width))))
-    lines.push(actionBar)
+    // The ONE physical last row owns the bar's real painted spans.
+    const barLine = lines.length
+    lines.push(actionBar.line)
+    regions.push(...actionBar.regions.map(region => ({ ...region, line: barLine })))
     this.paintView = undefined
     return this.publishFrame(lines.slice(0, height), regions)
   }
@@ -1847,7 +1889,7 @@ export class SessionWorkspacePanel implements Component {
         lines.push(paint(fit(sanitizedPhysicalLine(message), width)))
         remaining -= 1
       }
-      this.paintDirectoryVerbs(width, lines, regions, [], notices, remaining)
+      this.paintDirectoryStatus(width, lines, notices, remaining)
       return
     }
     const truncatedLine = 'Directory listing truncated; type a more specific path'
@@ -1861,7 +1903,7 @@ export class SessionWorkspacePanel implements Component {
         lines.push(color.warning(fit(truncatedLine, width)))
         remaining -= 1
       }
-      this.paintDirectoryVerbs(width, lines, regions, [], notices, remaining)
+      this.paintDirectoryStatus(width, lines, notices, remaining)
       return
     }
     const hasExtras = notices.length > 0 || snapshot.truncated
@@ -1899,48 +1941,23 @@ export class SessionWorkspacePanel implements Component {
       lines.push(color.warning(fit(truncatedLine, width)))
       remaining -= 1
     }
-    this.paintDirectoryVerbs(width, lines, regions, candidates, notices, remaining)
+    this.paintDirectoryStatus(width, lines, notices, remaining)
   }
 
-  /** The ONE painted verb line (its two complete word spans are the mouse
-   *  targets) plus any real status/notice below it. */
-  private paintDirectoryVerbs(
+  /** The real status/notice rows beside the editor. The VERBS live on the ONE
+   *  physical Action Bar, so this paints no second action row and registers no
+   *  confirm/cancel region: a status line is never a clickable affordance. */
+  private paintDirectoryStatus(
     width: number,
     lines: string[],
-    regions: HitRegion[],
-    candidates: readonly HostDirectoryCandidate[],
     extras: ReadonlyArray<{ readonly text: string; readonly error: boolean }>,
     remaining: number,
   ): void {
-    if (remaining <= 0) return
     for (const extra of extras) {
       if (remaining <= 0) return
       const paint = extra.error ? color.error : color.textMuted
       lines.push(paint(fit(sanitizedPhysicalLine(extra.text), width)))
       remaining -= 1
-    }
-    if (remaining <= 0) return
-    const hiding = candidates.length > 0
-    const confirmText = 'Enter verify'
-    const escapeText = hiding ? 'Esc hide suggestions' : 'Esc cancel'
-    const prefix = hiding
-      ? candidates.length > 1 ? 'Tab complete · ↑↓ choose · ' : 'Tab complete · '
-      : ''
-    const lineText = `${prefix}${confirmText} · ${escapeText}`
-    // A hint that does not fit is DROPPED, never clipped mid-word: the Action
-    // Bar below advertises the same whole segments at every width.
-    if (visibleWidth(lineText) > width) return
-    const row = lines.length
-    lines.push(color.textMuted(fit(lineText, width)))
-    const confirmStart = visibleWidth(prefix)
-    const confirmEnd = confirmStart + visibleWidth(confirmText) - 1
-    if (confirmEnd < width) {
-      regions.push({ kind: 'directory-confirm', xStart: confirmStart, xEnd: confirmEnd, line: row })
-    }
-    const escapeStart = confirmEnd + 1 + visibleWidth(' · ')
-    const escapeEnd = escapeStart + visibleWidth(escapeText) - 1
-    if (escapeEnd < width) {
-      regions.push({ kind: 'directory-cancel', xStart: escapeStart, xEnd: escapeEnd, line: row })
     }
   }
 
@@ -2100,7 +2117,9 @@ export class SessionWorkspacePanel implements Component {
     ]
   }
 
-  /** The read-only Peek body: ONE scrollable plain-text column. */
+  /** The read-only Peek body: ONE scrollable plain-text column. The global
+   *  Action Bar is the ONLY exit affordance; the body owns no local action row,
+   *  so the whole budget belongs to the read-only facts. */
   private renderPeekPane(width: number, budget: number): PaneRender {
     const peek = this.peek
     // The Peek body is pinned to its OWN Session id: a roster refresh that
@@ -2111,19 +2130,14 @@ export class SessionWorkspacePanel implements Component {
     }
     const fact = this.frameView().rowsById.get(row.id)
     const all = this.peekLines(row, fact, width)
-    const maxScroll = Math.max(0, all.length - Math.max(1, budget - 1))
+    const viewport = Math.max(1, budget)
+    const maxScroll = Math.max(0, all.length - viewport)
     peek.scrollRow = Math.min(Math.max(0, peek.scrollRow), maxScroll)
-    const lines = all.slice(peek.scrollRow, peek.scrollRow + Math.max(1, budget - 1))
-    const regions: HitRegion[] = []
-    // The ONE back affordance is the last physical row of the pane.
-    const openable = peek.sessionId !== this.options.currentSessionId && !this.snapshot.resumePending
-    const backText = openable
-      ? 'Esc back · Space close · Enter open'
-      : 'Esc back · Space close'
-    const back = color.textMuted(fit(backText, width))
-    regions.push({ kind: 'peek-back', xStart: 0, xEnd: Math.max(0, width - 1), line: Math.min(lines.length, budget - 1) })
-    lines.push(back)
-    return { lines: lines.slice(0, budget), regions }
+    const lines = all.slice(peek.scrollRow, peek.scrollRow + viewport)
+    // The page keys use the REAL painted row count: a short Peek never pages
+    // past its own content and a full one never skips a row.
+    this.lastPaintedListRows = Math.max(1, lines.length)
+    return { lines: lines.slice(0, budget), regions: [] }
   }
 
   private peekLines(
@@ -2151,9 +2165,6 @@ export class SessionWorkspacePanel implements Component {
       ? this.snapshot.searchResults.find(result => result.row.id === row.id)?.snippet
       : undefined
     if (snippet !== undefined) lines.push(line('Content hit', `…${sanitizedPhysicalLine(snippet)}…`, 'dim'))
-    if (row.id !== this.options.currentSessionId && !this.snapshot.resumePending) {
-      lines.push(color.textMuted(fit('Open: Enter (switch session, re-proved by the read owner)', width)))
-    }
     return lines
   }
 
@@ -2301,9 +2312,43 @@ export class SessionWorkspacePanel implements Component {
     return lines
   }
 
-  private renderActionBar(width: number): string {
+  /** Paint the ONE physical Action Bar from the shared layout. Hit geometry is
+   *  the UNPAINTED `layoutActionBarRow` span (half-open), converted to this
+   *  panel's inclusive `xEnd`; separators, padding and a truncated row are
+   *  always inert. Returned regions carry the synthetic row 0; each `render()`
+   *  branch remaps them to the row really painted. */
+  private renderActionBar(width: number): { readonly line: string; readonly regions: readonly HitRegion[] } {
     const segments = this.actionBarSegments()
-    return color.textMuted(renderActionBarRow(segments, width))
+    if (segments.length === 0) {
+      return { line: color.textMuted(renderActionBarRow(segments, width)), regions: [] }
+    }
+    const layout = layoutActionBarRow(segments, width)
+    // One surviving segment that still cannot fit is truncated with the
+    // ellipsis and yields NO span: it is a fact, never a target.
+    if (layout.truncated) return { line: color.textMuted(layout.text), regions: [] }
+    const parts: string[] = []
+    const regions: HitRegion[] = []
+    layout.spans.forEach((span, index) => {
+      if (index > 0) parts.push(color.textMuted(ACTION_BAR_SEPARATOR))
+      const segment = segments[span.inputIndex]!
+      if (segment.action === undefined) {
+        parts.push(color.textMuted(span.text))
+        return
+      }
+      parts.push(paintActionSpan(span.text, segment.ink))
+      regions.push({
+        kind: 'bar-action',
+        action: segment.action,
+        xStart: span.startCol,
+        xEnd: span.endCol - 1,
+        line: 0,
+      })
+    })
+    const line = parts.join('')
+    // Colours never change the visible width; pad to the historical row width
+    // so `visibleWidth(line)` is the UNPAINTED layout width (≤ width).
+    const padding = visibleWidth(layout.text) - visibleWidth(line)
+    return { line: padding > 0 ? `${line}${' '.repeat(padding)}` : line, regions }
   }
 
   /** The ONE current Enter verb of the selected typed row. */
@@ -2311,74 +2356,80 @@ export class SessionWorkspacePanel implements Component {
     switch (row.kind) {
       case 'folder':
         if (this.chooserMode() && this.options.currentSessionId === undefined && this.workspaces.byId.has(row.workspaceId)) {
-          return { text: 'Enter Choose workspace', short: 'Choose' }
+          return { text: 'Choose [Enter]', short: 'Choose' }
         }
-        return row.expanded ? { text: 'Enter Collapse', short: 'Collapse' } : { text: 'Enter Expand', short: 'Expand' }
+        return row.expanded ? { text: 'Collapse [Enter]', short: 'Collapse' } : { text: 'Expand [Enter]', short: 'Expand' }
       case 'newSession':
-        return { text: 'Enter New session', short: 'New' }
+        return { text: 'New [Enter]', short: 'New' }
       case 'addDirectory':
-        return { text: 'Enter Add directory', short: 'Add' }
+        return { text: 'Add [Enter]', short: 'Add' }
       case 'showMore':
-        return { text: 'Enter More sessions', short: 'More' }
+        return { text: 'More [Enter]', short: 'More' }
       case 'session':
-        return { text: 'Enter Open', short: 'Open' }
+        return { text: 'Open [Enter]', short: 'Open' }
     }
   }
 
-  private actionBarSegments(): { text: string; priority: number; short?: string }[] {
+  private actionBarSegments(): SessionBarSegment[] {
     if (this.directoryEntryActive) {
-      if (this.directorySubmitting) return [{ text: 'Verifying directory', priority: 9, short: 'Verifying' }]
+      if (this.directorySubmitting) return [{ text: 'Verifying directory…', priority: 9, short: 'Verifying' }]
       const candidatesPainted = this.paintedDirectorySuggestionPaths.length
-      const segments: { text: string; priority: number; short?: string }[] = []
+      const segments: SessionBarSegment[] = []
       if (candidatesPainted > 0) {
+        // Keyboard-only hints: the candidate rows already own the click and
+        // Tab/arrows are not pointer actions.
         segments.push({ text: 'Tab Complete', priority: 6, short: 'Tab' })
         if (candidatesPainted > 1) segments.push({ text: '↑↓ Choose', priority: 5, short: '↑↓' })
-        segments.push({ text: 'Enter Verify directory', priority: 7, short: 'Verify' })
-        segments.push({ text: 'Esc Hide suggestions', priority: 9, short: 'Esc' })
+        if (this.directoryEditorPainted) {
+          segments.push({ text: 'Verify [Enter]', priority: 7, short: 'Verify', action: 'verify', ink: 'primary' })
+        }
+        // The first Esc step this frame really promises: fold the suggestions
+        // (the same ladder the key follows).
+        segments.push({ text: 'Hide suggestions [Esc]', priority: 9, short: 'Hide', action: 'cancel', ink: 'secondary' })
         return segments
       }
-      if (this.directoryEditorPainted) segments.push({ text: 'Enter Verify directory', priority: 7, short: 'Verify' })
-      segments.push({ text: 'Esc Cancel', priority: 9, short: 'Cancel' })
+      if (this.directoryEditorPainted) {
+        segments.push({ text: 'Verify [Enter]', priority: 7, short: 'Verify', action: 'verify', ink: 'primary' })
+      }
+      segments.push({ text: 'Cancel [Esc]', priority: 9, short: 'Cancel', action: 'cancel', ink: 'secondary' })
       return segments
     }
     if (this.focus === 'peek') {
       const openable = this.peek?.sessionId !== this.options.currentSessionId && !this.snapshot.resumePending
-      return [
-        { text: 'Up/Down scroll', priority: 6, short: 'Scroll' },
-        ...(openable ? [{ text: 'Enter open', priority: 7, short: 'Open' }] : []),
-        { text: 'Space close', priority: 5, short: 'Space' },
-        { text: 'Esc back', priority: 9, short: 'Esc' },
-      ]
+      const segments: SessionBarSegment[] = [{ text: 'Up/Down scroll', priority: 6, short: 'Scroll' }]
+      if (openable) segments.push({ text: 'Open [Enter]', priority: 7, short: 'Open', action: 'open', ink: 'primary' })
+      segments.push({ text: 'Back [Esc]', priority: 9, short: 'Esc', action: 'close', ink: 'secondary' })
+      return segments
     }
     if (this.focus === 'search-results') {
       const painted = new Set(this.lastPaintedResultIds)
       const selectedPainted = this.selectedSearchSessionId !== undefined && painted.has(this.selectedSearchSessionId)
-      const segments: { text: string; priority: number; short?: string }[] = []
+      const segments: SessionBarSegment[] = []
       if (painted.size >= 2) segments.push({ text: 'Up/Down move', priority: 6, short: 'Move' })
       if (selectedPainted && !this.snapshot.resumePending) {
-        segments.push({ text: 'Space peek', priority: 4, short: 'Peek' })
         // The opened Session is a legal search hit, but Enter on it is the
         // same deliberate no-op as in the browse tree.
         if (this.selectedSearchSessionId !== this.options.currentSessionId) {
-          segments.push({ text: 'Enter open', priority: 7, short: 'Open' })
+          segments.push({ text: 'Open [Enter]', priority: 7, short: 'Open', action: 'open', ink: 'primary' })
         }
+        segments.push({ text: 'Peek [Space]', priority: 4, short: 'Peek', action: 'peek', ink: 'secondary' })
       }
-      segments.push({ text: 'Esc back', priority: 9, short: 'Esc' })
+      segments.push({ text: 'Back [Esc]', priority: 9, short: 'Esc', action: 'close', ink: 'secondary' })
       return segments
     }
     if (this.focus === 'search') {
-      return [
-        ...(this.snapshot.searchResults.length > 0
-          ? [{ text: 'Enter results', priority: 5, short: 'Results' }]
-          : []),
-        { text: 'Esc back', priority: 9, short: 'Esc' },
-      ]
+      const segments: SessionBarSegment[] = []
+      if (this.snapshot.searchResults.length > 0) {
+        segments.push({ text: 'Results [Enter]', priority: 5, short: 'Results', action: 'results', ink: 'primary' })
+      }
+      segments.push({ text: 'Back [Esc]', priority: 9, short: 'Esc', action: 'close', ink: 'secondary' })
+      return segments
     }
     if (this.newSessionPending !== undefined) {
       return [
         { text: 'Starting session…', priority: 9, short: 'Starting' },
         { text: '/ search', priority: 5, short: '/' },
-        { text: 'Esc close', priority: 9, short: 'Esc' },
+        { text: 'Close [Esc]', priority: 9, short: 'Esc', action: 'close', ink: 'secondary' },
       ]
     }
     // Browse: advertise ONLY what the painted frame can really execute.
@@ -2388,7 +2439,7 @@ export class SessionWorkspacePanel implements Component {
     const selectedPainted = selected !== undefined && painted.has(selected.id)
     const paintedFolders = paintedRows.filter(row => row.kind === 'folder').length
     const folderCount = this.treeRowsCache.filter(row => row.kind === 'folder').length
-    const segments: { text: string; priority: number; short?: string }[] = []
+    const segments: SessionBarSegment[] = []
     if (paintedFolders > 0 && folderCount >= 2) {
       segments.push({ text: `${SESSION_WORKSPACE_CHORDS.folderCycle.label} Workspace`, priority: 3, short: 'Tab' })
     }
@@ -2398,15 +2449,21 @@ export class SessionWorkspacePanel implements Component {
       if (selected.kind === 'session' && selected.sessionId === this.options.currentSessionId) {
         // Enter on the opened Session is a deliberate no-op: advertise only
         // the read-only Peek it really supports.
-        segments.push({ text: 'Space peek', priority: 4, short: 'Peek' })
+        segments.push({ text: 'Peek [Space]', priority: 4, short: 'Peek', action: 'peek', ink: 'secondary' })
+      } else if (selected.kind === 'folder' || selected.kind === 'session') {
+        const enter = this.enterAction(selected)
+        segments.push({ text: enter.text, priority: 7, short: enter.short, action: 'activate-row', ink: 'primary' })
+        if (selected.kind === 'session') segments.push({ text: 'Peek [Space]', priority: 4, short: 'Peek', action: 'peek', ink: 'secondary' })
       } else {
+        // New / Add / More: the painted ROOT ROW already runs that explicit
+        // action, so the bar keeps only its truthful keyboard hint and never
+        // registers a second button for the same intent (§8.2).
         const enter = this.enterAction(selected)
         segments.push({ text: enter.text, priority: 7, short: enter.short })
-        if (selected.kind === 'session') segments.push({ text: 'Space peek', priority: 4, short: 'Peek' })
       }
     }
     segments.push({ text: '/ search', priority: 5, short: '/' })
-    segments.push({ text: 'Esc close', priority: 9, short: 'Esc' })
+    segments.push({ text: 'Close [Esc]', priority: 9, short: 'Esc', action: 'close', ink: 'secondary' })
     return segments
   }
 }

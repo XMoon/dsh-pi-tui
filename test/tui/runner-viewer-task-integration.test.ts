@@ -1317,7 +1317,7 @@ test('switching sessions tears down the Job status viewer with its Task Browser'
   await vt.waitForRender()
   assert.equal(app.overlayGraphState().handles, 1, 'the browser only (the Job is a SCREEN)')
   assert.equal(jobWorkspaceOpen(view()), true, 'the Job workspace owns the surface')
-  assert.ok(view().includes('Esc back'), `the Job workspace shows Esc back:\n${view()}`)
+  assert.ok(view().includes('Back [Esc]'), `the Job workspace shows its Back affordance:\n${view()}`)
 
   // A fullscreen Session Workspace lease is mutually exclusive with the open
   // Job workspace: `/resume` is refused and the Task Center stack survives.
@@ -1336,7 +1336,7 @@ test('switching sessions tears down the Job status viewer with its Task Browser'
   await resume({ rawInput: sessionB.id })
   await vt.waitForRender()
   assert.equal(app.overlayGraphState().handles, 0, 'the whole Task Center stack is torn down')
-  assert.ok(!view().includes('Esc back'), `the old Job View must not survive the switch:\n${view()}`)
+  assert.ok(!view().includes('Back [Esc]'), `the old Job View must not survive the switch:\n${view()}`)
   // The BROWSER's own chrome is the discriminator: the new session's
   // first-party Task Quick accessory may legitimately paint the same fixture
   // roster label below the editor, so a bare label search can no longer tell

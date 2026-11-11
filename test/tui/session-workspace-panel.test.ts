@@ -257,8 +257,8 @@ test('a retained first-submit path enters Browser directly, submits once, and ex
   await h.paint()
   assert.ok(h.view().includes('could not start a session: the Host refused'),
     `the path editor keeps the originating failure notice:\n${h.view()}`)
-  assert.ok(h.view().includes('Verify directory') && h.view().includes('Cancel'), 'the path mode paints its actual actions')
-  const actionLine = lineIndexOf(panelFrame(h), 'Enter verify')
+  assert.ok(h.view().includes('Verify [Enter]') && h.view().includes('Cancel [Esc]'), 'the path mode paints its actual actions on the ONE bar')
+  const actionLine = lineIndexOf(panelFrame(h), 'Verify [Enter]')
   await clickCell(h, 2, actionLine)
   assert.deepEqual(submitted, ['/launch/failed', '/launch/failed'], 'clicking the painted Verify word submits the same retained proposal')
   outcomes[1]!({ kind: 'registered', workspaceId: 'ws-launch', path: '/host/canonical' })
@@ -276,7 +276,7 @@ test('the browse list paints the header, current marker, selection and guarded R
   assert.ok(view.includes('Current session') && view.includes('Other session'), `both titles paint:\n${view}`)
   assert.ok(/^> ● current-/m.test(view), `Current keeps only its own row marker:\n${view}`)
   const lines = view.split('\n')
-  assert.ok(lines[lines.length - 1]!.includes('Esc close'), 'the action bar is the last physical row')
+  assert.ok(lines[lines.length - 1]!.includes('Close [Esc]'), 'the action bar is the last physical row')
 
   // Enter on the selected CURRENT row is a no-op: currentness is not selection.
   h.vt.sendInput('\r')
@@ -338,7 +338,7 @@ test('the first Enter moves focus to the first REAL result; only the second Ente
   h.vt.sendInput('\r')
   await h.paint()
   assert.deepEqual(h.resumes, [], 'Enter from the editor only enters the result list')
-  assert.ok(h.view().includes('Esc back'), 'the result list advertises its own Esc')
+  assert.ok(h.view().includes('Back [Esc]'), 'the result list advertises its own Esc')
   h.vt.sendInput('\x1b[B') // second result
   await h.paint()
   h.vt.sendInput('\r')
@@ -895,6 +895,15 @@ function readyHostLevel(value: DirectoryListing): HostDirectoryBrowseOutcome {
   return { kind: 'ready', listing: value }
 }
 
+/** Click the named verb segment on the ONE physical Action Bar (last row). */
+async function clickBarAction(h: Harness, verb: string): Promise<void> {
+  const frame = panelFrame(h)
+  const bar = frame[frame.length - 1]!
+  const x = bar.indexOf(verb)
+  assert.ok(x >= 0, `the bar paints ${JSON.stringify(verb)}:\n${bar}`)
+  await clickCell(h, x + 1, frame.length - 1)
+}
+
 test('the per-open folder expansion and selection survive one global-search round trip', async () => {
   const h = harness({ columns: 100, rows: 24 })
   h.handle.setSnapshot(snapshot())
@@ -984,7 +993,7 @@ test('Space opens a read-only Peek: no Host write, Esc restores the browse selec
   assert.ok(peek.includes('Preset: plan'), 'the projected preset is read-only detail')
   assert.ok(peek.includes('Running: No'), 'the official running fact is stated')
   assert.ok(peek.includes('Pending: Pending unverified'), 'no answerability proof is stated as unverified')
-  assert.ok(peek.includes('Esc back'), 'the Peek advertises its own exit')
+  assert.ok(peek.includes('Back [Esc]'), 'the Peek advertises its own exit')
   assert.ok(!/Allow|Deny|Reject|Answer/.test(peek), `Peek carries no answer form:\n${peek}`)
   assert.deepEqual(h.resumes, [], 'opening Peek never resumes or writes anything')
   assert.deepEqual(h.queries, [], 'opening Peek never edits the search')
@@ -1715,9 +1724,9 @@ test('one-line header, truthful Current/Next, and a Footer of the live typed ver
   await h.paint()
   assert.ok(/^[ >]*[▾▸] Alpha · 1 · Current/m.test(h.view()), 'a manually collapsed Folder still states Current')
   let lines = h.view().split('\n')
-  assert.ok(lines[lines.length - 1]!.includes('Enter Expand'), 'the Footer advertises the current Enter verb')
-  assert.ok(!lines[lines.length - 1]!.includes('Space peek'), 'a Folder advertises no Peek')
-  assert.ok(lines[lines.length - 1]!.includes('Esc close'), 'Esc is always the last segment')
+  assert.ok(lines[lines.length - 1]!.includes('Expand [Enter]'), 'the Footer advertises the current Enter verb')
+  assert.ok(!lines[lines.length - 1]!.includes('Peek [Space]'), 'a Folder advertises no Peek')
+  assert.ok(lines[lines.length - 1]!.includes('Close [Esc]'), 'Esc is always the last segment')
   // Select the Session row: Footer advertises Open + Peek; the row keeps ●.
   h.vt.sendInput('\r') // re-expand Alpha
   await h.paint()
@@ -1726,9 +1735,9 @@ test('one-line header, truthful Current/Next, and a Footer of the live typed ver
   h.vt.sendInput('\x1b[B') // the current Session row
   await h.paint()
   lines = h.view().split('\n')
-  assert.ok(!lines[lines.length - 1]!.includes('Enter Open'),
+  assert.ok(!lines[lines.length - 1]!.includes('Open [Enter]'),
     'the opened Session never advertises the deliberate no-op Enter')
-  assert.ok(lines[lines.length - 1]!.includes('Space peek'), 'the opened Session still advertises its Peek')
+  assert.ok(lines[lines.length - 1]!.includes('Peek [Space]'), 'the opened Session still advertises its Peek')
   assert.ok(/^> ● current-/m.test(h.view()), 'Current is a row marker, not the selection')
   // A non-current Session advertises its real Open verb.
   h.vt.sendInput('\t') // Beta Folder
@@ -1740,7 +1749,7 @@ test('one-line header, truthful Current/Next, and a Footer of the live typed ver
   h.vt.sendInput('\x1b[B')
   await h.paint()
   lines = h.view().split('\n')
-  assert.ok(lines[lines.length - 1]!.includes('Enter Open') && lines[lines.length - 1]!.includes('Space peek'),
+  assert.ok(lines[lines.length - 1]!.includes('Open [Enter]') && lines[lines.length - 1]!.includes('Peek [Space]'),
     'a non-current Session advertises Open and Peek')
   assert.ok(/^> .*Other session/m.test(h.view()))
   h.app.dispose()
@@ -1898,8 +1907,8 @@ test('a short frame advertises only actions the painted body can really run', as
   assert.equal(squeezedFrame.length, 3, 'the 3-row frame keeps header/body/action bar')
   assert.ok(!squeezedFrame.join('\n').includes('Other session'), 'the status consumed the only body row')
   const squeezedFooter = squeezedFrame[squeezedFrame.length - 1]!
-  assert.ok(squeezedFooter.includes('Esc close'), 'Esc survives the status-squeezed frame')
-  assert.ok(!squeezedFooter.includes('Enter '), `no phantom Enter is advertised:\n${squeezedFooter}`)
+  assert.ok(squeezedFooter.includes('Close [Esc]'), 'Esc survives the status-squeezed frame')
+  assert.ok(!squeezedFooter.includes('[Enter]'), `no phantom Enter is advertised:\n${squeezedFooter}`)
   assert.ok(!squeezedFooter.includes('Tab/Shift+Tab'), 'no Folder ring is advertised with no painted Folder')
   assert.ok(!squeezedFooter.includes('Up/Down'), 'no movement is advertised over zero painted rows')
   squeezed.vt.sendInput('\x1b[B')
@@ -1923,13 +1932,13 @@ test('a short frame advertises only actions the painted body can really run', as
   })
   await painted.paint()
   let footer = panelFrame(painted)[2]!
-  assert.ok(footer.includes('Space peek') && !footer.includes('Enter '), `the current row advertises Peek only:\n${footer}`)
-  assert.ok(footer.includes('Esc close'))
+  assert.ok(footer.includes('Peek [Space]') && !footer.includes('[Enter]'), `the current row advertises Peek only:\n${footer}`)
+  assert.ok(footer.includes('Close [Esc]'))
   painted.vt.sendInput('\x1b[B')
   await painted.paint()
   footer = panelFrame(painted)[2]!
-  assert.ok(footer.includes('Enter Open'), `the painted non-current row advertises Open:\n${footer}`)
-  assert.ok(footer.includes('Esc close'), 'Esc stays the last segment')
+  assert.ok(footer.includes('Open [Enter]'), `the painted non-current row advertises Open:\n${footer}`)
+  assert.ok(footer.includes('Close [Esc]'), 'Esc stays the last segment')
   painted.vt.sendInput('\r')
   await painted.paint()
   assert.deepEqual(painted.resumes, [OTHER], 'the advertised Open is admitted by the same frame')
@@ -1968,7 +1977,7 @@ test('Folder New is locked by ONE per-operation settlement, never by a notice', 
   assert.ok(h.view().includes('Starting session…'), 'the pending state is visible')
   const pendingFooter = () => panelFrame(h)[panelFrame(h).length - 1]!
   assert.ok(pendingFooter().includes('Starting session…'))
-  assert.ok(!pendingFooter().includes('Enter New session'))
+  assert.ok(!pendingFooter().includes('New [Enter]'))
 
   // B5.1/B5.2: an unrelated notice, its expiry, and a changed notice NEVER
   // settle the operation. Only the operation's own callback may do that.
@@ -2144,15 +2153,15 @@ test('a current Session search hit never advertises the deliberate no-op Enter',
   h.vt.sendInput('\r') // editor -> first (current) result
   await h.paint()
   let footer = panelFrame(h)[panelFrame(h).length - 1]!
-  assert.ok(footer.includes('Space peek'), `the current result still advertises Peek:\n${footer}`)
-  assert.ok(!footer.includes('Enter open'), `the current result never advertises its no-op Enter:\n${footer}`)
+  assert.ok(footer.includes('Peek [Space]'), `the current result still advertises Peek:\n${footer}`)
+  assert.ok(!footer.includes('Open [Enter]'), `the current result never advertises its no-op Enter:\n${footer}`)
   h.vt.sendInput('\r')
   await h.paint()
   assert.deepEqual(h.resumes, [], 'Enter on the current search hit is a no-op')
   h.vt.sendInput('\x1b[B') // the non-current result
   await h.paint()
   footer = panelFrame(h)[panelFrame(h).length - 1]!
-  assert.ok(footer.includes('Enter open'), `the non-current result advertises Open:\n${footer}`)
+  assert.ok(footer.includes('Open [Enter]'), `the non-current result advertises Open:\n${footer}`)
   h.vt.sendInput('\r')
   await h.paint()
   assert.deepEqual(h.resumes, [OTHER], 'the advertised Open on a non-current result really resumes')
@@ -2166,9 +2175,9 @@ test('the current Session Peek never advertises its no-op Enter', async () => {
   await h.paint()
   const view = h.view()
   assert.ok(view.includes('Peek · curren'), `the current Session Peek opens:\n${view}`)
-  assert.ok(!view.includes('Enter open') && !view.includes('Open: Enter'),
+  assert.ok(!view.includes('Open [Enter]') && !view.includes('Open: Enter'),
     `neither the body hint nor the footer advertises Open:\n${view}`)
-  assert.ok(view.includes('Space close') && view.includes('Esc back'), 'the real Peek exits stay advertised')
+  assert.ok(view.includes('Back [Esc]') && !view.includes('Space close'), 'the Peek Back stays on the ONE global bar')
   h.vt.sendInput('\r')
   await h.paint()
   assert.deepEqual(h.resumes, [], 'Enter on the current Peek is a no-op')
@@ -2269,12 +2278,12 @@ test('the Footer suppresses session actions while a resume is pending', async ()
   await browse.paint()
   let footer = panelFrame(browse)[panelFrame(browse).length - 1]!
   assert.ok(browse.view().includes('Opening session…'), 'the pending fact is painted')
-  assert.ok(!footer.includes('Enter Open') && !footer.includes('Space peek'),
+  assert.ok(!footer.includes('Open [Enter]') && !footer.includes('Peek [Space]'),
     `no blocked session action is advertised while pending:\n${footer}`)
   browse.handle.setSnapshot(snapshot())
   await browse.paint()
   footer = panelFrame(browse)[panelFrame(browse).length - 1]!
-  assert.ok(footer.includes('Enter Open') && footer.includes('Space peek'),
+  assert.ok(footer.includes('Open [Enter]') && footer.includes('Peek [Space]'),
     'the actions return when the resume settles')
   browse.app.dispose()
   started.delete(browse.app)
@@ -2292,12 +2301,12 @@ test('the Footer suppresses session actions while a resume is pending', async ()
   results.handle.setSnapshot({ ...searchSnapshot, resumePending: true })
   await results.paint()
   footer = panelFrame(results)[panelFrame(results).length - 1]!
-  assert.ok(!footer.includes('Enter open') && !footer.includes('Space peek'),
+  assert.ok(!footer.includes('Open [Enter]') && !footer.includes('Peek [Space]'),
     `search results advertise no blocked action while pending:\n${footer}`)
   results.handle.setSnapshot(searchSnapshot)
   await results.paint()
   footer = panelFrame(results)[panelFrame(results).length - 1]!
-  assert.ok(footer.includes('Enter open') && footer.includes('Space peek'), 'search actions return after settlement')
+  assert.ok(footer.includes('Open [Enter]') && footer.includes('Peek [Space]'), 'search actions return after settlement')
   results.app.dispose()
   started.delete(results.app)
 
@@ -2311,12 +2320,12 @@ test('the Footer suppresses session actions while a resume is pending', async ()
   peek.handle.setSnapshot(snapshot({ resumePending: true }))
   await peek.paint()
   footer = panelFrame(peek)[panelFrame(peek).length - 1]!
-  assert.ok(!footer.includes('Enter open'), `Peek advertises no blocked Open while pending:\n${footer}`)
-  assert.ok(footer.includes('Space close') && footer.includes('Esc back'), 'the real Peek exits stay advertised')
+  assert.ok(!footer.includes('Open [Enter]'), `Peek advertises no blocked Open while pending:\n${footer}`)
+  assert.ok(footer.includes('Back [Esc]') && !footer.includes('Space close'), 'the Peek exits stay on the ONE global bar')
   peek.handle.setSnapshot(snapshot())
   await peek.paint()
   footer = panelFrame(peek)[panelFrame(peek).length - 1]!
-  assert.ok(footer.includes('Enter open'), 'the Peek Open cue returns after settlement')
+  assert.ok(footer.includes('Open [Enter]'), 'the Peek Open cue returns after settlement')
 })
 
 test('an initial search open with the path editor keeps only the path editor', async () => {
@@ -2379,7 +2388,7 @@ test('Preview and Peek state the same pending admission as the Footer', async ()
   await browse.paint()
   let view = browse.view()
   assert.ok(!view.includes('Space for read-only details'), `the Preview hides the blocked Peek cue:\n${view}`)
-  assert.ok(!view.includes('Enter Open') && !view.includes('Space peek'), 'the Footer hides both blocked verbs')
+  assert.ok(!view.includes('Open [Enter]') && !view.includes('Peek [Space]'), 'the Footer hides both blocked verbs')
   browse.handle.setSnapshot(snapshot())
   await browse.paint()
   assert.ok(browse.view().includes('Space for read-only details'), 'the Preview cue returns after settlement')
@@ -2397,12 +2406,12 @@ test('Preview and Peek state the same pending admission as the Footer', async ()
   await peek.paint()
   view = peek.view()
   assert.ok(!view.includes('Open: Enter'), `the Peek body hides its blocked Open cue:\n${view}`)
-  assert.ok(!view.includes('Enter open'), 'the Peek back row hides the blocked Open cue')
-  assert.ok(view.includes('Space close') && view.includes('Esc back'), 'the real exits stay visible')
+  assert.ok(!view.includes('Open [Enter]'), 'the Peek bar hides the blocked Open cue')
+  assert.ok(view.includes('Back [Esc]') && !view.includes('Space close'), 'the real exit stays on the ONE global bar')
   peek.handle.setSnapshot(snapshot())
   await peek.paint()
-  assert.ok(peek.view().includes('Open: Enter') && peek.view().includes('Enter open'),
-    'both Peek Open cues return after settlement')
+  assert.ok(!peek.view().includes('Open: Enter') && peek.view().includes('Open [Enter]'),
+    'only the global bar carries the Peek Open cue after settlement')
   peek.app.dispose()
   started.delete(peek.app)
 
@@ -2461,9 +2470,9 @@ test('the pending path verification blocks mouse tree actions and inert editor v
   assert.deepEqual(submitted, ['/host/pending'], 'the pending Host verification started once')
   let view = h.view()
   assert.ok(view.includes('Verifying directory…'), 'the pending verification is visible')
-  assert.ok(!view.includes('Enter Verify directory') && !view.includes('Esc Cancel'),
+  assert.ok(!view.includes('Verify [Enter]') && !view.includes('Cancel [Esc]'),
     `no inert editor verb is advertised while verifying:\n${view}`)
-  assert.ok(!panelFrame(h)[panelFrame(h).length - 1]!.includes('Enter Verify directory'),
+  assert.ok(!panelFrame(h)[panelFrame(h).length - 1]!.includes('Verify [Enter]'),
     'the Footer advertises only the verifying state')
   // A REAL painted New row is still visible under the editor; clicking it must
   // not start a second operation while the Host verification pends.
@@ -2501,7 +2510,7 @@ test('a tiny frame never submits a Host path it did not paint', async () => {
     await h.paint()
     assert.ok(h.view().includes('Host directory: /launch/failed'),
       `${rows} rows: the editable path line is preferred over the decorative Add row`)
-    assert.ok(panelFrame(h)[panelFrame(h).length - 1]!.includes('Enter Verify directory'),
+    assert.ok(panelFrame(h)[panelFrame(h).length - 1]!.includes('Verify [Enter]'),
       `${rows} rows: the advertised Enter belongs to the painted input`)
   }
   // No body line at all: the input is invisible, so Enter must be a no-op and
@@ -2510,8 +2519,8 @@ test('a tiny frame never submits a Host path it did not paint', async () => {
   await h.paint()
   assert.ok(!h.view().includes('Host directory:'), 'no input row is painted at 2 rows')
   let footer = panelFrame(h)[panelFrame(h).length - 1]!
-  assert.ok(!footer.includes('Enter Verify directory'), `no unseen submit is advertised:\n${footer}`)
-  assert.ok(footer.includes('Esc Cancel'), 'Esc remains available to leave the editor')
+  assert.ok(!footer.includes('Verify [Enter]'), `no unseen submit is advertised:\n${footer}`)
+  assert.ok(footer.includes('Cancel [Esc]'), 'Esc remains available to leave the editor')
   h.vt.sendInput('\r')
   await h.paint()
   assert.deepEqual(submitted, [], 'Enter cannot submit a path the frame did not paint')
@@ -2526,7 +2535,7 @@ test('a tiny frame never submits a Host path it did not paint', async () => {
   await h.paint()
   assert.ok(h.view().includes('/launch/failed'), 'a refusal keeps the attempted path')
   footer = panelFrame(h)[panelFrame(h).length - 1]!
-  assert.ok(footer.includes('Enter Verify directory') && footer.includes('Esc Cancel'),
+  assert.ok(footer.includes('Verify [Enter]') && footer.includes('Cancel [Esc]'),
     'the editor verbs return after the refusal')
 })
 
@@ -2694,7 +2703,7 @@ test('Enter is verify, Tab is completion and the first Esc only hides the painte
   const hidden = h.view()
   assert.ok(hidden.includes('Host directory: /host/home/p'), 'the first Esc keeps the editor and raw value')
   assert.ok(!hidden.includes('project-a/') && !hidden.includes('project-b/'), 'the first Esc hides the suggestion block')
-  assert.ok(hidden.includes('Esc cancel'), 'the remaining Esc verb is the real cancel verb')
+  assert.ok(hidden.includes('Cancel [Esc]'), 'the remaining Esc verb is the real cancel verb')
   h.vt.sendInput('\x1b')
   await h.paint()
   assert.ok(!h.view().includes('Host directory:'), 'the second Esc returns to the tree')
@@ -2867,7 +2876,7 @@ test('a pending verification owns the editor: no Tab/mouse/arrow write until the
   outcomes[0]!({ kind: 'failed', message: 'refused again' })
   await h.paint()
   assert.ok(h.view().includes('Host directory: /host/home/'), 'the settlement keeps the same raw input')
-  assert.ok(h.view().includes('Enter verify'), 'the explicit verbs return after the refusal')
+  assert.ok(h.view().includes('Verify [Enter]'), 'the explicit verbs return after the refusal')
   h.vt.sendInput('\r')
   await h.paint()
   assert.deepEqual(submitted, ['/host/home/', '/host/home/'], 'a deliberate new Enter is the only new write')
@@ -2903,8 +2912,8 @@ test('tiny and narrow frames paint only executable editor verbs', async () => {
     const visible = h.view()
     if (size.rows === 2) {
       assert.ok(!visible.includes('Host directory:'), '80x2 has no body row for an Input')
-      assert.ok(lines.at(-1)!.includes('Esc Cancel'), `80x2 advertises only the real cancel:\n${lines.at(-1)}`)
-      assert.ok(!lines.at(-1)!.includes('Enter Verify'), '80x2 never advertises an unpainted Enter')
+      assert.ok(lines.at(-1)!.includes('Cancel [Esc]'), `80x2 advertises only the real cancel:\n${lines.at(-1)}`)
+      assert.ok(!lines.at(-1)!.includes('Verify [Enter]'), '80x2 never advertises an unpainted Enter')
       h.vt.sendInput('\r')
       await h.paint()
       assert.deepEqual(submitted, [], '80x2 Enter is a NO-OP')
@@ -2992,7 +3001,7 @@ test('Host-controlled path bytes never reach the terminal while the raw value st
   await waitUntil(() => h.view().includes('No child directories'), 'the accepted path level is read')
   const lines = panelFrame(h)
   assert.equal(lines.length, 30, 'a line-breaking Host byte never changes the physical row count')
-  assert.ok(lines.at(-1)!.includes('Enter Verify directory'),
+  assert.ok(lines.at(-1)!.includes('Verify [Enter]'),
     `the action bar is still the last physical row:\n${lines.join('\n')}`)
   assert.ok(!h.raw().includes('pi-tui-pr3-pwned'),
     'the accepted official path injected its OSC sequence into the terminal output')
@@ -3035,14 +3044,14 @@ test('the wide Add preview advertises the SAME painted Esc ladder as the body an
   assert.match(previewColumn(h), /Enter Verify directory · Esc Hide suggestions/,
     'the expanded Preview promises the real first Esc step')
   assert.doesNotMatch(previewColumn(h), /Esc Cancel/u)
-  assert.match(panelFrame(h).at(-1)!, /Esc Hide suggestions/u, 'the footer agrees with the body and Preview')
+  assert.match(panelFrame(h).at(-1)!, /Hide suggestions \[Esc\]/u, 'the footer agrees with the Preview Esc step')
 
   h.vt.sendInput('\x1b')
   await h.paint()
   assert.match(previewColumn(h), /Enter Verify directory · Esc Cancel/,
     'after the fold the Preview promises the real close step')
   assert.doesNotMatch(previewColumn(h), /Esc Hide suggestions/u)
-  assert.match(panelFrame(h).at(-1)!, /Esc Cancel/u)
+  assert.match(panelFrame(h).at(-1)!, /Cancel \[Esc\]/u)
 
   h.vt.sendInput('\x1b')
   await h.paint()
@@ -3128,4 +3137,182 @@ test('a replaced prefix query settles stopped and a real edit recovers the next 
   await waitUntil(() => h.view().includes('project-b/'), 'a real edit starts and settles the next query generation')
   assert.equal(calls, 3)
   assert.ok(h.view().includes('Host directory: /host/home/pr'), 'the raw edit value is unchanged')
+})
+
+test('the Peek bar is the only exit: the removed local row is inert and Open resumes once', async () => {
+  const h = harness({ columns: 100, rows: 8 })
+  h.handle.setSnapshot(snapshot())
+  await h.paint()
+  h.vt.sendInput('\x1b[B')
+  await h.paint()
+  const browseBar = panelFrame(h)[panelFrame(h).length - 1]!
+  assert.ok(browseBar.includes('Peek [Space]') && browseBar.includes('Close [Esc]'),
+    `the Browse bar is the ONE physical bar:\n${browseBar}`)
+  assert.equal(visibleWidth(browseBar), 100, 'the painted bar keeps the historical full-row width')
+  await clickBarAction(h, 'Peek')
+  let view = h.view()
+  assert.ok(view.includes('Peek · other-se'), `the bar Peek opens the read-only detail:\n${view}`)
+  assert.ok(!view.includes('Space close') && !view.includes('Esc back'),
+    'the Peek body carries no local action row')
+  assert.ok(panelFrame(h)[panelFrame(h).length - 1]!.includes('Back [Esc]'),
+    'the ONE global bar owns the Peek Back')
+  // At this height the removed local action row occupied the fourth body row
+  // (physical row 5): it is now read-only content and must be inert.
+  await clickCell(h, 2, 5)
+  assert.ok(h.view().includes('Peek · other-se'), 'a body click never closes the Peek')
+  assert.deepEqual(h.resumes, [], 'opening and clicking the body never resumes')
+  const peekBar = panelFrame(h)[panelFrame(h).length - 1]!
+  const separator = peekBar.indexOf(' · ')
+  assert.ok(separator >= 0, `the Peek bar separates its segments:\n${peekBar}`)
+  await clickCell(h, separator + 1, panelFrame(h).length - 1)
+  assert.ok(h.view().includes('Peek · other-se'), 'the bar separator is decoration, never a target')
+  assert.deepEqual(h.resumes, [], 'the separator cell never resumes')
+  // PageDown pages by the REAL painted row count (four rows), and neither the
+  // page key nor Down can scroll past the last full page.
+  h.vt.sendInput('\x1b[6~')
+  await h.paint()
+  assert.ok(h.view().includes('cwd:'), `PageDown lands on the next page without skipping rows:\n${h.view()}`)
+  for (let step = 0; step < 5; step += 1) {
+    h.vt.sendInput('\x1b[B')
+    await h.paint()
+  }
+  view = h.view()
+  assert.ok(view.includes('Source:') && !view.includes('Peek · other-se'),
+    `the Peek scroll stops at the last full page:\n${view}`)
+  await clickBarAction(h, 'Open')
+  assert.deepEqual(h.resumes, [OTHER], 'the bar Open is the ONE re-proved resume intent')
+})
+
+test('the Search bar Results verb only enters the result list and never resumes', async () => {
+  const h = harness({ initialMode: 'search' })
+  h.handle.setSnapshot(snapshot({
+    query: 'needle',
+    searchState: 'ready',
+    searchResults: [{ row: row(OTHER, 2_000, { title: 'Other session' }), source: 'Content', snippet: 'needle other' }],
+  }), 'needle')
+  await h.paint()
+  assert.ok(panelFrame(h)[panelFrame(h).length - 1]!.includes('Results [Enter]'))
+  await clickBarAction(h, 'Results')
+  assert.deepEqual(h.resumes, [], 'the bar Results never resumes the first hit')
+  const resultsBar = panelFrame(h)[panelFrame(h).length - 1]!
+  assert.ok(resultsBar.includes('Open [Enter]') && resultsBar.includes('Back [Esc]'),
+    `the bar now names the result-list verbs:\n${resultsBar}`)
+  await clickBarAction(h, 'Open')
+  assert.deepEqual(h.resumes, [OTHER], 'the result-list Open is the deliberate second Enter')
+})
+
+test('the bar Verify submits the painted Host path once and is inert while verifying', async () => {
+  const submitted: string[] = []
+  const outcomes: Array<(outcome: import('../../src/app/command/session-browser-presentation.ts').SessionBrowserDirectorySettlement) => void> = []
+  const h = harness({
+    columns: 100,
+    rows: 24,
+    initialDirectoryEntry: true,
+    initialDirectoryPath: '/host/verify',
+    onAddDirectory: (path, settle) => { submitted.push(path); outcomes.push(settle) },
+  })
+  await h.paint()
+  assert.ok(h.view().includes('Host directory: /host/verify'), 'the retained path is painted')
+  const bar = () => panelFrame(h)[panelFrame(h).length - 1]!
+  assert.ok(bar().includes('Verify [Enter]') && bar().includes('Cancel [Esc]'),
+    `the path editor verbs live on the ONE bar:\n${bar()}`)
+  const verifyX = bar().indexOf('Verify') + 1
+  const cancelX = bar().indexOf('Cancel') + 1
+  await clickBarAction(h, 'Verify')
+  assert.deepEqual(submitted, ['/host/verify'], 'the bar Verify reaches the existing onAddDirectory')
+  assert.ok(bar().includes('Verifying directory…'), 'the submitting fact replaces the verbs')
+  // The former Verify/Cancel cells now hold a fact: a pending verification is
+  // never submitted twice and never cancelled.
+  await clickCell(h, verifyX, panelFrame(h).length - 1)
+  await clickCell(h, cancelX, panelFrame(h).length - 1)
+  assert.deepEqual(submitted, ['/host/verify'], 'a pending verification never submits twice')
+  assert.equal(h.closes, 0, 'a pending verification is never cancelled by a click')
+  assert.ok(h.view().includes('Host directory: /host/verify'), 'the editor stays the visible owner')
+})
+
+test('a bar gesture is dropped by any frame change between press and release', async () => {
+  const h = harness({ columns: 100, rows: 24 })
+  h.handle.setSnapshot(snapshot())
+  await h.paint()
+  h.vt.sendInput('\x1b[B')
+  await h.paint()
+  // Positive control: the exact same gesture on an UNCHANGED frame fires.
+  await clickBarAction(h, 'Peek')
+  assert.ok(h.view().includes('Peek · other-se'), 'control: an unchanged bar press/release opens the Peek')
+  h.vt.sendInput('\x1b')
+  await h.paint()
+  assert.ok(!h.view().includes('Peek ·'), 'control: the keyboard Esc closes it again')
+  // Press Peek, move the tree selection, release on the old cell: inert.
+  let frame = panelFrame(h)
+  let bar = frame[frame.length - 1]!
+  let x = bar.indexOf('Peek') + 1
+  let y = frame.length - 1
+  h.vt.sendInput(`\x1b[<0;${x + 1};${y + 1}M`)
+  await h.paint()
+  h.vt.sendInput('\x1b[H')
+  await h.paint()
+  h.vt.sendInput(`\x1b[<0;${x + 1};${y + 1}m`)
+  await h.paint()
+  assert.ok(!h.view().includes('Peek ·'), 'a scroll between press and release drops the Peek gesture')
+  // Press Open, resize, release on the old cell: inert.
+  h.vt.sendInput('\x1b[B')
+  await h.paint()
+  frame = panelFrame(h)
+  bar = frame[frame.length - 1]!
+  x = bar.indexOf('Open') + 1
+  y = frame.length - 1
+  h.vt.sendInput(`\x1b[<0;${x + 1};${y + 1}M`)
+  await h.paint()
+  h.vt.resize(80, 20)
+  await h.paint()
+  h.vt.sendInput(`\x1b[<0;${x + 1};${y + 1}m`)
+  await h.paint()
+  assert.deepEqual(h.resumes, [], 'a resize between press and release drops the Open gesture')
+  assert.equal(h.closes, 0, 'the dropped Open gesture never closes the Browser')
+  // Press Results in the search editor, clear the real results, release: inert.
+  h.vt.sendInput('/')
+  await h.paint()
+  h.handle.setSnapshot(snapshot({
+    query: 'needle',
+    searchState: 'ready',
+    searchResults: [{ row: row(OTHER, 2_000, { title: 'Other session' }), source: 'Content', snippet: 'needle' }],
+  }), 'needle')
+  await h.paint()
+  frame = panelFrame(h)
+  bar = frame[frame.length - 1]!
+  x = bar.indexOf('Results') + 1
+  y = frame.length - 1
+  h.vt.sendInput(`\x1b[<0;${x + 1};${y + 1}M`)
+  await h.paint()
+  h.handle.setSnapshot(snapshot({ query: 'needle', searchState: 'ready', searchResults: [] }), 'needle')
+  await h.paint()
+  h.vt.sendInput(`\x1b[<0;${x + 1};${y + 1}m`)
+  await h.paint()
+  assert.deepEqual(h.resumes, [], 'a changed search state between press and release never resumes')
+  assert.equal(h.closes, 0, 'a changed search state never closes through the old bar cell')
+  assert.ok(h.view().includes('Search all workspaces'), 'the search editor keeps its own focus')
+})
+
+test('a one-row frame has no action bar, and a truncated bar segment has no hit', async () => {
+  const headerOnly = harness({ columns: 80, rows: 1 })
+  headerOnly.handle.setSnapshot(snapshot())
+  await headerOnly.paint()
+  assert.equal(panelFrame(headerOnly).length, 1, 'height=1 paints the header only')
+  await clickCell(headerOnly, 2, 0)
+  assert.equal(headerOnly.closes, 0, 'the one-row header never creates a bar target')
+  assert.deepEqual(headerOnly.resumes, [])
+  headerOnly.app.dispose()
+  started.delete(headerOnly.app)
+
+  // Two cells cannot paint even the compact Esc verb whole: the row truncates
+  // with the ellipsis and yields no spans, so it must stay inert.
+  const narrow = harness({ columns: 2, rows: 3 })
+  narrow.handle.setSnapshot(snapshot())
+  await narrow.paint()
+  const frame = panelFrame(narrow)
+  assert.equal(frame.length, 3, 'the 3-row frame keeps its physical last row')
+  assert.ok(!frame[2]!.includes('Esc'), `the truncated Esc is never painted whole:\n${frame[2]}`)
+  await clickCell(narrow, 0, 2)
+  assert.equal(narrow.closes, 0, 'a truncated bar segment has no hit region')
+  assert.deepEqual(narrow.resumes, [])
 })
