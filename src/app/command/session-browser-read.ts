@@ -875,7 +875,9 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
           ...(openOptions.initialDirectoryPath === undefined ? {} : { initialDirectoryPath: openOptions.initialDirectoryPath }),
           onQueryChange: (query) => changeQuery(panel, query),
           onUseDirectory: options.onUseDirectory,
-          onNewSession: (workspaceId, settle) => options.onWorkspaceNewSession?.(workspaceId, () => retire(panel, true), settle),
+          onNewSession: options.onWorkspaceNewSession === undefined
+            ? undefined
+            : (workspaceId, settle) => options.onWorkspaceNewSession?.(workspaceId, () => retire(panel, true), settle),
           // The capability crosses the seam only when the composing owner really
           // has one: an always-present closure would make an unsupported Add
           // action look enabled.

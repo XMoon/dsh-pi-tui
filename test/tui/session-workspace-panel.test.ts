@@ -211,12 +211,8 @@ test('the sessionless Folder New session action uses the shared command callback
     { workspaceId: 'ws-other', path: '/other', title: 'Other', sessionIds: [CURRENT, OTHER] },
   ] })
   await h.paint()
-  // The next-create destination starts expanded with its Session rows; move the
-  // cursor onto that Folder so its New session action is offered.
-  h.vt.sendInput('\x1b[A')
-  await h.paint()
-  h.vt.sendInput('\t')
-  await h.paint()
+  // The next-create destination is the initial cursor and starts expanded;
+  // Right enters its first child, the New row.
   h.vt.sendInput('\x1b[C')
   await h.paint()
   h.vt.sendInput('\r')
@@ -956,7 +952,7 @@ test('Space opens a read-only Peek: no Host write, Esc restores the browse selec
 })
 
 test('all official Workspace folders, including empty and Unassigned, stay in one browse tree', async () => {
-  const h = harness({ columns: 100, rows: 24, initialBrowseScope: 'current' })
+  const h = harness({ columns: 100, rows: 24, initialBrowseScope: 'current', onAddDirectory: () => {} })
   h.handle.setSnapshot(snapshot({
     rows: [row(CURRENT, 4_000, { title: 'Current session' }), row(OTHER, 3_000, { title: 'Other session' }), row(THIRD, 2_000, { title: 'Cold session' })],
   }))
@@ -1586,7 +1582,7 @@ test('chooser Right/Left and disclosure only browse; the label click is the choo
 })
 
 test('the typed selection drives Preview, Enter and Space; Folder selection never keeps a stale Session Peek', async () => {
-  const h = harness({ columns: 120, rows: 30 })
+  const h = harness({ columns: 120, rows: 30, onNewSession: () => {} })
   h.handle.setSnapshot(snapshot())
   h.handle.updateWorkspaces({
     type: 'baseline',
@@ -1606,8 +1602,9 @@ test('the typed selection drives Preview, Enter and Space; Folder selection neve
   h.vt.sendInput(' ')
   await h.paint()
   assert.ok(!h.view().includes('Peek ·'), 'Space on a Folder never opens a stale Session Peek')
-  // Expand by the disclosure, then click the Session row.
-  await clickCell(h, 2, folderLineIndexOf(panelFrame(h), 'Beta'))
+  // Expand with Right, then click the Session row (the disclosure toggle has
+  // its own chooser regression).
+  h.vt.sendInput('\x1b[C')
   await h.paint()
   const otherLine = lineIndexOf(panelFrame(h), 'Other session')
   await clickCell(h, 8, otherLine)
@@ -1647,7 +1644,7 @@ test('a New-row press is dropped when the official Folder disappears before the 
 })
 
 test('one-line header, truthful Current/Next, and a Footer of the live typed verbs', async () => {
-  const h = harness({ columns: 120, rows: 30, onAddDirectory: () => {} })
+  const h = harness({ columns: 120, rows: 30, onAddDirectory: () => {}, onNewSession: () => {} })
   h.handle.setSnapshot(snapshot())
   h.handle.updateWorkspaces({
     type: 'baseline',
@@ -1711,7 +1708,7 @@ test('one-line header, truthful Current/Next, and a Footer of the live typed ver
 })
 
 test('search saves and restores the typed tree target and expansion from any row kind', async () => {
-  const h = harness({ columns: 100, rows: 30 })
+  const h = harness({ columns: 100, rows: 30, onNewSession: () => {} })
   h.handle.setSnapshot(snapshot())
   h.handle.updateWorkspaces({
     type: 'baseline',
@@ -1742,7 +1739,7 @@ test('search saves and restores the typed tree target and expansion from any row
 })
 
 test('Peek is pinned to a Session row, exposes its full identity, and refuses Folder targets', async () => {
-  const h = harness({ columns: 120, rows: 30 })
+  const h = harness({ columns: 120, rows: 30, onNewSession: () => {} })
   h.handle.setSnapshot(snapshot())
   h.handle.updateWorkspaces({
     type: 'baseline',
@@ -2192,6 +2189,8 @@ test('the inline Host path editor and the global search never coexist', async ()
   assert.ok(editing[0]!.includes('Sessions'), 'the header still names the workspace')
   assert.ok(!editing[0]!.includes('/ Search'), 'the Search target is not painted while the path editor owns the keyboard')
   assert.ok(h.view().includes('Host directory: /host/add'), 'the inline editor stays visible')
+  assert.ok(!h.view().includes('Enter Add directory'), 'the Preview does not advertise the already-open Add verb')
+  assert.ok(h.view().includes('Enter Verify directory · Esc Cancel'), 'the Preview states the editor verbs')
   // The old header cell is now inert: it can never enter a search presentation
   // behind the editor.
   await clickCell(h, editing[0]!.indexOf('Search') < 0 ? 110 : editing[0]!.indexOf('Search') + 1, 0)
@@ -2299,4 +2298,87 @@ test('an initial search open with the path editor keeps only the path editor', a
   assert.equal(h.closes, 0, 'Esc cancels the editor back to the tree, never closes the Browser')
   assert.ok(!h.view().includes('Host directory:'), 'the tree is back')
   assert.ok(!h.view().includes('Search all workspaces'), 'no search presentation survives the cancel')
+})
+
+test('missing optional capabilities paint no fake Add or New action', async () => {
+  const assertTree = async (options: {
+    readonly onAddDirectory?: () => void
+    readonly onNewSession?: () => void
+  }, expectAdd: boolean, expectNew: boolean): Promise<void> => {
+    const h = harness({ columns: 120, rows: 30, ...options })
+    h.handle.setSnapshot(snapshot())
+    h.handle.updateWorkspaces({ type: 'baseline', items: [{ workspaceId: 'ws-a', path: '/ws/a', title: 'Alpha', sessionIds: [CURRENT] }] })
+    await h.paint()
+    assert.equal(h.view().includes('Add directory'), expectAdd,
+      expectAdd ? 'a real Add callback paints the root Add row' : 'no Add callback paints no fake Add row')
+    assert.equal(h.view().includes('+ New session'), expectNew,
+      expectNew ? 'a real New callback paints the official Folder New row' : 'no New callback paints no fake New row')
+    h.app.dispose()
+    started.delete(h.app)
+  }
+  await assertTree({}, false, false)
+  await assertTree({ onAddDirectory: () => {} }, true, false)
+  await assertTree({ onNewSession: () => {} }, false, true)
+})
+
+test('Preview and Peek state the same pending admission as the Footer', async () => {
+  const browse = harness({ columns: 120, rows: 30 })
+  browse.handle.setSnapshot(snapshot())
+  await browse.paint()
+  browse.vt.sendInput('\x1b[B')
+  await browse.paint()
+  browse.handle.setSnapshot(snapshot({ resumePending: true }))
+  await browse.paint()
+  let view = browse.view()
+  assert.ok(!view.includes('Space for read-only details'), `the Preview hides the blocked Peek cue:\n${view}`)
+  assert.ok(!view.includes('Enter Open') && !view.includes('Space peek'), 'the Footer hides both blocked verbs')
+  browse.handle.setSnapshot(snapshot())
+  await browse.paint()
+  assert.ok(browse.view().includes('Space for read-only details'), 'the Preview cue returns after settlement')
+  browse.app.dispose()
+  started.delete(browse.app)
+
+  const peek = harness({ columns: 120, rows: 30 })
+  peek.handle.setSnapshot(snapshot())
+  await peek.paint()
+  peek.vt.sendInput('\x1b[B')
+  await peek.paint()
+  peek.vt.sendInput(' ')
+  await peek.paint()
+  peek.handle.setSnapshot(snapshot({ resumePending: true }))
+  await peek.paint()
+  view = peek.view()
+  assert.ok(!view.includes('Open: Enter'), `the Peek body hides its blocked Open cue:\n${view}`)
+  assert.ok(!view.includes('Enter open'), 'the Peek back row hides the blocked Open cue')
+  assert.ok(view.includes('Space close') && view.includes('Esc back'), 'the real exits stay visible')
+  peek.handle.setSnapshot(snapshot())
+  await peek.paint()
+  assert.ok(peek.view().includes('Open: Enter') && peek.view().includes('Enter open'),
+    'both Peek Open cues return after settlement')
+  peek.app.dispose()
+  started.delete(peek.app)
+
+  const settles: Array<(outcome: import('../../src/app/command/session-browser-presentation.ts').SessionBrowserNewSessionSettlement) => void> = []
+  const create = harness({
+    columns: 120,
+    rows: 30,
+    onNewSession: (_workspaceId, settle) => { settles.push(settle!) },
+  })
+  create.handle.setSnapshot(snapshot())
+  create.handle.updateWorkspaces({ type: 'baseline', items: [{ workspaceId: 'ws-a', path: '/ws/a', title: 'Alpha', sessionIds: [CURRENT] }] })
+  await create.paint()
+  create.vt.sendInput('\x1b[H')
+  await create.paint()
+  create.vt.sendInput('\x1b[B')
+  await create.paint()
+  create.vt.sendInput('\x1b[C')
+  await create.paint()
+  create.vt.sendInput('\r')
+  await create.paint()
+  view = create.view()
+  assert.ok(view.includes('Starting session…'), `the pending fact is painted:\n${view}`)
+  assert.ok(!view.includes('Enter New session'), 'the New Preview hides the already-started verb')
+  settles[0]!({ kind: 'failed', message: 'refused' })
+  await create.paint()
+  assert.ok(create.view().includes('Enter New session'), 'the New Preview verb returns after settlement')
 })

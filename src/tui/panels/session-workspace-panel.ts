@@ -708,11 +708,11 @@ export class SessionWorkspacePanel implements Component {
     const previousSelection = this.selectedBrowseRowId
     const rows = this.treeRows(view)
     if (rows.some(row => row.id === previousSelection)) {
-      // An AUTOMATIC fallback on the root Add (the loading frame had no
-      // Session row yet) yields to the CURRENT Session / first official Folder
-      // once the real roster arrives. A cursor the USER moved is never stolen
-      // by a late projection or baseline.
-      if (!this.browseSelectionUserOwned && previousSelection === ADD_DIRECTORY_ROW_ID) {
+      // An AUTOMATIC fallback (loading frame / flat pre-baseline roster) yields
+      // to the preferred CURRENT Session / next-create / first official Folder
+      // once the real tree arrives. A cursor the USER moved is never stolen by
+      // a late projection or baseline.
+      if (!this.browseSelectionUserOwned) {
         this.selectedBrowseRowId = this.initialBrowseRowId(rows, view)
       }
       return
@@ -1669,14 +1669,25 @@ export class SessionWorkspacePanel implements Component {
           lines.push(color.textDim(truncateToWidth(`Path: ${sanitizedPhysicalLine(workspace.path)}`, width, '…', false)))
         }
         lines.push(color.textMuted(truncateToWidth('Create a fresh session in this Workspace', width, '…', false)))
-        lines.push(color.textMuted(truncateToWidth('Enter New session', width, '…', false)))
+        lines.push(color.textMuted(truncateToWidth(
+          this.newSessionPending === undefined ? 'Enter New session' : 'Starting session…',
+          width, '…', false,
+        )))
         return { lines: lines.slice(0, budget), regions: [] }
       }
       case 'addDirectory': {
         lines.push(color.textStrong('Add directory'))
         lines.push(color.textMuted(truncateToWidth('Register an existing directory on the Host', width, '…', false)))
-        lines.push(color.textMuted(truncateToWidth('No directory has been verified yet', width, '…', false)))
-        lines.push(color.textMuted(truncateToWidth('Enter Add directory', width, '…', false)))
+        if (this.directoryEntryActive) {
+          lines.push(color.textMuted(truncateToWidth(
+            this.directorySubmitting ? 'Verifying directory…' : 'Editing the Host path',
+            width, '…', false,
+          )))
+          lines.push(color.textMuted(truncateToWidth('Enter Verify directory · Esc Cancel', width, '…', false)))
+        } else {
+          lines.push(color.textMuted(truncateToWidth('No directory has been verified yet', width, '…', false)))
+          lines.push(color.textMuted(truncateToWidth('Enter Add directory', width, '…', false)))
+        }
         return { lines: lines.slice(0, budget), regions: [] }
       }
       case 'showMore': {
@@ -1711,7 +1722,9 @@ export class SessionWorkspacePanel implements Component {
       color.textMuted(truncateToWidth(fact === undefined ? 'Activity unknown' : this.statusLabel(fact), width, '…', false)),
       color.textDim(truncateToWidth(`Workspace: ${this.membershipLabel(fact)}`, width, '…', false)),
       color.textDim(truncateToWidth(`Updated: ${formatSessionAge(row.updatedAt)}`, width, '…', false)),
-      color.textMuted(truncateToWidth('Space for read-only details', width, '…', false)),
+      ...(this.snapshot.resumePending
+        ? []
+        : [color.textMuted(truncateToWidth('Space for read-only details', width, '…', false))]),
     ]
   }
 
@@ -1731,9 +1744,10 @@ export class SessionWorkspacePanel implements Component {
     const lines = all.slice(peek.scrollRow, peek.scrollRow + Math.max(1, budget - 1))
     const regions: HitRegion[] = []
     // The ONE back affordance is the last physical row of the pane.
-    const backText = peek.sessionId === this.options.currentSessionId
-      ? 'Esc back · Space close'
-      : 'Esc back · Space close · Enter open'
+    const openable = peek.sessionId !== this.options.currentSessionId && !this.snapshot.resumePending
+    const backText = openable
+      ? 'Esc back · Space close · Enter open'
+      : 'Esc back · Space close'
     const back = color.textMuted(fit(backText, width))
     regions.push({ kind: 'peek-back', xStart: 0, xEnd: Math.max(0, width - 1), line: Math.min(lines.length, budget - 1) })
     lines.push(back)
@@ -1765,7 +1779,7 @@ export class SessionWorkspacePanel implements Component {
       ? this.snapshot.searchResults.find(result => result.row.id === row.id)?.snippet
       : undefined
     if (snippet !== undefined) lines.push(line('Content hit', `…${sanitizedPhysicalLine(snippet)}…`, 'dim'))
-    if (row.id !== this.options.currentSessionId) {
+    if (row.id !== this.options.currentSessionId && !this.snapshot.resumePending) {
       lines.push(color.textMuted(fit('Open: Enter (switch session, re-proved by the read owner)', width)))
     }
     return lines
