@@ -1886,6 +1886,10 @@ test('a routed PTC child start/settle reaches the mounted renderer wire', async 
       content: [{ type: 'text', text: 'file.txt' }],
     }, 5))
     harness.surface.paintNow()
+    // PR2: the Main children are maintained by targeted raw ops, so a retained
+    // parent card's own one-root diff may also RE-ADD its changed child subtree
+    // instead of only `set`-ing the child. Both are the same correctness claim:
+    // the child node the client ends up with is the SAME id, now settled.
     await awaitWireFact(
       () => harness.tern.frames.some(frame => frame.ops.some(op =>
         op[0] === 'set' && op[1] === childId && (op[2] as { status?: string }).status === 'done')),
@@ -1893,11 +1897,15 @@ test('a routed PTC child start/settle reaches the mounted renderer wire', async 
     )
 
     const settleFrame = harness.tern.frames.at(-1)!
+    const childDone = (node: WireNode): boolean => node.id === childId && node.p?.['status'] === 'done'
     assert.ok(settleFrame.ops.some(op => op[0] === 'set' && op[1] === childId
-      && (op[2] as { status?: string }).status === 'done'),
+      && (op[2] as { status?: string }).status === 'done')
+    || settleFrame.ops.some(op => op[0] === 'add' && childDone(op[4] as unknown as WireNode)),
     'the routed settle updates the SAME child node on the real wire')
-    assert.equal(settleFrame.ops.filter(op => op[0] === 'del').length, 0, 'the routed settle deletes nothing')
-    assert.equal(settleFrame.ops.filter(op => op[0] === 'move').length, 0, 'the routed settle moves nothing')
+    // The retained parent root is re-diffed, never re-keyed: no op may delete or
+    // move the ROOT card itself.
+    assert.equal(settleFrame.ops.some(op => op[0] === 'del' && op[1] === rootId), false, 'the routed settle deletes no root')
+    assert.equal(settleFrame.ops.some(op => op[0] === 'move' && op[1] === rootId), false, 'the routed settle moves no root')
     assert.equal(collectWireNodes().some(node => node.id === `${childId}.result`), false,
       'a settled child body remains hidden until its own Tool disclosure opens')
     const settledChild = collectWireNodes().find(node => node.id === childId)!
@@ -2417,6 +2425,11 @@ test('inner Thinking, Context and Tool toggles use the exact current node owner 
       'the Full Thinking Section head')
 
     const current = (): ModeWireNode[] => mountedNodes(harness)
+    // A queued SIGNAL hint from an earlier commit (`settle`) or the caret
+    // re-assertion after a modal retires (`focus`) may flush on the next ack;
+    // neither paints content, so the frame witness counts only frames that
+    // carry a real CONTENT op.
+    const painted = (): number => harness.tern.frames.filter(frame => frame.ops.some(op => op[0] !== 'settle' && op[0] !== 'focus')).length
     const byKey = (needle: string): ModeWireNode | undefined => current().find(node => node.k === 'section' && String(node.p['key']).includes(needle))
     const thinking = byKey('msg-')
     assert.ok(thinking !== undefined && nodeText(thinking).includes('latest reasoning line'))
@@ -2465,11 +2478,11 @@ test('inner Thinking, Context and Tool toggles use the exact current node owner 
     const oldIds = [...stableIds]
     harness.surface.display.beginSessionHydration()
     await awaitWireFact(() => current().some(node => nodeText(node).includes('Loading session')), 'the source retirement frame')
-    const framesDuringHydration = harness.tern.frames.length
+    const framesDuringHydration = painted()
     harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: oldIds[0]!, collapsed: true, raw: {} })
     // Bounded negative observation: a hydration-retired id must paint no frame.
     await settle()
-    assert.equal(harness.tern.frames.length, framesDuringHydration, 'a retired exact node id is rejected during hydration')
+    assert.equal(painted(), framesDuringHydration, 'a retired exact node id is rejected during hydration')
     harness.replaceMain()
     harness.route(ev('turn/start', { turn: 1 }, 20))
     harness.route(userMessage(21, 'incoming source'))
@@ -2482,11 +2495,11 @@ test('inner Thinking, Context and Tool toggles use the exact current node owner 
     const incomingThinking = current().find(node => node.k === 'section' && nodeText(node).includes('incoming reasoning'))
     assert.ok(incomingThinking !== undefined)
     assert.equal(incomingThinking.p['collapsed'], true, 'the new Source starts with no inherited inner expansion')
-    const beforeLate = harness.tern.frames.length
+    const beforeLate = painted()
     harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: oldIds[1]!, collapsed: true, raw: {} })
     // Bounded negative observation: a retired Context Cluster id must paint no late frame.
     await settle()
-    assert.equal(harness.tern.frames.length, beforeLate, 'a retired Context cluster id cannot act on the new Source')
+    assert.equal(painted(), beforeLate, 'a retired Context cluster id cannot act on the new Source')
   } finally {
     await harness.dispose()
     await harness.session.close()
@@ -3263,10 +3276,14 @@ test('Focus root toggle is refused by modal and retired source fences', async ()
     const root = mountedSections(harness).find(node => node.id.includes('focus-'))!
     const rootId = root.id
     const sf = harness.tern.frames.at(-1)!.sf
-    const beforeUnknown = harness.tern.frames.length
+    // A queued SIGNAL hint from an earlier commit (`settle`) or a caret
+    // re-assertion (`focus`) may flush on the next ack; neither paints content,
+    // so the frame witness counts only frames carrying a real CONTENT op.
+    const painted = (): number => harness.tern.frames.filter(frame => frame.ops.some(op => op[0] !== 'settle' && op[0] !== 'focus')).length
+    const beforeUnknown = painted()
     harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: 'main.not-a-real-focus-root', collapsed: false, raw: {} })
     await settle() // bounded observation window: a refused toggle must paint no frame
-    assert.equal(harness.tern.frames.length, beforeUnknown, 'an unknown root id paints no frame')
+    assert.equal(painted(), beforeUnknown, 'an unknown root id paints no frame')
     assert.equal(mountedSections(harness).find(node => node.id === rootId)?.p['collapsed'], true,
       'an unknown id cannot alter the real root owner')
     const pending = harness.renderer().interaction.askQuestions([{ id: 'focus-q', question: 'Continue?' }], undefined, undefined, false)
@@ -3288,10 +3305,10 @@ test('Focus root toggle is refused by modal and retired source fences', async ()
     harness.surface.display.beginSessionHydration()
     await awaitWireFact(() => mountedNodes(harness).some(node => nodeText(node).includes('Loading session')),
       'hydration paints the Loading state')
-    const duringHydration = harness.tern.frames.length
+    const duringHydration = painted()
     harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: rootId, collapsed: false, raw: {} })
     await settle() // bounded observation window: a hydration-retired id must paint no frame
-    assert.equal(harness.tern.frames.length, duringHydration, 'the retired root id is refused during hydration')
+    assert.equal(painted(), duringHydration, 'the retired root id is refused during hydration')
 
     harness.replaceMain()
     routeTwoWorkTurn(harness)
@@ -3300,10 +3317,10 @@ test('Focus root toggle is refused by modal and retired source fences', async ()
     const replacement = mountedSections(harness).find(node => node.id.includes('focus-'))!
     assert.notEqual(replacement.id, rootId, 'the replacement source receives a new root namespace')
     assert.equal(replacement.p['collapsed'], true, 'the replacement source inherits no Focus disclosure')
-    const beforeStale = harness.tern.frames.length
+    const beforeStale = painted()
     harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: rootId, collapsed: false, raw: {} })
     await settle() // bounded observation window: the prior source id must paint no frame
-    assert.equal(harness.tern.frames.length, beforeStale, 'the prior source root id cannot alter the replacement')
+    assert.equal(painted(), beforeStale, 'the prior source root id cannot alter the replacement')
   } finally {
     await harness.dispose()
     await harness.session.close()
