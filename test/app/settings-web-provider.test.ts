@@ -1868,9 +1868,13 @@ test('the page bar publishes the complete Esc span in its OWN content columns', 
 
     // List region: Esc returns to the Tools rows (the affordance names that Back).
     expectVerb('Back')
-    // Detail region: Esc returns to the page list.
+    // Detail region: Esc returns to the page list. The region/row transition
+    // changes the page's OWN gesture identity even when the bar verb repeats.
+    const listIdentity = page.gestureIdentity()
     page.handleInput('\r')
     expectVerb('Back')
+    assert.notEqual(page.gestureIdentity(), listIdentity,
+      'opening the detail changes the page gesture identity')
     page.handleInput('\x1b')
     expectVerb('Back')
 

@@ -667,6 +667,14 @@ export class KeybindingEditorPanel implements Component, Focusable {
     return this.paintedEscapeSpanValue
   }
 
+  /** The page's own SEMANTIC identity for a pointer gesture: the sub-view
+   *  (list / leader editor / action detail), the query stage and the pending
+   *  leader write decide what its Esc really does. The Settings root stores it
+   *  at press and re-proves it at the release. */
+  gestureIdentity(): string {
+    return `${this.viewKey()}:${this.query === '' ? 'empty' : 'query'}:${this.leaderPending ? 'pending' : 'idle'}`
+  }
+
   dispose(): void {
     if (this.disposed) return
     this.disposed = true

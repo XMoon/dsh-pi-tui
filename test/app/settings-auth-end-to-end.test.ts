@@ -644,9 +644,23 @@ test('a 30x8 Settings workspace disables Enter for a clipped masked form; 40x16 
   const h = open()
   await h.vt.waitForRender()
   ;(h as unknown as { invoke(line: string): unknown }).invoke('/login deepseek-official')
-  await h.vt.waitForRender()
+  // Wait for the ACTIONABLE reference page, not just its header: the Enter below
+  // must open the masked form, so the frame that grants that action has to be
+  // painted first (a single render after the deeplink can still be the Loading
+  // or provider frame under load).
+  await waitForFrame(
+    h.view,
+    frame => frame.includes('API Key Reference') && frame.includes('Configure API Key'),
+    () => h.vt.waitForRender(),
+    'the /login deeplink must reach the API Key Reference page before Enter',
+  )
   await key(h, '\r') // open the masked API-key form at full height
-  await h.vt.waitForRender()
+  await waitForFrame(
+    h.view,
+    frame => frame.includes('Enter the API key') && frame.includes('Enter continue'),
+    () => h.vt.waitForRender(),
+    'Enter on the reference page must open the masked form with its real submit hint',
+  )
   assert.match(h.view(), /API Key Reference|Enter the API key/u)
 
   h.vt.resize(40, 16)

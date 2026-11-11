@@ -1979,7 +1979,7 @@ test('Folder New is locked by ONE per-operation settlement, never by a notice', 
   assert.ok(h.view().includes('Starting session…'), 'the pending state is visible')
   const pendingFooter = () => panelFrame(h)[panelFrame(h).length - 1]!
   assert.ok(pendingFooter().includes('Starting session…'))
-  assert.ok(!pendingFooter().includes('New [Enter]'))
+  assert.ok(!pendingFooter().includes('Enter New session'))
 
   // B5.1/B5.2: an unrelated notice, its expiry, and a changed notice NEVER
   // settle the operation. Only the operation's own callback may do that.

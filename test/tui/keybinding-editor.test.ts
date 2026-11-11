@@ -301,7 +301,10 @@ test('editor search is cleared by the first Escape and closes on the second', ()
   let closed = 0
   const { manager, panel } = makePanel(() => { closed += 1 })
   try {
+    const emptyIdentity = panel.gestureIdentity()
     panel.handleInput('todo')
+    assert.notEqual(panel.gestureIdentity(), emptyIdentity,
+      'the query stage changes the page gesture identity')
     const filtered = panel.render(88).join('\n')
     assert.match(filtered, /Toggle todo panel/)
     assert.doesNotMatch(filtered, /Submit draft/)

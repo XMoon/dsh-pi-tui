@@ -1097,11 +1097,15 @@ test('refresh is refused while an Account operation is busy (RFL-012)', async ()
   page.setBodyHeight(30)
   await flush()
   text(page)
+  const idleIdentity = page.gestureIdentity()
   page.handleInput('\r') // start sign-in, held
   await flush()
   page.handleInput('r') // advertised refresh shortcut during busy
   await flush()
   assert.equal(state.watchStarts, 1, 'refresh must not replace the watch while a mutation is busy')
+  assert.match(text(page), /Wait \[Esc\]/u, 'the busy state paints the wait fact')
+  assert.equal(page.paintedEscapeSpan(), undefined, 'the wait fact publishes no clickable Esc span')
+  assert.notEqual(page.gestureIdentity(), idleIdentity, 'the busy phase changes the page gesture identity')
   resolveStart?.(waitingAttempt())
   await flush()
   assert.match(text(page), /Last known: signed out · Host state not current/u,

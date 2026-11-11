@@ -287,6 +287,11 @@ class FakeEmbeddedPluginPage implements EmbeddedPluginPage {
   gestureRevision(): number {
     return this.viewRevision
   }
+  /** Test-only: advance the page's OWN semantic identity while its painted bar
+   *  (and therefore every cell) stays identical. */
+  bumpGestureIdentity(): void {
+    this.viewRevision += 1
+  }
 
   semanticGeneration(): number {
     return this.viewRevision
@@ -2890,6 +2895,42 @@ test('a Settings bar press is refused when a keyboard transition or resize re-pa
   release(h, row2, col2)
   await settle(h)
   assert.match(h.rowsPlain()[0]!, /· Configured theme/, 'a release after a resize is inert')
+  h.dispose()
+})
+
+test('a child identity change with identical bar cells refuses the stale release', async () => {
+  const h = setup({ columns: 120, rows: 40, pluginPage: true })
+  await h.open('Plugins')
+  await key(h, '\r') // rail -> plugin content
+  const page = h.pluginPageInstances()[0]!
+  const barCell = (): { row: number; col: number; bar: string } => {
+    const rows = h.rowsPlain()
+    const row = rows.length - 1
+    const bar = rows[row]!
+    const col = bar.indexOf('Back [Esc]')
+    assert.ok(col >= 0, `the page bar paints Back:\n${bar}`)
+    return { row, col, bar }
+  }
+  const before = barCell()
+  press(h, before.row, before.col)
+  // The page's own semantic identity advances while its painted bar keeps the
+  // EXACT same cells; the root must refuse to hand the stale press to the new
+  // page state (its Esc would yield the keyboard to the rail).
+  page.bumpGestureIdentity()
+  h.app.requestRender()
+  await h.vt.waitForRender()
+  const after = barCell()
+  assert.equal(after.bar, before.bar, 'the child repaint keeps every bar cell identical')
+  release(h, before.row, before.col)
+  await settle(h)
+  assert.match(h.rowsPlain().at(-1)!, /PLUGIN BAR · Back \[Esc\]/, 'the stale release did not run the new page Esc')
+  assert.equal(h.pluginPageInstances()[0], page, 'the page instance stayed the focused owner')
+
+  // Positive control: the same cells on the CURRENT identity still run the
+  // child's own Esc (the List yields to the rail), once.
+  const current = barCell()
+  await key(h, '\x1b')
+  assert.match(h.rowsPlain().at(-1)!, /Close \[Esc\]/, 'the keyboard Esc yields to the rail')
   h.dispose()
 })
 
