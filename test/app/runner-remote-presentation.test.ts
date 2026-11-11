@@ -2410,8 +2410,12 @@ test('mounted /status (the /settings alias): lifetime totals and the RECENT figu
   let panelView = ''
   for (let page = 0; page < 6; page += 1) {
     panelView += `\n${fixture.vt.getViewport().join('\n')}`
+    // Stop only once EVERY figure this case asserts is actually painted in the
+    // collected pages: a long private root wraps the CWD fact over more rows,
+    // so TTFB can be the last visible row of a page while R5 is the next one.
     if (/Input tokens\s+5035/u.test(panelView)
-      && /TTFB \(recent\)\s+0\.[1-9]\d*s/u.test(panelView)) break
+      && /TTFB \(recent\)\s+0\.[1-9]\d*s/u.test(panelView)
+      && /R5 tokens\/sec\s+[1-9]\d*(?:\.\d)? tok\/s/u.test(panelView)) break
     fixture.vt.sendInput('\x1b[6~') // PageDown: scroll the painted About rows.
     await fixture.vt.waitForRender()
   }
@@ -2883,6 +2887,38 @@ test('Remote proof: official projections → the About controller view → the e
   }
 })
 
+/**
+ * The painted About `CWD` value, re-assembled from its OWN physical rows: the
+ * fact head owns the first row, a wrapped value continues under the SAME value
+ * column, and anything else (the next fact) ends the group. The label must be
+ * unique and the value non-empty — a missing or duplicated CWD fact is a
+ * failure, never an absent assertion. `complete` is false only when the frame
+ * ends inside the group (a path taller than the visible body): there the raw
+ * facts and the Copy All payload own the untouched value.
+ */
+function aboutCwdPaintedValue(rows: readonly string[]): { readonly value: string; readonly complete: boolean } {
+  const head = 'CWD  '
+  const starts = rows.flatMap((row, index) => row.includes(head) ? [index] : [])
+  assert.equal(starts.length, 1, `exactly one painted CWD fact row:\n${rows.join('\n')}`)
+  const first = starts[0]!
+  const valueStart = rows[first]!.indexOf(head) + head.length
+  // The frame pads every physical row to the panel width; the declared CWD is
+  // a padding-free absolute path, so only that trailing fill is removed.
+  const parts = [rows[first]!.slice(valueStart).trimEnd()]
+  let next = first + 1
+  // A wrapped value continues the fact under marker + head (7 columns): the
+  // continuation is exactly that indentation, with content after it.
+  while (next < rows.length
+    && rows[next]!.startsWith(' '.repeat(7), valueStart - 7)
+    && rows[next]!.length > valueStart) {
+    parts.push(rows[next]!.slice(valueStart).trimEnd())
+    next += 1
+  }
+  const value = parts.join('')
+  assert.ok(value !== '', `the painted CWD fact carries a value:\n${rows.join('\n')}`)
+  return { value, complete: next < rows.length }
+}
+
 // ── C3 (Phase 3C): the PRODUCTION-RUNNER Remote source→sink proof ─────────
 //
 // The plan §3.3 Remote positive through the REAL production composition: the
@@ -2988,24 +3024,31 @@ test('Remote production lane: /settings → real About panel → [Copy All] clic
       mountedFixture.vt.getViewport().join('\n').includes('dsh-pi-tui'), 15_000)
 
     // The About home paints the semantic fact rows from the REAL command
-    // runtime's reads (the official Remote projections).
+    // runtime's reads (the official Remote projections). Only the labels that
+    // are ALWAYS above the value wrap (Session ID and the CWD fact's own head)
+    // are required here: a long private root wraps the CWD value over more
+    // physical rows and pushes the lower groups below the frame, so those are
+    // asserted on the SCROLLED frame below.
     await waitFor('the About facts paint from the official projections', () => {
-      const frame = mountedFixture.vt.getViewport().map((line: string) => line).join('\n')
-      return frame.includes('Session ID') && frame.includes('Turns') && frame.includes('R5 tokens/sec')
+      const frame = mountedFixture.vt.getViewport().join('\n')
+      return frame.includes('Session ID') && frame.includes('CWD  ')
     }, 15_000)
     const frameText = mountedFixture.vt.getViewport().map((line: string) => line).join('\n')
     assert.ok(frameText.includes('c3-prod-remote'), 'the OFFICIAL session id paints')
     assert.ok(frameText.includes('Backend') && frameText.includes('Remote'), 'the Remote backend fact paints')
-    // THE OFFICIAL CWD, verbatim: the projection's list-row cwd of THIS session.
-    assert.ok(frameText.includes(seedHost.anchorDir), `the official cwd paints: ${frameText.match(/CWD.*/)?.[0]}`)
-    // The official lifetime fold of the seeded turn.
-    assert.ok(/Turns\s+1\b/.test(frameText), `the lifetime turns paint: ${frameText.match(/Turns.*/)?.[0]}`)
-    assert.ok(/Steps\s+1\b/.test(frameText), 'the lifetime steps paint')
-    // The Host piTuiPerformance projection's MEASURED figures paint (the
-    // seeded real sample: a real TTFB in the 0.1s-0.4s class and real rates).
-    assert.ok(/TTFB \(recent\)\s+0\.[1-3]/.test(frameText), `the seeded TTFB paints: ${frameText.match(/TTFB.*/)?.[0]}`)
-    assert.ok(/R5 tokens\/sec\s+[1-9]/.test(frameText), 'the seeded R5 rate paints non-zero')
-    assert.ok(/All tokens\/sec\s+[1-9]/.test(frameText), 'the seeded All rate paints non-zero')
+    // THE OFFICIAL CWD, from the PHYSICAL rows of its own fact: a long private
+    // root wraps the value under the fact column, so the raw path can never be
+    // required as one contiguous frame substring. When the frame ends inside
+    // the group the visible value is the correct prefix; the untouched full
+    // path stays proven by the raw facts and the Copy All payload.
+    const cwdPainted = aboutCwdPaintedValue(mountedFixture.vt.getViewport())
+    if (cwdPainted.complete) {
+      assert.equal(cwdPainted.value, seedHost.anchorDir,
+        `the official cwd paints every cell of its own fact:\n${frameText}`)
+    } else {
+      assert.ok(seedHost.anchorDir.startsWith(cwdPainted.value),
+        `the visible cwd prefix is the official value: ${JSON.stringify(cwdPainted.value)}`)
+    }
 
     // ── THE REAL COPY: SGR press/release on the painted [Copy All C]. ──
     // The action row paints BELOW the fold at 100×30: the About-local End
@@ -3028,6 +3071,17 @@ test('Remote production lane: /settings → real About panel → [Copy All] clic
     }
     void rows
     const actionRow = rows[actionRowIndex]!
+    // The lifetime fold and the Host piTuiPerformance figures sit BELOW the
+    // initial fold once the CWD fact wraps over several physical rows for a
+    // long private root: assert them on the SCROLLED frame where they really
+    // are visible. The Copy All payload below independently proves the same
+    // values byte-for-byte.
+    const scrolledText = rows.join('\n')
+    assert.ok(/Turns\s+1\b/.test(scrolledText), `the lifetime turns paint: ${scrolledText.match(/Turns.*/)?.[0]}`)
+    assert.ok(/Steps\s+1\b/.test(scrolledText), 'the lifetime steps paint')
+    assert.ok(/TTFB \(recent\)\s+0\.[1-3]/.test(scrolledText), `the seeded TTFB paints: ${scrolledText.match(/TTFB.*/)?.[0]}`)
+    assert.ok(/R5 tokens\/sec\s+[1-9]/.test(scrolledText), 'the seeded R5 rate paints non-zero')
+    assert.ok(/All tokens\/sec\s+[1-9]/.test(scrolledText), 'the seeded All rate paints non-zero')
     const copyAllCol = actionRow.indexOf('Copy All [')
     mountedFixture.vt.sendInput(`\x1b[<0;${copyAllCol + 3};${actionRowIndex + 1}M`)
     mountedFixture.vt.sendInput(`\x1b[<0;${copyAllCol + 3};${actionRowIndex + 1}m`)
@@ -3177,8 +3231,18 @@ test('Remote negative: the sample-less performance/context groups word Unavailab
       mountedFixture.vt.getViewport().join('\n').includes('dsh-pi-tui'), 15_000)
     await waitFor('the authoritative lifetime group paints', () => {
       const frame = mountedFixture.vt.getViewport().join('\n')
-      return /Turns\s+1\b/.test(frame)
+      return frame.includes('Session ID') && frame.includes('CWD  ')
     }, 15_000)
+    // The About content is taller than this frame once the CWD fact wraps over
+    // several physical rows for a long private root: hand the keyboard to the
+    // content and page to the pinned action row exactly like the positive lane
+    // before clicking it. The lifetime values stay proven by the payload below.
+    mountedFixture.vt.sendInput('\r')
+    await waitFor('the About content took the keyboard', () =>
+      mountedFixture.vt.getViewport().join('\n').includes('c copy fact'), 15_000)
+    mountedFixture.vt.sendInput('\x1b[6~')
+    await waitFor('the scrolled action row paints', () =>
+      mountedFixture.vt.getViewport().join('\n').includes('Copy All ['), 15_000)
     const rows = mountedFixture.vt.getViewport()
     const actionRowIndex = rows.findIndex((line: string) => line.includes('Copy All ['))
     assert.ok(actionRowIndex !== -1, `the action row paints:\n${rows.join('\n')}`)

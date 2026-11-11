@@ -28,7 +28,7 @@ import { createRemoteHostRuntime, type RemoteHostRuntime } from '../support/m3-i
 import { DeliveredFileReadError } from '../../src/runtime/deliverables-port.ts'
 import { DirectDeliveredFileReadPort } from '../../src/runtime/direct/deliverables-direct.ts'
 import { DeliveredFilesPanel } from '../../src/tui/deliverables/delivered-files-panel.ts'
-import { stripTerminalSequences } from '@xmoon76/pi-tui'
+import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import { RemoteDeliveredFileReadPort } from '../../src/runtime/remote/deliverables-remote.ts'
 import { createRemoteApplicationHostFixture } from '../support/remote-application-fixture.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
@@ -41,6 +41,29 @@ async function assertRejectsCode(promise: Promise<unknown>, code: string): Promi
     assert.equal(error.code, code)
     return true
   })
+}
+
+const HOST_PATH_LABEL = 'Host: '
+
+/**
+ * Re-assemble the ONE Details `Host:` field from its PHYSICAL rows: the label
+ * owns the first row, a six-space continuation row continues the declared path
+ * and any other row (the next metadata label or the blank separator) ends it.
+ * A missing or duplicated `Host:` field fails closed. The 96-column page wraps
+ * the path across rows, so a contiguous `painted.includes(path)` can never hold
+ * for a long private root — this reassembly proves the EXACT declared path.
+ */
+function paintedHostPath(rows: readonly string[]): string {
+  const starts = rows.flatMap((row, index) => row.startsWith(HOST_PATH_LABEL) ? [index] : [])
+  assert.equal(starts.length, 1, `exactly one Details Host: field:\n${rows.join('\n')}`)
+  const first = starts[0]!
+  let value = rows[first]!.slice(HOST_PATH_LABEL.length)
+  for (let index = first + 1; index < rows.length; index += 1) {
+    const row = rows[index]!
+    if (!row.startsWith(' '.repeat(HOST_PATH_LABEL.length))) break
+    value += row.slice(HOST_PATH_LABEL.length)
+  }
+  return value
 }
 
 test('the generated workspaceFiles Remote serves a real Host stat/read and a real refusal', async (t) => {
@@ -138,17 +161,22 @@ test('the generated workspaceFiles Remote serves a real Host stat/read and a rea
       copyPath: (_path, settle) => settle(true),
     })
     panel.setMaxRows(20)
-    const paint = (): string => panel.render(96).map(row => stripTerminalSequences(row)).join('\n')
+    const paintRows = (): string[] => panel.render(96).map(row => stripTerminalSequences(row))
+    const paint = (): string => paintRows().join('\n')
     // Wait for the REAL wire to settle instead of assuming a tick count.
     const deadline = Date.now() + 5_000
     while (!paint().includes(token) && Date.now() < deadline) {
       await new Promise(resolve => setTimeout(resolve, 10))
     }
-    const painted = paint()
+    const rows = paintRows()
+    const painted = rows.join('\n')
     assert.ok(painted.includes(token), `the UNIQUE Host bytes reach the painted page:\n${painted}`)
     assert.ok(painted.includes('the real report'), `the first real line is painted:\n${painted}`)
     assert.ok(painted.includes('tail line'), `the tail line is painted:\n${painted}`)
-    assert.ok(painted.includes('Host: ') && painted.includes(panelPath), `the declared path is the subject:\n${painted}`)
+    // The 96-column page wraps the declared path: every physical row stays
+    // inside the width, and the Host field reassembles to the EXACT path.
+    assert.ok(rows.every(row => visibleWidth(row) <= 96), `every physical row stays within 96 columns:\n${painted}`)
+    assert.equal(paintedHostPath(rows), panelPath, `the declared path is the subject:\n${painted}`)
     assert.ok(!painted.includes('Loading'), `the page left the loading state:\n${painted}`)
 
     // The SAME chain on a REAL refusal: the Host's official not-found code maps
@@ -381,17 +409,21 @@ test('a real Remote generation replacement never paints its late success OR its 
         copyPath: (_path, settle) => settle(true),
       })
       panel.setMaxRows(20)
-      const paint = (): string => panel.render(96).map(row => stripTerminalSequences(row)).join('\n')
+      const paintRows = (): string[] => panel.render(96).map(row => stripTerminalSequences(row))
+      const paint = (): string => paintRows().join('\n')
       const deadline = Date.now() + 5_000
       while (paint().includes('Loading') && Date.now() < deadline) {
         await new Promise(resolve => setTimeout(resolve, 10))
       }
-      const painted = paint()
+      const rows = paintRows()
+      const painted = rows.join('\n')
       assert.ok(!painted.includes('Loading'), `[${current.label}] the page settles:\n${painted}`)
       for (const forbidden of current.forbidden) {
         assert.ok(!painted.includes(forbidden), `[${current.label}] a superseded reply never paints "${forbidden}":\n${painted}`)
       }
-      assert.ok(painted.includes(current.declared), `[${current.label}] the declared metadata stays:\n${painted}`)
+      // The declared path is the page's identity even when it wraps over
+      // several physical Host rows at the fixed 96 columns.
+      assert.equal(paintedHostPath(rows), current.declared, `[${current.label}] the declared metadata stays:\n${painted}`)
       assert.equal(panel.currentPage(), 'details', `[${current.label}] the page survives its own reply`)
     }
   } finally {
