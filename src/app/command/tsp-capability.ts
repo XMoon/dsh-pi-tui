@@ -103,6 +103,9 @@ export const TSP_B2A_RESULT_NOTICE_COMMANDS: ReadonlySet<string> = new Set([
   // Remote Client command registry appends no result card. Membership here is
   // notice ownership only — this set is never a routing authority.
   'reload-client',
+  // PR-Q: an unavailable queue sheet returns a real error result; on the
+  // card-less route this set is its ONLY visible owner.
+  'queue',
 ])
 
 /**
@@ -128,6 +131,9 @@ export interface TspBuiltinPickers {
    * second renderer state.
    */
   readonly taskCenter?: boolean
+  /** PR-Q: the mounted renderer really installed the native Queue manager
+   *  sheet (picker + overlay + editor + button/row kinds negotiated). */
+  readonly queueManager?: boolean
 }
 
 /**
@@ -213,6 +219,7 @@ export function tspSelectedTuiBuiltinAvailability(
     // pane refuses the command instead of mounting an unreadable Hub.
     return pickers.taskCenter === true ? { kind: 'available' } : { kind: 'unsupported' }
   }
+  if (name === 'queue') return pickers.queueManager === true ? { kind: 'available' } : { kind: 'unsupported' }
   return (name === 'model' && pickers.modelPicker === true)
     || (name === 'preset' && pickers.presetPicker === true)
     || ((name === 'sessions' || name === 'resume' || name === 'search') && pickers.sessionBrowser === true)

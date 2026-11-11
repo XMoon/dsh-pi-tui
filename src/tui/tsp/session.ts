@@ -57,7 +57,7 @@ import type { SettledQuestionAnswersLookup, SurfaceInteractionPresenter } from '
 import type { SurfaceDraftImageOccurrence, SurfaceImageBinding } from '../../app/surface/runtime.ts'
 import type { DraftImage } from '../../client/media/image/types.ts'
 import type { ImageAttachmentRefLike } from '../../domain/media/types.ts'
-import { TSP_CONTINUED_INSPECTION_LABEL, TSP_VISUAL_CHORDS, TSP_VISUAL_COPY_LABEL, TSP_VISUAL_SELECT_LABEL, matchesKeyId } from '../keybindings/hints.ts'
+import { TSP_CONTINUED_INSPECTION_LABEL, TSP_VISUAL_CHORDS, TSP_VISUAL_COPY_LABEL, TSP_VISUAL_SELECT_LABEL, formatKeyId, matchesKeyId } from '../keybindings/hints.ts'
 import { createTspComposer, type TspComposer, type TspComposerEdit, type TspComposerState } from './editor.ts'
 import { createTspInputCompletion, type TspInputCompletion } from './input-completion.ts'
 import { createTspHistorySearch, TSP_HISTORY_SEARCH_UNAVAILABLE, type TspHistorySearchSeat } from './history-search.ts'
@@ -73,6 +73,8 @@ import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { createTspInteractionSeat, NATIVE_APPROVAL_ROLE, type TspContinuedRow, type TspInteractionSeat } from './interaction.ts'
 import { TspModelPicker } from './model-picker.ts'
+import { TspQueueManager } from './queue-manager.ts'
+import type { QueueManagerController, QueueManagerPresentation } from '../../app/queue/manager.ts'
 import { TspModelQuickMenu } from './model-quick-menu.ts'
 import type { QuickMenuIntent } from './model-quick-menu.ts'
 import { TspPresetPicker } from './preset-picker.ts'
@@ -387,6 +389,14 @@ export interface TspRendererOptions {
   /** SDK connect timeout override (tests); default is the SDK's 1000 ms. */
   readonly connectTimeout?: number
   /**
+   * PR-Q: the LIVE effective `app.queue.open` keys (the composition root reads
+   * the same definitions + user settings the PiTui keymap uses). The TSP
+   * renderer has no TuiApp keymap; this getter is what makes the raw SDK
+   * `Alt+I`/remap and the Dock's `Manage` label point at the SAME effective
+   * action. Absent = no queue-open key (the Dock shows `Manage` only).
+   */
+  readonly queueOpenKeys?: () => readonly string[]
+  /**
    * PR-B1: the presentation bridge over the REGISTERED tool definitions (the
    * SAME bridge the PiTui renderer consumes). It is consulted ONLY to decide
    * whether a tool row's displayed target is PROVEN to be a command, a single
@@ -430,6 +440,15 @@ export interface TspRenderer extends TspInputBinding {
   readonly webPresentation: WebAccessPresentation | undefined
   /** Internal read-only Session Browser seam; absent unless all required kinds are negotiated. */
   readonly sessionBrowserPresentation: SessionBrowserPresentation | undefined
+  /** PR-Q: the native Queue manager sheet; undefined until the composition
+   *  root binds the application controller AND the pane negotiated its kinds. */
+  readonly queuePresentation: QueueManagerPresentation | undefined
+  /**
+   * PR-Q: install the ONE application-level Queue manager controller. Called
+   * once at mount (before input binding); a second bind or a post-disposal bind
+   * fails fast.
+   */
+  bindQueueManager?(controller: QueueManagerController): void
   /**
    * B3-A1/B3-A3: the Task Center presentation sink. It is ALWAYS present — the
    * internal native Work Hub is the renderer's implementation — and the
@@ -732,6 +751,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   let hydrating = false
   let lastMain: Node | undefined
   let modelPicker: TspModelPicker | undefined
+  let queueManagerPresenter: TspQueueManager | undefined
   /** TSP-7 PR-G: the composer's anchored quick Model/Effort selector. A local
    *  presentation panel of THIS renderer (never a fifth business Presenter and
    *  never a second catalog/writer owner), retired with every higher seat. */
@@ -1519,6 +1539,8 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
               ? presetPicker.desiredFocusId() ?? null
               : modelPicker?.isOpen() === true
                 ? modelPicker.desiredFocusId() ?? null
+                : queueManagerPresenter?.isOpen() === true
+                  ? queueManagerPresenter.desiredFocusId() ?? null
                 // TSP-7 PR-G: the composer quick menu is the LAST seat above the
                 // Composer. It claims the hardware caret only while its search
                 // field owns the keyboard (the real wire id of the node this frame
@@ -1858,6 +1880,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       sessionBrowser?.suspend()
       webPicker?.suspend()
       modelPicker?.suspend()
+      queueManagerPresenter?.suspend()
       presetPicker?.suspend()
       workHub?.suspend()
     }
@@ -1929,6 +1952,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
             ?? webPicker?.renderLayer()
             ?? presetPicker?.renderLayer()
             ?? modelPicker?.renderLayer()
+            ?? queueManagerPresenter?.renderLayer()
             ?? seat.renderLayer(),
     })
     // The focus op is meaningful only for a node of a COMMITTED frame (the
@@ -2841,9 +2865,32 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // The pending-input presentation IS visible on this renderer: the queue
     // lane (authoritative queued + local echoes) and the ordered conversation
     // tail, exactly as the ONE join produced them.
+    if (pending.queued.length > 0) {
+      // PR-Q: ONE compact header replaces no dock row (the queue lane is the
+      // pre-existing lane); `Manage` is a native clickable row over the live
+      // effective `app.queue.open` key, and each row opens the SAME sheet with
+      // its Host occurrence id as a preselection hint.
+      const authoritative = pending.queued.filter(item => item.local !== true).length
+      const openKeys = options.queueOpenKeys?.() ?? []
+      const manageLabel = openKeys.length === 0 ? 'Manage' : `Manage [${formatKeyId(openKeys[0] as never)}]`
+      lines.push(ui.row(
+        { key: 'queue-header', justify: 'between' },
+        ui.text({ key: 'queue-header-title', text: `Queue · ${authoritative}` }),
+        ui.row(
+          { key: 'queue-manage', onClick: () => { queueManagerPresenter?.openManage() } },
+          ui.text({ key: 'queue-manage-label', text: manageLabel }),
+        ),
+      ))
+    }
     for (const item of pending.queued) {
       const sending = item.local === true ? ' — sending…' : ''
-      lines.push(ui.text({ key: `queue-${item.id}`, text: sanitizeDisplayText(`queued (${item.mode}): ${item.text}${sending}`) }))
+      lines.push(ui.row(
+        {
+          key: `queue-${item.id}`,
+          onClick: () => { queueManagerPresenter?.openRow(item.local === true ? undefined : item.id) },
+        },
+        ui.text({ key: `queue-text-${item.id}`, text: sanitizeDisplayText(`queued (${item.mode}): ${item.text}${sending}`) }),
+      ))
     }
     // An IDLE subject with at least one authoritative queued occurrence is the
     // preserved parked queue: the next real prompt wakes it. A local-only echo
@@ -3381,6 +3428,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     },
     setPendingInputPresentation(presentation: PendingInputPresentation) {
       if (disposed) return
+      // PR-Q: the pending presentation follows every display-subject commit;
+      // a queue sheet captured for a previous owner retires here BEFORE the new
+      // subject's dock paints beside it.
+      queueManagerPresenter?.retireIfStale()
       pending.queued = presentation.queued
       pending.tail = presentation.tail
       pending.running = presentation.running
@@ -3444,7 +3495,8 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     if (seat.hasModalSeat()) return false
     if (detailsSlot !== undefined || openingDetails) return false
     if (workHub?.isOpen() === true || sessionBrowser?.isOpen() === true
-      || presetPicker?.isOpen() === true || modelPicker?.isOpen() === true) return false
+      || presetPicker?.isOpen() === true || modelPicker?.isOpen() === true
+      || queueManagerPresenter?.isOpen() === true) return false
     return true
   }
 
@@ -4282,6 +4334,18 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     if (webPicker?.handleKey(key)) return false
     if (presetPicker?.handleKey(key)) return false
     if (modelPicker?.handleKey(key)) return false
+    // PR-Q: the renderer-local `/queue` entry uses the LIVE effective
+    // `app.queue.open` binding (the composition root injects the same action's
+    // key ids). It runs AFTER every higher presenter declined the key, so it
+    // can never stack the sheet on a live picker, and BEFORE the sheet's own
+    // key handler so the SAME chord toggles a mounted sheet closed (the
+    // controller's repeated-open intent). The seat order still wins above.
+    if (!fencedOut(key) && !seat.hasModalSeat() && queueManagerPresenter !== undefined
+      && queueManagerPresenter.matchesOpenKey(key)) {
+      queueManagerPresenter.openFromKey()
+      return false
+    }
+    if (queueManagerPresenter?.handleKey(key)) return false
     // TSP I-E: `Ctrl+R` opens the ONE History card. It runs after every higher
     // Presenter (Reader/Modal/Alt+Q list/Hub/Browser/Web/Preset/Model) has
     // declined the key and BEFORE the three low composer popovers, and it
@@ -4482,6 +4546,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         && workHub?.isOpen() !== true && sessionBrowser?.isOpen() !== true
         && webPicker?.isOpen() !== true && presetPicker?.isOpen() !== true
         && modelPicker?.isOpen() !== true && modelQuick?.isOpen() !== true
+        && queueManagerPresenter?.isOpen() !== true
         && historySearch?.isOpen() !== true) {
         const preset = options.displayState?.preset
         if (preset === 'focus') {
@@ -4589,6 +4654,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         if (webPicker?.handleEvent(input.event)) return false
         if (presetPicker?.handleEvent(input.event)) return false
         if (modelPicker?.handleEvent(input.event)) return false
+        if (queueManagerPresenter?.handleEvent(input.event)) return false
         if (input.event.ev === 'action' && input.event.act === TRANSCRIPT_COPY_ACTION) {
           if (transcriptCopyAdmitted()) {
             const target = transcriptCopyButtons.get(input.event.id)
@@ -4614,6 +4680,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         // than left on the Composer.
         if ((workHub?.isOpen() === true || sessionBrowser?.isOpen() === true
           || presetPicker?.isOpen() === true || modelPicker?.isOpen() === true
+          || queueManagerPresenter?.isOpen() === true
           || modelQuick?.isOpen() === true || historySearch?.isOpen() === true)
           && input.event.ev === 'focus') applyFocus(true)
       }
@@ -4707,6 +4774,15 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       return kinds.every(kind => session.caps.kinds.includes(kind))
         && session.caps.features.includes('scroll')
         ? presetPresentation
+        : undefined
+    },
+    get queuePresentation(): QueueManagerPresentation | undefined {
+      // The sheet builds a picker, a modal overlay, a controlled editor and
+      // native buttons/rows. A pane that did not negotiate every one of those
+      // kinds is refused BEFORE `/queue` reaches the handler (fail closed).
+      const kinds = ['picker', 'overlay', 'editor', 'button', 'row', 'col', 'text']
+      return kinds.every(kind => session.caps.kinds.includes(kind))
+        ? queueManagerPresenter?.presentation
         : undefined
     },
     get sessionBrowserPresentation() {
@@ -4862,6 +4938,27 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
           })
         },
       }, binding, nativeHistoryCapable)
+    },
+    bindQueueManager: (controller: QueueManagerController) => {
+      if (disposed) throw new Error('cannot bind the queue manager after TSP renderer disposal')
+      if (queueManagerPresenter !== undefined) throw new Error('the TSP renderer queue manager is already bound')
+      queueManagerPresenter = new TspQueueManager({
+        controller,
+        render: () => render(),
+        // The SAME seat admission every non-blocking presenter uses, PLUS the
+        // sibling presenters: a Dock click must never stack the sheet on a live
+        // picker/Reader/History card (the pointer path does not pass the
+        // keyboard ladder that would have consumed the key instead).
+        canInteract: () => !disposed && !hydrating && inputBound
+          && !seat.hasModalSeat()
+          && detailsSlot === undefined && !openingDetails
+          && workHub?.isOpen() !== true && sessionBrowser?.isOpen() !== true
+          && webPicker?.isOpen() !== true && presetPicker?.isOpen() !== true
+          && modelPicker?.isOpen() !== true && modelQuick?.isOpen() !== true
+          && historySearch?.isOpen() !== true,
+        queueOpenKeys: () => options.queueOpenKeys?.() ?? [],
+        notify: (message, kind) => display.notify(message, kind),
+      })
     },
     installInlineAttachmentStager: (stager) => {
       // A disposed mount installs nothing: the seat died with the renderer, so a

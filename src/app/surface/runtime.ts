@@ -145,6 +145,7 @@ import { assistantPresentationRevision, assistantStepOf, type TranscriptFolder }
 import type { TranscriptMessage, TurnActivity } from '../../domain/transcript/types.ts'
 import { eligibleFinalAssistant } from '../../domain/transcript/final-assistant.ts'
 import { deliveredTurnsOf, type DeliveredFilesCapability, type DeliveredFilesSnapshot } from '../../domain/deliverables/catalog.ts'
+import type { QueueManagerController, QueueManagerPresentation } from '../queue/manager.ts'
 import type { DeliveredFilePreviewCapability } from '../../runtime/deliverables-port.ts'
 import { collectPublishedVisuals, type PublishedVisual } from '../../domain/visual/publication.ts'
 import {
@@ -581,6 +582,7 @@ export interface SurfaceRendererMount {
      * closed — never an empty `search()` that pretends success.
      */
     historySearch: TspHistorySearchBinding,
+    queueManager?: QueueManagerController,
   ): {
     /** The renderer-facing display seam implementation. */
     readonly display: SurfaceDisplaySeam
@@ -604,6 +606,10 @@ export interface SurfaceRendererMount {
     readonly webPresentation?: WebAccessPresentation | undefined
     /** Internal read-only Session Browser presenter; no production command opens it in B1-A. */
     readonly sessionBrowserPresentation?: SessionBrowserPresentation | undefined
+    /** PR-Q: the native Queue manager sheet presentation. OPTIONAL: a pane
+     *  without the negotiated kinds mounts nothing and `/queue` is refused by
+     *  the TSP builtin capability gate. */
+    readonly queuePresentation?: QueueManagerPresentation | undefined
     /**
      * PR3-B §3.2: the renderer's modal presenter. B1 keeps the INERT
      * implementation (no TSP form exists; every ask rejects — fail-closed,
@@ -1261,6 +1267,12 @@ export interface SurfaceRuntime<Event extends RoutedSessionEvent> {
    */
   refreshPendingInput(): void
   /**
+   * PR-Q: install the ONE application-level Queue manager controller before the
+   * renderer mounts. The PiTui/TSP presentation is attached at the mount and
+   * detached at teardown; the controller itself outlives both.
+   */
+  attachQueueManager(controller: QueueManagerController): void
+  /**
    * A4-4: clear the pending-input presentation and the own-input memory at a
    * session-generation bump (the original `resetForGeneration` clearing).
    */
@@ -1415,6 +1427,16 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
   let presetPresentation: PresetPresentation | undefined
   let webPresentation: WebAccessPresentation | undefined
   let sessionBrowserPresentation: SessionBrowserPresentation | undefined
+  /** PR-Q: the application-level Queue manager and the CURRENT mount's
+   *  presentation. The controller is installed before the mount; the
+   *  presentation is attached at the mount and detached at teardown. */
+  let queueManager: QueueManagerController | undefined
+  let queuePresentation: QueueManagerPresentation | undefined
+  const attachQueuePresentation = (presentation: QueueManagerPresentation | undefined): void => {
+    if (queueManager === undefined || presentation === undefined) return
+    queuePresentation = presentation
+    queueManager.attach(presentation)
+  }
   /**
    * PR3-B §3.3: the renderer input projection constructed at `start()` and the
    * mount that will receive it. `bindRendererInput()` performs the ONE bind
@@ -3165,6 +3187,13 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     applyAssistantInput: (input) => eventRouting.applyAssistantInput(input),
     applyResumedCompaction: (id, active, phase) => eventRouting.applyResumedCompaction(id, active, phase),
     refreshPendingInput,
+    attachQueueManager(controller) {
+      queueManager = controller
+      // A controller installed AFTER the mount (tests/HMR) attaches to the
+      // live PiTui presentation immediately; the TSP branch never has an app
+      // here (its presentation is attached inside `start`).
+      if (app !== undefined) app.attachQueueManager(controller)
+    },
     resetPendingPresentation,
     schedulePaint,
     paintNow,
@@ -3236,6 +3265,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
             cwd: () => deps.sessionCwd(),
             captureScope: deps.captureHistoryScope,
           },
+          queueManager,
         )
         // TSP-7 PR-B: the TSP branch's seam is the renderer's own, wrapped by a
         // NARROW surface-side proxy over `commitStatusFacts` only. The proxy
@@ -3254,6 +3284,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
         webPresentation = mounted.webPresentation
         sessionBrowserPresentation = mounted.sessionBrowserPresentation
         interactionPresenter = mounted.interaction
+        attachQueuePresentation(mounted.queuePresentation)
         rendererDispose = mounted.dispose
         // TSP I-C: keep ONLY the mount's installer reference (no catalog, no
         // candidate state). A mount without a completion seat leaves this
@@ -3377,6 +3408,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
         terminalProgressMode: parseTerminalProgressMode(options.terminalProgress),
       })
       display = pituiDisplaySeam(app)
+      if (queueManager !== undefined) app.attachQueueManager(queueManager)
       // B3-A1: the PiTui Task Center presentation sink is the ONE live app
       // itself, wrapped by the pure delegation adapter. It is installed
       // BEFORE the post-mount attention republish below, so that republish
@@ -3451,6 +3483,10 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       presetPresentation = undefined
       webPresentation = undefined
       sessionBrowserPresentation = undefined
+      if (queueManager !== undefined && queuePresentation !== undefined) {
+        queueManager.detach(queuePresentation)
+      }
+      queuePresentation = undefined
       // A disposed surface never binds its renderer input afterwards.
       pendingInputBinding = undefined
       inputBindTarget = undefined

@@ -44,6 +44,9 @@ export interface RendererSelectionDeps {
     /** M5-W PR-C: the native `/web` presenter. */
     readonly webPresentation?: import('../command/web-access-presentation.ts').WebAccessPresentation | undefined
     readonly sessionBrowserPresentation?: import('../command/session-browser-presentation.ts').SessionBrowserPresentation | undefined
+    /** PR-Q: the native Queue manager presentation (undefined when the pane
+     *  did not negotiate the kinds the sheet needs). */
+    readonly queuePresentation?: import('../queue/manager.ts').QueueManagerPresentation | undefined
     readonly interaction: import('../surface/interaction-presenter.ts').SurfaceInteractionPresenter
     readonly bindInput: (handlers: import('../surface/runtime.ts').SurfaceInputBinding) => void
     /**
@@ -100,6 +103,8 @@ export interface RendererSelectionDeps {
     readonly bindHistorySearch?: (
       binding: import('../surface/runtime.ts').TspHistorySearchBinding,
     ) => void
+    /** PR-Q: install the application-level Queue manager controller ONCE. */
+    readonly bindQueueManager?: (controller: import('../queue/manager.ts').QueueManagerController) => void
     readonly dispose: () => Promise<void>
   } | undefined>
   /** The environment read (production: `process.env`). */
@@ -139,7 +144,7 @@ export async function selectRendererMount(deps: RendererSelectionDeps): Promise<
     // TSP-7 PR-D: the footer config binds exactly once at the mount, BEFORE
     // the first status commit can paint a row (a resolver throw propagates —
     // the mount-failure release path owns the session).
-    mount: (binding, statusReader, historySearch) => {
+    mount: (binding, statusReader, historySearch, queueManager) => {
       tsp.bindStatusReader(statusReader)
       tsp.bindNativeFooterConfig(deps.resolveFooterConfig())
       tsp.bindImages(binding)
@@ -150,6 +155,12 @@ export async function selectRendererMount(deps: RendererSelectionDeps): Promise<
       // unbound, so `Ctrl+R` states the truth instead of opening a fake card) —
       // never a second lifecycle and never a silent fallback.
       tsp.bindHistorySearch?.(historySearch)
+      // PR-Q: the application-level Queue manager is installed at the SAME
+      // one-time mount, before any input can reach the renderer. A scripted
+      // connector without the member mounts a renderer with no queue sheet; the
+      // TSP builtin capability gate refuses `/queue` there instead of mounting a
+      // half-rendered page.
+      if (queueManager !== undefined) tsp.bindQueueManager?.(queueManager)
       return {
         display: tsp.display,
         taskPresentation: tsp.taskPresentation,
@@ -158,6 +169,7 @@ export async function selectRendererMount(deps: RendererSelectionDeps): Promise<
         presetPresentation: tsp.presetPresentation,
         webPresentation: tsp.webPresentation,
         sessionBrowserPresentation: tsp.sessionBrowserPresentation,
+        queuePresentation: tsp.queuePresentation,
         interaction: tsp.interaction,
         bindInput: (handlers) => tsp.bindInput(handlers),
         // TSP I-C: the ONE catalog commit forwarded to the renderer's own seat.
@@ -206,6 +218,11 @@ export interface ProductionTspConnectorDeps {
    * renderer, which owns no clipboard policy of its own.
    */
   readonly copyVisual: (text: string) => Promise<boolean>
+  /** PR-Q: the LIVE effective `app.queue.open` keys, read from the SAME action
+   *  table + user keybindings the PiTui keymap compiles. The TSP renderer owns
+   *  no keymap; this getter is how its raw key stream and `Manage` label point
+   *  at the same effective action. */
+  readonly queueOpenKeys?: () => readonly string[]
 }
 
 /** The PRODUCTION connector: lazy import + the official SDK connect. */
@@ -243,6 +260,11 @@ export function productionTspConnector(
   readonly bindHistorySearch: (
     binding: import('../surface/runtime.ts').TspHistorySearchBinding,
   ) => void
+  /** PR-Q: install the application-level Queue manager controller ONCE. */
+  readonly bindQueueManager?: (controller: import('../queue/manager.ts').QueueManagerController) => void
+  /** PR-Q: the native Queue manager sheet (undefined without a controller or
+   *  without the negotiated kinds). */
+  readonly queuePresentation?: import('../queue/manager.ts').QueueManagerPresentation | undefined
   readonly bindNativeFooterConfig: (config: TspNativeFooterConfig) => void
   readonly dispose: () => Promise<void>
 } | undefined> {

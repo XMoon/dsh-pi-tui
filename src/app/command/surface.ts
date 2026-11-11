@@ -247,6 +247,9 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
     openTasksBrowser(viewMode: 'full'): void
     /** S5-PR4: lease the ONE Schedule workspace over the selected backend. */
     openScheduleWorkspace(): import('@deepseek-ai/dsh-commands').CommandResult
+    /** PR-Q: open the ONE per-occurrence queued-message manager. Optional for
+     *  legacy/headless assemblies with no mounted surface. */
+    openQueueManager?(): import('@deepseek-ai/dsh-commands').CommandResult
     /**
      * Image UX PR3-B: the LIVE mounted composer of the current renderer (the
      * draft seat the `/attach` `/image` intake commits into). Read at call
@@ -1448,6 +1451,12 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       // it opens the FULL browser explicitly.
       openTasksBrowser: () => deps.surface.openTasksBrowser('full'),
       openScheduleWorkspace: () => deps.surface.openScheduleWorkspace(),
+      // PR-Q: `/queue` forwards to the application-level manager; the command
+      // surface owns no queue state and performs no Host write.
+      openQueueManager: () => deps.surface.openQueueManager?.() ?? {
+        kind: 'error',
+        text: 'Queue management is unavailable',
+      },
       // Delivered files (PR1 / M2): the functional read capability the
       // `/deliverables` handler forwards to the mounted surface; no Folder or
       // runtime object crosses this seam.

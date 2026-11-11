@@ -65,6 +65,10 @@ export const SESSIONLESS_COMMANDS = new Set([
   // `/schedule` (S5-PR4) opens the Host-wide Schedule manager. It must answer
   // before any Session exists: managing Host tasks never creates or opens one.
   'schedule',
+  // `/queue` (PR-Q) opens the per-occurrence pending-input manager. It must
+  // answer before any Session exists (the panel then states the empty state)
+  // and never creates a Session just to show it.
+  'queue',
 ])
 
 /**
@@ -150,6 +154,11 @@ export const LOCAL_COMMANDS = new Set([
   // Schedule workspace and is never a Host/model line. Its panel performs
   // Host writes only through the controller's owned, confirmed operations.
   'schedule',
+  // `/queue` (PR-Q) is a reserved local name: it opens the Client's ONE
+  // per-occurrence pending-input manager. Its panel performs the official
+  // queue edit/remove only through the controller's confirmed operations;
+  // the command itself never writes.
+  'queue',
 ])
 
 /**

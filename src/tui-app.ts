@@ -85,6 +85,9 @@ import {
 } from './domain/terminal-progress/settings.ts'
 import { runSyncDisposalSteps, runSyncDisposalStepsWithPrimary } from './runtime/process/disposal.ts'
 import { Frame, FocusForwardingFrame, ResponsiveOverlayFrame, type ResponsiveOverlayGeometry } from './tui/components/frame.ts'
+import { DockQueue, type DockQueueModel } from './tui/queue/dock-queue.ts'
+import { QueuePanel, queueOverlayGeometry } from './tui/queue/queue-panel.ts'
+import type { QueueManagerController, QueueManagerPresentation } from './app/queue/manager.ts'
 // The generic overlay frame now lives in the TUI component layer; the stable
 // facade export stays here for existing consumers (TS4 plan §19).
 export { Frame } from './tui/components/frame.ts'
@@ -1403,6 +1406,14 @@ export interface TuiAppEventsBase {
    * not the official in-place queue edit operation. Optional.
    */
   onDequeue?: () => void
+  /**
+   * PR-Q: open the per-occurrence queued-message manager (the Dock `Manage`
+   * affordance, a Dock row click, `/queue` or the `app.queue.open` action).
+   * `initialItemId` is the clicked Host occurrence (a preselection hint only);
+   * the application-level manager re-reads the live projection and validates
+   * it before any write. Optional.
+   */
+  onOpenQueue?: (initialItemId?: string) => void
   /**
    * M6: a plugin keybinding fired (the InputRouter mapped a normalized
    * key to a SEMANTIC action). The host executes the action through its
@@ -3766,7 +3777,7 @@ export class TuiApp {
    * `❯ text` row per pending message and a dim hint. Renders nothing while
    * the queue is empty.
    */
-  private readonly queuePane: Text
+  private readonly queuePane: DockQueue
   /** The semantic queued pending-input occurrences for the active subject. */
   private queueItems: readonly QueueItem[] = []
   /** The ONE ordered ephemeral pending tail lane (authoritative steering +
@@ -4229,6 +4240,16 @@ export class TuiApp {
    *  change rebinds the SAME logical lease with a fresh frame and live options
    *  (never a wider host canvas that would erase the background beside it). */
   private deliveredFilesGeometryKey: string | undefined
+  /** PR-Q: the application-level Queue manager (the ONE business owner) and
+   *  the live overlay lease/presentation. The panel reads the manager's view
+   *  DTO; every intent goes back through it. */
+  private queueManager: QueueManagerController | undefined
+  private queuePresentationObject: QueueManagerPresentation | undefined
+  private queueOverlay: OverlayHandle | undefined
+  private queueFrame: ResponsiveOverlayFrame | undefined
+  private queuePanel: QueuePanel | undefined
+  private queueScreen: TuiMainScreen | TuiAltScreen | undefined
+  private queueGeometryKey: string | undefined
   private readonly openExternalUrl: ((url: string) => void) | undefined
   private readonly readClipboardText: (() => Promise<string | undefined>) | undefined
   /**
@@ -5421,7 +5442,7 @@ export class TuiApp {
     this.dock = new Text('', 0, 0)
     this.todoPanel = new Text('', 0, 0)
     this.goalLine = new Text('', 0, 0)
-    this.queuePane = new Text('', 0, 0)
+    this.queuePane = new DockQueue({ open: itemId => { this.openQueueEntry(itemId) } })
     // The busy indicator repaints through a callback, not a captured screen:
     // the MAIN screen stops rendering while the alt screen (fullscreen) is
     // active, so a captured TuiMainScreen would freeze the animation at the
@@ -6283,6 +6304,7 @@ export class TuiApp {
       // broker's physical unmount, so its recorded hit map can never survive
       // into a dying surface.
       () => this.closeDeliveredFiles(),
+      () => this.closeQueueManager(),
       // Phase 3B / B1-A / B2-A: the leased workspace screen (Job OR Settings) is
       // released FIRST — through the SAME close path Esc uses, so its owner
       // notification still runs exactly once, its temporary alt screen never
@@ -7783,6 +7805,15 @@ export class TuiApp {
         // opened); an ENTRY consumes the key (no replay — no double
         // processing).
         return this.enterTaskQuick()
+      },
+      openQueueManager: () => {
+        // PR-Q: the `app.queue.open` action. The host ladder resolves host
+        // actions BEFORE the overlay capture stage, so the shared entry (not
+        // the keymap) is what refuses to stack the queue panel on another
+        // managed overlay. When the queue panel itself is live, the
+        // application manager toggles it closed (one entry, one toggle).
+        this.openQueueEntry()
+        return true
       },
       openHistorySearch: () => {
         // Input-history search: unbound (no historySearchSource) is a
@@ -9518,6 +9549,10 @@ export class TuiApp {
     // CURRENT subject/projection is retired BEFORE this frame can paint it
     // beside the new subject (three identity comparisons while closed).
     this.retireStaleDeliveredFiles()
+    // PR-Q: a projection commit follows every display-subject change; a queue
+    // panel captured for a previous Session/owner must retire BEFORE the new
+    // subject paints beside it.
+    this.queueManager?.retireIfStale()
     const profileStart = this.transcriptRenderProfiler.begin()
     const previousWindow = this.transcriptWindow
     const previousWindowHint = this.transcriptWindowHint
@@ -23606,56 +23641,33 @@ export class TuiApp {
     this.syncExtensionState()
   }
 
-  /** Rebuild the queue pane text from the current inbox rows and width. */
+  /** Rebuild the Dock Queue pane from the current pending presentation. The
+   * component builds its own rows/hit map from the LAST paint width, so the
+   * pinned chrome height and the pointer identity can never be baked into a
+   * stale Text string. */
   private rebuildQueuePane(width: number): void {
+    void width
     const items = this.queueItems
+    const model: DockQueueModel = {
+      rows: items.length === 0
+        ? []
+        : items.map(item => ({
+            ...(item.local === true ? {} : { id: item.id }),
+            text: item.text,
+            local: item.local === true,
+          })),
+      running: this.queueRunning,
+      steerKey: this.keybindings.keyHint('app.input.steer'),
+      recallKey: this.keybindings.keyHint('app.input.dequeue'),
+      manageKey: this.keybindings.keyHint('app.queue.open'),
+      viewer: this.viewerMode !== undefined,
+    }
+    this.queuePane.setModel(model)
     if (items.length === 0) {
-      // An emptied pane must not leave its previously painted rows behind
-      // (fork trap): the empty Text renders no lines and the requested
-      // frame repaints the region.
-      this.queuePane.setText('')
-      return
+      // An emptied pane must not leave its previously painted rows behind: the
+      // model is empty and the requested frame repaints the region.
+      this.queuePane.setModel(model)
     }
-    const safeWidth = Math.max(1, Math.floor(width))
-    // Panel border rules indent one cell on each side so the boundary never
-    // reads as the editor's full-width border.
-    const lines = [color.border(` ${'─'.repeat(Math.max(0, safeWidth - 2))} `)]
-    for (const item of items) {
-      const text = sanitizeDisplayText(item.text).replace(/\s+/g, ' ').trim()
-      // A client-local echo has no authoritative queue item yet: advertise
-      // that it is still being admitted, never a plain authoritative row.
-      // The suffix is part of the row's width budget, so a narrow pane
-      // truncates the TEXT and keeps the status on the same line — never a
-      // detached wrapped row. On an ultra-narrow pane that cannot hold the
-      // marker + one text cell + the status, the status is dropped rather
-      // than wrapped.
-      const prefixWidth = visibleWidth('❯ ')
-      const fullSuffix = item.local === true ? ' sending…' : ''
-      const suffix = prefixWidth + visibleWidth(fullSuffix) + 1 <= safeWidth ? fullSuffix : ''
-      const available = Math.max(1, safeWidth - prefixWidth - visibleWidth(suffix))
-      const truncated = truncateToWidth(text, available, '…')
-      // Every row is a semantic queued occurrence; the same ❯ marker and
-      // steer/recall hints apply regardless of its backend origin.
-      lines.push(`${color.roleUser('❯')} ${truncated}${color.textDim(suffix)}`)
-    }
-    // The bulk steer-all/recall-all gestures address only AUTHORITATIVE queued
-    // occurrences; a client-local `sending…` row has no occurrence id yet. A
-    // pane holding ONLY local echoes must not advertise a no-op action (the
-    // `sending…` suffix already communicates the state). A MIXED pane keeps
-    // the hint but scopes it to the accepted rows, so `sending…` rows are
-    // never implied to participate.
-    const hasLocalRows = items.some(item => item.local === true)
-    if (items.some(item => item.local !== true)) {
-      const scope = hasLocalRows ? 'accepted' : 'all'
-      const steerHint = this.queueRunning
-        ? `${(this.keybindings.keyHint('app.input.steer') || 'the steer key').toLowerCase()} to steer ${scope}`
-        : 'waiting for the next prompt — send a message to continue'
-      const hint = this.viewerMode === undefined
-        ? `${steerHint} · ${(this.keybindings.keyHint('app.input.dequeue') || 'the recall key').toLowerCase()} to recall ${scope}`
-        : steerHint
-      lines.push(color.textDim(truncateToWidth(`  ${hint}`, Math.max(1, safeWidth - 2), '…')))
-    }
-    this.queuePane.setText(lines.join('\n'))
   }
 
   /** Rebuild the queue pane at the current terminal width and repaint. */
@@ -25793,6 +25805,139 @@ export class TuiApp {
     if (snapshot === undefined) return
     if (this.deliveredFiles?.isCurrent(snapshot) === true) return
     this.closeDeliveredFiles()
+  }
+
+  /**
+   * PR-Q: install the ONE application-level Queue manager on this mounted
+   * PiTui surface. Exactly one surface is mounted per process; the controller
+   * attaches once here and its `present()` drives the overlay below.
+   */
+  attachQueueManager(controller: QueueManagerController): void {
+    this.queueManager = controller
+    const presentation: QueueManagerPresentation = {
+      present: () => this.presentQueueManager(),
+      retire: () => this.closeQueueManager(),
+    }
+    this.queuePresentationObject = presentation
+    controller.attach(presentation)
+  }
+
+  /** The ONE entry shared by the Dock header/rows and `app.queue.open`. A
+   *  managed overlay already owns the keyboard: never stack the queue panel on
+   *  it (the host key ladder resolves actions before the overlay capture). */
+  private openQueueEntry(initialItemId?: string): void {
+    if (this.disposed) return
+    if (this.queueOverlay === undefined && this.overlayBroker.hasFocusedOverlay()) return
+    if (this.deliveredFilesPanel !== undefined || this.modelPickerOverlay !== undefined) return
+    this.events.onOpenQueue?.(initialItemId)
+  }
+
+  /**
+   * The controller's presentation commit: mount the panel on first open,
+   * repaint it afterwards, and close the physical overlay when the controller
+   * is closed (Esc, a session switch or an owner change).
+   */
+  private presentQueueManager(): void {
+    if (this.disposed) return
+    const controller = this.queueManager
+    if (controller === undefined) return
+    if (!controller.isOpen()) {
+      this.closeQueueManager()
+      return
+    }
+    if (this.queuePanel === undefined) {
+      this.mountQueueManagerPanel(controller)
+      return
+    }
+    if (this.queueScreen !== this.activeScreen) {
+      // A workspace lease owns the visible screen: the projection stays parked
+      // on its return screen and resumes with the ordinary repaint funnel.
+      return
+    }
+    this.requestRender()
+  }
+
+  private mountQueueManagerPanel(controller: QueueManagerController): void {
+    const panel = new QueuePanel({
+      controller,
+      requestRender: () => this.requestRender(),
+      screen: () => this.activeScreen,
+      close: () => { controller.close() },
+    })
+    const frame = this.createQueueManagerFrame(panel)
+    const geometry = queueOverlayGeometry(this.terminal.columns, this.terminal.rows)
+    // Publish the lease BEFORE the mount: a focus callback inside the mount may
+    // synchronously re-enter this presentation.
+    this.queuePanel = panel
+    this.queueFrame = frame
+    this.queueScreen = this.activeScreen
+    this.queueGeometryKey = geometry.key
+    let handle: OverlayHandle
+    try {
+      handle = this.showOverlayOnHost(
+        frame,
+        { width: geometry.width, maxHeight: geometry.maxHeight },
+        {
+          // REMOUNTABLE: a fullscreen screen swap keeps the SAME panel (edit
+          // draft, selection, scroll) behind a fresh physical projection.
+          remountable: true,
+          remount: (logical) => {
+            if (this.queuePanel !== panel) return
+            const next = this.createQueueManagerFrame(panel)
+            this.queueFrame = next
+            this.queueScreen = this.activeScreen
+            const live = queueOverlayGeometry(this.terminal.columns, this.terminal.rows)
+            this.queueGeometryKey = live.key
+            this.rebindOverlayRaw(logical, next, { width: live.width, maxHeight: live.maxHeight })
+          },
+        },
+      )
+    } catch (error) {
+      if (this.queuePanel === panel) {
+        this.queuePanel = undefined
+        this.queueFrame = undefined
+        this.queueScreen = undefined
+        this.queueGeometryKey = undefined
+      }
+      panel.dispose()
+      throw error
+    }
+    if (this.queuePanel !== panel) {
+      // A focus callback inside the mount already closed/replaced this lease:
+      // the fresh projection is orphaned and must not survive.
+      this.overlayRemounts.delete(handle)
+      handle.hide()
+      return
+    }
+    this.queueOverlay = handle
+  }
+
+  /** The frame's geometry callback, the host options and the panel's row grant
+   *  all read ONE live geometry result (D10 snap-down ladder). */
+  private createQueueManagerFrame(panel: QueuePanel): ResponsiveOverlayFrame {
+    return new ResponsiveOverlayFrame(
+      panel,
+      () => {
+        const geometry = queueOverlayGeometry(this.terminal.columns, this.terminal.rows)
+        return { width: geometry.width, maxHeight: geometry.maxHeight, key: geometry.key }
+      },
+      (geometry) => panel.setMaxRows(Math.max(1, geometry.maxHeight - 2)),
+    )
+  }
+
+  /** Close the live Queue manager overlay (idempotent). The lease identity is
+   *  dropped BEFORE the broker close can run focus callbacks. */
+  closeQueueManager(): void {
+    const overlay = this.queueOverlay
+    const panel = this.queuePanel
+    this.queueOverlay = undefined
+    this.queueFrame = undefined
+    this.queuePanel = undefined
+    this.queueScreen = undefined
+    this.queueGeometryKey = undefined
+    if (overlay !== undefined) this.overlayRemounts.delete(overlay)
+    overlay?.hide()
+    panel?.dispose()
   }
 
   /** The live terminal key a delivered-files physical projection was mounted

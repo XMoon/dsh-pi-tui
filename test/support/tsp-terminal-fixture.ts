@@ -196,6 +196,15 @@ export function installTspPane(options: {
    * `features` verbatim instead (the fail-closed default, not an accident).
    */
   readonly historySearch?: boolean
+  /**
+   * PR-Q: advertise the native kinds the TSP Queue manager sheet paints — its
+   * `picker` (Browse), the modal `overlay` + controlled `editor` (Edit) and
+   * `overlay` + `button` (Delete confirmation) plus the `row`/`text`/`col`
+   * vocabulary every one of those pages uses. A pane without them is refused
+   * the sheet BEFORE the command reaches the handler (fail closed), exactly
+   * like the real client.
+   */
+  readonly queueManager?: boolean
   readonly kinds?: readonly string[]
   readonly features?: readonly string[]
 } = {}): TspPane {
@@ -235,6 +244,7 @@ export function installTspPane(options: {
     ...(options.nativeChart === true ? ['chart'] : []),
     ...(options.nativeInteraction === true ? ['questions', 'overlay', 'row', 'text', 'input', 'button', 'scroll'] : []),
     ...(options.historySearch === true ? ['input', 'el', 'scroll', 'row', 'text'] : []),
+    ...(options.queueManager === true ? ['picker', 'overlay', 'editor', 'button', 'row', 'text'] : []),
   ]))
   const nativeFeatures = [
     ...(options.presetPicker === true || options.webPicker === true || options.sessionBrowser === true || options.workDetails === true ? ['scroll'] : []),

@@ -100,6 +100,7 @@ import { isUserInvocableSkill, type HumanSkillCatalog, type HumanSkillSummary } 
 import { registerExitCommand, registerHelpCommand, registerReloadClientCommand } from './tui/commands/utility.ts'
 import { registerPluginsCommand, registerTasksCommand } from './tui/commands/tasks.ts'
 import { registerScheduleCommand } from './tui/commands/schedule.ts'
+import { registerQueueCommand } from './tui/commands/queue.ts'
 import { createModelCommands } from './tui/commands/models.ts'
 import type { ModelPresentation } from './app/command/model-presentation.ts'
 import type { WebAccessPresentation } from './app/command/web-access-presentation.ts'
@@ -768,6 +769,14 @@ export interface TuiCommandRunner {  ctx: Context
    * Host write and returns a REAL error when no PiTui surface is mounted.
    */
   openScheduleWorkspace(): CommandResult
+  /**
+   * PR-Q: open the Client's ONE per-occurrence queued-message manager. The
+   * command creates no Session, sends nothing to the agent and performs no
+   * Host write; the application-level controller re-reads the authoritative
+   * `queued` projection and the panel's explicit intents perform the official
+   * edit/remove. A renderer without the manager returns a real error.
+   */
+  openQueueManager?(): CommandResult
   /**
    * Delivered files (PR1 / M2): the on-demand catalog of the CURRENT display
    * subject's delivered Turns, derived from the selected Folder's full grouped
@@ -2414,6 +2423,12 @@ export function registerTuiCommands(
   sessionCommands.registerNew()
 
   registerTasksCommand({ runner, registerTuiCommand })
+
+  // `/queue` (PR-Q): the ONE per-occurrence pending-input manager. It sits
+  // beside the other sessionless panel entries and is NOT a second queue
+  // surface: the panel reads the existing pending-input projection and writes
+  // through the existing `SessionWriter.updateQueue` port.
+  registerQueueCommand({ runner, registerTuiCommand })
 
   // `/schedule` (S5-PR4): the ONE Host Schedule management entry. It sits
   // beside the other sessionless workspace entries and is NOT an alias of

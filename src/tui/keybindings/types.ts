@@ -74,6 +74,8 @@ export type AppKeybindingId =
   | 'app.permission.cycle'
   | 'app.todo.toggle'
   | 'app.tasks.open'
+  /** PR-Q: open the per-occurrence queued-message manager. */
+  | 'app.queue.open'
   | 'app.history.search'
   // User shell
   | 'app.shell.dismissSettled'

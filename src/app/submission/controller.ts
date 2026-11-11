@@ -25,7 +25,7 @@ import type { Diag } from '../../runtime/process/diagnostics.ts'
 import { runOwned } from '../../runtime/process/tasks.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import { ImageInputError } from '../../domain/media/errors.ts'
-import type { FileAttachmentRefLike, ImageAttachmentRefLike } from '../../domain/media/types.ts'
+import type { ImageAttachmentRefLike } from '../../domain/media/types.ts'
 import { WorkspaceSelectionError } from '../../runtime/session-lifecycle-port.ts'
 import { runReservedSubmit } from './submit-flow.ts'
 
@@ -2174,7 +2174,6 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
         isViewing: () => deps.viewer.isViewing(),
         currentAgent: () => deps.liveAgent(),
         captureOwnerToken: () => deps.ownership.captureSubject(),
-        canPullBackRecalledFiles: deps.prepareTransport === undefined,
         isOwnerTokenCurrent: (token) => deps.captureMatches(token as SessionSubject | undefined),
         requireLiveScope: deps.scope.requireLive,
         readPullableQueue: (sessionId) => {
@@ -2198,15 +2197,6 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
             ...(ref.name !== undefined ? { name: ref.name } : {}),
             source: { type: 'recalled' },
             recalledRef: ref,
-          })
-          return { id: draft.id, placeholder: draft.placeholder }
-        },
-        stageRecalledFile: (attachment) => {
-          const ref = attachment as FileAttachmentRefLike
-          const draft = deps.drafts.files.add({
-            name: ref.name,
-            byteLength: ref.bytes,
-            source: { type: 'recalled', ref },
           })
           return { id: draft.id, placeholder: draft.placeholder }
         },

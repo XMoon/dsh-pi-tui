@@ -15,7 +15,7 @@ import { afterEach, test } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent, ModelSelection } from '@deepseek-ai/dsh-agent'
 import { TuiApp } from '../../src/tui-app.ts'
-import { LOCAL_COMMANDS } from '../../src/index.ts'
+import { LOCAL_COMMANDS, SESSIONLESS_COMMANDS } from '../../src/index.ts'
 import { CatalogRefreshCoordinator } from '../../src/app/command/catalog-refresh.ts'
 import { registerTuiCommands, type TuiCommandRunner } from '../../src/commands.ts'
 import { TransitionInProgressError } from '../../src/app/session/operation-barrier.ts'
@@ -667,7 +667,7 @@ test('/subagents is a registered alias of /tasks sharing its handler', () => {
   app.stop()
 })
 
-test('/queue is fully removed: the name is no longer host-owned or registered', async () => {
+test('/queue is the Client-local manager entry, never a Host/model line', async () => {
   const ctx = new Context()
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
@@ -678,9 +678,10 @@ test('/queue is fully removed: the name is no longer host-owned or registered', 
   const state = { agent: fakeAgent('session-a'), generation: 1 }
   registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, state))
   const queueDef = services.defs.find(def => def.name === 'queue')
-  assert.equal(queueDef, undefined,
-    '/queue must not be registered — the name is released (input steers to the model like any unknown /line)')
-  assert.ok(!LOCAL_COMMANDS.has('queue'), '/queue must be gone from LOCAL_COMMANDS')
+  assert.ok(queueDef !== undefined, '/queue registers the Client-local queue manager')
+  assert.equal(typeof queueDef!.handler, 'function', 'the /queue handler is registered')
+  assert.ok(LOCAL_COMMANDS.has('queue'), '/queue is a reserved local name')
+  assert.ok(SESSIONLESS_COMMANDS.has('queue'), '/queue answers before any Session exists')
   app.stop()
 })
 

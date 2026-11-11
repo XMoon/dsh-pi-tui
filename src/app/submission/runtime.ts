@@ -466,8 +466,6 @@ export interface PullBackQueueDeps {
   readonly currentAgent: () => { readonly session: { readonly id: string } } | undefined
   /** Capture the owner subject token synchronously (identity fence). */
   readonly captureOwnerToken: () => unknown
-  /** Whether this backend can rebind an already durable generic file. */
-  readonly canPullBackRecalledFiles: boolean
   /** Whether a captured owner token is still the current owner. */
   readonly isOwnerTokenCurrent: (token: unknown) => boolean
   /** Capture the live session scope for the writer admission (throws if absent). */
@@ -488,8 +486,6 @@ export interface PullBackQueueDeps {
   readonly deferQueueRecall: (recall: PendingQueueRecall) => void
   /** Stage one durable queued image as a recalled draft; returns its id + placeholder. */
   readonly stageRecalledImage: (attachment: unknown) => { readonly id: number; readonly placeholder: string }
-  /** Stage one durable queued file as a recalled draft; returns its id + placeholder. */
-  readonly stageRecalledFile: (attachment: unknown) => { readonly id: number; readonly placeholder: string }
   /** Drop one staged recalled draft. */
   readonly discardStagedDraft: (kind: 'image' | 'file', id: number) => void
   /** Pin the recalled drafts for the duration of the writer section. */
@@ -509,11 +505,20 @@ export interface PullBackQueueDeps {
 }
 
 /**
- * Alt+Up queue pull-back: stage every queued occurrence as recalled drafts
- * (durable image/file refs are reused), then remove each occurrence FIFO
- * through the semantic writer. The queue is spliced only after the drafts are
- * staged; a confirmed prefix is reflected only after settlement. A waiting
- * transition defers the local representation to {@link PendingQueueRecall}.
+ * Alt+Up queue pull-back: refuse the WHOLE gesture when any queued occurrence
+ * carries a durable generic FILE (no official Client can re-bind a stored
+ * file's upload receipt, on either backend), then stage every remaining
+ * occurrence as recalled drafts (durable image refs are reused), and remove
+ * each occurrence FIFO through the semantic writer. The queue is spliced only
+ * after the drafts are staged; a confirmed prefix is reflected only after
+ * settlement. A waiting transition defers the local representation to
+ * {@link PendingQueueRecall}.
+ *
+ * The FILE refusal reads the Host occurrence's RAW content, never the queue
+ * pane's display text: a `📄` marker in a text block is ordinary text, and a
+ * display projection can never decide what the Host really holds. It runs
+ * before any draft is staged and before any occurrence is removed, so a
+ * refused recall leaves the queue byte-for-byte unchanged.
  */
 export function pullBackQueue(deps: PullBackQueueDeps): void {
   if (deps.isDisposed() || deps.isViewing()) return
@@ -525,15 +530,14 @@ export function pullBackQueue(deps: PullBackQueueDeps): void {
   const queuedScope = deps.requireLiveScope()
   const queued = deps.readPullableQueue(queuedAgent.session.id)
   if (queued === undefined || queued.length === 0) return
-  if (!deps.canPullBackRecalledFiles
-    && queued.some(message => message.content.some(raw => (raw as PullableQueueBlock).type === 'file'))) {
+  if (queued.some(message => message.content.some(raw => (raw as PullableQueueBlock).type === 'file'))) {
     deps.notify(
-      'This queue includes a stored file. The official Client cannot rebind its upload receipt, so the queue was not modified.',
+      'Cannot recall queued messages containing files. Use /queue to remove the file-bearing message, then press Alt+Up again.',
       'error',
     )
     return
   }
-  // Multimodal queued messages (durable attachments) ARE pullable: each block
+  // Multimodal queued messages (durable images) ARE pullable: each block
   // becomes a RECALLED draft. The queue is spliced ONLY after the drafts are
   // staged (a failure keeps the queue intact).
   let recalledText = ''
@@ -552,11 +556,6 @@ export function pullBackQueue(deps: PullBackQueueDeps): void {
           const draft = deps.stageRecalledImage(block.attachment)
           staged.push({ kind: 'image', id: draft.id })
           messageStaged.push({ kind: 'image', id: draft.id })
-          parts.push(draft.placeholder)
-        } else if (block.type === 'file') {
-          const draft = deps.stageRecalledFile(block.attachment)
-          staged.push({ kind: 'file', id: draft.id })
-          messageStaged.push({ kind: 'file', id: draft.id })
           parts.push(draft.placeholder)
         }
       }

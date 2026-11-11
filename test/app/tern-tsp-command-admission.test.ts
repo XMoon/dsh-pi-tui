@@ -270,7 +270,7 @@ test('the card-less result-notice scope covers admitted builtins, the Browser fa
   // Remote Client command registry appends no result card, so its fixed
   // refusals need THIS one visible owner. Membership is notice ownership only.
   assert.deepEqual([...TSP_B2A_RESULT_NOTICE_COMMANDS].sort(),
-    [...TSP_SUPPORTED_TUI_BUILTINS, 'sessions', 'resume', 'search', 'logout', 'reload-client'].sort())
+    [...TSP_SUPPORTED_TUI_BUILTINS, 'sessions', 'resume', 'search', 'logout', 'reload-client', 'queue'].sort())
   assert.ok(!TSP_SUPPORTED_TUI_BUILTINS.has('reload-client'),
     'the TSP renderer gains no native reload command')
   assert.deepEqual(tspBuiltinAvailability(classify({ tuiCommand: true }), 'reload-client', {}, ''),
