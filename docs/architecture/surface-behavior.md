@@ -203,7 +203,10 @@ SAME paused Task Browser (lease ownership: [overlay-focus.md](./overlay-focus.md
   Find-open bar can never close the lease in one click and the Command page
   returns to Output without releasing the observation. The Header's
   Command/Copy affordances remain the only other pointer targets; the Stop verb
-  stays keyboard-only.
+  stays keyboard-only. A press records the LIVE terminal grant and the painted
+  frame geometry; a resize before the next paint, or a repaint at another
+  grant/chrome layout, revokes the gesture, so an old physical cell never
+  replays the previous Esc outcome.
 
 Authority: `TuiApp.openJobInspector` + `JobInspectorPanel` (`planChrome`,
 `deriveJobInspectorView`), `JobOutputScrollView`, `JobOutputSearch`,
@@ -433,7 +436,9 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   `handleSearchInput`, `handleDirectorySubmit`, `handleDirectoryCancel`,
   `activateSelectedBrowseRow`) and never starts a second navigation state
   machine. The Peek pane paints NO local action line: the global bar is the
-  only navigation row, and its `Open [Enter]` is the one explicit resume.
+  only navigation row, and its `Open [Enter]` is the one explicit resume. A
+  press records the LIVE terminal grant beside the frame revision, so a resize
+  that has not repainted yet also drops the gesture.
 - **One lifecycle.** Each open keeps exactly one Workspace follow, one roster
   read owner, one Activity sample generation and one fullscreen lease. The close
   path aborts list/search/Activity, disposes the follow once, stops the screen

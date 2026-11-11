@@ -17,6 +17,8 @@ import assert from 'node:assert/strict'
 import test, { afterEach } from 'node:test'
 import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import { TuiApp, type SessionWorkspaceHandle } from '../../src/tui-app.ts'
+import type { SessionWorkspacePanelHost, SessionWorkspacePanelOptions } from '../../src/tui/panels/session-workspace-panel.ts'
+import { SessionWorkspacePanel } from '../../src/tui/panels/session-workspace-panel.ts'
 import type {
   SessionBrowserAnswerEligibility,
   SessionBrowserReadSnapshot,
@@ -3291,6 +3293,88 @@ test('a bar gesture is dropped by any frame change between press and release', a
   assert.deepEqual(h.resumes, [], 'a changed search state between press and release never resumes')
   assert.equal(h.closes, 0, 'a changed search state never closes through the old bar cell')
   assert.ok(h.view().includes('Search all workspaces'), 'the search editor keeps its own focus')
+})
+
+test('a bar gesture is revoked by a resize that has not repainted yet', async () => {
+  const h = harness({ columns: 100, rows: 24 })
+  h.handle.setSnapshot(snapshot())
+  await h.paint()
+  h.vt.sendInput('\x1b[B')
+  await h.paint()
+  const frame = panelFrame(h)
+  const bar = frame[frame.length - 1]!
+  const x = bar.indexOf('Open') + 1
+  const y = frame.length - 1
+  assert.ok(x > 0, `the bar paints its Open affordance:\n${bar}`)
+
+  // PRESS, then let the terminal change geometry WITHOUT waiting for a frame,
+  // then RELEASE on the old physical cell. The pre-repaint resize must revoke
+  // the gesture instead of replaying the old bar action.
+  h.vt.sendInput(`\x1b[<0;${x + 1};${y + 1}M`)
+  h.vt.resize(80, 20)
+  h.vt.sendInput(`\x1b[<0;${x + 1};${y + 1}m`)
+  await h.paint()
+  assert.deepEqual(h.resumes, [], 'a resize before the next paint never resumes the old target')
+  assert.equal(h.closes, 0, 'the stale release never closes the workspace')
+
+  // Positive control: the same cells on an unchanged frame still resume once.
+  const current = panelFrame(h)
+  const currentBar = current[current.length - 1]!
+  const currentX = currentBar.indexOf('Open')
+  if (currentX >= 0) {
+    await clickBarAction(h, 'Open')
+    assert.deepEqual(h.resumes, [OTHER], 'an unchanged frame still runs the ONE resume intent')
+  }
+})
+
+test('the bar gesture is pinned to the live terminal grant, not only the frame revision', () => {
+  const resumes: string[] = []
+  let closes = 0
+  let rows = 24
+  let columns = 100
+  const host: SessionWorkspacePanelHost = {
+    rows: () => rows,
+    columns: () => columns,
+    requestRender: () => {},
+    notice: () => undefined,
+    onQueryChange: () => {},
+    onResume: (sessionId) => { resumes.push(sessionId) },
+    onClose: () => { closes += 1 },
+  }
+  const options: SessionWorkspacePanelOptions = {
+    initialMode: 'browse',
+    initialBrowseScope: 'current',
+    currentSessionId: CURRENT,
+  }
+  const panel = new SessionWorkspacePanel(host, options)
+  panel.setSnapshot(snapshot())
+  panel.handleInput('\x1b[B') // move from the current Session to `OTHER`
+  const paint = (): string => stripTerminalSequences(panel.render(columns).at(-1) ?? '')
+  const bar = paint()
+  const x = bar.indexOf('Open')
+  assert.ok(x >= 0, `the bar paints Open for the selected non-current Session:\n${bar}`)
+
+  // PRESS, change the LIVE grant WITHOUT a new frame, then RELEASE on the same
+  // cell: the stale cell must not reach resumeSelected.
+  panel.onCellPress(x, rows - 1)
+  rows = 20
+  panel.onCellClick(x, 23)
+  assert.deepEqual(resumes, [], 'a pre-repaint row resize revokes the bar gesture')
+
+  // The same fence covers a width-only change.
+  rows = 24
+  panel.onCellPress(x, 23)
+  columns = 80
+  panel.onCellClick(x, 23)
+  assert.deepEqual(resumes, [], 'a pre-repaint width change revokes the bar gesture')
+
+  // Positive control: the unchanged frame still runs the ONE resume intent.
+  columns = 100
+  panel.onCellPress(x, 23)
+  panel.onCellClick(x, 23)
+  assert.deepEqual(resumes, [OTHER], 'an unchanged frame still resumes the selected Session once')
+  assert.equal(closes, 0, 'no bar gesture ever closed the workspace')
+  panel.dispose()
 })
 
 test('a one-row frame has no action bar, and a truncated bar segment has no hit', async () => {

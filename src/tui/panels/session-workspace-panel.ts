@@ -482,6 +482,10 @@ export class SessionWorkspacePanel implements Component {
       readonly xStart: number
       readonly xEnd: number
       readonly line: number
+      /** The LIVE terminal grant at press time. A resize before the next frame
+       *  publishes revokes the gesture instead of replaying an old cell. */
+      readonly rows: number
+      readonly columns: number
     }
     | undefined
   /** The last frame this panel really painted, in panel-relative coordinates. */
@@ -1441,6 +1445,8 @@ export class SessionWorkspacePanel implements Component {
         xStart: region.xStart,
         xEnd: region.xEnd,
         line: region.line,
+        rows: this.host.rows(),
+        columns: this.host.columns(),
       }
     // Click-to-position on the input this frame really painted. The panel
     // stays the keyboard owner; only the private Input's cursor moves.
@@ -1471,6 +1477,10 @@ export class SessionWorkspacePanel implements Component {
     // The frame the user pressed must still be the frame at the release: a
     // scroll/resize/scope/search/Activity/content change between the two halves
     // drops the gesture instead of activating a target that appeared later.
+    // A resize that has NOT repainted yet leaves the previous frame revision in
+    // place, so the LIVE grant is re-proved too: an old physical cell can never
+    // replay a bar action after the terminal moved.
+    if (this.host.rows() !== pressed.rows || this.host.columns() !== pressed.columns) return
     if (pressed.revision !== this.hitFrame.revision) return
     const region = this.regionAt(x, y)
     if (region === undefined
