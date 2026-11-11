@@ -29,9 +29,11 @@
  */
 
 import {
+  CURSOR_MARKER,
   Input,
   Key,
   matchesKey,
+  renderFakeCursor,
   truncateToWidth,
   visibleWidth,
   type Component,
@@ -159,6 +161,76 @@ function fit(text: string, width: number): string {
   const clamped = truncateToWidth(text, width, '…', false)
   const padding = width - visibleWidth(clamped)
   return padding > 0 ? clamped + ' '.repeat(padding) : clamped
+}
+
+/** One display-safe single physical row for a private `Input` render. The
+ *  returned `safe` flag means the raw value was already display-safe, so the
+ *  exact Input click-to-position contract can be used. */
+interface SafeInputLine {
+  readonly line: string
+  readonly safe: boolean
+}
+
+function markerCount(line: string, marker: string): number {
+  let count = 0
+  for (let index = line.indexOf(marker); index >= 0; index = line.indexOf(marker, index + marker.length)) {
+    count += 1
+  }
+  return count
+}
+
+/** The private start/end wrappers `renderFakeCursor()` uses, DERIVED from its
+ *  public contract instead of duplicating the fork's protocol bytes. */
+const FAKE_CURSOR_PROBE = renderFakeCursor('\u0000')
+const FAKE_CURSOR_PROBE_INDEX = FAKE_CURSOR_PROBE.indexOf('\u0000')
+const FAKE_CURSOR_START_MARKER = FAKE_CURSOR_PROBE.slice(0, FAKE_CURSOR_PROBE_INDEX)
+const FAKE_CURSOR_END_MARKER = FAKE_CURSOR_PROBE.slice(FAKE_CURSOR_PROBE_INDEX + 1)
+
+/**
+ * Project one focused/unfocused `Input.render()` row through the plain
+ * terminal policy. The Input's own hardware/fake cursor markers are
+ * re-applied around SAFE text; every Host/user byte is projected as a plain
+ * single row, so a legal Host path containing ESC/C1/LF cannot inject a
+ * terminal sequence or break the row/hit-map. The raw Input value (the value
+ * `Enter` submits) is never touched.
+ *
+ * A focused Input renders `before + CURSOR_MARKER + fakeCursor(at) + after`.
+ * The fake cursor wraps exactly one grapheme, and the plain policy strips its
+ * private markers, so the first safe grapheme after the hardware marker is the
+ * caret cell. `safe` is true only when the raw VALUE itself needed no
+ * projection, which is also the only case where the exact click-to-position
+ * contract is used.
+ */
+function projectInputLine(rawLine: string, width: number, value: string): SafeInputLine {
+  const safeValue = sanitizedPhysicalLine(value) === value
+  if (markerCount(rawLine, CURSOR_MARKER) === 1
+    && markerCount(rawLine, FAKE_CURSOR_START_MARKER) === 1
+    && markerCount(rawLine, FAKE_CURSOR_END_MARKER) === 1) {
+    const cursorAt = rawLine.indexOf(CURSOR_MARKER)
+    const startAt = rawLine.indexOf(FAKE_CURSOR_START_MARKER)
+    const endAt = rawLine.indexOf(FAKE_CURSOR_END_MARKER)
+    if (cursorAt < startAt && startAt < endAt) {
+      const before = rawLine.slice(0, cursorAt)
+      const at = rawLine.slice(startAt + FAKE_CURSOR_START_MARKER.length, endAt)
+      const after = rawLine.slice(endAt + FAKE_CURSOR_END_MARKER.length)
+      const safeBefore = sanitizedPhysicalLine(before)
+      const safeAt = sanitizedPhysicalLine(at) || ' '
+      const safeAfter = sanitizedPhysicalLine(after)
+      const rebuilt = `${safeBefore}${CURSOR_MARKER}${renderFakeCursor(safeAt)}${safeAfter}`
+      if (visibleWidth(rebuilt) <= width) return { line: fit(rebuilt, width), safe: safeValue }
+    }
+  }
+  // An unfocused row, a value that spoofed the app's own cursor markers, or a
+  // projection that grew past the row budget: strip the app markers FIRST (the
+  // plain policy would treat an APC marker as an unterminated string and eat
+  // the rest of the row), then keep the safe single-line text and drop the
+  // fake caret. A hostile value never gets an unsafe caret.
+  const stripped = rawLine
+    .replaceAll(CURSOR_MARKER, '')
+    .replaceAll(FAKE_CURSOR_START_MARKER, '')
+    .replaceAll(FAKE_CURSOR_END_MARKER, '')
+  const safeLine = sanitizedPhysicalLine(stripped)
+  return { line: fit(safeLine, width), safe: safeValue }
 }
 
 /** The minimum cells a row's IDENTITY (title, or the short id when untitled)
@@ -361,6 +433,8 @@ export class SessionWorkspacePanel implements Component {
    *  checked against this exact set, never against the logical query result. */
   private paintedDirectorySuggestionPaths: string[] = []
   private lastDirectoryInputWidth = 0
+  /** Whether the LAST painted Input row was already display-safe (exact click mapping). */
+  private directoryInputDisplaySafe = true
   /** ONE pending Folder-New dispatch. The object identity is the per-operation
    *  currentness fence: only the settle callback for THIS object may unlock
    *  New. A notice, timer or roster diff is never a settlement channel. */
@@ -1347,7 +1421,7 @@ export class SessionWorkspacePanel implements Component {
       }
     // Click-to-position on the input this frame really painted. The panel
     // stays the keyboard owner; only the private Input's cursor moves.
-    if (region?.kind === 'directory-input'
+    if (region?.kind === 'directory-input' && this.directoryInputDisplaySafe
       && this.directoryChooser !== undefined && !this.directorySubmitting) {
       this.directoryChooser.input.handleMouse({
         type: 'press',
@@ -1487,6 +1561,7 @@ export class SessionWorkspacePanel implements Component {
     this.lastPaintedResultIds = []
     this.directoryEditorPainted = false
     this.paintedDirectorySuggestionPaths = []
+    this.directoryInputDisplaySafe = true
     const view = this.view(this.paintedGroups.flatMap(group => group.ids))
     this.paintedGroups = view.groups
     this.paintView = view
@@ -1735,7 +1810,9 @@ export class SessionWorkspacePanel implements Component {
     if (chooser === undefined) return
     chooser.input.focused = !this.directorySubmitting
     const row = lines.length
-    lines.push(fit(chooser.input.render(width)[0] ?? '', width))
+    const projected = projectInputLine(chooser.input.render(width)[0] ?? '', width, chooser.input.getValue())
+    this.directoryInputDisplaySafe = projected.safe
+    lines.push(projected.line)
     this.directoryEditorPainted = true
     this.lastDirectoryInputWidth = width
     regions.push({ kind: 'directory-input', xStart: 0, xEnd: Math.max(0, width - 1), line: row })
