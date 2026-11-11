@@ -692,11 +692,28 @@ export default async function (h) {
     return snap.nodes.some(node => node.id === `pk-session:${testInput.sessions.a}`)
       && snap.nodes.some(node => node.id === `pk-session:${testInput.sessions.b}`)
   }
-  if (!sessionRowsPresent()) {
+  // open() installs an EMPTY_SNAPSHOT (listState:'loading'); the Picker paints
+  // BEFORE the workspace folder/session rows arrive asynchronously. Do not read
+  // the folder row until the list is ready (a workspace row exists, or both
+  // sessions are already directly visible) — otherwise a slow load leaves
+  // `folder === undefined`, the collapsed folder is never expanded, and the
+  // later session-row wait times out as a false Source Switch failure.
+  const workspaceFolderNode = snap => snap.nodes.find(node => String(node.id ?? '').startsWith('pk-workspace:'))
+  const browserRowsReady = () => {
     const snap = h.snapshot()
-    const folder = snap.nodes.find(node => String(node.id ?? '').startsWith('pk-workspace:'))
+    return workspaceFolderNode(snap) !== undefined || sessionRowsPresent()
+  }
+  if (!await requiredWait(h, 'the native Session Browser list is ready (workspace folder or session rows)', browserRowsReady,
+  { limit: 200 })) {
+    h.measure('SESSION_BROWSER_ROWS_NOT_READY', 'Picker painted but no workspace folder and no target session rows appeared before the bounded wait; not a Source Switch failure')
+    finish(h, extra)
+    return
+  }
+  if (!sessionRowsPresent()) {
+    const readySnap = h.snapshot()
+    const folder = workspaceFolderNode(readySnap)
     if (folder !== undefined) {
-      await h.click(snap.chains, folder)
+      await h.click(readySnap.chains, folder)
       await h.key('ArrowRight', 400)
     }
   }
