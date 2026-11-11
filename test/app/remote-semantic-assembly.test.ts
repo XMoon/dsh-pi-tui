@@ -24,7 +24,13 @@ function serializer(): import('../../src/runtime/remote/session-writer-remote.ts
 /** A small structural stand-in for the narrow one-source runtime face. The
  * official-contract gate proves the REAL `RemoteClientRuntime` satisfies the
  * same face; this fake exists to observe the wiring identities. */
-function runtimeSource(): { source: RemoteM3ARuntimeSource; sessions: object; remote: object; generation: object } {
+function runtimeSource(): {
+  source: RemoteM3ARuntimeSource
+  sessions: object
+  remote: object
+  generation: object
+  directoryPickerCalls: Array<{ readonly path: string | undefined; readonly signal: AbortSignal | undefined }>
+} {
   const generation = createObservableGenerationHarness()
   const sessions = {
     list: {
@@ -39,7 +45,25 @@ function runtimeSource(): { source: RemoteM3ARuntimeSource; sessions: object; re
     create: async () => ({ ok: true as const, value: { sessionId: 's' } }),
     fork: async () => ({ ok: true as const, value: { sessionId: 'f' } }),
   }
+  const directoryPickerCalls: Array<{ readonly path: string | undefined; readonly signal: AbortSignal | undefined }> = []
   const remote = {
+    // The official generated `directoryPicker` namespace (Session Workspace
+    // PR1): the browse port must read through this SAME source object.
+    directoryPicker: {
+      list: async (path: string | undefined, signal?: AbortSignal) => {
+        directoryPickerCalls.push({ path, signal })
+        return {
+          ok: true as const,
+          value: {
+            path: path ?? '/home/host-user',
+            home: '/home/host-user',
+            crumbs: [{ name: '/', path: '/', hidden: false }],
+            entries: [{ name: 'proof', path: '/home/host-user/proof', hidden: false }],
+            truncated: false,
+          },
+        }
+      },
+    },
     session: {
       modelCatalog: async () => ({ ok: true as const, value: {
         default: { provider: 'p', model: 'm' },
@@ -85,6 +109,7 @@ function runtimeSource(): { source: RemoteM3ARuntimeSource; sessions: object; re
     sessions,
     remote,
     generation: generation.source,
+    directoryPickerCalls,
     source: {
       sessions: sessions as never,
       remote: remote as never,
@@ -108,9 +133,22 @@ test('every M3-3A adapter constructs from one shared runtime source', () => {
   assert.ok(semantics.hostFile)
   assert.ok(semantics.hostCommand)
   assert.ok(semantics.presentationReader)
+  assert.ok(semantics.hostDirectoryBrowse)
   void sessions
   void remote
   void generation
+})
+
+test('the Host directory-browse port reads the SAME generated namespace and generation', async () => {
+  const { source, directoryPickerCalls } = runtimeSource()
+  const semantics = createRemoteM3ASemantics(source, { promptSerializer: serializer() })
+  const signal = new AbortController().signal
+  const outcome = await semantics.hostDirectoryBrowse.list(undefined, signal)
+  assert.equal(outcome.kind, 'ready')
+  assert.ok(outcome.kind === 'ready')
+  assert.equal(outcome.listing.home, '/home/host-user')
+  assert.deepEqual(directoryPickerCalls, [{ path: undefined, signal }],
+    'the port must call the ONE shared generated namespace with the caller signal')
 })
 
 test('the catalog adapters serve reads through the shared source', async () => {

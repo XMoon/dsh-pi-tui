@@ -42,6 +42,7 @@
  * | RemoteConfigPort               | `ClientRemote['settings']` + `['credentials']`   |
  * | RemoteSessionWorkspaceFacts    | `ISessions` + `ClientRemote['session']` (state/projections) + `['workspace']` |
  * | RemoteHostFilePort (TS8-HF1)   | the PRIVATE `piTuiFileReferences` contribution   |
+ * | RemoteHostDirectoryBrowsePort  | `ClientRemote['directoryPicker']`               |
  *
  * @module @xmoon76/dsh-pi-tui/remote-official-contract.test
  */
@@ -78,6 +79,10 @@ import { createRemoteM3ASemantics, remoteM3ARuntimeSourceOf } from '../../../src
 import { RemoteHostFilePort } from '../../../src/runtime/remote/host-file-remote.ts'
 import { RemoteInteractionPort } from '../../../src/runtime/remote/interaction-remote.ts'
 import { RemoteSessionWorkspaceFacts } from '../../../src/runtime/remote/session-workspace-facts-remote.ts'
+import {
+  RemoteHostDirectoryBrowsePort,
+  type RemoteDirectoryPickerNamespace,
+} from '../../../src/runtime/remote/host-directory-browse-remote.ts'
 import type { ContextPressureProjection, ContextBreakdownProjection, TokenUsageProjection } from '@deepseek-ai/dsh-token-meter'
 import type { TurnOutlineEntry } from '@deepseek-ai/dsh-session-turn-outline/types'
 import type { SessionSeq } from '@deepseek-ai/dsh-session/types'
@@ -183,6 +188,21 @@ function officialPluginManagerPort(
 
 function officialJobObservationPort(jobs: IJobs): RemoteJobObservationPort {
   return new RemoteJobObservationPort(jobs)
+}
+
+/** Session Workspace PR1: the official generated `directoryPicker` namespace
+ *  satisfies the browse adapter's declared source with NO cast. */
+function officialHostDirectoryBrowseNamespace(
+  directoryPicker: ClientRemote['directoryPicker'],
+): RemoteDirectoryPickerNamespace {
+  return directoryPicker
+}
+
+function officialHostDirectoryBrowsePort(
+  directoryPicker: ClientRemote['directoryPicker'],
+  generation: ConnectionGenerationState,
+): RemoteHostDirectoryBrowsePort {
+  return new RemoteHostDirectoryBrowsePort(directoryPicker, generation)
 }
 
 function officialSkillCatalog(
@@ -337,6 +357,8 @@ test('every Remote adapter accepts the published DSH public Client/Remote face (
     officialRemoteInteractionPort,
     officialSessionWorkspaceFacts,
     officialQuestionProjectionPayload,
+    officialHostDirectoryBrowseNamespace,
+    officialHostDirectoryBrowsePort,
   ]) {
     assert.equal(typeof proof, 'function')
   }

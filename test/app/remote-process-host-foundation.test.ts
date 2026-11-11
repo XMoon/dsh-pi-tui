@@ -55,6 +55,7 @@ const BUNDLE_ROWS = BUNDLE_ENTRIES.flatMap(entry => entry.insert ?? [entry])
 const WORKSPACE_CONTROLLER_PACKAGE = '@deepseek-ai/dsh-api-workspace-controller'
 const ACCOUNT_CONTROLLER_PACKAGE = '@deepseek-ai/dsh-api-account-controller'
 const WORKSPACE_REGISTRY_PACKAGE = '@deepseek-ai/dsh-workspace'
+const DIRECTORY_PICKER_PACKAGE = '@deepseek-ai/dsh-host-directory-picker-browse'
 const DELIVERABLE_GUIDANCE_ID = 'deliverable-file-references'
 const DELIVERABLE_GUIDANCE_PACKAGE = '@deepseek-ai/dsh-deliverable-file-references'
 const OFFICE_PACKAGE = '@deepseek-ai/dsh-office-to-pdf'
@@ -150,14 +151,55 @@ function assertWorkspaceComposition(
     'the Host-only overlay must not override the official "workspace" registry row')
 }
 
-/** The twelve Host execution rows whose lifetime must not depend on the mutable
- *  `tuiStartup` provider: `webserver` / `workspace-files` /
- *  `workspace-controller` are the three existing rows overridden in place, the
- *  other eight are the Host-only inserted rows. */
+/**
+ * The ONE official Host directory-browse backend, shared by the positive
+ * assertion and its negative controls so each control proves THIS assertion
+ * group rejects the mutation instead of a private copy.
+ */
+function assertDirectoryBrowseComposition(
+  bundleEntries: readonly OverlayEntry[],
+  overlayEntries: readonly OverlayEntry[],
+): void {
+  const bundle = bundleEntries.flatMap(entry => entry.insert ?? [entry])
+  const overlay = overlayEntries.flatMap(entry => entry.insert ?? [entry])
+  const backends = bundle.filter(candidate => candidate.id === 'directory-picker')
+  assert.equal(backends.length, 1, 'the bundle must own exactly one "directory-picker" backend row')
+  assert.equal(backends[0].name, DIRECTORY_PICKER_PACKAGE,
+    'the browse backend must be the official browse package, never the native/auto chooser')
+  assert.deepEqual(backends[0].inject, ['tuiStartup'],
+    'Direct must gate the browse backend on the same command-line admission as the TUI')
+  // The Host-only overlay retunes the bundle's OWN row in place: exactly one
+  // top-level override of that id with only the startup gate removed.
+  const overrides = overlayEntries.filter(entry => entry.insert === undefined && entry.id === 'directory-picker')
+  assert.equal(overrides.length, 1,
+    'the Host-only overlay must override exactly one "directory-picker" row in place')
+  assert.deepEqual(overrides[0].inject, [],
+    'the Host-only override must remove only the tuiStartup dependency')
+  assert.equal(overrides[0].name, undefined, 'the in-place override must not re-declare the package')
+  assert.equal(overrides[0].disabled, undefined, 'the Host-only overlay must not disable the browse backend')
+  assert.equal(overrides[0].config, undefined, 'the Host-only overlay must not replace the row config')
+  // No inserted row of the official browse package: a second Loader row would
+  // register `ctx.directoryPicker` twice.
+  const inserted = overlayEntries.flatMap(entry => entry.insert ?? [])
+  assert.equal(inserted.filter(candidate => candidate.name === DIRECTORY_PICKER_PACKAGE).length, 0,
+    `the Host-only overlay must not INSERT a "${DIRECTORY_PICKER_PACKAGE}" row`)
+  // The controller is still the Workspace Controller's child, never a row.
+  for (const rows of [bundle, overlay]) {
+    assert.equal(rows.some(candidate => candidate.id === 'directory-picker-controller'
+      || candidate.name === '@deepseek-ai/dsh-api-workspace-controller/directory-picker'), false,
+    'the DirectoryPickerController must stay the Workspace Controller child plugin')
+  }
+}
+
+/** The thirteen Host execution rows whose lifetime must not depend on the
+ *  mutable `tuiStartup` provider: `webserver` / `workspace-files` /
+ *  `workspace-controller` / `directory-picker` are the four existing rows
+ *  overridden in place, the other nine are the Host-only inserted rows. */
 const HOST_EXECUTION_INJECT: ReadonlyArray<{ id: string; inject: readonly string[] }> = [
   { id: 'webserver', inject: [] },
   { id: 'workspace-files', inject: [] },
   { id: 'workspace-controller', inject: [] },
+  { id: 'directory-picker', inject: [] },
   { id: 'split-host-connection', inject: ['credentials', 'webServer'] },
   { id: 'split-host-file-upload', inject: ['agents', 'attachments', 'commands', 'connection'] },
   { id: 'split-host-session-stats', inject: ['sessionProjections'] },
@@ -176,7 +218,7 @@ const HOST_EXECUTION_INJECT: ReadonlyArray<{ id: string; inject: readonly string
 ]
 
 /**
- * Pin the exact dependency set of the twelve Host execution rows. Shared by the
+ * Pin the exact dependency set of the thirteen Host execution rows. Shared by the
  * positive assertion and its negative control so the control proves THIS
  * assertion group rejects a reintroduced `tuiStartup`, not a private copy.
  */
@@ -191,7 +233,7 @@ function assertHostExecutionInject(entries: readonly OverlayEntry[]): void {
   }
   // The three existing rows are overridden in place; inserting them again would
   // create a second service owner instead of retuning the production row.
-  for (const id of ['webserver', 'workspace-files', 'workspace-controller']) {
+  for (const id of ['webserver', 'workspace-files', 'workspace-controller', 'directory-picker']) {
     const topLevel = entries.filter(entry => entry.insert === undefined && entry.id === id)
     assert.equal(topLevel.length, 1, `the overlay must declare exactly one top-level "${id}" override`)
     assert.deepEqual(topLevel[0].inject, [], `the "${id}" top-level override must inject nothing`)
@@ -263,12 +305,13 @@ test('the Host-only overlay declares the official Host service rows and ONE buil
   assert.equal(OVERLAY_ROWS.some(candidate => /file-reference-host|terminal-progress-host/u.test(candidate.name ?? '')),
     false, 'the private features must not be independent Loader rows')
   assert.deepEqual(row('split-host-session-controller').config, { nativeOpen: false })
-  // The exact twelve-row dependency contract, including the three in-place overrides.
+  // The exact thirteen-row dependency contract, including the four in-place overrides.
   assertHostExecutionInject(OVERLAY_ENTRIES)
 })
 
 test('the bundle owns ONE stable official Workspace Controller row the Host overlay retunes in place', () => {
   assertWorkspaceComposition(BUNDLE_ENTRIES, OVERLAY_ENTRIES)
+  assertDirectoryBrowseComposition(BUNDLE_ENTRIES, OVERLAY_ENTRIES)
   // The positive path is what the assertions above accept; the negative
   // controls below prove the same function rejects each mutation.
   assert.equal(BUNDLE_ROWS.filter(candidate => candidate.id === 'workspace-controller').length, 1)
@@ -326,7 +369,54 @@ test('the protected Workspace composition rejects an in-place row that re-declar
   )
 })
 
-test('the protected twelve-row dependency assertion rejects a reintroduced tuiStartup', () => {
+test('the directory-browse composition rejects a second backend, a native choice and a gated Host row', () => {
+  const dropBackend = (entries: readonly OverlayEntry[]): OverlayEntry[] => entries.map(entry =>
+    entry.insert === undefined ? entry : { ...entry, insert: entry.insert.filter(candidate => candidate.id !== 'directory-picker') })
+  assert.throws(
+    () => assertDirectoryBrowseComposition(dropBackend(BUNDLE_ENTRIES), OVERLAY_ENTRIES),
+    /exactly one "directory-picker" backend row/u,
+    'a bundle without the browse backend has no Host directory read authority',
+  )
+  const nativeBackend = BUNDLE_ENTRIES.map(entry => entry.insert === undefined ? entry : {
+    ...entry,
+    insert: entry.insert.map(candidate => candidate.id === 'directory-picker'
+      ? { ...candidate, name: '@deepseek-ai/dsh-host-directory-picker-native' }
+      : candidate),
+  })
+  assert.throws(
+    () => assertDirectoryBrowseComposition(nativeBackend, OVERLAY_ENTRIES),
+    /official browse package/u,
+    'the native chooser serves no remote listing primitives',
+  )
+  const gatedOverlay = OVERLAY_ENTRIES.map(entry =>
+    entry.insert === undefined && entry.id === 'directory-picker'
+      ? { ...entry, inject: ['tuiStartup'] }
+      : entry)
+  assert.throws(
+    () => assertDirectoryBrowseComposition(BUNDLE_ENTRIES, gatedOverlay),
+    /remove only the tuiStartup dependency/u,
+    'a Host browse backend must survive the TUI Client',
+  )
+  const duplicateInsert = OVERLAY_ENTRIES.flatMap(entry => entry.insert === undefined ? [entry] : [{
+    ...entry,
+    insert: [...entry.insert, { id: 'directory-picker-copy', name: DIRECTORY_PICKER_PACKAGE }],
+  }])
+  assert.throws(
+    () => assertDirectoryBrowseComposition(BUNDLE_ENTRIES, duplicateInsert),
+    /must not INSERT/u,
+    'a second browse backend row would register the seam twice',
+  )
+  const declaredController = OVERLAY_ENTRIES.flatMap(entry => entry.insert === undefined ? [entry] : [{
+    ...entry,
+    insert: [...entry.insert, { id: 'directory-picker-controller', name: '@deepseek-ai/dsh-api-workspace-controller' }],
+  }])
+  assert.throws(
+    () => assertDirectoryBrowseComposition(BUNDLE_ENTRIES, declaredController),
+    /must stay the Workspace Controller child plugin/u,
+  )
+})
+
+test('the protected thirteen-row dependency assertion rejects a reintroduced tuiStartup', () => {
   const reintroduced = OVERLAY_ENTRIES.map(entry => entry.insert === undefined ? entry : {
     ...entry,
     insert: entry.insert.map(candidate => candidate.id === 'split-host-turn-outline'
@@ -340,7 +430,7 @@ test('the protected twelve-row dependency assertion rejects a reintroduced tuiSt
   )
 })
 
-test('the protected twelve-row dependency assertion rejects a duplicated protected row', () => {
+test('the protected thirteen-row dependency assertion rejects a duplicated protected row', () => {
   const insertEntry = OVERLAY_ENTRIES.find(entry => entry.insert !== undefined)
   const insertRows = insertEntry?.insert
   assert.ok(insertRows !== undefined, 'the overlay must insert the Host execution rows')
@@ -938,9 +1028,11 @@ function baselineRows(): FixtureRow[] {
     active('split-host-api-remotes', '@deepseek-ai/dsh-api-remotes'),
     active('pi-tui-performance-host', '@xmoon76/dsh-pi-tui/performance-host'),
     active('pi-tui-visual-tools', '@xmoon76/dsh-pi-tui/visual-tools'),
-    // The bundle's two official Workspace owners, both ACTIVE exactly once.
+    // The bundle's two official Workspace owners and the ONE browse backend the
+    // Workspace Controller's child reads through, all ACTIVE exactly once.
     active('workspace', WORKSPACE_REGISTRY_PACKAGE),
     active('workspace-controller', WORKSPACE_CONTROLLER_PACKAGE),
+    active('directory-picker', DIRECTORY_PICKER_PACKAGE),
     ...FOUNDATION_ROWS.map(({ id, name }) => active(id, name)),
     ...['tui-app', 'pi-tui-extension-host', 'pi-tui-builtins'].map(id => ({
       options: { id, name: id, disabled: true },
@@ -970,6 +1062,9 @@ function hostContext(rows: FixtureRow[], overrides: Record<string, unknown> = {}
   // The official Workspace Controller's REAL binding shape: the Host publishes
   // `workspaceController` under the `workspace` namespace.
   services.set('workspaceController', typertService('workspaceController', 'workspace'))
+  // The Workspace Controller's own child Remote owner of the `directoryPicker`
+  // namespace, published under the child service key.
+  services.set('directoryPickerController', typertService('directoryPickerController', 'directoryPicker'))
   services.set('piTuiFileReferences', typertService('piTuiFileReferences', PI_TUI_FILE_REFERENCES_NAMESPACE))
   services.set('piTuiTerminalProgress', {
     ...typertService('piTuiTerminalProgress', PI_TUI_TERMINAL_PROGRESS_NAMESPACE),
@@ -1002,8 +1097,11 @@ test('the readiness audit passes only when every owner row and binding is real',
   // The ONE official Workspace registry and controller owners.
   assert.deepEqual(status.ownerEntries.workspaceRegistry, ['workspace'])
   assert.deepEqual(status.ownerEntries.workspaceController, ['workspace-controller'])
+  assert.deepEqual(status.ownerEntries.directoryPicker, ['directory-picker'])
   assert.equal(status.services.workspaceRegistry, true, 'the official workspaceRegistry service must be live')
   assert.equal(status.services.workspaceController, true, 'the official Workspace Controller service must be live')
+  assert.equal(status.services.directoryPickerController, true,
+    'the Workspace Controller child directory-picker handler must be live')
   assert.deepEqual(status.ownerEntries.accountController, ['split-host-account-controller'])
   assert.equal(status.services.accountController, true, 'the official Account Controller service must be live')
   for (const { owner, id } of FOUNDATION_ROWS) {
@@ -1063,6 +1161,48 @@ test('the Workspace owners fail the audit unless each official package is ACTIVE
   assert.throws(
     () => collectHostEntryStatus(hostContext(missingRegistry), { profile: 'pi-tui' }),
     /expected exactly one active workspaceRegistry owner row, found 0/u,
+  )
+})
+
+test('the directory-browse backend fails Ready unless its official row and child binding are ACTIVE', () => {
+  // Control 1: a disabled or absent backend row would leave every list verb
+  // refusing; that is a startup failure, not a degraded Ready.
+  const disabled = baselineRows().map(candidate => candidate.options.id === 'directory-picker'
+    ? { ...candidate, fiber: { state: 0, uid: rowUid('directory-picker') } }
+    : candidate)
+  assert.throws(
+    () => collectHostEntryStatus(hostContext(disabled), { profile: 'pi-tui' }),
+    /expected exactly one active directoryPicker owner row, found 0/u,
+  )
+  const absent = baselineRows().filter(candidate => candidate.options.id !== 'directory-picker')
+  assert.throws(
+    () => collectHostEntryStatus(hostContext(absent), { profile: 'pi-tui' }),
+    /expected exactly one active directoryPicker owner row, found 0/u,
+  )
+  // Control 2: the controller can be readable while its child Remote owner is
+  // missing; `directoryPicker/list` has no Host handler in that state.
+  assert.throws(
+    () => collectHostEntryStatus(hostContext(baselineRows(), { directoryPickerController: {} }), { profile: 'pi-tui' }),
+    /directoryPickerController.*Typert binding/u,
+  )
+  assert.throws(
+    () => collectHostEntryStatus(
+      hostContext(baselineRows(), {
+        directoryPickerController: typertService('directoryPickerController', 'workspace'),
+      }),
+      { profile: 'pi-tui' },
+    ),
+    /directoryPickerController.*Typert binding/u,
+  )
+  // Control 3: a second ACTIVE row of the SAME official browse package under
+  // another Loader id would register `ctx.directoryPicker` twice.
+  const imposter = baselineRows().concat({
+    options: { id: 'split-host-directory-picker', name: DIRECTORY_PICKER_PACKAGE },
+    fiber: { state: 2, uid: rowUid('split-host-directory-picker') },
+  })
+  assert.throws(
+    () => collectHostEntryStatus(hostContext(imposter), { profile: 'pi-tui' }),
+    /exactly one active directoryPicker row for "@deepseek-ai\/dsh-host-directory-picker-browse" named "directory-picker"/u,
   )
 })
 

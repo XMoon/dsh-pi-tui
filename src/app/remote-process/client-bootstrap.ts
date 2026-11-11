@@ -47,6 +47,7 @@ import { createRemoteClientUiRuntime, type RemoteClientUiRuntime } from '../remo
 import { mergeCause } from '../remote/dispose-cause.ts'
 import type { RemoteBackendFetch } from '../remote/runtime.ts'
 import type { RemotePromptSerializer } from '../../runtime/remote/session-writer-remote.ts'
+import type { HostDirectoryBrowseOutcome } from '../../runtime/host-directory-browse-port.ts'
 import { RemotePromptSerializerProduction } from '../../runtime/remote/prompt-serializer-remote.ts'
 import { runDetached } from '../../runtime/process/tasks.ts'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
@@ -1117,6 +1118,8 @@ async function startSurfaceLocalClient(
             readonly answers?: unknown
             readonly windowMs?: unknown
             readonly maxFrames?: unknown
+            readonly path?: unknown
+            readonly abort?: unknown
           }
           nonce = request.nonce
           const backend = currentRevision?.application?.selected.backend
@@ -1191,6 +1194,78 @@ async function startSurfaceLocalClient(
               clearTimeout(deadline)
               handle.dispose()
             }
+            return
+          }
+          if (request.op === 'directory-browse') {
+            // Session Workspace PR1: exercise the mounted Backend's read-only
+            // `HostDirectoryBrowsePort` in the REAL Client composition against
+            // the REAL Host. Three modes share ONE dispatch: an ordinary read,
+            // a caller abort raised right after dispatch, and a physical mux
+            // drop raised while the read is in flight. Every emitted fact comes
+            // from the production port (never a raw namespace shortcut).
+            const path = typeof request.path === 'string' ? request.path : undefined
+            const mode = request.abort === true
+              ? 'abort-after-dispatch'
+              : request.abort === 'drop' ? 'drop-during-read' : 'read'
+            const controller = new AbortController()
+            const listing = (outcome: HostDirectoryBrowseOutcome): Record<string, unknown> =>
+              outcome.kind === 'ready'
+                ? {
+                    kind: outcome.kind,
+                    path: outcome.listing.path,
+                    home: outcome.listing.home,
+                    crumbs: outcome.listing.crumbs.map(crumb => ({ path: crumb.path, hidden: crumb.hidden })),
+                    entries: outcome.listing.entries.map(entry => ({
+                      name: entry.name,
+                      path: entry.path,
+                      hidden: entry.hidden,
+                    })),
+                    truncated: outcome.listing.truncated,
+                  }
+                : { kind: outcome.kind, reason: outcome.reason, ...(outcome.code === undefined ? {} : { code: outcome.code }) }
+            const record = (outcome: HostDirectoryBrowseOutcome): void => {
+              const current = status()
+              emit({
+                phase: 'directory-browse',
+                mode,
+                outcome: listing(outcome),
+                generationId: current.generationId ?? null,
+                sessionOpen: current.sessionOpen,
+                openSessionId: current.openSessionId ?? null,
+                listedSessions: domains.sessions.list.getSnapshot().ids.length,
+              })
+            }
+            if (request.abort === true) {
+              const pending = backend.hostDirectoryBrowse.list(path, controller.signal)
+              controller.abort()
+              try {
+                record(await pending)
+              } catch (error) {
+                emit({
+                  phase: 'directory-browse-rejected',
+                  mode,
+                  rejected: true,
+                  errorName: error instanceof Error ? error.name : typeof error,
+                })
+              }
+              return
+            }
+            if (request.abort === 'drop') {
+              const pending = backend.hostDirectoryBrowse.list(path, controller.signal)
+              composition.transport?.dropWebSocketsForQualification()
+              try {
+                record(await pending)
+              } catch (error) {
+                emit({
+                  phase: 'directory-browse-rejected',
+                  mode,
+                  rejected: true,
+                  errorName: error instanceof Error ? error.name : typeof error,
+                })
+              }
+              return
+            }
+            record(await backend.hostDirectoryBrowse.list(path, controller.signal))
             return
           }
           if (request.op === 'answer-continued') {

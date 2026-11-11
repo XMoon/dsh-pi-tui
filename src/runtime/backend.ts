@@ -31,6 +31,7 @@ import type { DeliveredFileReadPort } from './deliverables-port.ts'
 import type { WebAccessPort } from './web-access-port.ts'
 import type { SessionWorkspaceFactsPort } from './session-workspace-facts-port.ts'
 import type { SchedulePort } from './schedule-port.ts'
+import type { HostDirectoryBrowsePort } from './host-directory-browse-port.ts'
 
 /** The transport backends the TUI can run on. `direct` remains the
  * production/default; `remote` is the experimental M3-3B assembly that can be
@@ -100,6 +101,10 @@ export interface Backend {
    *  in-process service, Remote to the authenticated generated namespace; the
    *  Host stays the only task store and the only timer. */
   readonly schedule: SchedulePort
+  /** The Host directory-browse READ port (Session Workspace PR1): one official
+   *  `directoryPicker/list` level over the SAME Host the other ports reach.
+   *  Read-only; it never registers a Workspace or creates a Session. */
+  readonly hostDirectoryBrowse: HostDirectoryBrowsePort
 }
 
 /** Assemble the Direct backend: in-process adapters over `ctx.*` services.
@@ -126,6 +131,7 @@ export function createDirectBackend(
   webAccess: WebAccessPort,
   sessionWorkspaceFacts: SessionWorkspaceFactsPort,
   schedule: SchedulePort,
+  hostDirectoryBrowse: HostDirectoryBrowsePort,
 ): Backend {
   return {
     kind: 'direct',
@@ -150,5 +156,6 @@ export function createDirectBackend(
     webAccess,
     sessionWorkspaceFacts,
     schedule,
+    hostDirectoryBrowse,
   }
 }

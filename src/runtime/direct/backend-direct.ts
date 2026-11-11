@@ -45,6 +45,7 @@ import type { WorkingDirectoryServiceLike } from './working-directory-direct.ts'
 import { DirectDeliveredFileReadPort } from './deliverables-direct.ts'
 import { DirectSessionWorkspaceFacts } from './session-workspace-facts-direct.ts'
 import { DirectSchedulePort } from './schedule-direct.ts'
+import { DirectHostDirectoryBrowsePort } from './host-directory-browse-direct.ts'
 import type { WebAccessPort, WebAccessStatus, WebAccessUrl } from '../web-access-port.ts'
 
 /** The minimal Host context surface the Direct adapters need (structural;
@@ -172,5 +173,9 @@ export function createDirectRuntimeBackend(deps: DirectBackendDeps): Backend {
     // the SAME Host Context. Never a Client task store and never a
     // `runner.ctx.schedule` shortcut around this port.
     new DirectSchedulePort(deps.ctx),
+    // Session Workspace PR1: the official Host directory-picker controller's
+    // own `list` handler, resolved per read from the SAME Host Context. This
+    // adapter owns no filesystem scan and no Workspace write.
+    new DirectHostDirectoryBrowsePort(deps.ctx),
   )
 }

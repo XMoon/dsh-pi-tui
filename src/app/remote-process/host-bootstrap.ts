@@ -149,12 +149,22 @@ const OFFICIAL_TYPERT_BINDINGS = [
   // `follow` reach the registry only through this binding, so a readable
   // service object without it is not a working Workspace API.
   { serviceKey: 'workspaceController', namespace: 'workspace' },
+  // The Workspace Controller's own child owner of the `directoryPicker`
+  // namespace: the directory LIST verb reaches the official browse backend
+  // only through this binding, so the controller row alone is not a working
+  // directory read API.
+  { serviceKey: 'directoryPickerController', namespace: 'directoryPicker' },
 ] as const
 
 /** The official Loader owners whose package identity must be unique. */
 const OFFICIAL_LOADER_OWNER_PACKAGES = [
   { owner: 'workspaceRegistry', id: 'workspace', name: '@deepseek-ai/dsh-workspace' },
   { owner: 'workspaceController', id: 'workspace-controller', name: '@deepseek-ai/dsh-api-workspace-controller' },
+  // The ONE official Host directory-browse backend the Workspace Controller's
+  // child controller drives: a second instance would register
+  // `ctx.directoryPicker` twice, and a missing one leaves every list verb
+  // refusing.
+  { owner: 'directoryPicker', id: 'directory-picker', name: '@deepseek-ai/dsh-host-directory-picker-browse' },
   { owner: 'accountController', id: 'split-host-account-controller', name: '@deepseek-ai/dsh-api-account-controller' },
 ] as const
 
@@ -238,6 +248,9 @@ export function collectHostEntryStatus(
     // The Workspace Remote owner this overlay ENABLES is evidence too: `ready`
     // must not be published while `ctx.remote.workspace` has no Host owner.
     'workspaceController',
+    // The child directory-picker Remote owner: `directoryPicker/list` has no
+    // Host handler without it.
+    'directoryPickerController',
     PI_TUI_FILE_REFERENCES_NAMESPACE,
     PI_TUI_TERMINAL_PROGRESS_NAMESPACE,
     // The Web frontend toggle is a Host-ready service even though the Web
@@ -284,6 +297,10 @@ export function collectHostEntryStatus(
     // failure, never a degraded ready.
     workspaceRegistry: activeIds('workspace'),
     workspaceController: activeIds('workspace-controller'),
+    // The ONE official browse backend row the Workspace Controller's child
+    // reads through. Readiness requires it ACTIVE exactly once, under its own
+    // official package, alongside the controller binding above.
+    directoryPicker: activeIds('directory-picker'),
   }
   for (const [owner, ids] of Object.entries(ownerEntries)) {
     if (ids.length !== 1) {

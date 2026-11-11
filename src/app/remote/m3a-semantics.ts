@@ -66,6 +66,9 @@ import type { PluginManagerPort } from '../../runtime/plugin-manager-port.ts'
 import type { JobObservationPort } from '../../runtime/job-observation-port.ts'
 import type { DeliveredFileReadPort } from '../../runtime/deliverables-port.ts'
 import type { SchedulePort } from '../../runtime/schedule-port.ts'
+import type { HostDirectoryBrowsePort } from '../../runtime/host-directory-browse-port.ts'
+import { RemoteHostDirectoryBrowsePort } from '../../runtime/remote/host-directory-browse-remote.ts'
+import type { ClientRemote } from '@deepseek-ai/dsh-api-gateway/client'
 import type { InteractionPort } from '../../runtime/interaction-port.ts'
 import { RemoteSessionReader } from '../../runtime/remote/session-reader-remote.ts'
 import { RemotePendingInputReader } from '../../runtime/remote/pending-input-reader-remote.ts'
@@ -108,6 +111,9 @@ export interface RemoteM3ASemantics {
   /** The Host Schedule management port (S5-PR4): the official generated
    *  `schedule` namespace over the SAME authenticated Connection. */
   readonly schedule: SchedulePort
+  /** The Host directory-browse read port (Session Workspace PR1): the SAME
+   *  generated `directoryPicker` namespace, generation-fenced. Read-only. */
+  readonly hostDirectoryBrowse: HostDirectoryBrowsePort
   /** Drop adapter-owned caches/subscriptions. Runs BEFORE the Client
    *  Context disposal (`RemoteClientRuntime.dispose()`). */
   dispose(): void
@@ -182,6 +188,10 @@ export interface RemoteM3ARuntimeSource {
      *  lifecycle adopts it as the one pre-selection authority — never a second
      *  Client, store or cached Workspace list. */
     readonly workspace: RemoteWorkspaceNamespaceLike
+    /** The official generated `directoryPicker` namespace (Session Workspace
+     *  PR1): the SAME Workspace Controller's child Host handler. Host home,
+     *  paths, hidden flags and truncation stay Host facts. */
+    readonly directoryPicker: ClientRemote['directoryPicker']
     /** The official generated `schedule` namespace (S5-PR4): the Host Schedule
      *  domain's management face. Absent until the installed contribution is
      *  mounted, so the port answers the ONE truthful unavailable error. */
@@ -293,6 +303,10 @@ export function createRemoteM3ASemantics(
       forwardedEvents as unknown as RemoteScheduleEvents,
       generation,
     ),
+    // Session Workspace PR1: the SAME generated namespace the official Web
+    // Workspace UI reads (`UiWorkspace.listDirectory`), over the SAME
+    // Connection generation. No second Remote, no private RPC.
+    hostDirectoryBrowse: new RemoteHostDirectoryBrowsePort(remote.directoryPicker, generation),
     dispose(): void {
       if (disposed) return
       disposed = true

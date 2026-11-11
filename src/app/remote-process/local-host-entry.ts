@@ -104,6 +104,13 @@ export const HOST_ONLY_PATCH = `# M4-B1 Host-only profile overlay: production Ho
 # row here would register the \`workspace\` namespace twice.
 - id: workspace-controller
   inject: []
+# The bundle's ONE official Host directory-browse backend stays the bundle's
+# row too: the overlay only drops its Direct tuiStartup admission gate so the
+# Workspace Controller's DirectoryPickerController keeps serving
+# 'directoryPicker/list' after the TUI Client is gone. A second picker row
+# here would register 'ctx.directoryPicker' twice.
+- id: directory-picker
+  inject: []
 
 # Host Schedule management (S5-PR4): the bundle's ONE official Schedule row
 # stays this bundle's row; the overlay only drops its Direct tuiStartup
