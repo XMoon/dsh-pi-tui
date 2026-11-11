@@ -3,8 +3,8 @@
  *
  * The row itself is owned by {@link layoutActionBarRow}; this module owns only
  * HOW a complete segment is painted once the row decided it is fully visible.
- * The Fullscreen dense Action Bars (Question/Task Center in PR1 and the
- * Job/Viewer/Session/Settings/Plugin/Footer/Keybindings surfaces in PR2) are
+ * The Fullscreen dense Action Bars (Question/Task Center, Job, Output Viewer,
+ * Session, Settings and its hosted Plugin/Footer/Keybindings/Web pages) are
  * the Owner-scoped exception to Role 14 `primary`: the primary forward/commit
  * verb paints `text`, a secondary navigation verb (Back/Close/Cancel/Hide/
  * Clear) paints `textDim`, and a `[Key]` cap paints `textMuted`. The visible

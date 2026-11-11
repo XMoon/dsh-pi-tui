@@ -6,9 +6,9 @@
  * stay in `TuiApp`/the application surface; the job semantic stop action is
  * untouched.
  *
- * PR2 adds the ONE pointer-capable action bar of the fullscreen surface: while
- * the overlay's own mount screen is the active `TuiAltScreen`, the panel paints
- * the SAME live Stop/Close truth as complete `Verb [Key]` segments and
+ * This panel also owns the ONE pointer-capable action bar of the fullscreen
+ * surface: while the overlay's own mount screen is the active `TuiAltScreen`,
+ * it paints the SAME live Stop/Close truth as complete `Verb [Key]` segments and
  * publishes their exact spans, and a same-cell press/release runs the existing
  * `onStop`/close intents. The Regular/Main surface keeps the historical
  * keyboard-only hint and never creates this route.
@@ -272,7 +272,7 @@ export class OutputViewerPanel implements Component {
     }
   }
 
-  /** The historical keyboard-only hint (Regular/Main keeps the pre-PR2
+  /** The historical keyboard-only hint (Regular/Main keeps the established
    *  presentation byte for byte). */
   private renderLegacyBar(width: number): string[] {
     const live = this.bar?.()
