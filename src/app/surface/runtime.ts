@@ -2052,15 +2052,18 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     readonly index: VisualPublicationIndex
   } | undefined
   /**
-   * One STABLE `PublishedVisual` object per reference, for the lifetime of
-   * this surface runtime. When a committed revision is re-derived, a
-   * publication whose display content is unchanged keeps its previous object,
-   * so APPENDING a later figure never re-allocates the earlier ones and the
-   * sidecar's element-identity comparison keeps unrelated historical figure
-   * rows at their current revision. The cached objects carry only durable
-   * fact content (no session identity), so an equal-content publication of
-   * another Session may safely reuse the same object; the subject/session
-   * isolation stays in the sidecar key. The map dies with this runtime.
+   * One STABLE `PublishedVisual` object per reference. When a committed
+   * revision is re-derived, a publication whose display content is unchanged
+   * keeps its previous object, so APPENDING a later figure never
+   * re-allocates the earlier ones and the sidecar's element-identity
+   * comparison keeps unrelated historical figure rows at their current
+   * revision. The cached objects carry only durable fact content (no session
+   * identity). Memory shape: after a subject/source switch the map is
+   * cleared (see `publicationsOf`), so it holds at most the CURRENT
+   * Session's published refs — the same entries the publication index
+   * itself references (one shared object each, never a second copy of the
+   * chart/SVG content) — the same order of magnitude as that Session's
+   * in-memory event log.
    */
   const stablePublicationsByRef = new Map<string, { readonly publication: PublishedVisual; readonly token: string }>()
   /** One-shot guard for the post-commit successor repaint. A re-entrant
@@ -2083,6 +2086,12 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
   }
   const publicationsOf = (snapshot: VisualEventSnapshot): VisualPublicationIndex => {
     const memo = visualSnapshotMemo
+    // A subject/source switch retires the previous Session's stabilization
+    // entries (see the `stablePublicationsByRef` memory shape).
+    if (memo !== undefined
+      && (memo.session !== snapshot.session || memo.sessionId !== snapshot.sessionId)) {
+      stablePublicationsByRef.clear()
+    }
     // O(1) fast path: the same Session object at the SAME committed seq has
     // already been fully derived, and an unchanged snapshot is the common
     // case for every non-transcript repaint. `seq` is ONLY a derivation
@@ -2103,11 +2112,22 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     const token = publications.map(publicationContentToken).join('\u0002')
     // A content-identical re-derivation (the common case: an unrelated
     // session event bumped the committed seq) keeps the SAME index object, so
-    // no historical figure row ever re-materializes for it.
+    // no historical figure row ever re-materializes for it. The short-circuit
+    // cursor MOVES to the current committed seq: the next repaint at the same
+    // seq is O(1) again, never a second full derivation.
     if (memo !== undefined
       && memo.session === snapshot.session
       && memo.sessionId === snapshot.sessionId
-      && memo.token === token) return memo.index
+      && memo.token === token) {
+      visualSnapshotMemo = {
+        session: snapshot.session,
+        sessionId: snapshot.sessionId,
+        seq: snapshot.seq,
+        token: memo.token,
+        index: memo.index,
+      }
+      return memo.index
+    }
     const byTurn = new Map<number, PublishedVisual[]>()
     for (const publication of publications) {
       const existing = byTurn.get(publication.turn)

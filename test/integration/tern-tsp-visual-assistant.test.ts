@@ -1054,9 +1054,19 @@ test('an unchanged snapshot derivation is short-circuited, not re-run per repain
       harness.repaint()
     }
     const unrelatedCommitMs = performance.now() - started
+    // C: the NEW committed revision is now STABLE. After the first repaint at
+    // this seq moved the short-circuit cursor, every further repaint here is
+    // the same seq and must be O(1) again — a token hit that does NOT move
+    // the cursor leaves every subsequent repaint at a full re-derivation,
+    // which this ratio detects deterministically.
+    started = performance.now()
+    for (let index = 0; index < repaints; index += 1) harness.repaint()
+    const settledMs = performance.now() - started
     assert.equal(harness.fatalErrors.length, 0)
     assert.ok(unrelatedCommitMs > unchangedMs * 3 && unrelatedCommitMs - unchangedMs > 40,
       `an unchanged snapshot must not re-run the derivation per repaint (unchanged=${Math.round(unchangedMs)}ms, unrelated-commit=${Math.round(unrelatedCommitMs)}ms for ${repaints} repaints each)`)
+    assert.ok(unrelatedCommitMs > settledMs * 3,
+      `repaints at the NEW committed seq must be short-circuited again after the first one (settled=${Math.round(settledMs)}ms vs unrelated-commit=${Math.round(unrelatedCommitMs)}ms for ${repaints} repaints each)`)
   } finally {
     await harness.dispose()
   }
