@@ -62,6 +62,13 @@ interface Harness {
   readonly consumeCount: () => number
   readonly healthClears: () => number
   readonly healthRecords: () => number
+  /** How many execute calls started (the in-flight signal for held executes). */
+  executeStarts(): number
+  /** Hold the NEXT execute calls open until `releaseExecute()`. */
+  holdExecute(): void
+  releaseExecute(): void
+  /** Queue one per-call execute outcome (shifted in call order). */
+  queueExecuteOutcome(outcome: HostCommandOutcome): void
   readonly prompts: string[]
   /** How many stage calls started (the in-flight signal for held stages). */
   stageStarts(): number
@@ -105,6 +112,10 @@ function startHarness(options: { readonly sessionId?: string } = {}): Harness {
   let stageGate: Promise<void> | undefined
   let releaseStageGate: (() => void) | undefined
   let stageError: Error | undefined
+  let executeGate: Promise<void> | undefined
+  let releaseExecuteGate: (() => void) | undefined
+  let executeStarts = 0
+  const executeScript: HostCommandOutcome[] = []
   let executeOutcome: HostCommandOutcome = {
     kind: 'committed',
     matched: true,
@@ -193,12 +204,15 @@ function startHarness(options: { readonly sessionId?: string } = {}): Harness {
       return { receiptId: `receipt-${stages.length}` }
     },
     async execute(request: { readonly sessionId: string; readonly line: string; readonly attachments: readonly unknown[] }) {
+      executeStarts += 1
+      if (executeGate !== undefined) await executeGate
       executes.push({ sessionId: request.sessionId, line: request.line, attachments: request.attachments })
       // Mirror the official executor: an unresolved name is a committed
       // `matched:false` (the caller's advertised-miss / prompt-fallback
       // authority), never a synthetic success.
       const name = request.line.trim().replace(/^\/+/, '').split(/\s+/)[0] ?? ''
-      return descriptors.has(name) ? executeOutcome : { kind: 'committed', matched: false } as const
+      if (!descriptors.has(name)) return { kind: 'committed', matched: false } as const
+      return executeScript.shift() ?? executeOutcome
     },
   }
   const command = {
@@ -317,6 +331,17 @@ function startHarness(options: { readonly sessionId?: string } = {}): Harness {
     consumeCount: () => consumed,
     healthClears: () => healthClears,
     healthRecords: () => healthRecords,
+    executeStarts: () => executeStarts,
+    holdExecute: () => {
+      executeGate = new Promise<void>(resolve => { releaseExecuteGate = resolve })
+    },
+    releaseExecute: () => {
+      const release = releaseExecuteGate
+      releaseExecuteGate = undefined
+      executeGate = undefined
+      release?.()
+    },
+    queueExecuteOutcome: (outcome) => { executeScript.push(outcome) },
     prompts,
     stageStarts: () => stageStarts,
     until: async (predicate, label, timeoutMs = 15_000) => {
@@ -626,4 +651,95 @@ test('an unknown handler result kind is never consumed as success', async (t) =>
     'an illegal result never clears the command health error as if the command had succeeded')
   assert.equal(harness.healthRecords(), 1, 'the illegal result is recorded as a command failure')
   assert.match(harness.notices.join('\n'), /unknown result kind/)
+})
+
+test('a shared FILE draft survives a sibling failure and is retired only by the last consumer', async (t) => {
+  const life = testLifecycle(t)
+  const harness = startHarness({ sessionId: 'session-a' })
+  declareHost(harness, 'files', { leadingInput: true, attachments: true })
+  const staged = await addFileDraft(life, harness.files, 'shared.bin', Buffer.from([1, 2, 3]))
+  const line = `/files inspect ${staged.placeholder}`
+  harness.queueExecuteOutcome({ kind: 'committed', matched: true, execution: { result: { kind: 'success' } } })
+  harness.holdExecute()
+  // A is accepted and freezes/pins the FILE; its execute is held open.
+  harness.submit(line)
+  await harness.until(() => harness.executeStarts() === 1, 'A reached the command plane')
+  // B is accepted while A is in flight: it references the SAME placeholder,
+  // pins the draft synchronously and then waits behind the submit FIFO.
+  harness.submit(line)
+  assert.equal(harness.files.values().length, 1, 'the shared draft is staged while both gestures are accepted')
+  harness.queueExecuteOutcome({
+    kind: 'committed',
+    matched: true,
+    execution: { result: { kind: 'error', text: 'B failed' } },
+  })
+  harness.releaseExecute()
+  // B starts staging only AFTER A's success settlement ran; A's pin-aware
+  // consumption must have skipped the still-reserved draft.
+  await harness.until(() => harness.stageStarts() === 2, 'B started staging after A succeeded')
+  assert.equal(harness.files.values().length, 1,
+    'A success must not retire a FILE still reserved by the accepted sibling B')
+  await harness.settled()
+  assert.equal(harness.executes.length, 2, 'both accepted gestures were dispatched')
+  assert.equal(harness.files.values().length, 1,
+    'B failed and its restored line still resolves the shared FILE draft')
+  // Last consumer: a later successful submission retires the draft.
+  harness.queueExecuteOutcome({ kind: 'committed', matched: true, execution: { result: { kind: 'success' } } })
+  harness.submit(line)
+  await harness.settled()
+  assert.equal(harness.files.values().length, 0, 'the last successful consumer retires the draft')
+})
+
+test('a shared IMAGE draft follows the same ownership as a shared FILE', async (t) => {
+  const harness = startHarness({ sessionId: 'session-a' })
+  declareHost(harness, 'files', { leadingInput: true, attachments: true })
+  const image = harness.images.add({ bytes: new Uint8Array([7]), mediaType: 'image/png', width: 1, height: 1 })
+  const line = `/files inspect ${image.placeholder}`
+  harness.queueExecuteOutcome({ kind: 'committed', matched: true, execution: { result: { kind: 'success' } } })
+  harness.holdExecute()
+  harness.submit(line)
+  await harness.until(() => harness.executeStarts() === 1, 'A reached the command plane')
+  harness.submit(line)
+  assert.equal(harness.images.values().length, 1, 'the shared image is staged while both gestures are accepted')
+  harness.queueExecuteOutcome({
+    kind: 'committed',
+    matched: true,
+    execution: { result: { kind: 'error', text: 'B failed' } },
+  })
+  harness.releaseExecute()
+  await harness.until(() => harness.executeStarts() === 2, 'B reached the command plane')
+  assert.equal(harness.images.values().length, 1,
+    'A success must not retire an IMAGE still reserved by the accepted sibling B')
+  await harness.settled()
+  assert.equal(harness.images.values().length, 1,
+    'B failed and its restored line still resolves the shared IMAGE draft')
+  harness.queueExecuteOutcome({ kind: 'committed', matched: true, execution: { result: { kind: 'success' } } })
+  harness.submit(line)
+  await harness.settled()
+  assert.equal(harness.images.values().length, 0, 'the last successful consumer retires the image')
+})
+
+test('the final declaration uses the frozen attachment fact, not the live draft store', async (t) => {
+  const life = testLifecycle(t)
+  const harness = startHarness({ sessionId: 'session-a' })
+  declareHost(harness, 'files', { leadingInput: true, attachments: true })
+  const staged = await addFileDraft(life, harness.files, 'frozen.bin', Buffer.from([4, 5]))
+  const line = `/files inspect ${staged.placeholder}`
+  harness.holdExecute()
+  // A is accepted while the descriptor declares attachments.
+  harness.submit(line)
+  await harness.until(() => harness.executeStarts() === 1, 'A reached the command plane')
+  // B is accepted under the same declaration: its frozen snapshot carries the
+  // FILE. While it waits behind the FIFO the live draft can go away (a sibling
+  // success / intake prune) and the descriptor can change.
+  harness.submit(line)
+  harness.files.clear()
+  harness.descriptors.set('files', { leadingInput: true, attachments: false })
+  harness.releaseExecute()
+  await harness.settled()
+  assert.equal(harness.executes.length, 1,
+    'B must not execute an attachment-bearing command whose FINAL declaration refuses attachments')
+  assert.match(harness.notices.join('\n'), /does not accept attachments/,
+    'the final declaration refusal is surfaced from the frozen fact')
+  assert.equal(harness.draftText(), line, 'the refused line is restored for correction')
 })

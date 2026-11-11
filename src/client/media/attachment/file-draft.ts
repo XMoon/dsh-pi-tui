@@ -83,6 +83,18 @@ export class DraftFileStore {
     return this.files.delete(id)
   }
 
+  /**
+   * Retire one CONSUMED draft only when no other accepted submission still
+   * reserves it. A shared placeholder can be referenced by more than one
+   * in-flight gesture; the last owner keeps the draft available for a failed
+   * sibling's restored editor line. The caller must release its OWN
+   * reservation before calling this.
+   */
+  consume(id: number): boolean {
+    if (this.isPinned(id)) return false
+    return this.files.delete(id)
+  }
+
   /** Remove all file drafts and their in-flight reservations. */
   clear(): void {
     this.files.clear()

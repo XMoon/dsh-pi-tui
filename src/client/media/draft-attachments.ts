@@ -67,9 +67,14 @@ export function consumeDraftAttachments(
   imageStore: DraftImageStore,
   fileStore?: DraftFileStore,
 ): void {
+  // `consume`, not `remove`: a shared placeholder may still be reserved by
+  // ANOTHER accepted submission. The caller has already released this
+  // gesture's own reservation, so any remaining pin belongs to a sibling and
+  // keeps the draft alive for that sibling's success (last consumer retires
+  // it) or its failed restore.
   for (const segment of expandAttachmentPlaceholders(text, imageStore, fileStore)) {
-    if (segment.type === 'image') imageStore.remove(segment.image.id)
-    else if (segment.type === 'file') fileStore?.remove(segment.file.id)
+    if (segment.type === 'image') imageStore.consume(segment.image.id)
+    else if (segment.type === 'file') fileStore?.consume(segment.file.id)
   }
 }
 

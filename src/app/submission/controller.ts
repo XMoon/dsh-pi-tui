@@ -183,7 +183,10 @@ export interface SubmissionControllerDeps<ExactAgent extends SubmissionAgentLike
   /** The bound submission runtime (the SOLE writer/admission owner). */
   readonly submissionRuntime: {
     withWriter<T>(scope: LiveSessionScope, task: () => Promise<T> | T): Promise<T>
-    submitPrompt(submission: PromptSubmission): Promise<void>
+    submitPrompt(
+      submission: PromptSubmission,
+      options?: { readonly releaseReservation?: () => void },
+    ): Promise<void>
     deferQueueRecall(recall: PendingQueueRecall): void
     /** Settle every parked queue recall (commit keeps the removal, abort
      *  restores the draft). */
@@ -476,7 +479,11 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
    */
   const attachmentRefusal = (
     parsed: { name: string; rawInput?: string },
-    draft: string,
+    // The attachment fact of THE SUBMITTED LINE: at submit time the live
+    // draft stores are the authority; the deferred FINAL re-check uses the
+    // gesture's frozen snapshot instead (a concurrent success may already
+    // have consumed a shared live draft).
+    hasAttachments: boolean,
     // The caller's classification of THIS LINE (PR5 v2 §1C-7): a Client
     // command (TUI or extension) refuses staged attachments; a genuine
     // Host command follows the HOST descriptor's own `attachments`
@@ -486,7 +493,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // descriptor overwrite the winning Host declaration).
     classification: CommandLineClassification,
   ): string | undefined => {
-    if (!draftHasAttachments(draft, deps.drafts.images, deps.drafts.files)) return undefined
+    if (!hasAttachments) return undefined
     // §1C-4/§3 (review R7-2): the classification is the ONLY input. A parallel
     // `isSkillInvocation` predicate must not outrank the Host precedence — an
     // argued `/skill <name>` whose name a GENUINE Host command owns (or a live
@@ -1220,7 +1227,6 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
           },
           restoreSubmissionDraft: (value) => restoreSubmissionDraft(value),
           consumeDraftAttachments: (value) => consumeDraftAttachments(value, deps.drafts.images, deps.drafts.files),
-          draftHasAttachments: (value) => draftHasAttachments(value, deps.drafts.images, deps.drafts.files),
           pinDraftAttachments: (value) => pinDraftAttachments(value, deps.drafts.images, deps.drafts.files),
           settleLocalSubmission: (requestId) => settleLocalSubmission(requestId),
           settleSubmitAck: (reason, options) => settleLocalSubmitAck(reason, options),
@@ -1271,7 +1277,14 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
                 && deps.extensions.findContribution(parsed.name) !== undefined,
               skillInvocation: finalSkillInvocation,
             })
-            return attachmentRefusal(parsed, text, finalClassification)
+            // The FINAL policy reads the gesture's frozen fact, never the
+            // mutable live stores: another accepted submission may have
+            // consumed a shared draft while this one waited in the FIFO.
+            return attachmentRefusal(
+              parsed,
+              preparedCommandAttachments.segments.some(segment => segment.type !== 'text'),
+              finalClassification,
+            )
           },
           isTuiOwnedCommand: isTuiOwnedCommandLine,
           commandPlaneOwnsLine,
@@ -1381,7 +1394,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
           shouldConsumeAdvertisedMiss,
           isIndeterminateSkillWrite: (error) => isIndeterminateSkillWrite(error),
           startArtifactSave: (name) => deps.artifacts.start(name, agent),
-          submitPrompt: (submission) => deps.submissionRuntime.submitPrompt(submission),
+          submitPrompt: (submission, options) => deps.submissionRuntime.submitPrompt(submission, options),
           commandSessionId: () => agent.session.id,
           markTurnTransferred: () => { submitTurnTransferred = true },
           diag: deps.diag,
@@ -1906,7 +1919,11 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       // Client command (TUI or extension) refuses staged attachments, a
       // Host command follows the HOST descriptor's own declaration, skill
       // invocations and ordinary submissions stay multimodal.
-      const refusal = attachmentRefusal(parsed, text, classification)
+      const refusal = attachmentRefusal(
+        parsed,
+        draftHasAttachments(text, deps.drafts.images, deps.drafts.files),
+        classification,
+      )
       if (refusal !== undefined) {
         deps.app().setEditorText(mergeDraft(deps.app().getDraft(), text))
         deps.app().notify(refusal, 'error')
