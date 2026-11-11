@@ -477,3 +477,41 @@ test('a beginning shell card materializes only on the window that contains the S
   assert.ok((await viewport(vt)).includes('Shell echo beginning'), 'returning to the oldest page restores it exactly once')
   app.stop()
 })
+
+test('a retained card records a failed Session submission without falsifying the Host result', async () => {
+  const { vt, app } = startApp(40, 30)
+  const card = app.pushLocalMessage({
+    kind: 'tool', turn: Number.POSITIVE_INFINITY, name: 'shell',
+    args: 'echo hello', result: 'hello\n[exit 0]', status: 'ok',
+  })
+  app.setLocalShellSubmissionState(card, {
+    kind: 'uncertain',
+    reason: 'shell session write result is indeterminate — do not retry automatically',
+  })
+  const folded = await viewport(vt)
+  const foldedLines = folded.split('\n')
+  const header = foldedLines.findIndex(line => line.includes('Shell echo hello'))
+  assert.ok(header >= 0, `folded shell header missing:\n${folded}`)
+  assert.ok(foldedLines[header]!.includes('[ok]'), `the Host execution result stays truthful:\n${folded}`)
+  assert.ok(foldedLines[header + 2]!.includes('submission uncertain'),
+    `the folded card must carry the persistent submission state:\n${folded}`)
+  assert.ok(!foldedLines[header + 2]!.includes('do not retry'), 'the full reason belongs to the expanded body')
+  assert.ok(visibleWidth(foldedLines[header + 2]!) <= 40, `the marker row must stay inside 40 columns:\n${folded}`)
+
+  vt.sendInput('\x0f')
+  await vt.waitForRender()
+  const expanded = vt.getViewport().join('\n')
+  const expandedText = expanded.replace(/\s+/gu, ' ')
+  assert.ok(expandedText.includes('Session submission uncertain — do not retry automatically'),
+    `the expanded card must state the uncertainty and no-retry rule:\n${expanded}`)
+  assert.ok(expandedText.includes('shell session write result is indeterminate'),
+    `the expanded card must keep the writer reason:\n${expanded}`)
+
+  // A committed / not-attempted card has no failure marker.
+  const plain = app.pushLocalMessage({
+    kind: 'tool', turn: Number.POSITIVE_INFINITY, name: 'shell',
+    args: 'echo plain', result: 'plain\n[exit 0]', status: 'ok',
+  })
+  assert.equal(app.removeLocalMessage(plain), true)
+  app.stop()
+})

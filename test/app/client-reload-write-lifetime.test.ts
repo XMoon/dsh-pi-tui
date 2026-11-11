@@ -293,7 +293,7 @@ interface ShellHarness {
   readonly agent: AgentLike
   readonly card: () => { readonly result?: string; readonly status?: string } | undefined
   /** Every currently owned local card (identity-targeted removal witness). */
-  readonly cards: () => { readonly args?: string; readonly result?: string; readonly status?: string }[]
+  readonly cards: () => { readonly args?: string; readonly result?: string; readonly status?: string; readonly submission?: { readonly kind: string; readonly reason: string } }[]
   /** Queue the placement values a subsequent capture returns. */
   queuePlacements(values: readonly unknown[]): void
   readonly captureCalls: () => number
@@ -322,8 +322,8 @@ function startShellHarness(composerOverride?: unknown): ShellHarness {
   const writeResolvers: ((outcome: WriteOutcome) => void)[] = []
   const shellResolvers: ((result: HostUserShellResult) => void)[] = []
   const shellFailures: ((error: unknown) => void)[] = []
-  let lastCard: { args?: string; result?: string; status?: string } | undefined
-  let cards: { args?: string; result?: string; status?: string }[] = []
+  let lastCard: { args?: string; result?: string; status?: string; submission?: { kind: string; reason: string } } | undefined
+  let cards: { args?: string; result?: string; status?: string; submission?: { kind: string; reason: string } }[] = []
   let executions = 0
   let captureCalls = 0
   let queuedPlacements: unknown[] = []
@@ -359,6 +359,12 @@ function startShellHarness(composerOverride?: unknown): ShellHarness {
       if (index === -1) return false
       cards = cards.filter((_card, cardIndex) => cardIndex !== index)
       if (lastCard === message) lastCard = cards.at(-1)
+      return true
+    },
+    setLocalShellSubmissionState: (message: unknown, state: { kind: string; reason: string }) => {
+      const card = cards.find(candidate => candidate === message as { args?: string })
+      if (card === undefined) return false
+      card.submission = state
       return true
     },
   }
@@ -715,6 +721,7 @@ test('a committed ! removes only its own card, while !! and sibling submits keep
   await drainMicrotasks()
   const remaining = harness.cards()
   assert.deepEqual(remaining.map(card => card.args), ['echo A'], 'only the committed ! card is removed')
+  assert.equal(remaining[0]!.submission, undefined, 'a committed ! card is removed, not marked')
   assert.equal(remaining[0]!.status, 'ok', 'the settled !! card stays visible')
 
   // A normal prompt and a Ctrl+S steer never dismiss the retained !! card.
@@ -744,8 +751,11 @@ test('a rejected or indeterminate ! write keeps its own card and every other !!'
   await drainMicrotasks()
   harness.finishWrite({ kind: 'rejected', error: { code: 'busy', message: 'writer refused' } })
   await drainMicrotasks()
-  assert.deepEqual(harness.cards().map(card => card.args), ['echo A', 'echo B'],
+  const rejectedCards = harness.cards()
+  assert.deepEqual(rejectedCards.map(card => card.args), ['echo A', 'echo B'],
     'a rejected ! write keeps its diagnostic card beside the settled !!')
+  assert.equal(rejectedCards[1]!.submission?.kind, 'not-submitted', 'the rejected card keeps a persistent failure state')
+  assert.match(rejectedCards[1]!.submission?.reason ?? '', /writer refused/u, 'the writer reason stays on the card')
 
   harness.controller.submit('! echo C')
   await drainMicrotasks()
@@ -753,8 +763,12 @@ test('a rejected or indeterminate ! write keeps its own card and every other !!'
   await drainMicrotasks()
   harness.finishWrite({ kind: 'indeterminate', error: { code: 'transport/unknown', message: 'unknown' } })
   await drainMicrotasks()
-  assert.deepEqual(harness.cards().map(card => card.args), ['echo A', 'echo B', 'echo C'],
+  const indeterminateCards = harness.cards()
+  assert.deepEqual(indeterminateCards.map(card => card.args), ['echo A', 'echo B', 'echo C'],
     'an indeterminate ! write never removes the card')
+  assert.equal(indeterminateCards[2]!.submission?.kind, 'uncertain', 'the indeterminate write is persistently marked uncertain')
+  assert.match(indeterminateCards[2]!.submission?.reason ?? '', /do not retry automatically/u,
+    'the no-retry warning stays on the card')
 
   harness.controller.submit('!! echo D')
   await drainMicrotasks()

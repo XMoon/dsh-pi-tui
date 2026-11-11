@@ -59,7 +59,7 @@ test('the user shell keeps only the local-card TuiApp members', () => {
   // The remaining app uses are the local-card lifecycle only.
   for (const match of [...source.matchAll(/deps\.app\(\)\.(\w+)/g)]) {
     assert.ok(
-      ['pushLocalMessage', 'updateLocalMessage', 'removeLocalMessage', 'captureLocalShellPlacement'].includes(match[1]!),
+      ['pushLocalMessage', 'updateLocalMessage', 'removeLocalMessage', 'captureLocalShellPlacement', 'setLocalShellSubmissionState'].includes(match[1]!),
       `unexpected UserShell app member use: ${match[1]}`,
     )
   }

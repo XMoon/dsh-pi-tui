@@ -1970,7 +1970,12 @@ Authority: `src/runtime/direct/file-completion/host-discovery.ts`,
   owns that) and never deletes Session events. A committed `!` removes exactly
   ITS OWN local card after `SessionWriter` reports committed, leaving every
   other shell card in place; rejected, indeterminate, cancelled or unknown
-  outcomes keep their diagnostic card. The Child Viewer never renders the
+  outcomes keep their diagnostic card. A retained `!` card additionally carries
+  a Client-local Session-submission marker: `not submitted` for a rejected,
+  cancelled or pre-dispatch failure, and `submission uncertain` for an
+  indeterminate write that must not be retried automatically. The marker is
+  visible in the folded outcome row, and the expanded card keeps the concrete
+  writer reason without changing the Host execution status (`[ok]`/`[error]`). The Child Viewer never renders the
   main Session's shell cards; they stay owned by the hidden main view and
   return with it, while a real Session replacement clears them.
 - The card's placement belongs to the Client-local display policy, not to the

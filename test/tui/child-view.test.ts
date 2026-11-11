@@ -202,6 +202,7 @@ test('the child viewer hides the main session shell cards and restores them on r
   let view = vt.getViewport().join('\n')
   assert.ok(view.includes('!!ls'), `the shell card must render before the viewer:\n${view}`)
 
+  app.enterFocusViewerScope()
   app.setViewerMode({ parentSessionId: 'session-main', childSessionId: 'session-child', label: 'child', mode: 'one-shot', activity: 'inactive' })
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
@@ -215,6 +216,10 @@ test('the child viewer hides the main session shell cards and restores them on r
 
   // The production exit repaints the main folder; the retained card returns.
   app.setViewerMode(undefined)
+  // The production exitView order: leave the child Focus scope BEFORE the
+  // main-folder repaint, so the intermediate rebuild can never leak the child
+  // disclosure state or lose the parent's shell card.
+  app.exitFocusViewerScope()
   app.setTranscript([...mainTranscript])
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
