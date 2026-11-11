@@ -644,9 +644,9 @@ const EXTRACTED_DECLARATIONS: ReadonlyArray<readonly [string, readonly string[]]
       // submission owner (the sole writer/admission authority).
       'withWriterSection',
       // A5b-4 review fix: the submission-presentation policy the composition
-      // root used to define (attachment refusal, command-submit attachment
-      // expansion, local-echo placement) is controller-owned.
-      'attachmentRefusal', 'commandSubmitAttachments', 'submissionPlacement',
+      // root used to define (attachment refusal, local-echo placement) is
+      // controller-owned.
+      'attachmentRefusal', 'submissionPlacement',
     ],
   ],
   [

@@ -7,6 +7,10 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **声明接受附件的 Host 斜杠命令可以携带普通 FILE。** Host 声明 `input.attachments` 的斜杠命令（Direct 与 Split 两种后端）现在会把已暂存的普通文件按官方 upload receipt 投递给命令 handler；只有命令执行成功才消费草稿，上传或预检失败会保留可编辑的草稿与附件，结果不确定时不会自动重试。
+
 ### 变更
 
 - **Shell 卡片随提交位置展示并保留 `!!` 历史。** `!`/`!!` 卡片不再追加到对话末尾，而是固定在用户提交时的对话位置；默认折叠为至多三行，运行中不显示输出，`Ctrl+O` 展开完整保留内容。已结算的 `!!` 卡片会保留到切换 Session、重启 TUI 或 `Alt+K`；`!` 写入 Session 成功后只移除自己的本地卡片，不再清空其他 Shell 历史；写入失败或结果不确定时保留卡片并标注 `not submitted` / `submission uncertain`，展开可查看原因。

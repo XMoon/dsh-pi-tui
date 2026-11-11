@@ -142,7 +142,12 @@ function officialPendingInputReader(
 }
 
 function officialHostCommandPort(commands: ClientRemote['commands']): RemoteHostCommandPort {
-  return new RemoteHostCommandPort(commands)
+  return new RemoteHostCommandPort(commands, {
+    upload: async (_sessionId, file) => ({
+      receiptId: 'receipt-official',
+      file: { attachmentId: 'attachment-official', name: file.name, bytes: file.byteLength },
+    }),
+  })
 }
 
 function officialSubagentPort(subagents: ClientRemote['subagents']): RemoteSubagentPort {
@@ -300,7 +305,10 @@ function officialQuestionProjectionPayload(value: SessionProjectionsValue): {
  * Connection generation source feed every adapter). */
 function officialM3ASemanticsAssembly(
   runtime: import('../../support/m3-inprocess/client-runtime.ts').RemoteClientRuntime,
-  options: { promptSerializer: import('../../../src/runtime/remote/session-writer-remote.ts').RemotePromptSerializer },
+  options: {
+    promptSerializer: import('../../../src/runtime/remote/session-writer-remote.ts').RemotePromptSerializer
+    fileReceiptUploader: import('../../../src/runtime/remote/file-upload-remote.ts').RemoteFileReceiptUploader
+  },
 ): ReturnType<typeof createRemoteM3ASemantics> {
   return createRemoteM3ASemantics(remoteM3ARuntimeSourceOf(runtime), options)
 }

@@ -18,7 +18,7 @@
 
 import { randomUUID } from 'node:crypto'
 import { parseCommand } from '@deepseek-ai/dsh-commands'
-import { draftHasFiles, expandAttachmentPlaceholders } from '../../client/media/attachment/placeholder.ts'
+import { expandAttachmentPlaceholders } from '../../client/media/attachment/placeholder.ts'
 import type { DraftFileStore } from '../../client/media/attachment/file-draft.ts'
 import { formatBytes } from '../../domain/media/format.ts'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
@@ -32,7 +32,11 @@ import { runReservedSubmit } from './submit-flow.ts'
 import type { DraftImageStore } from '../../client/media/image/draft-store.ts'
 import { consumeDraftAttachments, draftHasAttachments, draftHasImages, pinDraftAttachments } from '../../client/media/draft-attachments.ts'
 import { prepareUserMessage, type DirectPrepareInputDeps } from './direct-message-preparation.ts'
-import { expandImagePlaceholders } from '../../client/media/image/placeholder.ts'
+import {
+  serializeCommandAttachments,
+  snapshotCommandAttachments,
+  type PreparedCommandAttachments,
+} from './command-attachments.ts'
 import { clientTimeZone } from '../../client/time-zone.ts'
 import { classifyCommandLine, IMMEDIATE_SESSIONLESS_COMMANDS, isBareCommandLine, isLocalCommandLine, isPlainExitPrompt, localCommandMayWrite, LOCAL_COMMANDS, SESSIONLESS_COMMANDS, SESSION_NAVIGATION_COMMANDS, shouldConsumeAdvertisedMiss, type CommandLineClassification } from '../../domain/command/policy.ts'
 import { resolveSubmitDelivery } from './command-policy.ts'
@@ -465,9 +469,9 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
    *   otherwise before dispatch). The claim is LINE-level: an argued line
    *   of an execute-kind command is no invocation at all (it falls back to
    *   the ordinary submission) and keeps its attachments;
-   * - a declared command still refuses a FILE attachment: the host expects
-   *   an upload receipt, which this client has no seam to produce (fail
-   *   closed rather than silently drop the file).
+   * - a declared command carries images as encoded data and files as
+   *   official staged receipts (`HostCommandPort.stageFileReceipt`), issued
+   *   inside the writer-admitted section against the ACTUAL Session.
    * The host executor re-enforces the declaration at admission.
    */
   const attachmentRefusal = (
@@ -493,34 +497,11 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     if (classification.kind === 'client-command') {
       return 'Attachments cannot be included in a user-shell command.'
     }
-    if (classification.kind === 'host-command') {
-      if (classification.attachments !== true) {
-        return `/${parsed.name} does not accept attachments; remove them first`
-      }
-      if (draftHasFiles(draft, deps.drafts.images, deps.drafts.files)) {
-        return `/${parsed.name} cannot receive file attachments in this client; remove them first`
-      }
+    if (classification.kind === 'host-command' && classification.attachments !== true) {
+      return `/${parsed.name} does not accept attachments; remove them first`
     }
     return undefined
   }
-
-  /** The encoded images ONE command invocation carries (DSH
-   * `CommandSubmitAttachment`): the draft store holds the exact bytes, and
-   * the host admits them through its own store at execute time. Only a
-   * declared host command reaches this builder — an undeclared command and
-   * any file attachment are refused before dispatch. A RECALLED image
-   * carries no local bytes (it is already durable): the wire has no
-   * ref-based variant, so the host's admission rejects the empty payload
-   * and the command settles as an error — the draft and its attachments
-   * are kept for correction (never silently dropped). */
-  const commandSubmitAttachments = (draft: string) => expandImagePlaceholders(draft, deps.drafts.images)
-    .flatMap(segment => segment.type === 'image' ? [segment.image] : [])
-    .map(image => ({
-      type: 'image' as const,
-      mediaType: image.mediaType,
-      data: Buffer.from(image.bytes).toString('base64'),
-      ...(image.name === undefined ? {} : { name: image.name }),
-    }))
 
   /** The official `beginSubmission` placement for one local echo. */
   const submissionPlacement = (mode: 'queue' | 'steer', running: boolean): PendingSubmissionPlacement =>
@@ -1031,6 +1012,12 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // owned — an argued line of an execute-kind command is an ordinary
     // submission even when its name was advertised.
     let planeAdvertised = false
+    // This gesture's immutable attachment source snapshot: frozen SYNCHRONOUSLY
+    // in the reserve step below, before the first await (the deferred
+    // `ensureSession()` may create the Session). Only the final genuine Host
+    // command branch serializes it; every other route leaves the snapshot
+    // unused and performs no upload.
+    let preparedCommandAttachments!: PreparedCommandAttachments
     // An owned workflow: the chain's outcome drives the editor draft, the
     // notices and the queue — runOwned (AGENTS.md), never a bare void.
     // Reserve the referenced drafts SYNCHRONOUSLY, in the SAME call stack
@@ -1063,6 +1050,18 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       reserve: (t) => {
         try {
           const releasePin = pinDraftAttachments(t, deps.drafts.images, deps.drafts.files)
+          try {
+            preparedCommandAttachments = snapshotCommandAttachments(t, {
+              images: deps.drafts.images,
+              files: deps.drafts.files,
+            })
+          } catch (error) {
+            // A failed snapshot must not strand the reservation it sits next
+            // to: release the pin first, then the FIFO turn via the outer
+            // catch.
+            releasePin()
+            throw error
+          }
           return () => {
             try {
               releasePin()
@@ -1274,7 +1273,6 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
             })
             return attachmentRefusal(parsed, text, finalClassification)
           },
-          commandSubmitAttachments: (value) => commandSubmitAttachments(value),
           isTuiOwnedCommand: isTuiOwnedCommandLine,
           commandPlaneOwnsLine,
           beginNavigationIntent: (name) => {
@@ -1284,7 +1282,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
           },
           submittedHostClaim: () => parsedAtSubmit === undefined ? undefined : deps.command.hostOriginClaimOf(parsedAtSubmit),
           commandSignal: () => deps.signal,
-          invokeCommandPlane: ({ toggled: commandLine, commandPlaneLine, tuiOwnedCommand, submittedAttachments, signal: commandSignal }) =>
+          invokeCommandPlane: ({ toggled: commandLine, commandPlaneLine, tuiOwnedCommand, hostAttachmentsDeclared, preparedAttachments, signal: commandSignal }) =>
             deps.command.withCommandDelivery(delivery, () => {
               if (!commandPlaneLine || parsedAtSubmit === undefined) {
                 return Promise.resolve({ kind: 'committed', matched: false } as HostCommandOutcome)
@@ -1297,7 +1295,9 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
                 // projection executes through the CLIENT registry — the
                 // projected agent must never reach `ctx.commands.execute`.
                 if (directAgent !== undefined) {
-                  return deps.commandPlane.execute(directAgent, commandLine, submittedAttachments, commandSignal).then((execution: HostCommandExecution | undefined) => {
+                  // A TUI-owned/client line refuses staged attachments in the
+                  // composer policy; its command plane never receives a wire.
+                  return deps.commandPlane.execute(directAgent, commandLine, [], commandSignal).then((execution: HostCommandExecution | undefined) => {
                     return execution === undefined
                       ? { kind: 'committed', matched: false } as const
                       : { kind: 'committed', matched: true, execution } as const
@@ -1330,15 +1330,34 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
                     : { kind: 'committed', matched: true, execution } as const
                 })
               }
-              // The HOST route: the HostCommandPort submission enters the
-              // barrier through the submission runtime (the M3 insertion
-              // point).
-              return deps.submissionRuntime.withWriter(scope, () => deps.backend.hostCommand.execute({
-                sessionId: agent.session.id,
-                line: commandLine,
-                attachments: submittedAttachments,
-                signal: commandSignal,
-              }))
+              // The HOST route: ONE writer-admitted section stages every file
+              // receipt and dispatches the command exactly once. The scope and
+              // the caller-owned signal are re-checked before serialization,
+              // after each staged file and immediately before dispatch, so a
+              // replaced Session can never receive the command.
+              return deps.submissionRuntime.withWriter(scope, async () => {
+                const assertCurrent = (): void => {
+                  commandSignal.throwIfAborted()
+                  if (!deps.scope.isCurrent(scope)) throw new SessionScopeSupersededError()
+                }
+                assertCurrent()
+                const attachments = hostAttachmentsDeclared
+                  ? await serializeCommandAttachments(
+                    preparedAttachments,
+                    scope.sessionId,
+                    deps.backend.hostCommand,
+                    commandSignal,
+                    assertCurrent,
+                  )
+                  : []
+                assertCurrent()
+                return deps.backend.hostCommand.execute({
+                  sessionId: scope.sessionId,
+                  line: commandLine,
+                  attachments,
+                  signal: commandSignal,
+                })
+              })
             }),
           beginCommandSettlement: () => deps.session.beginCommandSettlement(),
           abortCommandSettlement: () => deps.session.abortCommandSettlement(),
@@ -1377,6 +1396,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
           wasAdvertisedAtSubmit,
           parsedName: parsedAtSubmit?.name,
           submitTurn,
+          preparedCommandAttachments,
           // PR3-B §7.3 (F2): the subject pinned at the gesture's admission —
           // the fallback prompt's stale-restore discriminator.
           staleSubject: submittedSubject,

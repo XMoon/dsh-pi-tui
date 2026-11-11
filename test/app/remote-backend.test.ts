@@ -150,12 +150,73 @@ test('a failing config first read is recorded and still yields a backend (never 
   runtime.dispose()
 })
 
+test('the ONE composition uploader keeps Command receipt staging alive when a prompt serializer is injected', async () => {
+  const fake = fakeRuntime(async () => ({
+    ok: true,
+    value: { writable: true, hasDocument: true, namespaces: [], revision: 1 },
+  }))
+  const requests: { readonly url: string; readonly bytes: number }[] = []
+  const runtime = await createRemoteBackendRuntime({
+    runtime: fake.runtime,
+    // An injected serializer bypasses the production prompt serializer, but
+    // must NOT remove the command path's official receipt capability.
+    promptSerializer: {
+      preflight: () => ({ kind: 'unsupported', reason: 'test' }),
+      serialize: async () => ({ kind: 'unsupported', reason: 'test' }),
+    },
+    fetch: async (input, init) => {
+      let bytes = 0
+      const body = init?.body
+      if (body !== undefined && body !== null) {
+        const reader = (body as ReadableStream<Uint8Array>).getReader()
+        try {
+          for (;;) {
+            const chunk = await reader.read()
+            if (chunk.done) break
+            bytes += chunk.value.byteLength
+          }
+        } finally {
+          reader.releaseLock()
+        }
+      }
+      requests.push({ url: String(input), bytes })
+      return new Response(JSON.stringify({
+        ok: true,
+        value: { receiptId: 'receipt-remote', file: { attachmentId: 'att-remote', name: 'report.bin', bytes } },
+      }), { status: 200, headers: { 'content-type': 'application/json' } })
+    },
+  })
+  try {
+    const file: import('../../src/runtime/prepared-prompt.ts').PreparedFile = {
+      name: 'report.bin',
+      byteLength: 4,
+      source: {
+        kind: 'client-stream',
+        open: async function* () { yield new Uint8Array([1, 2, 3, 4]) },
+      },
+    }
+    const staged = await runtime.backend.hostCommand.stageFileReceipt({
+      sessionId: 'session-a',
+      file,
+      signal: new AbortController().signal,
+    })
+    assert.deepEqual(staged, { receiptId: 'receipt-remote' })
+    assert.equal(requests.length, 1, 'the command staged through the official raw upload route exactly once')
+    assert.match(requests[0]!.url, /\/api\/session\/uploadFileBinary\?sessionId=session-a&name=report\.bin/)
+    assert.equal(requests[0]!.bytes, 4, 'the exact Client bytes reached the authenticated route')
+  } finally {
+    runtime.dispose()
+  }
+})
+
 test('a post-adapter construction failure reverse-unwinds every constructed part (backend partial state does not survive)', async () => {
   // The injection lands EXACTLY in the "adapters already constructed, factory
-  // has not returned" window: `options.fetch` is read AFTER the semantics
-  // bundle and the ConfigPort (with its mirror subscriptions) are
-  // constructed, but BEFORE the backend object is assembled and returned. A
-  // throwing getter there rejects the factory with both parts alive.
+  // has not returned" window: the final backend assembly reads the optional
+  // `piTuiWebAccess` namespace AFTER the semantics bundle and the ConfigPort
+  // (with its mirror subscriptions) are constructed, but BEFORE the backend
+  // object is returned. A throwing getter there rejects the factory with both
+  // parts alive (the composition-owned receipt uploader is a plain function
+  // value and cannot throw).
   //
   // The unwind is observed through the REAL subscription lifecycle: the
   // fake runtime's `$on` hands out subscribes whose unsubscribes count —
@@ -168,20 +229,24 @@ test('a post-adapter construction failure reverse-unwinds every constructed part
   const induced = new Error('induced post-adapter construction failure')
   let activeSubscriptions = 0
   let totalSubscriptions = 0
-  const runtime = fake.runtime as unknown as { remote: { $on: () => () => {} } }
+  const runtime = fake.runtime as unknown as { remote: { $on: () => () => {}; piTuiWebAccess: unknown } }
   const originalOn = runtime.remote.$on
   runtime.remote.$on = (() => {
     activeSubscriptions += 1
     totalSubscriptions += 1
     return () => { activeSubscriptions -= 1 }
   }) as never
+  Object.defineProperty(runtime.remote, 'piTuiWebAccess', {
+    configurable: true,
+    get(): never { throw induced },
+  })
   try {
     await assert.rejects(
       createRemoteBackendRuntime({
         runtime: fake.runtime,
         promptSerializer: { preflight: () => ({ kind: 'unsupported', reason: 'test' }), serialize: async () => ({ kind: 'unsupported', reason: 'test' }) },
-        get fetch(): typeof fetch { throw induced },
-      } as never),
+        fetch: async () => new Response(null, { status: 404 }),
+      }),
       (error: unknown) => {
         assert.equal(error, induced, 'the original construction failure surfaces unmasked')
         return true
@@ -192,5 +257,6 @@ test('a post-adapter construction failure reverse-unwinds every constructed part
       'the reverse-unwind released every construction-time subscription (no surviving backend partial state)')
   } finally {
     runtime.remote.$on = originalOn
+    delete (runtime.remote as { piTuiWebAccess?: unknown }).piTuiWebAccess
   }
 })

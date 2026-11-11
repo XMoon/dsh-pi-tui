@@ -726,7 +726,6 @@ test('the HostCommand path maps a frozen transition to the proven-refusal settle
     isScopeCurrent: () => true,
     refuseByTransitionFence: () => { calls.push('fence') },
     lateAttachmentRefusal: () => undefined,
-    commandSubmitAttachments: () => [],
     isTuiOwnedCommand: () => false,
     commandPlaneOwnsLine: () => false,
     submittedHostClaim: () => undefined,
@@ -759,6 +758,7 @@ test('the HostCommand path maps a frozen transition to the proven-refusal settle
     wasAdvertisedAtSubmit: true,
     parsedName: 'compact',
     submitTurn: { wait: Promise.resolve(), release: () => {} },
+    preparedCommandAttachments: { segments: [] },
   })
   await flush()
   await flush()
@@ -1103,7 +1103,6 @@ test('a command settlement whose subject was REPLACED performs cleanup only, nev
     isScopeCurrent: () => scopeCurrent,
     refuseByTransitionFence: () => { calls.push('fence') },
     lateAttachmentRefusal: () => undefined,
-    commandSubmitAttachments: () => [],
     isTuiOwnedCommand: () => false,
     commandPlaneOwnsLine: () => false,
     submittedHostClaim: () => undefined,
@@ -1144,6 +1143,7 @@ test('a command settlement whose subject was REPLACED performs cleanup only, nev
     wasAdvertisedAtSubmit: true,
     parsedName: 'export',
     submitTurn: { wait: Promise.resolve(), release: () => { released = true; calls.push('turnRelease') } },
+    preparedCommandAttachments: { segments: [] },
   })
   await drainUntil(() => calls.includes('fallbackPin'))
   assert.equal(released, true, 'the submit turn is ALWAYS released (leak prevention)')
@@ -1175,7 +1175,6 @@ test('positive control: a current-scope settlement performs the normal visible b
     isScopeCurrent: () => true,
     refuseByTransitionFence: () => { calls.push('fence') },
     lateAttachmentRefusal: () => undefined,
-    commandSubmitAttachments: () => [],
     isTuiOwnedCommand: () => false,
     commandPlaneOwnsLine: () => false,
     submittedHostClaim: () => undefined,
@@ -1209,6 +1208,7 @@ test('positive control: a current-scope settlement performs the normal visible b
     wasAdvertisedAtSubmit: true,
     parsedName: 'export',
     submitTurn: { wait: Promise.resolve(), release: () => {} },
+    preparedCommandAttachments: { segments: [] },
   })
   await drainUntil(() => calls.includes('artifactSave'))
   assert.ok(calls.includes('artifactSave'), 'a current-scope /export success starts the artifact save')

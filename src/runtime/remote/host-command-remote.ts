@@ -8,20 +8,27 @@
  * command routing stay in the runner — this adapter only forwards the already
  * selected line, its declared attachment payload, and the caller-owned signal.
  *
- * Attachment values remain opaque here (the same structural payload the Direct
- * adapter forwards): the caller's attachment-preparation pipeline already
- * refused an unsupported D4-only local file before this port was invoked, so
- * the adapter must never strip or rewrite the payload.
+ * `stageFileReceipt` reuses the SAME F4 receipt uploader the production
+ * prompt serializer uses (one composition-owned instance), so a command file
+ * goes through the official authenticated raw-upload route and the Host mints
+ * its Session-scoped receipt. The uploader is REQUIRED: a composition that
+ * cannot stage a receipt must fail loudly rather than silently drop a file.
+ *
+ * The prepared attachment wire stays opaque at `execute`: the application has
+ * already encoded images and staged the file receipts, and the adapter must
+ * never strip or rewrite the payload.
  *
  * @module @xmoon76/dsh-pi-tui/runtime/remote/host-command-remote
  */
 
 import type {
   HostCommandExecution,
+  HostCommandFileStageRequest,
   HostCommandOutcome,
   HostCommandPort,
   HostCommandRequest,
 } from '../host-command-port.ts'
+import type { RemoteFileReceiptUploader } from './file-upload-remote.ts'
 import { classifyRemoteWriteFailure, remoteFailureCode, remoteFailureMessage } from './write-failure.ts'
 
 /** Structural official `RemoteResult`. */
@@ -46,9 +53,19 @@ export interface RemoteCommandsSource {
  */
 export class RemoteHostCommandPort implements HostCommandPort {
   private readonly commands: RemoteCommandsSource
+  private readonly uploader: RemoteFileReceiptUploader
 
-  constructor(commands: RemoteCommandsSource) {
+  constructor(commands: RemoteCommandsSource, uploader: RemoteFileReceiptUploader) {
     this.commands = commands
+    this.uploader = uploader
+  }
+
+  async stageFileReceipt(request: HostCommandFileStageRequest): Promise<{ readonly receiptId: string }> {
+    // The uploader owns source preflight (fingerprint before the Host sees a
+    // request), bounded streaming and FD release; a failure here proves no
+    // command was dispatched.
+    const uploaded = await this.uploader.upload(request.sessionId, request.file, request.signal)
+    return { receiptId: uploaded.receiptId }
   }
 
   async execute(request: HostCommandRequest): Promise<HostCommandOutcome> {

@@ -77,6 +77,16 @@ Host service resolution belongs to:
 - the Direct runtime policy/facades in `src/app/direct/**`;
 - the application composition root `src/app/bootstrap.ts`.
 
+`HostCommandPort` has ONE official-receipt seam beside `execute`:
+`stageFileReceipt`. It stores ONE Client file snapshot under the receiving
+Session and returns the Host-minted `receiptId` the command wire cites — Direct
+uses the official `fileUploads.uploadStream` (whose resolver `commands.execute`
+consumes), Remote reuses the SAME composition-owned authenticated receipt
+uploader as the prompt path. There is no second upload transport, no Client-side
+receipt registry and no fallback to a durable attachment reference; staging is
+admitted inside the ONE Session writer section against the ACTUAL Session id, so
+a staging failure proves no command was dispatched.
+
 `src/app/host/**` is the bundle's permanent Host plane: it registers with
 explicit `inject` and `ctx.reflect.get`, and consumers read only semantic DTOs or
 port values. `src/app/host/pi-tui-host-runtime.ts` is the ONE built-in Host

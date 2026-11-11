@@ -40,6 +40,7 @@ import type { RemotePresetRemotes } from '../../runtime/remote/preset-remote.ts'
 import type { RemoteSkillRemotes } from '../../runtime/remote/skill-remote.ts'
 import type { RemotePiTuiFileReferenceRemotes } from '../../runtime/remote/host-file-remote.ts'
 import type { RemoteCommandsSource } from '../../runtime/remote/host-command-remote.ts'
+import type { RemoteFileReceiptUploader } from '../../runtime/remote/file-upload-remote.ts'
 import type { RemoteConfigRuntimeSource } from '../../runtime/remote/config-remote.ts'
 import type { RemotePresentationSessionsSource } from '../../runtime/remote/presentation-read-remote.ts'
 import type {
@@ -125,6 +126,9 @@ export interface RemoteM3ASemantics {
  * synchronously at the surface-stop boundary). */
 export interface RemoteM3ASemanticsOptions {
   readonly promptSerializer: RemotePromptSerializer
+  /** The ONE composition-owned receipt uploader the Host command port reuses
+   *  for its official staged file receipts (never a second transport). */
+  readonly fileReceiptUploader: RemoteFileReceiptUploader
   readonly isDispatchAllowed?: () => boolean
   readonly signal?: AbortSignal
   /** Split-Client only: borrow the root delivery instead of per-revision `$on`. */
@@ -274,7 +278,7 @@ export function createRemoteM3ASemantics(
       skills: new RemoteSkillCatalog(remote.skills, remote.piTuiSkills, generation),
     },
     hostFile: new RemoteHostFilePort(remote.piTuiFileReferences, generation),
-    hostCommand: new RemoteHostCommandPort(remote.commands),
+    hostCommand: new RemoteHostCommandPort(remote.commands, options.fileReceiptUploader),
     presentationReader: new RemotePresentationReader(sessions, generation),
     interaction,
     pluginManager: new RemotePluginManagerPort(
