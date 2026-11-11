@@ -5633,7 +5633,7 @@ test('a refused first Host path restores the draft before opening the same Brows
   assert.equal(mounted.app.getDraft(), 'preserve this first prompt')
   assert.equal(mounted.app.isFullscreen(), true)
   const frame = vt.getViewport().join('\n')
-  assert.ok(frame.includes('Add Host directory'), `the existing Browser starts in path mode:\n${frame}`)
+  assert.ok(frame.includes('Host directory:'), `the existing Browser starts in the inline path editor:\n${frame}`)
   assert.ok(frame.includes(path), `the refused Host proposal is prefilled for correction:\n${frame}`)
 })
 test('observational: the CWD-level skip spans Sessions while the recall window keeps every accepted input', async (t) => {

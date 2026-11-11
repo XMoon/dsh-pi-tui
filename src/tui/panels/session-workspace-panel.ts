@@ -38,6 +38,7 @@ import {
 } from '@xmoon76/pi-tui'
 import type {
   SessionBrowserAnswerEligibility,
+  SessionBrowserNewSessionSettlement,
   SessionBrowserReadSnapshot,
   SessionBrowserRow,
   SessionBrowserSearchResult,
@@ -56,19 +57,24 @@ import {
   SESSION_SOURCE_LABEL,
   visibleWorkspaceBrowserRows,
   workspaceRowStatusLabel,
-  type WorkspaceBrowserRow,
   type SessionWorkspacePriority,
   type SessionWorkspaceGroupView,
   type SessionWorkspaceRowFact,
   type SessionWorkspaceView,
 } from '../presentation/session-workspace-view.ts'
+import {
+  ADD_DIRECTORY_ROW_ID,
+  projectPiTuiWorkspaceTree,
+  type PiTuiWorkspaceTreeRow,
+} from '../presentation/session-workspace-tree.ts'
+import { SESSION_WORKSPACE_CHORDS } from '../keybindings/hints.ts'
 import { color } from '../theme/runtime.ts'
 import { formatSessionAge, sessionBrowserErrorNotice, shortSessionId, workspaceKey } from '../pickers/sessions.ts'
 
 /** The logical focus of one Session Workspace frame. `search` is the raw
  * global query editor; `search-results` is the Host+metadata result list;
  * `peek` is the read-only `Space` detail of the selected row. */
-export type SessionWorkspaceFocus = 'search' | 'list' | 'search-results' | 'peek' | 'actions' | 'directory'
+export type SessionWorkspaceFocus = 'search' | 'list' | 'search-results' | 'peek' | 'directory'
 
 /** What the ONE PiTUI Session Workspace Presentation needs from `TuiApp`.
  *  Everything is read live; the panel never receives the app object. */
@@ -84,13 +90,12 @@ export interface SessionWorkspacePanelHost {
    *  read owner re-proves eligibility; the panel never switches a Session. */
   readonly onResume: (sessionId: string) => void
   readonly onUseDirectory?: (workspaceId: string, canonicalPath: string) => void
-  readonly onNewSession?: (workspaceId: string) => void
+  readonly onNewSession?: (workspaceId: string, settle?: (outcome: SessionBrowserNewSessionSettlement) => void) => void
   readonly onAddDirectory?: (path: string, settle: (outcome: import('../../app/command/session-browser-presentation.ts').SessionBrowserDirectorySettlement) => void) => void
   /** The user's own close gesture (Esc at the root list). */
   readonly onClose: () => void
 }
 
-type SessionWorkspaceAction = 'use' | 'new' | 'add' | 'close'
 export interface SessionWorkspacePanelOptions {
   /** `/sessions <query>` and `/search <query>` open the global editor; the
    * bare commands open the browse list. */
@@ -266,7 +271,7 @@ function foldWorkspaceFrame(projection: WorkspaceProjection, frame: WorkspaceFac
 /** One painted mouse target of the LAST frame. `xEnd` is inclusive and every
  *  range is the REAL painted cell range: a truncated/omitted target has none. */
 interface HitRegion {
-  readonly kind: 'row' | 'folder' | 'more' | 'result' | 'search' | 'search-hint' | 'peek-back' | 'directory-confirm' | 'directory-cancel'
+  readonly kind: 'tree-row' | 'folder-toggle' | 'result' | 'search' | 'search-hint' | 'peek-back' | 'directory-confirm' | 'directory-cancel'
   readonly id?: string
   readonly xStart: number
   readonly xEnd: number
@@ -291,7 +296,8 @@ export class SessionWorkspacePanel implements Component {
   private nextCreateWorkspaceId: string | undefined
   private readonly workspaceExpanded = new Map<string, boolean>()
   private readonly workspaceHistoryLimit = new Map<string, number>()
-  private visibleWorkspaceRows: readonly WorkspaceBrowserRow[] = []
+  /** The LAST projected PiTUI tree (renderer-local, rebuilt from official facts). */
+  private treeRowsCache: readonly PiTuiWorkspaceTreeRow[] = []
 
   /** The official Activity sample of ONE accepted roster revision. */
   private activity: readonly SessionActivityFact[] | undefined
@@ -302,23 +308,29 @@ export class SessionWorkspacePanel implements Component {
   private defaultScope: 'current' | 'all'
   private focus: SessionWorkspaceFocus
   private searchMode: boolean
-  private helpVisible = false
-  private selectedSessionId: string | undefined
-  /** The top visible BROWSE row id: the scroll anchor that survives a reorder. */
-  private browseAnchorId: string | undefined
-  private selectedWorkspaceId: string | undefined
-  private selectedMoreId: string | undefined
-  private browseRowOffset = 0
-  /** The top visible Workspace-tree row: rebased each frame onto the selected row. */
+  /** The ONE typed browse selection. Every browse action derives its target by
+   *  finding THIS id in the live projected rows; no second selected-* fact. */
+  private selectedBrowseRowId: PiTuiWorkspaceTreeRow['id'] | undefined
+  /** Whether the cursor was moved by the user. An automatic fallback may be
+   *  replaced by the first official Folder once the baseline arrives; a real
+   *  user selection is never stolen by a late baseline. */
+  private browseSelectionUserOwned = false
+  /** The search-results selection; never the browse selection. */
+  private selectedSearchSessionId: string | undefined
+  /** The browse selection and scroll anchor saved across one global search. */
+  private searchReturn: { readonly rowId: PiTuiWorkspaceTreeRow['id'] | undefined; readonly treeScrollAnchorId: string | undefined } | undefined
+  /** The physical viewport offset and the painted row id it points at. The id
+   *  is the anchor that survives reorders/inserts; the offset falls back only
+   *  when the anchored row is gone. */
   private treeScrollOffset = 0
-  private lastBrowseSelection: string | undefined
-  private lastBrowseAnchorId: string | undefined
+  private treeScrollAnchorId: string | undefined
   private lastPaintedListRows = 1
   /** The row ids actually painted in the LAST frame of each mode. Activation
    *  is admitted against this set, never against the logical roster: a row the
    *  current height/status budget did not paint cannot be opened by a blind
    *  Enter. */
   private lastPaintedBrowseIds: string[] = []
+  private lastPaintedTreeIds: string[] = []
   private lastPaintedResultIds: string[] = []
   /** The ordered groups of the last painted frame (the stable tie-break for
    *  rows whose official `updatedAt` collides). */
@@ -327,9 +339,12 @@ export class SessionWorkspacePanel implements Component {
    *  `applyingSeed`, so only a real text change reaches the read owner. */
   private readonly searchInput = new Input({ prompt: 'Search: ' })
   private readonly directoryInput = new Input({ prompt: 'Host directory: ' })
-  private actionIndex = 0
   private directoryEntryActive = false
   private directorySubmitting = false
+  /** ONE pending Folder-New dispatch. The object identity is the per-operation
+   *  currentness fence: only the settle callback for THIS object may unlock
+   *  New. A notice, timer or roster diff is never a settlement channel. */
+  private newSessionPending: { readonly workspaceId: string } | undefined
   private seedApplied = false
   private userEdited = false
   private applyingSeed = false
@@ -561,16 +576,7 @@ export class SessionWorkspacePanel implements Component {
     this.host.requestRender()
   }
 
-  private scopeLabel(): string {
-    if (!this.workspaces.proven) return this.workspaceError === undefined ? 'Checking current workspace…' : 'Information unavailable'
-    // F5-A froze the Browser as ONE global Host Workspace tree: every entry
-    // (typed `/sessions`, the Welcome chooser and the Editor gesture) shows all
-    // official folders, so the header must not borrow the retired scope-filter
-    // wording. Currentness is painted on the folder row itself.
-    return 'All workspaces'
-  }
-
-  /** Re-derive the ONE Current Workspace annotation after each official frame. */
+  /** Re-derive the ONE Current Workspace notice after each official frame. */
   private recomputeWorkspaceScope(): void {
     if (!this.workspaces.proven) return
     const current = currentWorkspaceOf(this.workspaceFacts(), this.options.currentSessionId)
@@ -586,14 +592,93 @@ export class SessionWorkspacePanel implements Component {
       this.defaultScope = 'all'
     }
   }
-  private selectedSessionOfCurrentRows(view: SessionWorkspaceView): string | undefined {
-    return view.listIds.includes(this.selectedSessionId ?? '') ? this.selectedSessionId : undefined
+  private officialWorkspaceIds(): ReadonlySet<string> {
+    return new Set(this.workspaces.byId.keys())
   }
 
-  /** Keep a surviving selection; only a selection that left the visible set is
-   *  re-anchored (a late projection never resets the cursor). */
+  /** The ONE projected PiTUI tree of this frame: the shared visible official
+   *  rows plus only the action rows this open can really reach. */
+  private treeRows(view: SessionWorkspaceView = this.view()): readonly PiTuiWorkspaceTreeRow[] {
+    const selected = this.treeRowsCache.find(row => row.id === this.selectedBrowseRowId)
+    const selectedSessionId = selected?.kind === 'session' ? selected.sessionId : undefined
+    const base = visibleWorkspaceBrowserRows(view, {
+      expanded: this.workspaceExpanded,
+      historyLimit: this.workspaceHistoryLimit,
+    }, selectedSessionId, this.options.currentSessionId)
+    const rows = projectPiTuiWorkspaceTree(base, this.officialWorkspaceIds(), {
+      mode: this.options.initialDirectoryChooser === true ? 'choose-directory' : 'browse',
+      canAddDirectory: this.host.onAddDirectory !== undefined,
+      canNewSession: this.host.onNewSession !== undefined,
+    })
+    this.treeRowsCache = rows
+    return rows
+  }
+
+  private treeRowById(id: string | undefined): PiTuiWorkspaceTreeRow | undefined {
+    return id === undefined ? undefined : this.treeRowsCache.find(row => row.id === id)
+  }
+
+  private selectedBrowseRow(): PiTuiWorkspaceTreeRow | undefined {
+    return this.treeRowById(this.selectedBrowseRowId)
+  }
+
+  private selectedBrowseSessionId(): string | undefined {
+    const row = this.selectedBrowseRow()
+    return row?.kind === 'session' ? row.sessionId : undefined
+  }
+
+  private folderRowOf(row: PiTuiWorkspaceTreeRow): PiTuiWorkspaceTreeRow | undefined {
+    if (row.kind === 'folder') return row
+    if (row.kind === 'addDirectory') return undefined
+    return this.treeRowsCache.find(candidate => candidate.kind === 'folder' && candidate.workspaceId === row.workspaceId)
+  }
+
+  /** The initial selection from the CURRENT official facts only. */
+  private initialBrowseRowId(
+    rows: readonly PiTuiWorkspaceTreeRow[],
+    view: SessionWorkspaceView,
+  ): PiTuiWorkspaceTreeRow['id'] | undefined {
+    if (this.options.currentSessionId !== undefined) {
+      const current = rows.find(row => row.kind === 'session' && row.sessionId === this.options.currentSessionId)
+      if (current !== undefined) return current.id
+    }
+    const currentFolder = view.currentWorkspaceId === undefined
+      ? undefined
+      : rows.find(row => row.kind === 'folder' && row.workspaceId === view.currentWorkspaceId)
+    if (currentFolder !== undefined) return currentFolder.id
+    const nextFolder = view.nextCreateWorkspaceId === undefined
+      ? undefined
+      : rows.find(row => row.kind === 'folder' && row.workspaceId === view.nextCreateWorkspaceId)
+    if (nextFolder !== undefined) return nextFolder.id
+    const firstFolder = rows.find(row => row.kind === 'folder')
+    if (firstFolder !== undefined) return firstFolder.id
+    const add = rows.find(row => row.kind === 'addDirectory')
+    if (add !== undefined) return add.id
+    return rows[0]?.id
+  }
+
+  /** The nearest surviving Folder to a row that disappeared, preferring the
+   *  row that used to FOLLOW it (the original visual position). */
+  private nearestFolderId(
+    previous: readonly PiTuiWorkspaceTreeRow[],
+    removedIndex: number,
+    rows: readonly PiTuiWorkspaceTreeRow[],
+  ): PiTuiWorkspaceTreeRow['id'] | undefined {
+    const ids = new Set(rows.map(row => row.id))
+    for (let index = removedIndex; index < previous.length; index += 1) {
+      const candidate = previous[index]
+      if (candidate?.kind === 'folder' && ids.has(candidate.id)) return candidate.id
+    }
+    for (let index = Math.min(removedIndex, previous.length - 1); index >= 0; index -= 1) {
+      const candidate = previous[index]
+      if (candidate?.kind === 'folder' && ids.has(candidate.id)) return candidate.id
+    }
+    return undefined
+  }
+
+  /** Keep a surviving typed selection; only a selection that left the visible
+   *  tree is re-anchored (a late projection never resets the cursor). */
   private ensureSelection(): void {
-    this.actionIndex = Math.min(this.actionIndex, this.workspaceActions().length - 1)
     const view = this.view()
     const resultIds = this.snapshot.searchResults.map(result => result.row.id)
     // A Peek pins its OWN Session id. If that Session is no longer listed (a
@@ -607,69 +692,43 @@ export class SessionWorkspacePanel implements Component {
       this.host.requestRender()
     }
     if (this.searchMode) {
-      // The visible rows ARE the Host+metadata results; the browse anchor and
-      // selection stay untouched until the user leaves the search.
-      if (resultIds.length === 0) return
-      if (!resultIds.includes(this.selectedSessionId ?? '')) this.selectedSessionId = resultIds[0]!
+      // The visible rows ARE the Host+metadata results; the browse selection
+      // and anchor stay untouched until the user leaves the search.
+      if (resultIds.length === 0) {
+        this.selectedSearchSessionId = undefined
+        return
+      }
+      if (!resultIds.includes(this.selectedSearchSessionId ?? '')) this.selectedSearchSessionId = resultIds[0]!
       return
     }
-    const ids = view.listIds
-    if (ids.length === 0) {
-      this.selectedSessionId = undefined
-      this.browseAnchorId = undefined
+    const previous = this.treeRowsCache
+    const previousSelection = this.selectedBrowseRowId
+    const rows = this.treeRows(view)
+    if (rows.some(row => row.id === previousSelection)) {
+      // An AUTOMATIC fallback on the root Add (the loading frame had no
+      // Session row yet) yields to the CURRENT Session / first official Folder
+      // once the real roster arrives. A cursor the USER moved is never stolen
+      // by a late projection or baseline.
+      if (!this.browseSelectionUserOwned && previousSelection === ADD_DIRECTORY_ROW_ID) {
+        this.selectedBrowseRowId = this.initialBrowseRowId(rows, view)
+      }
       return
     }
-    if (this.selectedSessionIdOfIds(ids) !== undefined) {
-      this.anchorSelectionOnVisibleRow(view)
-      return
+    let nextId: PiTuiWorkspaceTreeRow['id'] | undefined
+    if (previousSelection !== undefined) {
+      const previousIndex = previous.findIndex(row => row.id === previousSelection)
+      const previousRow = previousIndex < 0 ? undefined : previous[previousIndex]
+      const parent = previousRow === undefined ? undefined : this.folderRowOf(previousRow)
+      if (parent !== undefined && rows.some(row => row.id === parent.id)) nextId = parent.id
+      else if (previousIndex >= 0) nextId = this.nearestFolderId(previous, previousIndex, rows)
     }
-    const anchorIndex = this.browseAnchorId === undefined ? 0 : Math.max(0, ids.indexOf(this.browseAnchorId))
-    this.selectedSessionId = ids[Math.min(anchorIndex, ids.length - 1)]!
-    this.anchorSelectionOnVisibleRow(view)
-  }
-
-  /** A Session inside a manually/default-collapsed Workspace is NOT a visible
-   *  row: leaving the cursor there would both paint no marker and make Enter a
-   *  no-op. Anchor the cursor on that Workspace's Folder row instead, which the
-   *  user can expand; an explicit Folder/Show-more selection is left alone. */
-  private anchorSelectionOnVisibleRow(view: SessionWorkspaceView): void {
-    if (this.selectedSessionId === undefined
-      || this.selectedWorkspaceId !== undefined
-      || this.selectedMoreId !== undefined) return
-    const visible = this.visibleBrowserRows()
-    if (visible.some(row => row.kind === 'session' && row.sessionId === this.selectedSessionId)) return
-    const group = view.groups.find(candidate => candidate.ids.includes(this.selectedSessionId!))
-    if (group !== undefined) this.selectedWorkspaceId = group.workspaceId
-  }
-
-  /** Index of the ONE typed browse selection in the complete tree model. */
-  private treeRowIndex(rows: readonly WorkspaceBrowserRow[]): number {
-    const selectedId = this.selectedWorkspaceId !== undefined
-      ? `workspace:${this.selectedWorkspaceId}`
-      : this.selectedMoreId !== undefined
-        ? `more:${this.selectedMoreId}`
-        : this.selectedSessionId !== undefined
-          ? `session:${this.selectedSessionId}`
-          : undefined
-    return selectedId === undefined ? -1 : rows.findIndex(row => row.id === selectedId)
-  }
-
-  private selectedSessionIdOfIds(ids: readonly string[]): string | undefined {
-    return this.selectedSessionId !== undefined && ids.includes(this.selectedSessionId)
-      ? this.selectedSessionId
-      : undefined
+    this.selectedBrowseRowId = nextId ?? this.initialBrowseRowId(rows, view)
   }
 
   private notifyOnce(key: string, message: string): void {
     if (this.lastNotice === key) return
     this.lastNotice = key
     this.statusMessage = message
-  }
-
-  /** The rows this mode lists: the grouped browse list or the raw Host+
-  *  metadata search results (never regrouped by Activity). */
-  private currentIds(view: SessionWorkspaceView): readonly string[] {
-    return this.searchMode ? this.snapshot.searchResults.map(result => result.row.id) : view.listIds
   }
 
   // ── Input ───────────────────────────────────────────────────────────────
@@ -682,10 +741,6 @@ export class SessionWorkspacePanel implements Component {
     }
     if (matchesKey(data, Key.escape)) {
       this.handleEscape()
-      return
-    }
-    if (this.focus === 'actions') {
-      this.handleActionsInput(data)
       return
     }
     if (this.focus === 'search') {
@@ -721,14 +776,16 @@ export class SessionWorkspacePanel implements Component {
     this.host.onClose()
   }
 
-  /** `Space` opens the read-only Peek of the selected PAINTED row only. */
+  /** `Space` opens the read-only Peek of the selected PAINTED Session row only. */
   private openPeek(): void {
     if (this.focus !== 'list' && this.focus !== 'search-results') return
-    if (this.snapshot.resumePending || this.selectedSessionId === undefined) return
+    if (this.snapshot.resumePending) return
+    const target = this.focus === 'search-results' ? this.selectedSearchSessionId : this.selectedBrowseSessionId()
+    if (target === undefined) return
     const painted = this.focus === 'search-results' ? this.lastPaintedResultIds : this.lastPaintedBrowseIds
-    if (!painted.includes(this.selectedSessionId)) return
+    if (!painted.includes(target)) return
     this.peek = {
-      sessionId: this.selectedSessionId,
+      sessionId: target,
       returnFocus: this.focus === 'search-results' ? 'search-results' : 'list',
       scrollRow: 0,
     }
@@ -771,52 +828,6 @@ export class SessionWorkspacePanel implements Component {
     peek.scrollRow = Math.max(0, peek.scrollRow + delta)
     this.host.requestRender()
   }
-
-  private workspaceActions(): SessionWorkspaceAction[] {
-    // Synthetic projection groups (Unassigned / Membership ambiguous) are
-    // browsable, not official Host Workspaces: they never authorize Use
-    // directory or a Session create.
-    const hasFolder = this.selectedWorkspaceId !== undefined && this.workspaces.byId.has(this.selectedWorkspaceId)
-    if (this.options.currentSessionId === undefined) {
-      return hasFolder ? ['use', 'new', 'add', 'close'] : ['add', 'close']
-    }
-    return hasFolder ? ['new', 'add', 'close'] : ['add', 'close']
-  }
-  private handleActionsInput(data: string): void {
-    if (matchesKey(data, Key.escape)) {
-      this.focus = 'list'
-      this.host.requestRender()
-      return
-    }
-    if (matchesKey(data, Key.left) || matchesKey(data, Key.up)) {
-      this.actionIndex = Math.max(0, this.actionIndex - 1)
-      this.host.requestRender()
-      return
-    }
-    if (matchesKey(data, Key.right) || matchesKey(data, Key.down) || matchesKey(data, Key.tab)) {
-      this.actionIndex = Math.min(this.workspaceActions().length - 1, this.actionIndex + 1)
-      this.host.requestRender()
-      return
-    }
-    if (!matchesKey(data, Key.enter) && !matchesKey(data, Key.return)) return
-    const action = this.workspaceActions()[this.actionIndex]
-    if (action === 'use' && this.selectedWorkspaceId !== undefined) {
-      const workspace = this.workspaces.byId.get(this.selectedWorkspaceId)
-      if (workspace === undefined) return
-      this.host.onUseDirectory?.(workspace.workspaceId, workspace.path)
-      this.host.onClose()
-    } else if (action === 'new' && this.selectedWorkspaceId !== undefined) {
-      this.host.onNewSession?.(this.selectedWorkspaceId)
-    } else if (action === 'add') {
-      this.directoryEntryActive = true
-      this.focus = 'directory'
-      this.directoryInput.focused = true
-      this.host.requestRender()
-    } else if (action === 'close') {
-      this.host.onClose()
-    }
-  }
-
 
   private handleDirectoryInput(data: string): void {
     if (this.directorySubmitting) return
@@ -877,65 +888,38 @@ export class SessionWorkspacePanel implements Component {
     })
   }
 
+  private chooserMode(): boolean {
+    return this.options.initialDirectoryChooser === true
+  }
+
+  /** The ONE Folder-New dispatch: ONE per-operation pending object, settled
+   *  only by that operation's own owner callback. A late callback from an
+   *  earlier operation/open can never unlock a newer one. */
+  private startNewSession(workspaceId: string): void {
+    if (this.newSessionPending !== undefined) return
+    const pending = { workspaceId }
+    this.newSessionPending = pending
+    this.host.onNewSession?.(workspaceId, (_outcome) => {
+      if (this.disposed) return
+      if (this.newSessionPending !== pending) return
+      this.newSessionPending = undefined
+      this.host.requestRender()
+    })
+  }
+
   private handleListInput(data: string): void {
-    if (this.workspaces.proven) {
-      const rows = this.visibleBrowserRows()
-      if (matchesKey(data, Key.up)) return this.moveBrowserSelection(-1)
-      if (matchesKey(data, Key.down)) return this.moveBrowserSelection(1)
-      if (matchesKey(data, Key.pageUp)) return this.moveBrowserSelection(-Math.max(1, this.lastPaintedListRows - 1))
-      if (matchesKey(data, Key.pageDown)) return this.moveBrowserSelection(Math.max(1, this.lastPaintedListRows - 1))
-      if (matchesKey(data, Key.home)) return this.selectBrowserIndex(0)
-      if (matchesKey(data, Key.end)) return this.selectBrowserIndex(rows.length - 1)
-      if (matchesKey(data, Key.enter) || matchesKey(data, Key.return)) {
-        if (this.selectedWorkspaceId !== undefined) return this.toggleWorkspace(this.selectedWorkspaceId)
-        if (this.selectedMoreId !== undefined) return this.revealMore(this.selectedMoreId)
-        if (this.selectedSessionId !== undefined) return this.resumeSelected()
-        return
-      }
-      if ((matchesKey(data, Key.right) || matchesKey(data, Key.left)) && this.selectedWorkspaceId !== undefined) {
-        const folder = rows.find(row => row.kind === 'folder' && row.workspaceId === this.selectedWorkspaceId)
-        if (folder?.kind === 'folder' && folder.expanded === matchesKey(data, Key.left)) this.toggleWorkspace(folder.workspaceId)
-        return
-      }
-      if (matchesKey(data, Key.tab) || matchesKey(data, Key.shift(Key.tab))) {
-        this.focus = 'actions'
-        this.actionIndex = 0
-        this.host.requestRender()
-        return
-      }
-      if (data === ' ' || matchesKey(data, Key.space)) {
-        // Peek belongs to the CURRENTLY selected Session row. A folder or
-        // Show more selection keeps `selectedSessionId` as the last session
-        // cursor anchor, but Space must never reopen that stale row.
-        if (this.selectedWorkspaceId === undefined && this.selectedMoreId === undefined && this.selectedSessionId !== undefined) this.openPeek()
-        return
-      }
-      if (data === '/') {
-        this.enterSearch('search')
-        return
-      }
-      if (data.length > 0 && !/[\x00-\x1f\x7f]/u.test(data) && !data.includes('\x1b')) {
-        this.enterSearch('search')
-        this.searchInput.setValue(data)
-        this.host.onQueryChange(data)
-      }
-      return
-    }
-    const rows = this.currentIds(this.view())
-    if (matchesKey(data, Key.up)) return this.moveSelection(-1)
-    if (matchesKey(data, Key.down)) return this.moveSelection(1)
-    if (matchesKey(data, Key.pageUp)) return this.moveSelection(-Math.max(1, this.lastPaintedListRows - 1))
-    if (matchesKey(data, Key.pageDown)) return this.moveSelection(Math.max(1, this.lastPaintedListRows - 1))
-    if (matchesKey(data, Key.home)) return this.selectIndex(0)
-    if (matchesKey(data, Key.end)) return this.selectIndex(rows.length - 1)
-    if (matchesKey(data, Key.tab) || matchesKey(data, Key.shift(Key.tab))) {
-      this.enterSearch('search')
-      return
-    }
-    if (matchesKey(data, Key.enter) || matchesKey(data, Key.return)) {
-      this.resumeSelected()
-      return
-    }
+    const rows = this.treeRows()
+    if (matchesKey(data, Key.up)) return this.moveBrowseSelection(-1)
+    if (matchesKey(data, Key.down)) return this.moveBrowseSelection(1)
+    if (matchesKey(data, Key.pageUp)) return this.moveBrowseSelection(-Math.max(1, this.lastPaintedListRows - 1))
+    if (matchesKey(data, Key.pageDown)) return this.moveBrowseSelection(Math.max(1, this.lastPaintedListRows - 1))
+    if (matchesKey(data, Key.home)) return this.selectBrowseIndex(0)
+    if (matchesKey(data, Key.end)) return this.selectBrowseIndex(rows.length - 1)
+    if (matchesKey(data, Key.tab)) return this.jumpWorkspace(1)
+    if (matchesKey(data, Key.shift(Key.tab))) return this.jumpWorkspace(-1)
+    if (matchesKey(data, Key.right)) return this.expandSelectedFolder()
+    if (matchesKey(data, Key.left)) return this.collapseOrParent()
+    if (matchesKey(data, Key.enter) || matchesKey(data, Key.return)) return this.activateSelectedBrowseRow()
     if (data === ' ' || matchesKey(data, Key.space)) {
       this.openPeek()
       return
@@ -956,7 +940,7 @@ export class SessionWorkspacePanel implements Component {
       // The safe two-Enter contract: the first Enter only moves focus to the
       // first REAL result; a second Enter from the result list is the resume.
       if (this.snapshot.searchResults.length > 0) {
-        this.selectedSessionId = this.snapshot.searchResults[0]!.row.id
+        this.selectedSearchSessionId = this.snapshot.searchResults[0]!.row.id
         this.focus = 'search-results'
         this.host.requestRender()
       }
@@ -964,7 +948,7 @@ export class SessionWorkspacePanel implements Component {
     }
     if (matchesKey(data, Key.down)) {
       if (this.snapshot.searchResults.length > 0) {
-        this.selectedSessionId = this.snapshot.searchResults[0]!.row.id
+        this.selectedSearchSessionId = this.snapshot.searchResults[0]!.row.id
         this.focus = 'search-results'
         this.host.requestRender()
       }
@@ -975,7 +959,7 @@ export class SessionWorkspacePanel implements Component {
       // a browse tab can never hide the Host's global hits. An empty query is
       // the plain browse focus ring, so Tab returns to the Session List.
       if (this.searchInput.getValue() !== '' && this.snapshot.searchResults.length > 0) {
-        this.selectedSessionId = this.snapshot.searchResults[0]!.row.id
+        this.selectedSearchSessionId = this.snapshot.searchResults[0]!.row.id
         this.focus = 'search-results'
         this.host.requestRender()
       } else if (this.searchInput.getValue() === '') {
@@ -1005,7 +989,7 @@ export class SessionWorkspacePanel implements Component {
     if (matchesKey(data, Key.end)) return this.selectIndex(rows.length - 1)
     if (matchesKey(data, Key.enter) || matchesKey(data, Key.return)) {
       // Search results are flat Session rows: a Folder/Show-more selection
-      // that belongs to the browse tree (kept as the browse anchor while the
+      // that belongs to the browse tree (kept as the browse selection while the
       // user searches) can never absorb the result-list Enter.
       this.resumeSelected()
       return
@@ -1025,45 +1009,117 @@ export class SessionWorkspacePanel implements Component {
     }
   }
 
-  private visibleBrowserRows(): readonly WorkspaceBrowserRow[] {
-    return visibleWorkspaceBrowserRows(this.view(), {
-      expanded: this.workspaceExpanded,
-      historyLimit: this.workspaceHistoryLimit,
-    }, this.selectedSessionId, this.options.currentSessionId)
-  }
-
-  private selectBrowserRow(row: WorkspaceBrowserRow | undefined): void {
-    this.selectedWorkspaceId = undefined
-    this.selectedMoreId = undefined
-    if (row?.kind === 'folder') this.selectedWorkspaceId = row.workspaceId
-    else if (row?.kind === 'showMore') this.selectedMoreId = row.workspaceId
-    else if (row?.kind === 'session') this.selectedSessionId = row.sessionId
-  }
-
-  private moveBrowserSelection(delta: number): void {
-    const rows = this.visibleBrowserRows()
+  private moveBrowseSelection(delta: number): void {
+    const rows = this.treeRows()
     if (rows.length === 0) return
-    const selectedId = this.selectedWorkspaceId === undefined
-      ? this.selectedMoreId === undefined
-        ? this.selectedSessionId === undefined ? undefined : `session:${this.selectedSessionId}`
-        : `more:${this.selectedMoreId}`
-      : `workspace:${this.selectedWorkspaceId}`
-    const current = rows.findIndex(row => row.id === selectedId)
+    this.browseSelectionUserOwned = true
+    const current = rows.findIndex(row => row.id === this.selectedBrowseRowId)
     const next = Math.min(Math.max(0, (current < 0 ? 0 : current) + delta), rows.length - 1)
-    this.selectBrowserRow(rows[next])
-    this.actionIndex = Math.min(this.actionIndex, this.workspaceActions().length - 1)
+    this.selectedBrowseRowId = rows[next]!.id
     this.host.requestRender()
   }
 
-  private selectBrowserIndex(index: number): void {
-    const rows = this.visibleBrowserRows()
+  private selectBrowseIndex(index: number): void {
+    const rows = this.treeRows()
     if (rows.length === 0) return
-    this.selectBrowserRow(rows[Math.min(Math.max(0, index), rows.length - 1)])
+    this.browseSelectionUserOwned = true
+    this.selectedBrowseRowId = rows[Math.min(Math.max(0, index), rows.length - 1)]!.id
     this.host.requestRender()
+  }
+
+  /** Tab/Shift+Tab: ONE step between Folder TITLES, skipping their children. */
+  private jumpWorkspace(direction: 1 | -1): void {
+    const rows = this.treeRows()
+    const folders = rows.filter((row): row is Extract<PiTuiWorkspaceTreeRow, { kind: 'folder' }> => row.kind === 'folder')
+    if (folders.length === 0) return
+    this.browseSelectionUserOwned = true
+    const selected = this.selectedBrowseRow()
+    let index = -1
+    if (selected?.kind === 'folder') {
+      index = folders.findIndex(folder => folder.id === selected.id)
+    } else if (selected !== undefined && selected.kind !== 'addDirectory') {
+      index = folders.findIndex(folder => folder.workspaceId === selected.workspaceId)
+    }
+    if (index < 0) {
+      this.selectedBrowseRowId = (direction > 0 ? folders[0]! : folders[folders.length - 1]!).id
+    } else {
+      this.selectedBrowseRowId = folders[(index + direction + folders.length) % folders.length]!.id
+    }
+    this.host.requestRender()
+  }
+
+  /** Right: expand a collapsed Folder, or enter its first visible child. */
+  private expandSelectedFolder(): void {
+    const row = this.selectedBrowseRow()
+    if (row?.kind !== 'folder') return
+    this.browseSelectionUserOwned = true
+    if (!row.expanded) {
+      this.toggleWorkspace(row.workspaceId)
+      return
+    }
+    const rows = this.treeRows()
+    const index = rows.findIndex(candidate => candidate.id === row.id)
+    const next = index < 0 ? undefined : rows[index + 1]
+    if (next === undefined || next.kind === 'folder') return
+    this.selectedBrowseRowId = next.id
+    this.host.requestRender()
+  }
+
+  /** Left: focus the parent Folder of a child row, or collapse an expanded Folder. */
+  private collapseOrParent(): void {
+    const row = this.selectedBrowseRow()
+    if (row === undefined) return
+    this.browseSelectionUserOwned = true
+    if (row.kind === 'folder') {
+      if (row.expanded) this.toggleWorkspace(row.workspaceId)
+      return
+    }
+    if (row.kind === 'addDirectory') return
+    const parent = this.treeRows().find(candidate => candidate.kind === 'folder' && candidate.workspaceId === row.workspaceId)
+    if (parent === undefined) return
+    this.selectedBrowseRowId = parent.id
+    this.host.requestRender()
+  }
+
+  private activateSelectedBrowseRow(): void {
+    const row = this.selectedBrowseRow()
+    if (row === undefined) return
+    this.browseSelectionUserOwned = true
+    if (!this.lastPaintedTreeIds.includes(row.id)) return
+    switch (row.kind) {
+      case 'folder':
+        if (this.chooserMode() && this.options.currentSessionId === undefined && this.workspaces.byId.has(row.workspaceId)) {
+          const workspace = this.workspaces.byId.get(row.workspaceId)!
+          // Commit the local selection BEFORE the callback: an owner that closes
+          // this panel synchronously must not be overwritten afterwards.
+          this.selectedBrowseRowId = row.id
+          this.host.onUseDirectory?.(workspace.workspaceId, workspace.path)
+          this.host.onClose()
+          return
+        }
+        this.toggleWorkspace(row.workspaceId)
+        return
+      case 'newSession':
+        this.startNewSession(row.workspaceId)
+        return
+      case 'addDirectory':
+        this.directoryEntryActive = true
+        this.focus = 'directory'
+        this.directoryInput.focused = true
+        this.host.requestRender()
+        return
+      case 'showMore':
+        this.revealMore(row.workspaceId)
+        return
+      case 'session':
+        this.resumeSelected()
+        return
+    }
   }
 
   private toggleWorkspace(workspaceId: string): void {
-    const folder = this.visibleBrowserRows().find(row => row.kind === 'folder' && row.workspaceId === workspaceId)
+    this.browseSelectionUserOwned = true
+    const folder = this.treeRows().find(row => row.kind === 'folder' && row.workspaceId === workspaceId)
     if (folder?.kind !== 'folder') return
     const expanded = !folder.expanded
     this.workspaceExpanded.set(workspaceId, expanded)
@@ -1072,13 +1128,13 @@ export class SessionWorkspacePanel implements Component {
       const isPriority = workspaceId === view.currentWorkspaceId || workspaceId === view.nextCreateWorkspaceId
       this.workspaceHistoryLimit.set(workspaceId, isPriority ? 8 : 5)
     }
-    this.selectedWorkspaceId = workspaceId
-    this.selectedMoreId = undefined
+    this.selectedBrowseRowId = folder.id
     this.host.requestRender()
   }
 
   private revealMore(workspaceId: string): void {
-    const folder = this.visibleBrowserRows().find(row => row.kind === 'folder' && row.workspaceId === workspaceId)
+    this.browseSelectionUserOwned = true
+    const folder = this.treeRows().find(row => row.kind === 'folder' && row.workspaceId === workspaceId)
     const wasExpanded = folder?.kind === 'folder' && folder.expanded
     this.workspaceExpanded.set(workspaceId, true)
     if (!wasExpanded) {
@@ -1089,30 +1145,26 @@ export class SessionWorkspacePanel implements Component {
         ?? (workspaceId === view.currentWorkspaceId || workspaceId === view.nextCreateWorkspaceId ? 8 : 0)
       this.workspaceHistoryLimit.set(workspaceId, current + 5)
     }
-    this.selectedWorkspaceId = undefined
-    this.selectedMoreId = undefined
+    // Keep the cursor on the reveal target; only an exhausted watermark that
+    // really disappeared re-anchors on its parent Folder.
+    this.selectedBrowseRowId = `more:${workspaceId}`
+    this.ensureSelection()
     this.host.requestRender()
   }
 
   private moveSelection(delta: number): void {
-    if (!this.searchMode && this.workspaces.proven) {
-      this.moveBrowserSelection(delta)
-      return
-    }
-    const view = this.view()
-    const rows = this.currentIds(view)
+    const rows = this.snapshot.searchResults.map(result => result.row.id)
     if (rows.length === 0) return
-    const current = rows.findIndex(rowId => rowId === this.selectedSessionId)
+    const current = rows.findIndex(rowId => rowId === this.selectedSearchSessionId)
     const next = Math.min(Math.max(0, (current < 0 ? 0 : current) + delta), rows.length - 1)
     this.selectIndex(next)
   }
 
   private selectIndex(index: number): void {
-    const view = this.view()
-    const rows = this.currentIds(view)
+    const rows = this.snapshot.searchResults.map(result => result.row.id)
     if (rows.length === 0) return
     const clamped = Math.min(Math.max(0, index), rows.length - 1)
-    this.selectedSessionId = rows[clamped]!
+    this.selectedSearchSessionId = rows[clamped]!
     this.host.requestRender()
   }
 
@@ -1123,7 +1175,11 @@ export class SessionWorkspacePanel implements Component {
     // change can hide the previously selected row, and a short/status-squeezed
     // frame can paint no rows at all: only the set this frame really painted may
     // be opened.
-    const target = this.focus === 'peek' ? this.peek?.sessionId : this.selectedSessionId
+    const target = this.focus === 'peek'
+      ? this.peek?.sessionId
+      : this.searchMode
+        ? this.selectedSearchSessionId
+        : this.selectedBrowseSessionId()
     if (target === undefined || target === this.options.currentSessionId) return
     const listed = this.searchMode
       ? this.snapshot.searchResults.map(result => result.row.id)
@@ -1140,8 +1196,7 @@ export class SessionWorkspacePanel implements Component {
 
   private enterSearch(focus: 'search' | 'search-results'): void {
     if (!this.searchMode) {
-      this.lastBrowseSelection = this.selectedSessionId
-      this.lastBrowseAnchorId = this.browseAnchorId
+      this.searchReturn = { rowId: this.selectedBrowseRowId, treeScrollAnchorId: this.treeScrollAnchorId }
     }
     this.searchMode = true
     this.focus = focus
@@ -1152,8 +1207,9 @@ export class SessionWorkspacePanel implements Component {
   private leaveSearch(): void {
     this.searchMode = false
     this.focus = 'list'
-    this.selectedSessionId = this.lastBrowseSelection
-    this.browseAnchorId = this.lastBrowseAnchorId
+    this.selectedBrowseRowId = this.searchReturn?.rowId
+    this.treeScrollAnchorId = this.searchReturn?.treeScrollAnchorId
+    this.searchReturn = undefined
     this.ensureSelection()
     this.host.requestRender()
   }
@@ -1208,19 +1264,41 @@ export class SessionWorkspacePanel implements Component {
       case 'directory-cancel':
         this.handleDirectoryCancel()
         return
-      case 'folder':
+      case 'folder-toggle': {
         if (region.id === undefined) return
+        this.browseSelectionUserOwned = true
+        this.selectedBrowseRowId = `workspace:${region.id}`
         this.toggleWorkspace(region.id)
         return
-      case 'more':
+      }
+      case 'tree-row': {
         if (region.id === undefined) return
-        this.revealMore(region.id)
-        return
-      case 'row':
+        this.browseSelectionUserOwned = true
+        this.selectedBrowseRowId = region.id
+        const row = this.selectedBrowseRow()
+        if (row === undefined) return
+        // A Session click only selects; Enter is the guarded Resume verb. An
+        // explicit New / Add / More click IS its named action, executed only
+        // after the selection was committed.
+        if (row.kind === 'newSession') this.startNewSession(row.workspaceId)
+        else if (row.kind === 'addDirectory') {
+          this.directoryEntryActive = true
+          this.focus = 'directory'
+          this.directoryInput.focused = true
+        } else if (row.kind === 'showMore') this.revealMore(row.workspaceId)
+        else if (row.kind === 'folder' && this.chooserMode() && this.options.currentSessionId === undefined) {
+          if (!this.workspaces.byId.has(row.workspaceId)) return
+          const workspace = this.workspaces.byId.get(row.workspaceId)!
+          this.host.onUseDirectory?.(workspace.workspaceId, workspace.path)
+          this.host.onClose()
+          return
+        }
+        break
+      }
       case 'result': {
         if (region.id === undefined) return
-        this.selectedSessionId = region.id
-        this.focus = region.kind === 'result' ? 'search-results' : 'list'
+        this.selectedSearchSessionId = region.id
+        this.focus = 'search-results'
         break
       }
       case 'search': {
@@ -1246,37 +1324,48 @@ export class SessionWorkspacePanel implements Component {
     // they own: a resize, a status row or a result update can remove the
     // selected row entirely.
     this.lastPaintedBrowseIds = []
+    this.lastPaintedTreeIds = []
     this.lastPaintedResultIds = []
     const view = this.view(this.paintedGroups.flatMap(group => group.ids))
     this.paintedGroups = view.groups
     this.paintView = view
     const height = Math.max(0, this.host.rows())
     if (height === 0) return this.publishFrame([], [])
-    const actionBar = this.renderActionBar(width)
+    // Refresh the projected tree BEFORE the header/action bar so both state
+    // the CURRENT selection's real target.
+    this.treeRows(view)
     const header = this.renderHeader(width)
-    const subHeader = this.renderSubHeader(width)
-    if (height <= 3) {
-      const status = this.renderStatus(width)
-      const lines = [header, subHeader.line === '' ? status : subHeader.line, actionBar].slice(0, height)
-      return this.publishFrame(lines, [])
+    if (height === 1) return this.publishFrame([header.line], header.regions)
+    if (height === 2) {
+      // No body row exists: the action bar is built from the EMPTY painted set,
+      // so it can never advertise an unpainted activation.
+      return this.publishFrame([header.line, this.renderActionBar(width)], header.regions)
     }
-    const lines: string[] = [header]
-    // A 4/5-row terminal keeps ONE header line and ONE body row so the Esc row
-    // never disappears; from 6 rows the two-line header and both rules fit.
-    // The in-place Workspace selector always owns the second header row: its
-    // choices must stay reachable even on a short terminal.
-    const showSubHeader = height >= 6
-    if (showSubHeader) lines.push(subHeader.line)
+    if (height === 3) {
+      const body = this.renderBody(width, 1)
+      // The footer is built AFTER the body: it only advertises actions the
+      // frame really painted/admits.
+      const actionBar = this.renderActionBar(width)
+      const bodyLine = body.lines[0] ?? this.renderStatusLines(width)[0] ?? ''
+      const regions = body.regions
+        .filter(region => region.line === 0)
+        .map(region => ({ ...region, line: 1 }))
+      this.paintView = undefined
+      return this.publishFrame([header.line, bodyLine, actionBar], regions)
+    }
+    const lines: string[] = [header.line]
+    const regions: HitRegion[] = [...header.regions]
+    // The global search keeps its context line; a plain Browse frame has ONE
+    // header and never repeats the Current Session or an All-workspaces scope.
+    if (this.searchMode) lines.push(this.renderSearchContext(width))
     lines.push(color.border('─'.repeat(Math.max(1, width))))
-    const bottom = height >= 6
-      ? [color.border('─'.repeat(Math.max(1, width))), actionBar]
-      : [actionBar]
-    const bodyBudget = Math.max(0, height - lines.length - bottom.length)
+    // A 4/5-row terminal keeps ONE header line and ONE body row so the Esc row
+    // never disappears; from 6 rows both rules fit.
+    const bottomLines = height >= 6 ? 2 : 1
+    const bodyBudget = Math.max(0, height - lines.length - bottomLines)
     const bodyTop = lines.length
     const body = this.renderBody(width, bodyBudget)
-    const regions: HitRegion[] = showSubHeader
-      ? subHeader.regions.map(region => ({ ...region, line: region.line + 1 }))
-      : []
+    const actionBar = this.renderActionBar(width)
     for (let index = 0; index < bodyBudget; index += 1) {
       lines.push(fit(body.lines[index] ?? '', width))
     }
@@ -1284,33 +1373,26 @@ export class SessionWorkspacePanel implements Component {
       if (region.line >= bodyBudget) continue
       regions.push({ ...region, line: region.line + bodyTop })
     }
-    lines.push(...bottom)
+    if (height >= 6) lines.push(color.border('─'.repeat(Math.max(1, width))))
+    lines.push(actionBar)
     this.paintView = undefined
     return this.publishFrame(lines.slice(0, height), regions)
   }
 
-  private renderHeader(width: number): string {
-    const left = color.textStrong('Sessions')
-    const trailing = this.options.currentSessionId === undefined
-      ? `${color.textDim('Current: ')}${color.textMuted('none')}`
-      : `${color.textDim('Current: ')}${color.text(sanitizedPhysicalLine(shortSessionId(this.options.currentSessionId)))}`
-    return withTrailing(left, trailing, width)
-  }
-
-  private renderSubHeader(width: number): { readonly line: string; readonly regions: readonly HitRegion[] } {
-    if (this.searchMode) {
-      const left = color.textDim('Search all workspaces')
-      return { line: withTrailing(left, color.textMuted('Esc back'), width), regions: [] }
-    }
-    const left = `${color.textDim('Workspace: ')}${color.text(this.scopeLabel())}`
+  private renderHeader(width: number): { readonly line: string; readonly regions: readonly HitRegion[] } {
+    const title = this.chooserMode() ? 'Choose workspace' : 'Sessions'
+    const left = `${color.textStrong(title)}${color.textMuted(` · ${this.snapshot.rows.length}`)}`
     const trailing = color.textMuted('/ Search')
     const line = withTrailing(left, trailing, width)
     const regions: HitRegion[] = []
     if (width > visibleWidth(trailing)) {
-      const trailingStart = width - visibleWidth(trailing)
-      regions.push({ kind: 'search-hint', xStart: trailingStart, xEnd: width - 1, line: 0 })
+      regions.push({ kind: 'search-hint', xStart: width - visibleWidth(trailing), xEnd: width - 1, line: 0 })
     }
     return { line, regions }
+  }
+
+  private renderSearchContext(width: number): string {
+    return withTrailing(color.textDim('Search all workspaces'), color.textMuted('Esc back'), width)
   }
 
   /** Compose one body frame: single column, or the wide two-column layout. */
@@ -1325,9 +1407,9 @@ export class SessionWorkspacePanel implements Component {
     )
     const rightWidth = width - leftWidth - 2
     if (rightWidth < 20) return this.renderSingleColumn(width, budget)
-    // The wide layout's FRAME-LEVEL facts (the search editor, the status/error
-    // lines and the help line) span the whole frame: a long Host refusal must
-    // never be truncated to the list column and hand the user half an error.
+    // The wide layout's FRAME-LEVEL facts (the search editor and the
+    // status/error lines) span the whole frame: a long Host refusal must never
+    // be truncated to the list column and hand the user half an error.
     const head: string[] = []
     const headRegions: HitRegion[] = []
     if (this.searchMode) {
@@ -1336,7 +1418,6 @@ export class SessionWorkspacePanel implements Component {
       headRegions.push({ kind: 'search', xStart: 0, xEnd: Math.max(0, width - 1), line: 0 })
     }
     head.push(...this.renderStatusLines(width))
-    if (this.helpVisible) head.push(this.renderHelpLine(width))
     const paneBudget = budget - head.length
     if (paneBudget <= 0) return { lines: head.slice(0, budget), regions: headRegions }
     const left = this.searchMode
@@ -1375,164 +1456,133 @@ export class SessionWorkspacePanel implements Component {
 
   private renderListPane(width: number, budget: number, chrome: boolean): PaneRender {
     const view = this.frameView()
+    const rows = this.treeRows(view)
     const lines: string[] = []
     const regions: HitRegion[] = []
-    if (this.directoryEntryActive) {
-      lines.push(color.textStrong('Add Host directory'))
-      this.directoryInput.focused = !this.directorySubmitting
-      lines.push(fit(this.directoryInput.render(width)[0] ?? '', width))
-      if (this.directorySubmitting) {
-        lines.push(color.textMuted(fit('Verifying directory…', width)))
-      } else {
-        const useText = '[Use directory] Enter'
-        const separator = ' · '
-        const actionLine = `${color.primary('[Use directory]')}${color.textMuted(' Enter · ')}${color.text('[Cancel]')}${color.textMuted(' Esc')}`
-        const actionRow = lines.length
-        lines.push(fit(actionLine, width))
-        if (width >= visibleWidth('[Use directory]')) {
-          regions.push({ kind: 'directory-confirm', xStart: 0, xEnd: visibleWidth('[Use directory]') - 1, line: actionRow })
-        }
-        const cancelStart = visibleWidth(useText) + visibleWidth(separator)
-        if (width > cancelStart) {
-          regions.push({ kind: 'directory-cancel', xStart: cancelStart, xEnd: Math.min(width - 1, cancelStart + visibleWidth('[Cancel]') - 1), line: actionRow })
-        }
-      }
-      if (this.statusMessage !== undefined) lines.push(color.textMuted(fit(this.statusMessage, width)))
-      // The app-owned failure notice that led here (a refused first session)
-      // must stay visible INSIDE the path submode; otherwise auto-opening the
-      // chooser would hide the only explanation the user gets.
-      const notice = this.host.notice()
-      if (notice !== undefined && notice.text !== sanitizedPhysicalLine(this.statusMessage ?? '')) {
-        const painted = notice.kind === 'error' ? color.error : color.textMuted
-        lines.push(painted(fit(notice.text, width)))
-      }
-      return { lines: lines.slice(0, budget), regions }
+    // While the inline path editor is open it owns the frame's error/status
+    // facts: the generic list statuses must not squeeze the Add row and the
+    // input off a short frame.
+    if (chrome && !this.directoryEntryActive) lines.push(...this.renderStatusLines(width))
+    if (lines.length >= budget) return { lines: lines.slice(0, budget), regions }
+    const editorActive = this.directoryEntryActive
+    const addIndex = rows.findIndex(row => row.kind === 'addDirectory')
+    let offset: number
+    if (editorActive && addIndex >= 0) {
+      // The inline path editor stays directly under the root Add row.
+      offset = addIndex
+    } else {
+      const capacity = Math.max(1, budget - lines.length)
+      const anchorIndex = this.treeScrollAnchorId === undefined ? -1 : rows.findIndex(row => row.id === this.treeScrollAnchorId)
+      const base = anchorIndex >= 0 ? anchorIndex : this.treeScrollOffset
+      const selectedIndex = rows.findIndex(row => row.id === this.selectedBrowseRowId)
+      offset = rebaseOffset(base, selectedIndex, rows.length, capacity)
     }
-    if (!this.workspaces.proven) {
-      const ids = this.snapshot.rows.map(row => row.id)
-      lines.push(color.textDim(`Sessions · ${ids.length}`))
-      if (chrome) lines.push(...this.renderStatusLines(width))
-      if (chrome && this.helpVisible) lines.push(this.renderHelpLine(width))
-      const capacity = budget - lines.length
-      if (capacity <= 0) return { lines: lines.slice(0, budget), regions }
-      this.browseRowOffset = rebaseOffset(this.browseRowOffset, ids.indexOf(this.selectedSessionId ?? ''), ids.length, capacity)
-      const visibleIds = ids.slice(this.browseRowOffset, this.browseRowOffset + capacity)
-      this.lastPaintedListRows = Math.max(1, visibleIds.length)
-      for (const id of visibleIds) {
-        const row = this.snapshot.rows.find(candidate => candidate.id === id)
-        const fact = view.rowsById.get(id)
-        if (row === undefined || fact === undefined) continue
-        const line = this.browseRowLine(row, fact, id === this.selectedSessionId, width)
-        regions.push({ kind: 'row', id, xStart: 0, xEnd: Math.max(0, width - 1), line: lines.length })
-        this.lastPaintedBrowseIds.push(id)
-        lines.push(line)
-      }
-      return { lines: lines.slice(0, budget), regions }
-    }
-    lines.push(color.textDim(`Sessions · ${this.snapshot.rows.length}`))
-    if (chrome) lines.push(...this.renderStatusLines(width))
-    if (chrome && this.helpVisible) lines.push(this.renderHelpLine(width))
-    const currentWorkspaceId = this.options.currentSessionId === undefined
-      ? this.options.currentWorkspaceId
-      : this.view().currentWorkspaceId
-    const rows = visibleWorkspaceBrowserRows(view, {
-      expanded: this.workspaceExpanded,
-      historyLimit: this.workspaceHistoryLimit,
-    }, this.selectedSessionId, currentWorkspaceId)
-    this.visibleWorkspaceRows = rows
-    const capacity = Math.max(0, budget - lines.length)
-    if (capacity <= 0) return { lines: lines.slice(0, budget), regions }
-    this.treeScrollOffset = rebaseOffset(this.treeScrollOffset, this.treeRowIndex(rows), rows.length, capacity)
-    const visibleRows = rows.slice(this.treeScrollOffset, this.treeScrollOffset + capacity)
-    this.lastPaintedListRows = Math.max(1, visibleRows.length)
+    offset = Math.min(Math.max(0, offset), Math.max(0, rows.length - 1))
+    const visibleRows = rows.slice(offset)
+    let painted = 0
     for (const entry of visibleRows) {
-      if (entry.kind === 'folder') {
-        const marker = entry.expanded ? 'v ' : '> '
-        const suffix = entry.current ? ' · Current' : entry.next ? ' · Next' : ''
-        const active = entry.needs + entry.working > 0
-          ? ` · ${entry.needs} Needs · ${entry.working} Working`
-          : ''
-        const line = sanitizedPhysicalLine(`${marker}${entry.title} · ${entry.total}${suffix}${active}`)
-        regions.push({ kind: 'folder', id: entry.workspaceId, xStart: 0, xEnd: Math.max(0, width - 1), line: lines.length })
-        lines.push(fit(color.textStrong(line), width))
-        continue
+      if (lines.length >= budget) break
+      if (!this.paintTreeRow(entry, width, lines, regions)) continue
+      painted += 1
+      if (entry.kind === 'addDirectory' && editorActive) {
+        this.paintDirectoryEditor(width, budget, lines, regions)
       }
-      if (entry.kind === 'showMore') {
-        regions.push({ kind: 'more', id: entry.workspaceId, xStart: 0, xEnd: Math.max(0, width - 1), line: lines.length })
-        lines.push(fit(color.primary(`  Show more sessions · ${entry.remaining} remaining`), width))
-        continue
-      }
-      const row = this.snapshot.rows.find(candidate => candidate.id === entry.sessionId)
-      const fact = view.rowsById.get(entry.sessionId)
-      if (row === undefined || fact === undefined) continue
-      const line = this.browseRowLine(row, fact, entry.sessionId === this.selectedSessionId, width)
-      regions.push({ kind: 'row', id: entry.sessionId, xStart: 0, xEnd: Math.max(0, width - 1), line: lines.length })
-      this.lastPaintedBrowseIds.push(entry.sessionId)
-      lines.push(line)
     }
+    this.treeScrollOffset = offset
+    this.treeScrollAnchorId = visibleRows[0]?.id ?? this.treeScrollAnchorId
+    this.lastPaintedListRows = Math.max(1, painted)
     return { lines: lines.slice(0, budget), regions }
   }
 
-  /** The browse window: the anchored top row, shifted minimally so the
-   *  SELECTED row is painted whenever it can be. Group headers cost one row. */
-  private browseWindow(
-    ids: readonly string[],
-    groups: readonly SessionWorkspaceGroupView[],
-    capacity: number,
-  ): { readonly entries: readonly ({ kind: 'group'; group: string } | { kind: 'row'; id: string })[]; readonly anchorId: string | undefined } {
-    if (groups.length === 0) {
-      const selectedIndex = ids.indexOf(this.selectedSessionId ?? '')
-      const anchorIndex = this.browseAnchorId === undefined ? 0 : Math.max(0, ids.indexOf(this.browseAnchorId))
-      const from = selectedIndex >= 0
-        ? Math.min(Math.max(0, selectedIndex - Math.max(0, capacity - 1)), Math.max(0, ids.length - capacity))
-        : Math.min(anchorIndex, Math.max(0, ids.length - capacity))
-      const entries = ids.slice(from, from + capacity).map(id => ({ kind: 'row' as const, id }))
-      return { entries, anchorId: entries[0]?.id ?? this.browseAnchorId }
+  /** Paint ONE visible tree row and its REAL cell regions. */
+  private paintTreeRow(
+    entry: PiTuiWorkspaceTreeRow,
+    width: number,
+    lines: string[],
+    regions: HitRegion[],
+  ): boolean {
+    const line = lines.length
+    const selected = this.selectedBrowseRowId === entry.id
+    const marker = selected ? color.primary('> ') : '  '
+    if (entry.kind === 'addDirectory') {
+      lines.push(fit(`${marker}${selected ? color.textStrong('Add directory') : color.text('Add directory')}`, width))
+      regions.push({ kind: 'tree-row', id: entry.id, xStart: 0, xEnd: Math.max(0, width - 1), line })
+      this.lastPaintedTreeIds.push(entry.id)
+      return true
     }
-    const groupOf = new Map<string, string>()
-    for (const group of groups) for (const id of group.ids) groupOf.set(id, group.workspaceId)
-    const build = (from: number): { entries: ({ kind: 'group'; group: string } | { kind: 'row'; id: string })[]; end: number } => {
-      const entries: ({ kind: 'group'; group: string } | { kind: 'row'; id: string })[] = []
-      let cost = 0
-      let group: string | undefined
-      let index = from
-      for (; index < ids.length; index += 1) {
-        const kind = groupOf.get(ids[index]!)
-        if (kind === undefined) continue
-        const headerCost = kind === group ? 0 : 1
-        if (cost + headerCost + 1 > capacity) break
-        if (headerCost === 1) entries.push({ kind: 'group', group: kind })
-        entries.push({ kind: 'row', id: ids[index]! })
-        cost += headerCost + 1
-        group = kind
-      }
-      return { entries, end: index }
+    if (entry.kind === 'folder') {
+      const disclosure = entry.expanded ? color.textDim('▾ ') : color.textDim('▸ ')
+      const suffix = `${entry.current ? ' · Current' : entry.next ? ' · Next' : ''}${entry.needs + entry.working > 0
+        ? ` · ${entry.needs} Needs · ${entry.working} Working`
+        : ''}`
+      const label = sanitizedPhysicalLine(`${entry.title} · ${entry.total}`)
+      lines.push(fit(`${marker}${disclosure}${selected ? color.textStrong(label) : color.text(label)}${color.textMuted(suffix)}`, width))
+      // The disclosure owns its two cells; a click on the label only selects.
+      if (width > 2) regions.push({ kind: 'folder-toggle', id: entry.workspaceId, xStart: 2, xEnd: Math.min(width - 1, 3), line })
+      regions.push({ kind: 'tree-row', id: entry.id, xStart: 0, xEnd: Math.max(0, width - 1), line })
+      this.lastPaintedTreeIds.push(entry.id)
+      return true
     }
-    const anchorIndex = this.browseAnchorId === undefined ? 0 : Math.max(0, ids.indexOf(this.browseAnchorId))
-    const selectedIndex = ids.indexOf(this.selectedSessionId ?? '')
-    let from = Math.min(anchorIndex, Math.max(0, ids.length - 1))
-    // The anchor is the previous top row; when the selection ends up ABOVE it
-    // (an official re-order moved rows up), starting at the anchor would hide
-    // real rows. Recenter on the selection instead.
-    if (selectedIndex >= 0 && selectedIndex < from) {
-      from = Math.max(0, selectedIndex - Math.floor(capacity / 2))
+    if (entry.kind === 'newSession') {
+      lines.push(fit(`${marker}  ${color.textMuted('+ ')}${selected ? color.textStrong('New session') : color.text('New session')}`, width))
+      regions.push({ kind: 'tree-row', id: entry.id, xStart: 0, xEnd: Math.max(0, width - 1), line })
+      this.lastPaintedTreeIds.push(entry.id)
+      return true
     }
-    let window = build(from)
-    if (selectedIndex >= 0 && selectedIndex >= window.end) {
-      from = Math.max(0, selectedIndex - Math.floor(capacity / 2))
-      window = build(from)
-      while (window.end <= selectedIndex && from < selectedIndex) {
-        from += 1
-        window = build(from)
-      }
-      if (window.end <= selectedIndex) {
-        // A frame too short for a header + row still paints the selected row.
-        window = { entries: [{ kind: 'row', id: ids[selectedIndex]! }], end: selectedIndex + 1 }
-        from = selectedIndex
-      }
+    if (entry.kind === 'showMore') {
+      const label = `Show more sessions · ${entry.remaining} remaining`
+      lines.push(fit(`${marker}    ${selected ? color.textStrong(label) : color.textMuted(label)}`, width))
+      regions.push({ kind: 'tree-row', id: entry.id, xStart: 0, xEnd: Math.max(0, width - 1), line })
+      this.lastPaintedTreeIds.push(entry.id)
+      return true
     }
-    const firstRow = window.entries.find(entry => entry.kind === 'row')
-    return { entries: window.entries, anchorId: firstRow?.id ?? this.browseAnchorId }
+    const row = this.snapshot.rows.find(candidate => candidate.id === entry.sessionId)
+    const fact = this.frameView().rowsById.get(entry.sessionId)
+    if (row === undefined || fact === undefined) return false
+    lines.push(this.browseRowLine(row, fact, selected, width))
+    regions.push({ kind: 'tree-row', id: entry.id, xStart: 0, xEnd: Math.max(0, width - 1), line })
+    this.lastPaintedBrowseIds.push(entry.sessionId)
+    this.lastPaintedTreeIds.push(entry.id)
+    return true
+  }
+
+  /** The inline Host path editor, painted directly under the root Add row. */
+  private paintDirectoryEditor(width: number, budget: number, lines: string[], regions: HitRegion[]): void {
+    if (lines.length >= budget) return
+    this.directoryInput.focused = !this.directorySubmitting
+    lines.push(fit(this.directoryInput.render(width)[0] ?? '', width))
+    if (lines.length >= budget) return
+    if (this.directorySubmitting) {
+      lines.push(color.textMuted(fit('Verifying directory…', width)))
+      return
+    }
+    // A verb label never wears brackets (design language §4.5): the key is
+    // the badge, the action stays a plain verb.
+    const confirmText = 'Verify directory'
+    const cancelText = 'Cancel'
+    const actionLine = `${color.primary(confirmText)} ${color.primary('[Enter]')}${color.textMuted(' · ')}${color.text(cancelText)} ${color.primary('[Esc]')}`
+    const actionRow = lines.length
+    lines.push(fit(actionLine, width))
+    if (width >= visibleWidth(confirmText)) {
+      regions.push({ kind: 'directory-confirm', xStart: 0, xEnd: visibleWidth(confirmText) - 1, line: actionRow })
+    }
+    const cancelStart = visibleWidth(`${confirmText} [Enter]`) + visibleWidth(' · ')
+    if (width > cancelStart) {
+      regions.push({ kind: 'directory-cancel', xStart: cancelStart, xEnd: Math.min(width - 1, cancelStart + visibleWidth(cancelText) - 1), line: actionRow })
+    }
+    if (this.statusMessage !== undefined && lines.length < budget) {
+      lines.push(color.textMuted(fit(this.statusMessage, width)))
+    }
+    // The app-owned failure notice that led here (a refused first session)
+    // must stay visible INSIDE the path editor; otherwise auto-opening the
+    // chooser would hide the only explanation the user gets.
+    const notice = this.host.notice()
+    if (notice !== undefined
+      && notice.text !== sanitizedPhysicalLine(this.statusMessage ?? '')
+      && lines.length < budget) {
+      const painted = notice.kind === 'error' ? color.error : color.textMuted
+      lines.push(painted(fit(notice.text, width)))
+    }
   }
 
   private renderSearchPane(width: number, budget: number, chrome: boolean): PaneRender {
@@ -1544,42 +1594,113 @@ export class SessionWorkspacePanel implements Component {
       regions.push({ kind: 'search', xStart: 0, xEnd: Math.max(0, width - 1), line: 0 })
       lines.push(inputLine)
       lines.push(...this.renderStatusLines(width))
-      if (this.helpVisible) lines.push(this.renderHelpLine(width))
     }
     const rowBudget = budget - lines.length
     if (rowBudget <= 0) return { lines: lines.slice(0, budget), regions }
     this.lastPaintedListRows = Math.max(1, rowBudget)
     const rows = this.snapshot.searchResults
     if (rows.length === 0) return { lines: lines.slice(0, budget), regions }
-    const selectedIndex = Math.max(0, rows.findIndex(result => result.row.id === this.selectedSessionId))
+    const selectedIndex = Math.max(0, rows.findIndex(result => result.row.id === this.selectedSearchSessionId))
     this.resultScroll = rebaseOffset(this.resultScroll, selectedIndex, rows.length, rowBudget)
     const visible = rows.slice(this.resultScroll, this.resultScroll + rowBudget)
     for (const result of visible) {
       if (lines.length >= budget) break
       regions.push({ kind: 'result', id: result.row.id, xStart: 0, xEnd: Math.max(0, width - 1), line: lines.length })
       this.lastPaintedResultIds.push(result.row.id)
-      lines.push(this.searchRowLine(result, result.row.id === this.selectedSessionId, width))
+      lines.push(this.searchRowLine(result, result.row.id === this.selectedSearchSessionId, width))
     }
     return { lines: lines.slice(0, budget), regions }
   }
 
-  /** The wide layout's right-hand read-only preview of the selected row. */
+  /** The wide layout's right-hand read-only preview of the TYPED selection. */
   private renderPreviewPane(width: number, budget: number): PaneRender {
-    const row = this.selectedRow()
     const lines: string[] = []
+    if (this.searchMode) {
+      const row = this.selectedSearchSessionId === undefined ? undefined : this.rowById(this.selectedSearchSessionId)
+      if (row === undefined) {
+        lines.push(color.textMuted('No result selected'))
+        return { lines: lines.slice(0, budget), regions: [] }
+      }
+      return { lines: this.sessionPreviewLines(row, this.frameView().rowsById.get(row.id), width).slice(0, budget), regions: [] }
+    }
+    const row = this.selectedBrowseRow()
     if (row === undefined) {
-      lines.push(color.textMuted('No session selected'))
+      lines.push(color.textMuted('No row selected'))
       return { lines: lines.slice(0, budget), regions: [] }
     }
-    const view = this.frameView()
-    const fact = view.rowsById.get(row.id)
-    lines.push(color.textStrong(truncateToWidth(sanitizedPhysicalLine(row.title ?? shortSessionId(row.id)), width, '…', false)))
-    lines.push(color.textDim(truncateToWidth(sanitizedPhysicalLine(shortSessionId(row.id)), width, '…', false)))
-    lines.push(color.textMuted(truncateToWidth(fact === undefined ? 'Activity unknown' : this.statusLabel(fact), width, '…', false)))
-    lines.push(color.textDim(truncateToWidth(`Workspace: ${this.membershipLabel(fact)}`, width, '…', false)))
-    lines.push(color.textDim(truncateToWidth(`Updated: ${formatSessionAge(row.updatedAt)}`, width, '…', false)))
-    lines.push(color.textMuted(truncateToWidth('Space for read-only details', width, '…', false)))
-    return { lines: lines.slice(0, budget), regions: [] }
+    switch (row.kind) {
+      case 'folder': {
+        const official = this.workspaces.byId.has(row.workspaceId)
+        lines.push(color.textStrong(truncateToWidth(sanitizedPhysicalLine(row.title), width, '…', false)))
+        if (row.path !== '' && official) {
+          lines.push(color.textDim(truncateToWidth(`Path: ${sanitizedPhysicalLine(row.path)}`, width, '…', false)))
+        }
+        lines.push(color.textDim(truncateToWidth(`Sessions: ${row.total}`, width, '…', false)))
+        lines.push(color.textDim(truncateToWidth(`Needs attention: ${row.needs}`, width, '…', false)))
+        lines.push(color.textDim(truncateToWidth(`Working: ${row.working}`, width, '…', false)))
+        if (row.current) lines.push(color.textMuted(truncateToWidth('Current Workspace', width, '…', false)))
+        if (row.next) lines.push(color.textMuted(truncateToWidth('Next session destination', width, '…', false)))
+        if (!official) {
+          lines.push(color.textMuted(truncateToWidth('Synthetic group · not an official Workspace', width, '…', false)))
+          lines.push(color.textMuted(truncateToWidth('New session is unavailable here', width, '…', false)))
+        } else if (this.chooserMode() && this.options.currentSessionId === undefined) {
+          lines.push(color.textMuted(truncateToWidth('Enter Choose workspace · Right expands', width, '…', false)))
+        } else {
+          lines.push(color.textMuted(truncateToWidth(`Enter ${row.expanded ? 'Collapse' : 'Expand'} · Right expands`, width, '…', false)))
+        }
+        return { lines: lines.slice(0, budget), regions: [] }
+      }
+      case 'newSession': {
+        const workspace = this.workspaces.byId.get(row.workspaceId)
+        lines.push(color.textStrong(truncateToWidth(sanitizedPhysicalLine(workspace?.title ?? 'Workspace'), width, '…', false)))
+        if (workspace !== undefined) {
+          lines.push(color.textDim(truncateToWidth(`Path: ${sanitizedPhysicalLine(workspace.path)}`, width, '…', false)))
+        }
+        lines.push(color.textMuted(truncateToWidth('Create a fresh session in this Workspace', width, '…', false)))
+        lines.push(color.textMuted(truncateToWidth('Enter New session', width, '…', false)))
+        return { lines: lines.slice(0, budget), regions: [] }
+      }
+      case 'addDirectory': {
+        lines.push(color.textStrong('Add directory'))
+        lines.push(color.textMuted(truncateToWidth('Register an existing directory on the Host', width, '…', false)))
+        lines.push(color.textMuted(truncateToWidth('No directory has been verified yet', width, '…', false)))
+        lines.push(color.textMuted(truncateToWidth('Enter Add directory', width, '…', false)))
+        return { lines: lines.slice(0, budget), regions: [] }
+      }
+      case 'showMore': {
+        lines.push(color.textStrong('Show more sessions'))
+        lines.push(color.textDim(truncateToWidth(`${row.remaining} more history rows`, width, '…', false)))
+        lines.push(color.textMuted(truncateToWidth('Enter reveals the next batch', width, '…', false)))
+        return { lines: lines.slice(0, budget), regions: [] }
+      }
+      case 'session': {
+        const sessionRow = this.rowById(row.sessionId)
+        if (sessionRow === undefined) {
+          lines.push(color.textMuted('Session unavailable'))
+          return { lines: lines.slice(0, budget), regions: [] }
+        }
+        return {
+          lines: this.sessionPreviewLines(sessionRow, this.frameView().rowsById.get(row.sessionId), width).slice(0, budget),
+          regions: [],
+        }
+      }
+    }
+  }
+
+  /** The existing read-only Session preview (one typed Session row). */
+  private sessionPreviewLines(
+    row: SessionBrowserRow,
+    fact: SessionWorkspaceRowFact | undefined,
+    width: number,
+  ): string[] {
+    return [
+      color.textStrong(truncateToWidth(sanitizedPhysicalLine(row.title ?? shortSessionId(row.id)), width, '…', false)),
+      color.textDim(truncateToWidth(sanitizedPhysicalLine(shortSessionId(row.id)), width, '…', false)),
+      color.textMuted(truncateToWidth(fact === undefined ? 'Activity unknown' : this.statusLabel(fact), width, '…', false)),
+      color.textDim(truncateToWidth(`Workspace: ${this.membershipLabel(fact)}`, width, '…', false)),
+      color.textDim(truncateToWidth(`Updated: ${formatSessionAge(row.updatedAt)}`, width, '…', false)),
+      color.textMuted(truncateToWidth('Space for read-only details', width, '…', false)),
+    ]
   }
 
   /** The read-only Peek body: ONE scrollable plain-text column. */
@@ -1598,7 +1719,10 @@ export class SessionWorkspacePanel implements Component {
     const lines = all.slice(peek.scrollRow, peek.scrollRow + Math.max(1, budget - 1))
     const regions: HitRegion[] = []
     // The ONE back affordance is the last physical row of the pane.
-    const back = color.textMuted(fit('Esc back · Space close · Enter open', width))
+    const backText = peek.sessionId === this.options.currentSessionId
+      ? 'Esc back · Space close'
+      : 'Esc back · Space close · Enter open'
+    const back = color.textMuted(fit(backText, width))
     regions.push({ kind: 'peek-back', xStart: 0, xEnd: Math.max(0, width - 1), line: Math.min(lines.length, budget - 1) })
     lines.push(back)
     return { lines: lines.slice(0, budget), regions }
@@ -1617,6 +1741,7 @@ export class SessionWorkspacePanel implements Component {
     const title = row.title === undefined || row.title === '' ? '(untitled)' : sanitizedPhysicalLine(row.title)
     lines.push(color.textStrong(truncateToWidth(`Peek · ${sanitizedPhysicalLine(shortSessionId(row.id))}`, width, '…', false)))
     lines.push(line('Title', title))
+    lines.push(line('Session ID', sanitizedPhysicalLine(row.id), 'dim'))
     lines.push(line('Workspace', this.membershipLabel(fact)))
     lines.push(line('cwd', row.cwd === undefined ? 'Unknown' : sanitizedPhysicalLine(row.cwd), 'dim'))
     lines.push(line('Preset', row.preset === undefined ? 'Unknown' : sanitizedPhysicalLine(row.preset)))
@@ -1628,17 +1753,15 @@ export class SessionWorkspacePanel implements Component {
       ? this.snapshot.searchResults.find(result => result.row.id === row.id)?.snippet
       : undefined
     if (snippet !== undefined) lines.push(line('Content hit', `…${sanitizedPhysicalLine(snippet)}…`, 'dim'))
-    lines.push(color.textMuted(fit('Open: Enter (switch session, re-proved by the read owner)', width)))
+    if (row.id !== this.options.currentSessionId) {
+      lines.push(color.textMuted(fit('Open: Enter (switch session, re-proved by the read owner)', width)))
+    }
     return lines
   }
 
   private rowById(sessionId: string): SessionBrowserRow | undefined {
     return this.snapshot.rows.find(row => row.id === sessionId)
       ?? this.snapshot.searchResults.find(result => result.row.id === sessionId)?.row
-  }
-
-  private selectedRow(): SessionBrowserRow | undefined {
-    return this.selectedSessionId === undefined ? undefined : this.rowById(this.selectedSessionId)
   }
 
   /** The ONE truthful status text of one classified row. */
@@ -1732,6 +1855,7 @@ export class SessionWorkspacePanel implements Component {
         : color.textMuted(truncateToWidth(line, width, '…', false)))
     }
     if (snapshot.resumePending) push('Opening session…')
+    if (this.newSessionPending !== undefined) push('Starting session…')
     if (this.statusMessage !== undefined) push(this.statusMessage)
     if (snapshot.listState === 'error') {
       push(`session listing failed: ${sanitizedPhysicalLine(snapshot.listError ?? 'unknown error')}`, 'error')
@@ -1779,23 +1903,28 @@ export class SessionWorkspacePanel implements Component {
     return lines
   }
 
-  private renderStatus(width: number): string {
-    const lines = this.renderStatusLines(width)
-    if (lines.length > 0) return lines[0]!
-    const view = this.view()
-    return color.textDim(truncateToWidth(`Sessions · ${view.listIds.length}`, width, '…', false))
-  }
-
-  private renderHelpLine(width: number): string {
-    const text = this.searchMode
-      ? 'Type to search · Enter results · Esc back'
-      : 'Up/Down move · Enter folder/session · Space peek · / search · Tab actions · Esc close'
-    return color.textMuted(truncateToWidth(text, width, '…', false))
-  }
-
   private renderActionBar(width: number): string {
     const segments = this.actionBarSegments()
     return color.textMuted(renderActionBarRow(segments, width))
+  }
+
+  /** The ONE current Enter verb of the selected typed row. */
+  private enterAction(row: PiTuiWorkspaceTreeRow): { readonly text: string; readonly short: string } {
+    switch (row.kind) {
+      case 'folder':
+        if (this.chooserMode() && this.options.currentSessionId === undefined && this.workspaces.byId.has(row.workspaceId)) {
+          return { text: 'Enter Choose workspace', short: 'Choose' }
+        }
+        return row.expanded ? { text: 'Enter Collapse', short: 'Collapse' } : { text: 'Enter Expand', short: 'Expand' }
+      case 'newSession':
+        return { text: 'Enter New session', short: 'New' }
+      case 'addDirectory':
+        return { text: 'Enter Add directory', short: 'Add' }
+      case 'showMore':
+        return { text: 'Enter More sessions', short: 'More' }
+      case 'session':
+        return { text: 'Enter Open', short: 'Open' }
+    }
   }
 
   private actionBarSegments(): { text: string; priority: number; short?: string }[] {
@@ -1803,44 +1932,75 @@ export class SessionWorkspacePanel implements Component {
       return this.directorySubmitting
         ? [{ text: 'Verifying directory', priority: 9, short: 'Verifying' }]
         : [
-            { text: 'Enter Use directory', priority: 7, short: 'Use' },
+            { text: 'Enter Verify directory', priority: 7, short: 'Verify' },
             { text: 'Esc Cancel', priority: 9, short: 'Cancel' },
           ]
     }
     if (this.focus === 'peek') {
+      const pinnedCurrent = this.peek?.sessionId === this.options.currentSessionId
       return [
         { text: 'Up/Down scroll', priority: 6, short: 'Scroll' },
-        { text: 'Enter open', priority: 7, short: 'Open' },
+        ...(pinnedCurrent ? [] : [{ text: 'Enter open', priority: 7, short: 'Open' }]),
         { text: 'Space close', priority: 5, short: 'Space' },
         { text: 'Esc back', priority: 9, short: 'Esc' },
       ]
     }
     if (this.focus === 'search-results') {
-      return [
-        { text: 'Up/Down move', priority: 6, short: 'Move' },
-        { text: 'Space peek', priority: 4, short: 'Peek' },
-        { text: 'Enter open', priority: 7, short: 'Open' },
-        { text: 'Esc back', priority: 9, short: 'Esc' },
-      ]
+      const painted = new Set(this.lastPaintedResultIds)
+      const selectedPainted = this.selectedSearchSessionId !== undefined && painted.has(this.selectedSearchSessionId)
+      const segments: { text: string; priority: number; short?: string }[] = []
+      if (painted.size >= 2) segments.push({ text: 'Up/Down move', priority: 6, short: 'Move' })
+      if (selectedPainted) {
+        segments.push({ text: 'Space peek', priority: 4, short: 'Peek' })
+        // The opened Session is a legal search hit, but Enter on it is the
+        // same deliberate no-op as in the browse tree.
+        if (this.selectedSearchSessionId !== this.options.currentSessionId) {
+          segments.push({ text: 'Enter open', priority: 7, short: 'Open' })
+        }
+      }
+      segments.push({ text: 'Esc back', priority: 9, short: 'Esc' })
+      return segments
     }
     if (this.focus === 'search') {
       return [
-        { text: 'Enter results', priority: 5, short: 'Results' },
+        ...(this.snapshot.searchResults.length > 0
+          ? [{ text: 'Enter results', priority: 5, short: 'Results' }]
+          : []),
         { text: 'Esc back', priority: 9, short: 'Esc' },
       ]
     }
-    const labels: Record<SessionWorkspaceAction, { text: string; priority: number; short: string }> = {
-      use: { text: 'Use directory', priority: 7, short: 'Use' },
-      new: { text: 'New session', priority: 7, short: 'New' },
-      add: { text: 'Add directory', priority: 6, short: 'Add' },
-      close: { text: 'Esc close', priority: 9, short: 'Esc' },
+    if (this.newSessionPending !== undefined) {
+      return [
+        { text: 'Starting session…', priority: 9, short: 'Starting' },
+        { text: '/ search', priority: 5, short: '/' },
+        { text: 'Esc close', priority: 9, short: 'Esc' },
+      ]
     }
-    return [
-      { text: 'Up/Down move', priority: 6, short: 'Move' },
-      { text: 'Space peek', priority: 4, short: 'Peek' },
-      { text: '/ search', priority: 5, short: '/' },
-      ...this.workspaceActions().map(action => labels[action]),
-      { text: 'Tab actions', priority: 5, short: 'Actions' },
-    ]
+    // Browse: advertise ONLY what the painted frame can really execute.
+    const painted = new Set(this.lastPaintedTreeIds)
+    const paintedRows = this.treeRowsCache.filter(row => painted.has(row.id))
+    const selected = this.selectedBrowseRow()
+    const selectedPainted = selected !== undefined && painted.has(selected.id)
+    const paintedFolders = paintedRows.filter(row => row.kind === 'folder').length
+    const folderCount = this.treeRowsCache.filter(row => row.kind === 'folder').length
+    const segments: { text: string; priority: number; short?: string }[] = []
+    if (paintedFolders > 0 && folderCount >= 2) {
+      segments.push({ text: `${SESSION_WORKSPACE_CHORDS.folderCycle.label} Workspace`, priority: 3, short: 'Tab' })
+    }
+    if (paintedRows.length >= 2) segments.push({ text: 'Up/Down move', priority: 6, short: 'Move' })
+    if (selected !== undefined && selectedPainted) {
+      if (selected.kind === 'session' && selected.sessionId === this.options.currentSessionId) {
+        // Enter on the opened Session is a deliberate no-op: advertise only
+        // the read-only Peek it really supports.
+        segments.push({ text: 'Space peek', priority: 4, short: 'Peek' })
+      } else {
+        const enter = this.enterAction(selected)
+        segments.push({ text: enter.text, priority: 7, short: enter.short })
+        if (selected.kind === 'session') segments.push({ text: 'Space peek', priority: 4, short: 'Peek' })
+      }
+    }
+    segments.push({ text: '/ search', priority: 5, short: '/' })
+    segments.push({ text: 'Esc close', priority: 9, short: 'Esc' })
+    return segments
   }
 }

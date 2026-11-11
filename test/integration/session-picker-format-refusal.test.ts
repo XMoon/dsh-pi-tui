@@ -103,10 +103,12 @@ for (const [columns, rows] of [[120, 40], [80, 10], [44, 20]] as const) test(`th
   }
 
   // Both stored Sessions are legacy rows without official Workspace
-  // membership, so they live in the explicit Unassigned Folder. The cursor is
-  // anchored on that visible Folder row; Enter expands it, Down selects the
-  // newer (refused) child, and the second Enter is the guarded resume.
+  // membership, so they live in the explicit Unassigned Folder. End reaches
+  // that last Folder, Enter expands it, Down selects the newer (refused)
+  // child, and the second Enter is the guarded resume.
   const resumesBefore = harness.resumeSessionIds.length
+  vt.sendInput('\u001b[F')
+  await vt.waitForRender()
   vt.sendInput('\r')
   await vt.waitForRender()
   vt.sendInput('\u001b[B')

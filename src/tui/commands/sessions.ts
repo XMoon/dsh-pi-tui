@@ -293,11 +293,12 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
                  onUseDirectory: (workspaceId, canonicalPath) => {
             if (!state.disposed) request.onUseDirectory?.(workspaceId, canonicalPath)
           },
-         onNewSession: (workspaceId) => {
+         onNewSession: (workspaceId, settle) => {
            // The shared ReadOwner owns ONE folder-New transaction for both
            // renderers: it invokes the existing /new body and retires this
-           // lease only after the transition commits.
-           if (!state.disposed) request.onNewSession?.(workspaceId)
+           // lease only after the transition commits. The optional ack is the
+           // ONE per-operation settlement (a notice is never a settlement).
+           if (!state.disposed) request.onNewSession?.(workspaceId, settle)
          },
          onAddDirectory: (path, settle) => {
            if (!state.disposed) request.onAddDirectory?.(path, settle)
@@ -388,25 +389,55 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
       sessionWorkspaceFacts: runner.sessionWorkspaceFacts,
        forwardedAnswerEligibility: runner.forwardedAnswerEligibility,
        subscribeForwardedAnswerEligibility: runner.subscribeForwardedAnswerEligibility,
-       onWorkspaceNewSession: (workspaceId, closeAfterCommit) => {
-         runOwned('workspace new session', () => startNewSession({ source: 'folder', workspaceIntent: { kind: 'workspace-id', workspaceId } }), {
+       onWorkspaceNewSession: (workspaceId, closeAfterCommit, settle) => {
+         // ONE operation-local commit marker: a silent superseded success is
+         // NOT a commit, so CommandResult.kind alone cannot classify this.
+         let committed = false
+         let settled = false
+         const finish = (outcome: import('../../app/command/session-browser-presentation.ts').SessionBrowserNewSessionSettlement): void => {
+           if (settled) return
+           settled = true
+           settle?.(outcome)
+         }
+         const notifyFailure = (message: string): void => {
+           const text = sanitizeTerminalText(message)
+           if (nativePresentation !== undefined) nativePresentation.notify(text, 'error')
+           else app.notify(text, 'error')
+         }
+         runOwned('workspace new session', () => startNewSession({
+           source: 'folder',
+           workspaceIntent: { kind: 'workspace-id', workspaceId },
+           onCommitted: () => { committed = true },
+         }), {
            diag: runner.diag,
            sessionId: () => runner.currentSessionId,
            isCancellation: () => runner.signal.aborted,
            onResult: (result) => {
+             if (committed) {
+               // The create really committed; a post-commit cleanup error keeps
+               // its truthful error notice but never fabricates a pre-commit
+               // failure or blocks the committed retirement.
+               if (result.kind === 'error') notifyFailure(result.text ?? 'fresh session cleanup failed')
+               finish({ kind: 'committed' })
+               closeAfterCommit()
+               return
+             }
              if (result.kind === 'error') {
-                const message = sanitizeTerminalText(result.text ?? 'fresh session creation failed')
-                if (nativePresentation !== undefined) nativePresentation.notify(message, 'error')
-                else app.notify(message, 'error')
-                return
-              }
-              closeAfterCommit()
+               const message = sanitizeTerminalText(result.text ?? 'fresh session creation failed')
+               notifyFailure(message)
+               finish({ kind: 'failed', message })
+               return
+             }
+             // A silent superseded/success result created no Session: no close,
+             // no success, and the pending operation is released for a retry.
+             finish({ kind: 'not-committed' })
            },
            onError: (error) => {
-              const message = sanitizeTerminalText(safeErrorMessage(error))
-              if (nativePresentation !== undefined) nativePresentation.notify(message, 'error')
-              else app.notify(message, 'error')
-            },
+             const message = sanitizeTerminalText(safeErrorMessage(error))
+             notifyFailure(message)
+             finish({ kind: 'failed', message })
+           },
+           onCancel: () => finish({ kind: 'cancelled' }),
          })
        },
        onUseDirectory: (workspaceId, canonicalPath) => {
@@ -804,6 +835,9 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
   const startNewSession = async (options: {
     readonly workspaceIntent?: WorkspaceSelectionIntent
     readonly source: 'command' | 'folder'
+    /** Called ONLY after `transitionTo` confirmed a real commit. It observes
+     *  the one genuine commit checkpoint without changing the transaction. */
+    readonly onCommitted?: () => void
   }): Promise<CommandResult> => {
         if (freshSessionInFlight) {
           return { kind: 'error', text: 'a fresh session is already starting' }
@@ -954,6 +988,10 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
               }
               return { kind: 'error', text: `${result.message}${stopNote()}` }
             }
+            // The ONE genuine commit checkpoint: the transition really
+            // published the fresh Session. A later local cleanup failure must
+            // not turn this into a pre-commit failure.
+            options.onCommitted?.()
             if (nextIntentCapture !== undefined) {
               workspaceNextIntent.consumeAfterCommittedCreate(nextIntentCapture)
             }

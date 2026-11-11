@@ -154,7 +154,7 @@ export interface SessionBrowserReadOwnerOptions {
   readonly forwardedAnswerEligibility?: () => readonly SessionBrowserAnswerEligibility[]
   readonly subscribeForwardedAnswerEligibility?: (listener: () => void) => () => void
   readonly onUseDirectory?: (workspaceId: string, canonicalPath: string) => void
-  readonly onWorkspaceNewSession?: (workspaceId: string, closeAfterCommit: () => void) => void
+  readonly onWorkspaceNewSession?: (workspaceId: string, closeAfterCommit: () => void, settle?: (outcome: import('./session-browser-presentation.ts').SessionBrowserNewSessionSettlement) => void) => void
   readonly onAddDirectory?: (path: string, settle: (outcome: import('./session-browser-presentation.ts').SessionBrowserDirectorySettlement) => void) => void
   /** PiTUI only: re-read the ONE roster on a single re-armed timer so the
    *  fullscreen Workspace does not paint a stale Session list. TSP leaves it
@@ -875,7 +875,7 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
           ...(openOptions.initialDirectoryPath === undefined ? {} : { initialDirectoryPath: openOptions.initialDirectoryPath }),
           onQueryChange: (query) => changeQuery(panel, query),
           onUseDirectory: options.onUseDirectory,
-          onNewSession: (workspaceId) => options.onWorkspaceNewSession?.(workspaceId, () => retire(panel, true)),
+          onNewSession: (workspaceId, settle) => options.onWorkspaceNewSession?.(workspaceId, () => retire(panel, true), settle),
           // The capability crosses the seam only when the composing owner really
           // has one: an always-present closure would make an unsupported Add
           // action look enabled.

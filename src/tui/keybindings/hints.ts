@@ -83,6 +83,7 @@ export const DELIVERED_FILES_CHORDS = {
 } as const
 
 /**
+/**
  * The PiTui Queue manager overlay's FIXED local chords (PR-Q).
  *
  * The panel is a per-surface COMPONENT contract, not a Host command: inside it
@@ -101,6 +102,19 @@ export const QUEUE_CHORDS = {
 /** One Queue manager local chord key. */
 export type QueueChordId = keyof typeof QUEUE_CHORDS
 
+/**
+ * The Session Workspace tree's FIXED local chord (PR2).
+ *
+ * The fullscreen PiTUI tree is a per-surface COMPONENT contract, not a Host
+ * command: Tab/Shift+Tab step between Workspace Folder titles and have no
+ * keymap action or remap. Keeping the handler and painted label in this ONE
+ * key-label authority means a footer hint and the admitted keys cannot drift
+ * into two authorities — the same category as the History/Delivered-files
+ * fixed chords.
+ */
+export const SESSION_WORKSPACE_CHORDS = {
+  folderCycle: { keys: ['tab', 'shift+tab'], label: 'Tab/Shift+Tab' },
+} as const
 /** The display name of a bare (unmodified) key id. */
 const BASE_KEY_LABELS: Record<string, string> = {
   enter: 'Enter',

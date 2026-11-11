@@ -210,6 +210,10 @@ export const SCOPED_STRING_ALLOWLIST: ReadonlyArray<{ readonly file: string; rea
   // Ctrl+S/Enter/D/Esc are local to the panel (no keymap action, no remap), so
   // this table is its key authority and both its handler and action bar use it.
   { file: 'src/tui/keybindings/hints.ts', line: "save: { keys: ['ctrl+s'], label: 'Ctrl+S' }," },
+  // (13) The Session Workspace tree's ONE fixed Folder-cycle chord (PR2): the
+  // fullscreen component owns Tab/Shift+Tab with no Host keymap action and no
+  // remap, so this table is its key authority and the panel imports the label.
+  { file: 'src/tui/keybindings/hints.ts', line: "folderCycle: { keys: ['tab', 'shift+tab'], label: 'Tab/Shift+Tab' }," },
 ]
 
 /** One detected violation (a host chord or a hard-coded label). */
