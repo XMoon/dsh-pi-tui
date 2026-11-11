@@ -672,7 +672,8 @@ export class KeybindingEditorPanel implements Component, Focusable {
    *  leader write decide what its Esc really does. The Settings root stores it
    *  at press and re-proves it at the release. */
   gestureIdentity(): string {
-    return `${this.viewKey()}:${this.query === '' ? 'empty' : 'query'}:${this.leaderPending ? 'pending' : 'idle'}`
+    const detail = this.actionEditor === undefined ? '' : this.actionEditor.gestureIdentity()
+    return `${this.viewKey()}:${detail}:${this.query === '' ? 'empty' : 'query'}:${this.leaderPending ? 'pending' : 'idle'}`
   }
 
   dispose(): void {

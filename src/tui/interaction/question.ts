@@ -517,6 +517,14 @@ export class QuestionFlow implements Component, Focusable {
     this.budget = Math.max(MIN_SUPPORTED_BUDGET, Math.min(MAX_BUDGET, Math.floor(rows)))
   }
 
+  /** The read-only interaction identity of the CURRENT tab: which question is
+   *  shown and whether the free-text editor owns the keys. A host that keeps a
+   *  pointer gesture across a keyboard interaction re-proves it before the
+   *  release, so leaving EDIT can never turn the same cell into a flow cancel. */
+  interactionIdentity(): string {
+    return `${this.tab}:${this.editingOther ? 'edit' : 'navigate'}`
+  }
+
   /**
    * Replace the caller-owned status line (claiming / remaining time /
    * continued guidance). `undefined` renders no status row; the flow itself
