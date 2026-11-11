@@ -52,6 +52,9 @@ const HOST_PATH_LABEL = 'Host: '
  * A missing or duplicated `Host:` field fails closed. The 96-column page wraps
  * the path across rows, so a contiguous `painted.includes(path)` can never hold
  * for a long private root — this reassembly proves the EXACT declared path.
+ * The cases below use a declared path that fits inside the 20-row Details
+ * viewport (the field is never scrolled); covering a path taller than that
+ * viewport would need a real scroll proof, never a relaxed equality.
  */
 function paintedHostPath(rows: readonly string[]): string {
   const starts = rows.flatMap((row, index) => row.startsWith(HOST_PATH_LABEL) ? [index] : [])

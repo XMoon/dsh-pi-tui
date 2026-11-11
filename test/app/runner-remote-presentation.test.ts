@@ -2890,11 +2890,15 @@ test('Remote proof: official projections → the About controller view → the e
 /**
  * The painted About `CWD` value, re-assembled from its OWN physical rows: the
  * fact head owns the first row, a wrapped value continues under the SAME value
- * column, and anything else (the next fact) ends the group. The label must be
- * unique and the value non-empty — a missing or duplicated CWD fact is a
- * failure, never an absent assertion. `complete` is false only when the frame
- * ends inside the group (a path taller than the visible body): there the raw
- * facts and the Copy All payload own the untouched value.
+ * column, and anything else ends the group. The label must be unique and the
+ * value non-empty — a missing or duplicated CWD fact is a failure, never an
+ * absent assertion.
+ *
+ * `complete` requires the NEXT semantic fact row to be painted inside the
+ * About content area. The full-screen Settings surface pins its action bar as
+ * the LAST frame row, so a group whose final row is the content bottom is
+ * followed by that bar — a clipped value, never a complete one. In that case
+ * the raw facts and the Copy All payload own the untouched value.
  */
 function aboutCwdPaintedValue(rows: readonly string[]): { readonly value: string; readonly complete: boolean } {
   const head = 'CWD  '
@@ -2902,6 +2906,7 @@ function aboutCwdPaintedValue(rows: readonly string[]): { readonly value: string
   assert.equal(starts.length, 1, `exactly one painted CWD fact row:\n${rows.join('\n')}`)
   const first = starts[0]!
   const valueStart = rows[first]!.indexOf(head) + head.length
+  const contentX = valueStart - 7
   // The frame pads every physical row to the panel width; the declared CWD is
   // a padding-free absolute path, so only that trailing fill is removed.
   const parts = [rows[first]!.slice(valueStart).trimEnd()]
@@ -2909,14 +2914,23 @@ function aboutCwdPaintedValue(rows: readonly string[]): { readonly value: string
   // A wrapped value continues the fact under marker + head (7 columns): the
   // continuation is exactly that indentation, with content after it.
   while (next < rows.length
-    && rows[next]!.startsWith(' '.repeat(7), valueStart - 7)
+    && rows[next]!.startsWith(' '.repeat(7), contentX)
     && rows[next]!.length > valueStart) {
     parts.push(rows[next]!.slice(valueStart).trimEnd())
     next += 1
   }
   const value = parts.join('')
   assert.ok(value !== '', `the painted CWD fact carries a value:\n${rows.join('\n')}`)
-  return { value, complete: next < rows.length }
+  // Everything before the pinned bar is the About content area. Only a
+  // DIFFERENT semantic fact painted after the group proves the value ended: a
+  // clipped group is followed by the bar (or the frame bottom), never by a
+  // fact row.
+  const nextRow = next < rows.length - 1 ? rows[next]! : undefined
+  const marker = nextRow?.slice(contentX, contentX + 2)
+  const complete = nextRow !== undefined
+    && (marker === '  ' || marker === '> ')
+    && /^[A-Za-z]/.test(nextRow.slice(contentX + 2))
+  return { value, complete }
 }
 
 // ── C3 (Phase 3C): the PRODUCTION-RUNNER Remote source→sink proof ─────────
@@ -3059,6 +3073,25 @@ test('Remote production lane: /settings → real About panel → [Copy All] clic
     mountedFixture.vt.sendInput('\r') // Enter: the rail hands the keyboard to the content.
     await waitFor('the content focus took the keyboard', () =>
       mountedFixture.vt.getViewport().join('\n').includes('c copy fact'), 15_000)
+
+    // NEGATIVE CONTROL for the completion rule: a short 100×12 frame makes the
+    // CWD fact's FIRST row the last row of the About content area, so its value
+    // is clipped while the pinned action bar still paints as the last row. A
+    // bar row after the group must never be read as "the value ended".
+    mountedFixture.vt.resize(100, 12)
+    await waitFor('the short About frame paints the clipped CWD fact', () =>
+      mountedFixture.vt.getViewport().join('\n').includes('CWD  '), 15_000)
+    const clippedCwd = mountedFixture.vt.getViewport()
+    const clipped = aboutCwdPaintedValue(clippedCwd)
+    assert.equal(clipped.complete, false,
+      `a CWD group clipped by the content bottom is never complete:\n${clippedCwd.join('\n')}`)
+    assert.ok(clipped.value !== '' && seedHost.anchorDir.startsWith(clipped.value),
+      `the clipped CWD paints a non-empty prefix of the official value: ${JSON.stringify(clipped.value)}`)
+    // Restore the production 100×30 surface the rest of the lane drives.
+    mountedFixture.vt.resize(100, 30)
+    await waitFor('the full-size About frame is restored', () =>
+      /Turns\s+1/.test(mountedFixture.vt.getViewport().join('\n')), 15_000)
+
     mountedFixture.vt.sendInput('\x1b[6~') // PageDown: scroll the painted rows to the bottom.
     await waitFor('the scrolled frame settled', () => {
       const view = mountedFixture.vt.getViewport().join('\n')
