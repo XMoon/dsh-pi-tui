@@ -2947,3 +2947,58 @@ test('an absent Host browse capability keeps manual absolute verification and pa
   await h.paint()
   assert.ok(h.view().includes('Directory added: /srv/work'))
 })
+
+test('Host-controlled path bytes never reach the terminal while the raw value stays exact', async () => {
+  const submitted: string[] = []
+  const outcomes: Array<(outcome: import('../../src/app/command/session-browser-presentation.ts').SessionBrowserDirectorySettlement) => void> = []
+  // A LEGAL POSIX directory name can carry ESC/OSC/LF. Both the displayed name
+  // and the accepted official path must cross the single-row display policy;
+  // the raw value that Enter submits must stay byte-exact.
+  const maliciousName = 'evil\u001b]8;;https://evil.invalid\u0007name'
+  const maliciousPath = '/host/home/evil\u001b]0;pi-tui-pr3-pwned\u0007\nnext'
+  const h = harness({
+    columns: 100,
+    rows: 30,
+    initialDirectoryEntry: true,
+    onAddDirectory: (path, settle) => { submitted.push(path); outcomes.push(settle) },
+    onListDirectory: async (path) => path === undefined
+      ? readyHostLevel({
+        path: '/host/home',
+        home: '/host/home',
+        crumbs: [],
+        entries: [{ name: maliciousName, path: maliciousPath, hidden: false }],
+        truncated: false,
+      })
+      : readyHostLevel(hostListing(path, '/host/home', [])),
+  })
+  await h.paint()
+  await waitUntil(() => h.view().includes('evilname/'), 'the sanitized Host candidate paints')
+  assert.ok(!h.raw().includes('evil.invalid'),
+    'an OSC 8 hyperlink from the Host name reached the terminal output')
+  assert.ok(h.view().includes('evilname/'), 'the visible text of the name survives projection')
+
+  h.vt.sendInput('\t')
+  await h.paint()
+  await waitUntil(() => h.view().includes('No child directories'), 'the accepted path level is read')
+  const lines = panelFrame(h)
+  assert.equal(lines.length, 30, 'a line-breaking Host byte never changes the physical row count')
+  assert.ok(lines.at(-1)!.includes('Enter Verify directory'),
+    `the action bar is still the last physical row:\n${lines.join('\n')}`)
+  assert.ok(!h.raw().includes('pi-tui-pr3-pwned'),
+    'the accepted official path injected its OSC sequence into the terminal output')
+
+  // For a value that needed projection the display caret cannot be mapped
+  // exactly, so the Input click is inert: the click cannot move the raw cursor
+  // and typing appends to the raw value's END.
+  const inputLine = lineIndexOf(panelFrame(h), 'Host directory:')
+  await clickCell(h, 20, inputLine)
+  h.vt.sendInput('Z')
+  await h.paint()
+  h.vt.sendInput('\r')
+  await h.paint()
+  assert.equal(submitted.length, 1)
+  assert.equal(submitted[0], `${maliciousPath}/Z`,
+    'the submitted Host path keeps every raw control byte and the appended tail')
+  assert.ok(!h.raw().includes('pi-tui-pr3-pwned'),
+    'the verified frame still emits no Host-controlled terminal sequence')
+})
