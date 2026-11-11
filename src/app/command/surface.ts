@@ -1230,9 +1230,6 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
         lastAssistantText: (sessionId) => deps.direct.lastAssistantText(sessionId),
         refreshLiveCatalog: async (sessionId, source) => {
           if (!catalogRefreshAvailable()) return { kind: 'failed', error: 'catalog refresh unavailable' }
-          // An explicit owner refresh is the ONLY place a failed private
-          // invalidation stream is re-established (never a hidden retry loop).
-          deps.catalog.skills.rearmSkillsChange?.()
           // PR4 §2.2: the Remote live refresh reads the command source
           // (generation-fenced metadata) with the session id as the target —
           // never a Direct Agent resolution.
@@ -1256,7 +1253,6 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
           if (!catalogRefreshAvailable()) {
             return Promise.resolve({ kind: 'failed', error: 'catalog refresh unavailable' })
           }
-          deps.catalog.skills.rearmSkillsChange?.()
           return requestCatalogRefresh({ source, target: standingTargetOf(presetId) })
         },
         promptAdmission: (sessionId, line, task) =>
@@ -1551,6 +1547,9 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
     if (request.target.kind === 'preset' && deps.ownership.currentSessionId() !== undefined) {
       return Promise.resolve({ kind: 'superseded' })
     }
+    // An explicit owner refresh is the ONLY place a failed private
+    // invalidation stream is re-established (never a hidden retry loop).
+    deps.catalog.skills.rearmSkillsChange?.()
     return catalogRefreshRequest(request)
   }
   const disposeCatalog = (): void => {

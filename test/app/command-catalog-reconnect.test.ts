@@ -520,6 +520,10 @@ test('a live Session refuses a sessionless standing refresh, so Add directory ne
     remoteSource: source,
     currentSessionId: () => sessionId,
   })
+  const rearms = { count: 0 }
+  ;(harness.runner.catalog.skills as unknown as {
+    rearmSkillsChange?: () => void
+  }).rearmSkillsChange = () => { rearms.count += 1 }
   try {
     harness.register()
     assert.ok(harness.builtRunner() !== undefined, 'the runner facade must be built')
@@ -532,6 +536,7 @@ test('a live Session refuses a sessionless standing refresh, so Add directory ne
       'a live Session owns the catalog: the standing (preset/workspace) target is refused')
     assert.equal(source.reads.length, readsBefore,
       'the refusal neither re-dispatches nor replaces the live official read')
+    assert.equal(rearms.count, 0, 'a refused standing request never re-arms the live subscription')
     // The SAME request from a sessionless owner reaches the standing path.
     // There is no confirmed Workspace in this harness, so the coordinator
     // applies the local incomplete projection (never a Host RPC and never a
@@ -542,6 +547,8 @@ test('a live Session refuses a sessionless standing refresh, so Add directory ne
       target: { kind: 'preset', presetId: 'code' },
     })
     assert.equal(sessionless.kind, 'applied')
+    assert.equal(rearms.count, 1,
+      'an explicit owner refresh re-arms a failed invalidation stream exactly once')
     if (sessionless.kind === 'applied') {
       assert.match(String(sessionless.notice), /Select a Host workspace/u,
         'a sessionless Remote owner without a confirmed Workspace gets the explicit selection prompt')

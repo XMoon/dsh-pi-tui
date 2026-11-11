@@ -38,6 +38,7 @@ function assert(condition, message) {
 }
 
 const HOME = '\x1b[H'
+const END = '\x1b[F'
 const TAB = '\t'
 const BODY_MARKER = 'F6-SKILL-BODY-MUST-NEVER-BE-PAINTED'
 
@@ -278,6 +279,30 @@ export async function runSessionlessSkillsHot(context) {
       twoClientsIndependent: true,
     })
 
+    // ── B switches W2 → W1 with the SAME preset: the W2 wrapper must not
+    // survive the target transition and W1's remaining skill must install. ──
+    await submit(clientB, '/sessions', 'F6 B reopen the Session Workspace')
+    await clientB.waitForScreen('Workspace: ', 'F6 B Workspace for the switch back', 60_000)
+    clientB.send(END)
+    await sleep(150)
+    clientB.send('\r')
+    await sleep(150)
+    clientB.send(TAB)
+    await sleep(150)
+    clientB.send('\r')
+    await clientB.waitForScreenGone('Workspace: ', 'F6 B Use directory W1 closed the workspace', 60_000)
+    await waitForSurfaceStatus(clientB, sessionless, 'F6 B still sessionless after the W1 switch', 60_000)
+    await waitForPaintedSkills(clientB, '/f6-', {
+      visible: [addedDescription],
+      absent: [betaDescription, updatedDescription],
+    }, 'F6 B standing on W1 after the W2 switch')
+    trace('f6-workspace-switch-back', {
+      hostPid: hostFacts.hostPid,
+      from: basename(w2),
+      to: basename(w1),
+      oldWrapperGone: true,
+    })
+
     // ── Zero Session/Agent/Turn across the whole journey ───────────────────
     assert(lastSurfaceStatus(clientA)?.sessionOpen === false, 'F6 Client A created a Session')
     assert(lastSurfaceStatus(clientB)?.sessionOpen === false, 'F6 Client B created a Session')
@@ -298,13 +323,14 @@ export async function runSessionlessSkillsHot(context) {
 export async function runLiveSkillsHot(context) {
   const { workDir, trace } = context
   const tools = createDualSurfaceSceneTools(context)
-  // Client A's launch cwd is the smoke work dir, which the Host preflight
-  // confirms as the Session's Workspace: the Live project skill root is
-  // `<workDir>/.agents/skills`.
-  const sessionRoot = workDir
-  const liveDescription = 'F6 LIVE SESSION SKILL'
-  const updatedDescription = 'F6 LIVE SESSION SKILL UPDATED BY THE HOST WATCHER'
-  const keepDescription = 'F6 LIVE SESSION ANCHOR SKILL'
+  // Client A's launch directory is the installed profile (`base.cwd`), which
+  // the Host preflight confirms as the Session's Workspace: the Live project
+  // skill root is `<profileDir>/.agents/skills`.
+  const sessionRoot = context.installation.profileDir
+  const liveDescription = 'F6 LIVE INITIAL MARKER'
+  const updatedDescription = 'F6 LIVE UPDATED MARKER'
+  const keepDescription = 'F6 LIVE ANCHOR MARKER'
+  const addedDescription = 'F6 LIVE ADDED MARKER'
   writeSkill(sessionRoot, 'f6-live', liveDescription)
   writeSkill(sessionRoot, 'f6-live-keep', keepDescription)
   try {
@@ -318,6 +344,33 @@ export async function runLiveSkillsHot(context) {
 
     await waitForPaintedSkills(clientA, '/f6-live', { visible: [liveDescription] }, 'F6 live A initial catalog')
     await waitForPaintedSkills(clientB, '/f6-live', { visible: [liveDescription] }, 'F6 live B initial catalog')
+
+    // ── RFL-001 negative: Add directory from a LIVE Session Workspace must
+    // NOT switch the catalog to a sessionless standing target. ──────────────
+    const addTarget = makeProjectRoot(join(workDir, 'f6-live-add'))
+    await submit(clientA, '/sessions', 'F6 live A open the Session Workspace')
+    await clientA.waitForScreen('Workspace: ', 'F6 live A Workspace', 60_000)
+    clientA.send(TAB)
+    await sleep(150)
+    clientA.send('\r')
+    await clientA.waitForScreen('Add Host directory', 'F6 live A Add directory', 30_000)
+    clientA.send(addTarget)
+    clientA.send('\r')
+    await clientA.waitForScreen('Directory added', 'F6 live A Host directory registered', 60_000)
+    clientA.send('\x1b')
+    await clientA.waitForScreenGone('Workspace: ', 'F6 live A Workspace closed', 60_000)
+    await waitForPaintedSkills(clientA, '/f6-live', {
+      visible: [liveDescription],
+      absent: [BODY_MARKER],
+    }, 'F6 live A catalog after the live Add directory')
+    assert(lastSurfaceStatus(clientA)?.openSessionId === sessionY,
+      'F6 Add directory replaced the live Session owner')
+    trace('f6-live-add-kept-catalog', { session: sessionY, liveCatalogKept: true })
+
+    // A NEW Host skill appears while both Clients stay Live (runtime addition).
+    writeSkill(sessionRoot, 'f6-live-added', addedDescription)
+    await waitForPaintedSkills(clientA, '/f6-live-added', { visible: [addedDescription] }, 'F6 live A runtime addition')
+    await waitForPaintedSkills(clientB, '/f6-live-added', { visible: [addedDescription] }, 'F6 live B runtime addition')
 
     writeSkill(sessionRoot, 'f6-live', updatedDescription)
     await waitForPaintedSkills(clientA, '/f6-live', {
