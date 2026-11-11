@@ -62,6 +62,8 @@ export interface HostEntryStatus {
   readonly profile: string
   readonly services: Record<string, boolean>
   readonly terminalProgressWatches: number
+  /** Live private Skills invalidation subscriptions on THIS Host. */
+  readonly skillInvalidationWatches: number
   readonly ownerEntries: Record<string, readonly string[]>
   /**
    * Per-row Loader facts. `fiberUid` is the CURRENT Loader fiber identity of
@@ -104,6 +106,23 @@ interface TerminalProgressServiceLike {
  * prove the Host watch was cancelled, so the split-process smoke reads this
  * count from the Host status after the probe.
  */
+function skillInvalidationWatchCount(context: Context): number {
+  const service = context.reflect.get('piTuiSkills') as
+    (SkillsServiceLike & { readonly [symbols.original]?: SkillsServiceLike }) | undefined
+  if (service === undefined) {
+    throw new Error('local host entry: the private Skills service is not readable')
+  }
+  const raw = service[symbols.original] ?? service
+  if (typeof raw.activeSubscriptions !== 'number') {
+    throw new Error('local host entry: the private Skills service has no subscription count')
+  }
+  return raw.activeSubscriptions
+}
+
+interface SkillsServiceLike {
+  readonly activeSubscriptions?: number
+}
+
 function terminalProgressWatchCount(context: Context): number {
   const service = context.reflect.get('piTuiTerminalProgress') as
     (TerminalProgressServiceLike & { readonly [symbols.original]?: TerminalProgressServiceLike }) | undefined
@@ -327,6 +346,7 @@ export function collectHostEntryStatus(
     profile: identity.profile,
     services,
     terminalProgressWatches: terminalProgressWatchCount(context),
+    skillInvalidationWatches: skillInvalidationWatchCount(context),
     ownerEntries,
     entries: entries.map(entry => ({
       id: entry.options.id,

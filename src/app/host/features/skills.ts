@@ -48,6 +48,12 @@ export class PiTuiSkillsHostService extends TypertRemoteService {
   private readonly activeWakes = new Set<() => void>()
   private disposed = false
 
+  /** The live Host-side invalidation subscriptions (qualification evidence:
+   *  a Client teardown must return this to its baseline, never accumulate). */
+  get activeSubscriptions(): number {
+    return this.activeWakes.size
+  }
+
   constructor(ctx: Context, deps: PiTuiSkillsHostDeps) {
     super(ctx, PI_TUI_SKILLS_NAMESPACE)
     this.deps = deps
