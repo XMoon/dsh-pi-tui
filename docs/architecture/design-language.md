@@ -711,8 +711,11 @@ anchor, without inventing a fourth meaning for `primary`.
   Leave edit, Stop) paint `textDim`, and pure keyboard hints, `[Key]` caps and
   ` · ` separators paint `textMuted`. The difference is brightness only: no
   bold, no `primary` flood, no background, border, icon or new glyph. Every
-  other affordance in the product keeps Role 14 `primary`; this exception must
-  not be generalized into a second button style.
+  other affordance keeps Role 14 `primary`. This exception applies only to the
+  PiTui Fullscreen Question and Task Center Action Bars in this PR; other
+  panels must not adopt it automatically. Later PR2–PR4 surfaces may extend the
+  treatment after an independent UI/UX evaluation and explicit Owner
+  confirmation.
 
 ### 7.2 Ordering and degradation
 

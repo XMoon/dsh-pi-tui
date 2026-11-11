@@ -1955,7 +1955,8 @@ test('an inert or different Question press cannot transfer onto an action span',
   f.setMaxRows(24)
   f.setMouseActionsEnabled(true)
   let lines = render(f, 100)
-  const bodyRow = lines.findIndex(line => line.includes('?  Q1'))
+  const bodyRow = lines.findIndex(line => line.includes('?  Pick?'))
+  assert.ok(bodyRow >= 0, `the question body row must be visible:\n${lines.join('\n')}`)
   const actionRow = lines.length - 1
   const cancelX = lines[actionRow]!.indexOf('Cancel')
   const bodyGesture = f.beginMousePress(bodyRow, 0)
