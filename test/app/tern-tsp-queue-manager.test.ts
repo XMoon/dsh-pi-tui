@@ -249,6 +249,11 @@ test('native Queue: the Dock queue lane and Manage open the Browse sheet', async
   // The Manage entry is a REAL node click: the SDK dispatches its own onClick.
   clickNodeById(m.pane, 'dock.queue-header.queue-manage')
   await waitUntil('the Browse sheet', () => sheetPicker(m.pane) !== undefined)
+  // The real client paints a `layer` only through its verified region-root
+  // shape: the sheet root MUST be a `ui.col` (a bare picker as the region root
+  // was silently ignored by the real Tern client, found by the real-pane lane).
+  const layerRoot = wireNodes(m.pane).find(node => node.id === 'layer')
+  assert.equal(layerRoot?.k, 'col', `the sheet layer root is a col: ${JSON.stringify(layerRoot)}`)
   assert.equal(sheetProps(m.pane).title, 'Queue')
   assert.equal(sheetProps(m.pane).subtitle, '2 queued')
   assert.deepEqual(itemIds(m.pane), ['occ-1', 'occ-2'], 'the picker rows are the Host occurrences')
@@ -271,6 +276,11 @@ test('native Queue: the raw Alt+I chord opens and closes the sheet', async (t) =
   const m = await mounted(t, [TEXT_ONE, TEXT_TWO])
   m.pane.key('\u001bi')
   await waitUntil('Alt+I opened the sheet', () => sheetPicker(m.pane) !== undefined)
+  // The real client paints a `layer` only through its verified region-root
+  // shape: the sheet root MUST be a `ui.col` (a bare picker as the region root
+  // was silently ignored by the real Tern client, found by the real-pane lane).
+  const layerRoot = wireNodes(m.pane).find(node => node.id === 'layer')
+  assert.equal(layerRoot?.k, 'col', `the sheet layer root is a col: ${JSON.stringify(layerRoot)}`)
   assert.equal(sheetProps(m.pane).title, 'Queue')
   // The SAME injected `app.queue.open` binding is the toggle-close of the one
   // entry: a repeated open on a live panel closes it in every renderer.
