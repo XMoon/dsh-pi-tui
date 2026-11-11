@@ -1776,7 +1776,9 @@ export class SessionWorkspacePanel implements Component {
    * Workspace cannot take the whole spare of its siblings. Nothing here expands
    * a collapsed Folder, lowers a watermark, persists state or issues IO: the
    * grown tree is re-projected against the real budget and only then written
-   * into the ONE `workspaceHistoryLimit` map (monotone, per open).
+   * into the ONE `workspaceHistoryLimit` map (monotone, per open). A cursor the
+   * grown tree no longer paints re-anchors through the existing fallback in the
+   * same frame, so no invisible target ever survives a growth.
    */
   private growWorkspaceHistory(view: SessionWorkspaceView, listCapacity: number): void {
     if (listCapacity < 1) return
@@ -1791,6 +1793,9 @@ export class SessionWorkspacePanel implements Component {
     const recentIds = new Map<string, readonly string[]>()
     for (const group of view.groups) {
       if (!expanded.has(group.workspaceId)) continue
+      // A group already at the automatic cap can never grow again in this open:
+      // skip its roster filter so a saturated tall frame stays a cheap render.
+      if (this.effectiveHistoryLimit(view, group.workspaceId) >= AUTO_HISTORY_CAP) continue
       recentIds.set(group.workspaceId, group.ids.filter(id => view.rowsById.get(id)?.priority === 'recent'))
     }
     // Current then Next (deduped); every other expanded Folder keeps the
@@ -1842,6 +1847,10 @@ export class SessionWorkspacePanel implements Component {
     for (const [workspaceId, limit] of trial) {
       this.workspaceHistoryLimit.set(workspaceId, Math.max(this.workspaceHistoryLimit.get(workspaceId) ?? 0, limit))
     }
+    // A growth can exhaust the very `Show more` row the cursor sits on. Re-anchor
+    // in THIS frame through the existing fallback (its parent Folder, then the
+    // nearest survivor) instead of leaving a selection no painted row can own.
+    if (!finalRows.some(row => row.id === this.selectedBrowseRowId)) this.ensureSelection()
   }
 
   private renderListPane(width: number, budget: number, chrome: boolean): PaneRender {
