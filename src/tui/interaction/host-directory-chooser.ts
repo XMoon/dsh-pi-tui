@@ -133,7 +133,7 @@ export class HostDirectoryChooser {
     this.status = 'loading'
     this.message = undefined
     this.deps.onChange()
-    void list(undefined, controller.signal).then(
+    void list(undefined, controller.signal).then( // allowlist: generation-fenced Host read; its failure paints an explicit editor state
       (outcome) => {
         if (this.disposed || generation !== this.homeGeneration || controller.signal.aborted) return
         if (outcome.kind === 'ready') {
@@ -315,7 +315,7 @@ export class HostDirectoryChooser {
     this.message = undefined
     const fire = (): void => {
       if (this.disposed || generation !== this.queryGeneration) return
-      void list(query.directoryToList, controller.signal).then(
+      void list(query.directoryToList, controller.signal).then( // allowlist: generation-fenced Host read; its failure paints an explicit editor state
         (outcome) => {
           if (this.disposed || generation !== this.queryGeneration || controller.signal.aborted) return
           if (outcome.kind === 'ready') {
