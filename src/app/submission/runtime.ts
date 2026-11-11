@@ -388,7 +388,11 @@ export function submitShell(deps: ShellSubmitDeps): void {
     scope: deps.scope,
     isScopeCurrent: deps.isScopeCurrent,
     notify: (message, kind) => {
-      if (kind === 'error') failureReason = message
+      // The transition fence and the superseded-scope refusal are INFO
+      // notices (`shell-context.ts`), yet they are the real reason the result
+      // was not written. The retained card must keep whichever notice this
+      // submission produced, regardless of its display kind.
+      failureReason = message
       if (deps.isDisposed()) return
       deps.notify(message, kind)
     },
