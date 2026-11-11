@@ -511,6 +511,46 @@ test('the official Workspace facts port crosses the command facade BY IDENTITY (
   }
 })
 
+/* ── explicit owner refresh re-establishes a failed Skills watch ─────────── */
+
+test('a passive invalidation does not re-arm, but a same-generation Live Session refresh does', async () => {
+  const source = controlledRemoteSource({})
+  const harness = fakeRunnerDeps({
+    remoteSource: source,
+    currentSessionId: () => 'session-live',
+  })
+  const rearms = { count: 0 }
+  let passiveListener: (() => void) | undefined
+  const skills = harness.runner.catalog.skills as unknown as {
+    onSkillsChange: (listener: () => void, onError: (error: unknown) => void) => () => void
+    rearmSkillsChange?: () => void
+  }
+  skills.onSkillsChange = (listener) => {
+    passiveListener = listener
+    return () => {}
+  }
+  skills.rearmSkillsChange = () => { rearms.count += 1 }
+  try {
+    harness.register()
+    assert.ok(passiveListener !== undefined, 'registration installed the invalidation subscription')
+    // One passive `skills/change` notification: it MUST refresh the current
+    // owner but MUST NOT re-arm a failed stream (no hidden retry loop).
+    source.script([['passive-host-command']])
+    passiveListener!()
+    for (let index = 0; index < 40; index += 1) await Promise.resolve()
+    assert.equal(source.reads.length, 1, 'the passive invalidation really ran one owner read')
+    assert.equal(rearms.count, 0, 'a passive invalidation never re-arms the failed stream')
+    // The Live Session START/SWITCH/STARTUP entry is an explicit owner refresh:
+    // it re-arms even though the Connection generation is unchanged.
+    source.script([['switched-host-command']])
+    await harness.surface.refreshLiveCatalogById('session-live')
+    assert.equal(rearms.count, 1, 'a Live Session refresh re-arms the failed stream exactly once')
+    assert.equal(source.reads.length, 2, 'the Live Session refresh performed its official read')
+  } finally {
+    harness.dispose()
+  }
+})
+
 /* ── live owner admission for the sessionless standing refresh ───────────── */
 
 test('a live Session refuses a sessionless standing refresh, so Add directory never replaces its catalog', async () => {

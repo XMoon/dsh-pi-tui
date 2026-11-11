@@ -851,6 +851,11 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
   ): Promise<void> => {
     const refresh = catalogRefreshRequest
     if (refresh === undefined) return
+    // The by-id owner refresh is the Live Session START/SWITCH/STARTUP entry;
+    // it is explicitly owner-initiated, so a failed private invalidation stream
+    // is re-established here as well. Passive `skills/change` invalidations go
+    // through the coalescing gate below and never re-arm.
+    deps.catalog.skills.rearmSkillsChange?.()
     await refresh({
       source,
       target: { kind: 'agent', key: deps.ownership.generation() },

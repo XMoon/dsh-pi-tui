@@ -351,6 +351,11 @@ test('an explicit rearm after a stream failure opens ONE replacement stream and 
   streams[1]!.enqueue({ kind: 'invalidated' })
   await drainStreamPump()
   assert.equal(fired, 1, 'the rearmed stream startup frame reaches the listener')
+  // A SUBSEQUENT Host change on the same rearmed stream must also reach the
+  // owner (the recovery is not a one-frame-only subscription).
+  streams[1]!.enqueue({ kind: 'invalidated' })
+  await drainStreamPump()
+  assert.equal(fired, 2, 'subsequent Host changes keep flowing after the re-arm')
   // A second rearm while the replacement is live is a no-op.
   catalog.rearmSkillsChange()
   assert.equal(streams.length, 2)
