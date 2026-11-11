@@ -13186,12 +13186,10 @@ export class TuiApp {
       // body) still has REAL visible words: a POSITION-ONLY body region is the
       // authorized scroll hint, never header or status-count chrome. The
       // not-painted path never borrows a homonym this way.
-      const targetRegions = regions.filter(region => region.sourceKey === targetSourceKey)
-      const scrollCandidates = auxiliaryMatches.length > 0
-        ? auxiliaryMatches
-        : disposition === 'unproven' && targetRegions.length > 0
-          ? matches.filter(match => targetRegions.some(region => searchMatchInsideRegion(match, region)))
-          : []
+      // Never fall back to the whole-card match set: for a message target that
+      // would re-admit a delivered tail / sub-call word the scoped pool above
+      // deliberately excluded. An empty scoped pool means no scroll hint.
+      const scrollCandidates = auxiliaryMatches
       // The base range is the first eligible body candidate; geometry later
       // prefers a candidate already visible and unoccluded. This is a viewport
       // hint only, never source proof.
