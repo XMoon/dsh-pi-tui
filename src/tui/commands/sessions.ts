@@ -895,6 +895,12 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
           try {
             workspace = await runner.agents.resolveWorkspace(intent, signal)
           } catch (error) {
+            // A cancellation-shaped resolution rejection is NOT a user-visible
+            // failure: it propagates to the owned task's cancellation
+            // settlement. The Direct/Remote adapters map an abort of a
+            // pre-commit selection to WorkspaceSelectionError('superseded'),
+            // which stays the documented silent/no-ownership path below.
+            if (isCancellation(error)) throw error
             if (!runner.isSessionScopeCurrent(navigation.scope)
               || (error instanceof WorkspaceSelectionError && error.kind === 'superseded')) {
               // A stale/superseded selection owns nothing: silent, exactly like
@@ -923,12 +929,10 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
               resolved = await runner.catalog.presets.resolve(runner.effectivePresetId, runner.signal)
             } catch (error) {
               // A lifecycle cancellation (exit/HMR) during the read aborts it: no
-              // create is dispatched, and the abort must not surface as an unhandled
-              // rejection. Any OTHER failure keeps its real diagnostic — never
+              // create is dispatched, and the owned task settles it AS a
+              // cancellation. Any OTHER failure keeps its real diagnostic — never
               // mislabeled as a cancellation.
-              if (runner.signal.aborted) {
-                return { kind: 'error', text: `fresh session creation cancelled: ${safeErrorMessage(error)}${stopNote()}` }
-              }
+              if (isCancellation(error) || runner.signal.aborted) throw error
               return { kind: 'error', text: `fresh session creation failed: ${safeErrorMessage(error)}${stopNote()}` }
             }
             // Coordinate with the newest sessionless `/model` global-default write
@@ -940,8 +944,10 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
               await runner.awaitPendingDefaultWrite(signal)
             } catch (error) {
               // The lifetime signal aborted while waiting for the default write:
-              // no create is dispatched (the old session stays current).
-              return { kind: 'error', text: `fresh session creation cancelled: ${safeErrorMessage(error)}${stopNote()}` }
+              // no create is dispatched (the old session stays current) and the
+              // owned task settles the abort as a cancellation.
+              if (isCancellation(error) || runner.signal.aborted) throw error
+              return { kind: 'error', text: `fresh session creation failed: ${safeErrorMessage(error)}${stopNote()}` }
             }
             const result = await runner.transitionTo({
               // The Host-verified canonical Workspace directory is a display
@@ -1013,7 +1019,7 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
             if (error.settlement === 'stale') return { kind: 'success' }
             return { kind: 'error', text: `fresh session creation failed: ${error.message}` }
           }
-          if (isCancellation(error)) throw error
+          if (isCancellation(error) || runner.signal.aborted) throw error
           // The transition can THROW after the quiesce (a synchronous commit
           // seam): keep the phase fact in the user-visible failure instead of
           // letting the generic command path drop it.
