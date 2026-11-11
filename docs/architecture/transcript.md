@@ -89,11 +89,13 @@ projectTranscriptStructure()
   Preparing ownership consumes the SAME predicate, so a settled surfaced
   interaction (question / Plan review) closes the trailing run everywhere.
   A same-turn `form:'snapshot'` Context row, a proven Working `tool-jobs`
-  Notice or a proven same-turn `agent-message` relay may be CARRIED by a Work
+  Notice, a proven same-turn `agent-message` relay or a proven same-turn
+  `subagent-settled` Notice may be CARRIED by a Work
   span, but carriage is the separate display predicate
   `isFoldableWorkContext()` (`isFoldableSnapshotContext()` for Snapshots;
   exact source-form pair + the durable same-turn next-step claim flag for
-  `tool-jobs`/`notice` and `agent-message`/`relay`). It never becomes Process,
+  `tool-jobs`/`notice`, `agent-message`/`relay` and `subagent-settled`/`notice`).
+  It never becomes Process,
   never changes this predicate, and never enters Action/timing aggregates.
 - `clusterAdjacentAmbientContext()` remains the single cluster membership
   authority, computed from raw adjacency before any row is hidden. A
@@ -254,10 +256,12 @@ Compact:  User · Work(A)      · Assistant A · Work(B)      · Notice · Work(
   Attention rows always end the current span and stay visible at their
   chronological position.
 - Every surfaced Context presentation is a Work boundary **except a foldable
-  Snapshot, a proven Working `tool-jobs` Notice or a proven same-turn
-  `agent-message` relay** (Owner decision): a `form:'snapshot'` singleton, a
-  snapshot-only raw-adjacent cluster, or a `tool-jobs`/`notice` /
-  `agent-message`/`relay` row with the durable same-turn `next-step` claim flag
+  Snapshot, a proven Working `tool-jobs` Notice, a proven same-turn
+  `agent-message` relay or a proven same-turn `subagent-settled` Notice**
+  (Owner decision): a `form:'snapshot'` singleton,
+  snapshot-only raw-adjacent cluster, or a `tool-jobs`/`notice`,
+  `agent-message`/`relay` or `subagent-settled`/`notice` row with the durable
+  same-turn `next-step` claim flag
   is carried by the same-turn Work instead of splitting it. A mixed
   `instructions`/`catalog` + `snapshot` cluster, an unqualified/foreign
   `notice`/`relay`, `recall` and every unknown form remain boundaries. The
@@ -295,6 +299,20 @@ Compact:  User · Work(A)      · Assistant A · Work(B)      · Notice · Work(
   it is omitted only when no member carries a `TranscriptTiming` sidecar
   (unknown is omitted, never `0s`) — never faked or stretched from the
   whole-turn Focus duration.
+- **Header action-subtype order.** The shared
+  `compactActionStatParts()` formatter (Compact Activity and Focus header
+  alike) lists a recorded `send_message` subtype FIRST, then every remaining
+  subtype by call count descending and name ascending. This is a header
+  VISUAL priority only: the `N actions` total, each subtype count,
+  `COMPACT_ACTION_SUMMARY_MAX_TYPES` and the `+N` remainder (which counts the
+  other SUBTYPES, not occurrences) are unchanged, and the chronology-based
+  `Action:` preview still shows the latest real tool by event time. With no
+  `send_message` entry the order and output are exactly as before. On narrow
+  widths both headers trim the stats tail from its RIGHT one part at a time
+  (Compact keeps its existing ladder; Focus drops trailing subtypes and `+N`
+  before the `N actions` total, then the token segment, then the bare
+  identity), so a narrow Focus header can still show
+  `N actions · send_message ×1` instead of dropping every subtype at once.
 - Expanding a `Work` span reveals its raw member rows through the existing
   message renderers; Thinking and tool-local detail keep their own orthogonal
   disclosure.
@@ -454,14 +472,17 @@ the same-turn Work?":
 
 ### Working same-turn delivery follows Work
 
-Two non-Snapshot Context rows have the same narrow carriage: a producer-declared
-`kind:'tool-jobs'` / `form:'notice'` completion Notice, or a producer-declared
-`kind:'agent-message'` / `form:'relay'` message, that the agent inbox delivered
+Three non-Snapshot Context rows have the same narrow carriage: a producer-declared
+`kind:'tool-jobs'` / `form:'notice'` completion Notice, a producer-declared
+`kind:'agent-message'` / `form:'relay'` message, or a producer-declared
+`kind:'subagent-settled'` / `form:'notice'` settlement report, that the agent
+inbox delivered
 through **`next-step` during the same still-working turn**. This is a
 deliberately narrow exception, never a generic notice/relay rule:
 
 - Qualification requires ALL of: surfaced Context + the EXACT source/form pair
-  (`tool-jobs`/`notice` or `agent-message`/`relay`) + the fold's
+  (`tool-jobs`/`notice`, `agent-message`/`relay` or `subagent-settled`/`notice`)
+  + the fold's
   presentation-only `contextPresentation.sameTurnNextStep` flag. That flag is
   derived by the `TranscriptFolder` from the durable `agent/inbox/spliced`
   insert/claim identity chain (the same message id inserted into `next-step`,
@@ -470,14 +491,15 @@ deliberately narrow exception, never a generic notice/relay rule:
   adjacency.
 - A `next-turn` idle wakeup, a next-step message claimed in a DIFFERENT turn,
   a foreign/legacy log, a missing claim, a crossed source/form pair, or any
-  other producer (including `subagent-settled` and every recall/unknown/future
-  producer) keeps the existing independent Context behavior: the delivery
+  other producer (recall, unknown and future
+  producers) keeps the existing independent Context behavior: the delivery
   explains why the agent was woken and must stay visible.
 - The qualified row is carried by the same-turn Work exactly like a Snapshot
   singleton (it can appear at the start, middle or end; it never joins
   `ContextCluster`, which still accepts only raw-adjacent ambient rows). A Work
   still requires at least one real Process row; a Process-free segment keeps
-  the original card (Notice or Agent message) and never mints an Activity.
+  the original card (Notice, Agent message or settlement report) and never mints
+  an Activity.
 - It stays Context: no Action, ActionStats or span timing contribution. Its
   own card identity/header/body disclosure and search reachability are
   preserved (the Agent relay keeps the readable identity contract while it is
@@ -488,8 +510,10 @@ deliberately narrow exception, never a generic notice/relay rule:
   real Thought (the opening user guard still applies: a delivery before the
   first non-steer user, and every `next-turn` wakeup, stays foundation), and
   expanded Focus restores it once in raw order. An unqualified Notice or relay
-  keeps the existing pre/post-Thought rule; a `subagent-settled` Notice is
-  never qualified and therefore always stays independently visible.
+  keeps the existing pre/post-Thought rule. A subagent settlement Notice is
+  folded by this same delivery evidence and by nothing else: success, failure,
+  abort, max-tokens and refusal settlements all behave identically, and no
+  wording, `stopReason`-like field or display state is parsed.
 - The durable claim flag is presentation-only (`sameTurnNextStep` on
   `TranscriptContextPresentation`); it is never written back to the Session
   source, message, model input or Host/Remote wire. Search/click/Ctrl+O,
@@ -553,25 +577,29 @@ class:
   surfaced Context rows) stays above the Thought in both Focus states; a
   mid-turn Context row/cluster returns to its chronological position when the
   Thought is expanded. **Exception:** a foldable Context row (Snapshot, a
-  proven Working `tool-jobs` Notice or a proven same-turn `agent-message`
-  relay) after the initial user stops the foundation boundary and follows the
+  proven Working `tool-jobs` Notice, a proven same-turn `agent-message` relay
+  or a proven same-turn `subagent-settled` Notice) after the initial user stops
+  the foundation boundary and follows the
   Thought instead (hidden while
   collapsed, restored once in raw order when expanded); a mixed
   `instructions`/`catalog` + `snapshot` cluster keeps the foundation position as
   one indivisible unit. A Context row that truly precedes the initial user is
   never moved across that user.
 - Collapsed Focus also hides a foldable Snapshot-only turn (and a proven Working
-  `tool-jobs` Notice or same-turn Agent relay with a Thought owner) inside its
-  real Thought; all remain recoverable there. A same-turn Agent relay
-  additionally requires a REAL Work (Process) owner: the row must be a member
+  `tool-jobs` Notice, same-turn Agent relay or same-turn subagent settlement
+  Notice with a Thought owner) inside its
+  real Thought; all remain recoverable there. A same-turn Agent relay and a
+  subagent settlement Notice additionally require a REAL Work (Process) owner:
+  the row must be a member
   of a canonical Work span, so a Process elsewhere in the same turn is not
-  enough when a hard boundary separates the relay from it. Without that owner
-  the relay stays independently visible (fail open) instead of disappearing
+  enough when a hard boundary separates the row from it. Without that owner
+  the row stays independently visible (fail open) instead of disappearing
   into an activity-only Thought.
 - **Userless (next-turn wakeup) turns:** there is no initial user to anchor the
   foundation. The leading run of NON-foldable Context — the wakeup Notice and
   any `instructions`/`catalog` — is the foundation; the first foldable
-  Snapshot, proven Working `tool-jobs` Notice or same-turn Agent relay starts
+  Snapshot, proven Working `tool-jobs` Notice, same-turn Agent relay or
+  same-turn subagent settlement Notice starts
   Thought content. The wakeup cause therefore stays visible while later
   internal Snapshot / next-step deliveries fold, and expanded Focus restores
   them once in raw order.
@@ -584,11 +612,13 @@ class:
   inside the turn's opening foundation (the `thoughtLeadBoundary()` area) stays
   BEFORE the Thought because it explains why the turn started; an UNQUALIFIED
   mid-turn relay stays visible because it is external Agent-authored input.
-  **Working-delivery exception:** a `tool-jobs`/`notice` or
-  `agent-message`/`relay` row with the durable same-turn `next-step` claim flag
+  **Working-delivery exception:** a `tool-jobs`/`notice`,
+  `agent-message`/`relay` or `subagent-settled`/`notice` row with the durable
+  same-turn `next-step` claim flag
   follows the Thought instead (hidden while collapsed, restored once in raw
   order); `next-turn` wakeups and every unqualified/foreign notice or relay
-  keep this existing post-Thought or foundation rule. Expanded Focus restores
+  keep this existing post-Thought or foundation rule. Settlements of every
+  outcome share this rule. Expanded Focus restores
   every notice/relay at its exact raw position. Compact keeps every UNQUALIFIED
   notice/relay standalone (a qualified Working delivery folds into its
   Activity), and Full keeps the full chronology for every notice/relay.
@@ -597,7 +627,8 @@ class:
   the Thought, so ordinary search addresses it like any other surfaced Context
   card. A match inside the folded Notice payload still opens through the row's
   own ordinary message disclosure. A QUALIFIED Working delivery (tool-jobs
-  Notice or same-turn Agent relay) follows the Work/Thought ancestry instead
+  Notice, same-turn Agent relay or same-turn subagent settlement Notice)
+  follows the Work/Thought ancestry instead
   (the Work/Thought reveal opens it, then its own card disclosure shows the
   payload).
 - Full keeps the original transcript chronology, with ambient clusters
@@ -1086,9 +1117,9 @@ These guarantees hold under bad input, long sessions and rapid live updates:
   mutation re-resolves the current container path instead of a stale identity;
   and an UNQUALIFIED mid-turn notice is already visible outside the collapsed
   Thought, so search reaches it through the ordinary row/message disclosure
-  paths. A proven Working same-turn delivery (`tool-jobs` Notice or Agent
-  relay) is hidden with the Work/Thought and resolves through that ancestor
-  path instead.
+  paths. A proven Working same-turn delivery (`tool-jobs` Notice, Agent relay
+  or subagent settlement Notice) is hidden with the Work/Thought and resolves
+  through that ancestor path instead.
 - **Width / grapheme.** Every transcript row family (Work, pending Preparing rows,
   Context cluster, notice, relay, recall) obeys the framebuffer width contract
   at the current width for ASCII, CJK, emoji, combining marks, ZWJ emoji and

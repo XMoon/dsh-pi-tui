@@ -1452,6 +1452,53 @@ test('the header drops the token/action tail progressively on narrow widths (pla
   assert.ok(visibleWidth(minuscule) <= 4, `hard truncate as the last resort:\n${minuscule}`)
 })
 
+test('send_message leads the Focus header subtypes and survives partial degradation', () => {
+  const done = activityOf(0, completedTurn(0, 0, 1000))
+  const stats = actionStatsOf(37, { bash: 30, read: 5, edit: 1, send_message: 1 })
+  assert.deepEqual(compactActionStatParts(stats),
+    ['37 actions', 'send_message ×1', 'bash ×30', 'read ×5', '+1'],
+    'send_message leads; the remaining subtypes keep count-desc/name-asc and +N counts the other kinds')
+  assert.equal(stats.total, 37, 'the visual promotion never changes the counted total')
+  assert.equal(stats.types.get('bash'), 30, 'the subtype counts are unchanged')
+  const rich = { ...done!, usage: { inputTokens: 62_000, outputTokens: 800, cacheReadTokens: 0, cacheWriteTokens: 0 }, totalTokens: 62_800 }
+  const head = '🐋 Turn complete 6s'
+  const token = '63k tok'
+  const wide = formatFocusHeaderLine(rich, false, 'idle', '6s', 200, stats)
+  assert.ok(wide.includes('37 actions · send_message ×1 · bash ×30 · read ×5 · +1'), wide)
+  // The width that fits exactly the label + token + total + send_message: the
+  // trailing high-count subtypes are trimmed from the right, never the low
+  // frequency send_message.
+  const mediumWidth = visibleWidth(`${head} · ${token} · 37 actions · send_message ×1`)
+  const medium = formatFocusHeaderLine(rich, false, 'idle', '6s', mediumWidth, stats)
+  assert.equal(medium, `${head} · ${token} · 37 actions · send_message ×1`,
+    `a medium header keeps the total and send_message before dropping high-count types:
+${medium}`)
+  assert.ok(visibleWidth(medium) <= mediumWidth, 'the medium header never overflows')
+  // Even narrower: the total alone survives before the token is dropped.
+  const totalWidth = visibleWidth(`${head} · ${token} · 37 actions`)
+  assert.equal(formatFocusHeaderLine(rich, false, 'idle', '6s', totalWidth, stats),
+    `${head} · ${token} · 37 actions`)
+  // Extreme narrow: the header never exceeds the width and stays one row.
+  for (const width of [4, 8, 12]) {
+    const line = formatFocusHeaderLine(rich, false, 'idle', '6s', width, stats)
+    assert.ok(visibleWidth(line) <= width, `width ${width}: ${JSON.stringify(line)}`)
+    assert.ok(!line.includes('\n'), 'the header stays one physical row')
+  }
+  // The disclosure identity is still recognizable per icon style.
+  assert.ok(formatFocusHeaderLine(rich, false, 'idle', '6s', 120, stats, 'symbols').startsWith('▸ '))
+  assert.ok(formatFocusHeaderLine(rich, true, 'idle', '6s', 120, stats, 'minimal').startsWith('▾ '))
+})
+
+test('a header without send_message keeps the previous subtype order and degradation', () => {
+  const done = activityOf(0, completedTurn(0, 0, 1000))
+  const stats = actionStatsOf(16, { read: 7, search: 4, bash: 3, z: 2 })
+  assert.deepEqual(compactActionStatParts(stats), ['16 actions', 'read ×7', 'search ×4', 'bash ×3', '+1'],
+    'no send_message entry: the historical count-desc/name-asc order is byte-for-byte unchanged')
+  const rich = { ...done!, usage: { inputTokens: 62_000, outputTokens: 800, cacheReadTokens: 0, cacheWriteTokens: 0 }, totalTokens: 62_800 }
+  const wide = formatFocusHeaderLine(rich, false, 'idle', '6s', 120, stats)
+  assert.ok(wide.includes('🐋 Turn complete 6s · 63k tok · 16 actions · read ×7 · search ×4 · bash ×3 · +1'), wide)
+})
+
 test('the header never wraps: every candidate fits its width', () => {
   const done = activityOf(0, completedTurn(0, 0, 1000))
   const stats = actionStatsOf(6, { read: 3, bash: 2, skill: 1 })
