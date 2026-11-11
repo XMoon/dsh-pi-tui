@@ -202,8 +202,10 @@ export class QueuePanel implements Component, Focusable {
         return
       case 'browse': {
         if (this.chords.matches('edit', data)) {
-          const id = view.selectedId ?? view.rows[0]?.id
-          if (id !== undefined) this.controller.startEdit(id)
+          // The panel forwards the CURRENT selection only. It never substitutes
+          // the first live row: after a lost Dock preselection the manager must
+          // answer `Select a queued message` instead of editing another occurrence.
+          this.controller.startEdit()
           return
         }
         if (this.chords.matches('remove', data)) {

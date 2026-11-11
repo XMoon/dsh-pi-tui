@@ -313,6 +313,22 @@ test('a session-owner change retires the panel and a stale result never notifies
   assert.deepEqual(h.writes, [])
 })
 
+test('a vanished Dock row while Browse is open drops the prior highlight', () => {
+  const h = harness({
+    items: [item('a', [{ type: 'text', text: 'a' }]), item('b', [{ type: 'text', text: 'b' }])],
+  })
+  h.controller.open()
+  assert.equal(h.controller.view().selectedId, 'a')
+  h.controller.open({ initialItemId: 'gone' })
+  assert.equal(h.controller.view().mode, 'browse')
+  assert.equal(h.controller.view().selectedId, undefined, 'the previous highlight is not reused')
+  assert.equal(h.controller.view().notice?.text, 'This message is no longer queued')
+  h.controller.startEdit()
+  assert.equal(h.controller.view().mode, 'browse', 'Enter cannot edit the old selection')
+  assert.equal(h.controller.view().notice?.text, 'Select a queued message')
+  assert.deepEqual(h.writes, [])
+})
+
 test('the Dock preselection uses the exact Host id and a vanished id opens Browse with a notice', () => {
   const h = harness({
     items: [item('a', [{ type: 'text', text: 'a' }]), item('b', [{ type: 'text', text: 'b' }])],

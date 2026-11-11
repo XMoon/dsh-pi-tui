@@ -38,7 +38,7 @@
  * @module @xmoon76/dsh-pi-tui/tui/tsp/session
  */
 
-import { connect as sdkConnect, ui, View } from '@stencil-hq/tern'
+import { connect as sdkConnect, html, ui, View } from '@stencil-hq/tern'
 import type { Key, Node, ScrollTo, Session, SessionInput, Surface, Tree, TspEvent } from '@stencil-hq/tern'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { StatusSnapshot, StatusSnapshotReader } from '../../domain/status/types.ts'
@@ -2876,9 +2876,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       lines.push(ui.row(
         { key: 'queue-header', justify: 'between' },
         ui.text({ key: 'queue-header-title', text: `Queue · ${authoritative}` }),
-        ui.row(
+        html.button(
           { key: 'queue-manage', onClick: () => { queueManagerPresenter?.openManage() } },
-          ui.text({ key: 'queue-manage-label', text: manageLabel }),
+          html.span({ key: 'queue-manage-label' }, manageLabel),
         ),
       ))
     }
@@ -4780,7 +4780,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // The sheet builds a picker, a modal overlay, a controlled editor and
       // native buttons/rows. A pane that did not negotiate every one of those
       // kinds is refused BEFORE `/queue` reaches the handler (fail closed).
-      const kinds = ['picker', 'overlay', 'editor', 'button', 'row', 'col', 'text']
+      const kinds = ['picker', 'overlay', 'editor', 'button', 'row', 'col', 'text', 'el']
       return kinds.every(kind => session.caps.kinds.includes(kind))
         ? queueManagerPresenter?.presentation
         : undefined

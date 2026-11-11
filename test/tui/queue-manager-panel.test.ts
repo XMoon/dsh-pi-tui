@@ -37,7 +37,11 @@ function item(id: string, content: readonly unknown[]): PendingInputItem {
   return { id, placement: 'queued', content }
 }
 
-function harness(items: readonly PendingInputItem[], outcome: WriteOutcome = { kind: 'committed', value: undefined }): Harness {
+function harness(
+  items: readonly PendingInputItem[],
+  outcome: WriteOutcome = { kind: 'committed', value: undefined },
+  openInitial?: string,
+): Harness {
   const writes: Array<{ readonly id: string; readonly kind: 'edit' | 'remove' }> = []
   const tasks: Promise<void>[] = []
   const reader: PendingInputReader = { snapshot: () => ({ running: true, items }) }
@@ -68,7 +72,7 @@ function harness(items: readonly PendingInputItem[], outcome: WriteOutcome = { k
     textOf: content => queueTextOf(content as readonly ContentBlock[]),
   })
   controller.attach({ present: () => {}, retire: () => {} })
-  controller.open()
+  controller.open(openInitial === undefined ? {} : { initialItemId: openInitial })
   const panel = new QueuePanel({
     controller,
     requestRender: () => {},
@@ -219,6 +223,20 @@ test('the painted navigation fact is inert: clicking it never closes the panel',
   h.panel.handleMouse(mouse(barIndex, x, width, 'press'))
   h.panel.handleMouse(mouse(barIndex, x, width, 'click'))
   assert.equal(h.controller.view().mode, 'browse')
+})
+
+test('a real Enter after a lost Dock preselection never edits the first live row', () => {
+  const h = harness([item('occ-live', [{ type: 'text', text: 'still queued' }])], undefined, 'occ-gone')
+  const lines = h.panel.render(84)
+  assert.ok(lines[0]!.includes('Queue'), 'Browse stays visible')
+  assert.equal(h.controller.view().selectedId, undefined)
+  h.panel.handleInput('\r')
+  assert.equal(h.controller.view().mode, 'browse', 'Enter opened no Edit page')
+  assert.equal(h.controller.view().notice?.text, 'Select a queued message')
+  assert.deepEqual(h.writes, [])
+  // The action-bar Edit segment is absent with no selection.
+  const bar = lines[lines.length - 1]!
+  assert.ok(!bar.includes('Edit ['), 'no Edit action is advertised for an unselected list')
 })
 
 test('a stale-width pointer event never acts on the last painted action bar', () => {

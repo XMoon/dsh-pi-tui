@@ -212,7 +212,21 @@ export class QueueManagerController {
         this.close()
         return { opened: true }
       }
-      if (this.mode === 'browse') this.select(options.initialItemId)
+      if (this.mode === 'browse') {
+        const rows = this.readRows()
+        if (rows.some(row => row.id === options.initialItemId)) {
+          this.select(options.initialItemId)
+        } else {
+          // The clicked occurrence vanished while the sheet was open. Keeping
+          // the previous highlight would let the next Enter/D act on an
+          // occurrence the user did not click, so the selection is dropped.
+          this.selectedId = undefined
+          this.lastIndex = 0
+          this.selectionSuppressed = true
+          this.notice = { text: 'This message is no longer queued', kind: 'info' }
+          this.changed()
+        }
+      }
       return { opened: true }
     }
     this.reset()

@@ -171,18 +171,20 @@ function confirmLayer(view: QueueManagerView, deps: QueueLayerDeps): Node {
   )
 }
 
-/** Build the ONE layer node for the controller's current mode. */
+/** Build the ONE layer node for the controller's current mode. The `layer`
+ *  region root is a `ui.col` (the verified shape): the picker/overlay is its
+ *  child, never the region root itself. */
 export function queueManagerLayer(view: QueueManagerView, deps: QueueLayerDeps): Node | undefined {
-  switch (view.mode) {
-    case 'closed':
-      return undefined
-    case 'browse':
-      return browseLayer(view, deps)
-    case 'edit':
-      return editLayer(view, deps)
-    case 'confirm-delete':
-      return confirmLayer(view, deps)
-  }
+  const body = view.mode === 'closed'
+    ? undefined
+    : view.mode === 'browse'
+      ? browseLayer(view, deps)
+      : view.mode === 'edit'
+        ? editLayer(view, deps)
+        : confirmLayer(view, deps)
+  return body === undefined
+    ? undefined
+    : ui.col({ key: `queue-layer-${deps.serial}` }, body)
 }
 
 /** One line's display projection (no control bytes, no line break). */
