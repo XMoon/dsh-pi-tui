@@ -74,7 +74,20 @@ export const color = {
     ? text
     : chalk.bgHex(currentPalette.roleUserBg)(text),
   shellMode: (text: string) => hex('shellMode')(text),
-  /** The current EXACT search occurrence: bold with an explicit themed
+  /** Ordinary visible transcript-search occurrence: explicit themed ink on a
+   * yellow block, separate from the current occurrence. */
+  searchMatch: (text: string) => chalk
+    .hex(currentPalette.searchMatchFg ?? currentPalette.text)
+    .bgHex(currentPalette.searchMatchBg ?? currentPalette.warning)(text),
+  /** The current card's REAL visible title/anchor when the exact source cells
+   * cannot be proven. Same orange role as the current block but deliberately not
+   * bold: the bold current style is reserved for a Full source-proven cell or
+   * View's current mounted rendered occurrence. */
+  searchCardAnchor: (text: string) => chalk
+    .hex(currentPalette.searchCurrentFg ?? currentPalette.textStrong)
+    .bgHex(currentPalette.searchCurrentBg ?? currentPalette.primary)(text),
+  /** The current search occurrence (Full source-proven, or View's current
+   * mounted rendered occurrence): bold with an explicit themed
    * foreground AND background. NEVER the terminal's inverse attribute — a
    * palette that omits the tokens has them filled at apply time
    * ({@link withSearchCurrentTokens}), and this helper's own derivation stays
@@ -82,9 +95,11 @@ export const color = {
   searchCurrent: (text: string) => chalk.bold
     .hex(currentPalette.searchCurrentFg ?? currentPalette.textStrong)
     .bgHex(currentPalette.searchCurrentBg ?? currentPalette.primary)(text),
-  /** The anchor-only current result's ROW background: it marks the owning
-   * source/card row while every query occurrence on it stays weak-underlined.
-   * Never a proven occurrence — provenance is unchanged. */
+  /** The LEGACY anchor-only ROW wash used when no visible card-anchor geometry
+   * (header or first visible non-image text row) is available: it marks only the
+   * owning row, never a proven occurrence, and ordinary query words on that row
+   * keep their yellow block. A card with visible anchor geometry uses
+   * {@link searchCardAnchor} instead. */
   searchAnchorBg: (text: string) => chalk.bgHex(currentPalette.searchAnchorBg ?? currentPalette.border)(text),
   /** Plain italics (kimi thinking parity); an optional tone override
    * colors the italic run. */

@@ -50,11 +50,24 @@ function occurrenceCells(lines: readonly string[]): { row: number; first: number
   return { row, first, second }
 }
 
-/** Whether a rendered cell carries the EXACT-current themed block. This is the
- * real "is this occurrence the proven current one" signal now that the exact
- * style deliberately no longer uses the terminal inverse attribute. */
+function paletteRgb(hex: string | undefined): number | undefined {
+  return hex === undefined ? undefined : Number.parseInt(hex.slice(1), 16)
+}
+
 function isStrongCell(vt: VirtualTerminal, row: number, col: number): boolean {
-  return vt.getCellBgRgb(row, col) === 0xf5c542
+  return vt.getCellBgRgb(row, col) === paletteRgb(currentPalette.searchCurrentBg)
+    && vt.getCellBold(row, col)
+}
+
+/** The current card's REAL visible anchor: the same orange role without the
+ * bold weight that only a source-proven occurrence owns. */
+function isCardAnchorCell(vt: VirtualTerminal, row: number, col: number): boolean {
+  return vt.getCellBgRgb(row, col) === paletteRgb(currentPalette.searchCurrentBg)
+    && !vt.getCellBold(row, col)
+}
+
+function isWeakCell(vt: VirtualTerminal, row: number, col: number): boolean {
+  return vt.getCellBgRgb(row, col) === paletteRgb(currentPalette.searchMatchBg)
 }
 
 /** Press+release a left click at one viewport cell. */
@@ -117,7 +130,9 @@ interface MountedSearchSelectionForTest {
   readonly selectedIndex: number
   readonly selectedRow?: number
   readonly exact: boolean
+  readonly matches?: readonly unknown[]
   readonly exactPaintedSegments?: ReadonlyArray<{ readonly row: number; readonly startCol: number; readonly endCol: number }>
+  readonly cardAnchor?: { readonly row: number; readonly startCol: number; readonly endCol: number }
   readonly sourceDisposition?: 'not-painted' | 'unproven'
 }
 
@@ -141,8 +156,9 @@ function columnOf(line: string, needle: string, occurrence = 0): number {
   return visibleWidth(line.slice(0, index))
 }
 
-const STRONG_BG = 0xf5c542
-const ANCHOR_BG = 0x3a3220
+const weakBg = (): number => paletteRgb(currentPalette.searchMatchBg)!
+const anchorBg = (): number => paletteRgb(currentPalette.searchAnchorBg)!
+
 
 test('navigation: direct Workflow provenance remains visible across the frozen size, theme and icon matrix', async () => {
   const previousPalette = currentPalette
@@ -178,7 +194,7 @@ test('navigation: direct Workflow provenance remains visible across the frozen s
         assert.ok(row >= 0, `Workflow field is visible at ${width}x${height}, ${theme}, ${iconStyle}:\n${lines.join('\n')}`)
         const column = visibleWidth(lines[row]!.slice(0, lines[row]!.indexOf('needle')))
         const beforeBg = vt.getCellBgRgb(row, column)
-        assert.notEqual(beforeBg, 0xf5c542, 'the pre-search field cell is not painted as current')
+        assert.notEqual(beforeBg, strongBg(), 'the pre-search field cell is not painted as current')
 
         app.setTranscriptSearchTarget({
           query: 'needle',
@@ -237,7 +253,7 @@ test('navigation: a search reveal proves the hidden User body and scrolls to it'
   const row = lines.findIndex(line => line.includes('needle in the compacted middle'))
   assert.ok(row >= 0, `the revealed target body is visible:\n${revealed}`)
   assert.ok((app.fullscreenScrollForTest()?.scrollTop ?? 0) > 0, 'the proven painted row is below the card top')
-  assert.equal(vt.getCellBgRgb(row, columnOf(lines[row]!, 'needle')), STRONG_BG, 'the revealed source cell is current')
+  assert.equal(vt.getCellBgRgb(row, columnOf(lines[row]!, 'needle')), strongBg(), 'the revealed source cell is current')
   const selection = mountedSelectionFor(app, message)
   assert.equal(selection?.exact, true, 'the revealed body is proven, not guessed')
   assert.equal(selection?.selectedIndex, -1, 'the plain-text channel never needs a rendered ordinal')
@@ -311,7 +327,7 @@ test('navigation: two distant User hits scroll to their own painted cells', asyn
   let lines = await viewport(vt)
   let row = lines.findIndex(line => line.includes('needle first hit'))
   assert.ok(row >= 0, `the first target is visible:\n${lines.join('\n')}`)
-  assert.equal(vt.getCellBgRgb(row, columnOf(lines[row]!, 'needle')), STRONG_BG, 'the first occurrence is current')
+  assert.equal(vt.getCellBgRgb(row, columnOf(lines[row]!, 'needle')), strongBg(), 'the first occurrence is current')
   let selection = mountedSelectionFor(app, message)
   assert.equal(selection?.exact, true)
   assert.equal(selection?.selectedIndex, -1)
@@ -319,8 +335,8 @@ test('navigation: two distant User hits scroll to their own painted cells', asyn
   const firstScrollTop = app.fullscreenScrollForTest()!.scrollTop
   const otherRow = lines.findIndex(line => line.includes('another needle card'))
   if (otherRow >= 0) {
-    assert.ok(vt.getCellUnderline(otherRow, columnOf(lines[otherRow]!, 'needle')), 'the other matching card is weak')
-    assert.notEqual(vt.getCellBgRgb(otherRow, columnOf(lines[otherRow]!, 'needle')), STRONG_BG,
+    assert.ok(isWeakCell(vt, otherRow, columnOf(lines[otherRow]!, 'needle')), 'the other matching card is yellow')
+    assert.notEqual(vt.getCellBgRgb(otherRow, columnOf(lines[otherRow]!, 'needle')), strongBg(),
       'a different card never borrows the current strong block')
   }
 
@@ -330,7 +346,7 @@ test('navigation: two distant User hits scroll to their own painted cells', asyn
   assert.ok(row >= 0, `the second target is visible:\n${lines.join('\n')}`)
   assert.ok(!lines.some(line => line.includes('needle first hit')), 'the first occurrence is not the viewport destination')
   assert.notEqual(app.fullscreenScrollForTest()!.scrollTop, firstScrollTop, 'Next moves the viewport to the proven row')
-  assert.equal(vt.getCellBgRgb(row, columnOf(lines[row]!, 'needle')), STRONG_BG, 'the second occurrence is current')
+  assert.equal(vt.getCellBgRgb(row, columnOf(lines[row]!, 'needle')), strongBg(), 'the second occurrence is current')
   selection = mountedSelectionFor(app, message)
   assert.equal(selection?.exact, true)
   assert.equal(selection?.exactPaintedSegments?.[0]?.row, selection?.selectedRow)
@@ -339,7 +355,7 @@ test('navigation: two distant User hits scroll to their own painted cells', asyn
   lines = await viewport(vt)
   const backRow = lines.findIndex(line => line.includes('needle first hit'))
   assert.ok(backRow >= 0, `Prev returns to the first occurrence:\n${lines.join('\n')}`)
-  assert.equal(vt.getCellBgRgb(backRow, columnOf(lines[backRow]!, 'needle')), STRONG_BG, 'the first cell is current again')
+  assert.equal(vt.getCellBgRgb(backRow, columnOf(lines[backRow]!, 'needle')), strongBg(), 'the first cell is current again')
   app.stop()
 })
 
@@ -358,16 +374,16 @@ test('navigation: clearing the target removes every proven decoration', async ()
   let lines = await viewport(vt)
   let cells = occurrenceCells(lines)
   assert.equal(mountedSelectionFor(app, message)?.exact, true, 'precondition: the current User hit is proven')
-  assert.equal(vt.getCellBgRgb(cells.row, cells.first), STRONG_BG, 'precondition: the current occurrence is strong')
-  assert.ok(vt.getCellUnderline(cells.row, cells.second), 'precondition: the other occurrence is weak')
+  assert.equal(vt.getCellBgRgb(cells.row, cells.first), strongBg(), 'precondition: the current occurrence is strong')
+  assert.ok(isWeakCell(vt, cells.row, cells.second), 'precondition: the other occurrence is yellow')
 
   app.setTranscriptSearchTarget(undefined)
   lines = await viewport(vt)
   cells = occurrenceCells(lines)
-  assert.equal(vt.getCellUnderline(cells.row, cells.first), false, 'clearing removes the first decoration')
-  assert.equal(vt.getCellUnderline(cells.row, cells.second), false, 'clearing removes every decoration')
-  assert.notEqual(vt.getCellBgRgb(cells.row, cells.first), STRONG_BG, 'clearing leaves no strong highlight')
-  assert.notEqual(vt.getCellBgRgb(cells.row, cells.second), STRONG_BG, 'the other occurrence is not strong either')
+  assert.notEqual(vt.getCellBgRgb(cells.row, cells.first), weakBg(), 'clearing removes the first decoration')
+  assert.notEqual(vt.getCellBgRgb(cells.row, cells.second), weakBg(), 'clearing removes the second yellow decoration')
+  assert.notEqual(vt.getCellBgRgb(cells.row, cells.first), strongBg(), 'clearing leaves no strong highlight')
+  assert.notEqual(vt.getCellBgRgb(cells.row, cells.second), strongBg(), 'the other occurrence is not strong either')
   app.stop()
 })
 
@@ -388,7 +404,7 @@ test('navigation: resize re-proves the current wrapped User cell at the new widt
   let lines = await viewport(vt)
   let row = lines.findIndex(line => line.includes('needle'))
   assert.ok(row >= 0, `the target is visible before resize:\n${lines.join('\n')}`)
-  assert.equal(vt.getCellBgRgb(row, columnOf(lines[row]!, 'needle')), STRONG_BG, 'the pre-resize cell is exact')
+  assert.equal(vt.getCellBgRgb(row, columnOf(lines[row]!, 'needle')), strongBg(), 'the pre-resize cell is exact')
 
   vt.resize(40, 14)
   await viewport(vt)
@@ -396,7 +412,7 @@ test('navigation: resize re-proves the current wrapped User cell at the new widt
   lines = await viewport(vt)
   row = lines.findIndex(line => line.includes('needle'))
   assert.ok(row >= 0, `the target remains visible after re-wrapping:\n${lines.join('\n')}`)
-  assert.equal(vt.getCellBgRgb(row, columnOf(lines[row]!, 'needle')), STRONG_BG,
+  assert.equal(vt.getCellBgRgb(row, columnOf(lines[row]!, 'needle')), strongBg(),
     'resize re-proves the current cells at the new width instead of reusing stale columns')
   const selection = mountedSelectionFor(app, message)
   assert.equal(selection?.exact, true)
@@ -467,7 +483,7 @@ function findStrongSearchCell(vt: VirtualTerminal): { row: number; col: number }
   const lines = vt.getViewport()
   for (let row = 0; row < lines.length; row += 1) {
     for (let col = 0; col < visibleWidth(lines[row]!); col += 1) {
-      if (vt.getCellBgRgb(row, col) === STRONG_BG) return { row, col }
+      if (vt.getCellBgRgb(row, col) === strongBg() && vt.getCellBold(row, col)) return { row, col }
     }
   }
   return undefined
@@ -1135,10 +1151,10 @@ test('navigation: every visible matching card is weak-highlighted, the current c
   assert.ok(aRow >= 0 && bRow >= 0 && cRow >= 0, `all cards visible:\n${lines.join('\n')}`)
   const aCol = lines[aRow]!.indexOf('needle')
   const bCol = lines[bRow]!.indexOf('needle')
-  assert.equal(vt.getCellBgRgb(aRow, aCol), 0xf5c542, 'the target occurrence is strong (themed block)')
-  assert.ok(vt.getCellUnderline(bRow, bCol), 'the other VISIBLE matching card is weak (underline)')
-  assert.notEqual(vt.getCellBgRgb(bRow, bCol), 0xf5c542, 'the other matching card is not strong')
-  assert.ok(!vt.getCellUnderline(cRow, lines[cRow]!.indexOf('gamma')), 'a non-matching card is untouched')
+  assert.equal(vt.getCellBgRgb(aRow, aCol), strongBg(), 'the target occurrence is strong (themed block)')
+  assert.ok(isWeakCell(vt, bRow, bCol), 'the other VISIBLE matching card is yellow')
+  assert.notEqual(vt.getCellBgRgb(bRow, bCol), strongBg(), 'the other matching card is not strong')
+  assert.ok(!isWeakCell(vt, cRow, lines[cRow]!.indexOf('gamma')), 'a non-matching card is untouched')
   app.stop()
 })
 
@@ -1182,7 +1198,7 @@ test('navigation: a live group reflow keeps the current highlight via stable-mat
   app.setTranscriptSearchTarget({ query: 'read', match, message })
   let lines = await viewport(vt)
   let row = lines.findIndex(line => line.includes('Read 2 files'))
-  assert.ok(row >= 0 && vt.getCellUnderline(row, lines[row]!.indexOf('Read')), 'precondition: the target card is decorated (anchor-only source)')
+  assert.ok(row >= 0 && isWeakCell(vt, row, lines[row]!.indexOf('Read')), 'precondition: the visible tool-name candidate is yellow')
 
   // A pending read parks between the group and a settled tail read; when it
   // settles IN PLACE (non-tail) the run reflows and the representative card
@@ -1202,7 +1218,7 @@ test('navigation: a live group reflow keeps the current highlight via stable-mat
   assert.ok(row >= 0, `the reflowed group card is visible:\n${lines.join('\n')}`)
   // The rebind re-attached the presentation to the NEW card object: without it
   // the card would not even be decorated (identity would not match).
-  assert.ok(vt.getCellUnderline(row, lines[row]!.indexOf('Read')), 'the rebind keeps the reflowed card decorated')
+  assert.ok(isWeakCell(vt, row, lines[row]!.indexOf('Read')), 'the rebind keeps the reflowed tool-name match yellow')
   assert.ok(!isStrongCell(vt, row, lines[row]!.indexOf('Read')), 'a tool name/args source stays anchor-only (no guessed strong)')
   app.stop()
 })
@@ -1370,11 +1386,11 @@ test('navigation: expanded Thinking proves the body, never the title chrome', as
   const headerRow = lines.findIndex(line => /Thinking/.test(line))
   assert.ok(headerRow >= 0, `thinking header must render:\n${lines.join('\n')}`)
   const titleColumn = columnOf(lines[headerRow]!, 'Thinking')
-  assert.notEqual(vt.getCellBgRgb(headerRow, titleColumn), STRONG_BG, 'the injected Thinking title is not the body hit')
-  assert.notEqual(vt.getCellBgRgb(headerRow, 0), ANCHOR_BG, 'an exact body proof never washes the title row')
+  assert.notEqual(vt.getCellBgRgb(headerRow, titleColumn), strongBg(), 'the injected Thinking title is not the body hit')
+  assert.notEqual(vt.getCellBgRgb(headerRow, 0), anchorBg(), 'an exact body proof never washes the title row')
   const bodyRow = lines.findIndex(line => line.includes('about search'))
   assert.ok(bodyRow >= 0, `thinking body must render:\n${lines.join('\n')}`)
-  assert.equal(vt.getCellBgRgb(bodyRow, columnOf(lines[bodyRow]!, 'thinking')), STRONG_BG,
+  assert.equal(vt.getCellBgRgb(bodyRow, columnOf(lines[bodyRow]!, 'thinking')), strongBg(),
     'only the reasoning body occurrence is current')
   const selection = mountedSelectionFor(app, message)
   assert.equal(selection?.exact, true)
@@ -1403,13 +1419,13 @@ test('navigation: the bubble marker is never the proven User source cell', async
   assert.ok(row >= 0, `user bubble must render:\n${lines.join('\n')}`)
   const markerColumn = columnOf(lines[row]!, '❯', 0)
   const sourceColumn = columnOf(lines[row]!, '❯', 1)
-  assert.notEqual(vt.getCellBgRgb(row, markerColumn), STRONG_BG, 'the injected bubble marker is not the current occurrence')
-  assert.equal(vt.getCellBgRgb(row, sourceColumn), STRONG_BG, 'the source occurrence cell is current')
+  assert.notEqual(vt.getCellBgRgb(row, markerColumn), strongBg(), 'the injected bubble marker is not the current occurrence')
+  assert.equal(vt.getCellBgRgb(row, sourceColumn), strongBg(), 'the source occurrence cell is current')
   assert.equal(mountedSelectionFor(app, message)?.exact, true)
   app.stop()
 })
 
-test('navigation: an anchor-only mixed User card keeps the weaker row wash', async () => {
+test('navigation: an anchor-only mixed User card marks its real header with the orange card anchor', async () => {
   const { vt, app } = startApp()
   const text = 'needle alpha needle beta'
   const message: TranscriptMessage = {
@@ -1435,11 +1451,12 @@ test('navigation: an anchor-only mixed User card keeps the weaker row wash', asy
   })
   const lines = await viewport(vt)
   const cells = occurrenceCells(lines)
-  // Mixed content has no single Host Text layout to witness, so this card
-  // keeps the PR-A anchor: weak occurrences plus the weaker row wash.
-  assert.ok(vt.getCellUnderline(cells.row, cells.first), 'the occurrence stays weak')
-  assert.notEqual(vt.getCellBgRgb(cells.row, cells.first), STRONG_BG, 'mixed content never claims an exact cell')
-  assert.equal(vt.getCellBgRgb(cells.row, 0), ANCHOR_BG, `the anchor row carries the weaker current wash:\n${lines.join('\n')}`)
+  // Mixed content has no single Host Text layout to witness, so the card keeps
+  // its non-exact status: yellow visible words plus the orange (non-bold) card
+  // header anchor — never the weaker legacy row wash.
+  assert.ok(isWeakCell(vt, cells.row, cells.first), 'the occurrence stays yellow')
+  assert.ok(!isStrongCell(vt, cells.row, cells.first), 'mixed content never claims an exact cell')
+  assert.ok(isCardAnchorCell(vt, cells.row, 0), `the card header carries the orange anchor:\n${lines.join('\n')}`)
   const selection = mountedSelectionFor(app, message)
   assert.equal(selection?.exact, false)
   assert.equal(selection?.selectedIndex, -1)
@@ -1461,9 +1478,10 @@ test('navigation: the anchor wash never leaks past the anchor row', async () => 
   const first = lines.findIndex(line => line.includes('needle first'))
   const second = lines.findIndex(line => line.includes('plain second'))
   assert.ok(first >= 0 && second >= 0, `both rows must render:\n${lines.join('\n')}`)
-  assert.equal(vt.getCellBgRgb(first, 0), 0x3a3220, 'the anchor row is washed')
+  assert.ok(isCardAnchorCell(vt, first, 0), 'the card header carries the orange anchor')
   // The background must have been RESET before the next row: no bleed.
-  assert.notEqual(vt.getCellBgRgb(second, 0), 0x3a3220, 'the wash must not bleed into the following row')
+  assert.ok(!isCardAnchorCell(vt, second, 0), 'the anchor must not bleed into the following row')
+  assert.ok(!isStrongCell(vt, first, 0), 'the card anchor is not a source-proven cell')
   app.stop()
 })
 
@@ -1487,8 +1505,48 @@ test('navigation: a narrow width still paints the exact current occurrence', asy
   })
   const lines = await viewport(vt)
   const cells = occurrenceCells(lines)
-  assert.equal(vt.getCellBgRgb(cells.row, cells.first), undefined, 'the first occurrence is not current')
-  assert.equal(vt.getCellBgRgb(cells.row, cells.second), 0xf5c542, 'the second occurrence is the exact current block at 40 cols')
+  assert.equal(vt.getCellBgRgb(cells.row, cells.first), weakBg(), 'the first occurrence stays yellow')
+  assert.equal(vt.getCellBgRgb(cells.row, cells.second), strongBg(), 'the second occurrence is the exact current block at 40 cols')
+  app.stop()
+})
+
+test('navigation: a Tool result with a visible word scrolls to that word without claiming proof', async () => {
+  const filler = Array.from({ length: 24 }, (_, index) => `filler line ${index}`).join('\n')
+  const folder = new TranscriptFolder()
+  folder.apply([
+    sessionEvent('turn/start', { turn: 0 }, 0),
+    sessionEvent('tool/call', { turn: 0, step: 0, callId: ToolCallId('scroll-result-c1'), name: 'bash', arguments: JSON.stringify({ command: 'echo needle' }) }, 1),
+    sessionEvent('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('scroll-result-r1'), role: 'tool', toolCallId: ToolCallId('scroll-result-c1'),
+        content: [{ type: 'text', text: `${filler}\nneedle output` }],
+        source: { kind: 'tool', callId: ToolCallId('scroll-result-c1') },
+      },
+    }, 2),
+    sessionEvent('turn/end', { turn: 0, reason: { kind: 'completed' } }, 3),
+  ])
+  const match = folder.search('needle').find(candidate => candidate.source.kind === 'tool-field' && candidate.source.field === 'result')
+  assert.ok(match !== undefined)
+  const card = folder.messages()[0]!
+  const { vt, app } = startApp(100, 16)
+  app.setFullscreen(true)
+  app.setTranscript([card], folder.turnActivities())
+  await viewport(vt)
+  app.setTranscriptSearchTarget({ query: 'needle', match, message: card })
+  app.scrollToSearchTarget()
+  const lines = await viewport(vt)
+  const wordRow = lines.findIndex(line => line.includes('needle output'))
+  assert.ok(wordRow >= 0, `the card's real visible result word is the scroll destination:\n${lines.join('\n')}`)
+  assert.ok((app.fullscreenScrollForTest()?.scrollTop ?? 0) > 0, 'the word row is below the card top')
+  assert.ok(!isStrongCell(vt, wordRow, columnOf(lines[wordRow]!, 'needle')),
+    'a visible body word is still not a proven source cell')
+  const mounted = (app as unknown as {
+    mountedTranscriptBlocks: ReadonlyArray<{ block: { message?: TranscriptMessage }; searchSelection?: { selectedRow?: number; exact: boolean } }>
+  }).mountedTranscriptBlocks
+  const selection = mounted.find(entry => entry.block.message === card)?.searchSelection
+  assert.equal(selection?.exact, false)
+  assert.ok((selection?.selectedRow ?? 0) > 0, 'the scroll target is the visible word row, not the card top')
   app.stop()
 })
 
@@ -1521,13 +1579,183 @@ test('navigation: tool args and result anchor rows are visually distinct without
   const resultRow = lines.findIndex(line => line.includes('needle output'))
   assert.ok(resultRow >= 0, `tool result body must render:\n${lines.join('\n')}`)
   // Anchor-only: the occurrence never gets the exact block. The result field has
-  // no renderer-proven region, so the selection anchors at the owning card top —
-  // that row carries the weaker wash so the current N/M is still findable.
-  assert.notEqual(vt.getCellBgRgb(resultRow, lines[resultRow]!.indexOf('needle')), 0xf5c542, 'the result hit is not a proven occurrence')
+  // no renderer-proven region, so the selection marks the owning card header with
+  // the orange (non-bold) card anchor so the current N/M is still findable.
+  assert.ok(!isStrongCell(vt, resultRow, lines[resultRow]!.indexOf('needle')), 'the result hit is not a proven occurrence')
   const cardTop = lines.findIndex(line => line.includes('Bash'))
   assert.ok(cardTop >= 0, `tool card header missing:\n${lines.join('\n')}`)
-  assert.equal(vt.getCellBgRgb(cardTop, 0), 0x3a3220, 'the owning card top carries the anchor wash')
+  assert.ok(isCardAnchorCell(vt, cardTop, 0), 'the owning card header carries the orange anchor')
   app.stop()
+})
+
+test('navigation: a folded Work owner header carries the orange card anchor when the reveal is revoked', async () => {
+  const events: SessionEvent[] = [
+    sessionEvent('turn/start', { turn: 0 }, 0),
+    sessionEvent('tool/call', { turn: 0, step: 0, callId: ToolCallId('folded-owner-c1'), name: 'read', arguments: JSON.stringify({ file: 'src/a.ts' }) }, 1),
+    sessionEvent('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('folded-owner-r1'), role: 'tool', toolCallId: ToolCallId('folded-owner-c1'),
+        content: [{ type: 'text', text: 'needle in folded body' }],
+        source: { kind: 'tool', callId: ToolCallId('folded-owner-c1') },
+      },
+    }, 2),
+    sessionEvent('turn/end', { turn: 0, reason: { kind: 'completed' } }, 3),
+    sessionEvent('turn/start', { turn: 1 }, 4),
+    sessionEvent('user/message', {
+      id: MessageId('folded-owner-u2'), role: 'user',
+      content: [{ type: 'text', text: 'needle in the next card' }],
+      source: { kind: 'user' },
+    }, 5),
+    sessionEvent('turn/end', { turn: 1, reason: { kind: 'completed' } }, 6),
+  ]
+  const folder = new TranscriptFolder()
+  folder.apply(events)
+  const match = folder.search('needle').find(candidate => candidate.source.kind === 'tool-field' && candidate.source.field === 'result')
+  assert.ok(match !== undefined, 'fixture: the folded tool body is a semantic match')
+  const message = folder.resolveSearchMatch(match)
+  assert.ok(message !== undefined)
+  const { vt, app } = startApp(100, 30)
+  app.setDisplayPreset('compact')
+  app.setFullscreen(true)
+  app.startTranscriptSearch('full')
+  app.setTranscript(folder.messages(), folder.turnActivities())
+  await viewport(vt)
+  // A PASSIVE commit keeps the user's current disclosure: the Work stays folded,
+  // so the target's own message row is NOT materialized.
+  app.setTranscriptSearchPresentation({
+    matchMessages: new Set([message]),
+    target: { query: 'needle', match, message },
+    grantReveal: false,
+  })
+  const lines = await viewport(vt)
+  assert.ok(!lines.some(line => line.includes('needle in folded body')),
+    `precondition: the folded Work hides the target body:\n${lines.join('\n')}`)
+  const headerRow = lines.findIndex(line => stripTerminalSequences(line).includes('Activity'))
+  assert.ok(headerRow >= 0, `the real materialized Work header is painted:\n${lines.join('\n')}`)
+  const headerPlain = stripTerminalSequences(lines[headerRow]!)
+  const anchorColumn = visibleWidth(headerPlain.slice(0, headerPlain.search(/\S/u)))
+  assert.ok(isCardAnchorCell(vt, headerRow, anchorColumn),
+    'the materialized Work header carries the orange card anchor')
+  assert.ok(!isStrongCell(vt, headerRow, anchorColumn),
+    'the card anchor is never the bold exact style')
+  assert.deepEqual(app.currentFullSearchNotice(), { kind: 'unproven', sourceLabel: 'Tool result' },
+    'the folded target keeps the honest unproven Source-only state')
+  const qualification = app.currentFullNavigationQualification()
+  assert.equal(qualification?.verdict, 'card', 'the folded owner qualifies as ONE card target')
+  assert.equal(qualification?.groupScope, 'whole-card')
+  assert.equal(qualification?.representativeId, match.id)
+  const mounted = (app as unknown as {
+    mountedTranscriptBlocks: ReadonlyArray<{
+      block: { kind: string; span?: { members: readonly TranscriptMessage[] } }
+      searchSelection?: { cardAnchor?: { row: number; startCol: number; endCol: number }; exact: boolean }
+    }>
+  }).mountedTranscriptBlocks
+  const ownerSelection = mounted.find(entry => entry.block.kind === 'work'
+    && entry.block.span?.members.includes(message))?.searchSelection
+  assert.ok(ownerSelection?.cardAnchor !== undefined, 'only the real work header geometry is recorded')
+  assert.equal(ownerSelection?.exact, false)
+  app.stop()
+})
+
+test('navigation: a collapsed nested Context owner wins over the outer Work header', async () => {
+  const snapshot = (seq: number, id: string, body: string): SessionEvent => sessionEvent('user/message', {
+    id: MessageId(id), role: 'user',
+    content: [{ type: 'text', text: body }],
+    source: { kind: 'time-context', form: 'snapshot', sections: [{ name: 'time-context', body }] },
+  }, seq)
+  const events: SessionEvent[] = [
+    sessionEvent('turn/start', { turn: 0 }, 0),
+    snapshot(1, 'nested-owner-a', 'needle in snapshot A'),
+    snapshot(2, 'nested-owner-b', 'needle in snapshot B'),
+    sessionEvent('tool/call', { turn: 0, step: 0, callId: ToolCallId('nested-owner-c1'), name: 'read', arguments: JSON.stringify({ file: 'src/a.ts' }) }, 3),
+    sessionEvent('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('nested-owner-r1'), role: 'tool', toolCallId: ToolCallId('nested-owner-c1'),
+        content: [{ type: 'text', text: 'ok' }],
+        source: { kind: 'tool', callId: ToolCallId('nested-owner-c1') },
+      },
+    }, 4),
+    sessionEvent('turn/end', { turn: 0, reason: { kind: 'completed' } }, 5),
+  ]
+  const folder = new TranscriptFolder()
+  folder.apply(events)
+  const match = folder.search('needle')[0]
+  assert.ok(match !== undefined, 'fixture: the nested snapshot is a semantic match')
+  const message = folder.resolveSearchMatch(match)
+  assert.ok(message !== undefined)
+  const { vt, app } = startApp(110, 30)
+  app.setDisplayPreset('compact')
+  app.setFullscreen(true)
+  app.startTranscriptSearch('full')
+  app.setTranscript(folder.messages(), folder.turnActivities())
+  await viewport(vt)
+  // Expand the OUTER Work while its nested snapshot cluster stays collapsed.
+  const structure = (app as unknown as {
+    canonicalStructureIndex(): { workSpans: ReadonlyArray<{ owner: TranscriptMessage; members: readonly TranscriptMessage[] }> }
+  }).canonicalStructureIndex()
+  const span = structure.workSpans[0]
+  assert.ok(span !== undefined)
+  assert.ok(span.members.includes(message), 'fixture: the nested snapshot is a Work member')
+  app.toggleWorkSpan(span.owner)
+  await viewport(vt)
+  app.setTranscriptSearchPresentation({
+    matchMessages: new Set([message]),
+    target: { query: 'needle', match, message },
+    grantReveal: false,
+  })
+  const lines = await viewport(vt)
+  assert.ok(!lines.some(line => line.includes('needle in snapshot A')),
+    `precondition: the nested cluster still hides the target body:\n${lines.join('\n')}`)
+  const clusterRow = lines.findIndex(line => stripTerminalSequences(line).includes('Context · 2 injections'))
+  const workRow = lines.findIndex(line => stripTerminalSequences(line).includes('Activity'))
+  assert.ok(clusterRow >= 0 && workRow >= 0, `both materialized headers render:\n${lines.join('\n')}`)
+  const clusterPlain = stripTerminalSequences(lines[clusterRow]!)
+  const clusterColumn = visibleWidth(clusterPlain.slice(0, clusterPlain.search(/\S/u)))
+  assert.ok(isCardAnchorCell(vt, clusterRow, clusterColumn),
+    'the innermost collapsed Context header carries the orange card anchor')
+  for (let column = 0; column < visibleWidth(stripTerminalSequences(lines[workRow]!)); column += 1) {
+    assert.notEqual(vt.getCellBgRgb(workRow, column), strongBg(),
+      'the outer Activity header never borrows the anchor while the inner cluster hides the target')
+  }
+  assert.deepEqual(app.currentFullSearchNotice(), { kind: 'unproven', sourceLabel: 'Message source' },
+    'the nested hidden target keeps the honest unproven Source-only state')
+  assert.equal(app.currentFullNavigationQualification()?.verdict, 'card')
+  app.stop()
+})
+
+test('a hidden href on a bold-heading answer keeps its card anchor non-bold', async () => {
+  const previousCapabilities = getCapabilities()
+  setCapabilities({ images: null, trueColor: true, hyperlinks: true })
+  try {
+    const { folder, message } = assistantSearchFolder(
+      '# needle heading\n\n[display](https://example.invalid/needle)',
+      'assistant-bold-anchor',
+    )
+    const matches = folder.search('needle')
+    assert.equal(matches.length, 2, 'the heading and the hidden href are two semantic occurrences')
+    const hidden = matches[1]!
+    assert.ok(hidden.normalizedSourceRange !== undefined)
+    const { vt, app } = startApp(100, 30)
+    app.setFullscreen(true)
+    app.setTranscript(folder.messages(), folder.turnActivities())
+    app.setTranscriptSearchTarget({ query: 'needle', match: hidden, message })
+    const lines = await viewport(vt)
+    const headingRow = lines.findIndex(line => stripTerminalSequences(line).includes('heading'))
+    assert.ok(headingRow >= 0, `the bold Markdown heading is painted:\n${lines.join('\n')}`)
+    const anchorColumn = columnOf(lines[headingRow]!, 'heading')
+    assert.ok(isCardAnchorCell(vt, headingRow, anchorColumn),
+      'the heading anchor is orange without the content bold weight')
+    assert.ok(!isStrongCell(vt, headingRow, anchorColumn),
+      'a content-bold heading anchor never impersonates the proven exact block')
+    const selection = mountedSelectionFor(app, message)
+    assert.equal(selection?.exact, false)
+    assert.equal(selection?.exactPaintedSegments, undefined)
+    app.stop()
+  } finally {
+    setCapabilities(previousCapabilities)
+  }
 })
 
 test('navigation: a deliverable description truncated on its row never strong-highlights a substituted occurrence', async () => {
@@ -1735,8 +1963,8 @@ test('search after an inline figure highlights the rendered answer row', async (
   const row = lines.findIndex(line => line.includes('After needle.'))
   assert.ok(row >= 0, `the searched answer row is visible:\n${lines.join('\n')}`)
   const col = lines[row]!.indexOf('needle')
-  assert.ok(vt.getCellUnderline(row, col), 'the rendered occurrence is weak-highlighted')
-  assert.equal(vt.getCellBgRgb(row, col), undefined, 'a message-source occurrence is never falsely exact')
+  assert.ok(isWeakCell(vt, row, col), 'the rendered occurrence is yellow-highlighted')
+  assert.equal(vt.getCellBgRgb(row, col), weakBg(), 'a message-source occurrence stays yellow without source proof')
   app.stop()
 })
 
@@ -1756,8 +1984,9 @@ test('a search that only matches a consumed marker line paints no false anchor',
   const row = lines.findIndex(line => line.includes('Before figure.'))
   assert.ok(row >= 0, `the answer remains visible:\n${lines.join('\n')}`)
   const col = lines[row]!.indexOf('Before figure.')
-  assert.equal(vt.getCellBgRgb(row, col), undefined, 'no anchor wash for a hidden marker-only match')
-  assert.equal(vt.getCellUnderline(row, col), false, 'no false occurrence highlight')
+  assert.ok(isCardAnchorCell(vt, row, 0), 'the real card anchor is marked orange for a hidden marker-only match')
+  assert.equal(isWeakCell(vt, row, col), false, 'no false yellow occurrence highlight')
+  assert.ok(!isStrongCell(vt, row, col), 'no source-proven cell for a consumed marker')
   app.stop()
 })
 
@@ -1780,8 +2009,13 @@ test('navigation: a consumed Visual marker is Source-only no-visible-cell, never
   const lines = await viewport(vt)
   const row = lines.findIndex(line => line.includes('Before figure.'))
   assert.ok(row >= 0, `the answer remains visible:\n${lines.join('\n')}`)
-  assert.equal(mountedSelectionFor(app, assistant), undefined,
-    'the consumed marker owns no search selection and no fabricated visual row')
+  const consumedSelection = mountedSelectionFor(app, assistant)
+  assert.equal(consumedSelection?.exact, false,
+    'the consumed marker owns no exact search selection')
+  assert.equal(consumedSelection?.exactPaintedSegments, undefined)
+  assert.deepEqual(consumedSelection?.matches, [], 'no fabricated visual occurrence is selected')
+  assert.equal(consumedSelection?.sourceDisposition, 'not-painted')
+  assert.ok(consumedSelection?.cardAnchor !== undefined, 'only the real visible card anchor is decorated')
   assert.deepEqual(app.currentFullSearchNotice(), { kind: 'not-painted', sourceLabel: 'Assistant text' },
     'the consumed marker is real evidence of "no visible cell", not a same-named text match')
   const frame = lines.map(line => stripTerminalSequences(line))
@@ -1865,7 +2099,7 @@ test('a visual Assistant keeps the search anchor for a folded delivered-file tar
   app.stop()
 })
 
-test('a message target below an inline figure stays at the card anchor without provenance', async () => {
+test('a message target below an inline figure scrolls to its real visible word without claiming provenance', async () => {
   const ref = `sv2_${'f'.repeat(20)}`
   const marker = `[dsh-visual-${ref}]: <#>`
   const filler = Array.from({ length: 30 }, (_, index) => `filler line ${index}`).join('\n')
@@ -1881,16 +2115,19 @@ test('a message target below an inline figure stays at the card anchor without p
   })
   app.scrollToSearchTarget()
   const lines = await viewport(vt)
-  assert.ok(!lines.some(line => line.includes('After needle.')),
-    `a message source without cell provenance does not guess the row after the figure:\n${lines.join('\n')}`)
-  assert.equal(app.fullscreenScrollForTest()?.scrollTop, 0, 'the inexact message source stays at the card top')
+  const row = lines.findIndex(line => line.includes('After needle.'))
+  assert.ok(row >= 0, `the real visible word is the scroll destination:\n${lines.join('\n')}`)
+  assert.ok((app.fullscreenScrollForTest()?.scrollTop ?? 0) > 0, 'the visible word row is below the card top')
+  const column = lines[row]!.indexOf('needle')
+  assert.ok(isWeakCell(vt, row, column), 'the visible auxiliary word is an ordinary yellow match')
+  assert.ok(!isStrongCell(vt, row, column), 'a visible auxiliary word never becomes a source-proven cell')
   const mounted = (app as unknown as {
     mountedTranscriptBlocks: ReadonlyArray<{ block: { message?: TranscriptMessage }; searchSelection?: { selectedIndex: number; exact: boolean; selectedRow?: number } }>
   }).mountedTranscriptBlocks
   const selection = mounted.find(entry => entry.block.message === assistant)?.searchSelection
   assert.equal(selection?.selectedIndex, -1)
   assert.equal(selection?.exact, false)
-  assert.equal(selection?.selectedRow, 0)
+  assert.ok((selection?.selectedRow ?? 0) > 0, 'the scroll target is the visible word row, not the card top')
   app.stop()
 })
 
@@ -2194,7 +2431,7 @@ function strongNeedleStarts(vt: VirtualTerminal, lines: readonly string[]): Arra
     const line = lines[row]!
     for (let index = line.indexOf('needle'); index >= 0; index = line.indexOf('needle', index + 'needle'.length)) {
       const column = visibleWidth(line.slice(0, index))
-      if (vt.getCellBgRgb(row, column) === STRONG_BG) starts.push({ row, column })
+      if (vt.getCellBgRgb(row, column) === strongBg()) starts.push({ row, column })
     }
   }
   return starts
@@ -2249,7 +2486,7 @@ test('navigation: a very narrow User bubble still proves its wrapped cell', asyn
   const lines = await viewport(vt)
   const row = lines.findIndex(line => line.includes('needle'))
   assert.ok(row >= 0, `the wrapped source is visible at 12 columns:\n${lines.join('\n')}`)
-  assert.equal(vt.getCellBgRgb(row, columnOf(lines[row]!, 'needle')), STRONG_BG)
+  assert.equal(vt.getCellBgRgb(row, columnOf(lines[row]!, 'needle')), strongBg())
   const selection = mountedSelectionFor(app, message)
   assert.equal(selection?.exact, true)
   assert.equal(selection?.selectedRow, selection?.exactPaintedSegments?.[0]?.row)
@@ -2276,8 +2513,8 @@ test('navigation: wide CJK and ZWJ emoji User cells map to terminal columns', as
   let row = lines.findIndex(line => line.includes('检索 tail'))
   assert.ok(row >= 0, `the second CJK occurrence is visible:\n${lines.join('\n')}`)
   const cjkColumn = columnOf(lines[row]!, '检索')
-  assert.equal(vt.getCellBgRgb(row, cjkColumn), STRONG_BG, 'the first CJK cell is current')
-  assert.equal(vt.getCellBgRgb(row, cjkColumn + 1), STRONG_BG, 'the second CJK cell belongs to the same current grapheme')
+  assert.equal(vt.getCellBgRgb(row, cjkColumn), strongBg(), 'the first CJK cell is current')
+  assert.equal(vt.getCellBgRgb(row, cjkColumn + 1), strongBg(), 'the second CJK cell belongs to the same current grapheme')
 
   app.setTranscriptSearchPresentation({
     matchMessages: new Set([message]),
@@ -2288,8 +2525,8 @@ test('navigation: wide CJK and ZWJ emoji User cells map to terminal columns', as
   row = lines.findIndex(line => line.includes('👩‍👩‍👦'))
   assert.ok(row >= 0, `the ZWJ cluster is visible:\n${lines.join('\n')}`)
   const emojiColumn = columnOf(lines[row]!, '👩‍👩‍👦')
-  assert.equal(vt.getCellBgRgb(row, emojiColumn), STRONG_BG, 'the leading cell of the ZWJ cluster is current')
-  assert.equal(vt.getCellBgRgb(row, emojiColumn + 1), STRONG_BG, 'the whole wide grapheme is painted, never half')
+  assert.equal(vt.getCellBgRgb(row, emojiColumn), strongBg(), 'the leading cell of the ZWJ cluster is current')
+  assert.equal(vt.getCellBgRgb(row, emojiColumn + 1), strongBg(), 'the whole wide grapheme is painted, never half')
   assert.equal(mountedSelectionFor(app, message)?.exact, true)
   app.stop()
 })
@@ -2344,7 +2581,7 @@ test('navigation: a passively targeted compact Thinking stays anchor-only', asyn
   assert.ok(titleRow >= 0 && previewRow >= 0, `the compact Thinking rows are painted:\n${lines.join('\n')}`)
   for (const row of [titleRow, previewRow]) {
     for (let column = 0; column < visibleWidth(lines[row]!); column += 1) {
-      assert.notEqual(vt.getCellBgRgb(row, column), STRONG_BG,
+      assert.ok(!isStrongCell(vt, row, column),
         `the compact Thinking row ${row} never claims a proven source cell`)
     }
   }
@@ -2368,9 +2605,9 @@ test('navigation: the regular surface paints the proven User cell without a scro
   const lines = await viewport(vt)
   const row = lines.findIndex(line => line.includes('needle alpha needle beta'))
   assert.ok(row >= 0, `the regular User row is painted:\n${lines.join('\n')}`)
-  assert.equal(vt.getCellBgRgb(row, columnOf(lines[row]!, 'needle', 1)), STRONG_BG,
+  assert.equal(vt.getCellBgRgb(row, columnOf(lines[row]!, 'needle', 1)), strongBg(),
     'the second regular-surface occurrence is the proven current cell')
-  assert.notEqual(vt.getCellBgRgb(row, columnOf(lines[row]!, 'needle', 0)), STRONG_BG,
+  assert.notEqual(vt.getCellBgRgb(row, columnOf(lines[row]!, 'needle', 0)), strongBg(),
     'the first occurrence is not current')
   assert.equal(app.fullscreenScrollForTest(), undefined,
     'a regular surface never gains a Fullscreen scroll controller from search exactness')
@@ -2406,7 +2643,7 @@ test('navigation: a plugin-rendered User or Thinking card never claims Host sour
   const row = lines.findIndex(line => line.includes('plugin') && line.includes('needle'))
   assert.ok(row >= 0, `the plugin renderer owns the card:\n${lines.join('\n')}`)
   for (let column = 0; column < visibleWidth(lines[row]!); column += 1) {
-    assert.notEqual(vt.getCellBgRgb(row, column), STRONG_BG,
+    assert.ok(!isStrongCell(vt, row, column),
       'a plugin-rendered card never becomes an exact Host cell even when its text matches')
   }
   const selection = mountedSelectionFor(app, message)
@@ -2480,7 +2717,7 @@ test('a hidden Markdown href search hit never strong-highlights a visible homony
     const columns = visibleColumnsOf(lines[row]!, 'needle')
     assert.equal(columns.length, 1, `only the body homonym is visible:\n${lines[row]}`)
     for (let offset = 0; offset < 'needle'.length; offset += 1) {
-      assert.notEqual(vt.getCellBgRgb(row, columns[0]! + offset), STRONG_BG,
+      assert.ok(!isStrongCell(vt, row, columns[0]! + offset),
         'a hidden href never strong-highlights the visible homonym')
     }
     const selection = mountedSelectionFor(app, message)
@@ -2523,7 +2760,7 @@ test('a hidden Markdown href between two visible homonyms never selects either t
       assert.equal(columns.length, 2, `width ${width}: only the link label and the body are visible:\n${lines[row]}`)
       for (const column of columns) {
         for (let offset = 0; offset < 'needle'.length; offset += 1) {
-          assert.notEqual(vt.getCellBgRgb(row, column + offset), STRONG_BG,
+          assert.ok(!isStrongCell(vt, row, column + offset),
             `width ${width}: neither visible homonym becomes the hidden href's current cell`)
         }
       }
@@ -2549,7 +2786,7 @@ test('a hidden Markdown href between two visible homonyms never selects either t
 /** The CURRENT theme's exact-block background (the strong style is palette
  * driven, so the light theme uses a different RGB than dark). */
 function strongBg(): number {
-  return Number.parseInt((currentPalette.searchCurrentBg ?? '#F5C542').replace('#', ''), 16)
+  return Number.parseInt((currentPalette.searchCurrentBg ?? '#E58A24').replace('#', ''), 16)
 }
 
 /** The STRONG current block's characters on one viewport row, read from the
@@ -2564,6 +2801,7 @@ function strongCellText(vt: VirtualTerminal, row: number): string {
 function strongRows(_lines: readonly string[], vt: VirtualTerminal): { row: number; text: string }[] {
   const rows = new Map<number, string>()
   for (const run of vt.getRgbBackgroundRuns(strongBg())) {
+    if (!vt.getCellBold(run.row, run.startCol)) continue
     rows.set(run.row, (rows.get(run.row) ?? '') + run.text)
   }
   return [...rows].map(([row, text]) => ({ row, text }))
@@ -3171,8 +3409,8 @@ test('navigation: a case-folding rendered overlap never widens the proven cells'
       assert.ok(longSColumn >= 0, `${testCase.label}: the long-s cell is painted`)
       assert.notEqual(vt.getCellBgRgb(row, longSColumn), strongBg(),
         `${testCase.label}: the overlapping long-s cell is never upgraded to strong`)
-      assert.equal(vt.getCellUnderline(row, longSColumn), true,
-        `${testCase.label}: the weak occurrence keeps only the uncovered cell`)
+      assert.equal(isWeakCell(vt, row, longSColumn), true,
+        `${testCase.label}: the weak occurrence keeps only the uncovered yellow cell`)
     }
     app.stop()
   } finally {

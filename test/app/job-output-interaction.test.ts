@@ -30,6 +30,7 @@ import type { JobObservedSnapshot, JobObservationPort, JobStopOutcome } from '..
 import { parseUserKeybindings } from '../../src/tui/keybindings/config.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 import { displaySeamStub } from '../support/display-seam-stub.ts'
+import { currentPalette } from '../../src/tui/theme/runtime.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 
 const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
@@ -65,7 +66,7 @@ const highlightedRowText = (vt: VirtualTerminal): string => {
   const rows = rawView(vt)
   const highlighted = rows.findIndex((_, row) => {
     for (let column = 0; column < 200; column += 1) {
-      if (vt.getCellBgRgb(row, column) !== undefined) return true
+      if (vt.getCellBgRgb(row, column) === Number.parseInt(currentPalette.searchCurrentBg!.slice(1), 16)) return true
     }
     return false
   })
@@ -1022,23 +1023,25 @@ test('searching CJK, wrapped and ANSI text keeps the rendered row count and visi
   for (const row of rawView(vt)) assert.ok(visibleWidth(row) <= 80)
 
   const rowsWith = (fragment: string): number => rawView(vt).findIndex(row => row.includes(fragment))
-  const scan = (row: number): { background: number; underline: number } => {
-    let background = 0
-    let underline = 0
+  const rgb = (hex: string): number => Number.parseInt(hex.slice(1), 16)
+  const scan = (row: number): { current: number; ordinary: number } => {
+    let current = 0
+    let ordinary = 0
     for (let column = 0; column < 80; column += 1) {
-      if (vt.getCellBgRgb(row, column) !== undefined) background += 1
-      if (vt.getCellUnderline(row, column)) underline += 1
+      const background = vt.getCellBgRgb(row, column)
+      if (background === rgb(currentPalette.searchCurrentBg!)) current += 1
+      if (background === rgb(currentPalette.searchMatchBg!)) ordinary += 1
     }
-    return { background, underline }
+    return { current, ordinary }
   }
   const currentRow = rowsWith('alpha 中文 needle beta')
   assert.ok(currentRow >= 0, 'the current hit row is visible (the reveal ran)')
-  assert.ok(scan(currentRow).background > 0, 'the current hit carries the themed background highlight')
+  assert.ok(scan(currentRow).current > 0, 'the current hit carries the orange exact background')
   const weakRow = rowsWith('red needle tail')
   assert.ok(weakRow >= 0, 'the other occurrence stays visible')
   const weak = scan(weakRow)
-  assert.ok(weak.underline > 0, 'the other occurrence is weak-underlined')
-  assert.equal(weak.background, 0, 'only the current occurrence gets the strong background')
+  assert.ok(weak.ordinary > 0, 'the other occurrence carries the ordinary yellow background')
+  assert.equal(weak.current, 0, 'only the current occurrence gets the strong background')
 
   // A re-search over the ALREADY highlighted render must not see the highlight
   // decoration: the matcher indexes the raw retained rows only.

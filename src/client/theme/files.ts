@@ -58,7 +58,7 @@ const PALETTE_KEYS: readonly (keyof ColorPalette)[] = [
   'diffAdded', 'diffRemoved', 'diffAddedStrong', 'diffRemovedStrong',
   'diffGutter', 'diffMeta',
   'roleUser', 'roleUserBg', 'shellMode',
-  'searchCurrentFg', 'searchCurrentBg', 'searchAnchorBg',
+  'searchMatchFg', 'searchMatchBg', 'searchCurrentFg', 'searchCurrentBg', 'searchAnchorBg',
 ]
 
 /**

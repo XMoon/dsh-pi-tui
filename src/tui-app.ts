@@ -298,13 +298,15 @@ import { SaveLocationPrompt, SaveLocationFrame, type SaveLocationDeps, type Save
 export type { QuestionFlowDraft } from './tui/interaction/question.ts'
 export type { SaveLocationResult } from './tui/interaction/save-location.ts'
 import { createInstalledAutocompleteProvider } from './tui/interaction/autocomplete/installed-provider.ts'
-import { assistantPresentationRevision, PTC_MAX_DEPTH, recentTurnThreshold, textWithAttachmentMarkers, transcriptSearchSourceKey, type AssistantDisplayBlock, subCallDisplayStatus, type PresentedFilePresentation, type TranscriptMessage, type TranscriptSearchMatch, type TurnActivity, type WorkflowMemberView, type WorkflowRunStatus, workflowPhaseKey, workflowReadablePhase } from './transcript.ts'
+import { assistantPresentationRevision, PTC_MAX_DEPTH, recentTurnThreshold, textWithAttachmentMarkers, transcriptSearchMatchKey, transcriptSearchSourceKey, type AssistantDisplayBlock, subCallDisplayStatus, type PresentedFilePresentation, type TranscriptMessage, type TranscriptSearchMatch, type TurnActivity, type WorkflowMemberView, type WorkflowRunStatus, workflowPhaseKey, workflowReadablePhase } from './transcript.ts'
 import type { UserShellPresentationPlacement, UserShellSubmissionState } from './app/submission/user-shell.ts'
 import { eligibleFinalAssistant } from './domain/transcript/final-assistant.ts'
 import { classifyTranscriptMessage, isSurfacedInteractionTool, isSurfacedContext } from './domain/transcript/semantics.ts'
 import {
   SearchHighlightComponent,
   buildSourceGeometry,
+  cardAnchorForRenderedLines,
+  searchMatchInsideRegion,
   selectRenderedSearchMatch,
   selectRenderedSearchScrollRange,
   type RenderedSearchSelection,
@@ -3955,6 +3957,16 @@ export class TuiApp {
   /** The CURRENT render epoch's Source-only notice for a Full target without a
    * proven cell. `revision`/`query` bind it to the epoch that produced it. */
   private searchSourceNotice: (FullSearchSourceNotice & { readonly query: string; readonly revision: number }) | undefined
+  /** Whether the CURRENT render epoch has any proving channel for the target's
+   * semantic source, i.e. an unvisited same-card occurrence could still prove
+   * exact. Disposable metadata bound to query/revision/message; it never feeds
+   * the corpus or a stored geometry map. */
+  private searchExactChannelAvailable: {
+    readonly revision: number
+    readonly query: string
+    readonly message: TranscriptMessage
+    readonly available: boolean
+  } | undefined
   /** One-shot occlusion correction eligibility, registered by an explicit
    * navigation (or a resize) and consumed by the next painted-frame commit. */
   private pendingSearchOcclusionCorrection: SearchOcclusionCorrection | undefined
@@ -12484,9 +12496,77 @@ export class TuiApp {
   ): RenderedTranscriptBlock[] {
     const boundary = this.expandBoundary()
     const userBoundary = this.userExpandBoundary()
-    return blocks.map(block =>
+    const rendered = blocks.map(block =>
       this.renderTranscriptBlock(block, projectionExpanded, boundary, userBoundary, width),
     )
+    this.decorateCurrentOwnerHeader(rendered, width)
+    return rendered
+  }
+
+  /** The current Full target may be hidden inside a folded Work/Context card:
+   * decorate that card's REAL materialized header as the card anchor, and never
+   * a hidden member row. When the target's own message row is materialized the
+   * message-level selection already owns the highlight. */
+  private decorateCurrentOwnerHeader(renderedBlocks: RenderedTranscriptBlock[], width: number): void {
+    const target = this.searchTarget
+    if (target === undefined || target.query === '') return
+    const materialized = renderedBlocks.some(entry =>
+      entry.block.kind === 'message' && entry.block.message === target.message)
+    if (materialized) return
+    // A Work span's members INCLUDE its nested snapshot-context cluster, so a
+    // raw first-match pick would paint the OUTER Activity header even while the
+    // inner collapsed cluster is the real hiding owner. Prefer the deepest
+    // materialized container (the same outer→inner ancestry the reveal uses);
+    // ties keep the later render order.
+    let ownerIndex = -1
+    let ownerDepth = -1
+    renderedBlocks.forEach((entry, index) => {
+      const owns = entry.block.kind === 'work' && entry.block.span.members.includes(target.message)
+        || entry.block.kind === 'context-cluster' && entry.block.cluster.members.includes(target.message)
+      if (!owns) return
+      const depth = entry.containerPath?.length ?? 0
+      if (depth >= ownerDepth) {
+        ownerIndex = index
+        ownerDepth = depth
+      }
+    })
+    if (ownerIndex < 0) return
+    // A target change / disclosure change must never leave the previous owner's
+    // anchor painted on a different header.
+    for (let index = 0; index < renderedBlocks.length; index += 1) {
+      if (index === ownerIndex) continue
+      const entry = renderedBlocks[index]!
+      if (entry.block.kind === 'message') continue
+      if (entry.searchSelection === undefined && entry.searchSelector === undefined) continue
+      entry.searchSelection = undefined
+      entry.searchSelector = undefined
+      if (entry.mountedComponent instanceof SearchHighlightComponent) entry.mountedComponent.clear()
+    }
+    const owner = renderedBlocks[ownerIndex]!
+    const anchor = cardAnchorForRenderedLines(owner.rendered)
+    // The target row itself is hidden by the container's own disclosure: this
+    // is the honest `unproven` state until an explicit reveal materializes it.
+    this.recordSearchSourceNotice(target, 'unproven')
+    const selector: RenderedSearchSelector = { query: target.query, sourceOccurrence: 0 }
+    const selection: RenderedSearchSelection = {
+      matches: [],
+      selectedIndex: -1,
+      selectedRow: anchor?.row,
+      exact: false,
+      ...(anchor === undefined
+        ? {}
+        : { cardAnchor: anchor, scrollRange: { startRow: anchor.row, endRow: anchor.row } }),
+      sourceDisposition: 'unproven',
+    }
+    const mounted = owner.mountedComponent
+    if (mounted instanceof SearchHighlightComponent) {
+      mounted.updateSelector(selector, selection, width, owner.rendered)
+    } else {
+      const wrapper = new SearchHighlightComponent(owner.component, selector, selection, width, owner.rendered)
+      owner.mountedComponent = wrapper
+    }
+    owner.searchSelector = selector
+    owner.searchSelection = selection
   }
 
   /** Resolve rendered matches through the cache owned by the live message
@@ -12743,8 +12823,72 @@ export class TuiApp {
     }
   }
 
-  /**
-   * The optional Source-only context: ONLY a Host-owned single-text User
+  currentFullNavigationQualification(): {
+    readonly semanticMatchKey: string
+    readonly representativeId: number
+    readonly currentnessEpoch: number
+    readonly verdict: 'exact' | 'auxiliary' | 'card'
+    readonly groupScope: 'occurrence' | 'source-run' | 'whole-card'
+  } | undefined {
+    const target = this.searchTarget
+    const overlay = this.searchOverlay
+    if (target === undefined || overlay === undefined || overlay.isHidden()) return undefined
+    if (this.searchComponent?.getScope() !== 'full' || !this.overlayBroker.isOnlyVisibleModal(overlay)) return undefined
+    const key = transcriptSearchMatchKey(target.match)
+    const entry = this.mountedTranscriptBlocks.find(candidate =>
+      candidate.block.kind === 'message' && candidate.block.message === target.message)
+    const selection = entry?.searchSelection
+    if (selection?.exact === true) {
+      return {
+        semanticMatchKey: key,
+        representativeId: target.match.id,
+        currentnessEpoch: this.searchPresentationRevision,
+        verdict: 'exact',
+        groupScope: 'occurrence',
+      }
+    }
+    if (selection === undefined) {
+      const owner = this.mountedTranscriptBlocks.find(candidate =>
+        candidate.block.kind === 'work' && candidate.block.span.members.includes(target.message)
+        || candidate.block.kind === 'context-cluster' && candidate.block.cluster.members.includes(target.message),
+      )
+      if (owner === undefined && entry === undefined) return undefined
+    }
+    const sourceNotice = this.currentFullSearchNotice()
+    const visibleMatches = selection?.matches.length ?? 0
+    // A not-painted card with NO rendered occurrence proves every raw hit on
+    // this representative unlocatable at this frame: one card target. With
+    // visible homonyms the card may still hold exact-capable occurrences, so
+    // only the unresolved source run may merge.
+    if (sourceNotice?.kind === 'not-painted') {
+      return {
+        semanticMatchKey: key,
+        representativeId: target.match.id,
+        currentnessEpoch: this.searchPresentationRevision,
+        verdict: 'card',
+        groupScope: visibleMatches === 0 ? 'whole-card' : 'source-run',
+      }
+    }
+    const channel = this.searchExactChannelAvailable
+    const exactChannel = channel !== undefined
+      && channel.revision === this.searchPresentationRevision
+      && channel.query === target.query
+      && channel.message === target.message
+      && channel.available
+    const auxiliary = visibleMatches > 0
+    // A card WITH a proving channel may hide exact-capable unvisited occurrences:
+    // merge only this unresolved source run. Without any proving channel the
+    // whole card is unlocatable and its hits collapse into one card target.
+    return {
+      semanticMatchKey: key,
+      representativeId: target.match.id,
+      currentnessEpoch: this.searchPresentationRevision,
+      verdict: auxiliary ? 'auxiliary' : 'card',
+      groupScope: auxiliary && exactChannel ? 'source-run' : 'whole-card',
+    }
+  }
+
+  /** The optional Source-only context: ONLY a Host-owned single-text User
    * message or an EXPANDED Host Thinking body may contribute one. Every
    * Assistant Markdown (including a hidden href), Tool/Command/Workflow,
    * Plugin, Visual and Delivered source is label-only, and a collapsed or
@@ -12861,14 +13005,36 @@ export class TuiApp {
       && this.searchTargetRendersNoOccurrence(block.message, target.query)) {
       // The source text IS consumed by the card's own Visual rendering: this is
       // the ONE non-Assistant NOT_PAINTED evidence, and the notice must reach it
-      // even though the block owns no selection (no fabricated visual row).
+      // even though the block owns no semantic occurrence. Only the REAL card
+      // anchor may be decorated; no visual row or homonym is invented.
       this.recordSearchSourceNotice(target, 'not-painted')
-      return { current: false }
+      this.searchExactChannelAvailable = {
+        revision: this.searchPresentationRevision,
+        query: target.query,
+        message: block.message,
+        available: false,
+      }
+      const anchor = cardAnchorForRenderedLines(rendered)
+      const anchorSelector: RenderedSearchSelector = {
+        query: target.query,
+        sourceOccurrence: target.match.sourceOccurrence,
+      }
+      const anchorSelection: RenderedSearchSelection = {
+        matches: [],
+        selectedIndex: -1,
+        selectedRow: anchor?.row,
+        exact: false,
+        ...(anchor === undefined
+          ? {}
+          : { cardAnchor: anchor, scrollRange: { startRow: anchor.row, endRow: anchor.row } }),
+        sourceDisposition: 'not-painted',
+      }
+      return { selector: anchorSelector, selection: anchorSelection, current }
     }
     if (current) {
       const regions = this.searchSourceRegionsFor(
         block.message,
-        rendered.length,
+        rendered,
         subCallRegions,
         deliverableRegions,
         hostThinkingBodyRange,
@@ -12972,14 +13138,67 @@ export class TuiApp {
       // though the dedicated User/Thinking/Assistant channel produced nothing.
       // Record it only when the committed selection is genuinely non-exact.
       this.recordSearchSourceNotice(target, selection.exact ? undefined : disposition)
+      const targetSourceKey = transcriptSearchSourceKey(target.match.source)
+      // A proving channel is CARD-WIDE: the card may hold an exact-capable
+      // occurrence from a DIFFERENT source (an inline phase status beside a
+      // hidden summary-phase status), so whole-card merging is only safe when no
+      // source on this card can ever prove a cell at this size.
+      const provingRegion = regions.some(region => region.enumerable !== false
+        && region.sourceText !== undefined
+        && matches.some(match => searchMatchInsideRegion(match, region)))
+      const proofHostAvailable = target.match.source.kind === 'message'
+        && target.match.normalizedSourceRange !== undefined
+        && (block.message.kind === 'user' || block.message.kind === 'thinking' ? plainTextProofHost : assistantProofHost)
+      this.searchExactChannelAvailable = {
+        revision: this.searchPresentationRevision,
+        query: target.query,
+        message: block.message,
+        available: painted !== undefined || provingRegion || proofHostAvailable,
+      }
       const scrollRange = selectRenderedSearchScrollRange(matches, selection, selector, regions)
-      const committedSelection: RenderedSearchSelection = scrollRange === undefined
-        ? selection
-        : {
-            ...selection,
-            ...(selection.exact ? {} : { selectedRow: scrollRange.startRow }),
-            scrollRange,
-          }
+      const cardAnchor = selection.exact ? undefined : cardAnchorForRenderedLines(rendered)
+      const scopedMatches = targetSourceKey === 'message'
+        ? matches
+        : matches.filter(match => regions.some(region =>
+            region.sourceKey === targetSourceKey && searchMatchInsideRegion(match, region)))
+      const auxiliaryMatches = disposition === 'not-painted' ? [] : scopedMatches
+      // A card with no authorized region for this source (e.g. a Tool result
+      // body) still has REAL visible words: a POCISION-ONLY body region is the
+      // authorized scroll hint, never header or status-count chrome. The
+      // not-painted path never borrows a homonym this way.
+      const targetRegions = regions.filter(region => region.sourceKey === targetSourceKey)
+      const scrollCandidates = auxiliaryMatches.length > 0
+        ? auxiliaryMatches
+        : disposition === 'unproven' && targetRegions.length > 0
+          ? matches.filter(match => targetRegions.some(region => searchMatchInsideRegion(match, region)))
+          : []
+      // Without an authorized region prefer the LAST rendered candidate: header
+      // chrome (name/args) is painted before the body, so the last occurrence is
+      // the most likely body word. It is a viewport hint only, never source proof.
+      const toolBodyHint = targetSourceKey === 'tool.result'
+      const scrollCandidate = auxiliaryMatches.length > 0
+        ? (toolBodyHint ? scrollCandidates.at(-1) : scrollCandidates[0])
+        : scrollCandidates.at(-1)
+      const visibleWordRange = selection.exact || scrollCandidate === undefined
+        ? undefined
+        : (() => {
+            const first = scrollCandidate.segments[0]
+            const last = scrollCandidate.segments.at(-1)
+            return first === undefined || last === undefined
+              ? undefined
+              : { startRow: first.row, endRow: last.row }
+          })()
+      const targetRange = visibleWordRange ?? scrollRange ?? (cardAnchor === undefined
+        ? undefined
+        : { startRow: cardAnchor.row, endRow: cardAnchor.row })
+      const committedSelection: RenderedSearchSelection = {
+        ...selection,
+        ...(selection.exact
+          ? {}
+          : { selectedRow: targetRange?.startRow ?? selection.selectedRow }),
+        ...(targetRange === undefined ? {} : { scrollRange: targetRange }),
+        ...(cardAnchor === undefined ? {} : { cardAnchor }),
+      }
       return {
         selector,
         selection: selection.exact || disposition === undefined
@@ -13080,11 +13299,12 @@ export class TuiApp {
    * and (for message-kind cards) the whole card as the `message` source region. */
   private searchSourceRegionsFor(
     message: TranscriptMessage,
-    renderedLength: number,
+    renderedLines: readonly string[],
     subCallRegions: ReadonlyArray<SearchSourceRegion> | undefined,
     deliverableRegions: ReadonlyArray<SearchSourceRegion> | undefined,
     thinkingBodyRange: { anchorRow: number; rowStart: number; rowEnd: number } | undefined,
   ): SearchSourceRegion[] {
+    const renderedLength = renderedLines.length
     const regions: SearchSourceRegion[] = []
     if (subCallRegions !== undefined) regions.push(...subCallRegions)
     const cardRegions = this.searchSourceRegionsByMessage.get(message)
@@ -13098,6 +13318,28 @@ export class TuiApp {
         regions.push({ sourceKey: 'message', ...thinkingBodyRange, enumerable: false })
       } else {
         regions.push({ sourceKey: 'message', anchorRow: 0, rowStart: 0, rowEnd: renderedLength, enumerable: false })
+      }
+    }
+    // A Tool card's result BODY has no exact channel, but it is still a real
+    // visible surface: a position-only body region (row 0 is the header) lets
+    // the viewport preference land on a body word without claiming proof or
+    // borrowing header/status chrome.
+    if (message.kind === 'tool' && renderedLength > 1) {
+      // The shell command row is CALL presentation, not the result body: a
+      // terminal/local-shell card paints `$ command` (or `PS> command`) at row 1,
+      // so its result body starts at row 2. This is a position-only hint, never
+      // an exact channel; the structural predicate avoids mistaking a result
+      // line that merely STARTS with `$ ` for the call row.
+      const commandRow = isLocalShellCard(message) || this.terminalCommand(message.name, message.args) !== ''
+      const rowStart = commandRow ? 2 : 1
+      if (renderedLength > rowStart) {
+        regions.push({
+          sourceKey: transcriptSearchSourceKey({ kind: 'tool-field', field: 'result' }),
+          anchorRow: 0,
+          rowStart,
+          rowEnd: renderedLength,
+          enumerable: false,
+        })
       }
     }
     return regions
@@ -13649,6 +13891,7 @@ export class TuiApp {
     // below; an older epoch's notice must not survive a pass that finds no
     // current block.
     this.searchSourceNotice = undefined
+    this.searchExactChannelAvailable = undefined
     // Every rebuild path prunes the cache to the live set first. The caller
     // supplies the already-derived projection blocks when setTranscript() has
     // classified the commit, so the semantic epoch is projected once.
@@ -13798,8 +14041,10 @@ export class TuiApp {
     // This pass re-derives the current target's cells and Source-only state; an
     // older epoch's notice must not survive it when the target block is absent.
     this.searchSourceNotice = undefined
+    this.searchExactChannelAvailable = undefined
     const remeasureStart = this.scrollProfiler.enabled ? performance.now() : 0
     const renderedBlocks = this.remeasureTranscriptBlocks(this.mountedTranscriptBlocks, width)
+    this.decorateCurrentOwnerHeader(renderedBlocks, width)
     if (this.scrollProfiler.enabled) this.scrollFrameRemeasureMs += performance.now() - remeasureStart
     // Keep the MOUNTED highlight wrapper on the SAME geometry epoch as this
     // row map / scroll anchor: a stale selector would paint a strong occurrence
@@ -13864,6 +14109,7 @@ export class TuiApp {
     this.currentSearchTranscriptRange = undefined
     this.currentSearchPaintedSegments = undefined
     this.searchSourceNotice = undefined
+    this.searchExactChannelAvailable = undefined
     this.searchSourceSnippetMemo = undefined
   }
 

@@ -16,7 +16,13 @@ import test from 'node:test'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { TranscriptFolder, transcriptSearchText, transcriptSearchMatchKey, transcriptSearchSourceKey, workflowReadablePhase, type TranscriptMessage, type TranscriptSearchMatch } from '../../src/transcript.ts'
-import { refreshedSearchState, steppedSearchOverlayState } from '../../src/app/surface/search-overlay.ts'
+import {
+  projectFullFindNavigationTargets,
+  recoverFullNavigationTargetIndex,
+  refreshedSearchState,
+  stepFullNavigationTarget,
+  steppedFullNavigationTarget,
+} from '../../src/app/surface/search-overlay.ts'
 import type { AssistantLiveChunk, AssistantLiveInput } from '../../src/runtime/assistant-stream-port.ts'
 
 /** Build a minimal event envelope for tests. The type parameter is widened
@@ -332,6 +338,10 @@ test('same-turn adjacent reads merge into ONE representative card, parity kept',
   assert.equal(matches.length, 3, 'one logical card -> one occurrence per member result')
   assert.ok(matches.every(match => match.turn === 0))
   assert.equal(new Set(matches.map(match => match.id)).size, 1, 'every occurrence belongs to the one representative card')
+  assert.equal(folder.searchRepresentativeMemberCount(matches[0]!.id), 3, 'the Folder reports the representative group membership')
+  assert.equal(folder.searchRepresentativeMemberCount(matches[0]!.id + 1), 1,
+    'a non-representative member is never treated as another navigation card')
+  assert.equal(folder.searchRepresentativeMemberCount(-1), 1, 'an ordinary/nonexistent id has no read-group membership')
   // The legacy merged card searches "read N files <results>" — no member paths.
   assert.equal(legacySearchForTest(folder, 'src/b.ts').length, 0)
   assert.equal(folder.search('src/b.ts').length, 0, 'member paths are NOT searchable: strict legacy parity')
@@ -936,21 +946,16 @@ test('streaming lowercasing is whole-string — Greek sigma across chunk boundar
 test('stale overlay edge: Next/Prev discover a match that arrived AFTER an empty search (P1)', () => {
   const folder = new TranscriptFolder()
   folder.hydrate([turnStart(0, 0), userMessage(1, 'alpha only'), turnEnd(2, 0)])
-  // The overlay searched with zero matches...
   const empty = folder.search('needle-new')
   assert.equal(empty.length, 0)
   const state = { matches: empty, current: -1, query: 'needle-new', revision: folder.searchRevision(), folder }
-  // ...and a matching message arrives while it stays open.
   folder.apply([turnStart(3, 1), userMessage(4, 'a needle-new live message', 1), turnEnd(5, 1)])
-  // The RUNNER's handler path (the production seam onSearchNext/Prev call):
-  // the empty candidate list must be refreshed BEFORE the emptiness check,
-  // or the live match is never discoverable.
-  const next = steppedSearchOverlayState(state, folder, 1)
-  assert.equal(next.matches.length, 1, 'Next must find the live new match')
-  assert.equal(next.current, 0, 'Next steps onto the newly arrived match')
-  const prev = steppedSearchOverlayState(state, folder, -1)
-  assert.equal(prev.matches.length, 1, 'Prev must find the live new match too')
-  assert.equal(prev.current, 0)
+  const refreshed = refreshedSearchState(state, folder)
+  const targets = projectFullFindNavigationTargets(refreshed.matches, id => folder.searchRepresentativeMemberCount(id))
+  assert.equal(targets.length, 1, 'the current Folder result becomes a navigation candidate')
+  assert.equal(steppedFullNavigationTarget(-1, 0, targets.length, 1), 0, 'Next enters the newly arrived target')
+  assert.equal(steppedFullNavigationTarget(-1, 0, targets.length, -1), 0, 'Prev enters the sole target symmetrically')
+  assert.equal(steppedFullNavigationTarget(0, 0, 2, 1), 1, 'an existing current target still steps past the first')
 })
 
 test('stale overlay edge: an EMPTIED result set clamps to -1 (the 0/0 counter) (P2)', () => {
@@ -969,30 +974,29 @@ test('stale overlay edge: an EMPTIED result set clamps to -1 (the 0/0 counter) (
   const refreshed = refreshedSearchState(state, folder)
   assert.equal(refreshed.changed, true)
   assert.equal(refreshed.matches.length, 0)
-  assert.equal(refreshed.current, -1, 'an emptied result set must clamp to -1, never 0 (0/0 counter)')
-  // The runner's Next/Prev seam steps an emptied list to -1 as well.
-  const next = steppedSearchOverlayState(state, folder, 1)
-  assert.equal(next.current, -1)
-  assert.equal(next.matches.length, 0)
+  assert.equal(refreshed.current, -1, 'an emptied semantic result set clamps to -1')
+  const targets = projectFullFindNavigationTargets(refreshed.matches, id => folder.searchRepresentativeMemberCount(id))
+  assert.equal(targets.length, 0)
+  assert.equal(stepFullNavigationTarget(0, targets.length, 1), -1)
+  assert.equal(stepFullNavigationTarget(0, targets.length, -1), -1)
 })
 
-test('stale overlay edge: Next enters the fresh list at the FIRST match, Prev at the LAST (P2)', () => {
+test('stale overlay edge: Next enters the first fresh target and Prev the last (P2)', () => {
   const folder = new TranscriptFolder()
   folder.hydrate([turnStart(0, 0), userMessage(1, 'alpha only'), turnEnd(2, 0)])
   const empty = folder.search('needle-new')
   assert.equal(empty.length, 0)
   const state = { matches: empty, current: -1, query: 'needle-new', revision: folder.searchRevision(), folder }
-  // TWO matching messages arrive while the overlay stays open.
   folder.apply([
     turnStart(3, 1), userMessage(4, 'one needle-new live message', 1), turnEnd(5, 1),
     turnStart(6, 2), userMessage(7, 'two needle-new live messages', 2), turnEnd(8, 2),
   ])
-  const next = steppedSearchOverlayState(state, folder, 1)
-  assert.equal(next.matches.length, 2)
-  assert.equal(next.current, 0, 'Next must enter the fresh list at the FIRST match, never skip it (round-12 finding)')
-  const prev = steppedSearchOverlayState(state, folder, -1)
-  assert.equal(prev.matches.length, 2)
-  assert.equal(prev.current, 1, 'Prev enters the fresh list at the LAST match')
+  const refreshed = refreshedSearchState(state, folder)
+  const targets = projectFullFindNavigationTargets(refreshed.matches, id => folder.searchRepresentativeMemberCount(id))
+  assert.equal(targets.length, 2)
+  assert.equal(steppedFullNavigationTarget(-1, 0, targets.length, 1), 0, 'Next enters at the first target')
+  assert.equal(steppedFullNavigationTarget(-1, 0, targets.length, -1), 1, 'Prev enters at the last target')
+  assert.equal(steppedFullNavigationTarget(-1, 0, 0, 1), -1, 'an empty refreshed list steps to -1')
 })
 
 test('lazy normalization scans ONLY the dirty entries, never the history (P2)', () => {
@@ -1352,20 +1356,77 @@ test('overlay occurrence: a vanished source occurrence clamps into the surviving
   assert.equal(refreshed.matches[refreshed.current]!.id, initial[1]!.id, 'the surviving occurrence of the same card is chosen')
 })
 
-test('overlay occurrence: Next/Prev step through a single card occurrences then wrap', () => {
+test('Full navigation folds a real read group into one card target without changing raw matches', () => {
   const folder = new TranscriptFolder()
-  folder.hydrate([turnStart(0, 0), userMessage(1, 'foo foo foo'), turnEnd(2, 0)])
-  const initial = folder.search('foo')
-  let state = { matches: initial, current: 0, query: 'foo', revision: folder.searchRevision(), folder }
-  const seen: number[] = [state.current]
-  for (let step = 0; step < 4; step += 1) {
-    const stepped = steppedSearchOverlayState(state, folder, 1)
-    state = { matches: stepped.matches, current: stepped.current, query: 'foo', revision: stepped.revision, folder }
-    seen.push(state.current)
+  folder.hydrate([
+    turnStart(0, 0),
+    readToolCall(1, 'r1', 'src/a.ts', 0), toolResult(2, 'r1', 'needle A'),
+    readToolCall(3, 'r2', 'src/b.ts', 0), toolResult(4, 'r2', 'needle B'),
+    readToolCall(5, 'r3', 'src/c.ts', 0), toolResult(6, 'r3', 'needle C'),
+    userMessage(7, 'needle in the next card'),
+    turnEnd(8, 0),
+  ])
+  const matches = folder.search('needle')
+  assert.equal(matches.length, 4, 'Folder keeps all semantic raw occurrences')
+  const readId = matches[0]!.id
+  assert.equal(folder.searchRepresentativeMemberCount(readId), 3, 'the Folder owns this actual merged read membership')
+  const targets = projectFullFindNavigationTargets(matches, id => folder.searchRepresentativeMemberCount(id))
+  assert.equal(targets.length, 2, 'three unresolved read hits project to one card plus the next card')
+  assert.equal(targets[0]!.kind, 'card')
+  if (targets[0]!.kind !== 'card') assert.fail('the grouped read is a card target')
+  assert.equal(targets[0]!.groupedMatchKeys.length, 3)
+  assert.equal(targets[1]!.kind, 'occurrence')
+  assert.equal(stepFullNavigationTarget(0, targets.length, 1), 1, 'one Next skips the rest of the unresolved group')
+  assert.equal(stepFullNavigationTarget(1, targets.length, -1), 0, 'Prev returns to the card target')
+  assert.equal(stepFullNavigationTarget(0, 1, 1), 0, 'a single card target does not advance or re-target')
+  assert.equal(folder.search('needle').length, 4, 'navigation projection never mutates Folder semantic hits')
+})
+
+test('Full navigation keeps exact occurrences around one contiguous unresolved source run', () => {
+  const folder = new TranscriptFolder()
+  folder.hydrate([turnStart(0, 0), userMessage(1, 'needle A needle B needle C'), turnEnd(2, 0)])
+  const matches = folder.search('needle')
+  const qualifications = new Map([
+    [transcriptSearchMatchKey(matches[0]!), {
+      semanticMatchKey: transcriptSearchMatchKey(matches[0]!), representativeId: matches[0]!.id,
+      currentnessEpoch: 1, verdict: 'exact' as const, groupScope: 'occurrence' as const,
+    }],
+    [transcriptSearchMatchKey(matches[1]!), {
+      semanticMatchKey: transcriptSearchMatchKey(matches[1]!), representativeId: matches[1]!.id,
+      currentnessEpoch: 1, verdict: 'card' as const, groupScope: 'source-run' as const,
+    }],
+    [transcriptSearchMatchKey(matches[2]!), {
+      semanticMatchKey: transcriptSearchMatchKey(matches[2]!), representativeId: matches[2]!.id,
+      currentnessEpoch: 1, verdict: 'exact' as const, groupScope: 'occurrence' as const,
+    }],
+  ])
+  const targets = projectFullFindNavigationTargets(matches, id => folder.searchRepresentativeMemberCount(id), qualifications)
+  assert.deepEqual(targets.map(target => target.kind), ['occurrence', 'card', 'occurrence'])
+  assert.deepEqual(targets.map(target => target.match.occurrence), [0, 1, 2], 'raw order is preserved')
+  assert.equal(recoverFullNavigationTargetIndex(targets[1], targets, 1), 1, 'stable raw keys recover the card run')
+  assert.deepEqual(matches.map(match => match.occurrence), [0, 1, 2], 'the semantic corpus remains occurrence-level')
+})
+
+test('a non-exact Full target collapses all matching occurrences of one ordinary card', () => {
+  const folder = new TranscriptFolder()
+  folder.hydrate([turnStart(0, 0), userMessage(1, 'needle A needle B needle C'), turnEnd(2, 0)])
+  const matches = folder.search('needle')
+  const first = matches[0]!
+  const qualification = {
+    semanticMatchKey: transcriptSearchMatchKey(first),
+    representativeId: first.id,
+    currentnessEpoch: 1,
+    verdict: 'auxiliary' as const,
+    groupScope: 'whole-card' as const,
   }
-  assert.deepEqual(seen, [0, 1, 2, 0, 1], 'Next walks occurrences inside the card and wraps')
-  const prev = steppedSearchOverlayState(state, folder, -1)
-  assert.equal(prev.current, 0)
+  const targets = projectFullFindNavigationTargets(
+    matches,
+    id => folder.searchRepresentativeMemberCount(id),
+    new Map([[qualification.semanticMatchKey, qualification]]),
+  )
+  assert.equal(targets.length, 1)
+  assert.equal(targets[0]!.kind, 'card')
+  if (targets[0]!.kind === 'card') assert.equal(targets[0]!.groupedMatchKeys.length, 3)
 })
 
 // ── Corpus compatibility + cross-span source ownership (round-1 findings) ──

@@ -25,9 +25,8 @@ import { color } from '../../theme/runtime.ts'
 
 const graphemeSegmenter = getGraphemeSegmenter()
 
-/** The weak highlight of a visible non-current occurrence — the native
- * fullscreen search default. */
-const SEARCH_MATCH_STYLE = (text: string): string => `\x1b[4m${text}\x1b[24m`
+/** The weak highlight of every visible non-current occurrence. */
+const SEARCH_MATCH_STYLE = (text: string): string => color.searchMatch(text)
 
 /** The strong highlight of the current occurrence: bold + explicit theme-aware
  * foreground/background (plan S3 §6.2). Deliberately NOT the terminal's inverse
@@ -36,6 +35,14 @@ const SEARCH_CURRENT_MATCH_STYLE = (text: string): string => color.searchCurrent
 
 /** The anchor-only current result's row wash (weaker than the exact block). */
 const SEARCH_ANCHOR_STYLE = (text: string): string => color.searchAnchorBg(text)
+
+/** The current card's real visible anchor: the same orange role as the exact
+ * block, without the bold weight that only a source-proven occurrence owns.
+ * `styleVisibleText` passes embedded SGR sequences through verbatim and styles
+ * only the plain runs, so the anchor must switch intensity OFF inside its own
+ * style: a bold Markdown heading / emphasised first line would otherwise stay
+ * bold + orange and visually impersonate a proven exact block. */
+const SEARCH_CARD_ANCHOR_STYLE = (text: string): string => color.searchCardAnchor(`\x1b[22m${text}`)
 
 const KITTY_IMAGE_PREFIX = '\x1b_G'
 const ITERM2_IMAGE_PREFIX = '\x1b]1337;File='
@@ -127,6 +134,9 @@ export interface RenderedSearchSelection {
    * Host Assistant Markdown card); it expires with the selection and is never
    * persisted or used as match identity. */
   readonly exactPaintedSegments?: readonly AltScreenSearchSegment[]
+  /** The current card's actual visible title/anchor cells. Painted before weak
+   * matches so a visible homonym remains yellow rather than becoming exact. */
+  readonly cardAnchor?: { readonly row: number; readonly startCol: number; readonly endCol: number }
   /** Why the CURRENT Full target has no exact cells, when it has none:
    * `not-painted` means the source text itself has no visible cell here (a
    * hidden link destination, a consumed Visual marker); `unproven` means the
@@ -185,6 +195,10 @@ function matchInsideRegion(match: AltScreenSearchMatch, region: SearchSourceRegi
     }
   }
   return true
+}
+
+export function searchMatchInsideRegion(match: AltScreenSearchMatch, region: SearchSourceRegion): boolean {
+  return matchInsideRegion(match, region)
 }
 
 function graphemeBoundaries(text: string): Set<number> {
@@ -482,7 +496,8 @@ export function highlightSearchLines(
   selection: RenderedSearchSelection,
 ): string[] {
   let result = [...lines]
-  if (selection.matches.length > 0 || (selection.exactPaintedSegments?.length ?? 0) > 0) {
+  if (selection.matches.length > 0 || (selection.exactPaintedSegments?.length ?? 0) > 0
+    || selection.cardAnchor !== undefined || (!selection.exact && selection.selectedRow !== undefined)) {
     // Strong cells first (proof segments AND the selected rendered ordinal),
     // weak occurrences only fill what is left. The two sets can overlap with
     // different boundaries (Unicode ignore-case vs lowercase), so they are
@@ -504,30 +519,54 @@ export function highlightSearchLines(
       pushRange(strongByRow, segment.row, { startCol: segment.startCol, endCol: segment.endCol })
     }
 
+    const rows = new Set([...strongByRow.keys(), ...weakByRow.keys()])
+    if (selection.cardAnchor !== undefined) rows.add(selection.cardAnchor.row)
+    if (!selection.exact && selection.cardAnchor === undefined && selection.selectedRow !== undefined) rows.add(selection.selectedRow)
     const rangesByRow = new Map<number, RenderedColumnHighlight[]>()
-    for (const row of new Set([...strongByRow.keys(), ...weakByRow.keys()])) {
+    for (const row of rows) {
       const strongRanges = mergeColumnRanges(strongByRow.get(row) ?? [])
       const weakRanges = subtractColumnRanges(mergeColumnRanges(weakByRow.get(row) ?? []), strongRanges)
+      const occupied = mergeColumnRanges([...strongRanges, ...weakRanges])
+      const anchorRange = selection.cardAnchor?.row === row
+        ? [{ startCol: selection.cardAnchor.startCol, endCol: selection.cardAnchor.endCol }]
+        : !selection.exact && selection.cardAnchor === undefined && selection.selectedRow === row
+          ? [{ startCol: 0, endCol: visibleWidth(lines[row] ?? '') }]
+          : []
+      const anchor = subtractColumnRanges(anchorRange, occupied)
+      const anchorStyle = selection.cardAnchor?.row === row
+        ? SEARCH_CARD_ANCHOR_STYLE
+        : SEARCH_ANCHOR_STYLE
       rangesByRow.set(row, [
         ...strongRanges.map(range => ({ range, style: SEARCH_CURRENT_MATCH_STYLE })),
         ...weakRanges.map(range => ({ range, style: SEARCH_MATCH_STYLE })),
+        ...anchor.map(range => ({ range, style: anchorStyle })),
       ])
     }
     result = highlightColumnRanges(result, rangesByRow)
   }
-  // The ANCHOR-ONLY current result (plan S3 §6.3): no proven occurrence, so
-  // every match stays weak — but the owning source/card row gets a weaker
-  // background so the user can still see WHERE the current N/M lives. Any
-  // exact channel keeps its own strong cells unwashed. The occurrence
-  // provenance (selectedIndex = -1), the count and the scroll anchor are all
-  // unchanged. This applies EVEN with no visible occurrence: the source region
-  // is the honest anchor in that case.
-  if (!selection.exact && selection.selectedRow !== undefined) {
-    const row = selection.selectedRow
-    const line = result[row]
-    if (line !== undefined && !isImageLine(line)) result[row] = styleVisibleText(line, SEARCH_ANCHOR_STYLE)
-  }
   return result
+}
+
+/** The REAL visible anchor of a rendered card: its first non-empty, non-image
+ * text row, trimmed to the painted text columns. This is presentation geometry
+ * for the current card header only — never a semantic occurrence, never a
+ * source-cell proof, and never persisted. */
+export function cardAnchorForRenderedLines(
+  lines: readonly string[],
+): { readonly row: number; readonly startCol: number; readonly endCol: number } | undefined {
+  for (let row = 0; row < lines.length; row += 1) {
+    const line = lines[row]!
+    if (isImageLine(line)) continue
+    const plain = stripTerminalSequences(line)
+    const trimmed = plain.replace(/\s+$/u, '')
+    const startText = trimmed.replace(/^\s+/u, '')
+    if (startText === '') continue
+    const endCol = visibleWidth(trimmed)
+    const startCol = endCol - visibleWidth(startText)
+    if (endCol <= startCol) continue
+    return { row, startCol, endCol }
+  }
+  return undefined
 }
 
 /** Structural line-identity compare: the fork caches render output by

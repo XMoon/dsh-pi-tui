@@ -142,6 +142,7 @@ import { initialStatusSnapshot } from '../../domain/status/snapshot.ts'
 import { deriveActivityStatus, type ActivityFacts } from '../../domain/status/derive-activity.ts'
 import { plainSectionEqual } from '../../domain/status/equal.ts'
 import { assistantPresentationRevision, assistantStepOf, type TranscriptFolder } from '../../domain/transcript/folder.ts'
+import { transcriptSearchMatchKey } from '../../domain/transcript/search.ts'
 import type { TranscriptMessage, TurnActivity } from '../../domain/transcript/types.ts'
 import { eligibleFinalAssistant } from '../../domain/transcript/final-assistant.ts'
 import { deliveredTurnsOf, type DeliveredFilesCapability, type DeliveredFilesSnapshot } from '../../domain/deliverables/catalog.ts'
@@ -158,7 +159,14 @@ import type { TranscriptSearchMatch } from '../../domain/transcript/search.ts'
 import type { TranscriptWindowController } from '../../domain/transcript/window.ts'
 import { streamingToolPreviewSnapshot, type StreamingToolPreview } from './streaming-tool-preparing.ts'
 import { buildPendingPresentation } from './pending-presentation.ts'
-import { refreshedSearchState, steppedSearchOverlayState } from './search-overlay.ts'
+import {
+  projectFullFindNavigationTargets,
+  recoverFullNavigationTargetIndex,
+  refreshedSearchState,
+  steppedFullNavigationTarget,
+  type FullFindNavigationQualification,
+  type FullFindNavigationTarget,
+} from './search-overlay.ts'
 import { createSearchProfiler, searchProfilingEnabled, type SearchProfile } from './search-profile.ts'
 import { createOpeningJournal, type OpeningJournal } from './opening-journal.ts'
 import { parseTerminalProgressMode, type TerminalProgressOutcome } from '../../domain/terminal-progress/settings.ts'
@@ -2413,7 +2421,16 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
   // stays in search-overlay.ts. The runner owns the folder instances and
   // supplies them through the routing source.
   let searchMatches: TranscriptSearchMatch[] = []
+  /** Raw semantic index of the navigation target's representative match. */
   let searchCurrent = -1
+  let navigationTargets: FullFindNavigationTarget[] = []
+  let navigationCurrent = -1
+  const navigationQualifications = new Map<string, FullFindNavigationQualification>()
+  /** Stable key of the match the mounted TuiApp last presented. A merged card
+   * target may represent its group by the FIRST occurrence, while the explicit
+   * jump that created it presented a LATER occurrence; identity checks and
+   * subsequent qualification must use the match actually on screen. */
+  let presentedNavigationMatchKey: string | undefined
   let activeSearchScope: TranscriptSearchScope | undefined
   let activeSearchQuery = ''
   // Opt-in local wall-clock profiling of the Ctrl+F hot path (perf plan S1
@@ -2435,6 +2452,34 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
    * published representative objects (weak-highlight scope). */
   let searchMatchRepresentativeIds: number[] = []
   let searchMatchMessages: ReadonlySet<TranscriptMessage> = new Set()
+  const navigationMatchKey = (target: FullFindNavigationTarget | undefined): string | undefined =>
+    target === undefined ? undefined : target.kind === 'occurrence' ? target.matchKey : transcriptSearchMatchKey(target.match)
+  const publishNavigationTarget = (): void => {
+    // The projection carries the raw result index; never re-scan 3k+ matches per
+    // step just to recover an index the projection already knows.
+    searchCurrent = navigationTargets[navigationCurrent]?.matchIndex ?? -1
+  }
+  const rebuildFullNavigationTargets = (
+    folder: TranscriptFolder,
+    previous: FullFindNavigationTarget | undefined,
+    previousIndex: number,
+    preferredMatchKey?: string,
+  ): void => {
+    navigationTargets = projectFullFindNavigationTargets(
+      searchMatches,
+      id => folder.searchRepresentativeMemberCount(id),
+      navigationQualifications,
+    )
+    const preferredIndex = preferredMatchKey === undefined ? -1 : navigationTargets.findIndex(target =>
+      target.kind === 'occurrence'
+        ? target.matchKey === preferredMatchKey
+        : target.groupedMatchKeys.includes(preferredMatchKey),
+    )
+    navigationCurrent = preferredIndex >= 0
+      ? preferredIndex
+      : recoverFullNavigationTargetIndex(previous, navigationTargets, previousIndex)
+    publishNavigationTarget()
+  }
   const sameMessageSet = (left: ReadonlySet<TranscriptMessage>, right: ReadonlySet<TranscriptMessage>): boolean => {
     if (left.size !== right.size) return false
     for (const message of left) if (!right.has(message)) return false
@@ -2524,10 +2569,14 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     // Only a runner that actually holds search state needs to publish the
     // atomic clear: an unconditional empty commit would force a pointless
     // message-tree rebuild on every Ctrl+End in regular fullscreen use.
-    const hadState = lastSearchQuery !== '' || searchMatches.length > 0
+    const hadState = lastSearchQuery !== '' || searchMatches.length > 0 || navigationTargets.length > 0
       || searchMatchRepresentativeIds.length > 0 || searchMatchMessages.size > 0
     searchMatches = []
     searchCurrent = -1
+    navigationTargets = []
+    navigationCurrent = -1
+    navigationQualifications.clear()
+    presentedNavigationMatchKey = undefined
     lastSearchQuery = ''
     lastSearchRevision = 0
     lastSearchFolder = undefined
@@ -2562,7 +2611,9 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     // not move).
     refreshSearchMatchesIfStale()
     refreshSearchMatchMessages()
-    return { matchMessages: resolveSearchMatchMessages(), target: resolveSearchTarget(), grantReveal: false }
+    const target = resolveSearchTarget()
+    presentedNavigationMatchKey = target === undefined ? undefined : transcriptSearchMatchKey(target.match)
+    return { matchMessages: resolveSearchMatchMessages(), target, grantReveal: false }
   }
   // PR D1 P1: while the search overlay is open the transcript keeps
   // changing (settlements, read-group reflow, new messages), so Next/Prev
@@ -2572,16 +2623,26 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
   // previously current OCCURRENCE by its match key, and clamps the index.
   const refreshSearchMatchesIfStale = (): void => {
     const folder = activeFolder()
+    const previous = navigationTargets[navigationCurrent]
+    const previousIndex = navigationCurrent
     const refreshed = refreshedSearchState(
       { matches: searchMatches, current: searchCurrent, query: lastSearchQuery, revision: lastSearchRevision, folder: lastSearchFolder },
       folder,
     )
     if (!refreshed.changed) return
     searchMatches = refreshed.matches
-    searchCurrent = refreshed.current
     lastSearchRevision = refreshed.revision
     lastSearchFolder = folder
-    displaySeam().setSearchResult(searchCurrent + 1, searchMatches.length)
+    navigationQualifications.clear()
+    rebuildFullNavigationTargets(
+      folder,
+      previous,
+      previousIndex,
+      refreshed.matches[refreshed.current] === undefined
+        ? undefined
+        : transcriptSearchMatchKey(refreshed.matches[refreshed.current]!),
+    )
+    displaySeam().setSearchResult(navigationCurrent + 1, navigationTargets.length)
   }
   /** The search presentation for an EXPLICIT navigation: `grantReveal` so the
    * temporary reveal is (re-)granted, and the representative set / target
@@ -2595,14 +2656,73 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       grantReveal: true,
     }
   }
+  /** Commit only the qualification the mounted TuiApp just proved for this
+   * target. The projection remains disposable overlay state; semantic matches
+   * and representative sets stay Folder-derived. */
+  const commitCurrentNavigationQualification = (
+    folder: TranscriptFolder,
+    match: TranscriptSearchMatch,
+  ): void => {
+    const qualification = mounted().currentFullNavigationQualification()
+    if (qualification === undefined) return
+    const key = transcriptSearchMatchKey(match)
+    if (qualification.semanticMatchKey !== key || qualification.representativeId !== match.id) return
+    if (activeFolder() !== folder || lastSearchFolder !== folder || folder.searchRevision() !== lastSearchRevision) return
+    const current = navigationTargets[navigationCurrent]
+    const previousQualification = navigationQualifications.get(key)
+    navigationQualifications.set(key, qualification)
+    // An EXACT occurrence stays an occurrence: its grouping shape cannot change,
+    // so the O(matches) target projection does not need to run per step.
+    if (current?.kind === 'occurrence'
+      && qualification.verdict === 'exact' && qualification.groupScope === 'occurrence') {
+      displaySeam().setSearchResult(navigationCurrent + 1, navigationTargets.length)
+      return
+    }
+    // Re-projection is only needed when this target's grouping can actually
+    // change (first card qualification or a changed verdict/scope).
+    if (previousQualification !== undefined
+      && previousQualification.verdict === qualification.verdict
+      && previousQualification.groupScope === qualification.groupScope) {
+      displaySeam().setSearchResult(navigationCurrent + 1, navigationTargets.length)
+      return
+    }
+    const previousIndex = navigationCurrent
+    rebuildFullNavigationTargets(folder, current, previousIndex, key)
+    displaySeam().setSearchResult(navigationCurrent + 1, navigationTargets.length)
+  }
+
+  /** Re-qualify the CURRENT target from the live TuiApp frame. Called before
+   * every explicit step so a disclosure/theme/resize change (which rebuilds the
+   * frame without necessarily changing the folder revision) cannot keep a stale
+   * card grouping. The projection changes, never the semantic corpus. */
+  const syncCurrentNavigationQualification = (folder: TranscriptFolder): void => {
+    const current = navigationTargets[navigationCurrent]
+    if (current === undefined) return
+    if (lastSearchFolder !== folder || lastSearchRevision !== folder.searchRevision()) return
+    const presentedKey = presentedNavigationMatchKey
+    if (presentedKey === undefined) return
+    const qualification = mounted().currentFullNavigationQualification()
+    if (qualification === undefined) return
+    if (qualification.semanticMatchKey !== presentedKey || qualification.representativeId !== current.match.id) return
+    const previous = navigationQualifications.get(presentedKey)
+    // The presentation revision moves on every jump; only a verdict/scope
+    // change can change the grouping, so never re-project for the epoch alone.
+    if (previous !== undefined
+      && previous.verdict === qualification.verdict
+      && previous.groupScope === qualification.groupScope) return
+    navigationQualifications.set(presentedKey, qualification)
+    const previousIndex = navigationCurrent
+    rebuildFullNavigationTargets(folder, current, previousIndex, presentedKey)
+    displaySeam().setSearchResult(navigationCurrent + 1, navigationTargets.length)
+  }
   const jumpToSearchMatch = (): void => {
-    // `jumpToSearchMatch` is the ONLY caller of the stale refresh and the ONLY
-    // place that derives the representative ids: one O(searchMatches) dedupe
-    // pass per operation, over the FINAL result set (a 3000-result query must
-    // not pay it two or three times per keystroke).
+    // Refresh before resolving the projected target. Full target count may
+    // differ from the Folder's raw occurrence count, but raw match identity is
+    // the only authority used to resolve the visible representative.
     refreshSearchMatchesIfStale()
     refreshSearchMatchMessages()
-    const match = searchMatches[searchCurrent]
+    const navigationTarget = navigationTargets[navigationCurrent]
+    const match = navigationTarget?.match
     if (match === undefined) {
       // Publish the current (empty) representative set AND the cleared target
       // in ONE atomic commit. A bare setTranscriptSearchTarget(undefined)
@@ -2618,6 +2738,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       // step (same empty set, target already cleared) is a no-op and MUST NOT
       // be reported as a rebuild.
       if (mounted().setTranscriptSearchPresentation(presentation)) searchProfiler.stage('search.rebuild')
+      presentedNavigationMatchKey = undefined
       displaySeam().setSearchResult(0, 0)
       return
     }
@@ -2639,7 +2760,9 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       if (mounted().setTranscriptSearchPresentation(presentation)) searchProfiler.stage('search.rebuild')
       mounted().scrollToSearchTarget()
       searchProfiler.stage('search.scroll')
-      displaySeam().setSearchResult(searchCurrent + 1, searchMatches.length)
+      presentedNavigationMatchKey = transcriptSearchMatchKey(match)
+      commitCurrentNavigationQualification(folder, match)
+      displaySeam().setSearchResult(navigationCurrent + 1, navigationTargets.length)
       return
     }
     // Off-window: ONE fold snapshot (plan §19) — the anchored message window
@@ -2664,7 +2787,9 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     searchBoundRevision = folder.searchRevision()
     mounted().scrollToSearchTarget()
     searchProfiler.stage('search.scroll')
-    displaySeam().setSearchResult(searchCurrent + 1, searchMatches.length)
+    presentedNavigationMatchKey = transcriptSearchMatchKey(match)
+    commitCurrentNavigationQualification(folder, match)
+    displaySeam().setSearchResult(navigationCurrent + 1, navigationTargets.length)
   }
 
   // Virtual history boundaries preserve the rendered overlap anchor;
@@ -2802,10 +2927,9 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     activeSearchQuery = query
     searchProfiler.start()
     const folder = activeFolder()
-    // Prefix refinement reuses the previous candidate set only when the
-    // query EXTENDS it on the SAME folder; the folder itself also
-    // requires an unchanged projection revision (a live append or group
-    // reflow between queries invalidates the candidates).
+    // Prefix refinement remains entirely Folder-owned and preserves every raw
+    // semantic occurrence. The overlay projects temporary navigation units only
+    // after the authoritative result list is complete.
     searchMatches = folder.search(query, lastSearchQuery !== '' && folder === lastSearchFolder
       ? { previousQuery: lastSearchQuery, previousMatches: searchMatches, revision: lastSearchRevision }
       : undefined)
@@ -2813,11 +2937,13 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     lastSearchQuery = query
     lastSearchRevision = folder.searchRevision()
     lastSearchFolder = folder
-    searchCurrent = searchMatches.length > 0 ? 0 : -1
-    // The jump owns the single representative pass for this operation.
-    // Always run the jump path: an empty/no-match query must CLEAR the
-    // stale search presentation target (0/0), not leave the previous
-    // reveal/highlight on screen.
+    navigationQualifications.clear()
+    navigationTargets = projectFullFindNavigationTargets(
+      searchMatches,
+      id => folder.searchRepresentativeMemberCount(id),
+    )
+    navigationCurrent = navigationTargets.length > 0 ? 0 : -1
+    publishNavigationTarget()
     jumpToSearchMatch()
     searchProfiler.end()
   }
@@ -2828,24 +2954,30 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     }
     if (activeSearchScope !== 'full') return
     searchProfiler.start()
-    // PR D1 P1: refresh BEFORE stepping — an empty candidate list
-    // still refreshes (a match that arrived while the overlay stayed
-    // open must be discoverable), and the step is computed on the
-    // REFRESHED list. The policy lives in steppedSearchOverlayState,
-    // shared by both handlers.
-    const folder = activeFolder()
-    const stepped = steppedSearchOverlayState(
-      { matches: searchMatches, current: searchCurrent, query: lastSearchQuery, revision: lastSearchRevision, folder: lastSearchFolder },
-      folder,
-      1,
-    )
-    searchMatches = stepped.matches
-    searchCurrent = stepped.current
-    lastSearchRevision = stepped.revision
-    lastSearchFolder = folder
-    // The jump owns the single representative pass for this operation.
-    // An emptied list steps to -1: the jump path still runs so the
-    // stale target/highlight is cleared (0/0).
+    // The overlay can gain its FIRST targets while it stays open. The
+    // pre-refresh index is the entry sentinel: Next must land on the FIRST
+    // fresh target, Prev on the LAST, never one step past it.
+    const previousCurrent = navigationCurrent
+    refreshSearchMatchesIfStale()
+    syncCurrentNavigationQualification(activeFolder())
+    if (navigationTargets.length === 0) {
+      jumpToSearchMatch()
+      searchProfiler.end()
+      return
+    }
+    const current = navigationTargets[navigationCurrent]
+    const next = steppedFullNavigationTarget(previousCurrent, navigationCurrent, navigationTargets.length, 1)
+    if (next === navigationCurrent && current?.kind === 'card') {
+      // A single card target is already on screen: keep 1/1 without rebuilding,
+      // but only when the presented match really belongs to this card.
+      if (presentedNavigationMatchKey !== undefined && current.groupedMatchKeys.includes(presentedNavigationMatchKey)) {
+        displaySeam().setSearchResult(navigationCurrent + 1, navigationTargets.length)
+        searchProfiler.end()
+        return
+      }
+    }
+    navigationCurrent = next
+    publishNavigationTarget()
     jumpToSearchMatch()
     searchProfiler.end()
   }
@@ -2856,17 +2988,25 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     }
     if (activeSearchScope !== 'full') return
     searchProfiler.start()
-    const folder = activeFolder()
-    const stepped = steppedSearchOverlayState(
-      { matches: searchMatches, current: searchCurrent, query: lastSearchQuery, revision: lastSearchRevision, folder: lastSearchFolder },
-      folder,
-      -1,
-    )
-    searchMatches = stepped.matches
-    searchCurrent = stepped.current
-    lastSearchRevision = stepped.revision
-    lastSearchFolder = folder
-    // The jump owns the single representative pass for this operation.
+    const previousCurrent = navigationCurrent
+    refreshSearchMatchesIfStale()
+    syncCurrentNavigationQualification(activeFolder())
+    if (navigationTargets.length === 0) {
+      jumpToSearchMatch()
+      searchProfiler.end()
+      return
+    }
+    const current = navigationTargets[navigationCurrent]
+    const previous = steppedFullNavigationTarget(previousCurrent, navigationCurrent, navigationTargets.length, -1)
+    if (previous === navigationCurrent && current?.kind === 'card') {
+      if (presentedNavigationMatchKey !== undefined && current.groupedMatchKeys.includes(presentedNavigationMatchKey)) {
+        displaySeam().setSearchResult(navigationCurrent + 1, navigationTargets.length)
+        searchProfiler.end()
+        return
+      }
+    }
+    navigationCurrent = previous
+    publishNavigationTarget()
     jumpToSearchMatch()
     searchProfiler.end()
   }

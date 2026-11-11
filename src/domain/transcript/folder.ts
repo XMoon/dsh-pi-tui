@@ -4400,6 +4400,16 @@ export class TranscriptFolder {
     return matches
   }
 
+  /** The current Folder-owned member count of one representative read card.
+   * Non-representative ids deliberately report one: navigation projects only
+   * visible representative matches and must not infer membership from card
+   * presentation fields. */
+  searchRepresentativeMemberCount(id: TranscriptItemId): number {
+    const group = this.groupOf.get(id)
+    if (group === undefined || this.representativeOf(id) !== id) return 1
+    return this.groupMembers.get(group)?.length ?? 1
+  }
+
   /** Resolve one search match to its CURRENT visible card: the merged read
    * group when the matched item is a member now, else the raw item. A group
    * reflow AFTER the query may have replaced the representative card — the
