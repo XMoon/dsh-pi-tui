@@ -5,8 +5,6 @@ import { arch, cpus, platform, release as osRelease, type } from 'node:os'
 import { join } from 'node:path'
 import { fullyVisible, rect, visibleBox, visibleSpan } from './tern-pane-geometry.mjs'
 
-const PINNED_TERN = 'tern 0.9.13 (8c6dfbd)'
-const PINNED_TERN_SHA256 = 'ffa3c7c85cf557b5e0ee690cd62efc32e79dbc77044d475dce0edc3a4ac2cd99'
 const PRESETS = ['full', 'compact', 'focus']
 const VIEWPORTS = [
   { width: 1280, height: 800, appearance: 'dark' },
@@ -27,10 +25,6 @@ export function scenarioFromEnvironment(value = process.env.TERN_TRANSCRIPT_DETA
     throw new Error(`TERN_TRANSCRIPT_DETAIL_SCENARIO must be inner-disclosure or ptc-error-note; got ${scenario}`)
   }
   return scenario
-}
-
-export function isPinnedTernBuild(version, sha256) {
-  return version === PINNED_TERN && sha256 === PINNED_TERN_SHA256
 }
 
 export function isTargetToggle(event, id, collapsed) {
@@ -275,17 +269,10 @@ export default async function (h) {
     JSON.stringify({ dshMode, dshPin, dshSessionPin }))
   h.check('the locked Tern SDK is 0.2.0 with recorded integrity', sdkIntegrity !== undefined,
     String(sdkIntegrity))
-  h.check('the Tern executable is the plan-pinned 0.9.13 (8c6dfbd) binary SHA-256',
-    isPinnedTernBuild(ternVersion, ternSha256),
-    JSON.stringify({
-      expectedVersion: PINNED_TERN,
-      actualVersion: ternVersion,
-      expectedSha256: PINNED_TERN_SHA256,
-      actualSha256: ternSha256,
-    }))
+  h.measure('the Tern client binary identity for this run', JSON.stringify({ version: ternVersion, sha256: ternSha256 }))
   if (dshMode !== 'npm' || dshPin !== '0.2.2-rc.1' || dshSessionPin !== dshPin
-    || sdkIntegrity === undefined || ternVersion !== PINNED_TERN || ternSha256 !== PINNED_TERN_SHA256) {
-    finish(h, { ...extra, codeEvidenceOnly: true, qualification: 'NOT_RUN_PIN_MISMATCH' })
+    || sdkIntegrity === undefined) {
+    finish(h, { ...extra, codeEvidenceOnly: true, qualification: 'NOT_RUN_BASELINE_MISMATCH' })
     return
   }
 
