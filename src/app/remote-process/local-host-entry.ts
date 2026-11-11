@@ -108,7 +108,7 @@ export const HOST_ONLY_PATCH = `# M4-B1 Host-only profile overlay: production Ho
 # row too: the overlay only drops its Direct tuiStartup admission gate so the
 # Workspace Controller's DirectoryPickerController keeps serving
 # 'directoryPicker/list' after the TUI Client is gone. A second picker row
-# here would register 'ctx.directoryPicker' twice.
+# here would register the directory-picker seam twice.
 - id: directory-picker
   inject: []
 
