@@ -191,7 +191,7 @@ test('folder pointer collapses default-expanded active rows and Show more pointe
   await h.paint()
   assert.ok(h.view().includes('Active row'), 'the confirmed active non-current row is auto-expanded')
   let frame = panelFrame(h)
-  let folderLine = lineIndexOf(frame, 'Other · 31')
+  const folderLine = lineIndexOf(frame, 'Other · 31')
   await clickCell(h, 2, folderLine)
   assert.ok(!h.view().includes('Active row'), 'one pointer click honors the effective default-expanded state and collapses it')
   assert.ok(!h.view().includes('Show more sessions'), 'a manually collapsed Workspace contains only its folder header')
@@ -1413,8 +1413,8 @@ test('Tab/Shift+Tab hop between Folder TITLES and never enter a hidden action ri
     ],
   })
   await h.paint()
-  // Home lands on the root Add row; two Down presses enter the Folder and then
-  // one ordinary Session row of it, which is the starting point for Tab.
+  // Home lands on the root Add row; three Down presses reach an ordinary Session
+  // row inside the Folder, which is the starting point for Tab.
   h.vt.sendInput('\x1b[H') // root Add
   await h.paint()
   for (let step = 0; step < 3; step += 1) {
@@ -3495,11 +3495,9 @@ test('M01: a Browse Folder title click toggles it once and never writes the offi
   assert.ok(/^> .*▸ Alpha · 2 · Current/m.test(collapsed),
     `one gesture toggles exactly once, selects the Folder and keeps its official label:\n${collapsed}`)
   assert.ok(collapsed.includes('Sessions · 3'), 'the roster count is unchanged: a click never writes a Workspace')
-  // A same-cell re-click inside the platform double-click window is a text
-  // selection gesture, not a second disclosure: one toggle per gesture.
-  await clickCell(h, 6, folderLineIndexOf(panelFrame(h), 'Alpha'))
-  assert.ok(!h.view().includes('Other title'), `a double click never toggles twice:\n${h.view()}`)
-  // A DISTINCT title click reopens the Folder and its New row is the first child.
+  // A click on a DIFFERENT word of the same title row is a separate gesture (the
+  // terminal reserves a same-word double click for text selection), and it
+  // reopens the Folder with New as its first child.
   await clickCell(h, 20, folderLineIndexOf(panelFrame(h), 'Alpha'))
   const reopened = panelFrame(h)
   const folderLine = folderLineIndexOf(reopened, 'Alpha')
@@ -3660,13 +3658,74 @@ test('H02: resizing never rewinds a watermark and never moves the typed selectio
   assert.equal(count(), at40, 'returning to the same size never grows the watermark again')
   assert.ok(count() <= 20)
   assert.ok(/^> .*H02 9/m.test(h.view()), 'the cursor never jumped back to the top')
+  // A real press repaints the SAME content: the frame revision must survive it,
+  // so the release still selects another painted row. A hidden re-allocation on
+  // that second render would drop the gesture.
+  await clickCell(h, 6, lineIndexOf(panelFrame(h), 'H02 10'))
+  assert.ok(/^> .*H02 10/m.test(h.view()),
+    'a same-size press repaint keeps its frame revision: no hidden re-allocation on the second render')
+})
+
+test('H02B: a growth that exhausts the selected Show more row keeps a painted cursor', async () => {
+  const history = Array.from({ length: 14 }, (_, index) => row(`session-h02b-${index}`, 900 - index, { title: `H02B ${index}` }))
+  const h = harness({ columns: 100, rows: 16 })
+  h.handle.setSnapshot(snapshot({ rows: [row(CURRENT, 3_000, { title: 'H02B current' }), ...history] }))
+  h.handle.updateWorkspaces({ type: 'baseline', items: [
+    { workspaceId: 'ws-a', path: '/ws', title: 'Alpha', sessionIds: [CURRENT, ...history.map(item => item.id)] },
+  ] })
+  await h.paint()
+  h.vt.sendInput('\x1b[F')
+  await h.paint()
+  assert.ok(/^> .*Show more sessions/m.test(h.view()), `the cursor sits on the Show-more row:\n${h.view()}`)
+  // The taller frame reveals ALL remaining history, so the Show-more row the
+  // cursor sits on disappears in the same render.
+  h.vt.resize(100, 40)
+  await h.paint()
+  const grown = h.view()
+  assert.ok(!grown.includes('Show more sessions'), `the grown tree exhausted the remaining history:\n${grown}`)
+  assert.ok(/^> .*Alpha/m.test(grown),
+    `the cursor re-anchored on its parent Folder instead of vanishing:\n${grown}`)
+  const actionBar = panelFrame(h).at(-1)!
+  assert.ok(actionBar.includes('Enter Collapse'),
+    `the Footer still advertises the re-anchored row's real verb:\n${actionBar}`)
+  h.vt.sendInput('\r')
+  await h.paint()
+  assert.ok(!/H02B \d+/.test(h.view()), 'Enter acts on the painted Folder instead of an invisible target')
+  h.app.dispose()
+  started.delete(h.app)
+
+  // The same orphaning cannot happen through a status row that stops painting:
+  // one row of budget appears, the growth exhausts the selected Show more row.
+  const settledHistory = Array.from({ length: 14 }, (_, index) => row(`session-h02c-${index}`, 900 - index, { title: `H02C ${index}` }))
+  const status = harness({ columns: 100, rows: 20 })
+  status.handle.setSnapshot(snapshot({ rows: [row(CURRENT, 3_000, { title: 'H02C current' }), ...settledHistory] }))
+  status.handle.updateWorkspaces({ type: 'baseline', items: [
+    { workspaceId: 'ws-s', path: '/ws/s', title: 'Status', sessionIds: [CURRENT, ...settledHistory.map(item => item.id)] },
+  ] })
+  await status.paint()
+  status.vt.sendInput('\x1b[F')
+  await status.paint()
+  assert.ok(/^> .*Show more sessions/m.test(status.view()), `the cursor sits on the Show-more row:\n${status.view()}`)
+  status.handle.setActivityFacts({
+    listRevision: 1,
+    facts: [
+      fact(CURRENT, { running: false, attention: 'none', attentionSourceState: 'known' }),
+      ...settledHistory.map(item => fact(item.id, { running: false, attention: 'none', attentionSourceState: 'known' })),
+    ],
+    answerEligibility: [],
+  })
+  await status.paint()
+  const settled = status.view()
+  assert.ok(!settled.includes('Show more sessions'), `the settled sample frees a row and exhausts the history:\n${settled}`)
+  assert.ok(/^> .*Status/m.test(settled), `the cursor re-anchored on the parent Folder:\n${settled}`)
+  assert.ok(panelFrame(status).at(-1)!.includes('Enter Collapse'), 'the Footer advertises the painted row')
 })
 
 test('H03: spare rows fill the priority Workspace first and then the other expanded ones', async () => {
   const a = Array.from({ length: 45 }, (_, index) => row(`session-h03-a-${index}`, 9_000 - index, { title: `A history ${index}` }))
   const b = Array.from({ length: 10 }, (_, index) => row(`session-h03-b-${index}`, 8_000 - index, { title: `B history ${index}` }))
   const c = Array.from({ length: 10 }, (_, index) => row(`session-h03-c-${index}`, 7_000 - index, { title: `C history ${index}` }))
-  const h = harness({ columns: 100, rows: 14 })
+  const h = harness({ columns: 100, rows: 14, onNewSession: () => {} })
   h.handle.setSnapshot(snapshot({ rows: [
     row(CURRENT, 10_000, { title: 'Current session' }),
     row('session-h03-needs', 9_500, { title: 'B need' }),
@@ -3693,9 +3752,19 @@ test('H03: spare rows fill the priority Workspace first and then the other expan
     answerEligibility: [eligibility('session-h03-needs')],
   })
   await h.paint()
-  const tight = panelFrame(h)
-  assert.ok(!tight.some(line => line.includes('A history 7')),
-    `a frame whose base tree already overflows never grows it:\n${tight.join('\n')}`)
+  // The base tree already exceeds this frame: walk the cursor onto Alpha's own
+  // Show-more row and read the SHARED watermark it paints. It is still the
+  // default eight ordinary rows (46 recent - 8 = 38 remaining), so the
+  // overflowing frame grew nothing; an unconditional allocation would paint a
+  // smaller `remaining` here.
+  for (let step = 0; step < 8; step += 1) {
+    h.vt.sendInput('\x1b[B')
+    await h.paint()
+  }
+  const tight = h.view()
+  assert.ok(/^> .*Show more sessions/m.test(tight), `the cursor reaches Alpha's Show-more row:\n${tight}`)
+  assert.ok(tight.includes('Show more sessions · 38 remaining'),
+    `a frame whose base tree already overflows keeps the shared watermark:\n${tight}`)
   h.vt.resize(100, 60)
   await h.paint()
   const roomy = h.view()
@@ -3703,6 +3772,7 @@ test('H03: spare rows fill the priority Workspace first and then the other expan
   assert.ok(!roomy.includes('A history 19'), `and stops there instead of revealing the whole history:\n${roomy}`)
   assert.ok(roomy.includes('B history 9'), `the other expanded Workspace then receives the spare rows:\n${roomy}`)
   assert.ok(roomy.includes('B need') && roomy.includes('B working'), 'the active priority rows stay painted')
+  assert.ok(roomy.includes('+ New session'), 'the expanded official Folders keep their New row')
   assert.ok(!roomy.includes('C history'), 'the allocation never expands a collapsed Folder')
   assert.ok(/[▸▾] Gamma/.test(roomy), 'the collapsed Folder row itself stays in the complete tree')
 })

@@ -313,7 +313,7 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   unindented geometry.
 - **A sessionless destination is not a Current Session.** A Host-verified
   next-create Workspace is ordered first and painted `Next` with the same
-  eight-row BASE history watermark; it never renders as `Current`, because Current
+  eight-row base history watermark; it never renders as `Current`, because Current
   means the opened Session's unique official membership.
 - **Choose/add a directory returns through the same Browser lifecycle.** The
   sessionless Welcome's Choose directory opens the same `/sessions` Browser at
