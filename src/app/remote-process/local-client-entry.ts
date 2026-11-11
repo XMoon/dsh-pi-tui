@@ -47,6 +47,10 @@ import {
   type ProcessSeat,
 } from './local-scope.ts'
 import { ensureLocalHost, type VerifiedLocalHost } from './local-discovery.ts'
+import {
+  classifyLaunchWorkspace,
+  type LaunchWorkspaceVerdict,
+} from './local-workspace-equivalence.ts'
 import type {
   LocalClientComposition,
   LocalClientHandle,
@@ -63,6 +67,13 @@ import {
 import { createLocalClientSurfaceBridge } from './local-client-surface.ts'
 import { runDetached } from '../../runtime/process/tasks.ts'
 import type { ClientReloadProcessRefusal, ClientReloadRequestResult } from '../application-runtime.ts'
+
+/**
+ * The Client process's OWN launch directory, captured ONCE at module start.
+ * A later `process.cwd()` change (a shell builtin, a plugin) is not the launch
+ * fact, so the automatic Workspace classifier never follows drift.
+ */
+const CLIENT_LAUNCH_CWD = process.cwd()
 
 interface OfficialClientHostModules {
   readonly Context: new () => import('@deepseek-ai/cordis').Context
@@ -1702,6 +1713,13 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
       // callback after a same-process surface replacement.
       activeBridge = bridge
       const { applyRunnerWithRuntime } = await import('../bootstrap.ts')
+      // M6-1/F5-B: the ONE automatic Workspace eligibility check. It runs after
+      // the official Host authentication and before this surface revision's
+      // runner exists; the verdict only permits an AUTO host-path proposal (the
+      // Host still signs the WorkspaceId). Every unreadable/uncertain fact is
+      // `unverified`, so the surface stays unselected until the user picks a
+      // Host Workspace through the existing Browser.
+      const launchWorkspace: LaunchWorkspaceVerdict = classifyLaunchWorkspace(host.identity, CLIENT_LAUNCH_CWD)
       let runnerFiber: Fiber | undefined
       try {
         runnerFiber = clientContext.plugin(pluginContext => {
@@ -1715,7 +1733,7 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
             ...(reexecHandler === undefined
               ? {}
               : { requestClientReload: () => reexecHandler!.request('manual') }),
-          })
+          }, launchWorkspace)
         })
         await runnerFiber
       } catch (error) {

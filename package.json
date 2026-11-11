@@ -127,6 +127,7 @@
     "@deepseek-ai/dsh-commands": ">=0.2.2-rc.1",
     "@deepseek-ai/dsh-credentials": ">=0.2.2-rc.1",
     "@deepseek-ai/dsh-file-reference": ">=0.2.2-rc.1",
+    "@deepseek-ai/dsh-file-reference-local": ">=0.2.2-rc.1",
     "@deepseek-ai/dsh-goal": ">=0.2.2-rc.1",
     "@deepseek-ai/dsh-host-directory-picker": ">=0.2.2-rc.1",
     "@deepseek-ai/dsh-jobs": ">=0.2.2-rc.1",

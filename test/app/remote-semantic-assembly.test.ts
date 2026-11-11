@@ -188,7 +188,7 @@ test('dispose drops the adapter caches (before the Client Context disposal)', as
 test('the host-file adapter answers through the official session scope', async () => {
   const { source } = runtimeSource()
   const semantics = createRemoteM3ASemantics(source, { promptSerializer: serializer(), fileReceiptUploader: uploader() })
-  const result = await semantics.hostFile.listReferences({ kind: 'workspace', cwd: '/x' }, '@a')
+  const result = await semantics.hostFile.listReferences({ kind: 'workspace', selectionRevision: 1 }, '@a')
   assert.equal(result.kind, 'unavailable')
   const resolve = await semantics.hostFile.resolveReference({ kind: 'session', sessionId: 's' }, 'a')
   assert.equal(resolve.kind, 'unavailable')

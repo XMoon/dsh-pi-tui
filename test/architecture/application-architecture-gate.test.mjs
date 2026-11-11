@@ -1847,17 +1847,19 @@ test('a Remote adapter cannot import the Direct implementation (three Host bridg
   assert.equal(findRemoteToDirectViolations([
     entry('runtime/remote/example.ts', "const load = () => import('../direct/example.ts')\n"),
   ]).length, 1)
-  // The reviewed Host-side construction bridges keep EXACTLY their three
-  // reviewed Direct helpers; a new target from either file must fail.
+  // The reviewed Host-side construction bridges keep EXACTLY their reviewed
+  // Direct helpers; a new target from either file must fail.
   const shellBridge = 'runtime/remote/pi-tui-host-user-shell-host-bridge.ts'
   assert.deepEqual([...REMOTE_TO_DIRECT_APPROVED_EDGES].sort(), [
     `${bridge} -> runtime/direct/file-completion/host-discovery.ts`,
+    `${bridge} -> runtime/direct/file-completion/official-workspace-search.ts`,
     `${bridge} -> runtime/direct/host-file-augmentation-direct.ts`,
     `${shellBridge} -> runtime/direct/file-completion/host-discovery.ts`,
   ], 'the exception set contains exactly the reviewed Host-side bridge edges')
   assert.deepEqual(findRemoteToDirectViolations([
     entry(bridge, "import { x } from '../direct/file-completion/host-discovery.ts'\n"),
     entry(bridge, "export type { Y } from '../direct/host-file-augmentation-direct.ts'\n"),
+    entry(bridge, "import { OfficialWorkspaceSearchPool } from '../direct/file-completion/official-workspace-search.ts'\n"),
     entry(shellBridge, "import { x } from '../direct/file-completion/host-discovery.ts'\n"),
   ]), [], 'the reviewed edges stay legal')
   assert.equal(findRemoteToDirectViolations([

@@ -66,7 +66,7 @@ export interface WelcomeViewInput {
    *  action key rides it so a retired subject's button can never act. */
   readonly scopeKey: string
   readonly workspacePath?: string
-  readonly workspaceStatus?: 'proposed' | 'verifying' | 'confirmed' | 'rejected'
+  readonly workspaceStatus?: 'unselected' | 'proposed' | 'verifying' | 'confirmed' | 'rejected'
   readonly workspaceError?: string
   readonly onChooseDirectory?: () => void
   readonly onResume: () => void
@@ -156,7 +156,7 @@ function styledWelcome(input: WelcomeViewInput): Node {
             ? []
             : [html.div({ key: 'welcome-version', role: ROLES.version }, version)]),
         ),
-        ...(input.workspacePath === undefined ? [] : [html.div({ key: 'welcome-workspace', role: ROLES.tip }, `${input.workspaceStatus === 'confirmed' ? 'Host directory' : input.workspaceStatus === 'rejected' ? 'Host directory unavailable' : input.workspaceStatus === 'verifying' ? 'Checking Host directory' : 'Proposed directory'}: ${sanitizeDisplayText(input.workspacePath)}`)]),
+        ...(input.workspacePath === undefined ? [] : [html.div({ key: 'welcome-workspace', role: ROLES.tip }, `${input.workspaceStatus === 'unselected' ? 'No Host workspace selected — choose one in /sessions' : input.workspaceStatus === 'confirmed' ? 'Host directory' : input.workspaceStatus === 'rejected' ? 'Host directory unavailable' : input.workspaceStatus === 'verifying' ? 'Checking Host directory' : 'Proposed directory'}: ${sanitizeDisplayText(input.workspacePath)}`)]),
         ...(input.workspaceError === undefined ? [] : [html.div({ key: 'welcome-workspace-error', role: ROLES.tip }, sanitizeDisplayText(input.workspaceError))]),
         html.button({ key: `welcome-choose-${input.scopeKey}`, role: ROLES.resume, title: 'Choose a Host directory', attrs: { 'aria-label': 'Choose directory' }, onClick: () => input.onChooseDirectory?.() }, html.span({ key: 'welcome-choose-label', role: ROLES.resumeLabel }, 'Choose directory')),
 

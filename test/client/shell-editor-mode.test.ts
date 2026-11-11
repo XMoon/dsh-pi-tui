@@ -26,6 +26,26 @@ import { parseShellWords } from '../../src/client/shell/words.ts'
 import type { HostShellCompletionPort, HostShellCompletionRequest } from '../../src/runtime/host-shell-completion-port.ts'
 import { MentionProvider } from '../../src/tui/interaction/autocomplete/provider.ts'
 import { DirectHostFilePort } from '../../src/runtime/direct/host-file-direct.ts'
+import type { HostFileScope } from '../../src/runtime/host-file-port.ts'
+
+/** The fixture's confirmed Workspace scope + registry over its root. */
+const SHELL_WORKSPACE_ID = 'workspace-shell'
+
+function workspacePort(cwd: string): DirectHostFilePort {
+  return new DirectHostFilePort(() => undefined, null, {
+    get: (name: string) => name === 'workspaceRegistry'
+      ? {
+          create: async () => { throw new Error('the fixture never creates a workspace') },
+          list: () => [],
+          get: (id: string) => id === SHELL_WORKSPACE_ID ? { path: cwd } : undefined,
+        }
+      : undefined,
+  })
+}
+
+function workspaceScope(): HostFileScope {
+  return { kind: 'workspace', workspaceId: SHELL_WORKSPACE_ID, selectionRevision: 1 }
+}
 import { createHostShellPathCompletionBridge } from '../../src/runtime/remote/pi-tui-host-user-shell-host-bridge.ts'
 import { EMPTY_DIRECT_SHELL_COMPLETION } from '../support/host-shell-completion.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
@@ -93,6 +113,7 @@ function startApp(
      * port-backed — tests that exercise it wire the Direct adapter
      * (fallback mode), the rest keep the unavailable default. */
     fileReferences?: import('../../src/runtime/host-file-port.ts').HostFilePort
+    scope?: import('../../src/runtime/host-file-port.ts').HostFileScope
   } = {},
 ): { vt: VirtualTerminal; app: TuiApp; submitted: string[]; accelerated: string[]; cancels: number } {
   const vt = new VirtualTerminal(100, 24)
@@ -116,7 +137,7 @@ function startApp(
     cwd,
     options.fileReferences ?? null,
     undefined,
-    undefined,
+    options.scope ?? workspaceScope(),
     undefined,
     [],
     directShellCompletion,
@@ -1404,8 +1425,9 @@ test('a large shell paste (>10 lines) enters the shell mode through the paste re
 
 test('a prompt-mode dropdown closes when ! enters shell mode', async (t) => {
   const life = testLifecycle(t)
-  const { vt, app } = startApp(fixtureWithFiles(life), {
-    fileReferences: new DirectHostFilePort(() => undefined, null),
+  const root = fixtureWithFiles(life)
+  const { vt, app } = startApp(root, {
+    fileReferences: workspacePort(root),
   })
   life.defer(() => app.stop())
   await vt.waitForRender()
@@ -1591,7 +1613,7 @@ test('a pasted @dir/ path reopens the mention dropdown like ordinary input', asy
   // Direct adapter in FALLBACK mode (no fd binary) serves the directory
   // children, exactly like the pre-migration fd/fallback path.
   const { vt, app } = startApp(root, {
-    fileReferences: new DirectHostFilePort(() => undefined, null),
+    fileReferences: workspacePort(root),
   })
   life.defer(() => app.stop())
   await vt.waitForRender()

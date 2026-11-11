@@ -743,11 +743,12 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
     const workspace = deps.backend.kind === 'direct'
       ? undefined
       : deps.session.workspaceNextIntent?.snapshot()
-    // The create intent is the owner: `workspace-id` is only ever written by
-    // the Host-confirmed resolution (`setResolvedWorkspace` /
+    // The create intent is the owner: a confirmed `workspaceId` is only ever
+    // published by the Host-confirmed resolution (`setResolvedWorkspace` /
     // `commitVerifiedPath`), while an in-flight or rejected Add of a DIFFERENT
-    // path does not change the still-confirmed create target.
-    const workspaceId = workspace?.intent.kind === 'workspace-id' ? workspace.intent.workspaceId : undefined
+    // path does not change the still-confirmed create target. An UNSELECTED
+    // surface has no Host workspace: the standing read must not fabricate one.
+    const workspaceId = workspace?.status === 'confirmed' ? workspace.workspaceId : undefined
     return {
       kind: 'preset',
       presetId,

@@ -707,10 +707,11 @@ export const ARCHITECTURE_RULES = [
  * bridge use, so the exception is scoped to the reviewed dependency EDGE and
  * never to a whole file: a bridge importing any other Direct module — or any
  * other Remote adapter importing one of these three — is a violation. The gate
- * tests assert this set stays exactly these three pairs.
+ * tests assert this set stays exactly these pairs.
  */
 export const REMOTE_TO_DIRECT_APPROVED_EDGES = new Set([
   'runtime/remote/pi-tui-file-reference-host-bridge.ts -> runtime/direct/file-completion/host-discovery.ts',
+  'runtime/remote/pi-tui-file-reference-host-bridge.ts -> runtime/direct/file-completion/official-workspace-search.ts',
   'runtime/remote/pi-tui-file-reference-host-bridge.ts -> runtime/direct/host-file-augmentation-direct.ts',
   'runtime/remote/pi-tui-host-user-shell-host-bridge.ts -> runtime/direct/file-completion/host-discovery.ts',
 ])
