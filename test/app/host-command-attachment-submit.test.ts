@@ -60,6 +60,8 @@ interface Harness {
   readonly executes: { readonly sessionId: string; readonly line: string; readonly attachments: readonly unknown[] }[]
   readonly notices: string[]
   readonly consumeCount: () => number
+  readonly healthClears: () => number
+  readonly healthRecords: () => number
   readonly prompts: string[]
   /** The editor draft right now (the submit path clears it like the editor). */
   draftText(): string
@@ -90,6 +92,8 @@ function startHarness(options: { readonly sessionId?: string } = {}): Harness {
   const executes: Harness['executes'][number][] = []
   const prompts: string[] = []
   let consumed = 0
+  let healthClears = 0
+  let healthRecords = 0
   let ensureCalls = 0
   let ensureGate: Promise<void> | undefined
   let releaseEnsureGate: (() => void) | undefined
@@ -271,10 +275,10 @@ function startHarness(options: { readonly sessionId?: string } = {}): Harness {
     extensions: {
       findContribution: () => undefined,
       handlerFor: () => undefined,
-      commandIdFor: () => undefined,
-      recordHealthRef: () => undefined,
-      recordError: () => {},
-      clearError: () => {},
+      commandIdFor: () => 'command-files',
+      recordHealthRef: () => ({ slot: 'command', id: 'files', owner: 'test' }),
+      recordError: () => { healthRecords += 1 },
+      clearError: () => { healthClears += 1 },
     },
     artifacts: { start: () => {} },
     shell: {
@@ -305,6 +309,8 @@ function startHarness(options: { readonly sessionId?: string } = {}): Harness {
     executes,
     notices,
     consumeCount: () => consumed,
+    healthClears: () => healthClears,
+    healthRecords: () => healthRecords,
     prompts,
     draftText: () => draft,
     submit: (text: string) => {
@@ -600,5 +606,8 @@ test('an unknown handler result kind is never consumed as success', async (t) =>
   await harness.settled()
   assert.equal(harness.draftText(), `/files ${staged.placeholder}`, 'the illegal result restores the line')
   assert.equal(harness.files.values().length, 1, 'the draft survives the illegal result')
+  assert.equal(harness.healthClears(), 0,
+    'an illegal result never clears the command health error as if the command had succeeded')
+  assert.equal(harness.healthRecords(), 1, 'the illegal result is recorded as a command failure')
   assert.match(harness.notices.join('\n'), /unknown result kind/)
 })
