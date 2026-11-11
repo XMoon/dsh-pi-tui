@@ -2086,6 +2086,10 @@ export function applyRunnerWithRuntime(
         // M5-U-C: the SAME official Host read port the backend resolved; the
         // command runner forwards it unchanged to the PiTUI Session Workspace.
         sessionWorkspaceFacts: backend.sessionWorkspaceFacts,
+        // Session Workspace PR3: the SAME read-only Host browse port. The
+        // inline Add editor lists the Host home/levels; a listing never
+        // registers a Workspace or reads a Client filesystem.
+        hostDirectoryBrowse: backend.hostDirectoryBrowse,
         // Split-Client only: the Client-root forwarded-answer eligibility read
         // view. The Session Workspace uses it ONLY as the positive
         // answerability gate for `Needs attention`; a Direct/TSP composition

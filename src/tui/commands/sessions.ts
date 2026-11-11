@@ -65,6 +65,7 @@ type SessionCommandRunner = Pick<
   | 'sessionCwd'
   | 'sessionReader'
   | 'sessionWorkspaceFacts'
+  | 'hostDirectoryBrowse'
   | 'sessionBrowserPresentation'
   | 'sessionWriter'
   | 'signal'
@@ -316,6 +317,9 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
             if (!state.disposed) request.onAddDirectory?.(path, settle)
           },
         }),
+        // PR3: the optional Host browse read crosses only when this request
+        // really carries it; a missing capability stays missing.
+        ...(request.onListDirectory === undefined ? {} : { onListDirectory: request.onListDirectory }),
         initialMode: intent?.searchRequested === true ? 'search' : 'browse',
         initialBrowseScope: intent?.scope === 'all' || subject.currentSessionId === undefined ? 'all' : 'current',
        initialDirectoryChooser: request.initialDirectoryChooser,
@@ -377,6 +381,12 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
       reader: runner.sessionReader,
       presentation,
       ...(presentation === piTuiPresentation ? { autoRefreshMs: SESSION_WORKSPACE_REFRESH_MS } : {}),
+      // PR3: ONLY the PiTUI presentation receives the Host directory browse
+      // seam. The TSP native picker keeps its own read owner and must never
+      // grow a second directory reader or suggestion layer.
+      ...(presentation === piTuiPresentation
+        ? { onListDirectory: (path: string | undefined, signal: AbortSignal) => runner.hostDirectoryBrowse.list(path, signal) }
+        : {}),
       captureSubject: () => {
         const scope = runner.captureSessionScope()
         const nextIntent = scope.sessionId === undefined ? workspaceNextIntent.snapshot() : undefined

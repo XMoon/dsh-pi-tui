@@ -51,6 +51,9 @@ import type { HistoryOpenScope } from '../../src/tui-app.ts'
 import type { HistorySearchSource } from '../../src/client/history/search.ts'
 import type { SettingsWorkspaceSource } from '../../src/tui/panels/settings-workspace-panel.ts'
 import { sessionScopeFacts } from '../support/session-scope-facts.ts'
+import { createWorkspaceNextIntentOwner } from '../../src/app/session/workspace-next-intent.ts'
+import type { HostDirectoryBrowseOutcome } from '../../src/runtime/host-directory-browse-port.ts'
+import type { DirectoryListing } from '@deepseek-ai/dsh-host-directory-picker/types'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
 import { unavailableWebAccess } from '../support/web-access-fake.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
@@ -227,7 +230,7 @@ interface Harness {
   /** Run any command registered by this harness (e.g. `/search`). */
   runCommand(name: string, rawInput?: string): Promise<{ kind: 'success' } | { kind: 'error'; text: string }>
   /** The Opened `/sessions` UI body, exactly as the CommandSurface calls it. */
-  openSessionBrowser(scope?: 'current' | 'all'): Promise<{ kind: 'success' } | { kind: 'error'; text: string }>
+  openSessionBrowser(scope?: 'current' | 'all' | { readonly scope?: 'current' | 'all'; readonly addDirectory?: boolean }): Promise<{ kind: 'success' } | { kind: 'error'; text: string }>
   /** Install/replace/clear the ONE Host Editor `←←` control, as bootstrap does. */
   installControl(control?: EditorWorkspaceEntryControl): void
   /** ONE raw terminal Left press through the real input listener. */
@@ -274,6 +277,10 @@ function harness(options: {
   readonly transitionTo?: TuiCommandRunner['transitionTo']
   /** The runner's lifetime signal (cancellation tests). */
   readonly signal?: AbortSignal
+  /** PR3: the ONE Host directory browse seam this harness composes. */
+  readonly hostDirectoryBrowse?: TuiCommandRunner['hostDirectoryBrowse']
+  /** PR3: the intent owner whose commit ordering the case asserts. */
+  readonly workspaceNextIntent?: TuiCommandRunner['workspaceNextIntent']
 }): Harness {
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(
@@ -364,6 +371,8 @@ function harness(options: {
     openScheduleWorkspace: () => ({ kind: 'success' } as const),
     ...sessionScopeFacts(() => state.agent, () => 1),
     sessionWorkspaceFacts: facts.port,
+    ...(options.hostDirectoryBrowse === undefined ? {} : { hostDirectoryBrowse: options.hostDirectoryBrowse }),
+    ...(options.workspaceNextIntent === undefined ? {} : { workspaceNextIntent: options.workspaceNextIntent }),
     ...(options.nativePresentation === undefined ? {} : { sessionBrowserPresentation: options.nativePresentation }),
     ...(options.eligibility === undefined ? {} : {
       forwardedAnswerEligibility: options.eligibility,
@@ -467,7 +476,7 @@ function harness(options: {
       signal: new AbortController().signal,
     })
   const invoke = (rawInput: string): Promise<CommandOutcome> => invokeDefinition(def!, rawInput)
-  const openSessionBrowser = (scope?: 'current' | 'all'): Promise<CommandOutcome> => {
+  const openSessionBrowser = (scope?: 'current' | 'all' | { readonly scope?: 'current' | 'all'; readonly addDirectory?: boolean }): Promise<CommandOutcome> => {
     const opened = installed.openSessionBrowser
     assert.ok(opened !== undefined, 'the registered /sessions UI body must exist')
     const result = opened(scope)
@@ -1828,6 +1837,156 @@ test('E-L13: a Left consumed by an Advanced capture invalidates the pair; only a
     assert.equal(h.listCalls, 1)
   } finally {
     capture.dispose()
+    h.close()
+  }
+})
+
+// ── PR3: the ONE Host browse seam through the real command chain ────────────
+
+const PR3_HOME = '/host/home'
+
+function pr3Listing(path: string, names: readonly string[], truncated = false): DirectoryListing {
+  return {
+    path,
+    home: PR3_HOME,
+    crumbs: [],
+    entries: names.map(name => ({ name, path: `${path.endsWith('/') ? path : `${path}/`}${name}`, hidden: false })),
+    truncated,
+  }
+}
+
+function pr3Ready(listing: DirectoryListing): HostDirectoryBrowseOutcome {
+  return { kind: 'ready', listing }
+}
+
+test('PR3 D13: the real /sessions Add browses the Host, commits only on Enter and never creates a Session', async () => {
+  const nextIntent = createWorkspaceNextIntentOwner('/ws')
+  const listCalls: Array<string | undefined> = []
+  const resolveCalls: unknown[] = []
+  let releaseResolve!: (value: { workspaceId: string; path: string }) => void
+  let resolveGate: Promise<{ workspaceId: string; path: string }> | undefined
+  const h = harness({
+    workspaceNextIntent: nextIntent,
+    hostDirectoryBrowse: {
+      list: async (path) => {
+        listCalls.push(path)
+        if (path === undefined) return pr3Ready(pr3Listing(PR3_HOME, ['project-a', 'project-b']))
+        if (path === '/host/home/project-b/') return pr3Ready(pr3Listing(path, ['child']))
+        return pr3Ready(pr3Listing(path, []))
+      },
+    },
+    agents: {
+      resolveWorkspace: ((intent: unknown) => {
+        resolveCalls.push(intent)
+        resolveGate = new Promise(resolve => { releaseResolve = resolve })
+        return resolveGate
+      }) as never,
+    },
+  })
+  try {
+    await h.runSessions('')
+    await h.vt.waitForRender()
+    h.vt.sendInput('\x1b[H')
+    await h.vt.waitForRender()
+    h.vt.sendInput('\r')
+    await h.vt.waitForRender()
+    await waitUntil(() => h.view().includes('project-a/'), 'the Home read reaches the PiTUI editor')
+    assert.deepEqual(listCalls, [undefined], 'the ONE Host home read feeds the first level')
+    const revisionBefore = nextIntent.snapshot().revision
+
+    h.vt.sendInput('\x1b[B')
+    await h.vt.waitForRender()
+    h.vt.sendInput('\t')
+    await h.vt.waitForRender()
+    await waitUntil(() => h.view().includes('Host directory: /host/home/project-b/'), 'Tab writes the official path')
+    assert.deepEqual(resolveCalls, [], 'Tab never reaches the Workspace resolver')
+    assert.equal(nextIntent.snapshot().revision, revisionBefore, 'completion does not commit the next-create intent')
+
+    h.vt.sendInput('\r')
+    await h.vt.waitForRender()
+    await waitUntil(() => resolveCalls.length === 1, 'Enter dispatches exactly ONE Host resolve')
+    assert.equal(nextIntent.snapshot().status, 'verifying', 'the intent is verifying before the Host answer')
+    assert.equal(nextIntent.snapshot().revision, revisionBefore, 'beginPathVerification alone never commits the intent')
+    assert.deepEqual(listCalls, [undefined, '/host/home/project-b/'], 'only read-only Host browse requests were issued')
+    releaseResolve({ workspaceId: 'ws-new', path: '/host/home/project-b' })
+    await waitUntil(() => nextIntent.snapshot().status === 'confirmed', 'the committed Workspace becomes the next-create intent')
+    assert.notEqual(nextIntent.snapshot().revision, revisionBefore, 'the commit advances the intent revision')
+    assert.equal(resolveCalls.length, 1, 'the Host resolve was issued exactly once')
+    assert.deepEqual(h.switchCalls, [], 'Add never switches a Session')
+    await waitUntil(() => h.view().includes('Directory added: /host/home/project-b'),
+      'the registered canonical path is the painted outcome')
+    assert.ok(h.view().includes('Sessions'), 'ordinary Add returns to the same Browser')
+  } finally {
+    h.close()
+  }
+})
+
+test('PR3 D13: the Sessionless chooser verifies a Host path and returns to Welcome without creating a Session', async () => {
+  const nextIntent = createWorkspaceNextIntentOwner('/ws')
+  let resolveCalls = 0
+  const h = harness({
+    workspaceNextIntent: nextIntent,
+    hostDirectoryBrowse: {
+      list: async (path) => path === undefined
+        ? pr3Ready(pr3Listing(PR3_HOME, ['chosen']))
+        : pr3Ready(pr3Listing(path, [])),
+    },
+    agents: {
+      resolveWorkspace: (async () => {
+        resolveCalls += 1
+        return { workspaceId: 'ws-choose', path: `${PR3_HOME}/chosen` }
+      }) as never,
+    },
+  })
+  try {
+    await h.openSessionBrowser({ scope: 'all', addDirectory: true })
+    await h.vt.waitForRender()
+    assert.ok(h.view().includes('Choose workspace'), 'the Welcome chooser owns its own title')
+    h.vt.sendInput('\x1b[H')
+    await h.vt.waitForRender()
+    h.vt.sendInput('\r')
+    await h.vt.waitForRender()
+    await waitUntil(() => h.view().includes('Host directory: /host/home/'), 'the Add editor prefills the Host home')
+    h.vt.sendInput('\r')
+    await waitUntil(() => nextIntent.snapshot().status === 'confirmed', 'the Host resolve commits the next-create intent')
+    await waitUntil(() => h.app.isFullscreen() === false, 'a successful chooser returns to the Welcome')
+    assert.equal(resolveCalls, 1)
+    assert.deepEqual(h.switchCalls, [], 'choosing a directory never creates or switches a Session')
+  } finally {
+    h.close()
+  }
+})
+
+test('PR3: the native presentation never receives the Host browse seam and issues no Host list', async () => {
+  const listCalls: Array<string | undefined> = []
+  const requests: Array<Parameters<SessionBrowserPresentation['open']>[0]> = []
+  const nativePresentation: SessionBrowserPresentation = {
+    open: (request) => {
+      requests.push(request)
+      return {
+        isDisposed: () => false,
+        setSnapshot: () => {},
+        close: () => {},
+      }
+    },
+    notify: () => {},
+  }
+  const h = harness({
+    nativePresentation,
+    hostDirectoryBrowse: {
+      list: async (path) => { listCalls.push(path); return pr3Ready(pr3Listing(PR3_HOME, ['host-only'])) },
+    },
+  })
+  try {
+    await h.runSessions('')
+    await h.vt.waitForRender()
+    assert.equal(requests.length, 1, 'the native presentation owns the one open')
+    assert.equal(requests[0]!.onListDirectory, undefined,
+      'the PiTUI-only Host browse callback must not cross into the native presentation')
+    assert.deepEqual(listCalls, [], 'no Host directory read is issued for the native picker')
+    assert.ok(!h.view().includes('Host directory:'), 'no PiTUI suggestion layer is mounted')
+    assert.equal(h.app.isFullscreen(), false, 'the native picker keeps its own screen and no second layer')
+  } finally {
     h.close()
   }
 })

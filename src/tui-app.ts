@@ -2029,6 +2029,9 @@ export interface SessionWorkspaceOpenOptions {
   readonly onUseDirectory?: (workspaceId: string, canonicalPath: string) => void
   readonly onNewSession?: (workspaceId: string, settle?: (outcome: import('./app/command/session-browser-presentation.ts').SessionBrowserNewSessionSettlement) => void) => void
   readonly onAddDirectory?: (path: string, settle: (outcome: import('./app/command/session-browser-presentation.ts').SessionBrowserDirectorySettlement) => void) => void
+  /** Session Workspace PR3: the ONE optional read-only Host directory browse
+   *  seam. Installed on the panel ONLY when this open really carries it. */
+  readonly onListDirectory?: SessionWorkspacePanelHost['onListDirectory']
   /** The physical lease's ONE close notification (user Esc, blocking-owner
    *  pre-emption or surface teardown). An owner-origin `close()` suppresses it. */
   readonly onClose: () => void
@@ -26748,6 +26751,18 @@ export class TuiApp {
       ...(options.onAddDirectory === undefined ? {} : {
         onAddDirectory: (path: string, settle: (outcome: import('./app/command/session-browser-presentation.ts').SessionBrowserDirectorySettlement) => void) => {
           if (this.workspaceLease === record) options.onAddDirectory?.(path, settle)
+        },
+      }),
+      // PR3: an absent browse capability stays absent — never a fabricated
+      // always-ready reader. A read started during panel construction belongs
+      // to the open that is still committing; once the record exists any
+      // other lease is stale and refuses the read.
+      ...(options.onListDirectory === undefined ? {} : {
+        onListDirectory: (path: string | undefined, signal: AbortSignal) => {
+          if (record !== undefined && this.workspaceLease !== record) {
+            return Promise.reject(new Error('the Session Workspace lease was released'))
+          }
+          return options.onListDirectory!(path, signal)
         },
       }),
     }

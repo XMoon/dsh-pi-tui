@@ -70,6 +70,13 @@ import {
 import { SESSION_WORKSPACE_CHORDS } from '../keybindings/hints.ts'
 import { color } from '../theme/runtime.ts'
 import { formatSessionAge, sessionBrowserErrorNotice, shortSessionId, workspaceKey } from '../pickers/sessions.ts'
+import type { HostDirectoryBrowsePort } from '../../runtime/host-directory-browse-port.ts'
+import { hostDirectoryQuery } from '../../domain/file-completion/host-directory-query.ts'
+import {
+  HOST_DIRECTORY_SUGGESTION_LIMIT,
+  HostDirectoryChooser,
+  type HostDirectoryCandidate,
+} from '../interaction/host-directory-chooser.ts'
 
 /** The logical focus of one Session Workspace frame. `search` is the raw
  * global query editor; `search-results` is the Host+metadata result list;
@@ -92,6 +99,10 @@ export interface SessionWorkspacePanelHost {
   readonly onUseDirectory?: (workspaceId: string, canonicalPath: string) => void
   readonly onNewSession?: (workspaceId: string, settle?: (outcome: SessionBrowserNewSessionSettlement) => void) => void
   readonly onAddDirectory?: (path: string, settle: (outcome: import('../../app/command/session-browser-presentation.ts').SessionBrowserDirectorySettlement) => void) => void
+  /** Session Workspace PR3: the ONE optional read-only Host directory browse
+   *  seam. Absent = this composition has no Host browse capability, and the
+   *  editor keeps its manual absolute-path verification only. */
+  readonly onListDirectory?: HostDirectoryBrowsePort['list']
   /** The user's own close gesture (Esc at the root list). */
   readonly onClose: () => void
 }
@@ -271,7 +282,7 @@ function foldWorkspaceFrame(projection: WorkspaceProjection, frame: WorkspaceFac
 /** One painted mouse target of the LAST frame. `xEnd` is inclusive and every
  *  range is the REAL painted cell range: a truncated/omitted target has none. */
 interface HitRegion {
-  readonly kind: 'tree-row' | 'folder-toggle' | 'result' | 'search' | 'search-hint' | 'peek-back' | 'directory-confirm' | 'directory-cancel'
+  readonly kind: 'tree-row' | 'folder-toggle' | 'result' | 'search' | 'search-hint' | 'peek-back' | 'directory-confirm' | 'directory-cancel' | 'directory-input' | 'directory-suggestion'
   readonly id?: string
   readonly xStart: number
   readonly xEnd: number
@@ -338,12 +349,18 @@ export class SessionWorkspacePanel implements Component {
   /** The one raw search editor. Programmatic seeds are fenced by
    *  `applyingSeed`, so only a real text change reaches the read owner. */
   private readonly searchInput = new Input({ prompt: 'Search: ' })
-  private readonly directoryInput = new Input({ prompt: 'Host directory: ' })
-  private directoryEntryActive = false
+  /** The ONE per-open inline Host-directory editor; `undefined` means the
+   *  editor is closed. It owns the private Input, the Host home read and the
+   *  latest prefix query generation. */
+  private directoryChooser: HostDirectoryChooser | undefined
   private directorySubmitting = false
   /** Whether the CURRENT frame really painted the editable Host path line.
    *  A tiny frame can have no body room; Enter must then not submit. */
   private directoryEditorPainted = false
+  /** The candidate paths the LAST frame really painted. Tab/click admission is
+   *  checked against this exact set, never against the logical query result. */
+  private paintedDirectorySuggestionPaths: string[] = []
+  private lastDirectoryInputWidth = 0
   /** ONE pending Folder-New dispatch. The object identity is the per-operation
    *  currentness fence: only the settle callback for THIS object may unlock
    *  New. A notice, timer or roster diff is never a settlement channel. */
@@ -355,6 +372,8 @@ export class SessionWorkspacePanel implements Component {
   /** Per-open dedupe for the one status message this panel owns. */
   private lastNotice: string | undefined
   private statusMessage: string | undefined
+  /** Whether the inline editor's own status line reports an error. */
+  private directoryStatusError = false
   /** The transient result-list scroll of THIS search, never a stored anchor. */
   private resultScroll = 0
   /** The read-only `Space` Peek of one painted row. */
@@ -402,10 +421,10 @@ export class SessionWorkspacePanel implements Component {
     // Search and the inline path editor are mutually exclusive presentations:
     // the editor owns the keyboard while it is open. Resolve the editor state
     // FIRST so an initial `search + directoryEntry` open cannot keep both.
-    this.directoryEntryActive = options.initialDirectoryEntry === true
-    this.searchMode = options.initialMode === 'search' && !this.directoryEntryActive
-    if (options.initialDirectoryPath !== undefined) this.directoryInput.setValue(options.initialDirectoryPath)
-    this.focus = this.directoryEntryActive ? 'directory' : this.searchMode ? 'search' : 'list'
+    const initialDirectoryEntry = options.initialDirectoryEntry === true
+    this.searchMode = options.initialMode === 'search' && !initialDirectoryEntry
+    this.focus = initialDirectoryEntry ? 'directory' : this.searchMode ? 'search' : 'list'
+    if (initialDirectoryEntry) this.openDirectoryChooser(options.initialDirectoryPath)
   }
 
   /** Whether this panel has been released. The lease handle checks its own
@@ -534,6 +553,7 @@ export class SessionWorkspacePanel implements Component {
   dispose(): void {
     this.disposed = true
     this.pressed = undefined
+    this.closeDirectoryChooser(false)
   }
 
   // ── Pure view ────────────────────────────────────────────────────────────
@@ -835,32 +855,87 @@ export class SessionWorkspacePanel implements Component {
     this.host.requestRender()
   }
 
+  /** Open the ONE per-open inline Host-directory editor. The initial recovery
+   *  path and the user's Add row/mouse entry all share this same entry. */
+  private openDirectoryChooser(initialPath?: string): void {
+    if (this.directoryChooser !== undefined) return
+    this.directoryChooser = new HostDirectoryChooser({
+      list: this.host.onListDirectory,
+      onChange: () => {
+        if (!this.disposed) this.host.requestRender()
+      },
+    }, initialPath)
+    this.focus = 'directory'
+    this.directoryChooser.begin()
+    this.host.requestRender()
+  }
+
+  /** Release the editor and its Host reads. An owner-origin close (a
+   *  registered path / the whole panel lease) passes `false` to avoid a paint
+   *  request for a surface that is already retiring. */
+  private closeDirectoryChooser(requestRender = true): void {
+    const chooser = this.directoryChooser
+    if (chooser === undefined) return
+    this.directoryChooser = undefined
+    chooser.dispose()
+    this.statusMessage = undefined
+    this.directoryStatusError = false
+    this.paintedDirectorySuggestionPaths = []
+    this.directoryEditorPainted = false
+    this.focus = 'list'
+    if (requestRender && !this.disposed) this.host.requestRender()
+  }
+
+  /** The editor is OPEN exactly when its ONE controller exists. */
+  private get directoryEntryActive(): boolean {
+    return this.directoryChooser !== undefined
+  }
+
   private handleDirectoryInput(data: string): void {
-    if (this.directorySubmitting) return
+    const chooser = this.directoryChooser
+    if (chooser === undefined || this.directorySubmitting) return
     if (matchesKey(data, Key.escape)) {
-      this.handleDirectoryCancel()
+      // The FIRST Esc only hides a genuinely painted suggestion block; the
+      // second (or the first when nothing was painted) returns to the tree.
+      if (this.paintedDirectorySuggestionPaths.length > 0) {
+        chooser.hideSuggestions()
+        this.host.requestRender()
+        return
+      }
+      this.closeDirectoryChooser()
+      return
+    }
+    if (matchesKey(data, Key.shift(Key.tab))) return
+    if (matchesKey(data, Key.up) || matchesKey(data, Key.down)) {
+      // Arrow selection is admitted ONLY against candidates this frame really
+      // painted; a logical query result on an unpainted tiny frame is inert.
+      if (this.paintedDirectorySuggestionPaths.length === 0) return
+      chooser.handleInput(data)
+      this.host.requestRender()
+      return
+    }
+    if (matchesKey(data, Key.tab)) {
+      const snapshot = chooser.snapshot()
+      const selected = snapshot.candidates[snapshot.selectedIndex]
+      if (selected === undefined) return
+      if (!this.paintedDirectorySuggestionPaths.includes(selected.path)) return
+      this.statusMessage = undefined
+      this.directoryStatusError = false
+      chooser.acceptPaintedCandidate(selected.path)
+      this.host.requestRender()
       return
     }
     if (matchesKey(data, Key.enter) || matchesKey(data, Key.return)) {
       this.handleDirectorySubmit()
       return
     }
-    const before = this.directoryInput.getValue()
-    this.directoryInput.handleInput(data)
-    if (this.directoryInput.getValue() !== before) {
+    const before = chooser.input.getValue()
+    chooser.handleInput(data)
+    if (chooser.input.getValue() !== before) {
       this.statusMessage = undefined
+      this.directoryStatusError = false
       this.host.requestRender()
     }
-  }
-
-  private handleDirectoryCancel(): void {
-    if (this.directorySubmitting) return
-    this.directoryEntryActive = false
-    this.directoryInput.focused = false
-    this.directoryInput.setValue('')
-    this.statusMessage = undefined
-    this.focus = 'list'
-    this.host.requestRender()
   }
 
   private handleDirectorySubmit(): void {
@@ -868,30 +943,55 @@ export class SessionWorkspacePanel implements Component {
     // Submit only a path this frame really painted: on a frame too short for
     // the input row, Enter must not verify an unseen/prefilled path.
     if (!this.directoryEditorPainted) return
-    const path = this.directoryInput.getValue().trim()
-    if (!path.startsWith('/')) {
-      this.statusMessage = 'Enter an absolute Host path beginning with /.'
+    const chooser = this.directoryChooser
+    if (chooser === undefined) return
+    const onAddDirectory = this.host.onAddDirectory
+    if (onAddDirectory === undefined) return
+    // The value is submitted VERBATIM: a meaningful trailing space/segment is
+    // never trimmed into another path. Only empty and a shape that is
+    // definitely non-absolute for the KNOWN Host dialect are refused here;
+    // while the Host dialect is unknown the Host resolve remains the judge.
+    const raw = chooser.input.getValue()
+    if (raw.trim() === '') {
+      this.statusMessage = 'Enter an absolute Host path.'
+      this.directoryStatusError = true
       this.host.requestRender()
       return
     }
+    const snapshot = chooser.snapshot()
+    if (snapshot.hostHome !== undefined) {
+      const query = hostDirectoryQuery(raw, snapshot.hostHome)
+      if (query.kind === 'invalid') {
+        this.statusMessage = query.reason
+        this.directoryStatusError = true
+        this.host.requestRender()
+        return
+      }
+      if (query.kind === 'empty') return
+    }
+    chooser.hideSuggestions()
     this.directorySubmitting = true
     this.statusMessage = undefined
+    this.directoryStatusError = false
     this.host.requestRender()
-    this.host.onAddDirectory?.(path, (outcome) => {
+    onAddDirectory(raw, (outcome) => {
       if (this.disposed) return
       this.directorySubmitting = false
       if (outcome.kind === 'registered') {
         this.nextCreateWorkspaceId = outcome.workspaceId
         if (this.options.initialDirectoryChooser === true) {
+          this.closeDirectoryChooser(false)
           this.host.onClose()
           return
         }
-        this.directoryEntryActive = false
-        this.directoryInput.focused = false
-        this.focus = 'list'
+        this.closeDirectoryChooser(false)
         this.statusMessage = `Directory added: ${outcome.path}`
+        this.directoryStatusError = false
       } else {
+        // A Host refusal keeps the raw value editable; the chooser was hidden
+        // for the pending verification and a real edit queries again.
         this.statusMessage = outcome.message
+        this.directoryStatusError = true
       }
       this.host.requestRender()
     })
@@ -1112,10 +1212,7 @@ export class SessionWorkspacePanel implements Component {
         this.startNewSession(row.workspaceId)
         return
       case 'addDirectory':
-        this.directoryEntryActive = true
-        this.focus = 'directory'
-        this.directoryInput.focused = true
-        this.host.requestRender()
+        this.openDirectoryChooser()
         return
       case 'showMore':
         this.revealMore(row.workspaceId)
@@ -1248,6 +1345,25 @@ export class SessionWorkspacePanel implements Component {
         xStart: region.xStart,
         xEnd: region.xEnd,
       }
+    // Click-to-position on the input this frame really painted. The panel
+    // stays the keyboard owner; only the private Input's cursor moves.
+    if (region?.kind === 'directory-input'
+      && this.directoryChooser !== undefined && !this.directorySubmitting) {
+      this.directoryChooser.input.handleMouse({
+        type: 'press',
+        button: 'left',
+        x,
+        y: 0,
+        screenX: x,
+        screenY: y,
+        width: this.lastDirectoryInputWidth,
+        height: 1,
+        shift: false,
+        alt: false,
+        ctrl: false,
+      })
+      this.host.requestRender()
+    }
   }
 
   onCellClick(x: number, y: number): void {
@@ -1271,18 +1387,44 @@ export class SessionWorkspacePanel implements Component {
   private activateRegion(region: HitRegion): void {
     // The inline path editor owns the WHOLE interaction while it is open:
     // a mouse press on a tree row must not start a second operation (New,
-    // Add, More, Folder) behind it. Only its own confirm/cancel targets reach
-    // their handlers (and those are inert while the Host verification pends).
+    // Add, More, Folder) behind it. Only its own targets reach their handlers
+    // (and those are inert while the Host verification pends).
     if (this.directoryEntryActive
       && region.kind !== 'directory-confirm'
-      && region.kind !== 'directory-cancel') return
+      && region.kind !== 'directory-cancel'
+      && region.kind !== 'directory-input'
+      && region.kind !== 'directory-suggestion') return
     switch (region.kind) {
       case 'directory-confirm':
         this.handleDirectorySubmit()
         return
       case 'directory-cancel':
-        this.handleDirectoryCancel()
+        if (this.directorySubmitting) return
+        // The painted Escape verb is the SAME ladder the key follows: hide a
+        // visible suggestion block first, otherwise leave the editor.
+        if (this.paintedDirectorySuggestionPaths.length > 0) {
+          this.directoryChooser?.hideSuggestions()
+          this.host.requestRender()
+          return
+        }
+        this.closeDirectoryChooser()
         return
+      case 'directory-input':
+        // Cursor positioning already happened on the press half.
+        return
+      case 'directory-suggestion': {
+        if (this.directorySubmitting || region.id === undefined) return
+        const chooser = this.directoryChooser
+        if (chooser === undefined) return
+        // Only the candidate this frame really painted may act; its identity
+        // is the official full Host path, never a display name/row index.
+        if (!this.paintedDirectorySuggestionPaths.includes(region.id)) return
+        this.statusMessage = undefined
+        this.directoryStatusError = false
+        chooser.acceptPaintedCandidate(region.id)
+        this.host.requestRender()
+        return
+      }
       case 'folder-toggle': {
         if (region.id === undefined) return
         this.browseSelectionUserOwned = true
@@ -1300,11 +1442,8 @@ export class SessionWorkspacePanel implements Component {
         // explicit New / Add / More click IS its named action, executed only
         // after the selection was committed.
         if (row.kind === 'newSession') this.startNewSession(row.workspaceId)
-        else if (row.kind === 'addDirectory') {
-          this.directoryEntryActive = true
-          this.focus = 'directory'
-          this.directoryInput.focused = true
-        } else if (row.kind === 'showMore') this.revealMore(row.workspaceId)
+        else if (row.kind === 'addDirectory') this.openDirectoryChooser()
+        else if (row.kind === 'showMore') this.revealMore(row.workspaceId)
         else if (row.kind === 'folder' && this.chooserMode() && this.options.currentSessionId === undefined) {
           if (!this.workspaces.byId.has(row.workspaceId)) return
           const workspace = this.workspaces.byId.get(row.workspaceId)!
@@ -1347,6 +1486,7 @@ export class SessionWorkspacePanel implements Component {
     this.lastPaintedTreeIds = []
     this.lastPaintedResultIds = []
     this.directoryEditorPainted = false
+    this.paintedDirectorySuggestionPaths = []
     const view = this.view(this.paintedGroups.flatMap(group => group.ids))
     this.paintedGroups = view.groups
     this.paintView = view
@@ -1497,9 +1637,7 @@ export class SessionWorkspacePanel implements Component {
       // A tiny frame prefers the ACTUAL editable path line over the decorative
       // root Add row: the user must never press Enter on an unseen path.
       if (remaining === 1) {
-        this.directoryInput.focused = !this.directorySubmitting
-        lines.push(fit(this.directoryInput.render(width)[0] ?? '', width))
-        this.directoryEditorPainted = true
+        this.paintDirectoryInputLine(width, lines, regions)
         this.lastPaintedListRows = 1
         return { lines: lines.slice(0, budget), regions }
       }
@@ -1591,44 +1729,156 @@ export class SessionWorkspacePanel implements Component {
     return true
   }
 
-  /** The inline Host path editor, painted directly under the root Add row. */
-  private paintDirectoryEditor(width: number, budget: number, lines: string[], regions: HitRegion[]): void {
-    if (lines.length >= budget) return
-    this.directoryInput.focused = !this.directorySubmitting
-    lines.push(fit(this.directoryInput.render(width)[0] ?? '', width))
+  /** Paint the editable Host path line exactly once for this frame. */
+  private paintDirectoryInputLine(width: number, lines: string[], regions: HitRegion[]): void {
+    const chooser = this.directoryChooser
+    if (chooser === undefined) return
+    chooser.input.focused = !this.directorySubmitting
+    const row = lines.length
+    lines.push(fit(chooser.input.render(width)[0] ?? '', width))
     this.directoryEditorPainted = true
+    this.lastDirectoryInputWidth = width
+    regions.push({ kind: 'directory-input', xStart: 0, xEnd: Math.max(0, width - 1), line: row })
+  }
+
+  /**
+   * The inline Host editor block: the real Input, the Host home/prefix
+   * suggestion state, up to eight bounded candidate rows and the verbs this
+   * frame can really execute. Every row is admission-checked against what was
+   * physically painted; a dropped row is never a Tab/mouse target.
+   */
+  private paintDirectoryEditor(width: number, budget: number, lines: string[], regions: HitRegion[]): void {
+    const chooser = this.directoryChooser
+    if (chooser === undefined || lines.length >= budget) return
+    this.paintDirectoryInputLine(width, lines, regions)
     if (lines.length >= budget) return
     if (this.directorySubmitting) {
       lines.push(color.textMuted(fit('Verifying directory…', width)))
       return
     }
-    // A verb label never wears brackets (design language §4.5): the key is
-    // the badge, the action stays a plain verb.
-    const confirmText = 'Verify directory'
-    const cancelText = 'Cancel'
-    const actionLine = `${color.primary(confirmText)} ${color.primary('[Enter]')}${color.textMuted(' · ')}${color.text(cancelText)} ${color.primary('[Esc]')}`
-    const actionRow = lines.length
-    lines.push(fit(actionLine, width))
-    if (width >= visibleWidth(confirmText)) {
-      regions.push({ kind: 'directory-confirm', xStart: 0, xEnd: visibleWidth(confirmText) - 1, line: actionRow })
+    const snapshot = chooser.snapshot()
+    const notices = this.directoryStatusExtras()
+    let remaining = budget - lines.length
+    if (remaining <= 0) return
+    if (snapshot.status !== 'ready' || snapshot.hidden) {
+      const message = snapshot.message
+        ?? (snapshot.status === 'loading' ? 'Reading Host directories…' : undefined)
+      if (message !== undefined) {
+        const paint = snapshot.status === 'failed' || snapshot.status === 'unavailable' || snapshot.status === 'error'
+          ? color.error
+          : color.textMuted
+        lines.push(paint(fit(sanitizedPhysicalLine(message), width)))
+        remaining -= 1
+      }
+      this.paintDirectoryVerbs(width, lines, regions, [], notices, remaining)
+      return
     }
-    const cancelStart = visibleWidth(`${confirmText} [Enter]`) + visibleWidth(' · ')
-    if (width > cancelStart) {
-      regions.push({ kind: 'directory-cancel', xStart: cancelStart, xEnd: Math.min(width - 1, cancelStart + visibleWidth(cancelText) - 1), line: actionRow })
+    const truncatedLine = 'Directory listing truncated; type a more specific path'
+    if (snapshot.totalMatches === 0) {
+      const empty = snapshot.listingEntryCount === 0
+        ? 'No child directories'
+        : 'No matching child directories'
+      lines.push(color.textMuted(fit(empty, width)))
+      remaining -= 1
+      if (snapshot.truncated && remaining > 0) {
+        lines.push(color.warning(fit(truncatedLine, width)))
+        remaining -= 1
+      }
+      this.paintDirectoryVerbs(width, lines, regions, [], notices, remaining)
+      return
     }
-    if (this.statusMessage !== undefined && lines.length < budget) {
-      lines.push(color.textMuted(fit(this.statusMessage, width)))
+    const hasExtras = notices.length > 0 || snapshot.truncated
+    const reserveHint = remaining >= 3 && !hasExtras ? 1 : 0
+    const candidateBudget = Math.max(1, remaining - reserveHint)
+    const showHeader = candidateBudget >= (snapshot.truncated ? 3 : 2)
+    const headerCost = showHeader ? 1 : 0
+    const reserveTruncated = snapshot.truncated && candidateBudget - headerCost >= 2 ? 1 : 0
+    const candidateRows = Math.max(1, Math.min(
+      HOST_DIRECTORY_SUGGESTION_LIMIT,
+      snapshot.totalMatches,
+      candidateBudget - headerCost - reserveTruncated,
+    ))
+    if (showHeader) {
+      lines.push(color.textMuted(fit('Suggestions (Host)', width)))
+      remaining -= 1
     }
-    // The app-owned failure notice that led here (a refused first session)
-    // must stay visible INSIDE the path editor; otherwise auto-opening the
-    // chooser would hide the only explanation the user gets.
+    const candidates = chooser.visibleSuggestions(candidateRows)
+    const view = chooser.snapshot()
+    for (let index = 0; index < candidates.length && lines.length < budget; index += 1) {
+      const candidate = candidates[index]!
+      const selected = index === view.selectedIndex
+      const marker = selected ? color.primary('> ') : '  '
+      const text = `${sanitizedPhysicalLine(candidate.name)}${view.separator!}`
+      const painted = selected
+        ? color.textStrong(text)
+        : candidate.hidden ? color.textDim(text) : color.text(text)
+      const row = lines.length
+      lines.push(fit(`  ${marker}${painted}`, width))
+      this.paintedDirectorySuggestionPaths.push(candidate.path)
+      regions.push({ kind: 'directory-suggestion', id: candidate.path, xStart: 0, xEnd: Math.max(0, width - 1), line: row })
+    }
+    remaining = budget - lines.length
+    if (snapshot.truncated && remaining > 0) {
+      lines.push(color.warning(fit(truncatedLine, width)))
+      remaining -= 1
+    }
+    this.paintDirectoryVerbs(width, lines, regions, candidates, notices, remaining)
+  }
+
+  /** The ONE painted verb line (its two complete word spans are the mouse
+   *  targets) plus any real status/notice below it. */
+  private paintDirectoryVerbs(
+    width: number,
+    lines: string[],
+    regions: HitRegion[],
+    candidates: readonly HostDirectoryCandidate[],
+    extras: ReadonlyArray<{ readonly text: string; readonly error: boolean }>,
+    remaining: number,
+  ): void {
+    if (remaining <= 0) return
+    for (const extra of extras) {
+      if (remaining <= 0) return
+      const paint = extra.error ? color.error : color.textMuted
+      lines.push(paint(fit(sanitizedPhysicalLine(extra.text), width)))
+      remaining -= 1
+    }
+    if (remaining <= 0) return
+    const hiding = candidates.length > 0
+    const confirmText = 'Enter verify'
+    const escapeText = hiding ? 'Esc hide suggestions' : 'Esc cancel'
+    const prefix = hiding
+      ? candidates.length > 1 ? 'Tab complete · ↑↓ choose · ' : 'Tab complete · '
+      : ''
+    const lineText = `${prefix}${confirmText} · ${escapeText}`
+    // A hint that does not fit is DROPPED, never clipped mid-word: the Action
+    // Bar below advertises the same whole segments at every width.
+    if (visibleWidth(lineText) > width) return
+    const row = lines.length
+    lines.push(color.textMuted(fit(lineText, width)))
+    const confirmStart = visibleWidth(prefix)
+    const confirmEnd = confirmStart + visibleWidth(confirmText) - 1
+    if (confirmEnd < width) {
+      regions.push({ kind: 'directory-confirm', xStart: confirmStart, xEnd: confirmEnd, line: row })
+    }
+    const escapeStart = confirmEnd + 1 + visibleWidth(' · ')
+    const escapeEnd = escapeStart + visibleWidth(escapeText) - 1
+    if (escapeEnd < width) {
+      regions.push({ kind: 'directory-cancel', xStart: escapeStart, xEnd: escapeEnd, line: row })
+    }
+  }
+
+  /** The real status/notice lines this editor owns beside its verbs. A Host
+   *  refusal of THIS verification and the app-owned failure that led here are
+   *  both real facts; the notice is deduped only against the same text. */
+  private directoryStatusExtras(): Array<{ readonly text: string; readonly error: boolean }> {
+    const lines: Array<{ readonly text: string; readonly error: boolean }> = []
+    if (this.statusMessage !== undefined) lines.push({ text: this.statusMessage, error: this.directoryStatusError })
     const notice = this.host.notice()
     if (notice !== undefined
-      && notice.text !== sanitizedPhysicalLine(this.statusMessage ?? '')
-      && lines.length < budget) {
-      const painted = notice.kind === 'error' ? color.error : color.textMuted
-      lines.push(painted(fit(notice.text, width)))
+      && (this.statusMessage === undefined || notice.text !== sanitizedPhysicalLine(this.statusMessage))) {
+      lines.push({ text: notice.text, error: notice.kind === 'error' })
     }
+    return lines
   }
 
   private renderSearchPane(width: number, budget: number, chrome: boolean): PaneRender {
@@ -1711,15 +1961,20 @@ export class SessionWorkspacePanel implements Component {
       }
       case 'addDirectory': {
         lines.push(color.textStrong('Add directory'))
-        lines.push(color.textMuted(truncateToWidth('Register an existing directory on the Host', width, '…', false)))
-        if (this.directoryEntryActive) {
+        const chooser = this.directoryChooser
+        if (chooser !== undefined) {
+          const snapshot = chooser.snapshot()
+          lines.push(color.textMuted(truncateToWidth('Host directories · read only', width, '…', false)))
+          if (snapshot.hostHome !== undefined) {
+            lines.push(color.textDim(truncateToWidth(`Host home: ${sanitizedPhysicalLine(snapshot.hostHome)}`, width, '…', false)))
+          }
           if (this.directorySubmitting) {
             lines.push(color.textMuted(truncateToWidth('Verifying directory…', width, '…', false)))
-          } else {
-            lines.push(color.textMuted(truncateToWidth('Editing the Host path', width, '…', false)))
+          } else if (this.directoryEditorPainted) {
             lines.push(color.textMuted(truncateToWidth('Enter Verify directory · Esc Cancel', width, '…', false)))
           }
         } else {
+          lines.push(color.textMuted(truncateToWidth('Register an existing directory on the Host', width, '…', false)))
           lines.push(color.textMuted(truncateToWidth('No directory has been verified yet', width, '…', false)))
           lines.push(color.textMuted(truncateToWidth('Enter Add directory', width, '…', false)))
         }
@@ -1991,12 +2246,18 @@ export class SessionWorkspacePanel implements Component {
   private actionBarSegments(): { text: string; priority: number; short?: string }[] {
     if (this.directoryEntryActive) {
       if (this.directorySubmitting) return [{ text: 'Verifying directory', priority: 9, short: 'Verifying' }]
-      return [
-        ...(this.directoryEditorPainted
-          ? [{ text: 'Enter Verify directory', priority: 7, short: 'Verify' }]
-          : []),
-        { text: 'Esc Cancel', priority: 9, short: 'Cancel' },
-      ]
+      const candidatesPainted = this.paintedDirectorySuggestionPaths.length
+      const segments: { text: string; priority: number; short?: string }[] = []
+      if (candidatesPainted > 0) {
+        segments.push({ text: 'Tab Complete', priority: 6, short: 'Tab' })
+        if (candidatesPainted > 1) segments.push({ text: '↑↓ Choose', priority: 5, short: '↑↓' })
+        segments.push({ text: 'Enter Verify directory', priority: 7, short: 'Verify' })
+        segments.push({ text: 'Esc Hide suggestions', priority: 9, short: 'Esc' })
+        return segments
+      }
+      if (this.directoryEditorPainted) segments.push({ text: 'Enter Verify directory', priority: 7, short: 'Verify' })
+      segments.push({ text: 'Esc Cancel', priority: 9, short: 'Cancel' })
+      return segments
     }
     if (this.focus === 'peek') {
       const openable = this.peek?.sessionId !== this.options.currentSessionId && !this.snapshot.resumePending

@@ -377,6 +377,7 @@ function fakeRunnerDeps(options: {
       kind: options.remoteSource === undefined ? 'direct' : 'remote',
       sessionReader: runner.sessionReader,
       sessionWorkspaceFacts: runner.sessionWorkspaceFacts,
+      hostDirectoryBrowse: runner.hostDirectoryBrowse,
       sessionWriter: runner.sessionWriter,
       interaction: runner.interaction,
       catalog: runner.catalog,

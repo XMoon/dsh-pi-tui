@@ -298,6 +298,10 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
      *  the internal command runner. This facade never caches, wraps or
      *  re-derives it; the PiTUI Session Workspace is its only consumer. */
     readonly sessionWorkspaceFacts: TuiCommandRunner['sessionWorkspaceFacts']
+    /** Session Workspace PR3: the official read-only Host directory-browse
+     *  port, forwarded unchanged. The PiTUI inline Add editor lists the Host
+     *  home/levels through it; this facade never scans a Client directory. */
+    readonly hostDirectoryBrowse: TuiCommandRunner['hostDirectoryBrowse']
     /** Split-Client only (G567 capability): the Client-root forwarded-answer
      *  eligibility read view, forwarded unchanged. Direct/TSP supply nothing. */
     readonly forwardedAnswerEligibility?: TuiCommandRunner['forwardedAnswerEligibility']
@@ -1330,6 +1334,7 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       // through the port, never ctx directly.
       sessionReader: deps.backend.sessionReader,
       sessionWorkspaceFacts: deps.backend.sessionWorkspaceFacts,
+      hostDirectoryBrowse: deps.backend.hostDirectoryBrowse,
       ...(deps.backend.forwardedAnswerEligibility === undefined
         ? {}
         : { forwardedAnswerEligibility: deps.backend.forwardedAnswerEligibility }),
