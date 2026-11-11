@@ -323,6 +323,11 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   `Directory suggestions unavailable: …`, or an observable unexpected read
   failure); an empty official level is `No child directories`; a prefix with no
   match is distinct; and `truncated` is never presented as a complete no-match.
+  A request whose Host connection generation is replaced settles the CURRENT
+  editor's browse state as stopped rather than leaving a permanent loading
+  claim or presenting the stale result; the raw value and manual Host
+  verification remain usable, a new edit starts the next prefix generation,
+  and the Home-read case states the reopen path for browsing again.
   While verification pends the editor advertises only the verifying state and
   no completion, mouse or Tab action may start another read or write; a
   settlement returns to editing with the same raw value. A frame too short to

@@ -25,6 +25,7 @@ import type {
 import type { SessionActivityFact } from '../../src/runtime/session-workspace-facts-port.ts'
 import type { DirectoryEntry, DirectoryListing } from '@deepseek-ai/dsh-host-directory-picker/types'
 import type { HostDirectoryBrowseOutcome } from '../../src/runtime/host-directory-browse-port.ts'
+import { SupersededReadError } from '../../src/runtime/read-error.ts'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 
@@ -852,6 +853,15 @@ async function clickCell(h: Harness, x: number, y: number): Promise<void> {
   await h.paint()
   h.vt.sendInput(`\x1b[<0;${x + 1};${y + 1}m`)
   await h.paint()
+}
+
+/** The right-hand wide Preview column, anchored on its own Host text. */
+function previewColumn(h: Harness): string {
+  const frame = panelFrame(h)
+  const anchor = frame.findIndex(line => line.includes('Host directories · read only'))
+  assert.ok(anchor >= 0, `the wide preview paints its Host header:\n${frame.join('\n')}`)
+  const start = frame[anchor]!.indexOf('Host directories · read only')
+  return frame.slice(anchor).map(line => line.slice(start)).join('\n')
 }
 
 async function waitUntil(predicate: () => boolean, label: string, timeoutMs = 3_000): Promise<void> {
@@ -3001,4 +3011,121 @@ test('Host-controlled path bytes never reach the terminal while the raw value st
     'the submitted Host path keeps every raw control byte and the appended tail')
   assert.ok(!h.raw().includes('pi-tui-pr3-pwned'),
     'the verified frame still emits no Host-controlled terminal sequence')
+})
+
+// ── PR3 external-review fixes ───────────────────────────────────────────────
+
+test('the wide Add preview advertises the SAME painted Esc ladder as the body and footer', async () => {
+  const outcomes: Array<(outcome: import('../../src/app/command/session-browser-presentation.ts').SessionBrowserDirectorySettlement) => void> = []
+  const h = harness({
+    columns: 120,
+    rows: 40,
+    onAddDirectory: (_path, settle) => { outcomes.push(settle) },
+    onListDirectory: async (path) => path === undefined
+      ? readyHostLevel(hostListing('/host/home', '/host/home', ['project-a', 'project-b']))
+      : readyHostLevel(hostListing(path, '/host/home', [])),
+  })
+  h.handle.setSnapshot(snapshot({ rows: [] }))
+  await h.paint()
+  h.vt.sendInput('\x1b[H')
+  await h.paint()
+  h.vt.sendInput('\r')
+  await h.paint()
+  await waitUntil(() => h.view().includes('project-a/'), 'Home candidates paint')
+  assert.match(previewColumn(h), /Enter Verify directory · Esc Hide suggestions/,
+    'the expanded Preview promises the real first Esc step')
+  assert.doesNotMatch(previewColumn(h), /Esc Cancel/u)
+  assert.match(panelFrame(h).at(-1)!, /Esc Hide suggestions/u, 'the footer agrees with the body and Preview')
+
+  h.vt.sendInput('\x1b')
+  await h.paint()
+  assert.match(previewColumn(h), /Enter Verify directory · Esc Cancel/,
+    'after the fold the Preview promises the real close step')
+  assert.doesNotMatch(previewColumn(h), /Esc Hide suggestions/u)
+  assert.match(panelFrame(h).at(-1)!, /Esc Cancel/u)
+
+  h.vt.sendInput('\x1b')
+  await h.paint()
+  assert.ok(!h.view().includes('Host directory:'), 'the second Esc closes the editor')
+
+  h.vt.sendInput('\x1b[H')
+  await h.paint()
+  h.vt.sendInput('\r')
+  await h.paint()
+  await waitUntil(() => h.view().includes('project-a/'), 'the reopened editor paints candidates')
+  h.vt.sendInput('\r')
+  await h.paint()
+  const pendingPreview = previewColumn(h)
+  assert.match(pendingPreview, /Verifying directory…/)
+  assert.doesNotMatch(pendingPreview, /Enter Verify directory|Esc Cancel|Esc Hide suggestions/u,
+    'a pending verification advertises only the pending state')
+  outcomes[0]!({ kind: 'failed', message: 'refused after the probe' })
+  await h.paint()
+})
+
+test('a replaced Home generation paints a stopped browse state and keeps manual verification + reopen', async () => {
+  const submitted: string[] = []
+  const outcomes: Array<(outcome: import('../../src/app/command/session-browser-presentation.ts').SessionBrowserDirectorySettlement) => void> = []
+  let calls = 0
+  const h = harness({
+    columns: 100,
+    rows: 30,
+    initialDirectoryEntry: true,
+    onAddDirectory: (path, settle) => { submitted.push(path); outcomes.push(settle) },
+    onListDirectory: async (path) => {
+      calls += 1
+      if (calls === 1) throw new SupersededReadError('the Host connection generation changed')
+      if (path === undefined) return readyHostLevel(hostListing('/host/home', '/host/home', ['project-a']))
+      return readyHostLevel(hostListing(path, '/host/home', []))
+    },
+  })
+  await h.paint()
+  await waitUntil(() => h.view().includes('Directory suggestions stopped'), 'the superseded Home read settles visibly')
+  const stopped = h.view()
+  assert.ok(!stopped.includes('Reading Host directories…'), 'a terminal request never leaves a permanent loading claim')
+  assert.ok(!stopped.includes('project-a/'), 'a replaced read never becomes a fake listing')
+  h.vt.sendInput('/srv/manual')
+  await h.paint()
+  h.vt.sendInput('\r')
+  await h.paint()
+  assert.deepEqual(submitted, ['/srv/manual'], 'manual absolute verification stays available after the replaced Home read')
+  outcomes[0]!({ kind: 'registered', workspaceId: 'ws-manual', path: '/srv/manual' })
+  await h.paint()
+  assert.ok(!h.view().includes('Host directory:'), 'the verified directory retires the editor')
+
+  h.vt.sendInput('\x1b[H')
+  await h.paint()
+  h.vt.sendInput('\r')
+  await h.paint()
+  await waitUntil(() => h.view().includes('Host directory: /host/home/'), 'a reopened editor starts a NEW Home read')
+  assert.equal(calls, 2, 'reopening creates a fresh chooser generation, never an automatic retry inside the old one')
+})
+
+test('a replaced prefix query settles stopped and a real edit recovers the next Host level', async () => {
+  let calls = 0
+  const h = harness({
+    columns: 100,
+    rows: 30,
+    initialDirectoryEntry: true,
+    onAddDirectory: () => {},
+    onListDirectory: async (path) => {
+      calls += 1
+      if (calls === 1) return readyHostLevel(hostListing('/host/home', '/host/home', ['project-a']))
+      if (calls === 2) throw new SupersededReadError('the Host connection generation changed')
+      return readyHostLevel(hostListing('/host/home', '/host/home', ['project-b']))
+    },
+  })
+  await h.paint()
+  await waitUntil(() => h.view().includes('project-a/'), 'Home candidates paint')
+  h.vt.sendInput('p')
+  await h.paint()
+  await waitUntil(() => h.view().includes('Edit the path to retry'), 'the replaced prefix query settles stopped')
+  const stopped = h.view()
+  assert.ok(!stopped.includes('project-a/'), 'the replaced query result is not presented')
+  assert.ok(!stopped.includes('Reading Host directories…'), 'the stopped query is not a permanent loader')
+  h.vt.sendInput('r')
+  await h.paint()
+  await waitUntil(() => h.view().includes('project-b/'), 'a real edit starts and settles the next query generation')
+  assert.equal(calls, 3)
+  assert.ok(h.view().includes('Host directory: /host/home/pr'), 'the raw edit value is unchanged')
 })

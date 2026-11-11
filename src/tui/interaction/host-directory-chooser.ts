@@ -65,7 +65,10 @@ export interface HostDirectoryChooserSnapshot {
  * `idle` = blank input (no request); `loading` = the home or the latest level
  * is in flight; `invalid` = the typed value is not absolute for the Host;
  * `failed` = the Host refused the level; `unavailable` = the browse surface
- * itself is unavailable; `error` = an unclassified real read failure.
+ * itself is unavailable; `error` = an unclassified real read failure;
+ * `superseded` = the request's Host connection generation was replaced, so
+ * this editor's browse state is stopped (never a permanent loading claim) and
+ * the editor states its own recovery path.
  */
 export type HostDirectoryChooserStatus =
   | 'idle'
@@ -75,6 +78,7 @@ export type HostDirectoryChooserStatus =
   | 'failed'
   | 'unavailable'
   | 'error'
+  | 'superseded'
 
 /** The narrow capabilities one inline editor needs. */
 export interface HostDirectoryChooserDeps {
@@ -146,7 +150,10 @@ export class HostDirectoryChooser {
       },
       (error: unknown) => {
         if (this.disposed || generation !== this.homeGeneration || controller.signal.aborted) return
-        if (this.isSuperseded(error)) return
+        if (this.isSuperseded(error)) {
+          this.settleSuperseded('home')
+          return
+        }
         this.status = 'error'
         this.message = `Directory suggestions failed: ${safeErrorMessage(error)}`
         this.deps.onChange()
@@ -328,7 +335,10 @@ export class HostDirectoryChooser {
         },
         (error: unknown) => {
           if (this.disposed || generation !== this.queryGeneration || controller.signal.aborted) return
-          if (this.isSuperseded(error)) return
+          if (this.isSuperseded(error)) {
+            this.settleSuperseded('query')
+            return
+          }
           this.status = 'error'
           this.message = `Directory suggestions failed: ${safeErrorMessage(error)}`
           this.deps.onChange()
@@ -377,7 +387,27 @@ export class HostDirectoryChooser {
   }
 
   /**
-   * A replaced Remote generation is the port's own silent supersession, not a
+   * A replaced Host generation is neither success nor an empty directory: the
+   * CURRENT editor's browse state is stopped with a truthful local status and
+   * its own recovery path. Nothing is retried automatically; the raw value and
+   * the manual Host verification stay usable, and a new edit starts a fresh
+   * query generation when the dialect is already known.
+   */
+  private settleSuperseded(scope: 'home' | 'query'): void {
+    this.entries = []
+    this.listingEntryCount = 0
+    this.truncated = false
+    this.selectedIndex = 0
+    this.currentQuery = undefined
+    this.status = 'superseded'
+    this.message = scope === 'home'
+      ? 'Directory suggestions stopped after the Host connection changed. Reopen Add directory to browse, or verify an absolute path manually.'
+      : 'Directory suggestions stopped after the Host connection changed. Edit the path to retry, or verify an absolute path manually.'
+    this.deps.onChange()
+  }
+
+  /**
+   * A replaced Remote generation is the port's own supersession, not a
    * user-facing failure. The name is the structural official error identity;
    * this never classifies by message text.
    */

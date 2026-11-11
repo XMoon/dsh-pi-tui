@@ -2048,7 +2048,12 @@ export class SessionWorkspacePanel implements Component {
           if (this.directorySubmitting) {
             lines.push(color.textMuted(truncateToWidth('Verifying directory…', width, '…', false)))
           } else if (this.directoryEditorPainted) {
-            lines.push(color.textMuted(truncateToWidth('Enter Verify directory · Esc Cancel', width, '…', false)))
+            // The Preview promises the SAME Esc step the body and the Action
+            // Bar already paint: candidates first fold, then the editor closes.
+            const escape = this.paintedDirectorySuggestionPaths.length > 0
+              ? 'Esc Hide suggestions'
+              : 'Esc Cancel'
+            lines.push(color.textMuted(truncateToWidth(`Enter Verify directory · ${escape}`, width, '…', false)))
           }
         } else {
           lines.push(color.textMuted(truncateToWidth('Register an existing directory on the Host', width, '…', false)))
