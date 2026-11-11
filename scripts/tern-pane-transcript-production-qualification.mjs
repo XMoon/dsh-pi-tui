@@ -676,9 +676,31 @@ export default async function (h) {
   // ─────────── group 4: the real Session source replacement through the native Browser ───────────
   await runCase(h, 'project-full-window')
   await submit(h, '/sessions')
+  // The Browser is a workspace TREE: sessions nest under workspace folders, which
+  // are collapsed by default for the fixture's Unassigned group. Wait for the
+  // picker, then expand the folder so the session rows render (select the folder
+  // row, then ArrowRight = browse-workspace expand). Session row ids remain
+  // pk-session:<sessionId>; only the nesting changed, not the row identity.
   if (!await requiredWait(h, 'the native Session Browser opens over the production Main', () =>
-    h.classNodes(h.snapshot(), 'sf-picker').length === 1
-    && h.classNodes(h.snapshot(), 'pk-row').filter(node => !String(node.class ?? '').split(/\s+/u).includes('grp')).length >= 2,
+    h.classNodes(h.snapshot(), 'sf-picker').length === 1,
+  { limit: 200 })) {
+    finish(h, extra)
+    return
+  }
+  const sessionRowsPresent = () => {
+    const snap = h.snapshot()
+    return snap.nodes.some(node => node.id === `pk-session:${testInput.sessions.a}`)
+      && snap.nodes.some(node => node.id === `pk-session:${testInput.sessions.b}`)
+  }
+  if (!sessionRowsPresent()) {
+    const snap = h.snapshot()
+    const folder = snap.nodes.find(node => String(node.id ?? '').startsWith('pk-workspace:'))
+    if (folder !== undefined) {
+      await h.click(snap.chains, folder)
+      await h.key('ArrowRight', 400)
+    }
+  }
+  if (!await requiredWait(h, 'both fixed Sessions render as native option rows (workspace folder expanded)', sessionRowsPresent,
   { limit: 200 })) {
     finish(h, extra)
     return
