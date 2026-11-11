@@ -1924,7 +1924,7 @@ function focusNestedWorkDescriptor(
 ): TranscriptMainBlockDescriptor {
   const key = `${prefix}work-${keys.keyFor(span.owner)}`
   const expanded = options.expandedWorkOwners?.has(span.owner) === true
-  const stamp: TranscriptMainStampPart[] = ['work', key, expanded ? 1 : 0, lifetime?.endedAt, span.parts.length]
+  const stamp: TranscriptMainStampPart[] = ['work', key, expanded ? 1 : 0, lifetime?.startedAt, lifetime?.endedAt, span.parts.length]
   for (const preview of preparing) stamp.push(...preparingStampOf(preview))
   for (const part of span.parts) {
     stamp.push(...(part.kind === 'message'
@@ -2266,6 +2266,7 @@ function compactMainBlocks(
     readonly members: TranscriptMainBlockDescriptor[]
     readonly preparing: TranscriptMainBlockDescriptor[]
     readonly activityCompleted: boolean | undefined
+    readonly lifetimeStartedAt: number | undefined
     readonly lifetimeEndedAt: number | undefined
     readonly hasNewer: boolean | undefined
   }
@@ -2292,6 +2293,7 @@ function compactMainBlocks(
         members: [],
         preparing: expanded ? previews.map(preview => preparingDescriptor(preview, options.cwd, '')) : [],
         activityCompleted: options.turnActivities?.get(block.span.turn)?.completed,
+        lifetimeStartedAt: workLifetimes.get(owner)?.startedAt,
         lifetimeEndedAt: workLifetimes.get(owner)?.endedAt,
         hasNewer: options.window?.hasNewer,
       }
@@ -2337,6 +2339,7 @@ function compactWorkDescriptor(slot: {
   readonly members: readonly TranscriptMainBlockDescriptor[]
   readonly preparing: readonly TranscriptMainBlockDescriptor[]
   readonly activityCompleted: boolean | undefined
+  readonly lifetimeStartedAt: number | undefined
   readonly lifetimeEndedAt: number | undefined
   readonly hasNewer: boolean | undefined
 }, options: TranscriptPresetViewOptions): TranscriptMainBlockDescriptor {
@@ -2348,6 +2351,9 @@ function compactWorkDescriptor(slot: {
     slot.span.parts.length,
     slot.activityCompleted === true ? 1 : slot.activityCompleted === false ? 0 : -1,
     slot.hasNewer === false ? 1 : slot.hasNewer === true ? 0 : -1,
+    // The header duration is `endedAt - startedAt`; a proven EARLIER start is
+    // a real display change even when the end is unchanged.
+    slot.lifetimeStartedAt,
     slot.lifetimeEndedAt,
   ]
   for (const preview of slot.previews) stamp.push(...preparingStampOf(preview))

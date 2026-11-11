@@ -3283,6 +3283,9 @@ export class TranscriptFolder {
       const timing = transcriptTimingOf(card)
       if (timing === undefined || timing.startedAt <= at) continue
       setTranscriptTiming(card, { ...timing, startedAt: at })
+      // The materialized Work header derives its duration from this sidecar, so
+      // an earlier proven start is a real display change of the owning card.
+      bumpTranscriptDisplayRevision(card)
       refreshed.push(callId)
       const group = this.groupOf.get(index)
       if (group !== undefined) touchedGroups.add(group)
@@ -3990,7 +3993,14 @@ export class TranscriptFolder {
       if (!assistantEntryHasInterruptionEvidence(item)) continue
       if (this.hiddenAssistantEntries.has(item)) continue
       const wasVisible = this.isVisible(item)
+      if (item.interrupted === true) continue
       item.interrupted = true
+      // Interruption evidence is rendered (and disqualifies the row as the
+      // turn's final Assistant), so it is a display change even when the row's
+      // VISIBILITY does not move — the visibility sync below returns early in
+      // exactly that case.
+      bumpTranscriptDisplayRevision(item)
+      bumpAssistantPresentationRevision(item)
       this.syncAssistantVisibility(turn, itemStep, item, wasVisible)
     }
   }
