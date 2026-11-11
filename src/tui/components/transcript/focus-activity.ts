@@ -136,17 +136,20 @@ export function focusDurationText(
 
 /** Assemble the one-line header, dropping the stat tail progressively so
  * the header NEVER breaks the terminal (plan §14/§46; addendum v2 §21):
- * full tail → token + action total → token → bare label (then a hard
- * truncate as the last resort). The stat tail is the SHARED action-stats
- * parts — `N actions · subtype ×count` — derived turn-level by the
- * projection (never from a synthetic `TurnActivity` store). The per-turn
- * token segment is hidden entirely when the turn has no usage fact (never
- * a fake `0 tok` — plan §13.3) and remains Focus-only: Activity has no
- * trustworthy span-level token authority and never fabricates one
- * (addendum v2 §25). The disclosure glyph resolves against the CURRENT
- * icon style (the disclosure is an interaction affordance and is never
- * hidden — not even under minimal, plan §34.7); the single-space lead
- * keeps the historical `🐋 Working` layout. */
+ * the stat tail is trimmed from its RIGHT one part at a time (a subtype, then
+ * the trailing `+N`) until it fits, keeping the `N actions` total as long as
+ * possible, then the token segment, then the bare label (with a hard truncate
+ * as the last resort). The stat tail is the SHARED action-stats parts —
+ * `N actions · subtype ×count` — derived turn-level by the projection (never
+ * from a synthetic `TurnActivity` store); because `send_message` sorts first,
+ * a narrow header keeps it ahead of the higher-count subtypes instead of
+ * dropping every subtype at once. The per-turn token segment is hidden
+ * entirely when the turn has no usage fact (never a fake `0 tok` — plan
+ * §13.3) and remains Focus-only: Activity has no trustworthy span-level token
+ * authority and never fabricates one (addendum v2 §25). The disclosure glyph
+ * resolves against the CURRENT icon style (the disclosure is an interaction
+ * affordance and is never hidden — not even under minimal, plan §34.7); the
+ * single-space lead keeps the historical `🐋 Working` layout. */
 export function formatFocusHeaderLine(
   activity: TurnActivity,
   expanded: boolean,
@@ -163,12 +166,17 @@ export function formatFocusHeaderLine(
   const tail = compactActionStatParts(actionStats).map(sanitizedPhysicalLine)
   const candidates: string[] = []
   if (token !== undefined) {
-    candidates.push(`${head} · ${token}${tail.length > 0 ? ` · ${tail.join(' · ')}` : ''}`)
-    candidates.push(`${head} · ${token}${tail.length > 0 ? ` · ${tail[0]}` : ''}`)
+    // Longest fitting stat prefix first: `head · token · N actions · …` down to
+    // `head · token · N actions`, then the label + token alone.
+    for (let keep = tail.length; keep >= 1; keep -= 1) {
+      candidates.push(`${head} · ${token} · ${tail.slice(0, keep).join(' · ')}`)
+    }
     candidates.push(`${head} · ${token}`)
-  } else if (tail.length > 0) {
-    candidates.push(`${head} · ${tail.join(' · ')}`)
-    candidates.push(`${head} · ${tail[0]}`)
+  } else {
+    // Without usage the same right-to-left trim applies to the stat tail.
+    for (let keep = tail.length; keep >= 1; keep -= 1) {
+      candidates.push(`${head} · ${tail.slice(0, keep).join(' · ')}`)
+    }
   }
   candidates.push(head)
   for (const candidate of candidates) {
