@@ -287,6 +287,7 @@ function makePanel(state: JobInspectorState, overrides: Partial<JobInspectorPane
   const rows = { value: 24 }
   const panel = new JobInspectorPanel(state, {
     rows: () => rows.value,
+    columns: () => 120,
     requestRender: () => {},
     notice: () => undefined,
     onClose: () => { closes += 1 },

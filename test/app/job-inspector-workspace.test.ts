@@ -342,6 +342,7 @@ test('the panel header keeps status/gap/error visible and its Action Bar is the 
       },
       {
         rows: () => budget.rows,
+        columns: () => budget.width,
         requestRender: () => {},
         notice: () => undefined,
         onClose: () => {},
@@ -419,6 +420,7 @@ test('the Action Bar drops the Stop verb (never Esc back) when the capability di
   let closes = 0
   const panel = new JobInspectorPanel(openingRow(), {
     rows: () => 24,
+    columns: () => 120,
     requestRender: () => {},
     notice: () => undefined,
     onClose: () => { closes += 1 },
@@ -458,6 +460,7 @@ test('a long Job identity and a long error text never hide the status or the ind
     },
     {
       rows: () => 24,
+    columns: () => 120,
       requestRender: () => {},
       notice: () => undefined,
       onClose: () => {},
@@ -484,6 +487,65 @@ test('a long Job identity and a long error text never hide the status or the ind
   panel.dispose()
 })
 
+test('a Job bar gesture is revoked when the terminal resizes before the next paint', () => {
+  let rows = 24
+  let columns = 80
+  let closes = 0
+  let boxes: Array<{ x: number; y: number; width: number; height: number }> = []
+  const panel = new JobInspectorPanel(
+    { opening: { jobId: 'job-a', kind: 'bash', label: 'pnpm build', status: 'running' } },
+    {
+      rows: () => rows,
+      columns: () => columns,
+      requestRender: () => {},
+      notice: () => undefined,
+      onClose: () => { closes += 1 },
+      canStop: () => false,
+      onStop: () => {},
+      isFindKey: () => false,
+      findHint: () => '',
+      focusComponent: () => {},
+      onCopy: () => {},
+      // The frame-painted pass reads the header then the pinned bar in order.
+      paintedBox: () => boxes.shift(),
+      setNativeCopyOnSelect: () => {},
+    },
+  )
+  const paint = (): string => {
+    boxes = [
+      { x: 0, y: 0, width: columns, height: 4 },
+      { x: 0, y: rows - 1, width: columns, height: 1 },
+    ]
+    const lines = panel.render(columns)
+    panel.onFramePainted()
+    return stripTerminalSequences(lines.at(-1)!)
+  }
+  const bar = paint()
+  const col = bar.indexOf('Back')
+  assert.ok(col >= 0, `the bar paints its Back affordance:\n${bar}`)
+
+  // A resize between press and release (no repaint yet) revokes the gesture:
+  // the old physical cells must never replay the previous Esc outcome.
+  panel.onChromePress(col, rows - 1)
+  rows = 20
+  panel.onChromeClick(col, 23)
+  assert.equal(closes, 0, 'a pre-repaint row resize revokes the bar gesture')
+
+  // The same fence covers a width-only change.
+  rows = 24
+  panel.onChromePress(col, 23)
+  columns = 100
+  panel.onChromeClick(col, 23)
+  assert.equal(closes, 0, 'a pre-repaint width change revokes the bar gesture')
+
+  // Positive control: on an UNCHANGED frame the same cells act exactly once.
+  columns = 80
+  panel.onChromePress(col, 23)
+  panel.onChromeClick(col, 23)
+  assert.equal(closes, 1, 'an unchanged painted frame still runs the ONE close intent')
+  panel.dispose()
+})
+
 test('the ONE chrome plan keeps the Action Bar on screen at every height, notice included', () => {
   const flags = (): JobInspectorState => ({
     ...openingRow(),
@@ -495,6 +557,7 @@ test('the ONE chrome plan keeps the Action Bar on screen at every height, notice
   })
   const panelAt = (rows: number, noticeLive: boolean): JobInspectorPanel => new JobInspectorPanel(flags(), {
     rows: () => rows,
+    columns: () => 120,
     requestRender: () => {},
     notice: () => (noticeLive ? { text: 'could not stop job job-a: refused', kind: 'error' } : undefined),
     onClose: () => {},

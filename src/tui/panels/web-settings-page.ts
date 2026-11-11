@@ -1072,12 +1072,12 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     const rowId = this.selectedRowId()
     return this.region === 'list'
       ? wholeWording(
-          escapeWording('↑/↓ choose · Enter open · r refresh', 'Tools'),
+          escapeWording('↑/↓ choose · Enter open · r refresh', 'Back'),
           width,
           [
-            escapeWording('↑/↓ · Enter open · r refresh', 'Tools'),
-            escapeWording('↑/↓ · Enter', 'Tools'),
-            escapeWording('', 'Tools'),
+            escapeWording('↑/↓ · Enter open · r refresh', 'Back'),
+            escapeWording('↑/↓ · Enter', 'Back'),
+            escapeWording('', 'Back'),
           ],
         )
       : rowId === 'web-credential'

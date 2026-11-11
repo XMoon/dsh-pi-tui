@@ -26672,6 +26672,7 @@ export class TuiApp {
     let record: JobWorkspaceRecord
     const panel = new JobInspectorPanel(options.initial, {
       rows: () => this.terminal.rows,
+      columns: () => this.terminal.columns,
       requestRender: () => this.requestRender(),
       notice: () => this.currentNotice(),
       onClose: () => record.close(),

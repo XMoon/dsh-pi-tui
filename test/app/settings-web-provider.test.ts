@@ -1866,13 +1866,13 @@ test('the page bar publishes the complete Esc span in its OWN content columns', 
         'painting the affordance never changes its visible width')
     }
 
-    // List region: Esc returns to the Tools rows.
-    expectVerb('Tools')
+    // List region: Esc returns to the Tools rows (the affordance names that Back).
+    expectVerb('Back')
     // Detail region: Esc returns to the page list.
     page.handleInput('\r')
     expectVerb('Back')
     page.handleInput('\x1b')
-    expectVerb('Tools')
+    expectVerb('Back')
 
     // No wording fits at all: the bar is empty and carries no geometry.
     page.render(8)

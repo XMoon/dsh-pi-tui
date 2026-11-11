@@ -305,6 +305,10 @@ export interface JobInspectorPanelIntents {
   /** The live physical row grant. The shell owns the terminal; the panel
    *  reads it per frame and never keeps a second `terminal.rows` copy. */
   readonly rows: () => number
+  /** The live physical column grant. A pointer gesture is revoked when the
+   *  terminal geometry moved before the next paint, so the panel needs the
+   *  LIVE width too (it never guesses it from a painted row). */
+  readonly columns: () => number
   /** Repaint through the owning surface (the panel never paints itself). */
   readonly requestRender: () => void
   /** The app's LIVE transient notice (the ONE notice authority), read per frame.
@@ -1002,9 +1006,20 @@ function positionFacts(
   return { start: top + 1, end: Math.min(total, top + viewportHeight), total }
 }
 
+/** The chrome geometry of ONE painted frame: the terminal grant and the painted
+ *  header/bar boxes. A press records it, and the release accepts the gesture
+ *  only while the LIVE grant still matches it and the CURRENT painted frame has
+ *  the identical geometry (a resize/repaint boundary revokes it). */
+interface JobChromeFrame {
+  readonly rows: number
+  readonly columns: number
+  readonly headerTop: number
+  readonly bar: { readonly x: number; readonly y: number; readonly width: number; readonly height: number } | undefined
+}
+
 /** The header's pressed affordance: the SAME painted target object the release
  *  must re-resolve. */
-type JobHeaderPressed = { readonly kind: 'header'; readonly target: JobHeaderHitTarget }
+type JobHeaderPressed = { readonly kind: 'header'; readonly target: JobHeaderHitTarget; readonly chrome: JobChromeFrame }
 
 /** The bar's pressed affordance: the exact cells, the Esc destination and the
  *  read page/search-state identity the release must still match. */
@@ -1015,6 +1030,7 @@ interface JobBarPressed {
   readonly startCol: number
   readonly endCol: number
   readonly viewKey: string
+  readonly chrome: JobChromeFrame
 }
 
 type JobPressedGesture = JobHeaderPressed | JobBarPressed
@@ -1072,6 +1088,11 @@ export class JobInspectorPanel extends VStack {
     readonly startCol: number
     readonly endCol: number
   } | undefined
+  /** The geometry of the LAST PAINTED frame (live terminal grant + the real
+   *  header/bar boxes). Every pointer release re-proves it, so a resize,
+   *  remount or chrome row change between press and release is inert instead of
+   *  replaying an old Esc coordinate. */
+  private paintedChromeFrame: JobChromeFrame = { rows: -1, columns: -1, headerTop: 0, bar: undefined }
   /** The ONE press-time target of the LAST gesture: either the header's painted
    *  affordance or the bar's Esc affordance. The release re-proves the SAME
    *  owner, cells, view and search mode before acting. */
@@ -1300,6 +1321,18 @@ export class JobInspectorPanel extends VStack {
     this.barHit = barBox === undefined || esc === undefined
       ? undefined
       : { action: esc.action, row: barBox.y, startCol: barBox.x + esc.startCol, endCol: barBox.x + esc.endCol }
+    // The ONE frame identity every pointer release re-proves. The LIVE grant is
+    // read here (this frame was painted at that grant) and the real boxes are
+    // committed, so neither a pre-repaint resize nor a chrome-row move can keep
+    // an old gesture alive.
+    this.paintedChromeFrame = {
+      rows: this.intents.rows(),
+      columns: this.intents.columns(),
+      headerTop: this.headerTop,
+      bar: barBox === undefined
+        ? undefined
+        : { x: barBox.x, y: barBox.y, width: barBox.width, height: barBox.height },
+    }
     if (this.readState.view === 'command') {
       if (this.commandReader.search.mode !== 'inactive' && this.chrome.plan.searchRows === 0) {
         this.exitSearch()
@@ -1515,7 +1548,7 @@ export class JobInspectorPanel extends VStack {
 
   /** The painted Action Bar Esc affordance at one screen cell, or undefined.
    *  The span is bar-local; the bar's LAST PAINTED box supplies its origin. */
-  private barTargetAt(x: number, y: number): JobBarPressed | undefined {
+  private barTargetAt(x: number, y: number): Omit<JobBarPressed, 'chrome'> | undefined {
     const hit = this.barHit
     if (hit === undefined || y !== hit.row) return undefined
     if (x < hit.startCol || x >= hit.endCol) return undefined
@@ -1529,6 +1562,35 @@ export class JobInspectorPanel extends VStack {
     }
   }
 
+  /** Snapshot the LAST PAINTED chrome frame for one press. */
+  private chromeFrame(): JobChromeFrame {
+    const frame = this.paintedChromeFrame
+    return {
+      rows: frame.rows,
+      columns: frame.columns,
+      headerTop: frame.headerTop,
+      bar: frame.bar === undefined
+        ? undefined
+        : { x: frame.bar.x, y: frame.bar.y, width: frame.bar.width, height: frame.bar.height },
+    }
+  }
+
+  /** Whether the gesture's painted frame is still the LIVE one: the terminal
+   *  grant did not move (a resize before the next paint is refused) and the
+   *  current painted geometry is identical (a repaint at another width/height
+   *  or with another chrome row layout is refused). A benign repaint with the
+   *  same geometry keeps the gesture alive, exactly as §5.2 requires. */
+  private chromeFrameCurrent(chrome: JobChromeFrame): boolean {
+    if (this.intents.rows() !== chrome.rows || this.intents.columns() !== chrome.columns) return false
+    const live = this.paintedChromeFrame
+    if (live.rows !== chrome.rows || live.columns !== chrome.columns || live.headerTop !== chrome.headerTop) return false
+    if (live.bar === undefined || chrome.bar === undefined) return live.bar === chrome.bar
+    return live.bar.x === chrome.bar.x
+      && live.bar.y === chrome.bar.y
+      && live.bar.width === chrome.bar.width
+      && live.bar.height === chrome.bar.height
+  }
+
   /** The exact read page + Find state a bar press was recorded against. A page
    *  switch, a Find open/close or a different Job document rejects the release. */
   private viewKey(): string {
@@ -1540,12 +1602,14 @@ export class JobInspectorPanel extends VStack {
    *  pressed (header affordance OR the bar's Esc affordance), without acting. */
   onChromePress(x: number, y: number): void {
     if (this.disposed) return
+    const chrome = this.chromeFrame()
     const target = this.headerTargetAt(x, y)
     if (target !== undefined) {
-      this.pressed = { kind: 'header', target }
+      this.pressed = { kind: 'header', target, chrome }
       return
     }
-    this.pressed = this.barTargetAt(x, y)
+    const bar = this.barTargetAt(x, y)
+    this.pressed = bar === undefined ? undefined : { ...bar, chrome }
   }
 
   /** The RELEASE half: the click acts only when the SAME cell still resolves to
@@ -1559,6 +1623,9 @@ export class JobInspectorPanel extends VStack {
     const pressed = this.pressed
     this.pressed = undefined
     if (pressed === undefined) return
+    // A resize that has not repainted, a repaint at a different grant, or any
+    // chrome row move revokes the whole gesture before its owner is resolved.
+    if (!this.chromeFrameCurrent(pressed.chrome)) return
     if (pressed.kind === 'header') {
       const target = this.headerTargetAt(x, y)
       if (target === undefined) return
