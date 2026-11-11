@@ -1692,6 +1692,10 @@ export class ModelsWorkspacePage implements Component {
     if (this.question === question) {
       this.question = this.questionQueue.shift()
       if (this.question !== undefined) {
+        // The queued prompt is a DIFFERENT owner: its Esc must not inherit a
+        // press that was made on the retired one, even when both start in the
+        // same flow mode.
+        this.questionOwnerSerial += 1
         this.question.flow.focused = true
         this.questionUsable = false
       }

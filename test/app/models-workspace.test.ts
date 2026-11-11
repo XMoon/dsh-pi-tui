@@ -677,10 +677,13 @@ test('a withdrawn older prompt never closes the newer prompt UI (RFL-003)', asyn
   page.handleInput('\r')
   await flush()
   assert.match(viewText(page), /FIRST PROMPT/u)
+  const retiredOwner = page.gestureIdentity()
   emit({ kind: 'prompt-withdrawn', attemptId: 'auth-2', promptId: 'p1' })
   await flush()
   assert.match(viewText(page), /SECOND PROMPT/u)
   assert.doesNotMatch(viewText(page), /FIRST PROMPT/u)
+  assert.notEqual(page.gestureIdentity(), retiredOwner,
+    'the queued prompt takes over as a NEW owner; a press made on the retired prompt must stay stale')
   for (const character of 'second-answer') page.handleInput(character)
   page.handleInput('\r')
   page.handleInput('\r')
