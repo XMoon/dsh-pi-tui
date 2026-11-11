@@ -429,3 +429,82 @@ test('native Queue: a disabled/leader-only queue-open binding paints Manage with
   assert.equal(m.controller.isOpen(), false, 'the unbound raw chord never opens the sheet')
   assert.equal(sheetPicker(m.pane), undefined)
 })
+
+
+test('a pane without the sheet kinds mounts no presenter, no Manage and no raw entry', async (t) => {
+  // The base HELLO set has no picker/overlay/editor/button/row/el: the sheet
+  // cannot paint, so NOTHING may advertise or accept the queue entry.
+  const pane = installTspPane()
+  t.after(() => pane.restore())
+  const session = await connect({ timeout: 500, exitHooks: false })
+  assert.ok(session)
+  const renderer = mountTspRenderer(session, {
+    copyVisual: async () => false,
+    requestExit() {},
+    onFatal: (error) => assert.fail(String(error)),
+    queueOpenKeys: () => ['alt+i'],
+  })
+  t.after(() => renderer.dispose())
+  renderer.bindInput({
+    exit() {},
+    cancel() {},
+    submit() {},
+    steer() {},
+    pasteMedia() {},
+    pastedPath: () => {},
+    admitPastedPathDelivery: () => true,
+    shouldRememberInput: () => true,
+    noteUserInput() {},
+    listContinuedQuestions: () => [],
+    reopenContinuedQuestion: () => false,
+    openModelPicker() {},
+    openModelQuick() {},
+    openSessionBrowser() {},
+    sessionBrowserAvailable: () => true,
+  } as never)
+  const controller = new QueueManagerController({
+    reader: { snapshot: () => ({ running: true, items: [TEXT_ONE] }) },
+    writer: {
+      prompt: async () => ({ kind: 'committed', value: undefined }),
+      updateQueue: async () => ({ kind: 'committed', value: undefined }),
+      cancel: async () => ({ kind: 'committed', value: undefined }),
+      rename: async () => ({ kind: 'committed', value: { title: 't' } }),
+      refreshTitle: async () => ({ kind: 'unsupported', reason: 'none' }),
+    },
+    captureSessionId: () => 'session-a',
+    captureSubject: () => ({}),
+    isSubjectCurrent: () => true,
+    captureScope: () => ({ sessionId: 'session-a' } as never),
+    isScopeCurrent: () => true,
+    isViewing: () => false,
+    withWriter: async (_scope, task) => task(),
+    beginClientWrite: () => () => {},
+    runOwned: () => {},
+    refreshPendingInput: () => {},
+    notify: () => {},
+    textOf: content => queueTextOf(content as readonly ContentBlock[]),
+  })
+  renderer.bindQueueManager?.(controller)
+  assert.equal(renderer.queuePresentation, undefined, 'no sheet presentation is exposed without its kinds')
+  // The controller cannot be attached to a presentation that does not exist.
+  assert.deepEqual(controller.open(), { opened: false, message: 'Queue management is unavailable on this renderer' })
+
+  renderer.display.setPendingInputPresentation({
+    queued: [{ id: 'occ-1', text: 'first queued', mode: 'followup' }],
+    tail: [],
+    running: true,
+  })
+  await waitUntil('the legacy Dock row', () => wireNodes(pane).some(node => node.id === 'dock.queue-occ-1'))
+  const nodes = wireNodes(pane)
+  assert.equal(nodes.some(node => node.id.includes('queue-header')), false, 'no Queue header is advertised')
+  assert.equal(nodes.some(node => node.id.includes('queue-manage')), false, 'no Manage control is advertised')
+  assert.equal(nodes.some(node => node.k === 'el' || node.k === 'button'), false,
+    'the renderer sends no control kind the pane did not negotiate')
+  assert.equal(nodes.filter(node => node.k === 'text').some(node => String(node.p.text).includes('queued (followup): first queued')), true,
+    'the historical plain queue lane is preserved')
+
+  pane.key('\u001bi')
+  await settle(50)
+  assert.equal(controller.isOpen(), false, 'the raw queue chord cannot open a sheet that is not mounted')
+  assert.equal(controller.view().mode, 'closed')
+})

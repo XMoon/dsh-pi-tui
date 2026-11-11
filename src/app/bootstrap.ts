@@ -2077,6 +2077,7 @@ export function applyRunnerWithRuntime(
           modelPicker: surface.modelPresentation !== undefined,
           presetPicker: surface.presetPresentation !== undefined,
           sessionBrowser: surface.sessionBrowserPresentation !== undefined,
+          queueManager: surface.queuePresentationAvailable(),
           taskCenter: surface.display.supportsTaskCenter,
         }),
       },
