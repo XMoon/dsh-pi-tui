@@ -462,14 +462,42 @@ no `--patch` overlay), an isolated tmux socket, and the DSH process exit
 status. The candidate tarball argument is required (no published-package
 fallback); it is a manual qualification lane, not part of `verify:release`.
 
-A single file:
+### Isolated single-file and probe runs
+
+Prefer a repository-owned lane; it already owns and removes its disposable
+temp root:
 
 ```sh
-node --test test/tui/marquee.test.ts
+pnpm test:product -- --test-concurrency=4
+```
+
+A single file, or a probe outside any lane, runs through the containment
+runner with a private, worktree-owned temporary base:
+
+```sh
+mkdir -p temp/test-runs
+TMPDIR="$PWD/temp/test-runs" \
+TMP="$PWD/temp/test-runs" \
+TEMP="$PWD/temp/test-runs" \
+node scripts/run-with-temp-root.mjs \
+  node --test test/tui/marquee.test.ts
 ```
 
 The suite is TypeScript and runs under Node's type-stripping loader; a
-`.mjs` test needs no loader.
+`.mjs` test needs no loader. `run-with-temp-root.mjs` creates one run root
+under that base, points the child's `TMPDIR`/`TMP`/`TEMP` at it, and removes
+the root once the run settles — normal exit, handled interruption or spawn
+failure. A root it cannot prove unused is kept and the run is non-zero;
+`DSH_TEST_KEEP_TMP=1` keeps the root for debugging.
+
+Never run a fixture or a delegated review probe against the shared `/tmp`
+root, and never create a shared `/tmp/node_modules` link or any other
+globally visible artifact to make one resolve. Clean up only resources the
+current run owns, and pass these constraints to every subagent you delegate.
+
+A longer private temporary path can break a UI test that assumes a short
+path: fix the test's path assumption instead of reusing the shared `/tmp`
+root.
 
 ## 3. Adding a test — the checklist
 
