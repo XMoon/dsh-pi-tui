@@ -31,6 +31,12 @@ export interface VisualEventSnapshot {
   /** The exact live Session object (identity comparison only). */
   readonly session: object
   readonly sessionId: string
+  /** The committed log revision at capture time. It is ONLY the derivation
+   *  short-circuit of the runtime's publication index (an unchanged snapshot
+   *  skips the O(N) re-derivation); it NEVER re-enters the Assistant display
+   *  stamp, so an unrelated session event cannot re-materialize a historical
+   *  figure row. */
+  readonly seq: number
   /** The complete committed event log of that Session. The session id NEVER
    *  enters a visual reference; it only fences the display subject. */
   readonly events: readonly VisualSessionEvent[]
