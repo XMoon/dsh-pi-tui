@@ -113,10 +113,15 @@ async function submit(client, text, label) {
 /** Clear the current completion/draft so the next query starts from empty. */
 async function clearComposer(client, label) {
   for (let attempt = 0; attempt < 20; attempt += 1) {
+    // Close the completion list FIRST (a separate Esc batch: an Esc and the
+    // next key in one write would read as Alt+key), then delete the draft with
+    // backspaces (the proven composer-clearing path; the completion list can
+    // swallow Ctrl+U).
     client.send('\x1b')
-    client.send('\x15')
+    await sleep(120)
+    client.send('\x7f'.repeat(120))
+    await sleep(120)
     if (composerDraftEmpty(await client.composerText())) return
-    await sleep(100)
   }
   throw new SplitSmokeAssertionError(`${label}: the composer never cleared`)
 }
@@ -309,6 +314,10 @@ export async function runSessionlessSkillsHot(context) {
     assert(durableSessionLogs(dshHome) === sessionsBefore,
       `F6 the Sessionless journey materialized a durable Session log (${String(durableSessionLogs(dshHome))} > ${String(sessionsBefore)})`)
 
+    // A visible completion query is still in each editor: clear it so the
+    // real `/exit` line is a command, not an appended prompt.
+    await clearComposer(clientA, 'F6 Client A before exit')
+    await clearComposer(clientB, 'F6 Client B before exit')
     await scene.exitC1Client(clientA, 'F6 Client A')
     await scene.exitC1Client(clientB, 'F6 Client B')
     const hostAfter = await scene.hostIdentityFacts(host)
@@ -428,9 +437,16 @@ export async function runSkillsRecovery(context) {
     await waitForPaintedSkills(first, '/f6-recovery', { visible: [description] }, 'F6 recovery first client')
 
     // The first Client is killed (its subscription dies with the process);
-    // the Host must stay alive with the same identity.
-    first.kill('SIGKILL')
-    await sleep(500)
+    // the Host must stay alive with the same identity. A surface Client's
+    // signal goes to the BUSINESS PID the ready record published.
+    const firstStatus = lastSurfaceStatus(first)
+    assert(Number.isInteger(firstStatus?.pid), 'F6 the first Client published no business PID')
+    process.kill(firstStatus.pid, 'SIGKILL')
+    const firstExit = await first.waitForExit(60_000)
+    // The `script(1)` wrapper reports an exec-style status for a SIGKILLed
+    // child; either witness proves the first Client process terminated.
+    assert(firstExit.signal === 'SIGKILL' || firstExit.code === 137,
+      `F6 the first Client was not SIGKILLed: ${JSON.stringify(firstExit)}`)
     assert(alive(hostFacts.hostPid), 'F6 the Host died with the SIGKILLed Client')
 
     const { client: replacement } = await scene.startC1Client('F6 recovery replacement', {}, { cwd: root })
