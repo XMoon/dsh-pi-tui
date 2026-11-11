@@ -323,6 +323,7 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
     readonly cwd?: string
     ensureSession(): Promise<void>
     awaitWorkspacePreflight?(): Promise<void>
+    validateAutoWorkspace?(): boolean
     withWriter: CommandSessionRuntime['withWriter']
     switchSession(sessionId: string, expectedScope?: SessionScope): Promise<string | undefined>
     switchSessionOutcome?(sessionId: string, expectedScope?: SessionScope): Promise<import('../session/runtime.ts').SessionSwitchOutcome>
@@ -743,12 +744,11 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
     const workspace = deps.backend.kind === 'direct'
       ? undefined
       : deps.session.workspaceNextIntent?.snapshot()
-    // The create intent is the owner: a confirmed `workspaceId` is only ever
-    // published by the Host-confirmed resolution (`setResolvedWorkspace` /
-    // `commitVerifiedPath`), while an in-flight or rejected Add of a DIFFERENT
-    // path does not change the still-confirmed create target. An UNSELECTED
-    // surface has no Host workspace: the standing read must not fabricate one.
-    const workspaceId = workspace?.status === 'confirmed' ? workspace.workspaceId : undefined
+    // The create intent is the owner: `intent` is the IDENTITY authority, so
+    // the still-confirmed target stays usable while a DIFFERENT Add verifies
+    // or is refused (`status` is transient, review P1). An UNSELECTED surface
+    // has no Host workspace: the standing read must not fabricate one.
+    const workspaceId = workspace?.intent?.kind === 'workspace-id' ? workspace.intent.workspaceId : undefined
     return {
       kind: 'preset',
       presetId,

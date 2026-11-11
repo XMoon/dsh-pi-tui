@@ -340,6 +340,9 @@ export interface TuiCommandRunner {  ctx: Context
   /** Await the sessionless mount's in-flight Host Workspace preflight so a
    *  user create captures its committed intent instead of racing it. */
   awaitWorkspacePreflight?(): Promise<void>
+  /** Whether the Client-local AUTO launch-cwd evidence is current RIGHT NOW
+   *  (absent on Direct/launch surfaces, whose proposal needs no Client proof). */
+  validateAutoWorkspace?(): boolean
   /**
    * TUI-facing live selection facade (footer + /model). It follows the
    * current Agent; with deferred start it holds only the sessionless
@@ -1491,17 +1494,19 @@ export function registerTuiCommands(
     // The completion scope is resolved at SUGGESTION time from the LIVE
     // session id (session identity when one exists — even mid-transition) or,
     // sessionless, from the SAME Workspace selection snapshot the create path
-    // uses. Only a CONFIRMED Host WorkspaceId crosses; anything else is an
-    // unselected scope (zero Host discovery) — the Client launch cwd is never
-    // sent. The revision makes A→B→A stale results distinguishable.
+    // uses. The snapshot's `intent` is the create target's IDENTITY authority:
+    // its confirmed `workspaceId` stays usable while a DIFFERENT Add is
+    // verifying or was refused (`status` is transient, review P1). No intent,
+    // no Host discovery — and the Client launch cwd is never sent. The
+    // revision makes A→B→A stale results distinguishable.
     const completionScope: () => HostFileScope = () => {
       const sessionId = runner.currentSessionId
       if (sessionId !== undefined) return { kind: 'session', sessionId }
       const snapshot = runner.workspaceNextIntent?.snapshot()
       return {
         kind: 'workspace',
-        ...(snapshot?.status === 'confirmed' && snapshot.workspaceId !== undefined
-          ? { workspaceId: snapshot.workspaceId }
+        ...(snapshot?.intent?.kind === 'workspace-id'
+          ? { workspaceId: snapshot.intent.workspaceId }
           : {}),
         selectionRevision: snapshot?.revision ?? 0,
       }

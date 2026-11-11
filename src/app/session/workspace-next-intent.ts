@@ -13,6 +13,10 @@ export type WorkspaceNextIntentProvenance = 'launch' | 'auto' | 'manual'
 export interface WorkspaceNextIntentCapture {
   readonly intent: WorkspaceSelectionIntent
   readonly revision: number
+  /** How THIS create target came into existence (`undefined` for a legacy
+   *  structural caller). The auto provenance is what a create boundary must
+   *  re-prove before consuming the id. */
+  readonly provenance?: WorkspaceNextIntentProvenance
   isCurrent(): boolean
 }
 
@@ -22,7 +26,14 @@ export interface WorkspaceNextIntentCapture {
 export type WorkspaceNextIntentStatus = 'unselected' | 'proposed' | 'verifying' | 'confirmed' | 'rejected'
 
 export interface WorkspaceNextIntentSnapshot {
-  /** Absent exactly when `status === 'unselected'`. */
+  /** Absent exactly when `status === 'unselected'`.
+   *
+   *  IDENTITY RULE: `intent` (and its `workspace-id` member) is the CURRENT
+   *  create target's authority. `status` is TRANSIENT verification state: an
+   *  in-flight or refused Add of a DIFFERENT path neither replaces nor
+   *  disables the still-confirmed target, so consumers of the confirmed
+   *  WorkspaceId (completion, standing skills) read `intent`, never `status`.
+   */
   readonly intent?: WorkspaceSelectionIntent
   readonly revision: number
   readonly status: WorkspaceNextIntentStatus
@@ -84,6 +95,7 @@ export function createWorkspaceNextIntentOwner(
     return {
       intent: capturedIntent,
       revision: capturedRevision,
+      ...(provenance === undefined ? {} : { provenance }),
       isCurrent: () => !disposed && revision === capturedRevision,
     }
   }

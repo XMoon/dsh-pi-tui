@@ -2160,6 +2160,9 @@ export function applyRunnerWithRuntime(
         workspaceNextIntent,
         ensureSession: () => sessionRuntime.ensureSession(),
         awaitWorkspacePreflight: () => sessionRuntime.awaitWorkspacePreflight(),
+        // M6-1/F5-B (review P2): the create-side AUTO evidence check the `/new`
+        // path consults at its own consumption boundary.
+        validateAutoWorkspace: () => sessionRuntime.isAutoWorkspaceCurrent(),
         withWriter: (scope, task) => sessionRuntime.withWriter(scope, task),
         switchSession: (sessionId, expectedScope) => sessionRuntime.switchSession(sessionId, expectedScope),
         switchSessionOutcome: (sessionId, expectedScope) => sessionRuntime.switchSessionOutcome(sessionId, expectedScope),

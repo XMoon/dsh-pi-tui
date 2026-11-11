@@ -77,6 +77,7 @@ type SessionCommandRunner = Pick<
   | 'withWriter'
   | 'workspaceNextIntent'
   | 'updateWelcomeCard'
+  | 'validateAutoWorkspace'
 >
 
 export interface SessionCommandDeps {
@@ -930,8 +931,17 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
             if (nextIntentCapture === undefined) {
               // UNSELECTED: there is no Host Workspace to create in. Refuse
               // BEFORE any transition/stop/flush; the Welcome's existing
-              // Browser entry is the one place to choose one.
-              return { kind: 'error', text: 'Choose a Host workspace before starting a session' }
+              // Browser entry is the one place to choose one (ensureSession
+              // opens it through promptWorkspaceSelection on its own refusal).
+              return done({ kind: 'error', text: 'Choose a Host workspace before starting a session' })
+            }
+            // The AUTO candidate's local evidence is re-proved at THIS create
+            // boundary too (review P2): the preflight may have confirmed the
+            // id long ago and the mount view may have changed since. The
+            // surface returns to unselected; an explicit choice is unaffected.
+            if (nextIntentCapture.provenance === 'auto' && runner.validateAutoWorkspace?.() !== true) {
+              workspaceNextIntent.resetToLaunchCwd()
+              return done({ kind: 'error', text: 'The verified local workspace changed — choose a Host workspace' })
             }
             intent = nextIntentCapture.intent
           } else {

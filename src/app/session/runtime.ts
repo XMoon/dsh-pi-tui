@@ -344,6 +344,9 @@ export interface SessionRuntime {
   /** One sessionless Host preflight of the next-create directory proposal.
    *  Shared with the first create; never creates a Session. */
   preflightWorkspace(): Promise<void>
+  /** Whether the Client-local AUTO launch-cwd evidence is current RIGHT NOW
+   *  (fail-closed when this surface has no auto candidate). */
+  isAutoWorkspaceCurrent(): boolean
   /** Await an in-flight sessionless Host preflight without starting one. */
   awaitWorkspacePreflight(): Promise<void>
   /** Publish the startup-resume owner synchronously (plan §4D: publish →
@@ -1801,6 +1804,18 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
         deps.surface.reportFirstSessionCreateFailure(message)
         throw new WorkspaceSelectionError('refused', message, 'workspace/not-selected')
       }
+      // The AUTO candidate's local evidence is re-proved at the CONSUMPTION
+      // boundary too (review P2): a preflight may have confirmed the id long
+      // before the first message, and a mount-view change in that window
+      // revokes the proof. The Host-side registration stays with the official
+      // registry; the surface returns to unselected.
+      if (workspaceIntent.provenance === 'auto' && !autoWorkspaceEvidenceCurrent()) {
+        intentOwner().resetToLaunchCwd()
+        const message = 'The verified local workspace changed before the first session — choose a Host workspace'
+        deps.surface.promptWorkspaceSelection?.()
+        deps.surface.reportFirstSessionCreateFailure(message)
+        throw new WorkspaceSelectionError('refused', message, 'workspace/not-selected')
+      }
       let workspace: ResolvedWorkspaceSelection
       try {
         workspace = await deps.lifecycle.resolveWorkspace(workspaceIntent.intent, deps.lifecycleSignal)
@@ -1954,6 +1969,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     ensureSession,
     preflightWorkspace,
     awaitWorkspacePreflight,
+    isAutoWorkspaceCurrent: autoWorkspaceEvidenceCurrent,
     publishResumedOwner,
     retireOwnedSession,
     preCancelOwnedSession,
