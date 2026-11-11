@@ -1007,24 +1007,31 @@ function parseApprovalWheel(data: string): { x: number; y: number; direction: -1
 }
 
 /**
- * Decode one SGR/legacy mouse report's button bits (the low button number,
- * including the wheel 64 / motion 32 flags); undefined for non-mouse input.
+ * Decode one SGR mouse report's button number and release flag — the SAME
+ * grammar the fork's alt screen decodes (legacy X10 chunks are consumed by
+ * the fork without ever being decoded, so they carry no gesture semantics
+ * here and retire like any unknown protocol chunk); undefined for non-mouse
+ * input.
  */
-function mouseButtonBits(data: string): number | undefined {
-  const sgr = /^\x1b\[<(\d+);(\d+);(\d+)[Mm]$/.exec(data)
-  if (sgr !== null) return Number.parseInt(sgr[1]!, 10)
-  if (data.length === 6 && data.startsWith('\x1b[M')) return data.charCodeAt(3) - 32
-  return undefined
+function mouseChunkKind(data: string): { readonly button: number; readonly release: boolean } | undefined {
+  const sgr = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/.exec(data)
+  if (sgr === null) return undefined
+  return { button: Number.parseInt(sgr[1]!, 10), release: sgr[4] === 'm' }
 }
 
 /**
- * Whether one mouse report retires a pending same-cell press gesture: any
- * wheel, drag/motion, or secondary button. A plain primary press/release
- * keeps the gesture (the press path owns re-recording and the release path
- * owns completion).
+ * Whether one mouse report retires a pending same-cell press gesture. The
+ * fork's click synthesis accepts a primary release (button 0) AND the
+ * release of the pressed button as encoded by several terminals (button 3)
+ * — both must COMPLETE the pending gesture, never retire it (a narrower
+ * classification would break the fork's own supported release path). Wheel
+ * and drag/motion reports and any other button's press/release are
+ * intervening input.
  */
-function retiresPointerGesture(button: number): boolean {
-  return (button & 64) !== 0 || (button & 32) !== 0 || (button & 3) !== 0
+function retiresPointerGesture(chunk: { readonly button: number; readonly release: boolean }): boolean {
+  if ((chunk.button & 64) !== 0 || (chunk.button & 32) !== 0) return true
+  if (chunk.release) return chunk.button !== 0 && chunk.button !== 3
+  return chunk.button !== 0
 }
 
 /**
@@ -6739,8 +6746,8 @@ export class TuiApp {
     // consumes or rewrites a key or wheel is still intervening input, and a
     // later release must never act past it (the emergency fail-safe's
     // consumed keys are covered by the same placement).
-    const footerMouseButton = mouseButtonBits(data)
-    if (footerMouseButton === undefined || retiresPointerGesture(footerMouseButton)) {
+    const mouseChunk = mouseChunkKind(data)
+    if (mouseChunk === undefined || retiresPointerGesture(mouseChunk)) {
       this.footerPressGesture = undefined
     }
     // Terminal focus reports (CSI ? 1004 — ESC[I/ESC[O) are HOST-RESERVED:
@@ -16419,6 +16426,12 @@ export class TuiApp {
     const pressedFooter = this.footerPressGesture
     if (pressedFooter !== undefined) {
       this.footerPressGesture = undefined
+      // A completed footer release consumes the fork's same-word click
+      // history: the navigation control must never inherit the text-selection
+      // double-click window, or a close-and-reopen within 500 ms would be
+      // swallowed as a word selection. The fork's shared resetTextSelection
+      // seam clears both; sibling click paths are untouched.
+      pressedFooter.screen.resetTextSelection()
       this.completeFooterPress(pressedFooter, x, y)
       return
     }
@@ -16546,8 +16559,12 @@ export class TuiApp {
     }
     // PR3: a click inside the painted Footer box that did not begin with a
     // matching footer press is inert — never a transcript/todo fall-through.
+    // A completed footer-box release consumes the fork's same-word click
+    // history as well: its press armed the multi-click counter, and the
+    // footer must never feed the text-selection double-click window.
     if (this.isInertFooterClickCell(x, y)) {
       this.fullscreenCellGesture = undefined
+      this.footerPaintedProjection?.screen.resetTextSelection()
       return
     }
     // The region determination uses the SAME last-painted snapshot as the
