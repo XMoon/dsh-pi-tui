@@ -120,9 +120,15 @@ filesystem for it.
 - The Client maps every frame into the SAME `CoalescingRefreshGate` +
   `CatalogRefreshCoordinator` path as Direct's `skills/change` event. A stream
   failure is reported through the owner's error sink (never silently lost): the
-  current catalog stays last-good and the next connection generation, explicit
-  `/reload` or surface rebuild re-establishes observation. The subscription
-  disposer runs BEFORE the coordinator disposal.
+  current catalog stays last-good, the failed stream is never retried on its
+  own, and only an explicit owner refresh (`/reload`, a live owner switch or a
+  surface rebuild) re-arms the subscription. The subscription disposer runs
+  BEFORE the coordinator disposal.
+- Owner admission: a Sessionless standing refresh is admitted only while the
+  surface owns no Session. `Add directory` remains reachable from a live
+  Session Workspace, and a startup preflight can race the first Session
+  commit, so both paths re-check the live owner and a standing target can
+  never replace the official live `skills.list` catalog.
 
 ## Modules
 

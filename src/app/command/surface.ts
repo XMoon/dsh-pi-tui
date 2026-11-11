@@ -1230,6 +1230,9 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
         lastAssistantText: (sessionId) => deps.direct.lastAssistantText(sessionId),
         refreshLiveCatalog: async (sessionId, source) => {
           if (!catalogRefreshAvailable()) return { kind: 'failed', error: 'catalog refresh unavailable' }
+          // An explicit owner refresh is the ONLY place a failed private
+          // invalidation stream is re-established (never a hidden retry loop).
+          deps.catalog.skills.rearmSkillsChange?.()
           // PR4 §2.2: the Remote live refresh reads the command source
           // (generation-fenced metadata) with the session id as the target —
           // never a Direct Agent resolution.
@@ -1249,10 +1252,13 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
             agent: deps.toCatalogAgent(agent),
           })
         },
-        refreshStandingCatalog: (presetId, source) =>
-          catalogRefreshAvailable()
-            ? requestCatalogRefresh({ source, target: standingTargetOf(presetId) })
-            : Promise.resolve({ kind: 'failed', error: 'catalog refresh unavailable' }),
+        refreshStandingCatalog: (presetId, source) => {
+          if (!catalogRefreshAvailable()) {
+            return Promise.resolve({ kind: 'failed', error: 'catalog refresh unavailable' })
+          }
+          deps.catalog.skills.rearmSkillsChange?.()
+          return requestCatalogRefresh({ source, target: standingTargetOf(presetId) })
+        },
         promptAdmission: (sessionId, line, task) =>
           // M3-4 PR3 (§10.2): the Remote branch RETIRES the Direct-Agent
           // admission hook — the exact-owner resolution must not even run
@@ -1537,6 +1543,14 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
   const catalogRefreshAvailable = (): boolean => catalogRefreshRequest !== undefined
   const requestCatalogRefresh = (request: CatalogRefreshRequest): Promise<CatalogRefreshOutcome> => {
     if (catalogRefreshRequest === undefined) return Promise.reject(new Error('the command catalog is not registered'))
+    // OWNER ADMISSION: a live Session owns the official catalog
+    // (`skills.list` + commands). A sessionless standing refresh is admitted
+    // only while the surface owns no Session — `Add directory` stays reachable
+    // from a live Session Workspace and a startup preflight may race the first
+    // Session commit, so EVERY preset/workspace request passes this fence.
+    if (request.target.kind === 'preset' && deps.ownership.currentSessionId() !== undefined) {
+      return Promise.resolve({ kind: 'superseded' })
+    }
     return catalogRefreshRequest(request)
   }
   const disposeCatalog = (): void => {

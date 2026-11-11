@@ -412,6 +412,7 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
        onUseDirectory: (workspaceId, canonicalPath) => {
          workspaceNextIntent.setResolvedWorkspace(workspaceId, canonicalPath)
          runner.updateWelcomeCard()
+         if (runner.currentSessionId !== undefined) return
          runOwned(
            'workspace standing catalog refresh',
            () => runner.refreshStandingCatalog(runner.effectivePresetId, 'invalidation'),
@@ -442,6 +443,7 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
              workspaceNextIntent.commitVerifiedPath(token, resolved.workspaceId, resolved.path)
              runner.updateWelcomeCard()
              finish({ kind: 'registered', workspaceId: resolved.workspaceId, path: resolved.path })
+             if (runner.currentSessionId !== undefined) return
              runOwned(
                'workspace standing catalog refresh',
                () => runner.refreshStandingCatalog(runner.effectivePresetId, 'invalidation'),

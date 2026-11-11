@@ -26,6 +26,7 @@ import test from 'node:test'
 import { Context, type Fiber } from '@deepseek-ai/cordis'
 import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
 import { PiTuiSkillsHostService } from '../../../src/app/host/features/skills.ts'
+import type { SkillSummaryLike } from '../../../src/domain/catalog/skill.ts'
 import {
   PI_TUI_SKILLS_NAMESPACE,
   parsePiTuiSkillsStandingResult,
@@ -44,7 +45,7 @@ interface FixtureOptions {
   readonly workspacePath?: string | undefined
   readonly presetError?: Error
   readonly snapshot?: (options: SnapshotOptions) => Promise<{
-    readonly skills: readonly Record<string, unknown>[]
+    readonly skills: readonly SkillSummaryLike[]
     readonly complete: boolean
   }>
 }
@@ -68,17 +69,16 @@ async function hostFixture(options: FixtureOptions = {}): Promise<Fixture> {
   const snapshotCalls: SnapshotOptions[] = []
   const scopeRequests: Array<string | undefined> = []
   const state = { leaseDisposals: 0, releases: 0 }
-  ctx.provide('workspaceRegistry', {
-    get: (id: string) => id === 'ws-1' && workspacePath !== undefined ? { path: workspacePath } : undefined,
-  })
-  ctx.provide('skills', {
+  let service!: PiTuiSkillsHostService
+  const workspaces = { get: (id: string) => id === 'ws-1' && workspacePath !== undefined ? { path: workspacePath } : undefined }
+  const skills = {
     snapshot: async (snapshotOptions: SnapshotOptions) => {
       snapshotCalls.push(snapshotOptions)
       if (options.snapshot !== undefined) return options.snapshot(snapshotOptions)
       return { skills: [], complete: true }
     },
-  })
-  ctx.provide('agentPresets', {
+  }
+  const agentPresets = {
     acquireScope: async (id?: string) => {
       scopeRequests.push(id)
       if (options.presetError !== undefined) throw options.presetError
@@ -87,10 +87,13 @@ async function hostFixture(options: FixtureOptions = {}): Promise<Fixture> {
         [Symbol.asyncDispose]: async () => { state.leaseDisposals += 1 },
       }
     },
-  })
-  let service!: PiTuiSkillsHostService
-  const fiber = ctx.inject(['typert', 'workspaceRegistry', 'skills', 'agentPresets'], pluginCtx => {
-    service = new PiTuiSkillsHostService(pluginCtx)
+  }
+  const fiber = ctx.inject(['typert'], pluginCtx => {
+    service = new PiTuiSkillsHostService(pluginCtx, {
+      workspaces: () => workspaces,
+      skills: () => skills,
+      agentPresets: () => agentPresets,
+    })
   })
   await fiber
   assert.equal(fiber.state, FIBER_ACTIVE)
@@ -114,6 +117,7 @@ function withTimeout<T>(promise: Promise<T>, label: string): Promise<T> {
   return Promise.race([
     promise,
     new Promise<never>((_resolve, reject) => {
+      // Deadline guard only: a hung stream read must fail the case instead of hanging the lane; the assertions wait on real events.
       setTimeout(() => reject(new Error(`timed out waiting for ${label}`)), 2_000)
     }),
   ])

@@ -23,7 +23,11 @@ import { runReadAuthority } from '../smoke/split-process/read-authority.mjs'
 import { runInteractionNavigationFirst } from '../smoke/split-process/interaction-admission.mjs'
 import { runSessionWorkspaceActivity } from '../smoke/split-process/session-workspace-activity.mjs'
 import { runSessionWorkspaceEditorEntry } from '../smoke/split-process/session-workspace-editor-entry.mjs'
-import { runSessionlessSkillsHot } from '../smoke/split-process/skills.mjs'
+import {
+  runLiveSkillsHot,
+  runSessionlessSkillsHot,
+  runSkillsRecovery,
+} from '../smoke/split-process/skills.mjs'
 import { runEntryAdmission } from '../smoke/split-process/entry-admission.mjs'
 import { runOfficialWebComposition } from '../smoke/split-process/official-web-composition.mjs'
 import { runPtySessionWriteRecovery } from '../smoke/split-process/pty-session-write-recovery.mjs'
@@ -188,6 +192,18 @@ const CASE_REGISTRY = Object.freeze([
     id: 'skills.sessionless-hot',
     title: 'two real Sessionless TUIs read their own Host Workspace skills and hot-update them on Host file add/edit/delete without creating a Session',
     run: runSessionlessSkillsHot,
+  }),
+  Object.freeze({
+    suite: 'skills',
+    id: 'skills.live-hot',
+    title: 'two real TUIs on ONE Live Session follow Host skill add/edit/delete through the official catalog without replacing the Session',
+    run: runLiveSkillsHot,
+  }),
+  Object.freeze({
+    suite: 'skills',
+    id: 'skills.recovery',
+    title: 'a SIGKILLed Sessionless Client is replaced by a new process that re-establishes Host skill observation on the same Host',
+    run: runSkillsRecovery,
   }),
 ])
 

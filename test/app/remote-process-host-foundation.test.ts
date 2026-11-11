@@ -26,6 +26,7 @@ import { PI_TUI_HOST_READY_SERVICE } from '../../src/app/host/pi-tui-host-runtim
 import { PI_TUI_FILE_REFERENCES_NAMESPACE } from '../../src/runtime/remote/pi-tui-file-reference-contract.ts'
 import { PI_TUI_TERMINAL_PROGRESS_NAMESPACE } from '../../src/runtime/remote/pi-tui-terminal-progress-contract.ts'
 import { PI_TUI_WEB_ACCESS_NAMESPACE } from '../../src/runtime/remote/pi-tui-web-access-contract.ts'
+import { PI_TUI_SKILLS_NAMESPACE } from '../../src/runtime/remote/pi-tui-skills-contract.ts'
 import { PI_TUI_WEB_ACCESS_ROWS } from '../../src/app/host/features/web-roster.ts'
 
 /** One row of a real patch file (in-place override or `insert` entry). */
@@ -171,7 +172,7 @@ const HOST_EXECUTION_INJECT: ReadonlyArray<{ id: string; inject: readonly string
   { id: 'split-host-settings-controller', inject: ['typert'] },
   { id: 'split-host-account-controller', inject: ['deepseekAccount', 'agents'] },
   { id: 'split-host-session-log-download', inject: ['commands', 'connection'] },
-  { id: 'split-host-pi-tui-runtime', inject: ['typert', 'agents', 'fileReferences', 'workingDirectory', 'sessions', 'sandboxPolicy', 'sandbox', 'subprocess'] },
+  { id: 'split-host-pi-tui-runtime', inject: ['typert', 'agents', 'fileReferences', 'workingDirectory', 'sessions', 'sandboxPolicy', 'sandbox', 'subprocess', 'workspaceRegistry', 'skills', 'agentPresets'] },
 ]
 
 /**
@@ -975,6 +976,7 @@ function hostContext(rows: FixtureRow[], overrides: Record<string, unknown> = {}
     records: new Map(),
   })
   services.set('piTuiWebAccess', typertService('piTuiWebAccess', PI_TUI_WEB_ACCESS_NAMESPACE))
+  services.set('piTuiSkills', typertService('piTuiSkills', PI_TUI_SKILLS_NAMESPACE))
   services.set(PI_TUI_HOST_READY_SERVICE, {})
   services.set('piTuiPerformanceReady', {})
   for (const [name, value] of Object.entries(overrides)) services.set(name, value)

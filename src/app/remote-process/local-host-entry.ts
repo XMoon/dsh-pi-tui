@@ -176,11 +176,11 @@ export const HOST_ONLY_PATCH = `# M4-B1 Host-only profile overlay: production Ho
       inject: [commands, connection]
 
     # The package's ONE built-in Host Runtime row: the private contribution plus
-    # the three private business services. Business features are NOT separate
+    # the five private business services. Business features are NOT separate
     # Loader rows or package subpaths.
     - id: split-host-pi-tui-runtime
       name: '@xmoon76/dsh-pi-tui/host-runtime'
-      inject: [typert, agents, fileReferences, workingDirectory, sessions, sandboxPolicy, sandbox, subprocess]
+      inject: [typert, agents, fileReferences, workingDirectory, sessions, sandboxPolicy, sandbox, subprocess, workspaceRegistry, skills, agentPresets]
       config:
         sessionId: ''
 

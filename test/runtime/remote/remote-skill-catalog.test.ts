@@ -136,7 +136,7 @@ function standingResult(names: readonly string[], complete = true, notice?: stri
 }
 
 /** Drain pending microtasks AND one macrotask (the stream pump between frames). */
-async function settle(): Promise<void> {
+async function drainStreamPump(): Promise<void> {
   for (let index = 0; index < 8; index += 1) await Promise.resolve()
   await new Promise<void>(resolve => setTimeout(resolve, 0))
 }
@@ -302,7 +302,7 @@ test('the Host startup invalidation frame reaches the listener (subscribe-then-r
   const dispose = catalog.onSkillsChange(() => { fired += 1 }, () => {})
   assert.equal(streams.length, 1, 'the subscription opens ONE private stream')
   streams[0]!.enqueue({ kind: 'invalidated' })
-  await settle()
+  await drainStreamPump()
   assert.equal(fired, 1, 'the first frame wakes the current owner reread')
   dispose()
 })
@@ -313,7 +313,7 @@ test('a malformed downlink frame is refused and reported instead of waking a ref
   const errors: unknown[] = []
   const dispose = catalog.onSkillsChange(() => { fired += 1 }, error => { errors.push(error) })
   streams[0]!.enqueue({ kind: 'bogus' } as unknown as PiTuiSkillsInvalidationFrame)
-  await settle()
+  await drainStreamPump()
   assert.equal(fired, 0)
   assert.equal(errors.length, 1)
   assert.match(String((errors[0] as Error | undefined)?.message), /kind must be invalidated/)
@@ -329,10 +329,32 @@ test('a new Connection generation re-arms the stream and the Host first frame in
   assert.equal(streams[0]!.signal.aborted, true, 'the previous generation stream is aborted')
   assert.equal(streams.length, 2, 'the replacement generation opens its own private stream')
   streams[1]!.enqueue({ kind: 'invalidated' })
-  await settle()
+  await drainStreamPump()
   assert.equal(fired, 1, 'the startup frame of the NEW stream triggers the sessionless/live reread')
   dispose()
   assert.equal(streams[1]!.signal.aborted, true)
+})
+
+test('an explicit rearm after a stream failure opens ONE replacement stream and its startup frame refreshes', async () => {
+  const { catalog, streams } = harness()
+  let fired = 0
+  const errors: unknown[] = []
+  const dispose = catalog.onSkillsChange(() => { fired += 1 }, error => { errors.push(error) })
+  assert.equal(streams.length, 1)
+  streams[0]!.enqueue({ kind: 'bogus' } as unknown as PiTuiSkillsInvalidationFrame)
+  await drainStreamPump()
+  assert.equal(errors.length, 1, 'the failed stream is reported, not silently lost')
+  // No hidden retry: the adapter does NOT open a replacement on its own.
+  assert.equal(streams.length, 1)
+  catalog.rearmSkillsChange()
+  assert.equal(streams.length, 2, 'the explicit owner refresh re-establishes observation')
+  streams[1]!.enqueue({ kind: 'invalidated' })
+  await drainStreamPump()
+  assert.equal(fired, 1, 'the rearmed stream startup frame reaches the listener')
+  // A second rearm while the replacement is live is a no-op.
+  catalog.rearmSkillsChange()
+  assert.equal(streams.length, 2)
+  dispose()
 })
 
 test('the disposer releases the exact private stream before the coordinator goes away', () => {
