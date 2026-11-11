@@ -2271,3 +2271,32 @@ test('the Footer suppresses session actions while a resume is pending', async ()
   footer = panelFrame(peek)[panelFrame(peek).length - 1]!
   assert.ok(footer.includes('Enter open'), 'the Peek Open cue returns after settlement')
 })
+
+test('an initial search open with the path editor keeps only the path editor', async () => {
+  const submitted: string[] = []
+  const outcomes: Array<(outcome: import('../../src/app/command/session-browser-presentation.ts').SessionBrowserDirectorySettlement) => void> = []
+  const h = harness({
+    columns: 100,
+    rows: 24,
+    initialMode: 'search',
+    initialDirectoryEntry: true,
+    initialDirectoryPath: '/launch/failed',
+    onAddDirectory: (path, settle) => { submitted.push(path); outcomes.push(settle) },
+  })
+  await h.paint()
+  const frame = panelFrame(h)
+  assert.ok(h.view().includes('Host directory: /launch/failed'), 'the path editor is the ONE keyboard owner')
+  assert.ok(!h.view().includes('Search all workspaces'), 'no search context is painted behind the editor')
+  assert.ok(!h.view().includes('Search: '), 'the raw search editor is not painted behind the path editor')
+  assert.ok(!frame[0]!.includes('/ Search'), 'the header has no Search target while the editor is open')
+  h.vt.sendInput('\r')
+  await h.paint()
+  assert.deepEqual(submitted, ['/launch/failed'], 'Enter submits the visible path editor once')
+  outcomes[0]!({ kind: 'failed', message: 'not a directory on Host' })
+  await h.paint()
+  h.vt.sendInput('\x1b')
+  await h.paint()
+  assert.equal(h.closes, 0, 'Esc cancels the editor back to the tree, never closes the Browser')
+  assert.ok(!h.view().includes('Host directory:'), 'the tree is back')
+  assert.ok(!h.view().includes('Search all workspaces'), 'no search presentation survives the cancel')
+})
