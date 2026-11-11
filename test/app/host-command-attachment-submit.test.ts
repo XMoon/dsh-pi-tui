@@ -63,6 +63,10 @@ interface Harness {
   readonly healthClears: () => number
   readonly healthRecords: () => number
   readonly prompts: string[]
+  /** How many stage calls started (the in-flight signal for held stages). */
+  stageStarts(): number
+  /** Bounded wait for one observed fact (real load-tolerant polling). */
+  until(predicate: () => boolean, label: string, timeoutMs?: number): Promise<void>
   /** The editor draft right now (the submit path clears it like the editor). */
   draftText(): string
   /** Submit one line with the editor's OWN pre-clear (TuiApp contract). */
@@ -89,6 +93,7 @@ function startHarness(options: { readonly sessionId?: string } = {}): Harness {
   let draft = ''
   const notices: string[] = []
   const stages: StageRecord[] = []
+  let stageStarts = 0
   const executes: Harness['executes'][number][] = []
   const prompts: string[] = []
   let consumed = 0
@@ -175,6 +180,7 @@ function startHarness(options: { readonly sessionId?: string } = {}): Harness {
   }
   const hostCommand = {
     async stageFileReceipt(request: HostCommandFileStageRequest): Promise<{ readonly receiptId: string }> {
+      stageStarts += 1
       if (stageGate !== undefined) await stageGate
       if (stageError !== undefined) throw stageError
       let bytes = 0
@@ -312,6 +318,14 @@ function startHarness(options: { readonly sessionId?: string } = {}): Harness {
     healthClears: () => healthClears,
     healthRecords: () => healthRecords,
     prompts,
+    stageStarts: () => stageStarts,
+    until: async (predicate, label, timeoutMs = 15_000) => {
+      const deadline = Date.now() + timeoutMs
+      while (!predicate()) {
+        if (Date.now() >= deadline) throw new Error(`fixture wait timed out: ${label}`)
+        await new Promise<void>(resolve => setImmediate(resolve))
+      }
+    },
     draftText: () => draft,
     submit: (text: string) => {
       draft = text
@@ -350,13 +364,16 @@ function startHarness(options: { readonly sessionId?: string } = {}): Harness {
     setStageError: (error) => { stageError = error },
     setExecuteOutcome: (outcome) => { executeOutcome = outcome },
     settled: async () => {
-      // Bounded observation window over the OWNED workflow: the real file
-      // source performs fs I/O, so microtasks alone are not a settlement
-      // signal. `setImmediate` rounds let the pool callbacks run; 400 of them
-      // is a negative-fact observation window, not a timer guess.
-      for (let index = 0; index < 400; index += 1) {
+      // The REAL settlement signal: the controller's accepted-write lifetime
+      // ends at every terminal exit. Poll it with a bounded deadline instead
+      // of guessing a microtask budget under a loaded full-suite run.
+      const deadline = Date.now() + 15_000
+      while (controller.hasUnsettledClientWrite() && Date.now() < deadline) {
         await new Promise<void>(resolve => setImmediate(resolve))
       }
+      assert.equal(controller.hasUnsettledClientWrite(), false,
+        'the submitted gesture must settle within the observation window')
+      for (let index = 0; index < 8; index += 1) await Promise.resolve()
     },
   }
 }
@@ -511,8 +528,7 @@ test('a scope replaced during staging dispatches no command and mutates no draft
   const staged = await addFileDraft(life, harness.files, 'report.bin', Buffer.from([1, 2]))
   harness.holdStage()
   harness.submit(`/files ${staged.placeholder}`)
-  await harness.settled()
-  assert.equal(harness.stages.length, 0, 'the first stage is in flight')
+  await harness.until(() => harness.stageStarts() === 1, 'the held stage started')
   assert.equal(harness.controller.hasUnsettledClientWrite(), true,
     'the accepted Client write lifetime stays unsettled while the receipt is staged')
   harness.invalidateScope()
