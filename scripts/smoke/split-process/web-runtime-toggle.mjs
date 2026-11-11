@@ -365,7 +365,8 @@ export async function runWebRuntimeToggle(context) {
     // rows and nothing else.
     const enabledUids = rowUids(enabledStatus)
     for (const id of ['agent', 'session', 'job-controller', 'typert-gateway', 'split-host-connection',
-      'split-host-api-remotes', 'split-host-session-controller', 'split-host-account-controller', 'split-host-pi-tui-runtime']) {
+      'split-host-api-remotes', 'split-host-session-controller', 'split-host-account-controller',
+      'split-host-pi-tui-runtime', 'directory-picker']) {
       assert(enabledUids[id] === protectedUids[id], `PB-05 the "${id}" Host owner was re-mounted by the Web enable`)
     }
     const serving = await assertWebServing(origin, launch, 'PB-03')
@@ -410,7 +411,8 @@ export async function runWebRuntimeToggle(context) {
     assertIdentityFields(disabledStatus.localHost, ready.localHost, 'PB-04 Host identity')
     const disabledUids = rowUids(disabledStatus)
     for (const id of ['agent', 'session', 'job-controller', 'typert-gateway', 'split-host-connection',
-      'split-host-api-remotes', 'split-host-session-controller', 'split-host-account-controller', 'split-host-pi-tui-runtime']) {
+      'split-host-api-remotes', 'split-host-session-controller', 'split-host-account-controller',
+      'split-host-pi-tui-runtime', 'directory-picker']) {
       assert(disabledUids[id] === protectedUids[id], `PB-05 the "${id}" Host owner changed identity across the disable`)
     }
     const offAfterDisable = await assertWebOffHttp(origin, 'PB-04')
@@ -487,7 +489,8 @@ export async function runWebRuntimeToggle(context) {
     assertIdentityFields(reenabledStatus.localHost, ready.localHost, 'PB-07 Host identity')
     const reenabledUids = rowUids(reenabledStatus)
     for (const id of ['agent', 'session', 'job-controller', 'typert-gateway', 'split-host-connection',
-      'split-host-api-remotes', 'split-host-session-controller', 'split-host-account-controller', 'split-host-pi-tui-runtime']) {
+      'split-host-api-remotes', 'split-host-session-controller', 'split-host-account-controller',
+      'split-host-pi-tui-runtime', 'directory-picker']) {
       assert(reenabledUids[id] === protectedUids[id], `PB-07 the "${id}" Host owner changed identity across the re-enable`)
     }
     const servingAgain = await assertWebServing(origin, launch, 'PB-07')
@@ -646,6 +649,8 @@ export async function runWebRuntimeToggle(context) {
     const finalUids = rowUids(finalOff)
     assert(finalUids['split-host-account-controller'] === protectedUids['split-host-account-controller'],
       'PB-10 the official Account Controller owner changed identity across the final Web disable')
+    assert(finalUids['directory-picker'] === protectedUids['directory-picker'],
+      'PB-10 the official directory-picker owner changed identity across the final Web disable')
     await assertTuiAccountSignedOut('PB-10')
     tui.send('/exit\r')
     const tuiExit = await tui.waitForExit(60_000)
