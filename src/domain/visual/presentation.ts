@@ -9,10 +9,16 @@
  * back to the Session.
  *
  * A later re-derivation replaces the sidecar when ANY identity part changes
- * (display subject, projection source, session instance, committed seq, the
- * Assistant's own text/content revision or its turn/step). A → B → A can
- * therefore never resurrect a stale attribution, while an equivalent
- * re-derivation keeps the same revision so the TuiApp render cache stays warm.
+ * (display subject, projection source, session instance, the Assistant's own
+ * text/content revision or its turn/step) or when the derived publication
+ * content changes. The committed `seq` is deliberately NOT an identity part:
+ * an unrelated Session event must never re-materialize a historical figure
+ * row, and every real display change (a new/replaced/withdrawn publication)
+ * changes the derived `publications` themselves, which the caller compares
+ * element-identically (the runtime's publication index keeps one stable array
+ * for content-identical re-derivations). A → B → A can therefore never
+ * resurrect a stale attribution, while an equivalent re-derivation keeps the
+ * same revision so the TuiApp render cache stays warm.
  * @module @xmoon76/dsh-pi-tui/domain/visual/presentation
  */
 
@@ -25,8 +31,6 @@ export interface VisualEventSnapshot {
   /** The exact live Session object (identity comparison only). */
   readonly session: object
   readonly sessionId: string
-  /** The committed log revision (`Session.seq`). */
-  readonly seq: number
   /** The complete committed event log of that Session. The session id NEVER
    *  enters a visual reference; it only fences the display subject. */
   readonly events: readonly VisualSessionEvent[]
@@ -42,7 +46,6 @@ export interface VisualPresentationKey {
   /** The exact Session instance. */
   readonly session: object
   readonly sessionId: string
-  readonly seq: number
   /** The owning Assistant's turn and durable step. */
   readonly turn: number
   readonly step: number | undefined
@@ -67,7 +70,6 @@ function sameKey(left: VisualPresentationKey, right: VisualPresentationKey): boo
     && left.sourceIdentity === right.sourceIdentity
     && left.session === right.session
     && left.sessionId === right.sessionId
-    && left.seq === right.seq
     && left.turn === right.turn
     && left.step === right.step
     && left.text === right.text

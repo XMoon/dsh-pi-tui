@@ -131,7 +131,6 @@ function key(): VisualPresentationKey {
     sourceIdentity: {},
     session: {},
     sessionId: 'session',
-    seq: 10,
     turn: 0,
     step: 1,
     text: '',

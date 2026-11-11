@@ -44,7 +44,7 @@ import {
 } from '../../src/app/surface/runtime.ts'
 import { createVisualEventSnapshotProvider, type VisualEventSnapshotProvider } from '../../src/app/bootstrap/visual-snapshot.ts'
 import { asVisualSessionEvents, collectPublishedVisuals } from '../../src/domain/visual/publication.ts'
-import type { VisualEventSnapshot } from '../../src/domain/visual/presentation.ts'
+import { assistantVisualPresentationRevision, type VisualEventSnapshot } from '../../src/domain/visual/presentation.ts'
 import { TranscriptFolder, type TranscriptMessage } from '../../src/transcript.ts'
 import { TranscriptWindowController } from '../../src/domain/transcript/window.ts'
 import { createPluginManagerWorkspacePanel } from '../../src/tui/plugin-manager/workspace.ts'
@@ -505,7 +505,6 @@ async function mountTspSurface(
     visualEventSnapshotFor: snapshotFor ?? ((): VisualEventSnapshot => ({
       session: session.session,
       sessionId: session.sessionId,
-      seq: session.session.seq,
       events: asVisualSessionEvents(session.session.snapshotEvents()),
     })),
   })
@@ -549,6 +548,17 @@ function replayEvents(harness: TspSurfaceHarness, folder: TranscriptFolder, even
     folder.apply([event])
     harness.repaint()
   }
+}
+
+/** Every wire id of the committed figure subtrees (roots and descendants). */
+function figureSubtreeIds(tern: ScriptedTern): Set<string> {
+  const ids = new Set<string>()
+  const walk = (node: LiveNode): void => {
+    ids.add(node.id)
+    for (const child of node.children) walk(child)
+  }
+  for (const figure of nodesWhere(tern, node => node.kind === 'col' && node.props['role'] === 'dsh.visual.figure')) walk(figure)
+  return ids
 }
 
 // ── The answer plans ────────────────────────────────────────────────────────
@@ -810,6 +820,65 @@ test('a REAL production ordinary fork replays its inherited Chart and SVG into t
     harness.tern.key('\u001bc')
     await until('the inherited SVG copy', () => harness.copies.length === 2)
     assert.equal(harness.copies[1], SVG_SOURCE, 'the inherited SVG source bytes are unchanged')
+    assert.equal(harness.fatalErrors.length, 0)
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('an unrelated later turn never re-materializes a committed historical figure', async (t) => {
+  const life = testLifecycle(t)
+  const session = await bootRealSession(life, 'stable-figure')
+  await session.run([
+    { calls: [{ callId: 'call-chart', name: CHART_TOOL_NAME, args: CHART }] },
+    {
+      calls: prompt => [{
+        callId: 'call-present',
+        name: PRESENT_VISUAL_TOOL_NAME,
+        args: { visuals: [{ ref: refsInPrompt(prompt)[0] }] },
+      }],
+    },
+    { text: markerAnswer('Before figure.\n\n', '\n\nAfter figure.') },
+  ])
+
+  const folder = new TranscriptFolder()
+  const harness = await mountTspSurface(session, folder)
+  try {
+    replayEvents(harness, folder, session.session.snapshotEvents())
+    await until('the committed figure', () => figureIds(harness.tern).length === 1)
+    const figureSubtree = figureSubtreeIds(harness.tern)
+    assert.ok(figureSubtree.size > 0, 'the figure subtree is committed and indexed')
+    // The exact fold row that owns the figure sidecar.
+    const figureRow = folder.messages().find(
+      message => message.kind === 'assistant' && assistantVisualPresentationRevision(message) > 0,
+    )
+    assert.ok(figureRow !== undefined, 'the production derivation attached a sidecar to the fold row')
+    const revisionBefore = assistantVisualPresentationRevision(figureRow)
+
+    // A follow-up turn of the SAME session commits new events (the snapshot
+    // grows) but publishes nothing. The PR2 sidecar identity has no committed
+    // `seq` part and the publication index keeps ONE stable derivation for
+    // content-identical re-reads, so the sidecar revision must NOT advance:
+    // that revision is an assistant stamp input, and an advancing one would
+    // re-materialize the historical figure row on every unrelated commit.
+    const known = session.session.snapshotEvents().length
+    const framesBefore = harness.tern.frames.length
+    await session.run([{ text: 'a plain follow-up answer with no visuals' }])
+    replayEvents(harness, folder, session.session.snapshotEvents().slice(known))
+    await until('the follow-up answer', () => mdTexts(harness.tern).some(text => text.includes('a plain follow-up')))
+
+    assert.equal(assistantVisualPresentationRevision(figureRow), revisionBefore,
+      'an unrelated session commit never advances the historical figure sidecar')
+
+    const touched = new Set<string>()
+    for (const frame of harness.tern.frames.slice(framesBefore)) {
+      for (const op of frame.ops) {
+        const id = op[1]
+        if (typeof id === 'string' && figureSubtree.has(id)) touched.add(id)
+      }
+    }
+    assert.deepEqual([...touched], [], 'no wire op targeted the historical figure subtree')
+    assert.equal(figureIds(harness.tern).length, 1, 'the historical figure is still painted')
     assert.equal(harness.fatalErrors.length, 0)
   } finally {
     await harness.dispose()

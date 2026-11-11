@@ -124,7 +124,7 @@ export function createVisualEventSnapshotProvider(
     if (subject.subjectId !== undefined && session.id !== subject.subjectId) return undefined
     const seq = session.seq
     if (memo !== undefined && memo.session === session && memo.seq === seq) {
-      return { session, sessionId: session.id, seq, events: memo.events }
+      return { session, sessionId: session.id, events: memo.events }
     }
     const rawEvents = session.snapshotEvents()
     const cut = visualSeedCut(session, rawEvents)
@@ -134,6 +134,6 @@ export function createVisualEventSnapshotProvider(
     if (cut === undefined) return undefined
     const events = asVisualSessionEvents(rawEvents)
     memo = { session, seq, events }
-    return { session, sessionId: session.id, seq, events }
+    return { session, sessionId: session.id, events }
   }
 }

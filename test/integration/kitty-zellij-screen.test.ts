@@ -471,7 +471,6 @@ test('a published SVG uses the app raster loader for Preview and paints raw text
       sourceIdentity: {},
       session: {},
       sessionId: 'session-1',
-      seq: 1,
       turn: 1,
       step: 0,
       text: (message as unknown as { text: string }).text,

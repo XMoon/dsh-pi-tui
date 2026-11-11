@@ -2047,23 +2047,43 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
   let visualSnapshotMemo: {
     readonly session: object
     readonly sessionId: string
-    readonly seq: number
+    readonly token: string
     readonly index: VisualPublicationIndex
   } | undefined
   /** One-shot guard for the post-commit successor repaint. A re-entrant
    * setTranscript handover is not allowed to recurse without bound; the next
    * application repaint owns any further switch. */
   let visualSuccessorRepaint = false
+  /**
+   * The display-content token of one derived publication array. It covers
+   * exactly what a figure card paints (ref, final chart fact / SVG credential
+   * and admission width) and deliberately nothing else: the PR2-1 fix makes
+   * the visual sidecar advance only when this content changes, so an
+   * unrelated Session event (a plain `seq` bump) must not re-materialize
+   * historical figure rows. The SVG source bytes are covered by their digest.
+   */
+  const publicationContentToken = (publications: readonly PublishedVisual[]): string =>
+    publications.map(publication => {
+      const source = publication.source
+      if (source.chart !== undefined) return `${publication.ref}\u0001${JSON.stringify(source.chart)}`
+      const svg = source.svg
+      return `${publication.ref}\u0001${svg === undefined ? '' : `${svg.title}\u0001${svg.description}\u0001${svg.digest}\u0001${svg.bytes}\u0001${String(source.svgAdmissionWidth)}`}\u0001${String(source.svgSource?.length ?? -1)}`
+    }).join('\u0002')
   const publicationsOf = (snapshot: VisualEventSnapshot): VisualPublicationIndex => {
     const memo = visualSnapshotMemo
-    // The exact Session object + its committed seq are the identity: a fork
-    // epoch is derived synchronously from that log, so there is no late proof
-    // that could change the projection under the same seq.
+    // The exact Session object + the display-content token are the identity:
+    // a fork epoch is derived synchronously from that log, so there is no late
+    // proof that could change the projection under the same content. A
+    // content-identical re-derivation (the common case: an unrelated session
+    // event bumped the committed seq) keeps the SAME index object, so the
+    // sidecar's element-identity publication comparison stays true and no
+    // historical figure row ever re-materializes for it.
+    const publications = collectPublishedVisuals(snapshot.events)
+    const token = publicationContentToken(publications)
     if (memo !== undefined
       && memo.session === snapshot.session
       && memo.sessionId === snapshot.sessionId
-      && memo.seq === snapshot.seq) return memo.index
-    const publications = collectPublishedVisuals(snapshot.events)
+      && memo.token === token) return memo.index
     const byTurn = new Map<number, PublishedVisual[]>()
     for (const publication of publications) {
       const existing = byTurn.get(publication.turn)
@@ -2074,7 +2094,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     visualSnapshotMemo = {
       session: snapshot.session,
       sessionId: snapshot.sessionId,
-      seq: snapshot.seq,
+      token,
       index,
     }
     return index
@@ -2134,7 +2154,6 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
         sourceIdentity,
         session: snapshot.session,
         sessionId: snapshot.sessionId,
-        seq: snapshot.seq,
         turn: message.turn,
         step: assistantStepOf(message),
         text: message.text,

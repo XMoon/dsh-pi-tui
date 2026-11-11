@@ -347,3 +347,58 @@ test('an EARLIER proven Preparing start changes the Work block stamp', () => {
   // journal would keep painting the stale Activity header.
   assert.notDeepEqual(workAfter.stamp, workBefore.stamp, 'the earlier start changes the Work block stamp')
 })
+
+test('the settled-answer stamp reads only the ask_user_question row', () => {
+  const folder = apply([
+    ev('turn/start', { turn: 1 }, 0),
+    userMessage(1, 'user-1', 'ask and run'),
+    toolCall(2, 'call-bash', 'bash', { command: 'ls' }),
+    toolResult(3, 'call-bash', 'file list'),
+    toolCall(4, 'call-q', 'ask_user_question', { questions: [{ id: 'q1', question: 'Go on?', options: ['Yes'] }] }),
+    toolResult(5, 'call-q', '{"answers":[]}'),
+    assistantMessage(6, 'final-1', 'done'),
+    ev('turn/end', { turn: 1, reason: { kind: 'completed' } }, 7),
+  ])
+  const messages = folder.messages()
+  const readCallIds: string[] = []
+  const baseOptions = {
+    preset: 'full',
+    scopePrefix: 's1-',
+    window: LATEST_WINDOW,
+    settledQuestionAnswersRevision: 1,
+    settledQuestionAnswersLookup: (callId: string) => {
+      readCallIds.push(callId)
+      return callId === 'call-q' ? [{ id: 'q1', selected: ['Yes'] }] : undefined
+    },
+  } as const
+  const stampOf = (
+    blocks: ReturnType<typeof describeTranscriptMainBlocksForPreset>,
+    callId: string,
+  ): readonly unknown[] | undefined =>
+    blocks.find(descriptor => descriptor.owners.some(owner => owner.kind === 'tool' && owner.callId === callId))?.stamp
+
+  const before = describeTranscriptMainBlocksForPreset(messages, new TranscriptNodeKeys(), baseOptions)
+  const bashStamp = stampOf(before, 'call-bash')
+  const questionStamp = stampOf(before, 'call-q')
+  assert.ok(bashStamp !== undefined, 'the ordinary tool row has a block')
+  assert.ok(questionStamp !== undefined, 'the question row has a block')
+  // The lookup was read for the QUESTION row only — never once for the
+  // ordinary tool (the production lookup costs a settled-questions scan per
+  // read, so a wide query would grow with every historical tool call).
+  assert.deepEqual([...new Set(readCallIds)], ['call-q'])
+
+  // A projection change re-derives the descriptors: the question row's stamp
+  // moves (the revision is one of its display inputs)...
+  const after = describeTranscriptMainBlocksForPreset(messages, new TranscriptNodeKeys(), {
+    ...baseOptions,
+    settledQuestionAnswersRevision: 2,
+  })
+  const bashAfter = stampOf(after, 'call-bash')
+  const questionAfter = stampOf(after, 'call-q')
+  assert.ok(bashAfter !== undefined && questionAfter !== undefined)
+  assert.notDeepEqual(questionAfter, questionStamp, 'the question row reads the settled-answer inputs')
+  // ...while the ordinary tool row keeps its EXACT stamp: the journal must
+  // materialize nothing for it.
+  assert.deepEqual(bashAfter, bashStamp, 'the ordinary tool stamp is untouched by the projection change')
+  assert.deepEqual([...new Set(readCallIds)], ['call-q'])
+})

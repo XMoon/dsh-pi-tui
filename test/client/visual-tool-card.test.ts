@@ -693,7 +693,7 @@ test('the Work tool card survives unchanged when the final answer also renders t
     },
   }
   setAssistantVisualPresentation(assistant, {
-    subjectKind: 'main', subjectId: 'tool-card', sourceIdentity: {}, session: {}, sessionId: 'tool-card', seq: 4,
+    subjectKind: 'main', subjectId: 'tool-card', sourceIdentity: {}, session: {}, sessionId: 'tool-card',
     turn: 0, step: 1, text: assistant.text, content: undefined, assistantRevision: 0,
   }, [publication])
 

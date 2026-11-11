@@ -67,7 +67,6 @@ test('an unseeded Session returns its committed log synchronously with no parent
   assert.ok(snapshot !== undefined)
   assert.equal(snapshot.session, session, 'the exact live Session object is returned')
   assert.equal(snapshot.sessionId, 'session-main')
-  assert.equal(snapshot.seq, 3)
   assert.deepEqual(snapshot.events.map(event => event.type), ['turn/start', 'assistant/message'],
     'only the authority-relevant committed events are handed on')
 })

@@ -2022,7 +2022,7 @@ test('Compact renders a published visual inline while the raw marker stays searc
   const assistant = folder.messages().find(message => message.kind === 'assistant')
   assert.ok(assistant !== undefined && assistant.kind === 'assistant')
   setAssistantVisualPresentation(assistant, {
-    subjectKind: 'main', subjectId: 'compact', sourceIdentity: {}, session: {}, sessionId: 'compact', seq: 3,
+    subjectKind: 'main', subjectId: 'compact', sourceIdentity: {}, session: {}, sessionId: 'compact',
     turn: 0, step: 0, text: assistant.text, content: undefined, assistantRevision: 0,
   }, [compactChartPublication(ref)])
   const { vt, app } = startApp('compact')

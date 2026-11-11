@@ -1713,7 +1713,7 @@ function visualAnswerFolder(ref: string, text: string): {
   )
   assert.ok(assistant !== undefined)
   setAssistantVisualPresentation(assistant, {
-    subjectKind: 'main', subjectId: 'search', sourceIdentity: {}, session: {}, sessionId: 'search', seq: 2,
+    subjectKind: 'main', subjectId: 'search', sourceIdentity: {}, session: {}, sessionId: 'search',
     turn: 0, step: 0, text: assistant.text, content: undefined, assistantRevision: 0,
   }, [searchChartPublication(ref)])
   return { folder, assistant }
@@ -1829,7 +1829,7 @@ test('a visual Assistant keeps the search anchor for a folded delivered-file tar
   )
   assert.ok(card !== undefined)
   setAssistantVisualPresentation(card, {
-    subjectKind: 'main', subjectId: 'deliverable-search', sourceIdentity: {}, session: {}, sessionId: 'deliverable-search', seq: 3,
+    subjectKind: 'main', subjectId: 'deliverable-search', sourceIdentity: {}, session: {}, sessionId: 'deliverable-search',
     turn: 1, step: 0, text: card.text, content: undefined, assistantRevision: 0,
   }, [searchChartPublication(ref)])
   const match = folder.search('hidden-target').find(candidate => candidate.source.kind === 'assistant-deliverable')
@@ -1928,7 +1928,7 @@ test('a message target crossing a non-text block keeps its search anchor', async
   assert.ok(card !== undefined)
   assert.equal(card.text, 'cross-block', 'the raw corpus concatenates text blocks without a separator')
   setAssistantVisualPresentation(card, {
-    subjectKind: 'main', subjectId: 'cross-block-search', sourceIdentity: {}, session: {}, sessionId: 'cross-block-search', seq: 2,
+    subjectKind: 'main', subjectId: 'cross-block-search', sourceIdentity: {}, session: {}, sessionId: 'cross-block-search',
     turn: 0, step: 0, text: card.text, content: card.content, assistantRevision: 0,
   }, [searchChartPublication(ref)])
   const match = folder.search('cross-block').find(candidate => candidate.source.kind === 'message')
