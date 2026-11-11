@@ -2171,3 +2171,103 @@ test('a late settlement from a disposed open is inert for the next open', async 
   assert.ok(!h.view().includes('Starting session…'), 'the late settlement never mutates the newer Browser pending state')
   second.close()
 })
+
+test('the inline Host path editor and the global search never coexist', async () => {
+  const submitted: string[] = []
+  const outcomes: Array<(outcome: import('../../src/app/command/session-browser-presentation.ts').SessionBrowserDirectorySettlement) => void> = []
+  const h = harness({
+    columns: 120,
+    rows: 30,
+    onAddDirectory: (path, settle) => { submitted.push(path); outcomes.push(settle) },
+  })
+  h.handle.setSnapshot(snapshot())
+  await h.paint()
+  h.vt.sendInput('\x1b[H')
+  await h.paint()
+  h.vt.sendInput('\r')
+  await h.paint()
+  h.vt.sendInput('/host/add')
+  await h.paint()
+  const editing = panelFrame(h)
+  assert.ok(editing[0]!.includes('Sessions'), 'the header still names the workspace')
+  assert.ok(!editing[0]!.includes('/ Search'), 'the Search target is not painted while the path editor owns the keyboard')
+  assert.ok(h.view().includes('Host directory: /host/add'), 'the inline editor stays visible')
+  // The old header cell is now inert: it can never enter a search presentation
+  // behind the editor.
+  await clickCell(h, editing[0]!.indexOf('Search') < 0 ? 110 : editing[0]!.indexOf('Search') + 1, 0)
+  assert.ok(!h.view().includes('Search all workspaces'), 'a header click cannot enter search while editing')
+  assert.ok(h.view().includes('Host directory: /host/add'), 'the editor remains the visible keyboard owner')
+  // Enter still submits the VISIBLE path editor exactly once.
+  h.vt.sendInput('\r')
+  await h.paint()
+  assert.deepEqual(submitted, ['/host/add'], 'Enter submits the path editor once, never a hidden search action')
+  outcomes[0]!({ kind: 'failed', message: 'not a directory on Host' })
+  await h.paint()
+  assert.ok(h.view().includes('/host/add'), 'the rejection keeps the attempted path')
+  // Esc cancels the editor back to the tree and never closes the Browser.
+  h.vt.sendInput('\x1b')
+  await h.paint()
+  assert.equal(h.closes, 0)
+  assert.ok(!h.view().includes('Host directory:'), 'the tree is back')
+  assert.ok(!h.view().includes('Search all workspaces'), 'no search presentation was created behind the editor')
+})
+
+test('the Footer suppresses session actions while a resume is pending', async () => {
+  const browse = harness({ columns: 120, rows: 30 })
+  browse.handle.setSnapshot(snapshot())
+  await browse.paint()
+  browse.vt.sendInput('\x1b[B')
+  await browse.paint()
+  browse.handle.setSnapshot(snapshot({ resumePending: true }))
+  await browse.paint()
+  let footer = panelFrame(browse)[panelFrame(browse).length - 1]!
+  assert.ok(browse.view().includes('Opening session…'), 'the pending fact is painted')
+  assert.ok(!footer.includes('Enter Open') && !footer.includes('Space peek'),
+    `no blocked session action is advertised while pending:\n${footer}`)
+  browse.handle.setSnapshot(snapshot())
+  await browse.paint()
+  footer = panelFrame(browse)[panelFrame(browse).length - 1]!
+  assert.ok(footer.includes('Enter Open') && footer.includes('Space peek'),
+    'the actions return when the resume settles')
+  browse.app.dispose()
+  started.delete(browse.app)
+
+  const results = harness({ columns: 100, rows: 24, initialMode: 'search' })
+  const searchSnapshot = snapshot({
+    query: 'needle',
+    searchState: 'ready',
+    searchResults: [{ row: row(OTHER, 2_000, { title: 'Other session' }), source: 'Content', snippet: 'needle' }],
+  })
+  results.handle.setSnapshot(searchSnapshot, 'needle')
+  await results.paint()
+  results.vt.sendInput('\r')
+  await results.paint()
+  results.handle.setSnapshot({ ...searchSnapshot, resumePending: true })
+  await results.paint()
+  footer = panelFrame(results)[panelFrame(results).length - 1]!
+  assert.ok(!footer.includes('Enter open') && !footer.includes('Space peek'),
+    `search results advertise no blocked action while pending:\n${footer}`)
+  results.handle.setSnapshot(searchSnapshot)
+  await results.paint()
+  footer = panelFrame(results)[panelFrame(results).length - 1]!
+  assert.ok(footer.includes('Enter open') && footer.includes('Space peek'), 'search actions return after settlement')
+  results.app.dispose()
+  started.delete(results.app)
+
+  const peek = harness({ columns: 120, rows: 30 })
+  peek.handle.setSnapshot(snapshot())
+  await peek.paint()
+  peek.vt.sendInput('\x1b[B')
+  await peek.paint()
+  peek.vt.sendInput(' ')
+  await peek.paint()
+  peek.handle.setSnapshot(snapshot({ resumePending: true }))
+  await peek.paint()
+  footer = panelFrame(peek)[panelFrame(peek).length - 1]!
+  assert.ok(!footer.includes('Enter open'), `Peek advertises no blocked Open while pending:\n${footer}`)
+  assert.ok(footer.includes('Space close') && footer.includes('Esc back'), 'the real Peek exits stay advertised')
+  peek.handle.setSnapshot(snapshot())
+  await peek.paint()
+  footer = panelFrame(peek)[panelFrame(peek).length - 1]!
+  assert.ok(footer.includes('Enter open'), 'the Peek Open cue returns after settlement')
+})
