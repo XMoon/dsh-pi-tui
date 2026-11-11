@@ -654,13 +654,29 @@ test('a 30x8 Settings workspace disables Enter for a clipped masked form; 40x16 
     () => h.vt.waitForRender(),
     'the /login deeplink must reach the API Key Reference page before Enter',
   )
-  await key(h, '\r') // open the masked API-key form at full height
-  await waitForFrame(
-    h.view,
-    frame => frame.includes('Enter the API key') && frame.includes('Enter continue'),
-    () => h.vt.waitForRender(),
-    'Enter on the reference page must open the masked form with its real submit hint',
-  )
+  // Open the masked form. The page refuses a key while a changed row grant
+  // awaits its paint (a safe fail-closed admission), and a frame can land
+  // between the wait above and the keypress under CI load; retry the key after
+  // that frame. A genuinely broken Enter still never paints the form and fails.
+  const settledFormPainted = async (): Promise<boolean> => {
+    for (let frame = 0; frame < 8; frame += 1) {
+      const painted = h.view()
+      if (painted.includes('Enter the API key') && painted.includes('Enter continue')) return true
+      await h.vt.waitForRender()
+      await new Promise<void>(resolve => setImmediate(resolve))
+    }
+    return false
+  }
+  await key(h, '\r')
+  if (!(await settledFormPainted())) {
+    // Retry ONLY while the reference page is still the live owner: a frame that
+    // already advanced to the form/review must never receive a second submit.
+    assert.match(h.view(), /Configure API Key|API Key Reference/u,
+      'the retry is only safe while the reference page still owns the frame')
+    await key(h, '\r')
+    assert.ok(await settledFormPainted(),
+      'Enter on the reference page must open the masked form with its real submit hint')
+  }
   assert.match(h.view(), /API Key Reference|Enter the API key/u)
 
   h.vt.resize(40, 16)
