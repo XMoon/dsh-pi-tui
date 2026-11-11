@@ -142,10 +142,10 @@ export class DockQueue implements Component {
 
   handleMouse(event: TuiMouseEvent): TuiMouseDispatchResult | TuiMouseEventResult | undefined {
     if (event.type !== 'press' && event.type !== 'click' && event.type !== 'release') return undefined
-    if (event.type === 'release') {
-      this.pressed = undefined
-      return undefined
-    }
+    // The fork dispatches press → release → synthesized click. A RELEASE must
+    // not consume this pane's press identity: the click is the one event that
+    // validates it and performs the activation.
+    if (event.type === 'release') return undefined
     if (event.button !== 'left') return undefined
     if (event.width !== this.lastRenderWidth) return undefined
     const hit = this.hits[event.y]

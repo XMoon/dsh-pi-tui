@@ -43,6 +43,7 @@ function harness(options: HarnessOptions = {}) {
   let items = options.items ?? []
   let sessionId: string | undefined = 'sessionId' in options ? options.sessionId : 'session-a'
   let unavailable = options.unavailable === true
+  let viewing = options.viewing === true
   const writes: WriteRecord[] = []
   const notices: string[] = []
   let refreshes = 0
@@ -79,7 +80,7 @@ function harness(options: HarnessOptions = {}) {
     isSubjectCurrent: (token) => (token as { owner?: string } | undefined)?.owner === sessionId,
     captureScope: () => (sessionId === undefined ? undefined : ({ sessionId } as never)),
     isScopeCurrent: () => true,
-    isViewing: () => options.viewing === true,
+    isViewing: () => viewing,
     withWriter: async (_scope, task) => task(),
     beginClientWrite: () => () => {},
     runOwned: (_label, task) => { tasks.push(task()) },
@@ -106,6 +107,7 @@ function harness(options: HarnessOptions = {}) {
     setUnavailable(next: boolean) { unavailable = next },
     switchSession(next: string | undefined) { sessionId = next },
     setOutcome(next: WriteOutcome) { outcome = next },
+    setViewing(next: boolean) { viewing = next },
     diag: DIAG,
     refreshes: () => refreshes,
     dismissed: () => dismissed,
@@ -310,6 +312,29 @@ test('removing a queued occurrence dismisses its client-local submission echo', 
   h.controller.confirmDelete()
   await h.drain()
   assert.deepEqual(h.dismissed(), ['req-1'], 'the `sending…` echo of the removed occurrence is settled')
+})
+
+test('entering a subagent viewer retires the open queue panel', () => {
+  const h = harness({ items: [item('occ-1', [{ type: 'text', text: 'hello' }])] })
+  h.controller.open()
+  h.controller.startEdit()
+  assert.equal(h.controller.view().mode, 'edit')
+  h.setViewing(true)
+  h.controller.retireIfStale()
+  assert.equal(h.controller.view().mode, 'closed', 'the viewer is a newer display owner')
+})
+
+test('a viewer entered before a queued write blocks the parent queue mutation', async () => {
+  const h = harness({ items: [item('occ-1', [{ type: 'text', text: 'hello' }])] })
+  h.controller.open()
+  h.controller.startEdit()
+  h.controller.setDraft('edited')
+  // The viewer opens in the window before the owned write reaches withWriter.
+  h.setViewing(true)
+  h.controller.save()
+  await h.drain()
+  assert.deepEqual(h.writes, [], 'no parent-session queue write is admitted while the viewer owns the screen')
+  assert.equal(h.controller.view().mode, 'closed')
 })
 
 test('a session-owner change retires the panel and a stale result never notifies the new subject', async () => {

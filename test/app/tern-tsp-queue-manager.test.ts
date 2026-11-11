@@ -530,3 +530,22 @@ test('native Queue: a lost Dock preselection paints no cursor and no actionable 
   assert.equal(sheetNode(m.pane, 'overlay'), undefined, 'D opens no confirmation without a selection')
   assert.deepEqual(m.writes, [])
 })
+
+
+test('native Queue: attachment badges name images, files and mixed attachments', async (t) => {
+  const m = await mounted(t, [
+    queued('img', [{ type: 'image', attachment: { attachmentId: 'i1', mediaType: 'image/png', name: 'shot.png' } }]),
+    queued('file', [{ type: 'file', attachment: { attachmentId: 'f1', name: 'report.pdf', bytes: 12 } }]),
+    queued('mixed', [
+      { type: 'file', attachment: { attachmentId: 'f2', name: 'a.bin', bytes: 1 } },
+      { type: 'image', attachment: { attachmentId: 'i2', mediaType: 'image/png', name: 'b.png' } },
+    ]),
+  ])
+  m.controller.open()
+  await waitUntil('the Browse sheet', () => sheetPicker(m.pane) !== undefined)
+  const items = (sheetProps(m.pane).items ?? []) as Array<{ id: string; badges?: Array<{ text: string }> }>
+  const badge = (id: string): string | undefined => items.find(item => item.id === id)?.badges?.[0]?.text
+  assert.equal(badge('img'), '1 image')
+  assert.equal(badge('file'), '1 file')
+  assert.equal(badge('mixed'), '2 attachments')
+})

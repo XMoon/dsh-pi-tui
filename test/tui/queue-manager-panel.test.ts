@@ -93,7 +93,7 @@ function plain(text: string): string {
   return text.replace(/\x1b\[[0-9;]*m/gu, '')
 }
 
-function mouse(y: number, x: number, width: number, type: 'press' | 'click'): Parameters<QueuePanel['handleMouse']>[0] {
+function mouse(y: number, x: number, width: number, type: 'press' | 'release' | 'click'): Parameters<QueuePanel['handleMouse']>[0] {
   return {
     type,
     button: 'left',
@@ -202,6 +202,7 @@ test('the Delete action bar click opens the confirmation and Enter confirms exac
   const x = plain(lines[barIndex]!).indexOf('Delete [D]')
   assert.ok(x > 0, `Delete is painted:\n${lines.join('\n')}`)
   h.panel.handleMouse(mouse(barIndex, x, width, 'press'))
+  h.panel.handleMouse(mouse(barIndex, x, width, 'release'))
   h.panel.handleMouse(mouse(barIndex, x, width, 'click'))
   assert.equal(h.controller.view().mode, 'confirm-delete')
   const confirmLines = h.panel.render(width)
@@ -221,6 +222,7 @@ test('the painted navigation fact is inert: clicking it never closes the panel',
   const x = plain(lines[barIndex]!).indexOf('↑↓ navigate')
   assert.ok(x > 0)
   h.panel.handleMouse(mouse(barIndex, x, width, 'press'))
+  h.panel.handleMouse(mouse(barIndex, x, width, 'release'))
   h.panel.handleMouse(mouse(barIndex, x, width, 'click'))
   assert.equal(h.controller.view().mode, 'browse')
 })
@@ -262,4 +264,38 @@ test('short grants keep the header and the action bar, degrading the list first'
   assert.ok(lines.length <= 5, `the row grant is respected:\n${lines.join('\n')}`)
   assert.ok(lines[0]!.includes('Queue'), `the header survives:\n${lines.join('\n')}`)
   assert.ok(lines[lines.length - 1]!.includes('Esc'), `the action bar survives:\n${lines.join('\n')}`)
+})
+
+
+test('the real press → release → click sequence reaches the action bar exactly once', async () => {
+  const h = harness([item('occ-1', [{ type: 'text', text: 'hello' }])])
+  const width = 84
+  const lines = h.panel.render(width)
+  const barIndex = lines.length - 1
+  const x = plain(lines[barIndex]!).indexOf('Delete [D]')
+  h.panel.handleMouse(mouse(barIndex, x, width, 'press'))
+  assert.equal(h.controller.view().mode, 'browse', 'press alone never activates')
+  h.panel.handleMouse(mouse(barIndex, x, width, 'release'))
+  assert.equal(h.controller.view().mode, 'browse', 'release must not consume the press identity')
+  h.panel.handleMouse(mouse(barIndex, x, width, 'click'))
+  assert.equal(h.controller.view().mode, 'confirm-delete', 'the synthesized click opens the confirmation')
+})
+
+
+test('attachment counts name images, files and mixed attachments truthfully', () => {
+  const image = harness([item('img', [{ type: 'image', attachment: { attachmentId: 'i1', mediaType: 'image/png', name: 'shot.png' } }])])
+  const imageView = image.panel.render(84).join('\n')
+  assert.ok(imageView.includes('1 image'), `an image-only row names an image:\n${imageView}`)
+  assert.ok(!imageView.includes('1 file'), 'an image-only row never reads as a file')
+
+  const file = harness([item('file', [{ type: 'file', attachment: { attachmentId: 'f1', name: 'report.pdf', bytes: 12 } }])])
+  const fileView = file.panel.render(84).join('\n')
+  assert.ok(fileView.includes('1 file'), `a file-only row names a file:\n${fileView}`)
+
+  const mixed = harness([item('mixed', [
+    { type: 'file', attachment: { attachmentId: 'f2', name: 'a.bin', bytes: 1 } },
+    { type: 'image', attachment: { attachmentId: 'i2', mediaType: 'image/png', name: 'b.png' } },
+  ])])
+  const mixedView = mixed.panel.render(84).join('\n')
+  assert.ok(mixedView.includes('2 attachments'), `a mixed row is generic:\n${mixedView}`)
 })

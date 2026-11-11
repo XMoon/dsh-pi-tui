@@ -13,7 +13,7 @@
 
 import { ui, type Node, type PickerAction, type PickerItem } from '@stencil-hq/tern'
 import { QUEUE_CHORDS } from '../keybindings/hints.ts'
-import type { QueueManagerRow, QueueManagerView } from '../../app/queue/manager.ts'
+import { attachmentCountLabel, type QueueManagerRow, type QueueManagerView } from '../../app/queue/manager.ts'
 
 /** One intent the sheet's nodes can raise. */
 export type QueueManagerIntent =
@@ -42,14 +42,12 @@ export interface QueueLayerDeps {
 
 /** The ONE visible row of the native picker (value = Host occurrence id). */
 function rowItem(row: QueueManagerRow): PickerItem {
-  const attachments = row.fileCount + row.imageCount
+  const badge = attachmentCountLabel(row.fileCount, row.imageCount)
   return {
     id: row.id,
     label: singleLine(row.text),
     ...(row.attachments.length === 0 ? {} : { detail: singleLine(row.attachments.join(' · ')) }),
-    ...(attachments === 0
-      ? {}
-      : { badges: [{ text: `${attachments} file${attachments === 1 ? '' : 's'}` }] }),
+    ...(badge === undefined ? {} : { badges: [{ text: badge }] }),
     // A non-text occurrence stays selectable (Delete must remain reachable);
     // the reason is stated in words, never by colour alone.
     ...(row.textOnly ? {} : { disabled: 'Contains attachments · Editing unavailable' }),
