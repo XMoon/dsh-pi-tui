@@ -20,8 +20,8 @@
  * so a drift between the descriptors the Host registers and the Client mounts
  * remains impossible by construction.
  *
- * The four features here are file references, terminal progress, the official
- * Web frontend availability toggle and Host one-shot Shell/completion.
+ * The five features here are file references, terminal progress, the official
+ * Web frontend availability toggle, Host one-shot Shell/completion and Skills.
  *
  * @module @xmoon76/dsh-pi-tui/runtime/remote/pi-tui-remote-contribution
  */
@@ -39,6 +39,10 @@ import {
   PI_TUI_WEB_ACCESS_GET_STATUS,
   PI_TUI_WEB_ACCESS_SET_ENABLED,
 } from './pi-tui-web-access-contract.ts'
+import {
+  PI_TUI_SKILLS_STANDING,
+  PI_TUI_SKILLS_WATCH_INVALIDATIONS,
+} from './pi-tui-skills-contract.ts'
 
 /** The npm package that owns every private Remote invocation here. A test
  *  guards that it equals each contract module's own package constant. */
@@ -58,6 +62,8 @@ export const PI_TUI_HOST_CONTRIBUTION: TypertContribution = {
     PI_TUI_WEB_ACCESS_GET_STATUS,
     PI_TUI_WEB_ACCESS_SET_ENABLED,
     PI_TUI_WEB_ACCESS_GET_AUTHENTICATED_URL,
+    PI_TUI_SKILLS_STANDING,
+    PI_TUI_SKILLS_WATCH_INVALIDATIONS,
   ],
 }
 
@@ -72,5 +78,7 @@ export const PI_TUI_CLIENT_CONTRIBUTION: TypertRemoteContribution = {
     PI_TUI_WEB_ACCESS_GET_STATUS,
     PI_TUI_WEB_ACCESS_SET_ENABLED,
     PI_TUI_WEB_ACCESS_GET_AUTHENTICATED_URL,
+    PI_TUI_SKILLS_STANDING,
+    PI_TUI_SKILLS_WATCH_INVALIDATIONS,
   ],
 }

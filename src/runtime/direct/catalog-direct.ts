@@ -52,6 +52,7 @@ import type {
   SkillCatalogCapability,
   SkillDefinitionDto,
   SkillDefinitionResult,
+  StandingSkillLocation,
 } from '../catalog-port.ts'
 import type { StandingSkillRead } from '../../runtime/catalog-port.ts'
 import type { ProviderCatalogEntry } from '../../domain/catalog/provider.ts'
@@ -654,8 +655,11 @@ export class DirectSkillCatalog implements SkillCatalogCapability {
     return this.agentFor(sessionId) as LiveAgentLike | undefined
   }
 
-  async standing(presetId: string | undefined, cwd: string, signal?: AbortSignal): Promise<StandingSkillRead> {
-    const resolution = await resolveColdSkillTarget(this.ctx as unknown as SkillCatalogContext, presetId, cwd)
+  async standing(presetId: string | undefined, location: StandingSkillLocation, signal?: AbortSignal): Promise<StandingSkillRead> {
+    if (location.kind !== 'co-located-directory') {
+      throw new Error('the Direct standing skill catalog requires a co-located directory')
+    }
+    const resolution = await resolveColdSkillTarget(this.ctx as unknown as SkillCatalogContext, presetId, location.cwd)
     const target = resolution.target
     if (target === undefined) throw new Error('skill service unavailable')
     try {
@@ -696,8 +700,8 @@ export class DirectSkillCatalog implements SkillCatalogCapability {
     return loader !== undefined && typeof loader.execute === 'function'
   }
 
-  onSkillsChange(listener: () => void): void {
-    subscribeSkillsChange(this.ctx as unknown as SkillCatalogEventsContext, listener)
+  onSkillsChange(listener: () => void, _onError: (error: unknown) => void): () => void {
+    return subscribeSkillsChange(this.ctx as unknown as SkillCatalogEventsContext, listener)
   }
 }
 

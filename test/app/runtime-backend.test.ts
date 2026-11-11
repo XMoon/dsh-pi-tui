@@ -96,7 +96,7 @@ test('the Direct backend is the current production surface and serves EXACTLY th
       listHumanSkills: async () => undefined,
       resolveSkill: async () => ({ kind: 'unavailable' as const }),
       hostLoadsSkillBody: () => false,
-      onSkillsChange: () => {},
+      onSkillsChange: () => () => {},
     },
   }
   const config = {

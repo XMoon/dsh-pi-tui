@@ -23,6 +23,7 @@ import {
 } from '../../src/runtime/remote/pi-tui-terminal-progress-contract.ts'
 import { PI_TUI_WEB_ACCESS_NAMESPACE } from '../../src/runtime/remote/pi-tui-web-access-contract.ts'
 import { PI_TUI_HOST_USER_SHELL_NAMESPACE } from '../../src/runtime/remote/pi-tui-host-user-shell-contract.ts'
+import { PI_TUI_SKILLS_NAMESPACE } from '../../src/runtime/remote/pi-tui-skills-contract.ts'
 import type { PiTuiTerminalProgressFrame } from '../../src/runtime/remote/pi-tui-terminal-progress-contract.ts'
 
 /** Cordis `FiberState.ACTIVE` (const enum: no runtime value). */
@@ -37,6 +38,9 @@ interface HostContextOptions {
   readonly sandboxPolicy?: boolean
   readonly sandbox?: boolean
   readonly subprocess?: boolean
+  readonly workspaceRegistry?: boolean
+  readonly skills?: boolean
+  readonly agentPresets?: boolean
   readonly loader?: boolean
 }
 
@@ -51,6 +55,19 @@ async function hostContext(options: HostContextOptions = {}): Promise<Context> {
   if (options.sandboxPolicy !== false) ctx.provide('sandboxPolicy', {})
   if (options.sandbox !== false) ctx.provide('sandbox', {})
   if (options.subprocess !== false) ctx.provide('subprocess', {})
+  // The official Host Skills standing authorities. This suite pins the
+  // COMPOSITION, so a registry/lease shape that returns an empty complete
+  // observation is enough; the real Host semantics live in
+  // test/app/host/skills.test.ts and test/app/remote-skills-wire.test.ts.
+  if (options.workspaceRegistry !== false) ctx.provide('workspaceRegistry', { get: () => undefined })
+  if (options.skills !== false) {
+    ctx.provide('skills', { snapshot: async () => ({ skills: [], complete: true }) })
+  }
+  if (options.agentPresets !== false) {
+    ctx.provide('agentPresets', {
+      acquireScope: async () => ({ key: {}, [Symbol.asyncDispose]: async () => {} }),
+    })
+  }
   // The Host's own Loader is the official Web frontend toggle's ONLY authority.
   // This suite pins composition, so an empty Loader view is enough; the real
   // `Entry.update` transitions live in `test/app/host/web-access.test.ts`.
@@ -86,6 +103,8 @@ test('one contribution registers every private service and publishes readiness l
   assert.equal(bindingOf(ctx, 'piTuiWebAccess').serviceKey, 'piTuiWebAccess')
   assert.equal(bindingOf(ctx, 'piTuiWebAccess').namespace, PI_TUI_WEB_ACCESS_NAMESPACE)
   assert.equal(bindingOf(ctx, 'piTuiHostUserShell').namespace, PI_TUI_HOST_USER_SHELL_NAMESPACE)
+  assert.equal(bindingOf(ctx, 'piTuiSkills').serviceKey, 'piTuiSkills')
+  assert.equal(bindingOf(ctx, 'piTuiSkills').namespace, PI_TUI_SKILLS_NAMESPACE)
   // Every private endpoint is registered by the ONE package contribution.
   assert.equal(
     ctx.typert.local.get('piTuiFileReferences/list')?.id,
@@ -109,6 +128,8 @@ test('one contribution registers every private service and publishes readiness l
   )
   assert.equal(ctx.typert.local.get('piTuiHostUserShell/run')?.id, '@xmoon76/dsh-pi-tui#piTuiHostUserShell/run')
   assert.equal(ctx.typert.local.get('piTuiHostUserShell/complete')?.id, '@xmoon76/dsh-pi-tui#piTuiHostUserShell/complete')
+  assert.equal(ctx.typert.local.get('piTuiSkills/standing')?.id, '@xmoon76/dsh-pi-tui#piTuiSkills/standing')
+  assert.equal(ctx.typert.local.get('piTuiSkills/watchInvalidations')?.id, '@xmoon76/dsh-pi-tui#piTuiSkills/watchInvalidations')
   await ctx.fiber.dispose()
 })
 
@@ -132,6 +153,7 @@ test('disposing the ONE built-in fiber withdraws every service, the contribution
   assert.equal(ctx.reflect.get('piTuiTerminalProgress'), undefined)
   assert.equal(ctx.reflect.get('piTuiWebAccess'), undefined)
   assert.equal(ctx.reflect.get('piTuiHostUserShell'), undefined)
+  assert.equal(ctx.reflect.get('piTuiSkills'), undefined)
   assert.equal(ctx.reflect.get(piTuiHostRuntime.PI_TUI_HOST_READY_SERVICE), undefined)
   assert.equal(ctx.typert.local.get('piTuiFileReferences/list'), undefined)
   assert.equal(ctx.typert.local.get('piTuiTerminalProgress/watch'), undefined)
@@ -140,11 +162,13 @@ test('disposing the ONE built-in fiber withdraws every service, the contribution
   assert.equal(ctx.typert.local.get('piTuiWebAccess/getAuthenticatedUrl'), undefined)
   assert.equal(ctx.typert.local.get('piTuiHostUserShell/run'), undefined)
   assert.equal(ctx.typert.local.get('piTuiHostUserShell/complete'), undefined)
+  assert.equal(ctx.typert.local.get('piTuiSkills/standing'), undefined)
+  assert.equal(ctx.typert.local.get('piTuiSkills/watchInvalidations'), undefined)
   await ctx.fiber.dispose()
 })
 
 test('every required Host inject keeps the fiber from completing when missing', async () => {
-  for (const missing of ['typert', 'agents', 'fileReferences', 'workingDirectory', 'sessions', 'sandboxPolicy', 'sandbox', 'subprocess'] as const) {
+  for (const missing of ['typert', 'agents', 'fileReferences', 'workingDirectory', 'sessions', 'sandboxPolicy', 'sandbox', 'subprocess', 'workspaceRegistry', 'skills', 'agentPresets'] as const) {
     const ctx = await hostContext({ [missing]: false })
     const fiber = ctx.plugin(piTuiHostRuntime, { sessionId: '' } as never)
     await new Promise<void>(resolve => setImmediate(resolve))
@@ -201,6 +225,24 @@ test('a failing THIRD service mount unwinds the earlier services and the contrib
     'the package contribution must be withdrawn on failure')
   assert.equal(ctx.reflect.get(piTuiHostRuntime.PI_TUI_HOST_READY_SERVICE), undefined,
     'readiness must never be published by a failed mount')
+  await ctx.fiber.dispose()
+})
+
+test('a failing FIFTH service mount unwinds the earlier services and the contribution', async () => {
+  const ctx = await hostContext()
+  // Pre-owning the Skills service key makes the FIFTH child mount reject after
+  // every earlier service is live: readiness must never be published and the
+  // whole private roster must be withdrawn.
+  ctx.provide('piTuiSkills', { preOwned: true })
+  const fiber = ctx.plugin(piTuiHostRuntime, { sessionId: '' } as never)
+  await assert.rejects(Promise.resolve(fiber), /has been registered|already registered/iu)
+  assert.equal(ctx.reflect.get('piTuiFileReferences'), undefined)
+  assert.equal(ctx.reflect.get('piTuiTerminalProgress'), undefined)
+  assert.equal(ctx.reflect.get('piTuiWebAccess'), undefined)
+  assert.equal(ctx.reflect.get('piTuiHostUserShell'), undefined)
+  assert.equal(ctx.typert.local.get('piTuiSkills/standing'), undefined,
+    'the package contribution must be withdrawn on failure')
+  assert.equal(ctx.reflect.get(piTuiHostRuntime.PI_TUI_HOST_READY_SERVICE), undefined)
   await ctx.fiber.dispose()
 })
 

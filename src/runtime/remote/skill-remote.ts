@@ -8,23 +8,27 @@
  * value; a Host/domain error surfaces as a rejection (never an empty
  * success), and caller cancellation is honored.
  *
- * Explicitly unsupported on the wire (
- * requalified through 0.2.0-rc.2): the sessionless STANDING catalog (every
- * skills endpoint is Session-addressed), the Client skill-body read (no
- * `skills/read`; human gestures stay literal and the Host pre-step owns
- * injection), and `onSkillsChange` hot invalidation (no `skills/*` entry in
- * the forwarded Remote-event selection — strong re-read on Session/binding
- * entry, explicit `/reload` and `connection/reset` instead). No private
- * event, no Client filesystem scan, no second catalog authority.
+ * Sessionless standing reads use the private `piTuiSkills/standing` Host
+ * Workspace endpoint; Live Session reads remain on the official
+ * `remote.skills.list({sessionId})`. Host `skills/change` invalidation is
+ * consumed through the same package contribution and never carries Skill data.
+ * The Client does not scan its own filesystem or read Skill bodies.
  *
  * @module @xmoon76/dsh-pi-tui/runtime/remote/skill-remote
  */
 
 import { cancellationError } from '../process/tasks.ts'
 import { remoteFailureMessage } from './write-failure.ts'
+import { SupersededReadError } from '../read-error.ts'
+import type { RemoteStreamHandle } from '@deepseek-ai/dsh-typert-protocol'
 import type { HumanSkillCatalog, HumanSkillSummary } from '../../domain/catalog/skill.ts'
-import type { SkillCatalogCapability, SkillDefinitionResult } from '../catalog-port.ts'
-import type { StandingSkillRead } from '../../runtime/catalog-port.ts'
+import type { SkillCatalogCapability, SkillDefinitionResult, StandingSkillLocation, StandingSkillRead } from '../catalog-port.ts'
+import {
+  parsePiTuiSkillsInvalidationFrame,
+  type PiTuiSkillsInvalidationFrame,
+  type PiTuiSkillsStandingCall,
+  type PiTuiSkillsStandingRequest,
+} from './pi-tui-skills-contract.ts'
 import type {
   RemoteConnectionGeneration,
   RemoteConnectionGenerationSource,
@@ -53,6 +57,15 @@ export interface RemoteSkillRemotes {
   ): Promise<RemoteReadResult<RemoteSkillListValue>>
 }
 
+/** The private Host Skills namespace mounted by the package's ONE contribution. */
+export interface PiTuiSkillsRemotes {
+  standing(
+    request: PiTuiSkillsStandingRequest,
+    signal?: AbortSignal,
+  ): Promise<PiTuiSkillsStandingCall>
+  watchInvalidations(signal?: AbortSignal): RemoteStreamHandle<PiTuiSkillsInvalidationFrame, never>
+}
+
 /** One detached summary per wire row — only the fields the TUI catalog DTO
  * carries (the wire `path` is Host-side display metadata the picker never
  * reads; untrusted rows are refused rather than coerced). */
@@ -70,18 +83,64 @@ function detachedSummary(entry: RemoteSkillListEntry): HumanSkillSummary | undef
 /** The Remote skill catalog: official `skills/list` only. */
 export class RemoteSkillCatalog implements SkillCatalogCapability {
   private readonly skills: RemoteSkillRemotes
+  private readonly piTuiSkills: PiTuiSkillsRemotes
   private readonly generation: RemoteConnectionGenerationSource
 
-  constructor(skills: RemoteSkillRemotes, generation: RemoteConnectionGenerationSource) {
+  constructor(
+    skills: RemoteSkillRemotes,
+    piTuiSkills: PiTuiSkillsRemotes,
+    generation: RemoteConnectionGenerationSource,
+  ) {
     this.skills = skills
+    this.piTuiSkills = piTuiSkills
     this.generation = generation
   }
 
-  async standing(_presetId: string | undefined, _cwd: string, _signal?: AbortSignal): Promise<StandingSkillRead> {
-    // No sessionless official catalog exists on the wire: this is an
-    // explicit unsupported capability, never a Client filesystem scan and
-    // never a fabricated empty catalog.
-    throw new Error('the Remote backend has no sessionless standing skill catalog; open a Session or use /reload')
+  async standing(
+    presetId: string | undefined,
+    location: StandingSkillLocation,
+    signal?: AbortSignal,
+  ): Promise<StandingSkillRead> {
+    signal?.throwIfAborted()
+    if (location.kind !== 'host-workspace') {
+      throw new Error('the Remote standing skill catalog requires a Host workspace identity')
+    }
+    const capturedGeneration = this.generation.getSnapshot()
+    if (capturedGeneration === undefined) {
+      throw new SupersededReadError('the Remote connection is unavailable for a standing skill read')
+    }
+    const requestSignal = signal ?? new AbortController().signal
+    let result: PiTuiSkillsStandingCall
+    try {
+      result = await this.piTuiSkills.standing({
+        workspaceId: location.workspaceId,
+        ...(presetId === undefined ? {} : { presetId }),
+      }, requestSignal)
+      requestSignal.throwIfAborted()
+    } catch (error) {
+      requestSignal.throwIfAborted()
+      if (!Object.is(capturedGeneration, this.generation.getSnapshot())) {
+        throw new SupersededReadError('the Remote connection changed during a standing skill read')
+      }
+      throw error
+    }
+    if (!Object.is(capturedGeneration, this.generation.getSnapshot())) {
+      throw new SupersededReadError('the Remote connection changed during a standing skill read')
+    }
+    if (!result.ok) {
+      const error = result.error
+      const code = typeof error === 'object' && error !== null
+        ? (error as { readonly code?: unknown }).code
+        : undefined
+      if (code === 'ABORT_ERR' || code === 'gateway/cancelled') {
+        throw cancellationError('remote standing skill read was aborted')
+      }
+      throw new Error(`piTuiSkills/standing failed: ${remoteFailureMessage(error)}`)
+    }
+    return {
+      catalog: { skills: result.value.skills, complete: result.value.complete },
+      ...(result.value.notice === undefined ? {} : { notice: result.value.notice }),
+    }
   }
 
   async listHumanSkills(sessionId: string, signal?: AbortSignal): Promise<HumanSkillCatalog | undefined> {
@@ -137,9 +196,57 @@ export class RemoteSkillCatalog implements SkillCatalogCapability {
     return true
   }
 
-  onSkillsChange(_listener: () => void): void {
-    // No `skills/*` forwarded Remote event exists (through 0.2.0-rc.2). No private
-    // event seam: the consumers' strong re-read boundaries (Session/binding
-    // entry, explicit /reload, connection/reset) own freshness instead.
+  onSkillsChange(listener: () => void, onError: (error: unknown) => void): () => void {
+    let disposed = false
+    let observedGeneration = this.generation.getSnapshot()
+    let active: { readonly controller: AbortController } | undefined
+
+    const open = (generation: RemoteConnectionGeneration): void => {
+      const controller = new AbortController()
+      active = { controller }
+      const consume = async (): Promise<void> => {
+        const stream = this.piTuiSkills.watchInvalidations(controller.signal)
+        try {
+          for await (const value of stream) {
+            controller.signal.throwIfAborted()
+            if (!Object.is(generation, this.generation.getSnapshot())) return
+            parsePiTuiSkillsInvalidationFrame(value)
+            listener()
+          }
+          if (!controller.signal.aborted && Object.is(generation, this.generation.getSnapshot())) {
+            throw new Error('piTuiSkills/watchInvalidations ended unexpectedly')
+          }
+        } finally {
+          stream.dispose()
+        }
+      }
+      consume().catch(error => {
+        if (disposed || controller.signal.aborted || !Object.is(generation, this.generation.getSnapshot())) return
+        if (active?.controller === controller) active = undefined
+        onError(error)
+      })
+    }
+
+    const restart = (generation: RemoteConnectionGeneration | undefined): void => {
+      active?.controller.abort()
+      active = undefined
+      if (generation !== undefined && !disposed) open(generation)
+    }
+
+    if (observedGeneration !== undefined) open(observedGeneration)
+    const unsubscribe = this.generation.subscribe(() => {
+      const next = this.generation.getSnapshot()
+      if (Object.is(next, observedGeneration)) return
+      observedGeneration = next
+      restart(next)
+    })
+
+    return () => {
+      if (disposed) return
+      disposed = true
+      unsubscribe()
+      active?.controller.abort()
+      active = undefined
+    }
   }
 }

@@ -684,6 +684,7 @@ async function startSurfaceLocalClient(
     const privateRemote = domains.remote as unknown as {
       readonly piTuiFileReferences?: unknown
       readonly piTuiTerminalProgress?: unknown
+      readonly piTuiSkills?: unknown
     } | undefined
     return {
       ...base,
@@ -709,7 +710,8 @@ async function startSurfaceLocalClient(
       privateNamespaces: domainsOpen
         && privateRemote?.piTuiFileReferences !== undefined
         && privateRemote.piTuiTerminalProgress !== undefined
-        ? 2
+        && privateRemote.piTuiSkills !== undefined
+        ? 3
         : 0,
     }
   }

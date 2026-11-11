@@ -492,7 +492,7 @@ test('skills standing reads the cold catalog through the standing scope', async 
       acquireScope: async (id?: string) => { standingKey = id; return { key: { scope: 'standing' }, [Symbol.asyncDispose]: async () => {} } },
     },
   }).skills
-  const read = await skills.standing('standard', '/ws')
+  const read = await skills.standing('standard', { kind: 'co-located-directory', cwd: '/ws' })
   assert.equal(standingKey, 'standard')
   assert.deepEqual(read.catalog.skills.map(s => s.name), ['cold'])
   assert.equal(read.notice, undefined)
@@ -505,14 +505,26 @@ test('skills standing degrades to the global layer with a one-shot notice', asyn
       acquireScope: async () => { throw new Error('mount broken') },
     },
   }).skills
-  const read = await skills.standing(undefined, '/ws')
+  const read = await skills.standing(undefined, { kind: 'co-located-directory', cwd: '/ws' })
   assert.deepEqual(read.catalog.skills.map(s => s.name), ['cold'])
   assert.ok(read.notice !== undefined && read.notice.includes('mount broken'))
 })
 
 test('skills standing throws when no registry is reachable', async () => {
   const skills = port({ agentPresets: {} }).skills
-  await assert.rejects(() => skills.standing(undefined, '/ws'), /skill service unavailable/)
+  await assert.rejects(
+    () => skills.standing(undefined, { kind: 'co-located-directory', cwd: '/ws' }),
+    /skill service unavailable/,
+  )
+})
+
+test('the Direct standing read refuses a Host Workspace identity instead of reading another backend location', async () => {
+  const skills = port({ skills: skillRegistry({ cold: 'Cold skill' }) }).skills
+  await assert.rejects(
+    () => skills.standing(undefined, { kind: 'host-workspace', workspaceId: 'ws-remote' }),
+    /co-located directory/,
+    'a Host-issued WorkspaceId is not a Direct filesystem location',
+  )
 })
 
 test('model discovery stays on the official seam (alpha.4 profile-header regression)', async () => {

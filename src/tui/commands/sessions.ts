@@ -61,6 +61,7 @@ type SessionCommandRunner = Pick<
   | 'isSessionScopeCurrent'
   | 'openRewindPicker'
   | 'requireLiveSessionScope'
+  | 'refreshStandingCatalog'
   | 'sessionCwd'
   | 'sessionReader'
   | 'sessionWorkspaceFacts'
@@ -411,6 +412,18 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
        onUseDirectory: (workspaceId, canonicalPath) => {
          workspaceNextIntent.setResolvedWorkspace(workspaceId, canonicalPath)
          runner.updateWelcomeCard()
+         runOwned(
+           'workspace standing catalog refresh',
+           () => runner.refreshStandingCatalog(runner.effectivePresetId, 'invalidation'),
+           {
+             diag: runner.diag,
+             sessionId: () => runner.currentSessionId,
+             onResult: (outcome) => {
+               if (outcome.kind === 'applied' && outcome.notice !== undefined) notify(outcome.notice, 'error')
+             },
+             onError: (error) => notify(`workspace skill refresh failed: ${safeErrorMessage(error)}`, 'error'),
+           },
+         )
        },
        onAddDirectory: (path, settle) => {
          const token = workspaceNextIntent.beginPathVerification(path)
@@ -429,6 +442,18 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
              workspaceNextIntent.commitVerifiedPath(token, resolved.workspaceId, resolved.path)
              runner.updateWelcomeCard()
              finish({ kind: 'registered', workspaceId: resolved.workspaceId, path: resolved.path })
+             runOwned(
+               'workspace standing catalog refresh',
+               () => runner.refreshStandingCatalog(runner.effectivePresetId, 'invalidation'),
+               {
+                 diag: runner.diag,
+                 sessionId: () => runner.currentSessionId,
+                 onResult: (outcome) => {
+                   if (outcome.kind === 'applied' && outcome.notice !== undefined) notify(outcome.notice, 'error')
+                 },
+                 onError: (error) => notify(`workspace skill refresh failed: ${safeErrorMessage(error)}`, 'error'),
+               },
+             )
            },
            onCancel: () => finish({ kind: 'failed', message: 'Directory verification was superseded.' }),
            onError: (error) => {

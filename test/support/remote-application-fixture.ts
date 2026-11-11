@@ -66,6 +66,7 @@ import Loader from '@deepseek-ai/cordis-plugin-loader'
 import { mountAgentLoopTestDependencies, mountAgentLoopTestHarness } from '@deepseek-ai/dsh-agent-loop-testkit'
 import CommandRuntime from '@deepseek-ai/dsh-commands'
 import AgentPresetRegistry from '@deepseek-ai/dsh-agent-preset-registry'
+import SkillRegistry from '@deepseek-ai/dsh-skill'
 import TypertGatewayService from '@deepseek-ai/dsh-api-gateway'
 import { RemoteAccessService } from '@deepseek-ai/dsh-api-remote-access'
 import JobController from '@deepseek-ai/dsh-api-job-controller'
@@ -457,13 +458,21 @@ export async function createRemoteApplicationHostFixture(
     await ctx.plugin(WorkingDirectory)
     await ctx.plugin(LocalSandboxProvider)
     await ctx.plugin(LocalSubprocessRuntime)
-    // M6-1 F1: the same Host Runtime row owns one-shot shell and completion;
-    await ctx.plugin(piTuiHostRuntime, { sessionId: '' } as never)
-    await ctx.plugin(performanceHost)
+    // The official Host Skills standing authorities the built-in Host Runtime
+    // now injects: the durable Workspace registry (a Host-issued WorkspaceId
+    // must resolve to the Host canonical path) and the official Skills
+    // registry (the standing metadata read). Both mount BEFORE the runtime row
+    // so its explicit injects settle; the fixture provides no skill providers,
+    // so an authoritative empty COMPLETE catalog is the real observation.
     await ctx.plugin(Storage)
     await ctx.plugin(StorageJson, { root: join(workRoot, 'storages') })
     await ctx.plugin(StorageDomain, { backend: 'json' })
     await ctx.plugin(WorkspaceRegistry)
+    await ctx.plugin(SkillRegistry)
+    // M6-1 F1: the same Host Runtime row owns one-shot shell and completion;
+    // M6-1 F6 adds the private Skills standing read and invalidation stream.
+    await ctx.plugin(piTuiHostRuntime, { sessionId: '' } as never)
+    await ctx.plugin(performanceHost)
     // The official `workspace` Remote owner (the `workspace-controller` Host
     // row): an ordinary Remote create names a Host WorkspaceId, so the Host must
     // serve `workspace/create` and `workspace/follow` like production does.

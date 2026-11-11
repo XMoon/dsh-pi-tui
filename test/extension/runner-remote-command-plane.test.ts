@@ -1023,17 +1023,21 @@ test('a REAL Host `/export` claim wins over the same-named TUI built-in', async 
     'the /export line executed through the OFFICIAL Host executor exactly once (the Host claim owns it)')
 })
 
-test('sessionless standing skill: the Remote refresh reports EXPLICIT unavailable and creates NO Session', async (t) => {
+test('sessionless standing skill: a Remote Client without a confirmed Host Workspace reports the selection prompt and creates NO Session', async (t) => {
   const life = testLifecycle(t)
   const fixture = await mountRunner(life, {})
   const before = fixture.host.ctx.sessions.list().length
   submit(fixture, '/reload')
-  await waitFor('the explicit standing-unavailable copy rendered', () =>
-    fixture.vt.getViewport().join('').includes('catalog refresh failed')
-    && fixture.vt.getViewport().join('').includes('no sessionless standing skill catalog'), 15_000)
+  // `/reload` and the startup Host invalidation frame share the ONE coalescing
+  // gate, so either path may carry the applied outcome; the invariant is the
+  // selection notice itself, never a specific interleaving.
+  await waitFor('the explicit standing selection prompt rendered', () =>
+    fixture.vt.getViewport().join('').includes('Select a Host workspace to load skills'), 15_000)
   await settle(150)
   assert.equal(fixture.host.ctx.sessions.list().length, before,
     'the Remote standing refresh creates NO hidden Session')
+  assert.equal(fixture.vt.getViewport().join('').includes('no sessionless standing skill catalog'), false,
+    'the retired unconditional-unsupported copy must not be the sessionless answer any more')
 })
 
 test('L6: Remote /transcript writes the official Host Markdown to a Client-local file (real authenticated route)', async (t) => {

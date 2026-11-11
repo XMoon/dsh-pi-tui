@@ -29,6 +29,7 @@ import type { SessionReader } from '../../runtime/session-reader-port.ts'
 import type { SessionWriter } from '../../runtime/session-writer-port.ts'
 import type { SubagentPort } from '../../runtime/subagent-port.ts'
 import type { RemoteConnectionGenerationSource, RemoteSessionsReadSource } from '../../runtime/remote/session-reader-remote.ts'
+import type { PiTuiSkillsRemotes } from '../../runtime/remote/skill-remote.ts'
 import type { RemoteLlmRemotes, RemoteModelRemotes, RemoteModelSessionsSource } from '../../runtime/remote/model-remote.ts'
 import type { RemotePendingSessionsSource } from '../../runtime/remote/pending-input-reader-remote.ts'
 import type { RemoteWriteSessionsSource } from '../../runtime/remote/session-writer-remote.ts'
@@ -155,6 +156,8 @@ export interface RemoteM3ARuntimeSource {
     readonly llm: RemoteLlmRemotes & RemoteConfigRuntimeSource['remote']['llm']
     readonly agentPresets: RemotePresetRemotes
     readonly skills: RemoteSkillRemotes
+    /** The private Host Workspace standing catalog and invalidation stream. */
+    readonly piTuiSkills: PiTuiSkillsRemotes
     /** The PRIVATE pi-tui Host augmentation namespace (TS8-HF1): the Session
      *  `@` source. The official `fileReferences` namespace stays mounted but is
      *  consumed only by the Host-side bare-query delegation. */
@@ -258,7 +261,7 @@ export function createRemoteM3ASemantics(
     catalog: {
       models: modelCatalog,
       presets: presetCatalog,
-      skills: new RemoteSkillCatalog(remote.skills, generation),
+      skills: new RemoteSkillCatalog(remote.skills, remote.piTuiSkills, generation),
     },
     hostFile: new RemoteHostFilePort(remote.piTuiFileReferences, generation),
     hostCommand: new RemoteHostCommandPort(remote.commands),

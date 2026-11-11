@@ -12,6 +12,7 @@
  * the private `piTuiTerminalProgress` Host service
  * the private `piTuiWebAccess` Host service (official Web frontend toggle)
  * the private `piTuiHostUserShell` Host service (one-shot Shell and completion)
+ * the private `piTuiSkills` Host service (standing metadata and invalidation)
  * ```
  *
  * The row publishes the data-free `piTuiHostReady` gate only after the
@@ -31,6 +32,7 @@ import { PI_TUI_FILE_REFERENCES_NAMESPACE } from '../../runtime/remote/pi-tui-fi
 import { PI_TUI_TERMINAL_PROGRESS_NAMESPACE } from '../../runtime/remote/pi-tui-terminal-progress-contract.ts'
 import { PI_TUI_WEB_ACCESS_NAMESPACE } from '../../runtime/remote/pi-tui-web-access-contract.ts'
 import { PI_TUI_HOST_USER_SHELL_NAMESPACE } from '../../runtime/remote/pi-tui-host-user-shell-contract.ts'
+import { PI_TUI_SKILLS_NAMESPACE } from '../../runtime/remote/pi-tui-skills-contract.ts'
 import { createHostShellPathCompletionBridge } from '../../runtime/remote/pi-tui-host-user-shell-host-bridge.ts'
 import { mergeCause } from '../remote/dispose-cause.ts'
 import {
@@ -44,6 +46,7 @@ import {
 } from './features/terminal-progress.ts'
 import { PiTuiWebAccessHostService } from './features/web-access.ts'
 import { PiTuiHostUserShellService } from './features/host-user-shell.ts'
+import { PiTuiSkillsHostService } from './features/skills.ts'
 
 /** Stable Cordis plugin name (the Loader row id in the Host-only overlay). */
 export const name = 'pi-tui-host-runtime'
@@ -59,7 +62,10 @@ export const Config = TuiConfig
  * published row contract does not change: this row IS a Loader row, and a Host
  * without a Loader fails closed (`unavailable`) instead of pending forever.
  */
-export const inject = ['typert', 'agents', 'fileReferences', 'workingDirectory', 'sessions', 'sandboxPolicy', 'sandbox', 'subprocess']
+export const inject = [
+  'typert', 'agents', 'fileReferences', 'workingDirectory', 'sessions',
+  'sandboxPolicy', 'sandbox', 'subprocess', 'workspaceRegistry', 'skills', 'agentPresets',
+]
 
 /** Data-free readiness gate published after the whole built-in runtime is live. */
 export const PI_TUI_HOST_READY_SERVICE = 'piTuiHostReady'
@@ -162,10 +168,16 @@ export async function apply(ctx: Context, config: TuiConfigValue): Promise<void>
     })
     fibers.push(hostUserShellFiber)
     await hostUserShellFiber
+    const skillsFiber = ctx.inject(PiTuiSkillsHostService.inject, pluginCtx => {
+      new PiTuiSkillsHostService(pluginCtx)
+    })
+    fibers.push(skillsFiber)
+    await skillsFiber
     assertPrivateBinding(ctx, 'piTuiFileReferences', PI_TUI_FILE_REFERENCES_NAMESPACE)
     assertPrivateBinding(ctx, 'piTuiTerminalProgress', PI_TUI_TERMINAL_PROGRESS_NAMESPACE)
     assertPrivateBinding(ctx, 'piTuiWebAccess', PI_TUI_WEB_ACCESS_NAMESPACE)
     assertPrivateBinding(ctx, 'piTuiHostUserShell', PI_TUI_HOST_USER_SHELL_NAMESPACE)
+    assertPrivateBinding(ctx, 'piTuiSkills', PI_TUI_SKILLS_NAMESPACE)
     ctx.provide(PI_TUI_HOST_READY_SERVICE, {})
   } catch (error) {
     const cleanupErrors: unknown[] = []

@@ -440,6 +440,9 @@ const REMOTE_BRANCH_SUBSCRIPTIONS: ReadonlyArray<readonly [string, string]> = [
   ['session/event', 'src/app/host/features/terminal-progress.ts'],
   ['agent/status', 'src/app/host/features/terminal-progress.ts'],
   ['agent/disposed', 'src/app/host/features/terminal-progress.ts'],
+  // M6-1 F6: the Host Skills row observes the official registry invalidation
+  // event and forwards it as the private stream's pending bit.
+  ['skills/change', 'src/app/host/features/skills.ts'],
 ]
 
 /** Dynamic (non-literal event) `ctx.on` bridges: the Direct config port only. */
