@@ -1761,6 +1761,17 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
           })
           return
         }
+        // A selection that settles after its OWN captured token expired or
+        // after another Session appeared belongs to nobody: classify it as
+        // superseded and never rewrite the newer target, report it as the
+        // current failure or open the recovery chooser. A late Host refusal
+        // must not overwrite a newer user choice.
+        if (!workspaceIntent.isCurrent() || core.owner() !== undefined) {
+          deps.diag.warn('first session workspace selection superseded', {
+            settlement: 'superseded',
+          })
+          throw new WorkspaceSelectionError('superseded', 'workspace selection changed before first session creation')
+        }
         if (error instanceof WorkspaceSelectionError && error.kind === 'superseded') {
           deps.diag.warn('first session workspace selection superseded', {
             settlement: error.kind,

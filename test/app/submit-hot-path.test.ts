@@ -626,7 +626,7 @@ async function mountRunner(
   harness: ReturnType<typeof makeHarness>,
   startup: { sessionId?: string },
   config: Record<string, unknown> = {},
-  options: { readonly workspaceRegistry?: FakeHostWorkspaceRegistry } = {},
+  options: { readonly workspaceRegistry?: FakeHostWorkspaceRegistry; readonly omitWorkspaceRegistry?: boolean } = {},
 ): Promise<{ dispose: () => Promise<void>; app: TuiApp; configRefs: Record<string, unknown>; workspaceRegistry: FakeHostWorkspaceRegistry }> {
   ctx.provide('appExit', () => {})
   // The startup service is normally provided here; an extension-hosting
@@ -640,8 +640,11 @@ async function mountRunner(
   // its persisted immutable header directory through the official query seam.
   ctx.provide('sessionQuery', harness.sessionQuery as never)
   ctx.provide('agents', harness.agents as never)
-  // WS-2: the official Host Workspace registry the Direct lifecycle pre-selects through.
-  const workspaceRegistry = provideFakeHostWorkspaceRegistry(ctx, options.workspaceRegistry)
+  // WS-2: the official Host Workspace registry the Direct lifecycle pre-selects
+  // through. A case may deliberately omit the service to exercise the Direct
+  // adapter's REAL `unavailable` classification, never a hand-built error.
+  const workspaceRegistry = options.workspaceRegistry ?? createFakeHostWorkspaceRegistry().registry
+  if (options.omitWorkspaceRegistry !== true) provideFakeHostWorkspaceRegistry(ctx, workspaceRegistry)
   ctx.provide('sessions', harness.sessions as never)
   ctx.provide('agentDefaultModel', harness.defaultModel as never)
   ctx.provide('commands', harness.commands as never)
@@ -1360,6 +1363,9 @@ async function bootCommandHarness(
     /** The official Host Workspace registry stand-in, when a test must
      *  control the REAL pre-gate `resolveWorkspace` await. */
     workspaceRegistry?: Parameters<typeof provideFakeHostWorkspaceRegistry>[1]
+    /** Deliberately leave the Host Workspace registry service UNSET: the real
+     *  Direct adapter then classifies the selection as `unavailable`. */
+    omitWorkspaceRegistry?: boolean
     /** Extension command contributions to mount (owner metadata + the
      * plugin's own commands-service registration, like a real plugin). */
     extensionCommands?: readonly {
@@ -1619,7 +1625,7 @@ async function bootCommandHarness(
   const mounted = await mountRunner(context, home, harness,
     options.deferredStart === true ? {} : { sessionId: 'command-session' },
     { busyEnter: options.busyEnter },
-    { workspaceRegistry: options.workspaceRegistry })
+    { workspaceRegistry: options.workspaceRegistry, omitWorkspaceRegistry: options.omitWorkspaceRegistry })
   bindLiveConfig(mounted.configRefs)
   harness.host.status = options.status
   return {
@@ -5665,6 +5671,254 @@ test('a refused first Host path restores the draft before opening the same Brows
   assert.ok(afterHome.includes(visiblePathTail), `the Home answer never replaces the refused path:\n${afterHome}`)
   assert.equal(mounted.app.getDraft(), 'preserve this first prompt', 'the Home answer never touches the restored draft')
 })
+test('a refused first Host path restores an attachment-bearing draft without replaying or dropping it', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-pi-tui-first-attachment-recovery-')
+  const path = join(root, 'shot.png')
+  await writeFile(path, pngHeader(5, 5))
+  const home = life.tempDir('dsh-pi-tui-first-attachment-home-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const base = createFakeHostWorkspaceRegistry()
+  const registry = base.registry
+  const baseCreate = registry.create
+  let createCalls = 0
+  registry.create = async (proposal: string) => {
+    createCalls += 1
+    if (createCalls <= 2) throw new Error('controlled Host path refusal')
+    return await baseCreate(proposal)
+  }
+  const { harness, mounted, vt, imageSaves } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    deferredStart: true,
+    attachments: true,
+    virtualTerminal: true,
+    workspaceRegistry: registry,
+  })
+  assert.ok(vt, 'the case drives a virtual terminal')
+  await waitForRenderView(vt)
+  assert.equal(await drainUntil(() => vt.getViewport().join('\n').includes('Host directory unavailable'), 10_000), true,
+    'the mount preflight states the Host refusal on the Welcome')
+  const staged = await stageAttachmentDraft(harness, mounted, path)
+  assert.match(staged, /\[image #1/, 'the real intake staged one image placeholder')
+  const text = `preserve this first prompt ${staged.trim()}`
+  mounted.app.setDraft(text)
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  assert.equal(await drainUntil(() => vt.getViewport().join('\n').includes('Host directory:'), 10_000), true,
+    'the refused first create opens the same inline Host editor after the restore')
+  await waitForRenderView(vt)
+  assert.equal(mounted.app.getDraft(), text, 'the exact attachment-bearing draft is restored verbatim')
+  assert.deepEqual(imageSaves, [], 'a refused first create uploads nothing')
+  assert.deepEqual(harness.createdSessionIds, [], 'the refusal dispatched no Session create')
+  assert.equal(harness.host.followedUp.length + harness.host.steered.length, 0,
+    'the refused attachment-bearing prompt is never replayed automatically')
+})
+
+test('a refused first Host path verifies through the same inline editor and only a second Enter creates the Session', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-first-path-verify-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(100, 24)
+  const restoreTerminal = installVirtualProcessTerminal(vt)
+  life.defer(restoreTerminal)
+  const context = new Context()
+  life.defer(() => disposeContext(context))
+  const harness = makeHarness(home)
+  const base = createFakeHostWorkspaceRegistry()
+  const registry = base.registry
+  const baseCreate = registry.create
+  let createCalls = 0
+  registry.create = async (proposal: string) => {
+    createCalls += 1
+    // The mount preflight and the refused first submit both see the refusal;
+    // the explicit Verify below is the user's corrected retry.
+    if (createCalls <= 2) throw new Error('controlled Host path refusal')
+    return await baseCreate(proposal)
+  }
+  const mounted = await mountRunner(context, home, harness, {}, {}, { workspaceRegistry: registry })
+  await waitForRenderView(vt)
+  assert.ok(vt.getViewport().join('\n').includes('Host directory unavailable'),
+    'the mount preflight states the Host refusal on the Welcome')
+  const originalOpen = TuiApp.prototype.openSessionWorkspace
+  let opens = 0
+  TuiApp.prototype.openSessionWorkspace = function (this: TuiApp, options) {
+    opens += 1
+    return originalOpen.call(this, options)
+  }
+  try {
+    const text = 'a recovered first prompt'
+    mounted.app.setDraft(text)
+    ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+    assert.equal(await drainUntil(() => opens === 1, 10_000), true,
+      'the refused first create opens the ONE inline recovery Browser')
+    await waitForRenderView(vt)
+    assert.ok(vt.getViewport().join('\n').includes('Host directory:'), 'the inline Host editor owns the keyboard')
+    assert.equal(mounted.app.getDraft(), text, 'the exact draft is restored before the editor opens')
+    assert.deepEqual(harness.createdSessionIds, [], 'no Session exists before the explicit Verify')
+    assert.equal(harness.host.followedUp.length, 0, 'the refused prompt was not delivered')
+
+    // Enter verifies the prefilled RAW Host path through the existing ONE
+    // resolve; success returns to the Welcome and never creates a Session.
+    vt.sendInput('\r')
+    assert.equal(await drainUntil(() => createCalls === 3, 10_000), true,
+      'Enter verifies the prefilled raw Host path through the ONE existing resolve')
+    assert.equal(await drainUntil(() => !vt.getViewport().join('\n').includes('Sessions'), 10_000), true,
+      'a successful Verify returns to the Welcome')
+    assert.equal(mounted.app.getDraft(), text, 'the draft survives the Verify return')
+    assert.deepEqual(harness.createdSessionIds, [], 'Verify only registers the Host Workspace')
+    assert.equal(harness.host.followedUp.length, 0, 'Verify never replays the first prompt')
+
+    // The user's second deliberate Enter is the ONLY legal submit.
+    ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+    assert.equal(await drainUntil(() => harness.createdSessionIds.length === 1 && harness.host.followedUp.length === 1, 15_000), true,
+      'the second Enter creates one Session and delivers one prompt')
+    const delivered = harness.host.followedUp[0] as { content: readonly { type: string; text?: string }[] }
+    assert.equal(delivered.content.filter(block => block.type === 'text' && block.text?.includes(text)).length, 1,
+      'the prompt content reaches the Host exactly once')
+    assert.equal(opens, 1, 'the refusal opened the Browser exactly once')
+  } finally {
+    TuiApp.prototype.openSessionWorkspace = originalOpen
+  }
+})
+
+test('an unavailable first Workspace selection restores the draft and never opens recovery navigation', async (t) => {
+  const { harness, mounted, vt } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    deferredStart: true,
+    virtualTerminal: true,
+    omitWorkspaceRegistry: true,
+  })
+  assert.ok(vt, 'the case drives a virtual terminal')
+  await waitForRenderView(vt)
+  const originalOpen = TuiApp.prototype.openSessionWorkspace
+  let opens = 0
+  TuiApp.prototype.openSessionWorkspace = function (this: TuiApp, options) {
+    opens += 1
+    return originalOpen.call(this, options)
+  }
+  try {
+    const text = 'keep this draft while the Host is unavailable'
+    mounted.app.setDraft(text)
+    ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+    assert.equal(await drainUntil(() => mounted.app.notifyTextForTest().includes('Workspace registry is unavailable'), 10_000), true,
+      'the real Direct adapter reports the unavailable Host')
+    await waitForRenderView(vt)
+    assert.equal(opens, 0, 'an unavailable Host never opens recovery navigation')
+    assert.ok(!vt.getViewport().join('\n').includes('Sessions ·'),
+      'the disconnected Host is never presented as a directory error')
+    assert.equal(mounted.app.getDraft(), text, 'the draft is restored')
+    assert.deepEqual(harness.createdSessionIds, [], 'no Session is created')
+    assert.equal(harness.host.followedUp.length + harness.host.steered.length, 0, 'nothing is replayed')
+  } finally {
+    TuiApp.prototype.openSessionWorkspace = originalOpen
+  }
+})
+
+test('a late first-submit refusal after the next-create intent changed restores the draft without recovery navigation', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-first-stale-refusal-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const base = createFakeHostWorkspaceRegistry()
+  const registry = base.registry
+  const baseCreate = registry.create
+  let createCalls = 0
+  let parkedEntered = false
+  let releaseParked!: () => void
+  const parkedGate = new Promise<void>((resolve) => { releaseParked = resolve })
+  registry.create = async (proposal: string) => {
+    createCalls += 1
+    if (createCalls === 1) throw new Error('controlled preflight refusal')
+    if (createCalls === 2) {
+      parkedEntered = true
+      await parkedGate
+      throw new Error('controlled stale refusal')
+    }
+    return await baseCreate(proposal)
+  }
+  const { harness, mounted, vt } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    deferredStart: true,
+    virtualTerminal: true,
+    workspaceRegistry: registry,
+  })
+  assert.ok(vt, 'the case drives a virtual terminal')
+  await waitForRenderView(vt)
+  assert.equal(await drainUntil(() => vt.getViewport().join('\n').includes('Host directory unavailable'), 10_000), true,
+    'the preflight refusal reaches the Welcome')
+  const sessionsHandler = (harness.commands as {
+    handler(name: string): ((...args: never[]) => unknown) | undefined
+  }).handler('sessions')
+  assert.ok(sessionsHandler, 'the runner registers the /sessions command')
+  const originalOpen = TuiApp.prototype.openSessionWorkspace
+  let opens = 0
+  TuiApp.prototype.openSessionWorkspace = function (this: TuiApp, options) {
+    opens += 1
+    return originalOpen.call(this, options)
+  }
+  t.after(() => releaseParked())
+  try {
+    const text = 'stale first prompt'
+    mounted.app.setDraft(text)
+    ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+    assert.equal(await drainUntil(() => parkedEntered, 10_000), true,
+      'the first submit is parked in its real Workspace pre-selection')
+    // The user opens the read-only Browser and registers another Host
+    // Workspace: the next-create intent changes while the stalled refusal is
+    // still in flight. No Session create and no transition barrier is taken.
+    const browser = (sessionsHandler as (invocation: unknown) => Promise<unknown>)({
+      commandId: CommandId('cmd-stale-refusal'),
+      agent: undefined,
+      rawInput: '',
+      signal: new AbortController().signal,
+    })
+    await browser
+    await waitForRenderView(vt)
+    assert.ok(vt.getViewport().join('\n').includes('Add directory'), 'the Browser offers the Host registration row')
+    vt.sendInput('\x1b[H')
+    await waitForRenderView(vt)
+    vt.sendInput('\r')
+    await waitForRenderView(vt)
+    vt.sendInput('/host/recovered')
+    await waitForRenderView(vt)
+    vt.sendInput('\r')
+    assert.equal(await drainUntil(() => createCalls === 3, 10_000), true,
+      'the Browser Add resolves the new Host path')
+    releaseParked()
+    assert.equal(await drainUntil(() => mounted.app.getDraft().includes(text), 10_000), true,
+      'the late refusal restores the original draft')
+    assert.equal(await drainUntil(() => mounted.app.notifyTextForTest()
+      .includes('workspace selection changed before first session creation'), 10_000), true,
+    'the late refusal is classified superseded by the original token')
+    await waitForRenderView(vt)
+    assert.equal(opens, 1, 'only the read-only Browser opened; the stale refusal opens no second one')
+    assert.deepEqual(harness.createdSessionIds, [], 'the stale refusal creates no Session')
+    assert.equal(harness.host.followedUp.length + harness.host.steered.length, 0,
+      'the stale first prompt is never delivered')
+    const file = historyFilePath(home, home)
+    assert.equal(existsSync(file) && loadHistoryRecords(file).some(row => row.content.includes(text)), false,
+      'the stale refusal persists no history row')
+  } finally {
+    TuiApp.prototype.openSessionWorkspace = originalOpen
+  }
+})
+
 test('observational: the CWD-level skip spans Sessions while the recall window keeps every accepted input', async (t) => {
   // DEFERRED SEMANTICS (docs/architecture/input-history.md): the persistence dedupe anchor
   // (`lastHistoryContent`) is the CWD file's actual last row, NOT a per-Session

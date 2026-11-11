@@ -22,6 +22,10 @@ import { runNonDestructiveClientLifecycle } from '../smoke/split-process/non-des
 import { runReadAuthority } from '../smoke/split-process/read-authority.mjs'
 import { runHostDirectoryBrowse } from '../smoke/split-process/host-directory-browse.mjs'
 import { runHostDirectoryInlineChooser } from '../smoke/split-process/host-directory-inline-chooser.mjs'
+import {
+  runWorkspaceFirstSubmitFailureRecovery,
+  runWorkspaceNewFailureRecovery,
+} from '../smoke/split-process/workspace-failure-recovery.mjs'
 import { runInteractionNavigationFirst } from '../smoke/split-process/interaction-admission.mjs'
 import { runSessionWorkspaceActivity } from '../smoke/split-process/session-workspace-activity.mjs'
 import { runSessionWorkspaceEditorEntry } from '../smoke/split-process/session-workspace-editor-entry.mjs'
@@ -159,6 +163,18 @@ const CASE_REGISTRY = Object.freeze([
     id: 'interaction.host-directory-inline-chooser',
     title: 'a real Sessionless Split Client completes a Host-only directory through the inline chooser and registers it through the ONE existing Workspace resolve without creating a Session',
     run: runHostDirectoryInlineChooser,
+  }),
+  Object.freeze({
+    suite: 'interaction',
+    id: 'interaction.workspace-new-failure-recovery',
+    title: 'a real refused /new opens the full Workspace tree, Add registers only the Host directory and the explicit Folder New commits exactly one Session',
+    run: runWorkspaceNewFailureRecovery,
+  }),
+  Object.freeze({
+    suite: 'interaction',
+    id: 'interaction.workspace-first-submit-failure-recovery',
+    title: 'a real refused first submit restores its attachment-free draft, Verify registers only the Workspace and a second Enter writes the marker exactly once',
+    run: runWorkspaceFirstSubmitFailureRecovery,
   }),
   Object.freeze({
     suite: 'recovery',

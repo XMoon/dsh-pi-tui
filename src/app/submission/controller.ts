@@ -26,7 +26,7 @@ import { runOwned } from '../../runtime/process/tasks.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import { ImageInputError } from '../../domain/media/errors.ts'
 import type { ImageAttachmentRefLike } from '../../domain/media/types.ts'
-import { WorkspaceSelectionError } from '../../runtime/session-lifecycle-port.ts'
+import { recoverableWorkspaceSelection } from '../session/workspace-selection-recovery.ts'
 import { runReservedSubmit } from './submit-flow.ts'
 
 import type { DraftImageStore } from '../../client/media/image/draft-store.ts'
@@ -1053,6 +1053,10 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
           && deps.extensions.findContribution(parsedAtSubmit.name) !== undefined))
     const tag = `${text.slice(0, 14)}:${submitRequestId.slice(0, 8)}`
     const submitTurn = takeSubmitTurn(!localControlAtSubmit)
+    // The ONE operation-local outcome of this gesture's failure restore. It is
+    // an admission fact for the recovery navigation below — never a second
+    // draft, a saved copy or a replay queue.
+    let restoredDraft: 'merged-verbatim' | 'merged' | 'dropped' | undefined
     runOwned('submit', () => runReservedSubmit({
       reserve: (t) => {
         try {
@@ -1422,7 +1426,9 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       // same two-fact policy decides (a same-owner invalidation and every
       // retaining renderer still merge). The lifetime fence precedes it
       // (round 11): a cancelled or disposed gesture restores nothing.
-      restore: (t) => { if (lifetimeOwnsSurface()) restoreStaleDraft(t, submittedSubject) },
+      restore: (t) => {
+        if (lifetimeOwnsSurface()) restoredDraft = restoreStaleDraft(t, submittedSubject)
+      },
     }, text), {
       diag: deps.diag,
       sessionId: () => deps.liveAgent()?.session.id,
@@ -1432,7 +1438,16 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
         settleLocalSubmission(submitRequestId)
         settleLocalSubmitAck('failure', { token: submitAckToken, terminal: true })
         notifySubmissionFailure(error)
-        if (error instanceof WorkspaceSelectionError && error.kind !== 'superseded') {
+        const recovery = recoverableWorkspaceSelection(error)
+        const restored = restoredDraft
+        if (recovery.kind === 'select-workspace'
+          && (restored === 'merged-verbatim' || restored === 'merged')
+          && lifetimeOwnsSurface()
+          && deps.liveAgent() === undefined) {
+          // Only an authoritative PRE-CREATE refusal whose exact draft really
+          // landed back in this live sessionless editor may open the existing
+          // inline Host chooser. A dropped/absent restore, a replaced surface,
+          // an unavailable Host or a post-create failure never navigates.
           deps.surface.openWorkspaceChooserAfterRestore?.()
         }
       },

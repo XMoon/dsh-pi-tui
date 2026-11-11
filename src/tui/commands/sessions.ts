@@ -27,6 +27,7 @@ import type { SessionSwitchOutcome } from '../../app/session/runtime.ts'
 import { cancellationError, isCancellation, runOwned } from '../../runtime/process/tasks.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import { createWorkspaceNextIntentOwner } from '../../app/session/workspace-next-intent.ts'
+import { recoverableWorkspaceSelection } from '../../app/session/workspace-selection-recovery.ts'
 import { LifecycleError, WorkspaceSelectionError, type ResolvedWorkspaceSelection, type WorkspaceSelectionIntent } from '../../runtime/session-lifecycle-port.ts'
 import {
   findSessionMatch,
@@ -430,7 +431,11 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
            diag: runner.diag,
            sessionId: () => runner.currentSessionId,
            isCancellation: () => runner.signal.aborted,
-           onResult: (result) => {
+           onResult: (settlement) => {
+             // The Folder row never consumes the recovery settlement: it keeps
+             // this Browser, reports the refusal here and releases its pending
+             // operation. A second Browser would be a second screen owner.
+             const result = settlement.result
              if (committed) {
                // The create really committed; a post-commit cleanup error keeps
                // its truthful error notice but never fabricates a pre-commit
@@ -850,15 +855,32 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
    */
   let freshSessionInFlight = false
 
+  /**
+   * The internal `/new` settlement. Every ordinary branch keeps its exact
+   * `CommandResult`; a proven pre-create Host Workspace refusal additionally
+   * carries the typed failure and the captured subject, so ONLY the `/new`
+   * entry can decide whether that refusal may open recovery navigation.
+   * Folder `New session` consumes the same settlement but never navigates.
+   */
+  type NewSessionSettlement =
+    | { readonly kind: 'done'; readonly result: CommandResult }
+    | {
+        readonly kind: 'workspace-refused'
+        readonly result: CommandResult
+        readonly failure: WorkspaceSelectionError
+        readonly subject: SessionScope
+      }
+
   const startNewSession = async (options: {
     readonly workspaceIntent?: WorkspaceSelectionIntent
     readonly source: 'command' | 'folder'
     /** Called ONLY after `transitionTo` confirmed a real commit. It observes
      *  the one genuine commit checkpoint without changing the transaction. */
     readonly onCommitted?: () => void
-  }): Promise<CommandResult> => {
+  }): Promise<NewSessionSettlement> => {
+        const done = (result: CommandResult): NewSessionSettlement => ({ kind: 'done', result })
         if (freshSessionInFlight) {
-          return { kind: 'error', text: 'a fresh session is already starting' }
+          return done({ kind: 'error', text: 'a fresh session is already starting' })
         }
         freshSessionInFlight = true
         // The ORIGINAL session generation/navigation identity, captured
@@ -920,18 +942,30 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
             // which stays the documented silent/no-ownership path below.
             if (isCancellation(error)) throw error
             if (!runner.isSessionScopeCurrent(navigation.scope)
+              || (nextIntentCapture !== undefined && !nextIntentCapture.isCurrent())
               || (error instanceof WorkspaceSelectionError && error.kind === 'superseded')) {
               // A stale/superseded selection owns nothing: silent, exactly like
               // a superseded create. Nothing was stopped, flushed or created.
-              return { kind: 'success' }
+              return done({ kind: 'success' })
             }
-            return { kind: 'error', text: `fresh session creation failed: ${safeErrorMessage(error)}` }
+            if (error instanceof WorkspaceSelectionError
+              && recoverableWorkspaceSelection(error).kind === 'select-workspace') {
+              // The Host proved a PRE-CREATE refusal the user can fix by
+              // choosing another Workspace. Only `registerNew` may act on it.
+              return {
+                kind: 'workspace-refused',
+                result: { kind: 'error', text: `fresh session creation failed: ${safeErrorMessage(error)}` },
+                failure: error,
+                subject: navigation.scope,
+              }
+            }
+            return done({ kind: 'error', text: `fresh session creation failed: ${safeErrorMessage(error)}` })
           }
           if (nextIntentCapture !== undefined && !nextIntentCapture.isCurrent()) {
-            return { kind: 'error', text: 'workspace selection changed before fresh session creation' }
+            return done({ kind: 'error', text: 'workspace selection changed before fresh session creation' })
           }
-          if (!runner.isSessionScopeCurrent(navigation.scope)) return { kind: 'success' }
-          return await runner.withSessionTransition(async () => {
+          if (!runner.isSessionScopeCurrent(navigation.scope)) return done({ kind: 'success' })
+          return done(await runner.withSessionTransition(async () => {
             // The unified transaction: the old session is flushed BEFORE the
             // fresh session is created, the commit is synchronous, and a failure
             // anywhere before the create leaves the current session untouched
@@ -1026,7 +1060,7 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
             runner.imageStore.clearUnpinned()
             runner.fileStore?.clearUnpinned()
             return { kind: 'success', text: 'started a fresh session' }
-          }, navigation)
+          }, navigation))
         } catch (error) {
           if (error instanceof SessionNavigationStopError) {
             // A stale capture is a locally SUPERSEDED navigation (another
@@ -1034,24 +1068,52 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
             // owns nothing — silent, exactly like the superseded create path.
             // A refused/unproven stop aborts BEFORE any child work; the message
             // already states whether the old Turn may have been stopped.
-            if (error.settlement === 'stale') return { kind: 'success' }
-            return { kind: 'error', text: `fresh session creation failed: ${error.message}` }
+            if (error.settlement === 'stale') return done({ kind: 'success' })
+            return done({ kind: 'error', text: `fresh session creation failed: ${error.message}` })
           }
           if (isCancellation(error) || runner.signal.aborted) throw error
           // The transition can THROW after the quiesce (a synchronous commit
           // seam): keep the phase fact in the user-visible failure instead of
           // letting the generic command path drop it.
-          return { kind: 'error', text: `${safeErrorMessage(error)}${stopNote()}` }
+          return done({ kind: 'error', text: `${safeErrorMessage(error)}${stopNote()}` })
         } finally {
           freshSessionInFlight = false
         }
+  }
+
+  /**
+   * The ONLY `/new` auto-recovery entry. A proven pre-create Host refusal may
+   * open the SAME full Workspace Browser read-only; the user must then choose a
+   * Folder and explicitly activate its `New session` (no create is dispatched
+   * here). The single-flight is already released by `startNewSession`'s own
+   * `finally` before this opens anything.
+   */
+  const runNewCommandWithRecovery = async (): Promise<CommandResult> => {
+    const settled = await startNewSession({ source: 'command' })
+    if (settled.kind === 'done') return settled.result
+    // A refusal whose captured subject is no longer current owns nothing: no
+    // error card and no Browser for a Session the user already left.
+    if (!runner.isSessionScopeCurrent(settled.subject) || runner.signal.aborted) return { kind: 'success' }
+    if (recoverableWorkspaceSelection(settled.failure).kind !== 'select-workspace') return settled.result
+    // A native renderer without a Session Browser presenter has no fallback:
+    // the original error text stays with the command's existing owner.
+    const piTuiMounted = (app as TuiApp | undefined) !== undefined
+    if (!piTuiMounted && runner.sessionBrowserPresentation === undefined) return settled.result
+    // This is the ONLY /new auto-Browse entry. No `addDirectory` and no
+    // initial-directory options: the sessionless chooser must keep its Folder
+    // click meaning, and the recovery is always the full tree.
+    const opened = await openSessionsBody({ rawInput: '' }, 'all')
+    if (opened.kind === 'error') return opened
+    const message = settled.result.kind === 'error' ? settled.result.text : undefined
+    if (message !== undefined && message !== '') notify(message, 'error')
+    return { kind: 'success' }
   }
 
   const registerNew = (): void => {
     registerOne({
       name: 'new',
       description: 'Start a fresh session in this workspace',
-      handler: () => startNewSession({ source: 'command' }),
+      handler: () => runNewCommandWithRecovery(),
     })
   }
 
