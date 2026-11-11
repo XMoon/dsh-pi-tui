@@ -976,7 +976,10 @@ function hostContext(rows: FixtureRow[], overrides: Record<string, unknown> = {}
     records: new Map(),
   })
   services.set('piTuiWebAccess', typertService('piTuiWebAccess', PI_TUI_WEB_ACCESS_NAMESPACE))
-  services.set('piTuiSkills', typertService('piTuiSkills', PI_TUI_SKILLS_NAMESPACE))
+  services.set('piTuiSkills', {
+    ...typertService('piTuiSkills', PI_TUI_SKILLS_NAMESPACE),
+    activeSubscriptions: 0,
+  })
   services.set(PI_TUI_HOST_READY_SERVICE, {})
   services.set('piTuiPerformanceReady', {})
   for (const [name, value] of Object.entries(overrides)) services.set(name, value)
@@ -992,6 +995,7 @@ test('the readiness audit passes only when every owner row and binding is real',
   assert.equal(status.phase, 'ready')
   assert.equal(status.sessionOpen, false, 'Host RPC readiness is not an open Client Session')
   assert.equal(status.terminalProgressWatches, 0, 'the Host reports no live terminal-progress watch')
+  assert.equal(status.skillInvalidationWatches, 0, 'the Host reports no live private Skills subscription')
   assert.deepEqual(status.ownerEntries.piTuiHostRuntime, ['split-host-pi-tui-runtime'])
   assert.deepEqual(status.ownerEntries.performance, ['pi-tui-performance-host'])
   assert.deepEqual(status.ownerEntries.visualTools, ['pi-tui-visual-tools'])

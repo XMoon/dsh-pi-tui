@@ -24,12 +24,12 @@
  */
 
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 
 import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
-import { alive, lastSurfaceStatus, waitForSurfaceStatus } from '../../lib/split-smoke-processes.mjs'
+import { alive, hostStatus, lastSurfaceStatus, waitForSurfaceStatus } from '../../lib/split-smoke-processes.mjs'
 import { createC1Scene } from './c1-scene.mjs'
 import { createDualSurfaceSceneTools } from './dual-surface-scene.mjs'
 
@@ -126,9 +126,20 @@ async function clearComposer(client, label) {
   throw new SplitSmokeAssertionError(`${label}: the composer never cleared`)
 }
 
+/** Clear the draft WITHOUT Esc (a Busy Esc aborts the running Turn). */
+async function clearComposerBusy(client, label) {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    client.send('\x7f'.repeat(160))
+    await sleep(120)
+    if (composerDraftEmpty(await client.composerText())) return
+  }
+  throw new SplitSmokeAssertionError(`${label}: the composer never cleared (busy-safe)`)
+}
+
 /** Read the real painted completion frame for one typed query. */
-async function completionFrame(client, query, label) {
-  await clearComposer(client, label)
+async function completionFrame(client, query, label, busy = false) {
+  if (busy) await clearComposerBusy(client, label)
+  else await clearComposer(client, label)
   client.send(query)
   await sleep(150)
   return (await client.viewport()).join('\n')
@@ -139,11 +150,11 @@ async function completionFrame(client, query, label) {
  * `absent` needles. The visible anchor makes an unpainted/empty list fail
  * instead of satisfying an absence-only assertion.
  */
-async function waitForPaintedSkills(client, query, { visible, absent = [] }, label, timeoutMs = 120_000) {
+async function waitForPaintedSkills(client, query, { visible, absent = [] }, label, timeoutMs = 120_000, busy = false) {
   const deadline = Date.now() + timeoutMs
   let frame = ''
   while (Date.now() < deadline) {
-    frame = await completionFrame(client, query, label)
+    frame = await completionFrame(client, query, label, busy)
     if (visible.every(needle => frame.includes(needle))
       && absent.every(needle => !frame.includes(needle))) return frame
     await sleep(200)
@@ -182,9 +193,13 @@ export async function runSessionlessSkillsHot(context) {
   writeSkill(w2, 'f6-beta', betaDescription)
   writeSkill(clientLocal, 'f6-alpha', localDescription)
   const sessionsBefore = durableSessionLogs(dshHome)
+  const faultDir = join(root, 'f6-fault')
+  mkdirSync(faultDir, { recursive: true, mode: 0o700 })
 
   try {
-    const { host, ready } = await scene.startC1Host('skills-standing', 'F6 skills')
+    const { host, ready } = await scene.startC1Host('skills-standing', 'F6 skills', {
+      C1_SKILLS_FAULT_DIR: faultDir,
+    })
     const hostFacts = await scene.hostIdentityFacts(host)
     assert(ready.sessionOpen === false, 'F6 the Host ready record already owns a Session')
     const { client: clientA } = await scene.startC1Client('F6 skills A', {}, { cwd: w1 })
@@ -206,6 +221,41 @@ export async function runSessionlessSkillsHot(context) {
       skill: 'f6-alpha',
       painted: true,
     })
+
+    // ── Incomplete Host observation: the same-target last-good catalog stays
+    // (never a blank replacement), then a complete observation recovers. ───
+    const staleDescription = 'F6 ALPHA MUST NOT REPLACE LAST-GOOD WHILE INCOMPLETE'
+    const recoveredDescription = 'F6 ALPHA RECOVERED AFTER THE COMPLETE OBSERVATION'
+    const readsPath = join(faultDir, 'fault-reads.jsonl')
+    const readCount = () => existsSync(readsPath)
+      ? readFileSync(readsPath, 'utf8').split('\n').filter(Boolean).length
+      : 0
+    const waitForFaultRead = async (after, label) => {
+      const deadline = Date.now() + 60_000
+      while (Date.now() < deadline) {
+        if (readCount() > after) return
+        await sleep(100)
+      }
+      throw new SplitSmokeAssertionError(`${label}: the Host never re-read the Skills catalog`)
+    }
+    const readsBeforeIncomplete = readCount()
+    writeFileSync(join(faultDir, 'incomplete'), 'incomplete\n', { mode: 0o600 })
+    writeSkill(w1, 'f6-alpha', staleDescription)
+    await waitForFaultRead(readsBeforeIncomplete, 'F6 the incomplete observation')
+    const incompleteFrame = await completionFrame(clientA, '/f6-alpha', 'F6 A incomplete last-good')
+    assert(incompleteFrame.includes(alphaDescription),
+      `F6 the incomplete observation replaced the last-good catalog:\n${incompleteFrame}`)
+    assert(!incompleteFrame.includes(staleDescription),
+      `F6 an incomplete observation installed the new catalog instead of last-good:\n${incompleteFrame}`)
+    const readsBeforeRecovery = readCount()
+    rmSync(join(faultDir, 'incomplete'), { force: true })
+    writeSkill(w1, 'f6-alpha', recoveredDescription)
+    await waitForFaultRead(readsBeforeRecovery, 'F6 the complete observation')
+    await waitForPaintedSkills(clientA, '/f6-alpha', {
+      visible: [recoveredDescription],
+      absent: [staleDescription, alphaDescription],
+    }, 'F6 A complete observation recovery')
+    trace('f6-incomplete-recovery', { hostPid: hostFacts.hostPid, lastGoodKept: true, recovered: true })
 
     // ── B: Client-local launch Workspace → real Add/Use of Host W2 ─────────
     await submit(clientB, '/sessions', 'F6 B open the Session Workspace')
@@ -284,8 +334,12 @@ export async function runSessionlessSkillsHot(context) {
       twoClientsIndependent: true,
     })
 
-    // ── B switches W2 → W1 with the SAME preset: the W2 wrapper must not
-    // survive the target transition and W1's remaining skill must install. ──
+    // ── B switches W2 → W1 with the SAME preset: the OLD wrapper must be
+    // visibly revalidating BEFORE the new Workspace catalog installs, then W1
+    // installs and the W2 wrapper disappears. The Host fault provider's
+    // qualification-only 1.5s read delay makes the transition frame
+    // observable without changing production timing. ────────────────────────
+    writeFileSync(join(faultDir, 'slow'), 'slow\n', { mode: 0o600 })
     await submit(clientB, '/sessions', 'F6 B reopen the Session Workspace')
     await clientB.waitForScreen('Workspace: ', 'F6 B Workspace for the switch back', 60_000)
     clientB.send(END)
@@ -296,6 +350,16 @@ export async function runSessionlessSkillsHot(context) {
     await sleep(150)
     clientB.send('\r')
     await clientB.waitForScreenGone('Workspace: ', 'F6 B Use directory W1 closed the workspace', 60_000)
+    const transitionFrame = await completionFrame(clientB, '/f6-beta', 'F6 B transition frame')
+    // The target change clears the OLD scoped suggestions synchronously (and
+    // re-registers the old names as revalidating transition commands that are
+    // NOT advertised as suggestions), so the in-flight frame must carry the
+    // typed query but neither the old Workspace row nor a stale suggestion.
+    assert(transitionFrame.includes('/f6-beta'),
+      `F6 the transition frame did not carry the typed query:\n${transitionFrame}`)
+    assert(!transitionFrame.includes(betaDescription) && !transitionFrame.includes('[skill: revalidating] f6-beta'),
+      `F6 the old W2 scoped suggestion was still advertised during the Workspace transition:\n${transitionFrame}`)
+    rmSync(join(faultDir, 'slow'), { force: true })
     await waitForSurfaceStatus(clientB, sessionless, 'F6 B still sessionless after the W1 switch', 60_000)
     await waitForPaintedSkills(clientB, '/f6-', {
       visible: [addedDescription],
@@ -320,6 +384,19 @@ export async function runSessionlessSkillsHot(context) {
     await clearComposer(clientB, 'F6 Client B before exit')
     await scene.exitC1Client(clientA, 'F6 Client A')
     await scene.exitC1Client(clientB, 'F6 Client B')
+    // Client teardown must release its Host invalidation subscription: the
+    // authoritative Host-side count returns to its baseline (no watcher leak).
+    {
+      const deadline = Date.now() + 60_000
+      let watches = Number.NaN
+      while (Date.now() < deadline) {
+        watches = (await hostStatus(host)).skillInvalidationWatches
+        if (watches === 0) break
+        await sleep(100)
+      }
+      assert(watches === 0,
+        `F6 the Host kept ${String(watches)} Skills invalidation subscription(s) after both Clients exited`)
+    }
     const hostAfter = await scene.hostIdentityFacts(host)
     assert(hostAfter.hostPid === hostFacts.hostPid, 'F6 a Client exit replaced the Host')
     trace('f6-sessionless-close', { hostPid: hostFacts.hostPid, sessionLogs: sessionsBefore })
@@ -343,9 +420,10 @@ export async function runLiveSkillsHot(context) {
   const addedDescription = 'F6 LIVE ADDED MARKER'
   writeSkill(sessionRoot, 'f6-live', liveDescription)
   writeSkill(sessionRoot, 'f6-live-keep', keepDescription)
+  const releaseBarrier = join(workDir, 'f6-live-long-turn.release')
   try {
     const { host, hostBefore, clientA, clientB, sessionY } =
-      await tools.startDualSurfaceScene('skills-live', 'F6 live skills', {}, { openB: false })
+      await tools.startDualSurfaceScene('long-turn', 'F6 live skills', { C1_HOLD_LONG_TURN: releaseBarrier }, { openB: false })
     await tools.resumeSession(clientB, sessionY, 'F6 live Client B')
     await waitForSurfaceStatus(clientA, liveOn(sessionY), 'F6 live Client A', 60_000)
     await waitForSurfaceStatus(clientB, liveOn(sessionY), 'F6 live Client B', 60_000)
@@ -438,6 +516,29 @@ export async function runLiveSkillsHot(context) {
       visible: [keepDescription],
       absent: [updatedDescription],
     }, 'F6 live B hot deletion')
+
+    // ── A running Turn is NOT cancelled or rewritten by the invalidation. ──
+    await submit(clientA, 'hold the turn while the catalog changes', 'F6 live held turn')
+    await clientA.waitForScreen('long-turn started', 'F6 live held turn start', 120_000)
+    await clientB.waitForScreen('long-turn started', 'F6 live B sees the held turn', 120_000)
+    const runningDescription = 'F6 LIVE ANCHOR UPDATED WHILE THE TURN RUNS'
+    writeSkill(sessionRoot, 'f6-live-keep', runningDescription)
+    // Busy-safe queries only: an Esc while the Turn runs would abort it.
+    await waitForPaintedSkills(clientA, '/f6-live-keep', {
+      visible: [runningDescription],
+      absent: [keepDescription],
+    }, 'F6 live A hot update during the running Turn', 120_000, true)
+    await waitForPaintedSkills(clientB, '/f6-live-keep', {
+      visible: [runningDescription],
+      absent: [keepDescription],
+    }, 'F6 live B hot update during the running Turn', 120_000, true)
+    assert((await viewportText(clientA)).includes('long-turn started'),
+      'F6 the running Turn disappeared from A during the catalog invalidation')
+    assert((await viewportText(clientB)).includes('long-turn started'),
+      'F6 the running Turn disappeared from B during the catalog invalidation')
+    writeFileSync(releaseBarrier, 'release\n', { mode: 0o600 })
+    await clientA.waitForScreen('long-turn answer', 'F6 the held Turn settled normally', 120_000)
+    rmSync(releaseBarrier, { force: true })
 
     assert(lastSurfaceStatus(clientA)?.openSessionId === sessionY
       && lastSurfaceStatus(clientB)?.openSessionId === sessionY,
@@ -538,6 +639,21 @@ export async function runSkillsRecovery(context) {
       absent: [afterReconnectDescription],
     }, 'F6 recovery hot update after replacement')
 
+    const replacementStatus = lastSurfaceStatus(replacement)
+    assert(Number.isInteger(replacementStatus?.pid), 'F6 the replacement Client published no business PID')
+    process.kill(replacementStatus.pid, 'SIGKILL')
+    await replacement.waitForExit(60_000)
+    {
+      const deadline = Date.now() + 60_000
+      let watches = Number.NaN
+      while (Date.now() < deadline) {
+        watches = (await hostStatus(host)).skillInvalidationWatches
+        if (watches === 0) break
+        await sleep(100)
+      }
+      assert(watches === 0,
+        `F6 the Host kept ${String(watches)} Skills invalidation subscription(s) after the replacement Client died`)
+    }
     const hostAfter = await scene.hostIdentityFacts(host)
     assert(hostAfter.hostPid === hostFacts.hostPid, 'F6 the Host identity changed across the Client replacement')
     assert(durableSessionLogs(dshHome) === sessionsBefore, 'F6 the recovery journey created a Session')

@@ -55,6 +55,10 @@ const SCENARIOS = new Set([
   // M6 F4: one Host-seeded Session for the real Client /attach -> official
   // receipt -> durable file proof.
   'f4-file',
+  // M6-1 F6: the Skills cases only need the real Host profile; the scripted
+  // model stays inert and the fault provider is gated by C1_SKILLS_FAULT_DIR.
+  'skills-standing',
+  'skills-recovery',
 ])
 
 /** Quote one token for the Host shell used by the harmless fixture commands. */
@@ -446,6 +450,33 @@ export async function apply(ctx) {
   })
 
   ctx.effect(() => ctx.llm.registerAdapter(['c1-qualification'], model))
+
+  // M6-1 F6 qualification fault: an EMPTY official provider that reports an
+  // INCOMPLETE observation while the control file exists. The real filesystem
+  // provider keeps contributing its candidates, so the catalog can prove
+  // "incomplete must not replace the same-target last-good, then a complete
+  // observation recovers".
+  const skillsFaultDir = process.env.C1_SKILLS_FAULT_DIR
+  if (skillsFaultDir !== undefined && skillsFaultDir !== '') {
+    ctx.skills.registerProvider(() => ({
+      name: 'c1-skills-fault',
+      list: async () => {
+        // A qualification-only slow read: it keeps the target-change
+        // revalidating state observable to the smoke without touching any
+        // production timing.
+        if (existsSync(join(skillsFaultDir, 'slow'))) {
+          await new Promise(resolve => setTimeout(resolve, 1_500))
+        }
+        const incomplete = existsSync(join(skillsFaultDir, 'incomplete'))
+        // Causal barrier for the qualification case: one line per real
+        // discovery attempt, carrying the completeness it answered with.
+        appendFileSync(join(skillsFaultDir, 'fault-reads.jsonl'),
+          `${JSON.stringify({ incomplete, time: Date.now() })}\n`, { mode: 0o600 })
+        return incomplete ? { candidates: [], complete: false } : { candidates: [], complete: true }
+      },
+      get: async () => undefined,
+    }))
+  }
 
   if (scenario === 'f1-shell') {
     const sessionId = process.env.C1_F1_SESSION_ID
