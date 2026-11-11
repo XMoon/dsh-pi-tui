@@ -296,7 +296,7 @@ export type { QuestionFlowDraft } from './tui/interaction/question.ts'
 export type { SaveLocationResult } from './tui/interaction/save-location.ts'
 import { createInstalledAutocompleteProvider } from './tui/interaction/autocomplete/installed-provider.ts'
 import { assistantPresentationRevision, PTC_MAX_DEPTH, recentTurnThreshold, textWithAttachmentMarkers, transcriptSearchSourceKey, type AssistantDisplayBlock, subCallDisplayStatus, type PresentedFilePresentation, type TranscriptMessage, type TranscriptSearchMatch, type TurnActivity, type WorkflowMemberView, type WorkflowRunStatus, workflowPhaseKey, workflowReadablePhase } from './transcript.ts'
-import type { UserShellPresentationPlacement } from './app/submission/user-shell.ts'
+import type { UserShellPresentationPlacement, UserShellSubmissionState } from './app/submission/user-shell.ts'
 import { eligibleFinalAssistant } from './domain/transcript/final-assistant.ts'
 import { classifyTranscriptMessage, isSurfacedInteractionTool, isSurfacedContext } from './domain/transcript/semantics.ts'
 import {
@@ -2622,6 +2622,8 @@ interface LocalShellEntry {
   message: TranscriptMessage
   placement: LocalShellPlacement
   acceptedOrder: number
+  /** Client-local Session-submission outcome; absent while pending/succeeded. */
+  submission?: UserShellSubmissionState
 }
 
 /** Canonical Work/cluster membership for one `messages` window, memoized on
@@ -8315,6 +8317,38 @@ export class TuiApp {
       this.localMessages[index] = { ...entry, message }
       this.pruneLocalShellRetention()
     })
+  }
+
+  /** Record (or clear) the Client-local Session-submission outcome of one
+   * retained shell card. Unknown references are inert: the card was already
+   * evicted or removed. */
+  setLocalShellSubmissionState(message: TranscriptMessage, state: UserShellSubmissionState | undefined): boolean {
+    const index = this.localMessages.findIndex(entry => entry.message === message)
+    if (index === -1) return false
+    this.mutateTranscriptDisclosure(() => {
+      const entry = this.localMessages[index]!
+      this.localMessages[index] = state === undefined
+        ? { message: entry.message, placement: entry.placement, acceptedOrder: entry.acceptedOrder }
+        : { ...entry, submission: state }
+      // The submission sidecar is entry state, not part of the message's
+      // semantic snapshot: the width/bake cache cannot see it, so drop THIS
+      // card's cached component explicitly (the same dispose path the window
+      // prune uses) or the next paint would keep the old folded row.
+      const cached = this.messageComponents.get(message)
+      if (cached !== undefined) {
+        this.messageComponents.delete(message)
+        try {
+          cached.component.dispose?.()
+        } catch {
+          // Best effort: a cached component's dispose must not break a paint.
+        }
+      }
+    })
+    return true
+  }
+
+  private localShellSubmissionOf(message: TranscriptMessage): UserShellSubmissionState | undefined {
+    return this.localMessages.find(entry => entry.message === message)?.submission
   }
 
   /** Remove one local card only when its exact current object is still owned. */
@@ -21042,6 +21076,15 @@ export class TuiApp {
       // disclosure) or any REGULAR Focus expanded root — a capped diff in
       // regular mode would have no mouse affordance to open it.
       this.renderToolBody(card, message, fullReveal, editResultView, editDiffs)
+      if (localShell) {
+        const submission = this.localShellSubmissionOf(message)
+        if (submission !== undefined) {
+          const headline = submission.kind === 'uncertain'
+            ? 'Session submission uncertain — do not retry automatically'
+            : 'Session submission not written'
+          card.addChild(new Text(color.textDim(`${headline}\n${sanitizeDisplayText(submission.reason)}`), 0, 0))
+        }
+      }
     } else {
       if (action !== undefined) {
         // Action cards deliberately keep the stable header separate from the
@@ -21494,17 +21537,29 @@ export class TuiApp {
     }
     const body = sanitizeDisplayLog(message.result)
     const summary = this.localShellOutcomeSummary(body, message.status)
+    const submission = this.localShellSubmissionOf(message)
+    const fullMarker = submission === undefined
+      ? ''
+      : submission.kind === 'uncertain' ? 'submission uncertain' : 'not submitted'
+    const shortMarker = submission === undefined
+      ? ''
+      : submission.kind === 'uncertain' ? 'uncertain' : 'not sent'
+    const marker = fullMarker !== '' && visibleWidth(fullMarker) + 3 < contentWidth ? fullMarker : shortMarker
+    const markerText = marker === '' ? '' : ` · ${marker}`
+    const markerWidth = visibleWidth(markerText)
     const hint = this.localShellExpandHint()
-    const wantsHint = hint !== '' && summary !== '' && this.localShellHasHiddenBody(body, summary)
+    const wantsHint = hint !== '' && summary !== '' && (this.localShellHasHiddenBody(body, summary) || submission !== undefined)
     const suffixText = wantsHint ? ` (${hint} to expand)` : ''
     const suffixWidth = suffixText === '' ? 0 : visibleWidth(suffixText)
-    // The hint and the summary share ONE physical row budget. Appending the
-    // hint after a contentWidth-truncated summary would push the row past the
-    // card width, and Text would wrap it into a fourth line.
-    const showHint = suffixText !== '' && suffixWidth + 8 <= contentWidth
-    const summaryBudget = Math.max(1, contentWidth - (showHint ? suffixWidth : 0))
+    // The Host outcome, the persistent submission marker and the hint share
+    // ONE physical row budget. The marker is a safety fact and never yields;
+    // the hint yields first, and the summary gets what remains.
+    const showHint = suffixText !== '' && markerWidth + suffixWidth + 8 <= contentWidth
+    const summaryBudget = Math.max(1, contentWidth - markerWidth - (showHint ? suffixWidth : 0))
     const suffix = showHint ? color.textDim(suffixText) : ''
-    if (summary !== '') rows.push(`${indent}${truncateToWidth(color.textDim(summary), summaryBudget, '…')}${suffix}`)
+    if (summary !== '' || markerText !== '') {
+      rows.push(`${indent}${truncateToWidth(color.textDim(summary), summaryBudget, '…')}${markerText === '' ? '' : color.textDim(markerText)}${suffix}`)
+    }
     card.addChild(new Text(rows.join('\n'), 0, 0))
   }
 

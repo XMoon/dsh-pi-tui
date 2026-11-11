@@ -47,6 +47,13 @@ export interface UserShellPresentationPlacement {
   readonly acceptedOrder: number
 }
 
+/** Client-local Session-submission outcome shown on a retained `!` card. The
+ * Host execution status stays untouched; this only records whether the
+ * finished result actually reached the Session. */
+export type UserShellSubmissionState =
+  | { readonly kind: 'not-submitted'; readonly reason: string }
+  | { readonly kind: 'uncertain'; readonly reason: string }
+
 /** The narrow capabilities the user shell consumes. */
 export interface UserShellDeps<ExactAgent extends InterruptAgentLike> {
   /**
@@ -309,6 +316,7 @@ export function createUserShell<ExactAgent extends InterruptAgentLike>(
         isScopeCurrent: captured => deps.isLiveScopeCurrent(captured),
         terminalAck: shellTerminalAck,
         removeCommittedShellCard: () => { deps.app().removeLocalMessage(card) },
+        onSubmissionFailure: (failure) => { deps.app().setLocalShellSubmissionState(card, failure) },
         notify: (message, kind) => {
           if (deps.isCleanedUp()) return
           deps.notify(message, kind)

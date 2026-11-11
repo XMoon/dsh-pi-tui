@@ -348,6 +348,8 @@ export interface ShellSubmitDeps {
   readonly terminalAck: (reason: string) => void
   /** Remove ONLY this run's local card after the Session write committed. */
   readonly removeCommittedShellCard: () => void
+  /** Keep the card and record WHY its result did not reach the Session. */
+  readonly onSubmissionFailure: (failure: { readonly kind: 'not-submitted' | 'uncertain'; readonly reason: string }) => void
   readonly notify: (message: string, kind: 'info' | 'error') => void
   readonly markDispatch: (sessionId: string) => void
   readonly writerSection: <T>(scope: LiveSessionScope, task: () => Promise<T>) => Promise<T>
@@ -363,9 +365,20 @@ export function submitShell(deps: ShellSubmitDeps): void {
     deps.onSettled()
     return
   }
+  // The writer's own rejection/unknown message is the best durable reason for
+  // the retained card; capture it from the one notify sink that already
+  // reports it (the same text the transient notice paints).
+  let failureReason: string | undefined
+  const reportFailure = (kind: 'not-submitted' | 'uncertain', fallback: string): void => {
+    if (deps.isDisposed()) return
+    deps.onSubmissionFailure({ kind, reason: failureReason ?? fallback })
+  }
   if (!deps.isScopeCurrent(deps.scope)) {
     deps.terminalAck('shell submit skipped after a session switch')
-    deps.notify('the session changed while the command ran — the output was not submitted', 'error')
+    const message = 'the session changed while the command ran — the output was not submitted'
+    deps.notify(message, 'error')
+    failureReason = message
+    reportFailure('not-submitted', message)
     deps.onSettled()
     return
   }
@@ -375,6 +388,7 @@ export function submitShell(deps: ShellSubmitDeps): void {
     scope: deps.scope,
     isScopeCurrent: deps.isScopeCurrent,
     notify: (message, kind) => {
+      if (kind === 'error') failureReason = message
       if (deps.isDisposed()) return
       deps.notify(message, kind)
     },
@@ -395,17 +409,30 @@ export function submitShell(deps: ShellSubmitDeps): void {
     onResult: outcome => {
       deps.onSettled()
       if (deps.isDisposed()) return
-      if (outcome !== 'ok') deps.terminalAck(`shell submit ${outcome}`)
+      if (outcome !== 'ok') {
+        deps.terminalAck(`shell submit ${outcome}`)
+        reportFailure(
+          outcome === 'indeterminate' ? 'uncertain' : 'not-submitted',
+          outcome === 'indeterminate'
+            ? 'shell session write result is indeterminate — do not retry automatically'
+            : 'the shell result was not written to the session',
+        )
+      }
     },
     onCancel: () => {
       deps.onSettled()
-      if (!deps.isDisposed()) deps.terminalAck('shell submit cancelled')
+      if (deps.isDisposed()) return
+      deps.terminalAck('shell submit cancelled')
+      reportFailure('not-submitted', 'the shell submission was cancelled')
     },
     onError: error => {
       deps.onSettled()
       if (deps.isDisposed()) return
       deps.terminalAck('shell submit failure')
-      deps.notify(`shell submit failed: ${safeErrorMessage(error)}`, 'error')
+      const message = `shell submit failed: ${safeErrorMessage(error)}`
+      deps.notify(message, 'error')
+      failureReason = message
+      reportFailure('not-submitted', message)
     },
   })
 }

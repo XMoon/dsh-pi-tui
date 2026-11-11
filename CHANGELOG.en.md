@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Shell cards stay at their submitted conversation position and `!!` history is retained.** `!`/`!!` cards are no longer appended to the conversation tail; they stay at the conversation position where the user submitted them, fold to at most three rows, show no output while running, and expand the retained output with `Ctrl+O`. A settled `!!` card survives until a Session switch, TUI restart, or Alt+K; a committed `!` removes only its own local card instead of clearing other shell history.
+- **Shell cards stay at their submitted conversation position and `!!` history is retained.** `!`/`!!` cards are no longer appended to the conversation tail; they stay at the conversation position where the user submitted them, fold to at most three rows, show no output while running, and expand the retained output with `Ctrl+O`. A settled `!!` card survives until a Session switch, TUI restart, or Alt+K; a committed `!` removes only its own local card instead of clearing other shell history; a rejected or indeterminate Session write keeps the card marked `not submitted` / `submission uncertain`, with the reason available when expanded.
 
 ### Fixed
 
