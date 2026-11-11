@@ -155,6 +155,10 @@ export class QueueManagerController {
   private listState: QueueManagerListState = 'no-session'
   /** Monotonic write token: a superseded settle never overwrites a newer panel. */
   private writeToken = 0
+  /** A Dock preselection that vanished suppresses the browse fallback until the
+   *  user explicitly selects a live row: a stale id must never silently become
+   *  the first row's edit/delete target. */
+  private selectionSuppressed = false
 
   constructor(deps: QueueManagerDeps) {
     this.deps = deps
@@ -216,12 +220,18 @@ export class QueueManagerController {
     this.sessionId = this.deps.captureSessionId()
     this.subject = this.deps.captureSubject()
     const rows = this.readRows()
-    this.selectedId = options.initialItemId !== undefined && rows.some(row => row.id === options.initialItemId)
-      ? options.initialItemId
-      : rows[0]?.id
-    this.lastIndex = Math.max(0, rows.findIndex(row => row.id === this.selectedId))
-    if (options.initialItemId !== undefined && this.selectedId !== options.initialItemId) {
+    const initial = options.initialItemId
+    if (initial !== undefined && !rows.some(row => row.id === initial)) {
+      // The clicked occurrence disappeared before the panel read it. Browse
+      // opens with NO selection: the first/next live row is a different
+      // occurrence and must never inherit the stale click's edit/delete target.
+      this.selectedId = undefined
+      this.lastIndex = 0
+      this.selectionSuppressed = true
       this.notice = { text: 'This message is no longer queued', kind: 'info' }
+    } else {
+      this.selectedId = initial ?? rows[0]?.id
+      this.lastIndex = Math.max(0, rows.findIndex(row => row.id === this.selectedId))
     }
     this.changed()
     return { opened: true }
@@ -264,7 +274,12 @@ export class QueueManagerController {
     }
     const rows = this.readRows()
     if (this.mode === 'browse') {
-      if (this.selectedId === undefined || !rows.some(row => row.id === this.selectedId)) {
+      if (this.selectionSuppressed) {
+        // A lost preselection stays unselected until the user picks a live row
+        // or one of the other browse fallbacks below applies to a REAL
+        // selection that disappeared while the panel was open.
+        this.selectedId = undefined
+      } else if (this.selectedId === undefined || !rows.some(row => row.id === this.selectedId)) {
         if (rows.length > 0) {
           const next = Math.min(Math.max(0, this.lastIndex), rows.length - 1)
           this.selectedId = rows[next]!.id
@@ -304,6 +319,7 @@ export class QueueManagerController {
     }
     this.selectedId = id
     this.lastIndex = index
+    this.selectionSuppressed = false
     this.notice = undefined
     this.changed()
   }
@@ -316,8 +332,14 @@ export class QueueManagerController {
    */
   startEdit(id?: string): void {
     if (this.mode !== 'browse' || this.pending) return
+    const targetId = id ?? this.selectedId
+    if (targetId === undefined) {
+      this.notice = { text: 'Select a queued message', kind: 'info' }
+      this.changed()
+      return
+    }
     const rows = this.readRows()
-    const row = rows.find(candidate => candidate.id === (id ?? this.selectedId))
+    const row = rows.find(candidate => candidate.id === targetId)
     if (row === undefined) {
       this.notice = { text: 'This message is no longer queued', kind: 'info' }
       this.changed()
@@ -331,6 +353,7 @@ export class QueueManagerController {
     }
     this.selectedId = row.id
     this.lastIndex = rows.indexOf(row)
+    this.selectionSuppressed = false
     this.originalText = this.rawTextOf(row.id)
     this.draft = this.originalText
     this.notice = undefined
@@ -427,7 +450,13 @@ export class QueueManagerController {
       } finally {
         endWrite()
       }
-      if (this.writeToken !== token) return
+      if (this.writeToken !== token) {
+        // The panel lease was closed/replaced while the write was in flight.
+        // The Host may still have committed, so the shared projection is
+        // refreshed; the retired panel is never repainted or reopened.
+        if (outcome?.kind === 'committed') this.deps.refreshPendingInput()
+        return
+      }
       this.pending = false
       if (outcome === undefined) return
       if (outcome.kind === 'committed') {
@@ -451,8 +480,14 @@ export class QueueManagerController {
   /** Enter the delete-confirmation page for one occurrence. */
   startDelete(id?: string): void {
     if (this.mode !== 'browse' || this.pending) return
+    const targetId = id ?? this.selectedId
+    if (targetId === undefined) {
+      this.notice = { text: 'Select a queued message', kind: 'info' }
+      this.changed()
+      return
+    }
     const rows = this.readRows()
-    const row = rows.find(candidate => candidate.id === (id ?? this.selectedId))
+    const row = rows.find(candidate => candidate.id === targetId)
     if (row === undefined) {
       this.notice = { text: 'This message is no longer queued', kind: 'info' }
       this.changed()
@@ -460,6 +495,7 @@ export class QueueManagerController {
     }
     this.selectedId = row.id
     this.lastIndex = rows.indexOf(row)
+    this.selectionSuppressed = false
     this.notice = undefined
     this.mode = 'confirm-delete'
     this.changed()
@@ -530,7 +566,10 @@ export class QueueManagerController {
       } finally {
         endWrite()
       }
-      if (this.writeToken !== token) return
+      if (this.writeToken !== token) {
+        if (outcome?.kind === 'committed') this.deps.refreshPendingInput()
+        return
+      }
       this.pending = false
       if (outcome === undefined) return
       if (outcome.kind === 'committed') {
@@ -585,6 +624,11 @@ export class QueueManagerController {
   }
 
   private reset(): void {
+    // A closed/replaced panel lease invalidates every in-flight write's UI
+    // settlement: the Host write may still commit, but its result must never
+    // repaint or reopen a panel the user has already left.
+    this.writeToken += 1
+    this.selectionSuppressed = false
     this.mode = 'closed'
     this.sessionId = undefined
     this.subject = undefined

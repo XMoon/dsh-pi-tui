@@ -131,6 +131,21 @@ test('browse paints the header, the queued count, one cursor and a whole action 
   }
 })
 
+test('semantic Up/Down spellings (CSI, SS3) move the browse selection', () => {
+  const h = harness([
+    item('occ-a', [{ type: 'text', text: 'first' }]),
+    item('occ-b', [{ type: 'text', text: 'second' }]),
+  ])
+  h.panel.render(84)
+  assert.equal(h.controller.view().selectedId, 'occ-a')
+  // SS3 Down (application cursor keys) is a real semantic Down.
+  h.panel.handleInput('\x1bOB')
+  assert.equal(h.controller.view().selectedId, 'occ-b')
+  // CSI Up is the other common spelling.
+  h.panel.handleInput('\x1b[A')
+  assert.equal(h.controller.view().selectedId, 'occ-a')
+})
+
 test('a selected attachment item shows its summary and the editing-unavailable reason', () => {
   const h = harness([
     item('occ-file', [
