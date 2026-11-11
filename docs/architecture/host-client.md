@@ -383,10 +383,14 @@ mark. The TUI consumes it through ONE transport-neutral
 per read, Remote calls the same generated namespace over the authenticated
 Connection with a captured generation, and a read whose generation was replaced
 is rejected instead of presented as the new connection's state. A missing
-controller/namespace, a non-browse capability or a lost carrier answers the
-truthful `unavailable` outcome; only the official `directory-picker/unreadable`
-refusal is a `failed` outcome for the requested path, and an empty level stays a
-successful empty listing. The port never reads the Client filesystem, never
+controller/namespace, a non-browse capability or an official availability code
+answers the truthful `unavailable` outcome; only the official
+`directory-picker/unreadable` refusal is a `failed` outcome for the requested
+path, and an empty level stays a successful empty listing. The generic
+`gateway/internal` code is NOT an availability discriminator: the official
+controller uses it for any unexpected handler failure (and the Client carrier
+for a dropped transport), so it reaches the caller as an observable failure
+rather than being hidden behind an `unavailable` outcome. The port never reads the Client filesystem, never
 normalizes or joins a path itself, keeps no cache, and performs no Workspace
 registration or Session create — `workspace.create` remains the separate
 Workspace write authority. Direct gates the browse row on `tuiStartup`; the

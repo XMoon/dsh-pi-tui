@@ -66,18 +66,22 @@ const HOST_DIRECTORY_UNREADABLE_CODES: ReadonlySet<string> = new Set([
 
 /**
  * The official codes that prove the browse SURFACE could not answer at all:
- * the composed picker is not the browse backend, the Remote namespace/endpoint
- * is gone, or the carrier lost the Host. These are availability facts, never a
- * statement about the requested directory.
+ * the composed picker is not the browse backend, the addressed Host endpoint
+ * or service is not available, or the peer was retired. These are availability
+ * facts, never a statement about the requested directory.
+ *
+ * `gateway/internal` is deliberately ABSENT: the official controller also uses
+ * it for ANY unexpected handler failure (`browseFailure` folds a non-seam error
+ * into `gateway/internal`), and the Client carrier folds a dropped transport
+ * into the same code, so it is not an authoritative availability
+ * discriminator. Such a failure stays observable instead of becoming a
+ * fabricated `unavailable`.
  */
 const HOST_DIRECTORY_UNAVAILABLE_CODES: ReadonlySet<string> = new Set([
   'directory-picker/unavailable',
   // The caller's own cancellation is handled before classification; an
   // official cancellation the caller did not request is an availability fact.
   'gateway/cancelled',
-  // The official carrier folds a dropped transport and a retired namespace
-  // into these endpoint failures.
-  'gateway/internal',
   'gateway/peer-disposed',
   'gateway/service-unavailable',
   'gateway/context-unavailable',
