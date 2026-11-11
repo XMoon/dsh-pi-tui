@@ -1293,7 +1293,7 @@ test('busy steer with a file: the steered occurrence carries the Host file block
     'the explicit-queue file gesture appends a next-turn occurrence')
   fixture.vt.sendInput('\x1b[1;3A')
   await waitFor('the file queue pull-back is refused visibly', () =>
-    fixture.vt.getViewport().join('').includes('cannot rebind its upload receipt'), 20_000)
+    fixture.vt.getViewport().join('').includes('Cannot recall queued messages containing files'), 20_000)
   assert.equal(app.getDraft(), '', 'the refused recall never injects a recalled draft')
   assert.equal(spliceOf(queueMarker)?.file, true, 'the Host queue keeps its file occurrence')
 
