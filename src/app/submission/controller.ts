@@ -1441,12 +1441,14 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
         const recovery = recoverableWorkspaceSelection(error)
         const restored = restoredDraft
         if (recovery.kind === 'select-workspace'
+          && ordinaryPromptAtSubmit
           && (restored === 'merged-verbatim' || restored === 'merged')
           && lifetimeOwnsSurface()
           && deps.liveAgent() === undefined) {
-          // Only an authoritative PRE-CREATE refusal whose exact draft really
-          // landed back in this live sessionless editor may open the existing
-          // inline Host chooser. A dropped/absent restore, a replaced surface,
+          // Only an authoritative PRE-CREATE refusal of an ORDINARY prompt,
+          // whose exact draft really landed back in this live sessionless
+          // editor, may open the existing inline Host chooser. A Host command,
+          // a skill invocation, a dropped/absent restore, a replaced surface,
           // an unavailable Host or a post-create failure never navigates.
           deps.surface.openWorkspaceChooserAfterRestore?.()
         }

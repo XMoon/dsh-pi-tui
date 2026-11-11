@@ -5786,6 +5786,47 @@ test('a refused first Host path verifies through the same inline editor and only
     assert.equal(delivered.content.filter(block => block.type === 'text' && block.text?.includes(text)).length, 1,
       'the prompt content reaches the Host exactly once')
     assert.equal(opens, 1, 'the refusal opened the Browser exactly once')
+    assert.equal(mounted.app.notifyTextForTest().includes('could not create the first session'), false,
+      'the fixed refusal is never replayed as a false first-session failure after the success')
+  } finally {
+    TuiApp.prototype.openSessionWorkspace = originalOpen
+  }
+})
+
+test('a refused first Host path for a sessionless Host command restores the draft without opening the recovery Browser', async (t) => {
+  const base = createFakeHostWorkspaceRegistry()
+  const registry = base.registry
+  registry.create = async () => { throw new Error('controlled Host path refusal') }
+  const { harness, mounted, vt } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    deferredStart: true,
+    virtualTerminal: true,
+    hostCommands: ['compact'],
+    workspaceRegistry: registry,
+  })
+  assert.ok(vt, 'the case drives a virtual terminal')
+  await waitForRenderView(vt)
+  assert.equal(await drainUntil(() => vt.getViewport().join('\n').includes('Host directory unavailable'), 10_000), true,
+    'the mount preflight states the Host refusal on the Welcome')
+  const originalOpen = TuiApp.prototype.openSessionWorkspace
+  let opens = 0
+  TuiApp.prototype.openSessionWorkspace = function (this: TuiApp, options) {
+    opens += 1
+    return originalOpen.call(this, options)
+  }
+  try {
+    mounted.app.setDraft('/compact')
+    ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+    assert.equal(await drainUntil(() => mounted.app.notifyTextForTest().includes('could not start a session'), 10_000), true,
+      'the refused Host command keeps the real submission error')
+    await waitForRenderView(vt)
+    assert.equal(opens, 0, 'a Host command refusal never opens the first-submit recovery Browser')
+    assert.ok(!vt.getViewport().join('\n').includes('Host directory:'),
+      'the Host command never enters the first-prompt inline recovery editor')
+    assert.equal(mounted.app.getDraft(), '/compact', 'the command draft is restored for a deliberate retry')
+    assert.deepEqual(harness.createdSessionIds, [], 'the refused Host command creates no Session')
+    assert.equal(harness.executed.length, 0, 'the Host command never executes without its Session')
   } finally {
     TuiApp.prototype.openSessionWorkspace = originalOpen
   }

@@ -134,6 +134,8 @@ export interface SessionRuntimeSurface {
   launchComposition(): Promise<{ failure?: string; composition: { agentPreset?: string } }>
   /** Record a first-session failure for the next resume notice. */
   setResumeFailure(failure: string): void
+  /** Drop the previous first-session attempt's pending failure notice. */
+  clearResumeFailure(): void
   /** Report a failed first-session create (the runner logs + records it). */
   reportFirstSessionCreateFailure(message: string): void
   /** Show (and clear) the pending resume notice. */
@@ -1745,6 +1747,10 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     if (core.owner() !== undefined) return
     if (creating !== undefined) return creating
     creating = core.gate.run(() => core.barrier.runTransition(async () => {
+      // A NEW create attempt replaces the previous attempt's pending notice: a
+      // refusal the user then fixed must never be replayed as a false error
+      // after this attempt's successful commit.
+      deps.surface.clearResumeFailure()
       // The Host Workspace pre-selection precedes every Session side-effect: a
       // refused/unavailable workspace leaves the surface sessionless without a
       // Session create, an opening journal entry or a consumed draft.

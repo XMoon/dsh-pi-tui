@@ -294,6 +294,7 @@ function buildSessionFixture(life: TestLifecycle, options: {
     warnCommittedDurability: () => {},
     launchComposition: async () => ({ composition: {} }),
     setResumeFailure: () => {},
+    clearResumeFailure: () => {},
     reportFirstSessionCreateFailure: () => {},
     notifyResumeFailure: () => {},
     awaitPendingDefaultWrite: async () => {},
