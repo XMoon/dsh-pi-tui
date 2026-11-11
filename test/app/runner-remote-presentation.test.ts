@@ -2281,17 +2281,16 @@ test('literal skill gesture over a mounted Remote surface: the Client delivers t
   // reads. The Client NEVER loads a body on this branch (its semantic
   // resolveSkill is explicitly unavailable), so the marker can only come
   // from the Host pre-step.
-  const skillSummary = {
-    name: 'pr4-skill', description: 'the fixture skill',
+  // The fixture Host mounts the REAL official Skill registry; the fixture
+  // skill is a real runtime contribution on it (the Host pre-step reads the
+  // same authority a filesystem provider would supply).
+  host.ctx.skills.register({
+    name: 'pr4-skill',
+    description: 'the fixture skill',
+    content: BODY_MARKER,
+    source: 'runtime',
     invocation: { userInvocable: true, modelInvocable: false },
-  }
-  host.ctx.provide('skills', {
-    list: async () => [skillSummary],
-    snapshot: async () => ({ skills: [skillSummary], complete: true }),
-    get: async (name: string) => name === 'pr4-skill'
-      ? { ...skillSummary, provider: 'fixture', content: BODY_MARKER }
-      : undefined,
-  } as never)
+  })
   const toolSkill = await import('@deepseek-ai/dsh-tool-skill')
   await host.ctx.plugin(toolSkill as never, undefined as never)
   await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })

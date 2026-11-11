@@ -558,6 +558,34 @@ test('a live Session refuses a sessionless standing refresh, so Add directory ne
   }
 })
 
+test('disposeCatalog releases the Skills subscription BEFORE the coordinator and unsubscribes the generation listener', () => {
+  const source = controlledRemoteSource({})
+  const harness = fakeRunnerDeps({
+    remoteSource: source,
+    currentSessionId: () => 'session-a',
+  })
+  const lifecycle: string[] = []
+  ;(harness.runner.catalog.skills as unknown as {
+    onSkillsChange: (listener: () => void, onError: (error: unknown) => void) => () => void
+  }).onSkillsChange = () => {
+    lifecycle.push('subscribe')
+    return () => { lifecycle.push('dispose-skills') }
+  }
+  try {
+    harness.register()
+    assert.deepEqual(lifecycle, ['subscribe'], 'registration installs the ONE invalidation subscription')
+    assert.equal(source.listenerCount(), 1, 'the Remote generation listener is installed')
+    harness.surface.disposeCatalog()
+    assert.deepEqual(lifecycle, ['subscribe', 'dispose-skills'],
+      'surface teardown MUST release the Skills subscription (Direct listener / Remote watch)')
+    assert.equal(source.listenerCount(), 0,
+      'the Remote generation listener is released by the SAME disposal owner')
+    assert.doesNotThrow(() => harness.surface.disposeCatalog(), 'disposal is idempotent')
+  } finally {
+    harness.dispose()
+  }
+})
+
 /* ── CCR-2 ────────────────────────────────────────────────────────────── */
 
 test('disconnect (A -> undefined) reads nothing, clears nothing, and keeps the Host-origin claim reserved', async () => {

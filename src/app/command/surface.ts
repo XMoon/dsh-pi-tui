@@ -1561,15 +1561,21 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
     // refresh path behind this surface; the collected failure is surfaced
     // after both attempts.
     const generationUnsubscribe = disposeRemoteConnectionGeneration
+    const skillsUnsubscribe = disposeSkillsChange
     const coordinator = catalogCoordinator
     disposeRemoteConnectionGeneration = undefined
+    disposeSkillsChange = undefined
+    skillsChangeSubscribed = false
     catalogCoordinator = undefined
-    // The Direct `skills/change` capability offers no unsubscribe, so a late
-    // event can still reach the coalescing gate after teardown. Clearing the
-    // request slot makes both refresh paths no-ops (they guard on undefined)
+    // A late event can still reach the coalescing gate after teardown. Clearing
+    // the request slot makes both refresh paths no-ops (they guard on undefined)
     // instead of touching the disposed coordinator.
     catalogRefreshRequest = undefined
+    // ORDER: the Host/Direct invalidation subscription is released FIRST (no
+    // late frame can start a read), then the Remote generation listener, then
+    // the coordinator. One throwing disposer never skips the remaining steps.
     runSyncDisposalSteps('command catalog disposal', [
+      () => skillsUnsubscribe?.(),
       () => generationUnsubscribe?.(),
       () => coordinator?.dispose(),
     ])
