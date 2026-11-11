@@ -1906,7 +1906,9 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
   const activeWindow = (): TranscriptWindowController =>
     viewedChildMounted() ? routing().viewedChild().window : routing().main().window
   const activeStreamingToolPreviews = (): readonly StreamingToolPreview[] => {
-    if (!activeWindow().isLatest()) return []
+    // TSP has no application-level history window. Native Tern owns scroll;
+    // a stale/virtual controller anchor must not hide the active turn's preview.
+    if (!rendererOwnedPresentation && !activeWindow().isLatest()) return []
     return streamingToolPreviewSnapshot(
       viewedChildMounted() ? routing().viewedChild().previews : routing().main().previews,
     )
@@ -2216,10 +2218,27 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     const groupedTurns = folder.groupedTurns()
     controller.setTurns(groupedTurns)
     const endTurn = controller.endTurn()
-    const projection = folder.window({
-      maxTurns: controller.windowTurns,
-      ...(endTurn === undefined ? {} : { endTurn }),
-    })
+    const projection = rendererOwnedPresentation
+      ? {
+          messages: folder.messages(),
+          firstTurn: undefined,
+          lastTurn: undefined,
+          hasOlder: false,
+          hasNewer: false,
+        }
+      : folder.window({
+          maxTurns: controller.windowTurns,
+          ...(endTurn === undefined ? {} : { endTurn }),
+        })
+    const windowPresentation = rendererOwnedPresentation
+      ? { mode: 'latest' as const, hasOlder: false, hasNewer: false }
+      : {
+          ...controller.state(),
+          firstTurn: projection.firstTurn,
+          lastTurn: projection.lastTurn,
+          hasOlder: projection.hasOlder,
+          hasNewer: projection.hasNewer,
+        }
     onProjected?.()
     // Capture the subject identity and its source at ONE instant BEFORE the
     // commit; both the visual sidecars and the read-only observer are scoped to
@@ -2245,13 +2264,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     // The Welcome eligibility rides THIS selection: computed BEFORE the
     // commit, from the same instant as the subject/visual scoping.
     const welcomeEligibility = welcomeEligibilityFor(folder, groupedTurns.length)
-    displaySeam().setTranscript(projection.messages, activities, {
-      ...controller.state(),
-      firstTurn: projection.firstTurn,
-      lastTurn: projection.lastTurn,
-      hasOlder: projection.hasOlder,
-      hasNewer: projection.hasNewer,
-    }, streamingToolPreviews, (searchPresentation ?? searchBindingForRepaint)?.(), projectionTokenFor(folder), welcomeEligibility)
+    displaySeam().setTranscript(projection.messages, activities, windowPresentation, streamingToolPreviews, (searchPresentation ?? searchBindingForRepaint)?.(), projectionTokenFor(folder), welcomeEligibility)
     if (target === undefined) return
     // setTranscript can SYNCHRONOUSLY run plugin/modal callbacks that hand the
     // session to another owner. The pre-commit derivation is then stale: clear

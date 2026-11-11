@@ -2910,7 +2910,7 @@ test('Focus root and nested Work toggles keep one semantic owner and reset only 
   }
 })
 
-test('live Focus Preparing follows the latest window and disappears when the same Folder selects history', async () => {
+test('a TSP Main ignores a virtual history anchor and retains its latest live Preparing', async () => {
   const harness = await mountTspHarness({ displayState: { preset: 'focus' } })
   try {
     harness.surface.bindRendererInput()
@@ -2925,11 +2925,11 @@ test('live Focus Preparing follows the latest window and disappears when the sam
     } as never)
     harness.surface.paintNow()
     await awaitWireFact(() => mountedNodes(harness).some(node => String(node.p['text'] ?? '').includes('Preparing Bash')),
-      'the live Preparing summary in the selected latest window')
+      'the live Preparing summary at the latest loaded document tail')
     const latestNodes = mountedNodes(harness)
     assert.equal(harness.windowSnapshot().hasNewer, false, 'the same Folder controller proves this is latest')
     assert.ok(latestNodes.some(node => node.p['text'] === 'prepare the next operation'),
-      'the latest window contains the current live turn')
+      'the latest loaded document contains the current live turn')
     assert.ok(latestNodes.some(node => String(node.p['text'] ?? '').includes('Preparing Bash')),
       'the latest Root carries the current Preparing summary')
     const sf = harness.tern.frames.at(-1)!.sf
@@ -2938,34 +2938,217 @@ test('live Focus Preparing follows the latest window and disappears when the sam
     await awaitWireFact(() => mountedNodes(harness).some(node => node.id.includes('preparing-history-live-bash')),
       'the live Preparing row inside its opened Root')
 
+    const rootId = currentRoot.id
     assert.equal(harness.selectHistoryTurn(1), true, 'the production window controller selects the earlier turn')
     assert.equal(harness.windowSnapshot().mode, 'history', 'the production controller owns a history selection')
     assert.equal(harness.windowSnapshot().hasNewer, true, 'the selected Folder window proves newer turns exist')
-    const beforeHistoryFrame = harness.tern.frames.length
     harness.surface.paintNow()
-    await awaitWireFact(() => harness.tern.frames.length > beforeHistoryFrame, 'the Main frame for the selected history window')
+    // The SDK emits no frame for this identical loaded node tree; this bounded
+    // observation window lets its synchronous input/write path drain before the live-set negative assertions.
+    await settle()
     const historyNodes = mountedNodes(harness)
     assert.ok(historyNodes.some(node => node.p['text'] === 'inspect the repository'),
-      'the selected Folder history window retains its earlier content')
-    assert.ok(!historyNodes.some(node => node.p['text'] === 'prepare the next operation'),
-      'the selected history window excludes the current user turn')
-    assert.ok(!historyNodes.some(node => node.id.includes('preparing-history-live-bash')),
-      'the selected history window never materializes the latest live Preparing')
+      'the earlier loaded User remains on the same Main')
+    assert.ok(historyNodes.some(node => node.p['text'] === 'prepare the next operation'),
+      'the virtual history anchor cannot remove the latest loaded User')
+    const livePreparingRows = historyNodes.filter(node => node.k === 'row'
+      && node.id.includes('preparing-history-live-bash'))
+    assert.equal(livePreparingRows.length, 1,
+      'the authorized live Preparing remains one row under the same source and Root id')
+    assert.ok(livePreparingRows[0]!.id.startsWith(`${rootId}.`), 'the Preparing row remains inside the original Root')
+    assert.ok(historyNodes.some(node => node.id === rootId), 'the existing Focus Root id remains mounted')
+    assert.ok(historyNodes.some(node => String(node.p['text'] ?? '').includes('Preparing Bash')),
+      'history metadata cannot suppress the current Preparing summary')
+    assert.ok(!historyNodes.some(node => nodeText(node).includes('Earlier turns')),
+      'the application does not synthesize a window summary for TSP Main')
+    assert.equal(harness.tern.frames.at(-1)!.sf, sf, 'the same native Main surface remains current')
 
     assert.equal(harness.selectLatestWindow(), true, 'the production window controller resumes the latest tail')
-    const beforeLatestFrame = harness.tern.frames.length
     harness.surface.paintNow()
-    await awaitWireFact(() => harness.tern.frames.length > beforeLatestFrame, 'the Main frame for the latest window')
-    assert.ok(mountedNodes(harness).some(node => String(node.p['text'] ?? '').includes('Preparing Bash')),
-      'the same live Preparing summary returns with the latest window')
-    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: currentRoot.id, collapsed: false, raw: {} })
+    // This selection also projects an identical tree, so the SDK may send zero
+    // ops; the bounded drain observes the live node set without requiring a frame.
+    await settle()
+    const latestAgain = mountedNodes(harness)
+    assert.ok(latestAgain.some(node => node.p['text'] === 'inspect the repository'))
+    assert.ok(latestAgain.some(node => node.p['text'] === 'prepare the next operation'))
+    assert.ok(latestAgain.some(node => node.id === rootId), 'returning to latest does not mint a new Root id')
+    assert.ok(latestAgain.some(node => String(node.p['text'] ?? '').includes('Preparing Bash')),
+      'the live Preparing remains mounted without an application-level Follow command')
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: rootId, collapsed: false, raw: {} })
     await awaitWireFact(() => mountedNodes(harness).some(node => node.id.includes('preparing-history-live-bash')),
-      'the same live Preparing row returns inside its reopened Root')
+      'the same live Preparing row remains inside its original Root')
   } finally {
     await harness.dispose()
     await harness.session.close()
   }
 })
+
+test('a Compact TSP Main keeps its current Work preview while the virtual window is anchored in history', async () => {
+  const harness = await mountTspHarness({ displayState: { preset: 'compact' } })
+  try {
+    harness.surface.bindRendererInput()
+    for (let turn = 1; turn <= 25; turn += 1) {
+      const seq = (turn - 1) * 3
+      harness.route(ev('turn/start', { turn }, seq))
+      harness.route(userMessage(seq + 1, `loaded Main turn ${turn}`, `compact-loaded-${turn}`))
+      harness.route(ev('turn/end', { turn, reason: { kind: 'completed' } }, seq + 2))
+    }
+    harness.surface.paintNow()
+    await awaitWireFact(() => mountedNodes(harness).some(node => node.p['text'] === 'loaded Main turn 25'),
+      'the latest loaded User before the virtual anchor')
+    assert.equal(harness.selectHistoryTurn(1), true, 'the virtual Controller can select an earlier turn')
+
+    harness.route(ev('turn/start', { turn: 26 }, 75))
+    harness.route(userMessage(76, 'prepare the next compact operation', 'compact-live-user-26'))
+    harness.route(ev('tool/call', {
+      turn: 26, step: 0, callId: ToolCallId('compact-preview-seed'), name: 'read', arguments: '{}',
+    }, 77))
+    harness.route(ev('tool/result', {
+      turn: 26, step: 0,
+      message: {
+        id: MessageId('compact-preview-seed-result'), role: 'tool',
+        toolCallId: ToolCallId('compact-preview-seed'),
+        content: [{ type: 'text', text: 'seeded the canonical Work' }],
+        source: { kind: 'tool', callId: ToolCallId('compact-preview-seed') },
+      },
+    }, 78))
+    harness.route(ev('step/start', { turn: 26, step: 1 }, 79))
+    harness.surface.applyAssistantInput({
+      kind: 'chunk', sessionId: SESSION_ID, attemptId: 'compact-history-preview', turn: 26, step: 1,
+      time: T0 + 80,
+      chunk: { type: 'tool-call-delta', index: 0, id: 'compact-live-bash', name: 'bash', argumentsDelta: '{"command":"echo pending"}' },
+    } as never)
+    harness.surface.paintNow()
+    await awaitWireFact(() => mountedNodes(harness).some(node =>
+      node.k === 'section' && node.p['collapsible'] === true && nodeText(node).includes('Preparing Bash')),
+    'the live Preparing summary in the latest Compact Work')
+
+    const nodes = mountedNodes(harness)
+    assert.equal(harness.windowSnapshot().mode, 'history', 'the virtual Controller still reports its earlier history anchor')
+    assert.ok(nodes.some(node => node.p['text'] === 'loaded Main turn 1'), 'the oldest loaded User remains mounted')
+    assert.ok(nodes.some(node => node.p['text'] === 'loaded Main turn 25'), 'the prior latest User remains mounted')
+    assert.ok(nodes.some(node => node.p['text'] === 'prepare the next compact operation'),
+      'the current live User remains mounted despite the virtual history anchor')
+    const activity = nodes.find(node => node.k === 'section'
+      && node.p['collapsible'] === true && nodeText(node).includes('Preparing Bash'))!
+    const sf = harness.tern.frames.at(-1)!.sf
+    harnessFreeInput(harness.tern, { ev: 'toggle', sf, id: activity.id, collapsed: false, raw: {} })
+    await awaitWireFact(() => mountedSections(harness).find(node => node.id === activity.id)?.p['collapsed'] === false,
+      'the exact latest Compact Activity expands under its real wire id')
+    const expandedRows = mountedNodes(harness).filter(node => node.k === 'row' && nodeText(node).includes('Preparing Bash'))
+    assert.equal(expandedRows.length, 1, 'the authorized live Preparing row appears exactly once')
+    assert.ok(expandedRows[0]!.id.startsWith(`${activity.id}.`), 'the live Preparing belongs to the expanded Compact Activity')
+    assert.ok(!nodes.some(node => nodeText(node).includes('Earlier turns')),
+      'the TSP Main has no virtual-window summary')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+for (const preset of ['full', 'compact', 'focus'] as const) {
+  test(`a TSP ${preset} Main retains all loaded User messages past the PiTui window`, async () => {
+    const harness = await mountTspHarness({ displayState: { preset } })
+    const userNodes = (): ModeWireNode[] => mountedNodes(harness).filter(node =>
+      node.k === 'message' && node.p['role'] === 'dsh.transcript.user')
+    const routeTurn = (turn: number, seq: number): void => {
+      const marker = `MAIN-${String(turn).padStart(2, '0')}`
+      harness.route(ev('turn/start', { turn }, seq))
+      harness.route(userMessage(seq + 1, marker, marker))
+      harness.route(ev('turn/end', { turn, reason: { kind: 'completed' } }, seq + 2))
+    }
+    try {
+      for (let turn = 1; turn <= 25; turn += 1) routeTurn(turn, (turn - 1) * 3)
+      harness.surface.paintNow()
+
+      const anchors = ['MAIN-01', 'MAIN-13', 'MAIN-25']
+      await awaitWireFact(() => anchors.every(marker =>
+        userNodes().filter(node => nodeText(node).includes(marker)).length === 1),
+      `${preset} Main mounts the earliest, middle and latest loaded Users`)
+      const projectedUsers = userNodes()
+      assert.equal(projectedUsers.length, 25, 'every loaded User message remains in the same Main')
+      for (const marker of anchors) {
+        assert.equal(projectedUsers.filter(node => nodeText(node).includes(marker)).length, 1,
+          `${marker} is mounted exactly once`)
+      }
+      assert.ok(!mountedNodes(harness).some(node => nodeText(node).includes('Earlier turns')),
+        'TSP does not add a synthetic virtual-window summary')
+
+      const earliest = projectedUsers.find(node => nodeText(node).includes('MAIN-01'))!
+      const framesBeforeAppend = harness.tern.frames.length
+      routeTurn(26, 75)
+      harness.surface.paintNow()
+      await awaitWireFact(() => userNodes().some(node => nodeText(node).includes('MAIN-26')),
+        `${preset} Main mounts the next loaded User`)
+      const afterAppend = userNodes()
+      const earliestAfterAppend = afterAppend.find(node => nodeText(node).includes('MAIN-01'))
+      assert.equal(earliestAfterAppend?.id, earliest.id, 'the earliest User keeps its SDK node id')
+      assert.equal(afterAppend.length, 26, 'the next turn appends without evicting a loaded User')
+      const earliestMutations = harness.tern.frames.slice(framesBeforeAppend).flatMap(frame => frame.ops)
+        .filter(op => (op[0] === 'del' && op[1] === earliest.id)
+          || (op[0] === 'move' && op.some(value => value === earliest.id)))
+      assert.equal(earliestMutations.length, 0, 'the appended turn neither deletes nor moves the earliest User')
+    } finally {
+      await harness.dispose()
+      await harness.session.close()
+    }
+  })
+}
+
+test('a TSP source replacement shows only loaded rows until an earlier Folder is rehydrated', async () => {
+  const harness = await mountTspHarness({ displayState: { preset: 'full' } })
+  const userNodes = (): ModeWireNode[] => mountedNodes(harness).filter(node =>
+    node.k === 'message' && node.p['role'] === 'dsh.transcript.user')
+  const routeTurn = (turn: number, seq: number, marker: string): void => {
+    harness.route(ev('turn/start', { turn }, seq))
+    harness.route(userMessage(seq + 1, marker, marker))
+    harness.route(ev('turn/end', { turn, reason: { kind: 'completed' } }, seq + 2))
+  }
+  try {
+    routeTurn(1, 0, 'MAIN-01')
+    routeTurn(2, 3, 'MAIN-02')
+    harness.surface.paintNow()
+    await awaitWireFact(() => userNodes().length === 2, 'the original loaded source')
+    const originalIds = userNodes().map(node => node.id)
+
+    // Fixture-level source replacement models an authorized Remote rehydrate;
+    // it is not evidence of a Remote Host reader.
+    harness.replaceMain()
+    routeTurn(24, 0, 'REMOTE-TAIL-24')
+    routeTurn(25, 3, 'REMOTE-TAIL-25')
+    harness.surface.paintNow()
+    await awaitWireFact(() => userNodes().some(node => nodeText(node).includes('REMOTE-TAIL-25')),
+      'the replacement source tail')
+    let replacementUsers = userNodes()
+    assert.equal(replacementUsers.length, 2, 'only the two loaded replacement rows are mounted')
+    assert.ok(replacementUsers.some(node => nodeText(node).includes('REMOTE-TAIL-24')))
+    assert.ok(replacementUsers.some(node => nodeText(node).includes('REMOTE-TAIL-25')))
+    assert.ok(replacementUsers.every(node => !originalIds.includes(node.id)), 'the new source receives a new node namespace')
+    assert.ok(replacementUsers.every(node => !nodeText(node).includes('MAIN-')),
+      'the retired Folder rows do not leak into the new source')
+    const firstTailId = replacementUsers.find(node => nodeText(node).includes('REMOTE-TAIL-25'))!.id
+
+    // Only a second authoritative Folder replacement may add an earlier row;
+    // it is submitted first so the loaded chronology stays valid.
+    harness.replaceMain()
+    routeTurn(23, 0, 'REMOTE-OLDER-23')
+    routeTurn(24, 3, 'REMOTE-TAIL-24')
+    routeTurn(25, 6, 'REMOTE-TAIL-25')
+    harness.surface.paintNow()
+    await awaitWireFact(() => userNodes().some(node => nodeText(node).includes('REMOTE-OLDER-23')),
+      'the explicitly rehydrated earlier row')
+    replacementUsers = userNodes()
+    assert.equal(replacementUsers.length, 3)
+    assert.ok(replacementUsers.some(node => nodeText(node).includes('REMOTE-OLDER-23')))
+    assert.ok(replacementUsers.some(node => nodeText(node).includes('REMOTE-TAIL-24')))
+    const rehydratedTailId = replacementUsers.find(node => nodeText(node).includes('REMOTE-TAIL-25'))!.id
+    assert.notEqual(rehydratedTailId, firstTailId, 'each authoritative Folder replacement retires the former source namespace')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
 
 test('a new Preparing after an Assistant remains a Root row beside an earlier Focus Work', async () => {
   const harness = await mountTspHarness({ displayState: { preset: 'focus' } })

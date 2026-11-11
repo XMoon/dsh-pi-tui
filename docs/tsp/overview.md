@@ -64,23 +64,16 @@ existing SessionPresentation + SurfaceEventRoutingSource
   (session/attachment/currentness/exact-Agent fences)
                 |
                 v
-ONE TranscriptFolder  (canonical fold)
+ONE TranscriptFolder  (canonical fold of Client-loaded rows)
                 |
                 v
-ONE TranscriptWindowController  (the selected window)
-                |
-                v
-SurfaceRuntime.repaintTarget()  -- the ONE projection glue
-   |                                    |
-   | production                         | optional read-only observer
-   v                                    v
-TuiApp.setTranscript(...)        onTranscriptProjected (absent in production)
-(PiTui, the product)                        |
-                                            v
-                              experimental TSP consumer
-                              projectTranscriptStructure()
-                                -> TSP node mapper
-                                -> official SDK Surface.render()
+SurfaceRuntime.repaintTarget()  -- the ONE application writer
+   +-> PiTui: folder.window(20 turns) -> TuiApp.setTranscript(...)
+   +-> TSP: folder.messages() -> SurfaceDisplaySeam.setTranscript(...)
+            -> projectTranscriptStructure()
+            -> Full / Compact / Focus mapper
+            -> official SDK Surface.render(Main)
+            -> Tern native scroll / Follow
 ```
 
 - `src/tui/transcript/structure.ts` → `projectTranscriptStructure()` remains the
@@ -93,7 +86,16 @@ TuiApp.setTranscript(...)        onTranscriptProjected (absent in production)
   row whose parent changes from standalone to Work-internal legitimately
   produces a local `del` of the old top-level card plus one `add` carrying the
   new Work subtree; Work and unrelated user/assistant node ids stay stable.
-- One fold, one window, one currentness authority. The TSP path adds neither a
+- PiTui keeps its existing `TranscriptWindowController` and bounded
+  `folder.window()` projection. TSP uses `folder.messages()` from that same
+  Folder for all Client-loaded rows and commits them through the same
+  `SurfaceDisplaySeam.setTranscript`; it does not add a window summary.
+- The TSP `mode:'latest'` metadata describes the loaded-document tail only,
+  not Tern's physical scroll position or Follow state. Tern owns native Main
+  scroll and Follow; no app-level history navigation or scroll mirror is added.
+- Remote projection remains limited to rows already loaded by the authorized
+  Reader. Scrolling does not fetch Host history; authorized rehydrate replaces
+  the Folder and starts a new source scope. The TSP path adds neither a
   second `TranscriptFolder`, nor a second SessionEvent subscription, nor a new
   Host port, nor a Host service read (`src/app/surface/**` stays Host-free and
   is gate-enforced).
