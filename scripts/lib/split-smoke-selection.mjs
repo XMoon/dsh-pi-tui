@@ -20,6 +20,7 @@ import { runClientHmrSignals } from '../smoke/split-process/client-hmr-signals.m
 import { runDetachedTurnInteractions } from '../smoke/split-process/detached-turn-interactions.mjs'
 import { runNonDestructiveClientLifecycle } from '../smoke/split-process/non-destructive-client-lifecycle.mjs'
 import { runReadAuthority } from '../smoke/split-process/read-authority.mjs'
+import { runHostDirectoryBrowse } from '../smoke/split-process/host-directory-browse.mjs'
 import { runInteractionNavigationFirst } from '../smoke/split-process/interaction-admission.mjs'
 import { runSessionWorkspaceActivity } from '../smoke/split-process/session-workspace-activity.mjs'
 import { runSessionWorkspaceEditorEntry } from '../smoke/split-process/session-workspace-editor-entry.mjs'
@@ -115,6 +116,12 @@ const CASE_REGISTRY = Object.freeze([
     id: 'read.official-read-authority',
     title: 'A(Y) reads X\'s real Host pending/Workspace facts through the ONE read-authority port and answers X through the existing first-settlement path',
     run: runReadAuthority,
+  }),
+  Object.freeze({
+    suite: 'read',
+    id: 'read.host-directory-browse',
+    title: 'a real Host-only directory-picker serves a Sessionless Split Client the Host home, an explicit Host level and an isolated Client directory exclusion through the ONE read-only browse port',
+    run: runHostDirectoryBrowse,
   }),
   Object.freeze({
     suite: 'interaction',

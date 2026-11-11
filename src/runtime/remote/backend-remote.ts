@@ -41,6 +41,7 @@ import type { DeliveredFileReadPort } from '../deliverables-port.ts'
 import type { WebAccessPort } from '../web-access-port.ts'
 import type { SessionWorkspaceFactsPort } from '../session-workspace-facts-port.ts'
 import type { SchedulePort } from '../schedule-port.ts'
+import type { HostDirectoryBrowsePort } from '../host-directory-browse-port.ts'
 
 /** Every semantic port the Remote backend serves (one adapter each). */
 export interface RemoteBackendParts {
@@ -70,6 +71,8 @@ export interface RemoteBackendParts {
   readonly sessionWorkspaceFacts: SessionWorkspaceFactsPort
   /** The official generated `schedule` namespace adapter (S5-PR4). */
   readonly schedule: SchedulePort
+  /** The official generated `directoryPicker` read adapter (Session Workspace PR1). */
+  readonly hostDirectoryBrowse: HostDirectoryBrowsePort
 }
 
 /** Assemble the experimental Remote `Backend` from its proven adapters. */

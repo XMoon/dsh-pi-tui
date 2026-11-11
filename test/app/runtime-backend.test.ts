@@ -259,11 +259,15 @@ test('the Direct backend is the current production surface and serves EXACTLY th
     deleteInactive: async () => ({ deleted: 0 }),
     onChanged: () => () => {},
   }
-  // S5-PR3, M5-U-A and S5-PR4 add THREE independent required ports: the official
-  // Session Markdown read, the UI-neutral read-authority facts and the Host
-  // Schedule management surface. All stay wired and asserted below; none
+  const hostDirectoryBrowse: import('../../src/runtime/host-directory-browse-port.ts').HostDirectoryBrowsePort = {
+    list: async () => ({ kind: 'unavailable' as const, reason: 'the fixture never browses the Host', code: 'directory-picker/unavailable' }),
+  }
+  // S5-PR3, M5-U-A, S5-PR4 and Session Workspace PR1 add FOUR independent
+  // required ports: the official Session Markdown read, the UI-neutral
+  // read-authority facts, the Host Schedule management surface and the
+  // read-only Host directory browse. All stay wired and asserted below; none
   // replaces another.
-  const backend = createDirectBackend(subagent, sessionReader, pendingInputReader, sessionWriter, sessionLifecycle, interaction, catalog, config, hostFile, sessionArchive, sessionMarkdown, hostCommand, pluginManager, jobObservation, hostUserShell, { pathAuthority: 'client', complete: async () => ({ kind: 'ok', candidates: [] }) }, deliveredFileRead, webAccess, sessionWorkspaceFacts, schedule)
+  const backend = createDirectBackend(subagent, sessionReader, pendingInputReader, sessionWriter, sessionLifecycle, interaction, catalog, config, hostFile, sessionArchive, sessionMarkdown, hostCommand, pluginManager, jobObservation, hostUserShell, { pathAuthority: 'client', complete: async () => ({ kind: 'ok', candidates: [] }) }, deliveredFileRead, webAccess, sessionWorkspaceFacts, schedule, hostDirectoryBrowse)
   assert.equal(backend.kind, 'direct')
   assert.equal(backend.subagent, subagent)
   assert.equal(backend.sessionReader, sessionReader)
@@ -281,6 +285,7 @@ test('the Direct backend is the current production surface and serves EXACTLY th
   assert.equal(backend.jobObservation, jobObservation)
   assert.equal(backend.sessionWorkspaceFacts, sessionWorkspaceFacts)
   assert.equal(backend.schedule, schedule)
+  assert.equal(backend.hostDirectoryBrowse, hostDirectoryBrowse)
   // Truthful advertisement: the backend serves EXACTLY the implemented
   // ports — nothing is advertised without a port.
   for (const capability of DIRECT_IMPLEMENTED_CAPABILITIES) {

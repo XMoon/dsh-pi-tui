@@ -36,6 +36,7 @@ test('the Remote backend advertises exactly its implemented capabilities', () =>
     webAccess: {} as RemoteBackendParts['webAccess'],
     sessionWorkspaceFacts: {} as RemoteBackendParts['sessionWorkspaceFacts'],
     schedule: {} as RemoteBackendParts['schedule'],
+    hostDirectoryBrowse: {} as RemoteBackendParts['hostDirectoryBrowse'],
   }
   const backend = createRemoteBackend(parts)
   assert.equal(backend.kind, 'remote')
@@ -49,6 +50,8 @@ test('the Remote backend advertises exactly its implemented capabilities', () =>
   assert.equal(backend.sessionArchive, parts.sessionArchive)
   assert.equal(backend.sessionMarkdown, parts.sessionMarkdown)
   assert.equal(backend.schedule, parts.schedule, 'S5-PR4: the required Schedule port is the very adapter handed in')
+  assert.equal(backend.hostDirectoryBrowse, parts.hostDirectoryBrowse,
+    'Session Workspace PR1: the required directory-browse port is the very adapter handed in')
 })
 
 test('BackendKind accepts remote while Direct stays the production default', () => {

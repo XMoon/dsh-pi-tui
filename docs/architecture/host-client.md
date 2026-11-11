@@ -370,10 +370,34 @@ package AND that the live controller carries the
 `workspaceController`/`workspace` Typert binding; a readable service object
 without it is not a working Workspace API.
 
+Host directory browsing is a separate READ authority with exactly one owner:
+the official `directory-picker` bundle row
+(`@deepseek-ai/dsh-host-directory-picker-browse`, the `browse` capability; not
+the `native`/`auto` chooser, which serves no remote listing primitives) and the
+`DirectoryPickerController` child the Workspace Controller installs. That child
+owns the generated `directoryPicker/list` Remote verb; the Host's own filesystem
+scan supplies the home directory, the canonical listed path, the ancestry
+crumbs, the child DIRECTORY rows with their hidden flags and the truncation
+mark. The TUI consumes it through ONE transport-neutral
+`HostDirectoryBrowsePort`: Direct calls the same in-process controller handler
+per read, Remote calls the same generated namespace over the authenticated
+Connection with a captured generation, and a read whose generation was replaced
+is rejected instead of presented as the new connection's state. A missing
+controller/namespace, a non-browse capability or a lost carrier answers the
+truthful `unavailable` outcome; only the official `directory-picker/unreadable`
+refusal is a `failed` outcome for the requested path, and an empty level stays a
+successful empty listing. The port never reads the Client filesystem, never
+normalizes or joins a path itself, keeps no cache, and performs no Workspace
+registration or Session create — `workspace.create` remains the separate
+Workspace write authority. Direct gates the browse row on `tuiStartup`; the
+Host-only overlay removes only that gate in place, and readiness asserts the
+browse row and the child `directoryPickerController`/`directoryPicker` binding
+are each live exactly once.
+
 The Host execution graph does not depend on the mutable `tui-startup` provider.
-The Host-only overlay overrides the existing `webserver`, `workspace-files` and
-`workspace-controller` rows with `inject: []` and removes `tuiStartup` from the
-eight Host-only execution rows, which keep only their real service dependencies
+The Host-only overlay overrides the existing `webserver`, `workspace-files`,
+`workspace-controller` and `directory-picker` rows with `inject: []` and
+removes `tuiStartup` from the eight Host-only execution rows, which keep only their real service dependencies
 (`split-host-connection`, `split-host-file-upload`,
 `split-host-session-stats`, `split-host-turn-outline`,
 `split-host-session-controller`, `split-host-settings-controller`,

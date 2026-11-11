@@ -155,6 +155,20 @@
       name: '@deepseek-ai/dsh-api-workspace-controller'
       inject: [tuiStartup]
 
+    # The ONE official Host directory-browsing backend (`ctx.directoryPicker`,
+    # browse capability): the existing Workspace Controller mounts its
+    # `DirectoryPickerController` child over this seam, and that child is what
+    # serves the generated `directoryPicker/list` Remote verb. The browse
+    # backend is chosen deliberately instead of the `auto` package, which may
+    # pick the host-display `native` chooser and leave remote clients without
+    # listing primitives. Mounting it creates no Workspace and no directory.
+    # `tuiStartup` is Direct's command-line admission; the Host-only overlay
+    # removes exactly that dependency in place, and no overlay inserts a second
+    # picker row.
+    - id: directory-picker
+      name: '@deepseek-ai/dsh-host-directory-picker-browse'
+      inject: [tuiStartup]
+
     # ── Host Schedule management (S5-PR4) ──────────────────────────────────
     # ONE Host Schedule domain shared by Direct and the Host-only Split
     # overlay: the official durable task store, the single timer, the session
