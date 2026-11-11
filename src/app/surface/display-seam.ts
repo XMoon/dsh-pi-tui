@@ -130,9 +130,9 @@ export type DisplayWelcomeEligibility = 'sessionless' | 'blank-session' | 'hidde
  */
 export interface SurfaceDisplaySeam {
   // ── The transcript projection (SurfaceRuntime.repaintTarget is the only writer) ──
-  /** Commit ONE windowed transcript projection (the same arguments
-   * `TuiApp.setTranscript` takes; a renderer that cannot present search
-   * ignores the optional presentation parts). */
+  /** Commit the one renderer-selected transcript projection: PiTui receives a
+   * bounded window; TSP receives all currently Client-loaded rows. Window-shaped
+   * metadata is display context, not a second history or physical scroll authority. */
   setTranscript(
     messages: readonly TranscriptMessage[],
     activities?: ReadonlyMap<number, TurnActivity>,
