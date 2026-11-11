@@ -754,3 +754,69 @@ test('100/200 Focus roots and Work spans retain bounded source reads with one fi
   assert.ok(reads200 <= reads100 * 3,
     `doubling 100→200 roots must stay below the 3x linearity bound; indexed reads ${reads100}→${reads200}`)
 })
+
+// --- A proven same-turn settlement keeps one canonical owner everywhere -----
+
+test('a proven same-turn subagent settlement is ONE message object across Compact, Focus and Full', () => {
+  const settledMessage = {
+    id: MessageId('converge-settled'), role: 'user',
+    content: [{ type: 'text', text: 'CONVERGE_SETTLED' }],
+    source: { kind: 'subagent-settled', form: 'notice', summary: 'child completed', senderSessionId: 'session-converge' },
+  }
+  const event = (type: string, data: Record<string, unknown>, seq: number): SessionEvent =>
+    ({ type, seq: seq + 1, time: 1_700_000_000_000 + seq, data }) as SessionEvent
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('tool/call', { turn: 0, step: 0, callId: 'converge-c1', name: 'read', arguments: '{}' }, 1),
+    event('tool/result', {
+      turn: 0, step: 0,
+      message: { id: MessageId('converge-r1'), role: 'tool', toolCallId: 'converge-c1', content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: 'converge-c1' } },
+    }, 2),
+    event('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [settledMessage] }, 3),
+    event('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, 4),
+    event('user/message', settledMessage, 5),
+    event('tool/call', { turn: 0, step: 1, callId: 'converge-c2', name: 'bash', arguments: '{}' }, 6),
+    event('tool/result', {
+      turn: 0, step: 1,
+      message: { id: MessageId('converge-r2'), role: 'tool', toolCallId: 'converge-c2', content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: 'converge-c2' } },
+    }, 7),
+    event('assistant/message', {
+      turn: 0, step: 2,
+      message: { id: MessageId('converge-final'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 8),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 9),
+  ])
+  const messages = folder.messages()
+  const settled = messages.find(message => message.kind === 'system')
+  assert.ok(settled !== undefined && settled.kind === 'system')
+  assert.equal(settled.contextPresentation?.sameTurnNextStep, true, 'fixture: durable same-turn claim')
+  assert.equal(settled.text, 'CONVERGE_SETTLED')
+
+  const structure = projectTranscriptStructure(messages)
+  const spans = workSpansOf(structure)
+  assert.equal(spans.length, 1, 'Process -> settlement -> Process is one canonical Work')
+  assert.equal(spans[0]!.members.includes(settled), true)
+
+  const compactSpans = projectCompact(messages, {
+    expandedWorkOwners: new Set(), expandedClusters: new Set(), forcedExpanded: new Set(),
+  }).flatMap(block => block.kind === 'work' ? [block.span] : [])
+  assertSameSpans(compactSpans, spans)
+  assert.equal(compactSpans[0]!.members.find(member => member === settled), settled,
+    'Compact carries the ORIGINAL settlement object, not a copy')
+
+  const activities = folder.turnActivities()
+  const focusWork = projectFocus(messages, activities, new Set([0]), true)
+    .flatMap(block => block.kind === 'work' ? [block.span] : [])
+  assert.deepEqual(focusWork, spans, 'expanded Focus materializes the same canonical span identity')
+  assert.equal(focusWork[0]!.members.find(member => member === settled), settled,
+    'expanded Focus carries the ORIGINAL settlement object inside the nested Work')
+
+  const flattened = flattenStructure(structure)
+  assert.equal(flattened.length, messages.length, 'Full stays a single flat chronology')
+  for (let index = 0; index < messages.length; index += 1) {
+    assert.equal(flattened[index], messages[index], `Full row ${index} keeps its exact identity and position`)
+  }
+  assert.equal(flattened.filter(message => message === settled).length, 1,
+    'Full renders the settlement exactly once')
+})
