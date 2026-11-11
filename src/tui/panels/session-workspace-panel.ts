@@ -397,9 +397,10 @@ export class SessionWorkspacePanel implements Component {
     this.nextCreateWorkspaceId = options.currentWorkspaceId
     this.defaultScope = options.initialBrowseScope
     // Search and the inline path editor are mutually exclusive presentations:
-    // the editor owns the keyboard while it is open.
-    this.searchMode = options.initialMode === 'search' && !this.directoryEntryActive
+    // the editor owns the keyboard while it is open. Resolve the editor state
+    // FIRST so an initial `search + directoryEntry` open cannot keep both.
     this.directoryEntryActive = options.initialDirectoryEntry === true
+    this.searchMode = options.initialMode === 'search' && !this.directoryEntryActive
     if (options.initialDirectoryPath !== undefined) this.directoryInput.setValue(options.initialDirectoryPath)
     this.focus = this.directoryEntryActive ? 'directory' : this.searchMode ? 'search' : 'list'
   }
