@@ -1550,6 +1550,47 @@ test('navigation: a Tool result with a visible word scrolls to that word without
   app.stop()
 })
 
+test('navigation: an auxiliary Tool result prefers the word already inside the viewport', async () => {
+  const lines = Array.from({ length: 160 }, (_, index) => `filler line ${index}`)
+  lines[25] = 'needle near the top'
+  lines[150] = 'needle far down'
+  const folder = new TranscriptFolder()
+  folder.apply([
+    sessionEvent('turn/start', { turn: 0 }, 0),
+    sessionEvent('tool/call', { turn: 0, step: 0, callId: ToolCallId('viewport-c1'), name: 'bash', arguments: JSON.stringify({ command: 'echo needle' }) }, 1),
+    sessionEvent('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('viewport-r1'), role: 'tool', toolCallId: ToolCallId('viewport-c1'),
+        content: [{ type: 'text', text: lines.join('\n') }],
+        source: { kind: 'tool', callId: ToolCallId('viewport-c1') },
+      },
+    }, 2),
+    sessionEvent('turn/end', { turn: 0, reason: { kind: 'completed' } }, 3),
+  ])
+  const match = folder.search('needle').find(candidate => candidate.source.kind === 'tool-field' && candidate.source.field === 'result')
+  assert.ok(match !== undefined)
+  const card = folder.messages()[0]!
+  const { vt, app } = startApp(100, 40)
+  app.setFullscreen(true)
+  app.setTranscript([card], folder.turnActivities())
+  await viewport(vt)
+  app.setTranscriptSearchTarget({ query: 'needle', match, message: card })
+  app.scrollToSearchTarget()
+  const frame = await viewport(vt)
+  assert.ok(frame.some(line => line.includes('needle near the top')),
+    `the already-visible near word remains on screen:\n${frame.join('\n')}`)
+  assert.ok(!frame.some(line => line.includes('needle far down')),
+    'the auxiliary target did not jump to the off-screen last candidate')
+  const mounted = (app as unknown as {
+    mountedTranscriptBlocks: ReadonlyArray<{ block: { message?: TranscriptMessage }; searchSelection?: { selectedRow?: number; exact: boolean } }>
+  }).mountedTranscriptBlocks
+  const selection = mounted.find(entry => entry.block.message === card)?.searchSelection
+  assert.equal(selection?.exact, false)
+  assert.ok((selection?.selectedRow ?? 999) < 40, 'the chosen auxiliary cell is the visible one')
+  app.stop()
+})
+
 test('navigation: tool args and result anchor rows are visually distinct without a strong occurrence', async () => {
   const event = (type: string, data: Record<string, unknown>, seq: number): SessionEvent =>
     ({ type, seq, time: 1_700_000_000_000 + seq, data } as SessionEvent)
@@ -1587,6 +1628,7 @@ test('navigation: tool args and result anchor rows are visually distinct without
   assert.ok(isCardAnchorCell(vt, cardTop, 0), 'the owning card header carries the orange anchor')
   app.stop()
 })
+
 
 test('navigation: a folded Work owner header carries the orange card anchor when the reveal is revoked', async () => {
   const events: SessionEvent[] = [

@@ -319,6 +319,7 @@ import {
 import { AssistantMarkdownComponent } from './tui/components/transcript/assistant-markdown-source-proof.ts'
 import {
   chooseSearchViewportTop,
+  selectReadableSearchCandidate,
   type PaintedTargetSegment,
   type PhysicalRect,
 } from './tui/components/transcript/search-viewport.ts'
@@ -3953,6 +3954,12 @@ export class TuiApp {
     readonly message: TranscriptMessage
     readonly available: boolean
   } | undefined
+  /** Monotonic epoch for NON-search structural state (resize, theme, display
+   * preset, disclosure, content remeasure). The navigation projection caches a
+   * target's qualification; that cache must expire when the frame that proved
+   * it changed, but MUST NOT expire on every ordinary search jump (which only
+   * bumps `searchPresentationRevision`). */
+  private searchQualificationEpoch = 0
   /** One-shot occlusion correction eligibility, registered by an explicit
    * navigation (or a resize) and consumed by the next painted-frame commit. */
   private pendingSearchOcclusionCorrection: SearchOcclusionCorrection | undefined
@@ -12785,6 +12792,13 @@ export class TuiApp {
     }
   }
 
+  /** The current frame's non-search structural epoch. Runtime clears its
+   * disposable qualification cache when this moves; ordinary search commits do
+   * not move it. */
+  searchQualificationEpochForRuntime(): number {
+    return this.searchQualificationEpoch
+  }
+
   currentFullNavigationQualification(): {
     readonly semanticMatchKey: string
     readonly representativeId: number
@@ -13105,9 +13119,11 @@ export class TuiApp {
       // occurrence from a DIFFERENT source (an inline phase status beside a
       // hidden summary-phase status), so whole-card merging is only safe when no
       // source on this card can ever prove a cell at this size.
-      const provingRegion = regions.some(region => region.enumerable !== false
-        && region.sourceText !== undefined
-        && matches.some(match => searchMatchInsideRegion(match, region)))
+      const provingRegion = regions.some(region => {
+        if (region.enumerable === false || region.sourceText === undefined) return false
+        const regionGeometry = buildSourceGeometry(matches, rendered, [region], region.sourceKey, target.query)
+        return (regionGeometry?.occurrences.length ?? 0) > 0
+      })
       const proofHostAvailable = target.match.source.kind === 'message'
         && target.match.normalizedSourceRange !== undefined
         && (block.message.kind === 'user' || block.message.kind === 'thinking' ? plainTextProofHost : assistantProofHost)
@@ -13120,12 +13136,16 @@ export class TuiApp {
       const scrollRange = selectRenderedSearchScrollRange(matches, selection, selector, regions)
       const cardAnchor = selection.exact ? undefined : cardAnchorForRenderedLines(rendered)
       const scopedMatches = targetSourceKey === 'message'
-        ? matches
+        // A message target's scroll hint must stay inside its own body: a
+        // delivered-files tail, PTC sub-call or other declared field region is a
+        // DIFFERENT semantic source and must never become the candidate pool.
+        ? matches.filter(match => !regions.some(region =>
+            region.sourceKey !== 'message' && searchMatchInsideRegion(match, region)))
         : matches.filter(match => regions.some(region =>
             region.sourceKey === targetSourceKey && searchMatchInsideRegion(match, region)))
       const auxiliaryMatches = disposition === 'not-painted' ? [] : scopedMatches
       // A card with no authorized region for this source (e.g. a Tool result
-      // body) still has REAL visible words: a POCISION-ONLY body region is the
+      // body) still has REAL visible words: a POSITION-ONLY body region is the
       // authorized scroll hint, never header or status-count chrome. The
       // not-painted path never borrows a homonym this way.
       const targetRegions = regions.filter(region => region.sourceKey === targetSourceKey)
@@ -13134,13 +13154,10 @@ export class TuiApp {
         : disposition === 'unproven' && targetRegions.length > 0
           ? matches.filter(match => targetRegions.some(region => searchMatchInsideRegion(match, region)))
           : []
-      // Without an authorized region prefer the LAST rendered candidate: header
-      // chrome (name/args) is painted before the body, so the last occurrence is
-      // the most likely body word. It is a viewport hint only, never source proof.
-      const toolBodyHint = targetSourceKey === 'tool.result'
-      const scrollCandidate = auxiliaryMatches.length > 0
-        ? (toolBodyHint ? scrollCandidates.at(-1) : scrollCandidates[0])
-        : scrollCandidates.at(-1)
+      // The base range is the first eligible body candidate; geometry later
+      // prefers a candidate already visible and unoccluded. This is a viewport
+      // hint only, never source proof.
+      const scrollCandidate = scrollCandidates[0]
       const visibleWordRange = selection.exact || scrollCandidate === undefined
         ? undefined
         : (() => {
@@ -13150,11 +13167,15 @@ export class TuiApp {
               ? undefined
               : { startRow: first.row, endRow: last.row }
           })()
+      const candidateSegments = selection.exact || scrollCandidates.length === 0
+        ? undefined
+        : scrollCandidates.flatMap(match => match.segments)
       const targetRange = visibleWordRange ?? scrollRange ?? (cardAnchor === undefined
         ? undefined
         : { startRow: cardAnchor.row, endRow: cardAnchor.row })
       const committedSelection: RenderedSearchSelection = {
         ...selection,
+        ...(candidateSegments === undefined ? {} : { candidateSegments }),
         ...(selection.exact
           ? {}
           : { selectedRow: targetRange?.startRow ?? selection.selectedRow }),
@@ -13294,12 +13315,17 @@ export class TuiApp {
       // line that merely STARTS with `$ ` for the call row.
       const commandRow = isLocalShellCard(message) || this.terminalCommand(message.name, message.args) !== ''
       const rowStart = commandRow ? 2 : 1
-      if (renderedLength > rowStart) {
+      // PTC sub-call rows belong to their own cards/sources, not to the root
+      // result body: clamp the position-only hint before the first sub-call.
+      const subCallStart = subCallRegions?.reduce((min, region) => Math.min(min, region.rowStart), Number.POSITIVE_INFINITY)
+        ?? Number.POSITIVE_INFINITY
+      const rowEnd = Math.min(renderedLength, subCallStart)
+      if (rowEnd > rowStart) {
         regions.push({
           sourceKey: transcriptSearchSourceKey({ kind: 'tool-field', field: 'result' }),
           anchorRow: 0,
           rowStart,
-          rowEnd: renderedLength,
+          rowEnd,
           enumerable: false,
         })
       }
@@ -13624,6 +13650,50 @@ export class TuiApp {
     }
   }
 
+  /** Resolve the CURRENT target's search range against the live viewport. An
+   * auxiliary target carries every eligible visible candidate; prefer one the
+   * user can already see and that the Search overlay does not cover, then fall
+   * back to distance from the viewport centre. Exact/card-anchor targets keep
+   * their proven or anchor geometry unchanged. */
+  private resolveCurrentSearchGeometry(
+    selection: RenderedSearchSelection,
+    blockContentRow: number,
+  ): { range: RenderedSearchScrollRange; segments: readonly PaintedTargetSegment[] | undefined } | undefined {
+    const fallback = selection.scrollRange
+    const candidates = selection.candidateSegments ?? []
+    if (fallback === undefined && candidates.length === 0) return undefined
+    let chosen: AltScreenSearchSegment | undefined = candidates[0]
+    const scroll = this.fullscreenScroll
+    const overlay = this.searchOverlayRect()
+    const viewport = scroll === undefined ? undefined : this.fullscreen?.getPaintedBox(scroll)
+    if (candidates.length > 0 && scroll !== undefined && viewport !== undefined) {
+      const welcome = this.transcriptWelcomeHeight
+      const picked = selectReadableSearchCandidate({
+        viewport,
+        ...(overlay === undefined ? {} : { overlay }),
+        scrollTop: scroll.scrollTop,
+        candidates: candidates.map(segment => ({
+          documentRow: welcome + blockContentRow + segment.row,
+          startCol: segment.startCol,
+          endCol: segment.endCol,
+        })),
+      })
+      if (picked !== undefined) {
+        chosen = {
+          row: picked.documentRow - welcome - blockContentRow,
+          startCol: picked.startCol,
+          endCol: picked.endCol,
+        }
+      }
+    }
+    const startRow = blockContentRow + (chosen?.row ?? fallback!.startRow)
+    const endRow = blockContentRow + (chosen?.row ?? fallback!.endRow)
+    const segments = chosen === undefined
+      ? this.paintedSegmentsForSelection(selection, blockContentRow)
+      : [{ documentRow: blockContentRow + chosen.row, startCol: chosen.startCol, endCol: chosen.endCol }]
+    return { range: { startRow, endRow }, segments }
+  }
+
   /** Publish row geometry from one already-rendered block batch. Structural
    * rebuilds also mount the batch; content commits reuse the existing mounts. */
   private updateTranscriptGeometry(
@@ -13638,19 +13708,11 @@ export class TuiApp {
     this.updateRenderedViewSearchGeometry(renderedBlocks, width, paddingRows)
     const rows: FullscreenRowEntry[] = []
     let transcriptRow = 0
-    let searchRange: RenderedSearchScrollRange | undefined
-    let searchSegments: readonly PaintedTargetSegment[] | undefined
+    let pendingSelection: { selection: RenderedSearchSelection; blockContentRow: number } | undefined
     renderedBlocks.forEach((entry, index) => {
       const height = this.normalTranscriptBlockHeight(entry, index, renderedBlocks.length)
-      const scrollRange = entry.searchSelection?.scrollRange
-      if (scrollRange !== undefined) {
-        searchRange = {
-          startRow: transcriptRow + scrollRange.startRow,
-          endRow: transcriptRow + scrollRange.endRow,
-        }
-        searchSegments = entry.searchSelection === undefined
-          ? undefined
-          : this.paintedSegmentsForSelection(entry.searchSelection, transcriptRow)
+      if (entry.searchSelection?.scrollRange !== undefined) {
+        pendingSelection = { selection: entry.searchSelection, blockContentRow: transcriptRow }
       }
       if (height === 0) {
         rows.push(this.fullscreenRowEntry(entry, 0, false))
@@ -13709,8 +13771,11 @@ export class TuiApp {
     }
     this.transcriptChromeHeight = chromeHeight
     this.transcriptWelcomeHeight = this.welcomeCard.render(this.terminal.columns).length
-    this.currentSearchTranscriptRange = searchRange
-    this.currentSearchPaintedSegments = searchSegments?.map(segment => ({
+    const searchGeometry = pendingSelection === undefined
+      ? undefined
+      : this.resolveCurrentSearchGeometry(pendingSelection.selection, pendingSelection.blockContentRow)
+    this.currentSearchTranscriptRange = searchGeometry?.range
+    this.currentSearchPaintedSegments = searchGeometry?.segments?.map(segment => ({
       ...segment,
       documentRow: this.transcriptWelcomeHeight + segment.documentRow,
     }))
@@ -13847,7 +13912,7 @@ export class TuiApp {
     projectionExpanded = this.focusProjectionExpandedTurns(),
     blocks = this.transcriptBlocks(projectionExpanded),
   ): void {
-    void reason
+    if (reason !== 'search-presentation') this.searchQualificationEpoch += 1
     this.searchPresentationDiagnostics.rebuilds += 1
     // The rebuild re-derives the current target's cells and Source-only state
     // below; an older epoch's notice must not survive a pass that finds no
@@ -13991,6 +14056,7 @@ export class TuiApp {
    * Must measure at the SAME transcript content width the frame paints at
    * (the gutter contract), or the hit map drifts from the layout. */
   private refreshMessageRows(): void {
+    this.searchQualificationEpoch += 1
     this.searchPresentationDiagnostics.remeasures += 1
     const width = this.transcriptRenderWidth()
     // Measurement-only: the derived projection set is read once, and the
@@ -14033,20 +14099,12 @@ export class TuiApp {
     this.updateRenderedViewSearchGeometry(renderedBlocks, width, paddingRows)
     const rows: FullscreenRowEntry[] = []
     let transcriptRow = 0
-    let searchRange: RenderedSearchScrollRange | undefined
-    let searchSegments: readonly PaintedTargetSegment[] | undefined
+    let pendingSelection: { selection: RenderedSearchSelection; blockContentRow: number } | undefined
     for (let index = 0; index < renderedBlocks.length; index += 1) {
       const entry = renderedBlocks[index]!
       const height = this.normalTranscriptBlockHeight(entry, index, renderedBlocks.length)
-      const scrollRange = entry.searchSelection?.scrollRange
-      if (scrollRange !== undefined) {
-        searchRange = {
-          startRow: transcriptRow + scrollRange.startRow,
-          endRow: transcriptRow + scrollRange.endRow,
-        }
-        searchSegments = entry.searchSelection === undefined
-          ? undefined
-          : this.paintedSegmentsForSelection(entry.searchSelection, transcriptRow)
+      if (entry.searchSelection?.scrollRange !== undefined) {
+        pendingSelection = { selection: entry.searchSelection, blockContentRow: transcriptRow }
       }
       rows.push(this.fullscreenRowEntry(entry, height, height > 0 && index < renderedBlocks.length - 1))
       const padding = paddingRows.get(index) ?? 0
@@ -14054,8 +14112,11 @@ export class TuiApp {
       transcriptRow += height + padding
     }
     this.transcriptWelcomeHeight = this.welcomeCard.render(this.terminal.columns).length
-    this.currentSearchTranscriptRange = searchRange
-    this.currentSearchPaintedSegments = searchSegments?.map(segment => ({
+    const searchGeometry = pendingSelection === undefined
+      ? undefined
+      : this.resolveCurrentSearchGeometry(pendingSelection.selection, pendingSelection.blockContentRow)
+    this.currentSearchTranscriptRange = searchGeometry?.range
+    this.currentSearchPaintedSegments = searchGeometry?.segments?.map(segment => ({
       ...segment,
       documentRow: this.transcriptWelcomeHeight + segment.documentRow,
     }))
