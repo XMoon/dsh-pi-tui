@@ -71,9 +71,17 @@ export async function runHostDirectoryBrowse(context) {
     mkdirSync(join(markerPath, 'alpha'), { recursive: true, mode: 0o700 })
     mkdirSync(join(markerPath, '.hidden-child'), { recursive: true, mode: 0o700 })
     writeFileSync(join(markerPath, 'not-a-directory.txt'), 'pr1\n', { mode: 0o600 })
-    // ── The Client launch directory: a directory the Host home cannot know ──
+    // ── The CLIENT-LOCAL home: a directory the Host home cannot know. The
+    // Client process runs with its own HOME, so an implementation that ever
+    // read the Client filesystem/homedir instead of the Host would surface this
+    // name (and lose the Host marker).
+    const clientHome = join(workDir, 'pr1-client-home')
     const clientCwd = join(workDir, 'pr1-client-cwd')
-    mkdirSync(join(clientCwd, clientOnlyName), { recursive: true, mode: 0o700 })
+    mkdirSync(clientHome, { recursive: true, mode: 0o700 })
+    mkdirSync(clientCwd, { recursive: true, mode: 0o700 })
+    mkdirSync(join(clientHome, clientOnlyName), { recursive: true, mode: 0o700 })
+    assert(realpathSync(clientHome) !== realpathSync(hostHome),
+      'PR1 the Client and Host homes are the same directory; locality would not be provable')
 
     const { host, ready } = await startC1Host('directory-browse', 'PR1')
     const backendRows = (ready.entries ?? []).filter(entry =>
@@ -97,6 +105,10 @@ export async function runHostDirectoryBrowse(context) {
 
     const { client, ready: clientReady } = await startC1Client('PR1 read client', {
       SPLIT_PROCESS_CLIENT_READ_AUTHORITY_PROOF: requestPath,
+      // A DISTINCT Client-local HOME: the Host home stays the isolated Host
+      // account, so a Client filesystem/homedir read cannot masquerade as the
+      // Host answer.
+      HOME: clientHome,
     }, { cwd: clientCwd })
     assert(clientReady.sessionOpen === false && clientReady.surfaceMounted === true,
       `PR1 the read client is not a mounted Sessionless surface (${JSON.stringify({
@@ -149,7 +161,7 @@ export async function runHostDirectoryBrowse(context) {
     assert(namesOf(homeListing).includes(markerName),
       `PR1 the Host home listing does not include ${markerName}: ${JSON.stringify(namesOf(homeListing))}`)
     assert(!namesOf(homeListing).includes(clientOnlyName),
-      `PR1 the Client launch directory entry ${clientOnlyName} leaked into the Host home listing`)
+      `PR1 the Client-local home entry ${clientOnlyName} leaked into the Host home listing`)
     assert(home.sessionOpen === false && home.openSessionId === null,
       `PR1 the read ran inside an open Session: ${JSON.stringify({
         sessionOpen: home.sessionOpen,
@@ -176,6 +188,19 @@ export async function runHostDirectoryBrowse(context) {
     assert(namesOf(explicitListing).every(name => name !== 'not-a-directory.txt'),
       'PR1 the file row entered a directory-only listing')
 
+    // ── PR1-F: the REAL Host refusal stays a path failure, not unavailable ──
+    const missingPath = join(hostHome, `pi-tui-pr1-missing-${unique}`)
+    const missing = await probe({ path: missingPath }, 'PR1 missing Host path')
+    assert(missing.phase === 'directory-browse' && missing.outcome.kind === 'failed',
+      `PR1 a missing Host path produced ${JSON.stringify(missing.outcome ?? missing)}`)
+    assert(missing.outcome.code === 'directory-picker/unreadable',
+      `PR1 a missing Host path carries ${String(missing.outcome.code)}`)
+    const relative = await probe({ path: `pi-tui-pr1-relative-${unique}` }, 'PR1 relative Host path')
+    assert(relative.phase === 'directory-browse' && relative.outcome.kind === 'failed',
+      `PR1 a relative path produced ${JSON.stringify(relative.outcome ?? relative)}`)
+    assert(relative.outcome.code === 'directory-picker/unreadable',
+      `PR1 a relative path carries ${String(relative.outcome.code)}`)
+
     // ── PR1-E1: a caller abort after dispatch never yields a ready listing ──
     const aborted = await probe({ path: markerPath, abort: true }, 'PR1 abort after dispatch')
     assert(aborted.phase === 'directory-browse-rejected' && aborted.rejected === true,
@@ -195,8 +220,13 @@ export async function runHostDirectoryBrowse(context) {
       assert(dropRecord.outcome.kind !== 'ready',
         `PR1 a dropped read fabricated ${JSON.stringify(dropRecord.outcome)}`)
     } else {
-      assert(['SupersededReadError', 'AbortError'].includes(dropRecord.errorName),
-        `PR1 a dropped read failed as ${String(dropRecord.errorName)}, expected an official supersession/cancellation`)
+      // A read that crossed the drop is either superseded by the replaced
+      // generation or surfaces the carrier's observable failure (the official
+      // `gateway/internal` fold). It is never fabricated into an empty or
+      // unavailable listing.
+      assert(['SupersededReadError', 'AbortError', 'RemoteError'].includes(dropRecord.errorName),
+        `PR1 a dropped read failed as ${String(dropRecord.errorName)}, expected supersession/cancellation/carrier failure`)
+      assert(dropRecord.outcome === undefined, 'PR1 a dropped read emitted a listing outcome')
     }
     // The SAME Client must observe the official generation rollover and keep
     // reading the SAME Host afterwards.
@@ -236,6 +266,8 @@ export async function runHostDirectoryBrowse(context) {
       markerVisible: true,
       clientOnlyExcluded: true,
       explicitPathRows: namesOf(explicitListing).sort(),
+      missingPathRefused: missing.outcome.code,
+      relativePathRefused: relative.outcome.code,
       sessionless: true,
       workspaceBaselineStable: true,
       browseBackendActiveExactlyOnce: true,

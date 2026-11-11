@@ -113,7 +113,6 @@ test('the official failure codes are classified by code, never by message text',
     { code: 'directory-picker/unreadable', message: 'permission denied', kind: 'failed' },
     { code: 'directory-picker/unavailable', message: 'not fully qualified', kind: 'unavailable' },
     { code: 'gateway/cancelled', message: 'the Host cancelled', kind: 'unavailable' },
-    { code: 'gateway/internal', message: 'transport drop', kind: 'unavailable' },
     { code: 'gateway/service-unavailable', message: 'Host service down', kind: 'unavailable' },
     { code: 'gateway/method-unavailable', message: 'endpoint retired', kind: 'unavailable' },
     { code: 'gateway/peer-disposed', message: 'peer gone', kind: 'unavailable' },
@@ -132,6 +131,22 @@ test('the official failure codes are classified by code, never by message text',
 test('an unclassified protocol failure stays observable instead of becoming an outcome', async () => {
   const directoryPicker = new FakeDirectoryPicker()
   const failure = remoteFailure('gateway/protocol', 'malformed frame')
+  directoryPicker.listImpl = async () => ({ ok: false, error: failure })
+  await assert.rejects(
+    new RemoteHostDirectoryBrowsePort(directoryPicker, createSnapshotGenerationHarness().source)
+      .list(undefined, new AbortController().signal),
+    error => error === failure,
+  )
+})
+
+test('the generic gateway/internal failure stays observable, never a fabricated unavailable', async () => {
+  // The official controller folds ANY unexpected handler failure into
+  // `gateway/internal`, and the Client carrier folds a dropped transport into
+  // the SAME code. It is therefore not an authoritative "directory read is
+  // unavailable" fact: the caller must see the failure instead of an empty
+  // availability outcome that hides a Host bug.
+  const directoryPicker = new FakeDirectoryPicker()
+  const failure = remoteFailure('gateway/internal', 'directory listing failed: EACCES')
   directoryPicker.listImpl = async () => ({ ok: false, error: failure })
   await assert.rejects(
     new RemoteHostDirectoryBrowsePort(directoryPicker, createSnapshotGenerationHarness().source)
@@ -195,7 +210,7 @@ test('the adapter never retries and never consumes a Session identity', async ()
   let failures = 0
   directoryPicker.listImpl = async () => {
     failures += 1
-    return { ok: false, error: remoteFailure('gateway/internal', 'offline') }
+    return { ok: false, error: remoteFailure('gateway/service-unavailable', 'offline') }
   }
   const outcome = await new RemoteHostDirectoryBrowsePort(directoryPicker, createSnapshotGenerationHarness().source)
     .list(undefined, new AbortController().signal)
