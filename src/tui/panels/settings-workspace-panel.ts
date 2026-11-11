@@ -4161,6 +4161,11 @@ export class SettingsWorkspacePanel implements Component {
 
   handleInput(data: string): void {
     if (this.disposed) return
+    // A keyboard interaction SUPERSEDES any in-flight pointer gesture: the
+    // press-time painted target may repaint into a different action, and a
+    // hosted page may switch its own Question/Picker sub-view, before the
+    // release. Revoking here means a release after a keypress is always inert.
+    this.cancelPointerOwners()
     // The conditional directory is a fail-closed boundary of its own: a changed
     // registry membership revokes the painted grants BEFORE any dispatch, and
     // the event that DISCOVERED the change never navigates with it. Until a

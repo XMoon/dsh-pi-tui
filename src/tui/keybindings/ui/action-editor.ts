@@ -236,6 +236,13 @@ export class ActionEditorPanel implements Component {
     return this.row.id
   }
 
+  /** The detail page's own SEMANTIC identity for a pointer gesture: the action
+   *  plus its `edit`/`choose-binding` sub-mode and whether the recorder owns
+   *  the keys. The Settings root re-proves it at the release. */
+  gestureIdentity(): string {
+    return `${this.row.id}:${this.mode}:${this.recorder === undefined ? 'idle' : 'record'}`
+  }
+
   /** The complete visible Esc affordance span of the LAST PAINTED frame, in
    *  this panel's own content-column coordinates; undefined when it painted
    *  none (a pending write, a recorder state hint, a cut fallback). */

@@ -373,6 +373,11 @@ export class ModelsWorkspacePage implements Component {
   private readonly pageController = new AbortController()
   private disposed = false
   private revision = 0
+  /** Monotonic owner identities for the embedded transient owners: a replaced
+   *  Question/Picker must not let a press recorded on the previous owner's bar
+   *  act on the new one. */
+  private questionOwnerSerial = 0
+  private pickerOwnerSerial = 0
   private paintedTargets: readonly HitTarget[] = []
   private pressed: { readonly target: HitTarget; readonly revision: number; readonly width: number; readonly height: number } | undefined
   private lastWidth = 0
@@ -1671,6 +1676,7 @@ export class ModelsWorkspacePage implements Component {
   }
 
   private setQuestion(question: EmbeddedQuestion): void {
+    this.questionOwnerSerial += 1
     if (this.question === undefined) {
       this.question = question
       this.questionUsable = false
@@ -1698,6 +1704,7 @@ export class ModelsWorkspacePage implements Component {
   }
 
   private clearQuestions(): void {
+    this.questionOwnerSerial += 1
     this.question = undefined
     this.questionQueue.length = 0
     this.questionPress = undefined
@@ -1741,13 +1748,20 @@ export class ModelsWorkspacePage implements Component {
   gestureIdentity(): string {
     return JSON.stringify({
       view: this.view,
-      question: this.question !== undefined,
-      picker: this.picker !== undefined,
-      modelPicker: this.modelPicker !== undefined,
+      question: this.question === undefined
+        ? undefined
+        : { owner: this.questionOwnerSerial, mode: this.question.flow.interactionIdentity() },
+      picker: this.picker === undefined
+        ? undefined
+        : { owner: this.pickerOwnerSerial, header: this.picker.header, index: this.picker.index },
+      modelPicker: this.modelPicker === undefined
+        ? undefined
+        : { index: this.modelPicker.index, selected: [...this.modelPicker.selected].sort().join(',') },
       reference: this.referencePhase,
       add: this.add === undefined ? undefined : { step: this.add.step, creating: this.add.creating === true },
+      // A browse/read refresh is not an Esc-semantic change: it must not revoke
+      // a legitimate press (the bar cells and their meaning stay the same).
       clear: this.clear === undefined ? undefined : this.clear.phase,
-      read: this.readState,
     })
   }
 
@@ -2795,6 +2809,7 @@ export class ModelsWorkspacePage implements Component {
   }
 
   private setPicker(picker: PickerState): void {
+    this.pickerOwnerSerial += 1
     if (this.picker === undefined) this.picker = picker
     else this.pickerQueue.push(picker)
     this.revision += 1
@@ -2806,6 +2821,7 @@ export class ModelsWorkspacePage implements Component {
   private removePicker(picker: PickerState): void {
     const token = picker.token
     if (this.picker?.token === token) {
+      this.pickerOwnerSerial += 1
       this.picker = this.pickerQueue.shift()
     } else {
       const index = this.pickerQueue.findIndex(candidate => candidate.token === token)

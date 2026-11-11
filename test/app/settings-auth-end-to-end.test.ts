@@ -640,6 +640,86 @@ test('/logout mykey deletes the flow RECORD, never the MYKEY reference (RFL-001 
   h.close()
 })
 
+test('a keyboard Esc between a bar press and release never cancels the embedded QuestionFlow', async () => {
+  const h = open()
+  await h.vt.waitForRender()
+  ;(h as unknown as { invoke(line: string): unknown }).invoke('/login deepseek-official')
+  await waitForFrame(
+    h.view,
+    frame => frame.includes('API Key Reference') && frame.includes('Configure API Key'),
+    () => h.vt.waitForRender(),
+    'the /login deeplink must reach the API Key Reference page',
+  )
+  await key(h, '\r')
+  await waitForFrame(
+    h.view,
+    frame => frame.includes('Enter the API key') && frame.includes('Enter continue'),
+    () => h.vt.waitForRender(),
+    'Enter must open the masked embedded QuestionFlow',
+  )
+  const frame = h.rows()
+  const barRow = frame.length - 1
+  const col = frame[barRow]!.indexOf('Back [Esc]')
+  assert.ok(col >= 0, `the embedded question bar paints Back:\n${frame[barRow]}`)
+
+  // PRESS the bar's Back, then let the KEYBOARD Esc leave only the QuestionFlow's
+  // current Esc state (edit -> navigation; the question itself stays).
+  press(h, barRow, col)
+  await key(h, '\x1b')
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Enter the API key/u, 'the keyboard Esc left the question in place')
+  const after = h.rows()
+  const afterRow = after.length - 1
+  assert.equal(after[afterRow]!.indexOf('Back [Esc]'), col, 'the repaint keeps the same Back cells')
+
+  // RELEASE on the old cells: the keyboard input revoked the press, so it must
+  // NOT run a second Esc and cancel the question.
+  release(h, barRow, col)
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Enter the API key/u, 'the stale release did not cancel the QuestionFlow')
+  assert.equal(h.calls.some(call => call.startsWith('set:')), false, 'no Host write was attempted')
+  h.close()
+})
+
+test('one fresh bar click runs exactly ONE Esc step of the embedded QuestionFlow', async () => {
+  const h = open()
+  await h.vt.waitForRender()
+  ;(h as unknown as { invoke(line: string): unknown }).invoke('/login deepseek-official')
+  await waitForFrame(
+    h.view,
+    frame => frame.includes('API Key Reference') && frame.includes('Configure API Key'),
+    () => h.vt.waitForRender(),
+    'the /login deeplink must reach the API Key Reference page',
+  )
+  await key(h, '\r')
+  await waitForFrame(
+    h.view,
+    frame => frame.includes('Enter the API key') && frame.includes('Enter continue'),
+    () => h.vt.waitForRender(),
+    'Enter must open the masked embedded QuestionFlow',
+  )
+  const barCell = (): { row: number; col: number } => {
+    const rows = h.rows()
+    const row = rows.length - 1
+    const col = rows[row]!.indexOf('Back [Esc]')
+    assert.ok(col >= 0, `the embedded question bar paints Back:\n${rows[row]}`)
+    return { row, col }
+  }
+  const first = barCell()
+  await click(h, first.row, first.col)
+  assert.match(h.view(), /Enter the API key/u,
+    'the first click ran only the edit-exit Esc (the flow stays)')
+  // Two rapid clicks on the same cell are read as a terminal double click; give
+  // the gesture window time to reset so this is a SECOND independent click.
+  await new Promise<void>(resolve => setTimeout(resolve, 900))
+  const second = barCell()
+  await click(h, second.row, second.col)
+  assert.doesNotMatch(h.view(), /Enter the API key/u,
+    'the second independent click ran the navigation-state Esc exactly once (the flow cancels)')
+  assert.match(h.rows()[0]!, /Settings · Models/u, 'the Settings lease stays on the Models page')
+  h.close()
+})
+
 test('a 30x8 Settings workspace disables Enter for a clipped masked form; 40x16 keeps it visible (MA12)', async () => {
   const h = open()
   await h.vt.waitForRender()

@@ -323,8 +323,13 @@ test('binding choice arrows move in their named direction', () => {
   try {
     panel.handleInput('\x1b[B')
     panel.handleInput('\r')
+    const detailIdentity = panel.gestureIdentity()
     panel.handleInput('\x1b[B')
     panel.handleInput('\r')
+    // The detail page's choose-binding sub-mode changes what its Esc does even
+    // when the bar cells repeat; the gesture identity must follow it.
+    assert.notEqual(panel.gestureIdentity(), detailIdentity,
+      'the choose-binding submode changes the page gesture identity')
     let view = plain(panel.render(88).join('\n'))
     assert.match(view, /› Direct shortcut/)
     panel.handleInput('\x1b[B')
