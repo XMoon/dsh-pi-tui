@@ -24,8 +24,13 @@
 export interface SubmitFlowDeps {
   /** Reserve the referenced drafts synchronously; returns the release. */
   reserve(text: string): () => void
-  /** The async submission work (ensure session, prepare, send). */
-  run(text: string): Promise<void>
+  /**
+   * The async submission work (ensure session, prepare, send). `release`
+   * ends THIS gesture's synchronous reservation early (idempotent); a
+   * successful write uses it before consuming drafts so a draft shared with
+   * another accepted submission is not retired under that sibling.
+   */
+  run(text: string, release: () => void): Promise<void>
   /** Restore the editor draft on failure (before the release). */
   restore(text: string): void
 }
@@ -40,9 +45,15 @@ export interface SubmitFlowDeps {
  *   onError then notifies — never a second restore).
  */
 export async function runReservedSubmit(flow: SubmitFlowDeps, text: string): Promise<void> {
-  const release = flow.reserve(text)
+  const reserveRelease = flow.reserve(text)
+  let released = false
+  const release = (): void => {
+    if (released) return
+    released = true
+    reserveRelease()
+  }
   try {
-    await flow.run(text)
+    await flow.run(text, release)
   } catch (error: unknown) {
     // Failure: restore the editor draft BEFORE the reservation releases —
     // the restored placeholders must keep their backing drafts against

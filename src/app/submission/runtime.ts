@@ -154,7 +154,10 @@ export interface SubmissionRuntime {
    * reserved-submit pin/release/restore wrapper; this method owns the ordered
    * write and its terminal ack/echo settlement.
    */
-  submitPrompt(submission: PromptSubmission): Promise<void>
+  submitPrompt(
+    submission: PromptSubmission,
+    options?: { readonly releaseReservation?: () => void },
+  ): Promise<void>
   /**
    * M4 PR4: open ONE accepted business-write lifetime and return its release.
    * The increment happens in the caller's SYNCHRONOUS acceptance stack; the
@@ -232,7 +235,10 @@ export function bindSubmissionRuntime(deps: SubmissionRuntimeDeps): SubmissionRu
         : STALE_DROPPED_NOTICE, 'error')
   }
 
-  const submitPrompt = async (submission: PromptSubmission): Promise<void> => {
+  const submitPrompt = async (
+    submission: PromptSubmission,
+    options?: { readonly releaseReservation?: () => void },
+  ): Promise<void> => {
     // M4 PR4: this entry can be reached without the submit FIFO (e.g. the
     // command fallback), so it holds its OWN write lifetime from this
     // synchronous admission until the writer promise settles. The FIFO layer
@@ -292,7 +298,10 @@ export function bindSubmissionRuntime(deps: SubmissionRuntimeDeps): SubmissionRu
           throw new Error(outcome.reason)
         }
         // Consume ONLY the referenced drafts — a concurrent intake's newer
-        // image survives.
+        // attachment survives. Release this gesture's reservation first so a
+        // draft shared with another accepted submission is not retired under
+        // that sibling; `consume` removes only genuinely unowned drafts.
+        options?.releaseReservation?.()
         surface.consumeDraftAttachments(text)
       }))
     } catch (error) {
@@ -962,7 +971,7 @@ function steerSubmission(deps: SteerSubmissionDeps, input: SteerSubmissionInput)
         throw error
       }
     },
-    run: async () => {
+    run: async (_text, releaseReservation) => {
       await submitTurn.wait
       if (deps.isDisposed()) return
       // The deferred-start gate: the steered draft's history row is written
@@ -1105,8 +1114,14 @@ function steerSubmission(deps: SteerSubmissionDeps, input: SteerSubmissionInput)
       if (admission.kind === 'stale') return
       const outcome = admission.outcome
       if (deps.isDisposed()) return
-      // Only a successful send consumes the drafts.
-      if (outcome === 'ok') deps.consumeDraftAttachments(text)
+      // Only a successful send consumes the drafts. Release THIS gesture's
+      // reservation first: a draft shared with another accepted submission
+      // must not be retired under that sibling (its failure still needs the
+      // editor line to resolve). `consume` is pin-aware.
+      if (outcome === 'ok') {
+        releaseReservation()
+        deps.consumeDraftAttachments(text)
+      }
       // Only a NON-delivered steer settles the ack row here: 'ok' waits for the
       // authoritative inbox event.
       if (outcome !== 'ok') {
@@ -1154,7 +1169,6 @@ export interface HostCommandSubmissionDeps {
   readonly mergeDraftIntoEditor: (text: string) => boolean
   readonly restoreSubmissionDraft: (text: string) => void
   readonly consumeDraftAttachments: (text: string) => void
-  readonly draftHasAttachments: (text: string) => boolean
   readonly pinDraftAttachments: (text: string) => () => void
   readonly settleLocalSubmission: (requestId: string) => void
   readonly settleSubmitAck: (reason: string, options: { readonly token: number; readonly terminal: true }) => void
@@ -1194,7 +1208,10 @@ export interface HostCommandSubmissionDeps {
   readonly shouldConsumeAdvertisedMiss: (execution: HostCommandExecutionLike | undefined, planeAdvertised: boolean) => boolean
   readonly isIndeterminateSkillWrite: (error: unknown) => boolean
   readonly startArtifactSave: (name: 'export' | 'transcript') => void
-  readonly submitPrompt: (submission: PromptSubmission) => Promise<void>
+  readonly submitPrompt: (
+    submission: PromptSubmission,
+    options?: { readonly releaseReservation?: () => void },
+  ) => Promise<void>
   readonly commandSessionId: () => string
   readonly markTurnTransferred: () => void
   readonly diag: Diag
@@ -1237,8 +1254,12 @@ export function executeHostCommandSubmission(
   const fallbackPin = deps.pinDraftAttachments(text)
   const lateRefusal = deps.lateAttachmentRefusal()
   if (lateRefusal !== undefined) {
+    // The refusal itself is derived from THIS gesture's frozen snapshot (a
+    // concurrent success may have consumed the shared live draft), so the
+    // complete submitted line is always restored here — the editor must be
+    // able to show and re-resolve what was refused.
     fallbackPin()
-    if (deps.draftHasAttachments(text)) deps.restoreSubmissionDraft(text)
+    deps.restoreSubmissionDraft(text)
     deps.notify(lateRefusal, 'error')
     deps.settleLocalSubmission(submitRequestId)
     deps.settleSubmitAck('attachments refused by the command declaration', { token: submitAckToken, terminal: true })
@@ -1394,7 +1415,7 @@ export function executeHostCommandSubmission(
             const task = runReservedSubmit({
               // TRANSFER the handoff reservation, never a second pin.
               reserve: () => fallbackPin,
-              run: () => deps.submitPrompt({
+              run: (_text, releaseReservation) => deps.submitPrompt({
                 text,
                 scope,
                 requestId: submitRequestId,
@@ -1402,7 +1423,7 @@ export function executeHostCommandSubmission(
                 generation,
                 echoInstalled: localEchoInstalled,
                 staleSubject: input.staleSubject,
-              }),
+              }, { releaseReservation }),
               restore: (t) => deps.restoreSubmissionDraft(t),
             }, text)
             // This nested submission starts one callback later, so teardown
@@ -1440,15 +1461,22 @@ export function executeHostCommandSubmission(
         // error keeps them for correction. The illegal-kind case already threw
         // above, before this settlement block.
         if (resultKind === 'success') {
+          // Release THIS gesture's handoff reservation BEFORE consumption:
+          // a placeholder shared with another accepted submission is still
+          // reserved by that sibling, and `consume` must not retire it (the
+          // sibling may fail and restore the same line). The last consumer
+          // removes it.
+          fallbackPin()
+          submitTurn.release()
           deps.consumeDraftAttachments(text)
-        } else if (draftDisposition !== 'restored' && draftDisposition !== 'suppressed') {
-          deps.restoreSubmissionDraft(text)
-        }
-        fallbackPin()
-        submitTurn.release()
-        if (resultKind === 'success') {
           const commandName = input.parsedName
           if (commandName === 'export' || commandName === 'transcript') deps.startArtifactSave(commandName)
+        } else {
+          if (draftDisposition !== 'restored' && draftDisposition !== 'suppressed') {
+            deps.restoreSubmissionDraft(text)
+          }
+          fallbackPin()
+          submitTurn.release()
         }
       }
     },

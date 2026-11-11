@@ -346,7 +346,7 @@ test('the queue-recall state and the plain-submit write body live in app/submiss
   const controller = readFileSync(new URL('../../src/app/submission/controller.ts', import.meta.url), 'utf8')
   assert.equal((controller.match(/deps\.submissionRuntime\.submitPrompt\(/g) ?? []).length, 1,
     'the agent-facing write must delegate to the submission runtime through submitPrompt')
-  assert.ok(controller.includes('submitPrompt: (submission) => deps.submissionRuntime.submitPrompt(submission)'),
+  assert.ok(controller.includes('submitPrompt: (submission, options) => deps.submissionRuntime.submitPrompt(submission, options)'),
     'the delegation is the command-submission fallback hook (never a second write path)')
 })
 

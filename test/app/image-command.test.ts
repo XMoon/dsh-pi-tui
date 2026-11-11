@@ -408,7 +408,13 @@ test('command fallback SUCCESS: the handoff pin transfers and releases exactly o
   // leak the handoff forever (review finding).
   await runReservedSubmit({
     reserve: () => handoff,
-    run: async () => { consumeDraftAttachments(text, imageStore) },
+    // A successful write releases THIS gesture's handoff reservation before
+    // consuming; `consumeDraftAttachments` then retires only drafts no other
+    // accepted submission still reserves.
+    run: async (_text, release) => {
+      release()
+      consumeDraftAttachments(text, imageStore)
+    },
     restore: () => {},
   }, text)
   assert.equal(imageStore.isPinned(draft.id), false, 'the handoff pin is released after the nested submit')
