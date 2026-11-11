@@ -140,7 +140,7 @@ export async function runPtySessionWriteRecovery(context) {
     for (const owner of ['typert', 'connection', 'remote', 'fileUpload', 'sessions', 'jobs']) {
       assert(c1Ready.owners?.[owner] === 1, `T27 expected exactly one ${owner} owner`)
     }
-    assert(c1Ready.privateNamespaces === 2, 'T27 expected exactly the two private pi-tui namespaces')
+    assert(c1Ready.privateNamespaces === 3, 'T27 expected exactly the three private pi-tui namespaces')
     assertClientHostFacts(c1Ready.host, surfaceHostFacts, 'T27 surface Client')
     await c1.waitForScreen('type a message to start a session', 'T28 sessionless Welcome')
     trace('t27-t28', {
@@ -468,7 +468,7 @@ export async function runPtySessionWriteRecovery(context) {
     assert(privateProof.fileOk === true, 'T36 the private PiFile RPC did not succeed')
     assert(typeof privateProof.fileKind === 'string', 'T36 the private PiFile RPC returned no business kind')
     assert(privateProof.terminalKind === 'snapshot', 'T36 the terminal-progress watch did not open with a snapshot')
-    assert(privateProof.owners?.sessions === 1 && privateProof.privateNamespaces === 2,
+    assert(privateProof.owners?.sessions === 1 && privateProof.privateNamespaces === 3,
       'T36 the private proof observed a duplicate/absent Domain owner')
     // Migrated from the retired built-bundle smoke: the private endpoint's
     // Host workspace semantics over the REAL authenticated split wire.

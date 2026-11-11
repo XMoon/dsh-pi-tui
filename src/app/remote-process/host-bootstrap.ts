@@ -23,6 +23,7 @@ import { PI_TUI_HOST_READY_SERVICE } from '../host/pi-tui-host-runtime.ts'
 import { PI_TUI_FILE_REFERENCES_NAMESPACE } from '../../runtime/remote/pi-tui-file-reference-contract.ts'
 import { PI_TUI_TERMINAL_PROGRESS_NAMESPACE } from '../../runtime/remote/pi-tui-terminal-progress-contract.ts'
 import { PI_TUI_WEB_ACCESS_NAMESPACE } from '../../runtime/remote/pi-tui-web-access-contract.ts'
+import { PI_TUI_SKILLS_NAMESPACE } from '../../runtime/remote/pi-tui-skills-contract.ts'
 
 /** Cordis `FiberState.ACTIVE` (the enum is a const enum with no runtime value). */
 const FIBER_ACTIVE = 2
@@ -138,11 +139,12 @@ const OFFICIAL_LOADER_OWNER_PACKAGES = [
   { owner: 'accountController', id: 'split-host-account-controller', name: '@deepseek-ai/dsh-api-account-controller' },
 ] as const
 
-/** The package's three private endpoint bindings. */
+/** The package's four private endpoint bindings. */
 const PRIVATE_TYPERT_BINDINGS = [
   { serviceKey: 'piTuiFileReferences', namespace: PI_TUI_FILE_REFERENCES_NAMESPACE },
   { serviceKey: 'piTuiTerminalProgress', namespace: PI_TUI_TERMINAL_PROGRESS_NAMESPACE },
   { serviceKey: 'piTuiWebAccess', namespace: PI_TUI_WEB_ACCESS_NAMESPACE },
+  { serviceKey: PI_TUI_SKILLS_NAMESPACE, namespace: PI_TUI_SKILLS_NAMESPACE },
 ] as const
 
 /**
@@ -223,6 +225,7 @@ export function collectHostEntryStatus(
     // frontend itself stays OFF by default: the Host must be Ready with Web
     // disabled, and the toggle must never be a Web-composition prerequisite.
     PI_TUI_WEB_ACCESS_NAMESPACE,
+    PI_TUI_SKILLS_NAMESPACE,
     PI_TUI_HOST_READY_SERVICE,
     'piTuiPerformanceReady',
   ]) {

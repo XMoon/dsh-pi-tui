@@ -144,7 +144,7 @@ import { serializeTuiSettingsMutation, type TuiSettingsDoc } from '../runtime/co
 import type { AssistantLiveInput } from '../runtime/assistant-stream-port.ts'
 import { requireCreated, requireOpened, type SessionHandle, type WorkspaceSelectionIntent } from '../runtime/session-lifecycle-port.ts'
 import { listGlobalCommands, readSurfaceCatalog, type SurfaceCatalogContext, type SurfaceCommandsService } from '../runtime/direct/surface-catalog.ts'
-import { commandSummaryOf, type SurfaceCatalogSnapshot } from '../domain/catalog/surface.ts'
+import { commandSummaryOf, type InitialCatalogResolution, type SurfaceCatalogSnapshot } from '../domain/catalog/surface.ts'
 import { parseCommand } from '@deepseek-ai/dsh-commands'
 import { createClientCommandRegistry } from './command/client-command-registry.ts'
 import { composeRemoteSessionStats, composeRemoteLastAssistantText } from './remote/session-facts-compose.ts'
@@ -1432,17 +1432,25 @@ export function applyRunnerWithRuntime(
           diag.warn('preset resolution failed at startup', { error: safeErrorMessage(error) })
         }
       }
-      const resolution = await resolveInitialCatalog({
-        liveAgent: agentNow(),
-        presetId: effectivePresetId,
-        signal: lifecycleController.signal,
-        ctx: ctx as unknown as SurfaceCatalogContext,
-        diag,
-        // The catalog read may emit its own failure warn: suspend the
-        // status right before it (the barrier itself keeps the status
-        // on screen).
-        onLog: () => startupStatus.clear(),
-      })
+      // The pre-mount cold read is DIRECT-only: on the Remote branch there is no
+      // Direct agent and no Host-authoritative workspace yet, so reading the
+      // Client process cwd here would present Client filesystem as Host
+      // catalog authority. The Remote standing catalog installs through the
+      // coordinator once a Host Workspace is confirmed (and the live catalog
+      // through `refreshLiveCatalogById` for a resumed Session).
+      const resolution: InitialCatalogResolution = remoteSources === undefined
+        ? await resolveInitialCatalog({
+          liveAgent: agentNow(),
+          presetId: effectivePresetId,
+          signal: lifecycleController.signal,
+          ctx: ctx as unknown as SurfaceCatalogContext,
+          diag,
+          // The catalog read may emit its own failure warn: suspend the
+          // status right before it (the barrier itself keeps the status
+          // on screen).
+          onLog: () => startupStatus.clear(),
+        })
+        : {}
       initialSnapshot = resolution.snapshot
       initialSkills = resolution.skills
       surfaceNotice = resolution.notice
@@ -3921,6 +3929,31 @@ export function applyRunnerWithRuntime(
     // The pre-mount snapshot installs SYNCHRONOUSLY inside registration —
     // the first terminal input cannot arrive before this call stack unwinds.
     command.register({ snapshot: initialSnapshot, skills: initialSkills })
+    // Remote sessionless startup: the FIRST standing read waits for the Host
+    // Workspace preflight to commit the confirmed WorkspaceId, then runs the
+    // SAME coordinator refresh the Sessions directory actions use. Without a
+    // confirmed Workspace the read stays a local incomplete projection (the
+    // command surface never sends the Client cwd to the Host).
+    if (remoteSources !== undefined && ownership.currentSessionId() === undefined) {
+      runOwned('sessionless standing catalog refresh', async () => {
+        await sessionRuntime.awaitWorkspacePreflight()
+        return command.runner().refreshStandingCatalog(
+          command.runner().effectivePresetId,
+          'invalidation',
+        )
+      }, {
+        diag,
+        sessionId: () => ownership.currentSessionId(),
+        onResult: (outcome) => {
+          if (outcome.kind === 'applied' && outcome.notice !== undefined) {
+            surface.display.notify(outcome.notice, 'error')
+          }
+        },
+        onError: (error) => {
+          diag.warn('sessionless standing catalog refresh failed', { error: safeErrorMessage(error) })
+        },
+      })
+    }
     // PR-C (TSP-7): the `/model` UI entry is armed the moment its registration
     // settled and BEFORE `bindRendererInput()` (the end of this startup) can
     // deliver the first bound input. The entry runs the SAME registered

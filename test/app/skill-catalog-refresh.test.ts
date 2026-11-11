@@ -70,7 +70,11 @@ function catalogOf(skills: string[], complete = true): HumanSkillCatalog {
 /** Scripted hooks recording every call. */
 function scriptedHooks(script: {
   read?: (agent: Agent, signal: AbortSignal) => Promise<SurfaceCatalogSnapshot> | never
-  standing?: (presetId: string | undefined, signal: AbortSignal) => Promise<{ catalog: HumanSkillCatalog; notice?: string }> | never
+  standing?: (
+    presetId: string | undefined,
+    workspaceId: string | undefined,
+    signal: AbortSignal,
+  ) => Promise<{ catalog: HumanSkillCatalog; notice?: string }> | never
 } = {}) {
   const calls: { kind: 'transition' | 'install' }[] = []
   const installed: SurfaceCatalogSnapshot[] = []
@@ -82,9 +86,9 @@ function scriptedHooks(script: {
       }
       throw new Error('unexpected read')
     },
-    readStanding: async (presetId, signal) => {
+    readStanding: async (presetId, workspaceId, signal) => {
       if (script.standing !== undefined) {
-        const result = script.standing(presetId, signal)
+        const result = script.standing(presetId, workspaceId, signal)
         return result instanceof Promise ? abortAware(result, signal) : result
       }
       throw new Error('unexpected standing read')
@@ -531,8 +535,68 @@ test('an incomplete standing observation on a TARGET CHANGE keeps the transition
   }
 })
 
-test('a user preset literally named "default" transitions away from the deployment default', async () => {
+test('the same preset on a DIFFERENT Host Workspace is a target change: the previous scoped catalog transitions first', async () => {
+  const reads: Array<{ presetId: string | undefined; workspaceId: string | undefined }> = []
   const { hooks, calls, installed } = scriptedHooks({
+    standing: async (presetId, workspaceId) => {
+      reads.push({ presetId, workspaceId })
+      return { catalog: catalogOf([workspaceId ?? 'no-workspace']) }
+    },
+  })
+  const { diag } = capturingDiag()
+  const coordinator = new CatalogRefreshCoordinator(hooks, new AbortController().signal, diag)
+  const first = await coordinator.refresh({
+    source: 'invalidation',
+    target: { kind: 'preset', presetId: 'standard', workspaceId: 'ws-1' },
+  })
+  assert.equal(first.kind, 'applied')
+  const transitionsBefore = calls.filter(call => call.kind === 'transition').length
+  const second = await coordinator.refresh({
+    source: 'invalidation',
+    target: { kind: 'preset', presetId: 'standard', workspaceId: 'ws-2' },
+  })
+  assert.equal(second.kind, 'applied')
+  assert.equal(
+    calls.filter(call => call.kind === 'transition').length,
+    transitionsBefore + 1,
+    'the Workspace owner changed even though the preset did not: the old wrappers must enter revalidating',
+  )
+  assert.deepEqual(reads, [
+    { presetId: 'standard', workspaceId: 'ws-1' },
+    { presetId: 'standard', workspaceId: 'ws-2' },
+  ], 'each read receives the WorkspaceId captured by its own request')
+  assert.deepEqual(installed.map(snapshot => snapshot.skills.map(skill => skill.name)), [['ws-1'], ['ws-2']])
+})
+
+test('a same-target standing refresh keeps the last-good catalog when the Host reports incomplete', async () => {
+  let calls = 0
+  const { hooks, installed } = scriptedHooks({
+    standing: async (presetId, workspaceId) => {
+      calls += 1
+      return references.catalog(workspaceId)
+    },
+  })
+  const references = {
+    catalog: (workspaceId: string | undefined): { catalog: HumanSkillCatalog } => calls === 1
+      ? { catalog: catalogOf([`${workspaceId}-good`]) }
+      : { catalog: catalogOf([], false) },
+  }
+  const { diag } = capturingDiag()
+  const coordinator = new CatalogRefreshCoordinator(hooks, new AbortController().signal, diag)
+  await coordinator.refresh({
+    source: 'invalidation',
+    target: { kind: 'preset', presetId: 'standard', workspaceId: 'ws-1' },
+  })
+  const outcome = await coordinator.refresh({
+    source: 'invalidation',
+    target: { kind: 'preset', presetId: 'standard', workspaceId: 'ws-1' },
+  })
+  assert.equal(outcome.kind, 'applied')
+  assert.deepEqual(installed.at(-1)?.skills.map(skill => skill.name), ['ws-1-good'],
+    'an incomplete same-target observation must not replace the last-good Workspace catalog')
+})
+
+test('a user preset literally named "default" transitions away from the deployment default', async () => {  const { hooks, calls, installed } = scriptedHooks({
     standing: async (presetId) => ({ catalog: catalogOf([presetId ?? 'deployment-default']) }),
   })
   const { diag } = capturingDiag()

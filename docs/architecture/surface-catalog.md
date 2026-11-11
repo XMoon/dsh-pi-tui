@@ -17,11 +17,18 @@ and human skills without creating an Agent, a session or a turn.
 There is no catalog probe. A probe session would be created through
 `agents.create()` and the base permission preset writes three durable knob
 events on `session/created`, so a probe both fails the zero-event gate and
-leaves a durable artifact. The cold surface is read through the standing scope
-instead: `agentPresets.standingKeyFor(id)` resolves the preset's standing
-composition and returns its `ScopeKey` without creating an Agent, session or
-turn. If an upstream change removes `standingKeyFor()`/`snapshot()`, the
-affected commands are merely absent; the TUI never fails to start.
+leaves a durable artifact. The cold surface is read through the preset's standing scope. There is no probe
+Agent: `agentPresets.acquireScope(id)` returns the preset's retained revision
+lease (`{key}`) and the caller releases it after the scoped read completes, so
+the composition being read cannot drift mid-read. The location whose skills are
+read is explicit: Direct reads its own co-located Host directory
+(`co-located-directory`), while the Remote Client sends the confirmed
+Host-issued WorkspaceId (`host-workspace`) to the private Host-standing endpoint
+and never its own process cwd. A Remote Client without a confirmed Workspace
+performs no Host RPC: the read is a local unavailable/incomplete projection
+with one explicit selection notice, never a fabricated complete empty catalog.
+If an upstream capability disappears, the affected commands are merely absent;
+the TUI never fails to start.
 
 ```text
 --session start:
@@ -31,14 +38,21 @@ affected commands are merely absent; the TUI never fails to start.
     -> registerTuiCommands(runner, snapshot)   (one synchronous commit)
     -> first input sees the full effective catalog
 
-deferred start (no --session):
+deferred start (no --session), Direct:
   loader.await()
     -> resolveInitialCatalog()          (cold HUMAN SKILL catalog through the
-    -> startProcessTui()                 effective preset's STANDING SCOPE)
+    -> startProcessTui()                 effective preset's STANDING SCOPE/key)
     -> registerTuiCommands(runner, skills)
     -> first input: global commands + standing skill wrappers
     -> the first real session's coordinator refresh swaps in the LIVE
        surface BEFORE the submission is dispatched (ensureSession awaits it)
+
+deferred start (no --session), Remote:
+  mount (no Session)
+    -> Host Workspace preflight confirms the launch directory
+    -> CatalogRefreshCoordinator preset refresh (Host standing read)
+    -> Use directory / Add directory commits a new WorkspaceId
+    -> the coordinator refresh is re-issued for that NEW target
 ```
 
 ## Refresh ownership
@@ -50,22 +64,65 @@ After mount, one `CatalogRefreshCoordinator` owns every refresh:
   (blank-session recompose) and live `/reload` read the LIVE agent's surface
   (commands + scoped commands + skills via `readSurfaceCatalog`).
 - **Preset targets** (sessionless): `/preset <id>`, an unmasked
-  `/preset default <id>`, sessionless `/reload`, and `skills/change`
-  notifications read the STANDING skill catalog of the effective preset
-  (skills only, via `resolveColdSkillTarget` + `readHumanSkillCatalog`).
+  `/preset default <id>`, sessionless `/reload`, the Host Skills invalidation
+  notification and the Host Workspace selection/add gestures read the STANDING
+  skill catalog of the effective preset. The target identity is
+  `(presetId, workspaceId)`: a Remote Client supplies the confirmed
+  Host-issued WorkspaceId captured at refresh admission, a Direct Client omits
+  it (the backend adapter uses its co-located directory). Changing only the
+  Workspace is therefore a TARGET CHANGE: the old wrappers and inline lexicon
+  enter the revalidating transition before the new Workspace is read, so a
+  same-preset switch never serves the previous Workspace's skills.
 - **Remote connection generation**: a new defined generation after reconnect
   triggers one same-Session/same-target refresh (`'invalidation'` source)
   against the session id read at callback time. Capture-before-subscribe makes
   a synchronous subscription-time notification a no-op. While the generation is
   undefined, no catalog RPC is issued and nothing is cleared. A failed
   reconnect reread keeps the last-good provider field and reserved claims; a
-  successful reread replaces them. Reconnect is not a Session transition.
+  successful reread replaces them. Reconnect is not a Session transition. The
+  private Skills invalidation stream re-arms on the same generation change and
+  its Host startup frame re-reads the CURRENT target (Live or Sessionless), so
+  a Sessionless reconnect also refreshes.
 
 Each refresh is an explicit request naming its target; a new request aborts the
 active one and only the latest epoch may commit, so a stale standing result can
 never replace a live-Agent result. `skills/change` bursts are coalesced by
 `CoalescingRefreshGate` (at most two reads per burst; the follow-up read
 observes the current ownership).
+
+## Host-owned standing skills and hot invalidation
+
+Remote Sessionless skill metadata is Host-owned; the Client never scans its own
+filesystem for it.
+
+- The private `piTuiSkills/standing` endpoint takes `{presetId?, workspaceId}`.
+  The Host resolves `workspaceId` through the official Workspace registry and
+  reads the Host canonical path; the Client cwd, a profile directory or an
+  implicit "default workspace" is never a substitute, and an unknown/revoked id
+  is a Host error rather than an empty success. A missing `workspaceId` is
+  refused at the strict wire codec.
+- The Host reads `ctx.skills.snapshot({cwd: workspace.path, scope: lease.key,
+  signal})` while holding the official `agentPresets.acquireScope(presetId)`
+  revision lease, releases it in `finally`, and projects only human-invocable
+  metadata (`name`, `description`, `whenToUse`, `modelInvocable`) under the
+  official policy, sorted by name. Skill bodies, paths, locators, scope keys,
+  provider instances and Host service objects never cross the wire, and
+  `complete` is passed through unchanged.
+- A Live Session keeps using the official Session-addressed
+  `remote.skills.list({sessionId})`; the standing endpoint never guesses a live
+  scope, and the Host never sends a Skill body for injection.
+- The private `piTuiSkills/watchInvalidations` stream carries only
+  `{kind:'invalidated'}`. Every attach starts with one startup frame (the
+  subscribe-then-reread barrier); the Host `skills/change` event only sets a
+  pending bit that wakes the generator, so bursts coalesce and no sequence,
+  timestamp, diff or replay is promised. Abort, Client disposal and Host plugin
+  disposal end the stream and release the Host listener.
+- The Client maps every frame into the SAME `CoalescingRefreshGate` +
+  `CatalogRefreshCoordinator` path as Direct's `skills/change` event. A stream
+  failure is reported through the owner's error sink (never silently lost): the
+  current catalog stays last-good and the next connection generation, explicit
+  `/reload` or surface rebuild re-establishes observation. The subscription
+  disposer runs BEFORE the coordinator disposal.
 
 ## Modules
 
@@ -78,6 +135,8 @@ observes the current ownership).
 | `src/app/direct/initial-catalog.ts` | Pre-mount resolution: resume prefetch or the cold standing-scope skill read, with one-shot degradation notices |
 | `src/runtime/catalog-port.ts` | Semantic catalog port + `StandingSkillRead` beside `SkillCatalogCapability` |
 | `src/app/command/catalog-refresh.ts` | `CatalogRefreshCoordinator` (epoch + abort + latest-only commit; target transitions; same-target retention; standing degradation notices; dispose cancellation) and `CoalescingRefreshGate` |
+| `src/app/host/features/skills.ts` | Host-owned standing read (official Workspace registry + preset lease + `ctx.skills.snapshot`, metadata-only projection) and the private invalidation stream |
+| `src/runtime/remote/pi-tui-skills-contract.ts` | Strict private wire contract for `piTuiSkills/standing` and `piTuiSkills/watchInvalidations` (single shared descriptor truth) |
 | `src/tui/interaction/autocomplete/skill-reference.ts` | Pure Client-local inline skill-reference grammar (`extractInlineSkillPrefix`, `applyInlineSkillReference`): no Context/Agent/Session/registry/Remote access |
 | `src/tui/interaction/autocomplete/provider.ts` | `MentionProvider` inline skill source: prompt-mode routing, fuzzy candidates from the detached `HumanSkillSummary[]`, strict snapshot fence, catalog-guarded apply |
 
@@ -240,10 +299,10 @@ provider credential.
 1. **Chat owner invariant** — only resume, `ensureSession()`, `/new`, `/fork`
    and session switches may write `liveHandle`/`liveAgent`. Catalog discovery
    NEVER does.
-2. **No discovery Agent or session** — cold paths only call
-   `standingKeyFor()` + `snapshot()`/`list()`; nothing calls `agents.create()`
-   for a catalog. If those capabilities disappear, degrade (missing commands),
-   never probe.
+2. **No discovery Agent or session** — cold paths only take the official
+   `agentPresets.acquireScope()` lease and read `snapshot()`/`list()`; nothing
+   calls `agents.create()` for a catalog. If those capabilities disappear,
+   degrade (missing commands), never probe.
 3. **No durable side effects from opening the TUI** — the deferred start
    creates no agent and writes no session; the resumed path only READS.
 4. **Detached data only** — a snapshot carries command display fields and skill
@@ -252,8 +311,11 @@ provider credential.
    to the live agent (`commands.execute(realAgent, ...)`; `loadSkill` re-`get`s
    and re-checks `isUserInvocable`).
 5. **Standing-scope authority** — a cold preset catalog uses the exact
-   `ScopeKey` returned by `standingKeyFor()`; the live surface uses the agent
-   object. A real Agent's view always replaces the cold snapshot.
+   `ScopeKey` returned by the official `agentPresets.acquireScope()` lease,
+   released after the read, and the exact location identity the backend owns
+   (Direct: co-located directory; Remote: the confirmed Host WorkspaceId
+   resolved by the Host). The live surface uses the agent object. A real
+   Agent's view always replaces the cold snapshot.
 6. **Claims** — the completion list IS the advertised set. The dispatch
    captures `wasAdvertised` BEFORE any session creation; an advertised command
    missing from the real session is consumed with an explicit error and never

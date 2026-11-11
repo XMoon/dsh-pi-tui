@@ -54,7 +54,7 @@ export type CatalogRefreshSource = 'live-session' | 'preset' | 'reload' | 'inval
  * explicitly. */
 export type CatalogRefreshTarget =
   | { readonly kind: 'agent'; readonly key: number }
-  | { readonly kind: 'preset'; readonly presetId: string | undefined }
+  | { readonly kind: 'preset'; readonly presetId: string | undefined; readonly workspaceId?: string }
 
 /** One explicit refresh request. */
 export interface CatalogRefreshRequest {
@@ -78,7 +78,11 @@ export interface CatalogRefreshHooks {
   readAgent(agent: CatalogReadTarget, signal: AbortSignal): Promise<SurfaceCatalogSnapshot>
   /** Read the standing skill catalog of one preset (preset target): the
    * adapter's capability-gated cold read, never an Agent probe. */
-  readStanding(presetId: string | undefined, signal: AbortSignal): Promise<StandingSkillRead>
+  readStanding(
+    presetId: string | undefined,
+    workspaceId: string | undefined,
+    signal: AbortSignal,
+  ): Promise<StandingSkillRead>
   /** Whether the READ TARGET's transport/ownership identity is still live
    *  (the §2.2/§16 final atomic-install fence): `captureTargetIdentity` is
    *  taken at admission and `isTargetCurrent(identity)` is re-checked
@@ -106,6 +110,7 @@ function sameTarget(left: CatalogRefreshTarget | undefined, right: CatalogRefres
   return left.kind === 'agent'
     ? left.key === (right as { key: number }).key
     : left.presetId === (right as { presetId: string | undefined }).presetId
+      && left.workspaceId === (right as { workspaceId?: string }).workspaceId
 }
 
 /**
@@ -159,7 +164,11 @@ export class CatalogRefreshCoordinator {
       const targetIdentity = this.hooks.captureTargetIdentity?.()
       const committed = request.target.kind === 'agent'
         ? { snapshot: await this.hooks.readAgent(request.agent!, signal) }
-        : await this.readStandingSnapshot(request.target.presetId, signal)
+        : await this.readStandingSnapshot(
+          request.target.presetId,
+          request.target.workspaceId,
+          signal,
+        )
       // Latest-only commit: the lifecycle signal, the epoch, the target
       // owner AND (§2.2/§16) the read target's ADMISSION transport identity
       // must all still hold — a same-id binding rollover in the gap between
@@ -241,9 +250,10 @@ export class CatalogRefreshCoordinator {
    * (installSurfaceSnapshot's skillsFailed guard). */
   private async readStandingSnapshot(
     presetId: string | undefined,
+    workspaceId: string | undefined,
     signal: AbortSignal,
   ): Promise<{ snapshot: SurfaceCatalogSnapshot; notice?: string }> {
-    const read = await this.hooks.readStanding(presetId, signal)
+    const read = await this.hooks.readStanding(presetId, workspaceId, signal)
     const incomplete = read.catalog.complete !== true
     const snapshot: SurfaceCatalogSnapshot = Object.freeze({
       commands: Object.freeze([]),

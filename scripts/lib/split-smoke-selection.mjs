@@ -23,6 +23,7 @@ import { runReadAuthority } from '../smoke/split-process/read-authority.mjs'
 import { runInteractionNavigationFirst } from '../smoke/split-process/interaction-admission.mjs'
 import { runSessionWorkspaceActivity } from '../smoke/split-process/session-workspace-activity.mjs'
 import { runSessionWorkspaceEditorEntry } from '../smoke/split-process/session-workspace-editor-entry.mjs'
+import { runSessionlessSkillsHot } from '../smoke/split-process/skills.mjs'
 import { runEntryAdmission } from '../smoke/split-process/entry-admission.mjs'
 import { runOfficialWebComposition } from '../smoke/split-process/official-web-composition.mjs'
 import { runPtySessionWriteRecovery } from '../smoke/split-process/pty-session-write-recovery.mjs'
@@ -181,6 +182,12 @@ const CASE_REGISTRY = Object.freeze([
     id: 'web.product-browser-tui',
     title: 'the product Browser and real TUI share one Host across the 22-case WP matrix',
     run: runWebProductQualification,
+  }),
+  Object.freeze({
+    suite: 'skills',
+    id: 'skills.sessionless-hot',
+    title: 'two real Sessionless TUIs read their own Host Workspace skills and hot-update them on Host file add/edit/delete without creating a Session',
+    run: runSessionlessSkillsHot,
   }),
 ])
 

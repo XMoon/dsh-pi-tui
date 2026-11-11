@@ -344,11 +344,11 @@ The Host Profile's Loader is the only Host composition authority: one
 that Loader. The Host-only overlay disables the TUI surface rows, keeps the B1
 Connection and API-remotes rows, and adds exactly the official Session-serving
 rows plus ONE built-in `@xmoon76/dsh-pi-tui/host-runtime` row. That built-in row
-owns the package's ONE private Typert contribution and its three private
+owns the package's ONE private Typert contribution and its five private
 business services (`piTuiFileReferences`, `piTuiTerminalProgress`,
-`piTuiWebAccess`); the feature modules are not independent Loader rows,
-configurable plugins or package subpaths. The row publishes `piTuiHostReady`
-only after every service binding is live.
+`piTuiWebAccess`, `piTuiHostUserShell`, `piTuiSkills`); the feature modules are
+not independent Loader rows, configurable plugins or package subpaths. The row
+publishes `piTuiHostReady` only after every service binding is live.
 
 Host Workspace authority has exactly two owners, both official bundle rows with
 the stable ids the official web bundle uses: `workspace`

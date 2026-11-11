@@ -187,9 +187,10 @@ function officialJobObservationPort(jobs: IJobs): RemoteJobObservationPort {
 
 function officialSkillCatalog(
   skills: ClientRemote['skills'],
+  piTuiSkills: import('../../../src/runtime/remote/skill-remote.ts').PiTuiSkillsRemotes,
   generation: ConnectionGenerationState,
 ): RemoteSkillCatalog {
-  return new RemoteSkillCatalog(skills, generation)
+  return new RemoteSkillCatalog(skills, piTuiSkills, generation)
 }
 
 /** TS8-HF1: the Session `@` source is the PRIVATE `piTuiFileReferences`

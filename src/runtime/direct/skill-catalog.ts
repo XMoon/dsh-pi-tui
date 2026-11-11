@@ -76,7 +76,7 @@ export interface SkillCatalogContext {
 /** The Cordis event surface the `skills/change` subscription needs
  * (structural; an absent `on` degrades to no subscription). */
 export interface SkillCatalogEventsContext {
-  on?(event: 'skills/change', listener: () => void): unknown
+  on?(event: 'skills/change', listener: () => void): (() => boolean) | void
 }
 
 /**
@@ -90,8 +90,9 @@ export interface SkillCatalogEventsContext {
  * @param listener - the notification listener (must be synchronous and
  *   never throw).
  */
-export function subscribeSkillsChange(ctx: SkillCatalogEventsContext, listener: () => void): void {
-  ctx.on?.('skills/change', listener)
+export function subscribeSkillsChange(ctx: SkillCatalogEventsContext, listener: () => void): () => void {
+  const unsubscribe = ctx.on?.('skills/change', listener)
+  return () => { unsubscribe?.() }
 }
 
 /** One readable catalog target. */

@@ -122,7 +122,7 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
         listHumanSkills: async () => undefined,
         resolveSkill: async () => ({ kind: 'unavailable' as const }),
         hostLoadsSkillBody: () => false,
-        onSkillsChange: () => {},
+        onSkillsChange: () => () => {},
       },
     },
     config: {

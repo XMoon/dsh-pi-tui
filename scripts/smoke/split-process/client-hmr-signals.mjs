@@ -122,7 +122,7 @@ export async function runClientHmrSignals(context) {
       assert(after.owners?.typert === 1 && after.owners?.connection === 1 && after.owners?.remote === 1
         && after.owners?.fileUpload === 1 && after.owners?.sessions === 1 && after.owners?.jobs === 1,
       `T57 duplicate/absent Domain owners after HMR: ${JSON.stringify(after.owners)}`)
-      assert(after.privateNamespaces === 2, 'T57 private namespaces were not remounted exactly once')
+      assert(after.privateNamespaces === 3, 'T57 private namespaces were not remounted exactly once')
       for (const operation of ['hmr-revision-start', 'hmr-revision-retired', 'hmr-revision-ready']) {
         assert(client.records.filter(record => record.m4b2s === 'qualification' && record.op === operation).length === 1,
           `T57 expected exactly one ${operation} record`)
@@ -152,7 +152,7 @@ export async function runClientHmrSignals(context) {
       await client.waitFor(record => record.m4b2s === 'qualification' && record.op === 'hmr-revision-ready', 'T58 HMR ready', 180_000)
       const after = await waitForSurfaceStatus(client, record => record.sessionOpen === true && record.openSessionId === sessionId, 'T58 new surface Session', 120_000)
       assert(after.pid === client.records.find(record => record.m4a0 === 'ready')?.pid, 'T58 the HMR changed the Client PID')
-      assert(after.owners?.sessions === 1 && after.owners?.jobs === 1 && after.privateNamespaces === 2,
+      assert(after.owners?.sessions === 1 && after.owners?.jobs === 1 && after.privateNamespaces === 3,
         'T58 duplicate/absent owners after HMR')
       assert(client.records.filter(record => record.m4b2s === 'qualification' && record.op === 'hmr-revision-retired').length === 1,
         'T58 duplicate HMR retirement records')

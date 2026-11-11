@@ -28,11 +28,11 @@ import type { Diag } from '../../runtime/process/diagnostics.ts'
 import type { BackendKind } from '../../runtime/backend.ts'
 import { SupersededReadError } from '../../runtime/read-error.ts'
 import { runSyncDisposalSteps } from '../../runtime/process/disposal.ts'
-import { runOwned } from '../../runtime/process/tasks.ts'
+import { runDetached, runOwned } from '../../runtime/process/tasks.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import { normalizeSkillInvocation } from '../../domain/command/policy.ts'
 import type { SurfaceCatalogSnapshot, SurfaceCommandSummary } from '../../domain/catalog/surface.ts'
-import type { SkillCatalogCapability } from '../../runtime/catalog-port.ts'
+import type { SkillCatalogCapability, StandingSkillLocation, StandingSkillRead } from '../../runtime/catalog-port.ts'
 import type { SessionScopeAuthority } from '../session/scope.ts'
 import type { SessionRuntime as ApplicationSessionRuntime } from '../session/runtime.ts'
 import { CatalogRefreshCoordinator, CoalescingRefreshGate, type CatalogRefreshOutcome, type CatalogRefreshRequest, type CatalogRefreshSource } from './catalog-refresh.ts'
@@ -67,7 +67,7 @@ export interface CommandCatalogCapability {
 
 /** One catalog refresh target (the semantic target, no Host type). */
 export type CommandCatalogTarget =
-  | { readonly kind: 'preset'; readonly presetId: string | undefined }
+  | { readonly kind: 'preset'; readonly presetId: string | undefined; readonly workspaceId?: string }
   | { readonly kind: 'agent'; readonly key: number }
 
 /** One catalog refresh request as this owner builds it. The composition root
@@ -657,17 +657,11 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
   
   let catalogRefreshRequest: ((request: CatalogRefreshRequest) => Promise<CatalogRefreshOutcome>) | undefined
 
-  /** `skills/change` coalescing: bursts of invalidation notifications cost
-   * at most two reads, and the follow-up re-read observes the CURRENT
-   * ownership (live agent vs standing preset). */
-  
   let skillsChangeSubscribed = false
+  let disposeSkillsChange: (() => void) | undefined
 
   // M3-6 PR2 §13.3.1: the Remote-only Connection-generation invalidation
-  // lifetime. `observedRemoteConnectionGeneration` is the last token the
-  // callback saw (the identity authority — never a `firstEvent` boolean);
-  // `disposeRemoteConnectionGeneration` is the official unsubscribe slot,
-  // released by `disposeCatalog()` BEFORE the coordinator goes away.
+  // lifetime, released by `disposeCatalog()` BEFORE the coordinator goes away.
   let observedRemoteConnectionGeneration: unknown | undefined
   let disposeRemoteConnectionGeneration: (() => void) | undefined
 
@@ -675,23 +669,24 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
     runOwned('skills/change refresh', async () => {
       const refresh = catalogRefreshRequest
       if (refresh === undefined) return undefined
-      const liveAgent = deps.liveAgent()
-      const target = liveAgent === undefined
-        ? { kind: 'preset', presetId: deps.presets.pending() ?? deps.presets.launch } as const
-        : { kind: 'agent', key: deps.ownership.generation() } as const
+      const sessionId = deps.backend.kind === 'direct' ? undefined : deps.ownership.currentSessionId()
+      const liveAgent = deps.backend.kind === 'direct' ? deps.liveAgent() : undefined
+      const remoteLive = sessionId !== undefined
+      const directLive = liveAgent !== undefined
+      const target = remoteLive || directLive
+        ? { kind: 'agent', key: deps.ownership.generation() } as const
+        : standingTargetOf(deps.presets.pending() ?? deps.presets.launch)
       return refresh({
         source: 'invalidation',
         target,
-        ...target.kind === 'agent' ? { agent: deps.toCatalogAgent(liveAgent!) } : {},
+        ...(remoteLive ? { agent: remoteCatalogTargetOf(sessionId) }
+          : directLive ? { agent: deps.toCatalogAgent(liveAgent) }
+            : {}),
       })
     }, {
       diag: deps.diag,
-      sessionId: () => deps.liveAgent()?.session.id,
+      sessionId: () => deps.ownership.currentSessionId(),
       onResult: (outcome) => {
-        // NOTIFY BEFORE settled(): if app.notify throws, runOwned routes
-        // to onError, whose settled() is then the ONLY settle — a dirty
-        // follow-up cannot be double-settled (a second settle would clear
-        // the follow-up's in-flight flag while it is still running).
         if (outcome !== undefined && outcome.kind === 'applied' && outcome.notice !== undefined) {
           deps.notify(outcome.notice, 'error')
         }
@@ -705,18 +700,19 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
     })
   })
 
-  /** Subscribe to the dsh-skill invalidation notification once, through
-   * the catalog capability (migration M1.8). The event carries no
-   * scope or cwd, so the refresh target follows the CURRENT ownership; an
-   * unavailable or throwing subscription degrades to no subscription —
-   * owner switches and /reload still refresh. The flag is set only after
-   * a successful subscribe, so a throwing subscribe can retry on a later
-   * registration attempt. */
-  
+  /** The Host event carries no scope or data; the current owner is reread. */
   const subscribeSkillsChangeEvents = (): void => {
     if (skillsChangeSubscribed) return
     try {
-      deps.catalog.skills.onSkillsChange(() => skillsChangeGate.notify())
+      disposeSkillsChange = deps.catalog.skills.onSkillsChange(
+        () => skillsChangeGate.notify(),
+        error => runDetached('Skills invalidation stream', () => { throw error }, {
+          diag: deps.diag,
+          sessionId: () => deps.ownership.currentSessionId(),
+          recoverable: () => true,
+          notify: message => deps.notify(message, 'error'),
+        }),
+      )
       skillsChangeSubscribed = true
     } catch (error) {
       deps.diag.warn('skills/change subscription unavailable', { error: safeErrorMessage(error) })
@@ -735,6 +731,21 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
   const remoteSessionIdOfCatalogTarget = (target: object): string | undefined => {
     const record = target as { [REMOTE_CATALOG_TARGET]?: string }
     return typeof record[REMOTE_CATALOG_TARGET] === 'string' ? record[REMOTE_CATALOG_TARGET] : undefined
+  }
+  const standingTargetOf = (presetId: string | undefined): CatalogRefreshRequest['target'] => {
+    const workspace = deps.backend.kind === 'direct'
+      ? undefined
+      : deps.session.workspaceNextIntent?.snapshot()
+    // The create intent is the owner: `workspace-id` is only ever written by
+    // the Host-confirmed resolution (`setResolvedWorkspace` /
+    // `commitVerifiedPath`), while an in-flight or rejected Add of a DIFFERENT
+    // path does not change the still-confirmed create target.
+    const workspaceId = workspace?.intent.kind === 'workspace-id' ? workspace.intent.workspaceId : undefined
+    return {
+      kind: 'preset',
+      presetId,
+      ...(workspaceId === undefined ? {} : { workspaceId }),
+    }
   }
   /**
    * The Remote live-catalog read: the command source's generation-fenced
@@ -1056,13 +1067,26 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
           return directCatalog.readSurfaceCatalog(agent as unknown as ExactAgent, readSignal)
         },
         // The sessionless (preset) target reads the STANDING skill catalog
-        // through the catalog capability (migration M1.8) — the
-        // capability-gated cold path (standing key → global → degraded
-        // global with a notice), never an Agent probe: probes emit
-        // durable session events in this deployment (see
-        // docs/architecture/surface-catalog.md).
-        readStanding: (presetId, readSignal) =>
-          deps.catalog.skills.standing(presetId, deps.clientCwd, readSignal),
+        // through the catalog capability (migration M1.8). The location
+        // identity is decided by the backend: Remote requires the confirmed
+        // Host WorkspaceId captured at refresh admission; Direct is co-located
+        // with the Host and reads its own client cwd. A Remote target without
+        // a confirmed Workspace is a LOCAL unavailable/incomplete projection
+        // (never an RPC with the Client cwd, never a fabricated complete []).
+        readStanding: (presetId, workspaceId, readSignal): Promise<StandingSkillRead> => {
+          if (deps.backend.kind === 'direct') {
+            const location: StandingSkillLocation = { kind: 'co-located-directory', cwd: deps.clientCwd }
+            return deps.catalog.skills.standing(presetId, location, readSignal)
+          }
+          if (workspaceId === undefined) {
+            return Promise.resolve({
+              catalog: { skills: [], complete: false },
+              notice: 'Select a Host workspace to load skills.',
+            })
+          }
+          const location: StandingSkillLocation = { kind: 'host-workspace', workspaceId }
+          return deps.catalog.skills.standing(presetId, location, readSignal)
+        },
         // §2.2/§16 final-install fence: the Remote target's admission
         // transport identity (captured ONCE at refresh admission, only ever
         // COMPARED before installSnapshot — a same-id binding rollover in
@@ -1106,7 +1130,17 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
             // Host claims; NO catalog RPC, no Session retain, no UI clear.
             if (next === undefined) return
             const sessionId = deps.ownership.currentSessionId()
-            if (sessionId === undefined) return
+            if (sessionId === undefined) {
+              runOwned(
+                'remote reconnect standing refresh',
+                () => requestCatalogRefresh({
+                  source: 'invalidation',
+                  target: standingTargetOf(deps.presets.pending() ?? deps.presets.launch),
+                }),
+                { diag: deps.diag, sessionId: () => undefined },
+              )
+              return
+            }
             runOwned(
               'remote reconnect catalog refresh',
               () => refreshLiveCatalogById(sessionId, 'invalidation'),
@@ -1217,7 +1251,7 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
         },
         refreshStandingCatalog: (presetId, source) =>
           catalogRefreshAvailable()
-            ? requestCatalogRefresh({ source, target: { kind: 'preset', presetId } })
+            ? requestCatalogRefresh({ source, target: standingTargetOf(presetId) })
             : Promise.resolve({ kind: 'failed', error: 'catalog refresh unavailable' }),
         promptAdmission: (sessionId, line, task) =>
           // M3-4 PR3 (§10.2): the Remote branch RETIRES the Direct-Agent

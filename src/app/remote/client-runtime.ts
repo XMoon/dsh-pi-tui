@@ -632,8 +632,8 @@ export async function mountRemoteClientDomainPrerequisites(
     // package), carrying every private descriptor — the
     // `piTuiFileReferences` augmentation (the official `fileReferences`
     // namespace stays mounted and authoritative for bare queries), the
-    // `piTuiTerminalProgress` status stream and the `piTuiWebAccess` official
-    // Web frontend toggle.
+    // `piTuiTerminalProgress` status stream, the `piTuiWebAccess` official
+    // Web frontend toggle and the `piTuiSkills` standing/invalidation seam.
     state.contributionDisposers.push(await remote.$mount(PI_TUI_CLIENT_CONTRIBUTION))
     // Domain Clients: fileUpload before Sessions is contractual (the Session
     // Client injects `fileUpload`). Each fiber is assigned BEFORE it is

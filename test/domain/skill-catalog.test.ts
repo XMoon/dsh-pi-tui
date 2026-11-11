@@ -322,20 +322,25 @@ test('the skills/change subscription registers its listener and degrades without
 test('the Direct catalog skills capability wires the skills/change subscription through the adapter', () => {
   // The runner subscribes via `backend.catalog.skills.onSkillsChange(...)`;
   // this pins the DIRECT adapter's half of the wiring (the event-bus
-  // registration). The coalescer that the listener drives is covered by
+  // registration plus the disposer the catalog owner releases first).
+  // The coalescer that the listener drives is covered by
   // test/app/skill-catalog-refresh.test.ts.
   const listeners: (() => void)[] = []
+  let unsubscribed = 0
   const ctx = {
     get: () => undefined,
     on: (event: string, listener: () => void) => {
       assert.equal(event, 'skills/change')
       listeners.push(listener)
+      return () => { unsubscribed += 1; return true }
     },
   }
   const port = new DirectCatalogPort(ctx as never, () => undefined)
   let fired = 0
-  port.skills.onSkillsChange(() => { fired += 1 })
+  const dispose = port.skills.onSkillsChange(() => { fired += 1 }, () => {})
   assert.equal(listeners.length, 1, 'the Direct skills capability must subscribe to skills/change')
   listeners[0]!()
   assert.equal(fired, 1, 'the invalidation notification must reach the registered listener')
+  dispose()
+  assert.equal(unsubscribed, 1, 'the returned disposer releases the exact direct subscription')
 })
