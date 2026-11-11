@@ -140,14 +140,15 @@ test('revalidate fails closed when the Host identity changes INSIDE its observat
   const launchCwd = realpathSync(root)
   // The injected reader replays the exact race: classify's two reads match,
   // revalidate's first read matches, then the Host PID restarts (a different
-  // starttime) BETWEEN revalidate's first check and its final check.
+  // starttime) BETWEEN revalidate's first check and its post-stats check.
   const matching = identity.hostStarttime
   let reads = 0
   const verdict = classifyLaunchWorkspace(identity, launchCwd, {
     readStarttime: () => {
       reads += 1
-      // classify: 2 reads (initial + final); revalidate: reads 3 (first check)
-      // and 5 (final check). Read 4 is the post-stats observation: CHANGED.
+      // classify: 2 reads (initial + final); revalidate: read 3 (its first
+      // check) and read 4 (the post-stats check). Read 4 is the one that
+      // observes the CHANGED Host identity.
       return reads === 4 ? '99999999' : matching
     },
   })
