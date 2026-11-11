@@ -48,17 +48,50 @@ retirement and requests `appExit` (see
   (PiTui queue pane, TSP Dock); there is no `parked` flag, no second state
   source and no automatic wake — the park ends when the user sends a real
   prompt.
-- `Alt+Up` is recall-all and `Ctrl+S` is a FIFO steer-all. They are bulk
-  affordances, not per-occurrence actions. Per-occurrence row
-  edit/remove/steer remains a known product gap (GitHub issue), not a promise.
+- `Alt+Up` is recall-all and `Ctrl+S` is a FIFO steer-all. They remain bulk
+  affordances; per-occurrence STEER is still not offered. Per-occurrence
+  **edit/remove** is owned by the ONE Queue manager controller
+  (`src/app/queue/manager.ts`), reached from three equivalent entries:
+  `/queue`, the `app.queue.open` action (default `Alt+I`) and the Dock Queue
+  header/row pointer entry. The PiTui entry is the 88-column Wide Overlay
+  (`browse → edit | confirm-delete`, ONE component); TSP renders the SAME
+  controller as native `picker`/`overlay`/`editor`/`button` sheets. A client-local
+  `sending…` echo, a `steering` occurrence and a `context` occurrence are never
+  addressable; only an authoritative `placement: 'queued'` occurrence is.
+- Editing is admitted by the occurrence's RAW content: every block must be text
+  (the display summary is never the classifier). The editor holds the official
+  `textOf()` projection (text blocks joined with `''`) and writes one
+  `updateQueue(id, {kind: 'edit', content: [{type: 'text', text}]})`; a
+  non-whitespace result is required and a cross-client change detected before
+  the write is refused rather than overwritten. Removing any queued occurrence
+  is one `updateQueue(id, {kind: 'remove'})` after explicit confirmation and is
+  never restored to the composer. Every write captures the exact Session owner
+  and occurrence id synchronously, enters the existing `withWriter` admission,
+  and settles with the existing `WriteOutcome` vocabulary; `indeterminate`
+  never retries automatically. The Dock itself never edits or deletes: it only
+  opens the manager (`Manage` and one clickable row per message).
+- Mouse: PiTui enables application mouse reporting on the fullscreen alt screen
+  alone, so the Dock pointer entry is fullscreen-only; the regular main screen
+  keeps `/queue` and the effective `app.queue.open` key. TSP admits pointer
+  clicks only from native nodes of the CURRENT frame with the exact occurrence
+  id.
+- `Alt+Up` refuses the WHOLE recall when ANY queued occurrence carries a durable
+  generic FILE: no draft is staged and no occurrence is removed (both Direct and
+  Remote). The notification names `/queue` as the way to remove the file-bearing
+  occurrence before recalling again. This is not a transport capability
+  difference: no official Client can re-bind a stored file's upload receipt.
 
 Authority: `src/app/surface/pending-presentation.ts`
 (`buildPendingPresentation`, `foldQueueRows`) over the Direct/Remote
-`PendingSubmissions` seam; sink: `TuiApp.setPendingInputPresentation`.
+`PendingSubmissions` seam; the per-occurrence owner is
+`src/app/queue/manager.ts` over `PendingInputReader` + `SessionWriter.updateQueue`;
+sink: `TuiApp.setPendingInputPresentation` and the shared Queue panel/sheet.
 
 Must-not: add a source-specific classifier/filter, correlate echoes by text,
 make a local echo addressable through `updateQueue`, render `context` as a user
-row, or claim exact-occurrence actions from the bulk gestures.
+row, claim exact-occurrence actions from the bulk gestures, store a durable
+queue mirror in a renderer, decide editability from the display summary, or
+perform an optimistic local removal before the writer confirms it.
 
 ## Composer submission policy
 
@@ -1535,10 +1568,12 @@ Attachment completion and intake are Client-local:
   Inbox row carrying the same request carries that fact. A failure before the
   prompt is dispatched restores the same draft and never retries or reuses a
   staged receipt. A durable generic file recalled from the Host queue
-  (`Alt+Up`) has no official Client carrier to re-bind a receipt: Remote
-  refuses that recall before removing any queue occurrence and keeps the queue
-  and editor unchanged; Direct keeps its existing referenced-file reuse. This
-  is a real Remote capability boundary, not a claim of full file parity.
+  (`Alt+Up`) has no official Client carrier to re-bind a receipt on EITHER
+  backend: the gesture refuses the whole recall before staging any draft or
+  removing any queue occurrence and keeps the queue and editor unchanged; the
+  user removes the file-bearing occurrence through `/queue` and recalls again.
+  This is a shared semantic boundary, not a transport capability difference and
+  not a claim of full file parity.
 - The attachment intake and the Ctrl+V paste intent share ONE active composer
   and the existing draft stores; there is no second draft copy. `/attach` and
   `/image` read the current draft and insert the canonical placeholder through

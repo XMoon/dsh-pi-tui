@@ -82,6 +82,25 @@ export const DELIVERED_FILES_CHORDS = {
   copyPath: { keys: ['shift+c'], label: 'Shift+C' },
 } as const
 
+/**
+ * The PiTui Queue manager overlay's FIXED local chords (PR-Q).
+ *
+ * The panel is a per-surface COMPONENT contract, not a Host command: inside it
+ * `Enter` is edit/confirm, `d` opens the delete confirmation, `Ctrl+S` saves the
+ * local edit draft (it must never reach the global steer action) and `Esc` backs
+ * out one level. The table is the ONE machine definition both the panel's
+ * handler and its painted action bar consume.
+ */
+export const QUEUE_CHORDS = {
+  edit: { keys: ['enter'], label: 'Enter' },
+  remove: { keys: ['d'], label: 'D' },
+  save: { keys: ['ctrl+s'], label: 'Ctrl+S' },
+  cancel: { keys: ['escape'], label: 'Esc' },
+} as const
+
+/** One Queue manager local chord key. */
+export type QueueChordId = keyof typeof QUEUE_CHORDS
+
 /** The display name of a bare (unmodified) key id. */
 const BASE_KEY_LABELS: Record<string, string> = {
   enter: 'Enter',

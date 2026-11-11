@@ -55,6 +55,7 @@ import { createStatusRuntime } from './surface/status-runtime.ts'
 import type { StatusRuntime } from './surface/status-runtime.ts'
 import { createInputHistory } from './surface/input-history.ts'
 import { createSettingsRuntime } from './surface/settings-runtime.ts'
+import { QueueManagerController } from './queue/manager.ts'
 import { createApplicationEvents, type ApplicationEventsOwner } from './surface/application-events.ts'
 import { createPastedImageIntakeOwner } from './surface/pasted-image-intake.ts'
 import { createClientActions } from './surface/client-actions.ts'
@@ -154,6 +155,8 @@ import { dangerCommand } from '../domain/shell/danger.ts'
 import { resolveInitialCatalog } from './direct/initial-catalog.ts'
 import { subagentJobTranscriptId, taskRowSelectionDisposition, subagentJobViewHint } from './surface/task-presentation.ts'
 import { queueTextOf } from '../app/surface/pending-presentation.ts'
+import { APP_KEYBINDINGS } from '../tui/keybindings/definitions.ts'
+import { parseUserKeybindings } from '../tui/keybindings/config.ts'
 import { bundleVersion, packageVersion } from '../client/launcher/version.ts'
 import { resumeCommand } from '../client/launcher/profile.ts'
 import { hostRunningProfile, type ProfileContextReadLike } from './bootstrap/profile.ts'
@@ -1925,6 +1928,13 @@ export function applyRunnerWithRuntime(
     // reach it late-bound and the mount below can hand its adapter over. It is
     // ASSIGNED once every owner it depends on exists, before `surface.start`.
     let applicationEvents: ApplicationEventsOwner
+    /**
+     * PR-Q: the ONE application-level Queue manager. Declared before the
+     * command surface (whose `/queue` seam reads it late-bound) and assigned
+     * before `surface.start`, which attaches the mounted renderer's
+     * presentation.
+     */
+    let queueManager: QueueManagerController | undefined
     // A5b-3b-2: the command authority/state machine + the TuiCommandRunner
     // facade owner. Constructed before the surface cleanup closure can run; the
     // runner facade is built later, after the semantic command runtime binds.
@@ -2032,6 +2042,16 @@ export function applyRunnerWithRuntime(
         // registration runs AFTER the mount, so this getter (never an eagerly
         // captured value) is what the attachment intake reads.
         composer: () => surface.composer,
+        // PR-Q: `/queue` forwards to the ONE application-level manager. The
+        // command itself creates no Session and performs no Host write; the
+        // manager re-reads the authoritative queued projection and states the
+        // empty/unavailable state itself.
+        openQueueManager: () => {
+          const controller = queueManager
+          if (controller === undefined) return { kind: 'error', text: 'Queue management is unavailable' }
+          controller.open()
+          return { kind: 'success' }
+        },
         // Delivered files (PR1 / M2): the surface's own display-subject
         // decision, exposed as a function-type read capability. The runner
         // forwards it to `/deliverables`; no Folder instance crosses the seam.
@@ -2950,8 +2970,34 @@ export function applyRunnerWithRuntime(
     // Built from the A5b owner objects plus the narrow runner lifetime
     // callbacks and the rewind/subagent Host-port groups that have no narrower
     // owner today; the mount below receives the produced adapter.
+    /**
+     * PR-Q: the ONE Queue manager controller (shared by PiTui and TSP). Every
+     * write it performs captures the owner/scope synchronously at the intent,
+     * enters the existing `withWriter` admission and settles with the existing
+     * WriteOutcome vocabulary. It owns no Host queue mirror and no renderer.
+     */
+    queueManager = new QueueManagerController({
+      reader: backend.pendingInputReader,
+      writer: backend.sessionWriter,
+      captureSessionId: () => ownership.currentSessionId(),
+      captureSubject: () => ownership.captureSubject(),
+      isSubjectCurrent: token => captureMatches(token as SessionSubject | undefined),
+      captureScope: () => sessionScope.captureLive(),
+      isScopeCurrent: scope => sessionScope.isCurrent(scope),
+      isViewing: () => viewer.isViewing(),
+      withWriter: (scope, task) => sessionRuntime.withWriter(scope, task),
+      beginClientWrite: () => submission.beginClientWrite(),
+      runOwned: (label, task) => { runOwned(label, task, { diag }) },
+      refreshPendingInput: () => surface.refreshPendingInput(),
+      notify: (message, kind) => surface.display.notify(message, kind),
+      textOf: content => queueTextOf(content as readonly import('@deepseek-ai/dsh-llm').ContentBlock[]),
+    })
+    surface.attachQueueManager(queueManager)
     applicationEvents = createApplicationEvents({
       submission,
+      queueManager: {
+        open: (options) => { queueManager?.open(options) },
+      },
       viewer,
       surface,
       status,
@@ -3084,6 +3130,15 @@ export function applyRunnerWithRuntime(
     const tspAttempt = tspRequested(process.env)
     if (tspAttempt) terminalOutput.suspend()
     try {
+      const queueOpenKeys = (): readonly string[] => {
+        const defaults = APP_KEYBINDINGS['app.queue.open'].defaultKeys
+        if (process.env.DSH_PI_TUI_SAFE_KEYBINDINGS === '1') return [...defaults]
+        const parsed = parseUserKeybindings(tuiSettings?.get().keybindings)
+        const value = parsed.bindings['app.queue.open']
+        if (value === undefined) return [...defaults]
+        if (value === false) return []
+        return typeof value === 'string' ? [value] : [...value]
+      }
       rendererMount = await selectRendererMount({
         log: (message, fields) => diag.info(message, fields),
         // TSP-7 PR-D: the boot-time footer projection source. The resolver is
@@ -3094,6 +3149,11 @@ export function applyRunnerWithRuntime(
         connectTsp: productionTspConnector({
           cwd,
           displayState,
+          // PR-Q: the SAME effective `app.queue.open` action the PiTui keymap
+          // compiles (definitions + persisted user overrides + safe mode). The
+          // TSP renderer owns no keymap; this is the one live read its raw key
+          // stream and its Dock label consume.
+          queueOpenKeys,
           requestExit: () => requestExit(),
           onFatal: rendererOnFatal,
           log: (message, fields) => diag.info(message, fields),

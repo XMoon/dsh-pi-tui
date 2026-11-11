@@ -549,8 +549,10 @@ test('the queue pane renders pending rows and hides when empty', async () => {
   // keymap has NO per-row queue edit/remove action, so a symbolic or
   // key-only row action cannot exist silently.
   const queueActions = Object.keys(APP_KEYBINDINGS).filter(id => /queue|dequeue|steer/i.test(id)).sort()
-  assert.deepEqual(queueActions, ['app.input.dequeue', 'app.input.queue', 'app.input.steer'],
-    'no per-row queue edit/remove action may be bound')
+  assert.deepEqual(queueActions, ['app.input.dequeue', 'app.input.queue', 'app.input.steer', 'app.queue.open'],
+    'the manager entry exists; per-row edit/remove still has no bound action')
+  assert.ok(view.includes(' Queue · 2'), `queue header/count missing:\n${view}`)
+  assert.ok(view.includes('Manage [Alt+I]'), `live Manage binding missing:\n${view}`)
   assert.equal((view.match(/❯/g) ?? []).length, 3, 'two queue rows plus the editor prompt only')
   // Every rendered queue row is EXACTLY the marker plus its text — no action
   // token, bracket hint, or extra control (viewport padding is trimmed).
@@ -624,14 +626,19 @@ test('queue pane reflows from raw items across a narrow-to-wide resize', async (
   let lines = vt.getViewport()
   const narrowRow = lines.findIndex(line => line.includes('QUEUE-RESIZE'))
   assert.ok(narrowRow > 0, `queue row must remain visible after narrowing:\n${lines.join('\n')}`)
-  let borderRows = 0
-  for (let index = narrowRow - 1; index >= 0 && lines[index]!.includes('─'); index -= 1) borderRows += 1
-  assert.equal(borderRows, 1, `a narrow queue must have one border row, not stale wrapped rows:\n${lines.join('\n')}`)
-  assert.equal(visibleWidth(lines[narrowRow - 1]!), 40)
+  // The pane's first row is the compact Queue header (it replaced the old
+  // decorative rule). A narrow frame must not leave stale wrapped rows behind
+  // it, and the header must occupy exactly the terminal width.
+  const headerRow = narrowRow - 1
+  assert.ok(lines[headerRow]!.includes('Queue · 1'), `a narrow queue must keep its compact header:\n${lines.join('\n')}`)
+  assert.ok(lines[headerRow]!.includes('Manage'), `a narrow queue must keep the Manage affordance:\n${lines.join('\n')}`)
+  assert.ok(!lines.slice(Math.max(0, headerRow - 2), headerRow).some(line => line.includes('─')),
+    `no stale queue border row may survive above the header:\n${lines.join('\n')}`)
+  assert.equal(visibleWidth(lines[headerRow]!), 40)
   vt.resize(120, 24)
   await vt.waitForRender()
   lines = vt.getViewport()
-  assert.ok(lines.some(line => line.includes(fullText)), `the wide queue must recover the raw semantic row:\n${lines.join('\n')}`)
+  assert.ok(lines.some(line => line.includes(fullText.trim())), `the wide queue must recover the raw semantic row:\n${lines.join('\n')}`)
 })
 
 test('a client-local queued echo renders its content marked sending in the queue pane', async () => {
@@ -2634,6 +2641,59 @@ test('a Job View opened from Full returns to the exact Full state (type filter, 
   assert.equal(after.typeFilter, 'subagent', 'the Full type filter must survive the Job View')
   assert.ok(after.expandedIds.has('agent:parent'), 'the Full tree disclosure must survive the Job View')
   assert.equal(after.selectedId, 'agent:parent', 'the Full selection must survive the Job View')
+  app.stop()
+})
+
+test('the queue manager opens from the Alt+I action, paints its rows and closes on Esc', async () => {
+  const vt = new VirtualTerminal(100, 30)
+  let controller: import('../../src/app/queue/manager.ts').QueueManagerController | undefined
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onOpenQueue: initialItemId => {
+      controller?.open(initialItemId === undefined ? {} : { initialItemId })
+    },
+  })
+  const items = [
+    { id: 'occ-1', placement: 'queued' as const, content: [{ type: 'text', text: 'check the API compatibility' }] },
+    { id: 'occ-2', placement: 'queued' as const, content: [{ type: 'text', text: 'run the whole suite' }] },
+  ]
+  const { QueueManagerController } = await import('../../src/app/queue/manager.ts')
+  const { queueTextOf } = await import('../../src/app/surface/pending-presentation.ts')
+  controller = new QueueManagerController({
+    reader: { snapshot: () => ({ running: true, items }) },
+    writer: {
+      prompt: async () => ({ kind: 'committed', value: undefined }),
+      updateQueue: async () => ({ kind: 'committed', value: undefined }),
+      cancel: async () => ({ kind: 'committed', value: undefined }),
+      rename: async () => ({ kind: 'committed', value: { title: 't' } }),
+      refreshTitle: async () => ({ kind: 'unsupported', reason: 'none' }),
+    },
+    captureSessionId: () => 'session-a',
+    captureSubject: () => ({}),
+    isSubjectCurrent: () => true,
+    captureScope: () => ({ sessionId: 'session-a' } as never),
+    isScopeCurrent: () => true,
+    isViewing: () => false,
+    withWriter: async (_scope, task) => task(),
+    beginClientWrite: () => () => {},
+    runOwned: () => {},
+    refreshPendingInput: () => {},
+    notify: () => {},
+    textOf: content => queueTextOf(content as never),
+  })
+  app.attachQueueManager(controller)
+  app.start()
+  startedApps.add(app)
+  vt.sendInput('\x1bi') // alt+i: the effective app.queue.open default
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Queue'), `the wide overlay header is painted:\n${view}`)
+  assert.ok(view.includes('2 queued'), `the queued count is painted:\n${view}`)
+  assert.ok(view.includes('check the API compatibility'), `the authoritative rows are painted:\n${view}`)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.ok(!vt.getViewport().join('\n').includes('2 queued'), 'Esc closes Browse')
   app.stop()
 })
 

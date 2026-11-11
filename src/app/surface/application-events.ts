@@ -172,6 +172,11 @@ export interface ApplicationEventsOwner {
 export interface ApplicationEventsDeps {
   /** A5b-4: the user-input workflow owner. */
   readonly submission: SubmissionController
+  /** PR-Q: the application-level queued-message manager opener. The events
+   *  owner carries only the entry; the manager owns every read and write. */
+  readonly queueManager: {
+    open(options?: { readonly initialItemId?: string }): void
+  }
   /** A5b-1: the interactive subagent viewer owner. */
   readonly viewer: ApplicationEventsViewer
   /** The mounted surface owner (app + focus/input reports + task browser). */
@@ -701,6 +706,12 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
     // editor draft. The gesture is disabled in every viewer so it cannot mutate
     // a hidden main or child queue.
     onDequeue: () => deps.submission.dequeue(),
+    // PR-Q: the ONE queue manager entry shared by the Dock `Manage`
+    // affordance, a Dock row click and the `app.queue.open` action. A row
+    // click passes its Host occurrence id as a PRESELECTION hint only.
+    onOpenQueue: (initialItemId?: string) => {
+      deps.queueManager.open(initialItemId === undefined ? {} : { initialItemId })
+    },
     // B4-B retired the old modal-Quick event route: the on-demand Task Quick
     // opens through the app's own `enterTaskQuick()` (the keymap's
     // `app.tasks.open` action), NOT through this event surface.

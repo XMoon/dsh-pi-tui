@@ -205,6 +205,11 @@ export const SCOPED_STRING_ALLOWLIST: ReadonlyArray<{ readonly file: string; rea
   // the panel's handler and its painted hints import it.
   { file: 'src/tui/keybindings/hints.ts', line: "turns: { keys: ['shift+t'], label: 'Shift+T' }," },
   { file: 'src/tui/keybindings/hints.ts', line: "copyPath: { keys: ['shift+c'], label: 'Shift+C' }," },
+  // (12) The PiTui Queue manager overlay's ONE fixed-chord table (PR-Q): the
+  // same category as (10)/(11) — a per-surface COMPONENT contract whose
+  // Ctrl+S/Enter/D/Esc are local to the panel (no keymap action, no remap), so
+  // this table is its key authority and both its handler and action bar use it.
+  { file: 'src/tui/keybindings/hints.ts', line: "save: { keys: ['ctrl+s'], label: 'Ctrl+S' }," },
 ]
 
 /** One detected violation (a host chord or a hard-coded label). */

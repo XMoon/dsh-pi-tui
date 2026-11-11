@@ -262,6 +262,17 @@ export const APP_KEYBINDINGS: Record<AppKeybindingId, AppKeybindingDefinition> =
     scope: 'editor',
     configurable: true,
   },
+  'app.queue.open': {
+    id: 'app.queue.open',
+    defaultKeys: ['alt+i'],
+    // Key-neutral on purpose: /keybindings and the Dock's `Manage` affordance
+    // read the EFFECTIVE key (`keyHint`). A remap or a disabled binding must
+    // never leave the physical chord hard-coded in the copy.
+    description: 'Manage queued messages',
+    category: 'Panels',
+    scope: 'global',
+    configurable: true,
+  },
   'app.history.search': {
     id: 'app.history.search',
     defaultKeys: ['ctrl+r'],

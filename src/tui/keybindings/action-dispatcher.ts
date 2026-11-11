@@ -62,6 +62,8 @@ export interface AppActionHost {
   pasteMedia(): boolean
   /** Open the task browser. */
   openTasks(): boolean
+  /** Open the per-occurrence queued-message manager. */
+  openQueueManager(): boolean
   /** Open the input-history search panel. */
   openHistorySearch(): boolean
   /** Dismiss settled user-shell cards. */
@@ -137,6 +139,8 @@ export class AppActionDispatcher {
         return this.host.pasteMedia()
       case 'app.tasks.open':
         return this.host.openTasks()
+      case 'app.queue.open':
+        return this.host.openQueueManager()
       case 'app.history.search':
         return this.host.openHistorySearch()
       case 'app.shell.dismissSettled':

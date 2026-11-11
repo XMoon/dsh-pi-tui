@@ -163,6 +163,13 @@ function offsetAtColumn(text: string, line: LogicalLine, column: number): number
 
 /** The sinks the composer notifies: the owning renderer renders ONE frame per
  *  authoritative mutation, plus the application-facing presentation facts. */
+/** Construction options for one composer instance. */
+export interface TspComposerOptions {
+  /** Queue manager edit page (PR-Q): a bare Enter inserts a newline instead of
+   *  submitting. The ordinary composer keeps its submit gesture unchanged. */
+  readonly enterInsertsNewline?: boolean
+}
+
 export interface TspComposerSinks {
   /** ONE authoritative editor state changed (reducer edit or port mutator). */
   readonly onChanged: () => void
@@ -200,7 +207,11 @@ interface RecallDraftBookmark {
  * application's composer-port facts onto the renderer's own presentation, and
  * the recall port is the mount's history scope read through the ONE kernel.
  */
-export function createTspComposer(sinks: TspComposerSinks, recall: TspComposerRecallPort): TspComposer {
+export function createTspComposer(
+  sinks: TspComposerSinks,
+  recall: TspComposerRecallPort,
+  options: TspComposerOptions = {},
+): TspComposer {
   let text = ''
   let cursor = 0
   let focused = false
@@ -607,6 +618,10 @@ export function createTspComposer(sinks: TspComposerSinks, recall: TspComposerRe
       // gesture; bare Enter is the plain submit gesture. Alt/Meta Enter is
       // not a submission gesture in B (ignored like other unknown chords).
       if (key.name === 'enter') {
+        if (options.enterInsertsNewline === true) {
+          insert('\n')
+          return { kind: 'edited' }
+        }
         if (key.shift === true) {
           insert('\n')
           return { kind: 'edited' }
