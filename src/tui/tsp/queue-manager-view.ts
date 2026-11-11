@@ -60,14 +60,23 @@ function rowItem(row: QueueManagerRow): PickerItem {
 function browseLayer(view: QueueManagerView, deps: QueueLayerDeps): Node {
   const selected = view.selected
   const canEdit = selected !== undefined && selected.textOnly
+  const noSelection = selected === undefined
   const actions: PickerAction[] = [
     {
       id: deps.actionId('edit'),
       label: 'Edit',
       keys: [QUEUE_CHORDS.edit.label],
-      ...(canEdit ? {} : { disabled: 'Contains attachments · Editing unavailable' }),
+      ...(canEdit
+        ? {}
+        : { disabled: noSelection ? 'Select a queued message' : 'Contains attachments · Editing unavailable' }),
     },
-    { id: deps.actionId('delete'), label: 'Delete', keys: [QUEUE_CHORDS.remove.label], danger: true },
+    {
+      id: deps.actionId('delete'),
+      label: 'Delete',
+      keys: [QUEUE_CHORDS.remove.label],
+      danger: true,
+      ...(noSelection ? { disabled: 'Select a queued message' } : {}),
+    },
     { id: deps.actionId('close'), label: 'Close', keys: [QUEUE_CHORDS.cancel.label], end: true },
   ]
   return ui.picker({
@@ -80,7 +89,9 @@ function browseLayer(view: QueueManagerView, deps: QueueLayerDeps): Node {
     state: 'ready',
     total: view.count,
     items: view.rows.map(rowItem),
-    ...(view.selectedId === undefined ? {} : { selected: view.selectedId }),
+    // ALWAYS send `selected` (empty = no cursor): omitting the prop in a later
+    // frame would leave the client's previous highlight alive.
+    selected: view.selectedId ?? '',
     actions,
     empty: view.list === 'no-session'
       ? 'No active session'

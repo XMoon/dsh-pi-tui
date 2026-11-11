@@ -472,7 +472,8 @@ export class QueuePanel implements Component, Focusable {
       this.picker.setItems(items)
     }
     this.picker.setMaxRows(Math.max(1, rows))
-    if (view.selectedId !== undefined) this.picker.setSelectedValue(view.selectedId)
+    if (view.selectedId === undefined) this.picker.clearSelection()
+    else this.picker.setSelectedValue(view.selectedId)
   }
 
   private ensureEditor(view: QueueManagerView): Editor {

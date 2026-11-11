@@ -508,3 +508,25 @@ test('a pane without the sheet kinds mounts no presenter, no Manage and no raw e
   assert.equal(controller.isOpen(), false, 'the raw queue chord cannot open a sheet that is not mounted')
   assert.equal(controller.view().mode, 'closed')
 })
+
+
+test('native Queue: a lost Dock preselection paints no cursor and no actionable row', async (t) => {
+  const m = await mounted(t, [TEXT_ONE, TEXT_TWO])
+  m.controller.open()
+  await waitUntil('the Browse sheet', () => sheetPicker(m.pane) !== undefined)
+  // A Dock row disappeared while the sheet was already open.
+  m.controller.open({ initialItemId: 'gone' })
+  await waitUntil('the selection cleared', () => m.controller.view().selectedId === undefined
+    && sheetProps(m.pane).selected === '')
+  assert.equal(sheetProps(m.pane).selected, '', 'the picker paints no selected occurrence')
+  assert.equal(sheetAction(m.pane, 'edit')?.disabled, 'Select a queued message')
+  assert.equal(sheetAction(m.pane, 'delete')?.disabled, 'Select a queued message')
+
+  m.pane.key('\r')
+  await settle(50)
+  assert.equal(sheetNode(m.pane, 'overlay'), undefined, 'Enter opens no page without a selection')
+  m.pane.key('d')
+  await settle(50)
+  assert.equal(sheetNode(m.pane, 'overlay'), undefined, 'D opens no confirmation without a selection')
+  assert.deepEqual(m.writes, [])
+})

@@ -402,6 +402,18 @@ export class SearchablePicker implements Component, Focusable {
   }
 
   /**
+   * Clear the active row so the list paints NO cursor. This is the one
+   * presentation counterpart of "the owner has no selected occurrence yet"
+   * (a lost Dock preselection): the rows stay visible and selectable, but no
+   * first/second row looks like the current action target. The zero-match
+   * navigation invariant still holds for the keyboard owner; this method is
+   * only called by an owner that routes navigation itself.
+   */
+  clearSelection(): void {
+    this.selectedIndex = -1
+  }
+
+  /**
    * The current selection index within the FILTERED list.
    *
    * Deliberate Host contract expansion (PR1 plan §8/§10.1): the zero-match
@@ -653,7 +665,9 @@ export class SearchablePicker implements Component, Focusable {
 
     // Add scroll indicators if needed
     if (startIndex > 0 || endIndex < this.filteredItems.length) {
-      const scrollText = `  (${this.selectedIndex + 1}/${this.filteredItems.length})`
+      const scrollText = this.selectedIndex < 0
+        ? `  (0/${this.filteredItems.length})`
+        : `  (${this.selectedIndex + 1}/${this.filteredItems.length})`
       // Truncate if too long for terminal
       lines.push(this.theme.scrollInfo(truncateToWidth(scrollText, width - 2, '')))
       hits.push({ kind: 'inert' })

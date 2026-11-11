@@ -230,6 +230,10 @@ test('a real Enter after a lost Dock preselection never edits the first live row
   const lines = h.panel.render(84)
   assert.ok(lines[0]!.includes('Queue'), 'Browse stays visible')
   assert.equal(h.controller.view().selectedId, undefined)
+  // The picker paints NO active cursor row either: the first live occurrence
+  // must not look like the current edit/delete target.
+  assert.equal(lines.some(line => plain(line).startsWith('> ')), false,
+    `no row may paint the active cursor:\n${lines.join('\n')}`)
   h.panel.handleInput('\r')
   assert.equal(h.controller.view().mode, 'browse', 'Enter opened no Edit page')
   assert.equal(h.controller.view().notice?.text, 'Select a queued message')
