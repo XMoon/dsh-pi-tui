@@ -155,6 +155,12 @@ const WIDE_MIN_COLUMNS = 112
 const WIDE_MIN_ROWS = 12
 /** The smallest left column of the two-column layout. */
 const WIDE_LEFT_MIN_CELLS = 44
+/** The automatic ordinary-history ceiling of ONE expanded group. It bounds the
+ *  per-open growth only; a user's `Show more` may cross it deliberately. */
+const AUTO_HISTORY_CAP = 20
+/** The two plain cells that make a Session a CHILD of its Folder row. `> ` stays
+ *  in the fixed tree gutter, so the bullet and the identity move together. */
+const SESSION_TREE_INDENT = 2
 const GROUP_LABEL: Record<SessionWorkspacePriority, string> = {
   needs: 'Needs attention',
   working: 'Working',
@@ -1346,9 +1352,7 @@ export class SessionWorkspacePanel implements Component {
       this.workspaceHistoryLimit.set(workspaceId, 5)
     } else {
       const view = this.view()
-      const current = this.workspaceHistoryLimit.get(workspaceId)
-        ?? (workspaceId === view.currentWorkspaceId || workspaceId === view.nextCreateWorkspaceId ? 8 : 0)
-      this.workspaceHistoryLimit.set(workspaceId, current + 5)
+      this.workspaceHistoryLimit.set(workspaceId, this.effectiveHistoryLimit(view, workspaceId) + 5)
     }
     // Keep the cursor on the reveal target; only an exhausted watermark that
     // really disappeared re-anchors on its parent Folder.
@@ -1563,11 +1567,18 @@ export class SessionWorkspacePanel implements Component {
         if (row.kind === 'newSession') this.startNewSession(row.workspaceId)
         else if (row.kind === 'addDirectory') this.openDirectoryChooser()
         else if (row.kind === 'showMore') this.revealMore(row.workspaceId)
-        else if (row.kind === 'folder' && this.chooserMode() && this.options.currentSessionId === undefined) {
-          if (!this.workspaces.byId.has(row.workspaceId)) return
-          const workspace = this.workspaces.byId.get(row.workspaceId)!
-          this.host.onUseDirectory?.(workspace.workspaceId, workspace.path)
-          this.host.onClose()
+        else if (row.kind === 'folder') {
+          // The Sessionless Welcome chooses an existing official Workspace; every
+          // ordinary Browse Folder title/blank click (and only once) is the same
+          // toggle the disclosure and the keyboard Folder verb run.
+          if (this.chooserMode() && this.options.currentSessionId === undefined) {
+            if (!this.workspaces.byId.has(row.workspaceId)) return
+            const workspace = this.workspaces.byId.get(row.workspaceId)!
+            this.host.onUseDirectory?.(workspace.workspaceId, workspace.path)
+            this.host.onClose()
+            return
+          }
+          this.toggleWorkspace(row.workspaceId)
           return
         }
         break
@@ -1747,8 +1758,102 @@ export class SessionWorkspacePanel implements Component {
       : this.renderListPane(width, budget, true)
   }
 
+  /** The ordinary-history watermark a group paints NOW: this open's manual or
+   *  automatically raised value, otherwise the shared default (Current/Next
+   *  eight, every other Workspace zero). */
+  private effectiveHistoryLimit(view: SessionWorkspaceView, workspaceId: string): number {
+    return this.workspaceHistoryLimit.get(workspaceId)
+      ?? (workspaceId === view.currentWorkspaceId || workspaceId === view.nextCreateWorkspaceId ? 8 : 0)
+  }
+
+  /**
+   * Spend the REAL free rows of this Browse frame on ordinary history of the
+   * groups that are already expanded. ONE step raises ONE group by one row and
+   * is charged the rows it really adds: a Session the shared projection already
+   * forces visible (the selected/current one) costs nothing, and finishing a
+   * group also drops its `Show more` row. Rounds fill Current/Next first and
+   * then rotate the other expanded Folders in official order, so one large
+   * Workspace cannot take the whole spare of its siblings. Nothing here expands
+   * a collapsed Folder, lowers a watermark, persists state or issues IO: the
+   * grown tree is re-projected against the real budget and only then written
+   * into the ONE `workspaceHistoryLimit` map (monotone, per open).
+   */
+  private growWorkspaceHistory(view: SessionWorkspaceView, listCapacity: number): void {
+    if (listCapacity < 1) return
+    const base = this.treeRows(view)
+    if (base.length >= listCapacity) return
+    const selected = base.find(row => row.id === this.selectedBrowseRowId)
+    const selectedSessionId = selected?.kind === 'session' ? selected.sessionId : undefined
+    const expanded = new Set<string>()
+    for (const row of base) {
+      if (row.kind === 'folder' && row.expanded) expanded.add(row.workspaceId)
+    }
+    const recentIds = new Map<string, readonly string[]>()
+    for (const group of view.groups) {
+      if (!expanded.has(group.workspaceId)) continue
+      recentIds.set(group.workspaceId, group.ids.filter(id => view.rowsById.get(id)?.priority === 'recent'))
+    }
+    // Current then Next (deduped); every other expanded Folder keeps the
+    // official group order.
+    const priority: string[] = []
+    for (const workspaceId of [view.currentWorkspaceId, view.nextCreateWorkspaceId]) {
+      if (workspaceId !== undefined && expanded.has(workspaceId) && !priority.includes(workspaceId)) priority.push(workspaceId)
+    }
+    const others = view.groups
+      .map(group => group.workspaceId)
+      .filter(workspaceId => !priority.includes(workspaceId))
+    // Frame-local scratch: the ONE watermark map is written only after the real
+    // projection proved that the whole tree still fits this frame.
+    const trial = new Map<string, number>()
+    let free = listCapacity - base.length
+    const step = (workspaceId: string): boolean => {
+      const ids = recentIds.get(workspaceId)
+      if (ids === undefined) return false
+      const limit = trial.get(workspaceId) ?? this.effectiveHistoryLimit(view, workspaceId)
+      if (limit >= AUTO_HISTORY_CAP || limit >= ids.length) return false
+      const forced = ids[limit] === this.options.currentSessionId || ids[limit] === selectedSessionId
+      const removesMore = limit + 1 === ids.length
+      const delta = (forced ? 0 : 1) - (removesMore ? 1 : 0)
+      if (delta > free) return false
+      trial.set(workspaceId, limit + 1)
+      free -= delta
+      return true
+    }
+    for (;;) {
+      let grew = false
+      for (const workspaceId of priority) if (step(workspaceId)) grew = true
+      if (grew) continue
+      for (const workspaceId of others) if (step(workspaceId)) grew = true
+      if (!grew) break
+    }
+    if (trial.size === 0) return
+    const limits = new Map(this.workspaceHistoryLimit)
+    for (const [workspaceId, limit] of trial) limits.set(workspaceId, limit)
+    const finalRows = projectPiTuiWorkspaceTree(
+      visibleWorkspaceBrowserRows(view, { expanded: this.workspaceExpanded, historyLimit: limits }, selectedSessionId, this.options.currentSessionId),
+      this.officialWorkspaceIds(),
+      {
+        mode: this.options.initialDirectoryChooser === true ? 'choose-directory' : 'browse',
+        canAddDirectory: this.host.onAddDirectory !== undefined,
+        canNewSession: this.host.onNewSession !== undefined,
+      },
+    )
+    if (finalRows.length > listCapacity) return
+    for (const [workspaceId, limit] of trial) {
+      this.workspaceHistoryLimit.set(workspaceId, Math.max(this.workspaceHistoryLimit.get(workspaceId) ?? 0, limit))
+    }
+  }
+
   private renderListPane(width: number, budget: number, chrome: boolean): PaneRender {
     const view = this.frameView()
+    // The ONE automatic watermark growth happens HERE, on a real Browse list,
+    // before this frame's rows are decided: a Search/Peek/Host-editor frame
+    // never moves it, and the wide layout already charged its global status
+    // lines against the pane budget (so only the single column pays `chrome`).
+    if (!this.searchMode && this.focus === 'list' && !this.directoryEntryActive && !this.disposed && this.workspaces.proven) {
+      const listCapacity = Math.max(0, budget - (chrome ? this.renderStatusLines(width).length : 0))
+      this.growWorkspaceHistory(view, listCapacity)
+    }
     const rows = this.treeRows(view)
     const lines: string[] = []
     const regions: HitRegion[] = []
@@ -2225,11 +2330,15 @@ export class SessionWorkspacePanel implements Component {
       color.textMuted(formatSessionAge(row.updatedAt)),
       color.textDim(workspaceKey(row.cwd)),
     ].filter((part): part is string => part !== undefined).join(color.textMuted(' · '))
-    const columns = rowColumns(identityWidth(shortId, title), width)
+    // A Session is painted as a CHILD of its Folder: the fixed `> ` gutter stays
+    // in the tree root column while the bullet, the identity and the meta all
+    // start two cells further right. The row's own columns shrink by exactly
+    // that indentation, so the metadata still cannot overflow the pane.
+    const columns = rowColumns(identityWidth(shortId, title), Math.max(1, width - SESSION_TREE_INDENT))
     const label = truncateToWidth(identityText(shortId, title, selected), columns.identity, '…', false)
     const secondary = columns.meta > 0 ? truncateToWidth(meta, columns.meta, '…', false) : ''
     return fit(
-      `${marker}${currentMark}${padColumn(label, columns.identity)}${secondary === '' ? '' : `  ${secondary}`}`,
+      `${marker}${' '.repeat(SESSION_TREE_INDENT)}${currentMark}${padColumn(label, columns.identity)}${secondary === '' ? '' : `  ${secondary}`}`,
       width,
     )
   }

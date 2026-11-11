@@ -246,10 +246,12 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   Session; within it, active priorities are Needs, Working, then ordinary
   history, each ordered by official `updatedAt` with the previous order as the
   tie-break. Only ordinary history is watermarked, and the watermark is
-  RENDERER-LOCAL to one Browser open. The current Workspace starts expanded with
-  eight ordinary rows; a non-current Workspace with confirmed Needs/Working
-  starts expanded with those active rows and zero ordinary history; every other
-  Workspace starts as its Folder row only. Explicit manual collapse hides EVERY
+  RENDERER-LOCAL to one Browser open. The shared default watermark is eight
+  ordinary rows for the current Workspace (and a Host-confirmed next-create
+  destination) and zero for every other Workspace; a non-current Workspace with
+  confirmed Needs/Working starts expanded with those active rows and zero
+  ordinary history; every other Workspace starts as its Folder row only.
+  Explicit manual collapse hides EVERY
   child row, active and current ones included, and leaves the Folder row with
   its trustworthy counts; `Enter`/`Right` restores the automatic view, `Left`
   collapses again. An expanded non-current Workspace starts at five ordinary
@@ -257,6 +259,23 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   `Show more` adds five more; the operation disappears when history is
   exhausted. Folder, Session and Show more are separate typed targets, not
   PickerGroup headers.
+- **PiTUI spends spare list rows on ordinary history, up to a per-group cap.**
+  In the real Browse list the panel raises the watermark of ALREADY EXPANDED
+  groups by ONE ordinary row per step while this frame's actual list budget (the
+  pane height the layout gave the list, less the status rows the list itself
+  paints) still has spare rows, up to twenty ordinary rows per group.
+  Current/Next groups fill first, then the other expanded groups rotate in
+  official order, so one large Workspace cannot starve its siblings. A collapsed
+  Folder is never expanded to use the space, and a frame whose base tree already
+  overflows its budget never grows. Needs/Working rows, the current Session and
+  the selected Session stay visible outside that ordinary cap, and a Session the
+  shared projection already forces visible costs no extra row. The watermark
+  never decreases inside one open: shrinking the terminal only changes the
+  viewport/scroll, and re-rendering the same size and facts does not grow it
+  again. `Show more` adds five rows from the CURRENT value and may cross twenty;
+  the next open recomputes from the shared defaults. The growth is PiTUI-only and
+  per open: the shared projection, TSP Native and every persisted source keep the
+  eight/zero defaults.
 - **The PiTUI tree has explicit inline action rows.** A real Host registration
   capability paints ONE root `Add directory` row above the official folders; an
   expanded REAL official Workspace paints `+ New session` as its first child
@@ -285,9 +304,16 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   blind key. The cursor is preserved by row id across official reorders and
   expansion changes; a hidden Session re-anchors on its parent Folder and a
   removed Folder on its nearest surviving neighbor.
+- **A Session row is a tree CHILD of its Folder.** The `> ` selection gutter
+  keeps the tree's leftmost two cells, while a Session's `●` current bullet,
+  its identity and its metadata start two cells further right; the bullet
+  therefore follows the same indent instead of staying in the root column. The
+  Folder row, its disclosure, `+ New session`, `Add directory` and `Show more`
+  keep their own relative indent, and the flat search-result list keeps its old,
+  unindented geometry.
 - **A sessionless destination is not a Current Session.** A Host-verified
   next-create Workspace is ordered first and painted `Next` with the same
-  eight-row history watermark; it never renders as `Current`, because Current
+  eight-row BASE history watermark; it never renders as `Current`, because Current
   means the opened Session's unique official membership.
 - **Choose/add a directory returns through the same Browser lifecycle.** The
   sessionless Welcome's Choose directory opens the same `/sessions` Browser at
@@ -425,23 +451,31 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   never changes the Workspace cursor and `Esc` cancels back to the tree.
 - **Mouse is the last painted hit-map.** One render commits a frame revision and
   the REAL painted cell ranges of every tree row plus the Folder disclosure,
+- **Mouse is the last painted hit-map.** One render commits a frame revision and
+  the REAL painted cell ranges of every tree row plus the Folder disclosure,
   search results and the physical Action Bar's action segments. A click acts
   only on the SAME frame revision and SAME target range as its press; any
   scroll, resize, search, Activity or content change between press and release
-  drops the gesture. A Session row click and a Folder LABEL click only select;
-  the Folder disclosure collapses/expands; `+ New session`, `Add directory` and
-  `Show more` clicks run their named explicit action; Resume stays the guarded
-  Enter verb. The ONE physical Action Bar is pointer-capable for its complete
-  painted `Verb [Key]` segments only (`Open [Enter]`, `Peek [Space]`,
-  `Close [Esc]`, `Back [Esc]`, `Results [Enter]`, `Verify [Enter]`,
-  `Cancel [Esc]`, and the selected row's real Enter verb); each runs the
-  existing method (`resumeSelected`, `openPeek`, `handleEscape`,
-  `handleSearchInput`, `handleDirectorySubmit`, `handleDirectoryCancel`,
-  `activateSelectedBrowseRow`) and never starts a second navigation state
-  machine. The Peek pane paints NO local action line: the global bar is the
-  only navigation row, and its `Open [Enter]` is the one explicit resume. A
-  press records the LIVE terminal grant beside the frame revision, so a resize
-  that has not repainted yet also drops the gesture.
+  drops the gesture. In the ordinary Browse tree a Folder's title/blank area
+  AND its disclosure both toggle that Folder exactly once, so the whole row is
+  the disclosure target while the `> ` gutter and Session rows keep their own
+  verbs. In the Sessionless `Choose workspace` Browser the same title click
+  commits that existing official Workspace and returns, while its disclosure
+  only toggles. A Session row click only selects; `+ New session`,
+  `Add directory` and `Show more` clicks run their named explicit action;
+  Resume stays the guarded Enter verb. The ONE physical Action Bar is
+  pointer-capable for its complete painted `Verb [Key]` segments only
+  (`Open [Enter]`, `Peek [Space]`, `Close [Esc]`, `Back [Esc]`,
+  `Results [Enter]`, `Verify [Enter]`, `Cancel [Esc]`, and the selected row's
+  real Enter verb); each runs the existing method (`resumeSelected`,
+  `openPeek`, `handleEscape`, `handleSearchInput`, `handleDirectorySubmit`,
+  `handleDirectoryCancel`, `activateSelectedBrowseRow`) and never starts a
+  second navigation state machine. The Peek pane paints NO local action line:
+  the global bar is the only navigation row, and its `Open [Enter]` is the one
+  explicit resume. A press records the LIVE terminal grant beside the frame
+  revision, so a resize that has not repainted yet also drops the gesture. A
+  same-row double click on the same word stays the terminal's word-selection
+  gesture, so one fast double click toggles a Folder at most once.
 - **One lifecycle.** Each open keeps exactly one Workspace follow, one roster
   read owner, one Activity sample generation and one fullscreen lease. The close
   path aborts list/search/Activity, disposes the follow once, stops the screen
