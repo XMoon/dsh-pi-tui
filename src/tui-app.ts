@@ -204,7 +204,7 @@ import type { AccessStatus, ActivityStatus, CompositionStatus, RunPhase, StatusP
 import { deriveActivityStatus } from './domain/status/derive-activity.ts'
 import { initialStatusSnapshot } from './domain/status/snapshot.ts'
 import { StatusStore as StatusStoreImpl } from './domain/status/store.ts'
-import { FooterComposer, mergeCommandSurface } from './tui/footer/composer.ts'
+import { FooterComposer, mergeCommandSurface, type FooterClickId, type FooterPaintProjection, type FooterPaintedItemHit } from './tui/footer/composer.ts'
 import { createBuiltinFooterRegistry } from './tui/footer/builtin-items.ts'
 import { resolveFooterInstruction } from './tui/footer/instruction.ts'
 import { layoutForPreset } from './domain/footer/presets.ts'
@@ -1004,6 +1004,27 @@ function parseApprovalWheel(data: string): { x: number; y: number; direction: -1
     }
   }
   return undefined
+}
+
+/**
+ * Decode one SGR/legacy mouse report's button bits (the low button number,
+ * including the wheel 64 / motion 32 flags); undefined for non-mouse input.
+ */
+function mouseButtonBits(data: string): number | undefined {
+  const sgr = /^\x1b\[<(\d+);(\d+);(\d+)[Mm]$/.exec(data)
+  if (sgr !== null) return Number.parseInt(sgr[1]!, 10)
+  if (data.length === 6 && data.startsWith('\x1b[M')) return data.charCodeAt(3) - 32
+  return undefined
+}
+
+/**
+ * Whether one mouse report retires a pending same-cell press gesture: any
+ * wheel, drag/motion, or secondary button. A plain primary press/release
+ * keeps the gesture (the press path owns re-recording and the release path
+ * owns completion).
+ */
+function retiresPointerGesture(button: number): boolean {
+  return (button & 64) !== 0 || (button & 32) !== 0 || (button & 3) !== 0
 }
 
 /**
@@ -2413,6 +2434,17 @@ export interface TuiAppOptions {
    *  first-party internal wiring, not an extension API. */
   onQuickTaskOpenFull?: () => void
   /**
+   * PR3: the Fullscreen footer's two FIRST-PARTY navigation entries. Both
+   * are the existing business owners — the registered `/model` command body
+   * and the Full Task Center — never a second picker/browser and never a
+   * capability shadow. Absent means the footer placement stays inert
+   * (standalone TuiApp fixtures keep no local fallback).
+   */
+  onFooterModelOpen?: () => void
+  footerModelAvailable?: () => boolean
+  onFooterTasksOpen?: () => void
+  footerTasksAvailable?: () => boolean
+  /**
    * M6: the plugin keybinding resolver (wired by the runner from the M5
    * KeybindingRegistry). Maps a NORMALIZED key (the InputRouter has
    * already decoded raw terminal input) → a plugin SEMANTIC action —
@@ -2934,6 +2966,66 @@ type TranscriptCellGesture = {
 
 /** The gesture hit id of the pinned viewer subject bar's `‹ back` affordance. */
 const VIEWER_BACK_HIT = 'back'
+
+/** PR3: one press on a PAINTED first-party root-Footer placement. The
+ * release may only act on the EXACT painted frame revision, placement,
+ * cell and terminal geometry the user pressed — never on a same-id target
+ * that repainted onto the cell. */
+type FooterPressGesture = {
+  readonly screen: TuiAltScreen
+  readonly compositionRevision: number
+  readonly subjectKind: 'main'
+  readonly id: FooterClickId
+  readonly placement: string
+  /** Absolute screen cell (0-based; half-open columns). */
+  readonly row: number
+  readonly startCol: number
+  readonly endCol: number
+  readonly columns: number
+  readonly termRows: number
+  /* Painted-frame geometry fencing (plan §9.1): the footer is bottom-anchored
+   * pinned chrome with `shrink: 0`, so its painted box is a pure function of
+   * the terminal geometry (columns/termRows, both fenced) and the composed
+   * line count (fenced by the projection revision, whose key carries the
+   * full text). Any reachable box change therefore necessarily moves one of
+   * the fenced values — the absolute hit cell + revision + screen identity
+   * below ARE the complete box fence, and storing the box separately would
+   * add a redundant latch for an unreachable state. */
+}
+
+/** One footer hit translated to ABSOLUTE screen cells of the painted
+ * frame. */
+type PaintedFooterHit = {
+  readonly id: FooterClickId
+  readonly placement: string
+  readonly row: number
+  readonly startCol: number
+  readonly endCol: number
+}
+
+/** PR3: the footer composition that belongs to the last PAINTED fullscreen
+ * frame, with its painted box and absolute hit cells. A value never
+ * outlives the frame it describes: every consumer checks the live screen,
+ * terminal geometry and projection revision before acting. */
+type PaintedFooterProjection = {
+  readonly screen: TuiAltScreen
+  readonly revision: number
+  readonly subjectKind: 'main' | 'subagent'
+  readonly columns: number
+  readonly termRows: number
+  readonly top: number
+  readonly left: number
+  readonly width: number
+  readonly height: number
+  readonly hits: ReadonlyArray<PaintedFooterHit>
+}
+
+/** PR3: one transient composition awaiting its paint commit. */
+type PendingFooterProjection = {
+  readonly revision: number
+  readonly subjectKind: 'main' | 'subagent'
+  readonly projection: FooterPaintProjection
+}
 
 /** The stable owner identity of one PAINTED `‹ back` band: a child switch, a
  *  viewer reopen or an exit bumps the generation, so a press can never
@@ -3570,6 +3662,11 @@ export class TuiApp {
   private readonly quickTaskSelect: ((value: string) => boolean) | undefined
   /** The Full Task Center route for Quick's typed open-full navigation target. */
   private readonly quickTaskOpenFull: (() => void) | undefined
+  /** PR3: the first-party footer navigation entries (see TuiAppOptions). */
+  private readonly footerModelOpen: (() => void) | undefined
+  private readonly footerModelAvailable: (() => boolean) | undefined
+  private readonly footerTasksOpen: (() => void) | undefined
+  private readonly footerTasksAvailable: (() => boolean) | undefined
   /** PR-D: the measured protected pinned chrome height the CURRENT fullscreen
    * widget grant was derived from (undefined on the regular surface, whose
    * grants are fixed). A change means the grant is stale — the widget rows
@@ -3686,6 +3783,15 @@ export class TuiApp {
    * not a transcript row, and its release must re-prove the exact draft
    * text/occurrence geometry it was pressed against. */
   private draftPreviewGesture: { remove: DraftPreviewRemoveHit; columns: number; termRows: number } | undefined
+  /** PR3: the transient footer click provenance. The pending projection is
+   * the last COMPOSED footer (waiting for its frame commit); the painted
+   * projection describes the frame the user actually saw; the press gesture
+   * is the one-shot release latch. None of them is persisted or transmitted. */
+  private footerProjectionRevision = 0
+  private footerProjectionKey: string | undefined
+  private footerPendingProjection: PendingFooterProjection | undefined
+  private footerPaintedProjection: PaintedFooterProjection | undefined
+  private footerPressGesture: FooterPressGesture | undefined
 
   /** Invalidate every fullscreen press/release latch at an ownership or
    * surface boundary. A gesture captured by one owner must never be
@@ -3693,6 +3799,7 @@ export class TuiApp {
   private clearFullscreenPointerGestures(): void {
     this.fullscreenCellGesture = undefined
     this.draftPreviewGesture = undefined
+    this.footerPressGesture = undefined
     this.questionPressGesture = undefined
     this.questionTranscriptGesture = undefined
     this.approvalPressGesture = undefined
@@ -4900,6 +5007,10 @@ export class TuiApp {
     // B4-B: the typed Quick task and Full Center routes (see field docs).
     this.quickTaskSelect = options.onQuickTaskSelect
     this.quickTaskOpenFull = options.onQuickTaskOpenFull
+    this.footerModelOpen = options.onFooterModelOpen
+    this.footerModelAvailable = options.footerModelAvailable
+    this.footerTasksOpen = options.onFooterTasksOpen
+    this.footerTasksAvailable = options.footerTasksAvailable
     // M0: the unified status projection store. The runner passes its own
     // store; without one the app keeps an internal projection so the
     // footer always composes from a snapshot (headless tests drive it
@@ -6762,8 +6873,16 @@ export class TuiApp {
     // BEFORE this point and still see every chunk.)
     if (MOUSE_SEQUENCE.test(data) || (data.length === 6 && data.startsWith('\x1b[M'))) {
       this.clearExitConfirmation()
+      // PR3: a wheel/drag/secondary-button report retires a pending footer
+      // press; a plain primary press/release keeps it (the press path
+      // re-records; the release path completes).
+      const button = mouseButtonBits(data)
+      if (button !== undefined && retiresPointerGesture(button)) this.footerPressGesture = undefined
       return undefined
     }
+    // PR3: any real keyboard/focus input retires a pending footer press
+    // before the key can change the frame or the business owner it names.
+    this.footerPressGesture = undefined
     // FOCUS reports (CSI ? 1004 — ESC[I/ESC[O) are handled HOST-SIDE,
     // before the key ladder: they can never reach the keybinding
     // manager, autocomplete or a host action. Screen-aware consumption
@@ -14984,6 +15103,9 @@ export class TuiApp {
       rows,
       viewerBack: this.paintedViewerBack(paintedHeight(this.header), paintedHeight(this.viewerSubjectBar)),
     }
+    // PR3: commit the footer's painted click geometry with the SAME frame
+    // boundary as the transcript snapshot — never a re-measured estimate.
+    this.commitFooterPaintProjection()
     if (effectiveImageProtocol(this.graphics, this.imageProtocolPreference) === 'sixel') this.refreshCommittedPixelHitRows()
     // A resize re-wraps the transcript and may move the overlay: the current
     // target gets ONE re-solve against the new real boxes, and only while a
@@ -15012,6 +15134,156 @@ export class TuiApp {
       })
       this.scrollFramePending = false
     }
+  }
+
+  /** PR3: commit the footer projection that belongs to the frame just
+   * PAINTED — the REAL painted box plus the composer hits translated to
+   * absolute screen cells. A composition whose rows do not match what the
+   * footer Text actually wrapped and painted publishes NO hit (fail closed;
+   * never a guessed coordinate map, never a second wrap pass). */
+  private commitFooterPaintProjection(): void {
+    const screen = this.fullscreen
+    const pending = this.footerPendingProjection
+    if (screen === undefined || pending === undefined) {
+      this.footerPaintedProjection = undefined
+      return
+    }
+    const box = screen.getPaintedBox(this.footer)
+    if (box === undefined || box.width <= 0 || box.height <= 0) {
+      this.footerPaintedProjection = undefined
+      return
+    }
+    const columns = this.terminal.columns
+    const termRows = this.terminal.rows
+    const rows = pending.projection.text === '' ? [] : pending.projection.text.split('\n')
+    // Text (padding 0) may only ADD right padding to each composed row: a
+    // row-count change, a second wrap, or a tab expansion means the
+    // composer's cells do not describe the painted frame.
+    const painted = this.footer.render(columns)
+    let matches = box.width === columns && box.height === painted.length && painted.length === rows.length
+    if (matches) {
+      for (let index = 0; index < rows.length; index += 1) {
+        if (stripTerminalSequences(painted[index]!).trimEnd() !== stripTerminalSequences(rows[index]!).trimEnd()) {
+          matches = false
+          break
+        }
+      }
+    }
+    if (!matches) {
+      this.footerPaintedProjection = undefined
+      return
+    }
+    const hits: PaintedFooterHit[] = []
+    for (const hit of pending.projection.hits) {
+      if (hit.row < 0 || hit.row >= rows.length) continue
+      if (hit.startCol < 0 || hit.endCol > box.width) continue
+      hits.push({
+        id: hit.id,
+        placement: hit.placement,
+        row: box.y + hit.row,
+        startCol: box.x + hit.startCol,
+        endCol: box.x + hit.endCol,
+      })
+    }
+    this.footerPaintedProjection = {
+      screen,
+      revision: pending.revision,
+      subjectKind: pending.subjectKind,
+      columns,
+      termRows,
+      top: box.y,
+      left: box.x,
+      width: box.width,
+      height: box.height,
+      hits,
+    }
+  }
+
+  /** PR3: the root Footer box half of a fullscreen press. Returns true when
+   * the cell belongs to the painted footer: a complete first-party hit
+   * starts the one-shot gesture, every other footer cell (separator, gap,
+   * truncated/dropped item, child-subject, command-mode, blocked owner) is
+   * inert and never falls through to the transcript/todo ladder. */
+  private beginFooterPress(x: number, y: number): boolean {
+    const painted = this.footerPaintedProjection
+    if (painted === undefined) return false
+    if (this.fullscreen !== painted.screen || this.activeScreen !== painted.screen) return false
+    if (this.terminal.columns !== painted.columns || this.terminal.rows !== painted.termRows) return false
+    const inBox = y >= painted.top && y < painted.top + painted.height
+      && x >= painted.left && x < painted.left + painted.width
+    if (!inBox) return false
+    // Inside the painted footer box the press is CONSUMED even when no hit
+    // applies: the footer is not a transcript surface.
+    if (painted.subjectKind !== 'main') return true
+    // The transcript-search box's passthrough exception belongs to transcript
+    // inspection ONLY: any visible modal — search included — blocks footer
+    // navigation, as does a non-capturing overlay actually painted here.
+    if (this.overlayBroker.hasVisibleModalOverlay()) return true
+    if (this.taskQuick.focused || this.optionalSeatOwnsKeyboard()) return true
+    if (this.overlayBroker.coversVisibleNonCapturingCell(x, y)) return true
+    const hit = painted.hits.find(candidate =>
+      candidate.row === y && x >= candidate.startCol && x < candidate.endCol)
+    if (hit === undefined) return true
+    this.footerPressGesture = {
+      screen: painted.screen,
+      compositionRevision: painted.revision,
+      subjectKind: 'main',
+      id: hit.id,
+      placement: hit.placement,
+      row: hit.row,
+      startCol: hit.startCol,
+      endCol: hit.endCol,
+      columns: painted.columns,
+      termRows: painted.termRows,
+    }
+    return true
+  }
+
+  /** PR3: complete (or reject) the ONE footer press gesture. The gesture is
+   * already cleared by the caller BEFORE this runs — the business callback
+   * can never observe or re-enter a stale latch. */
+  private completeFooterPress(pressed: FooterPressGesture, x: number, y: number): void {
+    const painted = this.footerPaintedProjection
+    if (painted === undefined || painted.screen !== pressed.screen) return
+    if (this.fullscreen !== pressed.screen || this.activeScreen !== pressed.screen) return
+    if (this.terminal.columns !== pressed.columns || this.terminal.rows !== pressed.termRows) return
+    if (painted.revision !== pressed.compositionRevision) return
+    if (painted.subjectKind !== 'main') return
+    if (this.statusStore.snapshot().view.subject.kind !== 'main') return
+    if (this.taskQuick.focused || this.optionalSeatOwnsKeyboard()) return
+    if (this.activeQuestions !== undefined || this.approvals.isActive()) return
+    if (this.overlayBroker.hasVisibleModalOverlay()) return
+    if (this.overlayBroker.coversVisibleNonCapturingCell(x, y)) return
+    // The release must be the SAME cell of the SAME hit the press resolved.
+    if (y !== pressed.row || x < pressed.startCol || x >= pressed.endCol) return
+    const current = painted.hits.find(candidate =>
+      candidate.id === pressed.id
+      && candidate.placement === pressed.placement
+      && candidate.row === pressed.row
+      && candidate.startCol === pressed.startCol
+      && candidate.endCol === pressed.endCol)
+    if (current === undefined) return
+    // The painted geometry is not a capability: re-read the live business
+    // availability the original owner exposes.
+    if (pressed.id === 'model') {
+      if (this.footerModelOpen === undefined || this.footerModelAvailable?.() !== true) return
+      this.footerModelOpen()
+      return
+    }
+    if (this.footerTasksOpen === undefined || this.footerTasksAvailable?.() !== true) return
+    this.footerTasksOpen()
+  }
+
+  /** PR3: whether one click cell is part of the CURRENT painted footer box.
+   * A click here without a matching press gesture is inert (a drag/second
+   * click never becomes a transcript or Task Quick action). */
+  private isInertFooterClickCell(x: number, y: number): boolean {
+    const painted = this.footerPaintedProjection
+    if (painted === undefined) return false
+    if (this.fullscreen !== painted.screen || this.activeScreen !== painted.screen) return false
+    if (this.terminal.columns !== painted.columns || this.terminal.rows !== painted.termRows) return false
+    return y >= painted.top && y < painted.top + painted.height
+      && x >= painted.left && x < painted.left + painted.width
   }
 
   /** The viewer subject bar's PAINTED `‹ back` band for the frame being
@@ -16012,6 +16284,10 @@ export class TuiApp {
       this.fullscreenCellGesture = undefined
       return
     }
+    // PR3: the root Footer's whole painted box is a first-party navigation
+    // surface. A press inside it either starts the ONE footer gesture or is
+    // inert — it never falls through to the transcript/todo ladder.
+    if (this.beginFooterPress(x, y)) return
     // The press resolves ONLY against the last-painted frame snapshot
     // (committed by the trailing paint-commit probe at the frame
     // boundary): no render() call, no refresh — a re-measure between
@@ -16121,6 +16397,17 @@ export class TuiApp {
   }
 
   private handleFullscreenClick(x: number, y: number): void {
+    // PR3: a press that began on the root Footer can only complete or
+    // reject the SAME footer target. The latch is cleared FIRST, before any
+    // callback, and the release never falls into the modal/transcript
+    // ladders — a modal that opened between press and release makes this
+    // release inert, not a click on the modal.
+    const pressedFooter = this.footerPressGesture
+    if (pressedFooter !== undefined) {
+      this.footerPressGesture = undefined
+      this.completeFooterPress(pressedFooter, x, y)
+      return
+    }
     // Image UX PR1: complete a composer-preview `×` gesture before the
     // transcript/modal ladders. The pressed occurrence must still occupy the
     // exact same painted row/columns and draft text; a repaint, a draft edit
@@ -16240,6 +16527,12 @@ export class TuiApp {
     // it on the background surface). A nonCapturing notice is non-modal and
     // does not own the release.
     if (this.overlayBlocksTranscriptPointer()) {
+      this.fullscreenCellGesture = undefined
+      return
+    }
+    // PR3: a click inside the painted Footer box that did not begin with a
+    // matching footer press is inert — never a transcript/todo fall-through.
+    if (this.isInertFooterClickCell(x, y)) {
       this.fullscreenCellGesture = undefined
       return
     }
@@ -24722,8 +25015,10 @@ export class TuiApp {
 
   /** Render the complete Footer surface for one task-browser context. Used
    *  both for the committed paint and the read-only `↓ view` candidate-height
-   *  preflight; the latter never mutates `this.footer`. */
-  private composeFooterText(width: number, taskBrowserAvailable: boolean): string {
+   *  preflight; the latter never mutates `this.footer`. The returned hits
+   *  are read-only presentation geometry — business availability is checked
+   *  again on release, never inferred from a painted badge. */
+  private composeFooterProjection(width: number, taskBrowserAvailable: boolean): FooterPaintProjection {
     // A pending leader sequence is an independent Host instruction, appended
     // after the layout rows; it never replaces a Footer row.
     const leader = this.keybindings.leaderMachine()
@@ -24734,10 +25029,15 @@ export class TuiApp {
     })
     if (this.commandRows !== undefined) {
       // M5: the command surface owns the Status Surface; the Host
-      // instruction still merges on top and reserves its own budget.
-      return mergeCommandSurface(this.commandRows, instruction, width, this.footerPhysicalLineBudget())
+      // instruction still merges on top and reserves its own budget. Command
+      // rows never publish a first-party footer hit (even when their text
+      // mimics a badge).
+      return {
+        text: mergeCommandSurface(this.commandRows, instruction, width, this.footerPhysicalLineBudget()),
+        hits: [],
+      }
     }
-    return this.footerComposer.render({
+    return this.footerComposer.compose({
       snapshot: this.statusStore.snapshot(),
       layout: this.currentFooterLayout(),
       width,
@@ -24748,6 +25048,33 @@ export class TuiApp {
       instruction,
       physicalLineBudget: this.footerPhysicalLineBudget(),
     })
+  }
+
+  /** The Task Quick candidate-height preflight reads the TEXT only: it must
+   *  never install a projection or disturb the painted frame's hit map. */
+  private composeFooterText(width: number, taskBrowserAvailable: boolean): string {
+    return this.composeFooterProjection(width, taskBrowserAvailable).text
+  }
+
+  /** Commit the newly composed footer for the NEXT frame commit. The
+   *  revision advances only when the text, a hit, or the subject kind
+   *  actually changes, so an unrelated repaint does not invalidate a click
+   *  that began on the same painted footer. */
+  private commitFooterPendingProjection(projection: FooterPaintProjection): void {
+    const subjectKind: 'main' | 'subagent' = this.statusStore.snapshot().view.subject.kind === 'subagent'
+      ? 'subagent'
+      : 'main'
+    const key = `${subjectKind}\u0000${projection.text}\u0000${
+      projection.hits.map(hit => `${hit.id}:${hit.placement}:${hit.row}:${hit.startCol}:${hit.endCol}`).join('|')}`
+    if (key !== this.footerProjectionKey) {
+      this.footerProjectionKey = key
+      this.footerProjectionRevision += 1
+    }
+    this.footerPendingProjection = {
+      revision: this.footerProjectionRevision,
+      subjectKind,
+      projection,
+    }
   }
 
   /** Commit the current Footer composition and refresh the painted editor
@@ -24776,13 +25103,14 @@ export class TuiApp {
         ? renderedLayout?.physicalWidth === width ? renderedLayout.onLastVisualLine : false
         : undefined
     this.footerCompositionInProgress = true
-    let text: string
+    let projection: FooterPaintProjection
     try {
-      text = this.composeFooterText(width, this.taskBrowserAvailable(onLastVisualLine))
+      projection = this.composeFooterProjection(width, this.taskBrowserAvailable(onLastVisualLine))
     } finally {
       this.footerCompositionInProgress = false
     }
-    this.footer.setText(text)
+    this.footer.setText(projection.text)
+    this.commitFooterPendingProjection(projection)
     this.taskQuickPaintedBoundary = onLastVisualLine
     const latestLayout = this.quickHintCurrentEditorLayout
     const latestOwnerEligible = this.keybindings.keysFor('app.tasks.open').includes('down')

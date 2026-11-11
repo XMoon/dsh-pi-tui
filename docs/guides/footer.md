@@ -327,6 +327,32 @@ The selected Style is a persisted preference. On a narrow terminal the runtime
 may render a shorter density form to preserve more useful information; that
 does not rewrite the saved Style.
 
+## Fullscreen Footer navigation
+
+In the default PiTui **Fullscreen** surface, two builtin Footer placements are
+also navigation affordances while they are completely visible and owned by the
+main Session:
+
+- a click on the `model` placement opens the same model picker as `/model`;
+- a click on the `tasks` placement opens the same Full Task Center as `/tasks`
+  (not the Task Quick band — the `↓ view` hint keeps its own separate keyboard
+  meaning).
+
+The whole visible placement is the target, including a configured prefix or
+suffix. The Footer is otherwise unchanged: no new row, no background, hover,
+button frame or badge, and the existing tones stay authoritative.
+
+A placement that the responsive rules dropped, compacted away or truncated is
+not clickable. Neither are separators, the right-alignment gap, the Host
+instruction line, whole-footer command output, a custom or extension item
+(even one that spells the same words), the Regular/Main surface, or the Footer
+of a viewed child Session (its `model` describes the child, while `/model`
+writes the main Session). A blocking Question, Approval or Save prompt, an
+open picker/overlay, and the Task Quick band block Footer clicks while they are
+in front. A press whose frame changed before release (resize, layout or
+subject switch, a repaint that moved the item) is dropped instead of acting on
+the new frame.
+
 ## Viewer subject bar
 
 The child viewer identity is NOT a Footer item and is NOT configurable through

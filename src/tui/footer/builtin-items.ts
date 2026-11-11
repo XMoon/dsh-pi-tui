@@ -110,8 +110,10 @@ const planStateItem: FooterItemDefinition = {
   },
 }
 
-/** The model styles: badge, provider/model plain text, or model id only. */
-const modelItem: FooterItemDefinition = {
+/** The model styles: badge, provider/model plain text, or model id only.
+ * Exported for the composer's OBJECT-IDENTITY click classification: only
+ * this exact builtin definition may publish a `model` footer hit. */
+export const modelItem: FooterItemDefinition = {
   id: 'model',
   label: 'Model',
   description: 'The provider/model identity as a badge, plain label, or model id.',
@@ -138,7 +140,7 @@ const modelItem: FooterItemDefinition = {
  * old wording for embedders; the runtime-backed snapshot uses independent
  * active/tracked job and agent counts and a persistent failure marker.
  */
-const tasksItem: FooterItemDefinition = {
+export const tasksItem: FooterItemDefinition = {
   id: 'tasks',
   label: 'Tasks',
   description: 'The Task Center active/tracked badge with failure attention, parked human Question attention and the ↓ view hint.',

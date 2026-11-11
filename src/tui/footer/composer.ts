@@ -29,12 +29,14 @@
  * @module @xmoon76/dsh-pi-tui/tui/footer/composer
  */
 
-import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from '@xmoon76/pi-tui'
+import { getGraphemeSegmenter, stripTerminalSequences, truncateToWidth, visibleWidth, wrapTextWithAnsi } from '@xmoon76/pi-tui'
 import { color } from '../theme/runtime.ts'
 import type { StatusSnapshot } from '../../domain/status/types.ts'
+import { modelItem, tasksItem } from './builtin-items.ts'
 import type { FooterItemRegistry } from './item-registry.ts'
 import type {
   FooterDensity,
+  FooterItemDefinition,
   FooterItemRef,
   FooterLayoutV1,
   FooterPhysicalLineBudget,
@@ -67,6 +69,32 @@ export interface FooterComposerOptions {
   readonly physicalLineBudget?: FooterPhysicalLineBudget
 }
 
+/** The FIRST-PARTY footer items that publish a click target. */
+export type FooterClickId = 'model' | 'tasks'
+
+/** One painted, fully visible builtin item placement: the terminal cell
+ * range the user can actually click. Coordinates are the composer's final
+ * physical lines (0-based row) and terminal cells (half-open `[startCol,
+ * endCol)`), never a persisted layout position or a text search. Presenting
+ * a hit is NOT a capability grant: the release path re-checks the live
+ * owner/capability before it runs any business action. */
+export interface FooterPaintedItemHit {
+  readonly id: FooterClickId
+  /** Layout row / zone / placement index — keeps two same-id placements
+   * apart without ever being committed to a settings schema. */
+  readonly placement: string
+  readonly row: number
+  readonly startCol: number
+  readonly endCol: number
+}
+
+/** The composer's ONE layout pass: the exact footer text plus the painted
+ * clickable placements. */
+export interface FooterPaintProjection {
+  readonly text: string
+  readonly hits: readonly FooterPaintedItemHit[]
+}
+
 /** The DEFAULT surface policy (plan §6.1, PR #57 revision): two physical
  * lines per logical row, hard capacity four for the whole footer. The
  * production path (TuiApp) always passes the EFFECTIVE surface budget —
@@ -95,7 +123,7 @@ interface ResolvedRow {
   readonly separator: string
   /** A right-zone row's already-fitted single physical line (its fitting
    * contract never wraps); absent for a left-only row. */
-  readonly rightLine: string | undefined
+  readonly rightLine: FittedRightLine | undefined
   /** How many physical lines the preferred form needs (a right-zone row
    * demands exactly 1). */
   readonly demand: number
@@ -105,13 +133,63 @@ interface ResolvedRow {
 /** One resolved zone item (rendered at the preferred density). */
 interface ZoneItem {
   readonly ref: FooterItemRef
-  readonly def: { render(snapshot: StatusSnapshot, ref: FooterItemRef, density: FooterDensity, context: FooterRenderContext): FooterSegment | null }
+  readonly def: FooterItemDefinition
   text: string
   readonly importance: number
   readonly minWidth: number | undefined
   readonly index: number
+  /** The logical layout row this placement lives in (click provenance). */
+  readonly layoutRowIndex: number
+  /** The zone side this placement lives in (click provenance). */
+  readonly side: 'left' | 'right'
+  /** The FIRST-PARTY action this placement publishes, or undefined. Only
+   * an OBJECT-IDENTITY match against the builtin definition qualifies. */
+  readonly clickId: FooterClickId | undefined
+  /** A stable per-compose placement identity: layout row / zone / index. */
+  readonly placement: string
+  /** Whether the item's FULL visible content survived the fit (a truncated
+   * item renders its ellipsis but publishes no clickable cell). */
+  complete: boolean
   /** Re-render at a density (the compact phase re-renders in place). */
-  renderAt(density: FooterDensity): string
+  readonly renderAt: (density: FooterDensity) => string
+}
+
+/** One surviving item of a fitted zone, captured WITH the exact text that
+ * was joined into the final line (the provenance source, never a re-read of
+ * the mutable item after the fact). */
+interface ZonePart {
+  readonly item: ZoneItem
+  readonly text: string
+  readonly complete: boolean
+}
+
+/** A fitted zone: the byte-identical joined string plus its surviving
+ * attributed parts in the SAME order. */
+interface FittedZone {
+  readonly text: string
+  readonly parts: readonly ZonePart[]
+}
+
+/** A right-zone row's single fitted line plus the parts that produced the
+ * left and right halves (used to derive the real cell spans). */
+interface FittedRightLine {
+  readonly text: string
+  readonly leftParts: readonly ZonePart[]
+  readonly rightParts: readonly ZonePart[]
+  readonly rightWidth: number
+}
+
+/** One attributed visible run of a placement on one physical line. */
+interface CellRun {
+  readonly part: ZonePart
+  readonly startCol: number
+  readonly endCol: number
+}
+
+/** One fitted physical line plus its per-line cell attribution. */
+interface FittedRow {
+  readonly lines: readonly string[]
+  readonly runs: ReadonlyArray<ReadonlyArray<CellRun>>
 }
 
 /** The footer composer. */
@@ -124,6 +202,14 @@ export class FooterComposer {
 
   /** Render the layout + instruction into the final footer text. */
   render(options: FooterComposerOptions): string {
+    return this.compose(options).text
+  }
+
+  /** Compose the layout + instruction in ONE layout pass: the exact final
+   * text plus the painted, fully visible first-party click targets. The
+   * hits are read-only presentation geometry, NOT a capability or business
+   * grant; the release owner re-checks availability before acting. */
+  compose(options: FooterComposerOptions): FooterPaintProjection {
     const { snapshot, layout, context, instruction } = options
     // The width normalizes ONCE to a finite integer ≥ 1: the app caller
     // clamps the terminal width already, but the composer is exported —
@@ -147,7 +233,7 @@ export class FooterComposer {
     // (arithmetic underflow, a buggy caller): they must not silently
     // hide the Host instruction, so they flow through the regular
     // normalization like every other finite junk value (floor 1).
-    if (budget.total === 0) return ''
+    if (budget.total === 0) return { text: '', hits: [] }
     const total = Math.min(FOOTER_MAX_PHYSICAL_LINES,
       normalizePositiveInt(budget.total, FOOTER_MAX_PHYSICAL_LINES))
     const perRow = Math.min(total, FOOTER_MAX_PHYSICAL_LINES_PER_ROW,
@@ -163,7 +249,7 @@ export class FooterComposer {
     // 1. Resolve every LOGICAL row once (rendered zones + preferred form
     // + demand). An EMPTY row (every item unavailable) never enters the
     // budget at all.
-    const resolved = layout.rows.map(row => this.resolveRow(row, snapshot, context, width))
+    const resolved = layout.rows.map((row, rowIndex) => this.resolveRow(row, snapshot, context, width, rowIndex))
     const renderable = resolved.filter(row => !row.isEmpty)
     // 2. The Host instruction reserves ONE physical line up front (plan
     // §7): it is an independent surface — never the replacement of a user
@@ -189,23 +275,56 @@ export class FooterComposer {
       allowances[index]! += extra
       remaining -= extra
     }
-    // 4. Render every row within its allowance, in layout order.
+    // 4. Render every row within its allowance, in layout order. Only the
+    // lines that actually reach the final text earn hits, so the physical
+    // row number always describes a line the user can see.
     const physical: string[] = []
+    const hits: FooterPaintedItemHit[] = []
     let renderIndex = 0
     for (const row of resolved) {
       if (row.isEmpty) continue
       const allowance = allowances[renderIndex]!
       renderIndex += 1
-      for (const physicalLine of this.fitLogicalRow(row, width, allowance)) {
-        if (physicalLine !== '') physical.push(physicalLine)
+      const fitted = this.fitLogicalRow(row, width, allowance)
+      for (let lineIndex = 0; lineIndex < fitted.lines.length; lineIndex += 1) {
+        const physicalLine = fitted.lines[lineIndex]!
+        if (physicalLine === '') continue
+        const physicalRow = physical.length
+        physical.push(physicalLine)
+        this.collectHits(fitted.runs[lineIndex]!, physicalRow, width, hits)
       }
     }
     // 5. The instruction: its own line, capped to one physical row. An
     // instruction with no VISIBLE content paints nothing (and reserved
-    // nothing).
+    // nothing). Instruction cells never carry a hit.
     if (hasInstruction) physical.push(renderInstructionLine(instructionText!, width))
     // The legacy footer's final pass: every physical row is dimmed.
-    return physical.map(row => color.textDim(row)).join('\n')
+    return {
+      text: physical.map(row => color.textDim(row)).join('\n'),
+      hits,
+    }
+  }
+
+  /** Publish the visible runs of a placement that owns a FIRST-PARTY click
+   * action. A truncated/dropped part publishes nothing. */
+  private collectHits(
+    runs: ReadonlyArray<CellRun>,
+    row: number,
+    width: number,
+    hits: FooterPaintedItemHit[],
+  ): void {
+    for (const run of runs) {
+      const id = run.part.item.clickId
+      if (id === undefined || !run.part.complete) continue
+      if (run.endCol <= run.startCol || run.startCol < 0 || run.endCol > width) continue
+      hits.push({
+        id,
+        placement: run.part.item.placement,
+        row,
+        startCol: run.startCol,
+        endCol: run.endCol,
+      })
+    }
   }
 
   /** Resolve one LOGICAL row (plan §6.2/§6.3): render its zones exactly
@@ -216,9 +335,10 @@ export class FooterComposer {
     snapshot: StatusSnapshot,
     context: FooterRenderContext,
     width: number,
+    layoutRowIndex: number,
   ): ResolvedRow {
-    const left = this.renderZone(row.left, snapshot, context)
-    const right = this.renderZone(row.right, snapshot, context)
+    const left = this.renderZone(row.left, snapshot, context, layoutRowIndex, 'left')
+    const right = this.renderZone(row.right, snapshot, context, layoutRowIndex, 'right')
     // The separator's semantic tone applies to its text (the plan §8
     // separator tone — the outer dim pass still colors untoned parts).
     const separator = row.separator === undefined
@@ -257,10 +377,14 @@ export class FooterComposer {
   /** Fit one logical row into a physical-line allowance (plan §6.2): 0 →
    * the row drops (the global budget is exhausted); a right-zone row stays
    * its single fitted line; a left-only row wraps into 1..maxPhysicalLines
-   * through the compact → drop → truncate discipline. */
-  private fitLogicalRow(row: ResolvedRow, width: number, maxPhysicalLines: number): string[] {
-    if (row.isEmpty || maxPhysicalLines < 1) return []
-    if (row.rightLine !== undefined) return [row.rightLine]
+   * through the compact → drop → truncate discipline. The returned runs are
+   * the per-physical-line cell attribution of the surviving parts. */
+  private fitLogicalRow(row: ResolvedRow, width: number, maxPhysicalLines: number): FittedRow {
+    if (row.isEmpty || maxPhysicalLines < 1) return { lines: [], runs: [] }
+    const rightLine = row.rightLine
+    if (rightLine !== undefined) {
+      return { lines: [rightLine.text], runs: [this.attributeRightLine(rightLine, row.separator, width)] }
+    }
     return this.wrapFitRow(row.left, row.separator, width, maxPhysicalLines)
   }
 
@@ -273,21 +397,63 @@ export class FooterComposer {
    * shrink a few times; the EXPLICIT floor below (cells 1) turns any
    * residual overflow into a single ANSI-safe '…' row, so termination
    * never depends on fitZone/wrap internals staying well-behaved. */
-  private wrapFitRow(items: ZoneItem[], separator: string, width: number, maxPhysicalLines: number): string[] {
-    const preferred = wrapTextWithAnsi(items.map(item => item.text).join(separator), width)
-    if (preferred.length <= maxPhysicalLines) return preferred
+  private wrapFitRow(items: ZoneItem[], separator: string, width: number, maxPhysicalLines: number): FittedRow {
+    const preferredParts = items.map(item => ({ item, text: item.text, complete: item.complete }))
+    const preferred = wrapTextWithAnsi(joinParts(preferredParts, separator), width)
+    if (preferred.length <= maxPhysicalLines) return this.attributeWrapped(preferredParts, separator, preferred)
     let cells = width * maxPhysicalLines
     for (;;) {
-      const wrapped = wrapTextWithAnsi(this.fitZone(items, separator, cells), width)
-      if (wrapped.length <= maxPhysicalLines) return wrapped
+      const fitted = this.fitZone(items, separator, cells)
+      const wrapped = wrapTextWithAnsi(fitted.text, width)
+      if (wrapped.length <= maxPhysicalLines) return this.attributeWrapped(fitted.parts, separator, wrapped)
       if (cells <= 1) {
         // Finite lower bound: one cell can only ever wrap to one line, so
         // this branch is the loop's guaranteed exit — belt and braces for
         // the termination argument even if future wrap/fit behavior drifts.
-        return [capRowWithEllipsis(wrapped[0] ?? '', width)]
+        // The ellipsis row is not a fully visible placement: no hits.
+        return { lines: [capRowWithEllipsis(wrapped[0] ?? '', width)], runs: [[]] }
       }
       cells = Math.max(1, cells - Math.max(1, wrapped.length - maxPhysicalLines))
     }
+  }
+
+  /** Attribute one wrapped left-only row: map every visible grapheme of the
+   * ACTUAL wrapped lines back to its source part in strict source order.
+   * Only layout whitespace the wrapper itself drops may be skipped; any
+   * other mismatch fails CLOSED for the whole row (no guessed spans). */
+  private attributeWrapped(
+    parts: readonly ZonePart[],
+    separator: string,
+    lines: readonly string[],
+  ): FittedRow {
+    const runs = attributeWrappedLines(parts, separator, lines)
+    return { lines, runs: runs ?? lines.map(() => []) }
+  }
+
+  /** Attribute a right-zone row's single fitted line from its surviving
+   * parts: the left half starts at column 0, the right half is flush right
+   * (its real width positions it), and the gap/gap-adjacent cells belong to
+   * no placement. */
+  private attributeRightLine(fitted: FittedRightLine, separator: string, width: number): CellRun[] {
+    const runs: CellRun[] = []
+    const separatorWidth = visibleWidth(separator)
+    let col = 0
+    for (let index = 0; index < fitted.leftParts.length; index += 1) {
+      if (index > 0) col += separatorWidth
+      const part = fitted.leftParts[index]!
+      const partWidth = visibleWidth(part.text)
+      runs.push({ part, startCol: col, endCol: col + partWidth })
+      col += partWidth
+    }
+    let rightCol = width - fitted.rightWidth
+    for (let index = 0; index < fitted.rightParts.length; index += 1) {
+      if (index > 0) rightCol += separatorWidth
+      const part = fitted.rightParts[index]!
+      const partWidth = visibleWidth(part.text)
+      runs.push({ part, startCol: rightCol, endCol: rightCol + partWidth })
+      rightCol += partWidth
+    }
+    return runs
   }
 
   /** The right-zone row's single-line contract (plan §6.4 — unchanged):
@@ -295,29 +461,44 @@ export class FooterComposer {
    * remaining width; the right zone re-fits the leftover room and drops
    * entirely when even one cell is left (never a negative gap, never
    * across the terminal width). An unavailable left zone must not drag
-   * right items to the left edge — a right zone stays flush right. */
-  private renderRightRow(left: ZoneItem[], right: ZoneItem[], separator: string, width: number): string {
+   * right items to the left edge — a right zone stays flush right. The
+   * returned parts are exactly the text the final line joins. */
+  private renderRightRow(left: ZoneItem[], right: ZoneItem[], separator: string, width: number): FittedRightLine {
     if (left.length === 0) {
       const fitted = this.fitZone(right, separator, width)
-      const gap = ' '.repeat(Math.max(0, width - visibleWidth(fitted)))
-      return `${gap}${fitted}`
+      const fittedWidth = visibleWidth(fitted.text)
+      const gap = ' '.repeat(Math.max(0, width - fittedWidth))
+      return {
+        text: `${gap}${fitted.text}`,
+        leftParts: [],
+        rightParts: fitted.parts,
+        rightWidth: fittedWidth,
+      }
     }
     const rightFull = right.map(item => item.text).join(separator)
     const rightWidth = visibleWidth(rightFull)
     const minGap = 1
     const leftBudget = Math.max(1, width - rightWidth - minGap)
-    const leftText = this.fitZone(left, separator, leftBudget)
-    const leftWidth = visibleWidth(leftText)
+    const leftFitted = this.fitZone(left, separator, leftBudget)
+    const leftWidth = visibleWidth(leftFitted.text)
     const rightRoom = Math.max(0, width - leftWidth - minGap)
-    if (rightRoom < 1) return leftText
+    if (rightRoom < 1) {
+      return { text: leftFitted.text, leftParts: leftFitted.parts, rightParts: [], rightWidth: 0 }
+    }
     // The right zone fits through the SAME item-level compact → drop →
     // truncate discipline as the left (the review finding: a whole-string
     // truncate cut the RIGHTMOST item even when a LOWER-importance item
     // was the better victim — e.g. `version(10) focus(120)` on a narrow
     // screen must drop version, never the pinned focus).
     const finalRight = this.fitZone(right, separator, rightRoom)
-    const gap = ' '.repeat(Math.max(0, width - leftWidth - visibleWidth(finalRight)))
-    return `${leftText}${gap}${finalRight}`
+    const finalRightWidth = visibleWidth(finalRight.text)
+    const gap = ' '.repeat(Math.max(0, width - leftWidth - finalRightWidth))
+    return {
+      text: `${leftFitted.text}${gap}${finalRight.text}`,
+      leftParts: leftFitted.parts,
+      rightParts: finalRight.parts,
+      rightWidth: finalRightWidth,
+    }
   }
 
   /** Resolve one zone's item refs into rendered items (unknown ids and
@@ -329,6 +510,8 @@ export class FooterComposer {
     refs: readonly FooterItemRef[],
     snapshot: StatusSnapshot,
     context: FooterRenderContext,
+    layoutRowIndex: number,
+    side: 'left' | 'right',
   ): ZoneItem[] {
     const items: ZoneItem[] = []
     for (const ref of refs) {
@@ -355,13 +538,19 @@ export class FooterComposer {
       if (segment === null) continue
       const text = renderAt('preferred')
       if (text === '') continue
+      const index = items.length
       items.push({
         ref,
         def,
         text,
         importance: ref.importance ?? def.defaultImportance,
         minWidth: segment.minWidth ?? def.minWidth,
-        index: items.length,
+        index,
+        layoutRowIndex,
+        side,
+        clickId: footerClickIdOf(def),
+        placement: `${layoutRowIndex}:${side}:${index}`,
+        complete: true,
         renderAt,
       })
     }
@@ -370,11 +559,17 @@ export class FooterComposer {
 
   /** Fit a zone into a width budget: compact → drop → truncate (plan
    * §9.2–§9.4). Deterministic: importance ASC, then reverse layout order
-   * as the tie-break. */
-  private fitZone(items: ZoneItem[], separator: string, budget: number): string {
+   * as the tie-break. The returned text is byte-identical to the legacy
+   * join; the parts carry the SAME surviving texts (and mark a truncated
+   * victim incomplete) for click provenance. */
+  private fitZone(items: ZoneItem[], separator: string, budget: number): FittedZone {
     const totalOf = (list: readonly ZoneItem[]): number =>
       list.reduce((sum, item, index) => sum + visibleWidth(item.text) + (index === 0 ? 0 : visibleWidth(separator)), 0)
-    if (totalOf(items) <= budget) return items.map(item => item.text).join(separator)
+    const partsOf = (list: readonly ZoneItem[]): ZonePart[] =>
+      list.map(item => ({ item, text: item.text, complete: item.complete }))
+    if (totalOf(items) <= budget) {
+      return { text: items.map(item => item.text).join(separator), parts: partsOf(items) }
+    }
     let kept = items
     // 1. compact: re-render the LOWEST-importance items at the compact
     // density first (an item whose compact form is shorter helps the
@@ -388,7 +583,9 @@ export class FooterComposer {
         victim.text = compact
       }
     }
-    if (totalOf(kept) <= budget) return kept.map(item => item.text).join(separator)
+    if (totalOf(kept) <= budget) {
+      return { text: kept.map(item => item.text).join(separator), parts: partsOf(kept) }
+    }
     // 2. drop: remove the lowest-importance items (order preserved)...
     for (const victim of byImportance) {
       if (kept.length === 1) break
@@ -413,10 +610,92 @@ export class FooterComposer {
         kept = kept.slice(0, -1)
       } else {
         last.text = truncateToWidth(last.text, room, '…')
+        // A truncated placement is NOT a fully visible click target.
+        last.complete = false
       }
     }
-    return kept.map(item => item.text).join(separator)
+    return { text: kept.map(item => item.text).join(separator), parts: partsOf(kept) }
   }
+}
+
+/** The FIRST-PARTY click identity of one item definition — OBJECT
+ * IDENTITY only, never the text or the user-visible `ref.id`: a custom,
+ * extension or user item that happens to share the `model`/`tasks` id (or
+ * the same words) stays inert. */
+function footerClickIdOf(def: FooterItemDefinition): FooterClickId | undefined {
+  if (def === modelItem) return 'model'
+  if (def === tasksItem) return 'tasks'
+  return undefined
+}
+
+const footerGraphemeSegmenter = getGraphemeSegmenter()
+
+/** Split one rendered part into its visible graphemes (tab normalization
+ * matches both the Text component and visibleWidth; ANSI/OSC carries no
+ * cell and is stripped). */
+function visibleGraphemes(text: string): string[] {
+  const stripped = stripTerminalSequences(text.replace(/\t/g, '   '))
+  const graphemes: string[] = []
+  for (const { segment } of footerGraphemeSegmenter.segment(stripped)) graphemes.push(segment)
+  return graphemes
+}
+
+function joinParts(parts: readonly ZonePart[], separator: string): string {
+  return parts.map(part => part.text).join(separator)
+}
+
+/** Whitespace the wrap contract itself may drop (trailing spaces, the
+ * space at a wrap boundary, literal newlines). */
+function isDroppableLayoutWhitespace(char: string): boolean {
+  return char === '\n' || char === '\r' || char.trim() === ''
+}
+
+/** Attribute the ACTUAL wrapped lines back to the source parts in strict
+ * source order. Returns undefined when any visible grapheme cannot be
+ * matched one-to-one (unknown ANSI expansion, width drift, reordering) —
+ * the caller then publishes NO hit for this row instead of guessing. */
+function attributeWrappedLines(
+  parts: readonly ZonePart[],
+  separator: string,
+  lines: readonly string[],
+): CellRun[][] | undefined {
+  const source: Array<{ readonly char: string; readonly part: ZonePart | undefined }> = []
+  for (let index = 0; index < parts.length; index += 1) {
+    if (index > 0) {
+      for (const char of visibleGraphemes(separator)) source.push({ char, part: undefined })
+    }
+    for (const char of visibleGraphemes(parts[index]!.text)) source.push({ char, part: parts[index]! })
+  }
+  let cursor = 0
+  const attributed: CellRun[][] = []
+  for (const line of lines) {
+    const runs: CellRun[] = []
+    let col = 0
+    for (const char of visibleGraphemes(line)) {
+      while (cursor < source.length
+        && source[cursor]!.char !== char
+        && isDroppableLayoutWhitespace(source[cursor]!.char)) {
+        cursor += 1
+      }
+      const matched = source[cursor]
+      if (matched === undefined || matched.char !== char) return undefined
+      const charWidth = Math.max(0, visibleWidth(char))
+      if (matched.part !== undefined && charWidth > 0) {
+        const last = runs[runs.length - 1]
+        if (last !== undefined && last.part === matched.part && last.endCol === col) {
+          runs[runs.length - 1] = { part: matched.part, startCol: last.startCol, endCol: col + charWidth }
+        } else {
+          runs.push({ part: matched.part, startCol: col, endCol: col + charWidth })
+        }
+      }
+      col += charWidth
+      cursor += 1
+    }
+    attributed.push(runs)
+  }
+  // Only wrapper-trimmed whitespace may remain unattributed.
+  while (cursor < source.length && isDroppableLayoutWhitespace(source[cursor]!.char)) cursor += 1
+  return cursor === source.length ? attributed : undefined
 }
 
 /** Render the instruction's spans into one line. */

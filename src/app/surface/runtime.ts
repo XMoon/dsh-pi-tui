@@ -3138,6 +3138,15 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     // Post-B4-B: Quick's distinct navigation action opens the same Full Task
     // Center owner as `/tasks`, without manufacturing a TaskPanelItem value.
     onQuickTaskOpenFull: () => task.openTasksBrowser('full'),
+    // PR3: the two first-party FULLSCREEN footer navigation entries. The
+    // model entry is the SAME late-bound registered `/model` command body;
+    // the tasks entry is the SAME Full Task Center owner `/tasks` uses.
+    // `displaySeam().supportsTaskCenter` is the TaskRuntime's own reachability
+    // truth (never a shadow capability), read at release time.
+    onFooterModelOpen: () => options.openModelPicker?.('models'),
+    footerModelAvailable: () => options.openModelPicker !== undefined && options.modelPickerAvailable?.() === true,
+    onFooterTasksOpen: () => task.openTasksBrowser('full'),
+    footerTasksAvailable: () => displaySeam().supportsTaskCenter,
   })
 
   return {
