@@ -643,7 +643,8 @@ export async function runDetachedTurnInteractions(context) {
         await c3.waitForScreen('question answered', 'T51 C3 settled transcript')
         await sleep(500)
         const viewport = (await c3.viewport()).join('\n')
-        assert(!viewport.includes('Submit'), 'T51 a settled question card was resurrected as an answerable flow')
+        assert(!viewport.includes('○ Review') && !viewport.includes('✓ Review'),
+          'T51 a settled question card was resurrected as an answerable flow')
         const settlements = readC1WorkEvents(workRoot).filter(event => event.kind === 'question-settled' && event.sessionId === sessionId)
         const toolResults = (hostSessionEvents(dshHome, sessionId) ?? []).filter(event => event.type === 'tool/result' && String(event.data?.message?.toolCallId) === callId)
         assert(settlements.length === 1 && toolResults.length === 1, 'T51 the settled question produced a second answer/result')

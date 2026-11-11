@@ -15667,7 +15667,7 @@ export class TuiApp {
       if (bounds === undefined) return
       if (y >= bounds.top && y < bounds.bottom) {
         if (x >= 2 && x <= width - 3) {
-          this.questionPressGesture = question.flow.beginMousePress(y - bounds.top - 1)
+          this.questionPressGesture = question.flow.beginMousePress(y - bounds.top - 1, x - 2)
         }
         return
       }
@@ -25531,6 +25531,7 @@ export class TuiApp {
         header: options.header,
         noMatchText: options.noMatchText,
         enableSearch: options.enableSearch,
+        mouseActionsEnabled: () => this.fullscreen !== undefined,
         onStop: options.onStop,
         onViewportExpose: options.onViewportExpose,
         onRefresh: options.onRefresh,
@@ -28358,7 +28359,7 @@ export class TuiApp {
     // The suspension hands the keyboard to the seat owner and may fire a plugin
     // focus/blur callback: re-read the identity before building the frame.
     if (this.abandonIfDead(this.questionFlowIsLive(state), state)) return
-    const frame = new QuestionFrame(state.flow, () => this.terminal.rows)
+    const frame = new QuestionFrame(state.flow, () => this.terminal.rows, () => this.fullscreen !== undefined)
     state.frame = frame
     // Re-vendor lifecycle follow-up P1: the flow only PROJECTS into the
     // seat — the previous occupant (the editor's compiled component) stays
@@ -28467,7 +28468,7 @@ export class TuiApp {
       },
       () => { target.flow.setStatus(target.status) },
       () => {
-        const frame = new QuestionFrame(target.flow, () => this.terminal.rows)
+        const frame = new QuestionFrame(target.flow, () => this.terminal.rows, () => this.fullscreen !== undefined)
         target.frame = frame
         // Re-vendor lifecycle follow-up P1: the next flow only PROJECTS
         // into the seat — the settled flow's frame is simply unmounted

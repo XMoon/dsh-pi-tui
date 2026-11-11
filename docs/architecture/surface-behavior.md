@@ -145,8 +145,25 @@ Full:
 - Question attention is a separate non-work dataset with its own `?N` footer
   fact. Quick shows hidden actionable attention plus active work; Full shows all
   attention plus tracked work.
-- Stop is confirmed and capability-gated. Reading Job output belongs to the Job
-  workspace, not the Task Browser.
+- Stop is confirmed and capability-gated. In the Full Task Center's fullscreen
+  Action Bar, the complete visible Stop span only enters the existing pending
+  confirmation. The detail identifies the target once (`Stop <task label>?`);
+  the existing Action Bar is the sole place that names `Confirm stop [Y]` and
+  `Cancel [Esc]`. In Regular/Main the existing keyboard Action Bar (`s stop`;
+  pending `Y confirm stop · Esc cancel`) stays and there is no application mouse
+  route; the pending detail still names only the target.
+  Fullscreen pending Confirm and Cancel spans act on that same stable task value
+  and use the existing `confirmStop` / pending-clear paths. TaskRuntime remains
+  the final Session/Job capability and currentness authority.
+- While a stop is pending, the first pointer press on another task row cancels
+  confirmation and selects that row, but its matching release cannot open it;
+  opening requires a second independent click. Stale row/capability, resized or
+  reprojected action geometry and a retired Browser cannot consume an old action
+  release. Only complete painted action spans are pointer targets; other Action
+  Bar hints remain inert.
+- This pointer path is Fullscreen-only. Regular/Main retains terminal-native
+  selection and scrolling behavior and has no application Task pointer routing.
+- Reading Job output belongs to the Job Workspace, not the Task Browser.
 
 Authority: `src/app/surface/task-browser-runtime.ts`, `task-runtime.ts`
 (`openTasksBrowser`, `quickTaskProjection`), `task-presentation.ts`,

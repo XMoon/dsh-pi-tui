@@ -13,9 +13,10 @@ import { Input, matchesKey, truncateToWidth, visibleWidth } from '@xmoon76/pi-tu
 import { dispatchMouseEvent } from '@xmoon76/pi-tui'
 import type { Component, Focusable, TuiMouseEvent, TuiMouseEventResult } from '@xmoon76/pi-tui'
 import { componentKeymap } from '../keybindings/component-keymap.ts'
+import { formatKeyId } from '../keybindings/hints.ts'
 import { color, taskStatusColor, taskStatusWord } from '../theme/runtime.ts'
 import { SelectedMarquee } from '../components/marquee.ts'
-import { renderActionBarRow, type ActionBarSegment } from '../presentation/action-bar.ts'
+import { ACTION_BAR_SEPARATOR, layoutActionBarRow, type ActionBarSegment } from '../presentation/action-bar.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import {
   isTaskItemActive,
@@ -28,6 +29,22 @@ import type { TaskBrowserViewState } from '../../app/surface/task-runtime.ts'
 
 export type { TaskPanelItem, TaskScope } from '../../app/surface/task-presentation.ts'
 
+type TaskMouseAction = 'stop' | 'confirm-stop' | 'cancel-stop'
+
+interface TaskMouseActionHit {
+  action: TaskMouseAction
+  value: string
+  pendingValue: string | undefined
+  startCol: number
+  endCol: number
+}
+
+interface TaskMouseActionGesture extends TaskMouseActionHit {
+  row: number
+  width: number
+  height: number
+}
+
 /** One physical row of the last painted panel frame (mouse hit-testing).
  * The map is built from the EXACT final rows render() returns (including
  * the fit-loop and degraded paths), so a click can only act on
@@ -35,6 +52,7 @@ export type { TaskPanelItem, TaskScope } from '../../app/surface/task-presentati
 type TaskMouseHit =
   | { kind: 'search' }
   | { kind: 'item'; value: string; index: number; listWidth?: number }
+  | { kind: 'actions'; actions: readonly TaskMouseActionHit[] }
   | { kind: 'inert' }
 
 /** Options for {@link TaskBrowserPanel}. */
@@ -47,8 +65,10 @@ export interface TaskPanelOptions {
   noMatchText?: string
   /** Whether the `/` search action is available (Full mode). */
   enableSearch?: boolean
-  /** Confirmed Stop: emitted only after the S → Y confirmation chord. */
+  /** Stop intent emitted only after its existing keyboard confirmation. */
   onStop?: (value: string) => void
+  /** Whether this browser is currently mounted inside the AltScreen pointer route. */
+  mouseActionsEnabled?: () => boolean
   /**
    * Called ONCE per attention row the first time it enters the open
    * viewport (scroll window), with the fresh ids. The runner uses it to
@@ -145,6 +165,8 @@ export class TaskBrowserPanel implements Component, Focusable {
    * enrichment repaint between press and release must never activate
    * whatever moved into the same physical row. */
   private mousePressedValue: string | undefined
+  private mousePressedSelectionOnly = false
+  private mousePressedAction: TaskMouseActionGesture | undefined
   private readonly onSelect: (value: string) => void
   private readonly onCancel: () => void
   private readonly onStop: ((value: string) => void) | undefined
@@ -245,6 +267,7 @@ export class TaskBrowserPanel implements Component, Focusable {
 
   /** Replace rows while preserving the selected identity where possible. */
   setItems(items: readonly TaskPanelItem[], preferredValue?: string): void {
+    this.mousePressedAction = undefined
     const previousValue = this.filtered[this.selected]?.value
     this.items = [...items]
     this.loading = false
@@ -273,14 +296,27 @@ export class TaskBrowserPanel implements Component, Focusable {
       if (index !== -1) {
         this.selected = index
         this.ensureVisible()
+        this.cancelPendingStopIfSelectionMoved()
         return
       }
     }
     if (!this.selectionTouched) this.selectPreferred()
+    this.cancelPendingStopIfSelectionMoved()
+  }
+
+  /** A refresh that moves the selection away from the armed task must cancel
+   *  the destructive confirmation, mirroring keyboard navigation. Otherwise
+   *  the bar would paint a Confirm action whose target is no longer the
+   *  selected row and whose mouse currentness check would reject it. */
+  private cancelPendingStopIfSelectionMoved(): void {
+    if (this.pendingStopValue === undefined) return
+    if (this.filtered[this.selected]?.value === this.pendingStopValue) return
+    this.pendingStopValue = undefined
   }
 
   /** Set the async refresh state without discarding cached rows. */
   setRefreshState(state: 'loading' | 'ready' | 'stale', error?: string): void {
+    this.mousePressedAction = undefined
     this.loading = state === 'loading'
     this.refreshError = state === 'stale' ? error ?? 'Refresh failed' : undefined
     if (state === 'ready') this.loading = false
@@ -458,6 +494,24 @@ export class TaskBrowserPanel implements Component, Focusable {
     return item.canStop ?? false
   }
 
+  private taskMouseActionCurrent(target: TaskMouseActionHit): boolean {
+    if (this.disposed || this.options.mouseActionsEnabled?.() !== true) return false
+    const selected = this.selectedItem()
+    if (target.action === 'stop') {
+      return target.pendingValue === undefined
+        && this.pendingStopValue === undefined
+        && selected?.value === target.value
+        && this.canStop(selected)
+    }
+    if (target.action === 'confirm-stop') {
+      return target.pendingValue === target.value
+        && this.pendingStopValue === target.value
+        && selected?.value === target.value
+        && this.canStop(selected)
+    }
+    return target.pendingValue === target.value && this.pendingStopValue === target.value
+  }
+
   private openSelected(): void {
     const item = this.selectedItem()
     if (item === undefined) return
@@ -468,6 +522,12 @@ export class TaskBrowserPanel implements Component, Focusable {
     const item = this.selectedItem()
     if (!this.canStop(item)) return
     this.pendingStopValue = item!.value
+    this.requestRender()
+  }
+
+  private clearPendingStop(): void {
+    if (this.pendingStopValue === undefined) return
+    this.pendingStopValue = undefined
     this.requestRender()
   }
 
@@ -519,14 +579,15 @@ export class TaskBrowserPanel implements Component, Focusable {
 
   /** Input ownership is forwarded by FocusForwardingFrame. */
   handleInput(data: string): void {
+    this.mousePressedValue = undefined
+    this.mousePressedAction = undefined
     // B4-B: the modal Quick mode is retired — the on-demand Task Quick
     // accessory replaced it. This panel is the Full Task Center only, and
     // the Full state machine below is the only keyboard surface.
 
     if (this.pendingStopValue !== undefined) {
       if (matchesKey(data, 'escape')) {
-        this.pendingStopValue = undefined
-        this.requestRender()
+        this.clearPendingStop()
         return
       }
       if (matchesKey(data, 'y') || data === 'Y') {
@@ -625,15 +686,50 @@ export class TaskBrowserPanel implements Component, Focusable {
     // a stale identity. The local copy still guards the valid-row
     // comparison below.
     const pressedValue = this.mousePressedValue
-    if (event.type === 'click' || (event.type === 'press' && event.button === 'left')) {
+    const pressedSelectionOnly = this.mousePressedSelectionOnly
+    const pressedAction = this.mousePressedAction
+    if (event.type === 'click' || (event.type === 'press' && event.button === 'left') || event.type === 'wheel') {
       this.mousePressedValue = undefined
+      this.mousePressedSelectionOnly = false
+      this.mousePressedAction = undefined
     }
+    if (event.type === 'click' && pressedSelectionOnly) return { handled: true }
+    if (this.disposed) return undefined
     // The hit map is only valid for the last painted width: a resize
     // that has not been repainted must not dispatch against stale
     // geometry (last-painted geometry is authoritative).
     if (event.width !== this.lastRenderWidth) return undefined
     const hit = this.hitMap[event.y]
     if (!hit) return undefined
+
+    if (hit.kind === 'actions') {
+      if (event.button !== 'left' || (event.type !== 'press' && event.type !== 'click')) return undefined
+      const target = hit.actions.find(action => event.x >= action.startCol && event.x < action.endCol)
+      if (event.type === 'press') {
+        if (target === undefined || !this.taskMouseActionCurrent(target)) return undefined
+        this.mousePressedAction = {
+          ...target,
+          row: event.y,
+          width: event.width,
+          height: event.height,
+        }
+        return { handled: true, focus: true }
+      }
+      if (target === undefined || pressedAction === undefined) return undefined
+      if (pressedAction.action !== target.action
+        || pressedAction.value !== target.value
+        || pressedAction.pendingValue !== target.pendingValue
+        || pressedAction.row !== event.y
+        || pressedAction.startCol !== target.startCol
+        || pressedAction.endCol !== target.endCol
+        || pressedAction.width !== event.width
+        || pressedAction.height !== event.height
+        || !this.taskMouseActionCurrent(target)) return undefined
+      if (target.action === 'stop') this.requestStop()
+      else if (target.action === 'confirm-stop') this.confirmStop()
+      else this.clearPendingStop()
+      return { handled: true }
+    }
 
     if (hit.kind === 'search') {
       if (event.type !== 'press') return undefined
@@ -666,11 +762,12 @@ export class TaskBrowserPanel implements Component, Focusable {
         // press — the pressed row no longer exists.
         const currentIndex = this.filtered.findIndex(candidate => candidate.value === hit.value)
         if (currentIndex === -1) return undefined
-        this.mousePressedValue = hit.value
+        const pendingAtPress = this.pendingStopValue
+        this.mousePressedSelectionOnly = pendingAtPress !== undefined
+        this.mousePressedValue = pendingAtPress === undefined ? hit.value : undefined
         if (this.selected !== currentIndex) {
-          // Changing selection cancels a pending destructive
-          // confirmation (mirror the keyboard navigation state machine:
-          // cursor/page moves clear pendingStopValue).
+          // A click begun while a Stop is pending is selection-only. Its
+          // release must not inherit the now-cleared pending state and open.
           this.pendingStopValue = undefined
           this.selected = currentIndex
           this.selectionTouched = true
@@ -685,6 +782,7 @@ export class TaskBrowserPanel implements Component, Focusable {
       // between press and release may have reordered/replaced rows
       // WITHOUT a repaint yet, so the index in the stale hit map can
       // point at a different item). No match => drop.
+      if (pressedSelectionOnly) return { handled: true }
       if (pressedValue !== hit.value) return undefined
       // A pending destructive confirmation is a modal state: the click
       // must not bypass it (keyboard Enter is ignored there).
@@ -718,6 +816,9 @@ export class TaskBrowserPanel implements Component, Focusable {
 
   dispose(): void {
     this.disposed = true
+    this.mousePressedValue = undefined
+    this.mousePressedSelectionOnly = false
+    this.mousePressedAction = undefined
     if (this.tickTimer !== undefined) clearInterval(this.tickTimer)
     this.tickTimer = undefined
     this.marquee.dispose()
@@ -747,7 +848,8 @@ export class TaskBrowserPanel implements Component, Focusable {
       hits.push(hit)
     }
     const limit = Number.isFinite(this.maxRows) ? Math.max(1, Math.floor(this.maxRows)) : Number.POSITIVE_INFINITY
-    const hintLine = color.textMuted(`  ${this.hint()}`)
+    const hint = this.hintFor(safeWidth)
+    const hintLine = hint.line
     const searchOn = this.searchMode
     // The retry verb is a Full action; the retired Quick no longer exists.
     const retrySuffix = this.mode === 'full' ? ' · R retry' : ''
@@ -784,7 +886,7 @@ export class TaskBrowserPanel implements Component, Focusable {
       push(color.textDim('Loading tasks…'), { kind: 'inert' })
       if (this.refreshError !== undefined) push(color.textMuted(refreshErrorLine!), { kind: 'inert' })
       push('', { kind: 'inert' })
-      push(hintLine, { kind: 'inert' })
+      push(hintLine, hint.hit)
       this.lastRenderedStart = 0
       this.lastRenderedCount = 0
       this.hasRenderedViewport = true
@@ -813,7 +915,7 @@ export class TaskBrowserPanel implements Component, Focusable {
       push(color.textDim(noMatchText), { kind: 'inert' })
       if (this.refreshError !== undefined) push(color.textMuted(refreshErrorLine!), { kind: 'inert' })
       push('', { kind: 'inert' })
-      push(hintLine, { kind: 'inert' })
+      push(hintLine, hint.hit)
       this.lastRenderedStart = 0
       this.lastRenderedCount = 0
       this.hasRenderedViewport = true
@@ -889,7 +991,7 @@ export class TaskBrowserPanel implements Component, Focusable {
       out.push('')
       outHits.push({ kind: 'inert' })
       out.push(hintLine)
-      outHits.push({ kind: 'inert' })
+      outHits.push(hint.hit)
       return { lines: out, hits: outHits }
     }
     let candidate = assemble()
@@ -937,6 +1039,7 @@ export class TaskBrowserPanel implements Component, Focusable {
       rows.length > itemCount ? `  ${this.selected + 1}/${rows.length}` : undefined,
       limit,
       hintLine,
+      hint.hit,
     )
     this.lastRenderedStart = degraded.paintsSelectedMain ? start : 0
     this.lastRenderedCount = degraded.paintsSelectedMain ? 1 : 0
@@ -961,6 +1064,7 @@ export class TaskBrowserPanel implements Component, Focusable {
     indicatorText: string | undefined,
     limit: number,
     hintLine: string,
+    hintHit: TaskMouseHit,
   ): { lines: string[]; hits: TaskMouseHit[]; paintsSelectedMain: boolean } {
     const mainRow = selectedEntry?.main
     const groupRow = selectedEntry !== undefined && selectedEntry.group !== undefined
@@ -1028,8 +1132,12 @@ export class TaskBrowserPanel implements Component, Focusable {
       outHits.push({ kind: 'inert' })
     }
     if (hintIncluded) {
-      out.push(...(hintBlank ? ['', hintLine] : [hintLine]))
-      outHits.push(...(hintBlank ? [{ kind: 'inert' }, { kind: 'inert' }] : [{ kind: 'inert' }]) as TaskMouseHit[])
+      if (hintBlank) {
+        out.push('')
+        outHits.push({ kind: 'inert' })
+      }
+      out.push(hintLine)
+      outHits.push(hintHit)
     }
     // The main row is always painted in this branch (the extreme branch
     // above was the only path that could drop it).
@@ -1168,7 +1276,7 @@ export class TaskBrowserPanel implements Component, Focusable {
       if (item.startedAt !== undefined) lines.push(`started   ${new Date(item.startedAt).toISOString()}`)
       if (item.detail !== undefined && item.detail !== '') lines.push(`detail    ${item.detail}`)
     }
-    if (this.pendingStopValue === item.value) lines.push(`Stop ${item.label}?  Y confirm · Esc cancel`)
+    if (this.pendingStopValue === item.value) lines.push(`Stop ${item.label}?`)
     // Single-row contract: every semantic line detailLines returns is
     // budgeted as one physical terminal row (the wide side pane and the
     // compact inline detail both truncate these). Dynamic text (label,
@@ -1185,47 +1293,94 @@ export class TaskBrowserPanel implements Component, Focusable {
     return [truncateToWidth(`    ${color.textDim(detail)}`, width, '…')]
   }
 
-  private hint(): string {
-    return this.hintFor(this.lastRenderWidth)
-  }
-
   /** D8: preserve action order and drop lower-priority whole segments before
    *  the final Esc segment. The caller reserves the two-cell row indent. */
-  private hintFor(width: number): string {
+  private hintFor(width: number): { line: string; hit: TaskMouseHit } {
     const actionWidth = Math.max(0, width - 2)
-    if (this.pendingStopValue !== undefined) {
-      return renderActionBarRow([
-        { text: 'Y confirm stop', priority: 90 },
-        { text: 'Esc cancel', priority: 1000 },
-      ], actionWidth)
+    const segments: ActionBarSegment[] = []
+    const actionByInputIndex = new Map<number, {
+      action: TaskMouseAction
+      value: string
+      pendingValue: string | undefined
+    }>()
+    const add = (
+      segment: ActionBarSegment,
+      target?: { action: TaskMouseAction; value: string; pendingValue: string | undefined },
+    ): void => {
+      const inputIndex = segments.length
+      segments.push(segment)
+      if (target !== undefined) actionByInputIndex.set(inputIndex, target)
     }
-    if (this.searchMode) {
+
+    if (this.pendingStopValue !== undefined) {
+      const value = this.pendingStopValue
+      if (this.options.mouseActionsEnabled?.() === true) {
+        add({ text: 'Confirm stop [Y]', priority: 90, short: 'Confirm stop' }, {
+          action: 'confirm-stop', value, pendingValue: value,
+        })
+        add({ text: 'Cancel [Esc]', priority: 1000, short: 'Cancel' }, {
+          action: 'cancel-stop', value, pendingValue: value,
+        })
+      } else {
+        add({ text: 'Y confirm stop', priority: 90 })
+        add({ text: 'Esc cancel', priority: 1000 })
+      }
+    } else if (this.searchMode) {
       // Printable keys and the arrows are query/edit input in search mode;
       // only the actions handled by this state are advertised. Esc backs out
       // of search without closing the Full Task Center.
-      const segments: ActionBarSegment[] = [
-        { text: 'Enter open', priority: 90 },
-        { text: '↑↓ select', priority: 80 },
-        { text: '←→ edit', priority: 70 },
-        { text: `${componentKeymap.keyHint('tasks.type.previous')} type`, priority: 60 },
-        { text: 'type to filter', priority: 10 },
-        { text: 'Esc back', priority: 1000 },
-      ]
-      return renderActionBarRow(segments, actionWidth)
+      add({ text: 'Enter open', priority: 90 })
+      add({ text: '↑↓ select', priority: 80 })
+      add({ text: '←→ edit', priority: 70 })
+      add({ text: `${componentKeymap.keyHint('tasks.type.previous')} type`, priority: 60 })
+      add({ text: 'type to filter', priority: 10 })
+      add({ text: 'Esc back', priority: 1000 })
+    } else {
+      add({ text: 'Enter open', priority: 90 })
+      add({ text: '↑↓ select', priority: 80 })
+      add({ text: '←→ tree', priority: 70 })
+      const selected = this.selectedItem()
+      if (this.canStop(selected)) {
+        if (this.options.mouseActionsEnabled?.() === true) {
+          const key = componentKeymap.keysFor('tasks.stop')[0]
+          const text = key === undefined ? 'Stop' : `Stop [${formatKeyId(key)}]`
+          add({ text, priority: 95 }, {
+            action: 'stop', value: selected!.value, pendingValue: undefined,
+          })
+        } else {
+          add({ text: 's stop', priority: 60 })
+        }
+      }
+      if (this.searchEnabled) add({ text: '/ search', priority: 30 })
+      add({ text: 'a scope', priority: 20 })
+      add({ text: `${componentKeymap.keyHint('tasks.type.previous')} type`, priority: 10 })
+      add({ text: 'Esc close', priority: 1000 })
     }
-    const segments: ActionBarSegment[] = [
-      { text: 'Enter open', priority: 90 },
-      { text: '↑↓ select', priority: 80 },
-      { text: '←→ tree', priority: 70 },
-      // The hint advertises the SELECTED row's capability: an external catalog
-      // leaf (or any other non-stoppable row) has no Stop action at all, so the
-      // key would be a silent no-op. Dropping the segment keeps the bar truthful.
-      ...(this.canStop(this.selectedItem()) ? [{ text: 's stop', priority: 60 }] : []),
-      ...(this.searchEnabled ? [{ text: '/ search', priority: 30 }] : []),
-      { text: 'a scope', priority: 20 },
-      { text: `${componentKeymap.keyHint('tasks.type.previous')} type`, priority: 10 },
-      { text: 'Esc close', priority: 1000 },
-    ]
-    return renderActionBarRow(segments, actionWidth)
+
+    const layout = layoutActionBarRow(segments, actionWidth)
+    if (this.options.mouseActionsEnabled?.() !== true) {
+      return { line: color.textMuted(`  ${layout.text}`), hit: { kind: 'inert' } }
+    }
+    const actions: TaskMouseActionHit[] = []
+    let line: string
+    if (layout.truncated || layout.spans.length === 0) {
+      line = color.textMuted(`  ${layout.text}`)
+    } else {
+      const painted = layout.spans.map(span => {
+        const target = actionByInputIndex.get(span.inputIndex)
+        if (target === undefined) return color.textMuted(span.text)
+        actions.push({
+          ...target,
+          startCol: span.startCol + 2,
+          endCol: span.endCol + 2,
+        })
+        return color.primary(span.text)
+      })
+      const segmentWidth = layout.spans.reduce((sum, span) => sum + visibleWidth(span.text), 0)
+        + Math.max(0, layout.spans.length - 1) * visibleWidth(ACTION_BAR_SEPARATOR)
+      const padding = Math.max(0, visibleWidth(layout.text) - segmentWidth)
+      line = `  ${painted.join(color.textMuted(ACTION_BAR_SEPARATOR))}${' '.repeat(padding)}`
+    }
+    return { line, hit: actions.length > 0 ? { kind: 'actions', actions } : { kind: 'inert' } }
   }
 }

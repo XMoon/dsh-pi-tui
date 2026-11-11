@@ -600,7 +600,7 @@ test('a real pending Remote Question survives reconnect — the same flow answer
   // + submit): exactly one answer reaches the Host.
   vt.sendInput('1')
   await new Promise(resolve => setTimeout(resolve, 300))
-  await waitFor('the review page rendered', () => view().includes('Submit'), 10_000)
+  await waitFor('the review page rendered', () => view().includes('Review your answer before submit'), 10_000)
   vt.sendInput('\r')
   const settled = await askSettled
   assert.deepEqual(settled.answers, [{ id: 'q1', selected: ['yes'] }],
@@ -809,7 +809,7 @@ test('a dispatched continued-answer settlement stays real across reconnect — c
   // settlement is HELD in flight.
   vt.sendInput('1')
   await new Promise(resolve => setTimeout(resolve, 300))
-  await waitFor('the review page rendered', () => view().includes('Submit'), 10_000)
+  await waitFor('the review page rendered', () => view().includes('Review your answer before submit'), 10_000)
   vt.sendInput('\r')
   await waitFor('the answer write dispatched on generation A', () => answerDispatches === 1, 15_000)
 

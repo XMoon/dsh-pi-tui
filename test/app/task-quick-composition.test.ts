@@ -1292,7 +1292,7 @@ test('the Question option hit uses geometry after the blocking owner retires Qui
   // keeps a wrong hit a fast, bounded failure instead of a test that hangs
   // waiting for a submit the flow is not ready for.
   const reviewed = rawView(h.vt)
-  assert.ok(reviewed.some(line => line.includes('Submit')),
+  assert.ok(reviewed.some(line => line.includes('Submit [Enter]')),
     `the click must advance to the review step:\n${view(h.vt)}`)
   assert.ok(reviewed.some(line => line.includes('OPTION-B')),
     `the review step must carry the chosen answer:\n${view(h.vt)}`)
@@ -1366,7 +1366,7 @@ test('Question option hits rebase after real Quick heights 0, 1 and 5 retire', a
       await flush(2)
       await h.vt.waitForRender()
       const reviewed = rawView(h.vt)
-      assert.ok(reviewed.some(line => line.includes('Submit')) && reviewed.some(line => line.includes('OPTION-B')),
+      assert.ok(reviewed.some(line => line.includes('Submit [Enter]')) && reviewed.some(line => line.includes('OPTION-B')),
         `the painted option hit must advance to the review step after Quick reflow:\n${view(h.vt)}`)
       h.vt.sendInput('\r')
       const answers = await question

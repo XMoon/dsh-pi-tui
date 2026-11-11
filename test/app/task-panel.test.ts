@@ -11,6 +11,8 @@ import assert from 'node:assert/strict'
 import test, { mock } from 'node:test'
 import { visibleWidth } from '@xmoon76/pi-tui'
 import { TaskBrowserPanel, formatElapsed } from '../../src/tui/panels/task-panel.ts'
+import { componentKeymap } from '../../src/tui/keybindings/component-keymap.ts'
+import { formatKeyId } from '../../src/tui/keybindings/hints.ts'
 import type { TaskPanelItem } from '../../src/app/surface/task-presentation.ts'
 import { MARQUEE_STEP_MS } from '../../src/tui/components/marquee.ts'
 
@@ -51,7 +53,13 @@ function makePanel(
   const panel = new TaskBrowserPanel(
     items,
     options.maxVisible ?? 10,
-    { mode: 'full', header: options.header ?? 'tasks · subagents', enableSearch: options.enableSearch, noMatchText: 'no active tasks' },
+    {
+      mode: 'full',
+      header: options.header ?? 'tasks · subagents',
+      enableSearch: options.enableSearch,
+      mouseActionsEnabled: () => true,
+      noMatchText: 'no active tasks',
+    },
     () => {},
     () => {},
     () => {},
@@ -62,16 +70,16 @@ function makePanel(
   return { panel, rendered: () => panel.render(100) }
 }
 
-test('the action bar advertises Stop only for a row that can be stopped', () => {
+test('the action bar advertises a clickable Stop only for a row that can be stopped', () => {
   const stoppable = makePanel([subagent()])
   const stoppableFrame = stoppable.rendered().map(strip).join('\n')
-  assert.ok(stoppableFrame.includes('s stop'), `a stoppable row advertises Stop:\n${stoppableFrame}`)
+  assert.ok(stoppableFrame.includes('Stop ['), `a stoppable row advertises its live Stop binding:\n${stoppableFrame}`)
   // An external catalog leaf (or any other non-stoppable row) has no Stop
   // action at all — `requestStop()` is a silent no-op there — so the bar must
   // not advertise a key that does nothing.
   const external = makePanel([subagent({ value: 'agent:ext', label: 'external · external run', canStop: false })])
   const externalFrame = external.rendered().map(strip).join('\n')
-  assert.ok(!externalFrame.includes('s stop'), `a non-stoppable row advertises no Stop:\n${externalFrame}`)
+  assert.ok(!externalFrame.includes('Stop ['), `a non-stoppable row advertises no Stop:\n${externalFrame}`)
   assert.ok(externalFrame.includes('Enter open'), 'the remaining hints stay listed')
 })
 
@@ -439,7 +447,7 @@ test('the Full action bar keeps the real Esc outcome last and visible at 44/80/1
   const panel = new TaskBrowserPanel(
     [runningJob(), doneJob(), subagent()],
     10,
-    { mode: 'full', header: 'tasks · subagents', enableSearch: true },
+    { mode: 'full', header: 'tasks · subagents', enableSearch: true, mouseActionsEnabled: () => true, initialPreferredValue: 'agent:child-1' },
     () => {},
     () => {},
     () => {},
@@ -451,15 +459,20 @@ test('the Full action bar keeps the real Esc outcome last and visible at 44/80/1
     assert.equal(visibleWidth(hint) <= width, true,
       `width ${width}: the painted hint fits (${visibleWidth(hint)} > ${width}): ${JSON.stringify(hint)}`)
     const segments = hint.trim().split(' · ')
+    const stopKey = componentKeymap.keysFor('tasks.stop')[0]
+    const stopLabel = stopKey === undefined ? 'Stop' : `Stop [${formatKeyId(stopKey)}]`
     const allowed = outcome === 'close'
-      ? new Set(['Enter open', '↑↓ select', '←→ tree', 's stop', '/ search', 'a scope', 'Shift+Tab type', 'Esc close'])
+      ? new Set(['Enter open', '↑↓ select', '←→ tree', stopLabel, 'Stop', '/ search', 'a scope', 'Shift+Tab type', 'Esc close'])
       : new Set(['Enter open', '↑↓ select', '←→ edit', 'Shift+Tab type', 'type to filter', 'Esc back'])
     assert.ok(segments.every(segment => allowed.has(segment)),
       `width ${width}: only complete advertised segments remain: ${JSON.stringify(segments)}`)
     assert.equal(segments.at(-1), `Esc ${outcome}`,
       `width ${width}: the real Esc outcome is the final painted segment:\n${rows.join('\n')}`)
     if (width === 44) {
-      assert.deepEqual(segments, ['Enter open', '↑↓ select', `Esc ${outcome}`],
+      const expected = outcome === 'close'
+        ? ['Enter open', stopLabel, `Esc ${outcome}`]
+        : ['Enter open', '↑↓ select', `Esc ${outcome}`]
+      assert.deepEqual(segments, expected,
         `width ${width}: lower-priority actions drop whole before Esc`)
     }
   }
@@ -859,6 +872,28 @@ function mouse(
   }
 }
 
+function pressPanelText(panel: TaskBrowserPanel, text: string, width = 100, height = 24): {
+  x: number
+  row: number
+  width: number
+  height: number
+} {
+  const lines = panel.render(width).map(strip)
+  const row = lines.findIndex(line => line.includes(text))
+  assert.ok(row >= 0, `panel action '${text}' must be visible:\n${lines.join('\n')}`)
+  const x = lines[row]!.indexOf(text)
+  assert.ok(x >= 0)
+  const press = panel.handleMouse(mouse('press', x, row, width, height))
+  assert.ok(press?.handled, `press on '${text}' must be handled`)
+  return { x, row, width, height }
+}
+
+function clickPanelText(panel: TaskBrowserPanel, text: string, width = 100, height = 24): boolean {
+  const pressed = pressPanelText(panel, text, width, height)
+  const click = panel.handleMouse(mouse('click', pressed.x, pressed.row, width, height))
+  return click?.handled === true
+}
+
 test('task panel: mouse click activates the exact task (mouse parity)', () => {
   const selected: string[] = []
   const panel = new TaskBrowserPanel(
@@ -879,21 +914,228 @@ test('task panel: mouse click activates the exact task (mouse parity)', () => {
   assert.deepEqual(selected, ['job:bash-2'], 'click must activate the exact task')
 })
 
-test('task panel: group headers and hint are inert (mouse parity)', () => {
+test('task panel: only the complete Stop span is clickable in the action row', () => {
+  const stopped: string[] = []
   const panel = new TaskBrowserPanel(
-    [runningJob(), doneJob(), subagent()],
+    [runningJob({ canStop: true })],
     10,
-    { mode: 'full', header: 'tasks', enableSearch: false },
+    { mode: 'full', header: 'tasks', enableSearch: false, mouseActionsEnabled: () => true, onStop: value => stopped.push(value) },
     () => {},
     () => {},
     () => {},
   )
-  const rendered = panel.render(100)
+  const rendered = panel.render(100).map(strip)
   const groupRow = rendered.findIndex(line => line.includes('── jobs ──'))
   const hintRow = rendered.findIndex(line => line.includes('↑↓'))
-  assert.ok(groupRow >= 0 && hintRow >= 0, `chrome rows missing:\n${rendered.join('\n')}`)
+  const otherHintX = rendered[hintRow]?.indexOf('Enter open') ?? -1
+  assert.ok(groupRow >= 0 && hintRow >= 0 && otherHintX >= 0, `chrome rows missing:\n${rendered.join('\n')}`)
   assert.equal(panel.handleMouse(mouse('press', 10, groupRow, 100, 24)), undefined, 'group header must be inert')
-  assert.equal(panel.handleMouse(mouse('press', 10, hintRow, 100, 24)), undefined, 'hint must be inert')
+  assert.equal(panel.handleMouse(mouse('press', otherHintX, hintRow, 100, 24)), undefined, 'non-action hints stay inert')
+  assert.equal(clickPanelText(panel, 'Stop ['), true, 'the fully painted Stop segment accepts a click')
+  assert.deepEqual(stopped, [], 'Stop only enters the original pending confirmation')
+  assert.ok(panel.render(100).map(strip).some(line => line.includes('Confirm stop [Y]')))
+  panel.dispose()
+})
+
+test('Regular Task Browser keeps its keyboard-only Stop hint and inert mouse row', () => {
+  const panel = new TaskBrowserPanel(
+    [runningJob({ canStop: true })],
+    10,
+    { mode: 'full', header: 'tasks' },
+    () => {},
+    () => {},
+    () => {},
+  )
+  const lines = panel.render(120).map(strip)
+  const actionRow = lines.at(-1) ?? ''
+  assert.ok(actionRow.includes('s stop'))
+  assert.ok(!actionRow.includes('Stop [S]'))
+  const row = lines.length - 1
+  const x = actionRow.indexOf('s stop')
+  assert.equal(panel.handleMouse(mouse('press', x, row, 120, 24)), undefined)
+  panel.handleInput('s')
+  const pending = panel.render(120).map(strip).join('\n')
+  assert.ok(pending.includes('Y confirm stop · Esc cancel'))
+  assert.ok(pending.includes('Stop bash · pnpm build?'))
+  assert.ok(!pending.includes('Stop bash · pnpm build?  Y confirm'))
+  panel.dispose()
+})
+
+test('Fullscreen pending stop details identify the task once and leave verbs in the Action Bar', () => {
+  const target = runningJob({ value: 'job:a', label: 'bash · release', canStop: true })
+  const panel = new TaskBrowserPanel(
+    [target],
+    10,
+    { mode: 'full', header: 'tasks', mouseActionsEnabled: () => true },
+    () => {},
+    () => {},
+    () => {},
+  )
+  panel.handleInput('s')
+  const rows = panel.render(120).map(strip)
+  const joined = rows.join('\n')
+  assert.ok(joined.includes('Stop bash · release?'), `the detail names the confirmation target:\n${joined}`)
+  assert.equal(joined.match(/Confirm stop \[Y\]/gu)?.length ?? 0, 1)
+  assert.equal(joined.match(/Cancel \[Esc\]/gu)?.length ?? 0, 1)
+  assert.ok(!joined.includes('Y confirm') && !joined.includes('Esc cancel'), `details do not repeat the bar verbs:\n${joined}`)
+  panel.dispose()
+})
+
+test('task panel: Stop, Cancel and Confirm share the original pending state and sink', () => {
+  const stopped: string[] = []
+  const panel = new TaskBrowserPanel(
+    [runningJob({ value: 'job:a', canStop: true })],
+    10,
+    { mode: 'full', header: 'tasks', mouseActionsEnabled: () => true, onStop: value => stopped.push(value) },
+    () => {},
+    () => {},
+    () => {},
+  )
+
+  assert.equal(clickPanelText(panel, 'Stop ['), true)
+  assert.ok(panel.render(100).map(strip).some(line => line.includes('Confirm stop [Y]')))
+  assert.deepEqual(stopped, [], 'Stop only arms the existing confirmation')
+  assert.equal(clickPanelText(panel, 'Cancel [Esc]'), true)
+  assert.deepEqual(stopped, [], 'Cancel clears pending without calling onStop')
+  assert.ok(panel.render(100).map(strip).some(line => line.includes('Stop [')))
+
+  assert.equal(clickPanelText(panel, 'Stop ['), true)
+  const pressed = pressPanelText(panel, 'Confirm stop [Y]')
+  assert.ok(panel.handleMouse(mouse('click', pressed.x, pressed.row, pressed.width, pressed.height))?.handled)
+  assert.deepEqual(stopped, ['job:a'], 'Confirm reaches the original onStop sink exactly once')
+  panel.handleMouse(mouse('click', pressed.x, pressed.row, pressed.width, pressed.height))
+  assert.deepEqual(stopped, ['job:a'], 'a duplicate release has no confirmation latch')
+  panel.dispose()
+})
+
+test('task panel: capability loss between Confirm press and release never reaches onStop', () => {
+  const stopped: string[] = []
+  const panel = new TaskBrowserPanel(
+    [runningJob({ value: 'job:a', canStop: true })],
+    10,
+    { mode: 'full', header: 'tasks', mouseActionsEnabled: () => true, onStop: value => stopped.push(value) },
+    () => {},
+    () => {},
+    () => {},
+  )
+  assert.equal(clickPanelText(panel, 'Stop ['), true)
+  const pressed = pressPanelText(panel, 'Confirm stop [Y]')
+  panel.setItems([runningJob({ value: 'job:a', canStop: false })])
+  panel.render(100)
+  panel.handleMouse(mouse('click', pressed.x, pressed.row, pressed.width, pressed.height))
+  assert.deepEqual(stopped, [])
+  panel.dispose()
+})
+
+test('task panel: the first pending other-row click only cancels and selects', () => {
+  const selected: string[] = []
+  const stopped: string[] = []
+  const panel = new TaskBrowserPanel(
+    [
+      runningJob({ value: 'job:a', label: 'first task', canStop: true }),
+      runningJob({ value: 'job:b', label: 'second task', canStop: true }),
+    ],
+    10,
+    { mode: 'full', header: 'tasks', mouseActionsEnabled: () => true, onStop: value => stopped.push(value) },
+    value => selected.push(value),
+    () => {},
+    () => {},
+  )
+  panel.handleInput('s')
+  let rendered = panel.render(100).map(strip)
+  assert.ok(rendered.some(line => line.includes('Confirm stop [Y]')))
+  const row = rendered.findIndex(line => line.includes('second task'))
+  assert.ok(row >= 0)
+  assert.ok(panel.handleMouse(mouse('press', 10, row, 100, 24))?.handled)
+  assert.equal(panel.getViewState().selectedId, 'job:b')
+  assert.ok(!panel.render(100).map(strip).some(line => line.includes('Confirm stop [Y]')))
+  const firstRelease = panel.handleMouse(mouse('click', 10, row, 100, 24))
+  assert.equal(firstRelease?.handled, true, 'the selection-only release is consumed by the browser')
+  assert.deepEqual(selected, [], 'the release from the cancellation press cannot open the row')
+  assert.deepEqual(stopped, [])
+
+  rendered = panel.render(100).map(strip)
+  const nextRow = rendered.findIndex(line => line.includes('second task'))
+  assert.ok(panel.handleMouse(mouse('press', 10, nextRow, 100, 24))?.handled)
+  panel.handleMouse(mouse('click', 10, nextRow, 100, 24))
+  assert.deepEqual(selected, ['job:b'], 'a second, independent click opens the selected row')
+  panel.dispose()
+})
+
+test('task panel: stale Stop releases lose their subject, capability, filter, size or owner', () => {
+  const invalidations: Array<{
+    name: string
+    apply(panel: TaskBrowserPanel): number
+  }> = [
+    { name: 'item replacement', apply: panel => { panel.setItems([runningJob({ value: 'job:b', canStop: true })]); return 100 } },
+    { name: 'capability revocation', apply: panel => { panel.setItems([runningJob({ value: 'job:a', canStop: false })]); return 100 } },
+    { name: 'search entry', apply: panel => { panel.handleInput('/'); return 100 } },
+    { name: 'resize', apply: panel => { panel.render(80); return 80 } },
+    { name: 'dispose', apply: panel => { panel.dispose(); return 100 } },
+  ]
+  for (const invalidation of invalidations) {
+    const stopped: string[] = []
+    const panel = new TaskBrowserPanel(
+      [runningJob({ value: 'job:a', canStop: true })],
+      10,
+      { mode: 'full', header: 'tasks', mouseActionsEnabled: () => true, onStop: value => stopped.push(value) },
+      () => {},
+      () => {},
+      () => {},
+    )
+    const pressed = pressPanelText(panel, 'Stop [')
+    const releaseWidth = invalidation.apply(panel)
+    panel.handleMouse(mouse('click', pressed.x, pressed.row, releaseWidth, pressed.height))
+    assert.deepEqual(stopped, [], `${invalidation.name} must revoke the action gesture`)
+    if (invalidation.name !== 'dispose') panel.dispose()
+  }
+})
+
+test('task panel: compact Stop spans remain clickable in the short final hint row', () => {
+  for (const [width, rows] of [[44, 10], [72, 10], [80, 8], [80, 10], [100, 10], [120, 10]]) {
+    const stopped: string[] = []
+    const panel = new TaskBrowserPanel(
+      [runningJob({ value: `job:${width}-${rows}`, canStop: true })],
+      10,
+      { mode: 'full', header: 'tasks', mouseActionsEnabled: () => true, onStop: value => stopped.push(value) },
+      () => {},
+      () => {},
+      () => {},
+    )
+    panel.setMaxRows(rows)
+    const lines = panel.render(width).map(strip)
+    assertPhysicalRows(lines, width)
+    assert.ok(lines.at(-1)?.includes('Stop'), `Stop remains on the final hint row at ${width}x${rows}:\n${lines.join('\n')}`)
+    assert.equal(clickPanelText(panel, 'Stop', width, rows), true, `Stop is clickable at ${width}x${rows}`)
+    assert.ok(panel.render(width).map(strip).some(line => line.includes('Confirm stop')))
+    panel.dispose()
+  }
+})
+
+test('a refresh that moves the selection cancels the pending stop instead of painting a dead Confirm', () => {
+  const stopped: string[] = []
+  const panel = new TaskBrowserPanel(
+    [runningJob({ value: 'job:a', label: 'first task', canStop: true }), runningJob({ value: 'job:b', label: 'second task', canStop: true })],
+    10,
+    { mode: 'full', header: 'tasks', mouseActionsEnabled: () => true, onStop: value => stopped.push(value) },
+    () => {},
+    () => {},
+    () => {},
+  )
+  panel.render(120)
+  panel.handleInput('s')
+  assert.ok(panel.render(120).map(strip).some(line => line.includes('Confirm stop [Y]')), 'precondition — job:a armed')
+  panel.setItems([
+    runningJob({ value: 'job:b', label: 'second task', canStop: true }),
+    runningJob({ value: 'job:a', label: 'first task', canStop: true }),
+  ], 'job:b')
+  assert.equal(panel.getViewState().selectedId, 'job:b')
+  const refreshed = panel.render(120).map(strip).join('\n')
+  assert.ok(!refreshed.includes('Confirm stop [Y]'), `the refresh must clear the stale confirmation:\n${refreshed}`)
+  assert.ok(refreshed.includes('Stop ['), `the refreshed bar must offer Stop for the selected row:\n${refreshed}`)
+  panel.handleInput('y')
+  assert.deepEqual(stopped, [], 'keyboard confirm cannot stop the pre-refresh target')
+  panel.dispose()
 })
 
 test('task panel: search Input click repositions the query cursor (mouse parity)', () => {
@@ -1063,7 +1305,7 @@ test('task panel: a mouse press that changes selection cancels a pending stop co
   const panel = new TaskBrowserPanel(
     [runningJob({ value: 'job:a', label: 'first', canStop: true }), runningJob({ value: 'job:b', label: 'second', canStop: true })],
     24,
-    { header: 'tasks', enableSearch: false, mode: 'full', onStop: value => stopped.push(value) },
+    { header: 'tasks', enableSearch: false, mode: 'full', mouseActionsEnabled: () => true, onStop: value => stopped.push(value) },
     () => {},
     () => {},
     () => {},
@@ -1071,7 +1313,7 @@ test('task panel: a mouse press that changes selection cancels a pending stop co
   // S on the selected first job: pending stop on job:a.
   panel.handleInput('s')
   let rendered = panel.render(100)
-  assert.ok(rendered.map(strip).join('\n').includes('Y confirm stop'), `precondition — pending stop on the first job:\n${rendered.map(strip).join('\n')}`)
+  assert.ok(rendered.map(strip).join('\n').includes('Confirm stop [Y]'), `precondition — pending stop on the first job:\n${rendered.map(strip).join('\n')}`)
   // Mouse press on the second job: changing selection cancels the
   // pending destructive confirmation (mirror the keyboard navigation).
   const row = rendered.findIndex(line => line.includes('second'))
@@ -1087,7 +1329,7 @@ test('task panel: a click cannot bypass a pending stop confirmation (mouse parit
   const panel = new TaskBrowserPanel(
     [runningJob({ value: 'job:a', label: 'first', canStop: true }), runningJob({ value: 'job:b', label: 'second', canStop: true })],
     24,
-    { header: 'tasks', enableSearch: false, mode: 'full' },
+    { header: 'tasks', enableSearch: false, mode: 'full', mouseActionsEnabled: () => true },
     value => selected.push(value),
     () => {},
     () => {},
@@ -1095,7 +1337,7 @@ test('task panel: a click cannot bypass a pending stop confirmation (mouse parit
   // S on the selected first job: pending stop on job:a.
   panel.handleInput('s')
   const rendered = panel.render(100)
-  assert.ok(rendered.map(strip).join('\n').includes('Y confirm stop'), 'precondition — pending stop on the first job')
+  assert.ok(rendered.map(strip).join('\n').includes('Confirm stop [Y]'), 'precondition — pending stop on the first job')
   // Press + click on the SAME row (selection unchanged, pending kept):
   // the click must NOT bypass the confirmation and open the job.
   const row = rendered.findIndex(line => line.includes('first'))

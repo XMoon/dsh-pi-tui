@@ -12,7 +12,7 @@
  * presents a local child it does not have.
  *
  * EVIDENCE BOUNDARY: the row and its Detail are asserted on the PAINTED frame
- * at all three sizes; the action bar advertises no `s stop` for that row (and
+ * at all three sizes; the action bar advertises no clickable `Stop` for that row (and
  * `s` latches nothing); Enter's refusal is asserted on the production notice
  * slot while the panel is open and on the PAINTED frame right after the user
  * closes it (the panel paints over the notice row while it is open).
@@ -192,15 +192,16 @@ for (const [columns, rows] of SIZES) test(`the REAL Task Center external leaf fr
     assert.match(frame, /activity\s+External/u, 'the Detail states the activity word')
   }
 
-  // The action bar advertises the SELECTED row's capability: the external leaf
-  // cannot be stopped (`canStop === false`), so no Stop hint may be painted and
+  // The action bar advertises the selected row's capability: the external leaf
+  // cannot be stopped (`canStop === false`), so no Stop action may be painted and
   // pressing `s` must never latch the stop confirmation.
-  assert.ok(!/\bs stop\b/u.test(frame), `the non-stoppable external row advertises no Stop hint:\n${frame}`)
+  assert.ok(!/\bStop \[/u.test(frame), `the non-stoppable external row advertises no Stop action:\n${frame}`)
   vt.sendInput('s')
   await settle()
   await new Promise(resolve => setTimeout(resolve, 30))
   await vt.waitForRender()
-  assert.doesNotMatch(view(), /Y confirm stop/u, `pressing s on the external row latches nothing:\n${view()}`)
+  assert.doesNotMatch(view(), /Y confirm stop|Confirm stop \[Y\]/u,
+    `pressing s on the external row latches nothing:\n${view()}`)
 
   // Enter: the external leaf is not openable and mounts nothing. The refusal is
   // a NOTICE; it shares the frame with the capturing Task Center panel (the

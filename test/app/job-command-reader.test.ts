@@ -372,7 +372,7 @@ test('C-05/C-06 the Command page owns one body and its own viewport at every bud
       assert.match(painted, /Tab switch/, `the symmetric page toggle is advertised on the Command page at ${budget.width}x${budget.rows}`)
     }
     assert.ok(!/c copy output/.test(painted), 'the Output-only copy verb is absent on the Command page')
-    assert.ok(!/s stop/.test(painted), 'the Stop segment is absent on the Command page')
+    assert.ok(!/Stop \[/.test(painted), 'the Stop segment is absent on the Command page')
     assert.ok(!/Follow on|Follow paused/.test(painted), 'the Command page never claims a Follow state')
     assert.ok(!/Retained preview/.test(painted), 'the Command page never claims a retained preview')
     assert.match(painted, /Full command/)

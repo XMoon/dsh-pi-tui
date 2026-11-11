@@ -17,7 +17,9 @@ import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
 import type { Component, Focusable } from '@xmoon76/pi-tui'
 import { getGraphemeSegmenter, visibleWidth, wrapTextWithAnsi } from '@xmoon76/pi-tui'
 import { Frame } from '../components/frame.ts'
+import { ACTION_BAR_SEPARATOR, layoutActionBarRow, type ActionBarSegment } from '../presentation/action-bar.ts'
 import { componentKeymap } from '../keybindings/component-keymap.ts'
+import { formatKeyId } from '../keybindings/hints.ts'
 
 /**
  * Whether the split composition installed the modal-safe no-answer navigation
@@ -261,7 +263,7 @@ function appendContentFirst(
 
 /** The current question's tab label: `Q{n}` or Submit. */
 function tabLabel(index: number, total: number): string {
-  return index === total ? 'Submit' : `Q${index + 1}`
+  return index === total ? 'Review' : `Q${index + 1}`
 }
 
 /** Split a conventional recommendation suffix off the DISPLAY label (the
@@ -284,35 +286,45 @@ interface Row {
   description?: string
 }
 
+type QuestionPointerAction = 'back' | 'progress' | 'edit' | 'leave-edit' | 'cancel' | 'submit'
+
+type QuestionMouseHitKind = 'action' | 'option' | 'other' | 'marker' | 'inert'
+
+interface PaintedQuestionActionHit {
+  row: number
+  action: QuestionPointerAction
+  startCol: number
+  endCol: number
+  tab: number
+  questionId: string | undefined
+  editingOther: boolean
+  width: number
+}
+
 /**
- * The press-time semantic identity of a QuestionFlow mouse gesture
- * (mouse parity): the release click may only act on the EXACT target
- * that was pressed — a question advance / repaint between press and
- * release must not transfer the click to whatever repainted onto the
- * same cell.
+ * The press-time semantic identity of a QuestionFlow mouse gesture. A release
+ * may only act on the same flow, page, mode and last-painted hit geometry.
  */
 export interface QuestionMouseGesture {
-  /** The question INDEX within this flow at press time (the flow's own
-   * unique in-flow identity — the caller-provided question id is NOT
-   * guaranteed unique within a batch, so a duplicate id must not let a
-   * press from Q[n] activate Q[n+1] after a keyboard advance). */
+  flow: QuestionFlow
   questionIndex: number
-  /** The question id at press time (a question advance rejects the
-   * release). */
-  questionId: string
-  /** The LAST-PAINTED hit at the pressed row: an option key, OTHER_ROW,
-   * the MARKER_ROW sentinel (the scroll marker is a distinct semantic
-   * target — an inert press that repaints into the marker row must not
-   * toggle the expanded panel), or undefined for inert chrome. */
+  questionId: string | undefined
+  hitKind: QuestionMouseHitKind
   hit: string | undefined
+  row: number
+  editingOther: boolean
+  width: number
+  action?: QuestionPointerAction
+  startCol?: number
+  endCol?: number
 }
 
 /**
  * The interactive question flow. Renders one question at a time with a tab
  * strip (answered marks), a navigable option list (↑↓/digits/Enter), a real
- * Input for free text, and a final REVIEW page with NO two-choice control:
- * Enter submits, Esc cancels, ← edits the last answer (plan item 4). Esc
- * cancels the whole flow; the app layer resolves the batch on done().
+ * Input for free text, and a final REVIEW page with a clickable action row:
+ * Enter submits, Esc cancels, and ← edits the last answer. Esc inside a text
+ * edit keeps its existing leave-edit behavior; the app owns batch settlement.
  */
 /** Caller-owned presentation status of one live Question flow: a mutable
  * status line the flow renders above its tabs while set. M3-3B uses it for
@@ -383,6 +395,10 @@ export class QuestionFlow implements Component, Focusable {
   /** Hit map from the last render: content row -> option row key. Built each
    * render; drives fullscreen click-to-select. */
   private readonly hitMap = new Map<number, string>()
+  /** Whether this flow is currently painted inside an AltScreen pointer route. */
+  private mouseActionsEnabled = false
+  /** Clickable spans committed by the last render's action row. */
+  private paintedActionHits: PaintedQuestionActionHit[] = []
   /** Visible width of the free-text row's prefix (pointer + marker +
    * space) from the last render: a click while editing must translate to
    * the Input's local column. (Mouse parity.) */
@@ -609,13 +625,44 @@ export class QuestionFlow implements Component, Focusable {
    * row alone, so a question advance or repaint between press and
    * release can never transfer the click to a different target.
    */
-  beginMousePress(row: number): QuestionMouseGesture | undefined {
+  beginMousePress(row: number, x?: number): QuestionMouseGesture | undefined {
+    this.mousePressGesture = undefined
     const question = this.questions[this.tab]
-    if (question === undefined) return undefined
+    const actionHit = x === undefined ? undefined : this.paintedActionHits.find(hit =>
+      hit.row === row && x >= hit.startCol && x < hit.endCol,
+    )
+    if (actionHit !== undefined
+      && actionHit.tab === this.tab
+      && actionHit.questionId === question?.id
+      && actionHit.editingOther === this.editingOther
+      && actionHit.width === this.lastContentWidth) {
+      const gesture: QuestionMouseGesture = {
+        flow: this,
+        questionIndex: this.tab,
+        questionId: question?.id,
+        hitKind: 'action',
+        hit: undefined,
+        row,
+        editingOther: this.editingOther,
+        width: this.lastContentWidth,
+        action: actionHit.action,
+        startCol: actionHit.startCol,
+        endCol: actionHit.endCol,
+      }
+      this.mousePressGesture = gesture
+      return gesture
+    }
+
+    const hit = this.hitMap.get(row)
     const gesture: QuestionMouseGesture = {
+      flow: this,
       questionIndex: this.tab,
-      questionId: question.id,
-      hit: this.hitMap.get(row),
+      questionId: question?.id,
+      hitKind: hit === undefined ? 'inert' : hit === OTHER_ROW ? 'other' : hit === MARKER_ROW ? 'marker' : 'option',
+      hit,
+      row,
+      editingOther: this.editingOther,
+      width: this.lastContentWidth,
     }
     this.mousePressGesture = gesture
     return gesture
@@ -636,15 +683,60 @@ export class QuestionFlow implements Component, Focusable {
     this.mousePressGesture = undefined
     if (gesture === undefined || gesture !== pressedGesture) return
     const question = this.questions[this.tab]
-    if (question === undefined) return
-    // The question INDEX is the flow's own unique in-flow identity: the
-    // caller-provided id is not guaranteed unique within a batch, so a
-    // duplicate id must not let a press from Q[n] activate Q[n+1] after
-    // a keyboard advance.
-    if (gesture.questionIndex !== this.tab) return
-    if (gesture.questionId !== question.id) return
-    if (this.hitMap.get(row) !== gesture.hit) return
+    if (gesture.flow !== this
+      || gesture.questionIndex !== this.tab
+      || gesture.row !== row
+      || gesture.editingOther !== this.editingOther
+      || gesture.width !== this.lastContentWidth) return
+    if (gesture.questionId !== question?.id) return
+
+    if (gesture.hitKind === 'action') {
+      if (x === undefined || gesture.action === undefined) return
+      const actionHit = this.paintedActionHits.find(hit =>
+        hit.row === row && x >= hit.startCol && x < hit.endCol,
+      )
+      if (actionHit === undefined
+        || actionHit.action !== gesture.action
+        || actionHit.startCol !== gesture.startCol
+        || actionHit.endCol !== gesture.endCol
+        || actionHit.tab !== this.tab
+        || actionHit.questionId !== question?.id
+        || actionHit.editingOther !== this.editingOther
+        || actionHit.width !== this.lastContentWidth) return
+      this.applyPointerAction(actionHit.action)
+      return
+    }
+
+    if (gesture.hitKind === 'inert') return
+    const hit = this.hitMap.get(row)
+    if (hit !== gesture.hit) return
+    const hitKind = hit === OTHER_ROW ? 'other' : hit === MARKER_ROW ? 'marker' : 'option'
+    if (hitKind !== gesture.hitKind) return
     this.clickRow(row, x)
+  }
+
+  private applyPointerAction(action: QuestionPointerAction): void {
+    switch (action) {
+      case 'back':
+        this.backToPreviousQuestion()
+        return
+      case 'progress':
+        if (this.editingOther) this.commitOther(this.otherInput.getValue())
+        else this.continueCurrentQuestion()
+        return
+      case 'edit':
+        this.enterOther()
+        return
+      case 'leave-edit':
+        this.handleOtherEscape()
+        return
+      case 'cancel':
+        this.onCancel()
+        return
+      case 'submit':
+        this.submit()
+        return
+    }
   }
 
   /**
@@ -1070,6 +1162,13 @@ export class QuestionFlow implements Component, Focusable {
     this.syncEditMode()
   }
 
+  private backToPreviousQuestion(): void {
+    if (this.tab <= 0) return
+    this.tab -= 1
+    this.cursor = 0
+    this.syncEditMode()
+  }
+
   /** Optionless questions edit text directly; options start in list mode. */
   private syncEditMode(): void {
     this.resetBodyView()
@@ -1281,21 +1380,15 @@ export class QuestionFlow implements Component, Focusable {
     }
     const rows = this.rows()
     if (this.tab >= this.questions.length) {
-      // Review page (the 2026-08-22 plan, item 4): a pure review — NO
-      // Submit/Cancel two-choice control, no focus, no ↑↓. Enter submits
-      // the whole batch, Esc cancels the flow, ← returns to the last
-      // question (drafts survive). The keys match user intuition and the
-      // page carries one less state machine. `h` stays the vim alias for
-      // ← (the review page has no text input to steal from).
+      // The Review page has no option cursor: Enter submits, Esc cancels,
+      // and ← returns to the last question with drafts intact. The action row
+      // is a pointer entry to those same methods, not a second state machine.
       if (componentKeymap.matches(data, 'question.confirm')) {
         this.submit()
       } else if (componentKeymap.matches(data, 'question.cancel')) {
         this.onCancel()
       } else if (componentKeymap.matches(data, 'question.previous') || data === 'h') {
-        // ← back to the last question (drafts survive).
-        this.tab = Math.max(0, this.questions.length - 1)
-        this.cursor = 0
-        this.syncEditMode()
+        this.backToPreviousQuestion()
       }
       return
     }
@@ -1383,12 +1476,7 @@ export class QuestionFlow implements Component, Focusable {
     // below (round finding — typing 'hello'/'linux' was hijacked).
     if (componentKeymap.matches(data, 'question.previous')
       || (!this.isOptionless() && data === 'h')) {
-      // ← back: previous question (keeps the draft).
-      if (this.tab > 0) {
-        this.tab -= 1
-        this.cursor = 0
-        this.syncEditMode()
-      }
+      this.backToPreviousQuestion()
       return
     }
     if (componentKeymap.matches(data, 'question.next')
@@ -1453,15 +1541,132 @@ export class QuestionFlow implements Component, Focusable {
     this.otherInput.invalidate()
   }
 
+  setMouseActionsEnabled(enabled: boolean): void {
+    if (this.mouseActionsEnabled === enabled) return
+    this.mouseActionsEnabled = enabled
+    this.paintedActionHits = []
+    this.mousePressGesture = undefined
+  }
+
+  private pointerActionSegments(): {
+    segments: ActionBarSegment[]
+    actionByInputIndex: Map<number, QuestionPointerAction>
+  } {
+    const segments: ActionBarSegment[] = []
+    const actionByInputIndex = new Map<number, QuestionPointerAction>()
+    const add = (
+      action: QuestionPointerAction,
+      label: string,
+      key: 'question.previous' | 'question.next' | 'question.confirm' | 'question.cancel' | undefined,
+      priority: number,
+    ): void => {
+      const primaryKey = key === undefined ? undefined : componentKeymap.keysFor(key)[0]
+      const keycap = primaryKey === undefined
+        ? ''
+        : primaryKey === 'left'
+          ? '←'
+          : primaryKey === 'right'
+            ? '→'
+            : formatKeyId(primaryKey)
+      actionByInputIndex.set(segments.length, action)
+      segments.push({ text: keycap === '' ? label : `${label} [${keycap}]`, short: label, priority })
+    }
+    const addHint = (text: string, priority: number): void => {
+      segments.push({ text, priority })
+    }
+    const addBack = (): void => {
+      if (this.tab > 0) add('back', 'Back', 'question.previous', 40)
+    }
+    const isLast = this.tab === this.questions.length - 1
+    const progress = this.answered() ? (isLast ? 'Review' : 'Continue') : 'Skip'
+    const browse = this.status?.navigationEligible === true && noAnswerNavigationUsable()
+      ? `${componentKeymap.keyHint('interaction.navigateWorkspace')} browse`
+      : ''
+
+    if (this.editingOther) {
+      add('progress', isLast ? 'Review' : 'Next', 'question.confirm', 95)
+      add('cancel', 'Cancel flow', undefined, 90)
+      addHint('←→ edit', 25)
+      if (this.lastExpandable) addHint('PgUp/PgDn scroll', 10)
+      if (browse !== '') addHint(browse, 1)
+      add('leave-edit', 'Leave edit', 'question.cancel', 1000)
+      return { segments, actionByInputIndex }
+    }
+
+    if (this.tab >= this.questions.length) {
+      add('submit', 'Submit', 'question.confirm', 95)
+      addBack()
+      add('cancel', 'Cancel', 'question.cancel', 1000)
+      return { segments, actionByInputIndex }
+    }
+
+    add('progress', progress, 'question.next', 95)
+    if (this.isOptionless()) {
+      add('edit', 'Edit', 'question.confirm', 50)
+    }
+    addBack()
+    if (!this.isOptionless()) {
+      addHint('↑↓ select', 25)
+      const count = Math.min(this.rows().length, 9)
+      if (count > 0) addHint(`1-${count} choose`, 20)
+      if (this.questions[this.tab]?.multiSelect === true) addHint('Space toggle', 30)
+    }
+    if (this.lastExpandable) addHint('PgUp/PgDn scroll', 10)
+    if (!this.isOptionless() && (this.lastExpandable || this.bodyExpanded)) {
+      const expandKey = componentKeymap.keysFor('question.toggleExpand')[0]
+      if (expandKey !== undefined) {
+        // A bare unmodified letter stays lowercase in a keyboard hint
+        // (design language §4.1); named keys keep their formatted label.
+        const label = expandKey.length === 1 ? expandKey : formatKeyId(expandKey)
+        addHint(`${label} ${this.bodyExpanded ? 'collapse' : 'expand'}`, 5)
+      }
+    }
+    if (browse !== '') addHint(browse, 1)
+    add('cancel', 'Cancel', 'question.cancel', 1000)
+    return { segments, actionByInputIndex }
+  }
+
+  private appendPointerActionRow(lines: string[], width: number): void {
+    if (!this.mouseActionsEnabled) return
+    const { segments, actionByInputIndex } = this.pointerActionSegments()
+    const layout = layoutActionBarRow(segments, width)
+    const row = lines.length
+    if (layout.truncated || layout.spans.length === 0) {
+      lines.push(color.textMuted(layout.text))
+      return
+    }
+
+    const painted = layout.spans.map(span => {
+      const action = actionByInputIndex.get(span.inputIndex)
+      if (action === undefined) return color.textMuted(span.text)
+      this.paintedActionHits.push({
+        row,
+        action,
+        startCol: span.startCol,
+        endCol: span.endCol,
+        tab: this.tab,
+        questionId: this.questions[this.tab]?.id,
+        editingOther: this.editingOther,
+        width,
+      })
+      return color.primary(span.text)
+    })
+    const segmentWidth = layout.spans.reduce((sum, span) => sum + visibleWidth(span.text), 0)
+      + Math.max(0, layout.spans.length - 1) * visibleWidth(ACTION_BAR_SEPARATOR)
+    const padding = Math.max(0, visibleWidth(layout.text) - segmentWidth)
+    lines.push(painted.join(color.textMuted(ACTION_BAR_SEPARATOR)) + ' '.repeat(padding))
+  }
+
   render(width: number): string[] {
     const safeWidth = Math.max(1, width)
     this.lastContentWidth = safeWidth
     const lines: string[] = []
     // The hit map reflects THIS frame only (the review page populates none).
     this.hitMap.clear()
+    this.paintedActionHits = []
     this.lastMarkerRow = -1
     this.pinnedOtherRow = -1
-    // Tab strip: Q1(✓) Q2(○) … Submit — answered marks, current highlighted.
+    // Tab strip: Q1(✓) Q2(○) … Review — answered marks, current highlighted.
     // Tabs carry NO leading/trailing spaces of their own (the box border
     // provides the padding), so every content row starts at the same column.
     // One pass derives BOTH the per-tab marks and the Submit mark.
@@ -1473,10 +1678,10 @@ export class QuestionFlow implements Component, Focusable {
         ? color.textStrong(`${mark} ${label}`)
         : color.textDim(`${mark} ${label}`)
     })
-    const submitText = `${answeredFlags.every(answered => answered) ? '✓' : '○'} Submit`
+    const reviewText = `${answeredFlags.every(answered => answered) ? '✓' : '○'} Review`
     tabs.push(this.tab === this.questions.length
-      ? color.textStrong(submitText)
-      : color.textDim(submitText))
+      ? color.textStrong(reviewText)
+      : color.textDim(reviewText))
     // Caller-owned status (timed claim / remaining time / continued
     // guidance) rides ABOVE the tabs and INSIDE the budget, so the header
     // math below accounts for it. It never renders without room.
@@ -1487,14 +1692,9 @@ export class QuestionFlow implements Component, Focusable {
     lines.push(tabs.join('  '))
     lines.push('')
     if (this.tab >= this.questions.length) {
-      // Review page (plan item 4): every answer, then the fixed hint — NO
-      // Submit/Cancel action row (Enter submits, Esc cancels, ← edits).
-      // The page shares the SAME physical-row budget as the rest of the
-      // dialog: no matter how long the answers are, the hint must stay
-      // visible — it is the ONLY required tail row now (the blank
-      // separator before it yields when space is tight, round-3 finding),
-      // and title, separators, questions and answers share everything
-      // else, row-budgeted with the usual `... N more lines` cut marker.
+      // Review page: the top tab names the Review stage; its bottom Action Bar
+      // owns the one real Submit action alongside Back and Cancel. Without the
+      // AltScreen mouse route the established keyboard-only hint remains.
       let reviewBudget = this.budget - lines.length - 1
       reviewBudget = appendWrappedBudgeted(
         lines,
@@ -1545,7 +1745,8 @@ export class QuestionFlow implements Component, Focusable {
         lines.push('')
         reviewBudget -= 1
       }
-      lines.push(color.textDim('← back · ↵ submit · esc cancel'))
+      if (this.mouseActionsEnabled) this.appendPointerActionRow(lines, safeWidth)
+      else lines.push(color.textDim('← back · ↵ submit · esc cancel'))
       return lines
     }
     const question = this.questions[this.tab]
@@ -1555,11 +1756,10 @@ export class QuestionFlow implements Component, Focusable {
     const multi = question.multiSelect === true
     const skippedRow = draft.skipped ? 1 : 0
     const optionless = this.isOptionless(rows)
-    // Required tail — the rows that must render below the scrollport:
-    //   choice page: (skipped) note + trailing blank + hint = 2 + skippedRow
-    //   optionless:  input row + (skipped) note + trailing blank + hint =
-    //                3 + skippedRow
-    const tail = optionless ? 3 + skippedRow : 2 + skippedRow
+    // Required tail — rows that must render below the scrollport:
+    //   choice page: (skipped) note + blank + one action bar/hint
+    //   optionless: input + (skipped) note + blank + one action bar/hint
+    const tail = (optionless ? 3 : 2) + skippedRow
     const header = question.header
     // The header is decorative: it renders only when the scrollport still
     // gets at least one row (the required-first guarantee below).
@@ -1647,6 +1847,10 @@ export class QuestionFlow implements Component, Focusable {
       lines.push(color.textDim('(skipped)'))
     }
     lines.push('')
+    if (this.mouseActionsEnabled) {
+      this.appendPointerActionRow(lines, safeWidth)
+      return lines
+    }
     // The hint describes the CURRENT mode, never a generic list-mode verb
     // set:
     // - text EDIT (choices or optionless): ←→ are the TEXT cursor, Enter
@@ -1747,21 +1951,24 @@ export class QuestionFlow implements Component, Focusable {
 export class QuestionFrame extends Frame implements Focusable {
   private readonly flow: QuestionFlow
   private readonly heightOf: () => number
+  private readonly mouseEnabled: () => boolean
   /** Rendered height of the last frame (fullscreen click hit-testing). */
   private lastRows = 0
   /** Terminal height the last render used (click staleness guard). */
   private lastTermRows = 0
 
-  constructor(flow: QuestionFlow, heightOf: () => number) {
+  constructor(flow: QuestionFlow, heightOf: () => number, mouseEnabled: () => boolean) {
     super(flow, true)
     this.flow = flow
     this.heightOf = heightOf
+    this.mouseEnabled = mouseEnabled
   }
 
   render(width: number): string[] {
     const rows = Math.max(1, this.heightOf())
     this.lastTermRows = rows
     this.lastTermColumns = width
+    this.flow.setMouseActionsEnabled(this.mouseEnabled())
     // The 60% cap is the DEFAULT (keeps the transcript visible); an explicit
     // body expand ('e' or a click on the scroll marker) grows the frame
     // toward 80% — the user asked for the room, and the flow's budget math

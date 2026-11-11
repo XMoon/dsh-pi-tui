@@ -562,8 +562,8 @@ test('a SECOND real Job stops through the Task-Center row confirmation (the SAME
   const killCallsBefore = fx.killControl.calls
   const hostKillsBefore = fx.hostKillCalls()
   fx.fixture.vt.sendInput(key)
-  // The REAL two-step confirmation affordance: the panel renders its
-  // `Y confirm stop · Esc cancel` chord hint and latches the pending stop.
+  // The production Remote runner opens this Task Browser on Regular/Main, so
+  // its keyboard-only confirmation hint remains the existing chord text.
   await waitFor('the row stop confirmation rendered', () =>
     /Y confirm stop · Esc cancel/u.test(view()), 10_000)
   fx.fixture.vt.sendInput('y')
