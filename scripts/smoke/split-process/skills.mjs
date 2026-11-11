@@ -38,7 +38,8 @@ function assert(condition, message) {
 }
 
 const HOME = '\x1b[H'
-const END = '\x1b[F'
+const DOWN = '\x1b[B'
+const RIGHT = '\x1b[C'
 const TAB = '\t'
 const BODY_MARKER = 'F6-SKILL-BODY-MUST-NEVER-BE-PAINTED'
 
@@ -164,6 +165,20 @@ async function waitForPaintedSkills(client, query, { visible, absent = [] }, lab
   )
 }
 
+/** The real painted frame of one Surface Client. */
+const viewportText = async client => (await client.viewport()).join('\n')
+
+/** Focus the Workspace action bar and prove the action row is painted. */
+async function focusWorkspaceActions(client, label) {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    client.send(TAB)
+    await sleep(250)
+    const frame = await viewportText(client)
+    if (frame.includes('Add directory') || frame.includes('Use directory')) return frame
+  }
+  throw new SplitSmokeAssertionError(`${label}: the Workspace action bar never accepted focus`)
+}
+
 /** The Sessionless surface record the cases require. */
 const sessionless = record => record.transport === 'connected'
   && record.surfaceMounted === true
@@ -179,7 +194,6 @@ const liveOn = sessionId => record => record.transport === 'connected'
 export async function runSessionlessSkillsHot(context) {
   const { dshHome, workDir, trace } = context
   const scene = createC1Scene(context)
-  const viewportText = async client => (await client.viewport()).join('\n')
   const root = join(workDir, 'f6-skills')
   const w1 = makeProjectRoot(join(root, 'f6-w1'))
   const w2 = makeProjectRoot(join(root, 'f6-w2'))
@@ -263,8 +277,16 @@ export async function runSessionlessSkillsHot(context) {
     // ── B: Client-local launch Workspace → real Add/Use of Host W2 ─────────
     await submit(clientB, '/sessions', 'F6 B open the Session Workspace')
     await clientB.waitForScreen('Workspace: ', 'F6 B Session Workspace', 60_000)
-    clientB.send(TAB)
-    await sleep(150)
+    // A durable registry from earlier cases may pre-select a folder: select the
+    // first row explicitly so the action bar is deterministically
+    // [use,new,add,close], then move to `Add` (index 2).
+    clientB.send(HOME)
+    await sleep(200)
+    await focusWorkspaceActions(clientB, 'F6 B Add directory focus')
+    clientB.send(RIGHT)
+    await sleep(120)
+    clientB.send(RIGHT)
+    await sleep(120)
     clientB.send('\r')
     await clientB.waitForScreen('Add Host directory', 'F6 B Add directory entry', 30_000)
     clientB.send(w2)
@@ -351,12 +373,20 @@ export async function runSessionlessSkillsHot(context) {
     await waitForFaultPhase('start', startsBeforeSwitch, 'F6 the pre-switch invalidation discovery')
     await submit(clientB, '/sessions', 'F6 B reopen the Session Workspace')
     await clientB.waitForScreen('Workspace: ', 'F6 B Workspace for the switch back', 60_000)
-    clientB.send(END)
+    // Registry order is newest-first, so after W2 was added the rows are
+    // [W2, launch, W1, …]: select W1 (index 2) explicitly.
+    clientB.send(HOME)
+    await sleep(150)
+    clientB.send(DOWN)
+    await sleep(150)
+    clientB.send(DOWN)
     await sleep(150)
     clientB.send('\r')
-    await sleep(150)
-    clientB.send(TAB)
-    await sleep(150)
+    await sleep(200)
+    await focusWorkspaceActions(clientB, 'F6 B switch-back focus')
+    const switchActions = await viewportText(clientB)
+    assert(switchActions.includes('Use directory'),
+      `F6 the switch-back action bar does not offer Use directory:\n${switchActions}`)
     clientB.send('\r')
     await clientB.waitForScreenGone('Workspace: ', 'F6 B Use directory W1 closed the workspace', 60_000)
     // CAUSAL BARRIER: the pre-switch discovery is still held; wait for the
@@ -425,7 +455,6 @@ export async function runSessionlessSkillsHot(context) {
 export async function runLiveSkillsHot(context) {
   const { workDir, trace } = context
   const tools = createDualSurfaceSceneTools(context)
-  const viewportText = async client => (await client.viewport()).join('\n')
   // Client A's launch directory is the installed profile (`base.cwd`), which
   // the Host preflight confirms as the Session's Workspace: the Live project
   // skill root is `<profileDir>/.agents/skills`.
