@@ -746,3 +746,108 @@ test('an EMPTY stats row does not cap the status row as if it were the stats tai
   const lines = plain.split('\n')
   assert.ok(lines.length > 1, `the status row must keep its budgeted wrap:\n${plain}`)
 })
+
+/** A snapshot whose builtin `model` and `tasks` placements render richly. */
+function clickableSnapshot(): StatusSnapshot {
+  const snap = emptyStatusSnapshot() as DeepMutable<StatusSnapshot>
+  snap.composition.model = { provider: 'deepseek', id: 'deepseek-v4-flash', displayName: 'deepseek-v4-flash' }
+  snap.access.permissionPreset = { id: 'danger-full-access', label: 'danger-full-access', matched: true }
+  snap.activity.taskCount = 2
+  snap.activity.childAgentCount = 1
+  snap.workspace = { cwd: '/home/xmoon/project/dsh-pi-tui', branch: 'feat/footer-click' }
+  snap.usage.tokens = { input: 1200, output: 3400, cacheRead: 0, cacheWrite: 0 }
+  snap.usage.turns = 12
+  snap.usage.steps = 38
+  snap.usage.context = { usedTokens: 160000, windowTokens: 1_000_000, percent: 16 }
+  return snap as StatusSnapshot
+}
+
+const plainRows = (text: string): string[] => text.split('\n').map(row => row.replace(/\x1b\[[0-9;:]*m/g, ''))
+
+test('compose() is the byte-identical render() plus exact first-party hit cells', () => {
+  const snap = clickableSnapshot()
+  for (const layout of [DEFAULT_FOOTER_LAYOUT, COMPACT_FOOTER_LAYOUT]) {
+    for (const width of [200, 120, 80, 44]) {
+      const options = { snapshot: snap, layout, width, context: CONTEXT }
+      const projection = composer.compose(options)
+      assert.equal(projection.text, composer.render(options), `render() must stay the compatibility entry (w=${width})`)
+      assert.ok(projection.hits.length >= 2, `model and tasks must publish hits at w=${width}`)
+      const rows = plainRows(projection.text)
+      for (const hit of projection.hits) {
+        assert.ok(hit.row >= 0 && hit.row < rows.length, `hit row must be a painted row (w=${width})`)
+        assert.ok(hit.startCol >= 0 && hit.startCol < hit.endCol && hit.endCol <= width,
+          `hit cells must stay inside the terminal (w=${width}): ${JSON.stringify(hit)}`)
+        const slice = rows[hit.row]!.slice(hit.startCol, hit.endCol)
+        if (hit.id === 'model') assert.ok(slice.includes('deepseek/') || slice.includes('deepseek-'), `model cells: ${JSON.stringify(slice)}`)
+        else assert.ok(slice.startsWith('[') && slice.endsWith(']'), `tasks cells: ${JSON.stringify(slice)}`)
+        assert.ok(!slice.includes('  '), `a hit never spans the separator/gap: ${JSON.stringify(slice)}`)
+      }
+    }
+  }
+})
+
+test('command mode, instruction cells and a zero budget publish no hit, and neither does a spoofing custom item', () => {
+  const snap = clickableSnapshot()
+  assert.deepEqual(
+    composer.compose({
+      snapshot: snap,
+      layout: DEFAULT_FOOTER_LAYOUT,
+      width: 100,
+      context: CONTEXT,
+    }).hits.map(hit => hit.id).sort(),
+    ['model', 'tasks'],
+  )
+  const noBudget = composer.compose({
+    snapshot: snap,
+    layout: DEFAULT_FOOTER_LAYOUT,
+    width: 100,
+    context: CONTEXT,
+    physicalLineBudget: { perRow: 2, total: 0 },
+  })
+  assert.deepEqual(noBudget, { text: '', hits: [] })
+  // A user item that spells the builtin badge stays inert: identity is the
+  // builtin DEFINITION OBJECT, never the id or the text.
+  const registry = createBuiltinFooterRegistry()
+  registry.setCustomSource({
+    ids: () => ['user:model'],
+    definition: () => ({
+      id: 'user:model',
+      label: 'Fake model',
+      defaultZone: 'left',
+      defaultImportance: 100,
+      formats: ['badge'],
+      defaultFormat: 'badge',
+      render: () => ({ spans: [{ text: '[deepseek/deepseek-v4-flash]' }] }),
+    }),
+  })
+  const withCustom = new FooterComposer(registry).compose({
+    snapshot: snap,
+    layout: { schemaVersion: 1, rows: [{ left: [{ id: 'user:model' }, { id: 'tasks' }], right: [] }] },
+    width: 100,
+    context: CONTEXT,
+  })
+  assert.deepEqual(withCustom.hits.map(hit => hit.id), ['tasks'],
+    'only the real builtin object publishes a hit; the same words from a custom item do not')
+  // The instruction reserves its own line and never publishes a cell.
+  const withInstruction = composer.compose({
+    snapshot: snap,
+    layout: DEFAULT_FOOTER_LAYOUT,
+    width: 100,
+    context: CONTEXT,
+    instruction: { id: 'exit-confirm', text: [{ text: 'Press Ctrl+D again to exit' }], priority: 100 },
+  })
+  const instructionRow = plainRows(withInstruction.text).length - 1
+  assert.ok(withInstruction.hits.every(hit => hit.row !== instructionRow),
+    'the Host instruction line is never clickable')
+  // The `↓ view` hint is the KEYBOARD Quick admission, never the mouse
+  // capability: without the hint the tasks placement still publishes its hit.
+  const withoutHint = composer.compose({
+    snapshot: snap,
+    layout: COMPACT_FOOTER_LAYOUT,
+    width: 120,
+    context: { taskBrowserAvailable: false, extensionFooterText: '' },
+  })
+  assert.ok(!plainRows(withoutHint.text).join('\n').includes('↓ view'), 'the hint is genuinely absent')
+  assert.ok(withoutHint.hits.some(hit => hit.id === 'tasks'),
+    'the Full Task Center click does not depend on the ↓ Quick hint')
+})
